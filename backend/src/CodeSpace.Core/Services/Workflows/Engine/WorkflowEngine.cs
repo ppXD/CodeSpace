@@ -205,11 +205,13 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
 
         var wf = BagFromResolved(wfResolved);
         var team = BagFromResolved(teamResolved);
+        var (projects, projectSecretPaths) = await LoadReferencedProjectVariablesAsync(definition, run.Workflow.TeamId, cancellationToken).ConfigureAwait(false);
         var secretPaths = CollectSecretPaths(wfResolved, teamResolved);
+        foreach (var p in projectSecretPaths) secretPaths.Add(p);
 
         await PersistFirstRunSnapshotAsync(run, releaseHash, wfResolved, teamResolved, cancellationToken).ConfigureAwait(false);
 
-        return new NodeRunScope { Trigger = trigger, Input = input, Wf = wf, Sys = sys, Team = team, SecretPaths = secretPaths };
+        return new NodeRunScope { Trigger = trigger, Input = input, Wf = wf, Sys = sys, Team = team, Projects = projects, SecretPaths = secretPaths };
     }
 
     /// <summary>
@@ -249,6 +251,13 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
             "Replay scope built. RunId={RunId} ParentRunId={ParentRunId} SnapshotCount={SnapshotCount}",
             run.Id, run.ParentRunId, snapshot.Count);
 
+        // Project variables are NOT snapshotted in v1 (Phase 3.0) — replay re-resolves from
+        // the live table. Consistent with the user-facing design philosophy that Project is
+        // a namespace + variables are looked up by explicit path. Future enhancement: snapshot
+        // them alongside Team/Workflow if reproducibility-on-replay becomes important.
+        var (projects, projectSecretPaths) = await LoadReferencedProjectVariablesAsync(definition, run.Workflow.TeamId, cancellationToken).ConfigureAwait(false);
+        foreach (var p in projectSecretPaths) secretPaths.Add(p);
+
         return new NodeRunScope
         {
             Trigger = trigger,
@@ -256,6 +265,7 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
             Wf = wf,
             Sys = sys,
             Team = team,
+            Projects = projects,
             SecretPaths = secretPaths,
         };
     }
@@ -309,6 +319,76 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
         foreach (var v in wfResolved) if (v.ValueType == VariableValueType.Secret) paths.Add($"wf.{v.Name}");
         foreach (var v in teamResolved) if (v.ValueType == VariableValueType.Secret) paths.Add($"team.{v.Name}");
         return paths;
+    }
+
+    /// <summary>
+    /// Scans the workflow definition for <c>project.&lt;slug&gt;.&lt;name&gt;</c> references,
+    /// loads each referenced Project's variables, and builds the <see cref="NodeRunScope.Projects"/>
+    /// bag keyed by slug. Also returns the secret-paths for any Secret-typed project variable —
+    /// caller merges these into the overall <see cref="NodeRunScope.SecretPaths"/> set.
+    ///
+    /// <para>Lookups are scoped to the workflow's team: a workflow can only resolve projects
+    /// belonging to the same team. Soft-deleted projects are excluded — a workflow referencing
+    /// a deleted project's slug ends up with that slug missing from the bag and the resolver
+    /// returns null for any reference into it (save-time validation should have rejected this
+    /// earlier; the engine stays defensive).</para>
+    /// </summary>
+    private async Task<(IReadOnlyDictionary<string, IReadOnlyDictionary<string, JsonElement>> Projects, IReadOnlySet<string> SecretPaths)> LoadReferencedProjectVariablesAsync(WorkflowDefinition definition, Guid teamId, CancellationToken cancellationToken)
+    {
+        var slugs = ExtractProjectSlugsFromDefinition(definition);
+        if (slugs.Count == 0)
+            return (new Dictionary<string, IReadOnlyDictionary<string, JsonElement>>(), new HashSet<string>());
+
+        var projects = await _db.Project.AsNoTracking()
+            .Where(p => p.TeamId == teamId && p.DeletedDate == null && slugs.Contains(p.Slug))
+            .Select(p => new { p.Id, p.Slug })
+            .ToListAsync(cancellationToken)
+            .ConfigureAwait(false);
+
+        var bag = new Dictionary<string, IReadOnlyDictionary<string, JsonElement>>(StringComparer.Ordinal);
+        var secretPaths = new HashSet<string>();
+
+        foreach (var project in projects)
+        {
+            var resolved = await _variableService.GetAllForEngineAsync(VariableScope.Project, project.Id, cancellationToken).ConfigureAwait(false);
+            bag[project.Slug] = BagFromResolved(resolved);
+            foreach (var v in resolved)
+            {
+                if (v.ValueType == VariableValueType.Secret)
+                    secretPaths.Add($"project.{project.Slug}.{v.Name}");
+            }
+        }
+
+        return (bag, secretPaths);
+    }
+
+    /// <summary>
+    /// Walks the definition's nodes' Inputs + Config trees, extracts every <c>project.X.Y</c>
+    /// reference, returns the unique set of slugs (the <c>X</c> segment). Used by the engine
+    /// to pre-flight load project variables.
+    /// </summary>
+    private static HashSet<string> ExtractProjectSlugsFromDefinition(WorkflowDefinition definition)
+    {
+        var slugs = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var node in definition.Nodes)
+        {
+            CollectSlugsFromElement(node.Inputs, slugs);
+            CollectSlugsFromElement(node.Config, slugs);
+        }
+        return slugs;
+    }
+
+    private static void CollectSlugsFromElement(JsonElement element, HashSet<string> sink)
+    {
+        var paths = VariableResolver.ExtractReferencedPaths(element);
+        foreach (var path in paths)
+        {
+            // Looking for `project.{slug}.{anything}`; need at least 3 segments.
+            var segments = path.Split('.');
+            if (segments.Length < 3) continue;
+            if (segments[0] != "project") continue;
+            sink.Add(segments[1]);
+        }
     }
 
     private static Dictionary<string, JsonElement> BagFromResolved(IReadOnlyList<ResolvedVariable> resolved)

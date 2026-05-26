@@ -103,9 +103,9 @@ public sealed class VariableService : IVariableService, IScopedDependency
 
     /// <summary>
     /// Tenant guard + team-id resolution in one pass. For Team scope, scopeId IS the team
-    /// — assert it matches the caller's expected team. For Workflow scope, look up the
-    /// workflow row with BOTH id AND team filters in one query — a workflow that doesn't
-    /// exist OR belongs to a different team returns null and we throw
+    /// — assert it matches the caller's expected team. For Workflow / Project scope, look up
+    /// the owner row with BOTH id AND team filters in one query — a row that doesn't exist
+    /// OR belongs to a different team returns null and we throw
     /// <see cref="KeyNotFoundException"/>. Conflating not-found with not-authorized prevents
     /// cross-team enumeration (same pattern as <c>RepositoryAccessAuthorizationBehavior</c>).
     /// Returns the team id that the variable row should denormalise into the team_id
@@ -120,13 +120,25 @@ public sealed class VariableService : IVariableService, IScopedDependency
             return expectedTeamId;
         }
 
-        // Workflow scope — single query proves existence + ownership in one shot.
-        var exists = await _db.Workflow.AsNoTracking()
-            .AnyAsync(w => w.Id == scopeId && w.TeamId == expectedTeamId && w.DeletedDate == null, cancellationToken)
+        if (scope == VariableScope.Workflow)
+        {
+            var workflowExists = await _db.Workflow.AsNoTracking()
+                .AnyAsync(w => w.Id == scopeId && w.TeamId == expectedTeamId && w.DeletedDate == null, cancellationToken)
+                .ConfigureAwait(false);
+
+            if (!workflowExists)
+                throw new KeyNotFoundException($"Workflow {scopeId} not found or not accessible.");
+
+            return expectedTeamId;
+        }
+
+        // VariableScope.Project — owner is a project row.
+        var projectExists = await _db.Project.AsNoTracking()
+            .AnyAsync(p => p.Id == scopeId && p.TeamId == expectedTeamId && p.DeletedDate == null, cancellationToken)
             .ConfigureAwait(false);
 
-        if (!exists)
-            throw new KeyNotFoundException($"Workflow {scopeId} not found or not accessible.");
+        if (!projectExists)
+            throw new KeyNotFoundException($"Project {scopeId} not found or not accessible.");
 
         return expectedTeamId;
     }

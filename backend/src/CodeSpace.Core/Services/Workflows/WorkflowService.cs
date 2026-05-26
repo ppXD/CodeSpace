@@ -104,6 +104,7 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
     public async Task<Guid> CreateAsync(Guid teamId, string name, string? description, WorkflowDefinition definition, IReadOnlyList<WorkflowActivationInput> activations, bool enabled, CancellationToken cancellationToken)
     {
         EnsureValidDefinition(definition);
+        await EnsureProjectReferencesValidAsync(definition, teamId, cancellationToken).ConfigureAwait(false);
 
         var workflowId = Guid.NewGuid();
         var definitionJson = JsonSerializer.Serialize(definition, WorkflowJson.Options);
@@ -147,6 +148,7 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
     public async Task UpdateAsync(Guid workflowId, Guid teamId, string name, string? description, WorkflowDefinition definition, IReadOnlyList<WorkflowActivationInput> activations, CancellationToken cancellationToken)
     {
         EnsureValidDefinition(definition);
+        await EnsureProjectReferencesValidAsync(definition, teamId, cancellationToken).ConfigureAwait(false);
 
         var workflow = await LoadWorkflowAsync(workflowId, teamId, cancellationToken).ConfigureAwait(false)
             ?? throw new KeyNotFoundException($"Workflow {workflowId} not found in team {teamId}.");
@@ -412,6 +414,64 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
             result.Errors.Count, string.Join(" | ", result.Errors));
 
         throw new WorkflowValidationException(result.Errors);
+    }
+
+    /// <summary>
+    /// Async companion to <see cref="EnsureValidDefinition"/> — validates that every
+    /// <c>project.{slug}.X</c> reference in the definition points at a Project that
+    /// actually exists in the team. Run after the static validator passes, before persisting.
+    ///
+    /// <para>Why separate from <see cref="DefinitionValidator"/>: the static validator is
+    /// pure (no DB access); this check requires a DB query for the team's projects. Keeping
+    /// the two concerns split keeps the static validator unit-testable without a DbContext.</para>
+    /// </summary>
+    private async Task EnsureProjectReferencesValidAsync(WorkflowDefinition definition, Guid teamId, CancellationToken cancellationToken)
+    {
+        var referencedSlugs = ExtractProjectSlugsFromDefinition(definition);
+        if (referencedSlugs.Count == 0) return;
+
+        var existingSlugs = await _db.Project.AsNoTracking()
+            .Where(p => p.TeamId == teamId && p.DeletedDate == null && referencedSlugs.Contains(p.Slug))
+            .Select(p => p.Slug)
+            .ToListAsync(cancellationToken)
+            .ConfigureAwait(false);
+
+        var missing = referencedSlugs.Except(existingSlugs).ToList();
+        if (missing.Count == 0) return;
+
+        var errors = missing
+            .Select(slug => $"Workflow references project.{slug}.* but no Project with slug '{slug}' exists in this team.")
+            .ToList();
+
+        _logger.LogWarning(
+            "Workflow definition rejected by project-reference validator. MissingSlugs={MissingSlugs}",
+            string.Join(",", missing));
+
+        throw new WorkflowValidationException(errors);
+    }
+
+    /// <summary>Walks the definition's node Inputs/Config trees and pulls every <c>project.{slug}</c> head.</summary>
+    private static HashSet<string> ExtractProjectSlugsFromDefinition(WorkflowDefinition definition)
+    {
+        var slugs = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var node in definition.Nodes)
+        {
+            CollectProjectSlugs(node.Inputs, slugs);
+            CollectProjectSlugs(node.Config, slugs);
+        }
+        return slugs;
+    }
+
+    private static void CollectProjectSlugs(System.Text.Json.JsonElement element, HashSet<string> sink)
+    {
+        var paths = Runtime.VariableResolver.ExtractReferencedPaths(element);
+        foreach (var path in paths)
+        {
+            var segments = path.Split('.');
+            if (segments.Length < 3) continue;
+            if (segments[0] != "project") continue;
+            sink.Add(segments[1]);
+        }
     }
 
     private async Task<Workflow?> LoadWorkflowAsync(Guid workflowId, Guid teamId, CancellationToken cancellationToken)

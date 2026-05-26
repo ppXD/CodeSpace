@@ -3,6 +3,11 @@ import { useState } from "react";
 import { Ic } from "@/_imported/ai-code-space/icons";
 import type { VariableSummary, VariableValueType } from "@/api/variables";
 import {
+  useDeleteProjectVariable,
+  useProjectVariables,
+  useSetProjectVariable,
+} from "@/hooks/use-projects";
+import {
   useDeleteTeamVariable,
   useDeleteWorkflowVariable,
   useSetTeamVariable,
@@ -24,10 +29,13 @@ import {
  */
 
 interface VariableTablePanelProps {
-  scope: "Team" | "Workflow";
+  scope: "Team" | "Workflow" | "Project";
   /** Required when scope === "Workflow"; unused otherwise. */
   workflowId?: string;
-  refPrefix: "wf" | "team";
+  /** Required when scope === "Project"; unused otherwise. */
+  projectId?: string;
+  /** Variable-path head shown on the ref-copy chip. <c>"team"</c> / <c>"wf"</c> / <c>"project.{slug}"</c>. */
+  refPrefix: string;
   title: string;
   subtitle: string;
   tip: string;
@@ -36,25 +44,35 @@ interface VariableTablePanelProps {
 
 const SCHEMA_TYPES: VariableValueType[] = ["String", "Number", "Boolean", "Object", "Array", "Secret"];
 
-export function VariableTablePanel({ scope, workflowId, refPrefix, title, subtitle, tip, emptyHint }: VariableTablePanelProps) {
+export function VariableTablePanel({ scope, workflowId, projectId, refPrefix, title, subtitle, tip, emptyHint }: VariableTablePanelProps) {
   const teamList = useTeamVariables();
   const wfList = useWorkflowVariables(scope === "Workflow" ? (workflowId ?? null) : null);
-  const list = scope === "Team" ? teamList : wfList;
+  const projList = useProjectVariables(scope === "Project" ? (projectId ?? null) : null);
+  const list = scope === "Team" ? teamList : scope === "Workflow" ? wfList : projList;
 
   const setTeam = useSetTeamVariable();
   const setWf = useSetWorkflowVariable(workflowId ?? null);
+  const setProj = useSetProjectVariable(projectId ?? null);
   const delTeam = useDeleteTeamVariable();
   const delWf = useDeleteWorkflowVariable(workflowId ?? null);
+  const delProj = useDeleteProjectVariable(projectId ?? null);
 
-  const isMutating = setTeam.isPending || setWf.isPending || delTeam.isPending || delWf.isPending;
+  const isMutating =
+    setTeam.isPending || setWf.isPending || setProj.isPending ||
+    delTeam.isPending || delWf.isPending || delProj.isPending;
 
-  const setVar = (name: string, valueType: VariableValueType, value: unknown, description: string | null) =>
-    scope === "Team"
-      ? setTeam.mutateAsync({ name, input: { valueType, value, description } })
-      : setWf.mutateAsync({ name, input: { valueType, value, description } });
+  const setVar = (name: string, valueType: VariableValueType, value: unknown, description: string | null) => {
+    const input = { valueType, value, description };
+    if (scope === "Team") return setTeam.mutateAsync({ name, input });
+    if (scope === "Workflow") return setWf.mutateAsync({ name, input });
+    return setProj.mutateAsync({ name, input });
+  };
 
-  const deleteVar = (name: string) =>
-    scope === "Team" ? delTeam.mutateAsync(name) : delWf.mutateAsync(name);
+  const deleteVar = (name: string) => {
+    if (scope === "Team") return delTeam.mutateAsync(name);
+    if (scope === "Workflow") return delWf.mutateAsync(name);
+    return delProj.mutateAsync(name);
+  };
 
   const variables = list.data ?? [];
 

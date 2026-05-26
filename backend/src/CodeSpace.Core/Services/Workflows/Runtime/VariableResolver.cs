@@ -173,6 +173,7 @@ public static class VariableResolver
             "input"   => WalkDictionary(scope.Input, rest),
             "sys"     => WalkDictionary(scope.Sys, rest),
             "nodes"   => WalkNodesScope(scope, rest),
+            "project" => WalkProjectsScope(scope, rest),
             _ => (JsonElement?)null
         };
 
@@ -181,7 +182,7 @@ public static class VariableResolver
         // Implicit iteration scope — only consulted when the head doesn't match a known
         // explicit bucket. This is what makes {{item}} / {{index}} work inside an iterate
         // node WITHOUT needing the operator to write {{iteration.item}}.
-        if (scope.Iteration != null && root is not "trigger" and not "team" and not "nodes" and not "wf" and not "input" and not "sys")
+        if (scope.Iteration != null && root is not "trigger" and not "team" and not "nodes" and not "wf" and not "input" and not "sys" and not "project")
         {
             if (scope.Iteration.TryGetValue(root, out var iterValue))
             {
@@ -203,6 +204,22 @@ public static class VariableResolver
         if (!scope.Nodes.TryGetValue(nodeId, out var outputs)) return null;
 
         return WalkDictionary(outputs, segments.Skip(2).ToArray());
+    }
+
+    /// <summary>
+    /// Walks <c>project.&lt;slug&gt;.&lt;name&gt;</c>. Outer key is the project slug; inner
+    /// key is the variable name. Returns null when either segment is missing — the engine's
+    /// pre-flight validation should have caught dangling refs at save time, but resolver
+    /// stays defensive.
+    /// </summary>
+    private static JsonElement? WalkProjectsScope(NodeRunScope scope, string[] segments)
+    {
+        if (segments.Length < 2) return null;
+
+        var slug = segments[0];
+        if (!scope.Projects.TryGetValue(slug, out var projectVars)) return null;
+
+        return WalkDictionary(projectVars, segments.Skip(1).ToArray());
     }
 
     private static JsonElement? WalkDictionary(IReadOnlyDictionary<string, JsonElement> dict, string[] segments)

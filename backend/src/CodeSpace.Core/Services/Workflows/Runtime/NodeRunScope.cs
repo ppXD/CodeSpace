@@ -36,6 +36,19 @@ public sealed class NodeRunScope
         = new Dictionary<string, JsonElement>();
 
     /// <summary>
+    /// Project-scoped variables — referenced via <c>{{project.&lt;slug&gt;.&lt;name&gt;}}</c>.
+    /// Outer key is the Project's slug (URL-safe identifier); inner key is the variable name.
+    /// Engine pre-scans the workflow definition for <c>project.X.*</c> references and loads
+    /// the union of referenced projects' variables (one slug → one bag).
+    ///
+    /// <para>A Project is purely a variable namespace — workflows reference projects only via
+    /// these paths, never via any FK / membership relationship. See <c>0022_project.sql</c>
+    /// for the data model rationale.</para>
+    /// </summary>
+    public IReadOnlyDictionary<string, IReadOnlyDictionary<string, JsonElement>> Projects { get; init; }
+        = new Dictionary<string, IReadOnlyDictionary<string, JsonElement>>();
+
+    /// <summary>
     /// Per-iteration variables for nodes inside a flow.iterate (or future flow.subworkflow).
     /// Null for non-iteration scopes. When populated, references like {{item}}, {{index}}
     /// resolve through here BEFORE falling through to the regular three buckets.
