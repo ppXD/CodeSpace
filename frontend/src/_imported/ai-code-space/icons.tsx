@@ -28,6 +28,7 @@ import {
   Eye,
   EyeOff,
   Filter,
+  Folder,
   GitBranch,
   GitMerge,
   GitPullRequest,
@@ -75,6 +76,7 @@ const wrap = (Component: ComponentType<LucideProps>, defaultStroke = 1.4): IconR
 export const Ic = {
   Home: wrap(Home),
   Repo: wrap(BookMarked),
+  Folder: wrap(Folder),
   Users: wrap(Users),
   Team: wrap(UsersRound),
   Settings: wrap(Settings),

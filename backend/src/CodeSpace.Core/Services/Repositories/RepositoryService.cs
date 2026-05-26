@@ -19,12 +19,13 @@ public sealed class RepositoryService : IRepositoryService, IScopedDependency
         _currentTeam = currentTeam;
     }
 
-    public async Task<IReadOnlyList<RepositorySummary>> ListAsync(Guid? providerInstanceId, CancellationToken cancellationToken)
+    public async Task<IReadOnlyList<RepositorySummary>> ListAsync(Guid? providerInstanceId, Guid? projectId, CancellationToken cancellationToken)
     {
         var teamId = _currentTeam.Id!.Value;
         var query = _db.Repository.AsNoTracking().Where(r => r.TeamId == teamId && r.DeletedDate == null);
 
         if (providerInstanceId.HasValue) query = query.Where(r => r.ProviderInstanceId == providerInstanceId.Value);
+        if (projectId.HasValue) query = query.Where(r => r.ProjectId == projectId.Value);
 
         return await query
             .OrderByDescending(r => r.CreatedDate)
