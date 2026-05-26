@@ -435,7 +435,7 @@ public class NoDoubleExecutionFlowTests
     {
         // Resolve the concrete type to access Calls / ThrowOnEnqueue (the interface only
         // exposes Enqueue). The fixture registers it singleton, so this is the same instance
-        // every dispatcher resolves via IBackgroundJobClient.
+        // every dispatcher resolves via ICodeSpaceBackgroundJobClient.
         using var scope = _fixture.BeginScope();
         return scope.Resolve<InMemoryBackgroundJobClient>();
     }

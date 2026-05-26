@@ -15,10 +15,10 @@ namespace CodeSpace.Core.Services.Workflows.Dispatch;
 public sealed class WorkflowRunDispatcher : IWorkflowRunDispatcher, IScopedDependency
 {
     private readonly CodeSpaceDbContext _db;
-    private readonly IBackgroundJobClient _backgroundJobClient;
+    private readonly ICodeSpaceBackgroundJobClient _backgroundJobClient;
     private readonly ILogger<WorkflowRunDispatcher> _logger;
 
-    public WorkflowRunDispatcher(CodeSpaceDbContext db, IBackgroundJobClient backgroundJobClient, ILogger<WorkflowRunDispatcher> logger)
+    public WorkflowRunDispatcher(CodeSpaceDbContext db, ICodeSpaceBackgroundJobClient backgroundJobClient, ILogger<WorkflowRunDispatcher> logger)
     {
         _db = db;
         _backgroundJobClient = backgroundJobClient;

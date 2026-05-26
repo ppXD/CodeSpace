@@ -1,12 +1,13 @@
 using System.Linq.Expressions;
-using System.Reflection;
+using CodeSpace.Core.Constants;
 using CodeSpace.Core.Services.Jobs;
+using Hangfire.Storage;
 
 namespace CodeSpace.IntegrationTests.Infrastructure.Jobs;
 
 /// <summary>
-/// Test double for <see cref="IBackgroundJobClient"/>. Records every Enqueue call so
-/// integration tests can assert "the dispatcher attempted exactly one enqueue for run X"
+/// Test double for <see cref="ICodeSpaceBackgroundJobClient"/>. Records every Enqueue call
+/// so integration tests can assert "the dispatcher attempted exactly one enqueue for run X"
 /// without spinning up a real Hangfire server.
 ///
 /// <para>The recorded <see cref="EnqueuedCall"/> entries carry the method + first argument
@@ -15,11 +16,11 @@ namespace CodeSpace.IntegrationTests.Infrastructure.Jobs;
 /// test double. Tests that want to drive the engine call it directly via
 /// <c>engine.ExecuteRunAsync(runId)</c>, simulating Hangfire's worker.</para>
 ///
-/// <para>Optionally, tests can set <see cref="ThrowOnEnqueue"/> to a value to force the
-/// client to throw on the next call — this exercises the dispatcher's revert-on-throw
-/// path (Pending → Enqueued → revert → Pending).</para>
+/// <para>Tests can set <see cref="ThrowOnEnqueue"/> to force the client to throw on the next
+/// call — this exercises the dispatcher's revert-on-throw path (Pending → Enqueued → revert
+/// → Pending).</para>
 /// </summary>
-public sealed class InMemoryBackgroundJobClient : IBackgroundJobClient
+public sealed class InMemoryBackgroundJobClient : ICodeSpaceBackgroundJobClient
 {
     private readonly object _lock = new();
     private readonly List<EnqueuedCall> _calls = new();
@@ -41,7 +42,51 @@ public sealed class InMemoryBackgroundJobClient : IBackgroundJobClient
         lock (_lock) _calls.Clear();
     }
 
-    public string Enqueue<T>(Expression<Func<T, Task>> methodCall)
+    public string Enqueue(Expression<Func<Task>> methodCall, string queue = HangfireConstants.DefaultQueue) =>
+        Record(typeof(object), methodCall.Body);
+
+    public string Enqueue<T>(Expression<Func<T, Task>> methodCall, string queue = HangfireConstants.DefaultQueue) =>
+        Record(typeof(T), methodCall.Body);
+
+    public string Enqueue<T>(Expression<Action> methodCall, string queue = HangfireConstants.DefaultQueue) =>
+        Record(typeof(T), methodCall.Body);
+
+    public string Enqueue<T>(Expression<Action<T>> methodCall, string queue = HangfireConstants.DefaultQueue) =>
+        Record(typeof(T), methodCall.Body);
+
+    public string Schedule(Expression<Func<Task>> methodCall, TimeSpan delay, string queue = HangfireConstants.DefaultQueue) =>
+        Record(typeof(object), methodCall.Body);
+
+    public string Schedule(Expression<Func<Task>> methodCall, DateTimeOffset enqueueAt, string queue = HangfireConstants.DefaultQueue) =>
+        Record(typeof(object), methodCall.Body);
+
+    public string Schedule<T>(Expression<Func<T, Task>> methodCall, TimeSpan delay, string queue = HangfireConstants.DefaultQueue) =>
+        Record(typeof(T), methodCall.Body);
+
+    public string Schedule<T>(Expression<Func<T, Task>> methodCall, DateTimeOffset enqueueAt, string queue = HangfireConstants.DefaultQueue) =>
+        Record(typeof(T), methodCall.Body);
+
+    public string ContinueJobWith(string parentJobId, Expression<Func<Task>> methodCall, string queue = HangfireConstants.DefaultQueue) =>
+        Record(typeof(object), methodCall.Body);
+
+    public string ContinueJobWith<T>(string parentJobId, Expression<Func<T, Task>> methodCall, string queue = HangfireConstants.DefaultQueue) =>
+        Record(typeof(T), methodCall.Body);
+
+    public void AddOrUpdateRecurringJob<T>(string recurringJobId, Expression<Func<T, Task>> methodCall, string cronExpression, TimeZoneInfo? timeZone = null, string queue = HangfireConstants.DefaultQueue)
+    {
+        // No-op in tests — recurring jobs are exercised by directly invoking their
+        // <c>Execute</c> through the mediator command path.
+    }
+
+    public bool DeleteJob(string jobId) => false;
+
+    public void RemoveRecurringJobIfExists(string jobId) { }
+
+    public List<RecurringJobDto> GetRecurringJobs() => new();
+
+    public StateData? GetJobState(string jobId) => null;
+
+    private string Record(Type serviceType, Expression body)
     {
         if (ThrowOnEnqueue is { } ex)
         {
@@ -49,7 +94,7 @@ public sealed class InMemoryBackgroundJobClient : IBackgroundJobClient
             throw ex;
         }
 
-        var (methodName, runId) = Decode(methodCall);
+        var (methodName, runId) = Decode(body);
         var jobId = Guid.NewGuid().ToString("N");
 
         lock (_lock)
@@ -57,7 +102,7 @@ public sealed class InMemoryBackgroundJobClient : IBackgroundJobClient
             _calls.Add(new EnqueuedCall
             {
                 JobId = jobId,
-                ServiceType = typeof(T),
+                ServiceType = serviceType,
                 MethodName = methodName,
                 RunId = runId,
                 EnqueuedAt = DateTimeOffset.UtcNow,
@@ -73,9 +118,9 @@ public sealed class InMemoryBackgroundJobClient : IBackgroundJobClient
     /// can extract the runId from <see cref="EnqueuedCall.RunId"/>. For expressions that
     /// don't have a Guid first arg, <see cref="EnqueuedCall.RunId"/> stays null.
     /// </summary>
-    private static (string MethodName, Guid? RunId) Decode<T>(Expression<Func<T, Task>> expression)
+    private static (string MethodName, Guid? RunId) Decode(Expression body)
     {
-        if (expression.Body is not MethodCallExpression call)
+        if (body is not MethodCallExpression call)
             return ("<non-method-call>", null);
 
         Guid? runId = null;

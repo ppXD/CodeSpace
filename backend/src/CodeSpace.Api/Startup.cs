@@ -1,5 +1,4 @@
 using System.Text.Json.Serialization;
-using CodeSpace.Api.BackgroundJobs;
 using CodeSpace.Api.Extensions;
 using CodeSpace.Api.Filters;
 using CodeSpace.Core.Services.Auth;
@@ -74,12 +73,10 @@ public class Startup
         // Loud warning whenever a user still has the bootstrap password flag set — operators
         // running with the committed default credentials see this every 30 minutes.
         services.AddHostedService<UnrotatedBootstrapPasswordWarningHostedService>();
-        // Hangfire wiring. Storage (Postgres, shared with CodeSpace's main DB, own schema),
-        // worker pool, and the bridge to Core's IBackgroundJobClient seam. The dashboard +
-        // recurring-job registration happen in Configure() below via
-        // UseHangfireDashboardAndRecurringJobs because RecurringJob.AddOrUpdate needs a live
-        // IServiceProvider.
-        services.AddHangfireBackgroundJobs(Configuration);
+        // Hangfire wiring. Storage (Postgres, own schema) + worker pool. The dashboard +
+        // recurring-job registration happen in Configure() below via UseCodeSpaceHangfire
+        // because RecurringJob.AddOrUpdate needs a live IServiceProvider.
+        services.AddCodeSpaceHangfire(Configuration);
         services.AddCustomAuthentication(Configuration, Environment);
     }
 
@@ -105,7 +102,7 @@ public class Startup
         // Mount /hangfire dashboard (admin-only via HangfireDashboardAuthFilter) + register
         // every IRecurringJob with Hangfire's scheduler. MUST run after UseAuthentication
         // so the filter can read HttpContext.User.
-        app.UseHangfireDashboardAndRecurringJobs();
+        app.UseCodeSpaceHangfire(Configuration);
 
         app.UseEndpoints(endpoints =>
         {

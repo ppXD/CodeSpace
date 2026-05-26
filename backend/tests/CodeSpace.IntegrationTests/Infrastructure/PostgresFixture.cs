@@ -216,11 +216,11 @@ public sealed class PostgresFixture : IAsyncLifetime
 
         builder.RegisterType<Webhooks.CapturedNormalizedEvents>().AsSelf().SingleInstance();
 
-        // IBackgroundJobClient test impl. Records Enqueue calls + lets tests simulate
+        // ICodeSpaceBackgroundJobClient test impl. Records Enqueue calls + lets tests simulate
         // Hangfire failure via ThrowOnEnqueue. SingleInstance so tests can assert the
         // recorded call list across fixture scopes.
         builder.RegisterType<Jobs.InMemoryBackgroundJobClient>()
-            .As<CodeSpace.Core.Services.Jobs.IBackgroundJobClient>()
+            .As<CodeSpace.Core.Services.Jobs.ICodeSpaceBackgroundJobClient>()
             .AsSelf()
             .SingleInstance();
     }
