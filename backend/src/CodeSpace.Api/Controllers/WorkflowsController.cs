@@ -62,7 +62,7 @@ public class WorkflowsController : ControllerBase
     /// <summary>
     /// Operator-initiated "Run now". Body is the trigger payload — defaults to an empty
     /// object when null. Returns the new run id so the SPA can navigate to the run-detail
-    /// page once the engine picks it up off the outbox.
+    /// page once the engine picks it up off the Hangfire queue.
     /// </summary>
     [HttpPost("{workflowId:guid}/run")]
     public async Task<IActionResult> Run([FromRoute] Guid workflowId, [FromBody] RunWorkflowManuallyCommand command, CancellationToken cancellationToken)

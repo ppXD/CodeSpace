@@ -3,7 +3,7 @@ using CodeSpace.Messages.Constants;
 namespace CodeSpace.Core.Services.Identity;
 
 /// <summary>
-/// The principal used when there is no HTTP context (outbox dispatcher, scheduled jobs,
+/// The principal used when there is no HTTP context (Hangfire workers, scheduled jobs,
 /// DbUp migrations). Mirrors the DB-side seeded system user from migration 0004 —
 /// same UUID, same Admin role. Hardcoding the [Admin] role here avoids a DB roundtrip
 /// on every background DI scope; the DB row exists for audit consistency.

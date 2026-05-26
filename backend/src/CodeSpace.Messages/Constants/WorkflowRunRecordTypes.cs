@@ -25,7 +25,7 @@ public static class WorkflowRunRecordTypes
     /// <summary>Service inserted the workflow_run row (status=Pending). Payload: {"source_type":"...","actor_id":"..."}.</summary>
     public const string RunQueued = "run.queued";
 
-    /// <summary>Engine picked up the run from the outbox + flipped Pending → Running. Payload: {"started_at":"ISO"}.</summary>
+    /// <summary>Engine atomic-claimed the run (CAS Enqueued → Running). Payload: {"started_at":"ISO"}.</summary>
     public const string RunStarted = "run.started";
 
     /// <summary>Frozen workflow_version JSON + definition_hash loaded. Payload: {"version":N,"definition_hash":"...","node_count":N,"edge_count":N}.</summary>

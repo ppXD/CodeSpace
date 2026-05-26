@@ -5,6 +5,7 @@ using CodeSpace.Core.Services.Credentials;
 using CodeSpace.Core.Services.Webhooks.Registration;
 using CodeSpace.IntegrationTests.Binding;
 using CodeSpace.IntegrationTests.Infrastructure;
+using CodeSpace.IntegrationTests.Infrastructure.Jobs;
 using CodeSpace.Messages.Commands.Repositories;
 using CodeSpace.Messages.Commands.Webhooks;
 using CodeSpace.Messages.Constants;
@@ -17,19 +18,28 @@ using Shouldly;
 namespace CodeSpace.IntegrationTests.Webhooks;
 
 /// <summary>
-/// Lifecycle proof for the outbox-demolition refactor. Covers the four invariants the
+/// Lifecycle proof for the outbox-demolition refactor. Covers the seven invariants the
 /// design relies on:
 /// <list type="number">
 ///   <item>Happy-path bind drives a RepositoryWebhook row through Pending → Enqueued →
 ///         Registering → Registered with the remote provider id written atomically.</item>
-///   <item>Dispatcher CAS gives no-double-enqueue under concurrency.</item>
+///   <item>Dispatcher CAS gives no-double-enqueue under concurrency (count remote
+///         registrations: must be exactly one).</item>
 ///   <item>Registrar's idempotency check (find-by-callback-URL) reuses an existing remote
 ///         hook instead of creating a duplicate.</item>
 ///   <item>Unbind during in-flight registration cancels the row (terminal Cancelled),
 ///         doesn't leak as Registered.</item>
-///   <item>Reconciler revives all four stuck-state classes (Pending overdue, Enqueued
-///         stale, Registering crashed, Failed due).</item>
+///   <item>Reconciler revives due-Failed rows.</item>
+///   <item>Reconciler reverts stuck Registering rows back to Pending.</item>
+///   <item>Registrar dead-letters after MaxAttempts — preventing infinite retry on a
+///         permanently-broken provider.</item>
 /// </list>
+///
+/// <para><b>Test client semantics:</b> <see cref="InMemoryBackgroundJobClient.AutoExecute"/>
+/// defaults to <c>true</c>, so <c>Bind</c> drives the whole dispatcher → registrar chain
+/// synchronously. Tests that need to observe intermediate state (e.g. "row is Enqueued
+/// after dispatch but before worker pickup") set the flag to <c>false</c> for the
+/// duration of the scenario.</para>
 /// </summary>
 [Collection(PostgresCollection.Name)]
 public class RepositoryWebhookRegistrationFlowTests
@@ -39,9 +49,11 @@ public class RepositoryWebhookRegistrationFlowTests
     public RepositoryWebhookRegistrationFlowTests(PostgresFixture fixture)
     {
         _fixture = fixture;
-        // The TestRepositoryProvider's "remote" state is a process-static dictionary keyed
-        // by callback URL — reset so prior fixtures' registrations don't bleed across cases.
-        TestRepositoryProvider.ResetRegistrations();
+        // TestRemoteHookStore is a fixture-scoped singleton; reset between tests within the
+        // same fixture so the per-test "register called exactly N times" assertions are
+        // deterministic.
+        using var scope = _fixture.BeginScope();
+        scope.Resolve<TestRemoteHookStore>().Reset();
     }
 
     [Fact]
@@ -61,10 +73,11 @@ public class RepositoryWebhookRegistrationFlowTests
             }).ConfigureAwait(false);
         }
 
-        // Immediately after the bind command completes, the dispatcher has already CAS'd
-        // Pending → Enqueued and called Hangfire.Enqueue. The in-memory job client records
-        // the call but doesn't execute. Drain the registration queue (simulates the worker).
-        await _fixture.DrainPendingWebhookRegistrationsAsync().ConfigureAwait(false);
+        // Outer transaction committed; drain queued registrar to drive Pending → Registered.
+        using (var drainScope = _fixture.BeginScope())
+        {
+            await drainScope.Resolve<InMemoryBackgroundJobClient>().WaitForPendingAsync().ConfigureAwait(false);
+        }
 
         using var verify = _fixture.BeginScope();
         var db = verify.Resolve<CodeSpaceDbContext>();
@@ -77,6 +90,9 @@ public class RepositoryWebhookRegistrationFlowTests
         hook.EnqueuedAt.ShouldNotBeNull();
         hook.RegisteringAt.ShouldNotBeNull();
         hook.LastError.ShouldBeNull();
+
+        // Provider was called exactly once.
+        verify.Resolve<TestRemoteHookStore>().RegisterCallCount.ShouldBe(1);
     }
 
     [Fact]
@@ -85,12 +101,14 @@ public class RepositoryWebhookRegistrationFlowTests
         var (teamId, providerInstanceId, credentialId) = await SeedAsync().ConfigureAwait(false);
 
         // Stage a Pending webhook row WITHOUT going through BindAsync — we want to control
-        // the starting state and not have the binding service auto-dispatch it.
+        // the starting state and not have the binding service auto-dispatch.
         var webhookId = await StagePendingWebhookAsync(teamId, providerInstanceId, credentialId).ConfigureAwait(false);
 
         // Two concurrent dispatch attempts. Both run their Pending → Enqueued CAS in
-        // parallel; exactly one row update should succeed (returns true), the other
-        // sees rows-affected = 0 and returns false.
+        // parallel; exactly one row update succeeds (returns true), the others see
+        // rows-affected = 0 and return false. The WINNER's Enqueue call then synchronously
+        // runs the registrar (AutoExecute=true) — so the end state is Registered, not
+        // Enqueued. We verify "exactly one winner" by counting actual remote registrations.
         async Task<bool> RaceAsync()
         {
             using var raceScope = _fixture.BeginScope();
@@ -101,9 +119,7 @@ public class RepositoryWebhookRegistrationFlowTests
             }
             catch
             {
-                // A CAS loser may surface as an exception under SERIALIZABLE-style isolation
-                // (or a duplicate Hangfire enqueue under our InMemoryBackgroundJobClient).
-                // Treat as a lost race.
+                // A CAS loser may surface as an exception under SERIALIZABLE-style isolation.
                 return false;
             }
         }
@@ -113,11 +129,22 @@ public class RepositoryWebhookRegistrationFlowTests
         results.Count(r => r).ShouldBe(1,
             customMessage: "Exactly one dispatcher should win the Pending → Enqueued CAS; the others lose.");
 
-        // Final row state: Enqueued — none of the losers reverted us.
+        // Drain queued registrar(s). Only the winner enqueued — there should be at most one
+        // job in the queue, and after drain the row is terminal Registered.
+        using (var drainScope = _fixture.BeginScope())
+        {
+            await drainScope.Resolve<InMemoryBackgroundJobClient>().WaitForPendingAsync().ConfigureAwait(false);
+        }
+
         using var verify = _fixture.BeginScope();
         var db = verify.Resolve<CodeSpaceDbContext>();
         var hook = await db.RepositoryWebhook.AsNoTracking().SingleAsync(w => w.Id == webhookId).ConfigureAwait(false);
-        hook.RegistrationStatus.ShouldBe(RepositoryWebhookRegistrationStatus.Enqueued);
+        hook.RegistrationStatus.ShouldBe(RepositoryWebhookRegistrationStatus.Registered,
+            customMessage: "Winner's queued job ran post-commit → terminal Registered.");
+
+        // Definitive no-double-registration proof: the remote provider was called exactly once.
+        verify.Resolve<TestRemoteHookStore>().RegisterCallCount.ShouldBe(1,
+            customMessage: "Three concurrent dispatchers must not produce three remote registrations.");
     }
 
     [Fact]
@@ -126,35 +153,48 @@ public class RepositoryWebhookRegistrationFlowTests
         var (teamId, providerInstanceId, credentialId) = await SeedAsync().ConfigureAwait(false);
         var webhookId = await StagePendingWebhookAsync(teamId, providerInstanceId, credentialId).ConfigureAwait(false);
 
-        // Pre-populate the test provider's registration store with an existing hook at the
-        // same callback URL — simulates a previous attempt that succeeded at the remote but
-        // crashed before writing external_id locally (Hangfire retry / reconciler re-dispatch).
+        // Pre-populate the remote hook store with the same callback URL the registrar will
+        // construct — simulates a prior attempt that succeeded at the remote but crashed
+        // before writing external_id locally.
         string preExistingExternalId;
         using (var preScope = _fixture.BeginScope())
         {
             var preDb = preScope.Resolve<CodeSpaceDbContext>();
+            var hookStore = preScope.Resolve<TestRemoteHookStore>();
             var callbackUrl = await preDb.RepositoryWebhook.AsNoTracking().Where(w => w.Id == webhookId).Select(w => w.CallbackUrl).SingleAsync().ConfigureAwait(false);
 
-            // Reach into the test provider's static store directly by calling the same
-            // register-then-find path the registrar would use.
-            var provider = new TestRepositoryProvider();
-            var registration = new Messages.Dtos.Providers.WebhookRegistration { CallbackUrl = callbackUrl, Secret = "preexisting", SubscribedEvents = new List<string> { "push" } };
-            var preExisting = await provider.RegisterWebhookAsync(null!, BuildRemoteRepo(), registration, CancellationToken.None).ConfigureAwait(false);
+            var preExisting = hookStore.Register(new Messages.Dtos.Providers.WebhookRegistration
+            {
+                CallbackUrl = callbackUrl,
+                Secret = "preexisting",
+                SubscribedEvents = new List<string> { "push" }
+            });
             preExistingExternalId = preExisting.ExternalId;
         }
 
-        // Walk the row from Pending → Enqueued via the dispatcher, then invoke the registrar
-        // directly. The registrar's FindWebhookByCallbackUrlAsync should hit the pre-existing
-        // hook and reuse its external id without calling RegisterWebhookAsync again.
-        using (var dispatchScope = _fixture.BeginScope())
+        // Disable auto-execute so we can drive Enqueue → registrar.RunAsync deterministically
+        // in two distinct steps (otherwise the dispatcher's Enqueue would synchronously run
+        // the registrar, but we want to assert that the registrar's find-by-URL hits the
+        // pre-existing hook without creating a new one — easier to read in two steps).
+        using var jobClientScope = _fixture.BeginScope();
+        var client = jobClientScope.Resolve<InMemoryBackgroundJobClient>();
+        client.AutoExecute = false;
+        try
         {
-            var dispatcher = dispatchScope.Resolve<IRepositoryWebhookRegistrationDispatcher>();
-            (await dispatcher.DispatchAsync(webhookId, CancellationToken.None).ConfigureAwait(false)).ShouldBeTrue();
+            using (var dispatchScope = _fixture.BeginScope())
+            {
+                var dispatcher = dispatchScope.Resolve<IRepositoryWebhookRegistrationDispatcher>();
+                (await dispatcher.DispatchAsync(webhookId, CancellationToken.None).ConfigureAwait(false)).ShouldBeTrue();
+            }
+            using (var runScope = _fixture.BeginScope())
+            {
+                var registrar = runScope.Resolve<IRepositoryWebhookRegistrar>();
+                await registrar.RunAsync(webhookId, CancellationToken.None).ConfigureAwait(false);
+            }
         }
-        using (var runScope = _fixture.BeginScope())
+        finally
         {
-            var registrar = runScope.Resolve<IRepositoryWebhookRegistrar>();
-            await registrar.RunAsync(webhookId, CancellationToken.None).ConfigureAwait(false);
+            client.AutoExecute = true;
         }
 
         using var verify = _fixture.BeginScope();
@@ -164,6 +204,12 @@ public class RepositoryWebhookRegistrationFlowTests
         hook.RegistrationStatus.ShouldBe(RepositoryWebhookRegistrationStatus.Registered);
         hook.ExternalId.ShouldBe(preExistingExternalId,
             customMessage: "Registrar must reuse the pre-existing hook's external id instead of creating a duplicate.");
+
+        // Critical assertion: registrar saw the pre-existing hook + did NOT register a fresh one.
+        // The pre-populate seeded RegisterCallCount = 1; if the registrar (incorrectly) registered
+        // again, count would be 2.
+        verify.Resolve<TestRemoteHookStore>().RegisterCallCount.ShouldBe(1,
+            customMessage: "Find-by-URL idempotency: registrar must not call RegisterWebhookAsync when a hook already exists.");
     }
 
     [Fact]
@@ -171,33 +217,43 @@ public class RepositoryWebhookRegistrationFlowTests
     {
         var (teamId, providerInstanceId, credentialId) = await SeedAsync().ConfigureAwait(false);
 
-        // Bind happens but we DELIBERATELY do not drain — the webhook sits in Enqueued
-        // (dispatcher CAS'd it but no worker ran). Unbind should flip the in-flight row to
-        // Cancelled, not delete it (the audit-trail intent of the Cancelled state).
-        Guid repositoryId;
-        using (var scope = _fixture.BeginScopeAs(Guid.NewGuid(), teamId, Roles.Admin))
+        // Disable auto-execute so Bind leaves the webhook in Enqueued (not Registered), then
+        // unbind hits the in-flight CAS path.
+        using var jobClientScope = _fixture.BeginScope();
+        var client = jobClientScope.Resolve<InMemoryBackgroundJobClient>();
+        client.AutoExecute = false;
+
+        try
         {
-            var mediator = scope.Resolve<IMediator>();
-            repositoryId = await mediator.Send(new BindRepositoryCommand
+            Guid repositoryId;
+            using (var scope = _fixture.BeginScopeAs(Guid.NewGuid(), teamId, Roles.Admin))
             {
-                ProviderInstanceId = providerInstanceId,
-                CredentialId = credentialId,
-                ProjectIdentifier = $"acme/unbind-inflight-{Guid.NewGuid():N}"
-            }).ConfigureAwait(false);
-        }
+                var mediator = scope.Resolve<IMediator>();
+                repositoryId = await mediator.Send(new BindRepositoryCommand
+                {
+                    ProviderInstanceId = providerInstanceId,
+                    CredentialId = credentialId,
+                    ProjectIdentifier = $"acme/unbind-inflight-{Guid.NewGuid():N}"
+                }).ConfigureAwait(false);
+            }
 
-        using (var scope = _fixture.BeginScopeAs(Guid.NewGuid(), teamId, Roles.Admin))
+            using (var scope = _fixture.BeginScopeAs(Guid.NewGuid(), teamId, Roles.Admin))
+            {
+                var mediator = scope.Resolve<IMediator>();
+                await mediator.Send(new UnbindRepositoryCommand { RepositoryId = repositoryId }).ConfigureAwait(false);
+            }
+
+            using var verify = _fixture.BeginScope();
+            var db = verify.Resolve<CodeSpaceDbContext>();
+            var hook = await db.RepositoryWebhook.AsNoTracking().SingleAsync(w => w.RepositoryId == repositoryId).ConfigureAwait(false);
+
+            hook.RegistrationStatus.ShouldBe(RepositoryWebhookRegistrationStatus.Cancelled,
+                customMessage: "Unbind during a non-terminal registration must CAS the row to Cancelled, not delete it.");
+        }
+        finally
         {
-            var mediator = scope.Resolve<IMediator>();
-            await mediator.Send(new UnbindRepositoryCommand { RepositoryId = repositoryId }).ConfigureAwait(false);
+            client.AutoExecute = true;
         }
-
-        using var verify = _fixture.BeginScope();
-        var db = verify.Resolve<CodeSpaceDbContext>();
-        var hook = await db.RepositoryWebhook.AsNoTracking().SingleAsync(w => w.RepositoryId == repositoryId).ConfigureAwait(false);
-
-        hook.RegistrationStatus.ShouldBe(RepositoryWebhookRegistrationStatus.Cancelled,
-            customMessage: "Unbind during a non-terminal registration must CAS the row to Cancelled, not delete it.");
     }
 
     [Fact]
@@ -208,7 +264,7 @@ public class RepositoryWebhookRegistrationFlowTests
 
         // Manually drive the row into Failed with next_attempt_at in the past — simulates
         // a registrar that hit MaxAttempts-1, set backoff, and the backoff window has now
-        // elapsed. The reconciler's ReviveDueFailedAsync should flip it back to Pending.
+        // elapsed.
         using (var stageScope = _fixture.BeginScope())
         {
             var stageDb = stageScope.Resolve<CodeSpaceDbContext>();
@@ -222,25 +278,34 @@ public class RepositoryWebhookRegistrationFlowTests
                 .ConfigureAwait(false);
         }
 
-        // Run the reconciler. Expect at minimum this Failed row revived; the dispatcher
-        // call inside RedispatchDuePendingAsync may also CAS it to Enqueued (depending on
-        // whether the Pending threshold sweep picks it up the same tick).
-        ReconcileStuckWebhookRegistrationsResponse summary;
-        using (var scope = _fixture.BeginScope())
+        // Disable auto-execute so reconciler's redispatch path stops at Enqueued instead of
+        // running the registrar synchronously — keeps the assertion focused on "Failed → Pending → Enqueued".
+        using var jobClientScope = _fixture.BeginScope();
+        var client = jobClientScope.Resolve<InMemoryBackgroundJobClient>();
+        client.AutoExecute = false;
+
+        try
         {
-            var mediator = scope.Resolve<IMediator>();
-            summary = await mediator.Send(new ReconcileStuckWebhookRegistrationsCommand()).ConfigureAwait(false);
+            ReconcileStuckWebhookRegistrationsResponse summary;
+            using (var scope = _fixture.BeginScope())
+            {
+                var mediator = scope.Resolve<IMediator>();
+                summary = await mediator.Send(new ReconcileStuckWebhookRegistrationsCommand()).ConfigureAwait(false);
+            }
+
+            summary.RevivedFromFailed.ShouldBeGreaterThanOrEqualTo(1,
+                customMessage: "Reconciler must revive at least the one Failed row we staged.");
+
+            using var verify = _fixture.BeginScope();
+            var db = verify.Resolve<CodeSpaceDbContext>();
+            var hook = await db.RepositoryWebhook.AsNoTracking().SingleAsync(w => w.Id == webhookId).ConfigureAwait(false);
+            // Reviver flipped Failed→Pending, then the Pending sweep dispatcher may have flipped Pending→Enqueued.
+            hook.RegistrationStatus.ShouldBeOneOf(RepositoryWebhookRegistrationStatus.Pending, RepositoryWebhookRegistrationStatus.Enqueued);
         }
-
-        summary.RevivedFromFailed.ShouldBeGreaterThanOrEqualTo(1,
-            customMessage: "Reconciler must revive at least the one Failed row we staged.");
-
-        // Row should no longer be in Failed; it's at least Pending (revived) and possibly
-        // Enqueued (if the Pending sweep also picked it up this tick — that's correct).
-        using var verify = _fixture.BeginScope();
-        var db = verify.Resolve<CodeSpaceDbContext>();
-        var hook = await db.RepositoryWebhook.AsNoTracking().SingleAsync(w => w.Id == webhookId).ConfigureAwait(false);
-        hook.RegistrationStatus.ShouldBeOneOf(RepositoryWebhookRegistrationStatus.Pending, RepositoryWebhookRegistrationStatus.Enqueued);
+        finally
+        {
+            client.AutoExecute = true;
+        }
     }
 
     [Fact]
@@ -249,11 +314,7 @@ public class RepositoryWebhookRegistrationFlowTests
         var (teamId, providerInstanceId, credentialId) = await SeedAsync().ConfigureAwait(false);
         var webhookId = await StagePendingWebhookAsync(teamId, providerInstanceId, credentialId).ConfigureAwait(false);
 
-        // Force the row into Registering with a registering_at older than the threshold
-        // (5min). Simulates a worker that CAS'd Enqueued → Registering and then crashed
-        // before responding. The reconciler should flip it back to Pending so the next
-        // dispatcher tick re-fires; the registrar's idempotency check on the next run
-        // covers the "provider call already landed before crash" case.
+        // Force the row into Registering with a registering_at older than threshold (5min).
         var stale = DateTimeOffset.UtcNow - StuckWebhookRegistrationReconcilerService.RegisteringStuckAfter - TimeSpan.FromMinutes(1);
         using (var stageScope = _fixture.BeginScope())
         {
@@ -266,44 +327,90 @@ public class RepositoryWebhookRegistrationFlowTests
                 .ConfigureAwait(false);
         }
 
-        ReconcileStuckWebhookRegistrationsResponse summary;
-        using (var scope = _fixture.BeginScope())
+        using var jobClientScope = _fixture.BeginScope();
+        var client = jobClientScope.Resolve<InMemoryBackgroundJobClient>();
+        client.AutoExecute = false;
+
+        try
         {
-            var mediator = scope.Resolve<IMediator>();
-            summary = await mediator.Send(new ReconcileStuckWebhookRegistrationsCommand()).ConfigureAwait(false);
+            ReconcileStuckWebhookRegistrationsResponse summary;
+            using (var scope = _fixture.BeginScope())
+            {
+                var mediator = scope.Resolve<IMediator>();
+                summary = await mediator.Send(new ReconcileStuckWebhookRegistrationsCommand()).ConfigureAwait(false);
+            }
+
+            summary.RevertedFromRegistering.ShouldBeGreaterThanOrEqualTo(1);
+
+            using var verify = _fixture.BeginScope();
+            var db = verify.Resolve<CodeSpaceDbContext>();
+            var hook = await db.RepositoryWebhook.AsNoTracking().SingleAsync(w => w.Id == webhookId).ConfigureAwait(false);
+            hook.RegistrationStatus.ShouldBeOneOf(RepositoryWebhookRegistrationStatus.Pending, RepositoryWebhookRegistrationStatus.Enqueued);
+            hook.RegisteringAt.ShouldBeNull(
+                customMessage: "Reverting from Registering must clear the timestamp so a fresh attempt is not seen as stuck.");
+        }
+        finally
+        {
+            client.AutoExecute = true;
+        }
+    }
+
+    [Fact]
+    public async Task Registrar_dead_letters_after_max_attempts()
+    {
+        var (teamId, providerInstanceId, credentialId) = await SeedAsync().ConfigureAwait(false);
+        var webhookId = await StagePendingWebhookAsync(teamId, providerInstanceId, credentialId).ConfigureAwait(false);
+
+        // Stage the row in Enqueued with Attempts = MaxAttempts - 1 — one more failure and
+        // the registrar must flip to DeadLettered (terminal). To force a deterministic
+        // failure, soft-delete the parent repository — LoadRepositoryAsync filters by
+        // DeletedDate == null, so it returns null, the registrar throws, RecordFailureAsync
+        // runs, attempts ticks to MaxAttempts → DeadLettered. Same code path as a permanently
+        // broken provider, achieved without standing up a throwing provider double.
+        using (var stageScope = _fixture.BeginScope())
+        {
+            var stageDb = stageScope.Resolve<CodeSpaceDbContext>();
+            var webhookRepoId = await stageDb.RepositoryWebhook.AsNoTracking()
+                .Where(w => w.Id == webhookId)
+                .Select(w => w.RepositoryId)
+                .SingleAsync()
+                .ConfigureAwait(false);
+
+            await stageDb.RepositoryWebhook
+                .Where(w => w.Id == webhookId)
+                .ExecuteUpdateAsync(s => s
+                    .SetProperty(w => w.RegistrationStatus, RepositoryWebhookRegistrationStatus.Enqueued)
+                    .SetProperty(w => w.Attempts, RepositoryWebhookRegistrar.MaxAttempts - 1)
+                    .SetProperty(w => w.EnqueuedAt, (DateTimeOffset?)DateTimeOffset.UtcNow))
+                .ConfigureAwait(false);
+
+            await stageDb.Repository
+                .Where(r => r.Id == webhookRepoId)
+                .ExecuteUpdateAsync(s => s.SetProperty(r => r.DeletedDate, (DateTimeOffset?)DateTimeOffset.UtcNow))
+                .ConfigureAwait(false);
         }
 
-        summary.RevertedFromRegistering.ShouldBeGreaterThanOrEqualTo(1);
+        using (var runScope = _fixture.BeginScope())
+        {
+            var registrar = runScope.Resolve<IRepositoryWebhookRegistrar>();
+            await registrar.RunAsync(webhookId, CancellationToken.None).ConfigureAwait(false);
+        }
 
         using var verify = _fixture.BeginScope();
         var db = verify.Resolve<CodeSpaceDbContext>();
         var hook = await db.RepositoryWebhook.AsNoTracking().SingleAsync(w => w.Id == webhookId).ConfigureAwait(false);
-        // After revert, sweep order may also redispatch to Enqueued — either is acceptable.
-        hook.RegistrationStatus.ShouldBeOneOf(RepositoryWebhookRegistrationStatus.Pending, RepositoryWebhookRegistrationStatus.Enqueued);
-        hook.RegisteringAt.ShouldBeNull(
-            customMessage: "Reverting from Registering must clear the timestamp so a fresh attempt is not seen as stuck.");
-    }
 
-    /// <summary>
-    /// Construct the minimal RemoteRepository the TestRepositoryProvider's
-    /// RegisterWebhookAsync ignores most fields on — we only need a valid stub.
-    /// </summary>
-    private static Messages.Dtos.Providers.RemoteRepository BuildRemoteRepo() => new()
-    {
-        ExternalId = "id-acme-api",
-        NamespacePath = "acme",
-        Name = "api",
-        FullPath = "acme/api",
-        DefaultBranch = "main",
-        Visibility = RepositoryVisibility.Private,
-        WebUrl = "https://test.local/acme/api"
-    };
+        hook.RegistrationStatus.ShouldBe(RepositoryWebhookRegistrationStatus.DeadLettered,
+            customMessage: "Registrar must dead-letter after Attempts reaches MaxAttempts.");
+        hook.Attempts.ShouldBe(RepositoryWebhookRegistrar.MaxAttempts);
+        hook.LastError.ShouldNotBeNullOrEmpty(
+            customMessage: "DeadLettered row must carry the last error message for operator triage.");
+    }
 
     /// <summary>
     /// Insert a Pending RepositoryWebhook + its parent Repository directly via the DbContext,
     /// without going through the binding service. Lets tests control the starting state
-    /// (e.g. test the dispatcher / registrar / reconciler in isolation) without the binding
-    /// flow's automatic dispatch step.
+    /// without the binding flow's automatic dispatch step.
     /// </summary>
     private async Task<Guid> StagePendingWebhookAsync(Guid teamId, Guid providerInstanceId, Guid credentialId)
     {

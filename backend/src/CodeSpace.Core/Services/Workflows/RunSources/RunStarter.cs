@@ -68,7 +68,7 @@ public sealed class RunStarter : IRunStarter, IScopedDependency
         // The caller commits the EF transaction, then calls
         // IWorkflowRunDispatcher.DispatchAsync(runId) which atomically transitions
         // Pending→Enqueued + hands to Hangfire. PostBoy-style: workflow_run.Status IS the
-        // queue, no separate outbox row needed.
+        // queue — no separate intent table needed.
 
         // Ledger entry that the run exists. Engine emits run.started when it picks up the
         // background-job; run.queued here is the "we accepted" marker.

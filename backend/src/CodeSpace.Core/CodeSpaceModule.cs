@@ -221,7 +221,7 @@ public class CodeSpaceModule : Autofac.Module
 
             if (accessor?.HttpContext != null) return c.Resolve<ApiUser>();
 
-            // No HTTP context → background work (outbox dispatcher, scheduled jobs, DbUp).
+            // No HTTP context → background work (Hangfire workers, scheduled jobs, DbUp).
             // BackgroundSeederUser holds the Admin role so tenancy bypass works the same way
             // as the seeded system user does for human admins.
             return new BackgroundSeederUser();
