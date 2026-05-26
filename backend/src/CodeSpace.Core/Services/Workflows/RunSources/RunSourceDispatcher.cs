@@ -22,12 +22,14 @@ namespace CodeSpace.Core.Services.Workflows.RunSources;
 ///   2. add one more <c>INotificationHandler&lt;NewEvent&gt;</c> line + a tiny pass-through method
 ///
 /// Two lines per new event type. The matcher does the matching; the dispatcher's job is
-/// "load activations of this type, fire matches, persist a request + run + outbox message."
+/// "load activations of this type, fire matches, persist a request + run, hand to the
+/// background-job dispatcher."
 ///
 /// Pipeline per match: insert <see cref="WorkflowRunRequest"/> (Consumed) → insert
-/// <see cref="WorkflowRun"/> (Pending) pointing at the request → enqueue outbox. The request
-/// row carries the source identity + raw normalised payload + frozen activation snapshot, so
-/// the run is just an execution handle.
+/// <see cref="WorkflowRun"/> (Pending) pointing at the request → call <c>IWorkflowRunDispatcher</c>
+/// to CAS Pending→Enqueued + enqueue the Hangfire job. The request row carries the source
+/// identity + raw normalised payload + frozen activation snapshot, so the run is just an
+/// execution handle.
 /// </summary>
 public sealed class RunSourceDispatcher :
     INotificationHandler<PullRequestOpenedEvent>,

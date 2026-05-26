@@ -2,8 +2,8 @@ namespace CodeSpace.Core.Services.Providers.Resilience;
 
 /// <summary>
 /// Thrown when a provider instance's local rate-limit bucket refuses the call (bucket empty
-/// AND queue full). Distinct from the SDK's 429 — this fires BEFORE the wire call. Outbox
-/// handlers can choose to retry; controllers should surface 429 to the user.
+/// AND queue full). Distinct from the SDK's 429 — this fires BEFORE the wire call. Background
+/// workers can choose to retry via the failure-state-machine path; controllers should surface 429 to the user.
 /// </summary>
 public sealed class ProviderRateLimitedException : Exception
 {

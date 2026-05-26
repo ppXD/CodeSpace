@@ -6,7 +6,7 @@ namespace CodeSpace.Messages.Constants;
 /// </summary>
 public static class SystemUsers
 {
-    /// <summary>The user under which background work (outbox dispatch, scheduled jobs, DbUp migrations) is attributed in audit columns. Holds the Admin role via migration 0004's role_user seed.</summary>
+    /// <summary>The user under which background work (Hangfire workers, scheduled jobs, DbUp migrations) is attributed in audit columns. Holds the Admin role via migration 0004's role_user seed.</summary>
     public static readonly Guid SeederId = Guid.Parse("00000000-0000-0000-0000-000000000001");
 
     public const string SeederEmail = "system@codespace.local";

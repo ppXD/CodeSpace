@@ -3,6 +3,7 @@ using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Credentials;
 using CodeSpace.IntegrationTests.Infrastructure;
+using CodeSpace.IntegrationTests.Infrastructure.Jobs;
 using CodeSpace.Messages.Commands.Repositories;
 using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Credentials;
@@ -105,7 +106,12 @@ public class RepositoryQueryFlowTests
             ProjectIdentifier = $"acme/get-{Guid.NewGuid():N}"
         }).ConfigureAwait(false);
 
-        await _fixture.DrainPendingWebhookRegistrationsAsync().ConfigureAwait(false);
+        // Drain the queued registrar so the webhook row reaches Registered (only Registered
+        // rows count toward ActiveWebhooksCount).
+        using (var drainScope = _fixture.BeginScope())
+        {
+            await drainScope.Resolve<InMemoryBackgroundJobClient>().WaitForPendingAsync().ConfigureAwait(false);
+        }
 
         var detail = await mediator.Send(new GetRepositoryQuery { RepositoryId = repoId }).ConfigureAwait(false);
 

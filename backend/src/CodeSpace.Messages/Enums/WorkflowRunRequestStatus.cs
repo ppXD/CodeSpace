@@ -22,7 +22,7 @@ public enum WorkflowRunRequestStatus
     /// <summary>Resolved to a concrete <c>workflow_id</c> + <c>activation_id</c>; snapshot of the activation row captured.</summary>
     Matched,
 
-    /// <summary>A <c>workflow_run</c> row was created from this request and queued on the outbox.</summary>
+    /// <summary>A <c>workflow_run</c> row was created from this request and handed to the run dispatcher for Pending→Enqueued CAS + Hangfire pickup.</summary>
     Consumed,
 
     /// <summary>Request was rejected somewhere in the pipeline; <c>error</c> column holds the reason.</summary>

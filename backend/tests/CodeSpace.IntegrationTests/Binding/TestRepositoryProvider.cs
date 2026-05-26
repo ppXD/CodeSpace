@@ -6,8 +6,67 @@ using CodeSpace.Messages.Events;
 
 namespace CodeSpace.IntegrationTests.Binding;
 
+/// <summary>
+/// In-memory remote-hook store backing the <see cref="TestRepositoryProvider"/>. Registered
+/// as a singleton in the test container so every fixture sees a fresh, isolated store — no
+/// cross-test bleed through process-static fields.
+///
+/// <para>Records every call <c>RegisterWebhookAsync</c> makes and lets <c>FindWebhookByCallbackUrlAsync</c>
+/// return the matching row. The registrar's idempotency check (find-by-URL → reuse instead of
+/// re-register) flows through both methods, so test assertions like "registration ran exactly
+/// once" can read <see cref="RegisterCallCount"/>.</para>
+/// </summary>
+public sealed class TestRemoteHookStore
+{
+    private readonly object _lock = new();
+    private readonly Dictionary<string, RemoteWebhook> _byCallbackUrl = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>Total times <c>RegisterWebhookAsync</c> created a fresh hook (not counting find-by-URL reuse).</summary>
+    public int RegisterCallCount { get; private set; }
+
+    public RemoteWebhook? Find(string callbackUrl)
+    {
+        lock (_lock)
+        {
+            return _byCallbackUrl.TryGetValue(callbackUrl, out var hook) ? hook : null;
+        }
+    }
+
+    public RemoteWebhook Register(WebhookRegistration request)
+    {
+        var hook = new RemoteWebhook
+        {
+            ExternalId = $"test-hook-{Guid.NewGuid():N}",
+            CallbackUrl = request.CallbackUrl,
+            SubscribedEvents = request.SubscribedEvents.ToList(),
+            Active = true
+        };
+
+        lock (_lock)
+        {
+            _byCallbackUrl[request.CallbackUrl] = hook;
+            RegisterCallCount++;
+        }
+
+        return hook;
+    }
+
+    public void Reset()
+    {
+        lock (_lock)
+        {
+            _byCallbackUrl.Clear();
+            RegisterCallCount = 0;
+        }
+    }
+}
+
 public sealed class TestRepositoryProvider : IRepositoryCatalogCapability, ICredentialProbeCapability, IWebhookRegistrationCapability, IWebhookSignatureVerifier, IWebhookEventNormalizer
 {
+    private readonly TestRemoteHookStore _hookStore;
+
+    public TestRepositoryProvider(TestRemoteHookStore hookStore) { _hookStore = hookStore; }
+
     public ProviderKind Kind => ProviderKind.Git;
 
     public Task<RemoteRepository> GetByExternalIdAsync(ProviderContext context, string externalId, CancellationToken cancellationToken) => Task.FromResult(BuildRemoteRepo(externalId, externalId));
@@ -36,47 +95,11 @@ public sealed class TestRepositoryProvider : IRepositoryCatalogCapability, ICred
         AuthenticatedUserName = "Test User"
     });
 
-    /// <summary>
-    /// Backing store for previously-registered hooks per (provider context, callback url).
-    /// Lets <see cref="FindWebhookByCallbackUrlAsync"/> see what <see cref="RegisterWebhookAsync"/>
-    /// already did this fixture — the worker's idempotency check ("look up existing by URL,
-    /// register only if absent") flows through both methods so the in-memory test double
-    /// has to honour the same contract a real provider would.
-    /// </summary>
-    private static readonly Dictionary<string, RemoteWebhook> _registeredByCallbackUrl = new(StringComparer.OrdinalIgnoreCase);
-    private static readonly object _lock = new();
+    public Task<RemoteWebhook?> FindWebhookByCallbackUrlAsync(ProviderContext context, RemoteRepository repository, string callbackUrl, CancellationToken cancellationToken) =>
+        Task.FromResult(_hookStore.Find(callbackUrl));
 
-    public Task<RemoteWebhook?> FindWebhookByCallbackUrlAsync(ProviderContext context, RemoteRepository repository, string callbackUrl, CancellationToken cancellationToken)
-    {
-        lock (_lock)
-        {
-            return Task.FromResult(_registeredByCallbackUrl.TryGetValue(callbackUrl, out var hook) ? hook : null);
-        }
-    }
-
-    public Task<RemoteWebhook> RegisterWebhookAsync(ProviderContext context, RemoteRepository repository, WebhookRegistration request, CancellationToken cancellationToken)
-    {
-        var hook = new RemoteWebhook
-        {
-            ExternalId = $"test-hook-{Guid.NewGuid():N}",
-            CallbackUrl = request.CallbackUrl,
-            SubscribedEvents = request.SubscribedEvents.ToList(),
-            Active = true
-        };
-
-        lock (_lock)
-        {
-            _registeredByCallbackUrl[request.CallbackUrl] = hook;
-        }
-
-        return Task.FromResult(hook);
-    }
-
-    /// <summary>Test-only hook to reset the in-memory registration store between fixtures.</summary>
-    public static void ResetRegistrations()
-    {
-        lock (_lock) _registeredByCallbackUrl.Clear();
-    }
+    public Task<RemoteWebhook> RegisterWebhookAsync(ProviderContext context, RemoteRepository repository, WebhookRegistration request, CancellationToken cancellationToken) =>
+        Task.FromResult(_hookStore.Register(request));
 
     public Task DeleteWebhookAsync(ProviderContext context, RemoteRepository repository, string externalWebhookId, CancellationToken cancellationToken) => Task.CompletedTask;
 

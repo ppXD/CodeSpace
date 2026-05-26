@@ -224,7 +224,7 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
         var payloadJson = payload?.GetRawText() ?? "{}";
 
         // Unified run-start through IRunStarter. The manual / replay / webhook paths share
-        // one (request + run + outbox + run.queued) staging path, varying only by the envelope
+        // one (request + run + run.queued) staging path, varying only by the envelope
         // they hand in.
         var runId = await _runStarter.StartAsync(new RunSourceEnvelope
         {
@@ -279,7 +279,7 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
         // Replay envelope carries the lineage fields (CausationRequestId + ParentRunId +
         // ReleaseHashAtRun) so the unified starter writes them onto the request + run rows
         // for us. Replay-specific snapshot cloning still happens below because it lives
-        // outside the (request + run + outbox) trio the starter owns.
+        // outside the (request + run) trio the starter owns.
         var replayRunId = await _runStarter.StartAsync(new RunSourceEnvelope
         {
             TeamId = teamId,

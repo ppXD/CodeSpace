@@ -2,12 +2,8 @@ using Autofac;
 using Autofac.Extensions.DependencyInjection;
 using CodeSpace.Core;
 using CodeSpace.Core.Persistence.Db;
-using CodeSpace.Core.Persistence.Entities;
-using CodeSpace.Core.Services.Webhooks.Registration;
 using CodeSpace.Core.Settings;
 using CodeSpace.IntegrationTests.Settings;
-using CodeSpace.Messages.Enums;
-using Microsoft.EntityFrameworkCore;
 using MediatR;
 using Microsoft.AspNetCore.DataProtection;
 using Microsoft.Extensions.Configuration;
@@ -60,54 +56,6 @@ public sealed class PostgresFixture : IAsyncLifetime
             b.RegisterInstance(new TestCurrentUser(userId, "test", roles)).As<CodeSpace.Core.Services.Identity.ICurrentUser>().SingleInstance();
             b.RegisterInstance(new TestCurrentTeam(teamId)).As<CodeSpace.Core.Services.Identity.ICurrentTeam>().SingleInstance();
         });
-    }
-
-    /// <summary>
-    /// Drives every Pending / Enqueued / Failed RepositoryWebhook through the registrar
-    /// directly, simulating what Hangfire would do in production. Tests that exercise the
-    /// bind flow must call this after Send-ing a bind command — BindAsync persists the
-    /// webhook in Pending state and enqueues a Hangfire job for the registrar, but the
-    /// in-memory <c>InMemoryBackgroundJobClient</c> doesn't actually execute the job; this
-    /// helper substitutes for the worker by invoking the registrar in a loop until every
-    /// non-terminal row reaches Registered (or DeadLettered / Cancelled).
-    /// </summary>
-    public async Task DrainPendingWebhookRegistrationsAsync(CancellationToken cancellationToken = default)
-    {
-        const int safetyCap = 100;
-        for (var iteration = 0; iteration < safetyCap; iteration++)
-        {
-            using var scope = BeginScope();
-            var db = scope.Resolve<CodeSpaceDbContext>();
-
-            var dueIds = await db.RepositoryWebhook.AsNoTracking()
-                .Where(w => w.RegistrationStatus == RepositoryWebhookRegistrationStatus.Pending
-                         || w.RegistrationStatus == RepositoryWebhookRegistrationStatus.Enqueued)
-                .Select(w => w.Id)
-                .ToListAsync(cancellationToken)
-                .ConfigureAwait(false);
-
-            if (dueIds.Count == 0) return;
-
-            foreach (var webhookId in dueIds)
-            {
-                // For each row: ensure it's in Enqueued (the registrar's CAS expects that).
-                // BindAsync's dispatcher flow already CAS'd Pending → Enqueued, but a row
-                // freshly re-revived from Failed by the reconciler sits in Pending — flip
-                // it forward so the registrar's CAS sees a row it can claim.
-                using var prepScope = BeginScope();
-                var prepDb = prepScope.Resolve<CodeSpaceDbContext>();
-                await prepDb.RepositoryWebhook
-                    .Where(w => w.Id == webhookId && w.RegistrationStatus == RepositoryWebhookRegistrationStatus.Pending)
-                    .ExecuteUpdateAsync(s => s
-                        .SetProperty(w => w.RegistrationStatus, RepositoryWebhookRegistrationStatus.Enqueued)
-                        .SetProperty(w => w.EnqueuedAt, (DateTimeOffset?)DateTimeOffset.UtcNow), cancellationToken)
-                    .ConfigureAwait(false);
-
-                using var runScope = BeginScope();
-                var registrar = runScope.Resolve<IRepositoryWebhookRegistrar>();
-                await registrar.RunAsync(webhookId, cancellationToken).ConfigureAwait(false);
-            }
-        }
     }
 
     public async Task InitializeAsync()
@@ -238,6 +186,12 @@ public sealed class PostgresFixture : IAsyncLifetime
         builder.RegisterTypes(settingTypes).AsSelf().SingleInstance();
 
         builder.RegisterType<Webhooks.CapturedNormalizedEvents>().AsSelf().SingleInstance();
+
+        // In-memory store backing TestRepositoryProvider's remote webhook lookups. Singleton
+        // per fixture (= per test DB) so tests within one fixture share state (e.g. assert
+        // "registrar called exactly once" via RegisterCallCount across multiple operations)
+        // but cross-fixture leak is impossible.
+        builder.RegisterType<Binding.TestRemoteHookStore>().AsSelf().SingleInstance();
 
         // ICodeSpaceBackgroundJobClient test impl. Records Enqueue calls + lets tests simulate
         // Hangfire failure via ThrowOnEnqueue. SingleInstance so tests can assert the

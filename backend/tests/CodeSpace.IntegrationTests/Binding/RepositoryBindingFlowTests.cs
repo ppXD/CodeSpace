@@ -3,6 +3,7 @@ using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Credentials;
 using CodeSpace.IntegrationTests.Infrastructure;
+using CodeSpace.IntegrationTests.Infrastructure.Jobs;
 using CodeSpace.Messages.Commands.Credentials;
 using CodeSpace.Messages.Commands.ProviderInstances;
 using CodeSpace.Messages.Commands.Repositories;
@@ -39,7 +40,10 @@ public class RepositoryBindingFlowTests
             }).ConfigureAwait(false);
         }
 
-        await _fixture.DrainPendingWebhookRegistrationsAsync().ConfigureAwait(false);
+        // BindAsync's outer EF transaction committed; the registrar job sat queued on the
+        // InMemoryBackgroundJobClient. Drain it now — this runs the registrar in a fresh
+        // scope (fresh DbContext + connection), mirroring real Hangfire worker semantics.
+        await DrainBackgroundJobsAsync().ConfigureAwait(false);
 
         using var verify = _fixture.BeginScope();
         var db = verify.Resolve<CodeSpaceDbContext>();
@@ -122,7 +126,8 @@ public class RepositoryBindingFlowTests
             }).ConfigureAwait(false);
         }
 
-        await _fixture.DrainPendingWebhookRegistrationsAsync().ConfigureAwait(false);
+        // Drain queued registrar so the webhook reaches Registered before unbind hits it.
+        await DrainBackgroundJobsAsync().ConfigureAwait(false);
 
         using (var scope = _fixture.BeginScopeAs(Guid.NewGuid(), teamId, Roles.Admin))
         {
@@ -217,6 +222,19 @@ public class RepositoryBindingFlowTests
         var decryptedJson = encryptor.Decrypt(credential.EncryptedPayload);
         var payload = (PatPayload)serializer.Deserialize(credential.AuthType, decryptedJson);
         payload.Token.ShouldBe("secret-token-xxx");
+    }
+
+    /// <summary>
+    /// Run every queued background-job on the in-memory client. Tests that exercise the
+    /// bind flow must call this after Send-ing a BindRepositoryCommand: BindAsync's outer
+    /// transaction commits before the queued registrar runs (matches real Hangfire worker
+    /// pickup, which only sees committed rows).
+    /// </summary>
+    private async Task DrainBackgroundJobsAsync()
+    {
+        using var scope = _fixture.BeginScope();
+        var client = scope.Resolve<InMemoryBackgroundJobClient>();
+        await client.WaitForPendingAsync().ConfigureAwait(false);
     }
 
     private async Task<Guid> SeedTeamAsync()

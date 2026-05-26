@@ -2,7 +2,7 @@ namespace CodeSpace.Core.Services.Identity;
 
 /// <summary>
 /// The caller of the current operation. Lifted from JWT claims on the HTTP path, or set to
-/// the seeded system user on the background path (outbox dispatcher, scheduled jobs, DbUp).
+/// the seeded system user on the background path (Hangfire workers, scheduled jobs, DbUp).
 /// Authorization behaviors decide what's allowed based on <see cref="HasRole"/> /
 /// <see cref="HasPermission"/>.
 /// </summary>

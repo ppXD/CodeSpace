@@ -74,7 +74,7 @@ public class WorkflowRun : IEntity<Guid>, IAuditable
     /// Npgsql xmin-backed optimistic concurrency token. PostgreSQL stamps every row with a
     /// transaction id on every UPDATE; mapping it as a concurrency token causes EF to add
     /// <c>WHERE xmin = $loaded_xmin</c> to every update, so when two engine workers race the
-    /// same run (e.g. duplicate outbox dispatch), the second one's SaveChanges throws
+    /// same run (e.g. duplicate Hangfire delivery of the same job), the second one's SaveChanges throws
     /// <c>DbUpdateConcurrencyException</c> and the engine treats it as "another worker won;
     /// skip". Eliminates duplicate ledger records + status double-transition.
     /// </summary>
