@@ -1,0 +1,126 @@
+using CodeSpace.Core.DependencyInjection;
+using CodeSpace.Core.Persistence.Db;
+using CodeSpace.Core.Persistence.Entities;
+using CodeSpace.Core.Services.Providers;
+using CodeSpace.Core.Services.Providers.Capabilities;
+using CodeSpace.Core.Services.Providers.Scopes;
+using CodeSpace.Messages.Dtos.Providers;
+using CodeSpace.Messages.Enums;
+using Microsoft.EntityFrameworkCore;
+
+namespace CodeSpace.Core.Services.PullRequests;
+
+public sealed class PullRequestService : IPullRequestService, IScopedDependency
+{
+    private readonly CodeSpaceDbContext _db;
+    private readonly IProviderRegistry _registry;
+    private readonly IScopeChecker _scopeChecker;
+
+    public PullRequestService(CodeSpaceDbContext db, IProviderRegistry registry, IScopeChecker scopeChecker)
+    {
+        _db = db;
+        _registry = registry;
+        _scopeChecker = scopeChecker;
+    }
+
+    public async Task<IReadOnlyList<RemotePullRequest>> ListAsync(Guid repositoryId, PullRequestState? state, int page, int perPage, CancellationToken cancellationToken)
+    {
+        var (catalog, context, remote) = await ResolveAsync(repositoryId, cancellationToken).ConfigureAwait(false);
+        return await catalog.ListPullRequestsAsync(context, remote, state, page, perPage, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<RemotePullRequest> GetAsync(Guid repositoryId, int number, CancellationToken cancellationToken)
+    {
+        var (catalog, context, remote) = await ResolveAsync(repositoryId, cancellationToken).ConfigureAwait(false);
+        return await catalog.GetPullRequestAsync(context, remote, number, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<IReadOnlyList<RemotePullRequestCommit>> ListCommitsAsync(Guid repositoryId, int number, CancellationToken cancellationToken)
+    {
+        var (catalog, context, remote) = await ResolveAsync(repositoryId, cancellationToken).ConfigureAwait(false);
+        return await catalog.ListPullRequestCommitsAsync(context, remote, number, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<IReadOnlyList<RemotePullRequestFile>> ListFilesAsync(Guid repositoryId, int number, CancellationToken cancellationToken)
+    {
+        var (catalog, context, remote) = await ResolveAsync(repositoryId, cancellationToken).ConfigureAwait(false);
+        return await catalog.ListPullRequestFilesAsync(context, remote, number, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<RemotePullRequestCounts> GetCountsAsync(Guid repositoryId, CancellationToken cancellationToken)
+    {
+        var (catalog, context, remote) = await ResolveAsync(repositoryId, cancellationToken).ConfigureAwait(false);
+        return await catalog.CountPullRequestsAsync(context, remote, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<IReadOnlyList<RemotePullRequestCheck>> ListChecksAsync(Guid repositoryId, int number, CancellationToken cancellationToken)
+    {
+        var (catalog, context, remote) = await ResolveAsync(repositoryId, cancellationToken).ConfigureAwait(false);
+        return await catalog.ListChecksAsync(context, remote, number, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<RemotePullRequestComment> PostCommentAsync(Guid repositoryId, int number, string body, CancellationToken cancellationToken)
+    {
+        // Comment WRITE preflight uses the same repo/credential lookup but enforces the
+        // narrower IPullRequestCommentCapability scope (e.g. GitLab requires `api`, not just `read_api`).
+        var repo = await LoadRepositoryAsync(repositoryId, cancellationToken).ConfigureAwait(false);
+        EnsureCredentialBound(repo);
+        _scopeChecker.EnsureCapability(repo.Credential!, repo.ProviderInstance.Provider, typeof(IPullRequestCommentCapability));
+
+        var commentCap = _registry.Require<IPullRequestCommentCapability>(repo.ProviderInstance.Provider);
+        var context = new ProviderContext(repo.ProviderInstance, repo.Credential!);
+        var remote = ToRemoteRepository(repo);
+
+        return await commentCap.PostCommentAsync(context, remote, number, body, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Shared preflight for every PR call: repo lookup → credential null-check →
+    /// scope check → capability + provider-context + remote-repository shape.
+    /// Throws InvalidOperationException (mapped to 400) or
+    /// ProviderInsufficientScopeException (422) on failure.
+    /// </summary>
+    private async Task<(IPullRequestCatalogCapability Catalog, ProviderContext Context, RemoteRepository Remote)> ResolveAsync(Guid repositoryId, CancellationToken cancellationToken)
+    {
+        var repo = await LoadRepositoryAsync(repositoryId, cancellationToken).ConfigureAwait(false);
+        EnsureCredentialBound(repo);
+        EnsureScopeCovered(repo);
+
+        var catalog = _registry.Require<IPullRequestCatalogCapability>(repo.ProviderInstance.Provider);
+        var context = new ProviderContext(repo.ProviderInstance, repo.Credential!);
+        var remote = ToRemoteRepository(repo);
+
+        return (catalog, context, remote);
+    }
+
+    private async Task<Repository> LoadRepositoryAsync(Guid repositoryId, CancellationToken cancellationToken) =>
+        await _db.Repository
+            .Include(r => r.ProviderInstance)
+            .Include(r => r.Credential)
+            .SingleOrDefaultAsync(r => r.Id == repositoryId && r.DeletedDate == null, cancellationToken).ConfigureAwait(false)
+            ?? throw new InvalidOperationException($"Repository {repositoryId} not found");
+
+    private static void EnsureCredentialBound(Repository repo)
+    {
+        if (repo.Credential == null)
+            throw new InvalidOperationException($"Repository {repo.Id} has no bound credential — relink first.");
+    }
+
+    private void EnsureScopeCovered(Repository repo) =>
+        _scopeChecker.EnsureCapability(repo.Credential!, repo.ProviderInstance.Provider, typeof(IPullRequestCatalogCapability));
+
+    private static RemoteRepository ToRemoteRepository(Repository repo) => new()
+    {
+        ExternalId = repo.ExternalId,
+        NamespacePath = repo.NamespacePath,
+        Name = repo.Name,
+        FullPath = repo.FullPath,
+        DefaultBranch = repo.DefaultBranch,
+        Visibility = repo.Visibility,
+        Description = repo.Description,
+        WebUrl = repo.WebUrl,
+        CloneUrlHttps = repo.CloneUrlHttps,
+        CloneUrlSsh = repo.CloneUrlSsh,
+        Archived = repo.Archived
+    };
+}

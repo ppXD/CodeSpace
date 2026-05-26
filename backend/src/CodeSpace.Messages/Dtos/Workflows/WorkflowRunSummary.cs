@@ -1,0 +1,23 @@
+using CodeSpace.Messages.Enums;
+
+namespace CodeSpace.Messages.Dtos.Workflows;
+
+/// <summary>
+/// History-row shape. <see cref="SourceType"/> is an open string sourced from
+/// <c>workflow_run_request.source_type</c> via the run's back-pointer.
+/// </summary>
+public sealed record WorkflowRunSummary
+{
+    public required Guid Id { get; init; }
+    public required Guid WorkflowId { get; init; }
+    public required int WorkflowVersion { get; init; }
+
+    /// <summary>Open-string source identifier. Examples: "manual", "replay", "provider.github.pull_request".</summary>
+    public required string SourceType { get; init; }
+
+    public required WorkflowRunStatus Status { get; init; }
+    public string? Error { get; init; }
+    public DateTimeOffset? StartedAt { get; init; }
+    public DateTimeOffset? CompletedAt { get; init; }
+    public required DateTimeOffset CreatedDate { get; init; }
+}

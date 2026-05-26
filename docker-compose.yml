@@ -1,0 +1,40 @@
+# Local dev stack. Spins up the dependencies CodeSpace needs so `dotnet run` and
+# `pnpm dev` work without any extra setup.
+#
+#   docker compose up -d            # start everything in the background
+#   docker compose down             # stop containers, preserve data
+#   docker compose down -v          # nuke the volume too (fresh DB)
+#
+# Credentials below intentionally match backend/src/CodeSpace.Api/appsettings.json —
+# the API connects with codespace/codespace/codespace out of the box. Rotate via env
+# vars in any non-local environment.
+
+services:
+  postgres:
+    image: postgres:18-alpine
+    container_name: codespace-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: codespace
+      POSTGRES_PASSWORD: codespace
+      POSTGRES_DB: codespace
+      # Also create a postgres superuser so the integration test fixture
+      # (TestPostgres:AdminConnectionString) can spin up disposable per-test DBs.
+      POSTGRES_HOST_AUTH_METHOD: scram-sha-256
+      # PG18+ uses major-version-specific data layout; pin PGDATA to a subdirectory of the
+      # mount so the volume-mount semantics we want (single named volume → all data) stay
+      # intact while satisfying PG18's check that data isn't at /var/lib/postgresql/data
+      # directly. See docker-library/postgres#37.
+      PGDATA: /var/lib/postgresql/data/pgdata
+    ports:
+      - "5432:5432"
+    volumes:
+      - codespace-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U codespace -d codespace"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  codespace-pgdata:

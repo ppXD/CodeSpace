@@ -1,0 +1,249 @@
+/*
+ * TUI-themed sign-in (and any future CLI-style screens). Lives outside ai-code-space.css
+ * because it uses a different colour palette — slightly darker, terminal-leaning — while
+ * still inheriting the global Geist Mono face from index.css.
+ *
+ * Palette: cream paper background + ink-black text, single accent (warm orange) for the
+ * caret and call-to-action. No drop shadows, no gradients — every effect has to feel
+ * like it could be drawn with characters.
+ */
+
+.tui-root {
+  position: relative;
+  min-height: 100vh;
+  background: #15140F;
+  color: #EDE7D6;
+  display: grid;
+  place-items: center;
+  padding: 32px 16px;
+  overflow: hidden;
+  font-feature-settings: "tnum", "zero", "ss01";
+}
+
+/* Subtle CRT scanlines — pure CSS, no img — to make it feel like a real terminal */
+.tui-scanlines {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background-image: repeating-linear-gradient(
+    to bottom,
+    rgba(255, 255, 255, 0) 0px,
+    rgba(255, 255, 255, 0) 2px,
+    rgba(0, 0, 0, 0.06) 2px,
+    rgba(0, 0, 0, 0.06) 3px
+  );
+  opacity: .6;
+  mix-blend-mode: multiply;
+}
+
+.tui-frame {
+  position: relative;
+  width: min(640px, 92vw);
+  border: 1px solid #4A4334;
+  background: #1F1D17;
+  padding: 28px 32px 24px;
+  box-shadow:
+    0 0 0 1px #1F1D17 inset,
+    0 0 0 3px #15140F,
+    0 0 0 4px #2A2620;
+}
+
+/* Corner glyphs evoke ASCII box-drawing chrome around the frame */
+.tui-frame::before,
+.tui-frame::after {
+  content: "";
+  position: absolute;
+  width: 6px;
+  height: 6px;
+  background: #D97757;
+}
+.tui-frame::before { top: -1px; left: -1px; }
+.tui-frame::after  { bottom: -1px; right: -1px; }
+
+/* ── Banner / ASCII heading ─────────────────────────────────────────────────── */
+
+.tui-banner {
+  text-align: left;
+  margin-bottom: 22px;
+}
+
+.tui-ascii {
+  margin: 0;
+  font-family: inherit;
+  font-size: 12px;
+  line-height: 1.1;
+  color: #D97757;
+  letter-spacing: 0;
+  white-space: pre;
+}
+
+.tui-banner-sub {
+  margin-top: 10px;
+  color: #8A8474;
+  font-size: 12px;
+}
+
+/* ── Prompt / form ──────────────────────────────────────────────────────────── */
+
+.tui-prompt {
+  font-size: 13px;
+  margin-bottom: 18px;
+  color: #BFB59A;
+}
+.tui-prompt-host { color: #7AA08A; }
+.tui-prompt-path { color: #5F86A9; }
+.tui-prompt-sep  { color: #6E6754; margin: 0 1px; }
+.tui-prompt-cmd  { color: #EDE7D6; }
+
+.tui-form {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.tui-field {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border: 1px solid #3A3528;
+  background: #16140E;
+}
+
+.tui-field:focus-within {
+  border-color: #D97757;
+  background: #18150E;
+}
+
+.tui-field-label {
+  display: inline-block;
+  min-width: 68px;
+  font-size: 12.5px;
+  color: #8A8474;
+  text-transform: lowercase;
+}
+
+.tui-field-arrow {
+  color: #D97757;
+  font-size: 13px;
+}
+
+.tui-field-input {
+  flex: 1;
+  background: transparent;
+  border: 0;
+  outline: 0;
+  color: #EDE7D6;
+  font: inherit;
+  font-size: 13.5px;
+  padding: 2px 0;
+  caret-color: #D97757;
+}
+
+.tui-field-input:disabled {
+  color: #6E6754;
+}
+
+/* Custom block caret that blinks beside the input — gives the feel of a real
+   terminal cursor even when the native one moves with the text */
+.tui-caret {
+  color: #D97757;
+  opacity: .85;
+  animation: tuiBlink 1.05s steps(2) infinite;
+  font-size: 13.5px;
+  line-height: 1;
+}
+.tui-field:not(:focus-within) .tui-caret { opacity: 0; }
+
+@keyframes tuiBlink {
+  0%, 49%   { opacity: .85; }
+  50%, 100% { opacity: 0; }
+}
+
+/* ── Submit + state pills ───────────────────────────────────────────────────── */
+
+.tui-actions {
+  margin-top: 14px;
+  display: flex;
+  justify-content: flex-end;
+}
+
+.tui-submit {
+  background: transparent;
+  border: 1px solid #D97757;
+  color: #D97757;
+  padding: 8px 16px;
+  font: inherit;
+  font-size: 13px;
+  letter-spacing: .04em;
+  cursor: pointer;
+  transition: background .12s, color .12s, transform .04s;
+}
+.tui-submit:hover:not(:disabled) { background: #D97757; color: #15140F; }
+.tui-submit:active:not(:disabled) { transform: translateY(1px); }
+.tui-submit:disabled { opacity: .4; cursor: not-allowed; }
+
+.tui-error {
+  margin-top: 12px;
+  padding: 8px 10px;
+  border-left: 2px solid #C24545;
+  background: #1E1612;
+  color: #E2A4A4;
+  font-size: 12.5px;
+}
+
+.tui-status {
+  margin-top: 12px;
+  padding: 8px 10px;
+  color: #8A8474;
+  font-size: 12.5px;
+}
+
+/* Rule checklist on the change-password page — turns green when satisfied. */
+.tui-rules {
+  margin-top: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px 10px;
+  border-left: 1px solid #3A3528;
+  color: #6E6754;
+  font-size: 12px;
+}
+.tui-rules > div[data-met="true"]  { color: #7AA08A; }
+.tui-rules > div[data-met="false"] { color: #6E6754; }
+
+/* ── Footer ─────────────────────────────────────────────────────────────────── */
+
+.tui-foot {
+  margin-top: 22px;
+  padding-top: 14px;
+  border-top: 1px dashed #3A3528;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  color: #6E6754;
+  font-size: 11.5px;
+}
+
+.tui-foot-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+}
+
+.tui-foot-hint {
+  color: #8A8474;
+}
+
+.tui-key {
+  display: inline-block;
+  padding: 1px 6px;
+  border: 1px solid #3A3528;
+  background: #1B1812;
+  color: #BFB59A;
+  font-size: 11px;
+  letter-spacing: .04em;
+}
+.tui-key.dim { color: #6E6754; }

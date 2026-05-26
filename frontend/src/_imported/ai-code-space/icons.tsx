@@ -1,0 +1,133 @@
+/**
+ * Maps the design's `Ic.*` icon namespace onto lucide-react. Each entry preserves the
+ * original size/stroke contract: `<Ic.X size={14} />`. Picked the closest lucide icon
+ * for each — visual identity stays close to the Claude canvas export.
+ */
+import type { ComponentType, ReactElement } from "react";
+import {
+  AlertTriangle,
+  AtSign,
+  Archive,
+  ArrowLeft,
+  ArrowUpDown,
+  Bell,
+  Book,
+  BookMarked,
+  Box,
+  Check,
+  ChevronDown,
+  ChevronLeft,
+  ChevronRight,
+  ChevronsUpDown,
+  Circle,
+  CircleStop,
+  Clock,
+  Command,
+  Copy,
+  ExternalLink,
+  Eye,
+  EyeOff,
+  Filter,
+  GitBranch,
+  GitMerge,
+  GitPullRequest,
+  GitPullRequestClosed,
+  GitPullRequestDraft,
+  Globe,
+  Home,
+  KeyRound,
+  Link as LinkIcon,
+  Lock,
+  LogOut,
+  Maximize2,
+  MessageSquare,
+  Minimize2,
+  MoreHorizontal,
+  PanelLeft,
+  Pause,
+  Play,
+  Plus,
+  Search,
+  Settings,
+  Sparkles,
+  Star,
+  Trash2,
+  Users,
+  UsersRound,
+  Workflow,
+  X,
+  Zap,
+  type LucideProps,
+} from "lucide-react";
+
+type IconRenderer = (props: LucideProps) => ReactElement;
+
+const wrap = (Component: ComponentType<LucideProps>, defaultStroke = 1.4): IconRenderer =>
+  function WrappedIcon({ size = 16, strokeWidth = defaultStroke, ...rest }: LucideProps) {
+    return <Component size={size} strokeWidth={strokeWidth} {...rest} />;
+  };
+
+/**
+ * `Ic` is structurally identical to the design's window-level global. PascalCase keys are
+ * what the JSX uses; aliases preserve the kebab-name imports as well so future Claude
+ * artifacts can paste in with zero rewiring.
+ */
+export const Ic = {
+  Home: wrap(Home),
+  Repo: wrap(BookMarked),
+  Users: wrap(Users),
+  Team: wrap(UsersRound),
+  Settings: wrap(Settings),
+  Search: wrap(Search),
+  Plus: wrap(Plus),
+  ChevronDown: wrap(ChevronDown),
+  ChevronRight: wrap(ChevronRight),
+  ChevronLeft: wrap(ChevronLeft),
+  ChevronUpDown: wrap(ChevronsUpDown),
+  X: wrap(X),
+  More: wrap(MoreHorizontal),
+  Star: wrap(Star),
+  Clock: wrap(Clock),
+  Branch: wrap(GitBranch),
+  Sidebar: wrap(PanelLeft),
+  Lock: wrap(Lock),
+  Globe: wrap(Globe),
+  Link: wrap(LinkIcon),
+  Check: wrap(Check),
+  Dot: wrap(Circle, 0),
+  Filter: wrap(Filter),
+  Sort: wrap(ArrowUpDown),
+  Eye: wrap(Eye),
+  EyeOff: wrap(EyeOff),
+  Archive: wrap(Archive),
+  Key: wrap(KeyRound),
+  Bell: wrap(Bell),
+  Command: wrap(Command),
+  Workflow: wrap(Workflow),
+  Book: wrap(Book),
+  PrOpen: wrap(GitPullRequest),
+  PrDraft: wrap(GitPullRequestDraft),
+  PrMerged: wrap(GitMerge),
+  PrClosed: wrap(GitPullRequestClosed),
+  Chat: wrap(MessageSquare),
+  ArrowOut: wrap(ExternalLink),
+  SignOut: wrap(LogOut),
+  Triangle: wrap(AlertTriangle),
+  // Workflow-specific icons. Pause/Play drive enable-disable toggles; Trash for delete;
+  // Zap marks triggers; Sparkles marks LLM nodes; CircleStop marks terminals; Box is the
+  // default node icon when nothing more specific fits.
+  Pause: wrap(Pause),
+  Play: wrap(Play),
+  Trash: wrap(Trash2),
+  Zap: wrap(Zap),
+  Sparkles: wrap(Sparkles),
+  CircleStop: wrap(CircleStop),
+  Box: wrap(Box),
+  ArrowLeft: wrap(ArrowLeft),
+  // Templated-input toolbar (Dify-style): @ opens variable picker, copy mirrors current
+  // value to clipboard, Maximize/Minimize toggles between compact and expanded editor.
+  At: wrap(AtSign),
+  Copy: wrap(Copy),
+  Expand: wrap(Maximize2),
+  Collapse: wrap(Minimize2),
+};

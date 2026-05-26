@@ -1,0 +1,142 @@
+using CodeSpace.Messages.Commands.Repositories;
+using CodeSpace.Messages.Queries.Repositories;
+using MediatR;
+using Microsoft.AspNetCore.Mvc;
+
+namespace CodeSpace.Api.Controllers;
+
+[ApiController]
+[Route("api/repositories")]
+public class RepositoriesController : ControllerBase
+{
+    private readonly IMediator _mediator;
+
+    public RepositoriesController(IMediator mediator) { _mediator = mediator; }
+
+    // All endpoints require X-Team-Id header (enforced by TeamMembershipAuthorizationBehavior).
+    //
+    // Every action binds its Query/Command record directly. ASP.NET model binding fills
+    // `[FromQuery]` records from the query string only — when an endpoint also has a route
+    // parameter, we take it as `[FromRoute] Guid x` and merge into the record via
+    // `query with { ... }`. The URL stays authoritative; the rest of the contract
+    // (state, page, perPage, defaults) lives on the record.
+
+    [HttpGet]
+    public async Task<IActionResult> List([FromQuery] ListRepositoriesQuery query, CancellationToken cancellationToken)
+    {
+        var result = await _mediator.Send(query, cancellationToken).ConfigureAwait(false);
+        return Ok(result);
+    }
+
+    [HttpGet("{repositoryId:guid}")]
+    public async Task<IActionResult> Get([FromRoute] Guid repositoryId, CancellationToken cancellationToken)
+    {
+        var result = await _mediator.Send(new GetRepositoryQuery { RepositoryId = repositoryId }, cancellationToken).ConfigureAwait(false);
+        return result == null ? NotFound() : Ok(result);
+    }
+
+    [HttpPost("bind")]
+    public async Task<IActionResult> Bind([FromBody] BindRepositoryCommand command, CancellationToken cancellationToken)
+    {
+        var id = await _mediator.Send(command, cancellationToken).ConfigureAwait(false);
+        return Ok(new { id });
+    }
+
+    [HttpPost("bind-bulk")]
+    public async Task<IActionResult> BindBulk([FromBody] BindRepositoriesBulkCommand command, CancellationToken cancellationToken)
+    {
+        var result = await _mediator.Send(command, cancellationToken).ConfigureAwait(false);
+        return Ok(result);
+    }
+
+    [HttpDelete("{repositoryId:guid}")]
+    public async Task<IActionResult> Unbind([FromRoute] Guid repositoryId, CancellationToken cancellationToken)
+    {
+        await _mediator.Send(new UnbindRepositoryCommand { RepositoryId = repositoryId }, cancellationToken).ConfigureAwait(false);
+        return NoContent();
+    }
+
+    [HttpPost("{repositoryId:guid}/test")]
+    public async Task<IActionResult> Test([FromRoute] Guid repositoryId, CancellationToken cancellationToken)
+    {
+        var result = await _mediator.Send(new TestRepositoryBindingCommand { RepositoryId = repositoryId }, cancellationToken).ConfigureAwait(false);
+        return Ok(result);
+    }
+
+    /// <summary>
+    /// Live PR/MR fetch — never cached locally. The provider call goes out on every
+    /// request, so consumers should debounce / poll politely. `state` accepts the
+    /// PullRequestState enum names (Open, Draft, Merged, Closed); omit for "all".
+    /// </summary>
+    [HttpGet("{repositoryId:guid}/pull-requests")]
+    public async Task<IActionResult> ListPullRequests([FromRoute] Guid repositoryId, [FromQuery] ListPullRequestsQuery query, CancellationToken cancellationToken)
+    {
+        var result = await _mediator.Send(query with { RepositoryId = repositoryId }, cancellationToken).ConfigureAwait(false);
+        return Ok(result);
+    }
+
+    /// <summary>
+    /// Single-PR live fetch. `number` is the per-repo number (#42 on GitHub, !42 on GitLab),
+    /// matching the URL shape the user reads in the address bar. Returns the full detail
+    /// shape including Body + diff stats.
+    /// </summary>
+    [HttpGet("{repositoryId:guid}/pull-requests/{number:int}")]
+    public async Task<IActionResult> GetPullRequest([FromRoute] Guid repositoryId, [FromRoute] int number, CancellationToken cancellationToken)
+    {
+        var result = await _mediator.Send(new GetPullRequestQuery { RepositoryId = repositoryId, Number = number }, cancellationToken).ConfigureAwait(false);
+        return Ok(result);
+    }
+
+    /// <summary>Live commit list for a PR. Ordered oldest-first.</summary>
+    [HttpGet("{repositoryId:guid}/pull-requests/{number:int}/commits")]
+    public async Task<IActionResult> ListPullRequestCommits([FromRoute] Guid repositoryId, [FromRoute] int number, CancellationToken cancellationToken)
+    {
+        var result = await _mediator.Send(new ListPullRequestCommitsQuery { RepositoryId = repositoryId, Number = number }, cancellationToken).ConfigureAwait(false);
+        return Ok(result);
+    }
+
+    /// <summary>Live file-change list for a PR with unified-diff patches. Binary/large files have Patch == null.</summary>
+    [HttpGet("{repositoryId:guid}/pull-requests/{number:int}/files")]
+    public async Task<IActionResult> ListPullRequestFiles([FromRoute] Guid repositoryId, [FromRoute] int number, CancellationToken cancellationToken)
+    {
+        var result = await _mediator.Send(new ListPullRequestFilesQuery { RepositoryId = repositoryId, Number = number }, cancellationToken).ConfigureAwait(false);
+        return Ok(result);
+    }
+
+    /// <summary>
+    /// Live CI/check-runs list for the PR's HEAD commit — GitHub Actions check_runs or
+    /// GitLab pipeline jobs. Returns an empty list when the credential lacks the scope to
+    /// read checks (Actions: Read on GitHub, read_api on GitLab) so the PR detail view
+    /// degrades gracefully rather than 4xx-ing.
+    /// </summary>
+    [HttpGet("{repositoryId:guid}/pull-requests/{number:int}/checks")]
+    public async Task<IActionResult> ListPullRequestChecks([FromRoute] Guid repositoryId, [FromRoute] int number, CancellationToken cancellationToken)
+    {
+        var result = await _mediator.Send(new ListPullRequestChecksQuery { RepositoryId = repositoryId, Number = number }, cancellationToken).ConfigureAwait(false);
+        return Ok(result);
+    }
+
+    /// <summary>Total open + closed PR counts for the repository. One round-trip per provider.</summary>
+    [HttpGet("{repositoryId:guid}/pull-requests/counts")]
+    public async Task<IActionResult> GetPullRequestCounts([FromRoute] Guid repositoryId, CancellationToken cancellationToken)
+    {
+        var result = await _mediator.Send(new GetPullRequestCountsQuery { RepositoryId = repositoryId }, cancellationToken).ConfigureAwait(false);
+        return Ok(result);
+    }
+
+    /// <summary>
+    /// Re-point a repository at another active credential of the same provider instance.
+    /// Used to recover from a credential disconnect: the operator picks a teammate's
+    /// still-valid credential (or their own new one) and the repo flips back to Active.
+    ///
+    /// Route's repositoryId is authoritative; the body carries NewCredentialId. We bind
+    /// route + body separately and merge via `with` so the URL can't be spoofed by a body
+    /// that disagrees.
+    /// </summary>
+    [HttpPost("{repositoryId:guid}/relink-credential")]
+    public async Task<IActionResult> RelinkCredential([FromRoute] Guid repositoryId, [FromBody] RelinkRepositoryCredentialCommand command, CancellationToken cancellationToken)
+    {
+        await _mediator.Send(command with { RepositoryId = repositoryId }, cancellationToken).ConfigureAwait(false);
+        return NoContent();
+    }
+}

@@ -1,0 +1,81 @@
+# ── .NET ──────────────────────────────────────────────────────────────────────
+bin/
+obj/
+*.user
+*.suo
+*.dbmdl
+*.dbproj.schemaview
+*.jfm
+*.pfx
+*.publishsettings
+[Dd]ebug/
+[Dd]ebugPublic/
+[Rr]elease/
+[Rr]eleases/
+x64/
+x86/
+[Bb]uild/
+[Ll]og/
+[Ll]ogs/
+*.log
+.vs/
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Build artifacts / test results
+[Tt]estResult*/
+[Bb]uildLog.*
+*.VisualState.xml
+TestResult.xml
+nCrunchTemp_*
+*.coverage
+*.coveragexml
+*.tdf
+*.opt
+
+# NuGet
+project.lock.json
+project.fragment.lock.json
+artifacts/
+
+# ── Frontend (Vite + React + Node) ────────────────────────────────────────────
+node_modules/
+dist/
+dist-ssr/
+*.local
+.vite/
+.next/
+
+# Frontend env (NEVER commit real secrets)
+.env
+.env.local
+.env.*.local
+
+# Test output
+coverage/
+.nyc_output/
+
+# ── macOS / OS ────────────────────────────────────────────────────────────────
+.DS_Store
+.AppleDouble
+.LSOverride
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# ── IDEs ──────────────────────────────────────────────────────────────────────
+.vs/
+.vscode/
+.idea/
+*.iml
+.fleet/
+
+# ── Secrets ───────────────────────────────────────────────────────────────────
+appsettings.Local.json
+*.pem
+*.key
+*.crt
+secrets/

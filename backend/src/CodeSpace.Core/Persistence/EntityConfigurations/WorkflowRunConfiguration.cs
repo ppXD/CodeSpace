@@ -1,0 +1,31 @@
+using CodeSpace.Core.Persistence.Entities;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Metadata.Builders;
+
+namespace CodeSpace.Core.Persistence.EntityConfigurations;
+
+public class WorkflowRunConfiguration : IEntityTypeConfiguration<WorkflowRun>
+{
+    public void Configure(EntityTypeBuilder<WorkflowRun> builder)
+    {
+        builder.HasKey(r => r.Id);
+
+        builder.Property(r => r.Status).HasConversion<string>().HasMaxLength(16);
+        builder.Property(r => r.OutputsJson).HasColumnName("outputs_jsonb").HasColumnType("jsonb");
+
+        builder.HasOne(r => r.Workflow).WithMany().HasForeignKey(r => r.WorkflowId);
+
+        builder.HasOne(r => r.RunRequest).WithMany().HasForeignKey(r => r.RunRequestId).IsRequired();
+
+        // Npgsql xmin concurrency token. EF appends WHERE xmin = $loaded to every UPDATE; second
+        // writer racing the same run gets DbUpdateConcurrencyException and the engine skips.
+        // PostgreSQL stamps xmin automatically on every INSERT/UPDATE, so we map it via
+        // HasColumnName + ValueGeneratedOnAddOrUpdate + IsConcurrencyToken. The Xmin property on
+        // the entity is `uint` per Npgsql's documented convention.
+        builder.Property(r => r.Xmin)
+            .HasColumnName("xmin")
+            .HasColumnType("xid")
+            .ValueGeneratedOnAddOrUpdate()
+            .IsConcurrencyToken();
+    }
+}
