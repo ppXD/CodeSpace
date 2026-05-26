@@ -99,12 +99,18 @@ public sealed class ProjectService : IProjectService, IScopedDependency
         };
     }
 
-    public async Task<Guid> CreateAsync(Guid teamId, string slug, string name, string? description, Guid actorUserId, CancellationToken cancellationToken)
+    public async Task<Guid> CreateAsync(Guid teamId, string name, string? description, Guid actorUserId, CancellationToken cancellationToken)
     {
-        EnsureValidSlug(slug);
         if (string.IsNullOrWhiteSpace(name)) throw new ArgumentException("Project name is required", nameof(name));
 
-        await EnsureSlugAvailableAsync(teamId, slug, cancellationToken).ConfigureAwait(false);
+        var slug = SlugifyName(name);
+        if (slug.Length == 0)
+            throw new InvalidOperationException(
+                $"Project name '{name}' has no characters that produce a valid slug. " +
+                $"Use a name with at least one letter or digit so we can derive an identifier for variable paths.");
+
+        EnsureValidSlug(slug);
+        await EnsureSlugAvailableAsync(teamId, slug, name, cancellationToken).ConfigureAwait(false);
 
         var now = DateTimeOffset.UtcNow;
         var project = new Project
@@ -125,6 +131,75 @@ public sealed class ProjectService : IProjectService, IScopedDependency
 
         _logger.LogInformation("Project created: team={TeamId} project={ProjectId} slug={Slug}", teamId, project.Id, slug);
         return project.Id;
+    }
+
+    public async Task MoveRepositoryAsync(Guid teamId, Guid repositoryId, Guid targetProjectId, Guid actorUserId, CancellationToken cancellationToken)
+    {
+        // Verify target project belongs to the team — prevents cross-team moves through a
+        // stolen project id. The single-row WHERE proves both existence and ownership.
+        var targetOk = await _db.Project.AsNoTracking()
+            .AnyAsync(p => p.Id == targetProjectId && p.TeamId == teamId && p.DeletedDate == null, cancellationToken)
+            .ConfigureAwait(false);
+        if (!targetOk)
+            throw new KeyNotFoundException($"Target project {targetProjectId} not found or not accessible.");
+
+        // Load + verify repo. Soft-deleted repos aren't movable — operator should rebind
+        // them through the normal bind flow if they want them back.
+        var repository = await _db.Repository
+            .Where(r => r.Id == repositoryId && r.TeamId == teamId && r.DeletedDate == null)
+            .SingleOrDefaultAsync(cancellationToken)
+            .ConfigureAwait(false)
+            ?? throw new KeyNotFoundException($"Repository {repositoryId} not found or not accessible.");
+
+        if (repository.ProjectId == targetProjectId) return;   // already in the target — idempotent
+
+        var fromProjectId = repository.ProjectId;
+        repository.ProjectId = targetProjectId;
+        repository.LastModifiedDate = DateTimeOffset.UtcNow;
+        repository.LastModifiedBy = actorUserId;
+
+        await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+
+        _logger.LogInformation(
+            "Repository moved: team={TeamId} repository={RepositoryId} from={FromProjectId} to={ToProjectId}",
+            teamId, repositoryId, fromProjectId, targetProjectId);
+    }
+
+    /// <summary>
+    /// Derives the slug from a project name. Lowercase + ASCII-safe + max 64 chars, matching
+    /// the DB CHECK on <c>project.slug</c> (<c>^[A-Za-z0-9_-]{1,64}$</c>). Spaces and
+    /// punctuation collapse to single hyphens; leading/trailing hyphens trim; consecutive
+    /// hyphens collapse. Returns an empty string when no characters survive — the caller
+    /// throws an actionable error in that case.
+    /// <para>Examples:
+    /// <list type="bullet">
+    ///   <item><c>"Acme Backend"</c> → <c>"acme-backend"</c></item>
+    ///   <item><c>"My Product 2024!"</c> → <c>"my-product-2024"</c></item>
+    ///   <item><c>"---spaces---"</c> → <c>"spaces"</c></item>
+    /// </list></para>
+    /// </summary>
+    public static string SlugifyName(string name)
+    {
+        if (string.IsNullOrWhiteSpace(name)) return string.Empty;
+
+        var sb = new System.Text.StringBuilder(name.Length);
+        var lastWasHyphen = true;   // suppresses a leading hyphen
+        foreach (var c in name)
+        {
+            if (c is (>= 'A' and <= 'Z') or (>= 'a' and <= 'z') or (>= '0' and <= '9') or '_')
+            {
+                sb.Append(char.ToLowerInvariant(c));
+                lastWasHyphen = false;
+            }
+            else if (!lastWasHyphen)
+            {
+                sb.Append('-');
+                lastWasHyphen = true;
+            }
+        }
+
+        var result = sb.ToString().TrimEnd('-');
+        return result.Length <= 64 ? result : result[..64].TrimEnd('-');
     }
 
     public async Task UpdateAsync(Guid teamId, Guid projectId, string name, string? description, Guid actorUserId, CancellationToken cancellationToken)
@@ -196,9 +271,27 @@ public sealed class ProjectService : IProjectService, IScopedDependency
         // violation and re-reads. For simplicity we just retry with a single re-fetch.
         try
         {
-            return await CreateAsync(teamId, DefaultProjectSlug, "Default",
-                "Default project for repositories and variables. Auto-created when this team was provisioned; rename or add additional projects as your team grows.",
-                SystemUsers.SeederId, cancellationToken).ConfigureAwait(false);
+            // EnsureDefault uses a direct INSERT path because we want slug=='default'
+            // verbatim, not derived from a Name that might slugify differently.
+            EnsureValidSlug(DefaultProjectSlug);
+
+            var now = DateTimeOffset.UtcNow;
+            var project = new Project
+            {
+                Id = Guid.NewGuid(),
+                TeamId = teamId,
+                Slug = DefaultProjectSlug,
+                Name = "Default",
+                Description = "Default project for repositories and variables. Auto-created when this team was provisioned; rename or add additional projects as your team grows.",
+                CreatedDate = now,
+                CreatedBy = SystemUsers.SeederId,
+                LastModifiedDate = now,
+                LastModifiedBy = SystemUsers.SeederId,
+            };
+            _db.Project.Add(project);
+            await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+            _logger.LogInformation("Default project lazily created: team={TeamId} project={ProjectId}", teamId, project.Id);
+            return project.Id;
         }
         catch (DbUpdateException)
         {
@@ -219,14 +312,22 @@ public sealed class ProjectService : IProjectService, IScopedDependency
         return project ?? throw new KeyNotFoundException($"Project {projectId} not found or not accessible.");
     }
 
-    private async Task EnsureSlugAvailableAsync(Guid teamId, string slug, CancellationToken cancellationToken)
+    private async Task EnsureSlugAvailableAsync(Guid teamId, string slug, string requestedName, CancellationToken cancellationToken)
     {
         var exists = await _db.Project.AsNoTracking()
             .AnyAsync(p => p.TeamId == teamId && p.Slug == slug && p.DeletedDate == null, cancellationToken)
             .ConfigureAwait(false);
 
+        // Message names BOTH the derived slug AND the requested name so the operator
+        // understands what to change. We refuse to auto-mangle into "{slug}-2" because
+        // the slug is part of the variable-path contract — a silent mangle would surprise
+        // the operator when they later try to reference {{project.{X}.foo}} from a
+        // workflow and the path they expected doesn't exist.
         if (exists)
-            throw new InvalidOperationException($"A project with slug '{slug}' already exists in this team.");
+            throw new InvalidOperationException(
+                $"A project with slug '{slug}' (derived from name '{requestedName}') already exists in this team. " +
+                $"Pick a different project name — the slug is used as the prefix for variable references " +
+                $"({{{{project.{slug}.X}}}}) and must be unique per team.");
     }
 
     private static void EnsureValidSlug(string slug)

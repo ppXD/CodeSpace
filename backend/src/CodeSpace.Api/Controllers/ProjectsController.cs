@@ -52,4 +52,20 @@ public class ProjectsController : ControllerBase
         await _mediator.Send(new DeleteProjectCommand { ProjectId = projectId }, cancellationToken).ConfigureAwait(false);
         return NoContent();
     }
+
+    /// <summary>
+    /// Move an existing repository INTO this project. Drives the project-detail
+    /// Repositories tab's row-hover "Move to another project" action; the body
+    /// carries the repository id, the route carries the target project id.
+    /// </summary>
+    [HttpPost("{projectId:guid}/repositories/{repositoryId:guid}/move-here")]
+    public async Task<IActionResult> MoveRepositoryHere([FromRoute] Guid projectId, [FromRoute] Guid repositoryId, CancellationToken cancellationToken)
+    {
+        await _mediator.Send(new MoveRepositoryToProjectCommand
+        {
+            RepositoryId = repositoryId,
+            TargetProjectId = projectId,
+        }, cancellationToken).ConfigureAwait(false);
+        return NoContent();
+    }
 }

@@ -349,7 +349,7 @@ export interface ProjectSummary {
 }
 
 export interface CreateProjectInput {
-  slug: string;
+  /** Display name. Backend derives the slug from this via SlugifyName; collision throws. */
   name: string;
   description?: string | null;
 }

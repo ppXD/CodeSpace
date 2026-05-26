@@ -33,4 +33,33 @@ export const projectsApi = {
 
   remove: (projectId: string) =>
     fetchJson<void>(`/api/projects/${projectId}`, { method: "DELETE" }),
+
+  /** Re-parent an existing repository under the target project. Idempotent. */
+  moveRepositoryHere: (targetProjectId: string, repositoryId: string) =>
+    fetchJson<void>(`/api/projects/${targetProjectId}/repositories/${repositoryId}/move-here`, {
+      method: "POST",
+    }),
 };
+
+/**
+ * Mirrors backend `ProjectService.SlugifyName` — used purely as a preview while the
+ * operator types the project name, so the modal can show "Variables will resolve as
+ * `project.{slug}.X`" before submit. The authoritative slug is computed server-side;
+ * never send this string up the wire.
+ */
+export function slugifyProjectName(name: string): string {
+  if (!name.trim()) return "";
+  const sb: string[] = [];
+  let lastHyphen = true;
+  for (const ch of name) {
+    if (/[A-Za-z0-9_]/.test(ch)) {
+      sb.push(ch.toLowerCase());
+      lastHyphen = false;
+    } else if (!lastHyphen) {
+      sb.push("-");
+      lastHyphen = true;
+    }
+  }
+  const joined = sb.join("").replace(/-+$/g, "");
+  return joined.length <= 64 ? joined : joined.slice(0, 64).replace(/-+$/g, "");
+}

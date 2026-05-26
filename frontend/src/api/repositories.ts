@@ -11,6 +11,8 @@ export interface BindRepositoriesBulkInput {
   providerInstanceId: string;
   credentialId: string;
   projectIdentifiers: string[];
+  /** Phase 3.0 — target CodeSpace Project; omit to land in the team's Default. */
+  projectId?: string;
 }
 
 export const repositoriesApi = {

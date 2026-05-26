@@ -17,7 +17,20 @@ public interface IProjectService
 
     Task<ProjectSummary?> GetAsync(Guid teamId, Guid projectId, CancellationToken cancellationToken);
 
-    Task<Guid> CreateAsync(Guid teamId, string slug, string name, string? description, Guid actorUserId, CancellationToken cancellationToken);
+    /// <summary>
+    /// Create a new project. The slug is derived from <paramref name="name"/> by
+    /// <c>ProjectService.SlugifyName</c> — operators never type identifiers directly.
+    /// Throws when the derived slug collides with an existing active project; the
+    /// caller surfaces a "rename to make it unique" prompt rather than auto-mangling.
+    /// </summary>
+    Task<Guid> CreateAsync(Guid teamId, string name, string? description, Guid actorUserId, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Move an active repository from its current project to a different project in
+    /// the same team. Throws when either the repo or the target project doesn't
+    /// belong to this team. No-op when the repo is already in the target project.
+    /// </summary>
+    Task MoveRepositoryAsync(Guid teamId, Guid repositoryId, Guid targetProjectId, Guid actorUserId, CancellationToken cancellationToken);
 
     Task UpdateAsync(Guid teamId, Guid projectId, string name, string? description, Guid actorUserId, CancellationToken cancellationToken);
 

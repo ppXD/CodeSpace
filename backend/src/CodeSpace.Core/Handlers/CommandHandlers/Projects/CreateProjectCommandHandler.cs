@@ -19,5 +19,5 @@ public sealed class CreateProjectCommandHandler : IRequestHandler<CreateProjectC
     }
 
     public Task<Guid> Handle(CreateProjectCommand request, CancellationToken cancellationToken) =>
-        _service.CreateAsync(_currentTeam.Id!.Value, request.Slug, request.Name, request.Description, _currentUser.Id!.Value, cancellationToken);
+        _service.CreateAsync(_currentTeam.Id!.Value, request.Name, request.Description, _currentUser.Id!.Value, cancellationToken);
 }
