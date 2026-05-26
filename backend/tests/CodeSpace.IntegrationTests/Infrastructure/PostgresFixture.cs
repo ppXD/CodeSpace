@@ -2,9 +2,12 @@ using Autofac;
 using Autofac.Extensions.DependencyInjection;
 using CodeSpace.Core;
 using CodeSpace.Core.Persistence.Db;
-using CodeSpace.Core.Services.Outbox;
+using CodeSpace.Core.Persistence.Entities;
+using CodeSpace.Core.Services.Webhooks.Registration;
 using CodeSpace.Core.Settings;
 using CodeSpace.IntegrationTests.Settings;
+using CodeSpace.Messages.Enums;
+using Microsoft.EntityFrameworkCore;
 using MediatR;
 using Microsoft.AspNetCore.DataProtection;
 using Microsoft.Extensions.Configuration;
@@ -60,24 +63,50 @@ public sealed class PostgresFixture : IAsyncLifetime
     }
 
     /// <summary>
-    /// Drains every Pending outbox message synchronously. Tests that exercise the bind flow
-    /// must call this after Send-ing a bind command — the bind only enqueues; the dispatcher
-    /// is what actually registers the webhook and inserts the RepositoryWebhook row.
+    /// Drives every Pending / Enqueued / Failed RepositoryWebhook through the registrar
+    /// directly, simulating what Hangfire would do in production. Tests that exercise the
+    /// bind flow must call this after Send-ing a bind command — BindAsync persists the
+    /// webhook in Pending state and enqueues a Hangfire job for the registrar, but the
+    /// in-memory <c>InMemoryBackgroundJobClient</c> doesn't actually execute the job; this
+    /// helper substitutes for the worker by invoking the registrar in a loop until every
+    /// non-terminal row reaches Registered (or DeadLettered / Cancelled).
     /// </summary>
-    public async Task DrainOutboxAsync(CancellationToken cancellationToken = default)
+    public async Task DrainPendingWebhookRegistrationsAsync(CancellationToken cancellationToken = default)
     {
         const int safetyCap = 100;
-        var totalProcessed = 0;
-
-        while (totalProcessed < safetyCap)
+        for (var iteration = 0; iteration < safetyCap; iteration++)
         {
             using var scope = BeginScope();
-            var dispatcher = scope.Resolve<IOutboxDispatcher>();
-            var processed = await dispatcher.DrainOnceAsync(50, cancellationToken).ConfigureAwait(false);
+            var db = scope.Resolve<CodeSpaceDbContext>();
 
-            if (processed == 0) return;
+            var dueIds = await db.RepositoryWebhook.AsNoTracking()
+                .Where(w => w.RegistrationStatus == RepositoryWebhookRegistrationStatus.Pending
+                         || w.RegistrationStatus == RepositoryWebhookRegistrationStatus.Enqueued)
+                .Select(w => w.Id)
+                .ToListAsync(cancellationToken)
+                .ConfigureAwait(false);
 
-            totalProcessed += processed;
+            if (dueIds.Count == 0) return;
+
+            foreach (var webhookId in dueIds)
+            {
+                // For each row: ensure it's in Enqueued (the registrar's CAS expects that).
+                // BindAsync's dispatcher flow already CAS'd Pending → Enqueued, but a row
+                // freshly re-revived from Failed by the reconciler sits in Pending — flip
+                // it forward so the registrar's CAS sees a row it can claim.
+                using var prepScope = BeginScope();
+                var prepDb = prepScope.Resolve<CodeSpaceDbContext>();
+                await prepDb.RepositoryWebhook
+                    .Where(w => w.Id == webhookId && w.RegistrationStatus == RepositoryWebhookRegistrationStatus.Pending)
+                    .ExecuteUpdateAsync(s => s
+                        .SetProperty(w => w.RegistrationStatus, RepositoryWebhookRegistrationStatus.Enqueued)
+                        .SetProperty(w => w.EnqueuedAt, (DateTimeOffset?)DateTimeOffset.UtcNow), cancellationToken)
+                    .ConfigureAwait(false);
+
+                using var runScope = BeginScope();
+                var registrar = runScope.Resolve<IRepositoryWebhookRegistrar>();
+                await registrar.RunAsync(webhookId, cancellationToken).ConfigureAwait(false);
+            }
         }
     }
 
@@ -199,12 +228,6 @@ public sealed class PostgresFixture : IAsyncLifetime
 
         builder.RegisterAssemblyTypes(testAssembly)
             .Where(t => t.IsClass && !t.IsAbstract && typeof(CodeSpace.Core.Services.Providers.Events.IProviderEventSubscription).IsAssignableFrom(t))
-            .AsImplementedInterfaces()
-            .InstancePerLifetimeScope();
-
-        // Test-only outbox handlers (NoOp) registered alongside production ones.
-        builder.RegisterAssemblyTypes(testAssembly)
-            .Where(t => t.IsClass && !t.IsAbstract && typeof(CodeSpace.Core.Services.Outbox.IOutboxMessageHandler).IsAssignableFrom(t))
             .AsImplementedInterfaces()
             .InstancePerLifetimeScope();
 

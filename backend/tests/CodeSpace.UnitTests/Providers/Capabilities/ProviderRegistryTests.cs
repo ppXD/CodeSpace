@@ -115,6 +115,7 @@ public class ProviderRegistryTests
     private sealed class GitHubWebhookStub : IWebhookRegistrationCapability
     {
         public ProviderKind Kind => ProviderKind.GitHub;
+        public Task<RemoteWebhook?> FindWebhookByCallbackUrlAsync(ProviderContext context, RemoteRepository repository, string callbackUrl, CancellationToken cancellationToken) => throw new NotImplementedException();
         public Task<RemoteWebhook> RegisterWebhookAsync(ProviderContext context, RemoteRepository repository, WebhookRegistration request, CancellationToken cancellationToken) => throw new NotImplementedException();
         public Task DeleteWebhookAsync(ProviderContext context, RemoteRepository repository, string externalWebhookId, CancellationToken cancellationToken) => throw new NotImplementedException();
     }

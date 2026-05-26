@@ -105,7 +105,7 @@ public class RepositoryQueryFlowTests
             ProjectIdentifier = $"acme/get-{Guid.NewGuid():N}"
         }).ConfigureAwait(false);
 
-        await _fixture.DrainOutboxAsync().ConfigureAwait(false);
+        await _fixture.DrainPendingWebhookRegistrationsAsync().ConfigureAwait(false);
 
         var detail = await mediator.Send(new GetRepositoryQuery { RepositoryId = repoId }).ConfigureAwait(false);
 
