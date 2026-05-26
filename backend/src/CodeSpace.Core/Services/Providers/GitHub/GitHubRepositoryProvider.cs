@@ -328,6 +328,36 @@ public sealed class GitHubRepositoryProvider : IRepositoryCatalogCapability, IPu
         }
     }
 
+    public async Task<RemoteWebhook?> FindWebhookByCallbackUrlAsync(ProviderContext context, RemoteRepository repository, string callbackUrl, CancellationToken cancellationToken)
+    {
+        var client = await BuildClientAsync(context, cancellationToken).ConfigureAwait(false);
+
+        return await _resilience.ExecuteAsync(context.Instance, nameof(FindWebhookByCallbackUrlAsync), async _ =>
+        {
+            // GET /repos/:owner/:repo/hooks — Octokit fetches all hook configs via the
+            // owner+name route. The hook's `config["url"]` carries the callback we set
+            // at register time, so a case-insensitive exact match against our generated
+            // callback URL identifies a prior registration uniquely.
+            var hooks = await client.Repository.Hooks.GetAll(long.Parse(repository.ExternalId)).ConfigureAwait(false);
+
+            foreach (var hook in hooks)
+            {
+                if (hook.Config != null && hook.Config.TryGetValue("url", out var url) && string.Equals(url, callbackUrl, StringComparison.OrdinalIgnoreCase))
+                {
+                    return new RemoteWebhook
+                    {
+                        ExternalId = hook.Id.ToString(),
+                        CallbackUrl = url,
+                        SubscribedEvents = hook.Events.ToList(),
+                        Active = hook.Active
+                    };
+                }
+            }
+
+            return null;
+        }, cancellationToken).ConfigureAwait(false);
+    }
+
     public async Task<RemoteWebhook> RegisterWebhookAsync(ProviderContext context, RemoteRepository repository, WebhookRegistration request, CancellationToken cancellationToken)
     {
         var client = await BuildClientAsync(context, cancellationToken).ConfigureAwait(false);

@@ -552,6 +552,49 @@ public sealed class GitLabRepositoryProvider : IRepositoryCatalogCapability, IPu
         }
     }
 
+    public async Task<RemoteWebhook?> FindWebhookByCallbackUrlAsync(ProviderContext context, RemoteRepository repository, string callbackUrl, CancellationToken cancellationToken)
+    {
+        var client = await BuildClientAsync(context, cancellationToken).ConfigureAwait(false);
+
+        return await _resilience.ExecuteAsync(context.Instance, nameof(FindWebhookByCallbackUrlAsync), _ =>
+        {
+            // GitLab's IProjectHooksClient exposes All as IEnumerable<ProjectHook>; we
+            // scan once and pick the entry whose Url matches the callback we set at
+            // registration time. The wire URL is set via Uri so we compare strings via
+            // OrdinalIgnoreCase (the host component is case-insensitive; we tolerate
+            // trailing-slash drift the same way).
+            var projectId = int.Parse(repository.ExternalId);
+            var hooks = client.GetRepository(projectId).ProjectHooks.All;
+
+            foreach (var hook in hooks)
+            {
+                var hookUrl = hook.Url?.ToString();
+                if (!string.IsNullOrEmpty(hookUrl) && string.Equals(hookUrl, callbackUrl, StringComparison.OrdinalIgnoreCase))
+                {
+                    // GitLab ProjectHook doesn't expose the flag-style "subscribed_events"
+                    // string array we model — events are individual booleans on the hook
+                    // record. Surface the boolean → string mapping that mirrors what
+                    // RegisterWebhookAsync set up, so a later code path can decide whether
+                    // to re-register with a wider subscription if the set has grown.
+                    var subscribed = new List<string>();
+                    if (hook.PushEvents) subscribed.Add("push");
+                    if (hook.MergeRequestsEvents) subscribed.Add("merge_request");
+                    if (hook.IssuesEvents) subscribed.Add("issue");
+
+                    return Task.FromResult<RemoteWebhook?>(new RemoteWebhook
+                    {
+                        ExternalId = hook.Id.ToString(),
+                        CallbackUrl = hookUrl,
+                        SubscribedEvents = subscribed,
+                        Active = true
+                    });
+                }
+            }
+
+            return Task.FromResult<RemoteWebhook?>(null);
+        }, cancellationToken).ConfigureAwait(false);
+    }
+
     public async Task<RemoteWebhook> RegisterWebhookAsync(ProviderContext context, RemoteRepository repository, WebhookRegistration request, CancellationToken cancellationToken)
     {
         var client = await BuildClientAsync(context, cancellationToken).ConfigureAwait(false);

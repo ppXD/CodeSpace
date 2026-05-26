@@ -39,7 +39,7 @@ public class RepositoryBindingFlowTests
             }).ConfigureAwait(false);
         }
 
-        await _fixture.DrainOutboxAsync().ConfigureAwait(false);
+        await _fixture.DrainPendingWebhookRegistrationsAsync().ConfigureAwait(false);
 
         using var verify = _fixture.BeginScope();
         var db = verify.Resolve<CodeSpaceDbContext>();
@@ -122,7 +122,7 @@ public class RepositoryBindingFlowTests
             }).ConfigureAwait(false);
         }
 
-        await _fixture.DrainOutboxAsync().ConfigureAwait(false);
+        await _fixture.DrainPendingWebhookRegistrationsAsync().ConfigureAwait(false);
 
         using (var scope = _fixture.BeginScopeAs(Guid.NewGuid(), teamId, Roles.Admin))
         {

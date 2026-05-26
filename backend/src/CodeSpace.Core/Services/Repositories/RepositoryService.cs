@@ -74,7 +74,12 @@ public sealed class RepositoryService : IRepositoryService, IScopedDependency
                 Status = r.Status,
                 LastError = r.LastError,
                 CreatedDate = r.CreatedDate,
-                ActiveWebhooksCount = _db.RepositoryWebhook.Count(w => w.RepositoryId == r.Id && w.Active)
+                // "Active" here means "alive at the provider AND we haven't unbound it" —
+                // i.e. RegistrationStatus = Registered AND the Active flag is still true.
+                // Pending / Enqueued / Registering / Failed rows represent in-flight registrations
+                // (the webhook isn't live on the remote yet); Cancelled / DeadLettered are dead.
+                // Only Registered counts toward the "this repo is hooked up" indicator.
+                ActiveWebhooksCount = _db.RepositoryWebhook.Count(w => w.RepositoryId == r.Id && w.Active && w.RegistrationStatus == Messages.Enums.RepositoryWebhookRegistrationStatus.Registered)
             })
             .SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
     }
