@@ -183,6 +183,12 @@ public sealed class RunSourceDispatcher :
         // Hand the envelope to the unified starter. The starter stages workflow_run_request +
         // workflow_run + emits run.queued; we provide only the source-specific fields (matcher
         // TypeKey, activation lineage).
+        //
+        // Provider-event idempotency: thread the delivery id (ProviderEventId — e.g.
+        // GitHub's X-GitHub-Delivery) into both ExternalEventId (audit) AND a synthesised
+        // IdempotencyKey that includes the activation id. RunStarter's unique-violation catch
+        // turns a duplicate delivery for the SAME activation into a silent no-op while still
+        // letting fan-out across activations succeed (each gets its own unique key).
         var runId = await _runStarter.StartAsync(new RunSourceEnvelope
         {
             TeamId = activation.Workflow.TeamId,
@@ -195,13 +201,32 @@ public sealed class RunSourceDispatcher :
             CreatedBy = SystemUsers.SeederId,                   // engine-initiated row; no user identity
             ActivationId = activation.Id,
             ActivationSnapshotJson = SerializeActivationSnapshot(activation),
+            ExternalEventId = normalizedEvent.ProviderEventId,
+            IdempotencyKey = SynthesiseProviderIdempotencyKey(matcher.TypeKey, normalizedEvent.ProviderEventId, activation.Id),
         }, cancellationToken).ConfigureAwait(false);
+
+        if (runId == Guid.Empty)
+        {
+            _logger.LogInformation(
+                "Skipped duplicate provider delivery: workflow {WorkflowId} activation {ActivationId} delivery {DeliveryId}",
+                activation.WorkflowId, activation.Id, normalizedEvent.ProviderEventId);
+            return null;
+        }
 
         _logger.LogInformation(
             "Fired workflow {WorkflowId} via activation {TypeKey} → run {RunId}",
             activation.WorkflowId, activation.TypeKey, runId);
         return runId;
     }
+
+    /// <summary>
+    /// Composite idempotency key for a provider event: <c>{sourceType}:{deliveryId}:{activationId}</c>.
+    /// Lets the SAME delivery fan out to N activations (each gets a unique key) while a
+    /// provider's duplicate redelivery of the same delivery id for the SAME activation
+    /// dedupes via the uq_wrr_idempotency_key partial index.
+    /// </summary>
+    private static string SynthesiseProviderIdempotencyKey(string sourceType, string deliveryId, Guid activationId) =>
+        $"{sourceType}:{deliveryId}:{activationId:N}";
 
     private static string SerializeActivationSnapshot(WorkflowActivation a)
     {

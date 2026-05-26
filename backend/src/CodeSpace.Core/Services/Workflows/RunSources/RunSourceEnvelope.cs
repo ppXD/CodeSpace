@@ -51,4 +51,39 @@ public sealed record RunSourceEnvelope
     public Guid? CausationRequestId { get; init; }
     public Guid? ParentRunId { get; init; }
     public string? ReleaseHashAtRun { get; init; }
+
+    // ── Idempotency triple — provider-event paths only ──────────────────────────────────
+    //
+    // Hardening (Phase 3.0): protects against duplicate ingestion of the SAME upstream
+    // event. The provider (GitHub/GitLab/etc.) re-delivers a webhook after a transient
+    // failure, the matcher fires a second time, and absent these we'd end up with two
+    // runs for one external event.
+    //
+    // <para>
+    // The unique index <c>idx_workflow_run_request_provider_event</c> on
+    // (source_instance_id, external_event_id) enforces the no-duplicate guarantee at the
+    // DB level. <see cref="RunStarter"/> catches the <c>23505</c> unique-violation,
+    // logs it, and returns <c>Guid.Empty</c> to signal "already accepted, no-op".
+    // </para>
+
+    /// <summary>
+    /// Free-form source identity — e.g. <c>"github.com/octocat/repo"</c> for a GitHub
+    /// webhook, the schedule's UUID for cron firings. Drives the per-source audit view.
+    /// Null for non-provider sources (manual / replay / api).
+    /// </summary>
+    public string? SourceInstanceId { get; init; }
+
+    /// <summary>
+    /// Provider-stamped event id. For GitHub this is the <c>X-GitHub-Delivery</c> header
+    /// (uuid4); for GitLab it's <c>X-Gitlab-Event-UUID</c>. The OTHER half of the (source,
+    /// id) idempotency tuple. Null for non-provider sources.
+    /// </summary>
+    public string? ExternalEventId { get; init; }
+
+    /// <summary>
+    /// Application-level idempotency token. Currently only the operator-driven path uses
+    /// this (e.g. <c>Idempotency-Key</c> header on POST /run/{workflowId}); provider events
+    /// rely on the (SourceInstanceId, ExternalEventId) pair instead. Null when not supplied.
+    /// </summary>
+    public string? IdempotencyKey { get; init; }
 }
