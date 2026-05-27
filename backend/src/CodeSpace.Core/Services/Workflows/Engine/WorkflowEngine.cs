@@ -448,10 +448,9 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
         // the run in Failed with the exception's message in WorkflowRun.Error); warn
         // logs and continues; off is silent.
         var foundSlugs = projects.Select(p => p.Slug).ToHashSet(StringComparer.Ordinal);
-        MissingProjectRefValidator.EnsureKnown(
-            referencedSlugs, foundSlugs, teamId, workflowId,
-            EnforcementModeReader.Read(MissingProjectRefValidator.EnforcementEnvVar),
-            _logger);
+        var refCtx = new MissingProjectRefContext(referencedSlugs, foundSlugs, teamId, workflowId);
+        var refMode = EnforcementModeReader.Read(MissingProjectRefValidator.EnforcementEnvVar);
+        MissingProjectRefValidator.EnsureKnown(refCtx, refMode, _logger);
 
         var bag = new Dictionary<string, IReadOnlyDictionary<string, JsonElement>>();
         var secretPaths = new List<string>();

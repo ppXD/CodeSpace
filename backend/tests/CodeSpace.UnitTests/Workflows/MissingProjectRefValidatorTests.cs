@@ -31,37 +31,34 @@ public class MissingProjectRefValidatorTests
         MissingProjectRefValidator.EnforcementEnvVar.ShouldBe("CODESPACE_MISSING_PROJECT_REF_ENFORCEMENT");
     }
 
+    private static MissingProjectRefContext Ctx(IReadOnlyCollection<string> referenced, IReadOnlyCollection<string> found) =>
+        new(referenced, found, TeamId, WorkflowId);
+
     [Fact]
     public void All_referenced_slugs_found_is_a_no_op_in_every_mode()
     {
-        var referenced = new[] { "a", "b" };
-        var found = new[] { "a", "b" };
+        var ctx = Ctx(new[] { "a", "b" }, new[] { "a", "b" });
 
         // None of the three modes do anything when the referenced set is a subset of
         // the found set — exercise all three to lock that contract.
         foreach (var mode in new[] { EnforcementMode.Off, EnforcementMode.Warn, EnforcementMode.Strict })
-        {
-            Should.NotThrow(() => MissingProjectRefValidator.EnsureKnown(
-                referenced, found, TeamId, WorkflowId, mode, NullLogger.Instance));
-        }
+            Should.NotThrow(() => MissingProjectRefValidator.EnsureKnown(ctx, mode, NullLogger.Instance));
     }
 
     [Fact]
     public void Empty_referenced_set_is_a_no_op_even_when_team_has_no_projects()
     {
-        Should.NotThrow(() => MissingProjectRefValidator.EnsureKnown(
-            Array.Empty<string>(), Array.Empty<string>(), TeamId, WorkflowId,
-            EnforcementMode.Strict, NullLogger.Instance));
+        var ctx = Ctx(Array.Empty<string>(), Array.Empty<string>());
+        Should.NotThrow(() => MissingProjectRefValidator.EnsureKnown(ctx, EnforcementMode.Strict, NullLogger.Instance));
     }
 
     [Fact]
     public void Off_mode_passes_silently_with_no_log_output()
     {
         var logger = new CapturingLogger();
+        var ctx = Ctx(new[] { "exists", "missing" }, new[] { "exists" });
 
-        MissingProjectRefValidator.EnsureKnown(
-            new[] { "exists", "missing" }, new[] { "exists" },
-            TeamId, WorkflowId, EnforcementMode.Off, logger);
+        MissingProjectRefValidator.EnsureKnown(ctx, EnforcementMode.Off, logger);
 
         logger.Events.ShouldBeEmpty("Off mode must produce zero log output");
     }
@@ -70,10 +67,9 @@ public class MissingProjectRefValidatorTests
     public void Warn_mode_passes_and_emits_log_warning_with_required_tokens()
     {
         var logger = new CapturingLogger();
+        var ctx = Ctx(new[] { "exists", "ghost-a", "ghost-b" }, new[] { "exists" });
 
-        MissingProjectRefValidator.EnsureKnown(
-            new[] { "exists", "ghost-a", "ghost-b" }, new[] { "exists" },
-            TeamId, WorkflowId, EnforcementMode.Warn, logger);
+        MissingProjectRefValidator.EnsureKnown(ctx, EnforcementMode.Warn, logger);
 
         // Single warning emitted.
         logger.Events.Count.ShouldBe(1);
@@ -94,10 +90,10 @@ public class MissingProjectRefValidatorTests
     [Fact]
     public void Strict_mode_throws_with_required_tokens_in_message()
     {
+        var ctx = Ctx(new[] { "ghost-a", "ghost-b", "exists" }, new[] { "exists" });
+
         var ex = Should.Throw<MissingProjectRefException>(() =>
-            MissingProjectRefValidator.EnsureKnown(
-                new[] { "ghost-a", "ghost-b", "exists" }, new[] { "exists" },
-                TeamId, WorkflowId, EnforcementMode.Strict, NullLogger.Instance));
+            MissingProjectRefValidator.EnsureKnown(ctx, EnforcementMode.Strict, NullLogger.Instance));
 
         // Required tokens: missing slugs + the env var name (so the operator knows the
         // remediation path) + the workflow + team for triage.
@@ -117,10 +113,9 @@ public class MissingProjectRefValidatorTests
         // text is deterministic across runs (helpful when greping logs / comparing
         // diff'd Failed runs).
         var logger = new CapturingLogger();
+        var ctx = Ctx(new[] { "zebra", "alpha", "mango" }, Array.Empty<string>());
 
-        MissingProjectRefValidator.EnsureKnown(
-            new[] { "zebra", "alpha", "mango" }, Array.Empty<string>(),
-            TeamId, WorkflowId, EnforcementMode.Warn, logger);
+        MissingProjectRefValidator.EnsureKnown(ctx, EnforcementMode.Warn, logger);
 
         var msg = logger.Events[0].RenderedMessage;
         msg.IndexOf("alpha").ShouldBeLessThan(msg.IndexOf("mango"));
