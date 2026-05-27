@@ -267,7 +267,7 @@ export function Sidebar() {
         >
           <span className="sb-nav-ic"><Ic.Folder size={15} /></span>
           <span className="sb-nav-lbl">Projects</span>
-          {active && <span className="sb-nav-badge">{active.repositoryCount}</span>}
+          {active && <span className="sb-nav-badge">{active.projectCount}</span>}
         </div>
         <div
           className="sb-nav-item"

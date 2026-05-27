@@ -91,6 +91,12 @@ export interface MeTeam {
   role: TeamRole;
   memberCount: number;
   repositoryCount: number;
+  /**
+   * Active project count for this team. Drives the sidebar's "Projects" nav badge —
+   * see backend `MeTeam.ProjectCount`. Always ≥ 1 for any team that's had a single
+   * repo bind (the auto-seeded "default" project), 0 on fresh empty teams.
+   */
+  projectCount: number;
 }
 
 export interface MeResponse {

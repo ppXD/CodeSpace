@@ -119,7 +119,12 @@ public sealed class UserService : IUserService, IScopedDependency
                 t.OwnerUserId,
                 MembershipRole = t.Memberships.Where(m => m.UserId == user.Id).Select(m => (TeamRole?)m.Role).FirstOrDefault(),
                 MemberCount = t.Memberships.Count() + 1,    // memberships + owner
-                RepositoryCount = _db.Repository.Count(r => r.TeamId == t.Id && r.DeletedDate == null)
+                RepositoryCount = _db.Repository.Count(r => r.TeamId == t.Id && r.DeletedDate == null),
+                // Sidebar "Projects" row badge — counts active projects only. The auto-seeded
+                // "default" project is always present, so for any team that's done a single
+                // repo bind this is ≥ 1; an empty team shows 0 until it lands on the projects
+                // page (which calls EnsureDefaultProjectAsync lazily on first list).
+                ProjectCount = _db.Project.Count(p => p.TeamId == t.Id && p.DeletedDate == null)
             })
             .OrderBy(t => t.Kind == TeamKind.Personal ? 0 : 1)
             .ThenBy(t => t.Name)
@@ -140,7 +145,8 @@ public sealed class UserService : IUserService, IScopedDependency
                 Kind = t.Kind,
                 Role = t.OwnerUserId == user.Id ? TeamRole.Owner : (t.MembershipRole ?? TeamRole.Member),
                 MemberCount = t.MemberCount,
-                RepositoryCount = t.RepositoryCount
+                RepositoryCount = t.RepositoryCount,
+                ProjectCount = t.ProjectCount
             }).ToList()
         };
     }
