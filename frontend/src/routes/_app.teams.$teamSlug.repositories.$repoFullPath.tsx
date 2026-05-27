@@ -45,7 +45,11 @@ function RepoDetailLayoutRoute() {
       repoId={repo.id}
       activeTab={activeTab}
       onTabChange={(tab) => navigate({ to: tabToPath(tab), params: { teamSlug, repoFullPath: encodeURIComponent(fullPath) } })}
-      onBack={() => navigate({ to: "/teams/$teamSlug/repositories", params: { teamSlug } })}
+      /* Phase 3.0 — back goes to the team's projects list (the new closest
+         ancestor) instead of the retired team-wide repos list. A future
+         change can route to the parent project's Repositories tab once the
+         repo DTO carries projectId. */
+      onBack={() => navigate({ to: "/teams/$teamSlug/projects", params: { teamSlug } })}
     >
       <Outlet />
     </RepoDetailHeader>

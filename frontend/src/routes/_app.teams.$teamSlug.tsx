@@ -46,7 +46,9 @@ function TeamScopeLayout() {
       // will eventually catch this via the /me UI.
       const fallback = teams[0];
       if (fallback) {
-        navigate({ to: "/teams/$teamSlug/repositories", params: { teamSlug: teamToUrlSlug(fallback) }, replace: true });
+        // Phase 3.0 — Projects is the primary nav row; route stale-slug bounces
+        // there instead of the retired /repositories list.
+        navigate({ to: "/teams/$teamSlug/projects", params: { teamSlug: teamToUrlSlug(fallback) }, replace: true });
       }
       return;
     }
