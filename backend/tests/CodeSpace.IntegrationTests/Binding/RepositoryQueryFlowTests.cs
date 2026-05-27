@@ -168,6 +168,18 @@ public class RepositoryQueryFlowTests
         result.FailureCount.ShouldBe(0);
         result.Items.Count.ShouldBe(3);
         result.Items.ShouldAllBe(i => i.RepositoryId != null);
+        // Pin the all-or-nothing wire contract: every item Error MUST be null on the
+        // success path. Vestigial-but-documented field — see BulkBindResult doc-comment.
+        result.Items.ShouldAllBe(i => i.Error == null,
+            customMessage: "BindRepositoriesBulk's all-or-nothing contract guarantees no per-item Error " +
+                           "is ever populated on a returned result. A non-null Error here means partial-success " +
+                           "semantics leaked into the success path");
+        // Preserve declared identifier order — operators read Items[i].ProjectIdentifier
+        // alongside the i-th input identifier when debugging a binding sequence.
+        result.Items.Select(i => i.ProjectIdentifier).ShouldBe(
+            new[] { $"acme/a-{suffix}", $"acme/b-{suffix}", $"acme/c-{suffix}" },
+            customMessage: "Items[] order MUST match the input ProjectIdentifiers[] order. " +
+                           "Reordering breaks any frontend caller that does positional comparison");
     }
 
     [Fact]
@@ -203,11 +215,20 @@ public class RepositoryQueryFlowTests
             await act.ShouldThrowAsync<InvalidOperationException>().ConfigureAwait(false);
         }
 
-        // Verify: ONLY the original `duplicate` exists; `x-` and `y-` got rolled back
+        // Verify: ONLY the original `duplicate` exists; `x-` and `y-` got rolled back.
+        // The all-or-nothing contract means the caller never sees a BulkBindResult on this
+        // path — it gets the exception (asserted above) and no half-state row reaches the
+        // database. Together with the Bind...all-in-one-transaction test's assertions on
+        // result.FailureCount = 0 + all Items.Error == null, this proves the documented
+        // contract from BOTH sides: success path produces no failure markers, failure path
+        // produces no success markers.
         using var verifyScope = _fixture.BeginScopeAs(Guid.NewGuid(), teamId, Roles.Admin);
         var listMediator = verifyScope.Resolve<IMediator>();
         var allRepos = await listMediator.Send(new ListRepositoriesQuery()).ConfigureAwait(false);
-        allRepos.Where(r => r.FullPath.Contains(suffix)).Select(r => r.FullPath).Single().ShouldBe(duplicate);
+        allRepos.Where(r => r.FullPath.Contains(suffix)).Select(r => r.FullPath).Single().ShouldBe(duplicate,
+            customMessage: "Rollback contract: the original `duplicate` row must survive AND the two new identifiers " +
+                           "(x-, y-) must NOT exist. Anything else means the transaction either committed partially " +
+                           "OR wiped the pre-existing row — both are tenancy/data-integrity regressions");
     }
 
     private async Task<Guid> SeedTeamAsync()

@@ -6,6 +6,11 @@ using MediatR;
 
 namespace CodeSpace.Core.Handlers.CommandHandlers.Repositories;
 
+/// <summary>
+/// Thin Mediator → Service dispatcher (CLAUDE.md Rule 16). The all-or-nothing iteration and
+/// per-item request expansion live on <see cref="IRepositoryBindingService.BindManyAsync"/>;
+/// the handler only resolves <c>teamId</c> from <see cref="ICurrentTeam"/> and forwards.
+/// </summary>
 public sealed class BindRepositoriesBulkCommandHandler : IRequestHandler<BindRepositoriesBulkCommand, BulkBindResult>
 {
     private readonly IRepositoryBindingService _service;
@@ -19,29 +24,15 @@ public sealed class BindRepositoriesBulkCommandHandler : IRequestHandler<BindRep
 
     public async Task<BulkBindResult> Handle(BindRepositoriesBulkCommand request, CancellationToken cancellationToken)
     {
-        var items = new List<BulkBindItemResult>();
-        var teamId = _currentTeam.Id!.Value;
-
-        foreach (var identifier in request.ProjectIdentifiers)
+        var bulk = new BindRepositoriesBulkRequest
         {
-            var bindRequest = new BindRepositoryRequest
-            {
-                TeamId = teamId,
-                ProviderInstanceId = request.ProviderInstanceId,
-                CredentialId = request.CredentialId,
-                ProjectIdentifier = identifier,
-                ProjectId = request.ProjectId,
-            };
-
-            var repo = await _service.BindAsync(bindRequest, cancellationToken).ConfigureAwait(false);
-            items.Add(new BulkBindItemResult { ProjectIdentifier = identifier, RepositoryId = repo.Id });
-        }
-
-        return new BulkBindResult
-        {
-            Items = items,
-            SuccessCount = items.Count,
-            FailureCount = 0
+            TeamId = _currentTeam.Id!.Value,
+            ProviderInstanceId = request.ProviderInstanceId,
+            CredentialId = request.CredentialId,
+            ProjectIdentifiers = request.ProjectIdentifiers,
+            ProjectId = request.ProjectId,
         };
+
+        return await _service.BindManyAsync(bulk, cancellationToken).ConfigureAwait(false);
     }
 }
