@@ -8,6 +8,7 @@ using Shouldly;
 
 namespace CodeSpace.UnitTests.Providers.Modules;
 
+[Trait("Category", "Unit")]
 public class ProviderModuleCatalogTests
 {
     [Fact]

@@ -20,6 +20,7 @@ namespace CodeSpace.IntegrationTests.ProviderInstances;
 /// Remove escape hatch.
 /// </summary>
 [Collection(PostgresCollection.Name)]
+[Trait("Category", "Integration")]
 public class UpdateAndDeleteProviderInstanceFlowTests
 {
     private readonly PostgresFixture _fixture;

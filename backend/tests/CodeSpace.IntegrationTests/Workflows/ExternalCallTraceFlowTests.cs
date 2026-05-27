@@ -28,6 +28,7 @@ namespace CodeSpace.IntegrationTests.Workflows;
 /// <c>workflow_run_record</c> directly.</para>
 /// </summary>
 [Collection(PostgresCollection.Name)]
+[Trait("Category", "Integration")]
 public class ExternalCallTraceFlowTests
 {
     private readonly PostgresFixture _fixture;

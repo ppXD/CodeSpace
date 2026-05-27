@@ -32,6 +32,7 @@ namespace CodeSpace.IntegrationTests.Workflows;
 ///      legacy rows in odd shapes; the read path must survive that.
 /// </summary>
 [Collection(PostgresCollection.Name)]
+[Trait("Category", "Integration")]
 public class WorkflowRoundTripFlowTests
 {
     private readonly PostgresFixture _fixture;

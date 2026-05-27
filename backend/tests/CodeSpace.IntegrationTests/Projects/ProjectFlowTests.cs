@@ -36,6 +36,7 @@ namespace CodeSpace.IntegrationTests.Projects;
 /// </list>
 /// </summary>
 [Collection(PostgresCollection.Name)]
+[Trait("Category", "Integration")]
 public class ProjectFlowTests
 {
     private readonly PostgresFixture _fixture;

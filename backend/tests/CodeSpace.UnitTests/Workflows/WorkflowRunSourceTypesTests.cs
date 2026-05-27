@@ -16,6 +16,7 @@ namespace CodeSpace.UnitTests.Workflows;
 /// <see cref="WorkflowRunSourceTypes.ProviderPrefix"/> documents this as the canonical
 /// shape. Schedule / Api / ChildWorkflow producers write their constants directly.</para>
 /// </summary>
+[Trait("Category", "Unit")]
 public class WorkflowRunSourceTypesTests
 {
     [Theory]

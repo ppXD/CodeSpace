@@ -17,6 +17,7 @@ namespace CodeSpace.UnitTests.Workflows;
 ///   5. Default mode (env var unset): same behaviour as Warn (per
 ///      <see cref="EnforcementModeReader.Read(string, EnforcementMode)"/> default).
 /// </summary>
+[Trait("Category", "Unit")]
 public class MissingProjectRefValidatorTests
 {
     private static readonly Guid TeamId = Guid.Parse("11111111-1111-1111-1111-111111111111");

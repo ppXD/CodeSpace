@@ -12,6 +12,7 @@ namespace CodeSpace.UnitTests.Workflows;
 /// schema MUST tolerate an empty {} config (treated as "no repository filter") because the
 /// dispatcher uses an empty probe to decide if the matcher is a candidate at all.
 /// </summary>
+[Trait("Category", "Unit")]
 public class TriggerMatcherTests
 {
     private static readonly Guid RepoA = Guid.NewGuid();

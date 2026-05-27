@@ -22,6 +22,7 @@ namespace CodeSpace.IntegrationTests.ProviderInstances;
 ///   • Soft-deleted instances don't block reuse (the partial index ignores them).
 /// </summary>
 [Collection(PostgresCollection.Name)]
+[Trait("Category", "Integration")]
 public class AddProviderInstanceFlowTests
 {
     private readonly PostgresFixture _fixture;

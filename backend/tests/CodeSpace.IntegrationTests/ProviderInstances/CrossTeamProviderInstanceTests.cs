@@ -23,6 +23,7 @@ namespace CodeSpace.IntegrationTests.ProviderInstances;
 ///     (e.g. a shared service-account credential).
 /// </summary>
 [Collection(PostgresCollection.Name)]
+[Trait("Category", "Integration")]
 public class CrossTeamProviderInstanceTests
 {
     private readonly PostgresFixture _fixture;

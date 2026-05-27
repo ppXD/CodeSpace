@@ -28,6 +28,7 @@ namespace CodeSpace.IntegrationTests.Workflows;
 /// to be reproducible.
 /// </summary>
 [Collection(PostgresCollection.Name)]
+[Trait("Category", "Integration")]
 public class WorkflowVersionImmutabilityTests
 {
     private readonly PostgresFixture _fixture;

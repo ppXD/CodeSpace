@@ -25,6 +25,7 @@ namespace CodeSpace.IntegrationTests.Authorization;
 /// TenantAccessDeniedException before any handler runs.
 /// </summary>
 [Collection(PostgresCollection.Name)]
+[Trait("Category", "Integration")]
 public class TenancyEnforcementTests
 {
     private readonly PostgresFixture _fixture;

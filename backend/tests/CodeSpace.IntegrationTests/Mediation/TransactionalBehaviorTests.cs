@@ -8,6 +8,7 @@ using Shouldly;
 namespace CodeSpace.IntegrationTests.Mediation;
 
 [Collection(PostgresCollection.Name)]
+[Trait("Category", "Integration")]
 public class TransactionalBehaviorTests
 {
     private readonly PostgresFixture _fixture;

@@ -17,6 +17,7 @@ using Shouldly;
 namespace CodeSpace.IntegrationTests.Binding;
 
 [Collection(PostgresCollection.Name)]
+[Trait("Category", "Integration")]
 public class RepositoryBindingFlowTests
 {
     private readonly PostgresFixture _fixture;

@@ -8,6 +8,7 @@ namespace CodeSpace.UnitTests.Workflows;
 /// <c>workflow_run_request.error</c>; analytics dashboards and operator filter queries
 /// match on the literal value, so a silent rename breaks every dashboard.
 /// </summary>
+[Trait("Category", "Unit")]
 public class WorkflowRunRequestRejectionReasonsTests
 {
     [Theory]

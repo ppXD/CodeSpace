@@ -31,6 +31,7 @@ namespace CodeSpace.IntegrationTests.Variables;
 /// service / DB / wiring tier. Engine integration uses this service via DI.
 /// </summary>
 [Collection(PostgresCollection.Name)]
+[Trait("Category", "Integration")]
 public class VariableServiceFlowTests
 {
     private readonly PostgresFixture _fixture;

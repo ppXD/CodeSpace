@@ -4,6 +4,7 @@ using Shouldly;
 
 namespace CodeSpace.UnitTests.OAuth;
 
+[Trait("Category", "Unit")]
 public class OAuthClientRegistryTests
 {
     [Fact]

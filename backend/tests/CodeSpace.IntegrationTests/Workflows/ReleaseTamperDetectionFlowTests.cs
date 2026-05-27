@@ -42,6 +42,7 @@ namespace CodeSpace.IntegrationTests.Workflows;
 /// disabling the trigger (which would race with parallel tests).</para>
 /// </summary>
 [Collection(PostgresCollection.Name)]
+[Trait("Category", "Integration")]
 public class ReleaseTamperDetectionFlowTests
 {
     private readonly PostgresFixture _fixture;

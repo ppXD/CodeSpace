@@ -63,6 +63,7 @@ namespace CodeSpace.IntegrationTests.Workflows;
 /// conforming engine, not just Postgres-with-READ-COMMITTED.</para>
 /// </summary>
 [Collection(PostgresCollection.Name)]
+[Trait("Category", "Integration")]
 public class NoDoubleExecutionFlowTests
 {
     private readonly PostgresFixture _fixture;

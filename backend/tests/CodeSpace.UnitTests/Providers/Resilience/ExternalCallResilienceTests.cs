@@ -7,6 +7,7 @@ using Shouldly;
 
 namespace CodeSpace.UnitTests.Providers.Resilience;
 
+[Trait("Category", "Unit")]
 public class ExternalCallResilienceTests
 {
     private static readonly ProviderInstance Instance = new()

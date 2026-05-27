@@ -27,6 +27,7 @@ namespace CodeSpace.IntegrationTests.Workflows;
 /// job uses) so the handler delegation is also tested end-to-end.</para>
 /// </summary>
 [Collection(PostgresCollection.Name)]
+[Trait("Category", "Integration")]
 public class StuckRunReconcilerFlowTests
 {
     private readonly PostgresFixture _fixture;

@@ -17,6 +17,7 @@ using Shouldly;
 namespace CodeSpace.IntegrationTests.Webhooks;
 
 [Collection(PostgresCollection.Name)]
+[Trait("Category", "Integration")]
 public class ReceiveWebhookFlowTests
 {
     private readonly PostgresFixture _fixture;

@@ -15,6 +15,7 @@ namespace CodeSpace.UnitTests.Variables;
 /// with a fresh numeric value and leave existing values untouched. Renames/reorders are
 /// the bugs this test prevents.</para>
 /// </summary>
+[Trait("Category", "Unit")]
 public class VariableEnumPinningTests
 {
     [Theory]

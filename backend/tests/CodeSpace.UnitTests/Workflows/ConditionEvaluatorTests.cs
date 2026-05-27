@@ -9,6 +9,7 @@ namespace CodeSpace.UnitTests.Workflows;
 /// (no boolean composition, no parens) — any future expansion happens here first so
 /// the tests document the new semantics before they exist.
 /// </summary>
+[Trait("Category", "Unit")]
 public class ConditionEvaluatorTests
 {
     private static NodeRunScope MakeScope() => new()

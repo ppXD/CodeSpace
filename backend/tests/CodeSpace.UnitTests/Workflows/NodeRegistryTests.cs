@@ -4,6 +4,7 @@ using Shouldly;
 
 namespace CodeSpace.UnitTests.Workflows;
 
+[Trait("Category", "Unit")]
 public class NodeRegistryTests
 {
     [Fact]

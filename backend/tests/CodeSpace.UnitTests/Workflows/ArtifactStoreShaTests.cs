@@ -10,6 +10,7 @@ namespace CodeSpace.UnitTests.Workflows;
 /// (every previously-stored byte sequence would suddenly look "new"), so we pin a handful
 /// of known digests against the canonical algorithm.
 /// </summary>
+[Trait("Category", "Unit")]
 public class ArtifactStoreShaTests
 {
     [Theory]

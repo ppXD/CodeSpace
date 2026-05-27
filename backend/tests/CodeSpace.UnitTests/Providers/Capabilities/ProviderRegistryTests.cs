@@ -7,6 +7,7 @@ using Shouldly;
 
 namespace CodeSpace.UnitTests.Providers.Capabilities;
 
+[Trait("Category", "Unit")]
 public class ProviderRegistryTests
 {
     [Fact]

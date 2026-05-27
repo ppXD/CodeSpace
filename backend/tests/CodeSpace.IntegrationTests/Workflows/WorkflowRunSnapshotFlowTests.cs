@@ -30,6 +30,7 @@ namespace CodeSpace.IntegrationTests.Workflows;
 /// equally-large suite of replay-semantic tests).
 /// </summary>
 [Collection(PostgresCollection.Name)]
+[Trait("Category", "Integration")]
 public class WorkflowRunSnapshotFlowTests
 {
     private readonly PostgresFixture _fixture;

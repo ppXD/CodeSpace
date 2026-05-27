@@ -33,6 +33,7 @@ namespace CodeSpace.IntegrationTests.Workflows;
 ///   - Retry semantics: multiple node.started records for the same cell only project to ONE row
 /// </summary>
 [Collection(PostgresCollection.Name)]
+[Trait("Category", "Integration")]
 public class RunRecordViewProjectionFlowTests
 {
     private readonly PostgresFixture _fixture;

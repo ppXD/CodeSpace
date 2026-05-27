@@ -14,6 +14,7 @@ namespace CodeSpace.UnitTests.Workflows;
 /// shows in autocomplete. Both are silent bugs; this test makes them compile-once
 /// failures.
 /// </summary>
+[Trait("Category", "Unit")]
 public class SystemScopeDescriptorsTests
 {
     [Fact]

@@ -10,6 +10,7 @@ using Shouldly;
 
 namespace CodeSpace.UnitTests.Providers.Scopes;
 
+[Trait("Category", "Unit")]
 public class ScopeCheckerTests
 {
     [Fact]

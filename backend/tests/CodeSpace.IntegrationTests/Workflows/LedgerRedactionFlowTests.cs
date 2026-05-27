@@ -26,6 +26,7 @@ namespace CodeSpace.IntegrationTests.Workflows;
 /// exports would expose decrypted credentials to anyone with run-view permission.</para>
 /// </summary>
 [Collection(PostgresCollection.Name)]
+[Trait("Category", "Integration")]
 public class LedgerRedactionFlowTests
 {
     private readonly PostgresFixture _fixture;

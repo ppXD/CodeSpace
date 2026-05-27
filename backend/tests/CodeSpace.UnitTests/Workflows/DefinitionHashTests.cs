@@ -20,6 +20,7 @@ namespace CodeSpace.UnitTests.Workflows;
 ///   • null handling: nodes/edges with optional null fields canonicalise to omit-null
 /// </para>
 /// </summary>
+[Trait("Category", "Unit")]
 public class DefinitionHashTests
 {
     private static WorkflowDefinition MinimalDef() => new()

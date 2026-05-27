@@ -22,6 +22,7 @@ namespace CodeSpace.IntegrationTests.Workflows;
 /// snapshotting, soft-delete behaviour, and tenancy enforcement in one go.
 /// </summary>
 [Collection(PostgresCollection.Name)]
+[Trait("Category", "Integration")]
 public class WorkflowCrudFlowTests
 {
     private readonly PostgresFixture _fixture;

@@ -6,6 +6,7 @@ using Shouldly;
 namespace CodeSpace.IntegrationTests.Persistence;
 
 [Collection(PostgresCollection.Name)]
+[Trait("Category", "Integration")]
 public class DbUpRunnerTests
 {
     private readonly PostgresFixture _fixture;

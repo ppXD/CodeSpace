@@ -42,6 +42,7 @@ namespace CodeSpace.IntegrationTests.Webhooks;
 /// duration of the scenario.</para>
 /// </summary>
 [Collection(PostgresCollection.Name)]
+[Trait("Category", "Integration")]
 public class RepositoryWebhookRegistrationFlowTests
 {
     private readonly PostgresFixture _fixture;
