@@ -33,6 +33,7 @@ import type {
   WorkflowDefinition,
   WorkflowDetail,
 } from "@/api/workflows";
+import { deriveActivations } from "@/lib/workflowActivations";
 import { SchemaForm } from "@/components/workflows/SchemaForm";
 import { introspectScope } from "@/components/workflows/scope-introspection";
 import { VariableTablePanel } from "@/components/workflows/VariableTablePanel";
@@ -1034,30 +1035,6 @@ function rfToDefinition(
     inputs: workflowInputs,
     outputs: workflowOutputs,
   };
-}
-
-function deriveActivations(
-  definition: WorkflowDefinition,
-  existing: WorkflowDetail["activations"],
-  manifestByType: Map<string, NodeManifestDto>,
-): WorkflowActivationInput[] {
-  // Every Trigger node in the graph maps to a workflow_activation row. Carry over the
-  // existing rows' config (matching by typeKey) so an operator can rename an activation
-  // node without losing its repo filter, label filter, etc. New activation nodes get an
-  // empty config; the operator can edit it via the inspector.
-  //
-  // Classify nodes via manifest Kind, not by a hardcoded "trigger." prefix — the manifest's
-  // declared Kind is the single source of truth and covers plugin authors who name their
-  // trigger "schedule.cron" or "slack.mention".
-  const triggerNodes = definition.nodes.filter((n) => manifestByType.get(n.typeKey)?.kind === "Trigger");
-  return triggerNodes.map((n) => {
-    const existingMatch = existing.find((a) => a.typeKey === n.typeKey);
-    return {
-      typeKey: n.typeKey,
-      enabled: existingMatch?.enabled ?? true,
-      config: existingMatch?.config ?? {},
-    };
-  });
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
