@@ -9,6 +9,7 @@ import { useProviderInstances } from "@/hooks/use-credentials";
 import { useRepositories, useUnbindRepository } from "@/hooks/use-repositories";
 import { useConfirm } from "@/components/dialog";
 import { AddRepoModal } from "@/_imported/ai-code-space/add-repo-modal";
+import { ConnectRemoteModal } from "@/_imported/ai-code-space/connect-remote-modal";
 import { ProviderMark } from "@/_imported/ai-code-space/content";
 import { Ic } from "@/_imported/ai-code-space/icons";
 import { VariableTablePanel } from "@/components/workflows/VariableTablePanel";
@@ -57,6 +58,13 @@ function ProjectDetailPage() {
   const instanceById = useMemo(() => new Map((providerInstances.data ?? []).map(i => [i.id, i])), [providerInstances.data]);
 
   const [addRepoOpen, setAddRepoOpen] = useState(false);
+  // Connect remote sits next to Add repository because Connections only matter
+  // when you're wiring repositories — that's the one workflow where the operator
+  // might realize they need a new credential. Keeping the entry contextual to
+  // the repo-binding flow rather than globally surfaced (sidebar nav, gear icon,
+  // user popover, team-switcher footer all tried and dropped) matches the actual
+  // usage pattern.
+  const [connectOpen, setConnectOpen] = useState(false);
   const [moveTarget, setMoveTarget] = useState<RepositorySummary | null>(null);
   const unbind = useUnbindRepository();
   const confirm = useConfirm();
@@ -153,6 +161,12 @@ function ProjectDetailPage() {
         <>
           <div className="ct-toolbar">
             <div className="ct-spacer" />
+            {/* Connect remote sits to the left of Add repository as a secondary
+                action — same row because they're both repo-binding entry points,
+                visual hierarchy via .btn (neutral) vs .btn-primary (accent). */}
+            <button className="btn" onClick={() => setConnectOpen(true)}>
+              <Ic.Link size={14} /> Connect remote
+            </button>
             <button className="btn btn-primary" onClick={() => setAddRepoOpen(true)}>
               <Ic.Plus size={14} /> Add repository
             </button>
@@ -263,6 +277,7 @@ function ProjectDetailPage() {
       )}
 
       {addRepoOpen && <AddRepoModal onClose={() => setAddRepoOpen(false)} presetProjectId={projectId} />}
+      {connectOpen && <ConnectRemoteModal onClose={() => setConnectOpen(false)} />}
 
       {moveTarget && (
         <MoveRepositoryModal
