@@ -6,12 +6,24 @@ namespace CodeSpace.Core.Services.Workflows.Nodes;
 /// <summary>
 /// Static, immutable descriptor of a node TYPE. Built once by the node's constructor and
 /// returned from <c>INodeRuntime.Manifest</c>. Drives the editor palette, config form
-/// rendering on the frontend, and write-time validation against <c>NodeDefinition.Config</c>.
+/// rendering on the frontend, and the variable picker's autocomplete.
 ///
-/// Schemas are kept as raw <see cref="JsonElement"/> rather than a typed JsonSchema class
-/// so plugin authors can use whichever JSON-schema library they like (or hand-author the
-/// JSON). The engine validates schemas opaquely — it just checks "does input X match
-/// declared shape Y" via a small embedded validator.
+/// <para>Schemas are kept as raw <see cref="JsonElement"/> rather than a typed JsonSchema
+/// class so plugin authors can hand-author the JSON or use any JSON-schema library.</para>
+///
+/// <para><b>How the schemas are actually used today</b> (do not assume more):
+/// <list type="bullet">
+///   <item><b>Frontend</b> — renders the config form, drives the variable-picker autocomplete,
+///         and labels expected input shapes in the inspector.</item>
+///   <item><b>Save-time (<c>DefinitionValidator</c>)</b> — when <see cref="OutputSchema"/> declares
+///         a typed <c>properties</c> bag, downstream <c>nodes.X.outputs.Y</c> references are
+///         checked against the declared keys. Reference-path SHAPE is validated; per-value
+///         type conformance is NOT.</item>
+///   <item><b>Runtime (engine + <c>NodeRunContext</c>)</b> — the engine does NOT validate
+///         resolved input/config values against these schemas. Nodes extract values
+///         defensively (<c>TryReadX</c>). A future release may add Rule-11 three-mode
+///         enforcement; today, no.</item>
+/// </list></para>
 /// </summary>
 public sealed record NodeManifest
 {
