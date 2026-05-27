@@ -198,7 +198,7 @@ function CredentialStep({ credentials, instances, loading, error, onPick, onClos
       <div className="mdl-head">
         <div className="mdl-title-wrap">
           <div className="mdl-title">Add repository</div>
-          <div className="mdl-sub">Choose which connection to read from. We'll list the repositories that connection can see.</div>
+          <div className="mdl-sub">Pick the credential to read repositories with.</div>
         </div>
         <button className="mdl-x" onClick={onClose} title="Close"><Ic.X size={14} /></button>
       </div>
@@ -251,8 +251,10 @@ function CredentialStep({ credentials, instances, loading, error, onPick, onClos
       </div>
 
       <div className="mdl-foot">
-        <div className="mdl-foot-info">Live list — only repos visible to the chosen token will appear.</div>
-        <button className="btn" onClick={onClose}>Cancel</button>
+        {/* No foot-info here — the head's mdl-sub already explains the "we list
+            what the connection can see" contract; repeating it next to the
+            Cancel button just gets ellipsis-truncated on narrow modals. */}
+        <button className="btn btn-ghost" onClick={onClose}>Cancel</button>
       </div>
     </>
   );
@@ -315,7 +317,7 @@ function PickerStep({ credential, instance, page, totalPages, onPageChange, page
         <button className="mdl-back" onClick={onBack} title="Back" disabled={submitting}><Ic.ChevronLeft size={16} /></button>
         <div className="mdl-title-wrap">
           <div className="mdl-title">Add from {instance.displayName}</div>
-          <div className="mdl-sub">Repos this connection can see. We register a webhook on each and fetch contents on demand — nothing is cloned.</div>
+          <div className="mdl-sub">Select one or more to add. We register a webhook on each.</div>
         </div>
         <button className="mdl-x" onClick={onClose} title="Close" disabled={submitting}><Ic.X size={14} /></button>
       </div>
@@ -419,14 +421,17 @@ function PickerStep({ credential, instance, page, totalPages, onPageChange, page
       </div>
 
       <div className="mdl-foot">
+        {/* Foot-info kept terse — "select to add" + "webhook registered on each"
+            were redundant with the primary button label and the head subtitle.
+            Now: just count + loading status, or selection count when picking. */}
         <div className="mdl-foot-info">
           {selected.size === 0
             ? totalCount != null && totalCount > 0
-              ? `${totalCount.toLocaleString()} ${totalCount === 1 ? "repo" : "repos"}${query ? ` matching "${query}"` : ""}${isFullyLoaded ? "" : " · loading…"} · select to add`
+              ? `${totalCount.toLocaleString()} ${totalCount === 1 ? "repo" : "repos"}${isFullyLoaded ? "" : " · loading…"}`
               : isLoading
                 ? "Loading…"
-                : "Select repositories to add"
-            : `${selected.size} selected · webhook registered on each`}
+                : "No repos visible"
+            : `${selected.size} selected`}
         </div>
         {/* No secondary Cancel button here — the .mdl-back in the head + X in the
             top-right already give two exit paths. A third button labelled Cancel that
@@ -465,8 +470,8 @@ function ResultStep({ result, selectedLookup, onDone }: ResultStepProps) {
           </div>
           <div className="mdl-sub">
             {anyFailures
-              ? "Some repositories couldn't be added. Successful ones are already showing in the list."
-              : "Webhooks were registered. Repositories now appear in the list, and provider events flow live."}
+              ? "Some failed — successful ones are already in the list."
+              : "Webhooks registered. Provider events now flow live."}
           </div>
         </div>
         <button className="mdl-x" onClick={onDone} title="Close"><Ic.X size={14} /></button>
@@ -494,7 +499,7 @@ function ResultStep({ result, selectedLookup, onDone }: ResultStepProps) {
       </div>
 
       <div className="mdl-foot">
-        <div className="mdl-foot-info">{anyFailures ? "Retry failed items individually after fixing the cause." : "All set."}</div>
+        <div className="mdl-foot-info">{anyFailures ? "Retry failed items after fixing the cause." : "All set."}</div>
         <button className="btn btn-primary" onClick={onDone}>Done</button>
       </div>
     </>

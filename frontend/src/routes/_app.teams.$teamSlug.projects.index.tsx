@@ -317,7 +317,9 @@ function EmptyStep({ onBack, onClose, onCreated }: { onBack: () => void; onClose
         {error && <div className="cn-banner cn-banner-err"><div className="cn-banner-p">{error}</div></div>}
       </div>
       <div className="mdl-foot">
-        <div className="mdl-foot-info">Slug is permanent — it's the prefix for every variable reference.</div>
+        {/* No foot-info — the form-hint under the Name input already covers
+            slug derivation; repeating it next to the button just truncates. */}
+        <div className="mdl-foot-info" />
         <button className="btn btn-primary" onClick={submit} disabled={!canSubmit}>
           {create.isPending ? "Creating…" : "Create project"}
         </button>
@@ -502,7 +504,16 @@ function ImportStep({ onBack, onClose, onCreated }: { onBack: () => void; onClos
           )}
         </div>
         <div className="mdl-foot">
-          <div className="mdl-foot-info">{accessible.totalCount != null ? `${accessible.totalCount.toLocaleString()} repos visible${debouncedQuery ? ` matching "${debouncedQuery}"` : ""}${accessible.isFullyLoaded ? "" : " · loading…"}` : `${accessible.loadedCount} loaded`}</div>
+          {/* Single-button step — keep info short so it never collides with
+              future trailing actions. The Pager + hints inside the body
+              already carry the load/search context; this is just a count. */}
+          <div className="mdl-foot-info">
+            {accessible.totalCount != null
+              ? `${accessible.totalCount.toLocaleString()} repo${accessible.totalCount === 1 ? "" : "s"}${accessible.isFullyLoaded ? "" : " · loading…"}`
+              : accessible.isLoading
+                ? "Loading…"
+                : `${accessible.loadedCount} loaded`}
+          </div>
         </div>
       </>
     );
@@ -608,7 +619,10 @@ function ConfirmImportStep({ credential, providerInstanceId, repo, onBack, onClo
         {error && <div className="cn-banner cn-banner-err"><div className="cn-banner-p">{error}</div></div>}
       </div>
       <div className="mdl-foot">
-        <div className="mdl-foot-info">Two-step: create project, then bind. Bind failure keeps the empty project.</div>
+        {/* No foot-info — the action button is wide ("Create project + bind
+            repo") and prose next to it gets ellipsis-truncated. The repo path
+            in the head's subtitle gives enough context. */}
+        <div className="mdl-foot-info" />
         <button className="btn btn-primary" onClick={submit} disabled={!canSubmit}>
           {submitting ? "Creating…" : "Create project + bind repo"}
         </button>
