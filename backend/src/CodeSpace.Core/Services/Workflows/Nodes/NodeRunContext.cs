@@ -9,13 +9,32 @@ namespace CodeSpace.Core.Services.Workflows.Nodes;
 /// already resolved — the engine has run <c>VariableResolver</c> over the raw NodeDefinition
 /// values, so the node sees concrete values (strings, numbers, objects), never raw
 /// <c>{{ref}}</c> templates.
+///
+/// <para><b>What is NOT guaranteed:</b> the engine does NOT JSON-Schema-validate the
+/// resolved <see cref="Inputs"/> / <see cref="Config"/> against the manifest's
+/// <c>InputSchema</c> / <c>ConfigSchema</c> at runtime. Schemas are used at save time by
+/// <c>DefinitionValidator</c> (reference-path shape + upstream output-key membership) and
+/// by the frontend (form rendering, picker autocomplete). At RunAsync time a node receives
+/// whatever the resolver produced — including <c>null</c> when a referenced scope value
+/// was missing — and MUST extract values defensively (the <c>TryReadX</c> pattern used by
+/// every built-in node). Strict per-value schema validation may be added in a future
+/// release behind <c>CLAUDE.md</c> Rule 11 three-mode enforcement; today, treat the
+/// manifest schemas as documentation + UI-driver, not a runtime contract.</para>
 /// </summary>
 public sealed record NodeRunContext
 {
-    /// <summary>Resolved inputs. Already validated against the manifest's <c>InputSchema</c>.</summary>
+    /// <summary>
+    /// Resolved inputs — every <c>{{ref}}</c> template was substituted by
+    /// <c>VariableResolver</c>. Values that referenced a missing scope key resolve to
+    /// <c>JsonValueKind.Null</c>; extract defensively. Not JSON-Schema-validated at runtime
+    /// (see the record-level remark).
+    /// </summary>
     public required IReadOnlyDictionary<string, JsonElement> Inputs { get; init; }
 
-    /// <summary>Resolved static config. Already validated against the manifest's <c>ConfigSchema</c>.</summary>
+    /// <summary>
+    /// Resolved static config — same resolution + null semantics as <see cref="Inputs"/>.
+    /// Not JSON-Schema-validated at runtime (see the record-level remark).
+    /// </summary>
     public required IReadOnlyDictionary<string, JsonElement> Config { get; init; }
 
     /// <summary>
