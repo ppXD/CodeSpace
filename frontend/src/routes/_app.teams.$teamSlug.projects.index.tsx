@@ -389,11 +389,16 @@ function ImportStep({ onBack, onClose, onCreated }: { onBack: () => void; onClos
         <div className="mdl-body">
           {/* Top-of-body action — visible whenever the picker list is showing.
               Lives here (not in .mdl-head) so it doesn't compete with the back/X
-              chrome and stays aligned with the credential list below. */}
+              chrome and stays aligned with the credential list below.
+              Balanced 10px vertical padding gives the button equal breathing room
+              from the modal head above and the credential list below — without
+              it the button hugged the body's top edge and felt loose at the
+              bottom. The `.btn` (not `.btn-ghost`) gives it a visible border +
+              panel bg so it reads as a deliberate action, not a stray link. */}
           {showInlineAction && (
-            <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 8 }}>
-              <button className="btn btn-ghost" onClick={() => setConnectOpen(true)}>
-                <Ic.Plus size={12} /> Connect new remote
+            <div style={{ display: "flex", justifyContent: "flex-end", padding: "10px 0" }}>
+              <button className="btn" onClick={() => setConnectOpen(true)}>
+                <Ic.Plus size={14} /> Connect new remote
               </button>
             </div>
           )}
