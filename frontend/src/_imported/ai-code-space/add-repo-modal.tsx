@@ -428,14 +428,14 @@ function PickerStep({ credential, instance, page, totalPages, onPageChange, page
                 : "Select repositories to add"
             : `${selected.size} selected · webhook registered on each`}
         </div>
-        <div style={{ display: "flex", gap: 8 }}>
-          <button className="btn" onClick={onBack} disabled={submitting}>Cancel</button>
-          <button className="btn btn-primary" disabled={selected.size === 0 || submitting} onClick={onSubmit}>
-            {submitting
-              ? <><Ic.Clock size={13} /> Adding…</>
-              : <>Add {selected.size > 0 ? `${selected.size} ` : ""}{selected.size === 1 ? "repo" : "repos"}</>}
-          </button>
-        </div>
+        {/* No secondary Cancel button here — the .mdl-back in the head + X in the
+            top-right already give two exit paths. A third button labelled Cancel that
+            actually goes Back was confusing operators. */}
+        <button className="btn btn-primary" disabled={selected.size === 0 || submitting} onClick={onSubmit}>
+          {submitting
+            ? <><Ic.Clock size={13} /> Adding…</>
+            : <>Add {selected.size > 0 ? `${selected.size} ` : ""}{selected.size === 1 ? "repo" : "repos"}</>}
+        </button>
       </div>
     </>
   );

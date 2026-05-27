@@ -50,19 +50,15 @@ function ProjectsListPage() {
 
   return (
     <section className="ct">
-      <div className="ct-head">
+      {/* paddingBottom on .ct-head: this page has no tabs strip below the title row,
+          so without explicit bottom padding the Add-project button sits flush against
+          the toolbar border. Mirrors the workflows list page comment. */}
+      <div className="ct-head" style={{ paddingBottom: 14 }}>
         <div className="ct-crumbs">
           <span>Projects</span>
         </div>
         <div className="ct-title-row">
-          <div>
-            <h1 className="ct-title">Projects</h1>
-            <div className="ct-sub">
-              Each project owns a slice of repositories and variables. Workflows reference
-              project variables as <code>{`{{project.<slug>.<name>}}`}</code>; the same
-              workflow can read from several projects at once.
-            </div>
-          </div>
+          <h1 className="ct-title">Projects</h1>
           <div className="ct-actions">
             <button className="btn btn-primary" onClick={() => setAddOpen(true)}>
               <Ic.Plus size={14} /> Add project
@@ -222,11 +218,13 @@ function ChooseStep({ onPickEmpty, onPickImport, onClose }: { onPickEmpty: () =>
   return (
     <>
       <div className="mdl-head">
-        <div className="mdl-title">Add project</div>
+        <div className="mdl-title-wrap">
+          <div className="mdl-title">Add project</div>
+          <div className="mdl-sub">How do you want to start?</div>
+        </div>
         <button className="mdl-x" onClick={onClose} aria-label="Close"><Ic.X size={14} /></button>
       </div>
       <div className="mdl-body">
-        <div className="mdl-sub">How do you want to start?</div>
         <div className="add-choice-grid">
           <button className="add-choice" onClick={onPickEmpty}>
             <div className="add-choice-ic"><Ic.Folder size={18} /></div>
@@ -269,8 +267,12 @@ function EmptyStep({ onBack, onClose, onCreated }: { onBack: () => void; onClose
   return (
     <>
       <div className="mdl-head">
-        <div className="mdl-title">New project</div>
-        <button className="mdl-x" onClick={onClose} aria-label="Close"><Ic.X size={14} /></button>
+        <button className="mdl-back" onClick={onBack} title="Back" disabled={create.isPending}><Ic.ChevronLeft size={16} /></button>
+        <div className="mdl-title-wrap">
+          <div className="mdl-title">New project</div>
+          <div className="mdl-sub">Name and optional description. The slug is derived from the name.</div>
+        </div>
+        <button className="mdl-x" onClick={onClose} aria-label="Close" disabled={create.isPending}><Ic.X size={14} /></button>
       </div>
       <div className="mdl-body">
         <div className="form-row">
@@ -283,8 +285,8 @@ function EmptyStep({ onBack, onClose, onCreated }: { onBack: () => void; onClose
           />
           {name.trim().length > 0 && slugPreview.length > 0 && (
             <div className="form-hint">
-              Variables will resolve as <code>{`{{project.${slugPreview}.X}}`}</code>.
-              The identifier is derived from the name and can't be changed later.
+              Variables resolve as <code>{`{{project.${slugPreview}.X}}`}</code>. The
+              identifier is derived from the name and can't be changed later.
             </div>
           )}
           {name.trim().length > 0 && slugPreview.length === 0 && (
@@ -304,9 +306,7 @@ function EmptyStep({ onBack, onClose, onCreated }: { onBack: () => void; onClose
         {error && <div className="cn-banner cn-banner-err"><div className="cn-banner-p">{error}</div></div>}
       </div>
       <div className="mdl-foot">
-        <button className="btn btn-ghost" onClick={onBack} disabled={create.isPending}><Ic.ArrowLeft size={12} /> Back</button>
-        <div className="ct-spacer" />
-        <button className="btn btn-ghost" onClick={onClose} disabled={create.isPending}>Cancel</button>
+        <div className="mdl-foot-info">Slug is permanent — it's the prefix for every variable reference.</div>
         <button className="btn btn-primary" onClick={submit} disabled={!canSubmit}>
           {create.isPending ? "Creating…" : "Create project"}
         </button>
@@ -356,11 +356,14 @@ function ImportStep({ onBack, onClose, onCreated }: { onBack: () => void; onClos
     return (
       <>
         <div className="mdl-head">
-          <div className="mdl-title">Import from repository</div>
+          <button className="mdl-back" onClick={onBack} title="Back"><Ic.ChevronLeft size={16} /></button>
+          <div className="mdl-title-wrap">
+            <div className="mdl-title">Import from repository</div>
+            <div className="mdl-sub">Pick the credential to browse repositories with.</div>
+          </div>
           <button className="mdl-x" onClick={onClose} aria-label="Close"><Ic.X size={14} /></button>
         </div>
         <div className="mdl-body">
-          <div className="mdl-sub">Pick the credential to browse repositories with.</div>
           {credentials.isLoading || instances.isLoading ? (
             <div className="ct-empty"><div className="ct-empty-h">Loading credentials…</div></div>
           ) : activeCredentials.length === 0 ? (
@@ -387,9 +390,6 @@ function ImportStep({ onBack, onClose, onCreated }: { onBack: () => void; onClos
             </div>
           )}
         </div>
-        <div className="mdl-foot">
-          <button className="btn btn-ghost" onClick={onBack}><Ic.ArrowLeft size={12} /> Back</button>
-        </div>
       </>
     );
   }
@@ -398,16 +398,17 @@ function ImportStep({ onBack, onClose, onCreated }: { onBack: () => void; onClos
     return (
       <>
         <div className="mdl-head">
-          <div className="mdl-title">Pick a repository</div>
+          <button className="mdl-back" onClick={() => { setPicked(null); setPhase("credential"); }} title="Back"><Ic.ChevronLeft size={16} /></button>
+          <div className="mdl-title-wrap">
+            <div className="mdl-title">Pick a repository</div>
+            <div className="mdl-sub">{picked.displayName ?? pickedInstance.displayName} · {pickedInstance.provider}</div>
+          </div>
           <button className="mdl-x" onClick={onClose} aria-label="Close"><Ic.X size={14} /></button>
         </div>
         <div className="mdl-body">
-          <div className="ct-toolbar" style={{ paddingLeft: 0, paddingRight: 0, borderBottom: 0 }}>
-            <div className="ct-search">
-              <Ic.Search size={13} />
-              <input placeholder="Search repositories…" value={query} onChange={e => setQuery(e.target.value)} autoFocus />
-            </div>
-            <div className="ct-spacer" />
+          <div className="picker-search">
+            <Ic.Search size={13} />
+            <input placeholder="Search repositories…" value={query} onChange={e => setQuery(e.target.value)} autoFocus />
           </div>
 
           {accessible.isLoading && <div className="ct-empty"><div className="ct-empty-h">Loading…</div></div>}
@@ -441,9 +442,7 @@ function ImportStep({ onBack, onClose, onCreated }: { onBack: () => void; onClos
           )}
         </div>
         <div className="mdl-foot">
-          <button className="btn btn-ghost" onClick={() => { setPicked(null); setPhase("credential"); }}><Ic.ArrowLeft size={12} /> Back</button>
-          <div className="ct-spacer" />
-          <span className="mdl-foot-meta">{accessible.totalCount != null ? `${accessible.totalCount} repos` : `${accessible.loadedCount} loaded`}</span>
+          <div className="mdl-foot-info">{accessible.totalCount != null ? `${accessible.totalCount} repos visible to this credential` : `${accessible.loadedCount} loaded`}</div>
         </div>
       </>
     );
@@ -517,8 +516,12 @@ function ConfirmImportStep({ credential, providerInstanceId, repo, onBack, onClo
   return (
     <>
       <div className="mdl-head">
-        <div className="mdl-title">Create project from {repo.fullPath}</div>
-        <button className="mdl-x" onClick={onClose} aria-label="Close"><Ic.X size={14} /></button>
+        <button className="mdl-back" onClick={onBack} title="Back" disabled={submitting}><Ic.ChevronLeft size={16} /></button>
+        <div className="mdl-title-wrap">
+          <div className="mdl-title">Create from repository</div>
+          <div className="mdl-sub">{repo.fullPath}</div>
+        </div>
+        <button className="mdl-x" onClick={onClose} aria-label="Close" disabled={submitting}><Ic.X size={14} /></button>
       </div>
       <div className="mdl-body">
         <div className="form-row">
@@ -545,9 +548,7 @@ function ConfirmImportStep({ credential, providerInstanceId, repo, onBack, onClo
         {error && <div className="cn-banner cn-banner-err"><div className="cn-banner-p">{error}</div></div>}
       </div>
       <div className="mdl-foot">
-        <button className="btn btn-ghost" onClick={onBack} disabled={submitting}><Ic.ArrowLeft size={12} /> Back</button>
-        <div className="ct-spacer" />
-        <button className="btn btn-ghost" onClick={onClose} disabled={submitting}>Cancel</button>
+        <div className="mdl-foot-info">Two-step: create project, then bind. Bind failure keeps the empty project.</div>
         <button className="btn btn-primary" onClick={submit} disabled={!canSubmit}>
           {submitting ? "Creating…" : "Create project + bind repo"}
         </button>
