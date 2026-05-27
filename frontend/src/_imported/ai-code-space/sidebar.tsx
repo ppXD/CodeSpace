@@ -48,9 +48,11 @@ export function Sidebar() {
 
   // Persistent top-level entry into the Connections manager (ConnectRemoteModal
   // already covers list + add + revoke, so one item handles all credential ops).
-  // Lives in the user popover because credentials are user-owned (each carries an
-  // ownerUserId), which matches the popover's "your-account actions" mental model
-  // alongside Change password / Sign out.
+  // Lives in the TEAM-switcher popover footer — credentials are team-scoped (each
+  // bound to the active X-Team-Id at creation time, and switching teams shows a
+  // different set), so grouping them with team actions is semantically right.
+  // The user-popover position tried earlier was misleading because the data isn't
+  // user-global.
   const [connectOpen, setConnectOpen] = useState(false);
 
   const initial = active?.name.charAt(0).toUpperCase() ?? "?";
@@ -167,6 +169,20 @@ export function Sidebar() {
           })}
         </div>
         <div className="sb-pop-foot">
+          {/* Connections lives here (NOT in the user popover) because credentials
+              are bound to the active team via X-Team-Id at creation time —
+              switching team shows a different set. Grouping with team-switch
+              actions is the semantic match. Opens ConnectRemoteModal scoped to
+              the currently-active team. */}
+          <div
+            className="sb-pop-action"
+            onClick={() => {
+              setTeamOpen(false);
+              setConnectOpen(true);
+            }}
+          >
+            <Ic.Link size={14} /> Connections
+          </div>
           {/* "Create workspace" rather than "Create team" — Personal teams aren't
               user-creatable (one per user, auto-provisioned on signup). The action
               label needs to match what the operator can actually do. */}
@@ -199,16 +215,6 @@ export function Sidebar() {
           </div>
         </div>
         <div className="sb-pop-menu">
-          <button
-            className="sb-pop-item"
-            onClick={() => {
-              setUserOpen(false);
-              setConnectOpen(true);
-            }}
-          >
-            <Ic.Link size={14} />
-            <span>Connections</span>
-          </button>
           <button
             className="sb-pop-item"
             onClick={() => {
