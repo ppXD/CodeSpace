@@ -151,6 +151,30 @@ public class TriggerMatcherTests
         labelsEl.EnumerateArray().Select(l => l.GetString()).ShouldBe(new[] { "wip" });
     }
 
+    [Fact]
+    public void PrUpdated_payload_labels_default_to_empty_array()
+    {
+        // Mirror of PrOpened_payload_labels_default_to_empty_array — pinning the same
+        // empty-array contract on the synchronize-side matcher so downstream node refs to
+        // {{trigger.labels}} have a uniform shape regardless of which trigger fired.
+        var ev = new PullRequestSynchronizedEvent
+        {
+            RepositoryId = RepoA,
+            ProviderEventId = "1",
+            OccurredAt = DateTimeOffset.UtcNow,
+            ExternalPullRequestId = "1",
+            Number = 7,
+            PreviousHeadSha = "a",
+            NewHeadSha = "b"
+        };
+
+        var payload = new PrUpdatedMatcher().BuildPayload(ev);
+
+        var labelsEl = payload.GetProperty("labels");
+        labelsEl.ValueKind.ShouldBe(JsonValueKind.Array);
+        labelsEl.GetArrayLength().ShouldBe(0);
+    }
+
     private static PullRequestOpenedEvent OpenedEvent(Guid repositoryId) => new()
     {
         RepositoryId = repositoryId,
