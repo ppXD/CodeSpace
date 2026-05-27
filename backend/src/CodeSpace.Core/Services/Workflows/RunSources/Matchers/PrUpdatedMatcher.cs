@@ -8,6 +8,7 @@ namespace CodeSpace.Core.Services.Workflows.RunSources.Matchers;
 /// Matches <see cref="PullRequestSynchronizedEvent"/>. Payload deliberately mirrors the
 /// shape of pr.opened so workflows that target either trigger can share the same downstream
 /// node graph (the {{trigger.repositoryId}} / {{trigger.number}} refs resolve identically).
+/// Match precedence + config schema live in <see cref="PrTriggerMatcherFilter"/>.
 /// </summary>
 public sealed class PrUpdatedMatcher : IRunSourceMatcher
 {
@@ -17,7 +18,7 @@ public sealed class PrUpdatedMatcher : IRunSourceMatcher
     {
         if (normalizedEvent is not PullRequestSynchronizedEvent synced) return false;
 
-        return RepositoryFilterMatches(activationConfig, synced.RepositoryId);
+        return PrTriggerMatcherFilter.Matches(activationConfig, synced.RepositoryId, synced.Labels);
     }
 
     public JsonElement BuildPayload(NormalizedEvent normalizedEvent)
@@ -34,16 +35,5 @@ public sealed class PrUpdatedMatcher : IRunSourceMatcher
         };
 
         return JsonSerializer.SerializeToElement(payload);
-    }
-
-    private static bool RepositoryFilterMatches(JsonElement activationConfig, Guid eventRepositoryId)
-    {
-        if (activationConfig.ValueKind != JsonValueKind.Object) return true;
-        if (!activationConfig.TryGetProperty("repositoryId", out var repoIdProp)) return true;
-        if (repoIdProp.ValueKind == JsonValueKind.Null) return true;
-        if (repoIdProp.ValueKind != JsonValueKind.String) return true;
-        if (!Guid.TryParse(repoIdProp.GetString(), out var configured)) return true;
-
-        return configured == eventRepositoryId;
     }
 }
