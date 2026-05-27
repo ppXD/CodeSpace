@@ -281,9 +281,42 @@
  * ============================================================ */
 .acs-root .ct { display: flex; flex-direction: column; height: 100%; overflow: hidden; background: var(--bg); }
 .acs-root .ct-head { padding: 18px 28px 0; display: flex; flex-direction: column; gap: 14px; border-bottom: 1px solid var(--line); }
-.acs-root .ct-crumbs { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); font-family: inherit; }
-.acs-root .ct-crumbs span.sep { color: var(--muted-2); }
-.acs-root .ct-crumbs span.cur { color: var(--ink-2); }
+/* Breadcrumb chrome — every page that renders a `.ct-head` (list / project
+   detail / workflows list / etc.) AND every repo-detail page that renders a
+   `.rd-head` share this row. Two class names exist for historical layout
+   reasons (`.ct-` = content shell, `.rd-` = repo-detail shell) but the
+   crumb behaviour is identical, so both selectors share a single rule set
+   below to avoid visual drift on hover/focus/active.
+   Three element kinds compose a crumb trail:
+     - `a` (or `.crumb-link` for non-anchor click handlers): clickable
+       ancestor segment. Pointer cursor + hover background pill + focus ring.
+       Negative margin trick on padding keeps the hover hit area generous
+       without shifting the row's text baseline relative to the sibling
+       title row below.
+     - `.sep`: visual divider ("/"). user-select: none stops drag-to-select
+       from grabbing the separator alongside the segment text.
+     - `.cur`: the current (non-clickable) leaf segment, slightly bolder
+       and ink-coloured so it stands out as "you are here". */
+.acs-root .ct-crumbs,
+.acs-root .rd-crumbs { display: flex; align-items: center; gap: 4px; font-size: 12px; color: var(--muted); font-family: inherit; flex-wrap: wrap; }
+.acs-root .ct-crumbs a, .acs-root .rd-crumbs a,
+.acs-root .ct-crumbs .crumb-link, .acs-root .rd-crumbs .crumb-link {
+  color: var(--muted);
+  cursor: pointer;
+  border-radius: 4px;
+  padding: 2px 6px;
+  margin: -2px -2px;
+  text-decoration: none;
+  transition: color .12s, background-color .12s;
+}
+.acs-root .ct-crumbs a:hover, .acs-root .rd-crumbs a:hover,
+.acs-root .ct-crumbs .crumb-link:hover, .acs-root .rd-crumbs .crumb-link:hover { color: var(--ink); background: rgba(0,0,0,.05); }
+.acs-root .ct-crumbs a:focus-visible, .acs-root .rd-crumbs a:focus-visible,
+.acs-root .ct-crumbs .crumb-link:focus-visible, .acs-root .rd-crumbs .crumb-link:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; color: var(--ink); }
+.acs-root .ct-crumbs .sep,
+.acs-root .rd-crumbs .sep { color: var(--muted-2); user-select: none; padding: 0 2px; }
+.acs-root .ct-crumbs .cur,
+.acs-root .rd-crumbs .cur { color: var(--ink); font-weight: 500; }
 .acs-root .ct-title-row { display: flex; align-items: flex-end; justify-content: space-between; gap: 16px; }
 .acs-root .ct-title { font-size: 24px; font-weight: 600; letter-spacing: -0.02em; line-height: 1.1; color: var(--ink); margin: 0; }
 .acs-root .ct-sub { font-size: 13px; color: var(--muted); margin-top: 4px; max-width: 560px; }
@@ -315,9 +348,21 @@
 .acs-root .repo-mark[data-p="github"] { color: #1F1E1D; background: #F5F4EE; }
 .acs-root .repo-mark[data-p="gitlab"] { color: #D97757; background: #FBF1E8; }
 .acs-root .repo-mark[data-p="git"] { color: #5C7CD6; background: #EEF1FB; }
-.acs-root .repo-info { min-width: 0; }
+/* `.repo-info` is the right-hand text column of every repo/project/workflow row.
+ * - flex:1 + min-width:0 bound it to "the cell width minus the mark + gap",
+ *   so a long .repo-path can't push the column wider than the table cell.
+ * - min-width:0 on .repo-path lets its flex children (esp. .repo-path-desc) shrink
+ *   below their natural content width, which is the prerequisite for ellipsis.
+ * Without these two bounds, a long description would wrap to a second line,
+ *   making the row 1 line taller than its siblings AND shifting the mark icon
+ *   visually upward (mark is align-items: center against .repo-cell). */
+.acs-root .repo-info { min-width: 0; flex: 1; }
 .acs-root .repo-name { font-weight: 600; color: var(--ink); font-size: 13.5px; letter-spacing: -0.005em; display: flex; align-items: center; gap: 6px; }
-.acs-root .repo-path { font-family: inherit; font-size: 11.5px; color: var(--muted); margin-top: 1px; display: flex; align-items: center; gap: 6px; }
+.acs-root .repo-path { font-family: inherit; font-size: 11.5px; color: var(--muted); margin-top: 1px; display: flex; align-items: center; gap: 6px; min-width: 0; }
+/* Single-line clamp for the description segment of a .repo-path. Used by the
+ * Projects list (slug · description) and the Workflows list (description). Hover
+ * the row to see the full text via the `title` attribute on the wrapping span. */
+.acs-root .repo-path .repo-path-desc { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .acs-root .repo-vis { display: inline-flex; align-items: center; gap: 3px; color: var(--muted); text-transform: lowercase; }
 
 .acs-root .branch-tag { display: inline-flex; align-items: center; gap: 4px; font-family: inherit; font-size: 11.5px; color: var(--ink-2); background: var(--panel-2); border: 1px solid var(--line); padding: 2px 7px; border-radius: 5px; }
@@ -345,11 +390,9 @@
  * ============================================================ */
 .acs-root .rd { display: flex; flex-direction: column; height: 100%; overflow: hidden; background: var(--bg); }
 .acs-root .rd-head { padding: 14px 28px 0; display: flex; flex-direction: column; gap: 14px; border-bottom: 1px solid var(--line); }
-.acs-root .rd-crumbs { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); font-family: inherit; }
-.acs-root .rd-crumbs a { color: var(--muted); cursor: pointer; }
-.acs-root .rd-crumbs a:hover { color: var(--ink-2); text-decoration: underline; text-underline-offset: 2px; }
-.acs-root .rd-crumbs .sep { color: var(--muted-2); }
-.acs-root .rd-crumbs .cur { color: var(--ink-2); }
+/* .rd-crumbs visual rules live with .ct-crumbs at the top of the file so both shells
+ * (content list pages + repo-detail page) share the same box-pill hover affordance.
+ * Putting them in one place stops the two breadcrumb strips from drifting apart again. */
 .acs-root .rd-title-row { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; padding-bottom: 2px; }
 .acs-root .rd-title-l { display: flex; align-items: center; gap: 14px; min-width: 0; flex: 1; }
 .acs-root .rd-back { appearance: none; border: 1px solid var(--line); background: var(--panel); width: 32px; height: 32px; border-radius: 7px; display: grid; place-items: center; color: var(--muted); cursor: pointer; box-shadow: var(--shadow-1); flex-shrink: 0; }
@@ -1126,6 +1169,12 @@
 .mdl-body::-webkit-scrollbar { width: 8px; }
 .mdl-body::-webkit-scrollbar-thumb { background: rgba(0,0,0,.15); border-radius: 4px; }
 .mdl-foot { padding: 14px 22px; border-top: 1px solid var(--line); display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+/* Right-aligned action row at the top of a .mdl-body (above a credential or
+ * picker list). 16px marginBottom mirrors .mdl-body's 16px padding-top, giving
+ * the button equal breathing room above and below; without it the row hugs
+ * the body's top edge unevenly. Used by the credential pickers in
+ * AddProjectModal (ImportStep) and AddRepoModal (CredentialStep). */
+.mdl-action-row { display: flex; justify-content: flex-end; margin-bottom: 16px; }
 /* Truncate-on-overflow rather than push the action buttons. The info string can grow
    ("13 selected · webhook registered on each") and narrow modals (440px dialog) don't
    have room to grow either side without something giving. */
@@ -2559,9 +2608,6 @@
   background: var(--panel); font-size: 12.5px; color: var(--ink);
 }
 .acs-root .confirm-repo-sub { font-size: 11px; color: var(--muted); margin-left: auto; }
-
-/* Modal footer meta — right-aligned secondary text (e.g. "30 repos loaded"). */
-.acs-root .mdl-foot-meta { font-size: 11.5px; color: var(--muted); }
 
 /* Row-action menu inside .tbl rows on the project detail page. */
 .acs-root .row-act {

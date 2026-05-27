@@ -73,10 +73,22 @@ export function useActiveTeam() {
       return teamId;
     },
     onSuccess: () => {
-      // Anything keyed by the team header needs a refetch.
-      queryClient.invalidateQueries({ queryKey: ["repositories"] });
-      queryClient.invalidateQueries({ queryKey: ["credentials"] });
-      queryClient.invalidateQueries({ queryKey: ["provider-instances"] });
+      // Switching team flips the X-Team-Id header for ALL subsequent requests,
+      // so every cached query is potentially scoped to the wrong team. Invalidate
+      // the whole cache (no args = every query) — only the currently-mounted ones
+      // refetch immediately; the rest just become stale until next access.
+      //
+      // The old explicit list (repositories / credentials / provider-instances)
+      // missed projects, workflows, variables, /pull-requests, /webhooks, etc. —
+      // and any future team-scoped query added later would break silently. The
+      // broad invalidate is the only maintenance-free guarantee that every team-
+      // scoped surface refetches on switch.
+      //
+      // The user-level /me query (queryKey: ["me"]) also invalidates, which is
+      // intentional — team stats (member/repo/project counts) live on /me and
+      // need to stay fresh; refetch is cheap because /me has a 60s staleTime and
+      // returns ~1KB.
+      queryClient.invalidateQueries();
     },
   });
 

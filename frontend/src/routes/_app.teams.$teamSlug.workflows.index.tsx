@@ -47,7 +47,7 @@ function WorkflowsListPage() {
           strip. We add explicit bottom padding here so the rhythm matches. */}
       <div className="ct-head" style={{ paddingBottom: 18 }}>
         <div className="ct-crumbs">
-          <span>Workflows</span>
+          <span className="cur">Workflows</span>
         </div>
         <div className="ct-title-row">
           <h1 className="ct-title">Workflows</h1>
@@ -114,7 +114,10 @@ function WorkflowsListPage() {
                           {w.name}
                           {!w.enabled && <span className="wf-badge wf-badge-disabled">disabled</span>}
                         </div>
-                        {w.description && <div className="repo-path">{w.description}</div>}
+                        {/* Wrap in .repo-path-desc so a long description ellipsis-truncates
+                            on one line instead of wrapping the row taller. See the CSS rule
+                            near .repo-info for the bounding model. */}
+                        {w.description && <div className="repo-path"><span className="repo-path-desc" title={w.description}>{w.description}</span></div>}
                       </div>
                     </div>
                   </td>

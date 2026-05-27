@@ -2,7 +2,7 @@ import { createFileRoute, useNavigate } from "@tanstack/react-router";
 
 import { Ic } from "@/_imported/ai-code-space/icons";
 import { ApiError } from "@/api/request";
-import { useReplayRun, useWorkflowRun } from "@/hooks/use-workflows";
+import { useReplayRun, useWorkflow, useWorkflowRun } from "@/hooks/use-workflows";
 
 /**
  * Single-run detail. One row per executed node with expandable inputs/outputs blocks.
@@ -16,6 +16,11 @@ function WorkflowRunDetailPage() {
   const { teamSlug, runId } = Route.useParams();
   const navigate = useNavigate();
   const run = useWorkflowRun(runId);
+  // Run detail's breadcrumb shows the workflow NAME (not "Workflow" placeholder).
+  // We fetch the workflow lazily — only after the run object resolves and gives
+  // us the workflowId. While it's loading or unavailable, the crumb falls back
+  // to "Workflow" so the trail is never broken.
+  const workflow = useWorkflow(run.data?.workflowId ?? null);
   const replay = useReplayRun();
 
   const onReplay = async () => {
@@ -61,15 +66,17 @@ function WorkflowRunDetailPage() {
           workflows-list and runs-list pages apply. */}
       <div className="ct-head" style={{ paddingBottom: 16 }}>
         <div className="ct-crumbs">
-          <span onClick={() => navigate({ to: "/teams/$teamSlug/workflows", params: { teamSlug } })} style={{ cursor: "pointer" }}>
-            Workflows
-          </span>
-          <span>·</span>
-          <span onClick={() => navigate({ to: "/teams/$teamSlug/workflows/$workflowId", params: { teamSlug, workflowId: r.workflowId } })} style={{ cursor: "pointer" }}>
-            Workflow
-          </span>
-          <span>·</span>
-          <span>Run {r.id.slice(0, 8)}</span>
+          <a onClick={() => navigate({ to: "/teams/$teamSlug/workflows", params: { teamSlug } })}>Workflows</a>
+          <span className="sep">/</span>
+          <a onClick={() => navigate({ to: "/teams/$teamSlug/workflows/$workflowId", params: { teamSlug, workflowId: r.workflowId } })}>
+            {workflow.data?.name ?? "Workflow"}
+          </a>
+          <span className="sep">/</span>
+          <a onClick={() => navigate({ to: "/teams/$teamSlug/workflows/$workflowId/runs", params: { teamSlug, workflowId: r.workflowId } })}>
+            Runs
+          </a>
+          <span className="sep">/</span>
+          <span className="cur">Run {r.id.slice(0, 8)}</span>
         </div>
         <div className="ct-title-row">
           <div>

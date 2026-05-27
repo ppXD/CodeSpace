@@ -161,7 +161,11 @@ export function Sidebar() {
         <div className="sb-pop-foot">
           {/* "Create workspace" rather than "Create team" — Personal teams aren't
               user-creatable (one per user, auto-provisioned on signup). The action
-              label needs to match what the operator can actually do. */}
+              label needs to match what the operator can actually do.
+              Note: Connections used to live here briefly but mixing team
+              management with the switcher's "switch team" purpose felt off.
+              Connections now live on /teams/{slug}/settings, reached via the
+              gear icon next to this trigger. */}
           <div className="sb-pop-action"><Ic.Plus size={14} /> Create workspace</div>
         </div>
       </div>
@@ -267,7 +271,16 @@ export function Sidebar() {
         >
           <span className="sb-nav-ic"><Ic.Folder size={15} /></span>
           <span className="sb-nav-lbl">Projects</span>
-          {active && <span className="sb-nav-badge">{active.repositoryCount}</span>}
+          {/* `projectCount != null` guard: the field is new on /me (Phase 3.0
+              follow-up); when an old backend build is still running it returns
+              MeTeam without this field, undefined would render an empty pill
+              (background + padding, no number) and look like a UI glitch. Hide
+              the badge entirely until the backend serves the field. A team
+              with exactly 0 projects (fresh empty workspace) still shows "0"
+              because typeof 0 === "number" — same UX as repositoryCount before. */}
+          {active && active.projectCount != null && (
+            <span className="sb-nav-badge">{active.projectCount}</span>
+          )}
         </div>
         <div
           className="sb-nav-item"

@@ -1,3 +1,4 @@
+import { useNavigate } from "@tanstack/react-router";
 import { useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -46,7 +47,12 @@ interface RepoDetailHeaderProps {
   repoId: string;
   activeTab: DetailTab;
   onTabChange: (tab: DetailTab) => void;
-  onBack: () => void;
+  /**
+   * Team slug from the route — needed so the breadcrumb's "Projects" and
+   * "{project name}" crumbs can build proper `/teams/{slug}/projects[/id]`
+   * URLs without coupling this shared component to the surrounding route shape.
+   */
+  teamSlug: string;
   children: React.ReactNode;
 }
 
@@ -62,9 +68,21 @@ interface RepoDetailHeaderProps {
  * runs once per repo entry: the counts call powers the tab badge AND warms the
  * cache so clicking "Pull requests" reads from cache instead of cold-starting.
  */
-export function RepoDetailHeader({ repoId, activeTab, onTabChange, onBack, children }: RepoDetailHeaderProps) {
+export function RepoDetailHeader({ repoId, activeTab, onTabChange, teamSlug, children }: RepoDetailHeaderProps) {
   const repository = useRepository(repoId);
   const instances = useProviderInstances();
+  const navigate = useNavigate();
+
+  // Breadcrumb navigation handlers — kept here so the route layer doesn't have
+  // to know about the per-crumb destinations. Both target the same place the
+  // sibling project-detail page lives, so deep-linking ↔ in-app navigation are
+  // symmetric. Phase 3.0 rule: every repo has a parent project (repository.
+  // project_id NOT NULL), so projectId being missing means the API hasn't
+  // returned RepositoryDetail yet — guard at the call site, not here.
+  const goToProjects = () =>
+    navigate({ to: "/teams/$teamSlug/projects", params: { teamSlug } });
+  const goToParentProject = (projectId: string) =>
+    navigate({ to: "/teams/$teamSlug/projects/$projectId", params: { teamSlug, projectId } });
 
   // Fire the PR-counts call as soon as the repo loads — not when the user clicks
   // into the Pull-requests tab. Two benefits:
@@ -110,8 +128,11 @@ export function RepoDetailHeader({ repoId, activeTab, onTabChange, onBack, child
     return (
       <section className="rd">
         <div className="rd-head">
+          {/* Loading state: only the "Projects" ancestor is known (no repo yet),
+              so the trail is just Projects / Loading… The crumb is still
+              clickable so an impatient user can bail back to the projects list. */}
           <div className="rd-crumbs">
-            <a onClick={onBack}>Repositories</a>
+            <a onClick={goToProjects}>Projects</a>
             <span className="sep">/</span>
             <span className="cur">Loading…</span>
           </div>
@@ -125,7 +146,7 @@ export function RepoDetailHeader({ repoId, activeTab, onTabChange, onBack, child
       <section className="rd">
         <div className="rd-head">
           <div className="rd-crumbs">
-            <a onClick={onBack}>Repositories</a>
+            <a onClick={goToProjects}>Projects</a>
             <span className="sep">/</span>
             <span className="cur">Error</span>
           </div>
@@ -142,18 +163,37 @@ export function RepoDetailHeader({ repoId, activeTab, onTabChange, onBack, child
 
   if (!repo) return null;
 
+  // Parent-project crumb safety: the field is required on RepositoryDetail at
+  // the DTO contract level, but a still-running old backend (no /me restart
+  // yet) could return undefined. Fall back to just "Projects / {repo.name}"
+  // in that case rather than rendering an empty middle crumb.
+  const hasParentProject = !!repo.projectId && !!repo.projectName;
+
   return (
     <section className="rd">
       <div className="rd-head">
         <div className="rd-crumbs">
-          <a onClick={onBack}>Repositories</a>
+          <a onClick={goToProjects}>Projects</a>
           <span className="sep">/</span>
+          {hasParentProject && (
+            <>
+              <a onClick={() => goToParentProject(repo.projectId)}>{repo.projectName}</a>
+              <span className="sep">/</span>
+            </>
+          )}
           <span className="cur">{repo.name}</span>
         </div>
 
         <div className="rd-title-row">
           <div className="rd-title-l">
-            <button className="rd-back" onClick={onBack} title="Back to repositories">
+            {/* Back arrow now goes to the parent project's Repositories tab —
+                the closest contextual ancestor. Falls back to the projects list
+                if for some reason the project link is unavailable. */}
+            <button
+              className="rd-back"
+              onClick={() => hasParentProject ? goToParentProject(repo.projectId) : goToProjects()}
+              title={hasParentProject ? `Back to ${repo.projectName}` : "Back to projects"}
+            >
               <Ic.ChevronLeft size={15} />
             </button>
             <div className="rd-mark" data-p={instance?.provider.toLowerCase()}>{mark}</div>

@@ -8,6 +8,18 @@ public sealed record RepositoryDetail
     public required Guid TeamId { get; init; }
     public required Guid ProviderInstanceId { get; init; }
     public Guid? CredentialId { get; init; }
+
+    /// <summary>
+    /// Parent project — every repository belongs to exactly one project (Phase 3.0).
+    /// Surfaced on the detail DTO so the SPA's repo-detail breadcrumb can render
+    /// <c>Projects / {ProjectName} / {repo.Name}</c> with both ancestor crumbs
+    /// clickable, instead of the pre-3.0 stub that pointed back to the retired
+    /// team-wide repositories list. Joined from the workflow_owned <c>project</c>
+    /// row that <c>repository.project_id</c> NOT NULL points at.
+    /// </summary>
+    public required Guid ProjectId { get; init; }
+    public required string ProjectSlug { get; init; }
+    public required string ProjectName { get; init; }
     public required string ExternalId { get; init; }
     public required string NamespacePath { get; init; }
     public required string Name { get; init; }

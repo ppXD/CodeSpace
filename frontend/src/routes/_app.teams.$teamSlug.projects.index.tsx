@@ -7,7 +7,14 @@ import type { CredentialSummary, RemoteRepository } from "@/api/types";
 import { useCredentials, useProviderInstances, useAccessibleRepositoriesForPicker } from "@/hooks/use-credentials";
 import { useCreateProject, useProjects } from "@/hooks/use-projects";
 import { useBindRepositoriesBulk, useRepositories } from "@/hooks/use-repositories";
+// ConnectRemoteModal is now invoked from inside the Import-from-repository flow
+// (see ImportStep below) where it's contextually needed, rather than as a page-level
+// action on the Projects header. Connecting a remote is an auth-setup task, not a
+// project-management task — surfacing it here forced an unrelated affordance onto
+// every project list view, even for teams that already have credentials wired up.
+import { ConnectRemoteModal } from "@/_imported/ai-code-space/connect-remote-modal";
 import { Ic } from "@/_imported/ai-code-space/icons";
+import { Pager } from "@/_imported/ai-code-space/pager";
 import { ProviderMark } from "@/_imported/ai-code-space/content";
 
 export const Route = createFileRoute("/_app/teams/$teamSlug/projects/")({
@@ -50,19 +57,15 @@ function ProjectsListPage() {
 
   return (
     <section className="ct">
-      <div className="ct-head">
+      {/* paddingBottom on .ct-head: this page has no tabs strip below the title row,
+          so without explicit bottom padding the Add-project button sits flush against
+          the toolbar border. Mirrors the workflows list page comment. */}
+      <div className="ct-head" style={{ paddingBottom: 14 }}>
         <div className="ct-crumbs">
-          <span>Projects</span>
+          <span className="cur">Projects</span>
         </div>
         <div className="ct-title-row">
-          <div>
-            <h1 className="ct-title">Projects</h1>
-            <div className="ct-sub">
-              Each project owns a slice of repositories and variables. Workflows reference
-              project variables as <code>{`{{project.<slug>.<name>}}`}</code>; the same
-              workflow can read from several projects at once.
-            </div>
-          </div>
+          <h1 className="ct-title">Projects</h1>
           <div className="ct-actions">
             <button className="btn btn-primary" onClick={() => setAddOpen(true)}>
               <Ic.Plus size={14} /> Add project
@@ -140,9 +143,16 @@ function ProjectsListPage() {
                       </div>
                       <div className="repo-info">
                         <div className="repo-name">{p.name}</div>
+                        {/* slug stays at natural width (flex-item with no flex-grow),
+                            description claims the remaining width via .repo-path-desc
+                            and ellipsis-truncates so the row stays one line tall
+                            regardless of description length. Hover reveals full text. */}
                         <div className="repo-path">
                           <span>{p.slug}</span>
-                          {p.description && <><span>·</span><span>{p.description}</span></>}
+                          {p.description && <>
+                            <span>·</span>
+                            <span className="repo-path-desc" title={p.description}>{p.description}</span>
+                          </>}
                         </div>
                       </div>
                     </div>
@@ -222,11 +232,13 @@ function ChooseStep({ onPickEmpty, onPickImport, onClose }: { onPickEmpty: () =>
   return (
     <>
       <div className="mdl-head">
-        <div className="mdl-title">Add project</div>
+        <div className="mdl-title-wrap">
+          <div className="mdl-title">Add project</div>
+          <div className="mdl-sub">How do you want to start?</div>
+        </div>
         <button className="mdl-x" onClick={onClose} aria-label="Close"><Ic.X size={14} /></button>
       </div>
       <div className="mdl-body">
-        <div className="mdl-sub">How do you want to start?</div>
         <div className="add-choice-grid">
           <button className="add-choice" onClick={onPickEmpty}>
             <div className="add-choice-ic"><Ic.Folder size={18} /></div>
@@ -269,8 +281,12 @@ function EmptyStep({ onBack, onClose, onCreated }: { onBack: () => void; onClose
   return (
     <>
       <div className="mdl-head">
-        <div className="mdl-title">New project</div>
-        <button className="mdl-x" onClick={onClose} aria-label="Close"><Ic.X size={14} /></button>
+        <button className="mdl-back" onClick={onBack} title="Back" disabled={create.isPending}><Ic.ChevronLeft size={16} /></button>
+        <div className="mdl-title-wrap">
+          <div className="mdl-title">New project</div>
+          <div className="mdl-sub">Name and optional description. The slug is derived from the name.</div>
+        </div>
+        <button className="mdl-x" onClick={onClose} aria-label="Close" disabled={create.isPending}><Ic.X size={14} /></button>
       </div>
       <div className="mdl-body">
         <div className="form-row">
@@ -283,8 +299,8 @@ function EmptyStep({ onBack, onClose, onCreated }: { onBack: () => void; onClose
           />
           {name.trim().length > 0 && slugPreview.length > 0 && (
             <div className="form-hint">
-              Variables will resolve as <code>{`{{project.${slugPreview}.X}}`}</code>.
-              The identifier is derived from the name and can't be changed later.
+              Variables resolve as <code>{`{{project.${slugPreview}.X}}`}</code>. The
+              identifier is derived from the name and can't be changed later.
             </div>
           )}
           {name.trim().length > 0 && slugPreview.length === 0 && (
@@ -304,9 +320,9 @@ function EmptyStep({ onBack, onClose, onCreated }: { onBack: () => void; onClose
         {error && <div className="cn-banner cn-banner-err"><div className="cn-banner-p">{error}</div></div>}
       </div>
       <div className="mdl-foot">
-        <button className="btn btn-ghost" onClick={onBack} disabled={create.isPending}><Ic.ArrowLeft size={12} /> Back</button>
-        <div className="ct-spacer" />
-        <button className="btn btn-ghost" onClick={onClose} disabled={create.isPending}>Cancel</button>
+        {/* No foot-info — the form-hint under the Name input already covers
+            slug derivation; repeating it next to the button just truncates. */}
+        <div className="mdl-foot-info" />
         <button className="btn btn-primary" onClick={submit} disabled={!canSubmit}>
           {create.isPending ? "Creating…" : "Create project"}
         </button>
@@ -322,6 +338,12 @@ function ImportStep({ onBack, onClose, onCreated }: { onBack: () => void; onClos
   const [phase, setPhase] = useState<Phase>("credential");
   const [picked, setPicked] = useState<CredentialSummary | null>(null);
   const [chosenRepo, setChosenRepo] = useState<RemoteRepository | null>(null);
+
+  // Lets the operator add a brand-new OAuth credential mid-import without dismissing
+  // this modal first. When this opens, ConnectRemoteModal renders ON TOP of the
+  // AddProject modal (both share .mdl z-index 81, later-DOM wins). When it closes,
+  // React Query auto-refreshes `credentials` so the new row appears in the picker.
+  const [connectOpen, setConnectOpen] = useState(false);
 
   const [query, setQuery] = useState("");
   const [debouncedQuery, setDebouncedQuery] = useState("");
@@ -353,20 +375,41 @@ function ImportStep({ onBack, onClose, onCreated }: { onBack: () => void; onClos
   };
 
   if (phase === "credential") {
+    const showInlineAction = !credentials.isLoading && !instances.isLoading && activeCredentials.length > 0;
     return (
       <>
         <div className="mdl-head">
-          <div className="mdl-title">Import from repository</div>
+          <button className="mdl-back" onClick={onBack} title="Back"><Ic.ChevronLeft size={16} /></button>
+          <div className="mdl-title-wrap">
+            <div className="mdl-title">Import from repository</div>
+            <div className="mdl-sub">Pick the credential to browse repositories with.</div>
+          </div>
           <button className="mdl-x" onClick={onClose} aria-label="Close"><Ic.X size={14} /></button>
         </div>
         <div className="mdl-body">
-          <div className="mdl-sub">Pick the credential to browse repositories with.</div>
+          {/* Top-of-body action — visible whenever the picker list is showing.
+              See `.mdl-action-row` in ai-code-space.css for the spacing model. */}
+          {showInlineAction && (
+            <div className="mdl-action-row">
+              <button className="btn" onClick={() => setConnectOpen(true)}>
+                <Ic.Plus size={14} /> Connect new remote
+              </button>
+            </div>
+          )}
           {credentials.isLoading || instances.isLoading ? (
             <div className="ct-empty"><div className="ct-empty-h">Loading credentials…</div></div>
           ) : activeCredentials.length === 0 ? (
+            // Empty-state CTA — the previous copy pointed at a "sidebar → Providers"
+            // nav row that Phase 3.0 removed. Replace with a primary action that
+            // opens ConnectRemoteModal stacked on top of this one.
             <div className="ct-empty">
               <div className="ct-empty-h">No active credentials yet</div>
-              <div className="ct-empty-p">Connect a provider first (sidebar → Providers), then come back here.</div>
+              <div className="ct-empty-p" style={{ marginBottom: 12 }}>
+                Connect a GitHub or GitLab account to start importing repositories.
+              </div>
+              <button className="btn btn-primary" onClick={() => setConnectOpen(true)}>
+                <Ic.Link size={14} /> Connect remote
+              </button>
             </div>
           ) : (
             <div className="cred-list">
@@ -387,38 +430,67 @@ function ImportStep({ onBack, onClose, onCreated }: { onBack: () => void; onClos
             </div>
           )}
         </div>
-        <div className="mdl-foot">
-          <button className="btn btn-ghost" onClick={onBack}><Ic.ArrowLeft size={12} /> Back</button>
-        </div>
+        {/* Stacked on top of the AddProject modal (.mdl z-index 81, later DOM wins).
+            On close, React Query's useCredentials cache refetches naturally so the
+            new credential appears in the list without any manual invalidation. */}
+        {connectOpen && <ConnectRemoteModal onClose={() => setConnectOpen(false)} />}
       </>
     );
   }
 
   if (phase === "picker" && picked && pickedInstance) {
+    // Search debounce: while the operator is still typing, query !== debouncedQuery.
+    // Surface this as a "typing…" indicator so the (unchanged) list below doesn't
+    // confuse them — they SEE the input updating but the list is intentionally a
+    // beat behind. Same affordance the AddRepoModal picker uses.
+    const isSearchPending = query !== debouncedQuery;
+    // hasNextPage mirrors the AddRepoModal heuristic: trust totalPages when known
+    // (GitHub always, GitLab via GraphQL count), otherwise infer "more available"
+    // from "this page came back full" — same pattern the PR list pager uses.
+    const hasNextPage = accessible.totalPages != null
+      ? page < accessible.totalPages
+      : accessible.pageItems.length > 0;
+    // First-load panel only when nothing is on screen yet. Once rows are visible
+    // we render them and let .pick-list[data-stale] dim the previous page during
+    // an in-flight refetch — dimming the empty state on cold-load was confusing.
+    const showFirstLoadPanel = accessible.isLoading && accessible.pageItems.length === 0;
+
     return (
       <>
         <div className="mdl-head">
-          <div className="mdl-title">Pick a repository</div>
+          <button className="mdl-back" onClick={() => { setPicked(null); setPhase("credential"); }} title="Back"><Ic.ChevronLeft size={16} /></button>
+          <div className="mdl-title-wrap">
+            <div className="mdl-title">Pick a repository</div>
+            <div className="mdl-sub">{picked.displayName ?? pickedInstance.displayName} · {pickedInstance.provider}</div>
+          </div>
           <button className="mdl-x" onClick={onClose} aria-label="Close"><Ic.X size={14} /></button>
         </div>
         <div className="mdl-body">
-          <div className="ct-toolbar" style={{ paddingLeft: 0, paddingRight: 0, borderBottom: 0 }}>
-            <div className="ct-search">
-              <Ic.Search size={13} />
-              <input placeholder="Search repositories…" value={query} onChange={e => setQuery(e.target.value)} autoFocus />
-            </div>
-            <div className="ct-spacer" />
+          <div className="picker-search">
+            <Ic.Search size={13} />
+            <input placeholder="Search repositories…" value={query} onChange={e => setQuery(e.target.value)} autoFocus />
+            {isSearchPending && <span className="picker-search-pending">typing…</span>}
           </div>
 
-          {accessible.isLoading && <div className="ct-empty"><div className="ct-empty-h">Loading…</div></div>}
+          {/* Eager-fetch progress hint — visible while the loop is still loading
+              pages in the background. The operator can already act on what's
+              loaded; search + paging only see the prefix until this clears. */}
+          {accessible.isLoading && accessible.loadedCount > 0 && (
+            <div className="picker-search-hint">
+              Loaded {accessible.loadedCount.toLocaleString()} repos so far · still loading the rest…
+            </div>
+          )}
+
           {accessible.error && (
             <div className="cn-banner cn-banner-err">
               <div className="cn-banner-p">{accessible.error instanceof Error ? accessible.error.message : "Could not load repositories."}</div>
             </div>
           )}
 
-          {!accessible.isLoading && !accessible.error && (
-            <div className="pick-list">
+          {showFirstLoadPanel && <div className="ct-empty"><div className="ct-empty-h">Loading…</div></div>}
+
+          {!showFirstLoadPanel && !accessible.error && (
+            <div className="pick-list" data-stale={accessible.isRefetching}>
               {accessible.pageItems.map((repo: RemoteRepository) => {
                 const alreadyBound = boundFullPaths.has(repo.fullPath);
                 return (
@@ -437,13 +509,42 @@ function ImportStep({ onBack, onClose, onCreated }: { onBack: () => void; onClos
                   </button>
                 );
               })}
+
+              {accessible.pageItems.length === 0 && (
+                <div style={{ padding: 24, textAlign: "center", color: "var(--muted)", fontSize: 12.5 }}>
+                  {debouncedQuery
+                    ? accessible.isFullyLoaded
+                      ? `No repositories match "${debouncedQuery}".`
+                      : `No matches yet for "${debouncedQuery}" — still loading more…`
+                    : accessible.isFullyLoaded
+                      ? "This token has no repos visible. Grant access on the provider side and try again."
+                      : null}
+                </div>
+              )}
             </div>
+          )}
+
+          {(page > 1 || hasNextPage) && (
+            <Pager
+              current={page}
+              totalPages={accessible.totalPages}
+              hasNext={hasNextPage}
+              loading={accessible.isLoading}
+              onChange={setPage}
+            />
           )}
         </div>
         <div className="mdl-foot">
-          <button className="btn btn-ghost" onClick={() => { setPicked(null); setPhase("credential"); }}><Ic.ArrowLeft size={12} /> Back</button>
-          <div className="ct-spacer" />
-          <span className="mdl-foot-meta">{accessible.totalCount != null ? `${accessible.totalCount} repos` : `${accessible.loadedCount} loaded`}</span>
+          {/* Single-button step — keep info short so it never collides with
+              future trailing actions. The Pager + hints inside the body
+              already carry the load/search context; this is just a count. */}
+          <div className="mdl-foot-info">
+            {accessible.totalCount != null
+              ? `${accessible.totalCount.toLocaleString()} repo${accessible.totalCount === 1 ? "" : "s"}${accessible.isFullyLoaded ? "" : " · loading…"}`
+              : accessible.isLoading
+                ? "Loading…"
+                : `${accessible.loadedCount} loaded`}
+          </div>
         </div>
       </>
     );
@@ -517,8 +618,12 @@ function ConfirmImportStep({ credential, providerInstanceId, repo, onBack, onClo
   return (
     <>
       <div className="mdl-head">
-        <div className="mdl-title">Create project from {repo.fullPath}</div>
-        <button className="mdl-x" onClick={onClose} aria-label="Close"><Ic.X size={14} /></button>
+        <button className="mdl-back" onClick={onBack} title="Back" disabled={submitting}><Ic.ChevronLeft size={16} /></button>
+        <div className="mdl-title-wrap">
+          <div className="mdl-title">Create from repository</div>
+          <div className="mdl-sub">{repo.fullPath}</div>
+        </div>
+        <button className="mdl-x" onClick={onClose} aria-label="Close" disabled={submitting}><Ic.X size={14} /></button>
       </div>
       <div className="mdl-body">
         <div className="form-row">
@@ -545,9 +650,10 @@ function ConfirmImportStep({ credential, providerInstanceId, repo, onBack, onClo
         {error && <div className="cn-banner cn-banner-err"><div className="cn-banner-p">{error}</div></div>}
       </div>
       <div className="mdl-foot">
-        <button className="btn btn-ghost" onClick={onBack} disabled={submitting}><Ic.ArrowLeft size={12} /> Back</button>
-        <div className="ct-spacer" />
-        <button className="btn btn-ghost" onClick={onClose} disabled={submitting}>Cancel</button>
+        {/* No foot-info — the action button is wide ("Create project + bind
+            repo") and prose next to it gets ellipsis-truncated. The repo path
+            in the head's subtitle gives enough context. */}
+        <div className="mdl-foot-info" />
         <button className="btn btn-primary" onClick={submit} disabled={!canSubmit}>
           {submitting ? "Creating…" : "Create project + bind repo"}
         </button>

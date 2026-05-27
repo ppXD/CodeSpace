@@ -38,21 +38,13 @@ function WorkflowRunsPage() {
     <section className="ct">
       <div className="ct-head" style={{ paddingBottom: 14 }}>
         <div className="ct-crumbs">
-          <span
-            style={{ cursor: "pointer" }}
-            onClick={() => navigate({ to: "/teams/$teamSlug/workflows", params: { teamSlug } })}
-          >
-            Workflows
-          </span>
-          <span>·</span>
-          <span
-            style={{ cursor: "pointer" }}
-            onClick={() => navigate({ to: "/teams/$teamSlug/workflows/$workflowId", params: { teamSlug, workflowId } })}
-          >
+          <a onClick={() => navigate({ to: "/teams/$teamSlug/workflows", params: { teamSlug } })}>Workflows</a>
+          <span className="sep">/</span>
+          <a onClick={() => navigate({ to: "/teams/$teamSlug/workflows/$workflowId", params: { teamSlug, workflowId } })}>
             {workflow.data?.name ?? "Workflow"}
-          </span>
-          <span>·</span>
-          <span>Runs</span>
+          </a>
+          <span className="sep">/</span>
+          <span className="cur">Runs</span>
         </div>
         <div className="ct-title-row">
           <h1 className="ct-title">Runs</h1>

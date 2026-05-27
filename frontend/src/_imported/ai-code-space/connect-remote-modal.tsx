@@ -209,7 +209,12 @@ function ProvidersStep({ providers, loading, error, myCredentialByInstance, conn
       <div className="mdl-head">
         <div className="mdl-title-wrap">
           <div className="mdl-title">Providers</div>
-          <div className="mdl-sub">A provider is one Git service (GitHub, GitLab) wired up for the whole team. Set it up <b>once</b>; every member then signs in with their own account and gets a personal credential the platform uses to read repos, post comments, and listen for PR events.</div>
+          {/* Description intentionally minimal. The previous paragraph explained
+              the team-vs-user split and the platform's read/comment/listen verbs;
+              that detail is documentation territory and the list below (with its
+              per-row Connect / Disconnect buttons) is self-explanatory once you
+              see it. Keep this single line as a one-glance positioning hint. */}
+          <div className="mdl-sub">Connect a Git host so the team can read repos and listen for events.</div>
         </div>
         <button className="mdl-x" onClick={onClose} title="Close"><Ic.X size={14} /></button>
       </div>
@@ -266,7 +271,10 @@ function ProvidersStep({ providers, loading, error, myCredentialByInstance, conn
       </div>
 
       <div className="mdl-foot">
-        <div className="mdl-foot-info">{providers.length} provider{providers.length === 1 ? "" : "s"} · tokens encrypted at rest</div>
+        {/* Foot-info MUST stay short — the primary button on the right takes
+            growing real estate ("Add provider", future "Connect all", etc.)
+            and .mdl-foot-info uses ellipsis truncation, so prose gets cut. */}
+        <div className="mdl-foot-info">{providers.length} provider{providers.length === 1 ? "" : "s"}</div>
         <button className="btn" onClick={onClose}>Done</button>
       </div>
     </>

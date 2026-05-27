@@ -91,6 +91,12 @@ export interface MeTeam {
   role: TeamRole;
   memberCount: number;
   repositoryCount: number;
+  /**
+   * Active project count for this team. Drives the sidebar's "Projects" nav badge —
+   * see backend `MeTeam.ProjectCount`. Always ≥ 1 for any team that's had a single
+   * repo bind (the auto-seeded "default" project), 0 on fresh empty teams.
+   */
+  projectCount: number;
 }
 
 export interface MeResponse {
@@ -138,6 +144,16 @@ export interface RepositoryDetail extends RepositorySummary {
   lastSyncedDate?: string | null;
   lastError?: string | null;
   activeWebhooksCount: number;
+
+  /**
+   * Parent project — Phase 3.0 made repository.project_id NOT NULL. The detail
+   * DTO joins to <c>project</c> so the breadcrumb can render
+   * <c>Projects / {projectName} / {repoName}</c> with both ancestor crumbs
+   * clickable. See backend RepositoryDetail.ProjectId/ProjectSlug/ProjectName.
+   */
+  projectId: string;
+  projectSlug: string;
+  projectName: string;
 }
 
 export interface RemoteRepository {

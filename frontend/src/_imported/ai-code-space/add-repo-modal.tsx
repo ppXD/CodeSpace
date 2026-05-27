@@ -6,6 +6,7 @@ import type { CredentialSummary, ProviderInstanceSummary, RemoteRepository } fro
 import { ACCESSIBLE_REPOS_PAGE_SIZE, useAccessibleRepositoriesForPicker, useCredentials, useProviderInstances } from "@/hooks/use-credentials";
 import { useBindRepositoriesBulk, useRepositories } from "@/hooks/use-repositories";
 
+import { ConnectRemoteModal } from "./connect-remote-modal";
 import { Ic } from "./icons";
 import { Pager } from "./pager";
 
@@ -38,6 +39,13 @@ type Step = "credential" | "picker" | "result";
 export function AddRepoModal({ onClose, presetProjectId }: AddRepoModalProps) {
   const [step, setStep] = useState<Step>("credential");
   const [picked, setPicked] = useState<CredentialSummary | null>(null);
+
+  // Stacked ConnectRemoteModal — opened from the inline "+ Connect new remote"
+  // affordance in CredentialStep. The nested modal renders alongside this one
+  // (both share .mdl z-index 81; later-DOM wins the stacking order), and on
+  // close React Query refetches the credentials list so any new credential
+  // appears in the picker without a manual invalidation step.
+  const [connectOpen, setConnectOpen] = useState(false);
 
   // Search box value (raw, every keystroke) vs the debounced value we actually
   // send to the backend. 300ms strikes the usual balance between responsiveness
@@ -144,7 +152,7 @@ export function AddRepoModal({ onClose, presetProjectId }: AddRepoModalProps) {
           the Cancel button, or Escape closes the modal. */}
       <div className="mdl-mask" />
       <div className="mdl" role="dialog" aria-modal="true">
-        {step === "credential" && <CredentialStep credentials={activeCredentials} instances={instanceById} loading={credentials.isLoading || instances.isLoading} error={credentials.error ?? instances.error} onPick={choose} onClose={onClose} />}
+        {step === "credential" && <CredentialStep credentials={activeCredentials} instances={instanceById} loading={credentials.isLoading || instances.isLoading} error={credentials.error ?? instances.error} onPick={choose} onClose={onClose} onOpenConnect={() => setConnectOpen(true)} />}
 
         {step === "picker" && picked && pickedInstance && (
           <PickerStep
@@ -176,6 +184,11 @@ export function AddRepoModal({ onClose, presetProjectId }: AddRepoModalProps) {
 
         {step === "result" && bind.data && <ResultStep result={bind.data} selectedLookup={selected} onDone={onClose} />}
       </div>
+      {/* Render ConnectRemoteModal as a sibling of the main .mdl (NOT inside it)
+          so its own .mdl-mask + .mdl pair stack cleanly on top. Both modals share
+          .mdl z-index 81 and the later DOM wins → the inner overlay appears above
+          the AddRepo modal until dismissed. */}
+      {connectOpen && <ConnectRemoteModal onClose={() => setConnectOpen(false)} />}
     </>,
     document.body,
   );
@@ -190,20 +203,35 @@ interface CredentialStepProps {
   error: unknown;
   onPick: (c: CredentialSummary) => void;
   onClose: () => void;
+  /** Opens ConnectRemoteModal stacked on top of this modal so the operator can add
+   *  a new OAuth credential without losing the in-progress Add Repository flow. */
+  onOpenConnect: () => void;
 }
 
-function CredentialStep({ credentials, instances, loading, error, onPick, onClose }: CredentialStepProps) {
+function CredentialStep({ credentials, instances, loading, error, onPick, onClose, onOpenConnect }: CredentialStepProps) {
+  const showInlineAction = !loading && !(error instanceof Error) && credentials.length > 0;
   return (
     <>
       <div className="mdl-head">
         <div className="mdl-title-wrap">
           <div className="mdl-title">Add repository</div>
-          <div className="mdl-sub">Choose which connection to read from. We'll list the repositories that connection can see.</div>
+          <div className="mdl-sub">Pick the credential to read repositories with.</div>
         </div>
         <button className="mdl-x" onClick={onClose} title="Close"><Ic.X size={14} /></button>
       </div>
 
       <div className="mdl-body">
+        {/* Top-of-body action — matches the AddProject → Import flow's
+            affordance so both credential pickers feel the same. See
+            `.mdl-action-row` in ai-code-space.css for the spacing model. */}
+        {showInlineAction && (
+          <div className="mdl-action-row">
+            <button className="btn" onClick={onOpenConnect}>
+              <Ic.Plus size={14} /> Connect new remote
+            </button>
+          </div>
+        )}
+
         {loading && <div className="cn-loading"><Ic.Clock size={14} /> Loading…</div>}
 
         {error instanceof Error && !loading && (
@@ -214,9 +242,17 @@ function CredentialStep({ credentials, instances, loading, error, onPick, onClos
         )}
 
         {!loading && !error && credentials.length === 0 && (
+          // Empty-state CTA — the previous copy pointed at a "Connect remote from
+          // the toolbar" that no longer exists post Phase 3.0. Replace with a
+          // primary action that opens ConnectRemoteModal directly.
           <div className="cn-empty">
             <div className="cn-empty-h">No connections yet</div>
-            <div className="cn-empty-p">Connect a Git host first — open <b>Connect remote</b> from the toolbar.</div>
+            <div className="cn-empty-p" style={{ marginBottom: 12 }}>
+              Connect a GitHub or GitLab account to start adding repositories.
+            </div>
+            <button className="btn btn-primary" onClick={onOpenConnect}>
+              <Ic.Link size={14} /> Connect remote
+            </button>
           </div>
         )}
 
@@ -251,8 +287,10 @@ function CredentialStep({ credentials, instances, loading, error, onPick, onClos
       </div>
 
       <div className="mdl-foot">
-        <div className="mdl-foot-info">Live list — only repos visible to the chosen token will appear.</div>
-        <button className="btn" onClick={onClose}>Cancel</button>
+        {/* No foot-info here — the head's mdl-sub already explains the "we list
+            what the connection can see" contract; repeating it next to the
+            Cancel button just gets ellipsis-truncated on narrow modals. */}
+        <button className="btn btn-ghost" onClick={onClose}>Cancel</button>
       </div>
     </>
   );
@@ -315,7 +353,7 @@ function PickerStep({ credential, instance, page, totalPages, onPageChange, page
         <button className="mdl-back" onClick={onBack} title="Back" disabled={submitting}><Ic.ChevronLeft size={16} /></button>
         <div className="mdl-title-wrap">
           <div className="mdl-title">Add from {instance.displayName}</div>
-          <div className="mdl-sub">Repos this connection can see. We register a webhook on each and fetch contents on demand — nothing is cloned.</div>
+          <div className="mdl-sub">Select one or more to add. We register a webhook on each.</div>
         </div>
         <button className="mdl-x" onClick={onClose} title="Close" disabled={submitting}><Ic.X size={14} /></button>
       </div>
@@ -419,23 +457,26 @@ function PickerStep({ credential, instance, page, totalPages, onPageChange, page
       </div>
 
       <div className="mdl-foot">
+        {/* Foot-info kept terse — "select to add" + "webhook registered on each"
+            were redundant with the primary button label and the head subtitle.
+            Now: just count + loading status, or selection count when picking. */}
         <div className="mdl-foot-info">
           {selected.size === 0
             ? totalCount != null && totalCount > 0
-              ? `${totalCount.toLocaleString()} ${totalCount === 1 ? "repo" : "repos"}${query ? ` matching "${query}"` : ""}${isFullyLoaded ? "" : " · loading…"} · select to add`
+              ? `${totalCount.toLocaleString()} ${totalCount === 1 ? "repo" : "repos"}${isFullyLoaded ? "" : " · loading…"}`
               : isLoading
                 ? "Loading…"
-                : "Select repositories to add"
-            : `${selected.size} selected · webhook registered on each`}
+                : "No repos visible"
+            : `${selected.size} selected`}
         </div>
-        <div style={{ display: "flex", gap: 8 }}>
-          <button className="btn" onClick={onBack} disabled={submitting}>Cancel</button>
-          <button className="btn btn-primary" disabled={selected.size === 0 || submitting} onClick={onSubmit}>
-            {submitting
-              ? <><Ic.Clock size={13} /> Adding…</>
-              : <>Add {selected.size > 0 ? `${selected.size} ` : ""}{selected.size === 1 ? "repo" : "repos"}</>}
-          </button>
-        </div>
+        {/* No secondary Cancel button here — the .mdl-back in the head + X in the
+            top-right already give two exit paths. A third button labelled Cancel that
+            actually goes Back was confusing operators. */}
+        <button className="btn btn-primary" disabled={selected.size === 0 || submitting} onClick={onSubmit}>
+          {submitting
+            ? <><Ic.Clock size={13} /> Adding…</>
+            : <>Add {selected.size > 0 ? `${selected.size} ` : ""}{selected.size === 1 ? "repo" : "repos"}</>}
+        </button>
       </div>
     </>
   );
@@ -465,8 +506,8 @@ function ResultStep({ result, selectedLookup, onDone }: ResultStepProps) {
           </div>
           <div className="mdl-sub">
             {anyFailures
-              ? "Some repositories couldn't be added. Successful ones are already showing in the list."
-              : "Webhooks were registered. Repositories now appear in the list, and provider events flow live."}
+              ? "Some failed — successful ones are already in the list."
+              : "Webhooks registered. Provider events now flow live."}
           </div>
         </div>
         <button className="mdl-x" onClick={onDone} title="Close"><Ic.X size={14} /></button>
@@ -494,7 +535,7 @@ function ResultStep({ result, selectedLookup, onDone }: ResultStepProps) {
       </div>
 
       <div className="mdl-foot">
-        <div className="mdl-foot-info">{anyFailures ? "Retry failed items individually after fixing the cause." : "All set."}</div>
+        <div className="mdl-foot-info">{anyFailures ? "Retry failed items after fixing the cause." : "All set."}</div>
         <button className="btn btn-primary" onClick={onDone}>Done</button>
       </div>
     </>
