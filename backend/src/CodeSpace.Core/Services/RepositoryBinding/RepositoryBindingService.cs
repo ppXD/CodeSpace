@@ -86,7 +86,7 @@ public sealed class RepositoryBindingService : IRepositoryBindingService, IScope
         ctx = await ResolveProjectAsync(ctx, cancellationToken).ConfigureAwait(false);
         ctx = GenerateWebhookIdAndSecret(ctx);
 
-        var repository = PersistRepositoryAndPendingWebhook(ctx);
+        PersistRepositoryAndPendingWebhook(ctx, out var repository);
 
         // Flush the Repository + Pending webhook row to the DB so the dispatcher's CAS
         // UPDATE can see them. Same shape as Workflows.WorkflowService.RunManuallyAsync:
@@ -281,26 +281,49 @@ public sealed class RepositoryBindingService : IRepositoryBindingService, IScope
     }
 
     /// <summary>
-    /// Persist the Repository + a Pending RepositoryWebhook in the same SaveChanges (one EF
-    /// transaction). The webhook row carries the durable intent — secret encrypted, callback
-    /// URL committed — so if the process crashes BEFORE we get to call the dispatcher, the
-    /// reconciler picks the row up within ~2 minutes and re-dispatches.
+    /// Persist the Repository + a Pending RepositoryWebhook + the Project-Repository link
+    /// in the same SaveChanges (one EF transaction). The webhook row carries the durable
+    /// intent — secret encrypted, callback URL committed — so if the process crashes
+    /// BEFORE we get to call the dispatcher, the reconciler picks the row up within ~2
+    /// minutes and re-dispatches.
+    ///
+    /// <para>Phase 3.1 — project membership lives in the <c>project_repository</c> link
+    /// table. New binds always create a link row to <see cref="BindContext.EffectiveProjectId"/>.
+    /// Resurrected repositories: only create a link if one isn't already active for the
+    /// target project (idempotent re-bind preserves existing N:M membership).</para>
     /// </summary>
-    private Repository PersistRepositoryAndPendingWebhook(BindContext ctx)
+    private void PersistRepositoryAndPendingWebhook(BindContext ctx, out Repository repository)
     {
-        var repository = ctx.ResurrectedRepository ?? BuildRepositoryEntity(ctx);
+        repository = ctx.ResurrectedRepository ?? BuildRepositoryEntity(ctx);
         var pendingWebhook = BuildPendingWebhookEntity(ctx, repository.Id);
 
         if (ctx.ResurrectedRepository == null) _db.Repository.Add(repository);
         _db.RepositoryWebhook.Add(pendingWebhook);
 
-        return repository;
+        // Attach the project link if it doesn't already exist as active. We need the
+        // pre-loaded list from ctx.ExistingActiveProjectLinks (populated by
+        // ResolveProjectAsync) so EF doesn't double-insert and trip the composite-PK
+        // unique violation.
+        if (!ctx.ExistingActiveProjectLinkProjectIds.Contains(ctx.EffectiveProjectId))
+        {
+            var now = DateTimeOffset.UtcNow;
+            _db.ProjectRepository.Add(new ProjectRepository
+            {
+                ProjectId = ctx.EffectiveProjectId,
+                RepositoryId = repository.Id,
+                TeamId = ctx.Request.TeamId,
+                CreatedDate = now,
+                LastModifiedDate = now,
+            });
+        }
     }
 
     private static Repository BuildRepositoryEntity(BindContext ctx) => new()
     {
         Id = Guid.NewGuid(),
         TeamId = ctx.Request.TeamId,
+        // Legacy column dual-written during the Phase 3.1 transition; the project_repository
+        // link row (created in PersistRepositoryAndPendingWebhook) is the new source of truth.
         ProjectId = ctx.EffectiveProjectId,
         ProviderInstanceId = ctx.Instance.Id,
         CredentialId = ctx.Credential.Id,
@@ -319,16 +342,20 @@ public sealed class RepositoryBindingService : IRepositoryBindingService, IScope
     };
 
     /// <summary>
-    /// Resolve the target Project. Caller-supplied <see cref="BindRepositoryRequest.ProjectId"/>
-    /// wins (we verify it belongs to the same team to prevent cross-team binding); otherwise
-    /// fall back to the team's "default" project (lazily created if missing).
-    /// Resurrected repositories keep their existing ProjectId — we don't move them on re-bind.
+    /// Resolve the target Project + pre-load existing active links so the persist step
+    /// can skip duplicate insertions. Caller-supplied
+    /// <see cref="BindRepositoryRequest.ProjectId"/> wins (we verify it belongs to the
+    /// same team to prevent cross-team binding); otherwise fall back to the team's
+    /// "default" project (lazily created if missing).
+    ///
+    /// <para>Phase 3.1 — Repository:Project is N:M. Resurrected repositories may already
+    /// have project links from their prior active life; we pre-load them so the persist
+    /// step won't double-insert (composite PK would fail). Fresh binds have no existing
+    /// links by definition.</para>
     /// </summary>
     private async Task<BindContext> ResolveProjectAsync(BindContext ctx, CancellationToken cancellationToken)
     {
-        if (ctx.ResurrectedRepository != null)
-            return ctx with { EffectiveProjectId = ctx.ResurrectedRepository.ProjectId };
-
+        Guid effectiveProjectId;
         if (ctx.Request.ProjectId.HasValue)
         {
             var ok = await _db.Project.AsNoTracking()
@@ -337,11 +364,30 @@ public sealed class RepositoryBindingService : IRepositoryBindingService, IScope
             if (!ok)
                 throw new InvalidOperationException(
                     $"Project {ctx.Request.ProjectId.Value} not found in team {ctx.Request.TeamId}. Choose a project that belongs to this team.");
-            return ctx with { EffectiveProjectId = ctx.Request.ProjectId.Value };
+            effectiveProjectId = ctx.Request.ProjectId.Value;
+        }
+        else
+        {
+            effectiveProjectId = await _projectService.EnsureDefaultProjectAsync(ctx.Request.TeamId, cancellationToken).ConfigureAwait(false);
         }
 
-        var defaultProjectId = await _projectService.EnsureDefaultProjectAsync(ctx.Request.TeamId, cancellationToken).ConfigureAwait(false);
-        return ctx with { EffectiveProjectId = defaultProjectId };
+        // Pre-load active project links for THIS repo (only relevant for resurrected
+        // rows; fresh binds will have a new Guid that's not in the table yet).
+        var existingProjectIds = new HashSet<Guid>();
+        if (ctx.ResurrectedRepository != null)
+        {
+            var rows = await _db.ProjectRepository.AsNoTracking()
+                .Where(pr => pr.RepositoryId == ctx.ResurrectedRepository.Id && pr.DeletedDate == null)
+                .Select(pr => pr.ProjectId)
+                .ToListAsync(cancellationToken).ConfigureAwait(false);
+            foreach (var pid in rows) existingProjectIds.Add(pid);
+        }
+
+        return ctx with
+        {
+            EffectiveProjectId = effectiveProjectId,
+            ExistingActiveProjectLinkProjectIds = existingProjectIds,
+        };
     }
 
     /// <summary>
@@ -462,11 +508,19 @@ public sealed class RepositoryBindingService : IRepositoryBindingService, IScope
         public Repository? ResurrectedRepository { get; init; }
 
         /// <summary>
-        /// The project the new (or resurrected) repository row will be attached to. Filled
-        /// by <see cref="ResolveProjectAsync"/> from either the caller's explicit ProjectId
-        /// (after team-membership check) or the team's lazily-created Default project.
+        /// The project the new (or resurrected) repository row will be attached to via the
+        /// <c>project_repository</c> link table. Filled by <see cref="ResolveProjectAsync"/>
+        /// from either the caller's explicit ProjectId (after team-membership check) or the
+        /// team's lazily-created Default project.
         /// </summary>
         public Guid EffectiveProjectId { get; init; }
+
+        /// <summary>
+        /// Project ids that <see cref="ResolveProjectAsync"/> observed as already-active
+        /// links for this repository (only populated for resurrected repos). Persist step
+        /// uses this to skip duplicate INSERTs that would trip the composite-PK uniqueness.
+        /// </summary>
+        public IReadOnlySet<Guid> ExistingActiveProjectLinkProjectIds { get; init; } = new HashSet<Guid>();
 
         public Guid NewWebhookId { get; init; }
         public string WebhookSecret { get; init; } = default!;

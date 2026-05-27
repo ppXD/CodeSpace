@@ -1,3 +1,4 @@
+using CodeSpace.Messages.Dtos.Projects;
 using CodeSpace.Messages.Enums;
 
 namespace CodeSpace.Messages.Dtos.Repositories;
@@ -10,16 +11,21 @@ public sealed record RepositoryDetail
     public Guid? CredentialId { get; init; }
 
     /// <summary>
-    /// Parent project — every repository belongs to exactly one project (Phase 3.0).
-    /// Surfaced on the detail DTO so the SPA's repo-detail breadcrumb can render
-    /// <c>Projects / {ProjectName} / {repo.Name}</c> with both ancestor crumbs
-    /// clickable, instead of the pre-3.0 stub that pointed back to the retired
-    /// team-wide repositories list. Joined from the workflow_owned <c>project</c>
-    /// row that <c>repository.project_id</c> NOT NULL points at.
+    /// Phase 3.1 — every Project this repository is actively linked to. A repository may
+    /// belong to multiple projects (shared library across squads, monorepo carving).
+    /// Empty when no project links exist (transient state allowed by the post-3.1 schema).
     /// </summary>
-    public required Guid ProjectId { get; init; }
-    public required string ProjectSlug { get; init; }
-    public required string ProjectName { get; init; }
+    public required IReadOnlyList<ProjectRef> Projects { get; init; }
+
+    /// <summary>
+    /// Legacy "primary" project — first active link by ascending CreatedDate. Nullable
+    /// because a repo may have zero project links after the 0026 schema change. Kept on
+    /// the DTO for backward compat with the SPA's repo-detail breadcrumb; new code should
+    /// iterate <see cref="Projects"/> directly.
+    /// </summary>
+    public Guid? ProjectId { get; init; }
+    public string? ProjectSlug { get; init; }
+    public string? ProjectName { get; init; }
     public required string ExternalId { get; init; }
     public required string NamespacePath { get; init; }
     public required string Name { get; init; }
