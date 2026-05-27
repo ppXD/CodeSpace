@@ -388,19 +388,9 @@ function ImportStep({ onBack, onClose, onCreated }: { onBack: () => void; onClos
         </div>
         <div className="mdl-body">
           {/* Top-of-body action — visible whenever the picker list is showing.
-              Lives here (not in .mdl-head) so it doesn't compete with the back/X
-              chrome and stays aligned with the credential list below.
-              Spacing math: `.mdl-body` already supplies `padding: 16px 22px`, so
-              the body's own padding-top contributes 16px above this row. Mirror
-              that exactly with marginBottom: 16 — total gap above and below the
-              button is 16px each, symmetric. Adding ANY padding-top to this
-              wrapper would stack on top of the body's 16px and make the top side
-              visibly larger than the bottom (a previous attempt with
-              `padding: 10px 0` produced a 26-vs-10 asymmetry). The `.btn` (not
-              `.btn-ghost`) gives it a visible border + panel bg so it reads as a
-              deliberate action, not a stray link. */}
+              See `.mdl-action-row` in ai-code-space.css for the spacing model. */}
           {showInlineAction && (
-            <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 16 }}>
+            <div className="mdl-action-row">
               <button className="btn" onClick={() => setConnectOpen(true)}>
                 <Ic.Plus size={14} /> Connect new remote
               </button>

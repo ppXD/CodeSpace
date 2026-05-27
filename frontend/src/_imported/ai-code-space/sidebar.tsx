@@ -45,7 +45,6 @@ export function Sidebar() {
   const [userCoords, setUserCoords] = useState<Coords | null>(null);
   const userTriggerRef = useRef<HTMLDivElement | null>(null);
 
-
   const initial = active?.name.charAt(0).toUpperCase() ?? "?";
   const activeIsPersonal = active?.kind === "Personal";
   const userInitial = me.data?.name.charAt(0).toUpperCase() ?? "?";

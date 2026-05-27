@@ -221,19 +221,11 @@ function CredentialStep({ credentials, instances, loading, error, onPick, onClos
       </div>
 
       <div className="mdl-body">
-        {/* Top-of-body action — visible whenever the picker list is showing.
-            Matches the AddProject → Import flow's affordance so both credential
-            pickers feel the same. Lives here (not in .mdl-head) so it doesn't
-            compete with the close X.
-            Spacing math: `.mdl-body` already supplies `padding: 16px 22px`, so
-            the body's own padding-top contributes 16px above this row. Mirror
-            that exactly with marginBottom: 16 — total gap above and below the
-            button is 16px each, symmetric. Adding ANY padding-top to this
-            wrapper would stack on top of the body's 16px and make the top side
-            visibly larger than the bottom. `.btn` (not `.btn-ghost`) gives the
-            button a visible border + panel bg. */}
+        {/* Top-of-body action — matches the AddProject → Import flow's
+            affordance so both credential pickers feel the same. See
+            `.mdl-action-row` in ai-code-space.css for the spacing model. */}
         {showInlineAction && (
-          <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 16 }}>
+          <div className="mdl-action-row">
             <button className="btn" onClick={onOpenConnect}>
               <Ic.Plus size={14} /> Connect new remote
             </button>

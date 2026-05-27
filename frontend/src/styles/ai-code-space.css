@@ -1169,6 +1169,12 @@
 .mdl-body::-webkit-scrollbar { width: 8px; }
 .mdl-body::-webkit-scrollbar-thumb { background: rgba(0,0,0,.15); border-radius: 4px; }
 .mdl-foot { padding: 14px 22px; border-top: 1px solid var(--line); display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+/* Right-aligned action row at the top of a .mdl-body (above a credential or
+ * picker list). 16px marginBottom mirrors .mdl-body's 16px padding-top, giving
+ * the button equal breathing room above and below; without it the row hugs
+ * the body's top edge unevenly. Used by the credential pickers in
+ * AddProjectModal (ImportStep) and AddRepoModal (CredentialStep). */
+.mdl-action-row { display: flex; justify-content: flex-end; margin-bottom: 16px; }
 /* Truncate-on-overflow rather than push the action buttons. The info string can grow
    ("13 selected · webhook registered on each") and narrow modals (440px dialog) don't
    have room to grow either side without something giving. */
@@ -2602,9 +2608,6 @@
   background: var(--panel); font-size: 12.5px; color: var(--ink);
 }
 .acs-root .confirm-repo-sub { font-size: 11px; color: var(--muted); margin-left: auto; }
-
-/* Modal footer meta — right-aligned secondary text (e.g. "30 repos loaded"). */
-.acs-root .mdl-foot-meta { font-size: 11.5px; color: var(--muted); }
 
 /* Row-action menu inside .tbl rows on the project detail page. */
 .acs-root .row-act {
