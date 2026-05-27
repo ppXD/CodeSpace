@@ -6,6 +6,7 @@ import type { CredentialSummary, ProviderInstanceSummary, RemoteRepository } fro
 import { ACCESSIBLE_REPOS_PAGE_SIZE, useAccessibleRepositoriesForPicker, useCredentials, useProviderInstances } from "@/hooks/use-credentials";
 import { useBindRepositoriesBulk, useRepositories } from "@/hooks/use-repositories";
 
+import { ConnectRemoteModal } from "./connect-remote-modal";
 import { Ic } from "./icons";
 import { Pager } from "./pager";
 
@@ -38,6 +39,13 @@ type Step = "credential" | "picker" | "result";
 export function AddRepoModal({ onClose, presetProjectId }: AddRepoModalProps) {
   const [step, setStep] = useState<Step>("credential");
   const [picked, setPicked] = useState<CredentialSummary | null>(null);
+
+  // Stacked ConnectRemoteModal — opened from the inline "+ Connect new remote"
+  // affordance in CredentialStep. The nested modal renders alongside this one
+  // (both share .mdl z-index 81; later-DOM wins the stacking order), and on
+  // close React Query refetches the credentials list so any new credential
+  // appears in the picker without a manual invalidation step.
+  const [connectOpen, setConnectOpen] = useState(false);
 
   // Search box value (raw, every keystroke) vs the debounced value we actually
   // send to the backend. 300ms strikes the usual balance between responsiveness
@@ -144,7 +152,7 @@ export function AddRepoModal({ onClose, presetProjectId }: AddRepoModalProps) {
           the Cancel button, or Escape closes the modal. */}
       <div className="mdl-mask" />
       <div className="mdl" role="dialog" aria-modal="true">
-        {step === "credential" && <CredentialStep credentials={activeCredentials} instances={instanceById} loading={credentials.isLoading || instances.isLoading} error={credentials.error ?? instances.error} onPick={choose} onClose={onClose} />}
+        {step === "credential" && <CredentialStep credentials={activeCredentials} instances={instanceById} loading={credentials.isLoading || instances.isLoading} error={credentials.error ?? instances.error} onPick={choose} onClose={onClose} onOpenConnect={() => setConnectOpen(true)} />}
 
         {step === "picker" && picked && pickedInstance && (
           <PickerStep
@@ -176,6 +184,11 @@ export function AddRepoModal({ onClose, presetProjectId }: AddRepoModalProps) {
 
         {step === "result" && bind.data && <ResultStep result={bind.data} selectedLookup={selected} onDone={onClose} />}
       </div>
+      {/* Render ConnectRemoteModal as a sibling of the main .mdl (NOT inside it)
+          so its own .mdl-mask + .mdl pair stack cleanly on top. Both modals share
+          .mdl z-index 81 and the later DOM wins → the inner overlay appears above
+          the AddRepo modal until dismissed. */}
+      {connectOpen && <ConnectRemoteModal onClose={() => setConnectOpen(false)} />}
     </>,
     document.body,
   );
@@ -190,9 +203,13 @@ interface CredentialStepProps {
   error: unknown;
   onPick: (c: CredentialSummary) => void;
   onClose: () => void;
+  /** Opens ConnectRemoteModal stacked on top of this modal so the operator can add
+   *  a new OAuth credential without losing the in-progress Add Repository flow. */
+  onOpenConnect: () => void;
 }
 
-function CredentialStep({ credentials, instances, loading, error, onPick, onClose }: CredentialStepProps) {
+function CredentialStep({ credentials, instances, loading, error, onPick, onClose, onOpenConnect }: CredentialStepProps) {
+  const showInlineAction = !loading && !(error instanceof Error) && credentials.length > 0;
   return (
     <>
       <div className="mdl-head">
@@ -204,6 +221,18 @@ function CredentialStep({ credentials, instances, loading, error, onPick, onClos
       </div>
 
       <div className="mdl-body">
+        {/* Top-of-body action — visible whenever the picker list is showing.
+            Matches the AddProject → Import flow's affordance so both credential
+            pickers feel the same. Lives here (not in .mdl-head) so it doesn't
+            compete with the close X. */}
+        {showInlineAction && (
+          <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 8 }}>
+            <button className="btn btn-ghost" onClick={onOpenConnect}>
+              <Ic.Plus size={12} /> Connect new remote
+            </button>
+          </div>
+        )}
+
         {loading && <div className="cn-loading"><Ic.Clock size={14} /> Loading…</div>}
 
         {error instanceof Error && !loading && (
@@ -214,9 +243,17 @@ function CredentialStep({ credentials, instances, loading, error, onPick, onClos
         )}
 
         {!loading && !error && credentials.length === 0 && (
+          // Empty-state CTA — the previous copy pointed at a "Connect remote from
+          // the toolbar" that no longer exists post Phase 3.0. Replace with a
+          // primary action that opens ConnectRemoteModal directly.
           <div className="cn-empty">
             <div className="cn-empty-h">No connections yet</div>
-            <div className="cn-empty-p">Connect a Git host first — open <b>Connect remote</b> from the toolbar.</div>
+            <div className="cn-empty-p" style={{ marginBottom: 12 }}>
+              Connect a GitHub or GitLab account to start adding repositories.
+            </div>
+            <button className="btn btn-primary" onClick={onOpenConnect}>
+              <Ic.Link size={14} /> Connect remote
+            </button>
           </div>
         )}
 

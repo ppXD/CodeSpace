@@ -6,6 +6,7 @@ import { clearAuthState } from "@/api/auth";
 import type { MeTeam } from "@/api/types";
 import { teamToUrlSlug, useActiveTeam } from "@/hooks/use-me";
 
+import { ConnectRemoteModal } from "./connect-remote-modal";
 import { Ic } from "./icons";
 
 /**
@@ -44,6 +45,13 @@ export function Sidebar() {
   const [userOpen, setUserOpen] = useState(false);
   const [userCoords, setUserCoords] = useState<Coords | null>(null);
   const userTriggerRef = useRef<HTMLDivElement | null>(null);
+
+  // Persistent top-level entry into the Connections manager (ConnectRemoteModal
+  // already covers list + add + revoke, so one item handles all credential ops).
+  // Lives in the user popover because credentials are user-owned (each carries an
+  // ownerUserId), which matches the popover's "your-account actions" mental model
+  // alongside Change password / Sign out.
+  const [connectOpen, setConnectOpen] = useState(false);
 
   const initial = active?.name.charAt(0).toUpperCase() ?? "?";
   const activeIsPersonal = active?.kind === "Personal";
@@ -195,6 +203,16 @@ export function Sidebar() {
             className="sb-pop-item"
             onClick={() => {
               setUserOpen(false);
+              setConnectOpen(true);
+            }}
+          >
+            <Ic.Link size={14} />
+            <span>Connections</span>
+          </button>
+          <button
+            className="sb-pop-item"
+            onClick={() => {
+              setUserOpen(false);
               navigate({ to: "/change-password" });
             }}
           >
@@ -313,6 +331,10 @@ export function Sidebar() {
         <Ic.ChevronUpDown size={14} className="sb-ws-caret" />
       </div>
       {userPopover}
+      {/* Connections manager — renders at sidebar level so it floats above the
+          entire app shell (its own .mdl-mask covers the viewport). Driven by the
+          user-popover "Connections" item; closes naturally on its X / Esc. */}
+      {connectOpen && <ConnectRemoteModal onClose={() => setConnectOpen(false)} />}
     </aside>
   );
 }
