@@ -20,3 +20,14 @@
 -- already removed (e.g. schemaversions reset).
 
 ALTER TABLE repository DROP COLUMN IF EXISTS project_id;
+
+-- Refresh the table comment on project_repository: the prior text (set by 0026)
+-- described the "during the 3.1 transition the legacy repository.project_id
+-- column is dual-written" state. That transition is now complete, so re-state
+-- the comment to match the steady-state schema. `COMMENT ON TABLE` is naturally
+-- idempotent — it overwrites the previous value.
+COMMENT ON TABLE project_repository IS
+    'Phase 3.1 — N:M link between Project and Repository. A repository may belong '
+    'to many projects (shared libraries, monorepo carving) and a project owns many '
+    'repositories. team_id denormalised for tenancy filtering — must match both '
+    'project.team_id and repository.team_id at write time (enforced in service).';

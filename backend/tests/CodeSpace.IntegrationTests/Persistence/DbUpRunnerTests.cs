@@ -36,6 +36,18 @@ public class DbUpRunnerTests
         exists.ShouldBeTrue($"Table '{tableName}' should exist after migration");
     }
 
+    [Theory]
+    [InlineData("repository", "project_id")]   // dropped by 0027 — see PR notes; the link table is now the sole project membership source
+    public async Task Column_does_not_exist_after_migration(string tableName, string columnName)
+    {
+        var exists = await ColumnExistsAsync(tableName, columnName).ConfigureAwait(false);
+
+        exists.ShouldBeFalse(
+            $"Column '{tableName}.{columnName}' must NOT exist after migrations apply — it was dropped by 0027_drop_repository_project_id.sql. " +
+            $"If present, either 0027 did not run, or a later migration re-added the column (unintentional regression). " +
+            $"Diagnose with: psql -c '\\d {tableName}' against the test database.");
+    }
+
     private async Task<bool> TableExistsAsync(string tableName)
     {
         await using var conn = new NpgsqlConnection(_fixture.ConnectionString);
@@ -45,6 +57,21 @@ public class DbUpRunnerTests
             "SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_schema = 'public' AND table_name = @t)",
             conn);
         cmd.Parameters.AddWithValue("@t", tableName);
+
+        var result = await cmd.ExecuteScalarAsync().ConfigureAwait(false);
+        return (bool)result!;
+    }
+
+    private async Task<bool> ColumnExistsAsync(string tableName, string columnName)
+    {
+        await using var conn = new NpgsqlConnection(_fixture.ConnectionString);
+        await conn.OpenAsync().ConfigureAwait(false);
+
+        await using var cmd = new NpgsqlCommand(
+            "SELECT EXISTS (SELECT FROM information_schema.columns WHERE table_schema = 'public' AND table_name = @t AND column_name = @c)",
+            conn);
+        cmd.Parameters.AddWithValue("@t", tableName);
+        cmd.Parameters.AddWithValue("@c", columnName);
 
         var result = await cmd.ExecuteScalarAsync().ConfigureAwait(false);
         return (bool)result!;
