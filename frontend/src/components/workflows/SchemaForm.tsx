@@ -2,6 +2,7 @@ import { useMemo } from "react";
 
 import type { ScopeSuggestion } from "./scope-introspection";
 import { RepositorySelector } from "./selectors/RepositorySelector";
+import { TriggerRepositoriesSelector } from "./selectors/TriggerRepositoriesSelector";
 import { VariablePickerInput } from "./VariablePickerInput";
 
 /**
@@ -258,6 +259,17 @@ function renderCustomSelector(key: string, _schema: Schema, value: unknown, onCh
         <RepositorySelector
           value={typeof value === "string" ? value : ""}
           onChange={(next) => onChange(next === "" ? undefined : next)}
+        />
+      );
+    case "trigger.repositories":
+      // List editor for the { repositoryId, labels? }[] shape used by PR-trigger
+      // activation configs. The selector handles legacy { repositoryId, labels? }
+      // shape transparently — see migrateLegacyTriggerConfig — so this branch can
+      // accept any of the three shapes the matcher tolerates.
+      return (
+        <TriggerRepositoriesSelector
+          value={value}
+          onChange={(next) => onChange(next)}
         />
       );
     default:

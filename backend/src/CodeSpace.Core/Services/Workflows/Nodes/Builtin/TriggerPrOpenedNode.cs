@@ -31,6 +31,7 @@ public sealed class TriggerPrOpenedNode : INodeRuntime
               "properties": {
                 "repositories": {
                   "type": "array",
+                  "x-selector": "trigger.repositories",
                   "description": "Repositories this trigger fires on. Each entry binds a repo to its own label filter so different repos can carry different label policies. Leave empty to match nothing; omit the key entirely to match every repo bound to this team.",
                   "items": {
                     "type": "object",
@@ -38,7 +39,6 @@ public sealed class TriggerPrOpenedNode : INodeRuntime
                       "repositoryId": {
                         "type": "string",
                         "format": "uuid",
-                        "x-selector": "repository",
                         "description": "Repository to match."
                       },
                       "labels": {
