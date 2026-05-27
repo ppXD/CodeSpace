@@ -34,6 +34,14 @@ public sealed class IngestionAuditor : IIngestionAuditor, IScopedDependency
             TeamId = context.TeamId,
             SourceType = context.SourceType,
             ExternalEventId = context.ExternalEventId,
+            // Phase 3.0 — dedup via the per-row uq_wrr_idempotency_key partial unique index.
+            // Migration 0024 dropped the global (source_type, external_event_id) unique index
+            // to allow multi-activation fan-out on the run-creation path; rejected audit rows
+            // still need per-(source, delivery) dedup but don't have an activation to scope by.
+            // Use the "rejected:" prefix so this keyspace can never collide with RunStarter's
+            // {sourceType}:{deliveryId}:{activationId} form (which has 3+ colons + a GUID
+            // suffix and is only emitted for fan-out into specific activations).
+            IdempotencyKey = BuildRejectedDedupKey(context.SourceType, context.ExternalEventId),
             ActorType = WorkflowRunActorTypes.Webhook,
             ActorId = null,
             NormalizedPayloadJson = "{}",
@@ -48,14 +56,25 @@ public sealed class IngestionAuditor : IIngestionAuditor, IScopedDependency
         await SaveAuditRowAsync(row, context.SourceType, context.ExternalEventId, cancellationToken).ConfigureAwait(false);
     }
 
+    /// <summary>
+    /// Synthesise the per-delivery dedup key for rejected audit rows. Null when there's no
+    /// delivery id (signature-fail rejection happens BEFORE we parse the body, so no
+    /// ExternalEventId); the row is then unique-by-default and we just accept all duplicates
+    /// — they're rare and the operator audit value of having both is higher than the cost.
+    /// </summary>
+    private static string? BuildRejectedDedupKey(string sourceType, string? externalEventId) =>
+        externalEventId == null ? null : $"rejected:{sourceType}:{externalEventId}";
+
     public async Task WriteNoMatchRejectedAsync(NormalizedEvent normalizedEvent, Guid teamId, CancellationToken cancellationToken)
     {
+        var sourceType = $"{WorkflowRunSourceTypes.ProviderPrefix}unmatched";
         var row = new WorkflowRunRequest
         {
             Id = Guid.NewGuid(),
             TeamId = teamId,
-            SourceType = $"{WorkflowRunSourceTypes.ProviderPrefix}unmatched",
+            SourceType = sourceType,
             ExternalEventId = normalizedEvent.ProviderEventId,
+            IdempotencyKey = BuildRejectedDedupKey(sourceType, normalizedEvent.ProviderEventId),
             ActorType = WorkflowRunActorTypes.Webhook,
             ActorId = null,
             NormalizedPayloadJson = "{}",

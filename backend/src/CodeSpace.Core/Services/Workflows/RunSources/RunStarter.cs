@@ -96,8 +96,14 @@ public sealed class RunStarter : IRunStarter, IScopedDependency
             // The first run already exists; the second attempt is a no-op. Detach both
             // tracked-but-unsaved entities so the same DbContext isn't poisoned for the
             // caller's subsequent reads.
-            _db.WorkflowRunRequest.Local.Remove(_db.WorkflowRunRequest.Local.First(r => r.Id == requestId));
-            _db.WorkflowRun.Local.Remove(_db.WorkflowRun.Local.First(r => r.Id == runId));
+            //
+            // EF's behaviour with `Added` entities that failed a unique-violation insert is
+            // inconsistent across providers (Npgsql leaves them tracked as Added; SQL Server
+            // detaches some). We defensively probe + remove only what's still tracked. The
+            // older `.First(...)` form crashed with "Sequence contains no matching element"
+            // when EF had already detached the entity for us.
+            DetachIfTracked(_db.WorkflowRunRequest.Local, requestId, r => r.Id);
+            DetachIfTracked(_db.WorkflowRun.Local, runId, r => r.Id);
 
             _logger.LogInformation(
                 "RunStarter: deduplicated duplicate provider event. SourceType={SourceType} ExternalEventId={ExternalEventId} IdempotencyKey={IdempotencyKey} — silently no-op",
@@ -120,6 +126,19 @@ public sealed class RunStarter : IRunStarter, IScopedDependency
 
     private static bool IsUniqueViolation(DbUpdateException ex) =>
         ex.InnerException is PostgresException pg && pg.SqlState == PostgresUniqueViolation;
+
+    /// <summary>
+    /// Defensive detach: removes <paramref name="id"/> from the local change tracker view
+    /// only if EF still has it. Some EF/provider combinations auto-detach entities after a
+    /// failed-insert SaveChanges; calling <c>Local.Remove</c> on a non-tracked instance is
+    /// fine but locating it via <c>.First()</c> on an empty match throws — hence the probe.
+    /// </summary>
+    private static void DetachIfTracked<TEntity>(Microsoft.EntityFrameworkCore.ChangeTracking.LocalView<TEntity> local, Guid id, Func<TEntity, Guid> selectId)
+        where TEntity : class
+    {
+        var match = local.FirstOrDefault(e => selectId(e) == id);
+        if (match != null) local.Remove(match);
+    }
 
     private static void Validate(RunSourceEnvelope envelope)
     {

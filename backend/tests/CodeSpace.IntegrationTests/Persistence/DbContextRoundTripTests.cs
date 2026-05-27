@@ -99,6 +99,7 @@ public class DbContextRoundTripTests
 
         var owner = new User { Id = Guid.NewGuid(), Email = $"owner-{suffix}@test", Name = "Owner" };
         var team = new Team { Id = Guid.NewGuid(), Slug = $"team-{suffix}", Name = "Team", OwnerUserId = owner.Id };
+        var project = TestProjectSeed.BuildDefaultProject(team.Id, owner.Id);
 
         var instance = new ProviderInstance
         {
@@ -126,6 +127,7 @@ public class DbContextRoundTripTests
         {
             Id = Guid.NewGuid(),
             TeamId = team.Id,
+            ProjectId = project.Id,
             ProviderInstanceId = instance.Id,
             CredentialId = credential.Id,
             ExternalId = $"42-{suffix}",
@@ -149,6 +151,7 @@ public class DbContextRoundTripTests
 
         db.User.Add(owner);
         db.Team.Add(team);
+        db.Project.Add(project);
         db.ProviderInstance.Add(instance);
         db.Credential.Add(credential);
         db.Repository.Add(repo);

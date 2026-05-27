@@ -188,6 +188,8 @@ public class WebhookIngestionAuditFlowTests
 
         db.User.Add(new User { Id = userId, Email = $"audit-{userId:N}@test.local", Name = $"audit-{userId:N}", CreatedBy = SystemUsers.SeederId, LastModifiedBy = SystemUsers.SeederId });
         db.Team.Add(new Team { Id = teamId, Slug = $"audit-{teamId:N}", Name = "Audit Test", Kind = TeamKind.Workspace, OwnerUserId = userId, CreatedBy = SystemUsers.SeederId, LastModifiedBy = SystemUsers.SeederId });
+        var project = TestProjectSeed.BuildDefaultProject(teamId, userId);
+        db.Project.Add(project);
 
         var providerInstanceId = Guid.NewGuid();
         db.ProviderInstance.Add(new ProviderInstance
@@ -206,6 +208,7 @@ public class WebhookIngestionAuditFlowTests
         {
             Id = repositoryId,
             TeamId = teamId,
+            ProjectId = project.Id,
             ProviderInstanceId = providerInstanceId,
             ExternalId = "test-ext-" + Guid.NewGuid().ToString("N")[..6],
             NamespacePath = "audit",

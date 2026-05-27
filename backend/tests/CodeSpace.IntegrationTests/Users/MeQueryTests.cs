@@ -109,6 +109,7 @@ public class MeQueryTests
         var member = new User { Id = Guid.NewGuid(), Email = $"m-{suffix}@x", Name = "member" };
 
         var team = new Team { Id = Guid.NewGuid(), Slug = $"team-{suffix}", Name = "BusyTeam", OwnerUserId = user.Id };
+        var project = TestProjectSeed.BuildDefaultProject(team.Id, user.Id);
         var instance = new ProviderInstance
         {
             Id = Guid.NewGuid(),
@@ -120,11 +121,12 @@ public class MeQueryTests
 
         db.User.AddRange(user, member);
         db.Team.Add(team);
+        db.Project.Add(project);
         db.ProviderInstance.Add(instance);
         db.TeamMembership.Add(new TeamMembership { Id = Guid.NewGuid(), TeamId = team.Id, UserId = member.Id, Role = TeamRole.Member });
         db.Repository.AddRange(
-            new Repository { Id = Guid.NewGuid(), TeamId = team.Id, ProviderInstanceId = instance.Id, ExternalId = "r1", NamespacePath = "n", Name = "r1", FullPath = "n/r1", DefaultBranch = "main", Visibility = RepositoryVisibility.Private, WebUrl = "x", Status = RepositoryStatus.Active },
-            new Repository { Id = Guid.NewGuid(), TeamId = team.Id, ProviderInstanceId = instance.Id, ExternalId = "r2", NamespacePath = "n", Name = "r2", FullPath = "n/r2", DefaultBranch = "main", Visibility = RepositoryVisibility.Private, WebUrl = "x", Status = RepositoryStatus.Active });
+            new Repository { Id = Guid.NewGuid(), TeamId = team.Id, ProjectId = project.Id, ProviderInstanceId = instance.Id, ExternalId = "r1", NamespacePath = "n", Name = "r1", FullPath = "n/r1", DefaultBranch = "main", Visibility = RepositoryVisibility.Private, WebUrl = "x", Status = RepositoryStatus.Active },
+            new Repository { Id = Guid.NewGuid(), TeamId = team.Id, ProjectId = project.Id, ProviderInstanceId = instance.Id, ExternalId = "r2", NamespacePath = "n", Name = "r2", FullPath = "n/r2", DefaultBranch = "main", Visibility = RepositoryVisibility.Private, WebUrl = "x", Status = RepositoryStatus.Active });
 
         await db.SaveChangesAsync().ConfigureAwait(false);
 

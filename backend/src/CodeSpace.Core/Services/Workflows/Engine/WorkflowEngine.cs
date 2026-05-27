@@ -417,9 +417,10 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
     /// <para>References are extracted from the WHOLE definition (every node's <c>Inputs</c>
     /// + <c>Config</c>) — paths starting with <c>project.</c> contribute their second
     /// segment as a slug. Unknown / soft-deleted slugs are silently skipped: save-time
-    /// validation guarantees no production workflow references a missing project, so a
-    /// skip here means the operator manually mutated the row or the project was deleted
-    /// post-publish (treated as an empty bag — the {{}} reference resolves to null).</para>
+    /// validation enforces shape only (<c>project.&lt;slug&gt;.&lt;name&gt;</c>) and does
+    /// NOT verify the slug exists — that would require a DB lookup at every save and would
+    /// race with concurrent project deletes. Runtime gracefully resolves missing slugs to
+    /// null (treated as an empty bag — the {{}} reference resolves to null).</para>
     /// </summary>
     private async Task<(IReadOnlyDictionary<string, IReadOnlyDictionary<string, JsonElement>> Bag, IReadOnlyList<string> SecretPaths)> LoadReferencedProjectVariablesAsync(Guid teamId, WorkflowDefinition definition, CancellationToken cancellationToken)
     {

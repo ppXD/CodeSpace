@@ -127,11 +127,40 @@ public sealed class ProjectService : IProjectService, IScopedDependency
         };
 
         _db.Project.Add(project);
-        await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+
+        try
+        {
+            await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+        }
+        catch (DbUpdateException ex) when (IsTeamSlugUniqueViolation(ex))
+        {
+            // Race-loss: two concurrent callers derived the same slug from different
+            // names ("Acme Backend" + "acme backend"). EnsureSlugAvailableAsync's
+            // pre-check passed for both before either SaveChanges landed; the partial
+            // unique index `uq_project_team_slug_active` catches the loser at write
+            // time. Translate to the same friendly error the pre-check would have
+            // emitted so the operator sees one consistent "rename" message instead
+            // of a raw 500.
+            _db.Project.Local.Remove(project);
+            throw new InvalidOperationException(
+                $"A project with slug '{slug}' (derived from name '{name}') already exists in this team. " +
+                $"Pick a different project name — the slug is used as the prefix for variable references " +
+                $"({{{{project.{slug}.X}}}}) and must be unique per team.", ex);
+        }
 
         _logger.LogInformation("Project created: team={TeamId} project={ProjectId} slug={Slug}", teamId, project.Id, slug);
         return project.Id;
     }
+
+    /// <summary>
+    /// True iff the exception is a Postgres unique-violation on the team-slug partial
+    /// unique index. Other 23505s (a future column with its own unique index) shouldn't
+    /// be translated — let those bubble as 500 so we notice + add specific handling.
+    /// </summary>
+    private static bool IsTeamSlugUniqueViolation(DbUpdateException ex) =>
+        ex.InnerException is Npgsql.PostgresException pg
+            && pg.SqlState == "23505"
+            && (pg.ConstraintName?.Contains("uq_project_team_slug_active", StringComparison.Ordinal) ?? false);
 
     public async Task MoveRepositoryAsync(Guid teamId, Guid repositoryId, Guid targetProjectId, Guid actorUserId, CancellationToken cancellationToken)
     {

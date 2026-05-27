@@ -418,6 +418,8 @@ public class RepositoryWebhookRegistrationFlowTests
         var db = scope.Resolve<CodeSpaceDbContext>();
         var encryptor = scope.Resolve<IPayloadEncryptor>();
 
+        var projectId = await db.Project.AsNoTracking().Where(p => p.TeamId == teamId).Select(p => p.Id).SingleAsync().ConfigureAwait(false);
+
         var repoId = Guid.NewGuid();
         var webhookId = Guid.NewGuid();
         var suffix = Guid.NewGuid().ToString("N").Substring(0, 6);
@@ -426,6 +428,7 @@ public class RepositoryWebhookRegistrationFlowTests
         {
             Id = repoId,
             TeamId = teamId,
+            ProjectId = projectId,
             ProviderInstanceId = providerInstanceId,
             CredentialId = credentialId,
             ExternalId = $"id-staged-{suffix}",
@@ -468,6 +471,7 @@ public class RepositoryWebhookRegistrationFlowTests
         var suffix = Guid.NewGuid().ToString("N").Substring(0, 8);
         var owner = new User { Id = Guid.NewGuid(), Email = $"owner-{suffix}@x", Name = "Owner" };
         var team = new Team { Id = Guid.NewGuid(), Slug = $"team-{suffix}", Name = "Team", OwnerUserId = owner.Id };
+        var project = TestProjectSeed.BuildDefaultProject(team.Id, owner.Id);
         var instance = new ProviderInstance
         {
             Id = Guid.NewGuid(),
@@ -490,6 +494,7 @@ public class RepositoryWebhookRegistrationFlowTests
 
         db.User.Add(owner);
         db.Team.Add(team);
+        db.Project.Add(project);
         db.ProviderInstance.Add(instance);
         db.Credential.Add(credential);
         await db.SaveChangesAsync().ConfigureAwait(false);

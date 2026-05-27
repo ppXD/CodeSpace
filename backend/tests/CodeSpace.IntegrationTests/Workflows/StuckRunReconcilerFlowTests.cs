@@ -254,6 +254,11 @@ public class StuckRunReconcilerFlowTests
             TeamId = teamId,
             RunRequestId = requestId,
             Status = status,
+            // Phase 3.0 hardening — Enqueued status now requires EnqueuedAt to be set
+            // (the dispatcher's CAS stamps it; the reconciler's stuck-Enqueued sweep
+            // reads it). Backdate it alongside CreatedDate so a staged "stuck Enqueued
+            // for 11 minutes" row actually looks stale to the reconciler.
+            EnqueuedAt = status == WorkflowRunStatus.Enqueued ? createdAt : null,
             StartedAt = startedAt,
             CreatedBy = SystemUsers.SeederId,
             LastModifiedBy = SystemUsers.SeederId,

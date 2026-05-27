@@ -237,6 +237,7 @@ public class RevokeCredentialFlowTests
         var db = scope.Resolve<CodeSpaceDbContext>();
 
         var providerInstanceId = await db.Credential.AsNoTracking().Where(c => c.Id == credId).Select(c => c.ProviderInstanceId).SingleAsync().ConfigureAwait(false);
+        var projectId = await db.Project.AsNoTracking().Where(p => p.TeamId == teamId).Select(p => p.Id).SingleAsync().ConfigureAwait(false);
         var ids = new List<Guid>();
 
         for (var i = 0; i < count; i++)
@@ -245,6 +246,7 @@ public class RevokeCredentialFlowTests
             {
                 Id = Guid.NewGuid(),
                 TeamId = teamId,
+                ProjectId = projectId,
                 ProviderInstanceId = providerInstanceId,
                 CredentialId = credId,
                 ExternalId = Guid.NewGuid().ToString("N"),
@@ -284,6 +286,7 @@ public class RevokeCredentialFlowTests
         var suffix = Guid.NewGuid().ToString("N").Substring(0, 8);
         var user = new User { Id = Guid.NewGuid(), Email = $"u-{suffix}@x", Name = "tester" };
         var team = new Team { Id = Guid.NewGuid(), Slug = $"t-{suffix}", Name = "Team", OwnerUserId = user.Id };
+        var project = TestProjectSeed.BuildDefaultProject(team.Id, user.Id);
         var instance = new ProviderInstance
         {
             Id = Guid.NewGuid(),
@@ -307,6 +310,7 @@ public class RevokeCredentialFlowTests
 
         db.User.Add(user);
         db.Team.Add(team);
+        db.Project.Add(project);
         db.ProviderInstance.Add(instance);
         db.Credential.Add(cred);
         await db.SaveChangesAsync().ConfigureAwait(false);
