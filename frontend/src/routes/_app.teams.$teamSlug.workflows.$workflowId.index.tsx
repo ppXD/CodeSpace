@@ -53,6 +53,9 @@ type OpenVarsPanel = "variables" | "team" | "inputs" | "outputs" | "system";
 import { useNodeManifests, useSystemVariables, useUpdateWorkflow, useWorkflow } from "@/hooks/use-workflows";
 // Real per-scope variable lists feed the autocomplete picker + toolbar counts.
 import { useTeamVariables, useWorkflowVariables } from "@/hooks/use-variables";
+import { useProjects } from "@/hooks/use-projects";
+import { projectVariablesApi, type VariableSummary } from "@/api/variables";
+import { useQueries } from "@tanstack/react-query";
 
 /**
  * Dify-style canvas editor. Three-pane layout:
@@ -153,6 +156,30 @@ function Editor({ workflow, manifests, onBackToList, onOpenRuns, saving, onSave 
   const workflowVariablesList = workflowVariablesQuery.data ?? [];
   const teamVariablesList = teamVariablesQuery.data ?? [];
   const systemVariablesList = systemVariablesQuery.data ?? [];
+
+  // Project variables — fan-out one query per project in the team. The backend
+  // resolves {{project.{slug}.{name}}} against any project in the team (not just
+  // the workflow's own), so the picker needs the full set so authors can pick
+  // any legal ref. useQueries is the right primitive: dynamic N, all reads share
+  // the same React Query cache key as the project-variable mutations (see
+  // useSet/DeleteProjectVariable invalidations), so a write on one panel
+  // refreshes the autocomplete here without a page reload.
+  const projectsQuery = useProjects();
+  const projectList = projectsQuery.data ?? [];
+  const projectVarQueries = useQueries({
+    queries: projectList.map((p) => ({
+      queryKey: ["project-variables", p.id],
+      queryFn: () => projectVariablesApi.list(p.id),
+      staleTime: 60_000,
+    })),
+  });
+  const projectVariablesForScope = useMemo(
+    () => projectList.map((p, i) => ({
+      slug: p.slug,
+      variables: (projectVarQueries[i]?.data ?? []) as ReadonlyArray<VariableSummary>,
+    })),
+    [projectList, projectVarQueries],
+  );
 
   const [nodes, setNodes] = useState<Node<WorkflowNodeData>[]>(() =>
     definitionToRfNodes(workflow.definition, manifestByType)
@@ -636,6 +663,9 @@ function Editor({ workflow, manifests, onBackToList, onOpenRuns, saving, onSave 
               // sys.* descriptors fetched from /api/workflows/system-variables — single source
               // of truth lives on the backend (SystemScopeKeys.Descriptors).
               systemVariables={systemVariablesList}
+              // Project variables — one entry per project in the team. The picker
+              // emits `project.{slug}.{name}` per real variable across all projects.
+              projectVariables={projectVariablesForScope}
               onLabelChange={(v) => updateLabel(selectedNode.id, v)}
               onConfigChange={(v) => updateConfig(selectedNode.id, v)}
               onInputsChange={(v) => updateInputs(selectedNode.id, v)}
@@ -795,6 +825,7 @@ function NodeInspector({
   workflowVariables,
   teamVariables,
   systemVariables,
+  projectVariables,
   onLabelChange,
   onConfigChange,
   onInputsChange,
@@ -809,6 +840,7 @@ function NodeInspector({
   workflowVariables: import("@/api/variables").VariableSummary[];
   teamVariables: import("@/api/variables").VariableSummary[];
   systemVariables: import("@/api/workflows").SystemVariableDto[];
+  projectVariables: ReadonlyArray<{ slug: string; variables: ReadonlyArray<import("@/api/variables").VariableSummary> }>;
   onLabelChange: (v: string) => void;
   onConfigChange: (v: Record<string, unknown>) => void;
   onInputsChange: (v: Record<string, unknown>) => void;
@@ -822,7 +854,8 @@ function NodeInspector({
     workflowVariables,
     teamVariables,
     systemVariables,
-  }), [liveDefinition, nodeId, manifestByType, workflowVariables, teamVariables, systemVariables]);
+    projectVariables,
+  }), [liveDefinition, nodeId, manifestByType, workflowVariables, teamVariables, systemVariables, projectVariables]);
 
   const ownOutputs = useMemo(() => {
     const schema = manifest.outputSchema as { properties?: Record<string, { type?: string | string[]; description?: string }> } | undefined;

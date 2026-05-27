@@ -77,7 +77,14 @@ export function useSetProjectVariable(projectId: string | null) {
   return useMutation({
     mutationFn: ({ name, input }: { name: string; input: SetVariableInput }) =>
       projectVariablesApi.set(projectId!, name, input),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["project-variables", projectId] }),
+    // Invalidate both the project's variable list AND the projects list — the
+    // latter carries `activeVariableCount` on each ProjectSummary, and the
+    // Projects table re-renders that count live. Without the second invalidate
+    // the table stays stale until a hard refresh.
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["project-variables", projectId] });
+      qc.invalidateQueries({ queryKey: ["projects"] });
+    },
   });
 }
 
@@ -85,6 +92,9 @@ export function useDeleteProjectVariable(projectId: string | null) {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (name: string) => projectVariablesApi.delete(projectId!, name),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["project-variables", projectId] }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["project-variables", projectId] });
+      qc.invalidateQueries({ queryKey: ["projects"] });
+    },
   });
 }

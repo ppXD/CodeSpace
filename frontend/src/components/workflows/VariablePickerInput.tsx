@@ -594,7 +594,10 @@ function filterSuggestions(all: ScopeSuggestion[], filter: string): ScopeSuggest
 }
 
 function groupSuggestions(items: ScopeSuggestion[]): { category: ScopeSuggestion["category"]; items: ScopeSuggestion[] }[] {
-  const order: ScopeSuggestion["category"][] = ["node", "wf", "input", "trigger", "iteration", "sys", "team"];
+  // Order: node-local → workflow-local → trigger/iteration → broader scopes (sys, team, project).
+  // Project sits last because it's the most "shared" scope (visible across every workflow in
+  // the team), so it should appear after the more workflow-specific groups.
+  const order: ScopeSuggestion["category"][] = ["node", "wf", "input", "trigger", "iteration", "sys", "team", "project"];
   const groups: Record<string, ScopeSuggestion[]> = {};
   for (const item of items) {
     (groups[item.category] ??= []).push(item);
@@ -611,9 +614,10 @@ function categoryLabel(c: ScopeSuggestion["category"]): string {
     iteration: "Iteration",
     sys: "System variables",
     team: "Team variables",
+    project: "Project variables",
   }[c];
 }
 
 function categoryIcon(c: ScopeSuggestion["category"]): string {
-  return { node: "▸", wf: "•", input: "→", trigger: "⚡", iteration: "↻", sys: "x", team: "$" }[c];
+  return { node: "▸", wf: "•", input: "→", trigger: "⚡", iteration: "↻", sys: "x", team: "$", project: "▣" }[c];
 }

@@ -37,7 +37,7 @@ export interface ScopeSuggestion {
   /** Display label for the dropdown row. */
   label: string;
   /** Source category (drives icon + group header). */
-  category: "node" | "wf" | "input" | "trigger" | "team" | "iteration" | "sys";
+  category: "node" | "wf" | "input" | "trigger" | "team" | "iteration" | "sys" | "project";
   /** Optional type hint shown after the label (e.g. "string", "array"). */
   type?: string;
   /** Optional one-line description. */
@@ -54,9 +54,17 @@ interface IntrospectArgs {
   teamVariables?: ReadonlyArray<VariableSummary>;
   /** Engine-injected sys.* variables fetched from /api/workflows/system-variables. */
   systemVariables?: ReadonlyArray<SystemVariableDto>;
+  /** Project-scoped variables, grouped by project slug. The backend resolver
+   *  walks `project.{slug}.{name}` — passing one entry per project in the team
+   *  lets the picker emit the full set of valid refs across projects, not just
+   *  the workflow's own project (a workflow can legally reference any project's
+   *  variables in the same team). Each entry's `variables` may be empty, in
+   *  which case we still emit a `project.{slug}.<name>` placeholder so the
+   *  scope head is discoverable. */
+  projectVariables?: ReadonlyArray<{ slug: string; variables: ReadonlyArray<VariableSummary> }>;
 }
 
-export function introspectScope({ definition, currentNodeId, manifestByType, workflowVariables, teamVariables, systemVariables }: IntrospectArgs): ScopeSuggestion[] {
+export function introspectScope({ definition, currentNodeId, manifestByType, workflowVariables, teamVariables, systemVariables, projectVariables }: IntrospectArgs): ScopeSuggestion[] {
   const suggestions: ScopeSuggestion[] = [];
 
   // 1. Upstream node outputs — only nodes that REACH the current node along directed edges.
@@ -198,6 +206,32 @@ export function introspectScope({ definition, currentNodeId, manifestByType, wor
       { path: "item",  label: "item",  category: "iteration", description: "Current iteration element" },
       { path: "index", label: "index", category: "iteration", type: "integer", description: "0-based iteration index" },
     );
+  }
+
+  // 7. Project variables — backend resolves `project.{slug}.{name}` against every
+  //    project in the active team, so we emit one suggestion per real variable
+  //    across all projects. Projects with no variables still get a placeholder
+  //    so the slug head is visible in the picker. Mirrors the team-empty-state
+  //    pattern above.
+  for (const proj of projectVariables ?? []) {
+    if (proj.variables.length === 0) {
+      suggestions.push({
+        path: `project.${proj.slug}.`,
+        label: `project.${proj.slug}.<name>`,
+        category: "project",
+        description: `Project "${proj.slug}" — add variables on the project's Variables panel.`,
+      });
+      continue;
+    }
+    for (const v of proj.variables) {
+      suggestions.push({
+        path: `project.${proj.slug}.${v.name}`,
+        label: `project.${proj.slug}.${v.name}`,
+        category: "project",
+        type: v.valueType === "Secret" ? "secret" : v.valueType.toLowerCase(),
+        description: v.description ?? (v.valueType === "Secret" ? "Project secret (re-resolved at run time)" : "Project variable"),
+      });
+    }
   }
 
   return suggestions;
