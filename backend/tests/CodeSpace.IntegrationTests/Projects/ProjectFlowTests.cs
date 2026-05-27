@@ -187,6 +187,159 @@ public class ProjectFlowTests
     }
 
     [Fact]
+    public async Task Cross_team_project_variable_access_is_refused_for_every_verb()
+    {
+        // Security boundary — the most important contract on the new ProjectVariablesController:
+        // Team B's caller MUST NOT be able to Set, List, or Delete variables on Team A's
+        // project even though they hold a valid (cross-team) project id. IVariableService's
+        // EnsureScopeBelongsToTeamAsync's Project branch enforces this via a
+        // (p.Id == scopeId && p.TeamId == expectedTeamId) probe — anything that bypasses
+        // that surfaces here as an unauthorised mutation.
+        var (teamA, userA) = await SeedTeamAsync();
+        var (teamB, userB) = await SeedTeamAsync();
+
+        Guid projectInA;
+        using (var scope = _fixture.BeginScopeAs(userA, teamA, Roles.Admin))
+        {
+            var mediator = scope.Resolve<IMediator>();
+            projectInA = await mediator.Send(new CreateProjectCommand { Name = "Secret Stuff" });
+            // Seed one variable so List would actually have something to leak if it didn't enforce tenancy.
+            await mediator.Send(new SetProjectVariableCommand
+            {
+                ProjectId = projectInA,
+                Name = "API_KEY",
+                ValueType = VariableValueType.String,
+                Value = JsonDocument.Parse("\"team-a-secret\"").RootElement,
+            });
+        }
+
+        using var attackerScope = _fixture.BeginScopeAs(userB, teamB, Roles.Admin);
+        var attackerMediator = attackerScope.Resolve<IMediator>();
+
+        // Verb 1 — Set. Attacker tries to upsert into Team A's project.
+        var setAct = async () => await attackerMediator.Send(new SetProjectVariableCommand
+        {
+            ProjectId = projectInA,
+            Name = "API_KEY",
+            ValueType = VariableValueType.String,
+            Value = JsonDocument.Parse("\"hijacked\"").RootElement,
+        });
+        await setAct.ShouldThrowAsync<KeyNotFoundException>(
+            customMessage: "SetProjectVariableCommand from a foreign team MUST throw KeyNotFoundException (the 'not-yours-or-not-found' 404 conflation) — anything else lets one tenant write into another tenant's project variables");
+
+        // Verb 2 — List. Attacker tries to read.
+        var listAct = async () => await attackerMediator.Send(new ListProjectVariablesQuery { ProjectId = projectInA });
+        await listAct.ShouldThrowAsync<KeyNotFoundException>(
+            customMessage: "ListProjectVariablesQuery from a foreign team MUST throw — returning even an empty list would confirm 'this project id exists', which is itself a tenancy leak");
+
+        // Verb 3 — Delete. Attacker tries to wipe Team A's variable.
+        var delAct = async () => await attackerMediator.Send(new DeleteProjectVariableCommand
+        {
+            ProjectId = projectInA,
+            Name = "API_KEY",
+        });
+        await delAct.ShouldThrowAsync<KeyNotFoundException>(
+            customMessage: "DeleteProjectVariableCommand from a foreign team MUST throw — silent no-op (the normal idempotent-delete path) would let an attacker destroy another tenant's data");
+
+        // Defensive ground-truth: the original variable in Team A is still there, untouched.
+        using var verify = _fixture.BeginScopeAs(userA, teamA, Roles.Admin);
+        var stillThere = await verify.Resolve<IMediator>().Send(new ListProjectVariablesQuery { ProjectId = projectInA });
+        stillThere.Count.ShouldBe(1, "the attacker's verbs all threw; Team A's original variable must be unchanged");
+        stillThere[0].ValuePlain.ShouldBe("\"team-a-secret\"",
+            customMessage: "the Set verb threw, so the original value MUST still be 'team-a-secret' — if it changed to 'hijacked' the tenancy guard failed silently");
+    }
+
+    [Fact]
+    public async Task Set_with_existing_name_replaces_value_in_place_no_duplicate_row()
+    {
+        // Upsert semantics: calling SetProjectVariableCommand twice with the same name
+        // mutates the existing row (rotation in-place), not a second insert. Same contract
+        // as Team / Workflow scopes — IVariableService.SetAsync routes both new + existing
+        // tuples through the (scope, scopeId, name) lookup before deciding insert vs update.
+        var (teamId, userId) = await SeedTeamAsync();
+
+        Guid projectId;
+        using (var scope = _fixture.BeginScopeAs(userId, teamId, Roles.Admin))
+        {
+            var mediator = scope.Resolve<IMediator>();
+            projectId = await mediator.Send(new CreateProjectCommand { Name = "Mutable" });
+            await mediator.Send(new SetProjectVariableCommand
+            {
+                ProjectId = projectId,
+                Name = "ROTATE_ME",
+                ValueType = VariableValueType.String,
+                Value = JsonDocument.Parse("\"v1\"").RootElement,
+            });
+            await mediator.Send(new SetProjectVariableCommand
+            {
+                ProjectId = projectId,
+                Name = "ROTATE_ME",
+                ValueType = VariableValueType.String,
+                Value = JsonDocument.Parse("\"v2\"").RootElement,
+                Description = "rotated",
+            });
+        }
+
+        using var verify = _fixture.BeginScopeAs(userId, teamId, Roles.Admin);
+        var vars = await verify.Resolve<IMediator>().Send(new ListProjectVariablesQuery { ProjectId = projectId });
+
+        vars.Count.ShouldBe(1,
+            customMessage: "second Set on the same (scope, scopeId, name) tuple MUST update in place, not insert a second row. " +
+                           "Two rows here means rotation creates phantoms that the resolver could pick the wrong one of");
+        vars[0].ValuePlain.ShouldBe("\"v2\"", "the second Set's value wins — most-recent-write semantics");
+        vars[0].Description.ShouldBe("rotated", "description is replaced, not merged");
+    }
+
+    [Fact]
+    public async Task Secret_project_variable_persists_encrypted_and_never_returns_plaintext()
+    {
+        // Phase 2.6/2.7 contract — secret values are AES-256-GCM encrypted in the DB and the
+        // List API NEVER returns plaintext (only the metadata + valueType=Secret marker).
+        // The Workflow + Team scopes were already covered by their own test suites; this
+        // proves the Project-scope wiring inherits the same protection rather than
+        // accidentally falling through to the plain-text path.
+        var (teamId, userId) = await SeedTeamAsync();
+
+        Guid projectId;
+        using (var scope = _fixture.BeginScopeAs(userId, teamId, Roles.Admin))
+        {
+            var mediator = scope.Resolve<IMediator>();
+            projectId = await mediator.Send(new CreateProjectCommand { Name = "VaultLike" });
+            await mediator.Send(new SetProjectVariableCommand
+            {
+                ProjectId = projectId,
+                Name = "ANTHROPIC_API_KEY",
+                ValueType = VariableValueType.Secret,
+                Value = JsonDocument.Parse("\"sk-ant-this-must-never-leak\"").RootElement,
+            });
+        }
+
+        // Operator-facing read MUST return null for ValuePlain on Secret rows.
+        using (var verify = _fixture.BeginScopeAs(userId, teamId, Roles.Admin))
+        {
+            var vars = await verify.Resolve<IMediator>().Send(new ListProjectVariablesQuery { ProjectId = projectId });
+            vars.Count.ShouldBe(1);
+            vars[0].ValueType.ShouldBe(VariableValueType.Secret);
+            vars[0].ValuePlain.ShouldBeNull(
+                customMessage: "Secret rows MUST have ValuePlain=null on the API surface. " +
+                               "Any non-null value here is a critical regression: the secret just went over the wire to whoever called List");
+        }
+
+        // Ground truth at the DB layer: the plaintext column is null AND the encrypted column
+        // contains bytes that don't include the plaintext literal. If the encryption layer
+        // silently fell back to plain storage (a real regression mode if the configured
+        // encryption key is missing), this catches it where the API surface alone wouldn't.
+        using var db = _fixture.BeginScope().Resolve<CodeSpaceDbContext>();
+        var row = await db.Variable.AsNoTracking()
+            .SingleAsync(v => v.Scope == VariableScope.Project && v.ScopeId == projectId && v.Name == "ANTHROPIC_API_KEY");
+        row.ValuePlain.ShouldBeNull("Secret rows MUST have value_plain NULL in the DB — the encrypted column is the only source of truth");
+        row.ValueEncrypted.ShouldNotBeNull("Secret rows MUST have a non-null value_encrypted blob — null here means encryption silently bypassed");
+        row.ValueEncrypted!.Length.ShouldBeGreaterThan(0);
+        System.Text.Encoding.UTF8.GetString(row.ValueEncrypted!).ShouldNotContain("sk-ant-this-must-never-leak",
+            customMessage: "the encrypted bytes MUST NOT contain the plaintext literal — if this fails, the encryption layer silently fell through to identity (key missing? AES routine throwing and the row stored the raw input?)");
+    }
+
+    [Fact]
     public async Task Delete_project_cascade_soft_deletes_its_variables()
     {
         // The Phase 3.0 contract: deleting a project soft-deletes the project row AND every
