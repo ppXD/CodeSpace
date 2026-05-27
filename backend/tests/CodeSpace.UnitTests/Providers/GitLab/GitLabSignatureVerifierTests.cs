@@ -3,6 +3,7 @@ using Shouldly;
 
 namespace CodeSpace.UnitTests.Providers.GitLab;
 
+[Trait("Category", "Unit")]
 public class GitLabSignatureVerifierTests
 {
     private readonly GitLabSignatureVerifier _verifier = new();

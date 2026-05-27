@@ -15,6 +15,7 @@ namespace CodeSpace.UnitTests.Workflows;
 /// test exists so that future-you sees the breakage immediately, not when a user clicks
 /// Save and sees a cryptic 400.
 /// </summary>
+[Trait("Category", "Unit")]
 public class WorkflowCommandShapeTests
 {
     [Theory]

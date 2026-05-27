@@ -6,6 +6,7 @@ using Shouldly;
 
 namespace CodeSpace.UnitTests.Credentials;
 
+[Trait("Category", "Unit")]
 public class CredentialPayloadSerializerTests
 {
     private readonly CredentialPayloadSerializer _serializer = new();

@@ -11,6 +11,7 @@ namespace CodeSpace.UnitTests.Workflows;
 /// Kind, and round-trippable JSON schemas. Catches the "I forgot to set IconKey on the
 /// new node so the editor breaks" class of regression without needing to wire DI.
 /// </summary>
+[Trait("Category", "Unit")]
 public class NodeManifestContractTests
 {
     public static IEnumerable<object[]> AllPureNodes()

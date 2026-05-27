@@ -8,6 +8,7 @@ using Shouldly;
 
 namespace CodeSpace.UnitTests.Workflows;
 
+[Trait("Category", "Unit")]
 public class FlowIterateNodeTests
 {
     [Fact]

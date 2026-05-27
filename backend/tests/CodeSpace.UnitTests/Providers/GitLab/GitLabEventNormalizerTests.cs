@@ -8,6 +8,7 @@ using Shouldly;
 
 namespace CodeSpace.UnitTests.Providers.GitLab;
 
+[Trait("Category", "Unit")]
 public class GitLabEventNormalizerTests
 {
     private readonly GitLabEventNormalizer _normalizer = new(new ProviderEventSubscriptionRegistry(new IProviderEventSubscription[]

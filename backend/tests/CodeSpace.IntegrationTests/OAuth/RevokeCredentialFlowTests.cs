@@ -19,6 +19,7 @@ namespace CodeSpace.IntegrationTests.OAuth;
 /// even when the provider's revocation endpoint fails. The provider call is best-effort.
 /// </summary>
 [Collection(PostgresCollection.Name)]
+[Trait("Category", "Integration")]
 public class RevokeCredentialFlowTests
 {
     private readonly PostgresFixture _fixture;

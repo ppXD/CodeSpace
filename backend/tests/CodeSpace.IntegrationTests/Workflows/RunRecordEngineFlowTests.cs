@@ -33,6 +33,7 @@ namespace CodeSpace.IntegrationTests.Workflows;
 ///   - Combination:     branch + downstream success in the same DAG
 /// </summary>
 [Collection(PostgresCollection.Name)]
+[Trait("Category", "Integration")]
 public class RunRecordEngineFlowTests
 {
     private readonly PostgresFixture _fixture;

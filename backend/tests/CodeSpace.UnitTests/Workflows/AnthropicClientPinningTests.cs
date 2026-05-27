@@ -8,6 +8,7 @@ namespace CodeSpace.UnitTests.Workflows;
 /// API key via this env var; renaming the constant breaks every deployment that pinned the
 /// old name. This test makes the rename a deliberate, compile-time-visible decision.
 /// </summary>
+[Trait("Category", "Unit")]
 public class AnthropicClientPinningTests
 {
     [Fact]

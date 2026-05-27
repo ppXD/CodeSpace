@@ -9,6 +9,7 @@ namespace CodeSpace.UnitTests.Workflows;
 /// invariant the engine (and any future caller) relies on. Adding a new persistence point
 /// means picking ONE of these guarantees as your assertion.
 /// </summary>
+[Trait("Category", "Unit")]
 public class PayloadRedactorTests
 {
     private readonly IPayloadRedactor _redactor = new PayloadRedactor();

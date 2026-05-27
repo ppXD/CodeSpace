@@ -5,6 +5,7 @@ using Shouldly;
 
 namespace CodeSpace.UnitTests.Providers.GitHub;
 
+[Trait("Category", "Unit")]
 public class GitHubSignatureVerifierTests
 {
     private readonly GitHubSignatureVerifier _verifier = new();

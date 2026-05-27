@@ -14,6 +14,7 @@ namespace CodeSpace.IntegrationTests.Authorization;
 /// and break every audit-trail join. These tests fail the build if either drifts.
 /// </summary>
 [Collection(PostgresCollection.Name)]
+[Trait("Category", "Integration")]
 public class RbacSeedTests
 {
     private readonly PostgresFixture _fixture;

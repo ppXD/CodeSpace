@@ -9,6 +9,7 @@ namespace CodeSpace.UnitTests.Workflows;
 /// existing row plus any downstream consumer that filters on the string (analytics dashboards,
 /// audit views).
 /// </summary>
+[Trait("Category", "Unit")]
 public class WorkflowRunActorTypesTests
 {
     [Theory]

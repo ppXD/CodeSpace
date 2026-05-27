@@ -24,6 +24,7 @@ namespace CodeSpace.IntegrationTests.Workflows;
 ///   - Reference shape: an artifact id can be embedded in a workflow_run_record's payload_json
 /// </summary>
 [Collection(PostgresCollection.Name)]
+[Trait("Category", "Integration")]
 public class ArtifactStoreFlowTests
 {
     private readonly PostgresFixture _fixture;

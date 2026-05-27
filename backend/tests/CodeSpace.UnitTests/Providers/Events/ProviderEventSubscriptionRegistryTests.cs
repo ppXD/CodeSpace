@@ -6,6 +6,7 @@ using Shouldly;
 
 namespace CodeSpace.UnitTests.Providers.Events;
 
+[Trait("Category", "Unit")]
 public class ProviderEventSubscriptionRegistryTests
 {
     [Fact]

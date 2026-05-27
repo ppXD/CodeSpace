@@ -27,6 +27,7 @@ namespace CodeSpace.IntegrationTests.Workflows;
 /// branches (in WorkflowRunActorTypesTests for the constant pinning).
 /// </summary>
 [Collection(PostgresCollection.Name)]
+[Trait("Category", "Integration")]
 public class RunStarterFlowTests
 {
     private readonly PostgresFixture _fixture;

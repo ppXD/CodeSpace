@@ -3,6 +3,7 @@ using Shouldly;
 
 namespace CodeSpace.UnitTests.Auth;
 
+[Trait("Category", "Unit")]
 public class Pbkdf2PasswordHasherTests
 {
     private readonly Pbkdf2PasswordHasher _hasher = new();

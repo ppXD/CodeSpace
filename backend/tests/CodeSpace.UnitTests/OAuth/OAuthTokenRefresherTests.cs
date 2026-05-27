@@ -14,6 +14,7 @@ namespace CodeSpace.UnitTests.OAuth;
 /// is still safely within its validity window. It must refresh when the access token is
 /// near expiry AND a refresh_token is available.
 /// </summary>
+[Trait("Category", "Unit")]
 public class OAuthTokenRefresherTests
 {
     private static readonly DateTimeOffset Now = new(2030, 1, 1, 12, 0, 0, TimeSpan.Zero);

@@ -5,6 +5,7 @@ using Shouldly;
 
 namespace CodeSpace.UnitTests.Providers.Auth;
 
+[Trait("Category", "Unit")]
 public class GitLabAuthStrategyTests
 {
     [Fact]

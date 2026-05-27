@@ -19,6 +19,7 @@ namespace CodeSpace.IntegrationTests.Repositories;
 /// credential of the same provider instance and have it flip back to Active in one call.
 /// </summary>
 [Collection(PostgresCollection.Name)]
+[Trait("Category", "Integration")]
 public class RelinkRepositoryCredentialFlowTests
 {
     private readonly PostgresFixture _fixture;

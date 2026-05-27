@@ -20,6 +20,7 @@ namespace CodeSpace.UnitTests.Workflows;
 ///   4. <c>PersistArtifactAsync</c> delegates to <see cref="IArtifactStore.PutAsync"/> with
 ///      the bound team id + returns the canonical ref shape.
 /// </summary>
+[Trait("Category", "Unit")]
 public class NodeObservabilityTests
 {
     private static readonly Guid RunId = Guid.NewGuid();

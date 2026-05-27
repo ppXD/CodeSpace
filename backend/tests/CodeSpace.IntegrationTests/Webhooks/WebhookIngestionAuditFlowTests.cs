@@ -28,6 +28,7 @@ namespace CodeSpace.IntegrationTests.Webhooks;
 /// while the bad-signature branch is tested via the auditor surface directly.
 /// </summary>
 [Collection(PostgresCollection.Name)]
+[Trait("Category", "Integration")]
 public class WebhookIngestionAuditFlowTests
 {
     private readonly PostgresFixture _fixture;

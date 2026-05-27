@@ -23,6 +23,7 @@ namespace CodeSpace.IntegrationTests.Workflows;
 /// <c>OutputsJson</c> must contain the resolved values, ready for external consumers.
 /// </summary>
 [Collection(PostgresCollection.Name)]
+[Trait("Category", "Integration")]
 public class WorkflowOutputsFlowTests
 {
     private readonly PostgresFixture _fixture;

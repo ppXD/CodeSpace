@@ -27,6 +27,7 @@ namespace CodeSpace.IntegrationTests.Workflows;
 ///   - Cascade delete: removing the workflow_run row cascades to its records
 /// </summary>
 [Collection(PostgresCollection.Name)]
+[Trait("Category", "Integration")]
 public class RunRecordLedgerFlowTests
 {
     private readonly PostgresFixture _fixture;

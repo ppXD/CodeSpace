@@ -8,6 +8,7 @@ namespace CodeSpace.UnitTests.Hardening;
 /// validator across the codebase routes through this so a regression here silently
 /// breaks every operator override; treat the alias table as a hard contract.
 /// </summary>
+[Trait("Category", "Unit")]
 public class EnforcementModeReaderTests : IDisposable
 {
     // Unique env-var name per test class so concurrent xunit runs can't cross-contaminate.

@@ -13,6 +13,7 @@ namespace CodeSpace.UnitTests.Variables;
 /// (Rule 8) — operators set the master key via that env var; renaming it silently breaks
 /// every deployment, so the rename has to show up as a failing test.
 /// </summary>
+[Trait("Category", "Unit")]
 public class AesGcmVariableEncryptionTests
 {
     // Fixed 32-byte test key in base64 — never used in production, just for these tests.

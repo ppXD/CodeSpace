@@ -20,6 +20,7 @@ namespace CodeSpace.IntegrationTests.OAuth;
 /// rejection at the init boundary.
 /// </summary>
 [Collection(PostgresCollection.Name)]
+[Trait("Category", "Integration")]
 public class OAuthFlowTests
 {
     private readonly PostgresFixture _fixture;

@@ -12,6 +12,7 @@ namespace CodeSpace.UnitTests.Workflows;
 /// Format convention: dotted-namespace, lowercase, source-family first. Catch typos and
 /// accidental camelCasing.
 /// </summary>
+[Trait("Category", "Unit")]
 public class WorkflowRunRecordTypesTests
 {
     [Theory]

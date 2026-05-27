@@ -10,6 +10,7 @@ namespace CodeSpace.UnitTests.Workflows;
 /// abstraction is exercised by four distinct callers, not one — proves the surface is
 /// generic enough for community plugins to use the same surface.
 /// </summary>
+[Trait("Category", "Unit")]
 public class BuiltinPluginModuleTests
 {
     [Fact]

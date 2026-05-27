@@ -14,6 +14,7 @@ namespace CodeSpace.UnitTests.Workflows;
 /// The AI Code Review template is the canonical built-in workflow. If its JSON drifts off
 /// the engine's schema, the operator's "click Create from template" flow breaks. Pin it.
 /// </summary>
+[Trait("Category", "Unit")]
 public class AiCodeReviewTemplateTests
 {
     private const string TemplatePath = "../../../../../templates/ai_code_review.json";

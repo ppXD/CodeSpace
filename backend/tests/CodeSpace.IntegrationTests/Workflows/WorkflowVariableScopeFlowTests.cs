@@ -26,6 +26,7 @@ namespace CodeSpace.IntegrationTests.Workflows;
 /// way to a node observing the resolved value in its outputs.
 /// </summary>
 [Collection(PostgresCollection.Name)]
+[Trait("Category", "Integration")]
 public class WorkflowVariableScopeFlowTests
 {
     private readonly PostgresFixture _fixture;

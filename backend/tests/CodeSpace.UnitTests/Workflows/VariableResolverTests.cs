@@ -8,6 +8,7 @@ namespace CodeSpace.UnitTests.Workflows;
 /// Pin the {{ref}} + $ref contract. These are the two ways every node receives upstream
 /// data — breaking either silently mangles every workflow in production.
 /// </summary>
+[Trait("Category", "Unit")]
 public class VariableResolverTests
 {
     private static NodeRunScope MakeScope() => new()

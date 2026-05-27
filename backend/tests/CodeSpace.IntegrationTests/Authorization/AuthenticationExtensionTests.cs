@@ -11,6 +11,7 @@ namespace CodeSpace.IntegrationTests.Authorization;
 /// inside the IntegrationTests project because that's where the project reference to
 /// CodeSpace.Api lives (UnitTests intentionally has no Api dep).
 /// </summary>
+[Trait("Category", "Integration")]
 public class AuthenticationExtensionTests
 {
     [Fact]

@@ -12,6 +12,7 @@ using Shouldly;
 namespace CodeSpace.IntegrationTests.Auth;
 
 [Collection(PostgresCollection.Name)]
+[Trait("Category", "Integration")]
 public class SignInFlowTests
 {
     private readonly PostgresFixture _fixture;

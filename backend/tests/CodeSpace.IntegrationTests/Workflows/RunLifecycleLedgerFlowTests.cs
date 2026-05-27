@@ -26,6 +26,7 @@ namespace CodeSpace.IntegrationTests.Workflows;
 /// gone. Tests pin both presence + order.</para>
 /// </summary>
 [Collection(PostgresCollection.Name)]
+[Trait("Category", "Integration")]
 public class RunLifecycleLedgerFlowTests
 {
     private readonly PostgresFixture _fixture;

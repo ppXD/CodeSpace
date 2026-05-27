@@ -10,6 +10,7 @@ using Shouldly;
 namespace CodeSpace.IntegrationTests.Users;
 
 [Collection(PostgresCollection.Name)]
+[Trait("Category", "Integration")]
 public class MeQueryTests
 {
     private readonly PostgresFixture _fixture;

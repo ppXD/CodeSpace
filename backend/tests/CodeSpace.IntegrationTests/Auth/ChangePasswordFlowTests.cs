@@ -18,6 +18,7 @@ namespace CodeSpace.IntegrationTests.Auth;
 /// normal API access resumes.
 /// </summary>
 [Collection(PostgresCollection.Name)]
+[Trait("Category", "Integration")]
 public class ChangePasswordFlowTests
 {
     private readonly PostgresFixture _fixture;

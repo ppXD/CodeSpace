@@ -12,6 +12,7 @@ namespace CodeSpace.UnitTests.Workflows;
 /// Pin every check it makes — every error message corresponds to a definition shape an
 /// operator might author. If we silently accept any of these, runtime explodes.
 /// </summary>
+[Trait("Category", "Unit")]
 public class DefinitionValidatorTests
 {
     private static DefinitionValidator BuildValidator()

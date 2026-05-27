@@ -11,6 +11,7 @@ namespace CodeSpace.UnitTests.OAuth;
 /// Any drift here breaks the entire OAuth handshake silently (provider just redirects to its
 /// error page), so the assertions deliberately check exact param presence and values.
 /// </summary>
+[Trait("Category", "Unit")]
 public class OAuthClientAuthorizeUrlTests
 {
     private static readonly Uri Redirect = new("https://app.codespace.dev/api/credentials/oauth/callback");

@@ -9,6 +9,7 @@ using Shouldly;
 namespace CodeSpace.IntegrationTests.Persistence;
 
 [Collection(PostgresCollection.Name)]
+[Trait("Category", "Integration")]
 public class AuditingTests
 {
     private readonly PostgresFixture _fixture;

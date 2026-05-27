@@ -25,6 +25,7 @@ namespace CodeSpace.IntegrationTests.Workflows;
 /// the run-detail UI and downstream consumers depend on.
 /// </summary>
 [Collection(PostgresCollection.Name)]
+[Trait("Category", "Integration")]
 public class WorkflowEngineFlowTests
 {
     private readonly PostgresFixture _fixture;

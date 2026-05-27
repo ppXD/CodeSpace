@@ -9,6 +9,7 @@ namespace CodeSpace.UnitTests.Variables;
 /// remains pinned so the backward-compat fallback registered in CodeSpaceModule doesn't
 /// silently become a no-op if someone renames the constant.
 /// </summary>
+[Trait("Category", "Unit")]
 public class VariableEncryptionConfigPinningTests
 {
     [Fact]

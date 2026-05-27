@@ -13,6 +13,7 @@ namespace CodeSpace.IntegrationTests.OAuth;
 /// strictly bounded by ExpiresDate — never touches live in-flight flows.
 /// </summary>
 [Collection(PostgresCollection.Name)]
+[Trait("Category", "Integration")]
 public class OAuthStateCleanupTests
 {
     private readonly PostgresFixture _fixture;

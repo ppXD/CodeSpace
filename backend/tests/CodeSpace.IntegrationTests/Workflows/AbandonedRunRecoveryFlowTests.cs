@@ -42,6 +42,7 @@ namespace CodeSpace.IntegrationTests.Workflows;
 /// for N minutes?" and acts only when truly abandoned.</para>
 /// </summary>
 [Collection(PostgresCollection.Name)]
+[Trait("Category", "Integration")]
 public class AbandonedRunRecoveryFlowTests
 {
     private readonly PostgresFixture _fixture;

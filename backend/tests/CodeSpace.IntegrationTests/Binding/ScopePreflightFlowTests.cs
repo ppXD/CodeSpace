@@ -21,6 +21,7 @@ namespace CodeSpace.IntegrationTests.Binding;
 /// instead of dying mid-bind with a cryptic 403.
 /// </summary>
 [Collection(PostgresCollection.Name)]
+[Trait("Category", "Integration")]
 public class ScopePreflightFlowTests
 {
     private readonly PostgresFixture _fixture;

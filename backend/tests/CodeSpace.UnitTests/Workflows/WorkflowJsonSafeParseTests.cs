@@ -10,6 +10,7 @@ namespace CodeSpace.UnitTests.Workflows;
 /// branch (null, empty string, whitespace, garbage, valid JSON of various shapes) so a
 /// future refactor can't silently weaken the defensive contract.
 /// </summary>
+[Trait("Category", "Unit")]
 public class WorkflowJsonSafeParseTests
 {
     [Theory]
