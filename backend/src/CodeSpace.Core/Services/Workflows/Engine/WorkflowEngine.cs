@@ -766,18 +766,7 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
         var resolvedConfig = VariableResolver.ResolveBag(node.Config, scope);
         var resolvedInputs = VariableResolver.ResolveBag(node.Inputs, scope);
 
-        // Emit node.started; the returned record id is the parent for any external_call.*
-        // records the node emits during RunAsync. Duration is measured from the started
-        // timestamp so the .completed/.failed record carries a reliable elapsed.
-        //
-        // Redact secret-tainted inputs + config BEFORE persisting to the ledger. The node
-        // itself receives unredacted values via NodeRunContext.Inputs/Config (so it can use
-        // the real API key / token to call its provider); ONLY the persistence path gets the
-        // marker form. This keeps `workflow_run_record.payload_json` clean of plaintext
-        // secrets without compromising node functionality. Config persistence answers
-        // "what model / timeout / temperature was this node running with".
-        var redactedInputs = _redactor.RedactBag(node.Inputs, resolvedInputs, scope.SecretPaths);
-        var redactedConfig = _redactor.RedactBag(node.Config, resolvedConfig, scope.SecretPaths);
+        var (redactedInputs, redactedConfig) = BuildRedactedRecordPayloads(node, resolvedInputs, resolvedConfig, scope);
         var startedAt = DateTimeOffset.UtcNow;
         // Capture the node.started record id so this node's external-call records chain back
         // to it via parent_record_id. The NodeObservability handle carries the link.
@@ -785,77 +774,131 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
 
         try
         {
-            var nodeLogger = _loggerFactory.CreateLogger($"Workflow.{runtime.TypeKey}.{node.Id}");
-            var observability = new NodeObservability(_recordLogger, _artifactStore, run.Id, node.Id, run.TeamId, parentRecordId);
-
-            var context = new NodeRunContext
-            {
-                Inputs = resolvedInputs,
-                Config = resolvedConfig,
-                RawInputs = node.Inputs,
-                RawConfig = node.Config,
-                Scope = scope,
-                Logger = nodeLogger,
-                Observability = observability,
-            };
-
+            var invocation = new NodeInvocationData(run, node, scope, resolvedInputs, resolvedConfig, runtime.TypeKey, parentRecordId);
+            var context = BuildNodeRunContext(invocation);
             var result = await runtime.RunAsync(context, cancellationToken).ConfigureAwait(false);
-
             var duration = DateTimeOffset.UtcNow - startedAt;
-            if (result.Status == NodeStatus.Success)
-                await _recordLogger.NodeCompletedAsync(run.Id, node.Id, NoIteration, result.Outputs, duration, cancellationToken).ConfigureAwait(false);
-            else
-                await _recordLogger.NodeFailedAsync(run.Id, node.Id, NoIteration, result.Error ?? "Node returned non-success without error message.", duration, cancellationToken).ConfigureAwait(false);
 
-            if (result.Status == NodeStatus.Success && result.Outputs.Count > 0)
-                scope.Nodes[node.Id] = result.Outputs;
+            await PersistNodeResultAsync(run.Id, node.Id, result, duration, cancellationToken).ConfigureAwait(false);
+            ApplyResultToScopeAndState(node, result, scope, state);
 
-            if (result.RoutingHints != null)
-                state.RoutingHints[node.Id] = new HashSet<string>(result.RoutingHints);
-
-            // Terminal nodes' resolved Inputs ARE the workflow's declared outputs. The
-            // engine already resolved the Inputs map before calling RunAsync — each key was
-            // bound to {{some.ref}} pointing at upstream values. We capture the resolved
-            // dict as the run's WorkflowOutputs so external consumers see what the workflow
-            // produced. Last Terminal wins (operators with multiple terminals should use
-            // logic.if to ensure only one fires per run).
-            //
-            // Secret-leak guard: secrets are designed for in-process consumption (HTTP auth
-            // headers, LLM API keys). Persisting them into workflow_run.OutputsJson would (a)
-            // leave plaintext in the runs table accessible to anyone with run-view permission,
-            // and (b) leak them to external callers that consume the workflow's declared output
-            // contract. We scan the Terminal's raw Inputs template (BEFORE resolution) for
-            // any {{path}} / $ref that targets a known secret path, and fail the node loudly.
-            // Author then sees a clear error and either removes the reference or stops treating
-            // a workflow output channel as a secret carrier.
             if (result.Status == NodeStatus.Success && runtime.Manifest.Kind == NodeKind.Terminal && resolvedInputs.Count > 0)
-            {
-                EnsureNoSecretInTerminalOutputs(node, scope);
-                state.WorkflowOutputs = resolvedInputs;
-            }
+                CaptureTerminalOutputs(node, resolvedInputs, scope, state);
 
             return result.Status;
         }
-        catch (OperationCanceledException)
-        {
-            throw;
-        }
+        catch (OperationCanceledException) { throw; }
         catch (WorkflowSecretLeakException)
         {
             // Let the secret-leak guard's exception propagate to ExecuteRunAsync's catch,
             // which lands the run in Failure with our detailed contract-violation message.
-            // Without this branch, the generic `catch (Exception)` below would swallow it into
-            // a `NodeStatus.Failure` + generic "Node 'X' failed." run.Error, losing the
-            // path-name + remediation hint the author needs to fix their wiring.
+            // Without this branch, the generic catch below would swallow it into NodeStatus.Failure
+            // + a generic "Node 'X' failed." run.Error, losing the path-name + remediation hint.
             throw;
         }
         catch (Exception ex)
         {
             _logger.LogError(ex, "Node {NodeId} threw unhandled exception", node.Id);
-            var duration = DateTimeOffset.UtcNow - startedAt;
-            await _recordLogger.NodeFailedAsync(run.Id, node.Id, NoIteration, ex.Message, duration, cancellationToken).ConfigureAwait(false);
+            await _recordLogger.NodeFailedAsync(run.Id, node.Id, NoIteration, ex.Message, DateTimeOffset.UtcNow - startedAt, cancellationToken).ConfigureAwait(false);
             return NodeStatus.Failure;
         }
+    }
+
+    /// <summary>
+    /// Build the redacted Inputs/Config pair the ledger persists. The node itself receives
+    /// unredacted values via <see cref="NodeRunContext"/> (so it can use the real API key /
+    /// token to call its provider); ONLY the persistence path gets the marker form. Keeps
+    /// <c>workflow_run_record.payload_json</c> clean of plaintext secrets without
+    /// compromising node functionality. Config persistence answers "what model / timeout /
+    /// temperature was this node running with".
+    /// </summary>
+    private (IReadOnlyDictionary<string, JsonElement> Inputs, IReadOnlyDictionary<string, JsonElement> Config) BuildRedactedRecordPayloads(NodeDefinition node, IReadOnlyDictionary<string, JsonElement> resolvedInputs, IReadOnlyDictionary<string, JsonElement> resolvedConfig, NodeRunScope scope)
+    {
+        var redactedInputs = _redactor.RedactBag(node.Inputs, resolvedInputs, scope.SecretPaths);
+        var redactedConfig = _redactor.RedactBag(node.Config, resolvedConfig, scope.SecretPaths);
+        return (redactedInputs, redactedConfig);
+    }
+
+    /// <summary>
+    /// Per-invocation data the engine threads from <see cref="ExecuteNodeAsync"/> into
+    /// <see cref="BuildNodeRunContext"/>. Packs the seven values the context needs into one
+    /// argument so the helper stays under Rule 1's 5-param cap. Private + record-shaped: zero
+    /// allocations beyond the boxing the context itself does, no behaviour, just a parameter
+    /// holder.
+    /// </summary>
+    private sealed record NodeInvocationData(WorkflowRun Run, NodeDefinition Node, NodeRunScope Scope, IReadOnlyDictionary<string, JsonElement> ResolvedInputs, IReadOnlyDictionary<string, JsonElement> ResolvedConfig, string TypeKey, Guid ParentRecordId);
+
+    /// <summary>
+    /// Assemble the <see cref="NodeRunContext"/> the node sees. Pulls the per-node logger
+    /// name from <see cref="NodeInvocationData.TypeKey"/> and binds observability to the
+    /// node.started record so external_call.* records chain back via parent_record_id.
+    /// </summary>
+    private NodeRunContext BuildNodeRunContext(NodeInvocationData inv)
+    {
+        var nodeLogger = _loggerFactory.CreateLogger($"Workflow.{inv.TypeKey}.{inv.Node.Id}");
+        var observability = new NodeObservability(_recordLogger, _artifactStore, inv.Run.Id, inv.Node.Id, inv.Run.TeamId, inv.ParentRecordId);
+
+        return new NodeRunContext
+        {
+            Inputs = inv.ResolvedInputs,
+            Config = inv.ResolvedConfig,
+            RawInputs = inv.Node.Inputs,
+            RawConfig = inv.Node.Config,
+            Scope = inv.Scope,
+            Logger = nodeLogger,
+            Observability = observability,
+        };
+    }
+
+    /// <summary>
+    /// Write the <c>node.completed</c> / <c>node.failed</c> ledger record for a node whose
+    /// <c>RunAsync</c> returned (i.e. did not throw). The branching is by <see cref="NodeStatus"/>;
+    /// thrown exceptions go through <see cref="ExecuteNodeAsync"/>'s catch handlers instead.
+    /// </summary>
+    private async Task PersistNodeResultAsync(Guid runId, string nodeId, NodeResult result, TimeSpan duration, CancellationToken cancellationToken)
+    {
+        if (result.Status == NodeStatus.Success)
+            await _recordLogger.NodeCompletedAsync(runId, nodeId, NoIteration, result.Outputs, duration, cancellationToken).ConfigureAwait(false);
+        else
+            await _recordLogger.NodeFailedAsync(runId, nodeId, NoIteration, result.Error ?? "Node returned non-success without error message.", duration, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Reflect a successful node's outputs + routing hints into the run-scoped scope/state
+    /// objects so downstream nodes can resolve <c>nodes.&lt;id&gt;.outputs.X</c> and the
+    /// walker's branch-routing pass sees the correct hint set.
+    /// </summary>
+    private static void ApplyResultToScopeAndState(NodeDefinition node, NodeResult result, NodeRunScope scope, WalkerState state)
+    {
+        if (result.Status == NodeStatus.Success && result.Outputs.Count > 0)
+            scope.Nodes[node.Id] = result.Outputs;
+
+        if (result.RoutingHints != null)
+            state.RoutingHints[node.Id] = new HashSet<string>(result.RoutingHints);
+    }
+
+    /// <summary>
+    /// Terminal nodes' resolved <c>Inputs</c> ARE the workflow's declared outputs. The engine
+    /// already resolved the Inputs map before <c>RunAsync</c> — each key was bound to
+    /// <c>{{some.ref}}</c> pointing at upstream values. We capture the resolved dict as the
+    /// run's <c>WorkflowOutputs</c> so external consumers see what the workflow produced.
+    /// Last Terminal wins (operators with multiple terminals should use logic.if to ensure
+    /// only one fires per run).
+    ///
+    /// <para>Secret-leak guard: secrets are designed for in-process consumption (HTTP auth
+    /// headers, LLM API keys). Persisting them into <c>workflow_run.OutputsJson</c> would
+    /// (a) leave plaintext in the runs table accessible to anyone with run-view permission,
+    /// and (b) leak them to external callers that consume the workflow's declared output
+    /// contract. <see cref="EnsureNoSecretInTerminalOutputs"/> scans the Terminal's raw
+    /// Inputs template (BEFORE resolution) for any <c>{{path}}</c> / <c>$ref</c> that
+    /// targets a known secret path, throws <see cref="WorkflowSecretLeakException"/>, and
+    /// the surrounding catch in <see cref="ExecuteNodeAsync"/> propagates it to the run-
+    /// level handler.</para>
+    /// </summary>
+    private static void CaptureTerminalOutputs(NodeDefinition node, IReadOnlyDictionary<string, JsonElement> resolvedInputs, NodeRunScope scope, WalkerState state)
+    {
+        EnsureNoSecretInTerminalOutputs(node, scope);
+        state.WorkflowOutputs = resolvedInputs;
     }
 
     private async Task MarkSkippedAsync(WorkflowRun run, NodeDefinition node, WalkerState state, CancellationToken cancellationToken)
