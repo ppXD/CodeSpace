@@ -21,7 +21,7 @@ public sealed class GitLabMergeRequestEventSubscription : IProviderEventSubscrip
         return action switch
         {
             "open" => BuildOpened(repositoryId, deliveryId, now, attrs, root),
-            "update" => BuildSynchronized(repositoryId, deliveryId, now, attrs),
+            "update" => BuildSynchronized(repositoryId, deliveryId, now, attrs, root),
             "merge" => BuildMerged(repositoryId, deliveryId, now, attrs, root),
             "close" => BuildClosed(repositoryId, deliveryId, now, attrs, root),
             _ => null
@@ -45,11 +45,12 @@ public sealed class GitLabMergeRequestEventSubscription : IProviderEventSubscrip
             TargetBranch = attrs.GetProperty("target_branch").GetString()!,
             AuthorExternalId = user.GetProperty("id").GetRawText(),
             AuthorName = user.GetProperty("username").GetString()!,
-            WebUrl = attrs.GetProperty("url").GetString()!
+            WebUrl = attrs.GetProperty("url").GetString()!,
+            Labels = ExtractLabels(root)
         };
     }
 
-    private static PullRequestSynchronizedEvent BuildSynchronized(Guid repositoryId, string deliveryId, DateTimeOffset now, JsonElement attrs)
+    private static PullRequestSynchronizedEvent BuildSynchronized(Guid repositoryId, string deliveryId, DateTimeOffset now, JsonElement attrs, JsonElement root)
     {
         var oldRev = attrs.TryGetProperty("oldrev", out var old) && old.ValueKind != JsonValueKind.Null ? old.GetString() ?? string.Empty : string.Empty;
         var newRev = attrs.TryGetProperty("last_commit", out var lc) && lc.ValueKind != JsonValueKind.Null ? lc.GetProperty("id").GetString() ?? string.Empty : string.Empty;
@@ -62,8 +63,36 @@ public sealed class GitLabMergeRequestEventSubscription : IProviderEventSubscrip
             ExternalPullRequestId = attrs.GetProperty("id").GetRawText(),
             Number = attrs.GetProperty("iid").GetInt32(),
             PreviousHeadSha = oldRev,
-            NewHeadSha = newRev
+            NewHeadSha = newRev,
+            Labels = ExtractLabels(root)
         };
+    }
+
+    /// <summary>
+    /// GitLab Merge Request Hook payloads place the authoritative current label set at the
+    /// top-level <c>labels[]</c> array — each entry is <c>{ id, title, color, project_id, ... }</c>.
+    /// We surface titles only; the matcher matches on names and downstream nodes reference
+    /// <c>{{trigger.labels}}</c> as a string array. <c>changes.labels.current</c> is
+    /// deliberately NOT consulted — it's only populated when labels changed in this specific
+    /// event, while the top-level array is the snapshot we want for matcher purposes.
+    /// </summary>
+    private static IReadOnlyList<string> ExtractLabels(JsonElement root)
+    {
+        if (!root.TryGetProperty("labels", out var labels) || labels.ValueKind != JsonValueKind.Array) return Array.Empty<string>();
+
+        var titles = new List<string>(labels.GetArrayLength());
+
+        foreach (var label in labels.EnumerateArray())
+        {
+            if (label.ValueKind != JsonValueKind.Object) continue;
+            if (!label.TryGetProperty("title", out var titleEl)) continue;
+            if (titleEl.ValueKind != JsonValueKind.String) continue;
+
+            var title = titleEl.GetString();
+            if (!string.IsNullOrEmpty(title)) titles.Add(title);
+        }
+
+        return titles;
     }
 
     private static PullRequestMergedEvent BuildMerged(Guid repositoryId, string deliveryId, DateTimeOffset now, JsonElement attrs, JsonElement root)

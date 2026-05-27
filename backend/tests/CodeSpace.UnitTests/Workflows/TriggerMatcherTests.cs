@@ -1,3 +1,4 @@
+using System.Linq;
 using System.Text.Json;
 using CodeSpace.Core.Services.Workflows.RunSources.Matchers;
 using CodeSpace.Messages.Events.PullRequest;
@@ -84,6 +85,70 @@ public class TriggerMatcherTests
         payload.GetProperty("number").GetInt32().ShouldBe(42);
         payload.GetProperty("title").GetString().ShouldBe("Fix bug");
         payload.GetProperty("repositoryId").GetString().ShouldBe(RepoA.ToString());
+    }
+
+    [Fact]
+    public void PrOpened_payload_includes_labels_array()
+    {
+        // OpenedEvent helper defaults Labels to empty; rebuild here with non-empty labels
+        // so we can pin the JSON-level shape AND the value passthrough in one assertion.
+        var ev = new PullRequestOpenedEvent
+        {
+            RepositoryId = RepoA,
+            ProviderEventId = "1",
+            OccurredAt = DateTimeOffset.UtcNow,
+            ExternalPullRequestId = "1",
+            Number = 42,
+            Title = "x",
+            SourceBranch = "f",
+            TargetBranch = "main",
+            AuthorExternalId = "u",
+            AuthorName = "u",
+            WebUrl = "x",
+            Labels = new[] { "bug", "needs-review" }
+        };
+
+        var payload = new PrOpenedMatcher().BuildPayload(ev);
+
+        var labelsEl = payload.GetProperty("labels");
+        labelsEl.ValueKind.ShouldBe(JsonValueKind.Array);
+        labelsEl.EnumerateArray().Select(l => l.GetString()).ShouldBe(new[] { "bug", "needs-review" });
+    }
+
+    [Fact]
+    public void PrOpened_payload_labels_default_to_empty_array()
+    {
+        // The helper's default-constructed event has no labels — the payload must still
+        // expose labels as an empty JSON array (not omit / not null), so downstream nodes
+        // referencing {{trigger.labels}} get a stable shape regardless of whether the
+        // upstream webhook had any labels.
+        var payload = new PrOpenedMatcher().BuildPayload(OpenedEvent(RepoA));
+
+        var labelsEl = payload.GetProperty("labels");
+        labelsEl.ValueKind.ShouldBe(JsonValueKind.Array);
+        labelsEl.GetArrayLength().ShouldBe(0);
+    }
+
+    [Fact]
+    public void PrUpdated_payload_includes_labels_array()
+    {
+        var ev = new PullRequestSynchronizedEvent
+        {
+            RepositoryId = RepoA,
+            ProviderEventId = "1",
+            OccurredAt = DateTimeOffset.UtcNow,
+            ExternalPullRequestId = "1",
+            Number = 7,
+            PreviousHeadSha = "a",
+            NewHeadSha = "b",
+            Labels = new[] { "wip" }
+        };
+
+        var payload = new PrUpdatedMatcher().BuildPayload(ev);
+
+        var labelsEl = payload.GetProperty("labels");
+        labelsEl.ValueKind.ShouldBe(JsonValueKind.Array);
+        labelsEl.EnumerateArray().Select(l => l.GetString()).ShouldBe(new[] { "wip" });
     }
 
     private static PullRequestOpenedEvent OpenedEvent(Guid repositoryId) => new()

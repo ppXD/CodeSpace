@@ -40,7 +40,8 @@ public sealed class PrOpenedMatcher : IRunSourceMatcher
             sourceBranch = opened.SourceBranch,
             targetBranch = opened.TargetBranch,
             authorName = opened.AuthorName,
-            webUrl = opened.WebUrl
+            webUrl = opened.WebUrl,
+            labels = opened.Labels
         };
 
         return JsonSerializer.SerializeToElement(payload);
