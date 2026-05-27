@@ -289,7 +289,6 @@ public class ProjectRepositoryLinkFlowTests
         {
             Id = repoId,
             TeamId = teamId,
-            ProjectId = defaultProject.Id,    // legacy column dual-write — required for the still-NOT-NULL constraint
             ProviderInstanceId = providerInstance.Id,
             ExternalId = $"prl-ext-{suffix}",
             NamespacePath = "ns",

@@ -126,8 +126,8 @@ public class MeQueryTests
         db.ProviderInstance.Add(instance);
         db.TeamMembership.Add(new TeamMembership { Id = Guid.NewGuid(), TeamId = team.Id, UserId = member.Id, Role = TeamRole.Member });
         db.Repository.AddRange(
-            new Repository { Id = Guid.NewGuid(), TeamId = team.Id, ProjectId = project.Id, ProviderInstanceId = instance.Id, ExternalId = "r1", NamespacePath = "n", Name = "r1", FullPath = "n/r1", DefaultBranch = "main", Visibility = RepositoryVisibility.Private, WebUrl = "x", Status = RepositoryStatus.Active },
-            new Repository { Id = Guid.NewGuid(), TeamId = team.Id, ProjectId = project.Id, ProviderInstanceId = instance.Id, ExternalId = "r2", NamespacePath = "n", Name = "r2", FullPath = "n/r2", DefaultBranch = "main", Visibility = RepositoryVisibility.Private, WebUrl = "x", Status = RepositoryStatus.Active });
+            new Repository { Id = Guid.NewGuid(), TeamId = team.Id, ProviderInstanceId = instance.Id, ExternalId = "r1", NamespacePath = "n", Name = "r1", FullPath = "n/r1", DefaultBranch = "main", Visibility = RepositoryVisibility.Private, WebUrl = "x", Status = RepositoryStatus.Active },
+            new Repository { Id = Guid.NewGuid(), TeamId = team.Id, ProviderInstanceId = instance.Id, ExternalId = "r2", NamespacePath = "n", Name = "r2", FullPath = "n/r2", DefaultBranch = "main", Visibility = RepositoryVisibility.Private, WebUrl = "x", Status = RepositoryStatus.Active });
 
         await db.SaveChangesAsync().ConfigureAwait(false);
 

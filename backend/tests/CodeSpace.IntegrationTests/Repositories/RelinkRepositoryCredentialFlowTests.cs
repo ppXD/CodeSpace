@@ -184,7 +184,6 @@ public class RelinkRepositoryCredentialFlowTests
         {
             Id = Guid.NewGuid(),
             TeamId = team.Id,
-            ProjectId = project.Id,
             ProviderInstanceId = instance.Id,
             CredentialId = oldCred.Id,
             ExternalId = "1",

@@ -419,8 +419,6 @@ public class RepositoryWebhookRegistrationFlowTests
         var db = scope.Resolve<CodeSpaceDbContext>();
         var encryptor = scope.Resolve<IPayloadEncryptor>();
 
-        var projectId = await db.Project.AsNoTracking().Where(p => p.TeamId == teamId).Select(p => p.Id).SingleAsync().ConfigureAwait(false);
-
         var repoId = Guid.NewGuid();
         var webhookId = Guid.NewGuid();
         var suffix = Guid.NewGuid().ToString("N").Substring(0, 6);
@@ -429,7 +427,6 @@ public class RepositoryWebhookRegistrationFlowTests
         {
             Id = repoId,
             TeamId = teamId,
-            ProjectId = projectId,
             ProviderInstanceId = providerInstanceId,
             CredentialId = credentialId,
             ExternalId = $"id-staged-{suffix}",

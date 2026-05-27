@@ -1,0 +1,22 @@
+-- 0027_drop_repository_project_id.sql
+--
+-- Phase 3.1b — drop the legacy repository.project_id column. Migration 0026
+-- introduced the project_repository link table as the N:M source of truth and
+-- the application code has fully migrated; this migration removes the now-
+-- unused column.
+--
+-- No data migration: the seed step in 0025 + the dual-write in
+-- RepositoryBindingService kept the column populated during the transition,
+-- but operators are expected to re-attach repositories via the UI if they
+-- need to preserve project membership beyond what the link table already
+-- carries. There are no production deployments yet, so this is a safe drop.
+--
+-- Index cleanup is automatic: PostgreSQL drops any index defined on the
+-- column (the EF-managed IX_repository_project_id from RepositoryConfiguration
+-- and the named idx_repository_project_active from 0025) when the column
+-- itself drops. No explicit DROP INDEX needed.
+--
+-- Idempotency: IF EXISTS guards re-runs on environments where the column was
+-- already removed (e.g. schemaversions reset).
+
+ALTER TABLE repository DROP COLUMN IF EXISTS project_id;
