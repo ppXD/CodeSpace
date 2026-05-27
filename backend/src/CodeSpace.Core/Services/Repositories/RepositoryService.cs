@@ -2,6 +2,7 @@ using CodeSpace.Core.DependencyInjection;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Identity;
+using CodeSpace.Messages.Dtos.Projects;
 using CodeSpace.Messages.Dtos.Repositories;
 using CodeSpace.Messages.Enums;
 using Microsoft.EntityFrameworkCore;
@@ -25,63 +26,73 @@ public sealed class RepositoryService : IRepositoryService, IScopedDependency
         var query = _db.Repository.AsNoTracking().Where(r => r.TeamId == teamId && r.DeletedDate == null);
 
         if (providerInstanceId.HasValue) query = query.Where(r => r.ProviderInstanceId == providerInstanceId.Value);
-        if (projectId.HasValue) query = query.Where(r => r.ProjectId == projectId.Value);
+        // Phase 3.1 — Repository:Project is N:M via the link table. "Filter by project" is
+        // "the repo has an active link to this project".
+        if (projectId.HasValue) query = query.Where(r => _db.ProjectRepository.Any(pr => pr.RepositoryId == r.Id && pr.ProjectId == projectId.Value && pr.DeletedDate == null));
 
-        return await query
+        var bare = await query
             .OrderByDescending(r => r.CreatedDate)
-            .Select(r => new RepositorySummary
+            .Select(r => new
             {
-                Id = r.Id,
-                TeamId = r.TeamId,
-                ProviderInstanceId = r.ProviderInstanceId,
-                CredentialId = r.CredentialId,
-                FullPath = r.FullPath,
-                Name = r.Name,
-                DefaultBranch = r.DefaultBranch,
-                Visibility = r.Visibility,
-                Status = r.Status,
-                LastError = r.LastError,
-                WebUrl = r.WebUrl,
-                LastEventDate = r.LastEventDate,
-                CreatedDate = r.CreatedDate
+                r.Id,
+                r.TeamId,
+                r.ProviderInstanceId,
+                r.CredentialId,
+                r.FullPath,
+                r.Name,
+                r.DefaultBranch,
+                r.Visibility,
+                r.Status,
+                r.LastError,
+                r.WebUrl,
+                r.LastEventDate,
+                r.CreatedDate,
+                Projects = _db.ProjectRepository
+                    .Where(pr => pr.RepositoryId == r.Id && pr.DeletedDate == null)
+                    .OrderBy(pr => pr.CreatedDate)
+                    .Select(pr => new ProjectRef { Id = pr.Project.Id, Slug = pr.Project.Slug, Name = pr.Project.Name })
+                    .ToList()
             })
             .ToListAsync(cancellationToken).ConfigureAwait(false);
+
+        return bare.Select(r => new RepositorySummary
+        {
+            Id = r.Id,
+            TeamId = r.TeamId,
+            ProviderInstanceId = r.ProviderInstanceId,
+            CredentialId = r.CredentialId,
+            FullPath = r.FullPath,
+            Name = r.Name,
+            DefaultBranch = r.DefaultBranch,
+            Visibility = r.Visibility,
+            Status = r.Status,
+            LastError = r.LastError,
+            WebUrl = r.WebUrl,
+            LastEventDate = r.LastEventDate,
+            CreatedDate = r.CreatedDate,
+            Projects = r.Projects,
+        }).ToList();
     }
 
     public async Task<RepositoryDetail?> GetAsync(Guid repositoryId, CancellationToken cancellationToken)
     {
-        // Join with the parent project so the breadcrumb on the repo-detail page
-        // can render Projects / {project.Name} / {repo.Name}. project_id is NOT NULL
-        // (migration 0025), so a missing match means the project row was hard-deleted
-        // out of band — we still surface what we have rather than 404'ing the repo.
-        return await _db.Repository
+        // Phase 3.1 — Repository:Project is N:M. The detail DTO surfaces every active
+        // project link; the legacy ProjectId/Slug/Name fields are derived from the first
+        // link (by ascending CreatedDate) so existing SPA breadcrumbs keep working until
+        // they migrate to the Projects[] field. Returns null Project* when the repo has
+        // no active project links (e.g. operator hasn't attached it after the 0026 schema
+        // change wiped legacy links).
+        var bare = await _db.Repository
             .AsNoTracking()
             .Where(r => r.Id == repositoryId && r.DeletedDate == null)
-            .Select(r => new RepositoryDetail
+            .Select(r => new
             {
-                Id = r.Id,
-                TeamId = r.TeamId,
-                ProviderInstanceId = r.ProviderInstanceId,
-                CredentialId = r.CredentialId,
-                ProjectId = r.ProjectId,
-                ProjectSlug = _db.Project.Where(p => p.Id == r.ProjectId).Select(p => p.Slug).FirstOrDefault() ?? string.Empty,
-                ProjectName = _db.Project.Where(p => p.Id == r.ProjectId).Select(p => p.Name).FirstOrDefault() ?? string.Empty,
-                ExternalId = r.ExternalId,
-                NamespacePath = r.NamespacePath,
-                Name = r.Name,
-                FullPath = r.FullPath,
-                DefaultBranch = r.DefaultBranch,
-                Visibility = r.Visibility,
-                Description = r.Description,
-                WebUrl = r.WebUrl,
-                CloneUrlHttps = r.CloneUrlHttps,
-                CloneUrlSsh = r.CloneUrlSsh,
-                Archived = r.Archived,
-                LastSyncedDate = r.LastSyncedDate,
-                LastEventDate = r.LastEventDate,
-                Status = r.Status,
-                LastError = r.LastError,
-                CreatedDate = r.CreatedDate,
+                Repo = r,
+                Projects = _db.ProjectRepository
+                    .Where(pr => pr.RepositoryId == r.Id && pr.DeletedDate == null)
+                    .OrderBy(pr => pr.CreatedDate)
+                    .Select(pr => new ProjectRef { Id = pr.Project.Id, Slug = pr.Project.Slug, Name = pr.Project.Name })
+                    .ToList(),
                 // "Active" here means "alive at the provider AND we haven't unbound it" —
                 // i.e. RegistrationStatus = Registered AND the Active flag is still true.
                 // Pending / Enqueued / Registering / Failed rows represent in-flight registrations
@@ -90,6 +101,38 @@ public sealed class RepositoryService : IRepositoryService, IScopedDependency
                 ActiveWebhooksCount = _db.RepositoryWebhook.Count(w => w.RepositoryId == r.Id && w.Active && w.RegistrationStatus == Messages.Enums.RepositoryWebhookRegistrationStatus.Registered)
             })
             .SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
+
+        if (bare == null) return null;
+
+        var primary = bare.Projects.FirstOrDefault();
+        return new RepositoryDetail
+        {
+            Id = bare.Repo.Id,
+            TeamId = bare.Repo.TeamId,
+            ProviderInstanceId = bare.Repo.ProviderInstanceId,
+            CredentialId = bare.Repo.CredentialId,
+            Projects = bare.Projects,
+            ProjectId = primary?.Id,
+            ProjectSlug = primary?.Slug,
+            ProjectName = primary?.Name,
+            ExternalId = bare.Repo.ExternalId,
+            NamespacePath = bare.Repo.NamespacePath,
+            Name = bare.Repo.Name,
+            FullPath = bare.Repo.FullPath,
+            DefaultBranch = bare.Repo.DefaultBranch,
+            Visibility = bare.Repo.Visibility,
+            Description = bare.Repo.Description,
+            WebUrl = bare.Repo.WebUrl,
+            CloneUrlHttps = bare.Repo.CloneUrlHttps,
+            CloneUrlSsh = bare.Repo.CloneUrlSsh,
+            Archived = bare.Repo.Archived,
+            LastSyncedDate = bare.Repo.LastSyncedDate,
+            LastEventDate = bare.Repo.LastEventDate,
+            Status = bare.Repo.Status,
+            LastError = bare.Repo.LastError,
+            CreatedDate = bare.Repo.CreatedDate,
+            ActiveWebhooksCount = bare.ActiveWebhooksCount,
+        };
     }
 
     public async Task RelinkCredentialAsync(Guid repositoryId, Guid newCredentialId, CancellationToken cancellationToken)

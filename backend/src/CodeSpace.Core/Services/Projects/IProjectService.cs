@@ -26,9 +26,15 @@ public interface IProjectService
     Task<Guid> CreateAsync(Guid teamId, string name, string? description, Guid actorUserId, CancellationToken cancellationToken);
 
     /// <summary>
-    /// Move an active repository from its current project to a different project in
-    /// the same team. Throws when either the repo or the target project doesn't
-    /// belong to this team. No-op when the repo is already in the target project.
+    /// Atomic-by-row "set membership" semantic for the legacy frontend Move-to-Project flow:
+    /// soft-deletes every active <c>project_repository</c> link for the repo and attaches a
+    /// fresh link to <paramref name="targetProjectId"/>. Throws when either the repo or the
+    /// target project doesn't belong to this team. Idempotent — already-only-in-target is a
+    /// no-op.
+    ///
+    /// <para>Phase 3.1 — Repository:Project is N:M. Callers that want to express true N:M
+    /// membership (a repo in TWO projects) should use a future <c>AttachRepositoryAsync</c>
+    /// / <c>DetachRepositoryAsync</c> pair instead of this Move primitive.</para>
     /// </summary>
     Task MoveRepositoryAsync(Guid teamId, Guid repositoryId, Guid targetProjectId, Guid actorUserId, CancellationToken cancellationToken);
 
@@ -43,8 +49,9 @@ public interface IProjectService
 
     /// <summary>
     /// Returns the team's "default" project id, creating it lazily if missing. Used by the
-    /// binding flow to fill <see cref="Persistence.Entities.Repository.ProjectId"/> when the
-    /// operator hasn't picked a project. Idempotent — concurrent callers all see the same row.
+    /// binding flow as the fallback project to attach a new repository to via the
+    /// <c>project_repository</c> link table when the operator hasn't picked one explicitly.
+    /// Idempotent — concurrent callers all see the same row.
     /// </summary>
     Task<Guid> EnsureDefaultProjectAsync(Guid teamId, CancellationToken cancellationToken);
 }

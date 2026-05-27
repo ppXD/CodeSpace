@@ -49,7 +49,7 @@ public sealed class ProjectService : IProjectService, IScopedDependency
                 p.Name,
                 p.Description,
                 p.CreatedDate,
-                ActiveRepositoryCount = _db.Repository.Count(r => r.ProjectId == p.Id && r.DeletedDate == null),
+                ActiveRepositoryCount = _db.ProjectRepository.Count(pr => pr.ProjectId == p.Id && pr.DeletedDate == null),
                 ActiveVariableCount = _db.Variable.Count(v => v.Scope == VariableScope.Project && v.ScopeId == p.Id && v.DeletedDate == null),
             })
             .ToListAsync(cancellationToken).ConfigureAwait(false);
@@ -79,7 +79,7 @@ public sealed class ProjectService : IProjectService, IScopedDependency
                 p.Name,
                 p.Description,
                 p.CreatedDate,
-                ActiveRepositoryCount = _db.Repository.Count(r => r.ProjectId == p.Id && r.DeletedDate == null),
+                ActiveRepositoryCount = _db.ProjectRepository.Count(pr => pr.ProjectId == p.Id && pr.DeletedDate == null),
                 ActiveVariableCount = _db.Variable.Count(v => v.Scope == VariableScope.Project && v.ScopeId == p.Id && v.DeletedDate == null),
             })
             .SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
@@ -174,24 +174,51 @@ public sealed class ProjectService : IProjectService, IScopedDependency
 
         // Load + verify repo. Soft-deleted repos aren't movable — operator should rebind
         // them through the normal bind flow if they want them back.
-        var repository = await _db.Repository
+        var repository = await _db.Repository.AsNoTracking()
             .Where(r => r.Id == repositoryId && r.TeamId == teamId && r.DeletedDate == null)
             .SingleOrDefaultAsync(cancellationToken)
             .ConfigureAwait(false)
             ?? throw new KeyNotFoundException($"Repository {repositoryId} not found or not accessible.");
 
-        if (repository.ProjectId == targetProjectId) return;   // already in the target — idempotent
+        // Phase 3.1 — Repository:Project is N:M via project_repository link table. "Move" is
+        // expressed as: detach every currently-active link of this repo, attach a fresh link
+        // to the target. This preserves the legacy "this repo now belongs to exactly the
+        // target project" contract that the frontend's Move-to-Project flow expects, while
+        // the underlying schema supports many-to-many for callers that want to express
+        // membership in multiple projects via the link table directly.
+        var existingLinks = await _db.ProjectRepository
+            .Where(pr => pr.RepositoryId == repositoryId && pr.DeletedDate == null)
+            .ToListAsync(cancellationToken).ConfigureAwait(false);
 
-        var fromProjectId = repository.ProjectId;
-        repository.ProjectId = targetProjectId;
-        repository.LastModifiedDate = DateTimeOffset.UtcNow;
-        repository.LastModifiedBy = actorUserId;
+        // Idempotent: already linked to exactly the target only → no-op.
+        if (existingLinks.Count == 1 && existingLinks[0].ProjectId == targetProjectId) return;
+
+        var now = DateTimeOffset.UtcNow;
+        foreach (var link in existingLinks)
+        {
+            if (link.ProjectId == targetProjectId) continue;   // keep an existing-target link untouched
+            link.DeletedDate = now;
+            link.LastModifiedDate = now;
+            link.LastModifiedBy = actorUserId;
+        }
+
+        if (!existingLinks.Any(l => l.ProjectId == targetProjectId && l.DeletedDate == null))
+            _db.ProjectRepository.Add(new ProjectRepository
+            {
+                ProjectId = targetProjectId,
+                RepositoryId = repositoryId,
+                TeamId = teamId,
+                CreatedDate = now,
+                CreatedBy = actorUserId,
+                LastModifiedDate = now,
+                LastModifiedBy = actorUserId,
+            });
 
         await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
 
         _logger.LogInformation(
-            "Repository moved: team={TeamId} repository={RepositoryId} from={FromProjectId} to={ToProjectId}",
-            teamId, repositoryId, fromProjectId, targetProjectId);
+            "Repository moved: team={TeamId} repository={RepositoryId} detached={DetachedCount} to={ToProjectId}",
+            teamId, repositoryId, existingLinks.Count(l => l.ProjectId != targetProjectId), targetProjectId);
     }
 
     /// <summary>
@@ -253,8 +280,8 @@ public sealed class ProjectService : IProjectService, IScopedDependency
         if (string.Equals(project.Slug, DefaultProjectSlug, StringComparison.Ordinal))
             throw new InvalidOperationException("The default project cannot be deleted — every team must have at least one project.");
 
-        var activeRepoCount = await _db.Repository.AsNoTracking()
-            .CountAsync(r => r.ProjectId == projectId && r.DeletedDate == null, cancellationToken)
+        var activeRepoCount = await _db.ProjectRepository.AsNoTracking()
+            .CountAsync(pr => pr.ProjectId == projectId && pr.DeletedDate == null, cancellationToken)
             .ConfigureAwait(false);
 
         if (activeRepoCount > 0)
