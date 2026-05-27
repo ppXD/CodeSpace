@@ -1,5 +1,6 @@
 using System.Text.Json;
 using CodeSpace.Core.DependencyInjection;
+using CodeSpace.Core.Hardening;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Variables;
@@ -290,7 +291,7 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
         // Project scope — load only the projects this definition references (via slug),
         // not every project in the team. Falls back to an empty bag when the definition
         // contains no project.* refs (cheap).
-        var (projects, projectSecretPaths) = await LoadReferencedProjectVariablesAsync(run.Workflow.TeamId, definition, cancellationToken).ConfigureAwait(false);
+        var (projects, projectSecretPaths) = await LoadReferencedProjectVariablesAsync(run.Workflow.TeamId, run.WorkflowId, definition, cancellationToken).ConfigureAwait(false);
 
         var secretPaths = CollectSecretPaths(wfResolved, teamResolved, projectSecretPaths);
 
@@ -332,7 +333,7 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
         var teamSecretNames = await MergeCurrentSecretsAsync(team, VariableScope.Team, run.Workflow.TeamId, cancellationToken).ConfigureAwait(false);
 
         // Project scope — load fresh (no snapshot path for projects).
-        var (projects, projectSecretPaths) = await LoadReferencedProjectVariablesAsync(run.Workflow.TeamId, definition, cancellationToken).ConfigureAwait(false);
+        var (projects, projectSecretPaths) = await LoadReferencedProjectVariablesAsync(run.Workflow.TeamId, run.WorkflowId, definition, cancellationToken).ConfigureAwait(false);
 
         // Secret-paths used by the engine's Terminal-output leak guard. Replay re-resolves
         // secrets from the live table (see MergeCurrentSecretsAsync), so we use the same
@@ -416,13 +417,20 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
     ///
     /// <para>References are extracted from the WHOLE definition (every node's <c>Inputs</c>
     /// + <c>Config</c>) — paths starting with <c>project.</c> contribute their second
-    /// segment as a slug. Unknown / soft-deleted slugs are silently skipped: save-time
-    /// validation enforces shape only (<c>project.&lt;slug&gt;.&lt;name&gt;</c>) and does
-    /// NOT verify the slug exists — that would require a DB lookup at every save and would
-    /// race with concurrent project deletes. Runtime gracefully resolves missing slugs to
-    /// null (treated as an empty bag — the {{}} reference resolves to null).</para>
+    /// segment as a slug. Save-time validation enforces shape only
+    /// (<c>project.&lt;slug&gt;.&lt;name&gt;</c>) and does NOT verify the slug exists —
+    /// that would require a DB lookup at every save and would race with concurrent project
+    /// deletes.</para>
+    ///
+    /// <para>Missing slugs at run time (project deleted after save, or never existed)
+    /// flow through <see cref="MissingProjectRefValidator"/> which applies three-mode
+    /// enforcement (off / warn / strict) — see that class for rationale. Default is
+    /// <c>warn</c>: a structured log line names every missing slug and the env var to
+    /// flip to <c>strict</c>; the bag for those slugs stays unfilled and the resolver
+    /// returns null (preserves legacy behavior). Operators flip to <c>strict</c> for
+    /// production hardening once stale refs are cleaned up.</para>
     /// </summary>
-    private async Task<(IReadOnlyDictionary<string, IReadOnlyDictionary<string, JsonElement>> Bag, IReadOnlyList<string> SecretPaths)> LoadReferencedProjectVariablesAsync(Guid teamId, WorkflowDefinition definition, CancellationToken cancellationToken)
+    private async Task<(IReadOnlyDictionary<string, IReadOnlyDictionary<string, JsonElement>> Bag, IReadOnlyList<string> SecretPaths)> LoadReferencedProjectVariablesAsync(Guid teamId, Guid workflowId, WorkflowDefinition definition, CancellationToken cancellationToken)
     {
         var referencedSlugs = CollectReferencedProjectSlugs(definition);
         if (referencedSlugs.Count == 0)
@@ -434,6 +442,16 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
             .Select(p => new { p.Id, p.Slug })
             .ToListAsync(cancellationToken)
             .ConfigureAwait(false);
+
+        // Apply Rule-11 three-mode enforcement on the diff between referenced and found
+        // slugs. Strict mode throws here (caught by the engine's main loop, which lands
+        // the run in Failed with the exception's message in WorkflowRun.Error); warn
+        // logs and continues; off is silent.
+        var foundSlugs = projects.Select(p => p.Slug).ToHashSet(StringComparer.Ordinal);
+        MissingProjectRefValidator.EnsureKnown(
+            referencedSlugs, foundSlugs, teamId, workflowId,
+            EnforcementModeReader.Read(MissingProjectRefValidator.EnforcementEnvVar),
+            _logger);
 
         var bag = new Dictionary<string, IReadOnlyDictionary<string, JsonElement>>();
         var secretPaths = new List<string>();
