@@ -7,7 +7,9 @@ import type { CredentialSummary, RemoteRepository } from "@/api/types";
 import { useCredentials, useProviderInstances, useAccessibleRepositoriesForPicker } from "@/hooks/use-credentials";
 import { useCreateProject, useProjects } from "@/hooks/use-projects";
 import { useBindRepositoriesBulk, useRepositories } from "@/hooks/use-repositories";
+import { ConnectRemoteModal } from "@/_imported/ai-code-space/connect-remote-modal";
 import { Ic } from "@/_imported/ai-code-space/icons";
+import { Pager } from "@/_imported/ai-code-space/pager";
 import { ProviderMark } from "@/_imported/ai-code-space/content";
 
 export const Route = createFileRoute("/_app/teams/$teamSlug/projects/")({
@@ -33,6 +35,10 @@ function ProjectsListPage() {
 
   const projectsQuery = useProjects();
   const [addOpen, setAddOpen] = useState(false);
+  // Connect remote modal lives on the Projects page now that Repositories is no
+  // longer a primary nav row — without this entry point users couldn't add a new
+  // OAuth credential / provider instance after the Phase 3.0 pivot.
+  const [connectOpen, setConnectOpen] = useState(false);
 
   const rows = projectsQuery.data ?? [];
   const filtered = query
@@ -60,6 +66,9 @@ function ProjectsListPage() {
         <div className="ct-title-row">
           <h1 className="ct-title">Projects</h1>
           <div className="ct-actions">
+            <button className="btn" onClick={() => setConnectOpen(true)}>
+              <Ic.Link size={14} /> Connect remote
+            </button>
             <button className="btn btn-primary" onClick={() => setAddOpen(true)}>
               <Ic.Plus size={14} /> Add project
             </button>
@@ -165,6 +174,8 @@ function ProjectsListPage() {
           }}
         />
       )}
+
+      {connectOpen && <ConnectRemoteModal onClose={() => setConnectOpen(false)} />}
     </section>
   );
 }
@@ -395,6 +406,22 @@ function ImportStep({ onBack, onClose, onCreated }: { onBack: () => void; onClos
   }
 
   if (phase === "picker" && picked && pickedInstance) {
+    // Search debounce: while the operator is still typing, query !== debouncedQuery.
+    // Surface this as a "typing…" indicator so the (unchanged) list below doesn't
+    // confuse them — they SEE the input updating but the list is intentionally a
+    // beat behind. Same affordance the AddRepoModal picker uses.
+    const isSearchPending = query !== debouncedQuery;
+    // hasNextPage mirrors the AddRepoModal heuristic: trust totalPages when known
+    // (GitHub always, GitLab via GraphQL count), otherwise infer "more available"
+    // from "this page came back full" — same pattern the PR list pager uses.
+    const hasNextPage = accessible.totalPages != null
+      ? page < accessible.totalPages
+      : accessible.pageItems.length > 0;
+    // First-load panel only when nothing is on screen yet. Once rows are visible
+    // we render them and let .pick-list[data-stale] dim the previous page during
+    // an in-flight refetch — dimming the empty state on cold-load was confusing.
+    const showFirstLoadPanel = accessible.isLoading && accessible.pageItems.length === 0;
+
     return (
       <>
         <div className="mdl-head">
@@ -409,17 +436,28 @@ function ImportStep({ onBack, onClose, onCreated }: { onBack: () => void; onClos
           <div className="picker-search">
             <Ic.Search size={13} />
             <input placeholder="Search repositories…" value={query} onChange={e => setQuery(e.target.value)} autoFocus />
+            {isSearchPending && <span className="picker-search-pending">typing…</span>}
           </div>
 
-          {accessible.isLoading && <div className="ct-empty"><div className="ct-empty-h">Loading…</div></div>}
+          {/* Eager-fetch progress hint — visible while the loop is still loading
+              pages in the background. The operator can already act on what's
+              loaded; search + paging only see the prefix until this clears. */}
+          {accessible.isLoading && accessible.loadedCount > 0 && (
+            <div className="picker-search-hint">
+              Loaded {accessible.loadedCount.toLocaleString()} repos so far · still loading the rest…
+            </div>
+          )}
+
           {accessible.error && (
             <div className="cn-banner cn-banner-err">
               <div className="cn-banner-p">{accessible.error instanceof Error ? accessible.error.message : "Could not load repositories."}</div>
             </div>
           )}
 
-          {!accessible.isLoading && !accessible.error && (
-            <div className="pick-list">
+          {showFirstLoadPanel && <div className="ct-empty"><div className="ct-empty-h">Loading…</div></div>}
+
+          {!showFirstLoadPanel && !accessible.error && (
+            <div className="pick-list" data-stale={accessible.isRefetching}>
               {accessible.pageItems.map((repo: RemoteRepository) => {
                 const alreadyBound = boundFullPaths.has(repo.fullPath);
                 return (
@@ -438,11 +476,33 @@ function ImportStep({ onBack, onClose, onCreated }: { onBack: () => void; onClos
                   </button>
                 );
               })}
+
+              {accessible.pageItems.length === 0 && (
+                <div style={{ padding: 24, textAlign: "center", color: "var(--muted)", fontSize: 12.5 }}>
+                  {debouncedQuery
+                    ? accessible.isFullyLoaded
+                      ? `No repositories match "${debouncedQuery}".`
+                      : `No matches yet for "${debouncedQuery}" — still loading more…`
+                    : accessible.isFullyLoaded
+                      ? "This token has no repos visible. Grant access on the provider side and try again."
+                      : null}
+                </div>
+              )}
             </div>
+          )}
+
+          {(page > 1 || hasNextPage) && (
+            <Pager
+              current={page}
+              totalPages={accessible.totalPages}
+              hasNext={hasNextPage}
+              loading={accessible.isLoading}
+              onChange={setPage}
+            />
           )}
         </div>
         <div className="mdl-foot">
-          <div className="mdl-foot-info">{accessible.totalCount != null ? `${accessible.totalCount} repos visible to this credential` : `${accessible.loadedCount} loaded`}</div>
+          <div className="mdl-foot-info">{accessible.totalCount != null ? `${accessible.totalCount.toLocaleString()} repos visible${debouncedQuery ? ` matching "${debouncedQuery}"` : ""}${accessible.isFullyLoaded ? "" : " · loading…"}` : `${accessible.loadedCount} loaded`}</div>
         </div>
       </>
     );
