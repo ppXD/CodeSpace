@@ -175,6 +175,225 @@ public class TriggerMatcherTests
         labelsEl.GetArrayLength().ShouldBe(0);
     }
 
+    // ─── Schema upgrade: `repositories: [{ repositoryId, labels }]` shape + label AND-filter ────────
+
+    [Fact]
+    public void Legacy_labels_AND_filter_matches_when_pr_has_every_required_label()
+    {
+        // Pre-upgrade, the matcher silently ignored the top-level `labels` array even though
+        // the trigger node's ConfigSchema advertised it. PR #23 promotes that to honoured
+        // semantics via the shared filter — verify AND semantics on the legacy shape.
+        var ev = OpenedWithLabels(RepoA, "bug", "wip", "noisy");
+        var config = ParseConfig($$"""{ "repositoryId": "{{RepoA}}", "labels": ["bug", "wip"] }""");
+
+        new PrOpenedMatcher().Match(ev, config).ShouldBeTrue();
+    }
+
+    [Fact]
+    public void Legacy_labels_AND_filter_rejects_when_pr_is_missing_a_required_label()
+    {
+        var ev = OpenedWithLabels(RepoA, "bug");
+        var config = ParseConfig($$"""{ "repositoryId": "{{RepoA}}", "labels": ["bug", "wip"] }""");
+
+        new PrOpenedMatcher().Match(ev, config).ShouldBeFalse();
+    }
+
+    [Fact]
+    public void Legacy_empty_labels_array_treats_as_no_label_filter()
+    {
+        // [] in the legacy shape means "no filter, match any label state" — opposite of the
+        // new-shape's empty `repositories: []` which means "no repos, match nothing".
+        var ev = OpenedEvent(RepoA);   // no labels
+        var config = ParseConfig($$"""{ "repositoryId": "{{RepoA}}", "labels": [] }""");
+
+        new PrOpenedMatcher().Match(ev, config).ShouldBeTrue();
+    }
+
+    [Fact]
+    public void Legacy_unparseable_repositoryId_preserves_no_filter_behaviour()
+    {
+        // Existing matcher bug-compat: an invalid Guid in `repositoryId` falls through to
+        // "no filter". Pinned so a future tightening is a conscious decision, not silent.
+        var ev = OpenedEvent(RepoA);
+        var config = ParseConfig("""{ "repositoryId": "not-a-guid" }""");
+
+        new PrOpenedMatcher().Match(ev, config).ShouldBeTrue();
+    }
+
+    [Fact]
+    public void New_shape_empty_repositories_array_matches_nothing()
+    {
+        // Operator explicitly configured "no repos" — must NOT silently match-all (that's
+        // what `{}` is for). Common scenario: UI clears the picker and saves before adding
+        // any entries back.
+        var ev = OpenedEvent(RepoA);
+        var config = ParseConfig("""{ "repositories": [] }""");
+
+        new PrOpenedMatcher().Match(ev, config).ShouldBeFalse();
+    }
+
+    [Fact]
+    public void New_shape_entry_with_only_repositoryId_matches_event_from_same_repo()
+    {
+        var ev = OpenedEvent(RepoA);
+        var config = ParseConfig($$"""{ "repositories": [{ "repositoryId": "{{RepoA}}" }] }""");
+
+        new PrOpenedMatcher().Match(ev, config).ShouldBeTrue();
+    }
+
+    [Fact]
+    public void New_shape_entry_with_only_repositoryId_rejects_event_from_other_repo()
+    {
+        var ev = OpenedEvent(RepoA);
+        var config = ParseConfig($$"""{ "repositories": [{ "repositoryId": "{{RepoB}}" }] }""");
+
+        new PrOpenedMatcher().Match(ev, config).ShouldBeFalse();
+    }
+
+    [Fact]
+    public void New_shape_entry_with_labels_AND_filter_matches_when_pr_has_every_required_label()
+    {
+        var ev = OpenedWithLabels(RepoA, "bug", "wip", "extra");
+        var config = ParseConfig($$"""{ "repositories": [{ "repositoryId": "{{RepoA}}", "labels": ["bug", "wip"] }] }""");
+
+        new PrOpenedMatcher().Match(ev, config).ShouldBeTrue();
+    }
+
+    [Fact]
+    public void New_shape_entry_with_labels_AND_filter_rejects_when_one_label_missing()
+    {
+        var ev = OpenedWithLabels(RepoA, "bug");
+        var config = ParseConfig($$"""{ "repositories": [{ "repositoryId": "{{RepoA}}", "labels": ["bug", "wip"] }] }""");
+
+        new PrOpenedMatcher().Match(ev, config).ShouldBeFalse();
+    }
+
+    [Fact]
+    public void New_shape_entry_with_empty_labels_array_skips_label_filter()
+    {
+        // Per-entry semantics mirror the legacy top-level: empty labels = no filter (for
+        // this entry).
+        var ev = OpenedEvent(RepoA);
+        var config = ParseConfig($$"""{ "repositories": [{ "repositoryId": "{{RepoA}}", "labels": [] }] }""");
+
+        new PrOpenedMatcher().Match(ev, config).ShouldBeTrue();
+    }
+
+    [Fact]
+    public void New_shape_multiple_entries_fires_when_any_entry_matches()
+    {
+        // OR-across-entries, AND-within-entry. Operator can express "match repo X with
+        // ['a','b'] OR repo Y with ['c']" in one activation row.
+        var ev = OpenedWithLabels(RepoA, "b");
+        var config = ParseConfig($$"""
+            {
+              "repositories": [
+                { "repositoryId": "{{RepoA}}", "labels": ["a"] },
+                { "repositoryId": "{{RepoA}}", "labels": ["b"] }
+              ]
+            }
+            """);
+
+        new PrOpenedMatcher().Match(ev, config).ShouldBeTrue();
+    }
+
+    [Fact]
+    public void New_shape_multiple_entries_returns_false_when_no_entry_matches()
+    {
+        var ev = OpenedWithLabels(RepoA, "x");
+        var config = ParseConfig($$"""
+            {
+              "repositories": [
+                { "repositoryId": "{{RepoA}}", "labels": ["a"] },
+                { "repositoryId": "{{RepoB}}", "labels": ["x"] }
+              ]
+            }
+            """);
+
+        new PrOpenedMatcher().Match(ev, config).ShouldBeFalse();
+    }
+
+    [Fact]
+    public void New_shape_non_array_value_returns_false()
+    {
+        // A clearly-broken config (string where array expected) must NOT silently match-all.
+        // Returning false here is conservative: the operator was using the new shape, just
+        // typed it wrong; reject the row rather than let the workflow fire on every PR.
+        var ev = OpenedEvent(RepoA);
+        var config = ParseConfig("""{ "repositories": "not-an-array" }""");
+
+        new PrOpenedMatcher().Match(ev, config).ShouldBeFalse();
+    }
+
+    [Fact]
+    public void New_shape_entry_with_unparseable_repositoryId_is_skipped()
+    {
+        // One bad entry shouldn't poison the whole config — other entries still get a chance.
+        var ev = OpenedEvent(RepoA);
+        var config = ParseConfig($$"""
+            {
+              "repositories": [
+                { "repositoryId": "not-a-guid" },
+                { "repositoryId": "{{RepoA}}" }
+              ]
+            }
+            """);
+
+        new PrOpenedMatcher().Match(ev, config).ShouldBeTrue();
+    }
+
+    [Fact]
+    public void New_shape_takes_precedence_when_both_new_and_legacy_keys_present()
+    {
+        // If the config carries both `repositories[]` (new) and `repositoryId` (legacy), the
+        // new shape wins — single source of truth, no ambiguous "fallback merge".
+        // Verified by: new shape has an empty array → no match, even though the legacy
+        // `repositoryId` matches the event's repo.
+        var ev = OpenedEvent(RepoA);
+        var config = ParseConfig($$"""{ "repositories": [], "repositoryId": "{{RepoA}}" }""");
+
+        new PrOpenedMatcher().Match(ev, config).ShouldBeFalse();
+    }
+
+    [Fact]
+    public void PrUpdated_honours_new_repositories_shape()
+    {
+        // The shared filter is plumbed into both matchers — parity check.
+        var ev = new PullRequestSynchronizedEvent
+        {
+            RepositoryId = RepoA,
+            ProviderEventId = "1",
+            OccurredAt = DateTimeOffset.UtcNow,
+            ExternalPullRequestId = "1",
+            Number = 7,
+            PreviousHeadSha = "a",
+            NewHeadSha = "b",
+            Labels = new[] { "ship-it" }
+        };
+        var config = ParseConfig($$"""{ "repositories": [{ "repositoryId": "{{RepoA}}", "labels": ["ship-it"] }] }""");
+
+        new PrUpdatedMatcher().Match(ev, config).ShouldBeTrue();
+    }
+
+    [Fact]
+    public void PrUpdated_honours_legacy_labels_AND_filter()
+    {
+        var ev = new PullRequestSynchronizedEvent
+        {
+            RepositoryId = RepoA,
+            ProviderEventId = "1",
+            OccurredAt = DateTimeOffset.UtcNow,
+            ExternalPullRequestId = "1",
+            Number = 7,
+            PreviousHeadSha = "a",
+            NewHeadSha = "b",
+            Labels = new[] { "bug" }
+        };
+        var config = ParseConfig($$"""{ "repositoryId": "{{RepoA}}", "labels": ["bug", "wip"] }""");
+
+        new PrUpdatedMatcher().Match(ev, config).ShouldBeFalse();
+    }
+
     private static PullRequestOpenedEvent OpenedEvent(Guid repositoryId) => new()
     {
         RepositoryId = repositoryId,
@@ -190,6 +409,25 @@ public class TriggerMatcherTests
         AuthorName = "alice",
         WebUrl = "https://example/1"
     };
+
+    private static PullRequestOpenedEvent OpenedWithLabels(Guid repositoryId, params string[] labels) => new()
+    {
+        RepositoryId = repositoryId,
+        ProviderEventId = "1",
+        OccurredAt = DateTimeOffset.UtcNow,
+        ExternalPullRequestId = "1",
+        Number = 42,
+        Title = "Fix bug",
+        Body = "body",
+        SourceBranch = "feature",
+        TargetBranch = "main",
+        AuthorExternalId = "u1",
+        AuthorName = "alice",
+        WebUrl = "https://example/1",
+        Labels = labels
+    };
+
+    private static JsonElement ParseConfig(string json) => JsonDocument.Parse(json).RootElement;
 
     private static JsonElement EmptyConfig() => JsonDocument.Parse("{}").RootElement;
 }

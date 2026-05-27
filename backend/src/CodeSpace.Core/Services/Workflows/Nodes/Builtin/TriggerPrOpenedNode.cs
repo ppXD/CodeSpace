@@ -29,16 +29,27 @@ public sealed class TriggerPrOpenedNode : INodeRuntime
             {
               "type": "object",
               "properties": {
-                "repositoryId": {
-                  "type": "string",
-                  "format": "uuid",
-                  "x-selector": "repository",
-                  "description": "Limit to this repository. Leave empty to match any repo bound to this team."
-                },
-                "labels": {
+                "repositories": {
                   "type": "array",
-                  "items": { "type": "string" },
-                  "description": "Only fire when the PR carries every label listed here (case-sensitive). Leave empty to ignore labels."
+                  "description": "Repositories this trigger fires on. Each entry binds a repo to its own label filter so different repos can carry different label policies. Leave empty to match nothing; omit the key entirely to match every repo bound to this team.",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "repositoryId": {
+                        "type": "string",
+                        "format": "uuid",
+                        "x-selector": "repository",
+                        "description": "Repository to match."
+                      },
+                      "labels": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Only fire when the PR carries every label listed here (case-sensitive). Leave empty / omit to ignore labels for this repo."
+                      }
+                    },
+                    "required": ["repositoryId"],
+                    "additionalProperties": false
+                  }
                 }
               },
               "additionalProperties": false

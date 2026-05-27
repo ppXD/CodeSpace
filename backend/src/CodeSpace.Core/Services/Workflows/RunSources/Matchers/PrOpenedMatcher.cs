@@ -5,9 +5,9 @@ using CodeSpace.Messages.Events.PullRequest;
 namespace CodeSpace.Core.Services.Workflows.RunSources.Matchers;
 
 /// <summary>
-/// Matches <see cref="PullRequestOpenedEvent"/>. Config schema (mirrors the trigger node's
-/// own config):
-///   - <c>repositoryId</c>: optional uuid — only fire when the event's RepositoryId matches
+/// Matches <see cref="PullRequestOpenedEvent"/>. Config schema + match precedence live in
+/// <see cref="PrTriggerMatcherFilter"/> — both PR-triggered matchers share that filter so
+/// the user-facing matching contract is uniform.
 ///
 /// Type key aligns with <c>TriggerPrOpenedNode.TypeKey</c> — the trigger NODE in a definition
 /// declares "trigger.pr.opened", and the workflow_activation ROW in the DB shares the same
@@ -21,7 +21,7 @@ public sealed class PrOpenedMatcher : IRunSourceMatcher
     {
         if (normalizedEvent is not PullRequestOpenedEvent opened) return false;
 
-        return RepositoryFilterMatches(activationConfig, opened.RepositoryId);
+        return PrTriggerMatcherFilter.Matches(activationConfig, opened.RepositoryId, opened.Labels);
     }
 
     public JsonElement BuildPayload(NormalizedEvent normalizedEvent)
@@ -45,16 +45,5 @@ public sealed class PrOpenedMatcher : IRunSourceMatcher
         };
 
         return JsonSerializer.SerializeToElement(payload);
-    }
-
-    private static bool RepositoryFilterMatches(JsonElement activationConfig, Guid eventRepositoryId)
-    {
-        if (activationConfig.ValueKind != JsonValueKind.Object) return true;
-        if (!activationConfig.TryGetProperty("repositoryId", out var repoIdProp)) return true;
-        if (repoIdProp.ValueKind == JsonValueKind.Null) return true;
-        if (repoIdProp.ValueKind != JsonValueKind.String) return true;
-        if (!Guid.TryParse(repoIdProp.GetString(), out var configured)) return true;
-
-        return configured == eventRepositoryId;
     }
 }
