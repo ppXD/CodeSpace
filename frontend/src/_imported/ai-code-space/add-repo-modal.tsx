@@ -224,12 +224,16 @@ function CredentialStep({ credentials, instances, loading, error, onPick, onClos
         {/* Top-of-body action — visible whenever the picker list is showing.
             Matches the AddProject → Import flow's affordance so both credential
             pickers feel the same. Lives here (not in .mdl-head) so it doesn't
-            compete with the close X. Balanced 10px vertical padding gives equal
-            breathing room above and below; `.btn` (not `.btn-ghost`) gives the
-            button a visible border + panel bg so it reads as a deliberate
-            action, not a stray transparent link. */}
+            compete with the close X.
+            Spacing math: `.mdl-body` already supplies `padding: 16px 22px`, so
+            the body's own padding-top contributes 16px above this row. Mirror
+            that exactly with marginBottom: 16 — total gap above and below the
+            button is 16px each, symmetric. Adding ANY padding-top to this
+            wrapper would stack on top of the body's 16px and make the top side
+            visibly larger than the bottom. `.btn` (not `.btn-ghost`) gives the
+            button a visible border + panel bg. */}
         {showInlineAction && (
-          <div style={{ display: "flex", justifyContent: "flex-end", padding: "10px 0" }}>
+          <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 16 }}>
             <button className="btn" onClick={onOpenConnect}>
               <Ic.Plus size={14} /> Connect new remote
             </button>
