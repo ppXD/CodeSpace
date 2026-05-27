@@ -1,23 +1,26 @@
 import { fetchJson } from "./request";
 
 /**
- * Unified variable API. Scope (Team / Workflow) and value-type (String / Number / Boolean /
- * Object / Array / Secret) are orthogonal.
+ * Unified variable API. Scope (Team / Workflow / Project) and value-type (String / Number /
+ * Boolean / Object / Array / Secret) are orthogonal.
  *
  * REST surface (backend):
- *   GET    /api/team-variables                            → list summaries (no values for Secret)
- *   PUT    /api/team-variables/{name}                     → upsert
- *   DELETE /api/team-variables/{name}                     → soft-delete (idempotent)
- *   GET    /api/workflows/{workflowId}/variables          → list summaries
- *   PUT    /api/workflows/{workflowId}/variables/{name}   → upsert
- *   DELETE /api/workflows/{workflowId}/variables/{name}   → soft-delete
+ *   GET    /api/team-variables                              → list team summaries (no values for Secret)
+ *   PUT    /api/team-variables/{name}                       → upsert
+ *   DELETE /api/team-variables/{name}                       → soft-delete (idempotent)
+ *   GET    /api/workflows/{workflowId}/variables            → list workflow summaries
+ *   PUT    /api/workflows/{workflowId}/variables/{name}     → upsert
+ *   DELETE /api/workflows/{workflowId}/variables/{name}     → soft-delete
+ *   GET    /api/projects/{projectId}/variables              → list project summaries
+ *   PUT    /api/projects/{projectId}/variables/{name}       → upsert
+ *   DELETE /api/projects/{projectId}/variables/{name}       → soft-delete
  *
- * Tenant boundary: team scope comes from X-Team-Id; workflow scope is verified against
- * the current team by the service (cross-team workflowId → 404 by design).
+ * Tenant boundary: team scope comes from X-Team-Id; workflow + project scope are verified
+ * against the current team by the service (cross-team scopeId → 404 by design).
  */
 
 /** Mirrors backend `Messages.Enums.VariableScope` (string enum). */
-export type VariableScope = "Team" | "Workflow";
+export type VariableScope = "Team" | "Workflow" | "Project";
 
 /** Mirrors backend `Messages.Enums.VariableValueType` (string enum). */
 export type VariableValueType = "String" | "Number" | "Boolean" | "Object" | "Array" | "Secret";
@@ -82,4 +85,24 @@ export const workflowVariablesApi = {
 
   delete: (workflowId: string, name: string) =>
     fetchJson<void>(`/api/workflows/${workflowId}/variables/${encodeURIComponent(name)}`, { method: "DELETE" }),
+};
+
+export const projectVariablesApi = {
+  list: (projectId: string) =>
+    fetchJson<VariableSummary[]>(`/api/projects/${projectId}/variables`),
+
+  set: (projectId: string, name: string, input: SetVariableInput) =>
+    fetchJson<void>(`/api/projects/${projectId}/variables/${encodeURIComponent(name)}`, {
+      method: "PUT",
+      body: JSON.stringify({
+        projectId,
+        name,
+        valueType: input.valueType,
+        value: input.value,
+        description: input.description ?? null,
+      }),
+    }),
+
+  delete: (projectId: string, name: string) =>
+    fetchJson<void>(`/api/projects/${projectId}/variables/${encodeURIComponent(name)}`, { method: "DELETE" }),
 };

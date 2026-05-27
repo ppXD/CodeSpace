@@ -3,8 +3,11 @@ import { useState } from "react";
 import { Ic } from "@/_imported/ai-code-space/icons";
 import type { VariableSummary, VariableValueType } from "@/api/variables";
 import {
+  useDeleteProjectVariable,
   useDeleteTeamVariable,
   useDeleteWorkflowVariable,
+  useProjectVariables,
+  useSetProjectVariable,
   useSetTeamVariable,
   useSetWorkflowVariable,
   useTeamVariables,
@@ -12,8 +15,9 @@ import {
 } from "@/hooks/use-variables";
 
 /**
- * Generic variable panel — single component used by BOTH the workflow editor's Variables
- * tab (wf.* scope) AND the team-settings Variables page (team.* scope).
+ * Generic variable panel — single component used by the workflow editor's Variables tab
+ * (wf.* scope), the team-settings Variables page (team.* scope), AND the project-detail
+ * Variables tab (project.{slug}.* scope).
  *
  * Variables live in their own DB table; every Add/Edit/Delete persists immediately via the
  * API. No editor-side Save step.
@@ -24,10 +28,18 @@ import {
  */
 
 interface VariableTablePanelProps {
-  scope: "Team" | "Workflow";
+  scope: "Team" | "Workflow" | "Project";
   /** Required when scope === "Workflow"; unused otherwise. */
   workflowId?: string;
-  refPrefix: "wf" | "team";
+  /** Required when scope === "Project"; unused otherwise. */
+  projectId?: string;
+  /**
+   * Variable-path head shown on the ref-copy chip. For Team it's <c>"team"</c>; for
+   * Workflow it's <c>"wf"</c>; for Project it's <c>"project.{slug}"</c> (so the chip
+   * copies <c>{{project.{slug}.{name}}}</c> verbatim — operators paste straight into a
+   * node config). Caller passes the prefix because the slug isn't known to this component.
+   */
+  refPrefix: string;
   title: string;
   subtitle: string;
   tip: string;
@@ -36,25 +48,35 @@ interface VariableTablePanelProps {
 
 const SCHEMA_TYPES: VariableValueType[] = ["String", "Number", "Boolean", "Object", "Array", "Secret"];
 
-export function VariableTablePanel({ scope, workflowId, refPrefix, title, subtitle, tip, emptyHint }: VariableTablePanelProps) {
+export function VariableTablePanel({ scope, workflowId, projectId, refPrefix, title, subtitle, tip, emptyHint }: VariableTablePanelProps) {
   const teamList = useTeamVariables();
   const wfList = useWorkflowVariables(scope === "Workflow" ? (workflowId ?? null) : null);
-  const list = scope === "Team" ? teamList : wfList;
+  const projList = useProjectVariables(scope === "Project" ? (projectId ?? null) : null);
+  const list = scope === "Team" ? teamList : scope === "Workflow" ? wfList : projList;
 
   const setTeam = useSetTeamVariable();
   const setWf = useSetWorkflowVariable(workflowId ?? null);
+  const setProj = useSetProjectVariable(projectId ?? null);
   const delTeam = useDeleteTeamVariable();
   const delWf = useDeleteWorkflowVariable(workflowId ?? null);
+  const delProj = useDeleteProjectVariable(projectId ?? null);
 
-  const isMutating = setTeam.isPending || setWf.isPending || delTeam.isPending || delWf.isPending;
+  const isMutating =
+    setTeam.isPending || setWf.isPending || setProj.isPending ||
+    delTeam.isPending || delWf.isPending || delProj.isPending;
 
-  const setVar = (name: string, valueType: VariableValueType, value: unknown, description: string | null) =>
-    scope === "Team"
-      ? setTeam.mutateAsync({ name, input: { valueType, value, description } })
-      : setWf.mutateAsync({ name, input: { valueType, value, description } });
+  const setVar = (name: string, valueType: VariableValueType, value: unknown, description: string | null) => {
+    const input = { valueType, value, description };
+    if (scope === "Team") return setTeam.mutateAsync({ name, input });
+    if (scope === "Workflow") return setWf.mutateAsync({ name, input });
+    return setProj.mutateAsync({ name, input });
+  };
 
-  const deleteVar = (name: string) =>
-    scope === "Team" ? delTeam.mutateAsync(name) : delWf.mutateAsync(name);
+  const deleteVar = (name: string) => {
+    if (scope === "Team") return delTeam.mutateAsync(name);
+    if (scope === "Workflow") return delWf.mutateAsync(name);
+    return delProj.mutateAsync(name);
+  };
 
   const variables = list.data ?? [];
 
