@@ -7,6 +7,11 @@ import type { CredentialSummary, RemoteRepository } from "@/api/types";
 import { useCredentials, useProviderInstances, useAccessibleRepositoriesForPicker } from "@/hooks/use-credentials";
 import { useCreateProject, useProjects } from "@/hooks/use-projects";
 import { useBindRepositoriesBulk, useRepositories } from "@/hooks/use-repositories";
+// ConnectRemoteModal is now invoked from inside the Import-from-repository flow
+// (see ImportStep below) where it's contextually needed, rather than as a page-level
+// action on the Projects header. Connecting a remote is an auth-setup task, not a
+// project-management task — surfacing it here forced an unrelated affordance onto
+// every project list view, even for teams that already have credentials wired up.
 import { ConnectRemoteModal } from "@/_imported/ai-code-space/connect-remote-modal";
 import { Ic } from "@/_imported/ai-code-space/icons";
 import { Pager } from "@/_imported/ai-code-space/pager";
@@ -35,10 +40,6 @@ function ProjectsListPage() {
 
   const projectsQuery = useProjects();
   const [addOpen, setAddOpen] = useState(false);
-  // Connect remote modal lives on the Projects page now that Repositories is no
-  // longer a primary nav row — without this entry point users couldn't add a new
-  // OAuth credential / provider instance after the Phase 3.0 pivot.
-  const [connectOpen, setConnectOpen] = useState(false);
 
   const rows = projectsQuery.data ?? [];
   const filtered = query
@@ -66,9 +67,6 @@ function ProjectsListPage() {
         <div className="ct-title-row">
           <h1 className="ct-title">Projects</h1>
           <div className="ct-actions">
-            <button className="btn" onClick={() => setConnectOpen(true)}>
-              <Ic.Link size={14} /> Connect remote
-            </button>
             <button className="btn btn-primary" onClick={() => setAddOpen(true)}>
               <Ic.Plus size={14} /> Add project
             </button>
@@ -181,8 +179,6 @@ function ProjectsListPage() {
           }}
         />
       )}
-
-      {connectOpen && <ConnectRemoteModal onClose={() => setConnectOpen(false)} />}
     </section>
   );
 }
@@ -343,6 +339,12 @@ function ImportStep({ onBack, onClose, onCreated }: { onBack: () => void; onClos
   const [picked, setPicked] = useState<CredentialSummary | null>(null);
   const [chosenRepo, setChosenRepo] = useState<RemoteRepository | null>(null);
 
+  // Lets the operator add a brand-new OAuth credential mid-import without dismissing
+  // this modal first. When this opens, ConnectRemoteModal renders ON TOP of the
+  // AddProject modal (both share .mdl z-index 81, later-DOM wins). When it closes,
+  // React Query auto-refreshes `credentials` so the new row appears in the picker.
+  const [connectOpen, setConnectOpen] = useState(false);
+
   const [query, setQuery] = useState("");
   const [debouncedQuery, setDebouncedQuery] = useState("");
   const [page, setPage] = useState(1);
@@ -373,6 +375,7 @@ function ImportStep({ onBack, onClose, onCreated }: { onBack: () => void; onClos
   };
 
   if (phase === "credential") {
+    const showInlineAction = !credentials.isLoading && !instances.isLoading && activeCredentials.length > 0;
     return (
       <>
         <div className="mdl-head">
@@ -384,12 +387,30 @@ function ImportStep({ onBack, onClose, onCreated }: { onBack: () => void; onClos
           <button className="mdl-x" onClick={onClose} aria-label="Close"><Ic.X size={14} /></button>
         </div>
         <div className="mdl-body">
+          {/* Top-of-body action — visible whenever the picker list is showing.
+              Lives here (not in .mdl-head) so it doesn't compete with the back/X
+              chrome and stays aligned with the credential list below. */}
+          {showInlineAction && (
+            <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 8 }}>
+              <button className="btn btn-ghost" onClick={() => setConnectOpen(true)}>
+                <Ic.Plus size={12} /> Connect new remote
+              </button>
+            </div>
+          )}
           {credentials.isLoading || instances.isLoading ? (
             <div className="ct-empty"><div className="ct-empty-h">Loading credentials…</div></div>
           ) : activeCredentials.length === 0 ? (
+            // Empty-state CTA — the previous copy pointed at a "sidebar → Providers"
+            // nav row that Phase 3.0 removed. Replace with a primary action that
+            // opens ConnectRemoteModal stacked on top of this one.
             <div className="ct-empty">
               <div className="ct-empty-h">No active credentials yet</div>
-              <div className="ct-empty-p">Connect a provider first (sidebar → Providers), then come back here.</div>
+              <div className="ct-empty-p" style={{ marginBottom: 12 }}>
+                Connect a GitHub or GitLab account to start importing repositories.
+              </div>
+              <button className="btn btn-primary" onClick={() => setConnectOpen(true)}>
+                <Ic.Link size={14} /> Connect remote
+              </button>
             </div>
           ) : (
             <div className="cred-list">
@@ -410,6 +431,10 @@ function ImportStep({ onBack, onClose, onCreated }: { onBack: () => void; onClos
             </div>
           )}
         </div>
+        {/* Stacked on top of the AddProject modal (.mdl z-index 81, later DOM wins).
+            On close, React Query's useCredentials cache refetches naturally so the
+            new credential appears in the list without any manual invalidation. */}
+        {connectOpen && <ConnectRemoteModal onClose={() => setConnectOpen(false)} />}
       </>
     );
   }
