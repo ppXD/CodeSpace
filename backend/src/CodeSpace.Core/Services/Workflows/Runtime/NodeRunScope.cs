@@ -4,14 +4,28 @@ namespace CodeSpace.Core.Services.Workflows.Runtime;
 
 /// <summary>
 /// The per-run variable scope. The engine builds + maintains this as the run proceeds —
-/// the trigger node's outputs land under <c>trigger.*</c>, every subsequent node's outputs
+/// the trigger node's payload lives under <c>trigger.*</c>, every subsequent node's outputs
 /// land under <c>nodes.&lt;id&gt;.outputs.*</c>. The <c>VariableResolver</c> walks dotted
 /// paths against this object.
 ///
-/// The shape is INTENTIONALLY minimal — only three top-level keys (trigger, nodes, env).
-/// Adding a new scope category requires deliberate engine work (and likely a new built-in
-/// node like <c>env.set</c>); plugin authors cannot extend the scope shape from outside.
-/// This protects the path syntax from drift.
+/// <para>Eight read-side buckets are exposed at runtime — one per template head the
+/// resolver knows about:</para>
+/// <list type="bullet">
+///   <item><c>{{trigger.X}}</c> → <see cref="Trigger"/></item>
+///   <item><c>{{nodes.&lt;id&gt;.outputs.X}}</c> → <see cref="Nodes"/></item>
+///   <item><c>{{team.X}}</c> → <see cref="Team"/></item>
+///   <item><c>{{wf.X}}</c> → <see cref="Wf"/></item>
+///   <item><c>{{input.X}}</c> → <see cref="Input"/></item>
+///   <item><c>{{sys.X}}</c> → <see cref="Sys"/></item>
+///   <item><c>{{project.&lt;slug&gt;.X}}</c> → <see cref="Projects"/></item>
+///   <item><c>{{item}}</c> / <c>{{index}}</c> → <see cref="Iteration"/> (only inside
+///         flow.iterate; null otherwise)</item>
+/// </list>
+/// <para>Plus <see cref="SecretPaths"/>, which is metadata for the Terminal-output
+/// secret-leak guard — not a resolvable template head. Adding a new scope category
+/// requires deliberate engine work (resolver dispatch + scope-build + the editor's
+/// system-variables tab); plugin authors cannot extend the shape from outside. This
+/// protects the path syntax from drift.</para>
 /// </summary>
 public sealed class NodeRunScope
 {
@@ -46,18 +60,30 @@ public sealed class NodeRunScope
     public IReadOnlyDictionary<string, JsonElement>? Iteration { get; init; }
 
     /// <summary>
-    /// Workflow-author-defined constants. Referenced via <c>{{wf.&lt;name&gt;}}</c>. Built once
-    /// per run from <c>WorkflowDefinition.Variables[].Default</c>. Immutable for the duration
-    /// of a run — variables are design-time constants, not per-run mutables (inputs are the
-    /// per-run channel).
+    /// Workflow-scoped variables — referenced via <c>{{wf.&lt;name&gt;}}</c>. Sourced from the
+    /// unified <c>variable</c> table with <c>scope='Workflow'</c> (NOT from a
+    /// <c>WorkflowDefinition.Variables[]</c> array — that field was removed in Phase 2.7;
+    /// values now live in the variable table and are CRUD'd through
+    /// <c>WorkflowVariablesController</c>). Engine pours all active rows for the run's
+    /// workflow in via <see cref="Variables.IVariableService.GetAllForEngineAsync"/> at
+    /// scope-build time; secret-typed rows are decrypted in that same call. Snapshotted on
+    /// first run for replay determinism.
     /// </summary>
     public IReadOnlyDictionary<string, JsonElement> Wf { get; init; } = new Dictionary<string, JsonElement>();
 
     /// <summary>
     /// Per-run input parameters. Referenced via <c>{{input.&lt;name&gt;}}</c>. Populated from
-    /// the run's trigger payload (manual run form / HTTP body / event-trigger normalised
-    /// fields) and validated against <c>WorkflowDefinition.Inputs[].Schema</c> at run-start.
-    /// Defaults from the definition apply when the caller omits a non-required input.
+    /// the run's normalised trigger payload (manual run form / HTTP body / event-trigger
+    /// normalised fields); defaults from <c>WorkflowDefinition.Inputs[].Default</c> apply when
+    /// the caller omits a non-required input.
+    ///
+    /// <para><b>Not</b> JSON-Schema-validated at run-start. <c>WorkflowDefinition.Inputs[].Schema</c>
+    /// is consumed by the frontend (form rendering + picker autocomplete) and the
+    /// save-time <c>DefinitionValidator</c> reference-path check, but the engine does not
+    /// enforce per-value schema conformance at runtime — nodes extract values defensively
+    /// (the <c>TryReadX</c> pattern). A future release may add Rule-11 three-mode
+    /// enforcement for missing required inputs (see the TODO in
+    /// <c>WorkflowEngine.BuildInputScope</c>); today, no.</para>
     /// </summary>
     public IReadOnlyDictionary<string, JsonElement> Input { get; init; } = new Dictionary<string, JsonElement>();
 
