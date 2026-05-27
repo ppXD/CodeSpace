@@ -6,7 +6,6 @@ import { clearAuthState } from "@/api/auth";
 import type { MeTeam } from "@/api/types";
 import { teamToUrlSlug, useActiveTeam } from "@/hooks/use-me";
 
-import { ConnectRemoteModal } from "./connect-remote-modal";
 import { Ic } from "./icons";
 
 /**
@@ -46,14 +45,6 @@ export function Sidebar() {
   const [userCoords, setUserCoords] = useState<Coords | null>(null);
   const userTriggerRef = useRef<HTMLDivElement | null>(null);
 
-  // Persistent top-level entry into the Connections manager (ConnectRemoteModal
-  // already covers list + add + revoke, so one item handles all credential ops).
-  // Lives in the TEAM-switcher popover footer — credentials are team-scoped (each
-  // bound to the active X-Team-Id at creation time, and switching teams shows a
-  // different set), so grouping them with team actions is semantically right.
-  // The user-popover position tried earlier was misleading because the data isn't
-  // user-global.
-  const [connectOpen, setConnectOpen] = useState(false);
 
   const initial = active?.name.charAt(0).toUpperCase() ?? "?";
   const activeIsPersonal = active?.kind === "Personal";
@@ -169,23 +160,13 @@ export function Sidebar() {
           })}
         </div>
         <div className="sb-pop-foot">
-          {/* Connections lives here (NOT in the user popover) because credentials
-              are bound to the active team via X-Team-Id at creation time —
-              switching team shows a different set. Grouping with team-switch
-              actions is the semantic match. Opens ConnectRemoteModal scoped to
-              the currently-active team. */}
-          <div
-            className="sb-pop-action"
-            onClick={() => {
-              setTeamOpen(false);
-              setConnectOpen(true);
-            }}
-          >
-            <Ic.Link size={14} /> Connections
-          </div>
           {/* "Create workspace" rather than "Create team" — Personal teams aren't
               user-creatable (one per user, auto-provisioned on signup). The action
-              label needs to match what the operator can actually do. */}
+              label needs to match what the operator can actually do.
+              Note: Connections used to live here briefly but mixing team
+              management with the switcher's "switch team" purpose felt off.
+              Connections now live on /teams/{slug}/settings, reached via the
+              gear icon next to this trigger. */}
           <div className="sb-pop-action"><Ic.Plus size={14} /> Create workspace</div>
         </div>
       </div>
@@ -246,13 +227,18 @@ export function Sidebar() {
 
   return (
     <aside className="sb">
-      <div
-        ref={teamTriggerRef}
-        className="sb-ws"
-        data-open={teamOpen}
-        onClick={() => setTeamOpen(o => !o)}
-        title={teamOpen ? "" : "Switch team"}
-      >
+      {/* Header row groups two distinct actions side-by-side: the workspace
+          trigger (click to switch team) and a gear button (click to manage
+          this team). Wrapping them in .sb-header-row keeps the original .sb-ws
+          margin behavior intact via the row's own outer margin. */}
+      <div className="sb-header-row">
+        <div
+          ref={teamTriggerRef}
+          className="sb-ws"
+          data-open={teamOpen}
+          onClick={() => setTeamOpen(o => !o)}
+          title={teamOpen ? "" : "Switch team"}
+        >
         <div className="sb-ws-avatar" style={{ background: teamColor(active) }}>
           {activeIsPersonal ? <Ic.Users size={14} /> : initial}
         </div>
@@ -267,7 +253,21 @@ export function Sidebar() {
                 : `${active.memberCount} ${active.memberCount === 1 ? "member" : "members"}`}
           </div>
         </div>
-        <Ic.ChevronUpDown size={14} className="sb-ws-caret" />
+          <Ic.ChevronUpDown size={14} className="sb-ws-caret" />
+        </div>
+        {/* Gear → Team Settings. Disabled until we have an active team so the
+            button doesn't dead-link to /teams/undefined/settings. */}
+        <button
+          className="sb-ws-gear"
+          disabled={!active}
+          title="Team settings"
+          onClick={() => {
+            if (!active) return;
+            navigate({ to: "/teams/$teamSlug/settings", params: { teamSlug: teamToUrlSlug(active) } });
+          }}
+        >
+          <Ic.Settings size={14} />
+        </button>
       </div>
       {teamPopover}
 
@@ -337,10 +337,6 @@ export function Sidebar() {
         <Ic.ChevronUpDown size={14} className="sb-ws-caret" />
       </div>
       {userPopover}
-      {/* Connections manager — renders at sidebar level so it floats above the
-          entire app shell (its own .mdl-mask covers the viewport). Driven by the
-          user-popover "Connections" item; closes naturally on its X / Esc. */}
-      {connectOpen && <ConnectRemoteModal onClose={() => setConnectOpen(false)} />}
     </aside>
   );
 }
