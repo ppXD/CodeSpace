@@ -47,7 +47,7 @@ function WorkflowsListPage() {
           strip. We add explicit bottom padding here so the rhythm matches. */}
       <div className="ct-head" style={{ paddingBottom: 18 }}>
         <div className="ct-crumbs">
-          <span>Workflows</span>
+          <span className="cur">Workflows</span>
         </div>
         <div className="ct-title-row">
           <h1 className="ct-title">Workflows</h1>

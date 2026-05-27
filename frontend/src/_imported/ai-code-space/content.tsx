@@ -123,7 +123,7 @@ export function RepositoryListPage({ tab, query, onTabChange, onQueryChange, onO
     <section className="ct">
       <div className="ct-head">
         <div className="ct-crumbs">
-          <span>Repositories</span>
+          <span className="cur">Repositories</span>
         </div>
         <div className="ct-title-row">
           <div>

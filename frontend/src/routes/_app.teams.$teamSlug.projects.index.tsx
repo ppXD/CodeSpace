@@ -61,7 +61,7 @@ function ProjectsListPage() {
           the toolbar border. Mirrors the workflows list page comment. */}
       <div className="ct-head" style={{ paddingBottom: 14 }}>
         <div className="ct-crumbs">
-          <span>Projects</span>
+          <span className="cur">Projects</span>
         </div>
         <div className="ct-title-row">
           <h1 className="ct-title">Projects</h1>
