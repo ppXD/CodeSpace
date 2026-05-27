@@ -132,6 +132,23 @@ export interface RepositorySummary {
   webUrl: string;
   lastEventDate?: string | null;
   createdDate: string;
+  /**
+   * Every Project this repository is actively linked to. Backend source: the
+   * <c>project_repository</c> N:M link table populated since #20. Used by the
+   * trigger inspector's project-first cascade picker to filter repos by project.
+   * Empty array when the repo has no active project links.
+   */
+  projects?: ProjectRef[];
+}
+
+/**
+ * Reduced project shape — just the fields the UI needs for picker / breadcrumb
+ * rendering. Mirrors backend <c>CodeSpace.Messages.Dtos.Projects.ProjectRef</c>.
+ */
+export interface ProjectRef {
+  id: string;
+  slug: string;
+  name: string;
 }
 
 export interface RepositoryDetail extends RepositorySummary {

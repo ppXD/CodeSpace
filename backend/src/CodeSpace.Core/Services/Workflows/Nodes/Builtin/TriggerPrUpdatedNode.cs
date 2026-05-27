@@ -20,6 +20,7 @@ public sealed class TriggerPrUpdatedNode : INodeRuntime
               "properties": {
                 "repositories": {
                   "type": "array",
+                  "x-selector": "trigger.repositories",
                   "description": "Repositories this trigger fires on. Each entry binds a repo to its own label filter. Leave empty to match nothing; omit the key entirely to match every repo bound to this team.",
                   "items": {
                     "type": "object",
@@ -27,7 +28,6 @@ public sealed class TriggerPrUpdatedNode : INodeRuntime
                       "repositoryId": {
                         "type": "string",
                         "format": "uuid",
-                        "x-selector": "repository",
                         "description": "Repository to match."
                       },
                       "labels": {
