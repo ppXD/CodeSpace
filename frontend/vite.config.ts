@@ -2,7 +2,11 @@ import path from "node:path";
 import tailwindcss from "@tailwindcss/vite";
 import { TanStackRouterVite } from "@tanstack/router-plugin/vite";
 import react from "@vitejs/plugin-react";
-import { defineConfig } from "vite";
+// `vitest/config` re-exports vite's defineConfig with the test-field type
+// merged in. Using it (rather than the triple-slash reference + vite's own
+// defineConfig) gives correct type-checking on the `test:` block below
+// without a wildcard ambient type declaration.
+import { defineConfig } from "vitest/config";
 
 // https://vite.dev/config/
 export default defineConfig({
@@ -41,5 +45,19 @@ export default defineConfig({
         changeOrigin: true,
       },
     },
+  },
+  test: {
+    // happy-dom gives us window, document, localStorage — required by request.ts /
+    // client.ts which read localStorage directly, and by component tests using
+    // @testing-library/react. happy-dom is faster than jsdom and avoids a known
+    // ESM-CJS interop issue between jsdom@29's html-encoding-sniffer and the
+    // node@21 loader. Works fine for React 19 + base-ui in this codebase.
+    environment: "happy-dom",
+    globals: true,
+    setupFiles: ["./vitest.setup.ts"],
+    // Co-locate specs with sources; *.test.ts(x) only. Excludes the route-tree
+    // auto-gen file + any imported sample-app code we keep around for reference.
+    include: ["src/**/*.test.{ts,tsx}"],
+    exclude: ["**/_imported/**", "node_modules/**", "dist/**", "src/routeTree.gen.ts"],
   },
 });
