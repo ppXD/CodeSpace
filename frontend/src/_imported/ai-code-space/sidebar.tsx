@@ -6,6 +6,7 @@ import { clearAuthState } from "@/api/auth";
 import type { MeTeam } from "@/api/types";
 import { teamToUrlSlug, useActiveTeam } from "@/hooks/use-me";
 
+import { ConnectRemoteModal } from "./connect-remote-modal";
 import { Ic } from "./icons";
 
 /**
@@ -44,6 +45,19 @@ export function Sidebar() {
   const [userOpen, setUserOpen] = useState(false);
   const [userCoords, setUserCoords] = useState<Coords | null>(null);
   const userTriggerRef = useRef<HTMLDivElement | null>(null);
+
+  // Connections nav row → opens ConnectRemoteModal directly. Lives as a sibling
+  // of Projects + Workflows in the primary sidebar nav because:
+  //   1. Connections need a discoverable persistent entry, and burying them
+  //      behind a popover / gear icon / sub-page added friction at every
+  //      placement we tried (Projects header, user popover, team-switcher
+  //      footer, gear→Settings page).
+  //   2. Credentials are team-scoped — sitting in the team-scoped primary nav
+  //      matches the data scope naturally.
+  // The row opens a modal rather than navigating to a route because the
+  // ConnectRemoteModal IS the management UI (list / add / revoke). A route
+  // would be a wrapper around the same modal.
+  const [connectOpen, setConnectOpen] = useState(false);
 
 
   const initial = active?.name.charAt(0).toUpperCase() ?? "?";
@@ -227,18 +241,13 @@ export function Sidebar() {
 
   return (
     <aside className="sb">
-      {/* Header row groups two distinct actions side-by-side: the workspace
-          trigger (click to switch team) and a gear button (click to manage
-          this team). Wrapping them in .sb-header-row keeps the original .sb-ws
-          margin behavior intact via the row's own outer margin. */}
-      <div className="sb-header-row">
-        <div
-          ref={teamTriggerRef}
-          className="sb-ws"
-          data-open={teamOpen}
-          onClick={() => setTeamOpen(o => !o)}
-          title={teamOpen ? "" : "Switch team"}
-        >
+      <div
+        ref={teamTriggerRef}
+        className="sb-ws"
+        data-open={teamOpen}
+        onClick={() => setTeamOpen(o => !o)}
+        title={teamOpen ? "" : "Switch team"}
+      >
         <div className="sb-ws-avatar" style={{ background: teamColor(active) }}>
           {activeIsPersonal ? <Ic.Users size={14} /> : initial}
         </div>
@@ -253,21 +262,7 @@ export function Sidebar() {
                 : `${active.memberCount} ${active.memberCount === 1 ? "member" : "members"}`}
           </div>
         </div>
-          <Ic.ChevronUpDown size={14} className="sb-ws-caret" />
-        </div>
-        {/* Gear → Team Settings. Disabled until we have an active team so the
-            button doesn't dead-link to /teams/undefined/settings. */}
-        <button
-          className="sb-ws-gear"
-          disabled={!active}
-          title="Team settings"
-          onClick={() => {
-            if (!active) return;
-            navigate({ to: "/teams/$teamSlug/settings", params: { teamSlug: teamToUrlSlug(active) } });
-          }}
-        >
-          <Ic.Settings size={14} />
-        </button>
+        <Ic.ChevronUpDown size={14} className="sb-ws-caret" />
       </div>
       {teamPopover}
 
@@ -318,6 +313,21 @@ export function Sidebar() {
           <span className="sb-nav-ic"><Ic.Workflow size={15} /></span>
           <span className="sb-nav-lbl">Workflows</span>
         </div>
+        {/* Connections — opens ConnectRemoteModal directly. Sits alongside
+            Projects + Workflows because credentials are team-scoped (just like
+            those) and the operator needs a discoverable persistent entry to
+            add / list / revoke them. Click opens the modal rather than
+            navigating because the modal IS the management UI; a route would
+            just be a wrapper around it. No badge for now — credential counts
+            don't ship on /me. */}
+        <div
+          className="sb-nav-item"
+          onClick={() => setConnectOpen(true)}
+          title="Connections"
+        >
+          <span className="sb-nav-ic"><Ic.Link size={15} /></span>
+          <span className="sb-nav-lbl">Connections</span>
+        </div>
       </nav>
 
       <div className="sb-spacer" />
@@ -337,6 +347,9 @@ export function Sidebar() {
         <Ic.ChevronUpDown size={14} className="sb-ws-caret" />
       </div>
       {userPopover}
+      {/* Driven by the Connections nav row. Modal owns its own .mdl-mask so it
+          floats over the entire app shell. */}
+      {connectOpen && <ConnectRemoteModal onClose={() => setConnectOpen(false)} />}
     </aside>
   );
 }

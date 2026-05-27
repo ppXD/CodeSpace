@@ -119,28 +119,11 @@
 }
 
 /* Team switcher trigger */
-/* Header row groups the workspace-switch trigger with the team-settings gear.
- * The .sb-ws still owns its inner padding; .sb-header-row owns the outer
- * margin so the two siblings line up flush at the same vertical position. */
-.acs-root .sb-header-row { display: flex; align-items: center; gap: 4px; margin: 8px; }
-.acs-root .sb-header-row .sb-ws { flex: 1; margin: 0; }
 .acs-root .sb-ws {
   display: flex; align-items: center; gap: 10px; margin: 8px; padding: 8px;
   border-radius: 8px; cursor: pointer; user-select: none; position: relative;
   transition: background .12s ease;
 }
-/* Gear button — navigates to /teams/{slug}/settings (team-admin home).
- * Sized to roughly match the workspace-row's height for visual balance, but
- * styled as a quiet icon-only secondary action so it doesn't compete with
- * the workspace name. */
-.acs-root .sb-ws-gear {
-  appearance: none; border: 1px solid transparent; background: transparent;
-  width: 32px; height: 32px; border-radius: 7px;
-  display: grid; place-items: center; cursor: pointer; color: var(--muted);
-  flex-shrink: 0; transition: background .12s, color .12s, border-color .12s;
-}
-.acs-root .sb-ws-gear:hover { background: rgba(0,0,0,.04); color: var(--ink); }
-.acs-root .sb-ws-gear:disabled { opacity: .4; cursor: not-allowed; }
 .acs-root .sb-ws:hover { background: rgba(0,0,0,.04); }
 .acs-root .sb-ws[data-open="true"] { background: rgba(0,0,0,.06); }
 .acs-root .sb-ws-avatar {
