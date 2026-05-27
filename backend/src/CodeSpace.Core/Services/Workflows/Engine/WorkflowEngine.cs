@@ -278,6 +278,14 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
     {
         var trigger = ParsePayloadObject(run.RunRequest?.NormalizedPayloadJson);
         var input = BuildInputScope(definition, trigger);
+
+        // Rule-11 enforcement: surface required inputs that the caller didn't supply AND
+        // that have no Default in the definition. Default mode (Warn) logs + continues so
+        // existing deploys aren't broken; Strict throws and lands the run in Failure;
+        // Off silently allows. Only runs on FRESH runs — replays use the snapshotted scope
+        // from first-run, so a mode flip between runs cannot retro-actively fail a replay.
+        EnsureRequiredInputsSatisfied(run, definition, input);
+
         var sys = BuildSysScope(run);
 
         // Fetch typed sets ONCE so we can both build scope AND persist snapshot rows
@@ -610,10 +618,38 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
     ///   - take the value from trigger payload when present
     ///   - else use the definition's default
     ///   - else omit (resolver returns null when referenced)
-    /// Type-validation against Schema is deferred to a later pass — for now we trust the
-    /// frontend SchemaForm + the Inputs declaration. Hardening: a strict-mode env var
-    /// (Rule 11) that rejects inputs that don't match Schema.
+    ///
+    /// <para>Required-input enforcement is performed by <see cref="MissingRequiredInputValidator"/>
+    /// at first-run scope build (caller's responsibility), NOT here — this method stays
+    /// pure data assembly so it stays trivially safe to call from the replay path.</para>
+    ///
+    /// <para>Per-value type-validation against <c>Schema</c> is deferred to a later pass — for
+    /// now we trust the frontend SchemaForm + the Inputs declaration. A future Rule-11
+    /// hardening could add a strict-mode env var that rejects inputs that don't match Schema;
+    /// today the engine doesn't validate JSON-Schema conformance at runtime (the NodeRunContext
+    /// doc-comment is explicit about this).</para>
     /// </summary>
+    /// <summary>
+    /// Apply CLAUDE.md Rule 11 three-mode enforcement on required inputs that <see cref="BuildInputScope"/>
+    /// failed to populate. The validator's modes (Off / Warn / Strict) are parsed from
+    /// <see cref="MissingRequiredInputValidator.EnforcementEnvVar"/>; defaults to Warn so
+    /// existing workflows continue to run and only emit log warnings.
+    /// </summary>
+    private void EnsureRequiredInputsSatisfied(WorkflowRun run, WorkflowDefinition definition, IReadOnlyDictionary<string, JsonElement> resolvedInputs)
+    {
+        if (definition.Inputs.Count == 0) return;
+
+        var requiredNames = new List<string>();
+        foreach (var declared in definition.Inputs)
+            if (declared.Required) requiredNames.Add(declared.Name);
+
+        if (requiredNames.Count == 0) return;
+
+        var ctx = new MissingRequiredInputContext(requiredNames, resolvedInputs.Keys.ToList(), run.Workflow.TeamId, run.WorkflowId);
+        var mode = EnforcementModeReader.Read(MissingRequiredInputValidator.EnforcementEnvVar);
+        MissingRequiredInputValidator.EnsureSatisfied(ctx, mode, _logger);
+    }
+
     private static IReadOnlyDictionary<string, JsonElement> BuildInputScope(WorkflowDefinition definition, IReadOnlyDictionary<string, JsonElement> triggerPayload)
     {
         if (definition.Inputs.Count == 0) return new Dictionary<string, JsonElement>();
