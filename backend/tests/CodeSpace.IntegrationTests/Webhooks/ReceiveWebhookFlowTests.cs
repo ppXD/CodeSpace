@@ -154,7 +154,7 @@ public class ReceiveWebhookFlowTests
         var project = TestProjectSeed.BuildDefaultProject(team.Id, owner.Id);
         var instance = new ProviderInstance { Id = Guid.NewGuid(), TeamId = team.Id, Provider = providerKind, DisplayName = "Inst", BaseUrl = $"https://{providerKind}-{suffix}.example.com" };
         var credential = new Credential { Id = Guid.NewGuid(), TeamId = team.Id, ProviderInstanceId = instance.Id, AuthType = AuthType.Pat, DisplayName = "PAT", EncryptedPayload = encryptor.Encrypt("{\"token\":\"x\"}") };
-        var repo = new Repository { Id = Guid.NewGuid(), TeamId = team.Id, ProjectId = project.Id, ProviderInstanceId = instance.Id, CredentialId = credential.Id, ExternalId = $"42-{suffix}", NamespacePath = "n", Name = "r", FullPath = $"n/r-{suffix}", WebUrl = "https://x" };
+        var repo = new Repository { Id = Guid.NewGuid(), TeamId = team.Id, ProviderInstanceId = instance.Id, CredentialId = credential.Id, ExternalId = $"42-{suffix}", NamespacePath = "n", Name = "r", FullPath = $"n/r-{suffix}", WebUrl = "https://x" };
         var webhook = new RepositoryWebhook { Id = Guid.NewGuid(), RepositoryId = repo.Id, ExternalId = $"wh-{suffix}", CallbackUrl = "https://x/cb", SecretEnc = encryptor.Encrypt(webhookSecret), SubscribedEvents = new List<string> { "push", "pull_request" } };
 
         db.User.Add(owner);

@@ -8,16 +8,6 @@ public class Repository : IEntity<Guid>, IAuditable
 
     public Guid TeamId { get; set; }
 
-    /// <summary>
-    /// Legacy 1:N Project FK from Phase 3.0. Phase 3.1 introduced the
-    /// <c>project_repository</c> link table as the new N:M source of truth; this column
-    /// is dual-written during the transition so existing read paths + the NOT NULL
-    /// constraint keep working. A follow-up migration drops the column once every
-    /// reader consumes the link table exclusively. New code SHOULD NOT read this —
-    /// use <c>IProjectRepositoryService</c> / link-table joins instead.
-    /// </summary>
-    public Guid ProjectId { get; set; }
-
     public Guid ProviderInstanceId { get; set; }
     public Guid? CredentialId { get; set; }
 

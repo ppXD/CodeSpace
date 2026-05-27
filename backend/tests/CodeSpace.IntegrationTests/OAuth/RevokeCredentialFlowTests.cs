@@ -238,7 +238,6 @@ public class RevokeCredentialFlowTests
         var db = scope.Resolve<CodeSpaceDbContext>();
 
         var providerInstanceId = await db.Credential.AsNoTracking().Where(c => c.Id == credId).Select(c => c.ProviderInstanceId).SingleAsync().ConfigureAwait(false);
-        var projectId = await db.Project.AsNoTracking().Where(p => p.TeamId == teamId).Select(p => p.Id).SingleAsync().ConfigureAwait(false);
         var ids = new List<Guid>();
 
         for (var i = 0; i < count; i++)
@@ -247,7 +246,6 @@ public class RevokeCredentialFlowTests
             {
                 Id = Guid.NewGuid(),
                 TeamId = teamId,
-                ProjectId = projectId,
                 ProviderInstanceId = providerInstanceId,
                 CredentialId = credId,
                 ExternalId = Guid.NewGuid().ToString("N"),

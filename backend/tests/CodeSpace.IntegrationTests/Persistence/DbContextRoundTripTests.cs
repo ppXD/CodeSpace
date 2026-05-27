@@ -128,7 +128,6 @@ public class DbContextRoundTripTests
         {
             Id = Guid.NewGuid(),
             TeamId = team.Id,
-            ProjectId = project.Id,
             ProviderInstanceId = instance.Id,
             CredentialId = credential.Id,
             ExternalId = $"42-{suffix}",

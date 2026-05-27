@@ -280,13 +280,10 @@ public class TenancyEnforcementTests
         using var scope = _fixture.BeginScope();
         var db = scope.Resolve<CodeSpaceDbContext>();
 
-        var projectB = await db.Project.AsNoTracking().Where(p => p.TeamId == teamB).Select(p => p.Id).SingleAsync().ConfigureAwait(false);
-
         var repo = new Repository
         {
             Id = Guid.NewGuid(),
             TeamId = teamB,
-            ProjectId = projectB,
             ProviderInstanceId = instanceB,
             CredentialId = credentialB,
             ExternalId = "id-B",

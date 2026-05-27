@@ -355,13 +355,10 @@ public class UpdateAndDeleteProviderInstanceFlowTests
         using var scope = _fixture.BeginScope();
         var db = scope.Resolve<CodeSpaceDbContext>();
 
-        var projectId = await db.Project.AsNoTracking().Where(p => p.TeamId == teamId).Select(p => p.Id).SingleAsync().ConfigureAwait(false);
-
         var repo = new Repository
         {
             Id = Guid.NewGuid(),
             TeamId = teamId,
-            ProjectId = projectId,
             ProviderInstanceId = instanceId,
             CredentialId = credentialId,
             ExternalId = Guid.NewGuid().ToString("N"),

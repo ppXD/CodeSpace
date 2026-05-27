@@ -209,7 +209,6 @@ public class WebhookIngestionAuditFlowTests
         {
             Id = repositoryId,
             TeamId = teamId,
-            ProjectId = project.Id,
             ProviderInstanceId = providerInstanceId,
             ExternalId = "test-ext-" + Guid.NewGuid().ToString("N")[..6],
             NamespacePath = "audit",

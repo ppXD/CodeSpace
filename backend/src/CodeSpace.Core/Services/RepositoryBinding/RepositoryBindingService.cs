@@ -322,9 +322,6 @@ public sealed class RepositoryBindingService : IRepositoryBindingService, IScope
     {
         Id = Guid.NewGuid(),
         TeamId = ctx.Request.TeamId,
-        // Legacy column dual-written during the Phase 3.1 transition; the project_repository
-        // link row (created in PersistRepositoryAndPendingWebhook) is the new source of truth.
-        ProjectId = ctx.EffectiveProjectId,
         ProviderInstanceId = ctx.Instance.Id,
         CredentialId = ctx.Credential.Id,
         ExternalId = ctx.Remote.ExternalId,
