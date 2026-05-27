@@ -12,5 +12,5 @@ public sealed class ListRepositoriesQueryHandler : IRequestHandler<ListRepositor
     public ListRepositoriesQueryHandler(IRepositoryService service) { _service = service; }
 
     public async Task<IReadOnlyList<RepositorySummary>> Handle(ListRepositoriesQuery request, CancellationToken cancellationToken) =>
-        await _service.ListAsync(request.ProviderInstanceId, cancellationToken).ConfigureAwait(false);
+        await _service.ListAsync(request.ProviderInstanceId, request.ProjectId, cancellationToken).ConfigureAwait(false);
 }

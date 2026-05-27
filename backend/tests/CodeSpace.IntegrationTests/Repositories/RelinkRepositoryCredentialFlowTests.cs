@@ -146,6 +146,7 @@ public class RelinkRepositoryCredentialFlowTests
         var suffix = Guid.NewGuid().ToString("N").Substring(0, 8);
         var owner = new User { Id = Guid.NewGuid(), Email = $"o-{suffix}@x", Name = "owner" };
         var team = new Team { Id = Guid.NewGuid(), Slug = $"t-{suffix}", Name = "Team", OwnerUserId = owner.Id };
+        var project = TestProjectSeed.BuildDefaultProject(team.Id, owner.Id);
         var instance = new ProviderInstance
         {
             Id = Guid.NewGuid(),
@@ -182,6 +183,7 @@ public class RelinkRepositoryCredentialFlowTests
         {
             Id = Guid.NewGuid(),
             TeamId = team.Id,
+            ProjectId = project.Id,
             ProviderInstanceId = instance.Id,
             CredentialId = oldCred.Id,
             ExternalId = "1",
@@ -196,6 +198,7 @@ public class RelinkRepositoryCredentialFlowTests
 
         db.User.Add(owner);
         db.Team.Add(team);
+        db.Project.Add(project);
         db.ProviderInstance.Add(instance);
         db.Credential.Add(oldCred);
         db.Credential.Add(newCred);

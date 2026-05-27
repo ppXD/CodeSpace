@@ -32,9 +32,18 @@ public sealed class WorkflowRunDispatcher : IWorkflowRunDispatcher, IScopedDepen
         // Two concurrent callers (e.g. RunManuallyAsync + a reconciler that found the same
         // row) cannot both succeed: Postgres's row-level lock + the WHERE clause guarantees
         // exactly one UPDATE affects 1 row, the other affects 0. No double-enqueue possible.
+        //
+        // We ALSO set EnqueuedAt in the same UPDATE — this is the canonical "when did this
+        // run enter the queue" timestamp. The reconciler's stuck-Enqueued sweep reads
+        // EnqueuedAt rather than LastModifiedDate because ExecuteUpdateAsync bypasses EF's
+        // audit hook (LastModifiedDate would still reflect the original Pending-state value,
+        // making a freshly-enqueued run look instantly stale).
+        var enqueuedAt = DateTimeOffset.UtcNow;
         var transitioned = await _db.WorkflowRun
             .Where(r => r.Id == runId && r.Status == WorkflowRunStatus.Pending)
-            .ExecuteUpdateAsync(s => s.SetProperty(r => r.Status, WorkflowRunStatus.Enqueued), cancellationToken)
+            .ExecuteUpdateAsync(s => s
+                .SetProperty(r => r.Status, WorkflowRunStatus.Enqueued)
+                .SetProperty(r => r.EnqueuedAt, (DateTimeOffset?)enqueuedAt), cancellationToken)
             .ConfigureAwait(false);
 
         if (transitioned == 0)
@@ -68,10 +77,13 @@ public sealed class WorkflowRunDispatcher : IWorkflowRunDispatcher, IScopedDepen
 
             // Use CancellationToken.None for the revert — we want it to land even if the
             // caller's cancellation token has tripped, otherwise a cancelled caller leaves
-            // an orphaned Enqueued row.
+            // an orphaned Enqueued row. The revert clears EnqueuedAt so the reconciler's
+            // sweep window restarts from the next successful dispatch.
             await _db.WorkflowRun
                 .Where(r => r.Id == runId && r.Status == WorkflowRunStatus.Enqueued)
-                .ExecuteUpdateAsync(s => s.SetProperty(r => r.Status, WorkflowRunStatus.Pending), CancellationToken.None)
+                .ExecuteUpdateAsync(s => s
+                    .SetProperty(r => r.Status, WorkflowRunStatus.Pending)
+                    .SetProperty(r => r.EnqueuedAt, (DateTimeOffset?)null), CancellationToken.None)
                 .ConfigureAwait(false);
 
             throw;

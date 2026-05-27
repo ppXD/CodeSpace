@@ -289,9 +289,11 @@ public class UpdateAndDeleteProviderInstanceFlowTests
         var suffix = Guid.NewGuid().ToString("N").Substring(0, 8);
         var owner = new User { Id = Guid.NewGuid(), Email = $"owner-{suffix}@x", Name = "Owner" };
         var team = new Team { Id = Guid.NewGuid(), Slug = $"team-{suffix}", Name = "Team", OwnerUserId = owner.Id };
+        var project = TestProjectSeed.BuildDefaultProject(team.Id, owner.Id);
 
         db.User.Add(owner);
         db.Team.Add(team);
+        db.Project.Add(project);
         await db.SaveChangesAsync().ConfigureAwait(false);
 
         return team.Id;
@@ -352,10 +354,13 @@ public class UpdateAndDeleteProviderInstanceFlowTests
         using var scope = _fixture.BeginScope();
         var db = scope.Resolve<CodeSpaceDbContext>();
 
+        var projectId = await db.Project.AsNoTracking().Where(p => p.TeamId == teamId).Select(p => p.Id).SingleAsync().ConfigureAwait(false);
+
         var repo = new Repository
         {
             Id = Guid.NewGuid(),
             TeamId = teamId,
+            ProjectId = projectId,
             ProviderInstanceId = instanceId,
             CredentialId = credentialId,
             ExternalId = Guid.NewGuid().ToString("N"),

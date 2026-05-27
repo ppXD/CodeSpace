@@ -26,9 +26,13 @@ export function Sidebar() {
   const { me, teams, active, setActive } = useActiveTeam();
   // Active-nav highlight is URL-derived so it stays in sync with browser
   // back/forward and deep-linked entry — no local toggle state needed.
-  const isReposActive = pathname === "/"
+  // Phase 3.0 — repositories now live inside Projects, so the sidebar no longer has a
+  // dedicated "Repositories" row. Repos are reached via Project detail → Repositories tab.
+  // Old /repositories and /teams/{slug}/repositories routes redirect to the team's
+  // Projects list so deep links from before the refactor still land somewhere useful.
+  const isProjectsActive = pathname === "/"
     || pathname.startsWith("/repositories")
-    || /^\/teams\/[^/]+\/repositories/.test(pathname);
+    || /^\/teams\/[^/]+\/(repositories|projects)/.test(pathname);
   const isWorkflowsActive = /^\/teams\/[^/]+\/workflows/.test(pathname);
 
   // ── Team switcher ────────────────────────────────────────────────────────────
@@ -130,7 +134,9 @@ export function Sidebar() {
                   // the address bar reflects the active scope.
                   setActive(t.id);
                   setTeamOpen(false);
-                  navigate({ to: "/teams/$teamSlug/repositories", params: { teamSlug: teamToUrlSlug(t) } });
+                  // Phase 3.0 — team switcher lands on the team's project list, matching
+                  // the sidebar's primary nav row.
+                  navigate({ to: "/teams/$teamSlug/projects", params: { teamSlug: teamToUrlSlug(t) } });
                 }}
               >
                 <div className="sb-pop-row-avatar" style={{ background: teamColor(t) }}>
@@ -244,23 +250,23 @@ export function Sidebar() {
       <nav className="sb-nav">
         <div
           className="sb-nav-item"
-          data-active={isReposActive}
+          data-active={isProjectsActive}
           onClick={() => {
-            // Navigate to the team-scoped repo list. When there's no active
-            // team yet (first paint before /me lands) we fall back to the
-            // legacy `/repositories` redirect route, which itself resolves
-            // the active team once /me arrives. Either way the user ends up
-            // on `/teams/{slug}/repositories`.
+            // Phase 3.0 — primary nav row is now "Projects". The project-detail page
+            // surfaces both Variables and Repositories tabs; repos no longer have a
+            // dedicated sidebar entry. First-paint clicks before /me resolves are
+            // no-ops; the legacy /repositories route still redirects deep links to
+            // the team's project list so old bookmarks land somewhere useful.
             if (active) {
-              navigate({ to: "/teams/$teamSlug/repositories", params: { teamSlug: teamToUrlSlug(active) } });
+              navigate({ to: "/teams/$teamSlug/projects", params: { teamSlug: teamToUrlSlug(active) } });
             } else {
               navigate({ to: "/repositories" });
             }
           }}
-          title="Repositories"
+          title="Projects"
         >
-          <span className="sb-nav-ic"><Ic.Repo size={15} /></span>
-          <span className="sb-nav-lbl">Repositories</span>
+          <span className="sb-nav-ic"><Ic.Folder size={15} /></span>
+          <span className="sb-nav-lbl">Projects</span>
           {active && <span className="sb-nav-badge">{active.repositoryCount}</span>}
         </div>
         <div
@@ -269,8 +275,7 @@ export function Sidebar() {
           onClick={() => {
             // Workflows are team-scoped — without an active team we have nowhere to land.
             // First-paint clicks (before /me resolves) are no-ops; a moment later the
-            // active team arrives and the click works. Same shape as Repositories above
-            // minus the legacy `/repositories` fallback (workflows have no global route).
+            // active team arrives and the click works.
             if (active) {
               navigate({ to: "/teams/$teamSlug/workflows", params: { teamSlug: teamToUrlSlug(active) } });
             }

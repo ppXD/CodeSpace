@@ -283,11 +283,30 @@ public class NoDoubleExecutionFlowTests
         var totalContenders = runCount * contendersPerRun;
         using var gate = new SemaphoreSlim(0, totalContenders);
 
+        // Connection-pool throttle (Phase 3.0 hardening): even with PG max_connections=100,
+        // 80 simultaneous DbContexts + Hangfire's own pool routinely exhausted the pool with
+        // 53300 ("too many clients"). The throttle caps in-flight DispatchOnceAsync to 16,
+        // which is well above any expected dispatch concurrency under load and well under
+        // the PG ceiling. The starting gun still fires all 80 in one burst — the throttle
+        // just queues whichever ones can't immediately grab a DB connection. CAS correctness
+        // is unaffected: any pair of contenders that EVENTUALLY run see the same row state,
+        // and the lock-queue / WHERE clause still picks one winner per run.
+        const int maxConcurrentDispatches = 16;
+        using var pgThrottle = new SemaphoreSlim(maxConcurrentDispatches, maxConcurrentDispatches);
+
         var contenderTasks = runIds.SelectMany(runId =>
             Enumerable.Range(0, contendersPerRun).Select(async _ =>
             {
                 await gate.WaitAsync();
-                return (RunId: runId, Won: await DispatchOnceAsync(runId));
+                await pgThrottle.WaitAsync();
+                try
+                {
+                    return (RunId: runId, Won: await DispatchOnceAsync(runId));
+                }
+                finally
+                {
+                    pgThrottle.Release();
+                }
             })).ToArray();
 
         gate.Release(totalContenders);   // open the gate — everyone fires

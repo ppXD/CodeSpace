@@ -268,6 +268,18 @@ public sealed class DefinitionValidator : IScopedDependency
             return;
         }
 
+        // project.<slug>.<name> — Phase 3.0 project-scoped variables. Validate shape only
+        // (need 3+ segments: head, slug, then at least one name component). Slug existence
+        // is NOT verified here: a DB lookup at save time would cost an extra query per
+        // workflow save AND would race with concurrent project deletes. Runtime gracefully
+        // resolves missing slugs to null via WalkProjectsScope.
+        if (head == "project")
+        {
+            if (segments.Length < 3)
+                errors.Add($"Node '{node.Id}' {source} reference '{path}' is malformed (project reference must be 'project.<slug>.<name>').");
+            return;
+        }
+
         // Iteration scope keys (item / index / etc) are populated at runtime by container
         // nodes like flow.iterate and are only valid inside that container's config/inputs.
         // We can't determine "is this node inside an iterate?" without a parent-pointer in
@@ -278,7 +290,7 @@ public sealed class DefinitionValidator : IScopedDependency
 
         if (head != "nodes")
         {
-            errors.Add($"Node '{node.Id}' {source} references unknown scope head '{head}' (must be one of: trigger, nodes, wf, input, team, sys, or an iteration variable like 'item' / 'index').");
+            errors.Add($"Node '{node.Id}' {source} references unknown scope head '{head}' (must be one of: trigger, nodes, wf, input, team, sys, project, or an iteration variable like 'item' / 'index').");
             return;
         }
 

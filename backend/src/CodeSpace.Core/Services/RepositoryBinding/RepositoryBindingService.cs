@@ -3,6 +3,7 @@ using CodeSpace.Core.DependencyInjection;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Credentials;
+using CodeSpace.Core.Services.Projects;
 using CodeSpace.Core.Services.Providers;
 using CodeSpace.Core.Services.Providers.Capabilities;
 using CodeSpace.Core.Services.Providers.Events;
@@ -26,10 +27,11 @@ public sealed class RepositoryBindingService : IRepositoryBindingService, IScope
     private readonly IPayloadEncryptor _encryptor;
     private readonly IScopeChecker _scopeChecker;
     private readonly IRepositoryWebhookRegistrationDispatcher _registrationDispatcher;
+    private readonly IProjectService _projectService;
     private readonly WebhookBaseUrlSetting _webhookBaseUrl;
     private readonly ILogger<RepositoryBindingService> _logger;
 
-    public RepositoryBindingService(CodeSpaceDbContext db, IProviderRegistry registry, IProviderEventSubscriptionRegistry subscriptionRegistry, IPayloadEncryptor encryptor, IScopeChecker scopeChecker, IRepositoryWebhookRegistrationDispatcher registrationDispatcher, WebhookBaseUrlSetting webhookBaseUrl, ILogger<RepositoryBindingService> logger)
+    public RepositoryBindingService(CodeSpaceDbContext db, IProviderRegistry registry, IProviderEventSubscriptionRegistry subscriptionRegistry, IPayloadEncryptor encryptor, IScopeChecker scopeChecker, IRepositoryWebhookRegistrationDispatcher registrationDispatcher, IProjectService projectService, WebhookBaseUrlSetting webhookBaseUrl, ILogger<RepositoryBindingService> logger)
     {
         _db = db;
         _registry = registry;
@@ -37,6 +39,7 @@ public sealed class RepositoryBindingService : IRepositoryBindingService, IScope
         _encryptor = encryptor;
         _scopeChecker = scopeChecker;
         _registrationDispatcher = registrationDispatcher;
+        _projectService = projectService;
         _webhookBaseUrl = webhookBaseUrl;
         _logger = logger;
     }
@@ -52,6 +55,7 @@ public sealed class RepositoryBindingService : IRepositoryBindingService, IScope
         await EnsureCredentialIsValidAsync(ctx, cancellationToken).ConfigureAwait(false);
         ctx = await ResolveRemoteRepositoryAsync(ctx, cancellationToken).ConfigureAwait(false);
         ctx = await ResolveOrResurrectRepositoryAsync(ctx, cancellationToken).ConfigureAwait(false);
+        ctx = await ResolveProjectAsync(ctx, cancellationToken).ConfigureAwait(false);
         ctx = GenerateWebhookIdAndSecret(ctx);
 
         var repository = PersistRepositoryAndPendingWebhook(ctx);
@@ -269,6 +273,7 @@ public sealed class RepositoryBindingService : IRepositoryBindingService, IScope
     {
         Id = Guid.NewGuid(),
         TeamId = ctx.Request.TeamId,
+        ProjectId = ctx.EffectiveProjectId,
         ProviderInstanceId = ctx.Instance.Id,
         CredentialId = ctx.Credential.Id,
         ExternalId = ctx.Remote.ExternalId,
@@ -284,6 +289,32 @@ public sealed class RepositoryBindingService : IRepositoryBindingService, IScope
         Archived = ctx.Remote.Archived,
         Status = RepositoryStatus.Active
     };
+
+    /// <summary>
+    /// Resolve the target Project. Caller-supplied <see cref="BindRepositoryRequest.ProjectId"/>
+    /// wins (we verify it belongs to the same team to prevent cross-team binding); otherwise
+    /// fall back to the team's "default" project (lazily created if missing).
+    /// Resurrected repositories keep their existing ProjectId — we don't move them on re-bind.
+    /// </summary>
+    private async Task<BindContext> ResolveProjectAsync(BindContext ctx, CancellationToken cancellationToken)
+    {
+        if (ctx.ResurrectedRepository != null)
+            return ctx with { EffectiveProjectId = ctx.ResurrectedRepository.ProjectId };
+
+        if (ctx.Request.ProjectId.HasValue)
+        {
+            var ok = await _db.Project.AsNoTracking()
+                .AnyAsync(p => p.Id == ctx.Request.ProjectId.Value && p.TeamId == ctx.Request.TeamId && p.DeletedDate == null, cancellationToken)
+                .ConfigureAwait(false);
+            if (!ok)
+                throw new InvalidOperationException(
+                    $"Project {ctx.Request.ProjectId.Value} not found in team {ctx.Request.TeamId}. Choose a project that belongs to this team.");
+            return ctx with { EffectiveProjectId = ctx.Request.ProjectId.Value };
+        }
+
+        var defaultProjectId = await _projectService.EnsureDefaultProjectAsync(ctx.Request.TeamId, cancellationToken).ConfigureAwait(false);
+        return ctx with { EffectiveProjectId = defaultProjectId };
+    }
 
     /// <summary>
     /// Construct the Pending webhook row. <c>ExternalId</c> stays null until the registrar
@@ -401,6 +432,13 @@ public sealed class RepositoryBindingService : IRepositoryBindingService, IScope
         /// Null on first-time binds; persistence INSERTs a new row in that case.
         /// </summary>
         public Repository? ResurrectedRepository { get; init; }
+
+        /// <summary>
+        /// The project the new (or resurrected) repository row will be attached to. Filled
+        /// by <see cref="ResolveProjectAsync"/> from either the caller's explicit ProjectId
+        /// (after team-membership check) or the team's lazily-created Default project.
+        /// </summary>
+        public Guid EffectiveProjectId { get; init; }
 
         public Guid NewWebhookId { get; init; }
         public string WebhookSecret { get; init; } = default!;

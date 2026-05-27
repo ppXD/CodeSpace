@@ -14,6 +14,7 @@ using CodeSpace.Messages.Queries.Credentials;
 using CodeSpace.Messages.Queries.ProviderInstances;
 using CodeSpace.Messages.Queries.Repositories;
 using MediatR;
+using Microsoft.EntityFrameworkCore;
 using Shouldly;
 
 namespace CodeSpace.IntegrationTests.Authorization;
@@ -215,9 +216,12 @@ public class TenancyEnforcementTests
         var userB = new User { Id = Guid.NewGuid(), Email = $"b-{suffix}@x", Name = "userB" };
         var teamA = new Team { Id = Guid.NewGuid(), Slug = $"a-{suffix}", Name = "TeamA", OwnerUserId = userA.Id };
         var teamB = new Team { Id = Guid.NewGuid(), Slug = $"b-{suffix}", Name = "TeamB", OwnerUserId = userB.Id };
+        var projectA = TestProjectSeed.BuildDefaultProject(teamA.Id, userA.Id);
+        var projectB = TestProjectSeed.BuildDefaultProject(teamB.Id, userB.Id);
 
         db.User.AddRange(userA, userB);
         db.Team.AddRange(teamA, teamB);
+        db.Project.AddRange(projectA, projectB);
         await db.SaveChangesAsync().ConfigureAwait(false);
 
         return (userA.Id, teamA.Id, teamB.Id);
@@ -275,10 +279,13 @@ public class TenancyEnforcementTests
         using var scope = _fixture.BeginScope();
         var db = scope.Resolve<CodeSpaceDbContext>();
 
+        var projectB = await db.Project.AsNoTracking().Where(p => p.TeamId == teamB).Select(p => p.Id).SingleAsync().ConfigureAwait(false);
+
         var repo = new Repository
         {
             Id = Guid.NewGuid(),
             TeamId = teamB,
+            ProjectId = projectB,
             ProviderInstanceId = instanceB,
             CredentialId = credentialB,
             ExternalId = "id-B",

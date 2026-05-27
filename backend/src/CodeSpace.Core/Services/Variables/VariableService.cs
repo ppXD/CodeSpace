@@ -113,22 +113,40 @@ public sealed class VariableService : IVariableService, IScopedDependency
     /// </summary>
     private async Task<Guid> EnsureScopeBelongsToTeamAsync(VariableScope scope, Guid scopeId, Guid expectedTeamId, CancellationToken cancellationToken)
     {
-        if (scope == VariableScope.Team)
+        switch (scope)
         {
-            if (scopeId != expectedTeamId)
-                throw new KeyNotFoundException($"Team {scopeId} not found or not accessible.");
-            return expectedTeamId;
+            case VariableScope.Team:
+                if (scopeId != expectedTeamId)
+                    throw new KeyNotFoundException($"Team {scopeId} not found or not accessible.");
+                return expectedTeamId;
+
+            case VariableScope.Workflow:
+            {
+                // Single query proves existence + ownership in one shot.
+                var exists = await _db.Workflow.AsNoTracking()
+                    .AnyAsync(w => w.Id == scopeId && w.TeamId == expectedTeamId && w.DeletedDate == null, cancellationToken)
+                    .ConfigureAwait(false);
+                if (!exists)
+                    throw new KeyNotFoundException($"Workflow {scopeId} not found or not accessible.");
+                return expectedTeamId;
+            }
+
+            case VariableScope.Project:
+            {
+                // Phase 3.0 — Project scope. Same proof-of-existence + ownership pattern.
+                // A soft-deleted project's variables become unreferenceable (the engine's
+                // slug→id resolver skips deleted rows), so we filter on deleted_date IS NULL.
+                var exists = await _db.Project.AsNoTracking()
+                    .AnyAsync(p => p.Id == scopeId && p.TeamId == expectedTeamId && p.DeletedDate == null, cancellationToken)
+                    .ConfigureAwait(false);
+                if (!exists)
+                    throw new KeyNotFoundException($"Project {scopeId} not found or not accessible.");
+                return expectedTeamId;
+            }
+
+            default:
+                throw new ArgumentOutOfRangeException(nameof(scope), scope, "Unknown variable scope");
         }
-
-        // Workflow scope — single query proves existence + ownership in one shot.
-        var exists = await _db.Workflow.AsNoTracking()
-            .AnyAsync(w => w.Id == scopeId && w.TeamId == expectedTeamId && w.DeletedDate == null, cancellationToken)
-            .ConfigureAwait(false);
-
-        if (!exists)
-            throw new KeyNotFoundException($"Workflow {scopeId} not found or not accessible.");
-
-        return expectedTeamId;
     }
 
     private void CreateNew(VariableScope scope, Guid scopeId, Guid teamId, string name, VariableValueType valueType, JsonElement value, string? description, Guid actorUserId)

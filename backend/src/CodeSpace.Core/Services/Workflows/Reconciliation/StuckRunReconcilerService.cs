@@ -101,14 +101,23 @@ public sealed class StuckRunReconcilerService : IStuckRunReconcilerService, ISco
     /// <summary>
     /// Enqueued older than threshold: walk back to Pending via CAS. The CAS WHERE clause
     /// ensures we don't trample a worker that's just flipping to Running right now.
+    /// <para>Staleness is judged against <see cref="WorkflowRun.EnqueuedAt"/> (set when the
+    /// dispatcher's CAS Pending→Enqueued succeeds) rather than <c>LastModifiedDate</c>:
+    /// <c>ExecuteUpdateAsync</c> bypasses EF's audit hook, so a run that sat in Pending for
+    /// 11 minutes then transitioned to Enqueued would otherwise look IMMEDIATELY stuck
+    /// because its audit timestamp still reflects the Pending creation time.</para>
     /// </summary>
     private async Task<int> RevertStuckEnqueuedAsync(CancellationToken cancellationToken)
     {
         var threshold = DateTimeOffset.UtcNow - EnqueuedStuckAfter;
 
         return await _db.WorkflowRun
-            .Where(r => r.Status == WorkflowRunStatus.Enqueued && r.LastModifiedDate < threshold)
-            .ExecuteUpdateAsync(s => s.SetProperty(r => r.Status, WorkflowRunStatus.Pending), cancellationToken)
+            .Where(r => r.Status == WorkflowRunStatus.Enqueued
+                        && r.EnqueuedAt != null
+                        && r.EnqueuedAt < threshold)
+            .ExecuteUpdateAsync(s => s
+                .SetProperty(r => r.Status, WorkflowRunStatus.Pending)
+                .SetProperty(r => r.EnqueuedAt, (DateTimeOffset?)null), cancellationToken)
             .ConfigureAwait(false);
     }
 

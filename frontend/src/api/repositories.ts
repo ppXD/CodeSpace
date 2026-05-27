@@ -11,12 +11,17 @@ export interface BindRepositoriesBulkInput {
   providerInstanceId: string;
   credentialId: string;
   projectIdentifiers: string[];
+  /** Phase 3.0 — target CodeSpace Project; omit to land in the team's Default. */
+  projectId?: string;
 }
 
 export const repositoriesApi = {
-  list: (providerInstanceId?: string) => {
-    const qs = providerInstanceId ? `?providerInstanceId=${encodeURIComponent(providerInstanceId)}` : "";
-    return fetchJson<RepositorySummary[]>(`/api/repositories${qs}`);
+  list: (providerInstanceId?: string, projectId?: string) => {
+    const params = new URLSearchParams();
+    if (providerInstanceId) params.set("providerInstanceId", providerInstanceId);
+    if (projectId) params.set("projectId", projectId);
+    const qs = params.toString();
+    return fetchJson<RepositorySummary[]>(`/api/repositories${qs ? `?${qs}` : ""}`);
   },
 
   get: (repositoryId: string) => fetchJson<RepositoryDetail>(`/api/repositories/${repositoryId}`),

@@ -34,6 +34,17 @@ public class WorkflowRun : IEntity<Guid>, IAuditable
 
     public WorkflowRunStatus Status { get; set; } = WorkflowRunStatus.Pending;
     public string? Error { get; set; }
+
+    /// <summary>
+    /// Phase 3.0 — set by <see cref="Services.Workflows.Dispatch.WorkflowRunDispatcher"/>
+    /// when CAS Pending → Enqueued succeeds. NULL while in Pending or after a reconciler
+    /// reverts to Pending. The stuck-Enqueued reconciler sweep reads THIS column rather than
+    /// <c>LastModifiedDate</c> — <c>ExecuteUpdateAsync</c> does not invoke EF's audit hook,
+    /// so a row that sits in Pending then transitions to Enqueued would otherwise look
+    /// instantly stale because its audit timestamp still reflects creation time.
+    /// </summary>
+    public DateTimeOffset? EnqueuedAt { get; set; }
+
     public DateTimeOffset? StartedAt { get; set; }
     public DateTimeOffset? CompletedAt { get; set; }
 

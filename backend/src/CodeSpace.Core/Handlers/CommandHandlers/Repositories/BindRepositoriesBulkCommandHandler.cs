@@ -29,7 +29,8 @@ public sealed class BindRepositoriesBulkCommandHandler : IRequestHandler<BindRep
                 TeamId = teamId,
                 ProviderInstanceId = request.ProviderInstanceId,
                 CredentialId = request.CredentialId,
-                ProjectIdentifier = identifier
+                ProjectIdentifier = identifier,
+                ProjectId = request.ProjectId,
             };
 
             var repo = await _service.BindAsync(bindRequest, cancellationToken).ConfigureAwait(false);

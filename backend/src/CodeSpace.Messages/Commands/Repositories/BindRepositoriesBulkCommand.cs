@@ -11,4 +11,12 @@ public sealed record BindRepositoriesBulkCommand : ICommand<BulkBindResult>, IRe
     public required Guid ProviderInstanceId { get; init; }
     public required Guid CredentialId { get; init; }
     public required IReadOnlyList<string> ProjectIdentifiers { get; init; }
+
+    /// <summary>
+    /// Phase 3.0 — the CodeSpace Project (NOT the provider-side "project" concept, which is
+    /// <see cref="ProjectIdentifiers"/>) the bulk-bound repositories should be attached to.
+    /// Null → the team's lazily-created Default project. Same id applies to every repo in
+    /// the batch (the AddRepoModal picker shows one project for the whole bulk action).
+    /// </summary>
+    public Guid? ProjectId { get; init; }
 }

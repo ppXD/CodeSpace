@@ -329,3 +329,32 @@ export interface InsufficientScopeErrorBody {
   missingScopes: string[];
   grantedScopes: string[];
 }
+
+// ── Projects (Phase 3.0) ─────────────────────────────────────────────────────
+//
+// A Project is a team-scoped container for Repositories + project-scoped
+// Variables. Workflows reference project variables via the dotted path
+// `project.{slug}.{name}`. Every team has at least one Project named "default";
+// new repositories default to that project unless the operator picks another.
+
+export interface ProjectSummary {
+  id: string;
+  teamId: string;
+  slug: string;
+  name: string;
+  description?: string | null;
+  createdDate: string;
+  activeRepositoryCount: number;
+  activeVariableCount: number;
+}
+
+export interface CreateProjectInput {
+  /** Display name. Backend derives the slug from this via SlugifyName; collision throws. */
+  name: string;
+  description?: string | null;
+}
+
+export interface UpdateProjectInput {
+  name: string;
+  description?: string | null;
+}

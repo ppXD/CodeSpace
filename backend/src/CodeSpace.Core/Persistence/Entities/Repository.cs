@@ -7,6 +7,14 @@ public class Repository : IEntity<Guid>, IAuditable
     public Guid Id { get; set; }
 
     public Guid TeamId { get; set; }
+
+    /// <summary>
+    /// Owning Project. Phase 3.0 — repositories live inside Projects (TeamCity-style
+    /// VcsRoot), not directly under Team. New binds default to the team's <c>default</c>
+    /// project unless the operator picks another.
+    /// </summary>
+    public Guid ProjectId { get; set; }
+
     public Guid ProviderInstanceId { get; set; }
     public Guid? CredentialId { get; set; }
 

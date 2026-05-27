@@ -101,11 +101,39 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
             return;
         }
 
-        var run = await LoadRunAsync(runId, cancellationToken).ConfigureAwait(false);
+        // Post-claim work is wrapped in a try/catch so that ANY failure between claim and
+        // walk (run load throwing, definition deserialisation throwing, hash mismatch,
+        // snapshot persist throwing) lands the row in Failure rather than leaving it stuck
+        // in Running forever — the reconciler's "abandoned Running" sweep would eventually
+        // catch it, but operators see the failure immediately this way + the timeline gets
+        // the run.failed ledger record with the specific exception message.
+        try
+        {
+            await RunAfterClaimAsync(runId, startedAt, cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            // Cancel handling already happens INSIDE RunAfterClaimAsync (it writes the
+            // Cancelled status + ledger). Re-throw so Hangfire records the job as cancelled.
+            throw;
+        }
+        catch (Exception ex)
+        {
+            // Bootstrap-phase failure — load / hash-verify / scope-build / snapshot
+            // persist threw. The walk's own try/catch never got a chance. Mark Failure
+            // here so the run row reaches a terminal state.
+            await MarkBootstrapFailureAsync(runId, startedAt, ex).ConfigureAwait(false);
+        }
+    }
 
-        // Capture engine pick-up time so we can compute the total run duration for the
-        // run.completed / run.failed / run.cancelled record's payload.
-        var engineStartedAt = startedAt;
+    /// <summary>
+    /// Everything between the atomic Enqueued→Running CAS and the walker's try/catch.
+    /// Extracted so the outer <see cref="ExecuteRunAsync"/> can wrap THIS in a
+    /// bootstrap-failure guard without nesting the walker's own catch clauses.
+    /// </summary>
+    private async Task RunAfterClaimAsync(Guid runId, DateTimeOffset engineStartedAt, CancellationToken cancellationToken)
+    {
+        var run = await LoadRunAsync(runId, cancellationToken).ConfigureAwait(false);
         await _recordLogger.RunStartedAsync(run.Id, cancellationToken).ConfigureAwait(false);
 
         var (definition, releaseHash) = await LoadDefinitionAndHashAsync(run, cancellationToken).ConfigureAwait(false);
@@ -160,6 +188,40 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
         }
     }
 
+    /// <summary>
+    /// Bootstrap-failure path: invoked when post-claim code throws BEFORE the walker
+    /// starts (most likely <see cref="ReleaseTamperedException"/>, a deserialisation
+    /// failure, or a snapshot-persist conflict). We mark the run Failed via a CAS UPDATE
+    /// (Running → Failure) AND emit a <c>run.failed</c> ledger record so the timeline
+    /// surfaces the cause. CancellationToken.None is used everywhere — the original token
+    /// may already be tripped, but we want this write to land regardless.
+    /// </summary>
+    private async Task MarkBootstrapFailureAsync(Guid runId, DateTimeOffset engineStartedAt, Exception failure)
+    {
+        var message = $"Engine bootstrap failure ({failure.GetType().Name}): {failure.Message}";
+        _logger.LogError(failure, "Run {RunId} failed during bootstrap before walker started", runId);
+
+        var now = DateTimeOffset.UtcNow;
+        await _db.WorkflowRun
+            .Where(r => r.Id == runId && r.Status == WorkflowRunStatus.Running)
+            .ExecuteUpdateAsync(s => s
+                .SetProperty(r => r.Status, WorkflowRunStatus.Failure)
+                .SetProperty(r => r.Error, message)
+                .SetProperty(r => r.CompletedAt, (DateTimeOffset?)now), CancellationToken.None)
+            .ConfigureAwait(false);
+
+        // Best-effort ledger record — if THIS throws we just log; the row's already
+        // terminal and that's the important guarantee.
+        try
+        {
+            await _recordLogger.RunFailedAsync(runId, message, now - engineStartedAt, CancellationToken.None).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Run {RunId} bootstrap failure recorded in workflow_run but ledger emit failed", runId);
+        }
+    }
+
     private async Task<WorkflowRun> LoadRunAsync(Guid runId, CancellationToken cancellationToken) =>
         await _db.WorkflowRun
             .Include(r => r.Workflow)
@@ -173,7 +235,16 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
     /// <c>DefinitionHash</c> in a single query. The hash is captured into
     /// <c>workflow_run.release_hash_at_run</c> at first-run snapshot time and verified
     /// against the version row at replay time — divergence throws
-    /// <c>ReleaseTamperedException</c>.
+    /// <see cref="ReleaseTamperedException"/>.
+    ///
+    /// <para>Tamper check (Phase 3.0 hardening): we recompute the hash from the CURRENT
+    /// <c>definition_json</c> and compare against the stored <c>definition_hash</c>.
+    /// workflow_version rows are immutable by contract, so the two MUST match. A mismatch
+    /// means someone bypassed the publish path and mutated the JSON directly in the DB —
+    /// we refuse to execute. This is independent of (and strictly stricter than) the
+    /// replay-time check that compares <c>workflow_run.release_hash_at_run</c> against
+    /// today's <c>definition_hash</c>: the new check catches the case where BOTH columns
+    /// were mutated together (a malicious operator zeros their own audit trail).</para>
     /// </summary>
     private async Task<(WorkflowDefinition Definition, string DefinitionHash)> LoadDefinitionAndHashAsync(WorkflowRun run, CancellationToken cancellationToken)
     {
@@ -184,6 +255,10 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
         var definition = JsonSerializer.Deserialize<WorkflowDefinition>(version.DefinitionJson, WorkflowJson.Options)
             ?? throw new InvalidOperationException($"WorkflowVersion ({run.WorkflowId},{run.WorkflowVersion}) has empty JSON.");
 
+        var recomputed = DefinitionHash.Compute(definition);
+        if (!string.Equals(recomputed, version.DefinitionHash, StringComparison.Ordinal))
+            throw new ReleaseTamperedException(run.WorkflowId, run.WorkflowVersion, version.DefinitionHash, recomputed);
+
         return (definition, version.DefinitionHash);
     }
 
@@ -191,6 +266,12 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
     /// First-run scope build: pulls every variable from the LIVE table, then writes a
     /// normalised snapshot capturing the resolved state. Subsequent replays of this run
     /// read from the snapshot rather than the (potentially mutated) live state.
+    /// <para>Project-scoped variables are intentionally NOT snapshotted — they're always
+    /// re-resolved from live state at replay time (similar to how Secret rotation is
+    /// reflected). The rationale: projects are meant to be living "config namespaces"
+    /// shared across many workflows; freezing them per-run would let stale dataset_url /
+    /// endpoint values bleed into newer replays. Operators who need per-run freeze should
+    /// model the value as a workflow-level <c>wf.*</c> variable.</para>
     /// </summary>
     private async Task<NodeRunScope> BuildScopeFreshAndPersistSnapshotAsync(WorkflowRun run, WorkflowDefinition definition, string releaseHash, CancellationToken cancellationToken)
     {
@@ -205,11 +286,17 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
 
         var wf = BagFromResolved(wfResolved);
         var team = BagFromResolved(teamResolved);
-        var secretPaths = CollectSecretPaths(wfResolved, teamResolved);
+
+        // Project scope — load only the projects this definition references (via slug),
+        // not every project in the team. Falls back to an empty bag when the definition
+        // contains no project.* refs (cheap).
+        var (projects, projectSecretPaths) = await LoadReferencedProjectVariablesAsync(run.Workflow.TeamId, definition, cancellationToken).ConfigureAwait(false);
+
+        var secretPaths = CollectSecretPaths(wfResolved, teamResolved, projectSecretPaths);
 
         await PersistFirstRunSnapshotAsync(run, releaseHash, wfResolved, teamResolved, cancellationToken).ConfigureAwait(false);
 
-        return new NodeRunScope { Trigger = trigger, Input = input, Wf = wf, Sys = sys, Team = team, SecretPaths = secretPaths };
+        return new NodeRunScope { Trigger = trigger, Input = input, Wf = wf, Sys = sys, Team = team, Projects = projects, SecretPaths = secretPaths };
     }
 
     /// <summary>
@@ -217,6 +304,10 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
     /// values are re-resolved fresh from the current <c>variable</c> table; sys is
     /// re-injected with the new run's identity (new run id, new started_at). Trigger
     /// payload is preserved verbatim from the run row.
+    /// <para>Project-scope variables are re-resolved from the LIVE state at replay (not
+    /// snapshotted). Match the documentation on <see cref="BuildScopeFreshAndPersistSnapshotAsync"/>:
+    /// projects are shared config namespaces; freezing them would let stale endpoint /
+    /// dataset values cross between original run and replay.</para>
     /// </summary>
     private async Task<NodeRunScope> BuildScopeForReplayAsync(WorkflowRun run, WorkflowDefinition definition, CancellationToken cancellationToken)
     {
@@ -240,10 +331,14 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
         var wfSecretNames = await MergeCurrentSecretsAsync(wf, VariableScope.Workflow, run.WorkflowId, cancellationToken).ConfigureAwait(false);
         var teamSecretNames = await MergeCurrentSecretsAsync(team, VariableScope.Team, run.Workflow.TeamId, cancellationToken).ConfigureAwait(false);
 
+        // Project scope — load fresh (no snapshot path for projects).
+        var (projects, projectSecretPaths) = await LoadReferencedProjectVariablesAsync(run.Workflow.TeamId, definition, cancellationToken).ConfigureAwait(false);
+
         // Secret-paths used by the engine's Terminal-output leak guard. Replay re-resolves
         // secrets from the live table (see MergeCurrentSecretsAsync), so we use the same
         // freshly-fetched set to drive the paths bag — the snapshot itself stores no plaintext.
         var secretPaths = new HashSet<string>(wfSecretNames.Select(n => $"wf.{n}").Concat(teamSecretNames.Select(n => $"team.{n}")));
+        foreach (var p in projectSecretPaths) secretPaths.Add(p);
 
         _logger.LogInformation(
             "Replay scope built. RunId={RunId} ParentRunId={ParentRunId} SnapshotCount={SnapshotCount}",
@@ -256,6 +351,7 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
             Wf = wf,
             Sys = sys,
             Team = team,
+            Projects = projects,
             SecretPaths = secretPaths,
         };
     }
@@ -299,16 +395,92 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
 
     /// <summary>
     /// Builds the fully-qualified secret-path set for the Terminal-output leak guard. Returns
-    /// strings like <c>"wf.PASSWORD"</c> / <c>"team.API_KEY"</c> — the same dotted form a
-    /// {{ref}} template uses, so <see cref="VariableResolver.ExtractReferencedPaths"/> output
-    /// can be intersected against this set directly.
+    /// strings like <c>"wf.PASSWORD"</c> / <c>"team.API_KEY"</c> / <c>"project.MyProject.API_KEY"</c>
+    /// — the same dotted form a {{ref}} template uses, so
+    /// <see cref="VariableResolver.ExtractReferencedPaths"/> output can be intersected against
+    /// this set directly.
     /// </summary>
-    private static HashSet<string> CollectSecretPaths(IReadOnlyList<ResolvedVariable> wfResolved, IReadOnlyList<ResolvedVariable> teamResolved)
+    private static HashSet<string> CollectSecretPaths(IReadOnlyList<ResolvedVariable> wfResolved, IReadOnlyList<ResolvedVariable> teamResolved, IReadOnlyCollection<string>? projectSecretPaths = null)
     {
         var paths = new HashSet<string>();
         foreach (var v in wfResolved) if (v.ValueType == VariableValueType.Secret) paths.Add($"wf.{v.Name}");
         foreach (var v in teamResolved) if (v.ValueType == VariableValueType.Secret) paths.Add($"team.{v.Name}");
+        if (projectSecretPaths != null) foreach (var p in projectSecretPaths) paths.Add(p);
         return paths;
+    }
+
+    /// <summary>
+    /// Phase 3.0 — load every project's variables referenced by the workflow definition.
+    /// Returns a slug-keyed bag of (varName → JsonElement) PLUS the fully-qualified secret
+    /// paths (e.g. <c>"project.MyProject.API_KEY"</c>) for the leak guard.
+    ///
+    /// <para>References are extracted from the WHOLE definition (every node's <c>Inputs</c>
+    /// + <c>Config</c>) — paths starting with <c>project.</c> contribute their second
+    /// segment as a slug. Unknown / soft-deleted slugs are silently skipped: save-time
+    /// validation enforces shape only (<c>project.&lt;slug&gt;.&lt;name&gt;</c>) and does
+    /// NOT verify the slug exists — that would require a DB lookup at every save and would
+    /// race with concurrent project deletes. Runtime gracefully resolves missing slugs to
+    /// null (treated as an empty bag — the {{}} reference resolves to null).</para>
+    /// </summary>
+    private async Task<(IReadOnlyDictionary<string, IReadOnlyDictionary<string, JsonElement>> Bag, IReadOnlyList<string> SecretPaths)> LoadReferencedProjectVariablesAsync(Guid teamId, WorkflowDefinition definition, CancellationToken cancellationToken)
+    {
+        var referencedSlugs = CollectReferencedProjectSlugs(definition);
+        if (referencedSlugs.Count == 0)
+            return (new Dictionary<string, IReadOnlyDictionary<string, JsonElement>>(), Array.Empty<string>());
+
+        // Resolve slug → project.id in one query, filtered to the team for safety.
+        var projects = await _db.Project.AsNoTracking()
+            .Where(p => p.TeamId == teamId && p.DeletedDate == null && referencedSlugs.Contains(p.Slug))
+            .Select(p => new { p.Id, p.Slug })
+            .ToListAsync(cancellationToken)
+            .ConfigureAwait(false);
+
+        var bag = new Dictionary<string, IReadOnlyDictionary<string, JsonElement>>();
+        var secretPaths = new List<string>();
+
+        foreach (var p in projects)
+        {
+            var resolved = await _variableService.GetAllForEngineAsync(VariableScope.Project, p.Id, cancellationToken).ConfigureAwait(false);
+            var projectBag = new Dictionary<string, JsonElement>(resolved.Count);
+            foreach (var v in resolved)
+            {
+                projectBag[v.Name] = v.Value;
+                if (v.ValueType == VariableValueType.Secret) secretPaths.Add($"project.{p.Slug}.{v.Name}");
+            }
+            bag[p.Slug] = projectBag;
+        }
+
+        return (bag, secretPaths);
+    }
+
+    /// <summary>
+    /// Walks every node's Inputs + Config templates extracting the unique set of project
+    /// slugs referenced via <c>project.{slug}.X</c>. Distinct slugs drive how many
+    /// per-project variable queries the engine issues per run. Inputs declarations
+    /// (workflow IO contract) are not scanned — they declare the workflow's surface,
+    /// they don't reference variables themselves.
+    /// </summary>
+    private static HashSet<string> CollectReferencedProjectSlugs(WorkflowDefinition definition)
+    {
+        var slugs = new HashSet<string>(StringComparer.Ordinal);
+
+        foreach (var node in definition.Nodes)
+        {
+            foreach (var path in VariableResolver.ExtractReferencedPaths(node.Inputs))
+                AddProjectSlug(slugs, path);
+            foreach (var path in VariableResolver.ExtractReferencedPaths(node.Config))
+                AddProjectSlug(slugs, path);
+        }
+
+        return slugs;
+    }
+
+    private static void AddProjectSlug(HashSet<string> slugs, string path)
+    {
+        var segments = path.Split('.');
+        if (segments.Length < 3) return;
+        if (segments[0] != "project") return;
+        slugs.Add(segments[1]);
     }
 
     private static Dictionary<string, JsonElement> BagFromResolved(IReadOnlyList<ResolvedVariable> resolved)

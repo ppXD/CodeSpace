@@ -71,6 +71,22 @@ public sealed class NodeRunScope
     public IReadOnlyDictionary<string, JsonElement> Sys { get; init; } = new Dictionary<string, JsonElement>();
 
     /// <summary>
+    /// Phase 3.0 — Project-scoped variables, keyed by project slug then by variable name.
+    /// Referenced via <c>{{project.&lt;slug&gt;.&lt;name&gt;}}</c>. Same secret/non-secret
+    /// rules as Team/Wf scope; secret rows are pre-decrypted in the bag, and their
+    /// fully-qualified paths land in <see cref="SecretPaths"/> for the Terminal-output guard.
+    ///
+    /// <para>Build strategy: the engine scans the workflow definition's references at
+    /// scope-build time and only loads variables for projects actually referenced. This
+    /// keeps the runtime cost proportional to what the workflow uses, not to the team's
+    /// total project count. References to non-existent slugs OR slugs in other teams
+    /// fail save-time validation, so the engine can trust the slug→project.id mapping it
+    /// resolves here.</para>
+    /// </summary>
+    public IReadOnlyDictionary<string, IReadOnlyDictionary<string, JsonElement>> Projects { get; init; }
+        = new Dictionary<string, IReadOnlyDictionary<string, JsonElement>>();
+
+    /// <summary>
     /// Fully-qualified dotted paths for every scope entry that came from a <c>Secret</c>-typed
     /// variable (e.g. <c>"team.API_KEY"</c>, <c>"wf.DB_PASSWORD"</c>). Populated at scope-build
     /// time from <see cref="Variables.IVariableService.GetAllForEngineAsync"/> by inspecting

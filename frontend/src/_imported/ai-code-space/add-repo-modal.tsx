@@ -22,11 +22,20 @@ import { Pager } from "./pager";
 
 interface AddRepoModalProps {
   onClose: () => void;
+  /**
+   * Phase 3.0 — pre-fill the target CodeSpace Project for the bulk-bind. When set,
+   * the modal still runs the full credential → picker flow, but the resulting
+   * binds land under this project rather than the team's lazily-created Default.
+   * Provided by the project-detail page's "+ Add repository" button so the user
+   * doesn't have to choose the project again after they've already navigated
+   * into it.
+   */
+  presetProjectId?: string;
 }
 
 type Step = "credential" | "picker" | "result";
 
-export function AddRepoModal({ onClose }: AddRepoModalProps) {
+export function AddRepoModal({ onClose, presetProjectId }: AddRepoModalProps) {
   const [step, setStep] = useState<Step>("credential");
   const [picked, setPicked] = useState<CredentialSummary | null>(null);
 
@@ -119,6 +128,10 @@ export function AddRepoModal({ onClose }: AddRepoModalProps) {
       providerInstanceId: pickedInstance.id,
       credentialId: picked.id,
       projectIdentifiers: Array.from(selected.keys()),
+      // When the operator invoked this modal from a project-detail page, all of
+      // these bulk-binds drop into that project. Without a preset id the backend
+      // falls back to the team's lazily-created Default project.
+      projectId: presetProjectId,
     });
 
     setStep("result");

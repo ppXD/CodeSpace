@@ -2470,3 +2470,107 @@
   flex: 1; min-width: 180px; font-size: 12px; font-family: inherit;
 }
 
+
+/* ── Add Project modal extras (Phase 3.0) ─────────────────────────────────────
+   Form rows, choice cards, credential + repo picker rows, confirm preview. The
+   .mdl shell already gives us padding + footer; these are content-level styles
+   reusable by any modal that needs them. */
+
+.acs-root .form-row { display: flex; flex-direction: column; gap: 6px; margin-bottom: 14px; }
+.acs-root .form-row label { font-size: 12px; font-weight: 500; color: var(--muted); letter-spacing: 0.01em; }
+.acs-root .form-row input,
+.acs-root .form-row textarea,
+.acs-root .form-row select {
+  font: inherit; font-size: 13px; color: var(--ink);
+  padding: 8px 10px; height: 32px;
+  border: 1px solid var(--line); border-radius: 7px;
+  background: var(--panel); outline: none;
+}
+.acs-root .form-row input:focus,
+.acs-root .form-row textarea:focus,
+.acs-root .form-row select:focus {
+  border-color: var(--accent); box-shadow: 0 0 0 3px rgba(217,119,87,.12);
+}
+.acs-root .form-hint { font-size: 11.5px; color: var(--muted); line-height: 1.45; }
+.acs-root .form-hint code {
+  font-family: inherit; padding: 1px 4px; border-radius: 4px;
+  background: rgba(0,0,0,.05); color: var(--ink-2); font-size: 11px;
+}
+.acs-root .form-hint.err { color: #B0411A; }
+
+/* Two-card choice grid at the top of Add Project. */
+.acs-root .add-choice-grid {
+  display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 10px;
+}
+.acs-root .add-choice {
+  appearance: none; cursor: pointer;
+  display: flex; flex-direction: column; gap: 8px; align-items: flex-start;
+  padding: 16px; min-height: 130px;
+  background: var(--panel); border: 1px solid var(--line); border-radius: 9px;
+  text-align: left; transition: all .12s ease;
+}
+.acs-root .add-choice:hover { border-color: var(--accent); background: #FDFCF8; box-shadow: 0 1px 0 rgba(0,0,0,.04); }
+.acs-root .add-choice-ic {
+  width: 32px; height: 32px; border-radius: 7px;
+  background: rgba(217,119,87,.12); color: var(--accent);
+  display: grid; place-items: center;
+}
+.acs-root .add-choice-h { font-size: 13.5px; font-weight: 600; color: var(--ink); }
+.acs-root .add-choice-p { font-size: 12px; color: var(--muted); line-height: 1.45; }
+
+/* Credential picker list inside the Import flow. */
+.acs-root .cred-list { display: flex; flex-direction: column; gap: 6px; }
+.acs-root .cred-row {
+  appearance: none; cursor: pointer;
+  display: flex; align-items: center; gap: 12px;
+  padding: 10px 12px; border-radius: 8px;
+  background: var(--panel); border: 1px solid var(--line);
+  text-align: left; width: 100%;
+}
+.acs-root .cred-row:hover { border-color: var(--accent); background: #FDFCF8; }
+.acs-root .cred-row-meta { flex: 1; min-width: 0; }
+.acs-root .cred-row-name { font-size: 13px; font-weight: 500; color: var(--ink); }
+.acs-root .cred-row-sub { font-size: 11.5px; color: var(--muted); margin-top: 2px; }
+
+/* Repository picker list — single-select, click-anywhere-to-pick rows. */
+.acs-root .pick-list { display: flex; flex-direction: column; gap: 4px; margin-top: 10px; max-height: 320px; overflow-y: auto; }
+.acs-root .pick-row {
+  appearance: none; cursor: pointer;
+  display: flex; align-items: center; gap: 10px;
+  padding: 8px 10px; border-radius: 7px;
+  background: transparent; border: 1px solid transparent;
+  text-align: left; width: 100%;
+}
+.acs-root .pick-row:hover { background: rgba(217,119,87,.06); border-color: var(--line); }
+.acs-root .pick-row[disabled] { opacity: .55; cursor: not-allowed; }
+.acs-root .pick-row[disabled]:hover { background: transparent; border-color: transparent; }
+.acs-root .pick-row-meta { flex: 1; min-width: 0; }
+.acs-root .pick-row-name { font-size: 13px; font-weight: 500; color: var(--ink); }
+.acs-root .pick-row-sub { font-size: 11.5px; color: var(--muted); margin-top: 2px; }
+.acs-root .pick-row-tag {
+  font-size: 10.5px; color: var(--muted); padding: 2px 7px;
+  background: rgba(0,0,0,.05); border-radius: 999px;
+}
+
+/* Confirm step: chosen repo summary row. */
+.acs-root .confirm-repo {
+  display: flex; align-items: center; gap: 8px;
+  padding: 8px 10px; border: 1px solid var(--line); border-radius: 7px;
+  background: var(--panel); font-size: 12.5px; color: var(--ink);
+}
+.acs-root .confirm-repo-sub { font-size: 11px; color: var(--muted); margin-left: auto; }
+
+/* Modal footer meta — right-aligned secondary text (e.g. "30 repos loaded"). */
+.acs-root .mdl-foot-meta { font-size: 11.5px; color: var(--muted); }
+
+/* Row-action menu inside .tbl rows on the project detail page. */
+.acs-root .row-act {
+  display: inline-flex; gap: 4px; opacity: 0; transition: opacity .12s ease;
+}
+.acs-root .tbl tr:hover .row-act { opacity: 1; }
+.acs-root .row-act button {
+  appearance: none; border: 1px solid var(--line); background: var(--panel);
+  color: var(--muted); width: 26px; height: 26px; border-radius: 6px;
+  display: grid; place-items: center; cursor: pointer;
+}
+.acs-root .row-act button:hover { color: var(--ink); border-color: var(--line-2); }

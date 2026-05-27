@@ -217,6 +217,50 @@ public class DefinitionValidatorTests
     }
 
     [Fact]
+    public void Project_reference_with_slug_and_name_is_accepted()
+    {
+        var definition = new WorkflowDefinition
+        {
+            Nodes = new List<NodeDefinition>
+            {
+                Node("t", "trigger.x"),
+                NodeWithInputs("a", "regular.a", """{"key":"{{project.shared.api_key}}"}"""),
+                Node("end", "builtin.terminal")
+            },
+            Edges = new List<EdgeDefinition>
+            {
+                new() { From = "t", To = "a" },
+                new() { From = "a", To = "end" }
+            }
+        };
+
+        BuildValidator().Validate(definition).IsValid.ShouldBeTrue();
+    }
+
+    [Fact]
+    public void Project_reference_with_only_head_is_rejected()
+    {
+        var definition = new WorkflowDefinition
+        {
+            Nodes = new List<NodeDefinition>
+            {
+                Node("t", "trigger.x"),
+                NodeWithInputs("a", "regular.a", """{"key":"{{project}}"}"""),
+                Node("end", "builtin.terminal")
+            },
+            Edges = new List<EdgeDefinition>
+            {
+                new() { From = "t", To = "a" },
+                new() { From = "a", To = "end" }
+            }
+        };
+
+        var result = BuildValidator().Validate(definition);
+        result.IsValid.ShouldBeFalse();
+        result.Errors.ShouldContain(e => e.Contains("project.<slug>.<name>"));
+    }
+
+    [Fact]
     public void Wrong_schema_version_errors()
     {
         var definition = new WorkflowDefinition
@@ -261,6 +305,14 @@ public class DefinitionValidatorTests
         TypeKey = typeKey,
         Config = JsonDocument.Parse("{}").RootElement.Clone(),
         Inputs = JsonDocument.Parse("{}").RootElement.Clone()
+    };
+
+    private static NodeDefinition NodeWithInputs(string id, string typeKey, string inputsJson) => new()
+    {
+        Id = id,
+        TypeKey = typeKey,
+        Config = JsonDocument.Parse("{}").RootElement.Clone(),
+        Inputs = JsonDocument.Parse(inputsJson).RootElement.Clone()
     };
 
     private sealed class StubNode : INodeRuntime

@@ -173,6 +173,7 @@ public static class VariableResolver
             "input"   => WalkDictionary(scope.Input, rest),
             "sys"     => WalkDictionary(scope.Sys, rest),
             "nodes"   => WalkNodesScope(scope, rest),
+            "project" => WalkProjectsScope(scope, rest),
             _ => (JsonElement?)null
         };
 
@@ -181,7 +182,7 @@ public static class VariableResolver
         // Implicit iteration scope — only consulted when the head doesn't match a known
         // explicit bucket. This is what makes {{item}} / {{index}} work inside an iterate
         // node WITHOUT needing the operator to write {{iteration.item}}.
-        if (scope.Iteration != null && root is not "trigger" and not "team" and not "nodes" and not "wf" and not "input" and not "sys")
+        if (scope.Iteration != null && root is not "trigger" and not "team" and not "nodes" and not "wf" and not "input" and not "sys" and not "project")
         {
             if (scope.Iteration.TryGetValue(root, out var iterValue))
             {
@@ -190,6 +191,21 @@ public static class VariableResolver
         }
 
         return null;
+    }
+
+    /// <summary>
+    /// Walks <c>project.{slug}.{name}</c> against <see cref="NodeRunScope.Projects"/>.
+    /// The bag is two-level: slug → name → JsonElement. Anything beyond <c>{slug}.{name}</c>
+    /// further descends into the value (e.g. <c>project.team.dataset.fields[0]</c>).
+    /// </summary>
+    private static JsonElement? WalkProjectsScope(NodeRunScope scope, string[] segments)
+    {
+        if (segments.Length < 2) return null;   // need at least slug + name
+
+        var slug = segments[0];
+        if (!scope.Projects.TryGetValue(slug, out var bag)) return null;
+
+        return WalkDictionary(bag, segments.Skip(1).ToArray());
     }
 
     private static JsonElement? WalkNodesScope(NodeRunScope scope, string[] segments)

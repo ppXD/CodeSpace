@@ -8,10 +8,26 @@ import type { PullRequestState } from "@/api/types";
  *  and the network request itself, so they can't drift. */
 export const PR_PAGE_SIZE = 30;
 
-export function useRepositories(providerInstanceId?: string) {
+interface UseRepositoriesFilter {
+  providerInstanceId?: string;
+  projectId?: string;
+}
+
+/**
+ * List the team's bound repositories with optional filters. Phase 3.0 — added
+ * <c>projectId</c> for the project-detail page (renders only repos attached to
+ * that project). Both filters are independent and additive at the backend.
+ *
+ * <para>Backwards-compatible call shape: the hook also accepts a bare
+ * <c>providerInstanceId</c> string so existing call sites don't need updates.</para>
+ */
+export function useRepositories(filter?: UseRepositoriesFilter | string) {
+  const normalized: UseRepositoriesFilter =
+    typeof filter === "string" ? { providerInstanceId: filter } : (filter ?? {});
+
   return useQuery({
-    queryKey: ["repositories", providerInstanceId ?? "all"],
-    queryFn: () => repositoriesApi.list(providerInstanceId),
+    queryKey: ["repositories", normalized.providerInstanceId ?? "all", normalized.projectId ?? "all"],
+    queryFn: () => repositoriesApi.list(normalized.providerInstanceId, normalized.projectId),
   });
 }
 
