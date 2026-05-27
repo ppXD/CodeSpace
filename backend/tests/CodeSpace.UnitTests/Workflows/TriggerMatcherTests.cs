@@ -394,6 +394,73 @@ public class TriggerMatcherTests
         new PrUpdatedMatcher().Match(ev, config).ShouldBeFalse();
     }
 
+    // ─── Defensive parsing — malformed JSON shapes the validator might miss ────────
+
+    [Fact]
+    public void Legacy_labels_filter_applied_even_when_repositoryId_absent()
+    {
+        // A legacy config that only sets `labels` (no `repositoryId` key at all) still
+        // applies the label filter — semantically "match any repo, but only PRs with these
+        // labels". Less common than the both-present form but the parser supports it.
+        var ev = OpenedWithLabels(RepoA, "shipping");
+        var config = ParseConfig("""{ "labels": ["shipping"] }""");
+
+        new PrOpenedMatcher().Match(ev, config).ShouldBeTrue();
+    }
+
+    [Fact]
+    public void Legacy_non_array_labels_value_treats_as_no_filter()
+    {
+        // Half-typed config — `labels` is a string, not an array. The parser SHOULD fall
+        // back to "no label filter" rather than reject the match: the operator's intent
+        // was clearly to filter, but the config is malformed; failing closed (no match)
+        // would silently break workflows. Failing open (no filter) lets the workflow fire
+        // and surfaces the misconfiguration in the run log.
+        var ev = OpenedEvent(RepoA);
+        var config = ParseConfig($$"""{ "repositoryId": "{{RepoA}}", "labels": "not-an-array" }""");
+
+        new PrOpenedMatcher().Match(ev, config).ShouldBeTrue();
+    }
+
+    [Fact]
+    public void New_shape_entry_with_non_string_repositoryId_is_skipped()
+    {
+        // The trigger node ConfigSchema enforces `type: string` on `repositoryId`, but the
+        // matcher MUST tolerate a stored config that bypassed validation (e.g. a future
+        // schema relaxation, or a direct DB edit). Defensive skip — sibling entries still
+        // get a chance.
+        var ev = OpenedEvent(RepoA);
+        var config = ParseConfig($$"""
+            {
+              "repositories": [
+                { "repositoryId": 12345 },
+                { "repositoryId": "{{RepoA}}" }
+              ]
+            }
+            """);
+
+        new PrOpenedMatcher().Match(ev, config).ShouldBeTrue();
+    }
+
+    [Fact]
+    public void New_shape_non_object_entry_is_skipped()
+    {
+        // The schema declares `items: { type: object }`, but again the matcher is
+        // defensive against stored configs that didn't go through validation. A string-
+        // valued entry in the array MUST be skipped, not crash the matcher.
+        var ev = OpenedEvent(RepoA);
+        var config = ParseConfig($$"""
+            {
+              "repositories": [
+                "not-an-object",
+                { "repositoryId": "{{RepoA}}" }
+              ]
+            }
+            """);
+
+        new PrOpenedMatcher().Match(ev, config).ShouldBeTrue();
+    }
+
     private static PullRequestOpenedEvent OpenedEvent(Guid repositoryId) => new()
     {
         RepositoryId = repositoryId,
