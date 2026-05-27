@@ -267,7 +267,16 @@ export function Sidebar() {
         >
           <span className="sb-nav-ic"><Ic.Folder size={15} /></span>
           <span className="sb-nav-lbl">Projects</span>
-          {active && <span className="sb-nav-badge">{active.projectCount}</span>}
+          {/* `projectCount != null` guard: the field is new on /me (Phase 3.0
+              follow-up); when an old backend build is still running it returns
+              MeTeam without this field, undefined would render an empty pill
+              (background + padding, no number) and look like a UI glitch. Hide
+              the badge entirely until the backend serves the field. A team
+              with exactly 0 projects (fresh empty workspace) still shows "0"
+              because typeof 0 === "number" — same UX as repositoryCount before. */}
+          {active && active.projectCount != null && (
+            <span className="sb-nav-badge">{active.projectCount}</span>
+          )}
         </div>
         <div
           className="sb-nav-item"
