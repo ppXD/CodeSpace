@@ -100,6 +100,101 @@ public class FlowIterateNodeTests
         outerScope.Trigger.ShouldNotContainKey("index");
     }
 
+    [Fact]
+    public void BuildIterationScope_inherits_every_read_side_bag_from_outer()
+    {
+        // Regression pin: the per-iteration scope must carry over ALL read-side bags
+        // from the outer scope. The original constructor here only listed Trigger /
+        // Team / Wf / Input / Sys explicitly and silently dropped Projects + SecretPaths
+        // (both added to NodeRunScope after this builder shipped). Consequences of the
+        // drop:
+        //   - {{project.<slug>.X}} inside the iteration body resolved to null.
+        //   - The Terminal secret-leak guard, which reads scope.SecretPaths to decide
+        //     whether a referenced ref is tainted, lost its set inside iterations —
+        //     meaning a {{team.API_KEY}} inside an iterated Terminal payload could
+        //     escape the guard.
+        // This test pins every field's propagation so a future field addition that
+        // forgets to wire it through here fails fast.
+        var triggerBag = new Dictionary<string, JsonElement> { ["t"] = JsonSerializer.SerializeToElement("trig") };
+        var teamBag    = new Dictionary<string, JsonElement> { ["k"] = JsonSerializer.SerializeToElement("teamval") };
+        var wfBag      = new Dictionary<string, JsonElement> { ["w"] = JsonSerializer.SerializeToElement("wfval") };
+        var inputBag   = new Dictionary<string, JsonElement> { ["i"] = JsonSerializer.SerializeToElement("inval") };
+        var sysBag     = new Dictionary<string, JsonElement> { ["s"] = JsonSerializer.SerializeToElement("sysval") };
+        var projectBag = new Dictionary<string, IReadOnlyDictionary<string, JsonElement>>
+        {
+            ["foo"] = new Dictionary<string, JsonElement> { ["var1"] = JsonSerializer.SerializeToElement("projval") }
+        };
+        var secretPaths = new HashSet<string> { "team.API_KEY", "project.foo.SECRET" };
+        var outerNodes = new Dictionary<string, JsonElement>
+        {
+            ["upstream"] = JsonSerializer.SerializeToElement(new { x = 1 })
+        };
+
+        var outer = new NodeRunScope
+        {
+            Trigger = triggerBag,
+            Team = teamBag,
+            Wf = wfBag,
+            Input = inputBag,
+            Sys = sysBag,
+            Projects = projectBag,
+            SecretPaths = secretPaths,
+        };
+        foreach (var (k, v) in outerNodes)
+            outer.Nodes[k] = new Dictionary<string, JsonElement> { ["outputs"] = v };
+
+        var inner = FlowIterateNode.BuildIterationScope(
+            outer, itemAs: "item",
+            item: JsonSerializer.SerializeToElement("hello"),
+            index: 0);
+
+        // Every read-side bag must come through by reference (cheap pass-through, no clone).
+        inner.Trigger.ShouldBeSameAs(triggerBag);
+        inner.Team.ShouldBeSameAs(teamBag);
+        inner.Wf.ShouldBeSameAs(wfBag);
+        inner.Input.ShouldBeSameAs(inputBag);
+        inner.Sys.ShouldBeSameAs(sysBag);
+        inner.Projects.ShouldBeSameAs(projectBag);   // ← the bug
+        inner.SecretPaths.ShouldBeSameAs(secretPaths); // ← the bug
+
+        // Iteration slot carries item + index.
+        inner.Iteration.ShouldNotBeNull();
+        inner.Iteration!.ShouldContainKey("item");
+        inner.Iteration!.ShouldContainKey("index");
+        inner.Iteration!["item"].GetString().ShouldBe("hello");
+        inner.Iteration!["index"].GetInt32().ShouldBe(0);
+
+        // Nodes bag is copied entry-by-entry (it's a mutable IDictionary that fills as
+        // the body executes); upstream entries must already be visible.
+        inner.Nodes.ShouldContainKey("upstream");
+    }
+
+    [Fact]
+    public async Task Template_inside_iteration_resolves_project_scope()
+    {
+        // End-to-end behaviour test for the same fix: a {{project.<slug>.X}} reference
+        // inside the iteration body must resolve from outer scope. Before the fix this
+        // produced an empty string because the inner scope's Projects bag was empty.
+        var outerScope = new NodeRunScope
+        {
+            Trigger = new Dictionary<string, JsonElement>(),
+            Projects = new Dictionary<string, IReadOnlyDictionary<string, JsonElement>>
+            {
+                ["acme"] = new Dictionary<string, JsonElement>
+                {
+                    ["greeting"] = JsonSerializer.SerializeToElement("hello")
+                }
+            },
+        };
+
+        var ctx = BuildContextWithScope("""["alice","bob"]""", "{{project.acme.greeting}} {{item}}", outerScope);
+        var result = await new FlowIterateNode().RunAsync(ctx, CancellationToken.None);
+
+        result.Status.ShouldBe(NodeStatus.Success);
+        result.Outputs["results"][0].GetString().ShouldBe("hello alice");
+        result.Outputs["results"][1].GetString().ShouldBe("hello bob");
+    }
+
     private static Task<NodeResult> Run(string itemsJson, string template) =>
         new FlowIterateNode().RunAsync(BuildContext(itemsJson, template), CancellationToken.None);
 

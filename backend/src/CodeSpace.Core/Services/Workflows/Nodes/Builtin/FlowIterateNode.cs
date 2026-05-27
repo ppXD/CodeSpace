@@ -120,7 +120,11 @@ public sealed class FlowIterateNode : INodeRuntime
         return Task.FromResult(NodeResult.Ok(outputs));
     }
 
-    private static NodeRunScope BuildIterationScope(NodeRunScope outer, string itemAs, JsonElement item, int index)
+    // Exposed via InternalsVisibleTo for unit tests that pin the scope-inheritance
+    // contract (Projects + SecretPaths must propagate so {{project.X.Y}} resolves
+    // inside the iteration body AND the Terminal secret-leak guard's SecretPaths
+    // set still recognises tainted refs reached through iterated templates).
+    internal static NodeRunScope BuildIterationScope(NodeRunScope outer, string itemAs, JsonElement item, int index)
     {
         // Put per-iteration vars in the dedicated Iteration slot — VariableResolver reads
         // bare {{item}} / {{index}} through it without polluting trigger.* (which would be
@@ -132,6 +136,16 @@ public sealed class FlowIterateNode : INodeRuntime
             ["index"] = JsonSerializer.SerializeToElement(index)
         };
 
+        // Per-iteration scope inherits every read-side bag from the outer scope so that
+        // {{project.<slug>.X}}, {{team.X}}, {{wf.X}}, {{input.X}}, {{sys.X}}, and
+        // {{trigger.X}} all keep working inside the iterated subgraph — and so the
+        // Terminal secret-leak guard's SecretPaths set carries over (an iterated template
+        // referencing {{team.API_KEY}} must still be blocked from a Terminal payload).
+        // Previously the constructor listed each field explicitly and silently dropped
+        // Projects + SecretPaths because they were added to NodeRunScope after this
+        // builder was written; passing them through here closes that gap. The Nodes bag
+        // is still copied entry-by-entry below because it's a mutable IDictionary that
+        // accumulates outputs as the iteration body executes.
         var scope = new NodeRunScope
         {
             Trigger = outer.Trigger,
@@ -139,6 +153,8 @@ public sealed class FlowIterateNode : INodeRuntime
             Wf = outer.Wf,
             Input = outer.Input,
             Sys = outer.Sys,
+            Projects = outer.Projects,
+            SecretPaths = outer.SecretPaths,
             Iteration = iteration
         };
 
