@@ -77,13 +77,18 @@ export function useSetProjectVariable(projectId: string | null) {
   return useMutation({
     mutationFn: ({ name, input }: { name: string; input: SetVariableInput }) =>
       projectVariablesApi.set(projectId!, name, input),
-    // Invalidate both the project's variable list AND the projects list — the
-    // latter carries `activeVariableCount` on each ProjectSummary, and the
-    // Projects table re-renders that count live. Without the second invalidate
-    // the table stays stale until a hard refresh.
+    // Three keys carry data that depends on a project's variable count, all
+    // need refresh:
+    //   1. ["project-variables", id] — the row list the panel renders
+    //   2. ["projects"]              — Projects table column `activeVariableCount`
+    //   3. ["project", id]           — Project detail page's tab badge reads
+    //                                  `project.activeVariableCount` from this
+    //                                  singular query (separate cache entry
+    //                                  from the list).
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["project-variables", projectId] });
       qc.invalidateQueries({ queryKey: ["projects"] });
+      qc.invalidateQueries({ queryKey: ["project", projectId] });
     },
   });
 }
@@ -95,6 +100,7 @@ export function useDeleteProjectVariable(projectId: string | null) {
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["project-variables", projectId] });
       qc.invalidateQueries({ queryKey: ["projects"] });
+      qc.invalidateQueries({ queryKey: ["project", projectId] });
     },
   });
 }

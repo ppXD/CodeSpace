@@ -209,20 +209,13 @@ export function introspectScope({ definition, currentNodeId, manifestByType, wor
   }
 
   // 7. Project variables — backend resolves `project.{slug}.{name}` against every
-  //    project in the active team, so we emit one suggestion per real variable
-  //    across all projects. Projects with no variables still get a placeholder
-  //    so the slug head is visible in the picker. Mirrors the team-empty-state
-  //    pattern above.
+  //    project in the active team. Emit one suggestion per REAL variable across
+  //    all projects; projects with no variables are skipped entirely. (We
+  //    initially emitted a `project.{slug}.<name>` placeholder per empty project
+  //    for discoverability — that turned out to clutter the picker with
+  //    non-selectable rows for every empty project in the team, so we dropped
+  //    them. Empty projects simply contribute nothing.)
   for (const proj of projectVariables ?? []) {
-    if (proj.variables.length === 0) {
-      suggestions.push({
-        path: `project.${proj.slug}.`,
-        label: `project.${proj.slug}.<name>`,
-        category: "project",
-        description: `Project "${proj.slug}" — add variables on the project's Variables panel.`,
-      });
-      continue;
-    }
     for (const v of proj.variables) {
       suggestions.push({
         path: `project.${proj.slug}.${v.name}`,
