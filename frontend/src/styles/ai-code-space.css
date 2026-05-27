@@ -281,20 +281,26 @@
  * ============================================================ */
 .acs-root .ct { display: flex; flex-direction: column; height: 100%; overflow: hidden; background: var(--bg); }
 .acs-root .ct-head { padding: 18px 28px 0; display: flex; flex-direction: column; gap: 14px; border-bottom: 1px solid var(--line); }
-/* Breadcrumb chrome — every page that renders a `.ct-head` shares this row.
+/* Breadcrumb chrome — every page that renders a `.ct-head` (list / project
+   detail / workflows list / etc.) AND every repo-detail page that renders a
+   `.rd-head` share this row. Two class names exist for historical layout
+   reasons (`.ct-` = content shell, `.rd-` = repo-detail shell) but the
+   crumb behaviour is identical, so both selectors share a single rule set
+   below to avoid visual drift on hover/focus/active.
    Three element kinds compose a crumb trail:
      - `a` (or `.crumb-link` for non-anchor click handlers): clickable
-       ancestor segment. Pointer cursor + hover background + focus ring.
+       ancestor segment. Pointer cursor + hover background pill + focus ring.
        Negative margin trick on padding keeps the hover hit area generous
        without shifting the row's text baseline relative to the sibling
-       `.ct-title-row` below.
+       title row below.
      - `.sep`: visual divider ("/"). user-select: none stops drag-to-select
        from grabbing the separator alongside the segment text.
      - `.cur`: the current (non-clickable) leaf segment, slightly bolder
        and ink-coloured so it stands out as "you are here". */
-.acs-root .ct-crumbs { display: flex; align-items: center; gap: 4px; font-size: 12px; color: var(--muted); font-family: inherit; flex-wrap: wrap; }
-.acs-root .ct-crumbs a,
-.acs-root .ct-crumbs .crumb-link {
+.acs-root .ct-crumbs,
+.acs-root .rd-crumbs { display: flex; align-items: center; gap: 4px; font-size: 12px; color: var(--muted); font-family: inherit; flex-wrap: wrap; }
+.acs-root .ct-crumbs a, .acs-root .rd-crumbs a,
+.acs-root .ct-crumbs .crumb-link, .acs-root .rd-crumbs .crumb-link {
   color: var(--muted);
   cursor: pointer;
   border-radius: 4px;
@@ -303,12 +309,14 @@
   text-decoration: none;
   transition: color .12s, background-color .12s;
 }
-.acs-root .ct-crumbs a:hover,
-.acs-root .ct-crumbs .crumb-link:hover { color: var(--ink); background: rgba(0,0,0,.05); }
-.acs-root .ct-crumbs a:focus-visible,
-.acs-root .ct-crumbs .crumb-link:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; color: var(--ink); }
-.acs-root .ct-crumbs .sep { color: var(--muted-2); user-select: none; padding: 0 2px; }
-.acs-root .ct-crumbs .cur { color: var(--ink); font-weight: 500; }
+.acs-root .ct-crumbs a:hover, .acs-root .rd-crumbs a:hover,
+.acs-root .ct-crumbs .crumb-link:hover, .acs-root .rd-crumbs .crumb-link:hover { color: var(--ink); background: rgba(0,0,0,.05); }
+.acs-root .ct-crumbs a:focus-visible, .acs-root .rd-crumbs a:focus-visible,
+.acs-root .ct-crumbs .crumb-link:focus-visible, .acs-root .rd-crumbs .crumb-link:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; color: var(--ink); }
+.acs-root .ct-crumbs .sep,
+.acs-root .rd-crumbs .sep { color: var(--muted-2); user-select: none; padding: 0 2px; }
+.acs-root .ct-crumbs .cur,
+.acs-root .rd-crumbs .cur { color: var(--ink); font-weight: 500; }
 .acs-root .ct-title-row { display: flex; align-items: flex-end; justify-content: space-between; gap: 16px; }
 .acs-root .ct-title { font-size: 24px; font-weight: 600; letter-spacing: -0.02em; line-height: 1.1; color: var(--ink); margin: 0; }
 .acs-root .ct-sub { font-size: 13px; color: var(--muted); margin-top: 4px; max-width: 560px; }
@@ -370,11 +378,9 @@
  * ============================================================ */
 .acs-root .rd { display: flex; flex-direction: column; height: 100%; overflow: hidden; background: var(--bg); }
 .acs-root .rd-head { padding: 14px 28px 0; display: flex; flex-direction: column; gap: 14px; border-bottom: 1px solid var(--line); }
-.acs-root .rd-crumbs { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); font-family: inherit; }
-.acs-root .rd-crumbs a { color: var(--muted); cursor: pointer; }
-.acs-root .rd-crumbs a:hover { color: var(--ink-2); text-decoration: underline; text-underline-offset: 2px; }
-.acs-root .rd-crumbs .sep { color: var(--muted-2); }
-.acs-root .rd-crumbs .cur { color: var(--ink-2); }
+/* .rd-crumbs visual rules live with .ct-crumbs at the top of the file so both shells
+ * (content list pages + repo-detail page) share the same box-pill hover affordance.
+ * Putting them in one place stops the two breadcrumb strips from drifting apart again. */
 .acs-root .rd-title-row { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; padding-bottom: 2px; }
 .acs-root .rd-title-l { display: flex; align-items: center; gap: 14px; min-width: 0; flex: 1; }
 .acs-root .rd-back { appearance: none; border: 1px solid var(--line); background: var(--panel); width: 32px; height: 32px; border-radius: 7px; display: grid; place-items: center; color: var(--muted); cursor: pointer; box-shadow: var(--shadow-1); flex-shrink: 0; }
