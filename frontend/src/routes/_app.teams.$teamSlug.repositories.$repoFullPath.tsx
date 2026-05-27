@@ -45,11 +45,12 @@ function RepoDetailLayoutRoute() {
       repoId={repo.id}
       activeTab={activeTab}
       onTabChange={(tab) => navigate({ to: tabToPath(tab), params: { teamSlug, repoFullPath: encodeURIComponent(fullPath) } })}
-      /* Phase 3.0 — back goes to the team's projects list (the new closest
-         ancestor) instead of the retired team-wide repos list. A future
-         change can route to the parent project's Repositories tab once the
-         repo DTO carries projectId. */
-      onBack={() => navigate({ to: "/teams/$teamSlug/projects", params: { teamSlug } })}
+      /* teamSlug threads through to the header so its breadcrumb can build
+         /teams/{slug}/projects[/id] URLs without coupling the shared component
+         to the route layer. The header reads repo.projectId from useRepository
+         (already in the hook) to know WHICH project to link to — fully generic,
+         no hardcoded "back to repos" jump. */
+      teamSlug={teamSlug}
     >
       <Outlet />
     </RepoDetailHeader>

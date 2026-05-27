@@ -50,6 +50,10 @@ public sealed class RepositoryService : IRepositoryService, IScopedDependency
 
     public async Task<RepositoryDetail?> GetAsync(Guid repositoryId, CancellationToken cancellationToken)
     {
+        // Join with the parent project so the breadcrumb on the repo-detail page
+        // can render Projects / {project.Name} / {repo.Name}. project_id is NOT NULL
+        // (migration 0025), so a missing match means the project row was hard-deleted
+        // out of band — we still surface what we have rather than 404'ing the repo.
         return await _db.Repository
             .AsNoTracking()
             .Where(r => r.Id == repositoryId && r.DeletedDate == null)
@@ -59,6 +63,9 @@ public sealed class RepositoryService : IRepositoryService, IScopedDependency
                 TeamId = r.TeamId,
                 ProviderInstanceId = r.ProviderInstanceId,
                 CredentialId = r.CredentialId,
+                ProjectId = r.ProjectId,
+                ProjectSlug = _db.Project.Where(p => p.Id == r.ProjectId).Select(p => p.Slug).FirstOrDefault() ?? string.Empty,
+                ProjectName = _db.Project.Where(p => p.Id == r.ProjectId).Select(p => p.Name).FirstOrDefault() ?? string.Empty,
                 ExternalId = r.ExternalId,
                 NamespacePath = r.NamespacePath,
                 Name = r.Name,
