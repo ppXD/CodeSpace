@@ -44,6 +44,34 @@ public sealed class RepositoryBindingService : IRepositoryBindingService, IScope
         _logger = logger;
     }
 
+    public async Task<BulkBindResult> BindManyAsync(BindRepositoriesBulkRequest request, CancellationToken cancellationToken)
+    {
+        // All-or-nothing per the interface contract — the TransactionalBehavior pipeline
+        // step around the calling handler owns the rollback on exception. We iterate
+        // BindAsync in declared order so the rollback set is bounded to "everything bound
+        // up to the failing identifier"; a parallel implementation would explode the
+        // rollback surface for no real win since IO-bound bind calls already overlap
+        // inside the underlying provider clients.
+        var items = new List<BulkBindItemResult>(request.ProjectIdentifiers.Count);
+
+        foreach (var identifier in request.ProjectIdentifiers)
+        {
+            var bind = new BindRepositoryRequest
+            {
+                TeamId = request.TeamId,
+                ProviderInstanceId = request.ProviderInstanceId,
+                CredentialId = request.CredentialId,
+                ProjectIdentifier = identifier,
+                ProjectId = request.ProjectId,
+            };
+
+            var repo = await BindAsync(bind, cancellationToken).ConfigureAwait(false);
+            items.Add(new BulkBindItemResult { ProjectIdentifier = identifier, RepositoryId = repo.Id });
+        }
+
+        return new BulkBindResult { Items = items, SuccessCount = items.Count, FailureCount = 0 };
+    }
+
     public async Task<Repository> BindAsync(BindRepositoryRequest request, CancellationToken cancellationToken)
     {
         var ctx = new BindContext { Request = request };
