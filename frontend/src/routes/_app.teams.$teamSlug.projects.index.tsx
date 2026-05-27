@@ -145,9 +145,16 @@ function ProjectsListPage() {
                       </div>
                       <div className="repo-info">
                         <div className="repo-name">{p.name}</div>
+                        {/* slug stays at natural width (flex-item with no flex-grow),
+                            description claims the remaining width via .repo-path-desc
+                            and ellipsis-truncates so the row stays one line tall
+                            regardless of description length. Hover reveals full text. */}
                         <div className="repo-path">
                           <span>{p.slug}</span>
-                          {p.description && <><span>·</span><span>{p.description}</span></>}
+                          {p.description && <>
+                            <span>·</span>
+                            <span className="repo-path-desc" title={p.description}>{p.description}</span>
+                          </>}
                         </div>
                       </div>
                     </div>

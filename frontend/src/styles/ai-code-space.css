@@ -348,9 +348,21 @@
 .acs-root .repo-mark[data-p="github"] { color: #1F1E1D; background: #F5F4EE; }
 .acs-root .repo-mark[data-p="gitlab"] { color: #D97757; background: #FBF1E8; }
 .acs-root .repo-mark[data-p="git"] { color: #5C7CD6; background: #EEF1FB; }
-.acs-root .repo-info { min-width: 0; }
+/* `.repo-info` is the right-hand text column of every repo/project/workflow row.
+ * - flex:1 + min-width:0 bound it to "the cell width minus the mark + gap",
+ *   so a long .repo-path can't push the column wider than the table cell.
+ * - min-width:0 on .repo-path lets its flex children (esp. .repo-path-desc) shrink
+ *   below their natural content width, which is the prerequisite for ellipsis.
+ * Without these two bounds, a long description would wrap to a second line,
+ *   making the row 1 line taller than its siblings AND shifting the mark icon
+ *   visually upward (mark is align-items: center against .repo-cell). */
+.acs-root .repo-info { min-width: 0; flex: 1; }
 .acs-root .repo-name { font-weight: 600; color: var(--ink); font-size: 13.5px; letter-spacing: -0.005em; display: flex; align-items: center; gap: 6px; }
-.acs-root .repo-path { font-family: inherit; font-size: 11.5px; color: var(--muted); margin-top: 1px; display: flex; align-items: center; gap: 6px; }
+.acs-root .repo-path { font-family: inherit; font-size: 11.5px; color: var(--muted); margin-top: 1px; display: flex; align-items: center; gap: 6px; min-width: 0; }
+/* Single-line clamp for the description segment of a .repo-path. Used by the
+ * Projects list (slug · description) and the Workflows list (description). Hover
+ * the row to see the full text via the `title` attribute on the wrapping span. */
+.acs-root .repo-path .repo-path-desc { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .acs-root .repo-vis { display: inline-flex; align-items: center; gap: 3px; color: var(--muted); text-transform: lowercase; }
 
 .acs-root .branch-tag { display: inline-flex; align-items: center; gap: 4px; font-family: inherit; font-size: 11.5px; color: var(--ink-2); background: var(--panel-2); border: 1px solid var(--line); padding: 2px 7px; border-radius: 5px; }
