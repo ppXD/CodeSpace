@@ -11,6 +11,7 @@ import { useConfirm } from "@/components/dialog";
 import { AddRepoModal } from "@/_imported/ai-code-space/add-repo-modal";
 import { ProviderMark } from "@/_imported/ai-code-space/content";
 import { Ic } from "@/_imported/ai-code-space/icons";
+import { VariableTablePanel } from "@/components/workflows/VariableTablePanel";
 import { useQueryClient } from "@tanstack/react-query";
 
 export const Route = createFileRoute("/_app/teams/$teamSlug/projects/$projectId")({
@@ -249,15 +250,15 @@ function ProjectDetailPage() {
 
       {tab === "variables" && (
         <div className="ct-body">
-          <div className="ct-empty">
-            <div className="ct-empty-h">Project variables CRUD lands in a follow-up commit</div>
-            <div className="ct-empty-p">
-              Until then, manage workflow-scope variables from the workflow editor's
-              Variables tab. The resolver already understands{" "}
-              <code>{`{{project.${project.slug}.<name>}}`}</code> — the API + UI
-              for creating those rows is wiring that needs one more pass.
-            </div>
-          </div>
+          <VariableTablePanel
+            scope="Project"
+            projectId={projectId}
+            refPrefix={`project.${project.slug}`}
+            title={`Variables — ${project.name}`}
+            subtitle={`Shared across every workflow that references project.${project.slug}.*. Secrets are AES-256-GCM encrypted and never returned by the API.`}
+            tip={`Reference these from any workflow as {{project.${project.slug}.<name>}}. Plain values get re-resolved from live state at every run (including replays) — projects are shared config namespaces.`}
+            emptyHint="No variables yet. Click + Add variable to create one — String type by default; pick Secret for encrypted values."
+          />
         </div>
       )}
 
