@@ -92,41 +92,58 @@ describe("TriggerRepositoriesSelector", () => {
   });
 
   it("picking a project filters the repo dropdown to that project's repos", () => {
-    const onChange = vi.fn();
+    // Two cascade pathways to verify:
+    //   (1) Operator picks the project EXPLICITLY → repo dropdown filters immediately.
+    //   (2) Operator opens an existing config with a picked repo → project is INFERRED
+    //       from the repo, dropdown still filtered correctly.
     const value = { repositories: [{ repositoryId: "" }] };
-
-    render(<TriggerRepositoriesSelector value={value} onChange={onChange} />);
+    render(<TriggerRepositoriesSelector value={value} onChange={vi.fn()} />);
 
     const row = screen.getByTestId("trigger-repositories-row");
-    const projectSelect = within(row).getByLabelText("Project");
-    const repoSelect = within(row).getByLabelText("Repository") as HTMLSelectElement;
+    const projectSelect = within(row).getByLabelText("Project") as HTMLSelectElement;
+    let repoSelect = within(row).getByLabelText("Repository") as HTMLSelectElement;
 
     // Pre-cascade: every repo across all projects is selectable.
     expect(Array.from(repoSelect.options).map((o) => o.value).filter(Boolean)).toEqual(["repo-1", "repo-2", "repo-3"]);
 
-    // Pick the Alpha project. The row's inferred project follows the picked repo,
-    // not the project dropdown directly, so we verify the onChange firing pattern
-    // separately. For the filter assertion we re-render with the row already
-    // pointing at an Alpha repo and check the repo dropdown only lists Alpha repos.
+    // (1) Explicit pick — Alpha contains repo-1 + repo-2, NOT repo-3.
     fireEvent.change(projectSelect, { target: { value: "proj-alpha" } });
 
-    // The picker uses an inferred project from the picked repo; the project select's
-    // value resets to "" since the row's repo just got cleared. Emit went out.
-    expect(onChange).toHaveBeenCalledTimes(1);
+    repoSelect = within(row).getByLabelText("Repository") as HTMLSelectElement;
+    const afterPickValues = Array.from(repoSelect.options).map((o) => o.value).filter(Boolean);
+    expect(afterPickValues).toEqual(["repo-1", "repo-2"]);
+    expect(afterPickValues).not.toContain("repo-3");
+    // Project select retains the Alpha pick so the operator can SEE which filter is
+    // active — without this they'd be looking at "All projects" while the dropdown
+    // was actually filtered, which is confusing UX.
+    expect(projectSelect.value).toBe("proj-alpha");
 
-    // Verify the cascade by rendering with a row pre-pointed at a known-project repo.
-    const onChange2 = vi.fn();
-    render(
-      <TriggerRepositoriesSelector
-        value={{ repositories: [{ repositoryId: "repo-1" }] }}
-        onChange={onChange2}
-      />,
-    );
+    // (2) Inferred from existing repo — re-render with repo-1 pre-picked, project
+    // should default to Alpha and only Alpha repos should be visible.
+    render(<TriggerRepositoriesSelector value={{ repositories: [{ repositoryId: "repo-1" }] }} onChange={vi.fn()} />);
     const rows = screen.getAllByTestId("trigger-repositories-row");
-    const secondRowRepoSelect = within(rows[rows.length - 1]!).getByLabelText("Repository") as HTMLSelectElement;
-    const visibleValues = Array.from(secondRowRepoSelect.options).map((o) => o.value).filter(Boolean);
-    expect(visibleValues).toEqual(["repo-1", "repo-2"]);
-    expect(visibleValues).not.toContain("repo-3");
+    const inferredRow = rows[rows.length - 1]!;
+    const inferredRepoValues = Array.from(
+      (within(inferredRow).getByLabelText("Repository") as HTMLSelectElement).options,
+    ).map((o) => o.value).filter(Boolean);
+    expect(inferredRepoValues).toEqual(["repo-1", "repo-2"]);
+  });
+
+  it("picking a project clears the row's repo so a stale cross-project repo can't persist", () => {
+    // Edge case: row currently points at a Beta repo; operator picks Alpha. The
+    // existing repo doesn't belong to Alpha, so we MUST clear it — otherwise the
+    // saved config would carry a repo that the picker visually hides (and the
+    // operator can't even see what they just configured).
+    const onChange = vi.fn();
+    const value = { repositories: [{ repositoryId: "repo-3" }] };   // repo-3 is in Beta
+    render(<TriggerRepositoriesSelector value={value} onChange={onChange} />);
+
+    const row = screen.getByTestId("trigger-repositories-row");
+    const projectSelect = within(row).getByLabelText("Project") as HTMLSelectElement;
+    fireEvent.change(projectSelect, { target: { value: "proj-alpha" } });
+
+    expect(onChange).toHaveBeenCalledTimes(1);
+    expect(onChange.mock.calls[0]![0]).toEqual({ repositories: [{ repositoryId: "" }] });
   });
 
   it("typing a label and pressing Enter adds a chip and emits onChange", () => {

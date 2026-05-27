@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 
 import { Ic } from "@/_imported/ai-code-space/icons";
 import { useProjects } from "@/hooks/use-projects";
@@ -44,6 +44,22 @@ export function TriggerRepositoriesSelector({ value, onChange }: TriggerReposito
   const projectRows = useMemo(() => projects.data ?? [], [projects.data]);
   const repoRows = useMemo(() => repositories.data ?? [], [repositories.data]);
 
+  // Per-row "draft" project picks. Stored in component state — NOT in the saved
+  // shape — because the row's wire format is `{ repositoryId, labels? }` and the
+  // project is purely a UI narrowing aid. Keyed by row index; on Add the new index
+  // is implicitly missing (the row defaults to "All projects" until the operator
+  // picks one). On Remove we shift the indices via filter+map to preserve picks
+  // for rows that survived. Inferring a default from the row's existing repo
+  // (when present) keeps a re-opened workflow showing the right project filter.
+  const [draftProjectByIndex, setDraftProjectByIndex] = useState<Map<number, string>>(new Map());
+
+  const projectForRow = (idx: number, entry: TriggerRepoEntry): string => {
+    const draft = draftProjectByIndex.get(idx);
+    if (draft !== undefined) return draft;
+    if (!entry.repositoryId) return "";
+    return repoRows.find((r) => r.id === entry.repositoryId)?.projects?.[0]?.id ?? "";
+  };
+
   // Emit the raw shape (including in-progress empty-repositoryId rows) so the picker
   // can survive a re-render with the row the user just added. The matcher tolerates
   // empty entries (PrTriggerMatcherFilter.EntryMatches skips them), and a parent that
@@ -51,11 +67,36 @@ export function TriggerRepositoriesSelector({ value, onChange }: TriggerReposito
   const emit = (next: TriggerRepoEntry[]) => onChange({ repositories: next });
 
   const addRow = () => emit([...shape.repositories, { repositoryId: "" }]);
-  const removeRow = (idx: number) => emit(shape.repositories.filter((_, i) => i !== idx));
+
+  const removeRow = (idx: number) => {
+    // Shift draft project indices: drop the removed entry, then re-key everything
+    // above it down by one so a surviving row's UI state follows it.
+    setDraftProjectByIndex((prev) => {
+      const next = new Map<number, string>();
+      for (const [k, v] of prev) {
+        if (k < idx) next.set(k, v);
+        else if (k > idx) next.set(k - 1, v);
+      }
+      return next;
+    });
+    emit(shape.repositories.filter((_, i) => i !== idx));
+  };
 
   const updateRow = (idx: number, patch: Partial<TriggerRepoEntry>) => {
     const merged = shape.repositories.map((entry, i) => (i === idx ? { ...entry, ...patch } : entry));
     emit(merged);
+  };
+
+  const pickProjectForRow = (idx: number, projectId: string) => {
+    setDraftProjectByIndex((prev) => {
+      const next = new Map(prev);
+      if (projectId === "") next.delete(idx);
+      else next.set(idx, projectId);
+      return next;
+    });
+    // Clearing the row's repo whenever the project changes prevents a stale repo
+    // from a different project lingering in the saved shape.
+    updateRow(idx, { repositoryId: "" });
   };
 
   return (
@@ -70,9 +111,10 @@ export function TriggerRepositoriesSelector({ value, onChange }: TriggerReposito
         <TriggerRepoRow
           key={idx}
           entry={entry}
+          projectId={projectForRow(idx, entry)}
           projects={projectRows}
           repositories={repoRows}
-          onPickProject={(projectId) => updateRow(idx, { repositoryId: "", labels: filterLabelsForProjectChange(entry.labels) })}
+          onPickProject={(projectId) => pickProjectForRow(idx, projectId)}
           onPickRepo={(repositoryId) => updateRow(idx, { repositoryId })}
           onChangeLabels={(labels) => updateRow(idx, { labels })}
           onRemove={() => removeRow(idx)}
@@ -87,17 +129,11 @@ export function TriggerRepositoriesSelector({ value, onChange }: TriggerReposito
   );
 }
 
-/**
- * Picking a new project clears the repo on the row — the previous repo almost
- * certainly belongs to the old project. Labels carry over unchanged because the
- * operator's intent ("PRs labeled X") is provider-agnostic.
- */
-function filterLabelsForProjectChange(labels: string[] | undefined): string[] | undefined {
-  return labels;
-}
-
 interface TriggerRepoRowProps {
   entry: TriggerRepoEntry;
+  /** Picked project for THIS row — drives the repo dropdown's filter. Lives in the
+   *  picker's component state, not the saved shape. Empty = "All projects". */
+  projectId: string;
   projects: Array<{ id: string; name: string; slug: string }>;
   repositories: Array<{ id: string; fullPath: string; projects?: Array<{ id: string }> }>;
   onPickProject: (projectId: string) => void;
@@ -108,6 +144,7 @@ interface TriggerRepoRowProps {
 
 function TriggerRepoRow({
   entry,
+  projectId,
   projects,
   repositories,
   onPickProject,
@@ -115,17 +152,6 @@ function TriggerRepoRow({
   onChangeLabels,
   onRemove,
 }: TriggerRepoRowProps) {
-  // Infer the row's project from the picked repo so a saved config (which only
-  // stores repositoryId) round-trips correctly through the cascade picker. If no
-  // repo is picked yet, the project dropdown sits at "All projects".
-  const inferredProjectId = useMemo(() => {
-    if (!entry.repositoryId) return "";
-    const repo = repositories.find((r) => r.id === entry.repositoryId);
-    return repo?.projects?.[0]?.id ?? "";
-  }, [entry.repositoryId, repositories]);
-
-  const projectId = inferredProjectId;
-
   const visibleRepos = useMemo(() => {
     if (!projectId) return repositories;
     return repositories.filter((r) => (r.projects ?? []).some((p) => p.id === projectId));
