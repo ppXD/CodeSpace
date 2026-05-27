@@ -257,4 +257,110 @@ public class GitLabEventNormalizerTests
 
         result.Body.ShouldBeNull();
     }
+
+    [Fact]
+    public void Normalize_merge_request_open_extracts_labels()
+    {
+        // GitLab's "Merge Request Hook" payload places the authoritative current label set
+        // at the top-level labels[] array. Each entry uses "title" (not "name" like GitHub)
+        // — verify the GitLab-side extractor reads the right field.
+        var headers = new Dictionary<string, string> { ["X-Gitlab-Event"] = "Merge Request Hook" };
+        var body = """
+            {
+              "object_kind": "merge_request",
+              "user": { "id": 1, "username": "alice" },
+              "labels": [
+                { "id": 10, "title": "bug", "color": "#f29513" },
+                { "id": 11, "title": "needs-review", "color": "#5319e7" }
+              ],
+              "object_attributes": {
+                "id": 99, "iid": 5, "title": "MR Title", "url": "x",
+                "source_branch": "f", "target_branch": "main",
+                "action": "open"
+              }
+            }
+            """;
+
+        var result = _normalizer.Normalize(_repositoryId, body, headers).ShouldBeOfType<PullRequestOpenedEvent>();
+
+        result.Labels.ShouldBe(new[] { "bug", "needs-review" });
+    }
+
+    [Fact]
+    public void Normalize_merge_request_open_returns_empty_labels_when_field_missing()
+    {
+        // Older webhook bodies / minimal fixtures may omit the labels[] array entirely.
+        // The extractor MUST return an empty list — never throw — so the matcher's
+        // empty-config path continues to fire.
+        var headers = new Dictionary<string, string> { ["X-Gitlab-Event"] = "Merge Request Hook" };
+        var body = """
+            {
+              "object_kind": "merge_request",
+              "user": { "id": 1, "username": "u" },
+              "object_attributes": {
+                "id": 99, "iid": 5, "title": "x", "url": "x",
+                "source_branch": "f", "target_branch": "main",
+                "action": "open"
+              }
+            }
+            """;
+
+        var result = _normalizer.Normalize(_repositoryId, body, headers).ShouldBeOfType<PullRequestOpenedEvent>();
+
+        result.Labels.ShouldBeEmpty();
+    }
+
+    [Fact]
+    public void Normalize_merge_request_update_extracts_labels()
+    {
+        var headers = new Dictionary<string, string> { ["X-Gitlab-Event"] = "Merge Request Hook" };
+        var body = """
+            {
+              "object_kind": "merge_request",
+              "user": { "id": 1, "username": "u" },
+              "labels": [ { "id": 10, "title": "wip" } ],
+              "object_attributes": {
+                "id": 99, "iid": 5, "title": "x", "url": "x",
+                "source_branch": "f", "target_branch": "main",
+                "action": "update",
+                "oldrev": "old-sha",
+                "last_commit": { "id": "new-sha" }
+              }
+            }
+            """;
+
+        var result = _normalizer.Normalize(_repositoryId, body, headers).ShouldBeOfType<PullRequestSynchronizedEvent>();
+
+        result.Labels.ShouldBe(new[] { "wip" });
+    }
+
+    [Fact]
+    public void Normalize_merge_request_labels_skips_entries_with_empty_or_null_title()
+    {
+        // Same defensive shape as the GitHub side — malformed entries skipped, never raised,
+        // never producing empty-string labels that would silently weaken matcher filters.
+        var headers = new Dictionary<string, string> { ["X-Gitlab-Event"] = "Merge Request Hook" };
+        var body = """
+            {
+              "object_kind": "merge_request",
+              "user": { "id": 1, "username": "u" },
+              "labels": [
+                { "id": 10, "title": "ok" },
+                { "id": 11, "title": null },
+                { "id": 12, "title": "" },
+                { "id": 13 },
+                "string-not-object"
+              ],
+              "object_attributes": {
+                "id": 99, "iid": 5, "title": "x", "url": "x",
+                "source_branch": "f", "target_branch": "main",
+                "action": "open"
+              }
+            }
+            """;
+
+        var result = _normalizer.Normalize(_repositoryId, body, headers).ShouldBeOfType<PullRequestOpenedEvent>();
+
+        result.Labels.ShouldBe(new[] { "ok" });
+    }
 }

@@ -46,7 +46,8 @@ public sealed class GitHubPullRequestEventSubscription : IProviderEventSubscript
             TargetBranch = pr.GetProperty("base").GetProperty("ref").GetString()!,
             AuthorExternalId = user.GetProperty("id").GetRawText(),
             AuthorName = user.GetProperty("login").GetString()!,
-            WebUrl = pr.GetProperty("html_url").GetString()!
+            WebUrl = pr.GetProperty("html_url").GetString()!,
+            Labels = ExtractLabels(pr)
         };
     }
 
@@ -58,8 +59,36 @@ public sealed class GitHubPullRequestEventSubscription : IProviderEventSubscript
         ExternalPullRequestId = pr.GetProperty("id").GetRawText(),
         Number = pr.GetProperty("number").GetInt32(),
         PreviousHeadSha = root.GetProperty("before").GetString()!,
-        NewHeadSha = root.GetProperty("after").GetString()!
+        NewHeadSha = root.GetProperty("after").GetString()!,
+        Labels = ExtractLabels(pr)
     };
+
+    /// <summary>
+    /// GitHub PR webhooks include the full label state at <c>pull_request.labels[]</c> on
+    /// every action variant (opened / synchronize / labeled / unlabeled / closed). Each entry
+    /// is <c>{ id, node_id, name, color, default, description }</c>. We surface names only;
+    /// the matcher matches on names and downstream nodes reference <c>{{trigger.labels}}</c>
+    /// as a string array. Skips entries whose <c>name</c> is null/empty so the array
+    /// downstream stays clean.
+    /// </summary>
+    private static IReadOnlyList<string> ExtractLabels(JsonElement pr)
+    {
+        if (!pr.TryGetProperty("labels", out var labels) || labels.ValueKind != JsonValueKind.Array) return Array.Empty<string>();
+
+        var names = new List<string>(labels.GetArrayLength());
+
+        foreach (var label in labels.EnumerateArray())
+        {
+            if (label.ValueKind != JsonValueKind.Object) continue;
+            if (!label.TryGetProperty("name", out var nameEl)) continue;
+            if (nameEl.ValueKind != JsonValueKind.String) continue;
+
+            var name = nameEl.GetString();
+            if (!string.IsNullOrEmpty(name)) names.Add(name);
+        }
+
+        return names;
+    }
 
     private static PullRequestMergedEvent BuildMerged(Guid repositoryId, string deliveryId, DateTimeOffset now, JsonElement pr, JsonElement root)
     {

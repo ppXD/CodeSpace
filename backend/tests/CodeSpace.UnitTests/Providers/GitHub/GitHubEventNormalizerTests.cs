@@ -279,4 +279,105 @@ public class GitHubEventNormalizerTests
 
         _normalizer.Normalize(_repositoryId, body, headers).ShouldBeNull();
     }
+
+    [Fact]
+    public void Normalize_pull_request_opened_extracts_labels()
+    {
+        var headers = new Dictionary<string, string> { ["X-GitHub-Event"] = "pull_request" };
+        var body = """
+            {
+              "action": "opened",
+              "pull_request": {
+                "id": 1, "number": 1, "title": "x", "body": null,
+                "head": { "ref": "f", "sha": "s" }, "base": { "ref": "main" },
+                "user": { "id": 1, "login": "u" }, "html_url": "x",
+                "labels": [
+                  { "id": 10, "name": "bug", "color": "f29513" },
+                  { "id": 11, "name": "needs-review", "color": "5319e7" }
+                ]
+              }
+            }
+            """;
+
+        var result = _normalizer.Normalize(_repositoryId, body, headers).ShouldBeOfType<PullRequestOpenedEvent>();
+
+        result.Labels.ShouldBe(new[] { "bug", "needs-review" });
+    }
+
+    [Fact]
+    public void Normalize_pull_request_opened_returns_empty_labels_when_field_missing()
+    {
+        // Older GitHub webhook payloads — and any tooling that synthesises minimal fixtures —
+        // can ship the pull_request without a labels[] array at all. Surface an empty list,
+        // never throw: the matcher's empty-config path must keep working.
+        var headers = new Dictionary<string, string> { ["X-GitHub-Event"] = "pull_request" };
+        var body = """
+            {
+              "action": "opened",
+              "pull_request": {
+                "id": 1, "number": 1, "title": "x", "body": null,
+                "head": { "ref": "f", "sha": "s" }, "base": { "ref": "main" },
+                "user": { "id": 1, "login": "u" }, "html_url": "x"
+              }
+            }
+            """;
+
+        var result = _normalizer.Normalize(_repositoryId, body, headers).ShouldBeOfType<PullRequestOpenedEvent>();
+
+        result.Labels.ShouldBeEmpty();
+    }
+
+    [Fact]
+    public void Normalize_pull_request_synchronize_extracts_labels()
+    {
+        var headers = new Dictionary<string, string> { ["X-GitHub-Event"] = "pull_request" };
+        var body = """
+            {
+              "action": "synchronize",
+              "before": "old-sha",
+              "after": "new-sha",
+              "pull_request": {
+                "id": 1, "number": 42,
+                "head": { "ref": "f", "sha": "new-sha" }, "base": { "ref": "main" },
+                "user": { "id": 1, "login": "u" }, "title": "x", "html_url": "x",
+                "labels": [ { "id": 10, "name": "wip" } ]
+              }
+            }
+            """;
+
+        var result = _normalizer.Normalize(_repositoryId, body, headers).ShouldBeOfType<PullRequestSynchronizedEvent>();
+
+        result.Labels.ShouldBe(new[] { "wip" });
+    }
+
+    [Fact]
+    public void Normalize_pull_request_labels_skips_entries_with_empty_or_null_name()
+    {
+        // Malformed entries (string-only, null name, missing name) MUST be skipped instead of
+        // crashing or producing empty strings — downstream matchers compare label names
+        // verbatim and an empty entry would let through every config that doesn't filter on
+        // labels (false-positive of "any label matches").
+        var headers = new Dictionary<string, string> { ["X-GitHub-Event"] = "pull_request" };
+        var body = """
+            {
+              "action": "opened",
+              "pull_request": {
+                "id": 1, "number": 1, "title": "x", "body": null,
+                "head": { "ref": "f", "sha": "s" }, "base": { "ref": "main" },
+                "user": { "id": 1, "login": "u" }, "html_url": "x",
+                "labels": [
+                  { "id": 10, "name": "ok" },
+                  { "id": 11, "name": null },
+                  { "id": 12, "name": "" },
+                  { "id": 13 },
+                  "string-not-object"
+                ]
+              }
+            }
+            """;
+
+        var result = _normalizer.Normalize(_repositoryId, body, headers).ShouldBeOfType<PullRequestOpenedEvent>();
+
+        result.Labels.ShouldBe(new[] { "ok" });
+    }
 }
