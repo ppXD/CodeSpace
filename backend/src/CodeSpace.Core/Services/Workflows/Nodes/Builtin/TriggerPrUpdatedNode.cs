@@ -21,7 +21,8 @@ public sealed class TriggerPrUpdatedNode : INodeRuntime
                 "repositories": {
                   "type": "array",
                   "x-selector": "trigger.repositories",
-                  "description": "Repositories this trigger fires on. Each entry binds a repo to its own label filter. Leave empty to match nothing; omit the key entirely to match every repo bound to this team.",
+                  "default": [],
+                  "description": "Repositories this trigger fires on. Each entry binds a repo to its own label filter. Use the 'Match every repository' checkbox above the list to fire on all repos in this team instead.",
                   "items": {
                     "type": "object",
                     "properties": {

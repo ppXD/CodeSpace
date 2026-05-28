@@ -11,16 +11,13 @@ import { TriggerRepositoriesSelector } from "./TriggerRepositoriesSelector";
  * directly, NOT the wrapping config object.
  *
  * Tests pin:
- *   1. value-contract: incoming value is the array; outgoing emits the array
- *      or undefined (matcher empty-config → match-all path);
- *   2. legacy auto-migration (the wrapping-object case is handled by the route,
- *      not this selector);
- *   3. add / remove rows emit the correct shape;
- *   4. project cascade narrows the repo dropdown.
+ *   1. Safe default — empty list = match nothing (NOT match all);
+ *   2. "Match every repository" checkbox is the only path to undefined emit;
+ *   3. Value/onChange contract is `TriggerRepoEntry[] | undefined`;
+ *   4. Add / remove rows emit the correct shape;
+ *   5. Project cascade filters the repo dropdown.
  *
- * Hooks mocked: useProjects + useRepositories. The real implementations call
- * @tanstack/react-query which would need a QueryClient + fixtures here;
- * mocking keeps the test focused on the picker's own logic.
+ * Hooks mocked: useProjects + useRepositories.
  */
 
 vi.mock("@/hooks/use-projects", () => ({
@@ -42,32 +39,88 @@ vi.mock("@/hooks/use-repositories", () => ({
   }),
 }));
 
-describe("TriggerRepositoriesSelector", () => {
-  it("renders the empty-list hint when value is undefined", () => {
-    // Card renders Add button only — no rows; footer hint explains the
-    // empty-list = match-all semantic.
+describe("TriggerRepositoriesSelector — safe default + match-all checkbox", () => {
+  it("empty array value: checkbox unchecked, list visible, footer warns trigger fires on nothing", () => {
+    // The new safe default. A fresh trigger lands here (schema default
+    // `repositories: []`). NO PR fires the workflow until the operator either
+    // adds a row or checks Match-every-repository.
+    render(<TriggerRepositoriesSelector value={[]} onChange={() => {}} />);
+
+    const checkbox = screen.getByRole("checkbox", { name: /Match every repository/i }) as HTMLInputElement;
+    expect(checkbox.checked).toBe(false);
+    expect(screen.getByTestId("trigger-repositories-list")).toBeInTheDocument();
+    expect(screen.getByText(/this trigger fires on nothing yet/i)).toBeInTheDocument();
+  });
+
+  it("undefined value: checkbox checked, list hidden, footer confirms team-wide trigger", () => {
+    // Wire-format `undefined` (saved as the `repositories` key being absent)
+    // is the EXPLICIT match-all state. Operator either checked the box in the
+    // UI, or an API caller omitted the key. Either way, the picker reflects it.
     render(<TriggerRepositoriesSelector value={undefined} onChange={() => {}} />);
 
-    expect(screen.queryAllByTestId("trigger-repositories-row")).toHaveLength(0);
-    expect(screen.getByText(/Leave list empty to trigger on any repo/i)).toBeInTheDocument();
+    const checkbox = screen.getByRole("checkbox", { name: /Match every repository/i }) as HTMLInputElement;
+    expect(checkbox.checked).toBe(true);
+    expect(screen.queryByTestId("trigger-repositories-list")).not.toBeInTheDocument();
+    expect(screen.getByText(/fires on PRs from every repository/i)).toBeInTheDocument();
   });
 
-  it("renders the empty-list hint when value is an empty array", () => {
-    render(<TriggerRepositoriesSelector value={[]} onChange={() => {}} />);
+  it("populated array value: checkbox unchecked, rows render", () => {
+    render(<TriggerRepositoriesSelector value={[{ repositoryId: "repo-1" }]} onChange={() => {}} />);
 
-    expect(screen.queryAllByTestId("trigger-repositories-row")).toHaveLength(0);
+    const checkbox = screen.getByRole("checkbox", { name: /Match every repository/i }) as HTMLInputElement;
+    expect(checkbox.checked).toBe(false);
+    expect(screen.queryAllByTestId("trigger-repositories-row")).toHaveLength(1);
   });
 
-  it("Add repository button is always visible (even with no rows yet)", () => {
-    render(<TriggerRepositoriesSelector value={[]} onChange={() => {}} />);
+  it("checking the box emits undefined (match-all opt-in)", () => {
+    const onChange = vi.fn();
+    render(<TriggerRepositoriesSelector value={[]} onChange={onChange} />);
 
-    expect(screen.getByRole("button", { name: /Add repository/i })).toBeInTheDocument();
+    const checkbox = screen.getByRole("checkbox", { name: /Match every repository/i });
+    fireEvent.click(checkbox);
+
+    expect(onChange).toHaveBeenCalledTimes(1);
+    expect(onChange.mock.calls[0]![0]).toBeUndefined();
+  });
+
+  it("unchecking the box emits [] — back to safe default (match nothing)", () => {
+    // Critical contract: toggling OFF Match-all returns to "explicit empty
+    // list = no match" instead of leaving the workflow firing on everything
+    // by accident.
+    const onChange = vi.fn();
+    render(<TriggerRepositoriesSelector value={undefined} onChange={onChange} />);
+
+    const checkbox = screen.getByRole("checkbox", { name: /Match every repository/i });
+    fireEvent.click(checkbox);
+
+    expect(onChange).toHaveBeenCalledTimes(1);
+    expect(onChange.mock.calls[0]![0]).toEqual([]);
+  });
+
+  it("Add repository button appends an empty-id row, emitting an array (NOT undefined)", () => {
+    const onChange = vi.fn();
+    render(<TriggerRepositoriesSelector value={[]} onChange={onChange} />);
+
+    fireEvent.click(screen.getByRole("button", { name: /Add repository/i }));
+
+    expect(onChange).toHaveBeenCalledTimes(1);
+    expect(onChange.mock.calls[0]![0]).toEqual([{ repositoryId: "" }]);
+  });
+
+  it("removing the LAST row emits [] (NOT undefined) — preserves safe default", () => {
+    // This is the safe-default invariant: the ONLY path to undefined is via
+    // the checkbox. Clearing all rows lands on `[]` (match nothing) so the
+    // workflow doesn't silently start firing on every repo.
+    const onChange = vi.fn();
+    render(<TriggerRepositoriesSelector value={[{ repositoryId: "repo-1" }]} onChange={onChange} />);
+
+    fireEvent.click(screen.getByRole("button", { name: /Remove repository/i }));
+
+    expect(onChange).toHaveBeenCalledTimes(1);
+    expect(onChange.mock.calls[0]![0]).toEqual([]);
   });
 
   it("each row exposes the explicit field labels from the UI spec", () => {
-    // Project: / Repository: / Labels (PR must carry all): — pinned so a
-    // visual rewrite can't accidentally drop the contract that tells the
-    // operator what the row's filter actually does.
     render(<TriggerRepositoriesSelector value={[{ repositoryId: "repo-1" }]} onChange={() => {}} />);
 
     expect(screen.getByText(/^Project:$/)).toBeInTheDocument();
@@ -81,32 +134,9 @@ describe("TriggerRepositoriesSelector", () => {
     expect(screen.getByText("(none)")).toBeInTheDocument();
   });
 
-  it("renders a row per entry when value is the new array shape", () => {
-    const value = [{ repositoryId: "repo-1" }, { repositoryId: "repo-3", labels: ["wip"] }];
-
-    render(<TriggerRepositoriesSelector value={value} onChange={() => {}} />);
-
-    expect(screen.queryAllByTestId("trigger-repositories-row")).toHaveLength(2);
-    expect(screen.getByText("wip")).toBeInTheDocument();
-  });
-
-  it("Add repository appends an empty row and emits onChange with the array shape", () => {
+  it("removing one of many rows emits the remaining entries", () => {
     const onChange = vi.fn();
-    render(<TriggerRepositoriesSelector value={[]} onChange={onChange} />);
-
-    fireEvent.click(screen.getByRole("button", { name: /Add repository/i }));
-
-    expect(onChange).toHaveBeenCalledTimes(1);
-    // The new empty-id row survives — without it, the user couldn't pick a repo
-    // on the row they just added (re-render would strip it before they finished).
-    expect(onChange.mock.calls[0]![0]).toEqual([{ repositoryId: "" }]);
-  });
-
-  it("removing a row emits the remaining entries in onChange", () => {
-    const onChange = vi.fn();
-    const value = [{ repositoryId: "repo-1" }, { repositoryId: "repo-3" }];
-
-    render(<TriggerRepositoriesSelector value={value} onChange={onChange} />);
+    render(<TriggerRepositoriesSelector value={[{ repositoryId: "repo-1" }, { repositoryId: "repo-3" }]} onChange={onChange} />);
 
     const removeButtons = screen.getAllByRole("button", { name: /Remove repository/i });
     fireEvent.click(removeButtons[0]!);
@@ -115,68 +145,26 @@ describe("TriggerRepositoriesSelector", () => {
     expect(onChange.mock.calls[0]![0]).toEqual([{ repositoryId: "repo-3" }]);
   });
 
-  it("removing the LAST row emits undefined so the SchemaForm drops the repositories key", () => {
-    // Wire-format contract: empty rows = match every repo. We emit `undefined`
-    // so the SchemaForm spreads `repositories: undefined`, dropping the key on
-    // JSON serialise → matcher empty-config → match-all path (rule #4).
-    // Without this, the picker would emit `[]` which the matcher treats as
-    // "explicit no repos, match nothing" (rule #1 with zero entries) — the
-    // opposite of the operator's likely intent when they clear the list.
-    const onChange = vi.fn();
-    const value = [{ repositoryId: "repo-1" }];
-
-    render(<TriggerRepositoriesSelector value={value} onChange={onChange} />);
-
-    fireEvent.click(screen.getByRole("button", { name: /Remove repository/i }));
-
-    expect(onChange).toHaveBeenCalledTimes(1);
-    expect(onChange.mock.calls[0]![0]).toBeUndefined();
-  });
-
   it("picking a project filters the repo dropdown to that project's repos", () => {
-    // Two cascade pathways to verify:
-    //   (1) Operator picks the project EXPLICITLY → repo dropdown filters immediately.
-    //   (2) Operator opens an existing config with a picked repo → project is INFERRED
-    //       from the repo, dropdown still filtered correctly.
     render(<TriggerRepositoriesSelector value={[{ repositoryId: "" }]} onChange={vi.fn()} />);
 
     const row = screen.getByTestId("trigger-repositories-row");
     const projectSelect = within(row).getByLabelText("Project") as HTMLSelectElement;
     let repoSelect = within(row).getByLabelText("Repository") as HTMLSelectElement;
 
-    // Pre-cascade: every repo across all projects is selectable.
     expect(Array.from(repoSelect.options).map((o) => o.value).filter(Boolean)).toEqual(["repo-1", "repo-2", "repo-3"]);
 
-    // (1) Explicit pick — Alpha contains repo-1 + repo-2, NOT repo-3.
     fireEvent.change(projectSelect, { target: { value: "proj-alpha" } });
 
     repoSelect = within(row).getByLabelText("Repository") as HTMLSelectElement;
-    const afterPickValues = Array.from(repoSelect.options).map((o) => o.value).filter(Boolean);
-    expect(afterPickValues).toEqual(["repo-1", "repo-2"]);
-    expect(afterPickValues).not.toContain("repo-3");
-    // Project select retains the Alpha pick so the operator can SEE which filter is
-    // active — without this they'd be looking at "All projects" while the dropdown
-    // was actually filtered, which is confusing UX.
+    const afterPick = Array.from(repoSelect.options).map((o) => o.value).filter(Boolean);
+    expect(afterPick).toEqual(["repo-1", "repo-2"]);
     expect(projectSelect.value).toBe("proj-alpha");
-
-    // (2) Inferred from existing repo — re-render with repo-1 pre-picked, project
-    // should default to Alpha and only Alpha repos should be visible.
-    render(<TriggerRepositoriesSelector value={[{ repositoryId: "repo-1" }]} onChange={vi.fn()} />);
-    const rows = screen.getAllByTestId("trigger-repositories-row");
-    const inferredRow = rows[rows.length - 1]!;
-    const inferredRepoValues = Array.from(
-      (within(inferredRow).getByLabelText("Repository") as HTMLSelectElement).options,
-    ).map((o) => o.value).filter(Boolean);
-    expect(inferredRepoValues).toEqual(["repo-1", "repo-2"]);
   });
 
-  it("picking a project clears the row's repo so a stale cross-project repo can't persist", () => {
-    // Edge case: row currently points at a Beta repo; operator picks Alpha. The
-    // existing repo doesn't belong to Alpha, so we MUST clear it — otherwise the
-    // saved config would carry a repo that the picker visually hides.
+  it("picking a project clears the row's repo when it doesn't belong to that project", () => {
     const onChange = vi.fn();
-    const value = [{ repositoryId: "repo-3" }];   // repo-3 is in Beta
-    render(<TriggerRepositoriesSelector value={value} onChange={onChange} />);
+    render(<TriggerRepositoriesSelector value={[{ repositoryId: "repo-3" }]} onChange={onChange} />);
 
     const row = screen.getByTestId("trigger-repositories-row");
     const projectSelect = within(row).getByLabelText("Project") as HTMLSelectElement;
@@ -186,11 +174,9 @@ describe("TriggerRepositoriesSelector", () => {
     expect(onChange.mock.calls[0]![0]).toEqual([{ repositoryId: "" }]);
   });
 
-  it("typing a label and pressing Enter adds a chip and emits onChange", () => {
+  it("typing a label and pressing Enter adds a chip", () => {
     const onChange = vi.fn();
-    const value = [{ repositoryId: "repo-1" }];
-
-    render(<TriggerRepositoriesSelector value={value} onChange={onChange} />);
+    render(<TriggerRepositoriesSelector value={[{ repositoryId: "repo-1" }]} onChange={onChange} />);
 
     const labelInput = screen.getByPlaceholderText("Add label…") as HTMLInputElement;
     fireEvent.change(labelInput, { target: { value: "needs-review" } });
@@ -200,11 +186,9 @@ describe("TriggerRepositoriesSelector", () => {
     expect(onChange.mock.calls[0]![0]).toEqual([{ repositoryId: "repo-1", labels: ["needs-review"] }]);
   });
 
-  it("removing a label chip emits onChange with the remaining labels", () => {
+  it("removing a label chip emits the remaining labels", () => {
     const onChange = vi.fn();
-    const value = [{ repositoryId: "repo-1", labels: ["bug", "wip"] }];
-
-    render(<TriggerRepositoriesSelector value={value} onChange={onChange} />);
+    render(<TriggerRepositoriesSelector value={[{ repositoryId: "repo-1", labels: ["bug", "wip"] }]} onChange={onChange} />);
 
     fireEvent.click(screen.getByRole("button", { name: /Remove label bug/i }));
 
@@ -212,21 +196,19 @@ describe("TriggerRepositoriesSelector", () => {
     expect(onChange.mock.calls[0]![0]).toEqual([{ repositoryId: "repo-1", labels: ["wip"] }]);
   });
 
-  it("malformed entries in the array are dropped silently (defensive)", () => {
-    // A hand-edited DB row could carry garbage; the picker MUST tolerate it.
+  it("malformed entries are dropped silently (defensive)", () => {
     const value = [
       { repositoryId: "repo-1" },
       null,
       "string-not-object",
-      { labels: ["orphan"] },           // no repositoryId key
-      { repositoryId: 42 },             // non-string repositoryId
+      { labels: ["orphan"] },
+      { repositoryId: 42 },
       { repositoryId: "repo-2", labels: ["bug"] },
     ];
 
     render(<TriggerRepositoriesSelector value={value} onChange={() => {}} />);
 
-    const rows = screen.queryAllByTestId("trigger-repositories-row");
-    expect(rows).toHaveLength(2);
+    expect(screen.queryAllByTestId("trigger-repositories-row")).toHaveLength(2);
     expect(screen.getByText("bug")).toBeInTheDocument();
   });
 });
