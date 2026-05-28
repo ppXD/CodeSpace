@@ -1,5 +1,5 @@
 # Local dev stack. Spins up the dependencies CodeSpace needs so `dotnet run` and
-# `pnpm dev` work without any extra setup.
+# `npm run dev` work without any extra setup.
 #
 #   docker compose up -d            # start everything in the background
 #   docker compose down             # stop containers, preserve data
