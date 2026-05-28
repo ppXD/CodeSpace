@@ -2807,16 +2807,17 @@
 .acs-root .chat-list-title {
   font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .04em; color: var(--muted);
 }
-.acs-root .chat-newchannel { display: flex; gap: 6px; padding: 0 12px 10px; }
-.acs-root .chat-newchannel-input {
+/* Inline channel creator (opened from the rail header "+"): input + Add + Cancel. */
+.acs-root .chat-create { display: flex; gap: 6px; padding: 8px 10px; border-bottom: 1px solid var(--line); flex-shrink: 0; }
+.acs-root .chat-create-input {
   flex: 1; min-width: 0; border: 1px solid var(--line); border-radius: var(--radius-sm);
   background: var(--panel); color: var(--ink); padding: 6px 8px; font: inherit; font-size: 13px;
 }
-.acs-root .chat-newchannel-input:focus { outline: none; border-color: var(--accent); }
+.acs-root .chat-create-input:focus { outline: none; border-color: var(--accent); }
 .acs-root .chat-list-body { flex: 1; overflow-y: auto; padding: 4px 8px 12px; }
 
 .acs-root .chat-conv {
-  display: flex; align-items: flex-start; gap: 10px; width: 100%; padding: 8px 10px; border-radius: var(--radius-sm);
+  display: flex; align-items: center; gap: 10px; width: 100%; padding: 8px 10px; border-radius: var(--radius-sm);
   border: none; background: none; text-align: left; font: inherit; color: var(--ink-2); cursor: pointer;
 }
 .acs-root .chat-conv:hover { background: var(--soft); }
@@ -2831,9 +2832,9 @@
 
 .acs-root .chat-conv-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
 .acs-root .chat-conv-top { display: flex; align-items: baseline; gap: 8px; }
-.acs-root .chat-conv-name { flex: 1; min-width: 0; font-size: 13px; font-weight: 600; color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.acs-root .chat-conv-name { flex: 1; min-width: 0; font-size: 13px; font-weight: 600; line-height: 1.35; color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .acs-root .chat-conv-time { flex-shrink: 0; font-size: 11px; color: var(--muted-2); }
-.acs-root .chat-conv-preview { display: block; font-size: 12px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.acs-root .chat-conv-preview { display: block; font-size: 12px; line-height: 1.4; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .acs-root .chat-conv-preview-author { color: var(--ink-2); }
 .acs-root .chat-conv-preview-muted, .acs-root .chat-conv-preview-deleted { color: var(--muted-2); font-style: italic; }
 
@@ -2917,6 +2918,8 @@ body.chat-resizing .acs-root .app { transition: none; }
   display: flex; align-items: center; justify-content: space-between; padding: 12px 12px 10px; flex-shrink: 0;
 }
 .acs-root .chat-rail-title { font-size: 16px; font-weight: 700; color: var(--ink); }
+.acs-root .chat-rail-head-actions { display: flex; align-items: center; gap: 2px; }
+.acs-root .chat-rail-head-actions .chrome-btn[data-active="true"] { background: var(--accent-soft); color: var(--accent); }
 .acs-root .chat-rail-tabs { display: flex; gap: 2px; padding: 0 8px; border-bottom: 1px solid var(--line); flex-shrink: 0; }
 .acs-root .chat-rail-tab {
   appearance: none; border: none; background: none; cursor: pointer;
@@ -2928,12 +2931,3 @@ body.chat-resizing .acs-root .app { transition: none; }
 .acs-root .chat-rail-hash { font-size: 16px; font-weight: 700; line-height: 1; }
 .acs-root .chat-rail-body { flex: 1; min-height: 0; display: flex; flex-direction: column; }
 .acs-root .chat-rail-body .chat-list { flex: 1; min-height: 0; border-right: none; background: transparent; }
-
-/* Inline channel creator (Channels tab): a dashed "+ New channel" trigger that reveals the input. */
-.acs-root .chat-list-actions { padding: 8px 8px 4px; }
-.acs-root .chat-newchannel-trigger {
-  display: flex; align-items: center; gap: 6px; width: 100%;
-  appearance: none; border: 1px dashed var(--line-2); background: none; cursor: pointer;
-  border-radius: var(--radius-sm); padding: 7px 10px; color: var(--muted); font: inherit; font-size: 13px;
-}
-.acs-root .chat-newchannel-trigger:hover { color: var(--ink-2); border-color: var(--muted-2); }

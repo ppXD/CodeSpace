@@ -1,79 +1,38 @@
-import { useState } from "react";
-
 import { Ic } from "@/_imported/ai-code-space/icons";
 import type { ConversationSummary } from "@/api/chat";
 import type { TeamMemberSummary } from "@/api/teams";
-import { useConversations, useCreateChannel } from "@/hooks/use-chat";
+import { useConversations } from "@/hooks/use-chat";
 import { useMe } from "@/hooks/use-me";
 import { useTeamMemberMap } from "@/hooks/use-team-members";
 
 import { conversationTitle } from "./conversationTitle";
 
 /**
- * Conversation list for the chat rail — Space-style rows: avatar (channel `#` tile / DM
+ * Selectable conversation rows for the chat rail — Space-style: avatar (channel `#` tile / DM
  * other-member avatar / group), title, last-message preview (author + token-stripped text), and
  * the last-activity time. Recency order + previews come from the backend (one query, no N+1).
- * Selection is a callback (not a route) so a pick swaps the centre view in place.
+ * Selection is a callback (not a route) so a pick swaps the centre panel in place. Optionally
+ * filtered (the Channels tab passes `kind === "Channel"`). Channel creation lives in the rail
+ * header, not here.
  */
 export function ConversationList({
   activeConversationId,
   onSelect,
   filter,
-  showCreate = false,
 }: {
   activeConversationId: string | null;
   onSelect: (conversationId: string) => void;
   filter?: (conversation: ConversationSummary) => boolean;
-  showCreate?: boolean;
 }) {
   const conversations = useConversations();
-  const create = useCreateChannel();
   const members = useTeamMemberMap();
   const me = useMe();
   const myId = me.data?.id ?? null;
-
-  const [adding, setAdding] = useState(false);
-  const [name, setName] = useState("");
-
-  const submit = async () => {
-    const trimmed = name.trim();
-    if (!trimmed || create.isPending) return;
-
-    const created = await create.mutateAsync({ name: trimmed, slug: trimmed });
-    setName("");
-    setAdding(false);
-    onSelect(created.id);
-  };
 
   const rows = (conversations.data ?? []).filter(c => (filter ? filter(c) : true));
 
   return (
     <div className="chat-list">
-      {showCreate && (
-        <div className="chat-list-actions">
-          {adding ? (
-            <div className="chat-newchannel">
-              <input
-                className="chat-newchannel-input"
-                value={name}
-                autoFocus
-                placeholder="channel name"
-                onChange={(e) => setName(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") submit();
-                  if (e.key === "Escape") setAdding(false);
-                }}
-              />
-              <button className="btn btn-primary" onClick={submit} disabled={create.isPending || name.trim().length === 0}>Add</button>
-            </div>
-          ) : (
-            <button className="chat-newchannel-trigger" onClick={() => setAdding(true)}>
-              <Ic.Plus size={13} /> New channel
-            </button>
-          )}
-        </div>
-      )}
-
       <div className="chat-list-body">
         {conversations.isLoading && <div className="chat-empty">Loading…</div>}
 

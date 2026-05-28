@@ -5,18 +5,17 @@ import { ChatRail } from "./ChatRail";
 import { useChatDock } from "./ChatDockContext";
 
 /**
- * The rail renders only while open, defaults to Home (unfiltered list, no create), and the tabs
- * swap the body: Channels → a channel-filtered list WITH the create affordance, Members → the
- * roster.
+ * The rail renders only while open, defaults to Home (unfiltered list), and the tabs swap the
+ * body (Channels → channel-filtered list, Members → roster). Channel creation is a header "+"
+ * that opens an escapable inline form.
  */
 vi.mock("./ChatDockContext", async (importOriginal) => ({
   ...(await importOriginal<typeof import("./ChatDockContext")>()),
   useChatDock: vi.fn(),
 }));
+vi.mock("@/hooks/use-chat", () => ({ useCreateChannel: () => ({ mutateAsync: vi.fn(), isPending: false }) }));
 vi.mock("./ConversationList", () => ({
-  ConversationList: ({ filter, showCreate }: { filter?: unknown; showCreate?: boolean }) => (
-    <div data-testid="conversation-list" data-filtered={filter ? "true" : "false"} data-create={showCreate ? "true" : "false"} />
-  ),
+  ConversationList: ({ filter }: { filter?: unknown }) => <div data-testid="conversation-list" data-filtered={filter ? "true" : "false"} />,
 }));
 vi.mock("./ChatMemberList", () => ({ ChatMemberList: () => <div data-testid="member-list" /> }));
 
@@ -38,24 +37,31 @@ describe("ChatRail", () => {
     expect(container.firstChild).toBeNull();
   });
 
-  it("defaults to Home: an unfiltered list with no create affordance", () => {
+  it("defaults to Home: an unfiltered list", () => {
     render(<ChatRail />);
-    const list = screen.getByTestId("conversation-list");
-    expect(list.getAttribute("data-filtered")).toBe("false");
-    expect(list.getAttribute("data-create")).toBe("false");
+    expect(screen.getByTestId("conversation-list").getAttribute("data-filtered")).toBe("false");
   });
 
-  it("Channels tab shows a channel-filtered list with create", () => {
+  it("Channels tab shows a channel-filtered list", () => {
     render(<ChatRail />);
     fireEvent.click(screen.getByTitle("Channels"));
-    const list = screen.getByTestId("conversation-list");
-    expect(list.getAttribute("data-filtered")).toBe("true");
-    expect(list.getAttribute("data-create")).toBe("true");
+    expect(screen.getByTestId("conversation-list").getAttribute("data-filtered")).toBe("true");
   });
 
   it("Members tab shows the roster", () => {
     render(<ChatRail />);
     fireEvent.click(screen.getByTitle("Members"));
     expect(screen.getByTestId("member-list")).toBeInTheDocument();
+  });
+
+  it("the header + reveals a create form, and Cancel dismisses it", () => {
+    render(<ChatRail />);
+    expect(screen.queryByPlaceholderText("New channel name")).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByLabelText("New channel"));
+    expect(screen.getByPlaceholderText("New channel name")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /cancel/i }));
+    expect(screen.queryByPlaceholderText("New channel name")).not.toBeInTheDocument();
   });
 });
