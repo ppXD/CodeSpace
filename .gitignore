@@ -38,7 +38,10 @@ nCrunchTemp_*
 # NuGet
 project.lock.json
 project.fragment.lock.json
-artifacts/
+# Root-anchored: the .NET SDK's build-output `artifacts/` dir only. WITHOUT the leading
+# slash this also matched the source folder src/.../Services/Workflows/Artifacts/ and silently
+# kept IArtifactStore.cs & siblings out of git, breaking clean-checkout builds.
+/artifacts/
 
 # ── Frontend (Vite + React + Node) ────────────────────────────────────────────
 node_modules/
