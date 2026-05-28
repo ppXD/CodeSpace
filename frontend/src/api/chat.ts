@@ -18,6 +18,20 @@ export interface ConversationSummary {
   memberCount: number;
   memberUserIds: string[];
   createdDate: string;
+  /** Most-recent message preview for the list row. Null on a single get / a conversation with no messages. */
+  lastMessage: MessagePreview | null;
+  /** Last message time, else createdDate. The list is sorted on this newest-first. */
+  lastActivityDate: string;
+}
+
+/** Mirrors backend `MessagePreview` — the conversation's latest message, trimmed for a list row. */
+export interface MessagePreview {
+  messageId: string;
+  authorUserId: string;
+  /** Token-stripped, truncated plain text. Empty when the last message is deleted. */
+  preview: string;
+  createdDate: string;
+  isDeleted: boolean;
 }
 
 /**

@@ -12,8 +12,8 @@ vi.mock("@/hooks/use-chat", () => ({
   useConversations: () => ({
     isLoading: false,
     data: [
-      { id: "c1", kind: "Channel", slug: "general", name: "General", description: null, visibility: "Public", archived: false, memberCount: 2, memberUserIds: [], createdDate: "" },
-      { id: "c2", kind: "Direct", slug: null, name: null, description: null, visibility: "Public", archived: false, memberCount: 2, memberUserIds: ["me", "u2"], createdDate: "" },
+      { id: "c1", kind: "Channel", slug: "general", name: "General", description: null, visibility: "Public", archived: false, memberCount: 2, memberUserIds: [], createdDate: "", lastMessage: null, lastActivityDate: "2026-01-02T10:00:00Z" },
+      { id: "c2", kind: "Direct", slug: null, name: null, description: null, visibility: "Public", archived: false, memberCount: 2, memberUserIds: ["me", "u2"], createdDate: "", lastMessage: null, lastActivityDate: "2026-01-01T10:00:00Z" },
     ],
   }),
   useCreateChannel: () => ({ mutateAsync: vi.fn(), isPending: false }),
