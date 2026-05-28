@@ -16,11 +16,18 @@ public sealed class MessageService : IMessageService, IScopedDependency
 
     public MessageService(CodeSpaceDbContext db) { _db = db; }
 
+    /// <summary>
+    /// Hard cap on a message body, in characters. Generous for a code-friendly chat (long
+    /// snippets / stack traces) while bounding one row + the FTS tsvector it generates, so a
+    /// single giant paste can't bloat the hot table or a page payload. Pinned by a test.
+    /// </summary>
+    public const int MaxBodyLength = 16_000;
+
     // ─── Post ────────────────────────────────────────────────────────────────────
 
     public async Task<MessageView> PostAsync(Guid teamId, Guid authorUserId, Guid conversationId, string body, Guid? replyToMessageId, CancellationToken cancellationToken)
     {
-        if (string.IsNullOrWhiteSpace(body)) throw new ArgumentException("Message body cannot be empty.", nameof(body));
+        EnsureValidBody(body);
 
         await EnsureActiveMemberAsync(teamId, conversationId, authorUserId, cancellationToken).ConfigureAwait(false);
 
@@ -70,7 +77,7 @@ public sealed class MessageService : IMessageService, IScopedDependency
 
     public async Task<MessageView> EditAsync(Guid teamId, Guid editorUserId, Guid messageId, string newBody, CancellationToken cancellationToken)
     {
-        if (string.IsNullOrWhiteSpace(newBody)) throw new ArgumentException("Message body cannot be empty.", nameof(newBody));
+        EnsureValidBody(newBody);
 
         var message = await LoadActiveMessageAsync(teamId, messageId, cancellationToken).ConfigureAwait(false);
 
@@ -117,6 +124,14 @@ public sealed class MessageService : IMessageService, IScopedDependency
 
         member.LastReadMessageId = lastReadMessageId;
         await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    // ─── Validation ──────────────────────────────────────────────────────────────--
+
+    private static void EnsureValidBody(string body)
+    {
+        if (string.IsNullOrWhiteSpace(body)) throw new ArgumentException("Message body cannot be empty.", nameof(body));
+        if (body.Length > MaxBodyLength) throw new ArgumentException($"Message body exceeds the {MaxBodyLength}-character limit.", nameof(body));
     }
 
     // ─── Membership / tenancy gates ─────────────────────────────────────────────────

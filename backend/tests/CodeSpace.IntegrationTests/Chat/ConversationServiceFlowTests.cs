@@ -168,6 +168,32 @@ public class ConversationServiceFlowTests
         (ex.InnerException as Npgsql.PostgresException)?.SqlState.ShouldBe("23505");
     }
 
+    [Fact]
+    public async Task GetOrCreateDirect_under_real_concurrency_still_yields_exactly_one_dm()
+    {
+        // Two callers open the same DM at the same instant, each on its own scope/DbContext.
+        // One INSERT wins the dm_key unique index; the loser catches 23505 and re-queries the
+        // winner. Both must return the SAME id and exactly one DM row may exist — the race-safe
+        // singleton guarantee exercised under genuine contention (not just sequential idempotence).
+        var (teamId, userA) = await SeedTeamAsync();
+        var userB = await SeedUserAsync();
+
+        async Task<Guid> OpenAsync()
+        {
+            using var scope = _fixture.BeginScope();
+            return await scope.Resolve<IConversationService>().GetOrCreateDirectAsync(teamId, userA, userB, default);
+        }
+
+        var results = await Task.WhenAll(OpenAsync(), OpenAsync());
+
+        results[0].ShouldBe(results[1], customMessage: "Concurrent opens of the same pair MUST resolve to one DM id.");
+
+        using var verify = _fixture.BeginScope();
+        var dmCount = await verify.Resolve<CodeSpaceDbContext>().Conversation.AsNoTracking()
+            .CountAsync(c => c.TeamId == teamId && c.Kind == ConversationKind.Direct);
+        dmCount.ShouldBe(1, customMessage: "Exactly one DM row may exist for the pair after a concurrent race.");
+    }
+
     // ─── Groups ────────────────────────────────────────────────────────────────────
 
     [Fact]

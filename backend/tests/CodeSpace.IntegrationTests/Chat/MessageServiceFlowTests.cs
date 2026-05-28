@@ -104,6 +104,18 @@ public class MessageServiceFlowTests
     }
 
     [Fact]
+    public async Task Post_at_the_body_length_limit_succeeds_but_one_over_throws()
+    {
+        var (teamId, ownerId, channelId) = await SeedChannelWithOwnerAsync();
+
+        var atLimit = await PostAsync(teamId, ownerId, channelId, new string('x', MessageService.MaxBodyLength));
+        atLimit.Body.Length.ShouldBe(MessageService.MaxBodyLength, customMessage: "A body exactly at the cap must post.");
+
+        await Should.ThrowAsync<ArgumentException>(
+            () => PostAsync(teamId, ownerId, channelId, new string('x', MessageService.MaxBodyLength + 1)));
+    }
+
+    [Fact]
     public async Task Post_reply_to_message_in_same_conversation_succeeds_but_foreign_parent_throws()
     {
         var (teamId, ownerId, channelId) = await SeedChannelWithOwnerAsync();
@@ -173,6 +185,19 @@ public class MessageServiceFlowTests
     }
 
     [Fact]
+    public async Task List_with_a_non_positive_limit_is_clamped_to_one()
+    {
+        // A 0 / negative limit must not blow up or return everything — it clamps to 1.
+        var (teamId, ownerId, channelId) = await SeedChannelWithOwnerAsync();
+        await SeedSequentialMessagesAsync(teamId, ownerId, channelId, 3);
+
+        var page = await ListAsync(teamId, ownerId, channelId, beforeId: null, limit: 0);
+
+        page.Messages.Count.ShouldBe(1, customMessage: "limit<=0 must clamp to 1, not return the whole conversation.");
+        page.HasMore.ShouldBeTrue(customMessage: "With 3 messages and an effective page of 1, there must be more.");
+    }
+
+    [Fact]
     public async Task List_by_non_member_throws()
     {
         var (teamId, _, channelId) = await SeedChannelWithOwnerAsync();
@@ -232,6 +257,17 @@ public class MessageServiceFlowTests
         using var scope = _fixture.BeginScope();
         await Should.ThrowAsync<InvalidOperationException>(
             () => scope.Resolve<IMessageService>().EditAsync(teamId, other, msg.Id, "hijacked", default));
+    }
+
+    [Fact]
+    public async Task Edit_to_a_body_over_the_limit_throws()
+    {
+        var (teamId, ownerId, channelId) = await SeedChannelWithOwnerAsync();
+        var msg = await PostAsync(teamId, ownerId, channelId, "short");
+
+        using var scope = _fixture.BeginScope();
+        await Should.ThrowAsync<ArgumentException>(
+            () => scope.Resolve<IMessageService>().EditAsync(teamId, ownerId, msg.Id, new string('x', MessageService.MaxBodyLength + 1), default));
     }
 
     // ─── Delete (soft) ───────────────────────────────────────────────────────────--
