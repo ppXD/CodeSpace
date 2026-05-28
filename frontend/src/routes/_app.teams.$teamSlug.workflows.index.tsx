@@ -2,6 +2,7 @@ import { createFileRoute, useNavigate } from "@tanstack/react-router";
 
 import { Ic } from "@/_imported/ai-code-space/icons";
 import { ApiError } from "@/api/request";
+import { useConfirm } from "@/components/dialog/dialog-context";
 import { useCreateEmptyWorkflow } from "@/hooks/use-workflow-templates";
 import { useDeleteWorkflow, useSetWorkflowEnabled, useWorkflows } from "@/hooks/use-workflows";
 
@@ -22,6 +23,7 @@ function WorkflowsListPage() {
   const setEnabled = useSetWorkflowEnabled();
   const remove = useDeleteWorkflow();
   const createEmpty = useCreateEmptyWorkflow();
+  const confirm = useConfirm();
 
   const rows = workflows.data ?? [];
 
@@ -34,10 +36,21 @@ function WorkflowsListPage() {
     });
   };
 
-  const handleDelete = (workflowId: string, name: string) => {
-    if (confirm(`Delete workflow "${name}"? Runs already in flight will finish on their own.`)) {
-      remove.mutate(workflowId);
-    }
+  const handleDelete = async (workflowId: string, name: string) => {
+    // Themed confirm dialog instead of the browser's native window.confirm —
+    // matches every other destructive action in the SPA (see dialog-context).
+    const ok = await confirm({
+      title: "Delete workflow?",
+      message: (
+        <>
+          <strong>{name}</strong> will be removed. Runs already in flight will finish on their own; new triggers stop firing immediately.
+        </>
+      ),
+      confirmLabel: "Delete",
+      destructive: true,
+    });
+    if (!ok) return;
+    remove.mutate(workflowId);
   };
 
   return (
