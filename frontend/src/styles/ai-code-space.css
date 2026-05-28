@@ -106,6 +106,7 @@
 }
 .acs-root .float-chrome > * { pointer-events: auto; }
 .acs-root .float-l { left: calc(var(--sidebar-w) - 14px); transition: left .28s cubic-bezier(.2,.7,.2,1); }
+.acs-root .float-r { right: 14px; }
 .acs-root .chrome-btn {
   width: 28px; height: 28px; border-radius: 7px; background: var(--panel);
   border: 1px solid var(--line); box-shadow: var(--shadow-1); display: grid; place-items: center;
