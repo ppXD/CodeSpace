@@ -1,6 +1,7 @@
 import { useState } from "react";
 
 import { Ic } from "@/_imported/ai-code-space/icons";
+import type { ConversationSummary } from "@/api/chat";
 import { useConversations, useCreateChannel } from "@/hooks/use-chat";
 import { useMe } from "@/hooks/use-me";
 import { useTeamMemberMap } from "@/hooks/use-team-members";
@@ -8,12 +9,21 @@ import { useTeamMemberMap } from "@/hooks/use-team-members";
 import { conversationTitle } from "./conversationTitle";
 
 /**
- * Conversation picker for the chat dock: the team's conversations + an inline "new channel"
- * form. Selection is a callback (not a route) so picking a conversation swaps the dock's pane
- * in place — no navigation, so you never leave whatever you're looking at. Channel slug is
- * normalised server-side, so the form sends the typed name as both name and slug.
+ * A selectable conversation list for the chat rail. Selection is a callback (not a route) so a
+ * pick swaps the centre conversation view in place — no navigation. Optionally filtered (e.g.
+ * the Channels tab passes `kind === "Channel"`) and optionally shows an inline channel creator.
  */
-export function ConversationList({ activeConversationId, onSelect }: { activeConversationId: string | null; onSelect: (conversationId: string) => void }) {
+export function ConversationList({
+  activeConversationId,
+  onSelect,
+  filter,
+  showCreate = false,
+}: {
+  activeConversationId: string | null;
+  onSelect: (conversationId: string) => void;
+  filter?: (conversation: ConversationSummary) => boolean;
+  showCreate?: boolean;
+}) {
   const conversations = useConversations();
   const create = useCreateChannel();
   const members = useTeamMemberMap();
@@ -29,34 +39,35 @@ export function ConversationList({ activeConversationId, onSelect }: { activeCon
     const created = await create.mutateAsync({ name: trimmed, slug: trimmed });
     setName("");
     setAdding(false);
-    onSelect(created.id);   // jump straight into the channel you just made
+    onSelect(created.id);   // open the channel you just made
   };
 
-  const rows = conversations.data ?? [];
+  const rows = (conversations.data ?? []).filter(c => (filter ? filter(c) : true));
 
   return (
     <div className="chat-list">
-      <div className="chat-list-head">
-        <span className="chat-list-title">Conversations</span>
-        <button className="chrome-btn" title="New channel" onClick={() => setAdding(a => !a)}>
-          <Ic.Plus size={14} />
-        </button>
-      </div>
-
-      {adding && (
-        <div className="chat-newchannel">
-          <input
-            className="chat-newchannel-input"
-            value={name}
-            autoFocus
-            placeholder="channel name"
-            onChange={(e) => setName(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter") submit();
-              if (e.key === "Escape") setAdding(false);
-            }}
-          />
-          <button className="btn btn-primary" onClick={submit} disabled={create.isPending || name.trim().length === 0}>Add</button>
+      {showCreate && (
+        <div className="chat-list-actions">
+          {adding ? (
+            <div className="chat-newchannel">
+              <input
+                className="chat-newchannel-input"
+                value={name}
+                autoFocus
+                placeholder="channel name"
+                onChange={(e) => setName(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") submit();
+                  if (e.key === "Escape") setAdding(false);
+                }}
+              />
+              <button className="btn btn-primary" onClick={submit} disabled={create.isPending || name.trim().length === 0}>Add</button>
+            </div>
+          ) : (
+            <button className="chat-newchannel-trigger" onClick={() => setAdding(true)}>
+              <Ic.Plus size={13} /> New channel
+            </button>
+          )}
         </div>
       )}
 
@@ -64,7 +75,7 @@ export function ConversationList({ activeConversationId, onSelect }: { activeCon
         {conversations.isLoading && <div className="chat-empty">Loading…</div>}
 
         {!conversations.isLoading && rows.length === 0 && (
-          <div className="chat-empty">No conversations yet. Create a channel to start.</div>
+          <div className="chat-empty">Nothing here yet.</div>
         )}
 
         {rows.map(c => (

@@ -58,3 +58,11 @@ export function useCreateChannel() {
     onSuccess: () => qc.invalidateQueries({ queryKey: ["chat-conversations"] }),
   });
 }
+
+export function useOpenDirect() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (otherUserId: string) => chatApi.openDirect(otherUserId),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["chat-conversations"] }),
+  });
+}

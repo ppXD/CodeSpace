@@ -96,9 +96,9 @@
   transition: grid-template-columns .28s cubic-bezier(.2,.7,.2,1);
 }
 .acs-root .app[data-sidebar="collapsed"] { --sidebar-w: 60px; }
-/* Chat dock occupies the 3rd column only when open; the content column (minmax 0 1fr)
-   shrinks beside it instead of being covered, so code + chat sit side-by-side. */
-.acs-root .app[data-chat-open="true"] { --chat-dock-w: 380px; }
+/* The chat rail occupies the 3rd column only when open; the content column (minmax 0 1fr)
+   shrinks beside it. The conversation view then overlays that content column on demand. */
+.acs-root .app[data-chat-open="true"] { --chat-dock-w: 320px; }
 
 /* ---------- Floating chrome ---------- */
 .acs-root .float-chrome {
@@ -2854,27 +2854,45 @@
 }
 .acs-root .chat-composer-input:focus { outline: none; border-color: var(--accent); }
 
-/* ── Chat dock (persistent right panel) ─────────────────────────────────────────
-   Lives in the app grid's 3rd column. The body reuses the .chat-list / .chat-main
-   blocks above — here we just frame them, add the top bar, and make them flex to
-   fill the dock height. */
-.acs-root .chat-dock {
+/* ── Chat: content column + rail + centre conversation ──────────────────────────
+   .content-col holds the page (Outlet); the conversation view overlays it absolutely so the
+   page stays mounted underneath (close = instant, never a navigation). The rail is the
+   persistent 3rd grid column. Both reuse the .chat-list / .chat-main blocks above. */
+.acs-root .content-col { position: relative; min-width: 0; height: 100%; overflow: hidden; }
+
+/* Centre conversation view — overlays the content column; the message column is capped + centred
+   for readable line lengths (Slack-style) rather than spanning the full width. */
+.acs-root .chat-convview { position: absolute; inset: 0; z-index: 20; background: var(--bg); }
+.acs-root .chat-convview .chat-main { height: 100%; max-width: 920px; margin: 0 auto; }
+.acs-root .chat-convview-close { position: absolute; top: 12px; right: 16px; z-index: 21; }
+
+/* Right rail — the persistent chat entry: title, tabs, and the active tab's list. */
+.acs-root .chat-rail {
   grid-column: 3; min-width: 0; height: 100%; overflow: hidden;
   display: flex; flex-direction: column;
-  border-left: 1px solid var(--line); background: var(--panel);
+  border-left: 1px solid var(--line); background: var(--panel-2);
 }
-.acs-root .chat-dock-bar {
-  display: flex; align-items: center; gap: 6px;
-  padding: 8px 10px; border-bottom: 1px solid var(--line); flex-shrink: 0;
+.acs-root .chat-rail-head {
+  display: flex; align-items: center; justify-content: space-between; padding: 12px 12px 10px; flex-shrink: 0;
 }
-.acs-root .chat-dock-title { font-size: 13px; font-weight: 600; color: var(--ink); }
-.acs-root .chat-dock-grow { flex: 1; }
+.acs-root .chat-rail-title { font-size: 16px; font-weight: 700; color: var(--ink); }
+.acs-root .chat-rail-tabs { display: flex; gap: 2px; padding: 0 8px; border-bottom: 1px solid var(--line); flex-shrink: 0; }
+.acs-root .chat-rail-tab {
+  appearance: none; border: none; background: none; cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
+  width: 38px; height: 34px; margin-bottom: -1px; color: var(--muted); border-bottom: 2px solid transparent;
+}
+.acs-root .chat-rail-tab:hover { color: var(--ink-2); }
+.acs-root .chat-rail-tab[data-active="true"] { color: var(--accent); border-bottom-color: var(--accent); }
+.acs-root .chat-rail-hash { font-size: 16px; font-weight: 700; line-height: 1; }
+.acs-root .chat-rail-body { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.acs-root .chat-rail-body .chat-list { flex: 1; min-height: 0; border-right: none; background: transparent; }
 
-/* The list / message pane fill the dock under the bar (they're height:100% by default
-   for the old full-page layout; in the flex dock they must flex instead). */
-.acs-root .chat-dock .chat-list,
-.acs-root .chat-dock .chat-main { flex: 1; min-height: 0; height: auto; }
-.acs-root .chat-dock .chat-list { border-right: none; background: var(--panel); }
-.acs-root .chat-dock .chat-main-head { padding: 12px 16px; }
-.acs-root .chat-dock .chat-msgs,
-.acs-root .chat-dock .chat-composer { padding-left: 16px; padding-right: 16px; }
+/* Inline channel creator (Channels tab): a dashed "+ New channel" trigger that reveals the input. */
+.acs-root .chat-list-actions { padding: 8px 8px 4px; }
+.acs-root .chat-newchannel-trigger {
+  display: flex; align-items: center; gap: 6px; width: 100%;
+  appearance: none; border: 1px dashed var(--line-2); background: none; cursor: pointer;
+  border-radius: var(--radius-sm); padding: 7px 10px; color: var(--muted); font: inherit; font-size: 13px;
+}
+.acs-root .chat-newchannel-trigger:hover { color: var(--ink-2); border-color: var(--muted-2); }

@@ -65,6 +65,13 @@ export const chatApi = {
       body: JSON.stringify({ name, slug, private: isPrivate }),
     }),
 
+  /** Find-or-create the 1:1 DM with another user (race-safe + idempotent server-side). */
+  openDirect: (otherUserId: string) =>
+    fetchJson<{ id: string }>("/api/conversations/direct", {
+      method: "POST",
+      body: JSON.stringify({ otherUserId }),
+    }),
+
   listMessages: (conversationId: string, beforeId?: string | null, limit = 50) => {
     const params = new URLSearchParams({ limit: String(limit) });
     if (beforeId) params.set("beforeId", beforeId);

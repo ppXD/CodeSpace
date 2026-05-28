@@ -4,25 +4,22 @@ import { useState } from "react";
 import { isAuthenticated } from "@/api/auth";
 import { Ic } from "@/_imported/ai-code-space/icons";
 import { Sidebar } from "@/_imported/ai-code-space/sidebar";
-import { ChatDock, ChatDockProvider } from "@/components/chat/ChatDock";
-import { useChatDock } from "@/components/chat/ChatDockContext";
+import { ChatConversationView } from "@/components/chat/ChatConversationView";
+import { ChatDockProvider, useChatDock } from "@/components/chat/ChatDockContext";
+import { ChatRail } from "@/components/chat/ChatRail";
 
 import "@/styles/ai-code-space.css";
 
 /**
- * Authenticated-shell layout. Sits above every URL the operator browses through
- * (repos, repo-detail, PRs, PR-detail, the placeholder tabs) so the sidebar +
- * collapse chrome stay mounted across navigations — no re-render storms when
- * clicking between tabs.
+ * Authenticated-shell layout. Sits above every URL the operator browses through so the sidebar
+ * + collapse chrome stay mounted across navigations.
  *
- * Wraps everything in <ChatDockProvider> so the persistent chat dock (right column)
- * stays mounted across every route — you chat alongside whatever you're viewing
- * instead of navigating to a chat page and back.
+ * Chat lives here, not in a route, so it's always available:
+ *   - <ChatRail> is the persistent right column (Home / Channels / Members tabs);
+ *   - <ChatConversationView> opens the selected conversation OVER the centre content (the page
+ *     stays mounted underneath, so closing is instant and never a navigation).
  *
- * Auth gate runs `beforeLoad` so unauthenticated users never see this shell at
- * all — they get bounced to /signin before any child component mounts. Cheap
- * localStorage check; mid-session 401s are caught downstream in api/request and
- * bounce out separately.
+ * Auth gate runs `beforeLoad` so unauthenticated users never see this shell.
  */
 export const Route = createFileRoute("/_app")({
   beforeLoad: () => {
@@ -52,8 +49,13 @@ function AppShell() {
         data-density="regular"
       >
         <Sidebar />
-        <Outlet />
-        <ChatDock />
+
+        <div className="content-col">
+          <Outlet />
+          <ChatConversationView />
+        </div>
+
+        <ChatRail />
 
         <div className="float-chrome float-l">
           <button
