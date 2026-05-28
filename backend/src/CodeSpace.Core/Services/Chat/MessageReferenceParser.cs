@@ -56,4 +56,20 @@ public static partial class MessageReferenceParser
 
         return result;
     }
+
+    /// <summary>
+    /// Renders a body to plain text for previews / notifications: each reference token collapses
+    /// to its label (or its refId when unlabelled), so a list row reads "Hello Alice" rather than
+    /// "Hello &lt;user:…|Alice&gt;". Surrounding text is untouched. Same grammar as <see cref="Parse"/>.
+    /// </summary>
+    public static string ToPlainText(string? body)
+    {
+        if (string.IsNullOrEmpty(body)) return string.Empty;
+
+        return TokenPattern().Replace(body, match =>
+        {
+            var label = match.Groups["label"];
+            return label.Success && label.Value.Length > 0 ? label.Value : match.Groups["id"].Value;
+        });
+    }
 }
