@@ -289,6 +289,71 @@ public class ConversationServiceFlowTests
         crossTeam.ShouldBeNull(customMessage: "A conversation id from another team MUST NOT resolve under this team's scope.");
     }
 
+    [Fact]
+    public async Task Get_surfaces_the_callers_read_cursor_after_mark_read()
+    {
+        var (teamId, owner) = await SeedTeamAsync();
+        var channelId = await SeedChannelAsync(teamId, owner, "general");
+
+        var t0 = DateTimeOffset.UtcNow;
+        await SeedMessageAsync(teamId, channelId, owner, "first", t0);
+        var readUpTo = await SeedMessageAsync(teamId, channelId, owner, "second", t0.AddSeconds(5));
+        await SeedMessageAsync(teamId, channelId, owner, "third (unread)", t0.AddSeconds(10));
+
+        using (var scope = _fixture.BeginScope())
+            await scope.Resolve<IMessageService>().MarkReadAsync(teamId, owner, channelId, readUpTo, default);
+
+        using var verify = _fixture.BeginScope();
+        var summary = await verify.Resolve<IConversationService>().GetAsync(teamId, owner, channelId, default);
+
+        summary.ShouldNotBeNull();
+        summary!.LastReadMessageId.ShouldBe(readUpTo, customMessage: "GetAsync must surface the caller's own read cursor so the pane can place the unread divider.");
+    }
+
+    [Fact]
+    public async Task Get_leaves_read_cursor_null_until_the_caller_has_read_anything()
+    {
+        var (teamId, owner) = await SeedTeamAsync();
+        var channelId = await SeedChannelAsync(teamId, owner, "general");
+        await SeedMessageAsync(teamId, channelId, owner, "hello", DateTimeOffset.UtcNow);
+
+        using var verify = _fixture.BeginScope();
+        var summary = await verify.Resolve<IConversationService>().GetAsync(teamId, owner, channelId, default);
+
+        summary.ShouldNotBeNull();
+        summary!.LastReadMessageId.ShouldBeNull(customMessage: "A member who has read nothing has a null cursor — the whole conversation is unread, no divider.");
+    }
+
+    [Fact]
+    public async Task Get_read_cursor_is_per_caller_not_shared_across_members()
+    {
+        var (teamId, owner) = await SeedTeamAsync();
+        var other = await SeedUserAsync();
+        var channelId = await SeedChannelAsync(teamId, owner, "general");
+
+        using (var scope = _fixture.BeginScope())
+            await scope.Resolve<IConversationService>().AddMemberAsync(teamId, owner, channelId, other, default);
+
+        var t0 = DateTimeOffset.UtcNow;
+        var first = await SeedMessageAsync(teamId, channelId, owner, "first", t0);
+        var second = await SeedMessageAsync(teamId, channelId, owner, "second", t0.AddSeconds(5));
+
+        using (var scope = _fixture.BeginScope())
+        {
+            var messages = scope.Resolve<IMessageService>();
+            await messages.MarkReadAsync(teamId, owner, channelId, second, default);   // owner read everything
+            await messages.MarkReadAsync(teamId, other, channelId, first, default);     // other read only the first
+        }
+
+        using var verify = _fixture.BeginScope();
+        var conversations = verify.Resolve<IConversationService>();
+        var ownerView = await conversations.GetAsync(teamId, owner, channelId, default);
+        var otherView = await conversations.GetAsync(teamId, other, channelId, default);
+
+        ownerView!.LastReadMessageId.ShouldBe(second);
+        otherView!.LastReadMessageId.ShouldBe(first, customMessage: "Each caller sees their OWN read cursor — cursors must not bleed across members.");
+    }
+
     // ─── Membership management ─────────────────────────────────────────────────────
 
     [Fact]

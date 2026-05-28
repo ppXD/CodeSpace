@@ -37,4 +37,9 @@ public sealed record ConversationSummary
     /// <summary>When the conversation last saw activity — the last message's time, else
     /// <see cref="CreatedDate"/>. The list sorts on this newest-first (the "recent" order).</summary>
     public required DateTimeOffset LastActivityDate { get; init; }
+
+    /// <summary>The caller's read cursor — the id of the last message they've seen. Populated only
+    /// by the single get (where "caller" is unambiguous); null in the list and until the caller has
+    /// read anything. The frontend draws the unread divider above the first message past this id.</summary>
+    public Guid? LastReadMessageId { get; init; }
 }

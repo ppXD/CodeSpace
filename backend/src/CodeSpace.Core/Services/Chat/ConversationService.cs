@@ -120,11 +120,15 @@ public sealed class ConversationService : IConversationService, IScopedDependenc
 
     public async Task<ConversationSummary?> GetAsync(Guid teamId, Guid userId, Guid conversationId, CancellationToken cancellationToken)
     {
-        var isMember = await IsActiveMemberAsync(conversationId, userId, cancellationToken).ConfigureAwait(false);
-        if (!isMember) return null;   // never leak existence of a conversation the caller isn't in
+        var membership = await LoadMembershipAsync(conversationId, userId, cancellationToken).ConfigureAwait(false);
+        if (membership == null) return null;   // never leak existence of a conversation the caller isn't in
 
-        return await QuerySummaries(c => c.TeamId == teamId && c.Id == conversationId && c.DeletedDate == null)
+        var summary = await QuerySummaries(c => c.TeamId == teamId && c.Id == conversationId && c.DeletedDate == null)
             .SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
+
+        // Stamp the caller's read cursor so the pane can draw the unread divider. Null cursor (never
+        // read) flows through unchanged. Tenant isolation still rides on the summary's TeamId filter.
+        return summary == null ? null : summary with { LastReadMessageId = membership.LastReadMessageId };
     }
 
     public async Task AddMemberAsync(Guid teamId, Guid actorUserId, Guid conversationId, Guid newMemberUserId, CancellationToken cancellationToken)
@@ -174,6 +178,19 @@ public sealed class ConversationService : IConversationService, IScopedDependenc
             .AnyAsync(m => m.ConversationId == conversationId && m.UserId == userId && m.DeletedDate == null, cancellationToken)
             .ConfigureAwait(false);
     }
+
+    /// <summary>The caller's active membership row, projected to just the read cursor — null when the
+    /// caller isn't an active member (the existence gate). Distinguishes "no row" from "row, null
+    /// cursor" by projecting into a reference type rather than selecting the nullable Guid directly.</summary>
+    private async Task<MemberCursor?> LoadMembershipAsync(Guid conversationId, Guid userId, CancellationToken cancellationToken)
+    {
+        return await _db.ConversationMember.AsNoTracking()
+            .Where(m => m.ConversationId == conversationId && m.UserId == userId && m.DeletedDate == null)
+            .Select(m => new MemberCursor(m.LastReadMessageId))
+            .SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    private sealed record MemberCursor(Guid? LastReadMessageId);
 
     /// <summary>
     /// Idempotent add. A previously-removed (soft-deleted) member resurrects the existing row

@@ -22,6 +22,9 @@ export interface ConversationSummary {
   lastMessage: MessagePreview | null;
   /** Last message time, else createdDate. The list is sorted on this newest-first. */
   lastActivityDate: string;
+  /** The caller's read cursor (last message id they've seen). Populated only on a single get;
+   * null in the list and until the caller has read anything. Drives the pane's unread divider. */
+  lastReadMessageId: string | null;
 }
 
 /** Mirrors backend `MessagePreview` — the conversation's latest message, trimmed for a list row. */
