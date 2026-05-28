@@ -5,6 +5,7 @@ import { useConversation, useMarkRead, useMessages, usePostMessage } from "@/hoo
 import { useMe } from "@/hooks/use-me";
 import { useTeamMemberMap } from "@/hooks/use-team-members";
 
+import { ChannelInvite } from "./ChannelInvite";
 import { conversationTitle } from "./conversationTitle";
 import { MessageComposer } from "./MessageComposer";
 import { MessageItem } from "./MessageItem";
@@ -47,8 +48,15 @@ export function MessagePane({ conversationId }: { conversationId: string }) {
   return (
     <div className="chat-main">
       <div className="chat-main-head">
-        <span className="chat-main-title">{title}</span>
-        {conversation.data && <span className="chat-main-sub">{conversation.data.memberCount} members</span>}
+        <div className="chat-main-head-info">
+          <span className="chat-main-title">{title}</span>
+          {conversation.data && conversation.data.kind !== "Direct" && (
+            <span className="chat-main-sub">{conversation.data.memberCount} members</span>
+          )}
+        </div>
+        {conversation.data && conversation.data.kind !== "Direct" && (
+          <ChannelInvite conversationId={conversationId} memberUserIds={conversation.data.memberUserIds} />
+        )}
       </div>
 
       <div className="chat-msgs">

@@ -86,6 +86,13 @@ export const chatApi = {
       body: JSON.stringify({ otherUserId }),
     }),
 
+  /** Invite a user into a channel/group (idempotent server-side; rejected for DMs). */
+  addMember: (conversationId: string, userId: string) =>
+    fetchJson<void>(`/api/conversations/${conversationId}/members`, {
+      method: "POST",
+      body: JSON.stringify({ userId }),
+    }),
+
   listMessages: (conversationId: string, beforeId?: string | null, limit = 50) => {
     const params = new URLSearchParams({ limit: String(limit) });
     if (beforeId) params.set("beforeId", beforeId);
