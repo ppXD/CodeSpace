@@ -374,6 +374,13 @@
 .acs-root .synced { color: var(--muted); font-size: 12.5px; font-feature-settings: "tnum"; }
 .acs-root .col-right { text-align: right; }
 .acs-root .col-center { text-align: center; }
+/* `.tbl thead th { text-align: left }` above carries (0,2,2) specificity and
+ * shadows the bare .col-* utilities on header cells — body cells inherit the
+ * utility correctly but the header text stayed flush-left, breaking the
+ * vertical alignment between header and column values. Re-state inside .tbl
+ * thead with (0,3,2) specificity so the utility wins on `<th>` as well. */
+.acs-root .tbl thead th.col-right { text-align: right; }
+.acs-root .tbl thead th.col-center { text-align: center; }
 .acs-root .row-act { display: inline-flex; gap: 2px; visibility: hidden; }
 .acs-root .tbl tbody tr:hover .row-act { visibility: visible; }
 .acs-root .row-act button { appearance: none; border: 0; background: transparent; color: var(--muted); width: 26px; height: 26px; border-radius: 5px; display: grid; place-items: center; cursor: pointer; }
