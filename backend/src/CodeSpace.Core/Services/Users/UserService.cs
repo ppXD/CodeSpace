@@ -74,6 +74,36 @@ public sealed class UserService : IUserService, IScopedDependency
     }
 
     /// <summary>
+    /// Members of a team = the owner (which may or may not also have a membership row) unioned
+    /// with the membership rows, deduplicated. Mirrors the visibility rule in
+    /// <see cref="BuildMeResponseAsync"/> (owner OR membership), so the owner is never dropped
+    /// just because the team was seeded without a self-membership row. Soft-deleted users fall
+    /// out; name-sorted for a stable picker.
+    /// </summary>
+    public async Task<IReadOnlyList<TeamMemberSummary>> ListTeamMembersAsync(Guid teamId, CancellationToken cancellationToken)
+    {
+        var ownerId = await _db.Team.AsNoTracking()
+            .Where(t => t.Id == teamId && t.DeletedDate == null)
+            .Select(t => (Guid?)t.OwnerUserId)
+            .SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
+
+        if (ownerId == null) return Array.Empty<TeamMemberSummary>();
+
+        var memberIds = await _db.TeamMembership.AsNoTracking()
+            .Where(m => m.TeamId == teamId)
+            .Select(m => m.UserId)
+            .ToListAsync(cancellationToken).ConfigureAwait(false);
+
+        var userIds = memberIds.Append(ownerId.Value).Distinct().ToList();
+
+        return await _db.User.AsNoTracking()
+            .Where(u => userIds.Contains(u.Id) && u.DeletedDate == null)
+            .OrderBy(u => u.Name)
+            .Select(u => new TeamMemberSummary { UserId = u.Id, Name = u.Name, Email = u.Email, AvatarUrl = u.AvatarUrl })
+            .ToListAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
     /// Accept either an email or a display name. Both sides lowered so we don't need CITEXT —
     /// fine for small user tables; OrderBy(Id) makes collision-resolution deterministic. The
     /// wrong-password check above still throws InvalidCredentials, so a colliding name can't

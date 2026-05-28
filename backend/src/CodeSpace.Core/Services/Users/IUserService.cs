@@ -13,4 +13,5 @@ public interface IUserService
     Task<SignInResponse> SignInAsync(string nameOrEmail, string password, CancellationToken cancellationToken);
     Task<ChangePasswordResponse> ChangePasswordAsync(string currentPassword, string newPassword, CancellationToken cancellationToken);
     Task<MeResponse> GetMeAsync(CancellationToken cancellationToken);
+    Task<IReadOnlyList<TeamMemberSummary>> ListTeamMembersAsync(Guid teamId, CancellationToken cancellationToken);
 }
