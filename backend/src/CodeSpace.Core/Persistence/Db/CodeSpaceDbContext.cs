@@ -41,6 +41,10 @@ public class CodeSpaceDbContext : DbContext, IUnitOfWork
     public DbSet<WorkflowRunNode> WorkflowRunNode => Set<WorkflowRunNode>();
     public DbSet<WorkflowRunVariable> WorkflowRunVariable => Set<WorkflowRunVariable>();
     public DbSet<Variable> Variable => Set<Variable>();
+    public DbSet<Conversation> Conversation => Set<Conversation>();
+    public DbSet<ConversationMember> ConversationMember => Set<ConversationMember>();
+    public DbSet<Message> Message => Set<Message>();
+    public DbSet<MessageReference> MessageReference => Set<MessageReference>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
