@@ -29,6 +29,59 @@ export interface TriggerConfigArrayShape {
   repositories: TriggerRepoEntry[];
 }
 
+/**
+ * Workflow-load-time migration: promote a legacy PR-trigger config
+ * <c>{ repositoryId, labels? }</c> to the new
+ * <c>{ repositories: [{ repositoryId, labels? }] }</c> shape so the inspector
+ * picker can render it. Targeted — only touches configs that look like the
+ * legacy shape (top-level string <c>repositoryId</c> AND no existing
+ * <c>repositories</c> array). All other config shapes pass through unchanged.
+ * Safe to call on non-trigger node configs because they don't carry a top-
+ * level <c>repositoryId</c> config field.
+ *
+ * <para>The matcher tolerates both shapes via its backward-compat shim
+ * (<c>PrTriggerMatcherFilter</c>), so this is purely a UI population fix.
+ * Storage gets cleaner as a side-effect: the next save writes only the new
+ * shape, dropping the legacy keys.</para>
+ */
+export function migrateLegacyPrTriggerConfig(config: Record<string, unknown>): Record<string, unknown> {
+  if (Array.isArray(config.repositories)) return config;
+  if (typeof config.repositoryId !== "string" || config.repositoryId.length === 0) return config;
+
+  const labels = Array.isArray(config.labels)
+    ? (config.labels as unknown[]).filter((l): l is string => typeof l === "string" && l.length > 0)
+    : [];
+
+  // Strip legacy keys + add the new array property. The matcher would have
+  // happily kept reading the legacy fields, but the picker can't surface them,
+  // so leaving them in would make storage perpetually noisier on every save.
+  const { repositoryId, labels: _labels, ...rest } = config;
+  return {
+    ...rest,
+    repositories: [labels.length > 0 ? { repositoryId, labels } : { repositoryId }],
+  };
+}
+
+/**
+ * Array-level normaliser used by the trigger inspector picker. Different
+ * scope from <see cref="migrateLegacyTriggerConfig"/>: that one normalises the
+ * WHOLE config (handles legacy <c>{ repositoryId, labels }</c> at the parent
+ * level); this one normalises just the <c>repositories</c> ARRAY because the
+ * SchemaForm dispatches via <c>x-selector</c> on the property level, passing
+ * only the array.
+ *
+ * Keeps in-progress empty-repositoryId entries so the "Add → Pick" flow
+ * survives a re-render. Drops clearly-malformed entries (nulls, non-objects,
+ * objects missing the repositoryId key, non-string repositoryId values).
+ *
+ * Returns <c>[]</c> for null / undefined / non-array input — the picker
+ * renders an empty list and the operator can add entries from there.
+ */
+export function normaliseRepositoriesArray(raw: unknown): TriggerRepoEntry[] {
+  if (!Array.isArray(raw)) return [];
+  return raw.flatMap(normaliseEntry);
+}
+
 export function migrateLegacyTriggerConfig(raw: unknown): TriggerConfigArrayShape {
   if (raw == null || typeof raw !== "object") return { repositories: [] };
 

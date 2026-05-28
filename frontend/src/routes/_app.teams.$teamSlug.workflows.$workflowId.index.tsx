@@ -34,6 +34,7 @@ import type {
   WorkflowDetail,
 } from "@/api/workflows";
 import { deriveActivations } from "@/lib/workflowActivations";
+import { migrateLegacyPrTriggerConfig } from "@/lib/migrateTriggerConfig";
 import { SchemaForm } from "@/components/workflows/SchemaForm";
 import { introspectScope } from "@/components/workflows/scope-introspection";
 import { VariableTablePanel } from "@/components/workflows/VariableTablePanel";
@@ -1043,7 +1044,14 @@ function initialBag(def: WorkflowDefinition, key: "config" | "inputs"): Record<s
   const out: Record<string, Record<string, unknown>> = {};
   for (const n of def.nodes) {
     const v = key === "config" ? n.config : n.inputs;
-    out[n.id] = (typeof v === "object" && v !== null) ? v as Record<string, unknown> : {};
+    const raw = (typeof v === "object" && v !== null) ? v as Record<string, unknown> : {};
+    // PR-trigger configs saved before #25 use the legacy `{ repositoryId, labels? }`
+    // shape. The new schema declares `repositories: [...]` and the picker only
+    // renders THAT property, so a legacy config would appear empty in the UI. Auto-
+    // migrate at load time so the operator sees their existing filter as one row.
+    // The matcher tolerates both shapes (PrTriggerMatcherFilter), so functional
+    // behaviour is identical — this is purely a UI population fix.
+    out[n.id] = key === "config" ? migrateLegacyPrTriggerConfig(raw) : raw;
   }
   return out;
 }
