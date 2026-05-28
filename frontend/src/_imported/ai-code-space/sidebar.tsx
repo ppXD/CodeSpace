@@ -4,6 +4,7 @@ import { createPortal } from "react-dom";
 
 import { clearAuthState } from "@/api/auth";
 import type { MeTeam } from "@/api/types";
+import { useChatDock } from "@/components/chat/ChatDockContext";
 import { teamToUrlSlug, useActiveTeam } from "@/hooks/use-me";
 
 import { Ic } from "./icons";
@@ -34,7 +35,7 @@ export function Sidebar() {
     || pathname.startsWith("/repositories")
     || /^\/teams\/[^/]+\/(repositories|projects)/.test(pathname);
   const isWorkflowsActive = /^\/teams\/[^/]+\/workflows/.test(pathname);
-  const isChatActive = /^\/teams\/[^/]+\/chat/.test(pathname);
+  const { isOpen: chatOpen, toggle: toggleChat } = useChatDock();
 
   // ── Team switcher ────────────────────────────────────────────────────────────
   const [teamOpen, setTeamOpen] = useState(false);
@@ -301,12 +302,8 @@ export function Sidebar() {
         </div>
         <div
           className="sb-nav-item"
-          data-active={isChatActive}
-          onClick={() => {
-            if (active) {
-              navigate({ to: "/teams/$teamSlug/chat", params: { teamSlug: teamToUrlSlug(active) } });
-            }
-          }}
+          data-active={chatOpen}
+          onClick={() => toggleChat()}
           title="Chat"
         >
           <span className="sb-nav-ic"><Ic.Chat size={15} /></span>

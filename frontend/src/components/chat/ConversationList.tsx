@@ -1,4 +1,3 @@
-import { Link } from "@tanstack/react-router";
 import { useState } from "react";
 
 import { Ic } from "@/_imported/ai-code-space/icons";
@@ -9,12 +8,12 @@ import { useTeamMemberMap } from "@/hooks/use-team-members";
 import { conversationTitle } from "./conversationTitle";
 
 /**
- * Left rail: the team's conversations + an inline "new channel" form. Each row deep-links to
- * <c>/teams/{slug}/chat/{conversationId}</c> so a conversation is shareable / back-button-able.
- * Channel slug is normalised server-side, so the create form sends the typed name as both name
- * and slug and lets the backend canonicalise.
+ * Conversation picker for the chat dock: the team's conversations + an inline "new channel"
+ * form. Selection is a callback (not a route) so picking a conversation swaps the dock's pane
+ * in place — no navigation, so you never leave whatever you're looking at. Channel slug is
+ * normalised server-side, so the form sends the typed name as both name and slug.
  */
-export function ConversationList({ teamSlug, activeConversationId }: { teamSlug: string; activeConversationId: string | null }) {
+export function ConversationList({ activeConversationId, onSelect }: { activeConversationId: string | null; onSelect: (conversationId: string) => void }) {
   const conversations = useConversations();
   const create = useCreateChannel();
   const members = useTeamMemberMap();
@@ -27,9 +26,10 @@ export function ConversationList({ teamSlug, activeConversationId }: { teamSlug:
     const trimmed = name.trim();
     if (!trimmed || create.isPending) return;
 
-    await create.mutateAsync({ name: trimmed, slug: trimmed });
+    const created = await create.mutateAsync({ name: trimmed, slug: trimmed });
     setName("");
     setAdding(false);
+    onSelect(created.id);   // jump straight into the channel you just made
   };
 
   const rows = conversations.data ?? [];
@@ -68,16 +68,16 @@ export function ConversationList({ teamSlug, activeConversationId }: { teamSlug:
         )}
 
         {rows.map(c => (
-          <Link
+          <button
             key={c.id}
-            to="/teams/$teamSlug/chat/$conversationId"
-            params={{ teamSlug, conversationId: c.id }}
+            type="button"
             className="chat-conv"
             data-active={c.id === activeConversationId}
+            onClick={() => onSelect(c.id)}
           >
             <span className="chat-conv-icon">{c.kind === "Channel" ? "#" : <Ic.Chat size={13} />}</span>
             <span className="chat-conv-name">{conversationTitle(c, members, me.data?.id ?? null)}</span>
-          </Link>
+          </button>
         ))}
       </div>
     </div>
