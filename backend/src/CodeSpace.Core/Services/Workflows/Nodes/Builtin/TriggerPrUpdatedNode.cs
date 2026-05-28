@@ -22,7 +22,7 @@ public sealed class TriggerPrUpdatedNode : INodeRuntime
                   "type": "array",
                   "x-selector": "trigger.repositories",
                   "default": [],
-                  "description": "Repositories this trigger fires on. Each entry binds a repo to its own label filter. Use the 'Match every repository' checkbox above the list to fire on all repos in this team instead.",
+                  "description": "Each row = one repo + its required labels (AND match).",
                   "items": {
                     "type": "object",
                     "properties": {
@@ -34,7 +34,7 @@ public sealed class TriggerPrUpdatedNode : INodeRuntime
                       "labels": {
                         "type": "array",
                         "items": { "type": "string" },
-                        "description": "Only fire when the PR carries every label listed here (case-sensitive). Leave empty / omit to ignore labels for this repo."
+                        "description": "PR must carry every label listed (case-sensitive)."
                       }
                     },
                     "required": ["repositoryId"],

@@ -157,14 +157,14 @@ export function TriggerRepositoriesSelector({ value, onChange }: TriggerReposito
       {!matchAll && entries.length === 0 && (
         <div className="wf-trigger-repos-hint">
           <span aria-hidden="true">ⓘ</span>
-          <span>No repositories selected — this trigger fires on nothing yet. Add a row above, or check "Match every repository" for team-wide triggers.</span>
+          <span>Fires on no repositories.</span>
         </div>
       )}
 
       {matchAll && (
         <div className="wf-trigger-repos-hint">
           <span aria-hidden="true">ⓘ</span>
-          <span>This trigger fires on PRs from every repository bound to this team. Uncheck above to scope to specific repos.</span>
+          <span>Fires on every repository in this team.</span>
         </div>
       )}
     </div>
@@ -242,7 +242,10 @@ function TriggerRepoRow({
       </div>
 
       <div className="wf-trigger-repos-row-labels">
-        <span className="wf-trigger-repos-field-label">Labels (PR must carry all):</span>
+        <span
+          className="wf-trigger-repos-field-label"
+          title="PR must carry every listed label (AND match)"
+        >Labels:</span>
         <LabelChipsInput
           value={entry.labels ?? []}
           onChange={onChangeLabels}

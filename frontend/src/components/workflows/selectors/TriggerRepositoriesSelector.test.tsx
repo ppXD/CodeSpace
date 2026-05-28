@@ -49,7 +49,7 @@ describe("TriggerRepositoriesSelector — safe default + match-all checkbox", ()
     const checkbox = screen.getByRole("checkbox", { name: /Match every repository/i }) as HTMLInputElement;
     expect(checkbox.checked).toBe(false);
     expect(screen.getByTestId("trigger-repositories-list")).toBeInTheDocument();
-    expect(screen.getByText(/this trigger fires on nothing yet/i)).toBeInTheDocument();
+    expect(screen.getByText(/Fires on no repositories/i)).toBeInTheDocument();
   });
 
   it("undefined value: checkbox checked, list hidden, footer confirms team-wide trigger", () => {
@@ -61,7 +61,7 @@ describe("TriggerRepositoriesSelector — safe default + match-all checkbox", ()
     const checkbox = screen.getByRole("checkbox", { name: /Match every repository/i }) as HTMLInputElement;
     expect(checkbox.checked).toBe(true);
     expect(screen.queryByTestId("trigger-repositories-list")).not.toBeInTheDocument();
-    expect(screen.getByText(/fires on PRs from every repository/i)).toBeInTheDocument();
+    expect(screen.getByText(/Fires on every repository in this team/i)).toBeInTheDocument();
   });
 
   it("populated array value: checkbox unchecked, rows render", () => {
@@ -125,7 +125,10 @@ describe("TriggerRepositoriesSelector — safe default + match-all checkbox", ()
 
     expect(screen.getByText(/^Project:$/)).toBeInTheDocument();
     expect(screen.getByText(/^Repository:$/)).toBeInTheDocument();
-    expect(screen.getByText(/Labels \(PR must carry all\):/)).toBeInTheDocument();
+    // Labels label is terse; the "AND match" semantic lives in the title
+    // attribute (tooltip) and the schema description, NOT the visible text.
+    expect(screen.getByText(/^Labels:$/)).toBeInTheDocument();
+    expect(screen.getByText(/^Labels:$/)).toHaveAttribute("title", expect.stringMatching(/AND match/));
   });
 
   it("row with no labels shows the (none) placeholder", () => {
