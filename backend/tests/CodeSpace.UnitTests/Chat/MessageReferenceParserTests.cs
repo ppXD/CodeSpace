@@ -138,4 +138,34 @@ public class MessageReferenceParserTests
         refs[0].RefId.ShouldBe("a");
         refs[1].RefId.ShouldBe("b");
     }
+
+    // ─── ToPlainText (preview rendering) ─────────────────────────────────────────
+
+    [Theory]
+    [InlineData(null, "")]
+    [InlineData("", "")]
+    [InlineData("just text", "just text")]
+    public void ToPlainText_passes_through_bodies_without_tokens(string? body, string expected)
+    {
+        MessageReferenceParser.ToPlainText(body).ShouldBe(expected);
+    }
+
+    [Fact]
+    public void ToPlainText_replaces_a_token_with_its_label_keeping_surrounding_text()
+    {
+        MessageReferenceParser.ToPlainText("Hello <user:u1|Alice>, welcome!").ShouldBe("Hello Alice, welcome!");
+    }
+
+    [Fact]
+    public void ToPlainText_uses_the_refid_when_a_token_has_no_label()
+    {
+        MessageReferenceParser.ToPlainText("see <pull_request:repo#42>").ShouldBe("see repo#42");
+    }
+
+    [Fact]
+    public void ToPlainText_replaces_every_token()
+    {
+        MessageReferenceParser.ToPlainText("<user:u1|Alice> and <workflow:w9|Deploy> done")
+            .ShouldBe("Alice and Deploy done");
+    }
 }

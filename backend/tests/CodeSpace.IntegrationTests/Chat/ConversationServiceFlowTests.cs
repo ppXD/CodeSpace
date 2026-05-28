@@ -346,7 +346,115 @@ public class ConversationServiceFlowTests
             () => verify.Resolve<IConversationService>().AddMemberAsync(teamId, outsider, channelId, newcomer, default));
     }
 
+    // ─── Recent-conversations overview (last message + recency) ──────────────────────
+
+    [Fact]
+    public async Task ListForUser_populates_a_token_stripped_last_message_preview()
+    {
+        var (teamId, owner) = await SeedTeamAsync();
+        var channelId = await SeedChannelAsync(teamId, owner, "general");
+        var mentioned = Guid.NewGuid();
+
+        await SeedMessageAsync(teamId, channelId, owner, $"hi <user:{mentioned}|Alice> welcome", DateTimeOffset.UtcNow);
+
+        using var verify = _fixture.BeginScope();
+        var row = (await verify.Resolve<IConversationService>().ListForUserAsync(teamId, owner, default)).Single(c => c.Id == channelId);
+
+        row.LastMessage.ShouldNotBeNull();
+        row.LastMessage!.AuthorUserId.ShouldBe(owner);
+        row.LastMessage.IsDeleted.ShouldBeFalse();
+        row.LastMessage.Preview.ShouldBe("hi Alice welcome", customMessage: "Preview must strip reference tokens to their labels.");
+        row.LastActivityDate.ShouldBe(row.LastMessage.CreatedDate);
+    }
+
+    [Fact]
+    public async Task ListForUser_surfaces_the_latest_message_not_an_earlier_one()
+    {
+        var (teamId, owner) = await SeedTeamAsync();
+        var channelId = await SeedChannelAsync(teamId, owner, "general");
+
+        var t0 = DateTimeOffset.UtcNow;
+        await SeedMessageAsync(teamId, channelId, owner, "first", t0);
+        await SeedMessageAsync(teamId, channelId, owner, "latest", t0.AddSeconds(5));
+
+        using var verify = _fixture.BeginScope();
+        var row = (await verify.Resolve<IConversationService>().ListForUserAsync(teamId, owner, default)).Single(c => c.Id == channelId);
+
+        row.LastMessage!.Preview.ShouldBe("latest", customMessage: "DISTINCT ON must surface the newest message per conversation.");
+    }
+
+    [Fact]
+    public async Task ListForUser_orders_conversations_by_recent_activity_newest_first()
+    {
+        var (teamId, owner) = await SeedTeamAsync();
+        var older = await SeedChannelAsync(teamId, owner, "older");
+        var newer = await SeedChannelAsync(teamId, owner, "newer");
+        var empty = await SeedChannelAsync(teamId, owner, "empty");
+
+        var t0 = DateTimeOffset.UtcNow;
+        await SeedMessageAsync(teamId, older, owner, "old chatter", t0);
+        await SeedMessageAsync(teamId, newer, owner, "new chatter", t0.AddMinutes(10));
+
+        using var verify = _fixture.BeginScope();
+        var ids = (await verify.Resolve<IConversationService>().ListForUserAsync(teamId, owner, default)).Select(c => c.Id).ToList();
+
+        ids.IndexOf(newer).ShouldBeLessThan(ids.IndexOf(older), customMessage: "A conversation with a newer message must sort first.");
+        ids.IndexOf(older).ShouldBeLessThan(ids.IndexOf(empty), customMessage: "An empty conversation (created earliest) sorts after one with later activity.");
+    }
+
+    [Fact]
+    public async Task ListForUser_shows_a_deleted_last_message_as_a_blank_tombstone()
+    {
+        var (teamId, owner) = await SeedTeamAsync();
+        var channelId = await SeedChannelAsync(teamId, owner, "general");
+
+        await SeedMessageAsync(teamId, channelId, owner, "secret", DateTimeOffset.UtcNow, deleted: true);
+
+        using var verify = _fixture.BeginScope();
+        var row = (await verify.Resolve<IConversationService>().ListForUserAsync(teamId, owner, default)).Single(c => c.Id == channelId);
+
+        row.LastMessage.ShouldNotBeNull();
+        row.LastMessage!.IsDeleted.ShouldBeTrue();
+        row.LastMessage.Preview.ShouldBeEmpty(customMessage: "A deleted last message must not leak its content into the list preview.");
+    }
+
+    [Fact]
+    public async Task ListForUser_leaves_last_message_null_and_falls_back_to_created_for_an_empty_conversation()
+    {
+        var (teamId, owner) = await SeedTeamAsync();
+        var channelId = await SeedChannelAsync(teamId, owner, "quiet");
+
+        using var verify = _fixture.BeginScope();
+        var row = (await verify.Resolve<IConversationService>().ListForUserAsync(teamId, owner, default)).Single(c => c.Id == channelId);
+
+        row.LastMessage.ShouldBeNull();
+        row.LastActivityDate.ShouldBe(row.CreatedDate, customMessage: "With no messages, last activity falls back to the conversation's creation.");
+    }
+
     // ─── Helpers ───────────────────────────────────────────────────────────────────
+
+    private async Task<Guid> SeedChannelAsync(Guid teamId, Guid ownerId, string slug)
+    {
+        using var scope = _fixture.BeginScope();
+        return await scope.Resolve<IConversationService>().CreateChannelAsync(teamId, slug, slug, false, ownerId, default);
+    }
+
+    private async Task<Guid> SeedMessageAsync(Guid teamId, Guid conversationId, Guid authorId, string body, DateTimeOffset createdAt, bool deleted = false)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+
+        // CreateVersion7(timestamp) makes the id sort by createdAt, so DISTINCT ON (id DESC) picks
+        // the latest deterministically — no inter-insert delays needed.
+        var id = Guid.CreateVersion7(createdAt);
+        db.Message.Add(new Message
+        {
+            Id = id, ConversationId = conversationId, TeamId = teamId, AuthorUserId = authorId,
+            Body = body, CreatedDate = createdAt, DeletedDate = deleted ? createdAt : null,
+        });
+        await db.SaveChangesAsync();
+        return id;
+    }
 
     private async Task<(Guid TeamId, Guid UserId)> SeedTeamAsync()
     {
