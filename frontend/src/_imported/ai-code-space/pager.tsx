@@ -9,11 +9,22 @@ import { Ic } from "./icons";
  * matches GitHub's PR list pattern exactly. When it's null (e.g. provider can't
  * give us a cheap total), falls back to an open-ended shape (no last anchor;
  * Next-arrow drives discovery one page at a time).
+ *
+ * <p><b>Loading state does NOT gate navigation.</b> The <code>loading</code>
+ * prop is exposed for callers that might want it (e.g. a future spinner badge),
+ * but page-number / Previous / Next buttons remain clickable while data loads.
+ * Disabling navigation during fetches stranded operators on the first page
+ * while the eager-fetch loop ran for tens of seconds — a worse UX than letting
+ * them queue a page change that becomes visible the moment its data arrives.
+ * Disabled state now reflects only structural constraints: current page,
+ * `current === 1` (Previous), `!hasNext` (Next).</p>
  */
-export function Pager({ current, totalPages, hasNext, loading, onChange }: {
+export function Pager({ current, totalPages, hasNext, loading: _loading, onChange }: {
   current: number;
   totalPages: number | null;
   hasNext: boolean;
+  /** Kept in the signature so existing callers compile unchanged; deliberately
+   *  unused by this component (see component doc). */
   loading: boolean;
   onChange: (next: number) => void;
 }) {
@@ -25,7 +36,7 @@ export function Pager({ current, totalPages, hasNext, loading, onChange }: {
     <nav className="pr-pager" aria-label="Pagination">
       <button
         className="pr-pager-step"
-        disabled={current === 1 || loading}
+        disabled={current === 1}
         onClick={() => onChange(current - 1)}
         aria-label="Previous page"
       >
@@ -40,7 +51,7 @@ export function Pager({ current, totalPages, hasNext, loading, onChange }: {
               key={p}
               className="pr-pager-num"
               data-current={p === current}
-              disabled={p === current || loading}
+              disabled={p === current}
               onClick={() => onChange(p)}
               aria-label={`Page ${p}`}
               aria-current={p === current ? "page" : undefined}
@@ -52,7 +63,7 @@ export function Pager({ current, totalPages, hasNext, loading, onChange }: {
 
       <button
         className="pr-pager-step"
-        disabled={!hasNext || loading}
+        disabled={!hasNext}
         onClick={() => onChange(current + 1)}
         aria-label="Next page"
       >
