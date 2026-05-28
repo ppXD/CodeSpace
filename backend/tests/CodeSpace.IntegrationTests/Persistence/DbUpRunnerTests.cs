@@ -29,6 +29,10 @@ public class DbUpRunnerTests
     [InlineData("credential")]
     [InlineData("repository")]
     [InlineData("repository_webhook")]
+    [InlineData("conversation")]
+    [InlineData("conversation_member")]
+    [InlineData("message")]
+    [InlineData("message_reference")]
     public async Task Table_exists_after_migration(string tableName)
     {
         var exists = await TableExistsAsync(tableName).ConfigureAwait(false);
