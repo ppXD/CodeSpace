@@ -2807,13 +2807,15 @@
 .acs-root .chat-list-title {
   font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .04em; color: var(--muted);
 }
-/* Inline channel creator (opened from the rail header "+"): input + Add + Cancel. */
-.acs-root .chat-create { display: flex; gap: 6px; padding: 8px 10px; border-bottom: 1px solid var(--line); flex-shrink: 0; }
+/* Channel creator — pinned in the Channels-tab footer (.chat-rail-foot): an accent button that
+   expands to an input + Add + Cancel form. The footer owns the padding + top border. */
+.acs-root .chat-create { display: flex; gap: 6px; }
 .acs-root .chat-create-input {
   flex: 1; min-width: 0; border: 1px solid var(--line); border-radius: var(--radius-sm);
   background: var(--panel); color: var(--ink); padding: 6px 8px; font: inherit; font-size: 13px;
 }
 .acs-root .chat-create-input:focus { outline: none; border-color: var(--accent); }
+.acs-root .chat-create-btn { width: 100%; justify-content: center; }
 .acs-root .chat-list-body { flex: 1; overflow-y: auto; padding: 4px 8px 12px; }
 
 .acs-root .chat-conv {
@@ -2918,8 +2920,6 @@ body.chat-resizing .acs-root .app { transition: none; }
   display: flex; align-items: center; justify-content: space-between; padding: 12px 12px 10px; flex-shrink: 0;
 }
 .acs-root .chat-rail-title { font-size: 16px; font-weight: 700; color: var(--ink); }
-.acs-root .chat-rail-head-actions { display: flex; align-items: center; gap: 2px; }
-.acs-root .chat-rail-head-actions .chrome-btn[data-active="true"] { background: var(--accent-soft); color: var(--accent); }
 .acs-root .chat-rail-tabs { display: flex; gap: 2px; padding: 0 8px; border-bottom: 1px solid var(--line); flex-shrink: 0; }
 .acs-root .chat-rail-tab {
   appearance: none; border: none; background: none; cursor: pointer;
@@ -2931,3 +2931,4 @@ body.chat-resizing .acs-root .app { transition: none; }
 .acs-root .chat-rail-hash { font-size: 16px; font-weight: 700; line-height: 1; }
 .acs-root .chat-rail-body { flex: 1; min-height: 0; display: flex; flex-direction: column; }
 .acs-root .chat-rail-body .chat-list { flex: 1; min-height: 0; border-right: none; background: transparent; }
+.acs-root .chat-rail-foot { flex-shrink: 0; padding: 8px 10px; border-top: 1px solid var(--line); }

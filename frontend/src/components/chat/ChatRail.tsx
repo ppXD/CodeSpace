@@ -8,10 +8,10 @@ import { ChatMemberList } from "./ChatMemberList";
 import { ConversationList } from "./ConversationList";
 
 /**
- * The persistent right rail — your always-available entry into chat. A "+" in the header creates
- * a channel (an inline form with Add + Cancel, so it's escapable). Tabs (Space-style): Home (all
- * recent conversations), Channels (channels only), Members (the roster → click opens a DM).
- * Picking anything opens it in the centre panel. Renders nothing while the dock is closed.
+ * The persistent right rail. Tabs (Space-style): Home (all recent conversations), Channels
+ * (channels you're in — no self-join; you're added by invite), Members (the roster → click opens
+ * a DM). Channel creation is an accent button pinned at the bottom of the Channels tab; it
+ * expands to an escapable Add/Cancel form. Renders nothing while the dock is closed.
  */
 type ChatTab = "home" | "channels" | "members";
 const TAB_KEY = "codespace.chatRail.tab";
@@ -27,6 +27,7 @@ export function ChatRail() {
 
   const setTab = (next: ChatTab) => {
     setTabState(next);
+    setCreating(false);
     localStorage.setItem(TAB_KEY, next);
   };
 
@@ -48,14 +49,9 @@ export function ChatRail() {
     <aside className="chat-rail" aria-label="Chats">
       <div className="chat-rail-head">
         <span className="chat-rail-title">Chats</span>
-        <div className="chat-rail-head-actions">
-          <button className="chrome-btn" title="New channel" aria-label="New channel" data-active={creating} onClick={() => setCreating(c => !c)}>
-            <Ic.Plus size={15} />
-          </button>
-          <button className="chrome-btn" title="Close chat" aria-label="Close chat" onClick={close}>
-            <Ic.ChevronRight size={14} />
-          </button>
-        </div>
+        <button className="chrome-btn" title="Close chat" aria-label="Close chat" onClick={close}>
+          <Ic.ChevronRight size={14} />
+        </button>
       </div>
 
       <div className="chat-rail-tabs" role="tablist">
@@ -70,29 +66,37 @@ export function ChatRail() {
         </button>
       </div>
 
-      {creating && (
-        <div className="chat-create">
-          <input
-            className="chat-create-input"
-            value={name}
-            autoFocus
-            placeholder="New channel name"
-            onChange={(e) => setName(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter") submitCreate();
-              if (e.key === "Escape") cancelCreate();
-            }}
-          />
-          <button className="btn btn-primary" onClick={submitCreate} disabled={create.isPending || name.trim().length === 0}>Add</button>
-          <button className="btn btn-ghost" onClick={cancelCreate}>Cancel</button>
-        </div>
-      )}
-
       <div className="chat-rail-body">
         {tab === "home" && <ConversationList activeConversationId={activeConversationId} onSelect={setActiveConversationId} />}
         {tab === "channels" && <ConversationList activeConversationId={activeConversationId} onSelect={setActiveConversationId} filter={c => c.kind === "Channel"} />}
         {tab === "members" && <ChatMemberList onOpened={setActiveConversationId} />}
       </div>
+
+      {tab === "channels" && (
+        <div className="chat-rail-foot">
+          {creating ? (
+            <div className="chat-create">
+              <input
+                className="chat-create-input"
+                value={name}
+                autoFocus
+                placeholder="New channel name"
+                onChange={(e) => setName(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") submitCreate();
+                  if (e.key === "Escape") cancelCreate();
+                }}
+              />
+              <button className="btn btn-primary" onClick={submitCreate} disabled={create.isPending || name.trim().length === 0}>Add</button>
+              <button className="btn btn-ghost" onClick={cancelCreate}>Cancel</button>
+            </div>
+          ) : (
+            <button className="btn btn-primary chat-create-btn" onClick={() => setCreating(true)}>
+              <Ic.Plus size={14} /> New channel
+            </button>
+          )}
+        </div>
+      )}
     </aside>
   );
 }

@@ -54,11 +54,13 @@ describe("ChatRail", () => {
     expect(screen.getByTestId("member-list")).toBeInTheDocument();
   });
 
-  it("the header + reveals a create form, and Cancel dismisses it", () => {
+  it("Channels-tab footer has a New channel button that opens an escapable form", () => {
     render(<ChatRail />);
-    expect(screen.queryByPlaceholderText("New channel name")).not.toBeInTheDocument();
+    // Home (default) has no create button — channel creation lives only under the Channels tab.
+    expect(screen.queryByRole("button", { name: /new channel/i })).not.toBeInTheDocument();
 
-    fireEvent.click(screen.getByLabelText("New channel"));
+    fireEvent.click(screen.getByTitle("Channels"));
+    fireEvent.click(screen.getByRole("button", { name: /new channel/i }));
     expect(screen.getByPlaceholderText("New channel name")).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: /cancel/i }));
