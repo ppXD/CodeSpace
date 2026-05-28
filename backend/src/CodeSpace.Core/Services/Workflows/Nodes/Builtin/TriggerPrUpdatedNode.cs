@@ -52,10 +52,9 @@ public sealed class TriggerPrUpdatedNode : INodeRuntime
               "properties": {
                 "repositoryId": { "type": "string", "format": "uuid" },
                 "number": { "type": "integer" },
-                "title": { "type": "string" },
-                "sourceBranch": { "type": "string" },
-                "targetBranch": { "type": "string" },
-                "webUrl": { "type": "string" }
+                "previousHeadSha": { "type": "string" },
+                "newHeadSha": { "type": "string" },
+                "labels": { "type": "array", "items": { "type": "string" } }
               }
             }
             """)
