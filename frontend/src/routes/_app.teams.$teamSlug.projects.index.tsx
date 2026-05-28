@@ -481,7 +481,7 @@ function ImportStep({ onBack, onClose, onCreated }: { onBack: () => void; onClos
             </div>
           )}
 
-          {accessible.error && (
+          {accessible.error != null && (
             <div className="cn-banner cn-banner-err">
               <div className="cn-banner-p">{accessible.error instanceof Error ? accessible.error.message : "Could not load repositories."}</div>
             </div>
