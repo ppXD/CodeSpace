@@ -373,6 +373,7 @@
 .acs-root .pill-dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
 .acs-root .synced { color: var(--muted); font-size: 12.5px; font-feature-settings: "tnum"; }
 .acs-root .col-right { text-align: right; }
+.acs-root .col-center { text-align: center; }
 .acs-root .row-act { display: inline-flex; gap: 2px; visibility: hidden; }
 .acs-root .tbl tbody tr:hover .row-act { visibility: visible; }
 .acs-root .row-act button { appearance: none; border: 0; background: transparent; color: var(--muted); width: 26px; height: 26px; border-radius: 5px; display: grid; place-items: center; cursor: pointer; }

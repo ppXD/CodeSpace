@@ -121,9 +121,8 @@ function ProjectsListPage() {
           <table className="tbl">
             <thead>
               <tr>
-                <th style={{ width: "50%" }}>Project</th>
-                <th>Repositories</th>
-                <th>Variables</th>
+                <th style={{ width: "55%" }}>Project</th>
+                <th className="col-center">Repositories</th>
                 <th>Created</th>
               </tr>
             </thead>
@@ -157,8 +156,7 @@ function ProjectsListPage() {
                       </div>
                     </div>
                   </td>
-                  <td>{p.activeRepositoryCount}</td>
-                  <td>{p.activeVariableCount}</td>
+                  <td className="col-center">{p.activeRepositoryCount}</td>
                   <td className="synced">{formatRelative(p.createdDate)}</td>
                 </tr>
               ))}
