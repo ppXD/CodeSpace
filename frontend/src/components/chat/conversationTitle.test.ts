@@ -12,7 +12,7 @@ function conv(partial: Partial<ConversationSummary>): ConversationSummary {
   return {
     id: "c", kind: "Channel", slug: null, name: null, description: null,
     visibility: "Public", archived: false, memberCount: 0, memberUserIds: [], createdDate: "",
-    lastMessage: null, lastActivityDate: "",
+    lastMessage: null, lastActivityDate: "", lastReadMessageId: null,
     ...partial,
   };
 }
