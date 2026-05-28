@@ -3,13 +3,10 @@ using CodeSpace.Messages.Enums;
 namespace CodeSpace.Messages.Dtos.Chat;
 
 /// <summary>
-/// Operator-facing row for a conversation in the sidebar list. One shape covers DM / group /
+/// Operator-facing row for a conversation in the chat list. One shape covers DM / group /
 /// channel — the frontend renders the title differently per <see cref="Kind"/> (a DM shows the
-/// other member's name; a channel shows <c>#slug</c>).
-///
-/// <para>Message-derived fields (last-message preview, unread count) are intentionally absent
-/// here — they arrive with the message layer (next PR). This DTO is the conversation-metadata
-/// view only.</para>
+/// other member's name; a channel shows <c>#slug</c>) and the row's preview from
+/// <see cref="LastMessage"/>.
 /// </summary>
 public sealed record ConversationSummary
 {
@@ -32,4 +29,12 @@ public sealed record ConversationSummary
     public required IReadOnlyList<Guid> MemberUserIds { get; init; }
 
     public required DateTimeOffset CreatedDate { get; init; }
+
+    /// <summary>Most-recent message preview, for the list row. Populated by the list ("recent
+    /// conversations") path; null on a single get and for a conversation with no messages yet.</summary>
+    public MessagePreview? LastMessage { get; init; }
+
+    /// <summary>When the conversation last saw activity — the last message's time, else
+    /// <see cref="CreatedDate"/>. The list sorts on this newest-first (the "recent" order).</summary>
+    public required DateTimeOffset LastActivityDate { get; init; }
 }

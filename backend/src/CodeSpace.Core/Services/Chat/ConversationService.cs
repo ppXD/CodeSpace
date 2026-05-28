@@ -4,6 +4,7 @@ using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Messages.Dtos.Chat;
 using CodeSpace.Messages.Enums;
 using Microsoft.EntityFrameworkCore;
+using Npgsql;
 
 namespace CodeSpace.Core.Services.Chat;
 
@@ -109,7 +110,12 @@ public sealed class ConversationService : IConversationService, IScopedDependenc
         var summaries = await QuerySummaries(c => c.TeamId == teamId && conversationIds.Contains(c.Id) && c.DeletedDate == null)
             .ToListAsync(cancellationToken).ConfigureAwait(false);
 
-        return summaries.OrderByDescending(s => s.CreatedDate).ToList();
+        var previews = await LoadLastMessagesAsync(teamId, conversationIds, cancellationToken).ConfigureAwait(false);
+
+        return summaries
+            .Select(s => previews.TryGetValue(s.Id, out var preview) ? s with { LastMessage = preview, LastActivityDate = preview.CreatedDate } : s)
+            .OrderByDescending(s => s.LastActivityDate)
+            .ToList();
     }
 
     public async Task<ConversationSummary?> GetAsync(Guid teamId, Guid userId, Guid conversationId, CancellationToken cancellationToken)
@@ -213,8 +219,52 @@ public sealed class ConversationService : IConversationService, IScopedDependenc
                     .Select(m => m.UserId)
                     .ToList(),
                 CreatedDate = c.CreatedDate,
+                LastActivityDate = c.CreatedDate,   // overridden with the last message's time in the list path
             });
     }
+
+    // ─── Last-message previews (for the "recent conversations" list) ─────────────────
+
+    private const int MaxPreviewLength = 140;
+
+    /// <summary>
+    /// The latest message per conversation in ONE pass over the (conversation_id, id DESC) index:
+    /// DISTINCT ON keeps the highest id (newest, since UUID v7 sorts by time) per conversation.
+    /// LEFT(body, …) ships only enough for a preview — never whole 16k bodies — so this stays cheap
+    /// no matter how long the messages are. Keyed by conversation id for the merge.
+    /// </summary>
+    private async Task<Dictionary<Guid, MessagePreview>> LoadLastMessagesAsync(Guid teamId, List<Guid> conversationIds, CancellationToken cancellationToken)
+    {
+        const string sql =
+            "SELECT DISTINCT ON (conversation_id) "
+            + "id, conversation_id, team_id, author_user_id, LEFT(body, 280) AS body, reply_to_message_id, created_date, edited_date, deleted_date "
+            + "FROM message WHERE team_id = @team AND conversation_id = ANY(@convs) "
+            + "ORDER BY conversation_id, id DESC";
+
+        var rows = await _db.Message.FromSqlRaw(sql,
+                new NpgsqlParameter("team", teamId),
+                new NpgsqlParameter("convs", conversationIds.ToArray()))
+            .AsNoTracking()
+            .ToListAsync(cancellationToken).ConfigureAwait(false);
+
+        return rows.ToDictionary(m => m.ConversationId, ToPreview);
+    }
+
+    private static MessagePreview ToPreview(Message message)
+    {
+        var deleted = message.DeletedDate != null;
+
+        return new MessagePreview
+        {
+            MessageId = message.Id,
+            AuthorUserId = message.AuthorUserId,
+            Preview = deleted ? string.Empty : Truncate(MessageReferenceParser.ToPlainText(message.Body), MaxPreviewLength),
+            CreatedDate = message.CreatedDate,
+            IsDeleted = deleted,
+        };
+    }
+
+    private static string Truncate(string text, int max) => text.Length <= max ? text : text[..max].TrimEnd() + "…";
 
     private static ConversationMember BuildMember(Guid conversationId, Guid teamId, Guid userId, ConversationMemberRole role) => new()
     {
