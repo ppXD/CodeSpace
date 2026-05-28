@@ -11,29 +11,44 @@ import {
 
 /**
  * Trigger-inspector picker for the
- * <c>{ repositories: [{ repositoryId, labels? }] }</c> config shape (see PR #23
- * for the matcher side). Renders a list editor:
+ * <c>{ repositories: [{ repositoryId, labels? }] }</c> config shape (PR #23).
+ * Renders a list editor:
  *
- *   ┌─ row ────────────────────────────────────────────────────────┐
- *   │  [ Project ▾ ]   [ Repo ▾ ]   [ label-1  label-2  + ]   [✕] │
+ *   ┌─ card ──────────────────────────────────────────────────────┐
+ *   │  Project: [Backend ▾]   Repository: [api ▾]            [×] │
+ *   │  Labels (PR must carry all):  [bug ×]  [release ×]  ⌷      │
+ *   ├──────────────────────────────────────────────────────────────┤
+ *   │  Project: [Backend ▾]   Repository: [cli ▾]            [×] │
+ *   │  Labels (PR must carry all):  (none)                         │
+ *   ├──────────────────────────────────────────────────────────────┤
+ *   │  + Add repository                                            │
  *   └──────────────────────────────────────────────────────────────┘
+ *   ⓘ Leave list empty to trigger on any repo in this team.
  *
  * The project dropdown narrows the repo dropdown (cascade) — picking
  * <c>frontend-platform</c> shows only repos linked to that project. This is
  * UX-only; the saved shape is still <c>{ repositoryId, labels }</c> per row,
  * no project-id stored. The matcher dispatches on repositoryId.
  *
+ * <h3>Empty list = match-all</h3>
+ * When the operator clears every row, the picker emits <c>{}</c> (no
+ * <c>repositories</c> key at all) so the matcher's empty-config → match-all
+ * path fires. The explicit <c>{ repositories: [] }</c> "match nothing" shape
+ * still exists at the wire level for API callers; the picker just never
+ * produces it.
+ *
  * <h3>Auto-migration</h3>
- * The incoming <c>value</c> may be the legacy <c>{ repositoryId, labels? }</c>
- * shape (configs saved before PR #23). The selector normalises through
- * <see cref="migrateLegacyTriggerConfig"/> before render; the first
- * <c>onChange</c> emits the new array shape, so the storage row auto-migrates
- * on first save. No offline data migration job needed.
+ * Incoming <c>value</c> may be the legacy <c>{ repositoryId, labels? }</c>
+ * (configs saved before PR #23) or <c>{ repositories: [] }</c> from an
+ * intermediate save. The selector normalises through
+ * <see cref="migrateLegacyTriggerConfig"/> for display; the first
+ * <c>onChange</c> emits the shape this picker prefers, so storage
+ * transparently upgrades on first save.
  */
 
 interface TriggerRepositoriesSelectorProps {
   value: unknown;
-  onChange: (next: TriggerConfigArrayShape) => void;
+  onChange: (next: TriggerConfigArrayShape | Record<string, never>) => void;
 }
 
 export function TriggerRepositoriesSelector({ value, onChange }: TriggerRepositoriesSelectorProps) {
@@ -60,11 +75,14 @@ export function TriggerRepositoriesSelector({ value, onChange }: TriggerReposito
     return repoRows.find((r) => r.id === entry.repositoryId)?.projects?.[0]?.id ?? "";
   };
 
-  // Emit the raw shape (including in-progress empty-repositoryId rows) so the picker
-  // can survive a re-render with the row the user just added. The matcher tolerates
-  // empty entries (PrTriggerMatcherFilter.EntryMatches skips them), and a parent that
-  // wants a clean wire format can call normaliseTriggerConfigForSave at save time.
-  const emit = (next: TriggerRepoEntry[]) => onChange({ repositories: next });
+  // Emit `{}` when the list is empty so the matcher's empty-config → match-all
+  // path fires (see component-level doc). Emit the full shape when there's at
+  // least one row (including in-progress empty-repositoryId rows; the matcher
+  // tolerates them as "no match" until the operator picks the repo).
+  const emit = (next: TriggerRepoEntry[]) => {
+    if (next.length === 0) onChange({});
+    else onChange({ repositories: next });
+  };
 
   const addRow = () => emit([...shape.repositories, { repositoryId: "" }]);
 
@@ -101,30 +119,31 @@ export function TriggerRepositoriesSelector({ value, onChange }: TriggerReposito
 
   return (
     <div className="wf-trigger-repos" data-testid="trigger-repositories-selector">
-      {shape.repositories.length === 0 && (
-        <div className="wf-trigger-repos-empty">
-          No repositories selected — the trigger fires on every repo bound to this team. Add a row to scope it.
-        </div>
-      )}
+      <div className="wf-trigger-repos-card">
+        {shape.repositories.map((entry, idx) => (
+          <TriggerRepoRow
+            key={idx}
+            entry={entry}
+            projectId={projectForRow(idx, entry)}
+            projects={projectRows}
+            repositories={repoRows}
+            onPickProject={(projectId) => pickProjectForRow(idx, projectId)}
+            onPickRepo={(repositoryId) => updateRow(idx, { repositoryId })}
+            onChangeLabels={(labels) => updateRow(idx, { labels })}
+            onRemove={() => removeRow(idx)}
+          />
+        ))}
 
-      {shape.repositories.map((entry, idx) => (
-        <TriggerRepoRow
-          key={idx}
-          entry={entry}
-          projectId={projectForRow(idx, entry)}
-          projects={projectRows}
-          repositories={repoRows}
-          onPickProject={(projectId) => pickProjectForRow(idx, projectId)}
-          onPickRepo={(repositoryId) => updateRow(idx, { repositoryId })}
-          onChangeLabels={(labels) => updateRow(idx, { labels })}
-          onRemove={() => removeRow(idx)}
-        />
-      ))}
+        <button type="button" className="wf-trigger-repos-add" onClick={addRow}>
+          <Ic.Plus size={11} />
+          <span>Add repository</span>
+        </button>
+      </div>
 
-      <button type="button" className="wf-trigger-repos-add" onClick={addRow}>
-        <Ic.Plus size={11} />
-        <span>Add repository</span>
-      </button>
+      <div className="wf-trigger-repos-hint">
+        <span aria-hidden="true">ⓘ</span>
+        <span>Leave list empty to trigger on any repo in this team.</span>
+      </div>
     </div>
   );
 }
@@ -159,44 +178,55 @@ function TriggerRepoRow({
 
   return (
     <div className="wf-trigger-repos-row" data-testid="trigger-repositories-row">
-      <select
-        className="wf-trigger-repos-project"
-        value={projectId}
-        onChange={(e) => onPickProject(e.target.value)}
-        aria-label="Project"
-      >
-        <option value="">All projects</option>
-        {projects.map((p) => (
-          <option key={p.id} value={p.id}>{p.name}</option>
-        ))}
-      </select>
+      <div className="wf-trigger-repos-row-controls">
+        <label className="wf-trigger-repos-field">
+          <span className="wf-trigger-repos-field-label">Project:</span>
+          <select
+            className="wf-trigger-repos-select"
+            value={projectId}
+            onChange={(e) => onPickProject(e.target.value)}
+            aria-label="Project"
+          >
+            <option value="">All projects</option>
+            {projects.map((p) => (
+              <option key={p.id} value={p.id}>{p.name}</option>
+            ))}
+          </select>
+        </label>
 
-      <select
-        className="wf-trigger-repos-repo"
-        value={entry.repositoryId}
-        onChange={(e) => onPickRepo(e.target.value)}
-        aria-label="Repository"
-      >
-        <option value="">Pick a repository…</option>
-        {visibleRepos.map((r) => (
-          <option key={r.id} value={r.id}>{r.fullPath}</option>
-        ))}
-      </select>
+        <label className="wf-trigger-repos-field">
+          <span className="wf-trigger-repos-field-label">Repository:</span>
+          <select
+            className="wf-trigger-repos-select"
+            value={entry.repositoryId}
+            onChange={(e) => onPickRepo(e.target.value)}
+            aria-label="Repository"
+          >
+            <option value="">Pick a repository…</option>
+            {visibleRepos.map((r) => (
+              <option key={r.id} value={r.id}>{r.fullPath}</option>
+            ))}
+          </select>
+        </label>
 
-      <LabelChipsInput
-        value={entry.labels ?? []}
-        onChange={onChangeLabels}
-      />
+        <button
+          type="button"
+          className="wf-trigger-repos-remove"
+          onClick={onRemove}
+          aria-label="Remove repository"
+          title="Remove"
+        >
+          <Ic.X size={10} />
+        </button>
+      </div>
 
-      <button
-        type="button"
-        className="wf-trigger-repos-remove"
-        onClick={onRemove}
-        aria-label="Remove repository"
-        title="Remove"
-      >
-        <Ic.X size={10} />
-      </button>
+      <div className="wf-trigger-repos-row-labels">
+        <span className="wf-trigger-repos-field-label">Labels (PR must carry all):</span>
+        <LabelChipsInput
+          value={entry.labels ?? []}
+          onChange={onChangeLabels}
+        />
+      </div>
     </div>
   );
 }
@@ -225,6 +255,9 @@ function LabelChipsInput({ value, onChange }: LabelChipsInputProps) {
 
   return (
     <div className="wf-trigger-repos-labels" data-testid="trigger-repositories-labels">
+      {value.length === 0 && (
+        <span className="wf-trigger-repos-labels-empty">(none)</span>
+      )}
       {value.map((label) => (
         <span key={label} className="wf-trigger-repos-label">
           <span>{label}</span>
@@ -239,7 +272,7 @@ function LabelChipsInput({ value, onChange }: LabelChipsInputProps) {
       <input
         type="text"
         className="wf-trigger-repos-label-input"
-        placeholder={value.length === 0 ? "Add label…" : ""}
+        placeholder={value.length === 0 ? "Add label…" : "+"}
         onKeyDown={(e) => {
           if (e.key === "Enter" || e.key === ",") {
             e.preventDefault();
