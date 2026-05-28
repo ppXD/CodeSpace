@@ -2272,6 +2272,19 @@
  * contract and the matcher (PrTriggerMatcherFilter) for what the saved shape
  * dispatches against. */
 .acs-root .wf-trigger-repos { display: flex; flex-direction: column; gap: 6px; }
+.acs-root .wf-trigger-repos-matchall {
+  display: inline-flex; align-items: center; gap: 8px;
+  padding: 6px 0;
+  font-size: 12px; color: var(--ink); cursor: pointer;
+  user-select: none;
+}
+.acs-root .wf-trigger-repos-matchall input[type="checkbox"] {
+  width: 14px; height: 14px;
+  accent-color: var(--accent);
+  cursor: pointer;
+  margin: 0;
+}
+.acs-root .wf-trigger-repos-matchall-label { font-weight: 500; }
 .acs-root .wf-trigger-repos-card {
   display: flex; flex-direction: column;
   background: var(--bg);

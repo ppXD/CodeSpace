@@ -7,52 +7,60 @@ import { normaliseRepositoriesArray, type TriggerRepoEntry } from "@/lib/migrate
 
 /**
  * Trigger-inspector picker for the <c>repositories</c> property of the PR-trigger
- * activation config (PR #23). Renders a list editor:
+ * activation config (PR #23). Renders a list editor + an explicit
+ * "Match every repository" opt-in checkbox above it:
  *
+ *   ☐ Match every repository in this team
  *   ┌─ card ──────────────────────────────────────────────────────┐
  *   │  Project: [Backend ▾]   Repository: [api ▾]            [×] │
  *   │  Labels (PR must carry all):  [bug ×]  [release ×]  ⌷      │
  *   ├──────────────────────────────────────────────────────────────┤
- *   │  Project: [Backend ▾]   Repository: [cli ▾]            [×] │
- *   │  Labels (PR must carry all):  (none)                         │
- *   ├──────────────────────────────────────────────────────────────┤
  *   │  + Add repository                                            │
  *   └──────────────────────────────────────────────────────────────┘
- *   ⓘ Leave list empty to trigger on any repo in this team.
  *
- * The project dropdown narrows the repo dropdown (cascade) — picking
- * <c>frontend-platform</c> shows only repos linked to that project. This is
- * UX-only; the saved shape is still <c>{ repositoryId, labels }</c> per row,
- * no project-id stored. The matcher dispatches on repositoryId.
+ * <h3>Safe default: empty list = match nothing</h3>
+ * A fresh trigger renders with the checkbox UNCHECKED and an empty list. The
+ * picker emits <c>[]</c> in that state, which the matcher (precedence rule #1
+ * iterating zero entries) treats as "no match". Operators can't accidentally
+ * dispatch a workflow across every PR in the team just by dropping the trigger
+ * node and saving.
  *
- * <h3>Value contract</h3>
- * The schema declares <c>"x-selector": "trigger.repositories"</c> on the
- * <c>repositories</c> ARRAY property, so the SchemaForm passes us the array
- * directly (NOT the wrapping config object). <c>value</c> is therefore
- * <c>TriggerRepoEntry[] | undefined</c>; <c>onChange</c> emits a fresh array
- * or <c>undefined</c> when the list becomes empty (so the SchemaForm spreads
- * <c>repositories: undefined</c> which JSON.stringify drops on save —
- * routing the matcher through its empty-config → match-all path).
+ * <h3>Explicit opt-in for team-wide triggers</h3>
+ * Checking "Match every repository" emits <c>undefined</c> for the property.
+ * The SchemaForm spreads <c>repositories: undefined</c>; JSON.stringify drops
+ * the key on save → matcher rule #4 (empty config) → match-all. The checkbox
+ * is the ONLY way to produce that wire state from the UI; API callers can
+ * still do it by omitting the key.
+ *
+ * <h3>State derivation</h3>
+ *   value === undefined → checkbox checked (match all)
+ *   value === []        → unchecked, empty list (match nothing)
+ *   value === [entries] → unchecked, populated list (match those entries)
  *
  * <h3>Defensive parsing</h3>
  * Raw <c>unknown</c> input flows through <see cref="normaliseRepositoriesArray"/>
- * which tolerates malformed entries (skipping them) and keeps in-progress
- * empty-repositoryId rows so the "Add → Pick" flow survives a re-render.
+ * which tolerates malformed entries and keeps in-progress empty-id rows so
+ * the "Add → Pick" flow survives a re-render.
  */
 
 interface TriggerRepositoriesSelectorProps {
   /** Property value: the repositories array, or undefined when the operator
-   *  has never picked anything. May be malformed shape from a hand-edited DB
-   *  row — normaliseRepositoriesArray handles it. */
+   *  has opted into "match every repository". May be malformed shape from a
+   *  hand-edited DB row — normaliseRepositoriesArray handles it. */
   value: unknown;
-  /** Emit the new array, OR undefined when the list is empty. Undefined
-   *  causes the SchemaForm to spread `repositories: undefined`, dropping
-   *  the key on JSON serialise — the matcher then sees an empty config
-   *  and matches all (its precedence rule #4). */
+  /** Emit the new array OR undefined. Undefined causes the SchemaForm to
+   *  spread `repositories: undefined`, dropping the key on JSON serialise —
+   *  the matcher then sees an empty config and matches all (its precedence
+   *  rule #4). The picker only emits undefined when the "Match every
+   *  repository" checkbox is checked; clearing all rows emits `[]` so the
+   *  safe-default (match nothing) holds. */
   onChange: (next: TriggerRepoEntry[] | undefined) => void;
 }
 
 export function TriggerRepositoriesSelector({ value, onChange }: TriggerRepositoriesSelectorProps) {
+  // value === undefined ⇒ operator opted into "match every repository". The
+  // wire format encodes this by omitting the `repositories` key entirely.
+  const matchAll = value === undefined;
   const entries = useMemo(() => normaliseRepositoriesArray(value), [value]);
   const projects = useProjects();
   const repositories = useRepositories();
@@ -60,13 +68,9 @@ export function TriggerRepositoriesSelector({ value, onChange }: TriggerReposito
   const projectRows = useMemo(() => projects.data ?? [], [projects.data]);
   const repoRows = useMemo(() => repositories.data ?? [], [repositories.data]);
 
-  // Per-row "draft" project picks. Stored in component state — NOT in the saved
-  // shape — because the row's wire format is `{ repositoryId, labels? }` and the
-  // project is purely a UI narrowing aid. Keyed by row index; on Add the new index
-  // is implicitly missing (the row defaults to "All projects" until the operator
-  // picks one). On Remove we shift the indices via filter+map to preserve picks
-  // for rows that survived. Inferring a default from the row's existing repo
-  // (when present) keeps a re-opened workflow showing the right project filter.
+  // Per-row "draft" project picks. Stored in component state — NOT in the
+  // saved shape — because the row's wire format is `{ repositoryId, labels? }`
+  // and the project is purely a UI narrowing aid.
   const [draftProjectByIndex, setDraftProjectByIndex] = useState<Map<number, string>>(new Map());
 
   const projectForRow = (idx: number, entry: TriggerRepoEntry): string => {
@@ -76,17 +80,16 @@ export function TriggerRepositoriesSelector({ value, onChange }: TriggerReposito
     return repoRows.find((r) => r.id === entry.repositoryId)?.projects?.[0]?.id ?? "";
   };
 
-  // Emit undefined when the list is empty so the SchemaForm spreads `repositories:
-  // undefined`, dropping the key on JSON serialise → matcher empty-config path →
-  // match-all. Emit the array when there's ≥1 row (including in-progress empty
-  // entries; the matcher tolerates them).
-  const emit = (next: TriggerRepoEntry[]) => onChange(next.length === 0 ? undefined : next);
+  const toggleMatchAll = (next: boolean) => {
+    if (next) onChange(undefined);   // opt-in: drop the key → matcher match-all
+    else onChange([]);               // opt-out: explicit empty list → matcher match-nothing (safe)
+  };
 
-  const addRow = () => emit([...entries, { repositoryId: "" }]);
+  const addRow = () => onChange([...entries, { repositoryId: "" }]);
 
   const removeRow = (idx: number) => {
-    // Shift draft project indices: drop the removed entry, then re-key everything
-    // above it down by one so a surviving row's UI state follows it.
+    // Shift draft project indices: drop the removed entry, then re-key
+    // everything above it down by one so a surviving row's UI state follows it.
     setDraftProjectByIndex((prev) => {
       const next = new Map<number, string>();
       for (const [k, v] of prev) {
@@ -95,11 +98,15 @@ export function TriggerRepositoriesSelector({ value, onChange }: TriggerReposito
       }
       return next;
     });
-    emit(entries.filter((_, i) => i !== idx));
+    // Even when removing the LAST row we emit `[]` (not undefined). The
+    // checkbox is the ONLY way to get to undefined; otherwise removing the
+    // last row would silently flip the trigger to fire on every repo —
+    // exactly the footgun this PR was designed to remove.
+    onChange(entries.filter((_, i) => i !== idx));
   };
 
   const updateRow = (idx: number, patch: Partial<TriggerRepoEntry>) => {
-    emit(entries.map((entry, i) => (i === idx ? { ...entry, ...patch } : entry)));
+    onChange(entries.map((entry, i) => (i === idx ? { ...entry, ...patch } : entry)));
   };
 
   const pickProjectForRow = (idx: number, projectId: string) => {
@@ -109,46 +116,63 @@ export function TriggerRepositoriesSelector({ value, onChange }: TriggerReposito
       else next.set(idx, projectId);
       return next;
     });
-    // Clearing the row's repo whenever the project changes prevents a stale repo
-    // from a different project lingering in the saved shape.
     updateRow(idx, { repositoryId: "" });
   };
 
   return (
     <div className="wf-trigger-repos" data-testid="trigger-repositories-selector">
-      <div className="wf-trigger-repos-card">
-        {entries.map((entry, idx) => (
-          <TriggerRepoRow
-            key={idx}
-            entry={entry}
-            projectId={projectForRow(idx, entry)}
-            projects={projectRows}
-            repositories={repoRows}
-            onPickProject={(projectId) => pickProjectForRow(idx, projectId)}
-            onPickRepo={(repositoryId) => updateRow(idx, { repositoryId })}
-            onChangeLabels={(labels) => updateRow(idx, { labels })}
-            onRemove={() => removeRow(idx)}
-          />
-        ))}
+      <label className="wf-trigger-repos-matchall">
+        <input
+          type="checkbox"
+          checked={matchAll}
+          onChange={(e) => toggleMatchAll(e.target.checked)}
+          aria-label="Match every repository"
+        />
+        <span className="wf-trigger-repos-matchall-label">Match every repository in this team</span>
+      </label>
 
-        <button type="button" className="wf-trigger-repos-add" onClick={addRow}>
-          <Ic.Plus size={11} />
-          <span>Add repository</span>
-        </button>
-      </div>
+      {!matchAll && (
+        <div className="wf-trigger-repos-card" data-testid="trigger-repositories-list">
+          {entries.map((entry, idx) => (
+            <TriggerRepoRow
+              key={idx}
+              entry={entry}
+              projectId={projectForRow(idx, entry)}
+              projects={projectRows}
+              repositories={repoRows}
+              onPickProject={(projectId) => pickProjectForRow(idx, projectId)}
+              onPickRepo={(repositoryId) => updateRow(idx, { repositoryId })}
+              onChangeLabels={(labels) => updateRow(idx, { labels })}
+              onRemove={() => removeRow(idx)}
+            />
+          ))}
 
-      <div className="wf-trigger-repos-hint">
-        <span aria-hidden="true">ⓘ</span>
-        <span>Leave list empty to trigger on any repo in this team.</span>
-      </div>
+          <button type="button" className="wf-trigger-repos-add" onClick={addRow}>
+            <Ic.Plus size={11} />
+            <span>Add repository</span>
+          </button>
+        </div>
+      )}
+
+      {!matchAll && entries.length === 0 && (
+        <div className="wf-trigger-repos-hint">
+          <span aria-hidden="true">ⓘ</span>
+          <span>No repositories selected — this trigger fires on nothing yet. Add a row above, or check "Match every repository" for team-wide triggers.</span>
+        </div>
+      )}
+
+      {matchAll && (
+        <div className="wf-trigger-repos-hint">
+          <span aria-hidden="true">ⓘ</span>
+          <span>This trigger fires on PRs from every repository bound to this team. Uncheck above to scope to specific repos.</span>
+        </div>
+      )}
     </div>
   );
 }
 
 interface TriggerRepoRowProps {
   entry: TriggerRepoEntry;
-  /** Picked project for THIS row — drives the repo dropdown's filter. Lives in the
-   *  picker's component state, not the saved shape. Empty = "All projects". */
   projectId: string;
   projects: Array<{ id: string; name: string; slug: string }>;
   repositories: Array<{ id: string; fullPath: string; projects?: Array<{ id: string }> }>;
@@ -233,13 +257,6 @@ interface LabelChipsInputProps {
   onChange: (next: string[]) => void;
 }
 
-/**
- * Lightweight chip editor — comma- or Enter-delimited labels. Each chip has its
- * own × button. Deliberately doesn't fetch the repo's actual label list from the
- * provider: that would require a credential probe per row (slow) and the matcher
- * doesn't care whether a configured label "exists" on the remote — a PR that
- * never carries that label just never matches, which is the correct semantic.
- */
 function LabelChipsInput({ value, onChange }: LabelChipsInputProps) {
   const add = (raw: string) => {
     const trimmed = raw.trim();
