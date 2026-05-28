@@ -45,4 +45,17 @@ describe("useChatDock", () => {
     expect(result.current.activeConversationId).toBeNull();
     expect(localStorage.getItem("codespace.chatDock.conversationId")).toBeNull();
   });
+
+  it("conversation width persists and is floored at the minimum", () => {
+    const { result } = renderHook(() => useChatDock(), { wrapper });
+
+    expect(result.current.conversationWidth).toBeGreaterThanOrEqual(320);
+
+    act(() => result.current.setConversationWidth(500));
+    expect(result.current.conversationWidth).toBe(500);
+    expect(localStorage.getItem("codespace.chatDock.conversationWidth")).toBe("500");
+
+    act(() => result.current.setConversationWidth(100));   // below the floor
+    expect(result.current.conversationWidth).toBe(320);
+  });
 });

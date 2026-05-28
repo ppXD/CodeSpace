@@ -24,6 +24,7 @@ function mockDock(overrides: Partial<ReturnType<typeof useChatDock>> = {}) {
   vi.mocked(useChatDock).mockReturnValue({
     isOpen: true, activeConversationId: null,
     open: vi.fn(), close: vi.fn(), toggle: vi.fn(), openConversation: vi.fn(), setActiveConversationId: vi.fn(),
+    conversationWidth: 420, setConversationWidth: vi.fn(),
     ...overrides,
   });
 }

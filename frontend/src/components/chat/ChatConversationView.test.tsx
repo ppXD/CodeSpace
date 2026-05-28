@@ -5,8 +5,9 @@ import { ChatConversationView } from "./ChatConversationView";
 import { useChatDock } from "./ChatDockContext";
 
 /**
- * The centre view shows only when the dock is open AND a conversation is active; closing it
- * clears the active conversation (returns to the page) without touching isOpen (rail stays).
+ * The panel shows only when the dock is open AND a conversation is active. Its left handle is
+ * dual-purpose: a plain click (no drag) closes the conversation — clearing the active id but
+ * leaving the dock open (rail stays).
  */
 vi.mock("./ChatDockContext", async (importOriginal) => ({
   ...(await importOriginal<typeof import("./ChatDockContext")>()),
@@ -19,6 +20,7 @@ function mockDock(overrides: Partial<ReturnType<typeof useChatDock>>) {
   vi.mocked(useChatDock).mockReturnValue({
     isOpen: true, activeConversationId: "c1",
     open: vi.fn(), close: vi.fn(), toggle: vi.fn(), openConversation: vi.fn(), setActiveConversationId: setActive,
+    conversationWidth: 420, setConversationWidth: vi.fn(),
     ...overrides,
   });
 }
@@ -36,14 +38,21 @@ describe("ChatConversationView", () => {
     expect(container.firstChild).toBeNull();
   });
 
-  it("shows the active conversation and closes back to the page (clears active, keeps dock open)", () => {
+  it("shows the active conversation's pane", () => {
+    mockDock({ isOpen: true, activeConversationId: "c9" });
+    render(<ChatConversationView />);
+    expect(screen.getByTestId("message-pane")).toHaveTextContent("c9");
+  });
+
+  it("clicking the handle without dragging closes the conversation", () => {
     setActive.mockClear();
     mockDock({ isOpen: true, activeConversationId: "c9" });
     render(<ChatConversationView />);
 
-    expect(screen.getByTestId("message-pane")).toHaveTextContent("c9");
+    const handle = screen.getByTitle("Drag to resize · click to close");
+    fireEvent.pointerDown(handle, { clientX: 500 });
+    fireEvent.pointerUp(window, { clientX: 500 });   // released at the same x → a click, not a drag
 
-    fireEvent.click(screen.getByTitle("Close conversation"));
     expect(setActive).toHaveBeenCalledWith(null);
   });
 });

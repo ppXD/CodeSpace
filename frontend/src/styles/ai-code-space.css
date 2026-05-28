@@ -91,7 +91,7 @@
    a concrete reason to surface it again.) */
 .acs-root .app {
   display: grid;
-  grid-template-columns: var(--sidebar-w) minmax(0, 1fr) var(--chat-dock-w, 0px);
+  grid-template-columns: var(--sidebar-w) minmax(0, 1fr) var(--chat-conv-w, 0px) var(--chat-dock-w, 0px);
   height: 100vh; width: 100vw; overflow: hidden;
   transition: grid-template-columns .28s cubic-bezier(.2,.7,.2,1);
 }
@@ -2875,13 +2875,28 @@
 
 /* Centre conversation view — overlays the content column; the message column is capped + centred
    for readable line lengths (Slack-style) rather than spanning the full width. */
-.acs-root .chat-convview { position: absolute; inset: 0; z-index: 20; background: var(--bg); }
-.acs-root .chat-convview .chat-main { height: 100%; max-width: 920px; margin: 0 auto; }
-.acs-root .chat-convview-close { position: absolute; top: 12px; right: 16px; z-index: 21; }
+/* Conversation panel — its own resizable column (3), between content and the rail, so chat sits
+   beside the page rather than over it. The left-edge handle resizes (drag) / closes (click). */
+.acs-root .chat-conv-panel {
+  grid-column: 3; min-width: 0; height: 100%; overflow: hidden; position: relative;
+  display: flex; background: var(--bg); border-left: 1px solid var(--line);
+}
+.acs-root .chat-conv-panel .chat-main { flex: 1; min-width: 0; height: auto; }
+.acs-root .chat-conv-resize {
+  flex-shrink: 0; width: 8px; cursor: col-resize; background: transparent;
+  display: flex; align-items: center; justify-content: center; touch-action: none;
+}
+.acs-root .chat-conv-resize:hover { background: var(--soft); }
+.acs-root .chat-conv-resize-grip { width: 2px; height: 28px; border-radius: 1px; background: var(--line-2); }
+.acs-root .chat-conv-resize:hover .chat-conv-resize-grip { background: var(--accent); }
+
+/* While dragging the handle: no grid transition (instant follow) + a consistent resize cursor. */
+body.chat-resizing { cursor: col-resize; user-select: none; }
+body.chat-resizing .acs-root .app { transition: none; }
 
 /* Right rail — the persistent chat entry: title, tabs, and the active tab's list. */
 .acs-root .chat-rail {
-  grid-column: 3; min-width: 0; height: 100%; overflow: hidden;
+  grid-column: 4; min-width: 0; height: 100%; overflow: hidden;
   display: flex; flex-direction: column;
   border-left: 1px solid var(--line); background: var(--panel-2);
 }

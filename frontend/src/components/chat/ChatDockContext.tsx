@@ -14,10 +14,18 @@ interface ChatDockState {
   /** Open the dock AND focus a conversation in one step (e.g. from a future "discuss this PR" action). */
   openConversation: (conversationId: string) => void;
   setActiveConversationId: (conversationId: string | null) => void;
+  /** Width (px) of the conversation panel; the resize handle drives it. Persisted + floored. */
+  conversationWidth: number;
+  setConversationWidth: (width: number) => void;
 }
 
 const OPEN_KEY = "codespace.chatDock.open";
 const CONVERSATION_KEY = "codespace.chatDock.conversationId";
+const WIDTH_KEY = "codespace.chatDock.conversationWidth";
+
+/** The conversation panel never narrows past this (px). */
+export const MIN_CONVERSATION_WIDTH = 320;
+const DEFAULT_CONVERSATION_WIDTH = 420;
 
 const ChatDockContext = createContext<ChatDockState | null>(null);
 
@@ -44,6 +52,18 @@ export function ChatDockProvider({ children }: { children: ReactNode }) {
     else localStorage.removeItem(CONVERSATION_KEY);
   }, []);
 
+  const [conversationWidth, setWidthState] = useState<number>(() => {
+    const stored = readString(WIDTH_KEY);
+    const parsed = stored != null ? Number(stored) : Number.NaN;
+    return Number.isFinite(parsed) ? Math.max(MIN_CONVERSATION_WIDTH, parsed) : DEFAULT_CONVERSATION_WIDTH;
+  });
+
+  const setConversationWidth = useCallback((width: number) => {
+    const clamped = Math.max(MIN_CONVERSATION_WIDTH, Math.round(width));
+    setWidthState(clamped);
+    localStorage.setItem(WIDTH_KEY, String(clamped));
+  }, []);
+
   const value = useMemo<ChatDockState>(() => ({
     isOpen,
     activeConversationId,
@@ -52,7 +72,9 @@ export function ChatDockProvider({ children }: { children: ReactNode }) {
     toggle: () => setOpen(!isOpen),
     openConversation: (conversationId: string) => { setActiveConversationId(conversationId); setOpen(true); },
     setActiveConversationId,
-  }), [isOpen, activeConversationId, setOpen, setActiveConversationId]);
+    conversationWidth,
+    setConversationWidth,
+  }), [isOpen, activeConversationId, setOpen, setActiveConversationId, conversationWidth, setConversationWidth]);
 
   return <ChatDockContext.Provider value={value}>{children}</ChatDockContext.Provider>;
 }
