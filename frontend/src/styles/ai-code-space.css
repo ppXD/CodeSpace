@@ -57,6 +57,19 @@
 .acs-root a { color: inherit; text-decoration: none; }
 .acs-root ::selection { background: var(--accent-soft); }
 
+/* Themed scrollbars for every scroll container in the app — thin + soft, matching the warm
+   palette, so the heavy/dark OS-default scrollbar never shows (e.g. in a narrowly-dragged chat
+   panel or any overflow pane). Firefox uses scrollbar-width/color; WebKit uses the pseudo-
+   elements. Specific per-element rules (e.g. .ct-body) still win where they exist. */
+.acs-root, .acs-root * { scrollbar-width: thin; scrollbar-color: rgba(0, 0, 0, .16) transparent; }
+.acs-root ::-webkit-scrollbar { width: 10px; height: 10px; }
+.acs-root ::-webkit-scrollbar-track { background: transparent; }
+.acs-root ::-webkit-scrollbar-thumb {
+  background: rgba(0, 0, 0, .16); border-radius: 5px; border: 2px solid transparent; background-clip: content-box;
+}
+.acs-root ::-webkit-scrollbar-thumb:hover { background: rgba(0, 0, 0, .28); }
+.acs-root ::-webkit-scrollbar-corner { background: transparent; }
+
 /* ---------- Global button system (Claude-style) ---------- */
 .acs-root .btn {
   appearance: none; border: 1px solid var(--line); background: var(--panel);
@@ -91,11 +104,14 @@
    a concrete reason to surface it again.) */
 .acs-root .app {
   display: grid;
-  grid-template-columns: var(--sidebar-w) 1fr;
+  grid-template-columns: var(--sidebar-w) minmax(0, 1fr) var(--chat-conv-w, 0px) var(--chat-dock-w, 0px);
   height: 100vh; width: 100vw; overflow: hidden;
   transition: grid-template-columns .28s cubic-bezier(.2,.7,.2,1);
 }
 .acs-root .app[data-sidebar="collapsed"] { --sidebar-w: 60px; }
+/* The chat rail occupies the 3rd column only when open; the content column (minmax 0 1fr)
+   shrinks beside it. The conversation view then overlays that content column on demand. */
+.acs-root .app[data-chat-open="true"] { --chat-dock-w: 320px; }
 
 /* ---------- Floating chrome ---------- */
 .acs-root .float-chrome {
@@ -103,6 +119,7 @@
 }
 .acs-root .float-chrome > * { pointer-events: auto; }
 .acs-root .float-l { left: calc(var(--sidebar-w) - 14px); transition: left .28s cubic-bezier(.2,.7,.2,1); }
+.acs-root .float-r { right: 14px; }
 .acs-root .chrome-btn {
   width: 28px; height: 28px; border-radius: 7px; background: var(--panel);
   border: 1px solid var(--line); box-shadow: var(--shadow-1); display: grid; place-items: center;
@@ -2768,3 +2785,185 @@
   display: grid; place-items: center; cursor: pointer;
 }
 .acs-root .row-act button:hover { color: var(--ink); border-color: var(--line-2); }
+
+/* ── Chat ──────────────────────────────────────────────────────────────────────
+   Two-pane: conversation rail (left) + message pane (right). Fills the content
+   cell; only the message list scrolls. All tokens reused from the theme :root. */
+.acs-root .chat {
+  display: grid;
+  grid-template-columns: 260px minmax(0, 1fr);
+  height: 100%;
+  overflow: hidden;
+  background: var(--bg);
+}
+
+.acs-root .chat-list {
+  display: flex; flex-direction: column;
+  border-right: 1px solid var(--line); background: var(--panel-2); overflow: hidden;
+}
+.acs-root .chat-list-head {
+  display: flex; align-items: center; justify-content: space-between; padding: 14px 14px 10px;
+}
+.acs-root .chat-list-title {
+  font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .04em; color: var(--muted);
+}
+/* Channel creator — pinned in the Channels-tab footer (.chat-rail-foot): an accent button that
+   expands to a stacked form (full-width input over a row of two equal-width buttons — a bordered
+   secondary Cancel + the accent Add — so the pair reads as balanced, not a solid-vs-transparent
+   mismatch). The footer owns the padding + top border. */
+.acs-root .chat-create { display: flex; flex-direction: column; gap: 8px; }
+.acs-root .chat-create-input {
+  width: 100%; min-width: 0; border: 1px solid var(--line); border-radius: var(--radius-sm);
+  background: var(--panel); color: var(--ink); padding: 7px 9px; font: inherit; font-size: 13px;
+}
+.acs-root .chat-create-input:focus { outline: none; border-color: var(--accent); }
+.acs-root .chat-create-actions { display: flex; gap: 6px; }
+.acs-root .chat-create-actions .btn { flex: 1; justify-content: center; }
+.acs-root .chat-create-btn { width: 100%; justify-content: center; }
+.acs-root .chat-list-body { flex: 1; overflow-y: auto; padding: 4px 8px 12px; }
+
+.acs-root .chat-conv {
+  display: flex; align-items: center; gap: 10px; width: 100%; padding: 8px 10px; border-radius: var(--radius-sm);
+  border: none; background: none; text-align: left; font: inherit; color: var(--ink-2); cursor: pointer;
+}
+.acs-root .chat-conv:hover { background: var(--soft); }
+.acs-root .chat-conv[data-active="true"] { background: var(--accent-soft); }
+
+.acs-root .chat-conv-av {
+  flex-shrink: 0; width: 36px; height: 36px; border-radius: 9px; object-fit: cover;
+  display: flex; align-items: center; justify-content: center; font-size: 14px; font-weight: 600;
+}
+.acs-root .chat-conv-av-hash { background: var(--panel); border: 1px solid var(--line); color: var(--muted); }
+.acs-root .chat-conv-av-initial { background: var(--accent-soft); color: var(--accent); }
+
+.acs-root .chat-conv-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.acs-root .chat-conv-top { display: flex; align-items: baseline; gap: 8px; }
+.acs-root .chat-conv-name { flex: 1; min-width: 0; font-size: 13px; font-weight: 600; line-height: 1.35; color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.acs-root .chat-conv-time { flex-shrink: 0; font-size: 11px; color: var(--muted-2); }
+.acs-root .chat-conv-preview { display: block; font-size: 12px; line-height: 1.4; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Author reads as a label (semibold + darker) so "You"/name parses as the speaker, not as the
+   start of the message text. A thin gap follows before the muted preview. */
+.acs-root .chat-conv-preview-author { font-weight: 600; color: var(--ink-2); margin-right: 1px; }
+.acs-root .chat-conv-preview-author::after { content: ":"; font-weight: 600; color: var(--muted-2); }
+.acs-root .chat-conv-preview-muted, .acs-root .chat-conv-preview-deleted { color: var(--muted-2); font-style: italic; }
+
+.acs-root .chat-main { display: flex; flex-direction: column; height: 100%; overflow: hidden; min-width: 0; }
+.acs-root .chat-main-placeholder { align-items: center; justify-content: center; }
+.acs-root .chat-main-head {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  padding: 12px 16px; border-bottom: 1px solid var(--line); flex-shrink: 0;
+}
+.acs-root .chat-main-head-info { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
+.acs-root .chat-main-title { font-size: 15px; font-weight: 600; color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.acs-root .chat-main-sub { flex-shrink: 0; font-size: 12px; color: var(--muted); }
+
+.acs-root .chat-msgs { flex: 1; overflow-y: auto; padding: 16px 24px; display: flex; flex-direction: column; gap: 2px; }
+.acs-root .chat-loadmore { display: flex; justify-content: center; padding: 4px 0 12px; }
+
+.acs-root .chat-msg { display: flex; gap: 10px; padding: 6px 0; }
+.acs-root .chat-msg-avatar {
+  flex-shrink: 0; width: 30px; height: 30px; border-radius: 50%;
+  background: var(--accent-soft); color: var(--accent);
+  display: flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 600;
+}
+.acs-root .chat-msg-main { min-width: 0; flex: 1; }
+.acs-root .chat-msg-head { display: flex; align-items: baseline; gap: 8px; }
+.acs-root .chat-msg-author { font-size: 13px; font-weight: 600; color: var(--ink); }
+.acs-root .chat-msg-time, .acs-root .chat-msg-edited { font-size: 11px; color: var(--muted-2); }
+.acs-root .chat-msg-text {
+  display: block; font-size: 14px; color: var(--ink-2); line-height: 1.5;
+  white-space: pre-wrap; word-break: break-word;
+}
+.acs-root .chat-msg-deleted { font-size: 13px; font-style: italic; color: var(--muted-2); }
+
+.acs-root .chat-ref {
+  padding: 0 4px; border-radius: 4px; background: var(--accent-soft); color: var(--accent); font-weight: 500;
+}
+
+.acs-root .chat-empty { color: var(--muted); font-size: 13px; padding: 24px; text-align: center; }
+
+/* Composer: textarea + Send share one bordered box (focus ring on the box) so they always line
+   up — Send pinned bottom-right, the borderless textarea growing above it. */
+.acs-root .chat-composer-wrap { flex-shrink: 0; padding: 12px 16px 16px; border-top: 1px solid var(--line); }
+.acs-root .chat-composer {
+  display: flex; align-items: flex-end; gap: 8px;
+  border: 1px solid var(--line); border-radius: var(--radius-lg); background: var(--panel); padding: 5px 5px 5px 12px;
+}
+.acs-root .chat-composer:focus-within { border-color: var(--accent); }
+.acs-root .chat-composer-input {
+  flex: 1; min-width: 0; resize: none; border: none; background: none; outline: none;
+  padding: 6px 0; font: inherit; font-size: 14px; line-height: 1.45; max-height: 160px; color: var(--ink);
+}
+.acs-root .chat-composer-send { flex-shrink: 0; height: 32px; padding: 0 14px; }
+
+/* "Add people" dropdown (channel/group header invite). */
+.acs-root .chat-invite { position: relative; }
+.acs-root .chat-invite-mask { position: fixed; inset: 0; z-index: 30; }
+.acs-root .chat-invite-pop {
+  position: absolute; top: calc(100% + 6px); right: 0; z-index: 31; width: 240px; max-height: 320px;
+  display: flex; flex-direction: column; overflow: hidden;
+  background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); box-shadow: var(--shadow-1);
+}
+.acs-root .chat-invite-pop-head {
+  padding: 10px 12px; border-bottom: 1px solid var(--line);
+  font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .04em; color: var(--muted);
+}
+.acs-root .chat-invite-pop-list { overflow-y: auto; padding: 4px; }
+.acs-root .chat-invite-item {
+  display: flex; align-items: center; gap: 8px; width: 100%; padding: 6px 8px; border-radius: var(--radius-sm);
+  appearance: none; border: none; background: none; cursor: pointer; color: var(--ink-2); font: inherit; font-size: 13px; text-align: left;
+}
+.acs-root .chat-invite-item:hover { background: var(--soft); }
+.acs-root .chat-invite-item .chat-conv-av { width: 26px; height: 26px; font-size: 12px; border-radius: 7px; }
+.acs-root .chat-invite-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.acs-root .chat-invite-item svg { color: var(--muted-2); flex-shrink: 0; }
+
+/* ── Chat: content column + rail + centre conversation ──────────────────────────
+   .content-col holds the page (Outlet); the conversation view overlays it absolutely so the
+   page stays mounted underneath (close = instant, never a navigation). The rail is the
+   persistent 3rd grid column. Both reuse the .chat-list / .chat-main blocks above. */
+.acs-root .content-col { position: relative; min-width: 0; height: 100%; overflow: hidden; }
+
+/* Centre conversation view — overlays the content column; the message column is capped + centred
+   for readable line lengths (Slack-style) rather than spanning the full width. */
+/* Conversation panel — its own resizable column (3), between content and the rail, so chat sits
+   beside the page rather than over it. The left-edge handle resizes (drag) / closes (click). */
+.acs-root .chat-conv-panel {
+  grid-column: 3; min-width: 0; height: 100%; overflow: hidden; position: relative;
+  display: flex; background: var(--bg); border-left: 1px solid var(--line);
+}
+.acs-root .chat-conv-panel .chat-main { flex: 1; min-width: 0; height: auto; }
+.acs-root .chat-conv-resize {
+  flex-shrink: 0; width: 8px; cursor: col-resize; background: transparent;
+  display: flex; align-items: center; justify-content: center; touch-action: none;
+}
+.acs-root .chat-conv-resize:hover { background: var(--soft); }
+.acs-root .chat-conv-resize-grip { width: 2px; height: 28px; border-radius: 1px; background: var(--line-2); }
+.acs-root .chat-conv-resize:hover .chat-conv-resize-grip { background: var(--accent); }
+
+/* While dragging the handle: no grid transition (instant follow) + a consistent resize cursor. */
+body.chat-resizing { cursor: col-resize; user-select: none; }
+body.chat-resizing .acs-root .app { transition: none; }
+
+/* Right rail — the persistent chat entry: title, tabs, and the active tab's list. */
+.acs-root .chat-rail {
+  grid-column: 4; min-width: 0; height: 100%; overflow: hidden;
+  display: flex; flex-direction: column;
+  border-left: 1px solid var(--line); background: var(--panel-2);
+}
+.acs-root .chat-rail-head {
+  display: flex; align-items: center; justify-content: space-between; padding: 12px 12px 10px; flex-shrink: 0;
+}
+.acs-root .chat-rail-title { font-size: 16px; font-weight: 700; color: var(--ink); }
+.acs-root .chat-rail-tabs { display: flex; gap: 2px; padding: 0 8px; border-bottom: 1px solid var(--line); flex-shrink: 0; }
+.acs-root .chat-rail-tab {
+  appearance: none; border: none; background: none; cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
+  width: 38px; height: 34px; margin-bottom: -1px; color: var(--muted); border-bottom: 2px solid transparent;
+}
+.acs-root .chat-rail-tab:hover { color: var(--ink-2); }
+.acs-root .chat-rail-tab[data-active="true"] { color: var(--accent); border-bottom-color: var(--accent); }
+.acs-root .chat-rail-hash { font-size: 16px; font-weight: 700; line-height: 1; }
+.acs-root .chat-rail-body { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.acs-root .chat-rail-body .chat-list { flex: 1; min-height: 0; border-right: none; background: transparent; }
+.acs-root .chat-rail-foot { flex-shrink: 0; padding: 8px 10px; border-top: 1px solid var(--line); }
