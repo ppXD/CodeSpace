@@ -41,6 +41,13 @@ public class Conversation : IEntity<Guid>, IAuditable
     public string? Description { get; set; }
 
     /// <summary>
+    /// Direct-message singleton key: <c>{minUserId}:{maxUserId}</c> (sorted, order-independent),
+    /// set only for <see cref="ConversationKind.Direct"/>. Null for channel / group. The partial
+    /// unique index on (team_id, dm_key) makes find-or-create-DM race-safe — see migration 0029.
+    /// </summary>
+    public string? DmKey { get; set; }
+
+    /// <summary>
     /// Only meaningful for <see cref="ConversationKind.Channel"/>. Public channels appear in
     /// the directory and any team member may join; private channels are visible only to their
     /// members. DM / group are implicitly private (their membership IS the access list).

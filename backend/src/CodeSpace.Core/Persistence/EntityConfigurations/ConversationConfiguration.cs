@@ -28,5 +28,11 @@ public class ConversationConfiguration : IEntityTypeConfiguration<Conversation>
             .HasFilter("slug IS NOT NULL AND deleted_date IS NULL");
 
         builder.HasIndex(c => c.TeamId).HasFilter("deleted_date IS NULL");
+
+        // DM singleton key — see migration 0029. Direct only; channel/group leave it null,
+        // which the partial filter excludes so they never collide.
+        builder.HasIndex(c => new { c.TeamId, c.DmKey })
+            .IsUnique()
+            .HasFilter("dm_key IS NOT NULL AND deleted_date IS NULL");
     }
 }
