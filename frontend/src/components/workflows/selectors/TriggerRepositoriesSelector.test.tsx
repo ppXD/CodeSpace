@@ -37,11 +37,37 @@ vi.mock("@/hooks/use-repositories", () => ({
 }));
 
 describe("TriggerRepositoriesSelector", () => {
-  it("renders the empty hint when value has no repositories", () => {
+  it("renders the empty-list hint when value has no repositories", () => {
+    // Card renders Add button only — no rows; footer hint explains the
+    // empty-list = match-all semantic so the operator isn't surprised by
+    // a workflow that fires on every repo.
     render(<TriggerRepositoriesSelector value={{}} onChange={() => {}} />);
 
     expect(screen.queryAllByTestId("trigger-repositories-row")).toHaveLength(0);
-    expect(screen.getByText(/No repositories selected/i)).toBeInTheDocument();
+    expect(screen.getByText(/Leave list empty to trigger on any repo/i)).toBeInTheDocument();
+  });
+
+  it("Add repository button is always visible (even with no rows yet)", () => {
+    render(<TriggerRepositoriesSelector value={{}} onChange={() => {}} />);
+
+    expect(screen.getByRole("button", { name: /Add repository/i })).toBeInTheDocument();
+  });
+
+  it("each row exposes the explicit field labels from the UI spec", () => {
+    // Project: / Repository: / Labels (PR must carry all): — pinned so a
+    // visual rewrite can't accidentally drop the contract that tells the
+    // operator what the row's filter actually does.
+    render(<TriggerRepositoriesSelector value={{ repositories: [{ repositoryId: "repo-1" }] }} onChange={() => {}} />);
+
+    expect(screen.getByText(/^Project:$/)).toBeInTheDocument();
+    expect(screen.getByText(/^Repository:$/)).toBeInTheDocument();
+    expect(screen.getByText(/Labels \(PR must carry all\):/)).toBeInTheDocument();
+  });
+
+  it("row with no labels shows the (none) placeholder", () => {
+    render(<TriggerRepositoriesSelector value={{ repositories: [{ repositoryId: "repo-1" }] }} onChange={() => {}} />);
+
+    expect(screen.getByText("(none)")).toBeInTheDocument();
   });
 
   it("renders a row per entry when value has the new array shape", () => {
@@ -89,6 +115,25 @@ describe("TriggerRepositoriesSelector", () => {
 
     expect(onChange).toHaveBeenCalledTimes(1);
     expect(onChange.mock.calls[0]![0]).toEqual({ repositories: [{ repositoryId: "repo-3" }] });
+  });
+
+  it("removing the last row emits {} so the matcher's empty-config → match-all path fires", () => {
+    // The wire-format contract: empty rows = match every repo. We emit `{}`
+    // (no `repositories` key) so the matcher's empty-config branch runs.
+    // Without this, the picker would emit `{ repositories: [] }` which the
+    // matcher treats as "explicit no repos, match nothing" — the opposite of
+    // the operator's likely intent when they clear the list.
+    const onChange = vi.fn();
+    const value = { repositories: [{ repositoryId: "repo-1" }] };
+
+    render(<TriggerRepositoriesSelector value={value} onChange={onChange} />);
+
+    fireEvent.click(screen.getByRole("button", { name: /Remove repository/i }));
+
+    expect(onChange).toHaveBeenCalledTimes(1);
+    expect(onChange.mock.calls[0]![0]).toEqual({});
+    // Specifically NOT { repositories: [] } — the wire shape collapses.
+    expect(onChange.mock.calls[0]![0]).not.toHaveProperty("repositories");
   });
 
   it("picking a project filters the repo dropdown to that project's repos", () => {
