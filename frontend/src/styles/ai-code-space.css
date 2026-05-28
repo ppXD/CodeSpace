@@ -2841,9 +2841,11 @@
 .acs-root .chat-conv-name { flex: 1; min-width: 0; font-size: 13px; font-weight: 600; line-height: 1.35; color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .acs-root .chat-conv-time { flex-shrink: 0; font-size: 11px; color: var(--muted-2); }
 .acs-root .chat-conv-preview { display: block; font-size: 12px; line-height: 1.4; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-/* Author reads as a label (semibold + darker) so "You"/name parses as the speaker, not as the
-   start of the message text. A thin gap follows before the muted preview. */
-.acs-root .chat-conv-preview-author { font-weight: 600; color: var(--ink-2); margin-right: 1px; }
+/* Row colour hierarchy keeps the types apart: the conversation TITLE is the dark primary
+   (var(--ink), above); the preview AUTHOR is a grey label — bold + ":" so it still reads as the
+   speaker (distinct from the message), but in the muted family so it never clashes with the
+   title's dark name; the message text stays muted-normal. */
+.acs-root .chat-conv-preview-author { font-weight: 600; color: var(--muted); margin-right: 1px; }
 .acs-root .chat-conv-preview-author::after { content: ":"; font-weight: 600; color: var(--muted-2); }
 .acs-root .chat-conv-preview-muted, .acs-root .chat-conv-preview-deleted { color: var(--muted-2); font-style: italic; }
 
