@@ -1,5 +1,6 @@
 using System.Linq;
 using System.Text.Json;
+using CodeSpace.Core.Services.Workflows.Nodes.Builtin;
 using CodeSpace.Core.Services.Workflows.RunSources.Matchers;
 using CodeSpace.Messages.Events.PullRequest;
 using Shouldly;
@@ -459,6 +460,74 @@ public class TriggerMatcherTests
             """);
 
         new PrOpenedMatcher().Match(ev, config).ShouldBeTrue();
+    }
+
+    // ─── Drift detectors: OutputSchema ↔ BuildPayload contract ──────────────────────
+    // Two independent sources of truth ship side by side: the trigger node declares
+    // an OutputSchema (read by the inspector's {{trigger.*}} autocomplete), and the
+    // matcher's BuildPayload writes the actual runtime payload. If they drift, the
+    // inspector either lies about available fields (autocomplete shows entries that
+    // resolve to undefined at run time) or silently hides real fields the operator
+    // could reference. PR #22 introduced exactly this drift for `labels`; these
+    // tests fail loudly on the next slip.
+
+    [Fact]
+    public void PrOpened_OutputSchema_lists_exactly_the_keys_BuildPayload_emits()
+    {
+        var matcher = new PrOpenedMatcher();
+        var ev = OpenedWithLabels(RepoA, "bug");
+        var payload = matcher.BuildPayload(ev);
+
+        var payloadKeys = payload.EnumerateObject().Select(p => p.Name).OrderBy(s => s).ToList();
+        var schemaKeys = ExtractSchemaPropertyNames(new TriggerPrOpenedNode().Manifest.OutputSchema).OrderBy(s => s).ToList();
+
+        payloadKeys.ShouldBe(schemaKeys,
+            customMessage:
+                "TriggerPrOpenedNode.OutputSchema is out of sync with PrOpenedMatcher.BuildPayload. " +
+                "The inspector's {{trigger.*}} autocomplete reads OutputSchema; the engine evaluates {{trigger.*}} " +
+                "against BuildPayload at run time. A mismatch shows ghosts in autocomplete (resolve to undefined) " +
+                "or hides real fields the operator could reference. " +
+                "Fix: add or drop properties in TriggerPrOpenedNode.OutputSchema until this list equals the payload keys.");
+    }
+
+    [Fact]
+    public void PrUpdated_OutputSchema_lists_exactly_the_keys_BuildPayload_emits()
+    {
+        var matcher = new PrUpdatedMatcher();
+        var ev = new PullRequestSynchronizedEvent
+        {
+            RepositoryId = RepoA,
+            ProviderEventId = "1",
+            OccurredAt = DateTimeOffset.UtcNow,
+            ExternalPullRequestId = "1",
+            Number = 42,
+            PreviousHeadSha = "a",
+            NewHeadSha = "b",
+            Labels = new[] { "bug" }
+        };
+        var payload = matcher.BuildPayload(ev);
+
+        var payloadKeys = payload.EnumerateObject().Select(p => p.Name).OrderBy(s => s).ToList();
+        var schemaKeys = ExtractSchemaPropertyNames(new TriggerPrUpdatedNode().Manifest.OutputSchema).OrderBy(s => s).ToList();
+
+        payloadKeys.ShouldBe(schemaKeys,
+            customMessage:
+                "TriggerPrUpdatedNode.OutputSchema is out of sync with PrUpdatedMatcher.BuildPayload. " +
+                "See PrOpened_OutputSchema_lists_exactly_the_keys_BuildPayload_emits for the failure mode and fix recipe.");
+    }
+
+    /// <summary>
+    /// Pulls the top-level <c>properties</c> object's keys from a JSON Schema, the
+    /// same surface SchemaForm walks to render fields. Tolerates missing /
+    /// non-object schemas by returning an empty list — keeps the diff-vs-payload
+    /// comparison readable instead of throwing in setup.
+    /// </summary>
+    private static IEnumerable<string> ExtractSchemaPropertyNames(JsonElement schema)
+    {
+        if (schema.ValueKind != JsonValueKind.Object) return Array.Empty<string>();
+        if (!schema.TryGetProperty("properties", out var props)) return Array.Empty<string>();
+        if (props.ValueKind != JsonValueKind.Object) return Array.Empty<string>();
+        return props.EnumerateObject().Select(p => p.Name).ToList();
     }
 
     private static PullRequestOpenedEvent OpenedEvent(Guid repositoryId) => new()

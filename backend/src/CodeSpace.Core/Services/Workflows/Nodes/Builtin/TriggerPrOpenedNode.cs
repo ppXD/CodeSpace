@@ -68,7 +68,8 @@ public sealed class TriggerPrOpenedNode : INodeRuntime
                 "sourceBranch": { "type": "string" },
                 "targetBranch": { "type": "string" },
                 "authorName": { "type": "string" },
-                "webUrl": { "type": "string" }
+                "webUrl": { "type": "string" },
+                "labels": { "type": "array", "items": { "type": "string" } }
               }
             }
             """)
