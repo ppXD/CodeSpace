@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 
-import { migrateLegacyTriggerConfig, normaliseTriggerConfigForSave } from "./migrateTriggerConfig";
+import {
+  migrateLegacyPrTriggerConfig,
+  migrateLegacyTriggerConfig,
+  normaliseRepositoriesArray,
+  normaliseTriggerConfigForSave,
+} from "./migrateTriggerConfig";
 
 /**
  * The migration helper sits between the on-disk activation config (which may be one of
@@ -110,5 +115,89 @@ describe("normaliseTriggerConfigForSave", () => {
   it("keeps non-empty labels arrays verbatim", () => {
     const withLabels = { repositories: [{ repositoryId: "r", labels: ["a", "b"] }] };
     expect(normaliseTriggerConfigForSave(withLabels)).toEqual({ repositories: [{ repositoryId: "r", labels: ["a", "b"] }] });
+  });
+});
+
+describe("normaliseRepositoriesArray", () => {
+  it("returns empty array for non-array inputs", () => {
+    expect(normaliseRepositoriesArray(undefined)).toEqual([]);
+    expect(normaliseRepositoriesArray(null)).toEqual([]);
+    expect(normaliseRepositoriesArray({})).toEqual([]);
+    expect(normaliseRepositoriesArray("string")).toEqual([]);
+    expect(normaliseRepositoriesArray(42)).toEqual([]);
+  });
+
+  it("keeps in-progress empty-repositoryId entries", () => {
+    // The "Add → Pick" flow requires the freshly-added empty row to survive a
+    // re-render. Verify the normaliser doesn't strip it.
+    expect(normaliseRepositoriesArray([{ repositoryId: "" }])).toEqual([{ repositoryId: "" }]);
+  });
+
+  it("drops null, non-object, and orphan entries", () => {
+    const input = [
+      { repositoryId: "good-1" },
+      null,
+      "string-not-object",
+      { labels: ["orphan"] },           // no repositoryId key
+      { repositoryId: 42 },             // non-string
+      { repositoryId: "good-2", labels: ["a"] },
+    ];
+    expect(normaliseRepositoriesArray(input)).toEqual([
+      { repositoryId: "good-1" },
+      { repositoryId: "good-2", labels: ["a"] },
+    ]);
+  });
+});
+
+describe("migrateLegacyPrTriggerConfig", () => {
+  it("returns the config unchanged when it already has a repositories array (new shape)", () => {
+    const already = { repositories: [{ repositoryId: "a" }] };
+    expect(migrateLegacyPrTriggerConfig(already)).toBe(already);
+  });
+
+  it("returns the config unchanged when no legacy repositoryId is present", () => {
+    // Non-trigger node configs flow through this helper at workflow load. The
+    // helper MUST be a no-op for them; otherwise it'd corrupt unrelated nodes.
+    const otherConfig = { someField: "value", count: 7 };
+    expect(migrateLegacyPrTriggerConfig(otherConfig)).toBe(otherConfig);
+  });
+
+  it("returns the config unchanged when repositoryId is empty string (no real legacy data)", () => {
+    const empty = { repositoryId: "" };
+    expect(migrateLegacyPrTriggerConfig(empty)).toBe(empty);
+  });
+
+  it("promotes legacy { repositoryId } to one-entry repositories array AND strips the legacy key", () => {
+    // The legacy key is stripped so the next save writes a clean wire format.
+    // The matcher would have happily kept reading the legacy field via its
+    // backward-compat shim (PrTriggerMatcherFilter precedence rule #3), but
+    // leaving the field in would make storage perpetually noisier — the
+    // operator would see both shapes on every saved diff.
+    expect(migrateLegacyPrTriggerConfig({ repositoryId: "repo-1" })).toEqual({
+      repositories: [{ repositoryId: "repo-1" }],
+    });
+  });
+
+  it("promotes legacy { repositoryId, labels } preserving labels", () => {
+    expect(migrateLegacyPrTriggerConfig({ repositoryId: "repo-1", labels: ["bug", "wip"] })).toEqual({
+      repositories: [{ repositoryId: "repo-1", labels: ["bug", "wip"] }],
+    });
+  });
+
+  it("drops empty / non-string label entries during migration (defensive)", () => {
+    const input = { repositoryId: "r", labels: ["ok", "", null, 42, "also-ok"] as unknown[] };
+    expect(migrateLegacyPrTriggerConfig(input)).toEqual({
+      repositories: [{ repositoryId: "r", labels: ["ok", "also-ok"] }],
+    });
+  });
+
+  it("preserves unrelated config keys (only the trigger-specific fields are touched)", () => {
+    // A node could carry custom fields alongside the legacy trigger keys (e.g.
+    // future schema additions). Migration must not lose them.
+    const mixed = { repositoryId: "r", labels: ["bug"], customField: "kept" };
+    expect(migrateLegacyPrTriggerConfig(mixed)).toEqual({
+      customField: "kept",
+      repositories: [{ repositoryId: "r", labels: ["bug"] }],
+    });
   });
 });

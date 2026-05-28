@@ -3,16 +3,11 @@ import { useMemo, useState } from "react";
 import { Ic } from "@/_imported/ai-code-space/icons";
 import { useProjects } from "@/hooks/use-projects";
 import { useRepositories } from "@/hooks/use-repositories";
-import {
-  migrateLegacyTriggerConfig,
-  type TriggerConfigArrayShape,
-  type TriggerRepoEntry,
-} from "@/lib/migrateTriggerConfig";
+import { normaliseRepositoriesArray, type TriggerRepoEntry } from "@/lib/migrateTriggerConfig";
 
 /**
- * Trigger-inspector picker for the
- * <c>{ repositories: [{ repositoryId, labels? }] }</c> config shape (PR #23).
- * Renders a list editor:
+ * Trigger-inspector picker for the <c>repositories</c> property of the PR-trigger
+ * activation config (PR #23). Renders a list editor:
  *
  *   ┌─ card ──────────────────────────────────────────────────────┐
  *   │  Project: [Backend ▾]   Repository: [api ▾]            [×] │
@@ -30,29 +25,35 @@ import {
  * UX-only; the saved shape is still <c>{ repositoryId, labels }</c> per row,
  * no project-id stored. The matcher dispatches on repositoryId.
  *
- * <h3>Empty list = match-all</h3>
- * When the operator clears every row, the picker emits <c>{}</c> (no
- * <c>repositories</c> key at all) so the matcher's empty-config → match-all
- * path fires. The explicit <c>{ repositories: [] }</c> "match nothing" shape
- * still exists at the wire level for API callers; the picker just never
- * produces it.
+ * <h3>Value contract</h3>
+ * The schema declares <c>"x-selector": "trigger.repositories"</c> on the
+ * <c>repositories</c> ARRAY property, so the SchemaForm passes us the array
+ * directly (NOT the wrapping config object). <c>value</c> is therefore
+ * <c>TriggerRepoEntry[] | undefined</c>; <c>onChange</c> emits a fresh array
+ * or <c>undefined</c> when the list becomes empty (so the SchemaForm spreads
+ * <c>repositories: undefined</c> which JSON.stringify drops on save —
+ * routing the matcher through its empty-config → match-all path).
  *
- * <h3>Auto-migration</h3>
- * Incoming <c>value</c> may be the legacy <c>{ repositoryId, labels? }</c>
- * (configs saved before PR #23) or <c>{ repositories: [] }</c> from an
- * intermediate save. The selector normalises through
- * <see cref="migrateLegacyTriggerConfig"/> for display; the first
- * <c>onChange</c> emits the shape this picker prefers, so storage
- * transparently upgrades on first save.
+ * <h3>Defensive parsing</h3>
+ * Raw <c>unknown</c> input flows through <see cref="normaliseRepositoriesArray"/>
+ * which tolerates malformed entries (skipping them) and keeps in-progress
+ * empty-repositoryId rows so the "Add → Pick" flow survives a re-render.
  */
 
 interface TriggerRepositoriesSelectorProps {
+  /** Property value: the repositories array, or undefined when the operator
+   *  has never picked anything. May be malformed shape from a hand-edited DB
+   *  row — normaliseRepositoriesArray handles it. */
   value: unknown;
-  onChange: (next: TriggerConfigArrayShape | Record<string, never>) => void;
+  /** Emit the new array, OR undefined when the list is empty. Undefined
+   *  causes the SchemaForm to spread `repositories: undefined`, dropping
+   *  the key on JSON serialise — the matcher then sees an empty config
+   *  and matches all (its precedence rule #4). */
+  onChange: (next: TriggerRepoEntry[] | undefined) => void;
 }
 
 export function TriggerRepositoriesSelector({ value, onChange }: TriggerRepositoriesSelectorProps) {
-  const shape = useMemo(() => migrateLegacyTriggerConfig(value), [value]);
+  const entries = useMemo(() => normaliseRepositoriesArray(value), [value]);
   const projects = useProjects();
   const repositories = useRepositories();
 
@@ -75,16 +76,13 @@ export function TriggerRepositoriesSelector({ value, onChange }: TriggerReposito
     return repoRows.find((r) => r.id === entry.repositoryId)?.projects?.[0]?.id ?? "";
   };
 
-  // Emit `{}` when the list is empty so the matcher's empty-config → match-all
-  // path fires (see component-level doc). Emit the full shape when there's at
-  // least one row (including in-progress empty-repositoryId rows; the matcher
-  // tolerates them as "no match" until the operator picks the repo).
-  const emit = (next: TriggerRepoEntry[]) => {
-    if (next.length === 0) onChange({});
-    else onChange({ repositories: next });
-  };
+  // Emit undefined when the list is empty so the SchemaForm spreads `repositories:
+  // undefined`, dropping the key on JSON serialise → matcher empty-config path →
+  // match-all. Emit the array when there's ≥1 row (including in-progress empty
+  // entries; the matcher tolerates them).
+  const emit = (next: TriggerRepoEntry[]) => onChange(next.length === 0 ? undefined : next);
 
-  const addRow = () => emit([...shape.repositories, { repositoryId: "" }]);
+  const addRow = () => emit([...entries, { repositoryId: "" }]);
 
   const removeRow = (idx: number) => {
     // Shift draft project indices: drop the removed entry, then re-key everything
@@ -97,12 +95,11 @@ export function TriggerRepositoriesSelector({ value, onChange }: TriggerReposito
       }
       return next;
     });
-    emit(shape.repositories.filter((_, i) => i !== idx));
+    emit(entries.filter((_, i) => i !== idx));
   };
 
   const updateRow = (idx: number, patch: Partial<TriggerRepoEntry>) => {
-    const merged = shape.repositories.map((entry, i) => (i === idx ? { ...entry, ...patch } : entry));
-    emit(merged);
+    emit(entries.map((entry, i) => (i === idx ? { ...entry, ...patch } : entry)));
   };
 
   const pickProjectForRow = (idx: number, projectId: string) => {
@@ -120,7 +117,7 @@ export function TriggerRepositoriesSelector({ value, onChange }: TriggerReposito
   return (
     <div className="wf-trigger-repos" data-testid="trigger-repositories-selector">
       <div className="wf-trigger-repos-card">
-        {shape.repositories.map((entry, idx) => (
+        {entries.map((entry, idx) => (
           <TriggerRepoRow
             key={idx}
             entry={entry}
