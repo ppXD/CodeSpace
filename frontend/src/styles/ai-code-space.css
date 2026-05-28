@@ -2278,11 +2278,33 @@
   font-size: 12px; color: var(--ink); cursor: pointer;
   user-select: none;
 }
+/* Custom flat checkbox — same approach as the markdown task-list checkbox
+ * (line 760) but tinted to the accent palette since this control is
+ * interactive (the markdown one is read-only). Plain browser checkboxes
+ * render as a heavy black box in the warm-cream palette; this matches the
+ * inspector's overall design language (--line border + --panel fill,
+ * --accent on activation). */
 .acs-root .wf-trigger-repos-matchall input[type="checkbox"] {
-  width: 14px; height: 14px;
-  accent-color: var(--accent);
-  cursor: pointer;
-  margin: 0;
+  appearance: none; -webkit-appearance: none;
+  width: 14px; height: 14px; margin: 0;
+  border: 1px solid var(--line-2); border-radius: 3px;
+  background: var(--panel);
+  position: relative; cursor: pointer;
+  transition: background .08s ease, border-color .08s ease;
+  flex-shrink: 0;
+}
+.acs-root .wf-trigger-repos-matchall input[type="checkbox"]:hover { border-color: var(--accent); }
+.acs-root .wf-trigger-repos-matchall input[type="checkbox"]:focus-visible {
+  outline: 2px solid var(--accent-soft); outline-offset: 1px;
+}
+.acs-root .wf-trigger-repos-matchall input[type="checkbox"]:checked {
+  background: var(--accent); border-color: var(--accent);
+}
+.acs-root .wf-trigger-repos-matchall input[type="checkbox"]:checked::after {
+  content: ""; position: absolute;
+  left: 4px; top: 1px; width: 4px; height: 8px;
+  border: solid #fff; border-width: 0 1.5px 1.5px 0;
+  transform: rotate(45deg);
 }
 .acs-root .wf-trigger-repos-matchall-label { font-weight: 500; }
 .acs-root .wf-trigger-repos-card {
