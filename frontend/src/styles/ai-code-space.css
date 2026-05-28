@@ -2808,13 +2808,17 @@
   font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .04em; color: var(--muted);
 }
 /* Channel creator — pinned in the Channels-tab footer (.chat-rail-foot): an accent button that
-   expands to an input + Add + Cancel form. The footer owns the padding + top border. */
-.acs-root .chat-create { display: flex; gap: 6px; }
+   expands to a stacked form (full-width input over a row of two equal-width buttons — a bordered
+   secondary Cancel + the accent Add — so the pair reads as balanced, not a solid-vs-transparent
+   mismatch). The footer owns the padding + top border. */
+.acs-root .chat-create { display: flex; flex-direction: column; gap: 8px; }
 .acs-root .chat-create-input {
-  flex: 1; min-width: 0; border: 1px solid var(--line); border-radius: var(--radius-sm);
-  background: var(--panel); color: var(--ink); padding: 6px 8px; font: inherit; font-size: 13px;
+  width: 100%; min-width: 0; border: 1px solid var(--line); border-radius: var(--radius-sm);
+  background: var(--panel); color: var(--ink); padding: 7px 9px; font: inherit; font-size: 13px;
 }
 .acs-root .chat-create-input:focus { outline: none; border-color: var(--accent); }
+.acs-root .chat-create-actions { display: flex; gap: 6px; }
+.acs-root .chat-create-actions .btn { flex: 1; justify-content: center; }
 .acs-root .chat-create-btn { width: 100%; justify-content: center; }
 .acs-root .chat-list-body { flex: 1; overflow-y: auto; padding: 4px 8px 12px; }
 

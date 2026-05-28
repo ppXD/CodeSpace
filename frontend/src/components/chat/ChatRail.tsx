@@ -87,8 +87,10 @@ export function ChatRail() {
                   if (e.key === "Escape") cancelCreate();
                 }}
               />
-              <button className="btn btn-primary" onClick={submitCreate} disabled={create.isPending || name.trim().length === 0}>Add</button>
-              <button className="btn btn-ghost" onClick={cancelCreate}>Cancel</button>
+              <div className="chat-create-actions">
+                <button className="btn" onClick={cancelCreate}>Cancel</button>
+                <button className="btn btn-primary" onClick={submitCreate} disabled={create.isPending || name.trim().length === 0}>Add</button>
+              </div>
             </div>
           ) : (
             <button className="btn btn-primary chat-create-btn" onClick={() => setCreating(true)}>
