@@ -20,6 +20,7 @@
   --muted-2: #A5A29C;
   --accent: #D97757;
   --accent-soft: #F4E3D8;
+  --accent-wash: #FBF2EB;
   --soft: #EDE7DB;
   --good: #5BA17A;
   --warn: #C97C3F;
@@ -2877,6 +2878,15 @@
    name in the accent colour (Discord-style coloured names), so you can spot your messages at a
    glance while every row stays an equal member of the flat log. */
 .acs-root .chat-msg[data-mine="true"] .chat-msg-author { color: var(--accent); }
+
+/* A message that @-mentions YOU gets the highlight Slack/Space reserve for mentions — a faint
+   accent wash + a 2px accent rail down the left — so it stands out as "this one's for me". */
+.acs-root .chat-msg[data-mentions-me="true"] {
+  position: relative; padding: 6px 12px; margin: 0 -12px; border-radius: var(--radius-sm); background: var(--accent-wash);
+}
+.acs-root .chat-msg[data-mentions-me="true"]::before {
+  content: ""; position: absolute; left: 0; top: 6px; bottom: 6px; width: 2px; border-radius: 2px; background: var(--accent);
+}
 .acs-root .chat-msg-time, .acs-root .chat-msg-edited { font-size: 11px; color: var(--muted-2); }
 .acs-root .chat-msg-text {
   display: block; font-size: 14px; color: var(--ink-2); line-height: 1.5;
@@ -2895,6 +2905,8 @@
 .acs-root .chat-ref {
   padding: 0 4px; border-radius: 4px; background: var(--accent-soft); color: var(--accent); font-weight: 500;
 }
+/* The @you chip — a mention OF the current user — is a solid accent pill so it pops in the line. */
+.acs-root .chat-ref[data-me="true"] { background: var(--accent); color: var(--panel); }
 
 .acs-root .chat-empty { color: var(--muted); font-size: 13px; padding: 24px; text-align: center; }
 

@@ -9,14 +9,17 @@ import { MessageBody } from "./MessageBody";
  * message renders as a tombstone — the server already blanked its body, so there is nothing
  * to leak. <c>isMine</c> lets the row style the author's own messages distinctly.
  */
-export function MessageItem({ message, members, isMine }: { message: MessageView; members: Map<string, TeamMemberSummary>; isMine: boolean }) {
+export function MessageItem({ message, members, isMine, myUserId }: { message: MessageView; members: Map<string, TeamMemberSummary>; isMine: boolean; myUserId: string | null }) {
   const name = members.get(message.authorUserId)?.name ?? "Unknown";
 
   // Stable per-author colour so each speaker is recognisable down the log (incl. yourself).
   const color = avatarColor(message.authorUserId);
 
+  // A message that @-mentions you gets the highlight reserved for mentions (Slack/Space).
+  const mentionsMe = myUserId != null && message.references.some((r) => r.refType === "user" && r.refId === myUserId);
+
   return (
-    <div className="chat-msg" data-mine={isMine}>
+    <div className="chat-msg" data-mine={isMine} data-mentions-me={mentionsMe}>
       <div className="chat-msg-avatar" aria-hidden="true" style={{ background: color.bg, color: color.fg }}>{name.charAt(0).toUpperCase()}</div>
       <div className="chat-msg-main">
         <div className="chat-msg-head">
@@ -27,7 +30,7 @@ export function MessageItem({ message, members, isMine }: { message: MessageView
         {message.isDeleted ? (
           <span className="chat-msg-deleted">message deleted</span>
         ) : (
-          <MessageBody body={message.body} members={members} />
+          <MessageBody body={message.body} members={members} myUserId={myUserId} />
         )}
       </div>
     </div>

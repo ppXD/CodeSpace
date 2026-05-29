@@ -428,7 +428,7 @@ public class ConversationServiceFlowTests
         row.LastMessage.ShouldNotBeNull();
         row.LastMessage!.AuthorUserId.ShouldBe(owner);
         row.LastMessage.IsDeleted.ShouldBeFalse();
-        row.LastMessage.Preview.ShouldBe("hi Alice welcome", customMessage: "Preview must strip reference tokens to their labels.");
+        row.LastMessage.Preview.ShouldBe("hi @Alice welcome", customMessage: "Preview must strip reference tokens to their labels, keeping the @ on a user mention.");
         row.LastActivityDate.ShouldBe(row.LastMessage.CreatedDate);
     }
 

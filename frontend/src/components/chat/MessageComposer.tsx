@@ -1,6 +1,7 @@
 import { useRef, useState, type ClipboardEvent, type KeyboardEvent } from "react";
 
 import type { TeamMemberSummary } from "@/api/teams";
+import { useMe } from "@/hooks/use-me";
 import { useTeamMembers } from "@/hooks/use-team-members";
 import { findActiveMention, matchMembers, mentionAttributes, serializeEditor } from "@/lib/mentionInput";
 
@@ -26,7 +27,9 @@ export function MessageComposer({ onSend, disabled, placeholder }: { onSend: (bo
   const [empty, setEmpty] = useState(true);
   const [picker, setPicker] = useState<PickerState | null>(null);
 
-  const roster = useTeamMembers().data ?? [];
+  // You can't mention yourself — drop your own id from the candidate roster.
+  const myId = useMe().data?.id ?? null;
+  const roster = (useTeamMembers().data ?? []).filter((m) => m.userId !== myId);
 
   const refreshEmpty = () => setEmpty((editorRef.current?.textContent ?? "").trim().length === 0);
 

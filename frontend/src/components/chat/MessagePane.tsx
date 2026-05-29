@@ -107,7 +107,7 @@ export function MessagePane({ conversationId }: { conversationId: string }) {
                   <span>New messages</span>
                 </div>
               )}
-              <MessageItem message={m} members={members} isMine={m.authorUserId === me.data?.id} />
+              <MessageItem message={m} members={members} isMine={m.authorUserId === me.data?.id} myUserId={me.data?.id ?? null} />
             </Fragment>
           );
         })}

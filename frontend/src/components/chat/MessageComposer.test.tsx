@@ -11,6 +11,7 @@ import { MessageComposer } from "./MessageComposer";
 vi.mock("@/hooks/use-team-members", () => ({
   useTeamMembers: () => ({ data: [{ userId: "u1", name: "Alice", email: "a@x", avatarUrl: null }] }),
 }));
+vi.mock("@/hooks/use-me", () => ({ useMe: () => ({ data: { id: "me" } }) }));
 
 function setContent(editor: HTMLElement, html: string) {
   editor.innerHTML = html;
