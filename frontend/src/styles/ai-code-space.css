@@ -2865,12 +2865,18 @@
 .acs-root .chat-msg { display: flex; gap: 10px; padding: 6px 0; }
 .acs-root .chat-msg-avatar {
   flex-shrink: 0; width: 30px; height: 30px; border-radius: 50%;
-  background: var(--accent-soft); color: var(--accent);
+  background: var(--panel-2); color: var(--muted);
   display: flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 600;
 }
 .acs-root .chat-msg-main { min-width: 0; flex: 1; }
 .acs-root .chat-msg-head { display: flex; align-items: baseline; gap: 8px; }
 .acs-root .chat-msg-author { font-size: 13px; font-weight: 600; color: var(--ink); }
+
+/* Speakers are told apart by a stable per-author avatar colour (set inline from the user id), the
+   Slack/Discord/Space convention — no bubbles, no per-message tint. The one self cue is your own
+   name in the accent colour (Discord-style coloured names), so you can spot your messages at a
+   glance while every row stays an equal member of the flat log. */
+.acs-root .chat-msg[data-mine="true"] .chat-msg-author { color: var(--accent); }
 .acs-root .chat-msg-time, .acs-root .chat-msg-edited { font-size: 11px; color: var(--muted-2); }
 .acs-root .chat-msg-text {
   display: block; font-size: 14px; color: var(--ink-2); line-height: 1.5;
@@ -2932,11 +2938,11 @@
    lists the roster then an "Add people" section. Opens below-left since the trigger sits by the title. */
 .acs-root .chat-members { position: relative; display: inline-flex; }
 .acs-root .chat-members-trigger {
-  display: inline-flex; align-items: center; gap: 5px; padding: 2px 7px; border-radius: var(--radius-sm);
-  appearance: none; border: none; background: none; cursor: pointer; font: inherit; font-size: 12px; color: var(--muted);
+  display: inline-flex; align-items: baseline; gap: 5px; padding: 3px 8px; border-radius: var(--radius-sm);
+  appearance: none; border: none; background: none; cursor: pointer; font: inherit; font-size: 12px; line-height: 1; color: var(--muted);
 }
 .acs-root .chat-members-trigger:hover, .acs-root .chat-members-trigger[data-active="true"] { background: var(--soft); color: var(--ink-2); }
-.acs-root .chat-members-trigger svg { color: var(--muted-2); flex-shrink: 0; }
+.acs-root .chat-members-trigger svg { align-self: center; color: var(--muted-2); flex-shrink: 0; }
 .acs-root .chat-members-pop { right: auto; left: 0; }
 .acs-root .chat-members-subhead {
   padding: 8px 12px 4px; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .04em; color: var(--muted);

@@ -30,6 +30,24 @@ describe("MessageComposer", () => {
     expect(onSend).toHaveBeenCalledWith("hi");
   });
 
+  it("does not send on the Enter that commits an IME composition, but sends the next Enter", () => {
+    const onSend = vi.fn();
+    render(<MessageComposer onSend={onSend} />);
+
+    const input = screen.getByRole("textbox");
+    fireEvent.change(input, { target: { value: "你好" } });
+
+    // Mid-composition (choosing a CJK candidate): Enter commits the candidate into the box, not a send.
+    fireEvent.compositionStart(input);
+    fireEvent.keyDown(input, { key: "Enter" });
+    expect(onSend).not.toHaveBeenCalled();
+
+    // Composition finished → the next Enter actually sends.
+    fireEvent.compositionEnd(input);
+    fireEvent.keyDown(input, { key: "Enter" });
+    expect(onSend).toHaveBeenCalledWith("你好");
+  });
+
   it("never sends whitespace-only input", () => {
     const onSend = vi.fn();
     render(<MessageComposer onSend={onSend} />);
