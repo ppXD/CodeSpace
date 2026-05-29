@@ -103,7 +103,6 @@ export function ConnectRemoteModal({ onClose }: ConnectRemoteModalProps) {
     [credentials.data],
   );
 
-  // Close on Escape.
   useEffect(() => {
     const handler = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
     window.addEventListener("keydown", handler);
@@ -263,11 +262,6 @@ function ProvidersStep({ providers, loading, error, myCredentialByInstance, team
       <div className="mdl-head">
         <div className="mdl-title-wrap">
           <div className="mdl-title">Providers</div>
-          {/* Description intentionally minimal. The previous paragraph explained
-              the team-vs-user split and the platform's read/comment/listen verbs;
-              that detail is documentation territory and the list below (with its
-              per-row Connect / Disconnect buttons) is self-explanatory once you
-              see it. Keep this single line as a one-glance positioning hint. */}
           <div className="mdl-sub">Connect a Git host so the team can read repos and listen for events.</div>
         </div>
         <button className="mdl-x" onClick={onClose} title="Close"><Ic.X size={14} /></button>
@@ -376,9 +370,6 @@ interface ProviderRowProps {
 }
 
 function ProviderRow({ instance, theme, myCred, isConnecting, isDisconnecting, errorMsg, onConnect, onDisconnect, onEdit }: ProviderRowProps) {
-  // Compact row: name + status on line 1, URL + purpose hint on line 2. Capability detail
-  // and connection time live in tooltips and warning chips — out of the main flow unless
-  // something needs attention. Keeps every row the same height regardless of state.
   return (
     <div className="cn-row">
       <div className="cn-mark" data-p={instance.provider.toLowerCase()}>{theme.initials}</div>
@@ -407,10 +398,6 @@ function ProviderRow({ instance, theme, myCred, isConnecting, isDisconnecting, e
         {errorMsg && <div className="cn-row-err">{errorMsg}</div>}
       </div>
       <div className="cn-cta">
-        {/* Primary action depends on state:
-            • OAuth not configured yet → "Configure OAuth" (opens edit form)
-            • OAuth ready + I'm not connected → "Connect"
-            • OAuth ready + I'm connected → "Disconnect" */}
         {!instance.oauthEnabled ? (
           <button className="btn btn-primary" onClick={() => onEdit(instance)}>
             <Ic.Key size={13} /> Configure OAuth
