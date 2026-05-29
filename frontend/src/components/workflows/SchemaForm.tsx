@@ -1,7 +1,7 @@
 import { useMemo } from "react";
 
 import type { ScopeSuggestion } from "./scope-introspection";
-import { RepositorySelector } from "./selectors/RepositorySelector";
+import { ProjectRepositorySelector } from "./selectors/ProjectRepositorySelector";
 import { TriggerRepositoriesSelector } from "./selectors/TriggerRepositoriesSelector";
 import { VariablePickerInput } from "./VariablePickerInput";
 
@@ -258,7 +258,7 @@ function renderCustomSelector(key: string, _schema: Schema, value: unknown, onCh
   switch (key) {
     case "repository":
       return (
-        <RepositorySelector
+        <ProjectRepositorySelector
           value={typeof value === "string" ? value : ""}
           onChange={(next) => onChange(next === "" ? undefined : next)}
         />
