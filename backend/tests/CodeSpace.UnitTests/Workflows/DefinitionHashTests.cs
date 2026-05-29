@@ -312,4 +312,46 @@ public class DefinitionHashTests
             "Today the canonicaliser preserves JSON property order. To make config-property-order " +
             "irrelevant, add a recursive key-sorting pass in DefinitionHash before SHA-256.");
     }
+
+    // ─── Engine integrity contract: hash MUST survive the store/load round-trip ──────
+    //
+    // The engine recomputes the hash from the STORED definition_json (deserialised via
+    // WorkflowJson.Options) and compares it to the hash stored at save time
+    // (DefinitionHash.Compute on the in-memory definition). If those two paths diverge for
+    // any legal definition, every run of that version fails with ReleaseTamperedException.
+    // This reproduces the exact flow for a manual workflow with declared inputs (no default)
+    // and a node wiring those inputs via {{input.*}} — the shape that triggered the bug.
+
+    [Fact]
+    public void Hash_survives_WorkflowJson_round_trip_for_inputs_and_ref_wiring()
+    {
+        var def = new WorkflowDefinition
+        {
+            SchemaVersion = 1,
+            Inputs = new[]
+            {
+                new WorkflowVariable { Name = "repo", Schema = JsonElementFrom("""{"type":"string","x-selector":"repository"}"""), Required = true },
+                new WorkflowVariable { Name = "pr_num", Schema = JsonElementFrom("""{"type":"integer"}"""), Required = true },
+            },
+            Nodes = new[]
+            {
+                new NodeDefinition { Id = "start", TypeKey = "trigger.manual", Config = JsonElementFrom("{}"), Inputs = JsonElementFrom("{}") },
+                new NodeDefinition { Id = "fetch", TypeKey = "git.fetch_pr_diff", Config = JsonElementFrom("{}"), Inputs = JsonElementFrom("""{"repositoryId":"{{input.repo}}","number":"{{input.pr_num}}"}""") },
+                new NodeDefinition { Id = "end",   TypeKey = "builtin.terminal",  Config = JsonElementFrom("{}"), Inputs = JsonElementFrom("{}") },
+            },
+            Edges = new[]
+            {
+                new EdgeDefinition { From = "start", To = "fetch" },
+                new EdgeDefinition { From = "fetch", To = "end" },
+            },
+        };
+
+        var storedHash = DefinitionHash.Compute(def);
+        var storedJson = JsonSerializer.Serialize(def, WorkflowJson.Options);
+        var reloaded = JsonSerializer.Deserialize<WorkflowDefinition>(storedJson, WorkflowJson.Options)!;
+        var recomputedHash = DefinitionHash.Compute(reloaded);
+
+        recomputedHash.ShouldBe(storedHash,
+            "save-time hash and run-time recompute must match, else the engine reports a false ReleaseTamperedException");
+    }
 }
