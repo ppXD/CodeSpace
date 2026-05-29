@@ -22,6 +22,15 @@ export function useProviderInstances() {
   return useQuery({ queryKey: ["provider-instances"], queryFn: () => oauthApi.listProviderInstances() });
 }
 
+/** Add a GitLab Group Access Token as a team-service credential, then refresh the credential list. */
+export function useAddGroupAccessToken() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (input: { providerInstanceId: string; displayName: string; token: string }) => oauthApi.addGroupAccessToken(input),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["credentials"] }),
+  });
+}
+
 export function useAddProviderInstance() {
   const queryClient = useQueryClient();
   return useMutation({

@@ -11,6 +11,7 @@ using CodeSpace.Messages.Commands.Repositories;
 using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Credentials;
 using CodeSpace.Messages.Enums;
+using CodeSpace.Messages.Queries.Credentials;
 using MediatR;
 using Microsoft.EntityFrameworkCore;
 using Shouldly;
@@ -336,11 +337,43 @@ public class RepositoryBindingFlowTests
 
         var credential = await db.Credential.AsNoTracking().SingleAsync(c => c.Id == credentialId).ConfigureAwait(false);
         credential.AuthType.ShouldBe(AuthType.Pat);
+        credential.Ownership.ShouldBe(CredentialOwnership.Personal, customMessage: "An ordinary add (no Ownership set) must default to Personal — adding the field is non-breaking.");
         credential.EncryptedPayload.ShouldNotContain("secret-token-xxx", customMessage: "payload must not be stored in plaintext");
 
         var decryptedJson = encryptor.Decrypt(credential.EncryptedPayload);
         var payload = (PatPayload)serializer.Deserialize(credential.AuthType, decryptedJson);
         payload.Token.ShouldBe("secret-token-xxx");
+    }
+
+    [Fact]
+    public async Task AddCredential_as_team_service_drops_the_owner_and_is_surfaced()
+    {
+        var teamId = await SeedTeamAsync().ConfigureAwait(false);
+        var providerInstanceId = await SeedProviderInstanceAsync(teamId).ConfigureAwait(false);
+
+        Guid credentialId;
+        using (var scope = _fixture.BeginScopeAs(Guid.NewGuid(), teamId, Roles.Admin))
+        {
+            credentialId = await scope.Resolve<IMediator>().Send(new AddCredentialCommand
+            {
+                ProviderInstanceId = providerInstanceId,
+                OwnerUserId = Guid.NewGuid(),   // a team-service credential must DROP any owner it's handed
+                DisplayName = "Acme group token",
+                Payload = new GroupAccessTokenPayload { Token = "glpat-team-xxx" },
+                Ownership = CredentialOwnership.TeamService,
+            }).ConfigureAwait(false);
+        }
+
+        using var verify = _fixture.BeginScope();
+        var credential = await verify.Resolve<CodeSpaceDbContext>().Credential.AsNoTracking().SingleAsync(c => c.Id == credentialId).ConfigureAwait(false);
+
+        credential.Ownership.ShouldBe(CredentialOwnership.TeamService);
+        credential.OwnerUserId.ShouldBeNull(customMessage: "A team-service credential belongs to the team, not a person — the owner must be dropped.");
+        credential.AuthType.ShouldBe(AuthType.GroupAccessToken);
+
+        using var read = _fixture.BeginScopeAs(Guid.NewGuid(), teamId, Roles.Admin);
+        var listed = await read.Resolve<IMediator>().Send(new ListCredentialsQuery { ProviderInstanceId = providerInstanceId }).ConfigureAwait(false);
+        listed.Single(c => c.Id == credentialId).Ownership.ShouldBe(CredentialOwnership.TeamService, customMessage: "Ownership must be surfaced on the read DTO so the UI can label + prefer it.");
     }
 
     /// <summary>

@@ -16,7 +16,7 @@ public interface ICredentialService
     Task<IReadOnlyList<CredentialSummary>> ListAsync(Guid? providerInstanceId, CancellationToken cancellationToken);
     Task<CredentialUsage> GetUsageAsync(Guid credentialId, CancellationToken cancellationToken);
     Task<CredentialCapabilitiesResponse> GetCapabilitiesAsync(Guid credentialId, CancellationToken cancellationToken);
-    Task<Guid> AddAsync(Guid providerInstanceId, Guid? ownerUserId, string displayName, CredentialPayload payload, CancellationToken cancellationToken);
+    Task<Guid> AddAsync(AddCredentialInput input, CancellationToken cancellationToken);
     Task<RevokeCredentialResult> RevokeAsync(Guid credentialId, CancellationToken cancellationToken);
     Task<RemoteRepositoryPage> ListAccessibleRepositoriesAsync(Guid credentialId, string? search, int page, int perPage, CancellationToken cancellationToken);
 }

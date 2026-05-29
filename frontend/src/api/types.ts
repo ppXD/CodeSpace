@@ -8,6 +8,9 @@
 export type ProviderKind = "GitHub" | "GitLab" | "Git";
 
 export type AuthType = "Pat" | "ProjectAccessToken" | "GroupAccessToken" | "OAuth" | "GitHubApp" | "SshKey" | "BasicAuth";
+/** Personal (one user's OAuth/PAT) vs TeamService (team-owned, no person). The bind picker prefers
+ *  TeamService so a repo's connection doesn't hinge on one person leaving. */
+export type CredentialOwnership = "Personal" | "TeamService";
 
 export type CredentialStatus = "Active" | "Expired" | "Revoked" | "Error";
 
@@ -32,6 +35,8 @@ export interface CredentialSummary {
    *  multiple credentials on the same provider ("alice's GitHub" vs "bob's GitHub")
    *  by identity instead of the user-editable display name. */
   ownerUserName?: string | null;
+  /** Personal (one user's) vs TeamService (team-owned, no person). Drives labeling + bind preference. */
+  ownership: CredentialOwnership;
   authType: AuthType;
   displayName: string;
   status: CredentialStatus;

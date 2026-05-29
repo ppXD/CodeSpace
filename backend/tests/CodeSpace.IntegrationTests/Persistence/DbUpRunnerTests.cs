@@ -41,6 +41,17 @@ public class DbUpRunnerTests
     }
 
     [Theory]
+    [InlineData("credential", "ownership")]   // added by 0030 — drives team-service vs personal credential governance
+    public async Task Column_exists_after_migration(string tableName, string columnName)
+    {
+        var exists = await ColumnExistsAsync(tableName, columnName).ConfigureAwait(false);
+
+        exists.ShouldBeTrue(
+            $"Column '{tableName}.{columnName}' must exist after migrations apply — added by 0030_credential_ownership.sql. " +
+            $"If missing, 0030 did not run. Diagnose with: psql -c '\\d {tableName}' against the test database.");
+    }
+
+    [Theory]
     [InlineData("repository", "project_id")]   // dropped by 0027 — see PR notes; the link table is now the sole project membership source
     public async Task Column_does_not_exist_after_migration(string tableName, string columnName)
     {

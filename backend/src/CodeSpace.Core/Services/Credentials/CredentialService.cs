@@ -63,6 +63,7 @@ public sealed class CredentialService : ICredentialService, IScopedDependency
                 ProviderInstanceId = c.ProviderInstanceId,
                 OwnerUserId = c.OwnerUserId,
                 OwnerUserName = c.Owner != null ? c.Owner.Name : null,
+                Ownership = c.Ownership,
                 AuthType = c.AuthType,
                 DisplayName = c.DisplayName,
                 Status = c.Status,
@@ -134,19 +135,21 @@ public sealed class CredentialService : ICredentialService, IScopedDependency
         };
     }
 
-    public async Task<Guid> AddAsync(Guid providerInstanceId, Guid? ownerUserId, string displayName, CredentialPayload payload, CancellationToken cancellationToken)
+    public async Task<Guid> AddAsync(AddCredentialInput input, CancellationToken cancellationToken)
     {
-        var json = _serializer.Serialize(payload);
+        var json = _serializer.Serialize(input.Payload);
         var encrypted = _encryptor.Encrypt(json);
 
         var credential = new Credential
         {
             Id = Guid.NewGuid(),
             TeamId = _currentTeam.Id!.Value,
-            ProviderInstanceId = providerInstanceId,
-            OwnerUserId = ownerUserId,
-            AuthType = payload.Type,
-            DisplayName = displayName,
+            ProviderInstanceId = input.ProviderInstanceId,
+            // A team-service credential belongs to the team, not a person — never carry an owner.
+            OwnerUserId = input.Ownership == CredentialOwnership.TeamService ? null : input.OwnerUserId,
+            Ownership = input.Ownership,
+            AuthType = input.Payload.Type,
+            DisplayName = input.DisplayName,
             EncryptedPayload = encrypted,
             Status = CredentialStatus.Active
         };

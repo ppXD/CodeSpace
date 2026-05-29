@@ -1,6 +1,7 @@
 using CodeSpace.Messages.Commands.Credentials;
 using CodeSpace.Messages.Credentials;
 using CodeSpace.Messages.Dtos.Credentials;
+using CodeSpace.Messages.Enums;
 using CodeSpace.Messages.Queries.Credentials;
 using MediatR;
 using Microsoft.AspNetCore.Mvc;
@@ -63,6 +64,26 @@ public class CredentialsController : ControllerBase
             OwnerUserId = request.OwnerUserId,
             DisplayName = request.DisplayName,
             Payload = new PatPayload { Token = request.Token }
+        }, cancellationToken).ConfigureAwait(false);
+
+        return Ok(new { id });
+    }
+
+    /// <summary>
+    /// Add a GitLab Group Access Token as a TEAM-SERVICE credential — owned by the team, not a
+    /// person, so a repo bound through it survives anyone leaving. Same flat-token → structured-
+    /// payload mapping as <see cref="AddPat"/> (Rule 17 exception). Ownership is forced TeamService,
+    /// so the credential is owner-less regardless of who creates it.
+    /// </summary>
+    [HttpPost("group-access-token")]
+    public async Task<IActionResult> AddGroupAccessToken([FromBody] AddGroupAccessTokenRequest request, CancellationToken cancellationToken)
+    {
+        var id = await _mediator.Send(new AddCredentialCommand
+        {
+            ProviderInstanceId = request.ProviderInstanceId,
+            DisplayName = request.DisplayName,
+            Payload = new GroupAccessTokenPayload { Token = request.Token },
+            Ownership = CredentialOwnership.TeamService
         }, cancellationToken).ConfigureAwait(false);
 
         return Ok(new { id });

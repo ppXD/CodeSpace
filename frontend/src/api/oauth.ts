@@ -82,6 +82,13 @@ export const oauthApi = {
     body: JSON.stringify(input),
   }),
 
+  // Add a GitLab Group Access Token as a TEAM-SERVICE credential (owned by the team, not a person).
+  addGroupAccessToken: (input: { providerInstanceId: string; displayName: string; token: string }) =>
+    fetchJson<{ id: string }>("/api/credentials/group-access-token", {
+      method: "POST",
+      body: JSON.stringify(input),
+    }),
+
   revokeCredential: (credentialId: string) => fetchJson<RevokeCredentialResponse>(`/api/credentials/${credentialId}/revoke`, {
     method: "POST",
   }),
