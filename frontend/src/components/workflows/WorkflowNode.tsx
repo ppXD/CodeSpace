@@ -24,10 +24,18 @@ export interface WorkflowNodeData extends Record<string, unknown> {
   /** Manifest-declared category ("AI", "Git", "Logic", …). Drives the icon fallback when iconKey is null. */
   category: string;
   label: string | null;
+  /**
+   * Manual Start node only: the workflow's declared input fields, rendered on the card so the
+   * entry node shows its inputs the way Dify's Start node does. Unbounded output lists are kept
+   * OFF the card (see above), but the input set on a manual trigger is small and is the node's
+   * whole purpose, so it earns its place. Synced from the editor's workflow inputs state.
+   */
+  inputFields?: ReadonlyArray<{ name: string; label?: string | null; required?: boolean }>;
 }
 
 export function WorkflowNode({ data, selected }: NodeProps) {
   const d = data as WorkflowNodeData;
+  const fields = d.inputFields ?? [];
   return (
     <div className="wf-rf-node" data-kind={d.kind.toLowerCase()} data-selected={selected}>
       {d.kind !== "Trigger" && <Handle type="target" position={Position.Top} className="wf-rf-handle" />}
@@ -36,6 +44,17 @@ export function WorkflowNode({ data, selected }: NodeProps) {
       <div className="wf-rf-node-body">
         <div className="wf-rf-node-id">{d.nodeId}</div>
         <div className="wf-rf-node-type">{d.label ?? d.displayName}</div>
+        {fields.length > 0 && (
+          <ul className="wf-rf-node-fields">
+            {fields.map((f) => (
+              <li key={f.name} className="wf-rf-node-field">
+                <span className="wf-rf-node-field-name">{f.name}</span>
+                {f.label && <span className="wf-rf-node-field-label">{f.label}</span>}
+                {f.required && <span className="wf-rf-node-field-req">required</span>}
+              </li>
+            ))}
+          </ul>
+        )}
       </div>
       {d.kind !== "Terminal" && <Handle type="source" position={Position.Bottom} className="wf-rf-handle" />}
     </div>

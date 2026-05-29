@@ -32,11 +32,13 @@ import type {
   WorkflowActivationInput,
   WorkflowDefinition,
   WorkflowDetail,
+  WorkflowVariable,
 } from "@/api/workflows";
 import { deriveActivations } from "@/lib/workflowActivations";
 import { migrateLegacyPrTriggerConfig } from "@/lib/migrateTriggerConfig";
 import { SchemaForm } from "@/components/workflows/SchemaForm";
 import { introspectScope } from "@/components/workflows/scope-introspection";
+import { StartNodeInputsEditor } from "@/components/workflows/StartNodeInputsEditor";
 import { VariableTablePanel } from "@/components/workflows/VariableTablePanel";
 import { WorkflowNode, type WorkflowNodeData } from "@/components/workflows/WorkflowNode";
 import { WorkflowVariablesPanel } from "@/components/workflows/WorkflowVariablesPanel";
@@ -194,6 +196,10 @@ function Editor({ workflow, manifests, onBackToList, onOpenRuns, saving, onSave 
   const selectedNode = nodes.find((n) => n.id === selectedId) ?? null;
   const selectedManifest = selectedNode ? manifestByType.get(selectedNode.data.typeKey) ?? null : null;
 
+  // A manual Start node owns the workflow's input fields (Dify-style), so its inspector edits
+  // `workflowInputs` directly and the redundant side-panel "Inputs" tab is hidden when one exists.
+  const hasManualTrigger = nodes.some((n) => manifestByType.get(n.data.typeKey)?.isManual);
+
   // Per-node config + inputs state. The React Flow node holds the lightweight visual
   // data; the full config/inputs JSON lives here, keyed by node id, and gets folded
   // back into the WorkflowDefinition at save time.
@@ -318,6 +324,8 @@ function Editor({ workflow, manifests, onBackToList, onOpenRuns, saving, onSave 
           kind: manifest.kind,
           category: manifest.category,
           label: null,
+          // A manual start node shows the current workflow input fields on its card.
+          ...(manifest.isManual ? { inputFields: workflowInputs } : {}),
         },
       },
     ]);
@@ -413,6 +421,15 @@ function Editor({ workflow, manifests, onBackToList, onOpenRuns, saving, onSave 
     setUnsaved(true);
   };
 
+  // Mirror the workflow input fields onto the Manual start node's card data so the entry node
+  // renders its inputs (Dify-style). Called from the inputs editor's onChange + the refetch
+  // re-hydrate — never from an effect body, so it can't trigger cascading renders.
+  const syncManualNodeInputFields = (fields: WorkflowVariable[]) => {
+    setNodes((nds) => nds.map((n) =>
+      manifestByType.get(n.data.typeKey)?.isManual ? { ...n, data: { ...n.data, inputFields: fields } } : n
+    ));
+  };
+
   // ─── Save ───────────────────────────────────────────────────────────────────
   const handleSave = async () => {
     const definition = rfToDefinition(nodes, edges, configs, inputs, nodeLabels, workflowInputs, workflowOutputs);
@@ -444,6 +461,7 @@ function Editor({ workflow, manifests, onBackToList, onOpenRuns, saving, onSave 
 
     setWorkflowInputs(workflow.definition.inputs ?? []);
     setWorkflowOutputs(workflow.definition.outputs ?? []);
+    syncManualNodeInputFields(workflow.definition.inputs ?? []);
     lastSyncedVersionRef.current = { id: workflow.id, lastModifiedDate: workflow.lastModifiedDate };
   }, [workflow, unsaved]);
 
@@ -503,14 +521,19 @@ function Editor({ workflow, manifests, onBackToList, onOpenRuns, saving, onSave 
           <span className="wf-editor-toolbar-sep" aria-hidden="true" />
 
           <div className="wf-editor-toolbar-group" aria-label="Workflow IO">
-            <ToolbarButton
-              icon={<Ic.Zap size={14} />}
-              label="Inputs"
-              count={workflowInputs.length}
-              active={openVarsPanel === "inputs"}
-              onClick={() => setOpenVarsPanel((p) => p === "inputs" ? null : "inputs")}
-              tooltip="Workflow Inputs — per-run parameters the caller passes in. Reference via {{input.X}}."
-            />
+            {/* When a Manual start node exists it owns the input fields (edited on the node),
+                so the redundant side-panel Inputs tab is hidden. Workflows without a manual
+                trigger (e.g. event-driven ones that map an event payload onto inputs) keep it. */}
+            {!hasManualTrigger && (
+              <ToolbarButton
+                icon={<Ic.Zap size={14} />}
+                label="Inputs"
+                count={workflowInputs.length}
+                active={openVarsPanel === "inputs"}
+                onClick={() => setOpenVarsPanel((p) => p === "inputs" ? null : "inputs")}
+                tooltip="Workflow Inputs — per-run parameters the caller passes in. Reference via {{input.X}}."
+              />
+            )}
             <ToolbarButton
               icon={<Ic.CircleStop size={14} />}
               label="Outputs"
@@ -668,6 +691,10 @@ function Editor({ workflow, manifests, onBackToList, onOpenRuns, saving, onSave 
               // Project variables — one entry per project in the team. The picker
               // emits `project.{slug}.{name}` per real variable across all projects.
               projectVariables={projectVariablesForScope}
+              // Manual Start node owns the workflow input fields — its inspector edits
+              // `workflowInputs` directly (Dify-style "inputs on the start node").
+              inputFields={workflowInputs}
+              onInputFieldsChange={(next) => { setWorkflowInputs(next); syncManualNodeInputFields(next); markVarsDirty(); }}
               onLabelChange={(v) => updateLabel(selectedNode.id, v)}
               onConfigChange={(v) => updateConfig(selectedNode.id, v)}
               onInputsChange={(v) => updateInputs(selectedNode.id, v)}
@@ -828,6 +855,8 @@ function NodeInspector({
   teamVariables,
   systemVariables,
   projectVariables,
+  inputFields,
+  onInputFieldsChange,
   onLabelChange,
   onConfigChange,
   onInputsChange,
@@ -843,6 +872,8 @@ function NodeInspector({
   teamVariables: import("@/api/variables").VariableSummary[];
   systemVariables: import("@/api/workflows").SystemVariableDto[];
   projectVariables: ReadonlyArray<{ slug: string; variables: ReadonlyArray<import("@/api/variables").VariableSummary> }>;
+  inputFields: WorkflowVariable[];
+  onInputFieldsChange: (next: WorkflowVariable[]) => void;
   onLabelChange: (v: string) => void;
   onConfigChange: (v: Record<string, unknown>) => void;
   onInputsChange: (v: Record<string, unknown>) => void;
@@ -895,26 +926,34 @@ function NodeInspector({
         </label>
       </section>
 
-      <section className="wf-inspector-section">
-        <div className="wf-inspector-section-h">Config</div>
-        <SchemaForm
-          schema={manifest.configSchema}
-          value={config}
-          onChange={onConfigChange}
-          variableSuggestions={suggestions}
-        />
-      </section>
+      {/* Manual Start node: its inspector IS the input-fields editor (Dify-style "inputs on the
+          start node"). Its Config/Input schemas are empty, so there's nothing else to show. */}
+      {manifest.isManual ? (
+        <StartNodeInputsEditor inputs={inputFields} onChange={onInputFieldsChange} />
+      ) : (
+        <>
+          <section className="wf-inspector-section">
+            <div className="wf-inspector-section-h">Config</div>
+            <SchemaForm
+              schema={manifest.configSchema}
+              value={config}
+              onChange={onConfigChange}
+              variableSuggestions={suggestions}
+            />
+          </section>
 
-      <section className="wf-inspector-section">
-        <div className="wf-inspector-section-h">Inputs</div>
-        <SchemaForm
-          schema={manifest.inputSchema}
-          value={inputs}
-          onChange={onInputsChange}
-          templateHint
-          variableSuggestions={suggestions}
-        />
-      </section>
+          <section className="wf-inspector-section">
+            <div className="wf-inspector-section-h">Inputs</div>
+            <SchemaForm
+              schema={manifest.inputSchema}
+              value={inputs}
+              onChange={onInputsChange}
+              templateHint
+              variableSuggestions={suggestions}
+            />
+          </section>
+        </>
+      )}
 
       {/* Output section — what THIS node emits for downstream nodes to reference. Header
           acts as a toggle; the body (intro + per-output {{ref}} pill list) renders only
@@ -986,6 +1025,8 @@ function definitionToRfNodes(
         kind: manifest?.kind ?? "Regular",
         category: manifest?.category ?? "",
         label: n.label ?? null,
+        // Manual start node shows the workflow's input fields on its card (Dify-style).
+        ...(manifest?.isManual ? { inputFields: def.inputs ?? [] } : {}),
       },
     };
   });

@@ -1,5 +1,7 @@
 import type { WorkflowVariable } from "@/api/workflows";
 
+import { isFieldHidden } from "./inputFieldSchema";
+
 /** A SchemaForm-ready object schema + seeded values, derived from a workflow's declared inputs. */
 export interface RunInputForm {
   schema: { type: "object"; properties: Record<string, unknown>; required: string[] };
@@ -25,6 +27,14 @@ export function buildRunInputForm(inputs: readonly WorkflowVariable[]): RunInput
   const initialValues: Record<string, unknown> = {};
 
   for (const input of inputs) {
+    // Hidden fields are set programmatically via their default — never prompted. They still
+    // resolve to {{input.<name>}} at run time (the engine applies the default), they just
+    // don't appear in the form.
+    if (isFieldHidden(input.schema)) {
+      if (input.default !== undefined) initialValues[input.name] = input.default;
+      continue;
+    }
+
     const base = (typeof input.schema === "object" && input.schema !== null ? input.schema : {}) as Record<string, unknown>;
 
     // Surface the declared description as field help, but never clobber a description the
