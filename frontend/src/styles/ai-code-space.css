@@ -1810,6 +1810,7 @@ textarea:-webkit-autofill {
 .acs-root .wf-run-node-id { font-weight: 600; font-size: 12.5px; color: var(--ink); }
 .acs-root .wf-run-node-time { font-size: 11px; color: var(--muted); margin-left: auto; }
 
+.acs-root .wf-run-node-none { font-size: 11.5px; color: var(--muted); font-style: italic; }
 .acs-root .wf-run-node-io { font-size: 11.5px; }
 .acs-root .wf-run-node-io > summary {
   cursor: pointer; color: var(--ink-2); padding: 2px 0; user-select: none;
