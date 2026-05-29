@@ -176,6 +176,12 @@ export interface NodeManifestDto {
   configSchema: unknown;
   inputSchema: unknown;
   outputSchema: unknown;
+  /**
+   * True for an on-demand trigger (e.g. `trigger.manual`) that starts runs by hand/API rather
+   * than by subscribing to an event. `deriveActivations` skips these (no `workflow_activation`
+   * row); the runs view uses it to collect inputs before a manual run. Default false/undefined.
+   */
+  isManual?: boolean;
 }
 
 // ─── API client ────────────────────────────────────────────────────────────────

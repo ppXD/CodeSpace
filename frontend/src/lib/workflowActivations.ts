@@ -30,13 +30,23 @@ import type {
  * Trigger-ness via the manifest's `kind === "Trigger"`, NOT a hardcoded `trigger.*` prefix.
  * The manifest's declared kind is the single source of truth and covers plugin authors who
  * name their trigger `schedule.cron` or `slack.mention`.
+ *
+ * <h3>Manual triggers produce no activation</h3>
+ * An on-demand trigger (manifest `isManual === true`, e.g. `trigger.manual`) starts runs by
+ * hand / API — it subscribes to no event source, so there is nothing for a matcher to match.
+ * We exclude it here: emitting an activation row for it would be a meaningless "subscription"
+ * that never fires and would pollute the workflow's activation list. Driven by the manifest
+ * flag, not a hardcoded type key, so future on-demand triggers get the same treatment for free.
  */
 export function deriveActivations(
   definition: WorkflowDefinition,
   existing: WorkflowDetail["activations"],
   manifestByType: Map<string, NodeManifestDto>,
 ): WorkflowActivationInput[] {
-  const triggerNodes = definition.nodes.filter((n) => manifestByType.get(n.typeKey)?.kind === "Trigger");
+  const triggerNodes = definition.nodes.filter((n) => {
+    const manifest = manifestByType.get(n.typeKey);
+    return manifest?.kind === "Trigger" && !manifest.isManual;
+  });
   return triggerNodes.map((n) => {
     const existingMatch = existing.find((a) => a.typeKey === n.typeKey);
     return {

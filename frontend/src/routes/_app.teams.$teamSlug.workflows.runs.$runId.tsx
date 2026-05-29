@@ -127,6 +127,17 @@ function WorkflowRunDetailPage() {
           <pre className="wf-json">{JSON.stringify(r.normalizedPayload, null, 2)}</pre>
         </section>
 
+        {/* The run's declared Outputs (the Terminal's resolved inputs) — what this run
+            produced. Surfaced as its own block so a manual "fill the form → Run" lands the
+            operator on a visible result, not buried in the per-node trace below. Only shown
+            once the run produced outputs (i.e. reached a successful Terminal). */}
+        {hasContent(r.outputs) && (
+          <section className="wf-section">
+            <h2 className="wf-section-h">Outputs</h2>
+            <pre className="wf-json">{JSON.stringify(r.outputs, null, 2)}</pre>
+          </section>
+        )}
+
         <section className="wf-section">
           <h2 className="wf-section-h">Node execution</h2>
           {r.nodes.length === 0 ? (
@@ -165,6 +176,13 @@ function WorkflowRunDetailPage() {
       </div>
     </section>
   );
+}
+
+/** True when the run produced outputs worth a dedicated block — non-null, and not an empty object. */
+function hasContent(value: unknown): boolean {
+  if (value === null || value === undefined) return false;
+  if (typeof value === "object" && !Array.isArray(value)) return Object.keys(value).length > 0;
+  return true;
 }
 
 function RunStatusBadge({ status }: { status: string }) {

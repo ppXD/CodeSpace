@@ -1,7 +1,9 @@
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
+import { useState } from "react";
 
 import { Ic } from "@/_imported/ai-code-space/icons";
 import { ApiError } from "@/api/request";
+import { RunWorkflowModal } from "@/components/workflows/RunWorkflowModal";
 import {
   useRunWorkflowManually,
   useWorkflow,
@@ -23,15 +25,27 @@ function WorkflowRunsPage() {
   const workflow = useWorkflow(workflowId);
   const runs = useWorkflowRuns(workflowId);
   const runManually = useRunWorkflowManually();
+  const [runModalOpen, setRunModalOpen] = useState(false);
 
   const rows = runs.data ?? [];
+  const inputs = workflow.data?.definition.inputs ?? [];
 
-  const handleRun = async () => {
-    const result = await runManually.mutateAsync({ workflowId });
+  const startRun = async (payload?: Record<string, unknown>) => {
+    const result = await runManually.mutateAsync({ workflowId, payload });
+    setRunModalOpen(false);
     navigate({
       to: "/teams/$teamSlug/workflows/runs/$runId",
       params: { teamSlug, runId: result.runId },
     });
+  };
+
+  // Inputs declared → collect them in a form first (the Dify "fill, then run" step);
+  // otherwise run immediately. Swallow the rejection so a failed run keeps the modal open
+  // with its error visible instead of surfacing an unhandled promise rejection.
+  const handleRun = () => {
+    if (inputs.length === 0) { void startRun().catch(() => {}); return; }
+    runManually.reset();
+    setRunModalOpen(true);
   };
 
   return (
@@ -116,6 +130,17 @@ function WorkflowRunsPage() {
           </table>
         )}
       </div>
+
+      {runModalOpen && (
+        <RunWorkflowModal
+          workflowName={workflow.data?.name ?? "workflow"}
+          inputs={inputs}
+          pending={runManually.isPending}
+          error={runManually.error instanceof ApiError ? runManually.error.message : null}
+          onRun={(payload) => { void startRun(payload).catch(() => {}); }}
+          onClose={() => setRunModalOpen(false)}
+        />
+      )}
     </section>
   );
 }
