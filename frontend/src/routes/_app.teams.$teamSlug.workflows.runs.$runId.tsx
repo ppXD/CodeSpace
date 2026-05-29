@@ -160,14 +160,25 @@ function WorkflowRunDetailPage() {
                     )}
                   </div>
                   {n.error && <pre className="wf-json wf-json-err">{n.error}</pre>}
-                  <details className="wf-run-node-io">
-                    <summary>Inputs</summary>
-                    <pre className="wf-json">{JSON.stringify(n.inputs, null, 2)}</pre>
-                  </details>
-                  <details className="wf-run-node-io">
-                    <summary>Outputs</summary>
-                    <pre className="wf-json">{JSON.stringify(n.outputs, null, 2)}</pre>
-                  </details>
+                  {/* Only show a block when it actually has data. A trigger node consumes
+                      nothing (Inputs is genuinely {}), so hiding the empty block stops the
+                      Start node from looking mis-rendered — its values surface under Outputs
+                      (echoed run payload) + NORMALIZED PAYLOAD above. */}
+                  {hasContent(n.inputs) && (
+                    <details className="wf-run-node-io">
+                      <summary>Inputs</summary>
+                      <pre className="wf-json">{JSON.stringify(n.inputs, null, 2)}</pre>
+                    </details>
+                  )}
+                  {hasContent(n.outputs) && (
+                    <details className="wf-run-node-io">
+                      <summary>Outputs</summary>
+                      <pre className="wf-json">{JSON.stringify(n.outputs, null, 2)}</pre>
+                    </details>
+                  )}
+                  {!n.error && !hasContent(n.inputs) && !hasContent(n.outputs) && (
+                    <div className="wf-run-node-none">No inputs or outputs recorded.</div>
+                  )}
                 </li>
               ))}
             </ol>
