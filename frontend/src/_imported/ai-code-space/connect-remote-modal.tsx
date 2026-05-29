@@ -4,9 +4,10 @@ import { createPortal } from "react-dom";
 import { ApiError, oauthApi, type AddProviderInstanceRequest, type UpdateProviderInstanceRequest } from "@/api/oauth";
 import type { CredentialSummary, ProviderInstanceSummary, ProviderKind } from "@/api/types";
 import { useAlert, useConfirm } from "@/components/dialog";
-import { useAddProviderInstance, useCredentialCapabilities, useCredentials, useDeleteProviderInstance, useProviderDefaults, useProviderInstances, useRevokeCredential, useUpdateProviderInstance } from "@/hooks/use-credentials";
+import { useAddGroupAccessToken, useAddProviderInstance, useCredentialCapabilities, useCredentials, useDeleteProviderInstance, useProviderDefaults, useProviderInstances, useRevokeCredential, useUpdateProviderInstance } from "@/hooks/use-credentials";
 import { useMe } from "@/hooks/use-me";
 import { OAuthFlowError, useOAuthFlow } from "@/hooks/use-oauth-flow";
+import { providerSupportsTeamServiceCredential } from "@/lib/teamCredentials";
 
 import { Ic } from "./icons";
 
@@ -17,16 +18,22 @@ import { Ic } from "./icons";
  * personal token), but the user never has to think about the split — a row is either
  * "Connected" or "Not connected" for them.
  *
- * Two steps:
- *   1. "list"        — providers with per-row Connect / Disconnect action
- *   2. "addProvider" — form to register a new GitHub/GitLab integration
+ * Steps:
+ *   1. "list"          — providers with per-row Connect / Disconnect action
+ *   2. "addProvider"   — form to register a new GitHub/GitLab integration
+ *   3. "editProvider"  — rotate OAuth secret / rename an existing integration
+ *   4. "addTeamToken"  — mint a durable team-owned credential (GitLab group token)
  */
 
 interface ConnectRemoteModalProps {
   onClose: () => void;
 }
 
-type Step = "list" | "addProvider" | "editProvider";
+type Step = "list" | "addProvider" | "editProvider" | "addTeamToken";
+
+/** The two credential audiences the list view splits into: my personal sign-ins vs the team's
+ *  shared service credentials. Toggled by the tab bar at the top of the providers list. */
+type ProviderTab = "personal" | "team";
 
 const PROVIDER_THEME: Record<ProviderKind, { initials: string; label: string }> = {
   GitHub: { initials: "GH", label: "GitHub" },
@@ -55,6 +62,8 @@ const CAPABILITY_LABELS: Record<string, string> = {
 export function ConnectRemoteModal({ onClose }: ConnectRemoteModalProps) {
   const [step, setStep] = useState<Step>("list");
   const [editingInstance, setEditingInstance] = useState<ProviderInstanceSummary | null>(null);
+  const [teamTokenInstance, setTeamTokenInstance] = useState<ProviderInstanceSummary | null>(null);
+  const [providerTab, setProviderTab] = useState<ProviderTab>("personal");
   const [connectingId, setConnectingId] = useState<string | null>(null);
   const [errorByInstance, setErrorByInstance] = useState<Record<string, string>>({});
 
@@ -86,6 +95,13 @@ export function ConnectRemoteModal({ onClose }: ConnectRemoteModalProps) {
     }
     return map;
   }, [credentials.data, me.data?.id]);
+
+  // Active team-service credentials (owned by the team, not a person). Shown in the modal's
+  // "Team" tab, grouped under the provider each belongs to — a distinct identity from a personal sign-in.
+  const teamServiceCreds = useMemo(
+    () => (credentials.data ?? []).filter(c => c.ownership === "TeamService" && c.status === "Active"),
+    [credentials.data],
+  );
 
   // Close on Escape.
   useEffect(() => {
@@ -140,6 +156,25 @@ export function ConnectRemoteModal({ onClose }: ConnectRemoteModalProps) {
     revoke.mutate(credential.id);
   };
 
+  // Revoke a team-service credential. Same usage-aware confirm as the personal disconnect, but
+  // team-worded — repos bound through it (if any) get marked needs-credential, webhooks keep working.
+  const revokeTeamCredential = async (credential: CredentialSummary) => {
+    let usageMsg = "This team service credential will be revoked. You can add a new one anytime.";
+    try {
+      const usage = await oauthApi.getCredentialUsage(credential.id);
+      if (usage.activeRepositoryCount > 0) {
+        const n = usage.activeRepositoryCount;
+        usageMsg = `This team service credential will be revoked. ${n} repositor${n === 1 ? "y" : "ies"} bound through it will be marked as needing a new credential (event webhooks keep working — re-link or unbind later).`;
+      }
+    } catch {
+      // ignore — confirm with generic copy
+    }
+
+    const ok = await confirm({ title: "Revoke this team credential?", message: usageMsg, confirmLabel: "Revoke", destructive: true });
+    if (!ok) return;
+    revoke.mutate(credential.id);
+  };
+
   return createPortal(
     <>
       {/* Backdrop is non-interactive — clicking outside the modal must not close it
@@ -153,6 +188,9 @@ export function ConnectRemoteModal({ onClose }: ConnectRemoteModalProps) {
             loading={instances.isLoading || credentials.isLoading || me.isLoading}
             error={instances.error ?? credentials.error}
             myCredentialByInstance={myCredentialByInstance}
+            teamServiceCreds={teamServiceCreds}
+            tab={providerTab}
+            onTabChange={setProviderTab}
             connectingId={connectingId}
             revokingId={revoke.isPending ? revoke.variables ?? null : null}
             errors={errorByInstance}
@@ -160,6 +198,8 @@ export function ConnectRemoteModal({ onClose }: ConnectRemoteModalProps) {
             onDisconnect={disconnect}
             onAddProvider={() => setStep("addProvider")}
             onEditProvider={(instance) => { setEditingInstance(instance); setStep("editProvider"); }}
+            onAddTeamToken={(instance) => { setTeamTokenInstance(instance); setStep("addTeamToken"); }}
+            onRevokeTeamCred={revokeTeamCredential}
             onClose={onClose}
           />
         )}
@@ -180,6 +220,15 @@ export function ConnectRemoteModal({ onClose }: ConnectRemoteModalProps) {
             onSaved={() => { setStep("list"); setEditingInstance(null); }}
           />
         )}
+
+        {step === "addTeamToken" && teamTokenInstance && (
+          <AddTeamTokenStep
+            instance={teamTokenInstance}
+            onBack={() => { setStep("list"); setTeamTokenInstance(null); }}
+            onClose={onClose}
+            onCreated={() => { setStep("list"); setTeamTokenInstance(null); }}
+          />
+        )}
       </div>
     </>,
     document.body,
@@ -193,6 +242,9 @@ interface ProvidersStepProps {
   loading: boolean;
   error: unknown;
   myCredentialByInstance: Map<string, CredentialSummary>;
+  teamServiceCreds: CredentialSummary[];
+  tab: ProviderTab;
+  onTabChange: (tab: ProviderTab) => void;
   connectingId: string | null;
   revokingId: string | null;
   errors: Record<string, string>;
@@ -200,10 +252,12 @@ interface ProvidersStepProps {
   onDisconnect: (credential: CredentialSummary) => void;
   onAddProvider: () => void;
   onEditProvider: (instance: ProviderInstanceSummary) => void;
+  onAddTeamToken: (instance: ProviderInstanceSummary) => void;
+  onRevokeTeamCred: (credential: CredentialSummary) => void;
   onClose: () => void;
 }
 
-function ProvidersStep({ providers, loading, error, myCredentialByInstance, connectingId, revokingId, errors, onConnect, onDisconnect, onAddProvider, onEditProvider, onClose }: ProvidersStepProps) {
+function ProvidersStep({ providers, loading, error, myCredentialByInstance, teamServiceCreds, tab, onTabChange, connectingId, revokingId, errors, onConnect, onDisconnect, onAddProvider, onEditProvider, onAddTeamToken, onRevokeTeamCred, onClose }: ProvidersStepProps) {
   return (
     <>
       <div className="mdl-head">
@@ -239,33 +293,59 @@ function ProvidersStep({ providers, loading, error, myCredentialByInstance, conn
 
         {!loading && !error && providers.length > 0 && (
           <>
-            <div className="cn-list">
-              {providers.map(instance => {
-                const theme = PROVIDER_THEME[instance.provider];
-                const myCred = myCredentialByInstance.get(instance.id);
-                const isConnecting = connectingId === instance.id;
-                const isDisconnecting = Boolean(myCred) && revokingId === myCred!.id;
-                const errorMsg = errors[instance.id];
+            {/* Both tabs list the SAME providers — they differ only in the credential dimension
+                (your personal sign-in vs the team's shared tokens). "Add provider" is tab-neutral
+                (a new provider shows in both), so it sits on its own action row above the tabs. */}
+            <div className="mdl-action-row">
+              <button className="btn" onClick={onAddProvider}><Ic.Plus size={14} /> Add provider</button>
+            </div>
+            <div className="cn-tabs" role="tablist">
+              <button className="cn-tab" role="tab" aria-selected={tab === "personal"} data-active={tab === "personal"} onClick={() => onTabChange("personal")}>Personal</button>
+              <button className="cn-tab" role="tab" aria-selected={tab === "team"} data-active={tab === "team"} onClick={() => onTabChange("team")}>Team</button>
+            </div>
 
-                return (
-                  <ProviderRow
-                    key={instance.id}
-                    instance={instance}
-                    theme={theme}
-                    myCred={myCred}
-                    isConnecting={isConnecting}
-                    isDisconnecting={isDisconnecting}
-                    errorMsg={errorMsg}
-                    onConnect={onConnect}
-                    onDisconnect={onDisconnect}
-                    onEdit={onEditProvider}
-                  />
-                );
-              })}
-            </div>
-            <div className="cn-addbar">
-              <button className="cn-add" onClick={onAddProvider}><Ic.Plus size={14} /> Add another provider</button>
-            </div>
+            {tab === "personal" && (
+              <div className="cn-list">
+                {providers.map(instance => {
+                  const myCred = myCredentialByInstance.get(instance.id);
+                  const isConnecting = connectingId === instance.id;
+                  const isDisconnecting = Boolean(myCred) && revokingId === myCred!.id;
+                  return (
+                    <ProviderRow
+                      key={instance.id}
+                      instance={instance}
+                      theme={PROVIDER_THEME[instance.provider]}
+                      myCred={myCred}
+                      isConnecting={isConnecting}
+                      isDisconnecting={isDisconnecting}
+                      errorMsg={errors[instance.id]}
+                      onConnect={onConnect}
+                      onDisconnect={onDisconnect}
+                      onEdit={onEditProvider}
+                    />
+                  );
+                })}
+              </div>
+            )}
+
+            {tab === "team" && (
+              <>
+                <div className="cn-section-p">Shared tokens owned by the team — repos bound through them survive anyone leaving. Any member can bind with these; no one shares a personal account.</div>
+                <div className="cn-list">
+                  {providers.map(instance => (
+                    <TeamProviderGroup
+                      key={instance.id}
+                      instance={instance}
+                      theme={PROVIDER_THEME[instance.provider]}
+                      creds={teamServiceCreds.filter(c => c.providerInstanceId === instance.id)}
+                      revokingId={revokingId}
+                      onAdd={onAddTeamToken}
+                      onRevoke={onRevokeTeamCred}
+                    />
+                  ))}
+                </div>
+              </>
+            )}
           </>
         )}
       </div>
@@ -345,6 +425,53 @@ function ProviderRow({ instance, theme, myCred, isConnecting, isDisconnecting, e
           </button>
         )}
         <ProviderRowMenu instance={instance} hasCredential={Boolean(myCred)} onEdit={onEdit} />
+      </div>
+    </div>
+  );
+}
+
+// ── Team service credentials (Team tab) ─────────────────────────────────────────
+
+/**
+ * One provider's team service credentials, grouped under it in the Team tab. GitLab providers
+ * can mint a group token in place ("+ Add team token"); others show why they can't yet (GitHub
+ * needs an App installation — not built). Each existing token carries its own Revoke.
+ */
+function TeamProviderGroup({ instance, theme, creds, revokingId, onAdd, onRevoke }: {
+  instance: ProviderInstanceSummary;
+  theme: { initials: string; label: string };
+  creds: CredentialSummary[];
+  revokingId: string | null;
+  onAdd: (instance: ProviderInstanceSummary) => void;
+  onRevoke: (credential: CredentialSummary) => void;
+}) {
+  const supportsTeamToken = providerSupportsTeamServiceCredential(instance.provider);
+
+  return (
+    <div className="cn-tg">
+      <div className="cn-tg-head">
+        <div className="cn-mark" data-p={instance.provider.toLowerCase()}>{theme.initials}</div>
+        <div className="cn-tg-name">{instance.displayName}<span className="cn-name-prov">{theme.label}</span></div>
+      </div>
+
+      {/* Tokens + add/coming-soon, indented to line up under the provider name. A provider can
+          hold many team tokens (different groups, rotation) — they stack here, each revocable. */}
+      <div className="cn-tg-items">
+        {creds.map(c => (
+          <div key={c.id} className="cn-tg-cred">
+            <Ic.Key size={12} />
+            <span className="cn-tg-cred-name" title={c.displayName}>{c.displayName}</span>
+            <button className="btn btn-ghost" onClick={() => onRevoke(c)} disabled={revokingId === c.id}>
+              {revokingId === c.id ? "Revoking…" : "Revoke"}
+            </button>
+          </div>
+        ))}
+
+        {supportsTeamToken ? (
+          <button className="btn btn-ghost cn-tg-add" onClick={() => onAdd(instance)}><Ic.Plus size={13} /> Add team token</button>
+        ) : (
+          <div className="cn-tg-note">Team tokens use a {theme.label} App — coming soon. For now, members connect personally on the Personal tab.</div>
+        )}
       </div>
     </div>
   );
@@ -873,6 +1000,109 @@ function EditProviderStep({ instance, onBack, onClose, onSaved }: EditProviderSt
           <button className="btn" onClick={onBack} disabled={update.isPending}>Cancel</button>
           <button className="btn btn-primary cn-submit" disabled={submitDisabled} onClick={submit}>
             {update.isPending ? <><Ic.Clock size={13} /> Saving…</> : <><Ic.Check size={13} /> Save</>}
+          </button>
+        </div>
+      </div>
+    </>
+  );
+}
+
+// ── Add team service token step ────────────────────────────────────────────────
+
+interface AddTeamTokenStepProps {
+  instance: ProviderInstanceSummary;
+  onBack: () => void;
+  onClose: () => void;
+  onCreated: () => void;
+}
+
+/**
+ * Mint a team-owned service credential — a GitLab Group Access Token that belongs to the group,
+ * not a person, so repos bound through it survive anyone leaving. Reuses the exact .cn-form field
+ * styling as Add/Edit provider so all three forms read identically. Scoped to the provider the
+ * operator opened it from (the Team-tab row), so there's no instance picker. GitLab-only for now;
+ * GitHub gets its App-installation flow later.
+ */
+function AddTeamTokenStep({ instance, onBack, onClose, onCreated }: AddTeamTokenStepProps) {
+  const add = useAddGroupAccessToken();
+
+  const [displayName, setDisplayName] = useState("");
+  const [token, setToken] = useState("");
+
+  const theme = PROVIDER_THEME[instance.provider];
+
+  const submitDisabled = !displayName.trim() || !token.trim() || add.isPending;
+
+  const submit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (submitDisabled) return;
+
+    try {
+      await add.mutateAsync({ providerInstanceId: instance.id, displayName: displayName.trim(), token: token.trim() });
+      onCreated();
+    } catch {
+      // surfaced via add.error below
+    }
+  };
+
+  const errorMessage =
+    add.error instanceof ApiError ? add.error.message
+      : add.error instanceof Error ? add.error.message
+        : null;
+
+  return (
+    <>
+      <div className="mdl-head">
+        <button className="mdl-back" onClick={onBack} title="Back" disabled={add.isPending}><Ic.ChevronLeft size={16} /></button>
+        <div className="mdl-title-wrap">
+          <div className="mdl-title">Add team service token</div>
+          <div className="mdl-sub">A {theme.label} group token owned by the team — repos bound through it survive anyone leaving.</div>
+        </div>
+        <button className="mdl-x" onClick={onClose} title="Close" disabled={add.isPending}><Ic.X size={14} /></button>
+      </div>
+
+      <form className="mdl-body cn-form" onSubmit={submit}>
+        <label className="cn-field">
+          <span className="cn-field-l">Name</span>
+          <input
+            className="cn-field-i"
+            autoFocus
+            value={displayName}
+            onChange={e => setDisplayName(e.target.value)}
+            placeholder={`e.g. Acme team · ${theme.label}`}
+            disabled={add.isPending}
+          />
+          <span className="cn-field-h">Shown in the credential picker when binding repositories.</span>
+        </label>
+
+        <label className="cn-field">
+          <span className="cn-field-l">Group access token</span>
+          <input
+            type="password"
+            className="cn-field-i"
+            value={token}
+            onChange={e => setToken(e.target.value)}
+            placeholder="glpat-…"
+            spellCheck={false}
+            autoComplete="off"
+            disabled={add.isPending}
+          />
+          <span className="cn-field-h">In {theme.label}: <strong>group → Settings → Access Tokens</strong> → role <code>Maintainer</code>, scopes <code>api</code> + <code>write_repository</code>.</span>
+        </label>
+
+        {errorMessage && (
+          <div className="cn-state cn-state-err">
+            <span>{errorMessage}</span>
+          </div>
+        )}
+      </form>
+
+      <div className="mdl-foot">
+        <div className="mdl-foot-info">{theme.label} · {instance.baseUrl}</div>
+        <div style={{ display: "flex", gap: 8 }}>
+          <button className="btn" onClick={onBack} disabled={add.isPending}>Cancel</button>
+          <button className="btn btn-primary cn-submit" disabled={submitDisabled} onClick={submit}>
+            {add.isPending ? <><Ic.Clock size={13} /> Adding…</> : <><Ic.Check size={13} /> Add token</>}
           </button>
         </div>
       </div>

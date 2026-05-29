@@ -67,10 +67,30 @@ public sealed class GlobalExceptionFilter : IExceptionFilter
                 context.Result = BuildScopeProblemResult(scope);
                 break;
 
+            case ProviderApiException providerAuth when providerAuth.StatusCode is StatusCodes.Status401Unauthorized or StatusCodes.Status403Forbidden:
+                // A provider REJECTING the picked credential (bad/expired token, or missing
+                // org/repo access) is NOT an app-session failure. Mirroring its 401/403 made the
+                // SPA mistake it for an expired login and sign the user out mid-flow. Surface it
+                // as 422 ("the chosen credential is unprocessable for this op") with an actionable
+                // message; the provider's real status rides along in the body for the UI.
+                _logger.LogWarning("Provider {Provider} rejected credential (HTTP {Status}) at {Path}: operation={Operation} message={Message}", providerAuth.ProviderKind, providerAuth.StatusCode, path, providerAuth.OperationName, providerAuth.ProviderMessage);
+                context.Result = new ObjectResult(new
+                {
+                    code = "provider_unauthorized",
+                    message = BuildProviderApiMessage(providerAuth),
+                    provider = providerAuth.ProviderKind.ToString(),
+                    providerStatus = providerAuth.StatusCode,
+                })
+                {
+                    StatusCode = StatusCodes.Status422UnprocessableEntity,
+                };
+                break;
+
             case ProviderApiException providerApi:
                 // Mirror the upstream provider's status code so the SPA gets a real 4xx —
                 // before this case existed, any Octokit.NotFoundException / GitLabException
-                // fell through to the default arm and surfaced as a useless 500.
+                // fell through to the default arm and surfaced as a useless 500. (401/403 are
+                // handled by the arm above so they never sign the user out.)
                 _logger.LogWarning("Provider {Provider} HTTP {Status} at {Path}: operation={Operation} message={Message}", providerApi.ProviderKind, providerApi.StatusCode, path, providerApi.OperationName, providerApi.ProviderMessage);
                 context.Result = BuildProblemResult(providerApi.StatusCode, "provider_error", BuildProviderApiMessage(providerApi));
                 break;

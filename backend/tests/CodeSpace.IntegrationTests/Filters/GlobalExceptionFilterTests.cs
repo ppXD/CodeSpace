@@ -1,0 +1,89 @@
+using System.Text.Json;
+using CodeSpace.Api.Filters;
+using CodeSpace.Messages.Enums;
+using CodeSpace.Messages.Exceptions;
+using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.Mvc.Abstractions;
+using Microsoft.AspNetCore.Mvc.Filters;
+using Microsoft.AspNetCore.Routing;
+using Microsoft.Extensions.Logging.Abstractions;
+using Shouldly;
+
+namespace CodeSpace.IntegrationTests.Filters;
+
+/// <summary>
+/// Pins GlobalExceptionFilter's provider-error mapping. The critical contract: a provider
+/// REJECTING the picked credential (HTTP 401/403 from GitHub/GitLab) must surface as 422
+/// "provider_unauthorized", NOT an app 401 — the SPA signs the user out on any 401, so
+/// mirroring the provider's 401 used to drop the user's session mid "Add repository". Other
+/// provider statuses (404 / 5xx) still mirror through as "provider_error".
+///
+/// Lives in IntegrationTests (not UnitTests) only because the filter needs the ASP.NET
+/// framework + CodeSpace.Api references; it touches no database, so no Postgres collection.
+/// </summary>
+[Trait("Category", "Unit")]
+public class GlobalExceptionFilterTests
+{
+    [Theory]
+    [InlineData(StatusCodes.Status401Unauthorized)]
+    [InlineData(StatusCodes.Status403Forbidden)]
+    public void Provider_credential_rejection_maps_to_422_not_signout(int providerStatus)
+    {
+        var result = Run(new ProviderApiException(ProviderKind.GitLab, providerStatus, "ListAccessibleRepositoriesAsync", "rejected", new Exception("inner")));
+        var body = Body(result);
+
+        result.StatusCode.ShouldBe(StatusCodes.Status422UnprocessableEntity);
+        body.GetProperty("code").GetString().ShouldBe("provider_unauthorized");
+        body.GetProperty("providerStatus").GetInt32().ShouldBe(providerStatus);
+    }
+
+    [Theory]
+    [InlineData(StatusCodes.Status404NotFound)]
+    [InlineData(StatusCodes.Status500InternalServerError)]
+    public void Other_provider_statuses_mirror_through_as_provider_error(int providerStatus)
+    {
+        var result = Run(new ProviderApiException(ProviderKind.GitHub, providerStatus, "ListPullRequestsAsync", "boom", new Exception("inner")));
+
+        result.StatusCode.ShouldBe(providerStatus);
+        Body(result).GetProperty("code").GetString().ShouldBe("provider_error");
+    }
+
+    [Fact]
+    public void Provider_unauthorized_body_names_the_provider_and_carries_an_actionable_message()
+    {
+        var result = Run(new ProviderApiException(ProviderKind.GitLab, StatusCodes.Status401Unauthorized, "ListAccessibleRepositoriesAsync", "401 Unauthorized", new Exception("inner")));
+        var body = Body(result);
+
+        body.GetProperty("provider").GetString().ShouldBe("GitLab");
+        body.GetProperty("message").GetString().ShouldNotBeNullOrWhiteSpace();
+    }
+
+    [Fact]
+    public void Insufficient_scope_still_maps_to_its_structured_422_unchanged()
+    {
+        // Regression guard: the new ProviderApiException 401/403 arm sits right beside the scope
+        // arm — prove it didn't shadow ProviderInsufficientScopeException's structured response.
+        var result = Run(new ProviderInsufficientScopeException(ProviderKind.GitLab, "IRepositoryCatalogCapability", new[] { "api" }, new[] { "read_user" }));
+        var body = Body(result);
+
+        result.StatusCode.ShouldBe(StatusCodes.Status422UnprocessableEntity);
+        body.GetProperty("code").GetString().ShouldBe("oauth_insufficient_scope");
+        body.GetProperty("missingScopes")[0].GetString().ShouldBe("api");
+    }
+
+    private static ObjectResult Run(Exception exception)
+    {
+        var filter = new GlobalExceptionFilter(NullLogger<GlobalExceptionFilter>.Instance);
+        var actionContext = new ActionContext(new DefaultHttpContext(), new RouteData(), new ActionDescriptor());
+        var context = new ExceptionContext(actionContext, new List<IFilterMetadata>()) { Exception = exception };
+
+        filter.OnException(context);
+
+        context.ExceptionHandled.ShouldBeTrue();
+        return context.Result.ShouldBeOfType<ObjectResult>();
+    }
+
+    private static JsonElement Body(ObjectResult result) =>
+        JsonDocument.Parse(JsonSerializer.Serialize(result.Value)).RootElement;
+}
