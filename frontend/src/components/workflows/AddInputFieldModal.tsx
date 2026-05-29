@@ -6,11 +6,12 @@ import type { WorkflowVariable } from "@/api/workflows";
 import {
   buildFieldSchema,
   INPUT_FIELD_TYPES,
+  isFieldHidden,
   type InputFieldType,
+  jsonTypeOf,
   schemaMaxLength,
   schemaOptions,
   schemaToFieldType,
-  isFieldHidden,
 } from "@/lib/inputFieldSchema";
 
 interface AddInputFieldModalProps {
@@ -26,8 +27,12 @@ const NAME_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
 /**
  * Dify-style "Add variable" dialog for a manual-start input field. Edits the friendly facets
- * (type / name / display name / max length / options / default / required / hidden) and emits a
- * {@link WorkflowVariable} whose `schema` is built by `buildFieldSchema`. Warm-theme `.mdl` shell.
+ * (type / name / display name / options / max length / default / required / hidden) and emits a
+ * {@link WorkflowVariable} whose `schema` is built by `buildFieldSchema`.
+ *
+ * Generic over field type: every entry in `INPUT_FIELD_TYPES` compiles to a JSON-schema shape
+ * the engine + SchemaForm already understand, so adding a type is one array entry + (if it
+ * needs a bespoke default control) one branch here. Warm-theme `.mdl` shell.
  */
 export function AddInputFieldModal({ initial, takenNames, onSave, onClose }: AddInputFieldModalProps) {
   const [type, setType] = useState<InputFieldType>(initial ? schemaToFieldType(initial.schema) : "text");
@@ -37,8 +42,11 @@ export function AddInputFieldModal({ initial, takenNames, onSave, onClose }: Add
     const m = initial ? schemaMaxLength(initial.schema) : null;
     return m != null ? String(m) : "";
   });
-  const [optionsText, setOptionsText] = useState(() => (initial ? schemaOptions(initial.schema).join("\n") : ""));
-  const [defaultText, setDefaultText] = useState(() => defaultToString(initial?.default));
+  const [options, setOptions] = useState<string[]>(() => (initial ? schemaOptions(initial.schema) : []));
+  // Text/number/select share a string default box; boolean uses a tri-state select.
+  const [defaultText, setDefaultText] = useState(() => (typeof initial?.default === "boolean" ? "" : defaultToString(initial?.default)));
+  const [defaultBool, setDefaultBool] = useState<"" | "true" | "false">(() =>
+    typeof initial?.default === "boolean" ? (initial.default ? "true" : "false") : "");
   const [required, setRequired] = useState(initial?.required ?? true);
   const [hidden, setHidden] = useState(initial ? isFieldHidden(initial.schema) : false);
 
@@ -47,6 +55,8 @@ export function AddInputFieldModal({ initial, takenNames, onSave, onClose }: Add
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [onClose]);
+
+  const usableOptions = useMemo(() => options.map((o) => o.trim()).filter((o) => o !== ""), [options]);
 
   const trimmedName = name.trim();
   const nameError = useMemo(() => {
@@ -60,15 +70,14 @@ export function AddInputFieldModal({ initial, takenNames, onSave, onClose }: Add
 
   const save = () => {
     if (!canSave) return;
-    const options = optionsText.split("\n").map((o) => o.trim()).filter((o) => o !== "");
     const maxLen = maxLength.trim() === "" ? null : Number(maxLength);
-    const schema = buildFieldSchema({ type, maxLength: Number.isFinite(maxLen) ? maxLen : null, options, hidden });
+    const schema = buildFieldSchema({ type, maxLength: Number.isFinite(maxLen) ? maxLen : null, options: usableOptions, hidden });
 
     onSave({
       name: trimmedName,
       label: displayName.trim() === "" ? null : displayName.trim(),
       schema,
-      default: parseDefault(type, defaultText),
+      default: resolveDefault(type, defaultText, defaultBool, usableOptions),
       required,
     });
   };
@@ -89,9 +98,12 @@ export function AddInputFieldModal({ initial, takenNames, onSave, onClose }: Add
           <div className="wf-form">
             <div className="wf-form-row">
               <span className="wf-form-label">Field type</span>
-              <select className="wf-form-input" value={type} onChange={(e) => setType(e.target.value as InputFieldType)}>
-                {INPUT_FIELD_TYPES.map((t) => <option key={t.value} value={t.value}>{t.label}</option>)}
-              </select>
+              <div className="wf-type-pick">
+                <select className="wf-form-input" value={type} onChange={(e) => setType(e.target.value as InputFieldType)}>
+                  {INPUT_FIELD_TYPES.map((t) => <option key={t.value} value={t.value}>{t.label}</option>)}
+                </select>
+                <span className="wf-type-badge">{jsonTypeOf(type)}</span>
+              </div>
             </div>
 
             <div className="wf-form-row">
@@ -120,13 +132,24 @@ export function AddInputFieldModal({ initial, takenNames, onSave, onClose }: Add
             {type === "select" && (
               <div className="wf-form-row">
                 <span className="wf-form-label">Options</span>
-                <textarea
-                  className="wf-form-input wf-form-textarea"
-                  value={optionsText}
-                  onChange={(e) => setOptionsText(e.target.value)}
-                  placeholder="One option per line"
-                  rows={4}
-                />
+                <div className="wf-opts">
+                  {options.map((opt, i) => (
+                    <div key={i} className="wf-opt-row">
+                      <input
+                        className="wf-form-input"
+                        value={opt}
+                        onChange={(e) => setOptions(options.map((o, j) => (j === i ? e.target.value : o)))}
+                        placeholder={`Option ${i + 1}`}
+                      />
+                      <button type="button" className="btn btn-ghost wf-opt-x" onClick={() => setOptions(options.filter((_, j) => j !== i))} title="Remove option">
+                        <Ic.Trash size={11} />
+                      </button>
+                    </div>
+                  ))}
+                  <button type="button" className="btn btn-ghost wf-opt-add" onClick={() => setOptions([...options, ""])}>
+                    <Ic.Plus size={12} /> Add option
+                  </button>
+                </div>
               </div>
             )}
 
@@ -146,12 +169,30 @@ export function AddInputFieldModal({ initial, takenNames, onSave, onClose }: Add
 
             <div className="wf-form-row">
               <span className="wf-form-label">Default value</span>
-              <input
-                className="wf-form-input"
-                value={defaultText}
-                onChange={(e) => setDefaultText(e.target.value)}
-                placeholder="Optional — used when the runner leaves it blank"
-              />
+              {type === "boolean" ? (
+                <select className="wf-form-input" value={defaultBool} onChange={(e) => setDefaultBool(e.target.value as "" | "true" | "false")}>
+                  <option value="">No default</option>
+                  <option value="true">Checked</option>
+                  <option value="false">Unchecked</option>
+                </select>
+              ) : type === "select" ? (
+                <select
+                  className="wf-form-input"
+                  value={usableOptions.includes(defaultText) ? defaultText : ""}
+                  onChange={(e) => setDefaultText(e.target.value)}
+                >
+                  <option value="">No default</option>
+                  {usableOptions.map((o) => <option key={o} value={o}>{o}</option>)}
+                </select>
+              ) : (
+                <input
+                  className="wf-form-input"
+                  type={type === "number" ? "number" : "text"}
+                  value={defaultText}
+                  onChange={(e) => setDefaultText(e.target.value)}
+                  placeholder="Optional — used when the runner leaves it blank"
+                />
+              )}
             </div>
 
             <label className="wf-form-check">
@@ -183,12 +224,19 @@ function defaultToString(value: unknown): string {
   return JSON.stringify(value);
 }
 
-function parseDefault(type: InputFieldType, raw: string): unknown {
-  const trimmed = raw.trim();
-  if (trimmed === "") return undefined;
+/** Compute the typed default value for the WorkflowVariable from the per-type editor state. */
+function resolveDefault(type: InputFieldType, text: string, bool: "" | "true" | "false", options: string[]): unknown {
+  if (type === "boolean") return bool === "" ? undefined : bool === "true";
+
+  if (type === "select") return options.includes(text) ? text : undefined;
+
   if (type === "number") {
-    const n = Number(trimmed);
-    return Number.isFinite(n) ? n : trimmed;
+    const t = text.trim();
+    if (t === "") return undefined;
+    const n = Number(t);
+    return Number.isFinite(n) ? n : t;
   }
-  return raw;
+
+  // text / paragraph
+  return text.trim() === "" ? undefined : text;
 }

@@ -47,6 +47,8 @@ interface Schema {
    * to <c>renderCustomSelector</c> below.
    */
   "x-selector"?: string;
+  /** Marks a long/multi-line string field (e.g. a "Paragraph" input) so it renders as a textarea. */
+  "x-long"?: boolean;
 }
 
 interface SchemaFormProps {
@@ -186,9 +188,9 @@ function renderControl(schema: Schema, value: unknown, onChange: (next: unknown)
   }
 
   if (type === "string") {
-    // Use a textarea for "long" string fields — heuristic: name hints at prompt / body /
-    // markdown content, or schema declared minLength > 100. Everything else is a single line.
-    const isLong = schema.minLength != null && schema.minLength > 100;
+    // Use a textarea for "long" string fields — an explicit `x-long` marker (the "Paragraph"
+    // input type) or the legacy heuristic of minLength > 100. Everything else is a single line.
+    const isLong = schema["x-long"] === true || (schema.minLength != null && schema.minLength > 100);
     const stringValue = typeof value === "string" ? value : "";
 
     // Every string field gets the Dify-style framed input: copy + expand toolbar always,
