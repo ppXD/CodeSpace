@@ -59,4 +59,13 @@ describe("buildRunInputForm", () => {
     ]);
     expect((schema.properties.email as { description?: string }).description).toBe("schema-level");
   });
+
+  it("omits x-hidden fields from the form but still seeds their default into the payload", () => {
+    const { schema, initialValues } = buildRunInputForm([
+      input({ name: "shown", schema: { type: "string" } }),
+      input({ name: "secret_mode", schema: { type: "string", "x-hidden": true }, default: "batch" }),
+    ]);
+    expect(Object.keys(schema.properties)).toEqual(["shown"]);
+    expect(initialValues).toEqual({ secret_mode: "batch" });
+  });
 });
