@@ -46,7 +46,7 @@ export function RunDetailView({ runId }: { runId: string }) {
       </div>
 
       {r.error && (
-        <div className="cn-banner cn-banner-err" style={{ margin: "0 0 16px" }}>
+        <div className="cn-banner cn-banner-err" style={{ margin: 0 }}>
           <div className="cn-banner-h">Run failed</div>
           <div className="cn-banner-p" style={{ fontFamily: "inherit" }}>{r.error}</div>
         </div>
