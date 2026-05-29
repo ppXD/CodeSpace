@@ -48,6 +48,37 @@ describe("deriveActivations", () => {
     expect(result.map((a) => a.typeKey)).toEqual(["trigger.pr.opened", "trigger.pr.updated"]);
   });
 
+  it("skips manual triggers (manifest.isManual) — on-demand entry nodes get no activation row", () => {
+    // trigger.manual starts runs by hand/API; it subscribes to no event, so it must NOT
+    // produce a workflow_activation. The event trigger in the same graph still does.
+    const definition = buildDefinition([
+      node("manual", "trigger.manual"),
+      node("on-open", "trigger.pr.opened"),
+      node("done", "core.terminal"),
+    ]);
+    const manifests = manifestMap({
+      "trigger.manual": "Trigger",
+      "trigger.pr.opened": "Trigger",
+      "core.terminal": "Terminal",
+    });
+    manifests.get("trigger.manual")!.isManual = true;
+
+    const result = deriveActivations(definition, [], manifests);
+
+    expect(result.map((a) => a.typeKey)).toEqual(["trigger.pr.opened"]);
+  });
+
+  it("returns empty for a manual-only workflow (lone manual trigger, no event source)", () => {
+    const definition = buildDefinition([
+      node("manual", "trigger.manual"),
+      node("done", "core.terminal"),
+    ]);
+    const manifests = manifestMap({ "trigger.manual": "Trigger", "core.terminal": "Terminal" });
+    manifests.get("trigger.manual")!.isManual = true;
+
+    expect(deriveActivations(definition, [], manifests)).toEqual([]);
+  });
+
   it("uses node.config as the activation config — overrides any existing row's config", () => {
     // This is the load-bearing contract: the inspector edits node.config; we must surface
     // it onto the activation so the backend matcher sees the operator's filter.
