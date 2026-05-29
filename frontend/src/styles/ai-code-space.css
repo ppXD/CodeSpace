@@ -407,6 +407,14 @@
 .acs-root .src-tag-meta { display: flex; flex-direction: column; line-height: 1.25; }
 .acs-root .src-tag-name { font-size: 12.5px; font-weight: 500; color: var(--ink); letter-spacing: -0.005em; }
 .acs-root .src-tag-acct { font-family: inherit; font-size: 11px; color: var(--muted); }
+/* "Credential" column — whose credential a repo is bound through. Icon + name reads as light
+   as the neighbouring .src-tag (plain text, not a pill); the accent variant marks the durable
+   team-service identity, the same accent the Add-repo picker's owner badge uses. */
+.acs-root .cred-tag { display: inline-flex; align-items: center; gap: 6px; min-width: 0; font-size: 12.5px; color: var(--ink-2); }
+.acs-root .cred-tag svg { color: var(--muted); flex-shrink: 0; }
+.acs-root .cred-tag-who { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.acs-root .cred-tag[data-team="true"], .acs-root .cred-tag[data-team="true"] svg { color: var(--accent); }
+.acs-root .cred-none { color: var(--muted); }
 .acs-root .ct-empty { padding: 64px 24px; text-align: center; color: var(--muted); }
 .acs-root .ct-empty-h { font-size: 15px; font-weight: 600; color: var(--ink); margin-bottom: 4px; }
 

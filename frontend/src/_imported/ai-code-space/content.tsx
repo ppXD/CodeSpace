@@ -6,6 +6,7 @@ import type { CredentialSummary, ProviderInstanceSummary, ProviderKind, Reposito
 import { useAlert, useConfirm } from "@/components/dialog";
 import { useCredentials, useProviderInstances } from "@/hooks/use-credentials";
 import { useRelinkRepositoryCredential, useRepositories, useUnbindRepository } from "@/hooks/use-repositories";
+import { credentialOwnershipLabel } from "@/lib/credentialOrdering";
 
 import { AddRepoModal } from "./add-repo-modal";
 import { ConnectRemoteModal } from "./connect-remote-modal";
@@ -74,6 +75,7 @@ export function RepositoryListPage({ tab, query, onTabChange, onQueryChange, onO
   const confirm = useConfirm();
 
   const instanceById = useMemo(() => new Map((instances.data ?? []).map(i => [i.id, i])), [instances.data]);
+  const credentialById = useMemo(() => new Map((credentials.data ?? []).map(c => [c.id, c])), [credentials.data]);
   const allCredentials = credentials.data ?? [];
 
   const askUnbind = async (r: RepositorySummary) => {
@@ -187,8 +189,9 @@ export function RepositoryListPage({ tab, query, onTabChange, onQueryChange, onO
           <table className="tbl">
             <thead>
               <tr>
-                <th style={{ width: "46%" }}>Repository</th>
+                <th style={{ width: "40%" }}>Repository</th>
                 <th>Source</th>
+                <th>Credential</th>
                 <th>Last activity</th>
                 <th className="col-right" />
               </tr>
@@ -196,6 +199,7 @@ export function RepositoryListPage({ tab, query, onTabChange, onQueryChange, onO
             <tbody>
               {filtered.map(r => {
                 const instance = instanceById.get(r.providerInstanceId);
+                const credential = r.credentialId ? credentialById.get(r.credentialId) : undefined;
                 return (
                   <tr
                     key={r.id}
@@ -242,6 +246,20 @@ export function RepositoryListPage({ tab, query, onTabChange, onQueryChange, onO
                             <span className="src-tag-acct">{instance.displayName}</span>
                           </span>
                         </span>
+                      )}
+                    </td>
+                    <td>
+                      {/* Who connected this repo — resolves the row's CredentialId to its owner so
+                          the team can see at a glance whether a repo runs through the shared team
+                          service or one person's personal sign-in. Tooltip carries the exact
+                          credential name; "—" means no credential is bound (broken / never linked). */}
+                      {credential ? (
+                        <span className="cred-tag" data-team={credential.ownership === "TeamService"} title={credential.displayName}>
+                          <Ic.Key size={13} />
+                          <span className="cred-tag-who">{credentialOwnershipLabel(credential)}</span>
+                        </span>
+                      ) : (
+                        <span className="cred-none">—</span>
                       )}
                     </td>
                     <td className="synced">{formatRelative(r.lastEventDate ?? r.createdDate)}</td>
