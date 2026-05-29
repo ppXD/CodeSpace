@@ -1,5 +1,7 @@
 import { useMemo } from "react";
 
+import { coerceNumberInput } from "@/lib/inputFieldSchema";
+
 import type { ScopeSuggestion } from "./scope-introspection";
 import { ProjectRepositorySelector } from "./selectors/ProjectRepositorySelector";
 import { TriggerRepositoriesSelector } from "./selectors/TriggerRepositoriesSelector";
@@ -169,6 +171,20 @@ function renderControl(schema: Schema, value: unknown, onChange: (next: unknown)
   }
 
   if (type === "integer" || type === "number") {
+    // In the editor (suggestions present) a number field is picker-capable, so it can reference
+    // an input / upstream value via @ or {{ }} — `coerceNumberInput` keeps literals as JSON
+    // numbers and {{ref}} templates as strings (a lone ref is type-preserved at run time). With
+    // no suggestions (e.g. the run form) it stays a plain numeric input for fast literal entry.
+    if (variableSuggestions && variableSuggestions.length > 0) {
+      return (
+        <VariablePickerInput
+          value={value == null ? "" : String(value)}
+          onChange={(next) => onChange(coerceNumberInput(next))}
+          suggestions={variableSuggestions}
+          placeholder="Type @ to insert an input or step output"
+        />
+      );
+    }
     return (
       <input
         type="number"
@@ -203,6 +219,7 @@ function renderControl(schema: Schema, value: unknown, onChange: (next: unknown)
           onChange={(next) => onChange(next)}
           suggestions={variableSuggestions ?? []}
           defaultMultiline={isLong}
+          placeholder={variableSuggestions && variableSuggestions.length > 0 ? "Type @ to insert an input or step output" : undefined}
         />
         {templateHint && variableSuggestions && variableSuggestions.length > 0 && <TemplateHint />}
       </>
