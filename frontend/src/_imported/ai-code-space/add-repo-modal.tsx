@@ -4,8 +4,9 @@ import { createPortal } from "react-dom";
 import { ApiError } from "@/api/request";
 import type { CredentialSummary, ProviderInstanceSummary, RemoteRepository, RepositorySummary } from "@/api/types";
 import { ACCESSIBLE_REPOS_PAGE_SIZE, useAccessibleRepositoriesForPicker, useCredentials, useProviderInstances } from "@/hooks/use-credentials";
+import { useMe } from "@/hooks/use-me";
 import { useBindRepositoriesBulk, useRepositories } from "@/hooks/use-repositories";
-import { credentialOwnershipLabel, sortCredentialsByPreference } from "@/lib/credentialOrdering";
+import { bindableCredentials, credentialOwnershipLabel, sortCredentialsByPreference } from "@/lib/credentialOrdering";
 import { repoConnectionState } from "@/lib/repoConnectionState";
 
 import { ConnectRemoteModal } from "./connect-remote-modal";
@@ -14,9 +15,9 @@ import { Pager } from "./pager";
 
 /**
  * Add repository modal. Three steps:
- *   1. "credential" — list the team's active credentials, user picks the one whose
- *                     visibility on the provider matches the repos they want to add.
- *   2. "picker"     — live-fetch accessible repos for that credential, multi-select with
+ *   1. "credential" — pick a connection to add from: the user's own sign-ins + the team's shared
+ *                     service credentials (a teammate's personal credential is never offered).
+ *   2. "picker"     — live-fetch accessible repos for that connection, multi-select with
  *                     already-bound filter, show count + visibility per row.
  *   3. "result"     — show per-item success/failure from BindRepositoriesBulkCommand.
  *
@@ -63,6 +64,7 @@ export function AddRepoModal({ onClose, presetProjectId }: AddRepoModalProps) {
   // and the ResultStep wouldn't be able to render the friendly path).
   const [selected, setSelected] = useState<Map<string, RemoteRepository>>(new Map());
 
+  const me = useMe();
   const credentials = useCredentials();
   const instances = useProviderInstances();
   // The team's ALREADY-CONNECTED repos for this provider (not project-scoped): a connection is a
@@ -91,9 +93,12 @@ export function AddRepoModal({ onClose, presetProjectId }: AddRepoModalProps) {
 
   const instanceById = useMemo(() => new Map((instances.data ?? []).map(i => [i.id, i])), [instances.data]);
 
+  // Only connections the current user may actually bind with: the team's shared services + their
+  // OWN personal sign-ins. A teammate's personal credential is never offered (binding the team's
+  // repo through someone else's token would run every fetch/webhook as them and break if they leave).
   const activeCredentials = useMemo(
-    () => (credentials.data ?? []).filter(c => c.status === "Active"),
-    [credentials.data],
+    () => bindableCredentials((credentials.data ?? []).filter(c => c.status === "Active"), me.data?.id),
+    [credentials.data, me.data?.id],
   );
 
   const connectedByFullPath = useMemo(() => new Map((existing.data ?? []).map(r => [r.fullPath, r])), [existing.data]);
@@ -159,7 +164,7 @@ export function AddRepoModal({ onClose, presetProjectId }: AddRepoModalProps) {
           the Cancel button, or Escape closes the modal. */}
       <div className="mdl-mask" />
       <div className="mdl" role="dialog" aria-modal="true">
-        {step === "credential" && <CredentialStep credentials={sortCredentialsByPreference(activeCredentials)} instances={instanceById} loading={credentials.isLoading || instances.isLoading} error={credentials.error ?? instances.error} onPick={choose} onClose={onClose} onOpenConnect={() => setConnectOpen(true)} />}
+        {step === "credential" && <CredentialStep credentials={sortCredentialsByPreference(activeCredentials)} instances={instanceById} loading={credentials.isLoading || instances.isLoading || me.isLoading} error={credentials.error ?? instances.error} onPick={choose} onClose={onClose} onOpenConnect={() => setConnectOpen(true)} />}
 
         {step === "picker" && picked && pickedInstance && (
           <PickerStep
@@ -226,7 +231,7 @@ function CredentialStep({ credentials, instances, loading, error, onPick, onClos
       <div className="mdl-head">
         <div className="mdl-title-wrap">
           <div className="mdl-title">Add repository</div>
-          <div className="mdl-sub">Pick the credential to read repositories with.</div>
+          <div className="mdl-sub">Choose which connection to add repositories from.</div>
         </div>
         <button className="mdl-x" onClick={onClose} title="Close"><Ic.X size={14} /></button>
       </div>
