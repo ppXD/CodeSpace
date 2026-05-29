@@ -2,9 +2,10 @@ import { useEffect, useMemo, useState } from "react";
 import { createPortal } from "react-dom";
 
 import { ApiError } from "@/api/request";
-import type { CredentialSummary, ProviderInstanceSummary, RemoteRepository } from "@/api/types";
+import type { CredentialSummary, ProviderInstanceSummary, RemoteRepository, RepositorySummary } from "@/api/types";
 import { ACCESSIBLE_REPOS_PAGE_SIZE, useAccessibleRepositoriesForPicker, useCredentials, useProviderInstances } from "@/hooks/use-credentials";
 import { useBindRepositoriesBulk, useRepositories } from "@/hooks/use-repositories";
+import { repoConnectionState } from "@/lib/repoConnectionState";
 
 import { ConnectRemoteModal } from "./connect-remote-modal";
 import { Ic } from "./icons";
@@ -63,9 +64,11 @@ export function AddRepoModal({ onClose, presetProjectId }: AddRepoModalProps) {
 
   const credentials = useCredentials();
   const instances = useProviderInstances();
-  // "Already added" is scoped to the TARGET project, not the whole team — N:M means a repo in another
-  // project is still addable here. Without a preset project the bind lands in Default, so scope to that.
-  const existing = useRepositories({ providerInstanceId: picked?.providerInstanceId, projectId: presetProjectId });
+  // The team's ALREADY-CONNECTED repos for this provider (not project-scoped): a connection is a
+  // team-level fact (one credential + one webhook) shared across the projects a repo is linked to.
+  // We classify each picker row against this — already in THIS project (block), connected elsewhere
+  // (addable, re-uses the connection), or fresh.
+  const existing = useRepositories({ providerInstanceId: picked?.providerInstanceId });
   const bind = useBindRepositoriesBulk();
 
   useEffect(() => {
@@ -92,10 +95,10 @@ export function AddRepoModal({ onClose, presetProjectId }: AddRepoModalProps) {
     [credentials.data],
   );
 
-  const boundFullPaths = useMemo(
-    () => new Set((existing.data ?? []).map(r => r.fullPath)),
-    [existing.data],
-  );
+  const connectedByFullPath = useMemo(() => new Map((existing.data ?? []).map(r => [r.fullPath, r])), [existing.data]);
+  // credentialId → a human label (owner name, else the credential's display name) for the
+  // "Connected via …" hint, so the operator sees which connection a re-used repo keeps using.
+  const credentialLabelById = useMemo(() => new Map((credentials.data ?? []).map(c => [c.id, c.ownerUserName ?? c.displayName])), [credentials.data]);
 
   const pickedInstance = picked ? instanceById.get(picked.providerInstanceId) : null;
 
@@ -122,7 +125,8 @@ export function AddRepoModal({ onClose, presetProjectId }: AddRepoModalProps) {
   };
 
   const toggleRepo = (repo: RemoteRepository) => {
-    if (boundFullPaths.has(repo.fullPath)) return;
+    // Only block repos already in THIS project; a connected-elsewhere repo is addable (re-uses).
+    if (repoConnectionState(repo.fullPath, connectedByFullPath, presetProjectId).state === "in-project") return;
     setSelected(prev => {
       const next = new Map(prev);
       if (next.has(repo.externalId)) next.delete(repo.externalId);
@@ -170,7 +174,9 @@ export function AddRepoModal({ onClose, presetProjectId }: AddRepoModalProps) {
             isRefetching={accessible.isRefetching}
             isFullyLoaded={accessible.isFullyLoaded}
             error={accessible.error}
-            boundFullPaths={boundFullPaths}
+            connectedByFullPath={connectedByFullPath}
+            credentialLabelById={credentialLabelById}
+            targetProjectId={presetProjectId}
             query={query}
             onQueryChange={setQuery}
             isSearchPending={query !== debouncedQuery}
@@ -322,7 +328,9 @@ interface PickerStepProps {
   isRefetching: boolean;
   isFullyLoaded: boolean;
   error: unknown;
-  boundFullPaths: Set<string>;
+  connectedByFullPath: ReadonlyMap<string, RepositorySummary>;
+  credentialLabelById: ReadonlyMap<string, string>;
+  targetProjectId?: string;
   query: string;
   onQueryChange: (next: string) => void;
   isSearchPending: boolean;
@@ -335,7 +343,7 @@ interface PickerStepProps {
   submitError: string | null;
 }
 
-function PickerStep({ credential, instance, page, totalPages, onPageChange, pageItems, totalCount, loadedCount, isLoading, isRefetching, isFullyLoaded, error, boundFullPaths, query, onQueryChange, isSearchPending, selected, onToggle, onBack, onClose, onSubmit, submitting, submitError }: PickerStepProps) {
+function PickerStep({ credential, instance, page, totalPages, onPageChange, pageItems, totalCount, loadedCount, isLoading, isRefetching, isFullyLoaded, error, connectedByFullPath, credentialLabelById, targetProjectId, query, onQueryChange, isSearchPending, selected, onToggle, onBack, onClose, onSubmit, submitting, submitError }: PickerStepProps) {
   const initials = providerInitials(instance.provider);
   // When the provider gave us a real total, use it for hasNext; otherwise (GitLab
   // open-ended fallback) infer it from "this page came back full" — same heuristic
@@ -407,13 +415,19 @@ function PickerStep({ credential, instance, page, totalPages, onPageChange, page
           )}
 
           {!showLoading && !error && pageItems.map(r => {
-            const already = boundFullPaths.has(r.fullPath);
+            const conn = repoConnectionState(r.fullPath, connectedByFullPath, targetProjectId);
+            const inProject = conn.state === "in-project";
+            // Connected to the team via another credential → adding re-uses THAT connection, not the
+            // credential picked here. Surface whose, so the picked credential isn't silently ignored.
+            const connectedVia = conn.state === "connected-elsewhere"
+              ? credentialLabelById.get(conn.repo.credentialId ?? "") ?? "an existing connection"
+              : null;
             const checked = selected.has(r.externalId);
             const VisIcon = r.visibility === "Private" ? Ic.Lock
               : r.visibility === "Public" ? Ic.Globe : Ic.Users;
 
             return (
-              <div key={r.externalId} className="picker-row" data-checked={checked} data-disabled={already} onClick={() => onToggle(r)}>
+              <div key={r.externalId} className="picker-row" data-checked={checked} data-disabled={inProject} onClick={() => onToggle(r)}>
                 <div className="picker-cb">{checked && <Ic.Check size={11} stroke="#fff" strokeWidth={2.2} />}</div>
                 <div className="picker-meta">
                   <div className="picker-name">{r.name}</div>
@@ -423,7 +437,9 @@ function PickerStep({ credential, instance, page, totalPages, onPageChange, page
                     <span className="picker-vis"><VisIcon size={10} /> {r.visibility.toLowerCase()}</span>
                   </div>
                 </div>
-                {already && <span className="picker-added">Already added</span>}
+                {inProject
+                  ? <span className="picker-added">Already added</span>
+                  : connectedVia && <span className="picker-connected" title={`Connected via ${connectedVia} — adding re-uses that connection, not the credential picked here`}>Connected · {connectedVia}</span>}
               </div>
             );
           })}
