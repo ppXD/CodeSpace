@@ -3,8 +3,11 @@ import { createPortal } from "react-dom";
 
 import { ApiError } from "@/api/request";
 import type { CredentialSummary, ProviderInstanceSummary, RemoteRepository, RepositorySummary } from "@/api/types";
+import { AddTeamCredentialModal } from "@/components/credentials/AddTeamCredentialModal";
 import { ACCESSIBLE_REPOS_PAGE_SIZE, useAccessibleRepositoriesForPicker, useCredentials, useProviderInstances } from "@/hooks/use-credentials";
+import { useActiveTeam } from "@/hooks/use-me";
 import { useBindRepositoriesBulk, useRepositories } from "@/hooks/use-repositories";
+import { credentialOwnershipLabel, sortCredentialsByPreference } from "@/lib/credentialOrdering";
 import { repoConnectionState } from "@/lib/repoConnectionState";
 
 import { ConnectRemoteModal } from "./connect-remote-modal";
@@ -47,6 +50,10 @@ export function AddRepoModal({ onClose, presetProjectId }: AddRepoModalProps) {
   // close React Query refetches the credentials list so any new credential
   // appears in the picker without a manual invalidation step.
   const [connectOpen, setConnectOpen] = useState(false);
+  // Admin-only "Add team credential" (a durable, team-owned GitLab group token).
+  const [teamCredOpen, setTeamCredOpen] = useState(false);
+  const activeRole = useActiveTeam().active?.role;
+  const isTeamAdmin = activeRole === "Owner" || activeRole === "Admin";
 
   // Search box value (raw, every keystroke) vs the debounced value we actually
   // send to the backend. 300ms strikes the usual balance between responsiveness
@@ -158,7 +165,7 @@ export function AddRepoModal({ onClose, presetProjectId }: AddRepoModalProps) {
           the Cancel button, or Escape closes the modal. */}
       <div className="mdl-mask" />
       <div className="mdl" role="dialog" aria-modal="true">
-        {step === "credential" && <CredentialStep credentials={activeCredentials} instances={instanceById} loading={credentials.isLoading || instances.isLoading} error={credentials.error ?? instances.error} onPick={choose} onClose={onClose} onOpenConnect={() => setConnectOpen(true)} />}
+        {step === "credential" && <CredentialStep credentials={sortCredentialsByPreference(activeCredentials)} instances={instanceById} loading={credentials.isLoading || instances.isLoading} error={credentials.error ?? instances.error} onPick={choose} onClose={onClose} onOpenConnect={() => setConnectOpen(true)} isTeamAdmin={isTeamAdmin} onAddTeamCredential={() => setTeamCredOpen(true)} />}
 
         {step === "picker" && picked && pickedInstance && (
           <PickerStep
@@ -197,6 +204,9 @@ export function AddRepoModal({ onClose, presetProjectId }: AddRepoModalProps) {
           .mdl z-index 81 and the later DOM wins → the inner overlay appears above
           the AddRepo modal until dismissed. */}
       {connectOpen && <ConnectRemoteModal onClose={() => setConnectOpen(false)} />}
+      {/* Add-team-credential modal, stacked like ConnectRemoteModal. On success the hook
+          invalidates ["credentials"], so the new team-service credential appears + sorts to top. */}
+      {teamCredOpen && <AddTeamCredentialModal instances={instances.data ?? []} onClose={() => setTeamCredOpen(false)} onAdded={() => setTeamCredOpen(false)} />}
     </>,
     document.body,
   );
@@ -214,9 +224,12 @@ interface CredentialStepProps {
   /** Opens ConnectRemoteModal stacked on top of this modal so the operator can add
    *  a new OAuth credential without losing the in-progress Add Repository flow. */
   onOpenConnect: () => void;
+  /** Team admins can add a durable, team-owned credential (GitLab group token). */
+  isTeamAdmin: boolean;
+  onAddTeamCredential: () => void;
 }
 
-function CredentialStep({ credentials, instances, loading, error, onPick, onClose, onOpenConnect }: CredentialStepProps) {
+function CredentialStep({ credentials, instances, loading, error, onPick, onClose, onOpenConnect, isTeamAdmin, onAddTeamCredential }: CredentialStepProps) {
   const showInlineAction = !loading && !(error instanceof Error) && credentials.length > 0;
   return (
     <>
@@ -237,6 +250,11 @@ function CredentialStep({ credentials, instances, loading, error, onPick, onClos
             <button className="btn" onClick={onOpenConnect}>
               <Ic.Plus size={14} /> Connect new remote
             </button>
+            {isTeamAdmin && (
+              <button className="btn" onClick={onAddTeamCredential} title="A team-owned GitLab token that survives anyone leaving">
+                <Ic.Plus size={14} /> Add team credential
+              </button>
+            )}
           </div>
         )}
 
@@ -261,6 +279,11 @@ function CredentialStep({ credentials, instances, loading, error, onPick, onClos
             <button className="btn btn-primary" onClick={onOpenConnect}>
               <Ic.Link size={14} /> Connect remote
             </button>
+            {isTeamAdmin && (
+              <button className="btn" style={{ marginLeft: 8 }} onClick={onAddTeamCredential}>
+                <Ic.Plus size={14} /> Add team credential
+              </button>
+            )}
           </div>
         )}
 
@@ -276,12 +299,11 @@ function CredentialStep({ credentials, instances, loading, error, onPick, onClos
                   <div className="cn-pv-meta">
                     <div className="cn-pv-name">
                       {cred.displayName}
-                      {/* Owner badge — only shown when we know who owns the credential and
-                          the display name doesn't already include them. Avoids the "alice
-                          alice's GitHub" double-print while still disambiguating shared
-                          credentials whose display name was renamed without "alice's" in it. */}
-                      {cred.ownerUserName && !cred.displayName.toLowerCase().includes(cred.ownerUserName.toLowerCase()) && (
-                        <span className="cn-cred-owner">{cred.ownerUserName}</span>
+                      {/* Ownership badge — "Team service" (accent) for a team-owned credential, else the
+                          owner's name (suppressed when the display name already includes it, to avoid
+                          the "alice · alice's GitHub" double-print). */}
+                      {(cred.ownership === "TeamService" || (cred.ownerUserName && !cred.displayName.toLowerCase().includes(cred.ownerUserName.toLowerCase()))) && (
+                        <span className="cn-cred-owner" data-team-service={cred.ownership === "TeamService"}>{credentialOwnershipLabel(cred)}</span>
                       )}
                     </div>
                     <div className="cn-pv-desc">{instance.displayName} · {instance.baseUrl}</div>

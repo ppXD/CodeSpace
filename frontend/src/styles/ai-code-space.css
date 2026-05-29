@@ -1482,6 +1482,9 @@
   background: var(--panel-2); border: 1px solid var(--line); color: var(--muted);
   letter-spacing: 0; text-transform: none;
 }
+/* Team-service credential badge — accent, so the durable team-owned identity reads distinctly
+   from a personal owner's name. */
+.cn-cred-owner[data-team-service="true"] { background: var(--accent-soft); border-color: var(--accent-soft); color: var(--accent); }
 
 /* Inactive credentials get faded so they don't dominate the active list */
 .cn-row[data-inactive="true"] { opacity: .65; }
