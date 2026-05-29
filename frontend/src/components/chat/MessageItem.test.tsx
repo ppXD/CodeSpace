@@ -44,16 +44,4 @@ describe("MessageItem", () => {
     render(<MessageItem message={msg({ isDeleted: true, body: "" })} members={members} isMine={false} myUserId={null} />);
     expect(screen.getByText("message deleted")).toBeInTheDocument();
   });
-
-  it("highlights a message that @-mentions the current user", () => {
-    const message = msg({ authorUserId: "u1", references: [{ refType: "user", refId: "me", label: "Me" }] });
-    const { container } = render(<MessageItem message={message} members={members} isMine={false} myUserId="me" />);
-    expect(container.querySelector('.chat-msg[data-mentions-me="true"]')).toBeTruthy();
-  });
-
-  it("does not highlight when the mention targets someone else", () => {
-    const message = msg({ references: [{ refType: "user", refId: "u1", label: "Alice" }] });
-    const { container } = render(<MessageItem message={message} members={members} isMine={false} myUserId="me" />);
-    expect(container.querySelector('.chat-msg[data-mentions-me="true"]')).toBeNull();
-  });
 });

@@ -15,11 +15,8 @@ export function MessageItem({ message, members, isMine, myUserId }: { message: M
   // Stable per-author colour so each speaker is recognisable down the log (incl. yourself).
   const color = avatarColor(message.authorUserId);
 
-  // A message that @-mentions you gets the highlight reserved for mentions (Slack/Space).
-  const mentionsMe = myUserId != null && message.references.some((r) => r.refType === "user" && r.refId === myUserId);
-
   return (
-    <div className="chat-msg" data-mine={isMine} data-mentions-me={mentionsMe}>
+    <div className="chat-msg" data-mine={isMine}>
       <div className="chat-msg-avatar" aria-hidden="true" style={{ background: color.bg, color: color.fg }}>{name.charAt(0).toUpperCase()}</div>
       <div className="chat-msg-main">
         <div className="chat-msg-head">

@@ -42,11 +42,12 @@ describe("ConversationList", () => {
     expect(screen.getByText("#general").closest("button")?.getAttribute("data-active")).toBe("true");
   });
 
-  it("flags only the conversation whose last message mentions you", () => {
-    render(<ConversationList activeConversationId={null} onSelect={() => {}} />);
+  it("accents the preview of only the conversation whose last message mentions you", () => {
+    const { container } = render(<ConversationList activeConversationId={null} onSelect={() => {}} />);
 
-    const badges = screen.getAllByLabelText("You were mentioned");
-    expect(badges).toHaveLength(1);
-    expect(badges[0].closest("button")).toHaveTextContent("#alerts");
+    const mentioned = container.querySelectorAll(".chat-conv-preview-mention");
+    expect(mentioned).toHaveLength(1);
+    expect(mentioned[0]).toHaveTextContent("@You ping");
+    expect(mentioned[0].closest("button")).toHaveTextContent("#alerts");
   });
 });

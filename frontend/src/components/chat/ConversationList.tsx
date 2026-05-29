@@ -53,7 +53,6 @@ export function ConversationList({
               <span className="chat-conv-top">
                 <span className="chat-conv-name">{conversationTitle(c, members, myId)}</span>
                 <span className="chat-conv-time">{formatListTime(c.lastActivityDate)}</span>
-                {c.lastMessage?.mentionsViewer && <span className="chat-conv-mention" title="You were mentioned" aria-label="You were mentioned">@</span>}
               </span>
               <PreviewLine conversation={c} members={members} myId={myId} />
             </span>
@@ -85,8 +84,11 @@ function PreviewLine({ conversation, members, myId }: { conversation: Conversati
   if (last.isDeleted) return <span className="chat-conv-preview chat-conv-preview-deleted">message deleted</span>;
 
   const author = last.authorUserId === myId ? "You" : members.get(last.authorUserId)?.name ?? "Someone";
+
+  // When the last message @-mentions you, the preview text goes accent — the list's "you're
+  // mentioned here" cue, matching the orange @ chip (no separate badge).
   return (
-    <span className="chat-conv-preview">
+    <span className={last.mentionsViewer ? "chat-conv-preview chat-conv-preview-mention" : "chat-conv-preview"}>
       <span className="chat-conv-preview-author">{author}</span> {last.preview}
     </span>
   );

@@ -20,7 +20,6 @@
   --muted-2: #A5A29C;
   --accent: #D97757;
   --accent-soft: #F4E3D8;
-  --accent-wash: #FBF2EB;
   --soft: #EDE7DB;
   --good: #5BA17A;
   --warn: #C97C3F;
@@ -2841,13 +2840,6 @@
 .acs-root .chat-conv-top { display: flex; align-items: baseline; gap: 8px; }
 .acs-root .chat-conv-name { flex: 1; min-width: 0; font-size: 13px; font-weight: 600; line-height: 1.35; color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .acs-root .chat-conv-time { flex-shrink: 0; font-size: 11px; color: var(--muted-2); }
-/* "You were mentioned here" badge on a conversation row — a small accent @ pill, the list's
-   equivalent of the in-message mention highlight. */
-.acs-root .chat-conv-mention {
-  flex-shrink: 0; align-self: center; display: inline-flex; align-items: center; justify-content: center;
-  min-width: 17px; height: 17px; padding: 0 4px; border-radius: 9px;
-  background: var(--accent); color: var(--panel); font-size: 10px; font-weight: 700; line-height: 1;
-}
 .acs-root .chat-conv-preview { display: block; font-size: 12px; line-height: 1.4; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* Row colour hierarchy keeps the types apart: the conversation TITLE is the dark primary
    (var(--ink), above); the preview AUTHOR is a grey label — bold + ":" so it still reads as the
@@ -2856,6 +2848,9 @@
 .acs-root .chat-conv-preview-author { font-weight: 600; color: var(--muted); margin-right: 1px; }
 .acs-root .chat-conv-preview-author::after { content: ":"; font-weight: 600; color: var(--muted-2); }
 .acs-root .chat-conv-preview-muted, .acs-root .chat-conv-preview-deleted { color: var(--muted-2); font-style: italic; }
+/* Last message @-mentions you → the preview text goes accent (the list's mention cue, matching the
+   orange @ chip; the author label keeps its own muted colour). */
+.acs-root .chat-conv-preview-mention { color: var(--accent); }
 
 .acs-root .chat-main { display: flex; flex-direction: column; height: 100%; overflow: hidden; min-width: 0; }
 .acs-root .chat-main-placeholder { align-items: center; justify-content: center; }
@@ -2885,15 +2880,6 @@
    name in the accent colour (Discord-style coloured names), so you can spot your messages at a
    glance while every row stays an equal member of the flat log. */
 .acs-root .chat-msg[data-mine="true"] .chat-msg-author { color: var(--accent); }
-
-/* A message that @-mentions YOU gets the highlight Slack/Space reserve for mentions — a faint
-   accent wash + a 2px accent rail down the left — so it stands out as "this one's for me". */
-.acs-root .chat-msg[data-mentions-me="true"] {
-  position: relative; padding: 6px 12px; margin: 0 -12px; border-radius: var(--radius-sm); background: var(--accent-wash);
-}
-.acs-root .chat-msg[data-mentions-me="true"]::before {
-  content: ""; position: absolute; left: 0; top: 6px; bottom: 6px; width: 2px; border-radius: 2px; background: var(--accent);
-}
 .acs-root .chat-msg-time, .acs-root .chat-msg-edited { font-size: 11px; color: var(--muted-2); }
 .acs-root .chat-msg-text {
   display: block; font-size: 14px; color: var(--ink-2); line-height: 1.5;
