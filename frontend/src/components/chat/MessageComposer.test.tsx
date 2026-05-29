@@ -3,30 +3,55 @@ import { describe, expect, it, vi } from "vitest";
 
 import { MessageComposer } from "./MessageComposer";
 
+/**
+ * The composer is a contenteditable editor (not a textarea), so tests drive it by setting innerHTML
+ * + firing an input event rather than changing a `value`. The caret-bound picker insertion is
+ * browser-only (verified live); its parsing/filtering is covered in lib/mentionInput + MentionPicker.
+ */
+vi.mock("@/hooks/use-team-members", () => ({
+  useTeamMembers: () => ({ data: [{ userId: "u1", name: "Alice", email: "a@x", avatarUrl: null }] }),
+}));
+
+function setContent(editor: HTMLElement, html: string) {
+  editor.innerHTML = html;
+  fireEvent.input(editor);
+}
+
 describe("MessageComposer", () => {
-  it("sends trimmed text on click and clears the input", () => {
+  it("sends trimmed text on click and clears the editor", () => {
     const onSend = vi.fn();
     render(<MessageComposer onSend={onSend} />);
 
-    const input = screen.getByRole("textbox") as HTMLTextAreaElement;
-    fireEvent.change(input, { target: { value: "  hello  " } });
+    const editor = screen.getByRole("textbox");
+    setContent(editor, "  hello  ");
     fireEvent.click(screen.getByRole("button", { name: /send/i }));
 
     expect(onSend).toHaveBeenCalledWith("hello");
-    expect(input.value).toBe("");
+    expect(editor.textContent).toBe("");
   });
 
-  it("sends on Enter but inserts a newline on Shift+Enter", () => {
+  it("serializes a mention chip to its generic token on send", () => {
     const onSend = vi.fn();
     render(<MessageComposer onSend={onSend} />);
 
-    const input = screen.getByRole("textbox");
-    fireEvent.change(input, { target: { value: "hi" } });
+    const editor = screen.getByRole("textbox");
+    setContent(editor, 'hi <span data-ref-type="user" data-ref-id="u1" data-label="Alice">@Alice</span> there');
+    fireEvent.click(screen.getByRole("button", { name: /send/i }));
 
-    fireEvent.keyDown(input, { key: "Enter", shiftKey: true });
+    expect(onSend).toHaveBeenCalledWith("hi <user:u1|Alice> there");
+  });
+
+  it("sends on Enter but not on Shift+Enter", () => {
+    const onSend = vi.fn();
+    render(<MessageComposer onSend={onSend} />);
+
+    const editor = screen.getByRole("textbox");
+    setContent(editor, "hi");
+
+    fireEvent.keyDown(editor, { key: "Enter", shiftKey: true });
     expect(onSend).not.toHaveBeenCalled();
 
-    fireEvent.keyDown(input, { key: "Enter" });
+    fireEvent.keyDown(editor, { key: "Enter" });
     expect(onSend).toHaveBeenCalledWith("hi");
   });
 
@@ -34,17 +59,15 @@ describe("MessageComposer", () => {
     const onSend = vi.fn();
     render(<MessageComposer onSend={onSend} />);
 
-    const input = screen.getByRole("textbox");
-    fireEvent.change(input, { target: { value: "你好" } });
+    const editor = screen.getByRole("textbox");
+    setContent(editor, "你好");
 
-    // Mid-composition (choosing a CJK candidate): Enter commits the candidate into the box, not a send.
-    fireEvent.compositionStart(input);
-    fireEvent.keyDown(input, { key: "Enter" });
+    fireEvent.compositionStart(editor);
+    fireEvent.keyDown(editor, { key: "Enter" });
     expect(onSend).not.toHaveBeenCalled();
 
-    // Composition finished → the next Enter actually sends.
-    fireEvent.compositionEnd(input);
-    fireEvent.keyDown(input, { key: "Enter" });
+    fireEvent.compositionEnd(editor);
+    fireEvent.keyDown(editor, { key: "Enter" });
     expect(onSend).toHaveBeenCalledWith("你好");
   });
 
@@ -52,9 +75,9 @@ describe("MessageComposer", () => {
     const onSend = vi.fn();
     render(<MessageComposer onSend={onSend} />);
 
-    const input = screen.getByRole("textbox");
-    fireEvent.change(input, { target: { value: "   " } });
-    fireEvent.keyDown(input, { key: "Enter" });
+    const editor = screen.getByRole("textbox");
+    setContent(editor, "   ");
+    fireEvent.keyDown(editor, { key: "Enter" });
 
     expect(onSend).not.toHaveBeenCalled();
   });
