@@ -89,3 +89,18 @@ export function isFieldHidden(schema: unknown): boolean {
 function asObject(value: unknown): Record<string, unknown> {
   return typeof value === "object" && value !== null ? (value as Record<string, unknown>) : {};
 }
+
+/**
+ * Coerce a number/integer form field's raw editor text into the value to persist. A plain
+ * numeric literal becomes a JSON number (so a node expecting a number gets one); a value
+ * containing a `{{ref}}` template stays a string (a lone `{{ref}}` is type-preserved by the
+ * engine, so it still resolves to a number at run time); blank becomes undefined. Anything
+ * else (a non-numeric literal) is kept verbatim so the operator can see + fix their typo.
+ */
+export function coerceNumberInput(raw: string): number | string | undefined {
+  const trimmed = raw.trim();
+  if (trimmed === "") return undefined;
+  if (raw.includes("{{")) return raw;
+  if (/^-?\d+(\.\d+)?$/.test(trimmed)) return Number(trimmed);
+  return raw;
+}

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   buildFieldSchema,
+  coerceNumberInput,
   isFieldHidden,
   jsonTypeOf,
   schemaMaxLength,
@@ -93,5 +94,27 @@ describe("schema readers", () => {
   it("isFieldHidden reads x-hidden", () => {
     expect(isFieldHidden({ "x-hidden": true })).toBe(true);
     expect(isFieldHidden({})).toBe(false);
+  });
+});
+
+describe("coerceNumberInput", () => {
+  it("turns a numeric literal into a JSON number", () => {
+    expect(coerceNumberInput("123")).toBe(123);
+    expect(coerceNumberInput("-4")).toBe(-4);
+    expect(coerceNumberInput("3.5")).toBe(3.5);
+    expect(coerceNumberInput("  42  ")).toBe(42);
+  });
+
+  it("keeps a {{ref}} template as a string (engine type-preserves a lone ref)", () => {
+    expect(coerceNumberInput("{{input.pr_number}}")).toBe("{{input.pr_number}}");
+  });
+
+  it("blank → undefined", () => {
+    expect(coerceNumberInput("")).toBeUndefined();
+    expect(coerceNumberInput("   ")).toBeUndefined();
+  });
+
+  it("keeps a non-numeric literal verbatim (operator sees + fixes the typo)", () => {
+    expect(coerceNumberInput("abc")).toBe("abc");
   });
 });
