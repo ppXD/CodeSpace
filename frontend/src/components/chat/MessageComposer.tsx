@@ -1,4 +1,4 @@
-import { useState, type KeyboardEvent } from "react";
+import { useRef, useState, type KeyboardEvent } from "react";
 
 /**
  * Message input. The textarea and Send sit inside one bordered box (focus ring on the box) so
@@ -9,6 +9,10 @@ import { useState, type KeyboardEvent } from "react";
 export function MessageComposer({ onSend, disabled, placeholder }: { onSend: (body: string) => void; disabled?: boolean; placeholder?: string }) {
   const [text, setText] = useState("");
 
+  // True while an IME composition is in flight (e.g. picking a Chinese/Japanese/Korean candidate).
+  // The Enter that commits the candidate must NOT send — it's finishing the input, not submitting.
+  const composing = useRef(false);
+
   const send = () => {
     const body = text.trim();
     if (!body || disabled) return;
@@ -18,7 +22,9 @@ export function MessageComposer({ onSend, disabled, placeholder }: { onSend: (bo
   };
 
   const onKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
-    if (e.key === "Enter" && !e.shiftKey) {
+    // Skip while composing (tracked event) or when the browser still reports this keydown as part
+    // of the composition (isComposing) — some platforms surface the commit Enter only one of the two ways.
+    if (e.key === "Enter" && !e.shiftKey && !composing.current && !e.nativeEvent.isComposing) {
       e.preventDefault();
       send();
     }
@@ -34,6 +40,8 @@ export function MessageComposer({ onSend, disabled, placeholder }: { onSend: (bo
           placeholder={placeholder ?? "Write a message…"}
           onChange={(e) => setText(e.target.value)}
           onKeyDown={onKeyDown}
+          onCompositionStart={() => { composing.current = true; }}
+          onCompositionEnd={() => { composing.current = false; }}
         />
         <button className="btn btn-primary chat-composer-send" onClick={send} disabled={disabled || text.trim().length === 0} aria-label="Send">
           Send

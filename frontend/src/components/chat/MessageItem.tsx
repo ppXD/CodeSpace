@@ -1,5 +1,6 @@
 import type { MessageView } from "@/api/chat";
 import type { TeamMemberSummary } from "@/api/teams";
+import { avatarColor } from "@/lib/avatarColor";
 
 import { MessageBody } from "./MessageBody";
 
@@ -11,9 +12,12 @@ import { MessageBody } from "./MessageBody";
 export function MessageItem({ message, members, isMine }: { message: MessageView; members: Map<string, TeamMemberSummary>; isMine: boolean }) {
   const name = members.get(message.authorUserId)?.name ?? "Unknown";
 
+  // Stable per-author colour so each speaker is recognisable down the log (incl. yourself).
+  const color = avatarColor(message.authorUserId);
+
   return (
     <div className="chat-msg" data-mine={isMine}>
-      <div className="chat-msg-avatar" aria-hidden="true">{name.charAt(0).toUpperCase()}</div>
+      <div className="chat-msg-avatar" aria-hidden="true" style={{ background: color.bg, color: color.fg }}>{name.charAt(0).toUpperCase()}</div>
       <div className="chat-msg-main">
         <div className="chat-msg-head">
           <span className="chat-msg-author">{name}</span>

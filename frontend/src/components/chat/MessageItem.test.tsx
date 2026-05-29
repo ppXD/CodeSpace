@@ -24,6 +24,12 @@ describe("MessageItem", () => {
     expect(screen.getByText("Alice")).toBeInTheDocument();
   });
 
+  it("keeps your real name on your own messages and flags the row as mine", () => {
+    const { container } = render(<MessageItem message={msg({})} members={members} isMine />);
+    expect(screen.getByText("Alice")).toBeInTheDocument();   // real name, not "You"
+    expect(container.querySelector('.chat-msg[data-mine="true"]')).toBeTruthy();
+  });
+
   it("falls back to Unknown for an unmapped author", () => {
     render(<MessageItem message={msg({ authorUserId: "ghost" })} members={members} isMine={false} />);
     expect(screen.getByText("Unknown")).toBeInTheDocument();
