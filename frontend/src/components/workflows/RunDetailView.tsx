@@ -1,6 +1,8 @@
 import { ApiError } from "@/api/request";
 import { useWorkflowRun } from "@/hooks/use-workflows";
 
+import { JsonView } from "./JsonView";
+
 /**
  * Shared run-detail view: status summary + normalized payload + declared outputs + the
  * per-node execution trace for one workflow run. Fetches by id and auto-polls while the run
@@ -54,7 +56,7 @@ export function RunDetailView({ runId }: { runId: string }) {
 
       <section className="wf-section">
         <h2 className="wf-section-h">Normalized payload</h2>
-        <pre className="wf-json">{JSON.stringify(r.normalizedPayload, null, 2)}</pre>
+        <JsonView data={r.normalizedPayload} />
       </section>
 
       {/* The run's declared Outputs (the Terminal's resolved inputs) — what this run produced.
@@ -62,7 +64,7 @@ export function RunDetailView({ runId }: { runId: string }) {
       {hasContent(r.outputs) && (
         <section className="wf-section">
           <h2 className="wf-section-h">Outputs</h2>
-          <pre className="wf-json">{JSON.stringify(r.outputs, null, 2)}</pre>
+          <JsonView data={r.outputs} />
         </section>
       )}
 
@@ -93,13 +95,13 @@ export function RunDetailView({ runId }: { runId: string }) {
                 {hasContent(n.inputs) && (
                   <details className="wf-run-node-io">
                     <summary>Inputs</summary>
-                    <pre className="wf-json">{JSON.stringify(n.inputs, null, 2)}</pre>
+                    <JsonView data={n.inputs} />
                   </details>
                 )}
                 {hasContent(n.outputs) && (
                   <details className="wf-run-node-io">
                     <summary>Outputs</summary>
-                    <pre className="wf-json">{JSON.stringify(n.outputs, null, 2)}</pre>
+                    <JsonView data={n.outputs} />
                   </details>
                 )}
                 {!n.error && !hasContent(n.inputs) && !hasContent(n.outputs) && (
