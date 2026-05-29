@@ -42,6 +42,9 @@ import { StartNodeInputsEditor } from "@/components/workflows/StartNodeInputsEdi
 import { VariableTablePanel } from "@/components/workflows/VariableTablePanel";
 import { WorkflowNode, type WorkflowNodeData } from "@/components/workflows/WorkflowNode";
 import { WorkflowVariablesPanel } from "@/components/workflows/WorkflowVariablesPanel";
+import { RunWorkflowModal } from "@/components/workflows/RunWorkflowModal";
+import { RunViewerDialog } from "@/components/workflows/RunViewerDialog";
+import { RunHistoryDialog } from "@/components/workflows/RunHistoryDialog";
 
 // Five panels covering every scope the engine resolves:
 //   - variables  → wf.*    (Variable table, scope=Workflow, persists immediately via API)
@@ -54,7 +57,7 @@ import { WorkflowVariablesPanel } from "@/components/workflows/WorkflowVariables
 // Team variables are *also* manageable from Team Settings → Variables; the in-editor panel
 // is a convenience so authors don't have to leave the canvas to add a shared value.
 type OpenVarsPanel = "variables" | "team" | "inputs" | "outputs" | "system";
-import { useNodeManifests, useSystemVariables, useUpdateWorkflow, useWorkflow } from "@/hooks/use-workflows";
+import { useNodeManifests, useRunWorkflowManually, useSystemVariables, useUpdateWorkflow, useWorkflow } from "@/hooks/use-workflows";
 // Real per-scope variable lists feed the autocomplete picker + toolbar counts.
 import { useTeamVariables, useWorkflowVariables } from "@/hooks/use-variables";
 import { useProjects } from "@/hooks/use-projects";
@@ -120,7 +123,6 @@ function EditorShell() {
       workflow={workflow.data}
       manifests={manifests.data ?? []}
       onBackToList={() => navigate({ to: "/teams/$teamSlug/workflows", params: { teamSlug } })}
-      onOpenRuns={() => navigate({ to: "/teams/$teamSlug/workflows/$workflowId/runs", params: { teamSlug, workflowId } })}
       saving={update.isPending}
       onSave={(input) => update.mutateAsync({ workflowId, input })}
     />
@@ -131,7 +133,6 @@ interface EditorProps {
   workflow: WorkflowDetail;
   manifests: NodeManifestDto[];
   onBackToList: () => void;
-  onOpenRuns: () => void;
   saving: boolean;
   onSave: (input: {
     name: string;
@@ -141,7 +142,7 @@ interface EditorProps {
   }) => Promise<unknown>;
 }
 
-function Editor({ workflow, manifests, onBackToList, onOpenRuns, saving, onSave }: EditorProps) {
+function Editor({ workflow, manifests, onBackToList, saving, onSave }: EditorProps) {
   // Editable workflow header — start as a copy of the persisted name; the user can rename
   // in place via the input above the canvas.
   const [name, setName] = useState(workflow.name);
@@ -227,6 +228,13 @@ function Editor({ workflow, manifests, onBackToList, onOpenRuns, saving, onSave 
   });
   const [openVarsPanel, setOpenVarsPanel] = useState<OpenVarsPanel | null>(null);
   const markVarsDirty = () => setUnsaved(true);
+
+  // In-editor run + history. runFormOpen → the input form (when the workflow declares inputs);
+  // viewerRunId → the live run-detail dialog; historyOpen → the runs list dialog.
+  const runManually = useRunWorkflowManually();
+  const [runFormOpen, setRunFormOpen] = useState(false);
+  const [viewerRunId, setViewerRunId] = useState<string | null>(null);
+  const [historyOpen, setHistoryOpen] = useState(false);
 
   const { screenToFlowPosition, getViewport } = useReactFlow();
   const canvasRef = useRef<HTMLDivElement | null>(null);
@@ -440,6 +448,28 @@ function Editor({ workflow, manifests, onBackToList, onOpenRuns, saving, onSave 
     // disappears and the user can immediately keep editing. Matches Dify behaviour.
   };
 
+  // ─── In-editor run + history (Dify-style — never leave the canvas) ────────────
+  const startRun = async (payload?: Record<string, unknown>) => {
+    // A manual run executes the LATEST SAVED version, so flush any pending edits first —
+    // otherwise "Run" would silently execute a stale definition. The run mutation reads the
+    // freshly-bumped version server-side.
+    if (unsaved) await handleSave();
+    const result = await runManually.mutateAsync({ workflowId: workflow.id, payload });
+    setRunFormOpen(false);
+    setViewerRunId(result.runId);
+  };
+
+  const handleRun = async () => {
+    try {
+      if (unsaved) await handleSave();
+    } catch {
+      return;   // save failed — don't run a half-saved definition
+    }
+    // Declared inputs → collect them first (same form as the runs page); else run immediately.
+    if (workflowInputs.length > 0) { setRunFormOpen(true); return; }
+    await startRun().catch(() => {});
+  };
+
   // Block accidental navigation when there are unsaved changes.
   useEffect(() => {
     if (!unsaved) return;
@@ -490,6 +520,24 @@ function Editor({ workflow, manifests, onBackToList, onOpenRuns, saving, onSave 
             Each group lives inside its own .wf-editor-toolbar-group; the .sep span draws
             the divider between them. Tooltips spell out the {{ref}} prefix for each scope. */}
         <div className="wf-editor-toolbar" role="toolbar" aria-label="Workflow scopes + actions">
+          {/* Leftmost: run the workflow in-place (Dify-style) + open run history — both stay on
+              the canvas via dialogs rather than navigating to the runs page. */}
+          <div className="wf-editor-toolbar-group" aria-label="Run">
+            <button
+              className="wf-editor-toolbar-run"
+              onClick={() => void handleRun()}
+              disabled={runManually.isPending}
+              title="Run this workflow now"
+            >
+              <Ic.Play size={13} /> {runManually.isPending ? "Running…" : "Run"}
+            </button>
+            <button className="wf-editor-toolbar-btn" onClick={() => setHistoryOpen(true)} title="Run history">
+              <Ic.Clock size={14} />
+            </button>
+          </div>
+
+          <span className="wf-editor-toolbar-sep" aria-hidden="true" />
+
           <div className="wf-editor-toolbar-group" aria-label="Scope variables">
             {/* Left-to-right = scope widens: workflow → team → engine. */}
             <ToolbarButton
@@ -546,10 +594,7 @@ function Editor({ workflow, manifests, onBackToList, onOpenRuns, saving, onSave 
 
           <span className="wf-editor-toolbar-sep" aria-hidden="true" />
 
-          <div className="wf-editor-toolbar-group" aria-label="Run actions">
-            <button className="wf-editor-toolbar-btn" onClick={onOpenRuns} title="Run history">
-              <Ic.Clock size={14} />
-            </button>
+          <div className="wf-editor-toolbar-group" aria-label="Save">
             <button
               className={`wf-editor-toolbar-publish ${unsaved ? "wf-editor-toolbar-publish-dirty" : ""}`}
               onClick={handleSave}
@@ -702,6 +747,27 @@ function Editor({ workflow, manifests, onBackToList, onOpenRuns, saving, onSave 
           )}
         </aside>
       </div>
+
+      {/* In-page run + history (rendered in-tree, inside .acs-root, so RunDetailView's
+          .wf-* styles apply). The input form portals to <body> on its own. */}
+      {runFormOpen && (
+        <RunWorkflowModal
+          workflowName={name}
+          inputs={workflowInputs}
+          pending={runManually.isPending}
+          error={runManually.error instanceof ApiError ? runManually.error.message : null}
+          onRun={(payload) => { void startRun(payload).catch(() => {}); }}
+          onClose={() => setRunFormOpen(false)}
+        />
+      )}
+      {viewerRunId && <RunViewerDialog runId={viewerRunId} onClose={() => setViewerRunId(null)} />}
+      {historyOpen && (
+        <RunHistoryDialog
+          workflowId={workflow.id}
+          onPick={(id) => { setHistoryOpen(false); setViewerRunId(id); }}
+          onClose={() => setHistoryOpen(false)}
+        />
+      )}
     </div>
   );
 }
