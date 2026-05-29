@@ -2,10 +2,10 @@ import { describe, expect, it } from "vitest";
 
 import type { CredentialSummary } from "@/api/types";
 
-import { credentialOwnershipLabel, sortCredentialsByPreference } from "./credentialOrdering";
+import { bindableCredentials, credentialOwnershipLabel, sortCredentialsByPreference } from "./credentialOrdering";
 
-const cred = (id: string, displayName: string, ownership: "Personal" | "TeamService", ownerUserName?: string): CredentialSummary => ({
-  id, teamId: "t", providerInstanceId: "pi", ownership, ownerUserName: ownerUserName ?? null,
+const cred = (id: string, displayName: string, ownership: "Personal" | "TeamService", ownerUserName?: string, ownerUserId?: string): CredentialSummary => ({
+  id, teamId: "t", providerInstanceId: "pi", ownerUserId: ownerUserId ?? null, ownership, ownerUserName: ownerUserName ?? null,
   authType: "GroupAccessToken", displayName, status: "Active", createdDate: "",
 });
 
@@ -40,5 +40,28 @@ describe("credentialOwnershipLabel", () => {
 
   it("falls back to 'Personal' when a personal credential has no owner name", () => {
     expect(credentialOwnershipLabel(cred("1", "x", "Personal"))).toBe("Personal");
+  });
+});
+
+describe("bindableCredentials", () => {
+  it("keeps team-service + the current user's own personal, drops other people's personal", () => {
+    const mine = cred("mine", "My GitLab", "Personal", "Me", "u1");
+    const team = cred("team", "Acme team", "TeamService");          // owner-less
+    const teammate = cred("bob", "Bob's GitLab", "Personal", "Bob", "u2");
+
+    const out = bindableCredentials([mine, team, teammate], "u1");
+    expect(out.map((c) => c.id)).toEqual(["mine", "team"]);
+  });
+
+  it("shows only team-service while the current user is unknown (still loading)", () => {
+    const mine = cred("mine", "My GitLab", "Personal", "Me", "u1");
+    const team = cred("team", "Acme team", "TeamService");
+
+    expect(bindableCredentials([mine, team], undefined).map((c) => c.id)).toEqual(["team"]);
+  });
+
+  it("returns empty when only other people's personal credentials exist", () => {
+    const teammate = cred("bob", "Bob's GitLab", "Personal", "Bob", "u2");
+    expect(bindableCredentials([teammate], "u1")).toEqual([]);
   });
 });

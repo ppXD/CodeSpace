@@ -17,3 +17,13 @@ function rank(credential: CredentialSummary): number {
 export function credentialOwnershipLabel(credential: CredentialSummary): string {
   return credential.ownership === "TeamService" ? "Team service" : credential.ownerUserName ?? "Personal";
 }
+
+/**
+ * Credentials the current user may bind a repo with: the team's shared service credentials
+ * (anyone may use those) plus the user's OWN personal sign-ins. A teammate's personal credential
+ * is never offered — binding the team's repo through someone else's token would run every fetch
+ * and webhook as that person and break the moment they leave.
+ */
+export function bindableCredentials(credentials: readonly CredentialSummary[], currentUserId: string | undefined): CredentialSummary[] {
+  return credentials.filter(c => c.ownership === "TeamService" || (currentUserId != null && c.ownerUserId === currentUserId));
+}
