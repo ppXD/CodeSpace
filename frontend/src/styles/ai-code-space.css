@@ -1833,6 +1833,32 @@ textarea:-webkit-autofill {
   background: #FCEDED; border-color: #F0C6C6; color: #9E3535;
 }
 
+/* Collapsible JSON tree (normalized payload, run outputs, node inputs/outputs).
+   Same card shell as .wf-json; rows fold per object/array via the caret toggle. */
+.acs-root .wf-jsonv {
+  margin: 4px 0 0; padding: 8px 12px;
+  background: var(--panel-2); border: 1px solid var(--line); border-radius: 5px;
+  font-family: inherit; font-size: 11.5px; color: var(--ink-2);
+  overflow: auto; max-height: 320px; line-height: 1.7;
+}
+.acs-root .wf-jsonv-row { white-space: pre-wrap; word-break: break-word; }
+.acs-root .wf-jsonv-children { padding-left: 14px; }
+.acs-root .wf-jsonv-caret {
+  display: inline-block; width: 1.1em; color: var(--muted);
+  font-size: 9px; text-align: left; vertical-align: 1px; flex-shrink: 0;
+}
+.acs-root .wf-jsonv-toggle { cursor: pointer; border-radius: 3px; }
+.acs-root .wf-jsonv-toggle:hover { background: var(--line); }
+.acs-root .wf-jsonv-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.acs-root .wf-jsonv-key { color: var(--ink); }
+.acs-root .wf-jsonv-punc { color: var(--muted); }
+.acs-root .wf-jsonv-str { color: #3F6B47; }
+.acs-root .wf-jsonv-num { color: #2A5485; }
+.acs-root .wf-jsonv-bool { color: #A8590E; }
+.acs-root .wf-jsonv-null { color: var(--muted); font-style: italic; }
+.acs-root .wf-jsonv-ellipsis { color: var(--muted); margin: 0 3px; }
+.acs-root .wf-jsonv-count { color: var(--muted); margin-left: 8px; font-size: 10.5px; }
+
 /* ── Workflow canvas editor (Dify-style three-pane) ───────────────────────────
  * Full-bleed take-over of the ct viewport: top bar (40px), then three columns —
  * palette (220px) | canvas (1fr) | inspector (320px). Inspector collapses under 1100px;
