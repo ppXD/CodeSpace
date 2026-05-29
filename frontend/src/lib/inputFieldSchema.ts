@@ -8,14 +8,23 @@
  * `x-hidden` extension keys the engine ignores.
  */
 
-export type InputFieldType = "text" | "paragraph" | "number" | "select";
+export type InputFieldType = "text" | "paragraph" | "number" | "select" | "boolean";
 
-export const INPUT_FIELD_TYPES: ReadonlyArray<{ value: InputFieldType; label: string }> = [
-  { value: "text", label: "Text" },
-  { value: "paragraph", label: "Paragraph" },
-  { value: "number", label: "Number" },
-  { value: "select", label: "Select" },
+/** JSON Schema primitive each editor type compiles down to (shown as a badge in the picker). */
+export type JsonType = "string" | "number" | "boolean";
+
+export const INPUT_FIELD_TYPES: ReadonlyArray<{ value: InputFieldType; label: string; jsonType: JsonType }> = [
+  { value: "text", label: "Text", jsonType: "string" },
+  { value: "paragraph", label: "Paragraph", jsonType: "string" },
+  { value: "select", label: "Select", jsonType: "string" },
+  { value: "number", label: "Number", jsonType: "number" },
+  { value: "boolean", label: "Checkbox", jsonType: "boolean" },
 ];
+
+/** The JSON primitive a field type compiles to — drives both the schema and the picker badge. */
+export function jsonTypeOf(type: InputFieldType): JsonType {
+  return INPUT_FIELD_TYPES.find((t) => t.value === type)?.jsonType ?? "string";
+}
 
 export interface InputFieldDraft {
   type: InputFieldType;
@@ -27,7 +36,7 @@ export interface InputFieldDraft {
 
 /** Build the per-field JSON Schema for an input field from the editor draft. */
 export function buildFieldSchema(draft: InputFieldDraft): Record<string, unknown> {
-  const schema: Record<string, unknown> = { type: draft.type === "number" ? "number" : "string" };
+  const schema: Record<string, unknown> = { type: jsonTypeOf(draft.type) };
 
   if (draft.type === "paragraph") schema["x-long"] = true;
 
@@ -49,6 +58,7 @@ export function buildFieldSchema(draft: InputFieldDraft): Record<string, unknown
 export function schemaToFieldType(schema: unknown): InputFieldType {
   const s = asObject(schema);
   if (Array.isArray(s.enum)) return "select";
+  if (s.type === "boolean") return "boolean";
   if (s.type === "number" || s.type === "integer") return "number";
   if (s["x-long"] === true) return "paragraph";
   return "text";

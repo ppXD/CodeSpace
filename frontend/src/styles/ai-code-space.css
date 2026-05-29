@@ -2150,6 +2150,41 @@ textarea:-webkit-autofill {
 .mdl .wf-form-check { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--ink-2); cursor: pointer; }
 .mdl .wf-form-check input { margin: 0; flex-shrink: 0; }
 
+/* Generic Claude-style checkbox. Plain browser checkboxes render as a heavy black box in the
+   warm palette (worst on dark mode), so theme every checkbox in the app + modals: --line border
+   + --panel fill, --accent + white tick when checked. More-specific rules (markdown task-list,
+   the trigger match-all) still win, so this only retints the previously-unstyled form/editor
+   checkboxes. */
+.acs-root input[type="checkbox"], .mdl input[type="checkbox"] {
+  appearance: none; -webkit-appearance: none;
+  width: 14px; height: 14px; margin: 0;
+  border: 1px solid var(--line-2); border-radius: 3px;
+  background: var(--panel);
+  position: relative; cursor: pointer; flex-shrink: 0;
+  transition: background .08s ease, border-color .08s ease;
+}
+.acs-root input[type="checkbox"]:hover, .mdl input[type="checkbox"]:hover { border-color: var(--accent); }
+.acs-root input[type="checkbox"]:focus-visible, .mdl input[type="checkbox"]:focus-visible { outline: 2px solid var(--accent-soft); outline-offset: 1px; }
+.acs-root input[type="checkbox"]:checked, .mdl input[type="checkbox"]:checked { background: var(--accent); border-color: var(--accent); }
+.acs-root input[type="checkbox"]:checked::after, .mdl input[type="checkbox"]:checked::after {
+  content: ""; position: absolute;
+  left: 4px; top: 1px; width: 4px; height: 8px;
+  border: solid #fff; border-width: 0 1.5px 1.5px 0;
+  transform: rotate(45deg);
+}
+
+/* Field-type picker: native select + a small JSON-primitive badge (string / number / boolean). */
+.mdl .wf-type-pick { display: flex; align-items: center; gap: 8px; }
+.mdl .wf-type-pick .wf-form-input { flex: 1; }
+.mdl .wf-type-badge { flex-shrink: 0; font-size: 10.5px; color: var(--muted); background: var(--panel-2); border: 1px solid var(--line); border-radius: 4px; padding: 2px 7px; }
+
+/* Select-field options editor (one input row per option + Add). */
+.mdl .wf-opts { display: flex; flex-direction: column; gap: 6px; }
+.mdl .wf-opt-row { display: flex; align-items: center; gap: 6px; }
+.mdl .wf-opt-row .wf-form-input { flex: 1; }
+.mdl .wf-opt-x { min-height: 0; padding: 4px 6px; flex-shrink: 0; }
+.mdl .wf-opt-add { align-self: flex-start; min-height: 0; padding: 5px 8px; gap: 4px; font-size: 11.5px; }
+
 /* Manual-start "Input fields" editor in the node inspector. */
 .acs-root .wf-inputs-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
 .acs-root .wf-inputs-add { min-height: 0; padding: 3px 6px; }

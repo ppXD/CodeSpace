@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   buildFieldSchema,
   isFieldHidden,
+  jsonTypeOf,
   schemaMaxLength,
   schemaOptions,
   schemaToFieldType,
@@ -35,8 +36,23 @@ describe("buildFieldSchema", () => {
     expect(buildFieldSchema({ type: "text", maxLength: 0 })).toEqual({ type: "string" });
   });
 
+  it("checkbox → boolean", () => {
+    expect(buildFieldSchema({ type: "boolean" })).toEqual({ type: "boolean" });
+    expect(buildFieldSchema({ type: "boolean", hidden: true })).toEqual({ type: "boolean", "x-hidden": true });
+  });
+
   it("hidden → x-hidden:true", () => {
     expect(buildFieldSchema({ type: "text", hidden: true })).toEqual({ type: "string", "x-hidden": true });
+  });
+});
+
+describe("jsonTypeOf", () => {
+  it("maps each editor type to its JSON primitive", () => {
+    expect(jsonTypeOf("text")).toBe("string");
+    expect(jsonTypeOf("paragraph")).toBe("string");
+    expect(jsonTypeOf("select")).toBe("string");
+    expect(jsonTypeOf("number")).toBe("number");
+    expect(jsonTypeOf("boolean")).toBe("boolean");
   });
 });
 
@@ -46,6 +62,7 @@ describe("schemaToFieldType", () => {
     expect(schemaToFieldType(buildFieldSchema({ type: "paragraph" }))).toBe("paragraph");
     expect(schemaToFieldType(buildFieldSchema({ type: "number" }))).toBe("number");
     expect(schemaToFieldType(buildFieldSchema({ type: "select", options: ["a"] }))).toBe("select");
+    expect(schemaToFieldType(buildFieldSchema({ type: "boolean" }))).toBe("boolean");
   });
 
   it("treats integer as number and unknown as text", () => {
