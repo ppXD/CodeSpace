@@ -237,7 +237,9 @@ public sealed class ProviderInstanceService : IProviderInstanceService, IScopedD
 
         foreach (var repoId in activeRepoIds)
         {
-            await _binding.UnbindAsync(repoId, cancellationToken).ConfigureAwait(false);
+            // The provider instance is being removed — drop these repos entirely (all project links),
+            // not per-project. projectId: null = full teardown.
+            await _binding.UnbindAsync(repoId, null, cancellationToken).ConfigureAwait(false);
         }
 
         return activeRepoIds.Count;

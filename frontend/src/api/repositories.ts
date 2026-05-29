@@ -36,7 +36,12 @@ export const repositoriesApi = {
     body: JSON.stringify(input),
   }),
 
-  unbind: (repositoryId: string) => fetchJson<void>(`/api/repositories/${repositoryId}`, { method: "DELETE" }),
+  // projectId set → remove only that project's link (the repo survives while other projects use it,
+  // N:M); omitted → remove the repository from the team entirely.
+  unbind: (repositoryId: string, projectId?: string) => {
+    const qs = projectId ? `?projectId=${encodeURIComponent(projectId)}` : "";
+    return fetchJson<void>(`/api/repositories/${repositoryId}${qs}`, { method: "DELETE" });
+  },
 
   // Re-point a repo at another active credential of the same provider — recovery path
   // for the "credential disconnected → repo went Error" cascade. Body field is

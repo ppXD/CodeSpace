@@ -96,7 +96,10 @@ public sealed class RepositoryBindingService : IRepositoryBindingService, IScope
         // Registering CAS + provider idempotency-by-callback-URL together ensure at most
         // one remote hook lands.
         await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
-        await _registrationDispatcher.DispatchAsync(ctx.NewWebhookId, cancellationToken).ConfigureAwait(false);
+
+        // No webhook was created when re-using an already-active repo (only a project link was added).
+        if (!ctx.ReusingActiveRepository)
+            await _registrationDispatcher.DispatchAsync(ctx.NewWebhookId, cancellationToken).ConfigureAwait(false);
 
         return repository;
     }
@@ -115,24 +118,70 @@ public sealed class RepositoryBindingService : IRepositoryBindingService, IScope
         _scopeChecker.EnsureCapability(ctx.Credential, ctx.Instance.Provider, typeof(IWebhookRegistrationCapability));
     }
 
-    public async Task<Unit> UnbindAsync(Guid repositoryId, CancellationToken cancellationToken)
+    /// <summary>
+    /// Unbind a repository. N:M-aware:
+    ///   • <paramref name="projectId"/> given → remove only THAT project's link. If the repo is still
+    ///     in another project, keep the repo + its webhook (only the link goes). If it was the last
+    ///     project, fall through to full teardown.
+    ///   • <paramref name="projectId"/> null → "remove entirely": soft-delete every project link, then
+    ///     tear down webhooks + the repo row (team-level removal).
+    /// </summary>
+    public async Task<Unit> UnbindAsync(Guid repositoryId, Guid? projectId, CancellationToken cancellationToken)
     {
         var repo = await LoadRepositoryAsync(repositoryId, cancellationToken).ConfigureAwait(false);
-        var webhooks = await LoadAllWebhooksAsync(repositoryId, cancellationToken).ConfigureAwait(false);
 
+        if (projectId.HasValue)
+        {
+            var link = await _db.ProjectRepository
+                .SingleOrDefaultAsync(pr => pr.RepositoryId == repositoryId && pr.ProjectId == projectId.Value && pr.DeletedDate == null, cancellationToken)
+                .ConfigureAwait(false)
+                ?? throw new InvalidOperationException($"Repository {repo.FullPath} is not in project {projectId.Value}.");
+
+            link.DeletedDate = DateTimeOffset.UtcNow;
+
+            // Still linked to another project → the repo (and its single webhook) stays; only this link goes.
+            var otherActiveLinks = await _db.ProjectRepository
+                .CountAsync(pr => pr.RepositoryId == repositoryId && pr.ProjectId != projectId.Value && pr.DeletedDate == null, cancellationToken)
+                .ConfigureAwait(false);
+
+            if (otherActiveLinks > 0) return Unit.Value;
+        }
+        else
+        {
+            await SoftDeleteAllProjectLinksAsync(repositoryId, cancellationToken).ConfigureAwait(false);
+        }
+
+        // No active project link remains (or an unscoped removal) → tear the repo + its webhooks down.
+        await TearDownRepositoryAsync(repo, cancellationToken).ConfigureAwait(false);
+        return Unit.Value;
+    }
+
+    private async Task SoftDeleteAllProjectLinksAsync(Guid repositoryId, CancellationToken cancellationToken)
+    {
+        var links = await _db.ProjectRepository
+            .Where(pr => pr.RepositoryId == repositoryId && pr.DeletedDate == null)
+            .ToListAsync(cancellationToken).ConfigureAwait(false);
+
+        var now = DateTimeOffset.UtcNow;
+        foreach (var link in links) link.DeletedDate = now;
+    }
+
+    /// <summary>
+    /// Delete the repo's remote webhooks (best-effort) and soft-delete the row. For Registered rows,
+    /// hard-delete the local record (the remote hook is gone, no audit value). Non-terminal rows
+    /// (Pending / Enqueued / Registering / Failed) CAS to Cancelled so any in-flight registrar /
+    /// dispatcher tick sees the terminal state and no-ops. DeadLettered rows stay for operator triage.
+    /// </summary>
+    private async Task TearDownRepositoryAsync(Repository repo, CancellationToken cancellationToken)
+    {
+        var webhooks = await LoadAllWebhooksAsync(repo.Id, cancellationToken).ConfigureAwait(false);
         var registeredWebhooks = webhooks.Where(w => w.RegistrationStatus == RepositoryWebhookRegistrationStatus.Registered).ToList();
-        await BestEffortDeleteRemoteWebhooksAsync(repo, registeredWebhooks, cancellationToken).ConfigureAwait(false);
 
-        // For Registered rows, hard-delete: the remote hook is gone, no audit value in
-        // keeping the row. For non-terminal rows (Pending / Enqueued / Registering / Failed),
-        // CAS to Cancelled so any in-flight registrar / dispatcher tick that races us sees
-        // the terminal state and no-ops. DeadLettered rows stay as-is for operator triage —
-        // they're already terminal.
-        await CancelNonTerminalWebhooksAsync(repositoryId, cancellationToken).ConfigureAwait(false);
+        await BestEffortDeleteRemoteWebhooksAsync(repo, registeredWebhooks, cancellationToken).ConfigureAwait(false);
+        await CancelNonTerminalWebhooksAsync(repo.Id, cancellationToken).ConfigureAwait(false);
+
         _db.RepositoryWebhook.RemoveRange(registeredWebhooks);
         repo.DeletedDate = DateTimeOffset.UtcNow;
-
-        return Unit.Value;
     }
 
     public async Task<CredentialProbeResult> TestAsync(Guid repositoryId, CancellationToken cancellationToken)
@@ -212,11 +261,12 @@ public sealed class RepositoryBindingService : IRepositoryBindingService, IScope
     /// survive a disconnect / re-OAuth / rebind cycle without becoming orphans.
     ///
     /// Three outcomes:
-    ///   • Active row found at the same identity → throw "already bound" with the existing
-    ///     row's id, so the operator knows what to unbind first.
+    ///   • Active row found at the same identity → RE-USE it (N:M): the repo is already imported,
+    ///     so this bind just attaches it to another project. No metadata mutation, no new webhook —
+    ///     the persist step adds the project link (or rejects if it's already in the target project).
     ///   • Soft-deleted row found → resurrect: clear DeletedDate, re-point to current
     ///     instance + credential, refresh metadata from the remote (path / name / visibility
-    ///     may have changed while unbound), flip back to Active. EF tracks the row already.
+    ///     may have changed while unbound), flip back to Active. Gets a fresh webhook.
     ///   • Nothing found → leave Repository null on the context; the persistence step will
     ///     INSERT a fresh row.
     /// </summary>
@@ -228,18 +278,17 @@ public sealed class RepositoryBindingService : IRepositoryBindingService, IScope
                      && r.ProviderInstance.Provider == ctx.Instance.Provider
                      && r.ProviderInstance.BaseUrl == ctx.Instance.BaseUrl
                      && r.ExternalId == ctx.Remote.ExternalId)
-            // Prefer an active row if one exists (we'll reject it). Otherwise the most-
-            // recently-deleted candidate (in case there are multiple historical bindings).
+            // Prefer an active row (re-use for N:M). Otherwise the most-recently-deleted
+            // candidate (in case there are multiple historical bindings) to resurrect.
             .OrderBy(r => r.DeletedDate == null ? 0 : 1)
             .ThenByDescending(r => r.DeletedDate ?? r.CreatedDate)
             .FirstOrDefaultAsync(cancellationToken).ConfigureAwait(false);
 
-        if (candidate?.DeletedDate == null && candidate != null)
-        {
-            throw new InvalidOperationException($"Repository {ctx.Remote.FullPath} is already bound (id={candidate.Id}). Unbind it first if you want to re-bind.");
-        }
+        if (candidate == null) return ctx with { ExistingRepository = null };
 
-        if (candidate == null) return ctx with { ResurrectedRepository = null };
+        // Already active → re-use as-is (the persist step adds the project link). N:M: the same repo
+        // can belong to many projects, so a second bind is not an error — it's another link.
+        if (candidate.DeletedDate == null) return ctx with { ExistingRepository = candidate, ReusingActiveRepository = true };
 
         candidate.DeletedDate = null;
         candidate.ProviderInstanceId = ctx.Instance.Id;
@@ -248,7 +297,7 @@ public sealed class RepositoryBindingService : IRepositoryBindingService, IScope
         candidate.LastError = null;
         ApplyRemoteMetadata(candidate, ctx.Remote);
 
-        return ctx with { ResurrectedRepository = candidate };
+        return ctx with { ExistingRepository = candidate };
     }
 
     /// <summary>
@@ -294,27 +343,50 @@ public sealed class RepositoryBindingService : IRepositoryBindingService, IScope
     /// </summary>
     private void PersistRepositoryAndPendingWebhook(BindContext ctx, out Repository repository)
     {
-        repository = ctx.ResurrectedRepository ?? BuildRepositoryEntity(ctx);
-        var pendingWebhook = BuildPendingWebhookEntity(ctx, repository.Id);
+        // Re-using an ALREADY-ACTIVE repo that's already in the target project is a true duplicate
+        // (same repo, same project). The picker disables these, so this is a safety net. (Resurrect
+        // never hits this — its links were soft-deleted on unbind; AttachProjectLink revives them.)
+        if (ctx.ReusingActiveRepository && ctx.ExistingTargetLink is { DeletedDate: null })
+            throw new InvalidOperationException($"Repository {ctx.Remote.FullPath} is already in this project.");
 
-        if (ctx.ResurrectedRepository == null) _db.Repository.Add(repository);
-        _db.RepositoryWebhook.Add(pendingWebhook);
+        repository = ctx.ExistingRepository ?? BuildRepositoryEntity(ctx);
 
-        // Attach the project link if it doesn't already exist as active. We need the
-        // pre-loaded list from ctx.ExistingActiveProjectLinks (populated by
-        // ResolveProjectAsync) so EF doesn't double-insert and trip the composite-PK
-        // unique violation.
-        if (!ctx.ExistingActiveProjectLinkProjectIds.Contains(ctx.EffectiveProjectId))
+        if (ctx.ExistingRepository == null) _db.Repository.Add(repository);
+
+        AttachProjectLink(ctx, repository.Id);
+
+        // A re-used active repo already has a registered webhook delivering its events — registering
+        // a second would duplicate deliveries. Only new + resurrected rows need a fresh webhook.
+        if (!ctx.ReusingActiveRepository)
+            _db.RepositoryWebhook.Add(BuildPendingWebhookEntity(ctx, repository.Id));
+    }
+
+    /// <summary>
+    /// Link the repository to the target project: INSERT a fresh row, or — because the composite
+    /// (ProjectId, RepositoryId) PK forbids a duplicate — revive a soft-deleted row from a prior
+    /// membership. An already-active link is left untouched (the resurrect path re-binding to a
+    /// project it never left).
+    /// </summary>
+    private void AttachProjectLink(BindContext ctx, Guid repositoryId)
+    {
+        if (ctx.ExistingTargetLink == null)
         {
             var now = DateTimeOffset.UtcNow;
             _db.ProjectRepository.Add(new ProjectRepository
             {
                 ProjectId = ctx.EffectiveProjectId,
-                RepositoryId = repository.Id,
+                RepositoryId = repositoryId,
                 TeamId = ctx.Request.TeamId,
                 CreatedDate = now,
                 LastModifiedDate = now,
             });
+            return;
+        }
+
+        if (ctx.ExistingTargetLink.DeletedDate != null)
+        {
+            ctx.ExistingTargetLink.DeletedDate = null;
+            ctx.ExistingTargetLink.LastModifiedDate = DateTimeOffset.UtcNow;
         }
     }
 
@@ -368,23 +440,18 @@ public sealed class RepositoryBindingService : IRepositoryBindingService, IScope
             effectiveProjectId = await _projectService.EnsureDefaultProjectAsync(ctx.Request.TeamId, cancellationToken).ConfigureAwait(false);
         }
 
-        // Pre-load active project links for THIS repo (only relevant for resurrected
-        // rows; fresh binds will have a new Guid that's not in the table yet).
-        var existingProjectIds = new HashSet<Guid>();
-        if (ctx.ResurrectedRepository != null)
+        // Load the (target project, repo) link — TRACKED, so persist can resurrect a soft-deleted
+        // one instead of INSERTing a duplicate. Only an existing repo can carry a link; a fresh
+        // bind's new id has none. Composite PK means there's at most one row (active or soft-deleted).
+        ProjectRepository? targetLink = null;
+        if (ctx.ExistingRepository != null)
         {
-            var rows = await _db.ProjectRepository.AsNoTracking()
-                .Where(pr => pr.RepositoryId == ctx.ResurrectedRepository.Id && pr.DeletedDate == null)
-                .Select(pr => pr.ProjectId)
-                .ToListAsync(cancellationToken).ConfigureAwait(false);
-            foreach (var pid in rows) existingProjectIds.Add(pid);
+            targetLink = await _db.ProjectRepository
+                .SingleOrDefaultAsync(pr => pr.RepositoryId == ctx.ExistingRepository.Id && pr.ProjectId == effectiveProjectId, cancellationToken)
+                .ConfigureAwait(false);
         }
 
-        return ctx with
-        {
-            EffectiveProjectId = effectiveProjectId,
-            ExistingActiveProjectLinkProjectIds = existingProjectIds,
-        };
+        return ctx with { EffectiveProjectId = effectiveProjectId, ExistingTargetLink = targetLink };
     }
 
     /// <summary>
@@ -498,11 +565,16 @@ public sealed class RepositoryBindingService : IRepositoryBindingService, IScope
         public RemoteRepository Remote { get; init; } = default!;
 
         /// <summary>
-        /// Set when a previously-unbound row with the same identity exists and we should
-        /// re-use its Id (preserving any FK chain — future PR / review / chat tables).
-        /// Null on first-time binds; persistence INSERTs a new row in that case.
+        /// The existing Repository row this bind re-uses — either an ALREADY-ACTIVE row (the repo is
+        /// imported already; we just attach it to another project, N:M) or a soft-deleted row we
+        /// resurrect. Null on a first-time bind; persistence INSERTs a fresh row then. Re-using a row
+        /// preserves its Id so any FK chain (PR / review / chat) survives.
         /// </summary>
-        public Repository? ResurrectedRepository { get; init; }
+        public Repository? ExistingRepository { get; init; }
+
+        /// <summary>True when <see cref="ExistingRepository"/> was already active — the bind then only
+        /// adds a project link, registering NO new webhook (the existing one already delivers events).</summary>
+        public bool ReusingActiveRepository { get; init; }
 
         /// <summary>
         /// The project the new (or resurrected) repository row will be attached to via the
@@ -513,11 +585,12 @@ public sealed class RepositoryBindingService : IRepositoryBindingService, IScope
         public Guid EffectiveProjectId { get; init; }
 
         /// <summary>
-        /// Project ids that <see cref="ResolveProjectAsync"/> observed as already-active
-        /// links for this repository (only populated for resurrected repos). Persist step
-        /// uses this to skip duplicate INSERTs that would trip the composite-PK uniqueness.
+        /// The existing <c>project_repository</c> row for (<see cref="EffectiveProjectId"/>, repo), if
+        /// any — active OR soft-deleted (composite PK ⇒ at most one). Lets persist resurrect a
+        /// soft-deleted link rather than INSERT a duplicate (PK violation), and detect the
+        /// "already in this project" duplicate. Null when no row exists yet (a fresh link to insert).
         /// </summary>
-        public IReadOnlySet<Guid> ExistingActiveProjectLinkProjectIds { get; init; } = new HashSet<Guid>();
+        public ProjectRepository? ExistingTargetLink { get; init; }
 
         public Guid NewWebhookId { get; init; }
         public string WebhookSecret { get; init; } = default!;

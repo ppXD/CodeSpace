@@ -84,7 +84,7 @@ export function RepositoryListPage({ tab, query, onTabChange, onQueryChange, onO
       destructive: true,
     });
     if (!ok) return;
-    unbind.mutate(r.id);
+    unbind.mutate({ repositoryId: r.id });   // team-level list → remove the repo entirely (all projects)
   };
 
   const rows = repositories.data ?? [];
@@ -256,7 +256,7 @@ export function RepositoryListPage({ tab, query, onTabChange, onQueryChange, onO
                         <button
                           title="Unbind"
                           onClick={e => { e.stopPropagation(); void askUnbind(r); }}
-                          disabled={unbind.isPending && unbind.variables === r.id}
+                          disabled={unbind.isPending && unbind.variables?.repositoryId === r.id}
                         >
                           <Ic.X size={14} />
                         </button>

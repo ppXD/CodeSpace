@@ -10,5 +10,5 @@ public sealed class UnbindRepositoryCommandHandler : IRequestHandler<UnbindRepos
 
     public UnbindRepositoryCommandHandler(IRepositoryBindingService service) { _service = service; }
 
-    public Task<Unit> Handle(UnbindRepositoryCommand request, CancellationToken cancellationToken) => _service.UnbindAsync(request.RepositoryId, cancellationToken);
+    public Task<Unit> Handle(UnbindRepositoryCommand request, CancellationToken cancellationToken) => _service.UnbindAsync(request.RepositoryId, request.ProjectId, cancellationToken);
 }

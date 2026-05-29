@@ -21,6 +21,8 @@ public interface IRepositoryBindingService
     /// </summary>
     Task<BulkBindResult> BindManyAsync(BindRepositoriesBulkRequest request, CancellationToken cancellationToken);
 
-    Task<Unit> UnbindAsync(Guid repositoryId, CancellationToken cancellationToken);
+    /// <summary>Unbind a repository. <paramref name="projectId"/> set → remove only that project's
+    /// link (keeping the repo while other projects still use it, N:M); null → remove entirely.</summary>
+    Task<Unit> UnbindAsync(Guid repositoryId, Guid? projectId, CancellationToken cancellationToken);
     Task<CredentialProbeResult> TestAsync(Guid repositoryId, CancellationToken cancellationToken);
 }
