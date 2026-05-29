@@ -3,9 +3,7 @@ import { createPortal } from "react-dom";
 
 import { ApiError } from "@/api/request";
 import type { CredentialSummary, ProviderInstanceSummary, RemoteRepository, RepositorySummary } from "@/api/types";
-import { AddTeamCredentialModal } from "@/components/credentials/AddTeamCredentialModal";
 import { ACCESSIBLE_REPOS_PAGE_SIZE, useAccessibleRepositoriesForPicker, useCredentials, useProviderInstances } from "@/hooks/use-credentials";
-import { useActiveTeam } from "@/hooks/use-me";
 import { useBindRepositoriesBulk, useRepositories } from "@/hooks/use-repositories";
 import { credentialOwnershipLabel, sortCredentialsByPreference } from "@/lib/credentialOrdering";
 import { repoConnectionState } from "@/lib/repoConnectionState";
@@ -50,10 +48,6 @@ export function AddRepoModal({ onClose, presetProjectId }: AddRepoModalProps) {
   // close React Query refetches the credentials list so any new credential
   // appears in the picker without a manual invalidation step.
   const [connectOpen, setConnectOpen] = useState(false);
-  // Admin-only "Add team credential" (a durable, team-owned GitLab group token).
-  const [teamCredOpen, setTeamCredOpen] = useState(false);
-  const activeRole = useActiveTeam().active?.role;
-  const isTeamAdmin = activeRole === "Owner" || activeRole === "Admin";
 
   // Search box value (raw, every keystroke) vs the debounced value we actually
   // send to the backend. 300ms strikes the usual balance between responsiveness
@@ -165,7 +159,7 @@ export function AddRepoModal({ onClose, presetProjectId }: AddRepoModalProps) {
           the Cancel button, or Escape closes the modal. */}
       <div className="mdl-mask" />
       <div className="mdl" role="dialog" aria-modal="true">
-        {step === "credential" && <CredentialStep credentials={sortCredentialsByPreference(activeCredentials)} instances={instanceById} loading={credentials.isLoading || instances.isLoading} error={credentials.error ?? instances.error} onPick={choose} onClose={onClose} onOpenConnect={() => setConnectOpen(true)} isTeamAdmin={isTeamAdmin} onAddTeamCredential={() => setTeamCredOpen(true)} />}
+        {step === "credential" && <CredentialStep credentials={sortCredentialsByPreference(activeCredentials)} instances={instanceById} loading={credentials.isLoading || instances.isLoading} error={credentials.error ?? instances.error} onPick={choose} onClose={onClose} onOpenConnect={() => setConnectOpen(true)} />}
 
         {step === "picker" && picked && pickedInstance && (
           <PickerStep
@@ -204,9 +198,6 @@ export function AddRepoModal({ onClose, presetProjectId }: AddRepoModalProps) {
           .mdl z-index 81 and the later DOM wins → the inner overlay appears above
           the AddRepo modal until dismissed. */}
       {connectOpen && <ConnectRemoteModal onClose={() => setConnectOpen(false)} />}
-      {/* Add-team-credential modal, stacked like ConnectRemoteModal. On success the hook
-          invalidates ["credentials"], so the new team-service credential appears + sorts to top. */}
-      {teamCredOpen && <AddTeamCredentialModal instances={instances.data ?? []} onClose={() => setTeamCredOpen(false)} onAdded={() => setTeamCredOpen(false)} />}
     </>,
     document.body,
   );
@@ -222,14 +213,13 @@ interface CredentialStepProps {
   onPick: (c: CredentialSummary) => void;
   onClose: () => void;
   /** Opens ConnectRemoteModal stacked on top of this modal so the operator can add
-   *  a new OAuth credential without losing the in-progress Add Repository flow. */
+   *  a new OAuth credential — or a team service token — without losing the in-progress
+   *  Add Repository flow. Credential *creation* lives in that Providers modal; this step
+   *  only picks from what already exists. */
   onOpenConnect: () => void;
-  /** Team admins can add a durable, team-owned credential (GitLab group token). */
-  isTeamAdmin: boolean;
-  onAddTeamCredential: () => void;
 }
 
-function CredentialStep({ credentials, instances, loading, error, onPick, onClose, onOpenConnect, isTeamAdmin, onAddTeamCredential }: CredentialStepProps) {
+function CredentialStep({ credentials, instances, loading, error, onPick, onClose, onOpenConnect }: CredentialStepProps) {
   const showInlineAction = !loading && !(error instanceof Error) && credentials.length > 0;
   return (
     <>
@@ -250,11 +240,6 @@ function CredentialStep({ credentials, instances, loading, error, onPick, onClos
             <button className="btn" onClick={onOpenConnect}>
               <Ic.Plus size={14} /> Connect new remote
             </button>
-            {isTeamAdmin && (
-              <button className="btn" onClick={onAddTeamCredential} title="A team-owned GitLab token that survives anyone leaving">
-                <Ic.Plus size={14} /> Add team credential
-              </button>
-            )}
           </div>
         )}
 
@@ -279,11 +264,6 @@ function CredentialStep({ credentials, instances, loading, error, onPick, onClos
             <button className="btn btn-primary" onClick={onOpenConnect}>
               <Ic.Link size={14} /> Connect remote
             </button>
-            {isTeamAdmin && (
-              <button className="btn" style={{ marginLeft: 8 }} onClick={onAddTeamCredential}>
-                <Ic.Plus size={14} /> Add team credential
-              </button>
-            )}
           </div>
         )}
 
@@ -422,7 +402,9 @@ function PickerStep({ credential, instance, page, totalPages, onPageChange, page
           {error instanceof ApiError && (
             <div className="cn-banner cn-banner-err">
               <div className="cn-banner-h">
-                {error.code === "oauth_insufficient_scope" ? "Missing OAuth scope" : "Provider call failed"}
+                {error.code === "oauth_insufficient_scope" ? "Missing OAuth scope"
+                  : error.code === "provider_unauthorized" ? "Credential rejected"
+                    : "Provider call failed"}
               </div>
               <div className="cn-banner-p">{error.message}</div>
               {/* Structured scope detail when the backend told us exactly what's missing. The
