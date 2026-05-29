@@ -63,7 +63,9 @@ export function AddRepoModal({ onClose, presetProjectId }: AddRepoModalProps) {
 
   const credentials = useCredentials();
   const instances = useProviderInstances();
-  const existing = useRepositories(picked?.providerInstanceId);
+  // "Already added" is scoped to the TARGET project, not the whole team — N:M means a repo in another
+  // project is still addable here. Without a preset project the bind lands in Default, so scope to that.
+  const existing = useRepositories({ providerInstanceId: picked?.providerInstanceId, projectId: presetProjectId });
   const bind = useBindRepositoriesBulk();
 
   useEffect(() => {

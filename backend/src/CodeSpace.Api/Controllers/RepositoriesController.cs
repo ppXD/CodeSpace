@@ -50,9 +50,9 @@ public class RepositoriesController : ControllerBase
     }
 
     [HttpDelete("{repositoryId:guid}")]
-    public async Task<IActionResult> Unbind([FromRoute] Guid repositoryId, CancellationToken cancellationToken)
+    public async Task<IActionResult> Unbind([FromRoute] Guid repositoryId, [FromQuery] Guid? projectId, CancellationToken cancellationToken)
     {
-        await _mediator.Send(new UnbindRepositoryCommand { RepositoryId = repositoryId }, cancellationToken).ConfigureAwait(false);
+        await _mediator.Send(new UnbindRepositoryCommand { RepositoryId = repositoryId, ProjectId = projectId }, cancellationToken).ConfigureAwait(false);
         return NoContent();
     }
 

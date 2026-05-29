@@ -79,8 +79,14 @@ export function useBindRepositoriesBulk() {
 export function useUnbindRepository() {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: (repositoryId: string) => repositoriesApi.unbind(repositoryId),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["repositories"] }),
+    // projectId set → remove from that project only (N:M); omitted → remove from the team entirely.
+    mutationFn: ({ repositoryId, projectId }: { repositoryId: string; projectId?: string }) => repositoriesApi.unbind(repositoryId, projectId),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["repositories"] });
+      // The per-project repo count + the project detail change too.
+      queryClient.invalidateQueries({ queryKey: ["projects"] });
+      queryClient.invalidateQueries({ queryKey: ["project"] });
+    },
   });
 }
 

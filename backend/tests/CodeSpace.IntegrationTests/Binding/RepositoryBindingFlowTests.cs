@@ -6,6 +6,7 @@ using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.IntegrationTests.Infrastructure.Jobs;
 using CodeSpace.Messages.Commands.Credentials;
 using CodeSpace.Messages.Commands.ProviderInstances;
+using CodeSpace.Messages.Commands.Projects;
 using CodeSpace.Messages.Commands.Repositories;
 using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Credentials;
@@ -82,8 +83,10 @@ public class RepositoryBindingFlowTests
     }
 
     [Fact]
-    public async Task Bind_twice_for_same_repo_throws_already_bound()
+    public async Task Bind_into_the_same_project_twice_throws()
     {
+        // N:M allows the same repo in DIFFERENT projects, but a duplicate bind into the SAME project
+        // (here both default, no ProjectId) is still a no-op error — the repo is already in it.
         var (teamId, providerInstanceId, credentialId) = await SeedBindablePrerequisitesAsync().ConfigureAwait(false);
         var identifier = $"acme/api-{Guid.NewGuid():N}";
 
@@ -109,6 +112,121 @@ public class RepositoryBindingFlowTests
 
         await act.ShouldThrowAsync<InvalidOperationException>().ConfigureAwait(false);
     }
+
+    [Fact]
+    public async Task Bind_same_repo_into_a_second_project_adds_a_link_and_reuses_the_webhook()
+    {
+        // The reported bug: a repo already in one project couldn't be added to another. N:M now lets
+        // it — the second bind reuses the SAME repository row + its single webhook, adding a link only.
+        var (teamId, providerInstanceId, credentialId) = await SeedBindablePrerequisitesAsync().ConfigureAwait(false);
+        var identifier = $"acme/shared-{Guid.NewGuid():N}";
+
+        Guid projectA, projectB, repoIdA, repoIdB;
+        using (var scope = _fixture.BeginScopeAs(Guid.NewGuid(), teamId, Roles.Admin))
+        {
+            var mediator = scope.Resolve<IMediator>();
+            projectA = await mediator.Send(new CreateProjectCommand { Name = $"A-{Guid.NewGuid():N}" }).ConfigureAwait(false);
+            projectB = await mediator.Send(new CreateProjectCommand { Name = $"B-{Guid.NewGuid():N}" }).ConfigureAwait(false);
+
+            var first = await mediator.Send(BulkBind(providerInstanceId, credentialId, identifier, projectA)).ConfigureAwait(false);
+            var second = await mediator.Send(BulkBind(providerInstanceId, credentialId, identifier, projectB)).ConfigureAwait(false);
+
+            repoIdA = first.Items[0].RepositoryId!.Value;
+            repoIdB = second.Items[0].RepositoryId!.Value;
+        }
+
+        await DrainBackgroundJobsAsync().ConfigureAwait(false);
+
+        repoIdB.ShouldBe(repoIdA, customMessage: "Binding the same repo to a second project must reuse the same repository row, not create a new one.");
+
+        using var verify = _fixture.BeginScope();
+        var db = verify.Resolve<CodeSpaceDbContext>();
+
+        var webhookCount = await db.RepositoryWebhook.CountAsync(w => w.RepositoryId == repoIdA).ConfigureAwait(false);
+        webhookCount.ShouldBe(1, customMessage: "The second bind must NOT register a duplicate webhook — one repo, one webhook.");
+
+        var linkedProjectIds = await db.ProjectRepository.AsNoTracking()
+            .Where(pr => pr.RepositoryId == repoIdA && pr.DeletedDate == null)
+            .Select(pr => pr.ProjectId)
+            .ToListAsync().ConfigureAwait(false);
+        linkedProjectIds.Count.ShouldBe(2);
+        linkedProjectIds.ShouldContain(projectA);
+        linkedProjectIds.ShouldContain(projectB);
+    }
+
+    [Fact]
+    public async Task Unbind_from_one_project_keeps_the_repo_while_another_project_still_uses_it()
+    {
+        var (teamId, providerInstanceId, credentialId) = await SeedBindablePrerequisitesAsync().ConfigureAwait(false);
+        var identifier = $"acme/two-projects-{Guid.NewGuid():N}";
+
+        Guid projectA, projectB, repoId;
+        using (var scope = _fixture.BeginScopeAs(Guid.NewGuid(), teamId, Roles.Admin))
+        {
+            var mediator = scope.Resolve<IMediator>();
+            projectA = await mediator.Send(new CreateProjectCommand { Name = $"A-{Guid.NewGuid():N}" }).ConfigureAwait(false);
+            projectB = await mediator.Send(new CreateProjectCommand { Name = $"B-{Guid.NewGuid():N}" }).ConfigureAwait(false);
+            repoId = (await mediator.Send(BulkBind(providerInstanceId, credentialId, identifier, projectA)).ConfigureAwait(false)).Items[0].RepositoryId!.Value;
+            await mediator.Send(BulkBind(providerInstanceId, credentialId, identifier, projectB)).ConfigureAwait(false);
+        }
+
+        await DrainBackgroundJobsAsync().ConfigureAwait(false);
+
+        using (var scope = _fixture.BeginScopeAs(Guid.NewGuid(), teamId, Roles.Admin))
+            await scope.Resolve<IMediator>().Send(new UnbindRepositoryCommand { RepositoryId = repoId, ProjectId = projectA }).ConfigureAwait(false);
+
+        using var verify = _fixture.BeginScope();
+        var db = verify.Resolve<CodeSpaceDbContext>();
+
+        var repo = await db.Repository.AsNoTracking().SingleAsync(r => r.Id == repoId).ConfigureAwait(false);
+        repo.DeletedDate.ShouldBeNull(customMessage: "The repo must survive — it's still in project B.");
+
+        var webhookCount = await db.RepositoryWebhook.CountAsync(w => w.RepositoryId == repoId).ConfigureAwait(false);
+        webhookCount.ShouldBe(1, customMessage: "The webhook must stay while any project still uses the repo.");
+
+        var activeLinks = await db.ProjectRepository.AsNoTracking()
+            .Where(pr => pr.RepositoryId == repoId && pr.DeletedDate == null)
+            .Select(pr => pr.ProjectId)
+            .ToListAsync().ConfigureAwait(false);
+        activeLinks.ShouldBe(new[] { projectB });
+    }
+
+    [Fact]
+    public async Task Unbind_from_the_last_project_deletes_the_repo_and_its_webhook()
+    {
+        var (teamId, providerInstanceId, credentialId) = await SeedBindablePrerequisitesAsync().ConfigureAwait(false);
+        var identifier = $"acme/last-link-{Guid.NewGuid():N}";
+
+        Guid projectA, repoId;
+        using (var scope = _fixture.BeginScopeAs(Guid.NewGuid(), teamId, Roles.Admin))
+        {
+            var mediator = scope.Resolve<IMediator>();
+            projectA = await mediator.Send(new CreateProjectCommand { Name = $"A-{Guid.NewGuid():N}" }).ConfigureAwait(false);
+            repoId = (await mediator.Send(BulkBind(providerInstanceId, credentialId, identifier, projectA)).ConfigureAwait(false)).Items[0].RepositoryId!.Value;
+        }
+
+        await DrainBackgroundJobsAsync().ConfigureAwait(false);
+
+        using (var scope = _fixture.BeginScopeAs(Guid.NewGuid(), teamId, Roles.Admin))
+            await scope.Resolve<IMediator>().Send(new UnbindRepositoryCommand { RepositoryId = repoId, ProjectId = projectA }).ConfigureAwait(false);
+
+        using var verify = _fixture.BeginScope();
+        var db = verify.Resolve<CodeSpaceDbContext>();
+
+        var repo = await db.Repository.AsNoTracking().SingleAsync(r => r.Id == repoId).ConfigureAwait(false);
+        repo.DeletedDate.ShouldNotBeNull(customMessage: "Removing the last project link must tear the repo down.");
+
+        var webhookCount = await db.RepositoryWebhook.CountAsync(w => w.RepositoryId == repoId).ConfigureAwait(false);
+        webhookCount.ShouldBe(0, customMessage: "The webhook must be removed when the repo's last project link goes.");
+    }
+
+    private static BindRepositoriesBulkCommand BulkBind(Guid providerInstanceId, Guid credentialId, string identifier, Guid projectId) => new()
+    {
+        ProviderInstanceId = providerInstanceId,
+        CredentialId = credentialId,
+        ProjectIdentifiers = new[] { identifier },
+        ProjectId = projectId,
+    };
 
     [Fact]
     public async Task Unbind_soft_deletes_repository_and_removes_webhooks()

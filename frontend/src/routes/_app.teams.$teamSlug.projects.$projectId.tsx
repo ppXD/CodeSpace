@@ -78,13 +78,13 @@ function ProjectDetailPage() {
 
   const askUnbind = async (r: RepositorySummary) => {
     const ok = await confirm({
-      title: `Unbind ${r.fullPath}?`,
-      message: "The repository will be removed from CodeSpace and its remote webhook deleted (best-effort). The repo on the provider isn't touched.",
-      confirmLabel: "Unbind",
+      title: `Remove ${r.fullPath} from this project?`,
+      message: "It stays available to any other project that uses it; its remote webhook is removed only when no project uses it anymore. The repo on the provider isn't touched.",
+      confirmLabel: "Remove",
       destructive: true,
     });
     if (!ok) return;
-    unbind.mutate(r.id);
+    unbind.mutate({ repositoryId: r.id, projectId });
   };
 
   if (projectQuery.isLoading) {
@@ -244,9 +244,9 @@ function ProjectDetailPage() {
                               <Ic.Folder size={13} />
                             </button>
                             <button
-                              title="Unbind"
+                              title="Remove from this project"
                               onClick={e => { e.stopPropagation(); void askUnbind(r); }}
-                              disabled={unbind.isPending && unbind.variables === r.id}
+                              disabled={unbind.isPending && unbind.variables?.repositoryId === r.id}
                             >
                               <Ic.X size={13} />
                             </button>

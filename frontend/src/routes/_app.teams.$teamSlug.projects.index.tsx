@@ -6,7 +6,7 @@ import { slugifyProjectName } from "@/api/projects";
 import type { CredentialSummary, RemoteRepository } from "@/api/types";
 import { useCredentials, useProviderInstances, useAccessibleRepositoriesForPicker } from "@/hooks/use-credentials";
 import { useCreateProject, useProjects } from "@/hooks/use-projects";
-import { useBindRepositoriesBulk, useRepositories } from "@/hooks/use-repositories";
+import { useBindRepositoriesBulk } from "@/hooks/use-repositories";
 // ConnectRemoteModal is now invoked from inside the Import-from-repository flow
 // (see ImportStep below) where it's contextually needed, rather than as a page-level
 // action on the Projects header. Connecting a remote is an auth-setup task, not a
@@ -354,10 +354,8 @@ function ImportStep({ onBack, onClose, onCreated }: { onBack: () => void; onClos
 
   const credentials = useCredentials();
   const instances = useProviderInstances();
-  const existingRepos = useRepositories(picked?.providerInstanceId);
   const instanceById = useMemo(() => new Map((instances.data ?? []).map(i => [i.id, i])), [instances.data]);
   const activeCredentials = useMemo(() => (credentials.data ?? []).filter(c => c.status === "Active"), [credentials.data]);
-  const boundFullPaths = useMemo(() => new Set((existingRepos.data ?? []).map(r => r.fullPath)), [existingRepos.data]);
   const pickedInstance = picked ? instanceById.get(picked.providerInstanceId) : null;
 
   const accessible = useAccessibleRepositoriesForPicker(picked?.id ?? null, pickedInstance?.provider ?? null, page, debouncedQuery);
@@ -489,24 +487,18 @@ function ImportStep({ onBack, onClose, onCreated }: { onBack: () => void; onClos
 
           {!showFirstLoadPanel && !accessible.error && (
             <div className="pick-list" data-stale={accessible.isRefetching}>
-              {accessible.pageItems.map((repo: RemoteRepository) => {
-                const alreadyBound = boundFullPaths.has(repo.fullPath);
-                return (
-                  <button
-                    key={repo.externalId}
-                    className="pick-row"
-                    disabled={alreadyBound}
-                    onClick={() => !alreadyBound && chooseRepo(repo)}
-                  >
-                    <ProviderMark provider={pickedInstance.provider} size={22} />
-                    <div className="pick-row-meta">
-                      <div className="pick-row-name">{repo.name}</div>
-                      <div className="pick-row-sub">{repo.fullPath} · {repo.visibility.toLowerCase()}</div>
-                    </div>
-                    {alreadyBound ? <span className="pick-row-tag">already bound</span> : <Ic.ChevronRight size={14} />}
-                  </button>
-                );
-              })}
+              {/* No "already bound" disable here: this step CREATES a new project, so no repo can
+                  already be in it. A repo bound to other projects is fair game — N:M binding. */}
+              {accessible.pageItems.map((repo: RemoteRepository) => (
+                <button key={repo.externalId} className="pick-row" onClick={() => chooseRepo(repo)}>
+                  <ProviderMark provider={pickedInstance.provider} size={22} />
+                  <div className="pick-row-meta">
+                    <div className="pick-row-name">{repo.name}</div>
+                    <div className="pick-row-sub">{repo.fullPath} · {repo.visibility.toLowerCase()}</div>
+                  </div>
+                  <Ic.ChevronRight size={14} />
+                </button>
+              ))}
 
               {accessible.pageItems.length === 0 && (
                 <div style={{ padding: 24, textAlign: "center", color: "var(--muted)", fontSize: 12.5 }}>
