@@ -2356,6 +2356,12 @@ textarea:-webkit-autofill {
  * input. Today: repository picker. Future: credential picker, branch picker, etc.
  * Trigger button reads like a Dify input row, popover shows a filtered list. */
 
+/* Project→repo cascade for a "repository" input field. Scoped under both .acs-root (inspector)
+   and .mdl (the run form is a portaled modal) so the two stacked dropdowns lay out either place. */
+.acs-root .wf-repo-pick, .mdl .wf-repo-pick { display: flex; flex-direction: column; gap: 8px; }
+.acs-root .wf-repo-pick-field, .mdl .wf-repo-pick-field { display: flex; flex-direction: column; gap: 3px; }
+.acs-root .wf-repo-pick-label, .mdl .wf-repo-pick-label { font-size: 10.5px; font-weight: 500; color: var(--muted); }
+
 .acs-root .wf-selector { position: relative; width: 100%; }
 .acs-root .wf-selector-trigger {
   width: 100%; box-sizing: border-box;

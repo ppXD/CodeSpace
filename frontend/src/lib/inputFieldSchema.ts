@@ -8,7 +8,7 @@
  * `x-hidden` extension keys the engine ignores.
  */
 
-export type InputFieldType = "text" | "paragraph" | "number" | "select" | "boolean";
+export type InputFieldType = "text" | "paragraph" | "number" | "select" | "boolean" | "repository";
 
 /** JSON Schema primitive each editor type compiles down to (shown as a badge in the picker). */
 export type JsonType = "string" | "number" | "boolean";
@@ -19,6 +19,9 @@ export const INPUT_FIELD_TYPES: ReadonlyArray<{ value: InputFieldType; label: st
   { value: "select", label: "Select", jsonType: "string" },
   { value: "number", label: "Number", jsonType: "number" },
   { value: "boolean", label: "Checkbox", jsonType: "boolean" },
+  // A repository id chosen at run time via the project→repo picker. Stored as a plain string
+  // (the repo UUID), so the engine sees an ordinary `{{input.<name>}}` string.
+  { value: "repository", label: "Repository", jsonType: "string" },
 ];
 
 /** The JSON primitive a field type compiles to — drives both the schema and the picker badge. */
@@ -37,6 +40,9 @@ export interface InputFieldDraft {
 /** Build the per-field JSON Schema for an input field from the editor draft. */
 export function buildFieldSchema(draft: InputFieldDraft): Record<string, unknown> {
   const schema: Record<string, unknown> = { type: jsonTypeOf(draft.type) };
+
+  // A repository field is a string id rendered by the project→repo picker (x-selector dispatch).
+  if (draft.type === "repository") schema["x-selector"] = "repository";
 
   if (draft.type === "paragraph") schema["x-long"] = true;
 
@@ -57,6 +63,7 @@ export function buildFieldSchema(draft: InputFieldDraft): Record<string, unknown
 /** Infer the editor field type from a stored schema (for editing an existing input). */
 export function schemaToFieldType(schema: unknown): InputFieldType {
   const s = asObject(schema);
+  if (s["x-selector"] === "repository") return "repository";
   if (Array.isArray(s.enum)) return "select";
   if (s.type === "boolean") return "boolean";
   if (s.type === "number" || s.type === "integer") return "number";

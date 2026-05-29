@@ -41,6 +41,11 @@ describe("buildFieldSchema", () => {
     expect(buildFieldSchema({ type: "boolean", hidden: true })).toEqual({ type: "boolean", "x-hidden": true });
   });
 
+  it("repository → string with x-selector (renders the project→repo picker)", () => {
+    expect(buildFieldSchema({ type: "repository" })).toEqual({ type: "string", "x-selector": "repository" });
+    expect(buildFieldSchema({ type: "repository", hidden: true })).toEqual({ type: "string", "x-selector": "repository", "x-hidden": true });
+  });
+
   it("hidden → x-hidden:true", () => {
     expect(buildFieldSchema({ type: "text", hidden: true })).toEqual({ type: "string", "x-hidden": true });
   });
@@ -53,6 +58,7 @@ describe("jsonTypeOf", () => {
     expect(jsonTypeOf("select")).toBe("string");
     expect(jsonTypeOf("number")).toBe("number");
     expect(jsonTypeOf("boolean")).toBe("boolean");
+    expect(jsonTypeOf("repository")).toBe("string");
   });
 });
 
@@ -63,6 +69,7 @@ describe("schemaToFieldType", () => {
     expect(schemaToFieldType(buildFieldSchema({ type: "number" }))).toBe("number");
     expect(schemaToFieldType(buildFieldSchema({ type: "select", options: ["a"] }))).toBe("select");
     expect(schemaToFieldType(buildFieldSchema({ type: "boolean" }))).toBe("boolean");
+    expect(schemaToFieldType(buildFieldSchema({ type: "repository" }))).toBe("repository");
   });
 
   it("treats integer as number and unknown as text", () => {

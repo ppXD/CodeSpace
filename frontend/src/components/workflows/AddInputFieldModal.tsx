@@ -167,6 +167,13 @@ export function AddInputFieldModal({ initial, takenNames, onSave, onClose }: Add
               </div>
             )}
 
+            {type === "repository" && (
+              <div className="wf-form-row">
+                <span className="wf-form-help">The runner picks a project, then a repository; its id is passed as the value.</span>
+              </div>
+            )}
+
+            {type !== "repository" && (
             <div className="wf-form-row">
               <span className="wf-form-label">Default value</span>
               {type === "boolean" ? (
@@ -194,6 +201,7 @@ export function AddInputFieldModal({ initial, takenNames, onSave, onClose }: Add
                 />
               )}
             </div>
+            )}
 
             <label className="wf-form-check">
               <input type="checkbox" checked={required} onChange={(e) => setRequired(e.target.checked)} />
@@ -226,6 +234,8 @@ function defaultToString(value: unknown): string {
 
 /** Compute the typed default value for the WorkflowVariable from the per-type editor state. */
 function resolveDefault(type: InputFieldType, text: string, bool: "" | "true" | "false", options: string[]): unknown {
+  if (type === "repository") return undefined;
+
   if (type === "boolean") return bool === "" ? undefined : bool === "true";
 
   if (type === "select") return options.includes(text) ? text : undefined;
