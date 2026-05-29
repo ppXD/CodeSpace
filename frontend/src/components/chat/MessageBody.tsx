@@ -7,7 +7,7 @@ import { parseMessageBody } from "@/lib/messageReferences";
  * convention — a leading <c>@</c> for <c>user</c> refs. A user ref with no cached label resolves
  * its display name from the member map; any other type shows its label (or raw refId fallback).
  */
-export function MessageBody({ body, members }: { body: string; members: Map<string, TeamMemberSummary> }) {
+export function MessageBody({ body, members, myUserId }: { body: string; members: Map<string, TeamMemberSummary>; myUserId: string | null }) {
   const segments = parseMessageBody(body);
 
   return (
@@ -16,7 +16,13 @@ export function MessageBody({ body, members }: { body: string; members: Map<stri
         seg.kind === "text" ? (
           <span key={i}>{seg.text}</span>
         ) : (
-          <span key={i} className="chat-ref" data-ref-type={seg.refType} title={`${seg.refType}:${seg.refId}`}>
+          <span
+            key={i}
+            className="chat-ref"
+            data-ref-type={seg.refType}
+            data-me={seg.refType === "user" && seg.refId === myUserId ? "true" : undefined}
+            title={`${seg.refType}:${seg.refId}`}
+          >
             {seg.refType === "user" ? "@" : ""}
             {resolveDisplay(seg.refType, seg.refId, seg.label, members)}
           </span>

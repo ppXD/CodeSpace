@@ -428,7 +428,7 @@ public class ConversationServiceFlowTests
         row.LastMessage.ShouldNotBeNull();
         row.LastMessage!.AuthorUserId.ShouldBe(owner);
         row.LastMessage.IsDeleted.ShouldBeFalse();
-        row.LastMessage.Preview.ShouldBe("hi Alice welcome", customMessage: "Preview must strip reference tokens to their labels.");
+        row.LastMessage.Preview.ShouldBe("hi @Alice welcome", customMessage: "Preview must strip reference tokens to their labels, keeping the @ on a user mention.");
         row.LastActivityDate.ShouldBe(row.LastMessage.CreatedDate);
     }
 
@@ -494,6 +494,47 @@ public class ConversationServiceFlowTests
 
         row.LastMessage.ShouldBeNull();
         row.LastActivityDate.ShouldBe(row.CreatedDate, customMessage: "With no messages, last activity falls back to the conversation's creation.");
+    }
+
+    [Fact]
+    public async Task ListForUser_flags_a_last_message_that_at_mentions_the_viewer()
+    {
+        var (teamId, owner) = await SeedTeamAsync();
+        var other = await SeedUserAsync();
+        var channelId = await SeedChannelAsync(teamId, owner, "general");
+
+        using (var scope = _fixture.BeginScope())
+            await scope.Resolve<IConversationService>().AddMemberAsync(teamId, owner, channelId, other, default);
+
+        // `other` posts a message that @-mentions the owner — via the real service, so the reference
+        // reverse index records (user, owner). The list flag reads off that index, not the body.
+        using (var scope = _fixture.BeginScope())
+            await scope.Resolve<IMessageService>().PostAsync(teamId, other, channelId, $"hey <user:{owner}|Owner> look", null, default);
+
+        using var verify = _fixture.BeginScope();
+        var row = (await verify.Resolve<IConversationService>().ListForUserAsync(teamId, owner, default)).Single(c => c.Id == channelId);
+
+        row.LastMessage!.MentionsViewer.ShouldBeTrue(customMessage: "A last message mentioning the viewer must flag the row.");
+    }
+
+    [Fact]
+    public async Task ListForUser_does_not_flag_a_last_message_that_mentions_someone_else()
+    {
+        var (teamId, owner) = await SeedTeamAsync();
+        var other = await SeedUserAsync();
+        var channelId = await SeedChannelAsync(teamId, owner, "general");
+
+        using (var scope = _fixture.BeginScope())
+            await scope.Resolve<IConversationService>().AddMemberAsync(teamId, owner, channelId, other, default);
+
+        // The owner mentions `other`; from the owner's own list view that's not a mention OF them.
+        using (var scope = _fixture.BeginScope())
+            await scope.Resolve<IMessageService>().PostAsync(teamId, owner, channelId, $"hi <user:{other}|Other>", null, default);
+
+        using var verify = _fixture.BeginScope();
+        var row = (await verify.Resolve<IConversationService>().ListForUserAsync(teamId, owner, default)).Single(c => c.Id == channelId);
+
+        row.LastMessage!.MentionsViewer.ShouldBeFalse(customMessage: "A mention of someone else must not flag the viewer's row.");
     }
 
     // ─── Helpers ───────────────────────────────────────────────────────────────────

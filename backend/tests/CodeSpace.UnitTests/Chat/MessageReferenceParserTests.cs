@@ -151,9 +151,9 @@ public class MessageReferenceParserTests
     }
 
     [Fact]
-    public void ToPlainText_replaces_a_token_with_its_label_keeping_surrounding_text()
+    public void ToPlainText_replaces_a_user_token_with_its_at_prefixed_label_keeping_surrounding_text()
     {
-        MessageReferenceParser.ToPlainText("Hello <user:u1|Alice>, welcome!").ShouldBe("Hello Alice, welcome!");
+        MessageReferenceParser.ToPlainText("Hello <user:u1|Alice>, welcome!").ShouldBe("Hello @Alice, welcome!");
     }
 
     [Fact]
@@ -163,9 +163,16 @@ public class MessageReferenceParserTests
     }
 
     [Fact]
-    public void ToPlainText_replaces_every_token()
+    public void ToPlainText_prefixes_only_user_mentions_with_an_at_sign()
     {
+        // The '@' is the user-mention sigil; other ref types render their label bare.
         MessageReferenceParser.ToPlainText("<user:u1|Alice> and <workflow:w9|Deploy> done")
-            .ShouldBe("Alice and Deploy done");
+            .ShouldBe("@Alice and Deploy done");
+    }
+
+    [Fact]
+    public void ToPlainText_at_prefixes_an_unlabelled_user_mention_too()
+    {
+        MessageReferenceParser.ToPlainText("ping <user:u1>").ShouldBe("ping @u1");
     }
 }

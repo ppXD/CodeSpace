@@ -110,7 +110,7 @@ public sealed class ConversationService : IConversationService, IScopedDependenc
         var summaries = await QuerySummaries(c => c.TeamId == teamId && conversationIds.Contains(c.Id) && c.DeletedDate == null)
             .ToListAsync(cancellationToken).ConfigureAwait(false);
 
-        var previews = await LoadLastMessagesAsync(teamId, conversationIds, cancellationToken).ConfigureAwait(false);
+        var previews = await LoadLastMessagesAsync(teamId, userId, conversationIds, cancellationToken).ConfigureAwait(false);
 
         return summaries
             .Select(s => previews.TryGetValue(s.Id, out var preview) ? s with { LastMessage = preview, LastActivityDate = preview.CreatedDate } : s)
@@ -250,7 +250,7 @@ public sealed class ConversationService : IConversationService, IScopedDependenc
     /// LEFT(body, …) ships only enough for a preview — never whole 16k bodies — so this stays cheap
     /// no matter how long the messages are. Keyed by conversation id for the merge.
     /// </summary>
-    private async Task<Dictionary<Guid, MessagePreview>> LoadLastMessagesAsync(Guid teamId, List<Guid> conversationIds, CancellationToken cancellationToken)
+    private async Task<Dictionary<Guid, MessagePreview>> LoadLastMessagesAsync(Guid teamId, Guid viewerId, List<Guid> conversationIds, CancellationToken cancellationToken)
     {
         const string sql =
             "SELECT DISTINCT ON (conversation_id) "
@@ -264,10 +264,31 @@ public sealed class ConversationService : IConversationService, IScopedDependenc
             .AsNoTracking()
             .ToListAsync(cancellationToken).ConfigureAwait(false);
 
-        return rows.ToDictionary(m => m.ConversationId, ToPreview);
+        var mentioning = await LoadViewerMentionsAsync(teamId, viewerId, rows.Select(m => m.Id).ToList(), cancellationToken).ConfigureAwait(false);
+
+        return rows.ToDictionary(m => m.ConversationId, m => ToPreview(m, mentioning.Contains(m.Id)));
     }
 
-    private static MessagePreview ToPreview(Message message)
+    /// <summary>
+    /// Which of the given last-message ids <c>@</c>-mention the viewer — one indexed lookup on the
+    /// reference reverse index (so a mention past the preview's 280-char truncation still counts).
+    /// The <c>user</c> ref type + the viewer's id string mirror what the composer writes into the token.
+    /// </summary>
+    private async Task<HashSet<Guid>> LoadViewerMentionsAsync(Guid teamId, Guid viewerId, List<Guid> messageIds, CancellationToken cancellationToken)
+    {
+        if (messageIds.Count == 0) return new HashSet<Guid>();
+
+        var viewer = viewerId.ToString();
+
+        var mentioned = await _db.MessageReference.AsNoTracking()
+            .Where(r => r.TeamId == teamId && messageIds.Contains(r.MessageId) && r.RefType == "user" && r.RefId == viewer)
+            .Select(r => r.MessageId)
+            .ToListAsync(cancellationToken).ConfigureAwait(false);
+
+        return mentioned.ToHashSet();
+    }
+
+    private static MessagePreview ToPreview(Message message, bool mentionsViewer)
     {
         var deleted = message.DeletedDate != null;
 
@@ -278,6 +299,7 @@ public sealed class ConversationService : IConversationService, IScopedDependenc
             Preview = deleted ? string.Empty : Truncate(MessageReferenceParser.ToPlainText(message.Body), MaxPreviewLength),
             CreatedDate = message.CreatedDate,
             IsDeleted = deleted,
+            MentionsViewer = mentionsViewer,
         };
     }
 

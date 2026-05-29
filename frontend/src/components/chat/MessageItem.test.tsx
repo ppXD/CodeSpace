@@ -20,28 +20,28 @@ function msg(partial: Partial<MessageView>): MessageView {
 
 describe("MessageItem", () => {
   it("shows the author name resolved from the member map", () => {
-    render(<MessageItem message={msg({})} members={members} isMine={false} />);
+    render(<MessageItem message={msg({})} members={members} isMine={false} myUserId={null} />);
     expect(screen.getByText("Alice")).toBeInTheDocument();
   });
 
   it("keeps your real name on your own messages and flags the row as mine", () => {
-    const { container } = render(<MessageItem message={msg({})} members={members} isMine />);
+    const { container } = render(<MessageItem message={msg({})} members={members} isMine myUserId="u1" />);
     expect(screen.getByText("Alice")).toBeInTheDocument();   // real name, not "You"
     expect(container.querySelector('.chat-msg[data-mine="true"]')).toBeTruthy();
   });
 
   it("falls back to Unknown for an unmapped author", () => {
-    render(<MessageItem message={msg({ authorUserId: "ghost" })} members={members} isMine={false} />);
+    render(<MessageItem message={msg({ authorUserId: "ghost" })} members={members} isMine={false} myUserId={null} />);
     expect(screen.getByText("Unknown")).toBeInTheDocument();
   });
 
   it("shows an (edited) marker when edited and not deleted", () => {
-    render(<MessageItem message={msg({ editedDate: new Date().toISOString() })} members={members} isMine />);
+    render(<MessageItem message={msg({ editedDate: new Date().toISOString() })} members={members} isMine myUserId="u1" />);
     expect(screen.getByText("(edited)")).toBeInTheDocument();
   });
 
   it("renders a deleted message as a tombstone, hiding the body", () => {
-    render(<MessageItem message={msg({ isDeleted: true, body: "" })} members={members} isMine={false} />);
+    render(<MessageItem message={msg({ isDeleted: true, body: "" })} members={members} isMine={false} myUserId={null} />);
     expect(screen.getByText("message deleted")).toBeInTheDocument();
   });
 });

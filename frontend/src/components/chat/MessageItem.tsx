@@ -9,7 +9,7 @@ import { MessageBody } from "./MessageBody";
  * message renders as a tombstone — the server already blanked its body, so there is nothing
  * to leak. <c>isMine</c> lets the row style the author's own messages distinctly.
  */
-export function MessageItem({ message, members, isMine }: { message: MessageView; members: Map<string, TeamMemberSummary>; isMine: boolean }) {
+export function MessageItem({ message, members, isMine, myUserId }: { message: MessageView; members: Map<string, TeamMemberSummary>; isMine: boolean; myUserId: string | null }) {
   const name = members.get(message.authorUserId)?.name ?? "Unknown";
 
   // Stable per-author colour so each speaker is recognisable down the log (incl. yourself).
@@ -27,7 +27,7 @@ export function MessageItem({ message, members, isMine }: { message: MessageView
         {message.isDeleted ? (
           <span className="chat-msg-deleted">message deleted</span>
         ) : (
-          <MessageBody body={message.body} members={members} />
+          <MessageBody body={message.body} members={members} myUserId={myUserId} />
         )}
       </div>
     </div>
