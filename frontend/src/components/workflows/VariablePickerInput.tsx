@@ -84,8 +84,11 @@ export function VariablePickerInput({ value, onChange, suggestions, placeholder,
 
   // Mirror the latest serialized value so we can ignore input events that don't change
   // anything (e.g. focus shifts, IME composition setup) and avoid stomping the caret on
-  // identity re-renders from upstream.
-  const lastSerializedRef = useRef<string>(value);
+  // identity re-renders from upstream. Starts as `null` (NOT `value`) so the mount-time
+  // hydration effect below actually runs for a non-empty initial value — otherwise a field
+  // loaded with an existing `{{ref}}` (e.g. reopening a saved workflow) would render EMPTY
+  // and a later blur would flush that empty DOM back as "", silently dropping the value.
+  const lastSerializedRef = useRef<string | null>(null);
 
   // Group + filter suggestions for the popover.
   const filtered = useMemo(() => filterSuggestions(suggestions, filter), [suggestions, filter]);
