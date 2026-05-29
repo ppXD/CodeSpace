@@ -49,8 +49,13 @@ export function WorkflowNode({ data, selected }: NodeProps) {
             {fields.map((f) => (
               <li key={f.name} className="wf-rf-node-field">
                 <span className="wf-rf-node-field-name">{f.name}</span>
-                {f.label && <span className="wf-rf-node-field-label">{f.label}</span>}
-                {f.required && <span className="wf-rf-node-field-req">required</span>}
+                {/* label + required form one right-aligned meta group, so the variable-name
+                    column stays flush-left and `required` flush-right regardless of how the
+                    names/labels differ in length (no ragged middle). */}
+                <span className="wf-rf-node-field-meta">
+                  {f.label && <span className="wf-rf-node-field-label">{f.label}</span>}
+                  {f.required && <span className="wf-rf-node-field-req">required</span>}
+                </span>
               </li>
             ))}
           </ul>

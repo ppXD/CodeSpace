@@ -2201,10 +2201,11 @@ textarea:-webkit-autofill {
 
 /* Input-field chips on the Manual start node card. */
 .acs-root .wf-rf-node-fields { list-style: none; margin: 6px 0 0; padding: 0; display: flex; flex-direction: column; gap: 3px; }
-.acs-root .wf-rf-node-field { display: flex; align-items: center; gap: 5px; font-size: 10.5px; color: var(--ink-2); background: var(--panel-2); border-radius: 4px; padding: 2px 6px; }
-.acs-root .wf-rf-node-field-name { font-weight: 500; }
+.acs-root .wf-rf-node-field { display: flex; align-items: center; gap: 8px; font-size: 10.5px; color: var(--ink-2); background: var(--panel-2); border-radius: 4px; padding: 2px 6px; }
+.acs-root .wf-rf-node-field-name { font-weight: 500; flex-shrink: 0; }
+.acs-root .wf-rf-node-field-meta { margin-left: auto; display: inline-flex; align-items: center; gap: 8px; min-width: 0; }
 .acs-root .wf-rf-node-field-label { color: var(--muted); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.acs-root .wf-rf-node-field-req { margin-left: auto; color: var(--accent); font-size: 9.5px; flex-shrink: 0; }
+.acs-root .wf-rf-node-field-req { color: var(--accent); font-size: 9.5px; flex-shrink: 0; }
 
 /* ── Variable picker (autocomplete popover) ───────────────────────────────────
  * Drop-in replacement for plain text inputs in the inspector. Operator types `{{`
