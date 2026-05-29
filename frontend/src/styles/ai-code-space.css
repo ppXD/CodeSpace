@@ -1702,7 +1702,10 @@ textarea:-webkit-autofill {
 .acs-root .wf-row-actions .btn { padding: 4px 6px; min-height: 0; }
 
 /* Detail page — two-column grid */
-.acs-root .wf-detail-body { padding: 16px; }
+/* Stack the run-detail blocks (status summary · error banner · payload · outputs · node trace)
+   with a uniform gap so they never sit flush. No own padding — the host (.ct-body on the page,
+   .mdl-body in the in-editor dialog) provides the outer padding, so we don't double it up. */
+.acs-root .wf-detail-body { display: flex; flex-direction: column; gap: 16px; }
 .acs-root .wf-detail-grid {
   display: grid; grid-template-columns: minmax(0, 1fr) 240px; gap: 24px;
 }
