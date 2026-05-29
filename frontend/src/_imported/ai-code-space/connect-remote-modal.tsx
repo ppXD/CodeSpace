@@ -797,7 +797,7 @@ function AddProviderStep({ onBack, onClose, onCreated }: AddProviderStepProps) {
             value={clientSecret}
             onChange={e => setClientSecret(e.target.value)}
             spellCheck={false}
-            autoComplete="off"
+            autoComplete="new-password"
             disabled={add.isPending}
             required
           />
@@ -962,7 +962,7 @@ function EditProviderStep({ instance, onBack, onClose, onSaved }: EditProviderSt
             onChange={e => setClientSecret(e.target.value)}
             placeholder={instance.oauthEnabled ? "leave blank to keep the existing value" : "paste from your OAuth app"}
             spellCheck={false}
-            autoComplete="off"
+            autoComplete="new-password"
             disabled={update.isPending}
           />
           <span className="cn-field-h">Redirect URL: <code>{effectiveCallbackUrl}</code></span>
@@ -1057,6 +1057,7 @@ function AddTeamTokenStep({ instance, onBack, onClose, onCreated }: AddTeamToken
             value={displayName}
             onChange={e => setDisplayName(e.target.value)}
             placeholder={`e.g. Acme team · ${theme.label}`}
+            autoComplete="off"
             disabled={add.isPending}
           />
           <span className="cn-field-h">Shown in the credential picker when binding repositories.</span>
@@ -1071,7 +1072,7 @@ function AddTeamTokenStep({ instance, onBack, onClose, onCreated }: AddTeamToken
             onChange={e => setToken(e.target.value)}
             placeholder="glpat-…"
             spellCheck={false}
-            autoComplete="off"
+            autoComplete="new-password"
             disabled={add.isPending}
           />
           <span className="cn-field-h">In {theme.label}: <strong>group → Settings → Access Tokens</strong> → role <code>Maintainer</code>, scopes <code>api</code> + <code>write_repository</code>.</span>
