@@ -42,6 +42,24 @@ export function ProviderMark({ provider, size = 30 }: ProviderMarkProps) {
   );
 }
 
+/**
+ * One repositories-table cell answering "whose credential is this repo bound through?".
+ * Resolves to the credential's owner so the team can tell at a glance whether a repo runs
+ * through the shared team-service identity (accent) or one person's personal sign-in (their
+ * name). The tooltip carries the exact credential name; "—" means nothing is bound (a broken
+ * or never-linked repo, or the credential was deleted). Shared by the team-level repository
+ * list and the project detail list so both read identically.
+ */
+export function RepoCredentialCell({ credential }: { credential: CredentialSummary | undefined }) {
+  if (!credential) return <span className="cred-none">—</span>;
+  return (
+    <span className="cred-tag" data-team={credential.ownership === "TeamService"} title={credential.displayName}>
+      <Ic.Key size={13} />
+      <span className="cred-tag-who">{credentialOwnershipLabel(credential)}</span>
+    </span>
+  );
+}
+
 export type Tab = "all" | "github" | "gitlab" | "git" | "archived";
 
 interface RepositoryListPageProps {
@@ -248,20 +266,7 @@ export function RepositoryListPage({ tab, query, onTabChange, onQueryChange, onO
                         </span>
                       )}
                     </td>
-                    <td>
-                      {/* Who connected this repo — resolves the row's CredentialId to its owner so
-                          the team can see at a glance whether a repo runs through the shared team
-                          service or one person's personal sign-in. Tooltip carries the exact
-                          credential name; "—" means no credential is bound (broken / never linked). */}
-                      {credential ? (
-                        <span className="cred-tag" data-team={credential.ownership === "TeamService"} title={credential.displayName}>
-                          <Ic.Key size={13} />
-                          <span className="cred-tag-who">{credentialOwnershipLabel(credential)}</span>
-                        </span>
-                      ) : (
-                        <span className="cred-none">—</span>
-                      )}
-                    </td>
+                    <td><RepoCredentialCell credential={credential} /></td>
                     <td className="synced">{formatRelative(r.lastEventDate ?? r.createdDate)}</td>
                     <td className="col-right">
                       <span className="row-act">

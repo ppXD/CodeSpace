@@ -5,12 +5,12 @@ import { ApiError } from "@/api/request";
 import { projectsApi } from "@/api/projects";
 import type { RepositorySummary } from "@/api/types";
 import { useProject, useProjects } from "@/hooks/use-projects";
-import { useProviderInstances } from "@/hooks/use-credentials";
+import { useCredentials, useProviderInstances } from "@/hooks/use-credentials";
 import { useRepositories, useUnbindRepository } from "@/hooks/use-repositories";
 import { useConfirm } from "@/components/dialog";
 import { AddRepoModal } from "@/_imported/ai-code-space/add-repo-modal";
 import { ConnectRemoteModal } from "@/_imported/ai-code-space/connect-remote-modal";
-import { ProviderMark } from "@/_imported/ai-code-space/content";
+import { ProviderMark, RepoCredentialCell } from "@/_imported/ai-code-space/content";
 import { Ic } from "@/_imported/ai-code-space/icons";
 import { VariableTablePanel } from "@/components/workflows/VariableTablePanel";
 import { useQueryClient } from "@tanstack/react-query";
@@ -53,9 +53,11 @@ function ProjectDetailPage() {
   const projectQuery = useProject(projectId);
   const reposQuery = useRepositories({ projectId });
   const providerInstances = useProviderInstances();
+  const credentials = useCredentials();
   const allProjects = useProjects();
 
   const instanceById = useMemo(() => new Map((providerInstances.data ?? []).map(i => [i.id, i])), [providerInstances.data]);
+  const credentialById = useMemo(() => new Map((credentials.data ?? []).map(c => [c.id, c])), [credentials.data]);
 
   const [addRepoOpen, setAddRepoOpen] = useState(false);
   // Connect remote sits next to Add repository because Connections only matter
@@ -197,8 +199,9 @@ function ProjectDetailPage() {
               <table className="tbl">
                 <thead>
                   <tr>
-                    <th style={{ width: "46%" }}>Repository</th>
+                    <th style={{ width: "40%" }}>Repository</th>
                     <th>Source</th>
+                    <th>Credential</th>
                     <th>Branch</th>
                     <th>Visibility</th>
                     <th className="col-right" />
@@ -207,6 +210,7 @@ function ProjectDetailPage() {
                 <tbody>
                   {repos.map(r => {
                     const instance = instanceById.get(r.providerInstanceId);
+                    const credential = r.credentialId ? credentialById.get(r.credentialId) : undefined;
                     return (
                       <tr
                         key={r.id}
@@ -226,6 +230,7 @@ function ProjectDetailPage() {
                           </div>
                         </td>
                         <td>{instance?.displayName ?? "—"}</td>
+                        <td><RepoCredentialCell credential={credential} /></td>
                         <td>{r.defaultBranch}</td>
                         <td>
                           <span className="repo-vis">
