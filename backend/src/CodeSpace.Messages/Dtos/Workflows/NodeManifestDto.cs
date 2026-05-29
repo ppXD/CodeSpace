@@ -20,4 +20,11 @@ public sealed record NodeManifestDto
     public required JsonElement ConfigSchema { get; init; }
     public required JsonElement InputSchema { get; init; }
     public required JsonElement OutputSchema { get; init; }
+
+    /// <summary>
+    /// True for an on-demand trigger (e.g. <c>trigger.manual</c>) that starts runs by hand/API
+    /// rather than by subscribing to an event. The editor uses this to skip creating a
+    /// <c>workflow_activation</c> row and to surface a "Run now" input form. Default false.
+    /// </summary>
+    public bool IsManual { get; init; }
 }

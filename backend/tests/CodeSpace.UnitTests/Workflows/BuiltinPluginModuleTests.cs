@@ -19,12 +19,13 @@ public class BuiltinPluginModuleTests
         var module = new CoreFlowPlugin();
 
         module.Name.ShouldBe("Core Flow");
+        module.Nodes.ShouldContain(typeof(CodeSpace.Core.Services.Workflows.Nodes.Builtin.TriggerManualNode));
         module.Nodes.ShouldContain(typeof(CodeSpace.Core.Services.Workflows.Nodes.Builtin.TerminalNode));
         module.Nodes.ShouldContain(typeof(CodeSpace.Core.Services.Workflows.Nodes.Builtin.LogicIfNode));
         module.Nodes.ShouldContain(typeof(CodeSpace.Core.Services.Workflows.Nodes.Builtin.LogicMergeNode));
         module.Nodes.ShouldContain(typeof(CodeSpace.Core.Services.Workflows.Nodes.Builtin.FlowIterateNode));
-        module.Nodes.Count.ShouldBe(4);
-        module.RunSourceMatchers.ShouldBeEmpty();
+        module.Nodes.Count.ShouldBe(5);
+        module.RunSourceMatchers.ShouldBeEmpty("the manual trigger subscribes to no event, so Core Flow still ships zero matchers");
     }
 
     [Fact]
@@ -63,7 +64,7 @@ public class BuiltinPluginModuleTests
     [Fact]
     public void All_four_builtin_plugins_together_cover_every_builtin_node()
     {
-        // Sum of all four = 10 nodes. If a node escapes its domain plugin OR a new node lands
+        // Sum of all four = 11 nodes. If a node escapes its domain plugin OR a new node lands
         // without being assigned to one, this test fails — keeps the catalog accountable.
         IReadOnlyList<IPluginModule> all = new IPluginModule[]
         {
@@ -74,6 +75,6 @@ public class BuiltinPluginModuleTests
         };
 
         var total = all.SelectMany(p => p.Nodes).Distinct().Count();
-        total.ShouldBe(10, "10 builtin node types across 4 domain plugins — adjust this number when adding a builtin");
+        total.ShouldBe(11, "11 builtin node types across 4 domain plugins — adjust this number when adding a builtin");
     }
 }

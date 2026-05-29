@@ -1,7 +1,9 @@
 using System.Text.Json;
 using CodeSpace.Core.Services.Workflows.Nodes;
 using CodeSpace.Core.Services.Workflows.Nodes.Builtin;
+using CodeSpace.Core.Services.Workflows.Runtime;
 using CodeSpace.Messages.Enums;
+using Microsoft.Extensions.Logging.Abstractions;
 using Shouldly;
 
 namespace CodeSpace.UnitTests.Workflows;
@@ -20,6 +22,7 @@ public class NodeManifestContractTests
         // git.* + llm.* take service deps via constructor, so contract-test them separately.
         yield return new object[] { new TriggerPrOpenedNode() };
         yield return new object[] { new TriggerPrUpdatedNode() };
+        yield return new object[] { new TriggerManualNode() };
         yield return new object[] { new TerminalNode() };
     }
 
@@ -52,6 +55,49 @@ public class NodeManifestContractTests
     {
         new TriggerPrOpenedNode().Manifest.Kind.ShouldBe(NodeKind.Trigger);
         new TriggerPrUpdatedNode().Manifest.Kind.ShouldBe(NodeKind.Trigger);
+        new TriggerManualNode().Manifest.Kind.ShouldBe(NodeKind.Trigger);
+    }
+
+    [Fact]
+    public void Only_the_manual_trigger_declares_IsManual_true()
+    {
+        // IsManual drives deriveActivations: a manual trigger produces NO workflow_activation
+        // row (nothing to match events against), event triggers DO. Pinning both directions
+        // here makes a future flip (e.g. someone setting IsManual on a PR trigger, or dropping
+        // it from the manual node) a loud, review-visible test failure rather than a silent
+        // activation-model regression.
+        new TriggerManualNode().Manifest.IsManual.ShouldBeTrue(
+            "trigger.manual is on-demand and must declare IsManual=true so the editor skips its activation row");
+
+        new TriggerPrOpenedNode().Manifest.IsManual.ShouldBeFalse(
+            "event triggers subscribe to webhooks and MUST keep IsManual=false so deriveActivations still emits their activation");
+        new TriggerPrUpdatedNode().Manifest.IsManual.ShouldBeFalse(
+            "event triggers subscribe to webhooks and MUST keep IsManual=false so deriveActivations still emits their activation");
+    }
+
+    [Fact]
+    public async Task Manual_trigger_echoes_run_payload_as_outputs()
+    {
+        // Mirrors the PR triggers: the trigger node copies scope.Trigger into its outputs so a
+        // downstream node can read either {{trigger.x}} or {{nodes.<id>.outputs.x}}.
+        var payload = JsonDocument.Parse("""{"ticket":"ABC-123"}""").RootElement
+            .EnumerateObject().ToDictionary(p => p.Name, p => p.Value.Clone());
+
+        var context = new NodeRunContext
+        {
+            Inputs = new Dictionary<string, JsonElement>(),
+            Config = new Dictionary<string, JsonElement>(),
+            RawInputs = JsonDocument.Parse("{}").RootElement,
+            RawConfig = JsonDocument.Parse("{}").RootElement,
+            Scope = new NodeRunScope { Trigger = payload },
+            Logger = NullLogger.Instance,
+            Observability = NodeObservability.NoOp,
+        };
+
+        var result = await new TriggerManualNode().RunAsync(context, CancellationToken.None);
+
+        result.Status.ShouldBe(NodeStatus.Success);
+        result.Outputs["ticket"].GetString().ShouldBe("ABC-123");
     }
 
     [Fact]

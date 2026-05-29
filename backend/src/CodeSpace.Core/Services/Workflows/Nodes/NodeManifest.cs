@@ -70,6 +70,18 @@ public sealed record NodeManifest
     /// it has billing implications) set it true.</para>
     /// </summary>
     public bool IsSideEffecting { get; init; }
+
+    /// <summary>
+    /// Marks a Trigger node that starts runs ON DEMAND (manual "Run now" / API call) instead of
+    /// by subscribing to an external event source. The frontend's <c>deriveActivations</c> reads
+    /// this to SKIP emitting a <c>workflow_activation</c> row for the node — a manual trigger has
+    /// nothing to match incoming events against.
+    ///
+    /// <para>Default <c>false</c>: event triggers (trigger.pr.opened / .updated) and every
+    /// non-trigger node leave it false, so existing activation derivation is unchanged. Only
+    /// on-demand triggers (trigger.manual) set it true. Ignored for non-Trigger kinds.</para>
+    /// </summary>
+    public bool IsManual { get; init; }
 }
 
 /// <summary>

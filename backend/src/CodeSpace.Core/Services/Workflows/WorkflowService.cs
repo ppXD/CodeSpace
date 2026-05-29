@@ -391,7 +391,8 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
             IconKey = n.Manifest.IconKey,
             ConfigSchema = n.Manifest.ConfigSchema,
             InputSchema = n.Manifest.InputSchema,
-            OutputSchema = n.Manifest.OutputSchema
+            OutputSchema = n.Manifest.OutputSchema,
+            IsManual = n.Manifest.IsManual
         }).ToList();
     }
 
