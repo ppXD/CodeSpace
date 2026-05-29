@@ -1513,6 +1513,20 @@
 .cn-field-i { width: 100%; padding: 9px 11px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); color: var(--ink); font-size: 13px; font-family: inherit; transition: border-color .12s, box-shadow .12s; outline: none; }
 .cn-field-i:focus { border-color: var(--ink-2); box-shadow: 0 0 0 3px rgba(31,30,29,.06); }
 .cn-field-i:disabled { background: var(--panel-2); color: var(--muted-2); cursor: not-allowed; }
+
+/* The browser's autofill paints inputs with its own blue/grey background + text colour (most
+   visible on saved credentials — OAuth client id/secret, group tokens). Pin autofilled fields
+   back to the panel background + ink text so they read as normal white fields in the warm theme. */
+input:-webkit-autofill,
+input:-webkit-autofill:hover,
+input:-webkit-autofill:focus,
+input:-webkit-autofill:active,
+textarea:-webkit-autofill {
+  -webkit-text-fill-color: var(--ink);
+  -webkit-box-shadow: 0 0 0 1000px var(--panel) inset;
+  box-shadow: 0 0 0 1000px var(--panel) inset;
+  caret-color: var(--ink);
+}
 .cn-field-h { font-size: 11.5px; color: var(--muted); line-height: 1.45; }
 
 /* Async authorize state pills */
