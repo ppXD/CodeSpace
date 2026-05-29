@@ -2663,6 +2663,39 @@ textarea:-webkit-autofill {
   50%      { box-shadow: 0 0 0 5px rgba(217,119,87,0); }
 }
 
+/* Leftmost "Run" button — accent-tinted, same 30px baseline as the other toolbar buttons. */
+.acs-root .wf-editor-toolbar-run {
+  display: inline-flex; align-items: center; justify-content: center; gap: 5px;
+  height: 30px; padding: 0 12px;
+  font-family: inherit; font-size: 12px; font-weight: 600;
+  background: var(--accent-soft); color: var(--accent);
+  border: 1px solid var(--accent-soft); border-radius: 6px;
+  cursor: pointer; transition: filter .12s ease, transform .04s ease;
+}
+.acs-root .wf-editor-toolbar-run:hover:not(:disabled) { filter: brightness(0.97); }
+.acs-root .wf-editor-toolbar-run:active:not(:disabled) { transform: translateY(1px); }
+.acs-root .wf-editor-toolbar-run:disabled { opacity: 0.6; cursor: not-allowed; }
+
+/* In-editor run viewer / history dialog — reuses the global .mdl shell but wider + taller so
+   the run-detail trace has room. Rendered in-tree (inside .acs-root) so RunDetailView's
+   .wf-section / .wf-json / .wf-run-node styles apply. */
+.wf-run-modal { width: 760px; max-width: calc(100vw - 48px); }
+.wf-run-modal .mdl-body { max-height: calc(100vh - 200px); overflow-y: auto; }
+
+/* Run-history list inside the history dialog. */
+.acs-root .wf-run-hist { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.acs-root .wf-run-hist-row {
+  display: flex; align-items: center; gap: 10px;
+  padding: 9px 11px; border: 1px solid var(--line); border-radius: 7px; background: var(--bg);
+  cursor: pointer; font-size: 12.5px;
+}
+.acs-root .wf-run-hist-row:hover { border-color: var(--accent-soft); background: var(--panel); }
+.acs-root .wf-run-hist-id { font-weight: 600; color: var(--ink); }
+.acs-root .wf-run-hist-src { color: var(--muted); }
+.acs-root .wf-run-hist-time { margin-left: auto; color: var(--muted); font-size: 12px; font-feature-settings: "tnum"; }
+.acs-root .wf-run-hist-ver { color: var(--muted-2); font-size: 11px; }
+.acs-root .wf-run-hist-row > svg { color: var(--muted-2); flex-shrink: 0; }
+
 /* Slide-over drawer */
 .acs-root .wf-editor-vars-mask {
   position: absolute; inset: 0; z-index: 50;
