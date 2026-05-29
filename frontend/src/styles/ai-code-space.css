@@ -1526,6 +1526,10 @@ textarea:-webkit-autofill {
   -webkit-box-shadow: 0 0 0 1000px var(--panel) inset;
   box-shadow: 0 0 0 1000px var(--panel) inset;
   caret-color: var(--ink);
+  /* Kill the load-time grey flicker: an absurdly long background-color transition means
+     Chrome's autofill background never visibly arrives, and overriding `transition` here
+     (vs the field's `box-shadow .12s`) makes the white inset shadow apply instantly. */
+  transition: background-color 9999s ease-in-out 0s;
 }
 .cn-field-h { font-size: 11.5px; color: var(--muted); line-height: 1.45; }
 
