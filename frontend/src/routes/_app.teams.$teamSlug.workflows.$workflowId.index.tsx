@@ -41,6 +41,7 @@ import { introspectScope } from "@/components/workflows/scope-introspection";
 import { StartNodeInputsEditor } from "@/components/workflows/StartNodeInputsEditor";
 import { VariableTablePanel } from "@/components/workflows/VariableTablePanel";
 import { WorkflowNode, type WorkflowNodeData } from "@/components/workflows/WorkflowNode";
+import { useAlert } from "@/components/dialog";
 import { WorkflowVariablesPanel } from "@/components/workflows/WorkflowVariablesPanel";
 import { RunWorkflowModal } from "@/components/workflows/RunWorkflowModal";
 import { RunViewerDialog } from "@/components/workflows/RunViewerDialog";
@@ -231,6 +232,7 @@ function Editor({ workflow, manifests, onBackToList, saving, onSave }: EditorPro
 
   // In-editor run + history. runFormOpen → the input form (when the workflow declares inputs);
   // viewerRunId → the live run-detail dialog; historyOpen → the runs list dialog.
+  const alert = useAlert();
   const runManually = useRunWorkflowManually();
   const [runFormOpen, setRunFormOpen] = useState(false);
   const [viewerRunId, setViewerRunId] = useState<string | null>(null);
@@ -442,7 +444,19 @@ function Editor({ workflow, manifests, onBackToList, saving, onSave }: EditorPro
   const handleSave = async () => {
     const definition = rfToDefinition(nodes, edges, configs, inputs, nodeLabels, workflowInputs, workflowOutputs);
     const activations = deriveActivations(definition, workflow.activations, manifestByType);
-    await onSave({ name, description: workflow.description, definition, activations });
+    try {
+      await onSave({ name, description: workflow.description, definition, activations });
+    } catch (e) {
+      // Surface the failure instead of silently dropping the save — a rejected save (e.g. a
+      // definition validation error like "exactly one trigger") otherwise looks like the edits
+      // just "didn't stick", and the workflow stays on its last good version.
+      await alert({
+        title: "Couldn't save workflow",
+        message: e instanceof ApiError ? e.message : e instanceof Error ? e.message : "Unexpected error while saving.",
+        variant: "error",
+      });
+      throw e;   // let callers (Run) know the save failed so they don't run a stale version
+    }
     setUnsaved(false);
     // No navigation on save — keep the user on the canvas. The "Unsaved changes" pill
     // disappears and the user can immediately keep editing. Matches Dify behaviour.
@@ -597,7 +611,7 @@ function Editor({ workflow, manifests, onBackToList, saving, onSave }: EditorPro
           <div className="wf-editor-toolbar-group" aria-label="Save">
             <button
               className={`wf-editor-toolbar-publish ${unsaved ? "wf-editor-toolbar-publish-dirty" : ""}`}
-              onClick={handleSave}
+              onClick={() => void handleSave().catch(() => {})}
               disabled={saving}
               title={unsaved ? "Save the current draft" : "All changes saved"}
             >
