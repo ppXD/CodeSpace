@@ -10,6 +10,10 @@ public class Credential : IEntity<Guid>, IAuditable
     public Guid ProviderInstanceId { get; set; }
     public Guid? OwnerUserId { get; set; }
 
+    /// <summary>Personal (one user's OAuth/PAT) vs TeamService (team-owned, no person). Defaults to
+    /// Personal so every existing + OAuth-created credential reads as personal without extra wiring.</summary>
+    public CredentialOwnership Ownership { get; set; } = CredentialOwnership.Personal;
+
     public AuthType AuthType { get; set; }
     public string DisplayName { get; set; } = default!;
     public string EncryptedPayload { get; set; } = default!;

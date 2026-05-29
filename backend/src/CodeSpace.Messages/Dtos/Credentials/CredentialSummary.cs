@@ -17,6 +17,10 @@ public sealed record CredentialSummary
     /// </summary>
     public string? OwnerUserName { get; init; }
 
+    /// <summary>Personal (one user's) vs TeamService (team-owned, no person). The UI labels + sorts
+    /// by this, and prefers a TeamService credential when binding repositories.</summary>
+    public required CredentialOwnership Ownership { get; init; }
+
     public required AuthType AuthType { get; init; }
     public required string DisplayName { get; init; }
     public required CredentialStatus Status { get; init; }

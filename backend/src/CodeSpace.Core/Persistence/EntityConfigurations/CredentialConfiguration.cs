@@ -12,6 +12,7 @@ public class CredentialConfiguration : IEntityTypeConfiguration<Credential>
 
         builder.Property(c => c.AuthType).HasConversion<string>();
         builder.Property(c => c.Status).HasConversion<string>();
+        builder.Property(c => c.Ownership).HasConversion<string>();
 
         builder.HasOne(c => c.Team).WithMany().HasForeignKey(c => c.TeamId);
         builder.HasOne(c => c.ProviderInstance).WithMany().HasForeignKey(c => c.ProviderInstanceId);
