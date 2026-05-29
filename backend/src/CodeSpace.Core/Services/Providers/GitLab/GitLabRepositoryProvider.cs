@@ -59,9 +59,14 @@ public sealed class GitLabRepositoryProvider : IRepositoryCatalogCapability, IPu
         {
             var trimmedSearch = string.IsNullOrWhiteSpace(search) ? null : search.Trim();
 
-            // GitLab's /projects endpoint accepts both `?search=` and `?per_page=` natively,
-            // so server-side filter+page work in one call. Scope=Accessible maps to
-            // `membership=true` on the wire — exactly the visibility the picker wants.
+            // GitLab's /projects accepts `?search=` and `?per_page=` natively, so server-side
+            // filter+page work in one call. But it DEFAULTS to every project visible to the token
+            // (incl. instance-wide public/internal ones), so a correct group access token still
+            // surfaces repos far outside its own group. NGitLab's ProjectQuery has no `membership`
+            // flag, so we scope with min_access_level=Guest: only projects where the token's
+            // identity actually has a membership role (for a group token: that group + subgroups),
+            // which excludes non-member public/internal projects and approximates the
+            // membership=true GraphQL count below.
             //
             // Heads-up for any future caller passing `search`: GitLab silently rejects
             // search queries shorter than 3 characters on self-hosted instances unless the
@@ -78,6 +83,7 @@ public sealed class GitLabRepositoryProvider : IRepositoryCatalogCapability, IPu
             var query = new ProjectQuery
             {
                 Scope = ProjectQueryScope.Accessible,
+                MinAccessLevel = AccessLevel.Guest,
                 Search = trimmedSearch,
                 PerPage = perPage,
                 OrderBy = "last_activity_at"
