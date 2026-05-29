@@ -13,4 +13,9 @@ public sealed record MessagePreview
     public required string Preview { get; init; }
     public required DateTimeOffset CreatedDate { get; init; }
     public required bool IsDeleted { get; init; }
+
+    /// <summary>True when this last message <c>@</c>-mentions the user the list was loaded for — lets
+    /// the row flag "you were mentioned here". Read from the reference reverse index, so it holds even
+    /// when the mention sits past the preview's truncation. Always false on the single-get path.</summary>
+    public bool MentionsViewer { get; init; }
 }

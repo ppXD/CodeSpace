@@ -53,6 +53,7 @@ export function ConversationList({
               <span className="chat-conv-top">
                 <span className="chat-conv-name">{conversationTitle(c, members, myId)}</span>
                 <span className="chat-conv-time">{formatListTime(c.lastActivityDate)}</span>
+                {c.lastMessage?.mentionsViewer && <span className="chat-conv-mention" title="You were mentioned" aria-label="You were mentioned">@</span>}
               </span>
               <PreviewLine conversation={c} members={members} myId={myId} />
             </span>

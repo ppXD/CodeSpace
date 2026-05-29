@@ -35,6 +35,8 @@ export interface MessagePreview {
   preview: string;
   createdDate: string;
   isDeleted: boolean;
+  /** True when this last message @-mentions the current user — the list flags "you were mentioned". */
+  mentionsViewer: boolean;
 }
 
 /**

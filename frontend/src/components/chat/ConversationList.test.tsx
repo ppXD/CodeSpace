@@ -14,6 +14,7 @@ vi.mock("@/hooks/use-chat", () => ({
     data: [
       { id: "c1", kind: "Channel", slug: "general", name: "General", description: null, visibility: "Public", archived: false, memberCount: 2, memberUserIds: [], createdDate: "", lastMessage: null, lastActivityDate: "2026-01-02T10:00:00Z", lastReadMessageId: null },
       { id: "c2", kind: "Direct", slug: null, name: null, description: null, visibility: "Public", archived: false, memberCount: 2, memberUserIds: ["me", "u2"], createdDate: "", lastMessage: null, lastActivityDate: "2026-01-01T10:00:00Z", lastReadMessageId: null },
+      { id: "c3", kind: "Channel", slug: "alerts", name: "Alerts", description: null, visibility: "Public", archived: false, memberCount: 2, memberUserIds: [], createdDate: "", lastMessage: { messageId: "m1", authorUserId: "u9", preview: "@You ping", createdDate: "2026-01-03T10:00:00Z", isDeleted: false, mentionsViewer: true }, lastActivityDate: "2026-01-03T10:00:00Z", lastReadMessageId: null },
     ],
   }),
   useCreateChannel: () => ({ mutateAsync: vi.fn(), isPending: false }),
@@ -39,5 +40,13 @@ describe("ConversationList", () => {
   it("marks the active conversation row", () => {
     render(<ConversationList activeConversationId="c1" onSelect={() => {}} />);
     expect(screen.getByText("#general").closest("button")?.getAttribute("data-active")).toBe("true");
+  });
+
+  it("flags only the conversation whose last message mentions you", () => {
+    render(<ConversationList activeConversationId={null} onSelect={() => {}} />);
+
+    const badges = screen.getAllByLabelText("You were mentioned");
+    expect(badges).toHaveLength(1);
+    expect(badges[0].closest("button")).toHaveTextContent("#alerts");
   });
 });

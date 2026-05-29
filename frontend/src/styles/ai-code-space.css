@@ -2841,6 +2841,13 @@
 .acs-root .chat-conv-top { display: flex; align-items: baseline; gap: 8px; }
 .acs-root .chat-conv-name { flex: 1; min-width: 0; font-size: 13px; font-weight: 600; line-height: 1.35; color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .acs-root .chat-conv-time { flex-shrink: 0; font-size: 11px; color: var(--muted-2); }
+/* "You were mentioned here" badge on a conversation row — a small accent @ pill, the list's
+   equivalent of the in-message mention highlight. */
+.acs-root .chat-conv-mention {
+  flex-shrink: 0; align-self: center; display: inline-flex; align-items: center; justify-content: center;
+  min-width: 17px; height: 17px; padding: 0 4px; border-radius: 9px;
+  background: var(--accent); color: var(--panel); font-size: 10px; font-weight: 700; line-height: 1;
+}
 .acs-root .chat-conv-preview { display: block; font-size: 12px; line-height: 1.4; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* Row colour hierarchy keeps the types apart: the conversation TITLE is the dark primary
    (var(--ink), above); the preview AUTHOR is a grey label — bold + ":" so it still reads as the
