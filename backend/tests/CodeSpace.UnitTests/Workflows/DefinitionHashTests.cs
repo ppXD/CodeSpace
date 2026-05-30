@@ -277,15 +277,11 @@ public class DefinitionHashTests
     [Fact]
     public void Same_node_config_property_order_yields_same_hash()
     {
-        // Within a single node's Config JSON, property order should not matter. JsonElement
-        // preserves the source order, but canonicalisation should normalise it. This pins
-        // the implementation's behaviour today: JsonSerializer with default options does NOT
-        // sort keys, so source order DOES matter. The test documents this as a known
-        // limitation — operators who hand-edit the JSON could trip the hash by reordering.
-        //
-        // To fix: introduce a true JSON canonicaliser (sorted keys, normalised whitespace)
-        // in DefinitionHash.Compute. Until then, the editor's serialiser is the de-facto
-        // canonical form.
+        // Within a single node's Config JSON, property order MUST NOT matter. The canonical
+        // hash sorts object keys recursively, so two semantically-equal configs that differ
+        // only by key order produce the SAME hash. This is not a nicety: the definition is
+        // stored in a PostgreSQL jsonb column that reorders keys on every round-trip, so
+        // order-sensitive hashing would false-trip ReleaseTamperedException on run.
         var def1 = MinimalDef() with
         {
             Nodes = new[]
@@ -304,13 +300,42 @@ public class DefinitionHashTests
             }
         };
 
-        // KNOWN-LIMITATION: JsonElement preserves source order; without explicit key-sorting
-        // in the canonicaliser, two semantically-equal configs with different property order
-        // produce DIFFERENT hashes. This test pins the today-behaviour so a future fix flips
-        // the assertion deliberately.
-        DefinitionHash.Compute(def1).ShouldNotBe(DefinitionHash.Compute(def2),
-            "Today the canonicaliser preserves JSON property order. To make config-property-order " +
-            "irrelevant, add a recursive key-sorting pass in DefinitionHash before SHA-256.");
+        DefinitionHash.Compute(def1).ShouldBe(DefinitionHash.Compute(def2),
+            "config property order must not change the hash — the canonicaliser sorts object keys recursively " +
+            "so the hash survives the jsonb store/load round-trip");
+    }
+
+    [Fact]
+    public void Node_input_key_order_does_not_affect_hash_reproducing_jsonb_reordering()
+    {
+        // The exact production trigger: fetch_pr_diff's Inputs wire {{input.repo}} / {{input.pr_num}}
+        // as `{"repositoryId":...,"number":...}`. The author/SPA order is repositoryId (12 chars)
+        // then number (6). PostgreSQL jsonb stores object keys by length-then-bytes, so on read-back
+        // the order becomes number, repositoryId — a DIFFERENT byte sequence. Before recursive
+        // key-sorting, the recomputed hash diverged from the stored hash and EVERY run failed with
+        // ReleaseTamperedException. Here we simulate the reordering directly: same content, two key
+        // orders, one hash.
+        var authored = MinimalDef() with
+        {
+            Nodes = new[]
+            {
+                MinimalDef().Nodes[0] with { Inputs = JsonElementFrom("""{"repositoryId":"{{input.repo}}","number":"{{input.pr_num}}"}""") },
+                MinimalDef().Nodes[1]
+            }
+        };
+
+        var jsonbReordered = authored with
+        {
+            Nodes = new[]
+            {
+                authored.Nodes[0] with { Inputs = JsonElementFrom("""{"number":"{{input.pr_num}}","repositoryId":"{{input.repo}}"}""") },
+                authored.Nodes[1]
+            }
+        };
+
+        DefinitionHash.Compute(authored).ShouldBe(DefinitionHash.Compute(jsonbReordered),
+            "a multi-key node Inputs object must hash identically regardless of key order — otherwise the jsonb " +
+            "column's key reordering makes the engine's recompute diverge from the stored hash on every run");
     }
 
     // ─── Engine integrity contract: hash MUST survive the store/load round-trip ──────
