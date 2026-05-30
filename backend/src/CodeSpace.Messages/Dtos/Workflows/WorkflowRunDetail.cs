@@ -72,4 +72,12 @@ public sealed record WorkflowRunNodeSummary
     public string? Error { get; init; }
     public DateTimeOffset? StartedAt { get; init; }
     public DateTimeOffset? CompletedAt { get; init; }
+
+    /// <summary>
+    /// For a <c>flow.subworkflow</c> node — the id of the child run it spawned (the Subworkflow
+    /// wait's token). Lets the run-detail UI embed / link the child run inline for this step in
+    /// any state (suspended while the child runs, or after it completed). <c>null</c> for every
+    /// other node. Sourced from the <c>workflow_run_wait</c> row, which persists post-resolution.
+    /// </summary>
+    public string? ChildRunId { get; init; }
 }

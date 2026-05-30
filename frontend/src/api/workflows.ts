@@ -161,6 +161,11 @@ export interface WorkflowRunNodeSummary {
   error: string | null;
   startedAt: string | null;
   completedAt: string | null;
+  /**
+   * For a `flow.subworkflow` node — the id of the child run this step spawned. Lets the run-detail
+   * view embed / link the child run inline for this step (in any state). `null`/absent otherwise.
+   */
+  childRunId?: string | null;
 }
 
 /** The outstanding wait a Suspended run is parked on — drives the resume affordance. */

@@ -75,7 +75,10 @@ function WorkflowRunDetailPage() {
       </div>
 
       <div className="ct-body">
-        <RunDetailView runId={runId} />
+        <RunDetailView
+          runId={runId}
+          onOpenRun={(childRunId) => navigate({ to: "/teams/$teamSlug/workflows/runs/$runId", params: { teamSlug, runId: childRunId } })}
+        />
       </div>
     </section>
   );

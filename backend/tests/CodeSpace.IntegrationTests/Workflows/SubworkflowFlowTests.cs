@@ -8,6 +8,7 @@ using CodeSpace.Messages.Commands.Workflows;
 using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Dtos.Workflows;
 using CodeSpace.Messages.Enums;
+using CodeSpace.Messages.Queries.Workflows;
 using MediatR;
 using Microsoft.EntityFrameworkCore;
 using Shouldly;
@@ -229,7 +230,47 @@ public class SubworkflowFlowTests
         }
     }
 
+    [Fact]
+    public async Task Run_detail_links_the_subworkflow_node_to_its_child_run()
+    {
+        // The data the node-list drill-down UI needs: the sub-workflow STEP carries its child run
+        // id, so the run-detail can embed / link the child inline — both while the step is suspended
+        // and after it finished (the wait row persists post-resolution). Other nodes carry none.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var childId = await CreateWorkflowAsync(teamId, userId, EchoChildDefinition());
+        var parentId = await CreateWorkflowAsync(teamId, userId, ParentDefinition(childId, inputValue: "x", withErrorBranch: false, childFails: false));
+        var parentRunId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, parentId, teamId);
+
+        await RunEngineAsync(parentRunId);                 // parent suspends on the sub-workflow
+        var childRunId = await ChildRunIdAsync(parentRunId);
+
+        // While suspended: the sub node already points at its child; the trigger node points at nothing.
+        var suspendedDetail = await GetRunDetailAsync(parentRunId, teamId, userId);
+        suspendedDetail.Nodes.Single(n => n.NodeId == "sub").ChildRunId
+            .ShouldBe(childRunId.ToString(), "the suspended sub-workflow step links its child run");
+        suspendedDetail.Nodes.Single(n => n.NodeId == "start").ChildRunId
+            .ShouldBeNull("a non-subworkflow node has no child run");
+
+        await RunEngineAsync(childRunId);                  // child completes
+        await RunEngineAsync(parentRunId);                 // parent resumes → finishes
+
+        // After completion: the link still holds (the resolved wait row is not deleted), so the
+        // finished step stays drillable.
+        var finishedDetail = await GetRunDetailAsync(parentRunId, teamId, userId);
+        finishedDetail.Status.ShouldBe(WorkflowRunStatus.Success);
+        finishedDetail.Nodes.Single(n => n.NodeId == "sub").ChildRunId
+            .ShouldBe(childRunId.ToString(), "a finished sub-workflow step keeps its child-run link");
+    }
+
     // ─── Helpers ────────────────────────────────────────────────────────────────
+
+    private async Task<WorkflowRunDetail> GetRunDetailAsync(Guid runId, Guid teamId, Guid userId)
+    {
+        using var scope = _fixture.BeginScopeAs(userId, teamId, Roles.Admin);
+        var detail = await scope.Resolve<IMediator>().Send(new GetWorkflowRunQuery { RunId = runId });
+        detail.ShouldNotBeNull();
+        return detail!;
+    }
 
     private async Task<bool> ApproveAsync(Guid runId, Guid teamId, Guid userId)
     {

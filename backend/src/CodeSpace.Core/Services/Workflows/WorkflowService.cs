@@ -404,6 +404,11 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
             .OrderByDescending(w => w.CreatedAt)
             .FirstOrDefaultAsync(cancellationToken).ConfigureAwait(false);
 
+        // Per-node child-run links: each flow.subworkflow node owns one Subworkflow wait whose
+        // token is the child run id. The row survives resolution (status flips to Resolved), so
+        // the link is available whether the step is still suspended or already finished.
+        var childRunByNode = await LoadSubworkflowChildLinksAsync(runId, cancellationToken).ConfigureAwait(false);
+
         return new WorkflowRunDetail
         {
             Id = run.Id,
@@ -415,7 +420,7 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
             Error = run.Error,
             StartedAt = run.StartedAt,
             CompletedAt = run.CompletedAt,
-            Nodes = nodes.Select(MapRunNode).ToList(),
+            Nodes = nodes.Select(n => MapRunNode(n, childRunByNode)).ToList(),
             Outputs = outputs,
             PendingWait = pending == null ? null : new WorkflowRunWaitInfo
             {
@@ -502,7 +507,23 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
         Config = SafeParseJson(a.ConfigJson)
     };
 
-    private static WorkflowRunNodeSummary MapRunNode(WorkflowRunNode n) => new()
+    /// <summary>
+    /// Maps each <c>flow.subworkflow</c> node to the child run it spawned. Keyed by
+    /// <c>(NodeId, IterationKey)</c> so a sub-workflow inside a loop links each iteration to its own
+    /// child. The Subworkflow wait row is unique per (run, node, iteration) and persists after it
+    /// resolves, so the link holds for both suspended and completed steps.
+    /// </summary>
+    private async Task<IReadOnlyDictionary<(string NodeId, string IterationKey), string>> LoadSubworkflowChildLinksAsync(Guid runId, CancellationToken cancellationToken)
+    {
+        var waits = await _db.WorkflowRunWait.AsNoTracking()
+            .Where(w => w.RunId == runId && w.WaitKind == WorkflowWaitKinds.Subworkflow)
+            .Select(w => new { w.NodeId, w.IterationKey, w.Token })
+            .ToListAsync(cancellationToken).ConfigureAwait(false);
+
+        return waits.ToDictionary(w => (w.NodeId, w.IterationKey), w => w.Token);
+    }
+
+    private static WorkflowRunNodeSummary MapRunNode(WorkflowRunNode n, IReadOnlyDictionary<(string NodeId, string IterationKey), string> childRunByNode) => new()
     {
         NodeId = n.NodeId,
         IterationKey = n.IterationKey,
@@ -511,7 +532,8 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
         Outputs = SafeParseJson(n.OutputsJson),
         Error = n.Error,
         StartedAt = n.StartedAt,
-        CompletedAt = n.CompletedAt
+        CompletedAt = n.CompletedAt,
+        ChildRunId = childRunByNode.GetValueOrDefault((n.NodeId, n.IterationKey))
     };
 
     /// <summary>Delegates to <see cref="WorkflowJsonSafeParse.SafeParse(string?)"/>.</summary>
