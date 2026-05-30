@@ -2171,6 +2171,10 @@ textarea:-webkit-autofill {
 .acs-root .wf-form-help-err { font-size: 10.5px; color: #9E3535; line-height: 1.4; }
 .acs-root .wf-form-help-inline { color: var(--muted); font-weight: 400; }
 
+/* Node retry-on-failure editor (inspector). */
+.acs-root .wf-retry-fields { display: flex; flex-direction: column; gap: 8px; margin-top: 8px; }
+.acs-root .wf-retry-hint { font-size: 10.5px; color: var(--muted); line-height: 1.4; margin: 2px 0 0; }
+
 /* Modals portal to <body>, OUTSIDE .acs-root, so the .acs-root-scoped .wf-form* rules above
    don't reach them and the form collapses to unstyled inline text. Mirror them under the
    global .mdl scope (same pattern as `.mdl .btn` mirrors `.acs-root .btn`) so SchemaForm and

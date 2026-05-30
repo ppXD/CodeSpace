@@ -42,6 +42,7 @@ public sealed class DefinitionValidator : IScopedDependency
         CheckAcyclic(definition, errors);
         CheckReachability(definition, errors);
         CheckReferencePaths(definition, errors);
+        CheckRetryPolicies(definition, errors);
 
         return new ValidationResult(errors);
     }
@@ -329,6 +330,27 @@ public sealed class DefinitionValidator : IScopedDependency
         {
             var available = string.Join(", ", declared.Select(k => $"'{k}'"));
             errors.Add($"Node '{node.Id}' {source} references '{path}', but '{refNodeId}' ({refNode.TypeKey}) doesn't declare output '{outputKey}'. Available: {available}.");
+        }
+    }
+
+    /// <summary>
+    /// Validate each node's optional retry policy. The engine clamps out-of-range values at run
+    /// time (<see cref="RetryPlan.From"/>), but a save-time error is clearer than silent clamping:
+    /// the operator sees "maxAttempts must be 1..10" immediately instead of wondering why their
+    /// 50 became 10. Caps come from <see cref="RetryPlan"/> so the two never drift.
+    /// </summary>
+    private static void CheckRetryPolicies(WorkflowDefinition definition, List<string> errors)
+    {
+        foreach (var node in definition.Nodes)
+        {
+            var retry = node.Retry;
+            if (retry == null) continue;
+
+            if (retry.MaxAttempts < 1 || retry.MaxAttempts > RetryPlan.MaxAttemptsCap)
+                errors.Add($"Node '{node.Id}' retry.maxAttempts must be between 1 and {RetryPlan.MaxAttemptsCap} (got {retry.MaxAttempts}).");
+
+            if (retry.BackoffSeconds < 0 || retry.BackoffSeconds > RetryPlan.MaxBackoffSeconds)
+                errors.Add($"Node '{node.Id}' retry.backoffSeconds must be between 0 and {RetryPlan.MaxBackoffSeconds} (got {retry.BackoffSeconds}).");
         }
     }
 

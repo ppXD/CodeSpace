@@ -29,6 +29,7 @@ import type {
   EdgeDefinition,
   NodeDefinition,
   NodeManifestDto,
+  RetryPolicy,
   WorkflowActivationInput,
   WorkflowDefinition,
   WorkflowDetail,
@@ -36,6 +37,7 @@ import type {
 } from "@/api/workflows";
 import { deriveActivations } from "@/lib/workflowActivations";
 import { migrateLegacyPrTriggerConfig } from "@/lib/migrateTriggerConfig";
+import { NodeRetryEditor } from "@/components/workflows/NodeRetryEditor";
 import { SchemaForm } from "@/components/workflows/SchemaForm";
 import { introspectScope } from "@/components/workflows/scope-introspection";
 import { StartNodeInputsEditor } from "@/components/workflows/StartNodeInputsEditor";
@@ -209,6 +211,13 @@ function Editor({ workflow, manifests, onBackToList, saving, onSave }: EditorPro
   const [inputs, setInputs] = useState<Record<string, Record<string, unknown>>>(() => initialBag(workflow.definition, "inputs"));
   const [nodeLabels, setNodeLabels] = useState<Record<string, string>>(() =>
     Object.fromEntries(workflow.definition.nodes.map((n) => [n.id, n.label ?? ""]))
+  );
+  // Per-node retry-on-failure policy, keyed by node id. Only nodes that declared one are present;
+  // absent = no retry. Folded back into each NodeDefinition.retry at save (rfToDefinition).
+  const [retries, setRetries] = useState<Record<string, RetryPolicy>>(() =>
+    Object.fromEntries(
+      workflow.definition.nodes.filter((n) => n.retry).map((n) => [n.id, n.retry as RetryPolicy])
+    )
   );
 
   // Workflow IO contract — inputs/outputs are part of the workflow JSON because they
@@ -430,6 +439,15 @@ function Editor({ workflow, manifests, onBackToList, saving, onSave }: EditorPro
     setNodes((nds) => nds.map((n) => n.id === id ? { ...n, data: { ...n.data, label: label || null } } : n));
     setUnsaved(true);
   };
+  const updateRetry = (id: string, next: RetryPolicy | null) => {
+    // null clears the policy (remove the key) so the saved definition omits retry entirely.
+    setRetries((r) => {
+      const copy = { ...r };
+      if (next) copy[id] = next; else delete copy[id];
+      return copy;
+    });
+    setUnsaved(true);
+  };
 
   // Mirror the workflow input fields onto the Manual start node's card data so the entry node
   // renders its inputs (Dify-style). Called from the inputs editor's onChange + the refetch
@@ -442,7 +460,7 @@ function Editor({ workflow, manifests, onBackToList, saving, onSave }: EditorPro
 
   // ─── Save ───────────────────────────────────────────────────────────────────
   const handleSave = async () => {
-    const definition = rfToDefinition(nodes, edges, configs, inputs, nodeLabels, workflowInputs, workflowOutputs);
+    const definition = rfToDefinition(nodes, edges, configs, inputs, nodeLabels, retries, workflowInputs, workflowOutputs);
     const activations = deriveActivations(definition, workflow.activations, manifestByType);
     try {
       await onSave({ name, description: workflow.description, definition, activations });
@@ -737,7 +755,7 @@ function Editor({ workflow, manifests, onBackToList, saving, onSave }: EditorPro
               // Live definition snapshot — recomputed every render from React Flow state +
               // workflow Variables/Inputs/Outputs. Drives the autocomplete picker and the
               // upstream outputs hint card so suggestions stay accurate as the user edits.
-              liveDefinition={rfToDefinition(nodes, edges, configs, inputs, nodeLabels, workflowInputs, workflowOutputs)}
+              liveDefinition={rfToDefinition(nodes, edges, configs, inputs, nodeLabels, retries, workflowInputs, workflowOutputs)}
               manifestByType={manifestByType}
               // Live variable rows from the unified `variable` table. Threaded through to
               // introspectScope so the {{}} picker autocompletes real names (e.g. {{team.test}})
@@ -757,6 +775,8 @@ function Editor({ workflow, manifests, onBackToList, saving, onSave }: EditorPro
               onLabelChange={(v) => updateLabel(selectedNode.id, v)}
               onConfigChange={(v) => updateConfig(selectedNode.id, v)}
               onInputsChange={(v) => updateInputs(selectedNode.id, v)}
+              retry={retries[selectedNode.id] ?? null}
+              onRetryChange={(v) => updateRetry(selectedNode.id, v)}
             />
           )}
         </aside>
@@ -940,6 +960,8 @@ function NodeInspector({
   onLabelChange,
   onConfigChange,
   onInputsChange,
+  retry,
+  onRetryChange,
 }: {
   nodeId: string;
   manifest: NodeManifestDto;
@@ -957,6 +979,8 @@ function NodeInspector({
   onLabelChange: (v: string) => void;
   onConfigChange: (v: Record<string, unknown>) => void;
   onInputsChange: (v: Record<string, unknown>) => void;
+  retry: RetryPolicy | null;
+  onRetryChange: (v: RetryPolicy | null) => void;
 }) {
   // Compute scope at THIS node's position. Re-runs every render — cheap, definition is
   // already in memory. Feeds the autocomplete picker + the "Provides" hint card.
@@ -1033,6 +1057,12 @@ function NodeInspector({
             />
           </section>
         </>
+      )}
+
+      {/* Retry-on-failure — a cross-cutting engine setting, shown for any node that can fail.
+          Triggers are the run's entry point (nothing to retry), so they're excluded. */}
+      {manifest.kind !== "Trigger" && (
+        <NodeRetryEditor value={retry} onChange={onRetryChange} />
       )}
 
       {/* Output section — what THIS node emits for downstream nodes to reference. Header
@@ -1128,6 +1158,7 @@ function rfToDefinition(
   configs: Record<string, Record<string, unknown>>,
   inputs: Record<string, Record<string, unknown>>,
   labels: Record<string, string>,
+  retries: Record<string, RetryPolicy>,
   workflowInputs: import("@/api/workflows").WorkflowVariable[] = [],
   workflowOutputs: import("@/api/workflows").WorkflowVariable[] = []
 ): WorkflowDefinition {
@@ -1138,6 +1169,9 @@ function rfToDefinition(
     config: configs[n.id] ?? {},
     inputs: inputs[n.id] ?? {},
     position: { x: Math.round(n.position.x), y: Math.round(n.position.y) },
+    // Omit retry entirely when absent so the saved definition (and its content hash) is
+    // unchanged for nodes the operator never gave a policy.
+    ...(retries[n.id] ? { retry: retries[n.id] } : {}),
   }));
 
   const edgeDefs: EdgeDefinition[] = edges.map((e) => ({

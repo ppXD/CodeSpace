@@ -54,6 +54,19 @@ export interface NodeDefinition {
   inputs: unknown;
   /** Canvas position (editor-only). When null the editor auto-lays out the node. */
   position?: NodePosition | null;
+  /** Optional retry-on-failure policy. Absent = run once (default). */
+  retry?: RetryPolicy | null;
+}
+
+/**
+ * Per-node retry-on-failure policy. Absent on a node = no retry (run once). The engine re-runs
+ * the node after a genuine failure up to `maxAttempts` times, waiting `backoffSeconds` between
+ * attempts. Suspends + cancellation are never retried. Mirrors the backend RetryPolicy DTO; the
+ * engine clamps maxAttempts to [1,10] and backoffSeconds to [0,60].
+ */
+export interface RetryPolicy {
+  maxAttempts: number;
+  backoffSeconds: number;
 }
 
 export interface NodePosition {

@@ -280,6 +280,56 @@ public class DefinitionValidatorTests
         result.Errors.ShouldContain(e => e.Contains("schemaVersion"));
     }
 
+    // ─── Retry policy (Phase 2) ────────────────────────────────────────────────
+
+    [Theory]
+    [InlineData(1, 0)]                              // no-retry sentinel
+    [InlineData(3, 5)]                              // typical
+    [InlineData(RetryPlan.MaxAttemptsCap, 0)]       // upper attempts boundary
+    [InlineData(2, RetryPlan.MaxBackoffSeconds)]    // upper backoff boundary
+    public void Valid_retry_policy_passes(int maxAttempts, double backoffSeconds)
+    {
+        var definition = MakeMinimalDefinition(extraNode: NodeWithRetry("a", "regular.a", maxAttempts, backoffSeconds));
+
+        BuildValidator().Validate(definition).IsValid.ShouldBeTrue();
+    }
+
+    [Theory]
+    [InlineData(0)]                                 // below floor
+    [InlineData(-1)]                                // negative
+    [InlineData(RetryPlan.MaxAttemptsCap + 1)]      // above cap
+    public void Out_of_range_retry_maxAttempts_errors(int maxAttempts)
+    {
+        var definition = MakeMinimalDefinition(extraNode: NodeWithRetry("a", "regular.a", maxAttempts, 0));
+        var result = BuildValidator().Validate(definition);
+
+        result.IsValid.ShouldBeFalse();
+        result.Errors.ShouldContain(e => e.Contains("maxAttempts") && e.Contains("'a'"));
+    }
+
+    [Theory]
+    [InlineData(-1)]                                // negative
+    [InlineData(RetryPlan.MaxBackoffSeconds + 1)]   // above cap
+    public void Out_of_range_retry_backoff_errors(double backoffSeconds)
+    {
+        var definition = MakeMinimalDefinition(extraNode: NodeWithRetry("a", "regular.a", 3, backoffSeconds));
+        var result = BuildValidator().Validate(definition);
+
+        result.IsValid.ShouldBeFalse();
+        result.Errors.ShouldContain(e => e.Contains("backoffSeconds") && e.Contains("'a'"));
+    }
+
+    [Fact]
+    public void No_retry_policy_is_valid()
+    {
+        // The common case: a node with Retry == null must validate cleanly (non-breaking).
+        var definition = MakeMinimalDefinition(extraNode: Node("a", "regular.a"));
+
+        var aNode = definition.Nodes.Single(n => n.Id == "a");
+        aNode.Retry.ShouldBeNull();
+        BuildValidator().Validate(definition).IsValid.ShouldBeTrue();
+    }
+
     private static WorkflowDefinition MakeMinimalDefinition(NodeDefinition? extraNode = null)
     {
         var nodes = new List<NodeDefinition>
@@ -314,6 +364,15 @@ public class DefinitionValidatorTests
         TypeKey = typeKey,
         Config = JsonDocument.Parse("{}").RootElement.Clone(),
         Inputs = JsonDocument.Parse(inputsJson).RootElement.Clone()
+    };
+
+    private static NodeDefinition NodeWithRetry(string id, string typeKey, int maxAttempts, double backoffSeconds) => new()
+    {
+        Id = id,
+        TypeKey = typeKey,
+        Config = JsonDocument.Parse("{}").RootElement.Clone(),
+        Inputs = JsonDocument.Parse("{}").RootElement.Clone(),
+        Retry = new RetryPolicy { MaxAttempts = maxAttempts, BackoffSeconds = backoffSeconds }
     };
 
     private sealed class StubNode : INodeRuntime
