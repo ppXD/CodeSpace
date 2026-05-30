@@ -35,5 +35,14 @@ public enum WorkflowRunStatus
     Failure,
 
     /// <summary>Operator hit "Cancel" via the UI; engine stopped at the next safe point.</summary>
-    Cancelled
+    Cancelled,
+
+    /// <summary>
+    /// A node returned <c>Suspended</c> — the run is intentionally PAUSED, waiting on an external
+    /// signal (a timer wake, a human approval, or an external callback). NOT terminal and NOT
+    /// "stuck": the stuck-run reconciler scans only Pending/Enqueued/Running, so a Suspended run
+    /// survives its sweeps untouched. A resume signal flips it back to <see cref="Pending"/> and
+    /// re-dispatches; the durable walker rehydrates and continues from where it paused.
+    /// </summary>
+    Suspended
 }
