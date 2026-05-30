@@ -1811,6 +1811,13 @@ textarea:-webkit-autofill {
 .acs-root .wf-callback-row { display: flex; gap: 8px; align-items: center; }
 .acs-root .wf-callback-url { flex: 1; min-width: 0; font-size: 11.5px; }
 
+/* Sub-workflow wait: the embedded live child run-detail. */
+.acs-root .wf-subrun-toggle { display: flex; align-items: center; gap: 6px; background: none; border: 0; padding: 0; cursor: pointer; color: var(--ink); }
+.acs-root .wf-subrun-toggle:disabled { cursor: default; }
+.acs-root .wf-subrun { margin-top: 10px; padding: 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); }
+/* A nested run-detail is tighter than a top-level one so the embedding stays legible. */
+.acs-root .wf-detail-body-nested { gap: 10px; }
+
 .acs-root .wf-run-summary { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
 .acs-root .wf-run-summary > span:not([class]) { color: var(--muted); }
 
