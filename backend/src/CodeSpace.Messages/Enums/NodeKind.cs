@@ -26,5 +26,13 @@ public enum NodeKind
     /// Exit point. Has inputs only (no outputs). A workflow MAY have multiple terminals — the
     /// engine stops the run when any one of them succeeds.
     /// </summary>
-    Terminal
+    Terminal,
+
+    /// <summary>
+    /// Container that owns a body subgraph and re-runs it per iteration (e.g. <c>flow.loop</c>).
+    /// The engine dispatches this Kind specially — like Trigger/Terminal it marks "a new engine
+    /// lifecycle phase" (run the owned body N times, keyed by iteration), not just another step.
+    /// Body nodes point back via <c>NodeDefinition.ParentId</c>.
+    /// </summary>
+    Loop
 }

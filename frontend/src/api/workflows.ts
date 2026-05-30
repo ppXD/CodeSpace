@@ -48,6 +48,8 @@ export interface NodeDefinition {
   id: string;
   typeKey: string;
   label?: string | null;
+  /** Container ownership — set when this node lives inside a flow.loop body. Null/absent at top level. */
+  parentId?: string | null;
   /** Static design-time config object. Shape varies per node type. */
   config: unknown;
   /** Dynamic inputs — values can be literals, {{ref}} strings, or { "$ref": "..." } objects. */

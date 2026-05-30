@@ -26,6 +26,14 @@ public sealed record NodeDefinition
     /// <summary>Optional human label shown in the editor. Falls back to manifest <c>DisplayName</c>.</summary>
     public string? Label { get; init; }
 
+    /// <summary>
+    /// Container ownership. When set, this node is part of another node's body subgraph — today
+    /// only a <c>flow.loop</c> container, whose body runs once per iteration. <c>null</c> for a
+    /// top-level node (the default). Null-omitted from the canonical content hash, so existing
+    /// definitions are byte-identical until a node is actually placed inside a container.
+    /// </summary>
+    public string? ParentId { get; init; }
+
     /// <summary>Per-node static configuration. Shape validated against the node's manifest <c>ConfigSchema</c>.</summary>
     public JsonElement Config { get; init; } = default;
 

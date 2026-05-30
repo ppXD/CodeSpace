@@ -60,6 +60,16 @@ public sealed class NodeRunScope
     public IReadOnlyDictionary<string, JsonElement>? Iteration { get; init; }
 
     /// <summary>
+    /// Loop-scoped variables for nodes inside a <c>flow.loop</c> body — referenced via
+    /// <c>{{loop.&lt;name&gt;}}</c>. Carries the loop's mutable variables plus <c>{{loop.index}}</c>
+    /// (0-based pass number). Null outside a loop body. Unlike <see cref="Iteration"/> (which the
+    /// resolver reads via BARE <c>{{item}}</c>), this is an explicit <c>loop.</c>-prefixed head so a
+    /// body can reference both its own loop vars and an enclosing iterate's <c>{{item}}</c> without
+    /// collision. Each enclosing loop swaps this slot for its body's pass (save/restore for nesting).
+    /// </summary>
+    public IReadOnlyDictionary<string, JsonElement>? Loop { get; init; }
+
+    /// <summary>
     /// Workflow-scoped variables — referenced via <c>{{wf.&lt;name&gt;}}</c>. Sourced from the
     /// unified <c>variable</c> table with <c>scope='Workflow'</c> (NOT from a
     /// <c>WorkflowDefinition.Variables[]</c> array — that field was removed in Phase 2.7;
