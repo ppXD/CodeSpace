@@ -5,7 +5,8 @@ import { fetchJson } from "./request";
 export type NodeKind = "Regular" | "Trigger" | "Terminal";
 export type NodeStatus = "Pending" | "Running" | "Success" | "Failure" | "Skipped" | "Suspended";
 // Enqueued = dispatched, awaiting worker pickup. Still cancellable; no node activity yet.
-export type WorkflowRunStatus = "Pending" | "Enqueued" | "Running" | "Success" | "Failure" | "Cancelled";
+// Suspended = paused on a node waiting for a timer / approval / callback; resumes on the signal.
+export type WorkflowRunStatus = "Pending" | "Enqueued" | "Running" | "Success" | "Failure" | "Cancelled" | "Suspended";
 
 /**
  * Open string instead of a closed enum. Examples: "manual", "replay", "schedule.cron",

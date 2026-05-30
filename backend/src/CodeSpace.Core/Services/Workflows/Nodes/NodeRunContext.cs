@@ -64,4 +64,13 @@ public sealed record NodeRunContext
     /// <see cref="INodeObservability"/> for the contract.
     /// </summary>
     public required INodeObservability Observability { get; init; }
+
+    /// <summary>
+    /// Set ONLY when the node is being re-run after a suspension was resolved — carries the
+    /// resume signal's payload (timer wake marker, the approver's decision, the callback body).
+    /// <c>null</c> on a node's first execution. A suspending node (e.g. flow.sleep, a future
+    /// flow.wait_approval) inspects this to decide "first pass → return <c>Suspend(token)</c>"
+    /// vs "resumed → return <c>Success</c>".
+    /// </summary>
+    public JsonElement? ResumePayload { get; init; }
 }

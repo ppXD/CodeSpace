@@ -3,12 +3,14 @@ using CodeSpace.Core.DependencyInjection;
 using CodeSpace.Core.Hardening;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
+using CodeSpace.Core.Services.Jobs;
 using CodeSpace.Core.Services.Variables;
 using CodeSpace.Core.Services.Workflows;
 using CodeSpace.Core.Services.Workflows.Artifacts;
 using CodeSpace.Core.Services.Workflows.Lifecycle;
 using CodeSpace.Core.Services.Workflows.Nodes;
 using CodeSpace.Core.Services.Workflows.Runtime;
+using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Dtos.Workflows;
 using CodeSpace.Messages.Enums;
 using Microsoft.EntityFrameworkCore;
@@ -47,8 +49,9 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
     private readonly IArtifactStore _artifactStore;
     private readonly ILogger<WorkflowEngine> _logger;
     private readonly ILoggerFactory _loggerFactory;
+    private readonly ICodeSpaceBackgroundJobClient _backgroundJobClient;
 
-    public WorkflowEngine(CodeSpaceDbContext db, INodeRegistry nodeRegistry, IVariableService variableService, IRunRecordLogger recordLogger, IPayloadRedactor redactor, IArtifactStore artifactStore, ILogger<WorkflowEngine> logger, ILoggerFactory loggerFactory)
+    public WorkflowEngine(CodeSpaceDbContext db, INodeRegistry nodeRegistry, IVariableService variableService, IRunRecordLogger recordLogger, IPayloadRedactor redactor, IArtifactStore artifactStore, ILogger<WorkflowEngine> logger, ILoggerFactory loggerFactory, ICodeSpaceBackgroundJobClient backgroundJobClient)
     {
         _db = db;
         _nodeRegistry = nodeRegistry;
@@ -58,6 +61,7 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
         _artifactStore = artifactStore;
         _logger = logger;
         _loggerFactory = loggerFactory;
+        _backgroundJobClient = backgroundJobClient;
     }
 
     public async Task ExecuteRunAsync(Guid runId, CancellationToken cancellationToken)
@@ -170,6 +174,15 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
         {
             await CompleteRunAsync(run, WorkflowRunStatus.Failure, ex.Message, cancellationToken).ConfigureAwait(false);
             await _recordLogger.RunFailedAsync(run.Id, ex.Message, DateTimeOffset.UtcNow - engineStartedAt, cancellationToken).ConfigureAwait(false);
+        }
+        catch (RunSuspendedException)
+        {
+            // A node paused the run. The wait row + node.suspended record are already persisted
+            // (SuspendNodeAsync) and the timer resume (if any) is scheduled. Flip the run to
+            // Suspended and return WITHOUT completing — the resume signal will re-dispatch it and
+            // the durable walker continues from the suspended node. NOT a terminal state.
+            run.Status = WorkflowRunStatus.Suspended;
+            await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
         }
         catch (WorkflowSecretLeakException ex)
         {
@@ -739,6 +752,13 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
             if (status == NodeStatus.Failure)
                 throw new NodeFailureException($"Node '{nodeId}' failed.");
 
+            // The node parked the run (timer / approval / callback). SuspendNodeAsync already
+            // persisted the wait + node.suspended record; abort the walk so the run lands in
+            // Suspended (not Success). The resume signal re-dispatches; the durable walker
+            // rehydrates and re-runs THIS node with its ResumePayload.
+            if (status == NodeStatus.Suspended)
+                throw new RunSuspendedException(nodeId);
+
             EnqueueDownstreamWhenReady(node, state);
 
             // Reaching a Terminal doesn't short-circuit the walker — we keep draining the
@@ -798,6 +818,9 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
         }
 
         RehydrateTerminalOutputs(definition, scope, state, persisted);
+
+        // Load any resolved waits so a resumed node sees its ResumePayload on re-run.
+        await LoadResolvedWaitsAsync(run.Id, state, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -890,6 +913,78 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
             .ToList();
     }
 
+    /// <summary>
+    /// Persist a node's suspension: emit the immutable node.suspended record, (re)write the
+    /// workflow_run_wait row, and — for a Timer wait — schedule the resume at wake_at. The walk
+    /// then throws <see cref="RunSuspendedException"/> so the run lands in Suspended.
+    /// </summary>
+    private async Task SuspendNodeAsync(WorkflowRun run, NodeDefinition node, NodeResult result, CancellationToken cancellationToken)
+    {
+        var token = result.SuspendUntil
+            ?? throw new NodeFailureException($"Node '{node.Id}' returned Suspended without a SuspensionToken.");
+
+        var waitKind = ValidateWaitKind(node.Id, token.Kind);
+        var wakeAt = waitKind == WorkflowWaitKinds.Timer ? ReadWakeAt(token) : null;
+
+        await _recordLogger.NodeSuspendedAsync(run.Id, node.Id, NoIteration, waitKind, wakeAt, cancellationToken).ConfigureAwait(false);
+
+        // One outstanding wait per (run, node, iteration). Drop any prior (resolved) wait for
+        // this node so a re-suspend can't trip the unique index.
+        var existing = await _db.WorkflowRunWait
+            .Where(w => w.RunId == run.Id && w.NodeId == node.Id && w.IterationKey == NoIteration)
+            .ToListAsync(cancellationToken).ConfigureAwait(false);
+        if (existing.Count > 0) _db.WorkflowRunWait.RemoveRange(existing);
+
+        _db.WorkflowRunWait.Add(new WorkflowRunWait
+        {
+            Id = Guid.NewGuid(),
+            RunId = run.Id,
+            NodeId = node.Id,
+            IterationKey = NoIteration,
+            WaitKind = waitKind,
+            Token = Guid.NewGuid().ToString("N"),
+            WakeAt = wakeAt,
+            Status = WorkflowWaitStatuses.Pending,
+            CreatedAt = DateTimeOffset.UtcNow,
+        });
+        await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+
+        // Timer waits self-wake: schedule the resume at wake_at. Approval / Callback waits are
+        // woken by an external signal (Phase 1.2), so nothing is scheduled here.
+        if (waitKind == WorkflowWaitKinds.Timer && wakeAt.HasValue)
+            _backgroundJobClient.Schedule<IWorkflowResumeService>(s => s.ResumeAsync(run.Id, CancellationToken.None), wakeAt.Value);
+    }
+
+    private static string ValidateWaitKind(string nodeId, string kind)
+    {
+        if (kind is WorkflowWaitKinds.Timer or WorkflowWaitKinds.Approval or WorkflowWaitKinds.Callback) return kind;
+
+        throw new NodeFailureException($"Node '{nodeId}' suspended with unknown wait kind '{kind}'. Expected Timer, Approval, or Callback.");
+    }
+
+    /// <summary>For a Timer suspension the node puts an ISO-8601 <c>wake_at</c> in the token payload.</summary>
+    private static DateTimeOffset? ReadWakeAt(SuspensionToken token)
+    {
+        if (token.Payload.ValueKind != JsonValueKind.Object) return null;
+        if (!token.Payload.TryGetProperty("wake_at", out var w) || w.ValueKind != JsonValueKind.String) return null;
+
+        return DateTimeOffset.TryParse(w.GetString(), out var dt) ? dt : null;
+    }
+
+    private async Task LoadResolvedWaitsAsync(Guid runId, WalkerState state, CancellationToken cancellationToken)
+    {
+        var resolved = await _db.WorkflowRunWait.AsNoTracking()
+            .Where(w => w.RunId == runId && w.Status == WorkflowWaitStatuses.Resolved)
+            .ToListAsync(cancellationToken).ConfigureAwait(false);
+
+        foreach (var w in resolved)
+            state.ResumePayloads[w.NodeId] = string.IsNullOrWhiteSpace(w.PayloadJson)
+                ? EmptyJsonObject()
+                : JsonDocument.Parse(w.PayloadJson).RootElement.Clone();
+    }
+
+    private static JsonElement EmptyJsonObject() => JsonDocument.Parse("{}").RootElement.Clone();
+
     private bool ShouldSkip(NodeDefinition node, WalkerState state)
     {
         // The trigger / any root never skips on incoming-edge logic (it has no incoming).
@@ -918,10 +1013,22 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
 
         try
         {
-            var invocation = new NodeInvocationData(run, node, scope, resolvedInputs, resolvedConfig, runtime.TypeKey, parentRecordId);
+            // On a resumed run the node was suspended; rehydrate loaded its resolved wait's
+            // payload into state.ResumePayloads. Pass it so the node knows it's being resumed.
+            var resumePayload = state.ResumePayloads.TryGetValue(node.Id, out var rp) ? rp : (JsonElement?)null;
+            var invocation = new NodeInvocationData(run, node, scope, resolvedInputs, resolvedConfig, runtime.TypeKey, parentRecordId, resumePayload);
             var context = BuildNodeRunContext(invocation);
             var result = await runtime.RunAsync(context, cancellationToken).ConfigureAwait(false);
             var duration = DateTimeOffset.UtcNow - startedAt;
+
+            // The node parked the run (timer / approval / callback). Persist the wait + the
+            // node.suspended record + schedule the timer resume, then signal the walker to abort
+            // into Suspended (the run is NOT done).
+            if (result.Status == NodeStatus.Suspended)
+            {
+                await SuspendNodeAsync(run, node, result, cancellationToken).ConfigureAwait(false);
+                return NodeStatus.Suspended;
+            }
 
             await PersistNodeResultAsync(run.Id, node.Id, result, duration, cancellationToken).ConfigureAwait(false);
             ApplyResultToScopeAndState(node, result, scope, state);
@@ -970,7 +1077,7 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
     /// allocations beyond the boxing the context itself does, no behaviour, just a parameter
     /// holder.
     /// </summary>
-    private sealed record NodeInvocationData(WorkflowRun Run, NodeDefinition Node, NodeRunScope Scope, IReadOnlyDictionary<string, JsonElement> ResolvedInputs, IReadOnlyDictionary<string, JsonElement> ResolvedConfig, string TypeKey, Guid ParentRecordId);
+    private sealed record NodeInvocationData(WorkflowRun Run, NodeDefinition Node, NodeRunScope Scope, IReadOnlyDictionary<string, JsonElement> ResolvedInputs, IReadOnlyDictionary<string, JsonElement> ResolvedConfig, string TypeKey, Guid ParentRecordId, JsonElement? ResumePayload);
 
     /// <summary>
     /// Assemble the <see cref="NodeRunContext"/> the node sees. Pulls the per-node logger
@@ -991,6 +1098,7 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
             Scope = inv.Scope,
             Logger = nodeLogger,
             Observability = observability,
+            ResumePayload = inv.ResumePayload,
         };
     }
 
@@ -1063,6 +1171,12 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
         public NodeFailureException(string message) : base(message) { }
     }
 
+    /// <summary>Thrown to abort the walk when a node parks the run. Caught in RunAfterClaimAsync, which sets Suspended.</summary>
+    private sealed class RunSuspendedException : Exception
+    {
+        public RunSuspendedException(string nodeId) : base($"Run suspended on node '{nodeId}'.") { }
+    }
+
     /// <summary>
     /// Per-run mutable bookkeeping for the frontier walker. Lives only for the duration of
     /// <see cref="WalkGraphAsync"/> — gets garbage-collected when the run ends. Pre-computes
@@ -1096,6 +1210,9 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
 
         /// <summary>Per edge: whether it's "live" (source succeeded AND handle is selected). Drives ShouldSkip.</summary>
         public Dictionary<EdgeDefinition, bool> EdgeLive { get; } = new();
+
+        /// <summary>Per suspended-then-resumed node: the resolved wait's payload, injected as the node's ResumePayload on re-run.</summary>
+        public Dictionary<string, JsonElement> ResumePayloads { get; } = new();
 
         /// <summary>
         /// Last successful Terminal node's resolved Inputs — written to workflow_run.OutputsJson
