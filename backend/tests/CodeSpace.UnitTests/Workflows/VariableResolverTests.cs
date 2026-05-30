@@ -204,4 +204,37 @@ public class VariableResolverTests
         VariableResolver.Resolve(ParseElement("\"{{item}}\""), scope).GetString().ShouldBe("PR-7");
         VariableResolver.Resolve(ParseElement("\"{{loop.item}}\""), scope).GetString().ShouldBe("loop-item");
     }
+
+    [Fact]
+    public void Loop_scope_supports_nested_access_dollar_ref_and_interpolation()
+    {
+        var scope = new NodeRunScope
+        {
+            Trigger = ParseDict("{}"),
+            Loop = ParseDict("""{ "state": { "count": 2, "label": "two" }, "items": [10, 20], "index": 1 }"""),
+        };
+
+        // Dotted descent into a loop var that holds an object.
+        VariableResolver.Resolve(ParseElement("\"{{loop.state.count}}\""), scope).GetInt32().ShouldBe(2);
+
+        // $ref form returns the WHOLE structured value (array), not a stringified copy.
+        var arr = VariableResolver.Resolve(ParseElement("""{ "$ref": "loop.items" }"""), scope);
+        arr.ValueKind.ShouldBe(JsonValueKind.Array);
+        arr.GetArrayLength().ShouldBe(2);
+
+        // Multi-placeholder interpolation mixes loop refs with surrounding text.
+        VariableResolver.Resolve(ParseElement("\"#{{loop.index}} = {{loop.state.label}}\""), scope)
+            .GetString().ShouldBe("#1 = two");
+    }
+
+    [Fact]
+    public void Loop_refs_resolve_to_null_when_not_inside_a_loop()
+    {
+        // Outside a loop body the Loop slot is null — {{loop.x}} must resolve to null (→ "" in
+        // interpolation) and NEVER throw, so a stray reference degrades gracefully.
+        var scope = new NodeRunScope { Trigger = ParseDict("{}") };   // Loop left null
+
+        VariableResolver.WalkPath("loop.anything", scope).ShouldBeNull();
+        VariableResolver.Resolve(ParseElement("\"x={{loop.anything}}\""), scope).GetString().ShouldBe("x=");
+    }
 }
