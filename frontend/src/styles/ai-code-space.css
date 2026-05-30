@@ -2195,6 +2195,31 @@ textarea:-webkit-autofill {
 .acs-root .wf-retry-fields { display: flex; flex-direction: column; gap: 8px; margin-top: 8px; }
 .acs-root .wf-retry-hint { font-size: 10.5px; color: var(--muted); line-height: 1.4; margin: 2px 0 0; }
 
+/* flow.loop inspector (Dify-style loop variables · termination · max iterations) */
+.acs-root .wf-loop-section-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.acs-root .wf-loop-add { font-size: 11px; padding: 2px 8px; display: inline-flex; align-items: center; gap: 4px; }
+.acs-root .wf-loop-empty { font-size: 11.5px; color: var(--muted); font-style: italic; margin-top: 6px; }
+.acs-root .wf-loop-var { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; padding: 8px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); }
+.acs-root .wf-loop-var-row { display: flex; align-items: center; gap: 6px; }
+.acs-root .wf-loop-var-name { flex: 1; min-width: 0; }
+.acs-root .wf-loop-var-type { flex: 0 0 88px; }
+.acs-root .wf-loop-var-source { flex: 0 0 96px; }
+.acs-root .wf-loop-del {
+  flex: 0 0 auto; display: inline-flex; align-items: center; justify-content: center;
+  width: 28px; height: 28px; background: none; border: 1px solid var(--line); border-radius: 6px;
+  cursor: pointer; color: var(--muted);
+}
+.acs-root .wf-loop-del:hover { color: var(--danger); border-color: var(--danger); }
+.acs-root .wf-loop-logic { display: flex; align-items: center; gap: 8px; font-size: 11.5px; color: var(--ink-2); margin-top: 8px; }
+.acs-root .wf-loop-logic-sel { flex: 0 0 120px; }
+.acs-root .wf-loop-cond { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; }
+.acs-root .wf-loop-cond-row { display: flex; align-items: center; gap: 6px; }
+.acs-root .wf-loop-cond-op { flex: 0 0 130px; }
+.acs-root .wf-loop-cond-val { flex: 1; min-width: 0; }
+.acs-root .wf-loop-max { display: flex; align-items: center; gap: 12px; }
+.acs-root .wf-loop-max-num { flex: 0 0 88px; }
+.acs-root .wf-loop-max-slider { flex: 1; min-width: 0; accent-color: var(--accent); }
+
 /* Modals portal to <body>, OUTSIDE .acs-root, so the .acs-root-scoped .wf-form* rules above
    don't reach them and the form collapses to unstyled inline text. Mirror them under the
    global .mdl scope (same pattern as `.mdl .btn` mirrors `.acs-root .btn`) so SchemaForm and

@@ -43,6 +43,7 @@ import { ERROR_HANDLE, errorRouteTarget, setErrorRoute } from "@/lib/workflowErr
 import { introspectScope } from "@/components/workflows/scope-introspection";
 import { StartNodeInputsEditor } from "@/components/workflows/StartNodeInputsEditor";
 import { SubworkflowEditor } from "@/components/workflows/SubworkflowEditor";
+import { LoopEditor } from "@/components/workflows/LoopEditor";
 import { VariableTablePanel } from "@/components/workflows/VariableTablePanel";
 import { WorkflowNode, type WorkflowNodeData } from "@/components/workflows/WorkflowNode";
 import { useAlert } from "@/components/dialog";
@@ -706,7 +707,9 @@ function Editor({ workflow, manifests, onBackToList, saving, onSave }: EditorPro
           <div className="wf-palette-hint">Click to add · Drag for precise placement</div>
           {manifests.length === 0 && <div className="wf-palette-empty">No node types loaded.</div>}
           <PaletteSection title="Triggers"  manifests={manifests.filter((m) => m.kind === "Trigger")}  onAdd={onPaletteClick} disabledOf={isPaletteItemDisabled} />
-          <PaletteSection title="Steps"     manifests={manifests.filter((m) => m.kind === "Regular")}  onAdd={onPaletteClick} disabledOf={isPaletteItemDisabled} />
+          {/* "Loop" is a Step too; "flow.loop_start" is the loop's internal body-entry marker, added
+              automatically with a Loop — never hand-dragged, so it's filtered out of the palette. */}
+          <PaletteSection title="Steps"     manifests={manifests.filter((m) => (m.kind === "Regular" || m.kind === "Loop") && m.typeKey !== "flow.loop_start")}  onAdd={onPaletteClick} disabledOf={isPaletteItemDisabled} />
           <PaletteSection title="Endpoints" manifests={manifests.filter((m) => m.kind === "Terminal")} onAdd={onPaletteClick} disabledOf={isPaletteItemDisabled} />
         </aside>
 
@@ -1082,6 +1085,15 @@ function NodeInspector({
           suggestions={suggestions}
           currentWorkflowId={currentWorkflowId}
         />
+      ) : manifest.typeKey === "flow.loop" ? (
+        // Loop gets Dify's settings panel (loop variables · termination · max iterations) instead of
+        // the generic Config/Inputs forms; its body subgraph is authored on the canvas.
+        <LoopEditor config={config} onConfigChange={onConfigChange} suggestions={suggestions} />
+      ) : manifest.typeKey === "flow.loop_start" ? (
+        // The loop body's entry marker — auto-added inside a Loop. Nothing to configure.
+        <section className="wf-inspector-section">
+          <p className="wf-retry-hint">Loop body entry — added automatically inside a Loop. Connect the loop's body steps from here; there's nothing to configure.</p>
+        </section>
       ) : (
         <>
           <section className="wf-inspector-section">
@@ -1108,14 +1120,18 @@ function NodeInspector({
       )}
 
       {/* Retry-on-failure — a cross-cutting engine setting, shown for any node that can fail.
-          Triggers are the run's entry point (nothing to retry), so they're excluded. */}
-      {manifest.kind !== "Trigger" && (
+          Triggers are the run's entry point (nothing to retry). A Loop has its own iteration
+          semantics (the engine doesn't honour node-level retry on it), and loop_start is a passthrough
+          marker — both are excluded. */}
+      {manifest.kind !== "Trigger" && manifest.typeKey !== "flow.loop" && manifest.typeKey !== "flow.loop_start" && (
         <NodeRetryEditor value={retry} onChange={onRetryChange} />
       )}
 
       {/* Error routing — mirrors the canvas red `error` handle. Picking a target wires an error
-          edge; the engine routes here on failure (after retries) instead of failing the run. */}
-      {manifest.kind === "Regular" && (
+          edge; the engine routes here on failure (after retries) instead of failing the run. Shown
+          for regular steps AND a Loop (a body failure can route the loop down its error edge); never
+          for the loop_start marker. */}
+      {(manifest.kind === "Regular" || manifest.typeKey === "flow.loop") && manifest.typeKey !== "flow.loop_start" && (
         <section className="wf-inspector-section">
           <div className="wf-inspector-section-h">On failure</div>
           <select
