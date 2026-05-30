@@ -297,12 +297,25 @@ function Editor({ workflow, manifests, onBackToList, saving, onSave }: EditorPro
     const abs = getInternalNode(node.id)?.internals.positionAbsolute ?? node.position;
     const parentAbs = targetId ? (getInternalNode(targetId)?.internals.positionAbsolute ?? { x: 0, y: 0 }) : { x: 0, y: 0 };
 
+    // No `extent: "parent"` — that would CLIP the child inside the box so it could never be dragged
+    // back out. Keeping just parentId lets it move with the loop yet still be dragged out (→ unparent).
     setNodes((nds) => nds.map((n) => {
       if (n.id !== node.id) return n;
       return targetId
-        ? { ...n, parentId: targetId, extent: "parent" as const, position: { x: abs.x - parentAbs.x, y: abs.y - parentAbs.y } }
-        : { ...n, parentId: undefined, extent: undefined, position: abs };
+        ? { ...n, parentId: targetId, position: { x: abs.x - parentAbs.x, y: abs.y - parentAbs.y } }
+        : { ...n, parentId: undefined, position: abs };
     }));
+
+    // Re-scoping severs any edge that now crosses the loop boundary — a step only connects to siblings
+    // in the same scope (both top-level, or both in the same loop body). So dropping a step IN or
+    // pulling it OUT auto-releases its now-invalid bindings.
+    const parentOf = new Map(nodes.map((n) => [n.id, n.parentId ?? null]));
+    parentOf.set(node.id, targetId);
+    setEdges((eds) => eds.filter((e) => {
+      if (e.source !== node.id && e.target !== node.id) return true;
+      return (parentOf.get(e.source) ?? null) === (parentOf.get(e.target) ?? null);
+    }));
+
     setUnsaved(true);
   };
   const onConnect = (params: Connection) => {
@@ -410,7 +423,7 @@ function Editor({ workflow, manifests, onBackToList, saving, onSave }: EditorPro
     const startId = isLoop ? uniqueNodeId("flow.loop_start", [...nodes, newNode]) : null;
     const startNode: Node<WorkflowNodeData> | null = startId
       ? {
-          id: startId, type: "wf", parentId: id, extent: "parent", position: { x: 40, y: 72 },
+          id: startId, type: "wf", parentId: id, position: { x: 40, y: 72 },
           data: {
             nodeId: startId, typeKey: "flow.loop_start", displayName: startManifest?.displayName ?? "Loop start",
             iconKey: startManifest?.iconKey ?? "play", kind: "Regular", category: startManifest?.category ?? "Logic", label: null,
@@ -1294,9 +1307,10 @@ function definitionToRfNodes(
       ...(manifest?.isManual ? { inputFields: def.inputs ?? [] } : {}),
     };
 
-    // A loop body node renders INSIDE its container — position is relative to the parent, clipped.
+    // A loop body node renders INSIDE its container — position is relative to the parent. No
+    // `extent: "parent"` so it can still be dragged back OUT (onNodeDragStop then un-nests it).
     if (n.parentId) {
-      return { id: n.id, type: "wf", parentId: n.parentId, extent: "parent" as const, position: n.position ?? { x: 40, y: 60 }, data };
+      return { id: n.id, type: "wf", parentId: n.parentId, position: n.position ?? { x: 40, y: 60 }, data };
     }
 
     const position = n.position ?? { x: 80, y: fallbackY };
