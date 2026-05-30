@@ -77,4 +77,23 @@ describe("RunDetailView — sub-workflow step drill-down", () => {
     expect(screen.queryByText("Sub-workflow run")).toBeNull();
     expect(screen.queryByTitle("Open the sub-workflow run")).toBeNull();
   });
+
+  it("does not double-embed the child the run is suspended on (the suspended panel already shows it)", () => {
+    useWorkflowRunMock.mockImplementation((runId: string) => {
+      if (runId === "parent-1") return ok(detail({
+        status: "Suspended",
+        pendingWait: { nodeId: "sub", kind: "Subworkflow", token: "child-1", payload: {} },
+        nodes: [node({ nodeId: "sub", status: "Suspended", childRunId: "child-1" })],
+      }));
+      if (runId === "child-1") return ok(detail({ id: "child-1", nodes: [node({ nodeId: "child-step" })] }));
+      return missing;
+    });
+
+    render(<RunDetailView runId="parent-1" />);
+
+    // The suspended panel embeds the child at the top…
+    expect(screen.getByText("Running a sub-workflow")).toBeTruthy();
+    // …so the trace row must NOT offer the same child again (no duplicate embed / double-poll).
+    expect(screen.queryByText("Sub-workflow run")).toBeNull();
+  });
 });
