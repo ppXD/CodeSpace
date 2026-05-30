@@ -1003,6 +1003,17 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
         return incoming.All(edge => !state.EdgeLive.GetValueOrDefault(edge, false));
     }
 
+    /// <summary>
+    /// Run one node, honouring its optional retry-on-failure policy. The shape is a bounded
+    /// attempt loop: run once → on suspend, park; on success/skip, finalise + advance; on a
+    /// genuine failure (returned Fail OR thrown), retry if attempts remain (Warn-logged + a
+    /// bounded in-process backoff), else write node.failed and return Failure. A null policy
+    /// resolves to a single attempt — behaviour-identical to the pre-retry engine.
+    ///
+    /// <para>The resolved Inputs/Config + the resume payload are computed ONCE and constant
+    /// across attempts; node.started is emitted ONCE before the loop (the run-node view ignores
+    /// the per-retry <c>log</c> records and projects status from the node.* records only).</para>
+    /// </summary>
     private async Task<NodeStatus> ExecuteNodeAsync(WorkflowRun run, NodeDefinition node, NodeRunScope scope, WalkerState state, CancellationToken cancellationToken)
     {
         var runtime = _nodeRegistry.Resolve(node.TypeKey);
@@ -1015,49 +1026,111 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
         // to it via parent_record_id. The NodeObservability handle carries the link.
         var parentRecordId = await _recordLogger.NodeStartedAsync(run.Id, node.Id, NoIteration, redactedInputs, redactedConfig, cancellationToken).ConfigureAwait(false);
 
-        try
-        {
-            // On a resumed run the node was suspended; rehydrate loaded its resolved wait's
-            // payload into state.ResumePayloads. Pass it so the node knows it's being resumed.
-            var resumePayload = state.ResumePayloads.TryGetValue(node.Id, out var rp) ? rp : (JsonElement?)null;
-            var invocation = new NodeInvocationData(run, node, scope, resolvedInputs, resolvedConfig, runtime.TypeKey, parentRecordId, resumePayload);
-            var context = BuildNodeRunContext(invocation);
-            var result = await runtime.RunAsync(context, cancellationToken).ConfigureAwait(false);
-            var duration = DateTimeOffset.UtcNow - startedAt;
+        // On a resumed run the node was suspended; rehydrate loaded its resolved wait's payload
+        // into state.ResumePayloads. The node knows it's being resumed via this.
+        var resumePayload = state.ResumePayloads.TryGetValue(node.Id, out var rp) ? rp : (JsonElement?)null;
+        var exec = new NodeExecution(run, node, runtime, scope, state, resolvedInputs, resolvedConfig, parentRecordId, resumePayload, startedAt);
 
-            // The node parked the run (timer / approval / callback). Persist the wait + the
-            // node.suspended record + schedule the timer resume, then signal the walker to abort
-            // into Suspended (the run is NOT done).
-            if (result.Status == NodeStatus.Suspended)
+        var plan = RetryPlan.From(node.Retry);
+        var lastError = "Node failed.";
+
+        for (var attempt = 1; attempt <= plan.MaxAttempts; attempt++)
+        {
+            var (result, thrownError) = await RunNodeOnceAsync(exec, cancellationToken).ConfigureAwait(false);
+
+            // A suspend parks the run by design — never a failure, never retried.
+            if (result is { Status: NodeStatus.Suspended })
             {
                 await SuspendNodeAsync(run, node, result, cancellationToken).ConfigureAwait(false);
                 return NodeStatus.Suspended;
             }
 
-            await PersistNodeResultAsync(run.Id, node.Id, result, duration, cancellationToken).ConfigureAwait(false);
-            ApplyResultToScopeAndState(node, result, scope, state);
+            // Success / Skipped — persist, reflect into scope, capture terminal outputs, advance.
+            if (result != null && result.Status != NodeStatus.Failure)
+            {
+                await FinalizeNonFailureAsync(exec, result, cancellationToken).ConfigureAwait(false);
+                return result.Status;
+            }
 
-            if (result.Status == NodeStatus.Success && runtime.Manifest.Kind == NodeKind.Terminal && resolvedInputs.Count > 0)
-                CaptureTerminalOutputs(node, resolvedInputs, scope, state);
+            // Genuine failure (returned Fail or threw). Retry while attempts remain, else finalise.
+            lastError = result?.Error ?? thrownError ?? lastError;
 
-            return result.Status;
+            if (attempt == plan.MaxAttempts)
+            {
+                await FinalizeFailureAsync(exec, lastError, cancellationToken).ConfigureAwait(false);
+                return NodeStatus.Failure;
+            }
+
+            await LogRetryAndWaitAsync(exec, attempt, plan, lastError, cancellationToken).ConfigureAwait(false);
+        }
+
+        // Defensive: the loop always returns on its final attempt.
+        await FinalizeFailureAsync(exec, lastError, cancellationToken).ConfigureAwait(false);
+        return NodeStatus.Failure;
+    }
+
+    /// <summary>
+    /// One attempt at the node's <c>RunAsync</c>. Returns the <see cref="NodeResult"/> on a clean
+    /// return; on a thrown exception returns <c>(null, message)</c> so the retry loop can treat it
+    /// as a failure. Cancellation and the secret-leak guard are re-thrown — they're not retryable:
+    /// a cancel stops the run, and a leak is a contract violation that must surface its detailed
+    /// message (the loop would otherwise mask it as a generic node failure).
+    /// </summary>
+    private async Task<(NodeResult? Result, string? Error)> RunNodeOnceAsync(NodeExecution exec, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var context = BuildNodeRunContext(exec);
+            var result = await exec.Runtime.RunAsync(context, cancellationToken).ConfigureAwait(false);
+            return (result, null);
         }
         catch (OperationCanceledException) { throw; }
-        catch (WorkflowSecretLeakException)
-        {
-            // Let the secret-leak guard's exception propagate to ExecuteRunAsync's catch,
-            // which lands the run in Failure with our detailed contract-violation message.
-            // Without this branch, the generic catch below would swallow it into NodeStatus.Failure
-            // + a generic "Node 'X' failed." run.Error, losing the path-name + remediation hint.
-            throw;
-        }
+        catch (WorkflowSecretLeakException) { throw; }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Node {NodeId} threw unhandled exception", node.Id);
-            await _recordLogger.NodeFailedAsync(run.Id, node.Id, NoIteration, ex.Message, DateTimeOffset.UtcNow - startedAt, cancellationToken).ConfigureAwait(false);
-            return NodeStatus.Failure;
+            _logger.LogError(ex, "Node {NodeId} threw unhandled exception", exec.Node.Id);
+            return (null, ex.Message);
         }
     }
+
+    /// <summary>
+    /// Finalise a Success / Skipped attempt: persist the node.completed (or node.failed for a
+    /// node-returned Skip — unchanged from before), reflect outputs + routing hints into the run
+    /// scope, and capture Terminal outputs. The secret-leak guard fires here (Terminal capture);
+    /// its exception propagates to the run-level handler — it is NOT swallowed or retried.
+    /// </summary>
+    private async Task FinalizeNonFailureAsync(NodeExecution exec, NodeResult result, CancellationToken cancellationToken)
+    {
+        var duration = DateTimeOffset.UtcNow - exec.StartedAt;
+        await PersistNodeResultAsync(exec.Run.Id, exec.Node.Id, result, duration, cancellationToken).ConfigureAwait(false);
+        ApplyResultToScopeAndState(exec.Node, result, exec.Scope, exec.State);
+
+        if (result.Status == NodeStatus.Success && exec.Runtime.Manifest.Kind == NodeKind.Terminal && exec.ResolvedInputs.Count > 0)
+            CaptureTerminalOutputs(exec.Node, exec.ResolvedInputs, exec.Scope, exec.State);
+    }
+
+    /// <summary>Write the terminal node.failed record. Unifies the returned-Failure and thrown-exception exhaustion paths.</summary>
+    private async Task FinalizeFailureAsync(NodeExecution exec, string error, CancellationToken cancellationToken) =>
+        await _recordLogger.NodeFailedAsync(exec.Run.Id, exec.Node.Id, NoIteration, error, DateTimeOffset.UtcNow - exec.StartedAt, cancellationToken).ConfigureAwait(false);
+
+    /// <summary>
+    /// Surface a failed attempt that WILL be retried: an append-only Warn <c>log</c> record naming
+    /// the attempt, the (truncated) error, and the wait — so the run-detail timeline tells the
+    /// retry story — then await the bounded backoff. Cancelling during the wait throws
+    /// OperationCanceledException, which propagates to the run-level cancel handler.
+    /// </summary>
+    private async Task LogRetryAndWaitAsync(NodeExecution exec, int attempt, RetryPlan plan, string error, CancellationToken cancellationToken)
+    {
+        var waitHint = plan.BackoffSeconds > 0 ? $" Retrying in {plan.BackoffSeconds:0.##}s." : " Retrying now.";
+        var message = $"Attempt {attempt}/{plan.MaxAttempts} failed: {Truncate(error, 200)}.{waitHint}";
+
+        await _recordLogger.LogAsync(exec.Run.Id, exec.Node.Id, Lifecycle.LogLevel.Warn, message, cancellationToken).ConfigureAwait(false);
+
+        if (plan.Delay > TimeSpan.Zero)
+            await Task.Delay(plan.Delay, cancellationToken).ConfigureAwait(false);
+    }
+
+    private static string Truncate(string value, int max) => value.Length <= max ? value : value[..max] + "…";
 
     /// <summary>
     /// Build the redacted Inputs/Config pair the ledger persists. The node itself receives
@@ -1075,34 +1148,34 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
     }
 
     /// <summary>
-    /// Per-invocation data the engine threads from <see cref="ExecuteNodeAsync"/> into
-    /// <see cref="BuildNodeRunContext"/>. Packs the seven values the context needs into one
-    /// argument so the helper stays under Rule 1's 5-param cap. Private + record-shaped: zero
-    /// allocations beyond the boxing the context itself does, no behaviour, just a parameter
-    /// holder.
+    /// Immutable per-node-execution context the retry loop + its finalise helpers thread around.
+    /// Built once in <see cref="ExecuteNodeAsync"/>; the resolved Inputs/Config + ResumePayload are
+    /// identical across retry attempts (the engine resolves them once, not per attempt). Packs the
+    /// values into one argument so the helpers stay under Rule 1's 5-param cap — a data holder with
+    /// no behaviour.
     /// </summary>
-    private sealed record NodeInvocationData(WorkflowRun Run, NodeDefinition Node, NodeRunScope Scope, IReadOnlyDictionary<string, JsonElement> ResolvedInputs, IReadOnlyDictionary<string, JsonElement> ResolvedConfig, string TypeKey, Guid ParentRecordId, JsonElement? ResumePayload);
+    private sealed record NodeExecution(WorkflowRun Run, NodeDefinition Node, INodeRuntime Runtime, NodeRunScope Scope, WalkerState State, IReadOnlyDictionary<string, JsonElement> ResolvedInputs, IReadOnlyDictionary<string, JsonElement> ResolvedConfig, Guid ParentRecordId, JsonElement? ResumePayload, DateTimeOffset StartedAt);
 
     /// <summary>
     /// Assemble the <see cref="NodeRunContext"/> the node sees. Pulls the per-node logger
-    /// name from <see cref="NodeInvocationData.TypeKey"/> and binds observability to the
-    /// node.started record so external_call.* records chain back via parent_record_id.
+    /// name from the runtime's TypeKey and binds observability to the node.started record so
+    /// external_call.* records chain back via parent_record_id.
     /// </summary>
-    private NodeRunContext BuildNodeRunContext(NodeInvocationData inv)
+    private NodeRunContext BuildNodeRunContext(NodeExecution exec)
     {
-        var nodeLogger = _loggerFactory.CreateLogger($"Workflow.{inv.TypeKey}.{inv.Node.Id}");
-        var observability = new NodeObservability(_recordLogger, _artifactStore, inv.Run.Id, inv.Node.Id, inv.Run.TeamId, inv.ParentRecordId);
+        var nodeLogger = _loggerFactory.CreateLogger($"Workflow.{exec.Runtime.TypeKey}.{exec.Node.Id}");
+        var observability = new NodeObservability(_recordLogger, _artifactStore, exec.Run.Id, exec.Node.Id, exec.Run.TeamId, exec.ParentRecordId);
 
         return new NodeRunContext
         {
-            Inputs = inv.ResolvedInputs,
-            Config = inv.ResolvedConfig,
-            RawInputs = inv.Node.Inputs,
-            RawConfig = inv.Node.Config,
-            Scope = inv.Scope,
+            Inputs = exec.ResolvedInputs,
+            Config = exec.ResolvedConfig,
+            RawInputs = exec.Node.Inputs,
+            RawConfig = exec.Node.Config,
+            Scope = exec.Scope,
             Logger = nodeLogger,
             Observability = observability,
-            ResumePayload = inv.ResumePayload,
+            ResumePayload = exec.ResumePayload,
         };
     }
 

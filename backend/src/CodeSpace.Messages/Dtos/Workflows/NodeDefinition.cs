@@ -33,6 +33,14 @@ public sealed record NodeDefinition
     public JsonElement Inputs { get; init; } = default;
 
     /// <summary>
+    /// Optional retry-on-failure policy. <c>null</c> = run the node exactly once (default).
+    /// When set, the engine re-runs the node after a failure per <see cref="RetryPolicy"/>.
+    /// Null-omitted from the canonical content hash, so adding it to an existing node only
+    /// changes the hash once the operator actually configures a policy.
+    /// </summary>
+    public RetryPolicy? Retry { get; init; }
+
+    /// <summary>
     /// Editor-only canvas position (pixel coords on the workflow canvas). Optional — when
     /// null, the UI auto-lays out via a simple top-to-bottom DAG walk so older / hand-written
     /// JSON definitions still open cleanly. The engine ignores this field entirely; it only

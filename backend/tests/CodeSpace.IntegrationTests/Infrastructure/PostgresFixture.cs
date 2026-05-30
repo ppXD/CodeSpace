@@ -200,5 +200,13 @@ public sealed class PostgresFixture : IAsyncLifetime
             .As<CodeSpace.Core.Services.Jobs.ICodeSpaceBackgroundJobClient>()
             .AsSelf()
             .SingleInstance();
+
+        // Test-only INodeRuntime for the retry-flow tests — a node that fails a deterministic
+        // number of times then succeeds. Registered as INodeRuntime so NodeRegistry picks it up
+        // (engine + validator accept "test.flaky"); it is NOT an IPluginModule node, so it stays
+        // out of the editor palette / node-manifest list.
+        builder.RegisterType<Workflows.Infrastructure.FlakyTestNode>()
+            .As<CodeSpace.Core.Services.Workflows.Nodes.INodeRuntime>()
+            .SingleInstance();
     }
 }
