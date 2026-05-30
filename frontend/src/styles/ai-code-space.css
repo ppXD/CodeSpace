@@ -1840,14 +1840,14 @@ textarea:-webkit-autofill {
 .acs-root .wf-run-node-io > summary:hover { color: var(--ink); }
 .acs-root .wf-run-node-io[open] > summary { color: var(--ink); }
 
-/* A flow.subworkflow step: the node id becomes a link (→ open the child run full-page), with the
-   inline child-run embed (chevron toggle + bordered nested run-detail) underneath. */
+/* A flow.subworkflow step: the node id becomes a link (→ open the child run full-page). The inline
+   child run is a peer <details> disclosure of Inputs/Outputs (.wf-run-node-io), so no extra styling
+   is needed for its marker/label — it lines up with the sibling rows by construction. */
 .acs-root .wf-run-node-link {
   display: inline-flex; align-items: center; gap: 4px;
   background: none; border: 0; padding: 0; cursor: pointer; font-family: inherit; color: inherit;
 }
 .acs-root .wf-run-node-link:hover { color: var(--accent); text-decoration: underline; }
-.acs-root .wf-childrun { display: flex; flex-direction: column; gap: 6px; margin-top: 2px; }
 
 /* JSON preview blocks (trigger payload, node inputs/outputs, errors) */
 .acs-root .wf-json {
