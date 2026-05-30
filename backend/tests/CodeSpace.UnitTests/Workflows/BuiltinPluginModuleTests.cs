@@ -25,7 +25,8 @@ public class BuiltinPluginModuleTests
         module.Nodes.ShouldContain(typeof(CodeSpace.Core.Services.Workflows.Nodes.Builtin.LogicMergeNode));
         module.Nodes.ShouldContain(typeof(CodeSpace.Core.Services.Workflows.Nodes.Builtin.FlowIterateNode));
         module.Nodes.ShouldContain(typeof(CodeSpace.Core.Services.Workflows.Nodes.Builtin.FlowSleepNode));
-        module.Nodes.Count.ShouldBe(6);
+        module.Nodes.ShouldContain(typeof(CodeSpace.Core.Services.Workflows.Nodes.Builtin.FlowWaitApprovalNode));
+        module.Nodes.Count.ShouldBe(7);
         module.RunSourceMatchers.ShouldBeEmpty("the manual trigger subscribes to no event, so Core Flow still ships zero matchers");
     }
 
@@ -76,6 +77,6 @@ public class BuiltinPluginModuleTests
         };
 
         var total = all.SelectMany(p => p.Nodes).Distinct().Count();
-        total.ShouldBe(12, "12 builtin node types across 4 domain plugins — adjust this number when adding a builtin");
+        total.ShouldBe(13, "13 builtin node types across 4 domain plugins — adjust this number when adding a builtin");
     }
 }

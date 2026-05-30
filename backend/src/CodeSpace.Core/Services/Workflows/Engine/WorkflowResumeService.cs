@@ -24,6 +24,13 @@ public interface IWorkflowResumeService
     /// (timer + manual, retries) are idempotent.
     /// </summary>
     Task<bool> ResumeAsync(Guid runId, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Resume with an explicit payload (the approver's decision, the callback body) — stamped
+    /// onto the resolved wait and injected as the node's ResumePayload on re-run. Same
+    /// idempotent Suspended→Pending gate as the no-payload overload.
+    /// </summary>
+    Task<bool> ResumeAsync(Guid runId, string resumePayloadJson, CancellationToken cancellationToken);
 }
 
 public sealed class WorkflowResumeService : IWorkflowResumeService, IScopedDependency
@@ -39,7 +46,13 @@ public sealed class WorkflowResumeService : IWorkflowResumeService, IScopedDepen
         _logger = logger;
     }
 
-    public async Task<bool> ResumeAsync(Guid runId, CancellationToken cancellationToken)
+    public Task<bool> ResumeAsync(Guid runId, CancellationToken cancellationToken) =>
+        ResumeCoreAsync(runId, resumePayloadJson: null, cancellationToken);
+
+    public Task<bool> ResumeAsync(Guid runId, string resumePayloadJson, CancellationToken cancellationToken) =>
+        ResumeCoreAsync(runId, resumePayloadJson, cancellationToken);
+
+    private async Task<bool> ResumeCoreAsync(Guid runId, string? resumePayloadJson, CancellationToken cancellationToken)
     {
         // Single-writer gate: only one resume flips Suspended -> Pending. Concurrent signals
         // (a fired timer + a manual resume, or a Hangfire retry of the timer job) cannot both
@@ -56,9 +69,10 @@ public sealed class WorkflowResumeService : IWorkflowResumeService, IScopedDepen
         }
 
         // Resolve every pending wait for the run + stamp the resume payload (the durable walker
-        // injects payload_jsonb as the node's ResumePayload on re-run).
+        // injects payload_jsonb as the node's ResumePayload on re-run). A timer wake supplies no
+        // payload, so we stamp a default marker; approval / callback supply their decision body.
         var now = DateTimeOffset.UtcNow;
-        var payload = JsonSerializer.Serialize(new { resumed_at = now.ToString("o") });
+        var payload = resumePayloadJson ?? JsonSerializer.Serialize(new { resumed_at = now.ToString("o") });
         await _db.WorkflowRunWait
             .Where(w => w.RunId == runId && w.Status == WorkflowWaitStatuses.Pending)
             .ExecuteUpdateAsync(s => s
