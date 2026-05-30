@@ -250,7 +250,7 @@ function Editor({ workflow, manifests, onBackToList, saving, onSave }: EditorPro
   const [viewerRunId, setViewerRunId] = useState<string | null>(null);
   const [historyOpen, setHistoryOpen] = useState(false);
 
-  const { screenToFlowPosition, getViewport } = useReactFlow();
+  const { screenToFlowPosition, getViewport, getIntersectingNodes, getInternalNode } = useReactFlow();
   const canvasRef = useRef<HTMLDivElement | null>(null);
 
   // ─── Canvas events ──────────────────────────────────────────────────────────
@@ -261,6 +261,49 @@ function Editor({ workflow, manifests, onBackToList, saving, onSave }: EditorPro
   const onEdgesChange = (changes: EdgeChange[]) => {
     setEdges((eds) => applyEdgeChanges(changes, eds));
     if (changes.some((c) => c.type === "remove")) setUnsaved(true);
+  };
+
+  // ─── Drag a step INTO / OUT of a loop container (Dify-style nesting) ──────────
+  // While dragging a non-loop node, highlight the loop it's hovering as a drop zone; on release,
+  // reparent it (or unparent it when dragged out). A reparented node becomes part of the loop's
+  // body — it moves WITH the container and runs inside it per iteration.
+  const loopUnder = (node: Node): string | null => {
+    if ((node.data as Partial<WorkflowNodeData>)?.kind === "Loop") return null;   // don't nest a loop in a loop
+    return getIntersectingNodes(node).find((n) => (n.data as Partial<WorkflowNodeData>)?.kind === "Loop")?.id ?? null;
+  };
+
+  const highlightLoop = (targetId: string | null) =>
+    setNodes((nds) => {
+      let changed = false;
+      const next = nds.map((n) => {
+        if ((n.data as Partial<WorkflowNodeData>)?.kind !== "Loop") return n;
+        const want = n.id === targetId ? "wf-rf-loop-node wf-rf-loop-droptarget" : "wf-rf-loop-node";
+        if (n.className === want) return n;
+        changed = true;
+        return { ...n, className: want };
+      });
+      return changed ? next : nds;
+    });
+
+  const onNodeDrag = (_e: unknown, node: Node) => highlightLoop(loopUnder(node));
+
+  const onNodeDragStop = (_e: unknown, node: Node) => {
+    const targetId = loopUnder(node);
+    highlightLoop(null);
+
+    const currentParent = node.parentId ?? null;
+    if (targetId === currentParent) return;   // no scope change
+
+    const abs = getInternalNode(node.id)?.internals.positionAbsolute ?? node.position;
+    const parentAbs = targetId ? (getInternalNode(targetId)?.internals.positionAbsolute ?? { x: 0, y: 0 }) : { x: 0, y: 0 };
+
+    setNodes((nds) => nds.map((n) => {
+      if (n.id !== node.id) return n;
+      return targetId
+        ? { ...n, parentId: targetId, extent: "parent" as const, position: { x: abs.x - parentAbs.x, y: abs.y - parentAbs.y } }
+        : { ...n, parentId: undefined, extent: undefined, position: abs };
+    }));
+    setUnsaved(true);
   };
   const onConnect = (params: Connection) => {
     setEdges((eds) => {
@@ -355,8 +398,9 @@ function Editor({ workflow, manifests, onBackToList, saving, onSave }: EditorPro
         // A manual start node shows the current workflow input fields on its card.
         ...(manifest.isManual ? { inputFields: workflowInputs } : {}),
       },
-      // A loop is a container sized to hold its body subgraph.
-      ...(isLoop ? { style: { width: LOOP_CONTAINER_W, height: LOOP_CONTAINER_H } } : {}),
+      // A loop is a container sized to hold its body subgraph; the wrapper is click-through (only its
+      // header drags/selects) so body steps stay clickable + the box moves as one with its body.
+      ...(isLoop ? { style: { width: LOOP_CONTAINER_W, height: LOOP_CONTAINER_H }, className: "wf-rf-loop-node", dragHandle: ".wf-rf-loop-head" } : {}),
     };
 
     // A Loop ships with its body-entry marker (flow.loop_start) pre-placed inside — the marker is
@@ -739,6 +783,8 @@ function Editor({ workflow, manifests, onBackToList, saving, onSave }: EditorPro
             onNodesChange={onNodesChange}
             onEdgesChange={onEdgesChange}
             onConnect={onConnect}
+            onNodeDrag={onNodeDrag}
+            onNodeDragStop={onNodeDragStop}
             onNodeClick={(_, n) => setSelectedId(n.id)}
             onPaneClick={() => setSelectedId(null)}
             fitView
@@ -1255,9 +1301,11 @@ function definitionToRfNodes(
     const position = n.position ?? { x: 80, y: fallbackY };
     if (!n.position) fallbackY += kind === "Loop" ? 300 : 180;
 
-    // A loop container is sized so its body subgraph fits; everything else is a normal card.
+    // A loop container is sized so its body subgraph fits; everything else is a normal card. The
+    // className makes the wrapper click-through (only its header drags/selects, so body steps stay
+    // clickable) and dragHandle restricts dragging to the header so the box moves as one with its body.
     return kind === "Loop"
-      ? { id: n.id, type: "wf", position, data, style: { width: LOOP_CONTAINER_W, height: LOOP_CONTAINER_H } }
+      ? { id: n.id, type: "wf", position, data, style: { width: LOOP_CONTAINER_W, height: LOOP_CONTAINER_H }, className: "wf-rf-loop-node", dragHandle: ".wf-rf-loop-head" }
       : { id: n.id, type: "wf", position, data };
   });
 }
