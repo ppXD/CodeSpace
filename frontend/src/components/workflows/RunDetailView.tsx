@@ -189,6 +189,20 @@ export function SuspendedPanel({ runId, wait }: { runId: string; wait: WorkflowR
     );
   }
 
+  if (wait.kind === "Callback") {
+    const url = `${window.location.origin}/api/workflows/callbacks/${wait.token}`;
+    return (
+      <section className="wf-section wf-approval">
+        <h2 className="wf-section-h">Waiting for callback</h2>
+        <div className="wf-approval-prompt">An external system resumes this run by POSTing to:</div>
+        <div className="wf-callback-row">
+          <input className="wf-form-input wf-callback-url" readOnly value={url} onFocus={(e) => e.currentTarget.select()} />
+          <button className="btn" onClick={() => navigator.clipboard?.writeText(url)}>Copy</button>
+        </div>
+      </section>
+    );
+  }
+
   return null;
 }
 

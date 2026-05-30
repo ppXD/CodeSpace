@@ -421,6 +421,7 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
             {
                 NodeId = pending.NodeId,
                 Kind = pending.WaitKind,
+                Token = pending.Token,
                 WakeAt = pending.WakeAt,
                 Payload = SafeParseJson(pending.PayloadJson),
             },

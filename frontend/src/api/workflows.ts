@@ -155,6 +155,8 @@ export interface WorkflowRunWaitInfo {
   nodeId: string;
   /** "Timer" | "Approval" | "Callback". */
   kind: string;
+  /** Correlation token — for a Callback wait, the secret the callback URL is built from. */
+  token: string;
   /** When the scheduled resume fires (Timer only). */
   wakeAt?: string | null;
   /** The node's suspend payload (e.g. an approval `prompt`). */

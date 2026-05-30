@@ -19,7 +19,7 @@ vi.mock("@/hooks/use-workflows", () => ({
 }));
 
 function approvalWait(prompt: string): WorkflowRunWaitInfo {
-  return { nodeId: "approval", kind: "Approval", payload: { prompt } };
+  return { nodeId: "approval", kind: "Approval", token: "tok-1", payload: { prompt } };
 }
 
 describe("SuspendedPanel", () => {
@@ -44,10 +44,19 @@ describe("SuspendedPanel", () => {
   });
 
   it("shows a wake hint for a Timer wait — no approval buttons", () => {
-    const wait: WorkflowRunWaitInfo = { nodeId: "sleep", kind: "Timer", wakeAt: "2026-05-30T11:00:00Z", payload: {} };
+    const wait: WorkflowRunWaitInfo = { nodeId: "sleep", kind: "Timer", token: "tok-2", wakeAt: "2026-05-30T11:00:00Z", payload: {} };
     render(<SuspendedPanel runId="run-1" wait={wait} />);
 
     expect(screen.queryByText("Approve")).toBeNull();
     expect(screen.getByText(/Resumes around/)).toBeTruthy();
+  });
+
+  it("shows the tokened callback URL for a Callback wait — no approval buttons", () => {
+    const wait: WorkflowRunWaitInfo = { nodeId: "cb", kind: "Callback", token: "abc123", payload: {} };
+    render(<SuspendedPanel runId="run-1" wait={wait} />);
+
+    expect(screen.queryByText("Approve")).toBeNull();
+    const url = screen.getByDisplayValue(/\/api\/workflows\/callbacks\/abc123$/);
+    expect(url).toBeTruthy();
   });
 });
