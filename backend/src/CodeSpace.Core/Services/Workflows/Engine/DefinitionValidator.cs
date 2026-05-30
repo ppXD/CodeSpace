@@ -1,5 +1,6 @@
 using CodeSpace.Core.DependencyInjection;
 using CodeSpace.Core.Services.Workflows.Nodes;
+using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Dtos.Workflows;
 using CodeSpace.Messages.Enums;
 
@@ -204,6 +205,9 @@ public sealed class DefinitionValidator : IScopedDependency
         foreach (var edge in definition.Edges)
         {
             if (edge.SourceHandle == null) continue;
+            // `error` is the universal failure handle every node implicitly exposes — always valid,
+            // regardless of the node's declared manifest outputs.
+            if (edge.SourceHandle == WorkflowHandles.Error) continue;
             if (!nodeById.TryGetValue(edge.From, out var sourceNode)) continue;
             if (!_nodeRegistry.Contains(sourceNode.TypeKey)) continue;
 
@@ -317,6 +321,10 @@ public sealed class DefinitionValidator : IScopedDependency
         }
 
         if (!_nodeRegistry.Contains(refNode.TypeKey)) return;
+
+        // `error` is the universal failure output — any node can emit it on a handled failure, so
+        // it's always a valid reference regardless of the manifest's declared outputs.
+        if (outputKey == WorkflowHandles.Error) return;
 
         // Output-key existence check: only when the upstream's manifest declares a typed
         // OutputSchema with explicit properties. For nodes that emit dynamic-shape output

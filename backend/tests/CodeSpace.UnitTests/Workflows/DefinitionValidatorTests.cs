@@ -22,6 +22,9 @@ public class DefinitionValidatorTests
             new StubNode("trigger.x", NodeKind.Trigger),
             new StubNode("regular.a", NodeKind.Regular),
             new StubNode("regular.b", NodeKind.Regular),
+            // Declares a typed output ("value") so the output-key membership check is active —
+            // lets the error-output tests prove `error` is accepted while typos still error.
+            new StubNode("regular.out", NodeKind.Regular, """{"type":"object","properties":{"value":{"type":"string"}}}"""),
             new StubNode("builtin.terminal", NodeKind.Terminal)
         };
 
@@ -330,6 +333,80 @@ public class DefinitionValidatorTests
         BuildValidator().Validate(definition).IsValid.ShouldBeTrue();
     }
 
+    // ─── Error routing (Phase 2) ───────────────────────────────────────────────
+
+    [Fact]
+    public void Error_handle_edge_is_accepted_universally()
+    {
+        // regular.a declares no Outputs (single default handle), so a non-null SourceHandle is
+        // normally rejected — but `error` is the universal failure handle and must be allowed.
+        var definition = new WorkflowDefinition
+        {
+            Nodes = new List<NodeDefinition> { Node("t", "trigger.x"), Node("a", "regular.a"), Node("h", "regular.b"), Node("end", "builtin.terminal") },
+            Edges = new List<EdgeDefinition>
+            {
+                new() { From = "t", To = "a" },
+                new() { From = "a", To = "end" },
+                new() { From = "a", To = "h", SourceHandle = "error" },
+                new() { From = "h", To = "end" },
+            }
+        };
+
+        BuildValidator().Validate(definition).IsValid.ShouldBeTrue();
+    }
+
+    [Fact]
+    public void Error_output_reference_is_accepted_even_when_upstream_declares_outputs()
+    {
+        // regular.out declares only "value", yet the handler may read the universal `error` output.
+        var definition = new WorkflowDefinition
+        {
+            Nodes = new List<NodeDefinition>
+            {
+                Node("t", "trigger.x"),
+                Node("a", "regular.out"),
+                NodeWithInputs("h", "regular.b", """{"msg":"{{nodes.a.outputs.error.message}}"}"""),
+                Node("end", "builtin.terminal")
+            },
+            Edges = new List<EdgeDefinition>
+            {
+                new() { From = "t", To = "a" },
+                new() { From = "a", To = "end" },
+                new() { From = "a", To = "h", SourceHandle = "error" },
+                new() { From = "h", To = "end" },
+            }
+        };
+
+        BuildValidator().Validate(definition).IsValid.ShouldBeTrue();
+    }
+
+    [Fact]
+    public void Unknown_non_error_output_reference_still_errors()
+    {
+        // Regression guard: accepting `error` must not loosen the general output-key check.
+        var definition = new WorkflowDefinition
+        {
+            Nodes = new List<NodeDefinition>
+            {
+                Node("t", "trigger.x"),
+                Node("a", "regular.out"),
+                NodeWithInputs("h", "regular.b", """{"msg":"{{nodes.a.outputs.bogus}}"}"""),
+                Node("end", "builtin.terminal")
+            },
+            Edges = new List<EdgeDefinition>
+            {
+                new() { From = "t", To = "a" },
+                new() { From = "a", To = "h" },
+                new() { From = "h", To = "end" },
+            }
+        };
+
+        var result = BuildValidator().Validate(definition);
+
+        result.IsValid.ShouldBeFalse();
+        result.Errors.ShouldContain(e => e.Contains("bogus"));
+    }
+
     private static WorkflowDefinition MakeMinimalDefinition(NodeDefinition? extraNode = null)
     {
         var nodes = new List<NodeDefinition>
@@ -377,7 +454,7 @@ public class DefinitionValidatorTests
 
     private sealed class StubNode : INodeRuntime
     {
-        public StubNode(string typeKey, NodeKind kind)
+        public StubNode(string typeKey, NodeKind kind, string? outputSchemaJson = null)
         {
             TypeKey = typeKey;
             Manifest = new NodeManifest
@@ -387,7 +464,7 @@ public class DefinitionValidatorTests
                 Kind = kind,
                 ConfigSchema = SchemaBuilder.EmptyObject(),
                 InputSchema = SchemaBuilder.EmptyObject(),
-                OutputSchema = SchemaBuilder.EmptyObject()
+                OutputSchema = outputSchemaJson != null ? SchemaBuilder.Parse(outputSchemaJson) : SchemaBuilder.EmptyObject()
             };
         }
 

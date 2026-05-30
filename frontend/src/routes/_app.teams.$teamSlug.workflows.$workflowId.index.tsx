@@ -39,6 +39,7 @@ import { deriveActivations } from "@/lib/workflowActivations";
 import { migrateLegacyPrTriggerConfig } from "@/lib/migrateTriggerConfig";
 import { NodeRetryEditor } from "@/components/workflows/NodeRetryEditor";
 import { SchemaForm } from "@/components/workflows/SchemaForm";
+import { ERROR_HANDLE, errorRouteTarget, setErrorRoute } from "@/lib/workflowErrorRoute";
 import { introspectScope } from "@/components/workflows/scope-introspection";
 import { StartNodeInputsEditor } from "@/components/workflows/StartNodeInputsEditor";
 import { VariableTablePanel } from "@/components/workflows/VariableTablePanel";
@@ -260,9 +261,15 @@ function Editor({ workflow, manifests, onBackToList, saving, onSave }: EditorPro
     if (changes.some((c) => c.type === "remove")) setUnsaved(true);
   };
   const onConnect = (params: Connection) => {
-    // De-dupe — React Flow itself doesn't prevent duplicate edges; we do.
     setEdges((eds) => {
-      const exists = eds.some((e) => e.source === params.source && e.target === params.target);
+      // Error-handle drags go through the same helper as the inspector control, so a node keeps
+      // at most one error route (drawing a new one replaces the old).
+      if (params.sourceHandle === ERROR_HANDLE && params.source && params.target)
+        return setErrorRoute(eds, params.source, params.target);
+
+      // De-dupe — React Flow itself doesn't prevent duplicate edges; we do (keyed by handle too,
+      // so a normal edge and an error edge to the same target can coexist).
+      const exists = eds.some((e) => e.source === params.source && e.target === params.target && (e.sourceHandle ?? null) === (params.sourceHandle ?? null));
       if (exists) return eds;
       return addEdge({ ...params, type: "smoothstep", animated: true }, eds);
     });
@@ -777,6 +784,13 @@ function Editor({ workflow, manifests, onBackToList, saving, onSave }: EditorPro
               onInputsChange={(v) => updateInputs(selectedNode.id, v)}
               retry={retries[selectedNode.id] ?? null}
               onRetryChange={(v) => updateRetry(selectedNode.id, v)}
+              // Error routing reads/writes the node's `error` edge directly on the edges state.
+              errorTarget={errorRouteTarget(edges, selectedNode.id)}
+              // Offer only valid handler targets: not self, not a Trigger, and not one that would
+              // close a cycle (mirrors isValidConnection, so the dropdown can't author a graph the
+              // backend validator would reject at save).
+              errorTargetOptions={nodes.filter((n) => n.id !== selectedNode.id && n.data.kind !== "Trigger" && !createsCycle(selectedNode.id, n.id, edges)).map((n) => ({ id: n.id, label: n.id }))}
+              onErrorRouteChange={(targetId) => { setEdges((eds) => setErrorRoute(eds, selectedNode.id, targetId)); setUnsaved(true); }}
             />
           )}
         </aside>
@@ -962,6 +976,9 @@ function NodeInspector({
   onInputsChange,
   retry,
   onRetryChange,
+  errorTarget,
+  errorTargetOptions,
+  onErrorRouteChange,
 }: {
   nodeId: string;
   manifest: NodeManifestDto;
@@ -981,6 +998,9 @@ function NodeInspector({
   onInputsChange: (v: Record<string, unknown>) => void;
   retry: RetryPolicy | null;
   onRetryChange: (v: RetryPolicy | null) => void;
+  errorTarget: string | null;
+  errorTargetOptions: { id: string; label: string }[];
+  onErrorRouteChange: (targetId: string | null) => void;
 }) {
   // Compute scope at THIS node's position. Re-runs every render — cheap, definition is
   // already in memory. Feeds the autocomplete picker + the "Provides" hint card.
@@ -1065,6 +1085,28 @@ function NodeInspector({
         <NodeRetryEditor value={retry} onChange={onRetryChange} />
       )}
 
+      {/* Error routing — mirrors the canvas red `error` handle. Picking a target wires an error
+          edge; the engine routes here on failure (after retries) instead of failing the run. */}
+      {manifest.kind === "Regular" && (
+        <section className="wf-inspector-section">
+          <div className="wf-inspector-section-h">On failure</div>
+          <select
+            className="wf-form-input"
+            value={errorTarget ?? ""}
+            onChange={(e) => onErrorRouteChange(e.target.value || null)}
+          >
+            <option value="">Fail the run (default)</option>
+            {errorTargetOptions.map((o) => (
+              <option key={o.id} value={o.id}>Route to “{o.label}”</option>
+            ))}
+          </select>
+          <p className="wf-retry-hint">
+            If this node fails (after any retries), route the run to the chosen node instead of
+            failing it. The failure is available there as <code>{`{{nodes.${nodeId}.outputs.error.message}}`}</code>.
+          </p>
+        </section>
+      )}
+
       {/* Output section — what THIS node emits for downstream nodes to reference. Header
           acts as a toggle; the body (intro + per-output {{ref}} pill list) renders only
           when the operator opens it. Default-collapsed keeps the inspector quiet for the
@@ -1143,13 +1185,21 @@ function definitionToRfNodes(
 }
 
 function definitionToRfEdges(def: WorkflowDefinition): Edge[] {
-  return def.edges.map((e, idx) => ({
-    id: `e${idx}-${e.from}-${e.to}`,
-    source: e.from,
-    target: e.to,
-    type: "smoothstep",
-    label: e.condition ?? undefined,
-  }));
+  return def.edges.map((e, idx) => {
+    const isError = e.sourceHandle === ERROR_HANDLE;
+    return {
+      id: `e${idx}-${e.from}-${e.to}`,
+      source: e.from,
+      target: e.to,
+      // Round-trip the source handle so error (and any future named-handle) edges re-anchor to
+      // the right port on load — a null handle stays the node's default output.
+      sourceHandle: e.sourceHandle ?? undefined,
+      type: "smoothstep",
+      animated: isError || undefined,
+      label: e.condition ?? undefined,
+      ...(isError ? { className: "wf-rf-edge-error" } : {}),
+    };
+  });
 }
 
 function rfToDefinition(
