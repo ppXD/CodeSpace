@@ -31,6 +31,29 @@ public sealed record WorkflowRunDetail
     /// runs OR workflows with no declared Outputs. Mirrors <c>workflow_run.outputs_jsonb</c>.
     /// </summary>
     public required JsonElement Outputs { get; init; }
+
+    /// <summary>
+    /// The outstanding wait when the run is Suspended — tells the UI WHY it's paused and what
+    /// affordance to show (approve/reject buttons for an Approval, a "waiting until…" hint for a
+    /// Timer). <c>null</c> unless the run is parked on a pending wait.
+    /// </summary>
+    public WorkflowRunWaitInfo? PendingWait { get; init; }
+}
+
+/// <summary>The pending wait a Suspended run is parked on. Drives the run-detail resume affordance.</summary>
+public sealed record WorkflowRunWaitInfo
+{
+    /// <summary>The node that suspended.</summary>
+    public required string NodeId { get; init; }
+
+    /// <summary>One of <c>WorkflowWaitKinds</c> — Timer / Approval / Callback.</summary>
+    public required string Kind { get; init; }
+
+    /// <summary>When the scheduled resume fires (Timer only); null for Approval / Callback.</summary>
+    public DateTimeOffset? WakeAt { get; init; }
+
+    /// <summary>The node's suspend payload (e.g. an approval <c>prompt</c>). Empty object when none.</summary>
+    public required JsonElement Payload { get; init; }
 }
 
 public sealed record WorkflowRunNodeSummary

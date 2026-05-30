@@ -945,6 +945,10 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
             Token = Guid.NewGuid().ToString("N"),
             WakeAt = wakeAt,
             Status = WorkflowWaitStatuses.Pending,
+            // Stash the node's suspend payload (e.g. an approval prompt) so the run-detail UI can
+            // render the right affordance while parked. Overwritten with the resume payload on
+            // resolve — the engine only reads Resolved waits, so there's no conflict.
+            PayloadJson = token.Payload.ValueKind == JsonValueKind.Undefined ? null : token.Payload.GetRawText(),
             CreatedAt = DateTimeOffset.UtcNow,
         });
         await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);

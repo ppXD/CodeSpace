@@ -130,6 +130,18 @@ export function useReplayRun() {
   });
 }
 
+/** Approve / reject a run parked on a flow.wait_approval, then resume it. */
+export function useResumeRun(runId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (body: { approved: boolean; comment?: string }) => workflowsApi.resumeRun(runId, body),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["workflow-run", runId] });
+      qc.invalidateQueries({ queryKey: ["workflow-runs"] });
+    },
+  });
+}
+
 export function useNodeManifests() {
   return useQuery({
     queryKey: ["node-manifests"],
