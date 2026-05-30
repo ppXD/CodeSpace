@@ -57,9 +57,14 @@ export function WorkflowNode({ data, selected }: NodeProps) {
     );
   }
 
+  // The loop body's entry marker (flow.loop_start) is source-only: the engine seeds it at the start
+  // of every iteration, so it can't have an incoming edge, and a passthrough never fails, so it must
+  // not expose an error handle either (wiring the body off that dead handle skips it every pass).
+  const isLoopStart = d.typeKey === "flow.loop_start";
+
   return (
     <div className="wf-rf-node" data-kind={d.kind.toLowerCase()} data-selected={selected}>
-      {d.kind !== "Trigger" && <Handle type="target" position={Position.Top} className="wf-rf-handle" />}
+      {d.kind !== "Trigger" && !isLoopStart && <Handle type="target" position={Position.Top} className="wf-rf-handle" />}
       <div className="wf-rf-node-bar" />
       <div className="wf-rf-node-icon">{iconFor(d)}</div>
       <div className="wf-rf-node-body">
@@ -85,7 +90,7 @@ export function WorkflowNode({ data, selected }: NodeProps) {
       {d.kind !== "Terminal" && <Handle type="source" position={Position.Bottom} className="wf-rf-handle" />}
       {/* Error output — connect it to a handler node to catch this node's failure (route the run
           there instead of failing it). Only meaningful on regular nodes that can fail-and-continue. */}
-      {d.kind === "Regular" && (
+      {d.kind === "Regular" && !isLoopStart && (
         <Handle
           id={ERROR_HANDLE}
           type="source"
