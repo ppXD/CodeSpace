@@ -707,7 +707,15 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
     private async Task<IReadOnlyDictionary<string, JsonElement>> WalkGraphAsync(WorkflowRun run, WorkflowDefinition definition, NodeRunScope scope, CancellationToken cancellationToken)
     {
         var state = new WalkerState(definition);
-        EnqueueRoots(state, definition);
+
+        // Durable re-entry (Engine v2 Phase 0): rebuild walker state from the persisted ledger
+        // so a run resumed after a crash / re-dispatch continues from where it stopped instead
+        // of re-running completed nodes. For a fresh run (no node records yet) this is a no-op
+        // and the ready frontier collapses to the graph roots — behaviour-identical to the
+        // original single-pass walk.
+        await RehydrateFromLedgerAsync(run, definition, scope, state, cancellationToken).ConfigureAwait(false);
+
+        EnqueueReadyFrontier(state, definition);
 
         while (state.Ready.Count > 0)
         {
@@ -742,15 +750,98 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
         return state.WorkflowOutputs;
     }
 
-    private static void EnqueueRoots(WalkerState state, WorkflowDefinition definition)
+    /// <summary>
+    /// Engine v2 Phase 0 — reconstruct the walker's settled state from the durable ledger (the
+    /// <c>workflow_run_node</c> view) so a resumed run continues instead of restarting. Loads
+    /// each settled node's status, its output bag (into <c>scope.Nodes</c>) and branch routing
+    /// hints, then recomputes edge-liveness for every settled source. A node still mid-flight
+    /// (only node.started → Running) is NOT settled and will re-run. A node that already FAILED
+    /// short-circuits the run to Failure, mirroring the in-walk halt. For a fresh run (zero
+    /// persisted nodes) this returns immediately and the walk proceeds exactly as before.
+    /// </summary>
+    private async Task RehydrateFromLedgerAsync(WorkflowRun run, WorkflowDefinition definition, NodeRunScope scope, WalkerState state, CancellationToken cancellationToken)
     {
-        // Root = nodes with no incoming edges. In a valid definition this is the (single)
-        // Trigger node. Defensive: if multiple roots exist (only possible for hand-written
-        // JSON that slipped past validation), enqueue them all — they're independent.
+        var persisted = await _db.WorkflowRunNode.AsNoTracking()
+            .Where(n => n.RunId == run.Id)
+            .ToListAsync(cancellationToken).ConfigureAwait(false);
+
+        if (persisted.Count == 0) return;
+
+        foreach (var node in persisted)
+        {
+            // A persisted failure means the original run already failed before the row flipped
+            // to a terminal status — re-fail it, same as the in-walk path.
+            if (node.Status == NodeStatus.Failure)
+                throw new NodeFailureException($"Node '{node.NodeId}' failed.");
+
+            // Only Success / Skipped are "settled". Running (node.started with no terminal record)
+            // re-runs — the engine crashed mid-node, so we re-execute it.
+            if (node.Status is not (NodeStatus.Success or NodeStatus.Skipped)) continue;
+
+            state.Statuses[node.NodeId] = node.Status;
+
+            if (node.Status != NodeStatus.Success) continue;
+
+            var outputs = ParsePayloadObject(node.OutputsJson);
+            if (outputs.Count > 0) scope.Nodes[node.NodeId] = outputs;
+
+            var hints = ParseRoutingHints(node.RoutingHintsJson);
+            if (hints != null) state.RoutingHints[node.NodeId] = new HashSet<string>(hints);
+        }
+
+        // Recompute edge-liveness for every edge whose source has settled, so the resumed
+        // frontier + ShouldSkip see the same EdgeLive a single-pass walk would have produced.
+        foreach (var edge in definition.Edges)
+        {
+            if (!state.Statuses.TryGetValue(edge.From, out var sourceStatus)) continue;
+            state.EdgeLive[edge] = IsEdgeLive(edge, sourceStatus, state.RoutingHints.GetValueOrDefault(edge.From));
+        }
+
+        RehydrateTerminalOutputs(definition, scope, state, persisted);
+    }
+
+    /// <summary>
+    /// Rebuild the run's declared outputs from an already-completed Terminal (the narrow crash
+    /// window where the Terminal ran but the run row never flipped to Success). Re-resolves the
+    /// Terminal's Inputs against the rebuilt scope — deterministic, no node re-execution. Last
+    /// completed Terminal wins, matching the in-walk <see cref="CaptureTerminalOutputs"/> rule.
+    /// </summary>
+    private void RehydrateTerminalOutputs(WorkflowDefinition definition, NodeRunScope scope, WalkerState state, IReadOnlyList<WorkflowRunNode> persisted)
+    {
+        var completedAt = persisted
+            .Where(n => n.Status == NodeStatus.Success)
+            .ToDictionary(n => n.NodeId, n => n.CompletedAt ?? DateTimeOffset.MinValue);
+
+        NodeDefinition? lastTerminal = null;
+        var lastCompleted = DateTimeOffset.MinValue;
+
         foreach (var node in definition.Nodes)
         {
-            var hasIncoming = definition.Edges.Any(e => e.To == node.Id);
-            if (!hasIncoming) state.Ready.Enqueue(node.Id);
+            if (!completedAt.TryGetValue(node.Id, out var when)) continue;
+            if (_nodeRegistry.Resolve(node.TypeKey).Manifest.Kind != NodeKind.Terminal) continue;
+
+            if (lastTerminal == null || when >= lastCompleted) { lastTerminal = node; lastCompleted = when; }
+        }
+
+        if (lastTerminal != null)
+            state.WorkflowOutputs = VariableResolver.ResolveBag(lastTerminal.Inputs, scope);
+    }
+
+    /// <summary>
+    /// Enqueue every not-yet-settled node whose incoming edges have all settled. For a fresh run
+    /// (no settled nodes) this is exactly the set of roots (nodes with no incoming edge — the
+    /// Trigger), iterated in definition order, so the walk starts identically to the original
+    /// EnqueueRoots. For a resumed run it is the boundary between done and not-yet-done work.
+    /// </summary>
+    private static void EnqueueReadyFrontier(WalkerState state, WorkflowDefinition definition)
+    {
+        foreach (var node in definition.Nodes)
+        {
+            if (state.Statuses.ContainsKey(node.Id)) continue;
+
+            var incoming = state.IncomingByNodeId.GetValueOrDefault(node.Id, Array.Empty<EdgeDefinition>());
+            if (incoming.All(e => state.Statuses.ContainsKey(e.From)) && !state.Ready.Contains(node.Id))
+                state.Ready.Enqueue(node.Id);
         }
     }
 
@@ -759,17 +850,9 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
         var routingHints = state.RoutingHints.GetValueOrDefault(source.Id);
         var sourceStatus = state.Statuses[source.Id];
 
-        // Walk every outgoing edge. Decide whether THIS edge is "live":
-        //   - Source node must have succeeded (skipped/failed sources kill downstream
-        //     transitively via the same logic in ShouldSkip).
-        //   - For a branch source (RoutingHints set), the edge's SourceHandle must be in
-        //     the hints list. Otherwise this particular edge is "dead".
         foreach (var edge in state.OutgoingByNodeId.GetValueOrDefault(source.Id, Array.Empty<EdgeDefinition>()))
         {
-            var edgeIsLive = sourceStatus == NodeStatus.Success
-                             && (routingHints == null || routingHints.Contains(edge.SourceHandle ?? DefaultHandleName));
-
-            state.EdgeLive[edge] = edgeIsLive;
+            state.EdgeLive[edge] = IsEdgeLive(edge, sourceStatus, routingHints);
 
             // A target becomes "ready to consider" once EVERY incoming edge's source has fired
             // (succeeded, skipped, or failed). The ShouldSkip check decides whether it actually
@@ -780,6 +863,31 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
             if (allIncomingSettled && !state.Statuses.ContainsKey(edge.To) && !state.Ready.Contains(edge.To))
                 state.Ready.Enqueue(edge.To);
         }
+    }
+
+    /// <summary>
+    /// An edge is "live" iff its source SUCCEEDED and — for a branch source (RoutingHints set) —
+    /// the edge's SourceHandle is among the chosen hints. Skipped/failed sources kill downstream
+    /// transitively (every incoming edge dead → ShouldSkip). Shared by the in-walk progression
+    /// and the durable rehydrate so both reconstruct identical liveness.
+    /// </summary>
+    private static bool IsEdgeLive(EdgeDefinition edge, NodeStatus sourceStatus, HashSet<string>? routingHints) =>
+        sourceStatus == NodeStatus.Success
+        && (routingHints == null || routingHints.Contains(edge.SourceHandle ?? DefaultHandleName));
+
+    /// <summary>Parse a persisted routing-hints JSON array (e.g. <c>["true"]</c>) back to a string list; null when absent.</summary>
+    private static IReadOnlyList<string>? ParseRoutingHints(string? routingHintsJson)
+    {
+        if (string.IsNullOrWhiteSpace(routingHintsJson)) return null;
+
+        var root = JsonDocument.Parse(routingHintsJson).RootElement;
+        if (root.ValueKind != JsonValueKind.Array) return null;
+
+        return root.EnumerateArray()
+            .Select(e => e.GetString())
+            .Where(s => s != null)
+            .Cast<string>()
+            .ToList();
     }
 
     private bool ShouldSkip(NodeDefinition node, WalkerState state)
