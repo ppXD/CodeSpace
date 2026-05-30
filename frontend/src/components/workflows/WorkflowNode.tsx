@@ -37,6 +37,26 @@ export interface WorkflowNodeData extends Record<string, unknown> {
 export function WorkflowNode({ data, selected }: NodeProps) {
   const d = data as WorkflowNodeData;
   const fields = d.inputFields ?? [];
+
+  // A loop container: the React Flow node's style sets its size and its body subgraph (child nodes
+  // with parentId === this loop) renders INSIDE via React Flow's parent/child positioning. We draw
+  // only the frame + header so the body shows through. Handles carry the run into/out of the whole
+  // loop and route a loop failure onward (its own `error` edge).
+  if (d.kind === "Loop") {
+    return (
+      <div className="wf-rf-loop" data-selected={selected}>
+        <Handle type="target" position={Position.Top} className="wf-rf-handle" />
+        <div className="wf-rf-loop-head">
+          <span className="wf-rf-loop-icon">{iconFor(d)}</span>
+          <span className="wf-rf-loop-id">{d.nodeId}</span>
+          <span className="wf-rf-loop-type">{d.label ?? d.displayName}</span>
+        </div>
+        <Handle type="source" position={Position.Bottom} className="wf-rf-handle" />
+        <Handle id={ERROR_HANDLE} type="source" position={Position.Right} className="wf-rf-handle wf-rf-handle-error" title="On error → connect to a handler node" />
+      </div>
+    );
+  }
+
   return (
     <div className="wf-rf-node" data-kind={d.kind.toLowerCase()} data-selected={selected}>
       {d.kind !== "Trigger" && <Handle type="target" position={Position.Top} className="wf-rf-handle" />}
