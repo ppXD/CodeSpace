@@ -171,4 +171,37 @@ public class VariableResolverTests
         var resolved = VariableResolver.WalkPath("sys.no_such_key", scope);
         resolved.ShouldBeNull();
     }
+
+    [Fact]
+    public void Loop_scope_resolves_prefixed_variables_and_index()
+    {
+        var scope = new NodeRunScope
+        {
+            Trigger = ParseDict("{}"),
+            Loop = ParseDict("""{ "answer": "ship it", "index": 3 }"""),
+        };
+
+        // {{loop.<name>}} resolves a loop variable; native types survive a sole placeholder.
+        VariableResolver.Resolve(ParseElement("\"{{loop.answer}}\""), scope).GetString().ShouldBe("ship it");
+        VariableResolver.Resolve(ParseElement("\"{{loop.index}}\""), scope).GetInt32().ShouldBe(3);
+
+        // An unknown loop var resolves to null (→ empty string in interpolation).
+        VariableResolver.WalkPath("loop.missing", scope).ShouldBeNull();
+    }
+
+    [Fact]
+    public void Loop_and_iteration_scopes_coexist_without_collision()
+    {
+        // A flow.loop body nested inside a flow.iterate sees BOTH heads: bare {{item}} (iterate)
+        // and prefixed {{loop.x}} (loop). The loop. prefix is what keeps them from colliding.
+        var scope = new NodeRunScope
+        {
+            Trigger = ParseDict("{}"),
+            Iteration = ParseDict("""{ "item": "PR-7" }"""),
+            Loop = ParseDict("""{ "item": "loop-item" }"""),
+        };
+
+        VariableResolver.Resolve(ParseElement("\"{{item}}\""), scope).GetString().ShouldBe("PR-7");
+        VariableResolver.Resolve(ParseElement("\"{{loop.item}}\""), scope).GetString().ShouldBe("loop-item");
+    }
 }

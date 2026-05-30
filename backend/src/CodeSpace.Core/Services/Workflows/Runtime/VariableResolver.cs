@@ -174,6 +174,7 @@ public static class VariableResolver
             "sys"     => WalkDictionary(scope.Sys, rest),
             "nodes"   => WalkNodesScope(scope, rest),
             "project" => WalkProjectsScope(scope, rest),
+            "loop"    => scope.Loop != null ? WalkDictionary(scope.Loop, rest) : null,
             _ => (JsonElement?)null
         };
 
@@ -182,7 +183,7 @@ public static class VariableResolver
         // Implicit iteration scope — only consulted when the head doesn't match a known
         // explicit bucket. This is what makes {{item}} / {{index}} work inside an iterate
         // node WITHOUT needing the operator to write {{iteration.item}}.
-        if (scope.Iteration != null && root is not "trigger" and not "team" and not "nodes" and not "wf" and not "input" and not "sys" and not "project")
+        if (scope.Iteration != null && root is not "trigger" and not "team" and not "nodes" and not "wf" and not "input" and not "sys" and not "project" and not "loop")
         {
             if (scope.Iteration.TryGetValue(root, out var iterValue))
             {

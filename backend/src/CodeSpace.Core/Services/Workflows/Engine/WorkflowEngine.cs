@@ -1015,7 +1015,7 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
     /// workflow_run_wait row, and — for a Timer wait — schedule the resume at wake_at. The walk
     /// then throws <see cref="RunSuspendedException"/> so the run lands in Suspended.
     /// </summary>
-    private async Task SuspendNodeAsync(WorkflowRun run, NodeDefinition node, NodeResult result, CancellationToken cancellationToken)
+    private async Task SuspendNodeAsync(WorkflowRun run, NodeDefinition node, NodeResult result, CancellationToken cancellationToken, string iterationKey = NoIteration)
     {
         var token = result.SuspendUntil
             ?? throw new NodeFailureException($"Node '{node.Id}' returned Suspended without a SuspensionToken.");
@@ -1031,12 +1031,12 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
             ? (await StageSubworkflowChildAsync(run, token, cancellationToken).ConfigureAwait(false)).ToString()
             : Guid.NewGuid().ToString("N");
 
-        await _recordLogger.NodeSuspendedAsync(run.Id, node.Id, NoIteration, waitKind, wakeAt, cancellationToken).ConfigureAwait(false);
+        await _recordLogger.NodeSuspendedAsync(run.Id, node.Id, iterationKey, waitKind, wakeAt, cancellationToken).ConfigureAwait(false);
 
         // One outstanding wait per (run, node, iteration). Drop any prior (resolved) wait for
-        // this node so a re-suspend can't trip the unique index.
+        // this node+iteration so a re-suspend can't trip the unique index.
         var existing = await _db.WorkflowRunWait
-            .Where(w => w.RunId == run.Id && w.NodeId == node.Id && w.IterationKey == NoIteration)
+            .Where(w => w.RunId == run.Id && w.NodeId == node.Id && w.IterationKey == iterationKey)
             .ToListAsync(cancellationToken).ConfigureAwait(false);
         if (existing.Count > 0) _db.WorkflowRunWait.RemoveRange(existing);
 
@@ -1045,7 +1045,7 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
             Id = Guid.NewGuid(),
             RunId = run.Id,
             NodeId = node.Id,
-            IterationKey = NoIteration,
+            IterationKey = iterationKey,
             WaitKind = waitKind,
             Token = correlationToken,
             WakeAt = wakeAt,
@@ -1139,7 +1139,7 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
     /// across attempts; node.started is emitted ONCE before the loop (the run-node view ignores
     /// the per-retry <c>log</c> records and projects status from the node.* records only).</para>
     /// </summary>
-    private async Task<NodeStatus> ExecuteNodeAsync(WorkflowRun run, NodeDefinition node, NodeRunScope scope, WalkerState state, CancellationToken cancellationToken)
+    private async Task<NodeStatus> ExecuteNodeAsync(WorkflowRun run, NodeDefinition node, NodeRunScope scope, WalkerState state, CancellationToken cancellationToken, string iterationKey = NoIteration)
     {
         var runtime = _nodeRegistry.Resolve(node.TypeKey);
         var resolvedConfig = VariableResolver.ResolveBag(node.Config, scope);
@@ -1149,12 +1149,12 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
         var startedAt = DateTimeOffset.UtcNow;
         // Capture the node.started record id so this node's external-call records chain back
         // to it via parent_record_id. The NodeObservability handle carries the link.
-        var parentRecordId = await _recordLogger.NodeStartedAsync(run.Id, node.Id, NoIteration, redactedInputs, redactedConfig, cancellationToken).ConfigureAwait(false);
+        var parentRecordId = await _recordLogger.NodeStartedAsync(run.Id, node.Id, iterationKey, redactedInputs, redactedConfig, cancellationToken).ConfigureAwait(false);
 
         // On a resumed run the node was suspended; rehydrate loaded its resolved wait's payload
         // into state.ResumePayloads. The node knows it's being resumed via this.
         var resumePayload = state.ResumePayloads.TryGetValue(node.Id, out var rp) ? rp : (JsonElement?)null;
-        var exec = new NodeExecution(run, node, runtime, scope, state, resolvedInputs, resolvedConfig, parentRecordId, resumePayload, startedAt);
+        var exec = new NodeExecution(run, node, runtime, scope, state, resolvedInputs, resolvedConfig, parentRecordId, resumePayload, startedAt, iterationKey);
 
         var plan = RetryPlan.From(node.Retry);
         var lastError = "Node failed.";
@@ -1170,7 +1170,7 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
             {
                 try
                 {
-                    await SuspendNodeAsync(run, node, result, cancellationToken).ConfigureAwait(false);
+                    await SuspendNodeAsync(run, node, result, cancellationToken, iterationKey).ConfigureAwait(false);
                     return NodeStatus.Suspended;
                 }
                 catch (SubworkflowStartException ex)
@@ -1237,7 +1237,7 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
     private async Task FinalizeNonFailureAsync(NodeExecution exec, NodeResult result, CancellationToken cancellationToken)
     {
         var duration = DateTimeOffset.UtcNow - exec.StartedAt;
-        await PersistNodeResultAsync(exec.Run.Id, exec.Node.Id, result, duration, cancellationToken).ConfigureAwait(false);
+        await PersistNodeResultAsync(exec.Run.Id, exec.Node.Id, result, duration, cancellationToken, exec.IterationKey).ConfigureAwait(false);
         ApplyResultToScopeAndState(exec.Node, result, exec.Scope, exec.State);
 
         if (result.Status == NodeStatus.Success && exec.Runtime.Manifest.Kind == NodeKind.Terminal && exec.ResolvedInputs.Count > 0)
@@ -1253,7 +1253,7 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
     private async Task FinalizeFailureAsync(NodeExecution exec, string error, CancellationToken cancellationToken)
     {
         exec.Scope.Nodes[exec.Node.Id] = BuildErrorOutput(error, exec.Node.Id);
-        await _recordLogger.NodeFailedAsync(exec.Run.Id, exec.Node.Id, NoIteration, error, DateTimeOffset.UtcNow - exec.StartedAt, cancellationToken).ConfigureAwait(false);
+        await _recordLogger.NodeFailedAsync(exec.Run.Id, exec.Node.Id, exec.IterationKey, error, DateTimeOffset.UtcNow - exec.StartedAt, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -1306,7 +1306,7 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
     /// values into one argument so the helpers stay under Rule 1's 5-param cap — a data holder with
     /// no behaviour.
     /// </summary>
-    private sealed record NodeExecution(WorkflowRun Run, NodeDefinition Node, INodeRuntime Runtime, NodeRunScope Scope, WalkerState State, IReadOnlyDictionary<string, JsonElement> ResolvedInputs, IReadOnlyDictionary<string, JsonElement> ResolvedConfig, Guid ParentRecordId, JsonElement? ResumePayload, DateTimeOffset StartedAt);
+    private sealed record NodeExecution(WorkflowRun Run, NodeDefinition Node, INodeRuntime Runtime, NodeRunScope Scope, WalkerState State, IReadOnlyDictionary<string, JsonElement> ResolvedInputs, IReadOnlyDictionary<string, JsonElement> ResolvedConfig, Guid ParentRecordId, JsonElement? ResumePayload, DateTimeOffset StartedAt, string IterationKey);
 
     /// <summary>
     /// Assemble the <see cref="NodeRunContext"/> the node sees. Pulls the per-node logger
@@ -1336,12 +1336,12 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
     /// <c>RunAsync</c> returned (i.e. did not throw). The branching is by <see cref="NodeStatus"/>;
     /// thrown exceptions go through <see cref="ExecuteNodeAsync"/>'s catch handlers instead.
     /// </summary>
-    private async Task PersistNodeResultAsync(Guid runId, string nodeId, NodeResult result, TimeSpan duration, CancellationToken cancellationToken)
+    private async Task PersistNodeResultAsync(Guid runId, string nodeId, NodeResult result, TimeSpan duration, CancellationToken cancellationToken, string iterationKey = NoIteration)
     {
         if (result.Status == NodeStatus.Success)
-            await _recordLogger.NodeCompletedAsync(runId, nodeId, NoIteration, result.Outputs, result.RoutingHints, duration, cancellationToken).ConfigureAwait(false);
+            await _recordLogger.NodeCompletedAsync(runId, nodeId, iterationKey, result.Outputs, result.RoutingHints, duration, cancellationToken).ConfigureAwait(false);
         else
-            await _recordLogger.NodeFailedAsync(runId, nodeId, NoIteration, result.Error ?? "Node returned non-success without error message.", duration, cancellationToken).ConfigureAwait(false);
+            await _recordLogger.NodeFailedAsync(runId, nodeId, iterationKey, result.Error ?? "Node returned non-success without error message.", duration, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -1382,12 +1382,12 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
         state.WorkflowOutputs = resolvedInputs;
     }
 
-    private async Task MarkSkippedAsync(WorkflowRun run, NodeDefinition node, WalkerState state, CancellationToken cancellationToken)
+    private async Task MarkSkippedAsync(WorkflowRun run, NodeDefinition node, WalkerState state, CancellationToken cancellationToken, string iterationKey = NoIteration)
     {
         state.Statuses[node.Id] = NodeStatus.Skipped;
         // The view treats a node.skipped record as the cell's terminal state — no node.started
         // is emitted for skipped nodes, so the projection's started_at column is NULL for them.
-        await _recordLogger.NodeSkippedAsync(run.Id, node.Id, NoIteration, reason: "all-incoming-dead", cancellationToken).ConfigureAwait(false);
+        await _recordLogger.NodeSkippedAsync(run.Id, node.Id, iterationKey, reason: "all-incoming-dead", cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>Empty iteration key — used for every non-flow.iterate node.</summary>
