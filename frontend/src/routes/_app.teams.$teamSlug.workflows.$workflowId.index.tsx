@@ -338,28 +338,45 @@ function Editor({ workflow, manifests, onBackToList, saving, onSave }: EditorPro
     const id = uniqueNodeId(manifest.typeKey, nodes);
     const position = computeAddPosition(manifest, options.screen);
 
-    setNodes((nds) => [
-      ...nds,
-      {
-        id,
-        type: "wf",
-        position,
-        data: {
-          nodeId: id,
-          typeKey: manifest.typeKey,
-          displayName: manifest.displayName,
-          iconKey: manifest.iconKey,
-          kind: manifest.kind,
-          category: manifest.category,
-          label: null,
-          // A manual start node shows the current workflow input fields on its card.
-          ...(manifest.isManual ? { inputFields: workflowInputs } : {}),
-        },
+    const isLoop = manifest.kind === "Loop";
+
+    const newNode: Node<WorkflowNodeData> = {
+      id,
+      type: "wf",
+      position,
+      data: {
+        nodeId: id,
+        typeKey: manifest.typeKey,
+        displayName: manifest.displayName,
+        iconKey: manifest.iconKey,
+        kind: manifest.kind,
+        category: manifest.category,
+        label: null,
+        // A manual start node shows the current workflow input fields on its card.
+        ...(manifest.isManual ? { inputFields: workflowInputs } : {}),
       },
-    ]);
-    setConfigs((c) => ({ ...c, [id]: defaultsFromSchema(manifest.configSchema) }));
-    setInputs((c) => ({ ...c, [id]: defaultsFromSchema(manifest.inputSchema) }));
-    setNodeLabels((l) => ({ ...l, [id]: "" }));
+      // A loop is a container sized to hold its body subgraph.
+      ...(isLoop ? { style: { width: LOOP_CONTAINER_W, height: LOOP_CONTAINER_H } } : {}),
+    };
+
+    // A Loop ships with its body-entry marker (flow.loop_start) pre-placed inside — the marker is
+    // never hand-dragged from the palette, so it's created here, parented to the new loop.
+    const startManifest = isLoop ? manifestByType.get("flow.loop_start") : undefined;
+    const startId = isLoop ? uniqueNodeId("flow.loop_start", [...nodes, newNode]) : null;
+    const startNode: Node<WorkflowNodeData> | null = startId
+      ? {
+          id: startId, type: "wf", parentId: id, extent: "parent", position: { x: 40, y: 72 },
+          data: {
+            nodeId: startId, typeKey: "flow.loop_start", displayName: startManifest?.displayName ?? "Loop start",
+            iconKey: startManifest?.iconKey ?? "play", kind: "Regular", category: startManifest?.category ?? "Logic", label: null,
+          },
+        }
+      : null;
+
+    setNodes((nds) => (startNode ? [...nds, newNode, startNode] : [...nds, newNode]));
+    setConfigs((c) => ({ ...c, [id]: defaultsFromSchema(manifest.configSchema), ...(startId ? { [startId]: {} } : {}) }));
+    setInputs((c) => ({ ...c, [id]: defaultsFromSchema(manifest.inputSchema), ...(startId ? { [startId]: {} } : {}) }));
+    setNodeLabels((l) => ({ ...l, [id]: "", ...(startId ? { [startId]: "" } : {}) }));
     setSelectedId(id);
     setUnsaved(true);
 
@@ -1196,6 +1213,11 @@ function NodeInspector({
 
 const NODE_TYPES = { wf: WorkflowNode };
 
+// Default size of a flow.loop container on the canvas — roomy enough for a small body row. The
+// body's nodes render inside it (React Flow parent/child); the user resizes/repositions as needed.
+const LOOP_CONTAINER_W = 820;
+const LOOP_CONTAINER_H = 240;
+
 function definitionToRfNodes(
   def: WorkflowDefinition,
   manifestByType: Map<string, NodeManifestDto>
@@ -1204,27 +1226,39 @@ function definitionToRfNodes(
   // are typically <20 nodes and the user immediately fixes positions on first drag, so no
   // real layout engine is needed.
   let fallbackY = 80;
-  return def.nodes.map((n) => {
-    const manifest = manifestByType.get(n.typeKey);
-    const position = n.position ?? { x: 80, y: fallbackY };
-    if (!n.position) fallbackY += 180;
 
-    return {
-      id: n.id,
-      type: "wf",
-      position,
-      data: {
-        nodeId: n.id,
-        typeKey: n.typeKey,
-        displayName: manifest?.displayName ?? n.typeKey,
-        iconKey: manifest?.iconKey ?? null,
-        kind: manifest?.kind ?? "Regular",
-        category: manifest?.category ?? "",
-        label: n.label ?? null,
-        // Manual start node shows the workflow's input fields on its card (Dify-style).
-        ...(manifest?.isManual ? { inputFields: def.inputs ?? [] } : {}),
-      },
+  // React Flow requires a parent (loop container) to appear BEFORE its children in the array.
+  // Body nodes carry parentId; ordering top-level-first guarantees parent-before-child.
+  const ordered = [...def.nodes].sort((a, b) => (a.parentId ? 1 : 0) - (b.parentId ? 1 : 0));
+
+  return ordered.map((n) => {
+    const manifest = manifestByType.get(n.typeKey);
+    const kind = manifest?.kind ?? "Regular";
+
+    const data: WorkflowNodeData = {
+      nodeId: n.id,
+      typeKey: n.typeKey,
+      displayName: manifest?.displayName ?? n.typeKey,
+      iconKey: manifest?.iconKey ?? null,
+      kind,
+      category: manifest?.category ?? "",
+      label: n.label ?? null,
+      // Manual start node shows the workflow's input fields on its card (Dify-style).
+      ...(manifest?.isManual ? { inputFields: def.inputs ?? [] } : {}),
     };
+
+    // A loop body node renders INSIDE its container — position is relative to the parent, clipped.
+    if (n.parentId) {
+      return { id: n.id, type: "wf", parentId: n.parentId, extent: "parent" as const, position: n.position ?? { x: 40, y: 60 }, data };
+    }
+
+    const position = n.position ?? { x: 80, y: fallbackY };
+    if (!n.position) fallbackY += kind === "Loop" ? 300 : 180;
+
+    // A loop container is sized so its body subgraph fits; everything else is a normal card.
+    return kind === "Loop"
+      ? { id: n.id, type: "wf", position, data, style: { width: LOOP_CONTAINER_W, height: LOOP_CONTAINER_H } }
+      : { id: n.id, type: "wf", position, data };
   });
 }
 
@@ -1266,6 +1300,9 @@ function rfToDefinition(
     // Omit retry entirely when absent so the saved definition (and its content hash) is
     // unchanged for nodes the operator never gave a policy.
     ...(retries[n.id] ? { retry: retries[n.id] } : {}),
+    // A node nested inside a flow.loop container carries its parent (React Flow `parentId`).
+    // Omitted when top-level so the hash is unchanged for every non-loop workflow.
+    ...(n.parentId ? { parentId: n.parentId } : {}),
   }));
 
   const edgeDefs: EdgeDefinition[] = edges.map((e) => ({

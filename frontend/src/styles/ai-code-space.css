@@ -2043,6 +2043,26 @@ textarea:-webkit-autofill {
   box-shadow: 0 1px 2px rgba(31,30,29,0.04);
 }
 .acs-root .wf-rf-node[data-selected="true"] { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-soft); }
+
+/* flow.loop container — a sized box whose body subgraph (child nodes) renders inside it. Only the
+   frame + header are drawn here; React Flow positions the children over the interior. */
+.acs-root .wf-rf-loop {
+  width: 100%; height: 100%;
+  background: var(--panel-2); border: 1.5px solid var(--line); border-radius: 12px;
+  position: relative; box-shadow: 0 1px 3px rgba(31,30,29,0.05);
+}
+.acs-root .wf-rf-loop[data-selected="true"] { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-soft); }
+.acs-root .wf-rf-loop-head {
+  display: flex; align-items: center; gap: 8px;
+  padding: 8px 12px; font-size: 12.5px; color: var(--ink);
+  border-bottom: 1px solid var(--line);
+}
+.acs-root .wf-rf-loop-icon {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 22px; height: 22px; border-radius: 6px; background: var(--accent-soft); color: var(--accent);
+}
+.acs-root .wf-rf-loop-id { font-weight: 600; }
+.acs-root .wf-rf-loop-type { color: var(--muted); }
 .acs-root .wf-rf-node-bar {
   position: absolute; left: 0; top: 0; bottom: 0; width: 3px; background: var(--accent);
   border-top-left-radius: 8px; border-bottom-left-radius: 8px;
