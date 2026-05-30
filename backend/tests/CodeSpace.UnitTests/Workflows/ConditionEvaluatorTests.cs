@@ -84,6 +84,37 @@ public class ConditionEvaluatorTests
         ConditionEvaluator.Evaluate("{{trigger.count}} == 5.0", scope).ShouldBeTrue();
     }
 
+    // ── CompareValues — the structured operator vocabulary (flow.loop termination) ──
+
+    [Theory]
+    [InlineData("\"reasoning DONE here\"", "contains", "DONE", true)]
+    [InlineData("\"still thinking\"", "contains", "DONE", false)]
+    [InlineData("\"still thinking\"", "not_contains", "DONE", true)]
+    [InlineData("\"reasoning DONE\"", "not_contains", "DONE", false)]
+    [InlineData("\"ship it\"", "startsWith", "ship", true)]
+    [InlineData("\"ship it\"", "endsWith", "it", true)]
+    [InlineData("\"ship it\"", "endsWith", "ship", false)]
+    [InlineData("\"ready\"", "eq", "ready", true)]
+    [InlineData("\"ready\"", "neq", "ready", false)]
+    [InlineData("42", "eq", "42", true)]                 // number left vs string literal → stringwise equal
+    [InlineData("\"\"", "is_empty", null, true)]
+    [InlineData("\"x\"", "is_empty", null, false)]
+    [InlineData("\"x\"", "is_not_empty", null, true)]
+    [InlineData("\"anything\"", "no_such_op", "x", false)] // unknown operator fails closed
+    public void CompareValues_maps_each_operator(string leftJson, string op, string? right, bool expected)
+    {
+        var left = JsonDocument.Parse(leftJson).RootElement;
+        ConditionEvaluator.CompareValues(op, left, right).ShouldBe(expected);
+    }
+
+    [Fact]
+    public void CompareValues_treats_json_null_as_empty()
+    {
+        var nullEl = JsonDocument.Parse("null").RootElement;
+        ConditionEvaluator.CompareValues("is_empty", nullEl, null).ShouldBeTrue();
+        ConditionEvaluator.CompareValues("contains", nullEl, "x").ShouldBeFalse();
+    }
+
     private static IReadOnlyDictionary<string, JsonElement> ParseDict(string json) =>
         JsonDocument.Parse(json).RootElement.EnumerateObject().ToDictionary(p => p.Name, p => p.Value.Clone());
 }

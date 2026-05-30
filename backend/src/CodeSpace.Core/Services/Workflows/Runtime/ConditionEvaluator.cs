@@ -82,6 +82,45 @@ public static class ConditionEvaluator
         return Truthy(value);
     }
 
+    // ── Structured comparison ───────────────────────────────────────────────────
+    // Operator vocabulary for builder UIs (flow.loop termination today; logic.switch later) where
+    // the caller already resolved the left ref + holds the right literal, so there is no expression
+    // string to parse. Mirrors Dify's operator dropdown. The two unary ops ignore `right`.
+    public const string OpKeyEquals = "eq";
+    public const string OpKeyNotEquals = "neq";
+    public const string OpKeyContains = "contains";
+    public const string OpKeyNotContains = "not_contains";
+    public const string OpKeyStartsWith = "startsWith";
+    public const string OpKeyEndsWith = "endsWith";
+    public const string OpKeyIsEmpty = "is_empty";
+    public const string OpKeyIsNotEmpty = "is_not_empty";
+
+    /// <summary>
+    /// Compare a resolved left value against a right literal by operator NAME (not an expression).
+    /// Reuses the same equality / string / emptiness semantics as the expression evaluator. A Null /
+    /// Undefined <paramref name="left"/> counts as empty (so <c>is_empty</c> is true, <c>contains</c>
+    /// is false). Unknown operators return false (fail-closed). Used by the <c>flow.loop</c> engine
+    /// for each structured termination row.
+    /// </summary>
+    public static bool CompareValues(string op, JsonElement left, string? right)
+    {
+        var l = JsonElementToClr(left);
+        var r = right ?? "";
+
+        return op switch
+        {
+            OpKeyEquals      => AreEqual(l, r),
+            OpKeyNotEquals   => !AreEqual(l, r),
+            OpKeyContains    => AsString(l).Contains(r, StringComparison.OrdinalIgnoreCase),
+            OpKeyNotContains => !AsString(l).Contains(r, StringComparison.OrdinalIgnoreCase),
+            OpKeyStartsWith  => AsString(l).StartsWith(r, StringComparison.OrdinalIgnoreCase),
+            OpKeyEndsWith    => AsString(l).EndsWith(r, StringComparison.OrdinalIgnoreCase),
+            OpKeyIsEmpty     => IsEmpty(l),
+            OpKeyIsNotEmpty  => !IsEmpty(l),
+            _ => false
+        };
+    }
+
     /// <summary>Resolves a token. {{ref}} → walk scope; "literal" → string; number → number; etc.</summary>
     private static object? Resolve(string token, NodeRunScope scope)
     {
