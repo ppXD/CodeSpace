@@ -1,5 +1,8 @@
+import { useState } from "react";
+
+import type { WorkflowRunWaitInfo } from "@/api/workflows";
 import { ApiError } from "@/api/request";
-import { useWorkflowRun } from "@/hooks/use-workflows";
+import { useResumeRun, useWorkflowRun } from "@/hooks/use-workflows";
 
 import { JsonView } from "./JsonView";
 
@@ -52,6 +55,10 @@ export function RunDetailView({ runId }: { runId: string }) {
           <div className="cn-banner-h">Run failed</div>
           <div className="cn-banner-p" style={{ fontFamily: "inherit" }}>{r.error}</div>
         </div>
+      )}
+
+      {r.status === "Suspended" && r.pendingWait && (
+        <SuspendedPanel runId={runId} wait={r.pendingWait} />
       )}
 
       <section className="wf-section">
@@ -135,4 +142,61 @@ function hasContent(value: unknown): boolean {
   if (value === null || value === undefined) return false;
   if (typeof value === "object" && !Array.isArray(value)) return Object.keys(value).length > 0;
   return true;
+}
+
+/**
+ * The resume affordance for a Suspended run. An Approval wait gets approve/reject + an optional
+ * comment (posts the decision, then the live poll shows the run continue). A Timer wait just
+ * shows when it'll wake. Callback waits (Phase 1.2c) have no UI yet.
+ */
+export function SuspendedPanel({ runId, wait }: { runId: string; wait: WorkflowRunWaitInfo }) {
+  const resume = useResumeRun(runId);
+  const [comment, setComment] = useState("");
+
+  if (wait.kind === "Approval") {
+    const prompt = readPrompt(wait.payload);
+    const decide = (approved: boolean) => resume.mutate({ approved, comment: comment.trim() || undefined });
+
+    return (
+      <section className="wf-section wf-approval">
+        <h2 className="wf-section-h">Waiting for approval</h2>
+        {prompt && <div className="wf-approval-prompt">{prompt}</div>}
+        <textarea
+          className="wf-form-input wf-approval-comment"
+          rows={2}
+          placeholder="Comment (optional)"
+          value={comment}
+          onChange={(e) => setComment(e.target.value)}
+          disabled={resume.isPending}
+        />
+        <div className="wf-approval-actions">
+          <button className="btn btn-primary" onClick={() => decide(true)} disabled={resume.isPending}>Approve</button>
+          <button className="btn" onClick={() => decide(false)} disabled={resume.isPending}>Reject</button>
+        </div>
+        {resume.isError && <div className="wf-approval-err">Couldn&apos;t submit — try again.</div>}
+      </section>
+    );
+  }
+
+  if (wait.kind === "Timer") {
+    return (
+      <section className="wf-section wf-approval">
+        <h2 className="wf-section-h">Sleeping</h2>
+        <div className="wf-approval-prompt">
+          {wait.wakeAt ? `Resumes around ${new Date(wait.wakeAt).toLocaleTimeString()}.` : "Waiting on a timer."}
+        </div>
+      </section>
+    );
+  }
+
+  return null;
+}
+
+/** Pull the approver-facing prompt out of a wait's suspend payload, if present. */
+function readPrompt(payload: unknown): string {
+  if (payload && typeof payload === "object" && "prompt" in payload) {
+    const p = (payload as { prompt?: unknown }).prompt;
+    return typeof p === "string" ? p : "";
+  }
+  return "";
 }

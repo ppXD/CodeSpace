@@ -9,6 +9,7 @@ using CodeSpace.Messages.Commands.Workflows;
 using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Dtos.Workflows;
 using CodeSpace.Messages.Enums;
+using CodeSpace.Messages.Queries.Workflows;
 using MediatR;
 using Microsoft.EntityFrameworkCore;
 using Shouldly;
@@ -112,6 +113,28 @@ public class ApprovalFlowTests
 
         (await ApproveAsync(runId, teamId, userId, approved: true, comment: null))
             .ShouldBeFalse("there is no pending approval wait to resolve");
+    }
+
+    [Fact]
+    public async Task Run_detail_surfaces_the_pending_approval_wait_for_the_UI()
+    {
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var workflowId = await CreateWorkflowAsync(teamId, userId, ApprovalDefinition());
+        var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
+        await RunEngineAsync(runId);
+
+        WorkflowRunDetail? detail;
+        using (var scope = _fixture.BeginScopeAs(userId, teamId, Roles.Admin))
+            detail = await scope.Resolve<IMediator>().Send(new GetWorkflowRunQuery { RunId = runId });
+
+        detail.ShouldNotBeNull();
+        detail!.Status.ShouldBe(WorkflowRunStatus.Suspended);
+        detail.PendingWait.ShouldNotBeNull("a run parked on an approval surfaces its wait so the UI can show approve/reject");
+        detail.PendingWait!.Kind.ShouldBe(WorkflowWaitKinds.Approval);
+        detail.PendingWait.NodeId.ShouldBe("approval");
+        detail.PendingWait.WakeAt.ShouldBeNull("approval waits have no timer");
+        detail.PendingWait.Payload.GetProperty("prompt").GetString().ShouldBe("Deploy to production?",
+            "the node's prompt is surfaced so the approver sees the question");
     }
 
     // ─── Helpers ────────────────────────────────────────────────────────────────

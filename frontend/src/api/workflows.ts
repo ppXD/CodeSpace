@@ -150,6 +150,17 @@ export interface WorkflowRunNodeSummary {
   completedAt: string | null;
 }
 
+/** The outstanding wait a Suspended run is parked on — drives the resume affordance. */
+export interface WorkflowRunWaitInfo {
+  nodeId: string;
+  /** "Timer" | "Approval" | "Callback". */
+  kind: string;
+  /** When the scheduled resume fires (Timer only). */
+  wakeAt?: string | null;
+  /** The node's suspend payload (e.g. an approval `prompt`). */
+  payload?: unknown;
+}
+
 export interface WorkflowRunDetail {
   id: string;
   workflowId: string;
@@ -165,6 +176,8 @@ export interface WorkflowRunDetail {
   nodes: WorkflowRunNodeSummary[];
   /** Last successful Terminal's resolved Inputs. */
   outputs?: unknown;
+  /** Set when the run is Suspended — tells the UI why it's paused + what affordance to show. */
+  pendingWait?: WorkflowRunWaitInfo | null;
 }
 
 export interface NodeManifestDto {
@@ -227,6 +240,13 @@ export const workflowsApi = {
   replayRun: (runId: string) => fetchJson<{ runId: string }>(`/api/workflows/runs/${runId}/replay`, {
     method: "POST",
   }),
+
+  /** Resolve a pending approval on a Suspended run + resume it. Returns whether it resumed. */
+  resumeRun: (runId: string, body: { approved: boolean; comment?: string }) =>
+    fetchJson<{ resumed: boolean }>(`/api/workflows/runs/${runId}/resume`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
 
   listNodeManifests: () => fetchJson<NodeManifestDto[]>("/api/workflows/node-manifests"),
 

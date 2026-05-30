@@ -397,6 +397,13 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
         var normalizedPayload = SafeParseJson(run.RunRequest?.NormalizedPayloadJson);
         var outputs = SafeParseJson(run.OutputsJson);
 
+        // The outstanding wait (if any) — drives the run-detail's resume affordance. Latest
+        // pending wins (there is at most one per node; a run parks on one at a time today).
+        var pending = await _db.WorkflowRunWait.AsNoTracking()
+            .Where(w => w.RunId == runId && w.Status == WorkflowWaitStatuses.Pending)
+            .OrderByDescending(w => w.CreatedAt)
+            .FirstOrDefaultAsync(cancellationToken).ConfigureAwait(false);
+
         return new WorkflowRunDetail
         {
             Id = run.Id,
@@ -410,6 +417,13 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
             CompletedAt = run.CompletedAt,
             Nodes = nodes.Select(MapRunNode).ToList(),
             Outputs = outputs,
+            PendingWait = pending == null ? null : new WorkflowRunWaitInfo
+            {
+                NodeId = pending.NodeId,
+                Kind = pending.WaitKind,
+                WakeAt = pending.WakeAt,
+                Payload = SafeParseJson(pending.PayloadJson),
+            },
         };
     }
 
