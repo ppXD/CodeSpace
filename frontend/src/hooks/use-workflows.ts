@@ -1,12 +1,26 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
-import { workflowsApi, type CreateWorkflowInput, type UpdateWorkflowInput } from "@/api/workflows";
+import { workflowsApi, type CreateWorkflowInput, type UpdateWorkflowInput, type WorkflowRunStatus } from "@/api/workflows";
 
 /**
  * Hooks for the workflows engine surface. Same shape as the repository hooks —
  * list/get queries auto-invalidate on mutation, run-status polls every 4 s while a
  * run is non-terminal.
  */
+
+/**
+ * Terminal run states — a run that reached one of these never changes again, so the live views
+ * stop polling. Everything else (Pending, Enqueued, Running, Suspended) is "active": the run
+ * will still transition. Suspended MUST be treated as active — it resumes on its timer /
+ * approval / callback, so the run-detail view has to keep refreshing or it freezes the moment a
+ * node suspends.
+ */
+const TERMINAL_RUN_STATUSES = new Set<WorkflowRunStatus>(["Success", "Failure", "Cancelled"]);
+
+/** True while a run can still change state (worth polling). */
+export function isRunActive(status: WorkflowRunStatus): boolean {
+  return !TERMINAL_RUN_STATUSES.has(status);
+}
 
 export function useWorkflows() {
   return useQuery({
@@ -84,7 +98,7 @@ export function useWorkflowRuns(workflowId: string | null) {
     refetchInterval: (q) => {
       const data = q.state.data;
       if (!data) return false;
-      const anyActive = data.some((r) => r.status === "Pending" || r.status === "Running");
+      const anyActive = data.some((r) => isRunActive(r.status));
       return anyActive ? 4000 : false;
     },
   });
@@ -98,7 +112,7 @@ export function useWorkflowRun(runId: string | null) {
     refetchInterval: (q) => {
       const data = q.state.data;
       if (!data) return false;
-      return data.status === "Pending" || data.status === "Running" ? 2000 : false;
+      return isRunActive(data.status) ? 2000 : false;
     },
   });
 }
