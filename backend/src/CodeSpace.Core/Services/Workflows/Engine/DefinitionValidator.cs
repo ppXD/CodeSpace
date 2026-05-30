@@ -150,6 +150,7 @@ public sealed class DefinitionValidator : IScopedDependency
         if (HasDuplicateIds(definition)) return;
 
         var adjacency = BuildAdjacency(definition);
+        var nodeById = definition.Nodes.ToDictionary(n => n.Id);   // safe: duplicate ids returned above
         var reachable = new HashSet<string>();
         var stack = new Stack<string>();
 
@@ -162,6 +163,13 @@ public sealed class DefinitionValidator : IScopedDependency
             if (!reachable.Add(current)) continue;
 
             foreach (var next in adjacency.GetValueOrDefault(current) ?? new List<string>()) stack.Push(next);
+
+            // A reachable loop container makes its whole body reachable — enter it so loop_start +
+            // body nodes (which have no top-level incoming edge) aren't flagged unreachable. The
+            // body's own internal connectivity is covered by CheckAcyclic. TryGetValue guards the
+            // case where `current` is an edge target that doesn't exist (CheckEdgeEndpoints flags it).
+            if (nodeById.TryGetValue(current, out var currentNode) && SafeKind(currentNode) == NodeKind.Loop)
+                foreach (var bodyNode in definition.Nodes.Where(n => n.ParentId == current)) stack.Push(bodyNode.Id);
         }
 
         foreach (var node in definition.Nodes)
@@ -284,6 +292,11 @@ public sealed class DefinitionValidator : IScopedDependency
                 errors.Add($"Node '{node.Id}' {source} reference '{path}' is malformed (project reference must be 'project.<slug>.<name>').");
             return;
         }
+
+        // loop.<name> — flow.loop body variables (+ loop.index), populated by the enclosing container
+        // at runtime. Membership is dynamic (depends on which loop body this node sits in), so accept
+        // the shape and let runtime null-resolve a stray ref — mirrors trigger / team / wf / input.
+        if (head == "loop") return;
 
         // Iteration scope keys (item / index / etc) are populated at runtime by container
         // nodes like flow.iterate and are only valid inside that container's config/inputs.
