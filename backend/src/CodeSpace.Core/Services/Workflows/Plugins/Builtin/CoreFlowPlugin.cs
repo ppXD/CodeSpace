@@ -28,6 +28,7 @@ public sealed class CoreFlowPlugin : IPluginModule
         typeof(FlowSleepNode),
         typeof(FlowWaitApprovalNode),
         typeof(FlowWaitCallbackNode),
+        typeof(FlowSubworkflowNode),
     };
 
     public IReadOnlyList<Type> RunSourceMatchers { get; } = Array.Empty<Type>();

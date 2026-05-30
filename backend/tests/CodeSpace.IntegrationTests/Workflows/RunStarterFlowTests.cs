@@ -239,8 +239,11 @@ public class RunStarterFlowTests
     }
 
     [Fact]
-    public async Task Replay_envelope_with_partial_lineage_throws()
+    public async Task Replay_envelope_with_one_frozen_version_field_missing_throws()
     {
+        // The frozen-version replay fields travel together: CausationRequestId iff ReleaseHashAtRun.
+        // ParentRunId is INDEPENDENT (a sub-workflow child sets it alone, with no frozen hash), so
+        // the violation is now a half-set replay pair — not ParentRunId standing on its own.
         var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
 
         using var scope = _fixture.BeginScope();
@@ -256,9 +259,9 @@ public class RunStarterFlowTests
             ActorId = userId,
             NormalizedPayloadJson = "{}",
             CreatedBy = userId,
-            ParentRunId = Guid.NewGuid(),                    // set
-            CausationRequestId = null,                        // missing — violation
-            ReleaseHashAtRun = null,                          // missing
+            ParentRunId = Guid.NewGuid(),
+            CausationRequestId = Guid.NewGuid(),              // set
+            ReleaseHashAtRun = null,                          // missing its partner — violation
         }, CancellationToken.None));
     }
 
