@@ -902,18 +902,13 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
     }
 
     /// <summary>
-    /// An edge is "live" iff EITHER:
-    ///   • its source SUCCEEDED and — for a branch source (RoutingHints set) — the edge's
-    ///     SourceHandle is among the chosen hints; OR
-    ///   • its source FAILED and the edge is the node's <c>error</c> handle (error routing).
-    /// A failed source thus makes ONLY its error edge live; a skipped source kills everything.
-    /// Determined by status alone (the error handle name is a constant), so the durable rehydrate
-    /// and the in-walk progression reconstruct identical liveness with no extra persistence.
+    /// Thin wrapper over <see cref="EdgeLiveness.IsLive"/> (the exhaustively-tested rule): a
+    /// successful source fires its normal/branch handles per the routing hints but NEVER the
+    /// <c>error</c> handle; a failed source fires ONLY its <c>error</c> handle; a skipped source
+    /// kills everything. Shared by the in-walk progression and the durable rehydrate.
     /// </summary>
     private static bool IsEdgeLive(EdgeDefinition edge, NodeStatus sourceStatus, HashSet<string>? routingHints) =>
-        sourceStatus == NodeStatus.Success
-            ? (routingHints == null || routingHints.Contains(edge.SourceHandle ?? DefaultHandleName))
-            : sourceStatus == NodeStatus.Failure && edge.SourceHandle == WorkflowHandles.Error;
+        EdgeLiveness.IsLive(sourceStatus, edge.SourceHandle, routingHints);
 
     /// <summary>True when the node has at least one outgoing <c>error</c>-handle edge — i.e. its failure is handled.</summary>
     private bool HasErrorEdge(NodeDefinition node, WalkerState state) =>
@@ -1274,8 +1269,6 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
 
     /// <summary>Empty iteration key — used for every non-flow.iterate node.</summary>
     private const string NoIteration = "";
-
-    private const string DefaultHandleName = "out";
 
     private sealed class NodeFailureException : Exception
     {

@@ -38,7 +38,7 @@ public class ErrorRoutingFlowTests
     {
         var key = Guid.NewGuid().ToString("N");
         var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
-        var workflowId = await CreateWorkflowAsync(teamId, userId, ErrorRoutedDefinition(key, retry: null));
+        var workflowId = await CreateWorkflowAsync(teamId, userId, ErrorRoutedDefinition(key, failTimes: 99, retry: null));
         var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
 
         await RunEngineAsync(runId);
@@ -87,7 +87,7 @@ public class ErrorRoutingFlowTests
         // (still-failing) result routes down the error branch.
         var key = Guid.NewGuid().ToString("N");
         var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
-        var workflowId = await CreateWorkflowAsync(teamId, userId, ErrorRoutedDefinition(key, retry: new RetryPolicy { MaxAttempts = 2, BackoffSeconds = 0 }));
+        var workflowId = await CreateWorkflowAsync(teamId, userId, ErrorRoutedDefinition(key, failTimes: 99, retry: new RetryPolicy { MaxAttempts = 2, BackoffSeconds = 0 }));
         var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
 
         await RunEngineAsync(runId);
@@ -109,7 +109,7 @@ public class ErrorRoutingFlowTests
         // source — NOT re-throw it as a run failure, and NOT re-invoke the node.
         var key = Guid.NewGuid().ToString("N");
         var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
-        var workflowId = await CreateWorkflowAsync(teamId, userId, ErrorRoutedDefinition(key, retry: null));
+        var workflowId = await CreateWorkflowAsync(teamId, userId, ErrorRoutedDefinition(key, failTimes: 99, retry: null));
         var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
 
         await RunEngineAsync(runId);
@@ -127,6 +127,54 @@ public class ErrorRoutingFlowTests
 
         (await db.WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == runId)).Status
             .ShouldBe(WorkflowRunStatus.Success, "re-entry of a handled-failure run stays Success — the persisted node.failed is NOT re-thrown");
+    }
+
+    [Fact]
+    public async Task Success_does_not_fire_the_error_branch()
+    {
+        // The regression the user hit: a node that SUCCEEDS must take its NORMAL edge, never the
+        // error edge. (failTimes:0 ⇒ flaky succeeds on the first attempt.)
+        var key = Guid.NewGuid().ToString("N");
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var workflowId = await CreateWorkflowAsync(teamId, userId, ErrorRoutedDefinition(key, failTimes: 0, retry: null));
+        var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
+
+        await RunEngineAsync(runId);
+
+        using var verify = _fixture.BeginScope();
+        var db = verify.Resolve<CodeSpaceDbContext>();
+
+        (await db.WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == runId)).Status.ShouldBe(WorkflowRunStatus.Success);
+        (await db.WorkflowRunNode.AsNoTracking().SingleAsync(n => n.RunId == runId && n.NodeId == "flaky")).Status
+            .ShouldBe(NodeStatus.Success);
+        (await db.WorkflowRunNode.AsNoTracking().SingleAsync(n => n.RunId == runId && n.NodeId == "ok")).Status
+            .ShouldBe(NodeStatus.Success, "the normal (success) branch runs");
+        (await db.WorkflowRunNode.AsNoTracking().SingleAsync(n => n.RunId == runId && n.NodeId == "caught")).Status
+            .ShouldBe(NodeStatus.Skipped, "the error branch must NOT fire when the node succeeds");
+    }
+
+    [Fact]
+    public async Task Success_after_a_retry_does_not_fire_the_error_branch()
+    {
+        // Compose retry + error routing on the SUCCESS path: the node fails once, succeeds on the
+        // retry, and the error branch stays skipped (only a genuine final failure routes to error).
+        var key = Guid.NewGuid().ToString("N");
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var workflowId = await CreateWorkflowAsync(teamId, userId, ErrorRoutedDefinition(key, failTimes: 1, retry: new RetryPolicy { MaxAttempts = 2, BackoffSeconds = 0 }));
+        var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
+
+        await RunEngineAsync(runId);
+
+        FlakyTestNode.AttemptsFor(key).ShouldBe(2, "fails once, then succeeds on the retry");
+
+        using var verify = _fixture.BeginScope();
+        var db = verify.Resolve<CodeSpaceDbContext>();
+
+        (await db.WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == runId)).Status.ShouldBe(WorkflowRunStatus.Success);
+        (await db.WorkflowRunNode.AsNoTracking().SingleAsync(n => n.RunId == runId && n.NodeId == "ok")).Status
+            .ShouldBe(NodeStatus.Success, "the normal branch runs once the retry succeeds");
+        (await db.WorkflowRunNode.AsNoTracking().SingleAsync(n => n.RunId == runId && n.NodeId == "caught")).Status
+            .ShouldBe(NodeStatus.Skipped, "a node that ultimately succeeds never routes to its error branch");
     }
 
     // ─── Helpers ────────────────────────────────────────────────────────────────
@@ -159,14 +207,15 @@ public class ErrorRoutingFlowTests
     }
 
     // start → flaky → ok (normal terminal); flaky =(error)=> caught (terminal capturing the error).
-    private static WorkflowDefinition ErrorRoutedDefinition(string key, RetryPolicy? retry) => new()
+    // failTimes drives the source's outcome: 99 ⇒ always fails (error branch); 0 ⇒ succeeds (normal branch).
+    private static WorkflowDefinition ErrorRoutedDefinition(string key, int failTimes, RetryPolicy? retry) => new()
     {
         SchemaVersion = 1,
         Nodes = new List<NodeDefinition>
         {
             new() { Id = "start", TypeKey = "trigger.manual", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
             new() { Id = "flaky", TypeKey = FlakyTestNode.Key,
-                    Config = WorkflowsTestSeed.Json($$"""{"key":"{{key}}","failTimes":99}"""),
+                    Config = WorkflowsTestSeed.Json($$"""{"key":"{{key}}","failTimes":{{failTimes}}}"""),
                     Inputs = WorkflowsTestSeed.EmptyJson(),
                     Retry = retry },
             new() { Id = "ok", TypeKey = "builtin.terminal", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
