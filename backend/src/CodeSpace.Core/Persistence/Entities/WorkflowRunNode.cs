@@ -23,6 +23,15 @@ public class WorkflowRunNode
     public NodeStatus Status { get; set; } = NodeStatus.Pending;
     public string InputsJson { get; set; } = "{}";
     public string OutputsJson { get; set; } = "{}";
+
+    /// <summary>
+    /// A branch node's chosen output handles as a JSON array (e.g. <c>["true"]</c>), surfaced
+    /// from the node.completed record. <c>null</c> when the node didn't branch (follow all
+    /// edges). Persisted so the durable walker can rebuild edge-liveness on re-entry without
+    /// re-running the branch node.
+    /// </summary>
+    public string? RoutingHintsJson { get; set; }
+
     public string? Error { get; set; }
     public DateTimeOffset? StartedAt { get; set; }
     public DateTimeOffset? CompletedAt { get; set; }

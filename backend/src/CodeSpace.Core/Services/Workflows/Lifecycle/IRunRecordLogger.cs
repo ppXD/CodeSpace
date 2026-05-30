@@ -55,8 +55,13 @@ public interface IRunRecordLogger
     /// <param name="resolvedConfig">Engine-resolved + redactor-processed config. Same redaction guarantee.</param>
     Task<Guid> NodeStartedAsync(Guid runId, string nodeId, string iterationKey, IReadOnlyDictionary<string, JsonElement> resolvedInputs, IReadOnlyDictionary<string, JsonElement> resolvedConfig, CancellationToken cancellationToken);
 
-    /// <summary>Emit <c>node.completed</c>. <paramref name="outputs"/> is the node's resolved output map.</summary>
-    Task NodeCompletedAsync(Guid runId, string nodeId, string iterationKey, IReadOnlyDictionary<string, JsonElement> outputs, TimeSpan duration, CancellationToken cancellationToken);
+    /// <summary>
+    /// Emit <c>node.completed</c>. <paramref name="outputs"/> is the node's resolved output map.
+    /// <paramref name="routingHints"/> is the branch node's chosen output handles (null when the
+    /// node didn't branch); persisted so the durable walker can rebuild edge-liveness on re-entry
+    /// without re-running the branch node.
+    /// </summary>
+    Task NodeCompletedAsync(Guid runId, string nodeId, string iterationKey, IReadOnlyDictionary<string, JsonElement> outputs, IReadOnlyList<string>? routingHints, TimeSpan duration, CancellationToken cancellationToken);
 
     /// <summary>Emit <c>node.failed</c>. <paramref name="error"/> is the human-readable failure reason.</summary>
     Task NodeFailedAsync(Guid runId, string nodeId, string iterationKey, string error, TimeSpan duration, CancellationToken cancellationToken);

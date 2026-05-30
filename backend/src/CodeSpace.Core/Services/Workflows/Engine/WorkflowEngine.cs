@@ -894,7 +894,7 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
     private async Task PersistNodeResultAsync(Guid runId, string nodeId, NodeResult result, TimeSpan duration, CancellationToken cancellationToken)
     {
         if (result.Status == NodeStatus.Success)
-            await _recordLogger.NodeCompletedAsync(runId, nodeId, NoIteration, result.Outputs, duration, cancellationToken).ConfigureAwait(false);
+            await _recordLogger.NodeCompletedAsync(runId, nodeId, NoIteration, result.Outputs, result.RoutingHints, duration, cancellationToken).ConfigureAwait(false);
         else
             await _recordLogger.NodeFailedAsync(runId, nodeId, NoIteration, result.Error ?? "Node returned non-success without error message.", duration, cancellationToken).ConfigureAwait(false);
     }

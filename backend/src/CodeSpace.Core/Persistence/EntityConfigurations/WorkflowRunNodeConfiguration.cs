@@ -21,5 +21,6 @@ public class WorkflowRunNodeConfiguration : IEntityTypeConfiguration<WorkflowRun
         builder.Property(n => n.Status).HasConversion<string>().HasMaxLength(16);
         builder.Property(n => n.InputsJson).HasColumnName("inputs_jsonb").HasColumnType("jsonb");
         builder.Property(n => n.OutputsJson).HasColumnName("outputs_jsonb").HasColumnType("jsonb");
+        builder.Property(n => n.RoutingHintsJson).HasColumnName("routing_hints_jsonb").HasColumnType("jsonb");
     }
 }
