@@ -155,7 +155,65 @@ public class ReleaseTamperDetectionFlowTests
             customMessage: "no node may complete execution under a tampered release — see node.started rationale");
     }
 
+    [Fact]
+    public async Task Legit_multi_key_node_config_survives_the_real_jsonb_round_trip_and_is_not_flagged_tampered()
+    {
+        // Regression guard for the production bug (workflow versions v14/v19). A node whose
+        // free-form Inputs object carries multiple keys in author order
+        // ({"repositoryId":...,"number":...}) is stored to the definition_jsonb column, which
+        // does NOT preserve key order — PostgreSQL reorders by length-then-bytes, so on
+        // read-back the object is {"number":...,"repositoryId":...}. The engine recomputes the
+        // hash from that round-tripped JSON at run start (LoadDefinitionAndHashAsync). Before
+        // recursive key-sorting in DefinitionHash.Compute, the recompute diverged from the
+        // stored hash and EVERY run failed with a FALSE ReleaseTamperedException.
+        //
+        // This asserts the exact store→load→recompute invariant the engine relies on, against
+        // a REAL PostgreSQL jsonb column — the fidelity the unit tests can't reach.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+
+        var def = new WorkflowDefinition
+        {
+            SchemaVersion = 1,
+            Inputs = new[]
+            {
+                new WorkflowVariable { Name = "repo", Schema = JsonElementFrom("""{"type":"string","x-selector":"repository"}"""), Required = true },
+                new WorkflowVariable { Name = "pr_num", Schema = JsonElementFrom("""{"type":"integer"}"""), Required = true },
+            },
+            Nodes = new[]
+            {
+                new NodeDefinition { Id = "manual", TypeKey = "trigger.manual", Config = JsonElementFrom("{}"), Inputs = JsonElementFrom("{}") },
+                new NodeDefinition { Id = "fetch", TypeKey = "git.fetch_pr_diff", Config = JsonElementFrom("{}"), Inputs = JsonElementFrom("""{"repositoryId":"{{input.repo}}","number":"{{input.pr_num}}"}""") },
+                new NodeDefinition { Id = "end", TypeKey = "builtin.terminal", Config = JsonElementFrom("{}"), Inputs = JsonElementFrom("{}") },
+            },
+            Edges = new[]
+            {
+                new EdgeDefinition { From = "manual", To = "fetch" },
+                new EdgeDefinition { From = "fetch", To = "end" },
+            },
+        };
+
+        // Publish through the REAL path — this writes definition_jsonb (PostgreSQL normalises
+        // the key order) AND stores definition_hash = DefinitionHash.Compute(def).
+        var workflowId = await CreateWorkflowAsync(teamId, userId, def);
+
+        // Read the version row back exactly as LoadDefinitionAndHashAsync does: definition_jsonb
+        // has been key-reordered by PostgreSQL; definition_hash is the publish-time hash.
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        var version = await db.WorkflowVersion.AsNoTracking()
+            .SingleAsync(v => v.WorkflowId == workflowId && v.Version == 1);
+
+        var reloaded = JsonSerializer.Deserialize<WorkflowDefinition>(version.DefinitionJson, WorkflowJson.Options)!;
+
+        DefinitionHash.Compute(reloaded).ShouldBe(version.DefinitionHash,
+            customMessage: "recomputing the hash from the jsonb-stored (key-reordered) definition MUST equal the hash the " +
+                           "publish path stored. Divergence is the false ReleaseTamperedException the user hit on every run of " +
+                           "a workflow with a multi-key node config. If this fails, DefinitionHash.Compute is not order-independent.");
+    }
+
     // ─── Helpers ──────────────────────────────────────────────────────────────────
+
+    private static JsonElement JsonElementFrom(string raw) => JsonDocument.Parse(raw).RootElement.Clone();
 
     private async Task<Guid> CreateWorkflowAsync(Guid teamId, Guid userId, WorkflowDefinition definition)
     {
