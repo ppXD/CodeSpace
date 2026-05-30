@@ -69,6 +69,14 @@ public interface IRunRecordLogger
     /// <summary>Emit <c>node.skipped</c>. <paramref name="reason"/> documents why (e.g. "all-incoming-edges-dead").</summary>
     Task NodeSkippedAsync(Guid runId, string nodeId, string iterationKey, string reason, CancellationToken cancellationToken);
 
+    /// <summary>
+    /// Emit <c>node.suspended</c> — the immutable audit copy of a node parking the run. The
+    /// <c>workflow_run_node</c> view projects this to <c>NodeStatus.Suspended</c>; the mutable
+    /// wait state lives in <c>workflow_run_wait</c>. <paramref name="waitKind"/> is one of
+    /// <c>WorkflowWaitKinds</c>; <paramref name="wakeAt"/> is set for Timer waits.
+    /// </summary>
+    Task NodeSuspendedAsync(Guid runId, string nodeId, string iterationKey, string waitKind, DateTimeOffset? wakeAt, CancellationToken cancellationToken);
+
     /// <summary>Emit <c>iteration.started</c> for flow.iterate boundary.</summary>
     Task IterationStartedAsync(Guid runId, string nodeId, int itemCount, CancellationToken cancellationToken);
 

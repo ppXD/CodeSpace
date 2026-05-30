@@ -1799,6 +1799,8 @@ textarea:-webkit-autofill {
 .acs-root .wf-status-running { background: #FFF4E6; color: #A8590E; border: 1px solid #F0D9B5; }
 /* Enqueued = dispatched, awaiting worker pickup. Cooler blue vs Running's warm orange. */
 .acs-root .wf-status-queued  { background: #E8F0FA; color: #2A5485; border: 1px solid #C2D4EC; }
+/* Suspended = parked on a timer / approval / callback. Calm violet — distinct from active states. */
+.acs-root .wf-status-suspended { background: #EEEAF6; color: #5B4B8A; border: 1px solid #D9CFEC; }
 
 .acs-root .wf-run-summary { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
 .acs-root .wf-run-summary > span:not([class]) { color: var(--muted); }

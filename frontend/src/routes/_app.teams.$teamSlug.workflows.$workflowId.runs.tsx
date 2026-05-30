@@ -152,6 +152,7 @@ function RunStatusBadge({ status }: { status: string }) {
     : status === "Failure" ? "err"
     : status === "Cancelled" ? "muted"
     : status === "Enqueued" ? "queued"
+    : status === "Suspended" ? "suspended"
     : "running";
 
   return <span className={`wf-status-pill wf-status-${tone}`}>{status}</span>;
