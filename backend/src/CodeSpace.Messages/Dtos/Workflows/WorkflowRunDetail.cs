@@ -49,6 +49,12 @@ public sealed record WorkflowRunWaitInfo
     /// <summary>One of <c>WorkflowWaitKinds</c> — Timer / Approval / Callback.</summary>
     public required string Kind { get; init; }
 
+    /// <summary>
+    /// The correlation token. For a Callback wait it's the bearer secret the UI builds the
+    /// callback URL from (the run owner shares it with the external system).
+    /// </summary>
+    public required string Token { get; init; }
+
     /// <summary>When the scheduled resume fires (Timer only); null for Approval / Callback.</summary>
     public DateTimeOffset? WakeAt { get; init; }
 
