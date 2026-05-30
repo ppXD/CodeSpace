@@ -208,5 +208,11 @@ public sealed class PostgresFixture : IAsyncLifetime
         builder.RegisterType<Workflows.Infrastructure.FlakyTestNode>()
             .As<CodeSpace.Core.Services.Workflows.Nodes.INodeRuntime>()
             .SingleInstance();
+
+        // Test-only loop body node — records the loop.* scope it sees each iteration. Same
+        // registration rationale as FlakyTestNode: engine/validator see it, palette doesn't.
+        builder.RegisterType<Workflows.Infrastructure.LoopProbeNode>()
+            .As<CodeSpace.Core.Services.Workflows.Nodes.INodeRuntime>()
+            .SingleInstance();
     }
 }

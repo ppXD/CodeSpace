@@ -68,14 +68,15 @@ public sealed class FlowLoopNode : INodeRuntime
             }
             """),
         InputSchema = SchemaBuilder.Parse("""{ "type": "object", "properties": {} }"""),
+        // Dynamic shape: one property per loop variable (names vary per workflow), plus the two
+        // fixed keys. No enumerated `properties` on purpose — that signals the validator to treat
+        // {{nodes.<loop>.outputs.X}} as dynamic (like http.request's body) and skip the strict
+        // output-key check, so referencing a loop variable's final value validates.
         OutputSchema = SchemaBuilder.Parse("""
             {
               "type": "object",
-              "properties": {
-                "iterations":        { "type": "integer", "description": "How many passes ran." },
-                "terminationReason": { "type": "string",  "description": "\"condition\" or \"maxIterations\"." }
-              },
-              "description": "Plus one property per loop variable, holding its final value."
+              "additionalProperties": true,
+              "description": "One property per loop variable (its final value), plus 'iterations' (passes run) and 'terminationReason' ('condition' | 'maxIterations')."
             }
             """)
     };

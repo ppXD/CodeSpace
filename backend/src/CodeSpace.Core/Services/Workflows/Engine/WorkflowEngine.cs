@@ -799,16 +799,21 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
     // no Terminal ran or the Terminal had no Inputs declared.
     private async Task<IReadOnlyDictionary<string, JsonElement>> WalkGraphAsync(WorkflowRun run, WorkflowDefinition definition, NodeRunScope scope, CancellationToken cancellationToken)
     {
-        var state = new WalkerState(definition);
+        // The top-level walk sees only top-level nodes (ParentId == null); a flow.loop's body
+        // (ParentId == loopId) is owned by its container and walked per-iteration inside
+        // ExecuteLoopAsync, never by this frontier. The FULL definition is still threaded to the
+        // loop dispatcher so it can carve out its body subgraph.
+        var topLevel = SubgraphView(definition, n => n.ParentId == null);
+        var state = new WalkerState(topLevel);
 
         // Durable re-entry (Engine v2 Phase 0): rebuild walker state from the persisted ledger
         // so a run resumed after a crash / re-dispatch continues from where it stopped instead
         // of re-running completed nodes. For a fresh run (no node records yet) this is a no-op
         // and the ready frontier collapses to the graph roots — behaviour-identical to the
         // original single-pass walk.
-        await RehydrateFromLedgerAsync(run, definition, scope, state, cancellationToken).ConfigureAwait(false);
+        await RehydrateFromLedgerAsync(run, topLevel, scope, state, cancellationToken).ConfigureAwait(false);
 
-        EnqueueReadyFrontier(state, definition);
+        EnqueueReadyFrontier(state, topLevel);
 
         while (state.Ready.Count > 0)
         {
@@ -826,7 +831,11 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
                 continue;
             }
 
-            var status = await ExecuteNodeAsync(run, node, scope, state, cancellationToken).ConfigureAwait(false);
+            // A loop container is engine-driven: dispatch on Kind (like Trigger/Terminal), running
+            // its body subgraph per iteration. Every other node runs through the normal per-node path.
+            var status = _nodeRegistry.Resolve(node.TypeKey).Manifest.Kind == NodeKind.Loop
+                ? await ExecuteLoopAsync(run, definition, node, scope, state, cancellationToken).ConfigureAwait(false)
+                : await ExecuteNodeAsync(run, node, scope, state, cancellationToken).ConfigureAwait(false);
             state.Statuses[nodeId] = status;
 
             // A failure halts the run UNLESS the node has an `error` edge: then the failure is
@@ -855,6 +864,191 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
     }
 
     /// <summary>
+    /// Carve a subgraph out of the definition: the nodes matching <paramref name="belongs"/> plus the
+    /// edges wholly within them. Splits the graph into the top-level view (ParentId == null) and each
+    /// loop's body view (ParentId == loopId). Edges never cross a container boundary (validator-
+    /// enforced), so an edge belongs iff both endpoints do.
+    /// </summary>
+    private static WorkflowDefinition SubgraphView(WorkflowDefinition definition, Func<NodeDefinition, bool> belongs)
+    {
+        var nodes = definition.Nodes.Where(belongs).ToList();
+        var ids = nodes.Select(n => n.Id).ToHashSet();
+        var edges = definition.Edges.Where(e => ids.Contains(e.From) && ids.Contains(e.To)).ToList();
+        return definition with { Nodes = nodes, Edges = edges };
+    }
+
+    /// <summary>
+    /// Run a <c>flow.loop</c> container. Seeds the <c>loop.*</c> scope from its variables, then re-runs
+    /// the body subgraph once per iteration until a termination condition is met OR a runaway budget
+    /// (max-iterations / wall-clock / total body-node executions) is hit. Each pass persists its body
+    /// nodes under iteration key <c>"&lt;loopId&gt;#&lt;i&gt;"</c>; loop variables thread across passes
+    /// via their optional update ref. On exit the loop emits <c>{loop vars…, iterations,
+    /// terminationReason}</c>. A body failure with no error edge fails the loop (whose OWN error edge
+    /// can then catch it); a body suspend or nested loop is refused with a clear message (follow-ups).
+    /// </summary>
+    private async Task<NodeStatus> ExecuteLoopAsync(WorkflowRun run, WorkflowDefinition definition, NodeDefinition loopNode, NodeRunScope scope, WalkerState state, CancellationToken cancellationToken)
+    {
+        var startedAt = DateTimeOffset.UtcNow;
+        await _recordLogger.NodeStartedAsync(run.Id, loopNode.Id, NoIteration, EmptyJsonBag, EmptyJsonBag, cancellationToken).ConfigureAwait(false);
+
+        try
+        {
+            var config = ParseLoopConfig(loopNode.Config);
+            var plan = LoopPlan.From(config);
+            var body = SubgraphView(definition, n => n.ParentId == loopNode.Id);
+            var deadline = startedAt + plan.WallClock;
+
+            var loopVars = InitLoopVars(config.LoopVariables, scope);
+            var nodeBudget = plan.NodeBudget;
+            var iterations = 0;
+            var reason = "maxIterations";
+
+            for (var i = 0; i < plan.MaxIterations; i++)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+
+                if (DateTimeOffset.UtcNow > deadline)
+                    throw new NodeFailureException($"Loop '{loopNode.Id}' exceeded its {plan.WallClock.TotalMinutes:0}-minute wall-clock budget after {iterations} iteration(s).");
+
+                var iterScope = BuildLoopScope(scope, scope.Nodes, loopVars, i);
+                nodeBudget -= await RunLoopBodyOnceAsync(run, body, iterScope, $"{loopNode.Id}#{i}", cancellationToken).ConfigureAwait(false);
+
+                if (nodeBudget < 0)
+                    throw new NodeFailureException($"Loop '{loopNode.Id}' exceeded its {plan.NodeBudget}-node execution budget.");
+
+                iterations++;
+                loopVars = ApplyLoopVarUpdates(config.LoopVariables, loopVars, iterScope);
+
+                if (IsTerminationMet(config.Termination, BuildLoopScope(scope, iterScope.Nodes, loopVars, i)))
+                {
+                    reason = "condition";
+                    break;
+                }
+            }
+
+            var outputs = BuildLoopOutputs(loopVars, iterations, reason);
+            scope.Nodes[loopNode.Id] = outputs;
+            await _recordLogger.NodeCompletedAsync(run.Id, loopNode.Id, NoIteration, outputs, null, DateTimeOffset.UtcNow - startedAt, cancellationToken).ConfigureAwait(false);
+            return NodeStatus.Success;
+        }
+        catch (NodeFailureException ex)
+        {
+            // A body failure (no error edge) or a tripped budget — expose it as the loop's `error`
+            // output so the loop's own error edge can catch it, then write node.failed.
+            scope.Nodes[loopNode.Id] = BuildErrorOutput(ex.Message, loopNode.Id);
+            await _recordLogger.NodeFailedAsync(run.Id, loopNode.Id, NoIteration, ex.Message, DateTimeOffset.UtcNow - startedAt, cancellationToken).ConfigureAwait(false);
+            return NodeStatus.Failure;
+        }
+    }
+
+    /// <summary>
+    /// Run the loop body subgraph for ONE iteration, reusing the per-node machinery (ShouldSkip /
+    /// ExecuteNodeAsync / EnqueueDownstream) with the iteration key set so each pass lands under its
+    /// own ledger rows. Returns the number of body nodes executed (for the loop's node budget). A body
+    /// suspend or nested loop throws — refused until the follow-up PRs.
+    /// </summary>
+    private async Task<int> RunLoopBodyOnceAsync(WorkflowRun run, WorkflowDefinition body, NodeRunScope iterScope, string iterationKey, CancellationToken cancellationToken)
+    {
+        var bodyState = new WalkerState(body);
+        EnqueueReadyFrontier(bodyState, body);
+        var executed = 0;
+
+        while (bodyState.Ready.Count > 0)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+
+            var nodeId = bodyState.Ready.Dequeue();
+            if (bodyState.Statuses.ContainsKey(nodeId)) continue;
+
+            var node = bodyState.NodeById[nodeId];
+
+            if (ShouldSkip(node, bodyState))
+            {
+                await MarkSkippedAsync(run, node, bodyState, cancellationToken, iterationKey).ConfigureAwait(false);
+                EnqueueDownstreamWhenReady(node, bodyState);
+                continue;
+            }
+
+            if (_nodeRegistry.Resolve(node.TypeKey).Manifest.Kind == NodeKind.Loop)
+                throw new NodeFailureException($"Node '{nodeId}' is a nested loop — nested loops inside a loop body aren't supported yet.");
+
+            executed++;
+            var status = await ExecuteNodeAsync(run, node, iterScope, bodyState, cancellationToken, iterationKey).ConfigureAwait(false);
+            bodyState.Statuses[nodeId] = status;
+
+            if (status == NodeStatus.Failure && !HasErrorEdge(node, bodyState))
+                throw new NodeFailureException($"Node '{nodeId}' failed.");
+
+            if (status == NodeStatus.Suspended)
+                throw new NodeFailureException($"Node '{nodeId}' suspended inside a loop body — suspending nodes (approval / sleep / callback / sub-workflow) inside a loop aren't supported yet.");
+
+            EnqueueDownstreamWhenReady(node, bodyState);
+        }
+
+        return executed;
+    }
+
+    private static readonly IReadOnlyDictionary<string, JsonElement> EmptyJsonBag = new Dictionary<string, JsonElement>();
+    private static readonly JsonSerializerOptions LoopConfigJsonOptions = new() { PropertyNameCaseInsensitive = true };
+
+    private static LoopConfig ParseLoopConfig(JsonElement config) =>
+        config.ValueKind == JsonValueKind.Object
+            ? JsonSerializer.Deserialize<LoopConfig>(config.GetRawText(), LoopConfigJsonOptions) ?? new LoopConfig()
+            : new LoopConfig();
+
+    /// <summary>Build a per-iteration scope: outer read-slots + <c>loop.*</c> (vars + injected <c>index</c>) + a fresh Nodes bag seeded from <paramref name="nodesSource"/> (so the body reads pre-loop outputs, and termination reads this pass's body outputs).</summary>
+    private static NodeRunScope BuildLoopScope(NodeRunScope outer, IEnumerable<KeyValuePair<string, IReadOnlyDictionary<string, JsonElement>>> nodesSource, IReadOnlyDictionary<string, JsonElement> loopVars, int index)
+    {
+        var loop = new Dictionary<string, JsonElement>(loopVars) { ["index"] = JsonSerializer.SerializeToElement(index) };
+
+        var scope = new NodeRunScope
+        {
+            Trigger = outer.Trigger, Team = outer.Team, Wf = outer.Wf, Input = outer.Input,
+            Sys = outer.Sys, Projects = outer.Projects, SecretPaths = outer.SecretPaths,
+            Iteration = outer.Iteration, Loop = loop,
+        };
+
+        foreach (var (k, v) in nodesSource) scope.Nodes[k] = v;
+        return scope;
+    }
+
+    private static Dictionary<string, JsonElement> InitLoopVars(IReadOnlyList<LoopVariable> vars, NodeRunScope outer)
+    {
+        var result = new Dictionary<string, JsonElement>();
+        foreach (var v in vars)
+            result[v.Name] = v.Ref != null ? VariableResolver.Resolve(JsonSerializer.SerializeToElement(v.Ref), outer) : v.Value ?? ToJsonNull();
+        return result;
+    }
+
+    private static Dictionary<string, JsonElement> ApplyLoopVarUpdates(IReadOnlyList<LoopVariable> vars, Dictionary<string, JsonElement> current, NodeRunScope iterScope)
+    {
+        var result = new Dictionary<string, JsonElement>(current);
+        foreach (var v in vars)
+            if (v.Update != null) result[v.Name] = VariableResolver.Resolve(JsonSerializer.SerializeToElement(v.Update), iterScope);
+        return result;
+    }
+
+    /// <summary>Evaluate the termination set against the loop scope; an empty/absent set never terminates (rely on the cap).</summary>
+    private static bool IsTerminationMet(LoopTermination? termination, NodeRunScope scope)
+    {
+        if (termination == null || termination.Conditions.Count == 0) return false;
+
+        bool Met(LoopCondition c) => ConditionEvaluator.CompareValues(c.Op, VariableResolver.Resolve(JsonSerializer.SerializeToElement(c.Ref), scope), c.Value);
+
+        return termination.Logic.Equals("or", StringComparison.OrdinalIgnoreCase) ? termination.Conditions.Any(Met) : termination.Conditions.All(Met);
+    }
+
+    private static IReadOnlyDictionary<string, JsonElement> BuildLoopOutputs(Dictionary<string, JsonElement> loopVars, int iterations, string reason)
+    {
+        var outputs = new Dictionary<string, JsonElement>(loopVars)
+        {
+            ["iterations"] = JsonSerializer.SerializeToElement(iterations),
+            ["terminationReason"] = JsonSerializer.SerializeToElement(reason),
+        };
+        return outputs;
+    }
+
+    /// <summary>
     /// Engine v2 Phase 0 — reconstruct the walker's settled state from the durable ledger (the
     /// <c>workflow_run_node</c> view) so a resumed run continues instead of restarting. Loads
     /// each settled node's status, its output bag (into <c>scope.Nodes</c>) and branch routing
@@ -865,8 +1059,11 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
     /// </summary>
     private async Task RehydrateFromLedgerAsync(WorkflowRun run, WorkflowDefinition definition, NodeRunScope scope, WalkerState state, CancellationToken cancellationToken)
     {
+        // Only top-level rows (iteration_key == "") rebuild the top-level walk. Loop-body rows are
+        // keyed "<loopId>#<i>" and belong to a loop's internal per-iteration sub-walk, not here — a
+        // loop container re-runs its whole body atomically (PR-L2b), so they never settle top-level state.
         var persisted = await _db.WorkflowRunNode.AsNoTracking()
-            .Where(n => n.RunId == run.Id)
+            .Where(n => n.RunId == run.Id && n.IterationKey == NoIteration)
             .ToListAsync(cancellationToken).ConfigureAwait(false);
 
         if (persisted.Count == 0) return;
