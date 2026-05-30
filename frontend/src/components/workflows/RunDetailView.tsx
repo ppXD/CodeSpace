@@ -1,10 +1,17 @@
 import { useState } from "react";
 
+import { Ic } from "@/_imported/ai-code-space/icons";
 import type { WorkflowRunWaitInfo } from "@/api/workflows";
 import { ApiError } from "@/api/request";
 import { useResumeRun, useWorkflowRun } from "@/hooks/use-workflows";
 
 import { JsonView } from "./JsonView";
+
+/**
+ * How many sub-workflow levels we embed inline before falling back to a plain id. The engine caps
+ * real nesting at 8; embedding (each level is a live, polling RunDetailView) stops well before that.
+ */
+const MAX_EMBED_DEPTH = 3;
 
 /**
  * Shared run-detail view: status summary + normalized payload + declared outputs + the
@@ -16,7 +23,7 @@ import { JsonView } from "./JsonView";
  * host must live inside `.acs-root` (the route does; the editor overlay renders in-tree rather
  * than portaling to <body> for exactly this reason).
  */
-export function RunDetailView({ runId }: { runId: string }) {
+export function RunDetailView({ runId, nested = false, depth = 0 }: { runId: string; nested?: boolean; depth?: number }) {
   const run = useWorkflowRun(runId);
 
   if (run.isLoading) {
@@ -35,7 +42,7 @@ export function RunDetailView({ runId }: { runId: string }) {
   const r = run.data;
 
   return (
-    <div className="wf-detail-body">
+    <div className={nested ? "wf-detail-body wf-detail-body-nested" : "wf-detail-body"}>
       <div className="wf-run-summary">
         <RunStatusBadge status={r.status} />
         <span>·</span>
@@ -58,7 +65,7 @@ export function RunDetailView({ runId }: { runId: string }) {
       )}
 
       {r.status === "Suspended" && r.pendingWait && (
-        <SuspendedPanel runId={runId} wait={r.pendingWait} />
+        <SuspendedPanel runId={runId} wait={r.pendingWait} depth={depth} />
       )}
 
       <section className="wf-section">
@@ -147,11 +154,18 @@ function hasContent(value: unknown): boolean {
 /**
  * The resume affordance for a Suspended run. An Approval wait gets approve/reject + an optional
  * comment (posts the decision, then the live poll shows the run continue). A Timer wait just
- * shows when it'll wake. Callback waits (Phase 1.2c) have no UI yet.
+ * shows when it'll wake. A Callback wait shows the tokened URL. A Subworkflow wait embeds the live
+ * child run inline — including ITS resume affordance, so e.g. an approval deep inside the child is
+ * operable right here; resolving it completes the child, which auto-resumes this run.
  */
-export function SuspendedPanel({ runId, wait }: { runId: string; wait: WorkflowRunWaitInfo }) {
+export function SuspendedPanel({ runId, wait, depth = 0 }: { runId: string; wait: WorkflowRunWaitInfo; depth?: number }) {
   const resume = useResumeRun(runId);
   const [comment, setComment] = useState("");
+
+  if (wait.kind === "Subworkflow") {
+    // The wait's token is the child run id (engine contract). Embed the child run-detail.
+    return <SubworkflowWaitPanel childRunId={wait.token} depth={depth} />;
+  }
 
   if (wait.kind === "Approval") {
     const prompt = readPrompt(wait.payload);
@@ -204,6 +218,45 @@ export function SuspendedPanel({ runId, wait }: { runId: string; wait: WorkflowR
   }
 
   return null;
+}
+
+/**
+ * The Subworkflow-wait affordance: an expandable card that embeds the LIVE child run-detail
+ * (recursively — it's a full RunDetailView). The child brings its own resume affordance, so an
+ * approval / callback inside the child is operated right here; resolving it completes the child,
+ * which the engine's completion hook turns into a resume of THIS run. Beyond a few nesting levels
+ * we stop embedding (each level is a polling fetch) and just name the child run id.
+ */
+function SubworkflowWaitPanel({ childRunId, depth }: { childRunId: string; depth: number }) {
+  const [open, setOpen] = useState(true);
+  const canEmbed = depth < MAX_EMBED_DEPTH;
+
+  return (
+    <section className="wf-section wf-approval">
+      <button
+        type="button"
+        className="wf-subrun-toggle"
+        onClick={() => setOpen((v) => !v)}
+        aria-expanded={open}
+        disabled={!canEmbed}
+      >
+        {canEmbed && (open ? <Ic.ChevronDown size={12} /> : <Ic.ChevronRight size={12} />)}
+        <span className="wf-section-h">Running a sub-workflow</span>
+      </button>
+      <div className="wf-approval-prompt">
+        This run is waiting for the sub-workflow below to finish. Acting on it here — e.g. approving —
+        resumes this run automatically.
+      </div>
+
+      {!canEmbed ? (
+        <div className="wf-approval-prompt">Sub-workflow run <code>{childRunId}</code> (nested too deep to embed).</div>
+      ) : open && (
+        <div className="wf-subrun">
+          <RunDetailView runId={childRunId} nested depth={depth + 1} />
+        </div>
+      )}
+    </section>
+  );
 }
 
 /** Pull the approver-facing prompt out of a wait's suspend payload, if present. */

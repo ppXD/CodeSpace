@@ -184,7 +184,89 @@ public class SubworkflowFlowTests
         }
     }
 
+    [Fact]
+    public async Task Parent_resumes_after_the_child_workflows_internal_approval()
+    {
+        // The composition the inline-embed UX is built for: a sub-workflow that itself contains an
+        // approval. Parent suspends on the sub-workflow → child suspends on ITS approval → approving
+        // the CHILD completes it → the engine resumes the PARENT, mapping the decision back out.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var childId = await CreateWorkflowAsync(teamId, userId, ApprovalChildDefinition());
+        var parentId = await CreateWorkflowAsync(teamId, userId, ApprovalParentDefinition(childId));
+        var parentRunId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, parentId, teamId);
+
+        await RunEngineAsync(parentRunId);                 // parent suspends on the sub-workflow
+        var childRunId = await ChildRunIdAsync(parentRunId);
+        await RunEngineAsync(childRunId);                  // child runs → suspends on its own approval
+
+        using (var verify = _fixture.BeginScope())
+        {
+            var db = verify.Resolve<CodeSpaceDbContext>();
+            (await db.WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == childRunId)).Status
+                .ShouldBe(WorkflowRunStatus.Suspended, "the child parks on its own approval");
+            (await db.WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == parentRunId)).Status
+                .ShouldBe(WorkflowRunStatus.Suspended, "the parent stays parked while the child awaits approval");
+            (await db.WorkflowRunWait.AsNoTracking().SingleAsync(w => w.RunId == childRunId)).WaitKind
+                .ShouldBe(WorkflowWaitKinds.Approval);
+        }
+
+        // Approve the CHILD (what the inline panel does — it posts to the child run).
+        (await ApproveAsync(childRunId, teamId, userId)).ShouldBeTrue();
+
+        await RunEngineAsync(childRunId);                  // child resumes → completes
+        await RunEngineAsync(parentRunId);                 // completion hook resumed the parent → it finishes
+
+        using (var verify = _fixture.BeginScope())
+        {
+            var db = verify.Resolve<CodeSpaceDbContext>();
+            (await db.WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == childRunId)).Status.ShouldBe(WorkflowRunStatus.Success);
+
+            var parent = await db.WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == parentRunId);
+            parent.Status.ShouldBe(WorkflowRunStatus.Success, "approving the child resumes + completes the parent");
+            // The child's approval decision propagated all the way out to the parent's outputs.
+            System.Text.Json.JsonDocument.Parse(parent.OutputsJson).RootElement.GetProperty("decision").GetBoolean()
+                .ShouldBeTrue();
+        }
+    }
+
     // ─── Helpers ────────────────────────────────────────────────────────────────
+
+    private async Task<bool> ApproveAsync(Guid runId, Guid teamId, Guid userId)
+    {
+        using var scope = _fixture.BeginScopeAs(userId, teamId, Roles.Admin);
+        return await scope.Resolve<IMediator>().Send(new ResumeRunCommand { RunId = runId, Approved = true });
+    }
+
+    // Child: manual → wait_approval → terminal that echoes the approval decision as `ok`.
+    private static WorkflowDefinition ApprovalChildDefinition() => new()
+    {
+        SchemaVersion = 1,
+        Nodes = new List<NodeDefinition>
+        {
+            new() { Id = "start", TypeKey = "trigger.manual", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
+            new() { Id = "approval", TypeKey = "flow.wait_approval",
+                    Config = WorkflowsTestSeed.Json("""{"prompt":"Approve the review?"}"""), Inputs = WorkflowsTestSeed.EmptyJson() },
+            new() { Id = "end", TypeKey = "builtin.terminal", Config = WorkflowsTestSeed.EmptyJson(),
+                    Inputs = WorkflowsTestSeed.Json("""{"ok":"{{nodes.approval.outputs.approved}}"}""") },
+        },
+        Edges = new List<EdgeDefinition> { new() { From = "start", To = "approval" }, new() { From = "approval", To = "end" } },
+    };
+
+    // Parent: manual → sub(child) → terminal that surfaces the child's `ok` as `decision`.
+    private static WorkflowDefinition ApprovalParentDefinition(Guid childWorkflowId) => new()
+    {
+        SchemaVersion = 1,
+        Nodes = new List<NodeDefinition>
+        {
+            new() { Id = "start", TypeKey = "trigger.manual", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
+            new() { Id = "sub", TypeKey = "flow.subworkflow",
+                    Config = WorkflowsTestSeed.Json($$"""{"workflowId":"{{childWorkflowId}}"}"""),
+                    Inputs = WorkflowsTestSeed.Json("""{"inputs":{}}""") },
+            new() { Id = "end", TypeKey = "builtin.terminal", Config = WorkflowsTestSeed.EmptyJson(),
+                    Inputs = WorkflowsTestSeed.Json("""{"decision":"{{nodes.sub.outputs.ok}}"}""") },
+        },
+        Edges = new List<EdgeDefinition> { new() { From = "start", To = "sub" }, new() { From = "sub", To = "end" } },
+    };
 
     private async Task<Guid> ChildRunIdAsync(Guid parentRunId)
     {
