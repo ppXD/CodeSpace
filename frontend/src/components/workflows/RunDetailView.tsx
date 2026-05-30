@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 
 import { Ic } from "@/_imported/ai-code-space/icons";
 import type { WorkflowRunWaitInfo } from "@/api/workflows";
@@ -23,7 +23,7 @@ const MAX_EMBED_DEPTH = 3;
  * host must live inside `.acs-root` (the route does; the editor overlay renders in-tree rather
  * than portaling to <body> for exactly this reason).
  */
-export function RunDetailView({ runId, nested = false, depth = 0 }: { runId: string; nested?: boolean; depth?: number }) {
+export function RunDetailView({ runId, nested = false, depth = 0, onOpenRun }: { runId: string; nested?: boolean; depth?: number; onOpenRun?: (runId: string) => void }) {
   const run = useWorkflowRun(runId);
 
   if (run.isLoading) {
@@ -65,7 +65,7 @@ export function RunDetailView({ runId, nested = false, depth = 0 }: { runId: str
       )}
 
       {r.status === "Suspended" && r.pendingWait && (
-        <SuspendedPanel runId={runId} wait={r.pendingWait} depth={depth} />
+        <SuspendedPanel runId={runId} wait={r.pendingWait} depth={depth} onOpenRun={onOpenRun} />
       )}
 
       <section className="wf-section">
@@ -94,7 +94,16 @@ export function RunDetailView({ runId, nested = false, depth = 0 }: { runId: str
             {r.nodes.map((n) => (
               <li key={`${n.nodeId}:${n.iterationKey}`} className="wf-run-node">
                 <div className="wf-run-node-head">
-                  <span className="wf-run-node-id">{n.nodeId}</span>
+                  {/* A flow.subworkflow step carries the child run it spawned: click the id to open
+                      that run full-page, or expand the card below to inspect it inline. */}
+                  {n.childRunId && onOpenRun ? (
+                    <button type="button" className="wf-run-node-id wf-run-node-link" onClick={() => onOpenRun(n.childRunId!)} title="Open the sub-workflow run">
+                      {n.nodeId}
+                      <Ic.ArrowOut size={11} />
+                    </button>
+                  ) : (
+                    <span className="wf-run-node-id">{n.nodeId}</span>
+                  )}
                   <RunStatusBadge status={n.status} />
                   {n.startedAt && (
                     <span className="wf-run-node-time">
@@ -118,7 +127,10 @@ export function RunDetailView({ runId, nested = false, depth = 0 }: { runId: str
                     <JsonView data={n.outputs} />
                   </details>
                 )}
-                {!n.error && !hasContent(n.inputs) && !hasContent(n.outputs) && (
+                {/* The child run for a sub-workflow step — collapsed by default so N steps cost no
+                    extra polling until expanded; the embedded view brings its own resume affordance. */}
+                {n.childRunId && <ChildRunEmbed childRunId={n.childRunId} depth={depth} defaultOpen={false} onOpenRun={onOpenRun} />}
+                {!n.error && !hasContent(n.inputs) && !hasContent(n.outputs) && !n.childRunId && (
                   <div className="wf-run-node-none">No inputs or outputs recorded.</div>
                 )}
               </li>
@@ -158,13 +170,13 @@ function hasContent(value: unknown): boolean {
  * child run inline — including ITS resume affordance, so e.g. an approval deep inside the child is
  * operable right here; resolving it completes the child, which auto-resumes this run.
  */
-export function SuspendedPanel({ runId, wait, depth = 0 }: { runId: string; wait: WorkflowRunWaitInfo; depth?: number }) {
+export function SuspendedPanel({ runId, wait, depth = 0, onOpenRun }: { runId: string; wait: WorkflowRunWaitInfo; depth?: number; onOpenRun?: (runId: string) => void }) {
   const resume = useResumeRun(runId);
   const [comment, setComment] = useState("");
 
   if (wait.kind === "Subworkflow") {
     // The wait's token is the child run id (engine contract). Embed the child run-detail.
-    return <SubworkflowWaitPanel childRunId={wait.token} depth={depth} />;
+    return <SubworkflowWaitPanel childRunId={wait.token} depth={depth} onOpenRun={onOpenRun} />;
   }
 
   if (wait.kind === "Approval") {
@@ -221,41 +233,66 @@ export function SuspendedPanel({ runId, wait, depth = 0 }: { runId: string; wait
 }
 
 /**
- * The Subworkflow-wait affordance: an expandable card that embeds the LIVE child run-detail
- * (recursively — it's a full RunDetailView). The child brings its own resume affordance, so an
- * approval / callback inside the child is operated right here; resolving it completes the child,
- * which the engine's completion hook turns into a resume of THIS run. Beyond a few nesting levels
- * we stop embedding (each level is a polling fetch) and just name the child run id.
+ * The Subworkflow-wait affordance shown at the top of a Suspended run: the child run embedded as
+ * the action surface (default-open), so an approval / callback inside the child is operated right
+ * here — resolving it completes the child, which the engine's completion hook turns into a resume
+ * of THIS run.
  */
-function SubworkflowWaitPanel({ childRunId, depth }: { childRunId: string; depth: number }) {
-  const [open, setOpen] = useState(true);
+function SubworkflowWaitPanel({ childRunId, depth, onOpenRun }: { childRunId: string; depth: number; onOpenRun?: (runId: string) => void }) {
+  return (
+    <section className="wf-section wf-approval">
+      <ChildRunEmbed
+        childRunId={childRunId}
+        depth={depth}
+        defaultOpen
+        label="Running a sub-workflow"
+        onOpenRun={onOpenRun}
+        description={
+          <div className="wf-approval-prompt">
+            This run is waiting for the sub-workflow below to finish. Acting on it here — e.g. approving —
+            resumes this run automatically.
+          </div>
+        }
+      />
+    </section>
+  );
+}
+
+/**
+ * The shared "drill into a child run inline" affordance for a flow.subworkflow step: a chevron
+ * toggle over a bordered, LIVE nested RunDetailView (recursively — the child brings its own resume
+ * affordance). Used both as the Suspended-run action surface (default-open) and on each sub-workflow
+ * row in the execution trace (default-collapsed). Past MAX_EMBED_DEPTH it stops embedding (each level
+ * is a polling fetch) and just names the run id. While collapsed the nested view is unmounted, so N
+ * collapsed steps cost zero extra polling until expanded.
+ */
+function ChildRunEmbed({ childRunId, depth, defaultOpen, onOpenRun, label = "Sub-workflow run", description }: {
+  childRunId: string;
+  depth: number;
+  defaultOpen: boolean;
+  onOpenRun?: (runId: string) => void;
+  label?: string;
+  description?: ReactNode;
+}) {
+  const [open, setOpen] = useState(defaultOpen);
   const canEmbed = depth < MAX_EMBED_DEPTH;
 
   return (
-    <section className="wf-section wf-approval">
-      <button
-        type="button"
-        className="wf-subrun-toggle"
-        onClick={() => setOpen((v) => !v)}
-        aria-expanded={open}
-        disabled={!canEmbed}
-      >
+    <div className="wf-childrun">
+      <button type="button" className="wf-subrun-toggle" onClick={() => setOpen((v) => !v)} aria-expanded={open} disabled={!canEmbed}>
         {canEmbed && (open ? <Ic.ChevronDown size={12} /> : <Ic.ChevronRight size={12} />)}
-        <span className="wf-section-h">Running a sub-workflow</span>
+        <span className="wf-section-h">{label}</span>
       </button>
-      <div className="wf-approval-prompt">
-        This run is waiting for the sub-workflow below to finish. Acting on it here — e.g. approving —
-        resumes this run automatically.
-      </div>
+      {description}
 
       {!canEmbed ? (
         <div className="wf-approval-prompt">Sub-workflow run <code>{childRunId}</code> (nested too deep to embed).</div>
       ) : open && (
         <div className="wf-subrun">
-          <RunDetailView runId={childRunId} nested depth={depth + 1} />
+          <RunDetailView runId={childRunId} nested depth={depth + 1} onOpenRun={onOpenRun} />
         </div>
       )}
-    </section>
+    </div>
   );
 }
 
