@@ -277,8 +277,8 @@ function Editor({ workflow, manifests, onBackToList, saving, onSave }: EditorPro
       let changed = false;
       const next = nds.map((n) => {
         if ((n.data as Partial<WorkflowNodeData>)?.kind !== "Loop") return n;
-        const want = n.id === targetId ? "wf-rf-loop-node wf-rf-loop-droptarget" : "wf-rf-loop-node";
-        if (n.className === want) return n;
+        const want = n.id === targetId ? "wf-rf-loop-droptarget" : undefined;
+        if ((n.className ?? undefined) === want) return n;
         changed = true;
         return { ...n, className: want };
       });
@@ -398,9 +398,10 @@ function Editor({ workflow, manifests, onBackToList, saving, onSave }: EditorPro
         // A manual start node shows the current workflow input fields on its card.
         ...(manifest.isManual ? { inputFields: workflowInputs } : {}),
       },
-      // A loop is a container sized to hold its body subgraph; the wrapper is click-through (only its
-      // header drags/selects) so body steps stay clickable + the box moves as one with its body.
-      ...(isLoop ? { style: { width: LOOP_CONTAINER_W, height: LOOP_CONTAINER_H }, className: "wf-rf-loop-node", dragHandle: ".wf-rf-loop-head" } : {}),
+      // A loop is a container sized to hold its body subgraph. It's draggable from anywhere on the
+      // box; its body steps render ABOVE it (React Flow parent/child z-order) so they stay clickable
+      // and grabbing one drags the step, while grabbing empty space drags the whole box + its body.
+      ...(isLoop ? { style: { width: LOOP_CONTAINER_W, height: LOOP_CONTAINER_H } } : {}),
     };
 
     // A Loop ships with its body-entry marker (flow.loop_start) pre-placed inside — the marker is
@@ -1301,11 +1302,11 @@ function definitionToRfNodes(
     const position = n.position ?? { x: 80, y: fallbackY };
     if (!n.position) fallbackY += kind === "Loop" ? 300 : 180;
 
-    // A loop container is sized so its body subgraph fits; everything else is a normal card. The
-    // className makes the wrapper click-through (only its header drags/selects, so body steps stay
-    // clickable) and dragHandle restricts dragging to the header so the box moves as one with its body.
+    // A loop container is sized so its body subgraph fits; everything else is a normal card. It's
+    // draggable from anywhere on the box — body steps render above it (parent/child z-order) so they
+    // stay clickable and the box drags as one with its body.
     return kind === "Loop"
-      ? { id: n.id, type: "wf", position, data, style: { width: LOOP_CONTAINER_W, height: LOOP_CONTAINER_H }, className: "wf-rf-loop-node", dragHandle: ".wf-rf-loop-head" }
+      ? { id: n.id, type: "wf", position, data, style: { width: LOOP_CONTAINER_W, height: LOOP_CONTAINER_H } }
       : { id: n.id, type: "wf", position, data };
   });
 }
