@@ -106,7 +106,7 @@ export function SubworkflowEditor({ config, inputs, onConfigChange, onInputsChan
 
 /** The child input's own JSON-schema fragment drives its control; carry label/description through. */
 function asFieldSchema(v: WorkflowVariable): Record<string, unknown> {
-  const base = (typeof v.schema === "object" && v.schema !== null) ? { ...(v.schema as Record<string, unknown>) } : { type: "string" };
+  const base: Record<string, unknown> = (typeof v.schema === "object" && v.schema !== null) ? { ...(v.schema as Record<string, unknown>) } : { type: "string" };
   if (v.label) base.title = v.label;
   if (v.description) base.description = v.description;
   return base;

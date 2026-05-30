@@ -1,5 +1,5 @@
 import { fireEvent, render, screen } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it, vi, type Mock } from "vitest";
 
 import { SubworkflowEditor } from "./SubworkflowEditor";
 
@@ -27,9 +27,11 @@ vi.mock("@/hooks/use-workflows", () => ({
   }),
 }));
 
-function renderEditor(config: Record<string, unknown>, handlers: { onConfigChange?: ReturnType<typeof vi.fn>; onInputsChange?: ReturnType<typeof vi.fn> } = {}) {
-  const onConfigChange = handlers.onConfigChange ?? vi.fn();
-  const onInputsChange = handlers.onInputsChange ?? vi.fn();
+type SchemaChange = (next: Record<string, unknown>) => void;
+
+function renderEditor(config: Record<string, unknown>, handlers: { onConfigChange?: Mock<SchemaChange>; onInputsChange?: Mock<SchemaChange> } = {}) {
+  const onConfigChange = handlers.onConfigChange ?? vi.fn<SchemaChange>();
+  const onInputsChange = handlers.onInputsChange ?? vi.fn<SchemaChange>();
   render(
     <SubworkflowEditor
       config={config}
