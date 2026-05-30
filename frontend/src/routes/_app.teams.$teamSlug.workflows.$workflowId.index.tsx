@@ -1016,13 +1016,25 @@ function NodeInspector({
 
   const ownOutputs = useMemo(() => {
     const schema = manifest.outputSchema as { properties?: Record<string, { type?: string | string[]; description?: string }> } | undefined;
-    if (!schema?.properties) return [];
-    return Object.entries(schema.properties).map(([name, prop]) => ({
-      name,
-      type: Array.isArray(prop.type) ? prop.type.join("|") : prop.type,
-      description: prop.description,
-      refPath: `nodes.${nodeId}.outputs.${name}`,
-    }));
+    const declared = schema?.properties
+      ? Object.entries(schema.properties).map(([name, prop]) => ({
+          name,
+          type: Array.isArray(prop.type) ? prop.type.join("|") : prop.type,
+          description: prop.description,
+          refPath: `nodes.${nodeId}.outputs.${name}`,
+        }))
+      : [];
+
+    // Every non-trigger node also emits the universal `error` output when it fails (Phase 2) —
+    // list it so the author discovers it's referenceable from an error-branch handler.
+    const errorOutputs = manifest.kind !== "Trigger"
+      ? [
+          { name: "error.message", type: "string", description: "Failure message — populated on the error branch", refPath: `nodes.${nodeId}.outputs.error.message` },
+          { name: "error.node", type: "string", description: "The failing node's id", refPath: `nodes.${nodeId}.outputs.error.node` },
+        ]
+      : [];
+
+    return [...declared, ...errorOutputs];
   }, [manifest, nodeId]);
 
   // Outputs section is collapsed by default — operator opens it on demand when wiring

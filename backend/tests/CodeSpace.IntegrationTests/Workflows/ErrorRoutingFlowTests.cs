@@ -56,8 +56,12 @@ public class ErrorRoutingFlowTests
         (await db.WorkflowRunNode.AsNoTracking().SingleAsync(n => n.RunId == runId && n.NodeId == "caught")).Status
             .ShouldBe(NodeStatus.Success, "the error branch runs");
 
+        // The error output carries BOTH the failure message AND the failing node's id, so a shared
+        // handler can tell what failed and where.
         run.OutputsJson.ShouldNotBeNull();
-        run.OutputsJson!.ShouldContain("flaky failure", Case.Insensitive);
+        var outputs = System.Text.Json.JsonDocument.Parse(run.OutputsJson!).RootElement;
+        outputs.GetProperty("message").GetString().ShouldContain("flaky failure");
+        outputs.GetProperty("node").GetString().ShouldBe("flaky");
     }
 
     [Fact]
@@ -220,7 +224,7 @@ public class ErrorRoutingFlowTests
                     Retry = retry },
             new() { Id = "ok", TypeKey = "builtin.terminal", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
             new() { Id = "caught", TypeKey = "builtin.terminal", Config = WorkflowsTestSeed.EmptyJson(),
-                    Inputs = WorkflowsTestSeed.Json("""{"message":"{{nodes.flaky.outputs.error.message}}"}""") },
+                    Inputs = WorkflowsTestSeed.Json("""{"message":"{{nodes.flaky.outputs.error.message}}","node":"{{nodes.flaky.outputs.error.node}}"}""") },
         },
         Edges = new List<EdgeDefinition>
         {

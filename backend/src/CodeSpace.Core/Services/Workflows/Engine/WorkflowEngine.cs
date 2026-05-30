@@ -803,7 +803,7 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
                     throw new NodeFailureException($"Node '{node.NodeId}' failed.");
 
                 state.Statuses[node.NodeId] = NodeStatus.Failure;
-                scope.Nodes[node.NodeId] = BuildErrorOutput(node.Error);
+                scope.Nodes[node.NodeId] = BuildErrorOutput(node.Error, node.NodeId);
                 continue;
             }
 
@@ -1134,13 +1134,18 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
     /// </summary>
     private async Task FinalizeFailureAsync(NodeExecution exec, string error, CancellationToken cancellationToken)
     {
-        exec.Scope.Nodes[exec.Node.Id] = BuildErrorOutput(error);
+        exec.Scope.Nodes[exec.Node.Id] = BuildErrorOutput(error, exec.Node.Id);
         await _recordLogger.NodeFailedAsync(exec.Run.Id, exec.Node.Id, NoIteration, error, DateTimeOffset.UtcNow - exec.StartedAt, cancellationToken).ConfigureAwait(false);
     }
 
-    /// <summary>The node's <c>error</c> output bag — <c>{ "error": { "message": ... } }</c>. Shared by the in-walk failure path and the durable rehydrate so both reconstruct the same handler-visible shape.</summary>
-    private static IReadOnlyDictionary<string, JsonElement> BuildErrorOutput(string? error) =>
-        new Dictionary<string, JsonElement> { ["error"] = JsonSerializer.SerializeToElement(new { message = error ?? "Node failed." }) };
+    /// <summary>
+    /// The node's <c>error</c> output bag — <c>{ "error": { "message": ..., "node": ... } }</c>,
+    /// referenced by a handler as <c>{{nodes.&lt;id&gt;.outputs.error.message}}</c> / <c>.error.node</c>.
+    /// <c>node</c> (the failing node's id) lets a shared/fan-in handler tell which node failed.
+    /// Shared by the in-walk failure path and the durable rehydrate so both reconstruct the same shape.
+    /// </summary>
+    private static IReadOnlyDictionary<string, JsonElement> BuildErrorOutput(string? error, string nodeId) =>
+        new Dictionary<string, JsonElement> { ["error"] = JsonSerializer.SerializeToElement(new { message = error ?? "Node failed.", node = nodeId }) };
 
     /// <summary>
     /// Surface a failed attempt that WILL be retried: an append-only Warn <c>log</c> record naming
