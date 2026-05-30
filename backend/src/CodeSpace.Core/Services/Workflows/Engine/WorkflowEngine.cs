@@ -749,7 +749,11 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
             var status = await ExecuteNodeAsync(run, node, scope, state, cancellationToken).ConfigureAwait(false);
             state.Statuses[nodeId] = status;
 
-            if (status == NodeStatus.Failure)
+            // A failure halts the run UNLESS the node has an `error` edge: then the failure is
+            // "handled" — IsEdgeLive makes only the error handle live (normal-handle downstream is
+            // skipped), so we fall through to route the run down the handler branch. ExecuteNodeAsync
+            // already exposed the failure as the node's `error` output for the handler to read.
+            if (status == NodeStatus.Failure && !HasErrorEdge(node, state))
                 throw new NodeFailureException($"Node '{nodeId}' failed.");
 
             // The node parked the run (timer / approval / callback). SuspendNodeAsync already
@@ -789,10 +793,19 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
 
         foreach (var node in persisted)
         {
-            // A persisted failure means the original run already failed before the row flipped
-            // to a terminal status — re-fail it, same as the in-walk path.
+            // A persisted failure: re-fail the run UNLESS the node has an `error` edge — then the
+            // original walk handled it by routing to the error branch, so settle it as a (failed)
+            // source and rebuild its `error` output for the handler. Mirrors the in-walk path so a
+            // re-dispatched run continues identically instead of re-failing.
             if (node.Status == NodeStatus.Failure)
-                throw new NodeFailureException($"Node '{node.NodeId}' failed.");
+            {
+                if (!definition.Edges.Any(e => e.From == node.NodeId && e.SourceHandle == WorkflowHandles.Error))
+                    throw new NodeFailureException($"Node '{node.NodeId}' failed.");
+
+                state.Statuses[node.NodeId] = NodeStatus.Failure;
+                scope.Nodes[node.NodeId] = BuildErrorOutput(node.Error);
+                continue;
+            }
 
             // Only Success / Skipped are "settled". Running (node.started with no terminal record)
             // re-runs — the engine crashed mid-node, so we re-execute it.
@@ -889,14 +902,23 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
     }
 
     /// <summary>
-    /// An edge is "live" iff its source SUCCEEDED and — for a branch source (RoutingHints set) —
-    /// the edge's SourceHandle is among the chosen hints. Skipped/failed sources kill downstream
-    /// transitively (every incoming edge dead → ShouldSkip). Shared by the in-walk progression
-    /// and the durable rehydrate so both reconstruct identical liveness.
+    /// An edge is "live" iff EITHER:
+    ///   • its source SUCCEEDED and — for a branch source (RoutingHints set) — the edge's
+    ///     SourceHandle is among the chosen hints; OR
+    ///   • its source FAILED and the edge is the node's <c>error</c> handle (error routing).
+    /// A failed source thus makes ONLY its error edge live; a skipped source kills everything.
+    /// Determined by status alone (the error handle name is a constant), so the durable rehydrate
+    /// and the in-walk progression reconstruct identical liveness with no extra persistence.
     /// </summary>
     private static bool IsEdgeLive(EdgeDefinition edge, NodeStatus sourceStatus, HashSet<string>? routingHints) =>
         sourceStatus == NodeStatus.Success
-        && (routingHints == null || routingHints.Contains(edge.SourceHandle ?? DefaultHandleName));
+            ? (routingHints == null || routingHints.Contains(edge.SourceHandle ?? DefaultHandleName))
+            : sourceStatus == NodeStatus.Failure && edge.SourceHandle == WorkflowHandles.Error;
+
+    /// <summary>True when the node has at least one outgoing <c>error</c>-handle edge — i.e. its failure is handled.</summary>
+    private bool HasErrorEdge(NodeDefinition node, WalkerState state) =>
+        state.OutgoingByNodeId.GetValueOrDefault(node.Id, Array.Empty<EdgeDefinition>())
+            .Any(e => e.SourceHandle == WorkflowHandles.Error);
 
     /// <summary>Parse a persisted routing-hints JSON array (e.g. <c>["true"]</c>) back to a string list; null when absent.</summary>
     private static IReadOnlyList<string>? ParseRoutingHints(string? routingHintsJson)
@@ -1109,9 +1131,21 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
             CaptureTerminalOutputs(exec.Node, exec.ResolvedInputs, exec.Scope, exec.State);
     }
 
-    /// <summary>Write the terminal node.failed record. Unifies the returned-Failure and thrown-exception exhaustion paths.</summary>
-    private async Task FinalizeFailureAsync(NodeExecution exec, string error, CancellationToken cancellationToken) =>
+    /// <summary>
+    /// Finalise a terminal failure (returned Fail or thrown, retries exhausted): expose the error
+    /// as the node's <c>error</c> output so a downstream error-branch handler can read
+    /// <c>{{nodes.&lt;id&gt;.outputs.error.message}}</c>, then write the node.failed record. The
+    /// scope write is harmless when the node has no error edge — the run fails and scope is dropped.
+    /// </summary>
+    private async Task FinalizeFailureAsync(NodeExecution exec, string error, CancellationToken cancellationToken)
+    {
+        exec.Scope.Nodes[exec.Node.Id] = BuildErrorOutput(error);
         await _recordLogger.NodeFailedAsync(exec.Run.Id, exec.Node.Id, NoIteration, error, DateTimeOffset.UtcNow - exec.StartedAt, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>The node's <c>error</c> output bag — <c>{ "error": { "message": ... } }</c>. Shared by the in-walk failure path and the durable rehydrate so both reconstruct the same handler-visible shape.</summary>
+    private static IReadOnlyDictionary<string, JsonElement> BuildErrorOutput(string? error) =>
+        new Dictionary<string, JsonElement> { ["error"] = JsonSerializer.SerializeToElement(new { message = error ?? "Node failed." }) };
 
     /// <summary>
     /// Surface a failed attempt that WILL be retried: an append-only Warn <c>log</c> record naming

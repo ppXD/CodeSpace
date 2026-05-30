@@ -2,6 +2,7 @@ import { Handle, Position, type NodeProps } from "@xyflow/react";
 
 import { Ic } from "@/_imported/ai-code-space/icons";
 import type { NodeKind } from "@/api/workflows";
+import { ERROR_HANDLE } from "@/lib/workflowErrorRoute";
 
 /**
  * Custom React Flow node. Renders the icon + display name + the author's id label,
@@ -62,6 +63,17 @@ export function WorkflowNode({ data, selected }: NodeProps) {
         )}
       </div>
       {d.kind !== "Terminal" && <Handle type="source" position={Position.Bottom} className="wf-rf-handle" />}
+      {/* Error output — connect it to a handler node to catch this node's failure (route the run
+          there instead of failing it). Only meaningful on regular nodes that can fail-and-continue. */}
+      {d.kind === "Regular" && (
+        <Handle
+          id={ERROR_HANDLE}
+          type="source"
+          position={Position.Right}
+          className="wf-rf-handle wf-rf-handle-error"
+          title="On error → connect to a handler node"
+        />
+      )}
     </div>
   );
 }

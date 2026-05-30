@@ -2058,6 +2058,10 @@ textarea:-webkit-autofill {
   background: var(--accent) !important; border-color: var(--accent) !important;
   transform: scale(1.3);
 }
+/* Error output handle + edge — the failure branch, in the theme's danger tone. */
+.acs-root .wf-rf-handle-error { border-color: var(--danger) !important; }
+.acs-root .wf-rf-handle-error:hover { background: var(--danger) !important; border-color: var(--danger) !important; }
+.acs-root .wf-canvas .react-flow__edge.wf-rf-edge-error .react-flow__edge-path { stroke: var(--danger); stroke-dasharray: 5 3; }
 /* Subtle pulse on the source handle of a selected node so users know where to drag from. */
 .acs-root .wf-rf-node[data-selected="true"] .react-flow__handle.source {
   background: var(--accent) !important; border-color: var(--accent) !important;
