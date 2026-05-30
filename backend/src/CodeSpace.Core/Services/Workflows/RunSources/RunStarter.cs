@@ -165,22 +165,17 @@ public sealed class RunStarter : IRunStarter, IScopedDependency
                 throw new ArgumentException("ActorType=Webhook requires a null ActorId (the provider isn't a CodeSpace identity)", nameof(envelope));
         }
 
-        // Replay envelopes MUST carry the original release hash so the engine can verify the
-        // workflow_version hash hasn't been tampered. CausationRequestId + ParentRunId travel
-        // together with ReleaseHashAtRun: all three or none.
-        var replayFieldsPresent =
-            envelope.CausationRequestId.HasValue
-            || envelope.ParentRunId.HasValue
-            || !string.IsNullOrEmpty(envelope.ReleaseHashAtRun);
+        // Replay re-runs a FROZEN version, so its frozen-version fields travel together: a
+        // CausationRequestId (lineage to the original request) iff a ReleaseHashAtRun (the hash the
+        // engine verifies the version against). ParentRunId is the broader "spawning run" link — set
+        // by replay AND by a sub-workflow child (which runs its own LATEST version, so it carries no
+        // frozen hash) — so it is validated independently, not bundled with the replay fields.
+        var hasCausation = envelope.CausationRequestId.HasValue;
+        var hasReleaseHash = !string.IsNullOrEmpty(envelope.ReleaseHashAtRun);
 
-        var replayFieldsComplete =
-            envelope.CausationRequestId.HasValue
-            && envelope.ParentRunId.HasValue
-            && !string.IsNullOrEmpty(envelope.ReleaseHashAtRun);
-
-        if (replayFieldsPresent && !replayFieldsComplete)
+        if (hasCausation != hasReleaseHash)
             throw new ArgumentException(
-                "Replay envelopes MUST carry CausationRequestId + ParentRunId + ReleaseHashAtRun together (all three or none)",
+                "Replay's frozen-version fields must travel together: CausationRequestId iff ReleaseHashAtRun.",
                 nameof(envelope));
     }
 }

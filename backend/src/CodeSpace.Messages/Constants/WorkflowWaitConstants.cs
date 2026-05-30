@@ -14,6 +14,13 @@ public static class WorkflowWaitKinds
 
     /// <summary>Waits for an external system to POST to a tokened callback URL (Phase 1.2).</summary>
     public const string Callback = "Callback";
+
+    /// <summary>
+    /// Waits for a child workflow run to finish (Phase 3 — <c>flow.subworkflow</c>). The wait's
+    /// <c>Token</c> is the child run's id; the engine resumes the parent when the child reaches a
+    /// terminal state, mapping the child's outputs back onto the node.
+    /// </summary>
+    public const string Subworkflow = "Subworkflow";
 }
 
 /// <summary>Lifecycle of a <c>workflow_run_wait</c> row. CHECK-constrained at the DB layer.</summary>

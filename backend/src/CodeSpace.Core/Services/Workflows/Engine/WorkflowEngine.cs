@@ -50,8 +50,10 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
     private readonly ILogger<WorkflowEngine> _logger;
     private readonly ILoggerFactory _loggerFactory;
     private readonly ICodeSpaceBackgroundJobClient _backgroundJobClient;
+    private readonly ISubworkflowService _subworkflowService;
+    private readonly IWorkflowResumeService _resumeService;
 
-    public WorkflowEngine(CodeSpaceDbContext db, INodeRegistry nodeRegistry, IVariableService variableService, IRunRecordLogger recordLogger, IPayloadRedactor redactor, IArtifactStore artifactStore, ILogger<WorkflowEngine> logger, ILoggerFactory loggerFactory, ICodeSpaceBackgroundJobClient backgroundJobClient)
+    public WorkflowEngine(CodeSpaceDbContext db, INodeRegistry nodeRegistry, IVariableService variableService, IRunRecordLogger recordLogger, IPayloadRedactor redactor, IArtifactStore artifactStore, ILogger<WorkflowEngine> logger, ILoggerFactory loggerFactory, ICodeSpaceBackgroundJobClient backgroundJobClient, ISubworkflowService subworkflowService, IWorkflowResumeService resumeService)
     {
         _db = db;
         _nodeRegistry = nodeRegistry;
@@ -62,6 +64,8 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
         _logger = logger;
         _loggerFactory = loggerFactory;
         _backgroundJobClient = backgroundJobClient;
+        _subworkflowService = subworkflowService;
+        _resumeService = resumeService;
     }
 
     public async Task ExecuteRunAsync(Guid runId, CancellationToken cancellationToken)
@@ -183,6 +187,11 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
             // the durable walker continues from the suspended node. NOT a terminal state.
             run.Status = WorkflowRunStatus.Suspended;
             await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+
+            // Now that the parent is COMMITTED Suspended, dispatch any sub-workflow child it staged.
+            // Deferring the dispatch to here (not at suspend time) closes the race where a fast
+            // child could finish and try to resume the parent before the parent was parked.
+            await DispatchPendingSubworkflowChildAsync(run.Id, cancellationToken).ConfigureAwait(false);
         }
         catch (WorkflowSecretLeakException ex)
         {
@@ -713,6 +722,77 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
         run.Error = error;
         run.CompletedAt = DateTimeOffset.UtcNow;
         await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+
+        // If this run is a sub-workflow child, wake the parent that's parked on it.
+        await ResumeParentIfSubworkflowChildAsync(run, status, error, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Dispatch the not-yet-dispatched sub-workflow child a just-suspended run staged. Looks up the
+    /// run's pending <c>Subworkflow</c> wait (its Token is the child run id) and dispatches it. No-op
+    /// for non-subworkflow suspends (timer / approval / callback) — those have no Subworkflow wait.
+    /// </summary>
+    private async Task DispatchPendingSubworkflowChildAsync(Guid parentRunId, CancellationToken cancellationToken)
+    {
+        var token = await _db.WorkflowRunWait.AsNoTracking()
+            .Where(w => w.RunId == parentRunId && w.WaitKind == WorkflowWaitKinds.Subworkflow && w.Status == WorkflowWaitStatuses.Pending)
+            .Select(w => w.Token)
+            .FirstOrDefaultAsync(cancellationToken)
+            .ConfigureAwait(false);
+
+        if (token != null && Guid.TryParse(token, out var childRunId))
+            await _subworkflowService.DispatchChildRunAsync(childRunId, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// When a child run reaches a terminal state, resume the parent parked on it (Phase 3). The
+    /// parent is found via its pending <c>Subworkflow</c> wait whose Token equals this child's id —
+    /// which also distinguishes a sub-workflow child from a replay child (a replay's "parent" holds
+    /// no such wait). Resumes with the child's status + outputs + error so the node can map them.
+    /// Best-effort: a failure here is logged, not propagated (the child already completed cleanly).
+    /// </summary>
+    private async Task ResumeParentIfSubworkflowChildAsync(WorkflowRun child, WorkflowRunStatus status, string? error, CancellationToken cancellationToken)
+    {
+        if (child.ParentRunId == null) return;
+
+        try
+        {
+            var childIdToken = child.Id.ToString();
+            var waiting = await _db.WorkflowRunWait.AsNoTracking()
+                .AnyAsync(w => w.RunId == child.ParentRunId && w.WaitKind == WorkflowWaitKinds.Subworkflow
+                               && w.Token == childIdToken && w.Status == WorkflowWaitStatuses.Pending, cancellationToken)
+                .ConfigureAwait(false);
+
+            if (!waiting) return;   // not a sub-workflow child (e.g. a replay) — nothing to resume
+
+            var payload = JsonSerializer.Serialize(new
+            {
+                status = status.ToString(),
+                outputs = JsonSafeParseObject(child.OutputsJson),
+                error,
+            });
+
+            await _resumeService.ResumeAsync(child.ParentRunId.Value, payload, cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Sub-workflow child {ChildRunId} completed but resuming parent {ParentRunId} failed", child.Id, child.ParentRunId);
+        }
+    }
+
+    /// <summary>Parse a run's OutputsJson into a JsonElement object for the resume payload; an empty object on any trouble.</summary>
+    private static JsonElement JsonSafeParseObject(string? json)
+    {
+        if (string.IsNullOrWhiteSpace(json)) return JsonDocument.Parse("{}").RootElement.Clone();
+        try
+        {
+            var root = JsonDocument.Parse(json).RootElement;
+            return root.ValueKind == JsonValueKind.Object ? root.Clone() : JsonDocument.Parse("{}").RootElement.Clone();
+        }
+        catch
+        {
+            return JsonDocument.Parse("{}").RootElement.Clone();
+        }
     }
 
     // Returns the workflow's outputs (filled by the last successful Terminal). Empty when
@@ -943,6 +1023,14 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
         var waitKind = ValidateWaitKind(node.Id, token.Kind);
         var wakeAt = waitKind == WorkflowWaitKinds.Timer ? ReadWakeAt(token) : null;
 
+        // Sub-workflow: stage the child run NOW (parent_run_id = this run); its id is the wait's
+        // correlation token. The child is dispatched only AFTER the parent commits Suspended (see
+        // RunAfterClaimAsync) so a fast child can't finish before the parent is parked. A staging
+        // failure throws SubworkflowStartException, which ExecuteNodeAsync turns into a node failure.
+        var correlationToken = waitKind == WorkflowWaitKinds.Subworkflow
+            ? (await StageSubworkflowChildAsync(run, token, cancellationToken).ConfigureAwait(false)).ToString()
+            : Guid.NewGuid().ToString("N");
+
         await _recordLogger.NodeSuspendedAsync(run.Id, node.Id, NoIteration, waitKind, wakeAt, cancellationToken).ConfigureAwait(false);
 
         // One outstanding wait per (run, node, iteration). Drop any prior (resolved) wait for
@@ -959,7 +1047,7 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
             NodeId = node.Id,
             IterationKey = NoIteration,
             WaitKind = waitKind,
-            Token = Guid.NewGuid().ToString("N"),
+            Token = correlationToken,
             WakeAt = wakeAt,
             Status = WorkflowWaitStatuses.Pending,
             // Stash the node's suspend payload (e.g. an approval prompt) so the run-detail UI can
@@ -978,9 +1066,29 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
 
     private static string ValidateWaitKind(string nodeId, string kind)
     {
-        if (kind is WorkflowWaitKinds.Timer or WorkflowWaitKinds.Approval or WorkflowWaitKinds.Callback) return kind;
+        if (kind is WorkflowWaitKinds.Timer or WorkflowWaitKinds.Approval or WorkflowWaitKinds.Callback or WorkflowWaitKinds.Subworkflow) return kind;
 
-        throw new NodeFailureException($"Node '{nodeId}' suspended with unknown wait kind '{kind}'. Expected Timer, Approval, or Callback.");
+        throw new NodeFailureException($"Node '{nodeId}' suspended with unknown wait kind '{kind}'. Expected Timer, Approval, Callback, or Subworkflow.");
+    }
+
+    /// <summary>
+    /// Stage the child run for a <c>flow.subworkflow</c> suspension: read the target + inputs from
+    /// the suspend payload and create the child via <see cref="ISubworkflowService"/> (NOT dispatched
+    /// yet). Returns the child run id, which becomes the wait's correlation token.
+    /// </summary>
+    private async Task<Guid> StageSubworkflowChildAsync(WorkflowRun run, SuspensionToken token, CancellationToken cancellationToken)
+    {
+        var payload = token.Payload;
+
+        if (payload.ValueKind != JsonValueKind.Object
+            || !payload.TryGetProperty("workflowId", out var widEl)
+            || !Guid.TryParse(widEl.GetString(), out var childWorkflowId))
+            throw new SubworkflowStartException("Sub-workflow node is missing a valid 'workflowId'.");
+
+        int? version = payload.TryGetProperty("version", out var vEl) && vEl.ValueKind == JsonValueKind.Number && vEl.TryGetInt32(out var v) ? v : null;
+        var inputsJson = payload.TryGetProperty("inputs", out var inEl) && inEl.ValueKind == JsonValueKind.Object ? inEl.GetRawText() : "{}";
+
+        return await _subworkflowService.StageChildRunAsync(run, childWorkflowId, version, inputsJson, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>For a Timer suspension the node puts an ISO-8601 <c>wake_at</c> in the token payload.</summary>
@@ -1055,11 +1163,21 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
         {
             var (result, thrownError) = await RunNodeOnceAsync(exec, cancellationToken).ConfigureAwait(false);
 
-            // A suspend parks the run by design — never a failure, never retried.
+            // A suspend parks the run by design — never a failure, never retried. A sub-workflow
+            // suspend stages its child here; if the child can't be started, that's a clean node
+            // failure (composes with the error branch), not a suspend.
             if (result is { Status: NodeStatus.Suspended })
             {
-                await SuspendNodeAsync(run, node, result, cancellationToken).ConfigureAwait(false);
-                return NodeStatus.Suspended;
+                try
+                {
+                    await SuspendNodeAsync(run, node, result, cancellationToken).ConfigureAwait(false);
+                    return NodeStatus.Suspended;
+                }
+                catch (SubworkflowStartException ex)
+                {
+                    await FinalizeFailureAsync(exec, ex.Message, cancellationToken).ConfigureAwait(false);
+                    return NodeStatus.Failure;
+                }
             }
 
             // Success / Skipped — persist, reflect into scope, capture terminal outputs, advance.
