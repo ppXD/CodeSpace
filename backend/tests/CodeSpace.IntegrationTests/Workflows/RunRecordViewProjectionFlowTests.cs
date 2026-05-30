@@ -150,6 +150,7 @@ public class RunRecordViewProjectionFlowTests
             await logger.NodeStartedAsync(runId, "retried", iterationKey: "", secondInputs, emptyConfig, CancellationToken.None);
             await logger.NodeCompletedAsync(runId, "retried", iterationKey: "",
                 outputs: new Dictionary<string, JsonElement> { ["result"] = JsonSerializer.SerializeToElement("ok") },
+                routingHints: null,
                 duration: TimeSpan.FromMilliseconds(5),
                 cancellationToken: CancellationToken.None);
         }
@@ -267,6 +268,50 @@ public class RunRecordViewProjectionFlowTests
         nodesB.Count.ShouldBe(2);
         nodesA.ShouldAllBe(n => n.RunId == runIdA);
         nodesB.ShouldAllBe(n => n.RunId == runIdB);
+    }
+
+    [Fact]
+    public async Task Branch_node_routing_decision_is_persisted_and_projected_to_the_view()
+    {
+        // Engine v2 Phase 0: a branch node's chosen output handles (NodeResult.RoutingHints)
+        // MUST be persisted to the ledger + surfaced on the view, so the durable walker can
+        // rebuild edge-liveness on re-entry WITHOUT re-running the branch node. Before this,
+        // routing hints lived only in the engine's in-memory WalkerState and were lost on a
+        // crash / resume.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var def = BranchedDefinition(condition: "true");
+        var workflowId = await CreateWorkflowAsync(teamId, userId, def);
+        var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
+        await RunEngineAsync(runId);
+
+        using var verify = _fixture.BeginScope();
+        var db = verify.Resolve<CodeSpaceDbContext>();
+        var branch = await db.WorkflowRunNode.AsNoTracking().SingleAsync(n => n.RunId == runId && n.NodeId == "branch");
+
+        branch.Status.ShouldBe(NodeStatus.Success);
+        branch.RoutingHintsJson.ShouldNotBeNull("a branch node's chosen handles must be persisted for durable re-entry");
+
+        var hints = JsonDocument.Parse(branch.RoutingHintsJson!).RootElement;
+        hints.ValueKind.ShouldBe(JsonValueKind.Array);
+        var handles = hints.EnumerateArray().Select(h => h.GetString()).ToList();
+        handles.ShouldContain("true", "condition was truthy → the 'true' handle is live");
+        handles.ShouldNotContain("false", "the 'false' handle must NOT be in the chosen set");
+    }
+
+    [Fact]
+    public async Task Non_branch_nodes_project_null_routing_hints()
+    {
+        // A node that doesn't branch (trigger, terminal, fetch, …) leaves RoutingHints null and
+        // follows all outgoing edges. Its routing_hints_jsonb column projects SQL NULL — the
+        // payload omits the key entirely, so the view returns null (NOT a JSON 'null' literal).
+        var runId = await SeedAndRunMinimalAsync();   // trigger → terminal, no branch
+
+        using var verify = _fixture.BeginScope();
+        var db = verify.Resolve<CodeSpaceDbContext>();
+        var nodes = await db.WorkflowRunNode.AsNoTracking().Where(n => n.RunId == runId).ToListAsync();
+
+        nodes.Count.ShouldBe(2);
+        nodes.ShouldAllBe(n => n.RoutingHintsJson == null);
     }
 
     // ─── Helpers ────────────────────────────────────────────────────────────────
