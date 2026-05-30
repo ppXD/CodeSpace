@@ -2218,7 +2218,20 @@ textarea:-webkit-autofill {
 .acs-root .wf-loop-cond-val { flex: 1; min-width: 0; }
 .acs-root .wf-loop-max { display: flex; align-items: center; gap: 12px; }
 .acs-root .wf-loop-max-num { flex: 0 0 88px; }
-.acs-root .wf-loop-max-slider { flex: 1; min-width: 0; accent-color: var(--accent); }
+/* Range slider — custom-styled so the track stays in the warm theme (a light rail) rather than the
+   OS-default dark track; the thumb is the accent. accent-color alone left the unfilled track black. */
+.acs-root .wf-loop-max-slider {
+  flex: 1; min-width: 0; height: 4px; -webkit-appearance: none; appearance: none;
+  background: var(--line); border-radius: 999px; cursor: pointer; outline: none;
+}
+.acs-root .wf-loop-max-slider::-webkit-slider-thumb {
+  -webkit-appearance: none; appearance: none;
+  width: 14px; height: 14px; border-radius: 50%; background: var(--accent); border: none; cursor: pointer;
+}
+.acs-root .wf-loop-max-slider::-moz-range-track { height: 4px; background: var(--line); border-radius: 999px; }
+.acs-root .wf-loop-max-slider::-moz-range-thumb {
+  width: 14px; height: 14px; border-radius: 50%; background: var(--accent); border: none; cursor: pointer;
+}
 
 /* Modals portal to <body>, OUTSIDE .acs-root, so the .acs-root-scoped .wf-form* rules above
    don't reach them and the form collapses to unstyled inline text. Mirror them under the
