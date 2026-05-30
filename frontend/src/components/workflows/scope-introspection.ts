@@ -4,6 +4,7 @@ import type {
   SystemVariableDto,
   WorkflowDefinition,
 } from "@/api/workflows";
+import { ERROR_HANDLE } from "@/lib/workflowErrorRoute";
 
 /**
  * Computes the set of variables ACTUALLY in scope at a specific node's position in the
@@ -96,6 +97,31 @@ export function introspectScope({ definition, currentNodeId, manifestByType, wor
         description: `From "${node.label || manifest?.displayName || node.typeKey}"`,
       });
     }
+  }
+
+  // 1b. Error outputs — every node emits `error` ({ message, node }) when it fails. Offer it only
+  //     where it's actually reachable: a node whose `error` edge leads (directly or down the chain)
+  //     to the current node. So an error-handler discovers {{nodes.X.outputs.error.*}} while a
+  //     success-path node isn't cluttered with paths that would always resolve null there.
+  for (const sourceId of collectErrorSources(definition, currentNodeId)) {
+    const node = definition.nodes.find((n) => n.id === sourceId);
+    const from = node?.label || manifestByType.get(node?.typeKey ?? "")?.displayName || sourceId;
+    suggestions.push(
+      {
+        path: `nodes.${sourceId}.outputs.error.message`,
+        label: `nodes.${sourceId}.outputs.error.message`,
+        category: "node",
+        type: "string",
+        description: `Failure message from "${from}" (error branch)`,
+      },
+      {
+        path: `nodes.${sourceId}.outputs.error.node`,
+        label: `nodes.${sourceId}.outputs.error.node`,
+        category: "node",
+        type: "string",
+        description: `The id of the node that failed`,
+      },
+    );
   }
 
   // 2. Workflow variables — live in the unified `variable` table (scope=Workflow); one
@@ -228,6 +254,23 @@ export function introspectScope({ definition, currentNodeId, manifestByType, wor
   }
 
   return suggestions;
+}
+
+/**
+ * Nodes whose `error` edge leads — directly or down the chain — to the given node, so their
+ * `error` output is genuinely in scope there. A source X qualifies when its error edge points at
+ * the current node OR at one of the current node's ancestors (the error branch flows through to it).
+ */
+function collectErrorSources(definition: WorkflowDefinition, currentNodeId: string | null): Set<string> {
+  const sources = new Set<string>();
+  if (!currentNodeId) return sources;
+
+  const ancestors = collectUpstream(definition, currentNodeId);
+  for (const e of definition.edges) {
+    if (e.sourceHandle !== ERROR_HANDLE) continue;
+    if (e.to === currentNodeId || ancestors.has(e.to)) sources.add(e.from);
+  }
+  return sources;
 }
 
 /** BFS backwards from a node along incoming edges. Returns ids of every ancestor. */
