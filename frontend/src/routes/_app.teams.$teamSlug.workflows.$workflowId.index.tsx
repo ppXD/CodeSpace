@@ -42,6 +42,7 @@ import { SchemaForm } from "@/components/workflows/SchemaForm";
 import { ERROR_HANDLE, errorRouteTarget, setErrorRoute } from "@/lib/workflowErrorRoute";
 import { introspectScope } from "@/components/workflows/scope-introspection";
 import { StartNodeInputsEditor } from "@/components/workflows/StartNodeInputsEditor";
+import { SubworkflowEditor } from "@/components/workflows/SubworkflowEditor";
 import { VariableTablePanel } from "@/components/workflows/VariableTablePanel";
 import { WorkflowNode, type WorkflowNodeData } from "@/components/workflows/WorkflowNode";
 import { useAlert } from "@/components/dialog";
@@ -782,6 +783,8 @@ function Editor({ workflow, manifests, onBackToList, saving, onSave }: EditorPro
               onLabelChange={(v) => updateLabel(selectedNode.id, v)}
               onConfigChange={(v) => updateConfig(selectedNode.id, v)}
               onInputsChange={(v) => updateInputs(selectedNode.id, v)}
+              // The flow.subworkflow editor lists the team's workflows; exclude the one being edited.
+              currentWorkflowId={workflow.id}
               retry={retries[selectedNode.id] ?? null}
               onRetryChange={(v) => updateRetry(selectedNode.id, v)}
               // Error routing reads/writes the node's `error` edge directly on the edges state.
@@ -974,6 +977,7 @@ function NodeInspector({
   onLabelChange,
   onConfigChange,
   onInputsChange,
+  currentWorkflowId,
   retry,
   onRetryChange,
   errorTarget,
@@ -996,6 +1000,7 @@ function NodeInspector({
   onLabelChange: (v: string) => void;
   onConfigChange: (v: Record<string, unknown>) => void;
   onInputsChange: (v: Record<string, unknown>) => void;
+  currentWorkflowId: string;
   retry: RetryPolicy | null;
   onRetryChange: (v: RetryPolicy | null) => void;
   errorTarget: string | null;
@@ -1066,6 +1071,17 @@ function NodeInspector({
           start node"). Its Config/Input schemas are empty, so there's nothing else to show. */}
       {manifest.isManual ? (
         <StartNodeInputsEditor inputs={inputFields} onChange={onInputFieldsChange} />
+      ) : manifest.typeKey === "flow.subworkflow" ? (
+        // Sub-workflow gets a dedicated editor: pick the child workflow, then map onto ITS declared
+        // inputs (rendered via SchemaForm) — far better than the generic "workflowId + raw object".
+        <SubworkflowEditor
+          config={config}
+          inputs={inputs}
+          onConfigChange={onConfigChange}
+          onInputsChange={onInputsChange}
+          suggestions={suggestions}
+          currentWorkflowId={currentWorkflowId}
+        />
       ) : (
         <>
           <section className="wf-inspector-section">

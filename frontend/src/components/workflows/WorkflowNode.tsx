@@ -90,6 +90,7 @@ function iconFor(d: WorkflowNodeData) {
   if (key === "circle-stop") return <Ic.CircleStop size={13} />;
   if (key === "zap") return <Ic.Zap size={13} />;
   if (key === "play") return <Ic.Play size={13} />;
+  if (key === "workflow") return <Ic.Workflow size={13} />;
 
   if (d.kind === "Trigger") return <Ic.Zap size={13} />;
   if (d.kind === "Terminal") return <Ic.CircleStop size={13} />;
