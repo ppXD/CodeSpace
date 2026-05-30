@@ -199,6 +199,35 @@ public class StuckRunReconcilerFlowTests
             "the abandoned Running row must have been marked Failure");
     }
 
+    [Fact]
+    public async Task Suspended_run_is_never_swept_by_the_reconciler()
+    {
+        // Engine v2 Phase 1: a run paused on a suspended node sits in Suspended — intentionally
+        // parked (waiting on a timer / approval / callback), NOT stuck. The reconciler's three
+        // sweeps target Pending / Enqueued / Running only, so a Suspended run — even one far
+        // older than the 30-minute abandoned-Running threshold — must survive untouched. Without
+        // this, a workflow waiting on a long sleep or a human approval would be murdered by the
+        // abandoned-Running sweep.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var workflowId = await CreateWorkflowAsync(teamId, userId);
+
+        var runId = await StageStuckRunAsync(
+            workflowId, teamId,
+            status: WorkflowRunStatus.Suspended,
+            createdAgo: StuckRunReconcilerService.RunningStuckAfter + TimeSpan.FromHours(2),
+            startedAtAgo: StuckRunReconcilerService.RunningStuckAfter + TimeSpan.FromHours(2),
+            backdateLastModified: true);
+
+        var summary = await ReconcileAsync();
+
+        summary.MarkedAbandonedFromRunning.ShouldBe(0,
+            "a Suspended run must NOT be counted as an abandoned Running run, however old it is");
+
+        (await ReadStatusAsync(runId)).ShouldBe(WorkflowRunStatus.Suspended,
+            "a Suspended run is intentionally parked and must survive every reconciler sweep — Pending re-dispatch, " +
+            "Enqueued revert, and abandoned-Running marking all skip it because none of those scans match Suspended");
+    }
+
     // ─── Helpers ──────────────────────────────────────────────────────────────────
 
     private async Task<Guid> CreateWorkflowAsync(Guid teamId, Guid userId)
