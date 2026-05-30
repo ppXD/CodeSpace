@@ -78,25 +78,28 @@ export function WorkflowNode({ data, selected }: NodeProps) {
   );
 }
 
+/** Manifest iconKey → icon. The author's hint wins; misses fall back to Kind, then category. */
+const ICON_BY_KEY: Record<string, typeof Ic.Box> = {
+  "git-pull-request": Ic.PrOpen,
+  "git-commit-horizontal": Ic.Branch,
+  "file-diff": Ic.Branch,
+  "message-square": Ic.Chat,
+  sparkles: Ic.Sparkles,
+  "circle-stop": Ic.CircleStop,
+  zap: Ic.Zap,
+  play: Ic.Play,
+  workflow: Ic.Workflow,
+};
+
 function iconFor(d: WorkflowNodeData) {
-  // Honour the manifest's iconKey hint when present; otherwise infer from typeKey prefix.
-  const key = d.iconKey ?? "";
+  // The manifest's iconKey hint wins; otherwise infer from Kind, then the declared category.
+  const Icon =
+    (d.iconKey ? ICON_BY_KEY[d.iconKey] : undefined)
+    ?? (d.kind === "Trigger" ? Ic.Zap
+      : d.kind === "Terminal" ? Ic.CircleStop
+      : d.category === "AI" ? Ic.Sparkles
+      : d.category === "Git" ? Ic.Branch
+      : Ic.Box);
 
-  if (key === "git-pull-request") return <Ic.PrOpen size={13} />;
-  if (key === "git-commit-horizontal") return <Ic.Branch size={13} />;
-  if (key === "file-diff") return <Ic.Branch size={13} />;
-  if (key === "message-square") return <Ic.Chat size={13} />;
-  if (key === "sparkles") return <Ic.Sparkles size={13} />;
-  if (key === "circle-stop") return <Ic.CircleStop size={13} />;
-  if (key === "zap") return <Ic.Zap size={13} />;
-  if (key === "play") return <Ic.Play size={13} />;
-  if (key === "workflow") return <Ic.Workflow size={13} />;
-
-  if (d.kind === "Trigger") return <Ic.Zap size={13} />;
-  if (d.kind === "Terminal") return <Ic.CircleStop size={13} />;
-  // Category-based fallback — the manifest's declared category is the source of truth.
-  if (d.category === "AI") return <Ic.Sparkles size={13} />;
-  if (d.category === "Git") return <Ic.Branch size={13} />;
-
-  return <Ic.Box size={13} />;
+  return <Icon size={13} />;
 }

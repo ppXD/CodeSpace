@@ -129,8 +129,12 @@ export function RunDetailView({ runId, nested = false, depth = 0, onOpenRun }: {
                 )}
                 {/* The child run for a sub-workflow step — a peer disclosure of Inputs/Outputs (same
                     marker + indent), collapsed by default so N steps cost no extra polling until
-                    expanded; the embedded view brings its own resume affordance. */}
-                {n.childRunId && <SubworkflowRunDisclosure childRunId={n.childRunId} depth={depth} onOpenRun={onOpenRun} />}
+                    expanded; the embedded view brings its own resume affordance. Suppressed for the
+                    node the run is *currently* suspended on: the SuspendedPanel above already embeds
+                    that same child (open), so showing it here too would double up + double-poll. */}
+                {n.childRunId && n.childRunId !== r.pendingWait?.token && (
+                  <SubworkflowRunDisclosure childRunId={n.childRunId} depth={depth} onOpenRun={onOpenRun} />
+                )}
                 {!n.error && !hasContent(n.inputs) && !hasContent(n.outputs) && !n.childRunId && (
                   <div className="wf-run-node-none">No inputs or outputs recorded.</div>
                 )}

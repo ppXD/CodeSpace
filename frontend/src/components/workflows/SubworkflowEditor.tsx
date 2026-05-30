@@ -40,7 +40,7 @@ export function SubworkflowEditor({ config, inputs, onConfigChange, onInputsChan
   );
 
   const childInputs = useMemo(
-    () => (child.data?.definition.inputs ?? []) as WorkflowVariable[],
+    () => child.data?.definition.inputs ?? [],
     [child.data],
   );
 

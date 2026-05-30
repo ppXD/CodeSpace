@@ -171,7 +171,7 @@ export interface WorkflowRunNodeSummary {
 /** The outstanding wait a Suspended run is parked on — drives the resume affordance. */
 export interface WorkflowRunWaitInfo {
   nodeId: string;
-  /** "Timer" | "Approval" | "Callback". */
+  /** "Timer" | "Approval" | "Callback" | "Subworkflow". */
   kind: string;
   /** Correlation token — for a Callback wait, the secret the callback URL is built from. */
   token: string;
