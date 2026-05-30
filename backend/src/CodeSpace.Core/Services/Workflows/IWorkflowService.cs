@@ -35,6 +35,15 @@ public interface IWorkflowService
     Task<IReadOnlyList<WorkflowRunSummary>> ListRunsAsync(Guid workflowId, Guid teamId, int limit, CancellationToken cancellationToken);
     Task<WorkflowRunDetail?> GetRunAsync(Guid runId, Guid teamId, CancellationToken cancellationToken);
 
+    /// <summary>
+    /// Resolve a pending <c>Approval</c> wait on a Suspended run with a human decision
+    /// (approved + optional comment) and resume it. Tenancy: the run's workflow must belong to
+    /// the caller's team (<see cref="KeyNotFoundException"/> conflated with not-yours). Returns
+    /// false when the run has no pending approval wait — already resolved, not suspended, or
+    /// parked on a different signal (timer / callback).
+    /// </summary>
+    Task<bool> ApproveRunAsync(Guid runId, Guid teamId, Guid actorUserId, bool approved, string? comment, CancellationToken cancellationToken);
+
     IReadOnlyList<NodeManifestDto> ListNodeManifests();
 
     /// <summary>

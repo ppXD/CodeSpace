@@ -98,6 +98,18 @@ public class WorkflowsController : ControllerBase
         return Ok(new { runId = newRunId });
     }
 
+    /// <summary>
+    /// Resolve a pending approval on a Suspended run with a human decision (approve / reject +
+    /// optional comment) and resume it. Returns <c>{ resumed }</c> — false when the run has no
+    /// pending approval wait.
+    /// </summary>
+    [HttpPost("runs/{runId:guid}/resume")]
+    public async Task<IActionResult> Resume([FromRoute] Guid runId, [FromBody] ResumeRunCommand command, CancellationToken cancellationToken)
+    {
+        var resumed = await _mediator.Send(command with { RunId = runId }, cancellationToken).ConfigureAwait(false);
+        return Ok(new { resumed });
+    }
+
     /// <summary>Editor palette: every loaded node type's manifest + JSON schemas.</summary>
     [HttpGet("node-manifests")]
     public async Task<IActionResult> ListNodeManifests([FromQuery] ListNodeManifestsQuery query, CancellationToken cancellationToken)

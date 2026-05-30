@@ -30,9 +30,10 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
     private readonly Lifecycle.IRunRecordLogger _recordLogger;
     private readonly IRunStarter _runStarter;
     private readonly IWorkflowRunDispatcher _runDispatcher;
+    private readonly Engine.IWorkflowResumeService _resumeService;
     private readonly ILogger<WorkflowService> _logger;
 
-    public WorkflowService(CodeSpaceDbContext db, DefinitionValidator validator, INodeRegistry nodeRegistry, Lifecycle.IRunRecordLogger recordLogger, IRunStarter runStarter, IWorkflowRunDispatcher runDispatcher, ILogger<WorkflowService> logger)
+    public WorkflowService(CodeSpaceDbContext db, DefinitionValidator validator, INodeRegistry nodeRegistry, Lifecycle.IRunRecordLogger recordLogger, IRunStarter runStarter, IWorkflowRunDispatcher runDispatcher, Engine.IWorkflowResumeService resumeService, ILogger<WorkflowService> logger)
     {
         _db = db;
         _validator = validator;
@@ -40,6 +41,7 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
         _recordLogger = recordLogger;
         _runStarter = runStarter;
         _runDispatcher = runDispatcher;
+        _resumeService = resumeService;
         _logger = logger;
     }
 
@@ -322,6 +324,38 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
             originalRunId, replayRunId, original.WorkflowId, teamId, originalSnapshot.Count);
 
         return replayRunId;
+    }
+
+    public async Task<bool> ApproveRunAsync(Guid runId, Guid teamId, Guid actorUserId, bool approved, string? comment, CancellationToken cancellationToken)
+    {
+        // Tenancy — the run's workflow must belong to the caller's team (404 conflated with not-yours).
+        var exists = await _db.WorkflowRun
+            .AnyAsync(r => r.Id == runId && r.Workflow.TeamId == teamId, cancellationToken).ConfigureAwait(false);
+        if (!exists) throw new KeyNotFoundException($"WorkflowRun {runId} not found in team {teamId}.");
+
+        // Only act when an Approval wait is actually pending. Approving a run parked on a timer /
+        // callback, or one that isn't suspended, is a no-op (the resume CAS would also reject it).
+        var hasApprovalWait = await _db.WorkflowRunWait
+            .AnyAsync(w => w.RunId == runId && w.Status == WorkflowWaitStatuses.Pending && w.WaitKind == WorkflowWaitKinds.Approval, cancellationToken)
+            .ConfigureAwait(false);
+
+        if (!hasApprovalWait) return false;
+
+        var payload = JsonSerializer.Serialize(new
+        {
+            approved,
+            comment = comment ?? string.Empty,
+            by = actorUserId.ToString(),
+            resumed_at = DateTimeOffset.UtcNow.ToString("o"),
+        });
+
+        var resumed = await _resumeService.ResumeAsync(runId, payload, cancellationToken).ConfigureAwait(false);
+
+        _logger.LogInformation(
+            "Run approval. RunId={RunId} TeamId={TeamId} Approved={Approved} By={Actor} Resumed={Resumed}",
+            runId, teamId, approved, actorUserId, resumed);
+
+        return resumed;
     }
 
     public async Task<IReadOnlyList<WorkflowRunSummary>> ListRunsAsync(Guid workflowId, Guid teamId, int limit, CancellationToken cancellationToken)
