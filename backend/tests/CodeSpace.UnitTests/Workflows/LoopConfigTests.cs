@@ -84,4 +84,48 @@ public class LoopConfigTests
         withVar!.LoopVariables[0].Update.ShouldBeNull();
         withVar.LoopVariables[0].Value!.Value.GetInt32().ShouldBe(0);
     }
+
+    [Fact]
+    public void Parses_a_complex_config_exercising_every_feature_at_once()
+    {
+        // A maximal config: a ref var, a numeric constant var, a var with a per-iteration update;
+        // OR-logic termination mixing a binary (eq) and a unary (is_not_empty) condition; a
+        // non-default cap. This is the "complex combination" the engine must round-trip faithfully.
+        const string json = """
+            {
+              "loopVariables": [
+                { "name": "cursor",  "type": "String", "ref": "{{input.start}}" },
+                { "name": "count",   "type": "Number", "value": 0 },
+                { "name": "history", "type": "String", "value": "", "update": "{{nodes.llm.outputs.text}}" }
+              ],
+              "termination": {
+                "logic": "or",
+                "conditions": [
+                  { "ref": "{{loop.count}}", "op": "eq", "value": "5" },
+                  { "ref": "{{nodes.llm.outputs.done}}", "op": "is_not_empty" }
+                ]
+              },
+              "maxIterations": 50
+            }
+            """;
+
+        var config = JsonSerializer.Deserialize<LoopConfig>(json, Options);
+
+        config.ShouldNotBeNull();
+        config!.MaxIterations.ShouldBe(50);
+        config.LoopVariables.Count.ShouldBe(3);
+
+        config.LoopVariables[0].Ref.ShouldBe("{{input.start}}");
+        config.LoopVariables[1].Type.ShouldBe("Number");
+        config.LoopVariables[1].Value!.Value.GetInt32().ShouldBe(0);
+        config.LoopVariables[2].Update.ShouldBe("{{nodes.llm.outputs.text}}");
+
+        config.Termination!.Logic.ShouldBe("or");
+        config.Termination.Conditions.Count.ShouldBe(2);
+        config.Termination.Conditions[0].Op.ShouldBe("eq");
+        config.Termination.Conditions[0].Value.ShouldBe("5");
+        // The unary condition carries no value.
+        config.Termination.Conditions[1].Op.ShouldBe("is_not_empty");
+        config.Termination.Conditions[1].Value.ShouldBeNull();
+    }
 }

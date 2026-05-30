@@ -101,10 +101,39 @@ public class ConditionEvaluatorTests
     [InlineData("\"x\"", "is_empty", null, false)]
     [InlineData("\"x\"", "is_not_empty", null, true)]
     [InlineData("\"anything\"", "no_such_op", "x", false)] // unknown operator fails closed
+    // Case-insensitive string ops (matters for LLM output matching).
+    [InlineData("\"reasoning DONE here\"", "contains", "done", true)]
+    [InlineData("\"SHIP IT\"", "startsWith", "ship", true)]
+    [InlineData("\"SHIP IT\"", "endsWith", "It", true)]
+    [InlineData("\"Ready\"", "eq", "ready", false)] // eq stays case-SENSITIVE (ordinal)
+    // Non-string lefts get stringified before string ops.
+    [InlineData("42", "contains", "4", true)]
+    [InlineData("42", "startsWith", "4", true)]
+    [InlineData("true", "eq", "true", true)]
+    [InlineData("3.5", "eq", "3.5", true)]
+    // contains/startsWith with an empty needle is vacuously true (String.Contains("") == true).
+    [InlineData("\"x\"", "contains", "", true)]
+    [InlineData("\"x\"", "contains", null, true)]
     public void CompareValues_maps_each_operator(string leftJson, string op, string? right, bool expected)
     {
         var left = JsonDocument.Parse(leftJson).RootElement;
         ConditionEvaluator.CompareValues(op, left, right).ShouldBe(expected);
+    }
+
+    [Fact]
+    public void CompareValues_emptiness_works_for_strings_arrays_and_objects()
+    {
+        // is_empty / is_not_empty must reflect structural emptiness for every JSON kind a loop
+        // variable or body output can take, not just strings.
+        ConditionEvaluator.CompareValues("is_empty", JsonDocument.Parse("\"\"").RootElement, null).ShouldBeTrue();
+        ConditionEvaluator.CompareValues("is_empty", JsonDocument.Parse("[]").RootElement, null).ShouldBeTrue();
+        ConditionEvaluator.CompareValues("is_empty", JsonDocument.Parse("{}").RootElement, null).ShouldBeTrue();
+
+        ConditionEvaluator.CompareValues("is_not_empty", JsonDocument.Parse("[1,2]").RootElement, null).ShouldBeTrue();
+        ConditionEvaluator.CompareValues("is_not_empty", JsonDocument.Parse("\"x\"").RootElement, null).ShouldBeTrue();
+        // A number/bool isn't a "container" — neither empty nor meaningfully not-empty by length;
+        // pin the actual behaviour so a future refactor can't silently flip it.
+        ConditionEvaluator.CompareValues("is_empty", JsonDocument.Parse("0").RootElement, null).ShouldBeFalse();
     }
 
     [Fact]

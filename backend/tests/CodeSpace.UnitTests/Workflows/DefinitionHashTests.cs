@@ -275,6 +275,37 @@ public class DefinitionHashTests
     }
 
     [Fact]
+    public void Node_parent_id_affects_hash_but_a_null_is_omitted()
+    {
+        // ParentId is semantic: a node placed inside a loop body is a structurally DIFFERENT
+        // workflow from the same node at top level, so it must bump the hash. A null ParentId
+        // (every top-level node's default) is omitted from the canonical JSON, so a definition
+        // authored before the field existed hashes byte-identically to one that sets it null.
+        var baseline = MinimalDef();
+
+        var explicitNull = baseline with
+        {
+            Nodes = new[] { baseline.Nodes[0], baseline.Nodes[1] with { ParentId = null } }
+        };
+        DefinitionHash.Compute(explicitNull).ShouldBe(DefinitionHash.Compute(baseline),
+            "an explicit null ParentId is omitted from the hash — identical to no ParentId at all");
+
+        var inLoop = baseline with
+        {
+            Nodes = new[] { baseline.Nodes[0], baseline.Nodes[1] with { ParentId = "loop1" } }
+        };
+        DefinitionHash.Compute(inLoop).ShouldNotBe(DefinitionHash.Compute(baseline),
+            "placing a node inside a loop body is a semantic change — it must bump the hash");
+
+        var inOtherLoop = baseline with
+        {
+            Nodes = new[] { baseline.Nodes[0], baseline.Nodes[1] with { ParentId = "loop2" } }
+        };
+        DefinitionHash.Compute(inLoop).ShouldNotBe(DefinitionHash.Compute(inOtherLoop),
+            "a node under a different container is a different graph — different hash");
+    }
+
+    [Fact]
     public void Same_node_config_property_order_yields_same_hash()
     {
         // Within a single node's Config JSON, property order MUST NOT matter. The canonical
