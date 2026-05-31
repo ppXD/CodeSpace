@@ -1,10 +1,11 @@
-import { useContext } from "react";
-import { Handle, NodeResizer, Position, type NodeProps } from "@xyflow/react";
+import { useCallback, useContext } from "react";
+import { Handle, NodeResizer, Position, useStore, type NodeProps, type ReactFlowState } from "@xyflow/react";
 
 import { Ic } from "@/_imported/ai-code-space/icons";
 import type { NodeKind } from "@/api/workflows";
 import { ERROR_HANDLE } from "@/lib/workflowErrorRoute";
 
+import { loopMinSize } from "./loopResize";
 import { NodeAddContext, type NodeAddRequest } from "./nodeAddContext";
 
 /**
@@ -57,35 +58,62 @@ export interface WorkflowNodeData extends Record<string, unknown> {
   size?: { width: number; height: number };
 }
 
-export function WorkflowNode({ data, selected }: NodeProps) {
+/**
+ * The loop's NodeResizer minimum size, derived from the LIVE React Flow store: the bounding box of the
+ * loop's body nodes (loopMinSize) — recomputed as body nodes are added / moved / resized, so a
+ * corner-drag can shrink the box only down to the items inside it, never clipping past their borders.
+ */
+function useLoopMinSize(loopId: string) {
+  return useStore(
+    useCallback(
+      (s: ReactFlowState) => loopMinSize([...s.nodeLookup.values()].filter((n) => n.parentId === loopId)),
+      [loopId],
+    ),
+    (a, b) => a.minWidth === b.minWidth && a.minHeight === b.minHeight,
+  );
+}
+
+/**
+ * A loop container: the React Flow node's style sets its size and its body subgraph (child nodes with
+ * parentId === this loop) renders INSIDE via React Flow's parent/child positioning. We draw only the
+ * frame + header so the body shows through. Handles carry the run into/out of the whole loop and route
+ * a loop failure onward (its own `error` edge). Corner-drag resizes the box; the resizer's minimum is
+ * the body's bounding box (useLoopMinSize), so it can't shrink past the items inside.
+ *
+ * Split into its own component so the store subscription (useLoopMinSize) mounts only for loop nodes,
+ * not for every node on the canvas.
+ */
+function LoopContainerNode({ id, d, selected }: { id: string; d: WorkflowNodeData; selected: boolean | undefined }) {
+  const { minWidth, minHeight } = useLoopMinSize(id);
+  const onAddFrom = useContext(NodeAddContext);
+  return (
+    <div className="wf-rf-loop" data-selected={selected}>
+      {/* Drag a corner/edge to resize. Min size = the body's bounding box, so the box never shrinks
+          past its items; the new size is persisted to the definition via the editor's onNodesChange. */}
+      <NodeResizer isVisible={selected} minWidth={minWidth} minHeight={minHeight} lineClassName="wf-rf-resize-line" handleClassName="wf-rf-resize-handle" />
+      <Handle type="target" position={Position.Left} className="wf-rf-handle" />
+      <div className="wf-rf-loop-head">
+        <span className="wf-rf-loop-icon">{iconFor(d)}</span>
+        <span className="wf-rf-loop-id">{d.nodeId}</span>
+        <span className="wf-rf-loop-type">{d.label ?? d.displayName}</span>
+      </div>
+      <Handle type="source" position={Position.Right} className="wf-rf-handle" />
+      <Handle id={ERROR_HANDLE} type="source" position={Position.Bottom} className="wf-rf-handle wf-rf-handle-error" title="On error → connect to a handler node" />
+      {onAddFrom && <AddNodeButton nodeId={d.nodeId} onAddFrom={onAddFrom} />}
+    </div>
+  );
+}
+
+export function WorkflowNode({ id, data, selected }: NodeProps) {
   const d = data as WorkflowNodeData;
   const fields = d.inputFields ?? [];
   // null outside the editor (no provider) → no "+" button. A Terminal has no output, so never add from it.
   const onAddFrom = useContext(NodeAddContext);
   const showAdd = d.kind !== "Terminal";
 
-  // A loop container: the React Flow node's style sets its size and its body subgraph (child nodes
-  // with parentId === this loop) renders INSIDE via React Flow's parent/child positioning. We draw
-  // only the frame + header so the body shows through. Handles carry the run into/out of the whole
-  // loop and route a loop failure onward (its own `error` edge).
-  if (d.kind === "Loop") {
-    return (
-      <div className="wf-rf-loop" data-selected={selected}>
-        {/* Drag any corner/edge to resize the loop box. Shown when the loop is selected; the new size
-            is persisted to the definition (overriding auto-fit) via the editor's onNodesChange. */}
-        <NodeResizer isVisible={selected} minWidth={320} minHeight={160} lineClassName="wf-rf-resize-line" handleClassName="wf-rf-resize-handle" />
-        <Handle type="target" position={Position.Left} className="wf-rf-handle" />
-        <div className="wf-rf-loop-head">
-          <span className="wf-rf-loop-icon">{iconFor(d)}</span>
-          <span className="wf-rf-loop-id">{d.nodeId}</span>
-          <span className="wf-rf-loop-type">{d.label ?? d.displayName}</span>
-        </div>
-        <Handle type="source" position={Position.Right} className="wf-rf-handle" />
-        <Handle id={ERROR_HANDLE} type="source" position={Position.Bottom} className="wf-rf-handle wf-rf-handle-error" title="On error → connect to a handler node" />
-        {showAdd && onAddFrom && <AddNodeButton nodeId={d.nodeId} onAddFrom={onAddFrom} />}
-      </div>
-    );
-  }
+  // A loop container draws only its frame + header; its body renders inside. It's its own component so
+  // the store subscription it needs (for the resize-min) doesn't run for every node.
+  if (d.kind === "Loop") return <LoopContainerNode id={id} d={d} selected={selected} />;
 
   // The loop body's entry marker (flow.loop_start) is source-only: the engine seeds it at the start
   // of every iteration, so it can't have an incoming edge, and a passthrough never fails, so it must
