@@ -19,9 +19,10 @@ namespace CodeSpace.IntegrationTests.Workflows;
 /// owns a body subgraph (nodes whose ParentId is the loop, rooted at a flow.loop_start) and re-runs
 /// it once per iteration until a termination condition is met or the iteration cap is hit; loop
 /// variables thread state across passes. Pins: condition-met exit + variable threading + the seen
-/// sequence; the max-iterations cap; a body failure (no error edge) failing the loop; an error edge
-/// INSIDE the body being handled; and a suspending body node being refused with a clear message.
-/// Each pass persists its body nodes under iteration key "&lt;loopId&gt;#&lt;i&gt;".
+/// sequence; the max-iterations cap; a body failure (no error edge) failing the loop under the default
+/// terminate policy; continue-on-error keeping the loop alive (all-fail and partial-fail-then-terminate);
+/// an error edge INSIDE the body being handled; and a suspending body node being refused with a clear
+/// message. Each pass persists its body nodes under iteration key "&lt;loopId&gt;#&lt;i&gt;".
 /// </summary>
 [Collection(PostgresCollection.Name)]
 [Trait("Category", "Integration")]
@@ -129,6 +130,62 @@ public class LoopFlowTests
     }
 
     [Fact]
+    public async Task Continue_on_error_keeps_the_loop_alive_when_every_pass_fails()
+    {
+        // errorHandling:"continue" — boom fails every pass (failTimes huge), but instead of sinking the
+        // loop, each failed pass is skipped and the loop runs the full cap, succeeding overall.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var workflowId = await CreateWorkflowAsync(teamId, userId,
+            FailingBodyDefinition(Guid.NewGuid().ToString("N"), withErrorBranch: false, errorHandling: "continue", failTimes: 99, maxIterations: 3, terminateAtIndex: "99"));
+        var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
+
+        await RunEngineAsync(runId);
+
+        using var verify = _fixture.BeginScope();
+        var db = verify.Resolve<CodeSpaceDbContext>();
+
+        (await db.WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == runId)).Status
+            .ShouldBe(WorkflowRunStatus.Success, "continue-on-error: an unhandled body failure no longer sinks the loop");
+
+        var loop = await LoopNodeAsync(db, runId);
+        loop.Status.ShouldBe(NodeStatus.Success);
+
+        var outputs = JsonDocument.Parse(loop.OutputsJson).RootElement;
+        outputs.GetProperty("iterations").GetInt32().ShouldBe(3, "ran the full cap — no pass ever succeeded to meet a condition");
+        outputs.GetProperty("failedIterations").GetInt32().ShouldBe(3, "every pass failed and was skipped");
+        outputs.GetProperty("terminationReason").GetString().ShouldBe("maxIterations");
+
+        // Each pass still recorded its body failure under its own iteration key — observability is intact.
+        var boomFailures = await db.WorkflowRunNode.AsNoTracking()
+            .Where(n => n.RunId == runId && n.NodeId == "boom" && n.Status == NodeStatus.Failure)
+            .Select(n => n.IterationKey).ToListAsync();
+        boomFailures.OrderBy(k => k).ShouldBe(new[] { "loop#0", "loop#1", "loop#2" });
+    }
+
+    [Fact]
+    public async Task Continue_on_error_skips_a_failed_pass_then_a_later_passing_one_can_terminate()
+    {
+        // boom fails the FIRST pass then succeeds; terminate when loop.index == 1. Proves a failed pass
+        // does NOT get to satisfy termination (it's skipped), but the next, passing one does.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var workflowId = await CreateWorkflowAsync(teamId, userId,
+            FailingBodyDefinition(Guid.NewGuid().ToString("N"), withErrorBranch: false, errorHandling: "continue", failTimes: 1, maxIterations: 5, terminateAtIndex: "1"));
+        var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
+
+        await RunEngineAsync(runId);
+
+        using var verify = _fixture.BeginScope();
+        var db = verify.Resolve<CodeSpaceDbContext>();
+
+        (await db.WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == runId)).Status.ShouldBe(WorkflowRunStatus.Success);
+
+        var outputs = JsonDocument.Parse((await LoopNodeAsync(db, runId)).OutputsJson).RootElement;
+        outputs.GetProperty("iterations").GetInt32().ShouldBe(2, "pass#0 failed (skipped), pass#1 succeeded and met index==1");
+        outputs.GetProperty("failedIterations").GetInt32().ShouldBe(1);
+        outputs.GetProperty("terminationReason").GetString().ShouldBe("condition");
+    }
+
+    [Fact]
     public async Task Suspending_node_in_a_loop_body_fails_with_a_clear_message()
     {
         // Durable suspend-in-loop is a follow-up; for now a suspending body node must fail loudly,
@@ -210,17 +267,23 @@ public class LoopFlowTests
         };
     }
 
-    // manual → loop(body: loop_start → boom[always fails]; optionally boom =(error)=> caught) → terminal.
-    private static WorkflowDefinition FailingBodyDefinition(string flakyKey, bool withErrorBranch)
+    // manual → loop(body: loop_start → boom[fails `failTimes` times]; optionally boom =(error)=> caught) → terminal.
+    // errorHandling: null/"terminate" (default) ⇒ a body failure fails the loop; "continue" ⇒ it skips the pass.
+    private static WorkflowDefinition FailingBodyDefinition(string flakyKey, bool withErrorBranch, string? errorHandling = null, int failTimes = 99, int maxIterations = 3, string terminateAtIndex = "0")
     {
+        // Plain raw string + Replace keeps the literal {{loop.index}} template intact (a $-string would mis-read it).
+        var ehLine = errorHandling != null ? $"\"errorHandling\": \"{errorHandling}\"," : "";
+        var loopConfig = """
+            { __EH__ "termination": { "conditions": [ { "ref": "{{loop.index}}", "op": "eq", "value": "__IDX__" } ] }, "maxIterations": __MAX__ }
+            """.Replace("__EH__", ehLine).Replace("__IDX__", terminateAtIndex).Replace("__MAX__", maxIterations.ToString());
+
         var nodes = new List<NodeDefinition>
         {
             new() { Id = "start", TypeKey = "trigger.manual", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
-            new() { Id = "loop", TypeKey = "flow.loop", Inputs = WorkflowsTestSeed.EmptyJson(),
-                    Config = WorkflowsTestSeed.Json("""{ "termination": { "conditions": [ { "ref": "{{loop.index}}", "op": "eq", "value": "0" } ] }, "maxIterations": 3 }""") },
+            new() { Id = "loop", TypeKey = "flow.loop", Inputs = WorkflowsTestSeed.EmptyJson(), Config = WorkflowsTestSeed.Json(loopConfig) },
             new() { Id = "ls", TypeKey = "flow.loop_start", ParentId = "loop", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
             new() { Id = "boom", TypeKey = FlakyTestNode.Key, ParentId = "loop",
-                    Config = WorkflowsTestSeed.Json($$"""{ "key": "{{flakyKey}}", "failTimes": 99 }"""), Inputs = WorkflowsTestSeed.EmptyJson() },
+                    Config = WorkflowsTestSeed.Json($$"""{ "key": "{{flakyKey}}", "failTimes": {{failTimes}} }"""), Inputs = WorkflowsTestSeed.EmptyJson() },
             new() { Id = "end", TypeKey = "builtin.terminal", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
         };
 

@@ -47,6 +47,7 @@ export function LoopEditor({ config, onConfigChange, suggestions }: LoopEditorPr
   const conditions: LoopCondition[] = Array.isArray(termination.conditions) ? termination.conditions : [];
   const logic = termination.logic === "or" ? "or" : "and";
   const maxIterations = typeof config.maxIterations === "number" ? config.maxIterations : 10;
+  const errorHandling = config.errorHandling === "continue" ? "continue" : "terminate";
 
   const setVariables = (next: LoopVariable[]) => onConfigChange({ ...config, loopVariables: next });
   const setTermination = (next: LoopTermination) => onConfigChange({ ...config, termination: next });
@@ -172,6 +173,24 @@ export function LoopEditor({ config, onConfigChange, suggestions }: LoopEditorPr
           />
         </div>
         <p className="wf-retry-hint">Hard safety cap — the loop never runs more than this many passes (engine ceiling 1000).</p>
+      </section>
+
+      {/* ── Error handling ───────────────────────────────────────────────── */}
+      <section className="wf-inspector-section">
+        <div className="wf-inspector-section-h">Error handling</div>
+        <select
+          className="wf-form-input"
+          value={errorHandling}
+          onChange={(e) => onConfigChange({ ...config, errorHandling: e.target.value })}
+        >
+          <option value="terminate">Terminate on error (default)</option>
+          <option value="continue">Continue on error</option>
+        </select>
+        <p className="wf-retry-hint">
+          {errorHandling === "continue"
+            ? "A failing pass (with no error route of its own) is skipped — the loop keeps going and reports how many iterations failed."
+            : "Any body-node failure without its own error route fails the whole loop."}
+        </p>
       </section>
     </>
   );
