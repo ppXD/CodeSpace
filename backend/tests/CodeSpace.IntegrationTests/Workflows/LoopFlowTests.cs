@@ -358,10 +358,173 @@ public class LoopFlowTests
         approvedKeys.OrderBy(k => k).ShouldBe(new[] { "outer#0/inner#0", "outer#0/inner#1" });
     }
 
+    [Fact]
+    public async Task A_loop_body_fans_out_into_concurrent_branches_within_an_iteration()
+    {
+        // The body subgraph itself fans out: loop_start → {pa, pb}. Within one iteration those two run
+        // as a parallel wave (Phase 4 extended into the loop body). The barrier only releases if both
+        // were in-flight at once — a sequential body would deadlock on it — so AllArrived is hard proof
+        // the body parallelised.
+        var gate = "gate-" + Guid.NewGuid().ToString("N");
+        ConcurrencyProbeNode.Arm(gate, 2);
+
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var workflowId = await CreateWorkflowAsync(teamId, userId, ParallelBodyLoopDefinition(gate));
+        var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
+
+        await RunEngineAsync(runId);
+
+        ConcurrencyProbeNode.AllArrived(gate).ShouldBeTrue("both body branches were in-flight together within the iteration");
+        ConcurrencyProbeNode.Peak(gate).ShouldBe(2);
+
+        using var verify = _fixture.BeginScope();
+        var db = verify.Resolve<CodeSpaceDbContext>();
+        (await db.WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == runId)).Status.ShouldBe(WorkflowRunStatus.Success);
+        JsonDocument.Parse((await LoopNodeAsync(db, runId)).OutputsJson).RootElement.GetProperty("iterations").GetInt32().ShouldBe(1);
+        foreach (var p in new[] { "pa", "pb" })
+            (await db.WorkflowRunNode.AsNoTracking().SingleAsync(n => n.RunId == runId && n.NodeId == p && n.IterationKey == "loop#0")).Status.ShouldBe(NodeStatus.Success);
+    }
+
+    [Fact]
+    public async Task A_suspend_in_a_parallel_loop_body_parks_then_resume_re_runs_only_the_suspended_branch()
+    {
+        // Durability × parallelism INSIDE a loop body: body fans out loop_start → {appr(approval), sib}.
+        // sib completes in the wave while appr suspends; the run parks. On resume the loop rehydrates
+        // pass 0 and re-runs ONLY appr — sib keeps exactly one node.started under "loop#0".
+        var sibKey = "sib-" + Guid.NewGuid().ToString("N");
+        LoopProbeNode.Reset(sibKey);
+
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var workflowId = await CreateWorkflowAsync(teamId, userId, SuspendingParallelBodyLoopDefinition(sibKey));
+        var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
+
+        await RunEngineAsync(runId);
+
+        using (var parked = _fixture.BeginScope())
+        {
+            var db = parked.Resolve<CodeSpaceDbContext>();
+            (await db.WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == runId)).Status.ShouldBe(WorkflowRunStatus.Suspended);
+            (await db.WorkflowRunNode.AsNoTracking().SingleAsync(n => n.RunId == runId && n.NodeId == "sib" && n.IterationKey == "loop#0")).Status.ShouldBe(NodeStatus.Success);
+            (await StartedCountAsync(db, runId, "sib", "loop#0")).ShouldBe(1, "sib ran once in the parallel body wave before the suspend");
+        }
+
+        (await ApproveAsync(runId, teamId, userId)).ShouldBeTrue();
+        await RunEngineAsync(runId);
+
+        using var done = _fixture.BeginScope();
+        var fdb = done.Resolve<CodeSpaceDbContext>();
+        (await fdb.WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == runId)).Status.ShouldBe(WorkflowRunStatus.Success);
+        (await fdb.WorkflowRunNode.AsNoTracking().SingleAsync(n => n.RunId == runId && n.NodeId == "appr" && n.IterationKey == "loop#0")).Status.ShouldBe(NodeStatus.Success);
+        (await StartedCountAsync(fdb, runId, "sib", "loop#0")).ShouldBe(1, "the completed body sibling was NOT re-run on resume");
+    }
+
+    [Fact]
+    public async Task Continue_on_error_with_a_parallel_body_abandons_the_failed_pass_and_the_loop_survives()
+    {
+        // continue-on-error through the parallel body: body fans out loop_start → {boom(always fails),
+        // sib}. Each pass runs both concurrently; boom's unhandled failure abandons the rest of the
+        // pass, the loop counts it as failed and moves on — surviving all passes. sib still ran each pass.
+        var sibKey = "sib-" + Guid.NewGuid().ToString("N");
+        LoopProbeNode.Reset(sibKey);
+        var boomKey = "boom-" + Guid.NewGuid().ToString("N");
+
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var workflowId = await CreateWorkflowAsync(teamId, userId, ContinueParallelBodyLoopDefinition(sibKey, boomKey));
+        var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
+
+        await RunEngineAsync(runId);
+
+        using var verify = _fixture.BeginScope();
+        var db = verify.Resolve<CodeSpaceDbContext>();
+        (await db.WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == runId)).Status
+            .ShouldBe(WorkflowRunStatus.Success, "continue-on-error keeps the loop alive even though every parallel pass had a failing branch");
+        var outputs = JsonDocument.Parse((await LoopNodeAsync(db, runId)).OutputsJson).RootElement;
+        outputs.GetProperty("iterations").GetInt32().ShouldBe(2);
+        outputs.GetProperty("failedIterations").GetInt32().ShouldBe(2, "both passes had an unhandled failing branch under continue");
+        LoopProbeNode.SeenFor(sibKey).Count.ShouldBe(2, "the parallel sibling ran in both passes despite the failing branch");
+    }
+
     // ─── Helpers ────────────────────────────────────────────────────────────────
 
     private static async Task<Core.Persistence.Entities.WorkflowRunNode> LoopNodeAsync(CodeSpaceDbContext db, Guid runId) =>
         await db.WorkflowRunNode.AsNoTracking().SingleAsync(n => n.RunId == runId && n.NodeId == "loop" && n.IterationKey == "");
+
+    private async Task<int> StartedCountAsync(CodeSpaceDbContext db, Guid runId, string nodeId, string iterationKey) =>
+        await db.WorkflowRunRecord.AsNoTracking().CountAsync(r => r.RunId == runId && r.NodeId == nodeId && r.IterationKey == iterationKey && r.RecordType == WorkflowRunRecordTypes.NodeStarted);
+
+    private static JsonElement ProbeInputs(string gate, string party) =>
+        WorkflowsTestSeed.Json("""{ "gate": "__GATE__", "party": "__PARTY__" }""".Replace("__GATE__", gate).Replace("__PARTY__", party));
+
+    private static JsonElement LoopBodyProbeInputs(string key, string value) =>
+        WorkflowsTestSeed.Json("""{ "key": "__KEY__", "value": "__VALUE__" }""".Replace("__KEY__", key).Replace("__VALUE__", value));
+
+    // manual → loop(1 pass; body: loop_start → {pa, pb} both concurrency probes barriered on `gate`) → terminal.
+    private static WorkflowDefinition ParallelBodyLoopDefinition(string gate) => new()
+    {
+        SchemaVersion = 1,
+        Nodes = new List<NodeDefinition>
+        {
+            new() { Id = "start", TypeKey = "trigger.manual", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
+            new() { Id = "loop", TypeKey = "flow.loop", Config = WorkflowsTestSeed.Json("""{ "maxIterations": 1 }"""), Inputs = WorkflowsTestSeed.EmptyJson() },
+            new() { Id = "ls", TypeKey = "flow.loop_start", ParentId = "loop", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
+            new() { Id = "pa", TypeKey = ConcurrencyProbeNode.Key, ParentId = "loop", Config = WorkflowsTestSeed.EmptyJson(), Inputs = ProbeInputs(gate, "pa") },
+            new() { Id = "pb", TypeKey = ConcurrencyProbeNode.Key, ParentId = "loop", Config = WorkflowsTestSeed.EmptyJson(), Inputs = ProbeInputs(gate, "pb") },
+            new() { Id = "end", TypeKey = "builtin.terminal", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
+        },
+        Edges = new List<EdgeDefinition>
+        {
+            new() { From = "start", To = "loop" },
+            new() { From = "loop", To = "end" },
+            new() { From = "ls", To = "pa" },
+            new() { From = "ls", To = "pb" },
+        },
+    };
+
+    // manual → loop(1 pass; body: loop_start → {appr(wait_approval), sib(probe)}) → terminal.
+    private static WorkflowDefinition SuspendingParallelBodyLoopDefinition(string sibKey) => new()
+    {
+        SchemaVersion = 1,
+        Nodes = new List<NodeDefinition>
+        {
+            new() { Id = "start", TypeKey = "trigger.manual", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
+            new() { Id = "loop", TypeKey = "flow.loop", Config = WorkflowsTestSeed.Json("""{ "maxIterations": 1 }"""), Inputs = WorkflowsTestSeed.EmptyJson() },
+            new() { Id = "ls", TypeKey = "flow.loop_start", ParentId = "loop", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
+            new() { Id = "appr", TypeKey = "flow.wait_approval", ParentId = "loop", Config = WorkflowsTestSeed.Json("""{ "prompt": "go?" }"""), Inputs = WorkflowsTestSeed.EmptyJson() },
+            new() { Id = "sib", TypeKey = LoopProbeNode.Key, ParentId = "loop", Config = WorkflowsTestSeed.EmptyJson(), Inputs = LoopBodyProbeInputs(sibKey, "ran") },
+            new() { Id = "end", TypeKey = "builtin.terminal", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
+        },
+        Edges = new List<EdgeDefinition>
+        {
+            new() { From = "start", To = "loop" },
+            new() { From = "loop", To = "end" },
+            new() { From = "ls", To = "appr" },
+            new() { From = "ls", To = "sib" },
+        },
+    };
+
+    // manual → loop(continue, 2 passes; body: loop_start → {boom(always fails), sib(probe)}) → terminal.
+    private static WorkflowDefinition ContinueParallelBodyLoopDefinition(string sibKey, string boomKey) => new()
+    {
+        SchemaVersion = 1,
+        Nodes = new List<NodeDefinition>
+        {
+            new() { Id = "start", TypeKey = "trigger.manual", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
+            new() { Id = "loop", TypeKey = "flow.loop", Inputs = WorkflowsTestSeed.EmptyJson(),
+                    Config = WorkflowsTestSeed.Json("""{ "maxIterations": 2, "errorHandling": "continue" }""") },
+            new() { Id = "ls", TypeKey = "flow.loop_start", ParentId = "loop", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
+            new() { Id = "boom", TypeKey = FlakyTestNode.Key, ParentId = "loop", Inputs = WorkflowsTestSeed.EmptyJson(),
+                    Config = WorkflowsTestSeed.Json("""{ "key": "__KEY__", "failTimes": 99 }""".Replace("__KEY__", boomKey)) },
+            new() { Id = "sib", TypeKey = LoopProbeNode.Key, ParentId = "loop", Config = WorkflowsTestSeed.EmptyJson(), Inputs = LoopBodyProbeInputs(sibKey, "ran") },
+            new() { Id = "end", TypeKey = "builtin.terminal", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
+        },
+        Edges = new List<EdgeDefinition>
+        {
+            new() { From = "start", To = "loop" },
+            new() { From = "loop", To = "end" },
+            new() { From = "ls", To = "boom" },
+            new() { From = "ls", To = "sib" },
+        },
+    };
 
     private async Task<Guid> CreateWorkflowAsync(Guid teamId, Guid userId, WorkflowDefinition definition)
     {
