@@ -883,8 +883,10 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
     /// (max-iterations / wall-clock / total body-node executions) is hit. Each pass persists its body
     /// nodes under iteration key <c>"&lt;loopId&gt;#&lt;i&gt;"</c>; loop variables thread across passes
     /// via their optional update ref. On exit the loop emits <c>{loop vars…, iterations,
-    /// terminationReason}</c>. A body failure with no error edge fails the loop (whose OWN error edge
-    /// can then catch it); a body suspend or nested loop is refused with a clear message (follow-ups).
+    /// failedIterations, terminationReason}</c>. An unhandled body failure (no error edge) is governed
+    /// by the config's <c>errorHandling</c>: <c>terminate</c> (default) fails the loop (whose OWN error
+    /// edge can then catch it); <c>continue</c> skips just that pass and carries on. A body suspend or
+    /// nested loop is refused with a clear message (follow-ups).
     /// </summary>
     private async Task<NodeStatus> ExecuteLoopAsync(WorkflowRun run, WorkflowDefinition definition, NodeDefinition loopNode, NodeRunScope scope, WalkerState state, CancellationToken cancellationToken)
     {
@@ -901,6 +903,7 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
             var loopVars = InitLoopVars(config.LoopVariables, scope);
             var nodeBudget = plan.NodeBudget;
             var iterations = 0;
+            var failures = 0;
             var reason = "maxIterations";
 
             for (var i = 0; i < plan.MaxIterations; i++)
@@ -911,12 +914,23 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
                     throw new NodeFailureException($"Loop '{loopNode.Id}' exceeded its {plan.WallClock.TotalMinutes:0}-minute wall-clock budget after {iterations} iteration(s).");
 
                 var iterScope = BuildLoopScope(scope, scope.Nodes, loopVars, i);
-                nodeBudget -= await RunLoopBodyOnceAsync(run, body, iterScope, $"{loopNode.Id}#{i}", cancellationToken).ConfigureAwait(false);
+                var outcome = await RunLoopBodyOnceAsync(run, body, iterScope, $"{loopNode.Id}#{i}", plan.ErrorHandling, cancellationToken).ConfigureAwait(false);
+                nodeBudget -= outcome.Executed;
 
                 if (nodeBudget < 0)
                     throw new NodeFailureException($"Loop '{loopNode.Id}' exceeded its {plan.NodeBudget}-node execution budget.");
 
                 iterations++;
+
+                // continue-on-error: a failed pass is error-tainted, so we neither thread its loop-var
+                // updates forward nor let it satisfy the termination condition — just count it and move on.
+                // (Terminate mode never reaches here on failure: RunLoopBodyOnceAsync throws instead.)
+                if (outcome.Failed)
+                {
+                    failures++;
+                    continue;
+                }
+
                 loopVars = ApplyLoopVarUpdates(config.LoopVariables, loopVars, iterScope);
 
                 if (IsTerminationMet(config.Termination, BuildLoopScope(scope, iterScope.Nodes, loopVars, i)))
@@ -926,7 +940,7 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
                 }
             }
 
-            var outputs = BuildLoopOutputs(loopVars, iterations, reason);
+            var outputs = BuildLoopOutputs(loopVars, iterations, failures, reason);
             scope.Nodes[loopNode.Id] = outputs;
             await _recordLogger.NodeCompletedAsync(run.Id, loopNode.Id, NoIteration, outputs, null, DateTimeOffset.UtcNow - startedAt, cancellationToken).ConfigureAwait(false);
             return NodeStatus.Success;
@@ -941,13 +955,20 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
         }
     }
 
+    /// <summary>The result of one loop-body pass: how many body nodes ran (for the node budget) and whether the pass failed under continue-on-error.</summary>
+    private readonly record struct LoopBodyOutcome(int Executed, bool Failed);
+
     /// <summary>
     /// Run the loop body subgraph for ONE iteration, reusing the per-node machinery (ShouldSkip /
     /// ExecuteNodeAsync / EnqueueDownstream) with the iteration key set so each pass lands under its
-    /// own ledger rows. Returns the number of body nodes executed (for the loop's node budget). A body
-    /// suspend or nested loop throws — refused until the follow-up PRs.
+    /// own ledger rows. Returns the body nodes executed + whether the pass failed. An unhandled body
+    /// failure (a node that fails with no <c>error</c> edge of its own) is governed by
+    /// <paramref name="errorHandling"/>: <see cref="LoopErrorHandling.Terminate"/> throws (the loop
+    /// fails); <see cref="LoopErrorHandling.Continue"/> abandons the rest of this pass and reports
+    /// <c>Failed</c> so the loop skips to the next iteration. A body suspend or nested loop always
+    /// throws — refused until the follow-up PRs.
     /// </summary>
-    private async Task<int> RunLoopBodyOnceAsync(WorkflowRun run, WorkflowDefinition body, NodeRunScope iterScope, string iterationKey, CancellationToken cancellationToken)
+    private async Task<LoopBodyOutcome> RunLoopBodyOnceAsync(WorkflowRun run, WorkflowDefinition body, NodeRunScope iterScope, string iterationKey, LoopErrorHandling errorHandling, CancellationToken cancellationToken)
     {
         var bodyState = new WalkerState(body);
         EnqueueReadyFrontier(bodyState, body);
@@ -976,8 +997,16 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
             var status = await ExecuteNodeAsync(run, node, iterScope, bodyState, cancellationToken, iterationKey).ConfigureAwait(false);
             bodyState.Statuses[nodeId] = status;
 
+            // A node with its own error edge routes there regardless of the loop's policy (it's
+            // "handled"). An OTHERWISE-unhandled failure: terminate ⇒ fail the loop; continue ⇒
+            // abandon this pass (node.failed is already persisted) and let the loop move on.
             if (status == NodeStatus.Failure && !HasErrorEdge(node, bodyState))
-                throw new NodeFailureException($"Node '{nodeId}' failed.");
+            {
+                if (errorHandling == LoopErrorHandling.Terminate)
+                    throw new NodeFailureException($"Node '{nodeId}' failed.");
+
+                return new LoopBodyOutcome(executed, Failed: true);
+            }
 
             if (status == NodeStatus.Suspended)
                 throw new NodeFailureException($"Node '{nodeId}' suspended inside a loop body — suspending nodes (approval / sleep / callback / sub-workflow) inside a loop aren't supported yet.");
@@ -985,7 +1014,7 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
             EnqueueDownstreamWhenReady(node, bodyState);
         }
 
-        return executed;
+        return new LoopBodyOutcome(executed, Failed: false);
     }
 
     private static readonly IReadOnlyDictionary<string, JsonElement> EmptyJsonBag = new Dictionary<string, JsonElement>();
@@ -1038,11 +1067,12 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
         return termination.Logic.Equals("or", StringComparison.OrdinalIgnoreCase) ? termination.Conditions.Any(Met) : termination.Conditions.All(Met);
     }
 
-    private static IReadOnlyDictionary<string, JsonElement> BuildLoopOutputs(Dictionary<string, JsonElement> loopVars, int iterations, string reason)
+    private static IReadOnlyDictionary<string, JsonElement> BuildLoopOutputs(Dictionary<string, JsonElement> loopVars, int iterations, int failedIterations, string reason)
     {
         var outputs = new Dictionary<string, JsonElement>(loopVars)
         {
             ["iterations"] = JsonSerializer.SerializeToElement(iterations),
+            ["failedIterations"] = JsonSerializer.SerializeToElement(failedIterations),
             ["terminationReason"] = JsonSerializer.SerializeToElement(reason),
         };
         return outputs;

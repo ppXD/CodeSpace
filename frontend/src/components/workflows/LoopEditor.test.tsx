@@ -72,4 +72,14 @@ describe("LoopEditor", () => {
     // Unary op → no value box.
     expect(within(section("Termination condition")).queryByPlaceholderText("value")).toBeNull();
   });
+
+  it("defaults error handling to terminate and switches to continue", () => {
+    render(<Harness initial={{}} />);
+
+    const sel = within(section("Error handling")).getByRole("combobox") as HTMLSelectElement;
+    expect(sel.value).toBe("terminate");
+
+    fireEvent.change(sel, { target: { value: "continue" } });
+    expect((within(section("Error handling")).getByRole("combobox") as HTMLSelectElement).value).toBe("continue");
+  });
 });

@@ -21,7 +21,25 @@ public sealed record LoopConfig
 
     /// <summary>Hard cap on passes — the runaway guard. Engine clamps to <c>[1, MaxIterationsCeiling]</c>. Default 10.</summary>
     public int MaxIterations { get; init; } = 10;
+
+    /// <summary>
+    /// What the loop does when a body node fails and has no <c>error</c> edge of its own. Parsed
+    /// leniently by <c>LoopPlan</c> (unknown/empty ⇒ <see cref="LoopErrorHandling.Terminate"/>, the
+    /// safe default). Values: <c>"terminate"</c> (Dify's "Terminate on error") | <c>"continue"</c>
+    /// (Dify's "Continue on error"). A node that DOES have its own error edge is routed there first,
+    /// regardless of this setting — this only governs an otherwise-unhandled body failure.
+    /// </summary>
+    public string? ErrorHandling { get; init; }
 }
+
+/// <summary>
+/// How a <c>flow.loop</c> reacts to an unhandled body failure (a body node that fails and has no
+/// <c>error</c> edge). <see cref="Terminate"/> fails the whole loop (its own error edge may still
+/// catch it); <see cref="Continue"/> abandons just that pass — its loop-variable updates and the
+/// termination check are skipped — and moves to the next iteration, so transient/partial failures
+/// don't sink the whole run. The loop reports how many passes failed via its <c>failedIterations</c> output.
+/// </summary>
+public enum LoopErrorHandling { Terminate, Continue }
 
 /// <summary>
 /// One loop variable. Initialised once (before the first pass) from EITHER a <see cref="Ref"/>
