@@ -3,6 +3,7 @@ import { createPortal } from "react-dom";
 import type { NodeManifestDto } from "@/api/workflows";
 
 import { nodeIconFor } from "./nodeIcon";
+import { isBodyStartTypeKey, isContainerKind } from "./workflowContainers";
 
 export interface NodeAddMenuProps {
   /** Screen point to anchor the popover at (the "+" click coords). */
@@ -14,12 +15,12 @@ export interface NodeAddMenuProps {
 
 /**
  * The node picker opened by a node's "+" affordance. Lists the types you can add DOWNSTREAM — Steps
- * (Regular + Loop) and Endpoints (Terminal) — never a second Trigger (the engine assumes one entry
- * point) and never the loop's internal `flow.loop_start` marker (it's auto-created with a Loop). A
- * fixed-position popover at the click point with a full-screen mask to dismiss.
+ * (Regular + the loop / try containers) and Endpoints (Terminal) — never a second Trigger (the engine
+ * assumes one entry point) and never a container's internal body-start marker (loop_start / try_start,
+ * auto-created with the container). A fixed-position popover at the click point with a full-screen mask.
  */
 export function NodeAddMenu({ at, manifests, onPick, onClose }: NodeAddMenuProps) {
-  const steps = manifests.filter((m) => (m.kind === "Regular" || m.kind === "Loop") && m.typeKey !== "flow.loop_start");
+  const steps = manifests.filter((m) => (m.kind === "Regular" || isContainerKind(m.kind)) && !isBodyStartTypeKey(m.typeKey));
   const endpoints = manifests.filter((m) => m.kind === "Terminal");
 
   const section = (title: string, items: NodeManifestDto[]) =>
