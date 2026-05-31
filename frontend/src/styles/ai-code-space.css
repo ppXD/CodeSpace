@@ -2132,26 +2132,28 @@ textarea:-webkit-autofill {
 .acs-root .wf-rf-loop:hover .wf-rf-add { opacity: 1; }
 .acs-root .wf-rf-add:hover { transform: translateY(-50%) scale(1.12); }
 
-/* Node picker popover opened by the "+" — a fixed menu at the click point with a full-screen mask. */
-.acs-root .wf-addmenu-mask { position: fixed; inset: 0; z-index: 1200; }
-.acs-root .wf-addmenu {
+/* Node picker popover opened by the "+" — a fixed menu at the click point with a full-screen mask.
+ * NOT scoped under `.acs-root`: it's portaled to <body> (like .mdl), so `.acs-root`-scoped rules
+ * wouldn't match. The theme vars live on :root, so var(--…) still resolves. Keep these selectors global. */
+.wf-addmenu-mask { position: fixed; inset: 0; z-index: 1200; }
+.wf-addmenu {
   position: fixed; z-index: 1201; min-width: 200px; max-height: 360px; overflow-y: auto;
   background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 6px;
   box-shadow: 0 8px 28px rgba(31,30,29,0.16); animation: mdlMask .12s ease;
 }
-.acs-root .wf-addmenu-section + .wf-addmenu-section { margin-top: 4px; border-top: 1px solid var(--line); padding-top: 4px; }
-.acs-root .wf-addmenu-h {
+.wf-addmenu-section + .wf-addmenu-section { margin-top: 4px; border-top: 1px solid var(--line); padding-top: 4px; }
+.wf-addmenu-h {
   font-size: 10px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase;
   color: var(--muted); padding: 4px 8px 2px;
 }
-.acs-root .wf-addmenu-item {
+.wf-addmenu-item {
   display: flex; align-items: center; justify-content: space-between; gap: 10px; width: 100%;
   padding: 7px 8px; border: none; background: transparent; border-radius: 6px; cursor: pointer;
   font-family: inherit; font-size: 12.5px; color: var(--ink); text-align: left;
 }
-.acs-root .wf-addmenu-item:hover { background: var(--panel-2); }
-.acs-root .wf-addmenu-item-name { font-weight: 500; }
-.acs-root .wf-addmenu-item-cat { font-size: 10.5px; color: var(--muted); flex-shrink: 0; }
+.wf-addmenu-item:hover { background: var(--panel-2); }
+.wf-addmenu-item-name { font-weight: 500; }
+.wf-addmenu-item-cat { font-size: 10.5px; color: var(--muted); flex-shrink: 0; }
 
 /* Right inspector */
 .acs-root .wf-inspector {
