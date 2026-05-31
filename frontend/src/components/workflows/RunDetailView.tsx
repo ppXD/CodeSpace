@@ -6,6 +6,7 @@ import { ApiError } from "@/api/request";
 import { useResumeRun, useWorkflowRun } from "@/hooks/use-workflows";
 
 import { JsonView } from "./JsonView";
+import { concurrentNodeKeys, runNodeKey } from "./runConcurrency";
 
 /**
  * How many sub-workflow levels we embed inline before falling back to a plain id. The engine caps
@@ -40,6 +41,9 @@ export function RunDetailView({ runId, nested = false, depth = 0, onOpenRun }: {
   }
 
   const r = run.data;
+  // Nodes whose execution overlapped in time — the engine ran them in a parallel wave (top-level or
+  // inside a loop body). Badged in the trace so a concurrent run is legible at a glance.
+  const concurrent = concurrentNodeKeys(r.nodes);
 
   return (
     <div className={nested ? "wf-detail-body wf-detail-body-nested" : "wf-detail-body"}>
@@ -105,6 +109,9 @@ export function RunDetailView({ runId, nested = false, depth = 0, onOpenRun }: {
                     <span className="wf-run-node-id">{n.nodeId}</span>
                   )}
                   <RunStatusBadge status={n.status} />
+                  {concurrent.has(runNodeKey(n)) && (
+                    <span className="wf-run-node-parallel" title="Ran concurrently with another node (parallel wave)">∥ parallel</span>
+                  )}
                   {n.startedAt && (
                     <span className="wf-run-node-time">
                       {new Date(n.startedAt).toLocaleTimeString()}

@@ -48,6 +48,16 @@ export function LoopEditor({ config, onConfigChange, suggestions }: LoopEditorPr
   const logic = termination.logic === "or" ? "or" : "and";
   const maxIterations = typeof config.maxIterations === "number" ? config.maxIterations : 10;
   const errorHandling = config.errorHandling === "continue" ? "continue" : "terminate";
+  const maxParallelism = typeof config.maxParallelism === "number" ? config.maxParallelism : undefined;
+
+  // Empty input ⇒ remove the key (inherit the engine-wide default); a value clamps to [1, 64].
+  const setMaxParallelism = (raw: string) => {
+    const next = { ...config };
+    const n = Math.floor(Number(raw));
+    if (raw.trim() === "" || !Number.isFinite(n)) delete next.maxParallelism;
+    else next.maxParallelism = Math.min(64, Math.max(1, n));
+    onConfigChange(next);
+  };
 
   const setVariables = (next: LoopVariable[]) => onConfigChange({ ...config, loopVariables: next });
   const setTermination = (next: LoopTermination) => onConfigChange({ ...config, termination: next });
@@ -173,6 +183,23 @@ export function LoopEditor({ config, onConfigChange, suggestions }: LoopEditorPr
           />
         </div>
         <p className="wf-retry-hint">Hard safety cap — the loop never runs more than this many passes (engine ceiling 1000).</p>
+      </section>
+
+      {/* ── Body parallelism ─────────────────────────────────────────────── */}
+      <section className="wf-inspector-section">
+        <div className="wf-inspector-section-h">Body parallelism</div>
+        <input
+          type="number"
+          min={1}
+          max={64}
+          className="wf-form-input wf-loop-max-num"
+          placeholder="inherit (default)"
+          value={maxParallelism ?? ""}
+          onChange={(e) => setMaxParallelism(e.target.value)}
+        />
+        <p className="wf-retry-hint">
+          Max independent body nodes running at once per iteration. Empty inherits the system default; set <code>1</code> to force sequential (e.g. a rate-limited API).
+        </p>
       </section>
 
       {/* ── Error handling ───────────────────────────────────────────────── */}
