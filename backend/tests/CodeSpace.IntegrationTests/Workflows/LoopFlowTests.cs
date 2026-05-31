@@ -444,6 +444,35 @@ public class LoopFlowTests
         LoopProbeNode.SeenFor(sibKey).Count.ShouldBe(2, "the parallel sibling ran in both passes despite the failing branch");
     }
 
+    [Fact]
+    public async Task A_loop_body_diamond_fans_out_concurrently_then_fans_in_within_an_iteration()
+    {
+        // Body is a DIAMOND: loop_start → {pa, pb} → join. pa+pb run as a concurrent wave (barrier
+        // proves overlap); join must run ONCE, only after BOTH settle, and see both their outputs —
+        // pinning the body wave's fan-in (a downstream body node waits for every parallel branch).
+        var gate = "gate-" + Guid.NewGuid().ToString("N");
+        ConcurrencyProbeNode.Arm(gate, 2);
+        var joinKey = "join-" + Guid.NewGuid().ToString("N");
+        LoopProbeNode.Reset(joinKey);
+
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var workflowId = await CreateWorkflowAsync(teamId, userId, DiamondBodyLoopDefinition(gate, joinKey));
+        var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
+
+        await RunEngineAsync(runId);
+
+        ConcurrencyProbeNode.AllArrived(gate).ShouldBeTrue("pa and pb ran concurrently within the iteration");
+
+        using var verify = _fixture.BeginScope();
+        var db = verify.Resolve<CodeSpaceDbContext>();
+        (await db.WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == runId)).Status.ShouldBe(WorkflowRunStatus.Success);
+        JsonDocument.Parse((await LoopNodeAsync(db, runId)).OutputsJson).RootElement.GetProperty("iterations").GetInt32().ShouldBe(1);
+
+        // join ran once, after both branches, and saw both merged outputs.
+        LoopProbeNode.SeenFor(joinKey).ShouldBe(new[] { "pa-pb" });
+        (await db.WorkflowRunNode.AsNoTracking().SingleAsync(n => n.RunId == runId && n.NodeId == "join" && n.IterationKey == "loop#0")).Status.ShouldBe(NodeStatus.Success);
+    }
+
     // ─── Helpers ────────────────────────────────────────────────────────────────
 
     private static async Task<Core.Persistence.Entities.WorkflowRunNode> LoopNodeAsync(CodeSpaceDbContext db, Guid runId) =>
@@ -523,6 +552,32 @@ public class LoopFlowTests
             new() { From = "loop", To = "end" },
             new() { From = "ls", To = "boom" },
             new() { From = "ls", To = "sib" },
+        },
+    };
+
+    // manual → loop(1 pass; body DIAMOND: loop_start → {pa, pb} barriered → join reads both) → terminal.
+    private static WorkflowDefinition DiamondBodyLoopDefinition(string gate, string joinKey) => new()
+    {
+        SchemaVersion = 1,
+        Nodes = new List<NodeDefinition>
+        {
+            new() { Id = "start", TypeKey = "trigger.manual", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
+            new() { Id = "loop", TypeKey = "flow.loop", Config = WorkflowsTestSeed.Json("""{ "maxIterations": 1 }"""), Inputs = WorkflowsTestSeed.EmptyJson() },
+            new() { Id = "ls", TypeKey = "flow.loop_start", ParentId = "loop", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
+            new() { Id = "pa", TypeKey = ConcurrencyProbeNode.Key, ParentId = "loop", Config = WorkflowsTestSeed.EmptyJson(), Inputs = ProbeInputs(gate, "pa") },
+            new() { Id = "pb", TypeKey = ConcurrencyProbeNode.Key, ParentId = "loop", Config = WorkflowsTestSeed.EmptyJson(), Inputs = ProbeInputs(gate, "pb") },
+            new() { Id = "join", TypeKey = LoopProbeNode.Key, ParentId = "loop", Config = WorkflowsTestSeed.EmptyJson(),
+                    Inputs = LoopBodyProbeInputs(joinKey, "{{nodes.pa.outputs.party}}-{{nodes.pb.outputs.party}}") },
+            new() { Id = "end", TypeKey = "builtin.terminal", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
+        },
+        Edges = new List<EdgeDefinition>
+        {
+            new() { From = "start", To = "loop" },
+            new() { From = "loop", To = "end" },
+            new() { From = "ls", To = "pa" },
+            new() { From = "ls", To = "pb" },
+            new() { From = "pa", To = "join" },
+            new() { From = "pb", To = "join" },
         },
     };
 
