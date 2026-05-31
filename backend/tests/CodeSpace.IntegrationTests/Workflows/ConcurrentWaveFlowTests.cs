@@ -187,10 +187,126 @@ public class ConcurrentWaveFlowTests
         (await NodeAsync(fdb, runId, "gate")).Status.ShouldBe(NodeStatus.Success);
     }
 
+    [Fact]
+    public async Task Resume_after_a_wave_suspend_does_not_re_execute_completed_siblings()
+    {
+        // Durability × parallelism — THE guarantee: a branch suspends in a fan-out wave while its
+        // siblings complete; on resume the durable walker rehydrates from the ledger and re-runs ONLY
+        // the suspended branch, never the already-finished siblings. Proven by each sibling carrying
+        // exactly ONE node.started record across the park + resume (a re-run would emit a second).
+        var gate = "gate-" + Guid.NewGuid().ToString("N");
+        var parties = new[] { "a", "b" };
+        ConcurrencyProbeNode.Arm(gate, parties.Length);
+
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var workflowId = await CreateWorkflowAsync(teamId, userId, FanOutWithApprovalAndSiblingsDefinition(gate, parties));
+        var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
+
+        await RunEngineAsync(runId);
+
+        ConcurrencyProbeNode.AllArrived(gate).ShouldBeTrue("the siblings ran concurrently alongside the suspending branch");
+
+        using (var parked = _fixture.BeginScope())
+        {
+            var db = parked.Resolve<CodeSpaceDbContext>();
+            (await db.WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == runId)).Status.ShouldBe(WorkflowRunStatus.Suspended);
+            foreach (var p in parties)
+            {
+                (await NodeAsync(db, runId, p)).Status.ShouldBe(NodeStatus.Success);
+                (await StartedCountAsync(db, runId, p)).ShouldBe(1, $"{p} ran exactly once before the suspend");
+            }
+        }
+
+        (await ApproveAsync(runId, teamId, userId)).ShouldBeTrue();
+        await RunEngineAsync(runId);
+
+        using var done = _fixture.BeginScope();
+        var fdb = done.Resolve<CodeSpaceDbContext>();
+        (await fdb.WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == runId)).Status.ShouldBe(WorkflowRunStatus.Success);
+        (await NodeAsync(fdb, runId, "gate")).Status.ShouldBe(NodeStatus.Success);
+        foreach (var p in parties)
+            (await StartedCountAsync(fdb, runId, p)).ShouldBe(1, $"{p} was NOT re-executed on resume — rehydration skipped the completed sibling");
+    }
+
+    [Fact]
+    public async Task Two_branches_suspending_in_one_wave_both_park_then_one_resume_releases_both()
+    {
+        // Two branches in the SAME wave both suspend (two pending waits under one run); a single resume
+        // resolves EVERY pending wait, so both re-run and the run completes. Pins that parallel
+        // double-suspend parks durably and the resume path isn't single-wait.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var workflowId = await CreateWorkflowAsync(teamId, userId, FanOutTwoApprovalsDefinition());
+        var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
+
+        await RunEngineAsync(runId);
+
+        using (var parked = _fixture.BeginScope())
+        {
+            var db = parked.Resolve<CodeSpaceDbContext>();
+            (await db.WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == runId)).Status.ShouldBe(WorkflowRunStatus.Suspended);
+            var pending = await db.WorkflowRunWait.AsNoTracking().CountAsync(w => w.RunId == runId && w.Status == WorkflowWaitStatuses.Pending);
+            pending.ShouldBe(2, "both parallel approval branches parked their own wait");
+        }
+
+        (await ApproveAsync(runId, teamId, userId)).ShouldBeTrue();
+        await RunEngineAsync(runId);
+
+        using var done = _fixture.BeginScope();
+        var fdb = done.Resolve<CodeSpaceDbContext>();
+        (await fdb.WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == runId)).Status.ShouldBe(WorkflowRunStatus.Success);
+        (await NodeAsync(fdb, runId, "gx")).Status.ShouldBe(NodeStatus.Success);
+        (await NodeAsync(fdb, runId, "gy")).Status.ShouldBe(NodeStatus.Success);
+    }
+
+    [Fact]
+    public async Task A_loop_and_parallel_branches_share_a_wave_and_all_fan_in()
+    {
+        // A loop container and two regular branches sit in ONE ready frontier. The walker runs the
+        // regular branches as a concurrent batch and the loop sequentially (engine-driven), then the
+        // terminal fans in over all three. Pins that loops coexist with the parallel batch (the wave
+        // partition keeps loops off the Task.WhenAll) without deadlock or lost output.
+        var gate = "gate-" + Guid.NewGuid().ToString("N");
+        var parties = new[] { "a", "b" };
+        ConcurrencyProbeNode.Arm(gate, parties.Length);
+        var bodyKey = "body-" + Guid.NewGuid().ToString("N");
+        LoopProbeNode.Reset(bodyKey);
+
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var workflowId = await CreateWorkflowAsync(teamId, userId, FanOutWithLoopDefinition(gate, bodyKey));
+        var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
+
+        await RunEngineAsync(runId);
+
+        ConcurrencyProbeNode.AllArrived(gate).ShouldBeTrue("the two regular branches ran concurrently while the loop ran in the same frontier");
+        ConcurrencyProbeNode.Peak(gate).ShouldBe(parties.Length);
+
+        using var verify = _fixture.BeginScope();
+        var db = verify.Resolve<CodeSpaceDbContext>();
+
+        var run = await db.WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == runId);
+        run.Status.ShouldBe(WorkflowRunStatus.Success);
+
+        var loop = await NodeAsync(db, runId, "loop");
+        loop.Status.ShouldBe(NodeStatus.Success);
+        JsonDocument.Parse(loop.OutputsJson).RootElement.GetProperty("iterations").GetInt32().ShouldBe(2, "the loop ran its 2 passes sequentially");
+        LoopProbeNode.SeenFor(bodyKey).ShouldBe(new[] { "i0", "i1" }, "the loop body ran once per pass");
+
+        foreach (var p in parties)
+            (await NodeAsync(db, runId, p)).Status.ShouldBe(NodeStatus.Success);
+
+        // Fan-in saw the loop's output AND both parallel branches' outputs.
+        var outputs = JsonDocument.Parse(run.OutputsJson).RootElement;
+        outputs.GetProperty("iters").GetInt32().ShouldBe(2);
+        outputs.GetProperty("ab").GetString().ShouldBe("a-b");
+    }
+
     // ─── Helpers ────────────────────────────────────────────────────────────────
 
     private static async Task<Core.Persistence.Entities.WorkflowRunNode> NodeAsync(CodeSpaceDbContext db, Guid runId, string nodeId) =>
         await db.WorkflowRunNode.AsNoTracking().SingleAsync(n => n.RunId == runId && n.NodeId == nodeId && n.IterationKey == "");
+
+    private static async Task<int> StartedCountAsync(CodeSpaceDbContext db, Guid runId, string nodeId) =>
+        await db.WorkflowRunRecord.AsNoTracking().CountAsync(r => r.RunId == runId && r.NodeId == nodeId && r.RecordType == WorkflowRunRecordTypes.NodeStarted);
 
     private async Task<Guid> CreateWorkflowAsync(Guid teamId, Guid userId, WorkflowDefinition definition)
     {
@@ -292,6 +408,81 @@ public class ConcurrentWaveFlowTests
             new() { From = "sib", To = "end" },
         },
     };
+
+    // manual → [gate(wait_approval), one probe per party] → terminal. The probes complete in the wave
+    // while gate suspends; on resume the durable walker must re-run ONLY gate, not the probes.
+    private static WorkflowDefinition FanOutWithApprovalAndSiblingsDefinition(string gate, IReadOnlyList<string> parties)
+    {
+        var nodes = new List<NodeDefinition>
+        {
+            new() { Id = "start", TypeKey = "trigger.manual", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
+            new() { Id = "gate", TypeKey = "flow.wait_approval", Config = WorkflowsTestSeed.Json("""{ "prompt": "go?" }"""), Inputs = WorkflowsTestSeed.EmptyJson() },
+            new() { Id = "end", TypeKey = "builtin.terminal", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
+        };
+        var edges = new List<EdgeDefinition> { new() { From = "start", To = "gate" }, new() { From = "gate", To = "end" } };
+
+        foreach (var p in parties)
+        {
+            nodes.Add(new() { Id = p, TypeKey = ConcurrencyProbeNode.Key, Config = WorkflowsTestSeed.EmptyJson(), Inputs = ProbeInputs(gate, p) });
+            edges.Add(new() { From = "start", To = p });
+            edges.Add(new() { From = p, To = "end" });
+        }
+
+        return new WorkflowDefinition { SchemaVersion = 1, Nodes = nodes, Edges = edges };
+    }
+
+    // manual → [gx(wait_approval), gy(wait_approval)] → terminal. Both suspend in ONE wave.
+    private static WorkflowDefinition FanOutTwoApprovalsDefinition() => new()
+    {
+        SchemaVersion = 1,
+        Nodes = new List<NodeDefinition>
+        {
+            new() { Id = "start", TypeKey = "trigger.manual", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
+            new() { Id = "gx", TypeKey = "flow.wait_approval", Config = WorkflowsTestSeed.Json("""{ "prompt": "x?" }"""), Inputs = WorkflowsTestSeed.EmptyJson() },
+            new() { Id = "gy", TypeKey = "flow.wait_approval", Config = WorkflowsTestSeed.Json("""{ "prompt": "y?" }"""), Inputs = WorkflowsTestSeed.EmptyJson() },
+            new() { Id = "end", TypeKey = "builtin.terminal", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
+        },
+        Edges = new List<EdgeDefinition>
+        {
+            new() { From = "start", To = "gx" },
+            new() { From = "start", To = "gy" },
+            new() { From = "gx", To = "end" },
+            new() { From = "gy", To = "end" },
+        },
+    };
+
+    // manual → [loop(2 passes), a(probe), b(probe)] → terminal. The loop is engine-driven (sequential);
+    // a + b run as the parallel batch; the terminal references all three so fan-in correctness is pinned.
+    private static WorkflowDefinition FanOutWithLoopDefinition(string gate, string loopProbeKey)
+    {
+        var bodyInputs = """{ "key": "__KEY__", "value": "i{{loop.index}}" }""".Replace("__KEY__", loopProbeKey);
+        var endInputs = """{ "iters": "{{nodes.loop.outputs.iterations}}", "ab": "__AB__" }""".Replace("__AB__", "{{nodes.a.outputs.party}}-{{nodes.b.outputs.party}}");
+
+        return new WorkflowDefinition
+        {
+            SchemaVersion = 1,
+            Nodes = new List<NodeDefinition>
+            {
+                new() { Id = "start", TypeKey = "trigger.manual", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
+                new() { Id = "loop", TypeKey = "flow.loop", Config = WorkflowsTestSeed.Json("""{ "maxIterations": 2 }"""), Inputs = WorkflowsTestSeed.EmptyJson() },
+                new() { Id = "ls", TypeKey = "flow.loop_start", ParentId = "loop", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
+                new() { Id = "bodyprobe", TypeKey = LoopProbeNode.Key, ParentId = "loop", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.Json(bodyInputs) },
+                new() { Id = "a", TypeKey = ConcurrencyProbeNode.Key, Config = WorkflowsTestSeed.EmptyJson(), Inputs = ProbeInputs(gate, "a") },
+                new() { Id = "b", TypeKey = ConcurrencyProbeNode.Key, Config = WorkflowsTestSeed.EmptyJson(), Inputs = ProbeInputs(gate, "b") },
+                new() { Id = "end", TypeKey = "builtin.terminal", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.Json(endInputs) },
+            },
+            Edges = new List<EdgeDefinition>
+            {
+                new() { From = "start", To = "loop" },
+                new() { From = "start", To = "a" },
+                new() { From = "start", To = "b" },
+                new() { From = "loop", To = "end" },
+                new() { From = "a", To = "end" },
+                new() { From = "b", To = "end" },
+                new() { From = "ls", To = "bodyprobe" },
+            },
+        };
+    }
 
     // Literal {gate,party} values (no {{}} templates) — spliced via Replace to dodge the raw-string brace trap.
     private static JsonElement ProbeInputs(string gate, string party) =>
