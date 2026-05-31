@@ -900,13 +900,18 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
             var body = SubgraphView(definition, n => n.ParentId == loopNode.Id);
             var deadline = startedAt + plan.WallClock;
 
-            var loopVars = InitLoopVars(config.LoopVariables, scope);
+            // Resume-aware: a body node may have suspended on an earlier engine invocation. Rebuild how
+            // far the loop got (completed iterations + threaded loop vars + failure count) from the
+            // per-iteration ledger so we re-enter at the suspended pass instead of restarting at 0. A
+            // fresh run finds no body rows → ResumeFrom 0 with freshly-initialised loop vars.
+            var resume = await RehydrateLoopStateAsync(run, loopNode, body, config, scope, cancellationToken).ConfigureAwait(false);
+            var loopVars = resume.LoopVars;
             var nodeBudget = plan.NodeBudget;
-            var iterations = 0;
-            var failures = 0;
+            var iterations = resume.Iterations;
+            var failures = resume.Failures;
             var reason = "maxIterations";
 
-            for (var i = 0; i < plan.MaxIterations; i++)
+            for (var i = resume.ResumeFrom; i < plan.MaxIterations; i++)
             {
                 cancellationToken.ThrowIfCancellationRequested();
 
@@ -965,12 +970,21 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
     /// failure (a node that fails with no <c>error</c> edge of its own) is governed by
     /// <paramref name="errorHandling"/>: <see cref="LoopErrorHandling.Terminate"/> throws (the loop
     /// fails); <see cref="LoopErrorHandling.Continue"/> abandons the rest of this pass and reports
-    /// <c>Failed</c> so the loop skips to the next iteration. A body suspend or nested loop always
-    /// throws — refused until the follow-up PRs.
+    /// <c>Failed</c> so the loop skips to the next iteration. A body node that SUSPENDS (approval /
+    /// sleep / callback / sub-workflow) parks the run durably: the pass rehydrates from the ledger on
+    /// resume so the suspended node re-runs with its payload and the already-finished body nodes
+    /// don't. A nested loop is still refused with a clear message.
     /// </summary>
     private async Task<LoopBodyOutcome> RunLoopBodyOnceAsync(WorkflowRun run, WorkflowDefinition body, NodeRunScope iterScope, string iterationKey, LoopErrorHandling errorHandling, CancellationToken cancellationToken)
     {
         var bodyState = new WalkerState(body);
+
+        // Durable re-entry for this pass: if it already ran partway (a body node suspended on an earlier
+        // engine invocation), settle the nodes that finished + inject the resolved wait payload, so the
+        // suspended node re-runs with its decision and the completed ones aren't redone. A fresh pass
+        // finds no rows under this iteration key and this is a no-op.
+        await RehydrateLoopBodyAsync(run, body, bodyState, iterScope, iterationKey, cancellationToken).ConfigureAwait(false);
+
         EnqueueReadyFrontier(bodyState, body);
         var executed = 0;
 
@@ -1008,14 +1022,125 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
                 return new LoopBodyOutcome(executed, Failed: true);
             }
 
+            // A body node parked the run (approval / sleep / callback / sub-workflow). The wait row +
+            // node.suspended were already persisted under THIS iteration key by SuspendNodeAsync; let
+            // the suspend propagate so the run lands Suspended (not Failure). On resume, ExecuteLoopAsync
+            // re-enters this exact iteration and RehydrateLoopBodyAsync re-runs only this node.
             if (status == NodeStatus.Suspended)
-                throw new NodeFailureException($"Node '{nodeId}' suspended inside a loop body — suspending nodes (approval / sleep / callback / sub-workflow) inside a loop aren't supported yet.");
+                throw new RunSuspendedException(nodeId);
 
             EnqueueDownstreamWhenReady(node, bodyState);
         }
 
         return new LoopBodyOutcome(executed, Failed: false);
     }
+
+    /// <summary>Where a resuming loop picks back up: the in-progress iteration index (also the completed-pass count), the failed-pass count, and the threaded loop vars as they stood at the START of that iteration.</summary>
+    private readonly record struct LoopResumeState(int ResumeFrom, int Iterations, int Failures, Dictionary<string, JsonElement> LoopVars);
+
+    /// <summary>
+    /// Rebuild a loop's progress from the per-iteration ledger so a run resumed after a body suspend
+    /// re-enters at the right pass with the right state — never restarting at iteration 0. Replays the
+    /// COMPLETED passes (every iteration before the highest index present) to re-thread loop variables
+    /// and re-count failed passes exactly as the live loop did; the highest index is the in-progress
+    /// (suspended) pass, which <see cref="RunLoopBodyOnceAsync"/> rehydrates and finishes. A fresh run
+    /// (no body rows) returns ResumeFrom 0 with freshly-initialised vars — behaviour-identical to before.
+    /// </summary>
+    private async Task<LoopResumeState> RehydrateLoopStateAsync(WorkflowRun run, NodeDefinition loopNode, WorkflowDefinition body, LoopConfig config, NodeRunScope outerScope, CancellationToken cancellationToken)
+    {
+        var loopVars = InitLoopVars(config.LoopVariables, outerScope);
+
+        var prefix = $"{loopNode.Id}#";
+        var rows = await _db.WorkflowRunNode.AsNoTracking()
+            .Where(n => n.RunId == run.Id && n.IterationKey.StartsWith(prefix))
+            .ToListAsync(cancellationToken).ConfigureAwait(false);
+
+        if (rows.Count == 0) return new LoopResumeState(0, 0, 0, loopVars);
+
+        var resumeFrom = rows.Max(r => IterationIndex(r.IterationKey));
+        var failures = 0;
+
+        for (var j = 0; j < resumeFrom; j++)
+        {
+            var passRows = rows.Where(r => IterationIndex(r.IterationKey) == j).ToList();
+
+            // A pass "failed" iff a body node failed with no error edge of its own (continue-mode skipped
+            // it). Mirror the live loop exactly: a failed pass threads NO loop-var updates forward.
+            if (passRows.Any(r => r.Status == NodeStatus.Failure && !HasErrorEdgeInDefinition(body, r.NodeId)))
+            {
+                failures++;
+                continue;
+            }
+
+            // Rebuild this pass's body scope (outer nodes + this pass's body outputs) so an update ref
+            // like {{loop.acc}}:{{loop.index}} or {{nodes.<body>.outputs.*}} resolves to the same value
+            // the live pass produced, then re-apply the var updates.
+            var passNodes = new Dictionary<string, IReadOnlyDictionary<string, JsonElement>>();
+            foreach (var (k, v) in outerScope.Nodes) passNodes[k] = v;
+            foreach (var r in passRows.Where(r => r.Status == NodeStatus.Success)) passNodes[r.NodeId] = ParsePayloadObject(r.OutputsJson);
+
+            loopVars = ApplyLoopVarUpdates(config.LoopVariables, loopVars, BuildLoopScope(outerScope, passNodes, loopVars, j));
+        }
+
+        return new LoopResumeState(resumeFrom, resumeFrom, failures, loopVars);
+    }
+
+    /// <summary>
+    /// Durable re-entry for ONE loop iteration: settle the body nodes that already finished (Success /
+    /// Skipped) into the pass's walker + scope, recompute their edge-liveness, and load the resolved
+    /// wait payload for THIS iteration so the suspended body node re-runs with its decision. Scoped to
+    /// the iteration key so iteration N's resolved wait never bleeds into iteration N+1. No-op for a
+    /// fresh pass (no rows under this key).
+    /// </summary>
+    private async Task RehydrateLoopBodyAsync(WorkflowRun run, WorkflowDefinition body, WalkerState bodyState, NodeRunScope iterScope, string iterationKey, CancellationToken cancellationToken)
+    {
+        var rows = await _db.WorkflowRunNode.AsNoTracking()
+            .Where(n => n.RunId == run.Id && n.IterationKey == iterationKey)
+            .ToListAsync(cancellationToken).ConfigureAwait(false);
+
+        if (rows.Count == 0) return;
+
+        foreach (var row in rows)
+        {
+            // Only Success / Skipped settle (and so won't re-run). The suspended node is left unsettled
+            // so EnqueueReadyFrontier re-runs it — with the resolved payload loaded below.
+            if (row.Status is not (NodeStatus.Success or NodeStatus.Skipped)) continue;
+
+            bodyState.Statuses[row.NodeId] = row.Status;
+
+            if (row.Status != NodeStatus.Success) continue;
+
+            var outputs = ParsePayloadObject(row.OutputsJson);
+            if (outputs.Count > 0) iterScope.Nodes[row.NodeId] = outputs;
+
+            var hints = ParseRoutingHints(row.RoutingHintsJson);
+            if (hints != null) bodyState.RoutingHints[row.NodeId] = new HashSet<string>(hints);
+        }
+
+        foreach (var edge in body.Edges)
+        {
+            if (!bodyState.Statuses.TryGetValue(edge.From, out var sourceStatus)) continue;
+            bodyState.EdgeLive[edge] = IsEdgeLive(edge, sourceStatus, bodyState.RoutingHints.GetValueOrDefault(edge.From));
+        }
+
+        var resolved = await _db.WorkflowRunWait.AsNoTracking()
+            .Where(w => w.RunId == run.Id && w.IterationKey == iterationKey && w.Status == WorkflowWaitStatuses.Resolved)
+            .ToListAsync(cancellationToken).ConfigureAwait(false);
+
+        foreach (var w in resolved)
+            bodyState.ResumePayloads[w.NodeId] = string.IsNullOrWhiteSpace(w.PayloadJson) ? EmptyJsonObject() : JsonDocument.Parse(w.PayloadJson).RootElement.Clone();
+    }
+
+    /// <summary>Parse the trailing iteration index out of a loop-body iteration key (<c>"&lt;loopId&gt;#&lt;i&gt;"</c>).</summary>
+    private static int IterationIndex(string iterationKey)
+    {
+        var hash = iterationKey.LastIndexOf('#');
+        return hash >= 0 && int.TryParse(iterationKey[(hash + 1)..], out var i) ? i : 0;
+    }
+
+    /// <summary>True when the body definition has an outgoing <c>error</c>-handle edge from the node — i.e. its failure is handled in-body (distinct from <see cref="HasErrorEdge"/>, which reads a live WalkerState).</summary>
+    private static bool HasErrorEdgeInDefinition(WorkflowDefinition body, string nodeId) =>
+        body.Edges.Any(e => e.From == nodeId && e.SourceHandle == WorkflowHandles.Error);
 
     private static readonly IReadOnlyDictionary<string, JsonElement> EmptyJsonBag = new Dictionary<string, JsonElement>();
     private static readonly JsonSerializerOptions LoopConfigJsonOptions = new() { PropertyNameCaseInsensitive = true };

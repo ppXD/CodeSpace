@@ -21,8 +21,9 @@ namespace CodeSpace.IntegrationTests.Workflows;
 /// variables thread state across passes. Pins: condition-met exit + variable threading + the seen
 /// sequence; the max-iterations cap; a body failure (no error edge) failing the loop under the default
 /// terminate policy; continue-on-error keeping the loop alive (all-fail and partial-fail-then-terminate);
-/// an error edge INSIDE the body being handled; and a suspending body node being refused with a clear
-/// message. Each pass persists its body nodes under iteration key "&lt;loopId&gt;#&lt;i&gt;".
+/// an error edge INSIDE the body being handled; and a SUSPENDING body node (approval) parking the run
+/// durably and resuming once per iteration — including a loop variable threaded correctly across the
+/// suspend. Each pass persists its body nodes under iteration key "&lt;loopId&gt;#&lt;i&gt;".
 /// </summary>
 [Collection(PostgresCollection.Name)]
 [Trait("Category", "Integration")]
@@ -186,24 +187,78 @@ public class LoopFlowTests
     }
 
     [Fact]
-    public async Task Suspending_node_in_a_loop_body_fails_with_a_clear_message()
+    public async Task Approval_in_a_loop_body_parks_then_resumes_once_per_iteration()
     {
-        // Durable suspend-in-loop is a follow-up; for now a suspending body node must fail loudly,
-        // never silently park or mis-resume.
+        // The case the user hits: an approval INSIDE a loop. Each pass parks the run on its OWN
+        // iteration-keyed approval wait; approving re-enters the loop AT that pass and carries on. A
+        // 3-iteration loop ⇒ three separate approvals, then the run completes — durable across each park.
         var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
-        var workflowId = await CreateWorkflowAsync(teamId, userId, SuspendingBodyDefinition());
+        var workflowId = await CreateWorkflowAsync(teamId, userId, ApprovalLoopDefinition(maxIterations: 3));
         var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
 
+        for (var pass = 0; pass < 3; pass++)
+        {
+            await RunEngineAsync(runId);
+
+            using (var verify = _fixture.BeginScope())
+            {
+                var db = verify.Resolve<CodeSpaceDbContext>();
+                (await db.WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == runId)).Status
+                    .ShouldBe(WorkflowRunStatus.Suspended, $"pass {pass}: parked on this iteration's approval");
+                var wait = await db.WorkflowRunWait.AsNoTracking().SingleAsync(w => w.RunId == runId && w.Status == WorkflowWaitStatuses.Pending);
+                wait.WaitKind.ShouldBe(WorkflowWaitKinds.Approval);
+                wait.IterationKey.ShouldBe($"loop#{pass}", "the wait is keyed to the iteration that suspended");
+            }
+
+            (await ApproveAsync(runId, teamId, userId)).ShouldBeTrue();
+        }
+
+        await RunEngineAsync(runId);
+
+        using var final = _fixture.BeginScope();
+        var fdb = final.Resolve<CodeSpaceDbContext>();
+        (await fdb.WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == runId)).Status.ShouldBe(WorkflowRunStatus.Success);
+
+        var loop = await LoopNodeAsync(fdb, runId);
+        loop.Status.ShouldBe(NodeStatus.Success);
+        JsonDocument.Parse(loop.OutputsJson).RootElement.GetProperty("iterations").GetInt32().ShouldBe(3);
+
+        // The approval re-ran to Success once per iteration, each under its own iteration key.
+        var approvedKeys = await fdb.WorkflowRunNode.AsNoTracking()
+            .Where(n => n.RunId == runId && n.NodeId == "gate" && n.Status == NodeStatus.Success)
+            .Select(n => n.IterationKey).ToListAsync();
+        approvedKeys.OrderBy(k => k).ShouldBe(new[] { "loop#0", "loop#1", "loop#2" });
+    }
+
+    [Fact]
+    public async Task Loop_threads_a_variable_correctly_across_a_body_suspend()
+    {
+        // The hard property: an approval suspends mid-pass, yet the threaded loop variable is rebuilt
+        // from the ledger on every resume, so the body sees the SAME accumulated value it would have
+        // without the pause. The probe runs AFTER the approval each pass, recording loop.acc.
+        var key = "probe-" + Guid.NewGuid().ToString("N");
+        LoopProbeNode.Reset(key);
+
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var workflowId = await CreateWorkflowAsync(teamId, userId, ThreadedApprovalLoopDefinition(key, maxIterations: 3));
+        var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
+
+        for (var pass = 0; pass < 3; pass++)
+        {
+            await RunEngineAsync(runId);
+            (await ApproveAsync(runId, teamId, userId)).ShouldBeTrue($"pass {pass} approval");
+        }
         await RunEngineAsync(runId);
 
         using var verify = _fixture.BeginScope();
         var db = verify.Resolve<CodeSpaceDbContext>();
+        (await db.WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == runId)).Status.ShouldBe(WorkflowRunStatus.Success);
 
-        (await db.WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == runId)).Status.ShouldBe(WorkflowRunStatus.Failure);
-        var loop = await LoopNodeAsync(db, runId);
-        loop.Status.ShouldBe(NodeStatus.Failure);
-        loop.Error.ShouldNotBeNull();
-        loop.Error!.ShouldContain("suspend");
+        // Same accumulated sequence the non-suspending threading test produces — proof the replay
+        // reconstructed loop.acc faithfully across three suspend/resume cycles.
+        LoopProbeNode.SeenFor(key).ShouldBe(new[] { "x", "x:0", "x:0:1" });
+        JsonDocument.Parse((await LoopNodeAsync(db, runId)).OutputsJson).RootElement
+            .GetProperty("acc").GetString().ShouldBe("x:0:1:2");
     }
 
     // ─── Helpers ────────────────────────────────────────────────────────────────
@@ -228,6 +283,14 @@ public class LoopFlowTests
     {
         using var scope = _fixture.BeginScope();
         await scope.Resolve<IWorkflowEngine>().ExecuteRunAsync(runId, CancellationToken.None);
+    }
+
+    // Approve the run's currently-pending approval wait (whatever iteration it's parked on) via the
+    // real command → service → resume chain, exactly as a human clicking approve would.
+    private async Task<bool> ApproveAsync(Guid runId, Guid teamId, Guid userId)
+    {
+        using var scope = _fixture.BeginScopeAs(userId, teamId, Roles.Admin);
+        return await scope.Resolve<IMediator>().Send(new ResumeRunCommand { RunId = runId, Approved = true, Comment = "ok" });
     }
 
     // manual → loop(body: loop_start → probe) → terminal. acc threads "start" + ":<index>" each pass.
@@ -305,25 +368,61 @@ public class LoopFlowTests
         return new WorkflowDefinition { SchemaVersion = 1, Nodes = nodes, Edges = edges };
     }
 
-    // manual → loop(body: loop_start → sleep[suspends]) → terminal.
-    private static WorkflowDefinition SuspendingBodyDefinition() => new()
+    // manual → loop(body: loop_start → gate[wait_approval]) → terminal. Runs to the cap; each pass parks
+    // on its own approval. The case the user asked about: an approval inside a loop, approved per pass.
+    private static WorkflowDefinition ApprovalLoopDefinition(int maxIterations) => new()
     {
         SchemaVersion = 1,
         Nodes = new List<NodeDefinition>
         {
             new() { Id = "start", TypeKey = "trigger.manual", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
             new() { Id = "loop", TypeKey = "flow.loop", Inputs = WorkflowsTestSeed.EmptyJson(),
-                    Config = WorkflowsTestSeed.Json("""{ "termination": { "conditions": [ { "ref": "{{loop.index}}", "op": "eq", "value": "0" } ] }, "maxIterations": 3 }""") },
+                    Config = WorkflowsTestSeed.Json($$"""{ "maxIterations": {{maxIterations}} }""") },
             new() { Id = "ls", TypeKey = "flow.loop_start", ParentId = "loop", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
-            new() { Id = "nap", TypeKey = "flow.sleep", ParentId = "loop",
-                    Config = WorkflowsTestSeed.Json("""{ "seconds": 60 }"""), Inputs = WorkflowsTestSeed.EmptyJson() },
+            new() { Id = "gate", TypeKey = "flow.wait_approval", ParentId = "loop",
+                    Config = WorkflowsTestSeed.Json("""{ "prompt": "approve iteration?" }"""), Inputs = WorkflowsTestSeed.EmptyJson() },
             new() { Id = "end", TypeKey = "builtin.terminal", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
         },
         Edges = new List<EdgeDefinition>
         {
             new() { From = "start", To = "loop" },
             new() { From = "loop", To = "end" },
-            new() { From = "ls", To = "nap" },
+            new() { From = "ls", To = "gate" },
         },
     };
+
+    // manual → loop(body: loop_start → gate[wait_approval] → probe) → terminal. acc threads "x" + ":<index>"
+    // each pass; the probe (AFTER the approval) records loop.acc so the test can prove the threaded var is
+    // rebuilt correctly across each suspend/resume. Plain raw strings keep the literal {{loop.*}} templates.
+    private static WorkflowDefinition ThreadedApprovalLoopDefinition(string probeKey, int maxIterations)
+    {
+        var loopConfig = """
+            { "loopVariables": [ { "name": "acc", "type": "String", "value": "x", "update": "{{loop.acc}}:{{loop.index}}" } ], "maxIterations": __MAX__ }
+            """.Replace("__MAX__", maxIterations.ToString());
+        var probeInputs = """{ "key": "__KEY__", "value": "{{loop.acc}}" }""".Replace("__KEY__", probeKey);
+
+        return new WorkflowDefinition
+        {
+            SchemaVersion = 1,
+            Nodes = new List<NodeDefinition>
+            {
+                new() { Id = "start", TypeKey = "trigger.manual", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
+                new() { Id = "loop", TypeKey = "flow.loop", Config = WorkflowsTestSeed.Json(loopConfig), Inputs = WorkflowsTestSeed.EmptyJson() },
+                new() { Id = "ls", TypeKey = "flow.loop_start", ParentId = "loop", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
+                new() { Id = "gate", TypeKey = "flow.wait_approval", ParentId = "loop",
+                        Config = WorkflowsTestSeed.Json("""{ "prompt": "go?" }"""), Inputs = WorkflowsTestSeed.EmptyJson() },
+                new() { Id = "probe", TypeKey = LoopProbeNode.Key, ParentId = "loop",
+                        Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.Json(probeInputs) },
+                new() { Id = "end", TypeKey = "builtin.terminal", Config = WorkflowsTestSeed.EmptyJson(),
+                        Inputs = WorkflowsTestSeed.Json("""{ "acc": "{{nodes.loop.outputs.acc}}" }""") },
+            },
+            Edges = new List<EdgeDefinition>
+            {
+                new() { From = "start", To = "loop" },
+                new() { From = "loop", To = "end" },
+                new() { From = "ls", To = "gate" },
+                new() { From = "gate", To = "probe" },
+            },
+        };
+    }
 }
