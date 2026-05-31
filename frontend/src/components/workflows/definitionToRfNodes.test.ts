@@ -123,6 +123,18 @@ describe("definitionToRfNodes", () => {
   });
 });
 
+describe("explicit (user-resized) loop size", () => {
+  it("uses the persisted width/height instead of auto-fit, and marks it on data.size", () => {
+    const out = byId(definitionToRfNodes(
+      def([node("loop", "flow.loop", { position: { x: 0, y: 0 }, width: 500, height: 300 })]),
+      manifests,
+    ));
+
+    expect(out.loop.style).toEqual({ width: 500, height: 300 });
+    expect((out.loop.data as { size?: unknown }).size).toEqual({ width: 500, height: 300 });
+  });
+});
+
 describe("fitLoopSizes", () => {
   it("keeps a leaf loop at the default size when its body fits", () => {
     const sizes = fitLoopSizes([

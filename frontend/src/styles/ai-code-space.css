@@ -2071,6 +2071,13 @@ textarea:-webkit-autofill {
 }
 .acs-root .wf-rf-loop-id { font-weight: 600; }
 .acs-root .wf-rf-loop-type { color: var(--muted); }
+/* Loop box resize handles (React Flow NodeResizer) — warm accent, not the library's default blue.
+   Corner/edge handles are small accent squares; the edge guide line is a faint accent. */
+.acs-root .wf-rf-resize-handle {
+  width: 9px; height: 9px; border-radius: 2px;
+  background: var(--accent); border: 1.5px solid var(--panel);
+}
+.acs-root .wf-rf-resize-line { border-color: var(--accent); border-width: 1px; opacity: 0.55; }
 .acs-root .wf-rf-node-bar {
   position: absolute; left: 0; top: 0; bottom: 0; width: 3px; background: var(--accent);
   border-top-left-radius: 8px; border-bottom-left-radius: 8px;

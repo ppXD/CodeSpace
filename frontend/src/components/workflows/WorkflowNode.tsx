@@ -1,5 +1,5 @@
 import { useContext } from "react";
-import { Handle, Position, type NodeProps } from "@xyflow/react";
+import { Handle, NodeResizer, Position, type NodeProps } from "@xyflow/react";
 
 import { Ic } from "@/_imported/ai-code-space/icons";
 import type { NodeKind } from "@/api/workflows";
@@ -53,6 +53,8 @@ export interface WorkflowNodeData extends Record<string, unknown> {
    * whole purpose, so it earns its place. Synced from the editor's workflow inputs state.
    */
   inputFields?: ReadonlyArray<{ name: string; label?: string | null; required?: boolean }>;
+  /** A flow.loop container the user resized by its corner — explicit pixel size, persisted to the definition. Absent = auto-size to fit the body. */
+  size?: { width: number; height: number };
 }
 
 export function WorkflowNode({ data, selected }: NodeProps) {
@@ -69,6 +71,9 @@ export function WorkflowNode({ data, selected }: NodeProps) {
   if (d.kind === "Loop") {
     return (
       <div className="wf-rf-loop" data-selected={selected}>
+        {/* Drag any corner/edge to resize the loop box. Shown when the loop is selected; the new size
+            is persisted to the definition (overriding auto-fit) via the editor's onNodesChange. */}
+        <NodeResizer isVisible={selected} minWidth={320} minHeight={160} lineClassName="wf-rf-resize-line" handleClassName="wf-rf-resize-handle" />
         <Handle type="target" position={Position.Left} className="wf-rf-handle" />
         <div className="wf-rf-loop-head">
           <span className="wf-rf-loop-icon">{iconFor(d)}</span>
