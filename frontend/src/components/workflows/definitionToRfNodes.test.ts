@@ -88,7 +88,7 @@ describe("definitionToRfNodes", () => {
     const out = byId(definitionToRfNodes(def([node("a", "http.request"), node("b", "http.request")]), manifests));
 
     expect(out.a.position).toEqual({ x: 80, y: 80 });
-    expect(out.b.position).toEqual({ x: 400, y: 80 }, "second node sits to the RIGHT (80 + 320)");
+    expect(out.b.position).toEqual({ x: 400, y: 80 }); // second node sits to the RIGHT (80 + 320)
   });
 
   it("defaults a positionless body node to a slot inside its container", () => {
