@@ -48,6 +48,7 @@ import { VariableTablePanel } from "@/components/workflows/VariableTablePanel";
 import { WorkflowNode, type WorkflowNodeData } from "@/components/workflows/WorkflowNode";
 import { NodeAddContext, type NodeAddRequest } from "@/components/workflows/nodeAddContext";
 import { NodeAddMenu } from "@/components/workflows/NodeAddMenu";
+import { nodeIconFor } from "@/components/workflows/nodeIcon";
 import { definitionToRfNodes, LOOP_CONTAINER_W, LOOP_CONTAINER_H } from "@/components/workflows/definitionToRfNodes";
 import { useAlert } from "@/components/dialog";
 import { WorkflowVariablesPanel } from "@/components/workflows/WorkflowVariablesPanel";
@@ -1016,7 +1017,7 @@ function PaletteItem({ manifest, onAdd, disabled, disabledReason }: {
       }}
       title={title}
     >
-      <span className="wf-palette-item-icon">{paletteIconFor(manifest)}</span>
+      <span className="wf-palette-item-icon">{nodeIconFor(manifest)}</span>
       <span className="wf-palette-item-body">
         <span className="wf-palette-item-name">{manifest.displayName}</span>
         <span className="wf-palette-item-key">{manifest.typeKey}</span>
@@ -1024,17 +1025,6 @@ function PaletteItem({ manifest, onAdd, disabled, disabledReason }: {
       <span className="wf-palette-item-add" aria-hidden>{disabled ? "—" : "+"}</span>
     </button>
   );
-}
-
-function paletteIconFor(m: NodeManifestDto) {
-  // Kind-then-Category cascade. Reading the manifest's declared Category is the source of
-  // truth — a typeKey-prefix probe would silently mis-icon plugin authors who name their
-  // LLM node "anthropic.chat" or "openai.complete".
-  if (m.kind === "Trigger") return <Ic.Zap size={12} />;
-  if (m.kind === "Terminal") return <Ic.CircleStop size={12} />;
-  if (m.category === "AI") return <Ic.Sparkles size={12} />;
-  if (m.category === "Git") return <Ic.Branch size={12} />;
-  return <Ic.Box size={12} />;
 }
 
 // ─── Top-bar toolbar button ───────────────────────────────────────────────────
