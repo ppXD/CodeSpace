@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import type { NodeDefinition, NodeKind, NodeManifestDto, WorkflowDefinition } from "@/api/workflows";
 
-import { definitionToRfNodes, LOOP_CONTAINER_H, LOOP_CONTAINER_W } from "./definitionToRfNodes";
+import { definitionToRfNodes, fitLoopSizes, LOOP_CONTAINER_H, LOOP_CONTAINER_W } from "./definitionToRfNodes";
 
 const manifest = (typeKey: string, kind: NodeKind, extra: Partial<NodeManifestDto> = {}): NodeManifestDto => ({
   typeKey, displayName: typeKey, category: "Logic", kind, description: null, iconKey: null,
@@ -112,10 +112,42 @@ describe("definitionToRfNodes", () => {
 
     // zIndex == nesting depth, so a child always paints above its container at every level.
     expect(out.outer.zIndex).toBe(0);
-    expect(out.outer.style).toEqual({ width: LOOP_CONTAINER_W, height: LOOP_CONTAINER_H });
     expect(out.inner.zIndex).toBe(1);
-    expect(out.inner.style).toEqual({ width: LOOP_CONTAINER_W, height: LOOP_CONTAINER_H }, "a nested loop is still a sized box");
     expect(out.gc.zIndex).toBe(2);
     expect(out.gc.style).toBeUndefined();
+
+    // Auto-fit: the outer container grew to WRAP the inner loop, so it's strictly bigger → no overlap.
+    expect((out.inner.style!.width as number)).toBeGreaterThanOrEqual(LOOP_CONTAINER_W);
+    expect((out.outer.style!.width as number)).toBeGreaterThan(out.inner.style!.width as number);
+    expect((out.outer.style!.height as number)).toBeGreaterThan(out.inner.style!.height as number);
+  });
+});
+
+describe("fitLoopSizes", () => {
+  it("keeps a leaf loop at the default size when its body fits", () => {
+    const sizes = fitLoopSizes([
+      { id: "loop", parentId: null, x: 0, y: 0, isLoop: true },
+      { id: "ls", parentId: "loop", x: 40, y: 90, isLoop: false },
+    ]);
+    expect(sizes.get("loop")).toEqual({ width: LOOP_CONTAINER_W, height: LOOP_CONTAINER_H });
+  });
+
+  it("grows an outer loop to wrap a nested loop (no overlap)", () => {
+    const sizes = fitLoopSizes([
+      { id: "outer", parentId: null, x: 0, y: 0, isLoop: true },
+      { id: "inner", parentId: "outer", x: 40, y: 40, isLoop: true },
+      { id: "ls_i", parentId: "inner", x: 40, y: 90, isLoop: false },
+    ]);
+
+    expect(sizes.get("inner")).toEqual({ width: LOOP_CONTAINER_W, height: LOOP_CONTAINER_H });
+    expect(sizes.get("outer")).toEqual({ width: 40 + LOOP_CONTAINER_W + 40, height: 40 + LOOP_CONTAINER_H + 40 });
+  });
+
+  it("grows a loop to fit a body node placed past the default edge", () => {
+    const sizes = fitLoopSizes([
+      { id: "loop", parentId: null, x: 0, y: 0, isLoop: true },
+      { id: "far", parentId: "loop", x: 900, y: 0, isLoop: false },
+    ]);
+    expect(sizes.get("loop")!.width).toBe(900 + 280 + 40); // far.x + node estimate + padding
   });
 });
