@@ -21,7 +21,7 @@ import {
 import "@xyflow/react/dist/style.css";
 
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
-import { useEffect, useMemo, useRef, useState, type DragEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent } from "react";
 
 import { Ic } from "@/_imported/ai-code-space/icons";
 import { ApiError } from "@/api/request";
@@ -46,6 +46,8 @@ import { SubworkflowEditor } from "@/components/workflows/SubworkflowEditor";
 import { LoopEditor } from "@/components/workflows/LoopEditor";
 import { VariableTablePanel } from "@/components/workflows/VariableTablePanel";
 import { WorkflowNode, type WorkflowNodeData } from "@/components/workflows/WorkflowNode";
+import { NodeAddContext, type NodeAddRequest } from "@/components/workflows/nodeAddContext";
+import { NodeAddMenu } from "@/components/workflows/NodeAddMenu";
 import { definitionToRfNodes, LOOP_CONTAINER_W, LOOP_CONTAINER_H } from "@/components/workflows/definitionToRfNodes";
 import { useAlert } from "@/components/dialog";
 import { WorkflowVariablesPanel } from "@/components/workflows/WorkflowVariablesPanel";
@@ -199,6 +201,13 @@ function Editor({ workflow, manifests, onBackToList, saving, onSave }: EditorPro
   const [edges, setEdges] = useState<Edge[]>(() => definitionToRfEdges(workflow.definition));
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [unsaved, setUnsaved] = useState(false);
+  // The node picker opened by a node's "+" — anchored at the click point, sourced from `fromId`.
+  const [addMenu, setAddMenu] = useState<{ at: { x: number; y: number }; fromId: string } | null>(null);
+  // A node's "+" was clicked → select it (so the new node auto-links from it) and open the picker.
+  const onAddFrom = useCallback<NodeAddRequest>((nodeId, at) => {
+    setSelectedId(nodeId);
+    setAddMenu({ at, fromId: nodeId });
+  }, []);
 
   // Lookup the selected node's definition (config/inputs come from React Flow node data).
   const selectedNode = nodes.find((n) => n.id === selectedId) ?? null;
@@ -794,6 +803,9 @@ function Editor({ workflow, manifests, onBackToList, saving, onSave }: EditorPro
 
         {/* Canvas */}
         <div ref={canvasRef} className="wf-canvas" onDragOver={onDragOver} onDrop={onDrop}>
+          {/* Provider so each custom node can open the "add a node here" picker (React Flow propagates
+              context into custom nodes rendered below it). */}
+          <NodeAddContext.Provider value={onAddFrom}>
           <ReactFlow
             nodes={nodes}
             edges={edges}
@@ -836,8 +848,19 @@ function Editor({ workflow, manifests, onBackToList, saving, onSave }: EditorPro
             <Controls showInteractive={false} />
             <MiniMap pannable zoomable maskColor="rgba(248,246,238,0.7)" />
           </ReactFlow>
+          </NodeAddContext.Provider>
 
           {nodes.length === 0 && <CanvasEmptyHint />}
+
+          {/* Node picker opened by a node's "+" — pick a type and it's added to the right + auto-linked. */}
+          {addMenu && (
+            <NodeAddMenu
+              at={addMenu.at}
+              manifests={manifests}
+              onPick={(m) => { addNodeFromManifest(m, { autoLink: true }); setAddMenu(null); }}
+              onClose={() => setAddMenu(null)}
+            />
+          )}
         </div>
 
         {/* Right inspector */}

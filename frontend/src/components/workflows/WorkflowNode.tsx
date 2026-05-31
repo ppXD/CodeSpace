@@ -1,8 +1,29 @@
+import { useContext } from "react";
 import { Handle, Position, type NodeProps } from "@xyflow/react";
 
 import { Ic } from "@/_imported/ai-code-space/icons";
 import type { NodeKind } from "@/api/workflows";
 import { ERROR_HANDLE } from "@/lib/workflowErrorRoute";
+
+import { NodeAddContext, type NodeAddRequest } from "./nodeAddContext";
+
+/**
+ * Hover affordance on a node's right edge: click to open the "add a node here" picker (the new node
+ * is auto-linked from this one). Drag-to-connect stays on the source Handle next to it. `nodrag`/`nopan`
+ * stop React Flow from treating the click as a node-drag / canvas-pan.
+ */
+function AddNodeButton({ nodeId, onAddFrom }: { nodeId: string; onAddFrom: NodeAddRequest }) {
+  return (
+    <button
+      type="button"
+      className="wf-rf-add nodrag nopan"
+      title="Add a node"
+      onClick={(e) => { e.stopPropagation(); onAddFrom(nodeId, { x: e.clientX, y: e.clientY }); }}
+    >
+      <Ic.Plus size={13} />
+    </button>
+  );
+}
 
 /**
  * Custom React Flow node. Renders the icon + display name + the author's id label,
@@ -37,6 +58,9 @@ export interface WorkflowNodeData extends Record<string, unknown> {
 export function WorkflowNode({ data, selected }: NodeProps) {
   const d = data as WorkflowNodeData;
   const fields = d.inputFields ?? [];
+  // null outside the editor (no provider) → no "+" button. A Terminal has no output, so never add from it.
+  const onAddFrom = useContext(NodeAddContext);
+  const showAdd = d.kind !== "Terminal";
 
   // A loop container: the React Flow node's style sets its size and its body subgraph (child nodes
   // with parentId === this loop) renders INSIDE via React Flow's parent/child positioning. We draw
@@ -53,6 +77,7 @@ export function WorkflowNode({ data, selected }: NodeProps) {
         </div>
         <Handle type="source" position={Position.Right} className="wf-rf-handle" />
         <Handle id={ERROR_HANDLE} type="source" position={Position.Bottom} className="wf-rf-handle wf-rf-handle-error" title="On error → connect to a handler node" />
+        {showAdd && onAddFrom && <AddNodeButton nodeId={d.nodeId} onAddFrom={onAddFrom} />}
       </div>
     );
   }
@@ -100,6 +125,7 @@ export function WorkflowNode({ data, selected }: NodeProps) {
           title="On error → connect to a handler node"
         />
       )}
+      {showAdd && onAddFrom && <AddNodeButton nodeId={d.nodeId} onAddFrom={onAddFrom} />}
     </div>
   );
 }
