@@ -46,6 +46,7 @@ import { SubworkflowEditor } from "@/components/workflows/SubworkflowEditor";
 import { LoopEditor } from "@/components/workflows/LoopEditor";
 import { VariableTablePanel } from "@/components/workflows/VariableTablePanel";
 import { WorkflowNode, type WorkflowNodeData } from "@/components/workflows/WorkflowNode";
+import { definitionToRfNodes, LOOP_CONTAINER_W, LOOP_CONTAINER_H } from "@/components/workflows/definitionToRfNodes";
 import { useAlert } from "@/components/dialog";
 import { WorkflowVariablesPanel } from "@/components/workflows/WorkflowVariablesPanel";
 import { RunWorkflowModal } from "@/components/workflows/RunWorkflowModal";
@@ -301,9 +302,11 @@ function Editor({ workflow, manifests, onBackToList, saving, onSave }: EditorPro
     // back out. Keeping just parentId lets it move with the loop yet still be dragged out (→ unparent).
     setNodes((nds) => nds.map((n) => {
       if (n.id !== node.id) return n;
+      // Dropped INTO a loop → zIndex 1 so it sits above the container body (clickable + connectable);
+      // pulled OUT → drop back to the default stacking (a top-level node needs no explicit zIndex).
       return targetId
-        ? { ...n, parentId: targetId, position: { x: abs.x - parentAbs.x, y: abs.y - parentAbs.y } }
-        : { ...n, parentId: undefined, position: abs };
+        ? { ...n, parentId: targetId, position: { x: abs.x - parentAbs.x, y: abs.y - parentAbs.y }, zIndex: 1 }
+        : { ...n, parentId: undefined, position: abs, zIndex: undefined };
     }));
 
     // Re-scoping severs any edge that now crosses the loop boundary — a step only connects to siblings
@@ -414,7 +417,7 @@ function Editor({ workflow, manifests, onBackToList, saving, onSave }: EditorPro
       // A loop is a container sized to hold its body subgraph. It's draggable from anywhere on the
       // box; its body steps render ABOVE it (React Flow parent/child z-order) so they stay clickable
       // and grabbing one drags the step, while grabbing empty space drags the whole box + its body.
-      ...(isLoop ? { style: { width: LOOP_CONTAINER_W, height: LOOP_CONTAINER_H } } : {}),
+      ...(isLoop ? { style: { width: LOOP_CONTAINER_W, height: LOOP_CONTAINER_H }, zIndex: 0 } : {}),
     };
 
     // A Loop ships with its body-entry marker (flow.loop_start) pre-placed inside — the marker is
@@ -423,7 +426,7 @@ function Editor({ workflow, manifests, onBackToList, saving, onSave }: EditorPro
     const startId = isLoop ? uniqueNodeId("flow.loop_start", [...nodes, newNode]) : null;
     const startNode: Node<WorkflowNodeData> | null = startId
       ? {
-          id: startId, type: "wf", parentId: id, position: { x: 40, y: 72 },
+          id: startId, type: "wf", parentId: id, position: { x: 40, y: 72 }, zIndex: 1,
           data: {
             nodeId: startId, typeKey: "flow.loop_start", displayName: startManifest?.displayName ?? "Loop start",
             iconKey: startManifest?.iconKey ?? "play", kind: "Regular", category: startManifest?.category ?? "Logic", label: null,
@@ -811,6 +814,12 @@ function Editor({ workflow, manifests, onBackToList, saving, onSave }: EditorPro
             // handle connect to a target handle regardless of which side it's on.
             connectionRadius={40}
             connectionMode={ConnectionMode.Loose}
+            // A loop container is a big node that sits UNDER its body steps (zIndex 0 vs the children's
+            // zIndex 1) so the steps stay clickable and their handles grabbable. React Flow's default
+            // "pop a selected node to z-index 1000" would shove a *selected* loop box on top of its own
+            // children — swallowing every pointer event aimed at a child handle, so you couldn't draw an
+            // edge inside the loop. Turning elevate-on-select off keeps the container below its body.
+            elevateNodesOnSelect={false}
             connectionLineType={ConnectionLineType.SmoothStep}
             connectionLineStyle={{ stroke: "#D97757", strokeWidth: 2 }}
             defaultEdgeOptions={{
@@ -1272,58 +1281,6 @@ function NodeInspector({
 // ─── React Flow ↔ WorkflowDefinition glue ─────────────────────────────────────
 
 const NODE_TYPES = { wf: WorkflowNode };
-
-// Default size of a flow.loop container on the canvas — roomy enough for a small body row. The
-// body's nodes render inside it (React Flow parent/child); the user resizes/repositions as needed.
-const LOOP_CONTAINER_W = 820;
-const LOOP_CONTAINER_H = 240;
-
-function definitionToRfNodes(
-  def: WorkflowDefinition,
-  manifestByType: Map<string, NodeManifestDto>
-): Node<WorkflowNodeData>[] {
-  // Auto-layout: vertical stack, 180px row spacing, when position is missing. Workflows
-  // are typically <20 nodes and the user immediately fixes positions on first drag, so no
-  // real layout engine is needed.
-  let fallbackY = 80;
-
-  // React Flow requires a parent (loop container) to appear BEFORE its children in the array.
-  // Body nodes carry parentId; ordering top-level-first guarantees parent-before-child.
-  const ordered = [...def.nodes].sort((a, b) => (a.parentId ? 1 : 0) - (b.parentId ? 1 : 0));
-
-  return ordered.map((n) => {
-    const manifest = manifestByType.get(n.typeKey);
-    const kind = manifest?.kind ?? "Regular";
-
-    const data: WorkflowNodeData = {
-      nodeId: n.id,
-      typeKey: n.typeKey,
-      displayName: manifest?.displayName ?? n.typeKey,
-      iconKey: manifest?.iconKey ?? null,
-      kind,
-      category: manifest?.category ?? "",
-      label: n.label ?? null,
-      // Manual start node shows the workflow's input fields on its card (Dify-style).
-      ...(manifest?.isManual ? { inputFields: def.inputs ?? [] } : {}),
-    };
-
-    // A loop body node renders INSIDE its container — position is relative to the parent. No
-    // `extent: "parent"` so it can still be dragged back OUT (onNodeDragStop then un-nests it).
-    if (n.parentId) {
-      return { id: n.id, type: "wf", parentId: n.parentId, position: n.position ?? { x: 40, y: 60 }, data };
-    }
-
-    const position = n.position ?? { x: 80, y: fallbackY };
-    if (!n.position) fallbackY += kind === "Loop" ? 300 : 180;
-
-    // A loop container is sized so its body subgraph fits; everything else is a normal card. It's
-    // draggable from anywhere on the box — body steps render above it (parent/child z-order) so they
-    // stay clickable and the box drags as one with its body.
-    return kind === "Loop"
-      ? { id: n.id, type: "wf", position, data, style: { width: LOOP_CONTAINER_W, height: LOOP_CONTAINER_H } }
-      : { id: n.id, type: "wf", position, data };
-  });
-}
 
 function definitionToRfEdges(def: WorkflowDefinition): Edge[] {
   return def.edges.map((e, idx) => {
