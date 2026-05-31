@@ -97,3 +97,31 @@ describe("RunDetailView — sub-workflow step drill-down", () => {
     expect(screen.queryByText("Sub-workflow run")).toBeNull();
   });
 });
+
+describe("RunDetailView — parallel-wave observability", () => {
+  const at = (sec: number) => new Date(Date.UTC(2026, 0, 1, 0, 0, sec)).toISOString();
+
+  it("badges nodes whose execution overlapped in time (ran concurrently)", () => {
+    useWorkflowRunMock.mockImplementation(() => ok(detail({
+      nodes: [
+        node({ nodeId: "a", startedAt: at(0), completedAt: at(10) }),
+        node({ nodeId: "b", startedAt: at(2), completedAt: at(8) }),  // overlaps a
+      ],
+    })));
+
+    render(<RunDetailView runId="parent-1" />);
+    expect(screen.getAllByText("∥ parallel").length).toBe(2);
+  });
+
+  it("shows no parallel badge for a strictly sequential run", () => {
+    useWorkflowRunMock.mockImplementation(() => ok(detail({
+      nodes: [
+        node({ nodeId: "a", startedAt: at(0), completedAt: at(5) }),
+        node({ nodeId: "b", startedAt: at(5), completedAt: at(10) }), // touching handoff, not overlap
+      ],
+    })));
+
+    render(<RunDetailView runId="parent-1" />);
+    expect(screen.queryByText("∥ parallel")).toBeNull();
+  });
+});

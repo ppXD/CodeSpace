@@ -82,4 +82,22 @@ describe("LoopEditor", () => {
     fireEvent.change(sel, { target: { value: "continue" } });
     expect((within(section("Error handling")).getByRole("combobox") as HTMLSelectElement).value).toBe("continue");
   });
+
+  it("body parallelism is empty by default (inherit), accepts a value, and clamps to [1, 64]", () => {
+    const onConfigChange = vi.fn();
+    const { rerender } = render(<LoopEditor config={{}} onConfigChange={onConfigChange} suggestions={[]} />);
+
+    const num = () => within(section("Body parallelism")).getByRole("spinbutton") as HTMLInputElement;
+    expect(num().value).toBe("");   // empty ⇒ inherit the engine-wide default
+
+    // A value is clamped down to the ceiling and written to config.maxParallelism.
+    fireEvent.change(num(), { target: { value: "999" } });
+    expect(onConfigChange).toHaveBeenLastCalledWith({ maxParallelism: 64 });
+
+    // Clearing the field removes the key entirely (back to inherit) rather than writing 0/NaN.
+    rerender(<LoopEditor config={{ maxParallelism: 2 }} onConfigChange={onConfigChange} suggestions={[]} />);
+    expect(num().value).toBe("2");
+    fireEvent.change(num(), { target: { value: "" } });
+    expect(onConfigChange).toHaveBeenLastCalledWith({});
+  });
 });
