@@ -1,4 +1,5 @@
 using System.Text.Json;
+using Autofac;
 using CodeSpace.Core.DependencyInjection;
 using CodeSpace.Core.Hardening;
 using CodeSpace.Core.Persistence.Db;
@@ -52,8 +53,22 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
     private readonly ICodeSpaceBackgroundJobClient _backgroundJobClient;
     private readonly ISubworkflowService _subworkflowService;
     private readonly IWorkflowResumeService _resumeService;
+    // The run's lifetime scope — BeginLifetimeScope() per parallel node gives each its own DbContext +
+    // record logger so concurrent nodes never share an EF change-tracker (see RunNodeInChildScopeAsync).
+    private readonly ILifetimeScope _lifetimeScope;
+    private readonly int _maxParallelism;
 
-    public WorkflowEngine(CodeSpaceDbContext db, INodeRegistry nodeRegistry, IVariableService variableService, IRunRecordLogger recordLogger, IPayloadRedactor redactor, IArtifactStore artifactStore, ILogger<WorkflowEngine> logger, ILoggerFactory loggerFactory, ICodeSpaceBackgroundJobClient backgroundJobClient, ISubworkflowService subworkflowService, IWorkflowResumeService resumeService)
+    /// <summary>
+    /// Max nodes from one ready frontier run concurrently (each in its own DI scope). Env-overridable
+    /// (Rule 8) so an operator can tune throughput, or pin to <c>1</c> to force fully-sequential
+    /// execution; parsed once at construction, clamped to [1, <see cref="MaxParallelismCeiling"/>],
+    /// default <see cref="DefaultMaxParallelism"/>.
+    /// </summary>
+    public const string MaxParallelismEnvVar = "CODESPACE_WORKFLOW_MAX_PARALLELISM";
+    internal const int DefaultMaxParallelism = 8;
+    internal const int MaxParallelismCeiling = 64;
+
+    public WorkflowEngine(CodeSpaceDbContext db, INodeRegistry nodeRegistry, IVariableService variableService, IRunRecordLogger recordLogger, IPayloadRedactor redactor, IArtifactStore artifactStore, ILogger<WorkflowEngine> logger, ILoggerFactory loggerFactory, ICodeSpaceBackgroundJobClient backgroundJobClient, ISubworkflowService subworkflowService, IWorkflowResumeService resumeService, ILifetimeScope lifetimeScope)
     {
         _db = db;
         _nodeRegistry = nodeRegistry;
@@ -66,7 +81,13 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
         _backgroundJobClient = backgroundJobClient;
         _subworkflowService = subworkflowService;
         _resumeService = resumeService;
+        _lifetimeScope = lifetimeScope;
+        _maxParallelism = ParseMaxParallelism(Environment.GetEnvironmentVariable(MaxParallelismEnvVar));
     }
+
+    /// <summary>Parse + clamp the max-parallelism env value. Unset / unparseable ⇒ the default; out-of-range ⇒ clamped. Pure + internal so it's unit-pinned (Rule 8).</summary>
+    internal static int ParseMaxParallelism(string? raw) =>
+        int.TryParse(raw, out var value) ? Math.Clamp(value, 1, MaxParallelismCeiling) : DefaultMaxParallelism;
 
     public async Task ExecuteRunAsync(Guid runId, CancellationToken cancellationToken)
     {
@@ -815,62 +836,139 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
 
         EnqueueReadyFrontier(state, topLevel);
 
+        // Walk by WAVES: drain the whole ready frontier, then execute it. The frontier invariant
+        // guarantees the drained nodes are mutually independent (a node enters Ready only once ALL its
+        // incoming edges' sources have settled, so an edge A→B can't put A and B in Ready together),
+        // so they're safe to run concurrently. Each wave: settle skips (cheap), run the regular nodes
+        // as a bounded parallel batch (each in its own DI scope), then run loop containers sequentially
+        // (engine-driven). Effects merge single-threaded in drain order — deterministic regardless of
+        // task completion order. Re-draining picks up the downstream nodes this wave just enqueued.
         while (state.Ready.Count > 0)
         {
             cancellationToken.ThrowIfCancellationRequested();
 
-            var nodeId = state.Ready.Dequeue();
-            if (state.Statuses.ContainsKey(nodeId)) continue;          // already fired
+            var wave = DrainReadyWave(state);
 
-            var node = state.NodeById[nodeId];
-
-            if (ShouldSkip(node, state))
+            var regular = new List<NodeDefinition>(wave.Count);
+            var loops = new List<NodeDefinition>();
+            foreach (var node in wave)
             {
-                await MarkSkippedAsync(run, node, state, cancellationToken).ConfigureAwait(false);
-                EnqueueDownstreamWhenReady(node, state);
-                continue;
+                if (ShouldSkip(node, state))
+                {
+                    await MarkSkippedAsync(run, node, state, cancellationToken).ConfigureAwait(false);
+                    EnqueueDownstreamWhenReady(node, state);
+                }
+                else if (IsLoopNode(node)) loops.Add(node);
+                else regular.Add(node);
             }
 
-            // A loop container is engine-driven: dispatch on Kind (like Trigger/Terminal), running
-            // its body subgraph per iteration and writing its own scope/state sequentially. Every
-            // other node runs the per-node path, which RETURNS its effects for the walker to merge
-            // single-threaded (MergeNodeOutcome) — the seam per-node parallel execution plugs into.
-            NodeStatus status;
-            if (_nodeRegistry.Resolve(node.TypeKey).Manifest.Kind == NodeKind.Loop)
+            // Regular nodes run concurrently and RETURN their effects; merge + advance in drain order
+            // (single-threaded), so a failure / suspend still aborts the walk deterministically.
+            var outcomes = await RunReadyNodesAsync(run, regular, scope, state, cancellationToken).ConfigureAwait(false);
+            for (var i = 0; i < regular.Count; i++)
             {
-                status = await ExecuteLoopAsync(run, definition, node, scope, state, cancellationToken).ConfigureAwait(false);
-                state.Statuses[nodeId] = status;
-            }
-            else
-            {
-                var outcome = await ExecuteNodeAsync(run, node, scope, state, cancellationToken).ConfigureAwait(false);
-                MergeNodeOutcome(node, outcome, scope, state);
-                status = outcome.Status;
+                MergeNodeOutcome(regular[i], outcomes[i], scope, state);
+                AdvanceAfterNodeSettled(regular[i], outcomes[i].Status, state);
             }
 
-            // A failure halts the run UNLESS the node has an `error` edge: then the failure is
-            // "handled" — IsEdgeLive makes only the error handle live (normal-handle downstream is
-            // skipped), so we fall through to route the run down the handler branch. The merged
-            // outcome already exposed the failure as the node's `error` output for the handler to read.
-            if (status == NodeStatus.Failure && !HasErrorEdge(node, state))
-                throw new NodeFailureException($"Node '{nodeId}' failed.");
+            // A loop container is engine-driven (dispatch on Kind, like Trigger/Terminal): it runs its
+            // body subgraph per iteration and writes its own scope/state sequentially, so it stays off
+            // the parallel batch.
+            foreach (var loop in loops)
+            {
+                var status = await ExecuteLoopAsync(run, definition, loop, scope, state, cancellationToken).ConfigureAwait(false);
+                state.Statuses[loop.Id] = status;
+                AdvanceAfterNodeSettled(loop, status, state);
+            }
 
-            // The node parked the run (timer / approval / callback). SuspendNodeAsync already
-            // persisted the wait + node.suspended record; abort the walk so the run lands in
-            // Suspended (not Success). The resume signal re-dispatches; the durable walker
-            // rehydrates and re-runs THIS node with its ResumePayload.
-            if (status == NodeStatus.Suspended)
-                throw new RunSuspendedException(nodeId);
-
-            EnqueueDownstreamWhenReady(node, state);
-
-            // Reaching a Terminal doesn't short-circuit the walker — we keep draining the
-            // queue so that any remaining ready/skip-pending nodes get persisted as Skipped.
-            // The run-detail UI needs those rows to show "this branch didn't run because of
-            // routing". The outer try/catch sets the run to Success when the queue empties.
+            // Reaching a Terminal doesn't short-circuit the walker — we keep draining so any remaining
+            // ready/skip-pending nodes get persisted as Skipped (the run-detail UI needs those rows to
+            // show "this branch didn't run because of routing"). The outer try/catch sets the run to
+            // Success when the frontier empties.
         }
 
         return state.WorkflowOutputs;
+    }
+
+    /// <summary>Drain the entire ready frontier into one wave (mutually-independent nodes), skipping any already fired in a prior wave and de-duping within the drain.</summary>
+    private static List<NodeDefinition> DrainReadyWave(WalkerState state)
+    {
+        var wave = new List<NodeDefinition>();
+        var seen = new HashSet<string>();
+        while (state.Ready.Count > 0)
+        {
+            var id = state.Ready.Dequeue();
+            if (state.Statuses.ContainsKey(id)) continue;   // already settled in an earlier wave
+            if (!seen.Add(id)) continue;                    // same node enqueued twice this drain
+            wave.Add(state.NodeById[id]);
+        }
+        return wave;
+    }
+
+    private bool IsLoopNode(NodeDefinition node) => _nodeRegistry.Resolve(node.TypeKey).Manifest.Kind == NodeKind.Loop;
+
+    /// <summary>
+    /// The shared post-settle tail for any node (regular or loop): a failure halts the run UNLESS the
+    /// node has an <c>error</c> edge (then IsEdgeLive routes the run down the handler branch — the
+    /// merged outcome already exposed the failure as the node's <c>error</c> output); a suspend aborts
+    /// the walk so the run lands Suspended (the wait + node.suspended are already persisted); otherwise
+    /// release the downstream nodes that are now ready.
+    /// </summary>
+    private void AdvanceAfterNodeSettled(NodeDefinition node, NodeStatus status, WalkerState state)
+    {
+        if (status == NodeStatus.Failure && !HasErrorEdge(node, state))
+            throw new NodeFailureException($"Node '{node.Id}' failed.");
+
+        if (status == NodeStatus.Suspended)
+            throw new RunSuspendedException(node.Id);
+
+        EnqueueDownstreamWhenReady(node, state);
+    }
+
+    /// <summary>
+    /// Execute one wave's regular nodes, returning their effects in the SAME order (the caller merges
+    /// single-threaded). A single ready node runs on THIS scope — the fast, behaviour-identical path
+    /// for a linear workflow (no child scope, no semaphore). A genuine fan-out (≥2 ready nodes) runs
+    /// each node in its OWN DI scope, bounded by <see cref="_maxParallelism"/>: the nodes only READ the
+    /// shared scope/state during the wave (writes happen in the caller's single-threaded merge), so
+    /// concurrent execution can't race on the shared collections, and each node's own DbContext /
+    /// record logger keeps EF change-trackers thread-isolated.
+    /// </summary>
+    private async Task<NodeRunOutcome[]> RunReadyNodesAsync(WorkflowRun run, IReadOnlyList<NodeDefinition> nodes, NodeRunScope scope, WalkerState state, CancellationToken cancellationToken)
+    {
+        if (nodes.Count == 0) return [];
+
+        if (nodes.Count == 1)
+            return [await ExecuteNodeAsync(run, nodes[0], scope, state, cancellationToken).ConfigureAwait(false)];
+
+        using var gate = new SemaphoreSlim(_maxParallelism);
+        var tasks = new Task<NodeRunOutcome>[nodes.Count];
+        for (var i = 0; i < nodes.Count; i++)
+            tasks[i] = RunNodeInChildScopeAsync(run, nodes[i], scope, state, gate, cancellationToken);
+
+        return await Task.WhenAll(tasks).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Run a single node in its OWN lifetime scope (its own CodeSpaceDbContext + IRunRecordLogger +
+    /// ISubworkflowService), bounded by the wave's semaphore. The fresh engine reuses the SAME node-
+    /// execution path (ExecuteNodeAsync) but with scoped DB writers, so two nodes running at once never
+    /// touch one EF change-tracker. It reads the shared (read-only-during-the-wave) scope/state and
+    /// returns its effects for the caller to merge.
+    /// </summary>
+    private async Task<NodeRunOutcome> RunNodeInChildScopeAsync(WorkflowRun run, NodeDefinition node, NodeRunScope scope, WalkerState state, SemaphoreSlim gate, CancellationToken cancellationToken)
+    {
+        await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            await using var childScope = _lifetimeScope.BeginLifetimeScope();
+            var nodeEngine = childScope.Resolve<WorkflowEngine>();
+            return await nodeEngine.ExecuteNodeAsync(run, node, scope, state, cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            gate.Release();
+        }
     }
 
     /// <summary>
