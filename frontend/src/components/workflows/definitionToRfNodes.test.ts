@@ -123,6 +123,22 @@ describe("definitionToRfNodes", () => {
   });
 });
 
+describe("loop_start lock", () => {
+  it("locks the loop's entry marker inside its container (extent:parent), but not other body nodes", () => {
+    const out = byId(definitionToRfNodes(
+      def([
+        node("loop", "flow.loop"),
+        node("ls", "flow.loop_start", { parentId: "loop" }),
+        node("req", "http.request", { parentId: "loop" }),
+      ]),
+      manifests,
+    ));
+
+    expect(out.ls.extent).toBe("parent");   // entry marker can't be dragged out
+    expect(out.req.extent).toBeUndefined(); // a regular body node can still be dragged out
+  });
+});
+
 describe("explicit (user-resized) loop size", () => {
   it("uses the persisted width/height instead of auto-fit, and marks it on data.size", () => {
     const out = byId(definitionToRfNodes(
