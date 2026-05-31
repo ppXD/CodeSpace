@@ -99,4 +99,23 @@ describe("definitionToRfNodes", () => {
 
     expect(out.ls.position).toEqual({ x: 40, y: 90 });
   });
+
+  it("renders a NESTED loop as a sized container, stacked by depth", () => {
+    const out = byId(definitionToRfNodes(
+      def([
+        node("outer", "flow.loop", { position: { x: 0, y: 0 } }),
+        node("inner", "flow.loop", { parentId: "outer", position: { x: 40, y: 40 } }),
+        node("gc", "http.request", { parentId: "inner", position: { x: 60, y: 60 } }),
+      ]),
+      manifests,
+    ));
+
+    // zIndex == nesting depth, so a child always paints above its container at every level.
+    expect(out.outer.zIndex).toBe(0);
+    expect(out.outer.style).toEqual({ width: LOOP_CONTAINER_W, height: LOOP_CONTAINER_H });
+    expect(out.inner.zIndex).toBe(1);
+    expect(out.inner.style).toEqual({ width: LOOP_CONTAINER_W, height: LOOP_CONTAINER_H }, "a nested loop is still a sized box");
+    expect(out.gc.zIndex).toBe(2);
+    expect(out.gc.style).toBeUndefined();
+  });
 });
