@@ -109,7 +109,11 @@ export function definitionToRfNodes(
     y: n.position?.y ?? 90,
     isLoop: (manifestByType.get(n.typeKey)?.kind ?? "Regular") === "Loop",
   })));
-  const loopStyle = (id: string) => loopSizes.get(id) ?? { width: LOOP_CONTAINER_W, height: LOOP_CONTAINER_H };
+  // An explicit (user-resized) size wins; otherwise auto-fit to the body; otherwise the default.
+  const loopStyle = (n: { id: string; width?: number | null; height?: number | null }) =>
+    n.width != null && n.height != null
+      ? { width: n.width, height: n.height }
+      : (loopSizes.get(n.id) ?? { width: LOOP_CONTAINER_W, height: LOOP_CONTAINER_H });
 
   return ordered.map((n) => {
     const manifest = manifestByType.get(n.typeKey);
@@ -127,6 +131,8 @@ export function definitionToRfNodes(
       label: n.label ?? null,
       // Manual start node shows the workflow's input fields on its card (Dify-style).
       ...(manifest?.isManual ? { inputFields: def.inputs ?? [] } : {}),
+      // An explicit (user-resized) container size — marks this loop as "don't auto-size", and round-trips back out via rfToDefinition.
+      ...(n.width != null && n.height != null ? { size: { width: n.width, height: n.height } } : {}),
     };
 
     // A nested node renders INSIDE its container — position relative to the parent, zIndex = depth so
@@ -134,7 +140,7 @@ export function definitionToRfNodes(
     // renders as a box. No `extent: "parent"` so it can still be dragged back OUT.
     if (n.parentId) {
       const nested = { id: n.id, type: "wf", parentId: n.parentId, position: n.position ?? { x: 40, y: 90 }, data, zIndex: depth };
-      return isLoop ? { ...nested, style: loopStyle(n.id) } : nested;
+      return isLoop ? { ...nested, style: loopStyle(n) } : nested;
     }
 
     const position = n.position ?? { x: fallbackX, y: 80 };
@@ -143,7 +149,7 @@ export function definitionToRfNodes(
     // A top-level loop container is sized so its body fits + sits at zIndex 0 (below its body);
     // everything else top-level is a normal card with default stacking.
     return isLoop
-      ? { id: n.id, type: "wf", position, data, style: loopStyle(n.id), zIndex: 0 }
+      ? { id: n.id, type: "wf", position, data, style: loopStyle(n), zIndex: 0 }
       : { id: n.id, type: "wf", position, data };
   });
 }

@@ -55,6 +55,17 @@ public sealed record NodeDefinition
     /// affects the visual layout in the editor.
     /// </summary>
     public NodePosition? Position { get; init; }
+
+    /// <summary>
+    /// Editor-only explicit size (pixels) for a container node (today only a <c>flow.loop</c> box the
+    /// user resized by its corner). Optional — null means the editor auto-sizes the container to fit
+    /// its body. Like <see cref="Position"/>, the engine ignores these; null-omitted from the content
+    /// hash so a workflow's hash is unchanged until a box is actually resized.
+    /// </summary>
+    public double? Width { get; init; }
+
+    /// <summary>Editor-only explicit height — see <see cref="Width"/>.</summary>
+    public double? Height { get; init; }
 }
 
 public sealed record NodePosition

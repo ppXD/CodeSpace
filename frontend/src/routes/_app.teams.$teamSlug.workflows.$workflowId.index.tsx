@@ -266,8 +266,20 @@ function Editor({ workflow, manifests, onBackToList, saving, onSave }: EditorPro
 
   // ─── Canvas events ──────────────────────────────────────────────────────────
   const onNodesChange = (changes: NodeChange[]) => {
-    setNodes((nds) => applyNodeChanges(changes, nds) as Node<WorkflowNodeData>[]);
-    if (changes.some((c) => c.type === "position" || c.type === "remove")) setUnsaved(true);
+    setNodes((nds) => {
+      const next = applyNodeChanges(changes, nds) as Node<WorkflowNodeData>[];
+      // NodeResizer emits "dimensions" changes as the user drags a corner. Record the new size on the
+      // loop's data so it (a) overrides auto-fit from here on and (b) round-trips into the definition.
+      const resized = changes.flatMap((c) => (c.type === "dimensions" && c.dimensions ? [{ id: c.id, dim: c.dimensions }] : []));
+      if (resized.length === 0) return next;
+      const sizeById = new Map(resized.map((r) => [r.id, r.dim]));
+      return next.map((n) =>
+        sizeById.has(n.id) && n.data.kind === "Loop"
+          ? { ...n, data: { ...n.data, size: { width: sizeById.get(n.id)!.width, height: sizeById.get(n.id)!.height } } }
+          : n);
+    });
+    // A finished resize (resizing:false) is a save-worthy edit, same as a move/remove.
+    if (changes.some((c) => c.type === "position" || c.type === "remove" || (c.type === "dimensions" && c.resizing === false))) setUnsaved(true);
   };
   const onEdgesChange = (changes: EdgeChange[]) => {
     setEdges((eds) => applyEdgeChanges(changes, eds));
@@ -346,7 +358,8 @@ function Editor({ workflow, manifests, onBackToList, saving, onSave }: EditorPro
         const depth = nodeDepth(n.id, reparented);
         const isLoop = (n.data as Partial<WorkflowNodeData>)?.kind === "Loop";
         const zIndex = depth === 0 && !isLoop ? undefined : depth;
-        const size = loopSizes.get(n.id);
+        // A user-resized loop keeps its explicit size; an auto loop re-fits to its (new) children.
+        const size = (n.data as Partial<WorkflowNodeData>).size ?? loopSizes.get(n.id);
         return isLoop && size ? { ...n, zIndex, style: { ...n.style, ...size } } : { ...n, zIndex };
       });
     });
@@ -1372,6 +1385,9 @@ function rfToDefinition(
     config: configs[n.id] ?? {},
     inputs: inputs[n.id] ?? {},
     position: { x: Math.round(n.position.x), y: Math.round(n.position.y) },
+    // Persist an explicit container size only when the user resized the loop box (data.size set);
+    // otherwise it's omitted so the loop keeps auto-sizing and the content hash is unchanged.
+    ...(n.data.size ? { width: Math.round(n.data.size.width), height: Math.round(n.data.size.height) } : {}),
     // Omit retry entirely when absent so the saved definition (and its content hash) is
     // unchanged for nodes the operator never gave a policy.
     ...(retries[n.id] ? { retry: retries[n.id] } : {}),

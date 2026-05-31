@@ -56,6 +56,9 @@ export interface NodeDefinition {
   inputs: unknown;
   /** Canvas position (editor-only). When null the editor auto-lays out the node. */
   position?: NodePosition | null;
+  /** Explicit container size (editor-only) — set when a loop box was resized by its corner; absent = auto-size to fit the body. */
+  width?: number | null;
+  height?: number | null;
   /** Optional retry-on-failure policy. Absent = run once (default). */
   retry?: RetryPolicy | null;
 }
