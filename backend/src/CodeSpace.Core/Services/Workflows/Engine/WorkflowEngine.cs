@@ -832,16 +832,26 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
             }
 
             // A loop container is engine-driven: dispatch on Kind (like Trigger/Terminal), running
-            // its body subgraph per iteration. Every other node runs through the normal per-node path.
-            var status = _nodeRegistry.Resolve(node.TypeKey).Manifest.Kind == NodeKind.Loop
-                ? await ExecuteLoopAsync(run, definition, node, scope, state, cancellationToken).ConfigureAwait(false)
-                : await ExecuteNodeAsync(run, node, scope, state, cancellationToken).ConfigureAwait(false);
-            state.Statuses[nodeId] = status;
+            // its body subgraph per iteration and writing its own scope/state sequentially. Every
+            // other node runs the per-node path, which RETURNS its effects for the walker to merge
+            // single-threaded (MergeNodeOutcome) — the seam per-node parallel execution plugs into.
+            NodeStatus status;
+            if (_nodeRegistry.Resolve(node.TypeKey).Manifest.Kind == NodeKind.Loop)
+            {
+                status = await ExecuteLoopAsync(run, definition, node, scope, state, cancellationToken).ConfigureAwait(false);
+                state.Statuses[nodeId] = status;
+            }
+            else
+            {
+                var outcome = await ExecuteNodeAsync(run, node, scope, state, cancellationToken).ConfigureAwait(false);
+                MergeNodeOutcome(node, outcome, scope, state);
+                status = outcome.Status;
+            }
 
             // A failure halts the run UNLESS the node has an `error` edge: then the failure is
             // "handled" — IsEdgeLive makes only the error handle live (normal-handle downstream is
-            // skipped), so we fall through to route the run down the handler branch. ExecuteNodeAsync
-            // already exposed the failure as the node's `error` output for the handler to read.
+            // skipped), so we fall through to route the run down the handler branch. The merged
+            // outcome already exposed the failure as the node's `error` output for the handler to read.
             if (status == NodeStatus.Failure && !HasErrorEdge(node, state))
                 throw new NodeFailureException($"Node '{nodeId}' failed.");
 
@@ -1020,13 +1030,22 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
             // A nested loop recurses: ExecuteLoopAsync runs the inner loop under THIS pass's key, so its
             // body keys become "<thisKey>/<inner>#<j>" (collision-free across outer passes) and it
             // rehydrates its own subtree on resume. Its outputs land in iterScope.Nodes for downstream
-            // body nodes. Every other node runs the normal per-node path. (Dispatch on Kind — no typeKey
-            // special-casing, same as the top-level walk.) A nested-loop suspend throws RunSuspendedException
-            // out of ExecuteLoopAsync and propagates here, parking the whole run durably.
-            var status = _nodeRegistry.Resolve(node.TypeKey).Manifest.Kind == NodeKind.Loop
-                ? await ExecuteLoopAsync(run, definition, node, iterScope, bodyState, cancellationToken, iterationKey).ConfigureAwait(false)
-                : await ExecuteNodeAsync(run, node, iterScope, bodyState, cancellationToken, iterationKey).ConfigureAwait(false);
-            bodyState.Statuses[nodeId] = status;
+            // body nodes. Every other node runs the per-node path, RETURNING its effects to merge into
+            // this pass's iterScope/bodyState single-threaded (same seam as the top-level walk). A
+            // nested-loop suspend throws RunSuspendedException out of ExecuteLoopAsync and propagates
+            // here, parking the whole run durably.
+            NodeStatus status;
+            if (_nodeRegistry.Resolve(node.TypeKey).Manifest.Kind == NodeKind.Loop)
+            {
+                status = await ExecuteLoopAsync(run, definition, node, iterScope, bodyState, cancellationToken, iterationKey).ConfigureAwait(false);
+                bodyState.Statuses[nodeId] = status;
+            }
+            else
+            {
+                var outcome = await ExecuteNodeAsync(run, node, iterScope, bodyState, cancellationToken, iterationKey).ConfigureAwait(false);
+                MergeNodeOutcome(node, outcome, iterScope, bodyState);
+                status = outcome.Status;
+            }
 
             // A node with its own error edge routes there regardless of the loop's policy (it's
             // "handled"). An OTHERWISE-unhandled failure: terminate ⇒ fail the loop; continue ⇒
@@ -1524,7 +1543,7 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
     /// across attempts; node.started is emitted ONCE before the loop (the run-node view ignores
     /// the per-retry <c>log</c> records and projects status from the node.* records only).</para>
     /// </summary>
-    private async Task<NodeStatus> ExecuteNodeAsync(WorkflowRun run, NodeDefinition node, NodeRunScope scope, WalkerState state, CancellationToken cancellationToken, string iterationKey = NoIteration)
+    private async Task<NodeRunOutcome> ExecuteNodeAsync(WorkflowRun run, NodeDefinition node, NodeRunScope scope, WalkerState state, CancellationToken cancellationToken, string iterationKey = NoIteration)
     {
         var runtime = _nodeRegistry.Resolve(node.TypeKey);
         var resolvedConfig = VariableResolver.ResolveBag(node.Config, scope);
@@ -1556,37 +1575,29 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
                 try
                 {
                     await SuspendNodeAsync(run, node, result, cancellationToken, iterationKey).ConfigureAwait(false);
-                    return NodeStatus.Suspended;
+                    return new NodeRunOutcome(NodeStatus.Suspended, null, null, null);
                 }
                 catch (SubworkflowStartException ex)
                 {
-                    await FinalizeFailureAsync(exec, ex.Message, cancellationToken).ConfigureAwait(false);
-                    return NodeStatus.Failure;
+                    return await FinalizeFailureAsync(exec, ex.Message, cancellationToken).ConfigureAwait(false);
                 }
             }
 
-            // Success / Skipped — persist, reflect into scope, capture terminal outputs, advance.
+            // Success / Skipped — persist + compute the effects to merge into scope/state, advance.
             if (result != null && result.Status != NodeStatus.Failure)
-            {
-                await FinalizeNonFailureAsync(exec, result, cancellationToken).ConfigureAwait(false);
-                return result.Status;
-            }
+                return await FinalizeNonFailureAsync(exec, result, cancellationToken).ConfigureAwait(false);
 
             // Genuine failure (returned Fail or threw). Retry while attempts remain, else finalise.
             lastError = result?.Error ?? thrownError ?? lastError;
 
             if (attempt == plan.MaxAttempts)
-            {
-                await FinalizeFailureAsync(exec, lastError, cancellationToken).ConfigureAwait(false);
-                return NodeStatus.Failure;
-            }
+                return await FinalizeFailureAsync(exec, lastError, cancellationToken).ConfigureAwait(false);
 
             await LogRetryAndWaitAsync(exec, attempt, plan, lastError, cancellationToken).ConfigureAwait(false);
         }
 
         // Defensive: the loop always returns on its final attempt.
-        await FinalizeFailureAsync(exec, lastError, cancellationToken).ConfigureAwait(false);
-        return NodeStatus.Failure;
+        return await FinalizeFailureAsync(exec, lastError, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -1615,30 +1626,37 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
 
     /// <summary>
     /// Finalise a Success / Skipped attempt: persist the node.completed (or node.failed for a
-    /// node-returned Skip — unchanged from before), reflect outputs + routing hints into the run
-    /// scope, and capture Terminal outputs. The secret-leak guard fires here (Terminal capture);
-    /// its exception propagates to the run-level handler — it is NOT swallowed or retried.
+    /// node-returned Skip — unchanged from before), then RETURN the effects (scope outputs, routing
+    /// hints, Terminal outputs) for the walker to merge single-threaded via <see cref="MergeNodeOutcome"/>.
+    /// This method itself writes only the DB (own scope's record logger) — no shared scope/state
+    /// mutation — so a node can run in its own DI scope under parallel execution without racing.
+    /// The secret-leak guard fires here (Terminal capture, reading scope); its exception propagates
+    /// to the run-level handler — it is NOT swallowed or retried.
     /// </summary>
-    private async Task FinalizeNonFailureAsync(NodeExecution exec, NodeResult result, CancellationToken cancellationToken)
+    private async Task<NodeRunOutcome> FinalizeNonFailureAsync(NodeExecution exec, NodeResult result, CancellationToken cancellationToken)
     {
         var duration = DateTimeOffset.UtcNow - exec.StartedAt;
         await PersistNodeResultAsync(exec.Run.Id, exec.Node.Id, result, duration, cancellationToken, exec.IterationKey).ConfigureAwait(false);
-        ApplyResultToScopeAndState(exec.Node, result, exec.Scope, exec.State);
 
-        if (result.Status == NodeStatus.Success && exec.Runtime.Manifest.Kind == NodeKind.Terminal && exec.ResolvedInputs.Count > 0)
-            CaptureTerminalOutputs(exec.Node, exec.ResolvedInputs, exec.Scope, exec.State);
+        var scopeOutputs = result.Status == NodeStatus.Success && result.Outputs.Count > 0 ? result.Outputs : null;
+        var terminalOutputs = result.Status == NodeStatus.Success && exec.Runtime.Manifest.Kind == NodeKind.Terminal && exec.ResolvedInputs.Count > 0
+            ? CaptureTerminalOutputs(exec.Node, exec.ResolvedInputs, exec.Scope)
+            : null;
+
+        return new NodeRunOutcome(result.Status, scopeOutputs, result.RoutingHints, terminalOutputs);
     }
 
     /// <summary>
-    /// Finalise a terminal failure (returned Fail or thrown, retries exhausted): expose the error
-    /// as the node's <c>error</c> output so a downstream error-branch handler can read
-    /// <c>{{nodes.&lt;id&gt;.outputs.error.message}}</c>, then write the node.failed record. The
-    /// scope write is harmless when the node has no error edge — the run fails and scope is dropped.
+    /// Finalise a terminal failure (returned Fail or thrown, retries exhausted): write the node.failed
+    /// record (own scope's record logger) and RETURN the error as the node's <c>error</c> scope output
+    /// so a downstream error-branch handler can read <c>{{nodes.&lt;id&gt;.outputs.error.message}}</c>
+    /// once the walker merges it. The scope write happens in <see cref="MergeNodeOutcome"/>; it's
+    /// harmless when the node has no error edge — the run fails and scope is dropped.
     /// </summary>
-    private async Task FinalizeFailureAsync(NodeExecution exec, string error, CancellationToken cancellationToken)
+    private async Task<NodeRunOutcome> FinalizeFailureAsync(NodeExecution exec, string error, CancellationToken cancellationToken)
     {
-        exec.Scope.Nodes[exec.Node.Id] = BuildErrorOutput(error, exec.Node.Id);
         await _recordLogger.NodeFailedAsync(exec.Run.Id, exec.Node.Id, exec.IterationKey, error, DateTimeOffset.UtcNow - exec.StartedAt, cancellationToken).ConfigureAwait(false);
+        return new NodeRunOutcome(NodeStatus.Failure, BuildErrorOutput(error, exec.Node.Id), null, null);
     }
 
     /// <summary>
@@ -1730,17 +1748,36 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
     }
 
     /// <summary>
-    /// Reflect a successful node's outputs + routing hints into the run-scoped scope/state
-    /// objects so downstream nodes can resolve <c>nodes.&lt;id&gt;.outputs.X</c> and the
-    /// walker's branch-routing pass sees the correct hint set.
+    /// The effects a per-node execution wants merged into shared run scope/state. Computed DURING
+    /// execution (in the node's own DI scope, so two parallel nodes don't race) but APPLIED by the
+    /// walker single-threaded via <see cref="MergeNodeOutcome"/>. A null field means "leave it":
+    /// <list type="bullet">
+    /// <item><see cref="ScopeOutputs"/> — the node's <c>nodes.&lt;id&gt;.outputs</c> entry: a successful
+    /// node's outputs, or a failed node's <c>error</c> output. Null on a Skip / suspend / output-less success.</item>
+    /// <item><see cref="RoutingHints"/> — which output handles steer downstream edges (branch nodes). Null = follow all.</item>
+    /// <item><see cref="TerminalOutputs"/> — a successful Terminal's resolved Inputs become the run's WorkflowOutputs. Null otherwise.</item>
+    /// </list>
     /// </summary>
-    private static void ApplyResultToScopeAndState(NodeDefinition node, NodeResult result, NodeRunScope scope, WalkerState state)
-    {
-        if (result.Status == NodeStatus.Success && result.Outputs.Count > 0)
-            scope.Nodes[node.Id] = result.Outputs;
+    private readonly record struct NodeRunOutcome(NodeStatus Status, IReadOnlyDictionary<string, JsonElement>? ScopeOutputs, IReadOnlyList<string>? RoutingHints, IReadOnlyDictionary<string, JsonElement>? TerminalOutputs);
 
-        if (result.RoutingHints != null)
-            state.RoutingHints[node.Id] = new HashSet<string>(result.RoutingHints);
+    /// <summary>
+    /// Apply a node execution's returned effects into the shared run scope/state — the SINGLE place
+    /// the walker mutates shared state for a per-node run. Always runs on the walker thread (even when
+    /// nodes execute in parallel), so concurrent executions never race on scope.Nodes /
+    /// state.RoutingHints / state.WorkflowOutputs / state.Statuses. Null effect fields are left untouched.
+    /// </summary>
+    private static void MergeNodeOutcome(NodeDefinition node, NodeRunOutcome outcome, NodeRunScope scope, WalkerState state)
+    {
+        state.Statuses[node.Id] = outcome.Status;
+
+        if (outcome.ScopeOutputs != null)
+            scope.Nodes[node.Id] = outcome.ScopeOutputs;
+
+        if (outcome.RoutingHints != null)
+            state.RoutingHints[node.Id] = new HashSet<string>(outcome.RoutingHints);
+
+        if (outcome.TerminalOutputs != null)
+            state.WorkflowOutputs = outcome.TerminalOutputs;
     }
 
     /// <summary>
@@ -1761,10 +1798,10 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
     /// the surrounding catch in <see cref="ExecuteNodeAsync"/> propagates it to the run-
     /// level handler.</para>
     /// </summary>
-    private static void CaptureTerminalOutputs(NodeDefinition node, IReadOnlyDictionary<string, JsonElement> resolvedInputs, NodeRunScope scope, WalkerState state)
+    private static IReadOnlyDictionary<string, JsonElement> CaptureTerminalOutputs(NodeDefinition node, IReadOnlyDictionary<string, JsonElement> resolvedInputs, NodeRunScope scope)
     {
         EnsureNoSecretInTerminalOutputs(node, scope);
-        state.WorkflowOutputs = resolvedInputs;
+        return resolvedInputs;
     }
 
     private async Task MarkSkippedAsync(WorkflowRun run, NodeDefinition node, WalkerState state, CancellationToken cancellationToken, string iterationKey = NoIteration)
