@@ -214,5 +214,11 @@ public sealed class PostgresFixture : IAsyncLifetime
         builder.RegisterType<Workflows.Infrastructure.LoopProbeNode>()
             .As<CodeSpace.Core.Services.Workflows.Nodes.INodeRuntime>()
             .SingleInstance();
+
+        // Test-only node that barriers on a shared CountdownEvent to PROVE a ready frontier ran
+        // concurrently (a sequential walk would time out at the barrier). Same registration rationale.
+        builder.RegisterType<Workflows.Infrastructure.ConcurrencyProbeNode>()
+            .As<CodeSpace.Core.Services.Workflows.Nodes.INodeRuntime>()
+            .SingleInstance();
     }
 }
