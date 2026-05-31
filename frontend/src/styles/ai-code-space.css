@@ -2116,6 +2116,43 @@ textarea:-webkit-autofill {
   50%      { box-shadow: 0 0 0 6px rgba(217,119,87,0); }
 }
 
+/* "+" add-node affordance — sits just off the node's right edge, revealed on hover. Click opens the
+ * node picker (drag-to-connect stays on the source handle next to it). It's a DOM child of the node
+ * card, so hovering it keeps the card ":hover" (no hover-gap), and `nodrag`/`nopan` keep React Flow
+ * from treating the click as a node-drag / pan. */
+.acs-root .wf-rf-add {
+  position: absolute; top: 50%; right: -34px; transform: translateY(-50%);
+  width: 22px; height: 22px; border-radius: 50%;
+  display: grid; place-items: center;
+  background: var(--accent); color: #fff; border: none; cursor: pointer;
+  opacity: 0; transition: opacity .12s ease, transform .12s ease;
+  box-shadow: 0 1px 4px rgba(31,30,29,0.18); z-index: 2;
+}
+.acs-root .wf-rf-node:hover .wf-rf-add,
+.acs-root .wf-rf-loop:hover .wf-rf-add { opacity: 1; }
+.acs-root .wf-rf-add:hover { transform: translateY(-50%) scale(1.12); }
+
+/* Node picker popover opened by the "+" — a fixed menu at the click point with a full-screen mask. */
+.acs-root .wf-addmenu-mask { position: fixed; inset: 0; z-index: 1200; }
+.acs-root .wf-addmenu {
+  position: fixed; z-index: 1201; min-width: 200px; max-height: 360px; overflow-y: auto;
+  background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 6px;
+  box-shadow: 0 8px 28px rgba(31,30,29,0.16); animation: mdlMask .12s ease;
+}
+.acs-root .wf-addmenu-section + .wf-addmenu-section { margin-top: 4px; border-top: 1px solid var(--line); padding-top: 4px; }
+.acs-root .wf-addmenu-h {
+  font-size: 10px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase;
+  color: var(--muted); padding: 4px 8px 2px;
+}
+.acs-root .wf-addmenu-item {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px; width: 100%;
+  padding: 7px 8px; border: none; background: transparent; border-radius: 6px; cursor: pointer;
+  font-family: inherit; font-size: 12.5px; color: var(--ink); text-align: left;
+}
+.acs-root .wf-addmenu-item:hover { background: var(--panel-2); }
+.acs-root .wf-addmenu-item-name { font-weight: 500; }
+.acs-root .wf-addmenu-item-cat { font-size: 10.5px; color: var(--muted); flex-shrink: 0; }
+
 /* Right inspector */
 .acs-root .wf-inspector {
   border-left: 1px solid var(--line); background: var(--panel);
