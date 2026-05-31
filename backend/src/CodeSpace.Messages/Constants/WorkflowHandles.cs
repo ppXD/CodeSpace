@@ -15,4 +15,13 @@ public static class WorkflowHandles
     /// handle, the failure fails the run: the default, pre-error-routing behaviour.
     /// </summary>
     public const string Error = "error";
+
+    /// <summary>
+    /// The catch output of a <c>flow.try</c> scope container. When ANY node in the try's body fails
+    /// unhandled, the engine routes the run down edges whose <c>SourceHandle</c> is this (carrying the
+    /// failure as the try node's <c>error</c> output) instead of down the default success output — the
+    /// region-level try/catch boundary. A normal branch handle (live only when the body failed), so
+    /// distinct from <see cref="Error"/> (which is live only on a node's OWN failure).
+    /// </summary>
+    public const string Catch = "catch";
 }

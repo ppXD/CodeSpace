@@ -34,5 +34,13 @@ public enum NodeKind
     /// lifecycle phase" (run the owned body N times, keyed by iteration), not just another step.
     /// Body nodes point back via <c>NodeDefinition.ParentId</c>.
     /// </summary>
-    Loop
+    Loop,
+
+    /// <summary>
+    /// Scope container that owns a body subgraph and runs it ONCE with a try/catch boundary
+    /// (<c>flow.try</c>): an unhandled failure anywhere in the body routes the run down the container's
+    /// <c>catch</c> output (the failure becomes data on the handler branch) instead of failing the run.
+    /// Engine-dispatched like <see cref="Loop"/>; body nodes point back via <c>NodeDefinition.ParentId</c>.
+    /// </summary>
+    Try
 }

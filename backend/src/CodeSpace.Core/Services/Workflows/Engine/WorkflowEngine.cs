@@ -854,7 +854,7 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
             var wave = DrainReadyWave(state);
 
             var regular = new List<NodeDefinition>(wave.Count);
-            var loops = new List<NodeDefinition>();
+            var containers = new List<NodeDefinition>();
             foreach (var node in wave)
             {
                 if (ShouldSkip(node, state))
@@ -862,7 +862,7 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
                     await MarkSkippedAsync(run, node, state, cancellationToken).ConfigureAwait(false);
                     EnqueueDownstreamWhenReady(node, state);
                 }
-                else if (IsLoopNode(node)) loops.Add(node);
+                else if (IsContainerNode(node)) containers.Add(node);
                 else regular.Add(node);
             }
 
@@ -875,14 +875,14 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
                 AdvanceAfterNodeSettled(regular[i], outcomes[i].Status, state);
             }
 
-            // A loop container is engine-driven (dispatch on Kind, like Trigger/Terminal): it runs its
-            // body subgraph per iteration and writes its own scope/state sequentially, so it stays off
-            // the parallel batch.
-            foreach (var loop in loops)
+            // An engine-driven container (loop / try) is dispatched on Kind (like Trigger/Terminal): it
+            // runs its body sub-walk + writes its own scope/state sequentially, so it stays off the
+            // parallel batch.
+            foreach (var container in containers)
             {
-                var status = await ExecuteLoopAsync(run, definition, loop, scope, state, cancellationToken).ConfigureAwait(false);
-                state.Statuses[loop.Id] = status;
-                AdvanceAfterNodeSettled(loop, status, state);
+                var status = await ExecuteContainerAsync(run, definition, container, scope, state, cancellationToken).ConfigureAwait(false);
+                state.Statuses[container.Id] = status;
+                AdvanceAfterNodeSettled(container, status, state);
             }
 
             // Reaching a Terminal doesn't short-circuit the walker — we keep draining so any remaining
@@ -909,7 +909,14 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
         return wave;
     }
 
-    private bool IsLoopNode(NodeDefinition node) => _nodeRegistry.Resolve(node.TypeKey).Manifest.Kind == NodeKind.Loop;
+    /// <summary>An engine-driven container that owns a body subgraph (a loop or a try) — dispatched specially + run sequentially, off the parallel batch.</summary>
+    private bool IsContainerNode(NodeDefinition node) => _nodeRegistry.Resolve(node.TypeKey).Manifest.Kind is NodeKind.Loop or NodeKind.Try;
+
+    /// <summary>Dispatch a container node on its Kind: a try runs its body once with a catch boundary; a loop re-runs per iteration. Both write their own scope/state + return the node's status.</summary>
+    private Task<NodeStatus> ExecuteContainerAsync(WorkflowRun run, WorkflowDefinition definition, NodeDefinition node, NodeRunScope scope, WalkerState state, CancellationToken cancellationToken, string nodeIterationKey = NoIteration) =>
+        _nodeRegistry.Resolve(node.TypeKey).Manifest.Kind == NodeKind.Try
+            ? ExecuteTryAsync(run, definition, node, scope, state, cancellationToken, nodeIterationKey)
+            : ExecuteLoopAsync(run, definition, node, scope, state, cancellationToken, nodeIterationKey);
 
     /// <summary>
     /// The shared post-settle tail for any node (regular or loop): a failure halts the run UNLESS the
@@ -1111,6 +1118,48 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
         }
     }
 
+    /// <summary>
+    /// Run a <c>flow.try</c> scope container: execute its body subgraph ONCE; if any body node fails
+    /// unhandled, CATCH it — route the run down the container's <c>catch</c> handle (exposing the
+    /// failure as the container's <c>error</c> output) instead of failing the run; otherwise route down
+    /// the default success output. The container always settles Success (it handled the body failure,
+    /// or there was none). A body SUSPEND propagates as <see cref="RunSuspendedException"/>, parking the
+    /// run durably — resume re-enters this try and RehydrateLoopBodyAsync re-runs only the suspended
+    /// body node. Reuses <see cref="RunLoopBodyOnceAsync"/> with continue-on-error semantics (an
+    /// unhandled failure is REPORTED, not thrown — exactly the "caught" outcome), so durable suspend,
+    /// nested loops/tries, and the parallel wave all work inside a try for free. The body runs under
+    /// iteration key <c>CombineIterationKey(nodeIterationKey, tryId)</c> so its ledger rows never
+    /// collide with the surrounding scope's.
+    /// </summary>
+    private async Task<NodeStatus> ExecuteTryAsync(WorkflowRun run, WorkflowDefinition definition, NodeDefinition tryNode, NodeRunScope scope, WalkerState state, CancellationToken cancellationToken, string nodeIterationKey = NoIteration)
+    {
+        var startedAt = DateTimeOffset.UtcNow;
+        await _recordLogger.NodeStartedAsync(run.Id, tryNode.Id, nodeIterationKey, EmptyJsonBag, EmptyJsonBag, cancellationToken).ConfigureAwait(false);
+
+        var body = SubgraphView(definition, n => n.ParentId == tryNode.Id);
+        var bodyKey = CombineIterationKey(nodeIterationKey, tryNode.Id);
+
+        // Run the body once with continue-on-error: an unhandled body failure is REPORTED (Failed) here
+        // rather than thrown — that IS the caught outcome. A body suspend throws RunSuspendedException
+        // out of here (parks the run; resume rehydrates the body + re-runs only the suspended node).
+        var outcome = await RunLoopBodyOnceAsync(run, definition, body, scope, bodyKey, LoopErrorHandling.Continue, _maxParallelism, cancellationToken).ConfigureAwait(false);
+
+        // Body OK → the default success output; body failed → the `catch` handle (failure handled).
+        var hint = outcome.Failed ? WorkflowHandles.Catch : EdgeLiveness.DefaultHandle;
+        state.RoutingHints[tryNode.Id] = new HashSet<string> { hint };
+
+        var outputs = outcome.Failed
+            ? BuildErrorOutput("A node in the try body failed.", tryNode.Id)
+            : EmptyJsonBag;
+        scope.Nodes[tryNode.Id] = outputs;
+
+        await _recordLogger.NodeCompletedAsync(run.Id, tryNode.Id, nodeIterationKey, outputs, new[] { hint }, DateTimeOffset.UtcNow - startedAt, cancellationToken).ConfigureAwait(false);
+
+        // The try always succeeds (it caught the body failure, or there was none); the routing hint
+        // sends the run down `catch` or the default success path.
+        return NodeStatus.Success;
+    }
+
     /// <summary>The result of one loop-body pass: how many body nodes ran (for the node budget) and whether the pass failed under continue-on-error.</summary>
     private readonly record struct LoopBodyOutcome(int Executed, bool Failed);
 
@@ -1157,7 +1206,7 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
             var wave = DrainReadyWave(bodyState);
 
             var regular = new List<NodeDefinition>(wave.Count);
-            var loops = new List<NodeDefinition>();
+            var containers = new List<NodeDefinition>();
             foreach (var node in wave)
             {
                 if (ShouldSkip(node, bodyState))
@@ -1165,7 +1214,7 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
                     await MarkSkippedAsync(run, node, bodyState, cancellationToken, iterationKey).ConfigureAwait(false);
                     EnqueueDownstreamWhenReady(node, bodyState);
                 }
-                else if (IsLoopNode(node)) loops.Add(node);
+                else if (IsContainerNode(node)) containers.Add(node);
                 else regular.Add(node);
             }
 
@@ -1180,15 +1229,15 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
                     return new LoopBodyOutcome(executed, Failed: true);
             }
 
-            // A nested loop recurses under THIS pass's key (its body keys become "<thisKey>/<inner>#<j>",
-            // collision-free across outer passes); it writes its own scope/state sequentially, so it
-            // stays off the parallel batch — exactly like a top-level loop container.
-            foreach (var loop in loops)
+            // A nested container (loop / try) recurses under THIS pass's key (its body keys become
+            // "<thisKey>/<inner>#<j>", collision-free across outer passes); it writes its own scope/state
+            // sequentially, so it stays off the parallel batch — exactly like a top-level container.
+            foreach (var container in containers)
             {
                 executed++;
-                var status = await ExecuteLoopAsync(run, definition, loop, iterScope, bodyState, cancellationToken, iterationKey).ConfigureAwait(false);
-                bodyState.Statuses[loop.Id] = status;
-                if (AdvanceBodyNodeOrAbandon(loop, status, bodyState, errorHandling))
+                var status = await ExecuteContainerAsync(run, definition, container, iterScope, bodyState, cancellationToken, iterationKey).ConfigureAwait(false);
+                bodyState.Statuses[container.Id] = status;
+                if (AdvanceBodyNodeOrAbandon(container, status, bodyState, errorHandling))
                     return new LoopBodyOutcome(executed, Failed: true);
             }
         }
