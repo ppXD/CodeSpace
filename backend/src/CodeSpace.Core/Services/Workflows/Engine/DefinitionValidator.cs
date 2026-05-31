@@ -164,11 +164,11 @@ public sealed class DefinitionValidator : IScopedDependency
 
             foreach (var next in adjacency.GetValueOrDefault(current) ?? new List<string>()) stack.Push(next);
 
-            // A reachable loop container makes its whole body reachable — enter it so loop_start +
-            // body nodes (which have no top-level incoming edge) aren't flagged unreachable. The
-            // body's own internal connectivity is covered by CheckAcyclic. TryGetValue guards the
-            // case where `current` is an edge target that doesn't exist (CheckEdgeEndpoints flags it).
-            if (nodeById.TryGetValue(current, out var currentNode) && SafeKind(currentNode) == NodeKind.Loop)
+            // A reachable container (loop / try) makes its whole body reachable — enter it so the
+            // body-start + body nodes (which have no top-level incoming edge) aren't flagged
+            // unreachable. The body's own internal connectivity is covered by CheckAcyclic. TryGetValue
+            // guards the case where `current` is an edge target that doesn't exist (CheckEdgeEndpoints flags it).
+            if (nodeById.TryGetValue(current, out var currentNode) && SafeKind(currentNode) is NodeKind.Loop or NodeKind.Try)
                 foreach (var bodyNode in definition.Nodes.Where(n => n.ParentId == current)) stack.Push(bodyNode.Id);
         }
 

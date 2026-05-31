@@ -30,7 +30,9 @@ public class BuiltinPluginModuleTests
         module.Nodes.ShouldContain(typeof(CodeSpace.Core.Services.Workflows.Nodes.Builtin.FlowSubworkflowNode));
         module.Nodes.ShouldContain(typeof(CodeSpace.Core.Services.Workflows.Nodes.Builtin.FlowLoopNode));
         module.Nodes.ShouldContain(typeof(CodeSpace.Core.Services.Workflows.Nodes.Builtin.FlowLoopStartNode));
-        module.Nodes.Count.ShouldBe(11);
+        module.Nodes.ShouldContain(typeof(CodeSpace.Core.Services.Workflows.Nodes.Builtin.FlowTryNode));
+        module.Nodes.ShouldContain(typeof(CodeSpace.Core.Services.Workflows.Nodes.Builtin.FlowTryStartNode));
+        module.Nodes.Count.ShouldBe(13);
         module.RunSourceMatchers.ShouldBeEmpty("the manual trigger subscribes to no event, so Core Flow still ships zero matchers");
     }
 
@@ -70,8 +72,8 @@ public class BuiltinPluginModuleTests
     [Fact]
     public void All_four_builtin_plugins_together_cover_every_builtin_node()
     {
-        // Sum of all four = 11 nodes. If a node escapes its domain plugin OR a new node lands
-        // without being assigned to one, this test fails — keeps the catalog accountable.
+        // If a node escapes its domain plugin OR a new node lands without being assigned to one,
+        // this test fails — keeps the catalog accountable.
         IReadOnlyList<IPluginModule> all = new IPluginModule[]
         {
             new CoreFlowPlugin(),
@@ -81,6 +83,6 @@ public class BuiltinPluginModuleTests
         };
 
         var total = all.SelectMany(p => p.Nodes).Distinct().Count();
-        total.ShouldBe(17, "17 builtin node types across 4 domain plugins (Core Flow gained flow.loop + flow.loop_start) — adjust this number when adding a builtin");
+        total.ShouldBe(19, "19 builtin node types across 4 domain plugins (Core Flow gained flow.try + flow.try_start) — adjust this number when adding a builtin");
     }
 }

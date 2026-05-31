@@ -17,4 +17,11 @@ public class WorkflowHandlesTests
     {
         WorkflowHandles.Error.ShouldBe("error");
     }
+
+    [Fact]
+    public void Catch_handle_literal_is_pinned()
+    {
+        // Persisted in flow.try catch edges' SourceHandle; a rename orphans every saved try/catch.
+        WorkflowHandles.Catch.ShouldBe("catch");
+    }
 }
