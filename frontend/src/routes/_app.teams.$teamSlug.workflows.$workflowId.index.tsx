@@ -332,7 +332,7 @@ function Editor({ workflow, manifests, onBackToList, saving, onSave }: EditorPro
       // so a normal edge and an error edge to the same target can coexist).
       const exists = eds.some((e) => e.source === params.source && e.target === params.target && (e.sourceHandle ?? null) === (params.sourceHandle ?? null));
       if (exists) return eds;
-      return addEdge({ ...params, type: "smoothstep", animated: true }, eds);
+      return addEdge({ ...params, type: "default", animated: true }, eds);
     });
     setUnsaved(true);
   };
@@ -426,7 +426,7 @@ function Editor({ workflow, manifests, onBackToList, saving, onSave }: EditorPro
     const startId = isLoop ? uniqueNodeId("flow.loop_start", [...nodes, newNode]) : null;
     const startNode: Node<WorkflowNodeData> | null = startId
       ? {
-          id: startId, type: "wf", parentId: id, position: { x: 40, y: 72 }, zIndex: 1,
+          id: startId, type: "wf", parentId: id, position: { x: 40, y: 90 }, zIndex: 1,
           data: {
             nodeId: startId, typeKey: "flow.loop_start", displayName: startManifest?.displayName ?? "Loop start",
             iconKey: startManifest?.iconKey ?? "play", kind: "Regular", category: startManifest?.category ?? "Logic", label: null,
@@ -453,7 +453,7 @@ function Editor({ workflow, manifests, onBackToList, saving, onSave }: EditorPro
         // generated id. Cast to Connection to satisfy the overload — sourceHandle /
         // targetHandle null is fine because our nodes only have one handle per side.
         setEdges((eds) => addEdge(
-          { source: selectedId, target: id, sourceHandle: null, targetHandle: null, type: "smoothstep", animated: true } as Connection,
+          { source: selectedId, target: id, sourceHandle: null, targetHandle: null, type: "default", animated: true } as Connection,
           eds,
         ));
       }
@@ -463,10 +463,11 @@ function Editor({ workflow, manifests, onBackToList, saving, onSave }: EditorPro
   const computeAddPosition = (_manifest: NodeManifestDto, screen?: { x: number; y: number }) => {
     if (screen) return screenToFlowPosition(screen);
 
-    // Place below the currently-selected node when one exists — natural "next step" UX.
+    // Place to the RIGHT of the currently-selected node when one exists — the left→right "next step"
+    // flow (Dify-style horizontal layout).
     if (selectedId) {
       const src = nodes.find((n) => n.id === selectedId);
-      if (src) return { x: src.position.x, y: src.position.y + 200 };
+      if (src) return { x: src.position.x + 320, y: src.position.y };
     }
 
     // Otherwise drop into the visible centre of the canvas. Convert by un-applying the
@@ -820,10 +821,10 @@ function Editor({ workflow, manifests, onBackToList, saving, onSave }: EditorPro
             // children — swallowing every pointer event aimed at a child handle, so you couldn't draw an
             // edge inside the loop. Turning elevate-on-select off keeps the container below its body.
             elevateNodesOnSelect={false}
-            connectionLineType={ConnectionLineType.SmoothStep}
+            connectionLineType={ConnectionLineType.Bezier}
             connectionLineStyle={{ stroke: "#D97757", strokeWidth: 2 }}
             defaultEdgeOptions={{
-              type: "smoothstep",
+              type: "default",
               animated: true,
               markerEnd: { type: MarkerType.ArrowClosed, color: "#B5B0A2", width: 16, height: 16 },
             }}
@@ -1292,7 +1293,7 @@ function definitionToRfEdges(def: WorkflowDefinition): Edge[] {
       // Round-trip the source handle so error (and any future named-handle) edges re-anchor to
       // the right port on load — a null handle stays the node's default output.
       sourceHandle: e.sourceHandle ?? undefined,
-      type: "smoothstep",
+      type: "default",
       animated: isError || undefined,
       label: e.condition ?? undefined,
       ...(isError ? { className: "wf-rf-edge-error" } : {}),

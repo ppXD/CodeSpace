@@ -45,14 +45,14 @@ export function WorkflowNode({ data, selected }: NodeProps) {
   if (d.kind === "Loop") {
     return (
       <div className="wf-rf-loop" data-selected={selected}>
-        <Handle type="target" position={Position.Top} className="wf-rf-handle" />
+        <Handle type="target" position={Position.Left} className="wf-rf-handle" />
         <div className="wf-rf-loop-head">
           <span className="wf-rf-loop-icon">{iconFor(d)}</span>
           <span className="wf-rf-loop-id">{d.nodeId}</span>
           <span className="wf-rf-loop-type">{d.label ?? d.displayName}</span>
         </div>
-        <Handle type="source" position={Position.Bottom} className="wf-rf-handle" />
-        <Handle id={ERROR_HANDLE} type="source" position={Position.Right} className="wf-rf-handle wf-rf-handle-error" title="On error → connect to a handler node" />
+        <Handle type="source" position={Position.Right} className="wf-rf-handle" />
+        <Handle id={ERROR_HANDLE} type="source" position={Position.Bottom} className="wf-rf-handle wf-rf-handle-error" title="On error → connect to a handler node" />
       </div>
     );
   }
@@ -64,7 +64,7 @@ export function WorkflowNode({ data, selected }: NodeProps) {
 
   return (
     <div className="wf-rf-node" data-kind={d.kind.toLowerCase()} data-selected={selected}>
-      {d.kind !== "Trigger" && !isLoopStart && <Handle type="target" position={Position.Top} className="wf-rf-handle" />}
+      {d.kind !== "Trigger" && !isLoopStart && <Handle type="target" position={Position.Left} className="wf-rf-handle" />}
       <div className="wf-rf-node-bar" />
       <div className="wf-rf-node-icon">{iconFor(d)}</div>
       <div className="wf-rf-node-body">
@@ -87,14 +87,15 @@ export function WorkflowNode({ data, selected }: NodeProps) {
           </ul>
         )}
       </div>
-      {d.kind !== "Terminal" && <Handle type="source" position={Position.Bottom} className="wf-rf-handle" />}
+      {d.kind !== "Terminal" && <Handle type="source" position={Position.Right} className="wf-rf-handle" />}
       {/* Error output — connect it to a handler node to catch this node's failure (route the run
-          there instead of failing it). Only meaningful on regular nodes that can fail-and-continue. */}
+          there instead of failing it). Only meaningful on regular nodes that can fail-and-continue.
+          Sits on the BOTTOM edge (the right edge is the node's normal left→right output). */}
       {d.kind === "Regular" && !isLoopStart && (
         <Handle
           id={ERROR_HANDLE}
           type="source"
-          position={Position.Right}
+          position={Position.Bottom}
           className="wf-rf-handle wf-rf-handle-error"
           title="On error → connect to a handler node"
         />
