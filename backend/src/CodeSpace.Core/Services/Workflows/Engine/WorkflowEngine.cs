@@ -926,6 +926,31 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
     }
 
     /// <summary>
+    /// The loop-body variant of <see cref="AdvanceAfterNodeSettled"/>: a suspend always parks the run,
+    /// but an UNHANDLED failure honours the loop's error policy — <see cref="LoopErrorHandling.Terminate"/>
+    /// throws (fails the loop), <see cref="LoopErrorHandling.Continue"/> returns <c>true</c> to tell the
+    /// pass to abandon the rest of this iteration (the loop counts it as a failed pass + moves on). A
+    /// node with its own <c>error</c> edge is "handled" regardless of policy. Returns <c>true</c> ONLY
+    /// for the continue-abandon case; otherwise releases the ready downstream and returns <c>false</c>.
+    /// </summary>
+    private bool AdvanceBodyNodeOrAbandon(NodeDefinition node, NodeStatus status, WalkerState bodyState, LoopErrorHandling errorHandling)
+    {
+        if (status == NodeStatus.Failure && !HasErrorEdge(node, bodyState))
+        {
+            if (errorHandling == LoopErrorHandling.Terminate)
+                throw new NodeFailureException($"Node '{node.Id}' failed.");
+
+            return true;   // continue: abandon the rest of this pass
+        }
+
+        if (status == NodeStatus.Suspended)
+            throw new RunSuspendedException(node.Id);
+
+        EnqueueDownstreamWhenReady(node, bodyState);
+        return false;
+    }
+
+    /// <summary>
     /// Execute one wave's regular nodes, returning their effects in the SAME order (the caller merges
     /// single-threaded). A single ready node runs on THIS scope — the fast, behaviour-identical path
     /// for a linear workflow (no child scope, no semaphore). A genuine fan-out (≥2 ready nodes) runs
@@ -934,17 +959,17 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
     /// concurrent execution can't race on the shared collections, and each node's own DbContext /
     /// record logger keeps EF change-trackers thread-isolated.
     /// </summary>
-    private async Task<NodeRunOutcome[]> RunReadyNodesAsync(WorkflowRun run, IReadOnlyList<NodeDefinition> nodes, NodeRunScope scope, WalkerState state, CancellationToken cancellationToken)
+    private async Task<NodeRunOutcome[]> RunReadyNodesAsync(WorkflowRun run, IReadOnlyList<NodeDefinition> nodes, NodeRunScope scope, WalkerState state, CancellationToken cancellationToken, string iterationKey = NoIteration)
     {
         if (nodes.Count == 0) return [];
 
         if (nodes.Count == 1)
-            return [await ExecuteNodeAsync(run, nodes[0], scope, state, cancellationToken).ConfigureAwait(false)];
+            return [await ExecuteNodeAsync(run, nodes[0], scope, state, cancellationToken, iterationKey).ConfigureAwait(false)];
 
         using var gate = new SemaphoreSlim(_maxParallelism);
         var tasks = new Task<NodeRunOutcome>[nodes.Count];
         for (var i = 0; i < nodes.Count; i++)
-            tasks[i] = RunNodeInChildScopeAsync(run, nodes[i], scope, state, gate, cancellationToken);
+            tasks[i] = RunNodeInChildScopeAsync(run, nodes[i], scope, state, gate, cancellationToken, iterationKey);
 
         return await Task.WhenAll(tasks).ConfigureAwait(false);
     }
@@ -956,14 +981,14 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
     /// touch one EF change-tracker. It reads the shared (read-only-during-the-wave) scope/state and
     /// returns its effects for the caller to merge.
     /// </summary>
-    private async Task<NodeRunOutcome> RunNodeInChildScopeAsync(WorkflowRun run, NodeDefinition node, NodeRunScope scope, WalkerState state, SemaphoreSlim gate, CancellationToken cancellationToken)
+    private async Task<NodeRunOutcome> RunNodeInChildScopeAsync(WorkflowRun run, NodeDefinition node, NodeRunScope scope, WalkerState state, SemaphoreSlim gate, CancellationToken cancellationToken, string iterationKey = NoIteration)
     {
         await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
             await using var childScope = _lifetimeScope.BeginLifetimeScope();
             var nodeEngine = childScope.Resolve<WorkflowEngine>();
-            return await nodeEngine.ExecuteNodeAsync(run, node, scope, state, cancellationToken).ConfigureAwait(false);
+            return await nodeEngine.ExecuteNodeAsync(run, node, scope, state, cancellationToken, iterationKey).ConfigureAwait(false);
         }
         finally
         {
@@ -1083,9 +1108,10 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
     private readonly record struct LoopBodyOutcome(int Executed, bool Failed);
 
     /// <summary>
-    /// Run the loop body subgraph for ONE iteration, reusing the per-node machinery (ShouldSkip /
-    /// ExecuteNodeAsync / EnqueueDownstream) with the iteration key set so each pass lands under its
-    /// own ledger rows. Returns the body nodes executed + whether the pass failed. An unhandled body
+    /// Run the loop body subgraph for ONE iteration as a parallel WAVE — the same model as the
+    /// top-level walk, with the iteration key set so each pass lands under its own ledger rows.
+    /// Independent body nodes run concurrently (each in its own DI scope); a single-node body keeps the
+    /// sequential in-scope fast path. Returns the body nodes executed + whether the pass failed. An unhandled body
     /// failure (a node that fails with no <c>error</c> edge of its own) is governed by
     /// <paramref name="errorHandling"/>: <see cref="LoopErrorHandling.Terminate"/> throws (the loop
     /// fails); <see cref="LoopErrorHandling.Continue"/> abandons the rest of this pass and reports
@@ -1107,63 +1133,57 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
         EnqueueReadyFrontier(bodyState, body);
         var executed = 0;
 
+        // Walk the body by WAVES — the same model as the top-level walk (WalkGraphAsync): drain the
+        // ready frontier, settle skips, run the independent regular body nodes as a bounded parallel
+        // batch (each in its own DI scope, under THIS pass's iteration key), then nested loops
+        // sequentially. A single ready body node keeps the in-scope fast path, so a linear body is
+        // behaviour-identical. The body's twists vs the top level: count executions for the loop's
+        // node budget, and honour the loop's error policy on an unhandled failure (terminate ⇒ throw;
+        // continue ⇒ abandon the rest of this pass + report Failed so the loop skips to the next pass).
+        // A nested-loop / body suspend throws RunSuspendedException, parking the whole run durably; on
+        // resume RehydrateLoopBodyAsync settles the finished body nodes (incl. parallel siblings) and
+        // re-runs only the suspended one.
         while (bodyState.Ready.Count > 0)
         {
             cancellationToken.ThrowIfCancellationRequested();
 
-            var nodeId = bodyState.Ready.Dequeue();
-            if (bodyState.Statuses.ContainsKey(nodeId)) continue;
+            var wave = DrainReadyWave(bodyState);
 
-            var node = bodyState.NodeById[nodeId];
-
-            if (ShouldSkip(node, bodyState))
+            var regular = new List<NodeDefinition>(wave.Count);
+            var loops = new List<NodeDefinition>();
+            foreach (var node in wave)
             {
-                await MarkSkippedAsync(run, node, bodyState, cancellationToken, iterationKey).ConfigureAwait(false);
-                EnqueueDownstreamWhenReady(node, bodyState);
-                continue;
+                if (ShouldSkip(node, bodyState))
+                {
+                    await MarkSkippedAsync(run, node, bodyState, cancellationToken, iterationKey).ConfigureAwait(false);
+                    EnqueueDownstreamWhenReady(node, bodyState);
+                }
+                else if (IsLoopNode(node)) loops.Add(node);
+                else regular.Add(node);
             }
 
-            executed++;
-
-            // A nested loop recurses: ExecuteLoopAsync runs the inner loop under THIS pass's key, so its
-            // body keys become "<thisKey>/<inner>#<j>" (collision-free across outer passes) and it
-            // rehydrates its own subtree on resume. Its outputs land in iterScope.Nodes for downstream
-            // body nodes. Every other node runs the per-node path, RETURNING its effects to merge into
-            // this pass's iterScope/bodyState single-threaded (same seam as the top-level walk). A
-            // nested-loop suspend throws RunSuspendedException out of ExecuteLoopAsync and propagates
-            // here, parking the whole run durably.
-            NodeStatus status;
-            if (_nodeRegistry.Resolve(node.TypeKey).Manifest.Kind == NodeKind.Loop)
+            // Regular body nodes run concurrently under this pass's iteration key; all of them ran, so
+            // they all count against the budget. Merge + advance in drain order (single-threaded).
+            var outcomes = await RunReadyNodesAsync(run, regular, iterScope, bodyState, cancellationToken, iterationKey).ConfigureAwait(false);
+            executed += regular.Count;
+            for (var i = 0; i < regular.Count; i++)
             {
-                status = await ExecuteLoopAsync(run, definition, node, iterScope, bodyState, cancellationToken, iterationKey).ConfigureAwait(false);
-                bodyState.Statuses[nodeId] = status;
-            }
-            else
-            {
-                var outcome = await ExecuteNodeAsync(run, node, iterScope, bodyState, cancellationToken, iterationKey).ConfigureAwait(false);
-                MergeNodeOutcome(node, outcome, iterScope, bodyState);
-                status = outcome.Status;
+                MergeNodeOutcome(regular[i], outcomes[i], iterScope, bodyState);
+                if (AdvanceBodyNodeOrAbandon(regular[i], outcomes[i].Status, bodyState, errorHandling))
+                    return new LoopBodyOutcome(executed, Failed: true);
             }
 
-            // A node with its own error edge routes there regardless of the loop's policy (it's
-            // "handled"). An OTHERWISE-unhandled failure: terminate ⇒ fail the loop; continue ⇒
-            // abandon this pass (node.failed is already persisted) and let the loop move on.
-            if (status == NodeStatus.Failure && !HasErrorEdge(node, bodyState))
+            // A nested loop recurses under THIS pass's key (its body keys become "<thisKey>/<inner>#<j>",
+            // collision-free across outer passes); it writes its own scope/state sequentially, so it
+            // stays off the parallel batch — exactly like a top-level loop container.
+            foreach (var loop in loops)
             {
-                if (errorHandling == LoopErrorHandling.Terminate)
-                    throw new NodeFailureException($"Node '{nodeId}' failed.");
-
-                return new LoopBodyOutcome(executed, Failed: true);
+                executed++;
+                var status = await ExecuteLoopAsync(run, definition, loop, iterScope, bodyState, cancellationToken, iterationKey).ConfigureAwait(false);
+                bodyState.Statuses[loop.Id] = status;
+                if (AdvanceBodyNodeOrAbandon(loop, status, bodyState, errorHandling))
+                    return new LoopBodyOutcome(executed, Failed: true);
             }
-
-            // A body node parked the run (approval / sleep / callback / sub-workflow). The wait row +
-            // node.suspended were already persisted under THIS iteration key by SuspendNodeAsync; let
-            // the suspend propagate so the run lands Suspended (not Failure). On resume, ExecuteLoopAsync
-            // re-enters this exact iteration and RehydrateLoopBodyAsync re-runs only this node.
-            if (status == NodeStatus.Suspended)
-                throw new RunSuspendedException(nodeId);
-
-            EnqueueDownstreamWhenReady(node, bodyState);
         }
 
         return new LoopBodyOutcome(executed, Failed: false);
