@@ -2,6 +2,8 @@ import { createPortal } from "react-dom";
 
 import type { NodeManifestDto } from "@/api/workflows";
 
+import { nodeIconFor } from "./nodeIcon";
+
 export interface NodeAddMenuProps {
   /** Screen point to anchor the popover at (the "+" click coords). */
   at: { x: number; y: number };
@@ -26,6 +28,7 @@ export function NodeAddMenu({ at, manifests, onPick, onClose }: NodeAddMenuProps
         <div className="wf-addmenu-h">{title}</div>
         {items.map((m) => (
           <button key={m.typeKey} type="button" className="wf-addmenu-item" onClick={() => onPick(m)}>
+            <span className="wf-addmenu-item-icon">{nodeIconFor(m, 13)}</span>
             <span className="wf-addmenu-item-name">{m.displayName}</span>
             <span className="wf-addmenu-item-cat">{m.category}</span>
           </button>

@@ -2137,22 +2137,34 @@ textarea:-webkit-autofill {
  * wouldn't match. The theme vars live on :root, so var(--…) still resolves. Keep these selectors global. */
 .wf-addmenu-mask { position: fixed; inset: 0; z-index: 1200; }
 .wf-addmenu {
-  position: fixed; z-index: 1201; min-width: 200px; max-height: 360px; overflow-y: auto;
+  position: fixed; z-index: 1201; min-width: 220px; max-height: 360px; overflow-y: auto;
   background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 6px;
   box-shadow: 0 8px 28px rgba(31,30,29,0.16); animation: mdlMask .12s ease;
+  /* Themed scrollbar — the popover is portaled to <body>, outside the `.acs-root` scrollbar rules,
+     so it would otherwise show the dark OS-default bar. Mirror the warm `.acs-root` scrollbar here. */
+  scrollbar-width: thin; scrollbar-color: rgba(0, 0, 0, .16) transparent;
 }
+.wf-addmenu::-webkit-scrollbar { width: 10px; height: 10px; }
+.wf-addmenu::-webkit-scrollbar-track { background: transparent; }
+.wf-addmenu::-webkit-scrollbar-thumb { background: rgba(0, 0, 0, .16); border-radius: 5px; border: 2px solid transparent; background-clip: content-box; }
+.wf-addmenu::-webkit-scrollbar-thumb:hover { background: rgba(0, 0, 0, .28); }
 .wf-addmenu-section + .wf-addmenu-section { margin-top: 4px; border-top: 1px solid var(--line); padding-top: 4px; }
 .wf-addmenu-h {
   font-size: 10px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase;
   color: var(--muted); padding: 4px 8px 2px;
 }
 .wf-addmenu-item {
-  display: flex; align-items: center; justify-content: space-between; gap: 10px; width: 100%;
-  padding: 7px 8px; border: none; background: transparent; border-radius: 6px; cursor: pointer;
+  display: flex; align-items: center; gap: 9px; width: 100%;
+  padding: 6px 8px; border: none; background: transparent; border-radius: 6px; cursor: pointer;
   font-family: inherit; font-size: 12.5px; color: var(--ink); text-align: left;
 }
 .wf-addmenu-item:hover { background: var(--panel-2); }
-.wf-addmenu-item-name { font-weight: 500; }
+.wf-addmenu-item-icon {
+  width: 22px; height: 22px; border-radius: 4px; display: grid; place-items: center;
+  background: var(--panel); border: 1px solid var(--line); color: var(--ink-2); flex-shrink: 0;
+}
+.wf-addmenu-item:hover .wf-addmenu-item-icon { border-color: var(--accent); color: var(--accent); }
+.wf-addmenu-item-name { font-weight: 500; flex: 1; min-width: 0; }
 .wf-addmenu-item-cat { font-size: 10.5px; color: var(--muted); flex-shrink: 0; }
 
 /* Right inspector */
