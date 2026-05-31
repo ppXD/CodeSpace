@@ -20,6 +20,9 @@ public readonly record struct LoopPlan(int MaxIterations, TimeSpan WallClock, in
     /// <summary>Ceiling on total body-node executions across all iterations (guards a big body × many passes).</summary>
     public const int NodeExecutionBudget = 10_000;
 
+    /// <summary>Max loop-in-loop nesting depth (stack + runaway guard; mirrors the sub-workflow depth cap).</summary>
+    public const int MaxNestingDepth = 8;
+
     /// <summary>Clamp the author's config into a safe plan. A missing/zero/negative max becomes 1; anything over the ceiling is capped.</summary>
     public static LoopPlan From(LoopConfig config) =>
         new(Math.Clamp(config.MaxIterations <= 0 ? 1 : config.MaxIterations, 1, MaxIterationsCeiling), WallClockBudget, NodeExecutionBudget, ParseErrorHandling(config.ErrorHandling));
