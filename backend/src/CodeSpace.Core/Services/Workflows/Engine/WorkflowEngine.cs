@@ -89,6 +89,10 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
     internal static int ParseMaxParallelism(string? raw) =>
         int.TryParse(raw, out var value) ? Math.Clamp(value, 1, MaxParallelismCeiling) : DefaultMaxParallelism;
 
+    /// <summary>Resolve a loop body's effective max-parallelism: a per-loop override (clamped to [1, ceiling]) wins; null inherits the engine-wide value. Pure + internal so it's unit-pinned.</summary>
+    internal static int ResolveBodyParallelism(int? loopOverride, int engineDefault) =>
+        loopOverride is { } v ? Math.Clamp(v, 1, MaxParallelismCeiling) : engineDefault;
+
     public async Task ExecuteRunAsync(Guid runId, CancellationToken cancellationToken)
     {
         // Atomic claim: Enqueued → Running.
@@ -954,19 +958,20 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
     /// Execute one wave's regular nodes, returning their effects in the SAME order (the caller merges
     /// single-threaded). A single ready node runs on THIS scope — the fast, behaviour-identical path
     /// for a linear workflow (no child scope, no semaphore). A genuine fan-out (≥2 ready nodes) runs
-    /// each node in its OWN DI scope, bounded by <see cref="_maxParallelism"/>: the nodes only READ the
-    /// shared scope/state during the wave (writes happen in the caller's single-threaded merge), so
-    /// concurrent execution can't race on the shared collections, and each node's own DbContext /
-    /// record logger keeps EF change-trackers thread-isolated.
+    /// each node in its OWN DI scope, bounded by <paramref name="maxParallelism"/> (null ⇒ the
+    /// engine-wide <see cref="_maxParallelism"/>; a loop passes its own per-loop cap): the nodes only
+    /// READ the shared scope/state during the wave (writes happen in the caller's single-threaded
+    /// merge), so concurrent execution can't race on the shared collections, and each node's own
+    /// DbContext / record logger keeps EF change-trackers thread-isolated.
     /// </summary>
-    private async Task<NodeRunOutcome[]> RunReadyNodesAsync(WorkflowRun run, IReadOnlyList<NodeDefinition> nodes, NodeRunScope scope, WalkerState state, CancellationToken cancellationToken, string iterationKey = NoIteration)
+    private async Task<NodeRunOutcome[]> RunReadyNodesAsync(WorkflowRun run, IReadOnlyList<NodeDefinition> nodes, NodeRunScope scope, WalkerState state, CancellationToken cancellationToken, string iterationKey = NoIteration, int? maxParallelism = null)
     {
         if (nodes.Count == 0) return [];
 
         if (nodes.Count == 1)
             return [await ExecuteNodeAsync(run, nodes[0], scope, state, cancellationToken, iterationKey).ConfigureAwait(false)];
 
-        using var gate = new SemaphoreSlim(_maxParallelism);
+        using var gate = new SemaphoreSlim(maxParallelism ?? _maxParallelism);
         var tasks = new Task<NodeRunOutcome>[nodes.Count];
         for (var i = 0; i < nodes.Count; i++)
             tasks[i] = RunNodeInChildScopeAsync(run, nodes[i], scope, state, gate, cancellationToken, iterationKey);
@@ -1041,6 +1046,8 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
             var plan = LoopPlan.From(config);
             var body = SubgraphView(definition, n => n.ParentId == loopNode.Id);
             var deadline = startedAt + plan.WallClock;
+            // A per-loop maxParallelism throttles THIS body's wave (e.g. a rate-limited API); null inherits the engine-wide cap.
+            var bodyParallelism = ResolveBodyParallelism(plan.MaxParallelism, _maxParallelism);
 
             // Resume-aware: a body node may have suspended on an earlier engine invocation. Rebuild how
             // far the loop got (completed iterations + threaded loop vars + failure count) from the
@@ -1063,7 +1070,7 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
                 var iterScope = BuildLoopScope(scope, scope.Nodes, loopVars, i);
                 // Body iteration key extends THIS loop's node key: "<loopId>#<i>" at top level, or
                 // "<outerKey>/<loopId>#<i>" when nested — so nested iterations never collide across passes.
-                var outcome = await RunLoopBodyOnceAsync(run, definition, body, iterScope, CombineIterationKey(nodeIterationKey, $"{loopNode.Id}#{i}"), plan.ErrorHandling, cancellationToken).ConfigureAwait(false);
+                var outcome = await RunLoopBodyOnceAsync(run, definition, body, iterScope, CombineIterationKey(nodeIterationKey, $"{loopNode.Id}#{i}"), plan.ErrorHandling, bodyParallelism, cancellationToken).ConfigureAwait(false);
                 nodeBudget -= outcome.Executed;
 
                 if (nodeBudget < 0)
@@ -1120,7 +1127,7 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
     /// resume so the suspended node re-runs with its payload and the already-finished body nodes
     /// don't. A nested loop recurses into <see cref="ExecuteLoopAsync"/> under this pass's key.
     /// </summary>
-    private async Task<LoopBodyOutcome> RunLoopBodyOnceAsync(WorkflowRun run, WorkflowDefinition definition, WorkflowDefinition body, NodeRunScope iterScope, string iterationKey, LoopErrorHandling errorHandling, CancellationToken cancellationToken)
+    private async Task<LoopBodyOutcome> RunLoopBodyOnceAsync(WorkflowRun run, WorkflowDefinition definition, WorkflowDefinition body, NodeRunScope iterScope, string iterationKey, LoopErrorHandling errorHandling, int maxParallelism, CancellationToken cancellationToken)
     {
         var bodyState = new WalkerState(body);
 
@@ -1164,7 +1171,7 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
 
             // Regular body nodes run concurrently under this pass's iteration key; all of them ran, so
             // they all count against the budget. Merge + advance in drain order (single-threaded).
-            var outcomes = await RunReadyNodesAsync(run, regular, iterScope, bodyState, cancellationToken, iterationKey).ConfigureAwait(false);
+            var outcomes = await RunReadyNodesAsync(run, regular, iterScope, bodyState, cancellationToken, iterationKey, maxParallelism).ConfigureAwait(false);
             executed += regular.Count;
             for (var i = 0; i < regular.Count; i++)
             {

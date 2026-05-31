@@ -78,6 +78,7 @@ public class LoopConfigTests
         config!.LoopVariables.ShouldBeEmpty();
         config.Termination.ShouldBeNull();
         config.MaxIterations.ShouldBe(10);
+        config.MaxParallelism.ShouldBeNull("omitted ⇒ inherit the engine-wide parallelism (no behaviour/hash change for existing configs)");
 
         // The optional per-iteration update ref is null unless the author sets it.
         var withVar = JsonSerializer.Deserialize<LoopConfig>("""{ "loopVariables": [ { "name": "n", "value": 0 } ] }""", Options);
@@ -105,7 +106,8 @@ public class LoopConfigTests
                   { "ref": "{{nodes.llm.outputs.done}}", "op": "is_not_empty" }
                 ]
               },
-              "maxIterations": 50
+              "maxIterations": 50,
+              "maxParallelism": 4
             }
             """;
 
@@ -113,6 +115,7 @@ public class LoopConfigTests
 
         config.ShouldNotBeNull();
         config!.MaxIterations.ShouldBe(50);
+        config.MaxParallelism.ShouldBe(4);
         config.LoopVariables.Count.ShouldBe(3);
 
         config.LoopVariables[0].Ref.ShouldBe("{{input.start}}");

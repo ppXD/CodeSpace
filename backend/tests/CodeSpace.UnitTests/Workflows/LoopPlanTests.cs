@@ -40,4 +40,12 @@ public class LoopPlanTests
         plan.WallClock.ShouldBe(LoopPlan.WallClockBudget);
         plan.NodeBudget.ShouldBe(LoopPlan.NodeExecutionBudget);
     }
+
+    [Theory]
+    [InlineData(null, null)]   // absent ⇒ null (engine inherits the global default)
+    [InlineData(1, 1)]
+    [InlineData(4, 4)]
+    [InlineData(999, 999)]     // carried RAW — the engine (ResolveBodyParallelism) does the clamp, not LoopPlan
+    public void Carries_max_parallelism_raw_for_the_engine_to_resolve(int? configured, int? expected) =>
+        LoopPlan.From(new LoopConfig { MaxParallelism = configured }).MaxParallelism.ShouldBe(expected);
 }

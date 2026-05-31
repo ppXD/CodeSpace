@@ -49,4 +49,16 @@ public class WorkflowEngineParallelismTests
     {
         WorkflowEngine.ParseMaxParallelism(raw).ShouldBe(WorkflowEngine.MaxParallelismCeiling);
     }
+
+    [Theory]
+    [InlineData(null, 8, 8)]     // no per-loop override → inherit the engine-wide value
+    [InlineData(2, 8, 2)]        // override wins over the engine default
+    [InlineData(16, 8, 16)]      // override can exceed the default (still ≤ ceiling)
+    [InlineData(0, 8, 1)]        // override floor: 0 → 1
+    [InlineData(-3, 8, 1)]       // negative → 1
+    [InlineData(999, 8, 64)]     // override above the ceiling → clamped down
+    public void ResolveBodyParallelism_prefers_a_clamped_override_else_inherits(int? loopOverride, int engineDefault, int expected)
+    {
+        WorkflowEngine.ResolveBodyParallelism(loopOverride, engineDefault).ShouldBe(expected);
+    }
 }

@@ -9,7 +9,7 @@ namespace CodeSpace.Core.Services.Workflows.Engine;
 /// (iterations × body size). Mirrors <c>RetryPlan</c>: a pure value with all clamping in one place so
 /// the engine never trusts an unbounded config value.
 /// </summary>
-public readonly record struct LoopPlan(int MaxIterations, TimeSpan WallClock, int NodeBudget, LoopErrorHandling ErrorHandling)
+public readonly record struct LoopPlan(int MaxIterations, TimeSpan WallClock, int NodeBudget, LoopErrorHandling ErrorHandling, int? MaxParallelism)
 {
     /// <summary>Absolute cap on iterations regardless of config — the primary runaway guard.</summary>
     public const int MaxIterationsCeiling = 1000;
@@ -23,9 +23,9 @@ public readonly record struct LoopPlan(int MaxIterations, TimeSpan WallClock, in
     /// <summary>Max loop-in-loop nesting depth (stack + runaway guard; mirrors the sub-workflow depth cap).</summary>
     public const int MaxNestingDepth = 8;
 
-    /// <summary>Clamp the author's config into a safe plan. A missing/zero/negative max becomes 1; anything over the ceiling is capped.</summary>
+    /// <summary>Clamp the author's config into a safe plan. A missing/zero/negative max becomes 1; anything over the ceiling is capped. <see cref="MaxParallelism"/> is carried RAW (null = inherit the engine-wide setting); the engine resolves + clamps it per loop.</summary>
     public static LoopPlan From(LoopConfig config) =>
-        new(Math.Clamp(config.MaxIterations <= 0 ? 1 : config.MaxIterations, 1, MaxIterationsCeiling), WallClockBudget, NodeExecutionBudget, ParseErrorHandling(config.ErrorHandling));
+        new(Math.Clamp(config.MaxIterations <= 0 ? 1 : config.MaxIterations, 1, MaxIterationsCeiling), WallClockBudget, NodeExecutionBudget, ParseErrorHandling(config.ErrorHandling), config.MaxParallelism);
 
     /// <summary>Lenient parse — only an explicit "continue" opts into continue-on-error; anything else (null, empty, typo) is the safe default Terminate.</summary>
     private static LoopErrorHandling ParseErrorHandling(string? raw) =>
