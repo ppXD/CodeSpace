@@ -261,6 +261,53 @@ public class LoopFlowTests
             .GetProperty("acc").GetString().ShouldBe("x:0:1:2");
     }
 
+    [Fact]
+    public async Task Continue_on_error_composes_with_a_body_suspend()
+    {
+        // The trickiest combination: a loop that BOTH parks on an approval AND skips a failed pass.
+        // Body is gate(approval) → boom(fails the first time, succeeds after). errorHandling=continue.
+        // pass#0: approve → boom fails → pass skipped. pass#1: approve → boom succeeds. ⇒ two approvals,
+        // failedIterations=1, run Success. Proves the failure-replay and the suspend-resume compose.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var workflowId = await CreateWorkflowAsync(teamId, userId, ContinueWithApprovalLoopDefinition(Guid.NewGuid().ToString("N")));
+        var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
+
+        for (var pass = 0; pass < 2; pass++)
+        {
+            await RunEngineAsync(runId);
+            (await ApproveAsync(runId, teamId, userId)).ShouldBeTrue($"pass {pass} approval");
+        }
+        await RunEngineAsync(runId);
+
+        using var verify = _fixture.BeginScope();
+        var db = verify.Resolve<CodeSpaceDbContext>();
+        (await db.WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == runId)).Status.ShouldBe(WorkflowRunStatus.Success);
+
+        var outputs = JsonDocument.Parse((await LoopNodeAsync(db, runId)).OutputsJson).RootElement;
+        outputs.GetProperty("iterations").GetInt32().ShouldBe(2);
+        outputs.GetProperty("failedIterations").GetInt32().ShouldBe(1, "pass#0 failed-and-skipped, reconstructed correctly across the suspend");
+    }
+
+    [Fact]
+    public async Task A_nested_loop_in_a_body_is_refused_with_a_clear_message()
+    {
+        // Nested loops are deferred — a loop whose body contains another loop must fail loudly, never
+        // silently mis-run. Pins the refusal so a future change can't accidentally allow a broken nest.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var workflowId = await CreateWorkflowAsync(teamId, userId, NestedLoopDefinition());
+        var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
+
+        await RunEngineAsync(runId);
+
+        using var verify = _fixture.BeginScope();
+        var db = verify.Resolve<CodeSpaceDbContext>();
+        (await db.WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == runId)).Status.ShouldBe(WorkflowRunStatus.Failure);
+        var outer = await LoopNodeAsync(db, runId);
+        outer.Status.ShouldBe(NodeStatus.Failure);
+        outer.Error.ShouldNotBeNull();
+        outer.Error!.ShouldContain("nested loop");
+    }
+
     // ─── Helpers ────────────────────────────────────────────────────────────────
 
     private static async Task<Core.Persistence.Entities.WorkflowRunNode> LoopNodeAsync(CodeSpaceDbContext db, Guid runId) =>
@@ -425,4 +472,52 @@ public class LoopFlowTests
             },
         };
     }
+
+    // manual → loop(errorHandling=continue, body: loop_start → gate[approval] → boom[fails once]) → terminal.
+    // boom fails the first pass (skipped) then succeeds — exercises continue-on-error THROUGH a suspend.
+    private static WorkflowDefinition ContinueWithApprovalLoopDefinition(string flakyKey) => new()
+    {
+        SchemaVersion = 1,
+        Nodes = new List<NodeDefinition>
+        {
+            new() { Id = "start", TypeKey = "trigger.manual", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
+            new() { Id = "loop", TypeKey = "flow.loop", Inputs = WorkflowsTestSeed.EmptyJson(),
+                    Config = WorkflowsTestSeed.Json("""{ "errorHandling": "continue", "maxIterations": 2 }""") },
+            new() { Id = "ls", TypeKey = "flow.loop_start", ParentId = "loop", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
+            new() { Id = "gate", TypeKey = "flow.wait_approval", ParentId = "loop",
+                    Config = WorkflowsTestSeed.Json("""{ "prompt": "go?" }"""), Inputs = WorkflowsTestSeed.EmptyJson() },
+            new() { Id = "boom", TypeKey = FlakyTestNode.Key, ParentId = "loop",
+                    Config = WorkflowsTestSeed.Json($$"""{ "key": "{{flakyKey}}", "failTimes": 1 }"""), Inputs = WorkflowsTestSeed.EmptyJson() },
+            new() { Id = "end", TypeKey = "builtin.terminal", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
+        },
+        Edges = new List<EdgeDefinition>
+        {
+            new() { From = "start", To = "loop" },
+            new() { From = "loop", To = "end" },
+            new() { From = "ls", To = "gate" },
+            new() { From = "gate", To = "boom" },
+        },
+    };
+
+    // manual → outer-loop(body: ls_o → inner-loop(body: ls_i)) → terminal. The outer body holds a Loop
+    // node, which the engine refuses at run time (nested loops deferred).
+    private static WorkflowDefinition NestedLoopDefinition() => new()
+    {
+        SchemaVersion = 1,
+        Nodes = new List<NodeDefinition>
+        {
+            new() { Id = "start", TypeKey = "trigger.manual", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
+            new() { Id = "loop", TypeKey = "flow.loop", Config = WorkflowsTestSeed.Json("""{ "maxIterations": 2 }"""), Inputs = WorkflowsTestSeed.EmptyJson() },
+            new() { Id = "ls_o", TypeKey = "flow.loop_start", ParentId = "loop", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
+            new() { Id = "inner", TypeKey = "flow.loop", ParentId = "loop", Config = WorkflowsTestSeed.Json("""{ "maxIterations": 2 }"""), Inputs = WorkflowsTestSeed.EmptyJson() },
+            new() { Id = "ls_i", TypeKey = "flow.loop_start", ParentId = "inner", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
+            new() { Id = "end", TypeKey = "builtin.terminal", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
+        },
+        Edges = new List<EdgeDefinition>
+        {
+            new() { From = "start", To = "loop" },
+            new() { From = "loop", To = "end" },
+            new() { From = "ls_o", To = "inner" },
+        },
+    };
 }
