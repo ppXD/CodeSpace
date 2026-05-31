@@ -325,6 +325,10 @@ function Editor({ workflow, manifests, onBackToList, saving, onSave }: EditorPro
     const targetId = loopUnder(node);
     highlightLoop(null);
 
+    // The loop's entry marker can never be orphaned — if it would land outside any loop, leave it
+    // parented to its container (extent:"parent" already clips a healthy one; this guards the rest).
+    if ((node.data as Partial<WorkflowNodeData>)?.typeKey === "flow.loop_start" && targetId === null) return;
+
     const currentParent = node.parentId ?? null;
     if (targetId === currentParent) return;   // no scope change
 
@@ -481,7 +485,8 @@ function Editor({ workflow, manifests, onBackToList, saving, onSave }: EditorPro
     const startId = isLoop ? uniqueNodeId("flow.loop_start", [...nodes, newNode]) : null;
     const startNode: Node<WorkflowNodeData> | null = startId
       ? {
-          id: startId, type: "wf", parentId: id, position: { x: 40, y: 90 }, zIndex: 1,
+          // extent:"parent" locks the entry marker inside its loop — it can never be dragged out / orphaned.
+          id: startId, type: "wf", parentId: id, position: { x: 40, y: 90 }, zIndex: 1, extent: "parent",
           data: {
             nodeId: startId, typeKey: "flow.loop_start", displayName: startManifest?.displayName ?? "Loop start",
             iconKey: startManifest?.iconKey ?? "play", kind: "Regular", category: startManifest?.category ?? "Logic", label: null,

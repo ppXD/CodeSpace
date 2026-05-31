@@ -139,7 +139,13 @@ export function definitionToRfNodes(
     // it (and its handles) paint above the container. A nested LOOP also needs the container size so it
     // renders as a box. No `extent: "parent"` so it can still be dragged back OUT.
     if (n.parentId) {
-      const nested = { id: n.id, type: "wf", parentId: n.parentId, position: n.position ?? { x: 40, y: 90 }, data, zIndex: depth };
+      const nested = {
+        id: n.id, type: "wf", parentId: n.parentId, position: n.position ?? { x: 40, y: 90 }, data, zIndex: depth,
+        // The loop's entry marker is LOCKED inside its container (extent:"parent" clips it to the box),
+        // so it can never be dragged out / orphaned — the body always has its root. Other body nodes
+        // stay free (no extent) so they can be dragged back out.
+        ...(n.typeKey === "flow.loop_start" ? { extent: "parent" as const } : {}),
+      };
       return isLoop ? { ...nested, style: loopStyle(n) } : nested;
     }
 
