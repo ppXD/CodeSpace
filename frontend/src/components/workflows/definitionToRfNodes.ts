@@ -22,10 +22,10 @@ export function definitionToRfNodes(
   def: WorkflowDefinition,
   manifestByType: Map<string, NodeManifestDto>
 ): Node<WorkflowNodeData>[] {
-  // Auto-layout: vertical stack, 180px row spacing, when position is missing. Workflows
-  // are typically <20 nodes and the user immediately fixes positions on first drag, so no
-  // real layout engine is needed.
-  let fallbackY = 80;
+  // Auto-layout: left→right row, ~300px column spacing (a loop container is wider), when position
+  // is missing. Workflows are typically <20 nodes and the user immediately fixes positions on first
+  // drag, so no real layout engine is needed. Horizontal mirrors the Dify-style left→right flow.
+  let fallbackX = 80;
 
   // React Flow requires a parent (loop container) to appear BEFORE its children in the array.
   // Body nodes carry parentId; ordering top-level-first guarantees parent-before-child.
@@ -52,11 +52,11 @@ export function definitionToRfNodes(
     // zIndex 1 keeps the step (and its handles) ABOVE the container's body so it stays clickable
     // and connectable; the container itself sits at zIndex 0 (below).
     if (n.parentId) {
-      return { id: n.id, type: "wf", parentId: n.parentId, position: n.position ?? { x: 40, y: 60 }, data, zIndex: 1 };
+      return { id: n.id, type: "wf", parentId: n.parentId, position: n.position ?? { x: 40, y: 90 }, data, zIndex: 1 };
     }
 
-    const position = n.position ?? { x: 80, y: fallbackY };
-    if (!n.position) fallbackY += kind === "Loop" ? 300 : 180;
+    const position = n.position ?? { x: fallbackX, y: 80 };
+    if (!n.position) fallbackX += kind === "Loop" ? LOOP_CONTAINER_W + 80 : 320;
 
     // A loop container is sized so its body subgraph fits; everything else is a normal card. It's
     // draggable from anywhere on the box — body steps render above it (parent/child z-order) so they

@@ -84,11 +84,11 @@ describe("definitionToRfNodes", () => {
     expect(out.m.data.inputFields).toEqual([{ name: "repo", schema: {} }]);
   });
 
-  it("auto-lays out top-level nodes that have no saved position", () => {
+  it("auto-lays out top-level nodes left→right when they have no saved position", () => {
     const out = byId(definitionToRfNodes(def([node("a", "http.request"), node("b", "http.request")]), manifests));
 
     expect(out.a.position).toEqual({ x: 80, y: 80 });
-    expect(out.b.position).toEqual({ x: 80, y: 260 });
+    expect(out.b.position).toEqual({ x: 400, y: 80 }, "second node sits to the RIGHT (80 + 320)");
   });
 
   it("defaults a positionless body node to a slot inside its container", () => {
@@ -97,6 +97,6 @@ describe("definitionToRfNodes", () => {
       manifests,
     ));
 
-    expect(out.ls.position).toEqual({ x: 40, y: 60 });
+    expect(out.ls.position).toEqual({ x: 40, y: 90 });
   });
 });
