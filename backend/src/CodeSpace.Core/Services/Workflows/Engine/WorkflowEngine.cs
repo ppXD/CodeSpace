@@ -888,10 +888,19 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
     /// edge can then catch it); <c>continue</c> skips just that pass and carries on. A body suspend or
     /// nested loop is refused with a clear message (follow-ups).
     /// </summary>
-    private async Task<NodeStatus> ExecuteLoopAsync(WorkflowRun run, WorkflowDefinition definition, NodeDefinition loopNode, NodeRunScope scope, WalkerState state, CancellationToken cancellationToken)
+    private async Task<NodeStatus> ExecuteLoopAsync(WorkflowRun run, WorkflowDefinition definition, NodeDefinition loopNode, NodeRunScope scope, WalkerState state, CancellationToken cancellationToken, string nodeIterationKey = NoIteration)
     {
         var startedAt = DateTimeOffset.UtcNow;
-        await _recordLogger.NodeStartedAsync(run.Id, loopNode.Id, NoIteration, EmptyJsonBag, EmptyJsonBag, cancellationToken).ConfigureAwait(false);
+
+        // Nesting guard: refuse pathologically deep loop-in-loop nesting (recursion + runaway safety),
+        // mirroring the sub-workflow depth cap. Depth = the number of enclosing loop iterations.
+        if (LoopNestingDepth(nodeIterationKey) >= LoopPlan.MaxNestingDepth)
+            throw new NodeFailureException($"Loop '{loopNode.Id}' is nested deeper than the {LoopPlan.MaxNestingDepth}-level limit.");
+
+        // The loop NODE's own ledger record is keyed by the context it runs in: NoIteration at top level,
+        // or the enclosing loop's body-iteration key when this is a nested loop (so a loop re-run once per
+        // outer iteration gets a distinct record per outer pass).
+        await _recordLogger.NodeStartedAsync(run.Id, loopNode.Id, nodeIterationKey, EmptyJsonBag, EmptyJsonBag, cancellationToken).ConfigureAwait(false);
 
         try
         {
@@ -904,7 +913,7 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
             // far the loop got (completed iterations + threaded loop vars + failure count) from the
             // per-iteration ledger so we re-enter at the suspended pass instead of restarting at 0. A
             // fresh run finds no body rows → ResumeFrom 0 with freshly-initialised loop vars.
-            var resume = await RehydrateLoopStateAsync(run, loopNode, body, config, scope, cancellationToken).ConfigureAwait(false);
+            var resume = await RehydrateLoopStateAsync(run, loopNode, body, config, scope, nodeIterationKey, cancellationToken).ConfigureAwait(false);
             var loopVars = resume.LoopVars;
             var nodeBudget = plan.NodeBudget;
             var iterations = resume.Iterations;
@@ -919,7 +928,9 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
                     throw new NodeFailureException($"Loop '{loopNode.Id}' exceeded its {plan.WallClock.TotalMinutes:0}-minute wall-clock budget after {iterations} iteration(s).");
 
                 var iterScope = BuildLoopScope(scope, scope.Nodes, loopVars, i);
-                var outcome = await RunLoopBodyOnceAsync(run, body, iterScope, $"{loopNode.Id}#{i}", plan.ErrorHandling, cancellationToken).ConfigureAwait(false);
+                // Body iteration key extends THIS loop's node key: "<loopId>#<i>" at top level, or
+                // "<outerKey>/<loopId>#<i>" when nested — so nested iterations never collide across passes.
+                var outcome = await RunLoopBodyOnceAsync(run, definition, body, iterScope, CombineIterationKey(nodeIterationKey, $"{loopNode.Id}#{i}"), plan.ErrorHandling, cancellationToken).ConfigureAwait(false);
                 nodeBudget -= outcome.Executed;
 
                 if (nodeBudget < 0)
@@ -947,7 +958,7 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
 
             var outputs = BuildLoopOutputs(loopVars, iterations, failures, reason);
             scope.Nodes[loopNode.Id] = outputs;
-            await _recordLogger.NodeCompletedAsync(run.Id, loopNode.Id, NoIteration, outputs, null, DateTimeOffset.UtcNow - startedAt, cancellationToken).ConfigureAwait(false);
+            await _recordLogger.NodeCompletedAsync(run.Id, loopNode.Id, nodeIterationKey, outputs, null, DateTimeOffset.UtcNow - startedAt, cancellationToken).ConfigureAwait(false);
             return NodeStatus.Success;
         }
         catch (NodeFailureException ex)
@@ -955,7 +966,7 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
             // A body failure (no error edge) or a tripped budget — expose it as the loop's `error`
             // output so the loop's own error edge can catch it, then write node.failed.
             scope.Nodes[loopNode.Id] = BuildErrorOutput(ex.Message, loopNode.Id);
-            await _recordLogger.NodeFailedAsync(run.Id, loopNode.Id, NoIteration, ex.Message, DateTimeOffset.UtcNow - startedAt, cancellationToken).ConfigureAwait(false);
+            await _recordLogger.NodeFailedAsync(run.Id, loopNode.Id, nodeIterationKey, ex.Message, DateTimeOffset.UtcNow - startedAt, cancellationToken).ConfigureAwait(false);
             return NodeStatus.Failure;
         }
     }
@@ -973,9 +984,9 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
     /// <c>Failed</c> so the loop skips to the next iteration. A body node that SUSPENDS (approval /
     /// sleep / callback / sub-workflow) parks the run durably: the pass rehydrates from the ledger on
     /// resume so the suspended node re-runs with its payload and the already-finished body nodes
-    /// don't. A nested loop is still refused with a clear message.
+    /// don't. A nested loop recurses into <see cref="ExecuteLoopAsync"/> under this pass's key.
     /// </summary>
-    private async Task<LoopBodyOutcome> RunLoopBodyOnceAsync(WorkflowRun run, WorkflowDefinition body, NodeRunScope iterScope, string iterationKey, LoopErrorHandling errorHandling, CancellationToken cancellationToken)
+    private async Task<LoopBodyOutcome> RunLoopBodyOnceAsync(WorkflowRun run, WorkflowDefinition definition, WorkflowDefinition body, NodeRunScope iterScope, string iterationKey, LoopErrorHandling errorHandling, CancellationToken cancellationToken)
     {
         var bodyState = new WalkerState(body);
 
@@ -1004,11 +1015,17 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
                 continue;
             }
 
-            if (_nodeRegistry.Resolve(node.TypeKey).Manifest.Kind == NodeKind.Loop)
-                throw new NodeFailureException($"Node '{nodeId}' is a nested loop — nested loops inside a loop body aren't supported yet.");
-
             executed++;
-            var status = await ExecuteNodeAsync(run, node, iterScope, bodyState, cancellationToken, iterationKey).ConfigureAwait(false);
+
+            // A nested loop recurses: ExecuteLoopAsync runs the inner loop under THIS pass's key, so its
+            // body keys become "<thisKey>/<inner>#<j>" (collision-free across outer passes) and it
+            // rehydrates its own subtree on resume. Its outputs land in iterScope.Nodes for downstream
+            // body nodes. Every other node runs the normal per-node path. (Dispatch on Kind — no typeKey
+            // special-casing, same as the top-level walk.) A nested-loop suspend throws RunSuspendedException
+            // out of ExecuteLoopAsync and propagates here, parking the whole run durably.
+            var status = _nodeRegistry.Resolve(node.TypeKey).Manifest.Kind == NodeKind.Loop
+                ? await ExecuteLoopAsync(run, definition, node, iterScope, bodyState, cancellationToken, iterationKey).ConfigureAwait(false)
+                : await ExecuteNodeAsync(run, node, iterScope, bodyState, cancellationToken, iterationKey).ConfigureAwait(false);
             bodyState.Statuses[nodeId] = status;
 
             // A node with its own error edge routes there regardless of the loop's policy (it's
@@ -1046,23 +1063,29 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
     /// (suspended) pass, which <see cref="RunLoopBodyOnceAsync"/> rehydrates and finishes. A fresh run
     /// (no body rows) returns ResumeFrom 0 with freshly-initialised vars — behaviour-identical to before.
     /// </summary>
-    private async Task<LoopResumeState> RehydrateLoopStateAsync(WorkflowRun run, NodeDefinition loopNode, WorkflowDefinition body, LoopConfig config, NodeRunScope outerScope, CancellationToken cancellationToken)
+    private async Task<LoopResumeState> RehydrateLoopStateAsync(WorkflowRun run, NodeDefinition loopNode, WorkflowDefinition body, LoopConfig config, NodeRunScope outerScope, string nodeIterationKey, CancellationToken cancellationToken)
     {
         var loopVars = InitLoopVars(config.LoopVariables, outerScope);
 
-        var prefix = $"{loopNode.Id}#";
+        // This loop's direct body iterations are keyed CombineIterationKey(nodeIterationKey, "<loopId>#<i>");
+        // nested descendants extend that with "/<inner>#<j>". We read the index UP TO the first '/' so a
+        // nested loop's rows attribute to the correct OUTER iteration, not the inner index.
+        var bodyKeyPrefix = CombineIterationKey(nodeIterationKey, $"{loopNode.Id}#");
         var rows = await _db.WorkflowRunNode.AsNoTracking()
-            .Where(n => n.RunId == run.Id && n.IterationKey.StartsWith(prefix))
+            .Where(n => n.RunId == run.Id && n.IterationKey.StartsWith(bodyKeyPrefix))
             .ToListAsync(cancellationToken).ConfigureAwait(false);
 
         if (rows.Count == 0) return new LoopResumeState(0, 0, 0, loopVars);
 
-        var resumeFrom = rows.Max(r => IterationIndex(r.IterationKey));
+        var resumeFrom = rows.Max(r => LoopIterationIndex(r.IterationKey, bodyKeyPrefix));
         var failures = 0;
 
         for (var j = 0; j < resumeFrom; j++)
         {
-            var passRows = rows.Where(r => IterationIndex(r.IterationKey) == j).ToList();
+            // Only THIS loop's direct body rows of pass j (key == the pass key exactly). Nested
+            // descendants have longer keys and don't carry this loop's own body-node outputs.
+            var passKey = CombineIterationKey(nodeIterationKey, $"{loopNode.Id}#{j}");
+            var passRows = rows.Where(r => r.IterationKey == passKey).ToList();
 
             // A pass "failed" iff a body node failed with no error edge of its own (continue-mode skipped
             // it). Mirror the live loop exactly: a failed pass threads NO loop-var updates forward.
@@ -1131,12 +1154,22 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
             bodyState.ResumePayloads[w.NodeId] = string.IsNullOrWhiteSpace(w.PayloadJson) ? EmptyJsonObject() : JsonDocument.Parse(w.PayloadJson).RootElement.Clone();
     }
 
-    /// <summary>Parse the trailing iteration index out of a loop-body iteration key (<c>"&lt;loopId&gt;#&lt;i&gt;"</c>).</summary>
-    private static int IterationIndex(string iterationKey)
+    /// <summary>Append a loop-iteration segment to an iteration-key path: top level ("") → just the segment; nested → "&lt;prefix&gt;/&lt;segment&gt;", so keys never collide across the enclosing loop's passes.</summary>
+    private static string CombineIterationKey(string prefix, string segment) =>
+        prefix.Length == 0 ? segment : $"{prefix}/{segment}";
+
+    /// <summary>The iteration index a key belongs to for the loop whose body keys start with <paramref name="bodyKeyPrefix"/> — the integer right after the prefix, up to the next '/' (so a nested descendant attributes to its OUTER pass). -1 when the key isn't in this loop's subtree.</summary>
+    private static int LoopIterationIndex(string key, string bodyKeyPrefix)
     {
-        var hash = iterationKey.LastIndexOf('#');
-        return hash >= 0 && int.TryParse(iterationKey[(hash + 1)..], out var i) ? i : 0;
+        if (!key.StartsWith(bodyKeyPrefix, StringComparison.Ordinal)) return -1;
+        var rest = key.AsSpan(bodyKeyPrefix.Length);
+        var slash = rest.IndexOf('/');
+        return int.TryParse(slash >= 0 ? rest[..slash] : rest, out var i) ? i : -1;
     }
+
+    /// <summary>How many loops enclose a node running at this iteration key (the number of "&lt;loop&gt;#&lt;i&gt;" path segments). 0 = top-level.</summary>
+    private static int LoopNestingDepth(string nodeIterationKey) =>
+        nodeIterationKey.Length == 0 ? 0 : nodeIterationKey.Count(c => c == '/') + 1;
 
     /// <summary>True when the body definition has an outgoing <c>error</c>-handle edge from the node — i.e. its failure is handled in-body (distinct from <see cref="HasErrorEdge"/>, which reads a live WalkerState).</summary>
     private static bool HasErrorEdgeInDefinition(WorkflowDefinition body, string nodeId) =>

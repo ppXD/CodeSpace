@@ -289,23 +289,73 @@ public class LoopFlowTests
     }
 
     [Fact]
-    public async Task A_nested_loop_in_a_body_is_refused_with_a_clear_message()
+    public async Task A_nested_loop_runs_the_full_cross_product_with_distinct_iteration_keys()
     {
-        // Nested loops are deferred — a loop whose body contains another loop must fail loudly, never
-        // silently mis-run. Pins the refusal so a future change can't accidentally allow a broken nest.
+        // outer(2) × inner(2): the inner body's probe runs 4 times, once per (outer, inner) pair. The
+        // per-iteration keys must nest as "outer#i/inner#j" so the four passes never collide.
+        var key = "probe-" + Guid.NewGuid().ToString("N");
+        LoopProbeNode.Reset(key);
+
         var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
-        var workflowId = await CreateWorkflowAsync(teamId, userId, NestedLoopDefinition());
+        var workflowId = await CreateWorkflowAsync(teamId, userId, NestedLoopDefinition(key, outerMax: 2, innerMax: 2));
         var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
 
         await RunEngineAsync(runId);
 
         using var verify = _fixture.BeginScope();
         var db = verify.Resolve<CodeSpaceDbContext>();
-        (await db.WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == runId)).Status.ShouldBe(WorkflowRunStatus.Failure);
-        var outer = await LoopNodeAsync(db, runId);
-        outer.Status.ShouldBe(NodeStatus.Failure);
-        outer.Error.ShouldNotBeNull();
-        outer.Error!.ShouldContain("nested loop");
+        (await db.WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == runId)).Status.ShouldBe(WorkflowRunStatus.Success);
+
+        // The probe saw the INNER index each run, resetting per outer pass (inner loop.* shadows the outer's).
+        LoopProbeNode.SeenFor(key).ShouldBe(new[] { "i0", "i1", "i0", "i1" });
+
+        // Each inner-body pass persisted under a nested key — proof the cross product ran without collision.
+        var probeKeys = await db.WorkflowRunNode.AsNoTracking()
+            .Where(n => n.RunId == runId && n.NodeId == "probe").Select(n => n.IterationKey).ToListAsync();
+        probeKeys.OrderBy(k => k).ShouldBe(new[] { "outer#0/inner#0", "outer#0/inner#1", "outer#1/inner#0", "outer#1/inner#1" });
+
+        // The outer loop ran 2 passes; the inner loop node has a record per outer pass.
+        var outer = await db.WorkflowRunNode.AsNoTracking().SingleAsync(n => n.RunId == runId && n.NodeId == "outer" && n.IterationKey == "");
+        outer.Status.ShouldBe(NodeStatus.Success);
+        JsonDocument.Parse(outer.OutputsJson).RootElement.GetProperty("iterations").GetInt32().ShouldBe(2);
+        var innerKeys = await db.WorkflowRunNode.AsNoTracking()
+            .Where(n => n.RunId == runId && n.NodeId == "inner" && n.Status == NodeStatus.Success).Select(n => n.IterationKey).ToListAsync();
+        innerKeys.OrderBy(k => k).ShouldBe(new[] { "outer#0", "outer#1" });
+    }
+
+    [Fact]
+    public async Task An_approval_inside_a_nested_loop_parks_and_resumes_per_inner_iteration()
+    {
+        // Durable suspend through TWO loop levels: outer(1) × inner(2) with an approval in the inner body.
+        // ⇒ two approvals; each resume re-enters outer pass 0 AND inner pass j (recursive rehydration).
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var workflowId = await CreateWorkflowAsync(teamId, userId, NestedApprovalLoopDefinition(outerMax: 1, innerMax: 2));
+        var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
+
+        for (var pass = 0; pass < 2; pass++)
+        {
+            await RunEngineAsync(runId);
+
+            using (var verify = _fixture.BeginScope())
+            {
+                var db = verify.Resolve<CodeSpaceDbContext>();
+                (await db.WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == runId)).Status
+                    .ShouldBe(WorkflowRunStatus.Suspended, $"inner pass {pass}: parked on the approval");
+                var wait = await db.WorkflowRunWait.AsNoTracking().SingleAsync(w => w.RunId == runId && w.Status == WorkflowWaitStatuses.Pending);
+                wait.IterationKey.ShouldBe($"outer#0/inner#{pass}", "the wait is keyed to the nested (outer, inner) iteration");
+            }
+
+            (await ApproveAsync(runId, teamId, userId)).ShouldBeTrue();
+        }
+
+        await RunEngineAsync(runId);
+
+        using var final = _fixture.BeginScope();
+        var fdb = final.Resolve<CodeSpaceDbContext>();
+        (await fdb.WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == runId)).Status.ShouldBe(WorkflowRunStatus.Success);
+        var approvedKeys = await fdb.WorkflowRunNode.AsNoTracking()
+            .Where(n => n.RunId == runId && n.NodeId == "gate" && n.Status == NodeStatus.Success).Select(n => n.IterationKey).ToListAsync();
+        approvedKeys.OrderBy(k => k).ShouldBe(new[] { "outer#0/inner#0", "outer#0/inner#1" });
     }
 
     // ─── Helpers ────────────────────────────────────────────────────────────────
@@ -499,25 +549,56 @@ public class LoopFlowTests
         },
     };
 
-    // manual → outer-loop(body: ls_o → inner-loop(body: ls_i)) → terminal. The outer body holds a Loop
-    // node, which the engine refuses at run time (nested loops deferred).
-    private static WorkflowDefinition NestedLoopDefinition() => new()
+    // manual → outer-loop(body: ls_o → inner-loop(body: ls_i → probe[value={{loop.index}}])) → terminal.
+    // The probe records the INNER loop index each innermost pass.
+    private static WorkflowDefinition NestedLoopDefinition(string probeKey, int outerMax, int innerMax)
+    {
+        // "i{{loop.index}}" (literal + template) resolves to a STRING ("i0", "i1", …); a bare
+        // "{{loop.index}}" would resolve to the raw JSON number, which the probe reads as "".
+        var probeInputs = """{ "key": "__KEY__", "value": "i{{loop.index}}" }""".Replace("__KEY__", probeKey);
+        return new WorkflowDefinition
+        {
+            SchemaVersion = 1,
+            Nodes = new List<NodeDefinition>
+            {
+                new() { Id = "start", TypeKey = "trigger.manual", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
+                new() { Id = "outer", TypeKey = "flow.loop", Config = WorkflowsTestSeed.Json($$"""{ "maxIterations": {{outerMax}} }"""), Inputs = WorkflowsTestSeed.EmptyJson() },
+                new() { Id = "ls_o", TypeKey = "flow.loop_start", ParentId = "outer", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
+                new() { Id = "inner", TypeKey = "flow.loop", ParentId = "outer", Config = WorkflowsTestSeed.Json($$"""{ "maxIterations": {{innerMax}} }"""), Inputs = WorkflowsTestSeed.EmptyJson() },
+                new() { Id = "ls_i", TypeKey = "flow.loop_start", ParentId = "inner", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
+                new() { Id = "probe", TypeKey = LoopProbeNode.Key, ParentId = "inner", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.Json(probeInputs) },
+                new() { Id = "end", TypeKey = "builtin.terminal", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
+            },
+            Edges = new List<EdgeDefinition>
+            {
+                new() { From = "start", To = "outer" },
+                new() { From = "outer", To = "end" },
+                new() { From = "ls_o", To = "inner" },
+                new() { From = "ls_i", To = "probe" },
+            },
+        };
+    }
+
+    // manual → outer-loop(body: ls_o → inner-loop(body: ls_i → gate[wait_approval])) → terminal.
+    private static WorkflowDefinition NestedApprovalLoopDefinition(int outerMax, int innerMax) => new()
     {
         SchemaVersion = 1,
         Nodes = new List<NodeDefinition>
         {
             new() { Id = "start", TypeKey = "trigger.manual", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
-            new() { Id = "loop", TypeKey = "flow.loop", Config = WorkflowsTestSeed.Json("""{ "maxIterations": 2 }"""), Inputs = WorkflowsTestSeed.EmptyJson() },
-            new() { Id = "ls_o", TypeKey = "flow.loop_start", ParentId = "loop", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
-            new() { Id = "inner", TypeKey = "flow.loop", ParentId = "loop", Config = WorkflowsTestSeed.Json("""{ "maxIterations": 2 }"""), Inputs = WorkflowsTestSeed.EmptyJson() },
+            new() { Id = "outer", TypeKey = "flow.loop", Config = WorkflowsTestSeed.Json($$"""{ "maxIterations": {{outerMax}} }"""), Inputs = WorkflowsTestSeed.EmptyJson() },
+            new() { Id = "ls_o", TypeKey = "flow.loop_start", ParentId = "outer", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
+            new() { Id = "inner", TypeKey = "flow.loop", ParentId = "outer", Config = WorkflowsTestSeed.Json($$"""{ "maxIterations": {{innerMax}} }"""), Inputs = WorkflowsTestSeed.EmptyJson() },
             new() { Id = "ls_i", TypeKey = "flow.loop_start", ParentId = "inner", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
+            new() { Id = "gate", TypeKey = "flow.wait_approval", ParentId = "inner", Config = WorkflowsTestSeed.Json("""{ "prompt": "go?" }"""), Inputs = WorkflowsTestSeed.EmptyJson() },
             new() { Id = "end", TypeKey = "builtin.terminal", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
         },
         Edges = new List<EdgeDefinition>
         {
-            new() { From = "start", To = "loop" },
-            new() { From = "loop", To = "end" },
+            new() { From = "start", To = "outer" },
+            new() { From = "outer", To = "end" },
             new() { From = "ls_o", To = "inner" },
+            new() { From = "ls_i", To = "gate" },
         },
     };
 }
