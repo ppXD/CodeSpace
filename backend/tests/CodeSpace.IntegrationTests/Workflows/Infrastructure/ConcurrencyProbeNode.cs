@@ -66,14 +66,30 @@ public sealed class ConcurrencyProbeNode : INodeRuntime
 
         gate.Arrived.Add(party);
         UpdatePeak(gate, Interlocked.Increment(ref gate.Current));
-
-        gate.Countdown.Signal();
-        // Block until ALL expected parties are simultaneously in-flight. A sequential walk could never
-        // get the others here, so Wait would time out — flipping TimedOut so AllArrived() reports false.
-        if (!gate.Countdown.Wait(TimeSpan.FromSeconds(10), cancellationToken))
-            gate.TimedOut = true;
-
-        Interlocked.Decrement(ref gate.Current);
+        try
+        {
+            if (ReadBool(context.Inputs, "peak"))
+            {
+                // Peak-gauge mode (no barrier): a brief hold gives concurrent siblings a window to
+                // overlap, so Peak reflects the real simultaneity the semaphore allowed. Deterministic
+                // for a cap of 1 (the semaphore physically forbids a second concurrent RunAsync), and
+                // fast (no timeout) — used to PROVE a per-loop maxParallelism throttle.
+                await Task.Delay(TimeSpan.FromMilliseconds(120), cancellationToken).ConfigureAwait(false);
+            }
+            else
+            {
+                // Barrier mode: block until ALL expected parties are simultaneously in-flight. A
+                // sequential walk could never get the others here, so Wait times out — flipping
+                // TimedOut so AllArrived() reports false.
+                gate.Countdown.Signal();
+                if (!gate.Countdown.Wait(TimeSpan.FromSeconds(10), cancellationToken))
+                    gate.TimedOut = true;
+            }
+        }
+        finally
+        {
+            Interlocked.Decrement(ref gate.Current);
+        }
 
         var outputs = new Dictionary<string, JsonElement> { ["party"] = JsonSerializer.SerializeToElement(party) };
         return NodeResult.Ok(outputs);
@@ -88,4 +104,7 @@ public sealed class ConcurrencyProbeNode : INodeRuntime
 
     private static string ReadString(IReadOnlyDictionary<string, JsonElement> bag, string name) =>
         bag.TryGetValue(name, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() ?? "" : "";
+
+    private static bool ReadBool(IReadOnlyDictionary<string, JsonElement> bag, string name) =>
+        bag.TryGetValue(name, out var v) && v.ValueKind == JsonValueKind.True;
 }

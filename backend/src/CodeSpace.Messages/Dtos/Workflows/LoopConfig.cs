@@ -23,6 +23,14 @@ public sealed record LoopConfig
     public int MaxIterations { get; init; } = 10;
 
     /// <summary>
+    /// Optional cap on how many independent body nodes run concurrently per iteration. Null (default)
+    /// inherits the engine-wide setting (the <c>CODESPACE_WORKFLOW_MAX_PARALLELISM</c> env value);
+    /// set it to throttle a body that hits a rate-limited resource (e.g. <c>1</c> = fully sequential).
+    /// Engine clamps to <c>[1, 64]</c>. Absent from existing configs ⇒ no behaviour or hash change.
+    /// </summary>
+    public int? MaxParallelism { get; init; }
+
+    /// <summary>
     /// What the loop does when a body node fails and has no <c>error</c> edge of its own. Parsed
     /// leniently by <c>LoopPlan</c> (unknown/empty ⇒ <see cref="LoopErrorHandling.Terminate"/>, the
     /// safe default). Values: <c>"terminate"</c> (Dify's "Terminate on error") | <c>"continue"</c>

@@ -473,6 +473,29 @@ public class LoopFlowTests
         (await db.WorkflowRunNode.AsNoTracking().SingleAsync(n => n.RunId == runId && n.NodeId == "join" && n.IterationKey == "loop#0")).Status.ShouldBe(NodeStatus.Success);
     }
 
+    [Theory]
+    [InlineData(1, 1)]   // a per-loop cap of 1 ⇒ the body runs strictly sequential (peak never exceeds 1)
+    [InlineData(2, 2)]   // a per-loop cap of 2 ⇒ both body branches overlap (peak reaches 2)
+    public async Task A_per_loop_maxParallelism_bounds_the_body_wave_concurrency(int maxParallelism, int expectedPeak)
+    {
+        // LoopConfig.maxParallelism throttles THIS loop's body wave independently of the engine-wide
+        // default — the rate-limit knob. Peak-gauge probes record the real simultaneity: a cap of 1
+        // forbids overlap (semaphore-deterministic), a cap of 2 allows it.
+        var gate = "gate-" + Guid.NewGuid().ToString("N");
+        ConcurrencyProbeNode.Arm(gate, 2);
+
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var workflowId = await CreateWorkflowAsync(teamId, userId, PerLoopParallelismDefinition(gate, maxParallelism));
+        var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
+
+        await RunEngineAsync(runId);
+
+        using var verify = _fixture.BeginScope();
+        var db = verify.Resolve<CodeSpaceDbContext>();
+        (await db.WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == runId)).Status.ShouldBe(WorkflowRunStatus.Success);
+        ConcurrencyProbeNode.Peak(gate).ShouldBe(expectedPeak, $"a per-loop maxParallelism of {maxParallelism} bounds the body wave's simultaneity");
+    }
+
     // ─── Helpers ────────────────────────────────────────────────────────────────
 
     private static async Task<Core.Persistence.Entities.WorkflowRunNode> LoopNodeAsync(CodeSpaceDbContext db, Guid runId) =>
@@ -580,6 +603,33 @@ public class LoopFlowTests
             new() { From = "pb", To = "join" },
         },
     };
+
+    // manual → loop(1 pass, maxParallelism=N; body: loop_start → {pa, pb} peak-gauge probes) → terminal.
+    private static WorkflowDefinition PerLoopParallelismDefinition(string gate, int maxParallelism) => new()
+    {
+        SchemaVersion = 1,
+        Nodes = new List<NodeDefinition>
+        {
+            new() { Id = "start", TypeKey = "trigger.manual", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
+            new() { Id = "loop", TypeKey = "flow.loop", Inputs = WorkflowsTestSeed.EmptyJson(),
+                    Config = WorkflowsTestSeed.Json("""{ "maxIterations": 1, "maxParallelism": __MP__ }""".Replace("__MP__", maxParallelism.ToString())) },
+            new() { Id = "ls", TypeKey = "flow.loop_start", ParentId = "loop", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
+            new() { Id = "pa", TypeKey = ConcurrencyProbeNode.Key, ParentId = "loop", Config = WorkflowsTestSeed.EmptyJson(), Inputs = PeakProbeInputs(gate, "pa") },
+            new() { Id = "pb", TypeKey = ConcurrencyProbeNode.Key, ParentId = "loop", Config = WorkflowsTestSeed.EmptyJson(), Inputs = PeakProbeInputs(gate, "pb") },
+            new() { Id = "end", TypeKey = "builtin.terminal", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
+        },
+        Edges = new List<EdgeDefinition>
+        {
+            new() { From = "start", To = "loop" },
+            new() { From = "loop", To = "end" },
+            new() { From = "ls", To = "pa" },
+            new() { From = "ls", To = "pb" },
+        },
+    };
+
+    // Peak-gauge probe inputs: literal {gate,party} + peak:true (a JSON bool, so the probe takes its no-barrier path).
+    private static JsonElement PeakProbeInputs(string gate, string party) =>
+        WorkflowsTestSeed.Json("""{ "gate": "__GATE__", "party": "__PARTY__", "peak": true }""".Replace("__GATE__", gate).Replace("__PARTY__", party));
 
     private async Task<Guid> CreateWorkflowAsync(Guid teamId, Guid userId, WorkflowDefinition definition)
     {
