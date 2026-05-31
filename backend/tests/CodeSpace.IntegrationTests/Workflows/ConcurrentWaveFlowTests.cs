@@ -300,6 +300,31 @@ public class ConcurrentWaveFlowTests
         outputs.GetProperty("ab").GetString().ShouldBe("a-b");
     }
 
+    [Fact]
+    public async Task Two_failing_branches_in_a_wave_route_their_error_edges_into_one_shared_handler()
+    {
+        // Error routing × parallel fan-in: two branches fail concurrently in the wave, each routes down
+        // its own `error` edge to ONE shared handler. The handler runs EXACTLY once (fan-in waits for
+        // both) and the run succeeds — proving multiple live error edges converge correctly under
+        // parallel execution.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var workflowId = await CreateWorkflowAsync(teamId, userId, ErrorFanInDefinition(
+            "b1-" + Guid.NewGuid().ToString("N"), "b2-" + Guid.NewGuid().ToString("N"), "h-" + Guid.NewGuid().ToString("N")));
+        var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
+
+        await RunEngineAsync(runId);
+
+        using var verify = _fixture.BeginScope();
+        var db = verify.Resolve<CodeSpaceDbContext>();
+        (await db.WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == runId)).Status
+            .ShouldBe(WorkflowRunStatus.Success, "both failures were handled by the shared error branch");
+        (await NodeAsync(db, runId, "boom1")).Status.ShouldBe(NodeStatus.Failure);
+        (await NodeAsync(db, runId, "boom2")).Status.ShouldBe(NodeStatus.Failure);
+        // NodeAsync uses Single() — it throws if the handler ran zero or more than once, so this pins
+        // "exactly one handler execution" (the fan-in deduped the two converging error edges).
+        (await NodeAsync(db, runId, "handler")).Status.ShouldBe(NodeStatus.Success);
+    }
+
     // ─── Helpers ────────────────────────────────────────────────────────────────
 
     private static async Task<Core.Persistence.Entities.WorkflowRunNode> NodeAsync(CodeSpaceDbContext db, Guid runId, string nodeId) =>
@@ -487,4 +512,35 @@ public class ConcurrentWaveFlowTests
     // Literal {gate,party} values (no {{}} templates) — spliced via Replace to dodge the raw-string brace trap.
     private static JsonElement ProbeInputs(string gate, string party) =>
         WorkflowsTestSeed.Json("""{ "gate": "__GATE__", "party": "__PARTY__" }""".Replace("__GATE__", gate).Replace("__PARTY__", party));
+
+    // manual → {boom1, boom2}(both always fail); boom1 =(error)=> handler <=(error)= boom2; handler → terminal.
+    private static WorkflowDefinition ErrorFanInDefinition(string boom1Key, string boom2Key, string handlerKey)
+    {
+        NodeDefinition Flaky(string id, string key, int failTimes) => new()
+        {
+            Id = id, TypeKey = FlakyTestNode.Key, Inputs = WorkflowsTestSeed.EmptyJson(),
+            Config = WorkflowsTestSeed.Json("""{ "key": "__KEY__", "failTimes": __FT__ }""".Replace("__KEY__", key).Replace("__FT__", failTimes.ToString())),
+        };
+
+        return new WorkflowDefinition
+        {
+            SchemaVersion = 1,
+            Nodes = new List<NodeDefinition>
+            {
+                new() { Id = "start", TypeKey = "trigger.manual", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
+                Flaky("boom1", boom1Key, 99),
+                Flaky("boom2", boom2Key, 99),
+                Flaky("handler", handlerKey, 0),
+                new() { Id = "end", TypeKey = "builtin.terminal", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
+            },
+            Edges = new List<EdgeDefinition>
+            {
+                new() { From = "start", To = "boom1" },
+                new() { From = "start", To = "boom2" },
+                new() { From = "boom1", To = "handler", SourceHandle = WorkflowHandles.Error },
+                new() { From = "boom2", To = "handler", SourceHandle = WorkflowHandles.Error },
+                new() { From = "handler", To = "end" },
+            },
+        };
+    }
 }
