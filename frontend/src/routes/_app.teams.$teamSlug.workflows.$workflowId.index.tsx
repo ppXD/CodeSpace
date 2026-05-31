@@ -50,6 +50,7 @@ import { NodeAddContext, type NodeAddRequest } from "@/components/workflows/node
 import { NodeAddMenu } from "@/components/workflows/NodeAddMenu";
 import { nodeIconFor } from "@/components/workflows/nodeIcon";
 import { definitionToRfNodes, fitLoopSizes, LOOP_CONTAINER_W, LOOP_CONTAINER_H } from "@/components/workflows/definitionToRfNodes";
+import { bodyStartTypeKey, CATCH_HANDLE, isBodyStartTypeKey, isContainerKind } from "@/components/workflows/workflowContainers";
 import { useAlert } from "@/components/dialog";
 import { WorkflowVariablesPanel } from "@/components/workflows/WorkflowVariablesPanel";
 import { RunWorkflowModal } from "@/components/workflows/RunWorkflowModal";
@@ -269,12 +270,12 @@ function Editor({ workflow, manifests, onBackToList, saving, onSave }: EditorPro
     setNodes((nds) => {
       const next = applyNodeChanges(changes, nds) as Node<WorkflowNodeData>[];
       // NodeResizer emits "dimensions" changes as the user drags a corner. Record the new size on the
-      // loop's data so it (a) overrides auto-fit from here on and (b) round-trips into the definition.
+      // container's data so it (a) overrides auto-fit from here on and (b) round-trips into the definition.
       const resized = changes.flatMap((c) => (c.type === "dimensions" && c.dimensions ? [{ id: c.id, dim: c.dimensions }] : []));
       if (resized.length === 0) return next;
       const sizeById = new Map(resized.map((r) => [r.id, r.dim]));
       return next.map((n) =>
-        sizeById.has(n.id) && n.data.kind === "Loop"
+        sizeById.has(n.id) && isContainerKind(n.data.kind)
           ? { ...n, data: { ...n.data, size: { width: sizeById.get(n.id)!.width, height: sizeById.get(n.id)!.height } } }
           : n);
     });
@@ -286,31 +287,31 @@ function Editor({ workflow, manifests, onBackToList, saving, onSave }: EditorPro
     if (changes.some((c) => c.type === "remove")) setUnsaved(true);
   };
 
-  // ─── Drag a step INTO / OUT of a loop container (Dify-style nesting) ──────────
-  // While dragging a non-loop node, highlight the loop it's hovering as a drop zone; on release,
-  // reparent it (or unparent it when dragged out). A reparented node becomes part of the loop's
-  // body — it moves WITH the container and runs inside it per iteration.
-  const loopUnder = (node: Node): string | null => {
-    // A loop CAN now nest inside another loop — but never inside itself or its own descendant (that
-    // would make a node its own ancestor). Among the overlapping valid loops, the innermost (deepest)
-    // wins, so dropping over a nested loop targets it rather than its outer container.
+  // ─── Drag a step INTO / OUT of a container (loop / try) (Dify-style nesting) ──
+  // While dragging a node, highlight the container it's hovering as a drop zone; on release, reparent
+  // it (or unparent it when dragged out). A reparented node becomes part of the container's body — it
+  // moves WITH the box and runs inside it (per loop iteration / inside the try scope).
+  const containerUnder = (node: Node): string | null => {
+    // A container CAN nest inside another container — but never inside itself or its own descendant
+    // (that would make a node its own ancestor). Among the overlapping valid containers, the innermost
+    // (deepest) wins, so dropping over a nested container targets it rather than its outer one.
     const insideDragged = (id: string): boolean => {
       let p = nodes.find((n) => n.id === id)?.parentId;
       while (p) { if (p === node.id) return true; p = nodes.find((n) => n.id === p)?.parentId; }
       return false;
     };
     const targets = getIntersectingNodes(node).filter((n) =>
-      (n.data as Partial<WorkflowNodeData>)?.kind === "Loop" && n.id !== node.id && !insideDragged(n.id));
+      isContainerKind((n.data as Partial<WorkflowNodeData>)?.kind) && n.id !== node.id && !insideDragged(n.id));
     return targets.length === 0
       ? null
       : targets.reduce((deep, n) => (nodeDepth(n.id, nodes) > nodeDepth(deep.id, nodes) ? n : deep)).id;
   };
 
-  const highlightLoop = (targetId: string | null) =>
+  const highlightContainer = (targetId: string | null) =>
     setNodes((nds) => {
       let changed = false;
       const next = nds.map((n) => {
-        if ((n.data as Partial<WorkflowNodeData>)?.kind !== "Loop") return n;
+        if (!isContainerKind((n.data as Partial<WorkflowNodeData>)?.kind)) return n;
         const want = n.id === targetId ? "wf-rf-loop-droptarget" : undefined;
         if ((n.className ?? undefined) === want) return n;
         changed = true;
@@ -319,15 +320,15 @@ function Editor({ workflow, manifests, onBackToList, saving, onSave }: EditorPro
       return changed ? next : nds;
     });
 
-  const onNodeDrag = (_e: unknown, node: Node) => highlightLoop(loopUnder(node));
+  const onNodeDrag = (_e: unknown, node: Node) => highlightContainer(containerUnder(node));
 
   const onNodeDragStop = (_e: unknown, node: Node) => {
-    const targetId = loopUnder(node);
-    highlightLoop(null);
+    const targetId = containerUnder(node);
+    highlightContainer(null);
 
-    // The loop's entry marker can never be orphaned — if it would land outside any loop, leave it
-    // parented to its container (extent:"parent" already clips a healthy one; this guards the rest).
-    if ((node.data as Partial<WorkflowNodeData>)?.typeKey === "flow.loop_start" && targetId === null) return;
+    // A container's entry marker (loop_start / try_start) can never be orphaned — if it would land
+    // outside any container, leave it parented (extent:"parent" already clips a healthy one).
+    if (isBodyStartTypeKey((node.data as Partial<WorkflowNodeData>)?.typeKey) && targetId === null) return;
 
     const currentParent = node.parentId ?? null;
     if (targetId === currentParent) return;   // no scope change
@@ -345,26 +346,26 @@ function Editor({ workflow, manifests, onBackToList, saving, onSave }: EditorPro
             ? { ...n, parentId: targetId, position: { x: abs.x - parentAbs.x, y: abs.y - parentAbs.y } }
             : { ...n, parentId: undefined, position: abs });
 
-      // Auto-fit every loop container to its (new) children, so dropping a loop INTO another loop
-      // grows the outer to wrap it — no overlap — and pulling one out shrinks it back.
+      // Auto-fit every container to its (new) children, so dropping a container INTO another grows the
+      // outer to wrap it — no overlap — and pulling one out shrinks it back.
       const loopSizes = fitLoopSizes(reparented.map((n) => ({
         id: n.id,
         parentId: n.parentId,
         x: n.position.x,
         y: n.position.y,
-        isLoop: (n.data as Partial<WorkflowNodeData>)?.kind === "Loop",
+        isContainer: isContainerKind((n.data as Partial<WorkflowNodeData>)?.kind),
       })));
 
       // Recompute every node's depth-based zIndex against the NEW parent structure, so moving a whole
-      // subtree (e.g. a loop with its body) into/out of another loop re-stacks it correctly at any depth.
-      // Top-level non-loop nodes keep no explicit zIndex (default stacking), matching the load path.
+      // subtree (e.g. a container with its body) into/out of another re-stacks it correctly at any depth.
+      // Top-level non-container nodes keep no explicit zIndex (default stacking), matching the load path.
       return reparented.map((n) => {
         const depth = nodeDepth(n.id, reparented);
-        const isLoop = (n.data as Partial<WorkflowNodeData>)?.kind === "Loop";
-        const zIndex = depth === 0 && !isLoop ? undefined : depth;
-        // A user-resized loop keeps its explicit size; an auto loop re-fits to its (new) children.
+        const isContainer = isContainerKind((n.data as Partial<WorkflowNodeData>)?.kind);
+        const zIndex = depth === 0 && !isContainer ? undefined : depth;
+        // A user-resized container keeps its explicit size; an auto one re-fits to its (new) children.
         const size = (n.data as Partial<WorkflowNodeData>).size ?? loopSizes.get(n.id);
-        return isLoop && size ? { ...n, zIndex, style: { ...n.style, ...size } } : { ...n, zIndex };
+        return isContainer && size ? { ...n, zIndex, style: { ...n.style, ...size } } : { ...n, zIndex };
       });
     });
 
@@ -388,10 +389,12 @@ function Editor({ workflow, manifests, onBackToList, saving, onSave }: EditorPro
         return setErrorRoute(eds, params.source, params.target);
 
       // De-dupe — React Flow itself doesn't prevent duplicate edges; we do (keyed by handle too,
-      // so a normal edge and an error edge to the same target can coexist).
+      // so a normal edge and an error/catch edge to the same target can coexist).
       const exists = eds.some((e) => e.source === params.source && e.target === params.target && (e.sourceHandle ?? null) === (params.sourceHandle ?? null));
       if (exists) return eds;
-      return addEdge({ ...params, type: "default", animated: true }, eds);
+      // A try's catch edge is a normal (multi-allowed) branch edge — just style it as the failure path.
+      const className = params.sourceHandle === CATCH_HANDLE ? "wf-rf-edge-catch" : undefined;
+      return addEdge({ ...params, type: "default", animated: true, ...(className ? { className } : {}) }, eds);
     });
     setUnsaved(true);
   };
@@ -456,7 +459,7 @@ function Editor({ workflow, manifests, onBackToList, saving, onSave }: EditorPro
     const id = uniqueNodeId(manifest.typeKey, nodes);
     const position = computeAddPosition(manifest, options.screen);
 
-    const isLoop = manifest.kind === "Loop";
+    const isContainer = isContainerKind(manifest.kind);
 
     const newNode: Node<WorkflowNodeData> = {
       id,
@@ -473,22 +476,23 @@ function Editor({ workflow, manifests, onBackToList, saving, onSave }: EditorPro
         // A manual start node shows the current workflow input fields on its card.
         ...(manifest.isManual ? { inputFields: workflowInputs } : {}),
       },
-      // A loop is a container sized to hold its body subgraph. It's draggable from anywhere on the
-      // box; its body steps render ABOVE it (React Flow parent/child z-order) so they stay clickable
-      // and grabbing one drags the step, while grabbing empty space drags the whole box + its body.
-      ...(isLoop ? { style: { width: LOOP_CONTAINER_W, height: LOOP_CONTAINER_H }, zIndex: 0 } : {}),
+      // A container (loop / try) is a box sized to hold its body subgraph. It's draggable from anywhere
+      // on the box; its body steps render ABOVE it (React Flow parent/child z-order) so they stay
+      // clickable and grabbing one drags the step, while grabbing empty space drags the whole box.
+      ...(isContainer ? { style: { width: LOOP_CONTAINER_W, height: LOOP_CONTAINER_H }, zIndex: 0 } : {}),
     };
 
-    // A Loop ships with its body-entry marker (flow.loop_start) pre-placed inside — the marker is
-    // never hand-dragged from the palette, so it's created here, parented to the new loop.
-    const startManifest = isLoop ? manifestByType.get("flow.loop_start") : undefined;
-    const startId = isLoop ? uniqueNodeId("flow.loop_start", [...nodes, newNode]) : null;
-    const startNode: Node<WorkflowNodeData> | null = startId
+    // A container ships with its body-entry marker (flow.loop_start / flow.try_start) pre-placed
+    // inside — the marker is never hand-dragged from the palette, so it's created here, parented to it.
+    const startTypeKey = bodyStartTypeKey(manifest.typeKey);
+    const startManifest = startTypeKey ? manifestByType.get(startTypeKey) : undefined;
+    const startId = startTypeKey ? uniqueNodeId(startTypeKey, [...nodes, newNode]) : null;
+    const startNode: Node<WorkflowNodeData> | null = startId && startTypeKey
       ? {
-          // extent:"parent" locks the entry marker inside its loop — it can never be dragged out / orphaned.
+          // extent:"parent" locks the entry marker inside its container — it can never be dragged out.
           id: startId, type: "wf", parentId: id, position: { x: 40, y: 90 }, zIndex: 1, extent: "parent",
           data: {
-            nodeId: startId, typeKey: "flow.loop_start", displayName: startManifest?.displayName ?? "Loop start",
+            nodeId: startId, typeKey: startTypeKey, displayName: startManifest?.displayName ?? "Start",
             iconKey: startManifest?.iconKey ?? "play", kind: "Regular", category: startManifest?.category ?? "Logic", label: null,
           },
         }
@@ -848,7 +852,7 @@ function Editor({ workflow, manifests, onBackToList, saving, onSave }: EditorPro
           <PaletteSection title="Triggers"  manifests={manifests.filter((m) => m.kind === "Trigger")}  onAdd={onPaletteClick} disabledOf={isPaletteItemDisabled} />
           {/* "Loop" is a Step too; "flow.loop_start" is the loop's internal body-entry marker, added
               automatically with a Loop — never hand-dragged, so it's filtered out of the palette. */}
-          <PaletteSection title="Steps"     manifests={manifests.filter((m) => (m.kind === "Regular" || m.kind === "Loop") && m.typeKey !== "flow.loop_start")}  onAdd={onPaletteClick} disabledOf={isPaletteItemDisabled} />
+          <PaletteSection title="Steps"     manifests={manifests.filter((m) => (m.kind === "Regular" || isContainerKind(m.kind)) && !isBodyStartTypeKey(m.typeKey))}  onAdd={onPaletteClick} disabledOf={isPaletteItemDisabled} />
           <PaletteSection title="Endpoints" manifests={manifests.filter((m) => m.kind === "Terminal")} onAdd={onPaletteClick} disabledOf={isPaletteItemDisabled} />
         </aside>
 
@@ -1244,6 +1248,16 @@ function NodeInspector({
         <section className="wf-inspector-section">
           <p className="wf-retry-hint">Loop body entry — added automatically inside a Loop. Connect the loop's body steps from here; there's nothing to configure.</p>
         </section>
+      ) : manifest.typeKey === "flow.try" ? (
+        // The try/catch scope — no config; wrap steps inside and wire the catch handle to a handler.
+        <section className="wf-inspector-section">
+          <p className="wf-retry-hint">Try / catch scope — wrap steps inside. If any body step fails unhandled, the run takes the <code>catch</code> branch (carrying the failure) instead of failing. Nothing to configure.</p>
+        </section>
+      ) : manifest.typeKey === "flow.try_start" ? (
+        // The try body's entry marker — auto-added inside a Try. Nothing to configure.
+        <section className="wf-inspector-section">
+          <p className="wf-retry-hint">Try body entry — added automatically inside a Try. Connect the try's body steps from here; there's nothing to configure.</p>
+        </section>
       ) : (
         <>
           <section className="wf-inspector-section">
@@ -1358,17 +1372,18 @@ function nodeDepth(id: string, nodes: Node[]): number {
 function definitionToRfEdges(def: WorkflowDefinition): Edge[] {
   return def.edges.map((e, idx) => {
     const isError = e.sourceHandle === ERROR_HANDLE;
+    const isCatch = e.sourceHandle === CATCH_HANDLE;
     return {
       id: `e${idx}-${e.from}-${e.to}`,
       source: e.from,
       target: e.to,
-      // Round-trip the source handle so error (and any future named-handle) edges re-anchor to
+      // Round-trip the source handle so error / catch (and any future named-handle) edges re-anchor to
       // the right port on load — a null handle stays the node's default output.
       sourceHandle: e.sourceHandle ?? undefined,
       type: "default",
-      animated: isError || undefined,
+      animated: isError || isCatch || undefined,
       label: e.condition ?? undefined,
-      ...(isError ? { className: "wf-rf-edge-error" } : {}),
+      ...(isError ? { className: "wf-rf-edge-error" } : isCatch ? { className: "wf-rf-edge-catch" } : {}),
     };
   });
 }

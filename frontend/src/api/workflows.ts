@@ -2,7 +2,7 @@ import { fetchJson } from "./request";
 
 // ─── Types (mirror backend DTOs) ───────────────────────────────────────────────
 
-export type NodeKind = "Regular" | "Trigger" | "Terminal" | "Loop";
+export type NodeKind = "Regular" | "Trigger" | "Terminal" | "Loop" | "Try";
 export type NodeStatus = "Pending" | "Running" | "Success" | "Failure" | "Skipped" | "Suspended";
 // Enqueued = dispatched, awaiting worker pickup. Still cancellable; no node activity yet.
 // Suspended = paused on a node waiting for a timer / approval / callback; resumes on the signal.

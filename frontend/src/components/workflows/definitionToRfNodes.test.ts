@@ -13,6 +13,8 @@ const manifests = new Map<string, NodeManifestDto>([
   ["trigger.manual", manifest("trigger.manual", "Trigger", { isManual: true, displayName: "Manual start" })],
   ["flow.loop", manifest("flow.loop", "Loop", { displayName: "Loop" })],
   ["flow.loop_start", manifest("flow.loop_start", "Regular", { displayName: "Loop start" })],
+  ["flow.try", manifest("flow.try", "Try", { displayName: "Try / catch" })],
+  ["flow.try_start", manifest("flow.try_start", "Regular", { displayName: "Try start" })],
   ["http.request", manifest("http.request", "Regular", { displayName: "HTTP request" })],
   ["flow.terminal", manifest("flow.terminal", "Terminal", { displayName: "Done" })],
 ]);
@@ -151,20 +153,59 @@ describe("explicit (user-resized) loop size", () => {
   });
 });
 
+describe("flow.try container", () => {
+  it("renders a flow.try as a sized container, stacks its body above it, and locks try_start", () => {
+    const out = byId(definitionToRfNodes(
+      def([
+        node("try", "flow.try", { position: { x: 0, y: 0 } }),
+        node("ts", "flow.try_start", { parentId: "try" }),
+        node("step", "http.request", { parentId: "try", position: { x: 300, y: 72 } }),
+      ]),
+      manifests,
+    ));
+
+    // Sized box at zIndex 0; body stacked above (zIndex 1) so its handles stay clickable.
+    expect(out.try.style).toMatchObject({ width: LOOP_CONTAINER_W, height: LOOP_CONTAINER_H });
+    expect(out.try.zIndex).toBe(0);
+    expect(out.ts.zIndex).toBe(1);
+    expect(out.step.zIndex).toBe(1);
+
+    // try_start is locked inside the container; a regular body node can still be dragged out.
+    expect(out.ts.extent).toBe("parent");
+    expect(out.step.extent).toBeUndefined();
+  });
+
+  it("auto-fits an outer loop to wrap a nested try (containers nest both ways)", () => {
+    const out = byId(definitionToRfNodes(
+      def([
+        node("outer", "flow.loop", { position: { x: 0, y: 0 } }),
+        node("inner", "flow.try", { parentId: "outer", position: { x: 40, y: 40 } }),
+        node("ts", "flow.try_start", { parentId: "inner", position: { x: 40, y: 60 } }),
+      ]),
+      manifests,
+    ));
+
+    expect(out.inner.zIndex).toBe(1);
+    expect(out.ts.zIndex).toBe(2);
+    // The outer loop grew to wrap the inner try box → strictly bigger, no overlap.
+    expect((out.outer.style!.width as number)).toBeGreaterThan(out.inner.style!.width as number);
+  });
+});
+
 describe("fitLoopSizes", () => {
   it("keeps a leaf loop at the default size when its body fits", () => {
     const sizes = fitLoopSizes([
-      { id: "loop", parentId: null, x: 0, y: 0, isLoop: true },
-      { id: "ls", parentId: "loop", x: 40, y: 90, isLoop: false },
+      { id: "loop", parentId: null, x: 0, y: 0, isContainer: true },
+      { id: "ls", parentId: "loop", x: 40, y: 90, isContainer: false },
     ]);
     expect(sizes.get("loop")).toEqual({ width: LOOP_CONTAINER_W, height: LOOP_CONTAINER_H });
   });
 
   it("grows an outer loop to wrap a nested loop (no overlap)", () => {
     const sizes = fitLoopSizes([
-      { id: "outer", parentId: null, x: 0, y: 0, isLoop: true },
-      { id: "inner", parentId: "outer", x: 40, y: 40, isLoop: true },
-      { id: "ls_i", parentId: "inner", x: 40, y: 90, isLoop: false },
+      { id: "outer", parentId: null, x: 0, y: 0, isContainer: true },
+      { id: "inner", parentId: "outer", x: 40, y: 40, isContainer: true },
+      { id: "ls_i", parentId: "inner", x: 40, y: 90, isContainer: false },
     ]);
 
     expect(sizes.get("inner")).toEqual({ width: LOOP_CONTAINER_W, height: LOOP_CONTAINER_H });
@@ -173,8 +214,8 @@ describe("fitLoopSizes", () => {
 
   it("grows a loop to fit a body node placed past the default edge", () => {
     const sizes = fitLoopSizes([
-      { id: "loop", parentId: null, x: 0, y: 0, isLoop: true },
-      { id: "far", parentId: "loop", x: 900, y: 0, isLoop: false },
+      { id: "loop", parentId: null, x: 0, y: 0, isContainer: true },
+      { id: "far", parentId: "loop", x: 900, y: 0, isContainer: false },
     ]);
     expect(sizes.get("loop")!.width).toBe(900 + 280 + 40); // far.x + node estimate + padding
   });
