@@ -1271,12 +1271,16 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
             bodyState.ResumePayloads[w.NodeId] = string.IsNullOrWhiteSpace(w.PayloadJson) ? EmptyJsonObject() : JsonDocument.Parse(w.PayloadJson).RootElement.Clone();
     }
 
+    // The three iteration-key helpers below are the nested-loop key backbone (durable resume parses
+    // them to re-enter the right pass). internal (not private) so they're unit-pinned directly via
+    // InternalsVisibleTo — see WorkflowEngineIterationKeyTests — not only through integration coverage.
+
     /// <summary>Append a loop-iteration segment to an iteration-key path: top level ("") → just the segment; nested → "&lt;prefix&gt;/&lt;segment&gt;", so keys never collide across the enclosing loop's passes.</summary>
-    private static string CombineIterationKey(string prefix, string segment) =>
+    internal static string CombineIterationKey(string prefix, string segment) =>
         prefix.Length == 0 ? segment : $"{prefix}/{segment}";
 
     /// <summary>The iteration index a key belongs to for the loop whose body keys start with <paramref name="bodyKeyPrefix"/> — the integer right after the prefix, up to the next '/' (so a nested descendant attributes to its OUTER pass). -1 when the key isn't in this loop's subtree.</summary>
-    private static int LoopIterationIndex(string key, string bodyKeyPrefix)
+    internal static int LoopIterationIndex(string key, string bodyKeyPrefix)
     {
         if (!key.StartsWith(bodyKeyPrefix, StringComparison.Ordinal)) return -1;
         var rest = key.AsSpan(bodyKeyPrefix.Length);
@@ -1285,7 +1289,7 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
     }
 
     /// <summary>How many loops enclose a node running at this iteration key (the number of "&lt;loop&gt;#&lt;i&gt;" path segments). 0 = top-level.</summary>
-    private static int LoopNestingDepth(string nodeIterationKey) =>
+    internal static int LoopNestingDepth(string nodeIterationKey) =>
         nodeIterationKey.Length == 0 ? 0 : nodeIterationKey.Count(c => c == '/') + 1;
 
     /// <summary>True when the body definition has an outgoing <c>error</c>-handle edge from the node — i.e. its failure is handled in-body (distinct from <see cref="HasErrorEdge"/>, which reads a live WalkerState).</summary>
