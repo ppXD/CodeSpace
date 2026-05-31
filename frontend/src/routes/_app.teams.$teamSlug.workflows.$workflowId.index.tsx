@@ -279,8 +279,19 @@ function Editor({ workflow, manifests, onBackToList, saving, onSave }: EditorPro
   // reparent it (or unparent it when dragged out). A reparented node becomes part of the loop's
   // body — it moves WITH the container and runs inside it per iteration.
   const loopUnder = (node: Node): string | null => {
-    if ((node.data as Partial<WorkflowNodeData>)?.kind === "Loop") return null;   // don't nest a loop in a loop
-    return getIntersectingNodes(node).find((n) => (n.data as Partial<WorkflowNodeData>)?.kind === "Loop")?.id ?? null;
+    // A loop CAN now nest inside another loop — but never inside itself or its own descendant (that
+    // would make a node its own ancestor). Among the overlapping valid loops, the innermost (deepest)
+    // wins, so dropping over a nested loop targets it rather than its outer container.
+    const insideDragged = (id: string): boolean => {
+      let p = nodes.find((n) => n.id === id)?.parentId;
+      while (p) { if (p === node.id) return true; p = nodes.find((n) => n.id === p)?.parentId; }
+      return false;
+    };
+    const targets = getIntersectingNodes(node).filter((n) =>
+      (n.data as Partial<WorkflowNodeData>)?.kind === "Loop" && n.id !== node.id && !insideDragged(n.id));
+    return targets.length === 0
+      ? null
+      : targets.reduce((deep, n) => (nodeDepth(n.id, nodes) > nodeDepth(deep.id, nodes) ? n : deep)).id;
   };
 
   const highlightLoop = (targetId: string | null) =>
@@ -310,14 +321,23 @@ function Editor({ workflow, manifests, onBackToList, saving, onSave }: EditorPro
 
     // No `extent: "parent"` — that would CLIP the child inside the box so it could never be dragged
     // back out. Keeping just parentId lets it move with the loop yet still be dragged out (→ unparent).
-    setNodes((nds) => nds.map((n) => {
-      if (n.id !== node.id) return n;
-      // Dropped INTO a loop → zIndex 1 so it sits above the container body (clickable + connectable);
-      // pulled OUT → drop back to the default stacking (a top-level node needs no explicit zIndex).
-      return targetId
-        ? { ...n, parentId: targetId, position: { x: abs.x - parentAbs.x, y: abs.y - parentAbs.y }, zIndex: 1 }
-        : { ...n, parentId: undefined, position: abs, zIndex: undefined };
-    }));
+    setNodes((nds) => {
+      const reparented = nds.map((n) =>
+        n.id !== node.id
+          ? n
+          : targetId
+            ? { ...n, parentId: targetId, position: { x: abs.x - parentAbs.x, y: abs.y - parentAbs.y } }
+            : { ...n, parentId: undefined, position: abs });
+
+      // Recompute every node's depth-based zIndex against the NEW parent structure, so moving a whole
+      // subtree (e.g. a loop with its body) into/out of another loop re-stacks it correctly at any depth.
+      // Top-level non-loop nodes keep no explicit zIndex (default stacking), matching the load path.
+      return reparented.map((n) => {
+        const depth = nodeDepth(n.id, reparented);
+        const isLoop = (n.data as Partial<WorkflowNodeData>)?.kind === "Loop";
+        return depth === 0 && !isLoop ? { ...n, zIndex: undefined } : { ...n, zIndex: depth };
+      });
+    });
 
     // Re-scoping severs any edge that now crosses the loop boundary — a step only connects to siblings
     // in the same scope (both top-level, or both in the same loop body). So dropping a step IN or
@@ -1295,6 +1315,15 @@ function NodeInspector({
 // ─── React Flow ↔ WorkflowDefinition glue ─────────────────────────────────────
 
 const NODE_TYPES = { wf: WorkflowNode };
+
+/** A node's nesting depth in the loop hierarchy — parentId hops to a top-level node (0 = top-level, 1 = loop body, 2 = nested-loop body, …). Drives loop-nesting target selection + the depth-based zIndex restacking on reparent. */
+function nodeDepth(id: string, nodes: Node[]): number {
+  const byId = new Map(nodes.map((n) => [n.id, n]));
+  let depth = 0;
+  let parent = byId.get(id)?.parentId;
+  while (parent) { depth++; parent = byId.get(parent)?.parentId; }
+  return depth;
+}
 
 function definitionToRfEdges(def: WorkflowDefinition): Edge[] {
   return def.edges.map((e, idx) => {

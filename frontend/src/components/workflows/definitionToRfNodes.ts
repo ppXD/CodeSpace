@@ -12,11 +12,13 @@ export const LOOP_CONTAINER_H = 240;
 /**
  * Map a saved workflow definition into React Flow nodes (the canvas's load path).
  *
- * z-index contract for the flow.loop container: the container sits at zIndex 0 and its body steps
- * at zIndex 1, so the steps (and their connect handles) always paint ABOVE the container's solid
- * body and stay clickable/connectable. Without this, a selected container can cover its own
- * children and swallow the pointer events you need to wire nodes inside the loop. The editor also
- * disables React Flow's elevate-on-select so a selected container can't jump above its children.
+ * z-index contract (works at ANY nesting depth, including a loop inside a loop): a node's zIndex is
+ * its nesting depth — a top-level loop container sits at 0, its body at 1, a nested loop container at
+ * 1, the nested body at 2, … so a child's handles always paint ABOVE its container and stay
+ * clickable/connectable. (Top-level non-loop nodes keep no explicit zIndex = default stacking.) Nodes
+ * are emitted parent-before-child at every level so React Flow's parent/child positioning resolves.
+ * The editor also disables React Flow's elevate-on-select so a selected container can't jump above
+ * its own children.
  */
 export function definitionToRfNodes(
   def: WorkflowDefinition,
@@ -27,13 +29,25 @@ export function definitionToRfNodes(
   // drag, so no real layout engine is needed. Horizontal mirrors the Dify-style left→right flow.
   let fallbackX = 80;
 
-  // React Flow requires a parent (loop container) to appear BEFORE its children in the array.
-  // Body nodes carry parentId; ordering top-level-first guarantees parent-before-child.
-  const ordered = [...def.nodes].sort((a, b) => (a.parentId ? 1 : 0) - (b.parentId ? 1 : 0));
+  // Nesting depth = how many parentId hops to a top-level node (0 = top-level, 1 = loop body,
+  // 2 = nested-loop body, …). Drives both the render order and the z-index.
+  const byId = new Map(def.nodes.map((n) => [n.id, n]));
+  const depthOf = (n: NodeDefinitionLike): number => {
+    let depth = 0;
+    let parent = n.parentId;
+    while (parent) { depth++; parent = byId.get(parent)?.parentId; }
+    return depth;
+  };
+
+  // A parent must appear BEFORE its children at EVERY level — sort by depth ascending (a nested loop
+  // sits between its outer container and its own body).
+  const ordered = [...def.nodes].sort((a, b) => depthOf(a) - depthOf(b));
 
   return ordered.map((n) => {
     const manifest = manifestByType.get(n.typeKey);
     const kind = manifest?.kind ?? "Regular";
+    const isLoop = kind === "Loop";
+    const depth = depthOf(n);
 
     const data: WorkflowNodeData = {
       nodeId: n.id,
@@ -47,22 +61,24 @@ export function definitionToRfNodes(
       ...(manifest?.isManual ? { inputFields: def.inputs ?? [] } : {}),
     };
 
-    // A loop body node renders INSIDE its container — position is relative to the parent. No
-    // `extent: "parent"` so it can still be dragged back OUT (onNodeDragStop then un-nests it).
-    // zIndex 1 keeps the step (and its handles) ABOVE the container's body so it stays clickable
-    // and connectable; the container itself sits at zIndex 0 (below).
+    // A nested node renders INSIDE its container — position relative to the parent, zIndex = depth so
+    // it (and its handles) paint above the container. A nested LOOP also needs the container size so it
+    // renders as a box. No `extent: "parent"` so it can still be dragged back OUT.
     if (n.parentId) {
-      return { id: n.id, type: "wf", parentId: n.parentId, position: n.position ?? { x: 40, y: 90 }, data, zIndex: 1 };
+      const nested = { id: n.id, type: "wf", parentId: n.parentId, position: n.position ?? { x: 40, y: 90 }, data, zIndex: depth };
+      return isLoop ? { ...nested, style: { width: LOOP_CONTAINER_W, height: LOOP_CONTAINER_H } } : nested;
     }
 
     const position = n.position ?? { x: fallbackX, y: 80 };
-    if (!n.position) fallbackX += kind === "Loop" ? LOOP_CONTAINER_W + 80 : 320;
+    if (!n.position) fallbackX += isLoop ? LOOP_CONTAINER_W + 80 : 320;
 
-    // A loop container is sized so its body subgraph fits; everything else is a normal card. It's
-    // draggable from anywhere on the box — body steps render above it (parent/child z-order) so they
-    // stay clickable and the box drags as one with its body.
-    return kind === "Loop"
+    // A top-level loop container is sized so its body fits + sits at zIndex 0 (below its body);
+    // everything else top-level is a normal card with default stacking.
+    return isLoop
       ? { id: n.id, type: "wf", position, data, style: { width: LOOP_CONTAINER_W, height: LOOP_CONTAINER_H }, zIndex: 0 }
       : { id: n.id, type: "wf", position, data };
   });
 }
+
+/** The shape depthOf needs — just the parentId link. */
+type NodeDefinitionLike = { parentId?: string | null };
