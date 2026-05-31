@@ -49,7 +49,7 @@ import { WorkflowNode, type WorkflowNodeData } from "@/components/workflows/Work
 import { NodeAddContext, type NodeAddRequest } from "@/components/workflows/nodeAddContext";
 import { NodeAddMenu } from "@/components/workflows/NodeAddMenu";
 import { nodeIconFor } from "@/components/workflows/nodeIcon";
-import { definitionToRfNodes, LOOP_CONTAINER_W, LOOP_CONTAINER_H } from "@/components/workflows/definitionToRfNodes";
+import { definitionToRfNodes, fitLoopSizes, LOOP_CONTAINER_W, LOOP_CONTAINER_H } from "@/components/workflows/definitionToRfNodes";
 import { useAlert } from "@/components/dialog";
 import { WorkflowVariablesPanel } from "@/components/workflows/WorkflowVariablesPanel";
 import { RunWorkflowModal } from "@/components/workflows/RunWorkflowModal";
@@ -329,13 +329,25 @@ function Editor({ workflow, manifests, onBackToList, saving, onSave }: EditorPro
             ? { ...n, parentId: targetId, position: { x: abs.x - parentAbs.x, y: abs.y - parentAbs.y } }
             : { ...n, parentId: undefined, position: abs });
 
+      // Auto-fit every loop container to its (new) children, so dropping a loop INTO another loop
+      // grows the outer to wrap it — no overlap — and pulling one out shrinks it back.
+      const loopSizes = fitLoopSizes(reparented.map((n) => ({
+        id: n.id,
+        parentId: n.parentId,
+        x: n.position.x,
+        y: n.position.y,
+        isLoop: (n.data as Partial<WorkflowNodeData>)?.kind === "Loop",
+      })));
+
       // Recompute every node's depth-based zIndex against the NEW parent structure, so moving a whole
       // subtree (e.g. a loop with its body) into/out of another loop re-stacks it correctly at any depth.
       // Top-level non-loop nodes keep no explicit zIndex (default stacking), matching the load path.
       return reparented.map((n) => {
         const depth = nodeDepth(n.id, reparented);
         const isLoop = (n.data as Partial<WorkflowNodeData>)?.kind === "Loop";
-        return depth === 0 && !isLoop ? { ...n, zIndex: undefined } : { ...n, zIndex: depth };
+        const zIndex = depth === 0 && !isLoop ? undefined : depth;
+        const size = loopSizes.get(n.id);
+        return isLoop && size ? { ...n, zIndex, style: { ...n.style, ...size } } : { ...n, zIndex };
       });
     });
 

@@ -4,10 +4,67 @@ import type { NodeManifestDto, WorkflowDefinition } from "@/api/workflows";
 
 import type { WorkflowNodeData } from "./WorkflowNode";
 
-// Default size of a flow.loop container on the canvas — roomy enough for a small body row. The
-// body's nodes render inside it (React Flow parent/child); the user resizes/repositions as needed.
+// Default (minimum) size of a flow.loop container on the canvas — roomy enough for a small body row.
+// The body's nodes render inside it (React Flow parent/child). A container auto-grows beyond this to
+// fit its children (see fitLoopSizes), so a nested loop never overflows its parent.
 export const LOOP_CONTAINER_W = 820;
 export const LOOP_CONTAINER_H = 240;
+
+// Estimated footprint of a non-loop body node (real size is only known after render). Generous so a
+// container doesn't clip a node; the dominant overlap case (a nested LOOP child) uses its EXACT
+// computed size, not this estimate.
+const NODE_EST_W = 280;
+const NODE_EST_H = 96;
+// Breathing room between the furthest child edge and the container edge.
+const LOOP_FIT_PAD = 40;
+
+/** Minimal node shape fitLoopSizes needs — id, parent link, top-left position, and whether it's a loop. */
+export interface LoopFitItem {
+  id: string;
+  parentId?: string | null;
+  x: number;
+  y: number;
+  isLoop: boolean;
+}
+
+/**
+ * Auto-size every loop container to fit its children — so a nested loop never overflows its parent.
+ * Computed BOTTOM-UP (deepest loops first): a leaf loop is at least the default size; an outer loop
+ * grows to wrap its inner loop's already-computed size + padding. A non-loop child contributes a
+ * generous estimate (its real size isn't known until render); a loop child contributes its exact
+ * computed size. Pure + deterministic → unit-tested. Shared by the load path (definitionToRfNodes)
+ * and the live re-fit on drag (the editor's onNodeDragStop).
+ */
+export function fitLoopSizes(items: LoopFitItem[]): Map<string, { width: number; height: number }> {
+  const byId = new Map(items.map((i) => [i.id, i]));
+  const depthOf = (i: LoopFitItem): number => {
+    let depth = 0;
+    let parent = i.parentId;
+    while (parent) { depth++; parent = byId.get(parent)?.parentId; }
+    return depth;
+  };
+
+  const childrenOf = new Map<string, LoopFitItem[]>();
+  for (const i of items) if (i.parentId) (childrenOf.get(i.parentId) ?? childrenOf.set(i.parentId, []).get(i.parentId)!).push(i);
+
+  const sizes = new Map<string, { width: number; height: number }>();
+  // Deepest loops first, so an outer loop sees its inner loops' sizes already settled.
+  const loopsDeepestFirst = items.filter((i) => i.isLoop).sort((a, b) => depthOf(b) - depthOf(a));
+
+  for (const loop of loopsDeepestFirst) {
+    let width = LOOP_CONTAINER_W;
+    let height = LOOP_CONTAINER_H;
+    for (const kid of childrenOf.get(loop.id) ?? []) {
+      const kw = kid.isLoop ? (sizes.get(kid.id)?.width ?? LOOP_CONTAINER_W) : NODE_EST_W;
+      const kh = kid.isLoop ? (sizes.get(kid.id)?.height ?? LOOP_CONTAINER_H) : NODE_EST_H;
+      width = Math.max(width, kid.x + kw + LOOP_FIT_PAD);
+      height = Math.max(height, kid.y + kh + LOOP_FIT_PAD);
+    }
+    sizes.set(loop.id, { width, height });
+  }
+
+  return sizes;
+}
 
 /**
  * Map a saved workflow definition into React Flow nodes (the canvas's load path).
@@ -43,6 +100,17 @@ export function definitionToRfNodes(
   // sits between its outer container and its own body).
   const ordered = [...def.nodes].sort((a, b) => depthOf(a) - depthOf(b));
 
+  // Auto-size each loop container to fit its body (so a nested loop never overflows its parent). A
+  // node's position defaults to the same {40,90} a positionless body node gets below.
+  const loopSizes = fitLoopSizes(def.nodes.map((n) => ({
+    id: n.id,
+    parentId: n.parentId,
+    x: n.position?.x ?? 40,
+    y: n.position?.y ?? 90,
+    isLoop: (manifestByType.get(n.typeKey)?.kind ?? "Regular") === "Loop",
+  })));
+  const loopStyle = (id: string) => loopSizes.get(id) ?? { width: LOOP_CONTAINER_W, height: LOOP_CONTAINER_H };
+
   return ordered.map((n) => {
     const manifest = manifestByType.get(n.typeKey);
     const kind = manifest?.kind ?? "Regular";
@@ -66,7 +134,7 @@ export function definitionToRfNodes(
     // renders as a box. No `extent: "parent"` so it can still be dragged back OUT.
     if (n.parentId) {
       const nested = { id: n.id, type: "wf", parentId: n.parentId, position: n.position ?? { x: 40, y: 90 }, data, zIndex: depth };
-      return isLoop ? { ...nested, style: { width: LOOP_CONTAINER_W, height: LOOP_CONTAINER_H } } : nested;
+      return isLoop ? { ...nested, style: loopStyle(n.id) } : nested;
     }
 
     const position = n.position ?? { x: fallbackX, y: 80 };
@@ -75,7 +143,7 @@ export function definitionToRfNodes(
     // A top-level loop container is sized so its body fits + sits at zIndex 0 (below its body);
     // everything else top-level is a normal card with default stacking.
     return isLoop
-      ? { id: n.id, type: "wf", position, data, style: { width: LOOP_CONTAINER_W, height: LOOP_CONTAINER_H }, zIndex: 0 }
+      ? { id: n.id, type: "wf", position, data, style: loopStyle(n.id), zIndex: 0 }
       : { id: n.id, type: "wf", position, data };
   });
 }
