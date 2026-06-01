@@ -25,4 +25,15 @@ public interface IPullRequestService
     /// credential lacks write scope (mapped to 422 with the missing-scope hint).
     /// </summary>
     Task<RemotePullRequestComment> PostCommentAsync(Guid repositoryId, int number, string body, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Submit a review VERDICT (approve / request-changes / comment) back to a PR/MR — the write-back
+    /// half of the review loop, via the provider's <c>IPullRequestReviewCapability</c>. The provider
+    /// maps the neutral verdict to its own API. <paramref name="body"/> is required for
+    /// <see cref="PullRequestReviewVerdict.Comment"/> and <see cref="PullRequestReviewVerdict.RequestChanges"/>
+    /// (you can't comment / block with nothing to say) and optional for
+    /// <see cref="PullRequestReviewVerdict.Approve"/>. Throws <see cref="InvalidOperationException"/> (400)
+    /// for a missing repo / missing required body, or on insufficient write scope (422).
+    /// </summary>
+    Task<RemotePullRequestReview> SubmitReviewAsync(Guid repositoryId, int number, PullRequestReviewVerdict verdict, string? body, CancellationToken cancellationToken);
 }

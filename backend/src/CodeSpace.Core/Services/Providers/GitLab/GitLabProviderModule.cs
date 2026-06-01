@@ -51,6 +51,9 @@ public sealed class GitLabProviderModule : IProviderModule
         // Posting MR comments needs WRITE scope — `api` only (read_api is read-only).
         [typeof(IPullRequestCommentCapability)] = ScopeRequirement.Of(GitLabScopes.Api),
 
+        // Submitting an MR review (posted as a note today) needs the same WRITE scope.
+        [typeof(IPullRequestReviewCapability)] = ScopeRequirement.Of(GitLabScopes.Api),
+
         // Webhook registration: only `api` works on GitLab. No narrower alternative exists.
         [typeof(IWebhookRegistrationCapability)] = ScopeRequirement.Of(GitLabScopes.Api),
 
