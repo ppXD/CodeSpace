@@ -7,6 +7,8 @@ export interface TeamMemberSummary {
   name: string;
   email: string;
   avatarUrl: string | null;
+  /** True for a bot user (e.g. the per-team CodeSpace bot). Present on the member-identities list; drives the robot avatar. */
+  isBot: boolean;
 }
 
 export const teamsApi = {
