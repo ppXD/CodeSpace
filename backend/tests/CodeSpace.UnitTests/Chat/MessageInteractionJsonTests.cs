@@ -1,3 +1,4 @@
+using System.Text.Json;
 using CodeSpace.Messages.Dtos.Chat.Interactions;
 using Shouldly;
 
@@ -86,6 +87,39 @@ public class MessageInteractionJsonTests
     public void Null_model_serializes_to_null()
     {
         MessageInteractionJson.Serialize(null).ShouldBeNull();
+    }
+
+    [Fact]
+    public void Round_trips_a_form_component_and_a_form_resolution()
+    {
+        var form = new MessageInteraction
+        {
+            Component = new FormComponent
+            {
+                Fields = JsonDocument.Parse("""{"type":"object","properties":{"channel":{"type":"string"}},"required":["channel"]}""").RootElement.Clone(),
+                SubmitLabel = "Send",
+            },
+            Target = new WorkflowWaitTarget { Token = "tok-form" },
+            State = InteractionState.Resolved,
+            Resolution = new InteractionResolution
+            {
+                ResponseKey = "submit",
+                ByUserId = Guid.Parse("33333333-3333-3333-3333-333333333333"),
+                Values = new Dictionary<string, JsonElement> { ["channel"] = JsonSerializer.SerializeToElement("c-42") },
+                AtUtc = new DateTimeOffset(2026, 6, 1, 9, 0, 0, TimeSpan.Zero),
+            },
+        };
+
+        var json = MessageInteractionJson.Serialize(form);
+        json.ShouldContain("\"kind\":\"form\"", customMessage: "the form discriminator is the wire contract the frontend switches on");
+
+        var back = MessageInteractionJson.Deserialize(json);
+
+        var component = back!.Component.ShouldBeOfType<FormComponent>();
+        component.SubmitLabel.ShouldBe("Send");
+        component.Fields.GetProperty("required")[0].GetString().ShouldBe("channel");
+        back.Resolution!.Values.ShouldNotBeNull();
+        back.Resolution!.Values!["channel"].GetString().ShouldBe("c-42", customMessage: "the submitted field values round-trip on the resolution mirror");
     }
 
     [Theory]

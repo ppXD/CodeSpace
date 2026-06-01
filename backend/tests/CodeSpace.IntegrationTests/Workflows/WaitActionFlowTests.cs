@@ -52,7 +52,7 @@ public class WaitActionFlowTests
         bool resumed;
         using (var scope = _fixture.BeginScope())
             resumed = await scope.Resolve<IWorkflowResumeService>()
-                .ResumeByActionTokenAsync("card-token-1", "approve", userId, "lgtm", teamId, CancellationToken.None);
+                .ResumeByActionTokenAsync("card-token-1", "approve", userId, "lgtm", values: null, teamId, CancellationToken.None);
         resumed.ShouldBeTrue();
 
         await RunEngineAsync(runId);

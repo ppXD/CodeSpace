@@ -1,3 +1,4 @@
+using System.Text.Json;
 using System.Text.Json.Serialization;
 
 namespace CodeSpace.Messages.Dtos.Chat.Interactions;
@@ -64,6 +65,9 @@ public sealed record InteractionResolution
     public required Guid ByUserId { get; init; }
 
     public string? Comment { get; init; }
+
+    /// <summary>For a form response — the submitted field values (mirrors the run's injected input). Null for a button response.</summary>
+    public IReadOnlyDictionary<string, JsonElement>? Values { get; init; }
 
     public required DateTimeOffset AtUtc { get; init; }
 }

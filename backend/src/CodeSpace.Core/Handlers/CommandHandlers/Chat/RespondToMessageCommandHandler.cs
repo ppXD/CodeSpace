@@ -19,5 +19,5 @@ public sealed class RespondToMessageCommandHandler : IRequestHandler<RespondToMe
     }
 
     public Task Handle(RespondToMessageCommand request, CancellationToken cancellationToken) =>
-        _interactions.RespondAsync(_currentTeam.Id!.Value, request.MessageId, request.ResponseKey, _currentUser.Id!.Value, request.Comment, cancellationToken);
+        _interactions.RespondAsync(_currentTeam.Id!.Value, request.MessageId, request.ResponseKey, _currentUser.Id!.Value, request.Comment, request.Values, cancellationToken);
 }
