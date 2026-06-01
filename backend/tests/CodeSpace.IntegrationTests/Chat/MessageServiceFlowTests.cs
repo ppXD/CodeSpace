@@ -1,3 +1,4 @@
+using System.Text.Json;
 using Autofac;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
@@ -414,8 +415,15 @@ public class MessageServiceFlowTests
 
         var page = await ListAsync(teamId, ownerId, channelId, beforeId: null, limit: 50);
 
-        var component = page.Messages.ShouldHaveSingleItem().Interaction.ShouldNotBeNull().Component.ShouldBeOfType<ActionButtonsComponent>();
+        var interaction = page.Messages.ShouldHaveSingleItem().Interaction.ShouldNotBeNull();
+        var component = interaction.Component.ShouldBeOfType<ActionButtonsComponent>();
         component.Buttons.Count.ShouldBe(2, customMessage: "the polymorphic component must survive the FromSqlRaw keyset read + jsonb deserialize");
+
+        // Token-leak guard: the read path drops the Target, so the JSON actually serialized to the
+        // client can never carry the server-side wait token. If someone re-adds Target to the view
+        // type, this fails — the token is the credential the respond endpoint re-derives, not a client value.
+        JsonSerializer.Serialize(interaction).ShouldNotContain("tok-list", Case.Insensitive,
+            customMessage: "the wait token must stay server-side — the client-facing interaction view must omit it");
     }
 
     [Fact]

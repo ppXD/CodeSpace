@@ -294,7 +294,9 @@ public sealed class MessageService : IMessageService, IScopedDependency
     // message id; the backend re-derives the target.
     private static MessageInteractionView? MapInteractionView(string? interactionJson)
     {
-        var interaction = MessageInteractionJson.Deserialize(interactionJson);
+        // Tolerant on the read path: an unrenderable card (unknown/newer kind, malformed jsonb) degrades
+        // to "no interaction" rather than throwing and bricking the whole conversation's message list.
+        var interaction = MessageInteractionJson.TryDeserialize(interactionJson);
         if (interaction == null) return null;
 
         return new MessageInteractionView
