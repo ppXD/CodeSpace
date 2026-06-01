@@ -32,29 +32,30 @@ public sealed class ChatPostMessageNode : INodeRuntime
         Category = "Chat",
         Kind = NodeKind.Regular,
         IconKey = "message-square",
-        Description = "Posts a message into a conversation as the CodeSpace bot. Add `actions` to post an interactive card; wire its `token` output into a flow.wait_action to wait for a click.",
+        Description = "Posts a message into a conversation as the CodeSpace bot. Add `actions` to attach an Action-buttons card (the interaction component — more kinds like forms/polls can be added later); wire its `token` output into a flow.wait_action to wait for a click.",
         IsSideEffecting = true,
         ConfigSchema = SchemaBuilder.EmptyObject(),
         InputSchema = SchemaBuilder.Parse("""
             {
               "type": "object",
               "properties": {
-                "conversationId": { "type": "string", "format": "uuid", "x-selector": "conversation" },
-                "body": { "type": "string", "minLength": 1 },
+                "conversationId": { "type": "string", "format": "uuid", "x-selector": "conversation", "description": "Target conversation. Pick a channel, or switch to Expression to bind it dynamically (e.g. {{trigger.channelId}})." },
+                "body": { "type": "string", "minLength": 1, "description": "The message text. Supports {{ }} references." },
                 "actions": {
                   "type": "array",
+                  "description": "Action buttons — each item renders as a clickable button. The clicked button's `key` is what a downstream flow.wait_action resumes with. Leave empty to post a plain message. (The only interaction component today; forms / polls would be future kinds.)",
                   "items": {
                     "type": "object",
                     "properties": {
-                      "key": { "type": "string" },
-                      "label": { "type": "string" },
-                      "style": { "type": "string", "enum": ["Default","Primary","Danger"] },
-                      "requiresComment": { "type": "boolean" }
+                      "key": { "type": "string", "description": "Returned to the workflow when this button is clicked (e.g. \"approve\")." },
+                      "label": { "type": "string", "description": "Button text shown to the responder." },
+                      "style": { "type": "string", "enum": ["Default","Primary","Danger"], "description": "Visual emphasis." },
+                      "requiresComment": { "type": "boolean", "description": "Require the responder to enter a comment before this button submits." }
                     },
                     "required": ["key","label"]
                   }
                 },
-                "allowedResponderUserIds": { "type": "array", "items": { "type": "string", "format": "uuid" } }
+                "allowedResponderUserIds": { "type": "array", "items": { "type": "string", "format": "uuid" }, "description": "Restrict who may click (user ids). Empty = any member of the conversation may respond." }
               },
               "required": ["conversationId","body"]
             }
