@@ -49,6 +49,17 @@ public class MessageInteractionPolicyTests
     }
 
     [Fact]
+    public void IsAllowedResponder_treats_an_empty_allow_list_as_nobody()
+    {
+        // A NON-null empty list means "explicitly nobody" (distinct from null = anyone). chat.post_message
+        // collapses an empty actions allow-list to null, so this only arises for a directly-built card —
+        // pin the strict semantics so a future caller can't accidentally open a card to everyone.
+        var card = Card(allowed: Array.Empty<Guid>());
+
+        MessageInteractionPolicy.IsAllowedResponder(card, Guid.NewGuid(), isConversationMember: true).ShouldBeFalse();
+    }
+
+    [Fact]
     public void RequiresComment_is_true_only_for_a_button_that_demands_one()
     {
         var card = new MessageInteraction

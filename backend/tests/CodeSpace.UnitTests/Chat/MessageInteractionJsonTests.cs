@@ -87,4 +87,21 @@ public class MessageInteractionJsonTests
     {
         MessageInteractionJson.Serialize(null).ShouldBeNull();
     }
+
+    [Theory]
+    [InlineData("""{"version":1,"component":{"kind":"hologram"},"target":{"kind":"workflow_wait","token":"t"},"state":"Open"}""")]  // unknown component kind (newer/forked server)
+    [InlineData("""{"version":1,"component":{"kind":"action_buttons","buttons":[]},"target":{"kind":"smoke_signal"},"state":"Open"}""")] // unknown target kind
+    [InlineData("{ this is not valid json")]                                                                                          // malformed
+    public void TryDeserialize_degrades_to_null_for_an_unknown_kind_or_malformed_json(string json)
+    {
+        // A card we can't render must degrade to null on the read path — never throw + brick the
+        // whole conversation's message list.
+        Should.NotThrow(() => MessageInteractionJson.TryDeserialize(json).ShouldBeNull());
+    }
+
+    [Fact]
+    public void TryDeserialize_returns_the_model_for_a_valid_document()
+    {
+        MessageInteractionJson.TryDeserialize(MessageInteractionJson.Serialize(SampleButtons())).ShouldNotBeNull();
+    }
 }

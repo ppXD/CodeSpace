@@ -18,4 +18,25 @@ public static class MessageInteractionJson
 
     public static MessageInteraction? Deserialize(string? json) =>
         string.IsNullOrEmpty(json) ? null : JsonSerializer.Deserialize<MessageInteraction>(json, Options);
+
+    /// <summary>
+    /// Tolerant variant for the READ/display path: returns null on malformed jsonb OR an unknown
+    /// component/target <c>kind</c> (a card written by a newer or forked server) INSTEAD of throwing —
+    /// so a single unrenderable card can't brick a whole message-list read. The strict
+    /// <see cref="Deserialize"/> stays for paths that legitimately require a well-formed interaction.
+    /// </summary>
+    public static MessageInteraction? TryDeserialize(string? json)
+    {
+        if (string.IsNullOrEmpty(json)) return null;
+
+        try
+        {
+            return JsonSerializer.Deserialize<MessageInteraction>(json, Options);
+        }
+        catch (Exception ex) when (ex is JsonException or NotSupportedException)
+        {
+            // JsonException = malformed jsonb; NotSupportedException = unknown polymorphic `kind`.
+            return null;
+        }
+    }
 }
