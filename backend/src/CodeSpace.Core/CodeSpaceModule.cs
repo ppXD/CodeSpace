@@ -119,6 +119,11 @@ public class CodeSpaceModule : Autofac.Module
 
                 optionsBuilder.UseNpgsql(connectionString).UseSnakeCaseNamingConvention();
 
+                // The global User query filter (exclude bots) sits across a required TeamMembership→User
+                // relationship; that's intentional (a bot membership's principal is filtered out of
+                // human rosters), so silence EF's defensive warning about the interaction.
+                optionsBuilder.ConfigureWarnings(w => w.Ignore(Microsoft.EntityFrameworkCore.Diagnostics.CoreEventId.PossibleIncorrectRequiredNavigationWithQueryFilterInteractionWarning));
+
                 return optionsBuilder.Options;
             })
             .As<DbContextOptions<CodeSpaceDbContext>>()
@@ -128,7 +133,8 @@ public class CodeSpaceModule : Autofac.Module
             {
                 var options = c.Resolve<DbContextOptions<CodeSpaceDbContext>>();
                 var currentUser = c.ResolveOptional<ICurrentUser>();
-                return new CodeSpaceDbContext(options, currentUser);
+                var botVisibility = c.ResolveOptional<IBotVisibility>();
+                return new CodeSpaceDbContext(options, currentUser, botVisibility);
             })
             .AsSelf()
             .As<DbContext>()

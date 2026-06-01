@@ -99,7 +99,7 @@ public sealed class UserService : IUserService, IScopedDependency
         return await _db.User.AsNoTracking()
             .Where(u => userIds.Contains(u.Id) && u.DeletedDate == null)
             .OrderBy(u => u.Name)
-            .Select(u => new TeamMemberSummary { UserId = u.Id, Name = u.Name, Email = u.Email, AvatarUrl = u.AvatarUrl })
+            .Select(u => new TeamMemberSummary { UserId = u.Id, Name = u.Name, Email = u.Email, AvatarUrl = u.AvatarUrl, IsBot = u.IsBot })
             .ToListAsync(cancellationToken).ConfigureAwait(false);
     }
 

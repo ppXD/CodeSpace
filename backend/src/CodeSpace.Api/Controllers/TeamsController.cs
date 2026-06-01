@@ -23,4 +23,16 @@ public class TeamsController : ControllerBase
         var result = await _mediator.Send(new ListTeamMembersQuery(), cancellationToken).ConfigureAwait(false);
         return Ok(result);
     }
+
+    /// <summary>
+    /// Member identities for DISPLAY — INCLUDES the team's CodeSpace bot so the chat UI can name a
+    /// message authored by the bot. Distinct from <see cref="Members"/> (which excludes bots) so the
+    /// @-mention picker / roster stay human-only.
+    /// </summary>
+    [HttpGet("member-identities")]
+    public async Task<IActionResult> MemberIdentities(CancellationToken cancellationToken)
+    {
+        var result = await _mediator.Send(new ListTeamMemberIdentitiesQuery(), cancellationToken).ConfigureAwait(false);
+        return Ok(result);
+    }
 }

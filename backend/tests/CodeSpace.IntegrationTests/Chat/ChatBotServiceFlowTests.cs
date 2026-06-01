@@ -36,7 +36,8 @@ public class ChatBotServiceFlowTests
 
         using var verify = _fixture.BeginScope();
         var db = verify.Resolve<CodeSpaceDbContext>();
-        var bots = await db.User.AsNoTracking()
+        // This scope didn't opt into bot visibility, so bypass the global filter to inspect the bot row.
+        var bots = await db.User.AsNoTracking().IgnoreQueryFilters()
             .Where(u => u.IsBot && db.TeamMembership.Any(m => m.UserId == u.Id && m.TeamId == teamId))
             .ToListAsync();
 
@@ -65,7 +66,7 @@ public class ChatBotServiceFlowTests
 
         using var verify = _fixture.BeginScope();
         var db = verify.Resolve<CodeSpaceDbContext>();
-        var count = await db.User.AsNoTracking()
+        var count = await db.User.AsNoTracking().IgnoreQueryFilters()
             .CountAsync(u => u.IsBot && db.TeamMembership.Any(m => m.UserId == u.Id && m.TeamId == teamId));
         count.ShouldBe(1, "the unique-email race guard must prevent a duplicate bot row");
     }
@@ -83,7 +84,8 @@ public class ChatBotServiceFlowTests
         using var verify = _fixture.BeginScope();
         var db = verify.Resolve<CodeSpaceDbContext>();
 
-        var author = await db.User.AsNoTracking().SingleAsync(u => u.Id == view.AuthorUserId);
+        // The author IS the bot, which the global filter hides — bypass it to verify the identity.
+        var author = await db.User.AsNoTracking().IgnoreQueryFilters().SingleAsync(u => u.Id == view.AuthorUserId);
         author.IsBot.ShouldBeTrue();
         author.Name.ShouldBe(ChatBotService.BotDisplayName);
 

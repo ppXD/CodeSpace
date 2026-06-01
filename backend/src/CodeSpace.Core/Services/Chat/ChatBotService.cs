@@ -60,7 +60,9 @@ public sealed class ChatBotService : IChatBotService, IScopedDependency
     internal static string BotEmail(Guid teamId) => $"codespace-bot.{teamId:N}@bot.codespace.local";
 
     private async Task<Guid?> FindBotIdAsync(string email, CancellationToken cancellationToken) =>
-        await _db.User.AsNoTracking()
+        // This service MANAGES the bot, so it must see bot users even though the global User query
+        // filter hides them by default — bypass the filter for this lookup specifically.
+        await _db.User.AsNoTracking().IgnoreQueryFilters()
             .Where(u => u.Email == email && u.IsBot && u.DeletedDate == null)
             .Select(u => (Guid?)u.Id)
             .FirstOrDefaultAsync(cancellationToken).ConfigureAwait(false);
