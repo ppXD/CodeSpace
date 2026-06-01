@@ -10,6 +10,11 @@ export interface TeamMemberSummary {
 }
 
 export const teamsApi = {
-  /** Current team's members (from the X-Team-Id header). */
+  /** Pickable members (bot-excluded) — for the `@`-mention picker, invite list, member roster. */
   listMembers: () => fetchJson<TeamMemberSummary[]>("/api/teams/members"),
+
+  /** Identities for display/resolution, including bots — for turning an author/`@user` id into a
+   *  name + avatar. A bot (e.g. the per-team CodeSpace bot that posts review cards) authors messages
+   *  but isn't pickable, so name resolution must use this superset list, not `listMembers`. */
+  listMemberIdentities: () => fetchJson<TeamMemberSummary[]>("/api/teams/member-identities"),
 };

@@ -3,7 +3,7 @@ import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { ApiError } from "@/api/request";
 import { useConversation, useMarkRead, useMessages, usePostMessage } from "@/hooks/use-chat";
 import { useMe } from "@/hooks/use-me";
-import { useTeamMemberMap } from "@/hooks/use-team-members";
+import { useTeamMemberIdentityMap } from "@/hooks/use-team-members";
 import { dayDividerLabel, firstUnreadId, isNewDay } from "@/lib/messageDividers";
 
 import { ConversationMembers } from "./ConversationMembers";
@@ -22,7 +22,7 @@ export function MessagePane({ conversationId }: { conversationId: string }) {
   const messagesQuery = useMessages(conversationId);
   const post = usePostMessage(conversationId);
   const markRead = useMarkRead(conversationId);
-  const members = useTeamMemberMap();
+  const members = useTeamMemberIdentityMap();   // bot-inclusive: a bot authors review cards but isn't pickable
   const me = useMe();
 
   const messages = useMemo(
