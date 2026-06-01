@@ -3,6 +3,7 @@ import { useMemo } from "react";
 import { coerceNumberInput } from "@/lib/inputFieldSchema";
 
 import type { ScopeSuggestion } from "./scope-introspection";
+import { ConversationSelector } from "./selectors/ConversationSelector";
 import { ProjectRepositorySelector } from "./selectors/ProjectRepositorySelector";
 import { TriggerRepositoriesSelector } from "./selectors/TriggerRepositoriesSelector";
 import { VariablePickerInput } from "./VariablePickerInput";
@@ -276,6 +277,13 @@ function renderCustomSelector(key: string, _schema: Schema, value: unknown, onCh
     case "repository":
       return (
         <ProjectRepositorySelector
+          value={typeof value === "string" ? value : ""}
+          onChange={(next) => onChange(next === "" ? undefined : next)}
+        />
+      );
+    case "conversation":
+      return (
+        <ConversationSelector
           value={typeof value === "string" ? value : ""}
           onChange={(next) => onChange(next === "" ? undefined : next)}
         />

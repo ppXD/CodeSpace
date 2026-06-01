@@ -39,7 +39,7 @@ public sealed class ChatPostMessageNode : INodeRuntime
             {
               "type": "object",
               "properties": {
-                "conversationId": { "type": "string", "format": "uuid" },
+                "conversationId": { "type": "string", "format": "uuid", "x-selector": "conversation" },
                 "body": { "type": "string", "minLength": 1 },
                 "actions": {
                   "type": "array",
