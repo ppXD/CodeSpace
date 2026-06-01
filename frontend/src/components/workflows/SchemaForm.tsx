@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { useMemo, useState, type ReactNode } from "react";
 
 import { Ic } from "@/_imported/ai-code-space/icons";
 import { coerceNumberInput } from "@/lib/inputFieldSchema";
@@ -138,7 +138,17 @@ function renderControl(schema: Schema, value: unknown, onChange: (next: unknown)
   const selectorKey = schema["x-selector"];
   if (selectorKey) {
     const custom = renderCustomSelector(selectorKey, schema, value, onChange);
-    if (custom != null) return custom;
+    if (custom != null) {
+      // A scalar-string selector (e.g. repository, conversation) can ALSO be bound to a dynamic
+      // {{ }} reference — essential when the target isn't known at design time. When the editor
+      // offers in-scope variables, wrap it in a Pick ⇄ Expression toggle so the author can switch
+      // to an @-reference. Array selectors (type !== string, e.g. trigger.repositories) and the run
+      // form (no suggestions) keep just the picker. The stored value is a string either way.
+      const dynamic = schema.type === "string" && variableSuggestions != null && variableSuggestions.length > 0;
+      return dynamic
+        ? <DualModeSelector pick={custom} value={value} onChange={onChange} variableSuggestions={variableSuggestions} />
+        : custom;
+    }
     // Unknown selector key — fall through to the type-based renderer so the field
     // still functions (operator can hand-type the value) and we don't strand
     // unsupported manifests behind a missing component.
@@ -316,6 +326,40 @@ function renderCustomSelector(key: string, _schema: Schema, value: unknown, onCh
     default:
       return null;
   }
+}
+
+/**
+ * Wraps a scalar-string custom selector with a Pick ⇄ Expression toggle. Pick = the dropdown
+ * (static literal value); Expression = the @/{{ }} variable input (a dynamic reference resolved at
+ * run time). The stored value is a plain string in both modes — a literal UUID or a `{{ref}}`
+ * template — so this is non-breaking and the engine resolves the template like any other input.
+ * Opening mode is inferred from the value (a `{{` ⇒ expression); the author can flip it freely.
+ */
+function DualModeSelector({ pick, value, onChange, variableSuggestions }: {
+  pick: ReactNode;
+  value: unknown;
+  onChange: (next: unknown) => void;
+  variableSuggestions: ScopeSuggestion[];
+}) {
+  const stringValue = typeof value === "string" ? value : "";
+  const [mode, setMode] = useState<"pick" | "expr">(stringValue.includes("{{") ? "expr" : "pick");
+
+  return (
+    <div className="wf-dualmode">
+      <div className="wf-dualmode-head" role="group" aria-label="Value mode">
+        <button type="button" className="wf-dualmode-toggle" data-active={mode === "pick"} onClick={() => setMode("pick")}>Pick</button>
+        <button type="button" className="wf-dualmode-toggle" data-active={mode === "expr"} onClick={() => setMode("expr")}>Expression</button>
+      </div>
+      {mode === "pick" ? pick : (
+        <VariablePickerInput
+          value={stringValue}
+          onChange={(next) => onChange(next === "" ? undefined : next)}
+          suggestions={variableSuggestions}
+          placeholder="Type @ to reference an input or step output"
+        />
+      )}
+    </div>
+  );
 }
 
 /**

@@ -3,6 +3,11 @@ import { describe, expect, it, vi } from "vitest";
 
 import { SchemaForm } from "./SchemaForm";
 
+// ConversationSelector (pick mode of the dual-mode selector) reads useConversations.
+vi.mock("@/hooks/use-chat", () => ({
+  useConversations: () => ({ isLoading: false, data: [{ id: "c1", kind: "Channel", slug: "general", name: "General" }] }),
+}));
+
 /**
  * Generic object-array editing. A property of `array` of `object` renders a repeatable list of
  * sub-forms (one per item), driven purely by `items.properties` — no per-node knowledge. The item
@@ -58,5 +63,44 @@ describe("SchemaForm object-array editor", () => {
     const onChange = renderForm({});
     fireEvent.click(screen.getByRole("button", { name: /add item/i }));
     expect(onChange).toHaveBeenCalledWith({ buttons: [{}] });
+  });
+});
+
+/**
+ * A scalar-string `x-selector` field (here `conversation`) is dynamically bindable: in the editor
+ * (variable suggestions present) it offers a Pick ⇄ Expression toggle so the value can be a static
+ * pick OR a `{{ }}` reference. Without suggestions (the run form) it stays a plain picker.
+ */
+describe("SchemaForm scalar selector dual-mode", () => {
+  const convSchema = { type: "object", properties: { conversationId: { type: "string", "x-selector": "conversation" } } };
+  const suggestions = [{ path: "trigger.channelId", label: "trigger.channelId", category: "trigger" as const }];
+
+  function renderConv(value: unknown, withSuggestions: boolean) {
+    render(<SchemaForm schema={convSchema} value={value} onChange={vi.fn()} variableSuggestions={withSuggestions ? suggestions : undefined} />);
+  }
+
+  it("offers a Pick ⇄ Expression toggle and defaults to the picker", () => {
+    renderConv({ conversationId: "" }, true);
+    expect(screen.getByRole("button", { name: "Pick" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Expression" })).toBeInTheDocument();
+    expect(screen.getByRole("combobox")).toBeInTheDocument();   // the conversation dropdown
+  });
+
+  it("switches to the expression input when Expression is chosen", () => {
+    renderConv({ conversationId: "" }, true);
+    fireEvent.click(screen.getByRole("button", { name: "Expression" }));
+    expect(screen.queryByRole("combobox")).toBeNull();   // dropdown replaced by the @/{{ }} input
+  });
+
+  it("opens in expression mode when the value is already a reference", () => {
+    renderConv({ conversationId: "{{trigger.channelId}}" }, true);
+    expect(screen.getByRole("button", { name: "Expression" }).getAttribute("data-active")).toBe("true");
+    expect(screen.queryByRole("combobox")).toBeNull();
+  });
+
+  it("stays a plain picker with no toggle when there are no variable suggestions (run form)", () => {
+    renderConv({ conversationId: "" }, false);
+    expect(screen.queryByRole("button", { name: "Pick" })).toBeNull();
+    expect(screen.getByRole("combobox")).toBeInTheDocument();
   });
 });

@@ -2565,6 +2565,12 @@ textarea:-webkit-autofill {
 .acs-root .wf-objarr-remove, .mdl .wf-objarr-remove { flex-shrink: 0; }
 .acs-root .wf-objarr-add, .mdl .wf-objarr-add { align-self: flex-start; }
 
+/* Pick ⇄ Expression toggle for a scalar selector field (static dropdown vs a dynamic {{ }} reference). */
+.acs-root .wf-dualmode, .mdl .wf-dualmode { display: flex; flex-direction: column; gap: 6px; }
+.acs-root .wf-dualmode-head, .mdl .wf-dualmode-head { display: inline-flex; gap: 2px; align-self: flex-start; padding: 2px; border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--panel-2); }
+.acs-root .wf-dualmode-toggle, .mdl .wf-dualmode-toggle { appearance: none; border: none; background: none; cursor: pointer; font: inherit; font-size: 11px; padding: 2px 8px; border-radius: 4px; color: var(--muted); }
+.acs-root .wf-dualmode-toggle[data-active="true"], .mdl .wf-dualmode-toggle[data-active="true"] { background: var(--panel); color: var(--ink); box-shadow: var(--shadow-1); }
+
 .acs-root .wf-selector { position: relative; width: 100%; }
 .acs-root .wf-selector-trigger {
   width: 100%; box-sizing: border-box;
