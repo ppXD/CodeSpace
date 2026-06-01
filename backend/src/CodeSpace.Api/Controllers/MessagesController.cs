@@ -54,4 +54,16 @@ public class MessagesController : ControllerBase
         await _mediator.Send(command with { ConversationId = conversationId }, cancellationToken).ConfigureAwait(false);
         return NoContent();
     }
+
+    /// <summary>
+    /// Respond to an interactive message — click a card button. The body carries the chosen
+    /// <c>responseKey</c> (+ optional comment); the route's <c>messageId</c> identifies the
+    /// interaction. The wait token stays server-side — the service re-derives it from the message.
+    /// </summary>
+    [HttpPost("{messageId:guid}/respond")]
+    public async Task<IActionResult> Respond([FromRoute] Guid messageId, [FromBody] RespondToMessageCommand command, CancellationToken cancellationToken)
+    {
+        await _mediator.Send(command with { MessageId = messageId }, cancellationToken).ConfigureAwait(false);
+        return NoContent();
+    }
 }
