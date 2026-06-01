@@ -21,6 +21,14 @@ public static class WorkflowWaitKinds
     /// terminal state, mapping the child's outputs back onto the node.
     /// </summary>
     public const string Subworkflow = "Subworkflow";
+
+    /// <summary>
+    /// Waits for a person to act on an interactive chat affordance (a card button — approve /
+    /// request-changes / …). The structured sibling of <see cref="Callback"/>: the click resolves
+    /// the wait with a <c>{ action, by, comment }</c> payload (vs the callback's opaque body) and
+    /// is woken by an authenticated, team-scoped resume rather than an anonymous URL.
+    /// </summary>
+    public const string Action = "Action";
 }
 
 /// <summary>Lifecycle of a <c>workflow_run_wait</c> row. CHECK-constrained at the DB layer.</summary>

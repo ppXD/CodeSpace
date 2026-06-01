@@ -1646,11 +1646,11 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
             _backgroundJobClient.Schedule<IWorkflowResumeService>(s => s.ResumeAsync(run.Id, CancellationToken.None), wakeAt.Value);
     }
 
-    private static string ValidateWaitKind(string nodeId, string kind)
+    internal static string ValidateWaitKind(string nodeId, string kind)
     {
-        if (kind is WorkflowWaitKinds.Timer or WorkflowWaitKinds.Approval or WorkflowWaitKinds.Callback or WorkflowWaitKinds.Subworkflow) return kind;
+        if (kind is WorkflowWaitKinds.Timer or WorkflowWaitKinds.Approval or WorkflowWaitKinds.Callback or WorkflowWaitKinds.Subworkflow or WorkflowWaitKinds.Action) return kind;
 
-        throw new NodeFailureException($"Node '{nodeId}' suspended with unknown wait kind '{kind}'. Expected Timer, Approval, Callback, or Subworkflow.");
+        throw new NodeFailureException($"Node '{nodeId}' suspended with unknown wait kind '{kind}'. Expected Timer, Approval, Callback, Subworkflow, or Action.");
     }
 
     /// <summary>

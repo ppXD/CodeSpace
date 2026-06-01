@@ -40,6 +40,16 @@ public interface IWorkflowResumeService
     /// unauthenticated callback URL.
     /// </summary>
     Task<bool> ResumeByCallbackTokenAsync(string token, string bodyJson, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Resume the run parked on the Action wait matching <paramref name="token"/> — a person acted
+    /// on an interactive chat affordance. Stamps a structured <c>{ action, by, comment }</c> payload
+    /// (surfaced as the suspended node's outputs) and resumes. <paramref name="actorUserId"/> is the
+    /// authenticated clicker (the write-back attributes the decision to them). Returns false when no
+    /// pending Action wait matches the token (unknown / already resolved) — caller maps that to 404.
+    /// The structured sibling of <see cref="ResumeByCallbackTokenAsync"/>.
+    /// </summary>
+    Task<bool> ResumeByActionTokenAsync(string token, string actionKey, Guid actorUserId, string? comment, CancellationToken cancellationToken);
 }
 
 public sealed class WorkflowResumeService : IWorkflowResumeService, IScopedDependency
@@ -112,5 +122,23 @@ public sealed class WorkflowResumeService : IWorkflowResumeService, IScopedDepen
         }
 
         return await ResumeCoreAsync(wait.RunId, bodyJson, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<bool> ResumeByActionTokenAsync(string token, string actionKey, Guid actorUserId, string? comment, CancellationToken cancellationToken)
+    {
+        var wait = await _db.WorkflowRunWait.AsNoTracking()
+            .Where(w => w.Token == token && w.Status == WorkflowWaitStatuses.Pending && w.WaitKind == WorkflowWaitKinds.Action)
+            .FirstOrDefaultAsync(cancellationToken)
+            .ConfigureAwait(false);
+
+        if (wait == null)
+        {
+            _logger.LogDebug("Action resume: no pending action wait matches the token");
+            return false;
+        }
+
+        var payload = JsonSerializer.Serialize(new { action = actionKey, by = actorUserId, comment });
+
+        return await ResumeCoreAsync(wait.RunId, payload, cancellationToken).ConfigureAwait(false);
     }
 }
