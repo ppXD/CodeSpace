@@ -16,6 +16,14 @@ public class User : IEntity<Guid>, IAuditable
     /// </summary>
     public bool PasswordMustChange { get; set; }
 
+    /// <summary>
+    /// True for a non-human identity — the per-team "CodeSpace" bot that authors workflow-posted
+    /// messages (interactive review cards, standup digests, …). A bot has no password and never
+    /// signs in; it exists so a workflow can post into chat with a stable, attributable author even
+    /// when the run has no human actor (e.g. a PR-triggered run). One bot per team — see IChatBotService.
+    /// </summary>
+    public bool IsBot { get; set; }
+
     public DateTimeOffset? LastLoginDate { get; set; }
 
     public DateTimeOffset CreatedDate { get; set; }
