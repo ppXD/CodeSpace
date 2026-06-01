@@ -82,8 +82,8 @@ public sealed class ChatPostMessageNode : INodeRuntime
 
     public async Task<NodeResult> RunAsync(NodeRunContext context, CancellationToken cancellationToken)
     {
-        if (!TryReadGuid(context, "conversationId", out var conversationId)) return NodeResult.Fail("Input 'conversationId' missing or not a uuid.");
-        if (!TryReadBody(context, out var body)) return NodeResult.Fail("Input 'body' missing or empty.");
+        if (RequireGuidInput(context, "conversationId", out var conversationId) is { } conversationError) return NodeResult.Fail(conversationError);
+        if (RequireStringInput(context, "body", out var body) is { } bodyError) return NodeResult.Fail(bodyError);
 
         var interaction = BuildInteraction(context, out var token);
 
@@ -175,18 +175,45 @@ public sealed class ChatPostMessageNode : INodeRuntime
         return ids.Count > 0 ? ids : null;
     }
 
-    private static bool TryReadGuid(NodeRunContext context, string key, out Guid value)
+    /// <summary>
+    /// Read a required non-empty string input, returning a SPECIFIC error (else null). Distinguishes
+    /// missing / wrong-type / empty so a <c>{{ref}}</c> that resolves to an array or object (a common
+    /// wiring slip) reads as "must be a string, got an array" rather than the misleading "missing".
+    /// </summary>
+    private static string? RequireStringInput(NodeRunContext context, string key, out string value)
     {
-        value = Guid.Empty;
-        if (!context.Inputs.TryGetValue(key, out var v) || v.ValueKind != JsonValueKind.String) return false;
-        return Guid.TryParse(v.GetString(), out value);
+        value = "";
+
+        if (!TryGetPresentInput(context, key, out var v)) return $"Input '{key}' is required.";
+        if (v.ValueKind != JsonValueKind.String) return WrongTypeError(key, "a string", v.ValueKind);
+
+        value = v.GetString() ?? "";
+        return value.Length == 0 ? $"Input '{key}' must not be empty." : null;
     }
 
-    private static bool TryReadBody(NodeRunContext context, out string body)
+    /// <summary>Read a required id (uuid) string input, returning a specific error (else null).</summary>
+    private static string? RequireGuidInput(NodeRunContext context, string key, out Guid value)
     {
-        body = "";
-        if (!context.Inputs.TryGetValue("body", out var v) || v.ValueKind != JsonValueKind.String) return false;
-        body = v.GetString() ?? "";
-        return body.Length > 0;
+        value = Guid.Empty;
+
+        if (!TryGetPresentInput(context, key, out var v)) return $"Input '{key}' is required.";
+        if (v.ValueKind != JsonValueKind.String) return WrongTypeError(key, "a conversation id (string)", v.ValueKind);
+
+        return Guid.TryParse(v.GetString(), out value) ? null : $"Input '{key}' must be a valid id, got '{v.GetString()}'.";
     }
+
+    private static bool TryGetPresentInput(NodeRunContext context, string key, out JsonElement value) =>
+        context.Inputs.TryGetValue(key, out value) && value.ValueKind is not (JsonValueKind.Null or JsonValueKind.Undefined);
+
+    private static string WrongTypeError(string key, string expected, JsonValueKind got) =>
+        $"Input '{key}' must be {expected}, but got {DescribeKind(got)}. If you wired a {{{{reference}}}} that resolves to an array/object, point it at a single value instead.";
+
+    private static string DescribeKind(JsonValueKind kind) => kind switch
+    {
+        JsonValueKind.Array => "an array",
+        JsonValueKind.Object => "an object",
+        JsonValueKind.Number => "a number",
+        JsonValueKind.True or JsonValueKind.False => "a boolean",
+        _ => "another type",
+    };
 }

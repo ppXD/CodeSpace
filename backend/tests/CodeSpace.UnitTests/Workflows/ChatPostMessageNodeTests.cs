@@ -83,6 +83,50 @@ public class ChatPostMessageNodeTests
     }
 
     [Fact]
+    public async Task Fails_with_a_type_aware_error_when_body_is_the_wrong_type()
+    {
+        // The slip that bit a real user: wiring body to a {{ref}} that resolves to an ARRAY (a file
+        // diff list). The error must name the actual type, not the misleading "missing or empty".
+        var inputs = new Dictionary<string, JsonElement>
+        {
+            ["conversationId"] = JsonSerializer.SerializeToElement("11111111-1111-1111-1111-111111111111"),
+            ["body"] = JsonDocument.Parse("""[{"Patch":"@@ ..."}]""").RootElement.Clone(),
+        };
+
+        var result = await new ChatPostMessageNode(new StubChatBot()).RunAsync(ContextFromInputs(inputs), CancellationToken.None);
+
+        result.Status.ShouldBe(NodeStatus.Failure);
+        result.Error.ShouldContain("must be a string");
+        result.Error.ShouldContain("an array", customMessage: "name the actual wrong type so a ref that resolved to an array is obvious");
+    }
+
+    [Fact]
+    public async Task Fails_with_required_when_body_is_missing()
+    {
+        var inputs = new Dictionary<string, JsonElement> { ["conversationId"] = JsonSerializer.SerializeToElement("11111111-1111-1111-1111-111111111111") };
+
+        var result = await new ChatPostMessageNode(new StubChatBot()).RunAsync(ContextFromInputs(inputs), CancellationToken.None);
+
+        result.Status.ShouldBe(NodeStatus.Failure);
+        result.Error.ShouldContain("'body' is required");
+    }
+
+    [Fact]
+    public async Task Fails_with_empty_when_body_is_a_blank_string()
+    {
+        var inputs = new Dictionary<string, JsonElement>
+        {
+            ["conversationId"] = JsonSerializer.SerializeToElement("11111111-1111-1111-1111-111111111111"),
+            ["body"] = JsonSerializer.SerializeToElement(""),
+        };
+
+        var result = await new ChatPostMessageNode(new StubChatBot()).RunAsync(ContextFromInputs(inputs), CancellationToken.None);
+
+        result.Status.ShouldBe(NodeStatus.Failure);
+        result.Error.ShouldContain("must not be empty");
+    }
+
+    [Fact]
     public async Task Posts_a_form_card_and_outputs_the_same_token_it_put_on_the_card()
     {
         var bot = new StubChatBot();
@@ -121,15 +165,17 @@ public class ChatPostMessageNodeTests
         if (actionsJson != null) inputs["actions"] = JsonDocument.Parse(actionsJson).RootElement.Clone();
         if (formJson != null) inputs["form"] = JsonDocument.Parse(formJson).RootElement.Clone();
 
-        return new NodeRunContext
-        {
-            Inputs = inputs,
-            Config = new Dictionary<string, JsonElement>(),
-            RawInputs = JsonDocument.Parse("{}").RootElement,
-            RawConfig = JsonDocument.Parse("{}").RootElement,
-            Scope = new NodeRunScope { Trigger = new Dictionary<string, JsonElement>() },
-            Logger = NullLogger.Instance,
-            Observability = NodeObservability.NoOp,
-        };
+        return ContextFromInputs(inputs);
     }
+
+    private static NodeRunContext ContextFromInputs(Dictionary<string, JsonElement> inputs) => new()
+    {
+        Inputs = inputs,
+        Config = new Dictionary<string, JsonElement>(),
+        RawInputs = JsonDocument.Parse("{}").RootElement,
+        RawConfig = JsonDocument.Parse("{}").RootElement,
+        Scope = new NodeRunScope { Trigger = new Dictionary<string, JsonElement>() },
+        Logger = NullLogger.Instance,
+        Observability = NodeObservability.NoOp,
+    };
 }
