@@ -13,7 +13,7 @@ const members = new Map<string, TeamMemberSummary>([
 function msg(partial: Partial<MessageView>): MessageView {
   return {
     id: "m", conversationId: "c", authorUserId: "u1", body: "hi", replyToMessageId: null,
-    createdDate: new Date().toISOString(), editedDate: null, isDeleted: false, references: [],
+    createdDate: new Date().toISOString(), editedDate: null, isDeleted: false, references: [], interaction: null,
     ...partial,
   };
 }
@@ -43,5 +43,29 @@ describe("MessageItem", () => {
   it("renders a deleted message as a tombstone, hiding the body", () => {
     render(<MessageItem message={msg({ isDeleted: true, body: "" })} members={members} isMine={false} myUserId={null} />);
     expect(screen.getByText("message deleted")).toBeInTheDocument();
+  });
+
+  it("renders the interaction card under the body when the message carries one", () => {
+    const interaction = {
+      version: 1,
+      component: { kind: "action_buttons" as const, buttons: [{ key: "approve", label: "Approve", style: "Primary" as const, requiresComment: false }] },
+      allowedResponderUserIds: null,
+      state: "Open" as const,
+      resolution: null,
+    };
+    render(<MessageItem message={msg({ interaction })} members={members} isMine={false} myUserId={null} />);
+    expect(screen.getByRole("button", { name: "Approve" })).toBeInTheDocument();
+  });
+
+  it("does not render the card for a deleted interactive message (tombstone wins)", () => {
+    const interaction = {
+      version: 1,
+      component: { kind: "action_buttons" as const, buttons: [{ key: "approve", label: "Approve", style: "Primary" as const, requiresComment: false }] },
+      allowedResponderUserIds: null,
+      state: "Open" as const,
+      resolution: null,
+    };
+    render(<MessageItem message={msg({ isDeleted: true, body: "", interaction })} members={members} isMine={false} myUserId={null} />);
+    expect(screen.queryByRole("button", { name: "Approve" })).toBeNull();
   });
 });

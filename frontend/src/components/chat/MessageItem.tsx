@@ -3,6 +3,7 @@ import type { TeamMemberSummary } from "@/api/teams";
 import { avatarColor } from "@/lib/avatarColor";
 
 import { MessageBody } from "./MessageBody";
+import { MessageInteractionCard } from "./MessageInteractionCard";
 
 /**
  * One message row: author avatar/name, timestamp, body (with reference chips). A deleted
@@ -27,7 +28,10 @@ export function MessageItem({ message, members, isMine, myUserId }: { message: M
         {message.isDeleted ? (
           <span className="chat-msg-deleted">message deleted</span>
         ) : (
-          <MessageBody body={message.body} members={members} myUserId={myUserId} />
+          <>
+            <MessageBody body={message.body} members={members} myUserId={myUserId} />
+            {message.interaction && <MessageInteractionCard interaction={message.interaction} members={members} />}
+          </>
         )}
       </div>
     </div>
