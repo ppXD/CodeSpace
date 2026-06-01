@@ -2558,6 +2558,13 @@ textarea:-webkit-autofill {
 .acs-root .wf-repo-pick-field, .mdl .wf-repo-pick-field { display: flex; flex-direction: column; gap: 3px; }
 .acs-root .wf-repo-pick-label, .mdl .wf-repo-pick-label { font-size: 10.5px; font-weight: 500; color: var(--muted); }
 
+/* Generic object-array editor (SchemaForm): a stack of bordered rows, each a sub-form, + an "Add" button. */
+.acs-root .wf-objarr, .mdl .wf-objarr { display: flex; flex-direction: column; gap: 8px; }
+.acs-root .wf-objarr-row, .mdl .wf-objarr-row { display: flex; gap: 6px; align-items: flex-start; padding: 8px; border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--panel-2); }
+.acs-root .wf-objarr-row-body, .mdl .wf-objarr-row-body { flex: 1; min-width: 0; }
+.acs-root .wf-objarr-remove, .mdl .wf-objarr-remove { flex-shrink: 0; }
+.acs-root .wf-objarr-add, .mdl .wf-objarr-add { align-self: flex-start; }
+
 .acs-root .wf-selector { position: relative; width: 100%; }
 .acs-root .wf-selector-trigger {
   width: 100%; box-sizing: border-box;
