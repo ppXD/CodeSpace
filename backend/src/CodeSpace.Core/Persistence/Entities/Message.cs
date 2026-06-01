@@ -56,5 +56,13 @@ public class Message : IEntity<Guid>
     /// <summary>Soft delete — keeps thread continuity + audit; renders as "message deleted".</summary>
     public DateTimeOffset? DeletedDate { get; set; }
 
+    /// <summary>
+    /// Optional interactive component (action buttons, …) — a polymorphic <c>MessageInteraction</c>
+    /// serialized to jsonb. Null for a plain message. Stored as raw JSON like the workflow run's
+    /// payload/outputs columns; the service (de)serializes the typed model at the boundary. The
+    /// response target inside carries the wait token, so it stays server-side — the view strips it.
+    /// </summary>
+    public string? InteractionJson { get; set; }
+
     public Conversation Conversation { get; set; } = default!;
 }

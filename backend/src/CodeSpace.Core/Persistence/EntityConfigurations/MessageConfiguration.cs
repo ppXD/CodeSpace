@@ -27,6 +27,10 @@ public class MessageConfiguration : IEntityTypeConfiguration<Message>
         // entire read pattern of an infinite-scroll message pane + SignalR backfill.
         builder.HasIndex(m => new { m.ConversationId, m.Id });
 
+        // Optional interactive component, stored as jsonb (raw JSON string on the entity, like the
+        // workflow run's payload/outputs columns). NULL for a plain message.
+        builder.Property(m => m.InteractionJson).HasColumnName("interaction_json").HasColumnType("jsonb");
+
         // The generated search_tsv tsvector column + its GIN index are declared SQL-side
         // in migration 0028. There's no CLR property for it on Message, so EF never maps
         // it — no Ignore() needed (and Ignore would throw, the property doesn't exist).

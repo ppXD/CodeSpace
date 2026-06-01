@@ -254,7 +254,11 @@ public sealed class ConversationService : IConversationService, IScopedDependenc
     {
         const string sql =
             "SELECT DISTINCT ON (conversation_id) "
-            + "id, conversation_id, team_id, author_user_id, LEFT(body, 280) AS body, reply_to_message_id, created_date, edited_date, deleted_date "
+            + "id, conversation_id, team_id, author_user_id, LEFT(body, 280) AS body, reply_to_message_id, created_date, edited_date, deleted_date, "
+            // The preview never needs the interaction payload — ship NULL (like LEFT(body, …) above)
+            // so a big card document isn't pulled per conversation, while still satisfying EF's
+            // requirement that every mapped column be present when materialising a Message.
+            + "NULL::jsonb AS interaction_json "
             + "FROM message WHERE team_id = @team AND conversation_id = ANY(@convs) "
             + "ORDER BY conversation_id, id DESC";
 

@@ -4,6 +4,7 @@ using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Chat;
 using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.Messages.Dtos.Chat;
+using CodeSpace.Messages.Dtos.Chat.Interactions;
 using CodeSpace.Messages.Enums;
 using Microsoft.EntityFrameworkCore;
 using Shouldly;
@@ -381,7 +382,84 @@ public class MessageServiceFlowTests
         mentioningMessageIds.ShouldContain(m2.Id);
     }
 
+    // ─── Interactive messages (action cards) ────────────────────────────────────────
+
+    [Fact]
+    public async Task Post_interactive_persists_the_component_and_keeps_the_token_server_side()
+    {
+        var (teamId, ownerId, channelId) = await SeedChannelWithOwnerAsync();
+
+        var view = await PostInteractiveAsync(teamId, ownerId, channelId, "Review PR #42?", SampleInteraction("tok-secret-42"));
+
+        var component = view.Interaction.ShouldNotBeNull().Component.ShouldBeOfType<ActionButtonsComponent>();
+        component.Buttons.Select(b => b.Key).ShouldBe(new[] { "approve", "reject" });
+        view.Interaction!.State.ShouldBe(InteractionState.Open);
+
+        // The view type has NO target field (compile-time guarantee). Prove the token IS persisted
+        // server-side (so the respond endpoint can re-derive it) — it lives in the stored jsonb only.
+        using var verify = _fixture.BeginScope();
+        var stored = await verify.Resolve<CodeSpaceDbContext>().Message.AsNoTracking().SingleAsync(m => m.Id == view.Id);
+        stored.InteractionJson.ShouldNotBeNull();
+        stored.InteractionJson!.ShouldContain("tok-secret-42", customMessage: "the wait token is persisted server-side for the respond endpoint to re-derive");
+        stored.InteractionJson.ShouldContain("workflow_wait");
+    }
+
+    [Fact]
+    public async Task Listed_interactive_message_round_trips_the_component_through_the_keyset_query()
+    {
+        // The keyset page query selects an explicit column list; this pins that interaction_json is
+        // in it and survives the jsonb round trip on read (not just on the post response).
+        var (teamId, ownerId, channelId) = await SeedChannelWithOwnerAsync();
+        await PostInteractiveAsync(teamId, ownerId, channelId, "Approve?", SampleInteraction("tok-list"));
+
+        var page = await ListAsync(teamId, ownerId, channelId, beforeId: null, limit: 50);
+
+        var component = page.Messages.ShouldHaveSingleItem().Interaction.ShouldNotBeNull().Component.ShouldBeOfType<ActionButtonsComponent>();
+        component.Buttons.Count.ShouldBe(2, customMessage: "the polymorphic component must survive the FromSqlRaw keyset read + jsonb deserialize");
+    }
+
+    [Fact]
+    public async Task Plain_message_has_a_null_interaction()
+    {
+        var (teamId, ownerId, channelId) = await SeedChannelWithOwnerAsync();
+
+        var view = await PostAsync(teamId, ownerId, channelId, "just text");
+
+        view.Interaction.ShouldBeNull(customMessage: "a plain message must read back with no interaction — the new column is purely additive");
+    }
+
+    [Fact]
+    public async Task Deleted_interactive_message_blanks_the_interaction()
+    {
+        var (teamId, ownerId, channelId) = await SeedChannelWithOwnerAsync();
+        var msg = await PostInteractiveAsync(teamId, ownerId, channelId, "Approve?", SampleInteraction("tok-del"));
+
+        await DeleteAsync(teamId, ownerId, msg.Id);
+
+        var page = await ListAsync(teamId, ownerId, channelId, null, 50);
+        page.Messages.ShouldHaveSingleItem().Interaction.ShouldBeNull(customMessage: "a tombstone exposes no interaction, mirroring the blanked body / references");
+    }
+
+    private static MessageInteraction SampleInteraction(string token) => new()
+    {
+        Component = new ActionButtonsComponent
+        {
+            Buttons = new List<InteractionButton>
+            {
+                new() { Key = "approve", Label = "Approve", Style = InteractionButtonStyle.Primary },
+                new() { Key = "reject", Label = "Reject", Style = InteractionButtonStyle.Danger },
+            },
+        },
+        Target = new WorkflowWaitTarget { Token = token },
+    };
+
     // ─── Helpers ───────────────────────────────────────────────────────────────────
+
+    private async Task<MessageView> PostInteractiveAsync(Guid teamId, Guid authorId, Guid conversationId, string body, MessageInteraction interaction)
+    {
+        using var scope = _fixture.BeginScope();
+        return await scope.Resolve<IMessageService>().PostInteractiveAsync(teamId, authorId, conversationId, body, interaction, default);
+    }
 
     private async Task<MessageView> PostAsync(Guid teamId, Guid authorId, Guid conversationId, string body, Guid? replyTo = null)
     {
