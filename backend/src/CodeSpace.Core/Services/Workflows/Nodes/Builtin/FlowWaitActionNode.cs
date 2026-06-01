@@ -25,7 +25,7 @@ public sealed class FlowWaitActionNode : INodeRuntime
         Category = "Logic",
         Kind = NodeKind.Regular,
         IconKey = "mouse-pointer-click",
-        Description = "Pauses until someone clicks a chat card button. Outputs { action, by, comment } — branch on 'action'. Wire its 'token' input from the chat.post_message that posted the card.",
+        Description = "Pauses until someone responds to a chat card (clicks a button or submits a form). Outputs { action, by, comment, values } — branch on 'action', read a form submission from 'values'. Wire its 'token' input from the chat.post_message that posted the card.",
         ConfigSchema = SchemaBuilder.EmptyObject(),
         InputSchema = SchemaBuilder.Parse("""
             {
@@ -42,7 +42,8 @@ public sealed class FlowWaitActionNode : INodeRuntime
               "properties": {
                 "action":  { "type": "string" },
                 "by":      { "type": "string" },
-                "comment": { "type": "string" }
+                "comment": { "type": "string" },
+                "values":  { "type": "object", "description": "A form submission's field values (absent for a button click)." }
               }
             }
             """),
@@ -60,6 +61,12 @@ public sealed class FlowWaitActionNode : INodeRuntime
                 ["by"]      = ReadOr(decision, "by", JsonSerializer.SerializeToElement("")),
                 ["comment"] = ReadOr(decision, "comment", JsonSerializer.SerializeToElement("")),
             };
+
+            // A form submission also carries `values` (the field object) — surface it so downstream reads
+            // {{nodes.<id>.outputs.values.<field>}}. Absent for a plain button click.
+            if (decision.ValueKind == JsonValueKind.Object && decision.TryGetProperty("values", out var values))
+                outputs["values"] = values.Clone();
+
             return Task.FromResult(NodeResult.Ok(outputs));
         }
 

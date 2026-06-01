@@ -46,7 +46,7 @@ public class ActionResumeFlowTests
         bool resumed;
         using (var scope = _fixture.BeginScope())
             resumed = await scope.Resolve<IWorkflowResumeService>()
-                .ResumeByActionTokenAsync(token, "approve", userId, "looks good", teamId, CancellationToken.None);
+                .ResumeByActionTokenAsync(token, "approve", userId, "looks good", values: null, teamId, CancellationToken.None);
 
         resumed.ShouldBeTrue();
 
@@ -71,7 +71,7 @@ public class ActionResumeFlowTests
         using var scope = _fixture.BeginScope();
 
         var resumed = await scope.Resolve<IWorkflowResumeService>()
-            .ResumeByActionTokenAsync("deadbeefdeadbeefdeadbeefdeadbeef", "approve", Guid.NewGuid(), null, Guid.NewGuid(), CancellationToken.None);
+            .ResumeByActionTokenAsync("deadbeefdeadbeefdeadbeefdeadbeef", "approve", Guid.NewGuid(), null, values: null, Guid.NewGuid(), CancellationToken.None);
 
         resumed.ShouldBeFalse("an unknown / already-used token matches no pending action wait → 404 at the controller");
     }
@@ -89,7 +89,7 @@ public class ActionResumeFlowTests
         bool resumed;
         using (var scope = _fixture.BeginScope())
             resumed = await scope.Resolve<IWorkflowResumeService>()
-                .ResumeByActionTokenAsync(token, "approve", userId, null, teamId, CancellationToken.None);
+                .ResumeByActionTokenAsync(token, "approve", userId, null, values: null, teamId, CancellationToken.None);
 
         resumed.ShouldBeFalse("the lookup is kind-scoped — an action resume must not hijack a Callback wait");
 
@@ -115,7 +115,7 @@ public class ActionResumeFlowTests
 
         using (var scope = _fixture.BeginScope())
             (await scope.Resolve<IWorkflowResumeService>()
-                .ResumeByActionTokenAsync("tok-A", "approve", userId, null, teamId, CancellationToken.None)).ShouldBeTrue();
+                .ResumeByActionTokenAsync("tok-A", "approve", userId, null, values: null, teamId, CancellationToken.None)).ShouldBeTrue();
 
         using var verify = _fixture.BeginScope();
         var db = verify.Resolve<CodeSpaceDbContext>();
@@ -136,7 +136,7 @@ public class ActionResumeFlowTests
         bool resumed;
         using (var scope = _fixture.BeginScope())
             resumed = await scope.Resolve<IWorkflowResumeService>()
-                .ResumeByActionTokenAsync("tok-X", "approve", userId, null, Guid.NewGuid(), CancellationToken.None);
+                .ResumeByActionTokenAsync("tok-X", "approve", userId, null, values: null, Guid.NewGuid(), CancellationToken.None);
 
         resumed.ShouldBeFalse("a card may only resolve a wait whose run is in the caller's team (tenancy guard)");
         using var verify = _fixture.BeginScope();

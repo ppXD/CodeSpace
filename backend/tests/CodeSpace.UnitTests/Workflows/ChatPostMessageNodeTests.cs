@@ -82,11 +82,44 @@ public class ChatPostMessageNodeTests
         result.Error.ShouldContain("conversationId");
     }
 
-    private static NodeRunContext BuildContext(string? conversationId, string body, string? actionsJson)
+    [Fact]
+    public async Task Posts_a_form_card_and_outputs_the_same_token_it_put_on_the_card()
+    {
+        var bot = new StubChatBot();
+        var ctx = BuildContext("11111111-1111-1111-1111-111111111111", "Pick a target", actionsJson: null,
+            formJson: """{"fields":{"type":"object","properties":{"channel":{"type":"string"}},"required":["channel"]},"submitLabel":"Send"}""");
+
+        var result = await new ChatPostMessageNode(bot).RunAsync(ctx, CancellationToken.None);
+
+        result.Status.ShouldBe(NodeStatus.Success);
+
+        var form = bot.Interaction.ShouldNotBeNull().Component.ShouldBeOfType<FormComponent>();
+        form.SubmitLabel.ShouldBe("Send");
+        form.Fields.GetProperty("properties").TryGetProperty("channel", out _).ShouldBeTrue("the authored field schema is carried verbatim onto the card");
+
+        var target = bot.Interaction!.Target.ShouldBeOfType<WorkflowWaitTarget>();
+        result.Outputs["token"].GetString().ShouldBe(target.Token, "a form card couples to its wait by the same token as a button card");
+    }
+
+    [Fact]
+    public async Task A_form_input_wins_over_actions_when_both_are_supplied()
+    {
+        var bot = new StubChatBot();
+        var ctx = BuildContext("11111111-1111-1111-1111-111111111111", "x",
+            actionsJson: """[{"key":"approve","label":"Approve"}]""",
+            formJson: """{"fields":{"type":"object","properties":{"v":{"type":"string"}}}}""");
+
+        await new ChatPostMessageNode(bot).RunAsync(ctx, CancellationToken.None);
+
+        bot.Interaction.ShouldNotBeNull().Component.ShouldBeOfType<FormComponent>("a card is one kind — a form takes precedence over buttons");
+    }
+
+    private static NodeRunContext BuildContext(string? conversationId, string body, string? actionsJson, string? formJson = null)
     {
         var inputs = new Dictionary<string, JsonElement> { ["body"] = JsonSerializer.SerializeToElement(body) };
         if (conversationId != null) inputs["conversationId"] = JsonSerializer.SerializeToElement(conversationId);
         if (actionsJson != null) inputs["actions"] = JsonDocument.Parse(actionsJson).RootElement.Clone();
+        if (formJson != null) inputs["form"] = JsonDocument.Parse(formJson).RootElement.Clone();
 
         return new NodeRunContext
         {

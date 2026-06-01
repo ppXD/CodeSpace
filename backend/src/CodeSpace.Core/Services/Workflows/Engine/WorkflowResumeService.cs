@@ -45,12 +45,13 @@ public interface IWorkflowResumeService
     /// Resume the run parked on the Action wait matching <paramref name="token"/> — a person acted
     /// on an interactive chat affordance. Resolves ONLY that wait (not the run's other pending waits,
     /// so two parallel cards resolve independently with their own decision), stamping a structured
-    /// <c>{ action, by, comment }</c> payload (surfaced as the suspended node's outputs). Scoped to
-    /// <paramref name="teamId"/>: the wait's run must belong to that team, or it no-ops (tenancy guard).
-    /// <paramref name="actorUserId"/> is the authenticated clicker. Returns false when no pending Action
-    /// wait matches the token in that team (unknown / already resolved / cross-team) — caller maps to 404/409.
+    /// <c>{ action, by, comment, values? }</c> payload (surfaced as the suspended node's outputs).
+    /// <paramref name="values"/> carries a form submission's field values (null for a button click).
+    /// Scoped to <paramref name="teamId"/>: the wait's run must belong to that team, or it no-ops (tenancy
+    /// guard). <paramref name="actorUserId"/> is the authenticated responder. Returns false when no pending
+    /// Action wait matches the token in that team (unknown / already resolved / cross-team) — caller maps to 404/409.
     /// </summary>
-    Task<bool> ResumeByActionTokenAsync(string token, string actionKey, Guid actorUserId, string? comment, Guid teamId, CancellationToken cancellationToken);
+    Task<bool> ResumeByActionTokenAsync(string token, string actionKey, Guid actorUserId, string? comment, IReadOnlyDictionary<string, JsonElement>? values, Guid teamId, CancellationToken cancellationToken);
 }
 
 public sealed class WorkflowResumeService : IWorkflowResumeService, IScopedDependency
@@ -128,7 +129,7 @@ public sealed class WorkflowResumeService : IWorkflowResumeService, IScopedDepen
         return await ResumeCoreAsync(wait.RunId, bodyJson, onlyWaitId: null, cancellationToken).ConfigureAwait(false);
     }
 
-    public async Task<bool> ResumeByActionTokenAsync(string token, string actionKey, Guid actorUserId, string? comment, Guid teamId, CancellationToken cancellationToken)
+    public async Task<bool> ResumeByActionTokenAsync(string token, string actionKey, Guid actorUserId, string? comment, IReadOnlyDictionary<string, JsonElement>? values, Guid teamId, CancellationToken cancellationToken)
     {
         // The wait's run must belong to the caller's team — a card can only resolve a wait in its own
         // tenant, even though the token is an unguessable Guid (defense in depth against a cross-team
@@ -146,7 +147,11 @@ public sealed class WorkflowResumeService : IWorkflowResumeService, IScopedDepen
             return false;
         }
 
-        var payload = JsonSerializer.Serialize(new { action = actionKey, by = actorUserId, comment });
+        // Structured decision payload — surfaced as the suspended node's outputs. `values` (a form
+        // submission) is added only when present, so a plain button click's payload is unchanged.
+        var decision = new Dictionary<string, object?> { ["action"] = actionKey, ["by"] = actorUserId, ["comment"] = comment };
+        if (values != null) decision["values"] = values;
+        var payload = JsonSerializer.Serialize(decision);
 
         // Resolve ONLY this wait — a sibling card parked on the same run keeps waiting for its own click.
         return await ResumeCoreAsync(wait.RunId, payload, onlyWaitId: wait.Id, cancellationToken).ConfigureAwait(false);

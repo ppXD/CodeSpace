@@ -1,3 +1,4 @@
+using System.Text.Json;
 using CodeSpace.Messages.Authorization;
 using MediatR;
 
@@ -14,8 +15,11 @@ public sealed record RespondToMessageCommand : IRequest, IRequireTeamMembership
 {
     public Guid MessageId { get; init; }
 
-    /// <summary>The chosen option — a button key from the card (e.g. "approve").</summary>
+    /// <summary>The chosen option — a button key from the card, or "submit" for a form (e.g. "approve").</summary>
     public required string ResponseKey { get; init; }
 
     public string? Comment { get; init; }
+
+    /// <summary>For a form card — the submitted field values, injected into the parked run. Null for a button response.</summary>
+    public IReadOnlyDictionary<string, JsonElement>? Values { get; init; }
 }

@@ -43,7 +43,7 @@ public sealed class ChatPostMessageNode : INodeRuntime
                 "body": { "type": "string", "minLength": 1, "description": "The message text. Supports {{ }} references." },
                 "actions": {
                   "type": "array",
-                  "description": "Action buttons — each item renders as a clickable button. The clicked button's `key` is what a downstream flow.wait_action resumes with. Leave empty to post a plain message. (The only interaction component today; forms / polls would be future kinds.)",
+                  "description": "Action buttons — each item renders as a clickable button. The clicked button's `key` is what a downstream flow.wait_action resumes with. Leave empty to post a plain message. (One interaction component; `form` is the other.)",
                   "items": {
                     "type": "object",
                     "properties": {
@@ -55,7 +55,16 @@ public sealed class ChatPostMessageNode : INodeRuntime
                     "required": ["key","label"]
                   }
                 },
-                "allowedResponderUserIds": { "type": "array", "items": { "type": "string", "format": "uuid" }, "description": "Restrict who may click (user ids). Empty = any member of the conversation may respond." }
+                "form": {
+                  "type": "object",
+                  "description": "Form card — input fields the responder fills; the submitted values are injected into the run (surfaced as the wait node's outputs.values). Alternative to `actions` (form wins if both are set).",
+                  "properties": {
+                    "fields": { "type": "object", "description": "A JSON Schema describing the form's input fields (rendered by the client's schema-driven form)." },
+                    "submitLabel": { "type": "string", "description": "Submit button text (default \"Submit\")." }
+                  },
+                  "required": ["fields"]
+                },
+                "allowedResponderUserIds": { "type": "array", "items": { "type": "string", "format": "uuid" }, "description": "Restrict who may respond (user ids). Empty = any member of the conversation may respond." }
               },
               "required": ["conversationId","body"]
             }
@@ -108,6 +117,33 @@ public sealed class ChatPostMessageNode : INodeRuntime
     {
         token = null;
 
+        // A card is one component kind: a form (if given) wins over buttons; neither ⇒ a plain message.
+        InteractionComponent? component = BuildFormComponent(context);
+        component ??= BuildActionButtonsComponent(context);
+        if (component == null) return null;
+
+        token = Guid.NewGuid().ToString("N");
+
+        return new MessageInteraction
+        {
+            Component = component,
+            Target = new WorkflowWaitTarget { Token = token },
+            AllowedResponderUserIds = ReadGuidList(context, "allowedResponderUserIds"),
+        };
+    }
+
+    private static FormComponent? BuildFormComponent(NodeRunContext context)
+    {
+        if (!context.Inputs.TryGetValue("form", out var formEl) || formEl.ValueKind != JsonValueKind.Object) return null;
+        if (!formEl.TryGetProperty("fields", out var fields) || fields.ValueKind != JsonValueKind.Object) return null;
+
+        var submitLabel = formEl.TryGetProperty("submitLabel", out var s) && s.ValueKind == JsonValueKind.String ? s.GetString()! : "Submit";
+
+        return new FormComponent { Fields = fields.Clone(), SubmitLabel = submitLabel };
+    }
+
+    private static ActionButtonsComponent? BuildActionButtonsComponent(NodeRunContext context)
+    {
         if (!context.Inputs.TryGetValue("actions", out var actionsEl) || actionsEl.ValueKind != JsonValueKind.Array) return null;
 
         var buttons = new List<InteractionButton>();
@@ -125,16 +161,7 @@ public sealed class ChatPostMessageNode : INodeRuntime
             buttons.Add(new InteractionButton { Key = key!, Label = label!, Style = style, RequiresComment = requiresComment });
         }
 
-        if (buttons.Count == 0) return null;
-
-        token = Guid.NewGuid().ToString("N");
-
-        return new MessageInteraction
-        {
-            Component = new ActionButtonsComponent { Buttons = buttons },
-            Target = new WorkflowWaitTarget { Token = token },
-            AllowedResponderUserIds = ReadGuidList(context, "allowedResponderUserIds"),
-        };
+        return buttons.Count > 0 ? new ActionButtonsComponent { Buttons = buttons } : null;
     }
 
     private static IReadOnlyList<Guid>? ReadGuidList(NodeRunContext context, string key)

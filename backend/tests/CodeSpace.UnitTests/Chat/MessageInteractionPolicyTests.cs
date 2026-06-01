@@ -1,3 +1,4 @@
+using System.Text.Json;
 using CodeSpace.Messages.Dtos.Chat.Interactions;
 using Shouldly;
 
@@ -14,6 +15,12 @@ public class MessageInteractionPolicyTests
         },
         Target = new WorkflowWaitTarget { Token = "t" },
         AllowedResponderUserIds = allowed,
+    };
+
+    private static MessageInteraction FormCard(string fieldsJson) => new()
+    {
+        Component = new FormComponent { Fields = JsonDocument.Parse(fieldsJson).RootElement.Clone() },
+        Target = new WorkflowWaitTarget { Token = "t" },
     };
 
     [Theory]
@@ -57,6 +64,36 @@ public class MessageInteractionPolicyTests
         var card = Card(allowed: Array.Empty<Guid>());
 
         MessageInteractionPolicy.IsAllowedResponder(card, Guid.NewGuid(), isConversationMember: true).ShouldBeFalse();
+    }
+
+    [Fact]
+    public void IsValidResponse_for_a_form_accepts_only_the_submit_key()
+    {
+        var card = FormCard("""{"type":"object"}""");
+
+        MessageInteractionPolicy.IsValidResponse(card, MessageInteractionPolicy.FormSubmitKey).ShouldBeTrue();
+        MessageInteractionPolicy.IsValidResponse(card, "approve").ShouldBeFalse("a form has no button keys — only its submit");
+    }
+
+    [Fact]
+    public void MissingRequiredFields_lists_absent_or_empty_required_form_fields()
+    {
+        var card = FormCard("""{"type":"object","required":["channel","note"]}""");
+
+        var values = new Dictionary<string, JsonElement>
+        {
+            ["channel"] = JsonSerializer.SerializeToElement("c1"),
+            ["note"] = JsonSerializer.SerializeToElement("   "),   // whitespace counts as empty
+        };
+
+        MessageInteractionPolicy.MissingRequiredFields(card, values).ShouldBe(new[] { "note" });
+        MessageInteractionPolicy.MissingRequiredFields(card, null).ShouldBe(new[] { "channel", "note" }, customMessage: "no values ⇒ every required field is missing");
+    }
+
+    [Fact]
+    public void MissingRequiredFields_is_empty_for_a_non_form_component()
+    {
+        MessageInteractionPolicy.MissingRequiredFields(Card(), null).ShouldBeEmpty("required-field validation only applies to a form");
     }
 
     [Fact]
