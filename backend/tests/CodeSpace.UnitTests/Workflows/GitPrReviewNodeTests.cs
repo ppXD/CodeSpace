@@ -57,6 +57,18 @@ public class GitPrReviewNodeTests
         result.Outputs["url"].GetString().ShouldBe("https://example.test/review/1");
     }
 
+    [Fact]
+    public async Task Approve_without_a_body_delegates_a_null_body()
+    {
+        var stub = new StubPrService();
+
+        var result = await new GitPrReviewNode(stub).RunAsync(BuildContext(Repo, 9, "approve", body: null), CancellationToken.None);
+
+        result.Status.ShouldBe(NodeStatus.Success);
+        stub.Verdict.ShouldBe(PullRequestReviewVerdict.Approve);
+        stub.Body.ShouldBeNull();
+    }
+
     [Theory]
     [InlineData("request_changes", PullRequestReviewVerdict.RequestChanges)]
     [InlineData("RequestChanges", PullRequestReviewVerdict.RequestChanges)]
