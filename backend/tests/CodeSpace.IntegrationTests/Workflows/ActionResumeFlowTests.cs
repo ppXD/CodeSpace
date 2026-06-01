@@ -46,7 +46,7 @@ public class ActionResumeFlowTests
         bool resumed;
         using (var scope = _fixture.BeginScope())
             resumed = await scope.Resolve<IWorkflowResumeService>()
-                .ResumeByActionTokenAsync(token, "approve", userId, "looks good", CancellationToken.None);
+                .ResumeByActionTokenAsync(token, "approve", userId, "looks good", teamId, CancellationToken.None);
 
         resumed.ShouldBeTrue();
 
@@ -71,7 +71,7 @@ public class ActionResumeFlowTests
         using var scope = _fixture.BeginScope();
 
         var resumed = await scope.Resolve<IWorkflowResumeService>()
-            .ResumeByActionTokenAsync("deadbeefdeadbeefdeadbeefdeadbeef", "approve", Guid.NewGuid(), null, CancellationToken.None);
+            .ResumeByActionTokenAsync("deadbeefdeadbeefdeadbeefdeadbeef", "approve", Guid.NewGuid(), null, Guid.NewGuid(), CancellationToken.None);
 
         resumed.ShouldBeFalse("an unknown / already-used token matches no pending action wait → 404 at the controller");
     }
@@ -89,7 +89,7 @@ public class ActionResumeFlowTests
         bool resumed;
         using (var scope = _fixture.BeginScope())
             resumed = await scope.Resolve<IWorkflowResumeService>()
-                .ResumeByActionTokenAsync(token, "approve", userId, null, CancellationToken.None);
+                .ResumeByActionTokenAsync(token, "approve", userId, null, teamId, CancellationToken.None);
 
         resumed.ShouldBeFalse("the lookup is kind-scoped — an action resume must not hijack a Callback wait");
 
@@ -101,10 +101,53 @@ public class ActionResumeFlowTests
             .ShouldBe(WorkflowWaitStatuses.Pending);
     }
 
+    [Fact]
+    public async Task Action_resume_resolves_only_the_matched_wait_leaving_siblings_pending()
+    {
+        // Two cards parked on ONE run (parallel reviewers). Resolving one must NOT touch the other —
+        // each card carries its own decision. (Regression guard: ResumeCore used to resolve ALL waits.)
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var workflowId = await CreateWorkflowAsync(teamId, userId);
+        var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
+
+        await ParkOnWaitAsync(runId, WorkflowWaitKinds.Action, "tok-A", nodeId: "wait_a");
+        await ParkOnWaitAsync(runId, WorkflowWaitKinds.Action, "tok-B", nodeId: "wait_b");
+
+        using (var scope = _fixture.BeginScope())
+            (await scope.Resolve<IWorkflowResumeService>()
+                .ResumeByActionTokenAsync("tok-A", "approve", userId, null, teamId, CancellationToken.None)).ShouldBeTrue();
+
+        using var verify = _fixture.BeginScope();
+        var db = verify.Resolve<CodeSpaceDbContext>();
+        (await db.WorkflowRunWait.AsNoTracking().SingleAsync(w => w.RunId == runId && w.NodeId == "wait_a")).Status
+            .ShouldBe(WorkflowWaitStatuses.Resolved, "the clicked card's wait resolves");
+        (await db.WorkflowRunWait.AsNoTracking().SingleAsync(w => w.RunId == runId && w.NodeId == "wait_b")).Status
+            .ShouldBe(WorkflowWaitStatuses.Pending, "a sibling card on the same run keeps waiting for its OWN click");
+    }
+
+    [Fact]
+    public async Task Action_resume_ignores_a_wait_whose_run_is_in_another_team()
+    {
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var workflowId = await CreateWorkflowAsync(teamId, userId);
+        var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
+        await ParkOnWaitAsync(runId, WorkflowWaitKinds.Action, "tok-X");
+
+        bool resumed;
+        using (var scope = _fixture.BeginScope())
+            resumed = await scope.Resolve<IWorkflowResumeService>()
+                .ResumeByActionTokenAsync("tok-X", "approve", userId, null, Guid.NewGuid(), CancellationToken.None);
+
+        resumed.ShouldBeFalse("a card may only resolve a wait whose run is in the caller's team (tenancy guard)");
+        using var verify = _fixture.BeginScope();
+        (await verify.Resolve<CodeSpaceDbContext>().WorkflowRunWait.AsNoTracking().SingleAsync(w => w.RunId == runId)).Status
+            .ShouldBe(WorkflowWaitStatuses.Pending);
+    }
+
     // ─── Helpers ────────────────────────────────────────────────────────────────
 
-    /// <summary>Park <paramref name="runId"/> on a Pending wait of the given kind/token (mirrors what SuspendNodeAsync writes).</summary>
-    private async Task ParkOnWaitAsync(Guid runId, string waitKind, string token)
+    /// <summary>Park <paramref name="runId"/> on a Pending wait of the given kind/token/node (mirrors what SuspendNodeAsync writes).</summary>
+    private async Task ParkOnWaitAsync(Guid runId, string waitKind, string token, string nodeId = "review_wait")
     {
         using var scope = _fixture.BeginScope();
         var db = scope.Resolve<CodeSpaceDbContext>();
@@ -116,7 +159,7 @@ public class ActionResumeFlowTests
         {
             Id = Guid.NewGuid(),
             RunId = runId,
-            NodeId = "review_wait",
+            NodeId = nodeId,
             IterationKey = string.Empty,
             WaitKind = waitKind,
             Token = token,

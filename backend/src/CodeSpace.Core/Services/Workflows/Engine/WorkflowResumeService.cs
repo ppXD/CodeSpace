@@ -43,13 +43,14 @@ public interface IWorkflowResumeService
 
     /// <summary>
     /// Resume the run parked on the Action wait matching <paramref name="token"/> — a person acted
-    /// on an interactive chat affordance. Stamps a structured <c>{ action, by, comment }</c> payload
-    /// (surfaced as the suspended node's outputs) and resumes. <paramref name="actorUserId"/> is the
-    /// authenticated clicker (the write-back attributes the decision to them). Returns false when no
-    /// pending Action wait matches the token (unknown / already resolved) — caller maps that to 404.
-    /// The structured sibling of <see cref="ResumeByCallbackTokenAsync"/>.
+    /// on an interactive chat affordance. Resolves ONLY that wait (not the run's other pending waits,
+    /// so two parallel cards resolve independently with their own decision), stamping a structured
+    /// <c>{ action, by, comment }</c> payload (surfaced as the suspended node's outputs). Scoped to
+    /// <paramref name="teamId"/>: the wait's run must belong to that team, or it no-ops (tenancy guard).
+    /// <paramref name="actorUserId"/> is the authenticated clicker. Returns false when no pending Action
+    /// wait matches the token in that team (unknown / already resolved / cross-team) — caller maps to 404/409.
     /// </summary>
-    Task<bool> ResumeByActionTokenAsync(string token, string actionKey, Guid actorUserId, string? comment, CancellationToken cancellationToken);
+    Task<bool> ResumeByActionTokenAsync(string token, string actionKey, Guid actorUserId, string? comment, Guid teamId, CancellationToken cancellationToken);
 }
 
 public sealed class WorkflowResumeService : IWorkflowResumeService, IScopedDependency
@@ -66,12 +67,15 @@ public sealed class WorkflowResumeService : IWorkflowResumeService, IScopedDepen
     }
 
     public Task<bool> ResumeAsync(Guid runId, CancellationToken cancellationToken) =>
-        ResumeCoreAsync(runId, resumePayloadJson: null, cancellationToken);
+        ResumeCoreAsync(runId, resumePayloadJson: null, onlyWaitId: null, cancellationToken);
 
     public Task<bool> ResumeAsync(Guid runId, string resumePayloadJson, CancellationToken cancellationToken) =>
-        ResumeCoreAsync(runId, resumePayloadJson, cancellationToken);
+        ResumeCoreAsync(runId, resumePayloadJson, onlyWaitId: null, cancellationToken);
 
-    private async Task<bool> ResumeCoreAsync(Guid runId, string? resumePayloadJson, CancellationToken cancellationToken)
+    // onlyWaitId: when set, resolve ONLY that wait (a token-keyed resume targets one specific
+    // affordance — so a run with several parallel waits resolves each independently with its own
+    // payload). When null, resolve every pending wait for the run (a run-level wake: timer / approval).
+    private async Task<bool> ResumeCoreAsync(Guid runId, string? resumePayloadJson, Guid? onlyWaitId, CancellationToken cancellationToken)
     {
         // Single-writer gate: only one resume flips Suspended -> Pending. Concurrent signals
         // (a fired timer + a manual resume, or a Hangfire retry of the timer job) cannot both
@@ -93,7 +97,7 @@ public sealed class WorkflowResumeService : IWorkflowResumeService, IScopedDepen
         var now = DateTimeOffset.UtcNow;
         var payload = resumePayloadJson ?? JsonSerializer.Serialize(new { resumed_at = now.ToString("o") });
         await _db.WorkflowRunWait
-            .Where(w => w.RunId == runId && w.Status == WorkflowWaitStatuses.Pending)
+            .Where(w => w.RunId == runId && w.Status == WorkflowWaitStatuses.Pending && (onlyWaitId == null || w.Id == onlyWaitId))
             .ExecuteUpdateAsync(s => s
                 .SetProperty(w => w.Status, WorkflowWaitStatuses.Resolved)
                 .SetProperty(w => w.PayloadJson, payload)
@@ -121,24 +125,30 @@ public sealed class WorkflowResumeService : IWorkflowResumeService, IScopedDepen
             return false;
         }
 
-        return await ResumeCoreAsync(wait.RunId, bodyJson, cancellationToken).ConfigureAwait(false);
+        return await ResumeCoreAsync(wait.RunId, bodyJson, onlyWaitId: null, cancellationToken).ConfigureAwait(false);
     }
 
-    public async Task<bool> ResumeByActionTokenAsync(string token, string actionKey, Guid actorUserId, string? comment, CancellationToken cancellationToken)
+    public async Task<bool> ResumeByActionTokenAsync(string token, string actionKey, Guid actorUserId, string? comment, Guid teamId, CancellationToken cancellationToken)
     {
+        // The wait's run must belong to the caller's team — a card can only resolve a wait in its own
+        // tenant, even though the token is an unguessable Guid (defense in depth against a cross-team
+        // card / a leaked token). The join keeps this a single indexed query.
         var wait = await _db.WorkflowRunWait.AsNoTracking()
             .Where(w => w.Token == token && w.Status == WorkflowWaitStatuses.Pending && w.WaitKind == WorkflowWaitKinds.Action)
+            .Where(w => _db.WorkflowRun.Any(r => r.Id == w.RunId && r.TeamId == teamId))
+            .Select(w => new { w.Id, w.RunId })
             .FirstOrDefaultAsync(cancellationToken)
             .ConfigureAwait(false);
 
         if (wait == null)
         {
-            _logger.LogDebug("Action resume: no pending action wait matches the token");
+            _logger.LogDebug("Action resume: no pending action wait matches the token in team {TeamId}", teamId);
             return false;
         }
 
         var payload = JsonSerializer.Serialize(new { action = actionKey, by = actorUserId, comment });
 
-        return await ResumeCoreAsync(wait.RunId, payload, cancellationToken).ConfigureAwait(false);
+        // Resolve ONLY this wait — a sibling card parked on the same run keeps waiting for its own click.
+        return await ResumeCoreAsync(wait.RunId, payload, onlyWaitId: wait.Id, cancellationToken).ConfigureAwait(false);
     }
 }

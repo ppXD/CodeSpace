@@ -21,4 +21,12 @@ public static class MessageInteractionPolicy
     /// </summary>
     public static bool IsAllowedResponder(MessageInteraction interaction, Guid userId, bool isConversationMember) =>
         isConversationMember && (interaction.AllowedResponderUserIds is null || interaction.AllowedResponderUserIds.Contains(userId));
+
+    /// <summary>
+    /// True if the chosen option mandates a comment (e.g. a "request changes" button with
+    /// <see cref="InteractionButton.RequiresComment"/>). The server enforces this — it isn't a UI-only hint.
+    /// </summary>
+    public static bool RequiresComment(MessageInteraction interaction, string responseKey) =>
+        interaction.Component is ActionButtonsComponent buttons
+        && buttons.Buttons.FirstOrDefault(b => b.Key == responseKey) is { RequiresComment: true };
 }

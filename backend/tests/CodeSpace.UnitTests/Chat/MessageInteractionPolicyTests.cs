@@ -47,4 +47,25 @@ public class MessageInteractionPolicyTests
         MessageInteractionPolicy.IsAllowedResponder(card, bob, isConversationMember: true)
             .ShouldBeFalse("a restricted card may only be answered by a listed user (e.g. the picked reviewer)");
     }
+
+    [Fact]
+    public void RequiresComment_is_true_only_for_a_button_that_demands_one()
+    {
+        var card = new MessageInteraction
+        {
+            Component = new ActionButtonsComponent
+            {
+                Buttons = new List<InteractionButton>
+                {
+                    new() { Key = "approve", Label = "Approve" },
+                    new() { Key = "reject", Label = "Reject", RequiresComment = true },
+                },
+            },
+            Target = new WorkflowWaitTarget { Token = "t" },
+        };
+
+        MessageInteractionPolicy.RequiresComment(card, "reject").ShouldBeTrue();
+        MessageInteractionPolicy.RequiresComment(card, "approve").ShouldBeFalse();
+        MessageInteractionPolicy.RequiresComment(card, "nonexistent").ShouldBeFalse();
+    }
 }

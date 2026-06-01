@@ -51,8 +51,8 @@ public class MessageRespondFlowTests
             messageId = Guid.Parse(JsonDocument.Parse(post.OutputsJson).RootElement.GetProperty("messageId").GetString()!);
         }
 
-        // The owner clicks "Approve" — through the real respond command (token never leaves the server).
-        await RespondViaMediatorAsync(ownerId, teamId, messageId, "approve");
+        // The owner clicks "Approve" with a comment — through the real respond command (token never leaves the server).
+        await RespondViaMediatorAsync(ownerId, teamId, messageId, "approve", "looks good");
 
         await RunEngineAsync(runId);   // the wait resumes with the decision
 
@@ -62,13 +62,16 @@ public class MessageRespondFlowTests
             (await db.WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == runId)).Status.ShouldBe(WorkflowRunStatus.Success);
 
             var wait = await db.WorkflowRunNode.AsNoTracking().SingleAsync(n => n.RunId == runId && n.NodeId == "wait");
-            JsonDocument.Parse(wait.OutputsJson).RootElement.GetProperty("action").GetString().ShouldBe("approve", "the clicked button flows through to the wait node's outputs");
+            var waitOut = JsonDocument.Parse(wait.OutputsJson).RootElement;
+            waitOut.GetProperty("action").GetString().ShouldBe("approve", "the clicked button flows through to the wait node's outputs");
+            waitOut.GetProperty("comment").GetString().ShouldBe("looks good", "the comment plumbs end-to-end through the real command → resume payload → node output");
 
             var message = await db.Message.AsNoTracking().SingleAsync(m => m.Id == messageId);
             var interaction = MessageInteractionJson.Deserialize(message.InteractionJson);
             interaction!.State.ShouldBe(InteractionState.Resolved, "the message's interaction is stamped resolved (display mirror)");
             interaction.Resolution!.ResponseKey.ShouldBe("approve");
             interaction.Resolution.ByUserId.ShouldBe(ownerId);
+            interaction.Resolution.Comment.ShouldBe("looks good");
         }
 
         // Responding again is rejected — the interaction is closed.
@@ -102,6 +105,27 @@ public class MessageRespondFlowTests
         await RespondDirectShouldThrow<InvalidOperationException>(teamId, cardId, "approve", Guid.NewGuid()); // a non-member / non-allowed responder
     }
 
+    [Fact]
+    public async Task Respond_rejects_a_required_comment_button_without_a_comment()
+    {
+        var (teamId, ownerId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var channelId = await SeedChannelAsync(teamId, ownerId);
+
+        var card = new MessageInteraction
+        {
+            Component = new ActionButtonsComponent { Buttons = new List<InteractionButton> { new() { Key = "request_changes", Label = "Request changes", RequiresComment = true } } },
+            Target = new WorkflowWaitTarget { Token = "tok-rc" },
+            AllowedResponderUserIds = new[] { ownerId },
+        };
+
+        Guid cardId;
+        using (var scope = _fixture.BeginScope())
+            cardId = (await scope.Resolve<IChatBotService>().PostAsBotAsync(channelId, "Review?", card, default)).Id;
+
+        // RespondDirectShouldThrow passes a null comment — a requires-comment button must reject that server-side.
+        await RespondDirectShouldThrow<InvalidOperationException>(teamId, cardId, "request_changes", ownerId);
+    }
+
     // ─── Helpers ────────────────────────────────────────────────────────────────
 
     private async Task<Guid> SeedChannelAsync(Guid teamId, Guid ownerId)
@@ -111,10 +135,10 @@ public class MessageRespondFlowTests
         return await scope.Resolve<IConversationService>().CreateChannelAsync(teamId, slug, slug, isPrivate: false, ownerId, default);
     }
 
-    private async Task RespondViaMediatorAsync(Guid userId, Guid teamId, Guid messageId, string responseKey)
+    private async Task RespondViaMediatorAsync(Guid userId, Guid teamId, Guid messageId, string responseKey, string? comment = null)
     {
         using var scope = _fixture.BeginScopeAs(userId, teamId, Roles.Admin);
-        await scope.Resolve<IMediator>().Send(new RespondToMessageCommand { MessageId = messageId, ResponseKey = responseKey });
+        await scope.Resolve<IMediator>().Send(new RespondToMessageCommand { MessageId = messageId, ResponseKey = responseKey, Comment = comment });
     }
 
     private async Task RespondDirectShouldThrow<TException>(Guid teamId, Guid messageId, string responseKey, Guid actorUserId) where TException : Exception
