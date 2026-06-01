@@ -7,6 +7,7 @@ import {
   buildFieldSchema,
   INPUT_FIELD_TYPES,
   isFieldHidden,
+  isSelectorFieldType,
   type InputFieldType,
   jsonTypeOf,
   schemaMaxLength,
@@ -173,7 +174,13 @@ export function AddInputFieldModal({ initial, takenNames, onSave, onClose }: Add
               </div>
             )}
 
-            {type !== "repository" && (
+            {type === "conversation" && (
+              <div className="wf-form-row">
+                <span className="wf-form-help">The runner picks a conversation (channel / group / DM); its id is passed as the value.</span>
+              </div>
+            )}
+
+            {!isSelectorFieldType(type) && (
             <div className="wf-form-row">
               <span className="wf-form-label">Default value</span>
               {type === "boolean" ? (
@@ -234,7 +241,7 @@ function defaultToString(value: unknown): string {
 
 /** Compute the typed default value for the WorkflowVariable from the per-type editor state. */
 function resolveDefault(type: InputFieldType, text: string, bool: "" | "true" | "false", options: string[]): unknown {
-  if (type === "repository") return undefined;
+  if (isSelectorFieldType(type)) return undefined;
 
   if (type === "boolean") return bool === "" ? undefined : bool === "true";
 
