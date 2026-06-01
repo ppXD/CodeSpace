@@ -33,6 +33,7 @@ public class DbUpRunnerTests
     [InlineData("conversation_member")]
     [InlineData("message")]
     [InlineData("message_reference")]
+    [InlineData("user_provider_identity")]
     public async Task Table_exists_after_migration(string tableName)
     {
         var exists = await TableExistsAsync(tableName).ConfigureAwait(false);
