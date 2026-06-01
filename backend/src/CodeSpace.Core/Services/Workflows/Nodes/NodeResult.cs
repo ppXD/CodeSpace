@@ -56,4 +56,13 @@ public sealed record SuspensionToken
 {
     public required string Kind { get; init; }
     public required JsonElement Payload { get; init; }
+
+    /// <summary>
+    /// Optional caller-supplied correlation token for the wait. When set, the engine uses it as the
+    /// wait's <c>Token</c> instead of minting a fresh Guid — letting one node pre-share the token with
+    /// another (e.g. <c>chat.post_message</c> mints it for the card; <c>flow.wait_action</c> parks on
+    /// the SAME token, so a button click resolves exactly this wait). Null ⇒ the engine mints one (the
+    /// default for Timer / Approval / Callback). Ignored for Subworkflow, whose token is the child run id.
+    /// </summary>
+    public string? CorrelationToken { get; init; }
 }
