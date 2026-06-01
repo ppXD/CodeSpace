@@ -4,6 +4,7 @@ import {
   buildFieldSchema,
   coerceNumberInput,
   isFieldHidden,
+  isSelectorFieldType,
   jsonTypeOf,
   schemaMaxLength,
   schemaOptions,
@@ -47,6 +48,10 @@ describe("buildFieldSchema", () => {
     expect(buildFieldSchema({ type: "repository", hidden: true })).toEqual({ type: "string", "x-selector": "repository", "x-hidden": true });
   });
 
+  it("conversation → string with x-selector (renders the conversation picker)", () => {
+    expect(buildFieldSchema({ type: "conversation" })).toEqual({ type: "string", "x-selector": "conversation" });
+  });
+
   it("hidden → x-hidden:true", () => {
     expect(buildFieldSchema({ type: "text", hidden: true })).toEqual({ type: "string", "x-hidden": true });
   });
@@ -60,6 +65,16 @@ describe("jsonTypeOf", () => {
     expect(jsonTypeOf("number")).toBe("number");
     expect(jsonTypeOf("boolean")).toBe("boolean");
     expect(jsonTypeOf("repository")).toBe("string");
+    expect(jsonTypeOf("conversation")).toBe("string");
+  });
+});
+
+describe("isSelectorFieldType", () => {
+  it("is true only for entity-picker field types", () => {
+    expect(isSelectorFieldType("repository")).toBe(true);
+    expect(isSelectorFieldType("conversation")).toBe(true);
+    expect(isSelectorFieldType("text")).toBe(false);
+    expect(isSelectorFieldType("select")).toBe(false);
   });
 });
 
@@ -71,6 +86,7 @@ describe("schemaToFieldType", () => {
     expect(schemaToFieldType(buildFieldSchema({ type: "select", options: ["a"] }))).toBe("select");
     expect(schemaToFieldType(buildFieldSchema({ type: "boolean" }))).toBe("boolean");
     expect(schemaToFieldType(buildFieldSchema({ type: "repository" }))).toBe("repository");
+    expect(schemaToFieldType(buildFieldSchema({ type: "conversation" }))).toBe("conversation");
   });
 
   it("treats integer as number and unknown as text", () => {
