@@ -1611,7 +1611,7 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
         // failure throws SubworkflowStartException, which ExecuteNodeAsync turns into a node failure.
         var correlationToken = waitKind == WorkflowWaitKinds.Subworkflow
             ? (await StageSubworkflowChildAsync(run, token, cancellationToken).ConfigureAwait(false)).ToString()
-            : Guid.NewGuid().ToString("N");
+            : (token.CorrelationToken ?? Guid.NewGuid().ToString("N"));
 
         await _recordLogger.NodeSuspendedAsync(run.Id, node.Id, iterationKey, waitKind, wakeAt, cancellationToken).ConfigureAwait(false);
 
