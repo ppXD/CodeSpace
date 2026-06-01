@@ -50,6 +50,48 @@ export interface MessageReferenceView {
   label: string | null;
 }
 
+// ─── Interactive components (mirror backend MessageInteractionView — token-stripped) ────────────
+
+export type InteractionButtonStyle = "Default" | "Primary" | "Danger";
+export type InteractionState = "Open" | "Resolved" | "Expired";
+
+export interface InteractionButton {
+  key: string;
+  label: string;
+  style: InteractionButtonStyle;
+  /** When true the UI must collect a comment before submitting this button (e.g. "request changes"). */
+  requiresComment: boolean;
+}
+
+/** Polymorphic by `kind` (mirrors backend `InteractionComponent`); `action_buttons` is the only kind today. */
+export interface ActionButtonsComponent {
+  kind: "action_buttons";
+  buttons: InteractionButton[];
+}
+export type InteractionComponent = ActionButtonsComponent;
+
+/** The outcome once a response lands — the display mirror of the resolved workflow wait. */
+export interface InteractionResolution {
+  responseKey: string;
+  byUserId: string;
+  comment: string | null;
+  atUtc: string;
+}
+
+/**
+ * The client-facing projection of a message's interaction. Deliberately omits the routing target —
+ * the wait token never reaches the client; a response is keyed by message id and the backend
+ * re-derives the target. Null for a plain message.
+ */
+export interface MessageInteractionView {
+  version: number;
+  component: InteractionComponent;
+  /** Null = any active member may respond; otherwise only these users (e.g. the picked reviewer). */
+  allowedResponderUserIds: string[] | null;
+  state: InteractionState;
+  resolution: InteractionResolution | null;
+}
+
 export interface MessageView {
   id: string;
   conversationId: string;
@@ -61,6 +103,8 @@ export interface MessageView {
   editedDate: string | null;
   isDeleted: boolean;
   references: MessageReferenceView[];
+  /** An attached interactive component (e.g. a review card), else null for a plain message. */
+  interaction: MessageInteractionView | null;
 }
 
 /** One newest-first page of history. Scroll up by passing `nextBeforeId` as the next cursor. */

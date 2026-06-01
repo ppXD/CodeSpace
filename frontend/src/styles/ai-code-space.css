@@ -3255,6 +3255,17 @@ textarea:-webkit-autofill {
 }
 .acs-root .chat-msg-deleted { font-size: 13px; font-style: italic; color: var(--muted-2); }
 
+/* Interactive card under a message body — a row of action buttons while Open, an outcome stamp once
+   Resolved/Expired. Low-chrome (no bubble): the buttons reuse the shared .btn family; the stamp is a
+   muted line with an accent check + the chosen action, who responded, and any comment. */
+.acs-root .chat-card { margin-top: 6px; }
+.acs-root .chat-card-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.acs-root .chat-card-stamp { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; color: var(--muted); }
+.acs-root .chat-card-stamp svg { color: var(--accent); flex-shrink: 0; }
+.acs-root .chat-card-stamp-label { font-weight: 600; color: var(--ink-2); }
+.acs-root .chat-card-stamp-comment { color: var(--muted-2); font-style: italic; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.acs-root .chat-card-stamp-muted { font-style: italic; }
+
 /* Date / unread separators in the message stream — a centred label flanked by hairlines, the
    Slack/Space "reading" cues. Date is muted normal-case; the unread line is small accent caps. */
 .acs-root .chat-divider { display: flex; align-items: center; gap: 10px; margin: 10px 0 4px; user-select: none; }
