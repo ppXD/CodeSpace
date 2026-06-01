@@ -3252,6 +3252,9 @@ textarea:-webkit-autofill {
   background: var(--panel-2); color: var(--muted);
   display: flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 600;
 }
+/* A bot author: a distinct accent robot avatar (no per-author letter colour) so automated messages
+   read as "from a bot" at a glance. */
+.acs-root .chat-msg-avatar[data-bot="true"] { background: var(--accent-soft); color: var(--accent); }
 .acs-root .chat-msg-main { min-width: 0; flex: 1; }
 .acs-root .chat-msg-head { display: flex; align-items: baseline; gap: 8px; }
 .acs-root .chat-msg-author { font-size: 13px; font-weight: 600; color: var(--ink); }

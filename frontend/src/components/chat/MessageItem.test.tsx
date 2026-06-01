@@ -10,7 +10,8 @@ import { MessageItem } from "./MessageItem";
 vi.mock("@/hooks/use-chat", () => ({ useRespondToMessage: () => ({ mutate: vi.fn(), isPending: false }) }));
 
 const members = new Map<string, TeamMemberSummary>([
-  ["u1", { userId: "u1", name: "Alice", email: "a@x", avatarUrl: null }],
+  ["u1", { userId: "u1", name: "Alice", email: "a@x", avatarUrl: null, isBot: false }],
+  ["bot1", { userId: "bot1", name: "CodeSpace", email: "bot@x", avatarUrl: null, isBot: true }],
 ]);
 
 function msg(partial: Partial<MessageView>): MessageView {
@@ -31,6 +32,16 @@ describe("MessageItem", () => {
     const { container } = render(<MessageItem message={msg({})} members={members} isMine myUserId="u1" />);
     expect(screen.getByText("Alice")).toBeInTheDocument();   // real name, not "You"
     expect(container.querySelector('.chat-msg[data-mine="true"]')).toBeTruthy();
+  });
+
+  it("renders a robot-icon avatar (not an initial) for a bot author", () => {
+    const { container } = render(<MessageItem message={msg({ authorUserId: "bot1" })} members={members} isMine={false} myUserId={null} />);
+
+    expect(screen.getByText("CodeSpace")).toBeInTheDocument();   // the bot's name still shows
+    const avatar = container.querySelector('.chat-msg-avatar[data-bot="true"]');
+    expect(avatar).toBeTruthy();
+    expect(avatar!.querySelector("svg")).toBeTruthy();           // an icon, not a letter
+    expect(avatar!.textContent).toBe("");                        // no initial
   });
 
   it("falls back to Unknown for an unmapped author", () => {
