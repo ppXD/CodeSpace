@@ -43,6 +43,7 @@ public class DbUpRunnerTests
     [Theory]
     [InlineData("credential", "ownership", "0030_credential_ownership.sql")]              // drives team-service vs personal credential governance
     [InlineData("message", "interaction_json", "0036_message_interaction.sql")]          // optional polymorphic interactive component (action cards)
+    [InlineData("app_user", "is_bot", "0037_user_is_bot.sql")]                            // flags the per-team CodeSpace bot identity
     public async Task Column_exists_after_migration(string tableName, string columnName, string addedBy)
     {
         var exists = await ColumnExistsAsync(tableName, columnName).ConfigureAwait(false);
