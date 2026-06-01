@@ -11,7 +11,7 @@ using GitLabMergeRequestState = NGitLab.Models.MergeRequestState;
 
 namespace CodeSpace.Core.Services.Providers.GitLab;
 
-public sealed class GitLabRepositoryProvider : IRepositoryCatalogCapability, IPullRequestCatalogCapability, IPullRequestCommentCapability, ICredentialProbeCapability, IWebhookRegistrationCapability, IWebhookSignatureVerifier, IWebhookEventNormalizer
+public sealed class GitLabRepositoryProvider : IRepositoryCatalogCapability, IPullRequestCatalogCapability, IPullRequestCommentCapability, IPullRequestReviewCapability, ICredentialProbeCapability, IWebhookRegistrationCapability, IWebhookSignatureVerifier, IWebhookEventNormalizer
 {
     private readonly IProviderAuthResolver _authResolver;
     private readonly IExternalCallResilience _resilience;
@@ -479,6 +479,26 @@ public sealed class GitLabRepositoryProvider : IRepositoryCatalogCapability, IPu
                 Body = comment.Body,
                 AuthorName = comment.Author?.Username ?? "unknown",
                 CreatedAt = new DateTimeOffset(DateTime.SpecifyKind(comment.CreatedAt, DateTimeKind.Utc), TimeSpan.Zero),
+                WebUrl = null
+            });
+        }, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<RemotePullRequestReview> SubmitReviewAsync(ProviderContext context, RemoteRepository repository, int number, PullRequestReviewVerdict verdict, string? body, CancellationToken cancellationToken)
+    {
+        var client = await BuildClientAsync(context, cancellationToken).ConfigureAwait(false);
+
+        return await _resilience.ExecuteAsync(context.Instance, nameof(SubmitReviewAsync), _ =>
+        {
+            // GitLab has no native review verdict — post it as a labeled MR note (see GitLabReviewPlan).
+            var projectId = int.Parse(repository.ExternalId);
+            var note = GitLabReviewPlan.NoteFor(verdict, body);
+            var comment = client.GetMergeRequest(projectId).Comments(number).Add(new NGitLab.Models.MergeRequestCommentCreate { Body = note });
+
+            return Task.FromResult(new RemotePullRequestReview
+            {
+                Verdict = verdict,
+                ExternalId = comment.Id.ToString(),
                 WebUrl = null
             });
         }, cancellationToken).ConfigureAwait(false);

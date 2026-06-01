@@ -48,6 +48,10 @@ public sealed class GitHubProviderModule : IProviderModule
         // canonical write-capable scope. `public_repo` works for public-only repos.
         [typeof(IPullRequestCommentCapability)] = ScopeRequirement.AnyOf(GitHubScopes.Repo, GitHubScopes.PublicRepo),
 
+        // Submitting a PR review (approve / request-changes / comment) is a repo write — same
+        // scope family as posting a comment.
+        [typeof(IPullRequestReviewCapability)] = ScopeRequirement.AnyOf(GitHubScopes.Repo, GitHubScopes.PublicRepo),
+
         // Webhook registration: `repo` is the superset; `admin:repo_hook` is the narrow grant.
         [typeof(IWebhookRegistrationCapability)] = ScopeRequirement.AnyOf(GitHubScopes.Repo, GitHubScopes.AdminRepoHook),
 

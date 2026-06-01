@@ -74,6 +74,23 @@ public sealed class PullRequestService : IPullRequestService, IScopedDependency
         return await commentCap.PostCommentAsync(context, remote, number, body, cancellationToken).ConfigureAwait(false);
     }
 
+    public async Task<RemotePullRequestReview> SubmitReviewAsync(Guid repositoryId, int number, PullRequestReviewVerdict verdict, string? body, CancellationToken cancellationToken)
+    {
+        // A comment / request-changes verdict needs something to say; approve may stand alone (LGTM).
+        if (verdict != PullRequestReviewVerdict.Approve && string.IsNullOrWhiteSpace(body))
+            throw new InvalidOperationException($"A '{verdict}' review requires a non-empty body.");
+
+        var repo = await LoadRepositoryAsync(repositoryId, cancellationToken).ConfigureAwait(false);
+        EnsureCredentialBound(repo);
+        _scopeChecker.EnsureCapability(repo.Credential!, repo.ProviderInstance.Provider, typeof(IPullRequestReviewCapability));
+
+        var reviewCap = _registry.Require<IPullRequestReviewCapability>(repo.ProviderInstance.Provider);
+        var context = new ProviderContext(repo.ProviderInstance, repo.Credential!);
+        var remote = ToRemoteRepository(repo);
+
+        return await reviewCap.SubmitReviewAsync(context, remote, number, verdict, body, cancellationToken).ConfigureAwait(false);
+    }
+
     /// <summary>
     /// Shared preflight for every PR call: repo lookup → credential null-check →
     /// scope check → capability + provider-context + remote-repository shape.

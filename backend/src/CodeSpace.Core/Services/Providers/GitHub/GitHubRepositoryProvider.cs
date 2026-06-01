@@ -8,13 +8,14 @@ using CodeSpace.Messages.Events;
 using Octokit;
 using FileChangeStatus = CodeSpace.Messages.Enums.FileChangeStatus;
 using PullRequestState = CodeSpace.Messages.Enums.PullRequestState;
+using PullRequestReviewVerdict = CodeSpace.Messages.Enums.PullRequestReviewVerdict;
 using PullRequestCheckStatus = CodeSpace.Messages.Enums.PullRequestCheckStatus;
 using RepositoryVisibility = CodeSpace.Messages.Enums.RepositoryVisibility;
 using ProviderKind = CodeSpace.Messages.Enums.ProviderKind;
 
 namespace CodeSpace.Core.Services.Providers.GitHub;
 
-public sealed class GitHubRepositoryProvider : IRepositoryCatalogCapability, IPullRequestCatalogCapability, IPullRequestCommentCapability, ICredentialProbeCapability, IWebhookRegistrationCapability, IWebhookSignatureVerifier, IWebhookEventNormalizer
+public sealed class GitHubRepositoryProvider : IRepositoryCatalogCapability, IPullRequestCatalogCapability, IPullRequestCommentCapability, IPullRequestReviewCapability, ICredentialProbeCapability, IWebhookRegistrationCapability, IWebhookSignatureVerifier, IWebhookEventNormalizer
 {
     private readonly IProviderAuthResolver _authResolver;
     private readonly IExternalCallResilience _resilience;
@@ -236,6 +237,25 @@ public sealed class GitHubRepositoryProvider : IRepositoryCatalogCapability, IPu
                 Body = created.Body,
                 AuthorName = created.User?.Login ?? "unknown",
                 CreatedAt = created.CreatedAt,
+                WebUrl = created.HtmlUrl
+            };
+        }, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<RemotePullRequestReview> SubmitReviewAsync(ProviderContext context, RemoteRepository repository, int number, PullRequestReviewVerdict verdict, string? body, CancellationToken cancellationToken)
+    {
+        var client = await BuildClientAsync(context, cancellationToken).ConfigureAwait(false);
+
+        return await _resilience.ExecuteAsync(context.Instance, nameof(SubmitReviewAsync), async _ =>
+        {
+            // GitHub has a native review verdict — one call submits approve / request-changes / comment.
+            var review = new PullRequestReviewCreate { Body = body ?? "", Event = GitHubReviewMapping.ToEvent(verdict) };
+            var created = await client.PullRequest.Review.Create(repository.NamespacePath, repository.Name, number, review).ConfigureAwait(false);
+
+            return new RemotePullRequestReview
+            {
+                Verdict = verdict,
+                ExternalId = created.Id.ToString(),
                 WebUrl = created.HtmlUrl
             };
         }, cancellationToken).ConfigureAwait(false);
