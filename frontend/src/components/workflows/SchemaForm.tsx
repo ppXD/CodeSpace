@@ -1,5 +1,6 @@
 import { useMemo } from "react";
 
+import { Ic } from "@/_imported/ai-code-space/icons";
 import { coerceNumberInput } from "@/lib/inputFieldSchema";
 
 import type { ScopeSuggestion } from "./scope-introspection";
@@ -25,8 +26,9 @@ import { VariablePickerInput } from "./VariablePickerInput";
  *   - boolean → checkbox
  *   - enum    → select
  *   - array of string → comma-separated text (one line per entry on Enter)
+ *   - array of object → a repeatable list of sub-forms (one per item), built from items.properties
  *
- * Anything richer (oneOf/anyOf, nested objects, arrays of objects) falls back to a
+ * Anything richer (oneOf/anyOf, free-form nested objects) falls back to a
  * monospace JSON editor — operator-friendly escape hatch, not a dead end.
  */
 
@@ -243,6 +245,18 @@ function renderControl(schema: Schema, value: unknown, onChange: (next: unknown)
     );
   }
 
+  if (type === "array" && schema.items?.type === "object" && schema.items.properties) {
+    return (
+      <ObjectArrayEditor
+        itemSchema={schema.items}
+        value={value}
+        onChange={onChange}
+        templateHint={templateHint}
+        variableSuggestions={variableSuggestions}
+      />
+    );
+  }
+
   // Fallback — raw JSON. Lets operators wire complex shapes (objects, $ref blocks) even when
   // the editor doesn't have a typed control for them. Round-trips safely.
   return (
@@ -302,6 +316,50 @@ function renderCustomSelector(key: string, _schema: Schema, value: unknown, onCh
     default:
       return null;
   }
+}
+
+/**
+ * Generic editor for an `array` of `object` items: a repeatable list where each row is a sub-form
+ * built recursively from the item schema's properties. Add / remove rows; the value stays a plain
+ * array of objects. Driven purely by schema — no per-node knowledge — so any object-array input
+ * (e.g. a row of action buttons) gets a usable editor instead of the raw-JSON fallback. Removing the
+ * last row emits undefined (the field clears) so an empty list never lingers as a degenerate value.
+ */
+function ObjectArrayEditor({ itemSchema, value, onChange, templateHint, variableSuggestions }: {
+  itemSchema: Schema;
+  value: unknown;
+  onChange: (next: unknown) => void;
+  templateHint: boolean;
+  variableSuggestions?: ScopeSuggestion[];
+}) {
+  const rows = Array.isArray(value) ? (value as Record<string, unknown>[]) : [];
+  const replace = (next: Record<string, unknown>[]) => onChange(next.length === 0 ? undefined : next);
+
+  return (
+    <div className="wf-objarr">
+      {rows.map((row, i) => (
+        // Index key: rows aren't reorderable and each sub-form is fully value-controlled (props in,
+        // changes out), so the index is stable enough for add / remove-by-index editing.
+        <div className="wf-objarr-row" key={i}>
+          <div className="wf-objarr-row-body">
+            <SchemaForm
+              schema={itemSchema}
+              value={row}
+              onChange={(next) => replace(rows.map((r, idx) => (idx === i ? next : r)))}
+              templateHint={templateHint}
+              variableSuggestions={variableSuggestions}
+            />
+          </div>
+          <button type="button" className="btn btn-ghost btn-icon wf-objarr-remove" onClick={() => replace(rows.filter((_, idx) => idx !== i))} aria-label="Remove item">
+            <Ic.Trash size={14} />
+          </button>
+        </div>
+      ))}
+      <button type="button" className="btn btn-ghost wf-objarr-add" onClick={() => replace([...rows, {}])}>
+        <Ic.Plus size={14} /> Add item
+      </button>
+    </div>
+  );
 }
 
 function TemplateHint() {
