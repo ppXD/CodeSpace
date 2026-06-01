@@ -3,6 +3,7 @@ using CodeSpace.Core.Services.Chat;
 using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.IntegrationTests.Workflows.Infrastructure;
 using CodeSpace.Messages.Constants;
+using CodeSpace.Messages.Dtos.Chat;
 using CodeSpace.Messages.Dtos.Users;
 using CodeSpace.Messages.Queries.Users;
 using MediatR;
@@ -41,6 +42,37 @@ public class BotVisibilityFlowTests
         var identities = await SendAsync(ownerId, teamId, new ListTeamMemberIdentitiesQuery());
         identities.ShouldContain(m => m.UserId == botId && m.IsBot, "author-name resolution (IBotInclusive) must see the bot");
         identities.ShouldContain(m => m.UserId == ownerId, "humans are still present in the identities list");
+    }
+
+    [Fact]
+    public async Task Conversation_member_count_and_roster_exclude_the_bot()
+    {
+        // A ConversationMember enumeration (count + id list) is queried DIRECTLY, not through a User
+        // join — so a User-only filter would miss it. This pins that the bot stays out anyway, via the
+        // `_db.User.Any(...)` correlation that rides the global filter.
+        var (teamId, ownerId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+
+        var slug = "vis-" + Guid.NewGuid().ToString("N")[..8];
+        Guid channelId;
+        using (var scope = _fixture.BeginScope())
+            channelId = await scope.Resolve<IConversationService>().CreateChannelAsync(teamId, slug, slug, isPrivate: false, ownerId, default);
+
+        Guid botId;
+        using (var scope = _fixture.BeginScope())
+        {
+            var bot = scope.Resolve<IChatBotService>();
+            await bot.PostAsBotAsync(channelId, "deployed ✅", interaction: null, default);   // the bot auto-joins the channel
+            botId = await bot.GetOrCreateTeamBotAsync(teamId, default);
+        }
+
+        IReadOnlyList<ConversationSummary> conversations;
+        using (var scope = _fixture.BeginScope())
+            conversations = await scope.Resolve<IConversationService>().ListForUserAsync(teamId, ownerId, default);
+
+        var channel = conversations.Single(c => c.Id == channelId);
+        channel.MemberUserIds.ShouldNotContain(botId, "the bot must not leak into the conversation roster");
+        channel.MemberUserIds.ShouldContain(ownerId);
+        channel.MemberCount.ShouldBe(1, "the member count is humans-only — the bot member must not inflate it");
     }
 
     private async Task<IReadOnlyList<TeamMemberSummary>> SendAsync(Guid userId, Guid teamId, IRequest<IReadOnlyList<TeamMemberSummary>> query)
