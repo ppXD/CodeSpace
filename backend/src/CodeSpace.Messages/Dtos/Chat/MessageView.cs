@@ -1,3 +1,5 @@
+using CodeSpace.Messages.Dtos.Chat.Interactions;
+
 namespace CodeSpace.Messages.Dtos.Chat;
 
 /// <summary>
@@ -28,4 +30,11 @@ public sealed record MessageView
     public required bool IsDeleted { get; init; }
 
     public required IReadOnlyList<MessageReferenceView> References { get; init; }
+
+    /// <summary>
+    /// The interactive component (action buttons, …) carried by this message, or null for a plain
+    /// message. Token-stripped: the response target stays server-side, so a client renders + responds
+    /// by message id without ever seeing the wait token. Blanked (null) on a soft-deleted message.
+    /// </summary>
+    public MessageInteractionView? Interaction { get; init; }
 }

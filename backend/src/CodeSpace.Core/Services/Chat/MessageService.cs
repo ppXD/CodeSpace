@@ -4,6 +4,7 @@ using CodeSpace.Core.DependencyInjection;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Messages.Dtos.Chat;
+using CodeSpace.Messages.Dtos.Chat.Interactions;
 using CodeSpace.Messages.Queries.Chat;
 using Microsoft.EntityFrameworkCore;
 using Npgsql;
@@ -25,7 +26,13 @@ public sealed class MessageService : IMessageService, IScopedDependency
 
     // ─── Post ────────────────────────────────────────────────────────────────────
 
-    public async Task<MessageView> PostAsync(Guid teamId, Guid authorUserId, Guid conversationId, string body, Guid? replyToMessageId, CancellationToken cancellationToken)
+    public Task<MessageView> PostAsync(Guid teamId, Guid authorUserId, Guid conversationId, string body, Guid? replyToMessageId, CancellationToken cancellationToken) =>
+        PostCoreAsync(teamId, authorUserId, conversationId, body, replyToMessageId, interaction: null, cancellationToken);
+
+    public Task<MessageView> PostInteractiveAsync(Guid teamId, Guid authorUserId, Guid conversationId, string body, MessageInteraction interaction, CancellationToken cancellationToken) =>
+        PostCoreAsync(teamId, authorUserId, conversationId, body, replyToMessageId: null, interaction, cancellationToken);
+
+    private async Task<MessageView> PostCoreAsync(Guid teamId, Guid authorUserId, Guid conversationId, string body, Guid? replyToMessageId, MessageInteraction? interaction, CancellationToken cancellationToken)
     {
         EnsureValidBody(body);
 
@@ -43,6 +50,7 @@ public sealed class MessageService : IMessageService, IScopedDependency
             Body = body,
             ReplyToMessageId = replyToMessageId,
             CreatedDate = DateTimeOffset.UtcNow,
+            InteractionJson = MessageInteractionJson.Serialize(interaction),
         };
 
         var references = BuildReferences(message.Id, teamId, body);
@@ -177,7 +185,7 @@ public sealed class MessageService : IMessageService, IScopedDependency
     // time, so this IS chronological order. EF can't express a uuid '<' cursor in LINQ, so the
     // keyset predicate lives here as parameterised SQL (column list is a constant — no injection).
     private const string MessageColumns =
-        "id, conversation_id, team_id, author_user_id, body, reply_to_message_id, created_date, edited_date, deleted_date";
+        "id, conversation_id, team_id, author_user_id, body, reply_to_message_id, created_date, edited_date, deleted_date, interaction_json";
 
     private async Task<List<Message>> QueryPageAsync(Guid teamId, Guid conversationId, Guid? beforeId, int take, CancellationToken cancellationToken)
     {
@@ -277,6 +285,25 @@ public sealed class MessageService : IMessageService, IScopedDependency
             EditedDate = message.EditedDate,
             IsDeleted = deleted,
             References = deleted ? Array.Empty<MessageReferenceView>() : references.Select(MapReferenceView).ToList(),
+            Interaction = deleted ? null : MapInteractionView(message.InteractionJson),
+        };
+    }
+
+    // Project the stored interaction to its client view — deliberately DROPPING the response target,
+    // so the wait token never leaves the server. A client renders from the component and responds by
+    // message id; the backend re-derives the target.
+    private static MessageInteractionView? MapInteractionView(string? interactionJson)
+    {
+        var interaction = MessageInteractionJson.Deserialize(interactionJson);
+        if (interaction == null) return null;
+
+        return new MessageInteractionView
+        {
+            Version = interaction.Version,
+            Component = interaction.Component,
+            AllowedResponderUserIds = interaction.AllowedResponderUserIds,
+            State = interaction.State,
+            Resolution = interaction.Resolution,
         };
     }
 

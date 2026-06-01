@@ -41,14 +41,15 @@ public class DbUpRunnerTests
     }
 
     [Theory]
-    [InlineData("credential", "ownership")]   // added by 0030 — drives team-service vs personal credential governance
-    public async Task Column_exists_after_migration(string tableName, string columnName)
+    [InlineData("credential", "ownership", "0030_credential_ownership.sql")]              // drives team-service vs personal credential governance
+    [InlineData("message", "interaction_json", "0036_message_interaction.sql")]          // optional polymorphic interactive component (action cards)
+    public async Task Column_exists_after_migration(string tableName, string columnName, string addedBy)
     {
         var exists = await ColumnExistsAsync(tableName, columnName).ConfigureAwait(false);
 
         exists.ShouldBeTrue(
-            $"Column '{tableName}.{columnName}' must exist after migrations apply — added by 0030_credential_ownership.sql. " +
-            $"If missing, 0030 did not run. Diagnose with: psql -c '\\d {tableName}' against the test database.");
+            $"Column '{tableName}.{columnName}' must exist after migrations apply — added by {addedBy}. " +
+            $"If missing, that migration did not run. Diagnose with: psql -c '\\d {tableName}' against the test database.");
     }
 
     [Theory]
