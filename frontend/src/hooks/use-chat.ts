@@ -55,8 +55,8 @@ export function useMarkRead(conversationId: string) {
 export function useRespondToMessage(conversationId: string) {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: ({ messageId, responseKey, comment }: { messageId: string; responseKey: string; comment: string | null }) =>
-      chatApi.respondToMessage(conversationId, messageId, responseKey, comment),
+    mutationFn: ({ messageId, responseKey, comment, values }: { messageId: string; responseKey: string; comment: string | null; values?: Record<string, unknown> | null }) =>
+      chatApi.respondToMessage(conversationId, messageId, responseKey, comment, values ?? null),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["chat-messages", conversationId] });
       qc.invalidateQueries({ queryKey: ["chat-conversations"] });

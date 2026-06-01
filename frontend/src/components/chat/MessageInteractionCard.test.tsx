@@ -33,6 +33,20 @@ function card(state: InteractionState, resolution: InteractionResolution | null 
   };
 }
 
+function formCard(state: InteractionState, resolution: InteractionResolution | null = null): MessageInteractionView {
+  return {
+    version: 1,
+    component: {
+      kind: "form",
+      fields: { type: "object", properties: { decision: { type: "string", enum: ["approve", "reject"] } }, required: ["decision"] },
+      submitLabel: "Send",
+    },
+    allowedResponderUserIds: null,
+    state,
+    resolution,
+  };
+}
+
 function renderCard(interaction: MessageInteractionView, myUserId: string | null = "rev") {
   return render(<MessageInteractionCard interaction={interaction} members={members} conversationId="c1" messageId="m1" myUserId={myUserId} />);
 }
@@ -89,7 +103,7 @@ describe("MessageInteractionCard", () => {
   });
 
   it("shows the chosen action's label + responder + comment once resolved, hiding the buttons", () => {
-    const resolution: InteractionResolution = { responseKey: "approve", byUserId: "rev", comment: "looks good", atUtc: "2026-06-01T09:00:00Z" };
+    const resolution: InteractionResolution = { responseKey: "approve", byUserId: "rev", comment: "looks good", values: null, atUtc: "2026-06-01T09:00:00Z" };
     renderCard(card("Resolved", resolution));
 
     expect(screen.getByText("Approve")).toBeInTheDocument();
@@ -99,9 +113,37 @@ describe("MessageInteractionCard", () => {
   });
 
   it("falls back to the raw response key when no button matches (forward-compat)", () => {
-    const resolution: InteractionResolution = { responseKey: "ghost_action", byUserId: "rev", comment: null, atUtc: "2026-06-01T09:00:00Z" };
+    const resolution: InteractionResolution = { responseKey: "ghost_action", byUserId: "rev", comment: null, values: null, atUtc: "2026-06-01T09:00:00Z" };
     renderCard(card("Resolved", resolution));
     expect(screen.getByText("ghost_action")).toBeInTheDocument();
+  });
+
+  it("renders a form card's fields and gates submit until required fields are filled", () => {
+    renderCard(formCard("Open"));
+
+    const submit = screen.getByRole("button", { name: "Send" });
+    expect(submit).toBeDisabled();   // required 'decision' not yet chosen
+
+    fireEvent.change(screen.getByRole("combobox"), { target: { value: "approve" } });
+    expect(submit).toBeEnabled();
+  });
+
+  it("submits a form with the entered values", () => {
+    renderCard(formCard("Open"));
+
+    fireEvent.change(screen.getByRole("combobox"), { target: { value: "reject" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+
+    expect(mutate).toHaveBeenCalledWith({ messageId: "m1", responseKey: "submit", comment: null, values: { decision: "reject" } });
+  });
+
+  it("shows a resolved form's submitted values, hiding the fields", () => {
+    const resolution: InteractionResolution = { responseKey: "submit", byUserId: "rev", comment: null, values: { decision: "approve" }, atUtc: "2026-06-01T09:00:00Z" };
+    renderCard(formCard("Resolved", resolution));
+
+    expect(screen.getByText("Submitted")).toBeInTheDocument();
+    expect(screen.getByText("decision: approve")).toBeInTheDocument();
+    expect(screen.queryByRole("combobox")).toBeNull();
   });
 
   it("renders an Expired card with no resolution as a muted stamp", () => {

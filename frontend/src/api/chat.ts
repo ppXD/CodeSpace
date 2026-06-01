@@ -63,18 +63,29 @@ export interface InteractionButton {
   requiresComment: boolean;
 }
 
-/** Polymorphic by `kind` (mirrors backend `InteractionComponent`); `action_buttons` is the only kind today. */
+/** Polymorphic by `kind` (mirrors backend `InteractionComponent`). */
 export interface ActionButtonsComponent {
   kind: "action_buttons";
   buttons: InteractionButton[];
 }
-export type InteractionComponent = ActionButtonsComponent;
+
+/** A form the responder fills in chat; the submitted values are injected into the run. */
+export interface FormComponent {
+  kind: "form";
+  /** JSON Schema describing the fields (rendered by the schema-driven form). */
+  fields: Record<string, unknown>;
+  submitLabel: string;
+}
+
+export type InteractionComponent = ActionButtonsComponent | FormComponent;
 
 /** The outcome once a response lands — the display mirror of the resolved workflow wait. */
 export interface InteractionResolution {
   responseKey: string;
   byUserId: string;
   comment: string | null;
+  /** For a form response — the submitted field values. Null for a button response. */
+  values: Record<string, unknown> | null;
   atUtc: string;
 }
 
@@ -160,11 +171,11 @@ export const chatApi = {
       body: JSON.stringify({ lastReadMessageId }),
     }),
 
-  /** Respond to an interactive message (click a card button). The wait token stays server-side —
-   *  the message id identifies the interaction; the backend re-derives + resolves the target. */
-  respondToMessage: (conversationId: string, messageId: string, responseKey: string, comment: string | null) =>
+  /** Respond to an interactive message (click a button, or submit a form's `values`). The wait token
+   *  stays server-side — the message id identifies the interaction; the backend re-derives the target. */
+  respondToMessage: (conversationId: string, messageId: string, responseKey: string, comment: string | null, values: Record<string, unknown> | null = null) =>
     fetchJson<void>(`/api/conversations/${conversationId}/messages/${messageId}/respond`, {
       method: "POST",
-      body: JSON.stringify({ responseKey, comment }),
+      body: JSON.stringify({ responseKey, comment, values }),
     }),
 };

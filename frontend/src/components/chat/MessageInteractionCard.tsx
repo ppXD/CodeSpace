@@ -1,9 +1,10 @@
 import { useState } from "react";
 
 import { Ic } from "@/_imported/ai-code-space/icons";
-import type { InteractionButton, InteractionButtonStyle, MessageInteractionView } from "@/api/chat";
+import type { FormComponent, InteractionButton, InteractionButtonStyle, MessageInteractionView } from "@/api/chat";
 import type { TeamMemberSummary } from "@/api/teams";
 import { useRespondToMessage } from "@/hooks/use-chat";
+import { SchemaForm } from "@/components/workflows/SchemaForm";
 
 /** Button visual emphasis → the app's shared button classes (warm Claude theme). */
 const STYLE_CLASS: Record<InteractionButtonStyle, string> = {
@@ -13,11 +14,11 @@ const STYLE_CLASS: Record<InteractionButtonStyle, string> = {
 };
 
 /**
- * The interactive component attached to a message — today a row of action buttons (the review card).
- * An Open card's buttons resolve the parked workflow wait via the respond endpoint (keyed by message
- * id — the wait token never reaches the client); a button that requires a comment first reveals an
- * inline composer. A Resolved / Expired card shows the outcome stamp instead. Once a response lands
- * the message refetches and the card re-renders settled.
+ * The interactive component attached to a message — a row of action buttons or a form. An Open card's
+ * controls resolve the parked workflow wait via the respond endpoint (keyed by message id — the wait
+ * token never reaches the client): a button click sends its key (+ a comment when required); a form
+ * submit sends the field values, which the run reads as the wait node's outputs.values. A Resolved /
+ * Expired card shows the outcome stamp instead. On success the message refetches and re-renders settled.
  */
 export function MessageInteractionCard({ interaction, members, conversationId, messageId, myUserId }: {
   interaction: MessageInteractionView;
@@ -41,22 +42,27 @@ export function MessageInteractionCard({ interaction, members, conversationId, m
   const allowed = interaction.allowedResponderUserIds;
   const canRespond = allowed == null || (myUserId != null && allowed.includes(myUserId));
   const pending = respond.isPending;
+  const component = interaction.component;
 
-  const submit = (responseKey: string, value: string | null) => respond.mutate({ messageId, responseKey, comment: value });
-
-  const onClick = (button: InteractionButton) => {
+  const onButtonClick = (button: InteractionButton) => {
     if (button.requiresComment) {
       setComment("");
       setCommenting(button);
       return;
     }
 
-    submit(button.key, null);
+    respond.mutate({ messageId, responseKey: button.key, comment: null });
   };
 
   return (
     <div className="chat-card" data-state="Open">
-      {commenting ? (
+      {component.kind === "form" ? (
+        <FormBody
+          component={component}
+          disabled={pending || !canRespond}
+          onSubmit={values => respond.mutate({ messageId, responseKey: "submit", comment: null, values })}
+        />
+      ) : commenting ? (
         <div className="chat-card-comment">
           <textarea
             className="chat-card-comment-input"
@@ -67,13 +73,13 @@ export function MessageInteractionCard({ interaction, members, conversationId, m
           />
           <div className="chat-card-comment-actions">
             <button type="button" className="btn btn-ghost" onClick={() => setCommenting(null)} disabled={pending}>Cancel</button>
-            <button type="button" className={STYLE_CLASS[commenting.style]} onClick={() => submit(commenting.key, comment.trim())} disabled={pending || comment.trim() === ""}>{commenting.label}</button>
+            <button type="button" className={STYLE_CLASS[commenting.style]} onClick={() => respond.mutate({ messageId, responseKey: commenting.key, comment: comment.trim() })} disabled={pending || comment.trim() === ""}>{commenting.label}</button>
           </div>
         </div>
       ) : (
         <div className="chat-card-actions">
-          {interaction.component.buttons.map(b => (
-            <button key={b.key} type="button" className={STYLE_CLASS[b.style]} onClick={() => onClick(b)} disabled={pending || !canRespond}>{b.label}</button>
+          {component.buttons.map(b => (
+            <button key={b.key} type="button" className={STYLE_CLASS[b.style]} onClick={() => onButtonClick(b)} disabled={pending || !canRespond}>{b.label}</button>
           ))}
         </div>
       )}
@@ -83,13 +89,30 @@ export function MessageInteractionCard({ interaction, members, conversationId, m
   );
 }
 
-/** The outcome line on a settled card: the chosen action's label, who responded, and any comment. */
+/** Renders a form card's fields (via the shared schema-driven form) + a submit button. Owns the draft value. */
+function FormBody({ component, disabled, onSubmit }: { component: FormComponent; disabled: boolean; onSubmit: (values: Record<string, unknown>) => void }) {
+  const [value, setValue] = useState<Record<string, unknown>>({});
+  const missing = missingRequired(component.fields, value);
+
+  return (
+    <div className="chat-card-form">
+      <SchemaForm schema={component.fields} value={value} onChange={setValue} />
+      <div className="chat-card-form-actions">
+        <button type="button" className="btn btn-primary" onClick={() => onSubmit(value)} disabled={disabled || missing.length > 0}>{component.submitLabel || "Submit"}</button>
+      </div>
+    </div>
+  );
+}
+
+/** The outcome line on a settled card: the chosen action / submitted form, who responded, any comment. */
 function ResolutionStamp({ interaction, members }: { interaction: MessageInteractionView; members: Map<string, TeamMemberSummary> }) {
   const resolution = interaction.resolution;
 
   if (resolution == null) return <span className="chat-card-stamp chat-card-stamp-muted">Expired</span>;
 
-  const label = interaction.component.buttons.find(b => b.key === resolution.responseKey)?.label ?? resolution.responseKey;
+  const label = interaction.component.kind === "action_buttons"
+    ? interaction.component.buttons.find(b => b.key === resolution.responseKey)?.label ?? resolution.responseKey
+    : "Submitted";
   const by = members.get(resolution.byUserId)?.name ?? "Unknown";
 
   return (
@@ -98,6 +121,22 @@ function ResolutionStamp({ interaction, members }: { interaction: MessageInterac
       <span className="chat-card-stamp-label">{label}</span>
       <span className="chat-card-stamp-by">by {by}</span>
       {resolution.comment && <span className="chat-card-stamp-comment">“{resolution.comment}”</span>}
+      {resolution.values && <span className="chat-card-stamp-comment">{summarizeValues(resolution.values)}</span>}
     </div>
   );
+}
+
+/** Required field names (per the form's JSON Schema) that are absent / empty in the draft. */
+function missingRequired(fields: Record<string, unknown>, value: Record<string, unknown>): string[] {
+  const required = Array.isArray((fields as { required?: unknown }).required) ? (fields as { required: string[] }).required : [];
+
+  return required.filter(name => {
+    const v = value[name];
+    return v == null || (typeof v === "string" && v.trim() === "") || (Array.isArray(v) && v.length === 0);
+  });
+}
+
+/** Compact "k: v · k: v" summary of a resolved form's submitted values. */
+function summarizeValues(values: Record<string, unknown>): string {
+  return Object.entries(values).map(([k, v]) => `${k}: ${String(v)}`).join(" · ");
 }
