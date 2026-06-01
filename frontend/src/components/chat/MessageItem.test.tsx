@@ -1,10 +1,13 @@
 import { render, screen } from "@testing-library/react";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import type { MessageView } from "@/api/chat";
 import type { TeamMemberSummary } from "@/api/teams";
 
 import { MessageItem } from "./MessageItem";
+
+// MessageItem renders the real interaction card, which owns the respond mutation — stub it.
+vi.mock("@/hooks/use-chat", () => ({ useRespondToMessage: () => ({ mutate: vi.fn(), isPending: false }) }));
 
 const members = new Map<string, TeamMemberSummary>([
   ["u1", { userId: "u1", name: "Alice", email: "a@x", avatarUrl: null }],

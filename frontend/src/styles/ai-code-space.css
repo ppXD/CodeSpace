@@ -3265,6 +3265,16 @@ textarea:-webkit-autofill {
 .acs-root .chat-card-stamp-label { font-weight: 600; color: var(--ink-2); }
 .acs-root .chat-card-stamp-comment { color: var(--muted-2); font-style: italic; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .acs-root .chat-card-stamp-muted { font-style: italic; }
+/* Inline comment composer revealed by a requires-comment button (e.g. "request changes"). */
+.acs-root .chat-card-comment { display: flex; flex-direction: column; gap: 8px; max-width: 440px; }
+.acs-root .chat-card-comment-input {
+  width: 100%; min-height: 56px; resize: vertical; padding: 8px 10px;
+  border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--panel);
+  font: inherit; font-size: 13px; line-height: 1.45; color: var(--ink); outline: none;
+}
+.acs-root .chat-card-comment-input:focus { border-color: var(--accent); }
+.acs-root .chat-card-comment-actions { display: flex; gap: 8px; justify-content: flex-end; }
+.acs-root .chat-card-hint { display: block; margin-top: 6px; font-size: 12px; color: var(--muted-2); }
 
 /* Date / unread separators in the message stream — a centred label flanked by hairlines, the
    Slack/Space "reading" cues. Date is muted normal-case; the unread line is small accent caps. */

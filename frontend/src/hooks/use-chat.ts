@@ -51,6 +51,19 @@ export function useMarkRead(conversationId: string) {
   });
 }
 
+/** Respond to an interactive message in this conversation; refetch so the card re-renders resolved. */
+export function useRespondToMessage(conversationId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ messageId, responseKey, comment }: { messageId: string; responseKey: string; comment: string | null }) =>
+      chatApi.respondToMessage(conversationId, messageId, responseKey, comment),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["chat-messages", conversationId] });
+      qc.invalidateQueries({ queryKey: ["chat-conversations"] });
+    },
+  });
+}
+
 export function useCreateChannel() {
   const qc = useQueryClient();
   return useMutation({

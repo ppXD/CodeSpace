@@ -30,7 +30,15 @@ export function MessageItem({ message, members, isMine, myUserId }: { message: M
         ) : (
           <>
             <MessageBody body={message.body} members={members} myUserId={myUserId} />
-            {message.interaction && <MessageInteractionCard interaction={message.interaction} members={members} />}
+            {message.interaction && (
+              <MessageInteractionCard
+                interaction={message.interaction}
+                members={members}
+                conversationId={message.conversationId}
+                messageId={message.id}
+                myUserId={myUserId}
+              />
+            )}
           </>
         )}
       </div>

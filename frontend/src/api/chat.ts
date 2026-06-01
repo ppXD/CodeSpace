@@ -159,4 +159,12 @@ export const chatApi = {
       method: "POST",
       body: JSON.stringify({ lastReadMessageId }),
     }),
+
+  /** Respond to an interactive message (click a card button). The wait token stays server-side —
+   *  the message id identifies the interaction; the backend re-derives + resolves the target. */
+  respondToMessage: (conversationId: string, messageId: string, responseKey: string, comment: string | null) =>
+    fetchJson<void>(`/api/conversations/${conversationId}/messages/${messageId}/respond`, {
+      method: "POST",
+      body: JSON.stringify({ responseKey, comment }),
+    }),
 };
