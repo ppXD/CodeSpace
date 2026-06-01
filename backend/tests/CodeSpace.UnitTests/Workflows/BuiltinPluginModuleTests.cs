@@ -5,9 +5,9 @@ using Shouldly;
 namespace CodeSpace.UnitTests.Workflows;
 
 /// <summary>
-/// Pins the 4-domain split. The single <c>BuiltinPluginModule</c> is broken into one
+/// Pins the domain split. The single <c>BuiltinPluginModule</c> is broken into one
 /// plugin per concern so each can be enabled/disabled independently and so the plugin
-/// abstraction is exercised by four distinct callers, not one — proves the surface is
+/// abstraction is exercised by several distinct callers, not one — proves the surface is
 /// generic enough for community plugins to use the same surface.
 /// </summary>
 [Trait("Category", "Unit")]
@@ -71,7 +71,17 @@ public class BuiltinPluginModuleTests
     }
 
     [Fact]
-    public void All_four_builtin_plugins_together_cover_every_builtin_node()
+    public void Chat_plugin_is_standalone()
+    {
+        var module = new ChatPlugin();
+
+        module.Name.ShouldBe("Chat");
+        module.Nodes.ShouldContain(typeof(CodeSpace.Core.Services.Workflows.Nodes.Builtin.ChatPostMessageNode));
+        module.Nodes.Count.ShouldBe(1);
+    }
+
+    [Fact]
+    public void All_builtin_plugins_together_cover_every_builtin_node()
     {
         // If a node escapes its domain plugin OR a new node lands without being assigned to one,
         // this test fails — keeps the catalog accountable.
@@ -81,9 +91,10 @@ public class BuiltinPluginModuleTests
             new GitProvidersPlugin(),
             new HttpToolsPlugin(),
             new LlmCompletePlugin(),
+            new ChatPlugin(),
         };
 
         var total = all.SelectMany(p => p.Nodes).Distinct().Count();
-        total.ShouldBe(20, "20 builtin node types across 4 domain plugins (Core Flow gained flow.wait_action) — adjust this number when adding a builtin");
+        total.ShouldBe(21, "21 builtin node types across 5 domain plugins (added the Chat plugin's chat.post_message) — adjust this number when adding a builtin");
     }
 }
