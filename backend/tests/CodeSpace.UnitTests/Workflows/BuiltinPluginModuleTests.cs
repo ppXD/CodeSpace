@@ -95,6 +95,6 @@ public class BuiltinPluginModuleTests
         };
 
         var total = all.SelectMany(p => p.Nodes).Distinct().Count();
-        total.ShouldBe(21, "21 builtin node types across 5 domain plugins (added the Chat plugin's chat.post_message) — adjust this number when adding a builtin");
+        total.ShouldBe(22, "22 builtin node types across 5 domain plugins (added the Git plugin's git.pr_review write-back) — adjust this number when adding a builtin");
     }
 }
