@@ -3,6 +3,7 @@ using Autofac;
 using CodeSpace.Core.Authorization;
 using CodeSpace.Core.Middlewares.Logging;
 using CodeSpace.Core.Middlewares.Transactional;
+using CodeSpace.Core.Middlewares.Visibility;
 using MediatR;
 using MediatR.Extensions.Autofac.DependencyInjection;
 using MediatR.Extensions.Autofac.DependencyInjection.Builder;
@@ -32,6 +33,7 @@ public class MediatorModule : Autofac.Module
         //                             the user has password_must_change=true
         //   GlobalAdmin            — for IRequireGlobalAdmin commands, no DB hit
         //   TeamMembership / Repo / Credential — DB-backed tenancy checks
+        //   BotVisibility          — opts the request into seeing bot users (IBotInclusive); default excludes
         //   Transactional          — innermost, wraps DB writes only after auth has passed
         builder.RegisterGeneric(typeof(LoggingBehavior<,>)).As(typeof(IPipelineBehavior<,>)).InstancePerLifetimeScope();
         builder.RegisterGeneric(typeof(AuthenticatedUserAuthorizationBehavior<,>)).As(typeof(IPipelineBehavior<,>)).InstancePerLifetimeScope();
@@ -40,6 +42,7 @@ public class MediatorModule : Autofac.Module
         builder.RegisterGeneric(typeof(TeamMembershipAuthorizationBehavior<,>)).As(typeof(IPipelineBehavior<,>)).InstancePerLifetimeScope();
         builder.RegisterGeneric(typeof(RepositoryAccessAuthorizationBehavior<,>)).As(typeof(IPipelineBehavior<,>)).InstancePerLifetimeScope();
         builder.RegisterGeneric(typeof(CredentialAccessAuthorizationBehavior<,>)).As(typeof(IPipelineBehavior<,>)).InstancePerLifetimeScope();
+        builder.RegisterGeneric(typeof(BotVisibilityBehavior<,>)).As(typeof(IPipelineBehavior<,>)).InstancePerLifetimeScope();
         builder.RegisterGeneric(typeof(TransactionalBehavior<,>)).As(typeof(IPipelineBehavior<,>)).InstancePerLifetimeScope();
     }
 }

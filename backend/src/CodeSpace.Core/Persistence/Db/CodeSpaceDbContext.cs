@@ -10,10 +10,14 @@ namespace CodeSpace.Core.Persistence.Db;
 public class CodeSpaceDbContext : DbContext, IUnitOfWork
 {
     private readonly ICurrentUser? _currentUser;
+    private readonly IBotVisibility _botVisibility;
 
-    public CodeSpaceDbContext(DbContextOptions<CodeSpaceDbContext> options, ICurrentUser? currentUser = null) : base(options)
+    public CodeSpaceDbContext(DbContextOptions<CodeSpaceDbContext> options, ICurrentUser? currentUser = null, IBotVisibility? botVisibility = null) : base(options)
     {
         _currentUser = currentUser;
+        // Default to "exclude bots" when none is supplied (design-time / raw construction) — the
+        // same safe default the global User query filter below enforces.
+        _botVisibility = botVisibility ?? new BotVisibility();
     }
 
     public DbSet<User> User => Set<User>();
@@ -50,6 +54,12 @@ public class CodeSpaceDbContext : DbContext, IUnitOfWork
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
         modelBuilder.ApplyConfigurationsFromAssembly(typeof(UserConfiguration).Assembly);
+
+        // Global default: bot (non-human) users are invisible to EVERY User query. A request opts
+        // back in by referencing the scoped IBotVisibility (flipped by BotVisibilityBehavior for
+        // IBotInclusive requests) — so the exclusion can't be forgotten by a new query, only
+        // explicitly waived. _botVisibility is an instance member, so EF re-evaluates it per query.
+        modelBuilder.Entity<User>().HasQueryFilter(u => _botVisibility.IncludeBots || !u.IsBot);
 
         ApplyUtcDateTimeOffsetConverter(modelBuilder);
     }

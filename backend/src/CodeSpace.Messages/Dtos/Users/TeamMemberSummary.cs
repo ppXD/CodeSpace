@@ -12,4 +12,12 @@ public sealed record TeamMemberSummary
     public required string Name { get; init; }
     public required string Email { get; init; }
     public string? AvatarUrl { get; init; }
+
+    /// <summary>
+    /// True for a non-human identity (the per-team CodeSpace bot). Only ever true on the
+    /// bot-inclusive identities query (<c>ListTeamMemberIdentitiesQuery</c>, used to resolve a
+    /// message author's name); the default member list / @-mention picker excludes bots, so this
+    /// is false for every row there.
+    /// </summary>
+    public bool IsBot { get; init; }
 }
