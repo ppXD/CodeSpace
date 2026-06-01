@@ -230,9 +230,13 @@ public sealed class ConversationService : IConversationService, IScopedDependenc
                 Description = c.Description,
                 Visibility = c.Visibility,
                 Archived = c.Archived,
-                MemberCount = _db.ConversationMember.Count(m => m.ConversationId == c.Id && m.DeletedDate == null),
+                // Count / list only members whose User is VISIBLE — the `_db.User.Any(...)` correlation
+                // rides the global bot filter, so a bot member drops out of human-facing rosters by
+                // default (and would reappear only under an IBotInclusive request). This closes the
+                // leak that a User-only filter misses: these enumerate ConversationMember directly.
+                MemberCount = _db.ConversationMember.Count(m => m.ConversationId == c.Id && m.DeletedDate == null && _db.User.Any(u => u.Id == m.UserId)),
                 MemberUserIds = _db.ConversationMember
-                    .Where(m => m.ConversationId == c.Id && m.DeletedDate == null)
+                    .Where(m => m.ConversationId == c.Id && m.DeletedDate == null && _db.User.Any(u => u.Id == m.UserId))
                     .Select(m => m.UserId)
                     .ToList(),
                 CreatedDate = c.CreatedDate,
