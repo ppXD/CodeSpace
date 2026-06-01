@@ -14,7 +14,7 @@ vi.mock("./MessageComposer", () => ({ MessageComposer: () => <div data-testid="c
 vi.mock("./MessageItem", () => ({ MessageItem: ({ message }: { message: { id: string } }) => <div data-testid="msg">{message.id}</div> }));
 
 vi.mock("@/hooks/use-me", () => ({ useMe: () => ({ data: { id: "me" } }) }));
-vi.mock("@/hooks/use-team-members", () => ({ useTeamMemberMap: () => new Map() }));
+vi.mock("@/hooks/use-team-members", () => ({ useTeamMemberIdentityMap: () => new Map() }));
 
 // Dates relative to "now" so the "Today" / "Yesterday" labels are deterministic on any run date.
 const now = new Date();

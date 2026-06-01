@@ -14,14 +14,19 @@ vi.mock("@/hooks/use-chat", () => ({
     data: [
       { id: "c1", kind: "Channel", slug: "general", name: "General", description: null, visibility: "Public", archived: false, memberCount: 2, memberUserIds: [], createdDate: "", lastMessage: null, lastActivityDate: "2026-01-02T10:00:00Z", lastReadMessageId: null },
       { id: "c2", kind: "Direct", slug: null, name: null, description: null, visibility: "Public", archived: false, memberCount: 2, memberUserIds: ["me", "u2"], createdDate: "", lastMessage: null, lastActivityDate: "2026-01-01T10:00:00Z", lastReadMessageId: null },
-      { id: "c3", kind: "Channel", slug: "alerts", name: "Alerts", description: null, visibility: "Public", archived: false, memberCount: 2, memberUserIds: [], createdDate: "", lastMessage: { messageId: "m1", authorUserId: "u9", preview: "@You ping", createdDate: "2026-01-03T10:00:00Z", isDeleted: false, mentionsViewer: true }, lastActivityDate: "2026-01-03T10:00:00Z", lastReadMessageId: null },
+      { id: "c3", kind: "Channel", slug: "alerts", name: "Alerts", description: null, visibility: "Public", archived: false, memberCount: 2, memberUserIds: [], createdDate: "", lastMessage: { messageId: "m1", authorUserId: "bot1", preview: "@You ping", createdDate: "2026-01-03T10:00:00Z", isDeleted: false, mentionsViewer: true }, lastActivityDate: "2026-01-03T10:00:00Z", lastReadMessageId: null },
     ],
   }),
   useCreateChannel: () => ({ mutateAsync: vi.fn(), isPending: false }),
 }));
 vi.mock("@/hooks/use-me", () => ({ useMe: () => ({ data: { id: "me" } }) }));
+// Author/ref name resolution reads the bot-INCLUSIVE identity map: Bob is a human DM partner,
+// CodeSpace is the per-team bot that authors review cards but isn't pickable.
 vi.mock("@/hooks/use-team-members", () => ({
-  useTeamMemberMap: () => new Map([["u2", { userId: "u2", name: "Bob", email: "b@x", avatarUrl: null }]]),
+  useTeamMemberIdentityMap: () => new Map([
+    ["u2", { userId: "u2", name: "Bob", email: "b@x", avatarUrl: null }],
+    ["bot1", { userId: "bot1", name: "CodeSpace", email: "bot@x", avatarUrl: null }],
+  ]),
 }));
 
 describe("ConversationList", () => {
@@ -40,6 +45,13 @@ describe("ConversationList", () => {
   it("marks the active conversation row", () => {
     render(<ConversationList activeConversationId="c1" onSelect={() => {}} />);
     expect(screen.getByText("#general").closest("button")?.getAttribute("data-active")).toBe("true");
+  });
+
+  it("resolves a bot's name as the preview author (author display uses the bot-inclusive identity list)", () => {
+    // c3's last message is authored by the per-team bot. Were author display still reading the
+    // bot-EXCLUDED picker list, this would render "Someone"; the identity list resolves the name.
+    render(<ConversationList activeConversationId={null} onSelect={() => {}} />);
+    expect(screen.getByText("CodeSpace")).toBeInTheDocument();
   });
 
   it("accents the preview of only the conversation whose last message mentions you", () => {

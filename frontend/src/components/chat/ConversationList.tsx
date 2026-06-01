@@ -3,7 +3,7 @@ import type { ConversationSummary } from "@/api/chat";
 import type { TeamMemberSummary } from "@/api/teams";
 import { useConversations } from "@/hooks/use-chat";
 import { useMe } from "@/hooks/use-me";
-import { useTeamMemberMap } from "@/hooks/use-team-members";
+import { useTeamMemberIdentityMap } from "@/hooks/use-team-members";
 
 import { conversationTitle } from "./conversationTitle";
 
@@ -25,7 +25,7 @@ export function ConversationList({
   filter?: (conversation: ConversationSummary) => boolean;
 }) {
   const conversations = useConversations();
-  const members = useTeamMemberMap();
+  const members = useTeamMemberIdentityMap();   // bot-inclusive: a bot can be a channel's last-message author
   const me = useMe();
   const myId = me.data?.id ?? null;
 
