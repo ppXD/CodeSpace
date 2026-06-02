@@ -61,6 +61,28 @@ public class ChatPostMessageNodeTests
     }
 
     [Fact]
+    public async Task Carries_the_required_responder_identity_repository_id_onto_the_wait_target()
+    {
+        const string repoId = "9c4ea7ba-bb16-4cd2-b312-bdf22c3cc789";
+        var bot = new StubChatBot();
+        var inputs = new Dictionary<string, JsonElement>
+        {
+            ["conversationId"] = JsonSerializer.SerializeToElement("11111111-1111-1111-1111-111111111111"),
+            ["body"] = JsonSerializer.SerializeToElement("Review?"),
+            ["actions"] = JsonDocument.Parse("""[{"key":"approve","label":"Approve"}]""").RootElement.Clone(),
+            ["requireResponderIdentityForRepositoryId"] = JsonSerializer.SerializeToElement(repoId),
+        };
+
+        var result = await new ChatPostMessageNode(bot).RunAsync(ContextFromInputs(inputs), CancellationToken.None);
+
+        result.Status.ShouldBe(NodeStatus.Success);
+
+        var target = bot.Interaction.ShouldNotBeNull().Target.ShouldBeOfType<WorkflowWaitTarget>();
+        target.RequiresResponderIdentityForRepositoryId.ShouldBe(Guid.Parse(repoId),
+            "the post node must carry the repo id onto the wait target so respond can pre-check the responder's identity before resolving");
+    }
+
+    [Fact]
     public async Task Posts_a_plain_message_with_a_null_token_when_no_actions()
     {
         var bot = new StubChatBot();
