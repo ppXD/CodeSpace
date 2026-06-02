@@ -41,6 +41,18 @@ describe("SchemaForm object-array editor", () => {
     expect(screen.getAllByRole("combobox")).toHaveLength(2);   // one enum select per row
   });
 
+  it("renders a boolean sub-field as an inline checkbox-before-label, not a stacked row", () => {
+    const onChange = renderForm({ buttons: [{ kind: "approve" }] });
+
+    const checkbox = screen.getByRole("checkbox");
+    const row = checkbox.closest(".wf-form-check");
+    expect(row).not.toBeNull();                  // inline .wf-form-check, not the label-on-top .wf-form-row
+    expect(row!.textContent).toContain("Urgent"); // label sits beside the checkbox, same row
+
+    fireEvent.click(checkbox);
+    expect(onChange).toHaveBeenCalledWith({ buttons: [{ kind: "approve", urgent: true }] });
+  });
+
   it("appends a blank row on Add item", () => {
     const onChange = renderForm({ buttons: [{ kind: "approve" }] });
     fireEvent.click(screen.getByRole("button", { name: /add item/i }));

@@ -112,6 +112,30 @@ function Field({ name, required, schema, value, onChange, templateHint, variable
   const label = humanize(name);
   const description = schema.description;
 
+  // Boolean → an inline checkbox-BEFORE-label row, not the label-on-top stack the other types use
+  // (which leaves the checkbox dangling on its own line). A <label> wrapper is safe + desirable here:
+  // a checkbox IS labelable, there's no contenteditable/@-button inside to mis-forward to, and it lets
+  // the user click the text to toggle. Description sits under the label so a long hint can wrap.
+  if (schema.type === "boolean" && !schema.enum && !schema["x-selector"]) {
+    return (
+      <label className="wf-form-check wf-form-check-field">
+        <input
+          type="checkbox"
+          className="wf-form-checkbox"
+          checked={Boolean(value)}
+          onChange={(e) => onChange(e.target.checked)}
+        />
+        <span className="wf-form-check-text">
+          <span className="wf-form-check-label">
+            {label}
+            {required && <span className="wf-form-required">*</span>}
+          </span>
+          {description && <span className="wf-form-help">{description}</span>}
+        </span>
+      </label>
+    );
+  }
+
   // IMPORTANT — must be a <div>, NOT a <label>. Native <label> elements forward any
   // click anywhere inside them to the first labelable control they contain. Our row
   // contains a contenteditable <div> (the picker input) and a <button> (the @ toolbar).
