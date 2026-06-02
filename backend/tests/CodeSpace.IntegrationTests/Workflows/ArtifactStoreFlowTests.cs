@@ -192,7 +192,7 @@ public class ArtifactStoreFlowTests
             await store.PutAsync(teamId, oversize, "application/octet-stream", CancellationToken.None);
         });
 
-        // Error message must surface both the size + the env var to flip — Rule 11 + 8.
+        // Error message must surface both the size + the env-var override knob (Rule 8 escape hatch).
         ex.Message.ShouldContain("inline threshold");
         ex.Message.ShouldContain(ArtifactStoreConfig.InlineThresholdEnvVar);
     }

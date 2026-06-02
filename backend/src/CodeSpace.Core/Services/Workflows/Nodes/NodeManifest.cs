@@ -21,8 +21,8 @@ namespace CodeSpace.Core.Services.Workflows.Nodes;
 ///         type conformance is NOT.</item>
 ///   <item><b>Runtime (engine + <c>NodeRunContext</c>)</b> — the engine does NOT validate
 ///         resolved input/config values against these schemas. Nodes extract values
-///         defensively (<c>TryReadX</c>). A future release may add Rule-11 three-mode
-///         enforcement; today, no.</item>
+///         defensively (<c>TryReadX</c>). A future release may add runtime schema
+///         validation; today, no.</item>
 /// </list></para>
 /// </summary>
 public sealed record NodeManifest

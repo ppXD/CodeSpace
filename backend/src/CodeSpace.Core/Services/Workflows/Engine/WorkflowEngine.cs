@@ -325,11 +325,10 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
         var trigger = ParsePayloadObject(run.RunRequest?.NormalizedPayloadJson);
         var input = BuildInputScope(definition, trigger);
 
-        // Rule-11 enforcement: surface required inputs that the caller didn't supply AND
-        // that have no Default in the definition. Default mode (Warn) logs + continues so
-        // existing deploys aren't broken; Strict throws and lands the run in Failure;
-        // Off silently allows. Only runs on FRESH runs — replays use the snapshotted scope
-        // from first-run, so a mode flip between runs cannot retro-actively fail a replay.
+        // Fail-fast: surface required inputs the caller didn't supply AND that have no Default
+        // in the definition — the validator throws (lands the run in Failure) rather than
+        // letting them resolve to null. Only runs on FRESH runs — replays use the snapshotted
+        // scope from first-run, so this can't retro-actively fail a replay.
         EnsureRequiredInputsSatisfied(run, definition, input);
 
         var sys = BuildSysScope(run);
