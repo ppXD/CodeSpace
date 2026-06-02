@@ -748,6 +748,10 @@ function AddProviderStep({ onBack, onClose, onCreated }: AddProviderStepProps) {
   const [baseUrlTouched, setBaseUrlTouched] = useState(false);
   const [clientId, setClientId] = useState("");
   const [clientSecret, setClientSecret] = useState("");
+  // OAuth app (one-click sign-in for the whole team) vs token-only (each member pastes their own
+  // personal access token; no OAuth app to register). Token-only sends no client id/secret — the
+  // backend marks the instance oauthEnabled=false and Connect-remote → Personal offers "Use a token".
+  const [authMethod, setAuthMethod] = useState<"oauth" | "token">("oauth");
 
   // Live defaults from backend IProviderModule — scope list, base URL, callback URL.
   // Falls back to FALLBACK_DEFAULTS only if the request fails (network blip, etc.) so the
@@ -762,17 +766,22 @@ function AddProviderStep({ onBack, onClose, onCreated }: AddProviderStepProps) {
     if (!baseUrlTouched) setBaseUrl(FALLBACK_DEFAULTS[next].baseUrl);
   };
 
+  // OAuth mode needs both client fields; token-only needs neither. Base fields always required.
+  const oauthIncomplete = authMethod === "oauth" && (!clientId.trim() || !clientSecret);
+  const submitDisabled = !displayName.trim() || !baseUrl.trim() || oauthIncomplete || add.isPending;
+
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!displayName.trim() || !baseUrl.trim() || !clientId.trim() || !clientSecret || add.isPending) return;
+    if (submitDisabled) return;
 
+    const oauth = authMethod === "oauth";
     const request: AddProviderInstanceRequest = {
       provider,
       displayName: displayName.trim(),
       baseUrl: baseUrl.trim().replace(/\/$/, ""),
-      oauthClientId: clientId.trim(),
-      oauthClientSecret: clientSecret,
-      oauthDefaultScopes: effectiveScopes,
+      oauthClientId: oauth ? clientId.trim() : null,
+      oauthClientSecret: oauth ? clientSecret : null,
+      oauthDefaultScopes: oauth ? effectiveScopes : null,
     };
 
     try {
@@ -782,12 +791,6 @@ function AddProviderStep({ onBack, onClose, onCreated }: AddProviderStepProps) {
       // error surfaced via add.error below
     }
   };
-
-  // OAuth client ID + secret are mandatory at Add time. The earlier "leave both blank →
-  // PAT-only provider" path created confusing half-state rows visible in the modal but
-  // not connectable; we removed it intentionally. Legacy rows without OAuth still exist
-  // (recovered via the Configure OAuth / Edit flow), but new Add must be fully configured.
-  const submitDisabled = !displayName.trim() || !baseUrl.trim() || !clientId.trim() || !clientSecret || add.isPending;
   const errorMessage =
     add.error instanceof ApiError ? add.error.message
       : add.error instanceof Error ? add.error.message
@@ -844,38 +847,59 @@ function AddProviderStep({ onBack, onClose, onCreated }: AddProviderStepProps) {
 
         <div className="cn-divider" />
 
-        <label className="cn-field">
-          <span className="cn-field-l">OAuth client ID</span>
-          <input
-            className="cn-field-i"
-            value={clientId}
-            onChange={e => setClientId(e.target.value)}
-            spellCheck={false}
-            autoComplete="off"
-            disabled={add.isPending}
-            required
-          />
-        </label>
-
-        <label className="cn-field">
-          <span className="cn-field-l">OAuth client secret</span>
-          <input
-            type="password"
-            className="cn-field-i"
-            value={clientSecret}
-            onChange={e => setClientSecret(e.target.value)}
-            spellCheck={false}
-            autoComplete="new-password"
-            disabled={add.isPending}
-            required
-          />
-          <span className="cn-field-h">Redirect URL: <code>{effectiveCallbackUrl}</code></span>
-        </label>
-
-        <div className="cn-scopes-note">
-          <span className="cn-scopes-note-l">Will request scope{effectiveScopes.length === 1 ? "" : "s"}:</span>
-          {effectiveScopes.map(s => <code key={s} className="cn-scope-chip">{s}</code>)}
+        {/* Authentication method — OAuth app (one-click for everyone) vs token-only (each member
+            pastes their own personal access token; no OAuth app to register). */}
+        <div className="cn-field">
+          <span className="cn-field-l">Authentication</span>
+          <div className="cn-tabs cn-tabs-inline" role="tablist">
+            <button type="button" className="cn-tab" role="tab" aria-selected={authMethod === "oauth"} data-active={authMethod === "oauth"} onClick={() => setAuthMethod("oauth")} disabled={add.isPending}>
+              <Ic.Link size={13} /> OAuth app
+            </button>
+            <button type="button" className="cn-tab" role="tab" aria-selected={authMethod === "token"} data-active={authMethod === "token"} onClick={() => setAuthMethod("token")} disabled={add.isPending}>
+              <Ic.Key size={13} /> Personal token
+            </button>
+          </div>
+          <span className="cn-field-h">
+            {authMethod === "oauth"
+              ? "One-click sign-in for every member. Register an OAuth app on the provider and paste its credentials below."
+              : "No OAuth app needed — each member connects with their own personal access token from Connect remote → Personal."}
+          </span>
         </div>
+
+        {authMethod === "oauth" && (
+          <>
+            <label className="cn-field">
+              <span className="cn-field-l">OAuth client ID</span>
+              <input
+                className="cn-field-i"
+                value={clientId}
+                onChange={e => setClientId(e.target.value)}
+                spellCheck={false}
+                autoComplete="off"
+                disabled={add.isPending}
+              />
+            </label>
+
+            <label className="cn-field">
+              <span className="cn-field-l">OAuth client secret</span>
+              <input
+                type="password"
+                className="cn-field-i"
+                value={clientSecret}
+                onChange={e => setClientSecret(e.target.value)}
+                spellCheck={false}
+                autoComplete="new-password"
+                disabled={add.isPending}
+              />
+              <span className="cn-field-h">Redirect URL: <code>{effectiveCallbackUrl}</code></span>
+            </label>
+
+            <div className="cn-scopes-note">
+              <span className="cn-scopes-note-l">Will request scope{effectiveScopes.length === 1 ? "" : "s"}:</span>
+              {effectiveScopes.map(s => <code key={s} className="cn-scope-chip">{s}</code>)}
+            </div>
+          </>
+        )}
 
         {errorMessage && (
           <div className="cn-state cn-state-err">

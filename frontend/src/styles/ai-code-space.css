@@ -1416,6 +1416,10 @@
 .cn-tab { flex: 1; display: inline-flex; align-items: center; justify-content: center; gap: 6px; padding: 7px 12px; border: none; border-radius: 7px; background: transparent; font-family: inherit; font-size: 12.5px; font-weight: 550; color: var(--muted); cursor: pointer; transition: background .12s, color .12s, box-shadow .12s; }
 .cn-tab:hover { color: var(--ink-2); }
 .cn-tab[data-active="true"] { background: var(--panel); color: var(--ink); box-shadow: var(--shadow-1); }
+.cn-tab:disabled { opacity: .5; cursor: not-allowed; }
+/* Inline segmented control inside a form field (Add-provider auth method): the standalone tab
+   bar's bottom margin would double up with .cn-field's 6px gap, so zero it for the inline use. */
+.cn-tabs-inline { margin-bottom: 0; }
 
 /* Team tab — one group per provider: a header (mark + name, centered) with the provider's tokens
    + add/coming-soon indented underneath to line up under the name. */

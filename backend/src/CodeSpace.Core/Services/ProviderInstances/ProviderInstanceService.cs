@@ -79,7 +79,7 @@ public sealed class ProviderInstanceService : IProviderInstanceService, IScopedD
         var normalisedBaseUrl = NormaliseBaseUrl(baseUrl);
         var normalisedClientId = NormaliseClientId(oauthClientId);
 
-        EnsureOAuthCredentialsProvided(normalisedClientId, oauthClientSecret);
+        EnsureOAuthPairConsistent(normalisedClientId, oauthClientSecret);
         await EnsureNotDuplicateAsync(teamId, provider, normalisedBaseUrl, normalisedClientId, cancellationToken).ConfigureAwait(false);
 
         var instance = new ProviderInstance
@@ -174,14 +174,19 @@ public sealed class ProviderInstanceService : IProviderInstanceService, IScopedD
     }
 
     /// <summary>
-    /// A provider instance without OAuth credentials is a half-state row the UI can't act on
-    /// (no Connect possible). Enforced backend-side so non-UI callers can't sidestep the
-    /// frontend's required-field validation.
+    /// OAuth client ID + secret are all-or-nothing. Both present → a one-click-sign-in (OAuth)
+    /// provider; both blank → a token-only provider (members connect with a personal access token,
+    /// no OAuth app required). Exactly one is ambiguous (a client_id without a secret can't exchange
+    /// a code, and a secret without an id is meaningless), so we reject it. Enforced backend-side so
+    /// non-UI callers can't sidestep the frontend's validation either way.
     /// </summary>
-    private static void EnsureOAuthCredentialsProvided(string? clientId, string? clientSecret)
+    private static void EnsureOAuthPairConsistent(string? clientId, string? clientSecret)
     {
-        if (string.IsNullOrWhiteSpace(clientId) || string.IsNullOrWhiteSpace(clientSecret))
-            throw new InvalidOperationException("OAuth client ID and client secret are required when adding a provider. Register an OAuth application on the provider first, then come back with the credentials.");
+        var hasClientId = !string.IsNullOrWhiteSpace(clientId);
+        var hasClientSecret = !string.IsNullOrWhiteSpace(clientSecret);
+
+        if (hasClientId != hasClientSecret)
+            throw new InvalidOperationException("Provide BOTH an OAuth client ID and secret to enable one-click sign-in, or leave BOTH blank to register a token-only provider (members connect with a personal access token).");
     }
 
     private async Task EnsureUniquenessKeyAvailableAsync(ProviderInstance instance, string newBaseUrl, string? newClientId, CancellationToken cancellationToken)
