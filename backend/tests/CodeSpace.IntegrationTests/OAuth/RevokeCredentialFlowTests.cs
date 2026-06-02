@@ -164,6 +164,27 @@ public class RevokeCredentialFlowTests
     }
 
     [Fact]
+    public async Task Revoke_soft_deletes_a_user_provider_identity_backed_by_the_credential()
+    {
+        // The Personal tab's Disconnect (a credential revoke) must also unlink the Model B identity that
+        // wraps that credential — otherwise Connected Identities keeps showing a dead link, out of sync.
+        var (userId, teamId, credId) = await SeedOAuthCredentialAsync().ConfigureAwait(false);
+        var identityId = await SeedIdentityAsync(userId, credId).ConfigureAwait(false);
+        var stub = new StubOAuthClient(ProviderKind.GitLab, BuildToken("ignored"));
+
+        using (var scope = _fixture.BeginScopeAs(userId, teamId, Roles.Admin))
+        using (var revoke = scope.BeginLifetimeScope(b => b.RegisterInstance<IOAuthClientRegistry>(new SingleProviderRegistry(stub)).SingleInstance()))
+        {
+            await revoke.Resolve<IMediator>().Send(new RevokeCredentialCommand { CredentialId = credId }).ConfigureAwait(false);
+        }
+
+        using var verify = _fixture.BeginScope();
+        var db = verify.Resolve<CodeSpaceDbContext>();
+        var identity = await db.UserProviderIdentity.AsNoTracking().SingleAsync(i => i.Id == identityId).ConfigureAwait(false);
+        identity.DeletedDate.ShouldNotBeNull("revoking the backing credential must unlink the identity so Connected Identities stays in sync with the Personal tab");
+    }
+
+    [Fact]
     public async Task Revoke_with_no_dependent_repositories_returns_zero_count()
     {
         var (userId, teamId, credId) = await SeedOAuthCredentialAsync().ConfigureAwait(false);
@@ -264,6 +285,27 @@ public class RevokeCredentialFlowTests
         return ids;
     }
 
+
+    private async Task<Guid> SeedIdentityAsync(Guid userId, Guid credId)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+
+        var providerInstanceId = await db.Credential.AsNoTracking().Where(c => c.Id == credId).Select(c => c.ProviderInstanceId).SingleAsync().ConfigureAwait(false);
+        var identity = new UserProviderIdentity
+        {
+            Id = Guid.NewGuid(),
+            UserId = userId,
+            ProviderInstanceId = providerInstanceId,
+            CredentialId = credId,
+            ProviderUserId = "42",
+            ProviderUsername = "tester"
+        };
+
+        db.UserProviderIdentity.Add(identity);
+        await db.SaveChangesAsync().ConfigureAwait(false);
+        return identity.Id;
+    }
 
     private async Task<(Guid UserId, Guid TeamId, Guid CredId)> SeedOAuthCredentialAsync()
     {

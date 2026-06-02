@@ -180,6 +180,7 @@ public sealed class CredentialService : ICredentialService, IScopedDependency
         }
 
         var affectedRepoCount = await MarkDependentRepositoriesUnauthorisedAsync(credential.Id, cancellationToken).ConfigureAwait(false);
+        await SoftDeleteDependentIdentitiesAsync(credential.Id, cancellationToken).ConfigureAwait(false);
 
         return new RevokeCredentialResult
         {
@@ -314,5 +315,23 @@ public sealed class CredentialService : ICredentialService, IScopedDependency
         }
 
         return affected.Count;
+    }
+
+    /// <summary>
+    /// A <see cref="UserProviderIdentity"/> (Model B act-as-user link) is unusable without its backing
+    /// credential, so revoking the credential — e.g. Disconnect on the Personal tab — must soft-delete the
+    /// linked identity too. Otherwise the Connected Identities surface keeps showing a dead link, out of
+    /// sync with the Personal tab. This mirrors what <c>UserProviderIdentityService.UnlinkAsync</c> does
+    /// from the identity side; tracked + saved by the same unit of work as the revoke, and idempotent
+    /// (no live identity ⇒ no-op) so the always-run cascade is safe on an already-revoked credential.
+    /// </summary>
+    private async Task SoftDeleteDependentIdentitiesAsync(Guid credentialId, CancellationToken cancellationToken)
+    {
+        var identities = await _db.UserProviderIdentity
+            .Where(i => i.CredentialId == credentialId && i.DeletedDate == null)
+            .ToListAsync(cancellationToken).ConfigureAwait(false);
+
+        var now = DateTimeOffset.UtcNow;
+        foreach (var identity in identities) identity.DeletedDate = now;
     }
 }
