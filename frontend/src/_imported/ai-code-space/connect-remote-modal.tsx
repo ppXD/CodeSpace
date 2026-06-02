@@ -53,12 +53,24 @@ const FALLBACK_DEFAULTS: Record<"GitHub" | "GitLab", { baseUrl: string; defaultD
 
 // Capability → user-facing label mapping. Capability names come from the backend by C# type
 // name (`IRepositoryCatalogCapability`, etc.) — we localise them here so the UI reads
-// "Read repos · Webhooks" instead of leaking interface names.
+// "Read repos · PR reviews" instead of leaking interface names. capabilityLabel() humanises
+// anything not listed, so a newly-added backend capability never surfaces as a raw type name.
 const CAPABILITY_LABELS: Record<string, string> = {
   IRepositoryCatalogCapability: "Read repos",
   IWebhookRegistrationCapability: "Webhooks",
-  ICredentialProbeCapability: "Identity"
+  ICredentialProbeCapability: "Identity",
+  IPullRequestCatalogCapability: "Read PRs",
+  IPullRequestCommentCapability: "PR comments",
+  IPullRequestReviewCapability: "PR reviews",
 };
+
+// Friendly label for a capability key, with a humanising fallback for anything not in the map:
+// "IPullRequestCatalogCapability" → "Pull Request Catalog". Keeps warning chips readable even if
+// the backend grows a capability the frontend hasn't localised yet (no raw "ipullrequest…" leak).
+function capabilityLabel(key: string): string {
+  return CAPABILITY_LABELS[key]
+    ?? key.replace(/^I/, "").replace(/Capability$/, "").replace(/([a-z])([A-Z])/g, "$1 $2");
+}
 
 export function ConnectRemoteModal({ onClose }: ConnectRemoteModalProps) {
   const [step, setStep] = useState<Step>("list");
@@ -391,61 +403,85 @@ function ProviderRow({ instance, theme, myCreds, isConnecting, revokingId, error
   const hasOAuth = myCreds.some(c => c.authType === "OAuth");
   const hasPat = myCreds.some(c => c.authType === "Pat");
 
+  // Connect affordances for the methods NOT yet linked. OAuth needs a configured app; a personal
+  // token is always available; a provider with no OAuth app instead offers "Configure OAuth".
+  const canConnectOAuth = instance.oauthEnabled && !hasOAuth;
+  const canConnectPat = !hasPat;
+  const needsOAuthSetup = !instance.oauthEnabled;
+  const showConnect = canConnectOAuth || canConnectPat || needsOAuthSetup;
+
   return (
     <div className="cn-row">
-      <div className="cn-mark" data-p={instance.provider.toLowerCase()}>{theme.initials}</div>
-      <div className="cn-meta">
-        <div className="cn-name">
-          {instance.displayName}
-          <span className="cn-name-prov">{theme.label}</span>
-          {!instance.oauthEnabled && (
-            <span className="cn-status cn-status-warn" title="No OAuth app configured. You can still connect with a personal token, or Configure OAuth for one-click sign-in.">
-              <Ic.Triangle size={10} /> no OAuth app
-            </span>
-          )}
-          {connected && (
-            <span className="cn-status cn-status-active">
-              <span className="cn-status-dot" /> connected
-            </span>
-          )}
-        </div>
-        <div className="cn-sub">
-          <span title={instance.baseUrl}>{instance.baseUrl}</span>
-          <span className="cn-sub-purpose"> · {purposeFor(instance.provider, connected, instance.oauthEnabled)}</span>
-        </div>
-        {errorMsg && <div className="cn-row-err">{errorMsg}</div>}
-      </div>
-      <div className="cn-cta cn-cta-stack">
-        {/* One row per connected credential — labelled by method (OAuth / Token), each with its own Disconnect. */}
-        {myCreds.map(c => (
-          <div key={c.id} className="cn-cred">
-            <span className="cn-cred-method" title={`Connected ${formatRelative(c.createdDate)}`}>{c.authType === "OAuth" ? "OAuth" : "Token"}</span>
-            <CredentialCapabilityWarnings credentialId={c.id} />
-            <button className="btn btn-ghost" onClick={() => onDisconnect(c)} disabled={revokingId === c.id}>
-              {revokingId === c.id ? <><Ic.Clock size={13} /> …</> : "Disconnect"}
-            </button>
+      {/* Header — identity (avatar · name · kind · status) with the per-provider overflow menu pinned right. */}
+      <div className="cn-row-head">
+        <div className="cn-mark" data-p={instance.provider.toLowerCase()}>{theme.initials}</div>
+        <div className="cn-meta">
+          <div className="cn-name">
+            {instance.displayName}
+            <span className="cn-name-prov">{theme.label}</span>
+            {needsOAuthSetup && (
+              <span className="cn-status cn-status-warn" title="No OAuth app configured. You can still connect with a personal token, or Configure OAuth for one-click sign-in.">
+                <Ic.Triangle size={10} /> no OAuth app
+              </span>
+            )}
+            {connected && (
+              <span className="cn-status cn-status-active">
+                <span className="cn-status-dot" /> connected
+              </span>
+            )}
           </div>
-        ))}
-        {/* Connect by whichever methods aren't connected yet: OAuth (needs an app) and/or a personal token (always). */}
-        <div className="cn-connect">
-          {instance.oauthEnabled && !hasOAuth && (
-            <button className="btn btn-primary" onClick={() => onConnect(instance)} disabled={isConnecting}>
-              {isConnecting ? <><Ic.Clock size={13} /> Connecting…</> : <><Ic.Link size={13} /> Connect (OAuth)</>}
-            </button>
-          )}
-          {!hasPat && (
-            <button className="btn" onClick={() => onConnectPat(instance)}>
-              <Ic.Key size={13} /> Use a token
-            </button>
-          )}
-          {!instance.oauthEnabled && (
-            <button className="btn btn-ghost" onClick={() => onEdit(instance)} title="Set up an OAuth app for one-click sign-in">
-              Configure OAuth
-            </button>
-          )}
-          <ProviderRowMenu instance={instance} hasCredential={connected} onEdit={onEdit} />
+          <div className="cn-sub">
+            <span title={instance.baseUrl}>{instance.baseUrl}</span>
+          </div>
         </div>
+        <ProviderRowMenu instance={instance} hasCredential={connected} onEdit={onEdit} />
       </div>
+
+      {/* What you HAVE — one uniform row per linked credential, labelled by method, each independently revocable. */}
+      {connected && (
+        <div className="cn-creds">
+          {myCreds.map(c => (
+            <div key={c.id} className="cn-cred">
+              <div className="cn-cred-main">
+                <span className="cn-cred-method">
+                  {c.authType === "OAuth" ? <><Ic.Link size={12} /> OAuth</> : <><Ic.Key size={12} /> Token</>}
+                </span>
+                <span className="cn-cred-since">connected {formatRelative(c.createdDate)}</span>
+                <button className="btn btn-ghost cn-cred-x" onClick={() => onDisconnect(c)} disabled={revokingId === c.id}>
+                  {revokingId === c.id ? <><Ic.Clock size={13} /> …</> : "Disconnect"}
+                </button>
+              </div>
+              <CredentialCapabilityWarnings credentialId={c.id} />
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* What you can DO — connect by the methods not yet linked. The hint shows only when nothing is linked yet. */}
+      {showConnect && (
+        <div className="cn-connect">
+          {!connected && <span className="cn-connect-hint">{purposeFor(instance.provider, instance.oauthEnabled)}</span>}
+          <div className="cn-connect-btns">
+            {canConnectOAuth && (
+              <button className={connected ? "btn" : "btn btn-primary"} onClick={() => onConnect(instance)} disabled={isConnecting}>
+                {isConnecting ? <><Ic.Clock size={13} /> Connecting…</> : <><Ic.Link size={13} /> Connect with OAuth</>}
+              </button>
+            )}
+            {canConnectPat && (
+              <button className="btn" onClick={() => onConnectPat(instance)}>
+                <Ic.Key size={13} /> Use a token
+              </button>
+            )}
+            {needsOAuthSetup && (
+              <button className="btn btn-ghost" onClick={() => onEdit(instance)} title="Set up an OAuth app for one-click sign-in">
+                Configure OAuth
+              </button>
+            )}
+          </div>
+        </div>
+      )}
+
+      {errorMsg && <div className="cn-row-err">{errorMsg}</div>}
     </div>
   );
 }
@@ -662,13 +698,14 @@ function ManageOrgAccessOnGitHubItem({ instanceId, onAfter }: { instanceId: stri
 }
 
 /**
- * Shows ONLY capabilities that are missing scopes. The common case (everything works) is
- * indicated by the "connected" status alone — green dot + that's it. Showing "✓ Read repos"
- * for every capability in the happy path was just noise that bloated row height; warnings
- * matter, ✓✓✓ doesn't.
+ * Shows ONLY the features this credential's token CAN'T do — the ones whose required OAuth
+ * scopes are missing. The happy path (everything works) shows nothing; the green "connected"
+ * status already says it, and "✓✓✓" per capability was just noise.
  *
- * Inline in the title line as small amber chips so they sit next to "connected" and the
- * row doesn't grow a third line just for them. Tooltip names the missing scope(s).
+ * Rendered as its own wrapping line beneath the credential, so any number of warnings flow onto
+ * new lines instead of overflowing the row and shoving Disconnect off-screen. The leading
+ * "Missing access" label names what the chips are; each chip's tooltip names the exact scope(s)
+ * the token needs to gain that feature.
  */
 function CredentialCapabilityWarnings({ credentialId }: { credentialId: string }) {
   const caps = useCredentialCapabilities(credentialId);
@@ -678,20 +715,18 @@ function CredentialCapabilityWarnings({ credentialId }: { credentialId: string }
   if (missing.length === 0) return null;
 
   return (
-    <>
-      {missing.map(cap => {
-        const label = CAPABILITY_LABELS[cap.capability] ?? cap.capability;
-        return (
-          <span
-            key={cap.capability}
-            className="cn-status cn-status-warn"
-            title={`${label} unavailable — missing scope(s): ${cap.missingScopes.join(", ")}`}
-          >
-            <Ic.Triangle size={10} /> {label}
-          </span>
-        );
-      })}
-    </>
+    <div className="cn-cap-warns">
+      <span className="cn-cap-warns-l"><Ic.Triangle size={11} /> Missing access</span>
+      {missing.map(cap => (
+        <span
+          key={cap.capability}
+          className="cn-cap-chip"
+          title={`Needs OAuth scope(s): ${cap.missingScopes.join(", ")}`}
+        >
+          {capabilityLabel(cap.capability)}
+        </span>
+      ))}
+    </div>
   );
 }
 
@@ -1165,16 +1200,13 @@ function formatRelative(iso: string) {
 }
 
 /**
- * One-line "what this row does for me right now" hint shown next to the URL. Three states
- * surface different verbs so the operator can scan the list and immediately spot the row
- * that needs attention vs. the ones that are already useful.
- *
- * The intent is "一目了然" — a glance is enough. No clicking, no reading the full status
- * chip, no parsing capability tags.
+ * One-line hint shown in the connect footer when the caller has NOT linked this provider yet —
+ * it says what connecting will do. Two states: a provider with no OAuth app prompts setup, an
+ * OAuth-ready one invites sign-in. Connected providers show their credential rows instead, so
+ * there's no connected-state copy here.
  */
-function purposeFor(provider: ProviderKind, isMineConnected: boolean, oauthEnabled: boolean): string {
+function purposeFor(provider: ProviderKind, oauthEnabled: boolean): string {
   if (!oauthEnabled) return "Set up OAuth so the team can connect their accounts.";
-  if (isMineConnected) return `Wires your ${provider} repos · webhooks · PR comments into CodeSpace.`;
   return `Sign in with your ${provider} account to bring your repos in.`;
 }
 

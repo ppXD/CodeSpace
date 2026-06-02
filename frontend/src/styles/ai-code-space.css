@@ -1355,12 +1355,13 @@
 .cn-listhead-l { font-size: 10.5px; font-weight: 600; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
 .cn-listhead-c { font-family: inherit; font-size: 11px; color: var(--muted-2); }
 .cn-list { display: flex; flex-direction: column; border: 1px solid var(--line); border-radius: 10px; overflow: hidden; background: var(--panel); }
-/* Provider row: every row is the same compact height regardless of whether the user is
-   connected, has missing capabilities, etc. The two-line layout (name+status / URL) is
-   the visual contract; warnings ride inline on the name line as small amber chips, never
-   pushing a third line. min-height pins it so a row with zero chips and a row with one
-   warning chip look identical in vertical rhythm. */
-.cn-row { display: flex; align-items: center; gap: 12px; padding: 10px 14px; min-height: 56px; border-bottom: 1px solid var(--line); transition: background .12s; }
+/* Provider row — a vertical card with up to three stacked zones: a header (avatar +
+   name/kind/status + overflow menu), the linked-credentials list, and the connect-action
+   footer. Height grows with content (0, 1, or 2 credentials) rather than a fixed min-height,
+   so a connected provider and a not-connected one each show exactly what they need. */
+.cn-row { display: flex; flex-direction: column; gap: 10px; padding: 12px 14px; border-bottom: 1px solid var(--line); transition: background .12s; }
+/* Header line: avatar + identity (flex:1, name/host shrink-truncate) + the overflow menu pinned right. */
+.cn-row-head { display: flex; align-items: center; gap: 12px; }
 .cn-row:last-child { border-bottom: 0; }
 .cn-row:hover { background: rgba(0,0,0,.02); }
 .cn-row[data-just-added="true"] { animation: cnFlash 1.2s ease; }
@@ -1383,17 +1384,29 @@
 .cn-sub > span { white-space: nowrap; }
 .cn-sub > span:first-child { overflow: hidden; text-overflow: ellipsis; min-width: 0; }
 .cn-sub-dot { width: 3px; height: 3px; border-radius: 50%; background: var(--muted-2); flex-shrink: 0; }
-/* Purpose hint — the "what this row does for me" line. Slightly different colour from
- * the URL so the eye can split them, and the chunk truncates with ellipsis on narrow
- * widths so the row never wraps to two lines mid-text. */
-.cn-sub-purpose { color: var(--ink-2); overflow: hidden; text-overflow: ellipsis; min-width: 0; }
-.cn-cta { display: flex; align-items: center; gap: 4px; flex-shrink: 0; }
-.cn-cta button { font-size: 12px; }
-/* Personal tab: a credential can be connected via OAuth and/or PAT — stack each method's row + the connect actions. */
-.cn-cta-stack { flex-direction: column; align-items: flex-end; gap: 5px; }
-.cn-cred { display: flex; align-items: center; gap: 6px; }
-.cn-cred-method { font-size: 10px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; color: var(--muted); border: 1px solid var(--line); border-radius: 5px; padding: 1px 6px; }
-.cn-connect { display: flex; align-items: center; gap: 4px; }
+/* Linked credentials — one uniform chip-row per credential the caller holds for this provider
+   (OAuth and/or a personal token). Indented 46px (34px avatar + 12px gap) so the list lines up
+   under the provider name, matching the Team tab's .cn-tg-items. */
+.cn-creds { display: flex; flex-direction: column; gap: 6px; margin-left: 46px; }
+.cn-cred { display: flex; flex-direction: column; gap: 7px; padding: 8px 10px; background: var(--panel-2); border: 1px solid var(--line); border-radius: 8px; }
+/* Top line: method · since · Disconnect (pinned right). Capability warnings, if any, drop to
+   their own wrapping line below (.cn-cap-warns) so they never crowd or overflow this line. */
+.cn-cred-main { display: flex; align-items: center; gap: 10px; }
+.cn-cred-method { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; font-weight: 600; color: var(--ink-2); white-space: nowrap; }
+.cn-cred-method svg { color: var(--muted); }
+.cn-cred-since { font-size: 11.5px; color: var(--muted); white-space: nowrap; }
+.cn-cred-x { margin-left: auto; flex-shrink: 0; height: 28px; padding: 0 10px; font-size: 12px; }
+/* Capability warnings — a wrapping line listing what this token CAN'T do. A leading amber label
+   ("Missing access") explains the chips; the row wraps freely so two or six warnings both fit
+   without overflowing the credential card. */
+.cn-cap-warns { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
+.cn-cap-warns-l { display: inline-flex; align-items: center; gap: 4px; font-size: 11px; font-weight: 600; color: #B07A2E; }
+.cn-cap-chip { font-size: 11px; color: #B07A2E; background: #FBF1E2; border: 1px solid #ECDAB5; border-radius: 5px; padding: 1px 7px; white-space: nowrap; }
+/* Connect footer — methods not yet linked. Same 46px indent as the credentials list. */
+.cn-connect { display: flex; flex-direction: column; gap: 8px; margin-left: 46px; }
+.cn-connect-hint { font-size: 12px; color: var(--muted); line-height: 1.45; }
+.cn-connect-btns { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+.cn-connect-btns .btn { font-size: 12.5px; }
 .cn-empty { padding: 36px 24px; text-align: center; }
 .cn-empty-h { font-size: 14px; font-weight: 600; color: var(--ink); margin-bottom: 4px; letter-spacing: -0.005em; }
 .cn-empty-p { font-size: 12.5px; color: var(--muted); margin-bottom: 14px; line-height: 1.5; }
