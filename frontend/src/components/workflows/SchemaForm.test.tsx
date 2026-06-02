@@ -8,6 +8,14 @@ vi.mock("@/hooks/use-chat", () => ({
   useConversations: () => ({ isLoading: false, data: [{ id: "c1", kind: "Channel", slug: "general", name: "General" }] }),
 }));
 
+// UserMultiSelector reads useTeamMembers.
+vi.mock("@/hooks/use-team-members", () => ({
+  useTeamMembers: () => ({ isLoading: false, data: [
+    { userId: "u1", name: "Alice", email: "a@x", avatarUrl: null, isBot: false },
+    { userId: "u2", name: "Bob", email: "b@x", avatarUrl: null, isBot: false },
+  ] }),
+}));
+
 /**
  * Generic object-array editing. A property of `array` of `object` renders a repeatable list of
  * sub-forms (one per item), driven purely by `items.properties` — no per-node knowledge. The item
@@ -114,5 +122,26 @@ describe("SchemaForm scalar selector dual-mode", () => {
     renderConv({ conversationId: "" }, false);
     expect(screen.queryByRole("button", { name: "Pick" })).toBeNull();
     expect(screen.getByRole("combobox")).toBeInTheDocument();
+  });
+});
+
+/**
+ * An array field with `"x-selector": "user"` (e.g. allowedResponderUserIds) renders the team's members
+ * as toggle chips instead of raw-GUID text entry. The stored value is an array of user ids.
+ */
+describe("SchemaForm user multi-selector", () => {
+  const userSchema = { type: "object", properties: { allowed: { type: "array", items: { type: "string", format: "uuid" }, "x-selector": "user" } } };
+
+  it("renders a chip per member reflecting the current allowlist", () => {
+    render(<SchemaForm schema={userSchema} value={{ allowed: ["u1"] }} onChange={vi.fn()} />);
+    expect(screen.getByRole("button", { name: "Alice" })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByRole("button", { name: "Bob" })).toHaveAttribute("aria-pressed", "false");
+  });
+
+  it("adds a member to the allowlist on click (array of ids, no raw GUID typing)", () => {
+    const onChange = vi.fn();
+    render(<SchemaForm schema={userSchema} value={{ allowed: ["u1"] }} onChange={onChange} />);
+    fireEvent.click(screen.getByRole("button", { name: "Bob" }));
+    expect(onChange).toHaveBeenCalledWith({ allowed: ["u1", "u2"] });
   });
 });

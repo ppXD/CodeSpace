@@ -2320,6 +2320,12 @@ textarea:-webkit-autofill {
 .acs-root .wf-form-check-field { align-items: flex-start; }
 .acs-root .wf-form-check-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 .acs-root .wf-form-check-label { font-size: 11.5px; font-weight: 500; color: var(--ink-2); }
+/* user multi-picker: toggle chips (x-selector:"user" on an array field). */
+.acs-root .wf-userpick { display: flex; flex-direction: column; gap: 6px; }
+.acs-root .wf-userpick-chips { display: flex; flex-wrap: wrap; gap: 5px; }
+.acs-root .wf-userpick-chip { padding: 3px 9px; font-size: 11.5px; border: 1px solid var(--line); border-radius: 999px; background: var(--bg); color: var(--ink-2); cursor: pointer; transition: background .12s, border-color .12s, color .12s; }
+.acs-root .wf-userpick-chip:hover { border-color: var(--accent); }
+.acs-root .wf-userpick-chip.is-on { background: var(--accent-soft); border-color: var(--accent); color: var(--ink); }
 .acs-root .wf-form-help-err { font-size: 10.5px; color: #9E3535; line-height: 1.4; }
 .acs-root .wf-form-help-inline { color: var(--muted); font-weight: 400; }
 
@@ -2387,6 +2393,11 @@ textarea:-webkit-autofill {
 .mdl .wf-form-check-field { align-items: flex-start; }
 .mdl .wf-form-check-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 .mdl .wf-form-check-label { font-size: 11.5px; font-weight: 500; color: var(--ink-2); }
+.mdl .wf-userpick { display: flex; flex-direction: column; gap: 6px; }
+.mdl .wf-userpick-chips { display: flex; flex-wrap: wrap; gap: 5px; }
+.mdl .wf-userpick-chip { padding: 3px 9px; font-size: 11.5px; border: 1px solid var(--line); border-radius: 999px; background: var(--bg); color: var(--ink-2); cursor: pointer; }
+.mdl .wf-userpick-chip:hover { border-color: var(--accent); }
+.mdl .wf-userpick-chip.is-on { background: var(--accent-soft); border-color: var(--accent); color: var(--ink); }
 
 /* Generic Claude-style checkbox. Plain browser checkboxes render as a heavy black box in the
    warm palette (worst on dark mode), so theme every checkbox in the app + modals: --line border
