@@ -64,8 +64,7 @@ public sealed class ChatPostMessageNode : INodeRuntime
                   },
                   "required": ["fields"]
                 },
-                "allowedResponderUserIds": { "type": "array", "items": { "type": "string", "format": "uuid" }, "description": "Restrict who may respond (user ids). Empty = any member of the conversation may respond." },
-                "requireResponderIdentityForRepositoryId": { "type": "string", "format": "uuid", "x-selector": "repository", "description": "When set, the responder must have a linked identity on THIS repository's provider before they can respond — because the resumed run will act AS them on it (e.g. a downstream git.pr_review). Surfaces a 428 link prompt on the click instead of failing the run in the background. Wire it to the same repo the act-as-user node uses (e.g. {{input.repo}})." }
+                "allowedResponderUserIds": { "type": "array", "items": { "type": "string", "format": "uuid" }, "description": "Restrict who may respond (user ids). Empty = any member of the conversation may respond." }
               },
               "required": ["conversationId","body"]
             }
@@ -128,18 +127,10 @@ public sealed class ChatPostMessageNode : INodeRuntime
         return new MessageInteraction
         {
             Component = component,
-            Target = new WorkflowWaitTarget
-            {
-                Token = token,
-                RequiresResponderIdentityForRepositoryId = ReadOptionalGuid(context, "requireResponderIdentityForRepositoryId"),
-            },
+            Target = new WorkflowWaitTarget { Token = token },
             AllowedResponderUserIds = ReadGuidList(context, "allowedResponderUserIds"),
         };
     }
-
-    /// <summary>Read an optional uuid input → Guid?, ignoring absent / null / unparseable values.</summary>
-    private static Guid? ReadOptionalGuid(NodeRunContext context, string key) =>
-        TryGetPresentInput(context, key, out var v) && v.ValueKind == JsonValueKind.String && Guid.TryParse(v.GetString(), out var g) ? g : null;
 
     private static FormComponent? BuildFormComponent(NodeRunContext context)
     {

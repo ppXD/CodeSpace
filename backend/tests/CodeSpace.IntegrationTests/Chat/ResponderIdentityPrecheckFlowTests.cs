@@ -20,15 +20,14 @@ using Shouldly;
 namespace CodeSpace.IntegrationTests.Chat;
 
 /// <summary>
-/// The chat-driven act-as-user path's identity gate, end-to-end on real Postgres: a workflow posts a
-/// review card that declares "responding acts AS you on this repo" (chat.post_message's
-/// requireResponderIdentityForRepositoryId → WorkflowWaitTarget) and parks (flow.wait_action). When the
-/// responder clicks, MessageInteractionService pre-checks their linked identity BEFORE resolving the wait:
-///   • unlinked → ActorIdentityRequiredException (→ 428 on the synchronous respond request, so the client
-///     prompts a link), and the wait stays OPEN — the run does NOT fail in the background;
-///   • linked → the wait resolves and the run resumes.
-/// This is the workflow-path complement to the synchronous PR-detail flow (which the GlobalExceptionFilter
-/// 428 mapping is pinned for in GlobalExceptionFilterTests).
+/// The GENERIC chat-driven act-as-user identity gate, end-to-end on real Postgres. A workflow posts a
+/// review card (chat.post_message), parks (flow.wait_action), and a downstream git.pr_review acts AS the
+/// responder (actAsUserId wired to the wait's `by`). When the responder clicks, the resume path derives
+/// — from git.pr_review's declared ActsAsUser trait, with nothing hardcoded — that resolving the wait will
+/// act as them on the repo's provider, and enforces their linked identity FIRST:
+///   • unlinked → ActorIdentityRequiredException (→ 428 on the synchronous respond), and the wait stays
+///     OPEN — the run does NOT fail in the background;
+///   • linked → the wait resolves, the run resumes, and git.pr_review submits as them.
 /// </summary>
 [Collection(PostgresCollection.Name)]
 [Trait("Category", "Integration")]
@@ -48,22 +47,22 @@ public class ResponderIdentityPrecheckFlowTests
         var workflowId = await CreateWorkflowAsync(teamId, ownerId, ReviewDefinition(channelId, ownerId, repoId));
         var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
 
-        await RunEngineAsync(runId);   // posts the card (declaring the repo requirement) + parks on flow.wait_action
+        await RunEngineAsync(runId);   // posts the card + parks on flow.wait_action (git.pr_review still downstream)
         var messageId = await ReadPostedMessageIdAsync(runId);
 
         var ex = await Should.ThrowAsync<ActorIdentityRequiredException>(() => RespondAsync(teamId, messageId, ownerId));
         ex.ProviderKind.ShouldBe(ProviderKind.Git);
         ex.ProviderInstanceId.ShouldBe(providerInstanceId,
-            customMessage: "the 428 must name the provider instance the responder has to link, so the client opens the modal for the right one");
+            customMessage: "the gate derives the requirement from the downstream git.pr_review's repo → provider instance");
 
         using var verify = _fixture.BeginScope();
         var db = verify.Resolve<CodeSpaceDbContext>();
         (await db.WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == runId)).Status
-            .ShouldBe(WorkflowRunStatus.Suspended, "the wait must NOT resolve — the run stays parked so a retry-after-link can succeed, instead of failing in the background");
+            .ShouldBe(WorkflowRunStatus.Suspended, "the wait must NOT resolve — the run stays parked so a retry-after-link can succeed");
     }
 
     [Fact]
-    public async Task Linked_responder_resolves_the_wait_and_the_run_resumes()
+    public async Task Linked_responder_resolves_the_wait_and_the_run_submits_the_review_as_them()
     {
         var (teamId, ownerId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
         var channelId = await SeedChannelAsync(teamId, ownerId);
@@ -75,13 +74,13 @@ public class ResponderIdentityPrecheckFlowTests
         await RunEngineAsync(runId);
         var messageId = await ReadPostedMessageIdAsync(runId);
 
-        await RespondAsync(teamId, messageId, ownerId);   // identity present → pre-check passes → wait resolves
-        await RunEngineAsync(runId);                       // the run resumes from the wait
+        await RespondAsync(teamId, messageId, ownerId);   // identity present → gate passes → wait resolves
+        await RunEngineAsync(runId);                       // resumes through git.pr_review → end
 
         using var verify = _fixture.BeginScope();
         var db = verify.Resolve<CodeSpaceDbContext>();
         (await db.WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == runId)).Status
-            .ShouldBe(WorkflowRunStatus.Success, "with a linked identity the responder's click resolves the wait and the run completes");
+            .ShouldBe(WorkflowRunStatus.Success, "with a linked identity the click resolves the wait and git.pr_review submits as the responder");
     }
 
     // ─── Helpers ────────────────────────────────────────────────────────────────
@@ -89,7 +88,7 @@ public class ResponderIdentityPrecheckFlowTests
     private async Task RespondAsync(Guid teamId, Guid messageId, Guid actorUserId)
     {
         using var scope = _fixture.BeginScope();
-        await scope.Resolve<IMessageInteractionService>().RespondAsync(teamId, messageId, "comment", actorUserId, "looks good", null, default);
+        await scope.Resolve<IMessageInteractionService>().RespondAsync(teamId, messageId, "approve", actorUserId, null, null, default);
     }
 
     private async Task<Guid> ReadPostedMessageIdAsync(Guid runId)
@@ -179,8 +178,9 @@ public class ResponderIdentityPrecheckFlowTests
         await scope.Resolve<IWorkflowEngine>().ExecuteRunAsync(runId, CancellationToken.None);
     }
 
-    // manual → post (declares the repo requirement) → wait → end. The card acts as the responder on `repoId`,
-    // so the respond pre-check requires their linked identity before the wait can resolve.
+    // manual → post → wait → git.pr_review (acts AS the responder) → end. git.pr_review's actAsUserId is
+    // wired to the wait's `by`, so the engine derives — from its ActsAsUser trait — that resolving the wait
+    // requires the responder's linked identity on this repo's provider.
     private static WorkflowDefinition ReviewDefinition(Guid channelId, Guid reviewerId, Guid repoId) => new()
     {
         SchemaVersion = 1,
@@ -195,20 +195,33 @@ public class ResponderIdentityPrecheckFlowTests
                 Inputs = WorkflowsTestSeed.Json(JsonSerializer.Serialize(new
                 {
                     conversationId = channelId.ToString(),
-                    body = "Review PR #80?",
-                    actions = new[] { new { key = "comment", label = "Comment" } },
+                    body = "Review PR #5?",
+                    actions = new[] { new { key = "approve", label = "Approve" } },
                     allowedResponderUserIds = new[] { reviewerId.ToString() },
-                    requireResponderIdentityForRepositoryId = repoId.ToString(),
                 })),
             },
             new() { Id = "wait", TypeKey = "flow.wait_action", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.Json("""{ "token": "{{nodes.post.outputs.token}}" }""") },
+            new()
+            {
+                Id = "review",
+                TypeKey = "git.pr_review",
+                Config = WorkflowsTestSeed.EmptyJson(),
+                Inputs = WorkflowsTestSeed.Json(JsonSerializer.Serialize(new
+                {
+                    repositoryId = repoId.ToString(),
+                    number = 5,
+                    verdict = "{{nodes.wait.outputs.action}}",
+                    actAsUserId = "{{nodes.wait.outputs.by}}",
+                })),
+            },
             new() { Id = "end", TypeKey = "builtin.terminal", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
         },
         Edges = new List<EdgeDefinition>
         {
             new() { From = "start", To = "post" },
             new() { From = "post", To = "wait" },
-            new() { From = "wait", To = "end" },
+            new() { From = "wait", To = "review" },
+            new() { From = "review", To = "end" },
         },
     };
 }
