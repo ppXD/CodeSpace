@@ -3365,6 +3365,10 @@ textarea:-webkit-autofill {
 .acs-root .chat-card-comment-input:focus { border-color: var(--accent); }
 .acs-root .chat-card-comment-actions { display: flex; gap: 8px; justify-content: flex-end; }
 .acs-root .chat-card-hint { display: block; margin-top: 6px; font-size: 12px; color: var(--muted-2); }
+/* Inline refusal shown when a click is rejected at respond time (e.g. 403 actor_repo_permission_denied):
+   the card stays Open, this names WHY so the responder can act on it (get repo access) without a modal. */
+.acs-root .chat-card-error { display: flex; align-items: flex-start; gap: 6px; margin-top: 8px; max-width: 440px; padding: 7px 10px; font-size: 12.5px; line-height: 1.45; color: #C24545; background: #FCEDED; border: 1px solid #F2C5C5; border-radius: var(--radius-sm); }
+.acs-root .chat-card-error svg { flex-shrink: 0; margin-top: 2px; }
 /* Form card: the schema-driven fields + a right-aligned submit. */
 .acs-root .chat-card-form { display: flex; flex-direction: column; gap: 10px; max-width: 460px; }
 .acs-root .chat-card-form-actions { display: flex; justify-content: flex-end; }

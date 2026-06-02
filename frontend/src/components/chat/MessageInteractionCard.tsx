@@ -4,6 +4,7 @@ import { Ic } from "@/_imported/ai-code-space/icons";
 import type { FormComponent, InteractionButton, InteractionButtonStyle, MessageInteractionView } from "@/api/chat";
 import type { TeamMemberSummary } from "@/api/teams";
 import { useActorIdentityGate } from "@/components/identities/ActorIdentityGate";
+import { parseActorRepoPermissionDenied } from "@/lib/actorIdentity";
 import { useRespondToMessage } from "@/hooks/use-chat";
 import { SchemaForm } from "@/components/workflows/SchemaForm";
 
@@ -34,12 +35,24 @@ export function MessageInteractionCard({ interaction, members, conversationId, m
   const gate = useActorIdentityGate();
   const [commenting, setCommenting] = useState<InteractionButton | null>(null);
   const [comment, setComment] = useState("");
+  const [permissionError, setPermissionError] = useState<string | null>(null);
 
-  // Respond, routing a 428 actor_identity_required to the global gate: the run will act AS the
-  // responder (e.g. a downstream git.pr_review), so if they haven't linked an identity the backend
-  // refuses BEFORE resolving the wait. The gate opens the link modal and, on success, retries this
-  // exact response — so the click succeeds after linking instead of the run failing in the background.
-  const submit = (vars: RespondVars) => respond.mutate(vars, { onError: e => { gate.prompt(e, () => submit(vars)); } });
+  // Respond, branching on the backend's two pre-flight refusals (both thrown BEFORE the wait resolves,
+  // so the card stays open and nothing fails in the background):
+  //   • 428 actor_identity_required → the responder hasn't LINKED an identity → the gate opens the link
+  //     modal and, on success, retries this exact response.
+  //   • 403 actor_repo_permission_denied → they're linked but lack repo access → nothing to link, so show
+  //     the reason inline on the card.
+  const submit = (vars: RespondVars) => {
+    setPermissionError(null);
+    respond.mutate(vars, {
+      onError: e => {
+        const denied = parseActorRepoPermissionDenied(e);
+        if (denied) { setPermissionError(denied.message); return; }
+        gate.prompt(e, () => submit(vars));
+      },
+    });
+  };
 
   if (interaction.state !== "Open") {
     return (
@@ -93,6 +106,8 @@ export function MessageInteractionCard({ interaction, members, conversationId, m
           ))}
         </div>
       )}
+
+      {permissionError && <div className="chat-card-error" role="alert"><Ic.Triangle size={12} /> {permissionError}</div>}
 
       {!canRespond && <span className="chat-card-hint">Only the requested reviewer can respond.</span>}
     </div>

@@ -34,3 +34,31 @@ export function parseActorIdentityRequired(error: unknown): ActorIdentityRequire
     message: body.message ?? error.message,
   };
 }
+
+/**
+ * Parsed payload of the backend's 403 `actor_repo_permission_denied` response — the responder's
+ * identity IS linked, but they can't act on the target repo (not a member / role too low / no access).
+ * Unlike the 428 there's nothing to LINK; the fix is to get access, so the call site shows the reason
+ * inline on the card (which stays open) instead of opening a modal.
+ */
+export interface ActorRepoPermissionDenied {
+  /** Provider kind name (e.g. "GitLab") for context. */
+  provider: string;
+  /** The repo full path (e.g. "acme/web"). */
+  repository: string;
+  /** The backend's actionable reason — shown to the responder verbatim. */
+  message: string;
+}
+
+/** Returns the repo-permission-denied details when `error` is the backend's 403 signal, else null. */
+export function parseActorRepoPermissionDenied(error: unknown): ActorRepoPermissionDenied | null {
+  if (!(error instanceof ApiError) || error.code !== "actor_repo_permission_denied") return null;
+
+  const body = error.body as { provider?: string; repository?: string; message?: string } | undefined;
+
+  return {
+    provider: body?.provider ?? "the provider",
+    repository: body?.repository ?? "this repository",
+    message: body?.message ?? error.message,
+  };
+}

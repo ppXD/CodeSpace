@@ -79,6 +79,23 @@ describe("MessageInteractionCard", () => {
     expect(prompt).toHaveBeenCalledWith(err, expect.any(Function));
   });
 
+  it("shows a 403 actor_repo_permission_denied inline and does NOT route to the identity gate (card stays open)", () => {
+    const err = new ApiError(403, "actor_repo_permission_denied", "denied", {
+      provider: "GitLab",
+      repository: "acme/api",
+      message: "Your GitLab role on this project is Reporter — reviewing needs Developer or higher.",
+    });
+    mutate.mockImplementation((_vars, opts) => opts?.onError?.(err));
+    renderCard(card("Open"));
+
+    fireEvent.click(screen.getByRole("button", { name: "Approve" }));
+
+    // The reason shows inline (nothing to LINK → no modal), and the card stays Open for a retry.
+    expect(screen.getByRole("alert")).toHaveTextContent("Reporter");
+    expect(prompt).not.toHaveBeenCalled();
+    expect(screen.getByRole("button", { name: "Approve" })).toBeInTheDocument();
+  });
+
   it("collects a comment before submitting a requires-comment button", () => {
     renderCard(card("Open"));
 
