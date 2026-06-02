@@ -20,14 +20,4 @@ public abstract record InteractionTarget;
 public sealed record WorkflowWaitTarget : InteractionTarget
 {
     public required string Token { get; init; }
-
-    /// <summary>
-    /// When set, resolving this wait will make the resumed run act AS the responder on this repository's
-    /// provider (e.g. a downstream <c>git.pr_review</c> wired to the responder as <c>actAsUserId</c>). The
-    /// respond endpoint enforces — BEFORE resolving the wait — that the responder has a linked identity
-    /// there, returning 428 <c>actor_identity_required</c> so the client prompts a link + retries, instead
-    /// of the run failing later in the background. Null ⇒ no responder-identity requirement. Server-side
-    /// only (carried on the never-surfaced <see cref="MessageInteraction.Target"/>).
-    /// </summary>
-    public Guid? RequiresResponderIdentityForRepositoryId { get; init; }
 }

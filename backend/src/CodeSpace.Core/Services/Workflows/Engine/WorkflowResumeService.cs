@@ -58,12 +58,14 @@ public sealed class WorkflowResumeService : IWorkflowResumeService, IScopedDepen
 {
     private readonly CodeSpaceDbContext _db;
     private readonly IWorkflowRunDispatcher _dispatcher;
+    private readonly IActorIdentityRequirementGate _identityGate;
     private readonly ILogger<WorkflowResumeService> _logger;
 
-    public WorkflowResumeService(CodeSpaceDbContext db, IWorkflowRunDispatcher dispatcher, ILogger<WorkflowResumeService> logger)
+    public WorkflowResumeService(CodeSpaceDbContext db, IWorkflowRunDispatcher dispatcher, IActorIdentityRequirementGate identityGate, ILogger<WorkflowResumeService> logger)
     {
         _db = db;
         _dispatcher = dispatcher;
+        _identityGate = identityGate;
         _logger = logger;
     }
 
@@ -137,7 +139,7 @@ public sealed class WorkflowResumeService : IWorkflowResumeService, IScopedDepen
         var wait = await _db.WorkflowRunWait.AsNoTracking()
             .Where(w => w.Token == token && w.Status == WorkflowWaitStatuses.Pending && w.WaitKind == WorkflowWaitKinds.Action)
             .Where(w => _db.WorkflowRun.Any(r => r.Id == w.RunId && r.TeamId == teamId))
-            .Select(w => new { w.Id, w.RunId })
+            .Select(w => new { w.Id, w.RunId, w.NodeId })
             .FirstOrDefaultAsync(cancellationToken)
             .ConfigureAwait(false);
 
@@ -146,6 +148,12 @@ public sealed class WorkflowResumeService : IWorkflowResumeService, IScopedDepen
             _logger.LogDebug("Action resume: no pending action wait matches the token in team {TeamId}", teamId);
             return false;
         }
+
+        // Generic act-as-user gate: if resolving this wait makes a downstream node act AS the responder on a
+        // provider they haven't linked, refuse HERE — throws ActorIdentityRequiredException → 428, so the
+        // client prompts a link + retries, rather than the run failing later in the background. Runs before
+        // the wait is resolved, so the run stays parked for the retry.
+        await _identityGate.EnsureResponderCanActAsUserAsync(wait.RunId, wait.NodeId, actorUserId, cancellationToken).ConfigureAwait(false);
 
         // Structured decision payload — surfaced as the suspended node's outputs. `values` (a form
         // submission) is added only when present, so a plain button click's payload is unchanged.
