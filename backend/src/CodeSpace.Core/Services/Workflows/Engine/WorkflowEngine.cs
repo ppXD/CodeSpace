@@ -1,7 +1,6 @@
 using System.Text.Json;
 using Autofac;
 using CodeSpace.Core.DependencyInjection;
-using CodeSpace.Core.Hardening;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Jobs;
@@ -478,12 +477,9 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
     /// deletes.</para>
     ///
     /// <para>Missing slugs at run time (project deleted after save, or never existed)
-    /// flow through <see cref="MissingProjectRefValidator"/> which applies three-mode
-    /// enforcement (off / warn / strict) — see that class for rationale. Default is
-    /// <c>warn</c>: a structured log line names every missing slug and the env var to
-    /// flip to <c>strict</c>; the bag for those slugs stays unfilled and the resolver
-    /// returns null (preserves legacy behavior). Operators flip to <c>strict</c> for
-    /// production hardening once stale refs are cleaned up.</para>
+    /// flow through <see cref="MissingProjectRefValidator"/>, which throws
+    /// <see cref="MissingProjectRefException"/> — the run lands in Failed with the missing
+    /// slug(s) named in <c>WorkflowRun.Error</c> instead of silently resolving to null.</para>
     /// </summary>
     private async Task<(IReadOnlyDictionary<string, IReadOnlyDictionary<string, JsonElement>> Bag, IReadOnlyList<string> SecretPaths)> LoadReferencedProjectVariablesAsync(Guid teamId, Guid workflowId, WorkflowDefinition definition, CancellationToken cancellationToken)
     {
@@ -498,14 +494,12 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
             .ToListAsync(cancellationToken)
             .ConfigureAwait(false);
 
-        // Apply Rule-11 three-mode enforcement on the diff between referenced and found
-        // slugs. Strict mode throws here (caught by the engine's main loop, which lands
-        // the run in Failed with the exception's message in WorkflowRun.Error); warn
-        // logs and continues; off is silent.
+        // Fail-fast on the diff between referenced and found slugs: a stale ref throws here
+        // (caught by the engine's main loop, which lands the run in Failed with the
+        // exception's message in WorkflowRun.Error) instead of silently resolving to null.
         var foundSlugs = projects.Select(p => p.Slug).ToHashSet(StringComparer.Ordinal);
         var refCtx = new MissingProjectRefContext(referencedSlugs, foundSlugs, teamId, workflowId);
-        var refMode = EnforcementModeReader.Read(MissingProjectRefValidator.EnforcementEnvVar);
-        MissingProjectRefValidator.EnsureKnown(refCtx, refMode, _logger);
+        MissingProjectRefValidator.EnsureKnown(refCtx);
 
         var bag = new Dictionary<string, IReadOnlyDictionary<string, JsonElement>>();
         var secretPaths = new List<string>();
@@ -671,16 +665,14 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
     /// pure data assembly so it stays trivially safe to call from the replay path.</para>
     ///
     /// <para>Per-value type-validation against <c>Schema</c> is deferred to a later pass — for
-    /// now we trust the frontend SchemaForm + the Inputs declaration. A future Rule-11
-    /// hardening could add a strict-mode env var that rejects inputs that don't match Schema;
-    /// today the engine doesn't validate JSON-Schema conformance at runtime (the NodeRunContext
-    /// doc-comment is explicit about this).</para>
+    /// now we trust the frontend SchemaForm + the Inputs declaration. A future pass could
+    /// reject inputs that don't match Schema; today the engine doesn't validate JSON-Schema
+    /// conformance at runtime (the NodeRunContext doc-comment is explicit about this).</para>
     /// </summary>
     /// <summary>
-    /// Apply CLAUDE.md Rule 11 three-mode enforcement on required inputs that <see cref="BuildInputScope"/>
-    /// failed to populate. The validator's modes (Off / Warn / Strict) are parsed from
-    /// <see cref="MissingRequiredInputValidator.EnforcementEnvVar"/>; defaults to Warn so
-    /// existing workflows continue to run and only emit log warnings.
+    /// Fail-fast on required inputs that <see cref="BuildInputScope"/> failed to populate:
+    /// <see cref="MissingRequiredInputValidator"/> throws <see cref="MissingRequiredInputException"/>
+    /// so the run lands in Failed instead of silently resolving the missing input to null.
     /// </summary>
     private void EnsureRequiredInputsSatisfied(WorkflowRun run, WorkflowDefinition definition, IReadOnlyDictionary<string, JsonElement> resolvedInputs)
     {
@@ -693,8 +685,7 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
         if (requiredNames.Count == 0) return;
 
         var ctx = new MissingRequiredInputContext(requiredNames, resolvedInputs.Keys.ToList(), run.Workflow.TeamId, run.WorkflowId);
-        var mode = EnforcementModeReader.Read(MissingRequiredInputValidator.EnforcementEnvVar);
-        MissingRequiredInputValidator.EnsureSatisfied(ctx, mode, _logger);
+        MissingRequiredInputValidator.EnsureSatisfied(ctx);
     }
 
     private static IReadOnlyDictionary<string, JsonElement> BuildInputScope(WorkflowDefinition definition, IReadOnlyDictionary<string, JsonElement> triggerPayload)
