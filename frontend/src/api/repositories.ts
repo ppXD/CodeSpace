@@ -1,5 +1,5 @@
 import { fetchJson } from "./request";
-import type { BulkBindResult, PullRequestState, RemotePullRequest, RemotePullRequestCheck, RemotePullRequestCommit, RemotePullRequestCounts, RemotePullRequestFile, RemoteRepositoryPage, RepositoryDetail, RepositorySummary } from "./types";
+import type { BulkBindResult, PullRequestReviewVerdict, PullRequestState, RemotePullRequest, RemotePullRequestCheck, RemotePullRequestCommit, RemotePullRequestCounts, RemotePullRequestFile, RemotePullRequestReview, RemoteRepositoryPage, RepositoryDetail, RepositorySummary } from "./types";
 
 export interface BindRepositoryInput {
   providerInstanceId: string;
@@ -92,4 +92,13 @@ export const repositoriesApi = {
   // Total open + closed counts. Cheap one-shot per repo (GitHub Search / GitLab GraphQL).
   getPullRequestCounts: (repositoryId: string) =>
     fetchJson<RemotePullRequestCounts>(`/api/repositories/${encodeURIComponent(repositoryId)}/pull-requests/counts`),
+
+  // Submit a review back to the PR/MR AS the caller's own linked identity (Model B). Returns 428
+  // actor_identity_required (surfaced as ApiError) when the caller hasn't linked one — the global
+  // ActorIdentityGate catches that and prompts a link, then the caller retries.
+  submitPullRequestReview: (repositoryId: string, number: number, input: { verdict: PullRequestReviewVerdict; body?: string | null }) =>
+    fetchJson<RemotePullRequestReview>(`/api/repositories/${encodeURIComponent(repositoryId)}/pull-requests/${number}/review`, {
+      method: "POST",
+      body: JSON.stringify(input),
+    }),
 };

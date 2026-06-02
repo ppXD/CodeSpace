@@ -325,6 +325,20 @@ export interface RemotePullRequestFile {
   patch?: string | null;
 }
 
+/** Review verdicts the caller can submit back to a PR/MR. Mirrors the backend PullRequestReviewVerdict (serialized as the name). */
+export type PullRequestReviewVerdict = "Approve" | "RequestChanges" | "Comment";
+
+/**
+ * Provider-neutral result of submitting a review back to a PR/MR (mirror of the backend
+ * RemotePullRequestReview). `externalId` is the provider's id for the created review/note when there
+ * is a single one; null for actions with no single object (e.g. a bare GitLab approve).
+ */
+export interface RemotePullRequestReview {
+  verdict: PullRequestReviewVerdict;
+  externalId?: string | null;
+  webUrl?: string | null;
+}
+
 /**
  * Returned by GET /api/provider-instances/defaults/{provider}. Backend reads its own
  * IProviderModule and emits the recommended UI defaults (base URL, OAuth scope list,
