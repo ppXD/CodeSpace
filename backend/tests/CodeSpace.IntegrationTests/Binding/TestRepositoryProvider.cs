@@ -61,7 +61,7 @@ public sealed class TestRemoteHookStore
     }
 }
 
-public sealed class TestRepositoryProvider : IRepositoryCatalogCapability, ICredentialProbeCapability, IWebhookRegistrationCapability, IWebhookSignatureVerifier, IWebhookEventNormalizer
+public sealed class TestRepositoryProvider : IRepositoryCatalogCapability, ICredentialProbeCapability, IPullRequestReviewCapability, IWebhookRegistrationCapability, IWebhookSignatureVerifier, IWebhookEventNormalizer
 {
     private readonly TestRemoteHookStore _hookStore;
 
@@ -94,6 +94,16 @@ public sealed class TestRepositoryProvider : IRepositoryCatalogCapability, ICred
         AuthenticatedUserExternalId = "test-user-id",
         AuthenticatedUserName = "Test User"
     });
+
+    // Echoes the acting credential's id back as the review's ExternalId so a test can assert WHICH
+    // credential made the write-back call (actor vs connection) without a shared recorder.
+    public Task<RemotePullRequestReview> SubmitReviewAsync(ProviderContext context, RemoteRepository repository, int number, PullRequestReviewVerdict verdict, string? body, CancellationToken cancellationToken) =>
+        Task.FromResult(new RemotePullRequestReview
+        {
+            Verdict = verdict,
+            ExternalId = context.Credential.Id.ToString(),
+            WebUrl = $"https://test.local/{repository.FullPath}/-/reviews/{number}"
+        });
 
     public Task<RemoteWebhook?> FindWebhookByCallbackUrlAsync(ProviderContext context, RemoteRepository repository, string callbackUrl, CancellationToken cancellationToken) =>
         Task.FromResult(_hookStore.Find(callbackUrl));

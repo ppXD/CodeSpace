@@ -45,7 +45,8 @@ public sealed class GitPrReviewNode : INodeRuntime
                 "repositoryId": { "type": "string", "format": "uuid", "x-selector": "repository", "description": "The repository. Pick one, or switch to Expression to bind it from the trigger (e.g. {{trigger.repositoryId}})." },
                 "number": { "type": "integer", "description": "The pull/merge request number." },
                 "verdict": { "type": "string", "enum": ["approve", "request_changes", "comment"], "description": "The verdict to submit. Wire {{nodes.<wait>.outputs.action}} from a chat card click." },
-                "body": { "type": "string", "description": "Review body — required for request_changes / comment, optional for approve. Supports {{ }} references." }
+                "body": { "type": "string", "description": "Review body — required for request_changes / comment, optional for approve. Supports {{ }} references." },
+                "actAsUserId": { "type": "string", "format": "uuid", "description": "Submit AS this CodeSpace user's own linked provider identity (Model B). Wire {{nodes.<wait>.outputs.by}} so the review is authored by the person who clicked. Omit to use the repository's connection credential." }
               },
               "required": ["repositoryId","number","verdict"]
             }
@@ -68,15 +69,17 @@ public sealed class GitPrReviewNode : INodeRuntime
         if (!TryReadVerdict(context, out var verdict)) return NodeResult.Fail("Input 'verdict' must be one of: approve, request_changes, comment.");
 
         var body = TryReadBody(context, out var b) ? b : null;
+        var actAsUserId = TryReadActAsUserId(context, out var a) ? a : (Guid?)null;
 
         // Trace the side-effecting Git API call. The body is summarised (length only) to keep the
         // ledger small; the service enforces the body-required-for-comment/request-changes rule and
-        // throws on failure — the engine records the node failure with its message.
+        // throws on failure — the engine records the node failure with its message. actAsUserId, when
+        // wired, makes the service authenticate as that user's own linked identity (Model B).
         var review = await context.Observability.TraceExternalCallAsync(
             target: $"git.submit_review:{repoId}:{number}",
             method: "submit_review",
-            requestPayload: JsonSerializer.SerializeToElement(new { repository_id = repoId, pull_request_number = number, verdict = verdict.ToString(), body_chars = body?.Length ?? 0 }),
-            action: ct => _prService.SubmitReviewAsync(repoId, number, verdict, body, ct),
+            requestPayload: JsonSerializer.SerializeToElement(new { repository_id = repoId, pull_request_number = number, verdict = verdict.ToString(), body_chars = body?.Length ?? 0, act_as_user_id = actAsUserId }),
+            action: ct => _prService.SubmitReviewAsync(repoId, number, verdict, body, actAsUserId, ct),
             completionExtractor: result => new ExternalCallCompletion
             {
                 ResponsePayload = JsonSerializer.SerializeToElement(new { verdict = result.Verdict.ToString(), url = result.WebUrl })
@@ -126,5 +129,13 @@ public sealed class GitPrReviewNode : INodeRuntime
         if (!context.Inputs.TryGetValue("body", out var value) || value.ValueKind != JsonValueKind.String) return false;
         body = value.GetString() ?? "";
         return body.Length > 0;
+    }
+
+    /// <summary>Optional actor: a uuid string → submit AS that user's linked identity (Model B). Absent / blank ⇒ null ⇒ connection credential.</summary>
+    private static bool TryReadActAsUserId(NodeRunContext context, out Guid actAsUserId)
+    {
+        actAsUserId = Guid.Empty;
+        if (!context.Inputs.TryGetValue("actAsUserId", out var value) || value.ValueKind != JsonValueKind.String) return false;
+        return Guid.TryParse(value.GetString(), out actAsUserId);
     }
 }

@@ -59,6 +59,23 @@ public sealed class GlobalExceptionFilter : IExceptionFilter
                 context.Result = BuildProblemResult(StatusCodes.Status429TooManyRequests, "rate_limited", "Too many requests to the upstream provider. Retry shortly.");
                 break;
 
+            case ActorIdentityRequiredException actorReq:
+                // 428 Precondition Required = "do something first, then retry". The frontend's global
+                // interceptor branches on code=actor_identity_required to open the identity-link modal
+                // for the named provider — one signal, reused by every act-as-user operation.
+                _logger.LogInformation("Actor identity required at {Path}: provider={Provider} instance={InstanceId}", path, actorReq.ProviderKind, actorReq.ProviderInstanceId);
+                context.Result = new ObjectResult(new
+                {
+                    code = "actor_identity_required",
+                    message = actorReq.Message,
+                    provider = actorReq.ProviderKind.ToString(),
+                    providerInstanceId = actorReq.ProviderInstanceId
+                })
+                {
+                    StatusCode = StatusCodes.Status428PreconditionRequired
+                };
+                break;
+
             case ProviderInsufficientScopeException scope:
                 // 422 Unprocessable Entity = "syntactically valid but semantically blocked".
                 // The frontend branches on code=oauth_insufficient_scope to render a

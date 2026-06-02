@@ -72,6 +72,21 @@ public class GlobalExceptionFilterTests
         body.GetProperty("missingScopes")[0].GetString().ShouldBe("api");
     }
 
+    [Fact]
+    public void Actor_identity_required_maps_to_428_with_the_provider_so_the_frontend_can_prompt_a_link()
+    {
+        // The single signal every act-as-user operation funnels through: the SPA's global
+        // interceptor branches on code=actor_identity_required to open the link modal.
+        var instanceId = Guid.NewGuid();
+        var result = Run(new ActorIdentityRequiredException(ProviderKind.GitLab, instanceId));
+        var body = Body(result);
+
+        result.StatusCode.ShouldBe(StatusCodes.Status428PreconditionRequired);
+        body.GetProperty("code").GetString().ShouldBe("actor_identity_required");
+        body.GetProperty("provider").GetString().ShouldBe("GitLab");
+        body.GetProperty("providerInstanceId").GetGuid().ShouldBe(instanceId);
+    }
+
     private static ObjectResult Run(Exception exception)
     {
         var filter = new GlobalExceptionFilter(NullLogger<GlobalExceptionFilter>.Instance);

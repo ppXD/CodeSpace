@@ -13,7 +13,7 @@ namespace CodeSpace.UnitTests.PullRequests;
 [Trait("Category", "Unit")]
 public class PullRequestServiceTests
 {
-    private static readonly PullRequestService Service = new(null!, null!, null!);
+    private static readonly PullRequestService Service = new(null!, null!, null!, null!);
 
     [Theory]
     [InlineData(PullRequestReviewVerdict.Comment)]
@@ -21,7 +21,7 @@ public class PullRequestServiceTests
     public async Task SubmitReview_requires_a_non_empty_body_for_comment_and_request_changes(PullRequestReviewVerdict verdict)
     {
         var ex = await Should.ThrowAsync<InvalidOperationException>(() =>
-            Service.SubmitReviewAsync(Guid.NewGuid(), 1, verdict, "   ", CancellationToken.None));
+            Service.SubmitReviewAsync(Guid.NewGuid(), 1, verdict, "   ", actorUserId: null, CancellationToken.None));
 
         ex.Message.ShouldContain(verdict.ToString());
         ex.Message.ShouldContain("non-empty body");
@@ -33,6 +33,6 @@ public class PullRequestServiceTests
     public async Task SubmitReview_rejects_a_null_or_empty_body_for_a_comment(string? body)
     {
         await Should.ThrowAsync<InvalidOperationException>(() =>
-            Service.SubmitReviewAsync(Guid.NewGuid(), 1, PullRequestReviewVerdict.Comment, body, CancellationToken.None));
+            Service.SubmitReviewAsync(Guid.NewGuid(), 1, PullRequestReviewVerdict.Comment, body, actorUserId: null, CancellationToken.None));
     }
 }
