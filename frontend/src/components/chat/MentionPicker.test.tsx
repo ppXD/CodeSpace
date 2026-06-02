@@ -5,7 +5,7 @@ import type { TeamMemberSummary } from "@/api/teams";
 
 import { MentionPicker } from "./MentionPicker";
 
-const member = (userId: string, name: string): TeamMemberSummary => ({ userId, name, email: `${name}@x`, avatarUrl: null });
+const member = (userId: string, name: string): TeamMemberSummary => ({ userId, name, email: `${name}@x`, avatarUrl: null, isBot: false });
 const roster = [member("u1", "Alice"), member("u2", "Bob")];
 
 describe("MentionPicker", () => {

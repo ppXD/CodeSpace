@@ -14,7 +14,7 @@ vi.mock("@/hooks/use-chat", () => ({ useRespondToMessage: () => ({ mutate, isPen
 beforeEach(() => { mutate.mockClear(); pending = false; });
 
 const members = new Map<string, TeamMemberSummary>([
-  ["rev", { userId: "rev", name: "Alice", email: "a@x", avatarUrl: null }],
+  ["rev", { userId: "rev", name: "Alice", email: "a@x", avatarUrl: null, isBot: false }],
 ]);
 
 function card(state: InteractionState, resolution: InteractionResolution | null = null, allowed: string[] | null = null): MessageInteractionView {
