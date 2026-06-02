@@ -82,6 +82,44 @@ public sealed record NodeManifest
     /// on-demand triggers (trigger.manual) set it true. Ignored for non-Trigger kinds.</para>
     /// </summary>
     public bool IsManual { get; init; }
+
+    /// <summary>
+    /// Opt-in marker for a node that performs a write AS a CodeSpace user's own provider identity
+    /// (Model B) — e.g. <c>git.pr_review</c> submitting a review as the actor. Declaring it lets the
+    /// engine GENERICALLY enforce the actor's linked identity: when such a node sits downstream of an
+    /// interactive wait whose responder feeds its <see cref="ActsAsUserSpec.ActorInputKey"/>, the respond
+    /// path requires the responder's identity FIRST (428 + link prompt) instead of the run failing later.
+    /// New act-as-user nodes get this for free by declaring the spec — no engine or chat-layer changes.
+    /// Null ⇒ the node never acts as a user.
+    /// </summary>
+    public ActsAsUserSpec? ActsAsUser { get; init; }
+}
+
+/// <summary>
+/// Declares HOW a node acts as a CodeSpace user's own provider identity, so the engine can enforce the
+/// identity requirement generically (without hardcoding any node). Both keys name entries in the node's
+/// runtime <c>Inputs</c> bag.
+/// </summary>
+public sealed record ActsAsUserSpec
+{
+    /// <summary>Input key whose value is the acting user's id. The interactive wait whose responder feeds this input is the one gated on the actor's linked identity.</summary>
+    public required string ActorInputKey { get; init; }
+
+    /// <summary>Input key whose value locates the provider the actor acts on — resolved per <see cref="ProviderSource"/>.</summary>
+    public required string ProviderInputKey { get; init; }
+
+    /// <summary>How <see cref="ProviderInputKey"/>'s value resolves to a provider instance (the unit a linked identity is scoped to).</summary>
+    public required ActorProviderSource ProviderSource { get; init; }
+}
+
+/// <summary>How an act-as-user node's provider-input value resolves to a provider instance.</summary>
+public enum ActorProviderSource
+{
+    /// <summary>The value is a repository id; the provider instance is the repo's <c>ProviderInstanceId</c>.</summary>
+    Repository,
+
+    /// <summary>The value is a provider instance id directly.</summary>
+    ProviderInstance,
 }
 
 /// <summary>
