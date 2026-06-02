@@ -125,6 +125,19 @@ public class RepositoriesController : ControllerBase
     }
 
     /// <summary>
+    /// Submit a review (Approve / RequestChanges / Comment) back to the PR/MR AS the caller's own
+    /// linked identity. Returns 428 actor_identity_required when the caller hasn't linked an identity
+    /// for the repo's provider instance, so the SPA can prompt a link and retry. Route's repositoryId
+    /// + number are authoritative; the body carries the verdict + optional comment.
+    /// </summary>
+    [HttpPost("{repositoryId:guid}/pull-requests/{number:int}/review")]
+    public async Task<IActionResult> SubmitPullRequestReview([FromRoute] Guid repositoryId, [FromRoute] int number, [FromBody] SubmitPullRequestReviewCommand command, CancellationToken cancellationToken)
+    {
+        var result = await _mediator.Send(command with { RepositoryId = repositoryId, Number = number }, cancellationToken).ConfigureAwait(false);
+        return Ok(result);
+    }
+
+    /// <summary>
     /// Re-point a repository at another active credential of the same provider instance.
     /// Used to recover from a credential disconnect: the operator picks a teammate's
     /// still-valid credential (or their own new one) and the repo flips back to Active.
