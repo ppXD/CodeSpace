@@ -7,6 +7,7 @@ import type { ScopeSuggestion } from "./scope-introspection";
 import { ConversationSelector } from "./selectors/ConversationSelector";
 import { ProjectRepositorySelector } from "./selectors/ProjectRepositorySelector";
 import { TriggerRepositoriesSelector } from "./selectors/TriggerRepositoriesSelector";
+import { UserMultiSelector, UserSelector } from "./selectors/UserSelector";
 import { VariablePickerInput } from "./VariablePickerInput";
 
 /**
@@ -320,8 +321,14 @@ function renderControl(schema: Schema, value: unknown, onChange: (next: unknown)
  * selector's expected shape. Returning <c>null</c> means "no selector registered" — the
  * caller then falls back to the default control so the field still works.
  */
-function renderCustomSelector(key: string, _schema: Schema, value: unknown, onChange: (next: unknown) => void) {
+function renderCustomSelector(key: string, schema: Schema, value: unknown, onChange: (next: unknown) => void) {
   switch (key) {
+    case "user":
+      // Array field → a multi-member toggle list (e.g. allowedResponderUserIds); scalar → a single-user
+      // select (which SchemaForm also wraps in the Pick ⇄ Expression toggle). Generic to any user-id field.
+      return schema.type === "array"
+        ? <UserMultiSelector value={Array.isArray(value) ? (value as string[]) : []} onChange={(next) => onChange(next.length === 0 ? undefined : next)} />
+        : <UserSelector value={typeof value === "string" ? value : ""} onChange={(next) => onChange(next === "" ? undefined : next)} />;
     case "repository":
       return (
         <ProjectRepositorySelector

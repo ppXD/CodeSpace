@@ -64,7 +64,7 @@ public sealed class ChatPostMessageNode : INodeRuntime
                   },
                   "required": ["fields"]
                 },
-                "allowedResponderUserIds": { "type": "array", "items": { "type": "string", "format": "uuid" }, "description": "Restrict who may respond (user ids). Empty = any member of the conversation may respond." }
+                "allowedResponderUserIds": { "type": "array", "items": { "type": "string", "format": "uuid" }, "x-selector": "user", "description": "Restrict who may respond — pick members. Empty = any member of the conversation may respond." }
               },
               "required": ["conversationId","body"]
             }
