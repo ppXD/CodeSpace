@@ -3,8 +3,11 @@ import { useState } from "react";
 import { Ic } from "@/_imported/ai-code-space/icons";
 import type { FormComponent, InteractionButton, InteractionButtonStyle, MessageInteractionView } from "@/api/chat";
 import type { TeamMemberSummary } from "@/api/teams";
+import { useActorIdentityGate } from "@/components/identities/ActorIdentityGate";
 import { useRespondToMessage } from "@/hooks/use-chat";
 import { SchemaForm } from "@/components/workflows/SchemaForm";
+
+type RespondVars = { messageId: string; responseKey: string; comment: string | null; values?: Record<string, unknown> | null };
 
 /** Button visual emphasis → the app's shared button classes (warm Claude theme). */
 const STYLE_CLASS: Record<InteractionButtonStyle, string> = {
@@ -28,8 +31,15 @@ export function MessageInteractionCard({ interaction, members, conversationId, m
   myUserId: string | null;
 }) {
   const respond = useRespondToMessage(conversationId);
+  const gate = useActorIdentityGate();
   const [commenting, setCommenting] = useState<InteractionButton | null>(null);
   const [comment, setComment] = useState("");
+
+  // Respond, routing a 428 actor_identity_required to the global gate: the run will act AS the
+  // responder (e.g. a downstream git.pr_review), so if they haven't linked an identity the backend
+  // refuses BEFORE resolving the wait. The gate opens the link modal and, on success, retries this
+  // exact response — so the click succeeds after linking instead of the run failing in the background.
+  const submit = (vars: RespondVars) => respond.mutate(vars, { onError: e => { gate.prompt(e, () => submit(vars)); } });
 
   if (interaction.state !== "Open") {
     return (
@@ -51,7 +61,7 @@ export function MessageInteractionCard({ interaction, members, conversationId, m
       return;
     }
 
-    respond.mutate({ messageId, responseKey: button.key, comment: null });
+    submit({ messageId, responseKey: button.key, comment: null });
   };
 
   return (
@@ -60,7 +70,7 @@ export function MessageInteractionCard({ interaction, members, conversationId, m
         <FormBody
           component={component}
           disabled={pending || !canRespond}
-          onSubmit={values => respond.mutate({ messageId, responseKey: "submit", comment: null, values })}
+          onSubmit={values => submit({ messageId, responseKey: "submit", comment: null, values })}
         />
       ) : commenting ? (
         <div className="chat-card-comment">
@@ -73,7 +83,7 @@ export function MessageInteractionCard({ interaction, members, conversationId, m
           />
           <div className="chat-card-comment-actions">
             <button type="button" className="btn btn-ghost" onClick={() => setCommenting(null)} disabled={pending}>Cancel</button>
-            <button type="button" className={STYLE_CLASS[commenting.style]} onClick={() => respond.mutate({ messageId, responseKey: commenting.key, comment: comment.trim() })} disabled={pending || comment.trim() === ""}>{commenting.label}</button>
+            <button type="button" className={STYLE_CLASS[commenting.style]} onClick={() => submit({ messageId, responseKey: commenting.key, comment: comment.trim() })} disabled={pending || comment.trim() === ""}>{commenting.label}</button>
           </div>
         </div>
       ) : (

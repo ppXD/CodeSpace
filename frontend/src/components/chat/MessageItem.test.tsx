@@ -6,8 +6,9 @@ import type { TeamMemberSummary } from "@/api/teams";
 
 import { MessageItem } from "./MessageItem";
 
-// MessageItem renders the real interaction card, which owns the respond mutation — stub it.
+// MessageItem renders the real interaction card, which owns the respond mutation + the identity gate — stub both.
 vi.mock("@/hooks/use-chat", () => ({ useRespondToMessage: () => ({ mutate: vi.fn(), isPending: false }) }));
+vi.mock("@/components/identities/ActorIdentityGate", () => ({ useActorIdentityGate: () => ({ prompt: vi.fn() }) }));
 
 const members = new Map<string, TeamMemberSummary>([
   ["u1", { userId: "u1", name: "Alice", email: "a@x", avatarUrl: null, isBot: false }],

@@ -2,6 +2,7 @@ import { fireEvent, render, screen } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { InteractionResolution, InteractionState, MessageInteractionView } from "@/api/chat";
+import { ApiError } from "@/api/request";
 import type { TeamMemberSummary } from "@/api/teams";
 
 import { MessageInteractionCard } from "./MessageInteractionCard";
@@ -11,7 +12,11 @@ const mutate = vi.fn();
 let pending = false;
 vi.mock("@/hooks/use-chat", () => ({ useRespondToMessage: () => ({ mutate, isPending: pending }) }));
 
-beforeEach(() => { mutate.mockClear(); pending = false; });
+// The card routes a 428 actor_identity_required to the global gate; stub it to capture the hand-off.
+const prompt = vi.fn(() => true);
+vi.mock("@/components/identities/ActorIdentityGate", () => ({ useActorIdentityGate: () => ({ prompt }) }));
+
+beforeEach(() => { mutate.mockClear(); prompt.mockClear(); pending = false; });
 
 const members = new Map<string, TeamMemberSummary>([
   ["rev", { userId: "rev", name: "Alice", email: "a@x", avatarUrl: null, isBot: false }],
@@ -61,7 +66,17 @@ describe("MessageInteractionCard", () => {
   it("submits immediately with no comment for a plain button", () => {
     renderCard(card("Open"));
     fireEvent.click(screen.getByRole("button", { name: "Approve" }));
-    expect(mutate).toHaveBeenCalledWith({ messageId: "m1", responseKey: "approve", comment: null });
+    expect(mutate).toHaveBeenCalledWith({ messageId: "m1", responseKey: "approve", comment: null }, expect.anything());
+  });
+
+  it("routes a 428 actor_identity_required to the gate, with a retry of the same response", () => {
+    const err = new ApiError(428, "actor_identity_required", "link required", { provider: "GitLab", providerInstanceId: "i1" });
+    mutate.mockImplementation((_vars, opts) => opts?.onError?.(err));
+    renderCard(card("Open"));
+
+    fireEvent.click(screen.getByRole("button", { name: "Approve" }));
+
+    expect(prompt).toHaveBeenCalledWith(err, expect.any(Function));
   });
 
   it("collects a comment before submitting a requires-comment button", () => {
@@ -78,7 +93,7 @@ describe("MessageInteractionCard", () => {
     expect(submit).toBeEnabled();
     fireEvent.click(submit);
 
-    expect(mutate).toHaveBeenCalledWith({ messageId: "m1", responseKey: "request_changes", comment: "please add a test" });
+    expect(mutate).toHaveBeenCalledWith({ messageId: "m1", responseKey: "request_changes", comment: "please add a test" }, expect.anything());
   });
 
   it("can cancel out of the comment composer without submitting", () => {
@@ -134,7 +149,7 @@ describe("MessageInteractionCard", () => {
     fireEvent.change(screen.getByRole("combobox"), { target: { value: "reject" } });
     fireEvent.click(screen.getByRole("button", { name: "Send" }));
 
-    expect(mutate).toHaveBeenCalledWith({ messageId: "m1", responseKey: "submit", comment: null, values: { decision: "reject" } });
+    expect(mutate).toHaveBeenCalledWith({ messageId: "m1", responseKey: "submit", comment: null, values: { decision: "reject" } }, expect.anything());
   });
 
   it("shows a resolved form's submitted values, hiding the fields", () => {
