@@ -14,16 +14,12 @@ export interface UserProviderIdentitySummary {
   createdDate: string;
 }
 
-/** `/api/me/identities` — the caller's own provider identities (link via PAT / list / unlink). */
+/** `/api/me/identities` — link the caller's own provider identity by PAT (Model B). The list /
+ *  unlink endpoints still exist server-side, but the only frontend caller is the reactive link modal. */
 export const identitiesApi = {
-  listMine: () => fetchJson<UserProviderIdentitySummary[]>("/api/me/identities"),
-
   linkByPat: (input: { providerInstanceId: string; accessToken: string }) =>
     fetchJson<UserProviderIdentitySummary>("/api/me/identities/pat", {
       method: "POST",
       body: JSON.stringify(input),
     }),
-
-  unlink: (identityId: string) =>
-    fetchJson<void>(`/api/me/identities/${encodeURIComponent(identityId)}`, { method: "DELETE" }),
 };
