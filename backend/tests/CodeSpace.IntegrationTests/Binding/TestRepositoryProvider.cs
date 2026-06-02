@@ -61,7 +61,7 @@ public sealed class TestRemoteHookStore
     }
 }
 
-public sealed class TestRepositoryProvider : IRepositoryCatalogCapability, ICredentialProbeCapability, IPullRequestReviewCapability, IWebhookRegistrationCapability, IWebhookSignatureVerifier, IWebhookEventNormalizer
+public sealed class TestRepositoryProvider : IRepositoryCatalogCapability, ICredentialProbeCapability, IPullRequestReviewCapability, IRepositoryAccessCapability, IWebhookRegistrationCapability, IWebhookSignatureVerifier, IWebhookEventNormalizer
 {
     private readonly TestRemoteHookStore _hookStore;
 
@@ -104,6 +104,14 @@ public sealed class TestRepositoryProvider : IRepositoryCatalogCapability, ICred
             ExternalId = context.Credential.Id.ToString(),
             WebUrl = $"https://test.local/{repository.FullPath}/-/reviews/{number}"
         });
+
+    // Deterministic, no shared state: deny when the repo's external id carries the "noaccess" marker, else
+    // allow. Lets a test exercise the pre-flight deny path by seeding a marked repo, without a toggle that
+    // could bleed across tests (every other repo — incl. the happy-path fixtures — stays Allowed).
+    public Task<RepositoryActorAccess> GetActorAccessAsync(ProviderContext context, RemoteRepository repository, CancellationToken cancellationToken) =>
+        Task.FromResult(repository.ExternalId.Contains("noaccess", StringComparison.OrdinalIgnoreCase)
+            ? RepositoryActorAccess.Denied("You're not a member of this project (test).")
+            : RepositoryActorAccess.Allowed);
 
     public Task<RemoteWebhook?> FindWebhookByCallbackUrlAsync(ProviderContext context, RemoteRepository repository, string callbackUrl, CancellationToken cancellationToken) =>
         Task.FromResult(_hookStore.Find(callbackUrl));

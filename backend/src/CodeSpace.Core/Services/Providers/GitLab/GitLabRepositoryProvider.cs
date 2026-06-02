@@ -646,22 +646,30 @@ public sealed class GitLabRepositoryProvider : IRepositoryCatalogCapability, IPu
         request.Headers.TryAddWithoutValidation("Authorization", $"Bearer {auth.Token}");
         request.Headers.TryAddWithoutValidation("PRIVATE-TOKEN", auth.Token);
 
-        using var response = await _countsHttpClient.SendAsync(request, HttpCompletionOption.ResponseContentRead, cancellationToken).ConfigureAwait(false);
+        try
+        {
+            using var response = await _countsHttpClient.SendAsync(request, HttpCompletionOption.ResponseContentRead, cancellationToken).ConfigureAwait(false);
 
-        // Can't even see the project → not a member / no access.
-        if ((int)response.StatusCode is 403 or 404)
-            return RepositoryActorAccess.Denied("You're not a member of this GitLab project, or can't access it. Ask a maintainer to add you, then try again.");
+            // Can't even see the project → not a member / no access.
+            if ((int)response.StatusCode is 403 or 404)
+                return RepositoryActorAccess.Denied("You're not a member of this GitLab project, or can't access it. Ask a maintainer to add you, then try again.");
 
-        // Inconclusive (transient / unexpected) — never block a legitimate click on a flaky probe; the write stays the backstop.
-        if (!response.IsSuccessStatusCode) return RepositoryActorAccess.Allowed;
+            // Inconclusive (transient / unexpected) — never block a legitimate click on a flaky probe; the write stays the backstop.
+            if (!response.IsSuccessStatusCode) return RepositoryActorAccess.Allowed;
 
-        var json = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
-        var level = ParseProjectAccessLevel(json);
+            var json = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
+            var level = ParseProjectAccessLevel(json);
 
-        // GitLab levels: Guest 10, Reporter 20, Developer 30, Maintainer 40, Owner 50. Approving / posting
-        // an MR note needs Developer+. Null = visible project but no membership grant → below Developer.
-        const int developer = 30;
-        return level >= developer ? RepositoryActorAccess.Allowed : RepositoryActorAccess.Denied(ReasonForLevel(level));
+            // GitLab levels: Guest 10, Reporter 20, Developer 30, Maintainer 40, Owner 50. Approving / posting
+            // an MR note needs Developer+. Null = visible project but no membership grant → below Developer.
+            const int developer = 30;
+            return level >= developer ? RepositoryActorAccess.Allowed : RepositoryActorAccess.Denied(ReasonForLevel(level));
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            // Network blip / DNS / unexpected — don't block a legitimate click on an inconclusive probe.
+            return RepositoryActorAccess.Allowed;
+        }
     }
 
     /// <summary>

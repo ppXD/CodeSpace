@@ -76,6 +76,24 @@ public sealed class GlobalExceptionFilter : IExceptionFilter
                 };
                 break;
 
+            case ActorRepoPermissionDeniedException repoPerm:
+                // 403 Forbidden = "you can't do this". The identity is fine (not a 428) but the responder
+                // lacks access on this repo. The frontend branches on code=actor_repo_permission_denied to
+                // show the reason inline on the card and leave it Open — no false success.
+                _logger.LogWarning("Actor repo permission denied at {Path}: provider={Provider} instance={InstanceId} repo={Repo}", path, repoPerm.ProviderKind, repoPerm.ProviderInstanceId, repoPerm.RepositoryPath);
+                context.Result = new ObjectResult(new
+                {
+                    code = "actor_repo_permission_denied",
+                    message = repoPerm.Reason ?? $"You don't have permission to act on {repoPerm.RepositoryPath}.",
+                    provider = repoPerm.ProviderKind.ToString(),
+                    providerInstanceId = repoPerm.ProviderInstanceId,
+                    repository = repoPerm.RepositoryPath
+                })
+                {
+                    StatusCode = StatusCodes.Status403Forbidden
+                };
+                break;
+
             case ProviderInsufficientScopeException scope:
                 // 422 Unprocessable Entity = "syntactically valid but semantically blocked".
                 // The frontend branches on code=oauth_insufficient_scope to render a
