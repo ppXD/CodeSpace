@@ -117,16 +117,15 @@ public class AddProviderInstanceFlowTests
     }
 
     [Theory]
-    [InlineData(null, "some-secret")]     // missing client_id
-    [InlineData("some-client", null)]     // missing secret
-    [InlineData(null, null)]              // missing both
-    [InlineData("   ", "some-secret")]    // whitespace-only client_id collapses to null
-    public async Task Add_without_oauth_credentials_is_rejected(string? clientId, string? clientSecret)
+    [InlineData(null, "some-secret")]     // secret without client_id
+    [InlineData("some-client", null)]     // client_id without secret
+    [InlineData("   ", "some-secret")]    // whitespace-only client_id collapses to null → still mismatched
+    public async Task Add_with_exactly_one_oauth_credential_is_rejected(string? clientId, string? clientSecret)
     {
-        // OAuth client ID + secret are required at Add time. The old "leave blank → PAT-only"
-        // path created half-state rows visible in the modal but not connectable. Backend
-        // enforces this so non-UI callers (curl, future integrations) can't sidestep the
-        // frontend's `required` attribute. Legacy rows can still be repaired via Update.
+        // OAuth client ID + secret are all-or-nothing. Exactly one is ambiguous (a client_id with no
+        // secret can't exchange a code; a secret with no id is meaningless), so we reject it. Both-blank
+        // is allowed — see Add_token_only_creates_instance_with_no_oauth. Enforced backend-side so
+        // non-UI callers can't sidestep the frontend either way.
         var teamId = await SeedTeamAsync().ConfigureAwait(false);
 
         using var scope = _fixture.BeginScopeAs(Guid.NewGuid(), teamId, Roles.Admin);
@@ -143,7 +142,32 @@ public class AddProviderInstanceFlowTests
             })).ConfigureAwait(false);
 
         ex.Message.ShouldContain("OAuth client ID");
-        ex.Message.ShouldContain("required");
+        ex.Message.ShouldContain("token-only");
+    }
+
+    [Fact]
+    public async Task Add_token_only_creates_instance_with_no_oauth()
+    {
+        // Both OAuth fields blank → a token-only provider (members connect with a personal access
+        // token; no OAuth app). The instance persists with no client id/secret → oauthEnabled=false,
+        // and Connect-remote → Personal offers "Use a token".
+        var teamId = await SeedTeamAsync().ConfigureAwait(false);
+
+        Guid id;
+        using (var scope = _fixture.BeginScopeAs(Guid.NewGuid(), teamId, Roles.Admin))
+        {
+            id = await scope.Resolve<IMediator>().Send(new AddProviderInstanceCommand
+            {
+                Provider = ProviderKind.GitLab,
+                DisplayName = "Token-only GitLab",
+                BaseUrl = "https://gitlab.token-only.test"
+            }).ConfigureAwait(false);
+        }
+
+        using var verify = _fixture.BeginScope();
+        var instance = await verify.Resolve<CodeSpaceDbContext>().ProviderInstance.AsNoTracking().SingleAsync(p => p.Id == id).ConfigureAwait(false);
+        instance.OauthClientId.ShouldBeNull("token-only provider stores no OAuth client id");
+        instance.OauthClientSecretEnc.ShouldBeNull();
     }
 
     [Theory]
