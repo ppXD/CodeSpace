@@ -1389,6 +1389,11 @@
 .cn-sub-purpose { color: var(--ink-2); overflow: hidden; text-overflow: ellipsis; min-width: 0; }
 .cn-cta { display: flex; align-items: center; gap: 4px; flex-shrink: 0; }
 .cn-cta button { font-size: 12px; }
+/* Personal tab: a credential can be connected via OAuth and/or PAT — stack each method's row + the connect actions. */
+.cn-cta-stack { flex-direction: column; align-items: flex-end; gap: 5px; }
+.cn-cred { display: flex; align-items: center; gap: 6px; }
+.cn-cred-method { font-size: 10px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; color: var(--muted); border: 1px solid var(--line); border-radius: 5px; padding: 1px 6px; }
+.cn-connect { display: flex; align-items: center; gap: 4px; }
 .cn-empty { padding: 36px 24px; text-align: center; }
 .cn-empty-h { font-size: 14px; font-weight: 600; color: var(--ink); margin-bottom: 4px; letter-spacing: -0.005em; }
 .cn-empty-p { font-size: 12.5px; color: var(--muted); margin-bottom: 14px; line-height: 1.5; }
