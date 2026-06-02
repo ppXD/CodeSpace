@@ -18,7 +18,7 @@ namespace CodeSpace.Core.Services.Workflows.Nodes;
 /// whatever the resolver produced — including <c>null</c> when a referenced scope value
 /// was missing — and MUST extract values defensively (the <c>TryReadX</c> pattern used by
 /// every built-in node). Strict per-value schema validation may be added in a future
-/// release behind <c>CLAUDE.md</c> Rule 11 three-mode enforcement; today, treat the
+/// release; today, treat the
 /// manifest schemas as documentation + UI-driver, not a runtime contract.</para>
 /// </summary>
 public sealed record NodeRunContext

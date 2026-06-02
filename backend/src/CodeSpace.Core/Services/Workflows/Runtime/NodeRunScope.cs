@@ -91,9 +91,9 @@ public sealed class NodeRunScope
     /// is consumed by the frontend (form rendering + picker autocomplete) and the
     /// save-time <c>DefinitionValidator</c> reference-path check, but the engine does not
     /// enforce per-value schema conformance at runtime — nodes extract values defensively
-    /// (the <c>TryReadX</c> pattern). A future release may add Rule-11 three-mode
-    /// enforcement for missing required inputs (see the TODO in
-    /// <c>WorkflowEngine.BuildInputScope</c>); today, no.</para>
+    /// (the <c>TryReadX</c> pattern). Missing REQUIRED inputs ARE enforced (fail-fast at
+    /// scope build — see <c>MissingRequiredInputValidator</c>); per-value schema conformance
+    /// is not.</para>
     /// </summary>
     public IReadOnlyDictionary<string, JsonElement> Input { get; init; } = new Dictionary<string, JsonElement>();
 
