@@ -16,6 +16,7 @@ import {
   useRepositoryPullRequestFiles,
   useRepositoryPullRequests,
 } from "@/hooks/use-repositories";
+import { PrReviewActions } from "@/components/repositories/PrReviewActions";
 
 import { DiffViewer } from "./diff-viewer";
 import { Ic } from "./icons";
@@ -752,6 +753,8 @@ export function PullRequestDetailRoute({ repoId, number, onBack }: PullRequestDe
         </div>
 
         <aside className="prd-side">
+          {pr.state === "Open" && <PrReviewActions repoId={repoId} number={number} />}
+
           <PrSidebarBlock title="Assignees">
             {(pr.assignees?.length ?? 0) === 0
               ? <span className="prd-side-empty">No one</span>

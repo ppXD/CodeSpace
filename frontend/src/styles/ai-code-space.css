@@ -1008,6 +1008,26 @@
   display: flex; flex-direction: column;
 }
 
+/* ── Review action (submit-as-me) ── verdict picker + comment + submit, in a sidebar block. */
+.acs-root .prd-review-opts { display: flex; gap: 4px; margin-bottom: 8px; }
+.acs-root .prd-review-opt {
+  flex: 1; padding: 5px 4px; font-size: 11px; font-weight: 500;
+  border: 1px solid var(--line); border-radius: 7px; background: var(--bg);
+  color: var(--ink-2); cursor: pointer; transition: background .12s, border-color .12s, color .12s;
+}
+.acs-root .prd-review-opt:hover { border-color: var(--accent); }
+.acs-root .prd-review-opt.is-active { background: var(--accent-soft); border-color: var(--accent); color: var(--ink); }
+.acs-root .prd-review-body {
+  width: 100%; box-sizing: border-box; resize: vertical; font: inherit; font-size: 12.5px;
+  padding: 7px 9px; border: 1px solid var(--line); border-radius: 8px;
+  background: var(--bg); color: var(--ink); margin-bottom: 8px;
+}
+.acs-root .prd-review-body:focus { outline: none; border-color: var(--accent); }
+.acs-root .prd-review-msg { font-size: 12px; margin-bottom: 8px; display: flex; align-items: center; gap: 5px; }
+.acs-root .prd-review-msg-err { color: var(--danger); }
+.acs-root .prd-review-msg-ok { color: var(--accent); }
+.acs-root .prd-review-submit { width: 100%; }
+
 .acs-root .prd-user-chip {
   display: inline-flex; align-items: center; gap: 6px;
   font-size: 12.5px; color: var(--ink-2);

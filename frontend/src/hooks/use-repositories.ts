@@ -1,7 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import { repositoriesApi, type BindRepositoriesBulkInput } from "@/api/repositories";
-import type { PullRequestState } from "@/api/types";
+import type { PullRequestReviewVerdict, PullRequestState } from "@/api/types";
 
 /** Page size for PR list pagination — matches the backend default. Same value
  *  is used by the "has next page" inference (`page.length === PR_PAGE_SIZE`)
@@ -135,6 +135,20 @@ export function useRepositoryPullRequest(repositoryId: string | null, number: nu
     queryFn: () => repositoriesApi.getPullRequest(repositoryId!, number!),
     enabled: repositoryId != null && number != null,
     staleTime: 30_000,
+  });
+}
+
+/**
+ * Submit a review (Approve / RequestChanges / Comment) back to the PR/MR as the caller's own
+ * linked identity. On success, stale the PR's cache family so the detail + reviewers refresh.
+ * The caller handles a 428 actor_identity_required via the ActorIdentityGate (see PrReviewActions).
+ */
+export function useSubmitPullRequestReview(repositoryId: string, number: number) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (input: { verdict: PullRequestReviewVerdict; body?: string | null }) =>
+      repositoriesApi.submitPullRequestReview(repositoryId, number, input),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["repository", repositoryId, "pull-requests"] }),
   });
 }
 
