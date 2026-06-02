@@ -34,6 +34,7 @@ export function Sidebar() {
     || pathname.startsWith("/repositories")
     || /^\/teams\/[^/]+\/(repositories|projects)/.test(pathname);
   const isWorkflowsActive = /^\/teams\/[^/]+\/workflows/.test(pathname);
+  const isIdentitiesActive = /^\/teams\/[^/]+\/identities/.test(pathname);
 
   // ── Team switcher ────────────────────────────────────────────────────────────
   const [teamOpen, setTeamOpen] = useState(false);
@@ -297,6 +298,21 @@ export function Sidebar() {
         >
           <span className="sb-nav-ic"><Ic.Workflow size={15} /></span>
           <span className="sb-nav-lbl">Workflows</span>
+        </div>
+        <div
+          className="sb-nav-item"
+          data-active={isIdentitiesActive}
+          onClick={() => {
+            // Per-user connected identities (Model B) are team-scoped via the active team's
+            // provider instances — no-op until /me resolves the active team (same as the rows above).
+            if (active) {
+              navigate({ to: "/teams/$teamSlug/identities", params: { teamSlug: teamToUrlSlug(active) } });
+            }
+          }}
+          title="Connected identities"
+        >
+          <span className="sb-nav-ic"><Ic.Key size={15} /></span>
+          <span className="sb-nav-lbl">Identities</span>
         </div>
       </nav>
 
