@@ -2316,6 +2316,10 @@ textarea:-webkit-autofill {
 /* Add-field modal extras (manual-start input editor). */
 .acs-root .wf-form-check { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--ink-2); cursor: pointer; }
 .acs-root .wf-form-check input { margin: 0; flex-shrink: 0; }
+/* Boolean field: checkbox before a (label + optional help) text column; top-align so a wrapped hint reads cleanly. */
+.acs-root .wf-form-check-field { align-items: flex-start; }
+.acs-root .wf-form-check-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.acs-root .wf-form-check-label { font-size: 11.5px; font-weight: 500; color: var(--ink-2); }
 .acs-root .wf-form-help-err { font-size: 10.5px; color: #9E3535; line-height: 1.4; }
 .acs-root .wf-form-help-inline { color: var(--muted); font-weight: 400; }
 
@@ -2380,6 +2384,9 @@ textarea:-webkit-autofill {
 .mdl select.wf-form-input { appearance: none; -webkit-appearance: none; background-image: linear-gradient(45deg, transparent 50%, var(--muted-2) 50%), linear-gradient(135deg, var(--muted-2) 50%, transparent 50%); background-position: calc(100% - 13px) 50%, calc(100% - 8px) 50%; background-size: 5px 5px, 5px 5px; background-repeat: no-repeat; padding-right: 24px; }
 .mdl .wf-form-check { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--ink-2); cursor: pointer; }
 .mdl .wf-form-check input { margin: 0; flex-shrink: 0; }
+.mdl .wf-form-check-field { align-items: flex-start; }
+.mdl .wf-form-check-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.mdl .wf-form-check-label { font-size: 11.5px; font-weight: 500; color: var(--ink-2); }
 
 /* Generic Claude-style checkbox. Plain browser checkboxes render as a heavy black box in the
    warm palette (worst on dark mode), so theme every checkbox in the app + modals: --line border
