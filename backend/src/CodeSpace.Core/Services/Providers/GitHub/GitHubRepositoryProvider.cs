@@ -5,6 +5,7 @@ using CodeSpace.Core.Services.Providers.Capabilities;
 using CodeSpace.Core.Services.Providers.Resilience;
 using CodeSpace.Messages.Dtos.Providers;
 using CodeSpace.Messages.Events;
+using CodeSpace.Messages.Exceptions;
 using Octokit;
 using FileChangeStatus = CodeSpace.Messages.Enums.FileChangeStatus;
 using PullRequestState = CodeSpace.Messages.Enums.PullRequestState;
@@ -15,7 +16,7 @@ using ProviderKind = CodeSpace.Messages.Enums.ProviderKind;
 
 namespace CodeSpace.Core.Services.Providers.GitHub;
 
-public sealed class GitHubRepositoryProvider : IRepositoryCatalogCapability, IPullRequestCatalogCapability, IPullRequestCommentCapability, IPullRequestReviewCapability, ICredentialProbeCapability, IWebhookRegistrationCapability, IWebhookSignatureVerifier, IWebhookEventNormalizer
+public sealed class GitHubRepositoryProvider : IRepositoryCatalogCapability, IPullRequestCatalogCapability, IPullRequestCommentCapability, IPullRequestReviewCapability, IRepositoryAccessCapability, ICredentialProbeCapability, IWebhookRegistrationCapability, IWebhookSignatureVerifier, IWebhookEventNormalizer
 {
     private readonly IProviderAuthResolver _authResolver;
     private readonly IExternalCallResilience _resilience;
@@ -354,6 +355,29 @@ public sealed class GitHubRepositoryProvider : IRepositoryCatalogCapability, IPu
         catch (Exception ex)
         {
             return new CredentialProbeResult { IsValid = false, Error = ex.Message };
+        }
+    }
+
+    public async Task<RepositoryActorAccess> GetActorAccessAsync(ProviderContext context, RemoteRepository repository, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var client = await BuildClientAsync(context, cancellationToken).ConfigureAwait(false);
+
+            await _resilience.ExecuteAsync(context.Instance, nameof(GetActorAccessAsync), async _ =>
+            {
+                // GitHub reviews need only READ — if the actor can fetch the repo they can review it
+                // (the "can't approve your own PR" case is a 422 we can't pre-empt here). A private repo
+                // the actor isn't a collaborator on returns 404 → caught below as "no access".
+                await client.Repository.Get(long.Parse(repository.ExternalId)).ConfigureAwait(false);
+                return true;
+            }, cancellationToken).ConfigureAwait(false);
+
+            return RepositoryActorAccess.Allowed;
+        }
+        catch (ProviderApiException ex) when (ex.StatusCode is 403 or 404)
+        {
+            return RepositoryActorAccess.Denied("You don't have access to this repository on GitHub. Ask a maintainer to add you, then try again.");
         }
     }
 

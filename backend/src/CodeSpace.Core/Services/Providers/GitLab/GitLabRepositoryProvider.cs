@@ -12,7 +12,7 @@ using GitLabMergeRequestState = NGitLab.Models.MergeRequestState;
 
 namespace CodeSpace.Core.Services.Providers.GitLab;
 
-public sealed class GitLabRepositoryProvider : IRepositoryCatalogCapability, IPullRequestCatalogCapability, IPullRequestCommentCapability, IPullRequestReviewCapability, ICredentialProbeCapability, IWebhookRegistrationCapability, IWebhookSignatureVerifier, IWebhookEventNormalizer
+public sealed class GitLabRepositoryProvider : IRepositoryCatalogCapability, IPullRequestCatalogCapability, IPullRequestCommentCapability, IPullRequestReviewCapability, IRepositoryAccessCapability, ICredentialProbeCapability, IWebhookRegistrationCapability, IWebhookSignatureVerifier, IWebhookEventNormalizer
 {
     private readonly IProviderAuthResolver _authResolver;
     private readonly IExternalCallResilience _resilience;
@@ -634,6 +634,70 @@ public sealed class GitLabRepositoryProvider : IRepositoryCatalogCapability, IPu
         {
             return null;
         }
+    }
+
+    public async Task<RepositoryActorAccess> GetActorAccessAsync(ProviderContext context, RemoteRepository repository, CancellationToken cancellationToken)
+    {
+        var auth = await _authResolver.ResolveAsync(context, cancellationToken).ConfigureAwait(false);
+        var host = string.IsNullOrWhiteSpace(context.Instance.ApiUrl) ? context.Instance.BaseUrl : context.Instance.ApiUrl;
+        var url = $"{host.TrimEnd('/')}/api/v4/projects/{Uri.EscapeDataString(repository.ExternalId)}";
+
+        using var request = new HttpRequestMessage(HttpMethod.Get, url);
+        request.Headers.TryAddWithoutValidation("Authorization", $"Bearer {auth.Token}");
+        request.Headers.TryAddWithoutValidation("PRIVATE-TOKEN", auth.Token);
+
+        using var response = await _countsHttpClient.SendAsync(request, HttpCompletionOption.ResponseContentRead, cancellationToken).ConfigureAwait(false);
+
+        // Can't even see the project → not a member / no access.
+        if ((int)response.StatusCode is 403 or 404)
+            return RepositoryActorAccess.Denied("You're not a member of this GitLab project, or can't access it. Ask a maintainer to add you, then try again.");
+
+        // Inconclusive (transient / unexpected) — never block a legitimate click on a flaky probe; the write stays the backstop.
+        if (!response.IsSuccessStatusCode) return RepositoryActorAccess.Allowed;
+
+        var json = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
+        var level = ParseProjectAccessLevel(json);
+
+        // GitLab levels: Guest 10, Reporter 20, Developer 30, Maintainer 40, Owner 50. Approving / posting
+        // an MR note needs Developer+. Null = visible project but no membership grant → below Developer.
+        const int developer = 30;
+        return level >= developer ? RepositoryActorAccess.Allowed : RepositoryActorAccess.Denied(ReasonForLevel(level));
+    }
+
+    /// <summary>
+    /// Pure parse of GitLab's <c>GET /projects/:id</c> body → the caller's effective access level: the max
+    /// of <c>permissions.project_access.access_level</c> and <c>permissions.group_access.access_level</c>.
+    /// Null when neither is present (a visible project the user holds no membership grant on) or the JSON
+    /// is malformed — callers treat null as "below Developer".
+    /// </summary>
+    internal static int? ParseProjectAccessLevel(string json)
+    {
+        try
+        {
+            using var doc = JsonDocument.Parse(json);
+
+            if (!doc.RootElement.TryGetProperty("permissions", out var perms) || perms.ValueKind != JsonValueKind.Object) return null;
+
+            int? Read(string key) =>
+                perms.TryGetProperty(key, out var access) && access.ValueKind == JsonValueKind.Object
+                && access.TryGetProperty("access_level", out var lvl) && lvl.ValueKind == JsonValueKind.Number
+                    ? lvl.GetInt32() : null;
+
+            var project = Read("project_access");
+            var group = Read("group_access");
+
+            return project == null && group == null ? null : Math.Max(project ?? 0, group ?? 0);
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+    }
+
+    private static string ReasonForLevel(int? level)
+    {
+        var role = level switch { 10 => "Guest", 20 => "Reporter", _ => "below Developer" };
+        return $"Your GitLab role on this project is {role} — reviewing needs Developer or higher. Ask a maintainer to raise your access, then try again.";
     }
 
     public async Task<RemoteWebhook?> FindWebhookByCallbackUrlAsync(ProviderContext context, RemoteRepository repository, string callbackUrl, CancellationToken cancellationToken)
