@@ -379,6 +379,12 @@ public sealed class GitHubRepositoryProvider : IRepositoryCatalogCapability, IPu
         {
             return RepositoryActorAccess.Denied("You don't have access to this repository on GitHub. Ask a maintainer to add you, then try again.");
         }
+        catch
+        {
+            // Inconclusive (network blip / transient / a scope gap on the read) — never block a
+            // legitimate click on a flaky probe. The write path stays the backstop.
+            return RepositoryActorAccess.Allowed;
+        }
     }
 
     public async Task<RemoteWebhook?> FindWebhookByCallbackUrlAsync(ProviderContext context, RemoteRepository repository, string callbackUrl, CancellationToken cancellationToken)

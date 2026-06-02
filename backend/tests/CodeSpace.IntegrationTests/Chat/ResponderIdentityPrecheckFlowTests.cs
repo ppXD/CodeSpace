@@ -83,6 +83,33 @@ public class ResponderIdentityPrecheckFlowTests
             .ShouldBe(WorkflowRunStatus.Success, "with a linked identity the click resolves the wait and git.pr_review submits as the responder");
     }
 
+    [Fact]
+    public async Task Linked_responder_without_repo_permission_is_refused_and_the_wait_stays_open()
+    {
+        var (teamId, ownerId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var channelId = await SeedChannelAsync(teamId, ownerId);
+        // Identity IS linked (the 428 check passes) — but the repo's access probe DENIES (the "noaccess"
+        // marker external id makes the test provider report no membership). The pre-flight must refuse the
+        // click HERE, before the wait resolves, so the clicker learns it in chat instead of a false success.
+        var (repoId, providerInstanceId) = await SeedRepoAsync(teamId, ownerId, linkIdentity: true, externalId: "noaccess-" + Guid.NewGuid().ToString("N")[..8]);
+
+        var workflowId = await CreateWorkflowAsync(teamId, ownerId, ReviewDefinition(channelId, ownerId, repoId));
+        var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
+
+        await RunEngineAsync(runId);
+        var messageId = await ReadPostedMessageIdAsync(runId);
+
+        var ex = await Should.ThrowAsync<ActorRepoPermissionDeniedException>(() => RespondAsync(teamId, messageId, ownerId));
+        ex.ProviderInstanceId.ShouldBe(providerInstanceId);
+        ex.RepositoryPath.ShouldBe("acme/api");
+        ex.Reason.ShouldNotBeNullOrEmpty("the client needs the reason to show on the card");
+
+        using var verify = _fixture.BeginScope();
+        var db = verify.Resolve<CodeSpaceDbContext>();
+        (await db.WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == runId)).Status
+            .ShouldBe(WorkflowRunStatus.Suspended, "no repo permission → the click is refused BEFORE the wait resolves; the run stays parked — no false success, no background failure");
+    }
+
     // ─── Helpers ────────────────────────────────────────────────────────────────
 
     private async Task RespondAsync(Guid teamId, Guid messageId, Guid actorUserId)
@@ -108,7 +135,7 @@ public class ResponderIdentityPrecheckFlowTests
     }
 
     /// <summary>Seed a Git provider instance + connection-credentialled repo under the existing team; optionally link the owner's own identity on that instance.</summary>
-    private async Task<(Guid RepositoryId, Guid ProviderInstanceId)> SeedRepoAsync(Guid teamId, Guid ownerId, bool linkIdentity)
+    private async Task<(Guid RepositoryId, Guid ProviderInstanceId)> SeedRepoAsync(Guid teamId, Guid ownerId, bool linkIdentity, string? externalId = null)
     {
         using var scope = _fixture.BeginScope();
         var db = scope.Resolve<CodeSpaceDbContext>();
@@ -131,7 +158,7 @@ public class ResponderIdentityPrecheckFlowTests
         var repo = new Repository
         {
             Id = Guid.NewGuid(), TeamId = teamId, ProviderInstanceId = instance.Id, CredentialId = connection.Id,
-            ExternalId = $"ext-{suffix}", NamespacePath = "acme", Name = "api", FullPath = "acme/api",
+            ExternalId = externalId ?? $"ext-{suffix}", NamespacePath = "acme", Name = "api", FullPath = "acme/api",
             DefaultBranch = "main", Visibility = RepositoryVisibility.Private, WebUrl = "https://git.local/acme/api", Status = RepositoryStatus.Active
         };
 
