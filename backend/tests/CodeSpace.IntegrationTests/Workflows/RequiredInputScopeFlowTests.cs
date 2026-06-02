@@ -18,41 +18,28 @@ namespace CodeSpace.IntegrationTests.Workflows;
 
 /// <summary>
 /// End-to-end coverage for <see cref="MissingRequiredInputValidator"/> wired into the engine's
-/// fresh-run scope build. Closes Rule 9 three-tier coverage on the required-input enforcement
-/// — unit tests pin the validator in isolation, this suite proves the engine wiring + the
-/// mode propagation through real Postgres.
+/// fresh-run scope build. Closes Rule 9 three-tier coverage on required-input enforcement —
+/// unit tests pin the validator in isolation, this suite proves the engine wiring through real
+/// Postgres.
 ///
-/// <para>Observable signal: same as ProjectScopeFlowTests — the Terminal node echoes its
-/// resolved Inputs into <c>WorkflowRun.OutputsJson</c>, so we can check what the resolver
-/// did with the missing required input.</para>
+/// <para>Observable signal: the Terminal node echoes its resolved Inputs into
+/// <c>WorkflowRun.OutputsJson</c>, so we can check what the resolver did with the input.</para>
 ///
 /// <para>Coverage:</para>
 /// <list type="number">
-///   <item>Happy path — Required input supplied → run succeeds, OutputsJson carries the
-///         resolved value.</item>
-///   <item>Required input with Default + caller omitted — run succeeds (the Default
-///         populates the bag; validator sees nothing missing).</item>
-///   <item>Required input + no Default + caller omitted, Warn mode (default) — run
-///         completes Success, missing ref resolves to null in OutputsJson, validator log
-///         emitted but no exception.</item>
-///   <item>Required input + no Default + caller omitted, Strict mode — run lands in
-///         Failure with the validator's actionable error in <c>WorkflowRun.Error</c>;
-///         no node ever runs (bootstrap-phase failure).</item>
+///   <item>Required input supplied by the caller → run succeeds, OutputsJson carries the value.</item>
+///   <item>Required input with a Default + caller omits → run succeeds (the Default populates the
+///         bag; validator sees nothing missing).</item>
+///   <item>Required input + no Default + caller omits → run lands in Failure with the validator's
+///         actionable error in <c>WorkflowRun.Error</c>; no node ever runs (bootstrap-phase failure).</item>
 /// </list>
-///
-/// <para>Env-var safety mirrors ProjectScopeFlowTests: tests SET
-/// <c>CODESPACE_MISSING_REQUIRED_INPUT_ENFORCEMENT</c> on the process for Strict-mode
-/// coverage; <see cref="PostgresCollection"/> serialises every IntegrationTests class so
-/// concurrent runs cannot read a stale env; <see cref="IDisposable"/> always clears.</para>
 /// </summary>
 [Collection(PostgresCollection.Name)]
 [Trait("Category", "Integration")]
-public class RequiredInputScopeFlowTests : IDisposable
+public class RequiredInputScopeFlowTests
 {
     private readonly PostgresFixture _fixture;
     public RequiredInputScopeFlowTests(PostgresFixture fixture) { _fixture = fixture; }
-
-    public void Dispose() => Environment.SetEnvironmentVariable(MissingRequiredInputValidator.EnforcementEnvVar, null);
 
     [Fact]
     public async Task Required_input_supplied_by_caller_resolves_to_value()
@@ -75,16 +62,11 @@ public class RequiredInputScopeFlowTests : IDisposable
     [Fact]
     public async Task Required_input_with_default_does_not_trip_validator_when_caller_omits()
     {
-        // Required + Default is a legitimate shape: the field MUST be present in the bag,
-        // but the Default fills it when callers omit. Validator MUST treat this as satisfied.
-        // (A future codebase could decide otherwise — pin the current contract here so the
-        // change is loud.)
+        // Required + Default is a legitimate shape: the field MUST be present in the bag, but the
+        // Default fills it when callers omit. The validator checks actual-bag presence, not the
+        // declaration, so the Default satisfies it and the run succeeds.
         var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
         var def = SingleRequiredInputDefinition(hasDefault: true);
-
-        // Set strict to make this assertion sharper — even under strict, default fills the
-        // gap so validator does not throw.
-        Environment.SetEnvironmentVariable(MissingRequiredInputValidator.EnforcementEnvVar, "strict");
 
         var workflowId = await CreateWorkflowAsync(teamId, userId, def);
         var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId, payloadJson: "{}");
@@ -93,9 +75,8 @@ public class RequiredInputScopeFlowTests : IDisposable
 
         var run = await LoadRunAsync(runId);
         run.Status.ShouldBe(WorkflowRunStatus.Success,
-            customMessage: "Default fills the missing required input even under Strict — validator must NOT throw " +
-                           "when BuildInputScope populated the name. A failure here means the validator is checking declaration " +
-                           "instead of actual-bag presence");
+            customMessage: "Default fills the missing required input — the validator must NOT throw when " +
+                           "BuildInputScope populated the name. A failure here means the validator is checking declaration instead of actual-bag presence");
         run.Error.ShouldBeNull();
 
         using var outputs = JsonDocument.Parse(run.OutputsJson!);
@@ -104,41 +85,13 @@ public class RequiredInputScopeFlowTests : IDisposable
     }
 
     [Fact]
-    public async Task Missing_required_input_under_default_warn_mode_resolves_to_null_and_run_succeeds()
+    public async Task Missing_required_input_without_default_fails_the_run_with_actionable_error()
     {
-        // Default (Warn) preserves backward compat: the validator logs a warning but the
-        // run still succeeds. The missing input shows up as null in OutputsJson because
-        // BuildInputScope omitted the key entirely.
+        // No caller value + no Default → the input is absent from the bag. The validator throws
+        // MissingRequiredInputException, which the engine catches as a bootstrap-phase failure and
+        // records on WorkflowRun.Error, instead of letting {{input.customer_email}} resolve to null.
         var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
         var def = SingleRequiredInputDefinition(hasDefault: false);
-
-        Environment.SetEnvironmentVariable(MissingRequiredInputValidator.EnforcementEnvVar, null);
-
-        var workflowId = await CreateWorkflowAsync(teamId, userId, def);
-        var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId, payloadJson: "{}");
-
-        await RunEngineAsync(runId);
-
-        var run = await LoadRunAsync(runId);
-        run.Status.ShouldBe(WorkflowRunStatus.Success,
-            customMessage: "Default (Warn) mode MUST NOT fail the run for a missing required input. " +
-                           "A Failure here means either the validator's default flipped to Strict, or the env-var dispose " +
-                           "from a previous test leaked Strict into this process");
-        run.Error.ShouldBeNull("Warn mode produces no run-row error");
-
-        using var outputs = JsonDocument.Parse(run.OutputsJson!);
-        outputs.RootElement.GetProperty("resolved").ValueKind.ShouldBe(JsonValueKind.Null,
-            customMessage: "BuildInputScope omitted the key → resolver returns null → Terminal's Inputs serialize as null. " +
-                           "If a literal string is here, the resolver is leaking the {{input.customer_email}} text");
-    }
-
-    [Fact]
-    public async Task Missing_required_input_under_strict_mode_lands_run_in_failure_with_actionable_error()
-    {
-        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
-        var def = SingleRequiredInputDefinition(hasDefault: false);
-
-        Environment.SetEnvironmentVariable(MissingRequiredInputValidator.EnforcementEnvVar, "strict");
 
         var workflowId = await CreateWorkflowAsync(teamId, userId, def);
         var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId, payloadJson: "{}");
@@ -147,20 +100,17 @@ public class RequiredInputScopeFlowTests : IDisposable
 
         var run = await LoadRunAsync(runId);
         run.Status.ShouldBe(WorkflowRunStatus.Failure,
-            customMessage: "Strict mode MUST fail the run when a Required input is missing AND has no Default. " +
-                           "Success here means the engine swallowed the validator's exception, or the env var didn't propagate to the engine's call site");
+            customMessage: "A Required input with no Default and no caller value MUST fail the run. Success here means " +
+                           "the engine swallowed the validator's exception, or the validator never wired into scope-build");
 
-        run.Error.ShouldNotBeNull("Strict failure must surface a message on the run row for the operator to triage");
+        run.Error.ShouldNotBeNull("the failure must surface a message on the run row for the operator to triage");
         run.Error.ShouldContain(nameof(MissingRequiredInputException),
             customMessage: "the engine's bootstrap-failure wrapper prefixes the exception type name — operators grep the run row for the failure class");
         run.Error.ShouldContain("customer_email",
             customMessage: "the validator's message must name the missing input so the operator knows WHICH declaration to add a Default to / which caller to update");
-        run.Error.ShouldContain(MissingRequiredInputValidator.EnforcementEnvVar,
-            customMessage: "the message must surface the env-var name so the operator can flip back to warn while triaging");
 
-        // Defensive: zero node-statuses got recorded — the bootstrap failure happened BEFORE
-        // the walker started, so no node ever ran. A non-empty node map means the validator
-        // wired in too late (mid-walk rather than at scope-build).
+        // Defensive: zero node-statuses got recorded — the bootstrap failure happened BEFORE the
+        // walker started, so no node ever ran. A non-empty map means the validator wired in too late.
         var nodes = await LoadRunNodesAsync(runId);
         nodes.ShouldBeEmpty(
             customMessage: "scope-build failure must short-circuit BEFORE any node executes — a non-empty node map here means the validator wired in too late");
