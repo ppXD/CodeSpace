@@ -1,6 +1,8 @@
 using System.Text.Json;
 using CodeSpace.Core.Services.PullRequests;
+using CodeSpace.Messages.Dtos.Providers;
 using CodeSpace.Messages.Enums;
+using CodeSpace.Messages.Exceptions;
 using Microsoft.Extensions.Logging;
 
 namespace CodeSpace.Core.Services.Workflows.Nodes.Builtin;
@@ -79,16 +81,27 @@ public sealed class GitPrReviewNode : INodeRuntime
         // ledger small; the service enforces the body-required-for-comment/request-changes rule and
         // throws on failure — the engine records the node failure with its message. actAsUserId, when
         // wired, makes the service authenticate as that user's own linked identity (Model B).
-        var review = await context.Observability.TraceExternalCallAsync(
-            target: $"git.submit_review:{repoId}:{number}",
-            method: "submit_review",
-            requestPayload: JsonSerializer.SerializeToElement(new { repository_id = repoId, pull_request_number = number, verdict = verdict.ToString(), body_chars = body?.Length ?? 0, act_as_user_id = actAsUserId }),
-            action: ct => _prService.SubmitReviewAsync(repoId, number, verdict, body, actAsUserId, ct),
-            completionExtractor: result => new ExternalCallCompletion
-            {
-                ResponsePayload = JsonSerializer.SerializeToElement(new { verdict = result.Verdict.ToString(), url = result.WebUrl })
-            },
-            cancellationToken: cancellationToken).ConfigureAwait(false);
+        RemotePullRequestReview review;
+        try
+        {
+            review = await context.Observability.TraceExternalCallAsync(
+                target: $"git.submit_review:{repoId}:{number}",
+                method: "submit_review",
+                requestPayload: JsonSerializer.SerializeToElement(new { repository_id = repoId, pull_request_number = number, verdict = verdict.ToString(), body_chars = body?.Length ?? 0, act_as_user_id = actAsUserId }),
+                action: ct => _prService.SubmitReviewAsync(repoId, number, verdict, body, actAsUserId, ct),
+                completionExtractor: result => new ExternalCallCompletion
+                {
+                    ResponsePayload = JsonSerializer.SerializeToElement(new { verdict = result.Verdict.ToString(), url = result.WebUrl })
+                },
+                cancellationToken: cancellationToken).ConfigureAwait(false);
+        }
+        // A provider scope / permission / not-found failure isn't an engine bug — turn the typed
+        // exception into a clean, actionable node failure so the run trace AND a chat.post_message
+        // wired to this node's `error` handle tell the clicker WHY the review didn't land, instead
+        // of leaking a raw SDK string. (Identity existence is gated up front at respond time → 428;
+        // repo-level permission is only knowable here, at write time.)
+        catch (ProviderInsufficientScopeException ex) { return NodeResult.Fail(DescribeWriteFailure(ex, number)); }
+        catch (ProviderApiException ex) { return NodeResult.Fail(DescribeWriteFailure(ex, number)); }
 
         context.Logger.LogInformation("Submitted {Verdict} review for repo {RepoId} PR #{Num}", verdict, repoId, number);
 
@@ -100,6 +113,25 @@ public sealed class GitPrReviewNode : INodeRuntime
 
         return NodeResult.Ok(outputs);
     }
+
+    /// <summary>
+    /// A clean, actionable message for a typed provider write failure — surfaced as the node's
+    /// failure (and on its <c>error</c> handle), so a chat.post_message can tell the clicker WHY
+    /// their review didn't land instead of leaking a raw SDK string. Scope gap vs no-permission
+    /// (403) vs not-found (404) each get their own remediation.
+    /// </summary>
+    private static string DescribeWriteFailure(Exception ex, int number) => ex switch
+    {
+        ProviderInsufficientScopeException scope =>
+            $"Couldn't submit the review: your {scope.ProviderKind} token is missing the {string.Join(", ", scope.MissingScopes)} scope. Re-link your identity with that scope, then try again.",
+        ProviderApiException { StatusCode: 403 } api =>
+            $"Couldn't submit the review to PR #{number}: {api.ProviderKind} refused it — your identity may not have review/write permission on this repository. Get access, then try again.",
+        ProviderApiException { StatusCode: 404 } api =>
+            $"Couldn't submit the review: {api.ProviderKind} couldn't find PR #{number}, or your identity can't access this repository.",
+        ProviderApiException api =>
+            $"Couldn't submit the review to PR #{number}: {api.ProviderKind} returned HTTP {api.StatusCode}.",
+        _ => $"Couldn't submit the review to PR #{number}: {ex.Message}",
+    };
 
     private static bool TryReadRepositoryId(NodeRunContext context, out Guid repoId)
     {

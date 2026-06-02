@@ -5,6 +5,7 @@ using CodeSpace.Core.Services.Workflows.Nodes.Builtin;
 using CodeSpace.Core.Services.Workflows.Runtime;
 using CodeSpace.Messages.Dtos.Providers;
 using CodeSpace.Messages.Enums;
+using CodeSpace.Messages.Exceptions;
 using Microsoft.Extensions.Logging.Abstractions;
 using Shouldly;
 
@@ -22,10 +23,12 @@ public class GitPrReviewNodeTests
         public string? Body;
         public Guid? ActorUserId;
         public int Calls;
+        public Exception? ThrowOnReview;
 
         public Task<RemotePullRequestReview> SubmitReviewAsync(Guid repositoryId, int number, PullRequestReviewVerdict verdict, string? body, Guid? actorUserId, CancellationToken cancellationToken)
         {
             RepoId = repositoryId; Number = number; Verdict = verdict; Body = body; ActorUserId = actorUserId; Calls++;
+            if (ThrowOnReview != null) throw ThrowOnReview;
             return Task.FromResult(new RemotePullRequestReview { Verdict = verdict, ExternalId = "rev-1", WebUrl = "https://example.test/review/1" });
         }
 
@@ -112,6 +115,43 @@ public class GitPrReviewNodeTests
 
         result.Status.ShouldBe(NodeStatus.Failure);
         result.Error.ShouldContain("verdict");
+    }
+
+    [Fact]
+    public async Task Provider_insufficient_scope_fails_with_an_actionable_scope_message()
+    {
+        var stub = new StubPrService { ThrowOnReview = new ProviderInsufficientScopeException(ProviderKind.GitLab, "IPullRequestReviewCapability", new[] { "api" }, Array.Empty<string>(), "hint") };
+
+        var result = await new GitPrReviewNode(stub).RunAsync(BuildContext(Repo, 42, "approve", null), CancellationToken.None);
+
+        result.Status.ShouldBe(NodeStatus.Failure);
+        result.Error.ShouldContain("api");
+        result.Error.ShouldContain("scope");
+        result.Error!.ShouldNotContain("HTTP", customMessage: "a scope gap must read as a scope message, not a raw SDK string");
+    }
+
+    [Fact]
+    public async Task Provider_403_fails_with_a_permission_message_not_a_scope_message()
+    {
+        var stub = new StubPrService { ThrowOnReview = new ProviderApiException(ProviderKind.GitLab, 403, "SubmitReviewAsync", "403 Forbidden", new Exception()) };
+
+        var result = await new GitPrReviewNode(stub).RunAsync(BuildContext(Repo, 42, "approve", null), CancellationToken.None);
+
+        result.Status.ShouldBe(NodeStatus.Failure);
+        result.Error.ShouldContain("permission");
+        result.Error!.ShouldNotContain("scope", customMessage: "a 403 is a permission problem — must not be mislabelled a scope gap");
+    }
+
+    [Fact]
+    public async Task Provider_404_fails_with_a_not_found_message()
+    {
+        var stub = new StubPrService { ThrowOnReview = new ProviderApiException(ProviderKind.GitHub, 404, "SubmitReviewAsync", "Not Found", new Exception()) };
+
+        var result = await new GitPrReviewNode(stub).RunAsync(BuildContext(Repo, 7, "approve", null), CancellationToken.None);
+
+        result.Status.ShouldBe(NodeStatus.Failure);
+        result.Error.ShouldContain("couldn't find");
+        result.Error.ShouldContain("#7");
     }
 
     [Fact]

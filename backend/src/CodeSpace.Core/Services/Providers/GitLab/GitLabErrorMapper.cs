@@ -9,13 +9,16 @@ namespace CodeSpace.Core.Services.Providers.GitLab;
 /// <summary>
 /// Maps NGitLab's <see cref="GitLabException"/> to <see cref="ProviderInsufficientScopeException"/>.
 ///
-/// GitLab returns 403/401 with either:
-///   • A JSON body containing <c>{"error": "insufficient_scope", "scope": "api"}</c> (OAuth-style)
-///   • A bare 403 with <c>"403 Forbidden"</c> message (PAT or scope-too-narrow on REST)
-///   • A 401 with <c>"401 Unauthorized"</c> — bad token, NOT scope (caller handles separately)
-///
-/// We map the first two. The token-scope is read from the error body if present; otherwise
-/// we guess <c>api</c> (the only scope that covers webhook writes).
+/// GitLab returns a 403 in two shapes we treat very differently:
+///   • Tagged <c>{"error":"insufficient_scope","scope":"api"}</c> (OAuth-style) — a real SCOPE gap;
+///     we map it to <see cref="ProviderInsufficientScopeException"/> with the named scope.
+///   • A bare <c>"403 Forbidden"</c> — almost always a PERMISSION/membership problem (the actor
+///     isn't a project member, their role is too low, or a protected-branch / approval rule blocks
+///     them), NOT a scope gap. We DON'T map it (return null) so it falls through to
+///     <c>ProviderApiException(403)</c> and the caller renders an accurate "you may lack
+///     access/permission" message — rather than a misleading "missing api scope" that sends the
+///     user to re-link a token that's already fine.
+/// (A 401 is a bad/revoked token — a different path, not handled here.)
 /// </summary>
 public sealed class GitLabErrorMapper : IProviderErrorMapper, ISingletonDependency
 {
@@ -25,25 +28,29 @@ public sealed class GitLabErrorMapper : IProviderErrorMapper, ISingletonDependen
     {
         if (exception is not GitLabException gl) return null;
 
-        var statusCode = (int)gl.StatusCode;
+        return ClassifyScope((int)gl.StatusCode, gl.ErrorObject?.ToString(), gl.ErrorMessage ?? gl.Message, operationName);
+    }
 
+    /// <summary>
+    /// Pure classification of a GitLab failure (decoupled from the NGitLab exception type for unit
+    /// testability). ONLY a 403 explicitly tagged <c>insufficient_scope</c> is a real scope gap → a
+    /// typed exception naming the scope (from the body's <c>"scope":"X"</c>, defaulting to <c>api</c>).
+    /// Every other status — including a BARE 403 (a permission/membership problem: not a project
+    /// member, role too low, protected-branch / approval rule) — returns null, so the caller falls
+    /// through to <c>ProviderApiException(403)</c> and an accurate "you may lack access/permission"
+    /// message, rather than a misleading "missing api scope" that sends the user to re-link a fine token.
+    /// </summary>
+    internal ProviderInsufficientScopeException? ClassifyScope(int statusCode, string? body, string? hint, string operationName)
+    {
         if (statusCode != 403) return null;
 
-        var body = gl.ErrorObject?.ToString();
-        var hint = gl.ErrorMessage ?? gl.Message;
-
-        // Best-effort parse of GitLab's structured error_description.
-        // {"error":"insufficient_scope","error_description":"...","scope":"api"}
         if (!string.IsNullOrEmpty(body) && body.Contains("insufficient_scope", StringComparison.OrdinalIgnoreCase))
         {
             var requiredScope = ExtractRequiredScope(body) ?? "api";
             return new ProviderInsufficientScopeException(Kind, operationName, new[] { requiredScope }, Array.Empty<string>(), hint);
         }
 
-        // 403 without "insufficient_scope" tag: webhook write attempted with read-only token,
-        // OAuth token from app missing api scope. Default-guess `api` since it's the umbrella
-        // scope covering every write GitLab capability we currently use.
-        return new ProviderInsufficientScopeException(Kind, operationName, new[] { "api" }, Array.Empty<string>(), hint);
+        return null;
     }
 
     /// <summary>
