@@ -1,3 +1,4 @@
+using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Messages.Dtos.Providers;
 
 namespace CodeSpace.Core.Services.Providers.Identity;
@@ -23,4 +24,14 @@ public interface IUserProviderIdentityService
 
     /// <summary>Unlink one of the caller's identities (soft-delete the identity + its credential). No-op if already gone.</summary>
     Task UnlinkAsync(Guid identityId, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Ensure <paramref name="userId"/> has an act-as-user identity on <paramref name="instance"/>
+    /// backed by an ALREADY-created credential (the OAuth-complete path — the credential is built by
+    /// the OAuth flow, not here). Probes the credential for the provider user, then either re-points
+    /// the user's existing live identity to this credential or creates a new one. NON-destructive: it
+    /// never revokes another credential (unlike the PAT replace-in-place path). The caller persists —
+    /// no SaveChanges here. Throws if the probe fails (caller decides whether that's fatal).
+    /// </summary>
+    Task EnsureIdentityForCredentialAsync(ProviderInstance instance, Credential credential, Guid userId, CancellationToken cancellationToken);
 }

@@ -3,6 +3,7 @@ using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Credentials;
 using CodeSpace.Core.Services.Identity;
+using CodeSpace.Core.Services.Providers.Identity;
 using CodeSpace.Core.Settings.OAuth;
 using CodeSpace.Messages.Commands.Credentials;
 using CodeSpace.Messages.Credentials;
@@ -26,9 +27,10 @@ public sealed class OAuthFlowService : IOAuthFlowService, IScopedDependency
     private readonly ICredentialPayloadSerializer _serializer;
     private readonly ICurrentTeam _currentTeam;
     private readonly ICurrentUser _currentUser;
+    private readonly IUserProviderIdentityService _identityService;
     private readonly OAuthCallbackUrlSetting _callbackUrlSetting;
 
-    public OAuthFlowService(CodeSpaceDbContext db, IOAuthClientRegistry oauthClients, IOAuthStateStore stateStore, IPkceGenerator pkce, IPayloadEncryptor encryptor, ICredentialPayloadSerializer serializer, ICurrentTeam currentTeam, ICurrentUser currentUser, OAuthCallbackUrlSetting callbackUrlSetting)
+    public OAuthFlowService(CodeSpaceDbContext db, IOAuthClientRegistry oauthClients, IOAuthStateStore stateStore, IPkceGenerator pkce, IPayloadEncryptor encryptor, ICredentialPayloadSerializer serializer, ICurrentTeam currentTeam, ICurrentUser currentUser, IUserProviderIdentityService identityService, OAuthCallbackUrlSetting callbackUrlSetting)
     {
         _db = db;
         _oauthClients = oauthClients;
@@ -38,6 +40,7 @@ public sealed class OAuthFlowService : IOAuthFlowService, IScopedDependency
         _serializer = serializer;
         _currentTeam = currentTeam;
         _currentUser = currentUser;
+        _identityService = identityService;
         _callbackUrlSetting = callbackUrlSetting;
     }
 
@@ -83,14 +86,35 @@ public sealed class OAuthFlowService : IOAuthFlowService, IScopedDependency
         var (clientId, clientSecret) = ReadOAuthClientCredentials(instance);
 
         var token = await ExchangeCodeAsync(instance, clientId, clientSecret, code, pending.CodeVerifier, cancellationToken).ConfigureAwait(false);
-        var credentialId = PersistCredential(pending, instance, token);
+        var credential = PersistCredential(pending, instance, token);
+
+        if (pending.IntendedOwnerUserId is Guid ownerId)
+            await LinkActorIdentityBestEffortAsync(instance, credential, ownerId, cancellationToken).ConfigureAwait(false);
 
         return new CompleteCredentialOAuthResult
         {
-            CredentialId = credentialId,
+            CredentialId = credential.Id,
             TeamId = pending.TeamId,
             ReturnUrl = pending.ReturnUrl ?? "/"
         };
+    }
+
+    /// <summary>
+    /// Give the freshly-connected OAuth credential an act-as-user identity, so "act as me" features
+    /// (e.g. PR review-as-me) work for OAuth users, not just PAT users. Best-effort: a probe hiccup
+    /// right after a valid token exchange must NOT fail the whole connect — the credential is already
+    /// valid for repo operations, and the user can reconnect to retry the identity link.
+    /// </summary>
+    private async Task LinkActorIdentityBestEffortAsync(ProviderInstance instance, Credential credential, Guid ownerId, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await _identityService.EnsureIdentityForCredentialAsync(instance, credential, ownerId, cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            Serilog.Log.Warning(ex, "[OAuthFlow] Connected credential {CredentialId} but could not link an act-as-user identity for user {UserId}; act-as-me stays unavailable until reconnect", credential.Id, ownerId);
+        }
     }
 
     private async Task<ProviderInstance> LoadOwnedInstanceAsync(Guid id, CancellationToken cancellationToken)
@@ -133,7 +157,7 @@ public sealed class OAuthFlowService : IOAuthFlowService, IScopedDependency
         }, cancellationToken).ConfigureAwait(false);
     }
 
-    private Guid PersistCredential(OAuthPendingState state, ProviderInstance instance, OAuthTokenResponse token)
+    private Credential PersistCredential(OAuthPendingState state, ProviderInstance instance, OAuthTokenResponse token)
     {
         var payload = new OAuthPayload
         {
@@ -164,7 +188,7 @@ public sealed class OAuthFlowService : IOAuthFlowService, IScopedDependency
         };
 
         _db.Credential.Add(credential);
-        return credential.Id;
+        return credential;
     }
 
     private (string ClientId, string ClientSecret) ReadOAuthClientCredentials(ProviderInstance instance)
