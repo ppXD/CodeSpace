@@ -58,6 +58,8 @@ export type InteractionState = "Open" | "Resolved" | "Expired";
 export interface InteractionButton {
   key: string;
   label: string;
+  /** Optional author note of what this button does — shown to the responder as a tooltip. */
+  description?: string | null;
   style: InteractionButtonStyle;
   /** When true the UI must collect a comment before submitting this button (e.g. "request changes"). */
   requiresComment: boolean;

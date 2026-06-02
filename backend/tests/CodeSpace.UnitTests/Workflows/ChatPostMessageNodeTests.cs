@@ -61,6 +61,20 @@ public class ChatPostMessageNodeTests
     }
 
     [Fact]
+    public async Task Carries_an_optional_button_description_onto_the_component()
+    {
+        var bot = new StubChatBot();
+        var ctx = BuildContext("11111111-1111-1111-1111-111111111111", "Review?",
+            """[{"key":"approve","label":"Approve","description":"Approve + merge"},{"key":"reject","label":"Reject"}]""");
+
+        await new ChatPostMessageNode(bot).RunAsync(ctx, CancellationToken.None);
+
+        var component = bot.Interaction.ShouldNotBeNull().Component.ShouldBeOfType<ActionButtonsComponent>();
+        component.Buttons[0].Description.ShouldBe("Approve + merge", "an author-written button description carries onto the card for the responder's tooltip");
+        component.Buttons[1].Description.ShouldBeNull("description is optional");
+    }
+
+    [Fact]
     public async Task Posts_a_plain_message_with_a_null_token_when_no_actions()
     {
         var bot = new StubChatBot();

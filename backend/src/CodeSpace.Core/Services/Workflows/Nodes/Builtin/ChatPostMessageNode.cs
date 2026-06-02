@@ -47,8 +47,9 @@ public sealed class ChatPostMessageNode : INodeRuntime
                   "items": {
                     "type": "object",
                     "properties": {
-                      "key": { "type": "string", "description": "Returned to the workflow when this button is clicked (e.g. \"approve\")." },
+                      "key": { "type": "string", "description": "What the workflow RECEIVES when this button is clicked — surfaced as the downstream flow.wait_action's outputs.action. The button only emits this signal; what it DOES is whatever you wire downstream (e.g. \"approve\" → a git.pr_review verdict)." },
                       "label": { "type": "string", "description": "Button text shown to the responder." },
+                      "description": { "type": "string", "description": "Optional: what this button does. Shown to the responder as a tooltip on the button, so a click's effect isn't opaque." },
                       "style": { "type": "string", "enum": ["Default","Primary","Danger"], "description": "Visual emphasis." },
                       "requiresComment": { "type": "boolean", "description": "Require the responder to enter a comment before this button submits." }
                     },
@@ -155,10 +156,11 @@ public sealed class ChatPostMessageNode : INodeRuntime
             var label = a.TryGetProperty("label", out var l) && l.ValueKind == JsonValueKind.String ? l.GetString() : null;
             if (string.IsNullOrEmpty(key) || string.IsNullOrEmpty(label)) continue;
 
+            var description = a.TryGetProperty("description", out var d) && d.ValueKind == JsonValueKind.String ? d.GetString() : null;
             var style = a.TryGetProperty("style", out var s) && s.ValueKind == JsonValueKind.String && Enum.TryParse<InteractionButtonStyle>(s.GetString(), ignoreCase: true, out var parsed) ? parsed : InteractionButtonStyle.Default;
             var requiresComment = a.TryGetProperty("requiresComment", out var rc) && rc.ValueKind == JsonValueKind.True;
 
-            buttons.Add(new InteractionButton { Key = key!, Label = label!, Style = style, RequiresComment = requiresComment });
+            buttons.Add(new InteractionButton { Key = key!, Label = label!, Description = description, Style = style, RequiresComment = requiresComment });
         }
 
         return buttons.Count > 0 ? new ActionButtonsComponent { Buttons = buttons } : null;
