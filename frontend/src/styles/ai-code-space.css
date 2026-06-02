@@ -1213,6 +1213,20 @@
    have room to grow either side without something giving. */
 .mdl-foot-info { font-size: 12.5px; color: var(--muted); min-width: 0; flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
+/* Connected identities (Model B) — per-user provider-identity management list. */
+.acs-identities { padding: 20px 24px; max-width: 720px; }
+.acs-identities-head { margin-bottom: 16px; }
+.acs-identities-title { font-size: 16px; font-weight: 600; color: var(--ink); }
+.acs-identities-sub { font-size: 13px; color: var(--muted); margin-top: 4px; }
+.acs-identities-muted { font-size: 13px; color: var(--muted); padding: 12px 0; }
+.acs-identity-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+.acs-identity-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 14px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel); }
+.acs-identity-meta { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.acs-identity-provider { font-size: 13.5px; font-weight: 500; color: var(--ink); }
+.acs-identity-user { font-size: 12.5px; color: var(--accent); }
+.acs-identity-stale { color: var(--muted); }
+.acs-identity-none { font-size: 12.5px; color: var(--muted); }
+
 /* Compact confirm/alert dialog — sits inside the .mdl shell so it inherits the same
    shadow, border, animation, mask. Just narrower and skips the header divider /
    scrollable body of the heavier flows. Used by useConfirm() / useAlert(). */
