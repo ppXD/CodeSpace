@@ -2,8 +2,10 @@ using System.Text.Json;
 using CodeSpace.Core.DependencyInjection;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
+using CodeSpace.Core.Services.Providers.Identity;
 using CodeSpace.Core.Services.Workflows.Engine;
 using CodeSpace.Messages.Dtos.Chat.Interactions;
+using CodeSpace.Messages.Exceptions;
 using Microsoft.EntityFrameworkCore;
 
 namespace CodeSpace.Core.Services.Chat;
@@ -12,11 +14,13 @@ public sealed class MessageInteractionService : IMessageInteractionService, ISco
 {
     private readonly CodeSpaceDbContext _db;
     private readonly IWorkflowResumeService _resume;
+    private readonly IActorIdentityResolver _actorIdentity;
 
-    public MessageInteractionService(CodeSpaceDbContext db, IWorkflowResumeService resume)
+    public MessageInteractionService(CodeSpaceDbContext db, IWorkflowResumeService resume, IActorIdentityResolver actorIdentity)
     {
         _db = db;
         _resume = resume;
+        _actorIdentity = actorIdentity;
     }
 
     public async Task RespondAsync(Guid teamId, Guid messageId, string responseKey, Guid actorUserId, string? comment, IReadOnlyDictionary<string, JsonElement>? values, CancellationToken cancellationToken)
@@ -31,6 +35,7 @@ public sealed class MessageInteractionService : IMessageInteractionService, ISco
         EnsureCommentIfRequired(interaction, responseKey, comment);
         EnsureRequiredFields(interaction, values);
         await EnsureAllowedResponderAsync(teamId, message.ConversationId, interaction, actorUserId, cancellationToken).ConfigureAwait(false);
+        await EnsureResponderIdentityIfRequiredAsync(interaction.Target, actorUserId, cancellationToken).ConfigureAwait(false);
 
         var resolved = await ResolveTargetAsync(interaction.Target, responseKey, actorUserId, comment, values, teamId, cancellationToken).ConfigureAwait(false);
 
@@ -78,6 +83,32 @@ public sealed class MessageInteractionService : IMessageInteractionService, ISco
             .ConfigureAwait(false);
 
         if (!MessageInteractionPolicy.IsAllowedResponder(interaction, actorUserId, isMember)) throw new InvalidOperationException("You are not allowed to respond to this message.");
+    }
+
+    /// <summary>
+    /// When the wait declares it (<see cref="WorkflowWaitTarget.RequiresResponderIdentityForRepositoryId"/>),
+    /// the resumed run will act AS the responder on that repo's provider — so require their linked identity
+    /// FIRST. Throwing here (before the wait resolves) surfaces as 428 actor_identity_required on the
+    /// synchronous respond request, so the client prompts a link + retries; the wait stays open and the run
+    /// never reaches the act-as-user node unlinked. The repo→provider-instance resolution lives here (this
+    /// service owns the DB read) so the post-time node only has to carry the repo id.
+    /// </summary>
+    private async Task EnsureResponderIdentityIfRequiredAsync(InteractionTarget target, Guid actorUserId, CancellationToken cancellationToken)
+    {
+        if (target is not WorkflowWaitTarget { RequiresResponderIdentityForRepositoryId: { } repositoryId }) return;
+
+        var repo = await _db.Repository
+            .Where(r => r.Id == repositoryId && r.DeletedDate == null)
+            .Select(r => new { r.ProviderInstanceId, r.ProviderInstance.Provider })
+            .SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
+
+        // Repo unbound / deleted between post and respond — can't name the provider to require; let the
+        // resume proceed (the downstream node surfaces any failure as before, unchanged).
+        if (repo == null) return;
+
+        var identity = await _actorIdentity.ResolveAsync(actorUserId, repo.ProviderInstanceId, cancellationToken).ConfigureAwait(false);
+
+        if (identity == null) throw new ActorIdentityRequiredException(repo.Provider, repo.ProviderInstanceId);
     }
 
     // ─── Dispatch (route the response to the interaction's target) ──────────────────
