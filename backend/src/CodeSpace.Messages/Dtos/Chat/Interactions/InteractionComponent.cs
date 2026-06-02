@@ -42,6 +42,10 @@ public sealed record InteractionButton
 {
     public required string Key { get; init; }
     public required string Label { get; init; }
+
+    /// <summary>Optional author-written note of what this button does — surfaced to the responder (tooltip) so a click's effect isn't opaque.</summary>
+    public string? Description { get; init; }
+
     public InteractionButtonStyle Style { get; init; } = InteractionButtonStyle.Default;
 
     /// <summary>When true the UI must collect a comment before submitting this button (e.g. "request changes" wants a reason).</summary>

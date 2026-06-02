@@ -89,7 +89,7 @@ export function MessageInteractionCard({ interaction, members, conversationId, m
       ) : (
         <div className="chat-card-actions">
           {component.buttons.map(b => (
-            <button key={b.key} type="button" className={STYLE_CLASS[b.style]} onClick={() => onButtonClick(b)} disabled={pending || !canRespond}>{b.label}</button>
+            <button key={b.key} type="button" title={b.description ?? undefined} className={STYLE_CLASS[b.style]} onClick={() => onButtonClick(b)} disabled={pending || !canRespond}>{b.label}</button>
           ))}
         </div>
       )}
