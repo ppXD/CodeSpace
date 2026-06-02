@@ -20,11 +20,12 @@ public class GitPrReviewNodeTests
         public int Number;
         public PullRequestReviewVerdict Verdict;
         public string? Body;
+        public Guid? ActorUserId;
         public int Calls;
 
-        public Task<RemotePullRequestReview> SubmitReviewAsync(Guid repositoryId, int number, PullRequestReviewVerdict verdict, string? body, CancellationToken cancellationToken)
+        public Task<RemotePullRequestReview> SubmitReviewAsync(Guid repositoryId, int number, PullRequestReviewVerdict verdict, string? body, Guid? actorUserId, CancellationToken cancellationToken)
         {
-            RepoId = repositoryId; Number = number; Verdict = verdict; Body = body; Calls++;
+            RepoId = repositoryId; Number = number; Verdict = verdict; Body = body; ActorUserId = actorUserId; Calls++;
             return Task.FromResult(new RemotePullRequestReview { Verdict = verdict, ExternalId = "rev-1", WebUrl = "https://example.test/review/1" });
         }
 
@@ -52,9 +53,29 @@ public class GitPrReviewNodeTests
         stub.Number.ShouldBe(42);
         stub.Verdict.ShouldBe(PullRequestReviewVerdict.Approve);
         stub.Body.ShouldBe("ship it");
+        stub.ActorUserId.ShouldBeNull("no actAsUserId wired → null → service uses the connection credential");
 
         result.Outputs["verdict"].GetString().ShouldBe("Approve");
         result.Outputs["url"].GetString().ShouldBe("https://example.test/review/1");
+    }
+
+    [Fact]
+    public async Task Passes_actAsUserId_through_when_wired()
+    {
+        var stub = new StubPrService();
+        var actor = Guid.NewGuid();
+        var inputs = new Dictionary<string, JsonElement>
+        {
+            ["repositoryId"] = JsonSerializer.SerializeToElement(Repo),
+            ["number"] = JsonSerializer.SerializeToElement(3),
+            ["verdict"] = JsonSerializer.SerializeToElement("approve"),
+            ["actAsUserId"] = JsonSerializer.SerializeToElement(actor.ToString()),
+        };
+
+        var result = await new GitPrReviewNode(stub).RunAsync(ContextFromInputs(inputs), CancellationToken.None);
+
+        result.Status.ShouldBe(NodeStatus.Success);
+        stub.ActorUserId.ShouldBe(actor, "a wired actAsUserId must reach the service so it acts as that user's identity");
     }
 
     [Fact]

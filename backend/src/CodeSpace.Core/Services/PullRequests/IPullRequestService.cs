@@ -34,6 +34,12 @@ public interface IPullRequestService
     /// (you can't comment / block with nothing to say) and optional for
     /// <see cref="PullRequestReviewVerdict.Approve"/>. Throws <see cref="InvalidOperationException"/> (400)
     /// for a missing repo / missing required body, or on insufficient write scope (422).
+    ///
+    /// <para><paramref name="actorUserId"/> opts into per-user attribution (Model B): when set, the
+    /// write authenticates AS that user's own linked provider identity instead of the repo's
+    /// connection credential — so the review shows up on the provider authored by the human. If they
+    /// haven't linked one, <see cref="Messages.Exceptions.ActorIdentityRequiredException"/> is thrown
+    /// (mapped to <c>actor_identity_required</c>). Null = use the connection credential (unchanged).</para>
     /// </summary>
-    Task<RemotePullRequestReview> SubmitReviewAsync(Guid repositoryId, int number, PullRequestReviewVerdict verdict, string? body, CancellationToken cancellationToken);
+    Task<RemotePullRequestReview> SubmitReviewAsync(Guid repositoryId, int number, PullRequestReviewVerdict verdict, string? body, Guid? actorUserId, CancellationToken cancellationToken);
 }

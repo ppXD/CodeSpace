@@ -3,6 +3,7 @@ using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Providers;
 using CodeSpace.Core.Services.Providers.Capabilities;
+using CodeSpace.Core.Services.Providers.Identity;
 using CodeSpace.Core.Services.Providers.Scopes;
 using CodeSpace.Messages.Dtos.Providers;
 using CodeSpace.Messages.Enums;
@@ -15,12 +16,14 @@ public sealed class PullRequestService : IPullRequestService, IScopedDependency
     private readonly CodeSpaceDbContext _db;
     private readonly IProviderRegistry _registry;
     private readonly IScopeChecker _scopeChecker;
+    private readonly IActorCredentialProvider _actorCredentials;
 
-    public PullRequestService(CodeSpaceDbContext db, IProviderRegistry registry, IScopeChecker scopeChecker)
+    public PullRequestService(CodeSpaceDbContext db, IProviderRegistry registry, IScopeChecker scopeChecker, IActorCredentialProvider actorCredentials)
     {
         _db = db;
         _registry = registry;
         _scopeChecker = scopeChecker;
+        _actorCredentials = actorCredentials;
     }
 
     public async Task<IReadOnlyList<RemotePullRequest>> ListAsync(Guid repositoryId, PullRequestState? state, int page, int perPage, CancellationToken cancellationToken)
@@ -74,7 +77,7 @@ public sealed class PullRequestService : IPullRequestService, IScopedDependency
         return await commentCap.PostCommentAsync(context, remote, number, body, cancellationToken).ConfigureAwait(false);
     }
 
-    public async Task<RemotePullRequestReview> SubmitReviewAsync(Guid repositoryId, int number, PullRequestReviewVerdict verdict, string? body, CancellationToken cancellationToken)
+    public async Task<RemotePullRequestReview> SubmitReviewAsync(Guid repositoryId, int number, PullRequestReviewVerdict verdict, string? body, Guid? actorUserId, CancellationToken cancellationToken)
     {
         // A comment / request-changes verdict needs something to say; approve may stand alone (LGTM).
         if (verdict != PullRequestReviewVerdict.Approve && string.IsNullOrWhiteSpace(body))
@@ -82,14 +85,26 @@ public sealed class PullRequestService : IPullRequestService, IScopedDependency
 
         var repo = await LoadRepositoryAsync(repositoryId, cancellationToken).ConfigureAwait(false);
         EnsureCredentialBound(repo);
-        _scopeChecker.EnsureCapability(repo.Credential!, repo.ProviderInstance.Provider, typeof(IPullRequestReviewCapability));
+
+        // Per-user attribution (Model B): act AS the actor's own linked identity when one is wired,
+        // else fall back to the repo's connection credential (unchanged behaviour). Scope is checked
+        // against whichever credential actually makes the call.
+        var credential = await ResolveActingCredentialAsync(repo, actorUserId, cancellationToken).ConfigureAwait(false);
+        _scopeChecker.EnsureCapability(credential, repo.ProviderInstance.Provider, typeof(IPullRequestReviewCapability));
 
         var reviewCap = _registry.Require<IPullRequestReviewCapability>(repo.ProviderInstance.Provider);
-        var context = new ProviderContext(repo.ProviderInstance, repo.Credential!);
+        var context = new ProviderContext(repo.ProviderInstance, credential);
         var remote = ToRemoteRepository(repo);
 
         return await reviewCap.SubmitReviewAsync(context, remote, number, verdict, body, cancellationToken).ConfigureAwait(false);
     }
+
+    /// <summary>Actor's own credential when <paramref name="actorUserId"/> is set (throws
+    /// ActorIdentityRequiredException if they haven't linked one); otherwise the repo's connection credential.</summary>
+    private async Task<Credential> ResolveActingCredentialAsync(Repository repo, Guid? actorUserId, CancellationToken cancellationToken) =>
+        actorUserId is { } uid
+            ? await _actorCredentials.RequireAsync(uid, repo.ProviderInstance, cancellationToken).ConfigureAwait(false)
+            : repo.Credential!;
 
     /// <summary>
     /// Shared preflight for every PR call: repo lookup → credential null-check →
