@@ -6,7 +6,7 @@ import type { TeamMemberSummary } from "@/api/teams";
 import { MessageBody } from "./MessageBody";
 
 const members = new Map<string, TeamMemberSummary>([
-  ["u1", { userId: "u1", name: "Alice", email: "a@x", avatarUrl: null }],
+  ["u1", { userId: "u1", name: "Alice", email: "a@x", avatarUrl: null, isBot: false }],
 ]);
 
 describe("MessageBody", () => {

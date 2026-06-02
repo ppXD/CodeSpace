@@ -4,7 +4,7 @@ import type { TeamMemberSummary } from "@/api/teams";
 
 import { findActiveMention, matchMembers, mentionAttributes, serializeEditor } from "./mentionInput";
 
-const member = (userId: string, name: string, email = `${name.toLowerCase()}@x`): TeamMemberSummary => ({ userId, name, email, avatarUrl: null });
+const member = (userId: string, name: string, email = `${name.toLowerCase()}@x`): TeamMemberSummary => ({ userId, name, email, avatarUrl: null, isBot: false });
 
 describe("serializeEditor", () => {
   function chip(refType: string, refId: string, label: string, text = label): HTMLElement {

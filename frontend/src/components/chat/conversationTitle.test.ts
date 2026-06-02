@@ -5,7 +5,7 @@ import type { TeamMemberSummary } from "@/api/teams";
 
 import { conversationTitle } from "./conversationTitle";
 
-const member = (userId: string, name: string): TeamMemberSummary => ({ userId, name, email: `${name}@x`, avatarUrl: null });
+const member = (userId: string, name: string): TeamMemberSummary => ({ userId, name, email: `${name}@x`, avatarUrl: null, isBot: false });
 const members = new Map([["me", member("me", "Me")], ["alice", member("alice", "Alice")]]);
 
 function conv(partial: Partial<ConversationSummary>): ConversationSummary {
