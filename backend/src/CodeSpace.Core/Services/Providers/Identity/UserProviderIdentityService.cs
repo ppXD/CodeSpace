@@ -102,6 +102,29 @@ public sealed class UserProviderIdentityService : IUserProviderIdentityService, 
         await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
     }
 
+    public async Task EnsureIdentityForCredentialAsync(ProviderInstance instance, Credential credential, Guid userId, CancellationToken cancellationToken)
+    {
+        var profile = await ProbeOrThrowAsync(instance, credential, cancellationToken).ConfigureAwait(false);
+
+        var existing = await _db.UserProviderIdentity
+            .SingleOrDefaultAsync(i => i.UserId == userId && i.ProviderInstanceId == instance.Id && i.DeletedDate == null, cancellationToken).ConfigureAwait(false);
+
+        // Already linked on this instance — re-point the single identity at the freshly connected
+        // credential so "act as me" uses the latest token, WITHOUT revoking the previous one (the
+        // user manages credentials on the Personal tab). Keeps one live identity per (user, instance),
+        // consistent with the partial unique index. The OAuth flow's UnitOfWork persists this.
+        if (existing != null)
+        {
+            existing.CredentialId = credential.Id;
+            existing.ProviderUserId = profile.AuthenticatedUserExternalId ?? existing.ProviderUserId;
+            existing.ProviderUsername = profile.AuthenticatedUserName ?? existing.ProviderUsername;
+            return;
+        }
+
+        var identity = BuildIdentity(userId, instance.Id, credential.Id, profile);
+        await _db.UserProviderIdentity.AddAsync(identity, cancellationToken).ConfigureAwait(false);
+    }
+
     private async Task<ProviderInstance> LoadInstanceAsync(Guid providerInstanceId, Guid teamId, CancellationToken cancellationToken) =>
         await _db.ProviderInstance
             .SingleOrDefaultAsync(i => i.Id == providerInstanceId && i.TeamId == teamId, cancellationToken).ConfigureAwait(false)

@@ -3,6 +3,7 @@ using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Credentials;
 using CodeSpace.Core.Services.OAuth;
+using CodeSpace.Core.Services.Providers.Identity;
 using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.Messages.Commands.Credentials;
 using CodeSpace.Messages.Constants;
@@ -210,6 +211,54 @@ public class OAuthFlowTests
         ex.Reason.ShouldContain("OAuth-configured");
     }
 
+    [Fact]
+    public async Task Complete_links_an_act_as_user_identity_resolvable_for_the_owner()
+    {
+        // Parity with PAT linking: an OAuth connect must also give the user an act-as-user identity,
+        // so "act as me" features (PR review-as-me) work for OAuth users, not just token users. We use
+        // the Git test provider, whose probe (TestRepositoryProvider) returns a canned whoami.
+        var (userId, teamId, instanceId) = await SeedOAuthCapableInstanceAsync(ProviderKind.Git).ConfigureAwait(false);
+        var stub = new StubOAuthClient(ProviderKind.Git, BuildToken("at", "rt", expiresIn: TimeSpan.FromHours(2)));
+
+        var credId = await ConnectViaOAuthAsync(userId, teamId, instanceId, stub).ConfigureAwait(false);
+
+        using var verify = _fixture.BeginScope();
+        var resolved = await verify.Resolve<IActorIdentityResolver>().ResolveAsync(userId, instanceId, CancellationToken.None).ConfigureAwait(false);
+
+        resolved.ShouldNotBeNull("an OAuth connect must give the owner an act-as-user identity, like PAT linking does");
+        resolved!.CredentialId.ShouldBe(credId);
+        resolved.ProviderUsername.ShouldBe("Test User");      // from TestRepositoryProvider's probe
+        resolved.ProviderUserId.ShouldBe("test-user-id");
+    }
+
+    [Fact]
+    public async Task Reconnecting_via_oauth_repoints_the_single_identity_and_keeps_the_first_credential()
+    {
+        var (userId, teamId, instanceId) = await SeedOAuthCapableInstanceAsync(ProviderKind.Git).ConfigureAwait(false);
+        var stub = new StubOAuthClient(ProviderKind.Git, BuildToken("at", "rt", expiresIn: TimeSpan.FromHours(2)));
+
+        var firstCredId = await ConnectViaOAuthAsync(userId, teamId, instanceId, stub).ConfigureAwait(false);
+        var secondCredId = await ConnectViaOAuthAsync(userId, teamId, instanceId, stub).ConfigureAwait(false);
+
+        firstCredId.ShouldNotBe(secondCredId);
+
+        using var verify = _fixture.BeginScope();
+        var db = verify.Resolve<CodeSpaceDbContext>();
+
+        // One identity per (user, instance) — the second connect re-points it, doesn't duplicate.
+        var identities = await db.UserProviderIdentity.AsNoTracking()
+            .Where(i => i.UserId == userId && i.ProviderInstanceId == instanceId && i.DeletedDate == null)
+            .ToListAsync().ConfigureAwait(false);
+        identities.Count.ShouldBe(1);
+        identities[0].CredentialId.ShouldBe(secondCredId);
+
+        // Re-point is NON-destructive — connecting again must not revoke the earlier credential
+        // (the user manages credentials on the Personal tab).
+        var first = await db.Credential.AsNoTracking().SingleAsync(c => c.Id == firstCredId).ConfigureAwait(false);
+        first.Status.ShouldBe(CredentialStatus.Active);
+        first.DeletedDate.ShouldBeNull();
+    }
+
     // ── Helpers ────────────────────────────────────────────────────────────────────
 
     private async Task<(Guid UserId, Guid TeamId, Guid InstanceId)> SeedOAuthCapableInstanceAsync(ProviderKind kind)
@@ -264,5 +313,38 @@ public class OAuthFlowTests
         private readonly IOAuthClient _client;
         public SingleProviderRegistry(IOAuthClient client) { _client = client; }
         public IOAuthClient Get(ProviderKind kind) => _client;
+    }
+
+    /// <summary>
+    /// Runs a full Init → Complete OAuth round for the given owner with the token endpoint stubbed.
+    /// The callback's identity-link probe resolves through the REAL registry (Git → TestRepositoryProvider,
+    /// a canned valid whoami), so no probe stub is needed. Returns the persisted credential id.
+    /// </summary>
+    private async Task<Guid> ConnectViaOAuthAsync(Guid userId, Guid teamId, Guid instanceId, StubOAuthClient stub)
+    {
+        InitCredentialOAuthResult initResult;
+        using (var initScope = _fixture.BeginScope(b =>
+        {
+            RegisterTestUserAndTeam(b, userId, teamId);
+            b.RegisterInstance<IOAuthClientRegistry>(new SingleProviderRegistry(stub)).SingleInstance();
+        }))
+        {
+            initResult = await initScope.Resolve<IMediator>().Send(new InitCredentialOAuthCommand
+            {
+                ProviderInstanceId = instanceId,
+                DisplayName = "Maya's Git"
+            }).ConfigureAwait(false);
+        }
+
+        using var callbackScope = _fixture.BeginScope(b =>
+            b.RegisterInstance<IOAuthClientRegistry>(new SingleProviderRegistry(stub)).SingleInstance());
+
+        var result = await callbackScope.Resolve<IMediator>().Send(new CompleteCredentialOAuthCommand
+        {
+            Code = "code-from-provider",
+            State = initResult.State
+        }).ConfigureAwait(false);
+
+        return result.CredentialId;
     }
 }
