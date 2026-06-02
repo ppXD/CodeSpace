@@ -43,6 +43,11 @@ public sealed class UserProviderIdentityService : IUserProviderIdentityService, 
         var profile = await ProbeOrThrowAsync(instance, credential, cancellationToken).ConfigureAwait(false);
 
         credential.DisplayName = $"{instance.Provider} · {profile.AuthenticatedUserName}";
+
+        // Persist the token's real granted scopes (the probe reads them live) so capability warnings
+        // reflect this PAT — same as the OAuth flow stores token.GrantedScopes. Null when the provider
+        // couldn't expose them; the capability check treats that as "unknown", never a false warning.
+        credential.Scopes = profile.GrantedScopes?.ToList();
         await ReplaceExistingLinkAsync(userId, providerInstanceId, cancellationToken).ConfigureAwait(false);
 
         await _db.Credential.AddAsync(credential, cancellationToken).ConfigureAwait(false);

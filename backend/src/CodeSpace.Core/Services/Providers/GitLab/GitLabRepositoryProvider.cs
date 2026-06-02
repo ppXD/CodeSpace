@@ -1,4 +1,5 @@
 using System.Runtime.CompilerServices;
+using System.Text.Json;
 using CodeSpace.Core.Services.Providers.Auth;
 using CodeSpace.Core.Services.Providers.Capabilities;
 using CodeSpace.Core.Services.Providers.Resilience;
@@ -555,20 +556,83 @@ public sealed class GitLabRepositoryProvider : IRepositoryCatalogCapability, IPu
         {
             var client = await BuildClientAsync(context, cancellationToken).ConfigureAwait(false);
 
-            return await _resilience.ExecuteAsync(context.Instance, nameof(ProbeCredentialAsync), _ =>
+            var identity = await _resilience.ExecuteAsync(context.Instance, nameof(ProbeCredentialAsync), _ =>
             {
                 var current = client.Users.Current;
-                return Task.FromResult(new CredentialProbeResult
-                {
-                    IsValid = true,
-                    AuthenticatedUserExternalId = current.Id.ToString(),
-                    AuthenticatedUserName = current.Username
-                });
+                return Task.FromResult((Id: current.Id.ToString(), Name: current.Username));
             }, cancellationToken).ConfigureAwait(false);
+
+            var scopes = await TryFetchTokenScopesAsync(context, cancellationToken).ConfigureAwait(false);
+
+            return new CredentialProbeResult
+            {
+                IsValid = true,
+                AuthenticatedUserExternalId = identity.Id,
+                AuthenticatedUserName = identity.Name,
+                GrantedScopes = scopes
+            };
         }
         catch (Exception ex)
         {
             return new CredentialProbeResult { IsValid = false, Error = ex.Message };
+        }
+    }
+
+    /// <summary>
+    /// Reads the token's OWN granted scopes via <c>GET /api/v4/personal_access_tokens/self</c> so
+    /// capability warnings reflect the real PAT (GitLab returns the exact scope list the user ticked).
+    /// Best-effort: the endpoint is PAT-only, so OAuth / group / impersonation tokens get 401/403 — any
+    /// non-success or failure returns null, which the capability check reads as "scopes unknown" (no
+    /// false warnings) rather than "no scopes". Mirrors the raw-HTTP pattern used by CountViaXTotalAsync.
+    /// </summary>
+    private async Task<IReadOnlyList<string>?> TryFetchTokenScopesAsync(ProviderContext context, CancellationToken cancellationToken)
+    {
+        var auth = await _authResolver.ResolveAsync(context, cancellationToken).ConfigureAwait(false);
+        var host = string.IsNullOrWhiteSpace(context.Instance.ApiUrl) ? context.Instance.BaseUrl : context.Instance.ApiUrl;
+        var url = $"{host.TrimEnd('/')}/api/v4/personal_access_tokens/self";
+
+        using var request = new HttpRequestMessage(HttpMethod.Get, url);
+        request.Headers.TryAddWithoutValidation("Authorization", $"Bearer {auth.Token}");
+        request.Headers.TryAddWithoutValidation("PRIVATE-TOKEN", auth.Token);
+
+        try
+        {
+            using var response = await _countsHttpClient.SendAsync(request, HttpCompletionOption.ResponseContentRead, cancellationToken).ConfigureAwait(false);
+            if (!response.IsSuccessStatusCode) return null;
+
+            var json = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
+            return ParseTokenScopes(json);
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Pure parse of GitLab's <c>personal_access_tokens/self</c> body → the <c>scopes</c> array.
+    /// Returns null (not empty) when the field is absent, empty, or the JSON is malformed, so callers
+    /// treat the result as "unknown" rather than "zero scopes".
+    /// </summary>
+    internal static IReadOnlyList<string>? ParseTokenScopes(string json)
+    {
+        try
+        {
+            using var doc = JsonDocument.Parse(json);
+
+            if (!doc.RootElement.TryGetProperty("scopes", out var scopesEl) || scopesEl.ValueKind != JsonValueKind.Array) return null;
+
+            var scopes = scopesEl.EnumerateArray()
+                .Where(e => e.ValueKind == JsonValueKind.String)
+                .Select(e => e.GetString()!)
+                .Where(s => !string.IsNullOrWhiteSpace(s))
+                .ToList();
+
+            return scopes.Count > 0 ? scopes : null;
+        }
+        catch (JsonException)
+        {
+            return null;
         }
     }
 
