@@ -4,6 +4,7 @@ import { createPortal } from "react-dom";
 import { ApiError, oauthApi, type AddProviderInstanceRequest, type UpdateProviderInstanceRequest } from "@/api/oauth";
 import type { CredentialSummary, ProviderInstanceSummary, ProviderKind } from "@/api/types";
 import { useAlert, useConfirm } from "@/components/dialog";
+import { IdentityLinkModal } from "@/components/identities/IdentityLinkModal";
 import { useAddGroupAccessToken, useAddProviderInstance, useCredentialCapabilities, useCredentials, useDeleteProviderInstance, useProviderDefaults, useProviderInstances, useRevokeCredential, useUpdateProviderInstance } from "@/hooks/use-credentials";
 import { useMe } from "@/hooks/use-me";
 import { OAuthFlowError, useOAuthFlow } from "@/hooks/use-oauth-flow";
@@ -72,6 +73,8 @@ export function ConnectRemoteModal({ onClose }: ConnectRemoteModalProps) {
   const instances = useProviderInstances();
   const revoke = useRevokeCredential();
   const runOAuth = useOAuthFlow();
+  // The instance to connect a personal token (PAT) to — opens the shared IdentityLinkModal.
+  const [patInstance, setPatInstance] = useState<ProviderInstanceSummary | null>(null);
   const confirm = useConfirm();
 
   // Show ALL providers (no oauthEnabled filter). Rows distinguish OAuth-ready vs
@@ -79,19 +82,21 @@ export function ConnectRemoteModal({ onClose }: ConnectRemoteModalProps) {
   // dead-end state where they can't even see the broken instance to fix it.
   const allProviders = useMemo(() => instances.data ?? [], [instances.data]);
 
-  // Per-instance, the current user's most-recent active OAuth credential. Drives the
-  // Connect vs Disconnect rendering per row.
-  const myCredentialByInstance = useMemo(() => {
-    const map = new Map<string, CredentialSummary>();
+  // Per-instance, the current user's active personal credentials — OAuth AND/OR PAT. A user can hold
+  // both (an OAuth sign-in + a pasted token), so this is a list; each is independently disconnectable.
+  // (Previously OAuth-only, which hid PAT credentials from the Personal tab entirely.)
+  const myCredsByInstance = useMemo(() => {
+    const map = new Map<string, CredentialSummary[]>();
     const myId = me.data?.id;
     if (!myId) return map;
 
-    const candidates = (credentials.data ?? [])
-      .filter(c => c.authType === "OAuth" && c.ownerUserId === myId && c.status === "Active")
+    const mine = (credentials.data ?? [])
+      .filter(c => c.ownerUserId === myId && c.status === "Active")
       .sort((a, b) => b.createdDate.localeCompare(a.createdDate));
 
-    for (const c of candidates) {
-      if (!map.has(c.providerInstanceId)) map.set(c.providerInstanceId, c);
+    for (const c of mine) {
+      const list = map.get(c.providerInstanceId);
+      if (list) list.push(c); else map.set(c.providerInstanceId, [c]);
     }
     return map;
   }, [credentials.data, me.data?.id]);
@@ -129,17 +134,22 @@ export function ConnectRemoteModal({ onClose }: ConnectRemoteModalProps) {
     }
   };
 
+  // Connect a personal token instead of OAuth — opens the shared link modal (paste a PAT). Works even
+  // for instances with no OAuth app configured. linkByPat creates the personal credential (it surfaces
+  // in this list on refetch).
+  const connectPat = (instance: ProviderInstanceSummary) => setPatInstance(instance);
+
   const disconnect = async (credential: CredentialSummary) => {
     // Preview impact BEFORE confirming — the user should know how many bound repos will
     // lose their auth source. Fetched on demand (not pre-cached) because it's only needed
     // at click time. Failure of the preview is non-fatal: we fall back to a generic
     // confirm message so the operator can still proceed.
-    let usageMsg = "Your OAuth token will be revoked. You can reconnect at any time.";
+    let usageMsg = "This credential will be revoked. You can reconnect at any time.";
     try {
       const usage = await oauthApi.getCredentialUsage(credential.id);
       if (usage.activeRepositoryCount > 0) {
         const n = usage.activeRepositoryCount;
-        usageMsg = `Your OAuth token will be revoked. ${n} repositor${n === 1 ? "y" : "ies"} bound through this credential will be marked as needing a new credential (event webhooks keep working — you can re-link or unbind later).`;
+        usageMsg = `This credential will be revoked. ${n} repositor${n === 1 ? "y" : "ies"} bound through this credential will be marked as needing a new credential (event webhooks keep working — you can re-link or unbind later).`;
       }
     } catch {
       // ignore — confirm with generic copy
@@ -186,7 +196,7 @@ export function ConnectRemoteModal({ onClose }: ConnectRemoteModalProps) {
             providers={allProviders}
             loading={instances.isLoading || credentials.isLoading || me.isLoading}
             error={instances.error ?? credentials.error}
-            myCredentialByInstance={myCredentialByInstance}
+            myCredsByInstance={myCredsByInstance}
             teamServiceCreds={teamServiceCreds}
             tab={providerTab}
             onTabChange={setProviderTab}
@@ -194,6 +204,7 @@ export function ConnectRemoteModal({ onClose }: ConnectRemoteModalProps) {
             revokingId={revoke.isPending ? revoke.variables ?? null : null}
             errors={errorByInstance}
             onConnect={connect}
+            onConnectPat={connectPat}
             onDisconnect={disconnect}
             onAddProvider={() => setStep("addProvider")}
             onEditProvider={(instance) => { setEditingInstance(instance); setStep("editProvider"); }}
@@ -229,6 +240,14 @@ export function ConnectRemoteModal({ onClose }: ConnectRemoteModalProps) {
           />
         )}
       </div>
+      {patInstance && (
+        <IdentityLinkModal
+          providerInstanceId={patInstance.id}
+          providerLabel={`${PROVIDER_THEME[patInstance.provider].label} · ${patInstance.displayName}`}
+          onClose={() => setPatInstance(null)}
+          onLinked={() => { void credentials.refetch(); }}
+        />
+      )}
     </>,
     document.body,
   );
@@ -240,7 +259,7 @@ interface ProvidersStepProps {
   providers: ProviderInstanceSummary[];
   loading: boolean;
   error: unknown;
-  myCredentialByInstance: Map<string, CredentialSummary>;
+  myCredsByInstance: Map<string, CredentialSummary[]>;
   teamServiceCreds: CredentialSummary[];
   tab: ProviderTab;
   onTabChange: (tab: ProviderTab) => void;
@@ -248,6 +267,7 @@ interface ProvidersStepProps {
   revokingId: string | null;
   errors: Record<string, string>;
   onConnect: (instance: ProviderInstanceSummary) => void;
+  onConnectPat: (instance: ProviderInstanceSummary) => void;
   onDisconnect: (credential: CredentialSummary) => void;
   onAddProvider: () => void;
   onEditProvider: (instance: ProviderInstanceSummary) => void;
@@ -256,7 +276,7 @@ interface ProvidersStepProps {
   onClose: () => void;
 }
 
-function ProvidersStep({ providers, loading, error, myCredentialByInstance, teamServiceCreds, tab, onTabChange, connectingId, revokingId, errors, onConnect, onDisconnect, onAddProvider, onEditProvider, onAddTeamToken, onRevokeTeamCred, onClose }: ProvidersStepProps) {
+function ProvidersStep({ providers, loading, error, myCredsByInstance, teamServiceCreds, tab, onTabChange, connectingId, revokingId, errors, onConnect, onConnectPat, onDisconnect, onAddProvider, onEditProvider, onAddTeamToken, onRevokeTeamCred, onClose }: ProvidersStepProps) {
   return (
     <>
       <div className="mdl-head">
@@ -300,25 +320,21 @@ function ProvidersStep({ providers, loading, error, myCredentialByInstance, team
 
             {tab === "personal" && (
               <div className="cn-list">
-                {providers.map(instance => {
-                  const myCred = myCredentialByInstance.get(instance.id);
-                  const isConnecting = connectingId === instance.id;
-                  const isDisconnecting = Boolean(myCred) && revokingId === myCred!.id;
-                  return (
-                    <ProviderRow
-                      key={instance.id}
-                      instance={instance}
-                      theme={PROVIDER_THEME[instance.provider]}
-                      myCred={myCred}
-                      isConnecting={isConnecting}
-                      isDisconnecting={isDisconnecting}
-                      errorMsg={errors[instance.id]}
-                      onConnect={onConnect}
-                      onDisconnect={onDisconnect}
-                      onEdit={onEditProvider}
-                    />
-                  );
-                })}
+                {providers.map(instance => (
+                  <ProviderRow
+                    key={instance.id}
+                    instance={instance}
+                    theme={PROVIDER_THEME[instance.provider]}
+                    myCreds={myCredsByInstance.get(instance.id) ?? []}
+                    isConnecting={connectingId === instance.id}
+                    revokingId={revokingId}
+                    errorMsg={errors[instance.id]}
+                    onConnect={onConnect}
+                    onConnectPat={onConnectPat}
+                    onDisconnect={onDisconnect}
+                    onEdit={onEditProvider}
+                  />
+                ))}
               </div>
             )}
 
@@ -360,16 +376,21 @@ function ProvidersStep({ providers, loading, error, myCredentialByInstance, team
 interface ProviderRowProps {
   instance: ProviderInstanceSummary;
   theme: { initials: string; label: string };
-  myCred: CredentialSummary | undefined;
+  myCreds: CredentialSummary[];
   isConnecting: boolean;
-  isDisconnecting: boolean;
+  revokingId: string | null;
   errorMsg: string | undefined;
   onConnect: (instance: ProviderInstanceSummary) => void;
+  onConnectPat: (instance: ProviderInstanceSummary) => void;
   onDisconnect: (credential: CredentialSummary) => void;
   onEdit: (instance: ProviderInstanceSummary) => void;
 }
 
-function ProviderRow({ instance, theme, myCred, isConnecting, isDisconnecting, errorMsg, onConnect, onDisconnect, onEdit }: ProviderRowProps) {
+function ProviderRow({ instance, theme, myCreds, isConnecting, revokingId, errorMsg, onConnect, onConnectPat, onDisconnect, onEdit }: ProviderRowProps) {
+  const connected = myCreds.length > 0;
+  const hasOAuth = myCreds.some(c => c.authType === "OAuth");
+  const hasPat = myCreds.some(c => c.authType === "Pat");
+
   return (
     <div className="cn-row">
       <div className="cn-mark" data-p={instance.provider.toLowerCase()}>{theme.initials}</div>
@@ -378,40 +399,52 @@ function ProviderRow({ instance, theme, myCred, isConnecting, isDisconnecting, e
           {instance.displayName}
           <span className="cn-name-prov">{theme.label}</span>
           {!instance.oauthEnabled && (
-            <span className="cn-status cn-status-warn" title="Provider has no OAuth client ID / secret yet. Click Configure OAuth to set them up.">
-              <Ic.Triangle size={10} /> needs OAuth setup
+            <span className="cn-status cn-status-warn" title="No OAuth app configured. You can still connect with a personal token, or Configure OAuth for one-click sign-in.">
+              <Ic.Triangle size={10} /> no OAuth app
             </span>
           )}
-          {myCred && (
-            <span className="cn-status cn-status-active" title={`Connected ${formatRelative(myCred.createdDate)}`}>
+          {connected && (
+            <span className="cn-status cn-status-active">
               <span className="cn-status-dot" /> connected
             </span>
           )}
-          {myCred && <CredentialCapabilityWarnings credentialId={myCred.id} />}
         </div>
         <div className="cn-sub">
           <span title={instance.baseUrl}>{instance.baseUrl}</span>
-          <span className="cn-sub-purpose" title={purposeFor(instance.provider, Boolean(myCred), instance.oauthEnabled)}>
-            · {purposeFor(instance.provider, Boolean(myCred), instance.oauthEnabled)}
-          </span>
+          <span className="cn-sub-purpose"> · {purposeFor(instance.provider, connected, instance.oauthEnabled)}</span>
         </div>
         {errorMsg && <div className="cn-row-err">{errorMsg}</div>}
       </div>
-      <div className="cn-cta">
-        {!instance.oauthEnabled ? (
-          <button className="btn btn-primary" onClick={() => onEdit(instance)}>
-            <Ic.Key size={13} /> Configure OAuth
-          </button>
-        ) : myCred ? (
-          <button className="btn btn-ghost" onClick={() => onDisconnect(myCred)} disabled={isDisconnecting}>
-            {isDisconnecting ? <><Ic.Clock size={13} /> Disconnecting…</> : "Disconnect"}
-          </button>
-        ) : (
-          <button className="btn btn-primary" onClick={() => onConnect(instance)} disabled={isConnecting}>
-            {isConnecting ? <><Ic.Clock size={13} /> Connecting…</> : <><Ic.Link size={13} /> Connect</>}
-          </button>
-        )}
-        <ProviderRowMenu instance={instance} hasCredential={Boolean(myCred)} onEdit={onEdit} />
+      <div className="cn-cta cn-cta-stack">
+        {/* One row per connected credential — labelled by method (OAuth / Token), each with its own Disconnect. */}
+        {myCreds.map(c => (
+          <div key={c.id} className="cn-cred">
+            <span className="cn-cred-method" title={`Connected ${formatRelative(c.createdDate)}`}>{c.authType === "OAuth" ? "OAuth" : "Token"}</span>
+            <CredentialCapabilityWarnings credentialId={c.id} />
+            <button className="btn btn-ghost" onClick={() => onDisconnect(c)} disabled={revokingId === c.id}>
+              {revokingId === c.id ? <><Ic.Clock size={13} /> …</> : "Disconnect"}
+            </button>
+          </div>
+        ))}
+        {/* Connect by whichever methods aren't connected yet: OAuth (needs an app) and/or a personal token (always). */}
+        <div className="cn-connect">
+          {instance.oauthEnabled && !hasOAuth && (
+            <button className="btn btn-primary" onClick={() => onConnect(instance)} disabled={isConnecting}>
+              {isConnecting ? <><Ic.Clock size={13} /> Connecting…</> : <><Ic.Link size={13} /> Connect (OAuth)</>}
+            </button>
+          )}
+          {!hasPat && (
+            <button className="btn" onClick={() => onConnectPat(instance)}>
+              <Ic.Key size={13} /> Use a token
+            </button>
+          )}
+          {!instance.oauthEnabled && (
+            <button className="btn btn-ghost" onClick={() => onEdit(instance)} title="Set up an OAuth app for one-click sign-in">
+              Configure OAuth
+            </button>
+          )}
+          <ProviderRowMenu instance={instance} hasCredential={connected} onEdit={onEdit} />
+        </div>
       </div>
     </div>
   );
