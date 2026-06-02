@@ -37,6 +37,10 @@ public sealed class GitPrReviewNode : INodeRuntime
         // Submitting a review is a permanent externally-visible side effect — the engine refuses
         // auto-resume on abandoned runs so we don't double-submit.
         IsSideEffecting = true,
+        // Acts AS the actor's own identity (Model B). Declaring this lets the engine generically gate
+        // the responder's linked identity when this node sits downstream of an interactive wait whose
+        // responder feeds actAsUserId — no chat/engine changes needed for future act-as-user nodes.
+        ActsAsUser = new ActsAsUserSpec { ActorInputKey = "actAsUserId", ProviderInputKey = "repositoryId", ProviderSource = ActorProviderSource.Repository },
         ConfigSchema = SchemaBuilder.EmptyObject(),
         InputSchema = SchemaBuilder.Parse("""
             {
