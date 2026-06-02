@@ -334,11 +334,20 @@ public sealed class GitHubRepositoryProvider : IRepositoryCatalogCapability, IPu
             return await _resilience.ExecuteAsync(context.Instance, nameof(ProbeCredentialAsync), async _ =>
             {
                 var user = await client.User.Current().ConfigureAwait(false);
+
+                // Octokit parses the X-OAuth-Scopes response header into ApiInfo.OauthScopes — the exact
+                // scopes a classic PAT / OAuth token carries. Fine-grained PATs and GitHub App tokens
+                // don't send the header (empty list) → null, which the capability check treats as
+                // "unknown" (no false warnings) rather than "zero scopes".
+                var oauthScopes = client.GetLastApiInfo()?.OauthScopes;
+                var scopes = oauthScopes is { Count: > 0 } ? oauthScopes.ToList() : null;
+
                 return new CredentialProbeResult
                 {
                     IsValid = true,
                     AuthenticatedUserExternalId = user.Id.ToString(),
-                    AuthenticatedUserName = user.Login
+                    AuthenticatedUserName = user.Login,
+                    GrantedScopes = scopes
                 };
             }, cancellationToken).ConfigureAwait(false);
         }

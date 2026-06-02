@@ -99,41 +99,40 @@ public sealed class CredentialService : ICredentialService, IScopedDependency
             ?? throw new KeyNotFoundException($"Credential {credentialId} not found");
 
         var module = _modules.Get(credential.ProviderInstance.Provider);
-        var granted = credential.Scopes ?? new List<string>();
 
-        // No module = no declared requirements; surface every capability as available rather
-        // than blocked so a future provider whose scope map hasn't been declared yet doesn't
-        // grey out features in the SPA.
-        if (module == null)
-        {
-            return new CredentialCapabilitiesResponse
-            {
-                CredentialId = credential.Id,
-                GrantedScopes = granted,
-                Capabilities = Array.Empty<CredentialCapabilityStatus>()
-            };
-        }
+        // No declared scope map → nothing to report. Surface no capabilities rather than blocking a
+        // provider whose requirements haven't been declared yet.
+        if (module == null) return BuildCapabilitiesResponse(credential, Array.Empty<CredentialCapabilityStatus>());
+
+        var granted = credential.Scopes;
+
+        // granted == null means we never captured this token's scopes (a PAT linked before scope-
+        // capture existed, or a token type that can't expose them). null is UNKNOWN, not "zero
+        // scopes" — surface every capability as available so we never show a FALSE "missing"
+        // warning. Only a known scope list (incl. an explicitly empty one) is checked and can warn.
+        if (granted == null)
+            return BuildCapabilitiesResponse(credential, module.CapabilityScopeRequirements.Select(kvp => Available(kvp.Key)).ToList());
 
         var statuses = module.CapabilityScopeRequirements
-            .Select(kvp =>
-            {
-                var outcome = _scopeChecker.Check(credential.ProviderInstance.Provider, kvp.Key, granted);
-                return new CredentialCapabilityStatus
-                {
-                    Capability = kvp.Key.Name,
-                    IsAvailable = outcome.IsSatisfied,
-                    MissingScopes = outcome.MissingScopes
-                };
-            })
+            .Select(kvp => ToStatus(kvp.Key, _scopeChecker.Check(credential.ProviderInstance.Provider, kvp.Key, granted)))
             .ToList();
 
-        return new CredentialCapabilitiesResponse
+        return BuildCapabilitiesResponse(credential, statuses);
+    }
+
+    private static CredentialCapabilityStatus ToStatus(Type capability, ScopeCheckOutcome outcome) =>
+        new() { Capability = capability.Name, IsAvailable = outcome.IsSatisfied, MissingScopes = outcome.MissingScopes };
+
+    private static CredentialCapabilityStatus Available(Type capability) =>
+        new() { Capability = capability.Name, IsAvailable = true };
+
+    private static CredentialCapabilitiesResponse BuildCapabilitiesResponse(Credential credential, IReadOnlyList<CredentialCapabilityStatus> capabilities) =>
+        new()
         {
             CredentialId = credential.Id,
-            GrantedScopes = granted,
-            Capabilities = statuses
+            GrantedScopes = credential.Scopes ?? new List<string>(),
+            Capabilities = capabilities
         };
-    }
 
     public async Task<Guid> AddAsync(AddCredentialInput input, CancellationToken cancellationToken)
     {
