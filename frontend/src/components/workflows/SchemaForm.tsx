@@ -62,6 +62,10 @@ interface Schema {
    * resolvesWait / vetoes move to Advanced). Purely presentational; the on-disk value shape is unchanged.
    */
   "x-advanced"?: boolean;
+  /** Plain-language label that overrides the humanized property name (e.g. "resolve" → "Decision rule"). */
+  title?: string;
+  /** Friendly display text per enum value (e.g. {"first":"First response wins"}). The stored value is unchanged. */
+  "x-enumLabels"?: Record<string, string>;
 }
 
 interface SchemaFormProps {
@@ -131,7 +135,7 @@ function Field({ name, required, schema, value, onChange, templateHint, variable
   templateHint: boolean;
   variableSuggestions?: ScopeSuggestion[];
 }) {
-  const label = humanize(name);
+  const label = schema.title ?? humanize(name);
   const description = schema.description;
 
   // Boolean → an inline checkbox-BEFORE-label row, not the label-on-top stack the other types use
@@ -200,8 +204,10 @@ function renderControl(schema: Schema, value: unknown, onChange: (next: unknown)
     // unsupported manifests behind a missing component.
   }
 
-  // Enum first — applies regardless of type.
+  // Enum first — applies regardless of type. Option text comes from x-enumLabels when present (friendly
+  // wording); the stored value is always the raw enum value, so this is purely a display nicety.
   if (schema.enum) {
+    const enumLabels = schema["x-enumLabels"] ?? {};
     return (
       <select
         className="wf-form-input"
@@ -210,7 +216,7 @@ function renderControl(schema: Schema, value: unknown, onChange: (next: unknown)
       >
         {!schema.enum.includes(value) && <option value="">— select —</option>}
         {schema.enum.map((v) => (
-          <option key={String(v)} value={String(v)}>{String(v)}</option>
+          <option key={String(v)} value={String(v)}>{enumLabels[String(v)] ?? String(v)}</option>
         ))}
       </select>
     );
