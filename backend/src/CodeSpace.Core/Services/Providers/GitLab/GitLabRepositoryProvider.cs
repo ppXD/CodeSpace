@@ -638,13 +638,9 @@ public sealed class GitLabRepositoryProvider : IRepositoryCatalogCapability, IPu
 
     public async Task<RepositoryActorAccess> GetActorAccessAsync(ProviderContext context, RemoteRepository repository, CancellationToken cancellationToken)
     {
-        // A read-only token can't make an attributable write (post a review note / approve) — those need
-        // the `api` scope. Checked FIRST (no round-trip) when the token's scopes are known (captured at
-        // link time, PR #177); unknown scopes (null/empty) fall through to the membership probe. This is
-        // the dimension a Reporter-with-read-token AND an Owner-with-read_api-token both fail on.
-        if (LacksApiScope(context.Credential.Scopes))
-            return RepositoryActorAccess.Denied("Your GitLab identity's token is read-only — it's missing the 'api' scope needed to submit a review. Reconnect it with an api-scoped token.");
-
+        // MEMBERSHIP only: is the actor a member with a high-enough role to act on this project? The token's
+        // SCOPE (api/read_api) is checked generically by the gate against the node's declared capability —
+        // not here, so this stays "can this person act on this repo", independent of which write they do.
         var auth = await _authResolver.ResolveAsync(context, cancellationToken).ConfigureAwait(false);
         var host = string.IsNullOrWhiteSpace(context.Instance.ApiUrl) ? context.Instance.BaseUrl : context.Instance.ApiUrl;
         var url = $"{host.TrimEnd('/')}/api/v4/projects/{Uri.EscapeDataString(repository.ExternalId)}";
@@ -717,12 +713,6 @@ public sealed class GitLabRepositoryProvider : IRepositoryCatalogCapability, IPu
         var role = level switch { 10 => "Guest", 20 => "Reporter", _ => "below Developer" };
         return $"Your GitLab role on this project is {role} — reviewing needs Developer or higher. Ask a maintainer to raise your access, then try again.";
     }
-
-    /// <summary>True when the token's scopes are KNOWN and lack <c>api</c> — the umbrella scope every
-    /// attributable GitLab write (review note / approve / webhook) needs. Null/empty = unknown → don't
-    /// deny on it (the membership probe + the wire 403 stay the backstop).</summary>
-    internal static bool LacksApiScope(IReadOnlyList<string>? scopes) =>
-        scopes is { Count: > 0 } && !scopes.Any(s => string.Equals(s, "api", StringComparison.OrdinalIgnoreCase));
 
     public async Task<RemoteWebhook?> FindWebhookByCallbackUrlAsync(ProviderContext context, RemoteRepository repository, string callbackUrl, CancellationToken cancellationToken)
     {

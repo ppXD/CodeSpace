@@ -24,6 +24,10 @@ public static class ActorIdentityRequirementPlan
 
         /// <summary>The resolved id string — a repository id (Repository) or a provider instance id (ProviderInstance).</summary>
         public required string ResolvedId { get; init; }
+
+        /// <summary>The capability the node exercises as the actor — the gate scope-checks the actor's token against
+        /// its per-provider requirement. Null = no scope pre-check (identity + membership only).</summary>
+        public Type? CapabilityType { get; init; }
     }
 
     /// <summary>
@@ -51,8 +55,10 @@ public static class ActorIdentityRequirementPlan
             var resolved = ResolveFromInputs(node.Inputs, spec.ProviderInputKey, inputScope);
             if (resolved == null) continue;
 
-            if (seen.Add($"{spec.ProviderSource}:{resolved}"))
-                requirements.Add(new Requirement { NodeId = node.Id, ProviderSource = spec.ProviderSource, ResolvedId = resolved });
+            // Dedup per (provider-target, capability): two nodes acting on the same repo via DIFFERENT
+            // capabilities each contribute a requirement so each capability's scope gets checked.
+            if (seen.Add($"{spec.ProviderSource}:{resolved}:{spec.CapabilityType?.Name}"))
+                requirements.Add(new Requirement { NodeId = node.Id, ProviderSource = spec.ProviderSource, ResolvedId = resolved, CapabilityType = spec.CapabilityType });
         }
 
         return requirements;

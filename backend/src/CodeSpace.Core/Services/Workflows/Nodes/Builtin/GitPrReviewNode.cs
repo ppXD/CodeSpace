@@ -1,4 +1,5 @@
 using System.Text.Json;
+using CodeSpace.Core.Services.Providers.Capabilities;
 using CodeSpace.Core.Services.PullRequests;
 using CodeSpace.Messages.Dtos.Providers;
 using CodeSpace.Messages.Enums;
@@ -42,7 +43,7 @@ public sealed class GitPrReviewNode : INodeRuntime
         // Acts AS the actor's own identity (Model B). Declaring this lets the engine generically gate
         // the responder's linked identity when this node sits downstream of an interactive wait whose
         // responder feeds actAsUserId — no chat/engine changes needed for future act-as-user nodes.
-        ActsAsUser = new ActsAsUserSpec { ActorInputKey = "actAsUserId", ProviderInputKey = "repositoryId", ProviderSource = ActorProviderSource.Repository },
+        ActsAsUser = new ActsAsUserSpec { ActorInputKey = "actAsUserId", ProviderInputKey = "repositoryId", ProviderSource = ActorProviderSource.Repository, CapabilityType = typeof(IPullRequestReviewCapability) },
         ConfigSchema = SchemaBuilder.EmptyObject(),
         InputSchema = SchemaBuilder.Parse("""
             {
