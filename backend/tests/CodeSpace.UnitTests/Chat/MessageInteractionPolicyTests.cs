@@ -116,4 +116,26 @@ public class MessageInteractionPolicyTests
         MessageInteractionPolicy.RequiresComment(card, "approve").ShouldBeFalse();
         MessageInteractionPolicy.RequiresComment(card, "nonexistent").ShouldBeFalse();
     }
+
+    [Fact]
+    public void IsComment_recognises_only_the_reserved_comment_key()
+    {
+        MessageInteractionPolicy.IsComment(MessageInteractionPolicy.CommentKey).ShouldBeTrue();
+        MessageInteractionPolicy.IsComment("approve").ShouldBeFalse();
+        MessageInteractionPolicy.IsComment("").ShouldBeFalse();
+    }
+
+    [Fact]
+    public void The_comment_key_is_not_a_component_option_so_it_can_never_be_mistaken_for_a_resolve()
+    {
+        // IsValidResponse gates the RESOLVE path; the comment key must NOT pass it (a comment is
+        // non-terminal discussion, handled before validation), so it can't be taken for a button.
+        var card = new MessageInteraction
+        {
+            Component = new ActionButtonsComponent { Buttons = new List<InteractionButton> { new() { Key = "approve", Label = "Approve" } } },
+            Target = new WorkflowWaitTarget { Token = "t" },
+        };
+
+        MessageInteractionPolicy.IsValidResponse(card, MessageInteractionPolicy.CommentKey).ShouldBeFalse();
+    }
 }

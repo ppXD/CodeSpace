@@ -25,10 +25,46 @@ public sealed record MessageInteraction
     /// <summary>Who may respond. Null = any active member of the conversation; otherwise only these users (e.g. the picked reviewer).</summary>
     public IReadOnlyList<Guid>? AllowedResponderUserIds { get; init; }
 
+    /// <summary>
+    /// The append-only collaboration log — every comment and every action click, in order, so the card
+    /// shows the full team timeline (who said / clicked what, when). Independent of <see cref="State"/>:
+    /// a card with no terminating wait keeps accumulating responses while staying Open (a living thread).
+    /// Empty for an untouched card AND for any pre-existing message (the field defaults empty on read).
+    /// </summary>
+    public IReadOnlyList<InteractionResponse> Responses { get; init; } = [];
+
     public InteractionState State { get; init; } = InteractionState.Open;
 
     /// <summary>Set when resolved — which response, by whom, when. Null while <see cref="State"/> is <see cref="InteractionState.Open"/>.</summary>
     public InteractionResolution? Resolution { get; init; }
+}
+
+/// <summary>
+/// One entry in an interaction's append-only response log. A <see cref="InteractionResponseKind.Comment"/>
+/// is non-terminal discussion (any conversation member may add, repeatedly); an
+/// <see cref="InteractionResponseKind.Action"/> records a button click. The terminal action that resolves
+/// the interaction is logged here too (mirrored from <see cref="InteractionResolution"/>) so the timeline is complete.
+/// </summary>
+public sealed record InteractionResponse
+{
+    public required Guid ByUserId { get; init; }
+
+    public required InteractionResponseKind Kind { get; init; }
+
+    /// <summary>The action key for an <see cref="InteractionResponseKind.Action"/> (e.g. "approve"); null for a comment.</summary>
+    public string? Key { get; init; }
+
+    public string? Comment { get; init; }
+
+    public required DateTimeOffset AtUtc { get; init; }
+}
+
+/// <summary>Kind of a logged response. Serialized as a string for a stable, readable wire value.</summary>
+[JsonConverter(typeof(JsonStringEnumConverter))]
+public enum InteractionResponseKind
+{
+    Action,
+    Comment,
 }
 
 /// <summary>
@@ -42,6 +78,7 @@ public sealed record MessageInteractionView
     public required int Version { get; init; }
     public required InteractionComponent Component { get; init; }
     public IReadOnlyList<Guid>? AllowedResponderUserIds { get; init; }
+    public required IReadOnlyList<InteractionResponse> Responses { get; init; }
     public required InteractionState State { get; init; }
     public InteractionResolution? Resolution { get; init; }
 }

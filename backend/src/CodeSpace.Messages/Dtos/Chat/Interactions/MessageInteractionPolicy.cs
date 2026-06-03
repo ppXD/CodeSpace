@@ -12,6 +12,18 @@ public static class MessageInteractionPolicy
     /// <summary>The single response key a <see cref="FormComponent"/> accepts — its submit control.</summary>
     public const string FormSubmitKey = "submit";
 
+    /// <summary>
+    /// The reserved response key for adding a non-terminal COMMENT to the interaction's log — discussion,
+    /// not a decision. A comment is open to any conversation member, repeatable, and NEVER resolves the
+    /// interaction (it just appends to <see cref="MessageInteraction.Responses"/>); only a component option
+    /// (a button / form submit) can resolve. Reserved with a sentinel so it can't collide with an author's
+    /// button key.
+    /// </summary>
+    public const string CommentKey = "__comment__";
+
+    /// <summary>True if <paramref name="responseKey"/> is the reserved non-terminal comment key.</summary>
+    public static bool IsComment(string responseKey) => responseKey == CommentKey;
+
     /// <summary>True if <paramref name="responseKey"/> is a selectable option of the interaction's component (a button key, or a form's submit).</summary>
     public static bool IsValidResponse(MessageInteraction interaction, string responseKey) =>
         interaction.Component switch
