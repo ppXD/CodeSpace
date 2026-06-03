@@ -230,4 +230,26 @@ describe("MessageInteractionCard", () => {
     fireEvent.click(screen.getByRole("button", { name: "Comment" }));
     expect(mutate).toHaveBeenCalledWith({ messageId: "m1", responseKey: "__comment__", comment: "ship it" }, expect.anything());
   });
+
+  it("marks the button carrying YOUR current vote and offers to change it", () => {
+    const responses: InteractionResponse[] = [
+      { byUserId: "rev", kind: "Action", key: "approve", comment: null, atUtc: "2026-06-01T09:00:00Z" },
+    ];
+    renderCard(card("Open", null, null, responses, { kind: "Quorum", count: 2 }), "rev");
+
+    expect(screen.getByRole("button", { name: /Approve/ })).toHaveAttribute("data-voted");
+    expect(screen.getByRole("button", { name: "Request changes" })).not.toHaveAttribute("data-voted");
+    expect(screen.getByText(/tap another to change/i)).toBeInTheDocument();
+  });
+
+  it("lists allowed responders who haven't voted yet as waiting", () => {
+    const responses: InteractionResponse[] = [
+      { byUserId: "rev", kind: "Action", key: "approve", comment: null, atUtc: "2026-06-01T09:00:00Z" },
+    ];
+    renderCard(card("Open", null, ["rev", "bob"], responses, { kind: "Quorum", count: 2 }), "rev");
+
+    // rev has voted (Approve); bob is a named reviewer who hasn't → shown as waiting.
+    expect(screen.getByText("Bob")).toBeInTheDocument();
+    expect(screen.getByText("waiting")).toBeInTheDocument();
+  });
 });

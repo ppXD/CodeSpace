@@ -3424,6 +3424,14 @@ textarea:-webkit-autofill {
 .acs-root .chat-card-standing-chip { display: inline-flex; align-items: center; padding: 1px 7px; border-radius: 999px; background: var(--panel-2); color: var(--ink-2); font-size: 11px; font-weight: 500; }
 .acs-root .chat-card-standing-list { display: flex; flex-direction: column; gap: 4px; margin: 0; padding: 0; list-style: none; }
 .acs-root .chat-card-standing-hint { display: inline-flex; align-items: center; gap: 5px; margin-bottom: 8px; font-size: 12px; font-weight: 600; color: var(--accent); }
+/* A pending (not-yet-voted) named reviewer — muted vs the cast votes. */
+.acs-root .chat-card-log-row[data-kind="pending"] .chat-card-log-av { opacity: 0.45; }
+.acs-root .chat-card-log-row[data-kind="pending"] .chat-card-log-name,
+.acs-root .chat-card-log-row[data-kind="pending"] .chat-card-log-what { color: var(--muted); }
+/* The button carrying YOUR current vote — a ring + check so you see what you're on and that you can change it. */
+.acs-root .chat-card-actions button[data-voted] { outline: 2px solid var(--accent); outline-offset: 1px; }
+.acs-root .chat-card-actions button[data-voted] svg { margin-right: 4px; vertical-align: -1px; }
+.acs-root .chat-card-yourvote { display: block; margin-top: 6px; font-size: 11px; color: var(--muted); }
 
 /* Always-available comment box on an Open card — non-terminal discussion, open to any member. */
 .acs-root .chat-card-commentbox { display: flex; align-items: center; gap: 8px; margin-top: 8px; max-width: 460px; }
