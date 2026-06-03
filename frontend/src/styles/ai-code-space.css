@@ -2265,20 +2265,21 @@ textarea:-webkit-autofill {
   background: var(--panel-2); border: 1px solid var(--line); color: var(--ink-2);
 }
 
-.acs-root .wf-inspector-body { display: flex; flex-direction: column; min-height: 0; }
+/* The inspector reads as distinct stacked CARDS on a recessed surface, so dense content (nested config,
+   per-action rows, help text) groups into legible blocks instead of one long undivided column. */
+.acs-root .wf-inspector-body { display: flex; flex-direction: column; gap: 8px; padding: 8px; min-height: 0; background: var(--panel-2); }
 .acs-root .wf-inspector-h {
-  padding: 14px 16px; border-bottom: 1px solid var(--line); background: var(--panel);
+  padding: 12px 14px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel);
   display: flex; flex-direction: column; gap: 2px;
 }
 .acs-root .wf-inspector-h-id   { font-weight: 600; font-size: 13px; color: var(--ink); }
 .acs-root .wf-inspector-h-type { font-size: 11.5px; color: var(--ink-2); }
 .acs-root .wf-inspector-h-key  { font-size: 10.5px; color: var(--muted); font-family: inherit; }
 
-.acs-root .wf-inspector-section { padding: 14px 16px; border-bottom: 1px solid var(--line); }
-.acs-root .wf-inspector-section:last-child { border-bottom: 0; }
+.acs-root .wf-inspector-section { padding: 14px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel); overflow: hidden; }
 .acs-root .wf-inspector-section-h {
-  font-size: 10.5px; font-weight: 600; color: var(--muted);
-  text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 10px;
+  font-size: 11px; font-weight: 700; color: var(--ink-2);
+  text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 12px;
 }
 
 /* Collapsible variant: the header IS the toggle button. Body renders conditionally.
