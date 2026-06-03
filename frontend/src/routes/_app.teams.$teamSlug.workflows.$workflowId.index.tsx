@@ -39,6 +39,7 @@ import { deriveActivations } from "@/lib/workflowActivations";
 import { migrateLegacyPrTriggerConfig } from "@/lib/migrateTriggerConfig";
 import { NodeRetryEditor } from "@/components/workflows/NodeRetryEditor";
 import { SchemaForm } from "@/components/workflows/SchemaForm";
+import { NodePresetPicker } from "@/components/workflows/NodePresetPicker";
 import { ERROR_HANDLE, errorRouteTarget, setErrorRoute } from "@/lib/workflowErrorRoute";
 import { introspectScope } from "@/components/workflows/scope-introspection";
 import { StartNodeInputsEditor } from "@/components/workflows/StartNodeInputsEditor";
@@ -1223,6 +1224,14 @@ function NodeInspector({
           />
         </label>
       </section>
+
+      {/* Start from a template — a node that declares presets offers an intent-first chooser that fills
+          Config + Inputs, so the author tweaks instead of assembling atoms. Generic: driven by the manifest. */}
+      {manifest.presets != null && manifest.presets.length > 0 && (
+        <section className="wf-inspector-section">
+          <NodePresetPicker presets={manifest.presets} onApply={(p) => { onConfigChange(p.config); onInputsChange(p.inputs); }} />
+        </section>
+      )}
 
       {/* Manual Start node: its inspector IS the input-fields editor (Dify-style "inputs on the
           start node"). Its Config/Input schemas are empty, so there's nothing else to show. */}

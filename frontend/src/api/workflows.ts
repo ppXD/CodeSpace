@@ -205,6 +205,19 @@ export interface WorkflowRunDetail {
   pendingWait?: WorkflowRunWaitInfo | null;
 }
 
+/**
+ * An author-facing starter template a node declares in its manifest — a ready-to-use (config, inputs)
+ * pair the editor applies on "start from a template". A friendly surface over the generic schemas;
+ * the engine never reads it. Mirrors backend NodePresetDto.
+ */
+export interface NodePreset {
+  id: string;
+  label: string;
+  description?: string | null;
+  config: Record<string, unknown>;
+  inputs: Record<string, unknown>;
+}
+
 export interface NodeManifestDto {
   typeKey: string;
   displayName: string;
@@ -221,6 +234,8 @@ export interface NodeManifestDto {
    * row); the runs view uses it to collect inputs before a manual run. Default false/undefined.
    */
   isManual?: boolean;
+  /** Starter templates the editor offers as "start from a template". Absent/empty ⇒ none. */
+  presets?: NodePreset[];
 }
 
 // ─── API client ────────────────────────────────────────────────────────────────
