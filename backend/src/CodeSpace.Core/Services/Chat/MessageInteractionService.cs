@@ -27,6 +27,15 @@ public sealed class MessageInteractionService : IMessageInteractionService, ISco
             ?? throw new KeyNotFoundException($"Message {messageId} has no interaction to respond to.");
 
         EnsureOpen(interaction);
+
+        // A comment is non-terminal discussion — any conversation member, repeatable, never resolves the
+        // interaction. It just appends to the log + leaves the card Open (a living thread).
+        if (MessageInteractionPolicy.IsComment(responseKey))
+        {
+            await AddCommentAsync(message, interaction, actorUserId, comment, teamId, cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
         EnsureValidResponse(interaction, responseKey);
         EnsureCommentIfRequired(interaction, responseKey, comment);
         EnsureRequiredFields(interaction, values);
@@ -37,6 +46,28 @@ public sealed class MessageInteractionService : IMessageInteractionService, ISco
         if (!resolved) throw new InvalidOperationException("This interaction was already handled.");
 
         await StampResolutionAsync(message, interaction, responseKey, actorUserId, comment, values, cancellationToken).ConfigureAwait(false);
+    }
+
+    // ─── Comment (non-terminal): append to the log, stay Open ───────────────────────
+
+    private async Task AddCommentAsync(Message message, MessageInteraction interaction, Guid actorUserId, string? comment, Guid teamId, CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(comment)) throw new InvalidOperationException("A comment can't be empty.");
+
+        // Discussion is open to any conversation member — AllowedResponderUserIds gates the DECISION, not
+        // who may comment — so the whole team can participate on one card.
+        var isMember = await IsConversationMemberAsync(teamId, message.ConversationId, actorUserId, cancellationToken).ConfigureAwait(false);
+
+        if (!isMember) throw new InvalidOperationException("You are not a member of this conversation.");
+
+        var appended = interaction with
+        {
+            Responses = [.. interaction.Responses, new InteractionResponse { ByUserId = actorUserId, Kind = InteractionResponseKind.Comment, Comment = comment, AtUtc = DateTimeOffset.UtcNow }],
+        };
+
+        message.InteractionJson = MessageInteractionJson.Serialize(appended);
+
+        await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
     }
 
     // ─── Load ────────────────────────────────────────────────────────────────────
@@ -73,12 +104,15 @@ public sealed class MessageInteractionService : IMessageInteractionService, ISco
 
     private async Task EnsureAllowedResponderAsync(Guid teamId, Guid conversationId, MessageInteraction interaction, Guid actorUserId, CancellationToken cancellationToken)
     {
-        var isMember = await _db.ConversationMember.AsNoTracking()
-            .AnyAsync(m => m.ConversationId == conversationId && m.UserId == actorUserId && m.TeamId == teamId && m.DeletedDate == null, cancellationToken)
-            .ConfigureAwait(false);
+        var isMember = await IsConversationMemberAsync(teamId, conversationId, actorUserId, cancellationToken).ConfigureAwait(false);
 
         if (!MessageInteractionPolicy.IsAllowedResponder(interaction, actorUserId, isMember)) throw new InvalidOperationException("You are not allowed to respond to this message.");
     }
+
+    private async Task<bool> IsConversationMemberAsync(Guid teamId, Guid conversationId, Guid actorUserId, CancellationToken cancellationToken) =>
+        await _db.ConversationMember.AsNoTracking()
+            .AnyAsync(m => m.ConversationId == conversationId && m.UserId == actorUserId && m.TeamId == teamId && m.DeletedDate == null, cancellationToken)
+            .ConfigureAwait(false);
 
     // ─── Dispatch (route the response to the interaction's target) ──────────────────
 
@@ -93,8 +127,12 @@ public sealed class MessageInteractionService : IMessageInteractionService, ISco
 
     private async Task StampResolutionAsync(Message message, MessageInteraction interaction, string responseKey, Guid actorUserId, string? comment, IReadOnlyDictionary<string, JsonElement>? values, CancellationToken cancellationToken)
     {
+        var now = DateTimeOffset.UtcNow;
+
         var resolved = interaction with
         {
+            // Log the terminal action too, so the timeline is complete (discussion + the final decision).
+            Responses = [.. interaction.Responses, new InteractionResponse { ByUserId = actorUserId, Kind = InteractionResponseKind.Action, Key = responseKey, Comment = comment, AtUtc = now }],
             State = InteractionState.Resolved,
             Resolution = new InteractionResolution
             {
@@ -102,7 +140,7 @@ public sealed class MessageInteractionService : IMessageInteractionService, ISco
                 ByUserId = actorUserId,
                 Comment = comment,
                 Values = values,
-                AtUtc = DateTimeOffset.UtcNow,
+                AtUtc = now,
             },
         };
 

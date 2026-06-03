@@ -127,6 +127,101 @@ public class MessageRespondFlowTests
     }
 
     [Fact]
+    public async Task Comments_accumulate_on_an_open_card_and_are_open_to_any_member_not_just_the_responder()
+    {
+        var (teamId, ownerId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var channelId = await SeedChannelAsync(teamId, ownerId);
+
+        // The allowed RESPONDER (the decider) is someone else — yet the owner, a conversation member, can
+        // still COMMENT. Discussion is open to the conversation; only the decision is restricted.
+        var card = new MessageInteraction
+        {
+            Component = new ActionButtonsComponent { Buttons = new List<InteractionButton> { new() { Key = "approve", Label = "Approve" } } },
+            Target = new WorkflowWaitTarget { Token = "tok-comments" },
+            AllowedResponderUserIds = new[] { Guid.NewGuid() },
+        };
+
+        Guid cardId;
+        using (var scope = _fixture.BeginScope())
+            cardId = (await scope.Resolve<IChatBotService>().PostAsBotAsync(channelId, "Review?", card, default)).Id;
+
+        await RespondViaMediatorAsync(ownerId, teamId, cardId, MessageInteractionPolicy.CommentKey, "taking a look");
+        await RespondViaMediatorAsync(ownerId, teamId, cardId, MessageInteractionPolicy.CommentKey, "one more thing");
+
+        using var verify = _fixture.BeginScope();
+        var interaction = MessageInteractionJson.Deserialize(
+            (await verify.Resolve<CodeSpaceDbContext>().Message.AsNoTracking().SingleAsync(m => m.Id == cardId)).InteractionJson)!;
+
+        interaction.State.ShouldBe(InteractionState.Open, "comments never resolve — the card stays a living thread");
+        interaction.Resolution.ShouldBeNull();
+        interaction.Responses.Count.ShouldBe(2, "every comment accumulates, repeatably, in order");
+        interaction.Responses.ShouldAllBe(r => r.Kind == InteractionResponseKind.Comment && r.ByUserId == ownerId);
+        interaction.Responses[0].Comment.ShouldBe("taking a look");
+        interaction.Responses[1].Comment.ShouldBe("one more thing");
+    }
+
+    [Fact]
+    public async Task Comment_guards_reject_empty_text_and_a_non_member()
+    {
+        var (teamId, ownerId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var channelId = await SeedChannelAsync(teamId, ownerId);
+
+        var card = new MessageInteraction
+        {
+            Component = new ActionButtonsComponent { Buttons = new List<InteractionButton> { new() { Key = "approve", Label = "Approve" } } },
+            Target = new WorkflowWaitTarget { Token = "tok-c-guard" },
+        };
+        Guid cardId;
+        using (var scope = _fixture.BeginScope())
+            cardId = (await scope.Resolve<IChatBotService>().PostAsBotAsync(channelId, "Review?", card, default)).Id;
+
+        await RespondDirectCommentShouldThrow(teamId, cardId, ownerId, "   ");                    // a member, but empty text
+        await RespondDirectCommentShouldThrow(teamId, cardId, Guid.NewGuid(), "I'm not in here");  // text, but not a member
+    }
+
+    [Fact]
+    public async Task Discussion_then_a_decision_is_one_ordered_timeline_then_the_card_closes()
+    {
+        var (teamId, ownerId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var channelId = await SeedChannelAsync(teamId, ownerId);
+
+        var workflowId = await CreateWorkflowAsync(teamId, ownerId, ReviewLoopDefinition(channelId, ownerId));
+        var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
+
+        await RunEngineAsync(runId);   // posts the card, parks on flow.wait_action
+        var messageId = await ReadPostedMessageIdAsync(runId);
+
+        // Two comments while the run is parked — the card stays Open, the run stays Suspended.
+        await RespondViaMediatorAsync(ownerId, teamId, messageId, MessageInteractionPolicy.CommentKey, "starting");
+        await RespondViaMediatorAsync(ownerId, teamId, messageId, MessageInteractionPolicy.CommentKey, "almost done");
+
+        using (var mid = _fixture.BeginScope())
+            (await mid.Resolve<CodeSpaceDbContext>().WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == runId)).Status
+                .ShouldBe(WorkflowRunStatus.Suspended, "comments don't resolve the wait — the run stays parked");
+
+        // Then the decision — resolves the wait + closes the card.
+        await RespondViaMediatorAsync(ownerId, teamId, messageId, "approve", "approved");
+        await RunEngineAsync(runId);
+
+        using (var verify = _fixture.BeginScope())
+        {
+            var db = verify.Resolve<CodeSpaceDbContext>();
+            (await db.WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == runId)).Status.ShouldBe(WorkflowRunStatus.Success);
+
+            var interaction = MessageInteractionJson.Deserialize((await db.Message.AsNoTracking().SingleAsync(m => m.Id == messageId)).InteractionJson)!;
+            interaction.State.ShouldBe(InteractionState.Resolved);
+            interaction.Responses.Count.ShouldBe(3, "the full timeline: two comments then the decision");
+            interaction.Responses[0].Kind.ShouldBe(InteractionResponseKind.Comment);
+            interaction.Responses[1].Kind.ShouldBe(InteractionResponseKind.Comment);
+            interaction.Responses[2].Kind.ShouldBe(InteractionResponseKind.Action);
+            interaction.Responses[2].Key.ShouldBe("approve", "the resolving decision is logged in the same timeline as the discussion");
+        }
+
+        // A comment after the card resolved is rejected — closed to further responses.
+        await Should.ThrowAsync<InvalidOperationException>(() => RespondViaMediatorAsync(ownerId, teamId, messageId, MessageInteractionPolicy.CommentKey, "too late"));
+    }
+
+    [Fact]
     public async Task Post_form_card_then_submit_injects_the_values_resumes_the_run_and_stamps_them()
     {
         var (teamId, ownerId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
@@ -194,6 +289,22 @@ public class MessageRespondFlowTests
             using var scope = _fixture.BeginScope();
             await scope.Resolve<IMessageInteractionService>().RespondAsync(teamId, messageId, responseKey, actorUserId, null, null, default);
         });
+    }
+
+    private async Task RespondDirectCommentShouldThrow(Guid teamId, Guid messageId, Guid actorUserId, string comment)
+    {
+        await Should.ThrowAsync<InvalidOperationException>(async () =>
+        {
+            using var scope = _fixture.BeginScope();
+            await scope.Resolve<IMessageInteractionService>().RespondAsync(teamId, messageId, MessageInteractionPolicy.CommentKey, actorUserId, comment, null, default);
+        });
+    }
+
+    private async Task<Guid> ReadPostedMessageIdAsync(Guid runId)
+    {
+        using var verify = _fixture.BeginScope();
+        var post = await verify.Resolve<CodeSpaceDbContext>().WorkflowRunNode.AsNoTracking().SingleAsync(n => n.RunId == runId && n.NodeId == "post");
+        return Guid.Parse(JsonDocument.Parse(post.OutputsJson).RootElement.GetProperty("messageId").GetString()!);
     }
 
     private async Task<Guid> CreateWorkflowAsync(Guid teamId, Guid userId, WorkflowDefinition def)
