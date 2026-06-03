@@ -13,6 +13,7 @@ using PullRequestReviewVerdict = CodeSpace.Messages.Enums.PullRequestReviewVerdi
 using PullRequestCheckStatus = CodeSpace.Messages.Enums.PullRequestCheckStatus;
 using RepositoryVisibility = CodeSpace.Messages.Enums.RepositoryVisibility;
 using ProviderKind = CodeSpace.Messages.Enums.ProviderKind;
+using RepositoryRole = CodeSpace.Messages.Enums.RepositoryRole;
 
 namespace CodeSpace.Core.Services.Providers.GitHub;
 
@@ -360,34 +361,47 @@ public sealed class GitHubRepositoryProvider : IRepositoryCatalogCapability, IPu
 
     public async Task<RepositoryActorAccess> GetActorAccessAsync(ProviderContext context, RemoteRepository repository, CancellationToken cancellationToken)
     {
-        // MEMBERSHIP / access only: can the actor reach this repo at all? The token's SCOPE (repo/public_repo)
-        // is checked generically by the gate against the node's declared capability — not here.
+        // MEMBERSHIP / access only: report the actor's effective ROLE on this repo. Whether that role is
+        // ENOUGH is decided by the gate against the node's declared capability — not here. The token's
+        // SCOPE (repo/public_repo) is a separate axis the gate checks too.
         try
         {
             var client = await BuildClientAsync(context, cancellationToken).ConfigureAwait(false);
 
-            await _resilience.ExecuteAsync(context.Instance, nameof(GetActorAccessAsync), async _ =>
-            {
-                // GitHub reviews need only READ — if the actor can fetch the repo they can review it
-                // (the "can't approve your own PR" case is a 422 we can't pre-empt here). A private repo
-                // the actor isn't a collaborator on returns 404 → caught below as "no access".
-                await client.Repository.Get(long.Parse(repository.ExternalId)).ConfigureAwait(false);
-                return true;
-            }, cancellationToken).ConfigureAwait(false);
+            // A private repo the actor isn't a collaborator on returns 404 → caught below as "no access".
+            var repo = await _resilience.ExecuteAsync(context.Instance, nameof(GetActorAccessAsync), async _ =>
+                await client.Repository.Get(long.Parse(repository.ExternalId)).ConfigureAwait(false), cancellationToken).ConfigureAwait(false);
 
-            return RepositoryActorAccess.Allowed;
+            // Get succeeding means the actor can at least SEE the repo → Read floor even if GitHub omitted the
+            // permissions block; otherwise map the highest granted permission onto the neutral ladder.
+            var p = repo.Permissions;
+            var role = p == null ? RepositoryRole.Read : MapPermissions(p.Admin, p.Maintain, p.Push, p.Triage, p.Pull);
+
+            return RepositoryActorAccess.Of(role);
         }
         catch (ProviderApiException ex) when (ex.StatusCode is 403 or 404)
         {
-            return RepositoryActorAccess.Denied("You don't have access to this repository on GitHub. Ask a maintainer to add you, then try again.");
+            return RepositoryActorAccess.Of(RepositoryRole.None);
         }
         catch
         {
             // Inconclusive (network blip / transient / a scope gap on the read) — never block a
             // legitimate click on a flaky probe. The write path stays the backstop.
-            return RepositoryActorAccess.Allowed;
+            return RepositoryActorAccess.Inconclusive;
         }
     }
+
+    /// <summary>
+    /// Maps GitHub's repository permission flags to the neutral <see cref="RepositoryRole"/> ladder,
+    /// highest-granted first (admin → Admin … pull → Read). All false → None.
+    /// </summary>
+    internal static RepositoryRole MapPermissions(bool admin, bool maintain, bool push, bool triage, bool pull) =>
+        admin ? RepositoryRole.Admin
+        : maintain ? RepositoryRole.Maintain
+        : push ? RepositoryRole.Write
+        : triage ? RepositoryRole.Triage
+        : pull ? RepositoryRole.Read
+        : RepositoryRole.None;
 
     public async Task<RemoteWebhook?> FindWebhookByCallbackUrlAsync(ProviderContext context, RemoteRepository repository, string callbackUrl, CancellationToken cancellationToken)
     {

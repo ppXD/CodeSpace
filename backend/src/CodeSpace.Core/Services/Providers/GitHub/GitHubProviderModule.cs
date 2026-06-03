@@ -64,4 +64,13 @@ public sealed class GitHubProviderModule : IProviderModule
         // Probe just calls /user — any valid token works, no specific scope required.
         [typeof(ICredentialProbeCapability)] = ScopeRequirement.None
     };
+
+    public IReadOnlyDictionary<Type, RepositoryRole> CapabilityRoleRequirements { get; } = new Dictionary<Type, RepositoryRole>
+    {
+        // Submitting a PR review on GitHub needs only READ — anyone who can see the repo can review it
+        // (the "can't approve your own PR" case is a 422 we can't pre-empt). RepositoryRole.Read maps to
+        // GitHub `pull`, preserving the historical "repo is accessible" membership threshold this
+        // replaces. Other capabilities fall back to the same Read floor.
+        [typeof(IPullRequestReviewCapability)] = RepositoryRole.Read
+    };
 }

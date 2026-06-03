@@ -43,4 +43,17 @@ public interface IProviderModule
     /// /api/credentials/{id}/capabilities endpoint that drives UI feature availability.
     /// </summary>
     IReadOnlyDictionary<Type, ScopeRequirement> CapabilityScopeRequirements { get; }
+
+    /// <summary>
+    /// Per-capability MEMBERSHIP contract: "to use TCapability as an act-as-user on this provider, the
+    /// actor's repository role must be at least this <see cref="RepositoryRole"/>". The act-as-user gate
+    /// reads this to decide, generically, whether a responder's role is enough — different actions can
+    /// need different roles (a comment may need Read while a review needs Write). Keyed by capability
+    /// interface, exactly like <see cref="CapabilityScopeRequirements"/>.
+    ///
+    /// A capability with NO entry defaults to <see cref="RepositoryRole.Read"/> — the actor must at least
+    /// be able to see the repo. The SCOPE axis's sibling: scopes gate "what the token may do", roles gate
+    /// "what the person may do on this repo". An empty map means every capability uses the Read floor.
+    /// </summary>
+    IReadOnlyDictionary<Type, RepositoryRole> CapabilityRoleRequirements { get; }
 }

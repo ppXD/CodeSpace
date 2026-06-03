@@ -111,6 +111,31 @@ public class ResponderIdentityPrecheckFlowTests
     }
 
     [Fact]
+    public async Task Linked_responder_with_an_inconclusive_access_probe_is_allowed_through()
+    {
+        var (teamId, ownerId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var channelId = await SeedChannelAsync(teamId, ownerId);
+        // Identity linked; the access probe returns INCONCLUSIVE (the "inconclusive" marker makes the test
+        // provider report Role=null — a transient/can't-determine outcome). A flaky probe must NEVER block a
+        // legitimate click: the gate degrades to allow, the wait resolves, the write path stays the backstop.
+        var (repoId, _) = await SeedRepoAsync(teamId, ownerId, linkIdentity: true, externalId: "inconclusive-" + Guid.NewGuid().ToString("N")[..8]);
+
+        var workflowId = await CreateWorkflowAsync(teamId, ownerId, ReviewDefinition(channelId, ownerId, repoId));
+        var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
+
+        await RunEngineAsync(runId);
+        var messageId = await ReadPostedMessageIdAsync(runId);
+
+        await RespondAsync(teamId, messageId, ownerId);   // inconclusive probe → gate allows → wait resolves
+        await RunEngineAsync(runId);
+
+        using var verify = _fixture.BeginScope();
+        var db = verify.Resolve<CodeSpaceDbContext>();
+        (await db.WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == runId)).Status
+            .ShouldBe(WorkflowRunStatus.Success, "an inconclusive access probe never blocks the click — the run resumes and submits");
+    }
+
+    [Fact]
     public async Task Linked_responder_with_a_read_only_token_is_refused_by_the_capability_scope_check()
     {
         var (teamId, ownerId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);

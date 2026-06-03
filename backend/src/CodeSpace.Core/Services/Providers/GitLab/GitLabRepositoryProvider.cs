@@ -638,9 +638,10 @@ public sealed class GitLabRepositoryProvider : IRepositoryCatalogCapability, IPu
 
     public async Task<RepositoryActorAccess> GetActorAccessAsync(ProviderContext context, RemoteRepository repository, CancellationToken cancellationToken)
     {
-        // MEMBERSHIP only: is the actor a member with a high-enough role to act on this project? The token's
-        // SCOPE (api/read_api) is checked generically by the gate against the node's declared capability —
-        // not here, so this stays "can this person act on this repo", independent of which write they do.
+        // MEMBERSHIP only: report the actor's effective ROLE on this project. Whether that role is ENOUGH is
+        // decided by the gate against the node's declared capability — not here. The token's SCOPE
+        // (api/read_api) is a separate axis the gate checks too, so this stays "what role does this person
+        // hold", independent of which write they do.
         var auth = await _authResolver.ResolveAsync(context, cancellationToken).ConfigureAwait(false);
         var host = string.IsNullOrWhiteSpace(context.Instance.ApiUrl) ? context.Instance.BaseUrl : context.Instance.ApiUrl;
         var url = $"{host.TrimEnd('/')}/api/v4/projects/{Uri.EscapeDataString(repository.ExternalId)}";
@@ -654,35 +655,60 @@ public sealed class GitLabRepositoryProvider : IRepositoryCatalogCapability, IPu
             using var response = await _countsHttpClient.SendAsync(request, HttpCompletionOption.ResponseContentRead, cancellationToken).ConfigureAwait(false);
             Serilog.Log.Information("[preflight-gitlab] GET projects/{Id} → HTTP {Status}", repository.ExternalId, (int)response.StatusCode);
 
-            // Can't even see the project → not a member / no access.
+            // Can't even see the project → not a member / no access at all.
             if ((int)response.StatusCode is 403 or 404)
-                return RepositoryActorAccess.Denied("You're not a member of this GitLab project, or can't access it. Ask a maintainer to add you, then try again.");
+                return RepositoryActorAccess.Of(RepositoryRole.None);
 
             // Inconclusive (transient / unexpected) — never block a legitimate click on a flaky probe; the write stays the backstop.
-            if (!response.IsSuccessStatusCode) return RepositoryActorAccess.Allowed;
+            if (!response.IsSuccessStatusCode) return RepositoryActorAccess.Inconclusive;
 
             var json = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
             var level = ParseProjectAccessLevel(json);
             Serilog.Log.Information("[preflight-gitlab] project {Id} access_level={Level}", repository.ExternalId, level?.ToString() ?? "(null)");
 
-            // GitLab levels: Guest 10, Reporter 20, Developer 30, Maintainer 40, Owner 50. Approving / posting
-            // an MR note needs Developer+. Null = visible project but no membership grant → below Developer.
-            const int developer = 30;
-            return level >= developer ? RepositoryActorAccess.Allowed : RepositoryActorAccess.Denied(ReasonForLevel(level));
+            // Report the role; the gate compares it to what the capability needs. GitLab levels:
+            // Guest 10, Reporter 20, Developer 30, Maintainer 40, Owner 50 → Read/Triage/Write/Maintain/Admin.
+            return RepositoryActorAccess.Of(MapAccessLevel(level), GitLabRoleName(level));
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             // Network blip / DNS / unexpected — don't block a legitimate click on an inconclusive probe.
-            Serilog.Log.Warning(ex, "[preflight-gitlab] access probe for project {Id} failed — degrading to allowed", repository.ExternalId);
-            return RepositoryActorAccess.Allowed;
+            Serilog.Log.Warning(ex, "[preflight-gitlab] access probe for project {Id} failed — degrading to inconclusive", repository.ExternalId);
+            return RepositoryActorAccess.Inconclusive;
         }
     }
+
+    /// <summary>
+    /// Maps a GitLab access_level to the neutral <see cref="RepositoryRole"/> ladder. null / unknown → None.
+    /// Guest 10 → Read, Reporter 20 → Triage, Developer 30 → Write, Maintainer 40 → Maintain, Owner 50 → Admin.
+    /// </summary>
+    internal static RepositoryRole MapAccessLevel(int? level) => level switch
+    {
+        >= 50 => RepositoryRole.Admin,
+        >= 40 => RepositoryRole.Maintain,
+        >= 30 => RepositoryRole.Write,
+        >= 20 => RepositoryRole.Triage,
+        >= 10 => RepositoryRole.Read,
+        _ => RepositoryRole.None
+    };
+
+    /// <summary>The GitLab-native role name for an access_level — phrases the gate's deny message in the
+    /// terms the user sees in GitLab. null when there's no membership grant.</summary>
+    private static string? GitLabRoleName(int? level) => level switch
+    {
+        >= 50 => "Owner",
+        >= 40 => "Maintainer",
+        >= 30 => "Developer",
+        >= 20 => "Reporter",
+        >= 10 => "Guest",
+        _ => null
+    };
 
     /// <summary>
     /// Pure parse of GitLab's <c>GET /projects/:id</c> body → the caller's effective access level: the max
     /// of <c>permissions.project_access.access_level</c> and <c>permissions.group_access.access_level</c>.
     /// Null when neither is present (a visible project the user holds no membership grant on) or the JSON
-    /// is malformed — callers treat null as "below Developer".
+    /// is malformed — callers map null to RepositoryRole.None (no membership grant).
     /// </summary>
     internal static int? ParseProjectAccessLevel(string json)
     {
@@ -706,12 +732,6 @@ public sealed class GitLabRepositoryProvider : IRepositoryCatalogCapability, IPu
         {
             return null;
         }
-    }
-
-    private static string ReasonForLevel(int? level)
-    {
-        var role = level switch { 10 => "Guest", 20 => "Reporter", _ => "below Developer" };
-        return $"Your GitLab role on this project is {role} — reviewing needs Developer or higher. Ask a maintainer to raise your access, then try again.";
     }
 
     public async Task<RemoteWebhook?> FindWebhookByCallbackUrlAsync(ProviderContext context, RemoteRepository repository, string callbackUrl, CancellationToken cancellationToken)
