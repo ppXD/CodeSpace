@@ -1,5 +1,6 @@
 import type { VariableSummary } from "@/api/variables";
 import type {
+  NodeDefinition,
   NodeManifestDto,
   SystemVariableDto,
   WorkflowDefinition,
@@ -88,13 +89,21 @@ export function introspectScope({ definition, currentNodeId, manifestByType, wor
       continue;
     }
 
+    // For a flow.wait_action node, follow its token back to the chat.post_message it pairs with and surface
+    // that post's configured action keys as the known values of `action` — so a downstream node can see
+    // "one of: approve, reject" instead of an opaque string and wire its branch against a real key.
+    const actionKeys = node.typeKey === "flow.wait_action" ? resolveWaitActionKeys(definition, node) : null;
+
     for (const key of outputKeys) {
+      const showsActionKeys = actionKeys != null && key.name === "action";
       suggestions.push({
         path: `nodes.${nodeId}.outputs.${key.name}`,
         label: `nodes.${nodeId}.outputs.${key.name}`,
         category: "node",
         type: key.type,
-        description: `From "${node.label || manifest?.displayName || node.typeKey}"`,
+        description: showsActionKeys
+          ? `Clicked action — one of: ${actionKeys.join(", ")}`
+          : `From "${node.label || manifest?.displayName || node.typeKey}"`,
       });
     }
   }
@@ -286,6 +295,42 @@ function collectUpstream(definition: WorkflowDefinition, nodeId: string): Set<st
     for (const e of definition.edges) if (e.to === current) stack.push(e.from);
   }
   return upstream;
+}
+
+/**
+ * For a flow.wait_action node, follow its `token` input back to the chat.post_message that minted it and
+ * return that post's configured action keys (its buttons). Lets the picker show the wait's `action` output
+ * as "one of: approve, reject" rather than an opaque string, so the next node can branch on a real key.
+ *
+ * Returns null when the link can't be resolved STATICALLY — a literal token (no upstream post), a source
+ * that isn't a chat.post_message, or an `actions` bound to an expression rather than a literal array.
+ */
+function resolveWaitActionKeys(definition: WorkflowDefinition, waitNode: NodeDefinition): string[] | null {
+  const token = readRef(asObject(waitNode.inputs)?.token);
+  const sourceId = token?.match(/nodes\.([A-Za-z0-9_-]+)\.outputs\.token/)?.[1];
+  if (!sourceId) return null;
+
+  const post = definition.nodes.find((n) => n.id === sourceId && n.typeKey === "chat.post_message");
+  const actions = asObject(post?.inputs)?.actions;
+  if (!Array.isArray(actions)) return null;
+
+  const keys = actions
+    .map((a) => (asObject(a)?.key))
+    .filter((k): k is string => typeof k === "string" && k.length > 0);
+
+  return keys.length > 0 ? keys : null;
+}
+
+/** Narrow an unknown to a plain object (not an array), else null. */
+function asObject(value: unknown): Record<string, unknown> | null {
+  return value != null && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : null;
+}
+
+/** Read a reference input in either wire form: a "{{ … }}" / bare string, or a { "$ref": "…" } object. */
+function readRef(value: unknown): string | null {
+  if (typeof value === "string") return value;
+  const ref = asObject(value)?.$ref;
+  return typeof ref === "string" ? ref : null;
 }
 
 interface OutputKey { name: string; type?: string; }

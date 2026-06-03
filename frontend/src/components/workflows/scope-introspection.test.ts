@@ -87,3 +87,64 @@ describe("introspectScope — error outputs", () => {
     expect(p.some((x) => x.includes(".outputs.error"))).toBe(false);
   });
 });
+
+/**
+ * A flow.wait_action's `action` output is the value a downstream node branches on — but it's an opaque
+ * string unless the picker reveals which keys are possible. Following the wait's token back to the
+ * chat.post_message that minted it surfaces the configured button keys, so the next node can wire against
+ * a real value (the interaction-difficulty the design caused: you set buttons here, use the value there).
+ */
+describe("introspectScope — wait_action surfaces the post_message action keys", () => {
+  const mbt = new Map<string, NodeManifestDto>([
+    ["chat.post_message", manifest("chat.post_message", "Regular", { messageId: { type: "string" }, token: { type: "string" } })],
+    ["flow.wait_action", manifest("flow.wait_action", "Regular", { action: { type: "string" }, by: { type: "string" }, comment: { type: "string" }, values: { type: "object" } })],
+    ["git.pr_review", manifest("git.pr_review", "Regular", { reviewId: { type: "string" } })],
+  ]);
+
+  // post → wait(token wired to post) → review. `review` is downstream of the wait, so it sees the wait's outputs.
+  function build(postInputs: unknown, waitToken: unknown): WorkflowDefinition {
+    return {
+      schemaVersion: 1,
+      nodes: [
+        { id: "post", typeKey: "chat.post_message", config: {}, inputs: postInputs },
+        { id: "wait", typeKey: "flow.wait_action", config: {}, inputs: { token: waitToken } },
+        { id: "review", typeKey: "git.pr_review", config: {}, inputs: {} },
+      ],
+      edges: [{ from: "post", to: "wait" }, { from: "wait", to: "review" }],
+    };
+  }
+
+  const actionSuggestion = (def: WorkflowDefinition) =>
+    introspectScope({ definition: def, currentNodeId: "review", manifestByType: mbt }).find((s) => s.path === "nodes.wait.outputs.action");
+
+  it("lists the post's action keys on the wait's `action` output", () => {
+    const def = build({ actions: [{ key: "approve", label: "Approve" }, { key: "reject", label: "Reject" }] }, "{{nodes.post.outputs.token}}");
+    const s = actionSuggestion(def);
+    expect(s).toBeDefined();
+    expect(s!.description).toContain("approve");
+    expect(s!.description).toContain("reject");
+  });
+
+  it("resolves the token from the { $ref } object form too", () => {
+    const def = build({ actions: [{ key: "approve", label: "A" }] }, { $ref: "nodes.post.outputs.token" });
+    expect(actionSuggestion(def)!.description).toContain("approve");
+  });
+
+  it("falls back to a plain string when the token is a literal (no upstream post link)", () => {
+    const def = build({ actions: [{ key: "approve", label: "A" }] }, "a-literal-token");
+    expect(actionSuggestion(def)!.description).not.toContain("approve");
+  });
+
+  it("falls back when the post's actions is a dynamic expression, not a literal list", () => {
+    const def = build({ actions: "{{wf.actions}}" }, "{{nodes.post.outputs.token}}");
+    expect(actionSuggestion(def)!.description).not.toContain("approve");
+  });
+
+  it("still surfaces the wait's other outputs (by/comment/values) unchanged", () => {
+    const def = build({ actions: [{ key: "approve", label: "A" }] }, "{{nodes.post.outputs.token}}");
+    const paths = introspectScope({ definition: def, currentNodeId: "review", manifestByType: mbt }).map((s) => s.path);
+    expect(paths).toContain("nodes.wait.outputs.by");
+    expect(paths).toContain("nodes.wait.outputs.comment");
+    expect(paths).toContain("nodes.wait.outputs.values");
+  });
+});
