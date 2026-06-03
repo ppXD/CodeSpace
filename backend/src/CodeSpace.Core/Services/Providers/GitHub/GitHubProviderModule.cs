@@ -33,7 +33,13 @@ public sealed class GitHubProviderModule : IProviderModule
     ///   (GitHub treats <c>admin:repo_hook</c> as a subset, so <c>repo</c> alone is enough.)
     /// • <c>read:user</c> lets ProbeCredential identify the authenticated user.
     /// </summary>
-    public IReadOnlyList<string> DefaultOAuthScopes { get; } = new[] { GitHubScopes.Repo, GitHubScopes.ReadUser };
+    // `read:user` isn't a capability requirement (ProbeCredential needs no scope) — it's the non-capability
+    // extra for identifying the authenticated user. `repo` is contributed by the capabilities below.
+    private static readonly string[] ExtraOAuthScopes = { GitHubScopes.ReadUser };
+
+    // DERIVED from CapabilityScopeRequirements (broadest scope per capability = `repo`) + ExtraOAuthScopes →
+    // [repo, read:user] today; a new capability needing another scope extends it automatically (no drift).
+    public IReadOnlyList<string> DefaultOAuthScopes => OAuthScopeDefaults.Compute(ExtraOAuthScopes, CapabilityScopeRequirements);
 
     public IReadOnlyDictionary<Type, ScopeRequirement> CapabilityScopeRequirements { get; } = new Dictionary<Type, ScopeRequirement>
     {
