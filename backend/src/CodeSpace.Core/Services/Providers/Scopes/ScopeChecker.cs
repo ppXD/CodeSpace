@@ -27,10 +27,16 @@ public sealed class ScopeChecker : IScopeChecker, ISingletonDependency
 
     public void EnsureCapability(Credential credential, ProviderKind kind, Type capabilityType)
     {
-        // Non-OAuth credentials (PAT, project access token, etc.) have no scope metadata on
-        // this side — the user-side token decides what's allowed. We can't pre-check those;
-        // any 403 from the wire flows through the per-provider error mapper instead.
-        if (credential.AuthType != AuthType.OAuth) return;
+        // Pre-check ANY credential whose scopes we KNOW. OAuth captures them at consent; PATs capture
+        // them at link time too (GitLab personal_access_tokens/self, GitHub X-OAuth-Scopes). The auth
+        // TYPE is irrelevant — the scope DATA is what decides — so a read-only PAT is caught here
+        // rather than failing mid-run at the wire.
+        //
+        // null Scopes = UNKNOWN (a token type that can't expose them, or one linked before capture
+        // existed): skip and let any wire 403 flow through the per-provider error mapper. This mirrors
+        // CredentialService's capability-warning semantics exactly — the surfaced warning and this
+        // runtime gate read identical scope data and treat null identically.
+        if (credential.Scopes == null) return;
 
         var outcome = Check(kind, capabilityType, credential.Scopes);
         if (outcome.IsSatisfied) return;
