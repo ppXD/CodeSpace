@@ -51,13 +51,14 @@ public sealed class ChatPostMessageNode : INodeRuntime
             {
               "type": "object",
               "properties": {
-                "waitForResponse": { "type": "boolean", "default": true, "description": "When the message is interactive (actions/form), pause HERE until someone responds and surface their choice as this node's outputs (action / by / comment / values) — no separate flow.wait_action needed. Off = post-and-continue (fire-and-forget), or wait elsewhere via a flow.wait_action wired to the `token` output. Ignored for a plain message." },
+                "waitForResponse": { "type": "boolean", "default": true, "title": "Wait for a response", "description": "Pause here until someone responds, and surface their choice as this node's outputs. Off = post and continue. Ignored for a plain message." },
                 "resolve": {
                   "type": "object",
-                  "description": "How responses RESOLVE the wait. Default: the first response wins (single-responder).",
+                  "title": "Decision rule",
+                  "description": "How responses decide the wait. Default: the first response wins.",
                   "properties": {
-                    "mode": { "type": "string", "enum": ["first","quorum"], "default": "first", "description": "first = the first terminal click resolves; quorum = N distinct responders of the same action. A button marked `vetoes` always short-circuits (one click resolves) regardless of mode." },
-                    "count": { "type": "integer", "minimum": 1, "default": 2, "description": "For quorum: how many DISTINCT responders are needed." }
+                    "mode": { "type": "string", "enum": ["first","quorum"], "default": "first", "x-enumLabels": { "first": "First response wins", "quorum": "Quorum — N of the same" }, "description": "A button marked `vetoes` always decides on one click, regardless of this." },
+                    "count": { "type": "integer", "minimum": 1, "default": 2, "title": "Responders needed", "description": "For quorum: how many DISTINCT people must pick the same option." }
                   }
                 }
               }
@@ -75,7 +76,7 @@ public sealed class ChatPostMessageNode : INodeRuntime
                   "items": {
                     "type": "object",
                     "properties": {
-                      "key": { "type": "string", "description": "What the workflow RECEIVES when this button is clicked — surfaced as outputs.action (this node when waiting, else the downstream flow.wait_action). The button only emits this signal; what it DOES is whatever you wire downstream (e.g. \"approve\" → a git.pr_review verdict)." },
+                      "key": { "type": "string", "title": "Action key", "description": "The signal surfaced as outputs.action when clicked — wire it downstream (e.g. \"approve\" → a git.pr_review verdict)." },
                       "label": { "type": "string", "description": "Button text shown to the responder." },
                       "description": { "type": "string", "x-advanced": true, "description": "Optional: what this button does. Shown to the responder as a tooltip on the button, so a click's effect isn't opaque." },
                       "style": { "type": "string", "enum": ["Default","Primary","Danger"], "description": "Visual emphasis." },

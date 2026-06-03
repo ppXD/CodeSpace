@@ -228,3 +228,27 @@ describe("SchemaForm advanced-field disclosure", () => {
     expect(container.querySelector("details.wf-form-advanced")).toBeNull();
   });
 });
+
+/**
+ * Plain-language surface: `title` overrides the humanized property label, and `x-enumLabels` gives an enum
+ * friendly option text — while the stored value stays the raw enum value (purely a display nicety).
+ */
+describe("SchemaForm title + enum labels", () => {
+  it("uses `title` as the field label instead of the humanized property name", () => {
+    render(<SchemaForm schema={{ type: "object", properties: { resolve: { type: "string", title: "Decision rule" } } }} value={{}} onChange={vi.fn()} />);
+    expect(screen.getByText("Decision rule")).toBeInTheDocument();
+    expect(screen.queryByText("Resolve")).toBeNull();
+  });
+
+  it("renders friendly x-enumLabels text but stores the raw enum value", () => {
+    const onChange = vi.fn();
+    const schema = { type: "object", properties: { mode: { type: "string", enum: ["first", "quorum"], "x-enumLabels": { first: "First response wins", quorum: "Quorum — N of the same" } } } };
+    render(<SchemaForm schema={schema} value={{ mode: "first" }} onChange={onChange} />);
+
+    const select = screen.getByRole("combobox");
+    expect([...select.querySelectorAll("option")].map(o => o.textContent)).toEqual(["First response wins", "Quorum — N of the same"]);
+
+    fireEvent.change(select, { target: { value: "quorum" } });
+    expect(onChange).toHaveBeenCalledWith({ mode: "quorum" });   // the raw value is stored, not the label
+  });
+});
