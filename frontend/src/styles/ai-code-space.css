@@ -3391,6 +3391,23 @@ textarea:-webkit-autofill {
 .acs-root .chat-card-form { display: flex; flex-direction: column; gap: 10px; max-width: 460px; }
 .acs-root .chat-card-form-actions { display: flex; justify-content: flex-end; }
 
+/* Collaboration timeline — the append-only log of comments + action clicks (who / what), so a card is a
+   living thread everyone sees, not a one-shot button. Action rows are slightly emphasised vs comments. */
+.acs-root .chat-card-log { display: flex; flex-direction: column; gap: 4px; margin: 0 0 8px; padding: 0; list-style: none; max-width: 460px; }
+.acs-root .chat-card-log-row { display: flex; align-items: baseline; gap: 6px; font-size: 12.5px; line-height: 1.4; min-width: 0; }
+.acs-root .chat-card-log-av { flex: none; align-self: center; display: inline-flex; align-items: center; justify-content: center; width: 16px; height: 16px; border-radius: 999px; font-size: 9px; font-weight: 600; }
+.acs-root .chat-card-log-name { font-weight: 600; color: var(--ink-2); flex: none; }
+.acs-root .chat-card-log-what { color: var(--ink); min-width: 0; overflow-wrap: anywhere; }
+.acs-root .chat-card-log-row[data-kind="action"] .chat-card-log-what { color: var(--ink-2); font-weight: 500; }
+
+/* Live quorum progress ("2 / 3 approved") on a quorum card. */
+.acs-root .chat-card-tally { display: inline-flex; align-items: center; gap: 5px; margin-bottom: 8px; font-size: 12px; font-weight: 600; color: var(--accent); }
+
+/* Always-available comment box on an Open card — non-terminal discussion, open to any member. */
+.acs-root .chat-card-commentbox { display: flex; align-items: center; gap: 8px; margin-top: 8px; max-width: 460px; }
+.acs-root .chat-card-commentbox-input { flex: 1; min-width: 0; padding: 6px 10px; font-size: 12.5px; border: 1px solid var(--line); border-radius: 999px; background: var(--bg); color: var(--ink); }
+.acs-root .chat-card-commentbox-input:focus { border-color: var(--accent); outline: none; }
+
 /* Date / unread separators in the message stream — a centred label flanked by hairlines, the
    Slack/Space "reading" cues. Date is muted normal-case; the unread line is small accent caps. */
 .acs-root .chat-divider { display: flex; align-items: center; gap: 10px; margin: 10px 0 4px; user-select: none; }
