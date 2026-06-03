@@ -56,6 +56,12 @@ interface Schema {
   "x-selector"?: string;
   /** Marks a long/multi-line string field (e.g. a "Paragraph" input) so it renders as a textarea. */
   "x-long"?: boolean;
+  /**
+   * Marks a secondary field so the form tucks it under a collapsed "Advanced" section instead of the main
+   * list — keeps the common path clean (e.g. a button's key/label/style stay visible; requiresComment /
+   * resolvesWait / vetoes move to Advanced). Purely presentational; the on-disk value shape is unchanged.
+   */
+  "x-advanced"?: boolean;
 }
 
 interface SchemaFormProps {
@@ -84,20 +90,34 @@ export function SchemaForm({ schema, value, onChange, templateHint = false, vari
 
   const update = (key: string, next: unknown) => onChange({ ...obj, [key]: next });
 
+  const renderField = ([key, propSchema]: [string, Schema]) => (
+    <Field
+      key={key}
+      name={key}
+      required={required.has(key)}
+      schema={propSchema}
+      value={obj[key]}
+      onChange={(next) => update(key, next)}
+      templateHint={templateHint}
+      variableSuggestions={variableSuggestions}
+    />
+  );
+
+  // Secondary fields (x-advanced) collapse under an "Advanced" disclosure so the common path stays light;
+  // everything else renders inline, in declared order.
+  const entries = Object.entries(parsed.properties);
+  const primary = entries.filter(([, s]) => !s["x-advanced"]);
+  const advanced = entries.filter(([, s]) => s["x-advanced"]);
+
   return (
     <div className="wf-form">
-      {Object.entries(parsed.properties).map(([key, propSchema]) => (
-        <Field
-          key={key}
-          name={key}
-          required={required.has(key)}
-          schema={propSchema}
-          value={obj[key]}
-          onChange={(next) => update(key, next)}
-          templateHint={templateHint}
-          variableSuggestions={variableSuggestions}
-        />
-      ))}
+      {primary.map(renderField)}
+      {advanced.length > 0 && (
+        <details className="wf-form-advanced">
+          <summary className="wf-form-advanced-summary">Advanced</summary>
+          <div className="wf-form-advanced-body">{advanced.map(renderField)}</div>
+        </details>
+      )}
     </div>
   );
 }
