@@ -64,4 +64,13 @@ public sealed class GitLabProviderModule : IProviderModule
         // Probe calls /user — any scope that hits the API (`api`, `read_api`, or `read_user`).
         [typeof(ICredentialProbeCapability)] = ScopeRequirement.AnyOf(GitLabScopes.Api, GitLabScopes.ReadApi, GitLabScopes.ReadUser)
     };
+
+    public IReadOnlyDictionary<Type, RepositoryRole> CapabilityRoleRequirements { get; } = new Dictionary<Type, RepositoryRole>
+    {
+        // Approving / posting an MR note is a Developer-level action on GitLab — Reporter and Guest can't.
+        // RepositoryRole.Write maps to GitLab Developer (access_level 30), preserving the historical
+        // ≥Developer membership threshold this replaces. Every other capability falls back to the Read
+        // floor — none of them is act-as-user-gated today, so the floor never fires for them.
+        [typeof(IPullRequestReviewCapability)] = RepositoryRole.Write
+    };
 }

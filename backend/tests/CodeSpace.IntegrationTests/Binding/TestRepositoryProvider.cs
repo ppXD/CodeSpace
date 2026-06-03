@@ -105,13 +105,25 @@ public sealed class TestRepositoryProvider : IRepositoryCatalogCapability, ICred
             WebUrl = $"https://test.local/{repository.FullPath}/-/reviews/{number}"
         });
 
-    // Deterministic, no shared state: deny when the repo's external id carries the "noaccess" marker, else
-    // allow. Lets a test exercise the pre-flight deny path by seeding a marked repo, without a toggle that
-    // could bleed across tests (every other repo — incl. the happy-path fixtures — stays Allowed).
+    // Deterministic, no shared state: the repo's external id encodes the actor's role, so a test drives any
+    // pre-flight outcome by seeding a marked repo (no cross-test toggle). "noaccess" → None (denied at the
+    // Read floor); "role-<name>" → that role; "inconclusive" → null (probe degrades to allow); everything
+    // else (incl. the happy-path fixtures) → Write, which clears the Read floor so existing tests stay green.
     public Task<RepositoryActorAccess> GetActorAccessAsync(ProviderContext context, RemoteRepository repository, CancellationToken cancellationToken) =>
-        Task.FromResult(repository.ExternalId.Contains("noaccess", StringComparison.OrdinalIgnoreCase)
-            ? RepositoryActorAccess.Denied("You're not a member of this project (test).")
-            : RepositoryActorAccess.Allowed);
+        Task.FromResult(repository.ExternalId.Contains("inconclusive", StringComparison.OrdinalIgnoreCase)
+            ? RepositoryActorAccess.Inconclusive
+            : RepositoryActorAccess.Of(RoleFor(repository.ExternalId)));
+
+    private static RepositoryRole RoleFor(string externalId)
+    {
+        if (externalId.Contains("noaccess", StringComparison.OrdinalIgnoreCase)) return RepositoryRole.None;
+        if (externalId.Contains("role-read", StringComparison.OrdinalIgnoreCase)) return RepositoryRole.Read;
+        if (externalId.Contains("role-triage", StringComparison.OrdinalIgnoreCase)) return RepositoryRole.Triage;
+        if (externalId.Contains("role-write", StringComparison.OrdinalIgnoreCase)) return RepositoryRole.Write;
+        if (externalId.Contains("role-maintain", StringComparison.OrdinalIgnoreCase)) return RepositoryRole.Maintain;
+        if (externalId.Contains("role-admin", StringComparison.OrdinalIgnoreCase)) return RepositoryRole.Admin;
+        return RepositoryRole.Write;
+    }
 
     public Task<RemoteWebhook?> FindWebhookByCallbackUrlAsync(ProviderContext context, RemoteRepository repository, string callbackUrl, CancellationToken cancellationToken) =>
         Task.FromResult(_hookStore.Find(callbackUrl));

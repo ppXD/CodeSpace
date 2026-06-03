@@ -5,10 +5,12 @@ using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Providers;
 using CodeSpace.Core.Services.Providers.Capabilities;
 using CodeSpace.Core.Services.Providers.Identity;
+using CodeSpace.Core.Services.Providers.Modules;
 using CodeSpace.Core.Services.Providers.Scopes;
 using CodeSpace.Core.Services.Workflows.Nodes;
 using CodeSpace.Messages.Dtos.Providers;
 using CodeSpace.Messages.Dtos.Workflows;
+using CodeSpace.Messages.Enums;
 using CodeSpace.Messages.Exceptions;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
@@ -43,15 +45,17 @@ public sealed class ActorIdentityRequirementGate : IActorIdentityRequirementGate
     private readonly INodeRegistry _nodeRegistry;
     private readonly IActorIdentityResolver _actorIdentity;
     private readonly IProviderRegistry _providers;
+    private readonly IProviderModuleCatalog _modules;
     private readonly IScopeChecker _scopeChecker;
     private readonly ILogger<ActorIdentityRequirementGate> _logger;
 
-    public ActorIdentityRequirementGate(CodeSpaceDbContext db, INodeRegistry nodeRegistry, IActorIdentityResolver actorIdentity, IProviderRegistry providers, IScopeChecker scopeChecker, ILogger<ActorIdentityRequirementGate> logger)
+    public ActorIdentityRequirementGate(CodeSpaceDbContext db, INodeRegistry nodeRegistry, IActorIdentityResolver actorIdentity, IProviderRegistry providers, IProviderModuleCatalog modules, IScopeChecker scopeChecker, ILogger<ActorIdentityRequirementGate> logger)
     {
         _db = db;
         _nodeRegistry = nodeRegistry;
         _actorIdentity = actorIdentity;
         _providers = providers;
+        _modules = modules;
         _scopeChecker = scopeChecker;
         _logger = logger;
     }
@@ -146,16 +150,47 @@ public sealed class ActorIdentityRequirementGate : IActorIdentityRequirementGate
             }
         }
 
-        // 2) MEMBERSHIP / repo access — provider-specific (a round-trip). Catches "valid token, but not a
-        //    member / role too low". A provider that can't answer → skip (the write stays the backstop).
+        // 2) MEMBERSHIP / repo ROLE — provider-specific (a round-trip). The provider REPORTS the actor's
+        //    effective role; the gate compares it to the role THIS capability needs (per-provider data on the
+        //    module, default Read). So different actions can need different roles — a comment may need Read
+        //    while a review needs Write — without the provider knowing the threshold. A provider that can't
+        //    answer the question → skip (the write stays the backstop).
         if (!_providers.TryGet<IRepositoryAccessCapability>(provider, out var access) || access == null) return;
 
-        var result = await access.GetActorAccessAsync(new ProviderContext(repo.ProviderInstance, credential), ToRemoteRepository(repo), cancellationToken).ConfigureAwait(false);
+        var actor = await access.GetActorAccessAsync(new ProviderContext(repo.ProviderInstance, credential), ToRemoteRepository(repo), cancellationToken).ConfigureAwait(false);
 
-        _logger.LogInformation("[preflight] repo {Repo} ({Provider}) cred {CredId}: canContribute={Can} reason={Reason}", repo.FullPath, provider, credential.Id, result.CanContribute, result.Reason ?? "(none)");
+        // Inconclusive probe (transient / couldn't determine) → never block a legitimate click; write is the backstop.
+        if (actor.Role == null) { _logger.LogInformation("[preflight] repo {Repo} ({Provider}): role probe inconclusive — allowing", repo.FullPath, provider); return; }
 
-        if (!result.CanContribute)
-            throw new ActorRepoPermissionDeniedException(provider, repo.ProviderInstanceId, repo.FullPath, result.Reason);
+        var required = RequiredRoleFor(_modules.Get(provider), capabilityType);
+
+        _logger.LogInformation("[preflight] repo {Repo} ({Provider}) cred {CredId}: role={Role} required={Required} for {Cap}", repo.FullPath, provider, credential.Id, actor.Role, required, capabilityType?.Name ?? "(none)");
+
+        if (actor.Role < required)
+            throw new ActorRepoPermissionDeniedException(provider, repo.ProviderInstanceId, repo.FullPath, RoleReason(provider, actor, required));
+    }
+
+    /// <summary>
+    /// The minimum <see cref="RepositoryRole"/> a capability needs on this provider: the module's declared
+    /// requirement, or <see cref="RepositoryRole.Read"/> (the act-as-user floor — you must at least be able
+    /// to see the repo) when the capability has no entry, the module is absent, or the requirement carries
+    /// no capability type. Pure + provider-data-driven so a new act-as-user node's role check follows its
+    /// declared capability with nothing hardcoded here.
+    /// </summary>
+    internal static RepositoryRole RequiredRoleFor(IProviderModule? module, Type? capabilityType)
+    {
+        if (module == null || capabilityType == null) return RepositoryRole.Read;
+
+        return module.CapabilityRoleRequirements.TryGetValue(capabilityType, out var role) ? role : RepositoryRole.Read;
+    }
+
+    private static string RoleReason(ProviderKind provider, RepositoryActorAccess actor, RepositoryRole required)
+    {
+        if (actor.Role == RepositoryRole.None)
+            return $"You don't have access to this {provider} repository — you're not a member, or can't see it. Ask a maintainer to add you, then try again.";
+
+        var have = actor.RoleLabel ?? actor.Role.ToString();
+        return $"Your {provider} role on this repository ({have}) isn't enough for this action — it needs at least {required}-level access. Ask a maintainer to raise your access, then try again.";
     }
 
     private static string ScopeReason(Messages.Enums.ProviderKind provider, IReadOnlyList<string> missing) =>
