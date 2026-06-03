@@ -27,4 +27,17 @@ public sealed record NodeManifestDto
     /// <c>workflow_activation</c> row and to surface a "Run now" input form. Default false.
     /// </summary>
     public bool IsManual { get; init; }
+
+    /// <summary>Author-facing starter templates the editor offers as "start from a template". Null/empty ⇒ none.</summary>
+    public IReadOnlyList<NodePresetDto>? Presets { get; init; }
+}
+
+/// <summary>API view of one node starter template — a named (Config, Inputs) pair the editor applies on pick.</summary>
+public sealed record NodePresetDto
+{
+    public required string Id { get; init; }
+    public required string Label { get; init; }
+    public string? Description { get; init; }
+    public required JsonElement Config { get; init; }
+    public required JsonElement Inputs { get; init; }
 }

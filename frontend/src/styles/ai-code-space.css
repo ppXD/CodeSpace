@@ -2341,6 +2341,16 @@ textarea:-webkit-autofill {
 .acs-root .wf-form-advanced-summary::before { content: "▸"; display: inline-block; margin-right: 5px; font-size: 9px; transition: transform 0.12s ease; }
 .acs-root .wf-form-advanced[open] > .wf-form-advanced-summary::before { transform: rotate(90deg); }
 .acs-root .wf-form-advanced-body { display: flex; flex-direction: column; gap: 12px; margin-top: 10px; }
+/* "Start from a template" chooser — collapsed disclosure of intent presets a node declares in its manifest. */
+.acs-root .wf-inspector-presets-summary { cursor: pointer; font-size: 11.5px; font-weight: 600; color: var(--ink-2); list-style: none; user-select: none; }
+.acs-root .wf-inspector-presets-summary::-webkit-details-marker { display: none; }
+.acs-root .wf-inspector-presets-summary::before { content: "▸"; display: inline-block; margin-right: 5px; font-size: 9px; transition: transform 0.12s ease; }
+.acs-root .wf-inspector-presets[open] > .wf-inspector-presets-summary::before { transform: rotate(90deg); }
+.acs-root .wf-inspector-presets-body { display: flex; flex-direction: column; gap: 6px; margin-top: 10px; }
+.acs-root .wf-inspector-preset { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; width: 100%; text-align: left; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); cursor: pointer; }
+.acs-root .wf-inspector-preset:hover { border-color: var(--accent); background: var(--panel); }
+.acs-root .wf-inspector-preset-label { font-size: 12px; font-weight: 600; color: var(--ink); }
+.acs-root .wf-inspector-preset-desc { font-size: 10.5px; color: var(--muted); line-height: 1.4; }
 /* Native select inside a wf-form-row: match input metrics + fill width. */
 .acs-root select.wf-form-input { appearance: none; -webkit-appearance: none; background-image: linear-gradient(45deg, transparent 50%, var(--muted-2) 50%), linear-gradient(135deg, var(--muted-2) 50%, transparent 50%); background-position: calc(100% - 13px) 50%, calc(100% - 8px) 50%; background-size: 5px 5px, 5px 5px; background-repeat: no-repeat; padding-right: 24px; }
 

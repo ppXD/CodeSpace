@@ -283,6 +283,26 @@ public class ChatPostMessageNodeTests
             .Buttons.Select(b => b.Key).ShouldBe(new[] { "ship" }, "the explicit generic component wins over the legacy actions shorthand");
     }
 
+    [Fact]
+    public void Declares_footgun_free_intent_presets_for_the_editor()
+    {
+        // Constructing the node runs the manifest initializer, which SchemaBuilder.Parse's every preset's
+        // JSON — so this also proves all four preset blobs are valid JSON.
+        var presets = Node(new StubChatBot()).Manifest.Presets.ShouldNotBeNull();
+
+        presets.Select(p => p.Id).ShouldBe(new[] { "announcement", "approval", "quorum_review", "form" });
+
+        // The quorum template is the footgun-free shape: a veto block + NO comment-as-vote button
+        // (discussion goes through the always-on comment box, not a terminal "comment" action).
+        var quorum = presets.Single(p => p.Id == "quorum_review");
+        quorum.Config.GetProperty("resolve").GetProperty("mode").GetString().ShouldBe("quorum");
+
+        var actions = quorum.Inputs.GetProperty("actions").EnumerateArray().ToList();
+        actions.Select(a => a.GetProperty("key").GetString()).ShouldBe(new[] { "approve", "request_changes" });
+        actions.Single(a => a.GetProperty("key").GetString() == "request_changes").GetProperty("vetoes").GetBoolean()
+            .ShouldBeTrue("request changes blocks via veto, not as a competing vote");
+    }
+
     private static NodeRunContext BuildContext(string? conversationId, string body, string? actionsJson, string? formJson = null, bool waitForResponse = false, string? resolveJson = null)
     {
         var inputs = new Dictionary<string, JsonElement> { ["body"] = JsonSerializer.SerializeToElement(body) };

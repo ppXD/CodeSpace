@@ -122,6 +122,65 @@ public sealed class ChatPostMessageNode : INodeRuntime
               }
             }
             """),
+        Presets =
+        [
+            new NodePreset
+            {
+                Id = "announcement",
+                Label = "Announcement",
+                Description = "Post a message. No response expected.",
+                Config = SchemaBuilder.Parse("""{ "waitForResponse": false }"""),
+                Inputs = SchemaBuilder.Parse("""{ "conversationId": "", "body": "" }"""),
+            },
+            new NodePreset
+            {
+                Id = "approval",
+                Label = "Approval",
+                Description = "One reviewer decides — approve or reject.",
+                Config = SchemaBuilder.Parse("""{ "waitForResponse": true, "resolve": { "mode": "first", "count": 1 } }"""),
+                Inputs = SchemaBuilder.Parse("""
+                    {
+                      "conversationId": "",
+                      "body": "",
+                      "actions": [
+                        { "key": "approve", "label": "Approve", "style": "Primary" },
+                        { "key": "reject", "label": "Reject", "style": "Danger", "requiresComment": true }
+                      ]
+                    }
+                    """),
+            },
+            new NodePreset
+            {
+                Id = "quorum_review",
+                Label = "Quorum review",
+                Description = "N approvals to pass; any \"Request changes\" blocks.",
+                Config = SchemaBuilder.Parse("""{ "waitForResponse": true, "resolve": { "mode": "quorum", "count": 2 } }"""),
+                Inputs = SchemaBuilder.Parse("""
+                    {
+                      "conversationId": "",
+                      "body": "",
+                      "actions": [
+                        { "key": "approve", "label": "Approve", "style": "Primary" },
+                        { "key": "request_changes", "label": "Request changes", "style": "Danger", "requiresComment": true, "vetoes": true }
+                      ]
+                    }
+                    """),
+            },
+            new NodePreset
+            {
+                Id = "form",
+                Label = "Form",
+                Description = "Collect structured input from one responder.",
+                Config = SchemaBuilder.Parse("""{ "waitForResponse": true }"""),
+                Inputs = SchemaBuilder.Parse("""
+                    {
+                      "conversationId": "",
+                      "body": "",
+                      "form": { "fields": { "type": "object", "properties": {} }, "submitLabel": "Submit" }
+                    }
+                    """),
+            },
+        ],
     };
 
     public async Task<NodeResult> RunAsync(NodeRunContext context, CancellationToken cancellationToken)

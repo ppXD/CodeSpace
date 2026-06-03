@@ -93,6 +93,27 @@ public sealed record NodeManifest
     /// Null ⇒ the node never acts as a user.
     /// </summary>
     public ActsAsUserSpec? ActsAsUser { get; init; }
+
+    /// <summary>
+    /// Optional author-facing starter templates for this node type. Each preset is a named, ready-to-use
+    /// (Config, Inputs) pair the editor offers as "start from a template" — a friendly surface over the
+    /// generic schemas, so an author picks an intent (e.g. "Quorum review") instead of assembling atoms.
+    /// Null/empty ⇒ the node offers no templates. Purely an editor convenience; the engine never reads it.
+    /// </summary>
+    public IReadOnlyList<NodePreset>? Presets { get; init; }
+}
+
+/// <summary>
+/// One author-facing starter template for a node — a named, ready-to-use (Config, Inputs) pair the editor
+/// applies on "start from a template". Schemas-as-data, like the manifest's other <see cref="JsonElement"/>s.
+/// </summary>
+public sealed record NodePreset
+{
+    public required string Id { get; init; }
+    public required string Label { get; init; }
+    public string? Description { get; init; }
+    public required JsonElement Config { get; init; }
+    public required JsonElement Inputs { get; init; }
 }
 
 /// <summary>

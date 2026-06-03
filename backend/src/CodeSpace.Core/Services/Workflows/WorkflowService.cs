@@ -446,7 +446,8 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
             ConfigSchema = n.Manifest.ConfigSchema,
             InputSchema = n.Manifest.InputSchema,
             OutputSchema = n.Manifest.OutputSchema,
-            IsManual = n.Manifest.IsManual
+            IsManual = n.Manifest.IsManual,
+            Presets = n.Manifest.Presets?.Select(p => new NodePresetDto { Id = p.Id, Label = p.Label, Description = p.Description, Config = p.Config, Inputs = p.Inputs }).ToList()
         }).ToList();
     }
 
