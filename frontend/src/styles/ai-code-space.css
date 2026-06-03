@@ -2334,6 +2334,13 @@ textarea:-webkit-autofill {
 .acs-root .wf-form-checkbox { align-self: flex-start; }
 /* Nested object (e.g. resolve { mode, count }) → its recursive sub-form, grouped by a left rule + indent. */
 .acs-root .wf-form-nested { border-left: 2px solid var(--line); padding-left: 12px; }
+/* Secondary fields tucked under a collapsed "Advanced" disclosure (e.g. a button's requiresComment / resolvesWait / vetoes). */
+.acs-root .wf-form-advanced { border-top: 1px solid var(--line); padding-top: 8px; }
+.acs-root .wf-form-advanced-summary { cursor: pointer; font-size: 11px; font-weight: 600; color: var(--muted); list-style: none; user-select: none; }
+.acs-root .wf-form-advanced-summary::-webkit-details-marker { display: none; }
+.acs-root .wf-form-advanced-summary::before { content: "▸"; display: inline-block; margin-right: 5px; font-size: 9px; transition: transform 0.12s ease; }
+.acs-root .wf-form-advanced[open] > .wf-form-advanced-summary::before { transform: rotate(90deg); }
+.acs-root .wf-form-advanced-body { display: flex; flex-direction: column; gap: 12px; margin-top: 10px; }
 /* Native select inside a wf-form-row: match input metrics + fill width. */
 .acs-root select.wf-form-input { appearance: none; -webkit-appearance: none; background-image: linear-gradient(45deg, transparent 50%, var(--muted-2) 50%), linear-gradient(135deg, var(--muted-2) 50%, transparent 50%); background-position: calc(100% - 13px) 50%, calc(100% - 8px) 50%; background-size: 5px 5px, 5px 5px; background-repeat: no-repeat; padding-right: 24px; }
 
@@ -2412,6 +2419,12 @@ textarea:-webkit-autofill {
 .mdl .wf-form-empty { font-size: 11.5px; color: var(--muted); font-style: italic; }
 .mdl .wf-form-row { display: flex; flex-direction: column; gap: 4px; }
 .mdl .wf-form-nested { border-left: 2px solid var(--line); padding-left: 12px; }
+.mdl .wf-form-advanced { border-top: 1px solid var(--line); padding-top: 8px; }
+.mdl .wf-form-advanced-summary { cursor: pointer; font-size: 11px; font-weight: 600; color: var(--muted); list-style: none; user-select: none; }
+.mdl .wf-form-advanced-summary::-webkit-details-marker { display: none; }
+.mdl .wf-form-advanced-summary::before { content: "▸"; display: inline-block; margin-right: 5px; font-size: 9px; transition: transform 0.12s ease; }
+.mdl .wf-form-advanced[open] > .wf-form-advanced-summary::before { transform: rotate(90deg); }
+.mdl .wf-form-advanced-body { display: flex; flex-direction: column; gap: 12px; margin-top: 10px; }
 .mdl .wf-form-label { font-size: 11.5px; font-weight: 500; color: var(--ink-2); }
 .mdl .wf-form-required { color: var(--accent); margin-left: 2px; }
 .mdl .wf-form-help { font-size: 10.5px; color: var(--muted); line-height: 1.4; }
@@ -3401,10 +3414,16 @@ textarea:-webkit-autofill {
 .acs-root .chat-card-log-av { flex: none; align-self: center; display: inline-flex; align-items: center; justify-content: center; width: 16px; height: 16px; border-radius: 999px; font-size: 9px; font-weight: 600; }
 .acs-root .chat-card-log-name { font-weight: 600; color: var(--ink-2); flex: none; }
 .acs-root .chat-card-log-what { color: var(--ink); min-width: 0; overflow-wrap: anywhere; }
-.acs-root .chat-card-log-row[data-kind="action"] .chat-card-log-what { color: var(--ink-2); font-weight: 500; }
+.acs-root .chat-card-log-row[data-kind="vote"] .chat-card-log-what { color: var(--ink-2); font-weight: 500; }
 
-/* Live quorum progress ("2 / 3 approved") on a quorum card. */
-.acs-root .chat-card-tally { display: inline-flex; align-items: center; gap: 5px; margin-bottom: 8px; font-size: 12px; font-weight: 600; color: var(--accent); }
+/* Decision standing — each responder's CURRENT vote (last-wins) + a generic per-option summary built from
+   the buttons' own labels (never a hardcoded verb). Replaces the old approve-specific tally. */
+.acs-root .chat-card-standing { margin-bottom: 8px; max-width: 460px; }
+.acs-root .chat-card-standing-head { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; margin-bottom: 6px; font-size: 12px; color: var(--accent); }
+.acs-root .chat-card-standing-rule { font-weight: 600; }
+.acs-root .chat-card-standing-chip { display: inline-flex; align-items: center; padding: 1px 7px; border-radius: 999px; background: var(--panel-2); color: var(--ink-2); font-size: 11px; font-weight: 500; }
+.acs-root .chat-card-standing-list { display: flex; flex-direction: column; gap: 4px; margin: 0; padding: 0; list-style: none; }
+.acs-root .chat-card-standing-hint { display: inline-flex; align-items: center; gap: 5px; margin-bottom: 8px; font-size: 12px; font-weight: 600; color: var(--accent); }
 
 /* Always-available comment box on an Open card — non-terminal discussion, open to any member. */
 .acs-root .chat-card-commentbox { display: flex; align-items: center; gap: 8px; margin-top: 8px; max-width: 460px; }

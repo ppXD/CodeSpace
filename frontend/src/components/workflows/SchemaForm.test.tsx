@@ -197,3 +197,34 @@ describe("SchemaForm nested object", () => {
     expect(textarea).toHaveValue(JSON.stringify({ a: 1 }, null, 2));
   });
 });
+
+/**
+ * x-advanced tucks secondary fields under a collapsed "Advanced" disclosure so the common path stays light
+ * (e.g. a button's key/label/style stay inline; requiresComment/resolvesWait/vetoes move to Advanced). Purely
+ * presentational — the value shape and editing are unchanged.
+ */
+describe("SchemaForm advanced-field disclosure", () => {
+  const advSchema = { type: "object", properties: { key: { type: "string" }, vetoes: { type: "boolean", "x-advanced": true } } };
+
+  it("renders x-advanced fields inside a collapsed disclosure, primary fields outside it", () => {
+    const { container } = render(<SchemaForm schema={advSchema} value={{}} onChange={vi.fn()} />);
+
+    const details = container.querySelector("details.wf-form-advanced");
+    expect(details).not.toBeNull();
+    expect(details).not.toHaveAttribute("open");                      // collapsed by default
+    expect(details!.textContent).toContain("Vetoes");                 // advanced field tucked inside
+    expect(screen.getByText("Key").closest("details")).toBeNull();    // primary field stays out of the disclosure
+  });
+
+  it("still edits an advanced field's value (children stay mounted under <details>)", () => {
+    const onChange = vi.fn();
+    render(<SchemaForm schema={advSchema} value={{}} onChange={onChange} />);
+    fireEvent.click(screen.getByRole("checkbox"));
+    expect(onChange).toHaveBeenCalledWith({ vetoes: true });
+  });
+
+  it("renders a plain form with no disclosure when nothing is x-advanced", () => {
+    const { container } = render(<SchemaForm schema={{ type: "object", properties: { key: { type: "string" } } }} value={{}} onChange={vi.fn()} />);
+    expect(container.querySelector("details.wf-form-advanced")).toBeNull();
+  });
+});

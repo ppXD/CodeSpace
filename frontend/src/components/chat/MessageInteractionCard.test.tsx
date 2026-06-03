@@ -198,12 +198,30 @@ describe("MessageInteractionCard", () => {
     expect(screen.getByText("Bob")).toBeInTheDocument();
   });
 
-  it("shows a live quorum tally for the leading action key", () => {
+  it("shows each responder's CURRENT vote by the button label — never a hardcoded verb like \"approved\"", () => {
     const responses: InteractionResponse[] = [
       { byUserId: "rev", kind: "Action", key: "approve", comment: null, atUtc: "2026-06-01T09:00:00Z" },
     ];
     renderCard(card("Open", null, null, responses, { kind: "Quorum", count: 2 }));
-    expect(screen.getByText(/1 \/ 2 approved/)).toBeInTheDocument();
+
+    expect(screen.getByText("Alice")).toBeInTheDocument();             // the responder, in the standing
+    expect(screen.getByText("Approve 1")).toBeInTheDocument();         // per-option summary built from the label
+    expect(screen.getByText(/Needs 2 of one option/)).toBeInTheDocument();
+    expect(screen.queryByText(/approved/i)).toBeNull();               // generic — no baked-in verb
+  });
+
+  it("counts each responder's LAST vote (last-wins): a switched vote leaves its old option", () => {
+    const responses: InteractionResponse[] = [
+      { byUserId: "rev", kind: "Action", key: "approve", comment: null, atUtc: "2026-06-01T09:00:01Z" },
+      { byUserId: "rev", kind: "Action", key: "request_changes", comment: "nope", atUtc: "2026-06-01T09:00:02Z" },
+      { byUserId: "bob", kind: "Action", key: "approve", comment: null, atUtc: "2026-06-01T09:00:03Z" },
+    ];
+    renderCard(card("Open", null, null, responses, { kind: "Quorum", count: 2 }));
+
+    // rev switched to request_changes; only bob still approves → Approve 1, Request changes 1 (no false 2/2).
+    expect(screen.getByText("Approve 1")).toBeInTheDocument();
+    expect(screen.getByText("Request changes 1")).toBeInTheDocument();
+    expect(screen.getByText("Request changes — nope")).toBeInTheDocument();   // the current-vote row carries the reason
   });
 
   it("lets any member add a non-terminal comment via the comment box (trimmed, reserved key)", () => {

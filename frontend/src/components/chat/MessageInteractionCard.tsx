@@ -68,7 +68,8 @@ export function MessageInteractionCard({ interaction, members, conversationId, m
   if (interaction.state !== "Open") {
     return (
       <div className="chat-card" data-state={interaction.state}>
-        <InteractionTimeline interaction={interaction} members={members} />
+        <VoteStanding interaction={interaction} members={members} />
+        <CommentThread interaction={interaction} members={members} />
         <ResolutionStamp interaction={interaction} members={members} />
       </div>
     );
@@ -91,8 +92,8 @@ export function MessageInteractionCard({ interaction, members, conversationId, m
 
   return (
     <div className="chat-card" data-state="Open">
-      <InteractionTimeline interaction={interaction} members={members} />
-      <QuorumTally interaction={interaction} />
+      <VoteStanding interaction={interaction} members={members} />
+      <CommentThread interaction={interaction} members={members} />
 
       {component.kind === "form" ? (
         <FormBody
@@ -146,60 +147,93 @@ export function MessageInteractionCard({ interaction, members, conversationId, m
   );
 }
 
-/** The append-only collaboration timeline — every comment and action click, in order (who / what). */
-function InteractionTimeline({ interaction, members }: { interaction: MessageInteractionView; members: Map<string, TeamMemberSummary> }) {
-  if (interaction.responses.length === 0) return null;
+/**
+ * Each responder's CURRENT terminal vote — their last terminal action (last-wins, so a changed vote counts
+ * once), with the button's label + any attached comment. Mirrors the backend's CurrentTerminalVotes, so the
+ * card's standing matches exactly what resolves the wait. Comments and non-terminal acks aren't votes here.
+ */
+function currentTerminalVotes(interaction: MessageInteractionView): Array<{ byUserId: string; key: string; label: string; comment: string | null }> {
+  if (interaction.component.kind !== "action_buttons") return [];
+
+  const buttons = interaction.component.buttons;
+  const isTerminal = (key: string) => { const b = buttons.find(x => x.key === key); return b != null && (b.resolvesWait ?? true); };
+
+  const latest = new Map<string, InteractionResponse>();
+  for (const r of interaction.responses)
+    if (r.kind === "Action" && r.key != null && isTerminal(r.key)) latest.set(r.byUserId, r);
+
+  return [...latest.values()].map(r => {
+    const key = r.key as string;
+    return { byUserId: r.byUserId, key, label: buttons.find(x => x.key === key)?.label ?? key, comment: r.comment };
+  });
+}
+
+/**
+ * The decision standing — one row per responder showing their CURRENT vote (last-wins), plus a per-option
+ * summary built from the buttons' OWN labels. Deliberately generic: it never prints a hardcoded verb like
+ * "approved" — the only human text is the author's labels — and it makes last-wins visible (a reviewer who
+ * switched Approve → Request changes shows only their current vote, so the counts always add up).
+ */
+function VoteStanding({ interaction, members }: { interaction: MessageInteractionView; members: Map<string, TeamMemberSummary> }) {
+  const votes = currentTerminalVotes(interaction);
+  const quorum = interaction.resolve.kind === "Quorum" ? interaction.resolve.count : null;
+
+  if (votes.length === 0)
+    return quorum != null ? <div className="chat-card-standing-hint"><Ic.Users size={11} /> Needs {quorum} of one option to decide</div> : null;
+
+  const perOption = new Map<string, { label: string; count: number }>();
+  for (const v of votes) {
+    const entry = perOption.get(v.key);
+    if (entry) entry.count += 1; else perOption.set(v.key, { label: v.label, count: 1 });
+  }
+
+  return (
+    <div className="chat-card-standing">
+      <div className="chat-card-standing-head">
+        <Ic.Users size={11} />
+        <span className="chat-card-standing-rule">{quorum != null ? `Needs ${quorum} of one option` : "Current votes"}</span>
+        {[...perOption.values()].map(o => <span key={o.label} className="chat-card-standing-chip">{o.label} {o.count}</span>)}
+      </div>
+      <ul className="chat-card-standing-list">
+        {votes.map(v => {
+          const name = members.get(v.byUserId)?.name ?? "Unknown";
+          const color = avatarColor(v.byUserId);
+
+          return (
+            <li key={v.byUserId} className="chat-card-log-row" data-kind="vote">
+              <span className="chat-card-log-av" style={{ background: color.bg, color: color.fg }}>{name.charAt(0).toUpperCase()}</span>
+              <span className="chat-card-log-name">{name}</span>
+              <span className="chat-card-log-what">{v.comment ? `${v.label} — ${v.comment}` : v.label}</span>
+            </li>
+          );
+        })}
+      </ul>
+    </div>
+  );
+}
+
+/** The discussion thread — non-terminal comments only (decisions live in the standing above). */
+function CommentThread({ interaction, members }: { interaction: MessageInteractionView; members: Map<string, TeamMemberSummary> }) {
+  const comments = interaction.responses.filter(r => r.kind === "Comment");
+
+  if (comments.length === 0) return null;
 
   return (
     <ul className="chat-card-log">
-      {interaction.responses.map((r, i) => {
+      {comments.map((r, i) => {
         const name = members.get(r.byUserId)?.name ?? "Unknown";
         const color = avatarColor(r.byUserId);
 
         return (
-          <li key={i} className="chat-card-log-row" data-kind={r.kind === "Comment" ? "comment" : "action"}>
+          <li key={i} className="chat-card-log-row" data-kind="comment">
             <span className="chat-card-log-av" style={{ background: color.bg, color: color.fg }}>{name.charAt(0).toUpperCase()}</span>
             <span className="chat-card-log-name">{name}</span>
-            <span className="chat-card-log-what">{describeResponse(r, interaction)}</span>
+            <span className="chat-card-log-what">{r.comment}</span>
           </li>
         );
       })}
     </ul>
   );
-}
-
-/** One log entry → human text: a comment shows its text; an action shows the button's label (+ any comment). */
-function describeResponse(r: InteractionResponse, interaction: MessageInteractionView): string {
-  if (r.kind === "Comment") return r.comment ?? "";
-
-  const label = interaction.component.kind === "action_buttons"
-    ? interaction.component.buttons.find(b => b.key === r.key)?.label ?? r.key ?? ""
-    : "submitted";
-
-  return r.comment ? `${label} — ${r.comment}` : label;
-}
-
-/** Live "N / count approved" progress for a quorum card (the leading action key's distinct, deduped responders). */
-function QuorumTally({ interaction }: { interaction: MessageInteractionView }) {
-  if (interaction.resolve.kind !== "Quorum") return null;
-
-  return <div className="chat-card-tally"><Ic.Users size={11} /> {countLeadingApprovals(interaction)} / {interaction.resolve.count} approved</div>;
-}
-
-/** Distinct responders (last-vote-wins per person) for the most-supported terminal, non-veto action key. */
-function countLeadingApprovals(interaction: MessageInteractionView): number {
-  if (interaction.component.kind !== "action_buttons") return 0;
-
-  const terminal = new Set(interaction.component.buttons.filter(b => (b.resolvesWait ?? true) && !b.vetoes).map(b => b.key));
-
-  const latestByResponder = new Map<string, string>();
-  for (const r of interaction.responses)
-    if (r.kind === "Action" && r.key && terminal.has(r.key)) latestByResponder.set(r.byUserId, r.key);
-
-  const perKey = new Map<string, number>();
-  for (const key of latestByResponder.values()) perKey.set(key, (perKey.get(key) ?? 0) + 1);
-
-  return perKey.size === 0 ? 0 : Math.max(...perKey.values());
 }
 
 /** Renders a form card's fields (via the shared schema-driven form) + a submit button. Owns the draft value. */

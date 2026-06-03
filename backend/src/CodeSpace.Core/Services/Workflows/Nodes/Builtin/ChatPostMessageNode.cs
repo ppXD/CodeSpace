@@ -77,17 +77,18 @@ public sealed class ChatPostMessageNode : INodeRuntime
                     "properties": {
                       "key": { "type": "string", "description": "What the workflow RECEIVES when this button is clicked — surfaced as outputs.action (this node when waiting, else the downstream flow.wait_action). The button only emits this signal; what it DOES is whatever you wire downstream (e.g. \"approve\" → a git.pr_review verdict)." },
                       "label": { "type": "string", "description": "Button text shown to the responder." },
-                      "description": { "type": "string", "description": "Optional: what this button does. Shown to the responder as a tooltip on the button, so a click's effect isn't opaque." },
+                      "description": { "type": "string", "x-advanced": true, "description": "Optional: what this button does. Shown to the responder as a tooltip on the button, so a click's effect isn't opaque." },
                       "style": { "type": "string", "enum": ["Default","Primary","Danger"], "description": "Visual emphasis." },
-                      "requiresComment": { "type": "boolean", "description": "Require the responder to enter a comment before this button submits." },
-                      "resolvesWait": { "type": "boolean", "default": true, "description": "Whether clicking this button RESOLVES the wait (the default). False = a non-terminal action: it's recorded for everyone to see but keeps the card open for others (e.g. an \"I'm looking\" ack alongside the real decision)." },
-                      "vetoes": { "type": "boolean", "description": "When true, one click resolves the wait IMMEDIATELY regardless of the resolve mode — a short-circuit (e.g. one \"request changes\" blocks a 2-approval quorum)." }
+                      "requiresComment": { "type": "boolean", "x-advanced": true, "description": "Require the responder to enter a comment before this button submits." },
+                      "resolvesWait": { "type": "boolean", "default": true, "x-advanced": true, "description": "Whether clicking this button RESOLVES the wait (the default). False = a non-terminal action: it's recorded for everyone to see but keeps the card open for others (e.g. an \"I'm looking\" ack alongside the real decision)." },
+                      "vetoes": { "type": "boolean", "x-advanced": true, "description": "When true, one click resolves the wait IMMEDIATELY regardless of the resolve mode — a short-circuit (e.g. one \"request changes\" blocks a 2-approval quorum)." }
                     },
                     "required": ["key","label"]
                   }
                 },
                 "component": {
                   "type": "object",
+                  "x-advanced": true,
                   "description": "Generic interaction component { kind, … } — the extensible alternative to `actions`/`form`. A new kind (poll, checklist, …) plugs in as a backend factory with no change to this node. When set it wins over `actions`/`form`. (`actions`/`form` remain as convenience shorthands.)",
                   "properties": {
                     "kind": { "type": "string", "description": "Which component to render (e.g. \"action_buttons\", \"form\")." }
