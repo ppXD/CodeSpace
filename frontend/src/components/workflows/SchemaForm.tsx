@@ -28,8 +28,9 @@ import { VariablePickerInput } from "./VariablePickerInput";
  *   - enum    → select
  *   - array of string → comma-separated text (one line per entry on Enter)
  *   - array of object → a repeatable list of sub-forms (one per item), built from items.properties
+ *   - object (with properties) → a nested sub-form, recursing into its declared properties
  *
- * Anything richer (oneOf/anyOf, free-form nested objects) falls back to a
+ * Anything richer (oneOf/anyOf, or a free-form object WITHOUT declared properties) falls back to a
  * monospace JSON editor — operator-friendly escape hatch, not a dead end.
  */
 
@@ -289,6 +290,24 @@ function renderControl(schema: Schema, value: unknown, onChange: (next: unknown)
         templateHint={templateHint}
         variableSuggestions={variableSuggestions}
       />
+    );
+  }
+
+  if (type === "object" && schema.properties && Object.keys(schema.properties).length > 0) {
+    // Structured nested object → a recursive sub-form (one control per nested property), visually
+    // grouped. Driven purely by schema, so e.g. chat.post_message's `resolve { mode, count }` renders
+    // as a select + number — not the raw-JSON fallback. A free-form object (no declared `properties`,
+    // e.g. a form's `fields` JSON Schema) has nothing to recurse into and still falls through to JSON.
+    return (
+      <div className="wf-form-nested">
+        <SchemaForm
+          schema={schema}
+          value={value}
+          onChange={(next) => onChange(next)}
+          templateHint={templateHint}
+          variableSuggestions={variableSuggestions}
+        />
+      </div>
     );
   }
 

@@ -148,3 +148,52 @@ describe("SchemaForm user multi-selector", () => {
     expect(onChange).toHaveBeenCalledWith({ allowed: ["u1", "u2"] });
   });
 });
+
+/**
+ * A structured nested object (one that declares `properties`) renders as a recursive sub-form — one
+ * control per nested property — not the raw-JSON fallback. This is what makes chat.post_message's
+ * `resolve { mode, count }` a real select + number in the inspector (mode → first|quorum). A FREE-FORM
+ * object (type object, no declared properties — e.g. a form's `fields` JSON Schema) still falls to JSON.
+ */
+describe("SchemaForm nested object", () => {
+  const nestedSchema = {
+    type: "object",
+    properties: {
+      resolve: {
+        type: "object",
+        properties: {
+          mode: { type: "string", enum: ["first", "quorum"] },
+          count: { type: "integer" },
+        },
+      },
+    },
+  };
+
+  it("renders a nested object's properties as a sub-form (enum → select, integer → number)", () => {
+    render(<SchemaForm schema={nestedSchema} value={{ resolve: { mode: "first", count: 2 } }} onChange={vi.fn()} />);
+    const select = screen.getByRole("combobox");
+    expect([...select.querySelectorAll("option")].map((o) => o.textContent)).toEqual(["first", "quorum"]);
+    expect(screen.getByRole("spinbutton")).toHaveValue(2);
+  });
+
+  it("merges a nested edit back under the parent key (resolve.mode → quorum, count preserved)", () => {
+    const onChange = vi.fn();
+    render(<SchemaForm schema={nestedSchema} value={{ resolve: { mode: "first", count: 2 } }} onChange={onChange} />);
+    fireEvent.change(screen.getByRole("combobox"), { target: { value: "quorum" } });
+    expect(onChange).toHaveBeenCalledWith({ resolve: { mode: "quorum", count: 2 } });
+  });
+
+  it("groups the sub-form (wf-form-nested) and starts blank when the nested value is absent", () => {
+    const { container } = render(<SchemaForm schema={nestedSchema} value={{}} onChange={vi.fn()} />);
+    expect(container.querySelector(".wf-form-nested")).not.toBeNull();
+    expect(screen.getByRole("spinbutton")).toHaveValue(null);
+  });
+
+  it("still falls back to a raw-JSON textarea for a FREE-FORM object (no declared properties)", () => {
+    const freeform = { type: "object", properties: { fields: { type: "object", description: "free-form" } } };
+    render(<SchemaForm schema={freeform} value={{ fields: { a: 1 } }} onChange={vi.fn()} />);
+    const textarea = screen.getByRole("textbox");
+    expect(textarea.className).toContain("wf-form-textarea-mono");
+    expect(textarea).toHaveValue(JSON.stringify({ a: 1 }, null, 2));
+  });
+});

@@ -1466,11 +1466,17 @@ function uniqueNodeId(typeKey: string, existing: Node[]): string {
 
 function defaultsFromSchema(schema: unknown): Record<string, unknown> {
   if (typeof schema !== "object" || schema == null) return {};
-  const s = schema as { properties?: Record<string, { default?: unknown }> };
+  const s = schema as { properties?: Record<string, { type?: string; default?: unknown; properties?: unknown }> };
   const out: Record<string, unknown> = {};
   if (!s.properties) return out;
   for (const [k, v] of Object.entries(s.properties)) {
-    if (v && "default" in v && v.default !== undefined) out[k] = v.default;
+    if (v && "default" in v && v.default !== undefined) { out[k] = v.default; continue; }
+
+    // Recurse into a structured nested object so its sub-defaults seed too (e.g. resolve { mode:"first", count:2 }).
+    if (v && v.type === "object" && v.properties) {
+      const nested = defaultsFromSchema(v);
+      if (Object.keys(nested).length > 0) out[k] = nested;
+    }
   }
   return out;
 }
