@@ -1,5 +1,6 @@
 using System.Text.Json;
 using CodeSpace.Core.Services.Chat;
+using CodeSpace.Core.Services.Chat.Interactions;
 using CodeSpace.Core.Services.Workflows.Nodes;
 using CodeSpace.Core.Services.Workflows.Nodes.Builtin;
 using CodeSpace.Core.Services.Workflows.Runtime;
@@ -15,6 +16,12 @@ namespace CodeSpace.UnitTests.Workflows;
 [Trait("Category", "Unit")]
 public class ChatPostMessageNodeTests
 {
+    /// <summary>The real component-factory registry — the node builds its card through it (action_buttons + form).</summary>
+    private static readonly IInteractionComponentRegistry Components =
+        new InteractionComponentRegistry(new IInteractionComponentFactory[] { new ActionButtonsComponentFactory(), new FormComponentFactory() });
+
+    private static ChatPostMessageNode Node(IChatBotService bot) => new(bot, Components);
+
     /// <summary>Hand-rolled stub (this suite uses no mocking lib) — records what was posted, returns a canned view.</summary>
     private sealed class StubChatBot : IChatBotService
     {
@@ -45,7 +52,7 @@ public class ChatPostMessageNodeTests
         var ctx = BuildContext("11111111-1111-1111-1111-111111111111", "Review?",
             """[{"key":"approve","label":"Approve","style":"Primary"},{"key":"reject","label":"Reject","style":"Danger","requiresComment":true}]""");
 
-        var result = await new ChatPostMessageNode(bot).RunAsync(ctx, CancellationToken.None);
+        var result = await Node(bot).RunAsync(ctx, CancellationToken.None);
 
         result.Status.ShouldBe(NodeStatus.Success);
 
@@ -68,7 +75,7 @@ public class ChatPostMessageNodeTests
         var ctx = BuildContext("11111111-1111-1111-1111-111111111111", "Review?",
             """[{"key":"approve","label":"Approve","description":"Approve + merge"},{"key":"reject","label":"Reject"}]""");
 
-        await new ChatPostMessageNode(bot).RunAsync(ctx, CancellationToken.None);
+        await Node(bot).RunAsync(ctx, CancellationToken.None);
 
         var component = bot.Interaction.ShouldNotBeNull().Component.ShouldBeOfType<ActionButtonsComponent>();
         component.Buttons[0].Description.ShouldBe("Approve + merge", "an author-written button description carries onto the card for the responder's tooltip");
@@ -80,7 +87,7 @@ public class ChatPostMessageNodeTests
     {
         var bot = new StubChatBot();
 
-        var result = await new ChatPostMessageNode(bot).RunAsync(BuildContext("11111111-1111-1111-1111-111111111111", "Deployed", actionsJson: null), CancellationToken.None);
+        var result = await Node(bot).RunAsync(BuildContext("11111111-1111-1111-1111-111111111111", "Deployed", actionsJson: null), CancellationToken.None);
 
         result.Status.ShouldBe(NodeStatus.Success);
         bot.Interaction.ShouldBeNull("no actions ⇒ a plain announcement, not a card");
@@ -90,7 +97,7 @@ public class ChatPostMessageNodeTests
     [Fact]
     public async Task Fails_when_conversation_id_is_missing()
     {
-        var result = await new ChatPostMessageNode(new StubChatBot())
+        var result = await Node(new StubChatBot())
             .RunAsync(BuildContext(conversationId: null, body: "x", actionsJson: null), CancellationToken.None);
 
         result.Status.ShouldBe(NodeStatus.Failure);
@@ -108,7 +115,7 @@ public class ChatPostMessageNodeTests
             ["body"] = JsonDocument.Parse("""[{"Patch":"@@ ..."}]""").RootElement.Clone(),
         };
 
-        var result = await new ChatPostMessageNode(new StubChatBot()).RunAsync(ContextFromInputs(inputs), CancellationToken.None);
+        var result = await Node(new StubChatBot()).RunAsync(ContextFromInputs(inputs), CancellationToken.None);
 
         result.Status.ShouldBe(NodeStatus.Failure);
         result.Error.ShouldContain("must be a string");
@@ -120,7 +127,7 @@ public class ChatPostMessageNodeTests
     {
         var inputs = new Dictionary<string, JsonElement> { ["conversationId"] = JsonSerializer.SerializeToElement("11111111-1111-1111-1111-111111111111") };
 
-        var result = await new ChatPostMessageNode(new StubChatBot()).RunAsync(ContextFromInputs(inputs), CancellationToken.None);
+        var result = await Node(new StubChatBot()).RunAsync(ContextFromInputs(inputs), CancellationToken.None);
 
         result.Status.ShouldBe(NodeStatus.Failure);
         result.Error.ShouldContain("'body' is required");
@@ -135,7 +142,7 @@ public class ChatPostMessageNodeTests
             ["body"] = JsonSerializer.SerializeToElement(""),
         };
 
-        var result = await new ChatPostMessageNode(new StubChatBot()).RunAsync(ContextFromInputs(inputs), CancellationToken.None);
+        var result = await Node(new StubChatBot()).RunAsync(ContextFromInputs(inputs), CancellationToken.None);
 
         result.Status.ShouldBe(NodeStatus.Failure);
         result.Error.ShouldContain("must not be empty");
@@ -148,7 +155,7 @@ public class ChatPostMessageNodeTests
         var ctx = BuildContext("11111111-1111-1111-1111-111111111111", "Pick a target", actionsJson: null,
             formJson: """{"fields":{"type":"object","properties":{"channel":{"type":"string"}},"required":["channel"]},"submitLabel":"Send"}""");
 
-        var result = await new ChatPostMessageNode(bot).RunAsync(ctx, CancellationToken.None);
+        var result = await Node(bot).RunAsync(ctx, CancellationToken.None);
 
         result.Status.ShouldBe(NodeStatus.Success);
 
@@ -168,7 +175,7 @@ public class ChatPostMessageNodeTests
             actionsJson: """[{"key":"approve","label":"Approve"}]""",
             formJson: """{"fields":{"type":"object","properties":{"v":{"type":"string"}}}}""");
 
-        await new ChatPostMessageNode(bot).RunAsync(ctx, CancellationToken.None);
+        await Node(bot).RunAsync(ctx, CancellationToken.None);
 
         bot.Interaction.ShouldNotBeNull().Component.ShouldBeOfType<FormComponent>("a card is one kind — a form takes precedence over buttons");
     }
@@ -180,7 +187,7 @@ public class ChatPostMessageNodeTests
         var ctx = BuildContext("11111111-1111-1111-1111-111111111111", "Review?",
             """[{"key":"approve","label":"Approve"}]""", waitForResponse: true);
 
-        var result = await new ChatPostMessageNode(bot).RunAsync(ctx, CancellationToken.None);
+        var result = await Node(bot).RunAsync(ctx, CancellationToken.None);
 
         result.Status.ShouldBe(NodeStatus.Suspended, "with waitForResponse on, the node posts the card THEN parks for the response — one node, no separate flow.wait_action");
         bot.Interaction.ShouldNotBeNull("the card is posted BEFORE suspending — the side-effect runs on the first pass");
@@ -196,7 +203,7 @@ public class ChatPostMessageNodeTests
     {
         var bot = new StubChatBot();
 
-        var result = await new ChatPostMessageNode(bot)
+        var result = await Node(bot)
             .RunAsync(BuildContext("11111111-1111-1111-1111-111111111111", "Deployed", actionsJson: null, waitForResponse: true), CancellationToken.None);
 
         result.Status.ShouldBe(NodeStatus.Success, "a plain message has nothing to respond to ⇒ it can't wait; it completes immediately");
@@ -210,7 +217,7 @@ public class ChatPostMessageNodeTests
         var decision = JsonDocument.Parse("""{ "action": "approve", "by": "u-1", "comment": "lgtm", "values": { "channel": "ops" } }""").RootElement;
         var ctx = ContextFromInputs(new Dictionary<string, JsonElement>(), resumePayload: decision);
 
-        var result = await new ChatPostMessageNode(bot).RunAsync(ctx, CancellationToken.None);
+        var result = await Node(bot).RunAsync(ctx, CancellationToken.None);
 
         result.Status.ShouldBe(NodeStatus.Success);
         bot.Interaction.ShouldBeNull("the resumed pass must NOT post again — the card is already up (ResumePayload guards the one-time side-effect)");
@@ -220,16 +227,74 @@ public class ChatPostMessageNodeTests
         result.Outputs["values"].GetProperty("channel").GetString().ShouldBe("ops", "a form submission's field values surface under `values`");
     }
 
-    private static NodeRunContext BuildContext(string? conversationId, string body, string? actionsJson, string? formJson = null, bool waitForResponse = false)
+    [Fact]
+    public async Task Carries_per_action_resolve_flags_onto_the_card()
+    {
+        var bot = new StubChatBot();
+        var ctx = BuildContext("11111111-1111-1111-1111-111111111111", "Review?",
+            """[{"key":"approve","label":"Approve"},{"key":"note","label":"Comment","resolvesWait":false},{"key":"reject","label":"Reject","vetoes":true}]""");
+
+        await Node(bot).RunAsync(ctx, CancellationToken.None);
+
+        var buttons = bot.Interaction.ShouldNotBeNull().Component.ShouldBeOfType<ActionButtonsComponent>().Buttons;
+        buttons.Single(b => b.Key == "approve").ResolvesWait.ShouldBeTrue("a button is a terminal decision by default");
+        buttons.Single(b => b.Key == "note").ResolvesWait.ShouldBeFalse("resolvesWait:false ⇒ non-terminal discussion");
+        buttons.Single(b => b.Key == "reject").Vetoes.ShouldBeTrue("vetoes short-circuits the wait");
+    }
+
+    [Fact]
+    public async Task Authors_the_quorum_resolve_policy_from_config()
+    {
+        var bot = new StubChatBot();
+        var ctx = BuildContext("11111111-1111-1111-1111-111111111111", "Review?",
+            """[{"key":"approve","label":"Approve"}]""", resolveJson: """{ "mode": "quorum", "count": 3 }""");
+
+        await Node(bot).RunAsync(ctx, CancellationToken.None);
+
+        bot.Interaction.ShouldNotBeNull().Resolve.Kind.ShouldBe(ResolvePolicyKind.Quorum);
+        bot.Interaction!.Resolve.Count.ShouldBe(3);
+    }
+
+    [Fact]
+    public async Task Defaults_the_resolve_policy_to_first_when_no_config()
+    {
+        var bot = new StubChatBot();
+
+        await Node(bot).RunAsync(BuildContext("11111111-1111-1111-1111-111111111111", "Review?", """[{"key":"approve","label":"Approve"}]"""), CancellationToken.None);
+
+        bot.Interaction.ShouldNotBeNull().Resolve.Kind.ShouldBe(ResolvePolicyKind.First, "no resolve config ⇒ first-click, backward compatible");
+    }
+
+    [Fact]
+    public async Task Builds_via_the_generic_component_input_which_wins_over_legacy_actions()
+    {
+        var bot = new StubChatBot();
+        var inputs = new Dictionary<string, JsonElement>
+        {
+            ["conversationId"] = JsonSerializer.SerializeToElement("11111111-1111-1111-1111-111111111111"),
+            ["body"] = JsonSerializer.SerializeToElement("Review?"),
+            ["component"] = JsonDocument.Parse("""{ "kind": "action_buttons", "buttons": [ { "key": "ship", "label": "Ship" } ] }""").RootElement.Clone(),
+            ["actions"] = JsonDocument.Parse("""[ { "key": "legacy", "label": "Legacy" } ]""").RootElement.Clone(),
+        };
+
+        await Node(bot).RunAsync(ContextFromInputs(inputs), CancellationToken.None);
+
+        bot.Interaction.ShouldNotBeNull().Component.ShouldBeOfType<ActionButtonsComponent>()
+            .Buttons.Select(b => b.Key).ShouldBe(new[] { "ship" }, "the explicit generic component wins over the legacy actions shorthand");
+    }
+
+    private static NodeRunContext BuildContext(string? conversationId, string body, string? actionsJson, string? formJson = null, bool waitForResponse = false, string? resolveJson = null)
     {
         var inputs = new Dictionary<string, JsonElement> { ["body"] = JsonSerializer.SerializeToElement(body) };
         if (conversationId != null) inputs["conversationId"] = JsonSerializer.SerializeToElement(conversationId);
         if (actionsJson != null) inputs["actions"] = JsonDocument.Parse(actionsJson).RootElement.Clone();
         if (formJson != null) inputs["form"] = JsonDocument.Parse(formJson).RootElement.Clone();
 
-        var config = waitForResponse ? new Dictionary<string, JsonElement> { ["waitForResponse"] = JsonSerializer.SerializeToElement(true) } : null;
+        var config = new Dictionary<string, JsonElement>();
+        if (waitForResponse) config["waitForResponse"] = JsonSerializer.SerializeToElement(true);
+        if (resolveJson != null) config["resolve"] = JsonDocument.Parse(resolveJson).RootElement.Clone();
 
-        return ContextFromInputs(inputs, config);
+        return ContextFromInputs(inputs, config.Count > 0 ? config : null);
     }
 
     private static NodeRunContext ContextFromInputs(Dictionary<string, JsonElement> inputs, Dictionary<string, JsonElement>? config = null, JsonElement? resumePayload = null) => new()

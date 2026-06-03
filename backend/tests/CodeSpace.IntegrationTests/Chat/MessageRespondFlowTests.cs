@@ -294,6 +294,35 @@ public class MessageRespondFlowTests
     }
 
     [Fact]
+    public async Task A_workflow_authored_quorum_card_resolves_only_after_two_approvals_then_resumes()
+    {
+        var (teamId, ownerId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var channelId = await SeedChannelAsync(teamId, ownerId);
+
+        var member2 = await SeedUserAsync();
+        using (var scope = _fixture.BeginScope())
+            await scope.Resolve<IConversationService>().AddMemberAsync(teamId, ownerId, channelId, member2, default);
+
+        var workflowId = await CreateWorkflowAsync(teamId, ownerId, QuorumReviewDefinition(channelId));
+        var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
+
+        await RunEngineAsync(runId);   // post_message posts the card AND parks itself (waitForResponse + quorum authored on the node)
+        var messageId = await ReadCardMessageIdAsync(channelId);   // the self-waiting node suspends → no messageId output; read the posted card by channel
+
+        await RespondDirectAsync(teamId, messageId, "approve", ownerId);
+        using (var mid = _fixture.BeginScope())
+            (await mid.Resolve<CodeSpaceDbContext>().WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == runId)).Status
+                .ShouldBe(WorkflowRunStatus.Suspended, "one approval is short of the node-authored 2-quorum — the run stays parked");
+
+        await RespondDirectAsync(teamId, messageId, "approve", member2);   // second distinct approval → reaches quorum
+        await RunEngineAsync(runId);
+
+        using var verify = _fixture.BeginScope();
+        (await verify.Resolve<CodeSpaceDbContext>().WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == runId)).Status
+            .ShouldBe(WorkflowRunStatus.Success, "the second distinct approval reaches the quorum, resolves the node's own wait, and the run resumes end-to-end");
+    }
+
+    [Fact]
     public async Task Post_form_card_then_submit_injects_the_values_resumes_the_run_and_stamps_them()
     {
         var (teamId, ownerId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
@@ -379,6 +408,13 @@ public class MessageRespondFlowTests
         return Guid.Parse(JsonDocument.Parse(post.OutputsJson).RootElement.GetProperty("messageId").GetString()!);
     }
 
+    private async Task<Guid> ReadCardMessageIdAsync(Guid channelId)
+    {
+        using var verify = _fixture.BeginScope();
+        return (await verify.Resolve<CodeSpaceDbContext>().Message.AsNoTracking()
+            .SingleAsync(m => m.ConversationId == channelId && m.InteractionJson != null && m.DeletedDate == null)).Id;
+    }
+
     private async Task RespondDirectAsync(Guid teamId, Guid messageId, string responseKey, Guid actorUserId, string? comment = null)
     {
         using var scope = _fixture.BeginScope();
@@ -434,6 +470,29 @@ public class MessageRespondFlowTests
         using var scope = _fixture.BeginScope();
         return (await scope.Resolve<IChatBotService>().PostAsBotAsync(channelId, "Review PR?", card, default)).Id;
     }
+
+    // A post_message that AUTHORS a 2-approval quorum on the node itself (config) + waits inline — the realistic
+    // "team review" the operator builds in the editor. allowedResponderUserIds omitted = any conversation member.
+    private static WorkflowDefinition QuorumReviewDefinition(Guid channelId) => new()
+    {
+        SchemaVersion = 1,
+        Nodes = new List<NodeDefinition>
+        {
+            new() { Id = "start", TypeKey = "trigger.manual", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
+            new()
+            {
+                Id = "post",
+                TypeKey = "chat.post_message",
+                Config = WorkflowsTestSeed.Json("""{ "waitForResponse": true, "resolve": { "mode": "quorum", "count": 2 } }"""),
+                Inputs = WorkflowsTestSeed.Json($$"""
+                    { "conversationId": "{{channelId}}", "body": "Review PR #9?",
+                      "actions": [ {"key":"approve","label":"Approve"}, {"key":"request_changes","label":"Request changes","vetoes":true} ] }
+                    """),
+            },
+            new() { Id = "end", TypeKey = "builtin.terminal", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
+        },
+        Edges = new List<EdgeDefinition> { new() { From = "start", To = "post" }, new() { From = "post", To = "end" } },
+    };
 
     private async Task<Guid> CreateWorkflowAsync(Guid teamId, Guid userId, WorkflowDefinition def)
     {

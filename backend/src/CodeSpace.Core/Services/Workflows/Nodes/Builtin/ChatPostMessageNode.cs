@@ -1,5 +1,6 @@
 using System.Text.Json;
 using CodeSpace.Core.Services.Chat;
+using CodeSpace.Core.Services.Chat.Interactions;
 using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Dtos.Chat;
 using CodeSpace.Messages.Dtos.Chat.Interactions;
@@ -28,10 +29,12 @@ namespace CodeSpace.Core.Services.Workflows.Nodes.Builtin;
 public sealed class ChatPostMessageNode : INodeRuntime
 {
     private readonly IChatBotService _bot;
+    private readonly IInteractionComponentRegistry _components;
 
-    public ChatPostMessageNode(IChatBotService bot)
+    public ChatPostMessageNode(IChatBotService bot, IInteractionComponentRegistry components)
     {
         _bot = bot;
+        _components = components;
     }
 
     public string TypeKey => "chat.post_message";
@@ -48,7 +51,15 @@ public sealed class ChatPostMessageNode : INodeRuntime
             {
               "type": "object",
               "properties": {
-                "waitForResponse": { "type": "boolean", "default": true, "description": "When the message is interactive (actions/form), pause HERE until someone responds and surface their choice as this node's outputs (action / by / comment / values) — no separate flow.wait_action needed. Off = post-and-continue (fire-and-forget), or wait elsewhere via a flow.wait_action wired to the `token` output. Ignored for a plain message." }
+                "waitForResponse": { "type": "boolean", "default": true, "description": "When the message is interactive (actions/form), pause HERE until someone responds and surface their choice as this node's outputs (action / by / comment / values) — no separate flow.wait_action needed. Off = post-and-continue (fire-and-forget), or wait elsewhere via a flow.wait_action wired to the `token` output. Ignored for a plain message." },
+                "resolve": {
+                  "type": "object",
+                  "description": "How responses RESOLVE the wait. Default: the first response wins (single-responder).",
+                  "properties": {
+                    "mode": { "type": "string", "enum": ["first","quorum"], "default": "first", "description": "first = the first terminal click resolves; quorum = N distinct responders of the same action. A button marked `vetoes` always short-circuits (one click resolves) regardless of mode." },
+                    "count": { "type": "integer", "minimum": 1, "default": 2, "description": "For quorum: how many DISTINCT responders are needed." }
+                  }
+                }
               }
             }
             """),
@@ -68,10 +79,20 @@ public sealed class ChatPostMessageNode : INodeRuntime
                       "label": { "type": "string", "description": "Button text shown to the responder." },
                       "description": { "type": "string", "description": "Optional: what this button does. Shown to the responder as a tooltip on the button, so a click's effect isn't opaque." },
                       "style": { "type": "string", "enum": ["Default","Primary","Danger"], "description": "Visual emphasis." },
-                      "requiresComment": { "type": "boolean", "description": "Require the responder to enter a comment before this button submits." }
+                      "requiresComment": { "type": "boolean", "description": "Require the responder to enter a comment before this button submits." },
+                      "resolvesWait": { "type": "boolean", "default": true, "description": "Whether clicking this button RESOLVES the wait (the default). False = a non-terminal action: it's recorded for everyone to see but keeps the card open for others (e.g. an \"I'm looking\" ack alongside the real decision)." },
+                      "vetoes": { "type": "boolean", "description": "When true, one click resolves the wait IMMEDIATELY regardless of the resolve mode — a short-circuit (e.g. one \"request changes\" blocks a 2-approval quorum)." }
                     },
                     "required": ["key","label"]
                   }
+                },
+                "component": {
+                  "type": "object",
+                  "description": "Generic interaction component { kind, … } — the extensible alternative to `actions`/`form`. A new kind (poll, checklist, …) plugs in as a backend factory with no change to this node. When set it wins over `actions`/`form`. (`actions`/`form` remain as convenience shorthands.)",
+                  "properties": {
+                    "kind": { "type": "string", "description": "Which component to render (e.g. \"action_buttons\", \"form\")." }
+                  },
+                  "required": ["kind"]
                 },
                 "form": {
                   "type": "object",
@@ -172,17 +193,17 @@ public sealed class ChatPostMessageNode : INodeRuntime
         obj.ValueKind == JsonValueKind.Object && obj.TryGetProperty(key, out var v) ? v.Clone() : fallback;
 
     /// <summary>
-    /// Build the interaction from the <c>actions</c> input (null ⇒ a plain message). Mints the action
-    /// token and returns it via <paramref name="token"/> so the caller can wire it into flow.wait_action;
-    /// the card's <c>workflow_wait</c> target carries the SAME token, which is what couples them.
+    /// Build the interaction (null ⇒ a plain message). The component is built by the
+    /// <see cref="IInteractionComponentRegistry"/> from a generic <c>component</c> config — so a new kind
+    /// (poll, …) is a new factory with no edit here. Legacy <c>form</c>/<c>actions</c> inputs are shimmed to
+    /// that config, so pre-existing definitions are unchanged. Mints the wait token + reads the resolve policy.
     /// </summary>
-    private static MessageInteraction? BuildInteraction(NodeRunContext context, out string? token)
+    private MessageInteraction? BuildInteraction(NodeRunContext context, out string? token)
     {
         token = null;
 
-        // A card is one component kind: a form (if given) wins over buttons; neither ⇒ a plain message.
-        InteractionComponent? component = BuildFormComponent(context);
-        component ??= BuildActionButtonsComponent(context);
+        var componentConfig = NormalizeComponentConfig(context);
+        var component = componentConfig is { } config ? _components.Build(config) : null;
         if (component == null) return null;
 
         token = Guid.NewGuid().ToString("N");
@@ -192,40 +213,52 @@ public sealed class ChatPostMessageNode : INodeRuntime
             Component = component,
             Target = new WorkflowWaitTarget { Token = token },
             AllowedResponderUserIds = ReadGuidList(context, "allowedResponderUserIds"),
+            Resolve = ParseResolvePolicy(context),
         };
     }
 
-    private static FormComponent? BuildFormComponent(NodeRunContext context)
+    /// <summary>
+    /// The component config to build from: the generic <c>component</c> input wins; otherwise the legacy
+    /// <c>form</c> (over <c>actions</c>) inputs are shimmed into the same <c>{ kind, … }</c> shape — so the
+    /// registry sees one uniform config whether authored the new way or the old way. Null ⇒ no interaction.
+    /// </summary>
+    private static JsonElement? NormalizeComponentConfig(NodeRunContext context)
     {
-        if (!context.Inputs.TryGetValue("form", out var formEl) || formEl.ValueKind != JsonValueKind.Object) return null;
-        if (!formEl.TryGetProperty("fields", out var fields) || fields.ValueKind != JsonValueKind.Object) return null;
+        if (context.Inputs.TryGetValue("component", out var c) && c.ValueKind == JsonValueKind.Object && c.TryGetProperty("kind", out _)) return c;
 
-        var submitLabel = formEl.TryGetProperty("submitLabel", out var s) && s.ValueKind == JsonValueKind.String ? s.GetString()! : "Submit";
+        if (context.Inputs.TryGetValue("form", out var form) && form.ValueKind == JsonValueKind.Object) return ShimForm(form);
 
-        return new FormComponent { Fields = fields.Clone(), SubmitLabel = submitLabel };
+        if (context.Inputs.TryGetValue("actions", out var actions) && actions.ValueKind == JsonValueKind.Array) return ShimActions(actions);
+
+        return null;
     }
 
-    private static ActionButtonsComponent? BuildActionButtonsComponent(NodeRunContext context)
+    private static JsonElement? ShimForm(JsonElement form)
     {
-        if (!context.Inputs.TryGetValue("actions", out var actionsEl) || actionsEl.ValueKind != JsonValueKind.Array) return null;
+        if (!form.TryGetProperty("fields", out var fields) || fields.ValueKind != JsonValueKind.Object) return null;
 
-        var buttons = new List<InteractionButton>();
-        foreach (var a in actionsEl.EnumerateArray())
-        {
-            if (a.ValueKind != JsonValueKind.Object) continue;
+        var submitLabel = form.TryGetProperty("submitLabel", out var s) && s.ValueKind == JsonValueKind.String ? s.GetString() : null;
 
-            var key = a.TryGetProperty("key", out var k) && k.ValueKind == JsonValueKind.String ? k.GetString() : null;
-            var label = a.TryGetProperty("label", out var l) && l.ValueKind == JsonValueKind.String ? l.GetString() : null;
-            if (string.IsNullOrEmpty(key) || string.IsNullOrEmpty(label)) continue;
+        return JsonSerializer.SerializeToElement(new { kind = "form", fields, submitLabel });
+    }
 
-            var description = a.TryGetProperty("description", out var d) && d.ValueKind == JsonValueKind.String ? d.GetString() : null;
-            var style = a.TryGetProperty("style", out var s) && s.ValueKind == JsonValueKind.String && Enum.TryParse<InteractionButtonStyle>(s.GetString(), ignoreCase: true, out var parsed) ? parsed : InteractionButtonStyle.Default;
-            var requiresComment = a.TryGetProperty("requiresComment", out var rc) && rc.ValueKind == JsonValueKind.True;
+    private static JsonElement ShimActions(JsonElement actions) =>
+        JsonSerializer.SerializeToElement(new { kind = "action_buttons", buttons = actions });
 
-            buttons.Add(new InteractionButton { Key = key!, Label = label!, Description = description, Style = style, RequiresComment = requiresComment });
-        }
+    /// <summary>
+    /// Read the resolve policy from the <c>resolve</c> config (<c>{ mode: first|quorum, count }</c>).
+    /// Default first-click; quorum count floored at 1. Absent config ⇒ the default, so existing cards resolve first-wins.
+    /// </summary>
+    private static ResolvePolicy ParseResolvePolicy(NodeRunContext context)
+    {
+        if (!context.Config.TryGetValue("resolve", out var r) || r.ValueKind != JsonValueKind.Object) return new ResolvePolicy();
 
-        return buttons.Count > 0 ? new ActionButtonsComponent { Buttons = buttons } : null;
+        var kind = r.TryGetProperty("mode", out var m) && m.ValueKind == JsonValueKind.String && string.Equals(m.GetString(), "quorum", StringComparison.OrdinalIgnoreCase)
+            ? ResolvePolicyKind.Quorum : ResolvePolicyKind.First;
+
+        var count = r.TryGetProperty("count", out var c) && c.ValueKind == JsonValueKind.Number && c.TryGetInt32(out var n) && n >= 1 ? n : 1;
+
+        return new ResolvePolicy { Kind = kind, Count = count };
     }
 
     private static IReadOnlyList<Guid>? ReadGuidList(NodeRunContext context, string key)
