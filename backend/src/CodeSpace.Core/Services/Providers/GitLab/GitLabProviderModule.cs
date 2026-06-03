@@ -30,13 +30,17 @@ public sealed class GitLabProviderModule : IProviderModule
 
     public IReadOnlyList<Type> AuxiliaryServices { get; } = new[] { typeof(GitLabSignatureVerifier), typeof(GitLabEventNormalizer) };
 
+    /// <summary>Scopes GitLab OAuth needs that aren't a capability requirement. None today — <c>api</c>
+    /// (required by the capabilities below) also covers profile/identity reads.</summary>
+    private static readonly string[] ExtraOAuthScopes = Array.Empty<string>();
+
     /// <summary>
-    /// GitLab's scope model is coarser: <c>api</c> grants everything we need (list projects,
-    /// register webhooks, read user profile). Asking only for <c>read_repository</c> would
-    /// let the user finish OAuth then immediately fail on the first webhook registration —
-    /// not worth the consent-screen savings.
+    /// DERIVED from <see cref="CapabilityScopeRequirements"/> so it can never drift: the broadest scope each
+    /// capability needs (all resolve to GitLab's umbrella <c>api</c>) plus <see cref="ExtraOAuthScopes"/>.
+    /// Resolves to <c>[api]</c> today — one consent covers list/webhook/review/profile. Add a capability that
+    /// needs a new scope and this grows automatically.
     /// </summary>
-    public IReadOnlyList<string> DefaultOAuthScopes { get; } = new[] { GitLabScopes.Api };
+    public IReadOnlyList<string> DefaultOAuthScopes => OAuthScopeDefaults.Compute(ExtraOAuthScopes, CapabilityScopeRequirements);
 
     public IReadOnlyDictionary<Type, ScopeRequirement> CapabilityScopeRequirements { get; } = new Dictionary<Type, ScopeRequirement>
     {
