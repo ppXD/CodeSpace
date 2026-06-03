@@ -3,6 +3,7 @@ using CodeSpace.Core.Services.Chat;
 using CodeSpace.Core.Services.Workflows.Nodes;
 using CodeSpace.Core.Services.Workflows.Nodes.Builtin;
 using CodeSpace.Core.Services.Workflows.Runtime;
+using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Dtos.Chat;
 using CodeSpace.Messages.Dtos.Chat.Interactions;
 using CodeSpace.Messages.Enums;
@@ -172,24 +173,74 @@ public class ChatPostMessageNodeTests
         bot.Interaction.ShouldNotBeNull().Component.ShouldBeOfType<FormComponent>("a card is one kind — a form takes precedence over buttons");
     }
 
-    private static NodeRunContext BuildContext(string? conversationId, string body, string? actionsJson, string? formJson = null)
+    [Fact]
+    public async Task Posts_then_suspends_on_the_cards_own_token_when_wait_for_response_is_on()
+    {
+        var bot = new StubChatBot();
+        var ctx = BuildContext("11111111-1111-1111-1111-111111111111", "Review?",
+            """[{"key":"approve","label":"Approve"}]""", waitForResponse: true);
+
+        var result = await new ChatPostMessageNode(bot).RunAsync(ctx, CancellationToken.None);
+
+        result.Status.ShouldBe(NodeStatus.Suspended, "with waitForResponse on, the node posts the card THEN parks for the response — one node, no separate flow.wait_action");
+        bot.Interaction.ShouldNotBeNull("the card is posted BEFORE suspending — the side-effect runs on the first pass");
+
+        var token = bot.Interaction!.Target.ShouldBeOfType<WorkflowWaitTarget>().Token;
+        result.SuspendUntil.ShouldNotBeNull();
+        result.SuspendUntil!.Kind.ShouldBe(WorkflowWaitKinds.Action);
+        result.SuspendUntil.CorrelationToken.ShouldBe(token, "it parks on the SAME token the card carries, so a click resolves exactly this card");
+    }
+
+    [Fact]
+    public async Task Does_not_wait_when_wait_for_response_is_on_but_there_is_no_interaction()
+    {
+        var bot = new StubChatBot();
+
+        var result = await new ChatPostMessageNode(bot)
+            .RunAsync(BuildContext("11111111-1111-1111-1111-111111111111", "Deployed", actionsJson: null, waitForResponse: true), CancellationToken.None);
+
+        result.Status.ShouldBe(NodeStatus.Success, "a plain message has nothing to respond to ⇒ it can't wait; it completes immediately");
+        result.Outputs["token"].ValueKind.ShouldBe(JsonValueKind.Null);
+    }
+
+    [Fact]
+    public async Task Resumed_pass_outputs_the_decision_and_does_not_repost()
+    {
+        var bot = new StubChatBot();
+        var decision = JsonDocument.Parse("""{ "action": "approve", "by": "u-1", "comment": "lgtm", "values": { "channel": "ops" } }""").RootElement;
+        var ctx = ContextFromInputs(new Dictionary<string, JsonElement>(), resumePayload: decision);
+
+        var result = await new ChatPostMessageNode(bot).RunAsync(ctx, CancellationToken.None);
+
+        result.Status.ShouldBe(NodeStatus.Success);
+        bot.Interaction.ShouldBeNull("the resumed pass must NOT post again — the card is already up (ResumePayload guards the one-time side-effect)");
+        result.Outputs["action"].GetString().ShouldBe("approve");
+        result.Outputs["by"].GetString().ShouldBe("u-1");
+        result.Outputs["comment"].GetString().ShouldBe("lgtm");
+        result.Outputs["values"].GetProperty("channel").GetString().ShouldBe("ops", "a form submission's field values surface under `values`");
+    }
+
+    private static NodeRunContext BuildContext(string? conversationId, string body, string? actionsJson, string? formJson = null, bool waitForResponse = false)
     {
         var inputs = new Dictionary<string, JsonElement> { ["body"] = JsonSerializer.SerializeToElement(body) };
         if (conversationId != null) inputs["conversationId"] = JsonSerializer.SerializeToElement(conversationId);
         if (actionsJson != null) inputs["actions"] = JsonDocument.Parse(actionsJson).RootElement.Clone();
         if (formJson != null) inputs["form"] = JsonDocument.Parse(formJson).RootElement.Clone();
 
-        return ContextFromInputs(inputs);
+        var config = waitForResponse ? new Dictionary<string, JsonElement> { ["waitForResponse"] = JsonSerializer.SerializeToElement(true) } : null;
+
+        return ContextFromInputs(inputs, config);
     }
 
-    private static NodeRunContext ContextFromInputs(Dictionary<string, JsonElement> inputs) => new()
+    private static NodeRunContext ContextFromInputs(Dictionary<string, JsonElement> inputs, Dictionary<string, JsonElement>? config = null, JsonElement? resumePayload = null) => new()
     {
         Inputs = inputs,
-        Config = new Dictionary<string, JsonElement>(),
+        Config = config ?? new Dictionary<string, JsonElement>(),
         RawInputs = JsonDocument.Parse("{}").RootElement,
         RawConfig = JsonDocument.Parse("{}").RootElement,
         Scope = new NodeRunScope { Trigger = new Dictionary<string, JsonElement>() },
         Logger = NullLogger.Instance,
         Observability = NodeObservability.NoOp,
+        ResumePayload = resumePayload,
     };
 }
