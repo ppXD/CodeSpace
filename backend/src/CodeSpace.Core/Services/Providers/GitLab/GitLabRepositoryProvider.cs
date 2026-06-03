@@ -638,6 +638,13 @@ public sealed class GitLabRepositoryProvider : IRepositoryCatalogCapability, IPu
 
     public async Task<RepositoryActorAccess> GetActorAccessAsync(ProviderContext context, RemoteRepository repository, CancellationToken cancellationToken)
     {
+        // A read-only token can't make an attributable write (post a review note / approve) — those need
+        // the `api` scope. Checked FIRST (no round-trip) when the token's scopes are known (captured at
+        // link time, PR #177); unknown scopes (null/empty) fall through to the membership probe. This is
+        // the dimension a Reporter-with-read-token AND an Owner-with-read_api-token both fail on.
+        if (LacksApiScope(context.Credential.Scopes))
+            return RepositoryActorAccess.Denied("Your GitLab identity's token is read-only — it's missing the 'api' scope needed to submit a review. Reconnect it with an api-scoped token.");
+
         var auth = await _authResolver.ResolveAsync(context, cancellationToken).ConfigureAwait(false);
         var host = string.IsNullOrWhiteSpace(context.Instance.ApiUrl) ? context.Instance.BaseUrl : context.Instance.ApiUrl;
         var url = $"{host.TrimEnd('/')}/api/v4/projects/{Uri.EscapeDataString(repository.ExternalId)}";
@@ -649,6 +656,7 @@ public sealed class GitLabRepositoryProvider : IRepositoryCatalogCapability, IPu
         try
         {
             using var response = await _countsHttpClient.SendAsync(request, HttpCompletionOption.ResponseContentRead, cancellationToken).ConfigureAwait(false);
+            Serilog.Log.Information("[preflight-gitlab] GET projects/{Id} → HTTP {Status}", repository.ExternalId, (int)response.StatusCode);
 
             // Can't even see the project → not a member / no access.
             if ((int)response.StatusCode is 403 or 404)
@@ -659,6 +667,7 @@ public sealed class GitLabRepositoryProvider : IRepositoryCatalogCapability, IPu
 
             var json = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
             var level = ParseProjectAccessLevel(json);
+            Serilog.Log.Information("[preflight-gitlab] project {Id} access_level={Level}", repository.ExternalId, level?.ToString() ?? "(null)");
 
             // GitLab levels: Guest 10, Reporter 20, Developer 30, Maintainer 40, Owner 50. Approving / posting
             // an MR note needs Developer+. Null = visible project but no membership grant → below Developer.
@@ -668,6 +677,7 @@ public sealed class GitLabRepositoryProvider : IRepositoryCatalogCapability, IPu
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             // Network blip / DNS / unexpected — don't block a legitimate click on an inconclusive probe.
+            Serilog.Log.Warning(ex, "[preflight-gitlab] access probe for project {Id} failed — degrading to allowed", repository.ExternalId);
             return RepositoryActorAccess.Allowed;
         }
     }
@@ -707,6 +717,12 @@ public sealed class GitLabRepositoryProvider : IRepositoryCatalogCapability, IPu
         var role = level switch { 10 => "Guest", 20 => "Reporter", _ => "below Developer" };
         return $"Your GitLab role on this project is {role} — reviewing needs Developer or higher. Ask a maintainer to raise your access, then try again.";
     }
+
+    /// <summary>True when the token's scopes are KNOWN and lack <c>api</c> — the umbrella scope every
+    /// attributable GitLab write (review note / approve / webhook) needs. Null/empty = unknown → don't
+    /// deny on it (the membership probe + the wire 403 stay the backstop).</summary>
+    internal static bool LacksApiScope(IReadOnlyList<string>? scopes) =>
+        scopes is { Count: > 0 } && !scopes.Any(s => string.Equals(s, "api", StringComparison.OrdinalIgnoreCase));
 
     public async Task<RemoteWebhook?> FindWebhookByCallbackUrlAsync(ProviderContext context, RemoteRepository repository, string callbackUrl, CancellationToken cancellationToken)
     {

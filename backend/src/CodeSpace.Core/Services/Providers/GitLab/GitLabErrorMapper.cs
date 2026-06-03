@@ -44,21 +44,29 @@ public sealed class GitLabErrorMapper : IProviderErrorMapper, ISingletonDependen
     {
         if (statusCode != 403) return null;
 
-        if (!string.IsNullOrEmpty(body) && body.Contains("insufficient_scope", StringComparison.OrdinalIgnoreCase))
+        // GitLab signals a scope gap with insufficient_scope — sometimes in the structured error body,
+        // sometimes ONLY in the message (NGitLab surfaces "...(Forbidden): insufficient_scope"). Check
+        // both so a bare-message scope error isn't mis-read as a permission 403.
+        var hasScopeTag = Contains(body, "insufficient_scope") || Contains(hint, "insufficient_scope");
+        if (hasScopeTag)
         {
             var requiredScope = ExtractRequiredScope(body) ?? "api";
             return new ProviderInsufficientScopeException(Kind, operationName, new[] { requiredScope }, Array.Empty<string>(), hint);
         }
 
         return null;
+
+        static bool Contains(string? s, string needle) => !string.IsNullOrEmpty(s) && s.Contains(needle, StringComparison.OrdinalIgnoreCase);
     }
 
     /// <summary>
     /// Very small JSON probe — avoids pulling System.Text.Json since the response body has
     /// already been deserialised into an opaque object by NGitLab. Looks for "scope":"X".
     /// </summary>
-    private static string? ExtractRequiredScope(string body)
+    private static string? ExtractRequiredScope(string? body)
     {
+        if (string.IsNullOrEmpty(body)) return null;
+
         const string token = "\"scope\":\"";
         var idx = body.IndexOf(token, StringComparison.OrdinalIgnoreCase);
 
