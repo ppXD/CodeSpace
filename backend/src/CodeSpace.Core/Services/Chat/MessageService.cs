@@ -304,6 +304,7 @@ public sealed class MessageService : IMessageService, IScopedDependency
             Version = interaction.Version,
             Component = interaction.Component,
             AllowedResponderUserIds = interaction.AllowedResponderUserIds,
+            Resolve = interaction.Resolve,
             Responses = interaction.Responses,
             State = interaction.State,
             Resolution = interaction.Resolution,

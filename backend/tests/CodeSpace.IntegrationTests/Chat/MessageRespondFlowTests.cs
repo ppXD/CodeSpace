@@ -1,6 +1,7 @@
 using System.Text.Json;
 using Autofac;
 using CodeSpace.Core.Persistence.Db;
+using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Chat;
 using CodeSpace.Core.Services.Workflows.Engine;
 using CodeSpace.IntegrationTests.Infrastructure;
@@ -222,6 +223,77 @@ public class MessageRespondFlowTests
     }
 
     [Fact]
+    public async Task Under_a_quorum_a_single_approval_records_the_vote_and_the_card_stays_open()
+    {
+        var (teamId, ownerId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var channelId = await SeedChannelAsync(teamId, ownerId);
+        var (runId, token) = await SeedParkedRunAsync(teamId, ownerId);
+
+        var cardId = await PostQuorumCardAsync(channelId, token, count: 2);
+
+        await RespondDirectAsync(teamId, cardId, "approve", ownerId);
+
+        using var verify = _fixture.BeginScope();
+        var db = verify.Resolve<CodeSpaceDbContext>();
+        var interaction = MessageInteractionJson.Deserialize((await db.Message.AsNoTracking().SingleAsync(m => m.Id == cardId)).InteractionJson)!;
+
+        interaction.State.ShouldBe(InteractionState.Open, "1 of 2 approvals — the card stays open");
+        interaction.Responses.Count(r => r.Kind == InteractionResponseKind.Action).ShouldBe(1, "the vote is recorded in the log");
+        (await db.WorkflowRunWait.AsNoTracking().SingleAsync(w => w.RunId == runId)).Status.ShouldBe(WorkflowWaitStatuses.Pending, "the wait is not resolved");
+        (await db.WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == runId)).Status.ShouldBe(WorkflowRunStatus.Suspended, "the run stays parked until quorum");
+    }
+
+    [Fact]
+    public async Task A_veto_resolves_the_wait_immediately_even_under_a_quorum()
+    {
+        var (teamId, ownerId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var channelId = await SeedChannelAsync(teamId, ownerId);
+        var (runId, token) = await SeedParkedRunAsync(teamId, ownerId);
+
+        var cardId = await PostQuorumCardAsync(channelId, token, count: 2);
+
+        await RespondDirectAsync(teamId, cardId, "request_changes", ownerId, "needs work");
+
+        using var verify = _fixture.BeginScope();
+        var db = verify.Resolve<CodeSpaceDbContext>();
+        var interaction = MessageInteractionJson.Deserialize((await db.Message.AsNoTracking().SingleAsync(m => m.Id == cardId)).InteractionJson)!;
+
+        interaction.State.ShouldBe(InteractionState.Resolved, "a veto short-circuits the 2-quorum");
+        interaction.Resolution!.ResponseKey.ShouldBe("request_changes");
+        (await db.WorkflowRunWait.AsNoTracking().SingleAsync(w => w.RunId == runId)).Status.ShouldBe(WorkflowWaitStatuses.Resolved);
+    }
+
+    [Fact]
+    public async Task A_two_person_quorum_resolves_only_on_the_second_distinct_approval()
+    {
+        var (teamId, ownerId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var channelId = await SeedChannelAsync(teamId, ownerId);
+        var (runId, token) = await SeedParkedRunAsync(teamId, ownerId);
+
+        var cardId = await PostQuorumCardAsync(channelId, token, count: 2);
+
+        var member2 = await SeedUserAsync();
+        using (var scope = _fixture.BeginScope())
+            await scope.Resolve<IConversationService>().AddMemberAsync(teamId, ownerId, channelId, member2, default);
+
+        await RespondDirectAsync(teamId, cardId, "approve", ownerId);   // 1st distinct approval
+
+        using (var mid = _fixture.BeginScope())
+            (await mid.Resolve<CodeSpaceDbContext>().WorkflowRunWait.AsNoTracking().SingleAsync(w => w.RunId == runId)).Status
+                .ShouldBe(WorkflowWaitStatuses.Pending, "one approval is short of the 2-quorum");
+
+        await RespondDirectAsync(teamId, cardId, "approve", member2);   // 2nd distinct approval → reaches quorum
+
+        using var verify = _fixture.BeginScope();
+        var db = verify.Resolve<CodeSpaceDbContext>();
+        var interaction = MessageInteractionJson.Deserialize((await db.Message.AsNoTracking().SingleAsync(m => m.Id == cardId)).InteractionJson)!;
+
+        interaction.State.ShouldBe(InteractionState.Resolved, "two distinct approvals reach the quorum");
+        interaction.Responses.Count(r => r.Kind == InteractionResponseKind.Action).ShouldBe(2);
+        (await db.WorkflowRunWait.AsNoTracking().SingleAsync(w => w.RunId == runId)).Status.ShouldBe(WorkflowWaitStatuses.Resolved);
+    }
+
+    [Fact]
     public async Task Post_form_card_then_submit_injects_the_values_resumes_the_run_and_stamps_them()
     {
         var (teamId, ownerId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
@@ -305,6 +377,62 @@ public class MessageRespondFlowTests
         using var verify = _fixture.BeginScope();
         var post = await verify.Resolve<CodeSpaceDbContext>().WorkflowRunNode.AsNoTracking().SingleAsync(n => n.RunId == runId && n.NodeId == "post");
         return Guid.Parse(JsonDocument.Parse(post.OutputsJson).RootElement.GetProperty("messageId").GetString()!);
+    }
+
+    private async Task RespondDirectAsync(Guid teamId, Guid messageId, string responseKey, Guid actorUserId, string? comment = null)
+    {
+        using var scope = _fixture.BeginScope();
+        await scope.Resolve<IMessageInteractionService>().RespondAsync(teamId, messageId, responseKey, actorUserId, comment, null, default);
+    }
+
+    private async Task<Guid> SeedUserAsync()
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        var userId = Guid.NewGuid();
+        db.User.Add(new User { Id = userId, Email = $"resp-{userId:N}@test.local", Name = $"resp-{userId:N}" });
+        await db.SaveChangesAsync();
+        return userId;
+    }
+
+    /// <summary>Seed a manual run, park it on an Action wait keyed by a fresh token, and return both (mirrors what a parked flow.wait_action writes) — so a respond can resolve a real wait without driving the engine.</summary>
+    private async Task<(Guid RunId, string Token)> SeedParkedRunAsync(Guid teamId, Guid ownerId)
+    {
+        var workflowId = await CreateWorkflowAsync(teamId, ownerId, WorkflowsTestSeed.MinimalDefinition());
+        var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
+        var token = "tok-" + Guid.NewGuid().ToString("N")[..8];
+
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        (await db.WorkflowRun.SingleAsync(r => r.Id == runId)).Status = WorkflowRunStatus.Suspended;
+        db.WorkflowRunWait.Add(new WorkflowRunWait
+        {
+            Id = Guid.NewGuid(), RunId = runId, NodeId = "wait", IterationKey = string.Empty,
+            WaitKind = WorkflowWaitKinds.Action, Token = token, Status = WorkflowWaitStatuses.Pending, CreatedAt = DateTimeOffset.UtcNow,
+        });
+        await db.SaveChangesAsync();
+
+        return (runId, token);
+    }
+
+    private async Task<Guid> PostQuorumCardAsync(Guid channelId, string token, int count)
+    {
+        var card = new MessageInteraction
+        {
+            Component = new ActionButtonsComponent
+            {
+                Buttons = new List<InteractionButton>
+                {
+                    new() { Key = "approve", Label = "Approve" },
+                    new() { Key = "request_changes", Label = "Request changes", Vetoes = true },
+                },
+            },
+            Target = new WorkflowWaitTarget { Token = token },
+            Resolve = new ResolvePolicy { Kind = ResolvePolicyKind.Quorum, Count = count },
+        };
+
+        using var scope = _fixture.BeginScope();
+        return (await scope.Resolve<IChatBotService>().PostAsBotAsync(channelId, "Review PR?", card, default)).Id;
     }
 
     private async Task<Guid> CreateWorkflowAsync(Guid teamId, Guid userId, WorkflowDefinition def)

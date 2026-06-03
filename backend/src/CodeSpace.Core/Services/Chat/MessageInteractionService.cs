@@ -2,6 +2,7 @@ using System.Text.Json;
 using CodeSpace.Core.DependencyInjection;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
+using CodeSpace.Core.Services.Chat.Interactions;
 using CodeSpace.Core.Services.Workflows.Engine;
 using CodeSpace.Messages.Dtos.Chat.Interactions;
 using Microsoft.EntityFrameworkCore;
@@ -12,11 +13,13 @@ public sealed class MessageInteractionService : IMessageInteractionService, ISco
 {
     private readonly CodeSpaceDbContext _db;
     private readonly IWorkflowResumeService _resume;
+    private readonly IResolvePolicyEvaluator _resolvePolicy;
 
-    public MessageInteractionService(CodeSpaceDbContext db, IWorkflowResumeService resume)
+    public MessageInteractionService(CodeSpaceDbContext db, IWorkflowResumeService resume, IResolvePolicyEvaluator resolvePolicy)
     {
         _db = db;
         _resume = resume;
+        _resolvePolicy = resolvePolicy;
     }
 
     public async Task RespondAsync(Guid teamId, Guid messageId, string responseKey, Guid actorUserId, string? comment, IReadOnlyDictionary<string, JsonElement>? values, CancellationToken cancellationToken)
@@ -41,11 +44,40 @@ public sealed class MessageInteractionService : IMessageInteractionService, ISco
         EnsureRequiredFields(interaction, values);
         await EnsureAllowedResponderAsync(teamId, message.ConversationId, interaction, actorUserId, cancellationToken).ConfigureAwait(false);
 
+        await ResolveOrRecordVoteAsync(message, interaction, responseKey, actorUserId, comment, values, teamId, cancellationToken).ConfigureAwait(false);
+    }
+
+    // ─── Terminal action: append the vote, then resolve the wait IF the policy is satisfied; else record + stay Open ──
+
+    private async Task ResolveOrRecordVoteAsync(Message message, MessageInteraction interaction, string responseKey, Guid actorUserId, string? comment, IReadOnlyDictionary<string, JsonElement>? values, Guid teamId, CancellationToken cancellationToken)
+    {
+        var now = DateTimeOffset.UtcNow;
+
+        var withVote = interaction with
+        {
+            Responses = [.. interaction.Responses, new InteractionResponse { ByUserId = actorUserId, Kind = InteractionResponseKind.Action, Key = responseKey, Comment = comment, AtUtc = now }],
+        };
+
+        // Threshold not met yet (quorum short of N, no veto) → record the vote, leave the card Open, the run stays parked.
+        if (!_resolvePolicy.ShouldResolve(withVote))
+        {
+            message.InteractionJson = MessageInteractionJson.Serialize(withVote);
+            await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
+        // Policy satisfied (first / quorum reached / veto) — this click is the tipping vote: resolve the wait.
         var resolved = await ResolveTargetAsync(interaction.Target, responseKey, actorUserId, comment, values, teamId, cancellationToken).ConfigureAwait(false);
 
         if (!resolved) throw new InvalidOperationException("This interaction was already handled.");
 
-        await StampResolutionAsync(message, interaction, responseKey, actorUserId, comment, values, cancellationToken).ConfigureAwait(false);
+        message.InteractionJson = MessageInteractionJson.Serialize(withVote with
+        {
+            State = InteractionState.Resolved,
+            Resolution = new InteractionResolution { ResponseKey = responseKey, ByUserId = actorUserId, Comment = comment, Values = values, AtUtc = now },
+        });
+
+        await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
     }
 
     // ─── Comment (non-terminal): append to the log, stay Open ───────────────────────
@@ -122,30 +154,4 @@ public sealed class MessageInteractionService : IMessageInteractionService, ISco
             WorkflowWaitTarget wait => await _resume.ResumeByActionTokenAsync(wait.Token, responseKey, actorUserId, comment, values, teamId, cancellationToken).ConfigureAwait(false),
             _ => throw new InvalidOperationException($"Unsupported interaction target '{target.GetType().Name}'."),
         };
-
-    // ─── Resolution mirror (the workflow wait is the authority; this reflects it for display) ───────
-
-    private async Task StampResolutionAsync(Message message, MessageInteraction interaction, string responseKey, Guid actorUserId, string? comment, IReadOnlyDictionary<string, JsonElement>? values, CancellationToken cancellationToken)
-    {
-        var now = DateTimeOffset.UtcNow;
-
-        var resolved = interaction with
-        {
-            // Log the terminal action too, so the timeline is complete (discussion + the final decision).
-            Responses = [.. interaction.Responses, new InteractionResponse { ByUserId = actorUserId, Kind = InteractionResponseKind.Action, Key = responseKey, Comment = comment, AtUtc = now }],
-            State = InteractionState.Resolved,
-            Resolution = new InteractionResolution
-            {
-                ResponseKey = responseKey,
-                ByUserId = actorUserId,
-                Comment = comment,
-                Values = values,
-                AtUtc = now,
-            },
-        };
-
-        message.InteractionJson = MessageInteractionJson.Serialize(resolved);
-
-        await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
-    }
 }
