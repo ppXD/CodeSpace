@@ -25,6 +25,9 @@ public sealed record MessageInteraction
     /// <summary>Who may respond. Null = any active member of the conversation; otherwise only these users (e.g. the picked reviewer).</summary>
     public IReadOnlyList<Guid>? AllowedResponderUserIds { get; init; }
 
+    /// <summary>How a terminal action resolves the wait (first click / quorum). Defaults to first-click (single-responder) — a pre-existing card with no stored policy reads this default, so behaviour is unchanged.</summary>
+    public ResolvePolicy Resolve { get; init; } = new();
+
     /// <summary>
     /// The append-only collaboration log — every comment and every action click, in order, so the card
     /// shows the full team timeline (who said / clicked what, when). Independent of <see cref="State"/>:
@@ -78,6 +81,7 @@ public sealed record MessageInteractionView
     public required int Version { get; init; }
     public required InteractionComponent Component { get; init; }
     public IReadOnlyList<Guid>? AllowedResponderUserIds { get; init; }
+    public required ResolvePolicy Resolve { get; init; }
     public required IReadOnlyList<InteractionResponse> Responses { get; init; }
     public required InteractionState State { get; init; }
     public InteractionResolution? Resolution { get; init; }

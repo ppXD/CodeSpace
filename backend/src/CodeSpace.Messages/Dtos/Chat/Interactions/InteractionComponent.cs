@@ -50,6 +50,21 @@ public sealed record InteractionButton
 
     /// <summary>When true the UI must collect a comment before submitting this button (e.g. "request changes" wants a reason).</summary>
     public bool RequiresComment { get; init; }
+
+    /// <summary>
+    /// Whether clicking this button participates in RESOLVING the wait (the default). False = a
+    /// non-terminal action: it's recorded in the log but never resolves — the card stays Open for others
+    /// (e.g. an "ack" / "I'm looking" button alongside the real decision). Defaults true so existing
+    /// buttons resolve exactly as before.
+    /// </summary>
+    public bool ResolvesWait { get; init; } = true;
+
+    /// <summary>
+    /// When true, clicking this button resolves the wait IMMEDIATELY regardless of the resolve policy — a
+    /// short-circuit veto (e.g. one "request changes" blocks even under a 2-approval quorum). Only
+    /// meaningful for a terminal (<see cref="ResolvesWait"/>) button.
+    /// </summary>
+    public bool Vetoes { get; init; }
 }
 
 /// <summary>Visual emphasis for a button. Serialized as a string so the wire value is stable + readable.</summary>
