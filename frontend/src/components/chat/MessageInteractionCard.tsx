@@ -80,6 +80,10 @@ export function MessageInteractionCard({ interaction, members, conversationId, m
   const pending = respond.isPending;
   const component = interaction.component;
 
+  // Your own current vote (last-wins) — so the card can mark which button you're on and offer to change it.
+  const myVoteKey = myUserId != null ? currentTerminalVotes(interaction).find(v => v.byUserId === myUserId)?.key ?? null : null;
+  const myVoteLabel = myVoteKey != null && component.kind === "action_buttons" ? component.buttons.find(b => b.key === myVoteKey)?.label ?? myVoteKey : null;
+
   const onButtonClick = (button: InteractionButton) => {
     if (button.requiresComment) {
       setComment("");
@@ -116,11 +120,16 @@ export function MessageInteractionCard({ interaction, members, conversationId, m
           </div>
         </div>
       ) : (
-        <div className="chat-card-actions">
-          {component.buttons.map(b => (
-            <button key={b.key} type="button" title={b.description ?? undefined} className={STYLE_CLASS[b.style]} onClick={() => onButtonClick(b)} disabled={pending || !canRespond}>{b.label}</button>
-          ))}
-        </div>
+        <>
+          <div className="chat-card-actions">
+            {component.buttons.map(b => (
+              <button key={b.key} type="button" title={b.description ?? undefined} className={STYLE_CLASS[b.style]} data-voted={b.key === myVoteKey || undefined} onClick={() => onButtonClick(b)} disabled={pending || !canRespond}>
+                {b.key === myVoteKey && <Ic.Check size={12} />}{b.label}
+              </button>
+            ))}
+          </div>
+          {myVoteLabel && canRespond && <span className="chat-card-yourvote">You voted “{myVoteLabel}” — tap another to change.</span>}
+        </>
       )}
 
       {permissionError && <div className="chat-card-error" role="alert"><Ic.Triangle size={12} /> {permissionError}</div>}
@@ -178,7 +187,12 @@ function VoteStanding({ interaction, members }: { interaction: MessageInteractio
   const votes = currentTerminalVotes(interaction);
   const quorum = interaction.resolve.kind === "Quorum" ? interaction.resolve.count : null;
 
-  if (votes.length === 0)
+  // Named reviewers who haven't cast a current vote — shown as "waiting" so the card answers "whose turn".
+  // Only meaningful when responders are restricted (a known list); an open card has no bounded pending set.
+  const voted = new Set(votes.map(v => v.byUserId));
+  const pendingResponders = (interaction.allowedResponderUserIds ?? []).filter(id => !voted.has(id));
+
+  if (votes.length === 0 && pendingResponders.length === 0)
     return quorum != null ? <div className="chat-card-standing-hint"><Ic.Users size={11} /> Needs {quorum} of one option to decide</div> : null;
 
   const perOption = new Map<string, { label: string; count: number }>();
@@ -204,6 +218,18 @@ function VoteStanding({ interaction, members }: { interaction: MessageInteractio
               <span className="chat-card-log-av" style={{ background: color.bg, color: color.fg }}>{name.charAt(0).toUpperCase()}</span>
               <span className="chat-card-log-name">{name}</span>
               <span className="chat-card-log-what">{v.comment ? `${v.label} — ${v.comment}` : v.label}</span>
+            </li>
+          );
+        })}
+        {pendingResponders.map(id => {
+          const name = members.get(id)?.name ?? "Unknown";
+          const color = avatarColor(id);
+
+          return (
+            <li key={id} className="chat-card-log-row" data-kind="pending">
+              <span className="chat-card-log-av" style={{ background: color.bg, color: color.fg }}>{name.charAt(0).toUpperCase()}</span>
+              <span className="chat-card-log-name">{name}</span>
+              <span className="chat-card-log-what">waiting</span>
             </li>
           );
         })}
