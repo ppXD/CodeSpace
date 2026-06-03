@@ -360,6 +360,12 @@ public sealed class GitHubRepositoryProvider : IRepositoryCatalogCapability, IPu
 
     public async Task<RepositoryActorAccess> GetActorAccessAsync(ProviderContext context, RemoteRepository repository, CancellationToken cancellationToken)
     {
+        // Submitting a review on GitHub needs the `repo` (or `public_repo`) scope — a token without it
+        // can't write even where the user can read. Checked FIRST when scopes are known; fine-grained
+        // PATs / App tokens expose no classic scopes (null/empty) → fall through to the access probe.
+        if (LacksReviewScope(context.Credential.Scopes))
+            return RepositoryActorAccess.Denied("Your GitHub identity's token is missing the 'repo' scope needed to submit a review. Reconnect it with that scope.");
+
         try
         {
             var client = await BuildClientAsync(context, cancellationToken).ConfigureAwait(false);
@@ -386,6 +392,12 @@ public sealed class GitHubRepositoryProvider : IRepositoryCatalogCapability, IPu
             return RepositoryActorAccess.Allowed;
         }
     }
+
+    /// <summary>True when the token's scopes are KNOWN and lack both <c>repo</c> and <c>public_repo</c> —
+    /// the scopes a GitHub review write needs. Null/empty (fine-grained PAT / App token exposes no classic
+    /// scopes) = unknown → don't deny on it; the access probe + the wire 403 stay the backstop.</summary>
+    internal static bool LacksReviewScope(IReadOnlyList<string>? scopes) =>
+        scopes is { Count: > 0 } && !scopes.Any(s => string.Equals(s, "repo", StringComparison.OrdinalIgnoreCase) || string.Equals(s, "public_repo", StringComparison.OrdinalIgnoreCase));
 
     public async Task<RemoteWebhook?> FindWebhookByCallbackUrlAsync(ProviderContext context, RemoteRepository repository, string callbackUrl, CancellationToken cancellationToken)
     {

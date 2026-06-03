@@ -10,6 +10,7 @@ using CodeSpace.Messages.Dtos.Providers;
 using CodeSpace.Messages.Dtos.Workflows;
 using CodeSpace.Messages.Exceptions;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging;
 
 namespace CodeSpace.Core.Services.Workflows.Engine;
 
@@ -41,13 +42,15 @@ public sealed class ActorIdentityRequirementGate : IActorIdentityRequirementGate
     private readonly INodeRegistry _nodeRegistry;
     private readonly IActorIdentityResolver _actorIdentity;
     private readonly IProviderRegistry _providers;
+    private readonly ILogger<ActorIdentityRequirementGate> _logger;
 
-    public ActorIdentityRequirementGate(CodeSpaceDbContext db, INodeRegistry nodeRegistry, IActorIdentityResolver actorIdentity, IProviderRegistry providers)
+    public ActorIdentityRequirementGate(CodeSpaceDbContext db, INodeRegistry nodeRegistry, IActorIdentityResolver actorIdentity, IProviderRegistry providers, ILogger<ActorIdentityRequirementGate> logger)
     {
         _db = db;
         _nodeRegistry = nodeRegistry;
         _actorIdentity = actorIdentity;
         _providers = providers;
+        _logger = logger;
     }
 
     public async Task EnsureResponderCanActAsUserAsync(Guid runId, string waitNodeId, Guid responderUserId, CancellationToken cancellationToken)
@@ -117,15 +120,17 @@ public sealed class ActorIdentityRequirementGate : IActorIdentityRequirementGate
 
         // Repo gone, provider can't answer the access question, or the credential vanished (the resolver
         // already gated Active) — degrade to "let the resume proceed". Only a CONCLUSIVE deny throws.
-        if (repo == null) return;
-        if (!_providers.TryGet<IRepositoryAccessCapability>(repo.ProviderInstance.Provider, out var access) || access == null) return;
+        if (repo == null) { _logger.LogWarning("[preflight] repo {RepoId} not found — skipping repo-access check", repositoryId); return; }
+        if (!_providers.TryGet<IRepositoryAccessCapability>(repo.ProviderInstance.Provider, out var access) || access == null) { _logger.LogWarning("[preflight] {Provider} has no IRepositoryAccessCapability — skipping repo-access check for {Repo}", repo.ProviderInstance.Provider, repo.FullPath); return; }
 
         var credential = await _db.Credential.AsNoTracking()
             .SingleOrDefaultAsync(c => c.Id == identity.CredentialId && c.DeletedDate == null, cancellationToken).ConfigureAwait(false);
 
-        if (credential == null) return;
+        if (credential == null) { _logger.LogWarning("[preflight] credential {CredId} for the identity not found — skipping repo-access check for {Repo}", identity.CredentialId, repo.FullPath); return; }
 
         var result = await access.GetActorAccessAsync(new ProviderContext(repo.ProviderInstance, credential), ToRemoteRepository(repo), cancellationToken).ConfigureAwait(false);
+
+        _logger.LogInformation("[preflight] repo {Repo} ({Provider}) cred {CredId}: canContribute={Can} reason={Reason}", repo.FullPath, repo.ProviderInstance.Provider, credential.Id, result.CanContribute, result.Reason ?? "(none)");
 
         if (!result.CanContribute)
             throw new ActorRepoPermissionDeniedException(repo.ProviderInstance.Provider, repo.ProviderInstanceId, repo.FullPath, result.Reason);

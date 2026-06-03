@@ -42,6 +42,17 @@ public class GitLabErrorMapperTests
     }
 
     [Fact]
+    public void Tagged_403_with_insufficient_scope_only_in_the_message_maps_to_scope()
+    {
+        // The exact NGitLab shape seen on a read-only token's write: the insufficient_scope tag is in the
+        // message, not a structured body. Must still map to a SCOPE error, not a permission 403.
+        var result = _mapper.ClassifyScope(403, body: null, hint: "GitLab server returned an error (Forbidden): insufficient_scope", "SubmitReviewAsync");
+
+        result.ShouldNotBeNull();
+        result!.MissingScopes.ShouldBe(new[] { "api" });
+    }
+
+    [Fact]
     public void Bare_403_without_the_tag_is_NOT_a_scope_issue()
     {
         // The regression guard: a permission/membership 403 (not a project member, role too low,
