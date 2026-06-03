@@ -110,6 +110,15 @@ public sealed record ActsAsUserSpec
 
     /// <summary>How <see cref="ProviderInputKey"/>'s value resolves to a provider instance (the unit a linked identity is scoped to).</summary>
     public required ActorProviderSource ProviderSource { get; init; }
+
+    /// <summary>
+    /// The capability this node exercises AS the actor (e.g. <c>typeof(IPullRequestReviewCapability)</c>). The
+    /// respond-time gate dynamically checks the actor's token scopes against THIS capability's per-provider
+    /// requirement (each provider module's <c>CapabilityScopeRequirements</c>) — so the scope a node needs
+    /// follows its declared capability, nothing hardcoded. Null = skip the scope pre-check (identity + repo
+    /// membership only).
+    /// </summary>
+    public Type? CapabilityType { get; init; }
 }
 
 /// <summary>How an act-as-user node's provider-input value resolves to a provider instance.</summary>

@@ -110,6 +110,33 @@ public class ResponderIdentityPrecheckFlowTests
             .ShouldBe(WorkflowRunStatus.Suspended, "no repo permission → the click is refused BEFORE the wait resolves; the run stays parked — no false success, no background failure");
     }
 
+    [Fact]
+    public async Task Linked_responder_with_a_read_only_token_is_refused_by_the_capability_scope_check()
+    {
+        var (teamId, ownerId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var channelId = await SeedChannelAsync(teamId, ownerId);
+        // A GitLab repo + a linked identity whose token is read-only ({read_api}). git.pr_review declares it
+        // acts via IPullRequestReviewCapability, which GitLab's module requires `api` for — so the gate's
+        // GENERIC, capability-driven scope check refuses the click (before any membership round-trip),
+        // nothing hardcoded. (Uses the real GitLab provider module's CapabilityScopeRequirements.)
+        var (repoId, providerInstanceId) = await SeedRepoAsync(teamId, ownerId, linkIdentity: true, provider: ProviderKind.GitLab, actorScopes: new List<string> { "read_api", "read_user" });
+
+        var workflowId = await CreateWorkflowAsync(teamId, ownerId, ReviewDefinition(channelId, ownerId, repoId));
+        var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
+
+        await RunEngineAsync(runId);
+        var messageId = await ReadPostedMessageIdAsync(runId);
+
+        var ex = await Should.ThrowAsync<ActorRepoPermissionDeniedException>(() => RespondAsync(teamId, messageId, ownerId));
+        ex.ProviderInstanceId.ShouldBe(providerInstanceId);
+        ex.Reason.ShouldContain("api", Case.Insensitive, "the reason names the scope the token is missing for this action");
+
+        using var verify = _fixture.BeginScope();
+        var db = verify.Resolve<CodeSpaceDbContext>();
+        (await db.WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == runId)).Status
+            .ShouldBe(WorkflowRunStatus.Suspended, "a read-only token fails the capability scope check at click time — refused before the wait resolves");
+    }
+
     // ─── Helpers ────────────────────────────────────────────────────────────────
 
     private async Task RespondAsync(Guid teamId, Guid messageId, Guid actorUserId)
@@ -135,7 +162,7 @@ public class ResponderIdentityPrecheckFlowTests
     }
 
     /// <summary>Seed a Git provider instance + connection-credentialled repo under the existing team; optionally link the owner's own identity on that instance.</summary>
-    private async Task<(Guid RepositoryId, Guid ProviderInstanceId)> SeedRepoAsync(Guid teamId, Guid ownerId, bool linkIdentity, string? externalId = null)
+    private async Task<(Guid RepositoryId, Guid ProviderInstanceId)> SeedRepoAsync(Guid teamId, Guid ownerId, bool linkIdentity, string? externalId = null, ProviderKind provider = ProviderKind.Git, List<string>? actorScopes = null)
     {
         using var scope = _fixture.BeginScope();
         var db = scope.Resolve<CodeSpaceDbContext>();
@@ -147,7 +174,7 @@ public class ResponderIdentityPrecheckFlowTests
 
         var instance = new ProviderInstance
         {
-            Id = Guid.NewGuid(), TeamId = teamId, Provider = ProviderKind.Git, DisplayName = "instance",
+            Id = Guid.NewGuid(), TeamId = teamId, Provider = provider, DisplayName = "instance",
             BaseUrl = $"https://git-{suffix}.local", OauthClientId = "client", OauthClientSecretEnc = encryptor.Encrypt("secret")
         };
         var connection = new Credential
@@ -171,7 +198,7 @@ public class ResponderIdentityPrecheckFlowTests
             var actorCred = new Credential
             {
                 Id = Guid.NewGuid(), TeamId = teamId, ProviderInstanceId = instance.Id, OwnerUserId = ownerId,
-                Ownership = CredentialOwnership.Personal, AuthType = AuthType.Pat, DisplayName = "actor", EncryptedPayload = Pat("actor"), Status = CredentialStatus.Active
+                Ownership = CredentialOwnership.Personal, AuthType = AuthType.Pat, DisplayName = "actor", EncryptedPayload = Pat("actor"), Status = CredentialStatus.Active, Scopes = actorScopes
             };
             db.Credential.Add(actorCred);
             db.UserProviderIdentity.Add(new UserProviderIdentity

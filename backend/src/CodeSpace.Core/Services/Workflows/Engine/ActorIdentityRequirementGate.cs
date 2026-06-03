@@ -5,6 +5,7 @@ using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Providers;
 using CodeSpace.Core.Services.Providers.Capabilities;
 using CodeSpace.Core.Services.Providers.Identity;
+using CodeSpace.Core.Services.Providers.Scopes;
 using CodeSpace.Core.Services.Workflows.Nodes;
 using CodeSpace.Messages.Dtos.Providers;
 using CodeSpace.Messages.Dtos.Workflows;
@@ -42,14 +43,16 @@ public sealed class ActorIdentityRequirementGate : IActorIdentityRequirementGate
     private readonly INodeRegistry _nodeRegistry;
     private readonly IActorIdentityResolver _actorIdentity;
     private readonly IProviderRegistry _providers;
+    private readonly IScopeChecker _scopeChecker;
     private readonly ILogger<ActorIdentityRequirementGate> _logger;
 
-    public ActorIdentityRequirementGate(CodeSpaceDbContext db, INodeRegistry nodeRegistry, IActorIdentityResolver actorIdentity, IProviderRegistry providers, ILogger<ActorIdentityRequirementGate> logger)
+    public ActorIdentityRequirementGate(CodeSpaceDbContext db, INodeRegistry nodeRegistry, IActorIdentityResolver actorIdentity, IProviderRegistry providers, IScopeChecker scopeChecker, ILogger<ActorIdentityRequirementGate> logger)
     {
         _db = db;
         _nodeRegistry = nodeRegistry;
         _actorIdentity = actorIdentity;
         _providers = providers;
+        _scopeChecker = scopeChecker;
         _logger = logger;
     }
 
@@ -109,32 +112,54 @@ public sealed class ActorIdentityRequirementGate : IActorIdentityRequirementGate
         // pre-flight it: a responder who can't contribute is refused HERE (the card stays open, the chat
         // shows why) instead of the write failing later in the background after a misleading "success".
         if (requirement.ProviderSource == ActorProviderSource.Repository)
-            await EnsureRepoAccessAsync(id, identity, cancellationToken).ConfigureAwait(false);
+            await EnsureRepoAccessAsync(id, identity, requirement.CapabilityType, cancellationToken).ConfigureAwait(false);
     }
 
-    private async Task EnsureRepoAccessAsync(Guid repositoryId, UserProviderIdentity identity, CancellationToken cancellationToken)
+    private async Task EnsureRepoAccessAsync(Guid repositoryId, UserProviderIdentity identity, Type? capabilityType, CancellationToken cancellationToken)
     {
         var repo = await _db.Repository.AsNoTracking()
             .Include(r => r.ProviderInstance)
             .SingleOrDefaultAsync(r => r.Id == repositoryId && r.DeletedDate == null, cancellationToken).ConfigureAwait(false);
 
-        // Repo gone, provider can't answer the access question, or the credential vanished (the resolver
-        // already gated Active) — degrade to "let the resume proceed". Only a CONCLUSIVE deny throws.
+        // Repo or credential gone (the resolver already gated the credential Active) — degrade to "let the
+        // resume proceed". Only a CONCLUSIVE deny throws.
         if (repo == null) { _logger.LogWarning("[preflight] repo {RepoId} not found — skipping repo-access check", repositoryId); return; }
-        if (!_providers.TryGet<IRepositoryAccessCapability>(repo.ProviderInstance.Provider, out var access) || access == null) { _logger.LogWarning("[preflight] {Provider} has no IRepositoryAccessCapability — skipping repo-access check for {Repo}", repo.ProviderInstance.Provider, repo.FullPath); return; }
 
         var credential = await _db.Credential.AsNoTracking()
             .SingleOrDefaultAsync(c => c.Id == identity.CredentialId && c.DeletedDate == null, cancellationToken).ConfigureAwait(false);
 
         if (credential == null) { _logger.LogWarning("[preflight] credential {CredId} for the identity not found — skipping repo-access check for {Repo}", identity.CredentialId, repo.FullPath); return; }
 
+        var provider = repo.ProviderInstance.Provider;
+
+        // 1) SCOPE — capability-driven + dynamic, no round-trip. Check the actor's KNOWN token scopes against
+        //    the scope THIS action's capability needs, read from the provider module's declared
+        //    CapabilityScopeRequirements (the single source of truth). A new act-as-user node's scope check
+        //    follows its declared capability — nothing hardcoded. Null capability or unknown scopes → skip.
+        if (capabilityType != null && credential.Scopes != null)
+        {
+            var outcome = _scopeChecker.Check(provider, capabilityType, credential.Scopes);
+            if (!outcome.IsSatisfied)
+            {
+                _logger.LogInformation("[preflight] repo {Repo} ({Provider}): token missing scope(s) [{Missing}] for {Cap}", repo.FullPath, provider, string.Join(", ", outcome.MissingScopes), capabilityType.Name);
+                throw new ActorRepoPermissionDeniedException(provider, repo.ProviderInstanceId, repo.FullPath, ScopeReason(provider, outcome.MissingScopes));
+            }
+        }
+
+        // 2) MEMBERSHIP / repo access — provider-specific (a round-trip). Catches "valid token, but not a
+        //    member / role too low". A provider that can't answer → skip (the write stays the backstop).
+        if (!_providers.TryGet<IRepositoryAccessCapability>(provider, out var access) || access == null) return;
+
         var result = await access.GetActorAccessAsync(new ProviderContext(repo.ProviderInstance, credential), ToRemoteRepository(repo), cancellationToken).ConfigureAwait(false);
 
-        _logger.LogInformation("[preflight] repo {Repo} ({Provider}) cred {CredId}: canContribute={Can} reason={Reason}", repo.FullPath, repo.ProviderInstance.Provider, credential.Id, result.CanContribute, result.Reason ?? "(none)");
+        _logger.LogInformation("[preflight] repo {Repo} ({Provider}) cred {CredId}: canContribute={Can} reason={Reason}", repo.FullPath, provider, credential.Id, result.CanContribute, result.Reason ?? "(none)");
 
         if (!result.CanContribute)
-            throw new ActorRepoPermissionDeniedException(repo.ProviderInstance.Provider, repo.ProviderInstanceId, repo.FullPath, result.Reason);
+            throw new ActorRepoPermissionDeniedException(provider, repo.ProviderInstanceId, repo.FullPath, result.Reason);
     }
+
+    private static string ScopeReason(Messages.Enums.ProviderKind provider, IReadOnlyList<string> missing) =>
+        $"Your {provider} identity's token is missing the {string.Join(", ", missing)} scope needed for this action. Reconnect it with that scope.";
 
     // Minimal DB-row → wire-shape projection: the access probe only reads ExternalId, but RemoteRepository's
     // required fields are all present on the row, so we fill them rather than fake them.

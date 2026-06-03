@@ -1,4 +1,5 @@
 using System.Text.Json;
+using CodeSpace.Core.Services.Providers.Capabilities;
 using CodeSpace.Core.Services.Workflows.Engine;
 using CodeSpace.Core.Services.Workflows.Nodes;
 using CodeSpace.Messages.Dtos.Workflows;
@@ -12,7 +13,7 @@ public class ActorIdentityRequirementPlanTests
     private const string Repo = "9c4ea7ba-bb16-4cd2-b312-bdf22c3cc789";
 
     // The only act-as-user node in these tests; mirrors git.pr_review's declared spec.
-    private static readonly ActsAsUserSpec ReviewSpec = new() { ActorInputKey = "actAsUserId", ProviderInputKey = "repositoryId", ProviderSource = ActorProviderSource.Repository };
+    private static readonly ActsAsUserSpec ReviewSpec = new() { ActorInputKey = "actAsUserId", ProviderInputKey = "repositoryId", ProviderSource = ActorProviderSource.Repository, CapabilityType = typeof(IPullRequestReviewCapability) };
     private static ActsAsUserSpec? Lookup(string typeKey) => typeKey == "git.pr_review" ? ReviewSpec : null;
 
     [Fact]
@@ -28,6 +29,7 @@ public class ActorIdentityRequirementPlanTests
         reqs[0].NodeId.ShouldBe("review");
         reqs[0].ProviderSource.ShouldBe(ActorProviderSource.Repository);
         reqs[0].ResolvedId.ShouldBe(Repo);
+        reqs[0].CapabilityType.ShouldBe(typeof(IPullRequestReviewCapability), "the requirement carries the node's declared capability so the gate can scope-check it dynamically");
     }
 
     [Fact]
