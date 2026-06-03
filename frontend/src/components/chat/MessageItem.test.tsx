@@ -65,6 +65,8 @@ describe("MessageItem", () => {
       version: 1,
       component: { kind: "action_buttons" as const, buttons: [{ key: "approve", label: "Approve", style: "Primary" as const, requiresComment: false }] },
       allowedResponderUserIds: null,
+      resolve: { kind: "First" as const, count: 1 },
+      responses: [],
       state: "Open" as const,
       resolution: null,
     };
@@ -77,6 +79,8 @@ describe("MessageItem", () => {
       version: 1,
       component: { kind: "action_buttons" as const, buttons: [{ key: "approve", label: "Approve", style: "Primary" as const, requiresComment: false }] },
       allowedResponderUserIds: null,
+      resolve: { kind: "First" as const, count: 1 },
+      responses: [],
       state: "Open" as const,
       resolution: null,
     };

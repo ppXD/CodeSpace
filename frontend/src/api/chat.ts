@@ -63,6 +63,10 @@ export interface InteractionButton {
   style: InteractionButtonStyle;
   /** When true the UI must collect a comment before submitting this button (e.g. "request changes"). */
   requiresComment: boolean;
+  /** Whether clicking RESOLVES the wait (default true). False = a non-terminal action that stays open for others. */
+  resolvesWait?: boolean;
+  /** When true one click short-circuits the resolve policy (e.g. one "request changes" blocks a quorum). */
+  vetoes?: boolean;
 }
 
 /** Polymorphic by `kind` (mirrors backend `InteractionComponent`). */
@@ -91,6 +95,29 @@ export interface InteractionResolution {
   atUtc: string;
 }
 
+export type ResolvePolicyKind = "First" | "Quorum";
+
+/** How responses resolve the wait: first click, or N distinct approvals (quorum). Mirrors backend ResolvePolicy. */
+export interface ResolvePolicy {
+  kind: ResolvePolicyKind;
+  count: number;
+}
+
+export type InteractionResponseKind = "Action" | "Comment";
+
+/** One entry in the append-only collaboration log — a comment or an action click (who / what / when). */
+export interface InteractionResponse {
+  byUserId: string;
+  kind: InteractionResponseKind;
+  /** The action key for an Action response; null for a comment. */
+  key: string | null;
+  comment: string | null;
+  atUtc: string;
+}
+
+/** The reserved response key for a non-terminal comment (mirrors backend MessageInteractionPolicy.CommentKey). */
+export const COMMENT_RESPONSE_KEY = "__comment__";
+
 /**
  * The client-facing projection of a message's interaction. Deliberately omits the routing target —
  * the wait token never reaches the client; a response is keyed by message id and the backend
@@ -101,6 +128,10 @@ export interface MessageInteractionView {
   component: InteractionComponent;
   /** Null = any active member may respond; otherwise only these users (e.g. the picked reviewer). */
   allowedResponderUserIds: string[] | null;
+  /** How a terminal click resolves the wait (first / quorum). */
+  resolve: ResolvePolicy;
+  /** Append-only collaboration log — comments + action clicks, in order (the living-thread timeline). */
+  responses: InteractionResponse[];
   state: InteractionState;
   resolution: InteractionResolution | null;
 }

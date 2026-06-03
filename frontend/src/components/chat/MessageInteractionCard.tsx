@@ -1,9 +1,11 @@
 import { useState } from "react";
 
 import { Ic } from "@/_imported/ai-code-space/icons";
-import type { FormComponent, InteractionButton, InteractionButtonStyle, MessageInteractionView } from "@/api/chat";
+import { COMMENT_RESPONSE_KEY } from "@/api/chat";
+import type { FormComponent, InteractionButton, InteractionButtonStyle, InteractionResponse, MessageInteractionView } from "@/api/chat";
 import type { TeamMemberSummary } from "@/api/teams";
 import { useActorIdentityGate } from "@/components/identities/ActorIdentityGate";
+import { avatarColor } from "@/lib/avatarColor";
 import { parseActorRepoPermissionDenied } from "@/lib/actorIdentity";
 import { useRespondToMessage } from "@/hooks/use-chat";
 import { SchemaForm } from "@/components/workflows/SchemaForm";
@@ -35,7 +37,16 @@ export function MessageInteractionCard({ interaction, members, conversationId, m
   const gate = useActorIdentityGate();
   const [commenting, setCommenting] = useState<InteractionButton | null>(null);
   const [comment, setComment] = useState("");
+  const [draftComment, setDraftComment] = useState("");
   const [permissionError, setPermissionError] = useState<string | null>(null);
+
+  // A non-terminal comment — open to ANY conversation member, never resolves the card (the backend gates it
+  // on membership, not the act-as-user identity), so it skips the identity gate entirely.
+  const submitComment = () => {
+    const text = draftComment.trim();
+    if (text === "") return;
+    respond.mutate({ messageId, responseKey: COMMENT_RESPONSE_KEY, comment: text }, { onSuccess: () => setDraftComment("") });
+  };
 
   // Respond, branching on the backend's two pre-flight refusals (both thrown BEFORE the wait resolves,
   // so the card stays open and nothing fails in the background):
@@ -57,6 +68,7 @@ export function MessageInteractionCard({ interaction, members, conversationId, m
   if (interaction.state !== "Open") {
     return (
       <div className="chat-card" data-state={interaction.state}>
+        <InteractionTimeline interaction={interaction} members={members} />
         <ResolutionStamp interaction={interaction} members={members} />
       </div>
     );
@@ -79,6 +91,9 @@ export function MessageInteractionCard({ interaction, members, conversationId, m
 
   return (
     <div className="chat-card" data-state="Open">
+      <InteractionTimeline interaction={interaction} members={members} />
+      <QuorumTally interaction={interaction} />
+
       {component.kind === "form" ? (
         <FormBody
           component={component}
@@ -109,9 +124,82 @@ export function MessageInteractionCard({ interaction, members, conversationId, m
 
       {permissionError && <div className="chat-card-error" role="alert"><Ic.Triangle size={12} /> {permissionError}</div>}
 
-      {!canRespond && <span className="chat-card-hint">Only the requested reviewer can respond.</span>}
+      {!canRespond && <span className="chat-card-hint">Only the requested reviewer can decide — anyone here can still comment.</span>}
+
+      {/* Non-terminal discussion: any member can add to the thread; the card stays open for the decision.
+          Hidden during the requires-comment flow (that composer is taking over the input). */}
+      {!commenting && (
+        <div className="chat-card-commentbox">
+          <input
+            className="chat-card-commentbox-input"
+            value={draftComment}
+            onChange={e => setDraftComment(e.target.value)}
+            onKeyDown={e => { if (e.key === "Enter") { e.preventDefault(); submitComment(); } }}
+            placeholder="Add a comment…"
+            disabled={pending}
+            aria-label="Add a comment"
+          />
+          <button type="button" className="btn btn-ghost" onClick={submitComment} disabled={pending || draftComment.trim() === ""}>Comment</button>
+        </div>
+      )}
     </div>
   );
+}
+
+/** The append-only collaboration timeline — every comment and action click, in order (who / what). */
+function InteractionTimeline({ interaction, members }: { interaction: MessageInteractionView; members: Map<string, TeamMemberSummary> }) {
+  if (interaction.responses.length === 0) return null;
+
+  return (
+    <ul className="chat-card-log">
+      {interaction.responses.map((r, i) => {
+        const name = members.get(r.byUserId)?.name ?? "Unknown";
+        const color = avatarColor(r.byUserId);
+
+        return (
+          <li key={i} className="chat-card-log-row" data-kind={r.kind === "Comment" ? "comment" : "action"}>
+            <span className="chat-card-log-av" style={{ background: color.bg, color: color.fg }}>{name.charAt(0).toUpperCase()}</span>
+            <span className="chat-card-log-name">{name}</span>
+            <span className="chat-card-log-what">{describeResponse(r, interaction)}</span>
+          </li>
+        );
+      })}
+    </ul>
+  );
+}
+
+/** One log entry → human text: a comment shows its text; an action shows the button's label (+ any comment). */
+function describeResponse(r: InteractionResponse, interaction: MessageInteractionView): string {
+  if (r.kind === "Comment") return r.comment ?? "";
+
+  const label = interaction.component.kind === "action_buttons"
+    ? interaction.component.buttons.find(b => b.key === r.key)?.label ?? r.key ?? ""
+    : "submitted";
+
+  return r.comment ? `${label} — ${r.comment}` : label;
+}
+
+/** Live "N / count approved" progress for a quorum card (the leading action key's distinct, deduped responders). */
+function QuorumTally({ interaction }: { interaction: MessageInteractionView }) {
+  if (interaction.resolve.kind !== "Quorum") return null;
+
+  return <div className="chat-card-tally"><Ic.Users size={11} /> {countLeadingApprovals(interaction)} / {interaction.resolve.count} approved</div>;
+}
+
+/** Distinct responders (last-vote-wins per person) for the most-supported terminal, non-veto action key. */
+function countLeadingApprovals(interaction: MessageInteractionView): number {
+  if (interaction.component.kind !== "action_buttons") return 0;
+
+  const terminal = new Set(interaction.component.buttons.filter(b => (b.resolvesWait ?? true) && !b.vetoes).map(b => b.key));
+
+  const latestByResponder = new Map<string, string>();
+  for (const r of interaction.responses)
+    if (r.kind === "Action" && r.key && terminal.has(r.key)) latestByResponder.set(r.byUserId, r.key);
+
+  const perKey = new Map<string, number>();
+  for (const key of latestByResponder.values()) perKey.set(key, (perKey.get(key) ?? 0) + 1);
+
+  return perKey.size === 0 ? 0 : Math.max(...perKey.values());
 }
 
 /** Renders a form card's fields (via the shared schema-driven form) + a submit button. Owns the draft value. */

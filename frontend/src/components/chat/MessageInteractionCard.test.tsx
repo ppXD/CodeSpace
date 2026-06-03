@@ -1,7 +1,7 @@
 import { fireEvent, render, screen } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { InteractionResolution, InteractionState, MessageInteractionView } from "@/api/chat";
+import type { InteractionResolution, InteractionResponse, InteractionState, MessageInteractionView, ResolvePolicy } from "@/api/chat";
 import { ApiError } from "@/api/request";
 import type { TeamMemberSummary } from "@/api/teams";
 
@@ -20,19 +20,22 @@ beforeEach(() => { mutate.mockClear(); prompt.mockClear(); pending = false; });
 
 const members = new Map<string, TeamMemberSummary>([
   ["rev", { userId: "rev", name: "Alice", email: "a@x", avatarUrl: null, isBot: false }],
+  ["bob", { userId: "bob", name: "Bob", email: "b@x", avatarUrl: null, isBot: false }],
 ]);
 
-function card(state: InteractionState, resolution: InteractionResolution | null = null, allowed: string[] | null = null): MessageInteractionView {
+function card(state: InteractionState, resolution: InteractionResolution | null = null, allowed: string[] | null = null, responses: InteractionResponse[] = [], resolve: ResolvePolicy = { kind: "First", count: 1 }): MessageInteractionView {
   return {
     version: 1,
     component: {
       kind: "action_buttons",
       buttons: [
         { key: "approve", label: "Approve", style: "Primary", requiresComment: false },
-        { key: "request_changes", label: "Request changes", style: "Danger", requiresComment: true },
+        { key: "request_changes", label: "Request changes", style: "Danger", requiresComment: true, vetoes: true },
       ],
     },
     allowedResponderUserIds: allowed,
+    resolve,
+    responses,
     state,
     resolution,
   };
@@ -47,6 +50,8 @@ function formCard(state: InteractionState, resolution: InteractionResolution | n
       submitLabel: "Send",
     },
     allowedResponderUserIds: null,
+    resolve: { kind: "First", count: 1 },
+    responses: [],
     state,
     resolution,
   };
@@ -131,7 +136,7 @@ describe("MessageInteractionCard", () => {
   it("disables responding and hints when the viewer is not an allowed responder", () => {
     renderCard(card("Open", null, ["someone-else"]), "rev");
     expect(screen.getByRole("button", { name: "Approve" })).toBeDisabled();
-    expect(screen.getByText("Only the requested reviewer can respond.")).toBeInTheDocument();
+    expect(screen.getByText(/Only the requested reviewer can decide/)).toBeInTheDocument();
   });
 
   it("shows the chosen action's label + responder + comment once resolved, hiding the buttons", () => {
@@ -182,5 +187,29 @@ describe("MessageInteractionCard", () => {
     renderCard(card("Expired"));
     expect(screen.getByText("Expired")).toBeInTheDocument();
     expect(screen.queryByRole("button")).toBeNull();
+  });
+
+  it("renders the response timeline — a comment with its author's name", () => {
+    const responses: InteractionResponse[] = [
+      { byUserId: "bob", kind: "Comment", key: null, comment: "looks risky to me", atUtc: "2026-06-01T09:00:00Z" },
+    ];
+    renderCard(card("Open", null, null, responses));
+    expect(screen.getByText("looks risky to me")).toBeInTheDocument();
+    expect(screen.getByText("Bob")).toBeInTheDocument();
+  });
+
+  it("shows a live quorum tally for the leading action key", () => {
+    const responses: InteractionResponse[] = [
+      { byUserId: "rev", kind: "Action", key: "approve", comment: null, atUtc: "2026-06-01T09:00:00Z" },
+    ];
+    renderCard(card("Open", null, null, responses, { kind: "Quorum", count: 2 }));
+    expect(screen.getByText(/1 \/ 2 approved/)).toBeInTheDocument();
+  });
+
+  it("lets any member add a non-terminal comment via the comment box (trimmed, reserved key)", () => {
+    renderCard(card("Open"));
+    fireEvent.change(screen.getByLabelText("Add a comment"), { target: { value: "  ship it  " } });
+    fireEvent.click(screen.getByRole("button", { name: "Comment" }));
+    expect(mutate).toHaveBeenCalledWith({ messageId: "m1", responseKey: "__comment__", comment: "ship it" }, expect.anything());
   });
 });
