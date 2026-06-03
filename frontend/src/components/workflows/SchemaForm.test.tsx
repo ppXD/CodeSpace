@@ -126,22 +126,25 @@ describe("SchemaForm scalar selector dual-mode", () => {
 });
 
 /**
- * An array field with `"x-selector": "user"` (e.g. allowedResponderUserIds) renders the team's members
- * as toggle chips instead of raw-GUID text entry. The stored value is an array of user ids.
+ * An array field with `"x-selector": "user"` (e.g. allowedResponderUserIds) renders a SEARCHABLE
+ * combobox — selected members as removable tags + a filtered dropdown — not one chip per member, so it
+ * scales to large teams. The stored value is an array of user ids. (Rich picker behaviours — filter, cap,
+ * keyboard, remove — live in selectors/UserSelector.test.tsx; here we only prove SchemaForm wires the array.)
  */
 describe("SchemaForm user multi-selector", () => {
   const userSchema = { type: "object", properties: { allowed: { type: "array", items: { type: "string", format: "uuid" }, "x-selector": "user" } } };
 
-  it("renders a chip per member reflecting the current allowlist", () => {
+  it("renders a removable tag for each selected member, not an inline list of the rest", () => {
     render(<SchemaForm schema={userSchema} value={{ allowed: ["u1"] }} onChange={vi.fn()} />);
-    expect(screen.getByRole("button", { name: "Alice" })).toHaveAttribute("aria-pressed", "true");
-    expect(screen.getByRole("button", { name: "Bob" })).toHaveAttribute("aria-pressed", "false");
+    expect(screen.getByRole("button", { name: "Remove Alice" })).toBeInTheDocument();
+    expect(screen.queryByText("Bob")).toBeNull();   // unselected members appear only when you search
   });
 
-  it("adds a member to the allowlist on click (array of ids, no raw GUID typing)", () => {
+  it("adds a member to the allowlist by picking from the search dropdown (array of ids)", () => {
     const onChange = vi.fn();
     render(<SchemaForm schema={userSchema} value={{ allowed: ["u1"] }} onChange={onChange} />);
-    fireEvent.click(screen.getByRole("button", { name: "Bob" }));
+    fireEvent.focus(screen.getByRole("textbox", { name: "Search members" }));
+    fireEvent.mouseDown(screen.getByRole("option", { name: /Bob/ }));
     expect(onChange).toHaveBeenCalledWith({ allowed: ["u1", "u2"] });
   });
 });
