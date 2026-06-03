@@ -47,38 +47,80 @@ public class ScopeCheckerTests
         outcome.IsSatisfied.ShouldBeTrue();
     }
 
-    [Fact]
-    public void EnsureCapability_skips_non_OAuth_credentials()
-    {
-        // PAT credentials have no Scopes column; user-side token decides. Pre-flight would
-        // wrongly reject if we treated them like OAuth.
-        var checker = BuildChecker();
-        var pat = new Credential { AuthType = AuthType.Pat, Scopes = null };
+    // ── EnsureCapability: gates on scope KNOWLEDGE, not auth TYPE ──────────────────────────────
+    // Every case below proves the auth type is irrelevant — only whether scopes are known + sufficient
+    // decides. (Pre-PR② this gate skipped every non-OAuth credential by type; now a PAT with captured
+    // scopes is pre-checked just like OAuth, so a read-only PAT is caught here, not mid-run at the wire.)
 
-        Should.NotThrow(() => checker.EnsureCapability(pat, ProviderKind.GitLab, typeof(IWebhookRegistrationCapability)));
+    [Theory]
+    [InlineData(AuthType.OAuth)]
+    [InlineData(AuthType.Pat)]
+    [InlineData(AuthType.ProjectAccessToken)]
+    [InlineData(AuthType.GroupAccessToken)]
+    [InlineData(AuthType.GitHubApp)]
+    public void EnsureCapability_skips_when_scopes_are_unknown_for_every_auth_type(AuthType authType)
+    {
+        // null Scopes = "never captured" (a token type that can't expose them, or one linked before
+        // scope capture existed). Unknown is NOT "zero scopes" — skip the pre-check and let any wire
+        // 403 flow through the per-provider error mapper. Identical rule for OAuth and every token type.
+        var credential = new Credential { AuthType = authType, Scopes = null };
+
+        Should.NotThrow(() => BuildChecker().EnsureCapability(credential, ProviderKind.GitLab, typeof(IWebhookRegistrationCapability)));
     }
 
-    [Fact]
-    public void EnsureCapability_passes_when_OAuth_scopes_satisfy_requirement()
+    [Theory]
+    [InlineData(AuthType.OAuth)]
+    [InlineData(AuthType.Pat)]
+    [InlineData(AuthType.ProjectAccessToken)]
+    public void EnsureCapability_passes_when_known_scopes_satisfy_for_every_auth_type(AuthType authType)
     {
-        var checker = BuildChecker();
-        var oauth = new Credential { AuthType = AuthType.OAuth, Scopes = new List<string> { "api" } };
+        // A credential whose CAPTURED scopes are sufficient passes pre-flight regardless of auth type —
+        // the gate reads scope DATA, never the auth TYPE. (`api` covers GitLab webhook registration.)
+        var credential = new Credential { AuthType = authType, Scopes = new List<string> { "api" } };
 
-        Should.NotThrow(() => checker.EnsureCapability(oauth, ProviderKind.GitLab, typeof(IWebhookRegistrationCapability)));
+        Should.NotThrow(() => BuildChecker().EnsureCapability(credential, ProviderKind.GitLab, typeof(IWebhookRegistrationCapability)));
     }
 
-    [Fact]
-    public void EnsureCapability_throws_typed_exception_when_OAuth_scope_missing()
+    [Theory]
+    [InlineData(AuthType.OAuth)]
+    [InlineData(AuthType.Pat)]
+    [InlineData(AuthType.ProjectAccessToken)]
+    public void EnsureCapability_throws_when_known_scopes_miss_for_every_auth_type(AuthType authType)
     {
-        var checker = BuildChecker();
-        var oauth = new Credential { AuthType = AuthType.OAuth, Scopes = new List<string> { "read_api" } };
+        // The user's actual bug: a read-only token (`read_api` only) is now caught HERE at pre-flight,
+        // not mid-run at the wire. read_api cannot register a webhook (needs `api`) — for any auth type.
+        var credential = new Credential { AuthType = authType, Scopes = new List<string> { "read_api" } };
 
         var ex = Should.Throw<ProviderInsufficientScopeException>(
-            () => checker.EnsureCapability(oauth, ProviderKind.GitLab, typeof(IWebhookRegistrationCapability)));
+            () => BuildChecker().EnsureCapability(credential, ProviderKind.GitLab, typeof(IWebhookRegistrationCapability)));
 
         ex.ProviderKind.ShouldBe(ProviderKind.GitLab);
         ex.CapabilityName.ShouldBe(nameof(IWebhookRegistrationCapability));
         ex.MissingScopes.ShouldContain("api");
+    }
+
+    [Fact]
+    public void EnsureCapability_checks_a_known_empty_scope_set_and_throws_when_capability_needs_one()
+    {
+        // Mirrors CredentialService's warning semantics exactly: null = unknown (skipped above), but a
+        // NON-null list — including an explicitly empty one — is KNOWN and gets checked. Empty can't
+        // satisfy a scope-requiring capability, so it throws. (In practice both probes emit null, never
+        // empty — this pins the boundary so the gate and the surfaced warning never diverge.)
+        var credential = new Credential { AuthType = AuthType.Pat, Scopes = new List<string>() };
+
+        Should.Throw<ProviderInsufficientScopeException>(
+            () => BuildChecker().EnsureCapability(credential, ProviderKind.GitLab, typeof(IWebhookRegistrationCapability)));
+    }
+
+    [Fact]
+    public void EnsureCapability_passes_a_known_empty_scope_set_when_the_capability_needs_no_scope()
+    {
+        // Empty (known) scopes are CHECKED, not blanket-rejected: against a None requirement (GitHub
+        // probe needs no scope) the check is satisfied → no throw. Proves empty is evaluated against
+        // the actual per-capability requirement, never assumed insufficient.
+        var credential = new Credential { AuthType = AuthType.Pat, Scopes = new List<string>() };
+
+        Should.NotThrow(() => BuildChecker().EnsureCapability(credential, ProviderKind.GitHub, typeof(ICredentialProbeCapability)));
     }
 
     private static ScopeChecker BuildChecker()
