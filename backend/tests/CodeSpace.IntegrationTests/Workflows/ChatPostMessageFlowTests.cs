@@ -66,6 +66,50 @@ public class ChatPostMessageFlowTests
         author.IsBot.ShouldBeTrue("the workflow posts as the CodeSpace bot, never a human");
     }
 
+    [Fact]
+    public async Task With_wait_for_response_on_the_node_parks_itself_then_outputs_the_clicked_action()
+    {
+        var (teamId, ownerId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+
+        var slug = "chatwait-" + Guid.NewGuid().ToString("N")[..8];
+        Guid channelId;
+        using (var scope = _fixture.BeginScope())
+            channelId = await scope.Resolve<IConversationService>().CreateChannelAsync(teamId, slug, slug, isPrivate: false, ownerId, default);
+
+        var workflowId = await CreateWorkflowAsync(teamId, ownerId, PostAndWaitDefinition(channelId));
+        var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
+
+        await RunEngineAsync(runId);
+
+        // First pass: the post_message node posted the card AND parked — one node, no separate flow.wait_action.
+        string token;
+        using (var verify = _fixture.BeginScope())
+        {
+            var db = verify.Resolve<CodeSpaceDbContext>();
+            (await db.WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == runId)).Status.ShouldBe(WorkflowRunStatus.Suspended);
+            var wait = await db.WorkflowRunWait.AsNoTracking().SingleAsync(w => w.RunId == runId && w.WaitKind == WorkflowWaitKinds.Action);
+            wait.NodeId.ShouldBe("post", "the post_message node ITSELF parked — there is no separate wait node");
+            token = wait.Token;
+        }
+
+        // A click resolves exactly this card's wait; re-dispatching drives the node's resumed pass.
+        using (var scope = _fixture.BeginScope())
+            (await scope.Resolve<IWorkflowResumeService>()
+                .ResumeByActionTokenAsync(token, "approve", ownerId, "lgtm", values: null, teamId, CancellationToken.None)).ShouldBeTrue();
+
+        await RunEngineAsync(runId);
+
+        using var verify2 = _fixture.BeginScope();
+        var db2 = verify2.Resolve<CodeSpaceDbContext>();
+        (await db2.WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == runId)).Status.ShouldBe(WorkflowRunStatus.Success);
+
+        var node = await db2.WorkflowRunNode.AsNoTracking().SingleAsync(n => n.RunId == runId && n.NodeId == "post");
+        var outputs = JsonDocument.Parse(node.OutputsJson).RootElement;
+        outputs.GetProperty("action").GetString().ShouldBe("approve", "the post_message node surfaces the clicked action as ITS OWN output — the downstream node uses it directly, no flow.wait_action needed");
+        outputs.GetProperty("by").GetString().ShouldBe(ownerId.ToString());
+        outputs.GetProperty("comment").GetString().ShouldBe("lgtm");
+    }
+
     // ─── Helpers ────────────────────────────────────────────────────────────────
 
     private async Task<Guid> CreateWorkflowAsync(Guid teamId, Guid userId, WorkflowDefinition def)
@@ -101,6 +145,33 @@ public class ChatPostMessageFlowTests
                 Inputs = WorkflowsTestSeed.Json($$"""
                     { "conversationId": "{{channelId}}", "body": "Review PR #9?",
                       "actions": [ {"key":"approve","label":"Approve","style":"Primary"}, {"key":"reject","label":"Reject","style":"Danger"} ] }
+                    """),
+            },
+            new() { Id = "end", TypeKey = "builtin.terminal", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
+        },
+        Edges = new List<EdgeDefinition>
+        {
+            new() { From = "start", To = "post" },
+            new() { From = "post", To = "end" },
+        },
+    };
+
+    // Same shape as PostCardDefinition but the post node opts into waitForResponse — so it posts AND waits
+    // in one node, surfacing the click as its own outputs (no separate flow.wait_action).
+    private static WorkflowDefinition PostAndWaitDefinition(Guid channelId) => new()
+    {
+        SchemaVersion = 1,
+        Nodes = new List<NodeDefinition>
+        {
+            new() { Id = "start", TypeKey = "trigger.manual", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
+            new()
+            {
+                Id = "post",
+                TypeKey = "chat.post_message",
+                Config = WorkflowsTestSeed.Json("""{ "waitForResponse": true }"""),
+                Inputs = WorkflowsTestSeed.Json($$"""
+                    { "conversationId": "{{channelId}}", "body": "Review PR #9?",
+                      "actions": [ {"key":"approve","label":"Approve"}, {"key":"reject","label":"Reject"} ] }
                     """),
             },
             new() { Id = "end", TypeKey = "builtin.terminal", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
