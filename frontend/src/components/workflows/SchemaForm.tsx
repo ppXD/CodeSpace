@@ -208,7 +208,7 @@ function renderControl(schema: Schema, value: unknown, onChange: (next: unknown)
   // wording); the stored value is always the raw enum value, so this is purely a display nicety.
   if (schema.enum) {
     const enumLabels = schema["x-enumLabels"] ?? {};
-    return (
+    const select = (
       <select
         className="wf-form-input"
         value={(value as string) ?? ""}
@@ -220,6 +220,15 @@ function renderControl(schema: Schema, value: unknown, onChange: (next: unknown)
         ))}
       </select>
     );
+
+    // In the editor (variable suggestions present) an enum gets the same Pick ⇄ Expression toggle as a
+    // string selector, so its value can ALSO be a dynamic {{ref}} — e.g. git.pr_review.verdict bound to a
+    // chat card's clicked action. Stored value is a string either way (a literal option or a {{ref}}), so
+    // it's non-breaking and the engine resolves it like any input. The run form (no suggestions) keeps the
+    // plain dropdown for fast literal entry.
+    return variableSuggestions != null && variableSuggestions.length > 0
+      ? <DualModeSelector pick={select} value={value} onChange={onChange} variableSuggestions={variableSuggestions} />
+      : select;
   }
 
   const type = schema.type;
