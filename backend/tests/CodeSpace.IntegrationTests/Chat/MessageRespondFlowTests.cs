@@ -244,7 +244,7 @@ public class MessageRespondFlowTests
     }
 
     [Fact]
-    public async Task A_resolving_click_on_a_card_whose_run_is_gone_expires_it_instead_of_erroring()
+    public async Task A_resolving_click_on_a_card_with_no_parked_run_records_the_decision()
     {
         var (teamId, ownerId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
         var channelId = await SeedChannelAsync(teamId, ownerId);
@@ -262,15 +262,18 @@ public class MessageRespondFlowTests
         using (var scope = _fixture.BeginScope())
             cardId = (await scope.Resolve<IChatBotService>().PostAsBotAsync(channelId, "Review?", card, default)).Id;
 
-        // No wait to resume ⇒ must NOT throw "already handled" (which TransactionalBehavior would roll back,
-        // leaving the card stuck Open). It expires the card so it stops being clickable.
+        // No wait to resume (post-and-continue card, or a run that already ended). The card is a living
+        // thread decoupled from the run, so this must NOT throw "already handled" and must NOT auto-expire —
+        // it records the decision (Resolved). The resume is simply a no-op.
         await RespondDirectAsync(teamId, cardId, "approve", ownerId);
 
         using var verify = _fixture.BeginScope();
         var db = verify.Resolve<CodeSpaceDbContext>();
         var interaction = MessageInteractionJson.Deserialize((await db.Message.AsNoTracking().SingleAsync(m => m.Id == cardId)).InteractionJson)!;
 
-        interaction.State.ShouldBe(InteractionState.Expired, "a resolving click on a card whose run is gone expires it, not a misleading 'already handled'");
+        interaction.State.ShouldBe(InteractionState.Resolved, "a card with no parked run still records the decision — a living thread, not an error and not auto-expired");
+        interaction.Resolution.ShouldNotBeNull();
+        interaction.Resolution!.ResponseKey.ShouldBe("approve");
     }
 
     [Fact]

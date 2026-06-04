@@ -66,20 +66,13 @@ public sealed class MessageInteractionService : IMessageInteractionService, ISco
             return;
         }
 
-        // Policy satisfied (first / quorum reached / veto) — this click is the tipping vote: resolve the wait.
-        var resolved = await ResolveTargetAsync(interaction.Target, responseKey, actorUserId, comment, values, teamId, cancellationToken).ConfigureAwait(false);
-
-        // No pending wait for this token ⇒ the run already ended (completed, failed, or was abandoned — e.g. a
-        // crashed worker mid-suspend). The card can never resolve, so EXPIRE it and return; the client refetches
-        // to the "Expired" stamp. We must NOT throw: TransactionalBehavior rolls back on any exception, which
-        // would discard the expiry and leave the card stuck Open + erroring with a misleading "already handled".
-        // The dangling vote is dropped (it resolved nothing).
-        if (!resolved)
-        {
-            message.InteractionJson = MessageInteractionJson.Serialize(interaction with { State = InteractionState.Expired });
-            await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
-            return;
-        }
+        // Policy satisfied (first / quorum reached / veto) — this click is the tipping vote. A card is a
+        // living thread DECOUPLED from any run (card-open ≠ run-suspended), so the decision is recorded
+        // regardless of whether a run is parked. If a run IS waiting on this token, resume it; a
+        // post-and-continue card (waitForResponse off, no downstream flow.wait_action) or a run that already
+        // ended simply has no wait — that's a no-op, NOT an error and NOT an expiry. (The identity gate inside
+        // the resume still throws 428/403 when a downstream node would act as the responder — unchanged.)
+        await ResolveTargetAsync(interaction.Target, responseKey, actorUserId, comment, values, teamId, cancellationToken).ConfigureAwait(false);
 
         message.InteractionJson = MessageInteractionJson.Serialize(withVote with
         {
