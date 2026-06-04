@@ -49,6 +49,7 @@ public sealed class FlowIterateNode : INodeRuntime
               "properties": {
                 "template": {
                   "type": "string",
+                  "x-long": true,
                   "description": "Evaluated per item. Access via {{item}}, {{item.field}}, {{index}}."
                 }
               },
@@ -60,7 +61,7 @@ public sealed class FlowIterateNode : INodeRuntime
               "type": "object",
               "properties": {
                 "items":  { "type": "array",  "description": "Array to iterate over." },
-                "itemAs": { "type": "string", "description": "Variable name for the current element. Defaults to 'item'." }
+                "itemAs": { "type": "string", "title": "Item variable name", "description": "Variable name for the current element. Defaults to 'item'." }
               },
               "required": ["items"]
             }

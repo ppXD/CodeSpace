@@ -25,37 +25,7 @@ public sealed class TriggerPrOpenedNode : INodeRuntime
         Kind = NodeKind.Trigger,
         IconKey = "git-pull-request",
         Description = "Starts the workflow when a pull/merge request is opened.",
-        ConfigSchema = SchemaBuilder.Parse("""
-            {
-              "type": "object",
-              "properties": {
-                "repositories": {
-                  "type": "array",
-                  "x-selector": "trigger.repositories",
-                  "default": [],
-                  "description": "Each row = one repo + its required labels (AND match).",
-                  "items": {
-                    "type": "object",
-                    "properties": {
-                      "repositoryId": {
-                        "type": "string",
-                        "format": "uuid",
-                        "description": "Repository to match."
-                      },
-                      "labels": {
-                        "type": "array",
-                        "items": { "type": "string" },
-                        "description": "PR must carry every label listed (case-sensitive)."
-                      }
-                    },
-                    "required": ["repositoryId"],
-                    "additionalProperties": false
-                  }
-                }
-              },
-              "additionalProperties": false
-            }
-            """),
+        ConfigSchema = SchemaBuilder.Parse(PrTriggerSchemas.RepositoriesConfigSchemaJson),
         InputSchema = SchemaBuilder.EmptyObject(),
         OutputSchema = SchemaBuilder.Parse("""
             {

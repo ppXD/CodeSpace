@@ -48,14 +48,14 @@ public sealed class FlowLoopNode : INodeRuntime
                   "type": "object",
                   "description": "Stops the loop when met.",
                   "properties": {
-                    "logic":      { "type": "string", "enum": ["and", "or"], "default": "and" },
+                    "logic":      { "type": "string", "enum": ["and", "or"], "default": "and", "x-enumLabels": { "and": "All conditions match", "or": "Any condition matches" } },
                     "conditions": {
                       "type": "array",
                       "items": {
                         "type": "object",
                         "properties": {
                           "ref":   { "type": "string", "description": "{{...}} resolved against the loop scope." },
-                          "op":    { "type": "string", "enum": ["eq", "neq", "contains", "not_contains", "startsWith", "endsWith", "is_empty", "is_not_empty"] },
+                          "op":    { "type": "string", "enum": ["eq", "neq", "contains", "not_contains", "startsWith", "endsWith", "is_empty", "is_not_empty"], "x-enumLabels": { "eq": "=", "neq": "≠", "contains": "Contains", "not_contains": "Does not contain", "startsWith": "Starts with", "endsWith": "Ends with", "is_empty": "Is empty", "is_not_empty": "Is not empty" } },
                           "value": { "type": "string" }
                         },
                         "required": ["ref", "op"]

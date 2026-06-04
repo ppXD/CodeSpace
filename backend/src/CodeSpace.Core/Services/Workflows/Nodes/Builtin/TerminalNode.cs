@@ -15,7 +15,7 @@ public sealed class TerminalNode : INodeRuntime
     public NodeManifest Manifest { get; } = new()
     {
         DisplayName = "End",
-        Category = "Flow",
+        Category = "Logic",
         Kind = NodeKind.Terminal,
         IconKey = "circle-stop",
         Description = "Marks the end of a workflow path.",
