@@ -73,6 +73,53 @@ public class PullRequestReviewCapabilityTests
         GitLabReviewPlan.NoteFor(PullRequestReviewVerdict.Approve, "   ").ShouldBe("**✅ Approved**");
     }
 
+    // ── GitLab note upsert: one living review note per MR (dedup re-runs) ────────────
+
+    [Fact]
+    public void GitLab_review_note_body_carries_the_verdict_text_and_the_dedup_marker()
+    {
+        var body = GitLabReviewPlan.ReviewNoteBody(PullRequestReviewVerdict.Approve, "ship it");
+
+        body.ShouldContain("✅ Approved");
+        body.ShouldContain("ship it");
+        body.ShouldContain(GitLabReviewPlan.ReviewNoteMarker, customMessage: "the invisible marker lets a re-run find & update this same note");
+    }
+
+    [Fact]
+    public void GitLab_finds_no_prior_note_when_none_is_marked()
+    {
+        (long, string?)[] notes = [(1, "a human comment"), (2, "another note")];
+
+        GitLabReviewPlan.FindOwnReviewNoteId(notes).ShouldBeNull("no CodeSpace note exists yet → create a fresh one");
+    }
+
+    [Fact]
+    public void GitLab_finds_our_marked_note_and_ignores_human_notes()
+    {
+        (long, string?)[] notes =
+        [
+            (10, "a human note"),
+            (11, $"**✅ Approved**\n\n{GitLabReviewPlan.ReviewNoteMarker}"),
+            (12, null),
+        ];
+
+        GitLabReviewPlan.FindOwnReviewNoteId(notes).ShouldBe(11);
+    }
+
+    [Fact]
+    public void GitLab_picks_the_most_recent_when_several_notes_are_marked()
+    {
+        // Defensive: if a prior run somehow left more than one marked note, update the newest (highest id).
+        (long, string?)[] notes =
+        [
+            (5, $"old {GitLabReviewPlan.ReviewNoteMarker}"),
+            (9, $"newer {GitLabReviewPlan.ReviewNoteMarker}"),
+            (7, $"middle {GitLabReviewPlan.ReviewNoteMarker}"),
+        ];
+
+        GitLabReviewPlan.FindOwnReviewNoteId(notes).ShouldBe(9);
+    }
+
     // ── GitLab unapprove (raw call): response classification ─────────────────────────
 
     [Theory]
