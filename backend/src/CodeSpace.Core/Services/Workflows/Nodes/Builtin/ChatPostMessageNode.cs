@@ -30,11 +30,16 @@ public sealed class ChatPostMessageNode : INodeRuntime
 {
     private readonly IChatBotService _bot;
     private readonly IInteractionComponentRegistry _components;
+    // Lazy breaks a DI construction cycle: node → IMessageInteractionService → IWorkflowResumeService →
+    // ActorIdentityRequirementGate → NodeRegistry → (back to) this node. Resolution is deferred to the
+    // timeout-resume path (the only place it's used), by when the graph is already built.
+    private readonly Lazy<IMessageInteractionService> _interactions;
 
-    public ChatPostMessageNode(IChatBotService bot, IInteractionComponentRegistry components)
+    public ChatPostMessageNode(IChatBotService bot, IInteractionComponentRegistry components, Lazy<IMessageInteractionService> interactions)
     {
         _bot = bot;
         _components = components;
+        _interactions = interactions;
     }
 
     public string TypeKey => "chat.post_message";
@@ -65,7 +70,9 @@ public sealed class ChatPostMessageNode : INodeRuntime
                   "description": "How responses decide the wait. Default: the first response wins.",
                   "properties": {
                     "mode": { "type": "string", "enum": ["first","quorum"], "default": "first", "x-enumLabels": { "first": "First response wins", "quorum": "Quorum — N of the same" }, "description": "A button marked `vetoes` always decides on one click, regardless of this." },
-                    "count": { "type": "integer", "minimum": 1, "default": 2, "title": "Responders needed", "description": "For quorum: how many DISTINCT people must pick the same option." }
+                    "count": { "type": "integer", "minimum": 1, "default": 2, "title": "Responders needed", "description": "For quorum: how many DISTINCT people must pick the same option." },
+                    "deadlineSeconds": { "type": "integer", "minimum": 1, "x-advanced": true, "title": "Auto-resolve after (seconds)", "description": "Optional. If no one responds within this long, auto-resolve with the timeout action below — so the run never hangs. e.g. 1800 = 30 min. Empty = wait indefinitely." },
+                    "onTimeout": { "type": "string", "x-advanced": true, "title": "On timeout, act as", "description": "Required when a deadline is set: which action key to record when it passes — use one of your button keys (e.g. 'reject' / 'request_changes'). Recorded as the system, with no responder." }
                   }
                 }
               }
@@ -197,16 +204,26 @@ public sealed class ChatPostMessageNode : INodeRuntime
 
     public async Task<NodeResult> RunAsync(NodeRunContext context, CancellationToken cancellationToken)
     {
-        // Resumed pass: this node posted a card on its first pass and parked; a click / form submit resolved
-        // the wait. Surface the decision as outputs — and do NOT re-post (the card is already up). The
-        // ResumePayload guard is what makes the side-effecting post happen exactly once.
+        // Resumed pass: this node posted a card on its first pass and parked; a click / form submit / the
+        // DEADLINE resolved the wait. Surface the decision as outputs — and do NOT re-post (the card is already
+        // up). When the resolution was a timeout (the payload carries _timedOut + _messageId), also stamp the
+        // card resolved so it stops showing live buttons. The ResumePayload guard makes the post happen once.
         if (context.ResumePayload.HasValue)
+        {
+            await StampCardIfTimedOutAsync(context.ResumePayload.Value, cancellationToken).ConfigureAwait(false);
             return NodeResult.Ok(BuildDecisionOutputs(context.ResumePayload.Value));
+        }
 
         if (RequireGuidInput(context, "conversationId", out var conversationId) is { } conversationError) return NodeResult.Fail(conversationError);
         if (RequireStringInput(context, "body", out var body) is { } bodyError) return NodeResult.Fail(bodyError);
 
         var interaction = BuildInteraction(context, out var token);
+
+        // A bounded wait (deadline) is validated BEFORE posting, so a misconfig fails fast without leaving an
+        // orphan card. Only meaningful when this node will actually wait here on an interaction.
+        var willWait = token != null && ShouldWaitForResponse(context);
+        var (deadlineSeconds, onTimeout, deadlineError) = willWait ? ReadDeadline(ReadResolveConfig(context)) : (null, null, null);
+        if (deadlineError != null) return NodeResult.Fail(deadlineError);
 
         MessageView posted;
         try
@@ -222,9 +239,21 @@ public sealed class ChatPostMessageNode : INodeRuntime
 
         // Opt-in: wait for the response HERE instead of forcing a separate flow.wait_action. Only when there's
         // an interaction (a card carries the token) — park on the SAME token so a click resolves exactly this
-        // card; the resumed pass (above) re-runs this node and emits { action, by, comment, values }.
-        if (token != null && ShouldWaitForResponse(context))
-            return NodeResult.Suspend(new SuspensionToken { Kind = WorkflowWaitKinds.Action, CorrelationToken = token, Payload = JsonSerializer.SerializeToElement(new { token }) });
+        // card; the resumed pass (above) re-runs this node and emits { action, by, comment, values }. A deadline
+        // adds DeadlineAt + a default-on-timeout payload so the engine auto-resolves the wait when it passes.
+        if (willWait)
+        {
+            var suspend = new SuspensionToken { Kind = WorkflowWaitKinds.Action, CorrelationToken = token, Payload = JsonSerializer.SerializeToElement(new { token }) };
+
+            if (deadlineSeconds is { } seconds)
+                suspend = suspend with
+                {
+                    DeadlineAt = DateTimeOffset.UtcNow.AddSeconds(seconds),
+                    TimeoutPayload = JsonSerializer.SerializeToElement(new { action = onTimeout, _timedOut = true, _messageId = posted.Id.ToString() }),
+                };
+
+            return NodeResult.Suspend(suspend);
+        }
 
         var outputs = new Dictionary<string, JsonElement>
         {
@@ -331,6 +360,51 @@ public sealed class ChatPostMessageNode : INodeRuntime
         var count = r.TryGetProperty("count", out var c) && c.ValueKind == JsonValueKind.Number && c.TryGetInt32(out var n) && n >= 1 ? n : 1;
 
         return new ResolvePolicy { Kind = kind, Count = count };
+    }
+
+    private static JsonElement ReadResolveConfig(NodeRunContext context) =>
+        context.Config.TryGetValue("resolve", out var r) ? r : default;
+
+    /// <summary>
+    /// Read the optional bounded-wait deadline from the <c>resolve</c> config. Returns the positive
+    /// <c>deadlineSeconds</c> + the required <c>onTimeout</c> action key, or <c>(null, null, null)</c>
+    /// when no deadline is set. <c>Error</c> is non-null only when a deadline is set WITHOUT an
+    /// onTimeout action — the node fails fast with that message rather than parking on an undecidable
+    /// timeout. Pure (config in → plan out) so it's unit-tested without the engine.
+    /// </summary>
+    internal static (int? Seconds, string? OnTimeout, string? Error) ReadDeadline(JsonElement resolveConfig)
+    {
+        if (resolveConfig.ValueKind != JsonValueKind.Object
+            || !resolveConfig.TryGetProperty("deadlineSeconds", out var d)
+            || d.ValueKind != JsonValueKind.Number
+            || !d.TryGetInt32(out var seconds)
+            || seconds <= 0)
+            return (null, null, null);
+
+        var onTimeout = resolveConfig.TryGetProperty("onTimeout", out var t) && t.ValueKind == JsonValueKind.String ? t.GetString()?.Trim() : null;
+
+        return string.IsNullOrEmpty(onTimeout)
+            ? (null, null, "Set 'On timeout, act as' (the default action key) when a deadline is configured.")
+            : (seconds, onTimeout, null);
+    }
+
+    /// <summary>
+    /// When the resumed pass is a DEADLINE timeout (the payload carries <c>_timedOut</c> + the
+    /// <c>_messageId</c> we stamped on the first pass), mirror the auto-resolution onto the card so it
+    /// stops showing live buttons. No-op for a normal click (already stamped by the respond path) or a
+    /// payload without the markers. Idempotent — stamping an already-closed card does nothing.
+    /// </summary>
+    private async Task StampCardIfTimedOutAsync(JsonElement decision, CancellationToken cancellationToken)
+    {
+        if (decision.ValueKind != JsonValueKind.Object
+            || !decision.TryGetProperty("_timedOut", out var timedOut) || timedOut.ValueKind != JsonValueKind.True
+            || !decision.TryGetProperty("_messageId", out var m) || m.ValueKind != JsonValueKind.String
+            || !Guid.TryParse(m.GetString(), out var messageId))
+            return;
+
+        var action = decision.TryGetProperty("action", out var a) && a.ValueKind == JsonValueKind.String ? a.GetString() ?? "" : "";
+
+        await _interactions.Value.MarkTimedOutAsync(messageId, action, cancellationToken).ConfigureAwait(false);
     }
 
     private static IReadOnlyList<Guid>? ReadGuidList(NodeRunContext context, string key)
