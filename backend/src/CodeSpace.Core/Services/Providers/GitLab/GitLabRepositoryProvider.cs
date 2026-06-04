@@ -518,8 +518,16 @@ public sealed class GitLabRepositoryProvider : IRepositoryCatalogCapability, IPu
             if (approveDecision == GitLabApproveDecision.Approve)
                 mergeRequest.Approve(number, new MergeRequestApprove());
 
-            // Always post the verdict note — it carries the reasoning a native approve has no field for.
-            var comment = mergeRequest.Comments(number).Add(new MergeRequestCommentCreate { Body = GitLabReviewPlan.NoteFor(verdict, body) });
+            // Post the verdict note as an UPSERT — one living review note per MR. Find our prior
+            // (marker-carrying) note and edit it in place; only create on the first run. The note
+            // carries the reasoning a native approve has no field for.
+            var comments = mergeRequest.Comments(number);
+            var noteBody = GitLabReviewPlan.ReviewNoteBody(verdict, body);
+            var existingNoteId = GitLabReviewPlan.FindOwnReviewNoteId(comments.All.Select(c => (c.Id, (string?)c.Body)));
+
+            var comment = existingNoteId is { } noteId
+                ? comments.Edit(noteId, new MergeRequestCommentEdit { Body = noteBody })
+                : comments.Add(new MergeRequestCommentCreate { Body = noteBody });
 
             return Task.FromResult(new RemotePullRequestReview { Verdict = verdict, ExternalId = comment.Id.ToString(), WebUrl = null });
         }, cancellationToken).ConfigureAwait(false);

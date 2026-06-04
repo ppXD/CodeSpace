@@ -72,6 +72,33 @@ internal static class GitLabReviewPlan
         _ => throw new ArgumentOutOfRangeException(nameof(verdict), verdict, "Unknown review verdict"),
     };
 
+    /// <summary>
+    /// Invisible tag appended to a CodeSpace review note. It's an HTML comment — GitLab strips it from
+    /// the RENDERED markdown (so reviewers never see it) but preserves it in the raw <c>body</c> the API
+    /// returns, so a later run can find THIS note and update it instead of posting a duplicate. Only
+    /// notes we author carry it, so a human's note is never matched.
+    /// </summary>
+    internal const string ReviewNoteMarker = "<!-- codespace:pr-review -->";
+
+    /// <summary>The note body to store: the verdict text + the dedup marker. Re-running the node then
+    /// updates one living review note per MR rather than piling up a new note each time.</summary>
+    public static string ReviewNoteBody(PullRequestReviewVerdict verdict, string? body) =>
+        $"{NoteFor(verdict, body)}\n\n{ReviewNoteMarker}";
+
+    /// <summary>The id of our existing review note (the marker-carrying one) so a re-run edits it in
+    /// place; null when none exists yet → post a fresh one. Picks the highest id (most recent) if more
+    /// than one is somehow marked.</summary>
+    internal static long? FindOwnReviewNoteId(IEnumerable<(long Id, string? Body)> notes)
+    {
+        long? newest = null;
+
+        foreach (var (id, body) in notes)
+            if (body != null && body.Contains(ReviewNoteMarker, StringComparison.Ordinal) && (newest is null || id > newest))
+                newest = id;
+
+        return newest;
+    }
+
     private static string Compose(string header, string? body) =>
         string.IsNullOrWhiteSpace(body) ? $"**{header}**" : $"**{header}**\n\n{body}";
 }
