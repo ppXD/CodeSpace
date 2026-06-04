@@ -36,8 +36,8 @@ public sealed class GitFetchPrDiffNode : INodeRuntime
             {
               "type": "object",
               "properties": {
-                "repositoryId": { "type": "string", "format": "uuid" },
-                "number": { "type": "integer" }
+                "repositoryId": { "type": "string", "format": "uuid", "x-selector": "repository", "description": "The repository. Pick one, or switch to Expression to bind from the trigger (e.g. {{trigger.repositoryId}})." },
+                "number": { "type": "integer", "description": "The pull/merge request number." }
               },
               "required": ["repositoryId","number"]
             }

@@ -51,7 +51,7 @@ public sealed class GitPrReviewNode : INodeRuntime
               "properties": {
                 "repositoryId": { "type": "string", "format": "uuid", "x-selector": "repository", "description": "The repository. Pick one, or switch to Expression to bind it from the trigger (e.g. {{trigger.repositoryId}})." },
                 "number": { "type": "integer", "description": "The pull/merge request number." },
-                "verdict": { "type": "string", "enum": ["approve", "request_changes", "comment"], "description": "The verdict to submit. Wire {{nodes.<wait>.outputs.action}} from a chat card click." },
+                "verdict": { "type": "string", "enum": ["approve", "request_changes", "comment"], "x-enumLabels": { "approve": "Approve", "request_changes": "Request changes", "comment": "Comment" }, "description": "The verdict to submit. Wire {{nodes.<wait>.outputs.action}} from a chat card click." },
                 "body": { "type": "string", "description": "Review body — required for request_changes / comment, optional for approve. Supports {{ }} references." },
                 "actAsUserId": { "type": "string", "format": "uuid", "description": "Submit AS this CodeSpace user's own linked provider identity (Model B). Wire {{nodes.<wait>.outputs.by}} so the review is authored by the person who clicked. Omit to use the repository's connection credential." }
               },

@@ -40,9 +40,9 @@ public sealed class GitPostPrCommentNode : INodeRuntime
             {
               "type": "object",
               "properties": {
-                "repositoryId": { "type": "string", "format": "uuid" },
-                "number": { "type": "integer" },
-                "body": { "type": "string", "minLength": 1 }
+                "repositoryId": { "type": "string", "format": "uuid", "x-selector": "repository", "description": "The repository. Pick one, or switch to Expression to bind from the trigger (e.g. {{trigger.repositoryId}})." },
+                "number": { "type": "integer", "description": "The pull/merge request number." },
+                "body": { "type": "string", "minLength": 1, "x-long": true, "description": "Markdown comment body. Supports {{ }} references." }
               },
               "required": ["repositoryId","number","body"]
             }

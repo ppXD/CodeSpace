@@ -30,7 +30,7 @@ public sealed class FlowSleepNode : INodeRuntime
             {
               "type": "object",
               "properties": {
-                "seconds": { "type": "integer", "description": "How long to pause, in seconds (must be greater than 0)." }
+                "seconds": { "type": "integer", "minimum": 1, "description": "How long to pause, in seconds." }
               },
               "required": ["seconds"]
             }
