@@ -79,6 +79,8 @@ public sealed class ChatPostMessageNode : INodeRuntime
                 "body": { "type": "string", "minLength": 1, "description": "The message text. Supports {{ }} references." },
                 "actions": {
                   "type": "array",
+                  "x-interactionField": true,
+                  "x-interactionLabel": "Buttons",
                   "description": "Action buttons — each item renders as a clickable button. The clicked button's `key` is surfaced as `action` (on THIS node when 'Wait for response' is on, otherwise on a downstream flow.wait_action). Leave empty to post a plain message. (One interaction component; `form` is the other.)",
                   "items": {
                     "type": "object",
@@ -105,6 +107,8 @@ public sealed class ChatPostMessageNode : INodeRuntime
                 },
                 "form": {
                   "type": "object",
+                  "x-interactionField": true,
+                  "x-interactionLabel": "Form",
                   "description": "Form card — input fields the responder fills; the submitted values are injected into the run (surfaced as the wait node's outputs.values). Alternative to `actions` (form wins if both are set).",
                   "properties": {
                     "fields": { "type": "object", "description": "A JSON Schema describing the form's input fields (rendered by the client's schema-driven form)." },

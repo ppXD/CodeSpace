@@ -40,6 +40,7 @@ import { migrateLegacyPrTriggerConfig } from "@/lib/migrateTriggerConfig";
 import { NodeRetryEditor } from "@/components/workflows/NodeRetryEditor";
 import { SchemaForm } from "@/components/workflows/SchemaForm";
 import { NodePresetPicker } from "@/components/workflows/NodePresetPicker";
+import { PostMessageInputsEditor } from "@/components/workflows/PostMessageInputsEditor";
 import { ERROR_HANDLE, errorRouteTarget, setErrorRoute } from "@/lib/workflowErrorRoute";
 import { introspectScope } from "@/components/workflows/scope-introspection";
 import { StartNodeInputsEditor } from "@/components/workflows/StartNodeInputsEditor";
@@ -1281,13 +1282,27 @@ function NodeInspector({
 
           <section className="wf-inspector-section">
             <div className="wf-inspector-section-h">Inputs</div>
-            <SchemaForm
-              schema={manifest.inputSchema}
-              value={inputs}
-              onChange={onInputsChange}
-              templateHint
-              variableSuggestions={suggestions}
-            />
+            {/* chat.post_message gets a custom Inputs editor: a single "Interaction type" picker
+                (None / Buttons / Form / …) replaces the confusing "fill actions / form / component
+                simultaneously" layout. The options are DATA-DRIVEN from the manifest's
+                x-interactionField properties, so adding a new interaction kind requires only a
+                manifest change — this component doesn't need to change. */}
+            {manifest.typeKey === "chat.post_message" ? (
+              <PostMessageInputsEditor
+                inputs={inputs}
+                onChange={onInputsChange}
+                variableSuggestions={suggestions}
+                inputSchema={manifest.inputSchema}
+              />
+            ) : (
+              <SchemaForm
+                schema={manifest.inputSchema}
+                value={inputs}
+                onChange={onInputsChange}
+                templateHint
+                variableSuggestions={suggestions}
+              />
+            )}
           </section>
         </>
       )}

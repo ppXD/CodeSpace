@@ -66,6 +66,12 @@ interface Schema {
   title?: string;
   /** Friendly display text per enum value (e.g. {"first":"First response wins"}). The stored value is unchanged. */
   "x-enumLabels"?: Record<string, string>;
+  /** Marks a property as an "interaction field" — a mutually-exclusive component slot. The
+   * PostMessageInputsEditor reads this to build the interaction-type picker instead of showing
+   * all interaction fields at once. Never read by SchemaForm itself. */
+  "x-interactionField"?: boolean;
+  /** Human-readable label for an x-interactionField option, shown in the type picker. */
+  "x-interactionLabel"?: string;
 }
 
 interface SchemaFormProps {

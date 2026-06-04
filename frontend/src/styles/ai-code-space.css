@@ -2339,6 +2339,20 @@ textarea:-webkit-autofill {
 /* Nested object (e.g. resolve { mode, count }) → its recursive sub-form, grouped by a left rule + indent. */
 .acs-root .wf-form-nested { border-left: 2px solid var(--line); padding-left: 12px; }
 /* Secondary fields tucked under a collapsed "Advanced" disclosure (e.g. a button's requiresComment / resolvesWait / vetoes). */
+/* ── Interaction type picker (PostMessageInputsEditor) ───────────────────────────────────────────
+   Segmented control for None / Buttons / Form / … — schema-driven, never hardcoded. The options
+   are discovered from x-interactionField properties in the node's InputSchema. */
+.acs-root .wf-interaction-picker { display: flex; flex-direction: column; gap: 4px; }
+.acs-root .wf-interaction-options { display: flex; flex-wrap: wrap; gap: 4px; }
+.acs-root .wf-interaction-opt {
+  padding: 4px 12px; border-radius: 999px; border: 1px solid var(--line);
+  background: var(--bg); font-family: inherit; font-size: 12px; font-weight: 500;
+  color: var(--ink-2); cursor: pointer; transition: background .1s, border-color .1s, color .1s;
+}
+.acs-root .wf-interaction-opt:hover { background: var(--panel); border-color: var(--line-2); color: var(--ink); }
+.acs-root .wf-interaction-opt[data-active] { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); font-weight: 600; }
+.acs-root .wf-interaction-body { padding-top: 4px; }
+
 .acs-root .wf-form-advanced { border-top: 1px solid var(--line); padding-top: 8px; }
 .acs-root .wf-form-advanced-summary { cursor: pointer; font-size: 11px; font-weight: 600; color: var(--muted); list-style: none; user-select: none; }
 .acs-root .wf-form-advanced-summary::-webkit-details-marker { display: none; }
