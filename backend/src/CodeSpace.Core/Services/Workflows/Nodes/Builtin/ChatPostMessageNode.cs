@@ -83,8 +83,8 @@ public sealed class ChatPostMessageNode : INodeRuntime
                   "items": {
                     "type": "object",
                     "properties": {
-                      "key": { "type": "string", "title": "Action key", "description": "The signal surfaced as outputs.action when clicked — wire it downstream (e.g. \"approve\" → a git.pr_review verdict)." },
-                      "label": { "type": "string", "description": "Button text shown to the responder." },
+                      "key": { "type": "string", "title": "Action key", "description": "What this button SENDS when clicked. The clicked button's key becomes this node's \"action\" output → wire it into a downstream field (e.g. a Verdict): type @ in that field and pick this node's action. Use keys the target expects, e.g. approve / request_changes." },
+                      "label": { "type": "string", "description": "Button text shown to the responder (emoji ok). Only the key above is sent downstream — the label is just display." },
                       "description": { "type": "string", "x-advanced": true, "description": "Optional: what this button does. Shown to the responder as a tooltip on the button, so a click's effect isn't opaque." },
                       "style": { "type": "string", "enum": ["Default","Primary","Danger"], "description": "Visual emphasis." },
                       "requiresComment": { "type": "boolean", "x-advanced": true, "description": "Require the responder to enter a comment before this button submits." },
@@ -123,7 +123,7 @@ public sealed class ChatPostMessageNode : INodeRuntime
               "properties": {
                 "messageId": { "type": "string", "description": "Posted message id." },
                 "token": { "type": ["string","null"], "description": "Action token — output for wiring a separate flow.wait_action when NOT waiting here." },
-                "action":  { "type": "string", "description": "The clicked button's key — present when this node waited (waitForResponse)." },
+                "action":  { "type": "string", "description": "The KEY of the button the responder clicked — i.e. one of the keys you set under Actions above. Set only after someone responds, so it needs Wait for a response on. Wire it downstream (e.g. a git.pr_review Verdict)." },
                 "by":      { "type": "string", "description": "Responder's user id — present when this node waited." },
                 "comment": { "type": "string", "description": "Responder's comment — present when this node waited." },
                 "values":  { "type": "object", "description": "A form submission's field values — present when this node waited on a form." }
