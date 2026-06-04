@@ -1,3 +1,5 @@
+import { useState } from "react";
+
 import { SchemaForm } from "@/components/workflows/SchemaForm";
 import type { ScopeSuggestion } from "@/components/workflows/scope-introspection";
 
@@ -20,25 +22,51 @@ import type { ScopeSuggestion } from "@/components/workflows/scope-introspection
  *
  * Stored values: still the same `actions` / `form` keys — fully non-breaking.
  */
-export function PostMessageInputsEditor({ inputs, onChange, variableSuggestions, inputSchema }: {
+export function PostMessageInputsEditor({ inputs, onChange, variableSuggestions, inputSchema, nodeId }: {
   inputs: Record<string, unknown>;
   onChange: (next: Record<string, unknown>) => void;
   variableSuggestions?: ScopeSuggestion[];
   inputSchema: unknown;
+  /** The node being edited. Scopes the draft state — switching to a different node resets drafts so
+   * one node's stashed interaction never leaks into another (this component is reused, not remounted). */
+  nodeId: string;
 }) {
   const parsed = parseInputSchema(inputSchema);
 
-  // Derive the active interaction kind: the first interaction-field key that is present in inputs.
-  // "form" wins over "actions" (matches the backend precedence) to correctly reflect existing definitions.
+  // Session drafts: the last-known value for each interaction kind that is NOT currently active.
+  // Switching kinds stashes the outgoing kind here instead of discarding it, so the user can toggle
+  // (peek at Form, go back to Buttons) without losing their work. Only the ACTIVE kind lives in
+  // `inputs` (the persisted + sent value) — keeping a single live interaction key means the engine's
+  // whole-bag template resolution + dependency extraction never touch an inactive draft. Drafts are
+  // session-scoped: they survive toggles during this node's editing, but not a save/reload.
+  const [draftsNodeId, setDraftsNodeId] = useState(nodeId);
+  const [drafts, setDrafts] = useState<Record<string, unknown>>({});
+
+  // Reset drafts when the inspector switches to a different node — without this, node A's stash would
+  // bleed into node B. (React "reset state on prop change" pattern: adjust during render, no effect.)
+  if (nodeId !== draftsNodeId) { setDraftsNodeId(nodeId); setDrafts({}); }
+
+  // The active kind = the single interaction-field key present in `inputs` (declaration order if a
+  // legacy definition exceptionally has more than one live). "none" = plain message, no interaction.
   const activeKind = parsed.interactionFields.find(f => inputs[f.key] != null)?.key ?? "none";
 
   const switchKind = (next: string) => {
-    // Remove all interaction fields, then seed the new kind's default.
-    const without: Record<string, unknown> = { ...inputs };
-    for (const f of parsed.interactionFields) delete without[f.key];
-    if (next === "none") { onChange(without); return; }
-    const seed = INTERACTION_DEFAULTS[next] ?? {};
-    onChange({ ...without, ...seed });
+    const out: Record<string, unknown> = { ...inputs };
+    const nextDrafts = { ...drafts };
+
+    // Stash the outgoing kind's current value so switching back restores exactly what was there.
+    if (activeKind !== "none" && out[activeKind] !== undefined) nextDrafts[activeKind] = out[activeKind];
+
+    // Exactly one interaction key may be live — clear them all, then activate the chosen one.
+    for (const f of parsed.interactionFields) delete out[f.key];
+
+    if (next !== "none") {
+      out[next] = next in nextDrafts ? nextDrafts[next] : (INTERACTION_SEED[next] ?? {});
+      delete nextDrafts[next];   // it's live now, no longer a draft
+    }
+
+    setDrafts(nextDrafts);
+    onChange(out);
   };
 
   const updateInteraction = (partial: Record<string, unknown>) => onChange({ ...inputs, ...partial });
@@ -111,11 +139,12 @@ export function PostMessageInputsEditor({ inputs, onChange, variableSuggestions,
   );
 }
 
-// ─── Defaults seeded when switching to a new kind ───────────────────────────────────────────────
+// ─── Seed value for a freshly-activated kind (used only when there's no stashed draft to restore) ──
+// Keyed by the interaction-field key; the value is exactly what gets written to inputs[key].
 
-const INTERACTION_DEFAULTS: Record<string, Record<string, unknown>> = {
-  actions: { actions: [] },
-  form: { form: { fields: { type: "object", properties: {} }, submitLabel: "Submit" } },
+const INTERACTION_SEED: Record<string, unknown> = {
+  actions: [],
+  form: { fields: { type: "object", properties: {} }, submitLabel: "Submit" },
 };
 
 // ─── Schema parsing ─────────────────────────────────────────────────────────────────────────────
