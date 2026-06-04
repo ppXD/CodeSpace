@@ -129,6 +129,8 @@ public sealed class GitPrReviewNode : INodeRuntime
             $"Couldn't submit the review to PR #{number}: {api.ProviderKind} refused it — your identity may not have review/write permission on this repository. Get access, then try again.",
         ProviderApiException { StatusCode: 404 } api =>
             $"Couldn't submit the review: {api.ProviderKind} couldn't find PR #{number}, or your identity can't access this repository.",
+        ProviderApiException { StatusCode: 422 } api =>
+            $"Couldn't submit the review to PR #{number}: {api.ProviderKind} rejected it as invalid — this usually means you're trying to approve your own pull request, which isn't allowed.",
         ProviderApiException api =>
             $"Couldn't submit the review to PR #{number}: {api.ProviderKind} returned HTTP {api.StatusCode}.",
         _ => $"Couldn't submit the review to PR #{number}: {ex.Message}",

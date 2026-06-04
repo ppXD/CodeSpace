@@ -43,6 +43,17 @@ public class PullRequestReviewCapabilityTests
     }
 
     [Fact]
+    public void GitLab_approve_decision_is_idempotent_and_eligibility_aware()
+    {
+        // GitLab's approve isn't idempotent (re-approve → 401), so we read state first and decide:
+        // already-approved short-circuits to a no-op; ineligible (author / low role) fails clearly.
+        GitLabReviewPlan.DecideApprove(userHasApproved: true, userCanApprove: true).ShouldBe(GitLabApproveDecision.AlreadyApproved);
+        GitLabReviewPlan.DecideApprove(userHasApproved: true, userCanApprove: false).ShouldBe(GitLabApproveDecision.AlreadyApproved, "already-approved wins even if eligibility now reads false");
+        GitLabReviewPlan.DecideApprove(userHasApproved: false, userCanApprove: true).ShouldBe(GitLabApproveDecision.Approve);
+        GitLabReviewPlan.DecideApprove(userHasApproved: false, userCanApprove: false).ShouldBe(GitLabApproveDecision.CannotApprove);
+    }
+
+    [Fact]
     public void GitLab_labels_approve_and_request_changes_and_keeps_a_bare_comment()
     {
         GitLabReviewPlan.NoteFor(PullRequestReviewVerdict.Approve, "ship it")

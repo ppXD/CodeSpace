@@ -10,6 +10,7 @@ using CodeSpace.Messages.Exceptions;
 using NGitLab;
 using NGitLab.Models;
 using GitLabMergeRequestState = NGitLab.Models.MergeRequestState;
+using ProviderInstance = CodeSpace.Core.Persistence.Entities.ProviderInstance;
 
 namespace CodeSpace.Core.Services.Providers.GitLab;
 
@@ -498,12 +499,23 @@ public sealed class GitLabRepositoryProvider : IRepositoryCatalogCapability, IPu
         if (action == GitLabApprovalAction.Unapprove)
             await UnapproveAsync(host, token, projectId, number, cancellationToken).ConfigureAwait(false);
 
+        // approve → read the MR's current approval state first (GitLab's approve isn't idempotent).
+        // Already-approved becomes a no-op; ineligible (author / low role) fails clearly outside the
+        // wrapper (so the typed 403 isn't re-wrapped) instead of firing an approve GitLab rejects 401.
+        var approveDecision = action == GitLabApprovalAction.Approve
+            ? await ReadApproveDecisionAsync(context.Instance, client, projectId, number, cancellationToken).ConfigureAwait(false)
+            : (GitLabApproveDecision?)null;
+
+        if (approveDecision == GitLabApproveDecision.CannotApprove)
+            throw new ProviderApiException(ProviderKind.GitLab, 403, nameof(SubmitReviewAsync), $"You can't approve merge request !{number} — you may be its author, or your role is below Developer.", new InvalidOperationException("UserCanApprove=false"));
+
         return await _resilience.ExecuteAsync(context.Instance, nameof(SubmitReviewAsync), _ =>
         {
             var mergeRequest = client.GetMergeRequest(projectId);
 
-            // approve → native GitLab approval (green badge, counts toward required approvals).
-            if (action == GitLabApprovalAction.Approve)
+            // approve → native GitLab approval (green badge, counts toward required approvals). Skipped
+            // when already approved — re-running the node is then an idempotent no-op, not a 401.
+            if (approveDecision == GitLabApproveDecision.Approve)
                 mergeRequest.Approve(number, new MergeRequestApprove());
 
             // Always post the verdict note — it carries the reasoning a native approve has no field for.
@@ -512,6 +524,17 @@ public sealed class GitLabRepositoryProvider : IRepositoryCatalogCapability, IPu
             return Task.FromResult(new RemotePullRequestReview { Verdict = verdict, ExternalId = comment.Id.ToString(), WebUrl = null });
         }, cancellationToken).ConfigureAwait(false);
     }
+
+    // Read the actor's current approval standing on the MR and decide whether to approve. The read is
+    // wrapped (NGitLab call → mapped on failure); the pure DecideApprove turns the two state flags into
+    // {approve | already-approved no-op | can't-approve} so re-runs are idempotent. GitLab's basic
+    // approvals GET is Free-tier (only approval RULES are Premium), so this works on all tiers.
+    private async Task<GitLabApproveDecision> ReadApproveDecisionAsync(ProviderInstance instance, GitLabClient client, int projectId, int iid, CancellationToken cancellationToken)
+        => await _resilience.ExecuteAsync(instance, nameof(SubmitReviewAsync) + "/approvals", _ =>
+        {
+            var approvals = client.GetMergeRequest(projectId).ApprovalClient(iid).Approvals;
+            return Task.FromResult(GitLabReviewPlan.DecideApprove(approvals.UserHasApproved, approvals.UserCanApprove));
+        }, cancellationToken).ConfigureAwait(false);
 
     /// <summary>
     /// Retract this token's approval on an MR via <c>POST /api/v4/projects/:id/merge_requests/:iid/unapprove</c>.

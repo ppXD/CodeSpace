@@ -155,6 +155,18 @@ public class GitPrReviewNodeTests
     }
 
     [Fact]
+    public async Task Provider_422_fails_with_a_self_approval_message()
+    {
+        var stub = new StubPrService { ThrowOnReview = new ProviderApiException(ProviderKind.GitHub, 422, "SubmitReviewAsync", "Unprocessable Entity", new Exception()) };
+
+        var result = await new GitPrReviewNode(stub).RunAsync(BuildContext(Repo, 99, "approve", null), CancellationToken.None);
+
+        result.Status.ShouldBe(NodeStatus.Failure);
+        result.Error.ShouldContain("own pull request");
+        result.Error.ShouldContain("#99");
+    }
+
+    [Fact]
     public async Task Fails_when_repository_id_is_missing()
     {
         var result = await new GitPrReviewNode(new StubPrService()).RunAsync(BuildContext(repositoryId: null, number: 1, verdict: "approve", body: null), CancellationToken.None);
