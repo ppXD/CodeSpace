@@ -101,6 +101,35 @@ public sealed record NodeManifest
     /// Null/empty ⇒ the node offers no templates. Purely an editor convenience; the engine never reads it.
     /// </summary>
     public IReadOnlyList<NodePreset>? Presets { get; init; }
+
+    /// <summary>
+    /// Declares outputs that are ONLY populated when this node actually WAITS for a response (suspends),
+    /// plus the config flag that controls waiting. Lets <see cref="DefinitionValidator"/> generically reject a
+    /// downstream reference to such an output when the producing node isn't configured to wait — that value
+    /// would be empty at run time. No node-type knowledge in the validator; any node with config-gated wait
+    /// outputs declares this. Null ⇒ all of the node's outputs are always available.
+    /// </summary>
+    public WaitOutputsSpec? WaitOutputs { get; init; }
+}
+
+/// <summary>
+/// Declares which of a node's outputs are populated only when it WAITS for a response, and the config flag
+/// that turns waiting on — so the validator can flag a downstream reference to such an output on a node that
+/// isn't waiting (the value would be empty at run time). Generic data, like the manifest's other markers.
+/// </summary>
+public sealed record WaitOutputsSpec
+{
+    /// <summary>Output keys present only when the node waits (e.g. action / by / comment / values).</summary>
+    public required IReadOnlyList<string> OutputKeys { get; init; }
+
+    /// <summary>The boolean config key that turns waiting on.</summary>
+    public required string WaitConfigKey { get; init; }
+
+    /// <summary>Whether the node waits when <see cref="WaitConfigKey"/> is absent from config (the schema default).</summary>
+    public bool WaitConfigDefault { get; init; }
+
+    /// <summary>Plain-language name of the wait toggle, for the validator's error message.</summary>
+    public required string WaitConfigLabel { get; init; }
 }
 
 /// <summary>

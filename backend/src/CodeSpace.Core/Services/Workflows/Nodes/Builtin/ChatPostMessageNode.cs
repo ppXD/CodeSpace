@@ -47,6 +47,13 @@ public sealed class ChatPostMessageNode : INodeRuntime
         IconKey = "message-square",
         Description = "Posts a message into a conversation as the CodeSpace bot. Add `actions` (buttons) or a `form` to make it interactive — by default it then WAITS here for the response and outputs the choice as { action, by, comment, values }, so the next node uses it directly. Turn off 'Wait for response' to post-and-continue or to wait elsewhere with a flow.wait_action wired to `token`.",
         IsSideEffecting = true,
+        WaitOutputs = new WaitOutputsSpec
+        {
+            OutputKeys = ["action", "by", "comment", "values"],
+            WaitConfigKey = "waitForResponse",
+            WaitConfigDefault = true,
+            WaitConfigLabel = "Wait for a response",
+        },
         ConfigSchema = SchemaBuilder.Parse("""
             {
               "type": "object",

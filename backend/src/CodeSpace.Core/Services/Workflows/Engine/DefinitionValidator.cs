@@ -351,7 +351,30 @@ public sealed class DefinitionValidator : IScopedDependency
         {
             var available = string.Join(", ", declared.Select(k => $"'{k}'"));
             errors.Add($"Node '{node.Id}' {source} references '{path}', but '{refNodeId}' ({refNode.TypeKey}) doesn't declare output '{outputKey}'. Available: {available}.");
+            return;
         }
+
+        // Wait-only output: a card's action/by/comment/values are EMPTY at run time unless the producing node
+        // actually waits for a response. Generic — driven by the manifest's WaitOutputsSpec, no node-type
+        // knowledge — so any node with config-gated wait outputs is covered. (This catches the classic footgun:
+        // wiring git.pr_review.verdict = nodes.post_message.outputs.action while post_message isn't waiting.)
+        if (manifest.WaitOutputs is { } waitSpec && waitSpec.OutputKeys.Contains(outputKey) && !NodeWaits(refNode, waitSpec))
+            errors.Add($"Node '{node.Id}' {source} references '{path}', but '{refNodeId}' isn't waiting for a response — '{outputKey}' will be empty at run time. Turn on '{waitSpec.WaitConfigLabel}' on '{refNodeId}' (or wire it to a wait), or remove the reference.");
+    }
+
+    /// <summary>
+    /// Does this node instance wait, per its <see cref="WaitOutputsSpec"/>? Reads the boolean wait-config key
+    /// from the node's Config; an absent key falls back to the spec's declared schema default.
+    /// </summary>
+    private static bool NodeWaits(NodeDefinition node, WaitOutputsSpec spec)
+    {
+        if (node.Config.ValueKind == System.Text.Json.JsonValueKind.Object && node.Config.TryGetProperty(spec.WaitConfigKey, out var value))
+        {
+            if (value.ValueKind == System.Text.Json.JsonValueKind.True) return true;
+            if (value.ValueKind == System.Text.Json.JsonValueKind.False) return false;
+        }
+
+        return spec.WaitConfigDefault;
     }
 
     /// <summary>

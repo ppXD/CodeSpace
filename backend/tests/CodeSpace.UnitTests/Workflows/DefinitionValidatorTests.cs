@@ -25,6 +25,11 @@ public class DefinitionValidatorTests
             // Declares a typed output ("value") so the output-key membership check is active —
             // lets the error-output tests prove `error` is accepted while typos still error.
             new StubNode("regular.out", NodeKind.Regular, """{"type":"object","properties":{"value":{"type":"string"}}}"""),
+            // A node with config-gated wait outputs (mirrors chat.post_message): action/by/comment/values are
+            // only populated when it waits; token is always present.
+            new StubNode("chat.wait", NodeKind.Regular,
+                """{"type":"object","properties":{"action":{"type":"string"},"by":{"type":"string"},"comment":{"type":"string"},"values":{"type":"object"},"token":{"type":"string"}}}""",
+                new WaitOutputsSpec { OutputKeys = new[] { "action", "by", "comment", "values" }, WaitConfigKey = "waitForResponse", WaitConfigDefault = true, WaitConfigLabel = "Wait for a response" }),
             new StubNode("builtin.terminal", NodeKind.Terminal)
         };
 
@@ -283,6 +288,69 @@ public class DefinitionValidatorTests
         result.Errors.ShouldContain(e => e.Contains("schemaVersion"));
     }
 
+    // ─── Wait-only output references (a card's action/by/comment require the producer to wait) ──────────
+
+    private static WorkflowDefinition WaitRefDefinition(NodeDefinition producer, string consumerInputsJson) => new()
+    {
+        Nodes = new List<NodeDefinition>
+        {
+            Node("t", "trigger.x"),
+            producer,
+            NodeWithInputs("d", "regular.a", consumerInputsJson),
+            Node("end", "builtin.terminal")
+        },
+        Edges = new List<EdgeDefinition>
+        {
+            new() { From = "t", To = "w" },
+            new() { From = "w", To = "d" },
+            new() { From = "d", To = "end" }
+        }
+    };
+
+    [Fact]
+    public void Wait_only_output_reference_errors_when_the_producer_is_not_waiting()
+    {
+        var definition = WaitRefDefinition(
+            NodeWithConfig("w", "chat.wait", """{"waitForResponse": false}"""),
+            """{"verdict":"{{nodes.w.outputs.action}}"}""");
+
+        var result = BuildValidator().Validate(definition);
+        result.IsValid.ShouldBeFalse();
+        result.Errors.ShouldContain(e => e.Contains("isn't waiting for a response") && e.Contains("Wait for a response"));
+    }
+
+    [Fact]
+    public void Wait_only_output_reference_passes_when_the_producer_waits()
+    {
+        var definition = WaitRefDefinition(
+            NodeWithConfig("w", "chat.wait", """{"waitForResponse": true}"""),
+            """{"verdict":"{{nodes.w.outputs.action}}"}""");
+
+        BuildValidator().Validate(definition).IsValid.ShouldBeTrue();
+    }
+
+    [Fact]
+    public void Wait_only_output_reference_passes_when_wait_config_is_absent_and_defaults_to_waiting()
+    {
+        // waitForResponse absent ⇒ the spec's schema default (true) ⇒ the node waits ⇒ the reference is valid.
+        var definition = WaitRefDefinition(
+            Node("w", "chat.wait"),
+            """{"verdict":"{{nodes.w.outputs.action}}"}""");
+
+        BuildValidator().Validate(definition).IsValid.ShouldBeTrue();
+    }
+
+    [Fact]
+    public void Non_wait_output_reference_is_unaffected_by_the_wait_gate()
+    {
+        // 'token' is always present (not wait-only), so referencing it on a non-waiting node is fine.
+        var definition = WaitRefDefinition(
+            NodeWithConfig("w", "chat.wait", """{"waitForResponse": false}"""),
+            """{"tok":"{{nodes.w.outputs.token}}"}""");
+
+        BuildValidator().Validate(definition).IsValid.ShouldBeTrue();
+    }
+
     // ─── Retry policy (Phase 2) ────────────────────────────────────────────────
 
     [Theory]
@@ -452,9 +520,17 @@ public class DefinitionValidatorTests
         Retry = new RetryPolicy { MaxAttempts = maxAttempts, BackoffSeconds = backoffSeconds }
     };
 
+    private static NodeDefinition NodeWithConfig(string id, string typeKey, string configJson) => new()
+    {
+        Id = id,
+        TypeKey = typeKey,
+        Config = JsonDocument.Parse(configJson).RootElement.Clone(),
+        Inputs = JsonDocument.Parse("{}").RootElement.Clone()
+    };
+
     private sealed class StubNode : INodeRuntime
     {
-        public StubNode(string typeKey, NodeKind kind, string? outputSchemaJson = null)
+        public StubNode(string typeKey, NodeKind kind, string? outputSchemaJson = null, WaitOutputsSpec? waitOutputs = null)
         {
             TypeKey = typeKey;
             Manifest = new NodeManifest
@@ -464,7 +540,8 @@ public class DefinitionValidatorTests
                 Kind = kind,
                 ConfigSchema = SchemaBuilder.EmptyObject(),
                 InputSchema = SchemaBuilder.EmptyObject(),
-                OutputSchema = outputSchemaJson != null ? SchemaBuilder.Parse(outputSchemaJson) : SchemaBuilder.EmptyObject()
+                OutputSchema = outputSchemaJson != null ? SchemaBuilder.Parse(outputSchemaJson) : SchemaBuilder.EmptyObject(),
+                WaitOutputs = waitOutputs
             };
         }
 
