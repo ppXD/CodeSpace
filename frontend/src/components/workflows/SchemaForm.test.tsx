@@ -252,3 +252,32 @@ describe("SchemaForm title + enum labels", () => {
     expect(onChange).toHaveBeenCalledWith({ mode: "quorum" });   // the raw value is stored, not the label
   });
 });
+
+/**
+ * An enum field is bind-able to a dynamic {{ref}} in the editor via the Pick ⇄ Expression toggle (the same
+ * one string selectors get) — so e.g. git.pr_review.verdict can be wired to a chat card's clicked action,
+ * not just a static option. Without suggestions (the run form) it stays a plain dropdown.
+ */
+describe("SchemaForm enum dual-mode", () => {
+  const enumSchema = { type: "object", properties: { verdict: { type: "string", enum: ["approve", "request_changes"] } } };
+  const suggestions = [{ path: "nodes.w.outputs.action", label: "nodes.w.outputs.action", category: "node" as const }];
+
+  it("offers a Pick ⇄ Expression toggle on an enum and defaults to the dropdown for a literal value", () => {
+    render(<SchemaForm schema={enumSchema} value={{ verdict: "approve" }} onChange={vi.fn()} variableSuggestions={suggestions} />);
+    expect(screen.getByRole("button", { name: "Pick" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Expression" })).toBeInTheDocument();
+    expect(screen.getByRole("combobox")).toBeInTheDocument();
+  });
+
+  it("opens an enum in Expression mode when the value is already a {{ref}} (no dropdown)", () => {
+    render(<SchemaForm schema={enumSchema} value={{ verdict: "{{nodes.w.outputs.action}}" }} onChange={vi.fn()} variableSuggestions={suggestions} />);
+    expect(screen.getByRole("button", { name: "Expression" }).getAttribute("data-active")).toBe("true");
+    expect(screen.queryByRole("combobox")).toBeNull();
+  });
+
+  it("keeps an enum a plain dropdown with no toggle in the run form (no suggestions)", () => {
+    render(<SchemaForm schema={enumSchema} value={{ verdict: "approve" }} onChange={vi.fn()} />);
+    expect(screen.queryByRole("button", { name: "Pick" })).toBeNull();
+    expect(screen.getByRole("combobox")).toBeInTheDocument();
+  });
+});
