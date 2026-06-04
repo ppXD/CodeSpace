@@ -47,6 +47,32 @@ public sealed class MessageInteractionService : IMessageInteractionService, ISco
         await ResolveOrRecordVoteAsync(message, interaction, responseKey, actorUserId, comment, values, teamId, cancellationToken).ConfigureAwait(false);
     }
 
+    public async Task MarkTimedOutAsync(Guid messageId, string responseKey, CancellationToken cancellationToken)
+    {
+        var message = await _db.Message
+            .SingleOrDefaultAsync(m => m.Id == messageId && m.DeletedDate == null, cancellationToken)
+            .ConfigureAwait(false);
+
+        var interaction = message?.InteractionJson is { } json ? MessageInteractionJson.Deserialize(json) : null;
+
+        // No interaction, or a human already resolved it before the deadline fired → nothing to mirror.
+        if (message == null || interaction is null || interaction.State != InteractionState.Open) return;
+
+        message.InteractionJson = MessageInteractionJson.Serialize(interaction with
+        {
+            State = InteractionState.Resolved,
+            Resolution = new InteractionResolution
+            {
+                ResponseKey = responseKey,
+                ByUserId = Guid.Empty,   // system — nobody responded before the deadline
+                Comment = "No response before the deadline.",
+                AtUtc = DateTimeOffset.UtcNow,
+            },
+        });
+
+        await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+    }
+
     // ─── Terminal action: append the vote, then resolve the wait IF the policy is satisfied; else record + stay Open ──
 
     private async Task ResolveOrRecordVoteAsync(Message message, MessageInteraction interaction, string responseKey, Guid actorUserId, string? comment, IReadOnlyDictionary<string, JsonElement>? values, Guid teamId, CancellationToken cancellationToken)

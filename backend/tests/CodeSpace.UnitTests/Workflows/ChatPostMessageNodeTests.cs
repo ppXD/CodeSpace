@@ -20,7 +20,22 @@ public class ChatPostMessageNodeTests
     private static readonly IInteractionComponentRegistry Components =
         new InteractionComponentRegistry(new IInteractionComponentFactory[] { new ActionButtonsComponentFactory(), new FormComponentFactory() });
 
-    private static ChatPostMessageNode Node(IChatBotService bot) => new(bot, Components);
+    private static ChatPostMessageNode Node(IChatBotService bot, IMessageInteractionService? interactions = null) =>
+        new(bot, Components, new Lazy<IMessageInteractionService>(() => interactions ?? new StubInteractions()));
+
+    /// <summary>Records a timeout-stamp call (the node's only use of the interaction service).</summary>
+    private sealed class StubInteractions : IMessageInteractionService
+    {
+        public (Guid MessageId, string ResponseKey)? TimedOut;
+
+        public Task RespondAsync(Guid teamId, Guid messageId, string responseKey, Guid actorUserId, string? comment, IReadOnlyDictionary<string, JsonElement>? values, CancellationToken cancellationToken) => Task.CompletedTask;
+
+        public Task MarkTimedOutAsync(Guid messageId, string responseKey, CancellationToken cancellationToken)
+        {
+            TimedOut = (messageId, responseKey);
+            return Task.CompletedTask;
+        }
+    }
 
     /// <summary>Hand-rolled stub (this suite uses no mocking lib) — records what was posted, returns a canned view.</summary>
     private sealed class StubChatBot : IChatBotService
@@ -301,6 +316,114 @@ public class ChatPostMessageNodeTests
         actions.Select(a => a.GetProperty("key").GetString()).ShouldBe(new[] { "approve", "request_changes" });
         actions.Single(a => a.GetProperty("key").GetString() == "request_changes").GetProperty("vetoes").GetBoolean()
             .ShouldBeTrue("request changes blocks via veto, not as a competing vote");
+    }
+
+    // ─── Bounded wait: deadline + onTimeout default ─────────────────────────────────
+
+    [Fact]
+    public void ReadDeadline_returns_seconds_and_action_when_both_set()
+    {
+        var (seconds, onTimeout, error) = ChatPostMessageNode.ReadDeadline(JsonDocument.Parse("""{ "deadlineSeconds": 1800, "onTimeout": "reject" }""").RootElement);
+
+        seconds.ShouldBe(1800);
+        onTimeout.ShouldBe("reject");
+        error.ShouldBeNull();
+    }
+
+    [Fact]
+    public void ReadDeadline_is_unbounded_when_no_positive_deadline()
+    {
+        ChatPostMessageNode.ReadDeadline(JsonDocument.Parse("""{ "mode": "first" }""").RootElement).Seconds.ShouldBeNull("no deadline key ⇒ unbounded");
+        ChatPostMessageNode.ReadDeadline(JsonDocument.Parse("""{ "deadlineSeconds": 0, "onTimeout": "x" }""").RootElement).Seconds.ShouldBeNull("a non-positive deadline ⇒ unbounded");
+        ChatPostMessageNode.ReadDeadline(default).Seconds.ShouldBeNull("no resolve config at all ⇒ unbounded");
+    }
+
+    [Fact]
+    public void ReadDeadline_errors_when_a_deadline_lacks_an_action()
+    {
+        var (seconds, onTimeout, error) = ChatPostMessageNode.ReadDeadline(JsonDocument.Parse("""{ "deadlineSeconds": 600 }""").RootElement);
+
+        seconds.ShouldBeNull();
+        onTimeout.ShouldBeNull();
+        error.ShouldNotBeNull();
+        error.ShouldContain("On timeout");
+    }
+
+    [Fact]
+    public async Task Suspends_with_a_deadline_and_timeout_payload_when_configured()
+    {
+        var bot = new StubChatBot();
+        var ctx = BuildContext("11111111-1111-1111-1111-111111111111", "Deploy?",
+            """[{"key":"approve","label":"Approve"},{"key":"reject","label":"Reject"}]""",
+            waitForResponse: true, resolveJson: """{ "mode": "first", "deadlineSeconds": 1800, "onTimeout": "reject" }""");
+
+        var result = await Node(bot).RunAsync(ctx, CancellationToken.None);
+
+        result.Status.ShouldBe(NodeStatus.Suspended);
+        result.SuspendUntil.ShouldNotBeNull();
+        result.SuspendUntil!.DeadlineAt.ShouldNotBeNull("a configured deadline parks a BOUNDED wait the engine auto-resolves");
+
+        var timeout = result.SuspendUntil.TimeoutPayload.ShouldNotBeNull();
+        timeout.GetProperty("action").GetString().ShouldBe("reject", "on timeout the wait resolves with the onTimeout action");
+        timeout.GetProperty("_timedOut").GetBoolean().ShouldBeTrue();
+        timeout.GetProperty("_messageId").GetString().ShouldBe("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", "carries the card id so the timeout-resume can stamp it resolved");
+    }
+
+    [Fact]
+    public async Task Fails_before_posting_when_a_deadline_has_no_timeout_action()
+    {
+        var bot = new StubChatBot();
+        var ctx = BuildContext("11111111-1111-1111-1111-111111111111", "Deploy?",
+            """[{"key":"approve","label":"Approve"}]""", waitForResponse: true, resolveJson: """{ "deadlineSeconds": 600 }""");
+
+        var result = await Node(bot).RunAsync(ctx, CancellationToken.None);
+
+        result.Status.ShouldBe(NodeStatus.Failure);
+        result.Error.ShouldContain("On timeout");
+        bot.Interaction.ShouldBeNull("the misconfig fails BEFORE posting — no orphan card left behind");
+    }
+
+    [Fact]
+    public async Task Keeps_an_unbounded_wait_when_no_deadline_is_configured()
+    {
+        var bot = new StubChatBot();
+        var ctx = BuildContext("11111111-1111-1111-1111-111111111111", "Review?",
+            """[{"key":"approve","label":"Approve"}]""", waitForResponse: true);
+
+        var result = await Node(bot).RunAsync(ctx, CancellationToken.None);
+
+        result.Status.ShouldBe(NodeStatus.Suspended);
+        result.SuspendUntil!.DeadlineAt.ShouldBeNull("no deadline config ⇒ wait indefinitely, the prior behaviour");
+        result.SuspendUntil.TimeoutPayload.ShouldBeNull();
+    }
+
+    [Fact]
+    public async Task Timed_out_resume_stamps_the_card_and_outputs_the_timeout_action()
+    {
+        var bot = new StubChatBot();
+        var interactions = new StubInteractions();
+        var decision = JsonDocument.Parse("""{ "action": "reject", "_timedOut": true, "_messageId": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa" }""").RootElement;
+
+        var result = await Node(bot, interactions).RunAsync(ContextFromInputs(new Dictionary<string, JsonElement>(), resumePayload: decision), CancellationToken.None);
+
+        result.Status.ShouldBe(NodeStatus.Success);
+        result.Outputs["action"].GetString().ShouldBe("reject", "the timeout resolves the wait with the onTimeout action");
+
+        interactions.TimedOut.ShouldNotBeNull("a timeout-resume mirrors the resolution onto the card so it stops showing live buttons");
+        interactions.TimedOut!.Value.MessageId.ShouldBe(Guid.Parse("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"));
+        interactions.TimedOut.Value.ResponseKey.ShouldBe("reject");
+    }
+
+    [Fact]
+    public async Task A_normal_click_resume_does_not_stamp_a_timeout()
+    {
+        var bot = new StubChatBot();
+        var interactions = new StubInteractions();
+        var decision = JsonDocument.Parse("""{ "action": "approve", "by": "u-1" }""").RootElement;
+
+        await Node(bot, interactions).RunAsync(ContextFromInputs(new Dictionary<string, JsonElement>(), resumePayload: decision), CancellationToken.None);
+
+        interactions.TimedOut.ShouldBeNull("a human click already stamps the card via the respond path — the node must not double-stamp");
     }
 
     private static NodeRunContext BuildContext(string? conversationId, string body, string? actionsJson, string? formJson = null, bool waitForResponse = false, string? resolveJson = null)

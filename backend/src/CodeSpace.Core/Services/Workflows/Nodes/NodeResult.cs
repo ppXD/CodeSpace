@@ -65,4 +65,20 @@ public sealed record SuspensionToken
     /// default for Timer / Approval / Callback). Ignored for Subworkflow, whose token is the child run id.
     /// </summary>
     public string? CorrelationToken { get; init; }
+
+    /// <summary>
+    /// Optional deadline for a BOUNDED wait. When set, the engine schedules a resume at this instant
+    /// that — if the wait is still pending — resolves it with <see cref="TimeoutPayload"/> (a person
+    /// never responded). Generic: any wait can be bounded; the node decides the default outcome. Null ⇒
+    /// the wait is unbounded (the prior behaviour). Independent of a Timer wait's own wake_at.
+    /// </summary>
+    public DateTimeOffset? DeadlineAt { get; init; }
+
+    /// <summary>
+    /// The resume payload injected as this node's <c>ResumePayload</c> when <see cref="DeadlineAt"/>
+    /// fires — i.e. the default decision on timeout (e.g. <c>{ action, by, _timedOut }</c>). Required
+    /// when <see cref="DeadlineAt"/> is set; ignored otherwise. The node reads it on the resumed pass
+    /// exactly like a human response.
+    /// </summary>
+    public JsonElement? TimeoutPayload { get; init; }
 }

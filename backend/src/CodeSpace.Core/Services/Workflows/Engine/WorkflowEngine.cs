@@ -1593,7 +1593,9 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
             ?? throw new NodeFailureException($"Node '{node.Id}' returned Suspended without a SuspensionToken.");
 
         var waitKind = ValidateWaitKind(node.Id, token.Kind);
-        var wakeAt = waitKind == WorkflowWaitKinds.Timer ? ReadWakeAt(token) : null;
+        // A Timer wait's wake_at IS its delay; any OTHER wait may carry a DeadlineAt (a bounded wait) —
+        // reuse the wake_at column so the row + run-detail surface "auto-wakes at X" uniformly.
+        var wakeAt = waitKind == WorkflowWaitKinds.Timer ? ReadWakeAt(token) : token.DeadlineAt;
 
         // Sub-workflow: stage the child run NOW (parent_run_id = this run); its id is the wait's
         // correlation token. The child is dispatched only AFTER the parent commits Suspended (see
@@ -1612,9 +1614,10 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
             .ToListAsync(cancellationToken).ConfigureAwait(false);
         if (existing.Count > 0) _db.WorkflowRunWait.RemoveRange(existing);
 
+        var waitId = Guid.NewGuid();
         _db.WorkflowRunWait.Add(new WorkflowRunWait
         {
-            Id = Guid.NewGuid(),
+            Id = waitId,
             RunId = run.Id,
             NodeId = node.Id,
             IterationKey = iterationKey,
@@ -1631,9 +1634,14 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
         await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
 
         // Timer waits self-wake: schedule the resume at wake_at. Approval / Callback waits are
-        // woken by an external signal (Phase 1.2), so nothing is scheduled here.
+        // woken by an external signal, so nothing is scheduled there. A BOUNDED wait (DeadlineAt +
+        // TimeoutPayload, e.g. an approval card with a deadline) self-wakes via ResumeByDeadlineAsync,
+        // which resolves ONLY this wait with the default-on-timeout payload if it's still pending —
+        // idempotent against a human resolving first.
         if (waitKind == WorkflowWaitKinds.Timer && wakeAt.HasValue)
             _backgroundJobClient.Schedule<IWorkflowResumeService>(s => s.ResumeAsync(run.Id, CancellationToken.None), wakeAt.Value);
+        else if (token.DeadlineAt.HasValue && token.TimeoutPayload is { ValueKind: not JsonValueKind.Undefined and not JsonValueKind.Null } timeoutPayload)
+            _backgroundJobClient.Schedule<IWorkflowResumeService>(s => s.ResumeByDeadlineAsync(waitId, timeoutPayload.GetRawText(), CancellationToken.None), token.DeadlineAt.Value);
     }
 
     internal static string ValidateWaitKind(string nodeId, string kind)

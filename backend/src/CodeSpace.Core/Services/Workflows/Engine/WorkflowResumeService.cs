@@ -52,6 +52,16 @@ public interface IWorkflowResumeService
     /// Action wait matches the token in that team (unknown / already resolved / cross-team) — caller maps to 404/409.
     /// </summary>
     Task<bool> ResumeByActionTokenAsync(string token, string actionKey, Guid actorUserId, string? comment, IReadOnlyDictionary<string, JsonElement>? values, Guid teamId, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Resume the run parked on wait <paramref name="waitId"/> because its DEADLINE passed with no
+    /// response — stamping <paramref name="timeoutPayloadJson"/> (the node's default-on-timeout decision)
+    /// as the resumed node's payload. Resolves ONLY that wait. No-ops when the wait is no longer Pending
+    /// (a human resolved it first), so the scheduled deadline job and a human click are mutually
+    /// idempotent (whoever flips the wait first wins; the other is a no-op). Invoked by the scheduled
+    /// background job the engine enqueues for a bounded wait.
+    /// </summary>
+    Task<bool> ResumeByDeadlineAsync(Guid waitId, string timeoutPayloadJson, CancellationToken cancellationToken);
 }
 
 public sealed class WorkflowResumeService : IWorkflowResumeService, IScopedDependency
@@ -163,5 +173,25 @@ public sealed class WorkflowResumeService : IWorkflowResumeService, IScopedDepen
 
         // Resolve ONLY this wait — a sibling card parked on the same run keeps waiting for its own click.
         return await ResumeCoreAsync(wait.RunId, payload, onlyWaitId: wait.Id, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<bool> ResumeByDeadlineAsync(Guid waitId, string timeoutPayloadJson, CancellationToken cancellationToken)
+    {
+        // Only fire if the wait is STILL pending — if a human already resolved it, this is a no-op (the
+        // common case where the deadline passes after someone responded). ResumeCoreAsync's run-flip gate
+        // is the final serialisation point against a click that lands in the same instant.
+        var runId = await _db.WorkflowRunWait.AsNoTracking()
+            .Where(w => w.Id == waitId && w.Status == WorkflowWaitStatuses.Pending)
+            .Select(w => (Guid?)w.RunId)
+            .FirstOrDefaultAsync(cancellationToken)
+            .ConfigureAwait(false);
+
+        if (runId is null)
+        {
+            _logger.LogDebug("Deadline resume: wait {WaitId} is no longer pending — skipping (already resolved)", waitId);
+            return false;
+        }
+
+        return await ResumeCoreAsync(runId.Value, timeoutPayloadJson, onlyWaitId: waitId, cancellationToken).ConfigureAwait(false);
     }
 }
