@@ -1289,6 +1289,7 @@ function NodeInspector({
                 manifest change — this component doesn't need to change. */}
             {manifest.typeKey === "chat.post_message" ? (
               <PostMessageInputsEditor
+                nodeId={nodeId}
                 inputs={inputs}
                 onChange={onInputsChange}
                 variableSuggestions={suggestions}
