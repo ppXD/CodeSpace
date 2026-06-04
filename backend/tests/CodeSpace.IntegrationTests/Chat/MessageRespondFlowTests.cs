@@ -244,6 +244,36 @@ public class MessageRespondFlowTests
     }
 
     [Fact]
+    public async Task A_resolving_click_on_a_card_whose_run_is_gone_expires_it_instead_of_erroring()
+    {
+        var (teamId, ownerId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var channelId = await SeedChannelAsync(teamId, ownerId);
+
+        // A card whose WorkflowWaitTarget token has NO pending wait — the run already ended or was abandoned
+        // (e.g. a worker crashed mid-suspend). First-policy, so this approve is a RESOLVING click.
+        var card = new MessageInteraction
+        {
+            Component = new ActionButtonsComponent { Buttons = new List<InteractionButton> { new() { Key = "approve", Label = "Approve" } } },
+            Target = new WorkflowWaitTarget { Token = "tok-orphan-no-pending-wait" },
+            AllowedResponderUserIds = new[] { ownerId },
+        };
+
+        Guid cardId;
+        using (var scope = _fixture.BeginScope())
+            cardId = (await scope.Resolve<IChatBotService>().PostAsBotAsync(channelId, "Review?", card, default)).Id;
+
+        // No wait to resume ⇒ must NOT throw "already handled" (which TransactionalBehavior would roll back,
+        // leaving the card stuck Open). It expires the card so it stops being clickable.
+        await RespondDirectAsync(teamId, cardId, "approve", ownerId);
+
+        using var verify = _fixture.BeginScope();
+        var db = verify.Resolve<CodeSpaceDbContext>();
+        var interaction = MessageInteractionJson.Deserialize((await db.Message.AsNoTracking().SingleAsync(m => m.Id == cardId)).InteractionJson)!;
+
+        interaction.State.ShouldBe(InteractionState.Expired, "a resolving click on a card whose run is gone expires it, not a misleading 'already handled'");
+    }
+
+    [Fact]
     public async Task A_veto_resolves_the_wait_immediately_even_under_a_quorum()
     {
         var (teamId, ownerId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
