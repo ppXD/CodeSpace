@@ -6,6 +6,7 @@ using CodeSpace.Core.Services.Providers.Resilience;
 using CodeSpace.Messages.Dtos.Providers;
 using CodeSpace.Messages.Enums;
 using CodeSpace.Messages.Events;
+using CodeSpace.Messages.Exceptions;
 using NGitLab;
 using NGitLab.Models;
 using GitLabMergeRequestState = NGitLab.Models.MergeRequestState;
@@ -487,23 +488,74 @@ public sealed class GitLabRepositoryProvider : IRepositoryCatalogCapability, IPu
 
     public async Task<RemotePullRequestReview> SubmitReviewAsync(ProviderContext context, RemoteRepository repository, int number, PullRequestReviewVerdict verdict, string? body, CancellationToken cancellationToken)
     {
-        var client = await BuildClientAsync(context, cancellationToken).ConfigureAwait(false);
+        var (client, host, token) = await BuildAuthedAsync(context, cancellationToken).ConfigureAwait(false);
+        var projectId = int.Parse(repository.ExternalId);
+        var action = GitLabReviewPlan.ActionFor(verdict);
+
+        // request_changes → retract any existing approval first. Raw call (NGitLab has no unapprove),
+        // made OUTSIDE the resilience wrapper: it throws ALREADY-classified provider exceptions, which
+        // the wrapper's duck-typed status-code mapper would otherwise double-wrap (and a 5xx re-retry).
+        if (action == GitLabApprovalAction.Unapprove)
+            await UnapproveAsync(host, token, projectId, number, cancellationToken).ConfigureAwait(false);
 
         return await _resilience.ExecuteAsync(context.Instance, nameof(SubmitReviewAsync), _ =>
         {
-            // GitLab has no native review verdict — post it as a labeled MR note (see GitLabReviewPlan).
-            var projectId = int.Parse(repository.ExternalId);
-            var note = GitLabReviewPlan.NoteFor(verdict, body);
-            var comment = client.GetMergeRequest(projectId).Comments(number).Add(new NGitLab.Models.MergeRequestCommentCreate { Body = note });
+            var mergeRequest = client.GetMergeRequest(projectId);
 
-            return Task.FromResult(new RemotePullRequestReview
-            {
-                Verdict = verdict,
-                ExternalId = comment.Id.ToString(),
-                WebUrl = null
-            });
+            // approve → native GitLab approval (green badge, counts toward required approvals).
+            if (action == GitLabApprovalAction.Approve)
+                mergeRequest.Approve(number, new MergeRequestApprove());
+
+            // Always post the verdict note — it carries the reasoning a native approve has no field for.
+            var comment = mergeRequest.Comments(number).Add(new MergeRequestCommentCreate { Body = GitLabReviewPlan.NoteFor(verdict, body) });
+
+            return Task.FromResult(new RemotePullRequestReview { Verdict = verdict, ExternalId = comment.Id.ToString(), WebUrl = null });
         }, cancellationToken).ConfigureAwait(false);
     }
+
+    /// <summary>
+    /// Retract this token's approval on an MR via <c>POST /api/v4/projects/:id/merge_requests/:iid/unapprove</c>.
+    /// NGitLab 11.7 wraps approve but NOT unapprove (only <c>ResetApprovals</c>, which nukes EVERYONE's
+    /// approvals — wrong semantic), so this mirrors the raw-HTTP pattern used by the scope probe.
+    /// </summary>
+    private async Task UnapproveAsync(string host, string token, int projectId, int iid, CancellationToken cancellationToken)
+    {
+        var url = $"{host.TrimEnd('/')}/api/v4/projects/{projectId}/merge_requests/{iid}/unapprove";
+
+        using var request = new HttpRequestMessage(HttpMethod.Post, url);
+        request.Headers.TryAddWithoutValidation("Authorization", $"Bearer {token}");
+        request.Headers.TryAddWithoutValidation("PRIVATE-TOKEN", token);
+
+        using var response = await _countsHttpClient.SendAsync(request, HttpCompletionOption.ResponseContentRead, cancellationToken).ConfigureAwait(false);
+        var responseBody = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
+
+        var failure = ClassifyUnapproveResponse((int)response.StatusCode, responseBody);
+        if (failure != null) throw failure;
+    }
+
+    /// <summary>
+    /// Pure classification of a raw <c>/unapprove</c> response. Returns null when the desired end-state
+    /// already holds — 2xx (retracted) or 404 (this token hadn't approved → idempotent no-op); otherwise
+    /// the typed exception to throw, classified the SAME way <c>ExternalCallResilience</c> classifies an
+    /// NGitLab failure: a 403 tagged <c>insufficient_scope</c> → scope gap, every other 4xx/5xx →
+    /// <see cref="ProviderApiException"/> carrying the status (so the node renders an accurate message).
+    /// </summary>
+    internal static Exception? ClassifyUnapproveResponse(int statusCode, string body)
+    {
+        if (statusCode is (>= 200 and < 300) or 404) return null;
+
+        const string operation = nameof(SubmitReviewAsync) + "/unapprove";
+
+        var scopeGap = _unapproveScopeClassifier.ClassifyScope(statusCode, body, body, operation);
+        if (scopeGap != null) return scopeGap;
+
+        var detail = string.IsNullOrWhiteSpace(body) ? "unapprove failed" : body;
+        return new ProviderApiException(ProviderKind.GitLab, statusCode, operation, detail, new HttpRequestException($"GitLab unapprove returned HTTP {statusCode}"));
+    }
+
+    // Stateless pure classifier, reused for the raw /unapprove path — the resilience wrapper only maps
+    // NGitLab's own exception type, which a raw HttpClient call never throws.
+    private static readonly GitLabErrorMapper _unapproveScopeClassifier = new();
 
     private static RemotePullRequestCheck ToRemoteCheck(NGitLab.Models.Job job)
     {
@@ -823,11 +875,16 @@ public sealed class GitLabRepositoryProvider : IRepositoryCatalogCapability, IPu
     public NormalizedEvent? Normalize(Guid repositoryId, string body, IReadOnlyDictionary<string, string> headers) => _eventNormalizer.Normalize(repositoryId, body, headers);
 
     private async Task<GitLabClient> BuildClientAsync(ProviderContext context, CancellationToken cancellationToken)
+        => (await BuildAuthedAsync(context, cancellationToken).ConfigureAwait(false)).Client;
+
+    // Like BuildClientAsync but also surfaces the host + token for the raw /unapprove call NGitLab
+    // doesn't wrap. One auth resolve serves both (no double round-trip).
+    private async Task<(GitLabClient Client, string Host, string Token)> BuildAuthedAsync(ProviderContext context, CancellationToken cancellationToken)
     {
         var auth = await _authResolver.ResolveAsync(context, cancellationToken).ConfigureAwait(false);
         var host = string.IsNullOrWhiteSpace(context.Instance.ApiUrl) ? context.Instance.BaseUrl : context.Instance.ApiUrl;
 
-        return new GitLabClient(host, auth.Token);
+        return (new GitLabClient(host, auth.Token), host, auth.Token);
     }
 
     private static RemoteRepository ToRemoteRepository(Project project) => new()
