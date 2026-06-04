@@ -2276,15 +2276,18 @@ textarea:-webkit-autofill {
 .acs-root .wf-inspector-h-type { font-size: 11.5px; color: var(--ink-2); }
 .acs-root .wf-inspector-h-key  { font-size: 10.5px; color: var(--muted); font-family: inherit; }
 
-.acs-root .wf-inspector-section { padding: 14px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel); overflow: hidden; }
+.acs-root .wf-inspector-section { padding: 14px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel); }
 .acs-root .wf-inspector-section-h {
   font-size: 11px; font-weight: 700; color: var(--ink-2);
   text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 12px;
 }
 
 /* Collapsible variant: the header IS the toggle button. Body renders conditionally.
- * Padding shifts to the toggle so the click target spans the full row. */
-.acs-root .wf-inspector-section-collapsible { padding: 0; }
+ * Padding shifts to the toggle so the click target spans the full row. overflow:hidden is SAFE here
+ * (the body is a static outputs list with no popovers) and keeps the toggle's hover fill inside the
+ * card's rounded corners — the plain sections above must NOT clip, or their @-picker / selector dropdowns
+ * and focus rings get cut off. */
+.acs-root .wf-inspector-section-collapsible { padding: 0; overflow: hidden; }
 .acs-root .wf-inspector-section-collapsible[data-open="true"] { padding-bottom: 14px; }
 .acs-root .wf-inspector-section-toggle {
   display: flex; align-items: center; gap: 6px;
