@@ -1,5 +1,6 @@
 using System.Text.Json;
 using CodeSpace.Core.DependencyInjection;
+using CodeSpace.Core.Middlewares.Transactional;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Workflows.Dispatch;
@@ -31,9 +32,10 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
     private readonly IRunStarter _runStarter;
     private readonly IWorkflowRunDispatcher _runDispatcher;
     private readonly Engine.IWorkflowResumeService _resumeService;
+    private readonly IPostCommitActions _postCommit;
     private readonly ILogger<WorkflowService> _logger;
 
-    public WorkflowService(CodeSpaceDbContext db, DefinitionValidator validator, INodeRegistry nodeRegistry, Lifecycle.IRunRecordLogger recordLogger, IRunStarter runStarter, IWorkflowRunDispatcher runDispatcher, Engine.IWorkflowResumeService resumeService, ILogger<WorkflowService> logger)
+    public WorkflowService(CodeSpaceDbContext db, DefinitionValidator validator, INodeRegistry nodeRegistry, Lifecycle.IRunRecordLogger recordLogger, IRunStarter runStarter, IWorkflowRunDispatcher runDispatcher, Engine.IWorkflowResumeService resumeService, IPostCommitActions postCommit, ILogger<WorkflowService> logger)
     {
         _db = db;
         _validator = validator;
@@ -42,6 +44,7 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
         _runStarter = runStarter;
         _runDispatcher = runDispatcher;
         _resumeService = resumeService;
+        _postCommit = postCommit;
         _logger = logger;
     }
 
@@ -242,14 +245,12 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
 
         await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
 
-        // PostBoy-style dispatch: after the workflow_run row commits in Pending state,
-        // atomically transition Pending→Enqueued + hand to the background-job client. Throws
-        // if Enqueue fails AND reverts the row; the stuck-run reconciler retries. Out-of-band
-        // failure (process dies between SaveChanges + DispatchAsync) leaves the row in Pending
-        // → reconciler picks up on its next tick. No double-execution: the CAS at
-        // Pending→Enqueued AND the engine's CAS at Enqueued→Running both reject any duplicate
-        // dispatch attempts.
-        await _runDispatcher.DispatchAsync(runId, cancellationToken).ConfigureAwait(false);
+        // Dispatch AFTER the command's transaction commits — RunAfterCommitAsync defers into the
+        // post-commit drain while a transaction is open (the ICommand path here), so a Hangfire worker
+        // can't fetch the job before the workflow_run row is visible (which would CAS-no-op and leave
+        // the run stuck until the reconciler). The Pending→Enqueued CAS + the engine's Enqueued→Running
+        // CAS still reject any duplicate; the reconciler backstops a dropped dispatch.
+        await _postCommit.RunAfterCommitAsync(ct => _runDispatcher.DispatchAsync(runId, ct), cancellationToken).ConfigureAwait(false);
 
         _logger.LogInformation(
             "Workflow manual run queued. WorkflowId={WorkflowId} TeamId={TeamId} RunId={RunId} Version={Version} PayloadSize={PayloadSize}",
@@ -314,10 +315,11 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
 
         await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
 
-        // PostBoy-style dispatch (same as RunManuallyAsync). Atomic Pending→Enqueued CAS +
-        // background-job client enqueue. Reconciler picks up if out-of-band failure leaves
-        // the row in Pending.
-        await _runDispatcher.DispatchAsync(replayRunId, cancellationToken).ConfigureAwait(false);
+        // Dispatch after commit (same as RunManuallyAsync). ReplayRunCommand is currently a non-
+        // transactional IRequest, so RunAfterCommitAsync runs inline (the SaveChanges above already
+        // auto-committed) — unchanged behavior today, and automatically post-commit-safe if replay is
+        // ever folded into the transactional ICommand pipeline. Reconciler backstops a dropped dispatch.
+        await _postCommit.RunAfterCommitAsync(ct => _runDispatcher.DispatchAsync(replayRunId, ct), cancellationToken).ConfigureAwait(false);
 
         _logger.LogInformation(
             "Workflow run replay queued. OriginalRunId={Original} ReplayRunId={Replay} WorkflowId={Workflow} TeamId={Team} SnapshotCount={SnapshotCount}",
