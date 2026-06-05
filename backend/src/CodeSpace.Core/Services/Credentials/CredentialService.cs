@@ -136,13 +136,24 @@ public sealed class CredentialService : ICredentialService, IScopedDependency
 
     public async Task<Guid> AddAsync(AddCredentialInput input, CancellationToken cancellationToken)
     {
+        var teamId = _currentTeam.Id!.Value;
+
+        // Tenant invariant: the target provider instance MUST belong to the caller's team. The command
+        // only gates team MEMBERSHIP (IRequireTeamMembership), not the instance — so without this a team
+        // member could attach a credential to ANOTHER team's instance by passing a foreign
+        // ProviderInstanceId, leaving a credential whose ProviderInstance navigation crosses the tenant
+        // boundary (a confused-deputy seam: the platform would pair that instance's host + OAuth client
+        // with this team's token). Conflate not-found with not-in-team — a 404 leaks nothing about
+        // another team's instances.
+        await EnsureProviderInstanceInTeamAsync(input.ProviderInstanceId, teamId, cancellationToken).ConfigureAwait(false);
+
         var json = _serializer.Serialize(input.Payload);
         var encrypted = _encryptor.Encrypt(json);
 
         var credential = new Credential
         {
             Id = Guid.NewGuid(),
-            TeamId = _currentTeam.Id!.Value,
+            TeamId = teamId,
             ProviderInstanceId = input.ProviderInstanceId,
             // A team-service credential belongs to the team, not a person — never carry an owner.
             OwnerUserId = input.Ownership == CredentialOwnership.TeamService ? null : input.OwnerUserId,
@@ -206,6 +217,14 @@ public sealed class CredentialService : ICredentialService, IScopedDependency
         var clampedPerPage = Math.Clamp(perPage, 1, ListAccessibleRepositoriesQuery.MaxPerPage);
 
         return await catalog.PagedListAccessibleAsync(context, search, clampedPage, clampedPerPage, cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task EnsureProviderInstanceInTeamAsync(Guid providerInstanceId, Guid teamId, CancellationToken cancellationToken)
+    {
+        var inTeam = await _db.ProviderInstance.AsNoTracking()
+            .AnyAsync(p => p.Id == providerInstanceId && p.TeamId == teamId && p.DeletedDate == null, cancellationToken).ConfigureAwait(false);
+
+        if (!inTeam) throw new KeyNotFoundException($"Provider instance {providerInstanceId} not found.");
     }
 
     private async Task<Credential> LoadCredentialAsync(Guid id, CancellationToken cancellationToken) =>
