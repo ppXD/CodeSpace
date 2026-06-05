@@ -78,6 +78,7 @@ public sealed class RepositoryBindingService : IRepositoryBindingService, IScope
 
         ctx = await LoadProviderInstanceAsync(ctx, cancellationToken).ConfigureAwait(false);
         ctx = await LoadCredentialAsync(ctx, cancellationToken).ConfigureAwait(false);
+        EnsureCredentialMatchesInstance(ctx);
         ctx = ResolveProvider(ctx);
         EnsureCredentialCoversBindCapabilities(ctx);   // pre-flight scope check — fail fast before any wire call
         await EnsureCredentialIsValidAsync(ctx, cancellationToken).ConfigureAwait(false);
@@ -210,6 +211,19 @@ public sealed class RepositoryBindingService : IRepositoryBindingService, IScope
             ?? throw new InvalidOperationException($"Credential {ctx.Request.CredentialId} not found in team {ctx.Request.TeamId}");
 
         return ctx with { Credential = credential };
+    }
+
+    /// <summary>
+    /// The chosen credential must belong to the SAME provider instance we're binding against. Both are
+    /// already team-scoped (LoadProviderInstance / LoadCredential), but within one team a caller can still
+    /// pair instance A1 with a credential of instance A2 — the token would then talk to the wrong host and
+    /// every API call would 401/404 mid-bind. Mirrors RepositoryService's relink-side
+    /// EnsureSameProviderInstance so bind and relink enforce the identical invariant.
+    /// </summary>
+    private static void EnsureCredentialMatchesInstance(BindContext ctx)
+    {
+        if (ctx.Credential.ProviderInstanceId != ctx.Instance.Id)
+            throw new InvalidOperationException($"Credential '{ctx.Credential.DisplayName}' is for a different provider instance. Pick a credential connected to the same provider instance you're binding.");
     }
 
     private BindContext ResolveProvider(BindContext ctx)
