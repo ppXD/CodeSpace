@@ -95,7 +95,7 @@ public class ChatPostMessageFlowTests
         // A click resolves exactly this card's wait; re-dispatching drives the node's resumed pass.
         using (var scope = _fixture.BeginScope())
             (await scope.Resolve<IWorkflowResumeService>()
-                .ResumeByActionTokenAsync(token, "approve", ownerId, "lgtm", values: null, teamId, CancellationToken.None)).ShouldBeTrue();
+                .ResumeByActionTokenAsync(token, "approve", ownerId, "lgtm", values: null, teamId, CancellationToken.None)).ShouldBe(ActionResumeResult.Resumed);
 
         await RunEngineAsync(runId);
 

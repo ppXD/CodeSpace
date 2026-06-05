@@ -49,11 +49,11 @@ public class WaitActionFlowTests
             wait.WakeAt.ShouldBeNull("an action wait has no timer — it wakes only on the click");
         }
 
-        bool resumed;
+        ActionResumeResult resumed;
         using (var scope = _fixture.BeginScope())
             resumed = await scope.Resolve<IWorkflowResumeService>()
                 .ResumeByActionTokenAsync("card-token-1", "approve", userId, "lgtm", values: null, teamId, CancellationToken.None);
-        resumed.ShouldBeTrue();
+        resumed.ShouldBe(ActionResumeResult.Resumed);
 
         await RunEngineAsync(runId);
 

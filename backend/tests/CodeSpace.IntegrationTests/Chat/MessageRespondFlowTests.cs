@@ -401,6 +401,113 @@ public class MessageRespondFlowTests
         }
     }
 
+    [Fact]
+    public async Task Two_parallel_clicks_with_different_keys_resolve_consistently_with_no_divergence()
+    {
+        var (teamId, ownerId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var channelId = await SeedChannelAsync(teamId, ownerId);
+        var member2 = await SeedUserAsync();
+        using (var scope = _fixture.BeginScope())
+            await scope.Resolve<IConversationService>().AddMemberAsync(teamId, ownerId, channelId, member2, default);
+
+        var (runId, token) = await SeedParkedRunAsync(teamId, ownerId);
+
+        // First-mode card (default): the FIRST decisive click resolves it. Two members click DIFFERENT keys
+        // at the same instant — the classic lost-update race the FOR UPDATE lock must serialize.
+        var card = new MessageInteraction
+        {
+            Component = new ActionButtonsComponent { Buttons = new List<InteractionButton> { new() { Key = "approve", Label = "Approve" }, new() { Key = "reject", Label = "Reject" } } },
+            Target = new WorkflowWaitTarget { Token = token },
+            AllowedResponderUserIds = new[] { ownerId, member2 },
+        };
+        Guid cardId;
+        using (var scope = _fixture.BeginScope())
+            cardId = (await scope.Resolve<IChatBotService>().PostAsBotAsync(channelId, "Review?", card, default)).Id;
+
+        // Fire both concurrently.
+        var results = await Task.WhenAll(
+            TryRespondViaMediatorAsync(ownerId, teamId, cardId, "approve"),
+            TryRespondViaMediatorAsync(member2, teamId, cardId, "reject"));
+
+        results.Count(ok => ok).ShouldBe(1, "exactly one click wins; the other is rejected because the card is already resolved");
+
+        using var verify = _fixture.BeginScope();
+        var db = verify.Resolve<CodeSpaceDbContext>();
+        var interaction = MessageInteractionJson.Deserialize((await db.Message.AsNoTracking().SingleAsync(m => m.Id == cardId)).InteractionJson)!;
+        interaction.State.ShouldBe(InteractionState.Resolved);
+
+        var wait = await db.WorkflowRunWait.AsNoTracking().SingleAsync(w => w.RunId == runId);
+        wait.Status.ShouldBe(WorkflowWaitStatuses.Resolved);
+        var workflowDecision = JsonDocument.Parse(wait.PayloadJson!).RootElement.GetProperty("action").GetString();
+
+        // THE invariant: the card's displayed resolution equals the decision the workflow actually took.
+        workflowDecision.ShouldBeOneOf("approve", "reject");
+        interaction.Resolution!.ResponseKey.ShouldBe(workflowDecision, "the card's resolution must never diverge from the workflow's decision");
+    }
+
+    [Fact]
+    public async Task Two_parallel_quorum_votes_are_both_recorded_with_no_lost_update()
+    {
+        var (teamId, ownerId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var channelId = await SeedChannelAsync(teamId, ownerId);
+        var member2 = await SeedUserAsync();
+        using (var scope = _fixture.BeginScope())
+            await scope.Resolve<IConversationService>().AddMemberAsync(teamId, ownerId, channelId, member2, default);
+
+        var (runId, token) = await SeedParkedRunAsync(teamId, ownerId);
+        var cardId = await PostQuorumCardAsync(channelId, token, count: 2);
+
+        // Two distinct approvals at the same instant. Without the row lock, both read Responses=[] and the
+        // last writer clobbers the other → the 2-quorum would never count two votes.
+        await Task.WhenAll(
+            TryRespondViaMediatorAsync(ownerId, teamId, cardId, "approve"),
+            TryRespondViaMediatorAsync(member2, teamId, cardId, "approve"));
+
+        using var verify = _fixture.BeginScope();
+        var db = verify.Resolve<CodeSpaceDbContext>();
+        var interaction = MessageInteractionJson.Deserialize((await db.Message.AsNoTracking().SingleAsync(m => m.Id == cardId)).InteractionJson)!;
+
+        interaction.Responses.Count(r => r.Kind == InteractionResponseKind.Action).ShouldBe(2, "both votes are recorded — neither clobbered the other");
+        interaction.State.ShouldBe(InteractionState.Resolved, "two distinct approvals reach the 2-quorum");
+        (await db.WorkflowRunWait.AsNoTracking().SingleAsync(w => w.RunId == runId)).Status.ShouldBe(WorkflowWaitStatuses.Resolved);
+    }
+
+    [Fact]
+    public async Task A_click_after_the_wait_was_already_resolved_is_rejected_and_does_not_stamp_the_card()
+    {
+        var (teamId, ownerId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var channelId = await SeedChannelAsync(teamId, ownerId);
+        var (runId, token) = await SeedParkedRunAsync(teamId, ownerId);
+
+        // Simulate a deadline (or another path) having ALREADY resolved the wait — the workflow's decision is set.
+        // Distinct from an orphan card with no wait at all (which still records the click): here a wait exists
+        // but is no longer Pending, so recording the click would make the card contradict the workflow.
+        using (var scope = _fixture.BeginScope())
+        {
+            var db = scope.Resolve<CodeSpaceDbContext>();
+            (await db.WorkflowRunWait.SingleAsync(w => w.RunId == runId)).Status = WorkflowWaitStatuses.Resolved;
+            await db.SaveChangesAsync();
+        }
+
+        var card = new MessageInteraction
+        {
+            Component = new ActionButtonsComponent { Buttons = new List<InteractionButton> { new() { Key = "approve", Label = "Approve" } } },
+            Target = new WorkflowWaitTarget { Token = token },
+            AllowedResponderUserIds = new[] { ownerId },
+        };
+        Guid cardId;
+        using (var scope = _fixture.BeginScope())
+            cardId = (await scope.Resolve<IChatBotService>().PostAsBotAsync(channelId, "Review?", card, default)).Id;
+
+        await Should.ThrowAsync<InvalidOperationException>(() => RespondViaMediatorAsync(ownerId, teamId, cardId, "approve"));
+
+        using var verify = _fixture.BeginScope();
+        var interaction = MessageInteractionJson.Deserialize(
+            (await verify.Resolve<CodeSpaceDbContext>().Message.AsNoTracking().SingleAsync(m => m.Id == cardId)).InteractionJson)!;
+        interaction.State.ShouldBe(InteractionState.Open, "the late click is rejected — the card is NOT stamped with a decision that would diverge from the workflow");
+        interaction.Resolution.ShouldBeNull();
+    }
+
     // ─── Helpers ────────────────────────────────────────────────────────────────
 
     private async Task<Guid> SeedChannelAsync(Guid teamId, Guid ownerId)
@@ -414,6 +521,23 @@ public class MessageRespondFlowTests
     {
         using var scope = _fixture.BeginScopeAs(userId, teamId, Roles.Admin);
         await scope.Resolve<IMediator>().Send(new RespondToMessageCommand { MessageId = messageId, ResponseKey = responseKey, Comment = comment, Values = values });
+    }
+
+    /// <summary>Respond through the real command in its own scope (its own transaction), returning true if it
+    /// succeeded and false if it was rejected (the loser of a concurrent race — card already resolved / closed).
+    /// Used to drive two clicks at once and assert exactly one wins.</summary>
+    private async Task<bool> TryRespondViaMediatorAsync(Guid userId, Guid teamId, Guid messageId, string responseKey)
+    {
+        try
+        {
+            using var scope = _fixture.BeginScopeAs(userId, teamId, Roles.Admin);
+            await scope.Resolve<IMediator>().Send(new RespondToMessageCommand { MessageId = messageId, ResponseKey = responseKey });
+            return true;
+        }
+        catch (InvalidOperationException)
+        {
+            return false;
+        }
     }
 
     private async Task RespondDirectShouldThrow<TException>(Guid teamId, Guid messageId, string responseKey, Guid actorUserId) where TException : Exception
