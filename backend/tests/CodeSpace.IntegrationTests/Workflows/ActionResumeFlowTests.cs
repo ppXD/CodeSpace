@@ -43,12 +43,12 @@ public class ActionResumeFlowTests
         var token = Guid.NewGuid().ToString("N");
         await ParkOnWaitAsync(runId, WorkflowWaitKinds.Action, token);
 
-        bool resumed;
+        ActionResumeResult resumed;
         using (var scope = _fixture.BeginScope())
             resumed = await scope.Resolve<IWorkflowResumeService>()
                 .ResumeByActionTokenAsync(token, "approve", userId, "looks good", values: null, teamId, CancellationToken.None);
 
-        resumed.ShouldBeTrue();
+        resumed.ShouldBe(ActionResumeResult.Resumed);
 
         using var verify = _fixture.BeginScope();
         var db = verify.Resolve<CodeSpaceDbContext>();
@@ -73,7 +73,7 @@ public class ActionResumeFlowTests
         var resumed = await scope.Resolve<IWorkflowResumeService>()
             .ResumeByActionTokenAsync("deadbeefdeadbeefdeadbeefdeadbeef", "approve", Guid.NewGuid(), null, values: null, Guid.NewGuid(), CancellationToken.None);
 
-        resumed.ShouldBeFalse("an unknown / already-used token matches no pending action wait → 404 at the controller");
+        resumed.ShouldBe(ActionResumeResult.NoWait, "an unknown token matches no action wait at all — distinct from a wait that exists but is already resolved");
     }
 
     [Fact]
@@ -86,12 +86,12 @@ public class ActionResumeFlowTests
         var token = Guid.NewGuid().ToString("N");
         await ParkOnWaitAsync(runId, WorkflowWaitKinds.Callback, token);
 
-        bool resumed;
+        ActionResumeResult resumed;
         using (var scope = _fixture.BeginScope())
             resumed = await scope.Resolve<IWorkflowResumeService>()
                 .ResumeByActionTokenAsync(token, "approve", userId, null, values: null, teamId, CancellationToken.None);
 
-        resumed.ShouldBeFalse("the lookup is kind-scoped — an action resume must not hijack a Callback wait");
+        resumed.ShouldBe(ActionResumeResult.NoWait, "the lookup is kind-scoped — an action resume finds no ACTION wait (only a Callback shares the token), so it must not hijack it");
 
         using var verify = _fixture.BeginScope();
         var db = verify.Resolve<CodeSpaceDbContext>();
@@ -115,7 +115,7 @@ public class ActionResumeFlowTests
 
         using (var scope = _fixture.BeginScope())
             (await scope.Resolve<IWorkflowResumeService>()
-                .ResumeByActionTokenAsync("tok-A", "approve", userId, null, values: null, teamId, CancellationToken.None)).ShouldBeTrue();
+                .ResumeByActionTokenAsync("tok-A", "approve", userId, null, values: null, teamId, CancellationToken.None)).ShouldBe(ActionResumeResult.Resumed);
 
         using var verify = _fixture.BeginScope();
         var db = verify.Resolve<CodeSpaceDbContext>();
@@ -133,12 +133,12 @@ public class ActionResumeFlowTests
         var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
         await ParkOnWaitAsync(runId, WorkflowWaitKinds.Action, "tok-X");
 
-        bool resumed;
+        ActionResumeResult resumed;
         using (var scope = _fixture.BeginScope())
             resumed = await scope.Resolve<IWorkflowResumeService>()
                 .ResumeByActionTokenAsync("tok-X", "approve", userId, null, values: null, Guid.NewGuid(), CancellationToken.None);
 
-        resumed.ShouldBeFalse("a card may only resolve a wait whose run is in the caller's team (tenancy guard)");
+        resumed.ShouldBe(ActionResumeResult.NoWait, "a card may only resolve a wait whose run is in the caller's team — a cross-team token matches no wait here (tenancy guard)");
         using var verify = _fixture.BeginScope();
         (await verify.Resolve<CodeSpaceDbContext>().WorkflowRunWait.AsNoTracking().SingleAsync(w => w.RunId == runId)).Status
             .ShouldBe(WorkflowWaitStatuses.Pending);

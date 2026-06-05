@@ -92,13 +92,22 @@ public sealed class MessageInteractionService : IMessageInteractionService, ISco
             return;
         }
 
-        // Policy satisfied (first / quorum reached / veto) — this click is the tipping vote. A card is a
-        // living thread DECOUPLED from any run (card-open ≠ run-suspended), so the decision is recorded
-        // regardless of whether a run is parked. If a run IS waiting on this token, resume it; a
-        // post-and-continue card (waitForResponse off, no downstream flow.wait_action) or a run that already
-        // ended simply has no wait — that's a no-op, NOT an error and NOT an expiry. (The identity gate inside
-        // the resume still throws 428/403 when a downstream node would act as the responder — unchanged.)
-        await ResolveTargetAsync(interaction.Target, responseKey, actorUserId, comment, values, teamId, cancellationToken).ConfigureAwait(false);
+        // Policy satisfied (first / quorum reached / veto) — this click is the tipping vote. Route the
+        // decision to the wait; the outcome decides whether we stamp THIS decision on the card:
+        //   • Resumed         — this click resolved the wait + re-dispatched the run → record it.
+        //   • NoWait          — no parked wait (a post-and-continue card, or a run that already ended): the
+        //                       card is a living thread decoupled from any run, so still record it — NOT an
+        //                       error and NOT an expiry.
+        //   • AlreadyResolved — a deadline timed out, or another responder already decided. The workflow's
+        //                       decision is set; stamping this (late) one would make the card contradict the
+        //                       workflow, so reject the click. (Concurrent humans are already serialized by
+        //                       the FOR UPDATE lock in LoadMessageAsync + EnsureOpen, so this is the deadline /
+        //                       cross-path case.)
+        // (The identity gate inside the resume still throws 428/403 when a downstream node would act as the
+        // responder — unchanged.)
+        var outcome = await ResolveTargetAsync(interaction.Target, responseKey, actorUserId, comment, values, teamId, cancellationToken).ConfigureAwait(false);
+
+        if (outcome == ActionResumeResult.AlreadyResolved) throw new InvalidOperationException("This interaction was already resolved.");
 
         message.InteractionJson = MessageInteractionJson.Serialize(withVote with
         {
@@ -133,11 +142,22 @@ public sealed class MessageInteractionService : IMessageInteractionService, ISco
 
     // ─── Load ────────────────────────────────────────────────────────────────────
 
-    private async Task<Message> LoadMessageAsync(Guid teamId, Guid messageId, CancellationToken cancellationToken) =>
-        await _db.Message
+    private async Task<Message> LoadMessageAsync(Guid teamId, Guid messageId, CancellationToken cancellationToken)
+    {
+        // Lock the row FOR UPDATE so concurrent responders to the same card serialize: the second waits
+        // until the first commits, then re-reads the just-written interaction (and EnsureOpen rejects it if
+        // the first already resolved). The lock holds for the ambient command transaction
+        // (RespondToMessageCommand is an ICommand). Without it, two clicks read the same baseline and the
+        // last writer clobbers the other — a dropped quorum vote, or a card resolution that disagrees with
+        // the workflow decision. With no ambient transaction (e.g. a direct service call in a test) this is
+        // a harmless no-op SELECT.
+        await _db.Database.ExecuteSqlInterpolatedAsync($"SELECT 1 FROM message WHERE id = {messageId} AND team_id = {teamId} AND deleted_date IS NULL FOR UPDATE", cancellationToken).ConfigureAwait(false);
+
+        return await _db.Message
             .SingleOrDefaultAsync(m => m.Id == messageId && m.TeamId == teamId && m.DeletedDate == null, cancellationToken)
             .ConfigureAwait(false)
             ?? throw new KeyNotFoundException($"Message {messageId} not found.");
+    }
 
     // ─── Validation ──────────────────────────────────────────────────────────────
 
@@ -177,7 +197,7 @@ public sealed class MessageInteractionService : IMessageInteractionService, ISco
 
     // ─── Dispatch (route the response to the interaction's target) ──────────────────
 
-    private async Task<bool> ResolveTargetAsync(InteractionTarget target, string responseKey, Guid actorUserId, string? comment, IReadOnlyDictionary<string, JsonElement>? values, Guid teamId, CancellationToken cancellationToken) =>
+    private async Task<ActionResumeResult> ResolveTargetAsync(InteractionTarget target, string responseKey, Guid actorUserId, string? comment, IReadOnlyDictionary<string, JsonElement>? values, Guid teamId, CancellationToken cancellationToken) =>
         target switch
         {
             WorkflowWaitTarget wait => await _resume.ResumeByActionTokenAsync(wait.Token, responseKey, actorUserId, comment, values, teamId, cancellationToken).ConfigureAwait(false),

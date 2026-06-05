@@ -1,5 +1,6 @@
 using System.Text.Json;
 using CodeSpace.Core.DependencyInjection;
+using CodeSpace.Core.Middlewares.Transactional;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Services.Workflows.Dispatch;
 using CodeSpace.Messages.Constants;
@@ -47,11 +48,13 @@ public interface IWorkflowResumeService
     /// so two parallel cards resolve independently with their own decision), stamping a structured
     /// <c>{ action, by, comment, values? }</c> payload (surfaced as the suspended node's outputs).
     /// <paramref name="values"/> carries a form submission's field values (null for a button click).
-    /// Scoped to <paramref name="teamId"/>: the wait's run must belong to that team, or it no-ops (tenancy
-    /// guard). <paramref name="actorUserId"/> is the authenticated responder. Returns false when no pending
-    /// Action wait matches the token in that team (unknown / already resolved / cross-team) — caller maps to 404/409.
+    /// Scoped to <paramref name="teamId"/>: the wait's run must belong to that team (tenancy guard).
+    /// <paramref name="actorUserId"/> is the authenticated responder. Returns an <see cref="ActionResumeResult"/>
+    /// so the caller can tell a decision it should RECORD (<see cref="ActionResumeResult.Resumed"/> /
+    /// <see cref="ActionResumeResult.NoWait"/>) from one it must REJECT
+    /// (<see cref="ActionResumeResult.AlreadyResolved"/> — a deadline or another responder already decided).
     /// </summary>
-    Task<bool> ResumeByActionTokenAsync(string token, string actionKey, Guid actorUserId, string? comment, IReadOnlyDictionary<string, JsonElement>? values, Guid teamId, CancellationToken cancellationToken);
+    Task<ActionResumeResult> ResumeByActionTokenAsync(string token, string actionKey, Guid actorUserId, string? comment, IReadOnlyDictionary<string, JsonElement>? values, Guid teamId, CancellationToken cancellationToken);
 
     /// <summary>
     /// Resume the run parked on wait <paramref name="waitId"/> because its DEADLINE passed with no
@@ -69,13 +72,15 @@ public sealed class WorkflowResumeService : IWorkflowResumeService, IScopedDepen
     private readonly CodeSpaceDbContext _db;
     private readonly IWorkflowRunDispatcher _dispatcher;
     private readonly IActorIdentityRequirementGate _identityGate;
+    private readonly IPostCommitActions _postCommit;
     private readonly ILogger<WorkflowResumeService> _logger;
 
-    public WorkflowResumeService(CodeSpaceDbContext db, IWorkflowRunDispatcher dispatcher, IActorIdentityRequirementGate identityGate, ILogger<WorkflowResumeService> logger)
+    public WorkflowResumeService(CodeSpaceDbContext db, IWorkflowRunDispatcher dispatcher, IActorIdentityRequirementGate identityGate, IPostCommitActions postCommit, ILogger<WorkflowResumeService> logger)
     {
         _db = db;
         _dispatcher = dispatcher;
         _identityGate = identityGate;
+        _postCommit = postCommit;
         _logger = logger;
     }
 
@@ -117,9 +122,13 @@ public sealed class WorkflowResumeService : IWorkflowResumeService, IScopedDepen
                 .SetProperty(w => w.ResolvedAt, (DateTimeOffset?)now), cancellationToken)
             .ConfigureAwait(false);
 
-        // Re-dispatch via the existing Pending -> Enqueued -> engine path. The walker rehydrates
-        // and continues from the suspended node.
-        await _dispatcher.DispatchAsync(runId, cancellationToken).ConfigureAwait(false);
+        // Re-dispatch via the existing Pending -> Enqueued -> engine path, deferred until AFTER this
+        // resume's transaction commits. RunAfterCommitAsync runs inline when there's no ambient
+        // transaction (a timer / callback / deadline resume), but DEFERS when one is open (a human
+        // respond folded into the RespondToMessageCommand transaction) — otherwise a worker could fetch
+        // the job before the Suspended->Pending flip is visible and CAS-no-op it into a stuck wait.
+        // The walker rehydrates and continues from the suspended node.
+        await _postCommit.RunAfterCommitAsync(ct => _dispatcher.DispatchAsync(runId, ct), cancellationToken).ConfigureAwait(false);
 
         _logger.LogInformation("Resume: run {RunId} resumed (Suspended -> Pending -> dispatched)", runId);
         return true;
@@ -141,22 +150,30 @@ public sealed class WorkflowResumeService : IWorkflowResumeService, IScopedDepen
         return await ResumeCoreAsync(wait.RunId, bodyJson, onlyWaitId: null, cancellationToken).ConfigureAwait(false);
     }
 
-    public async Task<bool> ResumeByActionTokenAsync(string token, string actionKey, Guid actorUserId, string? comment, IReadOnlyDictionary<string, JsonElement>? values, Guid teamId, CancellationToken cancellationToken)
+    public async Task<ActionResumeResult> ResumeByActionTokenAsync(string token, string actionKey, Guid actorUserId, string? comment, IReadOnlyDictionary<string, JsonElement>? values, Guid teamId, CancellationToken cancellationToken)
     {
-        // The wait's run must belong to the caller's team — a card can only resolve a wait in its own
-        // tenant, even though the token is an unguessable Guid (defense in depth against a cross-team
-        // card / a leaked token). The join keeps this a single indexed query.
+        // Look up the wait for this token REGARDLESS of status — still team-scoped (the wait's run must
+        // belong to the caller's team: defense in depth against a cross-team card / leaked token). Reading
+        // any status lets us tell "no wait at all" (an orphan / post-and-continue card → the caller records
+        // the click) from "a wait that's no longer Pending" (a deadline or another responder already
+        // decided → the caller must NOT record a divergent decision). The join keeps this a single query.
         var wait = await _db.WorkflowRunWait.AsNoTracking()
-            .Where(w => w.Token == token && w.Status == WorkflowWaitStatuses.Pending && w.WaitKind == WorkflowWaitKinds.Action)
+            .Where(w => w.Token == token && w.WaitKind == WorkflowWaitKinds.Action)
             .Where(w => _db.WorkflowRun.Any(r => r.Id == w.RunId && r.TeamId == teamId))
-            .Select(w => new { w.Id, w.RunId, w.NodeId })
+            .Select(w => new { w.Id, w.RunId, w.NodeId, w.Status })
             .FirstOrDefaultAsync(cancellationToken)
             .ConfigureAwait(false);
 
         if (wait == null)
         {
-            _logger.LogDebug("Action resume: no pending action wait matches the token in team {TeamId}", teamId);
-            return false;
+            _logger.LogDebug("Action resume: no action wait matches the token in team {TeamId} — wait-less card, caller records", teamId);
+            return ActionResumeResult.NoWait;
+        }
+
+        if (wait.Status != WorkflowWaitStatuses.Pending)
+        {
+            _logger.LogDebug("Action resume: wait for token already resolved in team {TeamId} — rejecting the late click", teamId);
+            return ActionResumeResult.AlreadyResolved;
         }
 
         // Generic act-as-user gate: if resolving this wait makes a downstream node act AS the responder on a
@@ -171,8 +188,11 @@ public sealed class WorkflowResumeService : IWorkflowResumeService, IScopedDepen
         if (values != null) decision["values"] = values;
         var payload = JsonSerializer.Serialize(decision);
 
-        // Resolve ONLY this wait — a sibling card parked on the same run keeps waiting for its own click.
-        return await ResumeCoreAsync(wait.RunId, payload, onlyWaitId: wait.Id, cancellationToken).ConfigureAwait(false);
+        // Resolve ONLY this wait — a sibling card parked on the same run keeps waiting for its own click. A
+        // run-flip CAS loss (a deadline / sibling resume that landed between our read and here) yields
+        // AlreadyResolved, not Resumed, so the caller still won't record a divergent decision.
+        var flipped = await ResumeCoreAsync(wait.RunId, payload, onlyWaitId: wait.Id, cancellationToken).ConfigureAwait(false);
+        return flipped ? ActionResumeResult.Resumed : ActionResumeResult.AlreadyResolved;
     }
 
     public async Task<bool> ResumeByDeadlineAsync(Guid waitId, string timeoutPayloadJson, CancellationToken cancellationToken)
