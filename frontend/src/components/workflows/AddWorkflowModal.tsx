@@ -32,12 +32,10 @@ export function AddWorkflowModal({ templates, pending, onBlank, onTemplate, onCl
       <div className="mdl-mask" onClick={onClose} />
       <div className="mdl" role="dialog" aria-modal="true">
         <div className="mdl-head">
+          {step === "templates" && (
+            <button type="button" className="mdl-back" onClick={() => setStep("choose")} title="Back"><Ic.ChevronLeft size={16} /></button>
+          )}
           <div className="mdl-title-wrap">
-            {step === "templates" && (
-              <button type="button" className="wf-add-back" onClick={() => setStep("choose")}>
-                <Ic.ArrowLeft size={13} /> Back
-              </button>
-            )}
             <div className="mdl-title">{step === "choose" ? "Add workflow" : "Choose a template"}</div>
             <div className="mdl-sub">
               {step === "choose"
