@@ -72,6 +72,10 @@ interface Schema {
   "x-interactionField"?: boolean;
   /** Human-readable label for an x-interactionField option, shown in the type picker. */
   "x-interactionLabel"?: string;
+  /** Conditional visibility: render this field ONLY when a SIBLING field (same object level) equals a
+   * value — e.g. show `count` only when `mode` === "quorum". Hidden fields keep their stored value (the
+   * engine ignores irrelevant ones), so toggling the condition is non-destructive. Purely presentational. */
+  "x-showWhen"?: { field: string; equals: unknown };
 }
 
 interface SchemaFormProps {
@@ -113,9 +117,14 @@ export function SchemaForm({ schema, value, onChange, templateHint = false, vari
     />
   );
 
-  // Secondary fields (x-advanced) collapse under an "Advanced" disclosure so the common path stays light;
-  // everything else renders inline, in declared order.
-  const entries = Object.entries(parsed.properties);
+  // x-showWhen: drop a field whose sibling condition isn't met (e.g. `count` only when mode === "quorum")
+  // so the form shows only what's relevant. Then x-advanced fields collapse under "Advanced" so the
+  // common path stays light; everything else renders inline, in declared order.
+  const showWhenMet = (s: Schema) => {
+    const cond = s["x-showWhen"];
+    return !cond || (obj as Record<string, unknown>)[cond.field] === cond.equals;
+  };
+  const entries = Object.entries(parsed.properties).filter(([, s]) => showWhenMet(s));
   const primary = entries.filter(([, s]) => !s["x-advanced"]);
   const advanced = entries.filter(([, s]) => s["x-advanced"]);
 

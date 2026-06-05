@@ -281,3 +281,29 @@ describe("SchemaForm enum dual-mode", () => {
     expect(screen.getByRole("combobox")).toBeInTheDocument();
   });
 });
+
+describe("SchemaForm — x-showWhen conditional visibility", () => {
+  const conditional = {
+    type: "object",
+    properties: {
+      mode: { type: "string", enum: ["first", "quorum"] },
+      count: { type: "integer", title: "Responders needed", "x-showWhen": { field: "mode", equals: "quorum" } },
+    },
+  };
+
+  it("hides a field whose sibling condition is not met", () => {
+    // count is irrelevant when mode is "first" → it must not render.
+    render(<SchemaForm schema={conditional} value={{ mode: "first" }} onChange={vi.fn()} />);
+    expect(screen.queryByText("Responders needed")).toBeNull();
+  });
+
+  it("shows the field once the sibling condition is met", () => {
+    render(<SchemaForm schema={conditional} value={{ mode: "quorum" }} onChange={vi.fn()} />);
+    expect(screen.getByText("Responders needed")).toBeInTheDocument();
+  });
+
+  it("shows fields with no x-showWhen unconditionally", () => {
+    render(<SchemaForm schema={conditional} value={{ mode: "first" }} onChange={vi.fn()} />);
+    expect(screen.getByText("Mode")).toBeInTheDocument();
+  });
+});

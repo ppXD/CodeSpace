@@ -70,7 +70,7 @@ public sealed class ChatPostMessageNode : INodeRuntime
                   "description": "How responses decide the wait. Default: the first response wins.",
                   "properties": {
                     "mode": { "type": "string", "enum": ["first","quorum"], "default": "first", "x-enumLabels": { "first": "First response wins", "quorum": "Quorum — N of the same" }, "description": "A button marked `vetoes` always decides on one click, regardless of this." },
-                    "count": { "type": "integer", "minimum": 1, "default": 2, "title": "Responders needed", "description": "For quorum: how many DISTINCT people must pick the same option." },
+                    "count": { "type": "integer", "minimum": 1, "default": 2, "title": "Responders needed", "x-showWhen": { "field": "mode", "equals": "quorum" }, "description": "For quorum: how many DISTINCT people must pick the same option." },
                     "deadlineSeconds": { "type": "integer", "minimum": 1, "title": "Auto-resolve after (seconds)", "description": "Optional. If no one responds within this long, auto-resolve with the timeout action below — so the run never hangs. e.g. 1800 = 30 min. Empty = wait indefinitely." },
                     "onTimeout": { "type": "string", "title": "On timeout, act as", "description": "Required when a deadline is set: which action key to record when it passes — use one of your button keys (e.g. 'reject' / 'request_changes'). Recorded as the system, with no responder." }
                   }
