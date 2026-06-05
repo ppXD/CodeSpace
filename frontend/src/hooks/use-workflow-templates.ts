@@ -32,53 +32,6 @@ const EMPTY_DEFINITION: WorkflowDefinition = {
   edges: [{ from: "trigger", to: "end" }],
 };
 
-const AI_CODE_REVIEW: WorkflowDefinition = {
-  schemaVersion: 1,
-  nodes: [
-    { id: "trigger", typeKey: "trigger.pr.opened", label: "When PR opened", config: {}, inputs: {}, position: { x: 80, y: 60 } },
-    {
-      id: "fetch_diff",
-      typeKey: "git.fetch_pr_diff",
-      label: "Fetch PR diff",
-      config: {},
-      inputs: { repositoryId: "{{trigger.repositoryId}}", number: "{{trigger.number}}" },
-      position: { x: 80, y: 220 },
-    },
-    {
-      id: "review_llm",
-      typeKey: "llm.complete",
-      label: "Ask LLM for review",
-      config: { provider: "Anthropic", model: "claude-sonnet-4-5", maxTokens: 3000, temperature: 0.2 },
-      inputs: {
-        systemPrompt:
-          "You are a senior software engineer reviewing a pull request. Focus on: correctness, edge cases, naming, security, and obvious refactors. Be specific — call out file paths and line numbers when you can. Output GitHub-flavoured markdown with a short Summary section followed by a bullet list of comments. Keep it under 30 lines unless the diff is massive.",
-        userPrompt:
-          "PR title: {{trigger.title}}\n\nPR description:\n{{trigger.body}}\n\nDiff:\n{{nodes.fetch_diff.outputs.files}}",
-      },
-      position: { x: 80, y: 380 },
-    },
-    {
-      id: "post_comment",
-      typeKey: "git.post_pr_comment",
-      label: "Post review comment",
-      config: {},
-      inputs: {
-        repositoryId: "{{trigger.repositoryId}}",
-        number: "{{trigger.number}}",
-        body: "{{nodes.review_llm.outputs.text}}",
-      },
-      position: { x: 80, y: 540 },
-    },
-    { id: "end", typeKey: "builtin.terminal", label: "Done", config: {}, inputs: {}, position: { x: 80, y: 700 } },
-  ],
-  edges: [
-    { from: "trigger", to: "fetch_diff" },
-    { from: "fetch_diff", to: "review_llm" },
-    { from: "review_llm", to: "post_comment" },
-    { from: "post_comment", to: "end" },
-  ],
-};
-
 // On PR opened: fetch diff → AI review → an APPROVAL CARD (2 approvals, any "request changes" blocks,
 // auto-requests-changes after 24h with no decision) → submit that verdict back to the PR as the
 // reviewer who clicked. The closed loop: code → AI summary → human decision → native git approve.
@@ -164,17 +117,9 @@ export interface WorkflowTemplate {
 
 export const WORKFLOW_TEMPLATES: WorkflowTemplate[] = [
   {
-    id: "ai-code-review",
-    name: "AI Code Review",
-    description: "On PR opened: fetch the diff, ask an LLM for a review, post it as a PR comment.",
-    definition: AI_CODE_REVIEW,
-    activations: [{ typeKey: "trigger.pr.opened", enabled: true, config: {} }],
-    enabled: true,
-  },
-  {
-    id: "ai-pr-review-gate",
-    name: "AI PR Review + Approval Gate",
-    description: "AI review → an approval card (2 approvals, any block, 24h deadline) → submit the verdict back to the PR. Pick a channel, then enable.",
+    id: "ai-pr-review",
+    name: "AI PR Review",
+    description: "On PR opened: AI reviews the diff, posts an approval card (2 approvals, any block, 24h deadline), then submits the verdict back to the PR. Pick a channel, then enable.",
     definition: AI_PR_REVIEW_GATE,
     activations: [{ typeKey: "trigger.pr.opened", enabled: true, config: {} }],
     enabled: false, // needs a conversation picked first
