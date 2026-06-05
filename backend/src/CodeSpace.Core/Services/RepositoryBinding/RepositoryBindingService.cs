@@ -1,5 +1,6 @@
 using System.Security.Cryptography;
 using CodeSpace.Core.DependencyInjection;
+using CodeSpace.Core.Middlewares.Transactional;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Credentials;
@@ -29,9 +30,10 @@ public sealed class RepositoryBindingService : IRepositoryBindingService, IScope
     private readonly IRepositoryWebhookRegistrationDispatcher _registrationDispatcher;
     private readonly IProjectService _projectService;
     private readonly WebhookBaseUrlSetting _webhookBaseUrl;
+    private readonly IPostCommitActions _postCommit;
     private readonly ILogger<RepositoryBindingService> _logger;
 
-    public RepositoryBindingService(CodeSpaceDbContext db, IProviderRegistry registry, IProviderEventSubscriptionRegistry subscriptionRegistry, IPayloadEncryptor encryptor, IScopeChecker scopeChecker, IRepositoryWebhookRegistrationDispatcher registrationDispatcher, IProjectService projectService, WebhookBaseUrlSetting webhookBaseUrl, ILogger<RepositoryBindingService> logger)
+    public RepositoryBindingService(CodeSpaceDbContext db, IProviderRegistry registry, IProviderEventSubscriptionRegistry subscriptionRegistry, IPayloadEncryptor encryptor, IScopeChecker scopeChecker, IRepositoryWebhookRegistrationDispatcher registrationDispatcher, IProjectService projectService, WebhookBaseUrlSetting webhookBaseUrl, IPostCommitActions postCommit, ILogger<RepositoryBindingService> logger)
     {
         _db = db;
         _registry = registry;
@@ -41,6 +43,7 @@ public sealed class RepositoryBindingService : IRepositoryBindingService, IScope
         _registrationDispatcher = registrationDispatcher;
         _projectService = projectService;
         _webhookBaseUrl = webhookBaseUrl;
+        _postCommit = postCommit;
         _logger = logger;
     }
 
@@ -98,9 +101,15 @@ public sealed class RepositoryBindingService : IRepositoryBindingService, IScope
         // one remote hook lands.
         await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
 
-        // No webhook was created when re-using an already-active repo (only a project link was added).
+        // Dispatch the webhook registration AFTER the bind transaction commits (RunAfterCommitAsync
+        // defers while a transaction is open), so the registrar job can't run before the
+        // RepositoryWebhook row is visible. No webhook row exists when re-using an already-active repo
+        // (only a project link was added), so there's nothing to register then.
         if (!ctx.ReusingActiveRepository)
-            await _registrationDispatcher.DispatchAsync(ctx.NewWebhookId, cancellationToken).ConfigureAwait(false);
+        {
+            var webhookId = ctx.NewWebhookId;
+            await _postCommit.RunAfterCommitAsync(ct => _registrationDispatcher.DispatchAsync(webhookId, ct), cancellationToken).ConfigureAwait(false);
+        }
 
         return repository;
     }

@@ -1,5 +1,6 @@
 using System.Text.Json;
 using CodeSpace.Core.DependencyInjection;
+using CodeSpace.Core.Middlewares.Transactional;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Messages.Constants;
@@ -41,15 +42,17 @@ public sealed class RunSourceDispatcher :
     private readonly IRunStarter _runStarter;
     private readonly Dispatch.IWorkflowRunDispatcher _runDispatcher;
     private readonly IIngestionAuditor _auditor;
+    private readonly IPostCommitActions _postCommit;
     private readonly ILogger<RunSourceDispatcher> _logger;
 
-    public RunSourceDispatcher(CodeSpaceDbContext db, IRunSourceMatcherRegistry matcherRegistry, IRunStarter runStarter, Dispatch.IWorkflowRunDispatcher runDispatcher, IIngestionAuditor auditor, ILogger<RunSourceDispatcher> logger)
+    public RunSourceDispatcher(CodeSpaceDbContext db, IRunSourceMatcherRegistry matcherRegistry, IRunStarter runStarter, Dispatch.IWorkflowRunDispatcher runDispatcher, IIngestionAuditor auditor, IPostCommitActions postCommit, ILogger<RunSourceDispatcher> logger)
     {
         _db = db;
         _matcherRegistry = matcherRegistry;
         _runStarter = runStarter;
         _runDispatcher = runDispatcher;
         _auditor = auditor;
+        _postCommit = postCommit;
         _logger = logger;
     }
 
@@ -100,23 +103,21 @@ public sealed class RunSourceDispatcher :
 
         await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
 
-        // PostBoy-style dispatch happens AFTER commit. Each successfully matched activation
-        // produced a Pending workflow_run row above; now we atomically transition each to
-        // Enqueued + hand to the background-job client. Reconciler covers any row that fails
-        // to dispatch (e.g. Hangfire transient outage).
-        //
-        // Why AFTER commit: if dispatch happened inline we'd be enqueueing references to rows
-        // that aren't yet committed; the background worker might pick up the runId before our
-        // transaction lands.
+        // Dispatch each matched run AFTER commit. RunAfterCommitAsync defers into the post-commit drain
+        // while a transaction is open (the ReceiveWebhookCommand path), so a worker can't pick up a
+        // runId before its row is visible — the exact race the previous inline dispatch hit, since the
+        // SaveChanges above only flushes within the still-open command transaction. With no ambient
+        // transaction (an event published directly, e.g. in tests) it runs inline. Reconciler covers any
+        // row whose dispatch is dropped (e.g. Hangfire transient outage).
         foreach (var runId in firedRunIds)
         {
             try
             {
-                await _runDispatcher.DispatchAsync(runId, cancellationToken).ConfigureAwait(false);
+                await _postCommit.RunAfterCommitAsync(ct => _runDispatcher.DispatchAsync(runId, ct), cancellationToken).ConfigureAwait(false);
             }
             catch (Exception ex)
             {
-                _logger.LogWarning(ex, "Webhook dispatcher: failed to enqueue run {RunId}; reconciler will retry", runId);
+                _logger.LogWarning(ex, "Webhook dispatcher: failed to dispatch run {RunId}; reconciler will retry", runId);
             }
         }
     }
