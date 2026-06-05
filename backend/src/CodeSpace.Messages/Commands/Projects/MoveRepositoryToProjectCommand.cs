@@ -1,4 +1,5 @@
 using CodeSpace.Messages.Authorization;
+using CodeSpace.Messages.Mediation;
 using MediatR;
 
 namespace CodeSpace.Messages.Commands.Projects;
@@ -9,7 +10,7 @@ namespace CodeSpace.Messages.Commands.Projects;
 /// can re-organise their repos without unbinding + rebinding through the OAuth
 /// dance. Idempotent — no-op when the repo is already in the target project.
 /// </summary>
-public sealed record MoveRepositoryToProjectCommand : IRequest<MediatR.Unit>, IRequireTeamMembership
+public sealed record MoveRepositoryToProjectCommand : ICommand<MediatR.Unit>, IRequireTeamMembership
 {
     public required Guid RepositoryId { get; init; }
     public required Guid TargetProjectId { get; init; }

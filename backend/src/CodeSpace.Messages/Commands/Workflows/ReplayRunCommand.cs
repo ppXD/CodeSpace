@@ -1,4 +1,5 @@
 using CodeSpace.Messages.Authorization;
+using CodeSpace.Messages.Mediation;
 using MediatR;
 
 namespace CodeSpace.Messages.Commands.Workflows;
@@ -14,7 +15,7 @@ namespace CodeSpace.Messages.Commands.Workflows;
 ///
 /// <para>Returns the new <c>WorkflowRun.Id</c> for the caller to navigate to.</para>
 /// </summary>
-public sealed record ReplayRunCommand : IRequest<Guid>, IRequireTeamMembership
+public sealed record ReplayRunCommand : ICommand<Guid>, IRequireTeamMembership
 {
     public Guid OriginalRunId { get; init; }
 }

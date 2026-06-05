@@ -1,4 +1,5 @@
 using CodeSpace.Messages.Authorization;
+using CodeSpace.Messages.Mediation;
 using MediatR;
 
 namespace CodeSpace.Messages.Commands.Workflows;
@@ -12,7 +13,7 @@ namespace CodeSpace.Messages.Commands.Workflows;
 /// <para>Returns <c>true</c> if the run resumed; <c>false</c> when it had no pending approval
 /// wait (already resolved, not suspended, or parked on a timer / callback instead).</para>
 /// </summary>
-public sealed record ResumeRunCommand : IRequest<bool>, IRequireTeamMembership
+public sealed record ResumeRunCommand : ICommand<bool>, IRequireTeamMembership
 {
     public Guid RunId { get; init; }
 
