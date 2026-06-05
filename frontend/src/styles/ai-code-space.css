@@ -2354,36 +2354,36 @@ textarea:-webkit-autofill {
 .acs-root .wf-interaction-body { padding-top: 4px; }
 
 /* ── Add-workflow modal: Blank vs Template choice, then a template card list ──────────────────────── */
-.acs-root .wf-add-choices { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
-.acs-root .wf-add-choice {
+.mdl .wf-add-choices { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.mdl .wf-add-choice {
   position: relative; display: flex; flex-direction: column; gap: 4px; text-align: left;
   padding: 16px; border: 1px solid var(--line); border-radius: 12px; background: var(--bg);
   cursor: pointer; font-family: inherit; color: var(--ink); transition: border-color .1s, background .1s;
 }
-.acs-root .wf-add-choice:hover { border-color: var(--accent); background: var(--panel); }
-.acs-root .wf-add-choice:disabled { opacity: 0.5; cursor: default; }
-.acs-root .wf-add-choice-ic { color: var(--accent); margin-bottom: 2px; }
-.acs-root .wf-add-choice-name { font-size: 14px; font-weight: 600; }
-.acs-root .wf-add-choice-desc { font-size: 12px; color: var(--muted); line-height: 1.4; }
-.acs-root .wf-add-choice-arrow { position: absolute; top: 14px; right: 12px; color: var(--muted); }
+.mdl .wf-add-choice:hover { border-color: var(--accent); background: var(--panel); }
+.mdl .wf-add-choice:disabled { opacity: 0.5; cursor: default; }
+.mdl .wf-add-choice-ic { color: var(--accent); margin-bottom: 2px; }
+.mdl .wf-add-choice-name { font-size: 14px; font-weight: 600; }
+.mdl .wf-add-choice-desc { font-size: 12px; color: var(--muted); line-height: 1.4; }
+.mdl .wf-add-choice-arrow { position: absolute; top: 14px; right: 12px; color: var(--muted); }
 
-.acs-root .wf-tpl-cards { display: flex; flex-direction: column; gap: 8px; }
-.acs-root .wf-tpl-card {
+.mdl .wf-tpl-cards { display: flex; flex-direction: column; gap: 8px; }
+.mdl .wf-tpl-card {
   display: flex; flex-direction: column; gap: 3px; text-align: left;
   padding: 12px 14px; border: 1px solid var(--line); border-radius: 10px; background: var(--bg);
   cursor: pointer; font-family: inherit; color: var(--ink); transition: border-color .1s, background .1s;
 }
-.acs-root .wf-tpl-card:hover { border-color: var(--accent); background: var(--panel); }
-.acs-root .wf-tpl-card:disabled { opacity: 0.5; cursor: default; }
-.acs-root .wf-tpl-card-name { font-size: 13px; font-weight: 600; }
-.acs-root .wf-tpl-card-desc { font-size: 12px; color: var(--muted); line-height: 1.4; }
+.mdl .wf-tpl-card:hover { border-color: var(--accent); background: var(--panel); }
+.mdl .wf-tpl-card:disabled { opacity: 0.5; cursor: default; }
+.mdl .wf-tpl-card-name { font-size: 13px; font-weight: 600; }
+.mdl .wf-tpl-card-desc { font-size: 12px; color: var(--muted); line-height: 1.4; }
 
-.acs-root .wf-add-back {
+.mdl .wf-add-back {
   display: inline-flex; align-items: center; gap: 3px; align-self: flex-start;
   background: none; border: none; padding: 0 0 4px; font-family: inherit; font-size: 11px;
   font-weight: 600; color: var(--muted); cursor: pointer;
 }
-.acs-root .wf-add-back:hover { color: var(--ink); }
+.mdl .wf-add-back:hover { color: var(--ink); }
 
 .acs-root .wf-form-advanced { border-top: 1px solid var(--line); padding-top: 8px; }
 .acs-root .wf-form-advanced-summary { cursor: pointer; font-size: 11px; font-weight: 600; color: var(--muted); list-style: none; user-select: none; }
