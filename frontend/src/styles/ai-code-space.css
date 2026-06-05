@@ -2353,6 +2353,27 @@ textarea:-webkit-autofill {
 .acs-root .wf-interaction-opt[data-active] { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); font-weight: 600; }
 .acs-root .wf-interaction-body { padding-top: 4px; }
 
+/* ── "Start from template" dropdown (Workflows list header) ───────────────────────────────────────── */
+.acs-root .wf-tpl-menu { position: relative; display: inline-block; }
+.acs-root .wf-tpl-menu > summary { cursor: pointer; list-style: none; }
+.acs-root .wf-tpl-menu > summary::-webkit-details-marker { display: none; }
+.acs-root .wf-tpl-menu-panel {
+  position: absolute; right: 0; top: calc(100% + 6px); z-index: 30;
+  width: 340px; max-width: 80vw; padding: 6px;
+  background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.12);
+  display: flex; flex-direction: column; gap: 2px;
+}
+.acs-root .wf-tpl-item {
+  display: flex; flex-direction: column; gap: 2px; text-align: left;
+  padding: 8px 10px; border-radius: 8px; border: none; background: transparent;
+  cursor: pointer; font-family: inherit; color: var(--ink);
+}
+.acs-root .wf-tpl-item:hover { background: var(--bg); }
+.acs-root .wf-tpl-item:disabled { opacity: 0.5; cursor: default; }
+.acs-root .wf-tpl-item-name { font-size: 13px; font-weight: 600; }
+.acs-root .wf-tpl-item-desc { font-size: 11px; color: var(--muted); line-height: 1.35; }
+
 .acs-root .wf-form-advanced { border-top: 1px solid var(--line); padding-top: 8px; }
 .acs-root .wf-form-advanced-summary { cursor: pointer; font-size: 11px; font-weight: 600; color: var(--muted); list-style: none; user-select: none; }
 .acs-root .wf-form-advanced-summary::-webkit-details-marker { display: none; }

@@ -3,7 +3,7 @@ import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { Ic } from "@/_imported/ai-code-space/icons";
 import { ApiError } from "@/api/request";
 import { useConfirm } from "@/components/dialog/dialog-context";
-import { useCreateEmptyWorkflow } from "@/hooks/use-workflow-templates";
+import { useCreateEmptyWorkflow, useCreateWorkflowFromTemplate, WORKFLOW_TEMPLATES, type WorkflowTemplate } from "@/hooks/use-workflow-templates";
 import { useDeleteWorkflow, useSetWorkflowEnabled, useWorkflows } from "@/hooks/use-workflows";
 
 /**
@@ -23,6 +23,7 @@ function WorkflowsListPage() {
   const setEnabled = useSetWorkflowEnabled();
   const remove = useDeleteWorkflow();
   const createEmpty = useCreateEmptyWorkflow();
+  const fromTemplate = useCreateWorkflowFromTemplate();
   const confirm = useConfirm();
 
   const rows = workflows.data ?? [];
@@ -30,6 +31,14 @@ function WorkflowsListPage() {
   const handleAdd = async () => {
     const result = await createEmpty.mutateAsync();
     // The canvas IS the workflow detail (Dify pattern) — no separate /edit route.
+    navigate({
+      to: "/teams/$teamSlug/workflows/$workflowId",
+      params: { teamSlug, workflowId: result.id },
+    });
+  };
+
+  const handleTemplate = async (template: WorkflowTemplate) => {
+    const result = await fromTemplate.mutateAsync(template);
     navigate({
       to: "/teams/$teamSlug/workflows/$workflowId",
       params: { teamSlug, workflowId: result.id },
@@ -65,6 +74,23 @@ function WorkflowsListPage() {
         <div className="ct-title-row">
           <h1 className="ct-title">Workflows</h1>
           <div className="ct-actions">
+            <details className="wf-tpl-menu">
+              <summary className="btn">Start from template</summary>
+              <div className="wf-tpl-menu-panel">
+                {WORKFLOW_TEMPLATES.map((t) => (
+                  <button
+                    key={t.id}
+                    type="button"
+                    className="wf-tpl-item"
+                    disabled={fromTemplate.isPending}
+                    onClick={() => handleTemplate(t)}
+                  >
+                    <span className="wf-tpl-item-name">{t.name}</span>
+                    <span className="wf-tpl-item-desc">{t.description}</span>
+                  </button>
+                ))}
+              </div>
+            </details>
             <button className="btn btn-primary" onClick={handleAdd} disabled={createEmpty.isPending}>
               <Ic.Plus size={14} /> {createEmpty.isPending ? "Creating…" : "Add workflow"}
             </button>
