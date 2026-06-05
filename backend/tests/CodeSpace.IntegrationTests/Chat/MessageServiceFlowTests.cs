@@ -306,6 +306,48 @@ public class MessageServiceFlowTests
             () => scope.Resolve<IMessageService>().DeleteAsync(teamId, other, msg.Id, default));
     }
 
+    [Fact]
+    public async Task Edit_by_a_removed_author_throws_even_though_they_are_the_author()
+    {
+        var (teamId, ownerId, channelId) = await SeedChannelWithOwnerAsync();
+        var author = await SeedUserAsync();
+        await JoinAsync(teamId, ownerId, channelId, author);
+
+        var msg = await PostAsync(teamId, author, channelId, "author's message");
+
+        await RemoveMemberAsync(channelId, author);   // the author leaves / is removed from the conversation
+
+        using (var scope = _fixture.BeginScope())
+            await Should.ThrowAsync<InvalidOperationException>(
+                () => scope.Resolve<IMessageService>().EditAsync(teamId, author, msg.Id, "sneaky edit after leaving", default));
+
+        // The message is untouched — the membership gate rejected the edit before any write.
+        using var verify = _fixture.BeginScope();
+        var row = await verify.Resolve<CodeSpaceDbContext>().Message.AsNoTracking().SingleAsync(m => m.Id == msg.Id);
+        row.Body.ShouldBe("author's message");
+        row.EditedDate.ShouldBeNull();
+    }
+
+    [Fact]
+    public async Task Delete_by_a_removed_author_throws_even_though_they_are_the_author()
+    {
+        var (teamId, ownerId, channelId) = await SeedChannelWithOwnerAsync();
+        var author = await SeedUserAsync();
+        await JoinAsync(teamId, ownerId, channelId, author);
+
+        var msg = await PostAsync(teamId, author, channelId, "author's message");
+
+        await RemoveMemberAsync(channelId, author);
+
+        using (var scope = _fixture.BeginScope())
+            await Should.ThrowAsync<InvalidOperationException>(
+                () => scope.Resolve<IMessageService>().DeleteAsync(teamId, author, msg.Id, default));
+
+        using var verify = _fixture.BeginScope();
+        (await verify.Resolve<CodeSpaceDbContext>().Message.AsNoTracking().SingleAsync(m => m.Id == msg.Id))
+            .DeletedDate.ShouldBeNull("the membership gate rejected the delete before any write");
+    }
+
     // ─── Read cursor (forward-only) ─────────────────────────────────────────────────
 
     [Fact]
@@ -491,6 +533,16 @@ public class MessageServiceFlowTests
     {
         using var scope = _fixture.BeginScope();
         await scope.Resolve<IConversationService>().AddMemberAsync(teamId, actorId, channelId, newMemberId, default);
+    }
+
+    /// <summary>Soft-delete a member's ConversationMember row — simulates leaving / being removed.</summary>
+    private async Task RemoveMemberAsync(Guid channelId, Guid userId)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        var member = await db.ConversationMember.SingleAsync(m => m.ConversationId == channelId && m.UserId == userId);
+        member.DeletedDate = DateTimeOffset.UtcNow;
+        await db.SaveChangesAsync();
     }
 
     /// <summary>Posts <paramref name="count"/> messages oldest-first, spacing them so each gets a

@@ -89,6 +89,11 @@ public sealed class MessageService : IMessageService, IScopedDependency
 
         var message = await LoadActiveMessageAsync(teamId, messageId, cancellationToken).ConfigureAwait(false);
 
+        // Must STILL be an active member of the conversation — an author removed after posting can no
+        // longer mutate their old messages (and a conversation-outsider can't even probe authorship by id).
+        // Checked before the author gate so a non-member never learns who authored the message.
+        await EnsureActiveMemberAsync(teamId, message.ConversationId, editorUserId, cancellationToken).ConfigureAwait(false);
+
         if (message.AuthorUserId != editorUserId) throw new InvalidOperationException("Only the author can edit a message.");
 
         message.Body = newBody;
@@ -109,6 +114,10 @@ public sealed class MessageService : IMessageService, IScopedDependency
     public async Task DeleteAsync(Guid teamId, Guid actorUserId, Guid messageId, CancellationToken cancellationToken)
     {
         var message = await LoadActiveMessageAsync(teamId, messageId, cancellationToken).ConfigureAwait(false);
+
+        // Must STILL be an active member of the conversation (see EditAsync) — checked before the author
+        // gate so a removed author is rejected as a non-member and an outsider can't probe authorship.
+        await EnsureActiveMemberAsync(teamId, message.ConversationId, actorUserId, cancellationToken).ConfigureAwait(false);
 
         if (message.AuthorUserId != actorUserId) throw new InvalidOperationException("Only the author can delete a message.");
 
