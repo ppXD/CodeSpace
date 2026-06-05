@@ -1,4 +1,5 @@
 using CodeSpace.Messages.Authorization;
+using CodeSpace.Messages.Mediation;
 using MediatR;
 
 namespace CodeSpace.Messages.Commands.Chat;
@@ -9,7 +10,7 @@ namespace CodeSpace.Messages.Commands.Chat;
 /// per-message read-receipt fan-out. The cursor only ever moves forward — a stale client can't
 /// drag it backward and resurrect "unread" on already-seen messages.
 /// </summary>
-public sealed record MarkConversationReadCommand : IRequest, IRequireTeamMembership
+public sealed record MarkConversationReadCommand : ICommand<Unit>, IRequireTeamMembership
 {
     public Guid ConversationId { get; init; }
     public required Guid LastReadMessageId { get; init; }

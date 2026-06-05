@@ -1,3 +1,4 @@
+using CodeSpace.Messages.Mediation;
 using MediatR;
 
 namespace CodeSpace.Messages.Commands.Workflows;
@@ -8,7 +9,7 @@ namespace CodeSpace.Messages.Commands.Workflows;
 /// there is no team/user context. Returns false when no pending callback wait matches the token
 /// (unknown or already used), which the controller maps to 404.
 /// </summary>
-public sealed record ResumeWorkflowCallbackCommand : IRequest<bool>
+public sealed record ResumeWorkflowCallbackCommand : ICommand<bool>
 {
     public required string Token { get; init; }
 

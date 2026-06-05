@@ -5,7 +5,7 @@ using MediatR;
 
 namespace CodeSpace.Core.Handlers.CommandHandlers.Chat;
 
-public sealed class MarkConversationReadCommandHandler : IRequestHandler<MarkConversationReadCommand>
+public sealed class MarkConversationReadCommandHandler : IRequestHandler<MarkConversationReadCommand, Unit>
 {
     private readonly IMessageService _service;
     private readonly ICurrentTeam _currentTeam;
@@ -18,6 +18,9 @@ public sealed class MarkConversationReadCommandHandler : IRequestHandler<MarkCon
         _currentUser = currentUser;
     }
 
-    public Task Handle(MarkConversationReadCommand request, CancellationToken cancellationToken) =>
-        _service.MarkReadAsync(_currentTeam.Id!.Value, _currentUser.Id!.Value, request.ConversationId, request.LastReadMessageId, cancellationToken);
+    public async Task<Unit> Handle(MarkConversationReadCommand request, CancellationToken cancellationToken)
+    {
+        await _service.MarkReadAsync(_currentTeam.Id!.Value, _currentUser.Id!.Value, request.ConversationId, request.LastReadMessageId, cancellationToken);
+        return Unit.Value;
+    }
 }

@@ -1,4 +1,5 @@
 using CodeSpace.Messages.Authorization;
+using CodeSpace.Messages.Mediation;
 using MediatR;
 
 namespace CodeSpace.Messages.Commands.Projects;
@@ -9,7 +10,7 @@ namespace CodeSpace.Messages.Commands.Projects;
 /// every workflow that uses this project. If operators need a different slug, they create
 /// a new project + re-attach repositories.
 /// </summary>
-public sealed record UpdateProjectCommand : IRequest<MediatR.Unit>, IRequireTeamMembership
+public sealed record UpdateProjectCommand : ICommand<MediatR.Unit>, IRequireTeamMembership
 {
     public required Guid ProjectId { get; init; }
     public required string Name { get; init; }

@@ -1,4 +1,5 @@
 using CodeSpace.Messages.Authorization;
+using CodeSpace.Messages.Mediation;
 using MediatR;
 
 namespace CodeSpace.Messages.Commands.Projects;
@@ -11,7 +12,7 @@ namespace CodeSpace.Messages.Commands.Projects;
 /// operator picks a different name (we never silently mangle a chosen name into
 /// <c>"foo-2"</c> because the slug is part of the variable-path contract).
 /// </summary>
-public sealed record CreateProjectCommand : IRequest<Guid>, IRequireTeamMembership
+public sealed record CreateProjectCommand : ICommand<Guid>, IRequireTeamMembership
 {
     public required string Name { get; init; }
     public string? Description { get; init; }

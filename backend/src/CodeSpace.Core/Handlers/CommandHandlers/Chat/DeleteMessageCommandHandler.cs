@@ -5,7 +5,7 @@ using MediatR;
 
 namespace CodeSpace.Core.Handlers.CommandHandlers.Chat;
 
-public sealed class DeleteMessageCommandHandler : IRequestHandler<DeleteMessageCommand>
+public sealed class DeleteMessageCommandHandler : IRequestHandler<DeleteMessageCommand, Unit>
 {
     private readonly IMessageService _service;
     private readonly ICurrentTeam _currentTeam;
@@ -18,6 +18,9 @@ public sealed class DeleteMessageCommandHandler : IRequestHandler<DeleteMessageC
         _currentUser = currentUser;
     }
 
-    public Task Handle(DeleteMessageCommand request, CancellationToken cancellationToken) =>
-        _service.DeleteAsync(_currentTeam.Id!.Value, _currentUser.Id!.Value, request.MessageId, cancellationToken);
+    public async Task<Unit> Handle(DeleteMessageCommand request, CancellationToken cancellationToken)
+    {
+        await _service.DeleteAsync(_currentTeam.Id!.Value, _currentUser.Id!.Value, request.MessageId, cancellationToken);
+        return Unit.Value;
+    }
 }

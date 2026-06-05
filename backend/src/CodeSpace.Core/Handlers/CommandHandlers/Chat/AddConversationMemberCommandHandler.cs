@@ -5,7 +5,7 @@ using MediatR;
 
 namespace CodeSpace.Core.Handlers.CommandHandlers.Chat;
 
-public sealed class AddConversationMemberCommandHandler : IRequestHandler<AddConversationMemberCommand>
+public sealed class AddConversationMemberCommandHandler : IRequestHandler<AddConversationMemberCommand, Unit>
 {
     private readonly IConversationService _service;
     private readonly ICurrentTeam _currentTeam;
@@ -18,6 +18,9 @@ public sealed class AddConversationMemberCommandHandler : IRequestHandler<AddCon
         _currentUser = currentUser;
     }
 
-    public Task Handle(AddConversationMemberCommand request, CancellationToken cancellationToken) =>
-        _service.AddMemberAsync(_currentTeam.Id!.Value, _currentUser.Id!.Value, request.ConversationId, request.UserId, cancellationToken);
+    public async Task<Unit> Handle(AddConversationMemberCommand request, CancellationToken cancellationToken)
+    {
+        await _service.AddMemberAsync(_currentTeam.Id!.Value, _currentUser.Id!.Value, request.ConversationId, request.UserId, cancellationToken);
+        return Unit.Value;
+    }
 }
