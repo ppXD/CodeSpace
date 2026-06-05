@@ -102,6 +102,11 @@ export interface MeTeam {
    * repo bind (the auto-seeded "default" project), 0 on fresh empty teams.
    */
   projectCount: number;
+  /**
+   * Active workflow count for this team. Drives the sidebar's "Workflows" nav badge —
+   * see backend `MeTeam.WorkflowCount`. 0 until the team authors its first workflow.
+   */
+  workflowCount: number;
 }
 
 export interface MeResponse {

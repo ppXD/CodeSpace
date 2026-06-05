@@ -41,4 +41,10 @@ public sealed record MeTeam
     /// team that's had a single bind happen.
     /// </summary>
     public required int ProjectCount { get; init; }
+
+    /// <summary>
+    /// Active (non-soft-deleted) workflow count — drives the sidebar's "Workflows" nav-row badge, the
+    /// same uniform treatment as <see cref="ProjectCount"/>. Matches the team's workflow list query.
+    /// </summary>
+    public required int WorkflowCount { get; init; }
 }
