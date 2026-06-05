@@ -7,14 +7,13 @@ import type { NodeDefinition } from "@/api/workflows";
 // gate a real closed loop — because a typo in a {{ref}} string fails silently at run time, not at
 // compile time.
 
-const gate = WORKFLOW_TEMPLATES.find((t) => t.id === "ai-pr-review-gate")!;
+const gate = WORKFLOW_TEMPLATES.find((t) => t.id === "ai-pr-review")!;
 const node = (typeKey: string) => gate.definition.nodes.find((n: NodeDefinition) => n.typeKey === typeKey)!;
 
-describe("WORKFLOW_TEMPLATES — AI PR Review + Approval Gate", () => {
-  it("is present and ships disabled (a channel must be picked first)", () => {
-    expect(gate).toBeDefined();
+describe("WORKFLOW_TEMPLATES — AI PR Review", () => {
+  it("is the single template and ships disabled (a channel must be picked first)", () => {
+    expect(WORKFLOW_TEMPLATES.map((t) => t.id)).toEqual(["ai-pr-review"]);
     expect(gate.enabled).toBe(false);
-    expect(WORKFLOW_TEMPLATES.find((t) => t.id === "ai-code-review")!.enabled).toBe(true);
   });
 
   it("posts a bounded quorum approval card (2 approvals, any block, 24h auto-resolve)", () => {
