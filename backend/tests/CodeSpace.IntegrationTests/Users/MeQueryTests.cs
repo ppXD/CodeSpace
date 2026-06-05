@@ -64,6 +64,7 @@ public class MeQueryTests
         var team = result.Teams.Single(t => t.Id == teamId);
         team.RepositoryCount.ShouldBe(2);
         team.MemberCount.ShouldBe(2); // owner + 1 membership
+        team.WorkflowCount.ShouldBe(2); // 2 active, 1 soft-deleted excluded
     }
 
     // ── Helpers ────────────────────────────────────────────────────────────────
@@ -128,6 +129,12 @@ public class MeQueryTests
         db.Repository.AddRange(
             new Repository { Id = Guid.NewGuid(), TeamId = team.Id, ProviderInstanceId = instance.Id, ExternalId = "r1", NamespacePath = "n", Name = "r1", FullPath = "n/r1", DefaultBranch = "main", Visibility = RepositoryVisibility.Private, WebUrl = "x", Status = RepositoryStatus.Active },
             new Repository { Id = Guid.NewGuid(), TeamId = team.Id, ProviderInstanceId = instance.Id, ExternalId = "r2", NamespacePath = "n", Name = "r2", FullPath = "n/r2", DefaultBranch = "main", Visibility = RepositoryVisibility.Private, WebUrl = "x", Status = RepositoryStatus.Active });
+
+        // Two active workflows + one soft-deleted — the count must include only the active two.
+        db.Workflow.AddRange(
+            new Workflow { Id = Guid.NewGuid(), TeamId = team.Id, Name = "wf-1", DefinitionJson = "{}" },
+            new Workflow { Id = Guid.NewGuid(), TeamId = team.Id, Name = "wf-2", DefinitionJson = "{}" },
+            new Workflow { Id = Guid.NewGuid(), TeamId = team.Id, Name = "wf-deleted", DefinitionJson = "{}", DeletedDate = DateTimeOffset.UtcNow });
 
         await db.SaveChangesAsync().ConfigureAwait(false);
 

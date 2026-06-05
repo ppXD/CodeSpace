@@ -297,6 +297,12 @@ export function Sidebar() {
         >
           <span className="sb-nav-ic"><Ic.Workflow size={15} /></span>
           <span className="sb-nav-lbl">Workflows</span>
+          {/* Same `!= null` guard as Projects above: workflowCount is new on /me, so
+              an old backend build returns MeTeam without it — hide the badge rather
+              than render an empty pill. A team with 0 workflows still shows "0". */}
+          {active && active.workflowCount != null && (
+            <span className="sb-nav-badge">{active.workflowCount}</span>
+          )}
         </div>
       </nav>
 
