@@ -1,3 +1,4 @@
+using System.Text.Json;
 using CodeSpace.Core.Services.Providers.Events;
 using CodeSpace.Core.Services.Providers.GitLab;
 using CodeSpace.Core.Services.Providers.GitLab.Events;
@@ -31,6 +32,27 @@ public class GitLabEventNormalizerTests
         var headers = new Dictionary<string, string> { ["X-Gitlab-Event"] = "Wiki Page Hook" };
 
         _normalizer.Normalize(_repositoryId, "{}", headers).ShouldBeNull();
+    }
+
+    [Fact]
+    public void Normalize_throws_on_non_json_body()
+    {
+        // Pins the contract WebhookIngestionService.PublishNormalizedEventAsync relies on: a
+        // signed-but-unparseable body surfaces as a catchable JsonException, which the ingestion
+        // boundary turns into a 200 + malformed_payload audit instead of a 500.
+        var headers = new Dictionary<string, string> { ["X-Gitlab-Event"] = "Merge Request Hook" };
+
+        Should.Throw<JsonException>(() => _normalizer.Normalize(_repositoryId, "not json at all", headers));
+    }
+
+    [Fact]
+    public void Normalize_throws_on_wrong_shape_payload()
+    {
+        // Valid JSON but missing object_attributes the normalizer requires → KeyNotFoundException,
+        // the other exception type the ingestion boundary catches.
+        var headers = new Dictionary<string, string> { ["X-Gitlab-Event"] = "Merge Request Hook" };
+
+        Should.Throw<KeyNotFoundException>(() => _normalizer.Normalize(_repositoryId, """{"object_kind":"merge_request"}""", headers));
     }
 
     [Fact]

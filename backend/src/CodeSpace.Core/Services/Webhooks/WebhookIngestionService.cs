@@ -6,6 +6,7 @@ using CodeSpace.Core.Services.Credentials;
 using CodeSpace.Core.Services.Providers.Capabilities;
 using CodeSpace.Core.Services.Workflows.RunSources;
 using CodeSpace.Messages.Constants;
+using CodeSpace.Messages.Events;
 using MediatR;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
@@ -105,28 +106,69 @@ public sealed class WebhookIngestionService : IWebhookIngestionService, IScopedD
 
     private async Task PublishNormalizedEventAsync(IWebhookEventNormalizer normalizer, RepositoryWebhook webhook, string body, IReadOnlyDictionary<string, string> headers, CancellationToken cancellationToken)
     {
-        var normalizedEvent = normalizer.Normalize(webhook.RepositoryId, body, headers);
+        NormalizedEvent? normalizedEvent;
+
+        try
+        {
+            normalizedEvent = normalizer.Normalize(webhook.RepositoryId, body, headers);
+        }
+        catch (Exception ex) when (ex is JsonException or KeyNotFoundException or InvalidOperationException)
+        {
+            await AuditMalformedPayloadAsync(webhook, headers, ex, cancellationToken).ConfigureAwait(false);
+            return;
+        }
 
         if (normalizedEvent == null)
         {
-            _logger.LogInformation("Webhook {WebhookId} payload not mapped to a tracked event type", webhook.Id);
-
-            // Write a Rejected row so operators can answer "I sent a deployment event but
-            // nothing happened — does CodeSpace ignore deployments?" without having to read
-            // server logs.
-            await _auditor.WriteWebhookRejectedAsync(new WebhookRejectionContext
-            {
-                TeamId = webhook.Repository.TeamId,
-                Reason = WorkflowRunRequestRejectionReasons.EventNotMapped,
-                Detail = $"normalizer for provider {webhook.Repository.ProviderInstance.Provider} returned null for this payload",
-                SourceType = $"{WorkflowRunSourceTypes.ProviderPrefix}{webhook.Repository.ProviderInstance.Provider.ToString().ToLowerInvariant()}",
-                ExternalEventId = TryExtractDeliveryId(headers),    // sig already passed, headers are trusted
-                RawHeadersRedactedJson = SerializeRedactedHeaders(headers),
-            }, cancellationToken).ConfigureAwait(false);
+            await AuditEventNotMappedAsync(webhook, headers, cancellationToken).ConfigureAwait(false);
             return;
         }
 
         await _mediator.Publish(normalizedEvent, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Signature passed but the body couldn't be parsed into the expected shape (non-JSON, or
+    /// missing / mistyped fields a normalizer requires — a provider API change, a truncated
+    /// delivery, a hand-crafted request). We return normally so the controller responds 200:
+    /// providers retry-storm on 5xx and GitLab auto-disables a webhook after repeated failures.
+    /// A Rejected row is recorded so the operator sees "delivery arrived but was malformed"
+    /// instead of guessing from a 500. Only the exception TYPE is stored — its message can echo
+    /// payload fragments we don't want in the audit trail.
+    /// </summary>
+    private async Task AuditMalformedPayloadAsync(RepositoryWebhook webhook, IReadOnlyDictionary<string, string> headers, Exception error, CancellationToken cancellationToken)
+    {
+        _logger.LogWarning(error, "Webhook {WebhookId} payload could not be parsed into a tracked event", webhook.Id);
+
+        await _auditor.WriteWebhookRejectedAsync(new WebhookRejectionContext
+        {
+            TeamId = webhook.Repository.TeamId,
+            Reason = WorkflowRunRequestRejectionReasons.MalformedPayload,
+            Detail = $"normalizer could not parse the payload for provider {webhook.Repository.ProviderInstance.Provider}: {error.GetType().Name}",
+            SourceType = $"{WorkflowRunSourceTypes.ProviderPrefix}{webhook.Repository.ProviderInstance.Provider.ToString().ToLowerInvariant()}",
+            ExternalEventId = TryExtractDeliveryId(headers),    // sig already passed, headers are trusted
+            RawHeadersRedactedJson = SerializeRedactedHeaders(headers),
+        }, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Payload parsed fine but the normalizer returned null — a valid provider event we don't
+    /// track (e.g. a "deployment" event for a repo subscribed only to PRs). Audited so operators
+    /// can answer "I sent X but nothing happened" without reading server logs.
+    /// </summary>
+    private async Task AuditEventNotMappedAsync(RepositoryWebhook webhook, IReadOnlyDictionary<string, string> headers, CancellationToken cancellationToken)
+    {
+        _logger.LogInformation("Webhook {WebhookId} payload not mapped to a tracked event type", webhook.Id);
+
+        await _auditor.WriteWebhookRejectedAsync(new WebhookRejectionContext
+        {
+            TeamId = webhook.Repository.TeamId,
+            Reason = WorkflowRunRequestRejectionReasons.EventNotMapped,
+            Detail = $"normalizer for provider {webhook.Repository.ProviderInstance.Provider} returned null for this payload",
+            SourceType = $"{WorkflowRunSourceTypes.ProviderPrefix}{webhook.Repository.ProviderInstance.Provider.ToString().ToLowerInvariant()}",
+            ExternalEventId = TryExtractDeliveryId(headers),    // sig already passed, headers are trusted
+            RawHeadersRedactedJson = SerializeRedactedHeaders(headers),
+        }, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>
