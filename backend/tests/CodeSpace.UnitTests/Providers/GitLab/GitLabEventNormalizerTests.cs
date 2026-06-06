@@ -125,6 +125,32 @@ public class GitLabEventNormalizerTests
     }
 
     [Fact]
+    public void Normalize_merge_request_reopen_returns_PullRequestOpenedEvent()
+    {
+        // GitLab action:"reopen" re-enters the review state — mapped to the same opened event as
+        // `open` (mirrors GitHub's `reopened`), where it previously fell through to null.
+        var headers = new Dictionary<string, string> { ["X-Gitlab-Event"] = "Merge Request Hook" };
+        var body = """
+            {
+              "object_kind": "merge_request",
+              "user": { "id": 1, "username": "alice" },
+              "object_attributes": {
+                "id": 99, "iid": 5, "title": "Reopened MR",
+                "source_branch": "feature", "target_branch": "main",
+                "action": "reopen",
+                "url": "https://gitlab.com/acme/repo/-/merge_requests/5"
+              }
+            }
+            """;
+
+        var result = _normalizer.Normalize(_repositoryId, body, headers).ShouldBeOfType<PullRequestOpenedEvent>();
+
+        result.Number.ShouldBe(5);
+        result.Title.ShouldBe("Reopened MR");
+        result.AuthorName.ShouldBe("alice");
+    }
+
+    [Fact]
     public void Normalize_merge_request_update_returns_PullRequestSynchronizedEvent()
     {
         var headers = new Dictionary<string, string> { ["X-Gitlab-Event"] = "Merge Request Hook" };

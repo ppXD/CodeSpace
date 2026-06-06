@@ -72,6 +72,48 @@ public class ReceiveWebhookFlowTests
     }
 
     [Fact]
+    public async Task GitHub_pull_request_reopened_publishes_opened_event()
+    {
+        // Reopening re-enters review / CI — fires the same opened event as a fresh open (it used
+        // to fall through to null and start nothing).
+        var secret = $"gh-sec-{Guid.NewGuid():N}";
+        var body = @"{""action"":""reopened"",""pull_request"":{""id"":1234567,""number"":42,""title"":""Add feature"",""head"":{""ref"":""feature"",""sha"":""s""},""base"":{""ref"":""main""},""user"":{""id"":583231,""login"":""octocat""},""html_url"":""https://x""}}";
+        var headers = new Dictionary<string, string>
+        {
+            ["X-GitHub-Event"] = "pull_request",
+            ["X-GitHub-Delivery"] = $"gh-reopened-{Guid.NewGuid():N}",
+            ["X-Hub-Signature-256"] = ComputeGitHubSignature(body, secret)
+        };
+
+        var (webhookId, repositoryId) = await SeedAsync(ProviderKind.GitHub, secret).ConfigureAwait(false);
+        ClearCapturedEvents();
+
+        await SendReceiveWebhookAsync(webhookId, body, headers).ConfigureAwait(false);
+
+        SnapshotCapturedEvents().OfType<PullRequestOpenedEvent>().ShouldContain(e => e.RepositoryId == repositoryId && e.Number == 42 && e.Title == "Add feature");
+    }
+
+    [Fact]
+    public async Task GitLab_merge_request_reopen_publishes_opened_event()
+    {
+        var secret = $"gl-sec-{Guid.NewGuid():N}";
+        var body = @"{""object_kind"":""merge_request"",""user"":{""id"":1,""username"":""alice""},""object_attributes"":{""id"":99,""iid"":5,""title"":""MR Title"",""source_branch"":""feature"",""target_branch"":""main"",""action"":""reopen"",""url"":""https://x""}}";
+        var headers = new Dictionary<string, string>
+        {
+            ["X-Gitlab-Event"] = "Merge Request Hook",
+            ["X-Gitlab-Event-UUID"] = $"gl-reopen-{Guid.NewGuid():N}",
+            ["X-Gitlab-Token"] = secret
+        };
+
+        var (webhookId, repositoryId) = await SeedAsync(ProviderKind.GitLab, secret).ConfigureAwait(false);
+        ClearCapturedEvents();
+
+        await SendReceiveWebhookAsync(webhookId, body, headers).ConfigureAwait(false);
+
+        SnapshotCapturedEvents().OfType<PullRequestOpenedEvent>().ShouldContain(e => e.RepositoryId == repositoryId && e.Number == 5 && e.AuthorName == "alice");
+    }
+
+    [Fact]
     public async Task GitLab_merge_request_update_with_oldrev_publishes_synchronized_event()
     {
         // A real code push to an open MR: GitLab fires action:"update" WITH object_attributes.oldrev.
