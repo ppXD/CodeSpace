@@ -158,6 +158,28 @@ public class ReceiveWebhookFlowTests
     }
 
     [Fact]
+    public async Task GitLab_draft_merge_request_via_draft_field_surfaces_isDraft()
+    {
+        // The newer GitLab field (object_attributes.draft, 13.2+) — the dominant path on current
+        // instances. Complements the legacy work_in_progress test above.
+        var secret = $"gl-sec-{Guid.NewGuid():N}";
+        var body = @"{""object_kind"":""merge_request"",""user"":{""id"":1,""username"":""alice""},""object_attributes"":{""id"":99,""iid"":5,""title"":""Draft: MR"",""source_branch"":""feature"",""target_branch"":""main"",""action"":""open"",""draft"":true,""url"":""https://x""}}";
+        var headers = new Dictionary<string, string>
+        {
+            ["X-Gitlab-Event"] = "Merge Request Hook",
+            ["X-Gitlab-Event-UUID"] = $"gl-draftfield-{Guid.NewGuid():N}",
+            ["X-Gitlab-Token"] = secret
+        };
+
+        var (webhookId, repositoryId) = await SeedAsync(ProviderKind.GitLab, secret).ConfigureAwait(false);
+        ClearCapturedEvents();
+
+        await SendReceiveWebhookAsync(webhookId, body, headers).ConfigureAwait(false);
+
+        SnapshotCapturedEvents().OfType<PullRequestOpenedEvent>().ShouldContain(e => e.RepositoryId == repositoryId && e.Number == 5 && e.IsDraft);
+    }
+
+    [Fact]
     public async Task GitLab_merge_request_update_with_oldrev_publishes_synchronized_event()
     {
         // A real code push to an open MR: GitLab fires action:"update" WITH object_attributes.oldrev.
@@ -242,6 +264,33 @@ public class ReceiveWebhookFlowTests
         var secret = $"gh-sec-{Guid.NewGuid():N}";
         var body = @"{""action"":""opened""}";
         var deliveryId = $"gh-wrongshape-{Guid.NewGuid():N}";
+        var headers = new Dictionary<string, string>
+        {
+            ["X-GitHub-Event"] = "pull_request",
+            ["X-GitHub-Delivery"] = deliveryId,
+            ["X-Hub-Signature-256"] = ComputeGitHubSignature(body, secret)
+        };
+
+        var (webhookId, _) = await SeedAsync(ProviderKind.GitHub, secret).ConfigureAwait(false);
+        ClearCapturedEvents();
+
+        await SendReceiveWebhookAsync(webhookId, body, headers).ConfigureAwait(false);
+
+        await AssertWebhookLastReceivedSetAsync(webhookId).ConfigureAwait(false);
+        SnapshotCapturedEvents().ShouldBeEmpty();
+        await AssertMalformedAuditWrittenAsync(deliveryId).ConfigureAwait(false);
+    }
+
+    [Fact]
+    public async Task GitHub_pull_request_with_non_int32_number_is_audited_and_publishes_nothing()
+    {
+        // A signed payload whose `number` is a valid JSON number that doesn't fit Int32 (provider
+        // quirk / overflow / hand-crafted). JsonElement.GetInt32() throws FormatException — which must
+        // be handled as a malformed payload (200 + audit), NOT escape as a 500 the way a missing field
+        // (KeyNotFoundException) or non-JSON body (JsonException) already are.
+        var secret = $"gh-sec-{Guid.NewGuid():N}";
+        var body = @"{""action"":""opened"",""pull_request"":{""id"":1,""number"":99999999999,""title"":""x"",""head"":{""ref"":""f"",""sha"":""s""},""base"":{""ref"":""main""},""user"":{""id"":5,""login"":""u""},""html_url"":""https://x""}}";
+        var deliveryId = $"gh-badnum-{Guid.NewGuid():N}";
         var headers = new Dictionary<string, string>
         {
             ["X-GitHub-Event"] = "pull_request",

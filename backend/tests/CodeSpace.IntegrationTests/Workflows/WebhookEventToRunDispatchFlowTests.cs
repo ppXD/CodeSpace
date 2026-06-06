@@ -125,6 +125,22 @@ public class WebhookEventToRunDispatchFlowTests
         payload.TryGetProperty("sourceBranch", out _).ShouldBeFalse();
     }
 
+    [Fact]
+    public async Task PrOpened_run_payload_carries_isDraft_true_for_a_draft_pr()
+    {
+        // Load-bearing case for #231: a DRAFT pr.opened must persist isDraft:true into the run
+        // payload so a workflow can gate on {{trigger.isDraft}}. The full-keys Facts pin the false
+        // case; this proves the true value survives publish → dispatch → NormalizedPayloadJson write.
+        var ctx = await SeedAsync();
+        var configJson = $$"""{ "repositories": [{ "repositoryId": "{{ctx.RepositoryId}}" }] }""";
+        await SeedActivationAsync(ctx.WorkflowId, "trigger.pr.opened", configJson);
+
+        await PublishAndCommitAsync(BuildOpenedEvent(ctx.RepositoryId, isDraft: true));
+
+        var (_, payload) = await LoadRunAndPayloadAsync(ctx.WorkflowId);
+        payload.GetProperty("isDraft").GetBoolean().ShouldBeTrue();
+    }
+
     // ─── Match-path contract (parametrized — both triggers obey identically) ────
 
     [Theory]
@@ -311,7 +327,7 @@ public class WebhookEventToRunDispatchFlowTests
         _ => throw new ArgumentOutOfRangeException(nameof(kind), kind, "Unknown trigger kind"),
     };
 
-    private static PullRequestOpenedEvent BuildOpenedEvent(Guid repositoryId, string[]? labels = null, string? providerEventId = null) => new()
+    private static PullRequestOpenedEvent BuildOpenedEvent(Guid repositoryId, string[]? labels = null, string? providerEventId = null, bool isDraft = false) => new()
     {
         RepositoryId = repositoryId,
         ProviderEventId = providerEventId ?? $"delivery-{Guid.NewGuid():N}",
@@ -326,6 +342,7 @@ public class WebhookEventToRunDispatchFlowTests
         AuthorName = "alice",
         WebUrl = "https://gh.local/acme/api/pull/42",
         Labels = labels ?? Array.Empty<string>(),
+        IsDraft = isDraft,
     };
 
     private static PullRequestSynchronizedEvent BuildSynchronizedEvent(Guid repositoryId, string[]? labels = null, string? providerEventId = null) => new()

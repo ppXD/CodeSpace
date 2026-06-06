@@ -112,7 +112,13 @@ public sealed class WebhookIngestionService : IWebhookIngestionService, IScopedD
         {
             normalizedEvent = normalizer.Normalize(webhook.RepositoryId, body, headers);
         }
-        catch (Exception ex) when (ex is JsonException or KeyNotFoundException or InvalidOperationException)
+        // Every way a normalizer can fail to read an untrusted body: JsonException (not JSON),
+        // KeyNotFoundException (missing GetProperty), InvalidOperationException (GetString/GetBoolean
+        // on the wrong ValueKind), FormatException/OverflowException (GetInt32 on a JSON number that
+        // isn't a valid Int32 — a float, scientific notation, or an out-of-range value). All are
+        // malformed-payload symptoms, not system faults, so they audit + return 200 rather than
+        // escaping as a 500 (which makes providers retry-storm / GitLab auto-disable the webhook).
+        catch (Exception ex) when (ex is JsonException or KeyNotFoundException or InvalidOperationException or FormatException or OverflowException)
         {
             await AuditMalformedPayloadAsync(webhook, headers, ex, cancellationToken).ConfigureAwait(false);
             return;
