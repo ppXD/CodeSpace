@@ -56,6 +56,17 @@ public class GitLabEventNormalizerTests
     }
 
     [Fact]
+    public void Normalize_throws_on_non_int32_iid()
+    {
+        // A GitLab `iid` too large for Int32 → GetInt32() throws FormatException, the numeric-parse
+        // case WebhookIngestionService's malformed-payload catch must also handle (else it 500s).
+        var headers = new Dictionary<string, string> { ["X-Gitlab-Event"] = "Merge Request Hook" };
+        var body = """{"object_kind":"merge_request","user":{"id":1,"username":"u"},"object_attributes":{"id":99,"iid":99999999999,"title":"x","url":"x","source_branch":"f","target_branch":"main","action":"open"}}""";
+
+        Should.Throw<FormatException>(() => _normalizer.Normalize(_repositoryId, body, headers));
+    }
+
+    [Fact]
     public void Normalize_push_hook_returns_PushReceivedEvent()
     {
         var headers = new Dictionary<string, string>

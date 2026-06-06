@@ -59,6 +59,19 @@ public class GitHubEventNormalizerTests
     }
 
     [Fact]
+    public void Normalize_throws_on_non_int32_number()
+    {
+        // A JSON number present but too large for Int32 makes GetInt32() throw FormatException —
+        // a distinct type from the missing-field (KeyNotFoundException) and non-JSON (JsonException)
+        // cases. Pinned because WebhookIngestionService's malformed-payload catch MUST include it,
+        // else such a payload escapes as a 500.
+        var headers = new Dictionary<string, string> { ["X-GitHub-Event"] = "pull_request" };
+        var body = """{"action":"opened","pull_request":{"id":1,"number":99999999999,"title":"x","head":{"ref":"f","sha":"s"},"base":{"ref":"main"},"user":{"id":5,"login":"u"},"html_url":"x"}}""";
+
+        Should.Throw<FormatException>(() => _normalizer.Normalize(_repositoryId, body, headers));
+    }
+
+    [Fact]
     public void Normalize_pull_request_reopened_returns_PullRequestOpenedEvent()
     {
         // Reopening re-enters the review / CI state; GitHub Actions treats `reopened` like `opened`
@@ -110,6 +123,30 @@ public class GitHubEventNormalizerTests
         var result = _normalizer.Normalize(_repositoryId, body, headers).ShouldBeOfType<PullRequestOpenedEvent>();
 
         result.IsDraft.ShouldBe(expected);
+    }
+
+    [Fact]
+    public void Normalize_pull_request_reopened_with_draft_true_surfaces_isDraft()
+    {
+        // Cross-feature guard (#230 × #231): reopen routes through BuildOpened, which reads draft,
+        // so a draft PR that is reopened must still carry IsDraft=true.
+        var headers = new Dictionary<string, string> { ["X-GitHub-Event"] = "pull_request" };
+        var body = """
+            {
+              "action": "reopened",
+              "pull_request": {
+                "id": 1, "number": 7, "title": "x", "draft": true,
+                "head": { "ref": "f", "sha": "s" },
+                "base": { "ref": "main" },
+                "user": { "id": 5, "login": "u" },
+                "html_url": "x"
+              }
+            }
+            """;
+
+        var result = _normalizer.Normalize(_repositoryId, body, headers).ShouldBeOfType<PullRequestOpenedEvent>();
+
+        result.IsDraft.ShouldBeTrue();
     }
 
     [Fact]
