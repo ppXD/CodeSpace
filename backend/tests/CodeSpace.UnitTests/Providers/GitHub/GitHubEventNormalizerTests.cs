@@ -59,6 +59,32 @@ public class GitHubEventNormalizerTests
     }
 
     [Fact]
+    public void Normalize_pull_request_reopened_returns_PullRequestOpenedEvent()
+    {
+        // Reopening re-enters the review / CI state; GitHub Actions treats `reopened` like `opened`
+        // by default, so it must fire the same opened event (previously fell through to null).
+        var headers = new Dictionary<string, string> { ["X-GitHub-Event"] = "pull_request" };
+        var body = """
+            {
+              "action": "reopened",
+              "pull_request": {
+                "id": 123, "number": 7, "title": "Reopened PR",
+                "head": { "ref": "feature", "sha": "s" },
+                "base": { "ref": "main" },
+                "user": { "id": 5, "login": "octocat" },
+                "html_url": "https://x"
+              }
+            }
+            """;
+
+        var result = _normalizer.Normalize(_repositoryId, body, headers).ShouldBeOfType<PullRequestOpenedEvent>();
+
+        result.Number.ShouldBe(7);
+        result.Title.ShouldBe("Reopened PR");
+        result.AuthorName.ShouldBe("octocat");
+    }
+
+    [Fact]
     public void Normalize_push_returns_PushReceivedEvent()
     {
         var headers = new Dictionary<string, string>

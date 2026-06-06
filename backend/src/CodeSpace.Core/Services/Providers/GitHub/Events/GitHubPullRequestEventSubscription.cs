@@ -21,6 +21,9 @@ public sealed class GitHubPullRequestEventSubscription : IProviderEventSubscript
         return action switch
         {
             "opened" => BuildOpened(repositoryId, deliveryId, now, pr),
+            // Reopening re-enters the "needs review / CI" state. GitHub Actions bundles `reopened`
+            // into its default pull_request trigger set alongside `opened`, so we fire the same event.
+            "reopened" => BuildOpened(repositoryId, deliveryId, now, pr),
             "synchronize" => BuildSynchronized(repositoryId, deliveryId, now, pr, root),
             "closed" => pr.GetProperty("merged").GetBoolean()
                 ? BuildMerged(repositoryId, deliveryId, now, pr, root)

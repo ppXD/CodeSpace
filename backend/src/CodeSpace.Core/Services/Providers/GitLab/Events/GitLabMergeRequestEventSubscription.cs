@@ -21,6 +21,9 @@ public sealed class GitLabMergeRequestEventSubscription : IProviderEventSubscrip
         return action switch
         {
             "open" => BuildOpened(repositoryId, deliveryId, now, attrs, root),
+            // GitLab fires action:"reopen" when an MR is reopened — same re-enters-review semantics as
+            // `open` (and GitHub's `reopened`), so we map it to the same opened event.
+            "reopen" => BuildOpened(repositoryId, deliveryId, now, attrs, root),
             "update" => HasCodeChange(attrs) ? BuildSynchronized(repositoryId, deliveryId, now, attrs, root) : null,
             "merge" => BuildMerged(repositoryId, deliveryId, now, attrs, root),
             "close" => BuildClosed(repositoryId, deliveryId, now, attrs, root),
