@@ -71,6 +71,57 @@ public class ReceiveWebhookFlowTests
     }
 
     [Fact]
+    public async Task GitLab_merge_request_update_with_oldrev_publishes_synchronized_event()
+    {
+        // A real code push to an open MR: GitLab fires action:"update" WITH object_attributes.oldrev.
+        // The full HTTP → signature → normalize path must publish a PullRequestSynchronizedEvent so
+        // `trigger.pr.updated` workflows fire on actual new commits.
+        var secret = $"gl-sec-{Guid.NewGuid():N}";
+        var body = @"{""object_kind"":""merge_request"",""user"":{""id"":1,""username"":""alice""},""object_attributes"":{""id"":99,""iid"":5,""title"":""MR Title"",""source_branch"":""feature"",""target_branch"":""main"",""action"":""update"",""oldrev"":""old-sha"",""last_commit"":{""id"":""new-sha""},""url"":""https://x""}}";
+        var headers = new Dictionary<string, string>
+        {
+            ["X-Gitlab-Event"] = "Merge Request Hook",
+            ["X-Gitlab-Event-UUID"] = "uuid-gl-update-push",
+            ["X-Gitlab-Token"] = secret
+        };
+
+        var (webhookId, repositoryId) = await SeedAsync(ProviderKind.GitLab, secret).ConfigureAwait(false);
+        ClearCapturedEvents();
+
+        await SendReceiveWebhookAsync(webhookId, body, headers).ConfigureAwait(false);
+
+        await AssertWebhookLastReceivedSetAsync(webhookId).ConfigureAwait(false);
+
+        var captured = SnapshotCapturedEvents();
+        captured.OfType<PullRequestSynchronizedEvent>().ShouldContain(e => e.RepositoryId == repositoryId && e.Number == 5 && e.NewHeadSha == "new-sha");
+    }
+
+    [Fact]
+    public async Task GitLab_merge_request_metadata_update_without_oldrev_publishes_nothing()
+    {
+        // A metadata-only MR edit (label / assignee / description) also fires action:"update" but
+        // WITHOUT object_attributes.oldrev. Ingestion must succeed (LastReceived set) yet publish NO
+        // event — otherwise every label edit would spuriously start a `trigger.pr.updated` run with
+        // empty head SHAs. Regression guard for the GitLab metadata-update false-fire.
+        var secret = $"gl-sec-{Guid.NewGuid():N}";
+        var body = @"{""object_kind"":""merge_request"",""user"":{""id"":1,""username"":""alice""},""object_attributes"":{""id"":99,""iid"":5,""title"":""MR Title"",""source_branch"":""feature"",""target_branch"":""main"",""action"":""update"",""url"":""https://x""}}";
+        var headers = new Dictionary<string, string>
+        {
+            ["X-Gitlab-Event"] = "Merge Request Hook",
+            ["X-Gitlab-Event-UUID"] = "uuid-gl-update-meta",
+            ["X-Gitlab-Token"] = secret
+        };
+
+        var (webhookId, _) = await SeedAsync(ProviderKind.GitLab, secret).ConfigureAwait(false);
+        ClearCapturedEvents();
+
+        await SendReceiveWebhookAsync(webhookId, body, headers).ConfigureAwait(false);
+
+        await AssertWebhookLastReceivedSetAsync(webhookId).ConfigureAwait(false);
+        SnapshotCapturedEvents().ShouldBeEmpty();
+    }
+
+    [Fact]
     public async Task Invalid_signature_throws_Unauthorized_and_publishes_nothing()
     {
         var secret = $"gh-sec-{Guid.NewGuid():N}";

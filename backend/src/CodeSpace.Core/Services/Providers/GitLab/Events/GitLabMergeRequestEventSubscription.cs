@@ -21,7 +21,7 @@ public sealed class GitLabMergeRequestEventSubscription : IProviderEventSubscrip
         return action switch
         {
             "open" => BuildOpened(repositoryId, deliveryId, now, attrs, root),
-            "update" => BuildSynchronized(repositoryId, deliveryId, now, attrs, root),
+            "update" => HasCodeChange(attrs) ? BuildSynchronized(repositoryId, deliveryId, now, attrs, root) : null,
             "merge" => BuildMerged(repositoryId, deliveryId, now, attrs, root),
             "close" => BuildClosed(repositoryId, deliveryId, now, attrs, root),
             _ => null
@@ -49,6 +49,20 @@ public sealed class GitLabMergeRequestEventSubscription : IProviderEventSubscrip
             Labels = ExtractLabels(root)
         };
     }
+
+    /// <summary>
+    /// GitLab fires <c>action:"update"</c> for ANY merge-request mutation — label / assignee /
+    /// description / milestone edits AND code pushes alike. It includes
+    /// <c>object_attributes.oldrev</c> ONLY when the source-branch HEAD actually moved (new
+    /// commits were pushed). We therefore map an <c>update</c> to a code-change
+    /// (<see cref="PullRequestSynchronizedEvent"/>) exclusively when <c>oldrev</c> is present;
+    /// metadata-only edits return null and are ignored — mirroring how GitHub keeps its
+    /// <c>synchronize</c> action (a push) distinct from <c>labeled</c>/<c>edited</c> (which we
+    /// also ignore). Without this gate every label/assignee edit would spuriously fire a
+    /// <c>trigger.pr.updated</c> run with empty head SHAs.
+    /// </summary>
+    private static bool HasCodeChange(JsonElement attrs) =>
+        attrs.TryGetProperty("oldrev", out var oldRev) && oldRev.ValueKind == JsonValueKind.String && !string.IsNullOrEmpty(oldRev.GetString());
 
     private static PullRequestSynchronizedEvent BuildSynchronized(Guid repositoryId, string deliveryId, DateTimeOffset now, JsonElement attrs, JsonElement root)
     {
