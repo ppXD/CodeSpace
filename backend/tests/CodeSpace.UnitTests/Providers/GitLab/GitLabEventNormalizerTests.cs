@@ -150,6 +150,35 @@ public class GitLabEventNormalizerTests
         result.AuthorName.ShouldBe("alice");
     }
 
+    [Theory]
+    [InlineData("\"draft\": true,", true)]               // GitLab 13.2+ draft flag
+    [InlineData("\"work_in_progress\": true,", true)]    // legacy WIP flag on older self-hosted instances
+    [InlineData("\"draft\": false,", false)]             // explicit non-draft
+    [InlineData("", false)]                               // neither field → treated as ready
+    public void Normalize_merge_request_open_reads_draft_flag(string draftFragment, bool expected)
+    {
+        // GitLab surfaces draft via object_attributes.draft (newer) or work_in_progress (legacy);
+        // either being true → IsDraft. Surfaced as {{trigger.isDraft}} for workflow gating.
+        var headers = new Dictionary<string, string> { ["X-Gitlab-Event"] = "Merge Request Hook" };
+        var body = $$"""
+            {
+              "object_kind": "merge_request",
+              "user": { "id": 1, "username": "alice" },
+              "object_attributes": {
+                "id": 99, "iid": 5, "title": "x", "url": "x",
+                "source_branch": "f", "target_branch": "main",
+                "action": "open",
+                {{draftFragment}}
+                "description": "d"
+              }
+            }
+            """;
+
+        var result = _normalizer.Normalize(_repositoryId, body, headers).ShouldBeOfType<PullRequestOpenedEvent>();
+
+        result.IsDraft.ShouldBe(expected);
+    }
+
     [Fact]
     public void Normalize_merge_request_update_returns_PullRequestSynchronizedEvent()
     {

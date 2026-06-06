@@ -31,7 +31,8 @@ public sealed class PrUpdatedMatcher : IRunSourceMatcher
             number = synced.Number,
             previousHeadSha = synced.PreviousHeadSha,
             newHeadSha = synced.NewHeadSha,
-            labels = synced.Labels
+            labels = synced.Labels,
+            isDraft = synced.IsDraft
         };
 
         return JsonSerializer.SerializeToElement(payload);

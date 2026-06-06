@@ -90,6 +90,7 @@ public class WebhookEventToRunDispatchFlowTests
         payload.GetProperty("authorName").GetString().ShouldBe("alice");
         payload.GetProperty("webUrl").GetString().ShouldBe("https://gh.local/acme/api/pull/42");
         payload.GetProperty("labels").EnumerateArray().Select(l => l.GetString()).ShouldBe(new[] { "bug", "needs-review" });
+        payload.GetProperty("isDraft").GetBoolean().ShouldBeFalse();
     }
 
     [Fact]
@@ -116,6 +117,7 @@ public class WebhookEventToRunDispatchFlowTests
         payload.GetProperty("previousHeadSha").GetString().ShouldBe("oldsha");
         payload.GetProperty("newHeadSha").GetString().ShouldBe("newsha");
         payload.GetProperty("labels").EnumerateArray().Select(l => l.GetString()).ShouldBe(new[] { "wip" });
+        payload.GetProperty("isDraft").GetBoolean().ShouldBeFalse();
 
         // The trigger-specific keys MUST NOT appear (would mean PrOpened payload got
         // mistakenly built for a sync event — matcher.GetType() switching is the bug).

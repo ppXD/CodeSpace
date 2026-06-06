@@ -50,7 +50,8 @@ public sealed class GitHubPullRequestEventSubscription : IProviderEventSubscript
             AuthorExternalId = user.GetProperty("id").GetRawText(),
             AuthorName = user.GetProperty("login").GetString()!,
             WebUrl = pr.GetProperty("html_url").GetString()!,
-            Labels = ExtractLabels(pr)
+            Labels = ExtractLabels(pr),
+            IsDraft = ReadIsDraft(pr)
         };
     }
 
@@ -63,8 +64,16 @@ public sealed class GitHubPullRequestEventSubscription : IProviderEventSubscript
         Number = pr.GetProperty("number").GetInt32(),
         PreviousHeadSha = root.GetProperty("before").GetString()!,
         NewHeadSha = root.GetProperty("after").GetString()!,
-        Labels = ExtractLabels(pr)
+        Labels = ExtractLabels(pr),
+        IsDraft = ReadIsDraft(pr)
     };
+
+    /// <summary>
+    /// GitHub sets <c>pull_request.draft = true</c> while a PR is a draft. Absent / non-boolean →
+    /// false (treat as ready), so a provider that omits the field never makes a PR look like a draft.
+    /// </summary>
+    private static bool ReadIsDraft(JsonElement pr) =>
+        pr.TryGetProperty("draft", out var draft) && draft.ValueKind == JsonValueKind.True;
 
     /// <summary>
     /// GitHub PR webhooks include the full label state at <c>pull_request.labels[]</c> on

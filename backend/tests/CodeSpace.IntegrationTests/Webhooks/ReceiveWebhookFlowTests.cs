@@ -114,6 +114,50 @@ public class ReceiveWebhookFlowTests
     }
 
     [Fact]
+    public async Task GitHub_draft_pull_request_opened_surfaces_isDraft()
+    {
+        // A real draft PR: GitHub sets pull_request.draft=true. The published event must carry
+        // IsDraft=true so a workflow can gate on {{trigger.isDraft}} — we surface, never suppress.
+        var secret = $"gh-sec-{Guid.NewGuid():N}";
+        var body = @"{""action"":""opened"",""pull_request"":{""id"":1234567,""number"":42,""title"":""WIP feature"",""draft"":true,""head"":{""ref"":""feature"",""sha"":""s""},""base"":{""ref"":""main""},""user"":{""id"":583231,""login"":""octocat""},""html_url"":""https://x""}}";
+        var headers = new Dictionary<string, string>
+        {
+            ["X-GitHub-Event"] = "pull_request",
+            ["X-GitHub-Delivery"] = $"gh-draft-{Guid.NewGuid():N}",
+            ["X-Hub-Signature-256"] = ComputeGitHubSignature(body, secret)
+        };
+
+        var (webhookId, repositoryId) = await SeedAsync(ProviderKind.GitHub, secret).ConfigureAwait(false);
+        ClearCapturedEvents();
+
+        await SendReceiveWebhookAsync(webhookId, body, headers).ConfigureAwait(false);
+
+        SnapshotCapturedEvents().OfType<PullRequestOpenedEvent>().ShouldContain(e => e.RepositoryId == repositoryId && e.Number == 42 && e.IsDraft);
+    }
+
+    [Fact]
+    public async Task GitLab_draft_merge_request_opened_surfaces_isDraft()
+    {
+        // GitLab signals draft via object_attributes.draft (newer) or work_in_progress (legacy).
+        // Use the legacy field here to prove older self-hosted instances still surface IsDraft.
+        var secret = $"gl-sec-{Guid.NewGuid():N}";
+        var body = @"{""object_kind"":""merge_request"",""user"":{""id"":1,""username"":""alice""},""object_attributes"":{""id"":99,""iid"":5,""title"":""Draft: MR"",""source_branch"":""feature"",""target_branch"":""main"",""action"":""open"",""work_in_progress"":true,""url"":""https://x""}}";
+        var headers = new Dictionary<string, string>
+        {
+            ["X-Gitlab-Event"] = "Merge Request Hook",
+            ["X-Gitlab-Event-UUID"] = $"gl-draft-{Guid.NewGuid():N}",
+            ["X-Gitlab-Token"] = secret
+        };
+
+        var (webhookId, repositoryId) = await SeedAsync(ProviderKind.GitLab, secret).ConfigureAwait(false);
+        ClearCapturedEvents();
+
+        await SendReceiveWebhookAsync(webhookId, body, headers).ConfigureAwait(false);
+
+        SnapshotCapturedEvents().OfType<PullRequestOpenedEvent>().ShouldContain(e => e.RepositoryId == repositoryId && e.Number == 5 && e.IsDraft);
+    }
+
+    [Fact]
     public async Task GitLab_merge_request_update_with_oldrev_publishes_synchronized_event()
     {
         // A real code push to an open MR: GitLab fires action:"update" WITH object_attributes.oldrev.

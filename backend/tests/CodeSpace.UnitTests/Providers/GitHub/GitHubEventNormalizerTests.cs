@@ -84,6 +84,34 @@ public class GitHubEventNormalizerTests
         result.AuthorName.ShouldBe("octocat");
     }
 
+    [Theory]
+    [InlineData("\"draft\": true,", true)]     // GitHub marks draft PRs with pull_request.draft
+    [InlineData("\"draft\": false,", false)]   // explicit non-draft
+    [InlineData("", false)]                     // field omitted → treated as ready
+    public void Normalize_pull_request_opened_reads_draft_flag(string draftFragment, bool expected)
+    {
+        // GitHub surfaces draft state on the PR object; we pass it through as IsDraft so a workflow
+        // can gate on {{trigger.isDraft}}. An omitted field defaults to not-draft (never null).
+        var headers = new Dictionary<string, string> { ["X-GitHub-Event"] = "pull_request" };
+        var body = $$"""
+            {
+              "action": "opened",
+              "pull_request": {
+                "id": 1, "number": 7, "title": "x",
+                {{draftFragment}}
+                "head": { "ref": "f", "sha": "s" },
+                "base": { "ref": "main" },
+                "user": { "id": 5, "login": "octocat" },
+                "html_url": "https://x"
+              }
+            }
+            """;
+
+        var result = _normalizer.Normalize(_repositoryId, body, headers).ShouldBeOfType<PullRequestOpenedEvent>();
+
+        result.IsDraft.ShouldBe(expected);
+    }
+
     [Fact]
     public void Normalize_push_returns_PushReceivedEvent()
     {

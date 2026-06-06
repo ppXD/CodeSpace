@@ -176,6 +176,63 @@ public class TriggerMatcherTests
         labelsEl.GetArrayLength().ShouldBe(0);
     }
 
+    [Fact]
+    public void PrOpened_payload_surfaces_isDraft()
+    {
+        // A draft PR → isDraft:true; a non-draft (the default helper) → isDraft:false, never
+        // omitted. Lets a workflow gate downstream nodes on {{trigger.isDraft}} (e.g. skip AI
+        // review while the PR is still a draft).
+        var draft = new PullRequestOpenedEvent
+        {
+            RepositoryId = RepoA,
+            ProviderEventId = "1",
+            OccurredAt = DateTimeOffset.UtcNow,
+            ExternalPullRequestId = "1",
+            Number = 42,
+            Title = "x",
+            SourceBranch = "f",
+            TargetBranch = "main",
+            AuthorExternalId = "u",
+            AuthorName = "u",
+            WebUrl = "x",
+            IsDraft = true
+        };
+
+        new PrOpenedMatcher().BuildPayload(draft).GetProperty("isDraft").GetBoolean().ShouldBeTrue();
+        new PrOpenedMatcher().BuildPayload(OpenedEvent(RepoA)).GetProperty("isDraft").GetBoolean().ShouldBeFalse();
+    }
+
+    [Fact]
+    public void PrUpdated_payload_surfaces_isDraft()
+    {
+        // Mirror of PrOpened — the synchronize-side payload exposes the same isDraft flag so a
+        // workflow targeting either trigger reads {{trigger.isDraft}} with a uniform shape.
+        var draft = new PullRequestSynchronizedEvent
+        {
+            RepositoryId = RepoA,
+            ProviderEventId = "1",
+            OccurredAt = DateTimeOffset.UtcNow,
+            ExternalPullRequestId = "1",
+            Number = 7,
+            PreviousHeadSha = "a",
+            NewHeadSha = "b",
+            IsDraft = true
+        };
+        var ready = new PullRequestSynchronizedEvent
+        {
+            RepositoryId = RepoA,
+            ProviderEventId = "1",
+            OccurredAt = DateTimeOffset.UtcNow,
+            ExternalPullRequestId = "1",
+            Number = 7,
+            PreviousHeadSha = "a",
+            NewHeadSha = "b"
+        };
+
+        new PrUpdatedMatcher().BuildPayload(draft).GetProperty("isDraft").GetBoolean().ShouldBeTrue();
+        new PrUpdatedMatcher().BuildPayload(ready).GetProperty("isDraft").GetBoolean().ShouldBeFalse();
+    }
+
     // ─── Schema upgrade: `repositories: [{ repositoryId, labels }]` shape + label AND-filter ────────
 
     [Fact]
