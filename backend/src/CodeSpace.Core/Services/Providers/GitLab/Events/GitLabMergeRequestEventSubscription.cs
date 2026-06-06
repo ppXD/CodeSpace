@@ -49,7 +49,8 @@ public sealed class GitLabMergeRequestEventSubscription : IProviderEventSubscrip
             AuthorExternalId = user.GetProperty("id").GetRawText(),
             AuthorName = user.GetProperty("username").GetString()!,
             WebUrl = attrs.GetProperty("url").GetString()!,
-            Labels = ExtractLabels(root)
+            Labels = ExtractLabels(root),
+            IsDraft = ReadIsDraft(attrs)
         };
     }
 
@@ -81,9 +82,19 @@ public sealed class GitLabMergeRequestEventSubscription : IProviderEventSubscrip
             Number = attrs.GetProperty("iid").GetInt32(),
             PreviousHeadSha = oldRev,
             NewHeadSha = newRev,
-            Labels = ExtractLabels(root)
+            Labels = ExtractLabels(root),
+            IsDraft = ReadIsDraft(attrs)
         };
     }
+
+    /// <summary>
+    /// GitLab marks a draft MR with <c>object_attributes.draft = true</c> (GitLab 13.2+), or the
+    /// legacy <c>work_in_progress</c> on older instances. Either being true → draft; absent /
+    /// non-boolean → false. Reading both keeps older self-hosted GitLab instances working.
+    /// </summary>
+    private static bool ReadIsDraft(JsonElement attrs) =>
+        (attrs.TryGetProperty("draft", out var draft) && draft.ValueKind == JsonValueKind.True)
+        || (attrs.TryGetProperty("work_in_progress", out var wip) && wip.ValueKind == JsonValueKind.True);
 
     /// <summary>
     /// GitLab Merge Request Hook payloads place the authoritative current label set at the

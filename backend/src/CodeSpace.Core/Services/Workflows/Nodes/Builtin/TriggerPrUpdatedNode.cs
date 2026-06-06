@@ -24,7 +24,8 @@ public sealed class TriggerPrUpdatedNode : INodeRuntime
                 "number": { "type": "integer" },
                 "previousHeadSha": { "type": "string" },
                 "newHeadSha": { "type": "string" },
-                "labels": { "type": "array", "items": { "type": "string" } }
+                "labels": { "type": "array", "items": { "type": "string" } },
+                "isDraft": { "type": "boolean" }
               }
             }
             """)
