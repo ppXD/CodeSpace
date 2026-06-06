@@ -1209,8 +1209,10 @@ function NodeInspector({
   return (
     <div className="wf-inspector-body">
       <header className="wf-inspector-h">
-        <div className="wf-inspector-h-id">{nodeId}</div>
-        <div className="wf-inspector-h-type">{manifest.displayName}</div>
+        {/* Lead with the human name (the editable Label below, falling back to the type's display name);
+            the node id is the immutable reference key (used in {{nodes.<id>.outputs.…}}), shown muted. */}
+        <div className="wf-inspector-h-name">{label || manifest.displayName}</div>
+        <div className="wf-inspector-h-ref">{nodeId}</div>
         <code className="wf-inspector-h-key">{manifest.typeKey}</code>
       </header>
 

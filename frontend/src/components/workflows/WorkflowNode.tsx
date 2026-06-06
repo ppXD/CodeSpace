@@ -100,8 +100,8 @@ function ContainerNode({ id, d, selected }: { id: string; d: WorkflowNodeData; s
       <Handle type="target" position={Position.Left} className="wf-rf-handle" />
       <div className="wf-rf-loop-head">
         <span className="wf-rf-loop-icon">{iconFor(d)}</span>
-        <span className="wf-rf-loop-id">{d.nodeId}</span>
-        <span className="wf-rf-loop-type">{d.label ?? d.displayName}</span>
+        <span className="wf-rf-loop-title">{d.label ?? d.displayName}</span>
+        <span className="wf-rf-loop-ref">{d.nodeId}</span>
       </div>
       <Handle type="source" position={Position.Right} className="wf-rf-handle" />
       {isTry ? (
@@ -136,8 +136,11 @@ export function WorkflowNode({ id, data, selected }: NodeProps) {
       <div className="wf-rf-node-bar" />
       <div className="wf-rf-node-icon">{iconFor(d)}</div>
       <div className="wf-rf-node-body">
-        <div className="wf-rf-node-id">{d.nodeId}</div>
-        <div className="wf-rf-node-type">{d.label ?? d.displayName}</div>
+        {/* Lead with the human name (the editable Label, falling back to the node type's display name);
+            the node id is the immutable reference key (used in {{nodes.<id>.outputs.…}}), shown as a
+            muted sub-line so it's visible to copy but no longer dominates the card. */}
+        <div className="wf-rf-node-title">{d.label ?? d.displayName}</div>
+        <div className="wf-rf-node-ref">{d.nodeId}</div>
         {fields.length > 0 && (
           <ul className="wf-rf-node-fields">
             {fields.map((f) => (
