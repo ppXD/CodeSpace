@@ -6,6 +6,7 @@ using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Credentials;
 using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.Messages.Commands.Webhooks;
+using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Enums;
 using CodeSpace.Messages.Events.Issue;
 using CodeSpace.Messages.Events.PullRequest;
@@ -119,6 +120,57 @@ public class ReceiveWebhookFlowTests
 
         await AssertWebhookLastReceivedSetAsync(webhookId).ConfigureAwait(false);
         SnapshotCapturedEvents().ShouldBeEmpty();
+    }
+
+    [Fact]
+    public async Task GitHub_malformed_json_body_is_audited_and_publishes_nothing()
+    {
+        // A signed payload that isn't valid JSON (provider API change, truncated delivery, or a
+        // hand-crafted request by someone holding the secret). The command MUST succeed (→ 200, not
+        // a 500 that makes GitHub mark the delivery failed and retry), publish nothing, and audit.
+        var secret = $"gh-sec-{Guid.NewGuid():N}";
+        var body = "this is not json at all";
+        var deliveryId = $"gh-malformed-{Guid.NewGuid():N}";
+        var headers = new Dictionary<string, string>
+        {
+            ["X-GitHub-Event"] = "pull_request",
+            ["X-GitHub-Delivery"] = deliveryId,
+            ["X-Hub-Signature-256"] = ComputeGitHubSignature(body, secret)
+        };
+
+        var (webhookId, _) = await SeedAsync(ProviderKind.GitHub, secret).ConfigureAwait(false);
+        ClearCapturedEvents();
+
+        await SendReceiveWebhookAsync(webhookId, body, headers).ConfigureAwait(false);
+
+        await AssertWebhookLastReceivedSetAsync(webhookId).ConfigureAwait(false);
+        SnapshotCapturedEvents().ShouldBeEmpty();
+        await AssertMalformedAuditWrittenAsync(deliveryId).ConfigureAwait(false);
+    }
+
+    [Fact]
+    public async Task GitHub_wrong_shape_pull_request_payload_is_audited_and_publishes_nothing()
+    {
+        // Valid JSON, correct event header, but missing the pull_request object the normalizer
+        // requires — a shape it can't read. Same contract: 200 + audit + no publish (not a 404/500).
+        var secret = $"gh-sec-{Guid.NewGuid():N}";
+        var body = @"{""action"":""opened""}";
+        var deliveryId = $"gh-wrongshape-{Guid.NewGuid():N}";
+        var headers = new Dictionary<string, string>
+        {
+            ["X-GitHub-Event"] = "pull_request",
+            ["X-GitHub-Delivery"] = deliveryId,
+            ["X-Hub-Signature-256"] = ComputeGitHubSignature(body, secret)
+        };
+
+        var (webhookId, _) = await SeedAsync(ProviderKind.GitHub, secret).ConfigureAwait(false);
+        ClearCapturedEvents();
+
+        await SendReceiveWebhookAsync(webhookId, body, headers).ConfigureAwait(false);
+
+        await AssertWebhookLastReceivedSetAsync(webhookId).ConfigureAwait(false);
+        SnapshotCapturedEvents().ShouldBeEmpty();
+        await AssertMalformedAuditWrittenAsync(deliveryId).ConfigureAwait(false);
     }
 
     [Fact]
@@ -238,6 +290,18 @@ public class ReceiveWebhookFlowTests
         var db = scope.Resolve<CodeSpaceDbContext>();
         var webhook = await db.RepositoryWebhook.AsNoTracking().SingleAsync(w => w.Id == webhookId).ConfigureAwait(false);
         webhook.LastReceivedDate.ShouldNotBeNull();
+    }
+
+    private async Task AssertMalformedAuditWrittenAsync(string deliveryId)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        var rejected = await db.WorkflowRunRequest.AsNoTracking()
+            .SingleOrDefaultAsync(r => r.ExternalEventId == deliveryId && r.Status == WorkflowRunRequestStatus.Rejected).ConfigureAwait(false);
+        rejected.ShouldNotBeNull(customMessage:
+            "A signed-but-malformed payload MUST write a Rejected audit row AND the command MUST NOT throw — " +
+            "otherwise the provider gets a 500 and retry-storms / auto-disables the webhook. Check WebhookIngestionService.PublishNormalizedEventAsync.");
+        rejected.Error!.ShouldContain(WorkflowRunRequestRejectionReasons.MalformedPayload);
     }
 
     private void ClearCapturedEvents()

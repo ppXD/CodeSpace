@@ -21,6 +21,9 @@ public static class WorkflowRunRequestRejectionReasons
     /// <summary>Provider payload couldn't be mapped to a tracked event type (e.g. a "deployment" event for a repo subscribed only to PRs).</summary>
     public const string EventNotMapped = "event_not_mapped";
 
+    /// <summary>Signature passed but the body couldn't be parsed into the expected shape (non-JSON, or missing/mistyped fields the normalizer requires). We respond 200 + audit so the provider doesn't retry-storm / auto-disable the webhook.</summary>
+    public const string MalformedPayload = "malformed_payload";
+
     /// <summary>No <c>workflow_activation</c> row matched the normalised event. Workflow exists but doesn't subscribe to this event shape OR the filter (repository_id, etc.) excludes it.</summary>
     public const string NoMatchingActivation = "no_matching_activation";
 }

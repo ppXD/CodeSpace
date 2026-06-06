@@ -15,6 +15,7 @@ public class WorkflowRunRequestRejectionReasonsTests
     [InlineData("signature_invalid",      nameof(WorkflowRunRequestRejectionReasons.SignatureInvalid))]
     [InlineData("webhook_inactive",       nameof(WorkflowRunRequestRejectionReasons.WebhookInactive))]
     [InlineData("event_not_mapped",       nameof(WorkflowRunRequestRejectionReasons.EventNotMapped))]
+    [InlineData("malformed_payload",      nameof(WorkflowRunRequestRejectionReasons.MalformedPayload))]
     [InlineData("no_matching_activation", nameof(WorkflowRunRequestRejectionReasons.NoMatchingActivation))]
     public void Rejection_reason_string_form_is_pinned(string expected, string constantName)
     {
