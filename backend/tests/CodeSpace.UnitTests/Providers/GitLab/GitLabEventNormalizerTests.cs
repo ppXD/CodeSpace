@@ -127,6 +127,35 @@ public class GitLabEventNormalizerTests
         result.Number.ShouldBe(5);
     }
 
+    [Theory]
+    [InlineData("")]                       // oldrev key absent entirely — a metadata-only edit (label / assignee / description / milestone)
+    [InlineData("\"oldrev\": null,")]      // present but explicitly null
+    [InlineData("\"oldrev\": \"\",")]      // present but empty string
+    public void Normalize_merge_request_update_without_code_change_returns_null(string oldrevFragment)
+    {
+        // GitLab fires action:"update" for ANY MR mutation but includes object_attributes.oldrev
+        // ONLY when the source-branch HEAD moved (a code push). A metadata-only edit must NOT
+        // produce a Synchronized event — otherwise every label/assignee/description change would
+        // spuriously fire a `trigger.pr.updated` run with empty head SHAs. last_commit is present
+        // in every case below to prove the gate keys on oldrev specifically, not last_commit.
+        var headers = new Dictionary<string, string> { ["X-Gitlab-Event"] = "Merge Request Hook" };
+        var body = $$"""
+            {
+              "object_kind": "merge_request",
+              "user": { "id": 1, "username": "u" },
+              "object_attributes": {
+                "id": 99, "iid": 5, "title": "x", "url": "x",
+                "source_branch": "f", "target_branch": "main",
+                "action": "update",
+                {{oldrevFragment}}
+                "last_commit": { "id": "new-sha" }
+              }
+            }
+            """;
+
+        _normalizer.Normalize(_repositoryId, body, headers).ShouldBeNull();
+    }
+
     [Fact]
     public void Normalize_merge_request_merge_returns_PullRequestMergedEvent()
     {
