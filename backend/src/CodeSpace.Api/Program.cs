@@ -34,7 +34,7 @@ public class Program
 
             new DbUpRunner(new CodeSpaceConnectionString(configuration).Value).Run();
 
-            var host = CreateHostBuilder(args, configuration).Build();
+            var host = CreateHostBuilder(args).Build();
 
             Log.Information("Starting {Application} host...", application);
 
@@ -50,13 +50,21 @@ public class Program
         }
     }
 
-    private static IHostBuilder CreateHostBuilder(string[] args, IConfiguration configuration) =>
+    /// <summary>
+    /// Conventional <c>(string[]) =&gt; IHostBuilder</c> factory. The standard signature matters:
+    /// <c>WebApplicationFactory</c>'s <c>HostFactoryResolver</c> discovers this method and builds
+    /// the host in-memory for E2E tests WITHOUT running <see cref="Main"/> — which would otherwise
+    /// re-run the startup <c>DbUpRunner</c> against the configured (production) database. Config +
+    /// logger come from the host-builder context so the same wiring serves both <c>dotnet run</c>
+    /// and the test host.
+    /// </summary>
+    public static IHostBuilder CreateHostBuilder(string[] args) =>
         Host.CreateDefaultBuilder(args)
             .UseSerilog()
             .UseServiceProviderFactory(new AutofacServiceProviderFactory())
-            .ConfigureContainer<ContainerBuilder>(builder =>
+            .ConfigureContainer<ContainerBuilder>((context, builder) =>
             {
-                builder.RegisterModule(new CodeSpaceModule(Log.Logger, configuration));
+                builder.RegisterModule(new CodeSpaceModule(Log.Logger, context.Configuration));
             })
             .ConfigureWebHostDefaults(webBuilder =>
             {
