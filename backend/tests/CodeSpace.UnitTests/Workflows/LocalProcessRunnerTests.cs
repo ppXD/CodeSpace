@@ -1,4 +1,5 @@
-using CodeSpace.Core.Services.Workflows.Sandbox;
+using CodeSpace.Core.Services.Agents.Sandbox;
+using CodeSpace.Messages.Agents;
 using Shouldly;
 
 namespace CodeSpace.UnitTests.Workflows;

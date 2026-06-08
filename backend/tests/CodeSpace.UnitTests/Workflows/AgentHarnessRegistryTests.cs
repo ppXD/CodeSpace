@@ -1,5 +1,5 @@
-using CodeSpace.Core.Services.Workflows.Agents;
-using CodeSpace.Core.Services.Workflows.Sandbox;
+using CodeSpace.Core.Services.Agents;
+using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Enums;
 using Shouldly;
 

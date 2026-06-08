@@ -1,6 +1,6 @@
-using CodeSpace.Core.Services.Workflows.Sandbox;
+using CodeSpace.Messages.Agents;
 
-namespace CodeSpace.Core.Services.Workflows.Agents;
+namespace CodeSpace.Core.Services.Agents;
 
 /// <summary>
 /// Adapter for one coding-agent harness (Codex CLI, Claude Code, Aider, OpenCode, …). This is the

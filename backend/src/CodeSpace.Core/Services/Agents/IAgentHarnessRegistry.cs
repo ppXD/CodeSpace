@@ -1,4 +1,4 @@
-namespace CodeSpace.Core.Services.Workflows.Agents;
+namespace CodeSpace.Core.Services.Agents;
 
 /// <summary>
 /// Resolves an <see cref="IAgentHarness"/> by its <see cref="IAgentHarness.Kind"/> — same shape as

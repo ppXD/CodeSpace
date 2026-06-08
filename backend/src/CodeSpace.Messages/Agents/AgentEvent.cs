@@ -1,6 +1,6 @@
 using System.Text.Json;
 
-namespace CodeSpace.Core.Services.Workflows.Agents;
+namespace CodeSpace.Messages.Agents;
 
 /// <summary>
 /// One normalized step in an agent run — the unit of the live log. Every harness maps its native

@@ -1,4 +1,5 @@
-using CodeSpace.Core.Services.Workflows.Agents;
+using CodeSpace.Core.Services.Agents.Harnesses.Codex;
+using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Enums;
 using Shouldly;
 
@@ -11,14 +12,14 @@ namespace CodeSpace.UnitTests.Workflows;
 /// real output at B0.4; these tests pin the normalization shape, which is the contract.
 /// </summary>
 [Trait("Category", "Unit")]
-public class CodexCliHarnessTests
+public class CodexHarnessTests
 {
-    private static readonly CodexCliHarness Harness = new();
+    private static readonly CodexHarness Harness = new();
 
     private static AgentTask Task(string goal = "Fix the failing billing tests", string model = "gpt-5.3-codex", AgentWriteScope scope = AgentWriteScope.Workspace) => new()
     {
         Goal = goal,
-        Harness = CodexCliHarness.HarnessKind,
+        Harness = CodexHarness.HarnessKind,
         Model = model,
         WorkspaceDirectory = "/tmp/ws",
         Permissions = new AgentPermissions { WriteScope = scope },
@@ -118,18 +119,18 @@ public class CodexCliHarnessTests
     [Fact]
     public void Version_uses_the_default_then_the_env_override()
     {
-        var original = System.Environment.GetEnvironmentVariable(CodexCliHarness.VersionEnvVar);
+        var original = System.Environment.GetEnvironmentVariable(CodexHarness.VersionEnvVar);
         try
         {
-            System.Environment.SetEnvironmentVariable(CodexCliHarness.VersionEnvVar, null);
-            new CodexCliHarness().Version.ShouldBe("0.2.0");
+            System.Environment.SetEnvironmentVariable(CodexHarness.VersionEnvVar, null);
+            new CodexHarness().Version.ShouldBe("0.2.0");
 
-            System.Environment.SetEnvironmentVariable(CodexCliHarness.VersionEnvVar, "9.9.9");
-            new CodexCliHarness().Version.ShouldBe("9.9.9");
+            System.Environment.SetEnvironmentVariable(CodexHarness.VersionEnvVar, "9.9.9");
+            new CodexHarness().Version.ShouldBe("9.9.9");
         }
         finally
         {
-            System.Environment.SetEnvironmentVariable(CodexCliHarness.VersionEnvVar, original);
+            System.Environment.SetEnvironmentVariable(CodexHarness.VersionEnvVar, original);
         }
     }
 
@@ -137,6 +138,6 @@ public class CodexCliHarnessTests
     public void VersionEnvVar_constant_name_is_pinned()
     {
         // Renaming this breaks every air-gapped operator who pinned a private Codex build via env.
-        CodexCliHarness.VersionEnvVar.ShouldBe("CODESPACE_CODEX_CLI_VERSION");
+        CodexHarness.VersionEnvVar.ShouldBe("CODESPACE_CODEX_CLI_VERSION");
     }
 }
