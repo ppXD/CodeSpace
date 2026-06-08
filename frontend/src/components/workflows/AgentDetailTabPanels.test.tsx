@@ -131,7 +131,7 @@ describe("SettingsTab", () => {
   it("renders the settings panel when loaded", () => {
     useWorkflowMock.mockReturnValue(loaded());
     render(<SettingsTab workflowId="w1" onDeleted={vi.fn()} />);
-    expect(screen.getByText("PR Security Reviewer")).toBeTruthy();
+    expect(screen.getByText("General")).toBeTruthy();
     expect(screen.getByText("Guardrails")).toBeTruthy();
     expect(screen.getByRole("button", { name: /Delete agent/ })).toBeTruthy();
   });
