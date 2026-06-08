@@ -58,10 +58,10 @@ function WorkflowRunsPage() {
             {workflow.data?.name ?? "Agent"}
           </a>
           <span className="sep">/</span>
-          <span className="cur">Runs</span>
+          <span className="cur">Activity</span>
         </div>
         <div className="ct-title-row">
-          <h1 className="ct-title">Runs</h1>
+          <h1 className="ct-title">Activity</h1>
           <div className="ct-actions">
             <button
               className="btn"
@@ -79,18 +79,18 @@ function WorkflowRunsPage() {
       <div className="ct-body">
         {workflow.error instanceof ApiError && (
           <div className="cn-banner cn-banner-err" style={{ margin: 16 }}>
-            <div className="cn-banner-h">Workflow not found</div>
+            <div className="cn-banner-h">Agent not found</div>
             <div className="cn-banner-p">{workflow.error.message}</div>
           </div>
         )}
 
         {runs.isLoading && (
-          <div className="ct-empty"><div className="ct-empty-h">Loading runs…</div></div>
+          <div className="ct-empty"><div className="ct-empty-h">Loading activity…</div></div>
         )}
 
         {!runs.isLoading && rows.length === 0 && (
           <div className="ct-empty">
-            <div className="ct-empty-h">No runs yet</div>
+            <div className="ct-empty-h">No activity yet</div>
             <div className="ct-empty-p">
               Click <strong>Run now</strong> above, or wait for a matching trigger to fire.
             </div>

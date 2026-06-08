@@ -169,7 +169,7 @@ function WorkflowsListPage() {
                             params: { teamSlug, workflowId: w.id },
                           })
                         }
-                        title="View runs"
+                        title="View activity"
                       >
                         <Ic.Clock size={13} />
                       </button>

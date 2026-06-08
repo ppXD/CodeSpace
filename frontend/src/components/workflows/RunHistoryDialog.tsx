@@ -26,7 +26,7 @@ export function RunHistoryDialog({ workflowId, onPick, onClose }: { workflowId: 
       <div className="mdl wf-run-modal" role="dialog" aria-modal="true">
         <div className="mdl-head">
           <div className="mdl-title-wrap">
-            <div className="mdl-title">Run history</div>
+            <div className="mdl-title">Activity</div>
             <div className="mdl-sub">Recent runs of this workflow — click one to view its detail.</div>
           </div>
           <button className="mdl-x" onClick={onClose} title="Close"><Ic.X size={14} /></button>
@@ -36,7 +36,7 @@ export function RunHistoryDialog({ workflowId, onPick, onClose }: { workflowId: 
 
           {!runs.isLoading && rows.length === 0 && (
             <div className="ct-empty">
-              <div className="ct-empty-h">No runs yet</div>
+              <div className="ct-empty-h">No activity yet</div>
               <div className="ct-empty-p">Click <strong>Run</strong> to start one.</div>
             </div>
           )}

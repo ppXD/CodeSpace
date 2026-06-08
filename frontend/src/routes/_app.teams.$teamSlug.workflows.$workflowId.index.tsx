@@ -717,7 +717,7 @@ function Editor({ workflow, manifests, onBackToList, saving, onSave }: EditorPro
             >
               <Ic.Play size={13} /> {runManually.isPending ? "Running…" : "Run"}
             </button>
-            <button className="wf-editor-toolbar-btn" onClick={() => setHistoryOpen(true)} title="Run history">
+            <button className="wf-editor-toolbar-btn" onClick={() => setHistoryOpen(true)} title="Activity">
               <Ic.Clock size={14} />
             </button>
           </div>
