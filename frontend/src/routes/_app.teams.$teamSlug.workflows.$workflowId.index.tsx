@@ -58,6 +58,8 @@ import { WorkflowVariablesPanel } from "@/components/workflows/WorkflowVariables
 import { RunWorkflowModal } from "@/components/workflows/RunWorkflowModal";
 import { RunViewerDialog } from "@/components/workflows/RunViewerDialog";
 import { RunHistoryDialog } from "@/components/workflows/RunHistoryDialog";
+import { AgentDetailShell, type AgentTab } from "@/components/workflows/AgentDetailShell";
+import { ActivityTab, OverviewTab } from "@/components/workflows/AgentDetailTabPanels";
 
 // Five panels covering every scope the engine resolves:
 //   - variables  → wf.*    (Variable table, scope=Workflow, persists immediately via API)
@@ -95,11 +97,38 @@ export const Route = createFileRoute("/_app/teams/$teamSlug/workflows/$workflowI
 });
 
 function WorkflowEditorPage() {
+  const { teamSlug, workflowId } = Route.useParams();
+  const navigate = useNavigate();
+
+  // Agent-first detail: Overview lands first (a friendly summary), Activity lists runs, and the
+  // canvas is the "Source" tab — kept mounted once opened (keepMounted) so the editor's unsaved
+  // edits survive tab switches. Data-driven: adding a view (Settings, …) is one array entry.
+  const tabs: AgentTab[] = [
+    { key: "overview", label: "Overview" },
+    { key: "activity", label: "Activity" },
+    { key: "source", label: "Source", icon: <Ic.Workflow size={13} />, keepMounted: true },
+  ];
+
   return (
-    // ReactFlowProvider must wrap any component that calls useReactFlow().
-    <ReactFlowProvider>
-      <EditorShell />
-    </ReactFlowProvider>
+    <AgentDetailShell
+      tabs={tabs}
+      defaultTab="overview"
+      leading={
+        <button
+          className="btn btn-ghost"
+          onClick={() => navigate({ to: "/teams/$teamSlug/workflows", params: { teamSlug } })}
+          title="Back to agents"
+        >
+          <Ic.ArrowLeft size={13} />
+        </button>
+      }
+      render={(key, api) =>
+        // ReactFlowProvider must wrap any component that calls useReactFlow().
+        key === "source" ? <ReactFlowProvider><EditorShell /></ReactFlowProvider>
+        : key === "overview" ? <OverviewTab workflowId={workflowId} onEditSource={() => api.goTo("source")} />
+        : <ActivityTab workflowId={workflowId} />
+      }
+    />
   );
 }
 

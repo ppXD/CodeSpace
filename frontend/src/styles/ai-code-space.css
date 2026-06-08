@@ -1949,6 +1949,59 @@ textarea:-webkit-autofill {
  * the canvas always wins the remaining width.
  */
 
+/* ── Agent detail: tabbed shell (Overview · Activity · ⟨/⟩ Source) ─────────────
+ * Flex column: a slim tab strip + a body holding the active tab. The Source pane fills the body
+ * (it IS the full-height wf-editor); the read-only Overview/Activity panes scroll. Source is kept
+ * mounted-but-hidden once visited (AgentDetailShell) so unsaved canvas edits survive tab switches. */
+.acs-root .agent-detail { display: flex; flex-direction: column; height: 100%; min-height: 0; background: var(--bg); }
+.acs-root .agent-detail-tabbar {
+  display: flex; align-items: center; gap: 8px;
+  padding: 6px 12px; border-bottom: 1px solid var(--line); background: var(--panel); flex-shrink: 0;
+}
+.acs-root .agent-detail-body { flex: 1; min-height: 0; min-width: 0; display: flex; }
+.acs-root .agent-detail-pane { flex: 1; min-height: 0; min-width: 0; display: flex; flex-direction: column; }
+.acs-root .agent-detail-pane[data-tab="overview"],
+.acs-root .agent-detail-pane[data-tab="activity"] { overflow-y: auto; }
+
+/* Segmented tab control */
+.acs-root .agent-tabs { display: inline-flex; align-items: center; gap: 2px; padding: 2px; background: var(--panel-2); border: 1px solid var(--line); border-radius: 8px; }
+.acs-root .agent-tab {
+  display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; cursor: pointer;
+  font: inherit; font-size: 12.5px; font-weight: 500; color: var(--muted);
+  background: transparent; border: 0; border-radius: 6px; padding: 5px 12px;
+}
+.acs-root .agent-tab:hover { color: var(--ink); }
+.acs-root .agent-tab[data-active="true"] { background: var(--panel); color: var(--ink); box-shadow: 0 1px 2px rgba(0,0,0,0.06); }
+.acs-root .agent-tab-ic { display: inline-flex; }
+
+/* Overview panel */
+.acs-root .agent-ov { padding: 28px 32px; max-width: 720px; display: flex; flex-direction: column; gap: 22px; }
+.acs-root .agent-ov-name { margin: 0; font-size: 20px; font-weight: 650; color: var(--ink); }
+.acs-root .agent-ov-desc { margin: 6px 0 0; font-size: 13.5px; line-height: 1.5; color: var(--muted); }
+.acs-root .agent-ov-desc-empty { font-style: italic; }
+.acs-root .agent-ov-facts { margin: 0; display: flex; flex-direction: column; gap: 14px; }
+.acs-root .agent-ov-fact { display: grid; grid-template-columns: 120px 1fr; align-items: center; gap: 12px; }
+.acs-root .agent-ov-fact dt { margin: 0; font-size: 12px; font-weight: 600; color: var(--muted); }
+.acs-root .agent-ov-fact dd { margin: 0; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.acs-root .agent-ov-muted { font-size: 13px; color: var(--muted); }
+.acs-root .agent-ov-triggers { display: inline-flex; gap: 6px; flex-wrap: wrap; }
+.acs-root .agent-ov-status { font-size: 12px; font-weight: 600; padding: 2px 8px; border-radius: 999px; background: var(--panel-2); color: var(--muted); border: 1px solid var(--line); }
+.acs-root .agent-ov-status[data-enabled="true"] { background: var(--accent-soft); color: var(--accent); border-color: var(--accent-soft); }
+.acs-root .agent-ov-ver { font-size: 12px; color: var(--muted); }
+.acs-root .agent-ov-actions { display: flex; gap: 10px; }
+
+/* Activity list */
+.acs-root .agent-activity { list-style: none; margin: 0; padding: 12px; display: flex; flex-direction: column; gap: 4px; }
+.acs-root .agent-activity-row {
+  display: grid; grid-template-columns: auto 90px 1fr auto auto 16px; align-items: center; gap: 12px;
+  padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); cursor: pointer;
+}
+.acs-root .agent-activity-row:hover { border-color: var(--accent-soft); background: var(--panel-2); }
+.acs-root .agent-activity-id { font-family: var(--mono, ui-monospace, monospace); font-size: 12px; color: var(--ink); }
+.acs-root .agent-activity-src,
+.acs-root .agent-activity-time { font-size: 12px; color: var(--muted); }
+.acs-root .agent-activity-ver { font-size: 11.5px; color: var(--muted); }
+
 .acs-root .wf-editor { display: flex; flex-direction: column; height: 100%; background: var(--bg); }
 
 .acs-root .wf-editor-bar {
