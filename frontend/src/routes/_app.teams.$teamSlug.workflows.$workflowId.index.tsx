@@ -21,7 +21,7 @@ import {
 import "@xyflow/react/dist/style.css";
 
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
-import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type DragEvent } from "react";
 
 import { Ic } from "@/_imported/ai-code-space/icons";
 import { ApiError } from "@/api/request";
@@ -76,6 +76,7 @@ import { useNodeManifests, useRunWorkflowManually, useSystemVariables, useUpdate
 // Real per-scope variable lists feed the autocomplete picker + toolbar counts.
 import { useTeamVariables, useWorkflowVariables } from "@/hooks/use-variables";
 import { useProjects } from "@/hooks/use-projects";
+import { usePaneResize } from "@/hooks/use-pane-resize";
 import { projectVariablesApi, type VariableSummary } from "@/api/variables";
 import { useQueries } from "@tanstack/react-query";
 
@@ -210,6 +211,9 @@ function Editor({ workflow, manifests, saving, onSave }: EditorProps) {
   // Editable workflow header — start as a copy of the persisted name; the user can rename
   // in place via the input above the canvas.
   const [name, setName] = useState(workflow.name);
+
+  // Drag-resizable palette + inspector rail widths (persisted, min-clamped).
+  const { paletteWidth, inspectorWidth, startResize } = usePaneResize();
 
   // React Flow state derived from the workflow definition on first mount + every time the
   // user re-enters the route. Subsequent changes are owned by React Flow itself.
@@ -892,8 +896,12 @@ function Editor({ workflow, manifests, saving, onSave }: EditorProps) {
         </div>
       )}
 
-      {/* Three-pane body */}
-      <div className="wf-editor-body">
+      {/* Three-pane body. Rail widths are CSS custom properties (not grid-template-columns directly)
+          so the narrow-screen media query can still collapse to two columns. */}
+      <div
+        className="wf-editor-body"
+        style={{ "--wf-palette-w": `${paletteWidth}px`, "--wf-inspector-w": `${inspectorWidth}px` } as CSSProperties}
+      >
         {/* Left palette */}
         <aside className="wf-palette">
           <div className="wf-palette-h">Nodes</div>
@@ -905,6 +913,8 @@ function Editor({ workflow, manifests, saving, onSave }: EditorProps) {
           <PaletteSection title="Steps"     manifests={manifests.filter((m) => (m.kind === "Regular" || isContainerKind(m.kind)) && !isBodyStartTypeKey(m.typeKey))}  onAdd={onPaletteClick} disabledOf={isPaletteItemDisabled} />
           <PaletteSection title="Endpoints" manifests={manifests.filter((m) => m.kind === "Terminal")} onAdd={onPaletteClick} disabledOf={isPaletteItemDisabled} />
         </aside>
+
+        <div className="wf-resize" role="separator" aria-orientation="vertical" aria-label="Resize palette" onPointerDown={(e) => startResize("palette", e)} />
 
         {/* Canvas */}
         <div ref={canvasRef} className="wf-canvas" onDragOver={onDragOver} onDrop={onDrop}>
@@ -967,6 +977,8 @@ function Editor({ workflow, manifests, saving, onSave }: EditorProps) {
             />
           )}
         </div>
+
+        <div className="wf-resize" role="separator" aria-orientation="vertical" aria-label="Resize inspector" onPointerDown={(e) => startResize("inspector", e)} />
 
         {/* Right inspector */}
         <aside className="wf-inspector">
