@@ -52,10 +52,10 @@ function WorkflowRunsPage() {
     <section className="ct">
       <div className="ct-head" style={{ paddingBottom: 14 }}>
         <div className="ct-crumbs">
-          <a onClick={() => navigate({ to: "/teams/$teamSlug/workflows", params: { teamSlug } })}>Workflows</a>
+          <a onClick={() => navigate({ to: "/teams/$teamSlug/workflows", params: { teamSlug } })}>Agents</a>
           <span className="sep">/</span>
           <a onClick={() => navigate({ to: "/teams/$teamSlug/workflows/$workflowId", params: { teamSlug, workflowId } })}>
-            {workflow.data?.name ?? "Workflow"}
+            {workflow.data?.name ?? "Agent"}
           </a>
           <span className="sep">/</span>
           <span className="cur">Runs</span>

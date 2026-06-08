@@ -293,10 +293,10 @@ export function Sidebar() {
               navigate({ to: "/teams/$teamSlug/workflows", params: { teamSlug: teamToUrlSlug(active) } });
             }
           }}
-          title="Workflows"
+          title="Agents"
         >
           <span className="sb-nav-ic"><Ic.Workflow size={15} /></span>
-          <span className="sb-nav-lbl">Workflows</span>
+          <span className="sb-nav-lbl">Agents</span>
           {/* Same `!= null` guard as Projects above: workflowCount is new on /me, so
               an old backend build returns MeTeam without it — hide the badge rather
               than render an empty pill. A team with 0 workflows still shows "0". */}

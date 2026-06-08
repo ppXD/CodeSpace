@@ -10,7 +10,7 @@ import { useDeleteWorkflow, useSetWorkflowEnabled, useWorkflows } from "@/hooks/
 
 /**
  * Workflows list. Same compact header rhythm as the Repositories page — title + a
- * single primary action, no marketing copy. The "+ Add workflow" button creates a
+ * single primary action, no marketing copy. The "+ New agent" button creates a
  * minimal seed definition (trigger → terminal) and immediately jumps the user into
  * the visual editor; no template prompt, no modal.
  */
@@ -52,7 +52,7 @@ function WorkflowsListPage() {
     // Themed confirm dialog instead of the browser's native window.confirm —
     // matches every other destructive action in the SPA (see dialog-context).
     const ok = await confirm({
-      title: "Delete workflow?",
+      title: "Delete agent?",
       message: (
         <>
           <strong>{name}</strong> will be removed. Runs already in flight will finish on their own; new triggers stop firing immediately.
@@ -72,13 +72,13 @@ function WorkflowsListPage() {
           strip. We add explicit bottom padding here so the rhythm matches. */}
       <div className="ct-head" style={{ paddingBottom: 18 }}>
         <div className="ct-crumbs">
-          <span className="cur">Workflows</span>
+          <span className="cur">Agents</span>
         </div>
         <div className="ct-title-row">
-          <h1 className="ct-title">Workflows</h1>
+          <h1 className="ct-title">Agents</h1>
           <div className="ct-actions">
             <button className="btn btn-primary" onClick={() => setAddOpen(true)} disabled={createEmpty.isPending || fromTemplate.isPending}>
-              <Ic.Plus size={14} /> {createEmpty.isPending || fromTemplate.isPending ? "Creating…" : "Add workflow"}
+              <Ic.Plus size={14} /> {createEmpty.isPending || fromTemplate.isPending ? "Creating…" : "New agent"}
             </button>
           </div>
         </div>
@@ -91,15 +91,15 @@ function WorkflowsListPage() {
 
         {workflows.error instanceof ApiError && (
           <div className="cn-banner cn-banner-err" style={{ margin: 16 }}>
-            <div className="cn-banner-h">Couldn't load workflows</div>
+            <div className="cn-banner-h">Couldn't load agents</div>
             <div className="cn-banner-p">{workflows.error.message}</div>
           </div>
         )}
 
         {!workflows.isLoading && !workflows.error && rows.length === 0 && (
           <div className="ct-empty">
-            <div className="ct-empty-h">No workflows yet</div>
-            <div className="ct-empty-p">Click <strong>Add workflow</strong> to open the canvas editor.</div>
+            <div className="ct-empty-h">No agents yet</div>
+            <div className="ct-empty-p">Click <strong>New agent</strong> to open the editor.</div>
           </div>
         )}
 
@@ -107,7 +107,7 @@ function WorkflowsListPage() {
           <table className="tbl">
             <thead>
               <tr>
-                <th style={{ width: "44%" }}>Workflow</th>
+                <th style={{ width: "44%" }}>Agent</th>
                 <th>Triggers</th>
                 <th>Version</th>
                 <th>Updated</th>
@@ -176,14 +176,14 @@ function WorkflowsListPage() {
                       <button
                         className="btn btn-ghost"
                         onClick={() => setEnabled.mutate({ workflowId: w.id, enabled: !w.enabled })}
-                        title={w.enabled ? "Disable workflow" : "Enable workflow"}
+                        title={w.enabled ? "Disable agent" : "Enable agent"}
                       >
                         {w.enabled ? <Ic.Pause size={13} /> : <Ic.Play size={13} />}
                       </button>
                       <button
                         className="btn btn-ghost"
                         onClick={() => handleDelete(w.id, w.name)}
-                        title="Delete workflow"
+                        title="Delete agent"
                       >
                         <Ic.Trash size={13} />
                       </button>
