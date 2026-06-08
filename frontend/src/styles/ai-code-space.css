@@ -2088,14 +2088,14 @@ textarea:-webkit-autofill {
 .acs-root .wf-palette-item {
   display: flex; align-items: center; gap: 8px; width: 100%;
   padding: 7px 8px; border-radius: 6px; cursor: pointer;
-  background: var(--panel); border: 1px solid var(--line);
+  background: var(--bg); border: 1px solid var(--line);
   font-family: inherit; font-size: 12px; color: var(--ink); text-align: left;
   user-select: none; transition: border-color .12s ease, background .12s ease, transform .08s ease;
   position: relative;
 }
 .acs-root .wf-palette-item:hover {
-  border-color: var(--accent); background: var(--bg);
-  /* a hint that this is interactive — subtle lift, not flashy */
+  border-color: var(--accent); background: var(--panel);
+  /* resting cards are warm cream; hover brightens to white — transient, so no resting glare */
   transform: translateX(1px);
 }
 .acs-root .wf-palette-item:active { transform: translateX(0); background: var(--accent-soft); }
@@ -2122,7 +2122,7 @@ textarea:-webkit-autofill {
   cursor: not-allowed; opacity: 0.5;
 }
 .acs-root .wf-palette-item[data-disabled="true"]:hover {
-  border-color: var(--line); background: var(--panel); transform: none;
+  border-color: var(--line); background: var(--bg); transform: none;
 }
 .acs-root .wf-palette-item[data-disabled="true"]:hover .wf-palette-item-icon { border-color: var(--line); color: var(--muted); }
 .acs-root .wf-palette-item[data-disabled="true"] .wf-palette-item-add { opacity: 1; color: var(--muted-2); }
@@ -2353,14 +2353,14 @@ textarea:-webkit-autofill {
    per-action rows, help text) groups into legible blocks instead of one long undivided column. */
 .acs-root .wf-inspector-body { display: flex; flex-direction: column; gap: 8px; padding: 8px; min-height: 0; background: var(--panel-2); }
 .acs-root .wf-inspector-h {
-  padding: 12px 14px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel);
+  padding: 12px 14px; border: 1px solid var(--line); border-radius: 10px; background: var(--bg);
   display: flex; flex-direction: column; gap: 2px;
 }
 .acs-root .wf-inspector-h-name { font-weight: 600; font-size: 13px; color: var(--ink); }
 .acs-root .wf-inspector-h-ref  { font-size: 11.5px; color: var(--muted); }
 .acs-root .wf-inspector-h-key  { font-size: 10.5px; color: var(--muted); font-family: inherit; }
 
-.acs-root .wf-inspector-section { padding: 14px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel); }
+.acs-root .wf-inspector-section { padding: 14px; border: 1px solid var(--line); border-radius: 10px; background: var(--bg); }
 .acs-root .wf-inspector-section-h {
   font-size: 11px; font-weight: 700; color: var(--ink-2);
   text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 12px;
