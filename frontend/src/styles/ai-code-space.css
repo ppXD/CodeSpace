@@ -2028,9 +2028,11 @@ textarea:-webkit-autofill {
 
 .acs-root .wf-editor { display: flex; flex-direction: column; height: 100%; background: var(--bg); }
 
+/* Warm cream (--bg), continuous with the .ct-head above it, instead of a cold white band — the
+ * editor toolbar reads as part of the same warm header zone. */
 .acs-root .wf-editor-bar {
   display: flex; align-items: center; gap: 8px;
-  padding: 8px 14px; border-bottom: 1px solid var(--line); background: var(--panel);
+  padding: 8px 14px; border-bottom: 1px solid var(--line); background: var(--bg);
   height: 44px; flex-shrink: 0;
 }
 .acs-root .wf-editor-name {
@@ -2319,8 +2321,10 @@ textarea:-webkit-autofill {
 .wf-addmenu-item-cat { font-size: 10.5px; color: var(--muted); flex-shrink: 0; }
 
 /* Right inspector */
+/* Warm-gray recessed rail (--panel-2), symmetric with the left palette and matching its own
+ * populated body — so the canvas is framed by two soft rails, not one grey + one stark-white. */
 .acs-root .wf-inspector {
-  border-left: 1px solid var(--line); background: var(--panel);
+  border-left: 1px solid var(--line); background: var(--panel-2);
   overflow-y: auto; display: flex; flex-direction: column;
 }
 .acs-root .wf-inspector-empty {
