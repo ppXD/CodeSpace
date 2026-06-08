@@ -1,6 +1,7 @@
 using System.Text.Json;
 using CodeSpace.Core.DependencyInjection;
 using CodeSpace.Core.Services.Workflows.Sandbox;
+using CodeSpace.Messages.Enums;
 
 namespace CodeSpace.Core.Services.Workflows.Agents;
 
