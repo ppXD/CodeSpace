@@ -28,16 +28,14 @@ const wf = (over: Partial<WorkflowDetail> = {}): WorkflowDetail => ({
 });
 
 describe("AgentSettingsPanel", () => {
-  it("shows the agent identity — name, description, version", () => {
+  it("is a sectioned controls page (General / Guardrails / Danger zone) — no identity header", () => {
     render(<AgentSettingsPanel workflow={wf()} onToggleEnabled={vi.fn()} onDelete={vi.fn()} />);
-    expect(screen.getByText("PR Security Reviewer")).toBeTruthy();
-    expect(screen.getByText("Reviews every PR for security issues.")).toBeTruthy();
-    expect(screen.getByText(/Version v3/)).toBeTruthy();
-  });
-
-  it("falls back to a placeholder when there is no description", () => {
-    render(<AgentSettingsPanel workflow={wf({ description: null })} onToggleEnabled={vi.fn()} onDelete={vi.fn()} />);
-    expect(screen.getByText("No description yet.")).toBeTruthy();
+    expect(screen.getByText("General")).toBeTruthy();
+    expect(screen.getByText("Guardrails")).toBeTruthy();
+    expect(screen.getByText("Danger zone")).toBeTruthy();
+    // The agent name + description belong to the breadcrumb + Overview, not here (no duplicate header).
+    expect(screen.queryByText("PR Security Reviewer")).toBeNull();
+    expect(screen.queryByText("Reviews every PR for security issues.")).toBeNull();
   });
 
   it("reflects enabled status with a Pause action", () => {

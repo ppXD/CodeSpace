@@ -1992,10 +1992,11 @@ textarea:-webkit-autofill {
 
 /* Settings panel — identity (read-only) · status switch · guardrails (forthcoming) · danger zone.
  * Each actionable setting is a bordered row: descriptive text on the left, the control on the right. */
-.acs-root .agent-set { padding: 22px 0 8px; display: flex; flex-direction: column; gap: 22px; }
-.acs-root .agent-set-head { min-width: 0; }
-.acs-root .agent-set-hint { margin: 10px 0 0; font-size: 12.5px; color: var(--muted); }
-.acs-root .agent-set-section { display: flex; flex-direction: column; gap: 10px; }
+.acs-root .agent-set { padding: 22px 0 8px; display: flex; flex-direction: column; gap: 26px; }
+/* A settings section: an uppercase label over its control row(s) — reads as a config page, distinct
+ * from the Overview dashboard (no big name/description header; the name lives in the breadcrumb). */
+.acs-root .agent-set-group { display: flex; flex-direction: column; gap: 8px; }
+.acs-root .agent-set-group-title { margin: 0; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); }
 .acs-root .agent-set-row { display: flex; align-items: center; justify-content: space-between; gap: 24px; padding: 16px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel); }
 .acs-root .agent-set-row-text { min-width: 0; }
 .acs-root .agent-set-row-title { font-size: 13.5px; font-weight: 600; color: var(--ink); }
