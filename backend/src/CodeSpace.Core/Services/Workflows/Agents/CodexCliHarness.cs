@@ -1,0 +1,140 @@
+using System.Text.Json;
+using CodeSpace.Core.DependencyInjection;
+using CodeSpace.Core.Services.Workflows.Sandbox;
+
+namespace CodeSpace.Core.Services.Workflows.Agents;
+
+/// <summary>
+/// Adapter for OpenAI's Codex CLI. Drives <c>codex exec --json …</c> (the non-interactive mode built
+/// for scripts/CI) and normalizes its JSONL event stream into <see cref="AgentEvent"/>s.
+///
+/// <para><b>Fidelity note:</b> the CLI surface (<c>exec</c>, <c>--json</c>, <c>--model</c>, <c>--sandbox</c>)
+/// is well-documented, so <see cref="BuildInvocation"/> is exact. The JSONL event <i>type</i> names are
+/// version-dependent, so <see cref="ParseEvent"/> classifies by tolerant keyword match and maps anything
+/// it can't place to <see cref="AgentEventKind.Warning"/> (surfaced, never dropped). The exact type→kind
+/// table is calibrated against real <c>codex exec --json</c> output when execution is wired (B0.4); the
+/// normalization shape tested here is the stable contract.</para>
+/// </summary>
+public sealed class CodexCliHarness : IAgentHarness, ISingletonDependency
+{
+    public const string HarnessKind = "codex-cli";
+
+    /// <summary>Air-gapped operators pin a private build via this env var (Rule 8). Renaming it breaks their pin — see the pin test.</summary>
+    public const string VersionEnvVar = "CODESPACE_CODEX_CLI_VERSION";
+
+    private const string DefaultVersion = "0.2.0";
+
+    public string Kind => HarnessKind;
+
+    public string Version => System.Environment.GetEnvironmentVariable(VersionEnvVar) is { Length: > 0 } v ? v : DefaultVersion;
+
+    public IReadOnlyList<string> Models { get; } = new[] { "gpt-5.3-codex", "gpt-5.4", "gpt-5.4-codex" };
+
+    public SandboxSpec BuildInvocation(AgentTask task)
+    {
+        var args = new List<string> { "exec", "--json", "--model", task.Model, "--sandbox", SandboxMode(task.Permissions), task.Goal };
+
+        return new SandboxSpec
+        {
+            Command = "codex",
+            Args = args,
+            WorkingDirectory = task.WorkspaceDirectory,
+            Environment = task.Environment,
+            TimeoutSeconds = task.TimeoutSeconds,
+        };
+    }
+
+    public AgentEvent? ParseEvent(string rawLine)
+    {
+        var line = rawLine.Trim();
+        if (line.Length == 0) return null;
+
+        JsonElement root;
+        using (var doc = TryParse(line))
+        {
+            if (doc is null || doc.RootElement.ValueKind != JsonValueKind.Object) return null;
+            root = doc.RootElement.Clone();
+        }
+
+        var type = ReadType(root);
+        if (type is null) return null;
+
+        return new AgentEvent { Kind = MapKind(type), Text = ReadText(root, type), Data = root };
+    }
+
+    public AgentRunResult BuildResult(IReadOnlyList<AgentEvent> events, int exitCode)
+    {
+        var changedFiles = events.Where(e => e.Kind == AgentEventKind.FileChanged).Select(e => e.Text).Where(t => t.Length > 0).Distinct().ToList();
+        var summary = (events.LastOrDefault(e => e.Kind == AgentEventKind.FinalSummary) ?? events.LastOrDefault(e => e.Kind == AgentEventKind.AssistantMessage))?.Text;
+
+        if (exitCode == 0)
+            return new AgentRunResult { Status = AgentRunStatus.Succeeded, ExitReason = "completed", Summary = summary, ChangedFiles = changedFiles };
+
+        var error = events.LastOrDefault(e => e.Kind == AgentEventKind.Error)?.Text ?? $"codex exited with code {exitCode}";
+
+        return new AgentRunResult { Status = AgentRunStatus.Failed, ExitReason = "non-zero-exit", Summary = summary, ChangedFiles = changedFiles, Error = error };
+    }
+
+    private static string SandboxMode(AgentPermissions permissions) =>
+        permissions.WriteScope == AgentWriteScope.ReadOnly ? "read-only" : "workspace-write";
+
+    private static JsonDocument? TryParse(string s)
+    {
+        try { return JsonDocument.Parse(s); }
+        catch (JsonException) { return null; }
+    }
+
+    /// <summary>Read the event discriminator — top-level <c>type</c>, or nested <c>msg.type</c> (Codex has used both envelopes).</summary>
+    private static string? ReadType(JsonElement root)
+    {
+        if (root.TryGetProperty("type", out var t) && t.ValueKind == JsonValueKind.String) return t.GetString();
+
+        if (root.TryGetProperty("msg", out var msg) && msg.ValueKind == JsonValueKind.Object && msg.TryGetProperty("type", out var mt) && mt.ValueKind == JsonValueKind.String)
+            return mt.GetString();
+
+        return null;
+    }
+
+    /// <summary>Tolerant type → normalized kind. Specific checks precede generic ones; unknown → Warning so nothing is silently lost.</summary>
+    private static AgentEventKind MapKind(string type)
+    {
+        var t = type.ToLowerInvariant();
+
+        if (t.Contains("reason")) return AgentEventKind.Reasoning;
+        if (t.Contains("plan")) return AgentEventKind.PlanUpdate;
+        if (t.Contains("command") || t.Contains("exec")) return AgentEventKind.CommandExecuted;
+        if (t.Contains("patch") || t.Contains("file") || t.Contains("apply")) return AgentEventKind.FileChanged;
+        if (t.Contains("mcp") || t.Contains("tool") || t.Contains("function")) return AgentEventKind.ToolCall;
+        if (t.Contains("test")) return AgentEventKind.TestOutput;
+        if (t.Contains("error")) return AgentEventKind.Error;
+        if (t.Contains("message") || t.Contains("assistant")) return AgentEventKind.AssistantMessage;
+        if (t.Contains("complete") || t.Contains("finish") || t.Contains("done")) return AgentEventKind.Completed;
+
+        return AgentEventKind.Warning;
+    }
+
+    /// <summary>Pull a human-readable line from the common message-bearing fields (top-level or under <c>msg</c>); fall back to the type.</summary>
+    private static string ReadText(JsonElement root, string type)
+    {
+        foreach (var key in new[] { "message", "text", "content", "command", "path", "summary" })
+        {
+            if (TryReadString(root, key, out var direct)) return direct;
+
+            if (root.TryGetProperty("msg", out var msg) && msg.ValueKind == JsonValueKind.Object && TryReadString(msg, key, out var nested)) return nested;
+        }
+
+        return type;
+    }
+
+    private static bool TryReadString(JsonElement obj, string key, out string value)
+    {
+        if (obj.TryGetProperty(key, out var v) && v.ValueKind == JsonValueKind.String)
+        {
+            value = v.GetString() ?? "";
+            return value.Length > 0;
+        }
+
+        value = "";
+        return false;
+    }
+}
