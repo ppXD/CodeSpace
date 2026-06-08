@@ -336,7 +336,9 @@
 .acs-root .rd-crumbs .cur { color: var(--ink); font-weight: 500; }
 .acs-root .ct-title-row { display: flex; align-items: flex-end; justify-content: space-between; gap: 16px; }
 .acs-root .ct-title { font-size: 24px; font-weight: 600; letter-spacing: -0.02em; line-height: 1.1; color: var(--ink); margin: 0; }
-.acs-root .ct-sub { font-size: 13px; color: var(--muted); margin-top: 4px; max-width: min(100%, 88ch); }
+/* No action buttons in this header, so the subtitle spans the full content width (≈ the table
+ * below) instead of being capped — short descriptions read on one line. */
+.acs-root .ct-sub { font-size: 13px; color: var(--muted); margin-top: 4px; }
 .acs-root .ct-actions { display: flex; align-items: center; gap: 8px; }
 .acs-root .ct-tabs { display: flex; gap: 2px; margin-top: 6px; }
 .acs-root .ct-tab { padding: 8px 12px 10px; font-size: 13px; font-weight: 500; color: var(--muted); border-bottom: 2px solid transparent; cursor: pointer; margin-bottom: -1px; }
@@ -1963,12 +1965,14 @@ textarea:-webkit-autofill {
 /* Overview panel — header (title + actions) · meta band · recent-activity preview. Full-width
  * inside `.ct-body` (which provides the page's side padding). */
 .acs-root .agent-ov { padding: 22px 0 8px; display: flex; flex-direction: column; gap: 24px; }
-.acs-root .agent-ov-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 24px; }
-.acs-root .agent-ov-head-text { min-width: 0; }
+.acs-root .agent-ov-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 40px; }
+/* Text block grows to fill the header's left share; the action buttons sit at the right after one
+ * clear gap — two parts, not a narrow block + a wide center void + buttons. */
+.acs-root .agent-ov-head-text { flex: 1; min-width: 0; }
 .acs-root .agent-ov-name { margin: 0; font-size: 22px; font-weight: 650; color: var(--ink); }
-/* Adaptive width: fill the column up to a readable ceiling rather than a narrow fixed cap that
- * wrapped a one-line blurb into three. Shared by the Overview + Settings descriptions. */
-.acs-root .agent-ov-desc { margin: 8px 0 0; font-size: 14px; line-height: 1.6; color: var(--muted); max-width: min(100%, 88ch); }
+/* Fills the header's (flex:1) text block, so a short blurb sits on one/two lines and wraps only at
+ * the block's right edge — beside, not under, the action buttons. Overview-only. */
+.acs-root .agent-ov-desc { margin: 8px 0 0; font-size: 14px; line-height: 1.6; color: var(--muted); }
 .acs-root .agent-ov-desc-empty { font-style: italic; }
 .acs-root .agent-ov-actions { display: flex; gap: 10px; flex-shrink: 0; }
 .acs-root .agent-ov-meta { margin: 0; display: flex; flex-wrap: wrap; gap: 12px 40px; padding: 16px 0; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
