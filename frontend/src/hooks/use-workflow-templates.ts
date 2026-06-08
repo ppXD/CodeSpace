@@ -1,6 +1,7 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 
 import { workflowsApi, type CreateWorkflowInput, type WorkflowDefinition } from "@/api/workflows";
+import { deriveAgentName } from "@/lib/agentName";
 
 /**
  * Seed definitions for "+ Add workflow". The primary button uses the EMPTY seed — one
@@ -133,6 +134,28 @@ export function useCreateEmptyWorkflow() {
       const input: CreateWorkflowInput = {
         name: "Untitled workflow",
         description: null,
+        enabled: false,
+        definition: EMPTY_DEFINITION,
+        activations: [],
+      };
+      return workflowsApi.create(input);
+    },
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["workflows"] }),
+  });
+}
+
+/** Create an agent from a free-text task description (the "Describe a task" on-ramp). The task
+ * becomes the agent's description and seeds a friendly name; the canvas starts from the same EMPTY
+ * seed as Blank, so the user lands in the editor with their intent already captured. (Turning the
+ * description into a real node graph is a later, model-gateway-backed step — not done here.) */
+export function useCreateWorkflowFromTask() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (task: string) => {
+      const trimmed = task.trim();
+      const input: CreateWorkflowInput = {
+        name: deriveAgentName(task),
+        description: trimmed === "" ? null : trimmed,
         enabled: false,
         definition: EMPTY_DEFINITION,
         activations: [],

@@ -10,23 +10,60 @@ const TEMPLATES: WorkflowTemplate[] = [
 ];
 
 function renderModal(over: Partial<Parameters<typeof AddWorkflowModal>[0]> = {}) {
-  const props = { templates: TEMPLATES, pending: false, onBlank: vi.fn(), onTemplate: vi.fn(), onClose: vi.fn(), ...over };
+  const props = { templates: TEMPLATES, pending: false, onBlank: vi.fn(), onTask: vi.fn(), onTemplate: vi.fn(), onClose: vi.fn(), ...over };
   render(<AddWorkflowModal {...props} />);
   return props;
 }
 
 describe("AddWorkflowModal", () => {
-  it("opens on the Blank vs Template choice — templates not shown yet", () => {
+  it("opens on the three on-ramps — neither templates nor the task field shown yet", () => {
     renderModal();
+    expect(screen.getByRole("button", { name: /Describe a task/ })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /Blank/ })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /Template/ })).toBeInTheDocument();
     expect(screen.queryByText("AI PR Review + Approval Gate")).toBeNull();
+    expect(screen.queryByRole("textbox")).toBeNull();
   });
 
   it("Blank calls onBlank", () => {
     const { onBlank } = renderModal();
     fireEvent.click(screen.getByRole("button", { name: /Blank/ }));
     expect(onBlank).toHaveBeenCalledTimes(1);
+  });
+
+  it("Describe a task reveals the textarea; Create is disabled until text is entered, then calls onTask with the task", () => {
+    const { onTask } = renderModal();
+    fireEvent.click(screen.getByRole("button", { name: /Describe a task/ }));
+
+    const field = screen.getByRole("textbox");
+    expect(field).toBeInTheDocument();
+
+    const create = screen.getByRole("button", { name: /Create agent/ });
+    expect(create).toBeDisabled();
+
+    fireEvent.change(field, { target: { value: "Triage incoming bugs" } });
+    expect(create).not.toBeDisabled();
+
+    fireEvent.click(create);
+    expect(onTask).toHaveBeenCalledWith("Triage incoming bugs");
+  });
+
+  it("Create stays disabled for whitespace-only input", () => {
+    const { onTask } = renderModal();
+    fireEvent.click(screen.getByRole("button", { name: /Describe a task/ }));
+    fireEvent.change(screen.getByRole("textbox"), { target: { value: "   " } });
+
+    expect(screen.getByRole("button", { name: /Create agent/ })).toBeDisabled();
+    expect(onTask).not.toHaveBeenCalled();
+  });
+
+  it("Back returns from the task step to the choice", () => {
+    renderModal();
+    fireEvent.click(screen.getByRole("button", { name: /Describe a task/ }));
+    fireEvent.click(screen.getByRole("button", { name: /Back/ }));
+
+    expect(screen.getByRole("button", { name: /Blank/ })).toBeInTheDocument();
+    expect(screen.queryByRole("textbox")).toBeNull();
   });
 
   it("Template reveals the template cards; picking one calls onTemplate with that template", () => {

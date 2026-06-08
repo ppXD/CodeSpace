@@ -5,14 +5,14 @@ import { Ic } from "@/_imported/ai-code-space/icons";
 import { ApiError } from "@/api/request";
 import { useConfirm } from "@/components/dialog/dialog-context";
 import { AddWorkflowModal } from "@/components/workflows/AddWorkflowModal";
-import { useCreateEmptyWorkflow, useCreateWorkflowFromTemplate, WORKFLOW_TEMPLATES, type WorkflowTemplate } from "@/hooks/use-workflow-templates";
+import { useCreateEmptyWorkflow, useCreateWorkflowFromTask, useCreateWorkflowFromTemplate, WORKFLOW_TEMPLATES, type WorkflowTemplate } from "@/hooks/use-workflow-templates";
 import { useDeleteWorkflow, useSetWorkflowEnabled, useWorkflows } from "@/hooks/use-workflows";
 
 /**
- * Workflows list. Same compact header rhythm as the Repositories page — title + a
- * single primary action, no marketing copy. The "+ New agent" button creates a
- * minimal seed definition (trigger → terminal) and immediately jumps the user into
- * the visual editor; no template prompt, no modal.
+ * Agents list. Same compact header rhythm as the Repositories page — title + a single
+ * primary action, no marketing copy. "+ New agent" opens AddWorkflowModal with three
+ * on-ramps — Describe a task, Blank, or Template — each of which creates the agent and
+ * jumps straight into the visual editor.
  */
 export const Route = createFileRoute("/_app/teams/$teamSlug/workflows/")({
   component: WorkflowsListPage,
@@ -25,15 +25,25 @@ function WorkflowsListPage() {
   const setEnabled = useSetWorkflowEnabled();
   const remove = useDeleteWorkflow();
   const createEmpty = useCreateEmptyWorkflow();
+  const fromTask = useCreateWorkflowFromTask();
   const fromTemplate = useCreateWorkflowFromTemplate();
   const confirm = useConfirm();
   const [addOpen, setAddOpen] = useState(false);
 
   const rows = workflows.data ?? [];
+  const creating = createEmpty.isPending || fromTask.isPending || fromTemplate.isPending;
 
   const handleAdd = async () => {
     const result = await createEmpty.mutateAsync();
     // The canvas IS the workflow detail (Dify pattern) — no separate /edit route.
+    navigate({
+      to: "/teams/$teamSlug/workflows/$workflowId",
+      params: { teamSlug, workflowId: result.id },
+    });
+  };
+
+  const handleTask = async (task: string) => {
+    const result = await fromTask.mutateAsync(task);
     navigate({
       to: "/teams/$teamSlug/workflows/$workflowId",
       params: { teamSlug, workflowId: result.id },
@@ -77,8 +87,8 @@ function WorkflowsListPage() {
         <div className="ct-title-row">
           <h1 className="ct-title">Agents</h1>
           <div className="ct-actions">
-            <button className="btn btn-primary" onClick={() => setAddOpen(true)} disabled={createEmpty.isPending || fromTemplate.isPending}>
-              <Ic.Plus size={14} /> {createEmpty.isPending || fromTemplate.isPending ? "Creating…" : "New agent"}
+            <button className="btn btn-primary" onClick={() => setAddOpen(true)} disabled={creating}>
+              <Ic.Plus size={14} /> {creating ? "Creating…" : "New agent"}
             </button>
           </div>
         </div>
@@ -199,8 +209,9 @@ function WorkflowsListPage() {
       {addOpen && (
         <AddWorkflowModal
           templates={WORKFLOW_TEMPLATES}
-          pending={createEmpty.isPending || fromTemplate.isPending}
+          pending={creating}
           onBlank={handleAdd}
+          onTask={handleTask}
           onTemplate={handleTemplate}
           onClose={() => setAddOpen(false)}
         />
