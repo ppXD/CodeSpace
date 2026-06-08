@@ -1,20 +1,19 @@
-import type { ReactNode } from "react";
-
 /**
- * One tab in the Agent-detail shell. The set is data-driven so adding a view (Settings, Logs,
- * future) is one array entry — no shell change. `key` is the stable identifier the parent
- * switches on; `label` is what the user reads; `icon` is optional leading glyph.
+ * One tab in the Agent-detail shell. Data-driven so adding a view (Settings, Logs, future) is one
+ * array entry — no shell change. `count` shows the standard `.ct-tab-c` badge (like the Project
+ * page's "Repositories 5" / "Variables 2").
  */
 export interface AgentTab {
   key: string;
   label: string;
-  icon?: ReactNode;
+  count?: number;
 }
 
 /**
- * Presentational segmented tab strip for the Agent detail (Overview · Activity · Source · …).
- * Pure + controlled: it renders the tabs and reports clicks; the parent owns which is active and
- * what each renders. Kept dumb so it's trivially testable and reusable for any tabbed surface.
+ * Presentational tab strip for the Agent detail. Emits the app's shared `.ct-tabs` / `.ct-tab`
+ * underline tabs (the same markup the Project page uses for Repositories | Variables) so the
+ * surface is visually consistent across the product. Pure + controlled: the parent owns which is
+ * active and what each renders.
  */
 export function AgentDetailTabs({ tabs, active, onChange }: {
   tabs: ReadonlyArray<AgentTab>;
@@ -22,21 +21,22 @@ export function AgentDetailTabs({ tabs, active, onChange }: {
   onChange: (key: string) => void;
 }) {
   return (
-    <nav className="agent-tabs" role="tablist" aria-label="Agent views">
+    <div className="ct-tabs" role="tablist" aria-label="Agent views">
       {tabs.map((t) => (
-        <button
+        <div
           key={t.key}
-          type="button"
           role="tab"
+          tabIndex={0}
           aria-selected={t.key === active}
           data-active={t.key === active}
-          className="agent-tab"
+          className="ct-tab"
           onClick={() => onChange(t.key)}
+          onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onChange(t.key); } }}
         >
-          {t.icon && <span className="agent-tab-ic" aria-hidden>{t.icon}</span>}
-          <span className="agent-tab-lbl">{t.label}</span>
-        </button>
+          {t.label}
+          {t.count != null && <span className="ct-tab-c">{t.count}</span>}
+        </div>
       ))}
-    </nav>
+    </div>
   );
 }

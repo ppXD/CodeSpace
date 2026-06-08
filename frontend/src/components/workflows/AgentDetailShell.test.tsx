@@ -4,36 +4,35 @@ import { describe, expect, it, vi } from "vitest";
 import { AgentDetailShell, type AgentTab } from "./AgentDetailShell";
 
 /**
- * AgentDetailShell owns the agent-first tab behaviour. The mount policy is the load-bearing,
- * non-breaking guarantee — these pin every branch of it:
- *   1. default tab renders on mount; others don't;
- *   2. clicking a tab switches content; a non-keepMounted tab unmounts when left;
+ * AgentDetailShell — the agent-first tab behaviour on the shared `.ct` container-page system.
+ * The mount policy is the load-bearing, non-breaking guarantee:
+ *   1. default tab renders (in a padded `.ct-body`); others don't;
+ *   2. clicking switches content; a non-keepMounted tab unmounts when left;
  *   3. a keepMounted tab (Source) is NOT mounted until first visited (no eager editor mount)…
- *   4. …and once visited, stays in the DOM hidden (display:none) when left — so the editor's
- *      unsaved state survives tab switches (the whole reason for keepMounted);
- *   5. render() is called only for mounted tabs (lazy);
- *   6. api.goTo lets a tab's content drive navigation (Overview's "Edit in Source");
- *   7. the leading slot renders before the tabs (back button).
+ *   4. …and once visited stays mounted-but-hidden when left (the editor's unsaved state survives);
+ *   5. render() runs only for mounted tabs (lazy);
+ *   6. a `fill` tab renders edge-to-edge (`.agent-source-pane`), normal tabs in `.ct-body`;
+ *   7. api.goTo lets content switch tabs; the breadcrumb (crumbs) renders in the head.
  */
 const TABS: AgentTab[] = [
   { key: "overview", label: "Overview" },
   { key: "activity", label: "Activity" },
-  { key: "source", label: "Source", keepMounted: true },
+  { key: "source", label: "Source", keepMounted: true, fill: true },
 ];
 
 describe("AgentDetailShell", () => {
-  it("renders only the default tab's content on mount", () => {
-    render(<AgentDetailShell tabs={TABS} defaultTab="overview" render={(k) => <div>content:{k}</div>} />);
+  it("renders only the default tab's content on mount, inside a .ct-body", () => {
+    const { container } = render(<AgentDetailShell tabs={TABS} defaultTab="overview" render={(k) => <div>content:{k}</div>} />);
     expect(screen.getByText("content:overview")).toBeTruthy();
     expect(screen.queryByText("content:activity")).toBeNull();
-    expect(screen.queryByText("content:source")).toBeNull();
+    expect(container.querySelector('.ct-body[data-tab="overview"]')).not.toBeNull();
   });
 
   it("switches content on tab click; a non-keepMounted tab unmounts when left", () => {
     render(<AgentDetailShell tabs={TABS} defaultTab="overview" render={(k) => <div>content:{k}</div>} />);
     fireEvent.click(screen.getByRole("tab", { name: "Activity" }));
     expect(screen.getByText("content:activity")).toBeTruthy();
-    expect(screen.queryByText("content:overview")).toBeNull(); // overview is not keepMounted
+    expect(screen.queryByText("content:overview")).toBeNull();
   });
 
   it("does NOT mount a keepMounted tab until it is first visited", () => {
@@ -43,15 +42,19 @@ describe("AgentDetailShell", () => {
 
   it("keeps a visited keepMounted tab mounted-but-hidden when left (preserves its state)", () => {
     const { container } = render(<AgentDetailShell tabs={TABS} defaultTab="overview" render={(k) => <div>content:{k}</div>} />);
-
     fireEvent.click(screen.getByRole("tab", { name: "Source" }));
     expect(screen.getByText("content:source")).toBeTruthy();
-
     fireEvent.click(screen.getByRole("tab", { name: "Overview" }));
     const sourcePane = container.querySelector('[data-tab="source"]') as HTMLElement | null;
     expect(sourcePane).not.toBeNull();
-    expect(sourcePane!.style.display).toBe("none");      // hidden, not removed
-    expect(screen.getByText("content:source")).toBeTruthy(); // still in the DOM
+    expect(sourcePane!.style.display).toBe("none");
+    expect(screen.getByText("content:source")).toBeTruthy();
+  });
+
+  it("renders a fill tab edge-to-edge (.agent-source-pane), normal tabs in .ct-body", () => {
+    const { container } = render(<AgentDetailShell tabs={TABS} defaultTab="source" render={(k) => <div>content:{k}</div>} />);
+    expect(container.querySelector('.agent-source-pane[data-tab="source"]')).not.toBeNull();
+    expect(container.querySelector('[data-tab="overview"]')).toBeNull(); // not active, not keepMounted → unmounted
   });
 
   it("only calls render() for mounted tabs (lazy)", () => {
@@ -71,8 +74,8 @@ describe("AgentDetailShell", () => {
     expect(screen.getByText("go-from:source")).toBeTruthy();
   });
 
-  it("renders the leading slot (e.g. back button) before the tabs", () => {
-    render(<AgentDetailShell tabs={TABS} defaultTab="overview" leading={<span>LEAD</span>} render={() => null} />);
-    expect(screen.getByText("LEAD")).toBeTruthy();
+  it("renders the breadcrumb (crumbs) in the head", () => {
+    render(<AgentDetailShell tabs={TABS} defaultTab="overview" crumbs={<span>Agents / Reviewer</span>} render={() => null} />);
+    expect(screen.getByText("Agents / Reviewer")).toBeTruthy();
   });
 });
