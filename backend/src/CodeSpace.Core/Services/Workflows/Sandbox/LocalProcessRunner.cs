@@ -68,9 +68,21 @@ public sealed class LocalProcessRunner : ISandboxRunner, ISingletonDependency
     {
         KillQuietly(process);
 
+        // Let the captured output settle (the kill closes the child's pipes) BEFORE we return OR throw,
+        // so the read tasks never run against the Process as `using` disposes it on the caller-cancel path.
+        var stdout = await SafeRead(stdoutTask).ConfigureAwait(false);
+        var stderr = await SafeRead(stderrTask).ConfigureAwait(false);
+
         cancellationToken.ThrowIfCancellationRequested();
 
-        return new SandboxResult { Status = SandboxStatus.TimedOut, ExitCode = -1, Stdout = await stdoutTask.ConfigureAwait(false), Stderr = await stderrTask.ConfigureAwait(false) };
+        return new SandboxResult { Status = SandboxStatus.TimedOut, ExitCode = -1, Stdout = stdout, Stderr = stderr };
+    }
+
+    /// <summary>Await a redirected-stream read that may fault if the process was killed mid-read — partial/empty output is best-effort.</summary>
+    private static async Task<string> SafeRead(Task<string> readTask)
+    {
+        try { return await readTask.ConfigureAwait(false); }
+        catch { return ""; }
     }
 
     private static void KillQuietly(Process process)
