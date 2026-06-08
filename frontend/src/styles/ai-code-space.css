@@ -2054,13 +2054,20 @@ textarea:-webkit-autofill {
  * readable without horizontal scroll. The 1fr canvas column absorbs any leftover. */
 .acs-root .wf-editor-body {
   flex: 1; display: grid;
-  grid-template-columns: 220px minmax(0, 1fr) clamp(380px, 28vw, 560px);
+  /* palette · drag-handle · canvas · drag-handle · inspector. Rail widths come from CSS vars set
+   * inline by usePaneResize (defaults match the old fixed sizes); the 6px handles are draggable gutters. */
+  grid-template-columns: var(--wf-palette-w, 220px) 6px minmax(0, 1fr) 6px var(--wf-inspector-w, 440px);
   min-height: 0; min-width: 0;
 }
 @media (max-width: 1100px) {
   .acs-root .wf-editor-body { grid-template-columns: 200px 1fr; }
-  .acs-root .wf-inspector { display: none; }
+  .acs-root .wf-inspector, .acs-root .wf-resize { display: none; }
 }
+
+/* Drag-resize gutter between palette/canvas and canvas/inspector — thin + transparent at rest, with
+ * a warm tint on hover/drag so it's discoverable as grabbable. Hidden in the narrow two-column layout. */
+.acs-root .wf-resize { cursor: col-resize; background: transparent; transition: background .12s ease; }
+.acs-root .wf-resize:hover, .acs-root .wf-resize:active { background: var(--accent-soft); }
 
 /* Left palette */
 /* Palette is the warm-gray "tool rail" (panel-2); its node cards are white (panel) so they pop
