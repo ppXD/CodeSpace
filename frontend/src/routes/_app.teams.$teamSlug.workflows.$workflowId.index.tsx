@@ -92,15 +92,35 @@ import { useQueries } from "@tanstack/react-query";
  * in the palette automatically, and its config + inputs forms come for free from
  * its JSON schemas. No editor code change required for new node types.
  */
+type AgentDetailTab = "overview" | "activity" | "source" | "settings";
+
 export const Route = createFileRoute("/_app/teams/$teamSlug/workflows/$workflowId/")({
+  // Tab choice is URL-driven (?tab=settings) for shareable deep links; overview is the default and
+  // omitted from the URL for a clean path (mirrors the Project detail page's ?tab=variables).
+  validateSearch: (raw: Record<string, unknown>): { tab?: AgentDetailTab } => {
+    if (typeof raw.tab === "string") {
+      const lower = raw.tab.toLowerCase();
+      if (lower === "activity" || lower === "source" || lower === "settings") return { tab: lower };
+    }
+    return {};
+  },
   component: WorkflowEditorPage,
 });
 
 function WorkflowEditorPage() {
   const { teamSlug, workflowId } = Route.useParams();
+  const { tab } = Route.useSearch();
+  const activeTab: AgentDetailTab = tab ?? "overview";
   const navigate = useNavigate();
   const workflow = useWorkflow(workflowId);
   const name = workflow.data?.name ?? "Agent";
+
+  const setTab = (next: string) =>
+    navigate({
+      to: "/teams/$teamSlug/workflows/$workflowId",
+      params: { teamSlug, workflowId },
+      search: next === "overview" ? {} : { tab: next as AgentDetailTab },
+    });
 
   // Agent-first detail on the shared `.ct` page system: breadcrumb + underline tabs (matches the
   // Project page). Overview lands first; the canvas is the "Source" tab — kept mounted once opened
@@ -117,6 +137,8 @@ function WorkflowEditorPage() {
     <AgentDetailShell
       tabs={tabs}
       defaultTab="overview"
+      active={activeTab}
+      onActiveChange={setTab}
       crumbs={
         <>
           <a onClick={() => navigate({ to: "/teams/$teamSlug/workflows", params: { teamSlug } })}>Agents</a>

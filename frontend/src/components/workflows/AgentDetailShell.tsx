@@ -28,20 +28,33 @@ export interface AgentShellApi {
  *   - `keepMounted` tab, already visited → mounted but hidden → state preserved (the editor);
  *   - everything else → not mounted (so the heavy editor never mounts until Source is opened).
  * `render(key, api)` returns each tab's content; `api.goTo` lets content switch tabs.
+ *
+ * Active tab is controlled when `active` + `onActiveChange` are supplied (the route drives it from
+ * the URL `?tab=` so links are deep-linkable), and uncontrolled otherwise. Either way the shell
+ * owns the `visited` set so `keepMounted` panes survive once shown — including when the controlled
+ * tab changes from the URL on load.
  */
-export function AgentDetailShell({ tabs, defaultTab, crumbs, render }: {
+export function AgentDetailShell({ tabs, defaultTab, crumbs, render, active: controlledActive, onActiveChange }: {
   tabs: ReadonlyArray<AgentTab>;
   defaultTab: string;
   crumbs?: ReactNode;
   render: (key: string, api: AgentShellApi) => ReactNode;
+  active?: string;
+  onActiveChange?: (key: string) => void;
 }) {
-  const [active, setActive] = useState(defaultTab);
-  const [visited, setVisited] = useState<ReadonlySet<string>>(() => new Set([defaultTab]));
+  const [internalActive, setInternalActive] = useState(defaultTab);
+  const active = controlledActive ?? internalActive;
+
+  // Tabs shown so far — a keepMounted pane (the Source editor) stays mounted-but-hidden once
+  // visited. Seeded with the mount-time active (covers a deep-link straight to ?tab=source) and
+  // extended in goTo, the path every tab click + in-content nav goes through.
+  const [visited, setVisited] = useState<ReadonlySet<string>>(() => new Set([controlledActive ?? defaultTab]));
 
   const goTo = useCallback((key: string) => {
     setVisited((v) => (v.has(key) ? v : new Set(v).add(key)));
-    setActive(key);
-  }, []);
+    if (onActiveChange) onActiveChange(key);
+    else setInternalActive(key);
+  }, [onActiveChange]);
 
   const api: AgentShellApi = { active, goTo };
 

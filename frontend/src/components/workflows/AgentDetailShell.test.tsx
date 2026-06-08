@@ -78,4 +78,32 @@ describe("AgentDetailShell", () => {
     render(<AgentDetailShell tabs={TABS} defaultTab="overview" crumbs={<span>Agents / Reviewer</span>} render={() => null} />);
     expect(screen.getByText("Agents / Reviewer")).toBeTruthy();
   });
+
+  // Controlled mode — the route drives `active` from the URL (?tab=) so links are deep-linkable.
+  it("controlled: renders the `active` tab rather than the default", () => {
+    render(<AgentDetailShell tabs={TABS} defaultTab="overview" active="activity" onActiveChange={vi.fn()} render={(k) => <div>content:{k}</div>} />);
+    expect(screen.getByText("content:activity")).toBeTruthy();
+    expect(screen.queryByText("content:overview")).toBeNull();
+  });
+
+  it("controlled: a tab click calls onActiveChange and lets the parent drive the switch", () => {
+    const onActiveChange = vi.fn();
+    render(<AgentDetailShell tabs={TABS} defaultTab="overview" active="overview" onActiveChange={onActiveChange} render={(k) => <div>content:{k}</div>} />);
+    fireEvent.click(screen.getByRole("tab", { name: "Activity" }));
+    expect(onActiveChange).toHaveBeenCalledWith("activity");
+    // The shell does not self-switch when controlled — content follows the prop, still overview.
+    expect(screen.getByText("content:overview")).toBeTruthy();
+  });
+
+  it("controlled: a keepMounted tab stays mounted-but-hidden after the controlled tab changes", () => {
+    const { container, rerender } = render(<AgentDetailShell tabs={TABS} defaultTab="overview" active="source" onActiveChange={vi.fn()} render={(k) => <div>content:{k}</div>} />);
+    expect(screen.getByText("content:source")).toBeTruthy();
+
+    rerender(<AgentDetailShell tabs={TABS} defaultTab="overview" active="overview" onActiveChange={vi.fn()} render={(k) => <div>content:{k}</div>} />);
+
+    const sourcePane = container.querySelector('[data-tab="source"]') as HTMLElement | null;
+    expect(sourcePane).not.toBeNull();
+    expect(sourcePane!.style.display).toBe("none");
+    expect(screen.getByText("content:source")).toBeTruthy();
+  });
 });
