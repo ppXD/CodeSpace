@@ -1988,6 +1988,25 @@ textarea:-webkit-autofill {
 .acs-root .agent-ov-run-id { font-family: var(--mono, ui-monospace, monospace); font-size: 12px; color: var(--ink); }
 .acs-root .agent-ov-run-src, .acs-root .agent-ov-run-time { font-size: 12px; color: var(--muted); }
 
+/* Settings panel — identity (read-only) · status switch · guardrails (forthcoming) · danger zone.
+ * Each actionable setting is a bordered row: descriptive text on the left, the control on the right. */
+.acs-root .agent-set { padding: 22px 0 8px; display: flex; flex-direction: column; gap: 22px; }
+.acs-root .agent-set-head { min-width: 0; }
+.acs-root .agent-set-hint { margin: 10px 0 0; font-size: 12.5px; color: var(--muted); }
+.acs-root .agent-set-section { display: flex; flex-direction: column; gap: 10px; }
+.acs-root .agent-set-row { display: flex; align-items: center; justify-content: space-between; gap: 24px; padding: 16px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel); }
+.acs-root .agent-set-row-text { min-width: 0; }
+.acs-root .agent-set-row-title { font-size: 13.5px; font-weight: 600; color: var(--ink); }
+.acs-root .agent-set-row-desc { margin-top: 3px; font-size: 12.5px; color: var(--muted); max-width: 64ch; }
+.acs-root .agent-set-row .btn { flex-shrink: 0; }
+/* Guardrails placeholder — muted, dashed, clearly not-yet-active. */
+.acs-root .agent-set-soon { display: flex; align-items: center; gap: 12px; padding: 16px; border: 1px dashed var(--line); border-radius: 10px; background: var(--panel); }
+.acs-root .agent-set-soon-ic { display: inline-flex; flex-shrink: 0; color: var(--muted); }
+.acs-root .agent-set-soon-text { margin: 0; flex: 1; min-width: 0; font-size: 12.5px; line-height: 1.55; color: var(--muted); }
+.acs-root .agent-set-soon-tag { flex-shrink: 0; font-size: 11px; font-weight: 600; padding: 2px 9px; border-radius: 999px; background: var(--panel-2); color: var(--muted); border: 1px solid var(--line); }
+/* Danger zone — soft warning tint so deletion reads as consequential without shouting. */
+.acs-root .agent-set-danger { border-color: #E4C3B5; background: #FBF1EC; }
+
 /* Activity list */
 .acs-root .agent-activity { list-style: none; margin: 0; padding: 16px 0; display: flex; flex-direction: column; gap: 4px; }
 .acs-root .agent-activity-row {

@@ -59,7 +59,7 @@ import { RunWorkflowModal } from "@/components/workflows/RunWorkflowModal";
 import { RunViewerDialog } from "@/components/workflows/RunViewerDialog";
 import { RunHistoryDialog } from "@/components/workflows/RunHistoryDialog";
 import { AgentDetailShell, type AgentTab } from "@/components/workflows/AgentDetailShell";
-import { ActivityTab, OverviewTab } from "@/components/workflows/AgentDetailTabPanels";
+import { ActivityTab, OverviewTab, SettingsTab } from "@/components/workflows/AgentDetailTabPanels";
 
 // Five panels covering every scope the engine resolves:
 //   - variables  → wf.*    (Variable table, scope=Workflow, persists immediately via API)
@@ -110,6 +110,7 @@ function WorkflowEditorPage() {
     { key: "overview", label: "Overview" },
     { key: "activity", label: "Activity" },
     { key: "source", label: "Source", keepMounted: true, fill: true },
+    { key: "settings", label: "Settings" },
   ];
 
   return (
@@ -127,6 +128,7 @@ function WorkflowEditorPage() {
         // ReactFlowProvider must wrap any component that calls useReactFlow().
         key === "source" ? <ReactFlowProvider><EditorShell /></ReactFlowProvider>
         : key === "overview" ? <OverviewTab workflowId={workflowId} onEditSource={() => api.goTo("source")} onViewActivity={() => api.goTo("activity")} />
+        : key === "settings" ? <SettingsTab workflowId={workflowId} onDeleted={() => navigate({ to: "/teams/$teamSlug/workflows", params: { teamSlug } })} />
         : <ActivityTab workflowId={workflowId} />
       }
     />
