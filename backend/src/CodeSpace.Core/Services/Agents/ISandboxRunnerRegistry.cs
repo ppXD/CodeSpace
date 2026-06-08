@@ -1,4 +1,4 @@
-namespace CodeSpace.Core.Services.Workflows.Sandbox;
+namespace CodeSpace.Core.Services.Agents;
 
 /// <summary>
 /// Resolves an <see cref="ISandboxRunner"/> by its <see cref="ISandboxRunner.Kind"/>. Same shape as

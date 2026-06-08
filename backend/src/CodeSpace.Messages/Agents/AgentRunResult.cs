@@ -1,6 +1,6 @@
 using CodeSpace.Messages.Enums;
 
-namespace CodeSpace.Core.Services.Workflows.Agents;
+namespace CodeSpace.Messages.Agents;
 
 /// <summary>
 /// The normalized OUTPUT contract of an agent run — what the harness produces at the end, regardless

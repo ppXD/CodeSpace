@@ -1,4 +1,4 @@
-namespace CodeSpace.Core.Services.Workflows.Agents;
+namespace CodeSpace.Messages.Agents;
 
 /// <summary>
 /// The substrate-neutral "agent task envelope" — what the workflow hands to the agent layer. It says

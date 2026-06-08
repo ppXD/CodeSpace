@@ -1,9 +1,9 @@
 using System.Text.Json;
 using CodeSpace.Core.DependencyInjection;
-using CodeSpace.Core.Services.Workflows.Sandbox;
+using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Enums;
 
-namespace CodeSpace.Core.Services.Workflows.Agents;
+namespace CodeSpace.Core.Services.Agents.Harnesses.Codex;
 
 /// <summary>
 /// Adapter for OpenAI's Codex CLI. Drives <c>codex exec --json …</c> (the non-interactive mode built
@@ -16,7 +16,7 @@ namespace CodeSpace.Core.Services.Workflows.Agents;
 /// table is calibrated against real <c>codex exec --json</c> output when execution is wired (B0.4); the
 /// normalization shape tested here is the stable contract.</para>
 /// </summary>
-public sealed class CodexCliHarness : IAgentHarness, ISingletonDependency
+public sealed class CodexHarness : IAgentHarness, ISingletonDependency
 {
     public const string HarnessKind = "codex-cli";
 

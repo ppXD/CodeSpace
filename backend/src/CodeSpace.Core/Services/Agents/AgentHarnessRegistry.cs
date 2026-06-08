@@ -1,6 +1,6 @@
 using CodeSpace.Core.DependencyInjection;
 
-namespace CodeSpace.Core.Services.Workflows.Agents;
+namespace CodeSpace.Core.Services.Agents;
 
 /// <summary>
 /// Default <see cref="IAgentHarnessRegistry"/> — indexes every registered <see cref="IAgentHarness"/>
