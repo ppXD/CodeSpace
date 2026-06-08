@@ -1,18 +1,21 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { WorkflowDetail } from "@/api/workflows";
-import { ActivityTab, OverviewTab } from "./AgentDetailTabPanels";
+import { ActivityTab, OverviewTab, SettingsTab } from "./AgentDetailTabPanels";
 
 /**
  * The tab-content wrappers carry the wiring around the (separately-tested) pure panels: data
  * loading, the manual-run branch (inputs → modal, none → run immediately), and opening the run
  * viewer. Hooks are mocked; the dialogs are stubbed so these isolate the wrapper logic.
  */
-const { useWorkflowMock, mutateAsyncMock, useWorkflowRunsMock } = vi.hoisted(() => ({
+const { useWorkflowMock, mutateAsyncMock, useWorkflowRunsMock, setEnabledMock, deleteMock, confirmMock } = vi.hoisted(() => ({
   useWorkflowMock: vi.fn(),
   mutateAsyncMock: vi.fn(),
   useWorkflowRunsMock: vi.fn(),
+  setEnabledMock: vi.fn(),
+  deleteMock: vi.fn(),
+  confirmMock: vi.fn(),
 }));
 
 vi.mock("@/hooks/use-workflows", () => ({
@@ -21,8 +24,11 @@ vi.mock("@/hooks/use-workflows", () => ({
   useWorkflowRuns: (id: string) => useWorkflowRunsMock(id),
   useWorkflowRun: vi.fn(),
   useResumeRun: () => ({ mutate: vi.fn(), isPending: false, isError: false }),
+  useSetWorkflowEnabled: () => ({ mutate: setEnabledMock, isPending: false }),
+  useDeleteWorkflow: () => ({ mutate: deleteMock, isPending: false }),
 }));
 
+vi.mock("@/components/dialog/dialog-context", () => ({ useConfirm: () => confirmMock }));
 vi.mock("./RunWorkflowModal", () => ({ RunWorkflowModal: () => <div>run-modal</div> }));
 vi.mock("./RunViewerDialog", () => ({ RunViewerDialog: ({ runId }: { runId: string }) => <div>viewer:{runId}</div> }));
 
@@ -38,6 +44,10 @@ beforeEach(() => {
   useWorkflowMock.mockReset();
   mutateAsyncMock.mockReset();
   useWorkflowRunsMock.mockReset();
+  setEnabledMock.mockReset();
+  deleteMock.mockReset();
+  confirmMock.mockReset();
+  confirmMock.mockResolvedValue(true);
   // OverviewTab now also reads useWorkflowRuns (recent-activity preview) — safe default; ActivityTab overrides.
   useWorkflowRunsMock.mockReturnValue({ isLoading: false, error: null, data: [] });
 });
@@ -102,5 +112,57 @@ describe("ActivityTab", () => {
     render(<ActivityTab workflowId="w1" />);
     fireEvent.click(screen.getByText("run-aaaa"));
     expect(screen.getByText("viewer:run-aaaa1111")).toBeTruthy();
+  });
+});
+
+describe("SettingsTab", () => {
+  it("shows a loading shell while the agent loads", () => {
+    useWorkflowMock.mockReturnValue({ isLoading: true, error: null, data: undefined });
+    render(<SettingsTab workflowId="w1" onDeleted={vi.fn()} />);
+    expect(screen.getByText("Loading…")).toBeTruthy();
+  });
+
+  it("shows 'Agent not found' when the agent is missing", () => {
+    useWorkflowMock.mockReturnValue({ isLoading: false, error: null, data: null });
+    render(<SettingsTab workflowId="w1" onDeleted={vi.fn()} />);
+    expect(screen.getByText("Agent not found")).toBeTruthy();
+  });
+
+  it("renders the settings panel when loaded", () => {
+    useWorkflowMock.mockReturnValue(loaded());
+    render(<SettingsTab workflowId="w1" onDeleted={vi.fn()} />);
+    expect(screen.getByText("PR Security Reviewer")).toBeTruthy();
+    expect(screen.getByText("Guardrails")).toBeTruthy();
+    expect(screen.getByRole("button", { name: /Delete agent/ })).toBeTruthy();
+  });
+
+  it("toggles enabled via the dedicated endpoint", () => {
+    useWorkflowMock.mockReturnValue(loaded({ enabled: true }));
+    render(<SettingsTab workflowId="w1" onDeleted={vi.fn()} />);
+    fireEvent.click(screen.getByRole("button", { name: /Pause agent/ }));
+    expect(setEnabledMock).toHaveBeenCalledWith({ workflowId: "w1", enabled: false });
+  });
+
+  it("deletes after confirm, then navigates away via onDeleted", async () => {
+    useWorkflowMock.mockReturnValue(loaded());
+    deleteMock.mockImplementation((_id: string, opts?: { onSuccess?: () => void }) => opts?.onSuccess?.());
+    const onDeleted = vi.fn();
+    render(<SettingsTab workflowId="w1" onDeleted={onDeleted} />);
+
+    fireEvent.click(screen.getByRole("button", { name: /Delete agent/ }));
+
+    await waitFor(() => expect(deleteMock).toHaveBeenCalledWith("w1", expect.objectContaining({ onSuccess: expect.any(Function) })));
+    expect(onDeleted).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not delete when the confirm is dismissed", async () => {
+    confirmMock.mockResolvedValue(false);
+    useWorkflowMock.mockReturnValue(loaded());
+    render(<SettingsTab workflowId="w1" onDeleted={vi.fn()} />);
+
+    fireEvent.click(screen.getByRole("button", { name: /Delete agent/ }));
+
+    await waitFor(() => expect(confirmMock).toHaveBeenCalled());
+    expect(deleteMock).not.toHaveBeenCalled();
   });
 });
