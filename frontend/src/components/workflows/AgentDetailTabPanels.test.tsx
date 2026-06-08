@@ -38,6 +38,8 @@ beforeEach(() => {
   useWorkflowMock.mockReset();
   mutateAsyncMock.mockReset();
   useWorkflowRunsMock.mockReset();
+  // OverviewTab now also reads useWorkflowRuns (recent-activity preview) — safe default; ActivityTab overrides.
+  useWorkflowRunsMock.mockReturnValue({ isLoading: false, error: null, data: [] });
 });
 
 describe("OverviewTab", () => {

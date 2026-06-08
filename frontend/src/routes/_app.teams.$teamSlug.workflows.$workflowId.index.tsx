@@ -125,7 +125,7 @@ function WorkflowEditorPage() {
       render={(key, api) =>
         // ReactFlowProvider must wrap any component that calls useReactFlow().
         key === "source" ? <ReactFlowProvider><EditorShell /></ReactFlowProvider>
-        : key === "overview" ? <OverviewTab workflowId={workflowId} onEditSource={() => api.goTo("source")} />
+        : key === "overview" ? <OverviewTab workflowId={workflowId} onEditSource={() => api.goTo("source")} onViewActivity={() => api.goTo("activity")} />
         : <ActivityTab workflowId={workflowId} />
       }
     />
@@ -133,8 +133,7 @@ function WorkflowEditorPage() {
 }
 
 function EditorShell() {
-  const { teamSlug, workflowId } = Route.useParams();
-  const navigate = useNavigate();
+  const { workflowId } = Route.useParams();
   const workflow = useWorkflow(workflowId);
   const manifests = useNodeManifests();
   const update = useUpdateWorkflow();
@@ -164,7 +163,6 @@ function EditorShell() {
     <Editor
       workflow={workflow.data}
       manifests={manifests.data ?? []}
-      onBackToList={() => navigate({ to: "/teams/$teamSlug/workflows", params: { teamSlug } })}
       saving={update.isPending}
       onSave={(input) => update.mutateAsync({ workflowId, input })}
     />
@@ -174,7 +172,6 @@ function EditorShell() {
 interface EditorProps {
   workflow: WorkflowDetail;
   manifests: NodeManifestDto[];
-  onBackToList: () => void;
   saving: boolean;
   onSave: (input: {
     name: string;
@@ -184,7 +181,7 @@ interface EditorProps {
   }) => Promise<unknown>;
 }
 
-function Editor({ workflow, manifests, onBackToList, saving, onSave }: EditorProps) {
+function Editor({ workflow, manifests, saving, onSave }: EditorProps) {
   // Editable workflow header — start as a copy of the persisted name; the user can rename
   // in place via the input above the canvas.
   const [name, setName] = useState(workflow.name);
@@ -714,9 +711,6 @@ function Editor({ workflow, manifests, onBackToList, saving, onSave }: EditorPro
     <div className="wf-editor">
       {/* Top bar */}
       <header className="wf-editor-bar">
-        <button className="btn btn-ghost" onClick={onBackToList} title="Back to agents">
-          <Ic.ArrowLeft size={13} />
-        </button>
         <input
           className="wf-editor-name"
           value={name}

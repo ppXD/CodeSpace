@@ -1,7 +1,7 @@
 import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
-import type { WorkflowDetail } from "@/api/workflows";
+import type { WorkflowDetail, WorkflowRunSummary } from "@/api/workflows";
 import { AgentOverviewPanel } from "./AgentOverviewPanel";
 
 /**
@@ -24,6 +24,12 @@ const wf = (over: Partial<WorkflowDetail> = {}): WorkflowDetail => ({
   activations: [],
   createdDate: "2026-01-01T00:00:00Z",
   lastModifiedDate: "2026-01-01T00:00:00Z",
+  ...over,
+});
+
+const run = (over: Partial<WorkflowRunSummary> = {}): WorkflowRunSummary => ({
+  id: "run-aaaa1111", workflowId: "w1", workflowVersion: 3, sourceType: "manual",
+  status: "Success", error: null, startedAt: "2026-01-01T00:00:00Z", completedAt: null, createdDate: "",
   ...over,
 });
 
@@ -76,5 +82,24 @@ describe("AgentOverviewPanel", () => {
     render(<AgentOverviewPanel workflow={wf()} onRun={vi.fn()} onEditSource={vi.fn()} running />);
     const btn = screen.getByRole("button", { name: /running/i });
     expect(btn.hasAttribute("disabled")).toBe(true);
+  });
+
+  it("shows 'No runs yet' in Recent activity when there are no recent runs", () => {
+    render(<AgentOverviewPanel workflow={wf()} recentRuns={[]} onRun={vi.fn()} onEditSource={vi.fn()} />);
+    expect(screen.getByText(/No runs yet/)).toBeTruthy();
+  });
+
+  it("lists recent runs and wires View all", () => {
+    const onViewActivity = vi.fn();
+    render(<AgentOverviewPanel workflow={wf()} recentRuns={[run({ id: "run-zzzz9999" })]} onRun={vi.fn()} onEditSource={vi.fn()} onViewActivity={onViewActivity} />);
+    expect(screen.getByText("run-zzzz")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: /view all/i }));
+    expect(onViewActivity).toHaveBeenCalledTimes(1);
+  });
+
+  it("caps the recent list at 5", () => {
+    const many = Array.from({ length: 8 }, (_, i) => run({ id: `run-${i}0000000` }));
+    render(<AgentOverviewPanel workflow={wf()} recentRuns={many} onRun={vi.fn()} onEditSource={vi.fn()} onViewActivity={vi.fn()} />);
+    expect(screen.getAllByText(/^run-/).length).toBe(5);
   });
 });
