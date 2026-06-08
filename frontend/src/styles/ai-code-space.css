@@ -1956,6 +1956,9 @@ textarea:-webkit-autofill {
  * height wf-editor fills it. Source is kept mounted-but-hidden once visited (AgentDetailShell) so
  * unsaved canvas edits survive tab switches. */
 .acs-root .agent-source-pane { flex: 1; min-height: 0; min-width: 0; display: flex; }
+/* The editor (or its loading/error section) must fill the pane. Without flex:1 a row-flex child
+ * only takes its content width — which left the canvas at ~half width. */
+.acs-root .agent-source-pane > * { flex: 1; min-width: 0; min-height: 0; }
 
 /* Overview panel — header (title + actions) · meta band · recent-activity preview. Full-width
  * inside `.ct-body` (which provides the page's side padding). */
@@ -1970,11 +1973,10 @@ textarea:-webkit-autofill {
 .acs-root .agent-ov-meta-item { display: flex; align-items: center; gap: 10px; }
 .acs-root .agent-ov-meta-item dt { margin: 0; font-size: 12px; font-weight: 600; color: var(--muted); }
 .acs-root .agent-ov-meta-item dd { margin: 0; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-.acs-root .agent-ov-muted { font-size: 13px; color: var(--muted); }
 .acs-root .agent-ov-triggers { display: inline-flex; gap: 6px; flex-wrap: wrap; }
 .acs-root .agent-ov-status { font-size: 12px; font-weight: 600; padding: 2px 9px; border-radius: 999px; background: var(--panel-2); color: var(--muted); border: 1px solid var(--line); }
-.acs-root .agent-ov-status[data-enabled="true"] { background: var(--accent-soft); color: var(--accent); border-color: var(--accent-soft); }
-.acs-root .agent-ov-ver { font-size: 12px; color: var(--muted); }
+/* Enabled = success green (matches the run-status "ok" pill); Paused keeps the neutral grey above. */
+.acs-root .agent-ov-status[data-enabled="true"] { background: #E6F4EC; color: #1F6B3F; border-color: #BFE0CD; }
 .acs-root .agent-ov-section { display: flex; flex-direction: column; gap: 10px; }
 .acs-root .agent-ov-section-head { display: flex; align-items: center; justify-content: space-between; }
 .acs-root .agent-ov-section-title { margin: 0; font-size: 13px; font-weight: 600; color: var(--ink); }

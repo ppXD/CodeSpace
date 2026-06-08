@@ -44,16 +44,17 @@ export function AgentOverviewPanel({ workflow, recentRuns = [], onRun, onEditSou
           <dt>Runs when</dt>
           <dd>
             {triggers.length === 0
-              ? <span className="agent-ov-muted">Manual only</span>
+              ? <span className="wf-trigger-muted">Manual only</span>
               : <span className="agent-ov-triggers">{triggers.map((t) => <span key={t} className="wf-trigger-chip">{t}</span>)}</span>}
           </dd>
         </div>
         <div className="agent-ov-meta-item">
           <dt>Status</dt>
-          <dd>
-            <span className="agent-ov-status" data-enabled={workflow.enabled}>{workflow.enabled ? "Enabled" : "Paused"}</span>
-            <span className="agent-ov-ver">v{workflow.latestVersion}</span>
-          </dd>
+          <dd><span className="agent-ov-status" data-enabled={workflow.enabled}>{workflow.enabled ? "Enabled" : "Paused"}</span></dd>
+        </div>
+        <div className="agent-ov-meta-item">
+          <dt>Version</dt>
+          <dd><span className="wf-version">v{workflow.latestVersion}</span></dd>
         </div>
       </dl>
 

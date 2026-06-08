@@ -60,9 +60,10 @@ describe("AgentOverviewPanel", () => {
     expect(screen.queryByText("Manual only")).toBeNull();
   });
 
-  it("reflects enabled/paused status + version", () => {
+  it("reflects enabled/paused status + a labeled version", () => {
     const { rerender } = render(<AgentOverviewPanel workflow={wf({ enabled: true, latestVersion: 3 })} onRun={vi.fn()} onEditSource={vi.fn()} />);
     expect(screen.getByText("Enabled")).toBeTruthy();
+    expect(screen.getByText("Version")).toBeTruthy();
     expect(screen.getByText("v3")).toBeTruthy();
     rerender(<AgentOverviewPanel workflow={wf({ enabled: false, latestVersion: 3 })} onRun={vi.fn()} onEditSource={vi.fn()} />);
     expect(screen.getByText("Paused")).toBeTruthy();
