@@ -1,7 +1,7 @@
 import { useState } from "react";
 
 import { ApiError } from "@/api/request";
-import { useRunWorkflowManually, useWorkflow } from "@/hooks/use-workflows";
+import { useRunWorkflowManually, useWorkflow, useWorkflowRuns } from "@/hooks/use-workflows";
 
 import { AgentActivityPanel } from "./AgentActivityPanel";
 import { AgentOverviewPanel } from "./AgentOverviewPanel";
@@ -16,8 +16,9 @@ import { RunWorkflowModal } from "./RunWorkflowModal";
  */
 
 /** Overview tab — read-only agent summary + the manual-run flow (reuses the run modal + viewer). */
-export function OverviewTab({ workflowId, onEditSource }: { workflowId: string; onEditSource: () => void }) {
+export function OverviewTab({ workflowId, onEditSource, onViewActivity }: { workflowId: string; onEditSource: () => void; onViewActivity?: () => void }) {
   const workflow = useWorkflow(workflowId);
+  const runs = useWorkflowRuns(workflowId);
   const runManually = useRunWorkflowManually();
   const [runFormOpen, setRunFormOpen] = useState(false);
   const [viewerRunId, setViewerRunId] = useState<string | null>(null);
@@ -49,7 +50,7 @@ export function OverviewTab({ workflowId, onEditSource }: { workflowId: string; 
 
   return (
     <>
-      <AgentOverviewPanel workflow={workflow.data} onRun={onRun} onEditSource={onEditSource} running={runManually.isPending} />
+      <AgentOverviewPanel workflow={workflow.data} recentRuns={runs.data ?? []} onRun={onRun} onEditSource={onEditSource} onViewActivity={onViewActivity} running={runManually.isPending} />
       {runFormOpen && (
         <RunWorkflowModal
           workflowName={workflow.data.name}
