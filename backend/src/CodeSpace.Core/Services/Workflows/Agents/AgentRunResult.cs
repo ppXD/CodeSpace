@@ -1,3 +1,5 @@
+using CodeSpace.Messages.Enums;
+
 namespace CodeSpace.Core.Services.Workflows.Agents;
 
 /// <summary>
@@ -26,15 +28,6 @@ public sealed record AgentRunResult
 
     /// <summary>Failure detail when <see cref="Status"/> is <see cref="AgentRunStatus.Failed"/>.</summary>
     public string? Error { get; init; }
-}
-
-/// <summary>Terminal outcome of an agent run. The non-terminal lifecycle states (Queued/Running) live on the AgentRun record (B0.3).</summary>
-public enum AgentRunStatus
-{
-    Succeeded,
-    Failed,
-    Cancelled,
-    TimedOut,
 }
 
 public sealed record AgentTokenUsage

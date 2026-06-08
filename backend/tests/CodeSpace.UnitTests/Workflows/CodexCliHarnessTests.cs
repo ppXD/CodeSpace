@@ -1,4 +1,5 @@
 using CodeSpace.Core.Services.Workflows.Agents;
+using CodeSpace.Messages.Enums;
 using Shouldly;
 
 namespace CodeSpace.UnitTests.Workflows;
