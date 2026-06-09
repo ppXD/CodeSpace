@@ -3,7 +3,7 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
 import { ApiError } from "@/api/request";
-import type { RemoteBranch, RemoteCommitSummary, RemoteFileContent, RemoteLanguage, RemoteRepositoryStats, RemoteTreeEntry } from "@/api/types";
+import type { RemoteBranch, RemoteCommitSummary, RemoteFileContent, RemoteLanguage, RemoteTreeEntry, RepositoryDetail } from "@/api/types";
 import {
   useRepository,
   useRepositoryBranches,
@@ -23,12 +23,11 @@ interface CodeBrowserBodyProps {
 }
 
 /**
- * The "Code" tab — a GitHub/GitLab-style, branch-scoped source browser. A two-column layout: the file
- * tree + viewer on the left, a stats sidebar (stars/forks/counts/storage) and Languages bar on the right.
- * Above the file list sits the latest-commit bar, and each row carries its own last-commit + time.
+ * The "Code" tab — GitHub/GitLab-style. The repo name + Public/Private + Star/Fork live in the page
+ * header (RepoDetailHeader) above the tab strip; this body is the rest: a toolbar (branch · N branches ·
+ * N tags · search · Code-with-clone), the file tree + viewer, and a right rail (About + Languages).
  *
- * Branch / path / open-file are local state (URL stays clean, like the PR list). Switching branch resets
- * to the root because a deep path may not exist on the other branch.
+ * Branch / path / open-file / filter are local state. Switching branch or navigating resets the filter.
  */
 export function CodeBrowserBody({ repoId }: CodeBrowserBodyProps) {
   const repository = useRepository(repoId);
@@ -39,6 +38,7 @@ export function CodeBrowserBody({ repoId }: CodeBrowserBodyProps) {
   const [branch, setBranch] = useState<string | null>(null);
   const [path, setPath] = useState("");
   const [file, setFile] = useState<string | null>(null);
+  const [query, setQuery] = useState("");
 
   const repo = repository.data;
   const ref = branch ?? repo?.defaultBranch ?? null;
@@ -47,7 +47,6 @@ export function CodeBrowserBody({ repoId }: CodeBrowserBodyProps) {
   const tree = useRepositoryTree(repoId, path, ref, repo != null && inTree);
   const fileContent = useRepositoryFile(repoId, file, ref, file !== null);
 
-  // Sorted once: drives the list, the README lookup, and the per-entry commit fetch.
   const entries = inTree && tree.data ? sortTreeEntries(tree.data) : [];
   const entryPaths = entries.map(e => e.path);
 
@@ -59,27 +58,47 @@ export function CodeBrowserBody({ repoId }: CodeBrowserBodyProps) {
 
   if (!repo) return null;
 
-  const goToRoot = () => { setFile(null); setPath(""); };
-  const goToCrumb = (crumbPath: string) => { setFile(null); setPath(crumbPath); };
-  const goUp = () => { setFile(null); setPath(parentPath(path)); };
+  const filter = query.trim().toLowerCase();
+  const visibleEntries = filter ? entries.filter(e => e.name.toLowerCase().includes(filter)) : entries;
+
+  const goToRoot = () => { setFile(null); setPath(""); setQuery(""); };
+  const goToCrumb = (crumbPath: string) => { setFile(null); setPath(crumbPath); setQuery(""); };
+  const goUp = () => { setFile(null); setPath(parentPath(path)); setQuery(""); };
   const openEntry = (entry: RemoteTreeEntry) => {
+    setQuery("");
     if (entry.type === "Directory") { setFile(null); setPath(entry.path); }
     else setFile(entry.path);
   };
-  const changeBranch = (name: string) => { setBranch(name); setPath(""); setFile(null); };
+  const changeBranch = (name: string) => { setBranch(name); setPath(""); setFile(null); setQuery(""); };
 
   const crumbs = buildBreadcrumbs(file ?? path);
 
   return (
     <div className="cb">
       <div className="cb-main">
-        <div className="cb-bar">
-          <BranchPicker branches={branches.data ?? []} current={ref} loading={branches.isLoading} onPick={changeBranch} />
+        <div className="cb-toolbar">
+          <div className="cb-toolbar-l">
+            <BranchPicker branches={branches.data ?? []} current={ref} loading={branches.isLoading} onPick={changeBranch} />
+            {stats.data?.branchCount != null && (
+              <span className="cb-count"><Ic.Branch size={13} /> <b>{formatCount(stats.data.branchCount)}</b> branches</span>
+            )}
+            {stats.data?.tagCount != null && (
+              <span className="cb-count"><Ic.Tag size={13} /> <b>{formatCount(stats.data.tagCount)}</b> tags</span>
+            )}
+          </div>
 
-          <nav className="cb-crumbs" aria-label="Path">
-            <button className="cb-crumb cb-crumb-root" onClick={goToRoot} disabled={crumbs.length === 0}>
-              <Ic.Repo size={13} /> {repo.name}
-            </button>
+          <div className="cb-toolbar-r">
+            <div className="cb-search">
+              <Ic.Search size={14} />
+              <input value={query} onChange={e => setQuery(e.target.value)} placeholder="Go to file" spellCheck={false} />
+            </div>
+            <CloneMenu repo={repo} />
+          </div>
+        </div>
+
+        {crumbs.length > 0 && (
+          <nav className="cb-path" aria-label="Path">
+            <button className="cb-crumb cb-crumb-root" onClick={goToRoot}><Ic.Repo size={13} /> {repo.name}</button>
             {crumbs.map((c, i) => {
               const isLast = i === crumbs.length - 1;
               return (
@@ -92,29 +111,30 @@ export function CodeBrowserBody({ repoId }: CodeBrowserBodyProps) {
               );
             })}
           </nav>
-        </div>
+        )}
 
         {file !== null
           ? <FileView content={fileContent.data} isLoading={fileContent.isLoading} error={fileContent.error} webUrl={repo.webUrl} />
           : (
             <>
-              <LatestCommitBar commit={latestCommit.data} totalCommits={stats.data?.commitCount} />
+              {!filter && <LatestCommitBar commit={latestCommit.data} totalCommits={stats.data?.commitCount} />}
               <TreeList
-                entries={entries}
+                entries={visibleEntries}
                 commits={treeCommits.data}
                 isLoading={tree.isLoading}
                 error={tree.error}
-                showUp={path !== ""}
+                showUp={path !== "" && !filter}
                 onUp={goUp}
                 onOpen={openEntry}
+                emptyLabel={filter ? "No files match." : "This folder is empty."}
               />
-              {readmeEntry && <ReadmeCard name={readmeEntry.name} content={readme.data} isLoading={readme.isLoading} />}
+              {readmeEntry && !filter && <ReadmeCard name={readmeEntry.name} content={readme.data} isLoading={readme.isLoading} />}
             </>
           )}
       </div>
 
       <aside className="cb-side">
-        <StatsPanel stats={stats.data} />
+        <AboutCard description={repo.description} />
         <LanguagesPanel languages={languages.data} />
       </aside>
     </div>
@@ -169,6 +189,56 @@ function BranchPicker({ branches, current, loading, onPick }: BranchPickerProps)
   );
 }
 
+// ── Code button → clone dropdown (SSH / HTTPS) ────────────────────────────────
+
+function CloneMenu({ repo }: { repo: RepositoryDetail }) {
+  const [open, setOpen] = useState(false);
+
+  return (
+    <div className="cb-clone">
+      <button className="cb-code-btn" onClick={() => setOpen(o => !o)}>
+        <Ic.Code size={14} /> Code <Ic.ChevronDown size={13} />
+      </button>
+
+      {open && (
+        <>
+          <div className="cb-branch-backdrop" onClick={() => setOpen(false)} />
+          <div className="cb-clone-menu">
+            <div className="cb-clone-title">Clone</div>
+            {repo.cloneUrlSsh && <CloneRow label="Clone with SSH" url={repo.cloneUrlSsh} />}
+            {repo.cloneUrlHttps && <CloneRow label="Clone with HTTPS" url={repo.cloneUrlHttps} />}
+            {!repo.cloneUrlSsh && !repo.cloneUrlHttps && <div className="cb-branch-empty">No clone URL available</div>}
+            <button className="cb-clone-open" onClick={() => { window.open(repo.webUrl, "_blank", "noopener"); setOpen(false); }}>
+              <Ic.ArrowOut size={13} /> Open on provider
+            </button>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+function CloneRow({ label, url }: { label: string; url: string }) {
+  const [copied, setCopied] = useState(false);
+
+  const copy = () => {
+    navigator.clipboard?.writeText(url).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    }).catch(() => { /* clipboard blocked — the field is still selectable for manual copy */ });
+  };
+
+  return (
+    <div className="cb-clone-block">
+      <div className="cb-clone-label">{label}</div>
+      <div className="cb-clone-field">
+        <input readOnly value={url} onFocus={e => e.currentTarget.select()} spellCheck={false} />
+        <button className="cb-clone-copy" onClick={copy} title="Copy">{copied ? <Ic.Check size={13} /> : <Ic.Copy size={13} />}</button>
+      </div>
+    </div>
+  );
+}
+
 // ── Latest-commit header bar ────────────────────────────────────────────────
 
 function LatestCommitBar({ commit, totalCommits }: { commit: RemoteCommitSummary | null | undefined; totalCommits?: number | null }) {
@@ -205,9 +275,10 @@ interface TreeListProps {
   showUp: boolean;
   onUp: () => void;
   onOpen: (entry: RemoteTreeEntry) => void;
+  emptyLabel: string;
 }
 
-function TreeList({ entries, commits, isLoading, error, showUp, onUp, onOpen }: TreeListProps) {
+function TreeList({ entries, commits, isLoading, error, showUp, onUp, onOpen, emptyLabel }: TreeListProps) {
   if (error instanceof ApiError) return <SourceError message={error.message} />;
   if (isLoading && entries.length === 0) return <div className="cb-loading">Loading…</div>;
 
@@ -222,7 +293,7 @@ function TreeList({ entries, commits, isLoading, error, showUp, onUp, onOpen }: 
       )}
 
       {entries.length === 0 && !showUp
-        ? <div className="cb-empty">This folder is empty.</div>
+        ? <div className="cb-empty">{emptyLabel}</div>
         : entries.map(entry => {
           const isDir = entry.type === "Directory";
           const commit = commits?.[entry.path];
@@ -321,41 +392,17 @@ function ReadmeCard({ name, content, isLoading }: { name: string; content: Remot
   );
 }
 
-// ── Right rail: stats + languages ─────────────────────────────────────────────
+// ── Right rail: About + Languages ─────────────────────────────────────────────
 
-function StatsPanel({ stats }: { stats: RemoteRepositoryStats | undefined }) {
-  if (!stats) return null;
-
-  const rows: Array<{ key: string; icon: React.ReactNode; value: string; label: string }> = [];
-  if (stats.commitCount != null) rows.push({ key: "commits", icon: <Ic.Commit size={15} />, value: formatCount(stats.commitCount), label: "Commits" });
-  if (stats.branchCount != null) rows.push({ key: "branches", icon: <Ic.Branch size={15} />, value: formatCount(stats.branchCount), label: "Branches" });
-  if (stats.tagCount != null) rows.push({ key: "tags", icon: <Ic.Tag size={15} />, value: formatCount(stats.tagCount), label: "Tags" });
-  if (stats.releaseCount != null) rows.push({ key: "releases", icon: <Ic.Release size={15} />, value: formatCount(stats.releaseCount), label: "Releases" });
-  if (stats.storageBytes != null) rows.push({ key: "storage", icon: <Ic.Storage size={15} />, value: formatBytes(stats.storageBytes), label: "Storage" });
-
-  const hasSocial = stats.stars != null || stats.forks != null;
-  if (rows.length === 0 && !hasSocial) return null;
+function AboutCard({ description }: { description?: string | null }) {
+  const hasDescription = !!description && description.trim().length > 0;
 
   return (
     <div className="cb-side-card">
       <div className="cb-side-title">About</div>
-
-      {hasSocial && (
-        <div className="cb-side-social">
-          {stats.stars != null && <span className="cb-social-item"><Ic.Star size={14} /> {formatCount(stats.stars)} <span className="cb-social-label">stars</span></span>}
-          {stats.forks != null && <span className="cb-social-item"><Ic.Fork size={14} /> {formatCount(stats.forks)} <span className="cb-social-label">forks</span></span>}
-        </div>
-      )}
-
-      <div className="cb-stats">
-        {rows.map(r => (
-          <div className="cb-stat" key={r.key}>
-            {r.icon}
-            <b>{r.value}</b>
-            <span className="cb-stat-label">{r.label}</span>
-          </div>
-        ))}
-      </div>
+      {hasDescription
+        ? <p className="cb-about-desc">{description}</p>
+        : <p className="cb-about-empty">No description provided.</p>}
     </div>
   );
 }
