@@ -22,6 +22,7 @@ namespace CodeSpace.Core.Services.Agents.Workspace.Providers;
 public sealed class LocalGitWorkspaceProvider : IWorkspaceProvider, ISingletonDependency
 {
     private const int CloneTimeoutSeconds = 300;
+    private const int CaptureTimeoutSeconds = 120;
     private static readonly string WorkspacesRoot = Path.Combine(Path.GetTempPath(), "codespace-agent-workspaces");
 
     private readonly ISandboxRunnerRegistry _runners;
@@ -40,7 +41,6 @@ public sealed class LocalGitWorkspaceProvider : IWorkspaceProvider, ISingletonDe
         Directory.CreateDirectory(WorkspacesRoot);
 
         var directory = Path.Combine(WorkspacesRoot, Guid.NewGuid().ToString("N"));
-        var handle = new LocalWorkspaceHandle(directory, _logger);
 
         try
         {
@@ -49,12 +49,38 @@ public sealed class LocalGitWorkspaceProvider : IWorkspaceProvider, ISingletonDe
             if (!string.IsNullOrEmpty(request.Token))
                 await StripTokenFromRemoteAsync(request.RepositoryUrl, directory, cancellationToken).ConfigureAwait(false);
 
-            return handle;
+            var baseSha = await ReadBaseShaAsync(directory, cancellationToken).ConfigureAwait(false);
+
+            return new LocalWorkspaceHandle(directory, baseSha, _runners.Resolve(Kind), _logger);
         }
         catch
         {
-            await handle.DisposeAsync().ConfigureAwait(false);
+            TryDeleteDirectory(directory);
             throw;
+        }
+    }
+
+    /// <summary>Record the cloned HEAD revision so <see cref="LocalWorkspaceHandle.CaptureChangesAsync"/> can diff the agent's work against it — robust whether the agent commits or leaves changes uncommitted.</summary>
+    private async Task<string> ReadBaseShaAsync(string directory, CancellationToken cancellationToken)
+    {
+        var result = await _runners.Resolve(Kind).RunAsync(
+            new SandboxSpec { Command = "git", Args = new[] { "-C", directory, "rev-parse", "HEAD" }, TimeoutSeconds = CloneTimeoutSeconds }, cancellationToken).ConfigureAwait(false);
+
+        if (result.Status != SandboxStatus.Success)
+            throw new WorkspaceException($"Could not read the workspace base revision (exit {result.ExitCode}): {Summarize(result.Stderr)}");
+
+        return result.Stdout.Trim();
+    }
+
+    private static void TryDeleteDirectory(string directory)
+    {
+        try
+        {
+            if (Directory.Exists(directory)) Directory.Delete(directory, recursive: true);
+        }
+        catch
+        {
+            // Best-effort: a leaked temp dir on the worker's ephemeral disk is harmless.
         }
     }
 
@@ -109,15 +135,47 @@ public sealed class LocalGitWorkspaceProvider : IWorkspaceProvider, ISingletonDe
 
     private sealed class LocalWorkspaceHandle : IWorkspaceHandle
     {
+        private readonly string _baseSha;
+        private readonly ISandboxRunner _runner;
         private readonly ILogger _logger;
 
-        public LocalWorkspaceHandle(string directory, ILogger logger)
+        public LocalWorkspaceHandle(string directory, string baseSha, ISandboxRunner runner, ILogger logger)
         {
             Directory = directory;
+            _baseSha = baseSha;
+            _runner = runner;
             _logger = logger;
         }
 
         public string Directory { get; }
+
+        public async Task<WorkspaceChanges> CaptureChangesAsync(CancellationToken cancellationToken)
+        {
+            // Stage everything (new, modified, deleted) so the diff vs the cloned base is complete, then
+            // read the patch + the changed-file names. `--cached <base>` captures committed AND uncommitted
+            // work, so it's robust whether the agent committed or just edited the working tree.
+            await RunGitOrThrowAsync(new[] { "add", "-A" }, cancellationToken).ConfigureAwait(false);
+
+            var patch = await RunGitOrThrowAsync(new[] { "diff", "--cached", "--no-color", _baseSha }, cancellationToken).ConfigureAwait(false);
+            var names = await RunGitOrThrowAsync(new[] { "diff", "--cached", "--name-only", _baseSha }, cancellationToken).ConfigureAwait(false);
+
+            return new WorkspaceChanges
+            {
+                Patch = patch,
+                ChangedFiles = names.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries),
+            };
+        }
+
+        private async Task<string> RunGitOrThrowAsync(IReadOnlyList<string> args, CancellationToken cancellationToken)
+        {
+            var result = await _runner.RunAsync(
+                new SandboxSpec { Command = "git", Args = args, WorkingDirectory = Directory, TimeoutSeconds = CaptureTimeoutSeconds }, cancellationToken).ConfigureAwait(false);
+
+            if (result.Status != SandboxStatus.Success)
+                throw new WorkspaceException($"git {string.Join(' ', args)} failed (exit {result.ExitCode}): {result.Stderr.Trim()}");
+
+            return result.Stdout;
+        }
 
         public ValueTask DisposeAsync()
         {

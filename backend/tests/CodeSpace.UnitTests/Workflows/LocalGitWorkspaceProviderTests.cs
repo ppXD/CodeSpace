@@ -114,6 +114,73 @@ public sealed class LocalGitWorkspaceProviderTests
     [Fact]
     public void Kind_is_local() => NewProvider().Kind.ShouldBe("local");
 
+    // ─── Change capture ──────────────────────────────────────────────────────
+
+    [Fact]
+    public async Task Captures_edits_new_files_and_deletions_as_a_diff()
+    {
+        if (!await GitAvailableAsync()) return;
+
+        using var origin = new TempDir();
+        await SeedOriginAsync(origin.Path, "keep.txt", "original");
+        await WriteAndCommitAsync(origin.Path, "remove.txt", "to be deleted");
+
+        await using var handle = await NewProvider().PrepareAsync(new WorkspaceRequest { RepositoryUrl = AsFileUrl(origin.Path) }, CancellationToken.None);
+
+        // The "agent" edits a tracked file, adds a new one, and deletes another.
+        await File.WriteAllTextAsync(Path.Combine(handle.Directory, "keep.txt"), "edited by agent");
+        await File.WriteAllTextAsync(Path.Combine(handle.Directory, "new.txt"), "brand new");
+        File.Delete(Path.Combine(handle.Directory, "remove.txt"));
+
+        var changes = await handle.CaptureChangesAsync(CancellationToken.None);
+
+        changes.IsEmpty.ShouldBeFalse();
+        changes.ChangedFiles.ShouldBe(new[] { "keep.txt", "new.txt", "remove.txt" }, ignoreOrder: true);
+        changes.Patch.ShouldContain("edited by agent");
+        changes.Patch.ShouldContain("brand new");
+    }
+
+    [Fact]
+    public async Task Captures_nothing_when_the_agent_made_no_changes()
+    {
+        if (!await GitAvailableAsync()) return;
+
+        using var origin = new TempDir();
+        await SeedOriginAsync(origin.Path, "README.md", "unchanged");
+
+        await using var handle = await NewProvider().PrepareAsync(new WorkspaceRequest { RepositoryUrl = AsFileUrl(origin.Path) }, CancellationToken.None);
+
+        var changes = await handle.CaptureChangesAsync(CancellationToken.None);
+
+        changes.IsEmpty.ShouldBeTrue();
+        changes.ChangedFiles.ShouldBeEmpty();
+        changes.Patch.ShouldBeEmpty();
+    }
+
+    [Fact]
+    public async Task Captures_committed_work_against_the_cloned_base()
+    {
+        // If the agent commits (HEAD moves), the diff is still taken vs the cloned base — committed work is captured.
+        if (!await GitAvailableAsync()) return;
+
+        using var origin = new TempDir();
+        await SeedOriginAsync(origin.Path, "README.md", "base");
+
+        await using var handle = await NewProvider().PrepareAsync(new WorkspaceRequest { RepositoryUrl = AsFileUrl(origin.Path) }, CancellationToken.None);
+
+        await File.WriteAllTextAsync(Path.Combine(handle.Directory, "feature.txt"), "committed change");
+        await RunGitAsync(handle.Directory, "config", "user.email", "agent@codespace.dev");
+        await RunGitAsync(handle.Directory, "config", "user.name", "Agent");
+        await RunGitAsync(handle.Directory, "config", "commit.gpgsign", "false");
+        await RunGitAsync(handle.Directory, "add", ".");
+        await RunGitAsync(handle.Directory, "commit", "-m", "agent commit");
+
+        var changes = await handle.CaptureChangesAsync(CancellationToken.None);
+
+        changes.ChangedFiles.ShouldContain("feature.txt", "committed work is captured vs the base");
+        changes.Patch.ShouldContain("committed change");
+    }
+
     // ─── Helpers ─────────────────────────────────────────────────────────────
 
     private static LocalGitWorkspaceProvider NewProvider() =>
