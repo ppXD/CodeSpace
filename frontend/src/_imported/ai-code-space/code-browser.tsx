@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
@@ -15,6 +15,7 @@ import {
   useRepositoryTreeCommits,
 } from "@/hooks/use-repositories";
 import { buildBreadcrumbs, formatBytes, formatCount, isMarkdownName, languageColor, parentPath, pickReadme, relativeTime, sortTreeEntries } from "@/lib/codeTree";
+import { blobUrl } from "@/lib/repoUrls";
 
 import { Ic } from "./icons";
 
@@ -114,7 +115,7 @@ export function CodeBrowserBody({ repoId }: CodeBrowserBodyProps) {
         )}
 
         {file !== null
-          ? <FileView content={fileContent.data} isLoading={fileContent.isLoading} error={fileContent.error} webUrl={repo.webUrl} />
+          ? <FileView content={fileContent.data} isLoading={fileContent.isLoading} error={fileContent.error} webUrl={repo.webUrl} gitRef={ref ?? repo.defaultBranch} />
           : (
             <>
               {!filter && <LatestCommitBar commit={latestCommit.data} totalCommits={stats.data?.commitCount} />}
@@ -153,10 +154,16 @@ interface BranchPickerProps {
 /** Warm-themed dropdown (a transparent fixed backdrop catches the outside click to close — no portal). */
 function BranchPicker({ branches, current, loading, onPick }: BranchPickerProps) {
   const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState("");
+
+  const q = query.trim().toLowerCase();
+  const filtered = q ? branches.filter(b => b.name.toLowerCase().includes(q)) : branches;
+
+  const toggle = () => setOpen(o => { if (o) setQuery(""); return !o; });
 
   return (
     <div className="cb-branch">
-      <button className="cb-branch-btn" onClick={() => setOpen(o => !o)} disabled={loading && branches.length === 0}>
+      <button className="cb-branch-btn" onClick={toggle} disabled={loading && branches.length === 0}>
         <Ic.Branch size={13} />
         <span className="cb-branch-name">{current ?? "…"}</span>
         <Ic.ChevronDown size={13} />
@@ -164,18 +171,24 @@ function BranchPicker({ branches, current, loading, onPick }: BranchPickerProps)
 
       {open && (
         <>
-          <div className="cb-branch-backdrop" onClick={() => setOpen(false)} />
+          <div className="cb-branch-backdrop" onClick={() => { setOpen(false); setQuery(""); }} />
           <div className="cb-branch-menu" role="listbox">
-            {branches.length === 0
-              ? <div className="cb-branch-empty">{loading ? "Loading branches…" : "No branches"}</div>
-              : branches.map(b => (
+            {branches.length > 8 && (
+              <div className="cb-branch-search">
+                <Ic.Search size={13} />
+                <input autoFocus value={query} onChange={e => setQuery(e.target.value)} placeholder="Find a branch…" spellCheck={false} />
+              </div>
+            )}
+            {filtered.length === 0
+              ? <div className="cb-branch-empty">{loading && branches.length === 0 ? "Loading branches…" : "No branches"}</div>
+              : filtered.map(b => (
                 <button
                   key={b.name}
                   role="option"
                   aria-selected={b.name === current}
                   data-active={b.name === current}
                   className="cb-branch-opt"
-                  onClick={() => { onPick(b.name); setOpen(false); }}
+                  onClick={() => { onPick(b.name); setOpen(false); setQuery(""); }}
                 >
                   <Ic.Branch size={12} />
                   <span className="cb-branch-opt-name">{b.name}</span>
@@ -323,13 +336,45 @@ interface FileViewProps {
   isLoading: boolean;
   error: unknown;
   webUrl: string;
+  gitRef: string;
 }
 
-function FileView({ content, isLoading, error, webUrl }: FileViewProps) {
+function FileView({ content, isLoading, error, webUrl, gitRef }: FileViewProps) {
   if (error instanceof ApiError) return <SourceError message={error.message} />;
   if (isLoading && !content) return <div className="cb-loading">Loading…</div>;
   if (!content) return null;
 
+  return (
+    <div className="cb-file">
+      <FileHeader content={content} webUrl={webUrl} gitRef={gitRef} />
+      <div className="cb-file-body">
+        <FileBody content={content} webUrl={webUrl} />
+      </div>
+    </div>
+  );
+}
+
+/** Action bar above the file content: name + size/lines + copy-contents · copy-path · open-on-provider. */
+function FileHeader({ content, webUrl, gitRef }: { content: RemoteFileContent; webUrl: string; gitRef: string }) {
+  const renderable = content.text != null && !content.isBinary && !content.isTruncated;
+  const lineCount = renderable ? content.text!.split("\n").length : null;
+
+  return (
+    <div className="cb-file-head">
+      <span className="cb-file-name"><Ic.File size={14} /> {content.name}</span>
+      <span className="cb-file-meta">{lineCount != null && <>{lineCount.toLocaleString()} lines · </>}{formatBytes(content.size)}</span>
+      <div className="cb-file-actions">
+        {renderable && <CopyIconButton text={content.text!} title="Copy file contents" />}
+        <CopyIconButton text={content.path} title="Copy path" idleIcon={<Ic.Link size={14} />} />
+        <button className="cb-file-act" title="Open on provider" onClick={() => window.open(blobUrl(webUrl, gitRef, content.path), "_blank", "noopener")}>
+          <Ic.ArrowOut size={14} />
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function FileBody({ content, webUrl }: { content: RemoteFileContent; webUrl: string }) {
   if (content.isTruncated) {
     return (
       <div className="cb-file-notice">
@@ -355,23 +400,37 @@ function FileView({ content, isLoading, error, webUrl }: FileViewProps) {
 
   const text = content.text ?? "";
 
-  if (isMarkdownName(content.name)) {
-    return <div className="cb-file"><Markdown source={text} /></div>;
-  }
+  if (isMarkdownName(content.name)) return <Markdown source={text} />;
 
   const lines = text.split("\n");
 
   return (
-    <div className="cb-file">
-      <div className="cb-code">
-        {lines.map((line, i) => (
-          <div className="cb-code-row" key={i}>
-            <span className="cb-code-gutter">{i + 1}</span>
-            <span className="cb-code-text">{line || " "}</span>
-          </div>
-        ))}
-      </div>
+    <div className="cb-code">
+      {lines.map((line, i) => (
+        <div className="cb-code-row" key={i}>
+          <span className="cb-code-gutter">{i + 1}</span>
+          <span className="cb-code-text">{line || " "}</span>
+        </div>
+      ))}
     </div>
+  );
+}
+
+/** Icon button that copies text to the clipboard and flips to a check for a moment. */
+function CopyIconButton({ text, title, idleIcon }: { text: string; title: string; idleIcon?: ReactNode }) {
+  const [copied, setCopied] = useState(false);
+
+  const copy = () => {
+    navigator.clipboard?.writeText(text).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    }).catch(() => { /* clipboard blocked — no-op */ });
+  };
+
+  return (
+    <button className="cb-file-act" title={title} onClick={copy}>
+      {copied ? <Ic.Check size={14} /> : (idleIcon ?? <Ic.Copy size={14} />)}
+    </button>
   );
 }
 
