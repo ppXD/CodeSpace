@@ -33,4 +33,12 @@ public interface IWorkspaceHandle : IAsyncDisposable
 {
     /// <summary>Absolute path to the prepared working directory the agent runs in.</summary>
     string Directory { get; }
+
+    /// <summary>
+    /// Capture the agent's changes versus the cloned base — the unified diff + the changed-file paths
+    /// (ground truth from git, covering staged, unstaged, and committed work). Returns an empty
+    /// <see cref="WorkspaceChanges"/> when nothing changed. Throws <see cref="WorkspaceException"/> on a
+    /// git failure. Call before <see cref="IAsyncDisposable.DisposeAsync"/> removes the directory.
+    /// </summary>
+    Task<WorkspaceChanges> CaptureChangesAsync(CancellationToken cancellationToken);
 }
