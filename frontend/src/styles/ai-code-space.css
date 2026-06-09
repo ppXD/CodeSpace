@@ -3764,7 +3764,12 @@ body.chat-resizing .acs-root .app { transition: none; }
 .acs-root .cb { display: grid; grid-template-columns: minmax(0, 1fr) 296px; gap: 20px; align-items: start; padding: 24px 28px 32px; }
 .acs-root .cb-main { display: flex; flex-direction: column; gap: 14px; min-width: 0; }
 .acs-root .cb-side { display: flex; flex-direction: column; gap: 14px; }
-@media (max-width: 1040px) {
+/* Drop the right rail below the content while the main column would be too narrow to render a
+   README the way the provider does (centered hero, badge rows, wide tables). Our app already
+   spends width on the left nav that a provider's repo page doesn't, so the README needs the full
+   column earlier than a provider would collapse — hence 1280, not ~1040. Same responsive move
+   every provider makes, just at the breakpoint our chrome dictates. */
+@media (max-width: 1280px) {
   .acs-root .cb { grid-template-columns: 1fr; }
   .acs-root .cb-side { flex-direction: row; flex-wrap: wrap; }
   .acs-root .cb-side-card { flex: 1; min-width: 240px; }
