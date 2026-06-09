@@ -44,6 +44,42 @@ public class AgentCodeNodeTests
         task.Permissions.WriteScope.ShouldBe(AgentWriteScope.ReadOnly);
     }
 
+    [Fact]
+    public async Task Repository_input_is_carried_onto_the_task()
+    {
+        var repoId = Guid.NewGuid();
+        var inputs = new Dictionary<string, JsonElement> { ["repositoryId"] = Str(repoId.ToString()) };
+
+        var result = await new AgentCodeNode().RunAsync(BuildContext(RequiredConfig(), resume: null, inputs), CancellationToken.None);
+
+        result.Status.ShouldBe(NodeStatus.Suspended);
+        JsonSerializer.Deserialize<AgentTask>(result.SuspendUntil!.Payload, AgentJson.Options)!.RepositoryId.ShouldBe(repoId);
+    }
+
+    [Theory]
+    [InlineData(null)]   // input absent entirely
+    [InlineData("")]     // picked then cleared
+    public async Task No_repository_input_is_a_no_repo_run(string? raw)
+    {
+        var inputs = raw is null ? new Dictionary<string, JsonElement>() : new Dictionary<string, JsonElement> { ["repositoryId"] = Str(raw) };
+
+        var result = await new AgentCodeNode().RunAsync(BuildContext(RequiredConfig(), resume: null, inputs), CancellationToken.None);
+
+        result.Status.ShouldBe(NodeStatus.Suspended);
+        JsonSerializer.Deserialize<AgentTask>(result.SuspendUntil!.Payload, AgentJson.Options)!.RepositoryId.ShouldBeNull();
+    }
+
+    [Fact]
+    public async Task Malformed_repository_input_fails_the_node()
+    {
+        var inputs = new Dictionary<string, JsonElement> { ["repositoryId"] = Str("not-a-uuid") };
+
+        var result = await new AgentCodeNode().RunAsync(BuildContext(RequiredConfig(), resume: null, inputs), CancellationToken.None);
+
+        result.Status.ShouldBe(NodeStatus.Failure);
+        result.Error.ShouldContain("repositoryId");
+    }
+
     [Theory]
     [InlineData("goal")]
     [InlineData("harness")]
@@ -90,9 +126,16 @@ public class AgentCodeNodeTests
     private static JsonElement Num(int n) => JsonSerializer.SerializeToElement(n);
     private static JsonElement Bool(bool b) => JsonSerializer.SerializeToElement(b);
 
-    private static NodeRunContext BuildContext(Dictionary<string, JsonElement> config, JsonElement? resume) => new()
+    private static Dictionary<string, JsonElement> RequiredConfig() => new()
     {
-        Inputs = new Dictionary<string, JsonElement>(),
+        ["goal"] = Str("Fix the tests"),
+        ["harness"] = Str("codex-cli"),
+        ["model"] = Str("gpt-5.3-codex"),
+    };
+
+    private static NodeRunContext BuildContext(Dictionary<string, JsonElement> config, JsonElement? resume, Dictionary<string, JsonElement>? inputs = null) => new()
+    {
+        Inputs = inputs ?? new Dictionary<string, JsonElement>(),
         Config = config,
         RawInputs = JsonDocument.Parse("{}").RootElement,
         RawConfig = JsonDocument.Parse("{}").RootElement,
