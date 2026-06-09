@@ -58,6 +58,10 @@ public sealed class GitLabProviderModule : IProviderModule
         // Submitting an MR review (posted as a note today) needs the same WRITE scope.
         [typeof(IPullRequestReviewCapability)] = ScopeRequirement.Of(GitLabScopes.Api),
 
+        // Browsing source (branches, tree, file content) reads via the API — `api`/`read_api`, the same
+        // family as the catalog/PR reads. (`read_repository` is clone-only and can't reach these endpoints.)
+        [typeof(IRepositorySourceCapability)] = ScopeRequirement.AnyOf(GitLabScopes.Api, GitLabScopes.ReadApi),
+
         // Webhook registration: only `api` works on GitLab. No narrower alternative exists.
         [typeof(IWebhookRegistrationCapability)] = ScopeRequirement.Of(GitLabScopes.Api),
 

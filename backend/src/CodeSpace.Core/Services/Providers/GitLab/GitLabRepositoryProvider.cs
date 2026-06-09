@@ -3,6 +3,7 @@ using System.Text.Json;
 using CodeSpace.Core.Services.Providers.Auth;
 using CodeSpace.Core.Services.Providers.Capabilities;
 using CodeSpace.Core.Services.Providers.Resilience;
+using CodeSpace.Core.Services.Providers.Source;
 using CodeSpace.Messages.Dtos.Providers;
 using CodeSpace.Messages.Enums;
 using CodeSpace.Messages.Events;
@@ -14,7 +15,7 @@ using ProviderInstance = CodeSpace.Core.Persistence.Entities.ProviderInstance;
 
 namespace CodeSpace.Core.Services.Providers.GitLab;
 
-public sealed class GitLabRepositoryProvider : IRepositoryCatalogCapability, IPullRequestCatalogCapability, IPullRequestCommentCapability, IPullRequestReviewCapability, IRepositoryAccessCapability, ICredentialProbeCapability, IWebhookRegistrationCapability, IWebhookSignatureVerifier, IWebhookEventNormalizer
+public sealed class GitLabRepositoryProvider : IRepositoryCatalogCapability, IPullRequestCatalogCapability, IPullRequestCommentCapability, IPullRequestReviewCapability, IRepositoryAccessCapability, IRepositorySourceCapability, ICredentialProbeCapability, IWebhookRegistrationCapability, IWebhookSignatureVerifier, IWebhookEventNormalizer
 {
     private readonly IProviderAuthResolver _authResolver;
     private readonly IExternalCallResilience _resilience;
@@ -904,6 +905,88 @@ public sealed class GitLabRepositoryProvider : IRepositoryCatalogCapability, IPu
     public bool VerifySignature(string body, IReadOnlyDictionary<string, string> headers, string secret) => _signatureVerifier.Verify(body, headers, secret);
 
     public NormalizedEvent? Normalize(Guid repositoryId, string body, IReadOnlyDictionary<string, string> headers) => _eventNormalizer.Normalize(repositoryId, body, headers);
+
+    // ── Repository source (Code browser): branches, one tree level, single file ──
+
+    public async Task<IReadOnlyList<RemoteBranch>> ListBranchesAsync(ProviderContext context, RemoteRepository repository, CancellationToken cancellationToken)
+    {
+        var client = await BuildClientAsync(context, cancellationToken).ConfigureAwait(false);
+
+        return await _resilience.ExecuteAsync(context.Instance, nameof(ListBranchesAsync), _ =>
+        {
+            var projectId = int.Parse(repository.ExternalId);
+            var branches = client.GetRepository(projectId).Branches.All.ToList();
+            var mapped = branches.Select(b => ToRemoteBranch(b, repository.DefaultBranch)).ToList();
+            return Task.FromResult((IReadOnlyList<RemoteBranch>)mapped);
+        }, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<IReadOnlyList<RemoteTreeEntry>> ListTreeAsync(ProviderContext context, RemoteRepository repository, string? path, string? reference, CancellationToken cancellationToken)
+    {
+        var client = await BuildClientAsync(context, cancellationToken).ConfigureAwait(false);
+
+        var gitRef = string.IsNullOrWhiteSpace(reference) ? repository.DefaultBranch : reference;
+        var folder = (path ?? string.Empty).Trim('/');
+
+        return await _resilience.ExecuteAsync(context.Instance, nameof(ListTreeAsync), _ =>
+        {
+            var projectId = int.Parse(repository.ExternalId);
+
+            // Non-recursive: one level under `folder` (null ⇒ root) on `gitRef` — the browser drills in lazily.
+            var options = new RepositoryGetTreeOptions
+            {
+                Path = string.IsNullOrEmpty(folder) ? null : folder,
+                Ref = gitRef,
+                Recursive = false
+            };
+            var tree = client.GetRepository(projectId).GetTree(options);
+            var mapped = tree.Select(ToRemoteTreeEntry).ToList();
+            return Task.FromResult((IReadOnlyList<RemoteTreeEntry>)mapped);
+        }, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<RemoteFileContent> GetFileAsync(ProviderContext context, RemoteRepository repository, string path, string? reference, CancellationToken cancellationToken)
+    {
+        var client = await BuildClientAsync(context, cancellationToken).ConfigureAwait(false);
+
+        var gitRef = string.IsNullOrWhiteSpace(reference) ? repository.DefaultBranch : reference;
+        var filePath = path.Trim('/');
+
+        return await _resilience.ExecuteAsync(context.Instance, nameof(GetFileAsync), _ =>
+        {
+            var projectId = int.Parse(repository.ExternalId);
+            var file = client.GetRepository(projectId).Files.Get(filePath, gitRef);
+            return Task.FromResult(FileContentDecoder.Build(filePath, ExtractFileName(filePath), DecodeContent(file), file.BlobId, file.Size));
+        }, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>GitLab's Files.Get always returns base64. Empty string ⇒ a legitimately empty file (empty bytes, not truncated).</summary>
+    private static byte[] DecodeContent(FileData file) =>
+        string.IsNullOrEmpty(file.Content) ? Array.Empty<byte>() : Convert.FromBase64String(file.Content);
+
+    private static string ExtractFileName(string path)
+    {
+        var slash = path.LastIndexOf('/');
+        return slash >= 0 ? path[(slash + 1)..] : path;
+    }
+
+    private static RemoteBranch ToRemoteBranch(Branch branch, string defaultBranch) => new()
+    {
+        Name = branch.Name,
+        CommitSha = branch.Commit?.Id.ToString(),
+        IsDefault = string.Equals(branch.Name, defaultBranch, StringComparison.Ordinal),
+        Protected = branch.Protected
+    };
+
+    private static RemoteTreeEntry ToRemoteTreeEntry(Tree entry) => new()
+    {
+        Name = entry.Name,
+        Path = entry.Path,
+        Type = RepositoryTreeEntryTypeMap.From(entry.Type.ToString()),
+        // GitLab's tree listing doesn't carry per-entry size; the file fetch reports it instead.
+        Size = null,
+        Sha = entry.Id.ToString()
+    };
 
     private async Task<GitLabClient> BuildClientAsync(ProviderContext context, CancellationToken cancellationToken)
         => (await BuildAuthedAsync(context, cancellationToken).ConfigureAwait(false)).Client;

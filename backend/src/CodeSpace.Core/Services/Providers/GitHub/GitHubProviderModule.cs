@@ -58,6 +58,10 @@ public sealed class GitHubProviderModule : IProviderModule
         // scope family as posting a comment.
         [typeof(IPullRequestReviewCapability)] = ScopeRequirement.AnyOf(GitHubScopes.Repo, GitHubScopes.PublicRepo),
 
+        // Browsing source (branches, tree, file content) is a repo READ — same `repo`/`public_repo`
+        // family as the catalog/PR reads, so it adds no new OAuth consent for existing credentials.
+        [typeof(IRepositorySourceCapability)] = ScopeRequirement.AnyOf(GitHubScopes.Repo, GitHubScopes.PublicRepo),
+
         // Webhook registration: `repo` is the superset; `admin:repo_hook` is the narrow grant.
         [typeof(IWebhookRegistrationCapability)] = ScopeRequirement.AnyOf(GitHubScopes.Repo, GitHubScopes.AdminRepoHook),
 

@@ -63,6 +63,40 @@ public class RepositoriesController : ControllerBase
         return Ok(result);
     }
 
+    // ── Code browser: branches, file tree, file content (the "Code" tab) ──────────────
+    // All live reads via the repo's credential — never cached. Membership is enforced by the
+    // queries' IRequireRepositoryAccess marker, same as the PR endpoints below.
+
+    /// <summary>All branches for the repository — the Code tab's branch picker, with the default flagged.</summary>
+    [HttpGet("{repositoryId:guid}/branches")]
+    public async Task<IActionResult> ListBranches([FromRoute] Guid repositoryId, CancellationToken cancellationToken)
+    {
+        var result = await _mediator.Send(new ListRepositoryBranchesQuery { RepositoryId = repositoryId }, cancellationToken).ConfigureAwait(false);
+        return Ok(result);
+    }
+
+    /// <summary>
+    /// One level of the file tree. `path` (query) is the repo-root-relative folder — omit for the root;
+    /// `ref` is the branch/tag/SHA — omit for the default branch. Non-recursive: the browser drills in lazily.
+    /// </summary>
+    [HttpGet("{repositoryId:guid}/tree")]
+    public async Task<IActionResult> ListTree([FromRoute] Guid repositoryId, [FromQuery] ListRepositoryTreeQuery query, CancellationToken cancellationToken)
+    {
+        var result = await _mediator.Send(query with { RepositoryId = repositoryId }, cancellationToken).ConfigureAwait(false);
+        return Ok(result);
+    }
+
+    /// <summary>
+    /// A single file's content for the viewer. `path` (query) is required; omit `ref` for the default branch.
+    /// Binary or oversized files come back flagged with no inline text.
+    /// </summary>
+    [HttpGet("{repositoryId:guid}/file")]
+    public async Task<IActionResult> GetFile([FromRoute] Guid repositoryId, [FromQuery] GetRepositoryFileQuery query, CancellationToken cancellationToken)
+    {
+        var result = await _mediator.Send(query with { RepositoryId = repositoryId }, cancellationToken).ConfigureAwait(false);
+        return Ok(result);
+    }
+
     /// <summary>
     /// Live PR/MR fetch — never cached locally. The provider call goes out on every
     /// request, so consumers should debounce / poll politely. `state` accepts the
