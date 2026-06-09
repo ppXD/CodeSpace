@@ -20,6 +20,7 @@ namespace CodeSpace.Core.Services.Workflows.Nodes.Builtin;
 /// failure.
 ///
 /// Config: goal · harness · model (required) · runnerKind? · timeoutSeconds? · network? · readOnly?
+/// Inputs: repositoryId? (the repo to clone into the workspace — pick or bind from the trigger)
 /// Outputs: status · summary · changedFiles · branch
 /// </summary>
 public sealed class AgentCodeNode : INodeRuntime
@@ -48,7 +49,14 @@ public sealed class AgentCodeNode : INodeRuntime
               "required": ["goal", "harness", "model"]
             }
             """),
-        InputSchema = SchemaBuilder.EmptyObject(),
+        InputSchema = SchemaBuilder.Parse("""
+            {
+              "type": "object",
+              "properties": {
+                "repositoryId": { "type": "string", "format": "uuid", "x-selector": "repository", "description": "The repository the agent works in — cloned into its workspace before it runs. Pick one, or switch to Expression to bind it from the trigger (e.g. {{trigger.repositoryId}}). Leave empty for an analysis-only run with no repo." }
+              }
+            }
+            """),
         OutputSchema = SchemaBuilder.Parse("""
             {
               "type": "object",
@@ -75,11 +83,14 @@ public sealed class AgentCodeNode : INodeRuntime
         if (string.IsNullOrWhiteSpace(harness)) return Fail("Config 'harness' is required.");
         if (string.IsNullOrWhiteSpace(model)) return Fail("Config 'model' is required.");
 
+        if (!TryReadRepositoryId(context, out var repositoryId)) return Fail("Input 'repositoryId' must be a repository id (uuid).");
+
         var task = new AgentTask
         {
             Goal = goal,
             Harness = harness,
             Model = model,
+            RepositoryId = repositoryId,
             RunnerKind = ReadOptionalString(context.Config, "runnerKind"),
             TimeoutSeconds = ReadInt(context.Config, "timeoutSeconds") ?? 1800,
             Permissions = new AgentPermissions
@@ -114,6 +125,23 @@ public sealed class AgentCodeNode : INodeRuntime
     }
 
     private static Task<NodeResult> Fail(string message) => Task.FromResult(NodeResult.Fail(message));
+
+    /// <summary>Read the optional <c>repositoryId</c> input. Absent / empty → no repo (null, an analysis-only run). Present-but-malformed → false (a clean node failure).</summary>
+    private static bool TryReadRepositoryId(NodeRunContext context, out Guid? repositoryId)
+    {
+        repositoryId = null;
+
+        if (!context.Inputs.TryGetValue("repositoryId", out var value) || value.ValueKind == JsonValueKind.Null) return true;
+
+        var raw = value.ValueKind == JsonValueKind.String ? value.GetString() : null;
+
+        if (string.IsNullOrWhiteSpace(raw)) return true;
+
+        if (!Guid.TryParse(raw, out var id)) return false;
+
+        repositoryId = id;
+        return true;
+    }
 
     private static string ReadString(IReadOnlyDictionary<string, JsonElement> bag, string key) =>
         bag.TryGetValue(key, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() ?? "" : "";
