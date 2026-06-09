@@ -59,6 +59,19 @@ export function isMarkdownName(name: string): boolean {
 }
 
 /**
+ * The LICENSE file in a tree level, if any — LICENSE / LICENCE / COPYING / UNLICENSE, optionally with a
+ * .md/.txt/.markdown extension. Prefers the shortest name when several match. Files only (never a dir).
+ */
+export function pickLicense(entries: RemoteTreeEntry[]): RemoteTreeEntry | null {
+  const re = /^(licen[sc]e|copying|unlicense)(\.(md|markdown|txt))?$/i;
+  const found = entries.filter(e => e.type !== "Directory" && re.test(e.name.trim()));
+  if (found.length === 0) return null;
+
+  found.sort((a, b) => a.name.length - b.name.length || a.name.localeCompare(b.name));
+  return found[0];
+}
+
+/**
  * The README entry in a tree level, if any. Considers only files (a "README" directory is ignored),
  * preferring a markdown README when several variants exist (README.md beats README.txt). Null when none.
  */

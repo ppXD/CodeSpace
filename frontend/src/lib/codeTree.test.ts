@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { RemoteTreeEntry, RemoteTreeEntryType } from "@/api/types";
-import { buildBreadcrumbs, formatBytes, formatCount, isMarkdownName, isReadmeName, languageColor, parentPath, pickReadme, relativeTime, sortTreeEntries } from "./codeTree";
+import { buildBreadcrumbs, formatBytes, formatCount, isMarkdownName, isReadmeName, languageColor, parentPath, pickLicense, pickReadme, relativeTime, sortTreeEntries } from "./codeTree";
 
 const entry = (name: string, type: RemoteTreeEntryType, path = name): RemoteTreeEntry => ({ name, path, type });
 
@@ -152,5 +152,21 @@ describe("languageColor", () => {
     const a = languageColor("Brainfuck");
     expect(a).toBe(languageColor("Brainfuck"));
     expect(a).toMatch(/^hsl\(/);
+  });
+});
+
+describe("pickLicense", () => {
+  const f = (name: string): RemoteTreeEntry => ({ name, path: name, type: "File" });
+
+  it.each(["LICENSE", "LICENSE.md", "LICENSE.txt", "LICENCE", "COPYING", "UNLICENSE"])(
+    "finds %j", name => expect(pickLicense([f("src.ts"), f(name)])?.name).toBe(name));
+
+  it("prefers the shortest match", () => {
+    expect(pickLicense([f("LICENSE.md"), f("LICENSE")])?.name).toBe("LICENSE");
+  });
+
+  it("ignores a LICENSE directory and returns null when none", () => {
+    expect(pickLicense([{ name: "LICENSE", path: "LICENSE", type: "Directory" }])).toBeNull();
+    expect(pickLicense([f("index.ts"), f("readme.md")])).toBeNull();
   });
 });

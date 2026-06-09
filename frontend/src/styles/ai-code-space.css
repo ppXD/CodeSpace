@@ -3888,12 +3888,21 @@ body.chat-resizing .acs-root .app { transition: none; }
 
 /* README card under the listing (root only). */
 .acs-root .cb-readme { border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; background: var(--panel); }
-.acs-root .cb-readme-head {
-  display: flex; align-items: center; gap: 7px; padding: 9px 14px; font-size: 13px; font-weight: 600;
-  color: var(--ink-2); background: var(--bg); border-bottom: 1px solid var(--line);
+.acs-root .cb-doc-tabs { display: flex; gap: 2px; padding: 4px 8px 0; background: var(--bg); border-bottom: 1px solid var(--line); }
+.acs-root .cb-doc-tab {
+  display: inline-flex; align-items: center; gap: 7px; padding: 9px 12px 10px; font-size: 13px; font-weight: 500;
+  color: var(--muted); background: transparent; border: none; border-bottom: 2px solid transparent; margin-bottom: -1px; cursor: pointer;
 }
-.acs-root .cb-readme-head svg { color: var(--muted); }
+.acs-root .cb-doc-tab:hover { color: var(--ink-2); }
+.acs-root .cb-doc-tab[data-active="true"] { color: var(--ink); border-bottom-color: var(--accent); }
+.acs-root .cb-doc-tab svg { color: var(--muted); }
+.acs-root .cb-doc-tab[data-active="true"] svg { color: var(--accent); }
 .acs-root .cb-readme-body { padding: 18px 20px; }
+.acs-root .cb-doc-text {
+  margin: 0; white-space: pre-wrap; word-break: break-word;
+  font-family: "Geist Mono Variable", "Geist Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12.5px; line-height: 1.6; color: var(--ink-2);
+}
 
 /* File viewer — source with a line-number gutter, or rich markdown for *.md. */
 .acs-root .cb-file { border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; background: var(--panel); }
