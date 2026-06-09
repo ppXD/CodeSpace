@@ -1,5 +1,5 @@
 import { useNavigate } from "@tanstack/react-router";
-import { useState } from "react";
+import { useRef, useState, type CSSProperties, type MouseEvent as ReactMouseEvent } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
@@ -1193,6 +1193,41 @@ function FilesPanel({ query, providerLabel }: { query: ReturnType<typeof useRepo
   // as the tab selection above.
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
 
+  // Draggable width of the file-list pane, remembered across visits so long paths can be read in full.
+  const [treeWidth, setTreeWidth] = useState<number>(() => {
+    const saved = Number(localStorage.getItem(TREE_WIDTH_KEY));
+    return saved >= TREE_WIDTH_MIN && saved <= TREE_WIDTH_MAX ? saved : TREE_WIDTH_DEFAULT;
+  });
+  const filesRef = useRef<HTMLDivElement>(null);
+
+  // Resize the file list by dragging the splitter. During the drag we write the CSS var straight to
+  // the DOM (no React re-render, so the heavy diff doesn't repaint on every mousemove); on release we
+  // commit the final width to state + localStorage.
+  function startResize(e: ReactMouseEvent) {
+    e.preventDefault();
+    const startX = e.clientX;
+    const startW = treeWidth;
+    let next = startW;
+
+    const onMove = (ev: MouseEvent) => {
+      next = Math.min(TREE_WIDTH_MAX, Math.max(TREE_WIDTH_MIN, startW + (ev.clientX - startX)));
+      filesRef.current?.style.setProperty("--prd-tree-w", `${next}px`);
+    };
+    const onUp = () => {
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
+      setTreeWidth(next);
+      localStorage.setItem(TREE_WIDTH_KEY, String(next));
+    };
+
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+    document.body.style.cursor = "col-resize";
+    document.body.style.userSelect = "none";
+  }
+
   if (query.isLoading) {
     return <div className="prd-card"><div className="pr-empty"><div className="pr-empty-h">Loading files…</div></div></div>;
   }
@@ -1213,7 +1248,7 @@ function FilesPanel({ query, providerLabel }: { query: ReturnType<typeof useRepo
   const active = files.find(f => f.fileName === selectedPath) ?? files[0];
 
   return (
-    <div className="prd-files">
+    <div className="prd-files" ref={filesRef} style={{ "--prd-tree-w": `${treeWidth}px` } as CSSProperties}>
       <div className="prd-file-tree">
         {files.map(f => (
           <div
@@ -1226,7 +1261,7 @@ function FilesPanel({ query, providerLabel }: { query: ReturnType<typeof useRepo
             <span className="prd-file-tree-status" data-status={f.status.toLowerCase()}>
               {fileStatusGlyph(f.status)}
             </span>
-            <span className="prd-file-tree-name">{shortenPath(f.fileName)}</span>
+            <span className="prd-file-tree-name">{f.fileName}</span>
             <span className="prd-file-tree-stats">
               <span className="prd-diff-add">+{f.additions}</span>
               <span className="prd-diff-del">−{f.deletions}</span>
@@ -1234,6 +1269,14 @@ function FilesPanel({ query, providerLabel }: { query: ReturnType<typeof useRepo
           </div>
         ))}
       </div>
+
+      <div
+        className="prd-files-splitter"
+        role="separator"
+        aria-orientation="vertical"
+        title="Drag to resize the file list"
+        onMouseDown={startResize}
+      />
 
       <div className="prd-file-pane">
         <div className="prd-file-pane-h">
@@ -1319,11 +1362,12 @@ function fileStatusGlyph(status: RemotePullRequestFile["status"]): string {
  * Trim deep paths to "…/parent/file.ext" so the tree column stays narrow.
  * The full path is in the row's `title` attribute for hover tooltip.
  */
-function shortenPath(path: string): string {
-  const parts = path.split("/");
-  if (parts.length <= 3) return path;
-  return `…/${parts.slice(-2).join("/")}`;
-}
+// Bounds + storage key for the draggable file-list pane (see FilesPanel.startResize). The width is
+// remembered per browser so long paths stay readable across visits.
+const TREE_WIDTH_KEY = "codespace.prd-tree-w";
+const TREE_WIDTH_MIN = 180;
+const TREE_WIDTH_MAX = 640;
+const TREE_WIDTH_DEFAULT = 280;
 
 // ── Label pill ───────────────────────────────────────────────────────────────────
 
