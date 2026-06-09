@@ -1,5 +1,7 @@
 import { useState, type ReactNode } from "react";
 import ReactMarkdown from "react-markdown";
+import rehypeRaw from "rehype-raw";
+import rehypeSanitize, { defaultSchema } from "rehype-sanitize";
 import remarkGfm from "remark-gfm";
 
 import { ApiError } from "@/api/request";
@@ -14,8 +16,8 @@ import {
   useRepositoryTree,
   useRepositoryTreeCommits,
 } from "@/hooks/use-repositories";
-import { buildBreadcrumbs, formatBytes, formatCount, isMarkdownName, languageColor, parentPath, pickReadme, relativeTime, sortTreeEntries } from "@/lib/codeTree";
-import { blobUrl } from "@/lib/repoUrls";
+import { buildBreadcrumbs, formatBytes, formatCount, isMarkdownName, languageColor, parentPath, pickLicense, pickReadme, relativeTime, sortTreeEntries } from "@/lib/codeTree";
+import { blobUrl, resolveReadmeUrl } from "@/lib/repoUrls";
 
 import { Ic } from "./icons";
 
@@ -55,7 +57,7 @@ export function CodeBrowserBody({ repoId }: CodeBrowserBodyProps) {
   const treeCommits = useRepositoryTreeCommits(repoId, entryPaths, ref, entryPaths.length > 0);
 
   const readmeEntry = path === "" && inTree && tree.data ? pickReadme(tree.data) : null;
-  const readme = useRepositoryFile(repoId, readmeEntry?.path ?? null, ref, readmeEntry != null);
+  const licenseEntry = path === "" && inTree && tree.data ? pickLicense(tree.data) : null;
 
   if (!repo) return null;
 
@@ -129,7 +131,9 @@ export function CodeBrowserBody({ repoId }: CodeBrowserBodyProps) {
                 onOpen={openEntry}
                 emptyLabel={filter ? "No files match." : "This folder is empty."}
               />
-              {readmeEntry && !filter && <ReadmeCard name={readmeEntry.name} content={readme.data} isLoading={readme.isLoading} />}
+              {(readmeEntry || licenseEntry) && !filter && (
+                <DocTabs repoId={repoId} gitRef={ref ?? repo.defaultBranch} webUrl={repo.webUrl} readmeEntry={readmeEntry} licenseEntry={licenseEntry} />
+              )}
             </>
           )}
       </div>
@@ -348,7 +352,7 @@ function FileView({ content, isLoading, error, webUrl, gitRef }: FileViewProps) 
     <div className="cb-file">
       <FileHeader content={content} webUrl={webUrl} gitRef={gitRef} />
       <div className="cb-file-body">
-        <FileBody content={content} webUrl={webUrl} />
+        <FileBody content={content} webUrl={webUrl} gitRef={gitRef} />
       </div>
     </div>
   );
@@ -374,7 +378,7 @@ function FileHeader({ content, webUrl, gitRef }: { content: RemoteFileContent; w
   );
 }
 
-function FileBody({ content, webUrl }: { content: RemoteFileContent; webUrl: string }) {
+function FileBody({ content, webUrl, gitRef }: { content: RemoteFileContent; webUrl: string; gitRef: string }) {
   if (content.isTruncated) {
     return (
       <div className="cb-file-notice">
@@ -400,7 +404,7 @@ function FileBody({ content, webUrl }: { content: RemoteFileContent; webUrl: str
 
   const text = content.text ?? "";
 
-  if (isMarkdownName(content.name)) return <Markdown source={text} />;
+  if (isMarkdownName(content.name)) return <Markdown source={text} webUrl={webUrl} gitRef={gitRef} dir={parentPath(content.path)} />;
 
   const lines = text.split("\n");
 
@@ -436,19 +440,57 @@ function CopyIconButton({ text, title, idleIcon }: { text: string; title: string
 
 // ── README card ─────────────────────────────────────────────────────────────
 
-function ReadmeCard({ name, content, isLoading }: { name: string; content: RemoteFileContent | undefined; isLoading: boolean }) {
+/** README / License tabbed card under the root listing — mirrors GitHub's "README · MIT license" tabs. */
+function DocTabs({ repoId, gitRef, webUrl, readmeEntry, licenseEntry }: {
+  repoId: string;
+  gitRef: string;
+  webUrl: string;
+  readmeEntry: RemoteTreeEntry | null;
+  licenseEntry: RemoteTreeEntry | null;
+}) {
+  const [tab, setTab] = useState<"readme" | "license">(readmeEntry ? "readme" : "license");
+
+  // Fetch only the active tab's file — the license is lazy, loaded when its tab is first opened.
+  const readme = useRepositoryFile(repoId, readmeEntry?.path ?? null, gitRef, tab === "readme" && readmeEntry != null);
+  const license = useRepositoryFile(repoId, licenseEntry?.path ?? null, gitRef, tab === "license" && licenseEntry != null);
+
+  const active = tab === "readme" ? { entry: readmeEntry, query: readme } : { entry: licenseEntry, query: license };
+
   return (
     <div className="cb-readme">
-      <div className="cb-readme-head"><Ic.Book size={14} /> {name}</div>
+      <div className="cb-doc-tabs">
+        {readmeEntry && (
+          <button className="cb-doc-tab" data-active={tab === "readme"} onClick={() => setTab("readme")}>
+            <Ic.Book size={14} /> {readmeEntry.name}
+          </button>
+        )}
+        {licenseEntry && (
+          <button className="cb-doc-tab" data-active={tab === "license"} onClick={() => setTab("license")}>
+            <Ic.Scale size={14} /> {licenseEntry.name}
+          </button>
+        )}
+      </div>
       <div className="cb-readme-body">
-        {isLoading && !content
-          ? <div className="cb-loading">Loading…</div>
-          : content?.text
-            ? <Markdown source={content.text} />
-            : <div className="cb-empty">Couldn't render this README.</div>}
+        <DocContent entry={active.entry} content={active.query.data} isLoading={active.query.isLoading} webUrl={webUrl} gitRef={gitRef} />
       </div>
     </div>
   );
+}
+
+function DocContent({ entry, content, isLoading, webUrl, gitRef }: {
+  entry: RemoteTreeEntry | null;
+  content: RemoteFileContent | undefined;
+  isLoading: boolean;
+  webUrl: string;
+  gitRef: string;
+}) {
+  if (!entry) return null;
+  if (isLoading && !content) return <div className="cb-loading">Loading…</div>;
+  if (!content?.text) return <div className="cb-empty">Couldn't render {entry.name}.</div>;
+
+  return isMarkdownName(entry.name)
+    ? <Markdown source={content.text} webUrl={webUrl} gitRef={gitRef} dir={parentPath(entry.path)} />
+    : <pre className="cb-doc-text">{content.text}</pre>;
 }
 
 // ── Right rail: About + Languages ─────────────────────────────────────────────
@@ -493,12 +535,39 @@ function LanguagesPanel({ languages }: { languages: RemoteLanguage[] | undefined
 
 // ── Shared bits ─────────────────────────────────────────────────────────────
 
-/** GitHub-flavored markdown with links opening in a new tab — mirrors the PR-body renderer. */
-function Markdown({ source }: { source: string }) {
+/**
+ * Sanitize schema for rendering a README's embedded HTML safely. Starts from rehype-sanitize's
+ * GitHub-based default (which already strips <script>, event handlers, and javascript: URLs) and adds
+ * back the cosmetic bits real READMEs rely on: `align` for centering, image sizing, and <picture>/<source>.
+ */
+const sanitizeSchema = {
+  ...defaultSchema,
+  tagNames: [...(defaultSchema.tagNames ?? []), "picture", "source"],
+  attributes: {
+    ...defaultSchema.attributes,
+    "*": [...(defaultSchema.attributes?.["*"] ?? []), "align"],
+    img: [...(defaultSchema.attributes?.img ?? []), "width", "height", "align", "loading"],
+    source: ["srcSet", "srcset", "media", "type", "sizes"],
+    div: [...(defaultSchema.attributes?.div ?? []), "align"],
+    p: [...(defaultSchema.attributes?.p ?? []), "align"],
+    h1: [...(defaultSchema.attributes?.h1 ?? []), "align"],
+    h2: [...(defaultSchema.attributes?.h2 ?? []), "align"],
+    h3: [...(defaultSchema.attributes?.h3 ?? []), "align"],
+  },
+};
+
+/**
+ * GitHub-flavored markdown that renders a README like the provider does: embedded HTML (logo, badges,
+ * centered blocks) via rehype-raw, kept XSS-safe by rehype-sanitize, with relative image/link paths
+ * resolved against the repo (images → raw URL, links → the provider's blob view). Links open in a new tab.
+ */
+function Markdown({ source, webUrl, gitRef, dir }: { source: string; webUrl: string; gitRef: string; dir: string }) {
   return (
     <div className="prd-markdown">
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
+        rehypePlugins={[rehypeRaw, [rehypeSanitize, sanitizeSchema]]}
+        urlTransform={(url, key) => resolveReadmeUrl(url, webUrl, gitRef, dir, key === "src" || key === "srcSet" || key === "poster")}
         components={{
           a: ({ href, children, ...rest }) => (
             <a href={href} target="_blank" rel="noopener noreferrer" {...rest}>{children}</a>
