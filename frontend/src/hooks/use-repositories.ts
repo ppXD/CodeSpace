@@ -317,3 +317,19 @@ export function useRepositoryTreeCommits(repositoryId: string | null, paths: str
     staleTime: SOURCE_STALE_MS,
   });
 }
+
+/**
+ * Render markdown to HTML via the repo's provider — the high-fidelity README render. Content-addressed
+ * (keyed on the markdown itself) so identical content is rendered once. `retry: false`: a provider with
+ * no render capability errors immediately, and the caller drops to client-side rendering rather than
+ * retrying a call that can't succeed.
+ */
+export function useRenderMarkdown(repositoryId: string | null, markdown: string, enabled = true) {
+  return useQuery({
+    queryKey: ["repository", repositoryId, "render-markdown", markdown],
+    queryFn: () => repositoriesApi.renderMarkdown(repositoryId!, markdown),
+    enabled: enabled && repositoryId != null && markdown.length > 0,
+    staleTime: SOURCE_STALE_MS,
+    retry: false,
+  });
+}
