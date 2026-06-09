@@ -3748,7 +3748,7 @@ body.chat-resizing .acs-root .app { transition: none; }
 .acs-root .chat-rail-foot { flex-shrink: 0; padding: 8px 10px; border-top: 1px solid var(--line); }
 
 /* ── Code browser (the "Code" tab): branch picker · breadcrumbs · tree · file viewer · README · right rail ── */
-.acs-root .cb { display: grid; grid-template-columns: minmax(0, 1fr) 296px; gap: 20px; align-items: start; }
+.acs-root .cb { display: grid; grid-template-columns: minmax(0, 1fr) 296px; gap: 20px; align-items: start; padding: 24px 28px 32px; }
 .acs-root .cb-main { display: flex; flex-direction: column; gap: 14px; min-width: 0; }
 .acs-root .cb-side { display: flex; flex-direction: column; gap: 14px; }
 @media (max-width: 1040px) {
