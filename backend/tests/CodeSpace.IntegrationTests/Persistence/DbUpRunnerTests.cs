@@ -35,6 +35,7 @@ public class DbUpRunnerTests
     [InlineData("message_reference")]
     [InlineData("user_provider_identity")]
     [InlineData("agent_run")]
+    [InlineData("agent_run_event")]
     public async Task Table_exists_after_migration(string tableName)
     {
         var exists = await TableExistsAsync(tableName).ConfigureAwait(false);
@@ -47,6 +48,7 @@ public class DbUpRunnerTests
     [InlineData("message", "interaction_json", "0036_message_interaction.sql")]          // optional polymorphic interactive component (action cards)
     [InlineData("app_user", "is_bot", "0037_user_is_bot.sql")]                            // flags the per-team CodeSpace bot identity
     [InlineData("agent_run", "heartbeat_at", "0039_agent_run.sql")]                       // worker liveness ping for stuck-run recovery
+    [InlineData("agent_run_event", "data_json", "0040_agent_run_event.sql")]              // optional structured payload on a normalized agent event
     public async Task Column_exists_after_migration(string tableName, string columnName, string addedBy)
     {
         var exists = await ColumnExistsAsync(tableName, columnName).ConfigureAwait(false);

@@ -52,6 +52,7 @@ public class CodeSpaceDbContext : DbContext, IUnitOfWork
     public DbSet<MessageReference> MessageReference => Set<MessageReference>();
     public DbSet<UserProviderIdentity> UserProviderIdentity => Set<UserProviderIdentity>();
     public DbSet<AgentRun> AgentRun => Set<AgentRun>();
+    public DbSet<AgentRunEvent> AgentRunEvent => Set<AgentRunEvent>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
