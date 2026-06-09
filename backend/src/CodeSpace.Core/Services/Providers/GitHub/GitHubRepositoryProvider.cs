@@ -3,6 +3,7 @@ using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Providers.Auth;
 using CodeSpace.Core.Services.Providers.Capabilities;
 using CodeSpace.Core.Services.Providers.Resilience;
+using CodeSpace.Core.Services.Providers.Source;
 using CodeSpace.Messages.Dtos.Providers;
 using CodeSpace.Messages.Events;
 using CodeSpace.Messages.Exceptions;
@@ -17,7 +18,7 @@ using RepositoryRole = CodeSpace.Messages.Enums.RepositoryRole;
 
 namespace CodeSpace.Core.Services.Providers.GitHub;
 
-public sealed class GitHubRepositoryProvider : IRepositoryCatalogCapability, IPullRequestCatalogCapability, IPullRequestCommentCapability, IPullRequestReviewCapability, IRepositoryAccessCapability, ICredentialProbeCapability, IWebhookRegistrationCapability, IWebhookSignatureVerifier, IWebhookEventNormalizer
+public sealed class GitHubRepositoryProvider : IRepositoryCatalogCapability, IPullRequestCatalogCapability, IPullRequestCommentCapability, IPullRequestReviewCapability, IRepositoryAccessCapability, IRepositorySourceCapability, ICredentialProbeCapability, IWebhookRegistrationCapability, IWebhookSignatureVerifier, IWebhookEventNormalizer
 {
     private readonly IProviderAuthResolver _authResolver;
     private readonly IExternalCallResilience _resilience;
@@ -476,6 +477,79 @@ public sealed class GitHubRepositoryProvider : IRepositoryCatalogCapability, IPu
     public bool VerifySignature(string body, IReadOnlyDictionary<string, string> headers, string secret) => _signatureVerifier.Verify(body, headers, secret);
 
     public NormalizedEvent? Normalize(Guid repositoryId, string body, IReadOnlyDictionary<string, string> headers) => _eventNormalizer.Normalize(repositoryId, body, headers);
+
+    // ── Repository source (Code browser): branches, one tree level, single file ──
+
+    public async Task<IReadOnlyList<RemoteBranch>> ListBranchesAsync(ProviderContext context, RemoteRepository repository, CancellationToken cancellationToken)
+    {
+        var client = await BuildClientAsync(context, cancellationToken).ConfigureAwait(false);
+
+        return await _resilience.ExecuteAsync(context.Instance, nameof(ListBranchesAsync), async _ =>
+        {
+            var branches = await client.Repository.Branch.GetAll(repository.NamespacePath, repository.Name).ConfigureAwait(false);
+            return (IReadOnlyList<RemoteBranch>)branches.Select(b => ToRemoteBranch(b, repository.DefaultBranch)).ToList();
+        }, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<IReadOnlyList<RemoteTreeEntry>> ListTreeAsync(ProviderContext context, RemoteRepository repository, string? path, string? reference, CancellationToken cancellationToken)
+    {
+        var client = await BuildClientAsync(context, cancellationToken).ConfigureAwait(false);
+
+        var gitRef = string.IsNullOrWhiteSpace(reference) ? repository.DefaultBranch : reference;
+        var folder = (path ?? string.Empty).Trim('/');
+
+        return await _resilience.ExecuteAsync(context.Instance, nameof(ListTreeAsync), async _ =>
+        {
+            // GetAllContentsByRef lists one directory level (non-recursive) — the browser drills in lazily.
+            var contents = string.IsNullOrEmpty(folder)
+                ? await client.Repository.Content.GetAllContentsByRef(repository.NamespacePath, repository.Name, gitRef).ConfigureAwait(false)
+                : await client.Repository.Content.GetAllContentsByRef(repository.NamespacePath, repository.Name, folder, gitRef).ConfigureAwait(false);
+            return (IReadOnlyList<RemoteTreeEntry>)contents.Select(ToRemoteTreeEntry).ToList();
+        }, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<RemoteFileContent> GetFileAsync(ProviderContext context, RemoteRepository repository, string path, string? reference, CancellationToken cancellationToken)
+    {
+        var client = await BuildClientAsync(context, cancellationToken).ConfigureAwait(false);
+
+        var gitRef = string.IsNullOrWhiteSpace(reference) ? repository.DefaultBranch : reference;
+        var filePath = path.Trim('/');
+
+        return await _resilience.ExecuteAsync(context.Instance, nameof(GetFileAsync), async _ =>
+        {
+            // On a file path this returns a single entry whose Path equals the request; on a directory it
+            // returns the directory's children (different paths) — reject that as "not a file".
+            var contents = await client.Repository.Content.GetAllContentsByRef(repository.NamespacePath, repository.Name, filePath, gitRef).ConfigureAwait(false);
+            var file = contents.Count == 1 ? contents[0] : null;
+
+            if (file == null || !string.Equals(file.Path, filePath, StringComparison.Ordinal))
+                throw new InvalidOperationException($"'{filePath}' is not a file on {gitRef}.");
+
+            var name = string.IsNullOrEmpty(file.Name) ? filePath : file.Name;
+            return FileContentDecoder.Build(filePath, name, DecodeContent(file), file.Sha, file.Size);
+        }, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>Base64 → bytes. Null when GitHub omitted the content (files above its ~1 MB inline cap) so the decoder marks it truncated.</summary>
+    private static byte[]? DecodeContent(RepositoryContent file) =>
+        string.IsNullOrEmpty(file.EncodedContent) ? null : Convert.FromBase64String(file.EncodedContent);
+
+    private static RemoteBranch ToRemoteBranch(Branch branch, string defaultBranch) => new()
+    {
+        Name = branch.Name,
+        CommitSha = branch.Commit?.Sha,
+        IsDefault = string.Equals(branch.Name, defaultBranch, StringComparison.Ordinal),
+        Protected = branch.Protected
+    };
+
+    private static RemoteTreeEntry ToRemoteTreeEntry(RepositoryContent content) => new()
+    {
+        Name = content.Name,
+        Path = content.Path,
+        Type = RepositoryTreeEntryTypeMap.From(content.Type.StringValue),
+        Size = content.Size,
+        Sha = content.Sha
+    };
 
     private async Task<GitHubClient> BuildClientAsync(ProviderContext context, CancellationToken cancellationToken)
     {
