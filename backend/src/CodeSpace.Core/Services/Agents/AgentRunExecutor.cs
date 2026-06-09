@@ -90,7 +90,17 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     /// <summary>Land the terminal result, then fire the completion notifier (which resumes the agent.code node parked on this run). The notifier is best-effort + swallows its own failures, so completion is never masked by a resume error.</summary>
     private async Task CompleteAndNotifyAsync(Guid runId, AgentRunResult result, CancellationToken cancellationToken)
     {
-        await _runs.CompleteAsync(runId, result, cancellationToken).ConfigureAwait(false);
+        try
+        {
+            await _runs.CompleteAsync(runId, result, cancellationToken).ConfigureAwait(false);
+        }
+        catch (AgentRunTransitionException ex)
+        {
+            // The run is already terminal — the reconciler (or another worker) landed it first while this
+            // executor was mid-flight. Don't re-complete or throw; still notify below so the parent
+            // workflow resumes off whatever terminal state stuck.
+            _logger.LogWarning(ex, "Agent run {RunId} was already terminal at completion (likely reconciled); skipping re-complete, still notifying", runId);
+        }
 
         await _notifier.NotifyCompletedAsync(runId, cancellationToken).ConfigureAwait(false);
     }

@@ -214,7 +214,107 @@ public class AgentNodeFlowTests
         }
     }
 
+    [Fact]
+    public async Task A_crashed_agent_run_is_recovered_and_the_parent_workflow_resumes()
+    {
+        // The pod-death story end-to-end: a worker claims the run then vanishes. The reconciler abandons
+        // the run AND resumes the parked workflow — so the workflow never hangs forever waiting on it.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var workflowId = await CreateWorkflowAsync(teamId, userId, AgentNodeDefinition(withErrorBranch: false));
+        var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
+
+        var jobClient = ResolveJobClient();
+        jobClient.Clear();
+        jobClient.AutoExecute = false;
+
+        try
+        {
+            await RunEngineAsync(runId);
+            var agentRunId = await GetAgentRunIdAsync(runId);
+
+            // Worker claimed it (Running) then crashed — heartbeat goes stale past the liveness window.
+            await MarkRunningAsync(agentRunId);
+            await BackdateColumnAsync(agentRunId, "heartbeat_at", TimeSpan.FromMinutes(20));
+
+            var summary = await ReconcileAsync();
+            summary.MarkedAbandonedFromRunning.ShouldBeGreaterThanOrEqualTo(1, "the abandoned run is failed");
+            summary.ResumedStalledParents.ShouldBeGreaterThanOrEqualTo(1, "and its parked workflow is resumed");
+
+            await RunEngineAsync(runId);   // the resume re-runs the node, which maps the abandoned failure
+
+            using var verify = _fixture.BeginScope();
+            var db = verify.Resolve<CodeSpaceDbContext>();
+
+            (await db.AgentRun.AsNoTracking().SingleAsync(r => r.Id == agentRunId)).Status.ShouldBe(AgentRunStatus.Failed);
+            (await db.WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == runId)).Status
+                .ShouldBe(WorkflowRunStatus.Failure, "the abandoned agent run fails the node → the run (no error branch)");
+            (await db.WorkflowRunNode.AsNoTracking().SingleAsync(n => n.RunId == runId && n.NodeId == "agent")).Error!
+                .ShouldContain("abandoned");
+        }
+        finally
+        {
+            jobClient.AutoExecute = true;
+        }
+    }
+
+    [Fact]
+    public async Task A_stuck_queued_agent_run_is_re_dispatched_by_the_reconciler()
+    {
+        // The lost-dispatch crash window: the workflow committed Suspended but the executor was never
+        // enqueued. The reconciler re-dispatches the stuck-Queued run so it isn't stranded forever.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var workflowId = await CreateWorkflowAsync(teamId, userId, AgentNodeDefinition(withErrorBranch: false));
+        var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
+
+        var jobClient = ResolveJobClient();
+        jobClient.Clear();
+        jobClient.AutoExecute = false;
+
+        try
+        {
+            await RunEngineAsync(runId);
+            var agentRunId = await GetAgentRunIdAsync(runId);
+
+            await BackdateColumnAsync(agentRunId, "created_date", TimeSpan.FromMinutes(20));   // looks stuck
+            jobClient.Clear();   // forget the engine's original dispatch — we want to see the reconciler's
+
+            var summary = await ReconcileAsync();
+            summary.ReDispatchedQueued.ShouldBeGreaterThanOrEqualTo(1);
+
+            jobClient.Calls.Count(c => c.ServiceType == typeof(IAgentRunExecutor) && c.MethodName == nameof(IAgentRunExecutor.ExecuteAsync) && c.RunId == agentRunId)
+                .ShouldBe(1, "the reconciler re-dispatches the stuck queued run exactly once");
+
+            using var verify = _fixture.BeginScope();
+            (await verify.Resolve<CodeSpaceDbContext>().AgentRun.AsNoTracking().SingleAsync(r => r.Id == agentRunId)).Status
+                .ShouldBe(AgentRunStatus.Queued, "re-dispatch doesn't change status — the executor claims it when it runs");
+        }
+        finally
+        {
+            jobClient.AutoExecute = true;
+        }
+    }
+
     // ─── Helpers ────────────────────────────────────────────────────────────────
+
+    private async Task<AgentRunReconcileSummary> ReconcileAsync()
+    {
+        using var scope = _fixture.BeginScope();
+        return await scope.Resolve<IAgentRunReconcilerService>().ReconcileAsync(CancellationToken.None);
+    }
+
+    private async Task MarkRunningAsync(Guid agentRunId)
+    {
+        using var scope = _fixture.BeginScope();
+        await scope.Resolve<IAgentRunService>().MarkRunningAsync(agentRunId, CancellationToken.None);
+    }
+
+    /// <summary>Backdate a timestamp column on an agent run so the default liveness window treats it as stale (column is a fixed literal; the value is parameterised).</summary>
+    private async Task BackdateColumnAsync(Guid agentRunId, string column, TimeSpan ago)
+    {
+        using var scope = _fixture.BeginScope();
+        await scope.Resolve<CodeSpaceDbContext>().Database
+            .ExecuteSqlRawAsync($"UPDATE agent_run SET {column} = {{0}} WHERE id = {{1}}", DateTimeOffset.UtcNow - ago, agentRunId);
+    }
 
     private async Task<Guid> AssertStagedAndGetAgentRunIdAsync(Guid runId, InMemoryBackgroundJobClient jobClient)
     {

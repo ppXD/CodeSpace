@@ -1,7 +1,9 @@
 using CodeSpace.Core.DependencyInjection;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
+using CodeSpace.Core.Services.Jobs;
 using CodeSpace.Messages.Agents;
+using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Enums;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
@@ -49,11 +51,15 @@ public sealed class AgentRunReconcilerService : IAgentRunReconcilerService, ISco
         "in-progress work is not resumed.";
 
     private readonly CodeSpaceDbContext _db;
+    private readonly IAgentRunCompletionNotifier _notifier;
+    private readonly ICodeSpaceBackgroundJobClient _jobs;
     private readonly ILogger<AgentRunReconcilerService> _logger;
 
-    public AgentRunReconcilerService(CodeSpaceDbContext db, ILogger<AgentRunReconcilerService> logger)
+    public AgentRunReconcilerService(CodeSpaceDbContext db, IAgentRunCompletionNotifier notifier, ICodeSpaceBackgroundJobClient jobs, ILogger<AgentRunReconcilerService> logger)
     {
         _db = db;
+        _notifier = notifier;
+        _jobs = jobs;
         _logger = logger;
     }
 
@@ -61,10 +67,12 @@ public sealed class AgentRunReconcilerService : IAgentRunReconcilerService, ISco
     {
         var marked = await MarkAbandonedRunningAsync(cancellationToken).ConfigureAwait(false);
 
-        if (marked > 0)
-            _logger.LogInformation("AgentRunReconciler: marked {Abandoned} abandoned agent run(s) failed", marked);
+        var (resumed, reDispatched) = await ReconcilePendingWaitsAsync(cancellationToken).ConfigureAwait(false);
 
-        return new AgentRunReconcileSummary { MarkedAbandonedFromRunning = marked };
+        if (marked > 0 || resumed > 0 || reDispatched > 0)
+            _logger.LogInformation("AgentRunReconciler: abandoned {Abandoned}, resumed {Resumed} stalled parent(s), re-dispatched {ReDispatched} stuck queued run(s)", marked, resumed, reDispatched);
+
+        return new AgentRunReconcileSummary { MarkedAbandonedFromRunning = marked, ResumedStalledParents = resumed, ReDispatchedQueued = reDispatched };
     }
 
     private async Task<int> MarkAbandonedRunningAsync(CancellationToken cancellationToken)
@@ -104,6 +112,92 @@ public sealed class AgentRunReconcilerService : IAgentRunReconcilerService, ISco
         return marked;
     }
 
+    /// <summary>
+    /// The backstop for the agent → workflow hand-off: for every workflow run still parked on a pending
+    /// <c>AgentRun</c> wait, unstick the agent run it's waiting on. A run that's already terminal but whose
+    /// parent never resumed (a crashed worker, a reconciler-abandoned run, or an executor whose best-effort
+    /// notify failed) → fire the completion notifier so the parent resumes. A run stuck <c>Queued</c> past
+    /// the liveness window (its dispatch lost in the crash window between the parent committing Suspended
+    /// and the executor being enqueued) → re-dispatch the executor; the claim guard makes a duplicate a
+    /// no-op. Idempotent + retried every sweep (a resume flips the wait Resolved so it drops out next tick);
+    /// a per-item failure is logged and retried, never aborting the sweep.
+    /// </summary>
+    private async Task<(int Resumed, int ReDispatched)> ReconcilePendingWaitsAsync(CancellationToken cancellationToken)
+    {
+        var waitingIds = await PendingAgentRunWaitIdsAsync(cancellationToken).ConfigureAwait(false);
+
+        if (waitingIds.Count == 0) return (0, 0);
+
+        var staleThreshold = DateTimeOffset.UtcNow - LivenessWindow;
+
+        var runs = await _db.AgentRun.AsNoTracking()
+            .Where(r => waitingIds.Contains(r.Id))
+            .Select(r => new { r.Id, r.Status, r.CreatedDate })
+            .ToListAsync(cancellationToken)
+            .ConfigureAwait(false);
+
+        var resumed = 0;
+        foreach (var run in runs.Where(r => AgentRunStateMachine.IsTerminal(r.Status)))
+            resumed += await TryResumeParentAsync(run.Id, run.Status, cancellationToken).ConfigureAwait(false);
+
+        var reDispatched = 0;
+        foreach (var run in runs.Where(r => r.Status == AgentRunStatus.Queued && r.CreatedDate < staleThreshold))
+            reDispatched += TryReDispatch(run.Id, run.CreatedDate);
+
+        return (resumed, reDispatched);
+    }
+
+    /// <summary>Resume the workflow parked on a terminal agent run, via the same notifier the executor uses. A failure is logged + retried next sweep — never throws out of the sweep.</summary>
+    private async Task<int> TryResumeParentAsync(Guid runId, AgentRunStatus status, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await _notifier.NotifyCompletedAsync(runId, cancellationToken).ConfigureAwait(false);
+
+            _logger.LogInformation("AgentRunReconciler: resumed the workflow parked on terminal agent run {RunId} ({Status})", runId, status);
+            return 1;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "AgentRunReconciler: failed to resume the workflow parked on agent run {RunId}; will retry next sweep", runId);
+            return 0;
+        }
+    }
+
+    /// <summary>Re-enqueue the executor for a stuck-Queued run whose original dispatch was lost. The claim guard dedups a double-dispatch. A failure is logged + retried next sweep.</summary>
+    private int TryReDispatch(Guid runId, DateTimeOffset createdDate)
+    {
+        try
+        {
+            _jobs.Enqueue<IAgentRunExecutor>(e => e.ExecuteAsync(runId, CancellationToken.None));
+
+            _logger.LogInformation("AgentRunReconciler: re-dispatched stuck queued agent run {RunId} (created {CreatedDate:o})", runId, createdDate);
+            return 1;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "AgentRunReconciler: failed to re-dispatch queued agent run {RunId}; will retry next sweep", runId);
+            return 0;
+        }
+    }
+
+    /// <summary>The agent-run ids that workflow runs are currently parked on (pending AgentRun waits). The wait Token is the agent-run id; parse defensively.</summary>
+    private async Task<List<Guid>> PendingAgentRunWaitIdsAsync(CancellationToken cancellationToken)
+    {
+        var tokens = await _db.WorkflowRunWait.AsNoTracking()
+            .Where(w => w.WaitKind == WorkflowWaitKinds.AgentRun && w.Status == WorkflowWaitStatuses.Pending)
+            .Select(w => w.Token)
+            .Take(BatchSize)
+            .ToListAsync(cancellationToken)
+            .ConfigureAwait(false);
+
+        return tokens
+            .Select(t => Guid.TryParse(t, out var id) ? id : (Guid?)null)
+            .Where(id => id.HasValue)
+            .Select(id => id!.Value)
+            .ToList();
+    }
+
     /// <summary>Append an Error event so the live log / replay timeline shows the abandonment. Best-effort — a logging failure doesn't undo the recovery.</summary>
     private async Task TryAppendAbandonedEventAsync(Guid runId, CancellationToken cancellationToken)
     {
@@ -122,7 +216,14 @@ public sealed class AgentRunReconcilerService : IAgentRunReconcilerService, ISco
 /// <summary>Diagnostic summary of one reconcile sweep. Returned for log surfacing + the recurring-job result.</summary>
 public sealed record AgentRunReconcileSummary
 {
+    /// <summary>Running runs flipped to Failed because their worker vanished (stale heartbeat + no events).</summary>
     public int MarkedAbandonedFromRunning { get; init; }
 
-    public int Total => MarkedAbandonedFromRunning;
+    /// <summary>Workflow runs resumed off a terminal agent run that hadn't propagated its completion (crash / failed notify).</summary>
+    public int ResumedStalledParents { get; init; }
+
+    /// <summary>Stuck-Queued agent runs whose dispatch was lost and were re-enqueued to the executor.</summary>
+    public int ReDispatchedQueued { get; init; }
+
+    public int Total => MarkedAbandonedFromRunning + ResumedStalledParents + ReDispatchedQueued;
 }
