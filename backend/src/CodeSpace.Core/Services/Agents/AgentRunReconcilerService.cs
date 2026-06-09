@@ -30,8 +30,14 @@ public interface IAgentRunReconcilerService
 
 public sealed class AgentRunReconcilerService : IAgentRunReconcilerService, IScopedDependency
 {
+    /// <summary>Operators tune reclaim aggressiveness via this env var (a TimeSpan, e.g. "00:05:00"); default 5 min. Pinned by a test (Rule 8).</summary>
+    public const string LivenessWindowEnvVar = "CODESPACE_AGENT_RUN_LIVENESS_WINDOW";
+
+    private static readonly TimeSpan DefaultLivenessWindow = TimeSpan.FromMinutes(5);
+
     /// <summary>A Running run with no heartbeat AND no event activity within this window is treated as abandoned. The worker should heartbeat well inside it.</summary>
-    public static readonly TimeSpan LivenessWindow = TimeSpan.FromMinutes(5);
+    private static TimeSpan LivenessWindow =>
+        TimeSpan.TryParse(System.Environment.GetEnvironmentVariable(LivenessWindowEnvVar), out var window) ? window : DefaultLivenessWindow;
 
     /// <summary>Per-sweep cap so a backlog can't run a single tick forever.</summary>
     public const int BatchSize = 50;
