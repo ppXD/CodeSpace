@@ -787,6 +787,12 @@
    these rules style it to match the rest of the app palette without going full
    GitHub-CSS-clone (which would be ~10KB extra). Spacing rules follow the same
    compact rhythm as the rest of the PR card. */
+/* Prose uses a proportional system sans (like GitHub's .markdown-body) — long
+   README text reads far better than the app's global Geist Mono. Code spans and
+   blocks keep Geist Mono via their own more-specific rules below. */
+.acs-root .prd-markdown {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans", Helvetica, Arial, sans-serif, "Apple Color Emoji", "Segoe UI Emoji";
+}
 .acs-root .prd-markdown > *:first-child { margin-top: 0; }
 .acs-root .prd-markdown > *:last-child { margin-bottom: 0; }
 .acs-root .prd-markdown p { margin: 0 0 10px; }
