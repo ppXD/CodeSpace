@@ -32,13 +32,15 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     private readonly IAgentRunService _runs;
     private readonly IAgentHarnessRegistry _harnesses;
     private readonly ISandboxRunnerRegistry _runners;
+    private readonly IAgentRunCompletionNotifier _notifier;
     private readonly ILogger<AgentRunExecutor> _logger;
 
-    public AgentRunExecutor(IAgentRunService runs, IAgentHarnessRegistry harnesses, ISandboxRunnerRegistry runners, ILogger<AgentRunExecutor> logger)
+    public AgentRunExecutor(IAgentRunService runs, IAgentHarnessRegistry harnesses, ISandboxRunnerRegistry runners, IAgentRunCompletionNotifier notifier, ILogger<AgentRunExecutor> logger)
     {
         _runs = runs;
         _harnesses = harnesses;
         _runners = runners;
+        _notifier = notifier;
         _logger = logger;
     }
 
@@ -58,7 +60,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
 
             var result = await RunHarnessAsync(agentRunId, harness, runner, harness.BuildInvocation(task), cancellationToken).ConfigureAwait(false);
 
-            await _runs.CompleteAsync(agentRunId, result, cancellationToken).ConfigureAwait(false);
+            await CompleteAndNotifyAsync(agentRunId, result, cancellationToken).ConfigureAwait(false);
         }
         catch (OperationCanceledException)
         {
@@ -68,8 +70,16 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         catch (Exception ex)
         {
             _logger.LogError(ex, "Agent run {RunId} failed during execution", agentRunId);
-            await _runs.CompleteAsync(agentRunId, new AgentRunResult { Status = AgentRunStatus.Failed, ExitReason = "executor-error", Error = ex.Message }, cancellationToken).ConfigureAwait(false);
+            await CompleteAndNotifyAsync(agentRunId, new AgentRunResult { Status = AgentRunStatus.Failed, ExitReason = "executor-error", Error = ex.Message }, cancellationToken).ConfigureAwait(false);
         }
+    }
+
+    /// <summary>Land the terminal result, then fire the completion notifier (which resumes the agent.code node parked on this run). The notifier is best-effort + swallows its own failures, so completion is never masked by a resume error.</summary>
+    private async Task CompleteAndNotifyAsync(Guid runId, AgentRunResult result, CancellationToken cancellationToken)
+    {
+        await _runs.CompleteAsync(runId, result, cancellationToken).ConfigureAwait(false);
+
+        await _notifier.NotifyCompletedAsync(runId, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>Claim the run (Queued → Running). Returns false when it's already Running/terminal — the exactly-once guard that stops a re-claim from re-spawning the harness.</summary>

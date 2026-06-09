@@ -1,0 +1,83 @@
+using System.Text.Json;
+using CodeSpace.Core.DependencyInjection;
+using CodeSpace.Core.Persistence.Db;
+using CodeSpace.Core.Persistence.Entities;
+using CodeSpace.Core.Services.Agents;
+using CodeSpace.Messages.Agents;
+using CodeSpace.Messages.Constants;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging;
+
+namespace CodeSpace.Core.Services.Workflows.Engine;
+
+/// <summary>
+/// Resumes the <c>agent.code</c> node parked on a now-terminal agent run. When the executor finishes a
+/// run a workflow node spawned (<see cref="AgentRun.WorkflowRunId"/> set), this maps the run's
+/// <c>AgentRunResult</c> onto the node's resume payload — <c>{ status, summary, changedFiles, branch,
+/// error }</c> — and resumes the workflow run, which re-runs the node so it turns that into outputs
+/// (Succeeded) or a clean node failure (anything else, composing with retry + the error branch).
+///
+/// Best-effort + idempotent per the <see cref="IAgentRunCompletionNotifier"/> contract: a no-op for a run
+/// with no workflow link or no still-pending wait (a replay / double-notify resolved the wait already),
+/// and a resume failure is logged rather than thrown back into the executor — the agent run already
+/// committed its terminal result, and the stuck-run reconciler is the backstop for a lost resume.
+/// </summary>
+public sealed class WorkflowResumeAgentRunCompletionNotifier : IAgentRunCompletionNotifier, IScopedDependency
+{
+    private readonly CodeSpaceDbContext _db;
+    private readonly IWorkflowResumeService _resumeService;
+    private readonly ILogger<WorkflowResumeAgentRunCompletionNotifier> _logger;
+
+    public WorkflowResumeAgentRunCompletionNotifier(CodeSpaceDbContext db, IWorkflowResumeService resumeService, ILogger<WorkflowResumeAgentRunCompletionNotifier> logger)
+    {
+        _db = db;
+        _resumeService = resumeService;
+        _logger = logger;
+    }
+
+    public async Task NotifyCompletedAsync(Guid agentRunId, CancellationToken cancellationToken)
+    {
+        var run = await _db.AgentRun.AsNoTracking().SingleOrDefaultAsync(r => r.Id == agentRunId, cancellationToken).ConfigureAwait(false);
+
+        if (run is null || run.WorkflowRunId is null) return;
+
+        try
+        {
+            await ResumeParkedNodeAsync(run, cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Agent run {AgentRunId} completed but resuming workflow run {WorkflowRunId} failed", agentRunId, run.WorkflowRunId);
+        }
+    }
+
+    /// <summary>Resume the workflow run iff it still holds a pending AgentRun wait for this run — the idempotence guard against a replay / double-notify.</summary>
+    private async Task ResumeParkedNodeAsync(AgentRun run, CancellationToken cancellationToken)
+    {
+        var token = run.Id.ToString();
+
+        var hasPendingWait = await _db.WorkflowRunWait.AsNoTracking()
+            .AnyAsync(w => w.RunId == run.WorkflowRunId && w.WaitKind == WorkflowWaitKinds.AgentRun
+                           && w.Token == token && w.Status == WorkflowWaitStatuses.Pending, cancellationToken)
+            .ConfigureAwait(false);
+
+        if (!hasPendingWait) return;
+
+        await _resumeService.ResumeAsync(run.WorkflowRunId!.Value, BuildResumePayload(run), cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>Map the durable run + its <c>AgentRunResult</c> onto the flat payload the agent.code node reads on resume.</summary>
+    private static string BuildResumePayload(AgentRun run)
+    {
+        var result = string.IsNullOrWhiteSpace(run.ResultJson) ? null : JsonSerializer.Deserialize<AgentRunResult>(run.ResultJson!, AgentJson.Options);
+
+        return JsonSerializer.Serialize(new
+        {
+            status = run.Status.ToString(),
+            summary = result?.Summary,
+            changedFiles = result?.ChangedFiles,
+            branch = result?.ProducedBranch,
+            error = result?.Error ?? run.Error,
+        });
+    }
+}
