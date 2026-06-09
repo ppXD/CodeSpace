@@ -68,6 +68,9 @@ public sealed class GitHubProviderModule : IProviderModule
         // Commit history (latest + per-entry) is a repo READ — same scope family.
         [typeof(IRepositoryHistoryCapability)] = ScopeRequirement.AnyOf(GitHubScopes.Repo, GitHubScopes.PublicRepo),
 
+        // Markdown render (README → HTML via /markdown) is a repo READ — same scope family.
+        [typeof(IRepositoryMarkdownRenderCapability)] = ScopeRequirement.AnyOf(GitHubScopes.Repo, GitHubScopes.PublicRepo),
+
         // Webhook registration: `repo` is the superset; `admin:repo_hook` is the narrow grant.
         [typeof(IWebhookRegistrationCapability)] = ScopeRequirement.AnyOf(GitHubScopes.Repo, GitHubScopes.AdminRepoHook),
 

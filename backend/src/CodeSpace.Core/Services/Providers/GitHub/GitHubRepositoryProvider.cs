@@ -18,7 +18,7 @@ using RepositoryRole = CodeSpace.Messages.Enums.RepositoryRole;
 
 namespace CodeSpace.Core.Services.Providers.GitHub;
 
-public sealed class GitHubRepositoryProvider : IRepositoryCatalogCapability, IPullRequestCatalogCapability, IPullRequestCommentCapability, IPullRequestReviewCapability, IRepositoryAccessCapability, IRepositorySourceCapability, IRepositoryInsightsCapability, IRepositoryHistoryCapability, ICredentialProbeCapability, IWebhookRegistrationCapability, IWebhookSignatureVerifier, IWebhookEventNormalizer
+public sealed class GitHubRepositoryProvider : IRepositoryCatalogCapability, IPullRequestCatalogCapability, IPullRequestCommentCapability, IPullRequestReviewCapability, IRepositoryAccessCapability, IRepositorySourceCapability, IRepositoryInsightsCapability, IRepositoryHistoryCapability, IRepositoryMarkdownRenderCapability, ICredentialProbeCapability, IWebhookRegistrationCapability, IWebhookSignatureVerifier, IWebhookEventNormalizer
 {
     private readonly IProviderAuthResolver _authResolver;
     private readonly IExternalCallResilience _resilience;
@@ -695,6 +695,20 @@ public sealed class GitHubRepositoryProvider : IRepositoryCatalogCapability, IPu
         CommittedDate = commit.Commit?.Author?.Date,
         WebUrl = commit.HtmlUrl
     };
+
+    // ── Repository markdown render (Code tab README): GitHub's own /markdown renderer ──
+
+    public async Task<RemoteRenderedMarkdown> RenderMarkdownAsync(ProviderContext context, RemoteRepository repository, string markdown, CancellationToken cancellationToken)
+    {
+        var client = await BuildClientAsync(context, cancellationToken).ConfigureAwait(false);
+
+        return await _resilience.ExecuteAsync(context.Instance, nameof(RenderMarkdownAsync), async _ =>
+        {
+            // `context` = owner/repo so #issues, @mentions, and relative links resolve like on github.com.
+            var html = await client.Miscellaneous.RenderArbitraryMarkdown(new NewArbitraryMarkdown(markdown, "gfm", repository.FullPath)).ConfigureAwait(false);
+            return new RemoteRenderedMarkdown { Html = html ?? string.Empty };
+        }, cancellationToken).ConfigureAwait(false);
+    }
 
     private async Task<GitHubClient> BuildClientAsync(ProviderContext context, CancellationToken cancellationToken)
     {
