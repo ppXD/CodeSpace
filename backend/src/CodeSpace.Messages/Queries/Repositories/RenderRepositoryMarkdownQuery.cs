@@ -11,6 +11,8 @@ namespace CodeSpace.Messages.Queries.Repositories;
 /// </summary>
 public sealed record RenderRepositoryMarkdownQuery : IQuery<RemoteRenderedMarkdown>, IRequireRepositoryAccess
 {
-    public required Guid RepositoryId { get; init; }
+    /// <summary>Set by the controller from the route segment via `query with { RepositoryId = ... }`. Non-required so System.Text.Json doesn't 400-fail when the POST body omits it (the URL is authoritative).</summary>
+    public Guid RepositoryId { get; init; }
+
     public required string Markdown { get; init; }
 }

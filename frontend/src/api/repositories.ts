@@ -1,5 +1,5 @@
 import { fetchJson } from "./request";
-import type { BulkBindResult, PullRequestReviewVerdict, PullRequestState, RemoteBranch, RemoteCommitSummary, RemoteFileContent, RemoteLanguage, RemotePullRequest, RemotePullRequestCheck, RemotePullRequestCommit, RemotePullRequestCounts, RemotePullRequestFile, RemotePullRequestReview, RemoteRepositoryPage, RemoteRepositoryStats, RemoteTreeEntry, RepositoryDetail, RepositorySummary } from "./types";
+import type { BulkBindResult, PullRequestReviewVerdict, PullRequestState, RemoteBranch, RemoteCommitSummary, RemoteFileContent, RemoteLanguage, RemotePullRequest, RemotePullRequestCheck, RemotePullRequestCommit, RemotePullRequestCounts, RemotePullRequestFile, RemotePullRequestReview, RemoteRenderedMarkdown, RemoteRepositoryPage, RemoteRepositoryStats, RemoteTreeEntry, RepositoryDetail, RepositorySummary } from "./types";
 
 export interface BindRepositoryInput {
   providerInstanceId: string;
@@ -151,4 +151,13 @@ export const repositoriesApi = {
     if (ref) params.set("ref", ref);
     return fetchJson<Record<string, RemoteCommitSummary>>(`/api/repositories/${encodeURIComponent(repositoryId)}/tree-commits?${params.toString()}`);
   },
+
+  // Render markdown to HTML through the repo's provider (so refs / relative links resolve like on the
+  // provider's site). POST so large READMEs aren't constrained by query-string limits. The caller falls
+  // back to client-side rendering on any failure (providers without a render capability return an error).
+  renderMarkdown: (repositoryId: string, markdown: string) =>
+    fetchJson<RemoteRenderedMarkdown>(`/api/repositories/${encodeURIComponent(repositoryId)}/render-markdown`, {
+      method: "POST",
+      body: JSON.stringify({ markdown }),
+    }),
 };

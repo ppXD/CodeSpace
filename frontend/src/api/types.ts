@@ -408,6 +408,11 @@ export interface RemoteCommitSummary {
   webUrl?: string | null;
 }
 
+/** A README / .md rendered to HTML by the repo's provider. Empty `html` ⇒ render client-side instead. */
+export interface RemoteRenderedMarkdown {
+  html: string;
+}
+
 /**
  * Returned by GET /api/provider-instances/defaults/{provider}. Backend reads its own
  * IProviderModule and emits the recommended UI defaults (base URL, OAuth scope list,

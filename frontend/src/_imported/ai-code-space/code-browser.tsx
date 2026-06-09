@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from "react";
+import { useMemo, useState, type ReactNode } from "react";
 import ReactMarkdown from "react-markdown";
 import rehypeRaw from "rehype-raw";
 import rehypeSanitize, { defaultSchema } from "rehype-sanitize";
@@ -7,6 +7,7 @@ import remarkGfm from "remark-gfm";
 import { ApiError } from "@/api/request";
 import type { RemoteBranch, RemoteCommitSummary, RemoteFileContent, RemoteLanguage, RemoteTreeEntry, RepositoryDetail } from "@/api/types";
 import {
+  useRenderMarkdown,
   useRepository,
   useRepositoryBranches,
   useRepositoryFile,
@@ -17,6 +18,7 @@ import {
   useRepositoryTreeCommits,
 } from "@/hooks/use-repositories";
 import { buildBreadcrumbs, formatBytes, formatCount, isMarkdownName, languageColor, parentPath, pickLicense, pickReadme, relativeTime, sortTreeEntries } from "@/lib/codeTree";
+import { prepareProviderHtml } from "@/lib/providerHtml";
 import { blobUrl, resolveReadmeUrl } from "@/lib/repoUrls";
 
 import { Ic } from "./icons";
@@ -117,7 +119,7 @@ export function CodeBrowserBody({ repoId }: CodeBrowserBodyProps) {
         )}
 
         {file !== null
-          ? <FileView content={fileContent.data} isLoading={fileContent.isLoading} error={fileContent.error} webUrl={repo.webUrl} gitRef={ref ?? repo.defaultBranch} />
+          ? <FileView repoId={repoId} content={fileContent.data} isLoading={fileContent.isLoading} error={fileContent.error} webUrl={repo.webUrl} gitRef={ref ?? repo.defaultBranch} />
           : (
             <>
               {!filter && <LatestCommitBar commit={latestCommit.data} totalCommits={stats.data?.commitCount} />}
@@ -336,6 +338,7 @@ function TreeList({ entries, commits, isLoading, error, showUp, onUp, onOpen, em
 // ── File viewer ─────────────────────────────────────────────────────────────
 
 interface FileViewProps {
+  repoId: string;
   content: RemoteFileContent | undefined;
   isLoading: boolean;
   error: unknown;
@@ -343,7 +346,7 @@ interface FileViewProps {
   gitRef: string;
 }
 
-function FileView({ content, isLoading, error, webUrl, gitRef }: FileViewProps) {
+function FileView({ repoId, content, isLoading, error, webUrl, gitRef }: FileViewProps) {
   if (error instanceof ApiError) return <SourceError message={error.message} />;
   if (isLoading && !content) return <div className="cb-loading">Loading…</div>;
   if (!content) return null;
@@ -352,7 +355,7 @@ function FileView({ content, isLoading, error, webUrl, gitRef }: FileViewProps) 
     <div className="cb-file">
       <FileHeader content={content} webUrl={webUrl} gitRef={gitRef} />
       <div className="cb-file-body">
-        <FileBody content={content} webUrl={webUrl} gitRef={gitRef} />
+        <FileBody repoId={repoId} content={content} webUrl={webUrl} gitRef={gitRef} />
       </div>
     </div>
   );
@@ -378,7 +381,7 @@ function FileHeader({ content, webUrl, gitRef }: { content: RemoteFileContent; w
   );
 }
 
-function FileBody({ content, webUrl, gitRef }: { content: RemoteFileContent; webUrl: string; gitRef: string }) {
+function FileBody({ repoId, content, webUrl, gitRef }: { repoId: string; content: RemoteFileContent; webUrl: string; gitRef: string }) {
   if (content.isTruncated) {
     return (
       <div className="cb-file-notice">
@@ -404,7 +407,7 @@ function FileBody({ content, webUrl, gitRef }: { content: RemoteFileContent; web
 
   const text = content.text ?? "";
 
-  if (isMarkdownName(content.name)) return <Markdown source={text} webUrl={webUrl} gitRef={gitRef} dir={parentPath(content.path)} />;
+  if (isMarkdownName(content.name)) return <MarkdownView repoId={repoId} source={text} webUrl={webUrl} gitRef={gitRef} dir={parentPath(content.path)} />;
 
   const lines = text.split("\n");
 
@@ -471,13 +474,14 @@ function DocTabs({ repoId, gitRef, webUrl, readmeEntry, licenseEntry }: {
         )}
       </div>
       <div className="cb-readme-body">
-        <DocContent entry={active.entry} content={active.query.data} isLoading={active.query.isLoading} webUrl={webUrl} gitRef={gitRef} />
+        <DocContent repoId={repoId} entry={active.entry} content={active.query.data} isLoading={active.query.isLoading} webUrl={webUrl} gitRef={gitRef} />
       </div>
     </div>
   );
 }
 
-function DocContent({ entry, content, isLoading, webUrl, gitRef }: {
+function DocContent({ repoId, entry, content, isLoading, webUrl, gitRef }: {
+  repoId: string;
   entry: RemoteTreeEntry | null;
   content: RemoteFileContent | undefined;
   isLoading: boolean;
@@ -489,7 +493,7 @@ function DocContent({ entry, content, isLoading, webUrl, gitRef }: {
   if (!content?.text) return <div className="cb-empty">Couldn't render {entry.name}.</div>;
 
   return isMarkdownName(entry.name)
-    ? <Markdown source={content.text} webUrl={webUrl} gitRef={gitRef} dir={parentPath(entry.path)} />
+    ? <MarkdownView repoId={repoId} source={content.text} webUrl={webUrl} gitRef={gitRef} dir={parentPath(entry.path)} />
     : <pre className="cb-doc-text">{content.text}</pre>;
 }
 
@@ -555,6 +559,28 @@ const sanitizeSchema = {
     h3: [...(defaultSchema.attributes?.h3 ?? []), "align"],
   },
 };
+
+/**
+ * Hybrid markdown render: ask the repo's provider to render it (so refs / relative links resolve exactly
+ * as on the provider's site), falling back to the client-side <Markdown> while that's in flight or when
+ * the provider can't render it (no capability, insufficient scope, error). Either way the user sees a
+ * rendered README — the provider path is a fidelity upgrade, never a hard dependency.
+ */
+function MarkdownView({ repoId, source, webUrl, gitRef, dir }: { repoId: string; source: string; webUrl: string; gitRef: string; dir: string }) {
+  const rendered = useRenderMarkdown(repoId, source);
+  const html = rendered.data?.html;
+
+  if (html) return <ProviderHtml html={html} webUrl={webUrl} gitRef={gitRef} dir={dir} />;
+
+  return <Markdown source={source} webUrl={webUrl} gitRef={gitRef} dir={dir} />;
+}
+
+/** Provider-rendered README HTML, post-processed (relative URLs resolved against the repo, unsafe bits stripped) then embedded. */
+function ProviderHtml({ html, webUrl, gitRef, dir }: { html: string; webUrl: string; gitRef: string; dir: string }) {
+  const safe = useMemo(() => prepareProviderHtml(html, webUrl, gitRef, dir), [html, webUrl, gitRef, dir]);
+
+  return <div className="prd-markdown" dangerouslySetInnerHTML={{ __html: safe }} />;
+}
 
 /**
  * GitHub-flavored markdown that renders a README like the provider does: embedded HTML (logo, badges,
