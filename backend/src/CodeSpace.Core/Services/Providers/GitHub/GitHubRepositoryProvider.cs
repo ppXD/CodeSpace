@@ -18,7 +18,7 @@ using RepositoryRole = CodeSpace.Messages.Enums.RepositoryRole;
 
 namespace CodeSpace.Core.Services.Providers.GitHub;
 
-public sealed class GitHubRepositoryProvider : IRepositoryCatalogCapability, IPullRequestCatalogCapability, IPullRequestCommentCapability, IPullRequestReviewCapability, IRepositoryAccessCapability, IRepositorySourceCapability, ICredentialProbeCapability, IWebhookRegistrationCapability, IWebhookSignatureVerifier, IWebhookEventNormalizer
+public sealed class GitHubRepositoryProvider : IRepositoryCatalogCapability, IPullRequestCatalogCapability, IPullRequestCommentCapability, IPullRequestReviewCapability, IRepositoryAccessCapability, IRepositorySourceCapability, IRepositoryInsightsCapability, ICredentialProbeCapability, IWebhookRegistrationCapability, IWebhookSignatureVerifier, IWebhookEventNormalizer
 {
     private readonly IProviderAuthResolver _authResolver;
     private readonly IExternalCallResilience _resilience;
@@ -550,6 +550,102 @@ public sealed class GitHubRepositoryProvider : IRepositoryCatalogCapability, IPu
         Size = content.Size,
         Sha = content.Sha
     };
+
+    // ── Repository insights (Code tab right rail): stats + languages ──
+
+    private static readonly HttpClient _statsHttpClient = new();
+
+    public async Task<RemoteRepositoryStats> GetStatsAsync(ProviderContext context, RemoteRepository repository, CancellationToken cancellationToken)
+    {
+        var client = await BuildClientAsync(context, cancellationToken).ConfigureAwait(false);
+        var auth = await _authResolver.ResolveAsync(context, cancellationToken).ConfigureAwait(false);
+        var apiBase = ResolveApiBaseAddress(context.Instance);
+        var owner = repository.NamespacePath;
+        var name = repository.Name;
+
+        return await _resilience.ExecuteAsync(context.Instance, nameof(GetStatsAsync), async _ =>
+        {
+            var repo = await client.Repository.Get(owner, name).ConfigureAwait(false);
+
+            // Counts come from the pagination Link header (per_page=1 → the rel="last" page number == total).
+            // Every count is best-effort: a failure returns null and the panel just omits that row.
+            var commits = await CountViaLinkAsync(auth.Token, apiBase, $"repos/{owner}/{name}/commits", $"sha={Uri.EscapeDataString(repository.DefaultBranch)}", cancellationToken).ConfigureAwait(false);
+            var branches = await CountViaLinkAsync(auth.Token, apiBase, $"repos/{owner}/{name}/branches", null, cancellationToken).ConfigureAwait(false);
+            var tags = await CountViaLinkAsync(auth.Token, apiBase, $"repos/{owner}/{name}/tags", null, cancellationToken).ConfigureAwait(false);
+            var releases = await CountViaLinkAsync(auth.Token, apiBase, $"repos/{owner}/{name}/releases", null, cancellationToken).ConfigureAwait(false);
+
+            return new RemoteRepositoryStats
+            {
+                Stars = repo.StargazersCount,
+                Forks = repo.ForksCount,
+                StorageBytes = repo.Size * 1024L,   // GitHub reports repo size in KB
+                CommitCount = commits,
+                BranchCount = branches,
+                TagCount = tags,
+                ReleaseCount = releases
+            };
+        }, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<IReadOnlyList<RemoteLanguage>> GetLanguagesAsync(ProviderContext context, RemoteRepository repository, CancellationToken cancellationToken)
+    {
+        var client = await BuildClientAsync(context, cancellationToken).ConfigureAwait(false);
+
+        return await _resilience.ExecuteAsync(context.Instance, nameof(GetLanguagesAsync), async _ =>
+        {
+            var languages = await client.Repository.GetAllLanguages(repository.NamespacePath, repository.Name).ConfigureAwait(false);
+            return LanguageBreakdown.FromBytes(languages.ToDictionary(l => l.Name, l => l.NumberOfBytes));
+        }, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Total item count for a paginated GitHub list resource via the <c>Link</c> header: request one item
+    /// and read the <c>rel="last"</c> page number (== total when per_page=1). No Link header ⇒ the whole
+    /// list fits on one page (0 or 1). Best-effort — any failure returns null so a missing count never
+    /// breaks the stats panel.
+    /// </summary>
+    private static async Task<int?> CountViaLinkAsync(string token, Uri apiBase, string path, string? query, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var url = new Uri(apiBase, $"{path}?per_page=1{(query is null ? "" : "&" + query)}");
+            using var request = new HttpRequestMessage(HttpMethod.Get, url);
+            request.Headers.TryAddWithoutValidation("Authorization", $"Bearer {token}");
+            request.Headers.TryAddWithoutValidation("Accept", "application/vnd.github+json");
+            request.Headers.TryAddWithoutValidation("User-Agent", "CodeSpace");
+
+            using var response = await _statsHttpClient.SendAsync(request, cancellationToken).ConfigureAwait(false);
+            if (!response.IsSuccessStatusCode) return null;
+
+            if (response.Headers.TryGetValues("Link", out var links))
+            {
+                var last = ParseLastPage(string.Join(",", links));
+                if (last.HasValue) return last.Value;
+            }
+
+            // No Link header → ≤ 1 page of size 1: empty array body ⇒ 0, otherwise 1.
+            var body = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
+            return body.AsSpan().TrimStart().StartsWith("[]") ? 0 : 1;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    /// <summary>Extract N from a GitHub Link header's <c>rel="last"</c> entry: <c>&lt;...?page=N&amp;per_page=1&gt;; rel="last"</c>.</summary>
+    private static int? ParseLastPage(string linkHeader)
+    {
+        foreach (var part in linkHeader.Split(','))
+        {
+            if (!part.Contains("rel=\"last\"", StringComparison.Ordinal)) continue;
+
+            var match = System.Text.RegularExpressions.Regex.Match(part, @"[?&]page=(\d+)");
+            if (match.Success && int.TryParse(match.Groups[1].Value, out var n)) return n;
+        }
+
+        return null;
+    }
 
     private async Task<GitHubClient> BuildClientAsync(ProviderContext context, CancellationToken cancellationToken)
     {

@@ -15,7 +15,7 @@ using ProviderInstance = CodeSpace.Core.Persistence.Entities.ProviderInstance;
 
 namespace CodeSpace.Core.Services.Providers.GitLab;
 
-public sealed class GitLabRepositoryProvider : IRepositoryCatalogCapability, IPullRequestCatalogCapability, IPullRequestCommentCapability, IPullRequestReviewCapability, IRepositoryAccessCapability, IRepositorySourceCapability, ICredentialProbeCapability, IWebhookRegistrationCapability, IWebhookSignatureVerifier, IWebhookEventNormalizer
+public sealed class GitLabRepositoryProvider : IRepositoryCatalogCapability, IPullRequestCatalogCapability, IPullRequestCommentCapability, IPullRequestReviewCapability, IRepositoryAccessCapability, IRepositorySourceCapability, IRepositoryInsightsCapability, ICredentialProbeCapability, IWebhookRegistrationCapability, IWebhookSignatureVerifier, IWebhookEventNormalizer
 {
     private readonly IProviderAuthResolver _authResolver;
     private readonly IExternalCallResilience _resilience;
@@ -987,6 +987,82 @@ public sealed class GitLabRepositoryProvider : IRepositoryCatalogCapability, IPu
         Size = null,
         Sha = entry.Id.ToString()
     };
+
+    // ── Repository insights (Code tab right rail): stats + languages ──
+
+    public async Task<RemoteRepositoryStats> GetStatsAsync(ProviderContext context, RemoteRepository repository, CancellationToken cancellationToken)
+    {
+        var (client, host, token) = await BuildAuthedAsync(context, cancellationToken).ConfigureAwait(false);
+        var projectId = int.Parse(repository.ExternalId);
+
+        return await _resilience.ExecuteAsync(context.Instance, nameof(GetStatsAsync), async _ =>
+        {
+            // statistics=true populates Project.Statistics (commit count + storage). One call covers
+            // stars/forks too. Branch/tag/release counts come from the X-Total header, best-effort.
+            var project = await client.Projects.GetByIdAsync(projectId, new SingleProjectQuery { Statistics = true }).ConfigureAwait(false);
+
+            var branches = await CountResourceViaXTotalAsync(host, token, $"projects/{projectId}/repository/branches", cancellationToken).ConfigureAwait(false);
+            var tags = await CountResourceViaXTotalAsync(host, token, $"projects/{projectId}/repository/tags", cancellationToken).ConfigureAwait(false);
+            var releases = await CountResourceViaXTotalAsync(host, token, $"projects/{projectId}/releases", cancellationToken).ConfigureAwait(false);
+
+            return new RemoteRepositoryStats
+            {
+                Stars = project.StarCount,
+                Forks = project.ForksCount,
+                CommitCount = project.Statistics?.CommitCount,
+                StorageBytes = project.Statistics?.StorageSize,
+                BranchCount = branches,
+                TagCount = tags,
+                ReleaseCount = releases
+            };
+        }, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<IReadOnlyList<RemoteLanguage>> GetLanguagesAsync(ProviderContext context, RemoteRepository repository, CancellationToken cancellationToken)
+    {
+        var (_, host, token) = await BuildAuthedAsync(context, cancellationToken).ConfigureAwait(false);
+        var projectId = int.Parse(repository.ExternalId);
+
+        return await _resilience.ExecuteAsync(context.Instance, nameof(GetLanguagesAsync), async _ =>
+        {
+            // GitLab's /languages returns { "C#": 97.4, ... } — already percentages. Best-effort.
+            var url = $"{host.TrimEnd('/')}/api/v4/projects/{projectId}/languages";
+            using var request = new HttpRequestMessage(HttpMethod.Get, url);
+            request.Headers.TryAddWithoutValidation("Authorization", $"Bearer {token}");
+            request.Headers.TryAddWithoutValidation("PRIVATE-TOKEN", token);
+
+            using var response = await _countsHttpClient.SendAsync(request, cancellationToken).ConfigureAwait(false);
+            if (!response.IsSuccessStatusCode) return (IReadOnlyList<RemoteLanguage>)Array.Empty<RemoteLanguage>();
+
+            var json = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
+            var percents = JsonSerializer.Deserialize<Dictionary<string, double>>(json) ?? new Dictionary<string, double>();
+            return LanguageBreakdown.FromPercents(percents);
+        }, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>Item count for a paginated GitLab list via the X-Total header (per_page=1). Best-effort → null on any failure.</summary>
+    private static async Task<int?> CountResourceViaXTotalAsync(string host, string token, string path, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var url = $"{host.TrimEnd('/')}/api/v4/{path}?per_page=1";
+            using var request = new HttpRequestMessage(HttpMethod.Get, url);
+            request.Headers.TryAddWithoutValidation("Authorization", $"Bearer {token}");
+            request.Headers.TryAddWithoutValidation("PRIVATE-TOKEN", token);
+
+            using var response = await _countsHttpClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken).ConfigureAwait(false);
+            if (!response.IsSuccessStatusCode) return null;
+
+            if (response.Headers.TryGetValues("X-Total", out var values) && int.TryParse(values.FirstOrDefault(), out var total))
+                return total;
+
+            return null;
+        }
+        catch
+        {
+            return null;
+        }
+    }
 
     private async Task<GitLabClient> BuildClientAsync(ProviderContext context, CancellationToken cancellationToken)
         => (await BuildAuthedAsync(context, cancellationToken).ConfigureAwait(false)).Client;

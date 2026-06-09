@@ -62,6 +62,9 @@ public sealed class GitLabProviderModule : IProviderModule
         // family as the catalog/PR reads. (`read_repository` is clone-only and can't reach these endpoints.)
         [typeof(IRepositorySourceCapability)] = ScopeRequirement.AnyOf(GitLabScopes.Api, GitLabScopes.ReadApi),
 
+        // Repo insights (stats + languages) read via the API — same `api`/`read_api` family.
+        [typeof(IRepositoryInsightsCapability)] = ScopeRequirement.AnyOf(GitLabScopes.Api, GitLabScopes.ReadApi),
+
         // Webhook registration: only `api` works on GitLab. No narrower alternative exists.
         [typeof(IWebhookRegistrationCapability)] = ScopeRequirement.Of(GitLabScopes.Api),
 
