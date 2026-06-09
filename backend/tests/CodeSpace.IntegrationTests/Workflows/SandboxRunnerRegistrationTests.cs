@@ -31,4 +31,15 @@ public class SandboxRunnerRegistrationTests
         registry.Resolve(LocalProcessRunner.LocalKind).ShouldBeOfType<LocalProcessRunner>();
         registry.All.ShouldContain(r => r.Kind == LocalProcessRunner.LocalKind);
     }
+
+    [Fact]
+    public void Local_runner_also_exposes_the_streaming_capability()
+    {
+        using var scope = _fixture.BeginScope();
+
+        var runner = scope.Resolve<ISandboxRunnerRegistry>().Resolve(LocalProcessRunner.LocalKind);
+
+        // Feature-detection (Rule 7): the same resolved runner opts into the streaming sibling.
+        runner.ShouldBeAssignableTo<ISandboxStreamRunner>();
+    }
 }
