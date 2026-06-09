@@ -4,6 +4,8 @@ using CodeSpace.Api.Filters;
 using CodeSpace.Core.Services.Auth;
 using CodeSpace.Core.Services.Identity;
 using CodeSpace.Core.Services.OAuth;
+using CodeSpace.Core.Settings;
+using Microsoft.Extensions.Hosting;
 using Serilog;
 
 namespace CodeSpace.Api;
@@ -77,6 +79,15 @@ public class Startup
         // recurring-job registration happen in Configure() below via UseCodeSpaceHangfire
         // because RecurringJob.AddOrUpdate needs a live IServiceProvider.
         services.AddCodeSpaceHangfire(Configuration);
+
+        // Graceful-shutdown drain budget. On SIGTERM (rolling update / scale-down) the host stops
+        // fetching new background work and lets in-flight Hangfire jobs finish within this window
+        // before exiting — so a deploy doesn't sever short jobs mid-flight (they'd otherwise be
+        // re-claimed ~5 min later via the invisibility timeout). The deployment's grace period MUST
+        // be >= this (k8s: terminationGracePeriodSeconds); long agent runs that exceed it are
+        // recovered by the reconciler, not drained. Tunable via CODESPACE_SHUTDOWN_DRAIN_SECONDS.
+        services.Configure<HostOptions>(o => o.ShutdownTimeout = ShutdownSettings.ResolveDrainTimeout());
+
         services.AddCustomAuthentication(Configuration, Environment);
     }
 
