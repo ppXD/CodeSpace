@@ -1,5 +1,5 @@
 import { fetchJson } from "./request";
-import type { BulkBindResult, PullRequestReviewVerdict, PullRequestState, RemoteBranch, RemoteFileContent, RemotePullRequest, RemotePullRequestCheck, RemotePullRequestCommit, RemotePullRequestCounts, RemotePullRequestFile, RemotePullRequestReview, RemoteRepositoryPage, RemoteTreeEntry, RepositoryDetail, RepositorySummary } from "./types";
+import type { BulkBindResult, PullRequestReviewVerdict, PullRequestState, RemoteBranch, RemoteCommitSummary, RemoteFileContent, RemoteLanguage, RemotePullRequest, RemotePullRequestCheck, RemotePullRequestCommit, RemotePullRequestCounts, RemotePullRequestFile, RemotePullRequestReview, RemoteRepositoryPage, RemoteRepositoryStats, RemoteTreeEntry, RepositoryDetail, RepositorySummary } from "./types";
 
 export interface BindRepositoryInput {
   providerInstanceId: string;
@@ -125,5 +125,30 @@ export const repositoriesApi = {
     params.set("path", path);
     if (ref) params.set("ref", ref);
     return fetchJson<RemoteFileContent>(`/api/repositories/${encodeURIComponent(repositoryId)}/file?${params.toString()}`);
+  },
+
+  // ── Code browser v2: stats sidebar · Languages bar · commit columns ──
+
+  getStats: (repositoryId: string) =>
+    fetchJson<RemoteRepositoryStats>(`/api/repositories/${encodeURIComponent(repositoryId)}/stats`),
+
+  getLanguages: (repositoryId: string) =>
+    fetchJson<RemoteLanguage[]>(`/api/repositories/${encodeURIComponent(repositoryId)}/languages`),
+
+  // Latest commit on a path/ref — the header bar. Null body when the path has no history.
+  getLatestCommit: (repositoryId: string, path?: string, ref?: string) => {
+    const params = new URLSearchParams();
+    if (path) params.set("path", path);
+    if (ref) params.set("ref", ref);
+    const qs = params.toString();
+    return fetchJson<RemoteCommitSummary | null>(`/api/repositories/${encodeURIComponent(repositoryId)}/commit${qs ? `?${qs}` : ""}`);
+  },
+
+  // Per-entry last commit for the file rows. Returns a { path: commit } map; failed/absent paths are omitted.
+  getTreeCommits: (repositoryId: string, paths: string[], ref?: string) => {
+    const params = new URLSearchParams();
+    for (const p of paths) params.append("paths", p);
+    if (ref) params.set("ref", ref);
+    return fetchJson<Record<string, RemoteCommitSummary>>(`/api/repositories/${encodeURIComponent(repositoryId)}/tree-commits?${params.toString()}`);
   },
 };

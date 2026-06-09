@@ -93,3 +93,63 @@ export function formatBytes(bytes: number): string {
 
   return `${value < 10 ? value.toFixed(1) : Math.round(value)} ${units[i]}`;
 }
+
+/**
+ * GitHub-style relative time — "just now", "3 hours ago", "2 weeks ago", "2 years ago". Unlike the PR
+ * view's after-a-week date fallback, this rolls all the way up to years because file last-commits are
+ * often old. <c>now</c> is injectable so tests are deterministic. Empty/invalid input ⇒ "".
+ */
+export function relativeTime(iso: string | null | undefined, now: number = Date.now()): string {
+  if (!iso) return "";
+
+  const t = new Date(iso).getTime();
+  if (Number.isNaN(t)) return "";
+
+  const sec = Math.floor((now - t) / 1000);
+  if (sec < 60) return "just now";
+
+  const min = Math.floor(sec / 60);
+  if (min < 60) return pluralAgo(min, "minute");
+  const hr = Math.floor(min / 60);
+  if (hr < 24) return pluralAgo(hr, "hour");
+  const day = Math.floor(hr / 24);
+  if (day < 7) return pluralAgo(day, "day");
+  const wk = Math.floor(day / 7);
+  if (wk < 5) return pluralAgo(wk, "week");
+  const mo = Math.floor(day / 30);
+  if (mo < 12) return pluralAgo(mo, "month");
+
+  return pluralAgo(Math.floor(day / 365), "year");
+}
+
+function pluralAgo(n: number, unit: string): string {
+  return `${n} ${unit}${n === 1 ? "" : "s"} ago`;
+}
+
+/** Thousands-separated integer for the stats panel ("1,128"). */
+export function formatCount(n: number): string {
+  return n.toLocaleString("en-US");
+}
+
+// Linguist-ish colors for the Languages bar; unknown languages get a stable generated hue so the bar
+// never has a blank segment.
+const LANGUAGE_COLORS: Record<string, string> = {
+  "c#": "#178600", javascript: "#f1e05a", typescript: "#3178c6", python: "#3572a5", java: "#b07219",
+  go: "#00add8", rust: "#dea584", ruby: "#701516", php: "#4f5d95", "c++": "#f34b7d", c: "#555555",
+  shell: "#89e051", powershell: "#012456", html: "#e34c26", css: "#563d7c", scss: "#c6538c",
+  vue: "#41b883", svelte: "#ff3e00", kotlin: "#a97bff", swift: "#f05138", "objective-c": "#438eff",
+  dart: "#00b4ab", scala: "#c22d40", elixir: "#6e4a7e", clojure: "#db5855", haskell: "#5e5086",
+  lua: "#000080", "jupyter notebook": "#da5b0b", dockerfile: "#384d54", makefile: "#427819",
+  json: "#292929", yaml: "#cb171e", markdown: "#083fa1", sql: "#e38c00",
+};
+
+/** Color for a language's bar/legend swatch — known linguist color, else a deterministic generated hue. */
+export function languageColor(name: string): string {
+  return LANGUAGE_COLORS[name.trim().toLowerCase()] ?? generatedColor(name);
+}
+
+function generatedColor(name: string): string {
+  let hash = 0;
+  for (let i = 0; i < name.length; i++) hash = (hash * 31 + name.charCodeAt(i)) | 0;
+  return `hsl(${Math.abs(hash) % 360} 45% 55%)`;
+}

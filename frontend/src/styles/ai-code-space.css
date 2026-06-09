@@ -3747,8 +3747,15 @@ body.chat-resizing .acs-root .app { transition: none; }
 .acs-root .chat-rail-body .chat-list { flex: 1; min-height: 0; border-right: none; background: transparent; }
 .acs-root .chat-rail-foot { flex-shrink: 0; padding: 8px 10px; border-top: 1px solid var(--line); }
 
-/* ── Code browser (the "Code" tab): branch picker · breadcrumbs · tree · file viewer · README ── */
-.acs-root .cb { display: flex; flex-direction: column; gap: 14px; }
+/* ── Code browser (the "Code" tab): branch picker · breadcrumbs · tree · file viewer · README · right rail ── */
+.acs-root .cb { display: grid; grid-template-columns: minmax(0, 1fr) 296px; gap: 20px; align-items: start; }
+.acs-root .cb-main { display: flex; flex-direction: column; gap: 14px; min-width: 0; }
+.acs-root .cb-side { display: flex; flex-direction: column; gap: 14px; }
+@media (max-width: 1040px) {
+  .acs-root .cb { grid-template-columns: 1fr; }
+  .acs-root .cb-side { flex-direction: row; flex-wrap: wrap; }
+  .acs-root .cb-side-card { flex: 1; min-width: 240px; }
+}
 
 /* Toolbar: branch picker on the left, path breadcrumb trail on the right. */
 .acs-root .cb-bar { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
@@ -3798,17 +3805,25 @@ body.chat-resizing .acs-root .app { transition: none; }
 /* File tree — one level, lazily drilled. */
 .acs-root .cb-tree { border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; background: var(--panel); }
 .acs-root .cb-row {
-  display: flex; align-items: center; gap: 10px; width: 100%; padding: 8px 12px;
-  font-size: 13.5px; color: var(--ink-2); background: transparent; border: none; border-bottom: 1px solid var(--line);
-  cursor: pointer; text-align: left;
+  display: grid; grid-template-columns: minmax(0, 2.2fr) minmax(0, 3fr) auto; align-items: center; gap: 16px;
+  width: 100%; padding: 8px 14px; font-size: 13.5px; color: var(--ink-2);
+  background: transparent; border: none; border-bottom: 1px solid var(--line); cursor: pointer; text-align: left;
 }
 .acs-root .cb-row:last-child { border-bottom: none; }
 .acs-root .cb-row:hover { background: var(--accent-soft); }
-.acs-root .cb-row[data-kind="dir"] svg { color: var(--accent); }
-.acs-root .cb-row[data-kind="file"] svg { color: var(--muted); }
-.acs-root .cb-row-up svg { color: var(--muted); }
-.acs-root .cb-row-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.acs-root .cb-row-size { flex-shrink: 0; font-size: 12px; color: var(--muted-2); font-variant-numeric: tabular-nums; }
+.acs-root .cb-row[data-kind="dir"] .cb-row-main svg { color: var(--accent); }
+.acs-root .cb-row[data-kind="file"] .cb-row-main svg { color: var(--muted); }
+.acs-root .cb-row-up .cb-row-main svg { color: var(--muted); }
+.acs-root .cb-row-main { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.acs-root .cb-row-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.acs-root .cb-row-commit { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12.5px; color: var(--muted); }
+.acs-root .cb-row-commit a { color: var(--muted); text-decoration: none; }
+.acs-root .cb-row-commit a:hover { color: var(--accent); text-decoration: underline; }
+.acs-root .cb-row-time { flex-shrink: 0; font-size: 12px; color: var(--muted-2); white-space: nowrap; font-variant-numeric: tabular-nums; }
+@media (max-width: 720px) {
+  .acs-root .cb-row { grid-template-columns: minmax(0, 1fr) auto; }
+  .acs-root .cb-row-commit { display: none; }
+}
 
 .acs-root .cb-empty, .acs-root .cb-loading { padding: 28px 16px; font-size: 13px; color: var(--muted); text-align: center; }
 
@@ -3845,3 +3860,42 @@ body.chat-resizing .acs-root .app { transition: none; }
 .acs-root .cb-file-notice svg { color: var(--muted-2); margin-bottom: 6px; }
 .acs-root .cb-file-notice-h { font-size: 14px; font-weight: 600; color: var(--ink-2); }
 .acs-root .cb-file-notice-p { font-size: 12.5px; color: var(--muted); }
+
+/* Latest-commit header bar above the file list. */
+.acs-root .cb-commitbar {
+  display: flex; align-items: center; gap: 8px; padding: 9px 14px; font-size: 13px;
+  background: var(--bg); border: 1px solid var(--line); border-radius: var(--radius);
+}
+.acs-root .cb-commitbar-avatar {
+  flex-shrink: 0; display: inline-flex; align-items: center; justify-content: center; width: 20px; height: 20px;
+  border-radius: 999px; background: var(--accent-soft); color: var(--accent); font-size: 11px; font-weight: 700;
+}
+.acs-root .cb-commitbar-author { font-weight: 600; color: var(--ink-2); flex-shrink: 0; }
+.acs-root .cb-commitbar-msg { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink-2); text-decoration: none; }
+.acs-root a.cb-commitbar-msg:hover { color: var(--accent); text-decoration: underline; }
+.acs-root .cb-commitbar-meta { flex-shrink: 0; display: inline-flex; align-items: center; gap: 6px; color: var(--muted); font-size: 12px; }
+.acs-root .cb-commitbar-meta code { font-family: "Geist Mono Variable", "Geist Mono", ui-monospace, monospace; color: var(--muted); }
+.acs-root .cb-commitbar-count { flex-shrink: 0; display: inline-flex; align-items: center; gap: 5px; color: var(--muted); font-size: 12px; }
+.acs-root .cb-commitbar-count svg { color: var(--muted-2); }
+@media (max-width: 720px) { .acs-root .cb-commitbar-count { display: none; } }
+
+/* Right rail cards: stats (About) + Languages. */
+.acs-root .cb-side-card { border: 1px solid var(--line); border-radius: var(--radius); background: var(--panel); padding: 14px 16px; }
+.acs-root .cb-side-title { font-size: 12px; font-weight: 700; letter-spacing: 0.03em; text-transform: uppercase; color: var(--muted); margin-bottom: 12px; }
+.acs-root .cb-side-social { display: flex; gap: 16px; margin-bottom: 14px; }
+.acs-root .cb-social-item { display: inline-flex; align-items: center; gap: 5px; font-size: 13px; font-weight: 600; color: var(--ink-2); }
+.acs-root .cb-social-item svg { color: var(--muted); }
+.acs-root .cb-social-label { font-weight: 400; color: var(--muted); }
+.acs-root .cb-stats { display: flex; flex-direction: column; gap: 10px; }
+.acs-root .cb-stat { display: flex; align-items: center; gap: 9px; font-size: 13px; color: var(--ink-2); }
+.acs-root .cb-stat svg { color: var(--muted); flex-shrink: 0; }
+.acs-root .cb-stat b { font-weight: 600; font-variant-numeric: tabular-nums; }
+.acs-root .cb-stat-label { color: var(--muted); }
+
+/* Languages bar + legend. */
+.acs-root .cb-lang-bar { display: flex; height: 8px; border-radius: 999px; overflow: hidden; background: var(--line); }
+.acs-root .cb-lang-seg { height: 100%; min-width: 2px; }
+.acs-root .cb-lang-legend { display: flex; flex-direction: column; gap: 7px; margin-top: 12px; }
+.acs-root .cb-lang-item { display: inline-flex; align-items: center; gap: 7px; font-size: 12.5px; color: var(--ink-2); }
+.acs-root .cb-lang-dot { width: 9px; height: 9px; border-radius: 999px; flex-shrink: 0; }
+.acs-root .cb-lang-pct { color: var(--muted); font-variant-numeric: tabular-nums; }
