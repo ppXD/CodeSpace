@@ -542,6 +542,7 @@ public sealed class GitHubRepositoryProvider : IRepositoryCatalogCapability, IPu
             ClosedDate = pr.ClosedAt,
             WebUrl = pr.HtmlUrl,
             Labels = ToLabelRefs(pr.Labels),
+            MilestoneTitle = pr.Milestone?.Title,
             TasksCompleted = tasksDone,
             TasksTotal = tasksTotal
         };
