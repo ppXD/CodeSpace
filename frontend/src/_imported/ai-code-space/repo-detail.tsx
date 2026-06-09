@@ -40,7 +40,7 @@ import { Pager } from "./pager";
  * the header — no duplicate fetches.
  */
 
-export type DetailTab = "overview" | "pulls" | "issues" | "branches" | "activity";
+export type DetailTab = "overview" | "code" | "pulls" | "issues" | "branches" | "activity";
 
 const PROVIDER_LABEL: Record<string, string> = { GitHub: "GitHub", GitLab: "GitLab", Git: "Git" };
 
@@ -119,6 +119,7 @@ export function RepoDetailHeader({ repoId, activeTab, onTabChange, teamSlug, chi
   const prTotal = counts.data ? counts.data.open + counts.data.closed : undefined;
   const detailTabs: Array<[DetailTab, string, number?]> = [
     ["overview", "Overview"],
+    ["code", "Code"],
     ["pulls", "Pull requests", prTotal],
     ["issues", "Issues"],
     ["branches", "Branches"],

@@ -344,6 +344,42 @@ export interface RemotePullRequestReview {
   webUrl?: string | null;
 }
 
+// ── Repository source (Code browser) ──────────────────────────────────────────
+
+/** One branch of a repository — the Code tab's branch picker. Mirror of the backend RemoteBranch. */
+export interface RemoteBranch {
+  name: string;
+  commitSha?: string | null;
+  isDefault: boolean;
+  protected: boolean;
+}
+
+/** Cross-provider tree-entry classification. Serialized as the backend enum name. */
+export type RemoteTreeEntryType = "File" | "Directory" | "Submodule" | "Symlink";
+
+/** One entry at a single level of a repository tree. `path` is the repo-root-relative path used to drill in / open. */
+export interface RemoteTreeEntry {
+  name: string;
+  path: string;
+  type: RemoteTreeEntryType;
+  size?: number | null;
+  sha?: string | null;
+}
+
+/**
+ * A single file's content for the viewer. Exactly one rendering state holds: `text` set (renderable),
+ * `isBinary` (not previewable), or `isTruncated` (too large to inline). `size` is always the byte size.
+ */
+export interface RemoteFileContent {
+  path: string;
+  name: string;
+  size: number;
+  isBinary: boolean;
+  isTruncated: boolean;
+  text?: string | null;
+  sha?: string | null;
+}
+
 /**
  * Returned by GET /api/provider-instances/defaults/{provider}. Backend reads its own
  * IProviderModule and emits the recommended UI defaults (base URL, OAuth scope list,
