@@ -274,3 +274,46 @@ export function useRepositoryFile(repositoryId: string | null, path: string | nu
     staleTime: SOURCE_STALE_MS,
   });
 }
+
+/** Headline stats for the Code tab's right rail (stars/forks/counts/storage). */
+export function useRepositoryStats(repositoryId: string | null) {
+  return useQuery({
+    queryKey: ["repository", repositoryId, "source", "stats"],
+    queryFn: () => repositoriesApi.getStats(repositoryId!),
+    enabled: repositoryId != null,
+    staleTime: SOURCE_STALE_MS,
+  });
+}
+
+/** Language composition for the Languages bar. */
+export function useRepositoryLanguages(repositoryId: string | null) {
+  return useQuery({
+    queryKey: ["repository", repositoryId, "source", "languages"],
+    queryFn: () => repositoriesApi.getLanguages(repositoryId!),
+    enabled: repositoryId != null,
+    staleTime: SOURCE_STALE_MS,
+  });
+}
+
+/** Latest commit on the current path/ref — the header bar above the file list. */
+export function useRepositoryLatestCommit(repositoryId: string | null, path: string, ref: string | null, enabled = true) {
+  return useQuery({
+    queryKey: ["repository", repositoryId, "source", "commit", ref ?? "default", path],
+    queryFn: () => repositoriesApi.getLatestCommit(repositoryId!, path || undefined, ref || undefined),
+    enabled: enabled && repositoryId != null,
+    staleTime: SOURCE_STALE_MS,
+  });
+}
+
+/**
+ * Per-entry last commit for the current folder's children — the file rows' last-commit column. Keyed on
+ * the path set so navigating folders refetches; the tree renders immediately and these fill in when ready.
+ */
+export function useRepositoryTreeCommits(repositoryId: string | null, paths: string[], ref: string | null, enabled = true) {
+  return useQuery({
+    queryKey: ["repository", repositoryId, "source", "tree-commits", ref ?? "default", ...paths],
+    queryFn: () => repositoriesApi.getTreeCommits(repositoryId!, paths, ref || undefined),
+    enabled: enabled && repositoryId != null && paths.length > 0,
+    staleTime: SOURCE_STALE_MS,
+  });
+}

@@ -380,6 +380,34 @@ export interface RemoteFileContent {
   sha?: string | null;
 }
 
+/** Headline stats for the Code tab's right rail. Every field is best-effort — null ⇒ omit that row. */
+export interface RemoteRepositoryStats {
+  stars?: number | null;
+  forks?: number | null;
+  commitCount?: number | null;
+  branchCount?: number | null;
+  tagCount?: number | null;
+  releaseCount?: number | null;
+  storageBytes?: number | null;
+}
+
+/** One language in the Code tab's Languages bar. `percent` is 0–100, descending across the list. */
+export interface RemoteLanguage {
+  name: string;
+  percent: number;
+}
+
+/** One commit as the Code tab's header bar / file-row last-commit column show it. */
+export interface RemoteCommitSummary {
+  sha: string;
+  shortSha: string;
+  message: string;
+  authorName?: string | null;
+  authorAvatarUrl?: string | null;
+  committedDate?: string | null;
+  webUrl?: string | null;
+}
+
 /**
  * Returned by GET /api/provider-instances/defaults/{provider}. Backend reads its own
  * IProviderModule and emits the recommended UI defaults (base URL, OAuth scope list,

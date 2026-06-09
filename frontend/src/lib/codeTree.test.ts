@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { RemoteTreeEntry, RemoteTreeEntryType } from "@/api/types";
-import { buildBreadcrumbs, formatBytes, isMarkdownName, isReadmeName, parentPath, pickReadme, sortTreeEntries } from "./codeTree";
+import { buildBreadcrumbs, formatBytes, formatCount, isMarkdownName, isReadmeName, languageColor, parentPath, pickReadme, relativeTime, sortTreeEntries } from "./codeTree";
 
 const entry = (name: string, type: RemoteTreeEntryType, path = name): RemoteTreeEntry => ({ name, path, type });
 
@@ -110,5 +110,47 @@ describe("formatBytes", () => {
   it("returns empty string for invalid sizes", () => {
     expect(formatBytes(-1)).toBe("");
     expect(formatBytes(NaN)).toBe("");
+  });
+});
+
+describe("relativeTime", () => {
+  const now = Date.parse("2026-06-09T12:00:00Z");
+  const ago = (ms: number) => new Date(now - ms).toISOString();
+  const SEC = 1000, MIN = 60 * SEC, HR = 60 * MIN, DAY = 24 * HR;
+
+  it.each([
+    [ago(30 * SEC), "just now"],
+    [ago(1 * MIN), "1 minute ago"],
+    [ago(5 * MIN), "5 minutes ago"],
+    [ago(1 * HR), "1 hour ago"],
+    [ago(3 * DAY), "3 days ago"],
+    [ago(14 * DAY), "2 weeks ago"],
+    [ago(60 * DAY), "2 months ago"],
+    [ago(800 * DAY), "2 years ago"],
+  ])("formats %j → %j", (iso, expected) => {
+    expect(relativeTime(iso, now)).toBe(expected);
+  });
+
+  it("returns empty for null/invalid", () => {
+    expect(relativeTime(null, now)).toBe("");
+    expect(relativeTime("not-a-date", now)).toBe("");
+  });
+});
+
+describe("formatCount", () => {
+  it.each([[0, "0"], [42, "42"], [1128, "1,128"], [1048576, "1,048,576"]])(
+    "formatCount(%i) → %j", (input, expected) => expect(formatCount(input)).toBe(expected));
+});
+
+describe("languageColor", () => {
+  it("returns the known linguist color (case-insensitive)", () => {
+    expect(languageColor("C#")).toBe("#178600");
+    expect(languageColor("typescript")).toBe("#3178c6");
+  });
+
+  it("returns a stable generated hue for unknown languages", () => {
+    const a = languageColor("Brainfuck");
+    expect(a).toBe(languageColor("Brainfuck"));
+    expect(a).toMatch(/^hsl\(/);
   });
 });
