@@ -591,8 +591,11 @@
 /* Milestone chip on the PR row meta line — signpost icon + title, warm accent so it
    reads as a milestone (matching the detail view + GitHub/GitLab), truncated if long. */
 .acs-root .pr-row-milestone {
-  display: inline-flex; align-items: center; gap: 3px; min-width: 0; max-width: 180px;
-  color: var(--accent);
+  display: inline-flex; align-items: center; gap: 4px; min-width: 0; max-width: 180px;
+  /* Softened warm tone — gentler than the full accent so it sits comfortably in the muted
+     meta line; tabular nums keep version strings like 1.1.8 crisp. */
+  color: color-mix(in srgb, var(--accent) 72%, var(--muted) 28%);
+  font-feature-settings: "tnum";
 }
 .acs-root .pr-row-milestone > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 

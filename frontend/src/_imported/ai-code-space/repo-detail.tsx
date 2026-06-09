@@ -554,13 +554,13 @@ function PullRequestRow({ pr, onSelect }: { pr: RemotePullRequest; onSelect: () 
           {pr.authorLogin && (
             <span>by <span className="pr-row-author">{pr.authorLogin}</span></span>
           )}
+          <TaskProgressBadge done={pr.tasksCompleted ?? null} total={pr.tasksTotal ?? null} />
           {pr.milestoneTitle && (
             <span className="pr-row-milestone" title={`Milestone: ${pr.milestoneTitle}`}>
               <Ic.Milestone size={11} />
               <span>{pr.milestoneTitle}</span>
             </span>
           )}
-          <TaskProgressBadge done={pr.tasksCompleted ?? null} total={pr.tasksTotal ?? null} />
         </div>
       </div>
       {pr.commentsCount > 0 && (
