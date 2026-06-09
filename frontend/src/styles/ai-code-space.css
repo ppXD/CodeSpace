@@ -441,6 +441,13 @@
 .acs-root .rd-vis { display: inline-flex; align-items: center; gap: 4px; font-size: 11.5px; font-weight: 500; color: var(--muted); background: var(--panel-2); border: 1px solid var(--line); padding: 2px 8px; border-radius: 5px; text-transform: lowercase; font-family: inherit; letter-spacing: 0; }
 .acs-root .rd-path { font-family: inherit; font-size: 12.5px; color: var(--muted); margin-top: 4px; display: flex; align-items: center; gap: 8px; }
 .acs-root .rd-actions { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
+.acs-root .rd-social { display: inline-flex; align-items: center; gap: 8px; margin-right: 4px; }
+.acs-root .rd-social-pill {
+  display: inline-flex; align-items: center; gap: 6px; padding: 5px 11px; font-size: 12.5px; font-weight: 600;
+  color: var(--ink-2); background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius-sm);
+  font-variant-numeric: tabular-nums;
+}
+.acs-root .rd-social-pill svg { color: var(--muted); }
 .acs-root .rd-tabs { display: flex; gap: 2px; margin-top: 4px; }
 .acs-root .rd-tab { padding: 8px 12px 11px; font-size: 13px; font-weight: 500; color: var(--muted); border-bottom: 2px solid transparent; cursor: pointer; margin-bottom: -1px; display: inline-flex; align-items: center; gap: 6px; }
 .acs-root .rd-tab:hover { color: var(--ink-2); }
@@ -3758,7 +3765,54 @@ body.chat-resizing .acs-root .app { transition: none; }
 }
 
 /* Toolbar: branch picker on the left, path breadcrumb trail on the right. */
-.acs-root .cb-bar { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+/* Toolbar row: branch picker + branch/tag counts (left), search + Code-clone (right). */
+.acs-root .cb-toolbar { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.acs-root .cb-toolbar-l { display: flex; align-items: center; gap: 16px; min-width: 0; flex-wrap: wrap; }
+.acs-root .cb-toolbar-r { display: flex; align-items: center; gap: 8px; margin-left: auto; }
+.acs-root .cb-count { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; color: var(--muted); white-space: nowrap; }
+.acs-root .cb-count svg { color: var(--muted-2); }
+.acs-root .cb-count b { color: var(--ink-2); font-weight: 600; font-variant-numeric: tabular-nums; }
+
+/* Search box ("Go to file" — filters the current folder). */
+.acs-root .cb-search {
+  display: inline-flex; align-items: center; gap: 7px; width: 220px; max-width: 38vw; padding: 6px 10px;
+  background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius-sm); color: var(--muted);
+}
+.acs-root .cb-search:focus-within { border-color: var(--accent); }
+.acs-root .cb-search input { flex: 1; min-width: 0; border: none; background: transparent; outline: none; font: inherit; font-size: 13px; color: var(--ink-2); }
+
+/* Code button → clone dropdown. */
+.acs-root .cb-clone { position: relative; }
+.acs-root .cb-code-btn {
+  display: inline-flex; align-items: center; gap: 6px; padding: 6px 12px; font-size: 13px; font-weight: 600;
+  color: #fff; background: var(--accent); border: 1px solid var(--accent); border-radius: var(--radius-sm); cursor: pointer;
+}
+.acs-root .cb-code-btn:hover { background: color-mix(in srgb, var(--accent) 88%, #000 12%); }
+.acs-root .cb-clone-menu {
+  position: absolute; top: calc(100% + 4px); right: 0; z-index: 41; width: 340px; padding: 14px;
+  background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); box-shadow: var(--shadow-2);
+}
+.acs-root .cb-clone-title { font-size: 13px; font-weight: 700; color: var(--ink-2); margin-bottom: 10px; }
+.acs-root .cb-clone-block { margin-bottom: 12px; }
+.acs-root .cb-clone-label { font-size: 12px; color: var(--muted); margin-bottom: 5px; }
+.acs-root .cb-clone-field { display: flex; align-items: center; gap: 6px; }
+.acs-root .cb-clone-field input {
+  flex: 1; min-width: 0; padding: 6px 9px; font-family: "Geist Mono Variable", "Geist Mono", ui-monospace, monospace;
+  font-size: 12px; color: var(--ink-2); background: var(--bg); border: 1px solid var(--line); border-radius: var(--radius-sm); outline: none;
+}
+.acs-root .cb-clone-copy {
+  flex-shrink: 0; display: inline-flex; align-items: center; justify-content: center; width: 30px; height: 30px;
+  color: var(--muted); background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius-sm); cursor: pointer;
+}
+.acs-root .cb-clone-copy:hover { color: var(--accent); border-color: var(--muted-2); }
+.acs-root .cb-clone-open {
+  display: flex; align-items: center; gap: 7px; width: 100%; margin-top: 4px; padding: 8px 9px; border-radius: var(--radius-sm);
+  font-size: 13px; color: var(--ink-2); background: transparent; border: none; border-top: 1px solid var(--line); cursor: pointer; text-align: left;
+}
+.acs-root .cb-clone-open:hover { background: var(--accent-soft); }
+
+/* Path breadcrumb row (shown once you drill into a folder / open a file). */
+.acs-root .cb-path { display: flex; align-items: center; flex-wrap: wrap; gap: 2px; min-width: 0; font-size: 14px; }
 
 /* Branch picker — warm dropdown (a transparent fixed backdrop catches the outside click). */
 .acs-root .cb-branch { position: relative; }
@@ -3882,15 +3936,8 @@ body.chat-resizing .acs-root .app { transition: none; }
 /* Right rail cards: stats (About) + Languages. */
 .acs-root .cb-side-card { border: 1px solid var(--line); border-radius: var(--radius); background: var(--panel); padding: 14px 16px; }
 .acs-root .cb-side-title { font-size: 12px; font-weight: 700; letter-spacing: 0.03em; text-transform: uppercase; color: var(--muted); margin-bottom: 12px; }
-.acs-root .cb-side-social { display: flex; gap: 16px; margin-bottom: 14px; }
-.acs-root .cb-social-item { display: inline-flex; align-items: center; gap: 5px; font-size: 13px; font-weight: 600; color: var(--ink-2); }
-.acs-root .cb-social-item svg { color: var(--muted); }
-.acs-root .cb-social-label { font-weight: 400; color: var(--muted); }
-.acs-root .cb-stats { display: flex; flex-direction: column; gap: 10px; }
-.acs-root .cb-stat { display: flex; align-items: center; gap: 9px; font-size: 13px; color: var(--ink-2); }
-.acs-root .cb-stat svg { color: var(--muted); flex-shrink: 0; }
-.acs-root .cb-stat b { font-weight: 600; font-variant-numeric: tabular-nums; }
-.acs-root .cb-stat-label { color: var(--muted); }
+.acs-root .cb-about-desc { font-size: 13.5px; line-height: 1.55; color: var(--ink-2); margin: 0; }
+.acs-root .cb-about-empty { font-size: 13px; color: var(--muted-2); font-style: italic; margin: 0; }
 
 /* Languages bar + legend. */
 .acs-root .cb-lang-bar { display: flex; height: 8px; border-radius: 999px; overflow: hidden; background: var(--line); }

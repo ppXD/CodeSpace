@@ -15,6 +15,7 @@ import {
   useRepositoryPullRequestCounts,
   useRepositoryPullRequestFiles,
   useRepositoryPullRequests,
+  useRepositoryStats,
 } from "@/hooks/use-repositories";
 import { PrReviewActions } from "@/components/repositories/PrReviewActions";
 
@@ -94,6 +95,10 @@ export function RepoDetailHeader({ repoId, activeTab, onTabChange, teamSlug, chi
   //      PullRequestsListBody's call to the same hook is a free cache hit — no
   //      duplicate request, no second loading state.
   const counts = useRepositoryPullRequestCounts(repoId);
+
+  // Star / fork counts power the GitHub-style pills on the right of the title row. Shared with the
+  // Code tab's stats (same query key), so this is a free cache hit there.
+  const stats = useRepositoryStats(repoId);
 
   // Prefetch page 1 of the Open PR list at the same time. The user's most likely
   // next action after landing on a repo is clicking "Pull requests" — by then this
@@ -223,6 +228,20 @@ export function RepoDetailHeader({ repoId, activeTab, onTabChange, teamSlug, chi
             </div>
           </div>
           <div className="rd-actions">
+            {stats.data && (stats.data.stars != null || stats.data.forks != null) && (
+              <div className="rd-social">
+                {stats.data.stars != null && (
+                  <span className="rd-social-pill" title={`${stats.data.stars.toLocaleString()} stars`}>
+                    <Ic.Star size={13} /> {stats.data.stars.toLocaleString()}
+                  </span>
+                )}
+                {stats.data.forks != null && (
+                  <span className="rd-social-pill" title={`${stats.data.forks.toLocaleString()} forks`}>
+                    <Ic.Fork size={13} /> {stats.data.forks.toLocaleString()}
+                  </span>
+                )}
+              </div>
+            )}
             <button className="btn" onClick={() => window.open(repo.webUrl, "_blank", "noopener")}>
               <Ic.ArrowOut size={13} /> Open on {instance ? PROVIDER_LABEL[instance.provider] : "provider"}
             </button>
