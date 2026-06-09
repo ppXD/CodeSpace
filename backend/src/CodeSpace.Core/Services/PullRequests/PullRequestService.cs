@@ -72,7 +72,7 @@ public sealed class PullRequestService : IPullRequestService, IScopedDependency
 
         var commentCap = _registry.Require<IPullRequestCommentCapability>(repo.ProviderInstance.Provider);
         var context = new ProviderContext(repo.ProviderInstance, repo.Credential!);
-        var remote = ToRemoteRepository(repo);
+        var remote = repo.ToRemoteRepository();
 
         return await commentCap.PostCommentAsync(context, remote, number, body, cancellationToken).ConfigureAwait(false);
     }
@@ -94,7 +94,7 @@ public sealed class PullRequestService : IPullRequestService, IScopedDependency
 
         var reviewCap = _registry.Require<IPullRequestReviewCapability>(repo.ProviderInstance.Provider);
         var context = new ProviderContext(repo.ProviderInstance, credential);
-        var remote = ToRemoteRepository(repo);
+        var remote = repo.ToRemoteRepository();
 
         return await reviewCap.SubmitReviewAsync(context, remote, number, verdict, body, cancellationToken).ConfigureAwait(false);
     }
@@ -120,7 +120,7 @@ public sealed class PullRequestService : IPullRequestService, IScopedDependency
 
         var catalog = _registry.Require<IPullRequestCatalogCapability>(repo.ProviderInstance.Provider);
         var context = new ProviderContext(repo.ProviderInstance, repo.Credential!);
-        var remote = ToRemoteRepository(repo);
+        var remote = repo.ToRemoteRepository();
 
         return (catalog, context, remote);
     }
@@ -140,19 +140,4 @@ public sealed class PullRequestService : IPullRequestService, IScopedDependency
 
     private void EnsureScopeCovered(Repository repo) =>
         _scopeChecker.EnsureCapability(repo.Credential!, repo.ProviderInstance.Provider, typeof(IPullRequestCatalogCapability));
-
-    private static RemoteRepository ToRemoteRepository(Repository repo) => new()
-    {
-        ExternalId = repo.ExternalId,
-        NamespacePath = repo.NamespacePath,
-        Name = repo.Name,
-        FullPath = repo.FullPath,
-        DefaultBranch = repo.DefaultBranch,
-        Visibility = repo.Visibility,
-        Description = repo.Description,
-        WebUrl = repo.WebUrl,
-        CloneUrlHttps = repo.CloneUrlHttps,
-        CloneUrlSsh = repo.CloneUrlSsh,
-        Archived = repo.Archived
-    };
 }

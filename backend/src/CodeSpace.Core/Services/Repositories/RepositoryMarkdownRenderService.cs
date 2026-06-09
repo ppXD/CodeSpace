@@ -35,7 +35,7 @@ public sealed class RepositoryMarkdownRenderService : IRepositoryMarkdownRenderS
         var render = _registry.Require<IRepositoryMarkdownRenderCapability>(repo.ProviderInstance.Provider);
         var context = new ProviderContext(repo.ProviderInstance, repo.Credential!);
 
-        return await render.RenderMarkdownAsync(context, ToRemoteRepository(repo), markdown, cancellationToken).ConfigureAwait(false);
+        return await render.RenderMarkdownAsync(context, repo.ToRemoteRepository(), markdown, cancellationToken).ConfigureAwait(false);
     }
 
     private async Task<Repository> LoadRepositoryAsync(Guid repositoryId, CancellationToken cancellationToken) =>
@@ -50,19 +50,4 @@ public sealed class RepositoryMarkdownRenderService : IRepositoryMarkdownRenderS
         if (repo.Credential == null)
             throw new InvalidOperationException($"Repository {repo.Id} has no bound credential — relink first.");
     }
-
-    private static RemoteRepository ToRemoteRepository(Repository repo) => new()
-    {
-        ExternalId = repo.ExternalId,
-        NamespacePath = repo.NamespacePath,
-        Name = repo.Name,
-        FullPath = repo.FullPath,
-        DefaultBranch = repo.DefaultBranch,
-        Visibility = repo.Visibility,
-        Description = repo.Description,
-        WebUrl = repo.WebUrl,
-        CloneUrlHttps = repo.CloneUrlHttps,
-        CloneUrlSsh = repo.CloneUrlSsh,
-        Archived = repo.Archived
-    };
 }

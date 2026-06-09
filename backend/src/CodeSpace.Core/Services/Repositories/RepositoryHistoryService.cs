@@ -48,7 +48,7 @@ public sealed class RepositoryHistoryService : IRepositoryHistoryService, IScope
 
         var history = _registry.Require<IRepositoryHistoryCapability>(repo.ProviderInstance.Provider);
         var context = new ProviderContext(repo.ProviderInstance, repo.Credential!);
-        var remote = ToRemoteRepository(repo);
+        var remote = repo.ToRemoteRepository();
 
         return (history, context, remote);
     }
@@ -65,19 +65,4 @@ public sealed class RepositoryHistoryService : IRepositoryHistoryService, IScope
         if (repo.Credential == null)
             throw new InvalidOperationException($"Repository {repo.Id} has no bound credential — relink first.");
     }
-
-    private static RemoteRepository ToRemoteRepository(Repository repo) => new()
-    {
-        ExternalId = repo.ExternalId,
-        NamespacePath = repo.NamespacePath,
-        Name = repo.Name,
-        FullPath = repo.FullPath,
-        DefaultBranch = repo.DefaultBranch,
-        Visibility = repo.Visibility,
-        Description = repo.Description,
-        WebUrl = repo.WebUrl,
-        CloneUrlHttps = repo.CloneUrlHttps,
-        CloneUrlSsh = repo.CloneUrlSsh,
-        Archived = repo.Archived
-    };
 }
