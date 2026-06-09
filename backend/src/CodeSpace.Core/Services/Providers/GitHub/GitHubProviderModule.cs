@@ -62,6 +62,9 @@ public sealed class GitHubProviderModule : IProviderModule
         // family as the catalog/PR reads, so it adds no new OAuth consent for existing credentials.
         [typeof(IRepositorySourceCapability)] = ScopeRequirement.AnyOf(GitHubScopes.Repo, GitHubScopes.PublicRepo),
 
+        // Repo insights (stats + languages) are repo READs — same scope family as source browsing.
+        [typeof(IRepositoryInsightsCapability)] = ScopeRequirement.AnyOf(GitHubScopes.Repo, GitHubScopes.PublicRepo),
+
         // Webhook registration: `repo` is the superset; `admin:repo_hook` is the narrow grant.
         [typeof(IWebhookRegistrationCapability)] = ScopeRequirement.AnyOf(GitHubScopes.Repo, GitHubScopes.AdminRepoHook),
 

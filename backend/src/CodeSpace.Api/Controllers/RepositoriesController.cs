@@ -98,6 +98,25 @@ public class RepositoriesController : ControllerBase
     }
 
     /// <summary>
+    /// Headline stats for the Code tab's right rail — stars, forks, and (best-effort) commit / branch /
+    /// tag / release counts + storage size. Numbers the provider can't supply come back null.
+    /// </summary>
+    [HttpGet("{repositoryId:guid}/stats")]
+    public async Task<IActionResult> GetStats([FromRoute] Guid repositoryId, CancellationToken cancellationToken)
+    {
+        var result = await _mediator.Send(new GetRepositoryStatsQuery { RepositoryId = repositoryId }, cancellationToken).ConfigureAwait(false);
+        return Ok(result);
+    }
+
+    /// <summary>Language composition for the Code tab's Languages bar, descending by percent.</summary>
+    [HttpGet("{repositoryId:guid}/languages")]
+    public async Task<IActionResult> GetLanguages([FromRoute] Guid repositoryId, CancellationToken cancellationToken)
+    {
+        var result = await _mediator.Send(new GetRepositoryLanguagesQuery { RepositoryId = repositoryId }, cancellationToken).ConfigureAwait(false);
+        return Ok(result);
+    }
+
+    /// <summary>
     /// Live PR/MR fetch — never cached locally. The provider call goes out on every
     /// request, so consumers should debounce / poll politely. `state` accepts the
     /// PullRequestState enum names (Open, Draft, Merged, Closed); omit for "all".
