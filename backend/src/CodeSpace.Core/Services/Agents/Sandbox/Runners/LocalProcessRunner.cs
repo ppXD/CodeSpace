@@ -2,7 +2,7 @@ using System.Diagnostics;
 using CodeSpace.Core.DependencyInjection;
 using CodeSpace.Messages.Agents;
 
-namespace CodeSpace.Core.Services.Agents.Sandbox;
+namespace CodeSpace.Core.Services.Agents.Sandbox.Runners;
 
 /// <summary>
 /// v0 sandbox runner: runs the command as a child OS process on the worker itself. No container

@@ -1,6 +1,6 @@
 using CodeSpace.Messages.Agents;
 
-namespace CodeSpace.Core.Services.Agents;
+namespace CodeSpace.Core.Services.Agents.Sandbox;
 
 /// <summary>
 /// Runs one command inside an isolated execution sandbox and returns its outcome. This is the seam
