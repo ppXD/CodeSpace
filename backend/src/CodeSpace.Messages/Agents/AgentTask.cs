@@ -20,6 +20,9 @@ public sealed record AgentTask
     /// <summary>Model id, valid within the chosen harness's <see cref="IAgentHarness.Models"/> catalog.</summary>
     public required string Model { get; init; }
 
+    /// <summary>Sandbox runner to execute on — e.g. "local", "docker", "k8s". Null → the executor's default. The knob for choosing / overriding the execution backend per run.</summary>
+    public string? RunnerKind { get; init; }
+
     /// <summary>Isolated working directory the agent runs in (AgentRunService prepares it). Null → the runner's default.</summary>
     public string? WorkspaceDirectory { get; init; }
 
