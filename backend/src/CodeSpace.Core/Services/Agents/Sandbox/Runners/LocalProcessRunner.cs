@@ -9,12 +9,13 @@ namespace CodeSpace.Core.Services.Agents.Sandbox.Runners;
 /// isolation — this is the local-dev / single-tenant default that proves the seam end to end while
 /// Docker / Kubernetes-Job runners are built behind the same <see cref="ISandboxRunner"/> contract.
 ///
-/// Captures stdout/stderr in full (a future slice adds streaming + size caps for long agent runs),
-/// enforces <see cref="SandboxSpec.TimeoutSeconds"/> by killing the process tree, and surfaces a
+/// Implements both the batch <see cref="ISandboxRunner"/> (full stdout/stderr capture) and the
+/// streaming <see cref="ISandboxStreamRunner"/> (stdout delivered line-by-line for live logs).
+/// Enforces <see cref="SandboxSpec.TimeoutSeconds"/> by killing the process tree, and surfaces a
 /// non-zero exit as <see cref="SandboxStatus.Failed"/> rather than throwing. Caller cancellation is
 /// honoured distinctly from the spec timeout: it terminates the process and rethrows.
 /// </summary>
-public sealed class LocalProcessRunner : ISandboxRunner, ISingletonDependency
+public sealed class LocalProcessRunner : ISandboxRunner, ISandboxStreamRunner, ISingletonDependency
 {
     public const string LocalKind = "local";
 
@@ -44,6 +45,52 @@ public sealed class LocalProcessRunner : ISandboxRunner, ISingletonDependency
         var status = process.ExitCode == 0 ? SandboxStatus.Success : SandboxStatus.Failed;
 
         return new SandboxResult { Status = status, ExitCode = process.ExitCode, Stdout = await stdoutTask.ConfigureAwait(false), Stderr = await stderrTask.ConfigureAwait(false) };
+    }
+
+    public async Task<SandboxResult> RunStreamingAsync(SandboxSpec spec, Func<string, CancellationToken, Task> onStdoutLine, CancellationToken cancellationToken)
+    {
+        using var process = new Process { StartInfo = BuildStartInfo(spec) };
+
+        process.Start();
+
+        // stderr captured in full (diagnostic context for the result); stdout is pumped line-by-line to the consumer.
+        var stderrTask = process.StandardError.ReadToEndAsync();
+
+        using var timeoutCts = new CancellationTokenSource(TimeSpan.FromSeconds(spec.TimeoutSeconds));
+        using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, timeoutCts.Token);
+
+        try
+        {
+            await PumpStdoutAsync(process, onStdoutLine, linkedCts.Token).ConfigureAwait(false);
+            await process.WaitForExitAsync(linkedCts.Token).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            return await TerminateStreamingAsync(process, stderrTask, cancellationToken).ConfigureAwait(false);
+        }
+
+        var status = process.ExitCode == 0 ? SandboxStatus.Success : SandboxStatus.Failed;
+
+        return new SandboxResult { Status = status, ExitCode = process.ExitCode, Stdout = "", Stderr = await stderrTask.ConfigureAwait(false) };
+    }
+
+    /// <summary>Read stdout line-by-line, awaiting the consumer per line so a slow consumer backpressures the read. Ends when stdout closes (process exit).</summary>
+    private static async Task PumpStdoutAsync(Process process, Func<string, CancellationToken, Task> onStdoutLine, CancellationToken cancellationToken)
+    {
+        while (await process.StandardOutput.ReadLineAsync(cancellationToken).ConfigureAwait(false) is { } line)
+            await onStdoutLine(line, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>Same terminate semantics as the batch path: kill the tree, let stderr settle, rethrow on caller-cancel, else map to TimedOut.</summary>
+    private static async Task<SandboxResult> TerminateStreamingAsync(Process process, Task<string> stderrTask, CancellationToken cancellationToken)
+    {
+        KillQuietly(process);
+
+        var stderr = await SafeRead(stderrTask).ConfigureAwait(false);
+
+        cancellationToken.ThrowIfCancellationRequested();
+
+        return new SandboxResult { Status = SandboxStatus.TimedOut, ExitCode = -1, Stdout = "", Stderr = stderr };
     }
 
     private static ProcessStartInfo BuildStartInfo(SandboxSpec spec)
