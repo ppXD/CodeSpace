@@ -3,6 +3,7 @@ using Autofac;
 using CodeSpace.Core.DependencyInjection;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
+using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Jobs;
 using CodeSpace.Core.Services.Variables;
 using CodeSpace.Core.Services.Workflows;
@@ -10,6 +11,7 @@ using CodeSpace.Core.Services.Workflows.Artifacts;
 using CodeSpace.Core.Services.Workflows.Lifecycle;
 using CodeSpace.Core.Services.Workflows.Nodes;
 using CodeSpace.Core.Services.Workflows.Runtime;
+using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Dtos.Workflows;
 using CodeSpace.Messages.Enums;
@@ -52,6 +54,7 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
     private readonly ICodeSpaceBackgroundJobClient _backgroundJobClient;
     private readonly ISubworkflowService _subworkflowService;
     private readonly IWorkflowResumeService _resumeService;
+    private readonly IAgentRunService _agentRunService;
     // The run's lifetime scope — BeginLifetimeScope() per parallel node gives each its own DbContext +
     // record logger so concurrent nodes never share an EF change-tracker (see RunNodeInChildScopeAsync).
     private readonly ILifetimeScope _lifetimeScope;
@@ -67,7 +70,7 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
     internal const int DefaultMaxParallelism = 8;
     internal const int MaxParallelismCeiling = 64;
 
-    public WorkflowEngine(CodeSpaceDbContext db, INodeRegistry nodeRegistry, IVariableService variableService, IRunRecordLogger recordLogger, IPayloadRedactor redactor, IArtifactStore artifactStore, ILogger<WorkflowEngine> logger, ILoggerFactory loggerFactory, ICodeSpaceBackgroundJobClient backgroundJobClient, ISubworkflowService subworkflowService, IWorkflowResumeService resumeService, ILifetimeScope lifetimeScope)
+    public WorkflowEngine(CodeSpaceDbContext db, INodeRegistry nodeRegistry, IVariableService variableService, IRunRecordLogger recordLogger, IPayloadRedactor redactor, IArtifactStore artifactStore, ILogger<WorkflowEngine> logger, ILoggerFactory loggerFactory, ICodeSpaceBackgroundJobClient backgroundJobClient, ISubworkflowService subworkflowService, IWorkflowResumeService resumeService, IAgentRunService agentRunService, ILifetimeScope lifetimeScope)
     {
         _db = db;
         _nodeRegistry = nodeRegistry;
@@ -80,6 +83,7 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
         _backgroundJobClient = backgroundJobClient;
         _subworkflowService = subworkflowService;
         _resumeService = resumeService;
+        _agentRunService = agentRunService;
         _lifetimeScope = lifetimeScope;
         _maxParallelism = ParseMaxParallelism(Environment.GetEnvironmentVariable(MaxParallelismEnvVar));
     }
@@ -216,6 +220,7 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
             // Deferring the dispatch to here (not at suspend time) closes the race where a fast
             // child could finish and try to resume the parent before the parent was parked.
             await DispatchPendingSubworkflowChildAsync(run.Id, cancellationToken).ConfigureAwait(false);
+            await DispatchPendingAgentRunAsync(run.Id, cancellationToken).ConfigureAwait(false);
         }
         catch (WorkflowSecretLeakException ex)
         {
@@ -757,6 +762,25 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
 
         if (token != null && Guid.TryParse(token, out var childRunId))
             await _subworkflowService.DispatchChildRunAsync(childRunId, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Dispatch the agent run a just-suspended <c>agent.code</c> node staged. Looks up the run's pending
+    /// <c>AgentRun</c> wait (its Token is the agent-run id) and enqueues the executor on the background
+    /// queue — so the harness streams in its sandbox out-of-band while this run stays Suspended. No-op
+    /// for non-agent suspends. Enqueued (not awaited): a worker crash mid-run is re-claimed by the
+    /// reconciler, and the executor's claim guard makes a double-dispatch a no-op (no wasted tokens).
+    /// </summary>
+    private async Task DispatchPendingAgentRunAsync(Guid runId, CancellationToken cancellationToken)
+    {
+        var token = await _db.WorkflowRunWait.AsNoTracking()
+            .Where(w => w.RunId == runId && w.WaitKind == WorkflowWaitKinds.AgentRun && w.Status == WorkflowWaitStatuses.Pending)
+            .Select(w => w.Token)
+            .FirstOrDefaultAsync(cancellationToken)
+            .ConfigureAwait(false);
+
+        if (token != null && Guid.TryParse(token, out var agentRunId))
+            _backgroundJobClient.Enqueue<IAgentRunExecutor>(e => e.ExecuteAsync(agentRunId, CancellationToken.None));
     }
 
     /// <summary>
@@ -1601,9 +1625,12 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
         // correlation token. The child is dispatched only AFTER the parent commits Suspended (see
         // RunAfterClaimAsync) so a fast child can't finish before the parent is parked. A staging
         // failure throws SubworkflowStartException, which ExecuteNodeAsync turns into a node failure.
-        var correlationToken = waitKind == WorkflowWaitKinds.Subworkflow
-            ? (await StageSubworkflowChildAsync(run, token, cancellationToken).ConfigureAwait(false)).ToString()
-            : (token.CorrelationToken ?? Guid.NewGuid().ToString("N"));
+        var correlationToken = waitKind switch
+        {
+            WorkflowWaitKinds.Subworkflow => (await StageSubworkflowChildAsync(run, token, cancellationToken).ConfigureAwait(false)).ToString(),
+            WorkflowWaitKinds.AgentRun => (await StageAgentRunAsync(run, node, token, cancellationToken).ConfigureAwait(false)).ToString(),
+            _ => token.CorrelationToken ?? Guid.NewGuid().ToString("N"),
+        };
 
         await _recordLogger.NodeSuspendedAsync(run.Id, node.Id, iterationKey, waitKind, wakeAt, cancellationToken).ConfigureAwait(false);
 
@@ -1646,9 +1673,36 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
 
     internal static string ValidateWaitKind(string nodeId, string kind)
     {
-        if (kind is WorkflowWaitKinds.Timer or WorkflowWaitKinds.Approval or WorkflowWaitKinds.Callback or WorkflowWaitKinds.Subworkflow or WorkflowWaitKinds.Action) return kind;
+        if (kind is WorkflowWaitKinds.Timer or WorkflowWaitKinds.Approval or WorkflowWaitKinds.Callback or WorkflowWaitKinds.Subworkflow or WorkflowWaitKinds.Action or WorkflowWaitKinds.AgentRun) return kind;
 
-        throw new NodeFailureException($"Node '{nodeId}' suspended with unknown wait kind '{kind}'. Expected Timer, Approval, Callback, Subworkflow, or Action.");
+        throw new NodeFailureException($"Node '{nodeId}' suspended with unknown wait kind '{kind}'. Expected Timer, Approval, Callback, Subworkflow, Action, or AgentRun.");
+    }
+
+    /// <summary>
+    /// Stage the agent run for an <c>agent.code</c> suspension: deserialize the <see cref="AgentTask"/>
+    /// from the suspend payload and create the durable run (Queued, linked to this run + node) via
+    /// <see cref="IAgentRunService"/>. NOT dispatched yet — <see cref="DispatchPendingAgentRunAsync"/>
+    /// enqueues the executor only after the run commits Suspended, so the work can never start before
+    /// the wait it resumes through exists. Returns the agent-run id, which becomes the wait's
+    /// correlation token. A malformed envelope is a clean node failure.
+    /// </summary>
+    private async Task<Guid> StageAgentRunAsync(WorkflowRun run, NodeDefinition node, SuspensionToken token, CancellationToken cancellationToken)
+    {
+        AgentTask task;
+
+        try
+        {
+            task = JsonSerializer.Deserialize<AgentTask>(token.Payload.GetRawText(), AgentJson.Options)
+                   ?? throw new NodeFailureException($"Node '{node.Id}' suspended with an empty agent-task envelope.");
+        }
+        catch (JsonException ex)
+        {
+            throw new NodeFailureException($"Node '{node.Id}' suspended with an invalid agent-task envelope: {ex.Message}");
+        }
+
+        var agentRun = await _agentRunService.CreateAsync(task, run.TeamId, run.Id, node.Id, cancellationToken).ConfigureAwait(false);
+
+        return agentRun.Id;
     }
 
     /// <summary>

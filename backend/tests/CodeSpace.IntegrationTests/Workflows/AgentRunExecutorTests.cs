@@ -109,6 +109,7 @@ public class AgentRunExecutorTests
             scope.Resolve<IAgentRunService>(),
             new AgentHarnessRegistry(new[] { harness }),
             scope.Resolve<ISandboxRunnerRegistry>(),
+            scope.Resolve<IAgentRunCompletionNotifier>(),
             NullLogger<AgentRunExecutor>.Instance);
 
         await executor.ExecuteAsync(runId, CancellationToken.None);
