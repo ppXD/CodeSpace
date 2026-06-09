@@ -68,6 +68,9 @@ public sealed class GitLabProviderModule : IProviderModule
         // Commit history (latest + per-entry) reads via the API — same `api`/`read_api` family.
         [typeof(IRepositoryHistoryCapability)] = ScopeRequirement.AnyOf(GitLabScopes.Api, GitLabScopes.ReadApi),
 
+        // Markdown render (README → HTML via /api/v4/markdown) reads via the API — same family.
+        [typeof(IRepositoryMarkdownRenderCapability)] = ScopeRequirement.AnyOf(GitLabScopes.Api, GitLabScopes.ReadApi),
+
         // Webhook registration: only `api` works on GitLab. No narrower alternative exists.
         [typeof(IWebhookRegistrationCapability)] = ScopeRequirement.Of(GitLabScopes.Api),
 

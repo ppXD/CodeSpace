@@ -140,6 +140,19 @@ public class RepositoriesController : ControllerBase
     }
 
     /// <summary>
+    /// Render markdown (a README / .md file) to HTML via the repo's provider renderer, in the repo's
+    /// context (so #issues, @mentions, relative links resolve). Providers without a render capability
+    /// throw NotSupported — the SPA catches the failure and renders the markdown client-side instead.
+    /// POST because the markdown body can exceed query-string limits.
+    /// </summary>
+    [HttpPost("{repositoryId:guid}/render-markdown")]
+    public async Task<IActionResult> RenderMarkdown([FromRoute] Guid repositoryId, [FromBody] RenderRepositoryMarkdownQuery query, CancellationToken cancellationToken)
+    {
+        var result = await _mediator.Send(query with { RepositoryId = repositoryId }, cancellationToken).ConfigureAwait(false);
+        return Ok(result);
+    }
+
+    /// <summary>
     /// Live PR/MR fetch — never cached locally. The provider call goes out on every
     /// request, so consumers should debounce / poll politely. `state` accepts the
     /// PullRequestState enum names (Open, Draft, Merged, Closed); omit for "all".

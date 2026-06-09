@@ -15,7 +15,7 @@ using ProviderInstance = CodeSpace.Core.Persistence.Entities.ProviderInstance;
 
 namespace CodeSpace.Core.Services.Providers.GitLab;
 
-public sealed class GitLabRepositoryProvider : IRepositoryCatalogCapability, IPullRequestCatalogCapability, IPullRequestCommentCapability, IPullRequestReviewCapability, IRepositoryAccessCapability, IRepositorySourceCapability, IRepositoryInsightsCapability, IRepositoryHistoryCapability, ICredentialProbeCapability, IWebhookRegistrationCapability, IWebhookSignatureVerifier, IWebhookEventNormalizer
+public sealed class GitLabRepositoryProvider : IRepositoryCatalogCapability, IPullRequestCatalogCapability, IPullRequestCommentCapability, IPullRequestReviewCapability, IRepositoryAccessCapability, IRepositorySourceCapability, IRepositoryInsightsCapability, IRepositoryHistoryCapability, IRepositoryMarkdownRenderCapability, ICredentialProbeCapability, IWebhookRegistrationCapability, IWebhookSignatureVerifier, IWebhookEventNormalizer
 {
     private readonly IProviderAuthResolver _authResolver;
     private readonly IExternalCallResilience _resilience;
@@ -1123,6 +1123,33 @@ public sealed class GitLabRepositoryProvider : IRepositoryCatalogCapability, IPu
             return null;
         }
     }
+
+    // ── Repository markdown render (Code tab README): GitLab's own /markdown renderer ──
+
+    public async Task<RemoteRenderedMarkdown> RenderMarkdownAsync(ProviderContext context, RemoteRepository repository, string markdown, CancellationToken cancellationToken)
+    {
+        var (_, host, token) = await BuildAuthedAsync(context, cancellationToken).ConfigureAwait(false);
+
+        return await _resilience.ExecuteAsync(context.Instance, nameof(RenderMarkdownAsync), async _ =>
+        {
+            // `project` = group/repo so issue/MR/user references resolve like on the GitLab site.
+            var url = $"{host.TrimEnd('/')}/api/v4/markdown";
+            var body = JsonSerializer.Serialize(new { text = markdown, gfm = true, project = repository.FullPath });
+
+            using var request = new HttpRequestMessage(HttpMethod.Post, url) { Content = new StringContent(body, System.Text.Encoding.UTF8, "application/json") };
+            request.Headers.TryAddWithoutValidation("Authorization", $"Bearer {token}");
+            request.Headers.TryAddWithoutValidation("PRIVATE-TOKEN", token);
+
+            using var response = await _countsHttpClient.SendAsync(request, cancellationToken).ConfigureAwait(false);
+            response.EnsureSuccessStatusCode();
+
+            var json = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
+            var rendered = JsonSerializer.Deserialize<GitLabMarkdownResponse>(json, _snakeCaseJson);
+            return new RemoteRenderedMarkdown { Html = rendered?.Html ?? string.Empty };
+        }, cancellationToken).ConfigureAwait(false);
+    }
+
+    private sealed record GitLabMarkdownResponse(string? Html);
 
     private async Task<GitLabClient> BuildClientAsync(ProviderContext context, CancellationToken cancellationToken)
         => (await BuildAuthedAsync(context, cancellationToken).ConfigureAwait(false)).Client;
