@@ -1,6 +1,7 @@
 using System.Text.Json;
 using CodeSpace.Core.DependencyInjection;
 using CodeSpace.Core.Services.Agents.Sandbox;
+using CodeSpace.Core.Services.Agents.Workspace;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Enums;
 using Microsoft.Extensions.Logging;
@@ -32,14 +33,18 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     private readonly IAgentRunService _runs;
     private readonly IAgentHarnessRegistry _harnesses;
     private readonly ISandboxRunnerRegistry _runners;
+    private readonly IAgentWorkspaceResolver _workspaceResolver;
+    private readonly IWorkspaceProviderRegistry _workspaces;
     private readonly IAgentRunCompletionNotifier _notifier;
     private readonly ILogger<AgentRunExecutor> _logger;
 
-    public AgentRunExecutor(IAgentRunService runs, IAgentHarnessRegistry harnesses, ISandboxRunnerRegistry runners, IAgentRunCompletionNotifier notifier, ILogger<AgentRunExecutor> logger)
+    public AgentRunExecutor(IAgentRunService runs, IAgentHarnessRegistry harnesses, ISandboxRunnerRegistry runners, IAgentWorkspaceResolver workspaceResolver, IWorkspaceProviderRegistry workspaces, IAgentRunCompletionNotifier notifier, ILogger<AgentRunExecutor> logger)
     {
         _runs = runs;
         _harnesses = harnesses;
         _runners = runners;
+        _workspaceResolver = workspaceResolver;
+        _workspaces = workspaces;
         _notifier = notifier;
         _logger = logger;
     }
@@ -56,9 +61,17 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
                        ?? throw new InvalidOperationException($"AgentRun {agentRunId} has an empty task envelope.");
 
             var harness = _harnesses.Resolve(task.Harness);
-            var runner = _runners.Resolve(string.IsNullOrWhiteSpace(task.RunnerKind) ? DefaultRunnerKind : task.RunnerKind);
+            var runnerKind = string.IsNullOrWhiteSpace(task.RunnerKind) ? DefaultRunnerKind : task.RunnerKind;
+            var runner = _runners.Resolve(runnerKind);
 
-            var result = await RunHarnessAsync(agentRunId, harness, runner, harness.BuildInvocation(task), cancellationToken).ConfigureAwait(false);
+            // Materialise the workspace (clone the bound repo) before the harness runs. Null = no workspace
+            // for this run. The handle's lifetime is the run's — DisposeAsync removes the clone afterwards.
+            var workspaceRequest = await _workspaceResolver.ResolveAsync(task, run.TeamId, cancellationToken).ConfigureAwait(false);
+            await using var workspace = workspaceRequest is null ? null : await _workspaces.Resolve(runnerKind).PrepareAsync(workspaceRequest, cancellationToken).ConfigureAwait(false);
+
+            var effectiveTask = workspace is null ? task : task with { WorkspaceDirectory = workspace.Directory };
+
+            var result = await RunHarnessAsync(agentRunId, harness, runner, harness.BuildInvocation(effectiveTask), cancellationToken).ConfigureAwait(false);
 
             await CompleteAndNotifyAsync(agentRunId, result, cancellationToken).ConfigureAwait(false);
         }

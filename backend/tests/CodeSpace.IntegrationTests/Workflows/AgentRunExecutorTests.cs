@@ -3,6 +3,8 @@ using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Agents.Sandbox;
+using CodeSpace.Core.Services.Agents.Sandbox.Runners;
+using CodeSpace.Core.Services.Agents.Workspace;
 using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Enums;
@@ -102,6 +104,90 @@ public class AgentRunExecutorTests
         scope.Resolve<IAgentRunExecutor>().ShouldNotBeNull();
     }
 
+    [Fact]
+    public async Task Clones_the_bound_repository_into_the_workspace_and_runs_there()
+    {
+        if (OperatingSystem.IsWindows()) return;
+        if (!await GitAvailableAsync()) return;
+
+        var teamId = await SeedTeamAsync();
+        using var origin = new TempDir();
+        await SeedLocalRepoAsync(origin.Path, "README.md", "hello-from-repo");
+        var repoId = await SeedRepositoryAsync(teamId, new Uri(origin.Path).AbsoluteUri, defaultBranch: "main");
+        var runId = await CreateRepoRunAsync(teamId, repoId);
+
+        // The scripted harness `cat README.md` only sees the file if the executor cloned the repo AND
+        // ran the harness with the clone as its working directory.
+        await ExecuteAsync(runId, new ScriptedHarness("cat README.md"));
+
+        using var scope = _fixture.BeginScope();
+        var svc = scope.Resolve<IAgentRunService>();
+
+        (await svc.GetAsync(runId, CancellationToken.None)).Status.ShouldBe(AgentRunStatus.Succeeded);
+        (await svc.GetEventsAsync(runId, 0, CancellationToken.None)).Select(e => e.Text)
+            .ShouldContain("hello-from-repo", "the harness ran inside the cloned workspace and read the repo file");
+    }
+
+    private async Task<Guid> CreateRepoRunAsync(Guid teamId, Guid repositoryId)
+    {
+        using var scope = _fixture.BeginScope();
+        var run = await scope.Resolve<IAgentRunService>().CreateAsync(
+            new AgentTask { Goal = "edit", Harness = "scripted", Model = "test-model", RepositoryId = repositoryId },
+            teamId, null, null, CancellationToken.None);
+        return run.Id;
+    }
+
+    private async Task<Guid> SeedRepositoryAsync(Guid teamId, string cloneUrlHttps, string defaultBranch)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+
+        var instanceId = Guid.NewGuid();
+        db.ProviderInstance.Add(new ProviderInstance { Id = instanceId, TeamId = teamId, Provider = ProviderKind.Git, DisplayName = "local", BaseUrl = "https://local" });
+
+        var repoId = Guid.NewGuid();
+        db.Repository.Add(new Repository
+        {
+            Id = repoId, TeamId = teamId, ProviderInstanceId = instanceId, CredentialId = null,
+            ExternalId = repoId.ToString(), NamespacePath = "org", Name = "repo", FullPath = "org/repo",
+            DefaultBranch = defaultBranch, CloneUrlHttps = cloneUrlHttps, WebUrl = "https://local/org/repo",
+        });
+
+        await db.SaveChangesAsync();
+        return repoId;
+    }
+
+    private static async Task<bool> GitAvailableAsync()
+    {
+        try { return (await new LocalProcessRunner().RunAsync(new SandboxSpec { Command = "git", Args = new[] { "--version" }, TimeoutSeconds = 10 }, CancellationToken.None)).Status == SandboxStatus.Success; }
+        catch { return false; }
+    }
+
+    private static async Task SeedLocalRepoAsync(string dir, string file, string content)
+    {
+        await RunGitInAsync(dir, "init", "-b", "main");
+        await RunGitInAsync(dir, "config", "user.email", "test@codespace.dev");
+        await RunGitInAsync(dir, "config", "user.name", "Test");
+        await RunGitInAsync(dir, "config", "commit.gpgsign", "false");
+        await File.WriteAllTextAsync(Path.Combine(dir, file), content);
+        await RunGitInAsync(dir, "add", ".");
+        await RunGitInAsync(dir, "commit", "-m", "seed");
+    }
+
+    private static async Task RunGitInAsync(string workdir, params string[] args)
+    {
+        var result = await new LocalProcessRunner().RunAsync(
+            new SandboxSpec { Command = "git", Args = args, WorkingDirectory = workdir, TimeoutSeconds = 60 }, CancellationToken.None);
+        if (result.Status != SandboxStatus.Success) throw new InvalidOperationException($"git {string.Join(' ', args)} failed: {result.Stderr}");
+    }
+
+    private sealed class TempDir : IDisposable
+    {
+        public string Path { get; } = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "cs-agent-origin-" + Guid.NewGuid().ToString("N"));
+        public TempDir() => Directory.CreateDirectory(Path);
+        public void Dispose() { try { Directory.Delete(Path, recursive: true); } catch { /* best-effort */ } }
+    }
+
     private async Task ExecuteAsync(Guid runId, IAgentHarness harness)
     {
         using var scope = _fixture.BeginScope();
@@ -109,6 +195,8 @@ public class AgentRunExecutorTests
             scope.Resolve<IAgentRunService>(),
             new AgentHarnessRegistry(new[] { harness }),
             scope.Resolve<ISandboxRunnerRegistry>(),
+            scope.Resolve<IAgentWorkspaceResolver>(),
+            scope.Resolve<IWorkspaceProviderRegistry>(),
             scope.Resolve<IAgentRunCompletionNotifier>(),
             NullLogger<AgentRunExecutor>.Instance);
 
@@ -151,7 +239,7 @@ public class AgentRunExecutorTests
         public string Version => "test";
         public IReadOnlyList<string> Models { get; } = new[] { "test-model" };
 
-        public SandboxSpec BuildInvocation(AgentTask task) => new() { Command = "/bin/sh", Args = new[] { "-c", _script }, TimeoutSeconds = task.TimeoutSeconds };
+        public SandboxSpec BuildInvocation(AgentTask task) => new() { Command = "/bin/sh", Args = new[] { "-c", _script }, WorkingDirectory = task.WorkspaceDirectory, TimeoutSeconds = task.TimeoutSeconds };
 
         public AgentEvent? ParseEvent(string rawLine) =>
             string.IsNullOrWhiteSpace(rawLine) ? null : new AgentEvent { Kind = AgentEventKind.AssistantMessage, Text = rawLine.Trim() };
