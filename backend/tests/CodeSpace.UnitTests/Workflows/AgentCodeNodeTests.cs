@@ -1,0 +1,104 @@
+using System.Text.Json;
+using CodeSpace.Core.Services.Agents;
+using CodeSpace.Core.Services.Workflows.Nodes;
+using CodeSpace.Core.Services.Workflows.Nodes.Builtin;
+using CodeSpace.Core.Services.Workflows.Runtime;
+using CodeSpace.Messages.Agents;
+using CodeSpace.Messages.Constants;
+using CodeSpace.Messages.Enums;
+using Microsoft.Extensions.Logging.Abstractions;
+using Shouldly;
+
+namespace CodeSpace.UnitTests.Workflows;
+
+[Trait("Category", "Unit")]
+public class AgentCodeNodeTests
+{
+    [Fact]
+    public void Type_key_is_agent_code() => new AgentCodeNode().TypeKey.ShouldBe("agent.code");
+
+    [Fact]
+    public async Task First_pass_suspends_on_an_agent_run_wait_carrying_the_task_envelope()
+    {
+        var config = new Dictionary<string, JsonElement>
+        {
+            ["goal"] = Str("Fix the failing billing tests"),
+            ["harness"] = Str("codex-cli"),
+            ["model"] = Str("gpt-5.3-codex"),
+            ["runnerKind"] = Str("local"),
+            ["timeoutSeconds"] = Num(900),
+            ["readOnly"] = Bool(true),
+        };
+
+        var result = await new AgentCodeNode().RunAsync(BuildContext(config, resume: null), CancellationToken.None);
+
+        result.Status.ShouldBe(NodeStatus.Suspended);
+        result.SuspendUntil!.Kind.ShouldBe(WorkflowWaitKinds.AgentRun);
+
+        var task = JsonSerializer.Deserialize<AgentTask>(result.SuspendUntil.Payload, AgentJson.Options);
+        task!.Goal.ShouldBe("Fix the failing billing tests");
+        task.Harness.ShouldBe("codex-cli");
+        task.Model.ShouldBe("gpt-5.3-codex");
+        task.RunnerKind.ShouldBe("local");
+        task.TimeoutSeconds.ShouldBe(900);
+        task.Permissions.WriteScope.ShouldBe(AgentWriteScope.ReadOnly);
+    }
+
+    [Theory]
+    [InlineData("goal")]
+    [InlineData("harness")]
+    [InlineData("model")]
+    public async Task First_pass_fails_when_a_required_config_field_is_missing(string omit)
+    {
+        var config = new Dictionary<string, JsonElement> { ["goal"] = Str("g"), ["harness"] = Str("codex-cli"), ["model"] = Str("m") };
+        config.Remove(omit);
+
+        var result = await new AgentCodeNode().RunAsync(BuildContext(config, resume: null), CancellationToken.None);
+
+        result.Status.ShouldBe(NodeStatus.Failure);
+        result.Error.ShouldContain(omit);
+    }
+
+    [Fact]
+    public async Task Resumed_success_maps_the_result_onto_outputs()
+    {
+        var resume = JsonDocument.Parse("""
+            {"status":"Succeeded","summary":"Fixed the tests.","changedFiles":["src/a.ts","src/b.ts"],"branch":"agent/fix-billing"}
+            """).RootElement;
+
+        var result = await new AgentCodeNode().RunAsync(BuildContext(new(), resume), CancellationToken.None);
+
+        result.Status.ShouldBe(NodeStatus.Success);
+        result.Outputs["status"].GetString().ShouldBe("Succeeded");
+        result.Outputs["summary"].GetString().ShouldBe("Fixed the tests.");
+        result.Outputs["branch"].GetString().ShouldBe("agent/fix-billing");
+        result.Outputs["changedFiles"].GetArrayLength().ShouldBe(2);
+    }
+
+    [Fact]
+    public async Task Resumed_failure_fails_the_node_with_the_error()
+    {
+        var resume = JsonDocument.Parse("""{"status":"Failed","error":"patch did not apply"}""").RootElement;
+
+        var result = await new AgentCodeNode().RunAsync(BuildContext(new(), resume), CancellationToken.None);
+
+        result.Status.ShouldBe(NodeStatus.Failure);
+        result.Error.ShouldContain("patch did not apply");
+    }
+
+    private static JsonElement Str(string s) => JsonSerializer.SerializeToElement(s);
+    private static JsonElement Num(int n) => JsonSerializer.SerializeToElement(n);
+    private static JsonElement Bool(bool b) => JsonSerializer.SerializeToElement(b);
+
+    private static NodeRunContext BuildContext(Dictionary<string, JsonElement> config, JsonElement? resume) => new()
+    {
+        Inputs = new Dictionary<string, JsonElement>(),
+        Config = config,
+        RawInputs = JsonDocument.Parse("{}").RootElement,
+        RawConfig = JsonDocument.Parse("{}").RootElement,
+        Scope = new NodeRunScope { Trigger = new Dictionary<string, JsonElement>() },
+        Logger = NullLogger.Instance,
+        Observability = NodeObservability.NoOp,
+        ResumePayload = resume,
+    };
+}

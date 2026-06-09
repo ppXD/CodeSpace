@@ -29,6 +29,13 @@ public static class WorkflowWaitKinds
     /// is woken by an authenticated, team-scoped resume rather than an anonymous URL.
     /// </summary>
     public const string Action = "Action";
+
+    /// <summary>
+    /// Waits for an agent run (<c>agent.code</c>) to reach a terminal state. The wait's <c>Token</c> is
+    /// the agent-run id; the executor's completion resumes the node with the <c>AgentRunResult</c>
+    /// mapped onto <c>{ status, summary, changedFiles, branch, error }</c>.
+    /// </summary>
+    public const string AgentRun = "AgentRun";
 }
 
 /// <summary>Lifecycle of a <c>workflow_run_wait</c> row. CHECK-constrained at the DB layer.</summary>
