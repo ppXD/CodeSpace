@@ -976,6 +976,7 @@ public sealed class GitLabRepositoryProvider : IRepositoryCatalogCapability, IPu
             ClosedDate = mr.ClosedAt.HasValue ? new DateTimeOffset(DateTime.SpecifyKind(mr.ClosedAt.Value, DateTimeKind.Utc), TimeSpan.Zero) : null,
             WebUrl = mr.WebUrl,
             Labels = ToLabelRefs(mr.Labels, labelColors),
+            MilestoneTitle = mr.Milestone?.Title,
             TasksCompleted = tasksDone,
             TasksTotal = tasksTotal
         };

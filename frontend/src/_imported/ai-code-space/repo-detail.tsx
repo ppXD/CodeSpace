@@ -554,6 +554,12 @@ function PullRequestRow({ pr, onSelect }: { pr: RemotePullRequest; onSelect: () 
           {pr.authorLogin && (
             <span>by <span className="pr-row-author">{pr.authorLogin}</span></span>
           )}
+          {pr.milestoneTitle && (
+            <span className="pr-row-milestone" title={`Milestone: ${pr.milestoneTitle}`}>
+              <Ic.Milestone size={11} />
+              <span>{pr.milestoneTitle}</span>
+            </span>
+          )}
           <TaskProgressBadge done={pr.tasksCompleted ?? null} total={pr.tasksTotal ?? null} />
         </div>
       </div>
@@ -1019,7 +1025,7 @@ function buildTimelineEvents(pr: RemotePullRequest, commits: RemotePullRequestCo
   if (pr.milestoneTitle) {
     events.push({
       kind: "milestone",
-      icon: <Ic.Workflow size={12} />,
+      icon: <Ic.Milestone size={12} />,
       text: <>added this to the <span className="prd-evt-strong">{pr.milestoneTitle}</span> milestone</>,
     });
   }
