@@ -15,7 +15,7 @@ using ProviderInstance = CodeSpace.Core.Persistence.Entities.ProviderInstance;
 
 namespace CodeSpace.Core.Services.Providers.GitLab;
 
-public sealed class GitLabRepositoryProvider : IRepositoryCatalogCapability, IPullRequestCatalogCapability, IPullRequestCommentCapability, IPullRequestReviewCapability, IRepositoryAccessCapability, IRepositorySourceCapability, IRepositoryInsightsCapability, ICredentialProbeCapability, IWebhookRegistrationCapability, IWebhookSignatureVerifier, IWebhookEventNormalizer
+public sealed class GitLabRepositoryProvider : IRepositoryCatalogCapability, IPullRequestCatalogCapability, IPullRequestCommentCapability, IPullRequestReviewCapability, IRepositoryAccessCapability, IRepositorySourceCapability, IRepositoryInsightsCapability, IRepositoryHistoryCapability, ICredentialProbeCapability, IWebhookRegistrationCapability, IWebhookSignatureVerifier, IWebhookEventNormalizer
 {
     private readonly IProviderAuthResolver _authResolver;
     private readonly IExternalCallResilience _resilience;
@@ -987,6 +987,66 @@ public sealed class GitLabRepositoryProvider : IRepositoryCatalogCapability, IPu
         Size = null,
         Sha = entry.Id.ToString()
     };
+
+    // ── Repository history (Code tab): latest commit (header bar) + per-entry last commit (file rows) ──
+
+    // GitLab's /repository/commits supports a `path` filter and returns latest-first — exactly what the
+    // header bar + per-entry columns need. We hit it via raw REST (NGitLab's ICommitClient has no request-
+    // shaped GetAll overload in this version) — genuinely async, so the bounded map gets real concurrency.
+    private static readonly JsonSerializerOptions _snakeCaseJson = new() { PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower };
+
+    public async Task<RemoteCommitSummary?> GetLatestCommitAsync(ProviderContext context, RemoteRepository repository, string? path, string? reference, CancellationToken cancellationToken)
+    {
+        var (_, host, token) = await BuildAuthedAsync(context, cancellationToken).ConfigureAwait(false);
+        var gitRef = string.IsNullOrWhiteSpace(reference) ? repository.DefaultBranch : reference;
+        var projectId = int.Parse(repository.ExternalId);
+
+        return await _resilience.ExecuteAsync(context.Instance, nameof(GetLatestCommitAsync), async _ =>
+            await FetchLatestCommitAsync(host, token, projectId, gitRef, (path ?? string.Empty).Trim('/'), cancellationToken).ConfigureAwait(false),
+            cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<IReadOnlyDictionary<string, RemoteCommitSummary>> ListPathCommitsAsync(ProviderContext context, RemoteRepository repository, IReadOnlyList<string> paths, string? reference, CancellationToken cancellationToken)
+    {
+        var (_, host, token) = await BuildAuthedAsync(context, cancellationToken).ConfigureAwait(false);
+        var gitRef = string.IsNullOrWhiteSpace(reference) ? repository.DefaultBranch : reference;
+        var projectId = int.Parse(repository.ExternalId);
+
+        // One commit lookup per entry, bounded (cap 8) + best-effort (a path that fails is omitted).
+        return await BoundedParallelMap.RunAsync<RemoteCommitSummary>(paths, 8,
+            (entryPath, ct) => FetchLatestCommitAsync(host, token, projectId, gitRef, entryPath.Trim('/'), ct),
+            cancellationToken).ConfigureAwait(false);
+    }
+
+    private static async Task<RemoteCommitSummary?> FetchLatestCommitAsync(string host, string token, int projectId, string gitRef, string path, CancellationToken cancellationToken)
+    {
+        var url = $"{host.TrimEnd('/')}/api/v4/projects/{projectId}/repository/commits?per_page=1&ref_name={Uri.EscapeDataString(gitRef)}";
+        if (!string.IsNullOrEmpty(path)) url += $"&path={Uri.EscapeDataString(path)}";
+
+        using var request = new HttpRequestMessage(HttpMethod.Get, url);
+        request.Headers.TryAddWithoutValidation("Authorization", $"Bearer {token}");
+        request.Headers.TryAddWithoutValidation("PRIVATE-TOKEN", token);
+
+        using var response = await _countsHttpClient.SendAsync(request, cancellationToken).ConfigureAwait(false);
+        if (!response.IsSuccessStatusCode) return null;
+
+        var json = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
+        var commit = JsonSerializer.Deserialize<List<GitLabCommitJson>>(json, _snakeCaseJson)?.FirstOrDefault();
+        if (commit is null) return null;
+
+        return new RemoteCommitSummary
+        {
+            Sha = commit.Id ?? string.Empty,
+            ShortSha = string.IsNullOrEmpty(commit.ShortId) ? CommitSummaryText.ShortSha(commit.Id) : commit.ShortId,
+            Message = CommitSummaryText.FirstLine(string.IsNullOrEmpty(commit.Title) ? commit.Message : commit.Title),
+            AuthorName = commit.AuthorName,
+            AuthorAvatarUrl = null,   // GitLab commits don't carry an author avatar URL
+            CommittedDate = commit.CommittedDate,
+            WebUrl = commit.WebUrl
+        };
+    }
+
+    private sealed record GitLabCommitJson(string? Id, string? ShortId, string? Title, string? Message, string? AuthorName, DateTimeOffset? CommittedDate, string? WebUrl);
 
     // ── Repository insights (Code tab right rail): stats + languages ──
 

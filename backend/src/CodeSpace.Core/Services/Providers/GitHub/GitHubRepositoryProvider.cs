@@ -18,7 +18,7 @@ using RepositoryRole = CodeSpace.Messages.Enums.RepositoryRole;
 
 namespace CodeSpace.Core.Services.Providers.GitHub;
 
-public sealed class GitHubRepositoryProvider : IRepositoryCatalogCapability, IPullRequestCatalogCapability, IPullRequestCommentCapability, IPullRequestReviewCapability, IRepositoryAccessCapability, IRepositorySourceCapability, IRepositoryInsightsCapability, ICredentialProbeCapability, IWebhookRegistrationCapability, IWebhookSignatureVerifier, IWebhookEventNormalizer
+public sealed class GitHubRepositoryProvider : IRepositoryCatalogCapability, IPullRequestCatalogCapability, IPullRequestCommentCapability, IPullRequestReviewCapability, IRepositoryAccessCapability, IRepositorySourceCapability, IRepositoryInsightsCapability, IRepositoryHistoryCapability, ICredentialProbeCapability, IWebhookRegistrationCapability, IWebhookSignatureVerifier, IWebhookEventNormalizer
 {
     private readonly IProviderAuthResolver _authResolver;
     private readonly IExternalCallResilience _resilience;
@@ -646,6 +646,55 @@ public sealed class GitHubRepositoryProvider : IRepositoryCatalogCapability, IPu
 
         return null;
     }
+
+    // ── Repository history (Code tab): latest commit (header bar) + per-entry last commit (file rows) ──
+
+    public async Task<RemoteCommitSummary?> GetLatestCommitAsync(ProviderContext context, RemoteRepository repository, string? path, string? reference, CancellationToken cancellationToken)
+    {
+        var client = await BuildClientAsync(context, cancellationToken).ConfigureAwait(false);
+        var gitRef = string.IsNullOrWhiteSpace(reference) ? repository.DefaultBranch : reference;
+        var folder = (path ?? string.Empty).Trim('/');
+
+        return await _resilience.ExecuteAsync(context.Instance, nameof(GetLatestCommitAsync), async _ =>
+        {
+            var commit = await FetchLatestCommitAsync(client, repository, gitRef, folder).ConfigureAwait(false);
+            return commit is null ? null : ToCommitSummary(commit);
+        }, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<IReadOnlyDictionary<string, RemoteCommitSummary>> ListPathCommitsAsync(ProviderContext context, RemoteRepository repository, IReadOnlyList<string> paths, string? reference, CancellationToken cancellationToken)
+    {
+        var client = await BuildClientAsync(context, cancellationToken).ConfigureAwait(false);
+        var gitRef = string.IsNullOrWhiteSpace(reference) ? repository.DefaultBranch : reference;
+
+        // One "latest commit for this path" call per entry — Octokit is genuinely async, so the bounded
+        // map runs them concurrently (cap 8). Best-effort: a path that fails is omitted.
+        return await BoundedParallelMap.RunAsync<RemoteCommitSummary>(paths, 8, async (entryPath, _) =>
+        {
+            var commit = await FetchLatestCommitAsync(client, repository, gitRef, entryPath.Trim('/')).ConfigureAwait(false);
+            return commit is null ? null : ToCommitSummary(commit);
+        }, cancellationToken).ConfigureAwait(false);
+    }
+
+    private static async Task<GitHubCommit?> FetchLatestCommitAsync(GitHubClient client, RemoteRepository repository, string gitRef, string path)
+    {
+        var request = new CommitRequest { Sha = gitRef };
+        if (!string.IsNullOrEmpty(path)) request.Path = path;
+
+        var commits = await client.Repository.Commit.GetAll(repository.NamespacePath, repository.Name, request, new ApiOptions { PageSize = 1, PageCount = 1 }).ConfigureAwait(false);
+        return commits.FirstOrDefault();
+    }
+
+    private static RemoteCommitSummary ToCommitSummary(GitHubCommit commit) => new()
+    {
+        Sha = commit.Sha,
+        ShortSha = CommitSummaryText.ShortSha(commit.Sha),
+        Message = CommitSummaryText.FirstLine(commit.Commit?.Message),
+        AuthorName = commit.Commit?.Author?.Name,
+        AuthorAvatarUrl = commit.Author?.AvatarUrl,
+        CommittedDate = commit.Commit?.Author?.Date,
+        WebUrl = commit.HtmlUrl
+    };
 
     private async Task<GitHubClient> BuildClientAsync(ProviderContext context, CancellationToken cancellationToken)
     {

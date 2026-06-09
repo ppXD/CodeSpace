@@ -65,6 +65,9 @@ public sealed class GitHubProviderModule : IProviderModule
         // Repo insights (stats + languages) are repo READs — same scope family as source browsing.
         [typeof(IRepositoryInsightsCapability)] = ScopeRequirement.AnyOf(GitHubScopes.Repo, GitHubScopes.PublicRepo),
 
+        // Commit history (latest + per-entry) is a repo READ — same scope family.
+        [typeof(IRepositoryHistoryCapability)] = ScopeRequirement.AnyOf(GitHubScopes.Repo, GitHubScopes.PublicRepo),
+
         // Webhook registration: `repo` is the superset; `admin:repo_hook` is the narrow grant.
         [typeof(IWebhookRegistrationCapability)] = ScopeRequirement.AnyOf(GitHubScopes.Repo, GitHubScopes.AdminRepoHook),
 

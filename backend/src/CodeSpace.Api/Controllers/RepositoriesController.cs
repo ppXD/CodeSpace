@@ -117,6 +117,29 @@ public class RepositoriesController : ControllerBase
     }
 
     /// <summary>
+    /// Latest commit on a path/ref — the Code tab's header bar. `path` (query) omitted ⇒ repo root;
+    /// `ref` omitted ⇒ the default branch. 200 with a null body when the path has no history.
+    /// </summary>
+    [HttpGet("{repositoryId:guid}/commit")]
+    public async Task<IActionResult> GetLatestCommit([FromRoute] Guid repositoryId, [FromQuery] GetRepositoryLatestCommitQuery query, CancellationToken cancellationToken)
+    {
+        var result = await _mediator.Send(query with { RepositoryId = repositoryId }, cancellationToken).ConfigureAwait(false);
+        return Ok(result);
+    }
+
+    /// <summary>
+    /// Per-entry last commit for a folder's children — the file list's last-commit column. `paths` (repeated
+    /// query param) names the entries; `ref` omitted ⇒ default branch. Best-effort + capped: paths that fail
+    /// are absent from the returned map (keyed by path).
+    /// </summary>
+    [HttpGet("{repositoryId:guid}/tree-commits")]
+    public async Task<IActionResult> GetTreeCommits([FromRoute] Guid repositoryId, [FromQuery] GetRepositoryTreeCommitsQuery query, CancellationToken cancellationToken)
+    {
+        var result = await _mediator.Send(query with { RepositoryId = repositoryId }, cancellationToken).ConfigureAwait(false);
+        return Ok(result);
+    }
+
+    /// <summary>
     /// Live PR/MR fetch — never cached locally. The provider call goes out on every
     /// request, so consumers should debounce / poll politely. `state` accepts the
     /// PullRequestState enum names (Open, Draft, Merged, Closed); omit for "all".
