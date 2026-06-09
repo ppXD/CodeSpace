@@ -66,7 +66,7 @@ function pickActiveTabFromPath(pathname: string): DetailTab {
   const segs = pathname.split("/").filter(Boolean);
   // ["teams", teamSlug, "repositories", encodedFullPath, tab, ...rest]
   const seg = (segs[4] ?? "overview") as DetailTab;
-  const known: DetailTab[] = ["overview", "pulls", "issues", "branches", "activity"];
+  const known: DetailTab[] = ["overview", "code", "pulls", "issues", "branches", "activity"];
   return known.includes(seg) ? seg : "overview";
 }
 
@@ -75,6 +75,7 @@ function tabToPath(tab: DetailTab) {
   // /teams/$teamSlug so the calling navigate() must supply both teamSlug + repoFullPath.
   switch (tab) {
     case "overview": return "/teams/$teamSlug/repositories/$repoFullPath/overview" as const;
+    case "code": return "/teams/$teamSlug/repositories/$repoFullPath/code" as const;
     case "pulls": return "/teams/$teamSlug/repositories/$repoFullPath/pulls" as const;
     case "issues": return "/teams/$teamSlug/repositories/$repoFullPath/issues" as const;
     case "branches": return "/teams/$teamSlug/repositories/$repoFullPath/branches" as const;

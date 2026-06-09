@@ -3,6 +3,10 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { repositoriesApi, type BindRepositoriesBulkInput } from "@/api/repositories";
 import type { PullRequestReviewVerdict, PullRequestState } from "@/api/types";
 
+/** Live source reads (branches/tree/file) share a 60s staleTime — source changes far less
+ *  often than the user clicks around the tree, so we avoid re-fetching every navigation. */
+const SOURCE_STALE_MS = 60_000;
+
 /** Page size for PR list pagination — matches the backend default. Same value
  *  is used by the "has next page" inference (`page.length === PR_PAGE_SIZE`)
  *  and the network request itself, so they can't drift. */
@@ -229,5 +233,44 @@ export function useRelinkRepositoryCredential() {
       queryClient.invalidateQueries({ queryKey: ["repositories"] });
       queryClient.invalidateQueries({ queryKey: ["repository"] });
     },
+  });
+}
+
+// ── Code browser (live source reads) ──────────────────────────────────────────
+
+/** All branches for the repo's branch picker. */
+export function useRepositoryBranches(repositoryId: string | null) {
+  return useQuery({
+    queryKey: ["repository", repositoryId, "source", "branches"],
+    queryFn: () => repositoriesApi.listBranches(repositoryId!),
+    enabled: repositoryId != null,
+    staleTime: SOURCE_STALE_MS,
+  });
+}
+
+/**
+ * One level of the file tree at `path` on `ref`. The caller gates `enabled` until the
+ * effective ref is known (default branch or the picked one) so we fetch each folder exactly
+ * once per (ref, path) instead of double-fetching with an unresolved ref.
+ */
+export function useRepositoryTree(repositoryId: string | null, path: string, ref: string | null, enabled = true) {
+  return useQuery({
+    queryKey: ["repository", repositoryId, "source", "tree", ref ?? "default", path],
+    queryFn: () => repositoriesApi.listTree(repositoryId!, path || undefined, ref || undefined),
+    enabled: enabled && repositoryId != null,
+    staleTime: SOURCE_STALE_MS,
+  });
+}
+
+/**
+ * A single file's content for the viewer / README card. `enabled` lets the caller defer the
+ * fetch until a file is actually selected (or a README was found in the current tree level).
+ */
+export function useRepositoryFile(repositoryId: string | null, path: string | null, ref: string | null, enabled = true) {
+  return useQuery({
+    queryKey: ["repository", repositoryId, "source", "file", ref ?? "default", path],
+    queryFn: () => repositoriesApi.getFile(repositoryId!, path!, ref || undefined),
+    enabled: enabled && repositoryId != null && path != null && path.length > 0,
+    staleTime: SOURCE_STALE_MS,
   });
 }

@@ -1,5 +1,5 @@
 import { fetchJson } from "./request";
-import type { BulkBindResult, PullRequestReviewVerdict, PullRequestState, RemotePullRequest, RemotePullRequestCheck, RemotePullRequestCommit, RemotePullRequestCounts, RemotePullRequestFile, RemotePullRequestReview, RemoteRepositoryPage, RepositoryDetail, RepositorySummary } from "./types";
+import type { BulkBindResult, PullRequestReviewVerdict, PullRequestState, RemoteBranch, RemoteFileContent, RemotePullRequest, RemotePullRequestCheck, RemotePullRequestCommit, RemotePullRequestCounts, RemotePullRequestFile, RemotePullRequestReview, RemoteRepositoryPage, RemoteTreeEntry, RepositoryDetail, RepositorySummary } from "./types";
 
 export interface BindRepositoryInput {
   providerInstanceId: string;
@@ -101,4 +101,29 @@ export const repositoriesApi = {
       method: "POST",
       body: JSON.stringify(input),
     }),
+
+  // ── Code browser (live source reads, never cached locally) ──
+
+  // All branches for the repo — the Code tab's branch picker. The repo's default is flagged on each row.
+  listBranches: (repositoryId: string) =>
+    fetchJson<RemoteBranch[]>(`/api/repositories/${encodeURIComponent(repositoryId)}/branches`),
+
+  // One level of the file tree. `path` omitted = root; `ref` omitted = the repo's default branch.
+  // Non-recursive — the browser drills into each folder lazily.
+  listTree: (repositoryId: string, path?: string, ref?: string) => {
+    const params = new URLSearchParams();
+    if (path) params.set("path", path);
+    if (ref) params.set("ref", ref);
+    const qs = params.toString();
+    return fetchJson<RemoteTreeEntry[]>(`/api/repositories/${encodeURIComponent(repositoryId)}/tree${qs ? `?${qs}` : ""}`);
+  },
+
+  // A single file's content for the viewer. `ref` omitted = default branch. Binary / oversized
+  // files come back flagged (isBinary / isTruncated) with no inline text.
+  getFile: (repositoryId: string, path: string, ref?: string) => {
+    const params = new URLSearchParams();
+    params.set("path", path);
+    if (ref) params.set("ref", ref);
+    return fetchJson<RemoteFileContent>(`/api/repositories/${encodeURIComponent(repositoryId)}/file?${params.toString()}`);
+  },
 };
