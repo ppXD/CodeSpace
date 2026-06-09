@@ -23,7 +23,10 @@ public sealed record AgentTask
     /// <summary>Sandbox runner to execute on — e.g. "local", "docker", "k8s". Null → the executor's default. The knob for choosing / overriding the execution backend per run.</summary>
     public string? RunnerKind { get; init; }
 
-    /// <summary>Isolated working directory the agent runs in (AgentRunService prepares it). Null → the runner's default.</summary>
+    /// <summary>Bound repository the agent works in — the executor clones it into the workspace before running the harness. Null → no workspace (analysis-only / no-repo run). One workspace source among future others (raw URL, upstream-produced); all resolve to a <c>WorkspaceRequest</c>.</summary>
+    public Guid? RepositoryId { get; init; }
+
+    /// <summary>Isolated working directory the agent runs in (the executor prepares it from <see cref="RepositoryId"/>). Null → the runner's default.</summary>
     public string? WorkspaceDirectory { get; init; }
 
     /// <summary>What the agent is allowed to do — mapped by the harness onto its sandbox flags.</summary>
