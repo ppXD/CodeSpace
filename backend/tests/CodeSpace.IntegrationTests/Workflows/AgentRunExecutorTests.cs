@@ -128,6 +128,27 @@ public class AgentRunExecutorTests
             .ShouldContain("hello-from-repo", "the harness ran inside the cloned workspace and read the repo file");
     }
 
+    [Fact]
+    public async Task Workspace_clone_failure_lands_the_run_failed_not_stuck()
+    {
+        if (OperatingSystem.IsWindows()) return;
+        if (!await GitAvailableAsync()) return;
+
+        var teamId = await SeedTeamAsync();
+        // A repo whose clone URL points at a non-existent local path → the clone fails. The executor must
+        // land the run Failed (its catch maps the WorkspaceException), never leave it stuck Running.
+        var missing = new Uri(Path.Combine(Path.GetTempPath(), "cs-missing-" + Guid.NewGuid().ToString("N"))).AbsoluteUri;
+        var repoId = await SeedRepositoryAsync(teamId, missing, "main");
+        var runId = await CreateRepoRunAsync(teamId, repoId);
+
+        await ExecuteAsync(runId, new ScriptedHarness("echo should-not-run"));
+
+        using var verify = _fixture.BeginScope();
+        var run = await verify.Resolve<IAgentRunService>().GetAsync(runId, CancellationToken.None);
+        run.Status.ShouldBe(AgentRunStatus.Failed, "a workspace clone failure lands the run Failed, not stuck Running");
+        run.Error.ShouldNotBeNull();
+    }
+
     private async Task<Guid> CreateRepoRunAsync(Guid teamId, Guid repositoryId)
     {
         using var scope = _fixture.BeginScope();
