@@ -1,6 +1,6 @@
 using CodeSpace.Core.DependencyInjection;
 
-namespace CodeSpace.Core.Services.Agents;
+namespace CodeSpace.Core.Services.Agents.Sandbox;
 
 /// <summary>
 /// Default <see cref="ISandboxRunnerRegistry"/> — indexes every registered <see cref="ISandboxRunner"/>

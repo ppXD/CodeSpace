@@ -1,6 +1,6 @@
 using Autofac;
-using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Agents.Sandbox;
+using CodeSpace.Core.Services.Agents.Sandbox.Runners;
 using CodeSpace.IntegrationTests.Infrastructure;
 using Shouldly;
 
