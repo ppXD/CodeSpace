@@ -33,4 +33,17 @@ public class WorkspaceProviderRegistrationTests
         registry.Resolve(LocalProcessRunner.LocalKind).ShouldBeOfType<LocalGitWorkspaceProvider>();
         registry.All.ShouldContain(p => p.Kind == LocalProcessRunner.LocalKind);
     }
+
+    [Fact]
+    public void Local_provider_is_bound_as_a_workspace_janitor()
+    {
+        // The janitor job's handler injects IEnumerable<IWorkspaceJanitor>; if the marker scan doesn't
+        // bind the provider to this sibling interface too, the sweep silently reclaims nothing. Prove the
+        // wiring through the REAL container, not a hand-newed set.
+        using var scope = _fixture.BeginScope();
+
+        var janitors = scope.Resolve<IEnumerable<IWorkspaceJanitor>>();
+
+        janitors.ShouldContain(j => j.Kind == LocalProcessRunner.LocalKind, "the local workspace provider must resolve as an IWorkspaceJanitor");
+    }
 }
