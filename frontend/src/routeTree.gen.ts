@@ -19,9 +19,11 @@ import { Route as AppTeamsTeamSlugRouteImport } from './routes/_app.teams.$teamS
 import { Route as AppTeamsTeamSlugIndexRouteImport } from './routes/_app.teams.$teamSlug.index'
 import { Route as AppTeamsTeamSlugWorkflowsRouteImport } from './routes/_app.teams.$teamSlug.workflows'
 import { Route as AppTeamsTeamSlugRepositoriesRouteImport } from './routes/_app.teams.$teamSlug.repositories'
+import { Route as AppTeamsTeamSlugAgentsRouteImport } from './routes/_app.teams.$teamSlug.agents'
 import { Route as AppTeamsTeamSlugWorkflowsIndexRouteImport } from './routes/_app.teams.$teamSlug.workflows.index'
 import { Route as AppTeamsTeamSlugRepositoriesIndexRouteImport } from './routes/_app.teams.$teamSlug.repositories.index'
 import { Route as AppTeamsTeamSlugProjectsIndexRouteImport } from './routes/_app.teams.$teamSlug.projects.index'
+import { Route as AppTeamsTeamSlugAgentsIndexRouteImport } from './routes/_app.teams.$teamSlug.agents.index'
 import { Route as AppTeamsTeamSlugWorkflowsWorkflowIdRouteImport } from './routes/_app.teams.$teamSlug.workflows.$workflowId'
 import { Route as AppTeamsTeamSlugRepositoriesRepoFullPathRouteImport } from './routes/_app.teams.$teamSlug.repositories.$repoFullPath'
 import { Route as AppTeamsTeamSlugProjectsProjectIdRouteImport } from './routes/_app.teams.$teamSlug.projects.$projectId'
@@ -89,6 +91,11 @@ const AppTeamsTeamSlugRepositoriesRoute =
     path: '/repositories',
     getParentRoute: () => AppTeamsTeamSlugRoute,
   } as any)
+const AppTeamsTeamSlugAgentsRoute = AppTeamsTeamSlugAgentsRouteImport.update({
+  id: '/agents',
+  path: '/agents',
+  getParentRoute: () => AppTeamsTeamSlugRoute,
+} as any)
 const AppTeamsTeamSlugWorkflowsIndexRoute =
   AppTeamsTeamSlugWorkflowsIndexRouteImport.update({
     id: '/',
@@ -106,6 +113,12 @@ const AppTeamsTeamSlugProjectsIndexRoute =
     id: '/projects/',
     path: '/projects/',
     getParentRoute: () => AppTeamsTeamSlugRoute,
+  } as any)
+const AppTeamsTeamSlugAgentsIndexRoute =
+  AppTeamsTeamSlugAgentsIndexRouteImport.update({
+    id: '/',
+    path: '/',
+    getParentRoute: () => AppTeamsTeamSlugAgentsRoute,
   } as any)
 const AppTeamsTeamSlugWorkflowsWorkflowIdRoute =
   AppTeamsTeamSlugWorkflowsWorkflowIdRouteImport.update({
@@ -205,12 +218,14 @@ export interface FileRoutesByFullPath {
   '/signin': typeof SigninRoute
   '/repositories': typeof AppRepositoriesRoute
   '/teams/$teamSlug': typeof AppTeamsTeamSlugRouteWithChildren
+  '/teams/$teamSlug/agents': typeof AppTeamsTeamSlugAgentsRouteWithChildren
   '/teams/$teamSlug/repositories': typeof AppTeamsTeamSlugRepositoriesRouteWithChildren
   '/teams/$teamSlug/workflows': typeof AppTeamsTeamSlugWorkflowsRouteWithChildren
   '/teams/$teamSlug/': typeof AppTeamsTeamSlugIndexRoute
   '/teams/$teamSlug/projects/$projectId': typeof AppTeamsTeamSlugProjectsProjectIdRoute
   '/teams/$teamSlug/repositories/$repoFullPath': typeof AppTeamsTeamSlugRepositoriesRepoFullPathRouteWithChildren
   '/teams/$teamSlug/workflows/$workflowId': typeof AppTeamsTeamSlugWorkflowsWorkflowIdRouteWithChildren
+  '/teams/$teamSlug/agents/': typeof AppTeamsTeamSlugAgentsIndexRoute
   '/teams/$teamSlug/projects/': typeof AppTeamsTeamSlugProjectsIndexRoute
   '/teams/$teamSlug/repositories/': typeof AppTeamsTeamSlugRepositoriesIndexRoute
   '/teams/$teamSlug/workflows/': typeof AppTeamsTeamSlugWorkflowsIndexRoute
@@ -235,6 +250,7 @@ export interface FileRoutesByTo {
   '/': typeof AppIndexRoute
   '/teams/$teamSlug': typeof AppTeamsTeamSlugIndexRoute
   '/teams/$teamSlug/projects/$projectId': typeof AppTeamsTeamSlugProjectsProjectIdRoute
+  '/teams/$teamSlug/agents': typeof AppTeamsTeamSlugAgentsIndexRoute
   '/teams/$teamSlug/projects': typeof AppTeamsTeamSlugProjectsIndexRoute
   '/teams/$teamSlug/repositories': typeof AppTeamsTeamSlugRepositoriesIndexRoute
   '/teams/$teamSlug/workflows': typeof AppTeamsTeamSlugWorkflowsIndexRoute
@@ -259,12 +275,14 @@ export interface FileRoutesById {
   '/_app/repositories': typeof AppRepositoriesRoute
   '/_app/': typeof AppIndexRoute
   '/_app/teams/$teamSlug': typeof AppTeamsTeamSlugRouteWithChildren
+  '/_app/teams/$teamSlug/agents': typeof AppTeamsTeamSlugAgentsRouteWithChildren
   '/_app/teams/$teamSlug/repositories': typeof AppTeamsTeamSlugRepositoriesRouteWithChildren
   '/_app/teams/$teamSlug/workflows': typeof AppTeamsTeamSlugWorkflowsRouteWithChildren
   '/_app/teams/$teamSlug/': typeof AppTeamsTeamSlugIndexRoute
   '/_app/teams/$teamSlug/projects/$projectId': typeof AppTeamsTeamSlugProjectsProjectIdRoute
   '/_app/teams/$teamSlug/repositories/$repoFullPath': typeof AppTeamsTeamSlugRepositoriesRepoFullPathRouteWithChildren
   '/_app/teams/$teamSlug/workflows/$workflowId': typeof AppTeamsTeamSlugWorkflowsWorkflowIdRouteWithChildren
+  '/_app/teams/$teamSlug/agents/': typeof AppTeamsTeamSlugAgentsIndexRoute
   '/_app/teams/$teamSlug/projects/': typeof AppTeamsTeamSlugProjectsIndexRoute
   '/_app/teams/$teamSlug/repositories/': typeof AppTeamsTeamSlugRepositoriesIndexRoute
   '/_app/teams/$teamSlug/workflows/': typeof AppTeamsTeamSlugWorkflowsIndexRoute
@@ -290,12 +308,14 @@ export interface FileRouteTypes {
     | '/signin'
     | '/repositories'
     | '/teams/$teamSlug'
+    | '/teams/$teamSlug/agents'
     | '/teams/$teamSlug/repositories'
     | '/teams/$teamSlug/workflows'
     | '/teams/$teamSlug/'
     | '/teams/$teamSlug/projects/$projectId'
     | '/teams/$teamSlug/repositories/$repoFullPath'
     | '/teams/$teamSlug/workflows/$workflowId'
+    | '/teams/$teamSlug/agents/'
     | '/teams/$teamSlug/projects/'
     | '/teams/$teamSlug/repositories/'
     | '/teams/$teamSlug/workflows/'
@@ -320,6 +340,7 @@ export interface FileRouteTypes {
     | '/'
     | '/teams/$teamSlug'
     | '/teams/$teamSlug/projects/$projectId'
+    | '/teams/$teamSlug/agents'
     | '/teams/$teamSlug/projects'
     | '/teams/$teamSlug/repositories'
     | '/teams/$teamSlug/workflows'
@@ -343,12 +364,14 @@ export interface FileRouteTypes {
     | '/_app/repositories'
     | '/_app/'
     | '/_app/teams/$teamSlug'
+    | '/_app/teams/$teamSlug/agents'
     | '/_app/teams/$teamSlug/repositories'
     | '/_app/teams/$teamSlug/workflows'
     | '/_app/teams/$teamSlug/'
     | '/_app/teams/$teamSlug/projects/$projectId'
     | '/_app/teams/$teamSlug/repositories/$repoFullPath'
     | '/_app/teams/$teamSlug/workflows/$workflowId'
+    | '/_app/teams/$teamSlug/agents/'
     | '/_app/teams/$teamSlug/projects/'
     | '/_app/teams/$teamSlug/repositories/'
     | '/_app/teams/$teamSlug/workflows/'
@@ -445,6 +468,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AppTeamsTeamSlugRepositoriesRouteImport
       parentRoute: typeof AppTeamsTeamSlugRoute
     }
+    '/_app/teams/$teamSlug/agents': {
+      id: '/_app/teams/$teamSlug/agents'
+      path: '/agents'
+      fullPath: '/teams/$teamSlug/agents'
+      preLoaderRoute: typeof AppTeamsTeamSlugAgentsRouteImport
+      parentRoute: typeof AppTeamsTeamSlugRoute
+    }
     '/_app/teams/$teamSlug/workflows/': {
       id: '/_app/teams/$teamSlug/workflows/'
       path: '/'
@@ -465,6 +495,13 @@ declare module '@tanstack/react-router' {
       fullPath: '/teams/$teamSlug/projects/'
       preLoaderRoute: typeof AppTeamsTeamSlugProjectsIndexRouteImport
       parentRoute: typeof AppTeamsTeamSlugRoute
+    }
+    '/_app/teams/$teamSlug/agents/': {
+      id: '/_app/teams/$teamSlug/agents/'
+      path: '/'
+      fullPath: '/teams/$teamSlug/agents/'
+      preLoaderRoute: typeof AppTeamsTeamSlugAgentsIndexRouteImport
+      parentRoute: typeof AppTeamsTeamSlugAgentsRoute
     }
     '/_app/teams/$teamSlug/workflows/$workflowId': {
       id: '/_app/teams/$teamSlug/workflows/$workflowId'
@@ -574,6 +611,20 @@ declare module '@tanstack/react-router' {
   }
 }
 
+interface AppTeamsTeamSlugAgentsRouteChildren {
+  AppTeamsTeamSlugAgentsIndexRoute: typeof AppTeamsTeamSlugAgentsIndexRoute
+}
+
+const AppTeamsTeamSlugAgentsRouteChildren: AppTeamsTeamSlugAgentsRouteChildren =
+  {
+    AppTeamsTeamSlugAgentsIndexRoute: AppTeamsTeamSlugAgentsIndexRoute,
+  }
+
+const AppTeamsTeamSlugAgentsRouteWithChildren =
+  AppTeamsTeamSlugAgentsRoute._addFileChildren(
+    AppTeamsTeamSlugAgentsRouteChildren,
+  )
+
 interface AppTeamsTeamSlugRepositoriesRepoFullPathPullsRouteChildren {
   AppTeamsTeamSlugRepositoriesRepoFullPathPullsNumberRoute: typeof AppTeamsTeamSlugRepositoriesRepoFullPathPullsNumberRoute
   AppTeamsTeamSlugRepositoriesRepoFullPathPullsIndexRoute: typeof AppTeamsTeamSlugRepositoriesRepoFullPathPullsIndexRoute
@@ -682,6 +733,7 @@ const AppTeamsTeamSlugWorkflowsRouteWithChildren =
   )
 
 interface AppTeamsTeamSlugRouteChildren {
+  AppTeamsTeamSlugAgentsRoute: typeof AppTeamsTeamSlugAgentsRouteWithChildren
   AppTeamsTeamSlugRepositoriesRoute: typeof AppTeamsTeamSlugRepositoriesRouteWithChildren
   AppTeamsTeamSlugWorkflowsRoute: typeof AppTeamsTeamSlugWorkflowsRouteWithChildren
   AppTeamsTeamSlugIndexRoute: typeof AppTeamsTeamSlugIndexRoute
@@ -690,6 +742,7 @@ interface AppTeamsTeamSlugRouteChildren {
 }
 
 const AppTeamsTeamSlugRouteChildren: AppTeamsTeamSlugRouteChildren = {
+  AppTeamsTeamSlugAgentsRoute: AppTeamsTeamSlugAgentsRouteWithChildren,
   AppTeamsTeamSlugRepositoriesRoute:
     AppTeamsTeamSlugRepositoriesRouteWithChildren,
   AppTeamsTeamSlugWorkflowsRoute: AppTeamsTeamSlugWorkflowsRouteWithChildren,

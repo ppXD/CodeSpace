@@ -33,6 +33,7 @@ export function Sidebar() {
   const isProjectsActive = pathname === "/"
     || pathname.startsWith("/repositories")
     || /^\/teams\/[^/]+\/(repositories|projects)/.test(pathname);
+  const isAgentsActive = /^\/teams\/[^/]+\/agents/.test(pathname);
   const isWorkflowsActive = /^\/teams\/[^/]+\/workflows/.test(pathname);
 
   // ── Team switcher ────────────────────────────────────────────────────────────
@@ -281,6 +282,23 @@ export function Sidebar() {
           {active && active.projectCount != null && (
             <span className="sb-nav-badge">{active.projectCount}</span>
           )}
+        </div>
+        <div
+          className="sb-nav-item"
+          data-active={isAgentsActive}
+          onClick={() => {
+            // Agents (reusable personas) are team-scoped — same first-paint guard as the
+            // other rows: no active team yet ⇒ no-op until /me resolves.
+            if (active) {
+              navigate({ to: "/teams/$teamSlug/agents", params: { teamSlug: teamToUrlSlug(active) } });
+            }
+          }}
+          title="Agents"
+        >
+          <span className="sb-nav-ic"><Ic.Bot size={15} /></span>
+          <span className="sb-nav-lbl">Agents</span>
+          {/* No badge: MeTeam carries projectCount + workflowCount but no persona count yet.
+              Adding agentDefinitionCount to /me is a separate backend change. */}
         </div>
         <div
           className="sb-nav-item"
