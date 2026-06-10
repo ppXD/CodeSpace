@@ -19,7 +19,13 @@ namespace CodeSpace.Core.Services.Workflows.Nodes.Builtin;
 /// run lifecycle, so any failure (unknown harness, sandbox error, timeout) surfaces as a clean node
 /// failure.
 ///
-/// Config: goal · harness · model (required) · runnerKind? · timeoutSeconds? · network? · readOnly?
+/// It may reference an Agent persona (<c>agentDefinitionId</c>): the node only carries the reference; the
+/// dispatch-time resolver merges the persona's system prompt + model into the task (staying pure, no DB).
+/// With a persona, <c>goal</c> is the task-specific addition to its prompt (optional); without one, <c>goal</c>
+/// is required. <c>harness</c> is always required (a persona is harness-agnostic); <c>model</c> is always
+/// optional (blank → the persona's model → the harness default).
+///
+/// Config: harness (required) · agentDefinitionId? · goal (required unless a persona is set) · model? · runnerKind? · timeoutSeconds? · network? · readOnly?
 /// Inputs: repositoryId? (the repo to clone into the workspace — pick or bind from the trigger)
 /// Outputs: status · summary · changedFiles · branch
 /// </summary>
@@ -38,15 +44,16 @@ public sealed class AgentCodeNode : INodeRuntime
             {
               "type": "object",
               "properties": {
-                "goal":           { "type": "string", "description": "What the agent should do (the prompt)." },
+                "agentDefinitionId": { "type": "string", "format": "uuid", "x-selector": "agent", "description": "Pick an Agent persona — its system prompt + model become the defaults for this run (its prompt prepends the goal below). Leave empty to configure the run inline." },
+                "goal":           { "type": "string", "description": "What the agent should do (the prompt). Required unless a persona is selected, in which case it's the task-specific addition to the persona's prompt." },
                 "harness":        { "type": "string", "description": "Agent harness kind, e.g. \"codex-cli\"." },
-                "model":          { "type": "string", "description": "Model id within the harness's catalog." },
+                "model":          { "type": "string", "description": "Model id within the harness's catalog. Leave empty to use the persona's model, or the harness default." },
                 "runnerKind":     { "type": "string", "description": "Sandbox runner (e.g. \"local\"). Defaults to the deployment default." },
                 "timeoutSeconds": { "type": "integer", "minimum": 1, "description": "Wall-clock cap for the run." },
                 "network":        { "type": "boolean", "description": "Allow network access in the sandbox." },
                 "readOnly":       { "type": "boolean", "description": "Analysis-only — the agent may not write." }
               },
-              "required": ["goal", "harness", "model"]
+              "required": ["harness"]
             }
             """),
         InputSchema = SchemaBuilder.Parse("""
@@ -77,11 +84,14 @@ public sealed class AgentCodeNode : INodeRuntime
 
         var goal = ReadString(context.Config, "goal");
         var harness = ReadString(context.Config, "harness");
-        var model = ReadString(context.Config, "model");
 
-        if (string.IsNullOrWhiteSpace(goal)) return Fail("Config 'goal' is required.");
+        if (!TryReadAgentDefinitionId(context, out var agentDefinitionId)) return Fail("Config 'agentDefinitionId' must be an agent persona id (uuid).");
+
         if (string.IsNullOrWhiteSpace(harness)) return Fail("Config 'harness' is required.");
-        if (string.IsNullOrWhiteSpace(model)) return Fail("Config 'model' is required.");
+
+        // A persona supplies the prompt floor (its system prompt), so 'goal' is only required without one.
+        // The dispatch-time resolver composes the persona's prompt + this goal and supplies the model.
+        if (agentDefinitionId is null && string.IsNullOrWhiteSpace(goal)) return Fail("Config 'goal' is required when no agent persona is selected.");
 
         if (!TryReadRepositoryId(context, out var repositoryId)) return Fail("Input 'repositoryId' must be a repository id (uuid).");
 
@@ -89,7 +99,8 @@ public sealed class AgentCodeNode : INodeRuntime
         {
             Goal = goal,
             Harness = harness,
-            Model = model,
+            Model = ReadOptionalString(context.Config, "model"),
+            AgentDefinitionId = agentDefinitionId,
             RepositoryId = repositoryId,
             RunnerKind = ReadOptionalString(context.Config, "runnerKind"),
             TimeoutSeconds = ReadInt(context.Config, "timeoutSeconds") ?? 1800,
@@ -125,6 +136,21 @@ public sealed class AgentCodeNode : INodeRuntime
     }
 
     private static Task<NodeResult> Fail(string message) => Task.FromResult(NodeResult.Fail(message));
+
+    /// <summary>Read the optional <c>agentDefinitionId</c> config. Absent / empty → no persona (null, a pure-inline run). Present-but-malformed → false (a clean node failure).</summary>
+    private static bool TryReadAgentDefinitionId(NodeRunContext context, out Guid? agentDefinitionId)
+    {
+        agentDefinitionId = null;
+
+        var raw = ReadString(context.Config, "agentDefinitionId");
+
+        if (string.IsNullOrWhiteSpace(raw)) return true;
+
+        if (!Guid.TryParse(raw, out var id)) return false;
+
+        agentDefinitionId = id;
+        return true;
+    }
 
     /// <summary>Read the optional <c>repositoryId</c> input. Absent / empty → no repo (null, an analysis-only run). Present-but-malformed → false (a clean node failure).</summary>
     private static bool TryReadRepositoryId(NodeRunContext context, out Guid? repositoryId)

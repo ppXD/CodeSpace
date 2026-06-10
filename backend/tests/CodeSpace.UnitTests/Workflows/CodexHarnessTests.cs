@@ -16,7 +16,7 @@ public class CodexHarnessTests
 {
     private static readonly CodexHarness Harness = new();
 
-    private static AgentTask Task(string goal = "Fix the failing billing tests", string model = "gpt-5.3-codex", AgentWriteScope scope = AgentWriteScope.Workspace) => new()
+    private static AgentTask Task(string goal = "Fix the failing billing tests", string? model = "gpt-5.3-codex", AgentWriteScope scope = AgentWriteScope.Workspace) => new()
     {
         Goal = goal,
         Harness = CodexHarness.HarnessKind,
@@ -38,6 +38,18 @@ public class CodexHarnessTests
         spec.Args.ShouldBe(new[] { "exec", "--json", "--model", "gpt-5.3-codex", "--sandbox", "workspace-write", "Fix the failing billing tests" });
         spec.WorkingDirectory.ShouldBe("/tmp/ws");
         spec.TimeoutSeconds.ShouldBe(900);
+    }
+
+    [Theory]
+    [InlineData(null)]   // persona Model=empty rule: blank model → let Codex pick its own default
+    [InlineData("")]
+    [InlineData("   ")]
+    public void Omits_the_model_flag_when_no_model_is_set(string? model)
+    {
+        var spec = Harness.BuildInvocation(Task(model: model));
+
+        spec.Args.ShouldBe(new[] { "exec", "--json", "--sandbox", "workspace-write", "Fix the failing billing tests" },
+            customMessage: "a blank model must omit --model entirely (not emit `--model \"\"`, which Codex rejects) so the CLI uses its default");
     }
 
     [Fact]

@@ -42,6 +42,7 @@ public class AgentCodeNodeTests
         task.RunnerKind.ShouldBe("local");
         task.TimeoutSeconds.ShouldBe(900);
         task.Permissions.WriteScope.ShouldBe(AgentWriteScope.ReadOnly);
+        task.AgentDefinitionId.ShouldBeNull("an inline run carries no persona — the pure-inline path the resolver returns unchanged (zero regression)");
     }
 
     [Fact]
@@ -81,18 +82,58 @@ public class AgentCodeNodeTests
     }
 
     [Theory]
-    [InlineData("goal")]
-    [InlineData("harness")]
-    [InlineData("model")]
+    [InlineData("goal")]      // no persona → goal is required
+    [InlineData("harness")]   // always required (a persona is harness-agnostic)
     public async Task First_pass_fails_when_a_required_config_field_is_missing(string omit)
     {
-        var config = new Dictionary<string, JsonElement> { ["goal"] = Str("g"), ["harness"] = Str("codex-cli"), ["model"] = Str("m") };
+        // model is intentionally NOT here — it's optional now (blank → persona's model → harness default).
+        var config = new Dictionary<string, JsonElement> { ["goal"] = Str("g"), ["harness"] = Str("codex-cli") };
         config.Remove(omit);
 
         var result = await new AgentCodeNode().RunAsync(BuildContext(config, resume: null), CancellationToken.None);
 
         result.Status.ShouldBe(NodeStatus.Failure);
         result.Error.ShouldContain(omit);
+    }
+
+    [Fact]
+    public async Task Model_is_optional_so_a_node_can_defer_to_the_persona_or_harness_default()
+    {
+        var config = new Dictionary<string, JsonElement> { ["goal"] = Str("Fix it"), ["harness"] = Str("codex-cli") };
+
+        var result = await new AgentCodeNode().RunAsync(BuildContext(config, resume: null), CancellationToken.None);
+
+        result.Status.ShouldBe(NodeStatus.Suspended);
+        JsonSerializer.Deserialize<AgentTask>(result.SuspendUntil!.Payload, AgentJson.Options)!.Model
+            .ShouldBeNull("a blank model is no longer a hard failure — it flows through as null for the resolver / harness to default");
+    }
+
+    [Fact]
+    public async Task Persona_reference_lets_goal_and_model_be_omitted_and_carries_the_id()
+    {
+        var agentId = Guid.NewGuid();
+        // Only harness + the persona reference — no goal, no model. The persona supplies the prompt + model
+        // (composed by the dispatch-time resolver); the node just carries the reference.
+        var config = new Dictionary<string, JsonElement> { ["harness"] = Str("codex-cli"), ["agentDefinitionId"] = Str(agentId.ToString()) };
+
+        var result = await new AgentCodeNode().RunAsync(BuildContext(config, resume: null), CancellationToken.None);
+
+        result.Status.ShouldBe(NodeStatus.Suspended);
+        var task = JsonSerializer.Deserialize<AgentTask>(result.SuspendUntil!.Payload, AgentJson.Options)!;
+        task.AgentDefinitionId.ShouldBe(agentId);
+        task.Goal.ShouldBe("", "the node carries the raw (empty) goal — the resolver composes persona prompt + goal at dispatch");
+        task.Model.ShouldBeNull();
+    }
+
+    [Fact]
+    public async Task Malformed_agent_definition_id_fails_the_node()
+    {
+        var config = new Dictionary<string, JsonElement> { ["harness"] = Str("codex-cli"), ["agentDefinitionId"] = Str("not-a-uuid") };
+
+        var result = await new AgentCodeNode().RunAsync(BuildContext(config, resume: null), CancellationToken.None);
+
+        result.Status.ShouldBe(NodeStatus.Failure);
+        result.Error.ShouldContain("agentDefinitionId");
     }
 
     [Fact]

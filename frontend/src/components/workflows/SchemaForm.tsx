@@ -4,6 +4,7 @@ import { Ic } from "@/_imported/ai-code-space/icons";
 import { coerceNumberInput } from "@/lib/inputFieldSchema";
 
 import type { ScopeSuggestion } from "./scope-introspection";
+import { AgentSelector } from "./selectors/AgentSelector";
 import { ConversationSelector } from "./selectors/ConversationSelector";
 import { ProjectRepositorySelector } from "./selectors/ProjectRepositorySelector";
 import { TriggerRepositoriesSelector } from "./selectors/TriggerRepositoriesSelector";
@@ -408,6 +409,13 @@ function renderCustomSelector(key: string, schema: Schema, value: unknown, onCha
     case "conversation":
       return (
         <ConversationSelector
+          value={typeof value === "string" ? value : ""}
+          onChange={(next) => onChange(next === "" ? undefined : next)}
+        />
+      );
+    case "agent":
+      return (
+        <AgentSelector
           value={typeof value === "string" ? value : ""}
           onChange={(next) => onChange(next === "" ? undefined : next)}
         />

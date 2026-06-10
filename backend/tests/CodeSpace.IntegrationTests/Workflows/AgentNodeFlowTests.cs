@@ -1,6 +1,7 @@
 using System.Text.Json;
 using Autofac;
 using CodeSpace.Core.Persistence.Db;
+using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Workflows.Engine;
 using CodeSpace.IntegrationTests.Infrastructure;
@@ -294,7 +295,99 @@ public class AgentNodeFlowTests
         }
     }
 
+    [Fact]
+    public async Task Agent_node_with_a_persona_stages_the_resolved_merged_task()
+    {
+        // The persona-reference happy path end-to-end: the node carries only an AgentDefinitionId + a small
+        // goal; the engine resolves the persona at staging (its system prompt prepends the goal, its model
+        // fills in) and FREEZES the merged task into the run's TaskJson — self-describing + deterministic.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var personaId = await SeedPersonaAsync(teamId, userId, "You are a careful billing engineer.", "gpt-5.4");
+        var workflowId = await CreateWorkflowAsync(teamId, userId, PersonaAgentNodeDefinition(personaId.ToString()));
+        var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
+
+        var jobClient = ResolveJobClient();
+        jobClient.Clear();
+        jobClient.AutoExecute = false;
+
+        try
+        {
+            await RunEngineAsync(runId);
+
+            using var verify = _fixture.BeginScope();
+            var agentRun = await verify.Resolve<CodeSpaceDbContext>().AgentRun.AsNoTracking().SingleAsync(r => r.WorkflowRunId == runId);
+            var task = JsonSerializer.Deserialize<AgentTask>(agentRun.TaskJson, AgentJson.Options)!;
+
+            task.AgentDefinitionId.ShouldBe(personaId, "the persona reference is frozen into TaskJson as run provenance");
+            task.Goal.ShouldBe("You are a careful billing engineer.\n\nFix the billing bug.",
+                customMessage: "the engine resolves the persona at staging: its system prompt prepends the node goal, persisted as the final task");
+            task.Model.ShouldBe("gpt-5.4", "the node set no model inline → the persona's model fills in");
+        }
+        finally
+        {
+            jobClient.AutoExecute = true;
+        }
+    }
+
+    [Fact]
+    public async Task Agent_node_referencing_a_missing_persona_fails_the_node_with_no_orphan_run()
+    {
+        // A node pointing at a persona that doesn't exist for the team is a clean node failure at staging —
+        // the resolver throws, the engine maps it to a node failure, and NO agent run is ever created.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var workflowId = await CreateWorkflowAsync(teamId, userId, PersonaAgentNodeDefinition(Guid.NewGuid().ToString()));
+        var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
+
+        var jobClient = ResolveJobClient();
+        jobClient.Clear();
+        jobClient.AutoExecute = false;
+
+        try
+        {
+            await RunEngineAsync(runId);
+
+            using var verify = _fixture.BeginScope();
+            var db = verify.Resolve<CodeSpaceDbContext>();
+
+            var run = await db.WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == runId);
+            run.Status.ShouldBe(WorkflowRunStatus.Failure, "an unresolvable persona fails the node → the run (no error branch)");
+            run.Error!.ShouldContain("not found", Case.Insensitive,
+                customMessage: "the resolution failure surfaces as the run error — the engine wraps the typed resolver exception into a clean node failure");
+            (await db.AgentRun.AsNoTracking().AnyAsync(r => r.WorkflowRunId == runId))
+                .ShouldBeFalse("resolution fails BEFORE CreateAsync — no orphan agent run is persisted");
+        }
+        finally
+        {
+            jobClient.AutoExecute = true;
+        }
+    }
+
     // ─── Helpers ────────────────────────────────────────────────────────────────
+
+    private async Task<Guid> SeedPersonaAsync(Guid teamId, Guid userId, string systemPrompt, string? model)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+
+        var now = DateTimeOffset.UtcNow;
+        var agent = new AgentDefinition
+        {
+            Id = Guid.NewGuid(),
+            TeamId = teamId,
+            Slug = "billing-" + Guid.NewGuid().ToString("N")[..6],
+            Name = "Billing Engineer",
+            SystemPrompt = systemPrompt,
+            Model = model,
+            Origin = AgentDefinitionOrigin.Authored,
+            CreatedDate = now,
+            CreatedBy = userId,
+            LastModifiedDate = now,
+            LastModifiedBy = userId,
+        };
+        db.AgentDefinition.Add(agent);
+        await db.SaveChangesAsync();
+        return agent.Id;
+    }
 
     private async Task<AgentRunReconcileSummary> ReconcileAsync()
     {
@@ -423,6 +516,24 @@ public class AgentNodeFlowTests
 
         if (withErrorBranch)
             edges.Add(new() { From = "agent", To = "caught", SourceHandle = WorkflowHandles.Error });
+
+        return new WorkflowDefinition { SchemaVersion = 1, Nodes = nodes, Edges = edges };
+    }
+
+    // manual → agent.code (references a persona by id; no inline model; a small task goal) → terminal.
+    private static WorkflowDefinition PersonaAgentNodeDefinition(string agentDefinitionId)
+    {
+        var nodes = new List<NodeDefinition>
+        {
+            new() { Id = "start", TypeKey = "trigger.manual", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
+            new() { Id = "agent", TypeKey = "agent.code",
+                    Config = WorkflowsTestSeed.Json($$"""{"harness":"codex-cli","agentDefinitionId":"{{agentDefinitionId}}","goal":"Fix the billing bug."}"""),
+                    Inputs = WorkflowsTestSeed.EmptyJson() },
+            new() { Id = "end", TypeKey = "builtin.terminal", Config = WorkflowsTestSeed.EmptyJson(),
+                    Inputs = WorkflowsTestSeed.Json("""{"summary":"{{nodes.agent.outputs.summary}}"}""") },
+        };
+
+        var edges = new List<EdgeDefinition> { new() { From = "start", To = "agent" }, new() { From = "agent", To = "end" } };
 
         return new WorkflowDefinition { SchemaVersion = 1, Nodes = nodes, Edges = edges };
     }
