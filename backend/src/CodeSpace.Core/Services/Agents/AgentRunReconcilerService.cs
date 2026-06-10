@@ -32,14 +32,8 @@ public interface IAgentRunReconcilerService
 
 public sealed class AgentRunReconcilerService : IAgentRunReconcilerService, IScopedDependency
 {
-    /// <summary>Operators tune reclaim aggressiveness via this env var (a TimeSpan, e.g. "00:05:00"); default 5 min. Pinned by a test (Rule 8).</summary>
-    public const string LivenessWindowEnvVar = "CODESPACE_AGENT_RUN_LIVENESS_WINDOW";
-
-    private static readonly TimeSpan DefaultLivenessWindow = TimeSpan.FromMinutes(5);
-
-    /// <summary>A Running run with no heartbeat AND no event activity within this window is treated as abandoned. The worker should heartbeat well inside it.</summary>
-    private static TimeSpan LivenessWindow =>
-        TimeSpan.TryParse(System.Environment.GetEnvironmentVariable(LivenessWindowEnvVar), out var window) ? window : DefaultLivenessWindow;
+    /// <summary>Operators tune reclaim aggressiveness via this env var (a TimeSpan, e.g. "00:05:00"); default 5 min. Pinned by a test (Rule 8). Forwards to <see cref="AgentRunLiveness.WindowEnvVar"/> so the abandonment window and the executor's heartbeat cadence share ONE source and can't drift.</summary>
+    public const string LivenessWindowEnvVar = AgentRunLiveness.WindowEnvVar;
 
     /// <summary>Per-sweep cap so a backlog can't run a single tick forever.</summary>
     public const int BatchSize = 50;
@@ -77,7 +71,7 @@ public sealed class AgentRunReconcilerService : IAgentRunReconcilerService, ISco
 
     private async Task<int> MarkAbandonedRunningAsync(CancellationToken cancellationToken)
     {
-        var livenessThreshold = DateTimeOffset.UtcNow - LivenessWindow;
+        var livenessThreshold = DateTimeOffset.UtcNow - AgentRunLiveness.Window;
 
         var candidates = await _db.AgentRun.AsNoTracking()
             .Where(r => r.Status == AgentRunStatus.Running
@@ -128,7 +122,7 @@ public sealed class AgentRunReconcilerService : IAgentRunReconcilerService, ISco
 
         if (waitingIds.Count == 0) return (0, 0);
 
-        var staleThreshold = DateTimeOffset.UtcNow - LivenessWindow;
+        var staleThreshold = DateTimeOffset.UtcNow - AgentRunLiveness.Window;
 
         var runs = await _db.AgentRun.AsNoTracking()
             .Where(r => waitingIds.Contains(r.Id))

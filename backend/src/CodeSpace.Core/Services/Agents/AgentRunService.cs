@@ -87,11 +87,14 @@ public sealed class AgentRunService : IAgentRunService, IScopedDependency
 
     public async Task HeartbeatAsync(Guid runId, CancellationToken cancellationToken)
     {
-        var run = await LoadAsync(runId, cancellationToken).ConfigureAwait(false);
-
-        run.HeartbeatAt = DateTimeOffset.UtcNow;
-
-        await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+        // Tracking-free set-based UPDATE (like the reconciler's CAS). The executor pings this on a loop over
+        // a long-lived scope, so a load-mutate-save would keep a tracked entity + a stale xmin between pings —
+        // one lost optimistic-concurrency round would then silently kill every later heartbeat. A pure UPDATE
+        // never participates in optimistic concurrency; a missing row is a harmless 0-row no-op.
+        await _db.AgentRun
+            .Where(r => r.Id == runId)
+            .ExecuteUpdateAsync(s => s.SetProperty(r => r.HeartbeatAt, (DateTimeOffset?)DateTimeOffset.UtcNow), cancellationToken)
+            .ConfigureAwait(false);
     }
 
     public async Task<AgentRunEvent> AppendEventAsync(Guid runId, AgentEvent @event, CancellationToken cancellationToken)

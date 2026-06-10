@@ -209,6 +209,40 @@ public class AgentRunExecutorTests
         public void Dispose() { try { Directory.Delete(Path, recursive: true); } catch { /* best-effort */ } }
     }
 
+    [Fact]
+    public async Task Heartbeat_loop_advances_heartbeat_during_a_long_quiet_run()
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        // Force the heartbeat cadence to its 5s floor (window/3 of 9s → floored 5s) so a ping lands during
+        // the ~8s run. The harness sleeps emitting NO events, so ONLY the heartbeat loop — pinging through
+        // its dedicated-scope DbContext concurrently with the (empty) event stream — can advance HeartbeatAt.
+        var original = Environment.GetEnvironmentVariable(AgentRunLiveness.WindowEnvVar);
+        try
+        {
+            Environment.SetEnvironmentVariable(AgentRunLiveness.WindowEnvVar, "00:00:09");
+
+            var teamId = await SeedTeamAsync();
+            var runId = await CreateScriptedRunAsync(teamId);
+
+            await ExecuteAsync(runId, new ScriptedHarness("sleep 8"));
+
+            using var scope = _fixture.BeginScope();
+            var run = await scope.Resolve<IAgentRunService>().GetAsync(runId, CancellationToken.None);
+
+            run.StartedAt.ShouldNotBeNull();
+            run.HeartbeatAt.ShouldNotBeNull();
+            // MarkRunning stamps StartedAt ≈ HeartbeatAt at claim; a ≥3s advance can only come from a mid-run
+            // ping (the 5s-floor interval fired before the 8s run ended). Regressing to the shared _runs
+            // context — or dropping the loop — would leave HeartbeatAt at its claim value and fail this.
+            (run.HeartbeatAt!.Value - run.StartedAt!.Value).ShouldBeGreaterThan(TimeSpan.FromSeconds(3));
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable(AgentRunLiveness.WindowEnvVar, original);
+        }
+    }
+
     private async Task ExecuteAsync(Guid runId, IAgentHarness harness)
     {
         using var scope = _fixture.BeginScope();
@@ -219,6 +253,7 @@ public class AgentRunExecutorTests
             scope.Resolve<IAgentWorkspaceResolver>(),
             scope.Resolve<IWorkspaceProviderRegistry>(),
             scope.Resolve<IAgentRunCompletionNotifier>(),
+            scope.Resolve<Microsoft.Extensions.DependencyInjection.IServiceScopeFactory>(),
             NullLogger<AgentRunExecutor>.Instance);
 
         await executor.ExecuteAsync(runId, CancellationToken.None);
