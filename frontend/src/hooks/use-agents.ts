@@ -10,7 +10,7 @@ import { agentsApi } from "@/api/agents";
 
 export function useAgentDefinitions() {
   return useQuery({
-    queryKey: ["agent-definitions"],
+    queryKey: ["agents"],
     queryFn: () => agentsApi.listAgentDefinitions(),
   });
 }

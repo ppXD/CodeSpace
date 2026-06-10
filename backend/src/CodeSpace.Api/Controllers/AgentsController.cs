@@ -12,12 +12,12 @@ namespace CodeSpace.Api.Controllers;
 /// before the handler runs. Records bind directly (Rule 17) — route ids merge in via <c>with</c>.
 /// </summary>
 [ApiController]
-[Route("api/agent-definitions")]
-public class AgentDefinitionsController : ControllerBase
+[Route("api/agents")]
+public class AgentsController : ControllerBase
 {
     private readonly IMediator _mediator;
 
-    public AgentDefinitionsController(IMediator mediator) { _mediator = mediator; }
+    public AgentsController(IMediator mediator) { _mediator = mediator; }
 
     [HttpGet]
     public async Task<IActionResult> List(CancellationToken cancellationToken)

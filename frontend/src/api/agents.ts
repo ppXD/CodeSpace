@@ -26,5 +26,5 @@ export interface AgentDefinitionSummary {
 // ─── API client ────────────────────────────────────────────────────────────────
 
 export const agentsApi = {
-  listAgentDefinitions: () => fetchJson<AgentDefinitionSummary[]>("/api/agent-definitions"),
+  listAgentDefinitions: () => fetchJson<AgentDefinitionSummary[]>("/api/agents"),
 };
