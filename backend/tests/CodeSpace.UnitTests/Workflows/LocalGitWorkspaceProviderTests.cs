@@ -181,6 +181,81 @@ public sealed class LocalGitWorkspaceProviderTests
         changes.Patch.ShouldContain("committed change");
     }
 
+    // ─── Workspace janitor (reclaim clones orphaned by a crashed worker) ──────
+
+    [Fact]
+    public void StaleThreshold_env_var_name_is_pinned() =>
+        // Renaming this breaks every operator who pinned a custom staleness window via env (Rule 8).
+        LocalGitWorkspaceProvider.StaleThresholdEnvVar.ShouldBe("CODESPACE_AGENT_WORKSPACE_STALE_THRESHOLD");
+
+    [Theory]
+    [InlineData(3, true)]    // last write 3h ago, threshold 2h → stale
+    [InlineData(1, false)]   // last write 1h ago → still within the window (a live run)
+    public void IsStale_compares_age_against_threshold(int ageHours, bool expectedStale)
+    {
+        var now = new DateTime(2026, 6, 11, 12, 0, 0, DateTimeKind.Utc);
+
+        LocalGitWorkspaceProvider.IsStale(now.AddHours(-ageHours), now, TimeSpan.FromHours(2)).ShouldBe(expectedStale);
+    }
+
+    [Fact]
+    public void IsStale_is_strict_at_the_boundary() =>
+        // Exactly == threshold is NOT stale — age must strictly EXCEED, so a run right at the limit is spared.
+        LocalGitWorkspaceProvider.IsStale(
+            new DateTime(2026, 1, 1, 10, 0, 0, DateTimeKind.Utc),
+            new DateTime(2026, 1, 1, 12, 0, 0, DateTimeKind.Utc),
+            TimeSpan.FromHours(2)).ShouldBeFalse();
+
+    [Fact]
+    public void ReadStaleThreshold_overrides_from_env_and_falls_back_on_absent_or_garbage()
+    {
+        var original = Environment.GetEnvironmentVariable(LocalGitWorkspaceProvider.StaleThresholdEnvVar);
+        try
+        {
+            Environment.SetEnvironmentVariable(LocalGitWorkspaceProvider.StaleThresholdEnvVar, null);
+            LocalGitWorkspaceProvider.ReadStaleThreshold().ShouldBe(TimeSpan.FromHours(2), "absent → the 2h default");
+
+            Environment.SetEnvironmentVariable(LocalGitWorkspaceProvider.StaleThresholdEnvVar, "not-a-timespan");
+            LocalGitWorkspaceProvider.ReadStaleThreshold().ShouldBe(TimeSpan.FromHours(2), "garbage → the default");
+
+            Environment.SetEnvironmentVariable(LocalGitWorkspaceProvider.StaleThresholdEnvVar, "00:00:00");
+            LocalGitWorkspaceProvider.ReadStaleThreshold().ShouldBe(TimeSpan.FromHours(2), "non-positive → the default (never sweep everything)");
+
+            Environment.SetEnvironmentVariable(LocalGitWorkspaceProvider.StaleThresholdEnvVar, "00:30:00");
+            LocalGitWorkspaceProvider.ReadStaleThreshold().ShouldBe(TimeSpan.FromMinutes(30), "a valid positive TimeSpan overrides the default");
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable(LocalGitWorkspaceProvider.StaleThresholdEnvVar, original);
+        }
+    }
+
+    [Fact]
+    public void Sweep_reclaims_stale_workspaces_and_spares_fresh_ones()
+    {
+        using var root = new TempDir();   // an ISOLATED root, never the real WorkspacesRoot
+        var now = new DateTime(2026, 6, 11, 12, 0, 0, DateTimeKind.Utc);
+
+        var stale = Directory.CreateDirectory(Path.Combine(root.Path, "stale")).FullName;
+        var fresh = Directory.CreateDirectory(Path.Combine(root.Path, "fresh")).FullName;
+        Directory.SetLastWriteTimeUtc(stale, now.AddHours(-3));      // older than the 2h threshold
+        Directory.SetLastWriteTimeUtc(fresh, now.AddMinutes(-30));   // within the window
+
+        var reclaimed = NewProvider().SweepStale(root.Path, TimeSpan.FromHours(2), now, CancellationToken.None);
+
+        reclaimed.ShouldBe(1);
+        Directory.Exists(stale).ShouldBeFalse("a workspace untouched past the threshold is reclaimed");
+        Directory.Exists(fresh).ShouldBeTrue("a workspace within the window (a live run) is never touched");
+    }
+
+    [Fact]
+    public void Sweep_is_a_noop_when_the_storage_root_was_never_created()
+    {
+        var missing = Path.Combine(Path.GetTempPath(), "cs-never-" + Guid.NewGuid().ToString("N"));
+
+        NewProvider().SweepStale(missing, TimeSpan.FromHours(2), DateTime.UtcNow, CancellationToken.None).ShouldBe(0);
+    }
+
     // ─── Helpers ─────────────────────────────────────────────────────────────
 
     private static LocalGitWorkspaceProvider NewProvider() =>

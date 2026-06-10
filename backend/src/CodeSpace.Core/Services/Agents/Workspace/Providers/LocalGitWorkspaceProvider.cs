@@ -19,11 +19,20 @@ namespace CodeSpace.Core.Services.Agents.Workspace.Providers;
 /// exposure is acceptable on a single-tenant local worker; the K8s runner injects via an in-pod
 /// credential helper instead.)</para>
 /// </summary>
-public sealed class LocalGitWorkspaceProvider : IWorkspaceProvider, ISingletonDependency
+public sealed class LocalGitWorkspaceProvider : IWorkspaceProvider, IWorkspaceJanitor, ISingletonDependency
 {
     private const int CloneTimeoutSeconds = 300;
     private const int CaptureTimeoutSeconds = 120;
     private static readonly string WorkspacesRoot = Path.Combine(Path.GetTempPath(), "codespace-agent-workspaces");
+
+    /// <summary>
+    /// Operators tune how long an orphaned workspace lingers before the janitor reclaims it (a TimeSpan,
+    /// e.g. "02:00:00"); default 2h. Pinned by a test (Rule 8). MUST exceed the maximum possible run
+    /// duration so the age-based sweep can never delete a live workspace.
+    /// </summary>
+    public const string StaleThresholdEnvVar = "CODESPACE_AGENT_WORKSPACE_STALE_THRESHOLD";
+
+    private static readonly TimeSpan DefaultStaleThreshold = TimeSpan.FromHours(2);
 
     private readonly ISandboxRunnerRegistry _runners;
     private readonly ILogger<LocalGitWorkspaceProvider> _logger;
@@ -72,6 +81,51 @@ public sealed class LocalGitWorkspaceProvider : IWorkspaceProvider, ISingletonDe
         return result.Stdout.Trim();
     }
 
+    // ── IWorkspaceJanitor: reclaim clones orphaned by a crashed worker ───────────────────────────────
+
+    /// <summary>Reclaim local clones older than the staleness threshold. No-op when the root was never created.</summary>
+    public Task<int> SweepStaleAsync(CancellationToken cancellationToken) =>
+        Task.FromResult(SweepStale(WorkspacesRoot, ReadStaleThreshold(), DateTime.UtcNow, cancellationToken));
+
+    /// <summary>The configured staleness threshold, or the 2h default when the env var is absent / unparseable / non-positive. Pure + internal so it's unit-pinned.</summary>
+    internal static TimeSpan ReadStaleThreshold()
+    {
+        var raw = Environment.GetEnvironmentVariable(StaleThresholdEnvVar);
+
+        return TimeSpan.TryParse(raw, out var parsed) && parsed > TimeSpan.Zero ? parsed : DefaultStaleThreshold;
+    }
+
+    /// <summary>
+    /// A workspace is stale when the time since its last write exceeds the threshold. Last-write (not
+    /// creation) is used because it's settable cross-platform (Linux has no birthtime-set syscall) AND is
+    /// sound here: the threshold far exceeds any run, so a dir untouched that long cannot be a live run.
+    /// Pure + internal so it's unit-pinned without touching the filesystem or clock.
+    /// </summary>
+    internal static bool IsStale(DateTime lastWriteUtc, DateTime nowUtc, TimeSpan olderThan) => nowUtc - lastWriteUtc > olderThan;
+
+    /// <summary>The filesystem sweep, parameterised on root + clock so it's driven by an isolated test against a controlled temp dir.</summary>
+    internal int SweepStale(string root, TimeSpan olderThan, DateTime nowUtc, CancellationToken cancellationToken)
+    {
+        if (!Directory.Exists(root)) return 0;
+
+        var reclaimed = 0;
+
+        foreach (var directory in Directory.EnumerateDirectories(root))
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+
+            if (!IsStale(Directory.GetLastWriteTimeUtc(directory), nowUtc, olderThan)) continue;
+
+            TryDeleteDirectory(directory);
+            if (!Directory.Exists(directory)) reclaimed++;
+        }
+
+        if (reclaimed > 0)
+            _logger.LogInformation("Reclaimed {Count} stale agent workspace(s) older than {Threshold}", reclaimed, olderThan);
+
+        return reclaimed;
+    }
+
     private static void TryDeleteDirectory(string directory)
     {
         try
@@ -102,13 +156,25 @@ public sealed class LocalGitWorkspaceProvider : IWorkspaceProvider, ISingletonDe
             throw new WorkspaceException($"git clone failed (exit {result.ExitCode}): {Redact(Summarize(result.Stderr), request.Token)}");
     }
 
-    /// <summary>Rewrite origin to the tokenless URL so the cloned <c>.git/config</c> never persists credentials. Best-effort — a failure is logged, not fatal (the clone already succeeded).</summary>
+    /// <summary>
+    /// Rewrite origin to the tokenless URL so the cloned <c>.git/config</c> never persists credentials.
+    /// If the rewrite fails, REMOVE the origin remote outright — the persisted config carrying a token is
+    /// the credential-leak we must close, and the run captures changes via the local diff (not origin), so
+    /// dropping origin is safe. Only when both fail do we log an error; the workspace janitor is the final
+    /// backstop. The clone already succeeded, so this never fails the run.
+    /// </summary>
     private async Task StripTokenFromRemoteAsync(string cleanUrl, string directory, CancellationToken cancellationToken)
     {
-        var result = await RunGitAsync(new[] { "-C", directory, "remote", "set-url", "origin", cleanUrl }, cancellationToken).ConfigureAwait(false);
+        var rewrite = await RunGitAsync(new[] { "-C", directory, "remote", "set-url", "origin", cleanUrl }, cancellationToken).ConfigureAwait(false);
 
-        if (result.Status != SandboxStatus.Success)
-            _logger.LogWarning("Could not strip the token from origin (exit {ExitCode}); the clone succeeded but .git/config may retain credentials", result.ExitCode);
+        if (rewrite.Status == SandboxStatus.Success) return;
+
+        var remove = await RunGitAsync(new[] { "-C", directory, "remote", "remove", "origin" }, cancellationToken).ConfigureAwait(false);
+
+        if (remove.Status == SandboxStatus.Success)
+            _logger.LogWarning("Token strip via set-url failed (exit {ExitCode}); removed the origin remote so no credential persists in .git/config", rewrite.ExitCode);
+        else
+            _logger.LogError("Could not strip OR remove the tokened origin (set-url exit {SetExit}, remove exit {RemoveExit}); .git/config may retain credentials until the workspace janitor reclaims it", rewrite.ExitCode, remove.ExitCode);
     }
 
     private Task<SandboxResult> RunGitAsync(IReadOnlyList<string> args, CancellationToken cancellationToken) =>
