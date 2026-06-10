@@ -9,9 +9,9 @@ import { useCreateEmptyWorkflow, useCreateWorkflowFromTask, useCreateWorkflowFro
 import { useDeleteWorkflow, useSetWorkflowEnabled, useWorkflows } from "@/hooks/use-workflows";
 
 /**
- * Agents list. Same compact header rhythm as the Repositories page — title + a single
- * primary action, no marketing copy. "+ New agent" opens AddWorkflowModal with three
- * on-ramps — Describe a task, Blank, or Template — each of which creates the agent and
+ * Workflows list. Same compact header rhythm as the Repositories page — title + a single
+ * primary action, no marketing copy. "+ New workflow" opens AddWorkflowModal with three
+ * on-ramps — Describe a task, Blank, or Template — each of which creates the workflow and
  * jumps straight into the visual editor.
  */
 export const Route = createFileRoute("/_app/teams/$teamSlug/workflows/")({
@@ -62,7 +62,7 @@ function WorkflowsListPage() {
     // Themed confirm dialog instead of the browser's native window.confirm —
     // matches every other destructive action in the SPA (see dialog-context).
     const ok = await confirm({
-      title: "Delete agent?",
+      title: "Delete workflow?",
       message: (
         <>
           <strong>{name}</strong> will be removed. Runs already in flight will finish on their own; new triggers stop firing immediately.
@@ -82,13 +82,13 @@ function WorkflowsListPage() {
           strip. We add explicit bottom padding here so the rhythm matches. */}
       <div className="ct-head" style={{ paddingBottom: 18 }}>
         <div className="ct-crumbs">
-          <span className="cur">Agents</span>
+          <span className="cur">Workflows</span>
         </div>
         <div className="ct-title-row">
-          <h1 className="ct-title">Agents</h1>
+          <h1 className="ct-title">Workflows</h1>
           <div className="ct-actions">
             <button className="btn btn-primary" onClick={() => setAddOpen(true)} disabled={creating}>
-              <Ic.Plus size={14} /> {creating ? "Creating…" : "New agent"}
+              <Ic.Plus size={14} /> {creating ? "Creating…" : "New workflow"}
             </button>
           </div>
         </div>
@@ -101,15 +101,15 @@ function WorkflowsListPage() {
 
         {workflows.error instanceof ApiError && (
           <div className="cn-banner cn-banner-err" style={{ margin: 16 }}>
-            <div className="cn-banner-h">Couldn't load agents</div>
+            <div className="cn-banner-h">Couldn't load workflows</div>
             <div className="cn-banner-p">{workflows.error.message}</div>
           </div>
         )}
 
         {!workflows.isLoading && !workflows.error && rows.length === 0 && (
           <div className="ct-empty">
-            <div className="ct-empty-h">No agents yet</div>
-            <div className="ct-empty-p">Click <strong>New agent</strong> to open the editor.</div>
+            <div className="ct-empty-h">No workflows yet</div>
+            <div className="ct-empty-p">Click <strong>New workflow</strong> to open the editor.</div>
           </div>
         )}
 
@@ -117,7 +117,7 @@ function WorkflowsListPage() {
           <table className="tbl">
             <thead>
               <tr>
-                <th style={{ width: "44%" }}>Agent</th>
+                <th style={{ width: "44%" }}>Workflow</th>
                 <th>Triggers</th>
                 <th>Version</th>
                 <th>Updated</th>
@@ -186,14 +186,14 @@ function WorkflowsListPage() {
                       <button
                         className="btn btn-ghost"
                         onClick={() => setEnabled.mutate({ workflowId: w.id, enabled: !w.enabled })}
-                        title={w.enabled ? "Disable agent" : "Enable agent"}
+                        title={w.enabled ? "Disable workflow" : "Enable workflow"}
                       >
                         {w.enabled ? <Ic.Pause size={13} /> : <Ic.Play size={13} />}
                       </button>
                       <button
                         className="btn btn-ghost"
                         onClick={() => handleDelete(w.id, w.name)}
-                        title="Delete agent"
+                        title="Delete workflow"
                       >
                         <Ic.Trash size={13} />
                       </button>

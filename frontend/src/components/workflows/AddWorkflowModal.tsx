@@ -16,13 +16,13 @@ interface AddWorkflowModalProps {
 type Step = "choose" | "describe" | "templates";
 
 const HEAD: Record<Step, { title: string; sub: string }> = {
-  choose: { title: "Add agent", sub: "Describe what it should do, start blank, or pick a template." },
-  describe: { title: "Describe a task", sub: "Say what this agent should do, in plain language." },
+  choose: { title: "Add workflow", sub: "Describe what it should do, start blank, or pick a template." },
+  describe: { title: "Describe a task", sub: "Say what this workflow should do, in plain language." },
   templates: { title: "Choose a template", sub: "Each is a ready-to-run starting point you can edit." },
 };
 
 /**
- * "Add agent" dialog. Step 1 offers three on-ramps: Describe a task (the agent-first default —
+ * "Add workflow" dialog. Step 1 offers three on-ramps: Describe a task (the default —
  * capture intent in plain language), Blank (an empty canvas), or Template (a ready-made workflow).
  * Choosing Describe flips, in place, to a task textarea; choosing Template flips to a card grid.
  * Warm-theme `.mdl` portal shell. The template grid is data-driven from WORKFLOW_TEMPLATES — a new
@@ -81,7 +81,7 @@ export function AddWorkflowModal({ templates, pending, onBlank, onTask, onTempla
           {step === "describe" && (
             <div className="wf-form">
               <div className="wf-form-row">
-                <span className="wf-form-label">What should this agent do?</span>
+                <span className="wf-form-label">What should this workflow do?</span>
                 <textarea
                   className="wf-form-textarea"
                   value={task}
@@ -111,7 +111,7 @@ export function AddWorkflowModal({ templates, pending, onBlank, onTask, onTempla
           <div className="mdl-foot">
             <button className="btn" onClick={onClose}>Cancel</button>
             <button className="btn btn-primary" disabled={!canCreate} onClick={() => onTask(task)}>
-              {pending ? "Creating…" : "Create agent"}
+              {pending ? "Creating…" : "Create workflow"}
             </button>
           </div>
         )}

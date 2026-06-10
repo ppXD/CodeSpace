@@ -114,7 +114,7 @@ function WorkflowEditorPage() {
   const activeTab: AgentDetailTab = tab ?? "overview";
   const navigate = useNavigate();
   const workflow = useWorkflow(workflowId);
-  const name = workflow.data?.name ?? "Agent";
+  const name = workflow.data?.name ?? "Workflow";
 
   const setTab = (next: string) =>
     navigate({
@@ -142,7 +142,7 @@ function WorkflowEditorPage() {
       onActiveChange={setTab}
       crumbs={
         <>
-          <a onClick={() => navigate({ to: "/teams/$teamSlug/workflows", params: { teamSlug } })}>Agents</a>
+          <a onClick={() => navigate({ to: "/teams/$teamSlug/workflows", params: { teamSlug } })}>Workflows</a>
           <span className="sep">/</span>
           <span className="cur">{name}</span>
         </>
@@ -177,7 +177,7 @@ function EditorShell() {
       <section className="ct">
         <div className="ct-body">
           <div className="cn-banner cn-banner-err" style={{ margin: 16 }}>
-            <div className="cn-banner-h">Agent not found</div>
+            <div className="cn-banner-h">Workflow not found</div>
             <div className="cn-banner-p">{workflow.error?.message ?? "It may have been deleted."}</div>
           </div>
         </div>
@@ -744,7 +744,7 @@ function Editor({ workflow, manifests, saving, onSave }: EditorProps) {
           className="wf-editor-name"
           value={name}
           onChange={(e) => { setName(e.target.value); setUnsaved(true); }}
-          placeholder="Agent name"
+          placeholder="Workflow name"
         />
 
         <div className="wf-editor-bar-spacer" />
@@ -765,7 +765,7 @@ function Editor({ workflow, manifests, saving, onSave }: EditorProps) {
               className="wf-editor-toolbar-run"
               onClick={() => void handleRun()}
               disabled={runManually.isPending}
-              title="Run this agent now"
+              title="Run this workflow now"
             >
               <Ic.Play size={13} /> {runManually.isPending ? "Running…" : "Run"}
             </button>

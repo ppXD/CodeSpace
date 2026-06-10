@@ -35,13 +35,13 @@ function WorkflowRunDetailPage() {
     <section className="ct">
       <div className="ct-head" style={{ paddingBottom: 16 }}>
         <div className="ct-crumbs">
-          <a onClick={() => navigate({ to: "/teams/$teamSlug/workflows", params: { teamSlug } })}>Agents</a>
+          <a onClick={() => navigate({ to: "/teams/$teamSlug/workflows", params: { teamSlug } })}>Workflows</a>
           <span className="sep">/</span>
           {workflowId ? (
             <a onClick={() => navigate({ to: "/teams/$teamSlug/workflows/$workflowId", params: { teamSlug, workflowId } })}>
-              {workflow.data?.name ?? "Agent"}
+              {workflow.data?.name ?? "Workflow"}
             </a>
-          ) : <span>Agent</span>}
+          ) : <span>Workflow</span>}
           <span className="sep">/</span>
           {workflowId ? (
             <a onClick={() => navigate({ to: "/teams/$teamSlug/workflows/$workflowId/runs", params: { teamSlug, workflowId } })}>Activity</a>
