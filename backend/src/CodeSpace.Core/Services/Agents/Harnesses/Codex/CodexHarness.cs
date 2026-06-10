@@ -33,7 +33,19 @@ public sealed class CodexHarness : IAgentHarness, ISingletonDependency
 
     public SandboxSpec BuildInvocation(AgentTask task)
     {
-        var args = new List<string> { "exec", "--json", "--model", task.Model, "--sandbox", SandboxMode(task.Permissions), task.Goal };
+        var args = new List<string> { "exec", "--json" };
+
+        // Omit --model when blank so Codex picks its own default (the Model=empty rule). Passing an empty
+        // string would emit `--model ""`, which Codex rejects.
+        if (!string.IsNullOrWhiteSpace(task.Model))
+        {
+            args.Add("--model");
+            args.Add(task.Model);
+        }
+
+        args.Add("--sandbox");
+        args.Add(SandboxMode(task.Permissions));
+        args.Add(task.Goal);
 
         return new SandboxSpec
         {

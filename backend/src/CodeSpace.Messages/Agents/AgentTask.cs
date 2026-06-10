@@ -17,8 +17,15 @@ public sealed record AgentTask
     /// <summary>Harness kind to run this task — resolved via <see cref="IAgentHarnessRegistry"/> (e.g. "codex-cli").</summary>
     public required string Harness { get; init; }
 
-    /// <summary>Model id, valid within the chosen harness's <see cref="IAgentHarness.Models"/> catalog.</summary>
-    public required string Model { get; init; }
+    /// <summary>Model id within the chosen harness's <see cref="IAgentHarness.Models"/> catalog, or null/blank to let the harness pick its own default (the Model=empty rule).</summary>
+    public string? Model { get; init; }
+
+    /// <summary>
+    /// Optional Agent persona (<c>AgentDefinition</c>) this run resolves from — null = a pure-inline run (no persona).
+    /// When set, the dispatch-time <c>IAgentDefinitionResolver</c> merges the persona's system prompt + model into this
+    /// task before the run is persisted; the id is preserved here as run provenance.
+    /// </summary>
+    public Guid? AgentDefinitionId { get; init; }
 
     /// <summary>Sandbox runner to execute on — e.g. "local", "docker", "k8s". Null → the executor's default. The knob for choosing / overriding the execution backend per run.</summary>
     public string? RunnerKind { get; init; }

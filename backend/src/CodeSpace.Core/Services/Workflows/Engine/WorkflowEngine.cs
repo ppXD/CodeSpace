@@ -55,6 +55,7 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
     private readonly ISubworkflowService _subworkflowService;
     private readonly IWorkflowResumeService _resumeService;
     private readonly IAgentRunService _agentRunService;
+    private readonly IAgentDefinitionResolver _agentDefinitionResolver;
     // The run's lifetime scope — BeginLifetimeScope() per parallel node gives each its own DbContext +
     // record logger so concurrent nodes never share an EF change-tracker (see RunNodeInChildScopeAsync).
     private readonly ILifetimeScope _lifetimeScope;
@@ -70,7 +71,7 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
     internal const int DefaultMaxParallelism = 8;
     internal const int MaxParallelismCeiling = 64;
 
-    public WorkflowEngine(CodeSpaceDbContext db, INodeRegistry nodeRegistry, IVariableService variableService, IRunRecordLogger recordLogger, IPayloadRedactor redactor, IArtifactStore artifactStore, ILogger<WorkflowEngine> logger, ILoggerFactory loggerFactory, ICodeSpaceBackgroundJobClient backgroundJobClient, ISubworkflowService subworkflowService, IWorkflowResumeService resumeService, IAgentRunService agentRunService, ILifetimeScope lifetimeScope)
+    public WorkflowEngine(CodeSpaceDbContext db, INodeRegistry nodeRegistry, IVariableService variableService, IRunRecordLogger recordLogger, IPayloadRedactor redactor, IArtifactStore artifactStore, ILogger<WorkflowEngine> logger, ILoggerFactory loggerFactory, ICodeSpaceBackgroundJobClient backgroundJobClient, ISubworkflowService subworkflowService, IWorkflowResumeService resumeService, IAgentRunService agentRunService, IAgentDefinitionResolver agentDefinitionResolver, ILifetimeScope lifetimeScope)
     {
         _db = db;
         _nodeRegistry = nodeRegistry;
@@ -84,6 +85,7 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
         _subworkflowService = subworkflowService;
         _resumeService = resumeService;
         _agentRunService = agentRunService;
+        _agentDefinitionResolver = agentDefinitionResolver;
         _lifetimeScope = lifetimeScope;
         _maxParallelism = ParseMaxParallelism(Environment.GetEnvironmentVariable(MaxParallelismEnvVar));
     }
@@ -1698,6 +1700,18 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
         catch (JsonException ex)
         {
             throw new NodeFailureException($"Node '{node.Id}' suspended with an invalid agent-task envelope: {ex.Message}");
+        }
+
+        // Resolve the persona (if any) into the task BEFORE persisting, so the run's TaskJson is the final
+        // merged task — self-describing + deterministic on re-claim. A missing/foreign persona is a clean
+        // node failure, like a bad envelope above.
+        try
+        {
+            task = await _agentDefinitionResolver.ResolveAsync(task, run.TeamId, cancellationToken).ConfigureAwait(false);
+        }
+        catch (AgentDefinitionResolutionException ex)
+        {
+            throw new NodeFailureException($"Node '{node.Id}': {ex.Message}");
         }
 
         var agentRun = await _agentRunService.CreateAsync(task, run.TeamId, run.Id, node.Id, cancellationToken).ConfigureAwait(false);
