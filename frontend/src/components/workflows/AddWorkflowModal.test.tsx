@@ -38,7 +38,7 @@ describe("AddWorkflowModal", () => {
     const field = screen.getByRole("textbox");
     expect(field).toBeInTheDocument();
 
-    const create = screen.getByRole("button", { name: /Create agent/ });
+    const create = screen.getByRole("button", { name: /Create workflow/ });
     expect(create).toBeDisabled();
 
     fireEvent.change(field, { target: { value: "Triage incoming bugs" } });
@@ -53,7 +53,7 @@ describe("AddWorkflowModal", () => {
     fireEvent.click(screen.getByRole("button", { name: /Describe a task/ }));
     fireEvent.change(screen.getByRole("textbox"), { target: { value: "   " } });
 
-    expect(screen.getByRole("button", { name: /Create agent/ })).toBeDisabled();
+    expect(screen.getByRole("button", { name: /Create workflow/ })).toBeDisabled();
     expect(onTask).not.toHaveBeenCalled();
   });
 

@@ -52,10 +52,10 @@ function WorkflowRunsPage() {
     <section className="ct">
       <div className="ct-head" style={{ paddingBottom: 14 }}>
         <div className="ct-crumbs">
-          <a onClick={() => navigate({ to: "/teams/$teamSlug/workflows", params: { teamSlug } })}>Agents</a>
+          <a onClick={() => navigate({ to: "/teams/$teamSlug/workflows", params: { teamSlug } })}>Workflows</a>
           <span className="sep">/</span>
           <a onClick={() => navigate({ to: "/teams/$teamSlug/workflows/$workflowId", params: { teamSlug, workflowId } })}>
-            {workflow.data?.name ?? "Agent"}
+            {workflow.data?.name ?? "Workflow"}
           </a>
           <span className="sep">/</span>
           <span className="cur">Activity</span>
@@ -79,7 +79,7 @@ function WorkflowRunsPage() {
       <div className="ct-body">
         {workflow.error instanceof ApiError && (
           <div className="cn-banner cn-banner-err" style={{ margin: 16 }}>
-            <div className="cn-banner-h">Agent not found</div>
+            <div className="cn-banner-h">Workflow not found</div>
             <div className="cn-banner-p">{workflow.error.message}</div>
           </div>
         )}
