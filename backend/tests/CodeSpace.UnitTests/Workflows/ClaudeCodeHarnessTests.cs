@@ -18,11 +18,12 @@ public class ClaudeCodeHarnessTests
 {
     private static readonly ClaudeCodeHarness Harness = new();
 
-    private static AgentTask Task(string goal = "Fix the failing billing tests", string? model = "claude-opus-4-8", AgentWriteScope scope = AgentWriteScope.Workspace) => new()
+    private static AgentTask Task(string goal = "Fix the failing billing tests", string? model = "claude-opus-4-8", AgentWriteScope scope = AgentWriteScope.Workspace, IReadOnlyList<string>? tools = null) => new()
     {
         Goal = goal,
         Harness = ClaudeCodeHarness.HarnessKind,
         Model = model,
+        Tools = tools,
         WorkspaceDirectory = "/tmp/ws",
         Permissions = new AgentPermissions { WriteScope = scope },
         TimeoutSeconds = 900,
@@ -71,6 +72,28 @@ public class ClaudeCodeHarnessTests
         var i = args.IndexOf("--permission-mode");
         i.ShouldBeGreaterThanOrEqualTo(0);
         args[i + 1].ShouldBe(expectedMode);
+    }
+
+    [Fact]
+    public void Projects_the_tool_allow_list_before_permission_mode_so_the_prompt_is_not_swallowed()
+    {
+        var args = Harness.BuildInvocation(Task(tools: new[] { "Read", "Grep", "Bash" })).Args.ToList();
+
+        // --allowed-tools + its values must sit BEFORE --permission-mode (the variadic stops at the next flag),
+        // and the prompt stays the trailing positional argument.
+        var toolsAt = args.IndexOf("--allowed-tools");
+        var modeAt = args.IndexOf("--permission-mode");
+        toolsAt.ShouldBeGreaterThanOrEqualTo(0);
+        toolsAt.ShouldBeLessThan(modeAt, "the variadic --allowed-tools must be bounded by --permission-mode");
+        args.GetRange(toolsAt + 1, 3).ShouldBe(new[] { "Read", "Grep", "Bash" });
+        args[^1].ShouldBe("Fix the failing billing tests", "the prompt remains the trailing positional argument");
+    }
+
+    [Fact]
+    public void Omits_the_tool_allow_list_when_tools_are_null_or_empty()
+    {
+        Harness.BuildInvocation(Task(tools: null)).Args.ShouldNotContain("--allowed-tools", customMessage: "null tools = inherit the harness default");
+        Harness.BuildInvocation(Task(tools: Array.Empty<string>())).Args.ShouldNotContain("--allowed-tools");
     }
 
     [Fact]

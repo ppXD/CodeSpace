@@ -1,3 +1,4 @@
+using System.Text.Json;
 using CodeSpace.Core.DependencyInjection;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
@@ -40,7 +41,9 @@ public sealed class AgentDefinitionResolver : IAgentDefinitionResolver, IScopedD
 
         var model = ResolveModel(task.Model, persona.Model);
 
-        return task with { Goal = goal, Model = model };
+        var tools = MergeTools(ParseTools(persona.ToolsJson), task.Tools);
+
+        return task with { Goal = goal, Model = model, Tools = tools };
     }
 
     private async Task<AgentDefinition> LoadPersonaAsync(Guid id, Guid teamId, CancellationToken cancellationToken) =>
@@ -65,4 +68,29 @@ public sealed class AgentDefinitionResolver : IAgentDefinitionResolver, IScopedD
         !string.IsNullOrWhiteSpace(nodeModel) ? nodeModel
         : !string.IsNullOrWhiteSpace(personaModel) ? personaModel
         : null;
+
+    /// <summary>
+    /// UNION the persona's tools with the node's, preserving the tri-state: if either side is null (inherit the
+    /// harness default), the other side wins as-is; when both are present, the union is order-stable and de-duped
+    /// (persona tools first, then any node tools not already present). Tools SUPPLEMENT, never narrow — picking a
+    /// persona and adding a tool inline grants both.
+    /// </summary>
+    internal static IReadOnlyList<string>? MergeTools(IReadOnlyList<string>? personaTools, IReadOnlyList<string>? nodeTools)
+    {
+        if (personaTools is null) return nodeTools;
+        if (nodeTools is null) return personaTools;
+
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        var merged = new List<string>();
+
+        foreach (var tool in personaTools.Concat(nodeTools))
+            if (!string.IsNullOrWhiteSpace(tool) && seen.Add(tool))
+                merged.Add(tool);
+
+        return merged;
+    }
+
+    /// <summary>Deserialize the persona's jsonb tool list — null/blank = inherit the harness default (distinct from "[]" = no tools).</summary>
+    internal static IReadOnlyList<string>? ParseTools(string? toolsJson) =>
+        string.IsNullOrWhiteSpace(toolsJson) ? null : JsonSerializer.Deserialize<List<string>>(toolsJson, AgentJson.Options);
 }

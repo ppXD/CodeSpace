@@ -126,6 +126,24 @@ public class AgentCodeNodeTests
     }
 
     [Fact]
+    public async Task Tools_config_is_carried_onto_the_task_and_absent_tools_stay_null()
+    {
+        var withTools = new Dictionary<string, JsonElement>
+        {
+            ["goal"] = Str("Fix it"), ["harness"] = Str("codex-cli"),
+            ["tools"] = JsonSerializer.SerializeToElement(new[] { "Read", "Grep" }),
+        };
+        var withoutTools = new Dictionary<string, JsonElement> { ["goal"] = Str("Fix it"), ["harness"] = Str("codex-cli") };
+
+        var a = await new AgentCodeNode().RunAsync(BuildContext(withTools, resume: null), CancellationToken.None);
+        var b = await new AgentCodeNode().RunAsync(BuildContext(withoutTools, resume: null), CancellationToken.None);
+
+        JsonSerializer.Deserialize<AgentTask>(a.SuspendUntil!.Payload, AgentJson.Options)!.Tools.ShouldBe(new[] { "Read", "Grep" });
+        JsonSerializer.Deserialize<AgentTask>(b.SuspendUntil!.Payload, AgentJson.Options)!.Tools
+            .ShouldBeNull("no tools config → null = inherit the harness default (the resolver/harness decide), not an empty list");
+    }
+
+    [Fact]
     public async Task Malformed_agent_definition_id_fails_the_node()
     {
         var config = new Dictionary<string, JsonElement> { ["harness"] = Str("codex-cli"), ["agentDefinitionId"] = Str("not-a-uuid") };

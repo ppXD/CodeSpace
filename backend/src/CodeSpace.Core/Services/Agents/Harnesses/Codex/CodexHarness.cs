@@ -35,6 +35,11 @@ public sealed class CodexHarness : IAgentHarness, ISingletonDependency
     {
         var args = new List<string> { "exec", "--json" };
 
+        // task.Tools is intentionally NOT projected here: Codex has no global tool allow-list (it restricts via
+        // --sandbox + per-MCP-server enabled_tools), so a Claude-Code-style tool list has no faithful Codex flag.
+        // The list rides along in the task for harnesses that enforce it (Claude Code → --allowed-tools); Codex
+        // bounds the agent through the sandbox mode below instead.
+
         // Omit --model when blank so Codex picks its own default (the Model=empty rule). Passing an empty
         // string would emit `--model ""`, which Codex rejects.
         if (!string.IsNullOrWhiteSpace(task.Model))
