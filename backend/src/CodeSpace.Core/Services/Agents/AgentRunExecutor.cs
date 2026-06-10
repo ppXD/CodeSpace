@@ -4,6 +4,7 @@ using CodeSpace.Core.Services.Agents.Sandbox;
 using CodeSpace.Core.Services.Agents.Workspace;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Enums;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 
 namespace CodeSpace.Core.Services.Agents;
@@ -36,9 +37,11 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     private readonly IAgentWorkspaceResolver _workspaceResolver;
     private readonly IWorkspaceProviderRegistry _workspaces;
     private readonly IAgentRunCompletionNotifier _notifier;
+    // Mints a fresh DI scope (→ its own DbContext) for the heartbeat loop, which runs concurrently with the event stream.
+    private readonly IServiceScopeFactory _scopeFactory;
     private readonly ILogger<AgentRunExecutor> _logger;
 
-    public AgentRunExecutor(IAgentRunService runs, IAgentHarnessRegistry harnesses, ISandboxRunnerRegistry runners, IAgentWorkspaceResolver workspaceResolver, IWorkspaceProviderRegistry workspaces, IAgentRunCompletionNotifier notifier, ILogger<AgentRunExecutor> logger)
+    public AgentRunExecutor(IAgentRunService runs, IAgentHarnessRegistry harnesses, ISandboxRunnerRegistry runners, IAgentWorkspaceResolver workspaceResolver, IWorkspaceProviderRegistry workspaces, IAgentRunCompletionNotifier notifier, IServiceScopeFactory scopeFactory, ILogger<AgentRunExecutor> logger)
     {
         _runs = runs;
         _harnesses = harnesses;
@@ -46,6 +49,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         _workspaceResolver = workspaceResolver;
         _workspaces = workspaces;
         _notifier = notifier;
+        _scopeFactory = scopeFactory;
         _logger = logger;
     }
 
@@ -133,11 +137,41 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
             events.Add(normalized);
         }
 
-        var sandbox = await RunAndStreamAsync(runner, spec, PersistLineAsync, cancellationToken).ConfigureAwait(false);
+        var sandbox = await RunWithHeartbeatAsync(runId, runner, spec, PersistLineAsync, cancellationToken).ConfigureAwait(false);
 
         return sandbox.Status == SandboxStatus.TimedOut
             ? new AgentRunResult { Status = AgentRunStatus.TimedOut, ExitReason = "timed-out", Error = "The agent run exceeded its time budget and was terminated." }
             : harness.BuildResult(events, sandbox.ExitCode);
+    }
+
+    /// <summary>
+    /// Run the harness while a background <see cref="HeartbeatLoop"/> keeps the run's liveness fresh, so a
+    /// long QUIET step (no event output) isn't mistaken for a crashed worker and abandoned by the reconciler.
+    /// The heartbeat pings on a DEDICATED DI scope — its own DbContext — because it runs concurrently with the
+    /// event stream (<paramref name="persistLine"/>) and a scoped DbContext is not thread-safe. The loop is
+    /// cancelled and awaited the moment the harness returns (or the worker is torn down).
+    /// </summary>
+    private async Task<SandboxResult> RunWithHeartbeatAsync(Guid runId, ISandboxRunner runner, SandboxSpec spec, Func<string, Task> persistLine, CancellationToken cancellationToken)
+    {
+        using var heartbeatScope = _scopeFactory.CreateScope();
+        var heartbeatRuns = heartbeatScope.ServiceProvider.GetRequiredService<IAgentRunService>();
+
+        using var heartbeatCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        var heartbeat = HeartbeatLoop.RunAsync(
+            ct => heartbeatRuns.HeartbeatAsync(runId, ct),
+            AgentRunLiveness.HeartbeatInterval,
+            ex => _logger.LogWarning(ex, "Heartbeat ping failed for agent run {RunId}; will retry next interval", runId),
+            heartbeatCts.Token);
+
+        try
+        {
+            return await RunAndStreamAsync(runner, spec, persistLine, cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            heartbeatCts.Cancel();
+            await heartbeat.ConfigureAwait(false);
+        }
     }
 
     /// <summary>Stream the harness live when the runner supports it (events land as emitted); otherwise run batch and replay captured stdout through the same per-line path.</summary>
