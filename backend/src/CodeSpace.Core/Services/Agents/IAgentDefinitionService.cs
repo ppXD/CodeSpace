@@ -35,6 +35,14 @@ public interface IAgentDefinitionService
     Task UpdateAsync(Guid teamId, Guid agentDefinitionId, AgentDefinitionInput input, Guid actorUserId, CancellationToken cancellationToken);
 
     /// <summary>
+    /// Create an IMPORTED persona (<c>Origin = Imported</c>) from a parsed artifact — sets the authorable
+    /// fields PLUS the import-owned ones (skills / MCP / verbatim frontmatter / SourcePath / PackId). The
+    /// slug is derived from the name and guarded for per-team uniqueness exactly like an authored create
+    /// (throws an actionable <see cref="InvalidOperationException"/> on collision).
+    /// </summary>
+    Task<Guid> ImportAsync(Guid teamId, ImportedAgentDefinitionInput input, Guid actorUserId, CancellationToken cancellationToken);
+
+    /// <summary>
     /// Soft-delete a persona (the slug becomes reusable). Throws <see cref="KeyNotFoundException"/>
     /// when not found in this team.
     /// </summary>

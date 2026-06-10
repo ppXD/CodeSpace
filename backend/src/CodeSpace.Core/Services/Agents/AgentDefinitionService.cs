@@ -74,6 +74,43 @@ public sealed class AgentDefinitionService : IAgentDefinitionService, IScopedDep
         return agent.Id;
     }
 
+    public async Task<Guid> ImportAsync(Guid teamId, ImportedAgentDefinitionInput input, Guid actorUserId, CancellationToken cancellationToken)
+    {
+        var slug = DeriveValidSlug(input.Name);
+
+        await EnsureSlugAvailableAsync(teamId, slug, input.Name, cancellationToken).ConfigureAwait(false);
+
+        var now = DateTimeOffset.UtcNow;
+        var agent = new AgentDefinition
+        {
+            Id = Guid.NewGuid(),
+            TeamId = teamId,
+            Slug = slug,
+            Origin = AgentDefinitionOrigin.Imported,
+            PackId = input.PackId,
+            SourcePath = input.SourcePath,
+            Name = input.Name,
+            Description = input.Description,
+            SystemPrompt = input.SystemPrompt ?? "",
+            Model = NullIfBlank(input.Model),
+            DefaultAutonomy = NullIfBlank(input.DefaultAutonomy),
+            ToolsJson = SerializeTools(input.Tools),
+            SkillsJson = string.IsNullOrWhiteSpace(input.SkillsJson) ? "[]" : input.SkillsJson,
+            McpServersJson = string.IsNullOrWhiteSpace(input.McpServersJson) ? "[]" : input.McpServersJson,
+            RawFrontmatterJson = string.IsNullOrWhiteSpace(input.RawFrontmatterJson) ? "{}" : input.RawFrontmatterJson,
+            CreatedDate = now,
+            CreatedBy = actorUserId,
+            LastModifiedDate = now,
+            LastModifiedBy = actorUserId,
+        };
+
+        _db.AgentDefinition.Add(agent);
+        await SaveCreateAsync(agent, slug, input.Name, cancellationToken).ConfigureAwait(false);
+
+        _logger.LogInformation("Agent persona imported: team={TeamId} agent={AgentId} slug={Slug} source={SourcePath}", teamId, agent.Id, slug, input.SourcePath);
+        return agent.Id;
+    }
+
     public async Task UpdateAsync(Guid teamId, Guid agentDefinitionId, AgentDefinitionInput input, Guid actorUserId, CancellationToken cancellationToken)
     {
         if (string.IsNullOrWhiteSpace(input.Name)) throw new ArgumentException("Agent name is required", nameof(input));
