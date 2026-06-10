@@ -23,7 +23,12 @@ public sealed class CodexHarness : IAgentHarness, ISingletonDependency
     /// <summary>Air-gapped operators pin a private build via this env var (Rule 8). Renaming it breaks their pin — see the pin test.</summary>
     public const string VersionEnvVar = "CODESPACE_CODEX_CLI_VERSION";
 
+    /// <summary>Air-gapped operators (and tests) repoint the Codex binary via this env var — an absolute path or a PATH name. Renaming it breaks their pin — see the pin test.</summary>
+    public const string CommandEnvVar = "CODESPACE_CODEX_CLI_PATH";
+
     private const string DefaultVersion = "0.2.0";
+
+    private const string DefaultCommand = "codex";
 
     public string Kind => HarnessKind;
 
@@ -54,7 +59,7 @@ public sealed class CodexHarness : IAgentHarness, ISingletonDependency
 
         return new SandboxSpec
         {
-            Command = "codex",
+            Command = ResolveCommand(),
             Args = args,
             WorkingDirectory = task.WorkspaceDirectory,
             Environment = task.Environment,
@@ -92,6 +97,10 @@ public sealed class CodexHarness : IAgentHarness, ISingletonDependency
 
         return new AgentRunResult { Status = AgentRunStatus.Failed, ExitReason = "non-zero-exit", Summary = summary, ChangedFiles = changedFiles, Error = error };
     }
+
+    /// <summary>The Codex executable — the <see cref="CommandEnvVar"/> override (absolute path / PATH name) when set, else <c>codex</c> on PATH.</summary>
+    private static string ResolveCommand() =>
+        System.Environment.GetEnvironmentVariable(CommandEnvVar) is { Length: > 0 } path ? path : DefaultCommand;
 
     private static string SandboxMode(AgentPermissions permissions) =>
         permissions.WriteScope == AgentWriteScope.ReadOnly ? "read-only" : "workspace-write";

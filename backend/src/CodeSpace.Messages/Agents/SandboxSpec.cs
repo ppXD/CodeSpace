@@ -23,7 +23,11 @@ public sealed record SandboxSpec
     public int TimeoutSeconds { get; init; } = 600;
 }
 
-/// <summary>Outcome of a sandbox run. Output is captured in full in v0; a future slice adds streaming + size caps for long agent runs.</summary>
+/// <summary>
+/// Outcome of a sandbox run. A runner that streams (<see cref="ISandboxStreamRunner"/>) delivers stdout
+/// live line-by-line and leaves <see cref="Stdout"/> empty; the non-streaming <see cref="ISandboxRunner.RunAsync"/>
+/// path returns it buffered in full. A stderr size cap for chatty long runs is a future sibling capability.
+/// </summary>
 public sealed record SandboxResult
 {
     public required SandboxStatus Status { get; init; }
@@ -31,6 +35,7 @@ public sealed record SandboxResult
     /// <summary>Process exit code. <c>-1</c> when the command was terminated before a natural exit (timeout).</summary>
     public required int ExitCode { get; init; }
 
+    /// <summary>Buffered stdout from the non-streaming path; empty when the run streamed line-by-line (the lines were delivered live).</summary>
     public required string Stdout { get; init; }
 
     public required string Stderr { get; init; }
