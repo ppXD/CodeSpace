@@ -1,3 +1,4 @@
+using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Commands.Agents;
 using CodeSpace.Messages.Queries.Agents;
 using MediatR;
@@ -51,5 +52,21 @@ public class AgentDefinitionsController : ControllerBase
     {
         await _mediator.Send(new DeleteAgentDefinitionCommand { AgentDefinitionId = agentDefinitionId }, cancellationToken).ConfigureAwait(false);
         return NoContent();
+    }
+
+    /// <summary>Dry-run: discover + parse the agents in a bound repository's pack (no persistence) so the operator can inspect + select before importing.</summary>
+    [HttpPost("import-preview")]
+    public async Task<IActionResult> ImportPreview([FromBody] PreviewAgentPackQuery query, CancellationToken cancellationToken)
+    {
+        var result = await _mediator.Send(query, cancellationToken).ConfigureAwait(false);
+        return Ok(result);
+    }
+
+    /// <summary>Commit the selected agents from a previewed pack — returns a per-path outcome (imported / skipped / failed).</summary>
+    [HttpPost("import")]
+    public async Task<IActionResult> Import([FromBody] ImportAgentPackCommand command, CancellationToken cancellationToken)
+    {
+        var result = await _mediator.Send(command, cancellationToken).ConfigureAwait(false);
+        return Ok(result);
     }
 }
