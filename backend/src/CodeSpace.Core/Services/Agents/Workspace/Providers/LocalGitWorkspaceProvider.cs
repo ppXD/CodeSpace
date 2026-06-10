@@ -168,8 +168,19 @@ public sealed class LocalGitWorkspaceProvider : IWorkspaceProvider, ISingletonDe
 
         private async Task<string> RunGitOrThrowAsync(IReadOnlyList<string> args, CancellationToken cancellationToken)
         {
-            var result = await _runner.RunAsync(
-                new SandboxSpec { Command = "git", Args = args, WorkingDirectory = Directory, TimeoutSeconds = CaptureTimeoutSeconds }, cancellationToken).ConfigureAwait(false);
+            SandboxResult result;
+            try
+            {
+                result = await _runner.RunAsync(
+                    new SandboxSpec { Command = "git", Args = args, WorkingDirectory = Directory, TimeoutSeconds = CaptureTimeoutSeconds }, cancellationToken).ConfigureAwait(false);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                // Honour the IWorkspaceHandle contract: a git failure — including an INFRASTRUCTURE failure the
+                // runner throws (git not on PATH, the working directory removed mid-run) — surfaces as a
+                // WorkspaceException, never a raw Win32Exception/IOException leaking to the caller.
+                throw new WorkspaceException($"git {string.Join(' ', args)} could not run: {ex.Message}", ex);
+            }
 
             if (result.Status != SandboxStatus.Success)
                 throw new WorkspaceException($"git {string.Join(' ', args)} failed (exit {result.ExitCode}): {result.Stderr.Trim()}");

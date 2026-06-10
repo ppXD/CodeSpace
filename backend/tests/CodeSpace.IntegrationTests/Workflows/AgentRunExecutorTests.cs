@@ -1,3 +1,4 @@
+using System.Text.Json;
 using Autofac;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
@@ -147,6 +148,70 @@ public class AgentRunExecutorTests
         var run = await verify.Resolve<IAgentRunService>().GetAsync(runId, CancellationToken.None);
         run.Status.ShouldBe(AgentRunStatus.Failed, "a workspace clone failure lands the run Failed, not stuck Running");
         run.Error.ShouldNotBeNull();
+    }
+
+    [Fact]
+    public async Task Captures_the_git_diff_ground_truth_of_the_agents_edits_into_the_result()
+    {
+        if (OperatingSystem.IsWindows()) return;
+        if (!await GitAvailableAsync()) return;
+
+        var teamId = await SeedTeamAsync();
+        using var origin = new TempDir();
+        await SeedLocalRepoAsync(origin.Path, "README.md", "hello\n");
+        var repoId = await SeedRepositoryAsync(teamId, new Uri(origin.Path).AbsoluteUri, defaultBranch: "main");
+        var runId = await CreateRepoRunAsync(teamId, repoId);
+
+        // The scripted harness makes a REAL edit in the clone; the executor must capture the git diff
+        // ground truth into the result (overriding any event-parsed list) before the workspace is disposed.
+        await ExecuteAsync(runId, new ScriptedHarness("printf 'added by the agent\\n' >> README.md; echo edited"));
+
+        using var scope = _fixture.BeginScope();
+        var run = await scope.Resolve<IAgentRunService>().GetAsync(runId, CancellationToken.None);
+        run.Status.ShouldBe(AgentRunStatus.Succeeded);
+
+        var result = JsonSerializer.Deserialize<AgentRunResult>(run.ResultJson!, AgentJson.Options)!;
+        result.ChangedFiles.ShouldContain("README.md", customMessage: "git ground truth — the captured diff lists the file the agent actually edited");
+        result.Patch.ShouldContain("added by the agent", customMessage: "the unified diff carries the actual change, captured from git before the clone was removed");
+    }
+
+    [Fact]
+    public async Task A_capture_infra_failure_does_not_flip_a_succeeded_run_to_failed()
+    {
+        if (OperatingSystem.IsWindows()) return;
+        if (!await GitAvailableAsync()) return;
+
+        var teamId = await SeedTeamAsync();
+        using var origin = new TempDir();
+        await SeedLocalRepoAsync(origin.Path, "README.md", "hello\n");
+        var repoId = await SeedRepositoryAsync(teamId, new Uri(origin.Path).AbsoluteUri, defaultBranch: "main");
+        var runId = await CreateRepoRunAsync(teamId, repoId);
+
+        // The harness SUCCEEDS (exit 0) but removes its own clone directory, so the post-run git-diff
+        // capture spawns git with a now-missing working directory — a RAW infra failure (not a non-zero
+        // git exit). Best-effort capture must swallow it and leave the run Succeeded, never flip it Failed.
+        await ExecuteAsync(runId, new ScriptedHarness("d=\"$(pwd)\"; cd /tmp 2>/dev/null; rm -rf \"$d\"; echo done"));
+
+        using var scope = _fixture.BeginScope();
+        var run = await scope.Resolve<IAgentRunService>().GetAsync(runId, CancellationToken.None);
+        run.Status.ShouldBe(AgentRunStatus.Succeeded, "a capture-time infrastructure failure is best-effort — the successful run must not become Failed over it");
+    }
+
+    [Fact]
+    public async Task A_run_with_no_workspace_has_an_empty_patch()
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        var teamId = await SeedTeamAsync();
+        var runId = await CreateScriptedRunAsync(teamId);   // no RepositoryId → no workspace → nothing to capture
+
+        await ExecuteAsync(runId, new ScriptedHarness("printf 'analysis only\\n'"));
+
+        using var scope = _fixture.BeginScope();
+        var run = await scope.Resolve<IAgentRunService>().GetAsync(runId, CancellationToken.None);
+
+        var result = JsonSerializer.Deserialize<AgentRunResult>(run.ResultJson!, AgentJson.Options)!;
+        result.Patch.ShouldBeEmpty("no workspace → the capture step is a no-op and the patch stays empty");
     }
 
     private async Task<Guid> CreateRepoRunAsync(Guid teamId, Guid repositoryId)

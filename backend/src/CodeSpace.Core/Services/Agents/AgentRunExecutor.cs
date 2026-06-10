@@ -31,6 +31,9 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     /// <summary>Runner used when the task doesn't pin one. v0 = the in-process local runner.</summary>
     private const string DefaultRunnerKind = "local";
 
+    /// <summary>Cap on the captured diff inlined into the persisted result row (~1 MB). A larger diff is truncated with a marker; the full diff belongs in the artifact layer (a later slice).</summary>
+    private const int MaxPatchChars = 1_000_000;
+
     private readonly IAgentRunService _runs;
     private readonly IAgentHarnessRegistry _harnesses;
     private readonly ISandboxRunnerRegistry _runners;
@@ -77,6 +80,8 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
 
             var result = await RunHarnessAsync(agentRunId, harness, runner, harness.BuildInvocation(effectiveTask), cancellationToken).ConfigureAwait(false);
 
+            result = await EnrichWithWorkspaceChangesAsync(agentRunId, result, workspace, cancellationToken).ConfigureAwait(false);
+
             await CompleteAndNotifyAsync(agentRunId, result, cancellationToken).ConfigureAwait(false);
         }
         catch (OperationCanceledException)
@@ -107,6 +112,43 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         }
 
         await _notifier.NotifyCompletedAsync(runId, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Fold the workspace's git-diff ground truth into the result — the agent's actual changed files +
+    /// unified patch, overriding the harness's event-parsed file list (git is authoritative, not the
+    /// agent's self-report). No-op when the run had no workspace. Best-effort: a capture failure is logged
+    /// and the result kept as-is, never flipping an otherwise-successful run to Failed over a git hiccup.
+    /// </summary>
+    private async Task<AgentRunResult> EnrichWithWorkspaceChangesAsync(Guid runId, AgentRunResult result, IWorkspaceHandle? workspace, CancellationToken cancellationToken)
+    {
+        if (workspace is null) return result;
+
+        try
+        {
+            var changes = await workspace.CaptureChangesAsync(cancellationToken).ConfigureAwait(false);
+            return result with { ChangedFiles = changes.ChangedFiles, Patch = TruncatePatch(changes.Patch, MaxPatchChars) };
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            // Best-effort + defence-in-depth: ANY capture failure (a wrapped WorkspaceException, or a raw
+            // infra exception that slipped the provider) is logged and the result kept — a git hiccup must
+            // never flip an otherwise-successful run to Failed. Cancellation still propagates (worker torn down).
+            _logger.LogWarning(ex, "Agent run {RunId}: failed to capture workspace changes; keeping the harness-reported file list", runId);
+            return result;
+        }
+    }
+
+    /// <summary>
+    /// Cap the inlined diff so a runaway / binary diff can't bloat the persisted run row (read on every
+    /// resume). The full diff moving to the artifact/observability layer is a later slice. Internal + static
+    /// so it's unit-pinned.
+    /// </summary>
+    internal static string TruncatePatch(string patch, int maxChars)
+    {
+        if (string.IsNullOrEmpty(patch) || patch.Length <= maxChars) return patch;
+
+        return patch[..maxChars] + $"\n... diff truncated ({patch.Length} chars; capped at {maxChars}) ...\n";
     }
 
     /// <summary>Claim the run (Queued → Running). Returns false when it's already Running/terminal — the exactly-once guard that stops a re-claim from re-spawning the harness.</summary>
