@@ -46,6 +46,14 @@ public sealed class ClaudeCodeHarness : IAgentHarness, ISingletonDependency
             args.Add(task.Model);
         }
 
+        // Project the tool allow-list. Placed BEFORE --permission-mode so the variadic stops at that flag and
+        // the trailing positional prompt is never swallowed. null/empty → omit (the harness's default toolset).
+        if (task.Tools is { Count: > 0 } tools)
+        {
+            args.Add("--allowed-tools");
+            args.AddRange(tools);
+        }
+
         args.Add("--permission-mode");
         args.Add(PermissionMode(task.Permissions));
 

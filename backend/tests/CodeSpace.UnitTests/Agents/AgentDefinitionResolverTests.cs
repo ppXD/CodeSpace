@@ -47,4 +47,49 @@ public class AgentDefinitionResolverTests
         AgentDefinitionResolver.ResolveModel(nodeModel, personaModel)
             .ShouldBeNull("no model anywhere = let the harness pick its own default (the Model=empty rule)");
     }
+
+    [Fact]
+    public void MergeTools_unions_persona_and_node_tools_order_stable_and_deduped()
+    {
+        AgentDefinitionResolver.MergeTools(new[] { "Read", "Grep" }, new[] { "Grep", "Bash" })
+            .ShouldBe(new[] { "Read", "Grep", "Bash" }, "persona tools first, then node tools not already present — supplement, never narrow");
+    }
+
+    [Fact]
+    public void MergeTools_returns_the_other_side_when_one_is_null_preserving_the_default_tristate()
+    {
+        // null = "inherit the harness default"; the present side wins as-is (no spurious empty list).
+        AgentDefinitionResolver.MergeTools(null, new[] { "Bash" }).ShouldBe(new[] { "Bash" });
+        AgentDefinitionResolver.MergeTools(new[] { "Read" }, null).ShouldBe(new[] { "Read" });
+        AgentDefinitionResolver.MergeTools(null, null).ShouldBeNull("both inherit the default → still the default");
+    }
+
+    [Fact]
+    public void MergeTools_skips_blank_entries()
+    {
+        AgentDefinitionResolver.MergeTools(new[] { "Read", "" }, new[] { "  ", "Bash" }).ShouldBe(new[] { "Read", "Bash" });
+    }
+
+    [Fact]
+    public void MergeTools_of_two_empty_lists_is_empty_not_null()
+    {
+        // [] = "explicitly no tools" — the union of two empties stays empty (distinct from null = default).
+        AgentDefinitionResolver.MergeTools(Array.Empty<string>(), Array.Empty<string>()).ShouldBeEmpty();
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("   ")]
+    public void ParseTools_returns_null_for_absent_or_blank_json(string? toolsJson)
+    {
+        AgentDefinitionResolver.ParseTools(toolsJson).ShouldBeNull("null/blank ToolsJson = inherit the harness default");
+    }
+
+    [Fact]
+    public void ParseTools_round_trips_a_json_array()
+    {
+        AgentDefinitionResolver.ParseTools("[\"Read\",\"Grep\"]").ShouldBe(new[] { "Read", "Grep" });
+        AgentDefinitionResolver.ParseTools("[]").ShouldBeEmpty("an explicit empty array is 'no tools', not the default");
+    }
 }

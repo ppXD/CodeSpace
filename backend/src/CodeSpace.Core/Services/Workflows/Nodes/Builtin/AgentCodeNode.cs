@@ -48,6 +48,7 @@ public sealed class AgentCodeNode : INodeRuntime
                 "goal":           { "type": "string", "description": "What the agent should do (the prompt). Required unless a persona is selected, in which case it's the task-specific addition to the persona's prompt." },
                 "harness":        { "type": "string", "description": "Agent harness kind, e.g. \"codex-cli\"." },
                 "model":          { "type": "string", "description": "Model id within the harness's catalog. Leave empty to use the persona's model, or the harness default." },
+                "tools":          { "type": "array", "items": { "type": "string" }, "description": "Tool allow-list the agent is restricted to (e.g. Read, Grep, Bash). Empty = the harness default. Added to (not replacing) the persona's tools; enforced by harnesses that support an allow-list (Claude Code), carried otherwise (Codex restricts via sandbox)." },
                 "runnerKind":     { "type": "string", "description": "Sandbox runner (e.g. \"local\"). Defaults to the deployment default." },
                 "timeoutSeconds": { "type": "integer", "minimum": 1, "description": "Wall-clock cap for the run." },
                 "network":        { "type": "boolean", "description": "Allow network access in the sandbox." },
@@ -101,6 +102,7 @@ public sealed class AgentCodeNode : INodeRuntime
             Harness = harness,
             Model = ReadOptionalString(context.Config, "model"),
             AgentDefinitionId = agentDefinitionId,
+            Tools = ReadStringArray(context.Config, "tools"),
             RepositoryId = repositoryId,
             RunnerKind = ReadOptionalString(context.Config, "runnerKind"),
             TimeoutSeconds = ReadInt(context.Config, "timeoutSeconds") ?? 1800,
@@ -186,6 +188,18 @@ public sealed class AgentCodeNode : INodeRuntime
 
     private static bool ReadBool(IReadOnlyDictionary<string, JsonElement> bag, string key) =>
         bag.TryGetValue(key, out var v) && v.ValueKind == JsonValueKind.True;
+
+    /// <summary>Read an optional string-array config field. Absent → null (inherit the harness default); present → the string elements (blanks skipped), preserving "[]" = no tools.</summary>
+    private static IReadOnlyList<string>? ReadStringArray(IReadOnlyDictionary<string, JsonElement> bag, string key)
+    {
+        if (!bag.TryGetValue(key, out var v) || v.ValueKind != JsonValueKind.Array) return null;
+
+        return v.EnumerateArray()
+            .Where(e => e.ValueKind == JsonValueKind.String)
+            .Select(e => e.GetString()!)
+            .Where(s => !string.IsNullOrWhiteSpace(s))
+            .ToList();
+    }
 
     private static void CopyIfPresent(JsonElement payload, string key, Dictionary<string, JsonElement> outputs)
     {

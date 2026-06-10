@@ -27,6 +27,14 @@ public sealed record AgentTask
     /// </summary>
     public Guid? AgentDefinitionId { get; init; }
 
+    /// <summary>
+    /// Tool allow-list the harness restricts the agent to — null = the harness's default toolset, empty = no tools,
+    /// non-empty = exactly these. A harness that supports allow-lists projects it (Claude Code → <c>--allowed-tools</c>);
+    /// one that doesn't (Codex, which restricts via sandbox) carries it without enforcement. Resolved from the persona's
+    /// tools UNIONed with any node-level tools by the dispatch-time resolver.
+    /// </summary>
+    public IReadOnlyList<string>? Tools { get; init; }
+
     /// <summary>Sandbox runner to execute on — e.g. "local", "docker", "k8s". Null → the executor's default. The knob for choosing / overriding the execution backend per run.</summary>
     public string? RunnerKind { get; init; }
 

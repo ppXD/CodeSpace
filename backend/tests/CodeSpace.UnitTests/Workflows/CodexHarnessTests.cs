@@ -53,6 +53,18 @@ public class CodexHarnessTests
     }
 
     [Fact]
+    public void Tools_are_not_projected_codex_has_no_global_allow_list()
+    {
+        // Codex restricts via --sandbox + per-MCP enabled_tools, not a global allow-list, so task.Tools must
+        // NOT leak a fabricated flag — the args are identical to a no-tools run (Codex bounds via the sandbox).
+        var withTools = Harness.BuildInvocation(Task() with { Tools = new[] { "Read", "Grep" } });
+
+        withTools.Args.ShouldNotContain("--allowed-tools");
+        withTools.Args.ShouldBe(new[] { "exec", "--json", "--model", "gpt-5.3-codex", "--sandbox", "workspace-write", "Fix the failing billing tests" },
+            customMessage: "a tools list must not change the Codex invocation — it has no faithful projection there");
+    }
+
+    [Fact]
     public void Read_only_scope_maps_to_the_read_only_sandbox()
     {
         var spec = Harness.BuildInvocation(Task(scope: AgentWriteScope.ReadOnly));

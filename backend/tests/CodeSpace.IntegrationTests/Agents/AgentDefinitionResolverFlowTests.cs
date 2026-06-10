@@ -126,6 +126,37 @@ public class AgentDefinitionResolverFlowTests
         ex.Message.ShouldContain("nothing to run");
     }
 
+    [Fact]
+    public async Task Persona_tools_union_with_the_nodes_tools()
+    {
+        var teamId = await SeedTeamAsync();
+        var id = await SeedPersonaAsync(teamId, "You are a reviewer.", model: null, toolsJson: "[\"Read\",\"Grep\"]");
+        var task = InlineTask(goal: "Review.", model: null, agentDefinitionId: id) with { Tools = new[] { "Grep", "Bash" } };
+
+        (await ResolveAsync(task, teamId)).Tools.ShouldBe(new[] { "Read", "Grep", "Bash" },
+            customMessage: "the run's tools are the UNION of the persona's and the node's — supplement, never narrow");
+    }
+
+    [Fact]
+    public async Task Persona_tools_fill_in_when_the_node_supplies_none()
+    {
+        var teamId = await SeedTeamAsync();
+        var id = await SeedPersonaAsync(teamId, "You are a reviewer.", model: null, toolsJson: "[\"Read\"]");
+
+        // task.Tools is null (node sets none) → the persona's tools are used as-is.
+        (await ResolveAsync(InlineTask(goal: "Review.", model: null, agentDefinitionId: id), teamId)).Tools.ShouldBe(new[] { "Read" });
+    }
+
+    [Fact]
+    public async Task A_persona_with_no_tools_leaves_the_run_on_the_harness_default()
+    {
+        var teamId = await SeedTeamAsync();
+        var id = await SeedPersonaAsync(teamId, "You are a reviewer.", model: null);   // ToolsJson null = default
+
+        (await ResolveAsync(InlineTask(goal: "Review.", model: null, agentDefinitionId: id), teamId)).Tools
+            .ShouldBeNull("neither persona nor node set tools → null = inherit the harness default");
+    }
+
     private static AgentTask InlineTask(string goal, string? model, Guid? agentDefinitionId = null) => new()
     {
         Goal = goal,
@@ -140,7 +171,7 @@ public class AgentDefinitionResolverFlowTests
         return await scope.Resolve<IAgentDefinitionResolver>().ResolveAsync(task, teamId, CancellationToken.None);
     }
 
-    private async Task<Guid> SeedPersonaAsync(Guid teamId, string systemPrompt, string? model)
+    private async Task<Guid> SeedPersonaAsync(Guid teamId, string systemPrompt, string? model, string? toolsJson = null)
     {
         using var scope = _fixture.BeginScope();
         var db = scope.Resolve<CodeSpaceDbContext>();
@@ -154,6 +185,7 @@ public class AgentDefinitionResolverFlowTests
             Name = "Persona",
             SystemPrompt = systemPrompt,
             Model = model,
+            ToolsJson = toolsJson,
             Origin = AgentDefinitionOrigin.Authored,
             CreatedDate = now,
             CreatedBy = SystemUsers.SeederId,
