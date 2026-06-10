@@ -5,8 +5,9 @@ namespace CodeSpace.Messages.Agents;
 /// <summary>
 /// The normalized OUTPUT contract of an agent run — what the harness produces at the end, regardless
 /// of which CLI ran. Stable + versioned so a consumer (the agent.code node, audit, the UI) reads one
-/// shape for every harness. B0.3 persists this alongside the run; the diff/test artifacts it points
-/// at are stored via the observability/artifact layer.
+/// shape for every harness. B0.3 persists this alongside the run as <c>result_jsonb</c>. The unified
+/// diff is INLINED into <see cref="Patch"/> (length-capped) for v1; moving the full diff to the
+/// artifact/observability layer and keeping only a reference here is a later slice.
 /// </summary>
 public sealed record AgentRunResult
 {
@@ -18,8 +19,11 @@ public sealed record AgentRunResult
     /// <summary>The agent's final summary of what it did (its last assistant/summary message).</summary>
     public string? Summary { get; init; }
 
-    /// <summary>Repo-relative paths the agent changed.</summary>
+    /// <summary>Repo-relative paths the agent changed. When the run had a workspace, this is git ground truth (the captured diff), not the agent's self-report.</summary>
     public IReadOnlyList<string> ChangedFiles { get; init; } = Array.Empty<string>();
+
+    /// <summary>Unified diff (git format) of everything the agent changed vs the cloned base. Empty when there was no workspace or nothing changed. The artefact a downstream PR-open step consumes.</summary>
+    public string Patch { get; init; } = "";
 
     /// <summary>Branch the sandbox pushed, when the run produced one (the output handoff for opening a PR).</summary>
     public string? ProducedBranch { get; init; }
