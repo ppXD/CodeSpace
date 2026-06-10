@@ -220,4 +220,29 @@ public class ClaudeCodeHarnessTests
             System.Environment.SetEnvironmentVariable(ClaudeCodeHarness.VersionEnvVar, original);
         }
     }
+
+    [Fact]
+    public void CommandEnvVar_constant_name_is_pinned()
+    {
+        // Renaming this breaks every air-gapped operator who repointed the Claude Code binary via env.
+        ClaudeCodeHarness.CommandEnvVar.ShouldBe("CODESPACE_CLAUDE_CODE_PATH");
+    }
+
+    [Fact]
+    public void Command_uses_the_default_then_the_env_override()
+    {
+        var original = System.Environment.GetEnvironmentVariable(ClaudeCodeHarness.CommandEnvVar);
+        try
+        {
+            System.Environment.SetEnvironmentVariable(ClaudeCodeHarness.CommandEnvVar, null);
+            Harness.BuildInvocation(Task()).Command.ShouldBe("claude", "default binary name when the env var is unset");
+
+            System.Environment.SetEnvironmentVariable(ClaudeCodeHarness.CommandEnvVar, "/opt/claude/bin/claude");
+            Harness.BuildInvocation(Task()).Command.ShouldBe("/opt/claude/bin/claude", "the override redirects the spawned binary");
+        }
+        finally
+        {
+            System.Environment.SetEnvironmentVariable(ClaudeCodeHarness.CommandEnvVar, original);
+        }
+    }
 }

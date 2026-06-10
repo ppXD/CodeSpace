@@ -164,4 +164,29 @@ public class CodexHarnessTests
         // Renaming this breaks every air-gapped operator who pinned a private Codex build via env.
         CodexHarness.VersionEnvVar.ShouldBe("CODESPACE_CODEX_CLI_VERSION");
     }
+
+    [Fact]
+    public void CommandEnvVar_constant_name_is_pinned()
+    {
+        // Renaming this breaks every air-gapped operator who repointed the Codex binary via env.
+        CodexHarness.CommandEnvVar.ShouldBe("CODESPACE_CODEX_CLI_PATH");
+    }
+
+    [Fact]
+    public void Command_uses_the_default_then_the_env_override()
+    {
+        var original = System.Environment.GetEnvironmentVariable(CodexHarness.CommandEnvVar);
+        try
+        {
+            System.Environment.SetEnvironmentVariable(CodexHarness.CommandEnvVar, null);
+            Harness.BuildInvocation(Task()).Command.ShouldBe("codex", "default binary name when the env var is unset");
+
+            System.Environment.SetEnvironmentVariable(CodexHarness.CommandEnvVar, "/opt/codex/bin/codex");
+            Harness.BuildInvocation(Task()).Command.ShouldBe("/opt/codex/bin/codex", "the override redirects the spawned binary");
+        }
+        finally
+        {
+            System.Environment.SetEnvironmentVariable(CodexHarness.CommandEnvVar, original);
+        }
+    }
 }

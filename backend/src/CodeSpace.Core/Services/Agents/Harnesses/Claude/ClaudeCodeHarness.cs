@@ -26,7 +26,12 @@ public sealed class ClaudeCodeHarness : IAgentHarness, ISingletonDependency
     /// <summary>Air-gapped operators pin a private build via this env var (Rule 8). Renaming it breaks their pin — see the pin test.</summary>
     public const string VersionEnvVar = "CODESPACE_CLAUDE_CODE_VERSION";
 
+    /// <summary>Air-gapped operators (and tests) repoint the Claude Code binary via this env var — an absolute path or a PATH name. Renaming it breaks their pin — see the pin test.</summary>
+    public const string CommandEnvVar = "CODESPACE_CLAUDE_CODE_PATH";
+
     private const string DefaultVersion = "2.1.0";
+
+    private const string DefaultCommand = "claude";
 
     public string Kind => HarnessKind;
 
@@ -61,7 +66,7 @@ public sealed class ClaudeCodeHarness : IAgentHarness, ISingletonDependency
 
         return new SandboxSpec
         {
-            Command = "claude",
+            Command = ResolveCommand(),
             Args = args,
             WorkingDirectory = task.WorkspaceDirectory,
             Environment = task.Environment,
@@ -109,6 +114,10 @@ public sealed class ClaudeCodeHarness : IAgentHarness, ISingletonDependency
 
         return new AgentRunResult { Status = AgentRunStatus.Failed, ExitReason = "non-zero-exit", Summary = summary, ChangedFiles = changedFiles, Error = error };
     }
+
+    /// <summary>The Claude Code executable — the <see cref="CommandEnvVar"/> override (absolute path / PATH name) when set, else <c>claude</c> on PATH.</summary>
+    private static string ResolveCommand() =>
+        System.Environment.GetEnvironmentVariable(CommandEnvVar) is { Length: > 0 } path ? path : DefaultCommand;
 
     /// <summary>ReadOnly → plan (analysis, no edits); Workspace → bypassPermissions (autonomous within the OS sandbox, the Codex workspace-write analogue). The Autonomy dial refines this mapping later.</summary>
     private static string PermissionMode(AgentPermissions permissions) =>
