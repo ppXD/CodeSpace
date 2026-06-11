@@ -37,6 +37,7 @@ public class DbUpRunnerTests
     [InlineData("agent_run")]
     [InlineData("agent_run_event")]
     [InlineData("agent_definition")]
+    [InlineData("model_credential")]
     public async Task Table_exists_after_migration(string tableName)
     {
         var exists = await TableExistsAsync(tableName).ConfigureAwait(false);
@@ -51,6 +52,7 @@ public class DbUpRunnerTests
     [InlineData("agent_run", "heartbeat_at", "0039_agent_run.sql")]                       // worker liveness ping for stuck-run recovery
     [InlineData("agent_run_event", "data_json", "0040_agent_run_event.sql")]              // optional structured payload on a normalized agent event
     [InlineData("agent_definition", "raw_frontmatter_jsonb", "0042_agent_definition.sql")] // verbatim imported frontmatter — lossless forward-compat
+    [InlineData("model_credential", "encrypted_api_key", "0043_model_credential.sql")]     // the model API key, encrypted at rest (NULL for a keyless provider)
     public async Task Column_exists_after_migration(string tableName, string columnName, string addedBy)
     {
         var exists = await ColumnExistsAsync(tableName, columnName).ConfigureAwait(false);

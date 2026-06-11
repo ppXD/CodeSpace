@@ -54,6 +54,7 @@ public class CodeSpaceDbContext : DbContext, IUnitOfWork
     public DbSet<AgentRun> AgentRun => Set<AgentRun>();
     public DbSet<AgentRunEvent> AgentRunEvent => Set<AgentRunEvent>();
     public DbSet<AgentDefinition> AgentDefinition => Set<AgentDefinition>();
+    public DbSet<ModelCredential> ModelCredential => Set<ModelCredential>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
