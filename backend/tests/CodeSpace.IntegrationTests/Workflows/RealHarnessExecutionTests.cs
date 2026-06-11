@@ -79,7 +79,7 @@ public class RealHarnessExecutionTests
         var run = await svc.GetAsync(runId, CancellationToken.None);
         run.Status.ShouldBe(AgentRunStatus.Succeeded, "the real harness streamed + parsed the fixture and the run folded to Succeeded");
 
-        var events = await svc.GetEventsAsync(runId, 0, CancellationToken.None);
+        var events = await svc.GetEventsAsync(runId, teamId, 0, CancellationToken.None);
         events.Select(e => e.Kind).ShouldBe(expected.Kinds, "the production ParseEvent normalized the real-shaped lines off the pipe into the expected kinds");
         events.Select(e => e.Text).ShouldBe(expected.Texts);
 
@@ -145,7 +145,7 @@ public class RealHarnessExecutionTests
 
         (await svc.GetAsync(runId, CancellationToken.None)).Status
             .ShouldBe(AgentRunStatus.Succeeded, "tolerant ParseEvent never throws on real junk bytes — non-event lines are dropped and the run still completes");
-        (await svc.GetEventsAsync(runId, 0, CancellationToken.None)).Select(e => e.Kind)
+        (await svc.GetEventsAsync(runId, teamId, 0, CancellationToken.None)).Select(e => e.Kind)
             .ShouldBe(new[] { AgentEventKind.Reasoning, AgentEventKind.Completed }, "only the two parseable lines persisted; the junk + typeless lines were dropped");
     }
 

@@ -8,4 +8,6 @@ namespace CodeSpace.Core.Services.Agents;
 public sealed class AgentDefinitionResolutionException : Exception
 {
     public AgentDefinitionResolutionException(string message) : base(message) { }
+
+    public AgentDefinitionResolutionException(string message, Exception innerException) : base(message, innerException) { }
 }

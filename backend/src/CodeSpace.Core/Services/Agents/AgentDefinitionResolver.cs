@@ -13,10 +13,11 @@ namespace CodeSpace.Core.Services.Agents;
 /// <list type="bullet">
 ///   <item>prompt — persona system prompt PREPENDED to the node goal (the harness has one prompt conduit, the goal);</item>
 ///   <item>model — a non-blank node override wins, else the persona's model, else null (harness default);</item>
+///   <item>tools — the persona's tools UNIONED with the node's (supplement-never-narrow; null = inherit the harness default);</item>
 ///   <item>everything else (harness, runner, repo, permissions, timeout) is node-authored and flows through.</item>
 /// </list>
-/// Tools / skills / MCP / autonomy are NOT merged yet — the task envelope + harness don't carry them, so
-/// merging would silently drop them; that lands together with the harness projection in a follow-up.
+/// Skills / MCP / autonomy are NOT merged yet — the task envelope + harness don't carry them, so merging
+/// would silently drop them; that lands together with the harness projection in a follow-up.
 /// </summary>
 public sealed class AgentDefinitionResolver : IAgentDefinitionResolver, IScopedDependency
 {
@@ -90,7 +91,23 @@ public sealed class AgentDefinitionResolver : IAgentDefinitionResolver, IScopedD
         return merged;
     }
 
-    /// <summary>Deserialize the persona's jsonb tool list — null/blank = inherit the harness default (distinct from "[]" = no tools).</summary>
-    internal static IReadOnlyList<string>? ParseTools(string? toolsJson) =>
-        string.IsNullOrWhiteSpace(toolsJson) ? null : JsonSerializer.Deserialize<List<string>>(toolsJson, AgentJson.Options);
+    /// <summary>
+    /// Deserialize the persona's jsonb tool list — null/blank = inherit the harness default (distinct from
+    /// "[]" = no tools). A corrupt blob surfaces as an <see cref="AgentDefinitionResolutionException"/> so a
+    /// bad imported persona fails as a clean node failure, not a raw <see cref="JsonException"/> escaping the
+    /// resolve path.
+    /// </summary>
+    internal static IReadOnlyList<string>? ParseTools(string? toolsJson)
+    {
+        if (string.IsNullOrWhiteSpace(toolsJson)) return null;
+
+        try
+        {
+            return JsonSerializer.Deserialize<List<string>>(toolsJson, AgentJson.Options);
+        }
+        catch (JsonException ex)
+        {
+            throw new AgentDefinitionResolutionException($"Agent persona has an unreadable tools list: {ex.Message}", ex);
+        }
+    }
 }

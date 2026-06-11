@@ -47,7 +47,7 @@ public class AgentRunExecutorTests
         run.CompletedAt.ShouldNotBeNull();
         run.ResultJson.ShouldNotBeNull();
 
-        var events = await svc.GetEventsAsync(runId, 0, CancellationToken.None);
+        var events = await svc.GetEventsAsync(runId, teamId, 0, CancellationToken.None);
         events.Select(e => e.Text).ShouldBe(new[] { "step one", "step two", "step three" });
     }
 
@@ -67,7 +67,7 @@ public class AgentRunExecutorTests
         using var verify = _fixture.BeginScope();
         var svc = verify.Resolve<IAgentRunService>();
         (await svc.GetAsync(runId, CancellationToken.None)).Status.ShouldBe(AgentRunStatus.Running);   // untouched
-        (await svc.GetEventsAsync(runId, 0, CancellationToken.None)).ShouldBeEmpty();                  // the harness was never spawned
+        (await svc.GetEventsAsync(runId, teamId, 0, CancellationToken.None)).ShouldBeEmpty();                  // the harness was never spawned
     }
 
     [Fact]
@@ -125,7 +125,7 @@ public class AgentRunExecutorTests
         var svc = scope.Resolve<IAgentRunService>();
 
         (await svc.GetAsync(runId, CancellationToken.None)).Status.ShouldBe(AgentRunStatus.Succeeded);
-        (await svc.GetEventsAsync(runId, 0, CancellationToken.None)).Select(e => e.Text)
+        (await svc.GetEventsAsync(runId, teamId, 0, CancellationToken.None)).Select(e => e.Text)
             .ShouldContain("hello-from-repo", "the harness ran inside the cloned workspace and read the repo file");
     }
 

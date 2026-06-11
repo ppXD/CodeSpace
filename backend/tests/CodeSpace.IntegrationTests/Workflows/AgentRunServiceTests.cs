@@ -61,14 +61,40 @@ public class AgentRunServiceTests
             run.ResultJson.ShouldNotBeNull();
             run.ResultJson!.ShouldContain("completed");
 
-            var events = await svc.GetEventsAsync(runId, 0, CancellationToken.None);
+            var events = await svc.GetEventsAsync(runId, teamId, 0, CancellationToken.None);
             events.Select(e => e.Kind).ShouldBe(new[] { AgentEventKind.CommandExecuted, AgentEventKind.AssistantMessage });
             events[0].DataJson.ShouldNotBeNull();
             events[0].DataJson!.ShouldContain("npm test");
 
             // cursor: events strictly after the first
-            var tail = await svc.GetEventsAsync(runId, events[0].Sequence, CancellationToken.None);
+            var tail = await svc.GetEventsAsync(runId, teamId, events[0].Sequence, CancellationToken.None);
             tail.Select(e => e.Kind).ShouldBe(new[] { AgentEventKind.AssistantMessage });
+        }
+    }
+
+    [Fact]
+    public async Task Reading_events_for_another_teams_run_returns_empty()
+    {
+        // The events read is team-scoped: a foreign run id leaks neither events nor the run's existence.
+        var ownerTeam = await SeedTeamAsync();
+        var otherTeam = await SeedTeamAsync();
+
+        Guid runId;
+        using (var scope = _fixture.BeginScope())
+        {
+            var svc = scope.Resolve<IAgentRunService>();
+            var run = await svc.CreateAsync(BuildTask(), ownerTeam, null, null, CancellationToken.None);
+            runId = run.Id;
+            await svc.MarkRunningAsync(runId, CancellationToken.None);
+            await svc.AppendEventAsync(runId, new AgentEvent { Kind = AgentEventKind.AssistantMessage, Text = "owner-only" }, CancellationToken.None);
+        }
+
+        using (var scope = _fixture.BeginScope())
+        {
+            var svc = scope.Resolve<IAgentRunService>();
+
+            (await svc.GetEventsAsync(runId, otherTeam, 0, CancellationToken.None)).ShouldBeEmpty("a foreign team sees no events");
+            (await svc.GetEventsAsync(runId, ownerTeam, 0, CancellationToken.None)).ShouldHaveSingleItem();
         }
     }
 
