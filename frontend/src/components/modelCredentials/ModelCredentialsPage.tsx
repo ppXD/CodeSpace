@@ -35,20 +35,16 @@ export function ModelCredentialsPage() {
     if (ok) revoke.mutate(c.id);
   };
 
+  // Rendered inside the Settings layout (it owns the "Settings" header + tab strip), so this is body-only.
   return (
-    <section className="ct">
-      <div className="ct-head" style={{ paddingBottom: 18 }}>
-        <div className="ct-crumbs"><span className="cur">Model credentials</span></div>
-        <div className="ct-title-row" style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-          <h1 className="ct-title">Model credentials</h1>
-          <button className="btn btn-primary" onClick={() => setModal({ mode: "add" })}>
-            <Ic.Plus size={14} /> Add credential
-          </button>
-        </div>
+    <>
+      <div style={{ display: "flex", justifyContent: "flex-end", padding: "4px 16px 0" }}>
+        <button className="btn btn-primary" onClick={() => setModal({ mode: "add" })}>
+          <Ic.Plus size={14} /> Add credential
+        </button>
       </div>
 
-      <div className="ct-body">
-        <div className="cn-banner" style={{ margin: 16 }}>
+      <div className="cn-banner" style={{ margin: 16 }}>
           <div className="cn-banner-h">How agents authenticate</div>
           <div className="cn-banner-p">
             A run uses the credential pinned on its node or agent, else the team's credential for that provider, else the
@@ -106,10 +102,9 @@ export function ModelCredentialsPage() {
             </tbody>
           </table>
         )}
-      </div>
 
       {modal?.mode === "add" && <ModelCredentialModal onClose={() => setModal(null)} />}
       {modal?.mode === "edit" && <ModelCredentialModal editing={modal.credential} onClose={() => setModal(null)} />}
-    </section>
+    </>
   );
 }
