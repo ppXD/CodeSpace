@@ -99,7 +99,12 @@ public sealed class CodexHarness : IAgentHarness, IModelCredentialProjector, ISi
         if (exitCode == 0)
             return new AgentRunResult { Status = AgentRunStatus.Succeeded, ExitReason = "completed", Summary = summary, ChangedFiles = changedFiles };
 
-        var error = events.LastOrDefault(e => e.Kind == AgentEventKind.Error)?.Text ?? $"codex exited with code {exitCode}";
+        // Prefer an explicit Error event, else the CLI's final message (on a non-zero exit that's the
+        // failure reason — e.g. a provider 401), else the bare exit code — so the real reason reaches
+        // AgentRun.error and the node failure instead of an opaque "codex exited with code 1".
+        var error = events.LastOrDefault(e => e.Kind == AgentEventKind.Error)?.Text
+                    ?? (string.IsNullOrWhiteSpace(summary) ? null : summary)
+                    ?? $"codex exited with code {exitCode}";
 
         return new AgentRunResult { Status = AgentRunStatus.Failed, ExitReason = "non-zero-exit", Summary = summary, ChangedFiles = changedFiles, Error = error };
     }

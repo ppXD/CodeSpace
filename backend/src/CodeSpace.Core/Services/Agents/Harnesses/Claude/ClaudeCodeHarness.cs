@@ -121,7 +121,13 @@ public sealed class ClaudeCodeHarness : IAgentHarness, IModelCredentialProjector
         if (exitCode == 0)
             return new AgentRunResult { Status = AgentRunStatus.Succeeded, ExitReason = "completed", Summary = summary, ChangedFiles = changedFiles };
 
-        var error = events.LastOrDefault(e => e.Kind == AgentEventKind.Error)?.Text ?? $"claude exited with code {exitCode}";
+        // Surface the most actionable text we have: an explicit Error event, else the CLI's final
+        // message (on a non-zero exit that's the failure reason — e.g. a provider 401), else the bare
+        // exit code. Folding the summary in here means it reaches AgentRun.error and the node's failure
+        // message, instead of the run failing with an opaque "claude exited with code 1".
+        var error = events.LastOrDefault(e => e.Kind == AgentEventKind.Error)?.Text
+                    ?? (string.IsNullOrWhiteSpace(summary) ? null : summary)
+                    ?? $"claude exited with code {exitCode}";
 
         return new AgentRunResult { Status = AgentRunStatus.Failed, ExitReason = "non-zero-exit", Summary = summary, ChangedFiles = changedFiles, Error = error };
     }
