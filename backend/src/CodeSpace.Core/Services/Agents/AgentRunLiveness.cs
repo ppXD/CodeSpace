@@ -23,6 +23,17 @@ public static class AgentRunLiveness
         TimeSpan.TryParse(Environment.GetEnvironmentVariable(WindowEnvVar), out var window) ? window : DefaultWindow;
 
     /// <summary>
+    /// How long a claim's lease lasts before the reconciler may reclaim the run — equal to the
+    /// <see cref="Window"/>. The heartbeat renews it every <see cref="HeartbeatInterval"/> (Window/3), so a
+    /// live worker's lease never lapses. A single source so lowering the window (once restart re-attach makes
+    /// a faster reclaim safe) tightens the lease, the renew cadence, AND the reclaim floor together.
+    /// </summary>
+    public static TimeSpan LeaseDuration => Window;
+
+    /// <summary>The lease expiry to stamp NOW — <c>UtcNow + <see cref="LeaseDuration"/></c>. Stamped at claim and refreshed on every heartbeat.</summary>
+    public static DateTimeOffset NextLeaseExpiry() => DateTimeOffset.UtcNow + LeaseDuration;
+
+    /// <summary>
     /// How often a live worker pings its heartbeat — a third of the <see cref="Window"/>, so two pings can
     /// be lost before the reconciler would abandon. Floored at <see cref="MinHeartbeatInterval"/>.
     /// </summary>

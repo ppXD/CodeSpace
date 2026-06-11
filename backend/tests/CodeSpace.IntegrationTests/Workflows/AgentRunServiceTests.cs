@@ -202,6 +202,37 @@ public class AgentRunServiceTests
         }
     }
 
+    [Fact]
+    public async Task Claim_stamps_a_lease_and_heartbeat_renews_it()
+    {
+        var teamId = await SeedTeamAsync();
+
+        Guid runId;
+        using (var scope = _fixture.BeginScope())
+            runId = (await scope.Resolve<IAgentRunService>().CreateAsync(BuildTask(), teamId, null, null, CancellationToken.None)).Id;
+
+        using (var scope = _fixture.BeginScope())
+            await scope.Resolve<IAgentRunService>().MarkRunningAsync(runId, CancellationToken.None);
+
+        DateTimeOffset claimedLease;
+        using (var scope = _fixture.BeginScope())
+        {
+            var run = await scope.Resolve<IAgentRunService>().GetAsync(runId, CancellationToken.None);
+            run.LeaseExpiresAt.ShouldNotBeNull("the claim stamps a lease");
+            claimedLease = run.LeaseExpiresAt!.Value;
+            claimedLease.ShouldBeGreaterThan(DateTimeOffset.UtcNow, "the lease is in the future (now + window)");
+        }
+
+        using (var scope = _fixture.BeginScope())
+            await scope.Resolve<IAgentRunService>().HeartbeatAsync(runId, CancellationToken.None);
+
+        using (var scope = _fixture.BeginScope())
+        {
+            var run = await scope.Resolve<IAgentRunService>().GetAsync(runId, CancellationToken.None);
+            run.LeaseExpiresAt!.Value.ShouldBeGreaterThanOrEqualTo(claimedLease, "the heartbeat pushes the lease forward");
+        }
+    }
+
     private static AgentTask BuildTask(string goal = "Fix the failing billing tests") =>
         new() { Goal = goal, Harness = "codex-cli", Model = "gpt-5.3-codex" };
 

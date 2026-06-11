@@ -177,6 +177,35 @@ public class AgentRunRecoveryFlowTests : IDisposable
         run.Status.ShouldBe(AgentRunStatus.Running, "a durable run whose supervised process is still alive must be left for re-attach, not abandoned");
     }
 
+    [Fact]
+    public async Task A_fresh_lease_with_a_stale_heartbeat_is_left_alone()
+    {
+        // The reconciler gates on the LEASE (ground truth — a live worker keeps renewing it), NOT on
+        // heartbeat-silence: an old HeartbeatAt but a still-valid lease must NOT be reclaimed.
+        var teamId = await SeedTeamAsync();
+        var runId = Guid.NewGuid();
+
+        using (var scope = _fixture.BeginScope())
+        {
+            var db = scope.Resolve<CodeSpaceDbContext>();
+            db.AgentRun.Add(new AgentRun
+            {
+                Id = runId, TeamId = teamId, Harness = "codex-cli", Status = AgentRunStatus.Running,
+                StartedAt = DateTimeOffset.UtcNow.AddMinutes(-20),
+                HeartbeatAt = DateTimeOffset.UtcNow.AddMinutes(-20),   // stale heartbeat…
+                LeaseExpiresAt = DateTimeOffset.UtcNow.AddMinutes(2),  // …but the lease is still valid
+            });
+            await db.SaveChangesAsync();
+        }
+
+        using (var scope = _fixture.BeginScope())
+            await scope.Resolve<IAgentRunReconcilerService>().ReconcileAsync(CancellationToken.None);
+
+        using var verify = _fixture.BeginScope();
+        (await verify.Resolve<CodeSpaceDbContext>().AgentRun.AsNoTracking().SingleAsync(r => r.Id == runId)).Status
+            .ShouldBe(AgentRunStatus.Running, "a valid lease (a live worker) protects the run despite a stale heartbeat");
+    }
+
     /// <summary>Seed a stale (20-min) Running run carrying a durable handle that points at a spool dir with an optional exit marker — the post-crash state the reconciler probes.</summary>
     private async Task<Guid> SeedDurableRunAsync(Guid teamId, int processId, int? exitCode)
     {
@@ -196,7 +225,7 @@ public class AgentRunRecoveryFlowTests : IDisposable
         db.AgentRun.Add(new AgentRun
         {
             Id = runId, TeamId = teamId, Harness = "codex-cli", Status = AgentRunStatus.Running,
-            StartedAt = stamp, HeartbeatAt = stamp,
+            StartedAt = stamp, HeartbeatAt = stamp, LeaseExpiresAt = stamp + AgentRunLiveness.Window,   // lease = last heartbeat + window (lapsed, since stamp is 20min old)
             RunnerHandleJson = JsonSerializer.Serialize(handle, AgentJson.Options),
         });
         await db.SaveChangesAsync();
@@ -225,7 +254,9 @@ public class AgentRunRecoveryFlowTests : IDisposable
         using var scope = _fixture.BeginScope();
         var db = scope.Resolve<CodeSpaceDbContext>();
 
-        db.AgentRun.Add(new AgentRun { Id = runId, TeamId = teamId, Harness = "codex-cli", Status = status, StartedAt = stamp, HeartbeatAt = stamp });
+        // Lease = last heartbeat + the window, so the reconciler's lease-gate reproduces the heartbeat behaviour:
+        // a 20-min-old stamp → lapsed lease (reclaimable); a 10s-old stamp → still-valid lease (left alone).
+        db.AgentRun.Add(new AgentRun { Id = runId, TeamId = teamId, Harness = "codex-cli", Status = status, StartedAt = stamp, HeartbeatAt = stamp, LeaseExpiresAt = stamp + AgentRunLiveness.Window });
 
         if (withRecentEvent)
             db.AgentRunEvent.Add(new AgentRunEvent { Id = Guid.NewGuid(), AgentRunId = runId, Kind = AgentEventKind.CommandExecuted, Text = "still working" });

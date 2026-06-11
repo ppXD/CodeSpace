@@ -79,21 +79,25 @@ public sealed class AgentRunReconcilerService : IAgentRunReconcilerService, ISco
     }
 
     /// <summary>
-    /// For each Running run gone quiet past the liveness window: if it carries a durable runner handle, PROBE it
-    /// before abandoning — a run that finished while unobserved (its observer crashed mid-tail, or the backend
-    /// restarted) is RECOVERED from its exit marker instead of being lost; one still alive is left for a future
-    /// re-attach; one truly gone is abandoned. A run with no handle (non-durable runner) keeps the blind-abandon
-    /// behaviour. Every transition is the same status-guarded CAS, so a worker landing the run right now wins.
+    /// For each Running run whose LEASE has lapsed (the claiming worker stopped renewing it — it died/hung): if
+    /// it carries a durable runner handle, PROBE it before abandoning — a run that finished while unobserved (its
+    /// observer crashed mid-tail, or the backend restarted) is RECOVERED from its exit marker instead of being
+    /// lost; one still alive is left for a future re-attach; one truly gone is abandoned. A run with no handle
+    /// (non-durable runner) keeps the blind-abandon behaviour. The lapsed lease is ground-truth liveness (a live
+    /// worker keeps it fresh); the no-recent-events second signal still shields a streaming run whose lease lapsed
+    /// from a stray timing edge. Every transition is the same status-guarded CAS, so a worker landing the run
+    /// right now wins.
     /// </summary>
     private async Task<(int Abandoned, int Recovered)> SweepStaleRunningAsync(CancellationToken cancellationToken)
     {
-        var livenessThreshold = DateTimeOffset.UtcNow - AgentRunLiveness.Window;
+        var now = DateTimeOffset.UtcNow;
+        var eventThreshold = now - AgentRunLiveness.Window;
 
         var candidates = await _db.AgentRun.AsNoTracking()
             .Where(r => r.Status == AgentRunStatus.Running
-                        && (r.HeartbeatAt == null || r.HeartbeatAt < livenessThreshold)
-                        && !_db.AgentRunEvent.Any(e => e.AgentRunId == r.Id && e.OccurredAt >= livenessThreshold))
-            .OrderBy(r => r.HeartbeatAt)
+                        && (r.LeaseExpiresAt == null || r.LeaseExpiresAt < now)
+                        && !_db.AgentRunEvent.Any(e => e.AgentRunId == r.Id && e.OccurredAt >= eventThreshold))
+            .OrderBy(r => r.LeaseExpiresAt)
             .Take(BatchSize)
             .Select(r => new { r.Id, r.RunnerHandleJson })
             .ToListAsync(cancellationToken)

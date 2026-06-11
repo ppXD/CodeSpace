@@ -56,6 +56,7 @@ public class DbUpRunnerTests
     [InlineData("agent_definition", "model_credential_id", "0044_agent_definition_model_credential.sql")] // persona's default model-credential reference
     [InlineData("agent_run", "runner_handle", "0045_agent_run_runner_handle.sql")]         // durable runner handle (pid + spool) for restart re-attach/recovery
     [InlineData("agent_run", "fence_epoch", "0046_agent_run_fence_epoch.sql")]             // monotonic fencing token — completion CAS rejects a reclaimed-then-revived worker
+    [InlineData("agent_run", "lease_expires_at", "0047_agent_run_lease.sql")]              // DB-owned lease the worker renews; reconciler reclaims on lapse (ground-truth liveness)
     public async Task Column_exists_after_migration(string tableName, string columnName, string addedBy)
     {
         var exists = await ColumnExistsAsync(tableName, columnName).ConfigureAwait(false);
