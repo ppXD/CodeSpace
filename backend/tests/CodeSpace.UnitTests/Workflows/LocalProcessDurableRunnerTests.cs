@@ -140,6 +140,50 @@ public sealed class LocalProcessDurableRunnerTests : IDisposable
     }
 
     [Fact]
+    public async Task Probe_reports_exited_with_the_code_once_the_marker_is_present()
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        var handle = await LaunchAsync(ContractSpecs.PrintThenExit("x", 3));
+        await WaitForExitMarkerAsync(handle);
+
+        var probe = await _runner.ProbeAsync(handle, default);
+
+        probe.State.ShouldBe(SandboxRunState.Exited);
+        probe.ExitCode.ShouldBe(3);
+    }
+
+    [Fact]
+    public async Task Probe_reports_running_while_the_supervised_process_is_alive()
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        var handle = await LaunchAsync(ContractSpecs.Sleep(10) with { TimeoutSeconds = 30 });
+
+        var probe = await _runner.ProbeAsync(handle, default);
+
+        probe.State.ShouldBe(SandboxRunState.Running);
+        probe.ExitCode.ShouldBeNull();
+
+        KillTree(handle.ProcessId);   // cleanup — still running
+    }
+
+    [Fact]
+    public async Task Probe_reports_gone_when_the_process_died_without_recording_a_marker()
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        var handle = await LaunchAsync(ContractSpecs.Sleep(10) with { TimeoutSeconds = 30 });
+
+        KillTree(handle.ProcessId);          // killed mid-run → it never writes an exit marker
+        await Task.Delay(200);
+
+        var probe = await _runner.ProbeAsync(handle, default);
+
+        probe.State.ShouldBe(SandboxRunState.Gone);
+    }
+
+    [Fact]
     public async Task BuildDurableStartInfo_wraps_the_command_in_a_sh_supervisor_pointing_at_the_spool()
     {
         var info = LocalProcessRunner.BuildDurableStartInfo(

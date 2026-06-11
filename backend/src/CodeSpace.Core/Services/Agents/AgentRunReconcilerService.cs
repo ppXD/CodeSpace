@@ -1,6 +1,8 @@
+using System.Text.Json;
 using CodeSpace.Core.DependencyInjection;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
+using CodeSpace.Core.Services.Agents.Sandbox;
 using CodeSpace.Core.Services.Jobs;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Constants;
@@ -44,32 +46,46 @@ public sealed class AgentRunReconcilerService : IAgentRunReconcilerService, ISco
         "event activity past the liveness window. Re-run the agent to retry; an interrupted run's " +
         "in-progress work is not resumed.";
 
+    /// <summary>Operator-facing note stamped on a run recovered from its durable spool (it had finished while unobserved).</summary>
+    public const string RecoveredError =
+        "Recovered by the reconciler from the run's durable spool after its live observer went away (a worker " +
+        "crash or backend restart) — the agent had already finished, so its outcome was salvaged rather than lost.";
+
     private readonly CodeSpaceDbContext _db;
     private readonly IAgentRunCompletionNotifier _notifier;
     private readonly ICodeSpaceBackgroundJobClient _jobs;
+    private readonly ISandboxRunnerRegistry _runners;
     private readonly ILogger<AgentRunReconcilerService> _logger;
 
-    public AgentRunReconcilerService(CodeSpaceDbContext db, IAgentRunCompletionNotifier notifier, ICodeSpaceBackgroundJobClient jobs, ILogger<AgentRunReconcilerService> logger)
+    public AgentRunReconcilerService(CodeSpaceDbContext db, IAgentRunCompletionNotifier notifier, ICodeSpaceBackgroundJobClient jobs, ISandboxRunnerRegistry runners, ILogger<AgentRunReconcilerService> logger)
     {
         _db = db;
         _notifier = notifier;
         _jobs = jobs;
+        _runners = runners;
         _logger = logger;
     }
 
     public async Task<AgentRunReconcileSummary> ReconcileAsync(CancellationToken cancellationToken)
     {
-        var marked = await MarkAbandonedRunningAsync(cancellationToken).ConfigureAwait(false);
+        var (abandoned, recovered) = await SweepStaleRunningAsync(cancellationToken).ConfigureAwait(false);
 
         var (resumed, reDispatched) = await ReconcilePendingWaitsAsync(cancellationToken).ConfigureAwait(false);
 
-        if (marked > 0 || resumed > 0 || reDispatched > 0)
-            _logger.LogInformation("AgentRunReconciler: abandoned {Abandoned}, resumed {Resumed} stalled parent(s), re-dispatched {ReDispatched} stuck queued run(s)", marked, resumed, reDispatched);
+        if (abandoned > 0 || recovered > 0 || resumed > 0 || reDispatched > 0)
+            _logger.LogInformation("AgentRunReconciler: abandoned {Abandoned}, recovered {Recovered} from spool, resumed {Resumed} stalled parent(s), re-dispatched {ReDispatched} stuck queued run(s)", abandoned, recovered, resumed, reDispatched);
 
-        return new AgentRunReconcileSummary { MarkedAbandonedFromRunning = marked, ResumedStalledParents = resumed, ReDispatchedQueued = reDispatched };
+        return new AgentRunReconcileSummary { MarkedAbandonedFromRunning = abandoned, RecoveredFromSpool = recovered, ResumedStalledParents = resumed, ReDispatchedQueued = reDispatched };
     }
 
-    private async Task<int> MarkAbandonedRunningAsync(CancellationToken cancellationToken)
+    /// <summary>
+    /// For each Running run gone quiet past the liveness window: if it carries a durable runner handle, PROBE it
+    /// before abandoning — a run that finished while unobserved (its observer crashed mid-tail, or the backend
+    /// restarted) is RECOVERED from its exit marker instead of being lost; one still alive is left for a future
+    /// re-attach; one truly gone is abandoned. A run with no handle (non-durable runner) keeps the blind-abandon
+    /// behaviour. Every transition is the same status-guarded CAS, so a worker landing the run right now wins.
+    /// </summary>
+    private async Task<(int Abandoned, int Recovered)> SweepStaleRunningAsync(CancellationToken cancellationToken)
     {
         var livenessThreshold = DateTimeOffset.UtcNow - AgentRunLiveness.Window;
 
@@ -79,31 +95,120 @@ public sealed class AgentRunReconcilerService : IAgentRunReconcilerService, ISco
                         && !_db.AgentRunEvent.Any(e => e.AgentRunId == r.Id && e.OccurredAt >= livenessThreshold))
             .OrderBy(r => r.HeartbeatAt)
             .Take(BatchSize)
-            .Select(r => r.Id)
+            .Select(r => new { r.Id, r.RunnerHandleJson })
             .ToListAsync(cancellationToken)
             .ConfigureAwait(false);
 
-        var marked = 0;
-        foreach (var runId in candidates)
+        var abandoned = 0;
+        var recovered = 0;
+
+        foreach (var c in candidates)
+            switch (await ResolveStaleRunAsync(c.Id, c.RunnerHandleJson, cancellationToken).ConfigureAwait(false))
+            {
+                case StaleOutcome.Recovered: recovered++; break;
+                case StaleOutcome.Abandoned: abandoned++; break;
+            }
+
+        return (abandoned, recovered);
+    }
+
+    /// <summary>Decide one stale run's fate: probe its durable handle (recover / leave-alone / abandon), or blind-abandon when there's no usable handle or the probe fails.</summary>
+    private async Task<StaleOutcome> ResolveStaleRunAsync(Guid runId, string? handleJson, CancellationToken cancellationToken)
+    {
+        var durable = ResolveDurableRunner(handleJson, out var handle);
+
+        if (durable is null || handle is null)
+            return await AbandonAsync(runId, cancellationToken).ConfigureAwait(false);
+
+        var probe = await ProbeQuietlyAsync(durable, handle, runId, cancellationToken).ConfigureAwait(false);
+
+        if (probe is null)
+            return await AbandonAsync(runId, cancellationToken).ConfigureAwait(false);   // can't probe → don't leave it stuck
+
+        if (probe.State == SandboxRunState.Exited)
+            return await RecoverFromSpoolAsync(runId, probe.ExitCode ?? -1, cancellationToken).ConfigureAwait(false);
+
+        if (probe.State == SandboxRunState.Gone)
+            return await AbandonAsync(runId, cancellationToken).ConfigureAwait(false);
+
+        // Running: the supervised process is still alive — leave it; a future re-attach (Slice 2) finishes it.
+        _logger.LogInformation("AgentRunReconciler: agent run {RunId} is quiet but its durable process is still alive; leaving it for re-attach", runId);
+        return StaleOutcome.LeftAlone;
+    }
+
+    /// <summary>Atomic CAS Running → Failed (the abandon path), pinned to status=Running so a worker completing right now wins. Appends the abandoned-run event when it transitions.</summary>
+    private async Task<StaleOutcome> AbandonAsync(Guid runId, CancellationToken cancellationToken)
+    {
+        var transitioned = await _db.AgentRun
+            .Where(r => r.Id == runId && r.Status == AgentRunStatus.Running)
+            .ExecuteUpdateAsync(s => s
+                .SetProperty(r => r.Status, AgentRunStatus.Failed)
+                .SetProperty(r => r.Error, AbandonedError)
+                .SetProperty(r => r.CompletedAt, (DateTimeOffset?)DateTimeOffset.UtcNow), cancellationToken)
+            .ConfigureAwait(false);
+
+        if (transitioned == 0) return StaleOutcome.LeftAlone;
+
+        await TryAppendEventAsync(runId, AgentEventKind.Error, AbandonedError, cancellationToken).ConfigureAwait(false);
+        return StaleOutcome.Abandoned;
+    }
+
+    /// <summary>
+    /// Salvage a run whose durable spool shows it already finished: CAS Running → Succeeded/Failed by the exit
+    /// code, with a result + an event noting the recovery. The raw spool output is NOT folded in here — the
+    /// reconciler can't decrypt the run's secret to redact it, so it persists only the exit code; the redacted
+    /// events the live observer streamed before it died are already in the log.
+    /// </summary>
+    private async Task<StaleOutcome> RecoverFromSpoolAsync(Guid runId, int exitCode, CancellationToken cancellationToken)
+    {
+        var status = exitCode == 0 ? AgentRunStatus.Succeeded : AgentRunStatus.Failed;
+        var error = status == AgentRunStatus.Failed ? $"{RecoveredError} The agent exited with code {exitCode}." : null;
+        var resultJson = JsonSerializer.Serialize(new AgentRunResult { Status = status, ExitReason = "recovered-from-spool", Error = error }, AgentJson.Options);
+
+        var transitioned = await _db.AgentRun
+            .Where(r => r.Id == runId && r.Status == AgentRunStatus.Running)
+            .ExecuteUpdateAsync(s => s
+                .SetProperty(r => r.Status, status)
+                .SetProperty(r => r.ResultJson, resultJson)
+                .SetProperty(r => r.Error, error)
+                .SetProperty(r => r.CompletedAt, (DateTimeOffset?)DateTimeOffset.UtcNow), cancellationToken)
+            .ConfigureAwait(false);
+
+        if (transitioned == 0) return StaleOutcome.LeftAlone;   // a worker (or another replica) landed it first
+
+        var kind = status == AgentRunStatus.Succeeded ? AgentEventKind.Completed : AgentEventKind.Error;
+        await TryAppendEventAsync(runId, kind, $"{RecoveredError} (exit {exitCode})", cancellationToken).ConfigureAwait(false);
+
+        _logger.LogInformation("AgentRunReconciler: recovered agent run {RunId} from its durable spool as {Status} (exit {Exit})", runId, status, exitCode);
+        return StaleOutcome.Recovered;
+    }
+
+    /// <summary>Resolve the durable runner for a persisted handle, or null when the handle is absent/unparseable or its runner isn't durable (then the caller blind-abandons).</summary>
+    private ISandboxDurableRunner? ResolveDurableRunner(string? handleJson, out SandboxHandle? handle)
+    {
+        handle = null;
+
+        if (string.IsNullOrWhiteSpace(handleJson)) return null;
+
+        SandboxHandle? parsed;
+        try { parsed = JsonSerializer.Deserialize<SandboxHandle>(handleJson, AgentJson.Options); }
+        catch (JsonException) { return null; }
+
+        if (parsed is null) return null;
+
+        handle = parsed;
+        return _runners.All.FirstOrDefault(r => r.Kind == parsed.Kind) as ISandboxDurableRunner;
+    }
+
+    /// <summary>Probe the handle, swallowing any failure (a missing spool dir, an IO error) as null so the caller falls back to a clean abandon rather than throwing out of the sweep.</summary>
+    private async Task<SandboxProbe?> ProbeQuietlyAsync(ISandboxDurableRunner durable, SandboxHandle handle, Guid runId, CancellationToken cancellationToken)
+    {
+        try { return await durable.ProbeAsync(handle, cancellationToken).ConfigureAwait(false); }
+        catch (Exception ex)
         {
-            // Atomic CAS Running → Failed, pinned to status=Running so a worker completing the run
-            // right now (its own Succeeded/Failed) wins the race and isn't overwritten.
-            var transitioned = await _db.AgentRun
-                .Where(r => r.Id == runId && r.Status == AgentRunStatus.Running)
-                .ExecuteUpdateAsync(s => s
-                    .SetProperty(r => r.Status, AgentRunStatus.Failed)
-                    .SetProperty(r => r.Error, AbandonedError)
-                    .SetProperty(r => r.CompletedAt, (DateTimeOffset?)DateTimeOffset.UtcNow), cancellationToken)
-                .ConfigureAwait(false);
-
-            if (transitioned == 0) continue;
-
-            marked++;
-
-            await TryAppendAbandonedEventAsync(runId, cancellationToken).ConfigureAwait(false);
+            _logger.LogWarning(ex, "AgentRunReconciler: failed to probe the durable handle for {RunId}; falling back to abandon", runId);
+            return null;
         }
-
-        return marked;
     }
 
     /// <summary>
@@ -192,26 +297,42 @@ public sealed class AgentRunReconcilerService : IAgentRunReconcilerService, ISco
             .ToList();
     }
 
-    /// <summary>Append an Error event so the live log / replay timeline shows the abandonment. Best-effort — a logging failure doesn't undo the recovery.</summary>
-    private async Task TryAppendAbandonedEventAsync(Guid runId, CancellationToken cancellationToken)
+    /// <summary>Append one reconciler-authored event (abandonment or recovery note) so the live log / replay timeline shows what happened. Best-effort — a logging failure doesn't undo the transition.</summary>
+    private async Task TryAppendEventAsync(Guid runId, AgentEventKind kind, string text, CancellationToken cancellationToken)
     {
         try
         {
-            _db.AgentRunEvent.Add(new AgentRunEvent { Id = Guid.NewGuid(), AgentRunId = runId, Kind = AgentEventKind.Error, Text = AbandonedError });
+            _db.AgentRunEvent.Add(new AgentRunEvent { Id = Guid.NewGuid(), AgentRunId = runId, Kind = kind, Text = text });
             await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "AgentRunReconciler: failed to append the abandoned-run event for {RunId}", runId);
+            _logger.LogWarning(ex, "AgentRunReconciler: failed to append the {Kind} event for {RunId}", kind, runId);
         }
     }
+}
+
+/// <summary>What the sweep did with one stale-Running run.</summary>
+internal enum StaleOutcome
+{
+    /// <summary>Left as-is — a worker landed it first, or its durable process is still alive (left for re-attach).</summary>
+    LeftAlone,
+
+    /// <summary>Flipped Running → Failed because its worker vanished and the run was not recoverable.</summary>
+    Abandoned,
+
+    /// <summary>Salvaged from its durable spool: the run had already finished while unobserved.</summary>
+    Recovered,
 }
 
 /// <summary>Diagnostic summary of one reconcile sweep. Returned for log surfacing + the recurring-job result.</summary>
 public sealed record AgentRunReconcileSummary
 {
-    /// <summary>Running runs flipped to Failed because their worker vanished (stale heartbeat + no events).</summary>
+    /// <summary>Running runs flipped to Failed because their worker vanished (stale heartbeat + no events) and they were not recoverable.</summary>
     public int MarkedAbandonedFromRunning { get; init; }
+
+    /// <summary>Running runs salvaged from their durable spool — the agent had already finished while its live observer was gone.</summary>
+    public int RecoveredFromSpool { get; init; }
 
     /// <summary>Workflow runs resumed off a terminal agent run that hadn't propagated its completion (crash / failed notify).</summary>
     public int ResumedStalledParents { get; init; }
@@ -219,5 +340,5 @@ public sealed record AgentRunReconcileSummary
     /// <summary>Stuck-Queued agent runs whose dispatch was lost and were re-enqueued to the executor.</summary>
     public int ReDispatchedQueued { get; init; }
 
-    public int Total => MarkedAbandonedFromRunning + ResumedStalledParents + ReDispatchedQueued;
+    public int Total => MarkedAbandonedFromRunning + RecoveredFromSpool + ResumedStalledParents + ReDispatchedQueued;
 }
