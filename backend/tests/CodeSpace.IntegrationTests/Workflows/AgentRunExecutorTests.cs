@@ -166,7 +166,12 @@ public class AgentRunExecutorTests
         await ExecuteAsync(runId, new ScriptedHarness("printf 'working\\n'; exit 7"));
 
         using var verify = _fixture.BeginScope();
-        (await verify.Resolve<IAgentRunService>().GetAsync(runId, CancellationToken.None)).Status.ShouldBe(AgentRunStatus.Failed);
+        var run = await verify.Resolve<IAgentRunService>().GetAsync(runId, CancellationToken.None);
+        run.Status.ShouldBe(AgentRunStatus.Failed);
+        // The harness's failure reason must reach the persisted run record — not just the status — so the
+        // operator sees WHY it failed. (The real harnesses fold the CLI's final message into this; the
+        // stub carries the exit code, which is what we assert reaches AgentRun.error here.)
+        (run.Error ?? "").ShouldContain("7", customMessage: "the run's failure reason must be persisted to AgentRun.error, not swallowed");
     }
 
     [Fact]

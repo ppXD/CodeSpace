@@ -129,6 +129,26 @@ public class CodexHarnessTests
     }
 
     [Fact]
+    public void Build_result_surfaces_the_final_summary_as_the_error_when_a_failed_run_has_no_error_event()
+    {
+        // The CLI printed its failure reason as a final message (e.g. a gateway 401) but emitted no
+        // structured Error event — the run must still fail with that reason, not an opaque exit code.
+        var events = new[] { new AgentEvent { Kind = AgentEventKind.FinalSummary, Text = "API Error: 401 Authentication Error" } };
+
+        var result = Harness.BuildResult(events, exitCode: 1);
+
+        result.Status.ShouldBe(AgentRunStatus.Failed);
+        result.Error.ShouldBe("API Error: 401 Authentication Error");
+        result.Summary.ShouldBe("API Error: 401 Authentication Error");
+    }
+
+    [Fact]
+    public void Build_result_falls_back_to_an_exit_code_error_when_a_failed_run_has_no_diagnostic()
+    {
+        Harness.BuildResult(System.Array.Empty<AgentEvent>(), exitCode: 137).Error.ShouldContain("137");
+    }
+
+    [Fact]
     public void Builds_a_failed_result_with_the_error_on_nonzero_exit()
     {
         var events = new[] { new AgentEvent { Kind = AgentEventKind.Error, Text = "patch failed to apply" } };
