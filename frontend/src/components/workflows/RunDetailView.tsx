@@ -5,6 +5,7 @@ import type { WorkflowRunWaitInfo } from "@/api/workflows";
 import { ApiError } from "@/api/request";
 import { useResumeRun, useWorkflowRun } from "@/hooks/use-workflows";
 
+import { AgentRunTimeline } from "./AgentRunTimeline";
 import { JsonView } from "./JsonView";
 import { concurrentNodeKeys, runNodeKey } from "./runConcurrency";
 
@@ -142,7 +143,10 @@ export function RunDetailView({ runId, nested = false, depth = 0, onOpenRun }: {
                 {n.childRunId && n.childRunId !== r.pendingWait?.token && (
                   <SubworkflowRunDisclosure childRunId={n.childRunId} depth={depth} onOpenRun={onOpenRun} />
                 )}
-                {!n.error && !hasContent(n.inputs) && !hasContent(n.outputs) && !n.childRunId && (
+                {/* An agent.code step: stream its run's live status + event timeline inline, so you watch
+                    the agent work in real time (and see WHY, not just a static "Suspended"/final status). */}
+                {n.agentRunId && <AgentRunTimeline agentRunId={n.agentRunId} />}
+                {!n.error && !hasContent(n.inputs) && !hasContent(n.outputs) && !n.childRunId && !n.agentRunId && (
                   <div className="wf-run-node-none">No inputs or outputs recorded.</div>
                 )}
               </li>
