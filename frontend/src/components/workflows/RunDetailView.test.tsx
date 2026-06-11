@@ -11,11 +11,21 @@ import { RunDetailView } from "./RunDetailView";
  *   2. the child run-detail embeds inline, but only once expanded (no eager polling for N steps);
  *   3. with no navigation handler the id is plain text; a non-subworkflow node shows neither.
  */
-const { useWorkflowRunMock } = vi.hoisted(() => ({ useWorkflowRunMock: vi.fn() }));
+const { useWorkflowRunMock, useAgentRunMock } = vi.hoisted(() => ({
+  useWorkflowRunMock: vi.fn(),
+  useAgentRunMock: vi.fn<(id?: string) => { data: { status: string } | undefined }>(() => ({ data: undefined })),
+}));
 
 vi.mock("@/hooks/use-workflows", () => ({
   useResumeRun: () => ({ mutate: vi.fn(), isPending: false, isError: false }),
   useWorkflowRun: (runId: string) => useWorkflowRunMock(runId),
+}));
+
+// RunNodeRow reads the agent run's live status for its badge (and AgentRunTimeline streams it); mock the
+// hooks so the row renders without a QueryClient. Default: no agent run → badge falls back to node status.
+vi.mock("@/hooks/use-agents", () => ({
+  useAgentRun: (id?: string) => useAgentRunMock(id),
+  useAgentRunEvents: () => ({ data: [] }),
 }));
 
 function node(over: Partial<WorkflowRunNodeSummary> & { nodeId: string }): WorkflowRunNodeSummary {
@@ -33,7 +43,11 @@ function detail(over: Partial<WorkflowRunDetail>): WorkflowRunDetail {
 const ok = (data: WorkflowRunDetail) => ({ isLoading: false, error: null, data });
 const missing = { isLoading: false, error: null, data: null };
 
-beforeEach(() => useWorkflowRunMock.mockReset());
+beforeEach(() => {
+  useWorkflowRunMock.mockReset();
+  useAgentRunMock.mockReset();
+  useAgentRunMock.mockImplementation(() => ({ data: undefined }));
+});
 
 describe("RunDetailView — sub-workflow step drill-down", () => {
   it("links the step to its child run, and embeds the child inline only once expanded", () => {
@@ -95,6 +109,50 @@ describe("RunDetailView — sub-workflow step drill-down", () => {
     expect(screen.getByText("Running a sub-workflow")).toBeTruthy();
     // …so the trace row must NOT offer the same child again (no duplicate embed / double-poll).
     expect(screen.queryByText("Sub-workflow run")).toBeNull();
+  });
+});
+
+describe("RunDetailView — live agent-code node badge", () => {
+  const parkedTitle = "Workflow node is parked (Suspended) while its agent runs";
+
+  it("badges a Suspended agent.code node with its agent run's LIVE status, not 'Suspended'", () => {
+    useWorkflowRunMock.mockImplementation(() => ok(detail({
+      status: "Suspended",
+      nodes: [node({ nodeId: "code", status: "Suspended", agentRunId: "ar-1" })],
+    })));
+    useAgentRunMock.mockImplementation((id?: string) => ({ data: id === "ar-1" ? { status: "Running" } : undefined }));
+
+    render(<RunDetailView runId="parent-1" />);
+
+    // The row's status badge reads "Running" (derived from the agent run), with the engine truth on hover.
+    const badge = screen.getByTitle(parkedTitle);
+    expect(badge.textContent).toBe("Running");
+  });
+
+  it("keeps the node's own status for a Suspended node with no agent run (e.g. a Timer wait)", () => {
+    useWorkflowRunMock.mockImplementation(() => ok(detail({
+      status: "Suspended",
+      nodes: [node({ nodeId: "sleep", status: "Suspended" })],  // no agentRunId
+    })));
+
+    const { container } = render(<RunDetailView runId="parent-1" />);
+
+    expect(screen.queryByTitle(parkedTitle)).toBeNull();
+    // The node row's own pill keeps "Suspended" (scoped, so it's not the run-summary badge).
+    expect(container.querySelector(".wf-run-node .wf-status-pill")?.textContent).toBe("Suspended");
+  });
+
+  it("does NOT override the badge once the agent run is terminal (the node is about to resume)", () => {
+    useWorkflowRunMock.mockImplementation(() => ok(detail({
+      status: "Suspended",
+      nodes: [node({ nodeId: "code", status: "Suspended", agentRunId: "ar-1" })],
+    })));
+    useAgentRunMock.mockImplementation((id?: string) => ({ data: id === "ar-1" ? { status: "Failed" } : undefined }));
+
+    render(<RunDetailView runId="parent-1" />);
+
+    // Terminal agent status → keep the node's own status (no parked-badge override).
+    expect(screen.queryByTitle(parkedTitle)).toBeNull();
   });
 });
 
