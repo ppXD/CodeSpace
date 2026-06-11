@@ -262,7 +262,92 @@ public class SubworkflowFlowTests
             .ShouldBe(childRunId.ToString(), "a finished sub-workflow step keeps its child-run link");
     }
 
+    [Fact]
+    public async Task Two_parallel_subworkflow_children_each_resume_their_own_parent_node()
+    {
+        // The subworkflow analog of the parallel-agent fix: two flow.subworkflow nodes run children in ONE
+        // wave; each parent node MUST resume with ITS OWN child's outputs (not the first completer's), both
+        // children are staged + dispatched, and the parent advances only after the LAST child finishes.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var childId = await CreateWorkflowAsync(teamId, userId, EchoChildDefinition());
+        var parentId = await CreateWorkflowAsync(teamId, userId, TwoSubsParentDefinition(childId));
+        var parentRunId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, parentId, teamId);
+
+        // ── Pass 1: both sub nodes park in one wave → two Subworkflow waits, two children staged. ──
+        await RunEngineAsync(parentRunId);
+
+        Guid child1, child2;
+        using (var verify = _fixture.BeginScope())
+        {
+            var db = verify.Resolve<CodeSpaceDbContext>();
+            (await db.WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == parentRunId)).Status.ShouldBe(WorkflowRunStatus.Suspended);
+
+            var waits = await db.WorkflowRunWait.AsNoTracking()
+                .Where(w => w.RunId == parentRunId && w.Status == WorkflowWaitStatuses.Pending).ToListAsync();
+            waits.Count.ShouldBe(2, "both sub-workflow nodes park on their own child wait");
+            child1 = Guid.Parse(waits.Single(w => w.NodeId == "sub1").Token);
+            child2 = Guid.Parse(waits.Single(w => w.NodeId == "sub2").Token);
+
+            (await db.WorkflowRun.AsNoTracking().CountAsync(r => r.ParentRunId == parentRunId))
+                .ShouldBe(2, "both children are staged + dispatched — not just the first");
+        }
+
+        // ── Child 1 completes first → resolves ONLY sub1's wait; the parent stays parked for sub2. ──
+        await RunEngineAsync(child1);
+
+        using (var verify = _fixture.BeginScope())
+        {
+            var db = verify.Resolve<CodeSpaceDbContext>();
+            (await db.WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == parentRunId)).Status
+                .ShouldBe(WorkflowRunStatus.Suspended, "one of two parallel children finishing does NOT advance the parent");
+            (await db.WorkflowRunWait.AsNoTracking().SingleAsync(w => w.RunId == parentRunId && w.NodeId == "sub2")).Status
+                .ShouldBe(WorkflowWaitStatuses.Pending, "sub2's wait is untouched by child1's completion (the corruption resolved it too)");
+        }
+
+        // ── Child 2 completes → the last wait → the parent advances; each node maps its OWN child. ──
+        await RunEngineAsync(child2);
+        await RunEngineAsync(parentRunId);
+
+        using (var verify = _fixture.BeginScope())
+        {
+            var db = verify.Resolve<CodeSpaceDbContext>();
+            (await db.WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == parentRunId)).Status.ShouldBe(WorkflowRunStatus.Success);
+
+            var sub1 = await db.WorkflowRunNode.AsNoTracking().SingleAsync(n => n.RunId == parentRunId && n.NodeId == "sub1");
+            var sub2 = await db.WorkflowRunNode.AsNoTracking().SingleAsync(n => n.RunId == parentRunId && n.NodeId == "sub2");
+            System.Text.Json.JsonDocument.Parse(sub1.OutputsJson!).RootElement.GetProperty("result").GetString()
+                .ShouldBe("CHILD-1", "sub1 resumes with child1's output");
+            System.Text.Json.JsonDocument.Parse(sub2.OutputsJson!).RootElement.GetProperty("result").GetString()
+                .ShouldBe("CHILD-2", "sub2 resumes with child2's output — NOT the first completer's (the bug)");
+        }
+    }
+
     // ─── Helpers ────────────────────────────────────────────────────────────────
+
+    // Parent: manual → { sub1(child, x=CHILD-1), sub2(child, x=CHILD-2) } in parallel → join terminal.
+    private static WorkflowDefinition TwoSubsParentDefinition(Guid childWorkflowId) => new()
+    {
+        SchemaVersion = 1,
+        Nodes = new List<NodeDefinition>
+        {
+            new() { Id = "start", TypeKey = "trigger.manual", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
+            new() { Id = "sub1", TypeKey = "flow.subworkflow",
+                    Config = WorkflowsTestSeed.Json($$"""{"workflowId":"{{childWorkflowId}}"}"""),
+                    Inputs = WorkflowsTestSeed.Json("""{"inputs":{"x":"CHILD-1"}}""") },
+            new() { Id = "sub2", TypeKey = "flow.subworkflow",
+                    Config = WorkflowsTestSeed.Json($$"""{"workflowId":"{{childWorkflowId}}"}"""),
+                    Inputs = WorkflowsTestSeed.Json("""{"inputs":{"x":"CHILD-2"}}""") },
+            new() { Id = "end", TypeKey = "builtin.terminal", Config = WorkflowsTestSeed.EmptyJson(),
+                    Inputs = WorkflowsTestSeed.Json("""{"a":"{{nodes.sub1.outputs.result}}","b":"{{nodes.sub2.outputs.result}}"}""") },
+        },
+        Edges = new List<EdgeDefinition>
+        {
+            new() { From = "start", To = "sub1" },
+            new() { From = "start", To = "sub2" },
+            new() { From = "sub1", To = "end" },
+            new() { From = "sub2", To = "end" },
+        },
+    };
 
     private async Task<WorkflowRunDetail> GetRunDetailAsync(Guid runId, Guid teamId, Guid userId)
     {

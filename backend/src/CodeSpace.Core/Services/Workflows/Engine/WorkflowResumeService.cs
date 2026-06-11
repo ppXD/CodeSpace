@@ -34,6 +34,19 @@ public interface IWorkflowResumeService
     Task<bool> ResumeAsync(Guid runId, string resumePayloadJson, CancellationToken cancellationToken);
 
     /// <summary>
+    /// Resume a run on the completion of ONE external unit of work it parked on (an agent run, a
+    /// sub-workflow child). Unlike the run-level <see cref="ResumeAsync(System.Guid,string,System.Threading.CancellationToken)"/>
+    /// (which resolves EVERY pending wait), this resolves ONLY <paramref name="waitId"/> —
+    /// UNCONDITIONALLY (the work has durably finished, so its result MUST be consumed even if a sibling
+    /// completion is mid-flight; dropping it on a run-flip CAS race is exactly the bug that fed every
+    /// parallel node the first completer's payload) and idempotently (a replay / double-notify is a
+    /// no-op) — then re-dispatches the run only once NO pending waits remain. So K parallel waits on one
+    /// run each resolve with their OWN payload and the run advances exactly once, after the last
+    /// completes. Returns false when the wait was already resolved (replay / double-notify).
+    /// </summary>
+    Task<bool> ResumeOnWaitCompletionAsync(Guid runId, Guid waitId, string resumePayloadJson, CancellationToken cancellationToken);
+
+    /// <summary>
     /// Resume the run parked on the Callback wait matching <paramref name="token"/>, stamping the
     /// posted <paramref name="bodyJson"/> as the resume payload (surfaced as the node's <c>body</c>
     /// output). Returns false when no pending callback wait matches the token (unknown / already
@@ -131,6 +144,60 @@ public sealed class WorkflowResumeService : IWorkflowResumeService, IScopedDepen
         await _postCommit.RunAfterCommitAsync(ct => _dispatcher.DispatchAsync(runId, ct), cancellationToken).ConfigureAwait(false);
 
         _logger.LogInformation("Resume: run {RunId} resumed (Suspended -> Pending -> dispatched)", runId);
+        return true;
+    }
+
+    public async Task<bool> ResumeOnWaitCompletionAsync(Guid runId, Guid waitId, string resumePayloadJson, CancellationToken cancellationToken)
+    {
+        var now = DateTimeOffset.UtcNow;
+
+        // 1. Durably resolve THIS wait, independent of the run's status. A finished agent / child run MUST
+        //    have its result consumed; we cannot drop it on a sibling's run-flip CAS race (the corruption
+        //    where one completer's payload landed on every parallel wait). Idempotent: 0 rows = the wait was
+        //    already resolved (a replay / double-notify) → no-op.
+        var resolved = await _db.WorkflowRunWait
+            .Where(w => w.Id == waitId && w.Status == WorkflowWaitStatuses.Pending)
+            .ExecuteUpdateAsync(s => s
+                .SetProperty(w => w.Status, WorkflowWaitStatuses.Resolved)
+                .SetProperty(w => w.PayloadJson, resumePayloadJson)
+                .SetProperty(w => w.ResolvedAt, (DateTimeOffset?)now), cancellationToken)
+            .ConfigureAwait(false);
+
+        if (resolved == 0)
+        {
+            _logger.LogDebug("Wait-completion resume: wait {WaitId} already resolved — skipping (replay / double-notify)", waitId);
+            return false;
+        }
+
+        // 2. Re-dispatch only once the LAST parallel wait resolved. While any sibling wait is still pending
+        //    the run stays Suspended — so the walker never does a partial re-walk that could miss a wait
+        //    resolved just after it passed the node (the stuck race). The last completer flips
+        //    Suspended→Pending (CAS); a concurrent last-completer loses the flip and the winner's single
+        //    re-walk consumes every resolved wait (each keyed to its own node by the walker).
+        var anyPending = await _db.WorkflowRunWait.AsNoTracking()
+            .AnyAsync(w => w.RunId == runId && w.Status == WorkflowWaitStatuses.Pending, cancellationToken)
+            .ConfigureAwait(false);
+
+        if (anyPending)
+        {
+            _logger.LogDebug("Wait-completion resume: wait {WaitId} resolved; siblings still pending on run {RunId} — staying suspended", waitId, runId);
+            return true;
+        }
+
+        var flipped = await _db.WorkflowRun
+            .Where(r => r.Id == runId && r.Status == WorkflowRunStatus.Suspended)
+            .ExecuteUpdateAsync(s => s.SetProperty(r => r.Status, WorkflowRunStatus.Pending), cancellationToken)
+            .ConfigureAwait(false);
+
+        if (flipped == 0)
+        {
+            _logger.LogDebug("Wait-completion resume: run {RunId} no longer Suspended — a concurrent resume is driving the dispatch", runId);
+            return true;
+        }
+
+        await _postCommit.RunAfterCommitAsync(ct => _dispatcher.DispatchAsync(runId, ct), cancellationToken).ConfigureAwait(false);
+
+        _logger.LogInformation("Wait-completion resume: run {RunId} resumed after its last parallel wait resolved", runId);
         return true;
     }
 
