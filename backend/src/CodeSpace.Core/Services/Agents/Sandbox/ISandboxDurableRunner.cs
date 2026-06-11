@@ -42,4 +42,14 @@ public interface ISandboxDurableRunner
     /// leaves the process running, throwing <see cref="OperationCanceledException"/> (see the type remarks).
     /// </summary>
     Task<SandboxResult> AttachAsync(SandboxHandle handle, Func<string, CancellationToken, Task> onStdoutLine, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Snapshot a launched run's liveness from its <paramref name="handle"/> WITHOUT observing it:
+    /// <see cref="SandboxRunState.Exited"/> (its exit marker is present, carrying the code),
+    /// <see cref="SandboxRunState.Running"/> (the supervised process is still alive, no marker yet), or
+    /// <see cref="SandboxRunState.Gone"/> (the process is gone and never recorded a marker — killed). Lets a
+    /// reconciler recover a run that finished unobserved, leave one still running, or abandon one truly lost —
+    /// instead of blindly abandoning every run whose live observer disappeared.
+    /// </summary>
+    Task<SandboxProbe> ProbeAsync(SandboxHandle handle, CancellationToken cancellationToken);
 }

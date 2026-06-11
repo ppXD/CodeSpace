@@ -82,6 +82,17 @@ public sealed partial class LocalProcessRunner
         }
     }
 
+    public Task<SandboxProbe> ProbeAsync(SandboxHandle handle, CancellationToken cancellationToken)
+    {
+        // Marker first: it's written BEFORE the supervisor exits, so its presence authoritatively means "finished".
+        if (TryReadExitCode(Path.Combine(handle.SpoolDirectory, ExitMarkerFile), out var code))
+            return Task.FromResult(new SandboxProbe { State = SandboxRunState.Exited, ExitCode = code });
+
+        var state = IsProcessAlive(handle.ProcessId) ? SandboxRunState.Running : SandboxRunState.Gone;
+
+        return Task.FromResult(new SandboxProbe { State = state });
+    }
+
     /// <summary>Final drain (incl. a trailing partial line) + buffered stderr, mapped to Success/Failed by the exit code.</summary>
     private async Task<SandboxResult> CompleteFromSpoolAsync(SandboxHandle handle, long offset, int exitCode, Func<string, CancellationToken, Task> onLine, CancellationToken ct)
     {
