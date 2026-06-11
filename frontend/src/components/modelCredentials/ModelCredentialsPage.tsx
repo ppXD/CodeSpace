@@ -38,7 +38,7 @@ export function ModelCredentialsPage() {
   // Rendered inside the Settings layout (it owns the "Settings" header + tab strip), so this is body-only.
   return (
     <>
-      <div style={{ display: "flex", justifyContent: "flex-end", padding: "4px 16px 0" }}>
+      <div style={{ display: "flex", justifyContent: "flex-end", padding: "16px 16px 0" }}>
         <button className="btn btn-primary" onClick={() => setModal({ mode: "add" })}>
           <Ic.Plus size={14} /> Add credential
         </button>

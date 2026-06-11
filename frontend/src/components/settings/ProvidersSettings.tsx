@@ -39,7 +39,7 @@ export function ProvidersSettings() {
   // Rendered inside the Settings layout (it owns the "Settings" header + tab strip), so this is body-only.
   return (
     <>
-      <div style={{ display: "flex", justifyContent: "flex-end", padding: "4px 16px 0" }}>
+      <div style={{ display: "flex", justifyContent: "flex-end", padding: "16px 16px 0" }}>
         <button className="btn btn-primary" onClick={() => setManageOpen(true)}>
           <Ic.Link size={14} /> Manage providers
         </button>
