@@ -46,6 +46,7 @@ import { introspectScope } from "@/components/workflows/scope-introspection";
 import { StartNodeInputsEditor } from "@/components/workflows/StartNodeInputsEditor";
 import { SubworkflowEditor } from "@/components/workflows/SubworkflowEditor";
 import { LoopEditor } from "@/components/workflows/LoopEditor";
+import { AgentCodeInspector } from "@/components/workflows/AgentCodeInspector";
 import { VariableTablePanel } from "@/components/workflows/VariableTablePanel";
 import { WorkflowNode, type WorkflowNodeData } from "@/components/workflows/WorkflowNode";
 import { NodeAddContext, type NodeAddRequest } from "@/components/workflows/nodeAddContext";
@@ -1330,6 +1331,17 @@ function NodeInspector({
         <section className="wf-inspector-section">
           <p className="wf-retry-hint">Try body entry — added automatically inside a Try. Connect the try's body steps from here; there's nothing to configure.</p>
         </section>
+      ) : manifest.typeKey === "agent.code" ? (
+        // Run-coding-agent gets a two-mode editor (bind an Agent persona ⇄ configure inline) with a
+        // harness picker, instead of the generic Config/Inputs forms — the engine already supports
+        // both modes; this surfaces them clearly.
+        <AgentCodeInspector
+          config={config}
+          inputs={inputs}
+          onConfigChange={onConfigChange}
+          onInputsChange={onInputsChange}
+          suggestions={suggestions}
+        />
       ) : (
         <>
           <section className="wf-inspector-section">
