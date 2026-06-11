@@ -393,6 +393,35 @@ public class AgentRunExecutorTests
     }
 
     [Fact]
+    public async Task Completes_succeeded_even_after_a_heartbeat_ping_fires_midrun()
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        // Regression: a run that outlives one heartbeat interval used to get stranded Running. The heartbeat
+        // loop pings on a SEPARATE DbContext, bumping the row's xmin; a tracked CompleteAsync then failed its
+        // optimistic-concurrency check and never landed terminal → the reconciler later abandoned it. Status-
+        // guarded CAS completion fixes it. Window 9s → interval 5s → a ping lands during the 8s run.
+        var original = Environment.GetEnvironmentVariable(AgentRunLiveness.WindowEnvVar);
+        try
+        {
+            Environment.SetEnvironmentVariable(AgentRunLiveness.WindowEnvVar, "00:00:09");
+
+            var teamId = await SeedTeamAsync();
+            var runId = await CreateScriptedRunAsync(teamId);
+
+            await ExecuteAsync(runId, new ScriptedHarness("sleep 8; printf 'done\\n'"));
+
+            using var scope = _fixture.BeginScope();
+            var run = await scope.Resolve<IAgentRunService>().GetAsync(runId, CancellationToken.None);
+            run.Status.ShouldBe(AgentRunStatus.Succeeded, $"a heartbeat bumping xmin mid-run must NOT block completion (actual={run.Status}, err={run.Error})");
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable(AgentRunLiveness.WindowEnvVar, original);
+        }
+    }
+
+    [Fact]
     public async Task Heartbeat_loop_advances_heartbeat_during_a_long_quiet_run()
     {
         if (OperatingSystem.IsWindows()) return;
