@@ -67,7 +67,7 @@ public class AgentRunChaosRecoveryTests
         {
             var svc = scope.Resolve<IAgentRunService>();
             (await svc.GetAsync(runId, CancellationToken.None)).Status.ShouldBe(AgentRunStatus.Running);
-            (await svc.GetEventsAsync(runId, 0, CancellationToken.None)).Select(e => e.Text).ShouldBe(new[] { "step1", "step2", "step3" });
+            (await svc.GetEventsAsync(runId, teamId, 0, CancellationToken.None)).Select(e => e.Text).ShouldBe(new[] { "step1", "step2", "step3" });
         }
 
         // Log integrity survives the crash: the durable ledger rejects tampering.
@@ -101,7 +101,7 @@ public class AgentRunChaosRecoveryTests
             run.Status.ShouldBe(AgentRunStatus.Failed);
             run.Error.ShouldNotBeNull();
 
-            var events = await svc.GetEventsAsync(runId, 0, CancellationToken.None);
+            var events = await svc.GetEventsAsync(runId, teamId, 0, CancellationToken.None);
             events.Select(e => e.Text).Take(3).ShouldBe(new[] { "step1", "step2", "step3" });
             events.ShouldContain(e => e.Kind == AgentEventKind.Error);
         }

@@ -33,11 +33,20 @@ public interface IAgentRunService
     /// <summary>Land a terminal result (the target state is <paramref name="result"/>'s Status); stores the result + CompletedAt. Throws when the transition is illegal or the result's status isn't terminal.</summary>
     Task CompleteAsync(Guid runId, AgentRunResult result, CancellationToken cancellationToken);
 
-    /// <summary>Read a run (untracked). Throws <see cref="KeyNotFoundException"/> when absent.</summary>
+    /// <summary>
+    /// Read a run by id (untracked) — the SYSTEM/execution path (the executor loads any staged run to run
+    /// it, regardless of team), so it is intentionally NOT team-scoped. Throws
+    /// <see cref="KeyNotFoundException"/> when absent. An operator-facing read must use a team-scoped query.
+    /// </summary>
     Task<AgentRun> GetAsync(Guid runId, CancellationToken cancellationToken);
 
-    /// <summary>Read the run's events with <c>Sequence &gt; afterSequence</c> in order — the live-stream / replay cursor (pass 0 for the whole log).</summary>
-    Task<IReadOnlyList<AgentRunEvent>> GetEventsAsync(Guid runId, long afterSequence, CancellationToken cancellationToken);
+    /// <summary>
+    /// Read the run's events with <c>Sequence &gt; afterSequence</c> in order — the operator-facing
+    /// live-stream / replay cursor (pass 0 for the whole log). TEAM-SCOPED: returns an empty list when the
+    /// run doesn't belong to <paramref name="teamId"/>, so a foreign run id leaks neither events nor its
+    /// existence.
+    /// </summary>
+    Task<IReadOnlyList<AgentRunEvent>> GetEventsAsync(Guid runId, Guid teamId, long afterSequence, CancellationToken cancellationToken);
 }
 
 public sealed class AgentRunService : IAgentRunService, IScopedDependency
@@ -137,11 +146,20 @@ public sealed class AgentRunService : IAgentRunService, IScopedDependency
         await _db.AgentRun.AsNoTracking().SingleOrDefaultAsync(r => r.Id == runId, cancellationToken).ConfigureAwait(false)
             ?? throw new KeyNotFoundException($"AgentRun {runId} not found.");
 
-    public async Task<IReadOnlyList<AgentRunEvent>> GetEventsAsync(Guid runId, long afterSequence, CancellationToken cancellationToken) =>
-        await _db.AgentRunEvent.AsNoTracking()
+    public async Task<IReadOnlyList<AgentRunEvent>> GetEventsAsync(Guid runId, Guid teamId, long afterSequence, CancellationToken cancellationToken)
+    {
+        // Gate on ownership first so a foreign run id leaks neither events nor existence (return empty,
+        // never throw "not found" only for owned runs — both cross-team and absent look identical).
+        var owned = await _db.AgentRun.AsNoTracking()
+            .AnyAsync(r => r.Id == runId && r.TeamId == teamId, cancellationToken).ConfigureAwait(false);
+
+        if (!owned) return Array.Empty<AgentRunEvent>();
+
+        return await _db.AgentRunEvent.AsNoTracking()
             .Where(e => e.AgentRunId == runId && e.Sequence > afterSequence)
             .OrderBy(e => e.Sequence)
             .ToListAsync(cancellationToken).ConfigureAwait(false);
+    }
 
     private async Task<AgentRun> LoadAsync(Guid runId, CancellationToken cancellationToken) =>
         await _db.AgentRun.SingleOrDefaultAsync(r => r.Id == runId, cancellationToken).ConfigureAwait(false)

@@ -92,4 +92,11 @@ public class AgentDefinitionResolverTests
         AgentDefinitionResolver.ParseTools("[\"Read\",\"Grep\"]").ShouldBe(new[] { "Read", "Grep" });
         AgentDefinitionResolver.ParseTools("[]").ShouldBeEmpty("an explicit empty array is 'no tools', not the default");
     }
+
+    [Fact]
+    public void ParseTools_wraps_a_corrupt_blob_as_a_clean_resolution_failure() =>
+        // A corrupt imported ToolsJson must surface as the typed exception the engine maps to a clean node
+        // failure — not a raw JsonException escaping the resolve path.
+        Should.Throw<AgentDefinitionResolutionException>(() => AgentDefinitionResolver.ParseTools("{not-an-array"))
+            .Message.ShouldContain("unreadable tools list");
 }
