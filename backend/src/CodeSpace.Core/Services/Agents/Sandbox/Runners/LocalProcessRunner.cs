@@ -19,6 +19,39 @@ public sealed class LocalProcessRunner : ISandboxRunner, ISandboxStreamRunner, I
 {
     public const string LocalKind = "local";
 
+    /// <summary>
+    /// Operator switch (a truthy <c>"1"</c>/<c>"true"</c>): when enabled, the child process starts from a
+    /// SCRUBBED environment — the worker's inherited env (DB / Redis / OAuth secrets, the variable master key,
+    /// cloud credentials) is dropped and only <see cref="EnvAllowlist"/> plus the spec's own
+    /// <see cref="SandboxSpec.Environment"/> survive. Default OFF so this lands ahead of, and flips ON together
+    /// with, per-team model-credential injection: scrubbing BEFORE a credential is injected would strip the
+    /// model key the agent currently authenticates with (it inherits it from the worker env today). Pinned by a
+    /// test (Rule 8).
+    /// </summary>
+    public const string EnvScrubEnvVar = "CODESPACE_AGENT_ENV_SCRUB";
+
+    /// <summary>
+    /// The ONLY inherited environment variables a scrubbed child keeps: process/runtime essentials, locale,
+    /// temp dirs, and the non-secret outbound-HTTPS knobs (proxy + custom CA bundle) an agent needs to reach its
+    /// model API. Deliberately excludes every secret-bearing name. Names absent on the host are simply skipped.
+    /// Pinned by a test (Rule 8) — widening it lets one more inherited worker variable reach the untrusted
+    /// agent, so it must be a visible, reviewed decision rather than a silent drift.
+    /// </summary>
+    public static readonly IReadOnlyList<string> EnvAllowlist = new[]
+    {
+        // process / runtime essentials
+        "PATH", "HOME", "USER", "LOGNAME", "SHELL", "TERM",
+        // locale
+        "LANG", "LANGUAGE", "LC_ALL", "LC_CTYPE", "TZ",
+        // temp dirs
+        "TMPDIR", "TEMP", "TMP",
+        // Windows essentials
+        "SystemRoot", "windir", "ComSpec", "PATHEXT", "USERPROFILE", "APPDATA", "LOCALAPPDATA", "HOMEDRIVE", "HOMEPATH", "NUMBER_OF_PROCESSORS", "PROCESSOR_ARCHITECTURE", "OS",
+        // non-secret outbound HTTPS (proxy + custom CA) — needed to reach the model API
+        "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy",
+        "SSL_CERT_FILE", "SSL_CERT_DIR", "NODE_EXTRA_CA_CERTS", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE",
+    };
+
     public string Kind => LocalKind;
 
     public async Task<SandboxResult> RunAsync(SandboxSpec spec, CancellationToken cancellationToken)
@@ -93,7 +126,16 @@ public sealed class LocalProcessRunner : ISandboxRunner, ISandboxStreamRunner, I
         return new SandboxResult { Status = SandboxStatus.TimedOut, ExitCode = -1, Stdout = "", Stderr = stderr };
     }
 
-    private static ProcessStartInfo BuildStartInfo(SandboxSpec spec)
+    private static ProcessStartInfo BuildStartInfo(SandboxSpec spec) =>
+        BuildStartInfo(spec, ParseEnvScrubFlag(Environment.GetEnvironmentVariable(EnvScrubEnvVar)));
+
+    /// <summary>
+    /// Builds the child <see cref="ProcessStartInfo"/>. <paramref name="scrub"/> is threaded explicitly rather
+    /// than read from the env here so the scrub behaviour is unit-testable against a real
+    /// <see cref="ProcessStartInfo"/> without mutating the process-global flag (which would leak into any
+    /// parallel test that spawns a runner). See <see cref="EnvScrubEnvVar"/>.
+    /// </summary>
+    internal static ProcessStartInfo BuildStartInfo(SandboxSpec spec, bool scrub)
     {
         var info = new ProcessStartInfo
         {
@@ -106,10 +148,34 @@ public sealed class LocalProcessRunner : ISandboxRunner, ISandboxStreamRunner, I
         };
 
         foreach (var arg in spec.Args) info.ArgumentList.Add(arg);
-        foreach (var (key, value) in spec.Environment) info.Environment[key] = value;
+
+        ApplyEnvironment(info, spec, scrub);
 
         return info;
     }
+
+    /// <summary>
+    /// When <paramref name="scrub"/>, reduce the inherited worker environment to <see cref="EnvAllowlist"/>;
+    /// then layer the spec's own variables on top so an injected value always wins over an allow-listed one.
+    /// When not scrubbing, the spec's variables are layered onto the full inherited env (the v0 behaviour).
+    /// </summary>
+    private static void ApplyEnvironment(ProcessStartInfo info, SandboxSpec spec, bool scrub)
+    {
+        if (scrub)
+        {
+            var preserved = new List<KeyValuePair<string, string?>>();
+            foreach (var name in EnvAllowlist)
+                if (info.Environment.TryGetValue(name, out var value)) preserved.Add(new(name, value));
+
+            info.Environment.Clear();
+            foreach (var kept in preserved) info.Environment[kept.Key] = kept.Value;
+        }
+
+        foreach (var (key, value) in spec.Environment) info.Environment[key] = value;
+    }
+
+    /// <summary>Only <c>"1"</c> or <c>"true"</c> (case-insensitive) enables the scrub; anything else — including <c>null</c> — keeps it off.</summary>
+    internal static bool ParseEnvScrubFlag(string? raw) => raw is "1" || (raw is not null && raw.Equals("true", StringComparison.OrdinalIgnoreCase));
 
     /// <summary>Kill the (possibly child-spawning) process, then map to TimedOut — unless the CALLER cancelled, which rethrows.</summary>
     private static async Task<SandboxResult> TerminateAsync(Process process, Task<string> stdoutTask, Task<string> stderrTask, CancellationToken cancellationToken)
