@@ -27,6 +27,7 @@ import { Route as AppTeamsTeamSlugRepositoriesIndexRouteImport } from './routes/
 import { Route as AppTeamsTeamSlugProjectsIndexRouteImport } from './routes/_app.teams.$teamSlug.projects.index'
 import { Route as AppTeamsTeamSlugAgentsIndexRouteImport } from './routes/_app.teams.$teamSlug.agents.index'
 import { Route as AppTeamsTeamSlugWorkflowsWorkflowIdRouteImport } from './routes/_app.teams.$teamSlug.workflows.$workflowId'
+import { Route as AppTeamsTeamSlugSettingsProvidersRouteImport } from './routes/_app.teams.$teamSlug.settings.providers'
 import { Route as AppTeamsTeamSlugSettingsModelCredentialsRouteImport } from './routes/_app.teams.$teamSlug.settings.model-credentials'
 import { Route as AppTeamsTeamSlugRepositoriesRepoFullPathRouteImport } from './routes/_app.teams.$teamSlug.repositories.$repoFullPath'
 import { Route as AppTeamsTeamSlugProjectsProjectIdRouteImport } from './routes/_app.teams.$teamSlug.projects.$projectId'
@@ -141,6 +142,12 @@ const AppTeamsTeamSlugWorkflowsWorkflowIdRoute =
     path: '/$workflowId',
     getParentRoute: () => AppTeamsTeamSlugWorkflowsRoute,
   } as any)
+const AppTeamsTeamSlugSettingsProvidersRoute =
+  AppTeamsTeamSlugSettingsProvidersRouteImport.update({
+    id: '/providers',
+    path: '/providers',
+    getParentRoute: () => AppTeamsTeamSlugSettingsRoute,
+  } as any)
 const AppTeamsTeamSlugSettingsModelCredentialsRoute =
   AppTeamsTeamSlugSettingsModelCredentialsRouteImport.update({
     id: '/model-credentials',
@@ -247,6 +254,7 @@ export interface FileRoutesByFullPath {
   '/teams/$teamSlug/projects/$projectId': typeof AppTeamsTeamSlugProjectsProjectIdRoute
   '/teams/$teamSlug/repositories/$repoFullPath': typeof AppTeamsTeamSlugRepositoriesRepoFullPathRouteWithChildren
   '/teams/$teamSlug/settings/model-credentials': typeof AppTeamsTeamSlugSettingsModelCredentialsRoute
+  '/teams/$teamSlug/settings/providers': typeof AppTeamsTeamSlugSettingsProvidersRoute
   '/teams/$teamSlug/workflows/$workflowId': typeof AppTeamsTeamSlugWorkflowsWorkflowIdRouteWithChildren
   '/teams/$teamSlug/agents/': typeof AppTeamsTeamSlugAgentsIndexRoute
   '/teams/$teamSlug/projects/': typeof AppTeamsTeamSlugProjectsIndexRoute
@@ -275,6 +283,7 @@ export interface FileRoutesByTo {
   '/teams/$teamSlug': typeof AppTeamsTeamSlugIndexRoute
   '/teams/$teamSlug/projects/$projectId': typeof AppTeamsTeamSlugProjectsProjectIdRoute
   '/teams/$teamSlug/settings/model-credentials': typeof AppTeamsTeamSlugSettingsModelCredentialsRoute
+  '/teams/$teamSlug/settings/providers': typeof AppTeamsTeamSlugSettingsProvidersRoute
   '/teams/$teamSlug/agents': typeof AppTeamsTeamSlugAgentsIndexRoute
   '/teams/$teamSlug/projects': typeof AppTeamsTeamSlugProjectsIndexRoute
   '/teams/$teamSlug/repositories': typeof AppTeamsTeamSlugRepositoriesIndexRoute
@@ -309,6 +318,7 @@ export interface FileRoutesById {
   '/_app/teams/$teamSlug/projects/$projectId': typeof AppTeamsTeamSlugProjectsProjectIdRoute
   '/_app/teams/$teamSlug/repositories/$repoFullPath': typeof AppTeamsTeamSlugRepositoriesRepoFullPathRouteWithChildren
   '/_app/teams/$teamSlug/settings/model-credentials': typeof AppTeamsTeamSlugSettingsModelCredentialsRoute
+  '/_app/teams/$teamSlug/settings/providers': typeof AppTeamsTeamSlugSettingsProvidersRoute
   '/_app/teams/$teamSlug/workflows/$workflowId': typeof AppTeamsTeamSlugWorkflowsWorkflowIdRouteWithChildren
   '/_app/teams/$teamSlug/agents/': typeof AppTeamsTeamSlugAgentsIndexRoute
   '/_app/teams/$teamSlug/projects/': typeof AppTeamsTeamSlugProjectsIndexRoute
@@ -345,6 +355,7 @@ export interface FileRouteTypes {
     | '/teams/$teamSlug/projects/$projectId'
     | '/teams/$teamSlug/repositories/$repoFullPath'
     | '/teams/$teamSlug/settings/model-credentials'
+    | '/teams/$teamSlug/settings/providers'
     | '/teams/$teamSlug/workflows/$workflowId'
     | '/teams/$teamSlug/agents/'
     | '/teams/$teamSlug/projects/'
@@ -373,6 +384,7 @@ export interface FileRouteTypes {
     | '/teams/$teamSlug'
     | '/teams/$teamSlug/projects/$projectId'
     | '/teams/$teamSlug/settings/model-credentials'
+    | '/teams/$teamSlug/settings/providers'
     | '/teams/$teamSlug/agents'
     | '/teams/$teamSlug/projects'
     | '/teams/$teamSlug/repositories'
@@ -406,6 +418,7 @@ export interface FileRouteTypes {
     | '/_app/teams/$teamSlug/projects/$projectId'
     | '/_app/teams/$teamSlug/repositories/$repoFullPath'
     | '/_app/teams/$teamSlug/settings/model-credentials'
+    | '/_app/teams/$teamSlug/settings/providers'
     | '/_app/teams/$teamSlug/workflows/$workflowId'
     | '/_app/teams/$teamSlug/agents/'
     | '/_app/teams/$teamSlug/projects/'
@@ -560,6 +573,13 @@ declare module '@tanstack/react-router' {
       fullPath: '/teams/$teamSlug/workflows/$workflowId'
       preLoaderRoute: typeof AppTeamsTeamSlugWorkflowsWorkflowIdRouteImport
       parentRoute: typeof AppTeamsTeamSlugWorkflowsRoute
+    }
+    '/_app/teams/$teamSlug/settings/providers': {
+      id: '/_app/teams/$teamSlug/settings/providers'
+      path: '/providers'
+      fullPath: '/teams/$teamSlug/settings/providers'
+      preLoaderRoute: typeof AppTeamsTeamSlugSettingsProvidersRouteImport
+      parentRoute: typeof AppTeamsTeamSlugSettingsRoute
     }
     '/_app/teams/$teamSlug/settings/model-credentials': {
       id: '/_app/teams/$teamSlug/settings/model-credentials'
@@ -754,6 +774,7 @@ const AppTeamsTeamSlugRepositoriesRouteWithChildren =
 
 interface AppTeamsTeamSlugSettingsRouteChildren {
   AppTeamsTeamSlugSettingsModelCredentialsRoute: typeof AppTeamsTeamSlugSettingsModelCredentialsRoute
+  AppTeamsTeamSlugSettingsProvidersRoute: typeof AppTeamsTeamSlugSettingsProvidersRoute
   AppTeamsTeamSlugSettingsIndexRoute: typeof AppTeamsTeamSlugSettingsIndexRoute
 }
 
@@ -761,6 +782,8 @@ const AppTeamsTeamSlugSettingsRouteChildren: AppTeamsTeamSlugSettingsRouteChildr
   {
     AppTeamsTeamSlugSettingsModelCredentialsRoute:
       AppTeamsTeamSlugSettingsModelCredentialsRoute,
+    AppTeamsTeamSlugSettingsProvidersRoute:
+      AppTeamsTeamSlugSettingsProvidersRoute,
     AppTeamsTeamSlugSettingsIndexRoute: AppTeamsTeamSlugSettingsIndexRoute,
   }
 

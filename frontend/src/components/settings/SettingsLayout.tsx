@@ -13,6 +13,7 @@ export function SettingsLayout() {
 
   const tabs = [
     { key: "model-credentials", label: "Model credentials", to: "/teams/$teamSlug/settings/model-credentials" },
+    { key: "providers", label: "Providers", to: "/teams/$teamSlug/settings/providers" },
   ] as const;
 
   const active = tabs.find(t => pathname.includes(`/settings/${t.key}`))?.key ?? tabs[0].key;
