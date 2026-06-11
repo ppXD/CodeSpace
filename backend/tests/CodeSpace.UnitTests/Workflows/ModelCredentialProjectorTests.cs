@@ -123,3 +123,42 @@ public sealed class ClaudeModelCredentialProjectorTests : ModelCredentialProject
         env.ShouldNotContainKey(ClaudeCodeHarness.ApiKeyEnvVar);   // a gateway token must never be presented as the official Anthropic key
     }
 }
+
+/// <summary>
+/// The cross-harness distinction, pinned: the HARNESS picks the wire format (Codex → OpenAI, Claude →
+/// Anthropic), the credential's PROVIDER tag picks which harnesses accept it + the auth scheme, and the
+/// base URL just overrides the endpoint. So one operator with a single endpoint that speaks BOTH formats
+/// uses a "Custom"-tagged credential, and it projects correctly under either harness — OpenAI-shaped env
+/// for Codex, Anthropic-bearer env for Claude — from the exact same stored credential.
+/// </summary>
+[Trait("Category", "Unit")]
+public sealed class CustomGatewayDualFormatTests
+{
+    private static readonly ResolvedModelCredential Custom = new() { Provider = "Custom", ApiKey = "sk-gateway-virtual-key", BaseUrl = "https://my-gateway/v1" };
+
+    [Fact]
+    public void Both_harnesses_accept_a_Custom_credential()
+    {
+        new CodexHarness().SupportedProviders.ShouldContain("Custom");
+        new ClaudeCodeHarness().SupportedProviders.ShouldContain("Custom");
+    }
+
+    [Fact]
+    public void Codex_projects_a_Custom_credential_as_OpenAI_shaped_env()
+    {
+        var env = new CodexHarness().ProjectToEnv(Custom);
+
+        env[CodexHarness.ApiKeyEnvVar].ShouldBe("sk-gateway-virtual-key");   // OPENAI_API_KEY (Bearer)
+        env[CodexHarness.BaseUrlEnvVar].ShouldBe("https://my-gateway/v1");   // OPENAI_BASE_URL
+    }
+
+    [Fact]
+    public void Claude_projects_the_same_Custom_credential_as_Anthropic_bearer_env()
+    {
+        var env = new ClaudeCodeHarness().ProjectToEnv(Custom);
+
+        env[ClaudeCodeHarness.AuthTokenEnvVar].ShouldBe("sk-gateway-virtual-key");   // ANTHROPIC_AUTH_TOKEN (Bearer), not x-api-key
+        env[ClaudeCodeHarness.BaseUrlEnvVar].ShouldBe("https://my-gateway/v1");      // ANTHROPIC_BASE_URL
+        env.ShouldNotContainKey(ClaudeCodeHarness.ApiKeyEnvVar);
+    }
+}
