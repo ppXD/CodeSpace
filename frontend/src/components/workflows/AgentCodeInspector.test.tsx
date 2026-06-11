@@ -7,7 +7,7 @@ import { AgentCodeInspector } from "./AgentCodeInspector";
 // selectors render synchronously from fixed data. The repository selector + the {{}} picker are
 // stubbed as simple controls (they carry their own heavy hooks / contenteditable, out of scope here).
 vi.mock("@/hooks/use-agents", () => ({
-  useHarnesses: () => ({ isLoading: false, data: [{ kind: "codex-cli", version: "1", models: ["gpt-5-codex"] }] }),
+  useHarnesses: () => ({ isLoading: false, data: [{ kind: "codex-cli", version: "1", models: ["gpt-5-codex"], supportedProviders: ["OpenAI", "Custom"] }] }),
   useAgentDefinitions: () => ({ isLoading: false, data: [{ id: "p1", slug: "reviewer", name: "Reviewer" }] }),
 }));
 vi.mock("@/hooks/use-model-credentials", () => ({

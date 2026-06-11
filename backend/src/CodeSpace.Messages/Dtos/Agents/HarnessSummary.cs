@@ -11,4 +11,12 @@ public sealed record HarnessSummary
     public required string Kind { get; init; }
     public required string Version { get; init; }
     public required IReadOnlyList<string> Models { get; init; }
+
+    /// <summary>
+    /// The model-credential provider tags this harness can authenticate with (its
+    /// <c>IModelCredentialProjector.SupportedProviders</c>), or empty when the harness implements no projector.
+    /// Lets the editor's credential picker show ONLY credentials this harness can drive — e.g. claude-code
+    /// (Anthropic wire format) accepts Anthropic + Custom, codex-cli (OpenAI format) accepts OpenAI/…/Custom.
+    /// </summary>
+    public required IReadOnlyList<string> SupportedProviders { get; init; }
 }

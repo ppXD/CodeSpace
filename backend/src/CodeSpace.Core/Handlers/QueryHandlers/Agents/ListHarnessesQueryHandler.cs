@@ -15,7 +15,15 @@ public sealed class ListHarnessesQueryHandler : IRequestHandler<ListHarnessesQue
     public Task<IReadOnlyList<HarnessSummary>> Handle(ListHarnessesQuery request, CancellationToken cancellationToken)
     {
         IReadOnlyList<HarnessSummary> harnesses = _registry.All
-            .Select(h => new HarnessSummary { Kind = h.Kind, Version = h.Version, Models = h.Models })
+            .Select(h => new HarnessSummary
+            {
+                Kind = h.Kind,
+                Version = h.Version,
+                Models = h.Models,
+                // A harness authenticates model providers only if it implements the projector capability (Rule 7);
+                // empty for one that doesn't, so the credential picker simply shows no provider-filtered options.
+                SupportedProviders = (h as IModelCredentialProjector)?.SupportedProviders ?? Array.Empty<string>(),
+            })
             .ToList();
 
         return Task.FromResult(harnesses);
