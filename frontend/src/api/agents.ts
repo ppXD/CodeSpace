@@ -36,9 +36,39 @@ export interface HarnessSummary {
   supportedProviders: string[];
 }
 
+export type AgentRunStatus = "Queued" | "Running" | "Succeeded" | "Failed" | "TimedOut" | "Cancelled";
+
+/** Mirrors backend `AgentRunSummary` — one agent run's live status + timing (no secret). */
+export interface AgentRunSummary {
+  id: string;
+  status: AgentRunStatus;
+  harness: string;
+  error: string | null;
+  startedAt: string | null;
+  heartbeatAt: string | null;
+  completedAt: string | null;
+  createdDate: string;
+}
+
+/** Mirrors backend `AgentRunEventDto` — one step in the run's append-only live log. */
+export interface AgentRunEventDto {
+  sequence: number;
+  kind: string;
+  text: string;
+  data: string | null;
+  occurredAt: string;
+}
+
+/** A run is still in flight (worth polling) while Queued or Running; terminal states stop the poll. */
+export const isAgentRunActive = (status: AgentRunStatus | undefined): boolean =>
+  status === "Queued" || status === "Running";
+
 // ─── API client ────────────────────────────────────────────────────────────────
 
 export const agentsApi = {
   listAgentDefinitions: () => fetchJson<AgentDefinitionSummary[]>("/api/agents"),
   listHarnesses: () => fetchJson<HarnessSummary[]>("/api/agents/harnesses"),
+  getRun: (agentRunId: string) => fetchJson<AgentRunSummary>(`/api/agents/runs/${agentRunId}`),
+  listRunEvents: (agentRunId: string, after = 0) =>
+    fetchJson<AgentRunEventDto[]>(`/api/agents/runs/${agentRunId}/events?after=${after}`),
 };

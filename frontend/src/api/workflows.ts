@@ -171,6 +171,11 @@ export interface WorkflowRunNodeSummary {
    * view embed / link the child run inline for this step (in any state). `null`/absent otherwise.
    */
   childRunId?: string | null;
+  /**
+   * For an `agent.code` node — the id of the agent run this step spawned. Lets the run-detail view
+   * embed the run's live status + event timeline inline for this step. `null`/absent otherwise.
+   */
+  agentRunId?: string | null;
 }
 
 /** The outstanding wait a Suspended run is parked on — drives the resume affordance. */
