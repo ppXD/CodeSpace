@@ -47,6 +47,7 @@ import { StartNodeInputsEditor } from "@/components/workflows/StartNodeInputsEdi
 import { SubworkflowEditor } from "@/components/workflows/SubworkflowEditor";
 import { LoopEditor } from "@/components/workflows/LoopEditor";
 import { AgentCodeInspector } from "@/components/workflows/AgentCodeInspector";
+import { AgentPaletteSection, AGENT_DRAG_MIME } from "@/components/workflows/AgentPaletteSection";
 import { VariableTablePanel } from "@/components/workflows/VariableTablePanel";
 import { WorkflowNode, type WorkflowNodeData } from "@/components/workflows/WorkflowNode";
 import { NodeAddContext, type NodeAddRequest } from "@/components/workflows/nodeAddContext";
@@ -512,7 +513,7 @@ function Editor({ workflow, manifests, saving, onSave }: EditorProps) {
   // handle (Trigger nodes have no input, so we never auto-link INTO them).
   const addNodeFromManifest = (
     manifest: NodeManifestDto,
-    options: { screen?: { x: number; y: number }; autoLink?: boolean } = {}
+    options: { screen?: { x: number; y: number }; autoLink?: boolean; seedConfig?: Record<string, unknown> } = {}
   ) => {
     const id = uniqueNodeId(manifest.typeKey, nodes);
     const position = computeAddPosition(manifest, options.screen);
@@ -557,7 +558,7 @@ function Editor({ workflow, manifests, saving, onSave }: EditorProps) {
       : null;
 
     setNodes((nds) => (startNode ? [...nds, newNode, startNode] : [...nds, newNode]));
-    setConfigs((c) => ({ ...c, [id]: defaultsFromSchema(manifest.configSchema), ...(startId ? { [startId]: {} } : {}) }));
+    setConfigs((c) => ({ ...c, [id]: { ...defaultsFromSchema(manifest.configSchema), ...(options.seedConfig ?? {}) }, ...(startId ? { [startId]: {} } : {}) }));
     setInputs((c) => ({ ...c, [id]: defaultsFromSchema(manifest.inputSchema), ...(startId ? { [startId]: {} } : {}) }));
     setNodeLabels((l) => ({ ...l, [id]: "", ...(startId ? { [startId]: "" } : {}) }));
     setSelectedId(id);
@@ -613,6 +614,15 @@ function Editor({ workflow, manifests, saving, onSave }: EditorProps) {
   };
   const onDrop = (e: DragEvent) => {
     e.preventDefault();
+
+    // A dragged Agent persona materializes into a Run-coding-agent node pre-bound to it.
+    const agentId = e.dataTransfer.getData(AGENT_DRAG_MIME);
+    if (agentId) {
+      const agentNode = manifestByType.get("agent.code");
+      if (agentNode) addNodeFromManifest(agentNode, { screen: { x: e.clientX, y: e.clientY }, seedConfig: { agentDefinitionId: agentId } });
+      return;
+    }
+
     const typeKey = e.dataTransfer.getData("application/x-workflow-node");
     if (!typeKey) return;
     const manifest = manifestByType.get(typeKey);
@@ -633,6 +643,13 @@ function Editor({ workflow, manifests, saving, onSave }: EditorProps) {
     if (disabled) return;
 
     addNodeFromManifest(manifest, { autoLink: true });
+  };
+
+  // Add a Run-coding-agent node pre-bound to a persona (from the palette's Agents section). The node
+  // carries only the reference; the persona's prompt + model are resolved live at dispatch.
+  const onAddAgent = (agentDefinitionId: string) => {
+    const agentNode = manifestByType.get("agent.code");
+    if (agentNode) addNodeFromManifest(agentNode, { autoLink: true, seedConfig: { agentDefinitionId } });
   };
 
   // ─── Inspector ──────────────────────────────────────────────────────────────
@@ -912,6 +929,8 @@ function Editor({ workflow, manifests, saving, onSave }: EditorProps) {
           {/* "Loop" is a Step too; "flow.loop_start" is the loop's internal body-entry marker, added
               automatically with a Loop — never hand-dragged, so it's filtered out of the palette. */}
           <PaletteSection title="Steps"     manifests={manifests.filter((m) => (m.kind === "Regular" || isContainerKind(m.kind)) && !isBodyStartTypeKey(m.typeKey))}  onAdd={onPaletteClick} disabledOf={isPaletteItemDisabled} />
+          {/* Team personas as draggable items — each drops a Run-coding-agent node pre-bound to it. */}
+          <AgentPaletteSection enabled={manifestByType.has("agent.code")} onAdd={onAddAgent} />
           <PaletteSection title="Endpoints" manifests={manifests.filter((m) => m.kind === "Terminal")} onAdd={onPaletteClick} disabledOf={isPaletteItemDisabled} />
         </aside>
 
