@@ -259,6 +259,45 @@ public class AgentNodeFlowTests
     }
 
     [Fact]
+    public async Task A_non_terminal_run_never_resumes_the_parent_with_a_running_status()
+    {
+        // Guards the "Agent run did not succeed: Running" bug: if the completion notifier fires while the run
+        // is still in flight (a completion racing the reconciler, an inconsistent mid-transition row), it must
+        // NOT resume the parent — handing the node a non-terminal status reads as a bogus failure. The wait
+        // stays Pending; the reconciler resumes the parent only once a real TERMINAL status lands.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var workflowId = await CreateWorkflowAsync(teamId, userId, AgentNodeDefinition(withErrorBranch: false));
+        var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
+
+        var jobClient = ResolveJobClient();
+        jobClient.Clear();
+        jobClient.AutoExecute = false;
+
+        try
+        {
+            await RunEngineAsync(runId);
+            var agentRunId = await GetAgentRunIdAsync(runId);
+
+            await MarkRunningAsync(agentRunId);   // Running — NOT terminal
+
+            using (var scope = _fixture.BeginScope())
+                await scope.Resolve<IAgentRunCompletionNotifier>().NotifyCompletedAsync(agentRunId, CancellationToken.None);
+
+            using var verify = _fixture.BeginScope();
+            var db = verify.Resolve<CodeSpaceDbContext>();
+
+            (await db.WorkflowRunWait.AsNoTracking().SingleAsync(w => w.RunId == runId)).Status
+                .ShouldBe(WorkflowWaitStatuses.Pending, "a non-terminal run must not resolve the AgentRun wait");
+            (await db.WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == runId)).Status
+                .ShouldBe(WorkflowRunStatus.Suspended, "the parent stays parked — never resumed (and failed) with a non-terminal status");
+        }
+        finally
+        {
+            jobClient.AutoExecute = true;
+        }
+    }
+
+    [Fact]
     public async Task A_stuck_queued_agent_run_is_re_dispatched_by_the_reconciler()
     {
         // The lost-dispatch crash window: the workflow committed Suspended but the executor was never
