@@ -42,4 +42,27 @@ public sealed record SandboxHandle
 
     /// <summary>Absolute wall-clock deadline (launch + the spec's timeout). The observer terminates the process once <c>now</c> passes it — surviving a re-attach by a new observer.</summary>
     public required DateTimeOffset Deadline { get; init; }
+
+    /// <summary>
+    /// The stdout-spool byte offset a re-attaching observer resumes tailing from — checkpointed (advanced) as
+    /// the live observer emits each batch, so a new observer after a backend restart resumes where the dead one
+    /// stopped rather than re-emitting the whole spool (which would duplicate the append-only event log). 0 =
+    /// from the start, and the value an older handle written before this field deserializes to (so a re-attach
+    /// of a pre-existing run safely replays from the beginning). The checkpoint is written AFTER the batch's
+    /// events persist, so it never runs ahead of the log — a re-attach at worst re-emits the last batch, never
+    /// loses lines (exactly-once is a later slice).
+    /// </summary>
+    public long StdoutOffset { get; init; }
+
+    /// <summary>
+    /// A NON-REVERSIBLE fingerprint of the secret(s) the launching run injected into the sandbox env (null when
+    /// the run injected none). A re-attaching observer rebuilds its redactor from the run's CURRENT credential
+    /// and compares: only when the fingerprint MATCHES has it provably reconstructed the same key that masked the
+    /// original output, so it's safe to re-tail the spool (which may echo that key). A mismatch — the credential
+    /// was deleted or rotated since launch, or the team default changed — means it can no longer mask the echoed
+    /// key, so it must complete from the exit marker only rather than freeze an unmaskable secret into the
+    /// append-only log. Null on an older handle, and for a run with no injected secret (nothing to mask → safe
+    /// to re-tail). It is a hash, never the key, so persisting it is safe.
+    /// </summary>
+    public string? InjectedKeyFingerprint { get; init; }
 }

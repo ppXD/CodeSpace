@@ -155,6 +155,41 @@ public sealed class LocalProcessDurableRunnerTests : IDisposable
     }
 
     [Fact]
+    public async Task Resuming_from_a_nonzero_StdoutOffset_emits_only_the_lines_after_it()
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        // The re-attach foundation: a fresh observer resumes from the dead observer's checkpoint, so the lines
+        // already emitted (and already in the append-only event log) are NOT replayed — no duplicate events.
+        var handle = await LaunchAsync(ContractSpecs.MultiLine("one", "two", "three"));
+        await WaitForExitMarkerAsync(handle);
+
+        var resumed = handle with { StdoutOffset = "one\n".Length };   // 4 bytes — resume past the first line
+        var (result, lines) = await AttachCollectAsync(resumed);
+
+        result.Status.ShouldBe(SandboxStatus.Success);
+        lines.ShouldBe(new[] { "two", "three" });   // only the lines after the checkpoint offset are re-emitted
+    }
+
+    [Fact]
+    public async Task Attach_checkpoints_the_advancing_offset_as_it_emits()
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        var handle = await LaunchAsync(ContractSpecs.MultiLine("a", "b", "c"));
+
+        var lines = new List<string>();
+        var checkpoints = new List<long>();
+        await _runner.AttachAsync(handle, (l, _) => { lines.Add(l.Trim()); return Task.CompletedTask; }, default,
+            (offset, _) => { checkpoints.Add(offset); return Task.CompletedTask; });
+
+        lines.ShouldBe(new[] { "a", "b", "c" });
+        checkpoints.ShouldNotBeEmpty("the observer checkpoints the advancing offset so a re-attach can resume from it");
+        checkpoints.ShouldBe(checkpoints.OrderBy(o => o).ToList(), "checkpoints only ever advance");
+        checkpoints[^1].ShouldBe("a\nb\nc\n".Length, "the final checkpoint covers every whole line emitted");
+    }
+
+    [Fact]
     public async Task A_fresh_attach_to_an_already_exited_run_recovers_its_full_output()
     {
         if (OperatingSystem.IsWindows()) return;
