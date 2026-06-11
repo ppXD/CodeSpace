@@ -13,7 +13,9 @@ namespace CodeSpace.Messages.Agents;
 ///
 /// <para><see cref="ProcessId"/> is the SUPERVISOR process (the <c>/bin/sh</c> wrapper that owns the spool
 /// redirection + writes the exit marker), not necessarily the harness CLI itself — probing it tells us
-/// whether the run is still alive. <see cref="SpoolDirectory"/> is the resolved absolute directory holding
+/// whether the run is still alive. On Linux the supervisor leads its own session (launched via <c>setsid</c>)
+/// so it outlives a graceful-shutdown signal aimed at the API's process group, which is why probing it after
+/// a restart is meaningful. <see cref="SpoolDirectory"/> is the resolved absolute directory holding
 /// <c>out.log</c> / <c>err.log</c> / <c>exit</c>. <see cref="Deadline"/> is the absolute wall-clock cap
 /// (launch time + the spec timeout); the observer terminates the process once it passes, so the timeout
 /// survives a re-attach by a different observer.</para>
@@ -25,6 +27,15 @@ public sealed record SandboxHandle
 
     /// <summary>OS pid of the supervisor process owning the spool redirection. Probing it (e.g. <c>kill -0</c>) distinguishes a live run from a crashed one.</summary>
     public required int ProcessId { get; init; }
+
+    /// <summary>
+    /// The supervisor's process start time (UTC), recorded at launch as a PID-reuse guard: a probe across a
+    /// backend restart compares it against the live process holding <see cref="ProcessId"/>, so a recycled pid
+    /// (the OS handed our old number to an unrelated process) is treated as "gone" rather than mistaken for our
+    /// run. Null for an older handle written before this guard existed, or when the host can't report it — the
+    /// guard is then skipped (the probe falls back to liveness alone).
+    /// </summary>
+    public DateTimeOffset? ProcessStartTimeUtc { get; init; }
 
     /// <summary>Resolved absolute path to the run's spool directory holding <c>out.log</c>, <c>err.log</c>, and the <c>exit</c> marker.</summary>
     public required string SpoolDirectory { get; init; }
