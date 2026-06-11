@@ -31,6 +31,15 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     /// <summary>Runner used when the task doesn't pin one. v0 = the in-process local runner.</summary>
     private const string DefaultRunnerKind = "local";
 
+    /// <summary>
+    /// Operator switch (a truthy <c>"1"</c>/<c>"true"</c>): when enabled AND the resolved runner implements
+    /// <see cref="ISandboxDurableRunner"/>, the executor LAUNCHES the run to a durable spool + persists a
+    /// runner handle + OBSERVES by tailing — so a backend restart can re-attach/recover instead of abandoning
+    /// the run. Default OFF, so this lands dark behind the existing streaming path and is flipped on once the
+    /// recovery path (the reconciler reading the handle) ships. Pinned by a test (Rule 8).
+    /// </summary>
+    public const string DurableRunnerEnvVar = "CODESPACE_AGENT_DURABLE_RUNNER";
+
     /// <summary>Cap on the captured diff inlined into the persisted result row (~1 MB). A larger diff is truncated with a marker; the full diff belongs in the artifact layer (a later slice).</summary>
     private const int MaxPatchChars = 1_000_000;
 
@@ -249,7 +258,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
 
         // The heartbeat is owned by ExecuteAsync (it spans the whole run, including the completion tail), so
         // streaming here just emits events — a quiet step's liveness is kept fresh by that outer heartbeat.
-        var sandbox = await RunAndStreamAsync(runner, spec, PersistLineAsync, cancellationToken).ConfigureAwait(false);
+        var sandbox = await RunSandboxAsync(runId, runner, spec, PersistLineAsync, cancellationToken).ConfigureAwait(false);
 
         // Events are already redacted, so a result the harness folds from them (summary / error) is redacted too.
         return sandbox.Status == SandboxStatus.TimedOut
@@ -279,6 +288,35 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         catch (JsonException) { return null; }
     }
 
+    /// <summary>
+    /// Pick the execution mode for the resolved runner: the DURABLE path (launch to a spool + persist a
+    /// handle + tail) when enabled and supported — so a backend restart can recover the run; otherwise the
+    /// live-stream / batch path. The durable path is feature-detected exactly like streaming
+    /// (<c>runner is ISandboxDurableRunner</c>), so an unsupporting runner transparently falls back.
+    /// </summary>
+    private async Task<SandboxResult> RunSandboxAsync(Guid runId, ISandboxRunner runner, SandboxSpec spec, Func<string, Task> persistLine, CancellationToken cancellationToken)
+    {
+        if (DurableRunnerEnabled && runner is ISandboxDurableRunner durable)
+            return await RunDurableAsync(runId, durable, spec, persistLine, cancellationToken).ConfigureAwait(false);
+
+        return await RunAndStreamAsync(runner, spec, persistLine, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Launch the run to its durable spool, persist the returned handle (keyed by the run id) BEFORE
+    /// observing, then attach + tail. Persisting first is what lets the reconciler recover this run if this
+    /// observer dies mid-tail. On a host-shutdown cancel the attach stops observing WITHOUT killing the
+    /// process (leaving the run Running for re-attach/recovery); only the spec timeout terminates it.
+    /// </summary>
+    private async Task<SandboxResult> RunDurableAsync(Guid runId, ISandboxDurableRunner durable, SandboxSpec spec, Func<string, Task> persistLine, CancellationToken cancellationToken)
+    {
+        var handle = await durable.LaunchAsync(spec, runId.ToString("N"), cancellationToken).ConfigureAwait(false);
+
+        await _runs.SetRunnerHandleAsync(runId, JsonSerializer.Serialize(handle, AgentJson.Options), cancellationToken).ConfigureAwait(false);
+
+        return await durable.AttachAsync(handle, (line, _) => persistLine(line), cancellationToken).ConfigureAwait(false);
+    }
+
     /// <summary>Stream the harness live when the runner supports it (events land as emitted); otherwise run batch and replay captured stdout through the same per-line path.</summary>
     private static async Task<SandboxResult> RunAndStreamAsync(ISandboxRunner runner, SandboxSpec spec, Func<string, Task> persistLine, CancellationToken cancellationToken)
     {
@@ -291,4 +329,9 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
 
         return result;
     }
+
+    private static bool DurableRunnerEnabled => ParseFlag(Environment.GetEnvironmentVariable(DurableRunnerEnvVar));
+
+    /// <summary>Only <c>"1"</c> or <c>"true"</c> (case-insensitive) enables a flag; anything else — including <c>null</c> — keeps it off.</summary>
+    internal static bool ParseFlag(string? raw) => raw is "1" || (raw is not null && raw.Equals("true", StringComparison.OrdinalIgnoreCase));
 }

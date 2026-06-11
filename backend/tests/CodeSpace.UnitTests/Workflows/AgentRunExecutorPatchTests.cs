@@ -30,4 +30,24 @@ public class AgentRunExecutorPatchTests
         result.ShouldContain("5000", customMessage: "the marker names the original length so the reader knows how much was dropped");
         result.Length.ShouldBeLessThan(big.Length, "a pathological full diff is capped well below its original size");
     }
+
+    [Theory]
+    [InlineData("1", true)]
+    [InlineData("true", true)]
+    [InlineData("TRUE", true)]
+    [InlineData("True", true)]
+    [InlineData("0", false)]
+    [InlineData("yes", false)]
+    [InlineData("", false)]
+    [InlineData(null, false)]
+    public void Durable_runner_flag_is_only_enabled_by_one_or_true(string? raw, bool expected) =>
+        AgentRunExecutor.ParseFlag(raw).ShouldBe(expected);
+
+    [Fact]
+    public void Durable_runner_env_var_name_is_pinned()
+    {
+        // The dark-launch switch for restart-survivable runs. Renaming it silently strands an operator who
+        // enabled durability via env — pin it (Rule 8).
+        AgentRunExecutor.DurableRunnerEnvVar.ShouldBe("CODESPACE_AGENT_DURABLE_RUNNER");
+    }
 }
