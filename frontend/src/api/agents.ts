@@ -63,6 +63,31 @@ export interface AgentRunEventDto {
 export const isAgentRunActive = (status: AgentRunStatus | undefined): boolean =>
   status === "Queued" || status === "Running";
 
+/**
+ * Merge a freshly-fetched batch of run events into the accumulated live log, deduped + ordered by the
+ * monotonic DB-assigned `sequence`. The log is append-only + immutable, so a higher sequence is strictly
+ * newer and an existing sequence never changes; the dedup is defensive against a cursor overlap (re-fetching
+ * a sequence we already hold). Returns `prev` UNCHANGED (same reference) when nothing new arrived, so a quiet
+ * poll tick causes no re-render.
+ */
+export function mergeRunEvents(prev: AgentRunEventDto[], fresh: AgentRunEventDto[]): AgentRunEventDto[] {
+  if (fresh.length === 0) return prev;
+
+  const bySequence = new Map<number, AgentRunEventDto>();
+  for (const e of prev) bySequence.set(e.sequence, e);
+  for (const e of fresh) bySequence.set(e.sequence, e);
+
+  // Same count ⇒ no new sequence (fresh fully overlapped) ⇒ keep the prev reference for render stability.
+  if (bySequence.size === prev.length) return prev;
+
+  return [...bySequence.values()].sort((a, b) => a.sequence - b.sequence);
+}
+
+/** The highest sequence in an accumulated log — the cursor to fetch the next delta from (0 when empty). */
+export function lastEventSequence(events: AgentRunEventDto[]): number {
+  return events.reduce((max, e) => (e.sequence > max ? e.sequence : max), 0);
+}
+
 // ─── API client ────────────────────────────────────────────────────────────────
 
 export const agentsApi = {
