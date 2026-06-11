@@ -77,8 +77,10 @@ export function AgentCodeInspector({ config, inputs, onConfigChange, onInputsCha
     <>
       <section className="wf-inspector-section">
         <div className="wf-inspector-section-h">Harness</div>
-        <HarnessSelector value={harness} onChange={(v) => patch({ harness: v })} />
-        <p className="wf-retry-hint">The wire protocol the run speaks. Required whether or not you bind an Agent.</p>
+        <div className="wf-form-row">
+          <HarnessSelector value={harness} onChange={(v) => patch({ harness: v })} />
+          <span className="wf-form-help">The wire protocol the run speaks. Required whether or not you bind an Agent.</span>
+        </div>
       </section>
 
       <section className="wf-inspector-section">
@@ -99,7 +101,7 @@ export function AgentCodeInspector({ config, inputs, onConfigChange, onInputsCha
               <VariablePickerInput value={goal} onChange={(v) => patch({ goal: v })} suggestions={suggestions} multiline placeholder="Task-specific addition to the persona's prompt (optional)" />
             </label>
 
-            <p className="wf-retry-hint">The persona supplies the system prompt, model, and tools. Override the model or credential below if needed.</p>
+            <p className="wf-form-help">The persona supplies the system prompt, model, and tools. Override the model or credential below if needed.</p>
           </>
         ) : (
           <label className="wf-form-row">

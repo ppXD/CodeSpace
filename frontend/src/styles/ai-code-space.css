@@ -2411,20 +2411,27 @@ textarea:-webkit-autofill {
 
 /* The inspector reads as distinct stacked CARDS on a recessed surface, so dense content (nested config,
    per-action rows, help text) groups into legible blocks instead of one long undivided column. */
-.acs-root .wf-inspector-body { display: flex; flex-direction: column; gap: 8px; padding: 8px; min-height: 0; background: var(--panel-2); }
+.acs-root .wf-inspector-body { display: flex; flex-direction: column; gap: 12px; padding: 12px; min-height: 0; background: var(--panel-2); }
 .acs-root .wf-inspector-h {
-  padding: 12px 14px; border: 1px solid var(--line); border-radius: 10px; background: var(--bg);
+  padding: 14px 16px; border: 1px solid var(--line-2); border-radius: 10px; background: var(--panel);
+  box-shadow: 0 1px 2px rgba(31,30,29,.05);
   display: flex; flex-direction: column; gap: 2px;
 }
 .acs-root .wf-inspector-h-name { font-weight: 600; font-size: 13px; color: var(--ink); }
 .acs-root .wf-inspector-h-ref  { font-size: 11.5px; color: var(--muted); }
 .acs-root .wf-inspector-h-key  { font-size: 10.5px; color: var(--muted); font-family: inherit; }
 
-.acs-root .wf-inspector-section { padding: 14px; border: 1px solid var(--line); border-radius: 10px; background: var(--bg); }
+.acs-root .wf-inspector-section { padding: 16px; border: 1px solid var(--line-2); border-radius: 10px; background: var(--panel); box-shadow: 0 1px 2px rgba(31,30,29,.05); }
+/* Plain sections stack their fields with a clear gap so each label binds to ITS input: tight 4px
+   label→input inside .wf-form-row, looser 16px between fields. The collapsible variant keeps its own
+   toggle/body layout (it sets its own padding + overflow), so it's excluded from the flex gap. */
+.acs-root .wf-inspector-section:not(.wf-inspector-section-collapsible) { display: flex; flex-direction: column; gap: 16px; }
 .acs-root .wf-inspector-section-h {
   font-size: 11px; font-weight: 700; color: var(--ink-2);
   text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 12px;
 }
+/* The flex gap supplies the spacing under the header now, so drop its own margin to avoid doubling. */
+.acs-root .wf-inspector-section:not(.wf-inspector-section-collapsible) > .wf-inspector-section-h { margin-bottom: 0; }
 
 /* Collapsible variant: the header IS the toggle button. Body renders conditionally.
  * Padding shifts to the toggle so the click target spans the full row. overflow:hidden is SAFE here
@@ -2457,7 +2464,7 @@ textarea:-webkit-autofill {
 .acs-root .wf-inspector-section-collapsible > .wf-outputs-hint { padding: 0 16px; }
 
 /* Schema-driven form */
-.acs-root .wf-form { display: flex; flex-direction: column; gap: 12px; }
+.acs-root .wf-form { display: flex; flex-direction: column; gap: 16px; }
 .acs-root .wf-form-empty { font-size: 11.5px; color: var(--muted); font-style: italic; }
 .acs-root .wf-form-row { display: flex; flex-direction: column; gap: 4px; }
 .acs-root .wf-form-label { font-size: 11.5px; font-weight: 500; color: var(--ink-2); }
