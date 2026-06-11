@@ -46,7 +46,9 @@ export function AgentCodeInspector({ config, inputs, onConfigChange, onInputsCha
   const [mode, setMode] = useState<"agent" | "inline">(agentId ? "agent" : "inline");
 
   const harnesses = useHarnesses();
-  const modelHints = harnesses.data?.find((h) => h.kind === harness)?.models ?? [];
+  const selectedHarness = harnesses.data?.find((h) => h.kind === harness);
+  const modelHints = selectedHarness?.models ?? [];
+  const credProviders = selectedHarness?.supportedProviders ?? [];
 
   // Set string/number keys, deleting blanks so the saved config stays minimal (the engine applies its
   // own defaults for absent keys — model → persona/harness default, timeoutSeconds → 1800, etc.).
@@ -125,7 +127,10 @@ export function AgentCodeInspector({ config, inputs, onConfigChange, onInputsCha
 
         <label className="wf-form-row">
           <span className="wf-form-label">{mode === "agent" ? "Model credential override" : "Model credential"}</span>
-          <ModelCredentialSelector value={credentialId} onChange={(v) => patch({ modelCredentialId: v })} />
+          <ModelCredentialSelector value={credentialId} onChange={(v) => patch({ modelCredentialId: v })} providers={credProviders} />
+          {harness
+            ? credProviders.length > 0 && <span className="wf-form-help">Only keys the <code>{harness}</code> harness can use ({credProviders.join(" / ")}) are shown. Empty = the team / operator default.</span>
+            : <span className="wf-form-help">Pick a harness first to filter compatible keys.</span>}
         </label>
       </section>
 

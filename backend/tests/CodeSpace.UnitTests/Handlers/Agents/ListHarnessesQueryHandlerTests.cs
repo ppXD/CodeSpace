@@ -29,15 +29,37 @@ public class ListHarnessesQueryHandlerTests
             new() { Status = AgentRunStatus.Succeeded, ExitReason = "completed" };
     }
 
+    /// <summary>A harness that ALSO implements the projector capability — so its SupportedProviders flows onto the DTO.</summary>
+    private sealed class ProjectingFakeHarness : IAgentHarness, IModelCredentialProjector
+    {
+        public ProjectingFakeHarness(string kind, params string[] providers)
+        {
+            Kind = kind;
+            SupportedProviders = providers;
+        }
+
+        public string Kind { get; }
+        public string Version => "test";
+        public IReadOnlyList<string> Models { get; } = new[] { "m" };
+        public IReadOnlyList<string> SupportedProviders { get; }
+
+        public SandboxSpec BuildInvocation(AgentTask task) => new() { Command = "x" };
+        public AgentEvent? ParseEvent(string rawLine) => null;
+        public AgentRunResult BuildResult(IReadOnlyList<AgentEvent> events, int exitCode) =>
+            new() { Status = AgentRunStatus.Succeeded, ExitReason = "completed" };
+        public IReadOnlyDictionary<string, string> ProjectToEnv(ResolvedModelCredential credential) =>
+            new Dictionary<string, string> { ["KEY"] = credential.ApiKey ?? "" };
+    }
+
     private static ListHarnessesQueryHandler HandlerFor(params IAgentHarness[] harnesses) =>
         new(new AgentHarnessRegistry(harnesses));
 
     [Fact]
-    public async Task Projects_every_registered_harness_with_its_kind_version_and_models()
+    public async Task Projects_kind_version_models_and_the_supported_providers_a_harness_can_drive()
     {
         var handler = HandlerFor(
             new FakeHarness("codex-cli", "1.2", "gpt-5-codex", "gpt-5"),
-            new FakeHarness("claude-code", "0.9", "claude-opus-4-8"));
+            new ProjectingFakeHarness("claude-code", "Anthropic", "Custom"));
 
         var result = await handler.Handle(new ListHarnessesQuery(), CancellationToken.None);
 
@@ -46,8 +68,9 @@ public class ListHarnessesQueryHandlerTests
         var codex = result.Single(h => h.Kind == "codex-cli");
         codex.Version.ShouldBe("1.2");
         codex.Models.ShouldBe(new[] { "gpt-5-codex", "gpt-5" });
+        codex.SupportedProviders.ShouldBeEmpty();   // implements no projector → advertises no providers
 
-        result.Single(h => h.Kind == "claude-code").Models.ShouldBe(new[] { "claude-opus-4-8" });
+        result.Single(h => h.Kind == "claude-code").SupportedProviders.ShouldBe(new[] { "Anthropic", "Custom" });
     }
 
     [Fact]

@@ -32,6 +32,8 @@ export interface HarnessSummary {
   kind: string;
   version: string;
   models: string[];
+  /** Provider tags this harness can authenticate with (empty if it implements no projector) — used to filter the credential picker. */
+  supportedProviders: string[];
 }
 
 // ─── API client ────────────────────────────────────────────────────────────────
