@@ -3,6 +3,7 @@ using CodeSpace.Core.DependencyInjection;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Messages.Agents;
+using CodeSpace.Messages.Dtos.Agents;
 using CodeSpace.Messages.Enums;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
@@ -39,6 +40,13 @@ public interface IAgentRunService
     /// <see cref="KeyNotFoundException"/> when absent. An operator-facing read must use a team-scoped query.
     /// </summary>
     Task<AgentRun> GetAsync(Guid runId, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// TEAM-SCOPED operator read of a run's live status (null when the run isn't <paramref name="teamId"/>'s,
+    /// so a foreign id leaks nothing) — distinct from <see cref="GetAsync"/>, which is the un-scoped execution
+    /// path. Backs the run-detail's live status header.
+    /// </summary>
+    Task<AgentRunSummary?> GetSummaryForTeamAsync(Guid runId, Guid teamId, CancellationToken cancellationToken);
 
     /// <summary>
     /// Read the run's events with <c>Sequence &gt; afterSequence</c> in order — the operator-facing
@@ -145,6 +153,24 @@ public sealed class AgentRunService : IAgentRunService, IScopedDependency
     public async Task<AgentRun> GetAsync(Guid runId, CancellationToken cancellationToken) =>
         await _db.AgentRun.AsNoTracking().SingleOrDefaultAsync(r => r.Id == runId, cancellationToken).ConfigureAwait(false)
             ?? throw new KeyNotFoundException($"AgentRun {runId} not found.");
+
+    public async Task<AgentRunSummary?> GetSummaryForTeamAsync(Guid runId, Guid teamId, CancellationToken cancellationToken)
+    {
+        var run = await _db.AgentRun.AsNoTracking()
+            .SingleOrDefaultAsync(r => r.Id == runId && r.TeamId == teamId, cancellationToken).ConfigureAwait(false);
+
+        return run is null ? null : new AgentRunSummary
+        {
+            Id = run.Id,
+            Status = run.Status,
+            Harness = run.Harness,
+            Error = run.Error,
+            StartedAt = run.StartedAt,
+            HeartbeatAt = run.HeartbeatAt,
+            CompletedAt = run.CompletedAt,
+            CreatedDate = run.CreatedDate,
+        };
+    }
 
     public async Task<IReadOnlyList<AgentRunEvent>> GetEventsAsync(Guid runId, Guid teamId, long afterSequence, CancellationToken cancellationToken)
     {

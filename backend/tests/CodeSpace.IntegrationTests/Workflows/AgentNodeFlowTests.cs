@@ -401,6 +401,53 @@ public class AgentNodeFlowTests
         }
     }
 
+    [Fact]
+    public async Task The_run_detail_links_the_agent_node_to_its_run_and_streams_its_events_team_scoped()
+    {
+        // Phase-1 observability foundation: the run detail carries the agent run id for the live timeline,
+        // and the run's status + events are readable team-scoped (a foreign team sees neither).
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var workflowId = await CreateWorkflowAsync(teamId, userId, AgentNodeDefinition(withErrorBranch: false));
+        var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
+
+        var jobClient = ResolveJobClient();
+        jobClient.Clear();
+        jobClient.AutoExecute = false;
+
+        try
+        {
+            await RunEngineAsync(runId);
+            var agentRunId = await GetAgentRunIdAsync(runId);
+
+            // Stream a live step onto the run, as the executor would.
+            using (var scope = _fixture.BeginScope())
+            {
+                var runs = scope.Resolve<IAgentRunService>();
+                await runs.MarkRunningAsync(agentRunId, CancellationToken.None);
+                await runs.AppendEventAsync(agentRunId, new AgentEvent { Kind = AgentEventKind.AssistantMessage, Text = "Analyzing the repo…" }, CancellationToken.None);
+            }
+
+            using var verify = _fixture.BeginScope();
+
+            var detail = await verify.Resolve<CodeSpace.Core.Services.Workflows.IWorkflowService>().GetRunAsync(runId, teamId, CancellationToken.None);
+            detail!.Nodes.Single(n => n.NodeId == "agent").AgentRunId
+                .ShouldBe(agentRunId.ToString(), "the agent.code node carries its agent run id for live streaming");
+
+            var svc = verify.Resolve<IAgentRunService>();
+
+            (await svc.GetSummaryForTeamAsync(agentRunId, teamId, CancellationToken.None))!.Status.ShouldBe(AgentRunStatus.Running);
+            (await svc.GetEventsAsync(agentRunId, teamId, 0, CancellationToken.None)).ShouldContain(e => e.Text == "Analyzing the repo…");
+
+            // A foreign team leaks neither status nor events.
+            (await svc.GetSummaryForTeamAsync(agentRunId, Guid.NewGuid(), CancellationToken.None)).ShouldBeNull();
+            (await svc.GetEventsAsync(agentRunId, Guid.NewGuid(), 0, CancellationToken.None)).ShouldBeEmpty();
+        }
+        finally
+        {
+            jobClient.AutoExecute = true;
+        }
+    }
+
     // ─── Helpers ────────────────────────────────────────────────────────────────
 
     private async Task<Guid> SeedPersonaAsync(Guid teamId, Guid userId, string systemPrompt, string? model)

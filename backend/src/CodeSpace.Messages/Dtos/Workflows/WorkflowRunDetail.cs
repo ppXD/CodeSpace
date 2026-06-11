@@ -80,4 +80,12 @@ public sealed record WorkflowRunNodeSummary
     /// other node. Sourced from the <c>workflow_run_wait</c> row, which persists post-resolution.
     /// </summary>
     public string? ChildRunId { get; init; }
+
+    /// <summary>
+    /// For an <c>agent.code</c> node — the id of the agent run it spawned (the AgentRun wait's token). Lets
+    /// the run-detail UI stream that run's live event timeline + status inline for this step, in any state
+    /// (suspended while the agent works, or after it finished). <c>null</c> for every other node. Sourced
+    /// from the <c>workflow_run_wait</c> row, which persists post-resolution.
+    /// </summary>
+    public string? AgentRunId { get; init; }
 }
