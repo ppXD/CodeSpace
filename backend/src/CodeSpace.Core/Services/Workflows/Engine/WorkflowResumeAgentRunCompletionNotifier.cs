@@ -58,6 +58,17 @@ public sealed class WorkflowResumeAgentRunCompletionNotifier : IAgentRunCompleti
     /// </summary>
     private async Task ResumeParkedNodeAsync(AgentRun run, CancellationToken cancellationToken)
     {
+        // Resume ONLY on a terminal run. A non-terminal status here means the notifier fired while the run
+        // was still in flight — a completion racing the reconciler, or an inconsistent mid-transition row —
+        // and resuming would hand the agent.code node a non-terminal "Running"/"Queued" status, which it can
+        // only read as failure ("Agent run did not succeed: Running"). Skip: the reconciler terminalizes a
+        // genuinely stuck run and re-fires this, so the node always resumes with a real terminal result.
+        if (!AgentRunStateMachine.IsTerminal(run.Status))
+        {
+            _logger.LogWarning("Agent run {AgentRunId} resume skipped — status {Status} is not terminal; deferring to the reconciler", run.Id, run.Status);
+            return;
+        }
+
         var token = run.Id.ToString();
 
         var waitId = await _db.WorkflowRunWait.AsNoTracking()

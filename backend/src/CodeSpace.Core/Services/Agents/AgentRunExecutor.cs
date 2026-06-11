@@ -66,6 +66,21 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
 
         if (!await TryClaimAsync(agentRunId, cancellationToken).ConfigureAwait(false)) return;
 
+        // One heartbeat spans the ENTIRE execution — streaming AND the post-CLI tail (git-diff capture +
+        // completion). The tail used to run un-heartbeated, so a slow capture on a large repo could outlast the
+        // reconciler's liveness window and falsely abandon a run that was actually finishing (which then races
+        // the real completion and resumes the parent node with a non-terminal status). Pinging on a DEDICATED DI
+        // scope — its own DbContext — because it runs concurrently with the event-append path (not thread-safe
+        // to share). Cancelled + awaited in the finally, the moment work ends (or the worker is torn down).
+        using var heartbeatScope = _scopeFactory.CreateScope();
+        var heartbeatRuns = heartbeatScope.ServiceProvider.GetRequiredService<IAgentRunService>();
+        using var heartbeatCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        var heartbeat = HeartbeatLoop.RunAsync(
+            ct => heartbeatRuns.HeartbeatAsync(agentRunId, ct),
+            AgentRunLiveness.HeartbeatInterval,
+            ex => _logger.LogWarning(ex, "Heartbeat ping failed for agent run {RunId}; will retry next interval", agentRunId),
+            heartbeatCts.Token);
+
         // Holds the run's resolved secret(s) once the credential is resolved (below), so the catch-all can scrub
         // them from a failure message too. None until then — a pre-resolve failure has no secret to leak.
         var redactor = SecretRedactor.None;
@@ -108,6 +123,11 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         {
             _logger.LogError(ex, "Agent run {RunId} failed during execution", agentRunId);
             await CompleteAndNotifyAsync(agentRunId, new AgentRunResult { Status = AgentRunStatus.Failed, ExitReason = "executor-error", Error = redactor.Redact(ex.Message) }, cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            heartbeatCts.Cancel();
+            await heartbeat.ConfigureAwait(false);
         }
     }
 
@@ -227,7 +247,9 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
             events.Add(redacted);
         }
 
-        var sandbox = await RunWithHeartbeatAsync(runId, runner, spec, PersistLineAsync, cancellationToken).ConfigureAwait(false);
+        // The heartbeat is owned by ExecuteAsync (it spans the whole run, including the completion tail), so
+        // streaming here just emits events — a quiet step's liveness is kept fresh by that outer heartbeat.
+        var sandbox = await RunAndStreamAsync(runner, spec, PersistLineAsync, cancellationToken).ConfigureAwait(false);
 
         // Events are already redacted, so a result the harness folds from them (summary / error) is redacted too.
         return sandbox.Status == SandboxStatus.TimedOut
@@ -255,36 +277,6 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
 
         try { using var doc = JsonDocument.Parse(redacted); return doc.RootElement.Clone(); }
         catch (JsonException) { return null; }
-    }
-
-    /// <summary>
-    /// Run the harness while a background <see cref="HeartbeatLoop"/> keeps the run's liveness fresh, so a
-    /// long QUIET step (no event output) isn't mistaken for a crashed worker and abandoned by the reconciler.
-    /// The heartbeat pings on a DEDICATED DI scope — its own DbContext — because it runs concurrently with the
-    /// event stream (<paramref name="persistLine"/>) and a scoped DbContext is not thread-safe. The loop is
-    /// cancelled and awaited the moment the harness returns (or the worker is torn down).
-    /// </summary>
-    private async Task<SandboxResult> RunWithHeartbeatAsync(Guid runId, ISandboxRunner runner, SandboxSpec spec, Func<string, Task> persistLine, CancellationToken cancellationToken)
-    {
-        using var heartbeatScope = _scopeFactory.CreateScope();
-        var heartbeatRuns = heartbeatScope.ServiceProvider.GetRequiredService<IAgentRunService>();
-
-        using var heartbeatCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        var heartbeat = HeartbeatLoop.RunAsync(
-            ct => heartbeatRuns.HeartbeatAsync(runId, ct),
-            AgentRunLiveness.HeartbeatInterval,
-            ex => _logger.LogWarning(ex, "Heartbeat ping failed for agent run {RunId}; will retry next interval", runId),
-            heartbeatCts.Token);
-
-        try
-        {
-            return await RunAndStreamAsync(runner, spec, persistLine, cancellationToken).ConfigureAwait(false);
-        }
-        finally
-        {
-            heartbeatCts.Cancel();
-            await heartbeat.ConfigureAwait(false);
-        }
     }
 
     /// <summary>Stream the harness live when the runner supports it (events land as emitted); otherwise run batch and replay captured stdout through the same per-line path.</summary>
