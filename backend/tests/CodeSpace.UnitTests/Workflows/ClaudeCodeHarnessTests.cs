@@ -136,6 +136,17 @@ public class ClaudeCodeHarnessTests
         ev.Text.ShouldBe("Fixed the billing tests.");
     }
 
+    [Theory]
+    [InlineData("""{"type":"result","subtype":"error_during_execution","result":"API Error: Request rejected (429) AccountQuotaExceeded","is_error":true}""")]
+    [InlineData("""{"type":"result","subtype":"error_max_turns","result":"Reached the turn limit."}""")]   // is_error absent → fall back to the error-flavored subtype
+    public void Parses_an_error_result_event_as_an_error_not_completed(string json)
+    {
+        // A failed result must surface as Error so the timeline doesn't render a failure as a clean "done".
+        var ev = Harness.ParseEvent(json);
+
+        ev!.Kind.ShouldBe(AgentEventKind.Error);
+    }
+
     [Fact]
     public void System_init_lines_carry_no_event()
     {

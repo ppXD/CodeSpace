@@ -101,7 +101,7 @@ public sealed class ClaudeCodeHarness : IAgentHarness, IModelCredentialProjector
         if (type.Length == 0) return null;
 
         if (type.Contains("result", StringComparison.OrdinalIgnoreCase))
-            return new AgentEvent { Kind = AgentEventKind.Completed, Text = ReadResultText(root), Data = root };
+            return new AgentEvent { Kind = IsErrorResult(root) ? AgentEventKind.Error : AgentEventKind.Completed, Text = ReadResultText(root), Data = root };
 
         if (type is "assistant" or "user")
             return ReadContentEvent(root);
@@ -222,6 +222,21 @@ public sealed class ClaudeCodeHarness : IAgentHarness, IModelCredentialProjector
         if (root.TryGetProperty("result", out var r) && r.ValueKind == JsonValueKind.String && r.GetString() is { Length: > 0 } s) return s;
 
         return ReadString(root, "subtype") is { Length: > 0 } sub ? sub : "result";
+    }
+
+    /// <summary>
+    /// A claude-code <c>result</c> line is a FAILURE when it sets <c>is_error: true</c>, or (when that flag is
+    /// absent) carries an error-flavored <c>subtype</c> (<c>error_during_execution</c> / <c>error_max_turns</c>).
+    /// Such a result must surface as an <see cref="AgentEventKind.Error"/> event, not <c>Completed</c> — otherwise a
+    /// failed run (e.g. a gateway 429) renders on the timeline as a clean "done". An explicit <c>is_error</c> wins;
+    /// only when it's missing do we fall back to the subtype.
+    /// </summary>
+    private static bool IsErrorResult(JsonElement root)
+    {
+        if (root.TryGetProperty("is_error", out var e) && e.ValueKind is JsonValueKind.True or JsonValueKind.False)
+            return e.GetBoolean();
+
+        return ReadString(root, "subtype").Contains("error", StringComparison.OrdinalIgnoreCase);
     }
 
     /// <summary>A tool_result's content is either a string or an array of {type,text} blocks — flatten to the first text.</summary>
