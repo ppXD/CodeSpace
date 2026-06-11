@@ -1,6 +1,6 @@
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 
-import { agentsApi, isAgentRunActive } from "@/api/agents";
+import { agentsApi, isAgentRunActive, lastEventSequence, mergeRunEvents, type AgentRunEventDto } from "@/api/agents";
 
 /**
  * Agent-persona data hooks. The library list backs the editor's persona picker + (later) the Agents
@@ -35,15 +35,23 @@ export function useAgentRun(agentRunId: string | undefined) {
 }
 
 /**
- * One agent run's live event log. Re-fetches the whole log every 2s while `active` (the run is still in
- * flight) so the timeline streams; stops polling once terminal. (Full-fetch keeps it simple + correct;
- * the `after` cursor is available for a future incremental upgrade on very long runs.)
+ * One agent run's live event log, streamed INCREMENTALLY: each ~1s poll (while `active`) fetches only the
+ * events past the highest sequence already held (the `after` cursor) and merges them in, so a long run
+ * streams deltas instead of re-pulling the whole log every tick. Polling stops once terminal. The log is
+ * append-only + immutable, so the merge is a safe dedup-by-sequence (see {@link mergeRunEvents}).
  */
 export function useAgentRunEvents(agentRunId: string | undefined, active: boolean) {
+  const queryClient = useQueryClient();
+  const queryKey = ["agent-run-events", agentRunId];
+
   return useQuery({
-    queryKey: ["agent-run-events", agentRunId],
-    queryFn: () => agentsApi.listRunEvents(agentRunId!, 0),
+    queryKey,
+    queryFn: async () => {
+      const prev = queryClient.getQueryData<AgentRunEventDto[]>(queryKey) ?? [];
+      const fresh = await agentsApi.listRunEvents(agentRunId!, lastEventSequence(prev));
+      return mergeRunEvents(prev, fresh);
+    },
     enabled: !!agentRunId,
-    refetchInterval: active ? 2000 : false,
+    refetchInterval: active ? 1000 : false,
   });
 }
