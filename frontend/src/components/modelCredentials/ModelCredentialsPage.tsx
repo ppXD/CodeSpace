@@ -8,14 +8,15 @@ import { useModelCredentials, useRevokeModelCredential } from "@/hooks/use-model
 import { providerForm } from "@/lib/providerForms";
 
 import { ModelCredentialModal } from "./ModelCredentialModal";
+import { ProviderLogo } from "./ProviderLogo";
 
 type ModalState = { mode: "add" } | { mode: "edit"; credential: ModelCredentialSummary } | null;
 
 /**
- * Team Model Credentials settings. Lists the team's model keys (masked — never the secret) and lets an
- * operator add / edit / revoke them. Same `ct` + `tbl` rhythm as the Agents / Workflows lists. The
- * provider + base URL + a free model id on the agent node are the three knobs that let a team point a
- * harness at any compatible endpoint (a self-hosted Qwen/DeepSeek gateway, OpenRouter, …).
+ * Team Model Credentials settings. A card per credential (provider logo + masked key — never the secret),
+ * with add / edit / revoke. The provider + base URL on the credential, plus a free model id on the agent
+ * node, are the three knobs that point a harness at any compatible endpoint (a self-hosted Qwen/DeepSeek
+ * gateway, OpenRouter, …).
  */
 export function ModelCredentialsPage() {
   const creds = useModelCredentials();
@@ -44,64 +45,56 @@ export function ModelCredentialsPage() {
         </button>
       </div>
 
-      <div className="cn-banner" style={{ margin: 16 }}>
-          <div className="cn-banner-h">How agents authenticate</div>
-          <div className="cn-banner-p">
-            A run uses the credential pinned on its node or agent, else the team's credential for that provider, else the
-            operator's global key. With none configured, runs rely on the operator key — add a team credential here to override it.
-          </div>
+      {creds.isLoading && <div className="ct-empty"><div className="ct-empty-h">Loading…</div></div>}
+
+      {creds.error instanceof ApiError && (
+        <div className="cn-banner cn-banner-err" style={{ margin: 16 }}>
+          <div className="cn-banner-h">Couldn't load model credentials</div>
+          <div className="cn-banner-p">{creds.error.message}</div>
         </div>
+      )}
 
-        {creds.isLoading && <div className="ct-empty"><div className="ct-empty-h">Loading…</div></div>}
+      {!creds.isLoading && !creds.error && rows.length === 0 && (
+        <div className="ct-empty">
+          <div className="ct-empty-h">No model credentials yet</div>
+          <div className="ct-empty-p">Add a provider key (Anthropic, OpenAI, OpenRouter, a self-hosted gateway, …) so this team's agents authenticate with its own key.</div>
+        </div>
+      )}
 
-        {creds.error instanceof ApiError && (
-          <div className="cn-banner cn-banner-err" style={{ margin: 16 }}>
-            <div className="cn-banner-h">Couldn't load model credentials</div>
-            <div className="cn-banner-p">{creds.error.message}</div>
-          </div>
-        )}
+      {!creds.isLoading && !creds.error && rows.length > 0 && (
+        <div className="mc-grid">
+          {rows.map((c) => (
+            <div key={c.id} className="mc-card">
+              <div className="mc-card-head">
+                <ProviderLogo provider={c.provider} />
+                <div className="mc-card-id">
+                  <div className="mc-card-name" title={c.displayName}>{c.displayName}</div>
+                  <div className="mc-card-prov">{providerForm(c.provider)?.label ?? c.provider}</div>
+                </div>
+                {c.status === "Active"
+                  ? <span className="wf-trigger-chip">Active</span>
+                  : <span className="wf-trigger-muted">{c.status}</span>}
+              </div>
 
-        {!creds.isLoading && !creds.error && rows.length === 0 && (
-          <div className="ct-empty">
-            <div className="ct-empty-h">No model credentials yet</div>
-            <div className="ct-empty-p">Add a provider key (Anthropic, OpenAI, OpenRouter, a self-hosted gateway, …) so this team's agents authenticate with its own key.</div>
-          </div>
-        )}
+              <div className="mc-card-rows">
+                <div className="mc-card-row">
+                  <Ic.Key size={12} />
+                  {c.keyHint ? <code>{c.keyHint}</code> : <span>no key</span>}
+                </div>
+                <div className="mc-card-row">
+                  <Ic.Link size={12} />
+                  <span title={c.baseUrl ?? undefined}>{c.baseUrl ?? "default endpoint"}</span>
+                </div>
+              </div>
 
-        {!creds.isLoading && !creds.error && rows.length > 0 && (
-          <table className="tbl">
-            <thead>
-              <tr>
-                <th style={{ width: "26%" }}>Credential</th>
-                <th>Provider</th>
-                <th>Key</th>
-                <th>Base URL</th>
-                <th>Status</th>
-                <th />
-              </tr>
-            </thead>
-            <tbody>
-              {rows.map((c) => (
-                <tr key={c.id}>
-                  <td>
-                    <div className="repo-cell">
-                      <div className="repo-mark" style={{ background: "var(--accent-soft)", color: "var(--accent)" }}><Ic.Key size={14} /></div>
-                      <div className="repo-info"><div className="repo-name">{c.displayName}</div></div>
-                    </div>
-                  </td>
-                  <td><span className="wf-version">{providerForm(c.provider)?.label ?? c.provider}</span></td>
-                  <td>{c.keyHint ? <span className="wf-version" style={{ fontFamily: "var(--font-mono)" }}>{c.keyHint}</span> : <span className="wf-trigger-muted">no key</span>}</td>
-                  <td>{c.baseUrl ? <span className="wf-trigger-muted">{c.baseUrl}</span> : <span className="wf-trigger-muted">default</span>}</td>
-                  <td>{c.status === "Active" ? <span className="wf-trigger-chip">Active</span> : <span className="wf-trigger-muted">{c.status}</span>}</td>
-                  <td style={{ textAlign: "right", whiteSpace: "nowrap" }}>
-                    <button className="btn btn-ghost btn-sm" onClick={() => setModal({ mode: "edit", credential: c })}>Edit</button>
-                    <button className="btn btn-ghost btn-sm" onClick={() => onRevoke(c)} disabled={revoke.isPending}>Revoke</button>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        )}
+              <div className="mc-card-foot">
+                <button className="btn btn-ghost" onClick={() => setModal({ mode: "edit", credential: c })}>Edit</button>
+                <button className="btn btn-ghost" onClick={() => onRevoke(c)} disabled={revoke.isPending}>Revoke</button>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
 
       {modal?.mode === "add" && <ModelCredentialModal onClose={() => setModal(null)} />}
       {modal?.mode === "edit" && <ModelCredentialModal editing={modal.credential} onClose={() => setModal(null)} />}
