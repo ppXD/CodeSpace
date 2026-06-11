@@ -136,16 +136,35 @@ public sealed class AgentRunService : IAgentRunService, IScopedDependency
         if (!AgentRunStateMachine.IsTerminal(result.Status))
             throw new AgentRunTransitionException($"AgentRunResult.Status must be terminal — got {result.Status}.");
 
-        var run = await LoadAsync(runId, cancellationToken).ConfigureAwait(false);
+        // Read the current status FRESH + untracked, then flip via a status-guarded CAS — NOT a tracked save on
+        // the xmin token. The worker heartbeats its own run on a separate DbContext (HeartbeatAsync), bumping the
+        // row's xmin every interval; a tracked Complete would then fail its optimistic-concurrency check on any
+        // run that outlived one heartbeat (~window/3) and never land terminal — stranding it Running until the
+        // reconciler abandoned it. Guarding on STATUS instead means the worker's own liveness pings can't block
+        // its completion, while a genuine concurrent transition (the reconciler abandoning this run) still wins
+        // the CAS and this side loses cleanly. Mirrors the reconciler's idempotent CAS.
+        var current = await _db.AgentRun.AsNoTracking()
+            .Where(r => r.Id == runId)
+            .Select(r => (AgentRunStatus?)r.Status)
+            .SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false)
+            ?? throw new KeyNotFoundException($"AgentRun {runId} not found.");
 
-        EnsureTransition(run, result.Status);
+        if (!AgentRunStateMachine.IsLegalTransition(current, result.Status))
+            throw new AgentRunTransitionException($"Illegal AgentRun transition {current} → {result.Status} (run {runId}).");
 
-        run.Status = result.Status;
-        run.ResultJson = JsonSerializer.Serialize(result, AgentJson.Options);
-        run.Error = result.Error;
-        run.CompletedAt = DateTimeOffset.UtcNow;
+        var resultJson = JsonSerializer.Serialize(result, AgentJson.Options);
 
-        await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+        var flipped = await _db.AgentRun
+            .Where(r => r.Id == runId && r.Status == current)
+            .ExecuteUpdateAsync(s => s
+                .SetProperty(r => r.Status, result.Status)
+                .SetProperty(r => r.ResultJson, resultJson)
+                .SetProperty(r => r.Error, result.Error)
+                .SetProperty(r => r.CompletedAt, (DateTimeOffset?)DateTimeOffset.UtcNow), cancellationToken)
+            .ConfigureAwait(false);
+
+        if (flipped == 0)
+            throw new AgentRunTransitionException($"AgentRun {runId} was no longer {current} at completion — a concurrent transition won the race.");
 
         _logger.LogInformation("Agent run completed. RunId={RunId} Status={Status}", runId, result.Status);
     }
