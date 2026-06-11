@@ -410,6 +410,7 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
         // token is the child run id. The row survives resolution (status flips to Resolved), so
         // the link is available whether the step is still suspended or already finished.
         var childRunByNode = await LoadSubworkflowChildLinksAsync(runId, cancellationToken).ConfigureAwait(false);
+        var agentRunByNode = await LoadAgentRunLinksAsync(runId, cancellationToken).ConfigureAwait(false);
 
         return new WorkflowRunDetail
         {
@@ -422,7 +423,7 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
             Error = run.Error,
             StartedAt = run.StartedAt,
             CompletedAt = run.CompletedAt,
-            Nodes = nodes.Select(n => MapRunNode(n, childRunByNode)).ToList(),
+            Nodes = nodes.Select(n => MapRunNode(n, childRunByNode, agentRunByNode)).ToList(),
             Outputs = outputs,
             PendingWait = pending == null ? null : new WorkflowRunWaitInfo
             {
@@ -526,7 +527,25 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
         return waits.ToDictionary(w => (w.NodeId, w.IterationKey), w => w.Token);
     }
 
-    private static WorkflowRunNodeSummary MapRunNode(WorkflowRunNode n, IReadOnlyDictionary<(string NodeId, string IterationKey), string> childRunByNode) => new()
+    /// <summary>
+    /// Maps each <c>agent.code</c> node to the agent run it spawned, keyed by <c>(NodeId, IterationKey)</c> —
+    /// from the AgentRun wait row (its token IS the agent-run id), which persists post-resolution so the link
+    /// holds whether the step is still suspended or finished. Lets the UI stream that run's live timeline.
+    /// </summary>
+    private async Task<IReadOnlyDictionary<(string NodeId, string IterationKey), string>> LoadAgentRunLinksAsync(Guid runId, CancellationToken cancellationToken)
+    {
+        var waits = await _db.WorkflowRunWait.AsNoTracking()
+            .Where(w => w.RunId == runId && w.WaitKind == WorkflowWaitKinds.AgentRun)
+            .Select(w => new { w.NodeId, w.IterationKey, w.Token })
+            .ToListAsync(cancellationToken).ConfigureAwait(false);
+
+        return waits.ToDictionary(w => (w.NodeId, w.IterationKey), w => w.Token);
+    }
+
+    private static WorkflowRunNodeSummary MapRunNode(
+        WorkflowRunNode n,
+        IReadOnlyDictionary<(string NodeId, string IterationKey), string> childRunByNode,
+        IReadOnlyDictionary<(string NodeId, string IterationKey), string> agentRunByNode) => new()
     {
         NodeId = n.NodeId,
         IterationKey = n.IterationKey,
@@ -536,7 +555,8 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
         Error = n.Error,
         StartedAt = n.StartedAt,
         CompletedAt = n.CompletedAt,
-        ChildRunId = childRunByNode.GetValueOrDefault((n.NodeId, n.IterationKey))
+        ChildRunId = childRunByNode.GetValueOrDefault((n.NodeId, n.IterationKey)),
+        AgentRunId = agentRunByNode.GetValueOrDefault((n.NodeId, n.IterationKey))
     };
 
     /// <summary>Delegates to <see cref="WorkflowJsonSafeParse.SafeParse(string?)"/>.</summary>

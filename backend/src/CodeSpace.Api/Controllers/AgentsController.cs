@@ -34,6 +34,22 @@ public class AgentsController : ControllerBase
         return Ok(result);
     }
 
+    /// <summary>Live status of one agent run (team-scoped) — the run-detail's status header + poll-while-active signal.</summary>
+    [HttpGet("runs/{agentRunId:guid}")]
+    public async Task<IActionResult> GetRun([FromRoute] Guid agentRunId, CancellationToken cancellationToken)
+    {
+        var result = await _mediator.Send(new GetAgentRunQuery { AgentRunId = agentRunId }, cancellationToken).ConfigureAwait(false);
+        return result == null ? NotFound() : Ok(result);
+    }
+
+    /// <summary>The agent run's live log, only steps after <paramref name="after"/> (0 = whole log) — the incremental cursor the timeline streams with.</summary>
+    [HttpGet("runs/{agentRunId:guid}/events")]
+    public async Task<IActionResult> ListRunEvents([FromRoute] Guid agentRunId, [FromQuery] long after, CancellationToken cancellationToken)
+    {
+        var result = await _mediator.Send(new ListAgentRunEventsQuery { AgentRunId = agentRunId, AfterSequence = after }, cancellationToken).ConfigureAwait(false);
+        return Ok(result);
+    }
+
     [HttpGet("{agentDefinitionId:guid}")]
     public async Task<IActionResult> Get([FromRoute] Guid agentDefinitionId, CancellationToken cancellationToken)
     {
