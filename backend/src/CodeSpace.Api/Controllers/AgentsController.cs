@@ -26,6 +26,14 @@ public class AgentsController : ControllerBase
         return Ok(result);
     }
 
+    /// <summary>Every harness registered in the engine (deployment-level, team-agnostic) — feeds the agent node's harness picker + per-harness model suggestions.</summary>
+    [HttpGet("harnesses")]
+    public async Task<IActionResult> ListHarnesses(CancellationToken cancellationToken)
+    {
+        var result = await _mediator.Send(new ListHarnessesQuery(), cancellationToken).ConfigureAwait(false);
+        return Ok(result);
+    }
+
     [HttpGet("{agentDefinitionId:guid}")]
     public async Task<IActionResult> Get([FromRoute] Guid agentDefinitionId, CancellationToken cancellationToken)
     {
