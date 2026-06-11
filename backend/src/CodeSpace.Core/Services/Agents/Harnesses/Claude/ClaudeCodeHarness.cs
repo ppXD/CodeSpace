@@ -19,7 +19,7 @@ namespace CodeSpace.Core.Services.Agents.Harnesses.Claude;
 /// (surfaced, never dropped) and pure setup lines return null — so a CLI version bump degrades gracefully; the
 /// normalization shape tested here is the stable contract, calibrated against real output when execution is wired.</para>
 /// </summary>
-public sealed class ClaudeCodeHarness : IAgentHarness, ISingletonDependency
+public sealed class ClaudeCodeHarness : IAgentHarness, IModelCredentialProjector, ISingletonDependency
 {
     public const string HarnessKind = "claude-code";
 
@@ -28,6 +28,17 @@ public sealed class ClaudeCodeHarness : IAgentHarness, ISingletonDependency
 
     /// <summary>Air-gapped operators (and tests) repoint the Claude Code binary via this env var — an absolute path or a PATH name. Renaming it breaks their pin — see the pin test.</summary>
     public const string CommandEnvVar = "CODESPACE_CLAUDE_CODE_PATH";
+
+    /// <summary>The env var Claude Code reads its Anthropic API key from (direct Anthropic). Pinned by a test (Rule 8).</summary>
+    public const string ApiKeyEnvVar = "ANTHROPIC_API_KEY";
+
+    /// <summary>The env var Claude Code reads a base-URL override from (a gateway / proxy / Bedrock-style endpoint). Pinned by a test (Rule 8).</summary>
+    public const string BaseUrlEnvVar = "ANTHROPIC_BASE_URL";
+
+    /// <summary>The env var Claude Code authenticates a gateway/proxy with (used instead of the api key when talking to a non-Anthropic endpoint). Pinned by a test (Rule 8).</summary>
+    public const string AuthTokenEnvVar = "ANTHROPIC_AUTH_TOKEN";
+
+    private const string AnthropicProvider = "Anthropic";
 
     private const string DefaultVersion = "2.1.0";
 
@@ -113,6 +124,35 @@ public sealed class ClaudeCodeHarness : IAgentHarness, ISingletonDependency
         var error = events.LastOrDefault(e => e.Kind == AgentEventKind.Error)?.Text ?? $"claude exited with code {exitCode}";
 
         return new AgentRunResult { Status = AgentRunStatus.Failed, ExitReason = "non-zero-exit", Summary = summary, ChangedFiles = changedFiles, Error = error };
+    }
+
+    /// <summary>Direct Anthropic, or any Anthropic-compatible gateway/proxy via a base-URL + auth-token override ("Custom").</summary>
+    public IReadOnlyList<string> SupportedProviders { get; } = new[] { AnthropicProvider, "Custom" };
+
+    /// <summary>
+    /// Project a resolved credential onto Claude Code's env. Direct Anthropic uses <see cref="ApiKeyEnvVar"/>; a
+    /// gateway/proxy ("Custom") authenticates with <see cref="AuthTokenEnvVar"/> + <see cref="BaseUrlEnvVar"/>
+    /// (Claude Code reads the api key only for the official endpoint, the auth-token for everything else). The
+    /// resolved key fills whichever applies; a base URL is added when present.
+    /// </summary>
+    public IReadOnlyDictionary<string, string> ProjectToEnv(ResolvedModelCredential credential)
+    {
+        EnsureSupported(credential.Provider);
+
+        var env = new Dictionary<string, string>(StringComparer.Ordinal);
+
+        var isGateway = !string.Equals(credential.Provider, AnthropicProvider, StringComparison.OrdinalIgnoreCase);
+
+        if (!string.IsNullOrEmpty(credential.ApiKey)) env[isGateway ? AuthTokenEnvVar : ApiKeyEnvVar] = credential.ApiKey;
+        if (!string.IsNullOrEmpty(credential.BaseUrl)) env[BaseUrlEnvVar] = credential.BaseUrl;
+
+        return env;
+    }
+
+    private void EnsureSupported(string provider)
+    {
+        if (!SupportedProviders.Contains(provider, StringComparer.OrdinalIgnoreCase))
+            throw new ArgumentException($"{Kind} cannot authenticate to model provider '{provider}'.", nameof(provider));
     }
 
     /// <summary>The Claude Code executable — the <see cref="CommandEnvVar"/> override (absolute path / PATH name) when set, else <c>claude</c> on PATH.</summary>

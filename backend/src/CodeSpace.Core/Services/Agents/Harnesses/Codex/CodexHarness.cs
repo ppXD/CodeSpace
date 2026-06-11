@@ -16,7 +16,7 @@ namespace CodeSpace.Core.Services.Agents.Harnesses.Codex;
 /// table is calibrated against real <c>codex exec --json</c> output when execution is wired (B0.4); the
 /// normalization shape tested here is the stable contract.</para>
 /// </summary>
-public sealed class CodexHarness : IAgentHarness, ISingletonDependency
+public sealed class CodexHarness : IAgentHarness, IModelCredentialProjector, ISingletonDependency
 {
     public const string HarnessKind = "codex-cli";
 
@@ -25,6 +25,12 @@ public sealed class CodexHarness : IAgentHarness, ISingletonDependency
 
     /// <summary>Air-gapped operators (and tests) repoint the Codex binary via this env var — an absolute path or a PATH name. Renaming it breaks their pin — see the pin test.</summary>
     public const string CommandEnvVar = "CODESPACE_CODEX_CLI_PATH";
+
+    /// <summary>The env var Codex reads its model API key from (OpenAI + OpenAI-compatible providers). Pinned by a test (Rule 8) — the agent authenticates with whatever lands here.</summary>
+    public const string ApiKeyEnvVar = "OPENAI_API_KEY";
+
+    /// <summary>The env var Codex reads a base-URL override from (OpenRouter / a self-hosted OpenAI-compatible gateway / a local Ollama). Pinned by a test (Rule 8).</summary>
+    public const string BaseUrlEnvVar = "OPENAI_BASE_URL";
 
     private const string DefaultVersion = "0.2.0";
 
@@ -96,6 +102,33 @@ public sealed class CodexHarness : IAgentHarness, ISingletonDependency
         var error = events.LastOrDefault(e => e.Kind == AgentEventKind.Error)?.Text ?? $"codex exited with code {exitCode}";
 
         return new AgentRunResult { Status = AgentRunStatus.Failed, ExitReason = "non-zero-exit", Summary = summary, ChangedFiles = changedFiles, Error = error };
+    }
+
+    /// <summary>Codex drives OpenAI + any OpenAI-API-compatible endpoint (OpenRouter, a self-hosted gateway, a local Ollama) via a base-URL override.</summary>
+    public IReadOnlyList<string> SupportedProviders { get; } = new[] { "OpenAI", "OpenRouter", "Ollama", "Custom" };
+
+    /// <summary>
+    /// Project a resolved credential onto Codex's env: the api key under <see cref="ApiKeyEnvVar"/> (omitted for a
+    /// keyless local provider) and any base-URL override under <see cref="BaseUrlEnvVar"/>. Codex's OpenAI provider
+    /// reads both, so the same shape covers OpenAI (key only), OpenRouter / Custom (key + base URL), and Ollama
+    /// (base URL only).
+    /// </summary>
+    public IReadOnlyDictionary<string, string> ProjectToEnv(ResolvedModelCredential credential)
+    {
+        EnsureSupported(credential.Provider);
+
+        var env = new Dictionary<string, string>(StringComparer.Ordinal);
+
+        if (!string.IsNullOrEmpty(credential.ApiKey)) env[ApiKeyEnvVar] = credential.ApiKey;
+        if (!string.IsNullOrEmpty(credential.BaseUrl)) env[BaseUrlEnvVar] = credential.BaseUrl;
+
+        return env;
+    }
+
+    private void EnsureSupported(string provider)
+    {
+        if (!SupportedProviders.Contains(provider, StringComparer.OrdinalIgnoreCase))
+            throw new ArgumentException($"{Kind} cannot authenticate to model provider '{provider}'.", nameof(provider));
     }
 
     /// <summary>The Codex executable — the <see cref="CommandEnvVar"/> override (absolute path / PATH name) when set, else <c>codex</c> on PATH.</summary>
