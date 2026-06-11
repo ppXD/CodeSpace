@@ -52,6 +52,44 @@ public class AgentRunExecutorTests
     }
 
     [Fact]
+    public async Task Durable_runner_executes_via_the_spool_and_persists_a_recoverable_handle()
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        var original = Environment.GetEnvironmentVariable(AgentRunExecutor.DurableRunnerEnvVar);
+        try
+        {
+            Environment.SetEnvironmentVariable(AgentRunExecutor.DurableRunnerEnvVar, "1");
+
+            var teamId = await SeedTeamAsync();
+            var runId = await CreateScriptedRunAsync(teamId);
+
+            await ExecuteAsync(runId, new ScriptedHarness("printf 'durable one\\ndurable two\\n'"));
+
+            using var scope = _fixture.BeginScope();
+            var svc = scope.Resolve<IAgentRunService>();
+
+            var run = await svc.GetAsync(runId, CancellationToken.None);
+            run.Status.ShouldBe(AgentRunStatus.Succeeded, "the durable launch→spool→tail path completes the run exactly like the streaming path");
+
+            var events = await svc.GetEventsAsync(runId, teamId, 0, CancellationToken.None);
+            events.Select(e => e.Text).ShouldBe(new[] { "durable one", "durable two" });   // lines tailed from the on-disk spool become the same normalized events
+
+            // The recovery spine: the handle is persisted at launch (proves the jsonb runner_handle write), so a
+            // restarted backend could re-find + recover this run from its spool instead of abandoning it.
+            run.RunnerHandleJson.ShouldNotBeNull("the runner handle is persisted the instant the run is launched");
+            var handle = JsonSerializer.Deserialize<SandboxHandle>(run.RunnerHandleJson!, AgentJson.Options)!;
+            handle.Kind.ShouldBe("local");
+            handle.ProcessId.ShouldBeGreaterThan(0);
+            handle.SpoolDirectory.ShouldNotBeNullOrEmpty();
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable(AgentRunExecutor.DurableRunnerEnvVar, original);
+        }
+    }
+
+    [Fact]
     public async Task Injects_the_decrypted_model_credential_into_the_child_env_and_freezes_only_the_reference()
     {
         if (OperatingSystem.IsWindows()) return;

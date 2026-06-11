@@ -28,6 +28,14 @@ public interface IAgentRunService
     /// <summary>Refresh the liveness heartbeat a stuck-run reconciler reads. Idempotent; does not change status.</summary>
     Task HeartbeatAsync(Guid runId, CancellationToken cancellationToken);
 
+    /// <summary>
+    /// Record the run's durable runner handle (a <c>SandboxHandle</c> as JSON: pid + spool location +
+    /// deadline) the instant it's launched, so a restarted backend can re-attach to or recover it from the
+    /// spool rather than abandoning it. Idempotent set-based UPDATE (like <see cref="HeartbeatAsync"/>); does
+    /// not change status.
+    /// </summary>
+    Task SetRunnerHandleAsync(Guid runId, string handleJson, CancellationToken cancellationToken);
+
     /// <summary>Append one normalized event to the run's append-only log. Sequence + timestamp are DB-assigned.</summary>
     Task<AgentRunEvent> AppendEventAsync(Guid runId, AgentEvent @event, CancellationToken cancellationToken);
 
@@ -111,6 +119,18 @@ public sealed class AgentRunService : IAgentRunService, IScopedDependency
         await _db.AgentRun
             .Where(r => r.Id == runId)
             .ExecuteUpdateAsync(s => s.SetProperty(r => r.HeartbeatAt, (DateTimeOffset?)DateTimeOffset.UtcNow), cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    public async Task SetRunnerHandleAsync(Guid runId, string handleJson, CancellationToken cancellationToken)
+    {
+        // Tracking-free set-based UPDATE (like HeartbeatAsync): a pure UPDATE that never participates in
+        // optimistic concurrency. Safe to bump the row independently of the executor's tracked instance because
+        // CompleteAsync flips status via a status-guarded CAS (not the xmin token), so neither this write nor the
+        // heartbeat's pings can block completion. A missing row is a harmless no-op.
+        await _db.AgentRun
+            .Where(r => r.Id == runId)
+            .ExecuteUpdateAsync(s => s.SetProperty(r => r.RunnerHandleJson, handleJson), cancellationToken)
             .ConfigureAwait(false);
     }
 

@@ -48,6 +48,14 @@ public class AgentRun : IEntity<Guid>, IAuditable
     /// <summary>Worker liveness ping; a stuck-Running reconciler reads this to recover crashed runs.</summary>
     public DateTimeOffset? HeartbeatAt { get; set; }
 
+    /// <summary>
+    /// The durable runner handle (a <c>SandboxHandle</c> as JSON: runner kind, supervisor pid, spool
+    /// directory, deadline) recorded the instant the run is launched on a durable runner — so a backend that
+    /// restarts mid-run can re-attach to or recover the run from its spool instead of abandoning it. NULL
+    /// until launched, and for runs on a non-durable runner.
+    /// </summary>
+    public string? RunnerHandleJson { get; set; }
+
     public DateTimeOffset? StartedAt { get; set; }
     public DateTimeOffset? CompletedAt { get; set; }
 

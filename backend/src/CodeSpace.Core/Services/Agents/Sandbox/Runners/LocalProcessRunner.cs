@@ -9,13 +9,15 @@ namespace CodeSpace.Core.Services.Agents.Sandbox.Runners;
 /// isolation — this is the local-dev / single-tenant default that proves the seam end to end while
 /// Docker / Kubernetes-Job runners are built behind the same <see cref="ISandboxRunner"/> contract.
 ///
-/// Implements both the batch <see cref="ISandboxRunner"/> (full stdout/stderr capture) and the
-/// streaming <see cref="ISandboxStreamRunner"/> (stdout delivered line-by-line for live logs).
-/// Enforces <see cref="SandboxSpec.TimeoutSeconds"/> by killing the process tree, and surfaces a
-/// non-zero exit as <see cref="SandboxStatus.Failed"/> rather than throwing. Caller cancellation is
-/// honoured distinctly from the spec timeout: it terminates the process and rethrows.
+/// Implements the batch <see cref="ISandboxRunner"/> (full stdout/stderr capture), the streaming
+/// <see cref="ISandboxStreamRunner"/> (stdout delivered line-by-line for live logs), and the DURABLE
+/// <see cref="ISandboxDurableRunner"/> (launch + spool + re-attachable observation — see
+/// <c>LocalProcessRunner.Durable.cs</c>). Enforces <see cref="SandboxSpec.TimeoutSeconds"/> by killing the
+/// process tree, and surfaces a non-zero exit as <see cref="SandboxStatus.Failed"/> rather than throwing.
+/// Caller cancellation is honoured distinctly from the spec timeout: it terminates the process and rethrows
+/// (the durable path differs — see its remarks: cancellation stops observing without killing).
 /// </summary>
-public sealed class LocalProcessRunner : ISandboxRunner, ISandboxStreamRunner, ISingletonDependency
+public sealed partial class LocalProcessRunner : ISandboxRunner, ISandboxStreamRunner, ISandboxDurableRunner, ISingletonDependency
 {
     public const string LocalKind = "local";
 
