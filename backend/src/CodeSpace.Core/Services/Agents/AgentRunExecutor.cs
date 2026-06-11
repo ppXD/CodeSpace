@@ -34,22 +34,26 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     /// <summary>Cap on the captured diff inlined into the persisted result row (~1 MB). A larger diff is truncated with a marker; the full diff belongs in the artifact layer (a later slice).</summary>
     private const int MaxPatchChars = 1_000_000;
 
+    private static readonly IReadOnlyDictionary<string, string> EmptySecretEnv = new Dictionary<string, string>();
+
     private readonly IAgentRunService _runs;
     private readonly IAgentHarnessRegistry _harnesses;
     private readonly ISandboxRunnerRegistry _runners;
     private readonly IAgentWorkspaceResolver _workspaceResolver;
+    private readonly IModelCredentialResolver _modelCredentials;
     private readonly IWorkspaceProviderRegistry _workspaces;
     private readonly IAgentRunCompletionNotifier _notifier;
     // Mints a fresh DI scope (→ its own DbContext) for the heartbeat loop, which runs concurrently with the event stream.
     private readonly IServiceScopeFactory _scopeFactory;
     private readonly ILogger<AgentRunExecutor> _logger;
 
-    public AgentRunExecutor(IAgentRunService runs, IAgentHarnessRegistry harnesses, ISandboxRunnerRegistry runners, IAgentWorkspaceResolver workspaceResolver, IWorkspaceProviderRegistry workspaces, IAgentRunCompletionNotifier notifier, IServiceScopeFactory scopeFactory, ILogger<AgentRunExecutor> logger)
+    public AgentRunExecutor(IAgentRunService runs, IAgentHarnessRegistry harnesses, ISandboxRunnerRegistry runners, IAgentWorkspaceResolver workspaceResolver, IModelCredentialResolver modelCredentials, IWorkspaceProviderRegistry workspaces, IAgentRunCompletionNotifier notifier, IServiceScopeFactory scopeFactory, ILogger<AgentRunExecutor> logger)
     {
         _runs = runs;
         _harnesses = harnesses;
         _runners = runners;
         _workspaceResolver = workspaceResolver;
+        _modelCredentials = modelCredentials;
         _workspaces = workspaces;
         _notifier = notifier;
         _scopeFactory = scopeFactory;
@@ -76,7 +80,12 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
             var workspaceRequest = await _workspaceResolver.ResolveAsync(task, run.TeamId, cancellationToken).ConfigureAwait(false);
             await using var workspace = workspaceRequest is null ? null : await _workspaces.Resolve(runnerKind).PrepareAsync(workspaceRequest, cancellationToken).ConfigureAwait(false);
 
-            var effectiveTask = workspace is null ? task : task with { WorkspaceDirectory = workspace.Directory };
+            // Resolve + decrypt the model credential JUST-IN-TIME (team from the run row, never the envelope) and
+            // project it onto the harness's env vars. The secret lives only in this in-memory effectiveTask →
+            // SandboxSpec.Environment; it is NEVER re-persisted (CompleteAsync writes only the result).
+            var secretEnv = await ResolveModelCredentialEnvAsync(task, run.TeamId, harness, cancellationToken).ConfigureAwait(false);
+
+            var effectiveTask = (workspace is null ? task : task with { WorkspaceDirectory = workspace.Directory }) with { Environment = MergeEnvironment(task.Environment, secretEnv) };
 
             var result = await RunHarnessAsync(agentRunId, harness, runner, harness.BuildInvocation(effectiveTask), cancellationToken).ConfigureAwait(false);
 
@@ -149,6 +158,32 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         if (string.IsNullOrEmpty(patch) || patch.Length <= maxChars) return patch;
 
         return patch[..maxChars] + $"\n... diff truncated ({patch.Length} chars; capped at {maxChars}) ...\n";
+    }
+
+    /// <summary>
+    /// Resolve + decrypt the run's model credential (if any) just-in-time and project it onto the harness's env
+    /// vars. Empty when the harness can't authenticate (implements no projector) or no credential applies — the
+    /// run then relies on whatever env the runner already provides. A PINNED-but-unresolvable credential throws
+    /// (the executor's catch lands a clean Failed), never silently using a different key.
+    /// </summary>
+    private async Task<IReadOnlyDictionary<string, string>> ResolveModelCredentialEnvAsync(AgentTask task, Guid teamId, IAgentHarness harness, CancellationToken cancellationToken)
+    {
+        var projector = harness as IModelCredentialProjector;
+
+        var credential = await _modelCredentials.ResolveAsync(task, teamId, projector, cancellationToken).ConfigureAwait(false);
+
+        return projector is not null && credential is not null ? projector.ProjectToEnv(credential) : EmptySecretEnv;
+    }
+
+    /// <summary>Layer the resolved credential's env onto the task's own non-secret env — the injected value wins for a shared key. In-memory only; the result is never re-persisted (an empty secret env returns the task env unchanged).</summary>
+    internal static IReadOnlyDictionary<string, string> MergeEnvironment(IReadOnlyDictionary<string, string> taskEnv, IReadOnlyDictionary<string, string> secretEnv)
+    {
+        if (secretEnv.Count == 0) return taskEnv;
+
+        var merged = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (var (key, value) in taskEnv) merged[key] = value;
+        foreach (var (key, value) in secretEnv) merged[key] = value;
+        return merged;
     }
 
     /// <summary>Claim the run (Queued → Running). Returns false when it's already Running/terminal — the exactly-once guard that stops a re-claim from re-spawning the harness.</summary>

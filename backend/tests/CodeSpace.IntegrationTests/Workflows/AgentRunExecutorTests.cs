@@ -52,6 +52,59 @@ public class AgentRunExecutorTests
     }
 
     [Fact]
+    public async Task Injects_the_decrypted_model_credential_into_the_child_env_and_freezes_only_the_reference()
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        const string plaintextKey = "sk-injected-keystone-value";
+
+        var teamId = await SeedTeamAsync();
+        var credId = await SeedModelCredentialAsync(teamId, "scripted-provider", plaintextKey);
+        var runId = await CreateRunWithCredentialAsync(teamId, credId);
+
+        // The projecting harness maps the resolved credential to SCRIPTED_MODEL_KEY; the script reports only the
+        // key's PRESENCE (never its value), so the run log proves injection without the test itself leaking it.
+        await ExecuteAsync(runId, new ProjectingScriptedHarness("scripted-provider", "SCRIPTED_MODEL_KEY",
+            "if [ -n \"$SCRIPTED_MODEL_KEY\" ]; then echo KEY_PRESENT; else echo KEY_ABSENT; fi"));
+
+        using var scope = _fixture.BeginScope();
+        var svc = scope.Resolve<IAgentRunService>();
+        var run = await svc.GetAsync(runId, CancellationToken.None);
+
+        run.Status.ShouldBe(AgentRunStatus.Succeeded);
+        (await svc.GetEventsAsync(runId, teamId, 0, CancellationToken.None)).Select(e => e.Text)
+            .ShouldContain("KEY_PRESENT", "the decrypted credential was injected into the REAL child process env");
+
+        // Staging froze only the Guid reference — the secret never touches the persisted run.
+        run.TaskJson.ShouldContain(credId.ToString());
+        run.TaskJson.ShouldNotContain(plaintextKey);
+        run.ResultJson.ShouldNotBeNull();
+        run.ResultJson!.ShouldNotContain(plaintextKey);
+    }
+
+    [Fact]
+    public async Task A_pinned_credential_from_another_team_lands_the_run_failed_clean()
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        var teamA = await SeedTeamAsync();
+        var teamB = await SeedTeamAsync();
+        var credInB = await SeedModelCredentialAsync(teamB, "scripted-provider", "sk-team-b-secret");
+
+        // Run belongs to team A but pins team B's credential → the resolver must refuse and the run fail clean.
+        var runId = await CreateRunWithCredentialAsync(teamA, credInB);
+
+        await ExecuteAsync(runId, new ProjectingScriptedHarness("scripted-provider", "SCRIPTED_MODEL_KEY", "echo should-not-run"));
+
+        using var scope = _fixture.BeginScope();
+        var run = await scope.Resolve<IAgentRunService>().GetAsync(runId, CancellationToken.None);
+
+        run.Status.ShouldBe(AgentRunStatus.Failed, "a pinned credential from another team is unresolvable — fail clean, never use it");
+        run.Error.ShouldNotBeNull();
+        run.Error!.ShouldNotContain("sk-team-b-secret", customMessage: "the failure must never echo a key (and none was decrypted anyway)");
+    }
+
+    [Fact]
     public async Task Does_not_re_run_an_already_claimed_run()
     {
         if (OperatingSystem.IsWindows()) return;
@@ -223,6 +276,34 @@ public class AgentRunExecutorTests
         return run.Id;
     }
 
+    private async Task<Guid> CreateRunWithCredentialAsync(Guid teamId, Guid modelCredentialId)
+    {
+        using var scope = _fixture.BeginScope();
+        var run = await scope.Resolve<IAgentRunService>().CreateAsync(
+            new AgentTask { Goal = "scripted", Harness = "scripted-projector", Model = "test-model", ModelCredentialId = modelCredentialId },
+            teamId, null, null, CancellationToken.None);
+        return run.Id;
+    }
+
+    private async Task<Guid> SeedModelCredentialAsync(Guid teamId, string provider, string plaintextKey)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+
+        var id = Guid.NewGuid();
+        db.ModelCredential.Add(new ModelCredential
+        {
+            Id = id,
+            TeamId = teamId,
+            Provider = provider,
+            DisplayName = "test cred",
+            EncryptedApiKey = scope.Resolve<CodeSpace.Core.Services.Credentials.IPayloadEncryptor>().Encrypt(plaintextKey),
+            Status = CredentialStatus.Active,
+        });
+        await db.SaveChangesAsync();
+        return id;
+    }
+
     private async Task<Guid> SeedRepositoryAsync(Guid teamId, string cloneUrlHttps, string defaultBranch)
     {
         using var scope = _fixture.BeginScope();
@@ -316,6 +397,7 @@ public class AgentRunExecutorTests
             new AgentHarnessRegistry(new[] { harness }),
             scope.Resolve<ISandboxRunnerRegistry>(),
             scope.Resolve<IAgentWorkspaceResolver>(),
+            scope.Resolve<IModelCredentialResolver>(),
             scope.Resolve<IWorkspaceProviderRegistry>(),
             scope.Resolve<IAgentRunCompletionNotifier>(),
             scope.Resolve<Microsoft.Extensions.DependencyInjection.IServiceScopeFactory>(),
@@ -369,5 +451,39 @@ public class AgentRunExecutorTests
             exitCode == 0
                 ? new AgentRunResult { Status = AgentRunStatus.Succeeded, ExitReason = "completed", Summary = events.Count > 0 ? events[^1].Text : null }
                 : new AgentRunResult { Status = AgentRunStatus.Failed, ExitReason = "non-zero-exit", Error = $"exit {exitCode}" };
+    }
+
+    /// <summary>A scripted harness that ALSO projects a model credential (kind "scripted-projector"): maps the resolved credential to one env var and — critically — carries <c>task.Environment</c> (the injected secret) into the sandbox spec, exactly as the real harnesses do.</summary>
+    private sealed class ProjectingScriptedHarness : IAgentHarness, IModelCredentialProjector
+    {
+        private readonly string _provider;
+        private readonly string _envVar;
+        private readonly string _script;
+
+        public ProjectingScriptedHarness(string provider, string envVar, string script)
+        {
+            _provider = provider;
+            _envVar = envVar;
+            _script = script;
+        }
+
+        public string Kind => "scripted-projector";
+        public string Version => "test";
+        public IReadOnlyList<string> Models { get; } = new[] { "test-model" };
+
+        public SandboxSpec BuildInvocation(AgentTask task) => new() { Command = "/bin/sh", Args = new[] { "-c", _script }, WorkingDirectory = task.WorkspaceDirectory, Environment = task.Environment, TimeoutSeconds = task.TimeoutSeconds };
+
+        public AgentEvent? ParseEvent(string rawLine) =>
+            string.IsNullOrWhiteSpace(rawLine) ? null : new AgentEvent { Kind = AgentEventKind.AssistantMessage, Text = rawLine.Trim() };
+
+        public AgentRunResult BuildResult(IReadOnlyList<AgentEvent> events, int exitCode) =>
+            exitCode == 0
+                ? new AgentRunResult { Status = AgentRunStatus.Succeeded, ExitReason = "completed", Summary = events.Count > 0 ? events[^1].Text : null }
+                : new AgentRunResult { Status = AgentRunStatus.Failed, ExitReason = "non-zero-exit", Error = $"exit {exitCode}" };
+
+        public IReadOnlyList<string> SupportedProviders => new[] { _provider };
+
+        public IReadOnlyDictionary<string, string> ProjectToEnv(ResolvedModelCredential credential) =>
+            new Dictionary<string, string> { [_envVar] = credential.ApiKey ?? "" };
     }
 }
