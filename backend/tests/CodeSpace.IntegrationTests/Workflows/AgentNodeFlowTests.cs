@@ -233,9 +233,10 @@ public class AgentNodeFlowTests
             await RunEngineAsync(runId);
             var agentRunId = await GetAgentRunIdAsync(runId);
 
-            // Worker claimed it (Running) then crashed — heartbeat goes stale past the liveness window.
+            // Worker claimed it (Running) then crashed — it stopped renewing its lease, which lapses past the
+            // liveness window (the reconciler gates on the lease, not heartbeat-silence).
             await MarkRunningAsync(agentRunId);
-            await BackdateColumnAsync(agentRunId, "heartbeat_at", TimeSpan.FromMinutes(20));
+            await BackdateColumnAsync(agentRunId, "lease_expires_at", TimeSpan.FromMinutes(20));
 
             var summary = await ReconcileAsync();
             summary.MarkedAbandonedFromRunning.ShouldBeGreaterThanOrEqualTo(1, "the abandoned run is failed");

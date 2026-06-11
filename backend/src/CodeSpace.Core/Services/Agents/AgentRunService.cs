@@ -120,6 +120,7 @@ public sealed class AgentRunService : IAgentRunService, IScopedDependency
         run.Status = AgentRunStatus.Running;
         run.StartedAt = DateTimeOffset.UtcNow;
         run.HeartbeatAt = DateTimeOffset.UtcNow;
+        run.LeaseExpiresAt = AgentRunLiveness.NextLeaseExpiry();   // start the lease; the heartbeat renews it
         run.FenceEpoch += 1;   // bump on claim; the claimer completes under this epoch, so a later reclaim fences it out
 
         await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
@@ -133,9 +134,15 @@ public sealed class AgentRunService : IAgentRunService, IScopedDependency
         // a long-lived scope, so a load-mutate-save would keep a tracked entity + a stale xmin between pings —
         // one lost optimistic-concurrency round would then silently kill every later heartbeat. A pure UPDATE
         // never participates in optimistic concurrency; a missing row is a harmless 0-row no-op.
+        //
+        // Renews the lease alongside the heartbeat: a live worker pushes lease_expires_at forward every ping,
+        // so the reconciler's lease-expiry reclaim only fires once the worker stops pinging (it died/hung).
+        var now = DateTimeOffset.UtcNow;
         await _db.AgentRun
             .Where(r => r.Id == runId)
-            .ExecuteUpdateAsync(s => s.SetProperty(r => r.HeartbeatAt, (DateTimeOffset?)DateTimeOffset.UtcNow), cancellationToken)
+            .ExecuteUpdateAsync(s => s
+                .SetProperty(r => r.HeartbeatAt, (DateTimeOffset?)now)
+                .SetProperty(r => r.LeaseExpiresAt, (DateTimeOffset?)(now + AgentRunLiveness.LeaseDuration)), cancellationToken)
             .ConfigureAwait(false);
     }
 

@@ -79,11 +79,19 @@ public class AgentRunChaosRecoveryTests
             await Should.ThrowAsync<DbUpdateException>(() => db.SaveChangesAsync());
         }
 
-        // Recover: shrink the liveness window to zero so the just-crashed run is immediately abandoned, then sweep.
+        // Recover. The reconciler reclaims a Running run whose LEASE has lapsed AND whose event window is quiet.
+        // The claim stamped the lease (now + the default window); the window override empties the event-recency
+        // check but doesn't touch the already-stamped lease, so lapse the lease directly — simulating the dead
+        // worker no longer renewing it — then sweep.
         var original = System.Environment.GetEnvironmentVariable(AgentRunReconcilerService.LivenessWindowEnvVar);
         try
         {
             System.Environment.SetEnvironmentVariable(AgentRunReconcilerService.LivenessWindowEnvVar, "00:00:00");
+
+            using (var lapse = _fixture.BeginScope())
+                await lapse.Resolve<CodeSpaceDbContext>().Database
+                    .ExecuteSqlInterpolatedAsync($"UPDATE agent_run SET lease_expires_at = {DateTimeOffset.UtcNow.AddMinutes(-1)} WHERE id = {runId}");
+
             using var scope = _fixture.BeginScope();
             var marked = (await scope.Resolve<IAgentRunReconcilerService>().ReconcileAsync(CancellationToken.None)).MarkedAbandonedFromRunning;
             marked.ShouldBeGreaterThanOrEqualTo(1);
