@@ -66,6 +66,10 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
 
         if (!await TryClaimAsync(agentRunId, cancellationToken).ConfigureAwait(false)) return;
 
+        // Holds the run's resolved secret(s) once the credential is resolved (below), so the catch-all can scrub
+        // them from a failure message too. None until then — a pre-resolve failure has no secret to leak.
+        var redactor = SecretRedactor.None;
+
         try
         {
             var task = JsonSerializer.Deserialize<AgentTask>(run.TaskJson, AgentJson.Options)
@@ -82,12 +86,14 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
 
             // Resolve + decrypt the model credential JUST-IN-TIME (team from the run row, never the envelope) and
             // project it onto the harness's env vars. The secret lives only in this in-memory effectiveTask →
-            // SandboxSpec.Environment; it is NEVER re-persisted (CompleteAsync writes only the result).
-            var secretEnv = await ResolveModelCredentialEnvAsync(task, run.TeamId, harness, cancellationToken).ConfigureAwait(false);
+            // SandboxSpec.Environment; it is NEVER re-persisted (CompleteAsync writes only the result). The
+            // redactor (keyed on the decrypted key) strips it from any echoed event / error before it persists.
+            var (secretEnv, secretRedactor) = await ResolveModelCredentialEnvAsync(task, run.TeamId, harness, cancellationToken).ConfigureAwait(false);
+            redactor = secretRedactor;
 
             var effectiveTask = (workspace is null ? task : task with { WorkspaceDirectory = workspace.Directory }) with { Environment = MergeEnvironment(task.Environment, secretEnv) };
 
-            var result = await RunHarnessAsync(agentRunId, harness, runner, harness.BuildInvocation(effectiveTask), cancellationToken).ConfigureAwait(false);
+            var result = await RunHarnessAsync(agentRunId, harness, runner, harness.BuildInvocation(effectiveTask), redactor, cancellationToken).ConfigureAwait(false);
 
             result = await EnrichWithWorkspaceChangesAsync(agentRunId, result, workspace, cancellationToken).ConfigureAwait(false);
 
@@ -101,7 +107,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         catch (Exception ex)
         {
             _logger.LogError(ex, "Agent run {RunId} failed during execution", agentRunId);
-            await CompleteAndNotifyAsync(agentRunId, new AgentRunResult { Status = AgentRunStatus.Failed, ExitReason = "executor-error", Error = ex.Message }, cancellationToken).ConfigureAwait(false);
+            await CompleteAndNotifyAsync(agentRunId, new AgentRunResult { Status = AgentRunStatus.Failed, ExitReason = "executor-error", Error = redactor.Redact(ex.Message) }, cancellationToken).ConfigureAwait(false);
         }
     }
 
@@ -166,13 +172,17 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     /// run then relies on whatever env the runner already provides. A PINNED-but-unresolvable credential throws
     /// (the executor's catch lands a clean Failed), never silently using a different key.
     /// </summary>
-    private async Task<IReadOnlyDictionary<string, string>> ResolveModelCredentialEnvAsync(AgentTask task, Guid teamId, IAgentHarness harness, CancellationToken cancellationToken)
+    private async Task<(IReadOnlyDictionary<string, string> Env, SecretRedactor Redactor)> ResolveModelCredentialEnvAsync(AgentTask task, Guid teamId, IAgentHarness harness, CancellationToken cancellationToken)
     {
         var projector = harness as IModelCredentialProjector;
 
         var credential = await _modelCredentials.ResolveAsync(task, teamId, projector, cancellationToken).ConfigureAwait(false);
 
-        return projector is not null && credential is not null ? projector.ProjectToEnv(credential) : EmptySecretEnv;
+        var env = projector is not null && credential is not null ? projector.ProjectToEnv(credential) : EmptySecretEnv;
+        // Redact only the actual SECRET (the api key / gateway token) — never the non-secret base URL.
+        var redactor = credential?.ApiKey is { Length: > 0 } key ? new SecretRedactor(new[] { key }) : SecretRedactor.None;
+
+        return (env, redactor);
     }
 
     /// <summary>Layer the resolved credential's env onto the task's own non-secret env — the injected value wins for a shared key. In-memory only; the result is never re-persisted (an empty secret env returns the task env unchanged).</summary>
@@ -201,7 +211,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         }
     }
 
-    private async Task<AgentRunResult> RunHarnessAsync(Guid runId, IAgentHarness harness, ISandboxRunner runner, SandboxSpec spec, CancellationToken cancellationToken)
+    private async Task<AgentRunResult> RunHarnessAsync(Guid runId, IAgentHarness harness, ISandboxRunner runner, SandboxSpec spec, SecretRedactor redactor, CancellationToken cancellationToken)
     {
         var events = new List<AgentEvent>();
 
@@ -210,15 +220,41 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
             var normalized = harness.ParseEvent(line);
             if (normalized is null) return;
 
-            await _runs.AppendEventAsync(runId, normalized, cancellationToken).ConfigureAwait(false);
-            events.Add(normalized);
+            // Strip any secret the CLI echoed BEFORE the append-only log freezes it (the log can't be edited later).
+            var redacted = Redact(normalized, redactor);
+
+            await _runs.AppendEventAsync(runId, redacted, cancellationToken).ConfigureAwait(false);
+            events.Add(redacted);
         }
 
         var sandbox = await RunWithHeartbeatAsync(runId, runner, spec, PersistLineAsync, cancellationToken).ConfigureAwait(false);
 
+        // Events are already redacted, so a result the harness folds from them (summary / error) is redacted too.
         return sandbox.Status == SandboxStatus.TimedOut
             ? new AgentRunResult { Status = AgentRunStatus.TimedOut, ExitReason = "timed-out", Error = "The agent run exceeded its time budget and was terminated." }
             : harness.BuildResult(events, sandbox.ExitCode);
+    }
+
+    /// <summary>Redact any echoed secret out of a normalized event — its text AND its structured payload — before it reaches the append-only log. No-op when the run has no secret.</summary>
+    private static AgentEvent Redact(AgentEvent normalized, SecretRedactor redactor)
+    {
+        if (redactor.IsEmpty) return normalized;
+
+        return normalized with { Text = redactor.Redact(normalized.Text), Data = RedactData(normalized.Data, redactor) };
+    }
+
+    /// <summary>Mask a structured payload via its raw JSON text, then re-parse. If masking somehow broke the JSON, drop the payload rather than persist an unredacted blob.</summary>
+    private static JsonElement? RedactData(JsonElement? data, SecretRedactor redactor)
+    {
+        if (data is null) return null;
+
+        var raw = data.Value.GetRawText();
+        var redacted = redactor.Redact(raw);
+
+        if (redacted == raw) return data;
+
+        try { using var doc = JsonDocument.Parse(redacted); return doc.RootElement.Clone(); }
+        catch (JsonException) { return null; }
     }
 
     /// <summary>

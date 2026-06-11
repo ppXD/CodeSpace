@@ -105,6 +105,38 @@ public class AgentRunExecutorTests
     }
 
     [Fact]
+    public async Task Redacts_an_echoed_model_key_from_the_append_only_log_and_result()
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        const string key = "sk-echo-leak-value-9f3a7c";
+
+        var teamId = await SeedTeamAsync();
+        var credId = await SeedModelCredentialAsync(teamId, "scripted-provider", key);
+        var runId = await CreateRunWithCredentialAsync(teamId, credId);
+
+        // The harness ECHOES its injected key to stdout — the real leak vector (a CLI printing its key in a
+        // banner / 401 body). The redactor must mask it before the append-only event log freezes it.
+        await ExecuteAsync(runId, new KeyEchoingHarness("scripted-provider", "SCRIPTED_MODEL_KEY"));
+
+        using var scope = _fixture.BeginScope();
+        var svc = scope.Resolve<IAgentRunService>();
+        var run = await svc.GetAsync(runId, CancellationToken.None);
+        var events = await svc.GetEventsAsync(runId, teamId, 0, CancellationToken.None);
+
+        events.ShouldNotBeEmpty();
+        foreach (var e in events)
+        {
+            e.Text.ShouldNotContain(key, customMessage: "the live-log text must never carry the key");
+            (e.DataJson ?? "").ShouldNotContain(key, customMessage: "the structured payload must never carry the key");
+        }
+        events.ShouldContain(e => e.Text.Contains(SecretRedactor.Placeholder), "the echoed key is masked, not silently dropped");
+
+        run.ResultJson!.ShouldNotContain(key, customMessage: "the result (summary folded from the events) must not carry the key");
+        (run.Error ?? "").ShouldNotContain(key);
+    }
+
+    [Fact]
     public async Task Does_not_re_run_an_already_claimed_run()
     {
         if (OperatingSystem.IsWindows()) return;
@@ -480,6 +512,39 @@ public class AgentRunExecutorTests
             exitCode == 0
                 ? new AgentRunResult { Status = AgentRunStatus.Succeeded, ExitReason = "completed", Summary = events.Count > 0 ? events[^1].Text : null }
                 : new AgentRunResult { Status = AgentRunStatus.Failed, ExitReason = "non-zero-exit", Error = $"exit {exitCode}" };
+
+        public IReadOnlyList<string> SupportedProviders => new[] { _provider };
+
+        public IReadOnlyDictionary<string, string> ProjectToEnv(ResolvedModelCredential credential) =>
+            new Dictionary<string, string> { [_envVar] = credential.ApiKey ?? "" };
+    }
+
+    /// <summary>A projecting harness whose script ECHOES its injected key to stdout, and whose events carry that line in BOTH Text and a structured Data payload — the leak the redactor must mask before the append-only log persists it.</summary>
+    private sealed class KeyEchoingHarness : IAgentHarness, IModelCredentialProjector
+    {
+        private readonly string _provider;
+        private readonly string _envVar;
+
+        public KeyEchoingHarness(string provider, string envVar)
+        {
+            _provider = provider;
+            _envVar = envVar;
+        }
+
+        public string Kind => "scripted-projector";
+        public string Version => "test";
+        public IReadOnlyList<string> Models { get; } = new[] { "test-model" };
+
+        public SandboxSpec BuildInvocation(AgentTask task) => new() { Command = "/bin/sh", Args = new[] { "-c", $"echo \"${_envVar}\"" }, WorkingDirectory = task.WorkspaceDirectory, Environment = task.Environment, TimeoutSeconds = task.TimeoutSeconds };
+
+        public AgentEvent? ParseEvent(string rawLine)
+        {
+            var line = rawLine.Trim();
+            return line.Length == 0 ? null : new AgentEvent { Kind = AgentEventKind.AssistantMessage, Text = line, Data = JsonSerializer.SerializeToElement(new { line }) };
+        }
+
+        public AgentRunResult BuildResult(IReadOnlyList<AgentEvent> events, int exitCode) =>
+            new() { Status = AgentRunStatus.Succeeded, ExitReason = "completed", Summary = events.Count > 0 ? events[^1].Text : null };
 
         public IReadOnlyList<string> SupportedProviders => new[] { _provider };
 
