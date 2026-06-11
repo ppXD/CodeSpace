@@ -756,14 +756,18 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
     /// </summary>
     private async Task DispatchPendingSubworkflowChildAsync(Guid parentRunId, CancellationToken cancellationToken)
     {
-        var token = await _db.WorkflowRunWait.AsNoTracking()
+        // Dispatch EVERY child this suspend cycle staged — a parallel fan-out of sub-workflow nodes parks on
+        // K Subworkflow waits, each with its own child run id; a single FirstOrDefault left K-1 children
+        // never dispatched (stranded until the reconciler). Each child run is independent.
+        var tokens = await _db.WorkflowRunWait.AsNoTracking()
             .Where(w => w.RunId == parentRunId && w.WaitKind == WorkflowWaitKinds.Subworkflow && w.Status == WorkflowWaitStatuses.Pending)
             .Select(w => w.Token)
-            .FirstOrDefaultAsync(cancellationToken)
+            .ToListAsync(cancellationToken)
             .ConfigureAwait(false);
 
-        if (token != null && Guid.TryParse(token, out var childRunId))
-            await _subworkflowService.DispatchChildRunAsync(childRunId, cancellationToken).ConfigureAwait(false);
+        foreach (var token in tokens)
+            if (Guid.TryParse(token, out var childRunId))
+                await _subworkflowService.DispatchChildRunAsync(childRunId, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -775,14 +779,18 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
     /// </summary>
     private async Task DispatchPendingAgentRunAsync(Guid runId, CancellationToken cancellationToken)
     {
-        var token = await _db.WorkflowRunWait.AsNoTracking()
+        // Enqueue EVERY agent run this suspend cycle staged — a parallel wave parks K agent.code nodes on K
+        // AgentRun waits, and each needs its executor launched now. A single FirstOrDefault left K-1 stranded
+        // until the reconciler's stale-window re-dispatch. The executor's claim CAS makes a re-dispatch a no-op.
+        var tokens = await _db.WorkflowRunWait.AsNoTracking()
             .Where(w => w.RunId == runId && w.WaitKind == WorkflowWaitKinds.AgentRun && w.Status == WorkflowWaitStatuses.Pending)
             .Select(w => w.Token)
-            .FirstOrDefaultAsync(cancellationToken)
+            .ToListAsync(cancellationToken)
             .ConfigureAwait(false);
 
-        if (token != null && Guid.TryParse(token, out var agentRunId))
-            _backgroundJobClient.Enqueue<IAgentRunExecutor>(e => e.ExecuteAsync(agentRunId, CancellationToken.None));
+        foreach (var token in tokens)
+            if (Guid.TryParse(token, out var agentRunId))
+                _backgroundJobClient.Enqueue<IAgentRunExecutor>(e => e.ExecuteAsync(agentRunId, CancellationToken.None));
     }
 
     /// <summary>
@@ -799,12 +807,14 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
         try
         {
             var childIdToken = child.Id.ToString();
-            var waiting = await _db.WorkflowRunWait.AsNoTracking()
-                .AnyAsync(w => w.RunId == child.ParentRunId && w.WaitKind == WorkflowWaitKinds.Subworkflow
-                               && w.Token == childIdToken && w.Status == WorkflowWaitStatuses.Pending, cancellationToken)
+            var waitId = await _db.WorkflowRunWait.AsNoTracking()
+                .Where(w => w.RunId == child.ParentRunId && w.WaitKind == WorkflowWaitKinds.Subworkflow
+                            && w.Token == childIdToken && w.Status == WorkflowWaitStatuses.Pending)
+                .Select(w => (Guid?)w.Id)
+                .FirstOrDefaultAsync(cancellationToken)
                 .ConfigureAwait(false);
 
-            if (!waiting) return;   // not a sub-workflow child (e.g. a replay) — nothing to resume
+            if (waitId is null) return;   // not a sub-workflow child (e.g. a replay) — nothing to resume
 
             var payload = JsonSerializer.Serialize(new
             {
@@ -813,7 +823,9 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
                 error,
             });
 
-            await _resumeService.ResumeAsync(child.ParentRunId.Value, payload, cancellationToken).ConfigureAwait(false);
+            // Resolve ONLY this child's own wait — never the sibling waits a parallel fan-out of children
+            // holds — so each parent subworkflow node resumes with its own child's outputs.
+            await _resumeService.ResumeOnWaitCompletionAsync(child.ParentRunId.Value, waitId.Value, payload, cancellationToken).ConfigureAwait(false);
         }
         catch (Exception ex)
         {

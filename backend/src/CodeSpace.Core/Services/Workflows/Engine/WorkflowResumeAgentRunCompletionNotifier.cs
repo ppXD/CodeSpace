@@ -51,19 +51,25 @@ public sealed class WorkflowResumeAgentRunCompletionNotifier : IAgentRunCompleti
         }
     }
 
-    /// <summary>Resume the workflow run iff it still holds a pending AgentRun wait for this run — the idempotence guard against a replay / double-notify.</summary>
+    /// <summary>
+    /// Resume the parent run on THIS agent run's completion. Resolves ONLY this run's own AgentRun wait
+    /// (its Token is the agent-run id) — never the sibling waits a parallel agent.code wave holds — so each
+    /// node resumes with its own result. A no-op when no pending wait matches (replay / double-notify).
+    /// </summary>
     private async Task ResumeParkedNodeAsync(AgentRun run, CancellationToken cancellationToken)
     {
         var token = run.Id.ToString();
 
-        var hasPendingWait = await _db.WorkflowRunWait.AsNoTracking()
-            .AnyAsync(w => w.RunId == run.WorkflowRunId && w.WaitKind == WorkflowWaitKinds.AgentRun
-                           && w.Token == token && w.Status == WorkflowWaitStatuses.Pending, cancellationToken)
+        var waitId = await _db.WorkflowRunWait.AsNoTracking()
+            .Where(w => w.RunId == run.WorkflowRunId && w.WaitKind == WorkflowWaitKinds.AgentRun
+                        && w.Token == token && w.Status == WorkflowWaitStatuses.Pending)
+            .Select(w => (Guid?)w.Id)
+            .FirstOrDefaultAsync(cancellationToken)
             .ConfigureAwait(false);
 
-        if (!hasPendingWait) return;
+        if (waitId is null) return;
 
-        await _resumeService.ResumeAsync(run.WorkflowRunId!.Value, BuildResumePayload(run), cancellationToken).ConfigureAwait(false);
+        await _resumeService.ResumeOnWaitCompletionAsync(run.WorkflowRunId!.Value, waitId.Value, BuildResumePayload(run), cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>Map the durable run + its <c>AgentRunResult</c> onto the flat payload the agent.code node reads on resume.</summary>
