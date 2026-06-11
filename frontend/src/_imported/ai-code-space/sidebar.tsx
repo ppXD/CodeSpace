@@ -35,6 +35,7 @@ export function Sidebar() {
     || /^\/teams\/[^/]+\/(repositories|projects)/.test(pathname);
   const isAgentsActive = /^\/teams\/[^/]+\/agents/.test(pathname);
   const isWorkflowsActive = /^\/teams\/[^/]+\/workflows/.test(pathname);
+  const isModelCredentialsActive = /^\/teams\/[^/]+\/model-credentials/.test(pathname);
 
   // ── Team switcher ────────────────────────────────────────────────────────────
   const [teamOpen, setTeamOpen] = useState(false);
@@ -321,6 +322,20 @@ export function Sidebar() {
           {active && active.workflowCount != null && (
             <span className="sb-nav-badge">{active.workflowCount}</span>
           )}
+        </div>
+        <div
+          className="sb-nav-item"
+          data-active={isModelCredentialsActive}
+          onClick={() => {
+            // Team-scoped, same first-paint guard as the other rows: no active team yet ⇒ no-op until /me resolves.
+            if (active) {
+              navigate({ to: "/teams/$teamSlug/model-credentials", params: { teamSlug: teamToUrlSlug(active) } });
+            }
+          }}
+          title="Model credentials"
+        >
+          <span className="sb-nav-ic"><Ic.Key size={15} /></span>
+          <span className="sb-nav-lbl">Model credentials</span>
         </div>
       </nav>
 
