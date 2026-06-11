@@ -35,7 +35,7 @@ export function Sidebar() {
     || /^\/teams\/[^/]+\/(repositories|projects)/.test(pathname);
   const isAgentsActive = /^\/teams\/[^/]+\/agents/.test(pathname);
   const isWorkflowsActive = /^\/teams\/[^/]+\/workflows/.test(pathname);
-  const isModelCredentialsActive = /^\/teams\/[^/]+\/model-credentials/.test(pathname);
+  const isSettingsActive = /^\/teams\/[^/]+\/settings/.test(pathname);
 
   // ── Team switcher ────────────────────────────────────────────────────────────
   const [teamOpen, setTeamOpen] = useState(false);
@@ -325,17 +325,17 @@ export function Sidebar() {
         </div>
         <div
           className="sb-nav-item"
-          data-active={isModelCredentialsActive}
+          data-active={isSettingsActive}
           onClick={() => {
-            // Team-scoped, same first-paint guard as the other rows: no active team yet ⇒ no-op until /me resolves.
+            // Team-scoped settings (model credentials, providers, …). Same first-paint guard as the other rows.
             if (active) {
-              navigate({ to: "/teams/$teamSlug/model-credentials", params: { teamSlug: teamToUrlSlug(active) } });
+              navigate({ to: "/teams/$teamSlug/settings", params: { teamSlug: teamToUrlSlug(active) } });
             }
           }}
-          title="Model credentials"
+          title="Settings"
         >
-          <span className="sb-nav-ic"><Ic.Key size={15} /></span>
-          <span className="sb-nav-lbl">Model credentials</span>
+          <span className="sb-nav-ic"><Ic.Settings size={15} /></span>
+          <span className="sb-nav-lbl">Settings</span>
         </div>
       </nav>
 
