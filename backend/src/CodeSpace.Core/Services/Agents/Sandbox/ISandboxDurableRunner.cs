@@ -34,14 +34,21 @@ public interface ISandboxDurableRunner
     Task<SandboxHandle> LaunchAsync(SandboxSpec spec, string spoolKey, CancellationToken cancellationToken);
 
     /// <summary>
-    /// Observe a launched run: tail its stdout spool from the start, invoking <paramref name="onStdoutLine"/>
+    /// Observe a launched run: tail its stdout spool from <see cref="SandboxHandle.StdoutOffset"/> (0 = the
+    /// start; a re-attach resumes from the dead observer's checkpoint), invoking <paramref name="onStdoutLine"/>
     /// for each line as it lands, until the process exits (its exit marker appears) or the
     /// <see cref="SandboxHandle.Deadline"/> elapses (the process is terminated → <see cref="SandboxStatus.TimedOut"/>).
     /// Returns the terminal <see cref="SandboxResult"/> (stdout empty — delivered live via the callback;
     /// stderr captured from the spool). Cancelling <paramref name="cancellationToken"/> stops observing and
     /// leaves the process running, throwing <see cref="OperationCanceledException"/> (see the type remarks).
+    ///
+    /// <para><paramref name="onCheckpoint"/> (optional) is invoked with the advanced byte offset after each
+    /// emitted batch (only when it advanced), so the caller can persist it onto the handle and a re-attach
+    /// resumes there. It is called AFTER the batch's lines are delivered, so the persisted offset never runs
+    /// ahead of the events — a re-attach at worst re-emits the last batch (at-least-once; exactly-once is a
+    /// later slice), never loses lines.</para>
     /// </summary>
-    Task<SandboxResult> AttachAsync(SandboxHandle handle, Func<string, CancellationToken, Task> onStdoutLine, CancellationToken cancellationToken);
+    Task<SandboxResult> AttachAsync(SandboxHandle handle, Func<string, CancellationToken, Task> onStdoutLine, CancellationToken cancellationToken, Func<long, CancellationToken, Task>? onCheckpoint = null);
 
     /// <summary>
     /// Snapshot a launched run's liveness from its <paramref name="handle"/> WITHOUT observing it:

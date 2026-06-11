@@ -34,6 +34,18 @@ public interface IAgentRunService
     Task HeartbeatAsync(Guid runId, CancellationToken cancellationToken);
 
     /// <summary>
+    /// Re-claim a still-<see cref="AgentRunStatus.Running"/> run for a fresh observer to re-attach to (its
+    /// durable process is alive but its worker vanished): atomically BUMP the fencing epoch (so a revived
+    /// original observer's epoch-fenced completion loses), INCREMENT the re-attach attempt counter (so the
+    /// reconciler's ceiling can never lag the action — it's written in this same transaction), and stamp a FRESH
+    /// lease + heartbeat (so the run drops out of the reconciler's stale-candidate set until the re-attaching
+    /// worker renews it — no duplicate re-dispatch). Status-guarded CAS like <see cref="CompleteAsync(Guid,AgentRunResult,long,CancellationToken)"/>
+    /// (a pure UPDATE, never a tracked save — so it can't strand a long run on optimistic concurrency). Returns
+    /// whether it won the row (0 rows = no longer Running / another replica won → don't re-dispatch).
+    /// </summary>
+    Task<bool> ReclaimForReattachAsync(Guid runId, CancellationToken cancellationToken);
+
+    /// <summary>
     /// Record the run's durable runner handle (a <c>SandboxHandle</c> as JSON: pid + spool location +
     /// deadline) the instant it's launched, so a restarted backend can re-attach to or recover it from the
     /// spool rather than abandoning it. Idempotent set-based UPDATE (like <see cref="HeartbeatAsync"/>); does
@@ -144,6 +156,27 @@ public sealed class AgentRunService : IAgentRunService, IScopedDependency
                 .SetProperty(r => r.HeartbeatAt, (DateTimeOffset?)now)
                 .SetProperty(r => r.LeaseExpiresAt, (DateTimeOffset?)(now + AgentRunLiveness.LeaseDuration)), cancellationToken)
             .ConfigureAwait(false);
+    }
+
+    public async Task<bool> ReclaimForReattachAsync(Guid runId, CancellationToken cancellationToken)
+    {
+        // Tracking-free status-guarded CAS (like CompleteCoreAsync, NOT MarkRunningAsync's tracked load-save — a
+        // tracked save would attach a stale-xmin entity to the reconciler's shared DbContext and could fail
+        // optimistic concurrency against the executor's concurrent heartbeat). Atomic in-DB increment of the epoch
+        // (the column-expression SetProperty form) fences a revived original observer; the fresh lease + heartbeat
+        // take the run out of the stale sweep until the re-attaching worker keeps renewing it. 0 rows = the run is
+        // no longer Running (another replica reclaimed it, or it already landed terminal) → caller skips dispatch.
+        var now = DateTimeOffset.UtcNow;
+        var reclaimed = await _db.AgentRun
+            .Where(r => r.Id == runId && r.Status == AgentRunStatus.Running)
+            .ExecuteUpdateAsync(s => s
+                .SetProperty(r => r.FenceEpoch, r => r.FenceEpoch + 1)
+                .SetProperty(r => r.ReattachAttempts, r => r.ReattachAttempts + 1)
+                .SetProperty(r => r.HeartbeatAt, (DateTimeOffset?)now)
+                .SetProperty(r => r.LeaseExpiresAt, (DateTimeOffset?)(now + AgentRunLiveness.LeaseDuration)), cancellationToken)
+            .ConfigureAwait(false);
+
+        return reclaimed == 1;
     }
 
     public async Task SetRunnerHandleAsync(Guid runId, string handleJson, CancellationToken cancellationToken)

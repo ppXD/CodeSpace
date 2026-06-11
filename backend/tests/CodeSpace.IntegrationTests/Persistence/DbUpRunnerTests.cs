@@ -57,6 +57,7 @@ public class DbUpRunnerTests
     [InlineData("agent_run", "runner_handle", "0045_agent_run_runner_handle.sql")]         // durable runner handle (pid + spool) for restart re-attach/recovery
     [InlineData("agent_run", "fence_epoch", "0046_agent_run_fence_epoch.sql")]             // monotonic fencing token — completion CAS rejects a reclaimed-then-revived worker
     [InlineData("agent_run", "lease_expires_at", "0047_agent_run_lease.sql")]              // DB-owned lease the worker renews; reconciler reclaims on lapse (ground-truth liveness)
+    [InlineData("agent_run", "reattach_attempts", "0048_agent_run_reattach_attempts.sql")] // reconciler re-attach reclaim count; bounds attempts so an unattachable-but-alive run is abandoned, not reclaimed forever
     public async Task Column_exists_after_migration(string tableName, string columnName, string addedBy)
     {
         var exists = await ColumnExistsAsync(tableName, columnName).ConfigureAwait(false);

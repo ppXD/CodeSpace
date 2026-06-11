@@ -115,15 +115,24 @@ public sealed partial class LocalProcessRunner
         catch { return false; }
     }
 
-    public async Task<SandboxResult> AttachAsync(SandboxHandle handle, Func<string, CancellationToken, Task> onStdoutLine, CancellationToken cancellationToken)
+    public async Task<SandboxResult> AttachAsync(SandboxHandle handle, Func<string, CancellationToken, Task> onStdoutLine, CancellationToken cancellationToken, Func<long, CancellationToken, Task>? onCheckpoint = null)
     {
         var stdoutPath = Path.Combine(handle.SpoolDirectory, StdoutFile);
         var exitPath = Path.Combine(handle.SpoolDirectory, ExitMarkerFile);
-        var offset = 0L;
+
+        // Resume from the handle's checkpoint (0 on a first attach / an older handle) so a re-attach after a
+        // restart picks up where the dead observer stopped instead of re-emitting the whole spool.
+        var offset = handle.StdoutOffset;
 
         while (true)
         {
-            offset = await EmitNewLinesAsync(stdoutPath, offset, onStdoutLine, drainPartial: false, cancellationToken).ConfigureAwait(false);
+            var advanced = await EmitNewLinesAsync(stdoutPath, offset, onStdoutLine, drainPartial: false, cancellationToken).ConfigureAwait(false);
+
+            // Checkpoint AFTER the batch's lines were delivered, only when it advanced — so the persisted offset
+            // never runs ahead of the events (a re-attach at worst re-emits the last batch, never loses lines).
+            if (onCheckpoint is not null && advanced != offset) await onCheckpoint(advanced, cancellationToken).ConfigureAwait(false);
+
+            offset = advanced;
 
             if (TryReadExitCode(exitPath, out var code))
                 return await CompleteFromSpoolAsync(handle, offset, code, onStdoutLine, cancellationToken).ConfigureAwait(false);

@@ -1,3 +1,6 @@
+using System.Security.Cryptography;
+using System.Text;
+
 namespace CodeSpace.Core.Services.Agents;
 
 /// <summary>
@@ -25,6 +28,26 @@ public sealed class SecretRedactor
         _secrets = secrets.Where(s => !string.IsNullOrWhiteSpace(s)).Distinct().OrderByDescending(s => s.Length).ToList();
 
     public bool IsEmpty => _secrets.Count == 0;
+
+    /// <summary>
+    /// A stable, NON-REVERSIBLE fingerprint of this redactor's secret set (null when empty) — a SHA-256 over the
+    /// ordered secrets, never the secrets themselves. Lets a re-attaching observer verify it rebuilt the SAME
+    /// redactor that masked the original run before it re-tails the spool: a mismatch (the credential was deleted
+    /// or rotated since launch) means it could freeze an unmaskable echoed key, so it must NOT re-tail. A SHA-256
+    /// of a long, high-entropy API key is not a practical leak, so persisting the fingerprint (e.g. on the run
+    /// handle) is safe where persisting the key would not be.
+    /// </summary>
+    public string? Fingerprint
+    {
+        get
+        {
+            if (IsEmpty) return null;
+
+            // Domain-separated so the digest can't be confused with any other hash of the same value.
+            var bytes = SHA256.HashData(Encoding.UTF8.GetBytes("codespace-secret-fingerprint-v1\n" + string.Join('\n', _secrets)));
+            return Convert.ToHexString(bytes);
+        }
+    }
 
     public string Redact(string text)
     {

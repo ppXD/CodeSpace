@@ -233,6 +233,95 @@ public class AgentRunServiceTests
         }
     }
 
+    [Fact]
+    public async Task Reclaim_for_reattach_bumps_the_epoch_and_re_leases_a_running_run()
+    {
+        var teamId = await SeedTeamAsync();
+
+        Guid runId;
+        long claimedEpoch;
+        using (var scope = _fixture.BeginScope())
+        {
+            var svc = scope.Resolve<IAgentRunService>();
+            runId = (await svc.CreateAsync(BuildTask(), teamId, null, null, CancellationToken.None)).Id;
+            claimedEpoch = await svc.MarkRunningAsync(runId, CancellationToken.None);
+        }
+
+        // Lapse the lease (the claiming worker stopped renewing it — it died) so the reclaim mirrors the real path.
+        using (var scope = _fixture.BeginScope())
+            await scope.Resolve<CodeSpaceDbContext>().Database
+                .ExecuteSqlInterpolatedAsync($"UPDATE agent_run SET lease_expires_at = {DateTimeOffset.UtcNow.AddMinutes(-1)} WHERE id = {runId}");
+
+        using (var scope = _fixture.BeginScope())
+            (await scope.Resolve<IAgentRunService>().ReclaimForReattachAsync(runId, CancellationToken.None))
+                .ShouldBeTrue("reclaiming a Running run wins the CAS");
+
+        using (var scope = _fixture.BeginScope())
+        {
+            var run = await scope.Resolve<IAgentRunService>().GetAsync(runId, CancellationToken.None);
+            run.Status.ShouldBe(AgentRunStatus.Running, "the reclaim keeps the run Running — it's re-claimed, not completed");
+            run.FenceEpoch.ShouldBe(claimedEpoch + 1, "the reclaim bumps the fence epoch so a revived original observer is fenced out");
+            run.LeaseExpiresAt!.Value.ShouldBeGreaterThan(DateTimeOffset.UtcNow, "the reclaim re-leases into the future so the run drops out of the stale sweep");
+        }
+    }
+
+    [Fact]
+    public async Task Reclaim_for_reattach_is_a_noop_on_a_terminal_run()
+    {
+        var teamId = await SeedTeamAsync();
+
+        Guid runId;
+        long epoch;
+        using (var scope = _fixture.BeginScope())
+        {
+            var svc = scope.Resolve<IAgentRunService>();
+            runId = (await svc.CreateAsync(BuildTask(), teamId, null, null, CancellationToken.None)).Id;
+            epoch = await svc.MarkRunningAsync(runId, CancellationToken.None);
+            await svc.CompleteAsync(runId, new AgentRunResult { Status = AgentRunStatus.Succeeded, ExitReason = "completed" }, epoch, CancellationToken.None);
+        }
+
+        using (var scope = _fixture.BeginScope())
+            (await scope.Resolve<IAgentRunService>().ReclaimForReattachAsync(runId, CancellationToken.None))
+                .ShouldBeFalse("a terminal run can't be reclaimed for re-attach");
+
+        using (var scope = _fixture.BeginScope())
+        {
+            var run = await scope.Resolve<IAgentRunService>().GetAsync(runId, CancellationToken.None);
+            run.Status.ShouldBe(AgentRunStatus.Succeeded);
+            run.FenceEpoch.ShouldBe(epoch, "a lost reclaim leaves the epoch untouched");
+        }
+    }
+
+    [Fact]
+    public async Task Completing_under_the_pre_reclaim_epoch_is_fenced_out_after_a_reattach_reclaim()
+    {
+        // The double-completion fence: a reclaim bumps the epoch for the re-attaching worker, so the ORIGINAL
+        // worker (if it revives and tries to complete under its old epoch) loses — no double-completion.
+        var teamId = await SeedTeamAsync();
+
+        Guid runId;
+        long originalEpoch;
+        using (var scope = _fixture.BeginScope())
+        {
+            var svc = scope.Resolve<IAgentRunService>();
+            runId = (await svc.CreateAsync(BuildTask(), teamId, null, null, CancellationToken.None)).Id;
+            originalEpoch = await svc.MarkRunningAsync(runId, CancellationToken.None);
+        }
+
+        using (var scope = _fixture.BeginScope())
+            (await scope.Resolve<IAgentRunService>().ReclaimForReattachAsync(runId, CancellationToken.None)).ShouldBeTrue();
+
+        using (var scope = _fixture.BeginScope())
+        {
+            var svc = scope.Resolve<IAgentRunService>();
+
+            await Should.ThrowAsync<AgentRunTransitionException>(() =>
+                svc.CompleteAsync(runId, new AgentRunResult { Status = AgentRunStatus.Succeeded, ExitReason = "completed" }, originalEpoch, CancellationToken.None));
+
+            (await svc.GetAsync(runId, CancellationToken.None)).Status.ShouldBe(AgentRunStatus.Running, "the original worker lost the epoch-fenced CAS; the run stays Running for the re-attacher");
+        }
+    }
+
     private static AgentTask BuildTask(string goal = "Fix the failing billing tests") =>
         new() { Goal = goal, Harness = "codex-cli", Model = "gpt-5.3-codex" };
 

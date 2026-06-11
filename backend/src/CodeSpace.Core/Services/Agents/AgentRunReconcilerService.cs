@@ -51,15 +51,25 @@ public sealed class AgentRunReconcilerService : IAgentRunReconcilerService, ISco
         "Recovered by the reconciler from the run's durable spool after its live observer went away (a worker " +
         "crash or backend restart) — the agent had already finished, so its outcome was salvaged rather than lost.";
 
+    /// <summary>Operator-facing breadcrumb appended (best-effort) each time the reconciler re-attaches a stale-but-alive run, so the live timeline shows the gap. Informational only — the ceiling is gated on the hard <c>reattach_attempts</c> column (incremented in the reclaim's own transaction), so a failed breadcrumb can't stall it.</summary>
+    public const string ReattachNote =
+        "Re-attaching to this run after its worker stopped (a backend restart) — its detached process is still " +
+        "alive, so the live timeline resumes from here.";
+
+    /// <summary>Cap on reconciler re-attach attempts for one run: past it, a still-alive-but-unattachable run is abandoned rather than reclaimed forever (the no-livelock guarantee).</summary>
+    public const int MaxReattachAttempts = 3;
+
     private readonly CodeSpaceDbContext _db;
+    private readonly IAgentRunService _runs;
     private readonly IAgentRunCompletionNotifier _notifier;
     private readonly ICodeSpaceBackgroundJobClient _jobs;
     private readonly ISandboxRunnerRegistry _runners;
     private readonly ILogger<AgentRunReconcilerService> _logger;
 
-    public AgentRunReconcilerService(CodeSpaceDbContext db, IAgentRunCompletionNotifier notifier, ICodeSpaceBackgroundJobClient jobs, ISandboxRunnerRegistry runners, ILogger<AgentRunReconcilerService> logger)
+    public AgentRunReconcilerService(CodeSpaceDbContext db, IAgentRunService runs, IAgentRunCompletionNotifier notifier, ICodeSpaceBackgroundJobClient jobs, ISandboxRunnerRegistry runners, ILogger<AgentRunReconcilerService> logger)
     {
         _db = db;
+        _runs = runs;
         _notifier = notifier;
         _jobs = jobs;
         _runners = runners;
@@ -68,14 +78,14 @@ public sealed class AgentRunReconcilerService : IAgentRunReconcilerService, ISco
 
     public async Task<AgentRunReconcileSummary> ReconcileAsync(CancellationToken cancellationToken)
     {
-        var (abandoned, recovered) = await SweepStaleRunningAsync(cancellationToken).ConfigureAwait(false);
+        var (abandoned, recovered, reattached) = await SweepStaleRunningAsync(cancellationToken).ConfigureAwait(false);
 
         var (resumed, reDispatched) = await ReconcilePendingWaitsAsync(cancellationToken).ConfigureAwait(false);
 
-        if (abandoned > 0 || recovered > 0 || resumed > 0 || reDispatched > 0)
-            _logger.LogInformation("AgentRunReconciler: abandoned {Abandoned}, recovered {Recovered} from spool, resumed {Resumed} stalled parent(s), re-dispatched {ReDispatched} stuck queued run(s)", abandoned, recovered, resumed, reDispatched);
+        if (abandoned > 0 || recovered > 0 || reattached > 0 || resumed > 0 || reDispatched > 0)
+            _logger.LogInformation("AgentRunReconciler: abandoned {Abandoned}, recovered {Recovered} from spool, re-attached {Reattached} alive run(s), resumed {Resumed} stalled parent(s), re-dispatched {ReDispatched} stuck queued run(s)", abandoned, recovered, reattached, resumed, reDispatched);
 
-        return new AgentRunReconcileSummary { MarkedAbandonedFromRunning = abandoned, RecoveredFromSpool = recovered, ResumedStalledParents = resumed, ReDispatchedQueued = reDispatched };
+        return new AgentRunReconcileSummary { MarkedAbandonedFromRunning = abandoned, RecoveredFromSpool = recovered, ReattachedStaleRunning = reattached, ResumedStalledParents = resumed, ReDispatchedQueued = reDispatched };
     }
 
     /// <summary>
@@ -88,7 +98,7 @@ public sealed class AgentRunReconcilerService : IAgentRunReconcilerService, ISco
     /// from a stray timing edge. Every transition is the same status-guarded CAS, so a worker landing the run
     /// right now wins.
     /// </summary>
-    private async Task<(int Abandoned, int Recovered)> SweepStaleRunningAsync(CancellationToken cancellationToken)
+    private async Task<(int Abandoned, int Recovered, int Reattached)> SweepStaleRunningAsync(CancellationToken cancellationToken)
     {
         var now = DateTimeOffset.UtcNow;
         var eventThreshold = now - AgentRunLiveness.Window;
@@ -99,25 +109,27 @@ public sealed class AgentRunReconcilerService : IAgentRunReconcilerService, ISco
                         && !_db.AgentRunEvent.Any(e => e.AgentRunId == r.Id && e.OccurredAt >= eventThreshold))
             .OrderBy(r => r.LeaseExpiresAt)
             .Take(BatchSize)
-            .Select(r => new { r.Id, r.RunnerHandleJson })
+            .Select(r => new { r.Id, r.RunnerHandleJson, r.ReattachAttempts })
             .ToListAsync(cancellationToken)
             .ConfigureAwait(false);
 
         var abandoned = 0;
         var recovered = 0;
+        var reattached = 0;
 
         foreach (var c in candidates)
-            switch (await ResolveStaleRunAsync(c.Id, c.RunnerHandleJson, cancellationToken).ConfigureAwait(false))
+            switch (await ResolveStaleRunAsync(c.Id, c.RunnerHandleJson, c.ReattachAttempts, cancellationToken).ConfigureAwait(false))
             {
                 case StaleOutcome.Recovered: recovered++; break;
                 case StaleOutcome.Abandoned: abandoned++; break;
+                case StaleOutcome.Reattached: reattached++; break;
             }
 
-        return (abandoned, recovered);
+        return (abandoned, recovered, reattached);
     }
 
     /// <summary>Decide one stale run's fate: probe its durable handle (recover / leave-alone / abandon), or blind-abandon when there's no usable handle or the probe fails.</summary>
-    private async Task<StaleOutcome> ResolveStaleRunAsync(Guid runId, string? handleJson, CancellationToken cancellationToken)
+    private async Task<StaleOutcome> ResolveStaleRunAsync(Guid runId, string? handleJson, int reattachAttempts, CancellationToken cancellationToken)
     {
         var durable = ResolveDurableRunner(handleJson, out var handle);
 
@@ -135,9 +147,37 @@ public sealed class AgentRunReconcilerService : IAgentRunReconcilerService, ISco
         if (probe.State == SandboxRunState.Gone)
             return await AbandonAsync(runId, cancellationToken).ConfigureAwait(false);
 
-        // Running: the supervised process is still alive — leave it; a future re-attach (Slice 2) finishes it.
-        _logger.LogInformation("AgentRunReconciler: agent run {RunId} is quiet but its durable process is still alive; leaving it for re-attach", runId);
-        return StaleOutcome.LeftAlone;
+        // Running: the supervised process is still alive but its worker vanished — re-attach a fresh observer to
+        // resume the live timeline + complete it, unless it has exhausted its re-attach budget (then abandon, so a
+        // permanently-unattachable-but-alive run still reaches a terminal state).
+        return await ReattachOrAbandonAsync(runId, reattachAttempts, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Re-attach a stale-but-alive Running run: enforce the attempt ceiling (abandon past it), then atomically
+    /// reclaim it (bump the fence epoch + re-lease + INCREMENT the attempt counter, status-guarded) and dispatch
+    /// <see cref="IAgentRunExecutor.ReattachAsync"/> to resume tailing + complete it. The fresh lease drops the
+    /// run out of the candidate set until the re-attaching worker renews it, so it isn't re-dispatched every
+    /// sweep; losing the reclaim CAS (another replica won / it already landed terminal) leaves it alone. The
+    /// ceiling reads <paramref name="reattachAttempts"/> — a HARD column incremented in the reclaim's own
+    /// transaction — so it can never lag the action (unlike a best-effort breadcrumb count would).
+    /// </summary>
+    private async Task<StaleOutcome> ReattachOrAbandonAsync(Guid runId, int reattachAttempts, CancellationToken cancellationToken)
+    {
+        if (reattachAttempts >= MaxReattachAttempts)
+        {
+            _logger.LogWarning("AgentRunReconciler: agent run {RunId} is alive but exhausted {Max} re-attach attempts; abandoning to reach a terminal state", runId, MaxReattachAttempts);
+            return await AbandonAsync(runId, cancellationToken).ConfigureAwait(false);
+        }
+
+        if (!await _runs.ReclaimForReattachAsync(runId, cancellationToken).ConfigureAwait(false))
+            return StaleOutcome.LeftAlone;   // lost the reclaim CAS — another replica won, or it just landed terminal
+
+        await TryAppendEventAsync(runId, AgentEventKind.Warning, ReattachNote, cancellationToken).ConfigureAwait(false);
+        _jobs.Enqueue<IAgentRunExecutor>(e => e.ReattachAsync(runId, CancellationToken.None));
+
+        _logger.LogInformation("AgentRunReconciler: re-attaching agent run {RunId} (its durable process is alive but its worker vanished)", runId);
+        return StaleOutcome.Reattached;
     }
 
     /// <summary>Atomic CAS Running → Failed (the abandon path), pinned to status=Running so a worker completing right now wins. Appends the abandoned-run event when it transitions.</summary>
@@ -301,16 +341,21 @@ public sealed class AgentRunReconcilerService : IAgentRunReconcilerService, ISco
             .ToList();
     }
 
-    /// <summary>Append one reconciler-authored event (abandonment or recovery note) so the live log / replay timeline shows what happened. Best-effort — a logging failure doesn't undo the transition.</summary>
+    /// <summary>Append one reconciler-authored event (abandonment / recovery / re-attach note) so the live log / replay timeline shows what happened. Best-effort — a logging failure doesn't undo the transition.</summary>
     private async Task TryAppendEventAsync(Guid runId, AgentEventKind kind, string text, CancellationToken cancellationToken)
     {
+        var record = new AgentRunEvent { Id = Guid.NewGuid(), AgentRunId = runId, Kind = kind, Text = text };
+
         try
         {
-            _db.AgentRunEvent.Add(new AgentRunEvent { Id = Guid.NewGuid(), AgentRunId = runId, Kind = kind, Text = text });
+            _db.AgentRunEvent.Add(record);
             await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
         }
         catch (Exception ex)
         {
+            // DETACH the failed insert so it doesn't stay tracked on this shared scoped DbContext and get
+            // re-attempted (and re-fail) by every later candidate's SaveChanges in the same sweep batch.
+            _db.Entry(record).State = EntityState.Detached;
             _logger.LogWarning(ex, "AgentRunReconciler: failed to append the {Kind} event for {RunId}", kind, runId);
         }
     }
@@ -327,6 +372,9 @@ internal enum StaleOutcome
 
     /// <summary>Salvaged from its durable spool: the run had already finished while unobserved.</summary>
     Recovered,
+
+    /// <summary>Still alive but its worker vanished: re-claimed (epoch bumped + re-leased) and a re-attach worker dispatched to resume + complete it.</summary>
+    Reattached,
 }
 
 /// <summary>Diagnostic summary of one reconcile sweep. Returned for log surfacing + the recurring-job result.</summary>
@@ -338,11 +386,14 @@ public sealed record AgentRunReconcileSummary
     /// <summary>Running runs salvaged from their durable spool — the agent had already finished while its live observer was gone.</summary>
     public int RecoveredFromSpool { get; init; }
 
+    /// <summary>Still-alive Running runs whose worker vanished — re-claimed + a re-attach worker dispatched to resume the live timeline and complete them.</summary>
+    public int ReattachedStaleRunning { get; init; }
+
     /// <summary>Workflow runs resumed off a terminal agent run that hadn't propagated its completion (crash / failed notify).</summary>
     public int ResumedStalledParents { get; init; }
 
     /// <summary>Stuck-Queued agent runs whose dispatch was lost and were re-enqueued to the executor.</summary>
     public int ReDispatchedQueued { get; init; }
 
-    public int Total => MarkedAbandonedFromRunning + RecoveredFromSpool + ResumedStalledParents + ReDispatchedQueued;
+    public int Total => MarkedAbandonedFromRunning + RecoveredFromSpool + ReattachedStaleRunning + ResumedStalledParents + ReDispatchedQueued;
 }

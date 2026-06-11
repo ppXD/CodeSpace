@@ -72,6 +72,14 @@ public class AgentRun : IEntity<Guid>, IAuditable
     /// </summary>
     public long FenceEpoch { get; set; }
 
+    /// <summary>
+    /// How many times the reconciler has re-claimed this run for a live re-attach (its detached process is
+    /// alive but its worker vanished). Incremented in the SAME atomic UPDATE as each reclaim, so the count can
+    /// never lag the action — once it reaches the reconciler's cap, a still-unattachable-but-alive run is
+    /// abandoned instead of reclaimed forever (the no-livelock guarantee). 0 until first re-attached.
+    /// </summary>
+    public int ReattachAttempts { get; set; }
+
     public DateTimeOffset? StartedAt { get; set; }
     public DateTimeOffset? CompletedAt { get; set; }
 

@@ -24,6 +24,17 @@ namespace CodeSpace.Core.Services.Agents;
 public interface IAgentRunExecutor
 {
     Task ExecuteAsync(Guid agentRunId, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Re-attach to an already-<see cref="AgentRunStatus.Running"/> durable run whose original worker vanished
+    /// (a backend restart) but whose detached supervisor is still alive — dispatched by the reconciler after it
+    /// re-claimed the run (bumped the fence epoch + re-leased). Unlike <see cref="ExecuteAsync"/> it does NOT
+    /// claim or launch: it resumes tailing the persisted spool from the handle's checkpoint offset (no duplicate
+    /// events), folds the result from the streamed events + exit code (NO git diff — the workspace clone didn't
+    /// survive the restart), and completes under the run's current (reclaim-bumped) epoch. A no-op if the run is
+    /// already terminal or carries no durable handle.
+    /// </summary>
+    Task ReattachAsync(Guid agentRunId, CancellationToken cancellationToken);
 }
 
 public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
@@ -138,6 +149,135 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
             heartbeatCts.Cancel();
             await heartbeat.ConfigureAwait(false);
         }
+    }
+
+    public async Task ReattachAsync(Guid agentRunId, CancellationToken cancellationToken)
+    {
+        var run = await _runs.GetAsync(agentRunId, cancellationToken).ConfigureAwait(false);
+
+        if (run.Status != AgentRunStatus.Running) return;   // already landed terminal (completed/recovered) — nothing to re-attach
+
+        if (DeserializeHandle(run.RunnerHandleJson) is not { } handle) return;   // no durable handle — the reconciler marker-recovers it instead
+
+        var task = JsonSerializer.Deserialize<AgentTask>(run.TaskJson, AgentJson.Options)
+                   ?? throw new InvalidOperationException($"AgentRun {agentRunId} has an empty task envelope.");
+
+        var harness = _harnesses.Resolve(task.Harness);
+
+        if (_runners.All.FirstOrDefault(r => r.Kind == handle.Kind) is not ISandboxDurableRunner durable) return;
+
+        // Heartbeat spans the whole re-tail (its own DI scope, like ExecuteAsync) so the lease stays fresh and the
+        // reconciler doesn't reclaim the run out from under this re-attach.
+        using var heartbeatScope = _scopeFactory.CreateScope();
+        var heartbeatRuns = heartbeatScope.ServiceProvider.GetRequiredService<IAgentRunService>();
+        using var heartbeatCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        var heartbeat = HeartbeatLoop.RunAsync(
+            ct => heartbeatRuns.HeartbeatAsync(agentRunId, ct),
+            AgentRunLiveness.HeartbeatInterval,
+            ex => _logger.LogWarning(ex, "Heartbeat ping failed for re-attached agent run {RunId}; will retry next interval", agentRunId),
+            heartbeatCts.Token);
+
+        // Complete under the run's CURRENT epoch — the reconciler's reclaim just bumped it, and its fresh lease
+        // blocks another reclaim for the lease window, so this is stably our epoch. A revived original observer
+        // (stale epoch) loses the completion CAS.
+        var expectedEpoch = run.FenceEpoch;
+
+        try
+        {
+            var result = await ReattachAndFoldAsync(agentRunId, durable, handle, task, run.TeamId, harness, cancellationToken).ConfigureAwait(false);
+
+            if (result is null) return;   // couldn't safely observe (no redactor, still running) — leave Running for a later sweep
+
+            await CompleteAndNotifyAsync(agentRunId, result, expectedEpoch, cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;   // worker torn down again — leave Running for the next re-attach
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Agent run {RunId} failed during re-attach", agentRunId);
+            await CompleteAndNotifyAsync(agentRunId, new AgentRunResult { Status = AgentRunStatus.Failed, ExitReason = "reattach-error", Error = "The agent run could not be re-attached after a restart and was failed." }, expectedEpoch, cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            heartbeatCts.Cancel();
+            await heartbeat.ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>
+    /// Re-tail the durable spool from the handle's checkpoint offset, redacting + appending each parsed event,
+    /// and fold the harness result (events + exit code) — NO git diff (the workspace clone didn't survive the
+    /// restart). The redactor is rebuilt by RE-RESOLVING the credential PURELY for redaction (not injected — the
+    /// CLI already ran): the tail may echo a secret and the append-only log can't be edited, so redaction-on-write
+    /// is the only safe point. The rebuilt redactor's fingerprint MUST match the one stamped on the handle at
+    /// launch — only then have we provably reconstructed the same key that masked the original output. If the
+    /// credential threw, re-resolved to nothing, or rotated (fingerprint mismatch), we complete from the exit
+    /// marker only (NEVER re-tail with an un/mis-keyed redactor) so an echoed secret is never frozen into the log.
+    /// </summary>
+    private async Task<AgentRunResult?> ReattachAndFoldAsync(Guid runId, ISandboxDurableRunner durable, SandboxHandle handle, AgentTask task, Guid teamId, IAgentHarness harness, CancellationToken cancellationToken)
+    {
+        SecretRedactor redactor;
+        try
+        {
+            redactor = (await ResolveModelCredentialEnvAsync(task, teamId, harness, cancellationToken).ConfigureAwait(false)).Redactor;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogWarning(ex, "Agent run {RunId}: could not re-resolve the credential to redact the re-attached tail; completing from the exit marker only to avoid leaking an echoed secret", runId);
+            return await CompleteFromMarkerOnlyAsync(durable, handle, cancellationToken).ConfigureAwait(false);
+        }
+
+        // Re-tail ONLY when the rebuilt redactor provably matches the one that masked the original output — its
+        // fingerprint must equal the one stamped at launch. A mismatch (credential deleted/rotated, team-default
+        // changed; both-null = a run with no injected secret → safe) means we can no longer mask a key the spool
+        // may echo, so complete from the marker only rather than freeze an unmaskable secret into the log.
+        if (redactor.Fingerprint != handle.InjectedKeyFingerprint)
+        {
+            _logger.LogWarning("Agent run {RunId}: the re-resolved credential no longer matches the one injected at launch (deleted/rotated); completing from the exit marker only to avoid leaking an echoed secret", runId);
+            return await CompleteFromMarkerOnlyAsync(durable, handle, cancellationToken).ConfigureAwait(false);
+        }
+
+        var events = new List<AgentEvent>();
+
+        async Task PersistLineAsync(string line)
+        {
+            var normalized = harness.ParseEvent(line);
+            if (normalized is null) return;
+
+            var redacted = Redact(normalized, redactor);
+
+            await _runs.AppendEventAsync(runId, redacted, cancellationToken).ConfigureAwait(false);
+            events.Add(redacted);
+        }
+
+        var sandbox = await durable.AttachAsync(handle, (line, _) => PersistLineAsync(line), cancellationToken, CheckpointHandleOffset(runId, handle)).ConfigureAwait(false);
+
+        return sandbox.Status == SandboxStatus.TimedOut
+            ? new AgentRunResult { Status = AgentRunStatus.TimedOut, ExitReason = "timed-out", Error = "The agent run exceeded its time budget and was terminated." }
+            : harness.BuildResult(events, sandbox.ExitCode);
+    }
+
+    /// <summary>Fallback when the credential can't be re-resolved to redact a re-attached tail: complete from the exit marker WITHOUT re-tailing (so no unredacted line reaches the log) — Succeeded/Failed by the code if it's present, Failed if the process is gone, or null (leave Running for a later sweep) if it's still alive and we can't safely observe it.</summary>
+    private static async Task<AgentRunResult?> CompleteFromMarkerOnlyAsync(ISandboxDurableRunner durable, SandboxHandle handle, CancellationToken cancellationToken)
+    {
+        var probe = await durable.ProbeAsync(handle, cancellationToken).ConfigureAwait(false);
+
+        return probe.State switch
+        {
+            SandboxRunState.Exited => new AgentRunResult { Status = (probe.ExitCode ?? -1) == 0 ? AgentRunStatus.Succeeded : AgentRunStatus.Failed, ExitReason = "reattach-marker-only", Error = (probe.ExitCode ?? -1) == 0 ? null : $"Re-attached run completed from its exit marker only (exit {probe.ExitCode}); its output was not re-folded because the credential was unavailable to redact it." },
+            SandboxRunState.Gone => new AgentRunResult { Status = AgentRunStatus.Failed, ExitReason = "reattach-marker-only", Error = "Re-attached run's process was gone with no exit marker and the credential was unavailable to redact its output." },
+            _ => null,
+        };
+    }
+
+    private static SandboxHandle? DeserializeHandle(string? handleJson)
+    {
+        if (string.IsNullOrWhiteSpace(handleJson)) return null;
+
+        try { return JsonSerializer.Deserialize<SandboxHandle>(handleJson, AgentJson.Options); }
+        catch (JsonException) { return null; }
     }
 
     /// <summary>Land the terminal result (fenced on the claim epoch, so a reclaimed-then-revived worker loses), then fire the completion notifier (which resumes the agent.code node parked on this run). The notifier is best-effort + swallows its own failures, so completion is never masked by a resume error.</summary>
@@ -257,8 +397,10 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         }
 
         // The heartbeat is owned by ExecuteAsync (it spans the whole run, including the completion tail), so
-        // streaming here just emits events — a quiet step's liveness is kept fresh by that outer heartbeat.
-        var sandbox = await RunSandboxAsync(runId, runner, spec, PersistLineAsync, cancellationToken).ConfigureAwait(false);
+        // streaming here just emits events — a quiet step's liveness is kept fresh by that outer heartbeat. The
+        // redactor's fingerprint is stamped onto the durable handle so a re-attach can prove it rebuilt the SAME
+        // key before re-tailing the spool (a rotated/deleted key → marker-only, never an unmaskable leak).
+        var sandbox = await RunSandboxAsync(runId, runner, spec, PersistLineAsync, redactor.Fingerprint, cancellationToken).ConfigureAwait(false);
 
         // Events are already redacted, so a result the harness folds from them (summary / error) is redacted too.
         return sandbox.Status == SandboxStatus.TimedOut
@@ -294,10 +436,10 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     /// live-stream / batch path. The durable path is feature-detected exactly like streaming
     /// (<c>runner is ISandboxDurableRunner</c>), so an unsupporting runner transparently falls back.
     /// </summary>
-    private async Task<SandboxResult> RunSandboxAsync(Guid runId, ISandboxRunner runner, SandboxSpec spec, Func<string, Task> persistLine, CancellationToken cancellationToken)
+    private async Task<SandboxResult> RunSandboxAsync(Guid runId, ISandboxRunner runner, SandboxSpec spec, Func<string, Task> persistLine, string? keyFingerprint, CancellationToken cancellationToken)
     {
         if (DurableRunnerEnabled && runner is ISandboxDurableRunner durable)
-            return await RunDurableAsync(runId, durable, spec, persistLine, cancellationToken).ConfigureAwait(false);
+            return await RunDurableAsync(runId, durable, spec, persistLine, keyFingerprint, cancellationToken).ConfigureAwait(false);
 
         return await RunAndStreamAsync(runner, spec, persistLine, cancellationToken).ConfigureAwait(false);
     }
@@ -308,14 +450,22 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     /// observer dies mid-tail. On a host-shutdown cancel the attach stops observing WITHOUT killing the
     /// process (leaving the run Running for re-attach/recovery); only the spec timeout terminates it.
     /// </summary>
-    private async Task<SandboxResult> RunDurableAsync(Guid runId, ISandboxDurableRunner durable, SandboxSpec spec, Func<string, Task> persistLine, CancellationToken cancellationToken)
+    private async Task<SandboxResult> RunDurableAsync(Guid runId, ISandboxDurableRunner durable, SandboxSpec spec, Func<string, Task> persistLine, string? keyFingerprint, CancellationToken cancellationToken)
     {
-        var handle = await durable.LaunchAsync(spec, runId.ToString("N"), cancellationToken).ConfigureAwait(false);
+        // Stamp the injected-key fingerprint onto the handle at launch so a re-attach can verify it rebuilt the
+        // same redactor before re-tailing (a rotated/deleted credential → fingerprint mismatch → marker-only).
+        var handle = (await durable.LaunchAsync(spec, runId.ToString("N"), cancellationToken).ConfigureAwait(false)) with { InjectedKeyFingerprint = keyFingerprint };
 
         await _runs.SetRunnerHandleAsync(runId, JsonSerializer.Serialize(handle, AgentJson.Options), cancellationToken).ConfigureAwait(false);
 
-        return await durable.AttachAsync(handle, (line, _) => persistLine(line), cancellationToken).ConfigureAwait(false);
+        // Checkpoint the advancing spool offset onto the handle as we tail, so a backend restart mid-run can
+        // re-attach (ReattachAsync) and resume from here instead of re-emitting the whole spool.
+        return await durable.AttachAsync(handle, (line, _) => persistLine(line), cancellationToken, CheckpointHandleOffset(runId, handle)).ConfigureAwait(false);
     }
+
+    /// <summary>The onCheckpoint callback for <see cref="ISandboxDurableRunner.AttachAsync"/>: persist the advanced spool offset onto the run's handle (re-serialising the same handle with the new offset) so a re-attach resumes there. A pure UPDATE via <see cref="IAgentRunService.SetRunnerHandleAsync"/>, never blocking completion.</summary>
+    private Func<long, CancellationToken, Task> CheckpointHandleOffset(Guid runId, SandboxHandle handle) =>
+        (offset, ct) => _runs.SetRunnerHandleAsync(runId, JsonSerializer.Serialize(handle with { StdoutOffset = offset }, AgentJson.Options), ct);
 
     /// <summary>Stream the harness live when the runner supports it (events land as emitted); otherwise run batch and replay captured stdout through the same per-line path.</summary>
     private static async Task<SandboxResult> RunAndStreamAsync(ISandboxRunner runner, SandboxSpec spec, Func<string, Task> persistLine, CancellationToken cancellationToken)
