@@ -73,7 +73,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     {
         var run = await _runs.GetAsync(agentRunId, cancellationToken).ConfigureAwait(false);
 
-        if (!await TryClaimAsync(agentRunId, cancellationToken).ConfigureAwait(false)) return;
+        if (await TryClaimAsync(agentRunId, cancellationToken).ConfigureAwait(false) is not { } claimedEpoch) return;
 
         // One heartbeat spans the ENTIRE execution — streaming AND the post-CLI tail (git-diff capture +
         // completion). The tail used to run un-heartbeated, so a slow capture on a large repo could outlast the
@@ -121,7 +121,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
 
             result = await EnrichWithWorkspaceChangesAsync(agentRunId, result, workspace, cancellationToken).ConfigureAwait(false);
 
-            await CompleteAndNotifyAsync(agentRunId, result, cancellationToken).ConfigureAwait(false);
+            await CompleteAndNotifyAsync(agentRunId, result, claimedEpoch, cancellationToken).ConfigureAwait(false);
         }
         catch (OperationCanceledException)
         {
@@ -131,7 +131,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         catch (Exception ex)
         {
             _logger.LogError(ex, "Agent run {RunId} failed during execution", agentRunId);
-            await CompleteAndNotifyAsync(agentRunId, new AgentRunResult { Status = AgentRunStatus.Failed, ExitReason = "executor-error", Error = redactor.Redact(ex.Message) }, cancellationToken).ConfigureAwait(false);
+            await CompleteAndNotifyAsync(agentRunId, new AgentRunResult { Status = AgentRunStatus.Failed, ExitReason = "executor-error", Error = redactor.Redact(ex.Message) }, claimedEpoch, cancellationToken).ConfigureAwait(false);
         }
         finally
         {
@@ -140,12 +140,12 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         }
     }
 
-    /// <summary>Land the terminal result, then fire the completion notifier (which resumes the agent.code node parked on this run). The notifier is best-effort + swallows its own failures, so completion is never masked by a resume error.</summary>
-    private async Task CompleteAndNotifyAsync(Guid runId, AgentRunResult result, CancellationToken cancellationToken)
+    /// <summary>Land the terminal result (fenced on the claim epoch, so a reclaimed-then-revived worker loses), then fire the completion notifier (which resumes the agent.code node parked on this run). The notifier is best-effort + swallows its own failures, so completion is never masked by a resume error.</summary>
+    private async Task CompleteAndNotifyAsync(Guid runId, AgentRunResult result, long expectedEpoch, CancellationToken cancellationToken)
     {
         try
         {
-            await _runs.CompleteAsync(runId, result, cancellationToken).ConfigureAwait(false);
+            await _runs.CompleteAsync(runId, result, expectedEpoch, cancellationToken).ConfigureAwait(false);
         }
         catch (AgentRunTransitionException ex)
         {
@@ -226,17 +226,17 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     }
 
     /// <summary>Claim the run (Queued → Running). Returns false when it's already Running/terminal — the exactly-once guard that stops a re-claim from re-spawning the harness.</summary>
-    private async Task<bool> TryClaimAsync(Guid runId, CancellationToken cancellationToken)
+    /// <summary>Claim the run (Queued → Running) and return the fencing epoch to complete under, or null when it's already claimed/terminal (the exactly-once guard).</summary>
+    private async Task<long?> TryClaimAsync(Guid runId, CancellationToken cancellationToken)
     {
         try
         {
-            await _runs.MarkRunningAsync(runId, cancellationToken).ConfigureAwait(false);
-            return true;
+            return await _runs.MarkRunningAsync(runId, cancellationToken).ConfigureAwait(false);
         }
         catch (AgentRunTransitionException)
         {
             _logger.LogInformation("Agent run {RunId} already claimed or terminal; skipping duplicate execution", runId);
-            return false;
+            return null;
         }
     }
 

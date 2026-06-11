@@ -16,6 +16,7 @@ public class AgentRunConfiguration : IEntityTypeConfiguration<AgentRun>
         builder.Property(r => r.TaskJson).HasColumnName("task_jsonb").HasColumnType("jsonb");
         builder.Property(r => r.ResultJson).HasColumnName("result_jsonb").HasColumnType("jsonb");
         builder.Property(r => r.RunnerHandleJson).HasColumnName("runner_handle").HasColumnType("jsonb");
+        builder.Property(r => r.FenceEpoch).HasColumnName("fence_epoch");
 
         // Npgsql xmin concurrency token — see WorkflowRunConfiguration for the rationale.
         builder.Property(r => r.Xmin)
