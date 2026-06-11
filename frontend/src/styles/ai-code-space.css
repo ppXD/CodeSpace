@@ -420,6 +420,23 @@
 .acs-root .ct-empty { padding: 64px 24px; text-align: center; color: var(--muted); }
 .acs-root .ct-empty-h { font-size: 15px; font-weight: 600; color: var(--ink); margin-bottom: 4px; }
 
+/* Model-credential cards (Settings → Model credentials) — provider logo + masked key, never the secret. */
+.acs-root .mc-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(264px, 1fr)); gap: 14px; padding: 16px; }
+.acs-root .mc-card { display: flex; flex-direction: column; gap: 12px; padding: 16px; background: var(--panel); border: 1px solid var(--line); border-radius: 12px; transition: border-color .12s ease, box-shadow .12s ease; }
+.acs-root .mc-card:hover { border-color: var(--accent); box-shadow: 0 2px 8px rgba(31,30,29,.06); }
+.acs-root .mc-card-head { display: flex; align-items: center; gap: 10px; }
+.acs-root .mc-logo { display: inline-flex; align-items: center; justify-content: center; width: 38px; height: 38px; border-radius: 10px; flex-shrink: 0; }
+.acs-root .mc-card-id { min-width: 0; flex: 1; }
+.acs-root .mc-card-name { font-size: 14px; font-weight: 600; color: var(--ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.acs-root .mc-card-prov { font-size: 12px; color: var(--muted); margin-top: 1px; }
+.acs-root .mc-card-rows { display: flex; flex-direction: column; gap: 5px; }
+.acs-root .mc-card-row { display: flex; align-items: center; gap: 7px; font-size: 12px; color: var(--muted); min-width: 0; }
+.acs-root .mc-card-row > svg { flex-shrink: 0; }
+.acs-root .mc-card-row > span, .acs-root .mc-card-row > code { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.acs-root .mc-card-row code { font-family: var(--font-mono, ui-monospace, monospace); color: var(--ink-2); }
+.acs-root .mc-card-foot { display: flex; align-items: center; justify-content: flex-end; gap: 4px; margin-top: auto; padding-top: 10px; border-top: 1px solid var(--line); }
+.acs-root .mc-card-foot .btn { height: 26px; padding: 0 10px; font-size: 12px; }
+
 /* ============================================================
  * Repo detail
  * ============================================================ */
