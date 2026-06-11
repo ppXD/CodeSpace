@@ -20,6 +20,13 @@ vi.mock("@/hooks/use-workflows", () => ({
   useWorkflowRun: (runId: string) => useWorkflowRunMock(runId),
 }));
 
+// The embedded child RunDetailView's node rows read each node's agent-run status for their badge; mock the
+// hooks so they render without a QueryClient (these child nodes carry no agent run → no-op).
+vi.mock("@/hooks/use-agents", () => ({
+  useAgentRun: () => ({ data: undefined }),
+  useAgentRunEvents: () => ({ data: [] }),
+}));
+
 function approvalWait(prompt: string): WorkflowRunWaitInfo {
   return { nodeId: "approval", kind: "Approval", token: "tok-1", payload: { prompt } };
 }

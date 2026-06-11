@@ -1,8 +1,10 @@
 import { useState } from "react";
 
 import { Ic } from "@/_imported/ai-code-space/icons";
-import type { WorkflowRunWaitInfo } from "@/api/workflows";
+import { isAgentRunActive, type AgentRunStatus } from "@/api/agents";
+import type { WorkflowRunNodeSummary, WorkflowRunWaitInfo } from "@/api/workflows";
 import { ApiError } from "@/api/request";
+import { useAgentRun } from "@/hooks/use-agents";
 import { useResumeRun, useWorkflowRun } from "@/hooks/use-workflows";
 
 import { AgentRunTimeline } from "./AgentRunTimeline";
@@ -97,59 +99,14 @@ export function RunDetailView({ runId, nested = false, depth = 0, onOpenRun }: {
         ) : (
           <ol className="wf-run-nodes">
             {r.nodes.map((n) => (
-              <li key={`${n.nodeId}:${n.iterationKey}`} className="wf-run-node">
-                <div className="wf-run-node-head">
-                  {/* A flow.subworkflow step carries the child run it spawned: click the id to open
-                      that run full-page, or expand the card below to inspect it inline. */}
-                  {n.childRunId && onOpenRun ? (
-                    <button type="button" className="wf-run-node-id wf-run-node-link" onClick={() => onOpenRun(n.childRunId!)} title="Open the sub-workflow run">
-                      {n.nodeId}
-                      <Ic.ArrowOut size={11} />
-                    </button>
-                  ) : (
-                    <span className="wf-run-node-id">{n.nodeId}</span>
-                  )}
-                  <RunStatusBadge status={n.status} />
-                  {concurrent.has(runNodeKey(n)) && (
-                    <span className="wf-run-node-parallel" title="Ran concurrently with another node (parallel wave)">∥ parallel</span>
-                  )}
-                  {n.startedAt && (
-                    <span className="wf-run-node-time">
-                      {new Date(n.startedAt).toLocaleTimeString()}
-                      {n.completedAt && ` → ${new Date(n.completedAt).toLocaleTimeString()}`}
-                    </span>
-                  )}
-                </div>
-                {n.error && <pre className="wf-json wf-json-err">{n.error}</pre>}
-                {/* A trigger node consumes nothing (Inputs is genuinely {}), so hide the empty
-                    block — the entered values surface under Outputs + NORMALIZED PAYLOAD. */}
-                {hasContent(n.inputs) && (
-                  <details className="wf-run-node-io">
-                    <summary>Inputs</summary>
-                    <JsonView data={n.inputs} />
-                  </details>
-                )}
-                {hasContent(n.outputs) && (
-                  <details className="wf-run-node-io">
-                    <summary>Outputs</summary>
-                    <JsonView data={n.outputs} />
-                  </details>
-                )}
-                {/* The child run for a sub-workflow step — a peer disclosure of Inputs/Outputs (same
-                    marker + indent), collapsed by default so N steps cost no extra polling until
-                    expanded; the embedded view brings its own resume affordance. Suppressed for the
-                    node the run is *currently* suspended on: the SuspendedPanel above already embeds
-                    that same child (open), so showing it here too would double up + double-poll. */}
-                {n.childRunId && n.childRunId !== r.pendingWait?.token && (
-                  <SubworkflowRunDisclosure childRunId={n.childRunId} depth={depth} onOpenRun={onOpenRun} />
-                )}
-                {/* An agent.code step: stream its run's live status + event timeline inline, so you watch
-                    the agent work in real time (and see WHY, not just a static "Suspended"/final status). */}
-                {n.agentRunId && <AgentRunTimeline agentRunId={n.agentRunId} />}
-                {!n.error && !hasContent(n.inputs) && !hasContent(n.outputs) && !n.childRunId && !n.agentRunId && (
-                  <div className="wf-run-node-none">No inputs or outputs recorded.</div>
-                )}
-              </li>
+              <RunNodeRow
+                key={`${n.nodeId}:${n.iterationKey}`}
+                node={n}
+                parallel={concurrent.has(runNodeKey(n))}
+                suppressChildEmbed={n.childRunId === r.pendingWait?.token}
+                depth={depth}
+                onOpenRun={onOpenRun}
+              />
             ))}
           </ol>
         )}
@@ -158,18 +115,107 @@ export function RunDetailView({ runId, nested = false, depth = 0, onOpenRun }: {
   );
 }
 
+/**
+ * One node row in the execution trace. Extracted from the trace map so it can observe its agent run's
+ * LIVE status (via {@link useAgentRun}) and badge accordingly — a hook can't run inside a `.map`.
+ */
+function RunNodeRow({ node: n, parallel, suppressChildEmbed, depth, onOpenRun }: {
+  node: WorkflowRunNodeSummary;
+  parallel: boolean;
+  suppressChildEmbed: boolean;
+  depth: number;
+  onOpenRun?: (runId: string) => void;
+}) {
+  // Shares AgentRunTimeline's query (same key) so the badge can reflect the agent's live status while the
+  // node is parked — React Query dedupes by agentRunId, so no extra fetch; disabled (no fetch) for a
+  // non-agent node, where agentRunId is null.
+  const agentRun = useAgentRun(n.agentRunId ?? undefined);
+  const parked = isParkedOnLiveAgent(n, agentRun.data?.status);
+
+  return (
+    <li className="wf-run-node">
+      <div className="wf-run-node-head">
+        {/* A flow.subworkflow step carries the child run it spawned: click the id to open
+            that run full-page, or expand the card below to inspect it inline. */}
+        {n.childRunId && onOpenRun ? (
+          <button type="button" className="wf-run-node-id wf-run-node-link" onClick={() => onOpenRun(n.childRunId!)} title="Open the sub-workflow run">
+            {n.nodeId}
+            <Ic.ArrowOut size={11} />
+          </button>
+        ) : (
+          <span className="wf-run-node-id">{n.nodeId}</span>
+        )}
+        {/* For an agent.code node, the raw node status is "Suspended" the whole time the agent is actually
+            working (the node parks on its AgentRun wait). Surface the agent run's live status instead so the
+            row reads as active work, not an idle wait; the engine truth stays on hover. */}
+        {parked
+          ? <RunStatusBadge status={agentRun.data!.status} title="Workflow node is parked (Suspended) while its agent runs" />
+          : <RunStatusBadge status={n.status} />}
+        {parallel && (
+          <span className="wf-run-node-parallel" title="Ran concurrently with another node (parallel wave)">∥ parallel</span>
+        )}
+        {n.startedAt && (
+          <span className="wf-run-node-time">
+            {new Date(n.startedAt).toLocaleTimeString()}
+            {n.completedAt && ` → ${new Date(n.completedAt).toLocaleTimeString()}`}
+          </span>
+        )}
+      </div>
+      {n.error && <pre className="wf-json wf-json-err">{n.error}</pre>}
+      {/* A trigger node consumes nothing (Inputs is genuinely {}), so hide the empty
+          block — the entered values surface under Outputs + NORMALIZED PAYLOAD. */}
+      {hasContent(n.inputs) && (
+        <details className="wf-run-node-io">
+          <summary>Inputs</summary>
+          <JsonView data={n.inputs} />
+        </details>
+      )}
+      {hasContent(n.outputs) && (
+        <details className="wf-run-node-io">
+          <summary>Outputs</summary>
+          <JsonView data={n.outputs} />
+        </details>
+      )}
+      {/* The child run for a sub-workflow step — a peer disclosure of Inputs/Outputs (same
+          marker + indent), collapsed by default so N steps cost no extra polling until
+          expanded; the embedded view brings its own resume affordance. Suppressed for the
+          node the run is *currently* suspended on: the SuspendedPanel above already embeds
+          that same child (open), so showing it here too would double up + double-poll. */}
+      {n.childRunId && !suppressChildEmbed && (
+        <SubworkflowRunDisclosure childRunId={n.childRunId} depth={depth} onOpenRun={onOpenRun} />
+      )}
+      {/* An agent.code step: stream its run's live status + event timeline inline, so you watch
+          the agent work in real time (and see WHY, not just a static "Suspended"/final status). */}
+      {n.agentRunId && <AgentRunTimeline agentRunId={n.agentRunId} />}
+      {!n.error && !hasContent(n.inputs) && !hasContent(n.outputs) && !n.childRunId && !n.agentRunId && (
+        <div className="wf-run-node-none">No inputs or outputs recorded.</div>
+      )}
+    </li>
+  );
+}
+
+/**
+ * True when a node is parked (Suspended) on an agent run that is still actively working (Queued/Running) —
+ * the case where we badge the row with the agent's live status instead of the bare "Suspended". A terminal
+ * agent status means the node is about to resume, so we keep the node's own status until it does.
+ */
+function isParkedOnLiveAgent(n: WorkflowRunNodeSummary, agentStatus: AgentRunStatus | undefined): boolean {
+  return n.status === "Suspended" && !!n.agentRunId && isAgentRunActive(agentStatus);
+}
+
 /** Status pill shared across the run-detail view + run lists. */
-export function RunStatusBadge({ status }: { status: string }) {
-  // Enqueued = "claimed by dispatcher, waiting for worker pickup".
+export function RunStatusBadge({ status, title }: { status: string; title?: string }) {
+  // Enqueued = workflow-run "claimed by dispatcher, waiting for worker pickup"; Queued = an agent run not yet
+  // claimed by its worker — both read as a pending-queue tone.
   const tone =
-    status === "Success" ? "ok"
-    : status === "Failure" ? "err"
+    status === "Success" || status === "Succeeded" ? "ok"
+    : status === "Failure" || status === "Failed" || status === "TimedOut" ? "err"
     : status === "Cancelled" || status === "Skipped" ? "muted"
-    : status === "Enqueued" ? "queued"
+    : status === "Enqueued" || status === "Queued" ? "queued"
     : status === "Suspended" ? "suspended"
     : "running";
 
-  return <span className={`wf-status-pill wf-status-${tone}`}>{status}</span>;
+  return <span className={`wf-status-pill wf-status-${tone}`} title={title}>{status}</span>;
 }
 
 /** True when a value is worth a dedicated block — non-null, and not an empty object. */
