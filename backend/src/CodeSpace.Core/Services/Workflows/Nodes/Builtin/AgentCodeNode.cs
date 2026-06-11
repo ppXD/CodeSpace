@@ -48,6 +48,7 @@ public sealed class AgentCodeNode : INodeRuntime
                 "goal":           { "type": "string", "description": "What the agent should do (the prompt). Required unless a persona is selected, in which case it's the task-specific addition to the persona's prompt." },
                 "harness":        { "type": "string", "description": "Agent harness kind, e.g. \"codex-cli\"." },
                 "model":          { "type": "string", "description": "Model id within the harness's catalog. Leave empty to use the persona's model, or the harness default." },
+                "modelCredentialId": { "type": "string", "format": "uuid", "x-selector": "modelCredential", "description": "Model credential the agent authenticates with. Leave empty to use the persona's default, or the team/operator default." },
                 "tools":          { "type": "array", "items": { "type": "string" }, "description": "Tool allow-list the agent is restricted to (e.g. Read, Grep, Bash). Empty = the harness default. Added to (not replacing) the persona's tools; enforced by harnesses that support an allow-list (Claude Code), carried otherwise (Codex restricts via sandbox)." },
                 "runnerKind":     { "type": "string", "description": "Sandbox runner (e.g. \"local\"). Defaults to the deployment default." },
                 "timeoutSeconds": { "type": "integer", "minimum": 1, "description": "Wall-clock cap for the run." },
@@ -88,6 +89,8 @@ public sealed class AgentCodeNode : INodeRuntime
 
         if (!TryReadAgentDefinitionId(context, out var agentDefinitionId)) return Fail("Config 'agentDefinitionId' must be an agent persona id (uuid).");
 
+        if (!TryReadModelCredentialId(context, out var modelCredentialId)) return Fail("Config 'modelCredentialId' must be a model credential id (uuid).");
+
         if (string.IsNullOrWhiteSpace(harness)) return Fail("Config 'harness' is required.");
 
         // A persona supplies the prompt floor (its system prompt), so 'goal' is only required without one.
@@ -102,6 +105,7 @@ public sealed class AgentCodeNode : INodeRuntime
             Harness = harness,
             Model = ReadOptionalString(context.Config, "model"),
             AgentDefinitionId = agentDefinitionId,
+            ModelCredentialId = modelCredentialId,
             Tools = ReadStringArray(context.Config, "tools"),
             RepositoryId = repositoryId,
             RunnerKind = ReadOptionalString(context.Config, "runnerKind"),
@@ -151,6 +155,21 @@ public sealed class AgentCodeNode : INodeRuntime
         if (!Guid.TryParse(raw, out var id)) return false;
 
         agentDefinitionId = id;
+        return true;
+    }
+
+    /// <summary>Read the optional <c>modelCredentialId</c> config (a node-level override of the persona/team default). Absent / empty → null. Present-but-malformed → false (a clean node failure).</summary>
+    private static bool TryReadModelCredentialId(NodeRunContext context, out Guid? modelCredentialId)
+    {
+        modelCredentialId = null;
+
+        var raw = ReadString(context.Config, "modelCredentialId");
+
+        if (string.IsNullOrWhiteSpace(raw)) return true;
+
+        if (!Guid.TryParse(raw, out var id)) return false;
+
+        modelCredentialId = id;
         return true;
     }
 

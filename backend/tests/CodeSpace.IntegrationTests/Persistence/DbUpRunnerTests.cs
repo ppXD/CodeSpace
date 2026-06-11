@@ -53,6 +53,7 @@ public class DbUpRunnerTests
     [InlineData("agent_run_event", "data_json", "0040_agent_run_event.sql")]              // optional structured payload on a normalized agent event
     [InlineData("agent_definition", "raw_frontmatter_jsonb", "0042_agent_definition.sql")] // verbatim imported frontmatter — lossless forward-compat
     [InlineData("model_credential", "encrypted_api_key", "0043_model_credential.sql")]     // the model API key, encrypted at rest (NULL for a keyless provider)
+    [InlineData("agent_definition", "model_credential_id", "0044_agent_definition_model_credential.sql")] // persona's default model-credential reference
     public async Task Column_exists_after_migration(string tableName, string columnName, string addedBy)
     {
         var exists = await ColumnExistsAsync(tableName, columnName).ConfigureAwait(false);

@@ -155,6 +155,41 @@ public class AgentCodeNodeTests
     }
 
     [Fact]
+    public async Task Model_credential_id_node_override_is_carried_onto_the_task_as_a_reference()
+    {
+        var credId = Guid.NewGuid();
+        var config = new Dictionary<string, JsonElement> { ["goal"] = Str("Fix it"), ["harness"] = Str("codex-cli"), ["modelCredentialId"] = Str(credId.ToString()) };
+
+        var result = await new AgentCodeNode().RunAsync(BuildContext(config, resume: null), CancellationToken.None);
+
+        result.Status.ShouldBe(NodeStatus.Suspended);
+        var task = JsonSerializer.Deserialize<AgentTask>(result.SuspendUntil!.Payload, AgentJson.Options)!;
+        task.ModelCredentialId.ShouldBe(credId);
+        // The staged envelope carries only the REFERENCE — never a secret. The key is decrypted + injected at execution.
+        task.Environment.ShouldBeEmpty("staging freezes a credential reference, never the key or any injected env");
+    }
+
+    [Fact]
+    public async Task No_model_credential_id_leaves_the_task_to_fall_back_at_resolve_time()
+    {
+        var result = await new AgentCodeNode().RunAsync(BuildContext(RequiredConfig(), resume: null), CancellationToken.None);
+
+        JsonSerializer.Deserialize<AgentTask>(result.SuspendUntil!.Payload, AgentJson.Options)!.ModelCredentialId
+            .ShouldBeNull("no node override → the resolver fills the persona default, else a team/operator key");
+    }
+
+    [Fact]
+    public async Task Malformed_model_credential_id_fails_the_node()
+    {
+        var config = new Dictionary<string, JsonElement> { ["goal"] = Str("Fix it"), ["harness"] = Str("codex-cli"), ["modelCredentialId"] = Str("not-a-uuid") };
+
+        var result = await new AgentCodeNode().RunAsync(BuildContext(config, resume: null), CancellationToken.None);
+
+        result.Status.ShouldBe(NodeStatus.Failure);
+        result.Error.ShouldContain("modelCredentialId");
+    }
+
+    [Fact]
     public async Task Resumed_success_maps_the_result_onto_outputs()
     {
         var resume = JsonDocument.Parse("""

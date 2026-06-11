@@ -28,6 +28,14 @@ public sealed record AgentTask
     public Guid? AgentDefinitionId { get; init; }
 
     /// <summary>
+    /// Optional <c>ModelCredential</c> this run authenticates with — a REFERENCE (id), never the key, so it's safe to
+    /// freeze into the persisted task. Resolved by the dispatch-time <c>IAgentDefinitionResolver</c> with the precedence
+    /// node-override &gt; persona default &gt; null; the executor decrypts it just-in-time and injects it into the sandbox
+    /// env, never persisting the secret. Null = fall back to a team default / operator-global key at resolve time.
+    /// </summary>
+    public Guid? ModelCredentialId { get; init; }
+
+    /// <summary>
     /// Tool allow-list the harness restricts the agent to — null = the harness's default toolset, empty = no tools,
     /// non-empty = exactly these. A harness that supports allow-lists projects it (Claude Code → <c>--allowed-tools</c>);
     /// one that doesn't (Codex, which restricts via sandbox) carries it without enforcement. Resolved from the persona's

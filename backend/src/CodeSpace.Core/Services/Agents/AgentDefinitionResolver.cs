@@ -44,7 +44,9 @@ public sealed class AgentDefinitionResolver : IAgentDefinitionResolver, IScopedD
 
         var tools = MergeTools(ParseTools(persona.ToolsJson), task.Tools);
 
-        return task with { Goal = goal, Model = model, Tools = tools };
+        var modelCredentialId = ResolveModelCredentialId(task.ModelCredentialId, persona.ModelCredentialId);
+
+        return task with { Goal = goal, Model = model, Tools = tools, ModelCredentialId = modelCredentialId };
     }
 
     private async Task<AgentDefinition> LoadPersonaAsync(Guid id, Guid teamId, CancellationToken cancellationToken) =>
@@ -63,6 +65,9 @@ public sealed class AgentDefinitionResolver : IAgentDefinitionResolver, IScopedD
 
         return prompt + "\n\n" + task;
     }
+
+    /// <summary>Node-pinned credential reference wins, else the persona's default, else null = fall back to a team/operator key at resolve time.</summary>
+    internal static Guid? ResolveModelCredentialId(Guid? nodeRef, Guid? personaRef) => nodeRef ?? personaRef;
 
     /// <summary>Node override (non-blank) wins, else the persona's model, else null = let the harness pick its default.</summary>
     internal static string? ResolveModel(string? nodeModel, string? personaModel) =>

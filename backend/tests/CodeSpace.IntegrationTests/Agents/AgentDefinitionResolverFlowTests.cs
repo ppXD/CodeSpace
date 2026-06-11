@@ -157,6 +157,31 @@ public class AgentDefinitionResolverFlowTests
             .ShouldBeNull("neither persona nor node set tools → null = inherit the harness default");
     }
 
+    [Fact]
+    public async Task Persona_model_credential_fills_in_when_the_node_pins_none()
+    {
+        var teamId = await SeedTeamAsync();
+        var personaCred = Guid.NewGuid();
+        var id = await SeedPersonaAsync(teamId, "You are a reviewer.", model: null, modelCredentialId: personaCred);
+
+        // task.ModelCredentialId is null (node pins none) → the persona's default reference is carried through.
+        (await ResolveAsync(InlineTask(goal: "Review.", model: null, agentDefinitionId: id), teamId)).ModelCredentialId
+            .ShouldBe(personaCred, "no node override → the persona's default model credential");
+    }
+
+    [Fact]
+    public async Task Node_model_credential_override_wins_over_the_persona()
+    {
+        var teamId = await SeedTeamAsync();
+        var personaCred = Guid.NewGuid();
+        var nodeCred = Guid.NewGuid();
+        var id = await SeedPersonaAsync(teamId, "You are a reviewer.", model: null, modelCredentialId: personaCred);
+
+        var task = InlineTask(goal: "Review.", model: null, agentDefinitionId: id) with { ModelCredentialId = nodeCred };
+
+        (await ResolveAsync(task, teamId)).ModelCredentialId.ShouldBe(nodeCred, "a node-pinned credential overrides the persona's default");
+    }
+
     private static AgentTask InlineTask(string goal, string? model, Guid? agentDefinitionId = null) => new()
     {
         Goal = goal,
@@ -171,7 +196,7 @@ public class AgentDefinitionResolverFlowTests
         return await scope.Resolve<IAgentDefinitionResolver>().ResolveAsync(task, teamId, CancellationToken.None);
     }
 
-    private async Task<Guid> SeedPersonaAsync(Guid teamId, string systemPrompt, string? model, string? toolsJson = null)
+    private async Task<Guid> SeedPersonaAsync(Guid teamId, string systemPrompt, string? model, string? toolsJson = null, Guid? modelCredentialId = null)
     {
         using var scope = _fixture.BeginScope();
         var db = scope.Resolve<CodeSpaceDbContext>();
@@ -185,6 +210,7 @@ public class AgentDefinitionResolverFlowTests
             Name = "Persona",
             SystemPrompt = systemPrompt,
             Model = model,
+            ModelCredentialId = modelCredentialId,
             ToolsJson = toolsJson,
             Origin = AgentDefinitionOrigin.Authored,
             CreatedDate = now,

@@ -35,6 +35,9 @@ public class AgentDefinition : IEntity<Guid>, IAuditable
     /// <summary>Model id, or NULL to let the chosen harness/CLI pick its own default (the Model=empty rule). Set only to override.</summary>
     public string? Model { get; set; }
 
+    /// <summary>Default <c>ModelCredential</c> this persona authenticates with — a REFERENCE (id), resolved + decrypted just-in-time at run. NULL → the run falls back to a team default / operator-global key. A node-level override wins over this.</summary>
+    public Guid? ModelCredentialId { get; set; }
+
     /// <summary>Default autonomy level name (guarded / suggest / autonomous); NULL → guarded. Stored as a string so this entity doesn't depend on the Autonomy-track enum; the dial parses it.</summary>
     public string? DefaultAutonomy { get; set; }
 

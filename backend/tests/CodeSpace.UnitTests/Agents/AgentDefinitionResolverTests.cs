@@ -49,6 +49,18 @@ public class AgentDefinitionResolverTests
     }
 
     [Fact]
+    public void ResolveModelCredentialId_prefers_the_node_ref_then_the_persona()
+    {
+        var node = Guid.NewGuid();
+        var persona = Guid.NewGuid();
+
+        AgentDefinitionResolver.ResolveModelCredentialId(node, persona).ShouldBe(node);    // node-pinned override wins
+        AgentDefinitionResolver.ResolveModelCredentialId(null, persona).ShouldBe(persona); // node absent → persona default
+        AgentDefinitionResolver.ResolveModelCredentialId(null, null)
+            .ShouldBeNull("neither side pins one = fall back to a team/operator key at resolve time");
+    }
+
+    [Fact]
     public void MergeTools_unions_persona_and_node_tools_order_stable_and_deduped()
     {
         AgentDefinitionResolver.MergeTools(new[] { "Read", "Grep" }, new[] { "Grep", "Bash" })
