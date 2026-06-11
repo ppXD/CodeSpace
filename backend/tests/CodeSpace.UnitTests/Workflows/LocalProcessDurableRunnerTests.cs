@@ -47,6 +47,38 @@ public sealed class LocalProcessDurableRunnerTests : IDisposable
     }
 
     [Fact]
+    public async Task Probe_treats_a_recycled_pid_as_gone_when_the_recorded_start_time_no_longer_matches()
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        // The PID-reuse guard: across a restart the OS can hand our old pid to an unrelated process. A handle
+        // bearing that pid but a start time that no longer matches the live process is NOT our run.
+        var handle = await LaunchAsync(ContractSpecs.Sleep(10) with { TimeoutSeconds = 30 });
+        handle.ProcessStartTimeUtc.ShouldNotBeNull();
+
+        (await _runner.ProbeAsync(handle, default)).State.ShouldBe(SandboxRunState.Running, "the live supervisor with its matching start time probes Running");
+
+        var recycled = handle with { ProcessStartTimeUtc = handle.ProcessStartTimeUtc!.Value.AddMinutes(-30) };
+        (await _runner.ProbeAsync(recycled, default)).State.ShouldBe(SandboxRunState.Gone, "the same pid with a mismatched recorded start time is a recycled pid, not our run");
+
+        KillTree(handle.ProcessId);
+    }
+
+    [Fact]
+    public async Task An_older_handle_without_a_recorded_start_time_still_probes_running()
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        // Back-compat: a handle persisted before the PID-reuse guard existed has no start time → the guard is
+        // skipped and liveness alone decides, so an in-flight run from an older backend is never wrongly abandoned.
+        var handle = await LaunchAsync(ContractSpecs.Sleep(10) with { TimeoutSeconds = 30 }) with { ProcessStartTimeUtc = null };
+
+        (await _runner.ProbeAsync(handle, default)).State.ShouldBe(SandboxRunState.Running);
+
+        KillTree(handle.ProcessId);
+    }
+
+    [Fact]
     public async Task Attach_streams_lines_in_order_then_completes_success_with_an_exit_marker()
     {
         if (OperatingSystem.IsWindows()) return;
@@ -184,20 +216,34 @@ public sealed class LocalProcessDurableRunnerTests : IDisposable
     }
 
     [Fact]
-    public async Task BuildDurableStartInfo_wraps_the_command_in_a_sh_supervisor_pointing_at_the_spool()
+    public void BuildDurableStartInfo_wraps_the_command_in_a_sh_supervisor_pointing_at_the_spool()
     {
         var info = LocalProcessRunner.BuildDurableStartInfo(
             new SandboxSpec { Command = "mycmd", Args = new[] { "--flag", "value" } }, "/tmp/spool-x", scrub: false);
 
-        info.FileName.ShouldBe("/bin/sh");
-        info.ArgumentList[0].ShouldBe("-c");
-        info.ArgumentList[2].ShouldBe("sh");                       // $0 — the script reads the real command from "$@"
-        info.ArgumentList[3].ShouldBe("mycmd");
-        info.ArgumentList[4].ShouldBe("--flag");
-        info.ArgumentList[5].ShouldBe("value");
+        // On Linux the supervisor is launched under `setsid` (a new session, so it survives a group signal) with
+        // /bin/sh as setsid's first arg; on macOS dev there's no setsid binary, so /bin/sh runs directly. Either
+        // way the `-c <script> sh <command> <args...>` tail is identical — assert from the shared "-c" anchor.
+        if (OperatingSystem.IsLinux())
+        {
+            info.FileName.ShouldBe("setsid");
+            info.ArgumentList[0].ShouldBe("/bin/sh");
+        }
+        else
+        {
+            info.FileName.ShouldBe("/bin/sh");
+        }
+
+        var c = info.ArgumentList.IndexOf("-c");
+        c.ShouldBeGreaterThanOrEqualTo(0, "the supervisor is invoked via sh -c");
+        info.ArgumentList[c + 2].ShouldBe("sh");                       // $0 — the script reads the real command from "$@"
+        info.ArgumentList[c + 3].ShouldBe("mycmd");
+        info.ArgumentList[c + 4].ShouldBe("--flag");
+        info.ArgumentList[c + 5].ShouldBe("value");
         info.Environment["CSP_OUT"].ShouldBe(Path.Combine("/tmp/spool-x", "out.log"));
         info.Environment["CSP_ERR"].ShouldBe(Path.Combine("/tmp/spool-x", "err.log"));
         info.Environment["CSP_EXIT"].ShouldBe(Path.Combine("/tmp/spool-x", "exit"));
+        info.Environment["CSP_PID"].ShouldBe(Path.Combine("/tmp/spool-x", "pid"));
     }
 
     [Fact]
@@ -211,6 +257,7 @@ public sealed class LocalProcessDurableRunnerTests : IDisposable
         info.Environment.ShouldContainKey("CSP_OUT");
         info.Environment.ShouldContainKey("CSP_ERR");
         info.Environment.ShouldContainKey("CSP_EXIT");
+        info.Environment.ShouldContainKey("CSP_PID");
     }
 
     [Theory]

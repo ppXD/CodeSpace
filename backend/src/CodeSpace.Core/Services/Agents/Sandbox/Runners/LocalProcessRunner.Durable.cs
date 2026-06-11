@@ -9,7 +9,12 @@ namespace CodeSpace.Core.Services.Agents.Sandbox.Runners;
 /// the command under a <c>/bin/sh</c> supervisor that redirects its output to on-disk spool files and records
 /// an exit-code marker, then observe the run by TAILING that spool. Decoupling the run's output from a parent
 /// pipe is what lets a restarted backend recover the run from its persisted <see cref="SandboxHandle"/>
-/// instead of losing it. POSIX-only (needs <c>/bin/sh</c>); a non-POSIX host falls back to the streaming path.
+/// instead of losing it. On Linux the supervisor is launched under <c>setsid</c> so it leads its own session
+/// and outlives a graceful-shutdown signal aimed at the API's process group — so the run keeps going for the
+/// reconciler to recover/re-attach. The supervisor self-reports its pid via a pid file because <c>setsid</c>
+/// may exec the shell in place or fork it (depending on whether setsid is a process-group leader), so the
+/// launched process's own id isn't a reliable handle either way. POSIX-only (needs <c>/bin/sh</c>); a
+/// non-POSIX host falls back to the streaming path.
 /// </summary>
 public sealed partial class LocalProcessRunner
 {
@@ -23,6 +28,7 @@ public sealed partial class LocalProcessRunner
     private const string StdoutFile = "out.log";
     private const string StderrFile = "err.log";
     private const string ExitMarkerFile = "exit";
+    private const string PidFile = "pid";
 
     /// <summary>Tail cadence — how often the observer re-reads the spool for new lines / checks the exit marker.</summary>
     private static readonly TimeSpan PollInterval = TimeSpan.FromMilliseconds(250);
@@ -30,15 +36,26 @@ public sealed partial class LocalProcessRunner
     /// <summary>Per-poll read cap so a burst can't allocate unbounded; the next poll continues from the new offset.</summary>
     private const int MaxReadChunk = 8 * 1024 * 1024;
 
-    /// <summary>
-    /// The supervisor script: run the command (the positional <c>"$@"</c>) with stdout→out.log, stderr→err.log,
-    /// then write the exit code to the marker. The marker is written AFTER the command and BEFORE the shell
-    /// exits, so "marker present" reliably means "the command finished with this code" and "shell gone with no
-    /// marker" means it was killed before recording one.
-    /// </summary>
-    private const string SupervisorScript = "\"$@\" >\"$CSP_OUT\" 2>\"$CSP_ERR\"; printf '%s' \"$?\" >\"$CSP_EXIT\"";
+    /// <summary>How long LaunchAsync waits for the supervisor to self-report its pid before treating the launch as failed.</summary>
+    private static readonly TimeSpan PidFileWait = TimeSpan.FromSeconds(2);
 
-    public Task<SandboxHandle> LaunchAsync(SandboxSpec spec, string spoolKey, CancellationToken cancellationToken)
+    /// <summary>Poll cadence while waiting for the supervisor's pid file to appear at launch.</summary>
+    private static readonly TimeSpan PidPollInterval = TimeSpan.FromMilliseconds(20);
+
+    /// <summary>PID-reuse guard tolerance: a live process whose start time is within this many seconds of the recorded one is "the same supervisor"; beyond it, the pid was recycled.</summary>
+    private const int StartTimeToleranceSeconds = 2;
+
+    /// <summary>
+    /// The supervisor script: FIRST record the supervisor's own pid (<c>$$</c>) to the pid file — read back in
+    /// LaunchAsync because under <c>setsid</c> the launched process's own id isn't a reliable handle (setsid
+    /// either execs the shell in place or forks it). Then run the command (the positional <c>"$@"</c>) with
+    /// stdout→out.log, stderr→err.log, and finally write the exit code to the marker. The marker is written
+    /// AFTER the command and BEFORE the shell exits, so "marker present" reliably means "the command finished
+    /// with this code" and "shell gone with no marker" means it was killed before recording one.
+    /// </summary>
+    private const string SupervisorScript = "printf '%s' \"$$\" >\"$CSP_PID\"; \"$@\" >\"$CSP_OUT\" 2>\"$CSP_ERR\"; printf '%s' \"$?\" >\"$CSP_EXIT\"";
+
+    public async Task<SandboxHandle> LaunchAsync(SandboxSpec spec, string spoolKey, CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
 
@@ -48,15 +65,54 @@ public sealed partial class LocalProcessRunner
         using var process = new Process { StartInfo = BuildDurableStartInfo(spec, spoolDir, ParseEnvScrubFlag(Environment.GetEnvironmentVariable(EnvScrubEnvVar))) };
         process.Start();
 
-        var handle = new SandboxHandle
+        // The launched process may be `setsid` (Linux); its own id isn't a reliable handle for the supervisor
+        // (setsid execs the shell in place or forks it). Read the pid the supervisor self-reported, then capture
+        // that process's start time as a PID-reuse guard for later probes.
+        var supervisorPid = await ResolveSupervisorPidAsync(spoolDir, process, cancellationToken).ConfigureAwait(false);
+
+        return new SandboxHandle
         {
             Kind = LocalKind,
-            ProcessId = process.Id,
+            ProcessId = supervisorPid,
+            ProcessStartTimeUtc = TryReadStartTimeUtc(supervisorPid),
             SpoolDirectory = spoolDir,
             Deadline = DateTimeOffset.UtcNow.AddSeconds(spec.TimeoutSeconds),
         };
+    }
 
-        return Task.FromResult(handle);
+    /// <summary>
+    /// Resolve the supervisor's real pid: it writes <c>$$</c> to the pid file as its first action, so poll
+    /// briefly for that (under <c>setsid</c> the launched process's own id isn't a reliable handle). Fall back
+    /// to the launched process's own id only when it's still our shell (the non-detached macOS path); a
+    /// detached launch that never reported a pid is a genuine launch failure and throws so the run lands a
+    /// clean Failed rather than tracking the wrong pid.
+    /// </summary>
+    private static async Task<int> ResolveSupervisorPidAsync(string spoolDir, Process launched, CancellationToken ct)
+    {
+        var pidPath = Path.Combine(spoolDir, PidFile);
+        var deadline = DateTimeOffset.UtcNow + PidFileWait;
+
+        while (DateTimeOffset.UtcNow < deadline)
+        {
+            if (TryReadPid(pidPath, out var pid)) return pid;
+
+            await Task.Delay(PidPollInterval, ct).ConfigureAwait(false);
+        }
+
+        if (TryReadPid(pidPath, out var late)) return late;
+
+        if (!OperatingSystem.IsLinux() && !launched.HasExited) return launched.Id;
+
+        throw new InvalidOperationException($"Durable launch supervisor did not report its pid at '{pidPath}' within {PidFileWait.TotalSeconds:0}s.");
+    }
+
+    /// <summary>Read the supervisor's pid from its pid file: present, parseable, and positive. A missing / mid-write file returns false so the caller keeps polling.</summary>
+    private static bool TryReadPid(string pidPath, out int pid)
+    {
+        pid = 0;
+
+        try { return File.Exists(pidPath) && int.TryParse(File.ReadAllText(pidPath).Trim(), out pid) && pid > 0; }
+        catch { return false; }
     }
 
     public async Task<SandboxResult> AttachAsync(SandboxHandle handle, Func<string, CancellationToken, Task> onStdoutLine, CancellationToken cancellationToken)
@@ -75,7 +131,7 @@ public sealed partial class LocalProcessRunner
             if (DateTimeOffset.UtcNow >= handle.Deadline)
                 return await TimeoutAsync(handle, offset, onStdoutLine, cancellationToken).ConfigureAwait(false);
 
-            if (!IsProcessAlive(handle.ProcessId))
+            if (!IsProcessAlive(handle.ProcessId, handle.ProcessStartTimeUtc))
                 return await VanishedAsync(handle, offset, onStdoutLine, cancellationToken).ConfigureAwait(false);
 
             await Task.Delay(PollInterval, cancellationToken).ConfigureAwait(false);
@@ -88,7 +144,7 @@ public sealed partial class LocalProcessRunner
         if (TryReadExitCode(Path.Combine(handle.SpoolDirectory, ExitMarkerFile), out var code))
             return Task.FromResult(new SandboxProbe { State = SandboxRunState.Exited, ExitCode = code });
 
-        var state = IsProcessAlive(handle.ProcessId) ? SandboxRunState.Running : SandboxRunState.Gone;
+        var state = IsProcessAlive(handle.ProcessId, handle.ProcessStartTimeUtc) ? SandboxRunState.Running : SandboxRunState.Gone;
 
         return Task.FromResult(new SandboxProbe { State = state });
     }
@@ -106,7 +162,7 @@ public sealed partial class LocalProcessRunner
     /// <summary>Deadline elapsed: terminate the process tree, drain what landed, return TimedOut.</summary>
     private async Task<SandboxResult> TimeoutAsync(SandboxHandle handle, long offset, Func<string, CancellationToken, Task> onLine, CancellationToken ct)
     {
-        KillByIdQuietly(handle.ProcessId);
+        KillByIdQuietly(handle.ProcessId, handle.ProcessStartTimeUtc);
 
         await EmitNewLinesAsync(Path.Combine(handle.SpoolDirectory, StdoutFile), offset, onLine, drainPartial: true, ct).ConfigureAwait(false);
 
@@ -144,11 +200,28 @@ public sealed partial class LocalProcessRunner
     {
         var info = new ProcessStartInfo
         {
-            FileName = "/bin/sh",
             UseShellExecute = false,
             CreateNoWindow = true,
             WorkingDirectory = spec.WorkingDirectory ?? string.Empty,
         };
+
+        // On Linux, run the supervisor under `setsid` so it LEADS A NEW SESSION: a graceful-shutdown signal
+        // aimed at the API's process group (a dev terminal's Ctrl-C, systemd KillMode=process) no longer reaches
+        // it, so the run outlives the restart for the reconciler to recover/re-attach. `setsid` either execs the
+        // shell in place or forks it, so the supervisor self-reports its real pid via the pid file rather than us
+        // trusting the launched process's id. (This escapes the session/process group, NOT a cgroup or PID
+        // namespace — systemd KillMode=control-group or a container teardown still stops it; that broader survival
+        // is a heavier, separate concern.) macOS dev has no setsid, so run /bin/sh directly (no detach) — the
+        // streaming + recovery paths are unaffected.
+        if (OperatingSystem.IsLinux())
+        {
+            info.FileName = "setsid";
+            info.ArgumentList.Add("/bin/sh");
+        }
+        else
+        {
+            info.FileName = "/bin/sh";
+        }
 
         info.ArgumentList.Add("-c");
         info.ArgumentList.Add(SupervisorScript);
@@ -162,6 +235,7 @@ public sealed partial class LocalProcessRunner
         info.Environment["CSP_OUT"] = Path.Combine(spoolDir, StdoutFile);
         info.Environment["CSP_ERR"] = Path.Combine(spoolDir, StderrFile);
         info.Environment["CSP_EXIT"] = Path.Combine(spoolDir, ExitMarkerFile);
+        info.Environment["CSP_PID"] = Path.Combine(spoolDir, PidFile);
 
         return info;
     }
@@ -232,16 +306,52 @@ public sealed partial class LocalProcessRunner
         catch { return false; }
     }
 
-    private static bool IsProcessAlive(int pid)
+    /// <summary>
+    /// True when the supervisor pid is still our live run. When a start time was recorded (<paramref
+    /// name="expectedStartUtc"/>), it also guards against PID reuse: a live process whose start time no longer
+    /// matches is a recycled pid — a DIFFERENT process the OS handed our old number — so it's NOT alive for us.
+    /// An unreadable start time skips the guard rather than risk a false "gone" that would abandon a live run.
+    /// </summary>
+    private static bool IsProcessAlive(int pid, DateTimeOffset? expectedStartUtc)
     {
-        try { using var p = Process.GetProcessById(pid); return !p.HasExited; }
-        catch (ArgumentException) { return false; }
-        catch (InvalidOperationException) { return false; }
+        try
+        {
+            using var p = Process.GetProcessById(pid);
+            if (p.HasExited) return false;
+
+            return !StartTimeMismatch(p, expectedStartUtc);
+        }
+        catch (ArgumentException) { return false; }        // no process with that id
+        catch (InvalidOperationException) { return false; } // exited between the lookup and the access
     }
 
-    private static void KillByIdQuietly(int pid)
+    /// <summary>True when a recorded start time disagrees (beyond tolerance) with the live process now holding the pid — i.e. the pid was recycled. False when no start time was recorded or it can't be read (guard skipped).</summary>
+    private static bool StartTimeMismatch(Process p, DateTimeOffset? expectedStartUtc)
     {
-        try { using var p = Process.GetProcessById(pid); if (!p.HasExited) p.Kill(entireProcessTree: true); }
+        if (expectedStartUtc is not { } expected) return false;
+
+        DateTimeOffset actual;
+        try { actual = p.StartTime.ToUniversalTime(); }
+        catch { return false; }
+
+        return Math.Abs((actual - expected).TotalSeconds) > StartTimeToleranceSeconds;
+    }
+
+    /// <summary>Capture a process's start time (UTC) for the PID-reuse guard; null when the host can't report it (the guard is then skipped on probe).</summary>
+    private static DateTimeOffset? TryReadStartTimeUtc(int pid)
+    {
+        try { using var p = Process.GetProcessById(pid); return p.StartTime.ToUniversalTime(); }
+        catch { return null; }
+    }
+
+    /// <summary>Terminate the supervisor's process tree on the timeout path — but only when the pid is still OUR supervisor (the start-time guard), so a recycled pid handed to an unrelated process is never killed by us.</summary>
+    private static void KillByIdQuietly(int pid, DateTimeOffset? expectedStartUtc)
+    {
+        try
+        {
+            using var p = Process.GetProcessById(pid);
+            if (!p.HasExited && !StartTimeMismatch(p, expectedStartUtc)) p.Kill(entireProcessTree: true);
+        }
         catch { /* best-effort: already exited / reaped between the check and the kill */ }
     }
 
