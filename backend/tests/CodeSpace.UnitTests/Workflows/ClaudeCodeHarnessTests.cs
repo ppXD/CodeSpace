@@ -200,6 +200,20 @@ public class ClaudeCodeHarnessTests
     }
 
     [Fact]
+    public void Build_result_surfaces_the_final_summary_as_the_error_when_a_failed_run_has_no_error_event()
+    {
+        // The CLI printed its failure reason as a final message (e.g. a gateway 401) but emitted no
+        // structured Error event — the run must still fail with that reason, not an opaque exit code.
+        var events = new[] { new AgentEvent { Kind = AgentEventKind.FinalSummary, Text = "API Error: 401 Authentication Error" } };
+
+        var result = Harness.BuildResult(events, exitCode: 1);
+
+        result.Status.ShouldBe(AgentRunStatus.Failed);
+        result.Error.ShouldBe("API Error: 401 Authentication Error");
+        result.Summary.ShouldBe("API Error: 401 Authentication Error");
+    }
+
+    [Fact]
     public void Version_env_var_constant_name_is_pinned()
     {
         // Renaming this breaks every air-gapped operator who pinned a private build via env. Hard-pin (Rule 8).
