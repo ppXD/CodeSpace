@@ -23,8 +23,20 @@ export interface AgentDefinitionSummary {
   createdDate: string;
 }
 
+/**
+ * Mirrors backend `HarnessSummary` — one agent harness registered in the engine. `kind` is the wire
+ * value the `agent.code` node stores (e.g. "codex-cli", "claude-code"); `models` seeds the model
+ * field's suggestions for the chosen harness. Deployment-level, so the same set for every team.
+ */
+export interface HarnessSummary {
+  kind: string;
+  version: string;
+  models: string[];
+}
+
 // ─── API client ────────────────────────────────────────────────────────────────
 
 export const agentsApi = {
   listAgentDefinitions: () => fetchJson<AgentDefinitionSummary[]>("/api/agents"),
+  listHarnesses: () => fetchJson<HarnessSummary[]>("/api/agents/harnesses"),
 };

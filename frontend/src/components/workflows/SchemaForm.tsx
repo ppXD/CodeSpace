@@ -6,6 +6,7 @@ import { coerceNumberInput } from "@/lib/inputFieldSchema";
 import type { ScopeSuggestion } from "./scope-introspection";
 import { AgentSelector } from "./selectors/AgentSelector";
 import { ConversationSelector } from "./selectors/ConversationSelector";
+import { HarnessSelector } from "./selectors/HarnessSelector";
 import { ProjectRepositorySelector } from "./selectors/ProjectRepositorySelector";
 import { TriggerRepositoriesSelector } from "./selectors/TriggerRepositoriesSelector";
 import { UserMultiSelector, UserSelector } from "./selectors/UserSelector";
@@ -416,6 +417,13 @@ function renderCustomSelector(key: string, schema: Schema, value: unknown, onCha
     case "agent":
       return (
         <AgentSelector
+          value={typeof value === "string" ? value : ""}
+          onChange={(next) => onChange(next === "" ? undefined : next)}
+        />
+      );
+    case "harness":
+      return (
+        <HarnessSelector
           value={typeof value === "string" ? value : ""}
           onChange={(next) => onChange(next === "" ? undefined : next)}
         />

@@ -14,3 +14,12 @@ export function useAgentDefinitions() {
     queryFn: () => agentsApi.listAgentDefinitions(),
   });
 }
+
+/** The harnesses registered in the engine — deployment-level, so a long staleTime; backs the agent node's harness picker. */
+export function useHarnesses() {
+  return useQuery({
+    queryKey: ["harnesses"],
+    queryFn: () => agentsApi.listHarnesses(),
+    staleTime: 5 * 60 * 1000,
+  });
+}
