@@ -22,8 +22,13 @@ public interface IAgentRunService
     /// <summary>Persist a new run in <see cref="AgentRunStatus.Queued"/> with <paramref name="task"/> as its envelope. workflowRunId/nodeId soft-link the spawning agent.code node (null for a standalone run).</summary>
     Task<AgentRun> CreateAsync(AgentTask task, Guid teamId, Guid? workflowRunId, string? nodeId, CancellationToken cancellationToken);
 
-    /// <summary>Queued → Running; stamps StartedAt + an initial heartbeat. Throws <see cref="AgentRunTransitionException"/> when the run isn't Queued.</summary>
-    Task MarkRunningAsync(Guid runId, CancellationToken cancellationToken);
+    /// <summary>
+    /// Queued → Running; stamps StartedAt + an initial heartbeat, BUMPS the fencing epoch, and returns the new
+    /// epoch — the claimer must complete under it (see the epoch overload of <see cref="CompleteAsync(Guid,AgentRunResult,long,CancellationToken)"/>),
+    /// so a later reclaim (which bumps the epoch again) fences this claimer out. Throws
+    /// <see cref="AgentRunTransitionException"/> when the run isn't Queued.
+    /// </summary>
+    Task<long> MarkRunningAsync(Guid runId, CancellationToken cancellationToken);
 
     /// <summary>Refresh the liveness heartbeat a stuck-run reconciler reads. Idempotent; does not change status.</summary>
     Task HeartbeatAsync(Guid runId, CancellationToken cancellationToken);
@@ -41,6 +46,15 @@ public interface IAgentRunService
 
     /// <summary>Land a terminal result (the target state is <paramref name="result"/>'s Status); stores the result + CompletedAt. Throws when the transition is illegal or the result's status isn't terminal.</summary>
     Task CompleteAsync(Guid runId, AgentRunResult result, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// As <see cref="CompleteAsync(Guid,AgentRunResult,CancellationToken)"/>, but ALSO fenced on
+    /// <paramref name="expectedEpoch"/> — the epoch the caller claimed with (<see cref="MarkRunningAsync"/>).
+    /// The status-guarded CAS additionally requires the run still carries that epoch, so a worker whose run was
+    /// reclaimed (its epoch bumped) and then revived matches 0 rows and throws, rather than double-completing.
+    /// The executor uses this; an unfenced caller (a test, a direct admin path) uses the 3-arg overload.
+    /// </summary>
+    Task CompleteAsync(Guid runId, AgentRunResult result, long expectedEpoch, CancellationToken cancellationToken);
 
     /// <summary>
     /// Read a run by id (untracked) — the SYSTEM/execution path (the executor loads any staged run to run
@@ -97,7 +111,7 @@ public sealed class AgentRunService : IAgentRunService, IScopedDependency
         return run;
     }
 
-    public async Task MarkRunningAsync(Guid runId, CancellationToken cancellationToken)
+    public async Task<long> MarkRunningAsync(Guid runId, CancellationToken cancellationToken)
     {
         var run = await LoadAsync(runId, cancellationToken).ConfigureAwait(false);
 
@@ -106,8 +120,11 @@ public sealed class AgentRunService : IAgentRunService, IScopedDependency
         run.Status = AgentRunStatus.Running;
         run.StartedAt = DateTimeOffset.UtcNow;
         run.HeartbeatAt = DateTimeOffset.UtcNow;
+        run.FenceEpoch += 1;   // bump on claim; the claimer completes under this epoch, so a later reclaim fences it out
 
         await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+
+        return run.FenceEpoch;
     }
 
     public async Task HeartbeatAsync(Guid runId, CancellationToken cancellationToken)
@@ -151,7 +168,13 @@ public sealed class AgentRunService : IAgentRunService, IScopedDependency
         return record;
     }
 
-    public async Task CompleteAsync(Guid runId, AgentRunResult result, CancellationToken cancellationToken)
+    public Task CompleteAsync(Guid runId, AgentRunResult result, CancellationToken cancellationToken) =>
+        CompleteCoreAsync(runId, result, expectedEpoch: null, cancellationToken);
+
+    public Task CompleteAsync(Guid runId, AgentRunResult result, long expectedEpoch, CancellationToken cancellationToken) =>
+        CompleteCoreAsync(runId, result, expectedEpoch, cancellationToken);
+
+    private async Task CompleteCoreAsync(Guid runId, AgentRunResult result, long? expectedEpoch, CancellationToken cancellationToken)
     {
         if (!AgentRunStateMachine.IsTerminal(result.Status))
             throw new AgentRunTransitionException($"AgentRunResult.Status must be terminal — got {result.Status}.");
@@ -163,6 +186,11 @@ public sealed class AgentRunService : IAgentRunService, IScopedDependency
         // reconciler abandoned it. Guarding on STATUS instead means the worker's own liveness pings can't block
         // its completion, while a genuine concurrent transition (the reconciler abandoning this run) still wins
         // the CAS and this side loses cleanly. Mirrors the reconciler's idempotent CAS.
+        //
+        // When expectedEpoch is supplied (the executor's claim epoch), the CAS ALSO requires the run still
+        // carries that epoch — so a worker whose run was reclaimed (the reclaim bumps fence_epoch) and then
+        // revived matches 0 rows and loses, instead of double-completing. A null epoch (an unfenced caller)
+        // keeps the status-only guard.
         var current = await _db.AgentRun.AsNoTracking()
             .Where(r => r.Id == runId)
             .Select(r => (AgentRunStatus?)r.Status)
@@ -175,7 +203,7 @@ public sealed class AgentRunService : IAgentRunService, IScopedDependency
         var resultJson = JsonSerializer.Serialize(result, AgentJson.Options);
 
         var flipped = await _db.AgentRun
-            .Where(r => r.Id == runId && r.Status == current)
+            .Where(r => r.Id == runId && r.Status == current && (expectedEpoch == null || r.FenceEpoch == expectedEpoch))
             .ExecuteUpdateAsync(s => s
                 .SetProperty(r => r.Status, result.Status)
                 .SetProperty(r => r.ResultJson, resultJson)
@@ -184,7 +212,7 @@ public sealed class AgentRunService : IAgentRunService, IScopedDependency
             .ConfigureAwait(false);
 
         if (flipped == 0)
-            throw new AgentRunTransitionException($"AgentRun {runId} was no longer {current} at completion — a concurrent transition won the race.");
+            throw new AgentRunTransitionException($"AgentRun {runId} was no longer {current}{(expectedEpoch is { } e ? $" at epoch {e}" : "")} at completion — a concurrent transition or reclaim won the race.");
 
         _logger.LogInformation("Agent run completed. RunId={RunId} Status={Status}", runId, result.Status);
     }

@@ -56,6 +56,14 @@ public class AgentRun : IEntity<Guid>, IAuditable
     /// </summary>
     public string? RunnerHandleJson { get; set; }
 
+    /// <summary>
+    /// Monotonic fencing token, bumped on every claim (→ Running). A worker remembers the epoch it claimed
+    /// with; completion requires it, so a worker whose run was reclaimed (a lease-expiry reclaim or a restart
+    /// re-claim — each bumps the epoch) and then revived loses its terminal write rather than double-completing.
+    /// Distinct from <see cref="Xmin"/>: xmin guards a single tracked save; this is an explicit CAS condition.
+    /// </summary>
+    public long FenceEpoch { get; set; }
+
     public DateTimeOffset? StartedAt { get; set; }
     public DateTimeOffset? CompletedAt { get; set; }
 

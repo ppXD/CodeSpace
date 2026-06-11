@@ -6,6 +6,7 @@ using CodeSpace.Core.Services.Agents;
 using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Enums;
+using Microsoft.EntityFrameworkCore;
 using Shouldly;
 
 namespace CodeSpace.IntegrationTests.Workflows;
@@ -144,6 +145,61 @@ public class AgentRunServiceTests
         using (var scope = _fixture.BeginScope())
             await Should.ThrowAsync<AgentRunTransitionException>(() =>
                 scope.Resolve<IAgentRunService>().MarkRunningAsync(runId, CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task Claim_returns_the_bumped_fence_epoch_and_completion_under_it_succeeds()
+    {
+        var teamId = await SeedTeamAsync();
+
+        Guid runId;
+        using (var scope = _fixture.BeginScope())
+            runId = (await scope.Resolve<IAgentRunService>().CreateAsync(BuildTask(), teamId, null, null, CancellationToken.None)).Id;
+
+        long epoch;
+        using (var scope = _fixture.BeginScope())
+            epoch = await scope.Resolve<IAgentRunService>().MarkRunningAsync(runId, CancellationToken.None);
+
+        epoch.ShouldBe(1, "the claim bumps the fence epoch from its 0 default");
+
+        using (var scope = _fixture.BeginScope())
+        {
+            var svc = scope.Resolve<IAgentRunService>();
+            await svc.CompleteAsync(runId, new AgentRunResult { Status = AgentRunStatus.Succeeded, ExitReason = "completed" }, epoch, CancellationToken.None);
+            (await svc.GetAsync(runId, CancellationToken.None)).Status.ShouldBe(AgentRunStatus.Succeeded);
+        }
+    }
+
+    [Fact]
+    public async Task Completing_under_a_stale_epoch_is_fenced_out()
+    {
+        // Simulates a reclaim: the run's epoch is bumped (a lease-expiry reclaim / restart re-claim) AFTER this
+        // worker claimed it, so the original worker's epoch-fenced completion must lose — no double-completion.
+        var teamId = await SeedTeamAsync();
+
+        Guid runId;
+        long claimedEpoch;
+        using (var scope = _fixture.BeginScope())
+        {
+            var svc = scope.Resolve<IAgentRunService>();
+            runId = (await svc.CreateAsync(BuildTask(), teamId, null, null, CancellationToken.None)).Id;
+            claimedEpoch = await svc.MarkRunningAsync(runId, CancellationToken.None);
+        }
+
+        using (var scope = _fixture.BeginScope())
+            await scope.Resolve<CodeSpaceDbContext>().Database
+                .ExecuteSqlInterpolatedAsync($"UPDATE agent_run SET fence_epoch = fence_epoch + 1 WHERE id = {runId}");
+
+        using (var scope = _fixture.BeginScope())
+        {
+            var svc = scope.Resolve<IAgentRunService>();
+
+            await Should.ThrowAsync<AgentRunTransitionException>(() =>
+                svc.CompleteAsync(runId, new AgentRunResult { Status = AgentRunStatus.Succeeded, ExitReason = "completed" }, claimedEpoch, CancellationToken.None));
+
+            // The run was NOT completed — it stays Running for the reclaimer to finish (no double-completion).
+            (await svc.GetAsync(runId, CancellationToken.None)).Status.ShouldBe(AgentRunStatus.Running);
+        }
     }
 
     private static AgentTask BuildTask(string goal = "Fix the failing billing tests") =>
