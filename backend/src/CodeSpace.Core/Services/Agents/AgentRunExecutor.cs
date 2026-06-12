@@ -96,6 +96,14 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         // them from a failure message too. None until then — a pre-resolve failure has no secret to leak.
         var redactor = SecretRedactor.None;
 
+        // The workspace clone is disposed in the finally on a TERMINAL exit (success / failure), but DELIBERATELY
+        // left in place when the worker is torn down (OperationCanceledException): the setsid-detached agent is
+        // still running with its cwd inside this clone, so deleting it would pull the directory out from under the
+        // live process and corrupt the run. The re-attach reuses the surviving clone, and the workspace janitor
+        // reaps it by age if no re-attach ever claims it.
+        IWorkspaceHandle? workspace = null;
+        var leaveWorkspaceForReattach = false;
+
         try
         {
             var task = JsonSerializer.Deserialize<AgentTask>(run.TaskJson, AgentJson.Options)
@@ -108,7 +116,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
             // Materialise the workspace (clone the bound repo) before the harness runs. Null = no workspace
             // for this run. The handle's lifetime is the run's — DisposeAsync removes the clone afterwards.
             var workspaceRequest = await _workspaceResolver.ResolveAsync(task, run.TeamId, cancellationToken).ConfigureAwait(false);
-            await using var workspace = workspaceRequest is null ? null : await _workspaces.Resolve(runnerKind).PrepareAsync(workspaceRequest, cancellationToken).ConfigureAwait(false);
+            workspace = workspaceRequest is null ? null : await _workspaces.Resolve(runnerKind).PrepareAsync(workspaceRequest, cancellationToken).ConfigureAwait(false);
 
             // Resolve + decrypt the model credential JUST-IN-TIME (team from the run row, never the envelope) and
             // project it onto the harness's env vars. The secret lives only in this in-memory effectiveTask →
@@ -127,7 +135,9 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         }
         catch (OperationCanceledException)
         {
-            // Worker torn down (pod shutdown): leave the run Running for the reconciler / a re-claim — do NOT complete.
+            // Worker torn down (pod shutdown): leave the run Running for the reconciler / a re-claim — do NOT
+            // complete, and do NOT delete the workspace (the detached agent is still running inside it; see above).
+            leaveWorkspaceForReattach = true;
             throw;
         }
         catch (Exception ex)
@@ -139,6 +149,10 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         {
             heartbeatCts.Cancel();
             await heartbeat.ConfigureAwait(false);
+
+            // Terminal exit (success / failure) owns the clone's cleanup; a worker tear-down leaves it for re-attach.
+            if (workspace is not null && !leaveWorkspaceForReattach)
+                await workspace.DisposeAsync().ConfigureAwait(false);
         }
     }
 
