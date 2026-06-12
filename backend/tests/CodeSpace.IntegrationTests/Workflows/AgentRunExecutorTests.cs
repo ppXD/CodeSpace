@@ -486,6 +486,112 @@ public class AgentRunExecutorTests
         }
     }
 
+    [Fact]
+    public async Task Worker_teardown_mid_run_leaves_the_workspace_for_reattach()
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        // A graceful worker tear-down (cancellation) while the detached agent is still running must NOT delete the
+        // workspace clone out from under it — the agent's cwd lives inside it. The re-attach reuses the surviving
+        // clone; the janitor reaps it by age if no re-attach ever claims it.
+        var teamId = await SeedTeamAsync();
+        var runId = await CreateScriptedRunAsync(teamId);
+
+        var provider = new RecordingWorkspaceProvider();
+        using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(600));
+
+        await Should.ThrowAsync<OperationCanceledException>(() =>
+            ExecuteWithRecordingWorkspaceAsync(runId, new ScriptedHarness("sleep 3"), provider, cts.Token));
+
+        provider.PreparedDirectory.ShouldNotBeNull();
+        provider.Disposed.ShouldBeFalse("a worker tear-down must leave the workspace clone for the re-attach, not delete it under the live agent");
+        Directory.Exists(provider.PreparedDirectory!).ShouldBeTrue("the workspace clone must still be on disk after the tear-down");
+
+        // PR leaves the clone for the janitor in prod; the test removes its own temp dir.
+        try { Directory.Delete(provider.PreparedDirectory!, recursive: true); } catch { /* best-effort */ }
+    }
+
+    [Fact]
+    public async Task Successful_run_disposes_the_workspace()
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        var teamId = await SeedTeamAsync();
+        var runId = await CreateScriptedRunAsync(teamId);
+
+        var provider = new RecordingWorkspaceProvider();
+
+        await ExecuteWithRecordingWorkspaceAsync(runId, new ScriptedHarness("printf 'done\\n'"), provider, CancellationToken.None);
+
+        using var scope = _fixture.BeginScope();
+        (await scope.Resolve<IAgentRunService>().GetAsync(runId, CancellationToken.None)).Status.ShouldBe(AgentRunStatus.Succeeded);
+        provider.Disposed.ShouldBeTrue("a terminal run owns the workspace cleanup");
+        Directory.Exists(provider.PreparedDirectory!).ShouldBeFalse("the clone is removed once the run lands terminal");
+    }
+
+    private async Task ExecuteWithRecordingWorkspaceAsync(Guid runId, IAgentHarness harness, RecordingWorkspaceProvider provider, CancellationToken cancellationToken)
+    {
+        using var scope = _fixture.BeginScope();
+        var executor = new AgentRunExecutor(
+            scope.Resolve<IAgentRunService>(),
+            new AgentHarnessRegistry(new[] { harness }),
+            scope.Resolve<ISandboxRunnerRegistry>(),
+            new FixedWorkspaceResolver(),
+            scope.Resolve<IModelCredentialResolver>(),
+            new SingleProviderRegistry(provider),
+            scope.Resolve<IAgentRunCompletionNotifier>(),
+            scope.Resolve<Microsoft.Extensions.DependencyInjection.IServiceScopeFactory>(),
+            NullLogger<AgentRunExecutor>.Instance);
+
+        await executor.ExecuteAsync(runId, cancellationToken);
+    }
+
+    /// <summary>Always returns a request, so the executor materialises a workspace — the fake provider ignores its contents.</summary>
+    private sealed class FixedWorkspaceResolver : IAgentWorkspaceResolver
+    {
+        public Task<WorkspaceRequest?> ResolveAsync(AgentTask task, Guid teamId, CancellationToken cancellationToken) =>
+            Task.FromResult<WorkspaceRequest?>(new WorkspaceRequest { RepositoryUrl = "file:///dev/null" });
+    }
+
+    private sealed class SingleProviderRegistry : IWorkspaceProviderRegistry
+    {
+        private readonly IWorkspaceProvider _provider;
+        public SingleProviderRegistry(IWorkspaceProvider provider) { _provider = provider; }
+        public IReadOnlyList<IWorkspaceProvider> All => new[] { _provider };
+        public IWorkspaceProvider Resolve(string kind) => _provider;
+    }
+
+    /// <summary>Prepares a REAL temp directory (so on-disk survival is observable) and records whether its handle was disposed.</summary>
+    private sealed class RecordingWorkspaceProvider : IWorkspaceProvider
+    {
+        public string? PreparedDirectory { get; private set; }
+        public bool Disposed { get; private set; }
+
+        public string Kind => LocalProcessRunner.LocalKind;
+
+        public Task<IWorkspaceHandle> PrepareAsync(WorkspaceRequest request, CancellationToken cancellationToken)
+        {
+            var dir = Path.Combine(Path.GetTempPath(), "cs-ws-reattach-test-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(dir);
+            PreparedDirectory = dir;
+            return Task.FromResult<IWorkspaceHandle>(new Handle(this, dir));
+        }
+
+        private sealed class Handle : IWorkspaceHandle
+        {
+            private readonly RecordingWorkspaceProvider _owner;
+            public Handle(RecordingWorkspaceProvider owner, string directory) { _owner = owner; Directory = directory; }
+            public string Directory { get; }
+            public Task<WorkspaceChanges> CaptureChangesAsync(CancellationToken cancellationToken) => Task.FromResult(new WorkspaceChanges { Patch = "" });
+            public ValueTask DisposeAsync()
+            {
+                _owner.Disposed = true;
+                try { if (System.IO.Directory.Exists(Directory)) System.IO.Directory.Delete(Directory, recursive: true); } catch { /* best-effort */ }
+                return ValueTask.CompletedTask;
+            }
+        }
+    }
+
     private async Task ExecuteAsync(Guid runId, IAgentHarness harness)
     {
         using var scope = _fixture.BeginScope();
