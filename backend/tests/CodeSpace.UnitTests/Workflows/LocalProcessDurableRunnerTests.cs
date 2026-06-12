@@ -275,22 +275,16 @@ public sealed class LocalProcessDurableRunnerTests : IDisposable
         c.ShouldBeGreaterThanOrEqualTo(0, "the supervisor is invoked via sh -c");
         info.ArgumentList[c + 2].ShouldBe("sh");                       // $0 — the script reads the real command from "$@"
 
-        // "$@" is either the bare command (unconfined) or a bwrap wrapper terminated by `--` then the command
-        // (when this host can sandbox — e.g. a Linux CI box with bwrap + userns).
+        // "$@" is the command, possibly wrapped by prlimit (resource caps, outermost) and/or bwrap (confinement),
+        // each terminated by `--`. The REAL command is invariably the trailing tokens, however many wrappers precede.
         var afterDollarZero = info.ArgumentList.Skip(c + 3).ToList();
-        if (BubblewrapSandbox.Available is null)
-        {
-            // unconfined: the command runs directly under the supervisor.
-            afterDollarZero.ShouldBe(new[] { "mycmd", "--flag", "value" });
-        }
+        // The real command is always the trailing tokens, after any prlimit/bwrap wrappers.
+        afterDollarZero.TakeLast(3).ShouldBe(new[] { "mycmd", "--flag", "value" });
+
+        if (BubblewrapSandbox.Available is null && ProcessRlimits.Available is null)
+            afterDollarZero.ShouldBe(new[] { "mycmd", "--flag", "value" });   // unconfined + uncapped: command runs directly
         else
-        {
-            afterDollarZero[0].ShouldBe("bwrap", "confined: the command is rewritten as a bwrap invocation");
-            var sep = afterDollarZero.IndexOf("--");
-            sep.ShouldBeGreaterThan(0, "the bwrap args are terminated by --");
-            // the real command follows the bwrap -- terminator.
-            afterDollarZero.Skip(sep + 1).ShouldBe(new[] { "mycmd", "--flag", "value" });
-        }
+            afterDollarZero[0].ShouldNotBe("mycmd", "when this host can sandbox (bwrap) or cap (prlimit), the command is wrapped, not run bare");
 
         info.Environment["CSP_OUT"].ShouldBe(Path.Combine("/tmp/spool-x", "out.log"));
         info.Environment["CSP_ERR"].ShouldBe(Path.Combine("/tmp/spool-x", "err.log"));
@@ -500,6 +494,53 @@ public sealed class LocalProcessDurableRunnerTests : IDisposable
 
         string.Join("\n", lines).ShouldContain("NET-BLOCKED",
             customMessage: "with AllowNetwork=false the sandbox severs egress (loopback only) — no route to the internet / cloud-metadata");
+    }
+
+    // ─── Resource caps (prlimit wrapper — Linux only, gated on ProcessRlimits.Available) ─────────
+    // 🟢 High fidelity (Rule 12): real durable launch (supervisor + prlimit + bwrap + agent), caps read straight
+    // from the kernel (/proc/self/limits) so dash's missing `ulimit -u` can never silently no-op them. Skips on
+    // macOS dev / no prlimit (the unconfined trust mode); the pure prlimit argv build is covered by ProcessRlimitsTests.
+
+    [Fact]
+    public async Task Caps_processes_and_file_size_via_prlimit_inherited_by_the_agent()
+    {
+        if (ProcessRlimits.Available is null) return;
+
+        // Read the effective limits from the kernel — shell-agnostic, and proving prlimit → (bwrap →) agent
+        // inheritance end to end. /proc/self/limits reports RLIMIT_NPROC as a count and RLIMIT_FSIZE in bytes.
+        var spec = new SandboxSpec
+        {
+            Command = "/bin/sh",
+            Args = new[] { "-c", "grep -E 'Max processes|Max file size' /proc/self/limits" },
+            MaxProcesses = 8192,
+            MaxFileSizeMb = 64,
+            WorkingDirectory = TempDir(),
+            TimeoutSeconds = 30,
+        };
+
+        var handle = await LaunchAsync(spec);
+        var (_, lines) = await AttachCollectAsync(handle);
+        var output = string.Join("\n", lines);
+
+        output.ShouldContain("8192", customMessage: "the RLIMIT_NPROC fork-bomb cap reaches the agent");
+        output.ShouldContain((64L * 1024 * 1024).ToString(), customMessage: "the 64 MiB RLIMIT_FSIZE single-file cap reaches the agent");
+    }
+
+    [Fact]
+    public async Task Caps_a_runaway_file_write_so_it_cannot_fill_the_disk()
+    {
+        if (ProcessRlimits.Available is null) return;
+
+        // A 1 MiB single-file cap: writing 5 MiB is truncated by RLIMIT_FSIZE (SIGXFSZ) well under 5 MiB, so a
+        // runaway file (or stdout spool) can't fill the disk.
+        var spec = new SandboxSpec { Command = "/bin/sh", Args = new[] { "-c", "head -c 5242880 /dev/zero > big.dat 2>/dev/null; wc -c < big.dat" }, MaxFileSizeMb = 1, WorkingDirectory = TempDir(), TimeoutSeconds = 30 };
+
+        var handle = await LaunchAsync(spec);
+        var (_, lines) = await AttachCollectAsync(handle);
+
+        var written = long.Parse(string.Join("", lines).Trim());
+        written.ShouldBeGreaterThan(0);
+        written.ShouldBeLessThan(5L * 1024 * 1024, "the 1 MiB RLIMIT_FSIZE cap truncates the 5 MiB write");
     }
 
     private string TempDir()

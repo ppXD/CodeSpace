@@ -39,6 +39,19 @@ public sealed record SandboxSpec
     /// sandboxing runner; a bare-process runner cannot honour it. (A model-API-only egress allowlist is a later slice.)
     /// </summary>
     public bool AllowNetwork { get; init; } = true;
+
+    /// <summary>
+    /// Max processes the command + its descendants may spawn (RLIMIT_NPROC) — a fork-bomb cap so a runaway agent
+    /// cannot exhaust the worker's process table. <c>0</c> = unlimited. Enforced by a sandboxing runner.
+    /// </summary>
+    public int MaxProcesses { get; init; } = 4096;
+
+    /// <summary>
+    /// Max size of any single file the command may write, in MiB (RLIMIT_FSIZE) — bounds a runaway file / log / the
+    /// run's own stdout spool from filling the disk. <c>0</c> = unlimited. Enforced by a sandboxing runner. (A total
+    /// disk quota + memory-RSS cap need cgroup delegation — a later slice.)
+    /// </summary>
+    public int MaxFileSizeMb { get; init; } = 2048;
 }
 
 /// <summary>
