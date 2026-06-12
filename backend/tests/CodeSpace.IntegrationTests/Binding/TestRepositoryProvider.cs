@@ -61,7 +61,7 @@ public sealed class TestRemoteHookStore
     }
 }
 
-public sealed class TestRepositoryProvider : IRepositoryCatalogCapability, ICredentialProbeCapability, IPullRequestReviewCapability, IPullRequestWriteCapability, IRepositoryAccessCapability, IWebhookRegistrationCapability, IWebhookSignatureVerifier, IWebhookEventNormalizer
+public sealed class TestRepositoryProvider : IRepositoryCatalogCapability, ICredentialProbeCapability, IPullRequestReviewCapability, IPullRequestWriteCapability, IIssueWriteCapability, IRepositoryAccessCapability, IWebhookRegistrationCapability, IWebhookSignatureVerifier, IWebhookEventNormalizer
 {
     private readonly TestRemoteHookStore _hookStore;
 
@@ -126,6 +126,21 @@ public sealed class TestRepositoryProvider : IRepositoryCatalogCapability, ICred
     // Echoes the acting credential's id back as the merge result's Sha so a test can assert WHICH credential merged.
     public Task<RemotePullRequestMergeResult> MergePullRequestAsync(ProviderContext context, RemoteRepository repository, int number, MergePullRequestInput input, CancellationToken cancellationToken) =>
         Task.FromResult(new RemotePullRequestMergeResult { Merged = true, Sha = context.Credential.Id.ToString(), Message = $"merged via {input.Method}" });
+
+    // Echoes the acting credential's id back as the created issue's ExternalId so a test can assert WHICH
+    // credential created it (actor vs connection). Reflects the input title/body/labels.
+    public Task<RemoteIssue> CreateIssueAsync(ProviderContext context, RemoteRepository repository, CreateIssueInput input, CancellationToken cancellationToken) =>
+        Task.FromResult(new RemoteIssue
+        {
+            ExternalId = context.Credential.Id.ToString(),
+            Number = 555,
+            Title = input.Title,
+            State = IssueState.Open,
+            Body = input.Body,
+            Labels = input.Labels.Select(n => new LabelRef { Name = n, Color = null }).ToList(),
+            CreatedDate = DateTimeOffset.UnixEpoch,
+            WebUrl = $"https://test.local/{repository.FullPath}/-/issues/555"
+        });
 
     // Deterministic, no shared state: the repo's external id encodes the actor's role, so a test drives any
     // pre-flight outcome by seeding a marked repo (no cross-test toggle). "noaccess" → None (denied at the

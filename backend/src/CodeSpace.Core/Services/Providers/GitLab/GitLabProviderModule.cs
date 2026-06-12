@@ -61,6 +61,9 @@ public sealed class GitLabProviderModule : IProviderModule
         // Opening an MR is a WRITE — `api` only (no narrower scope can create).
         [typeof(IPullRequestWriteCapability)] = ScopeRequirement.Of(GitLabScopes.Api),
 
+        // Creating an issue is a WRITE — `api` only, same as opening an MR.
+        [typeof(IIssueWriteCapability)] = ScopeRequirement.Of(GitLabScopes.Api),
+
         // Browsing source (branches, tree, file content) reads via the API — `api`/`read_api`, the same
         // family as the catalog/PR reads. (`read_repository` is clone-only and can't reach these endpoints.)
         [typeof(IRepositorySourceCapability)] = ScopeRequirement.AnyOf(GitLabScopes.Api, GitLabScopes.ReadApi),
@@ -90,6 +93,9 @@ public sealed class GitLabProviderModule : IProviderModule
         [typeof(IPullRequestReviewCapability)] = RepositoryRole.Write,
 
         // Opening an MR is likewise ≥Developer on GitLab.
-        [typeof(IPullRequestWriteCapability)] = RepositoryRole.Write
+        [typeof(IPullRequestWriteCapability)] = RepositoryRole.Write,
+
+        // Creating an issue is likewise ≥Developer on GitLab.
+        [typeof(IIssueWriteCapability)] = RepositoryRole.Write
     };
 }

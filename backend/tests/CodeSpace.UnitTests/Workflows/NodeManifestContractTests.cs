@@ -195,7 +195,7 @@ public class NodeManifestContractTests
     [Fact]
     public void Git_nodes_all_declare_x_selector_repository_on_repositoryId()
     {
-        var nodes = new INodeRuntime[] { new GitFetchPrDiffNode(null!), new GitFetchPrChecksNode(null!), new GitListPullRequestsNode(null!), new GitOpenPullRequestNode(null!), new GitMergePullRequestNode(null!), new GitPostPrCommentNode(null!), new GitPrReviewNode(null!) };
+        var nodes = new INodeRuntime[] { new GitFetchPrDiffNode(null!), new GitFetchPrChecksNode(null!), new GitListPullRequestsNode(null!), new GitOpenPullRequestNode(null!), new GitMergePullRequestNode(null!), new GitCreateIssueNode(null!), new GitPostPrCommentNode(null!), new GitPrReviewNode(null!) };
         foreach (var node in nodes)
         {
             var prop = GetInputProp(node, "repositoryId");
