@@ -45,13 +45,14 @@ public class BuiltinPluginModuleTests
         module.Name.ShouldBe("Git providers");
         module.Nodes.ShouldContain(typeof(CodeSpace.Core.Services.Workflows.Nodes.Builtin.TriggerPrOpenedNode));
         module.Nodes.ShouldContain(typeof(CodeSpace.Core.Services.Workflows.Nodes.Builtin.TriggerPrUpdatedNode));
+        module.Nodes.ShouldContain(typeof(CodeSpace.Core.Services.Workflows.Nodes.Builtin.TriggerPrMergedNode));
         module.Nodes.ShouldContain(typeof(CodeSpace.Core.Services.Workflows.Nodes.Builtin.GitFetchPrDiffNode));
         module.Nodes.ShouldContain(typeof(CodeSpace.Core.Services.Workflows.Nodes.Builtin.GitFetchPrChecksNode));
         module.Nodes.ShouldContain(typeof(CodeSpace.Core.Services.Workflows.Nodes.Builtin.GitListPullRequestsNode));
         module.Nodes.ShouldContain(typeof(CodeSpace.Core.Services.Workflows.Nodes.Builtin.GitPostPrCommentNode));
         module.Nodes.ShouldContain(typeof(CodeSpace.Core.Services.Workflows.Nodes.Builtin.GitOpenPullRequestNode));
         module.Nodes.ShouldContain(typeof(CodeSpace.Core.Services.Workflows.Nodes.Builtin.GitMergePullRequestNode));
-        module.RunSourceMatchers.Count.ShouldBe(2, "the PR matchers ride with the git plugin so disabling git unloads them together");
+        module.RunSourceMatchers.Count.ShouldBe(3, "the PR matchers (opened / updated / merged) ride with the git plugin so disabling git unloads them together");
     }
 
     [Fact]
@@ -99,6 +100,6 @@ public class BuiltinPluginModuleTests
         };
 
         var total = all.SelectMany(p => p.Nodes).Distinct().Count();
-        total.ShouldBe(26, "26 builtin node types across 5 domain plugins (added the Git plugin's git.merge_pr node) — adjust this number when adding a builtin");
+        total.ShouldBe(27, "27 builtin node types across 5 domain plugins (added the Git plugin's trigger.pr.merged node) — adjust this number when adding a builtin");
     }
 }

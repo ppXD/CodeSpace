@@ -257,7 +257,8 @@ public class GitLabEventNormalizerTests
                 "source_branch": "f", "target_branch": "main",
                 "action": "merge",
                 "merge_commit_sha": "merge-sha"
-              }
+              },
+              "labels": [ { "id": 1, "title": "release" }, { "id": 2, "title": "approved" } ]
             }
             """;
 
@@ -266,6 +267,9 @@ public class GitLabEventNormalizerTests
         result.MergedByExternalId.ShouldBe("2");
         result.MergedByName.ShouldBe("merger");
         result.MergeCommitSha.ShouldBe("merge-sha");
+        // Merged events carry the MR's label snapshot (top-level labels[].title) so the merged
+        // trigger reuses the shared repository + AND-label filter.
+        result.Labels.ShouldBe(new[] { "release", "approved" });
     }
 
     [Fact]

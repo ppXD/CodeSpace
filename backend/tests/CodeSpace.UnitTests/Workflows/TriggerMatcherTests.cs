@@ -33,6 +33,114 @@ public class TriggerMatcherTests
     }
 
     [Fact]
+    public void PrMerged_typekey_pinned()
+    {
+        new PrMergedMatcher().TypeKey.ShouldBe("trigger.pr.merged");
+    }
+
+    [Fact]
+    public void PrMerged_matches_merged_event_with_empty_config()
+    {
+        new PrMergedMatcher().Match(MergedEvent(RepoA), EmptyConfig()).ShouldBeTrue();
+    }
+
+    [Fact]
+    public void PrMerged_rejects_opened_event()
+    {
+        // A matcher must reject events of the wrong TYPE — the dispatcher relies on this for
+        // its empty-config candidate probe (only the right matcher claims the event).
+        new PrMergedMatcher().Match(OpenedEvent(RepoA), EmptyConfig()).ShouldBeFalse();
+    }
+
+    [Fact]
+    public void PrMerged_repository_filter_matches_same_repo()
+    {
+        var config = JsonDocument.Parse($"{{ \"repositoryId\": \"{RepoA}\" }}").RootElement;
+        new PrMergedMatcher().Match(MergedEvent(RepoA), config).ShouldBeTrue();
+    }
+
+    [Fact]
+    public void PrMerged_repository_filter_excludes_other_repos()
+    {
+        var config = JsonDocument.Parse($"{{ \"repositoryId\": \"{RepoB}\" }}").RootElement;
+        new PrMergedMatcher().Match(MergedEvent(RepoA), config).ShouldBeFalse();
+    }
+
+    [Fact]
+    public void PrMerged_payload_contains_expected_fields()
+    {
+        var payload = new PrMergedMatcher().BuildPayload(MergedEvent(RepoA));
+
+        payload.GetProperty("repositoryId").GetString().ShouldBe(RepoA.ToString());
+        payload.GetProperty("number").GetInt32().ShouldBe(99);
+        payload.GetProperty("mergedByName").GetString().ShouldBe("bob");
+        payload.GetProperty("mergeCommitSha").GetString().ShouldBe("abc123");
+    }
+
+    [Fact]
+    public void PrMerged_payload_includes_labels_array()
+    {
+        var ev = new PullRequestMergedEvent
+        {
+            RepositoryId = RepoA,
+            ProviderEventId = "1",
+            OccurredAt = DateTimeOffset.UtcNow,
+            ExternalPullRequestId = "1",
+            Number = 99,
+            MergedByExternalId = "u",
+            MergedByName = "bob",
+            Labels = new[] { "release" }
+        };
+
+        var labelsEl = new PrMergedMatcher().BuildPayload(ev).GetProperty("labels");
+        labelsEl.ValueKind.ShouldBe(JsonValueKind.Array);
+        labelsEl.EnumerateArray().Select(l => l.GetString()).ShouldBe(new[] { "release" });
+    }
+
+    [Fact]
+    public void PrMerged_payload_labels_default_to_empty_array()
+    {
+        var labelsEl = new PrMergedMatcher().BuildPayload(MergedEvent(RepoA)).GetProperty("labels");
+        labelsEl.ValueKind.ShouldBe(JsonValueKind.Array);
+        labelsEl.GetArrayLength().ShouldBe(0);
+    }
+
+    [Fact]
+    public void PrMerged_honours_new_repositories_shape_with_labels_AND_filter()
+    {
+        // The merged matcher delegates to the same shared filter — parity check that the
+        // repo + AND-label semantics apply identically (e.g. "deploy when a PR labelled
+        // 'release' AND 'approved' merges").
+        var ev = MergedWithLabels(RepoA, "release", "approved", "extra");
+        var config = ParseConfig($$"""{ "repositories": [{ "repositoryId": "{{RepoA}}", "labels": ["release", "approved"] }] }""");
+
+        new PrMergedMatcher().Match(ev, config).ShouldBeTrue();
+    }
+
+    [Fact]
+    public void PrMerged_new_shape_rejects_when_a_required_label_is_missing()
+    {
+        var ev = MergedWithLabels(RepoA, "release");
+        var config = ParseConfig($$"""{ "repositories": [{ "repositoryId": "{{RepoA}}", "labels": ["release", "approved"] }] }""");
+
+        new PrMergedMatcher().Match(ev, config).ShouldBeFalse();
+    }
+
+    [Fact]
+    public void PrMerged_OutputSchema_lists_exactly_the_keys_BuildPayload_emits()
+    {
+        var payload = new PrMergedMatcher().BuildPayload(MergedWithLabels(RepoA, "release"));
+
+        var payloadKeys = payload.EnumerateObject().Select(p => p.Name).OrderBy(s => s).ToList();
+        var schemaKeys = ExtractSchemaPropertyNames(new TriggerPrMergedNode().Manifest.OutputSchema).OrderBy(s => s).ToList();
+
+        payloadKeys.ShouldBe(schemaKeys,
+            customMessage:
+                "TriggerPrMergedNode.OutputSchema is out of sync with PrMergedMatcher.BuildPayload. " +
+                "See PrOpened_OutputSchema_lists_exactly_the_keys_BuildPayload_emits for the failure mode and fix recipe.");
+    }
+
+    [Fact]
     public void PrOpened_matches_open_event_with_empty_config()
     {
         var ev = OpenedEvent(RepoA);
@@ -617,6 +725,31 @@ public class TriggerMatcherTests
         AuthorExternalId = "u1",
         AuthorName = "alice",
         WebUrl = "https://example/1",
+        Labels = labels
+    };
+
+    private static PullRequestMergedEvent MergedEvent(Guid repositoryId) => new()
+    {
+        RepositoryId = repositoryId,
+        ProviderEventId = "1",
+        OccurredAt = DateTimeOffset.UtcNow,
+        ExternalPullRequestId = "1",
+        Number = 99,
+        MergedByExternalId = "u2",
+        MergedByName = "bob",
+        MergeCommitSha = "abc123"
+    };
+
+    private static PullRequestMergedEvent MergedWithLabels(Guid repositoryId, params string[] labels) => new()
+    {
+        RepositoryId = repositoryId,
+        ProviderEventId = "1",
+        OccurredAt = DateTimeOffset.UtcNow,
+        ExternalPullRequestId = "1",
+        Number = 99,
+        MergedByExternalId = "u2",
+        MergedByName = "bob",
+        MergeCommitSha = "abc123",
         Labels = labels
     };
 

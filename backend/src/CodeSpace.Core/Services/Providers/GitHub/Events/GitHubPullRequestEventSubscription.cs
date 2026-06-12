@@ -115,7 +115,8 @@ public sealed class GitHubPullRequestEventSubscription : IProviderEventSubscript
             Number = pr.GetProperty("number").GetInt32(),
             MergedByExternalId = sender.GetProperty("id").GetRawText(),
             MergedByName = sender.GetProperty("login").GetString()!,
-            MergeCommitSha = pr.TryGetProperty("merge_commit_sha", out var sha) && sha.ValueKind != JsonValueKind.Null ? sha.GetString() : null
+            MergeCommitSha = pr.TryGetProperty("merge_commit_sha", out var sha) && sha.ValueKind != JsonValueKind.Null ? sha.GetString() : null,
+            Labels = ExtractLabels(pr)
         };
     }
 

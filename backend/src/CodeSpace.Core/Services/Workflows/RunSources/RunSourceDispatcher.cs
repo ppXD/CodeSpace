@@ -35,6 +35,7 @@ namespace CodeSpace.Core.Services.Workflows.RunSources;
 public sealed class RunSourceDispatcher :
     INotificationHandler<PullRequestOpenedEvent>,
     INotificationHandler<PullRequestSynchronizedEvent>,
+    INotificationHandler<PullRequestMergedEvent>,
     IScopedDependency
 {
     private readonly CodeSpaceDbContext _db;
@@ -60,6 +61,9 @@ public sealed class RunSourceDispatcher :
         DispatchAsync(notification, cancellationToken);
 
     public Task Handle(PullRequestSynchronizedEvent notification, CancellationToken cancellationToken) =>
+        DispatchAsync(notification, cancellationToken);
+
+    public Task Handle(PullRequestMergedEvent notification, CancellationToken cancellationToken) =>
         DispatchAsync(notification, cancellationToken);
 
     private async Task DispatchAsync(NormalizedEvent normalizedEvent, CancellationToken cancellationToken)

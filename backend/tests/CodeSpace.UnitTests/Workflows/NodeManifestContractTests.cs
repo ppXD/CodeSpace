@@ -22,6 +22,7 @@ public class NodeManifestContractTests
         // git.* + llm.* take service deps via constructor, so contract-test them separately.
         yield return new object[] { new TriggerPrOpenedNode() };
         yield return new object[] { new TriggerPrUpdatedNode() };
+        yield return new object[] { new TriggerPrMergedNode() };
         yield return new object[] { new TriggerManualNode() };
         yield return new object[] { new TerminalNode() };
     }
@@ -55,6 +56,7 @@ public class NodeManifestContractTests
     {
         new TriggerPrOpenedNode().Manifest.Kind.ShouldBe(NodeKind.Trigger);
         new TriggerPrUpdatedNode().Manifest.Kind.ShouldBe(NodeKind.Trigger);
+        new TriggerPrMergedNode().Manifest.Kind.ShouldBe(NodeKind.Trigger);
         new TriggerManualNode().Manifest.Kind.ShouldBe(NodeKind.Trigger);
     }
 
@@ -72,6 +74,8 @@ public class NodeManifestContractTests
         new TriggerPrOpenedNode().Manifest.IsManual.ShouldBeFalse(
             "event triggers subscribe to webhooks and MUST keep IsManual=false so deriveActivations still emits their activation");
         new TriggerPrUpdatedNode().Manifest.IsManual.ShouldBeFalse(
+            "event triggers subscribe to webhooks and MUST keep IsManual=false so deriveActivations still emits their activation");
+        new TriggerPrMergedNode().Manifest.IsManual.ShouldBeFalse(
             "event triggers subscribe to webhooks and MUST keep IsManual=false so deriveActivations still emits their activation");
     }
 
@@ -299,17 +303,21 @@ public class NodeManifestContractTests
             "builtin.terminal must use Category='Logic' to group with the other flow/logic nodes in the palette; 'Flow' leaves it as a lone section");
     }
 
-    // PR-trigger schema dedup: both triggers must use the SAME serialised ConfigSchema JSON string.
-    // If either node drifts (e.g. someone copy-edits one description and forgets the other), this
+    // PR-trigger schema dedup: every PR trigger must use the SAME serialised ConfigSchema JSON string.
+    // If any node drifts (e.g. someone copy-edits one description and forgets the others), this
     // test fails — preventing a subtle activation-model regression where one trigger has different
-    // filter semantics from the other.
+    // filter semantics from the rest.
     [Fact]
     public void Pr_trigger_nodes_share_identical_ConfigSchema()
     {
         var opened = new TriggerPrOpenedNode().Manifest.ConfigSchema.GetRawText();
         var updated = new TriggerPrUpdatedNode().Manifest.ConfigSchema.GetRawText();
-        opened.ShouldBe(updated,
+        var merged = new TriggerPrMergedNode().Manifest.ConfigSchema.GetRawText();
+        updated.ShouldBe(opened,
             "trigger.pr.opened and trigger.pr.updated must use the same ConfigSchema (PrTriggerSchemas.RepositoriesConfigSchemaJson); " +
             "drift in repo-filter semantics between the two triggers is a silent activation regression");
+        merged.ShouldBe(opened,
+            "trigger.pr.merged must use the same ConfigSchema (PrTriggerSchemas.RepositoriesConfigSchemaJson) as the other PR triggers; " +
+            "drift in repo-filter semantics is a silent activation regression");
     }
 }

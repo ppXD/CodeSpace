@@ -17,6 +17,7 @@ public sealed class GitProvidersPlugin : IPluginModule
     {
         typeof(TriggerPrOpenedNode),
         typeof(TriggerPrUpdatedNode),
+        typeof(TriggerPrMergedNode),
         typeof(GitFetchPrDiffNode),
         typeof(GitFetchPrChecksNode),
         typeof(GitListPullRequestsNode),
@@ -30,6 +31,7 @@ public sealed class GitProvidersPlugin : IPluginModule
     {
         typeof(PrOpenedMatcher),
         typeof(PrUpdatedMatcher),
+        typeof(PrMergedMatcher),
     };
 
     public IReadOnlyList<Type> AuxiliaryServices { get; } = Array.Empty<Type>();
