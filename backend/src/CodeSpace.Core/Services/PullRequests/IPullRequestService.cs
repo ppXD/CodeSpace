@@ -42,4 +42,15 @@ public interface IPullRequestService
     /// (mapped to <c>actor_identity_required</c>). Null = use the connection credential (unchanged).</para>
     /// </summary>
     Task<RemotePullRequestReview> SubmitReviewAsync(Guid repositoryId, int number, PullRequestReviewVerdict verdict, string? body, Guid? actorUserId, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// OPEN a pull/merge request between two existing branches via the provider's
+    /// <c>IPullRequestWriteCapability</c>. Does the full preflight (repo lookup, credential null-check,
+    /// write-scope + write-role check) then creates the request, returning the created
+    /// <see cref="RemotePullRequest"/>. Throws <see cref="InvalidOperationException"/> (400) for a missing
+    /// repo / title / branch, on insufficient write scope (422), or when the branches/repo are rejected by
+    /// the provider (mapped from its 4xx). <paramref name="actorUserId"/> opts into per-user attribution
+    /// (Model B) exactly like <see cref="SubmitReviewAsync"/>.
+    /// </summary>
+    Task<RemotePullRequest> OpenPullRequestAsync(Guid repositoryId, OpenPullRequestInput input, Guid? actorUserId, CancellationToken cancellationToken);
 }

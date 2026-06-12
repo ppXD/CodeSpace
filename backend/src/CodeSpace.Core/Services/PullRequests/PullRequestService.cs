@@ -99,6 +99,29 @@ public sealed class PullRequestService : IPullRequestService, IScopedDependency
         return await reviewCap.SubmitReviewAsync(context, remote, number, verdict, body, cancellationToken).ConfigureAwait(false);
     }
 
+    public async Task<RemotePullRequest> OpenPullRequestAsync(Guid repositoryId, OpenPullRequestInput input, Guid? actorUserId, CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(input.Title)) throw new InvalidOperationException("A pull request requires a title.");
+        if (string.IsNullOrWhiteSpace(input.SourceBranch) || string.IsNullOrWhiteSpace(input.TargetBranch))
+            throw new InvalidOperationException("A pull request requires both a source and a target branch.");
+        if (string.Equals(input.SourceBranch, input.TargetBranch, StringComparison.Ordinal))
+            throw new InvalidOperationException("The source and target branch must differ.");
+
+        var repo = await LoadRepositoryAsync(repositoryId, cancellationToken).ConfigureAwait(false);
+        EnsureCredentialBound(repo);
+
+        // Per-user attribution (Model B), same as SubmitReviewAsync: open AS the actor's own linked identity
+        // when wired, else the repo's connection credential. Scope + role are checked against whichever acts.
+        var credential = await ResolveActingCredentialAsync(repo, actorUserId, cancellationToken).ConfigureAwait(false);
+        _scopeChecker.EnsureCapability(credential, repo.ProviderInstance.Provider, typeof(IPullRequestWriteCapability));
+
+        var writeCap = _registry.Require<IPullRequestWriteCapability>(repo.ProviderInstance.Provider);
+        var context = new ProviderContext(repo.ProviderInstance, credential);
+        var remote = repo.ToRemoteRepository();
+
+        return await writeCap.OpenPullRequestAsync(context, remote, input, cancellationToken).ConfigureAwait(false);
+    }
+
     /// <summary>Actor's own credential when <paramref name="actorUserId"/> is set (throws
     /// ActorIdentityRequiredException if they haven't linked one); otherwise the repo's connection credential.</summary>
     private async Task<Credential> ResolveActingCredentialAsync(Repository repo, Guid? actorUserId, CancellationToken cancellationToken) =>

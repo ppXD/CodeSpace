@@ -58,6 +58,9 @@ public sealed class GitLabProviderModule : IProviderModule
         // Submitting an MR review (posted as a note today) needs the same WRITE scope.
         [typeof(IPullRequestReviewCapability)] = ScopeRequirement.Of(GitLabScopes.Api),
 
+        // Opening an MR is a WRITE — `api` only (no narrower scope can create).
+        [typeof(IPullRequestWriteCapability)] = ScopeRequirement.Of(GitLabScopes.Api),
+
         // Browsing source (branches, tree, file content) reads via the API — `api`/`read_api`, the same
         // family as the catalog/PR reads. (`read_repository` is clone-only and can't reach these endpoints.)
         [typeof(IRepositorySourceCapability)] = ScopeRequirement.AnyOf(GitLabScopes.Api, GitLabScopes.ReadApi),
@@ -84,6 +87,9 @@ public sealed class GitLabProviderModule : IProviderModule
         // RepositoryRole.Write maps to GitLab Developer (access_level 30), preserving the historical
         // ≥Developer membership threshold this replaces. Every other capability falls back to the Read
         // floor — none of them is act-as-user-gated today, so the floor never fires for them.
-        [typeof(IPullRequestReviewCapability)] = RepositoryRole.Write
+        [typeof(IPullRequestReviewCapability)] = RepositoryRole.Write,
+
+        // Opening an MR is likewise ≥Developer on GitLab.
+        [typeof(IPullRequestWriteCapability)] = RepositoryRole.Write
     };
 }

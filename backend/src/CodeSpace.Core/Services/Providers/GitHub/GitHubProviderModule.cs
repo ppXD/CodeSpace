@@ -58,6 +58,9 @@ public sealed class GitHubProviderModule : IProviderModule
         // scope family as posting a comment.
         [typeof(IPullRequestReviewCapability)] = ScopeRequirement.AnyOf(GitHubScopes.Repo, GitHubScopes.PublicRepo),
 
+        // Opening a PR is a repo write — same `repo`/`public_repo` scope family.
+        [typeof(IPullRequestWriteCapability)] = ScopeRequirement.AnyOf(GitHubScopes.Repo, GitHubScopes.PublicRepo),
+
         // Browsing source (branches, tree, file content) is a repo READ — same `repo`/`public_repo`
         // family as the catalog/PR reads, so it adds no new OAuth consent for existing credentials.
         [typeof(IRepositorySourceCapability)] = ScopeRequirement.AnyOf(GitHubScopes.Repo, GitHubScopes.PublicRepo),
@@ -84,6 +87,10 @@ public sealed class GitHubProviderModule : IProviderModule
         // (the "can't approve your own PR" case is a 422 we can't pre-empt). RepositoryRole.Read maps to
         // GitHub `pull`, preserving the historical "repo is accessible" membership threshold this
         // replaces. Other capabilities fall back to the same Read floor.
-        [typeof(IPullRequestReviewCapability)] = RepositoryRole.Read
+        [typeof(IPullRequestReviewCapability)] = RepositoryRole.Read,
+
+        // Opening a PR needs contributor access (GitHub `push`) — a read-only member can review but
+        // not create. RepositoryRole.Write is the membership floor.
+        [typeof(IPullRequestWriteCapability)] = RepositoryRole.Write
     };
 }
