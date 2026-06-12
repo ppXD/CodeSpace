@@ -24,6 +24,7 @@ public class NodeManifestContractTests
         yield return new object[] { new TriggerPrUpdatedNode() };
         yield return new object[] { new TriggerPrMergedNode() };
         yield return new object[] { new TriggerPushNode() };
+        yield return new object[] { new TriggerScheduleNode() };
         yield return new object[] { new TriggerManualNode() };
         yield return new object[] { new TerminalNode() };
     }
@@ -59,6 +60,7 @@ public class NodeManifestContractTests
         new TriggerPrUpdatedNode().Manifest.Kind.ShouldBe(NodeKind.Trigger);
         new TriggerPrMergedNode().Manifest.Kind.ShouldBe(NodeKind.Trigger);
         new TriggerPushNode().Manifest.Kind.ShouldBe(NodeKind.Trigger);
+        new TriggerScheduleNode().Manifest.Kind.ShouldBe(NodeKind.Trigger);
         new TriggerManualNode().Manifest.Kind.ShouldBe(NodeKind.Trigger);
     }
 
@@ -81,6 +83,8 @@ public class NodeManifestContractTests
             "event triggers subscribe to webhooks and MUST keep IsManual=false so deriveActivations still emits their activation");
         new TriggerPushNode().Manifest.IsManual.ShouldBeFalse(
             "event triggers subscribe to webhooks and MUST keep IsManual=false so deriveActivations still emits their activation");
+        new TriggerScheduleNode().Manifest.IsManual.ShouldBeFalse(
+            "the schedule trigger MUST keep IsManual=false so deriveActivations emits the activation row the producer queries");
     }
 
     [Fact]

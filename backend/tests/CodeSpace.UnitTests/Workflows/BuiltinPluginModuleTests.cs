@@ -20,6 +20,7 @@ public class BuiltinPluginModuleTests
 
         module.Name.ShouldBe("Core Flow");
         module.Nodes.ShouldContain(typeof(CodeSpace.Core.Services.Workflows.Nodes.Builtin.TriggerManualNode));
+        module.Nodes.ShouldContain(typeof(CodeSpace.Core.Services.Workflows.Nodes.Builtin.TriggerScheduleNode));
         module.Nodes.ShouldContain(typeof(CodeSpace.Core.Services.Workflows.Nodes.Builtin.TerminalNode));
         module.Nodes.ShouldContain(typeof(CodeSpace.Core.Services.Workflows.Nodes.Builtin.LogicIfNode));
         module.Nodes.ShouldContain(typeof(CodeSpace.Core.Services.Workflows.Nodes.Builtin.LogicMergeNode));
@@ -33,8 +34,8 @@ public class BuiltinPluginModuleTests
         module.Nodes.ShouldContain(typeof(CodeSpace.Core.Services.Workflows.Nodes.Builtin.FlowLoopStartNode));
         module.Nodes.ShouldContain(typeof(CodeSpace.Core.Services.Workflows.Nodes.Builtin.FlowTryNode));
         module.Nodes.ShouldContain(typeof(CodeSpace.Core.Services.Workflows.Nodes.Builtin.FlowTryStartNode));
-        module.Nodes.Count.ShouldBe(14);
-        module.RunSourceMatchers.ShouldBeEmpty("the manual trigger subscribes to no event, so Core Flow still ships zero matchers");
+        module.Nodes.Count.ShouldBe(15);
+        module.RunSourceMatchers.ShouldBeEmpty("manual + schedule triggers subscribe to no inbound event (schedule is producer-driven), so Core Flow still ships zero matchers");
     }
 
     [Fact]
@@ -101,6 +102,6 @@ public class BuiltinPluginModuleTests
         };
 
         var total = all.SelectMany(p => p.Nodes).Distinct().Count();
-        total.ShouldBe(28, "28 builtin node types across 5 domain plugins (added the Git plugin's trigger.push node) — adjust this number when adding a builtin");
+        total.ShouldBe(29, "29 builtin node types across 5 domain plugins (added Core Flow's trigger.schedule node) — adjust this number when adding a builtin");
     }
 }
