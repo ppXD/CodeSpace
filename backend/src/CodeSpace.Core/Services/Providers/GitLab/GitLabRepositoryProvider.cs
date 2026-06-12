@@ -15,7 +15,7 @@ using ProviderInstance = CodeSpace.Core.Persistence.Entities.ProviderInstance;
 
 namespace CodeSpace.Core.Services.Providers.GitLab;
 
-public sealed class GitLabRepositoryProvider : IRepositoryCatalogCapability, IPullRequestCatalogCapability, IPullRequestCommentCapability, IPullRequestReviewCapability, IRepositoryAccessCapability, IRepositorySourceCapability, IRepositoryInsightsCapability, IRepositoryHistoryCapability, IRepositoryMarkdownRenderCapability, ICredentialProbeCapability, IWebhookRegistrationCapability, IWebhookSignatureVerifier, IWebhookEventNormalizer
+public sealed class GitLabRepositoryProvider : IRepositoryCatalogCapability, IPullRequestCatalogCapability, IPullRequestCommentCapability, IPullRequestReviewCapability, IPullRequestWriteCapability, IRepositoryAccessCapability, IRepositorySourceCapability, IRepositoryInsightsCapability, IRepositoryHistoryCapability, IRepositoryMarkdownRenderCapability, ICredentialProbeCapability, IWebhookRegistrationCapability, IWebhookSignatureVerifier, IWebhookEventNormalizer
 {
     private readonly IProviderAuthResolver _authResolver;
     private readonly IExternalCallResilience _resilience;
@@ -230,6 +230,31 @@ public sealed class GitLabRepositoryProvider : IRepositoryCatalogCapability, IPu
             return ToRemotePullRequestDetail(mr, labelColors);
         }, cancellationToken).ConfigureAwait(false);
     }
+
+    public async Task<RemotePullRequest> OpenPullRequestAsync(ProviderContext context, RemoteRepository repository, OpenPullRequestInput input, CancellationToken cancellationToken)
+    {
+        var client = await BuildClientAsync(context, cancellationToken).ConfigureAwait(false);
+
+        return await _resilience.ExecuteAsync(context.Instance, nameof(OpenPullRequestAsync), _ =>
+        {
+            var projectId = int.Parse(repository.ExternalId);
+
+            // GitLab marks a draft via a "Draft:" title prefix (the modern replacement for work_in_progress);
+            // the event normalizer maps that back to PullRequestState.Draft on read.
+            var mr = client.GetMergeRequest(projectId).Create(new MergeRequestCreate
+            {
+                SourceBranch = input.SourceBranch,
+                TargetBranch = input.TargetBranch,
+                Title = input.Draft ? $"Draft: {input.Title}" : input.Title,
+                Description = input.Body,
+            });
+
+            // A freshly-opened MR carries no labels, so no project-label-colour lookup is needed.
+            return Task.FromResult(ToRemotePullRequestDetail(mr, EmptyLabelColors));
+        }, cancellationToken).ConfigureAwait(false);
+    }
+
+    private static readonly IReadOnlyDictionary<string, string?> EmptyLabelColors = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
 
     /// <summary>
     /// Best-effort lookup of project + ancestor-group labels keyed by name → colour

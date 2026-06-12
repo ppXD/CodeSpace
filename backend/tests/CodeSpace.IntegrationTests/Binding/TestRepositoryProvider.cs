@@ -61,7 +61,7 @@ public sealed class TestRemoteHookStore
     }
 }
 
-public sealed class TestRepositoryProvider : IRepositoryCatalogCapability, ICredentialProbeCapability, IPullRequestReviewCapability, IRepositoryAccessCapability, IWebhookRegistrationCapability, IWebhookSignatureVerifier, IWebhookEventNormalizer
+public sealed class TestRepositoryProvider : IRepositoryCatalogCapability, ICredentialProbeCapability, IPullRequestReviewCapability, IPullRequestWriteCapability, IRepositoryAccessCapability, IWebhookRegistrationCapability, IWebhookSignatureVerifier, IWebhookEventNormalizer
 {
     private readonly TestRemoteHookStore _hookStore;
 
@@ -103,6 +103,24 @@ public sealed class TestRepositoryProvider : IRepositoryCatalogCapability, ICred
             Verdict = verdict,
             ExternalId = context.Credential.Id.ToString(),
             WebUrl = $"https://test.local/{repository.FullPath}/-/reviews/{number}"
+        });
+
+    // Echoes the acting credential's id back as the created PR's ExternalId (same trick as the review
+    // echo) so a test can assert WHICH credential opened it (actor vs connection). Reflects the input.
+    public Task<RemotePullRequest> OpenPullRequestAsync(ProviderContext context, RemoteRepository repository, OpenPullRequestInput input, CancellationToken cancellationToken) =>
+        Task.FromResult(new RemotePullRequest
+        {
+            ExternalId = context.Credential.Id.ToString(),
+            Number = 777,
+            Title = input.Title,
+            State = input.Draft ? PullRequestState.Draft : PullRequestState.Open,
+            SourceBranch = input.SourceBranch,
+            TargetBranch = input.TargetBranch,
+            Body = input.Body,
+            CommentsCount = 0,
+            CreatedDate = DateTimeOffset.UnixEpoch,
+            UpdatedDate = DateTimeOffset.UnixEpoch,
+            WebUrl = $"https://test.local/{repository.FullPath}/-/merge_requests/777"
         });
 
     // Deterministic, no shared state: the repo's external id encodes the actor's role, so a test drives any

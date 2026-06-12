@@ -18,7 +18,7 @@ using RepositoryRole = CodeSpace.Messages.Enums.RepositoryRole;
 
 namespace CodeSpace.Core.Services.Providers.GitHub;
 
-public sealed class GitHubRepositoryProvider : IRepositoryCatalogCapability, IPullRequestCatalogCapability, IPullRequestCommentCapability, IPullRequestReviewCapability, IRepositoryAccessCapability, IRepositorySourceCapability, IRepositoryInsightsCapability, IRepositoryHistoryCapability, IRepositoryMarkdownRenderCapability, ICredentialProbeCapability, IWebhookRegistrationCapability, IWebhookSignatureVerifier, IWebhookEventNormalizer
+public sealed class GitHubRepositoryProvider : IRepositoryCatalogCapability, IPullRequestCatalogCapability, IPullRequestCommentCapability, IPullRequestReviewCapability, IPullRequestWriteCapability, IRepositoryAccessCapability, IRepositorySourceCapability, IRepositoryInsightsCapability, IRepositoryHistoryCapability, IRepositoryMarkdownRenderCapability, ICredentialProbeCapability, IWebhookRegistrationCapability, IWebhookSignatureVerifier, IWebhookEventNormalizer
 {
     private readonly IProviderAuthResolver _authResolver;
     private readonly IExternalCallResilience _resilience;
@@ -261,6 +261,20 @@ public sealed class GitHubRepositoryProvider : IRepositoryCatalogCapability, IPu
                 ExternalId = created.Id.ToString(),
                 WebUrl = created.HtmlUrl
             };
+        }, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<RemotePullRequest> OpenPullRequestAsync(ProviderContext context, RemoteRepository repository, OpenPullRequestInput input, CancellationToken cancellationToken)
+    {
+        var client = await BuildClientAsync(context, cancellationToken).ConfigureAwait(false);
+
+        return await _resilience.ExecuteAsync(context.Instance, nameof(OpenPullRequestAsync), async _ =>
+        {
+            // GitHub: head = source branch, base = target branch. Draft is honoured when the repo plan allows it.
+            var newPr = new NewPullRequest(input.Title, input.SourceBranch, input.TargetBranch) { Body = input.Body, Draft = input.Draft };
+            var created = await client.PullRequest.Create(repository.NamespacePath, repository.Name, newPr).ConfigureAwait(false);
+
+            return ToRemotePullRequestDetail(created);
         }, cancellationToken).ConfigureAwait(false);
     }
 
