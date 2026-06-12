@@ -177,13 +177,13 @@ public class NodeManifestContractTests
         return prop;
     }
 
-    // Repository selector — all four Git nodes must present the same x-selector on repositoryId so
+    // Repository selector — every Git node carrying a repositoryId must present the same x-selector so
     // the editor shows the Pick ⇄ Expression repo picker. Before this sweep only git.pr_review had it;
     // git.fetch_pr_diff and git.post_pr_comment required pasting a raw UUID.
     [Fact]
     public void Git_nodes_all_declare_x_selector_repository_on_repositoryId()
     {
-        var nodes = new INodeRuntime[] { new GitFetchPrDiffNode(null!), new GitFetchPrChecksNode(null!), new GitPostPrCommentNode(null!), new GitPrReviewNode(null!) };
+        var nodes = new INodeRuntime[] { new GitFetchPrDiffNode(null!), new GitFetchPrChecksNode(null!), new GitListPullRequestsNode(null!), new GitPostPrCommentNode(null!), new GitPrReviewNode(null!) };
         foreach (var node in nodes)
         {
             var prop = GetInputProp(node, "repositoryId");
