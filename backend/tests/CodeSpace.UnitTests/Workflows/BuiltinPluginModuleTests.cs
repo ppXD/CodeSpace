@@ -46,13 +46,14 @@ public class BuiltinPluginModuleTests
         module.Nodes.ShouldContain(typeof(CodeSpace.Core.Services.Workflows.Nodes.Builtin.TriggerPrOpenedNode));
         module.Nodes.ShouldContain(typeof(CodeSpace.Core.Services.Workflows.Nodes.Builtin.TriggerPrUpdatedNode));
         module.Nodes.ShouldContain(typeof(CodeSpace.Core.Services.Workflows.Nodes.Builtin.TriggerPrMergedNode));
+        module.Nodes.ShouldContain(typeof(CodeSpace.Core.Services.Workflows.Nodes.Builtin.TriggerPushNode));
         module.Nodes.ShouldContain(typeof(CodeSpace.Core.Services.Workflows.Nodes.Builtin.GitFetchPrDiffNode));
         module.Nodes.ShouldContain(typeof(CodeSpace.Core.Services.Workflows.Nodes.Builtin.GitFetchPrChecksNode));
         module.Nodes.ShouldContain(typeof(CodeSpace.Core.Services.Workflows.Nodes.Builtin.GitListPullRequestsNode));
         module.Nodes.ShouldContain(typeof(CodeSpace.Core.Services.Workflows.Nodes.Builtin.GitPostPrCommentNode));
         module.Nodes.ShouldContain(typeof(CodeSpace.Core.Services.Workflows.Nodes.Builtin.GitOpenPullRequestNode));
         module.Nodes.ShouldContain(typeof(CodeSpace.Core.Services.Workflows.Nodes.Builtin.GitMergePullRequestNode));
-        module.RunSourceMatchers.Count.ShouldBe(3, "the PR matchers (opened / updated / merged) ride with the git plugin so disabling git unloads them together");
+        module.RunSourceMatchers.Count.ShouldBe(4, "the PR matchers (opened / updated / merged) + the push matcher ride with the git plugin so disabling git unloads them together");
     }
 
     [Fact]
@@ -100,6 +101,6 @@ public class BuiltinPluginModuleTests
         };
 
         var total = all.SelectMany(p => p.Nodes).Distinct().Count();
-        total.ShouldBe(27, "27 builtin node types across 5 domain plugins (added the Git plugin's trigger.pr.merged node) — adjust this number when adding a builtin");
+        total.ShouldBe(28, "28 builtin node types across 5 domain plugins (added the Git plugin's trigger.push node) — adjust this number when adding a builtin");
     }
 }
