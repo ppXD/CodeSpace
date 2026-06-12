@@ -31,6 +31,14 @@ public sealed record SandboxSpec
     /// hijack the run. Empty → the command needs no config isolation.
     /// </summary>
     public IReadOnlyList<string> ConfigHomeEnvVars { get; init; } = Array.Empty<string>();
+
+    /// <summary>
+    /// Whether the command may reach the network. <c>false</c> → the sandbox runner severs egress entirely (a fresh
+    /// network namespace with only loopback), so a confined agent cannot reach cloud-metadata, the LAN, or exfiltrate
+    /// over the internet. <c>true</c> (default — non-breaking) → the host network is shared. Enforced only by a
+    /// sandboxing runner; a bare-process runner cannot honour it. (A model-API-only egress allowlist is a later slice.)
+    /// </summary>
+    public bool AllowNetwork { get; init; } = true;
 }
 
 /// <summary>

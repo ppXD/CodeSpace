@@ -91,6 +91,8 @@ public sealed class ClaudeCodeHarness : IAgentHarness, IModelCredentialProjector
             TimeoutSeconds = task.TimeoutSeconds,
             // Isolate Claude Code's config dir per run so it ignores the operator's personal ~/.claude.
             ConfigHomeEnvVars = new[] { ConfigDirEnvVar },
+            // The agent reaches the network only when its permissions allow it (the sandbox severs egress otherwise).
+            AllowNetwork = task.Permissions.Network == AgentNetworkAccess.On,
         };
     }
 

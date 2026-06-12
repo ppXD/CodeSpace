@@ -61,6 +61,13 @@ public sealed class BubblewrapSandboxTests
             .ShouldBeTrue("with no config-home, HOME points at the writable tmpfs so ~-relative reads still miss operator dotfiles");
 
     [Fact]
+    public void Severs_the_network_only_when_sharing_is_disabled()
+    {
+        BubblewrapSandbox.BuildArgs(Plan() with { ShareNetwork = false }).ShouldContain("--unshare-net", customMessage: "no network → a fresh net namespace with only loopback");
+        BubblewrapSandbox.BuildArgs(Plan() with { ShareNetwork = true }).ShouldNotContain("--unshare-net");
+    }
+
+    [Fact]
     public void Binds_an_absolute_command_directory_that_is_outside_the_standard_roots()
     {
         var a = BubblewrapSandbox.BuildArgs(Plan() with { Command = "/usr/local/custom/claude" });

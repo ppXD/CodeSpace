@@ -203,6 +203,13 @@ public class CodexHarnessTests
         // Codex reads its config home from this exact name; renaming it would silently re-leak the operator's ~/.codex.
         CodexHarness.ConfigHomeEnvVar.ShouldBe("CODEX_HOME");
 
+    [Theory]
+    [InlineData(AgentNetworkAccess.On, true)]
+    [InlineData(AgentNetworkAccess.Off, false)]
+    public void Projects_the_network_permission_onto_AllowNetwork(AgentNetworkAccess network, bool expected) =>
+        // The sandbox runner severs egress when AllowNetwork is false — so the (previously dead) Network toggle finally bites.
+        Harness.BuildInvocation(Task() with { Permissions = new AgentPermissions { Network = network } }).AllowNetwork.ShouldBe(expected);
+
     [Fact]
     public void Command_uses_the_default_then_the_env_override()
     {

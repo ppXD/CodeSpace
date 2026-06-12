@@ -79,6 +79,8 @@ public sealed class CodexHarness : IAgentHarness, IModelCredentialProjector, ISi
             TimeoutSeconds = task.TimeoutSeconds,
             // Isolate Codex's config home per run so it ignores the operator's personal ~/.codex.
             ConfigHomeEnvVars = new[] { ConfigHomeEnvVar },
+            // The agent reaches the network only when its permissions allow it (the sandbox severs egress otherwise).
+            AllowNetwork = task.Permissions.Network == AgentNetworkAccess.On,
         };
     }
 
