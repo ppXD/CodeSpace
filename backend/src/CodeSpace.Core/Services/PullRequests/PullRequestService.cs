@@ -122,6 +122,21 @@ public sealed class PullRequestService : IPullRequestService, IScopedDependency
         return await writeCap.OpenPullRequestAsync(context, remote, input, cancellationToken).ConfigureAwait(false);
     }
 
+    public async Task<RemotePullRequestMergeResult> MergePullRequestAsync(Guid repositoryId, int number, MergePullRequestInput input, Guid? actorUserId, CancellationToken cancellationToken)
+    {
+        var repo = await LoadRepositoryAsync(repositoryId, cancellationToken).ConfigureAwait(false);
+        EnsureCredentialBound(repo);
+
+        var credential = await ResolveActingCredentialAsync(repo, actorUserId, cancellationToken).ConfigureAwait(false);
+        _scopeChecker.EnsureCapability(credential, repo.ProviderInstance.Provider, typeof(IPullRequestWriteCapability));
+
+        var writeCap = _registry.Require<IPullRequestWriteCapability>(repo.ProviderInstance.Provider);
+        var context = new ProviderContext(repo.ProviderInstance, credential);
+        var remote = repo.ToRemoteRepository();
+
+        return await writeCap.MergePullRequestAsync(context, remote, number, input, cancellationToken).ConfigureAwait(false);
+    }
+
     /// <summary>Actor's own credential when <paramref name="actorUserId"/> is set (throws
     /// ActorIdentityRequiredException if they haven't linked one); otherwise the repo's connection credential.</summary>
     private async Task<Credential> ResolveActingCredentialAsync(Repository repo, Guid? actorUserId, CancellationToken cancellationToken) =>

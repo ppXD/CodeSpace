@@ -53,4 +53,13 @@ public interface IPullRequestService
     /// (Model B) exactly like <see cref="SubmitReviewAsync"/>.
     /// </summary>
     Task<RemotePullRequest> OpenPullRequestAsync(Guid repositoryId, OpenPullRequestInput input, Guid? actorUserId, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// MERGE an open pull/merge request via the provider's <c>IPullRequestWriteCapability</c>. Same preflight
+    /// (repo lookup, credential null-check, write-scope + Write-role, Model B actor attribution) as
+    /// <see cref="OpenPullRequestAsync"/>. Throws <see cref="InvalidOperationException"/> (400) for a missing
+    /// repo, on insufficient write scope (422), or when the request can't be merged (conflicts / not mergeable
+    /// / already merged → mapped from the provider's 4xx).
+    /// </summary>
+    Task<RemotePullRequestMergeResult> MergePullRequestAsync(Guid repositoryId, int number, MergePullRequestInput input, Guid? actorUserId, CancellationToken cancellationToken);
 }

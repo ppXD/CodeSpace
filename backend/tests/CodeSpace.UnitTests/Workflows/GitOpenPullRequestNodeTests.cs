@@ -50,6 +50,7 @@ public class GitOpenPullRequestNodeTests
         public Task<IReadOnlyList<RemotePullRequestCheck>> ListChecksAsync(Guid r, int n, CancellationToken c) => throw new NotImplementedException();
         public Task<RemotePullRequestComment> PostCommentAsync(Guid r, int n, string b, CancellationToken c) => throw new NotImplementedException();
         public Task<RemotePullRequestReview> SubmitReviewAsync(Guid r, int n, PullRequestReviewVerdict v, string? b, Guid? a, CancellationToken c) => throw new NotImplementedException();
+        public Task<RemotePullRequestMergeResult> MergePullRequestAsync(Guid r, int n, MergePullRequestInput i, Guid? a, CancellationToken c) => throw new NotImplementedException();
     }
 
     [Fact]

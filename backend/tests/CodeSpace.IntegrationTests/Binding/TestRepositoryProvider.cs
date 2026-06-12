@@ -123,6 +123,10 @@ public sealed class TestRepositoryProvider : IRepositoryCatalogCapability, ICred
             WebUrl = $"https://test.local/{repository.FullPath}/-/merge_requests/777"
         });
 
+    // Echoes the acting credential's id back as the merge result's Sha so a test can assert WHICH credential merged.
+    public Task<RemotePullRequestMergeResult> MergePullRequestAsync(ProviderContext context, RemoteRepository repository, int number, MergePullRequestInput input, CancellationToken cancellationToken) =>
+        Task.FromResult(new RemotePullRequestMergeResult { Merged = true, Sha = context.Credential.Id.ToString(), Message = $"merged via {input.Method}" });
+
     // Deterministic, no shared state: the repo's external id encodes the actor's role, so a test drives any
     // pre-flight outcome by seeding a marked repo (no cross-test toggle). "noaccess" → None (denied at the
     // Read floor); "role-<name>" → that role; "inconclusive" → null (probe degrades to allow); everything

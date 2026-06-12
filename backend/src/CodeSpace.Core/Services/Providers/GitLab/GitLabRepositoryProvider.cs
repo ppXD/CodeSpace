@@ -254,6 +254,28 @@ public sealed class GitLabRepositoryProvider : IRepositoryCatalogCapability, IPu
         }, cancellationToken).ConfigureAwait(false);
     }
 
+    public async Task<RemotePullRequestMergeResult> MergePullRequestAsync(ProviderContext context, RemoteRepository repository, int number, MergePullRequestInput input, CancellationToken cancellationToken)
+    {
+        var client = await BuildClientAsync(context, cancellationToken).ConfigureAwait(false);
+
+        return await _resilience.ExecuteAsync(context.Instance, nameof(MergePullRequestAsync), _ =>
+        {
+            var projectId = int.Parse(repository.ExternalId);
+
+            // GitLab's Accept covers merge + squash + remove-source-branch in one call. Rebase-merge isn't a
+            // single Accept option, so it maps to a regular merge for the neutral model (Squash only when asked).
+            var accepted = client.GetMergeRequest(projectId).Accept(number, new MergeRequestMerge
+            {
+                Squash = input.Method == PullRequestMergeMethod.Squash,
+                ShouldRemoveSourceBranch = input.DeleteSourceBranch,
+                MergeCommitMessage = input.CommitMessage,
+            });
+
+            var merged = string.Equals(accepted.State, "merged", StringComparison.OrdinalIgnoreCase) || accepted.MergeCommitSha != null;
+            return Task.FromResult(new RemotePullRequestMergeResult { Merged = merged, Sha = accepted.MergeCommitSha });
+        }, cancellationToken).ConfigureAwait(false);
+    }
+
     private static readonly IReadOnlyDictionary<string, string?> EmptyLabelColors = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
 
     /// <summary>
