@@ -21,4 +21,12 @@ public interface IPullRequestWriteCapability : IProviderCapability
     /// branches / repo are invalid (mapped from the provider's 4xx).
     /// </summary>
     Task<RemotePullRequest> OpenPullRequestAsync(ProviderContext context, RemoteRepository repository, OpenPullRequestInput input, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// MERGE the open pull/merge request <paramref name="number"/> per <paramref name="input"/> (merge method +
+    /// optional commit title/message + delete-source-branch). The provider maps the neutral input onto its own
+    /// API. Throws when the bound credential lacks the required scope (mapped to 422 with the missing-scope hint)
+    /// or the request can't be merged (conflicts / not mergeable / already merged → mapped from the provider's 4xx).
+    /// </summary>
+    Task<RemotePullRequestMergeResult> MergePullRequestAsync(ProviderContext context, RemoteRepository repository, int number, MergePullRequestInput input, CancellationToken cancellationToken);
 }

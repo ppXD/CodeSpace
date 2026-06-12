@@ -278,6 +278,41 @@ public sealed class GitHubRepositoryProvider : IRepositoryCatalogCapability, IPu
         }, cancellationToken).ConfigureAwait(false);
     }
 
+    public async Task<RemotePullRequestMergeResult> MergePullRequestAsync(ProviderContext context, RemoteRepository repository, int number, MergePullRequestInput input, CancellationToken cancellationToken)
+    {
+        var client = await BuildClientAsync(context, cancellationToken).ConfigureAwait(false);
+
+        return await _resilience.ExecuteAsync(context.Instance, nameof(MergePullRequestAsync), async _ =>
+        {
+            var merge = new MergePullRequest
+            {
+                MergeMethod = input.Method switch
+                {
+                    CodeSpace.Messages.Dtos.Providers.PullRequestMergeMethod.Squash => Octokit.PullRequestMergeMethod.Squash,
+                    CodeSpace.Messages.Dtos.Providers.PullRequestMergeMethod.Rebase => Octokit.PullRequestMergeMethod.Rebase,
+                    _ => Octokit.PullRequestMergeMethod.Merge,
+                },
+                CommitTitle = input.CommitTitle,
+                CommitMessage = input.CommitMessage,
+            };
+
+            var result = await client.PullRequest.Merge(repository.NamespacePath, repository.Name, number, merge).ConfigureAwait(false);
+
+            // GitHub doesn't delete the head branch on merge — do it as a follow-up when asked. Need the PR's
+            // head ref, so fetch it; a delete failure (already gone / protected) is swallowed so it never fails
+            // an otherwise-successful merge.
+            if (input.DeleteSourceBranch && result.Merged)
+            {
+                var pr = await client.PullRequest.Get(repository.NamespacePath, repository.Name, number).ConfigureAwait(false);
+                if (!string.IsNullOrEmpty(pr.Head?.Ref))
+                    try { await client.Git.Reference.Delete(repository.NamespacePath, repository.Name, $"heads/{pr.Head.Ref}").ConfigureAwait(false); }
+                    catch (ApiException) { /* branch already deleted / protected — the merge still succeeded */ }
+            }
+
+            return new RemotePullRequestMergeResult { Merged = result.Merged, Sha = result.Sha, Message = result.Message };
+        }, cancellationToken).ConfigureAwait(false);
+    }
+
     private static RemotePullRequestCheck ToRemoteCheck(CheckRun run)
     {
         var status = MapCheckRunStatus(run.Status.Value, run.Conclusion?.Value);
