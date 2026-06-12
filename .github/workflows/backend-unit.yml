@@ -1,0 +1,69 @@
+name: Backend · Unit
+
+# Pure, infra-free backend logic (the 125 Category=Unit tests). No database, no network.
+# The 4 bubblewrap/prlimit isolation E2Es also live in this project; on this plain runner they
+# have no bwrap, so they DEGRADE-SKIP cleanly (proving the unconfined fallback path) — they run
+# for REAL in the dedicated sandbox-isolation workflow.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'backend/**'
+      - '.github/workflows/backend-unit.yml'
+  pull_request:
+    paths:
+      - 'backend/**'
+      - '.github/workflows/backend-unit.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: backend-unit-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  DOTNET_NOLOGO: 'true'
+  DOTNET_CLI_TELEMETRY_OPTOUT: 'true'
+  DOTNET_SKIP_FIRST_TIME_EXPERIENCE: 'true'
+
+jobs:
+  unit:
+    name: dotnet test (UnitTests)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up .NET 10
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Cache NuGet packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.nuget/packages
+          key: nuget-unit-${{ runner.os }}-${{ hashFiles('backend/**/*.csproj') }}
+          restore-keys: nuget-unit-${{ runner.os }}-
+
+      - name: Restore
+        run: dotnet restore backend/tests/CodeSpace.UnitTests/CodeSpace.UnitTests.csproj
+
+      - name: Test
+        run: >
+          dotnet test backend/tests/CodeSpace.UnitTests/CodeSpace.UnitTests.csproj
+          --no-restore
+          --logger "console;verbosity=normal"
+          --logger "trx;LogFileName=unit.trx"
+          --results-directory backend/TestResults
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-unit-trx
+          path: backend/TestResults/*.trx
+          if-no-files-found: ignore

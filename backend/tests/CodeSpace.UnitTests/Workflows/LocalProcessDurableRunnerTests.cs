@@ -425,6 +425,7 @@ public sealed class LocalProcessDurableRunnerTests : IDisposable
     // by design and the dict-level argv build is covered by BubblewrapSandboxTests.
 
     [Fact]
+    [Trait("Category", "Sandbox")]
     public async Task Bubblewrap_confines_the_agent_to_its_workspace_and_blocks_operator_secrets()
     {
         if (BubblewrapSandbox.Available is null)
@@ -469,6 +470,7 @@ public sealed class LocalProcessDurableRunnerTests : IDisposable
     }
 
     [Fact]
+    [Trait("Category", "Sandbox")]
     public async Task Bubblewrap_severs_egress_when_network_is_disallowed()
     {
         if (BubblewrapSandbox.Available is null)
@@ -502,6 +504,7 @@ public sealed class LocalProcessDurableRunnerTests : IDisposable
     // macOS dev / no prlimit (the unconfined trust mode); the pure prlimit argv build is covered by ProcessRlimitsTests.
 
     [Fact]
+    [Trait("Category", "Sandbox")]
     public async Task Caps_processes_and_file_size_via_prlimit_inherited_by_the_agent()
     {
         if (ProcessRlimits.Available is null) return;
@@ -527,6 +530,7 @@ public sealed class LocalProcessDurableRunnerTests : IDisposable
     }
 
     [Fact]
+    [Trait("Category", "Sandbox")]
     public async Task Caps_a_runaway_file_write_so_it_cannot_fill_the_disk()
     {
         if (ProcessRlimits.Available is null) return;

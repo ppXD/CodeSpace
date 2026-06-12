@@ -1,0 +1,87 @@
+name: Backend · Integration
+
+# The 108 Category=Integration tests against a REAL Postgres (the engine's change tracker,
+# concurrency tokens, the agent-run reconciler/lease/re-attach spine, the durable spool, the
+# webhook→dispatch chain). A throw-away GUID database is created + DbUp-migrated + dropped per
+# fixture. The committed appsettings.json admin connection (localhost:5432, postgres/123456)
+# matches the service container below verbatim, so no override is needed.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'backend/**'
+      - '.github/workflows/backend-integration.yml'
+  pull_request:
+    paths:
+      - 'backend/**'
+      - '.github/workflows/backend-integration.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: backend-integration-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  DOTNET_NOLOGO: 'true'
+  DOTNET_CLI_TELEMETRY_OPTOUT: 'true'
+  DOTNET_SKIP_FIRST_TIME_EXPERIENCE: 'true'
+
+jobs:
+  integration:
+    name: dotnet test (IntegrationTests · Postgres)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    services:
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: '123456'
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d postgres"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up .NET 10
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Cache NuGet packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.nuget/packages
+          key: nuget-integration-${{ runner.os }}-${{ hashFiles('backend/**/*.csproj') }}
+          restore-keys: nuget-integration-${{ runner.os }}-
+
+      - name: Restore
+        run: dotnet restore backend/tests/CodeSpace.IntegrationTests/CodeSpace.IntegrationTests.csproj
+
+      - name: Test
+        run: >
+          dotnet test backend/tests/CodeSpace.IntegrationTests/CodeSpace.IntegrationTests.csproj
+          --no-restore
+          --logger "console;verbosity=normal"
+          --logger "trx;LogFileName=integration.trx"
+          --results-directory backend/TestResults
+          --blame-hang-timeout 5m
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-integration-trx
+          path: backend/TestResults/*.trx
+          if-no-files-found: ignore

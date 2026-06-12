@@ -28,7 +28,7 @@ public class AuditingTests
         await db.SaveChangesAsync().ConfigureAwait(false);
 
         var saved = await db.User.AsNoTracking().SingleAsync(u => u.Id == user.Id).ConfigureAwait(false);
-        saved.CreatedDate.ShouldBeGreaterThanOrEqualTo(before);
+        saved.CreatedDate.ShouldBeGreaterThanOrEqualTo(ToDbPrecision(before));
         saved.CreatedBy.ShouldBe(SystemUsers.SeederId);
         saved.LastModifiedDate.ShouldBe(saved.CreatedDate);
         saved.LastModifiedBy.ShouldBe(saved.CreatedBy);
@@ -53,7 +53,7 @@ public class AuditingTests
         await db.SaveChangesAsync().ConfigureAwait(false);
 
         var reloaded = await db.User.AsNoTracking().SingleAsync(u => u.Id == user.Id).ConfigureAwait(false);
-        reloaded.CreatedDate.ShouldBe(originalCreatedDate);
+        reloaded.CreatedDate.ShouldBe(ToDbPrecision(originalCreatedDate));
         reloaded.CreatedBy.ShouldBe(originalCreatedBy);
         reloaded.LastModifiedDate.ShouldBeGreaterThan(originalCreatedDate);
     }
@@ -78,7 +78,7 @@ public class AuditingTests
 
         var reloaded = await db.User.AsNoTracking().SingleAsync(u => u.Id == user.Id).ConfigureAwait(false);
         reloaded.CreatedBy.ShouldBe(originalCreatedBy);
-        reloaded.CreatedDate.ShouldBe(originalCreatedDate);
+        reloaded.CreatedDate.ShouldBe(ToDbPrecision(originalCreatedDate));
     }
 
     [Fact]
@@ -96,4 +96,17 @@ public class AuditingTests
     }
 
     private static string UniqueEmail(string prefix) => $"{prefix}-{Guid.NewGuid():N}@test";
+
+    /// <summary>
+    /// Truncate a <see cref="DateTimeOffset"/> to MICROSECOND precision — the resolution Postgres
+    /// <c>timestamptz</c> stores. .NET <see cref="DateTimeOffset.UtcNow"/> carries 100ns ticks, so an in-memory
+    /// instant compared against the same value round-tripped through the DB can differ by up to one tick.
+    /// Comparing both sides at DB precision keeps these auditing assertions deterministic (a sub-microsecond
+    /// tick was failing them on a UTC CI runner, where UtcNow reliably has non-zero sub-microsecond ticks).
+    /// </summary>
+    private static DateTimeOffset ToDbPrecision(DateTimeOffset value)
+    {
+        const long ticksPerMicrosecond = TimeSpan.TicksPerMillisecond / 1000;
+        return new DateTimeOffset(value.Ticks - value.Ticks % ticksPerMicrosecond, value.Offset);
+    }
 }

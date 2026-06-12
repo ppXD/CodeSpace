@@ -1,3 +1,5 @@
+/* eslint-disable react-refresh/only-export-components -- a context module deliberately co-locates its
+   provider component with the hook that reads it (useActorIdentityGate); fast-refresh granularity is moot here. */
 import { createContext, useCallback, useContext, useState, type ReactNode } from "react";
 
 import { parseActorIdentityRequired } from "@/lib/actorIdentity";
