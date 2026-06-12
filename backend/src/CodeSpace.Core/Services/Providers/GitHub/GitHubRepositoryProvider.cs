@@ -10,6 +10,7 @@ using CodeSpace.Messages.Exceptions;
 using Octokit;
 using FileChangeStatus = CodeSpace.Messages.Enums.FileChangeStatus;
 using PullRequestState = CodeSpace.Messages.Enums.PullRequestState;
+using IssueState = CodeSpace.Messages.Enums.IssueState;
 using PullRequestReviewVerdict = CodeSpace.Messages.Enums.PullRequestReviewVerdict;
 using PullRequestCheckStatus = CodeSpace.Messages.Enums.PullRequestCheckStatus;
 using RepositoryVisibility = CodeSpace.Messages.Enums.RepositoryVisibility;
@@ -18,7 +19,7 @@ using RepositoryRole = CodeSpace.Messages.Enums.RepositoryRole;
 
 namespace CodeSpace.Core.Services.Providers.GitHub;
 
-public sealed class GitHubRepositoryProvider : IRepositoryCatalogCapability, IPullRequestCatalogCapability, IPullRequestCommentCapability, IPullRequestReviewCapability, IPullRequestWriteCapability, IRepositoryAccessCapability, IRepositorySourceCapability, IRepositoryInsightsCapability, IRepositoryHistoryCapability, IRepositoryMarkdownRenderCapability, ICredentialProbeCapability, IWebhookRegistrationCapability, IWebhookSignatureVerifier, IWebhookEventNormalizer
+public sealed class GitHubRepositoryProvider : IRepositoryCatalogCapability, IPullRequestCatalogCapability, IPullRequestCommentCapability, IPullRequestReviewCapability, IPullRequestWriteCapability, IIssueWriteCapability, IRepositoryAccessCapability, IRepositorySourceCapability, IRepositoryInsightsCapability, IRepositoryHistoryCapability, IRepositoryMarkdownRenderCapability, ICredentialProbeCapability, IWebhookRegistrationCapability, IWebhookSignatureVerifier, IWebhookEventNormalizer
 {
     private readonly IProviderAuthResolver _authResolver;
     private readonly IExternalCallResilience _resilience;
@@ -312,6 +313,33 @@ public sealed class GitHubRepositoryProvider : IRepositoryCatalogCapability, IPu
             return new RemotePullRequestMergeResult { Merged = result.Merged, Sha = result.Sha, Message = result.Message };
         }, cancellationToken).ConfigureAwait(false);
     }
+
+    public async Task<RemoteIssue> CreateIssueAsync(ProviderContext context, RemoteRepository repository, CreateIssueInput input, CancellationToken cancellationToken)
+    {
+        var client = await BuildClientAsync(context, cancellationToken).ConfigureAwait(false);
+
+        return await _resilience.ExecuteAsync(context.Instance, nameof(CreateIssueAsync), async _ =>
+        {
+            var newIssue = new NewIssue(input.Title) { Body = input.Body };
+            foreach (var label in input.Labels) newIssue.Labels.Add(label);
+
+            var created = await client.Issue.Create(repository.NamespacePath, repository.Name, newIssue).ConfigureAwait(false);
+            return ToRemoteIssue(created);
+        }, cancellationToken).ConfigureAwait(false);
+    }
+
+    private static RemoteIssue ToRemoteIssue(Issue issue) => new()
+    {
+        ExternalId = issue.Id.ToString(),
+        Number = issue.Number,
+        Title = issue.Title,
+        State = issue.State.Value == ItemState.Closed ? IssueState.Closed : IssueState.Open,
+        Body = issue.Body,
+        AuthorLogin = issue.User?.Login,
+        Labels = ToLabelRefs(issue.Labels),
+        CreatedDate = issue.CreatedAt,
+        WebUrl = issue.HtmlUrl
+    };
 
     private static RemotePullRequestCheck ToRemoteCheck(CheckRun run)
     {

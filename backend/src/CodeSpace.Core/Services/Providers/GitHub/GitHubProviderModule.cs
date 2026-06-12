@@ -61,6 +61,9 @@ public sealed class GitHubProviderModule : IProviderModule
         // Opening a PR is a repo write — same `repo`/`public_repo` scope family.
         [typeof(IPullRequestWriteCapability)] = ScopeRequirement.AnyOf(GitHubScopes.Repo, GitHubScopes.PublicRepo),
 
+        // Creating an issue is a repo write — same `repo`/`public_repo` family as opening a PR.
+        [typeof(IIssueWriteCapability)] = ScopeRequirement.AnyOf(GitHubScopes.Repo, GitHubScopes.PublicRepo),
+
         // Browsing source (branches, tree, file content) is a repo READ — same `repo`/`public_repo`
         // family as the catalog/PR reads, so it adds no new OAuth consent for existing credentials.
         [typeof(IRepositorySourceCapability)] = ScopeRequirement.AnyOf(GitHubScopes.Repo, GitHubScopes.PublicRepo),
@@ -91,6 +94,9 @@ public sealed class GitHubProviderModule : IProviderModule
 
         // Opening a PR needs contributor access (GitHub `push`) — a read-only member can review but
         // not create. RepositoryRole.Write is the membership floor.
-        [typeof(IPullRequestWriteCapability)] = RepositoryRole.Write
+        [typeof(IPullRequestWriteCapability)] = RepositoryRole.Write,
+
+        // Creating an issue needs contributor access — same `push`/Write floor as opening a PR.
+        [typeof(IIssueWriteCapability)] = RepositoryRole.Write
     };
 }

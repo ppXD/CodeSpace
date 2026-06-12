@@ -54,6 +54,7 @@ public class BuiltinPluginModuleTests
         module.Nodes.ShouldContain(typeof(CodeSpace.Core.Services.Workflows.Nodes.Builtin.GitPostPrCommentNode));
         module.Nodes.ShouldContain(typeof(CodeSpace.Core.Services.Workflows.Nodes.Builtin.GitOpenPullRequestNode));
         module.Nodes.ShouldContain(typeof(CodeSpace.Core.Services.Workflows.Nodes.Builtin.GitMergePullRequestNode));
+        module.Nodes.ShouldContain(typeof(CodeSpace.Core.Services.Workflows.Nodes.Builtin.GitCreateIssueNode));
         module.RunSourceMatchers.Count.ShouldBe(4, "the PR matchers (opened / updated / merged) + the push matcher ride with the git plugin so disabling git unloads them together");
     }
 
@@ -102,6 +103,6 @@ public class BuiltinPluginModuleTests
         };
 
         var total = all.SelectMany(p => p.Nodes).Distinct().Count();
-        total.ShouldBe(29, "29 builtin node types across 5 domain plugins (added Core Flow's trigger.schedule node) — adjust this number when adding a builtin");
+        total.ShouldBe(30, "30 builtin node types across 5 domain plugins (added the Git plugin's git.create_issue node) — adjust this number when adding a builtin");
     }
 }

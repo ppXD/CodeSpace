@@ -15,7 +15,7 @@ using ProviderInstance = CodeSpace.Core.Persistence.Entities.ProviderInstance;
 
 namespace CodeSpace.Core.Services.Providers.GitLab;
 
-public sealed class GitLabRepositoryProvider : IRepositoryCatalogCapability, IPullRequestCatalogCapability, IPullRequestCommentCapability, IPullRequestReviewCapability, IPullRequestWriteCapability, IRepositoryAccessCapability, IRepositorySourceCapability, IRepositoryInsightsCapability, IRepositoryHistoryCapability, IRepositoryMarkdownRenderCapability, ICredentialProbeCapability, IWebhookRegistrationCapability, IWebhookSignatureVerifier, IWebhookEventNormalizer
+public sealed class GitLabRepositoryProvider : IRepositoryCatalogCapability, IPullRequestCatalogCapability, IPullRequestCommentCapability, IPullRequestReviewCapability, IPullRequestWriteCapability, IIssueWriteCapability, IRepositoryAccessCapability, IRepositorySourceCapability, IRepositoryInsightsCapability, IRepositoryHistoryCapability, IRepositoryMarkdownRenderCapability, ICredentialProbeCapability, IWebhookRegistrationCapability, IWebhookSignatureVerifier, IWebhookEventNormalizer
 {
     private readonly IProviderAuthResolver _authResolver;
     private readonly IExternalCallResilience _resilience;
@@ -275,6 +275,45 @@ public sealed class GitLabRepositoryProvider : IRepositoryCatalogCapability, IPu
             return Task.FromResult(new RemotePullRequestMergeResult { Merged = merged, Sha = accepted.MergeCommitSha });
         }, cancellationToken).ConfigureAwait(false);
     }
+
+    public async Task<RemoteIssue> CreateIssueAsync(ProviderContext context, RemoteRepository repository, CreateIssueInput input, CancellationToken cancellationToken)
+    {
+        var client = await BuildClientAsync(context, cancellationToken).ConfigureAwait(false);
+
+        return await _resilience.ExecuteAsync(context.Instance, nameof(CreateIssueAsync), _ =>
+        {
+            var projectId = int.Parse(repository.ExternalId);
+
+            // NGitLab's IssueCreate.Labels is a single comma-separated string (Octokit takes a list) — the
+            // neutral CreateIssueInput.Labels is a list precisely to bridge that difference.
+            var issue = client.Issues.Create(new IssueCreate
+            {
+                ProjectId = projectId,
+                Title = input.Title,
+                Description = input.Body,
+                Labels = input.Labels.Count > 0 ? string.Join(",", input.Labels) : null,
+            });
+
+            return Task.FromResult(ToRemoteIssue(issue));
+        }, cancellationToken).ConfigureAwait(false);
+    }
+
+    // GitLab's issue list returns label NAMES only (no colour, unlike the MR-detail project-label lookup),
+    // and the project-scoped human number is the iid. State is a raw string ("opened" / "closed").
+    private static RemoteIssue ToRemoteIssue(Issue issue) => new()
+    {
+        ExternalId = issue.Id.ToString(),
+        Number = (int)issue.IssueId,
+        Title = issue.Title,
+        State = string.Equals(issue.State, "closed", StringComparison.OrdinalIgnoreCase)
+            ? CodeSpace.Messages.Enums.IssueState.Closed
+            : CodeSpace.Messages.Enums.IssueState.Open,
+        Body = issue.Description,
+        AuthorLogin = issue.Author?.Username,
+        Labels = (issue.Labels ?? Array.Empty<string>()).Select(n => new LabelRef { Name = n, Color = null }).ToList(),
+        CreatedDate = new DateTimeOffset(DateTime.SpecifyKind(issue.CreatedAt, DateTimeKind.Utc), TimeSpan.Zero),
+        WebUrl = issue.WebUrl
+    };
 
     private static readonly IReadOnlyDictionary<string, string?> EmptyLabelColors = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
 
