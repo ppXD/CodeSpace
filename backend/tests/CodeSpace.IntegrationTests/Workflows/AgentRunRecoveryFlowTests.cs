@@ -4,6 +4,8 @@ using Autofac;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Agents;
+using CodeSpace.Core.Services.Agents.Sandbox;
+using CodeSpace.Core.Services.Agents.Sandbox.Runners;
 using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Enums;
@@ -27,6 +29,7 @@ public class AgentRunRecoveryFlowTests : IDisposable
 {
     private readonly PostgresFixture _fixture;
     private readonly List<string> _spoolDirs = new();
+    private readonly List<int> _launchedPids = new();
 
     public AgentRunRecoveryFlowTests(PostgresFixture fixture) { _fixture = fixture; }
 
@@ -178,6 +181,33 @@ public class AgentRunRecoveryFlowTests : IDisposable
     }
 
     [Fact]
+    public async Task Alive_durable_run_past_the_reattach_ceiling_is_killed_then_abandoned()
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        // The orphan-key-burner scenario: a real durable agent process is still ALIVE, but its run has exhausted
+        // the re-attach budget. The reconciler must KILL it before abandoning — otherwise it runs on to its
+        // wall-clock deadline holding the workspace and burning the injected model credential after the DB says Failed.
+        var teamId = await SeedTeamAsync();
+        var (runId, pid) = await SeedAliveDurableRunAsync(teamId, reattachAttempts: AgentRunReconcilerService.MaxReattachAttempts);
+
+        ProcessAlive(pid).ShouldBeTrue("precondition: the launched durable agent process is running before the sweep");
+
+        using (var scope = _fixture.BeginScope())
+            (await scope.Resolve<IAgentRunReconcilerService>().ReconcileAsync(CancellationToken.None))
+                .MarkedAbandonedFromRunning.ShouldBeGreaterThanOrEqualTo(1);
+
+        using var verify = _fixture.BeginScope();
+        var run = await verify.Resolve<CodeSpaceDbContext>().AgentRun.AsNoTracking().SingleAsync(r => r.Id == runId);
+        run.Status.ShouldBe(AgentRunStatus.Failed);
+        run.Error!.ShouldContain("abandoned", customMessage: "a permanently-unattachable alive run is abandoned past the ceiling");
+
+        // The orphan must be DEAD — not orphaned to its deadline. The kill is a signal + reap, so poll briefly.
+        (await WaitForProcessGoneAsync(pid)).ShouldBeTrue(
+            "the reconciler must KILL a still-alive run it abandons past the re-attach ceiling, not leave it running");
+    }
+
+    [Fact]
     public async Task A_fresh_lease_with_a_stale_heartbeat_is_left_alone()
     {
         // The reconciler gates on the LEASE (ground truth — a live worker keeps renewing it), NOT on
@@ -232,6 +262,59 @@ public class AgentRunRecoveryFlowTests : IDisposable
         return runId;
     }
 
+    /// <summary>
+    /// Launch a REAL long-lived durable run via the local runner (a sleeping process under the supervisor), then
+    /// seed a stale Running row pointing at its handle with the given re-attach attempt count — the post-crash
+    /// state of an alive-but-unattachable run. Returns the run id + the supervisor pid so the test can assert the
+    /// reconciler kills it. The process is tracked for best-effort teardown.
+    /// </summary>
+    private async Task<(Guid RunId, int Pid)> SeedAliveDurableRunAsync(Guid teamId, int reattachAttempts)
+    {
+        var workDir = Path.Combine(Path.GetTempPath(), "cs-kill-test-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(workDir);
+        _spoolDirs.Add(workDir);
+
+        var spec = new SandboxSpec { Command = "/bin/sh", Args = new[] { "-c", "sleep 300" }, WorkingDirectory = workDir, TimeoutSeconds = 300 };
+
+        SandboxHandle handle;
+        using (var scope = _fixture.BeginScope())
+            handle = await ((ISandboxDurableRunner)scope.Resolve<ISandboxRunnerRegistry>().Resolve(LocalProcessRunner.LocalKind))
+                .LaunchAsync(spec, Guid.NewGuid().ToString("N"), CancellationToken.None);
+
+        _spoolDirs.Add(handle.SpoolDirectory);
+        _launchedPids.Add(handle.ProcessId);
+
+        var runId = Guid.NewGuid();
+        var stamp = DateTimeOffset.UtcNow - TimeSpan.FromMinutes(20);
+
+        using (var scope = _fixture.BeginScope())
+        {
+            var db = scope.Resolve<CodeSpaceDbContext>();
+            db.AgentRun.Add(new AgentRun
+            {
+                Id = runId, TeamId = teamId, Harness = "codex-cli", Status = AgentRunStatus.Running,
+                StartedAt = stamp, HeartbeatAt = stamp, LeaseExpiresAt = stamp + AgentRunLiveness.Window,
+                ReattachAttempts = reattachAttempts,
+                RunnerHandleJson = JsonSerializer.Serialize(handle, AgentJson.Options),
+            });
+            await db.SaveChangesAsync();
+        }
+
+        return (runId, handle.ProcessId);
+    }
+
+    private static bool ProcessAlive(int pid)
+    {
+        try { using var p = Process.GetProcessById(pid); return !p.HasExited; }
+        catch { return false; }
+    }
+
+    private static async Task<bool> WaitForProcessGoneAsync(int pid)
+    {
+        for (var i = 0; i < 50 && ProcessAlive(pid); i++) await Task.Delay(100);
+        return !ProcessAlive(pid);
+    }
+
     /// <summary>A pid guaranteed dead: start a trivial process, let it exit, return its (now-reaped) pid.</summary>
     private static int DeadPid()
     {
@@ -242,6 +325,9 @@ public class AgentRunRecoveryFlowTests : IDisposable
 
     public void Dispose()
     {
+        foreach (var pid in _launchedPids)
+            try { using var p = Process.GetProcessById(pid); if (!p.HasExited) p.Kill(entireProcessTree: true); } catch { /* best-effort: the test's kill already reaped it */ }
+
         foreach (var dir in _spoolDirs)
             try { Directory.Delete(dir, recursive: true); } catch { /* best-effort */ }
     }

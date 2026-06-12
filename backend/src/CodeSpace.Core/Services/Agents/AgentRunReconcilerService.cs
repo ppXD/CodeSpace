@@ -139,37 +139,37 @@ public sealed class AgentRunReconcilerService : IAgentRunReconcilerService, ISco
         var probe = await ProbeQuietlyAsync(durable, handle, runId, cancellationToken).ConfigureAwait(false);
 
         if (probe is null)
-            return await AbandonAsync(runId, cancellationToken).ConfigureAwait(false);   // can't probe → don't leave it stuck
+            return await AbandonAsync(runId, cancellationToken, durable, handle).ConfigureAwait(false);   // can't probe → kill the maybe-alive orphan, then abandon (don't leave it stuck)
 
         if (probe.State == SandboxRunState.Exited)
             return await RecoverFromSpoolAsync(runId, probe.ExitCode ?? -1, cancellationToken).ConfigureAwait(false);
 
         if (probe.State == SandboxRunState.Gone)
-            return await AbandonAsync(runId, cancellationToken).ConfigureAwait(false);
+            return await AbandonAsync(runId, cancellationToken).ConfigureAwait(false);   // process already gone — nothing to kill
 
-        // Running: the supervised process is still alive but its worker vanished — re-attach a fresh observer to
-        // resume the live timeline + complete it, unless it has exhausted its re-attach budget (then abandon, so a
-        // permanently-unattachable-but-alive run still reaches a terminal state).
-        return await ReattachOrAbandonAsync(runId, reattachAttempts, cancellationToken).ConfigureAwait(false);
+        // Running: the supervised process is still ALIVE but its worker vanished. Past the re-attach ceiling, KILL
+        // it and abandon — a permanently-unattachable-but-alive run must still reach a terminal state, and leaving
+        // its process running would keep burning the injected model credential. Otherwise re-attach a fresh observer
+        // to resume the live timeline + complete it.
+        if (reattachAttempts >= MaxReattachAttempts)
+        {
+            _logger.LogWarning("AgentRunReconciler: agent run {RunId} is alive but exhausted {Max} re-attach attempts; killing the orphan and abandoning", runId, MaxReattachAttempts);
+            return await AbandonAsync(runId, cancellationToken, durable, handle).ConfigureAwait(false);
+        }
+
+        return await ReattachAsync(runId, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>
-    /// Re-attach a stale-but-alive Running run: enforce the attempt ceiling (abandon past it), then atomically
-    /// reclaim it (bump the fence epoch + re-lease + INCREMENT the attempt counter, status-guarded) and dispatch
-    /// <see cref="IAgentRunExecutor.ReattachAsync"/> to resume tailing + complete it. The fresh lease drops the
-    /// run out of the candidate set until the re-attaching worker renews it, so it isn't re-dispatched every
-    /// sweep; losing the reclaim CAS (another replica won / it already landed terminal) leaves it alone. The
-    /// ceiling reads <paramref name="reattachAttempts"/> — a HARD column incremented in the reclaim's own
-    /// transaction — so it can never lag the action (unlike a best-effort breadcrumb count would).
+    /// Re-attach a stale-but-alive Running run: atomically reclaim it (bump the fence epoch + re-lease + INCREMENT
+    /// the attempt counter, status-guarded) and dispatch <see cref="IAgentRunExecutor.ReattachAsync"/> to resume
+    /// tailing + complete it. The fresh lease drops the run out of the candidate set until the re-attaching worker
+    /// renews it, so it isn't re-dispatched every sweep; losing the reclaim CAS (another replica won / it already
+    /// landed terminal) leaves it alone. The attempt ceiling is enforced by the caller (which has the durable
+    /// handle to kill the orphan on the past-ceiling abandon).
     /// </summary>
-    private async Task<StaleOutcome> ReattachOrAbandonAsync(Guid runId, int reattachAttempts, CancellationToken cancellationToken)
+    private async Task<StaleOutcome> ReattachAsync(Guid runId, CancellationToken cancellationToken)
     {
-        if (reattachAttempts >= MaxReattachAttempts)
-        {
-            _logger.LogWarning("AgentRunReconciler: agent run {RunId} is alive but exhausted {Max} re-attach attempts; abandoning to reach a terminal state", runId, MaxReattachAttempts);
-            return await AbandonAsync(runId, cancellationToken).ConfigureAwait(false);
-        }
-
         if (!await _runs.ReclaimForReattachAsync(runId, cancellationToken).ConfigureAwait(false))
             return StaleOutcome.LeftAlone;   // lost the reclaim CAS — another replica won, or it just landed terminal
 
@@ -180,8 +180,16 @@ public sealed class AgentRunReconcilerService : IAgentRunReconcilerService, ISco
         return StaleOutcome.Reattached;
     }
 
-    /// <summary>Atomic CAS Running → Failed (the abandon path), pinned to status=Running so a worker completing right now wins. Appends the abandoned-run event when it transitions.</summary>
-    private async Task<StaleOutcome> AbandonAsync(Guid runId, CancellationToken cancellationToken)
+    /// <summary>
+    /// Atomic CAS Running → Failed (the abandon path), pinned to status=Running so a worker completing right now
+    /// wins. When the run carries a live durable handle (<paramref name="durable"/> + <paramref name="handle"/>),
+    /// TERMINATE its orphaned process tree AFTER a won CAS — a still-alive agent would otherwise run on to its
+    /// wall-clock deadline, holding the workspace and burning the injected model credential after the DB says
+    /// Failed. Killing only on a won CAS means a run another replica/worker just legitimately landed (lost CAS) is
+    /// never killed out from under it. The kill is best-effort; the abandon stands regardless. Appends the
+    /// abandoned-run event when it transitions.
+    /// </summary>
+    private async Task<StaleOutcome> AbandonAsync(Guid runId, CancellationToken cancellationToken, ISandboxDurableRunner? durable = null, SandboxHandle? handle = null)
     {
         var transitioned = await _db.AgentRun
             .Where(r => r.Id == runId && r.Status == AgentRunStatus.Running)
@@ -193,8 +201,21 @@ public sealed class AgentRunReconcilerService : IAgentRunReconcilerService, ISco
 
         if (transitioned == 0) return StaleOutcome.LeftAlone;
 
+        if (durable is not null && handle is not null)
+            await TerminateQuietlyAsync(durable, handle, runId, cancellationToken).ConfigureAwait(false);
+
         await TryAppendEventAsync(runId, AgentEventKind.Error, AbandonedError, cancellationToken).ConfigureAwait(false);
         return StaleOutcome.Abandoned;
+    }
+
+    /// <summary>Kill the abandoned run's orphaned process tree via its durable handle, swallowing any failure (the run still reached Failed; at worst the process lingers to its deadline) so a kill error never aborts the sweep.</summary>
+    private async Task TerminateQuietlyAsync(ISandboxDurableRunner durable, SandboxHandle handle, Guid runId, CancellationToken cancellationToken)
+    {
+        try { await durable.TerminateAsync(handle, cancellationToken).ConfigureAwait(false); }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "AgentRunReconciler: failed to terminate the orphaned process for abandoned run {RunId}; it may keep running until its wall-clock deadline", runId);
+        }
     }
 
     /// <summary>

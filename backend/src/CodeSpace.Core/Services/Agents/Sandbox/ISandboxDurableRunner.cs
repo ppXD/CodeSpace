@@ -59,4 +59,15 @@ public interface ISandboxDurableRunner
     /// instead of blindly abandoning every run whose live observer disappeared.
     /// </summary>
     Task<SandboxProbe> ProbeAsync(SandboxHandle handle, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// TERMINATE a launched run from its <paramref name="handle"/>: kill the supervised process tree, guarded by
+    /// the recorded pid + start time so a recycled pid (a different process the OS handed our old number) is never
+    /// killed. This is the EXPLICIT kill — the opposite of cancelling <see cref="AttachAsync"/>, which only stops
+    /// observing and deliberately leaves the process alive. A reconciler issues it when it ABANDONS a stale run
+    /// whose process is (or may still be) alive, so the orphaned agent stops holding its workspace and burning the
+    /// injected model credential after the run is already marked Failed. Best-effort + idempotent: a run that has
+    /// already exited / been reaped is a no-op. Returns once the kill signal has been issued.
+    /// </summary>
+    Task TerminateAsync(SandboxHandle handle, CancellationToken cancellationToken);
 }
