@@ -136,7 +136,8 @@ public sealed class GitLabMergeRequestEventSubscription : IProviderEventSubscrip
             Number = attrs.GetProperty("iid").GetInt32(),
             MergedByExternalId = user.GetProperty("id").GetRawText(),
             MergedByName = user.GetProperty("username").GetString()!,
-            MergeCommitSha = attrs.TryGetProperty("merge_commit_sha", out var sha) && sha.ValueKind != JsonValueKind.Null ? sha.GetString() : null
+            MergeCommitSha = attrs.TryGetProperty("merge_commit_sha", out var sha) && sha.ValueKind != JsonValueKind.Null ? sha.GetString() : null,
+            Labels = ExtractLabels(root)
         };
     }
 

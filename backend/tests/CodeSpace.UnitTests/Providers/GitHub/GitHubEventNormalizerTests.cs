@@ -289,7 +289,8 @@ public class GitHubEventNormalizerTests
               "pull_request": {
                 "id": 1234567, "number": 42, "merged": true, "merge_commit_sha": "merge-sha",
                 "head": { "ref": "f" }, "base": { "ref": "main" },
-                "user": { "id": 1, "login": "u" }, "title": "x", "html_url": "x"
+                "user": { "id": 1, "login": "u" }, "title": "x", "html_url": "x",
+                "labels": [ { "id": 1, "name": "release" }, { "id": 2, "name": "approved" } ]
               },
               "sender": { "id": 888, "login": "merger" }
             }
@@ -300,6 +301,9 @@ public class GitHubEventNormalizerTests
         result.MergedByExternalId.ShouldBe("888");
         result.MergedByName.ShouldBe("merger");
         result.MergeCommitSha.ShouldBe("merge-sha");
+        // Merged events carry the PR's label snapshot so the merged trigger can reuse the
+        // shared repository + AND-label filter (e.g. "deploy when a PR labelled 'release' merges").
+        result.Labels.ShouldBe(new[] { "release", "approved" });
     }
 
     [Fact]

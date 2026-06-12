@@ -62,6 +62,7 @@ public class WebhookEventToRunDispatchFlowTests
     {
         Opened,
         Updated,
+        Merged,
     }
 
     // ─── Payload contents (per-trigger Facts — keys differ between matchers) ────
@@ -126,6 +127,35 @@ public class WebhookEventToRunDispatchFlowTests
     }
 
     [Fact]
+    public async Task PrMerged_run_carries_full_BuildPayload_keys()
+    {
+        // PrMerged's BuildPayload emits its own key set (mergedByName / mergeCommitSha; no
+        // title / branches / heads). Pin it through the full publish → dispatch chain so a
+        // payload drift at dispatch time fails here, complementing the unit-tier drift detector.
+        var ctx = await SeedAsync();
+        var configJson = $$"""{ "repositories": [{ "repositoryId": "{{ctx.RepositoryId}}" }] }""";
+        await SeedActivationAsync(ctx.WorkflowId, "trigger.pr.merged", configJson);
+
+        var ev = BuildMergedEvent(ctx.RepositoryId, labels: new[] { "release" });
+        await PublishAndCommitAsync(ev);
+
+        var (run, payload) = await LoadRunAndPayloadAsync(ctx.WorkflowId);
+
+        run.RunRequest.SourceType.ShouldBe("trigger.pr.merged");
+        run.RunRequest.ExternalEventId.ShouldBe(ev.ProviderEventId);
+
+        payload.GetProperty("repositoryId").GetString().ShouldBe(ctx.RepositoryId.ToString());
+        payload.GetProperty("number").GetInt32().ShouldBe(42);
+        payload.GetProperty("mergedByName").GetString().ShouldBe("bob");
+        payload.GetProperty("mergeCommitSha").GetString().ShouldBe("mergesha");
+        payload.GetProperty("labels").EnumerateArray().Select(l => l.GetString()).ShouldBe(new[] { "release" });
+
+        // PrOpened/PrUpdated-only keys must not leak in (matcher-type confusion guard).
+        payload.TryGetProperty("title", out _).ShouldBeFalse();
+        payload.TryGetProperty("newHeadSha", out _).ShouldBeFalse();
+    }
+
+    [Fact]
     public async Task PrOpened_run_payload_carries_isDraft_true_for_a_draft_pr()
     {
         // Load-bearing case for #231: a DRAFT pr.opened must persist isDraft:true into the run
@@ -146,6 +176,7 @@ public class WebhookEventToRunDispatchFlowTests
     [Theory]
     [InlineData(TriggerKind.Opened)]
     [InlineData(TriggerKind.Updated)]
+    [InlineData(TriggerKind.Merged)]
     public async Task NewShape_config_matches_event_then_creates_run(TriggerKind trigger)
     {
         var ctx = await SeedAsync();
@@ -166,6 +197,7 @@ public class WebhookEventToRunDispatchFlowTests
     [Theory]
     [InlineData(TriggerKind.Opened)]
     [InlineData(TriggerKind.Updated)]
+    [InlineData(TriggerKind.Merged)]
     public async Task LegacyShape_config_matches_event_then_creates_run(TriggerKind trigger)
     {
         // Backward-compat shim: configs saved before PR #23 use { repositoryId } at the
@@ -187,6 +219,7 @@ public class WebhookEventToRunDispatchFlowTests
     [Theory]
     [InlineData(TriggerKind.Opened)]
     [InlineData(TriggerKind.Updated)]
+    [InlineData(TriggerKind.Merged)]
     public async Task MatchAll_config_creates_run_regardless_of_event_repository(TriggerKind trigger)
     {
         // Match-all in production is signalled by an activation config with NO
@@ -209,6 +242,7 @@ public class WebhookEventToRunDispatchFlowTests
     [Theory]
     [InlineData(TriggerKind.Opened)]
     [InlineData(TriggerKind.Updated)]
+    [InlineData(TriggerKind.Merged)]
     public async Task EmptyList_config_creates_no_run_and_writes_no_match_audit(TriggerKind trigger)
     {
         // The safe default the picker now emits (PR #29). Operator dropped a trigger node
@@ -228,6 +262,7 @@ public class WebhookEventToRunDispatchFlowTests
     [Theory]
     [InlineData(TriggerKind.Opened)]
     [InlineData(TriggerKind.Updated)]
+    [InlineData(TriggerKind.Merged)]
     public async Task DisabledActivation_creates_no_run(TriggerKind trigger)
     {
         // Even with a matching config, an activation with Enabled=false MUST be excluded
@@ -246,6 +281,7 @@ public class WebhookEventToRunDispatchFlowTests
     [Theory]
     [InlineData(TriggerKind.Opened)]
     [InlineData(TriggerKind.Updated)]
+    [InlineData(TriggerKind.Merged)]
     public async Task LabelsFilter_AND_semantics_excludes_event_missing_a_required_label(TriggerKind trigger)
     {
         // The schema description + UI both promise AND-match. If the matcher silently
@@ -267,6 +303,7 @@ public class WebhookEventToRunDispatchFlowTests
     [Theory]
     [InlineData(TriggerKind.Opened)]
     [InlineData(TriggerKind.Updated)]
+    [InlineData(TriggerKind.Merged)]
     public async Task LabelsFilter_AND_semantics_fires_when_every_required_label_is_present(TriggerKind trigger)
     {
         var ctx = await SeedAsync();
@@ -284,6 +321,7 @@ public class WebhookEventToRunDispatchFlowTests
     [Theory]
     [InlineData(TriggerKind.Opened)]
     [InlineData(TriggerKind.Updated)]
+    [InlineData(TriggerKind.Merged)]
     public async Task DuplicateDelivery_dedupes_to_one_run_per_activation(TriggerKind trigger)
     {
         // RunStarter synthesises an idempotency key of {sourceType}:{deliveryId}:{activationId}.
@@ -324,6 +362,7 @@ public class WebhookEventToRunDispatchFlowTests
     {
         TriggerKind.Opened => ("trigger.pr.opened", BuildOpenedEvent(repositoryId, labels, providerEventId)),
         TriggerKind.Updated => ("trigger.pr.updated", BuildSynchronizedEvent(repositoryId, labels, providerEventId)),
+        TriggerKind.Merged => ("trigger.pr.merged", BuildMergedEvent(repositoryId, labels, providerEventId)),
         _ => throw new ArgumentOutOfRangeException(nameof(kind), kind, "Unknown trigger kind"),
     };
 
@@ -354,6 +393,19 @@ public class WebhookEventToRunDispatchFlowTests
         Number = 42,
         PreviousHeadSha = "oldsha",
         NewHeadSha = "newsha",
+        Labels = labels ?? Array.Empty<string>(),
+    };
+
+    private static PullRequestMergedEvent BuildMergedEvent(Guid repositoryId, string[]? labels = null, string? providerEventId = null) => new()
+    {
+        RepositoryId = repositoryId,
+        ProviderEventId = providerEventId ?? $"delivery-{Guid.NewGuid():N}",
+        OccurredAt = DateTimeOffset.UtcNow,
+        ExternalPullRequestId = "100",
+        Number = 42,
+        MergedByExternalId = "user-2",
+        MergedByName = "bob",
+        MergeCommitSha = "mergesha",
         Labels = labels ?? Array.Empty<string>(),
     };
 
