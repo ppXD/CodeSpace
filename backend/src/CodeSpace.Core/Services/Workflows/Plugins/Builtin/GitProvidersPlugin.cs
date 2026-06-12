@@ -19,6 +19,7 @@ public sealed class GitProvidersPlugin : IPluginModule
         typeof(TriggerPrUpdatedNode),
         typeof(GitFetchPrDiffNode),
         typeof(GitFetchPrChecksNode),
+        typeof(GitListPullRequestsNode),
         typeof(GitPostPrCommentNode),
         typeof(GitPrReviewNode),
     };
