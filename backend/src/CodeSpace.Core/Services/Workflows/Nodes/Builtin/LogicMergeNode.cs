@@ -24,11 +24,11 @@ public sealed class LogicMergeNode : INodeRuntime
 
     public NodeManifest Manifest { get; } = new()
     {
-        DisplayName = "Merge",
+        DisplayName = "Merge branches",
         Category = "Logic",
         Kind = NodeKind.Regular,
         IconKey = "git-merge",
-        Description = "Fan-in: waits for upstream branches to converge. Pick first-non-empty (typical) or all (barrier).",
+        Description = "Waits for parallel branches to rejoin here. Choose the first branch that produced output (typical), or wait for all of them.",
         ConfigSchema = SchemaBuilder.Parse("""
             {
               "type": "object",

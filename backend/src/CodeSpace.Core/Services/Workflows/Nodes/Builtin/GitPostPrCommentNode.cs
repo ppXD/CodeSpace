@@ -31,7 +31,7 @@ public sealed class GitPostPrCommentNode : INodeRuntime
         Category = "Git",
         Kind = NodeKind.Regular,
         IconKey = "message-square",
-        Description = "Posts a comment on a pull/merge request.",
+        Description = "Posts a plain comment on a pull/merge request (no review decision — use Submit PR review for approve / request changes).",
         // Posting a comment is a permanent externally-visible side effect. Engine refuses
         // auto-resume on abandoned runs so we don't double-post.
         IsSideEffecting = true,
