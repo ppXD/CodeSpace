@@ -229,11 +229,13 @@ public class ConcurrentWaveFlowTests
     }
 
     [Fact]
-    public async Task Two_branches_suspending_in_one_wave_both_park_then_one_resume_releases_both()
+    public async Task Two_parallel_approval_branches_each_resolve_independently_then_the_run_completes()
     {
-        // Two branches in the SAME wave both suspend (two pending waits under one run); a single resume
-        // resolves EVERY pending wait, so both re-run and the run completes. Pins that parallel
-        // double-suspend parks durably and the resume path isn't single-wait.
+        // Two branches in the SAME wave both suspend on their OWN flow.wait_approval (two pending waits
+        // under one run). Each gate is a DISTINCT decision: the run-level approve resolves exactly ONE
+        // pending approval at a time and must NOT collapse both into a single click. So the run re-parks
+        // after the first approve (one wait still pending) and completes only after the second — durable
+        // double-suspend that resolves wait-by-wait, never run-wide.
         var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
         var workflowId = await CreateWorkflowAsync(teamId, userId, FanOutTwoApprovalsDefinition());
         var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
@@ -244,10 +246,24 @@ public class ConcurrentWaveFlowTests
         {
             var db = parked.Resolve<CodeSpaceDbContext>();
             (await db.WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == runId)).Status.ShouldBe(WorkflowRunStatus.Suspended);
-            var pending = await db.WorkflowRunWait.AsNoTracking().CountAsync(w => w.RunId == runId && w.Status == WorkflowWaitStatuses.Pending);
-            pending.ShouldBe(2, "both parallel approval branches parked their own wait");
+            (await db.WorkflowRunWait.AsNoTracking().CountAsync(w => w.RunId == runId && w.Status == WorkflowWaitStatuses.Pending))
+                .ShouldBe(2, "both parallel approval branches parked their own wait");
         }
 
+        // First approve resolves ONE gate; the sibling gate is untouched, so the run re-parks.
+        (await ApproveAsync(runId, teamId, userId)).ShouldBeTrue();
+        await RunEngineAsync(runId);
+
+        using (var midway = _fixture.BeginScope())
+        {
+            var db = midway.Resolve<CodeSpaceDbContext>();
+            (await db.WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == runId)).Status
+                .ShouldBe(WorkflowRunStatus.Suspended, "one approve resolves one gate — the other still gates the run");
+            (await db.WorkflowRunWait.AsNoTracking().CountAsync(w => w.RunId == runId && w.Status == WorkflowWaitStatuses.Pending))
+                .ShouldBe(1, "exactly one approval wait remains — the first approve did NOT collapse both");
+        }
+
+        // Second approve resolves the remaining gate; now both branches fan in and the run completes.
         (await ApproveAsync(runId, teamId, userId)).ShouldBeTrue();
         await RunEngineAsync(runId);
 

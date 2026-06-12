@@ -63,7 +63,11 @@ public class SuspendResumeFlowTests
         // ── Resume signal (what the scheduled timer job invokes) ────────────────
         bool resumed;
         using (var scope = _fixture.BeginScope())
-            resumed = await scope.Resolve<IWorkflowResumeService>().ResumeAsync(runId, CancellationToken.None);
+        {
+            var db = scope.Resolve<CodeSpaceDbContext>();
+            var waitId = (await db.WorkflowRunWait.AsNoTracking().SingleAsync(w => w.RunId == runId)).Id;
+            resumed = await scope.Resolve<IWorkflowResumeService>().ResumeWaitAsync(runId, waitId, null, CancellationToken.None);
+        }
         resumed.ShouldBeTrue("resuming a Suspended run succeeds");
 
         // The resume re-dispatches (Suspended→Pending→Enqueued); the in-memory job client records
@@ -89,8 +93,12 @@ public class SuspendResumeFlowTests
 
         // ── Idempotency: resuming a no-longer-suspended run is a no-op ──────────
         using (var scope = _fixture.BeginScope())
-            (await scope.Resolve<IWorkflowResumeService>().ResumeAsync(runId, CancellationToken.None))
+        {
+            var db = scope.Resolve<CodeSpaceDbContext>();
+            var waitId = (await db.WorkflowRunWait.AsNoTracking().SingleAsync(w => w.RunId == runId)).Id;
+            (await scope.Resolve<IWorkflowResumeService>().ResumeWaitAsync(runId, waitId, null, CancellationToken.None))
                 .ShouldBeFalse("a second resume of an already-resumed/terminal run does nothing");
+        }
     }
 
     [Fact]
