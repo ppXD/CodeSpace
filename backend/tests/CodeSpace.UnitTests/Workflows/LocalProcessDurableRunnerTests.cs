@@ -474,6 +474,34 @@ public sealed class LocalProcessDurableRunnerTests : IDisposable
         finally { try { Directory.Delete(secretDir, recursive: true); } catch { /* best-effort */ } }
     }
 
+    [Fact]
+    public async Task Bubblewrap_severs_egress_when_network_is_disallowed()
+    {
+        if (BubblewrapSandbox.Available is null)
+        {
+            BubblewrapSandbox.IsRequired.ShouldBeFalse("CODESPACE_REQUIRE_SANDBOX is set but this host cannot sandbox (bwrap/userns)");
+            return;
+        }
+
+        // AllowNetwork=false → --unshare-net → a fresh net namespace with only loopback, so a curl to a public IP
+        // has no route and fails fast — deterministic regardless of the host's own connectivity. (curl is installed
+        // in the validation container.)
+        var spec = new SandboxSpec
+        {
+            Command = "/bin/sh",
+            Args = new[] { "-c", "curl -s -m 4 -o /dev/null http://1.1.1.1 && echo NET-OK || echo NET-BLOCKED" },
+            WorkingDirectory = TempDir(),
+            AllowNetwork = false,
+            TimeoutSeconds = 30,
+        };
+
+        var handle = await LaunchAsync(spec);
+        var (_, lines) = await AttachCollectAsync(handle);
+
+        string.Join("\n", lines).ShouldContain("NET-BLOCKED",
+            customMessage: "with AllowNetwork=false the sandbox severs egress (loopback only) — no route to the internet / cloud-metadata");
+    }
+
     private string TempDir()
     {
         var dir = Path.Combine(Path.GetTempPath(), "cs-spool-test-" + Guid.NewGuid().ToString("N"));

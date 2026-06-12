@@ -291,6 +291,7 @@ public sealed partial class LocalProcessRunner
                 WorkingDirectory = spec.WorkingDirectory,
                 HomeDir = configHome,
                 WritablePaths = writable,
+                ShareNetwork = spec.AllowNetwork,
             }))
                 argv.Add(bwrapArg);
 

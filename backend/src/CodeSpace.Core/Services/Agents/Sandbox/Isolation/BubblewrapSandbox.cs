@@ -88,6 +88,11 @@ public static class BubblewrapSandbox
             "--tmpfs", "/tmp",               // private /tmp → host /tmp (other runs' spools) shadowed
         };
 
+        // Network: severed by default-deny when the run forbids it — a fresh net namespace with only loopback, so
+        // the agent cannot reach cloud-metadata (169.254.169.254), the LAN, or the internet. When allowed, the host
+        // network is shared (the agent reaches its model API). (Model-API-only egress allowlist is a later slice.)
+        if (!plan.ShareNetwork) args.Add("--unshare-net");
+
         // Read-only minimal root: the runtime + harness binary are reachable, the rest of the host FS is invisible.
         foreach (var dir in ReadOnlyRootDirs)
         {
@@ -195,4 +200,7 @@ public sealed record BwrapPlan
 
     /// <summary>Host paths bound READ-WRITE into the sandbox (this run's workspace + config-home) — the only writable host paths.</summary>
     public IReadOnlyList<string> WritablePaths { get; init; } = Array.Empty<string>();
+
+    /// <summary>Whether to SHARE the host network. <c>false</c> → <c>--unshare-net</c> (only loopback; no egress).</summary>
+    public bool ShareNetwork { get; init; } = true;
 }
