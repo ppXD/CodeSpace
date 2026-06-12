@@ -1,3 +1,5 @@
+/* eslint-disable react-refresh/only-export-components -- a context module deliberately co-locates its
+   provider component with the hooks that read it (useConfirm/useAlert); fast-refresh granularity is moot here. */
 import { createContext, useCallback, useContext, useMemo, useState, type ReactNode } from "react";
 
 import { Dialog } from "./dialog";

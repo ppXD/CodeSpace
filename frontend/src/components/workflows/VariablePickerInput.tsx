@@ -93,6 +93,9 @@ export function VariablePickerInput({ value, onChange, suggestions, placeholder,
   // Group + filter suggestions for the popover.
   const filtered = useMemo(() => filterSuggestions(suggestions, filter), [suggestions, filter]);
   const grouped = useMemo(() => groupSuggestions(filtered), [filtered]);
+  // Reset the highlight to the first suggestion whenever the filter text or open-state changes. The write
+  // is idempotent (0 → 0 is a no-op for React), so there's no cascading-render risk the rule guards against.
+  // eslint-disable-next-line react-hooks/set-state-in-effect
   useEffect(() => { setHighlightIndex(0); }, [filter, open]);
 
   // Hydrate / rehydrate the editor when `value` changes from outside. We DON'T rebuild on
@@ -510,7 +513,7 @@ function nodeToValue(node: Node): string {
   let out = "";
   for (const child of Array.from(node.childNodes)) {
     if (child.nodeType === Node.TEXT_NODE) {
-      out += (child.textContent ?? "").replace(/​/g, "");
+      out += (child.textContent ?? "").replace(/\u200B/g, "");
     } else if (child.nodeType === Node.ELEMENT_NODE) {
       const el = child as HTMLElement;
       if (el.classList.contains("wf-picker-chip") && el.dataset.path) {
