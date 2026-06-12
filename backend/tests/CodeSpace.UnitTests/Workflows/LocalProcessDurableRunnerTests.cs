@@ -1,4 +1,6 @@
 using System.Diagnostics;
+using System.Linq;
+using CodeSpace.Core.Services.Agents.Sandbox.Isolation;
 using CodeSpace.Core.Services.Agents.Sandbox.Runners;
 using CodeSpace.Messages.Agents;
 using Shouldly;
@@ -272,9 +274,24 @@ public sealed class LocalProcessDurableRunnerTests : IDisposable
         var c = info.ArgumentList.IndexOf("-c");
         c.ShouldBeGreaterThanOrEqualTo(0, "the supervisor is invoked via sh -c");
         info.ArgumentList[c + 2].ShouldBe("sh");                       // $0 — the script reads the real command from "$@"
-        info.ArgumentList[c + 3].ShouldBe("mycmd");
-        info.ArgumentList[c + 4].ShouldBe("--flag");
-        info.ArgumentList[c + 5].ShouldBe("value");
+
+        // "$@" is either the bare command (unconfined) or a bwrap wrapper terminated by `--` then the command
+        // (when this host can sandbox — e.g. a Linux CI box with bwrap + userns).
+        var afterDollarZero = info.ArgumentList.Skip(c + 3).ToList();
+        if (BubblewrapSandbox.Available is null)
+        {
+            // unconfined: the command runs directly under the supervisor.
+            afterDollarZero.ShouldBe(new[] { "mycmd", "--flag", "value" });
+        }
+        else
+        {
+            afterDollarZero[0].ShouldBe("bwrap", "confined: the command is rewritten as a bwrap invocation");
+            var sep = afterDollarZero.IndexOf("--");
+            sep.ShouldBeGreaterThan(0, "the bwrap args are terminated by --");
+            // the real command follows the bwrap -- terminator.
+            afterDollarZero.Skip(sep + 1).ShouldBe(new[] { "mycmd", "--flag", "value" });
+        }
+
         info.Environment["CSP_OUT"].ShouldBe(Path.Combine("/tmp/spool-x", "out.log"));
         info.Environment["CSP_ERR"].ShouldBe(Path.Combine("/tmp/spool-x", "err.log"));
         info.Environment["CSP_EXIT"].ShouldBe(Path.Combine("/tmp/spool-x", "exit"));
@@ -404,6 +421,57 @@ public sealed class LocalProcessDurableRunnerTests : IDisposable
 
         // Renaming this breaks an air-gapped operator who pinned a durable spool volume via env — pin it (Rule 8).
         LocalProcessRunner.SpoolRootEnvVar.ShouldBe("CODESPACE_AGENT_RUN_SPOOL_DIR");
+    }
+
+    // ─── Bubblewrap confinement E2E (Linux + bwrap only) ─────────────────────────
+    // 🟢 High fidelity (Rule 12): drives the REAL durable launch (setsid + sh supervisor + bwrap + spool + attach)
+    // against a real bwrap, and asserts REAL OS confinement — the agent reads its workspace but CANNOT read an
+    // operator secret planted outside the binds, and HOME is redirected into the per-run config-home. Skips on
+    // macOS dev / no bwrap / a host that denies unprivileged userns (Rule 12.1) — there the runner is unconfined
+    // by design and the dict-level argv build is covered by BubblewrapSandboxTests.
+
+    [Fact]
+    public async Task Bubblewrap_confines_the_agent_to_its_workspace_and_blocks_operator_secrets()
+    {
+        if (BubblewrapSandbox.Available is null)
+        {
+            // The validation environment (Docker/Linux) sets CODESPACE_REQUIRE_SANDBOX=1 — there, an unavailable
+            // sandbox is a HARD FAILURE, so this confinement assertion can never silently no-op into a green run.
+            BubblewrapSandbox.IsRequired.ShouldBeFalse("CODESPACE_REQUIRE_SANDBOX is set but this host cannot sandbox (bwrap/userns) — the E2E cannot prove confinement here");
+            return;
+        }
+
+        var workspace = TempDir();
+        await File.WriteAllTextAsync(Path.Combine(workspace, "code.txt"), "WORKSPACE-VISIBLE\n");
+
+        // An "operator secret" under /var/tmp — /var is NOT in the read-only root set, so it does not exist inside
+        // the sandbox at all. (Unique + cleaned up — Rule 12.2/12.3.)
+        var secretDir = Path.Combine("/var/tmp", "cs-host-secret-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(secretDir);
+        var secretPath = Path.Combine(secretDir, "id_rsa");
+        await File.WriteAllTextAsync(secretPath, "OPERATOR-PRIVATE-KEY-7f3a");
+
+        try
+        {
+            var spec = new SandboxSpec
+            {
+                Command = "/bin/sh",
+                Args = new[] { "-c", $"cat code.txt; printf 'HOME=%s\\n' \"$HOME\"; cat {secretPath} 2>&1 || true" },
+                WorkingDirectory = workspace,
+                ConfigHomeEnvVars = new[] { "CLAUDE_CONFIG_DIR" },
+                TimeoutSeconds = 30,
+            };
+
+            var handle = await LaunchAsync(spec);
+            var (result, lines) = await AttachCollectAsync(handle);
+            var output = string.Join("\n", lines);
+
+            result.Status.ShouldBe(SandboxStatus.Success, "the confined command runs to a clean exit");
+            output.ShouldContain("WORKSPACE-VISIBLE", customMessage: "the workspace is bound read-write and readable inside the sandbox");
+            output.ShouldNotContain("OPERATOR-PRIVATE-KEY", customMessage: "an operator secret OUTSIDE the binds is invisible to the confined agent — the core isolation guarantee");
+            output.ShouldContain("HOME=" + Path.Combine(handle.SpoolDirectory, "agent-home"), customMessage: "HOME is redirected into the per-run config-home, not the operator's real home (so ~/.ssh etc. miss)");
+        }
+        finally { try { Directory.Delete(secretDir, recursive: true); } catch { /* best-effort */ } }
     }
 
     private string TempDir()

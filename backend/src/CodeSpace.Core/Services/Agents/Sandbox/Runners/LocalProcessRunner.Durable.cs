@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Text;
+using CodeSpace.Core.Services.Agents.Sandbox.Isolation;
 using CodeSpace.Messages.Agents;
 
 namespace CodeSpace.Core.Services.Agents.Sandbox.Runners;
@@ -238,8 +239,16 @@ public sealed partial class LocalProcessRunner
         info.ArgumentList.Add("-c");
         info.ArgumentList.Add(SupervisorScript);
         info.ArgumentList.Add("sh");          // $0 — the script reads the command + args from "$@" ($1 onward)
-        info.ArgumentList.Add(spec.Command);
-        foreach (var arg in spec.Args) info.ArgumentList.Add(arg);
+
+        // The per-run isolated config-home (Claude Code's CLAUDE_CONFIG_DIR / Codex's CODEX_HOME) doubles as the
+        // sandbox's writable HOME + a writable bind, so compute + create it BEFORE building the command. Created
+        // here (before launch) so bwrap's --bind source exists when the process starts.
+        var configHome = spec.ConfigHomeEnvVars.Count > 0 ? Path.Combine(spoolDir, AgentConfigHomeDir) : null;
+        if (configHome is not null) Directory.CreateDirectory(configHome);
+
+        // The actual command "$@": CONFINED under bwrap when this host supports it (fresh namespaces + read-only
+        // minimal root + only the workspace/config-home writable), else the bare command (unconfined fallback).
+        AppendChildCommand(info.ArgumentList, spec, configHome);
 
         ApplyEnvironment(info, spec);
 
@@ -249,18 +258,47 @@ public sealed partial class LocalProcessRunner
         info.Environment["CSP_EXIT"] = Path.Combine(spoolDir, ExitMarkerFile);
         info.Environment["CSP_PID"] = Path.Combine(spoolDir, PidFile);
 
-        // Point any config-isolating tool at a FRESH per-run home under the spool dir, so a shelled-out CLI
-        // (Claude Code's CLAUDE_CONFIG_DIR, Codex's CODEX_HOME) reads ONLY the credentials we inject — never the
-        // operator's personal ~/.claude / ~/.codex, whose base-URL / proxy overrides would hijack the run. Also
-        // set AFTER the scrub so an injected value wins, and reaped with the spool dir.
-        if (spec.ConfigHomeEnvVars.Count > 0)
-        {
-            var configHome = Path.Combine(spoolDir, AgentConfigHomeDir);
-            Directory.CreateDirectory(configHome);
+        // Point the config-isolating tool at the per-run home so a shelled-out CLI reads ONLY the credentials we
+        // inject — never the operator's personal ~/.claude / ~/.codex. Set AFTER the scrub so the injected value wins.
+        if (configHome is not null)
             foreach (var name in spec.ConfigHomeEnvVars) info.Environment[name] = configHome;
-        }
 
         return info;
+    }
+
+    /// <summary>
+    /// Append the agent command as the supervisor's <c>"$@"</c>: rewritten as a bubblewrap invocation
+    /// (filesystem + namespace confinement, the ONLY writable host paths being the workspace + config-home) when
+    /// <see cref="BubblewrapSandbox.Available"/>, else the bare command — the unconfined fallback on macOS dev, a
+    /// host without <c>bwrap</c>, or one that denies unprivileged user namespaces.
+    /// </summary>
+    private static void AppendChildCommand(System.Collections.ObjectModel.Collection<string> argv, SandboxSpec spec, string? configHome)
+    {
+        // Fail-closed: a deployment that mandates isolation (CODESPACE_REQUIRE_SANDBOX) must never run unconfined.
+        BubblewrapSandbox.EnsureSatisfiable(BubblewrapSandbox.Available, BubblewrapSandbox.IsRequired);
+
+        if (BubblewrapSandbox.Available is { } bwrap)
+        {
+            var writable = new List<string>();
+            if (!string.IsNullOrEmpty(spec.WorkingDirectory)) writable.Add(spec.WorkingDirectory);
+            if (configHome is not null) writable.Add(configHome);
+
+            argv.Add(bwrap);
+            foreach (var bwrapArg in BubblewrapSandbox.BuildArgs(new BwrapPlan
+            {
+                Command = spec.Command,
+                Args = spec.Args,
+                WorkingDirectory = spec.WorkingDirectory,
+                HomeDir = configHome,
+                WritablePaths = writable,
+            }))
+                argv.Add(bwrapArg);
+
+            return;
+        }
+
+        argv.Add(spec.Command);
+        foreach (var arg in spec.Args) argv.Add(arg);
     }
 
     internal static string SpoolRoot() =>
