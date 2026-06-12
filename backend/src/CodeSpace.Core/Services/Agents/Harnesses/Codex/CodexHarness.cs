@@ -32,6 +32,13 @@ public sealed class CodexHarness : IAgentHarness, IModelCredentialProjector, ISi
     /// <summary>The env var Codex reads a base-URL override from (OpenRouter / a self-hosted OpenAI-compatible gateway / a local Ollama). Pinned by a test (Rule 8).</summary>
     public const string BaseUrlEnvVar = "OPENAI_BASE_URL";
 
+    /// <summary>
+    /// Codex's config-home override (relocates <c>~/.codex</c>). The runner points it at a per-run isolated dir so
+    /// an agent run reads ONLY the credentials we inject — never the operator's personal <c>~/.codex</c>, whose
+    /// <c>config.toml</c> model-provider base-URL would otherwise override our injected gateway. Pinned by a test (Rule 8).
+    /// </summary>
+    public const string ConfigHomeEnvVar = "CODEX_HOME";
+
     private const string DefaultVersion = "0.2.0";
 
     private const string DefaultCommand = "codex";
@@ -70,6 +77,8 @@ public sealed class CodexHarness : IAgentHarness, IModelCredentialProjector, ISi
             WorkingDirectory = task.WorkspaceDirectory,
             Environment = task.Environment,
             TimeoutSeconds = task.TimeoutSeconds,
+            // Isolate Codex's config home per run so it ignores the operator's personal ~/.codex.
+            ConfigHomeEnvVars = new[] { ConfigHomeEnvVar },
         };
     }
 

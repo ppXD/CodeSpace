@@ -21,6 +21,16 @@ public sealed record SandboxSpec
 
     /// <summary>Wall-clock cap. On expiry the runner terminates the command (and its children) and returns <see cref="SandboxStatus.TimedOut"/>.</summary>
     public int TimeoutSeconds { get; init; } = 600;
+
+    /// <summary>
+    /// Names of environment variables that must point the command at a PER-RUN ISOLATED config home rather
+    /// than the operator's personal dotfiles under <c>$HOME</c>. The durable runner creates a fresh directory
+    /// under the run's spool dir and sets every name here to it, so a shelled-out CLI (Claude Code's
+    /// <c>CLAUDE_CONFIG_DIR</c>, Codex's <c>CODEX_HOME</c>) reads ONLY the credentials/config we inject — never
+    /// the operator's <c>~/.claude</c> / <c>~/.codex</c>, whose base-URL / proxy overrides would otherwise
+    /// hijack the run. Empty → the command needs no config isolation.
+    /// </summary>
+    public IReadOnlyList<string> ConfigHomeEnvVars { get; init; } = Array.Empty<string>();
 }
 
 /// <summary>

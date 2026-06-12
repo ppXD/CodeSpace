@@ -38,6 +38,13 @@ public sealed class ClaudeCodeHarness : IAgentHarness, IModelCredentialProjector
     /// <summary>The env var Claude Code authenticates a gateway/proxy with (used instead of the api key when talking to a non-Anthropic endpoint). Pinned by a test (Rule 8).</summary>
     public const string AuthTokenEnvVar = "ANTHROPIC_AUTH_TOKEN";
 
+    /// <summary>
+    /// Claude Code's config-dir override. The runner points it at a per-run isolated dir so an agent run reads
+    /// ONLY the credentials we inject — never the operator's personal <c>~/.claude</c> (settings, hooks, CLAUDE.md),
+    /// whose <c>env.ANTHROPIC_BASE_URL</c> would otherwise override our injected gateway. Pinned by a test (Rule 8).
+    /// </summary>
+    public const string ConfigDirEnvVar = "CLAUDE_CONFIG_DIR";
+
     private const string AnthropicProvider = "Anthropic";
 
     private const string DefaultVersion = "2.1.0";
@@ -82,6 +89,8 @@ public sealed class ClaudeCodeHarness : IAgentHarness, IModelCredentialProjector
             WorkingDirectory = task.WorkspaceDirectory,
             Environment = task.Environment,
             TimeoutSeconds = task.TimeoutSeconds,
+            // Isolate Claude Code's config dir per run so it ignores the operator's personal ~/.claude.
+            ConfigHomeEnvVars = new[] { ConfigDirEnvVar },
         };
     }
 

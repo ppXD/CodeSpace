@@ -254,6 +254,17 @@ public class ClaudeCodeHarnessTests
     }
 
     [Fact]
+    public void Requests_config_dir_isolation_so_the_agent_ignores_the_operators_personal_claude_config() =>
+        // The runner redirects this var to a per-run isolated dir, so a run never reads the operator's
+        // ~/.claude (whose env.ANTHROPIC_BASE_URL would otherwise override our injected gateway → ConnectionRefused).
+        Harness.BuildInvocation(Task()).ConfigHomeEnvVars.ShouldBe(new[] { "CLAUDE_CONFIG_DIR" });
+
+    [Fact]
+    public void ConfigDirEnvVar_constant_name_is_pinned() =>
+        // Claude Code reads its config dir from this exact name; renaming it would silently re-leak the operator's ~/.claude.
+        ClaudeCodeHarness.ConfigDirEnvVar.ShouldBe("CLAUDE_CONFIG_DIR");
+
+    [Fact]
     public void Command_uses_the_default_then_the_env_override()
     {
         var original = System.Environment.GetEnvironmentVariable(ClaudeCodeHarness.CommandEnvVar);

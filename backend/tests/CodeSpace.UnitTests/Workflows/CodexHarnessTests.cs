@@ -193,6 +193,17 @@ public class CodexHarnessTests
     }
 
     [Fact]
+    public void Requests_config_home_isolation_so_the_agent_ignores_the_operators_personal_codex_config() =>
+        // The runner redirects this var to a per-run isolated dir, so a run never reads the operator's
+        // ~/.codex (whose config.toml model-provider base-URL would otherwise override our injected gateway).
+        Harness.BuildInvocation(Task()).ConfigHomeEnvVars.ShouldBe(new[] { "CODEX_HOME" });
+
+    [Fact]
+    public void ConfigHomeEnvVar_constant_name_is_pinned() =>
+        // Codex reads its config home from this exact name; renaming it would silently re-leak the operator's ~/.codex.
+        CodexHarness.ConfigHomeEnvVar.ShouldBe("CODEX_HOME");
+
+    [Fact]
     public void Command_uses_the_default_then_the_env_override()
     {
         var original = System.Environment.GetEnvironmentVariable(CodexHarness.CommandEnvVar);

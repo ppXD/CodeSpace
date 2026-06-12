@@ -30,6 +30,9 @@ public sealed partial class LocalProcessRunner
     private const string ExitMarkerFile = "exit";
     private const string PidFile = "pid";
 
+    /// <summary>Per-run isolated config home (under the spool dir) that <see cref="SandboxSpec.ConfigHomeEnvVars"/> point at — keeps a shelled-out CLI off the operator's personal dotfiles. Reaped with the spool dir.</summary>
+    private const string AgentConfigHomeDir = "agent-home";
+
     /// <summary>Tail cadence — how often the observer re-reads the spool for new lines / checks the exit marker.</summary>
     private static readonly TimeSpan PollInterval = TimeSpan.FromMilliseconds(250);
 
@@ -245,6 +248,17 @@ public sealed partial class LocalProcessRunner
         info.Environment["CSP_ERR"] = Path.Combine(spoolDir, StderrFile);
         info.Environment["CSP_EXIT"] = Path.Combine(spoolDir, ExitMarkerFile);
         info.Environment["CSP_PID"] = Path.Combine(spoolDir, PidFile);
+
+        // Point any config-isolating tool at a FRESH per-run home under the spool dir, so a shelled-out CLI
+        // (Claude Code's CLAUDE_CONFIG_DIR, Codex's CODEX_HOME) reads ONLY the credentials we inject — never the
+        // operator's personal ~/.claude / ~/.codex, whose base-URL / proxy overrides would hijack the run. Also
+        // set AFTER the scrub so an injected value wins, and reaped with the spool dir.
+        if (spec.ConfigHomeEnvVars.Count > 0)
+        {
+            var configHome = Path.Combine(spoolDir, AgentConfigHomeDir);
+            Directory.CreateDirectory(configHome);
+            foreach (var name in spec.ConfigHomeEnvVars) info.Environment[name] = configHome;
+        }
 
         return info;
     }
