@@ -38,11 +38,11 @@ public sealed class FlowIterateNode : INodeRuntime
 
     public NodeManifest Manifest { get; } = new()
     {
-        DisplayName = "For each (map)",
+        DisplayName = "Transform each item",
         Category = "Logic",
         Kind = NodeKind.Regular,
-        IconKey = "repeat",
-        Description = "Maps an array through a template expression. Use flow.subworkflow when each iteration needs a multi-node subgraph.",
+        IconKey = "list",
+        Description = "Runs one expression on every item in a list and collects the results into a new list. For multi-step work per item, use Loop.",
         ConfigSchema = SchemaBuilder.Parse("""
             {
               "type": "object",

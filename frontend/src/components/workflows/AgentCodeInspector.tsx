@@ -81,7 +81,7 @@ export function AgentCodeInspector({ config, inputs, onConfigChange, onInputsCha
         <div className="wf-inspector-section-h">Harness</div>
         <div className="wf-form-row">
           <HarnessSelector value={harness} onChange={(v) => patch({ harness: v })} />
-          <span className="wf-form-help">The wire protocol the run speaks. Required whether or not you bind an Agent.</span>
+          <span className="wf-form-help">Which coding-agent CLI runs the task (e.g. Codex, Claude Code). Required whether or not you bind an Agent.</span>
         </div>
       </section>
 
