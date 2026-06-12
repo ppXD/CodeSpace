@@ -49,6 +49,7 @@ public class BuiltinPluginModuleTests
         module.Nodes.ShouldContain(typeof(CodeSpace.Core.Services.Workflows.Nodes.Builtin.GitFetchPrChecksNode));
         module.Nodes.ShouldContain(typeof(CodeSpace.Core.Services.Workflows.Nodes.Builtin.GitListPullRequestsNode));
         module.Nodes.ShouldContain(typeof(CodeSpace.Core.Services.Workflows.Nodes.Builtin.GitPostPrCommentNode));
+        module.Nodes.ShouldContain(typeof(CodeSpace.Core.Services.Workflows.Nodes.Builtin.GitOpenPullRequestNode));
         module.RunSourceMatchers.Count.ShouldBe(2, "the PR matchers ride with the git plugin so disabling git unloads them together");
     }
 
@@ -97,6 +98,6 @@ public class BuiltinPluginModuleTests
         };
 
         var total = all.SelectMany(p => p.Nodes).Distinct().Count();
-        total.ShouldBe(24, "24 builtin node types across 5 domain plugins (added the Git plugin's git.list_prs discovery node) — adjust this number when adding a builtin");
+        total.ShouldBe(25, "25 builtin node types across 5 domain plugins (added the Git plugin's git.open_pr node) — adjust this number when adding a builtin");
     }
 }
