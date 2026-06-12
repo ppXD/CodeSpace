@@ -62,7 +62,7 @@ public sealed partial class LocalProcessRunner
         var spoolDir = SpoolDirectoryFor(spoolKey);
         Directory.CreateDirectory(spoolDir);
 
-        using var process = new Process { StartInfo = BuildDurableStartInfo(spec, spoolDir, ParseEnvScrubFlag(Environment.GetEnvironmentVariable(EnvScrubEnvVar))) };
+        using var process = new Process { StartInfo = BuildDurableStartInfo(spec, spoolDir) };
         process.Start();
 
         // The launched process may be `setsid` (Linux); its own id isn't a reliable handle for the supervisor
@@ -205,7 +205,7 @@ public sealed partial class LocalProcessRunner
         return newOffset;
     }
 
-    internal static ProcessStartInfo BuildDurableStartInfo(SandboxSpec spec, string spoolDir, bool scrub)
+    internal static ProcessStartInfo BuildDurableStartInfo(SandboxSpec spec, string spoolDir)
     {
         var info = new ProcessStartInfo
         {
@@ -238,9 +238,9 @@ public sealed partial class LocalProcessRunner
         info.ArgumentList.Add(spec.Command);
         foreach (var arg in spec.Args) info.ArgumentList.Add(arg);
 
-        ApplyEnvironment(info, spec, scrub);
+        ApplyEnvironment(info, spec);
 
-        // Added AFTER ApplyEnvironment so they survive a scrub-driven Clear(); they are spool paths, not secrets.
+        // Added AFTER ApplyEnvironment so they survive the scrub-driven Clear(); they are spool paths, not secrets.
         info.Environment["CSP_OUT"] = Path.Combine(spoolDir, StdoutFile);
         info.Environment["CSP_ERR"] = Path.Combine(spoolDir, StderrFile);
         info.Environment["CSP_EXIT"] = Path.Combine(spoolDir, ExitMarkerFile);

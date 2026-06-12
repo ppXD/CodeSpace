@@ -254,7 +254,7 @@ public sealed class LocalProcessDurableRunnerTests : IDisposable
     public void BuildDurableStartInfo_wraps_the_command_in_a_sh_supervisor_pointing_at_the_spool()
     {
         var info = LocalProcessRunner.BuildDurableStartInfo(
-            new SandboxSpec { Command = "mycmd", Args = new[] { "--flag", "value" } }, "/tmp/spool-x", scrub: false);
+            new SandboxSpec { Command = "mycmd", Args = new[] { "--flag", "value" } }, "/tmp/spool-x");
 
         // On Linux the supervisor is launched under `setsid` (a new session, so it survives a group signal) with
         // /bin/sh as setsid's first arg; on macOS dev there's no setsid binary, so /bin/sh runs directly. Either
@@ -287,7 +287,7 @@ public sealed class LocalProcessDurableRunnerTests : IDisposable
         // The spool paths are added AFTER ApplyEnvironment, so a scrub's Clear() can't drop them — otherwise a
         // scrubbed run would have nowhere to write its output.
         var info = LocalProcessRunner.BuildDurableStartInfo(
-            new SandboxSpec { Command = "mycmd" }, "/tmp/spool-y", scrub: true);
+            new SandboxSpec { Command = "mycmd" }, "/tmp/spool-y");
 
         info.Environment.ShouldContainKey("CSP_OUT");
         info.Environment.ShouldContainKey("CSP_ERR");
