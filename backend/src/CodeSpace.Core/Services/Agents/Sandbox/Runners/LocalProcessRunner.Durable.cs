@@ -151,6 +151,14 @@ public sealed partial class LocalProcessRunner
         }
     }
 
+    public Task TerminateAsync(SandboxHandle handle, CancellationToken cancellationToken)
+    {
+        // The explicit kill (NOT the cancel-stops-observing path): reuse the same start-time-guarded tree-kill the
+        // timeout path uses, so a recycled pid is never killed and an already-exited run is a quiet no-op.
+        KillByIdQuietly(handle.ProcessId, handle.ProcessStartTimeUtc);
+        return Task.CompletedTask;
+    }
+
     public Task<SandboxProbe> ProbeAsync(SandboxHandle handle, CancellationToken cancellationToken)
     {
         // Marker first: it's written BEFORE the supervisor exits, so its presence authoritatively means "finished".
@@ -412,7 +420,7 @@ public sealed partial class LocalProcessRunner
         catch { return null; }
     }
 
-    /// <summary>Terminate the supervisor's process tree on the timeout path — but only when the pid is still OUR supervisor (the start-time guard), so a recycled pid handed to an unrelated process is never killed by us.</summary>
+    /// <summary>Terminate the supervisor's process tree (the timeout path and the explicit <see cref="TerminateAsync"/>) — but only when the pid is still OUR supervisor (the start-time guard), so a recycled pid handed to an unrelated process is never killed by us.</summary>
     private static void KillByIdQuietly(int pid, DateTimeOffset? expectedStartUtc)
     {
         try
