@@ -277,29 +277,35 @@ public sealed partial class LocalProcessRunner
         // Fail-closed: a deployment that mandates isolation (CODESPACE_REQUIRE_SANDBOX) must never run unconfined.
         BubblewrapSandbox.EnsureSatisfiable(BubblewrapSandbox.Available, BubblewrapSandbox.IsRequired);
 
+        var command = spec.Command;
+        IReadOnlyList<string> args = spec.Args;
+
+        // 1. Filesystem + namespace confinement (bubblewrap), innermost.
         if (BubblewrapSandbox.Available is { } bwrap)
         {
             var writable = new List<string>();
             if (!string.IsNullOrEmpty(spec.WorkingDirectory)) writable.Add(spec.WorkingDirectory);
             if (configHome is not null) writable.Add(configHome);
 
-            argv.Add(bwrap);
-            foreach (var bwrapArg in BubblewrapSandbox.BuildArgs(new BwrapPlan
+            args = BubblewrapSandbox.BuildArgs(new BwrapPlan
             {
-                Command = spec.Command,
-                Args = spec.Args,
+                Command = command,
+                Args = args,
                 WorkingDirectory = spec.WorkingDirectory,
                 HomeDir = configHome,
                 WritablePaths = writable,
                 ShareNetwork = spec.AllowNetwork,
-            }))
-                argv.Add(bwrapArg);
-
-            return;
+            });
+            command = bwrap;
         }
 
-        argv.Add(spec.Command);
-        foreach (var arg in spec.Args) argv.Add(arg);
+        // 2. Resource caps (prlimit), outermost — sets RLIMIT_NPROC + RLIMIT_FSIZE, then execs bwrap/agent which
+        //    inherit them. Fork-bomb + runaway-file caps; memory-RSS + total-disk need the cgroup tier (a later slice).
+        if (ProcessRlimits.Available is { } prlimit)
+            (command, args) = ProcessRlimits.Wrap(prlimit, command, args, ProcessRlimits.EffectiveMaxProcesses(spec.MaxProcesses), ProcessRlimits.EffectiveMaxFileSizeMb(spec.MaxFileSizeMb));
+
+        argv.Add(command);
+        foreach (var arg in args) argv.Add(arg);
     }
 
     internal static string SpoolRoot() =>
