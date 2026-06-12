@@ -295,6 +295,57 @@ public sealed class LocalProcessDurableRunnerTests : IDisposable
         info.Environment.ShouldContainKey("CSP_PID");
     }
 
+    [Fact]
+    public void BuildDurableStartInfo_points_config_home_env_vars_at_one_fresh_isolated_dir_under_the_spool()
+    {
+        // A config-isolating harness (Claude Code / Codex) asks for its config-dir var to be redirected so a
+        // shelled-out CLI never reads the operator's ~/.claude / ~/.codex. The runner points every requested
+        // name at ONE fresh dir under the spool (created here, reaped with the spool dir).
+        var spool = Path.Combine(Path.GetTempPath(), "codespace-cfg-" + Guid.NewGuid().ToString("N"));
+        _spoolDirs.Add(spool);
+
+        var info = LocalProcessRunner.BuildDurableStartInfo(
+            new SandboxSpec { Command = "mycmd", ConfigHomeEnvVars = new[] { "CLAUDE_CONFIG_DIR", "CODEX_HOME" } }, spool);
+
+        var expected = Path.Combine(spool, "agent-home");
+        info.Environment["CLAUDE_CONFIG_DIR"].ShouldBe(expected);
+        info.Environment["CODEX_HOME"].ShouldBe(expected, "every requested name points at the single isolated home");
+        Directory.Exists(expected).ShouldBeTrue("the home is created so the CLI initializes a clean config there");
+    }
+
+    [Fact]
+    public void BuildDurableStartInfo_adds_no_config_home_when_a_harness_requests_none()
+    {
+        var info = LocalProcessRunner.BuildDurableStartInfo(new SandboxSpec { Command = "mycmd" }, "/tmp/spool-noconfig");
+
+        info.Environment.ShouldNotContainKey("CLAUDE_CONFIG_DIR");
+        Directory.Exists(Path.Combine("/tmp/spool-noconfig", "agent-home")).ShouldBeFalse("no isolation requested → no per-run config home");
+    }
+
+    [Fact]
+    public async Task A_launched_process_sees_its_config_home_env_var_pointing_at_an_isolated_spool_dir()
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        // End-to-end on a REAL process: the child a config-isolating harness drives must actually SEE its
+        // config-dir var set to a fresh per-run dir under the spool — so Claude Code / Codex read only the
+        // config we inject, never the operator's personal ~/.claude / ~/.codex.
+        var handle = await LaunchAsync(new SandboxSpec
+        {
+            Command = "/bin/sh",
+            Args = new[] { "-c", "printf '%s' \"$CLAUDE_CONFIG_DIR\"" },
+            ConfigHomeEnvVars = new[] { "CLAUDE_CONFIG_DIR" },
+        });
+
+        var (result, lines) = await AttachCollectAsync(handle);
+
+        result.Status.ShouldBe(SandboxStatus.Success);
+        var expected = Path.Combine(handle.SpoolDirectory, "agent-home");
+        // The child read CLAUDE_CONFIG_DIR set to the isolated per-run home under the spool (not the operator's ~/.claude).
+        lines.ShouldBe(new[] { expected });
+        Directory.Exists(expected).ShouldBeTrue("the isolated config home exists for the CLI to initialize into");
+    }
+
     [Theory]
     [InlineData("alpha\nbeta\n", "alpha|beta")]       // trailing newline → the empty remainder is dropped
     [InlineData("alpha\nbeta", "alpha|beta")]         // trailing partial (no newline) → kept
