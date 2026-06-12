@@ -1,0 +1,87 @@
+name: Backend · E2E (HTTP)
+
+# The E2E tier: hosts the REAL ASP.NET pipeline (routing, [AllowAnonymous], model binding, the
+# GlobalExceptionFilter) in-memory via WebApplicationFactory against a throw-away GUID Postgres
+# database — the actual HTTP status code a webhook provider receives. The factory injects its own
+# master key / JWT / OAuth config, so the only infra this needs is the Postgres service below
+# (reached at localhost:5432, matching the committed appsettings.json admin connection).
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'backend/**'
+      - '.github/workflows/backend-e2e.yml'
+  pull_request:
+    paths:
+      - 'backend/**'
+      - '.github/workflows/backend-e2e.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: backend-e2e-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  DOTNET_NOLOGO: 'true'
+  DOTNET_CLI_TELEMETRY_OPTOUT: 'true'
+  DOTNET_SKIP_FIRST_TIME_EXPERIENCE: 'true'
+
+jobs:
+  e2e:
+    name: dotnet test (E2ETests · Postgres)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    services:
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: '123456'
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d postgres"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up .NET 10
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Cache NuGet packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.nuget/packages
+          key: nuget-e2e-${{ runner.os }}-${{ hashFiles('backend/**/*.csproj') }}
+          restore-keys: nuget-e2e-${{ runner.os }}-
+
+      - name: Restore
+        run: dotnet restore backend/tests/CodeSpace.E2ETests/CodeSpace.E2ETests.csproj
+
+      - name: Test
+        run: >
+          dotnet test backend/tests/CodeSpace.E2ETests/CodeSpace.E2ETests.csproj
+          --no-restore
+          --logger "console;verbosity=normal"
+          --logger "trx;LogFileName=e2e.trx"
+          --results-directory backend/TestResults
+          --blame-hang-timeout 5m
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-e2e-trx
+          path: backend/TestResults/*.trx
+          if-no-files-found: ignore

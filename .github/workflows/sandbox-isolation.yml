@@ -1,0 +1,117 @@
+name: Sandbox · Isolation E2E
+
+# The OS-isolation crown jewel — the ONLY suite that cannot run on a macOS dev host. It drives the
+# REAL durable launch (setsid + sh supervisor + bubblewrap + prlimit + spool) against real binaries
+# and asserts REAL kernel confinement: an operator secret outside the binds is invisible, egress is
+# severed when the network is disallowed, and RLIMIT_NPROC / RLIMIT_FSIZE caps reach the agent.
+#
+# Runs in a PRIVILEGED container so unprivileged user namespaces work regardless of the host runner's
+# AppArmor policy — exactly the `docker run --privileged dotnet/sdk:10.0 + apt install bubblewrap`
+# environment these tests were validated against locally.
+#
+# CODESPACE_REQUIRE_SANDBOX=1 is the fail-closed guarantee: if bubblewrap / userns is NOT working,
+# the tests do NOT silently skip — their gate asserts IsRequired==false and so fails HARD. Green here
+# therefore means "confinement was actually exercised", never "the environment couldn't sandbox".
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'backend/**'
+      - '.github/workflows/sandbox-isolation.yml'
+  pull_request:
+    paths:
+      - 'backend/**'
+      - '.github/workflows/sandbox-isolation.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: sandbox-isolation-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  DOTNET_NOLOGO: 'true'
+  DOTNET_CLI_TELEMETRY_OPTOUT: 'true'
+  DOTNET_SKIP_FIRST_TIME_EXPERIENCE: 'true'
+
+jobs:
+  isolation:
+    name: bubblewrap + prlimit confinement (fail-closed)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    container:
+      image: mcr.microsoft.com/dotnet/sdk:10.0
+      options: --privileged
+
+    env:
+      # Fail-closed: a degraded sandbox (no bwrap / no userns) becomes a HARD test failure, so
+      # confinement can never silently no-op into a green run.
+      CODESPACE_REQUIRE_SANDBOX: '1'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install bubblewrap + util-linux (prlimit)
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends bubblewrap util-linux ca-certificates
+          echo "bwrap: $(bwrap --version)"
+          echo "prlimit: $(prlimit --version)"
+
+      - name: Probe — unprivileged user namespaces (informational)
+        # Informational only: the authoritative gate is the test step below (REQUIRE_SANDBOX=1 → hard
+        # fail if confinement is unavailable). This just surfaces a clear "userns works/doesn't" signal
+        # early without ever failing the job on a bwrap-flag quirk.
+        run: |
+          if bwrap --ro-bind / / --dev /dev --proc /proc --unshare-all --uid 0 true; then
+            echo "✓ unprivileged user namespaces work"
+          else
+            echo "⚠ userns probe failed — the REQUIRE_SANDBOX=1 test step is authoritative and will fail hard if confinement is truly unavailable"
+          fi
+
+      - name: Cache NuGet packages
+        uses: actions/cache@v4
+        with:
+          path: /root/.nuget/packages
+          key: nuget-sandbox-${{ hashFiles('backend/**/*.csproj') }}
+          restore-keys: nuget-sandbox-
+
+      - name: Restore
+        run: dotnet restore backend/tests/CodeSpace.UnitTests/CodeSpace.UnitTests.csproj
+
+      - name: Test (real bwrap / prlimit confinement)
+        run: >
+          dotnet test backend/tests/CodeSpace.UnitTests/CodeSpace.UnitTests.csproj
+          --no-restore
+          --filter "Category=Sandbox"
+          --logger "console;verbosity=detailed"
+          --logger "trx;LogFileName=sandbox.trx"
+          --results-directory backend/TestResults
+
+      - name: Assert the isolation tests actually ran (no silent skip)
+        # `dotnet test --filter` EXITS 0 even when the filter matches ZERO tests, so a trait regression
+        # could make this job pass green while exercising nothing. Read the trx counters and require the
+        # 4 known confinement tests to have executed. (REQUIRE_SANDBOX=1 already turns a "ran but couldn't
+        # sandbox" degrade into a hard failure; this closes the complementary "matched nothing" hole.)
+        run: |
+          trx=backend/TestResults/sandbox.trx
+          test -f "$trx" || { echo "::error::trx not found at $trx — the test step produced no results"; exit 1; }
+          executed=$(grep -oE 'executed="[0-9]+"' "$trx" | head -1 | grep -oE '[0-9]+')
+          passed=$(grep -oE 'passed="[0-9]+"' "$trx" | head -1 | grep -oE '[0-9]+')
+          echo "executed=${executed:-0} passed=${passed:-0}"
+          if [ "${executed:-0}" -lt 4 ]; then
+            echo "::error::Expected >=4 sandbox isolation tests to run, but only ${executed:-0} did — the Category=Sandbox filter matched too few (trait regression?)."
+            exit 1
+          fi
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sandbox-isolation-trx
+          path: backend/TestResults/*.trx
+          if-no-files-found: ignore
