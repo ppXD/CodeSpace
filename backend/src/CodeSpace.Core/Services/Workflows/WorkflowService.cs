@@ -335,13 +335,18 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
             .AnyAsync(r => r.Id == runId && r.Workflow.TeamId == teamId, cancellationToken).ConfigureAwait(false);
         if (!exists) throw new KeyNotFoundException($"WorkflowRun {runId} not found in team {teamId}.");
 
-        // Only act when an Approval wait is actually pending. Approving a run parked on a timer /
-        // callback, or one that isn't suspended, is a no-op (the resume CAS would also reject it).
-        var hasApprovalWait = await _db.WorkflowRunWait
-            .AnyAsync(w => w.RunId == runId && w.Status == WorkflowWaitStatuses.Pending && w.WaitKind == WorkflowWaitKinds.Approval, cancellationToken)
+        // Resolve the run's pending Approval wait — the OLDEST one, so two parallel approvals resolve
+        // deterministically one click at a time and this run-level approve never collapses a sibling
+        // approval / callback / timer wait. Approving a run parked only on a timer / callback, or one
+        // that isn't suspended, finds no approval wait → no-op (the resume CAS would also reject it).
+        var approvalWaitId = await _db.WorkflowRunWait
+            .Where(w => w.RunId == runId && w.Status == WorkflowWaitStatuses.Pending && w.WaitKind == WorkflowWaitKinds.Approval)
+            .OrderBy(w => w.CreatedAt)
+            .Select(w => (Guid?)w.Id)
+            .FirstOrDefaultAsync(cancellationToken)
             .ConfigureAwait(false);
 
-        if (!hasApprovalWait) return false;
+        if (approvalWaitId is null) return false;
 
         var payload = JsonSerializer.Serialize(new
         {
@@ -351,7 +356,7 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
             resumed_at = DateTimeOffset.UtcNow.ToString("o"),
         });
 
-        var resumed = await _resumeService.ResumeAsync(runId, payload, cancellationToken).ConfigureAwait(false);
+        var resumed = await _resumeService.ResumeWaitAsync(runId, approvalWaitId.Value, payload, cancellationToken).ConfigureAwait(false);
 
         _logger.LogInformation(
             "Run approval. RunId={RunId} TeamId={TeamId} Approved={Approved} By={Actor} Resumed={Resumed}",

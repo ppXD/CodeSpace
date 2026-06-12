@@ -1680,7 +1680,7 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
         // which resolves ONLY this wait with the default-on-timeout payload if it's still pending —
         // idempotent against a human resolving first.
         if (waitKind == WorkflowWaitKinds.Timer && wakeAt.HasValue)
-            _backgroundJobClient.Schedule<IWorkflowResumeService>(s => s.ResumeAsync(run.Id, CancellationToken.None), wakeAt.Value);
+            _backgroundJobClient.Schedule<IWorkflowResumeService>(s => s.ResumeWaitAsync(run.Id, waitId, null, CancellationToken.None), wakeAt.Value);
         else if (token.DeadlineAt.HasValue && token.TimeoutPayload is { ValueKind: not JsonValueKind.Undefined and not JsonValueKind.Null } timeoutPayload)
             _backgroundJobClient.Schedule<IWorkflowResumeService>(s => s.ResumeByDeadlineAsync(waitId, timeoutPayload.GetRawText(), CancellationToken.None), token.DeadlineAt.Value);
     }
