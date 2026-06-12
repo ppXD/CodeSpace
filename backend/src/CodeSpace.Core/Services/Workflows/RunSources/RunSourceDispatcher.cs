@@ -6,6 +6,7 @@ using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Events;
 using CodeSpace.Messages.Events.PullRequest;
+using CodeSpace.Messages.Events.Push;
 using MediatR;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
@@ -36,6 +37,7 @@ public sealed class RunSourceDispatcher :
     INotificationHandler<PullRequestOpenedEvent>,
     INotificationHandler<PullRequestSynchronizedEvent>,
     INotificationHandler<PullRequestMergedEvent>,
+    INotificationHandler<PushReceivedEvent>,
     IScopedDependency
 {
     private readonly CodeSpaceDbContext _db;
@@ -64,6 +66,9 @@ public sealed class RunSourceDispatcher :
         DispatchAsync(notification, cancellationToken);
 
     public Task Handle(PullRequestMergedEvent notification, CancellationToken cancellationToken) =>
+        DispatchAsync(notification, cancellationToken);
+
+    public Task Handle(PushReceivedEvent notification, CancellationToken cancellationToken) =>
         DispatchAsync(notification, cancellationToken);
 
     private async Task DispatchAsync(NormalizedEvent normalizedEvent, CancellationToken cancellationToken)

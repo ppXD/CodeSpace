@@ -9,6 +9,7 @@ using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Enums;
 using CodeSpace.Messages.Events;
 using CodeSpace.Messages.Events.PullRequest;
+using CodeSpace.Messages.Events.Push;
 using MediatR;
 using Microsoft.EntityFrameworkCore;
 using Shouldly;
@@ -153,6 +154,58 @@ public class WebhookEventToRunDispatchFlowTests
         // PrOpened/PrUpdated-only keys must not leak in (matcher-type confusion guard).
         payload.TryGetProperty("title", out _).ShouldBeFalse();
         payload.TryGetProperty("newHeadSha", out _).ShouldBeFalse();
+    }
+
+    // ─── Push trigger (own config shape: repositoryId + branches, not the PR repositories[]) ────
+
+    [Fact]
+    public async Task Push_matching_branch_creates_run_with_full_payload()
+    {
+        var ctx = await SeedAsync();
+        var configJson = $$"""{ "repositoryId": "{{ctx.RepositoryId}}", "branches": ["main"] }""";
+        await SeedActivationAsync(ctx.WorkflowId, "trigger.push", configJson);
+
+        var ev = BuildPushEvent(ctx.RepositoryId, gitRef: "refs/heads/main");
+        await PublishAndCommitAsync(ev);
+
+        var (run, payload) = await LoadRunAndPayloadAsync(ctx.WorkflowId);
+
+        run.RunRequest.SourceType.ShouldBe("trigger.push");
+        run.RunRequest.ExternalEventId.ShouldBe(ev.ProviderEventId);
+
+        payload.GetProperty("repositoryId").GetString().ShouldBe(ctx.RepositoryId.ToString());
+        payload.GetProperty("ref").GetString().ShouldBe("refs/heads/main");
+        payload.GetProperty("branch").GetString().ShouldBe("main");
+        payload.GetProperty("beforeSha").GetString().ShouldBe("oldsha");
+        payload.GetProperty("afterSha").GetString().ShouldBe("newsha");
+        payload.GetProperty("pusherName").GetString().ShouldBe("alice");
+        payload.GetProperty("commitCount").GetInt32().ShouldBe(1);
+    }
+
+    [Fact]
+    public async Task Push_to_a_non_matching_branch_creates_no_run_and_audits()
+    {
+        // Branch filter is the push trigger's whole point: a push to develop must NOT fire a
+        // main-only activation, but the dispatcher still audits (activation existed, config excluded).
+        var ctx = await SeedAsync();
+        var configJson = $$"""{ "repositoryId": "{{ctx.RepositoryId}}", "branches": ["main"] }""";
+        await SeedActivationAsync(ctx.WorkflowId, "trigger.push", configJson);
+
+        await PublishAndCommitAsync(BuildPushEvent(ctx.RepositoryId, gitRef: "refs/heads/develop"));
+
+        await AssertRunCountAsync(ctx.WorkflowId, expected: 0);
+        await AssertNoMatchAuditWrittenAsync(ctx.TeamId);
+    }
+
+    [Fact]
+    public async Task Push_with_no_branch_filter_fires_on_any_branch()
+    {
+        var ctx = await SeedAsync();
+        await SeedActivationAsync(ctx.WorkflowId, "trigger.push", configJson: $$"""{ "repositoryId": "{{ctx.RepositoryId}}" }""");
+
+        await PublishAndCommitAsync(BuildPushEvent(ctx.RepositoryId, gitRef: "refs/heads/any-feature"));
+
+        await AssertRunCountAsync(ctx.WorkflowId, expected: 1);
     }
 
     [Fact]
@@ -407,6 +460,19 @@ public class WebhookEventToRunDispatchFlowTests
         MergedByName = "bob",
         MergeCommitSha = "mergesha",
         Labels = labels ?? Array.Empty<string>(),
+    };
+
+    private static PushReceivedEvent BuildPushEvent(Guid repositoryId, string gitRef, string? providerEventId = null) => new()
+    {
+        RepositoryId = repositoryId,
+        ProviderEventId = providerEventId ?? $"delivery-{Guid.NewGuid():N}",
+        OccurredAt = DateTimeOffset.UtcNow,
+        Ref = gitRef,
+        BeforeSha = "oldsha",
+        AfterSha = "newsha",
+        PusherExternalId = "user-1",
+        PusherName = "alice",
+        Commits = new[] { new CommitSummary { Sha = "c1", Message = "m", AuthorEmail = "a@x", AuthorName = "alice" } },
     };
 
     /// <summary>
