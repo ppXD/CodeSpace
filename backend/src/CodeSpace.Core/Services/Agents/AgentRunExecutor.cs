@@ -42,15 +42,6 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     /// <summary>Runner used when the task doesn't pin one. v0 = the in-process local runner.</summary>
     private const string DefaultRunnerKind = "local";
 
-    /// <summary>
-    /// Operator switch (a truthy <c>"1"</c>/<c>"true"</c>): when enabled AND the resolved runner implements
-    /// <see cref="ISandboxDurableRunner"/>, the executor LAUNCHES the run to a durable spool + persists a
-    /// runner handle + OBSERVES by tailing — so a backend restart can re-attach/recover instead of abandoning
-    /// the run. Default OFF, so this lands dark behind the existing streaming path and is flipped on once the
-    /// recovery path (the reconciler reading the handle) ships. Pinned by a test (Rule 8).
-    /// </summary>
-    public const string DurableRunnerEnvVar = "CODESPACE_AGENT_DURABLE_RUNNER";
-
     /// <summary>Cap on the captured diff inlined into the persisted result row (~1 MB). A larger diff is truncated with a marker; the full diff belongs in the artifact layer (a later slice).</summary>
     private const int MaxPatchChars = 1_000_000;
 
@@ -432,13 +423,13 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
 
     /// <summary>
     /// Pick the execution mode for the resolved runner: the DURABLE path (launch to a spool + persist a
-    /// handle + tail) when enabled and supported — so a backend restart can recover the run; otherwise the
-    /// live-stream / batch path. The durable path is feature-detected exactly like streaming
-    /// (<c>runner is ISandboxDurableRunner</c>), so an unsupporting runner transparently falls back.
+    /// handle + tail) whenever the runner supports it — so a backend restart can recover/re-attach the run;
+    /// otherwise the live-stream / batch path. Feature-detected via <c>runner is ISandboxDurableRunner</c>, so
+    /// a runner that can't be durable transparently falls back to streaming.
     /// </summary>
     private async Task<SandboxResult> RunSandboxAsync(Guid runId, ISandboxRunner runner, SandboxSpec spec, Func<string, Task> persistLine, string? keyFingerprint, CancellationToken cancellationToken)
     {
-        if (DurableRunnerEnabled && runner is ISandboxDurableRunner durable)
+        if (runner is ISandboxDurableRunner durable)
             return await RunDurableAsync(runId, durable, spec, persistLine, keyFingerprint, cancellationToken).ConfigureAwait(false);
 
         return await RunAndStreamAsync(runner, spec, persistLine, cancellationToken).ConfigureAwait(false);
@@ -479,9 +470,4 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
 
         return result;
     }
-
-    private static bool DurableRunnerEnabled => ParseFlag(Environment.GetEnvironmentVariable(DurableRunnerEnvVar));
-
-    /// <summary>Only <c>"1"</c> or <c>"true"</c> (case-insensitive) enables a flag; anything else — including <c>null</c> — keeps it off.</summary>
-    internal static bool ParseFlag(string? raw) => raw is "1" || (raw is not null && raw.Equals("true", StringComparison.OrdinalIgnoreCase));
 }

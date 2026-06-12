@@ -56,37 +56,30 @@ public class AgentRunExecutorTests
     {
         if (OperatingSystem.IsWindows()) return;
 
-        var original = Environment.GetEnvironmentVariable(AgentRunExecutor.DurableRunnerEnvVar);
-        try
-        {
-            Environment.SetEnvironmentVariable(AgentRunExecutor.DurableRunnerEnvVar, "1");
+        // Durable is now the unconditional path (no flag) — every run launches to a spool + persists a handle.
+        var teamId = await SeedTeamAsync();
+        var runId = await CreateScriptedRunAsync(teamId);
 
-            var teamId = await SeedTeamAsync();
-            var runId = await CreateScriptedRunAsync(teamId);
+        await ExecuteAsync(runId, new ScriptedHarness("printf 'durable one\\ndurable two\\n'"));
 
-            await ExecuteAsync(runId, new ScriptedHarness("printf 'durable one\\ndurable two\\n'"));
+        using var scope = _fixture.BeginScope();
+        var svc = scope.Resolve<IAgentRunService>();
 
-            using var scope = _fixture.BeginScope();
-            var svc = scope.Resolve<IAgentRunService>();
+        var run = await svc.GetAsync(runId, CancellationToken.None);
+        run.Status.ShouldBe(AgentRunStatus.Succeeded, "the durable launch→spool→tail path completes the run");
 
-            var run = await svc.GetAsync(runId, CancellationToken.None);
-            run.Status.ShouldBe(AgentRunStatus.Succeeded, "the durable launch→spool→tail path completes the run exactly like the streaming path");
+        var events = await svc.GetEventsAsync(runId, teamId, 0, CancellationToken.None);
+        events.Select(e => e.Text).ShouldBe(new[] { "durable one", "durable two" });   // lines tailed from the on-disk spool become the same normalized events
 
-            var events = await svc.GetEventsAsync(runId, teamId, 0, CancellationToken.None);
-            events.Select(e => e.Text).ShouldBe(new[] { "durable one", "durable two" });   // lines tailed from the on-disk spool become the same normalized events
-
-            // The recovery spine: the handle is persisted at launch (proves the jsonb runner_handle write), so a
-            // restarted backend could re-find + recover this run from its spool instead of abandoning it.
-            run.RunnerHandleJson.ShouldNotBeNull("the runner handle is persisted the instant the run is launched");
-            var handle = JsonSerializer.Deserialize<SandboxHandle>(run.RunnerHandleJson!, AgentJson.Options)!;
-            handle.Kind.ShouldBe("local");
-            handle.ProcessId.ShouldBeGreaterThan(0);
-            handle.SpoolDirectory.ShouldNotBeNullOrEmpty();
-        }
-        finally
-        {
-            Environment.SetEnvironmentVariable(AgentRunExecutor.DurableRunnerEnvVar, original);
-        }
+        // The recovery spine: the handle is persisted at launch (proves the jsonb runner_handle write), so a
+        // restarted backend could re-find + recover this run from its spool instead of abandoning it. (Once reaped
+        // after the run is terminal the handle is cleared, but the spool reaper's retention window far exceeds this
+        // test's wall-clock, so it's still present here.)
+        run.RunnerHandleJson.ShouldNotBeNull("the runner handle is persisted the instant the run is launched");
+        var handle = JsonSerializer.Deserialize<SandboxHandle>(run.RunnerHandleJson!, AgentJson.Options)!;
+        handle.Kind.ShouldBe("local");
+        handle.ProcessId.ShouldBeGreaterThan(0);
+        handle.SpoolDirectory.ShouldNotBeNullOrEmpty();
     }
 
     [Fact]
