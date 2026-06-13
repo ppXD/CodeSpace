@@ -91,6 +91,17 @@ public class BuiltinPluginModuleTests
     }
 
     [Fact]
+    public void Agent_plugin_lists_the_agent_execution_nodes()
+    {
+        var module = new AgentPlugin();
+
+        module.Name.ShouldBe("Agent");
+        module.Nodes.ShouldContain(typeof(CodeSpace.Core.Services.Workflows.Nodes.Builtin.AgentCodeNode));
+        module.Nodes.ShouldContain(typeof(CodeSpace.Core.Services.Workflows.Nodes.Builtin.AgentRunCommandNode));
+        module.Nodes.Count.ShouldBe(2);
+    }
+
+    [Fact]
     public void All_builtin_plugins_together_cover_every_builtin_node()
     {
         // If a node escapes its domain plugin OR a new node lands without being assigned to one,
@@ -102,9 +113,10 @@ public class BuiltinPluginModuleTests
             new HttpToolsPlugin(),
             new LlmCompletePlugin(),
             new ChatPlugin(),
+            new AgentPlugin(),
         };
 
         var total = all.SelectMany(p => p.Nodes).Distinct().Count();
-        total.ShouldBe(32, "32 builtin node types across 5 domain plugins (added the Git plugin's git.close_issue node) — adjust this number when adding a builtin");
+        total.ShouldBe(34, "34 builtin node types across 6 domain plugins — incl. the Agent plugin (agent.code + agent.run_command, now counted) — adjust this number when adding a builtin");
     }
 }
