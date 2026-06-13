@@ -361,6 +361,17 @@ public sealed class GitHubRepositoryProvider : IRepositoryCatalogCapability, IPu
         }, cancellationToken).ConfigureAwait(false);
     }
 
+    public async Task<RemoteIssue> CloseIssueAsync(ProviderContext context, RemoteRepository repository, int number, CancellationToken cancellationToken)
+    {
+        var client = await BuildClientAsync(context, cancellationToken).ConfigureAwait(false);
+
+        return await _resilience.ExecuteAsync(context.Instance, nameof(CloseIssueAsync), async _ =>
+        {
+            var updated = await client.Issue.Update(repository.NamespacePath, repository.Name, number, new IssueUpdate { State = ItemState.Closed }).ConfigureAwait(false);
+            return ToRemoteIssue(updated);
+        }, cancellationToken).ConfigureAwait(false);
+    }
+
     private static RemotePullRequestCheck ToRemoteCheck(CheckRun run)
     {
         var status = MapCheckRunStatus(run.Status.Value, run.Conclusion?.Value);

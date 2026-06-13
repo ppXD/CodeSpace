@@ -154,6 +154,18 @@ public sealed class TestRepositoryProvider : IRepositoryCatalogCapability, ICred
             WebUrl = $"https://test.local/{repository.FullPath}/-/issues/{number}#note_1"
         });
 
+    // Echoes the acting credential's id as ExternalId so a test can assert WHICH credential closed it; State=Closed.
+    public Task<RemoteIssue> CloseIssueAsync(ProviderContext context, RemoteRepository repository, int number, CancellationToken cancellationToken) =>
+        Task.FromResult(new RemoteIssue
+        {
+            ExternalId = context.Credential.Id.ToString(),
+            Number = number,
+            Title = "closed issue",
+            State = IssueState.Closed,
+            CreatedDate = DateTimeOffset.UnixEpoch,
+            WebUrl = $"https://test.local/{repository.FullPath}/-/issues/{number}"
+        });
+
     // Deterministic, no shared state: the repo's external id encodes the actor's role, so a test drives any
     // pre-flight outcome by seeding a marked repo (no cross-test toggle). "noaccess" → None (denied at the
     // Read floor); "role-<name>" → that role; "inconclusive" → null (probe degrades to allow); everything
