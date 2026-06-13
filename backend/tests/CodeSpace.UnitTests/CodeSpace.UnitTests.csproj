@@ -21,6 +21,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\src\CodeSpace.Core\CodeSpace.Core.csproj" />
+    <ProjectReference Include="..\..\src\CodeSpace.Mcp\CodeSpace.Mcp.csproj" />
     <ProjectReference Include="..\..\src\CodeSpace.Messages\CodeSpace.Messages.csproj" />
   </ItemGroup>
 

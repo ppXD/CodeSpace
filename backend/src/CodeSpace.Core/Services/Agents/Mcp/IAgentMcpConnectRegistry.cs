@@ -19,12 +19,12 @@ public interface IAgentMcpConnectRegistry
     bool TryConnect(Guid runId, out IAgentMcpClientConnect connect);
 }
 
-/// <summary>The client end a consumer talks to over a run's MCP channel — a newline-delimited JSON-RPC reader/writer pair.</summary>
+/// <summary>How a consumer reaches a run's MCP endpoint: the per-run UDS socket path it connects to, plus the per-run token it must present as the first line before the endpoint serves any JSON-RPC.</summary>
 public interface IAgentMcpClientConnect
 {
-    /// <summary>Writes JSON-RPC requests to the run's endpoint.</summary>
-    TextWriter Writer { get; }
+    /// <summary>The per-run Unix-domain-socket path the endpoint is listening on.</summary>
+    string SocketPath { get; }
 
-    /// <summary>Reads JSON-RPC responses from the run's endpoint.</summary>
-    TextReader Reader { get; }
+    /// <summary>The per-run capability token — sent as the FIRST line of the connection, before any JSON-RPC, to authenticate.</summary>
+    string Token { get; }
 }

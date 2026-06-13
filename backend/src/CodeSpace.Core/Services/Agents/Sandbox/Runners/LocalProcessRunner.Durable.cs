@@ -31,6 +31,12 @@ public sealed partial class LocalProcessRunner
     private const string ExitMarkerFile = "exit";
     private const string PidFile = "pid";
 
+    /// <summary>The per-run MCP listener socket file (under the spool dir). Single source of truth so the executor's listener and the harness/proxy's connect path agree by construction on the same path.</summary>
+    internal const string McpSocketFile = "mcp.sock";
+
+    /// <summary>The usable <c>AF_UNIX</c> path maximum — 103 on macOS/BSD, 107 on Linux; use the LOWER so the short-path fallback fires on every host that would overflow either. Pinned by a test: a spool path longer than this would overflow <c>Bind</c> (empirically, .NET's <c>UnixDomainSocketEndPoint</c> binds at length 103 and throws at 104 on macOS), so <see cref="McpSocketPathFor"/> falls back to a short temp path.</summary>
+    internal const int UnixSocketPathCap = 103;
+
     /// <summary>Per-run isolated config home (under the spool dir) that <see cref="SandboxSpec.ConfigHomeEnvVars"/> point at — keeps a shelled-out CLI off the operator's personal dotfiles. Reaped with the spool dir.</summary>
     private const string AgentConfigHomeDir = "agent-home";
 
@@ -320,6 +326,26 @@ public sealed partial class LocalProcessRunner
         Environment.GetEnvironmentVariable(SpoolRootEnvVar) is { Length: > 0 } v ? v : Path.Combine(Path.GetTempPath(), "codespace", "agent-runs");
 
     internal static string SpoolDirectoryFor(string spoolKey) => Path.Combine(SpoolRoot(), spoolKey);
+
+    /// <summary>
+    /// The per-run MCP listener socket path — normally <c>&lt;spoolDir&gt;/mcp.sock</c> so it's reaped with the spool
+    /// and the runner (a later slice) binds the SAME path. BUT an <c>AF_UNIX</c> address can't exceed <see
+    /// cref="UnixSocketPathCap"/> bytes, and the spool root (a temp dir + a 32-hex run key) can overflow that on macOS
+    /// — so when the canonical path is too long this falls back to a SHORT, still-unique temp path keyed by the run's
+    /// FULL 32-hex run key (matching the canonical path's uniqueness). Single source of truth: both the executor's
+    /// listener and the harness/proxy's connect path call this, so they agree by construction.
+    /// </summary>
+    internal static string McpSocketPathFor(string spoolKey)
+    {
+        var canonical = Path.Combine(SpoolDirectoryFor(spoolKey), McpSocketFile);
+
+        if (canonical.Length <= UnixSocketPathCap) return canonical;
+
+        // Intentionally temp-rooted: the canonical path overflowed BECAUSE the spool root is long, so the short socket
+        // must live elsewhere. Keyed by the FULL run key (~temp+42 ≈ 90 chars < cap on macOS), unlinked on dispose; if
+        // even this overflows a pathological temp dir, the executor's fail-soft logs a Warning rather than crashes.
+        return Path.Combine(Path.GetTempPath(), "cs-mcp", spoolKey, "s");
+    }
 
     /// <summary>
     /// Read the bytes appended since <paramref name="offset"/> and split them into whole lines. Cuts the read at

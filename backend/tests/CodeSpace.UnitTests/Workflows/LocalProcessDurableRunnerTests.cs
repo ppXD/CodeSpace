@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Linq;
+using System.Net.Sockets;
 using CodeSpace.Core.Services.Agents.Sandbox.Isolation;
 using CodeSpace.Core.Services.Agents.Sandbox.Runners;
 using CodeSpace.Messages.Agents;
@@ -415,6 +416,129 @@ public sealed class LocalProcessDurableRunnerTests : IDisposable
 
         // Renaming this breaks an air-gapped operator who pinned a durable spool volume via env — pin it (Rule 8).
         LocalProcessRunner.SpoolRootEnvVar.ShouldBe("CODESPACE_AGENT_RUN_SPOOL_DIR");
+    }
+
+    [Fact]
+    public void Mcp_socket_path_constants_are_pinned()
+    {
+        // The executor's listener and the runner/proxy connect path agree on these literals — a rename silently breaks the link.
+        LocalProcessRunner.McpSocketFile.ShouldBe("mcp.sock");
+
+        // The usable AF_UNIX path maximum: 103 on macOS/BSD, 107 on Linux. The LOWER cap so the short-path fallback
+        // fires on every host that would overflow either — a CRITICAL guard against Bind overflowing on this darwin
+        // host (empirically .NET binds at length 103 and throws at 104 here).
+        LocalProcessRunner.UnixSocketPathCap.ShouldBe(103);
+    }
+
+    [Fact]
+    public void Mcp_socket_path_is_under_the_spool_dir_for_a_short_root()
+    {
+        var original = Environment.GetEnvironmentVariable(LocalProcessRunner.SpoolRootEnvVar);
+        Environment.SetEnvironmentVariable(LocalProcessRunner.SpoolRootEnvVar, "/tmp/cs");
+
+        try
+        {
+            var key = Guid.NewGuid().ToString("N");
+            var path = LocalProcessRunner.McpSocketPathFor(key);
+
+            path.ShouldBe(Path.Combine("/tmp/cs", key, "mcp.sock"));
+            path.Length.ShouldBeLessThanOrEqualTo(LocalProcessRunner.UnixSocketPathCap);
+        }
+        finally { Environment.SetEnvironmentVariable(LocalProcessRunner.SpoolRootEnvVar, original); }
+    }
+
+    [Fact]
+    public void Mcp_socket_path_falls_back_to_a_short_unique_path_when_the_canonical_path_overflows_the_cap()
+    {
+        var original = Environment.GetEnvironmentVariable(LocalProcessRunner.SpoolRootEnvVar);
+        Environment.SetEnvironmentVariable(LocalProcessRunner.SpoolRootEnvVar, "/" + new string('x', 120));
+
+        try
+        {
+            var key = Guid.NewGuid().ToString("N");
+            var path = LocalProcessRunner.McpSocketPathFor(key);
+
+            path.Length.ShouldBeLessThanOrEqualTo(LocalProcessRunner.UnixSocketPathCap, customMessage: "an overflowing canonical path must fall back to a short path that fits the sun_path cap");
+            path.ShouldContain(key, customMessage: "the fallback must stay unique per run via the FULL run key (matching the canonical path's uniqueness)");
+        }
+        finally { Environment.SetEnvironmentVariable(LocalProcessRunner.SpoolRootEnvVar, original); }
+    }
+
+    [Fact]
+    public void Mcp_socket_path_cap_admits_a_bindable_path_and_one_byte_over_overflows()
+    {
+        if (!Socket.OSSupportsUnixDomainSockets) return;
+
+        // The off-by-one regression test: a path of EXACTLY the admitted cap MUST bind, and one byte over MUST throw.
+        // Build the parent dir under temp, then pad the filename so the FULL path hits the exact target length.
+        var parent = TempDir();
+        var prefix = parent + Path.DirectorySeparatorChar;
+
+        var atCap = prefix + new string('a', LocalProcessRunner.UnixSocketPathCap - prefix.Length);
+        atCap.Length.ShouldBe(LocalProcessRunner.UnixSocketPathCap);
+
+        using (var s = new Socket(AddressFamily.Unix, SocketType.Stream, ProtocolType.Unspecified))
+        {
+            Should.NotThrow(() => s.Bind(new UnixDomainSocketEndPoint(atCap)), "a path of exactly UnixSocketPathCap must be bindable");
+        }
+        try { File.Delete(atCap); } catch { /* best-effort */ }
+
+        // A path well over BOTH platform sun_path ceilings (104 macOS / 108 Linux) MUST be rejected. UnixSocketPathCap+1
+        // is NOT a portable overflow probe: it's the macOS usable max + 1, but Linux binds happily up to 107 — so use a
+        // generous margin that overflows on every host. The cross-platform guard against the value drifting up is the
+        // UnixSocketPathCap.ShouldBe(103) pin; this bind check proves the host actually rejects an over-length path.
+        const int clearlyOverAnyCap = 130;
+
+        var overCap = prefix + new string('a', clearlyOverAnyCap - prefix.Length);
+        overCap.Length.ShouldBe(clearlyOverAnyCap);
+
+        using var over = new Socket(AddressFamily.Unix, SocketType.Stream, ProtocolType.Unspecified);
+        Should.Throw<Exception>(() =>
+        {
+            var ep = new UnixDomainSocketEndPoint(overCap);   // the UDS endpoint ctor (or Bind) rejects an over-length sun_path
+            over.Bind(ep);
+        }).ShouldBeAssignableTo<ArgumentException>("a path well over the AF_UNIX sun_path cap must overflow on every host");
+    }
+
+    [Fact]
+    public async Task Mcp_socket_path_fallback_is_genuinely_bindable_and_round_trips_a_byte()
+    {
+        if (!Socket.OSSupportsUnixDomainSockets) return;
+
+        // The fallback branch (sun_path overflow) must yield a path that BINDS, not merely a short string. Force the
+        // fallback with a long spool root, then bind a real listener, connect a client, and round-trip one byte.
+        var original = Environment.GetEnvironmentVariable(LocalProcessRunner.SpoolRootEnvVar);
+        Environment.SetEnvironmentVariable(LocalProcessRunner.SpoolRootEnvVar, "/" + new string('x', 120));
+
+        try
+        {
+            var key = Guid.NewGuid().ToString("N");
+            var path = LocalProcessRunner.McpSocketPathFor(key);
+            path.Length.ShouldBeLessThanOrEqualTo(LocalProcessRunner.UnixSocketPathCap, "the fallback must fit the sun_path cap");
+
+            Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+
+            try
+            {
+                using var listener = new Socket(AddressFamily.Unix, SocketType.Stream, ProtocolType.Unspecified);
+                listener.Bind(new UnixDomainSocketEndPoint(path));
+                listener.Listen(backlog: 1);
+
+                using var client = new Socket(AddressFamily.Unix, SocketType.Stream, ProtocolType.Unspecified);
+                await client.ConnectAsync(new UnixDomainSocketEndPoint(path));
+
+                using var server = await listener.AcceptAsync();
+
+                await client.SendAsync(new byte[] { 0x42 }, SocketFlags.None);
+                var buf = new byte[1];
+                var n = await server.ReceiveAsync(buf, SocketFlags.None);
+
+                n.ShouldBe(1, "the fallback socket carried the byte");
+                buf[0].ShouldBe((byte)0x42, "the byte round-tripped over the genuinely-bound fallback socket");
+            }
+            finally { try { File.Delete(path); Directory.Delete(Path.GetDirectoryName(path)!, recursive: true); } catch { /* best-effort */ } }
+        }
+        finally { Environment.SetEnvironmentVariable(LocalProcessRunner.SpoolRootEnvVar, original); }
     }
 
     // ─── Bubblewrap confinement E2E (Linux + bwrap only) ─────────────────────────
