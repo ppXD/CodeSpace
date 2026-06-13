@@ -32,7 +32,7 @@ public class PullRequestMergeActorFlowTests
     {
         var seed = await SeedAsync(linkActor: true);
 
-        var result = await MergeAsync(seed.RepositoryId, seed.UserId);
+        var result = await MergeAsync(seed.RepositoryId, seed.TeamId, seed.UserId);
 
         result.Merged.ShouldBeTrue();
         result.Sha.ShouldBe(seed.ActorCredentialId.ToString(),
@@ -44,7 +44,7 @@ public class PullRequestMergeActorFlowTests
     {
         var seed = await SeedAsync(linkActor: true);
 
-        var result = await MergeAsync(seed.RepositoryId, actorUserId: null);
+        var result = await MergeAsync(seed.RepositoryId, seed.TeamId, actorUserId: null);
 
         result.Sha.ShouldBe(seed.ConnectionCredentialId.ToString(),
             customMessage: "no actorUserId → unchanged behaviour: the repo's connection credential merges");
@@ -55,7 +55,7 @@ public class PullRequestMergeActorFlowTests
     {
         var seed = await SeedAsync(linkActor: false);
 
-        var ex = await Should.ThrowAsync<ActorIdentityRequiredException>(() => MergeAsync(seed.RepositoryId, seed.UserId));
+        var ex = await Should.ThrowAsync<ActorIdentityRequiredException>(() => MergeAsync(seed.RepositoryId, seed.TeamId, seed.UserId));
 
         ex.ProviderKind.ShouldBe(ProviderKind.Git);
         ex.ProviderInstanceId.ShouldBe(seed.ProviderInstanceId);
@@ -66,18 +66,31 @@ public class PullRequestMergeActorFlowTests
     {
         var seed = await SeedAsync(linkActor: false);
 
-        var result = await MergeAsync(seed.RepositoryId, actorUserId: null, method: PullRequestMergeMethod.Squash);
+        var result = await MergeAsync(seed.RepositoryId, seed.TeamId, actorUserId: null, method: PullRequestMergeMethod.Squash);
 
         result.Message.ShouldContain("Squash", customMessage: "the test provider echoes the chosen method, proving the neutral input reaches it");
     }
 
+    [Fact]
+    public async Task A_repository_in_another_team_is_refused_fail_closed()
+    {
+        var seed = await SeedAsync(linkActor: true);
+        var otherTeam = Guid.NewGuid();
+
+        // The repo belongs to seed.TeamId; merging AS otherTeam must NOT resolve it — the tenant filter
+        // finds nothing and the service refuses with the same non-leaking "not found" as a missing repo.
+        var ex = await Should.ThrowAsync<InvalidOperationException>(() => MergeAsync(seed.RepositoryId, otherTeam, seed.UserId));
+        ex.Message.ShouldContain("not found", customMessage: "a cross-team repo is indistinguishable from a missing one (no existence leak)");
+    }
+
     // ── Helpers ────────────────────────────────────────────────────────────────
 
-    private async Task<RemotePullRequestMergeResult> MergeAsync(Guid repositoryId, Guid? actorUserId, int number = 777, PullRequestMergeMethod method = PullRequestMergeMethod.Merge)
+    private async Task<RemotePullRequestMergeResult> MergeAsync(Guid repositoryId, Guid teamId, Guid? actorUserId, int number = 777, PullRequestMergeMethod method = PullRequestMergeMethod.Merge)
     {
         using var scope = _fixture.BeginScope();
         return await scope.Resolve<IPullRequestService>().MergePullRequestAsync(
             repositoryId,
+            teamId,
             number,
             new MergePullRequestInput { Method = method, DeleteSourceBranch = true },
             actorUserId,
@@ -138,8 +151,8 @@ public class PullRequestMergeActorFlowTests
 
         await db.SaveChangesAsync();
 
-        return new SeedResult(user.Id, instance.Id, repo.Id, connection.Id, actorCredentialId);
+        return new SeedResult(user.Id, team.Id, instance.Id, repo.Id, connection.Id, actorCredentialId);
     }
 
-    private sealed record SeedResult(Guid UserId, Guid ProviderInstanceId, Guid RepositoryId, Guid ConnectionCredentialId, Guid ActorCredentialId);
+    private sealed record SeedResult(Guid UserId, Guid TeamId, Guid ProviderInstanceId, Guid RepositoryId, Guid ConnectionCredentialId, Guid ActorCredentialId);
 }

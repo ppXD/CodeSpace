@@ -1,5 +1,6 @@
 using System.Text.Json;
 using CodeSpace.Core.Services.PullRequests;
+using CodeSpace.Core.Services.Workflows.Runtime;
 using CodeSpace.Messages.Enums;
 using Microsoft.Extensions.Logging;
 
@@ -63,6 +64,7 @@ public sealed class GitPostPrCommentNode : INodeRuntime
         if (!TryReadRepositoryId(context, out var repoId)) return NodeResult.Fail("Input 'repositoryId' missing or not a uuid.");
         if (!TryReadNumber(context, out var number)) return NodeResult.Fail("Input 'number' missing or not an integer.");
         if (!TryReadBody(context, out var body)) return NodeResult.Fail("Input 'body' missing or empty.");
+        if (!NodeScopeReader.TryReadTeamId(context, out var teamId)) return NodeResult.Fail("This run has no team context, so a repository can't be resolved.");
 
         // Trace the side-effecting Git API call. Body content is summarised (length only) to
         // keep the ledger small; the full body lives in node inputs payload already (redacted
@@ -71,7 +73,7 @@ public sealed class GitPostPrCommentNode : INodeRuntime
             target: $"git.post_comment:{repoId}:{number}",
             method: "post_comment",
             requestPayload: JsonSerializer.SerializeToElement(new { repository_id = repoId, pull_request_number = number, body_chars = body.Length }),
-            action: ct => _prService.PostCommentAsync(repoId, number, body, ct),
+            action: ct => _prService.PostCommentAsync(repoId, teamId, number, body, ct),
             completionExtractor: result => new ExternalCallCompletion
             {
                 ResponsePayload = JsonSerializer.SerializeToElement(new

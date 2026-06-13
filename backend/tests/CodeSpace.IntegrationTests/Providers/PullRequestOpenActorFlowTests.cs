@@ -32,7 +32,7 @@ public class PullRequestOpenActorFlowTests
     {
         var seed = await SeedAsync(linkActor: true);
 
-        var pr = await OpenAsync(seed.RepositoryId, seed.UserId);
+        var pr = await OpenAsync(seed.RepositoryId, seed.TeamId, seed.UserId);
 
         pr.ExternalId.ShouldBe(seed.ActorCredentialId.ToString(),
             customMessage: "with a linked actor the PR must be opened by the actor's OWN credential, not the connection credential");
@@ -45,7 +45,7 @@ public class PullRequestOpenActorFlowTests
     {
         var seed = await SeedAsync(linkActor: true);
 
-        var pr = await OpenAsync(seed.RepositoryId, actorUserId: null);
+        var pr = await OpenAsync(seed.RepositoryId, seed.TeamId, actorUserId: null);
 
         pr.ExternalId.ShouldBe(seed.ConnectionCredentialId.ToString(),
             customMessage: "no actorUserId → unchanged behaviour: the repo's connection credential opens the PR");
@@ -56,7 +56,7 @@ public class PullRequestOpenActorFlowTests
     {
         var seed = await SeedAsync(linkActor: false);
 
-        var ex = await Should.ThrowAsync<ActorIdentityRequiredException>(() => OpenAsync(seed.RepositoryId, seed.UserId));
+        var ex = await Should.ThrowAsync<ActorIdentityRequiredException>(() => OpenAsync(seed.RepositoryId, seed.TeamId, seed.UserId));
 
         ex.ProviderKind.ShouldBe(ProviderKind.Git);
         ex.ProviderInstanceId.ShouldBe(seed.ProviderInstanceId);
@@ -68,7 +68,7 @@ public class PullRequestOpenActorFlowTests
         var seed = await SeedAsync(linkActor: false);
 
         var ex = await Should.ThrowAsync<InvalidOperationException>(() =>
-            OpenAsync(seed.RepositoryId, actorUserId: null, title: "   "));
+            OpenAsync(seed.RepositoryId, seed.TeamId, actorUserId: null, title: "   "));
 
         ex.Message.ShouldContain("title");
     }
@@ -79,7 +79,7 @@ public class PullRequestOpenActorFlowTests
         var seed = await SeedAsync(linkActor: false);
 
         var ex = await Should.ThrowAsync<InvalidOperationException>(() =>
-            OpenAsync(seed.RepositoryId, actorUserId: null, source: "main", target: "main"));
+            OpenAsync(seed.RepositoryId, seed.TeamId, actorUserId: null, source: "main", target: "main"));
 
         ex.Message.ShouldContain("differ");
     }
@@ -90,18 +90,31 @@ public class PullRequestOpenActorFlowTests
         var seed = await SeedAsync(linkActor: false);
 
         var ex = await Should.ThrowAsync<InvalidOperationException>(() =>
-            OpenAsync(seed.RepositoryId, actorUserId: null, source: ""));
+            OpenAsync(seed.RepositoryId, seed.TeamId, actorUserId: null, source: ""));
 
         ex.Message.ShouldContain("branch");
     }
 
+    [Fact]
+    public async Task A_repository_in_another_team_is_refused_fail_closed()
+    {
+        var seed = await SeedAsync(linkActor: true);
+        var otherTeam = Guid.NewGuid();
+
+        // The repo belongs to seed.TeamId; opening AS otherTeam must NOT resolve it — the tenant filter
+        // finds nothing and the service refuses with the same non-leaking "not found" as a missing repo.
+        var ex = await Should.ThrowAsync<InvalidOperationException>(() => OpenAsync(seed.RepositoryId, otherTeam, seed.UserId));
+        ex.Message.ShouldContain("not found", customMessage: "a cross-team repo is indistinguishable from a missing one (no existence leak)");
+    }
+
     // ── Helpers ────────────────────────────────────────────────────────────────
 
-    private async Task<RemotePullRequest> OpenAsync(Guid repositoryId, Guid? actorUserId, string title = "Add feature", string source = "feature", string target = "main")
+    private async Task<RemotePullRequest> OpenAsync(Guid repositoryId, Guid teamId, Guid? actorUserId, string title = "Add feature", string source = "feature", string target = "main")
     {
         using var scope = _fixture.BeginScope();
         return await scope.Resolve<IPullRequestService>().OpenPullRequestAsync(
             repositoryId,
+            teamId,
             new OpenPullRequestInput { Title = title, SourceBranch = source, TargetBranch = target, Body = "body" },
             actorUserId,
             CancellationToken.None);
@@ -161,8 +174,8 @@ public class PullRequestOpenActorFlowTests
 
         await db.SaveChangesAsync();
 
-        return new SeedResult(user.Id, instance.Id, repo.Id, connection.Id, actorCredentialId);
+        return new SeedResult(user.Id, team.Id, instance.Id, repo.Id, connection.Id, actorCredentialId);
     }
 
-    private sealed record SeedResult(Guid UserId, Guid ProviderInstanceId, Guid RepositoryId, Guid ConnectionCredentialId, Guid ActorCredentialId);
+    private sealed record SeedResult(Guid UserId, Guid TeamId, Guid ProviderInstanceId, Guid RepositoryId, Guid ConnectionCredentialId, Guid ActorCredentialId);
 }

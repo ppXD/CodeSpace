@@ -1,6 +1,7 @@
 using System.Text.Json;
 using CodeSpace.Core.Services.Providers.Capabilities;
 using CodeSpace.Core.Services.PullRequests;
+using CodeSpace.Core.Services.Workflows.Runtime;
 using CodeSpace.Messages.Dtos.Providers;
 using CodeSpace.Messages.Enums;
 using CodeSpace.Messages.Exceptions;
@@ -78,6 +79,7 @@ public sealed class GitOpenPullRequestNode : INodeRuntime
         if (!TryReadNonEmpty(context, "title", out var title)) return NodeResult.Fail("Input 'title' is required.");
         if (!TryReadNonEmpty(context, "sourceBranch", out var sourceBranch)) return NodeResult.Fail("Input 'sourceBranch' is required.");
         if (!TryReadNonEmpty(context, "targetBranch", out var targetBranch)) return NodeResult.Fail("Input 'targetBranch' is required.");
+        if (!NodeScopeReader.TryReadTeamId(context, out var teamId)) return NodeResult.Fail("This run has no team context, so a repository can't be resolved.");
 
         var body = TryReadNonEmpty(context, "body", out var b) ? b : null;
         var draft = TryReadBool(context, "draft");
@@ -92,7 +94,7 @@ public sealed class GitOpenPullRequestNode : INodeRuntime
                 target: $"git.open_pr:{repoId}",
                 method: "open_pull_request",
                 requestPayload: JsonSerializer.SerializeToElement(new { repository_id = repoId, title, source_branch = sourceBranch, target_branch = targetBranch, draft, body_chars = body?.Length ?? 0, act_as_user_id = actAsUserId }),
-                action: ct => _prService.OpenPullRequestAsync(repoId, input, actAsUserId, ct),
+                action: ct => _prService.OpenPullRequestAsync(repoId, teamId, input, actAsUserId, ct),
                 completionExtractor: result => new ExternalCallCompletion
                 {
                     ResponsePayload = JsonSerializer.SerializeToElement(new { number = result.Number, url = result.WebUrl, state = result.State.ToString() })
