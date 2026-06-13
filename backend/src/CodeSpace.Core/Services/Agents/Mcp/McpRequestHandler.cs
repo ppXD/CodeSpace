@@ -15,13 +15,15 @@ namespace CodeSpace.Core.Services.Agents.Mcp;
 /// normal result with <c>isError:true</c> so the model can read and retry. HandleAsync never throws except to
 /// propagate cancellation.
 ///
-/// <para><b>UNGATED — no approval enforcement in this slice.</b> The handler executes whatever tool the registry
-/// resolves, UNCONDITIONALLY: it deliberately does NOT consult <see cref="IAgentTool.RequiresApproval"/> /
-/// <see cref="IAgentTool.IsDestructive"/> (the approval/autonomy gate is a separate later slice). Nothing in
-/// production constructs this handler yet — there is no transport and no DI registration. The slice that first
-/// wires a transport or registers this in DI MUST add the approval gate first, or a connected model could invoke a
-/// destructive tool (e.g. git.merge_pr, agent.run_command) with no approval. That same slice must also route caught
-/// exception messages + tool error text through the secret redactor before they reach the model.</para>
+/// <para>Tool calls are gated by the run's autonomy tier via <see cref="AgentToolGate"/>: a gated (destructive)
+/// tool the tier does not permit comes back as a tool result with <c>isError:true</c> + a reason — never silently
+/// run. <b>Two preconditions are still owed before this is wired to a live transport:</b> (1) per-call TENANCY —
+/// the tool path does not yet enforce the run's team on the repository it touches, so a connected model could name
+/// another team's repository id; the transport-wiring slice MUST thread the run's team through tool execution +
+/// the repo load first. (2) SECRET REDACTION — tool error text + caught exception messages are not yet run through
+/// the per-run <c>SecretRedactor</c> (which needs the run's resolved secrets), so that slice must redact them
+/// before they reach the model. Nothing in production constructs this handler yet (no transport, no DI
+/// registration).</para>
 /// </summary>
 public sealed class McpRequestHandler : IMcpRequestHandler
 {
@@ -38,10 +40,12 @@ public sealed class McpRequestHandler : IMcpRequestHandler
     private static readonly JsonElement EmptyObject = JsonDocument.Parse("{}").RootElement.Clone();
 
     private readonly IAgentToolRegistry _registry;
+    private readonly AgentAutonomyLevel _autonomy;
 
-    public McpRequestHandler(IAgentToolRegistry registry)
+    public McpRequestHandler(IAgentToolRegistry registry, AgentAutonomyLevel autonomy)
     {
         _registry = registry;
+        _autonomy = autonomy;
     }
 
     public async Task<JsonElement?> HandleAsync(JsonElement request, CancellationToken cancellationToken)
@@ -75,6 +79,13 @@ public sealed class McpRequestHandler : IMcpRequestHandler
         var tool = _registry.Resolve(name);
 
         if (tool == null) return JsonRpcResponse.Fail(id, Error(JsonRpcError.InvalidParams, $"Unknown tool '{name}'."));
+
+        // Authorize BEFORE validating input: a tool the run's autonomy tier won't permit is refused outright (a
+        // tool result with isError:true, not a protocol error), so the model never sees input feedback for — or
+        // runs — a tool it can't call. A denied/needs-approval verdict short-circuits here.
+        var gate = AgentToolGate.Decide(_autonomy, tool.RequiresApproval);
+
+        if (gate != AgentToolGateDecision.Allow) return JsonRpcResponse.Ok(id, ToolResult(isError: true, GateMessage(gate, name)));
 
         // Absent arguments default to {}; present-but-wrong-type arguments pass through verbatim so the tool's own
         // ValidateInput rejects them (a teachable tool-result error, not a silent coercion).
@@ -145,4 +156,8 @@ public sealed class McpRequestHandler : IMcpRequestHandler
     private static JsonElement Serialize(JsonRpcResponse response) => JsonSerializer.SerializeToElement(response, AgentJson.Options);
 
     private static JsonRpcError Error(int code, string message) => new() { Code = code, Message = message };
+
+    private static string GateMessage(AgentToolGateDecision decision, string tool) => decision == AgentToolGateDecision.RequireApproval
+        ? $"Tool '{tool}' requires human approval, which this run's autonomy level cannot grant on its own."
+        : $"Tool '{tool}' is not permitted at this run's autonomy level.";
 }
