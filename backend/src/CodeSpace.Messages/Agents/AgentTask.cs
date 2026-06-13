@@ -52,7 +52,14 @@ public sealed record AgentTask
     /// <summary>Isolated working directory the agent runs in (the executor prepares it from <see cref="RepositoryId"/>). Null → the runner's default.</summary>
     public string? WorkspaceDirectory { get; init; }
 
-    /// <summary>What the agent is allowed to do — mapped by the harness onto its sandbox flags.</summary>
+    /// <summary>
+    /// The single named autonomy tier chosen for this run — the one axis an operator sets. <see cref="Permissions"/>
+    /// is DERIVED from it (via <c>AgentAutonomyPolicy</c>) and may then be overridden per-field. Carried as provenance
+    /// so the run's intent is auditable independently of the concrete knobs.
+    /// </summary>
+    public AgentAutonomyLevel Autonomy { get; init; } = AgentAutonomyLevel.Standard;
+
+    /// <summary>What the agent is allowed to do — mapped by the harness onto its sandbox flags. Derived from <see cref="Autonomy"/> plus any per-field overrides.</summary>
     public AgentPermissions Permissions { get; init; } = new();
 
     /// <summary>Extra environment for the agent process (short-lived credentials are injected here by AgentRunService, then wiped).</summary>
@@ -74,6 +81,27 @@ public enum AgentNetworkAccess
 {
     Off,
     On,
+}
+
+/// <summary>
+/// The single named autonomy axis — ascending capability, each tier DERIVING a default <see cref="AgentPermissions"/>
+/// (see <c>AgentAutonomyPolicy</c>). Replaces scattered network/read-only toggles with one operator-legible dial;
+/// future governance knobs (network allowlist, side-effect approval, privileged runner) hang off the SAME axis
+/// without widening call sites. Per-field overrides may still be layered on top of the derived defaults.
+/// </summary>
+public enum AgentAutonomyLevel
+{
+    /// <summary>Analysis-only: may not write, no network — the most restricted tier.</summary>
+    Confined,
+
+    /// <summary>May write inside its workspace, no network. The safe default (matches the historical permission default).</summary>
+    Standard,
+
+    /// <summary>Workspace write + network — for runs that fetch dependencies or call out.</summary>
+    Trusted,
+
+    /// <summary>Highest capability (admin / controlled runners only). Today the same concrete knobs as <see cref="Trusted"/>; diverges as privileged-runner / no-approval axes are added.</summary>
+    Unleashed,
 }
 
 public enum AgentWriteScope

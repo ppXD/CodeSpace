@@ -25,7 +25,7 @@ namespace CodeSpace.Core.Services.Workflows.Nodes.Builtin;
 /// is required. <c>harness</c> is always required (a persona is harness-agnostic); <c>model</c> is always
 /// optional (blank → the persona's model → the harness default).
 ///
-/// Config: harness (required) · agentDefinitionId? · goal (required unless a persona is set) · model? · runnerKind? · timeoutSeconds? · network? · readOnly?
+/// Config: harness (required) · agentDefinitionId? · goal (required unless a persona is set) · model? · runnerKind? · timeoutSeconds? · autonomyLevel? (one dial deriving the sandbox posture) · network?/readOnly? (advanced per-field overrides of the tier)
 /// Inputs: repositoryId? (the repo to clone into the workspace — pick or bind from the trigger)
 /// Outputs: status · summary · changedFiles · branch
 /// </summary>
@@ -52,8 +52,9 @@ public sealed class AgentCodeNode : INodeRuntime
                 "tools":          { "type": "array", "items": { "type": "string" }, "description": "Tool allow-list the agent is restricted to (e.g. Read, Grep, Bash). Empty = the harness default. Added to (not replacing) the persona's tools; enforced by harnesses that support an allow-list (Claude Code), carried otherwise (Codex restricts via sandbox)." },
                 "runnerKind":     { "type": "string", "description": "Sandbox runner (e.g. \"local\"). Defaults to the deployment default." },
                 "timeoutSeconds": { "type": "integer", "minimum": 1, "description": "Wall-clock cap for the run." },
-                "network":        { "type": "boolean", "description": "Allow network access in the sandbox." },
-                "readOnly":       { "type": "boolean", "description": "Analysis-only — the agent may not write." }
+                "autonomyLevel":  { "type": "string", "enum": ["Confined", "Standard", "Trusted", "Unleashed"], "description": "How much the agent may do — one dial that sets write scope + network. Confined: read-only, no network · Standard (default): workspace write, no network · Trusted: + network · Unleashed: highest, admin/controlled runners. The network/readOnly fields below are advanced per-field overrides of this tier." },
+                "network":        { "type": "boolean", "description": "Advanced override of the tier's network posture. Leave unset to inherit the autonomy level." },
+                "readOnly":       { "type": "boolean", "description": "Advanced override: force analysis-only (no writes), regardless of the autonomy level. Leave unset to inherit the tier." }
               },
               "required": ["harness"]
             }
@@ -99,6 +100,8 @@ public sealed class AgentCodeNode : INodeRuntime
 
         if (!TryReadRepositoryId(context, out var repositoryId)) return Fail("Input 'repositoryId' must be a repository id (uuid).");
 
+        var autonomy = ReadAutonomyLevel(context.Config);
+
         var task = new AgentTask
         {
             Goal = goal,
@@ -110,11 +113,8 @@ public sealed class AgentCodeNode : INodeRuntime
             RepositoryId = repositoryId,
             RunnerKind = ReadOptionalString(context.Config, "runnerKind"),
             TimeoutSeconds = ReadInt(context.Config, "timeoutSeconds") ?? 1800,
-            Permissions = new AgentPermissions
-            {
-                Network = ReadBool(context.Config, "network") ? AgentNetworkAccess.On : AgentNetworkAccess.Off,
-                WriteScope = ReadBool(context.Config, "readOnly") ? AgentWriteScope.ReadOnly : AgentWriteScope.Workspace,
-            },
+            Autonomy = autonomy,
+            Permissions = ResolvePermissions(context.Config, autonomy),
         };
 
         return Task.FromResult(NodeResult.Suspend(new SuspensionToken
@@ -205,8 +205,31 @@ public sealed class AgentCodeNode : INodeRuntime
     private static int? ReadInt(IReadOnlyDictionary<string, JsonElement> bag, string key) =>
         bag.TryGetValue(key, out var v) && v.ValueKind == JsonValueKind.Number && v.TryGetInt32(out var n) ? n : null;
 
-    private static bool ReadBool(IReadOnlyDictionary<string, JsonElement> bag, string key) =>
-        bag.TryGetValue(key, out var v) && v.ValueKind == JsonValueKind.True;
+    /// <summary>Reads the autonomy tier (case-insensitive); absent / unrecognized → the safe <see cref="AgentAutonomyLevel.Standard"/> default.</summary>
+    private static AgentAutonomyLevel ReadAutonomyLevel(IReadOnlyDictionary<string, JsonElement> bag) =>
+        Enum.TryParse<AgentAutonomyLevel>(ReadString(bag, "autonomyLevel"), ignoreCase: true, out var level) ? level : AgentAutonomyLevel.Standard;
+
+    /// <summary>
+    /// Derives permissions from the tier, then layers explicit per-field overrides on top (like allow-rules over a
+    /// mode) — an override applies ONLY when the field is explicitly present, so a tier-only config inherits cleanly
+    /// and a legacy network/readOnly config keeps its exact prior meaning.
+    /// </summary>
+    private static AgentPermissions ResolvePermissions(IReadOnlyDictionary<string, JsonElement> bag, AgentAutonomyLevel autonomy)
+    {
+        var permissions = AgentAutonomyPolicy.Derive(autonomy);
+
+        if (ReadOptionalBool(bag, "network") is { } network)
+            permissions = permissions with { Network = network ? AgentNetworkAccess.On : AgentNetworkAccess.Off };
+
+        if (ReadOptionalBool(bag, "readOnly") is { } readOnly)
+            permissions = permissions with { WriteScope = readOnly ? AgentWriteScope.ReadOnly : AgentWriteScope.Workspace };
+
+        return permissions;
+    }
+
+    /// <summary>A tri-state bool read: present-true / present-false / absent (null) — so an override only fires when explicitly set.</summary>
+    private static bool? ReadOptionalBool(IReadOnlyDictionary<string, JsonElement> bag, string key) =>
+        bag.TryGetValue(key, out var v) ? v.ValueKind switch { JsonValueKind.True => true, JsonValueKind.False => false, _ => (bool?)null } : null;
 
     /// <summary>Read an optional string-array config field. Absent → null (inherit the harness default); present → the string elements (blanks skipped), preserving "[]" = no tools.</summary>
     private static IReadOnlyList<string>? ReadStringArray(IReadOnlyDictionary<string, JsonElement> bag, string key)
