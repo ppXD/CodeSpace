@@ -1,6 +1,8 @@
 using System.Text.Json;
 using CodeSpace.Core.DependencyInjection;
+using CodeSpace.Core.Services.Agents.Mcp;
 using CodeSpace.Core.Services.Agents.Sandbox;
+using CodeSpace.Core.Services.Agents.Tools;
 using CodeSpace.Core.Services.Agents.Workspace;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Enums;
@@ -52,6 +54,14 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     /// (Rule 8) — renaming it silently turns the feature off for an operator who enabled it.
     /// </summary>
     public const string PushEnabledEnvVar = "CODESPACE_AGENT_PUSH_BRANCH_ENABLED";
+
+    /// <summary>
+    /// Operators opt INTO the in-process MCP endpoint (the run-scoped tool-fabric server a CLI harness can later
+    /// reach) by setting this to "1"/"true". Fail-closed default-OFF (absent/""/"0"/"false"/anything else → no
+    /// endpoint is minted, so the run is byte-identical to today). Pinned by a test (Rule 8) — renaming it silently
+    /// turns the feature off for an operator who enabled it.
+    /// </summary>
+    public const string McpEndpointEnabledEnvVar = "CODESPACE_AGENT_MCP_ENDPOINT_ENABLED";
 
     private static readonly IReadOnlyDictionary<string, string> EmptySecretEnv = new Dictionary<string, string>();
 
@@ -134,6 +144,11 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
             redactor = secretRedactor;
 
             var effectiveTask = (workspace is null ? task : task with { WorkspaceDirectory = workspace.Directory }) with { Environment = MergeEnvironment(task.Environment, secretEnv) };
+
+            // Open the per-run MCP endpoint (flag-OFF → null → no-op). It lives ONLY for the harness span: the harness
+            // runs synchronously here (RunHarnessAsync → AttachAsync blocks until exit), and `await using` inside the
+            // try tears it down on EVERY exit (success / cancel / generic catch) — NOT gated on leaveWorkspaceForReattach.
+            await using var mcp = await OpenMcpEndpointIfEnabledAsync(agentRunId, effectiveTask, run.TeamId, cancellationToken).ConfigureAwait(false);
 
             var result = await RunHarnessAsync(agentRunId, harness, runner, harness.BuildInvocation(effectiveTask), redactor, cancellationToken).ConfigureAwait(false);
 
@@ -427,6 +442,35 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         var raw = Environment.GetEnvironmentVariable(PushEnabledEnvVar)?.Trim();
 
         return raw is "1" or "true" or "TRUE";
+    }
+
+    /// <summary>True ONLY for "1"/"true"/"TRUE" (trimmed); fail-closed default-OFF otherwise. Mirrors <see cref="IsPushEnabled"/> exactly (Rule 8). Internal so it's unit-pinned; production reads it through this single gate.</summary>
+    internal static bool IsMcpEndpointEnabled()
+    {
+        var raw = Environment.GetEnvironmentVariable(McpEndpointEnabledEnvVar)?.Trim();
+
+        return raw is "1" or "true" or "TRUE";
+    }
+
+    /// <summary>
+    /// Open the run's in-process MCP endpoint when the flag is ON — null otherwise, so the flag-OFF path is
+    /// byte-identical. Mints a DEDICATED DI scope (its own DbContext) because the framing loop runs CONCURRENTLY
+    /// with the harness + the event-append path, so it must not share the heartbeat / streaming scope — the same
+    /// thread-safety reason the heartbeat mints its own. The scope is held for the endpoint's life and disposed in
+    /// the endpoint's <see cref="AgentMcpEndpoint.DisposeAsync"/> (never resolve the registry from a disposed scope).
+    /// The connect registry is a DI singleton, so resolving it from this scope hands a consumer the same map.
+    /// </summary>
+    private Task<AgentMcpEndpoint?> OpenMcpEndpointIfEnabledAsync(Guid runId, AgentTask effectiveTask, Guid teamId, CancellationToken ct)
+    {
+        if (!IsMcpEndpointEnabled()) return Task.FromResult<AgentMcpEndpoint?>(null);
+
+        var scope = _scopeFactory.CreateScope();
+        var registry = scope.ServiceProvider.GetRequiredService<IAgentToolRegistry>();
+        var connects = scope.ServiceProvider.GetRequiredService<IAgentMcpConnectRegistry>();
+
+        var endpoint = new AgentMcpEndpoint(runId, registry, effectiveTask.Autonomy, teamId, new AgentMcpChannel(), connects, scope, ct);
+
+        return Task.FromResult<AgentMcpEndpoint?>(endpoint);
     }
 
     /// <summary>
