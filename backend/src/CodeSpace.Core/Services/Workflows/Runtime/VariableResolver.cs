@@ -28,9 +28,15 @@ namespace CodeSpace.Core.Services.Workflows.Runtime;
 /// </summary>
 public static class VariableResolver
 {
-    // Matches {{ path.to.value }} with arbitrary whitespace around the dotted path.
-    // Multiple placeholders per string are independent matches.
-    private static readonly Regex TemplatePattern = new(@"\{\{\s*([a-zA-Z_][a-zA-Z0-9_.]*)\s*\}\}", RegexOptions.Compiled);
+    // Matches {{ path.to.value }} with arbitrary whitespace around the path. Multiple placeholders
+    // per string are independent matches. The path grammar is dotted segments — each a name that may
+    // carry zero+ array indices — so {{items[0]}}, {{matrix[0][1]}}, {{nodes.x.outputs.files[2].name}}
+    // and {{subtasks.length}} all match. Indices MUST be balanced [digits]: an unbalanced "{{a[0}}" or
+    // a stray "{{a]0}}" does NOT match and stays literal text (the head still anchors on [a-zA-Z_], so a
+    // leading digit / bracket is rejected). DefinitionValidator reuses THIS regex (internal) so the
+    // save-time and run-time grammars can never drift.
+    internal static readonly Regex TemplatePattern =
+        new(@"\{\{\s*([a-zA-Z_][a-zA-Z0-9_]*(?:\[\d+\])*(?:\.[a-zA-Z0-9_]+(?:\[\d+\])*)*)\s*\}\}", RegexOptions.Compiled);
 
     /// <summary>
     /// Walk a JsonElement tree, replacing every {{ref}} template inside strings AND every
@@ -162,7 +168,8 @@ public static class VariableResolver
 
         if (segments.Length == 0) return null;
 
-        var root = segments[0];
+        var headSeg = ParseSegment(segments[0]);
+        var root = headSeg.Name;                    // name only — the bucket / node-id / iteration key
         var rest = segments.Skip(1).ToArray();
 
         var explicitResult = root switch
@@ -187,7 +194,11 @@ public static class VariableResolver
         {
             if (scope.Iteration.TryGetValue(root, out var iterValue))
             {
-                return rest.Length == 0 ? iterValue : WalkElement(iterValue, rest);
+                // A bare iteration head may carry its own indices ({{items[0]}}, {{item.tags[0]}}).
+                var indexed = ApplyIndices(iterValue, headSeg.Indices);
+                if (!indexed.HasValue) return null;
+
+                return rest.Length == 0 ? indexed : WalkElement(indexed.Value, rest);
             }
         }
 
@@ -225,21 +236,96 @@ public static class VariableResolver
     private static JsonElement? WalkDictionary(IReadOnlyDictionary<string, JsonElement> dict, string[] segments)
     {
         if (segments.Length == 0) return null;
-        if (!dict.TryGetValue(segments[0], out var value)) return null;
 
-        return WalkElement(value, segments.Skip(1).ToArray());
+        // The first segment is a dict key that may itself carry indices (a node output named 'files'
+        // referenced as 'files[2]'). Look up the name, then apply the indices to the value.
+        var head = ParseSegment(segments[0]);
+        if (!dict.TryGetValue(head.Name, out var value)) return null;
+
+        var indexed = ApplyIndices(value, head.Indices);
+        if (!indexed.HasValue) return null;
+
+        return WalkElement(indexed.Value, segments.Skip(1).ToArray());
     }
 
     private static JsonElement? WalkElement(JsonElement element, string[] segments)
     {
         var current = element;
 
-        foreach (var segment in segments)
+        for (var s = 0; s < segments.Length; s++)
         {
-            if (current.ValueKind != JsonValueKind.Object) return null;
-            if (!current.TryGetProperty(segment, out var next)) return null;
+            var seg = ParseSegment(segments[s]);
+            var isLast = s == segments.Length - 1;
 
-            current = next;
+            // `.length` pseudo-property: only as the final segment, with no own index, and only on an
+            // Array (the headline {{…subtasks.length}} for flow.map). An Object that genuinely has a
+            // "length" key never reaches here as that kind — it's matched by TryGetProperty below — so
+            // a real property always wins; arrays can't carry a real member, so there's no ambiguity.
+            if (isLast && seg.Indices.Length == 0 && seg.Name == "length" && current.ValueKind == JsonValueKind.Array)
+                return JsonSerializer.SerializeToElement(current.GetArrayLength());
+
+            if (current.ValueKind != JsonValueKind.Object) return null;
+            if (!current.TryGetProperty(seg.Name, out var next)) return null;
+
+            var indexed = ApplyIndices(next, seg.Indices);
+            if (!indexed.HasValue) return null;
+
+            current = indexed.Value;
+        }
+
+        return current;
+    }
+
+    /// <summary>One dotted-path segment, split into its property name and any trailing array indices.</summary>
+    private readonly record struct Seg(string Name, int[] Indices);
+
+    private static readonly int[] NoIndices = Array.Empty<int>();
+
+    /// <summary>
+    /// Parses one segment into (name, indices): <c>files</c> → (files, []); <c>files[2]</c> → (files, [2]);
+    /// <c>m[0][1]</c> → (m, [0,1]). The inline-template regex guarantees balanced <c>[digits]</c>, but a
+    /// raw <c>$ref</c> string is unchecked — so a malformed segment (unbalanced bracket, non-digit index,
+    /// trailing junk, overflowing index) is treated as a single literal property name, which resolves to a
+    /// clean miss (null) just like any other unknown key. No throw, ever.
+    /// </summary>
+    private static Seg ParseSegment(string raw)
+    {
+        var bracket = raw.IndexOf('[');
+        if (bracket < 0) return new Seg(raw, NoIndices);
+
+        var name = raw[..bracket];
+        var indices = new List<int>();
+        var i = bracket;
+
+        while (i < raw.Length && raw[i] == '[')
+        {
+            var close = raw.IndexOf(']', i);
+            if (close < 0) return new Seg(raw, NoIndices);
+
+            var inner = raw[(i + 1)..close];
+            if (inner.Length == 0 || !inner.All(char.IsAsciiDigit) || !int.TryParse(inner, out var index))
+                return new Seg(raw, NoIndices);
+
+            indices.Add(index);
+            i = close + 1;
+        }
+
+        if (i != raw.Length) return new Seg(raw, NoIndices);   // trailing junk after the indices
+
+        return new Seg(name, indices.ToArray());
+    }
+
+    /// <summary>Applies array indices in order. Non-array / out-of-range / negative → null (a normal miss).</summary>
+    private static JsonElement? ApplyIndices(JsonElement element, int[] indices)
+    {
+        var current = element;
+
+        foreach (var index in indices)
+        {
+            if (current.ValueKind != JsonValueKind.Array) return null;
+            if (index < 0 || index >= current.GetArrayLength()) return null;
+
+            current = current[index];
         }
 
         return current;
@@ -265,13 +351,14 @@ public static class VariableResolver
     /// and <c>{"$ref":"path"}</c> structured references. Recurses into nested objects + arrays so
     /// references buried inside deeply-structured Inputs trees are still surfaced.
     ///
-    /// <para>Returned paths are the strings exactly as written in the template (no normalization),
-    /// e.g. <c>"team.API_KEY"</c>, <c>"nodes.fetch.outputs.users"</c>. Caller filters against
-    /// the secret-paths set / does whatever check it needs.</para>
+    /// <para>Returned paths are normalized to their TAINTABLE BASE — array indices and a trailing
+    /// <c>.length</c> are stripped — so a reference into part of a value (<c>team.SECRET[0]</c>,
+    /// <c>team.SECRET.length</c>) still string-equals the secret's base path (<c>team.SECRET</c>).
+    /// Without this, an indexed/length reference would slip past the engine's exact-match secret guard.
+    /// Plain dotted paths are returned verbatim (the strip is a no-op).</para>
     ///
-    /// <para>Used by the engine's Terminal-output secret-leak guard. Could be reused by future
-    /// save-time validators (e.g. statically checking that a node's inputs only reference paths
-    /// that exist at run time).</para>
+    /// <para>Used by the engine's Terminal-output secret-leak guard and the payload redactor, which both
+    /// compare the returned paths against the secret-paths set by string equality.</para>
     /// </summary>
     public static IReadOnlyList<string> ExtractReferencedPaths(JsonElement template)
     {
@@ -287,7 +374,7 @@ public static class VariableResolver
             case JsonValueKind.Object:
                 if (TryGetJsonRefPath(element, out var refPath))
                 {
-                    sink.Add(refPath);
+                    sink.Add(ToTaintableBase(refPath));
                     return;
                 }
                 foreach (var prop in element.EnumerateObject()) CollectReferencedPaths(prop.Value, sink);
@@ -298,8 +385,34 @@ public static class VariableResolver
             case JsonValueKind.String:
                 var raw = element.GetString();
                 if (string.IsNullOrEmpty(raw) || !raw.Contains("{{")) return;
-                foreach (Match match in TemplatePattern.Matches(raw)) sink.Add(match.Groups[1].Value);
+                foreach (Match match in TemplatePattern.Matches(raw)) sink.Add(ToTaintableBase(match.Groups[1].Value));
                 return;
         }
+    }
+
+    /// <summary>
+    /// Strips accessor suffixes so a reference resolves to the data path the secret guard knows: each
+    /// segment's array indices are dropped (<c>SECRET[0]</c> → <c>SECRET</c>), and a single trailing
+    /// <c>length</c> pseudo-segment is dropped (<c>SECRET.length</c> → <c>SECRET</c>). A <c>length</c>
+    /// that is NOT the last segment is a real object key and is preserved.
+    ///
+    /// <para>Tradeoff (intentional): this slightly OVER-taints — the <c>.length</c> of a secret array is
+    /// a count, not the secret content, yet it's treated as touching the secret. Over-tainting is the
+    /// leak-safe default; under-tainting could expose a secret element.</para>
+    /// </summary>
+    private static string ToTaintableBase(string path)
+    {
+        var segments = path.Split('.');
+
+        for (var i = 0; i < segments.Length; i++)
+        {
+            var bracket = segments[i].IndexOf('[');
+            if (bracket >= 0) segments[i] = segments[i][..bracket];
+        }
+
+        var end = segments.Length;
+        if (end > 1 && segments[end - 1] == "length") end--;
+
+        return string.Join('.', segments[..end]);
     }
 }

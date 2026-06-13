@@ -475,6 +475,61 @@ public class DefinitionValidatorTests
         result.Errors.ShouldContain(e => e.Contains("bogus"));
     }
 
+    [Theory]
+    [InlineData("{{nodes.a.outputs.value[0]}}", "index on the declared output key")]
+    [InlineData("{{nodes.a.outputs.value[0].name}}", "index then property descent")]
+    [InlineData("{{nodes.a.outputs.value.length}}", ".length on the declared output")]
+    public void Indexed_and_length_refs_validate_against_the_declared_output_key(string inputRef, string why)
+    {
+        // The accessor (index / .length) must not defeat the declared-output membership check — it
+        // validates the KEY ('value'), which regular.out declares. Save-time now matches run-time.
+        var definition = new WorkflowDefinition
+        {
+            Nodes = new List<NodeDefinition>
+            {
+                Node("t", "trigger.x"),
+                Node("a", "regular.out"),
+                NodeWithInputs("h", "regular.b", "{\"msg\":\"" + inputRef + "\"}"),
+                Node("end", "builtin.terminal")
+            },
+            Edges = new List<EdgeDefinition>
+            {
+                new() { From = "t", To = "a" },
+                new() { From = "a", To = "h" },
+                new() { From = "h", To = "end" },
+            }
+        };
+
+        BuildValidator().Validate(definition).IsValid.ShouldBeTrue(why);
+    }
+
+    [Fact]
+    public void Indexed_ref_against_an_undeclared_output_key_still_errors()
+    {
+        // Regression guard: stripping the accessor must not loosen the unknown-key check.
+        var definition = new WorkflowDefinition
+        {
+            Nodes = new List<NodeDefinition>
+            {
+                Node("t", "trigger.x"),
+                Node("a", "regular.out"),
+                NodeWithInputs("h", "regular.b", """{"msg":"{{nodes.a.outputs.bogus[0]}}"}"""),
+                Node("end", "builtin.terminal")
+            },
+            Edges = new List<EdgeDefinition>
+            {
+                new() { From = "t", To = "a" },
+                new() { From = "a", To = "h" },
+                new() { From = "h", To = "end" },
+            }
+        };
+
+        var result = BuildValidator().Validate(definition);
+
+        result.IsValid.ShouldBeFalse();
+        result.Errors.ShouldContain(e => e.Contains("bogus"));
+    }
+
     private static WorkflowDefinition MakeMinimalDefinition(NodeDefinition? extraNode = null)
     {
         var nodes = new List<NodeDefinition>
