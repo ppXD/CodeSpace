@@ -45,6 +45,14 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     /// <summary>Cap on the captured diff inlined into the persisted result row (~1 MB). A larger diff is truncated with a marker; the full diff belongs in the artifact layer (a later slice).</summary>
     private const int MaxPatchChars = 1_000_000;
 
+    /// <summary>
+    /// Operators opt INTO pushing a successful run's diff to a remote branch (a side-effecting write to the
+    /// user's remote) by setting this to "1"/"true". Fail-closed default-OFF (absent/""/"0"/"false"/anything
+    /// else → no push), so every existing run is byte-identical until an operator flips it. Pinned by a test
+    /// (Rule 8) — renaming it silently turns the feature off for an operator who enabled it.
+    /// </summary>
+    public const string PushEnabledEnvVar = "CODESPACE_AGENT_PUSH_BRANCH_ENABLED";
+
     private static readonly IReadOnlyDictionary<string, string> EmptySecretEnv = new Dictionary<string, string>();
 
     private readonly IAgentRunService _runs;
@@ -131,6 +139,8 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
 
             result = await EnrichWithWorkspaceChangesAsync(agentRunId, result, workspace, cancellationToken).ConfigureAwait(false);
 
+            result = await PushProducedBranchIfEnabledAsync(agentRunId, result, workspace, claimedEpoch, cancellationToken).ConfigureAwait(false);
+
             await CompleteAndNotifyAsync(agentRunId, result, claimedEpoch, cancellationToken).ConfigureAwait(false);
         }
         catch (OperationCanceledException)
@@ -189,6 +199,10 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
 
         try
         {
+            // NOTE: deliberately NO branch push on the re-attach path — the workspace clone didn't survive the
+            // backend restart (re-attach folds the result from the spool + exit code, never a git diff), so there
+            // is nothing to commit or push. A run that needed its branch on a remote must produce it on the
+            // original ExecuteAsync path.
             var result = await ReattachAndFoldAsync(agentRunId, durable, handle, task, run.TeamId, harness, cancellationToken).ConfigureAwait(false);
 
             if (result is null) return;   // couldn't safely observe (no redactor, still running) — leave Running for a later sweep
@@ -338,6 +352,81 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         if (string.IsNullOrEmpty(patch) || patch.Length <= maxChars) return patch;
 
         return patch[..maxChars] + $"\n... diff truncated ({patch.Length} chars; capped at {maxChars}) ...\n";
+    }
+
+    /// <summary>
+    /// When enabled, push a SUCCESSFUL run's non-empty diff to a deterministically-named remote branch and fold
+    /// the pushed name into the result so the agent.code node's <c>branch</c> output carries it — the handoff a
+    /// downstream git.open_pr needs (that node requires the branch to pre-exist on the remote). A SIDE-EFFECTING
+    /// write to the user's remote, so it is gated hard: the flag must be on, the run must have Succeeded with a
+    /// non-empty diff, and the handle must be push-capable; ANY guard failing returns the result UNCHANGED.
+    ///
+    /// <para>Idempotence / no-replay: re-read the run's epoch and skip if it no longer matches the one this
+    /// executor claimed — the run was reclaimed, so this side effect would be wasted (the completion CAS loses
+    /// anyway) and we must not fire it. The branch name is run-id-derived, so a workflow RETRY of agent.code is a
+    /// new run id → a NEW branch (acceptable v1 branch-litter), and a re-push of the SAME run is a plain --force
+    /// overwrite (no divergent branch).</para>
+    ///
+    /// <para>Best-effort like <see cref="EnrichWithWorkspaceChangesAsync"/>: a <see cref="WorkspaceException"/> is
+    /// SWALLOWED (a push hiccup — e.g. a read-only credential 403 — never flips a Succeeded run to Failed) but is
+    /// surfaced as a Warning event on the timeline (token already redacted in the message) so the operator sees
+    /// WHY no branch appeared. Cancellation still propagates (worker torn down).</para>
+    /// </summary>
+    internal async Task<AgentRunResult> PushProducedBranchIfEnabledAsync(Guid runId, AgentRunResult result, IWorkspaceHandle? workspace, long claimedEpoch, CancellationToken cancellationToken)
+    {
+        if (!IsPushEnabled()) return result;
+        if (result.Status != AgentRunStatus.Succeeded) return result;
+        if (result.ChangedFiles.Count == 0 && string.IsNullOrEmpty(result.Patch)) return result;
+        if (workspace is not IWorkspacePushHandle pushHandle) return result;
+
+        // No-replay: a reclaimed run (epoch bumped) would lose the completion CAS anyway — don't fire the side
+        // effect. Read FRESH + untracked (GetAsync is AsNoTracking) so we see the reclaimer's bumped epoch.
+        var current = await _runs.GetAsync(runId, cancellationToken).ConfigureAwait(false);
+
+        if (current.FenceEpoch != claimedEpoch)
+        {
+            _logger.LogWarning("Agent run {RunId}: skipping branch push — the run was reclaimed (epoch {Current} != claimed {Claimed}); its completion would lose the CAS", runId, current.FenceEpoch, claimedEpoch);
+            return result;
+        }
+
+        try
+        {
+            var branch = await pushHandle.PushChangesAsync(BuildBranchName(runId), cancellationToken).ConfigureAwait(false);
+
+            return branch is null ? result : result with { ProducedBranch = branch };
+        }
+        catch (WorkspaceException ex)
+        {
+            // Best-effort: a push failure must never flip a Succeeded run to Failed. The exception message has the
+            // token already redacted (the handle redacts it), so it's safe to persist onto the timeline.
+            _logger.LogWarning(ex, "Agent run {RunId}: failed to push the produced branch; the run stays Succeeded with no branch output", runId);
+            await AppendPushFailureWarningAsync(runId, ex.Message, cancellationToken).ConfigureAwait(false);
+            return result;
+        }
+    }
+
+    /// <summary>Append a Warning event so the operator sees on the timeline WHY no branch appeared — not only in an ILogger line. Best-effort: a failure to record the warning never masks the run's success.</summary>
+    private async Task AppendPushFailureWarningAsync(Guid runId, string redactedMessage, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await _runs.AppendEventAsync(runId, new AgentEvent { Kind = AgentEventKind.Warning, Text = $"Could not push the agent's changes to a branch: {redactedMessage}" }, cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogWarning(ex, "Agent run {RunId}: could not record the branch-push failure warning event", runId);
+        }
+    }
+
+    /// <summary>Deterministic, run-unique remote branch name for a produced diff. Pure + private so it's unit-pinned. Run-id-derived, so a workflow retry (new run id) → a new branch; a re-push of the same run → the same branch (plain --force overwrite).</summary>
+    internal static string BuildBranchName(Guid runId) => $"codespace/agent/{runId:N}";
+
+    /// <summary>True ONLY for "1"/"true"/"TRUE" (trimmed); fail-closed default-OFF for null / "" / "0" / "false" / anything else. Mirrors the env-flag pattern (Rule 8). Internal so it's unit-pinned; production reads it through this single gate.</summary>
+    internal static bool IsPushEnabled()
+    {
+        var raw = Environment.GetEnvironmentVariable(PushEnabledEnvVar)?.Trim();
+
+        return raw is "1" or "true" or "TRUE";
     }
 
     /// <summary>

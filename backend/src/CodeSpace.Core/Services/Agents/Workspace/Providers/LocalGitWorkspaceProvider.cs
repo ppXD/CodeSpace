@@ -23,6 +23,7 @@ public sealed class LocalGitWorkspaceProvider : IWorkspaceProvider, IWorkspaceJa
 {
     private const int CloneTimeoutSeconds = 300;
     private const int CaptureTimeoutSeconds = 120;
+    private const int PushTimeoutSeconds = 300;
     private static readonly string WorkspacesRoot = Path.Combine(Path.GetTempPath(), "codespace-agent-workspaces");
 
     /// <summary>
@@ -60,7 +61,10 @@ public sealed class LocalGitWorkspaceProvider : IWorkspaceProvider, IWorkspaceJa
 
             var baseSha = await ReadBaseShaAsync(directory, cancellationToken).ConfigureAwait(false);
 
-            return new LocalWorkspaceHandle(directory, baseSha, _runners.Resolve(Kind), _logger);
+            // Carry the SAME short-lived clone credential forward onto the handle so a later push can
+            // re-inject auth into the push argv WITHOUT a second auth round-trip. It is never persisted
+            // (the handle is in-memory) and never written to .git/config (origin was stripped after clone).
+            return new LocalWorkspaceHandle(directory, baseSha, request.RepositoryUrl, request.TokenUsername, request.Token, _runners.Resolve(Kind), _logger);
         }
         catch
         {
@@ -199,16 +203,22 @@ public sealed class LocalGitWorkspaceProvider : IWorkspaceProvider, IWorkspaceJa
     private static string Redact(string text, string? token) =>
         string.IsNullOrEmpty(token) ? text : text.Replace(token, "***");
 
-    private sealed class LocalWorkspaceHandle : IWorkspaceHandle
+    private sealed class LocalWorkspaceHandle : IWorkspaceHandle, IWorkspacePushHandle
     {
         private readonly string _baseSha;
+        private readonly string _repositoryUrl;
+        private readonly string? _tokenUsername;
+        private readonly string? _token;
         private readonly ISandboxRunner _runner;
         private readonly ILogger _logger;
 
-        public LocalWorkspaceHandle(string directory, string baseSha, ISandboxRunner runner, ILogger logger)
+        public LocalWorkspaceHandle(string directory, string baseSha, string repositoryUrl, string? tokenUsername, string? token, ISandboxRunner runner, ILogger logger)
         {
             Directory = directory;
             _baseSha = baseSha;
+            _repositoryUrl = repositoryUrl;
+            _tokenUsername = tokenUsername;
+            _token = token;
             _runner = runner;
             _logger = logger;
         }
@@ -232,27 +242,91 @@ public sealed class LocalGitWorkspaceProvider : IWorkspaceProvider, IWorkspaceJa
             };
         }
 
-        private async Task<string> RunGitOrThrowAsync(IReadOnlyList<string> args, CancellationToken cancellationToken)
+        public async Task<string?> PushChangesAsync(string branchName, CancellationToken cancellationToken)
         {
-            SandboxResult result;
+            // An anonymous clone carries no push credential — short-circuit WITHOUT invoking git (no remote to
+            // push to, no credential to re-inject). Not a failure: the run simply produces no branch.
+            if (string.IsNullOrEmpty(_token)) return null;
+
+            await RunGitOrThrowAsync(new[] { "checkout", "-b", branchName }, cancellationToken).ConfigureAwait(false);
+            await RunGitOrThrowAsync(new[] { "add", "-A" }, cancellationToken).ConfigureAwait(false);
+
+            // A run that changed nothing has nothing to push. The agent may either leave its edits for us to commit
+            // OR commit them itself — so push when we just made a commit, OR when the branch tip already differs
+            // from the cloned base (a harness that committed its own work leaves a clean tree, so there is nothing
+            // new to commit, but the branch still carries the change). This mirrors CaptureChangesAsync's base-SHA
+            // semantics so push and capture agree on "did this run change anything".
+            var committed = await CommitOrDetectEmptyAsync(branchName, cancellationToken).ConfigureAwait(false);
+
+            if (!committed && !await HeadDiffersFromBaseAsync(cancellationToken).ConfigureAwait(false)) return null;
+
+            // Re-inject the SAME clone credential into the push ARGV only (never as a remote, never into
+            // .git/config — origin was stripped after clone). Plain --force, not --force-with-lease: the branch
+            // name is run-unique so lease protection is vacuous, and its no-remote-tracking-ref semantics vary by
+            // git version. The push gets a bounded timeout so a hung push can't delay run completion.
+            var authedUrl = BuildAuthenticatedUrl(_repositoryUrl, _tokenUsername, _token);
+
+            await RunGitOrThrowAsync(new[] { "push", "--force", authedUrl, $"{branchName}:{branchName}" }, cancellationToken, PushTimeoutSeconds).ConfigureAwait(false);
+
+            return branchName;
+        }
+
+        /// <summary>Commit everything staged under a fixed CodeSpace identity; returns false (no commit) when there was nothing to commit. The identity is set inline via <c>-c</c> so the clone's git config is never mutated.</summary>
+        private async Task<bool> CommitOrDetectEmptyAsync(string branchName, CancellationToken cancellationToken)
+        {
+            var result = await RunGitAsync(new[] { "-c", "user.name=CodeSpace", "-c", "user.email=agent@codespace.local", "commit", "-m", $"Agent run {branchName}" }, cancellationToken, PushTimeoutSeconds).ConfigureAwait(false);
+
+            if (result.Status == SandboxStatus.Success) return true;
+
+            var output = $"{result.Stdout}\n{result.Stderr}";
+
+            if (output.Contains("nothing to commit", StringComparison.OrdinalIgnoreCase) || output.Contains("working tree clean", StringComparison.OrdinalIgnoreCase))
+                return false;
+
+            throw new WorkspaceException($"git commit failed (exit {result.ExitCode}): {Redact(Summarize(result.Stderr), _token)}");
+        }
+
+        /// <summary>True when the branch tip differs from the cloned base — covers a harness that COMMITTED its own
+        /// work (clean tree, so nothing new to commit, but the branch still carries the change). Diffs against the
+        /// same base SHA <see cref="CaptureChangesAsync"/> uses. <c>git diff --quiet</c> exits 0 when identical,
+        /// non-zero when different; a non-zero exit is the signal, not a failure, so this never throws (and on a
+        /// genuine git error it fails toward pushing rather than silently dropping the agent's work).</summary>
+        private async Task<bool> HeadDiffersFromBaseAsync(CancellationToken cancellationToken)
+        {
+            var result = await RunGitAsync(new[] { "diff", "--quiet", _baseSha, "HEAD" }, cancellationToken, CaptureTimeoutSeconds).ConfigureAwait(false);
+            return result.ExitCode != 0;
+        }
+
+        private async Task<string> RunGitOrThrowAsync(IReadOnlyList<string> args, CancellationToken cancellationToken, int timeoutSeconds = CaptureTimeoutSeconds)
+        {
+            var result = await RunGitAsync(args, cancellationToken, timeoutSeconds).ConfigureAwait(false);
+
+            if (result.Status != SandboxStatus.Success)
+                // Redact any echoed token (the push argv embeds the authed URL) so it never reaches a log / exception.
+                throw new WorkspaceException($"git {string.Join(' ', RedactArgs(args))} failed (exit {result.ExitCode}): {Redact(result.Stderr.Trim(), _token)}");
+
+            return result.Stdout;
+        }
+
+        /// <summary>Run a git command through the SAME unconfined batch path the diff-capture uses (the handle's runner with the clone as cwd — host network, not bubblewrapped). Returns the raw result so a caller can classify it (e.g. detect "nothing to commit") rather than always throw.</summary>
+        private async Task<SandboxResult> RunGitAsync(IReadOnlyList<string> args, CancellationToken cancellationToken, int timeoutSeconds)
+        {
             try
             {
-                result = await _runner.RunAsync(
-                    new SandboxSpec { Command = "git", Args = args, WorkingDirectory = Directory, TimeoutSeconds = CaptureTimeoutSeconds }, cancellationToken).ConfigureAwait(false);
+                return await _runner.RunAsync(
+                    new SandboxSpec { Command = "git", Args = args, WorkingDirectory = Directory, TimeoutSeconds = timeoutSeconds }, cancellationToken).ConfigureAwait(false);
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
                 // Honour the IWorkspaceHandle contract: a git failure — including an INFRASTRUCTURE failure the
                 // runner throws (git not on PATH, the working directory removed mid-run) — surfaces as a
                 // WorkspaceException, never a raw Win32Exception/IOException leaking to the caller.
-                throw new WorkspaceException($"git {string.Join(' ', args)} could not run: {ex.Message}", ex);
+                throw new WorkspaceException($"git {string.Join(' ', RedactArgs(args))} could not run: {Redact(ex.Message, _token)}", ex);
             }
-
-            if (result.Status != SandboxStatus.Success)
-                throw new WorkspaceException($"git {string.Join(' ', args)} failed (exit {result.ExitCode}): {result.Stderr.Trim()}");
-
-            return result.Stdout;
         }
+
+        /// <summary>Redact the token from the echoed argv (the push command carries the authed URL) before it lands in an exception message.</summary>
+        private IEnumerable<string> RedactArgs(IReadOnlyList<string> args) => args.Select(a => Redact(a, _token));
 
         public ValueTask DisposeAsync()
         {

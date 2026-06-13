@@ -42,3 +42,20 @@ public interface IWorkspaceHandle : IAsyncDisposable
     /// </summary>
     Task<WorkspaceChanges> CaptureChangesAsync(CancellationToken cancellationToken);
 }
+
+/// <summary>
+/// A SIBLING capability (Rule 7 / ISP — NOT widening <see cref="IWorkspaceHandle"/>): push the agent's
+/// changes from the prepared clone to a remote branch, so a downstream PR-open step has a branch that
+/// pre-exists on the remote. Only the handles that can write back (the local-clone handle) implement it;
+/// a feature-detect (<c>workspace is IWorkspacePushHandle</c>) keeps the base contract read-only.
+/// </summary>
+public interface IWorkspacePushHandle
+{
+    /// <summary>
+    /// Commit everything in the clone and force-push it to <paramref name="branchName"/> on the origin
+    /// remote, returning the pushed branch name on success. Returns null when the run made no changes
+    /// (nothing to commit) or the clone carries no push credential (an anonymous clone) — neither is a
+    /// failure. Throws <see cref="WorkspaceException"/> (with the token REDACTED) on a git failure.
+    /// </summary>
+    Task<string?> PushChangesAsync(string branchName, CancellationToken cancellationToken);
+}
