@@ -1,4 +1,5 @@
 using System.Text.Json;
+using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Agents.Tools;
 using CodeSpace.Messages.Agents;
 using Shouldly;
@@ -109,5 +110,27 @@ public class AgentToolContractTests
 
         call.IdempotencyKey.ShouldBe("open-pr-run-42");
         new AgentToolCall { Input = EmptyObject }.IdempotencyKey.ShouldBeNull("a read-only call carries no key");
+    }
+
+    [Fact]
+    public void TeamId_round_trips_under_agent_json_when_present()
+    {
+        var teamId = Guid.NewGuid();
+        var call = new AgentToolCall { Input = EmptyObject, TeamId = teamId };
+
+        var json = JsonSerializer.Serialize(call, AgentJson.Options);
+        var back = JsonSerializer.Deserialize<AgentToolCall>(json, AgentJson.Options)!;
+
+        back.TeamId.ShouldBe(teamId);
+    }
+
+    [Fact]
+    public void TeamId_defaults_to_null_when_omitted_forward_compat()
+    {
+        var call = new AgentToolCall { Input = EmptyObject };
+        call.TeamId.ShouldBeNull("no team → fail-closed default");
+
+        var back = JsonSerializer.Deserialize<AgentToolCall>(JsonSerializer.Serialize(call, AgentJson.Options), AgentJson.Options)!;
+        back.TeamId.ShouldBeNull();
     }
 }

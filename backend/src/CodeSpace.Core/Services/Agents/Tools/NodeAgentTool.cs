@@ -52,13 +52,21 @@ public sealed class NodeAgentTool : IAgentTool
             ? call.Input.EnumerateObject().ToDictionary(p => p.Name, p => p.Value.Clone())
             : new Dictionary<string, JsonElement>();
 
+        // Stamp the run's team onto the synthetic scope's sys.team_id so repo-touching nodes resolve within it.
+        // The Guid is serialized as a JSON STRING element, byte-for-byte like WorkflowEngine.BuildSysScope, so
+        // NodeScopeReader.TryReadTeamId (which requires ValueKind==String + Guid.TryParse) reads it back.
+        // A null team leaves Sys empty → no team_id → repo nodes fail closed (today's behavior).
+        var sys = call.TeamId is { } teamId
+            ? new Dictionary<string, JsonElement> { [SystemScopeKeys.TeamId] = JsonSerializer.SerializeToElement(teamId) }
+            : new Dictionary<string, JsonElement>();
+
         var context = new NodeRunContext
         {
             Inputs = inputs,
             Config = new Dictionary<string, JsonElement>(),
             RawInputs = call.Input,
             RawConfig = EmptyObject,
-            Scope = new NodeRunScope { Trigger = new Dictionary<string, JsonElement>() },
+            Scope = new NodeRunScope { Trigger = new Dictionary<string, JsonElement>(), Sys = sys },
             Logger = _logger,
             Observability = NodeObservability.NoOp,
         };

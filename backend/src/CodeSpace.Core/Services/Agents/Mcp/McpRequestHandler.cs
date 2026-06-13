@@ -17,13 +17,13 @@ namespace CodeSpace.Core.Services.Agents.Mcp;
 ///
 /// <para>Tool calls are gated by the run's autonomy tier via <see cref="AgentToolGate"/>: a gated (destructive)
 /// tool the tier does not permit comes back as a tool result with <c>isError:true</c> + a reason — never silently
-/// run. <b>Two preconditions are still owed before this is wired to a live transport:</b> (1) per-call TENANCY —
-/// the tool path does not yet enforce the run's team on the repository it touches, so a connected model could name
-/// another team's repository id; the transport-wiring slice MUST thread the run's team through tool execution +
-/// the repo load first. (2) SECRET REDACTION — tool error text + caught exception messages are not yet run through
-/// the per-run <c>SecretRedactor</c> (which needs the run's resolved secrets), so that slice must redact them
-/// before they reach the model. Nothing in production constructs this handler yet (no transport, no DI
-/// registration).</para>
+/// run. Per-call TENANCY is enforced: the handler stamps the run's <c>teamId</c> onto every <c>AgentToolCall</c>,
+/// which <c>NodeAgentTool</c> writes to the synthetic scope's <c>sys.team_id</c> so a repo-touching tool resolves
+/// the run's tenant (a foreign repository id still fail-closes; a null team → no team → fail-closed). <b>One
+/// precondition is still owed before this is wired to a live transport:</b> SECRET REDACTION — tool error text +
+/// caught exception messages are not yet run through the per-run <c>SecretRedactor</c> (which needs the run's
+/// resolved secrets), so that slice must redact them before they reach the model. Nothing in production constructs
+/// this handler yet (no transport, no DI registration).</para>
 /// </summary>
 public sealed class McpRequestHandler : IMcpRequestHandler
 {
@@ -41,11 +41,13 @@ public sealed class McpRequestHandler : IMcpRequestHandler
 
     private readonly IAgentToolRegistry _registry;
     private readonly AgentAutonomyLevel _autonomy;
+    private readonly Guid? _teamId;
 
-    public McpRequestHandler(IAgentToolRegistry registry, AgentAutonomyLevel autonomy)
+    public McpRequestHandler(IAgentToolRegistry registry, AgentAutonomyLevel autonomy, Guid? teamId = null)
     {
         _registry = registry;
         _autonomy = autonomy;
+        _teamId = teamId;
     }
 
     public async Task<JsonElement?> HandleAsync(JsonElement request, CancellationToken cancellationToken)
@@ -98,11 +100,11 @@ public sealed class McpRequestHandler : IMcpRequestHandler
         return JsonRpcResponse.Ok(id, await InvokeToolAsync(tool, arguments, cancellationToken).ConfigureAwait(false));
     }
 
-    private static async Task<JsonElement> InvokeToolAsync(IAgentTool tool, JsonElement arguments, CancellationToken cancellationToken)
+    private async Task<JsonElement> InvokeToolAsync(IAgentTool tool, JsonElement arguments, CancellationToken cancellationToken)
     {
         try
         {
-            var result = await tool.CallAsync(new AgentToolCall { Input = arguments }, cancellationToken).ConfigureAwait(false);
+            var result = await tool.CallAsync(new AgentToolCall { Input = arguments, TeamId = _teamId }, cancellationToken).ConfigureAwait(false);
 
             return result.IsError
                 ? ToolResult(isError: true, result.Error ?? "Tool failed.")

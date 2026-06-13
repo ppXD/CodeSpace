@@ -1,6 +1,8 @@
+using System.Text.Json;
 using Autofac;
 using CodeSpace.Core.Services.Agents.Tools;
 using CodeSpace.IntegrationTests.Infrastructure;
+using CodeSpace.Messages.Agents;
 using Shouldly;
 
 namespace CodeSpace.IntegrationTests.Agents;
@@ -45,5 +47,31 @@ public class AgentToolRegistryFlowTests
         tool.ShouldNotBeNull($"the eligible read-only {kind} node must project onto the tool fabric via DI");
         tool!.IsReadOnly.ShouldBeTrue($"{kind} only reads provider data → a read-only tool");
         tool.IsDestructive.ShouldBeFalse($"{kind} has no side effects → not a destructive, gated tool");
+    }
+
+    // Forward-looking guard: every currently-eligible repo-resolving tool MUST refuse a repositoryId when the
+    // call carries no team (no sys.team_id). If a future eligible node forgets the NodeScopeReader.TryReadTeamId
+    // check, this fails — catching a silently-reintroduced cross-tenant hole. (All 4 eligible builtins —
+    // agent.run_command + the three git read tools — declare a repositoryId input today; keep this list in sync
+    // with the IsAgentToolEligible repo nodes.) A teamless call must NOT succeed (it errors fail-closed).
+    [Theory]
+    [InlineData("agent.run_command")]
+    [InlineData("git.fetch_pr_diff")]
+    [InlineData("git.fetch_pr_checks")]
+    [InlineData("git.list_prs")]
+    public async Task A_repo_resolving_tool_with_no_team_context_fails_closed(string kind)
+    {
+        using var scope = _fixture.BeginScope();
+        var tool = scope.Resolve<IAgentToolRegistry>().Resolve(kind);
+
+        tool.ShouldNotBeNull($"{kind} must project onto the tool fabric via DI");
+
+        // A repositoryId is named but the call has no TeamId → no sys.team_id → the node can't resolve a tenant.
+        // The extra fields satisfy each node's OTHER required inputs (command / number) so it reaches — and
+        // fails at — the team-scope check rather than tripping an unrelated "missing input" guard first.
+        var input = JsonSerializer.SerializeToElement(new { repositoryId = Guid.NewGuid().ToString(), command = "true", number = 1 });
+        var result = await tool!.CallAsync(new AgentToolCall { Input = input }, CancellationToken.None);
+
+        result.IsError.ShouldBeTrue($"{kind} must fail closed when invoked with a repositoryId but no team — never resolve a repo cross-tenant");
     }
 }

@@ -54,6 +54,7 @@ public class McpRequestHandlerTests
     // Default to Unleashed so the protocol-focused tests see a transparent gate; gate-specific tests pass a tier.
     private static McpRequestHandler Handler(params IAgentTool[] tools) => Handler(AgentAutonomyLevel.Unleashed, tools);
     private static McpRequestHandler Handler(AgentAutonomyLevel autonomy, params IAgentTool[] tools) => new(new FakeRegistry(tools), autonomy);
+    private static McpRequestHandler Handler(AgentAutonomyLevel autonomy, Guid? teamId, params IAgentTool[] tools) => new(new FakeRegistry(tools), autonomy, teamId);
     private static async Task<JsonElement> Respond(McpRequestHandler handler, string requestJson) => (await handler.HandleAsync(Parse(requestJson), CancellationToken.None))!.Value;
     private static string Call(string name, string argsJson) => $$$"""{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"{{{name}}}","arguments":{{{argsJson}}}}}""";
 
@@ -316,6 +317,46 @@ public class McpRequestHandlerTests
 
         result.GetProperty("isError").GetBoolean().ShouldBeFalse();
         tool.CallCount.ShouldBe(1, "a read-only tool runs regardless of tier");
+    }
+
+    // ── tools/call team scope stamping ────────────────────────────────────────
+
+    [Fact]
+    public async Task ToolsCall_stamps_the_handlers_team_onto_the_tool_call()
+    {
+        var teamId = Guid.NewGuid();
+        Guid? seen = null;
+        var tool = new FakeTool { Kind = "echo", OnCall = (c, _) => { seen = c.TeamId; return Task.FromResult(AgentToolResult.Ok(Parse("{}"), 2)); } };
+
+        await Respond(Handler(AgentAutonomyLevel.Unleashed, teamId, tool), Call("echo", "{}"));
+
+        seen.ShouldBe(teamId, "the run's team must travel handler → AgentToolCall so a repo-touching tool resolves within it");
+    }
+
+    [Fact]
+    public async Task ToolsCall_with_no_team_on_the_handler_stamps_null_preserving_the_fail_closed_default()
+    {
+        Guid? seen = Guid.NewGuid();   // sentinel: must be overwritten to null by the call
+        var tool = new FakeTool { Kind = "echo", OnCall = (c, _) => { seen = c.TeamId; return Task.FromResult(AgentToolResult.Ok(Parse("{}"), 2)); } };
+
+        await Respond(Handler(tool), Call("echo", "{}"));   // 3rd ctor arg omitted via the defaulted param
+
+        seen.ShouldBeNull("no team on the handler → null TeamId → the tool's synthetic scope has no team_id (fail-closed)");
+    }
+
+    [Fact]
+    public async Task A_gate_denied_tool_is_never_invoked_so_no_team_is_stamped()
+    {
+        // Composition-order pin: the gate short-circuits BEFORE the tool is invoked, so a denied (destructive,
+        // Confined) tool never reaches CallAsync — no TeamId is ever stamped on it.
+        var teamId = Guid.NewGuid();
+        var tool = new FakeTool { Kind = "git.merge_pr", IsDestructiveOverride = true };
+
+        var resp = await Respond(Handler(AgentAutonomyLevel.Confined, teamId, tool), Call("git.merge_pr", "{}"));
+
+        resp.GetProperty("result").GetProperty("isError").GetBoolean().ShouldBeTrue();
+        resp.GetProperty("result").GetProperty("content")[0].GetProperty("text").GetString().ShouldContain("not permitted");
+        tool.CallCount.ShouldBe(0, "a denied tool must never execute, so it is never stamped/invoked");
     }
 
     // ── tools/call (protocol-error plane) ─────────────────────────────────────

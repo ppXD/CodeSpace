@@ -3,6 +3,7 @@ using CodeSpace.Core.Services.Agents.Commands;
 using CodeSpace.Core.Services.Agents.Tools;
 using CodeSpace.Core.Services.Workflows.Nodes;
 using CodeSpace.Core.Services.Workflows.Nodes.Builtin;
+using CodeSpace.Core.Services.Workflows.Runtime;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Enums;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -44,6 +45,23 @@ public class NodeAgentToolTests
     {
         public SandboxResult Result = new() { Status = SandboxStatus.Success, ExitCode = 0, Stdout = "ok", Stderr = "" };
         public Task<SandboxResult> RunAsync(RunCommandRequest request, CancellationToken ct) => Task.FromResult(Result);
+    }
+
+    /// <summary>Captures the NodeRunContext the adapter builds, so tests can assert what landed on the synthetic scope.</summary>
+    private sealed class CapturingNode : INodeRuntime
+    {
+        public NodeRunContext? Captured { get; private set; }
+        public string TypeKey => "test.capture";
+        public NodeManifest Manifest { get; } = new()
+        {
+            DisplayName = "capture", Category = "Test", Kind = NodeKind.Regular, Description = "desc", IsSideEffecting = false,
+            ConfigSchema = SchemaBuilder.EmptyObject(), InputSchema = SchemaBuilder.EmptyObject(), OutputSchema = SchemaBuilder.EmptyObject(),
+        };
+        public Task<NodeResult> RunAsync(NodeRunContext context, CancellationToken ct)
+        {
+            Captured = context;
+            return Task.FromResult(NodeResult.Ok());
+        }
     }
 
     private static NodeAgentTool Tool(INodeRuntime node) => new(node, NullLogger.Instance);
@@ -127,5 +145,57 @@ public class NodeAgentToolTests
         result.IsError.ShouldBeFalse();
         result.Output.GetProperty("exitCode").GetInt32().ShouldBe(0);
         result.Output.GetProperty("status").GetString().ShouldBe("Success");
+    }
+
+    // ── team scope stamping ────────────────────────────────────────────────────
+
+    [Fact]
+    public async Task A_call_with_a_team_stamps_sys_team_id_as_a_string_that_the_scope_reader_resolves()
+    {
+        // Load-bearing: the Guid MUST serialize as a JSON STRING element (byte-shape parity with
+        // WorkflowEngine.BuildSysScope), because NodeScopeReader.TryReadTeamId requires ValueKind==String +
+        // Guid.TryParse. Serialize it as a number/raw and the team silently fails to resolve (the fail-closed bug).
+        var teamId = Guid.NewGuid();
+        var node = new CapturingNode();
+
+        await Tool(node).CallAsync(new AgentToolCall { Input = EmptyObject, TeamId = teamId }, CancellationToken.None);
+
+        var captured = node.Captured.ShouldNotBeNull();
+        captured.Scope.Sys[SystemScopeKeys.TeamId].ValueKind.ShouldBe(JsonValueKind.String, "the Guid must be a JSON string, not a number — else the scope reader fails closed");
+        NodeScopeReader.TryReadTeamId(captured, out var read).ShouldBeTrue();
+        read.ShouldBe(teamId);
+    }
+
+    [Fact]
+    public async Task A_call_with_no_team_leaves_sys_empty_so_the_scope_reader_fails_closed()
+    {
+        var node = new CapturingNode();
+
+        await Tool(node).CallAsync(new AgentToolCall { Input = EmptyObject }, CancellationToken.None);   // TeamId omitted → null
+
+        var captured = node.Captured.ShouldNotBeNull();
+        captured.Scope.Sys.ContainsKey(SystemScopeKeys.TeamId).ShouldBeFalse("no team → no team_id → today's fail-closed default");
+        NodeScopeReader.TryReadTeamId(captured, out _).ShouldBeFalse();
+    }
+
+    [Fact]
+    public async Task TeamId_does_not_alter_inputs_rawinputs_config_or_observability()
+    {
+        // Surgical-change pin: stamping the team touches ONLY Scope.Sys — every other facet of the synthetic
+        // context is identical with or without a team.
+        var input = JsonSerializer.SerializeToElement(new { repositoryId = "abc", command = "echo" });
+        var withTeam = new CapturingNode();
+        var without = new CapturingNode();
+
+        await Tool(withTeam).CallAsync(new AgentToolCall { Input = input, TeamId = Guid.NewGuid() }, CancellationToken.None);
+        await Tool(without).CallAsync(new AgentToolCall { Input = input }, CancellationToken.None);
+
+        var a = withTeam.Captured.ShouldNotBeNull();
+        var b = without.Captured.ShouldNotBeNull();
+        a.RawInputs.GetRawText().ShouldBe(b.RawInputs.GetRawText());
+        JsonSerializer.SerializeToElement(a.Inputs).GetRawText().ShouldBe(JsonSerializer.SerializeToElement(b.Inputs).GetRawText());
+        a.Config.Count.ShouldBe(b.Config.Count);
+        a.Config.Count.ShouldBe(0);
+        a.Observability.ShouldBeSameAs(b.Observability);   // both NodeObservability.NoOp
     }
 }
