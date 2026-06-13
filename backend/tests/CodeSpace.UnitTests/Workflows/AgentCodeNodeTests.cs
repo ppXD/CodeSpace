@@ -216,6 +216,84 @@ public class AgentCodeNodeTests
         result.Error.ShouldContain("patch did not apply");
     }
 
+    // ── Autonomy tier → permissions ─────────────────────────────────────────────
+
+    [Theory]
+    [InlineData("Confined", AgentNetworkAccess.Off, AgentWriteScope.ReadOnly)]
+    [InlineData("Standard", AgentNetworkAccess.Off, AgentWriteScope.Workspace)]
+    [InlineData("Trusted", AgentNetworkAccess.On, AgentWriteScope.Workspace)]
+    [InlineData("Unleashed", AgentNetworkAccess.On, AgentWriteScope.Workspace)]
+    public async Task Autonomy_level_derives_the_permissions_and_is_carried_as_provenance(string level, AgentNetworkAccess network, AgentWriteScope writeScope)
+    {
+        var config = new Dictionary<string, JsonElement> { ["goal"] = Str("g"), ["harness"] = Str("codex-cli"), ["autonomyLevel"] = Str(level) };
+
+        var result = await new AgentCodeNode().RunAsync(BuildContext(config, resume: null), CancellationToken.None);
+
+        var task = JsonSerializer.Deserialize<AgentTask>(result.SuspendUntil!.Payload, AgentJson.Options)!;
+        task.Autonomy.ShouldBe(Enum.Parse<AgentAutonomyLevel>(level), "the chosen tier is carried as provenance");
+        task.Permissions.Network.ShouldBe(network);
+        task.Permissions.WriteScope.ShouldBe(writeScope);
+    }
+
+    [Fact]
+    public async Task No_autonomy_and_no_overrides_is_standard_matching_the_historical_default()
+    {
+        // Regression: a pre-existing node (no autonomyLevel, no network/readOnly) must behave EXACTLY as before
+        // the dial existed — Standard tier = Network Off + WriteScope Workspace.
+        var result = await new AgentCodeNode().RunAsync(BuildContext(RequiredConfig(), resume: null), CancellationToken.None);
+
+        var task = JsonSerializer.Deserialize<AgentTask>(result.SuspendUntil!.Payload, AgentJson.Options)!;
+        task.Autonomy.ShouldBe(AgentAutonomyLevel.Standard);
+        task.Permissions.ShouldBe(new AgentPermissions());
+    }
+
+    [Theory]
+    // Override layers on top of the tier, and ONLY the overridden field changes (the other inherits the tier).
+    [InlineData("Trusted", "readOnly", true, AgentNetworkAccess.On, AgentWriteScope.ReadOnly)]    // readOnly override; network inherits Trusted
+    [InlineData("Confined", "network", true, AgentNetworkAccess.On, AgentWriteScope.ReadOnly)]     // network override; writeScope inherits Confined
+    [InlineData("Trusted", "network", false, AgentNetworkAccess.Off, AgentWriteScope.Workspace)]   // an explicit false override still wins
+    public async Task Explicit_overrides_layer_over_the_tier(string level, string overrideKey, bool overrideValue, AgentNetworkAccess network, AgentWriteScope writeScope)
+    {
+        var config = new Dictionary<string, JsonElement>
+        {
+            ["goal"] = Str("g"), ["harness"] = Str("codex-cli"), ["autonomyLevel"] = Str(level), [overrideKey] = Bool(overrideValue),
+        };
+
+        var result = await new AgentCodeNode().RunAsync(BuildContext(config, resume: null), CancellationToken.None);
+
+        var task = JsonSerializer.Deserialize<AgentTask>(result.SuspendUntil!.Payload, AgentJson.Options)!;
+        task.Permissions.Network.ShouldBe(network);
+        task.Permissions.WriteScope.ShouldBe(writeScope);
+    }
+
+    [Fact]
+    public async Task Legacy_network_readonly_without_a_tier_keep_their_exact_prior_meaning()
+    {
+        // The pre-dial config form (network/readOnly as plain booleans, no autonomyLevel) must resolve identically:
+        // Standard base + the two overrides → exactly what the old inline construction produced.
+        var config = new Dictionary<string, JsonElement>
+        {
+            ["goal"] = Str("g"), ["harness"] = Str("codex-cli"), ["network"] = Bool(true), ["readOnly"] = Bool(true),
+        };
+
+        var result = await new AgentCodeNode().RunAsync(BuildContext(config, resume: null), CancellationToken.None);
+
+        var task = JsonSerializer.Deserialize<AgentTask>(result.SuspendUntil!.Payload, AgentJson.Options)!;
+        task.Permissions.Network.ShouldBe(AgentNetworkAccess.On);
+        task.Permissions.WriteScope.ShouldBe(AgentWriteScope.ReadOnly);
+    }
+
+    [Fact]
+    public async Task Unrecognized_autonomy_level_falls_back_to_standard()
+    {
+        var config = new Dictionary<string, JsonElement> { ["goal"] = Str("g"), ["harness"] = Str("codex-cli"), ["autonomyLevel"] = Str("bogus") };
+
+        var result = await new AgentCodeNode().RunAsync(BuildContext(config, resume: null), CancellationToken.None);
+
+        var task = JsonSerializer.Deserialize<AgentTask>(result.SuspendUntil!.Payload, AgentJson.Options)!;
+        task.Autonomy.ShouldBe(AgentAutonomyLevel.Standard, "an unknown tier degrades to the safe default, never throws");
+    }
+
     private static JsonElement Str(string s) => JsonSerializer.SerializeToElement(s);
     private static JsonElement Num(int n) => JsonSerializer.SerializeToElement(n);
     private static JsonElement Bool(bool b) => JsonSerializer.SerializeToElement(b);
