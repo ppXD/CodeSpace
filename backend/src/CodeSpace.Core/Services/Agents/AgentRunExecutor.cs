@@ -1,7 +1,9 @@
 using System.Text.Json;
+using System.Net.Sockets;
 using CodeSpace.Core.DependencyInjection;
 using CodeSpace.Core.Services.Agents.Mcp;
 using CodeSpace.Core.Services.Agents.Sandbox;
+using CodeSpace.Core.Services.Agents.Sandbox.Runners;
 using CodeSpace.Core.Services.Agents.Tools;
 using CodeSpace.Core.Services.Agents.Workspace;
 using CodeSpace.Messages.Agents;
@@ -453,24 +455,44 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     }
 
     /// <summary>
-    /// Open the run's in-process MCP endpoint when the flag is ON — null otherwise, so the flag-OFF path is
+    /// Open the run's per-run UDS MCP endpoint when the flag is ON — null otherwise, so the flag-OFF path is
     /// byte-identical. Mints a DEDICATED DI scope (its own DbContext) because the framing loop runs CONCURRENTLY
     /// with the harness + the event-append path, so it must not share the heartbeat / streaming scope — the same
     /// thread-safety reason the heartbeat mints its own. The scope is held for the endpoint's life and disposed in
     /// the endpoint's <see cref="AgentMcpEndpoint.DisposeAsync"/> (never resolve the registry from a disposed scope).
-    /// The connect registry is a DI singleton, so resolving it from this scope hands a consumer the same map.
+    /// The connect registry is a DI singleton, so resolving it from this scope hands a consumer the same map. The
+    /// socket path is computed from the SAME <see cref="LocalProcessRunner.McpSocketPathFor"/> the runner uses, so the
+    /// listener and a later runner-side bind agree by construction. Fail-soft (A10): a host that can't bind a UDS —
+    /// though the flag is on — disposes the scope, logs a Warning, and returns null; the endpoint is optional infra,
+    /// not the run, so the run still proceeds without it.
     /// </summary>
     private Task<AgentMcpEndpoint?> OpenMcpEndpointIfEnabledAsync(Guid runId, AgentTask effectiveTask, Guid teamId, CancellationToken ct)
     {
         if (!IsMcpEndpointEnabled()) return Task.FromResult<AgentMcpEndpoint?>(null);
 
+        var socketPath = LocalProcessRunner.McpSocketPathFor(runId.ToString("N"));
+        var token = McpRunToken.Mint();
+
         var scope = _scopeFactory.CreateScope();
         var registry = scope.ServiceProvider.GetRequiredService<IAgentToolRegistry>();
         var connects = scope.ServiceProvider.GetRequiredService<IAgentMcpConnectRegistry>();
 
-        var endpoint = new AgentMcpEndpoint(runId, registry, effectiveTask.Autonomy, teamId, new AgentMcpChannel(), connects, scope, ct);
+        try
+        {
+            var endpoint = new AgentMcpEndpoint(runId, registry, effectiveTask.Autonomy, teamId, socketPath, token, connects, scope, ct, _logger);
 
-        return Task.FromResult<AgentMcpEndpoint?>(endpoint);
+            return Task.FromResult<AgentMcpEndpoint?>(endpoint);
+        }
+        // An over-length socket path throws ArgumentOutOfRangeException (UDS endpoint ctor); CreateDirectory can throw
+        // IOException / UnauthorizedAccessException. The endpoint is optional infra, not the run, so any of these is a
+        // null + Warning, never a failed run. NOT OperationCanceledException — cancellation must propagate.
+        catch (Exception ex) when (ex is SocketException or PlatformNotSupportedException or ArgumentException or IOException or UnauthorizedAccessException)
+        {
+            scope.Dispose();
+            _logger.LogWarning(ex, "Agent run {RunId}: could not bind the MCP endpoint socket; proceeding without the tool fabric", runId);
+
+            return Task.FromResult<AgentMcpEndpoint?>(null);
+        }
     }
 
     /// <summary>

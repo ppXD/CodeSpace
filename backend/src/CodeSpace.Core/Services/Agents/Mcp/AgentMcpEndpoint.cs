@@ -1,46 +1,85 @@
+using System.Collections.Concurrent;
+using System.Net.Sockets;
+using System.Text;
 using CodeSpace.Core.Services.Agents.Tools;
 using CodeSpace.Messages.Agents;
+using Microsoft.Extensions.Logging;
 
 namespace CodeSpace.Core.Services.Agents.Mcp;
 
 /// <summary>
-/// One run's live MCP endpoint: it news up a <see cref="McpRequestHandler"/> (bound to the run's tool registry +
-/// autonomy + team), wraps it in a <see cref="McpFramingLoop"/>, and pumps that loop over the SERVER end of an
-/// in-process <see cref="AgentMcpChannel"/> on a background task. The CLIENT end is registered with the
-/// <see cref="IAgentMcpConnectRegistry"/> under the run id so a consumer can reach exactly this run's endpoint. The
+/// One run's live MCP endpoint over a PER-RUN Unix-domain socket: it binds + listens on the run's socket path, accepts
+/// connections in a loop, and for each connection validates the per-run <c>CODESPACE_RUN_TOKEN</c> on the FIRST line
+/// before serving — then pumps one <see cref="McpFramingLoop"/> (a fresh <see cref="McpRequestHandler"/> bound to the
+/// run's tool registry + autonomy + team) over the socket's <see cref="NetworkStream"/>. The connect descriptor
+/// (socket path + token) is registered with the <see cref="IAgentMcpConnectRegistry"/> under the run id so a consumer
+/// (the integration test today, the <c>codespace mcp</c> proxy later) reaches exactly this run's endpoint. The
 /// endpoint's life is bounded to the harness span — the executor opens it immediately before the (synchronous) harness
 /// run and disposes it unconditionally afterwards.
 ///
-/// <para><see cref="DisposeAsync"/> is IDEMPOTENT and NEVER throws regardless of how the pump ended (clean EOF, a
-/// cancel-driven fault): it cancels the loop's linked CTS, awaits the pump while swallowing the expected
-/// teardown exceptions, removes the run from the connect registry, then disposes the channel and the dedicated DI
-/// scope it was handed. It does NOT dispose the writer to signal EOF — cancelling the CTS unwinds the in-memory
-/// reader; EOF-signalling is a UDS-transport concern for a later slice.</para>
+/// <para><see cref="DisposeAsync"/> is IDEMPOTENT and NEVER throws regardless of how the accept loop / connection pumps
+/// ended: it cancels the linked CTS, disposes the listener (breaking a blocked accept), awaits the accept loop then all
+/// connection pumps while swallowing the expected teardown exceptions, removes the run from the connect registry (so a
+/// consumer never resolves a closed listener), unlinks the socket file, then disposes the dedicated DI scope + CTS.</para>
 /// </summary>
 public sealed class AgentMcpEndpoint : IAsyncDisposable
 {
+    private static readonly Encoding Utf8NoBom = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false);
+
     private readonly Guid _runId;
-    private readonly AgentMcpChannel _channel;
+    private readonly IAgentToolRegistry _registry;
+    private readonly AgentAutonomyLevel _autonomy;
+    private readonly Guid _teamId;
+    private readonly string _socketPath;
+    private readonly string _token;
     private readonly IAgentMcpConnectRegistry _connects;
     private readonly IDisposable _scope;
     private readonly CancellationTokenSource _cts;
-    private readonly Task _pump;
+    private readonly Socket _listener;
+    private readonly Task _acceptLoop;
+    private readonly ConcurrentBag<Task> _connections = new();
 
     private bool _disposed;
 
-    public AgentMcpEndpoint(Guid runId, IAgentToolRegistry registry, AgentAutonomyLevel autonomy, Guid teamId, AgentMcpChannel channel, IAgentMcpConnectRegistry connects, IDisposable scope, CancellationToken ct)
+    public AgentMcpEndpoint(Guid runId, IAgentToolRegistry registry, AgentAutonomyLevel autonomy, Guid teamId, string socketPath, string token, IAgentMcpConnectRegistry connects, IDisposable scope, CancellationToken ct, ILogger logger)
     {
         _runId = runId;
-        _channel = channel;
+        _registry = registry;
+        _autonomy = autonomy;
+        _teamId = teamId;
+        _socketPath = socketPath;
+        _token = token;
         _connects = connects;
         _scope = scope;
         _cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        _listener = new Socket(AddressFamily.Unix, SocketType.Stream, ProtocolType.Unspecified);
 
-        var loop = new McpFramingLoop(new McpRequestHandler(registry, autonomy, teamId));
+        // On any setup throw, dispose the listener + cts (an fd would otherwise orphan) and rethrow; the opener
+        // disposes the dedicated scope and fail-softs (so a degraded host is a logged Warning, not a failed run).
+        try
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(socketPath)!);
 
-        _connects.Register(runId, new ClientConnect(channel));
+            Quietly(() => File.Delete(socketPath));   // clear a stale socket file from a crashed prior incarnation
 
-        _pump = loop.RunAsync(channel.ServerReader, channel.ServerWriter, _cts.Token);
+            _listener.Bind(new UnixDomainSocketEndPoint(socketPath));
+
+            // Tighten to 0600 BEFORE the listener is reachable: a connect() before Listen cannot succeed, so this
+            // closes the window where the inode is group/other-writable under a permissive umask.
+            SetOwnerOnly(socketPath, logger);
+
+            _listener.Listen(backlog: 4);
+        }
+        catch
+        {
+            _listener.Dispose();
+            _cts.Dispose();
+            throw;
+        }
+
+        _connects.Register(runId, new AgentMcpConnect(socketPath, token));
+
+        _acceptLoop = AcceptLoopAsync(_cts.Token);
     }
 
     public async ValueTask DisposeAsync()
@@ -50,27 +89,81 @@ public sealed class AgentMcpEndpoint : IAsyncDisposable
 
         _cts.Cancel();
 
-        // OperationCanceledException covers TaskCanceledException (its subtype) — the cancel unwinding the loop's
-        // ReadLineAsync. IOException / ObjectDisposedException cover a pipe/stream torn down under a mid-flight read.
-        try { await _pump.ConfigureAwait(false); }
-        catch (OperationCanceledException) { /* cancel unwound the read */ }
-        catch (IOException) { /* a torn-down pipe mid-read */ }
-        catch (ObjectDisposedException) { /* a stream disposed under the read */ }
+        Quietly(() => _listener.Dispose());   // breaks a blocked AcceptAsync that didn't observe the cancel
 
+        try { await _acceptLoop.ConfigureAwait(false); }
+        catch (OperationCanceledException) { /* cancel unwound the accept */ }
+        catch (SocketException) { /* listener disposed under the accept */ }
+        catch (ObjectDisposedException) { /* listener disposed under the accept */ }
+
+        // Belt-and-braces: each ServeConnectionAsync already swallows its own faults, so this should not throw —
+        // but a connection added between the loop's last iteration and the cancel is still awaited here.
+        try { await Task.WhenAll(_connections).ConfigureAwait(false); }
+        catch { /* every pump swallows its own teardown exception */ }
+
+        // Remove AFTER the pumps are drained (fail-closed: the registry never points at a closed listener).
         _connects.Remove(_runId);
 
-        _channel.Dispose();
+        Quietly(() => File.Delete(_socketPath));
+
         _scope.Dispose();
         _cts.Dispose();
     }
 
-    private sealed class ClientConnect : IAgentMcpClientConnect
+    private async Task AcceptLoopAsync(CancellationToken ct)
     {
-        private readonly AgentMcpChannel _channel;
+        while (!ct.IsCancellationRequested)
+        {
+            Socket conn;
 
-        public ClientConnect(AgentMcpChannel channel) { _channel = channel; }
+            try { conn = await _listener.AcceptAsync(ct).ConfigureAwait(false); }
+            catch (OperationCanceledException) { break; }
+            catch (SocketException) { break; }
+            catch (ObjectDisposedException) { break; }
 
-        public TextWriter Writer => _channel.ClientWriter;
-        public TextReader Reader => _channel.ClientReader;
+            _connections.Add(ServeConnectionAsync(conn, ct));
+        }
+    }
+
+    private async Task ServeConnectionAsync(Socket conn, CancellationToken ct)
+    {
+        using var _ = conn;
+        await using var stream = new NetworkStream(conn, ownsSocket: false);
+
+        // Utf8NoBom + AutoFlush=false + NewLine="\n" mirror the wire the in-memory channel produced, so the framing is
+        // byte-identical to the prior slice.
+        using var reader = new StreamReader(stream, Utf8NoBom, detectEncodingFromByteOrderMarks: false);
+        await using var writer = new StreamWriter(stream, Utf8NoBom) { AutoFlush = false, NewLine = "\n" };
+
+        if (!await IsAuthenticatedAsync(reader, ct).ConfigureAwait(false)) return;   // silent close, no oracle, before any handler
+
+        var loop = new McpFramingLoop(new McpRequestHandler(_registry, _autonomy, _teamId));
+
+        try { await loop.RunAsync(reader, writer, ct).ConfigureAwait(false); }
+        catch (OperationCanceledException) { /* cancel unwound the pump */ }
+        catch (IOException) { /* a torn-down socket mid-read/write */ }
+        catch (ObjectDisposedException) { /* a stream disposed under the pump */ }
+    }
+
+    /// <summary>Read the connection's FIRST line and constant-time-compare it to the run token; an EOF / wrong token fails closed (the caller silently closes).</summary>
+    private async Task<bool> IsAuthenticatedAsync(StreamReader reader, CancellationToken ct)
+    {
+        var presented = await reader.ReadLineAsync(ct).ConfigureAwait(false);
+
+        return presented is not null && McpRunToken.Matches(_token, presented);
+    }
+
+    /// <summary>Restrict the socket file to the owner (0600) so another local user can't connect to the run's endpoint. A no-op on Windows where unix file modes don't apply. Best-effort — a chmod failure must NOT fail the endpoint (the 256-bit token is the authoritative gate), but it's logged as a Warning so it isn't fully silent.</summary>
+    private void SetOwnerOnly(string socketPath, ILogger logger)
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        try { File.SetUnixFileMode(socketPath, UnixFileMode.UserRead | UnixFileMode.UserWrite); }
+        catch (Exception ex) { logger.LogWarning(ex, "Agent run {RunId}: could not restrict the MCP socket to 0600; it may be group/other-accessible on this host", _runId); }
+    }
+
+    private static void Quietly(Action action)
+    {
+        try { action(); } catch { /* best-effort teardown / setup */ }
     }
 }
