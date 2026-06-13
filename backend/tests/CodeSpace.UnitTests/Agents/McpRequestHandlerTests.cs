@@ -10,8 +10,8 @@ namespace CodeSpace.UnitTests.Agents;
 /// <summary>
 /// Pins the MCP JSON-RPC protocol core: the initialize handshake, tools/list catalog projection, tools/call
 /// resolve→validate→invoke→map, the two distinct failure planes (JSON-RPC protocol errors vs MCP isError tool
-/// results), JSON-RPC notification semantics (no reply, no execution), and the deliberately-ungated execution of
-/// destructive tools (the approval gate is a later slice).
+/// results), JSON-RPC notification semantics (no reply, no execution), and the autonomy gate on tools/call
+/// (a gated tool is denied / requires approval per tier; read-only tools run at every tier).
 /// </summary>
 [Trait("Category", "Unit")]
 public class McpRequestHandlerTests
@@ -51,7 +51,9 @@ public class McpRequestHandlerTests
     }
 
     private static JsonElement Parse(string json) => JsonDocument.Parse(json).RootElement.Clone();
-    private static McpRequestHandler Handler(params IAgentTool[] tools) => new(new FakeRegistry(tools));
+    // Default to Unleashed so the protocol-focused tests see a transparent gate; gate-specific tests pass a tier.
+    private static McpRequestHandler Handler(params IAgentTool[] tools) => Handler(AgentAutonomyLevel.Unleashed, tools);
+    private static McpRequestHandler Handler(AgentAutonomyLevel autonomy, params IAgentTool[] tools) => new(new FakeRegistry(tools), autonomy);
     private static async Task<JsonElement> Respond(McpRequestHandler handler, string requestJson) => (await handler.HandleAsync(Parse(requestJson), CancellationToken.None))!.Value;
     private static string Call(string name, string argsJson) => $$$"""{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"{{{name}}}","arguments":{{{argsJson}}}}}""";
 
@@ -258,19 +260,62 @@ public class McpRequestHandlerTests
             await Handler(tool).HandleAsync(Parse(Call("cancels", "{}")), new CancellationToken(canceled: true)));
     }
 
+    // ── tools/call autonomy gate ──────────────────────────────────────────────
+
     [Fact]
-    public async Task ToolsCall_destructive_requires_approval_tool_executes_ungated()
+    public async Task ToolsCall_at_Unleashed_runs_a_destructive_tool()
     {
-        // PINS that this slice does NOT gate destructive tools — approval is a separate later slice. If a gate is
-        // ever added here, this test must be updated, making the fail-open seam impossible to close silently.
         var tool = new FakeTool { Kind = "git.merge_pr", IsDestructiveOverride = true, OnCall = (_, _) => Task.FromResult(AgentToolResult.Ok(Parse("""{"merged":true}"""), 14)) };
 
         ((IAgentTool)tool).RequiresApproval.ShouldBeTrue("a destructive tool requires approval by the fabric's fail-closed default");
 
-        var result = (await Respond(Handler(tool), Call("git.merge_pr", "{}"))).GetProperty("result");
+        var result = (await Respond(Handler(AgentAutonomyLevel.Unleashed, tool), Call("git.merge_pr", "{}"))).GetProperty("result");
 
         result.GetProperty("isError").GetBoolean().ShouldBeFalse();
-        tool.CallCount.ShouldBe(1, "the handler executes the resolved tool unconditionally in this slice");
+        tool.CallCount.ShouldBe(1, "Unleashed runs a gated tool unattended");
+    }
+
+    [Fact]
+    public async Task ToolsCall_at_Confined_denies_a_destructive_tool_without_running_it()
+    {
+        var tool = new FakeTool { Kind = "git.merge_pr", IsDestructiveOverride = true };
+
+        var resp = await Respond(Handler(AgentAutonomyLevel.Confined, tool), Call("git.merge_pr", "{}"));
+
+        resp.TryGetProperty("error", out _).ShouldBeFalse("a gate denial is a tool result, not a JSON-RPC error");
+        resp.GetProperty("result").GetProperty("isError").GetBoolean().ShouldBeTrue();
+        resp.GetProperty("result").GetProperty("content")[0].GetProperty("text").GetString().ShouldContain("not permitted");
+        tool.CallCount.ShouldBe(0, "a denied tool must never execute");
+    }
+
+    [Theory]
+    [InlineData(AgentAutonomyLevel.Standard)]
+    [InlineData(AgentAutonomyLevel.Trusted)]
+    public async Task ToolsCall_requires_approval_for_a_destructive_tool_without_running_it(AgentAutonomyLevel level)
+    {
+        var tool = new FakeTool { Kind = "git.merge_pr", IsDestructiveOverride = true };
+
+        var resp = await Respond(Handler(level, tool), Call("git.merge_pr", "{}"));
+
+        resp.TryGetProperty("error", out _).ShouldBeFalse();
+        resp.GetProperty("result").GetProperty("isError").GetBoolean().ShouldBeTrue();
+        resp.GetProperty("result").GetProperty("content")[0].GetProperty("text").GetString().ShouldContain("approval");
+        tool.CallCount.ShouldBe(0, "a tool needing approval must not run until approved");
+    }
+
+    [Theory]
+    [InlineData(AgentAutonomyLevel.Confined)]
+    [InlineData(AgentAutonomyLevel.Standard)]
+    [InlineData(AgentAutonomyLevel.Trusted)]
+    [InlineData(AgentAutonomyLevel.Unleashed)]
+    public async Task ToolsCall_runs_a_read_only_tool_at_every_tier(AgentAutonomyLevel level)
+    {
+        var tool = new FakeTool { Kind = "git.list_prs" };   // read-only → RequiresApproval false → ungated
+
+        var result = (await Respond(Handler(level, tool), Call("git.list_prs", "{}"))).GetProperty("result");
+
+        result.GetProperty("isError").GetBoolean().ShouldBeFalse();
+        tool.CallCount.ShouldBe(1, "a read-only tool runs regardless of tier");
     }
 
     // ── tools/call (protocol-error plane) ─────────────────────────────────────
