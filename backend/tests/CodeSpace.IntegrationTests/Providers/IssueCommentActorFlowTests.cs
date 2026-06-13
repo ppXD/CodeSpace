@@ -31,7 +31,7 @@ public class IssueCommentActorFlowTests
     {
         var seed = await SeedAsync(linkActor: true);
 
-        var comment = await CommentAsync(seed.RepositoryId, seed.UserId);
+        var comment = await CommentAsync(seed.RepositoryId, seed.TeamId, seed.UserId);
 
         comment.ExternalId.ShouldBe(seed.ActorCredentialId.ToString(),
             customMessage: "with a linked actor the comment must be posted by the actor's OWN credential, not the connection credential");
@@ -43,7 +43,7 @@ public class IssueCommentActorFlowTests
     {
         var seed = await SeedAsync(linkActor: true);
 
-        var comment = await CommentAsync(seed.RepositoryId, actorUserId: null);
+        var comment = await CommentAsync(seed.RepositoryId, seed.TeamId, actorUserId: null);
 
         comment.ExternalId.ShouldBe(seed.ConnectionCredentialId.ToString(),
             customMessage: "no actorUserId → unchanged behaviour: the repo's connection credential comments");
@@ -54,7 +54,7 @@ public class IssueCommentActorFlowTests
     {
         var seed = await SeedAsync(linkActor: false);
 
-        var ex = await Should.ThrowAsync<ActorIdentityRequiredException>(() => CommentAsync(seed.RepositoryId, seed.UserId));
+        var ex = await Should.ThrowAsync<ActorIdentityRequiredException>(() => CommentAsync(seed.RepositoryId, seed.TeamId, seed.UserId));
 
         ex.ProviderKind.ShouldBe(ProviderKind.Git);
         ex.ProviderInstanceId.ShouldBe(seed.ProviderInstanceId);
@@ -65,17 +65,29 @@ public class IssueCommentActorFlowTests
     {
         var seed = await SeedAsync(linkActor: false);
 
-        var ex = await Should.ThrowAsync<InvalidOperationException>(() => CommentAsync(seed.RepositoryId, actorUserId: null, body: "   "));
+        var ex = await Should.ThrowAsync<InvalidOperationException>(() => CommentAsync(seed.RepositoryId, seed.TeamId, actorUserId: null, body: "   "));
 
         ex.Message.ShouldContain("body");
     }
 
+    [Fact]
+    public async Task A_repository_in_another_team_is_refused_fail_closed()
+    {
+        var seed = await SeedAsync(linkActor: true);
+        var otherTeam = Guid.NewGuid();
+
+        // The repo belongs to seed.TeamId; commenting AS otherTeam must NOT resolve it — the tenant filter
+        // finds nothing and the service refuses with the same non-leaking "not found" as a missing repo.
+        var ex = await Should.ThrowAsync<InvalidOperationException>(() => CommentAsync(seed.RepositoryId, otherTeam, seed.UserId));
+        ex.Message.ShouldContain("not found", customMessage: "a cross-team repo is indistinguishable from a missing one (no existence leak)");
+    }
+
     // ── Helpers ────────────────────────────────────────────────────────────────
 
-    private async Task<RemoteIssueComment> CommentAsync(Guid repositoryId, Guid? actorUserId, string body = "ack", int number = 42)
+    private async Task<RemoteIssueComment> CommentAsync(Guid repositoryId, Guid teamId, Guid? actorUserId, string body = "ack", int number = 42)
     {
         using var scope = _fixture.BeginScope();
-        return await scope.Resolve<IIssueService>().CommentAsync(repositoryId, number, body, actorUserId, CancellationToken.None);
+        return await scope.Resolve<IIssueService>().CommentAsync(repositoryId, teamId, number, body, actorUserId, CancellationToken.None);
     }
 
     private async Task<SeedResult> SeedAsync(bool linkActor)
@@ -132,8 +144,8 @@ public class IssueCommentActorFlowTests
 
         await db.SaveChangesAsync();
 
-        return new SeedResult(user.Id, instance.Id, repo.Id, connection.Id, actorCredentialId);
+        return new SeedResult(user.Id, team.Id, instance.Id, repo.Id, connection.Id, actorCredentialId);
     }
 
-    private sealed record SeedResult(Guid UserId, Guid ProviderInstanceId, Guid RepositoryId, Guid ConnectionCredentialId, Guid ActorCredentialId);
+    private sealed record SeedResult(Guid UserId, Guid TeamId, Guid ProviderInstanceId, Guid RepositoryId, Guid ConnectionCredentialId, Guid ActorCredentialId);
 }

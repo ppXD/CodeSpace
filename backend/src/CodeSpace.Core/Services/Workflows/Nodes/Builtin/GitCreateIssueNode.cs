@@ -1,6 +1,7 @@
 using System.Text.Json;
 using CodeSpace.Core.Services.Issues;
 using CodeSpace.Core.Services.Providers.Capabilities;
+using CodeSpace.Core.Services.Workflows.Runtime;
 using CodeSpace.Messages.Dtos.Providers;
 using CodeSpace.Messages.Enums;
 using CodeSpace.Messages.Exceptions;
@@ -68,6 +69,7 @@ public sealed class GitCreateIssueNode : INodeRuntime
     public async Task<NodeResult> RunAsync(NodeRunContext context, CancellationToken cancellationToken)
     {
         if (!TryReadRepositoryId(context, out var repoId)) return NodeResult.Fail("Input 'repositoryId' missing or not a uuid.");
+        if (!NodeScopeReader.TryReadTeamId(context, out var teamId)) return NodeResult.Fail("This run has no team context, so a repository can't be resolved.");
         if (!TryReadNonEmpty(context, "title", out var title)) return NodeResult.Fail("Input 'title' is required.");
 
         var body = TryReadNonEmpty(context, "body", out var b) ? b : null;
@@ -83,7 +85,7 @@ public sealed class GitCreateIssueNode : INodeRuntime
                 target: $"git.create_issue:{repoId}",
                 method: "create_issue",
                 requestPayload: JsonSerializer.SerializeToElement(new { repository_id = repoId, title, label_count = labels.Count, body_chars = body?.Length ?? 0, act_as_user_id = actAsUserId }),
-                action: ct => _issueService.CreateAsync(repoId, input, actAsUserId, ct),
+                action: ct => _issueService.CreateAsync(repoId, teamId, input, actAsUserId, ct),
                 completionExtractor: result => new ExternalCallCompletion
                 {
                     ResponsePayload = JsonSerializer.SerializeToElement(new { number = result.Number, url = result.WebUrl, state = result.State.ToString() })
