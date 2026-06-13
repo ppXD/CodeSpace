@@ -149,6 +149,38 @@ public class AgentRunCommandNodeTests
         result.Error.ShouldContain("clone failed");
     }
 
+    [Fact]
+    public async Task Caps_stdout_and_stderr_when_maxOutputChars_is_set_but_always_reports_the_full_size()
+    {
+        var bigOut = new string('o', 5000);
+        var bigErr = new string('e', 4000);
+        var stub = new StubRunCommandService { Result = new() { Status = SandboxStatus.Success, ExitCode = 0, Stdout = bigOut, Stderr = bigErr } };
+
+        var result = await new AgentRunCommandNode(stub).RunAsync(ContextFrom(new()
+        {
+            ["command"] = JsonSerializer.SerializeToElement("npm"),
+            ["maxOutputChars"] = JsonSerializer.SerializeToElement(200),
+        }), CancellationToken.None);
+
+        result.Status.ShouldBe(NodeStatus.Success);
+        result.Outputs["stdout"].GetString()!.Length.ShouldBeLessThan(5000, "stdout is capped to a preview");
+        result.Outputs["stderr"].GetString()!.Length.ShouldBeLessThan(4000, "stderr is capped to a preview");
+        result.Outputs["stdoutBytes"].GetInt32().ShouldBe(5000, "the full original size is reported even when capped");
+        result.Outputs["stderrBytes"].GetInt32().ShouldBe(4000);
+    }
+
+    [Fact]
+    public async Task Without_maxOutputChars_the_full_output_is_kept_and_sizes_are_still_reported()
+    {
+        var stub = new StubRunCommandService { Result = new() { Status = SandboxStatus.Success, ExitCode = 0, Stdout = "all 42 tests passed", Stderr = "" } };
+
+        var result = await new AgentRunCommandNode(stub).RunAsync(Context(), CancellationToken.None);
+
+        result.Outputs["stdout"].GetString().ShouldBe("all 42 tests passed", "no cap → verbatim (non-breaking default)");
+        result.Outputs["stdoutBytes"].GetInt32().ShouldBe("all 42 tests passed".Length);
+        result.Outputs["stderrBytes"].GetInt32().ShouldBe(0);
+    }
+
     private static NodeRunContext Context() => ContextFrom(new()
     {
         ["repositoryId"] = JsonSerializer.SerializeToElement(Repo),

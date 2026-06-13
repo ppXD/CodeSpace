@@ -1,6 +1,7 @@
 using System.Text.Json;
 using CodeSpace.Core.Services.Agents.Commands;
 using CodeSpace.Core.Services.Agents.Workspace;
+using CodeSpace.Core.Services.Workflows.Artifacts;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Enums;
 using Microsoft.Extensions.Logging;
@@ -21,8 +22,8 @@ namespace CodeSpace.Core.Services.Workflows.Nodes.Builtin;
 /// Generic across backends: the run executes on the sandbox runner named by <c>runnerKind</c> (default
 /// "local"); a future docker / k8s runner + workspace provider plug in behind the same registries unchanged.
 ///
-/// Inputs: repositoryId? · command (required) · args · branch? · network? · timeoutSeconds? · runnerKind?
-/// Outputs: exitCode · status · stdout · stderr
+/// Inputs: repositoryId? · command (required) · args · branch? · network? · timeoutSeconds? · runnerKind? · maxOutputChars?
+/// Outputs: exitCode · status · stdout · stderr · stdoutBytes · stderrBytes (the original sizes, even when stdout/stderr are capped)
 /// </summary>
 public sealed class AgentRunCommandNode : INodeRuntime
 {
@@ -56,7 +57,8 @@ public sealed class AgentRunCommandNode : INodeRuntime
                 "branch":         { "type": "string", "description": "Branch / tag / sha to check out (repo runs only). Empty → the repository's default branch." },
                 "network":        { "type": "boolean", "description": "Allow the command to reach the network. Off by default — the sandbox severs egress so the command can't call out or exfiltrate." },
                 "timeoutSeconds": { "type": "integer", "minimum": 1, "description": "Wall-clock cap. On expiry the command (and its children) are killed and status is TimedOut. Default 600." },
-                "runnerKind":     { "type": "string", "description": "Sandbox backend to run on (e.g. \"local\"). Empty → the deployment default." }
+                "runnerKind":     { "type": "string", "description": "Sandbox backend to run on (e.g. \"local\"). Empty → the deployment default." },
+                "maxOutputChars": { "type": "integer", "minimum": 1, "description": "Cap stdout/stderr to this many characters (a head+tail preview is kept, the rest dropped). Leave empty for the full output. Use it to keep a noisy build/test log from bloating the run — the exact byte size is always reported on stdoutBytes/stderrBytes." }
               },
               "required": ["command"]
             }
@@ -65,10 +67,12 @@ public sealed class AgentRunCommandNode : INodeRuntime
             {
               "type": "object",
               "properties": {
-                "exitCode": { "type": "integer" },
-                "status":   { "type": "string" },
-                "stdout":   { "type": "string" },
-                "stderr":   { "type": "string" }
+                "exitCode":    { "type": "integer" },
+                "status":      { "type": "string" },
+                "stdout":      { "type": "string" },
+                "stderr":      { "type": "string" },
+                "stdoutBytes": { "type": "integer" },
+                "stderrBytes": { "type": "integer" }
               }
             }
             """)
@@ -111,12 +115,19 @@ public sealed class AgentRunCommandNode : INodeRuntime
 
         context.Logger.LogInformation("Ran command '{Command}' (repo {RepoId}) → status {Status}, exit {Exit}", command, request.RepositoryId, result.Status, result.ExitCode);
 
+        // Optional output cap keeps a noisy log from bloating the run state; the full byte size is always reported.
+        var maxOutputChars = TryReadPositiveInt(context, "maxOutputChars", out var cap) ? cap : 0;
+        var stdout = OutputCap.Apply(result.Stdout, maxOutputChars);
+        var stderr = OutputCap.Apply(result.Stderr, maxOutputChars);
+
         var outputs = new Dictionary<string, JsonElement>
         {
             ["exitCode"] = JsonSerializer.SerializeToElement(result.ExitCode),
             ["status"] = JsonSerializer.SerializeToElement(result.Status.ToString()),
-            ["stdout"] = JsonSerializer.SerializeToElement(result.Stdout),
-            ["stderr"] = JsonSerializer.SerializeToElement(result.Stderr)
+            ["stdout"] = JsonSerializer.SerializeToElement(stdout.Text),
+            ["stderr"] = JsonSerializer.SerializeToElement(stderr.Text),
+            ["stdoutBytes"] = JsonSerializer.SerializeToElement(stdout.OriginalLength),
+            ["stderrBytes"] = JsonSerializer.SerializeToElement(stderr.OriginalLength)
         };
 
         return NodeResult.Ok(outputs);
