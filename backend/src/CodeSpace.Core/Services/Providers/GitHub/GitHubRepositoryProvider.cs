@@ -341,6 +341,26 @@ public sealed class GitHubRepositoryProvider : IRepositoryCatalogCapability, IPu
         WebUrl = issue.HtmlUrl
     };
 
+    public async Task<RemoteIssueComment> CommentIssueAsync(ProviderContext context, RemoteRepository repository, int number, string body, CancellationToken cancellationToken)
+    {
+        var client = await BuildClientAsync(context, cancellationToken).ConfigureAwait(false);
+
+        return await _resilience.ExecuteAsync(context.Instance, nameof(CommentIssueAsync), async _ =>
+        {
+            // GitHub issue comments and PR comments share one API (Issue.Comment) — an issue number works here.
+            var created = await client.Issue.Comment.Create(repository.NamespacePath, repository.Name, number, body).ConfigureAwait(false);
+
+            return new RemoteIssueComment
+            {
+                ExternalId = created.Id.ToString(),
+                Body = created.Body,
+                AuthorName = created.User?.Login ?? "unknown",
+                CreatedAt = created.CreatedAt,
+                WebUrl = created.HtmlUrl
+            };
+        }, cancellationToken).ConfigureAwait(false);
+    }
+
     private static RemotePullRequestCheck ToRemoteCheck(CheckRun run)
     {
         var status = MapCheckRunStatus(run.Status.Value, run.Conclusion?.Value);

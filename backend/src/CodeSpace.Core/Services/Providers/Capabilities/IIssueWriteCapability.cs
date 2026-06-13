@@ -20,4 +20,11 @@ public interface IIssueWriteCapability : IProviderCapability
     /// provider's 4xx).
     /// </summary>
     Task<RemoteIssue> CreateIssueAsync(ProviderContext context, RemoteRepository repository, CreateIssueInput input, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Post a comment on issue <paramref name="number"/> and return it. GitHub maps to an issue comment;
+    /// GitLab to an issue note. Throws on insufficient scope (mapped to 422) or a provider 4xx (e.g. the
+    /// issue doesn't exist / issues are disabled).
+    /// </summary>
+    Task<RemoteIssueComment> CommentIssueAsync(ProviderContext context, RemoteRepository repository, int number, string body, CancellationToken cancellationToken);
 }

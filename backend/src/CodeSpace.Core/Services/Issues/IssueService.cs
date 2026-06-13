@@ -44,6 +44,23 @@ public sealed class IssueService : IIssueService, IScopedDependency
         return await writeCap.CreateIssueAsync(context, remote, input, cancellationToken).ConfigureAwait(false);
     }
 
+    public async Task<RemoteIssueComment> CommentAsync(Guid repositoryId, int number, string body, Guid? actorUserId, CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(body)) throw new InvalidOperationException("A comment requires a body.");
+
+        var repo = await LoadRepositoryAsync(repositoryId, cancellationToken).ConfigureAwait(false);
+        EnsureCredentialBound(repo);
+
+        var credential = await ResolveActingCredentialAsync(repo, actorUserId, cancellationToken).ConfigureAwait(false);
+        _scopeChecker.EnsureCapability(credential, repo.ProviderInstance.Provider, typeof(IIssueWriteCapability));
+
+        var writeCap = _registry.Require<IIssueWriteCapability>(repo.ProviderInstance.Provider);
+        var context = new ProviderContext(repo.ProviderInstance, credential);
+        var remote = repo.ToRemoteRepository();
+
+        return await writeCap.CommentIssueAsync(context, remote, number, body, cancellationToken).ConfigureAwait(false);
+    }
+
     /// <summary>Actor's own credential when <paramref name="actorUserId"/> is set (throws
     /// ActorIdentityRequiredException if they haven't linked one); otherwise the repo's connection credential.</summary>
     private async Task<Credential> ResolveActingCredentialAsync(Repository repo, Guid? actorUserId, CancellationToken cancellationToken) =>

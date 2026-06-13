@@ -142,6 +142,18 @@ public sealed class TestRepositoryProvider : IRepositoryCatalogCapability, ICred
             WebUrl = $"https://test.local/{repository.FullPath}/-/issues/555"
         });
 
+    // Echoes the acting credential's id back as the comment's ExternalId so a test can assert WHICH
+    // credential commented (actor vs connection). Reflects the input body.
+    public Task<RemoteIssueComment> CommentIssueAsync(ProviderContext context, RemoteRepository repository, int number, string body, CancellationToken cancellationToken) =>
+        Task.FromResult(new RemoteIssueComment
+        {
+            ExternalId = context.Credential.Id.ToString(),
+            Body = body,
+            AuthorName = "tester",
+            CreatedAt = DateTimeOffset.UnixEpoch,
+            WebUrl = $"https://test.local/{repository.FullPath}/-/issues/{number}#note_1"
+        });
+
     // Deterministic, no shared state: the repo's external id encodes the actor's role, so a test drives any
     // pre-flight outcome by seeding a marked repo (no cross-test toggle). "noaccess" → None (denied at the
     // Read floor); "role-<name>" → that role; "inconclusive" → null (probe degrades to allow); everything

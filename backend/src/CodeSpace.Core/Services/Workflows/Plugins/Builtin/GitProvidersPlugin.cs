@@ -27,6 +27,7 @@ public sealed class GitProvidersPlugin : IPluginModule
         typeof(GitOpenPullRequestNode),
         typeof(GitMergePullRequestNode),
         typeof(GitCreateIssueNode),
+        typeof(GitCommentIssueNode),
     };
 
     public IReadOnlyList<Type> RunSourceMatchers { get; } = new[]
