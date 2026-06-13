@@ -181,12 +181,46 @@ public class AgentRunCommandNodeTests
         result.Outputs["stderrBytes"].GetInt32().ShouldBe(0);
     }
 
+    [Fact]
+    public async Task Threads_the_run_team_from_sys_scope_into_the_request()
+    {
+        var team = Guid.Parse("22222222-2222-2222-2222-222222222222");
+        var stub = new StubRunCommandService();
+
+        await new AgentRunCommandNode(stub).RunAsync(ContextWithSys(
+            new() { ["repositoryId"] = JsonSerializer.SerializeToElement(Repo), ["command"] = JsonSerializer.SerializeToElement("npm") },
+            new() { [SystemScopeKeys.TeamId] = JsonSerializer.SerializeToElement(team) }), CancellationToken.None);
+
+        stub.Request!.TeamId.ShouldBe(team, "the run's team flows from {{sys.team_id}} into the request so the service fail-closes the repo load to it");
+    }
+
+    [Fact]
+    public async Task Leaves_the_request_team_null_when_sys_scope_has_no_team()
+    {
+        var stub = new StubRunCommandService();
+
+        await new AgentRunCommandNode(stub).RunAsync(Context(), CancellationToken.None);   // Context()'s scope has no sys.team_id
+
+        stub.Request!.TeamId.ShouldBeNull("no sys.team_id (e.g. a synthetic agent-tool context) → null → the service fails closed on a repo-scoped run");
+    }
+
     private static NodeRunContext Context() => ContextFrom(new()
     {
         ["repositoryId"] = JsonSerializer.SerializeToElement(Repo),
         ["command"] = JsonSerializer.SerializeToElement("npm"),
         ["args"] = JsonSerializer.SerializeToElement(new[] { "test" }),
     });
+
+    private static NodeRunContext ContextWithSys(Dictionary<string, JsonElement> inputs, Dictionary<string, JsonElement> sys) => new()
+    {
+        Inputs = inputs,
+        Config = new Dictionary<string, JsonElement>(),
+        RawInputs = JsonDocument.Parse("{}").RootElement,
+        RawConfig = JsonDocument.Parse("{}").RootElement,
+        Scope = new NodeRunScope { Trigger = new Dictionary<string, JsonElement>(), Sys = sys },
+        Logger = NullLogger.Instance,
+        Observability = NodeObservability.NoOp,
+    };
 
     private static NodeRunContext ContextFrom(Dictionary<string, JsonElement> inputs) => new()
     {

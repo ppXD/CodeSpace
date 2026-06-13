@@ -15,6 +15,14 @@ public sealed record RunCommandRequest
     /// <summary>Repository to clone into a fresh per-run workspace the command runs in. <c>null</c> → an ephemeral run with no checkout (the runner's default working dir).</summary>
     public Guid? RepositoryId { get; init; }
 
+    /// <summary>
+    /// The team that owns the run — the repository load is fail-closed to it: a <see cref="RepositoryId"/> resolves
+    /// only when it belongs to this team, so a model-supplied (or otherwise untrusted) id can never reach another
+    /// tenant's repository. <c>null</c> together with a <see cref="RepositoryId"/> is refused (no team context → no
+    /// clone). Ignored for an ephemeral (no-repo) run.
+    /// </summary>
+    public Guid? TeamId { get; init; }
+
     /// <summary>Branch / tag / sha to check out (repo-scoped only). <c>null</c> → the repository's default branch.</summary>
     public string? Ref { get; init; }
 

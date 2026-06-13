@@ -44,7 +44,7 @@ public class RunCommandFlowTests
         var repoId = await SeedRepositoryAsync(teamId, new Uri(origin.Path).AbsoluteUri, "main");
 
         // `cat README.md` only sees the file if the service cloned the repo AND ran with the clone as cwd.
-        var result = await RunAsync(new RunCommandRequest { RepositoryId = repoId, Command = "cat", Args = new[] { "README.md" } });
+        var result = await RunAsync(new RunCommandRequest { RepositoryId = repoId, TeamId = teamId, Command = "cat", Args = new[] { "README.md" } });
 
         result.Status.ShouldBe(SandboxStatus.Success);
         result.ExitCode.ShouldBe(0);
@@ -83,7 +83,39 @@ public class RunCommandFlowTests
         var missing = new Uri(Path.Combine(Path.GetTempPath(), "cs-missing-" + Guid.NewGuid().ToString("N"))).AbsoluteUri;
         var repoId = await SeedRepositoryAsync(teamId, missing, "main");
 
-        await Should.ThrowAsync<WorkspaceException>(() => RunAsync(new RunCommandRequest { RepositoryId = repoId, Command = "true" }));
+        await Should.ThrowAsync<WorkspaceException>(() => RunAsync(new RunCommandRequest { RepositoryId = repoId, TeamId = teamId, Command = "true" }));
+    }
+
+    [Fact]
+    public async Task A_repository_in_another_team_is_refused_fail_closed()
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        var (ownerTeam, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var (otherTeam, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        using var origin = new TempDir();
+        await SeedLocalRepoAsync(origin.Path, "README.md", "secret-of-owner-team");
+        var repoId = await SeedRepositoryAsync(ownerTeam, new Uri(origin.Path).AbsoluteUri, "main");
+
+        // The repo belongs to ownerTeam; a run bound to otherTeam must NOT be able to clone it — the tenant
+        // filter resolves nothing and the service refuses (no clone, no command, no cross-tenant read).
+        var ex = await Should.ThrowAsync<WorkspaceException>(() => RunAsync(new RunCommandRequest { RepositoryId = repoId, TeamId = otherTeam, Command = "cat", Args = new[] { "README.md" } }));
+        ex.Message.ShouldContain("not found", customMessage: "a cross-team repo is indistinguishable from a missing one (no existence leak)");
+    }
+
+    [Fact]
+    public async Task A_repo_scoped_run_without_a_team_context_is_refused()
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        using var origin = new TempDir();
+        await SeedLocalRepoAsync(origin.Path, "README.md", "x");
+        var repoId = await SeedRepositoryAsync(teamId, new Uri(origin.Path).AbsoluteUri, "main");
+
+        // No TeamId on a repo-scoped request → fail-closed (e.g. a synthetic agent-tool context with no scope).
+        var ex = await Should.ThrowAsync<WorkspaceException>(() => RunAsync(new RunCommandRequest { RepositoryId = repoId, Command = "true" }));
+        ex.Message.ShouldContain("team context");
     }
 
     [Fact]
