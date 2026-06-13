@@ -147,12 +147,28 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
 
             var effectiveTask = (workspace is null ? task : task with { WorkspaceDirectory = workspace.Directory }) with { Environment = MergeEnvironment(task.Environment, secretEnv) };
 
+            // Mint the per-run socket + token ONCE so the endpoint listener and the harness's declaration agree by
+            // construction (and so the token can be stamped on the durable handle for a re-attach to re-bind the same
+            // one). Both null on the flag-OFF path → no endpoint, no wiring → byte-identical to today.
+            var (socketPath, token) = MintMcpConnect(agentRunId);
+
             // Open the per-run MCP endpoint (flag-OFF → null → no-op). It lives ONLY for the harness span: the harness
             // runs synchronously here (RunHarnessAsync → AttachAsync blocks until exit), and `await using` inside the
             // try tears it down on EVERY exit (success / cancel / generic catch) — NOT gated on leaveWorkspaceForReattach.
-            await using var mcp = await OpenMcpEndpointIfEnabledAsync(agentRunId, effectiveTask, run.TeamId, cancellationToken).ConfigureAwait(false);
+            await using var mcp = OpenMcpEndpointIfEnabled(agentRunId, effectiveTask.Autonomy, run.TeamId, socketPath, token, cancellationToken);
 
-            var result = await RunHarnessAsync(agentRunId, harness, runner, harness.BuildInvocation(effectiveTask), redactor, cancellationToken).ConfigureAwait(false);
+            // Wire the live CLI to the fabric ONLY when the endpoint actually opened AND the harness declares an
+            // MCP-server shape — a non-null endpoint already encodes "the flag is on AND the bind succeeded", so no
+            // second flag. Otherwise the spec carries no Mcp and the run is unchanged. The token rides the handle so a
+            // re-attach re-binds the same one the agent's declaration file already holds.
+            var spec = harness.BuildInvocation(effectiveTask) with { Mcp = BuildMcpWiring(agentRunId, mcp, harness, socketPath, token) };
+
+            // The MCP token rides the durable handle whenever the ENDPOINT opened (not only when a declaration was
+            // written) so a re-attach re-binds the SAME socket+token — the detached agent's declaration file still
+            // points at it. Null when no endpoint → nothing to re-open.
+            var mcpToken = mcp is null ? null : token;
+
+            var result = await RunHarnessAsync(agentRunId, harness, runner, spec, mcpToken, redactor, cancellationToken).ConfigureAwait(false);
 
             result = await EnrichWithWorkspaceChangesAsync(agentRunId, result, workspace, cancellationToken).ConfigureAwait(false);
 
@@ -213,6 +229,11 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         // blocks another reclaim for the lease window, so this is stably our epoch. A revived original observer
         // (stale epoch) loses the completion CAS.
         var expectedEpoch = run.FenceEpoch;
+
+        // Re-open the run's MCP endpoint on the SAME socket+token the handle recorded at launch (the in-process listener
+        // died with the original worker, but the detached agent keeps running with its declaration file pointing here).
+        // Null when the run had no fabric / the flag is off → no-op. Bounded to the re-tail span like ExecuteAsync's.
+        await using var mcp = ReopenMcpEndpointForReattach(agentRunId, task.Autonomy, run.TeamId, handle, cancellationToken);
 
         try
         {
@@ -455,23 +476,26 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     }
 
     /// <summary>
-    /// Open the run's per-run UDS MCP endpoint when the flag is ON — null otherwise, so the flag-OFF path is
-    /// byte-identical. Mints a DEDICATED DI scope (its own DbContext) because the framing loop runs CONCURRENTLY
-    /// with the harness + the event-append path, so it must not share the heartbeat / streaming scope — the same
-    /// thread-safety reason the heartbeat mints its own. The scope is held for the endpoint's life and disposed in
-    /// the endpoint's <see cref="AgentMcpEndpoint.DisposeAsync"/> (never resolve the registry from a disposed scope).
-    /// The connect registry is a DI singleton, so resolving it from this scope hands a consumer the same map. The
-    /// socket path is computed from the SAME <see cref="LocalProcessRunner.McpSocketPathFor"/> the runner uses, so the
-    /// listener and a later runner-side bind agree by construction. Fail-soft (A10): a host that can't bind a UDS —
-    /// though the flag is on — disposes the scope, logs a Warning, and returns null; the endpoint is optional infra,
-    /// not the run, so the run still proceeds without it.
+    /// The run's per-run UDS socket path + a freshly-minted capability token, computed once so the endpoint listener,
+    /// the harness's declaration file, and the durable handle (for a re-attach) all agree on the same pair. The socket
+    /// path uses the SAME <see cref="LocalProcessRunner.McpSocketPathFor"/> the runner binds, so they match by
+    /// construction. On a re-attach the token is NOT re-minted — see <see cref="ReopenMcpEndpointForReattach"/>.
     /// </summary>
-    private Task<AgentMcpEndpoint?> OpenMcpEndpointIfEnabledAsync(Guid runId, AgentTask effectiveTask, Guid teamId, CancellationToken ct)
-    {
-        if (!IsMcpEndpointEnabled()) return Task.FromResult<AgentMcpEndpoint?>(null);
+    private static (string SocketPath, string Token) MintMcpConnect(Guid runId) =>
+        (LocalProcessRunner.McpSocketPathFor(runId.ToString("N")), McpRunToken.Mint());
 
-        var socketPath = LocalProcessRunner.McpSocketPathFor(runId.ToString("N"));
-        var token = McpRunToken.Mint();
+    /// <summary>
+    /// Open the run's per-run UDS MCP endpoint on the given socket + token when the endpoint flag is ON — null otherwise,
+    /// so the flag-OFF path is byte-identical. Mints a DEDICATED DI scope (its own DbContext) because the framing loop
+    /// runs CONCURRENTLY with the harness + the event-append path, so it must not share the heartbeat / streaming scope.
+    /// The scope is held for the endpoint's life and disposed in the endpoint's <see cref="AgentMcpEndpoint.DisposeAsync"/>.
+    /// The connect registry is a DI singleton, so resolving it from this scope hands a consumer the same map. Fail-soft
+    /// (A10): a host that can't bind a UDS — though the flag is on — disposes the scope, logs a Warning, and returns
+    /// null; the endpoint is optional infra, not the run, so the run still proceeds without it.
+    /// </summary>
+    private AgentMcpEndpoint? OpenMcpEndpointIfEnabled(Guid runId, AgentAutonomyLevel autonomy, Guid teamId, string socketPath, string token, CancellationToken ct)
+    {
+        if (!IsMcpEndpointEnabled()) return null;
 
         var scope = _scopeFactory.CreateScope();
         var registry = scope.ServiceProvider.GetRequiredService<IAgentToolRegistry>();
@@ -479,9 +503,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
 
         try
         {
-            var endpoint = new AgentMcpEndpoint(runId, registry, effectiveTask.Autonomy, teamId, socketPath, token, connects, scope, ct, _logger);
-
-            return Task.FromResult<AgentMcpEndpoint?>(endpoint);
+            return new AgentMcpEndpoint(runId, registry, autonomy, teamId, socketPath, token, connects, scope, ct, _logger);
         }
         // An over-length socket path throws ArgumentOutOfRangeException (UDS endpoint ctor); CreateDirectory can throw
         // IOException / UnauthorizedAccessException. The endpoint is optional infra, not the run, so any of these is a
@@ -491,8 +513,56 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
             scope.Dispose();
             _logger.LogWarning(ex, "Agent run {RunId}: could not bind the MCP endpoint socket; proceeding without the tool fabric", runId);
 
-            return Task.FromResult<AgentMcpEndpoint?>(null);
+            return null;
         }
+    }
+
+    /// <summary>
+    /// Re-open the run's MCP endpoint after a re-attach using the SAME socket + token the launch recorded on the handle.
+    /// The in-process listener died with the original worker, but the setsid-detached agent keeps running with its 0600
+    /// declaration file pointing at THIS socket+token — a fresh token would lock it out. The socket path is reconstructed
+    /// from the run id (the single-source-of-truth <see cref="LocalProcessRunner.McpSocketPathFor"/>, the SAME the
+    /// launch bound). Null — no re-open — when the run had no fabric (handle carries no token) or the endpoint flag is
+    /// off; the wiring flag is NOT re-checked here (the agent's declaration already exists, so the endpoint must serve
+    /// it regardless). Fail-soft via <see cref="OpenMcpEndpointIfEnabled"/>.
+    /// </summary>
+    private AgentMcpEndpoint? ReopenMcpEndpointForReattach(Guid runId, AgentAutonomyLevel autonomy, Guid teamId, SandboxHandle handle, CancellationToken ct)
+    {
+        if (handle.McpRunToken is not { Length: > 0 } token) return null;
+
+        var socketPath = LocalProcessRunner.McpSocketPathFor(runId.ToString("N"));
+
+        return OpenMcpEndpointIfEnabled(runId, autonomy, teamId, socketPath, token, ct);
+    }
+
+    /// <summary>
+    /// Build the MCP wiring the runner uses to point the live CLI at the fabric — or null (no wiring) unless BOTH hold:
+    /// the endpoint ACTUALLY opened (a non-null endpoint already encodes "the flag is on AND the bind succeeded" — no
+    /// second flag), and the chosen harness declares an MCP-server shape (<see cref="IMcpHarnessDeclaration"/>).
+    ///
+    /// <para>Fail-CLOSED (A10): the proxy binary the declaration points at must EXIST host-side; if it doesn't (a
+    /// mis-configured deployment, a missing publish artifact), write NO declaration + log a Warning — handing the agent
+    /// a config pointing at a missing binary would surface as a confusingly-broken MCP init, so a tool-less run is the
+    /// honest degradation. The harness owns its format: it renders the file Content from the run-scoped context (socket +
+    /// token + the absolute proxy command), so the declaration the agent reads matches the listener by construction.</para>
+    /// </summary>
+    private McpServerWiring? BuildMcpWiring(Guid runId, AgentMcpEndpoint? endpoint, IAgentHarness harness, string socketPath, string token)
+    {
+        if (endpoint is null || harness is not IMcpHarnessDeclaration declarer) return null;
+
+        var proxyPath = LocalProcessRunner.McpProxyBinaryPath();
+
+        if (!File.Exists(proxyPath))
+        {
+            _logger.LogWarning("Agent run {RunId}: the codespace-mcp proxy binary was not found at '{ProxyPath}'; proceeding WITHOUT the tool fabric (set {EnvVar} to its absolute path)", runId, proxyPath, LocalProcessRunner.McpProxyPathEnvVar);
+            return null;
+        }
+
+        var context = new McpDeclarationContext { ProxyCommand = proxyPath, SocketPath = socketPath, Token = token, ServerName = McpRequestHandler.ServerName };
+
+        var declaration = declarer.BuildMcpDeclaration(context);
+
+        return new McpServerWiring { RelativeFileName = declaration.RelativeFileName, Content = declaration.Content, SocketPath = socketPath };
     }
 
     /// <summary>
@@ -540,7 +610,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         }
     }
 
-    private async Task<AgentRunResult> RunHarnessAsync(Guid runId, IAgentHarness harness, ISandboxRunner runner, SandboxSpec spec, SecretRedactor redactor, CancellationToken cancellationToken)
+    private async Task<AgentRunResult> RunHarnessAsync(Guid runId, IAgentHarness harness, ISandboxRunner runner, SandboxSpec spec, string? mcpToken, SecretRedactor redactor, CancellationToken cancellationToken)
     {
         var events = new List<AgentEvent>();
 
@@ -559,8 +629,9 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         // The heartbeat is owned by ExecuteAsync (it spans the whole run, including the completion tail), so
         // streaming here just emits events — a quiet step's liveness is kept fresh by that outer heartbeat. The
         // redactor's fingerprint is stamped onto the durable handle so a re-attach can prove it rebuilt the SAME
-        // key before re-tailing the spool (a rotated/deleted key → marker-only, never an unmaskable leak).
-        var sandbox = await RunSandboxAsync(runId, runner, spec, PersistLineAsync, redactor.Fingerprint, cancellationToken).ConfigureAwait(false);
+        // key before re-tailing the spool (a rotated/deleted key → marker-only, never an unmaskable leak). The MCP
+        // token rides the handle too so a re-attach re-binds the SAME socket+token the agent's declaration carries.
+        var sandbox = await RunSandboxAsync(runId, runner, spec, PersistLineAsync, redactor.Fingerprint, mcpToken, cancellationToken).ConfigureAwait(false);
 
         // Events are already redacted, so a result the harness folds from them (summary / error) is redacted too.
         return sandbox.Status == SandboxStatus.TimedOut
@@ -596,10 +667,10 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     /// otherwise the live-stream / batch path. Feature-detected via <c>runner is ISandboxDurableRunner</c>, so
     /// a runner that can't be durable transparently falls back to streaming.
     /// </summary>
-    private async Task<SandboxResult> RunSandboxAsync(Guid runId, ISandboxRunner runner, SandboxSpec spec, Func<string, Task> persistLine, string? keyFingerprint, CancellationToken cancellationToken)
+    private async Task<SandboxResult> RunSandboxAsync(Guid runId, ISandboxRunner runner, SandboxSpec spec, Func<string, Task> persistLine, string? keyFingerprint, string? mcpToken, CancellationToken cancellationToken)
     {
         if (runner is ISandboxDurableRunner durable)
-            return await RunDurableAsync(runId, durable, spec, persistLine, keyFingerprint, cancellationToken).ConfigureAwait(false);
+            return await RunDurableAsync(runId, durable, spec, persistLine, keyFingerprint, mcpToken, cancellationToken).ConfigureAwait(false);
 
         return await RunAndStreamAsync(runner, spec, persistLine, cancellationToken).ConfigureAwait(false);
     }
@@ -610,11 +681,12 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     /// observer dies mid-tail. On a host-shutdown cancel the attach stops observing WITHOUT killing the
     /// process (leaving the run Running for re-attach/recovery); only the spec timeout terminates it.
     /// </summary>
-    private async Task<SandboxResult> RunDurableAsync(Guid runId, ISandboxDurableRunner durable, SandboxSpec spec, Func<string, Task> persistLine, string? keyFingerprint, CancellationToken cancellationToken)
+    private async Task<SandboxResult> RunDurableAsync(Guid runId, ISandboxDurableRunner durable, SandboxSpec spec, Func<string, Task> persistLine, string? keyFingerprint, string? mcpToken, CancellationToken cancellationToken)
     {
-        // Stamp the injected-key fingerprint onto the handle at launch so a re-attach can verify it rebuilt the
-        // same redactor before re-tailing (a rotated/deleted credential → fingerprint mismatch → marker-only).
-        var handle = (await durable.LaunchAsync(spec, runId.ToString("N"), cancellationToken).ConfigureAwait(false)) with { InjectedKeyFingerprint = keyFingerprint };
+        // Stamp the injected-key fingerprint + the MCP run token onto the handle at launch. The fingerprint lets a
+        // re-attach verify it rebuilt the same redactor before re-tailing (rotated/deleted credential → marker-only);
+        // the token lets it RE-OPEN the endpoint with the SAME socket+token the agent's declaration file already holds.
+        var handle = (await durable.LaunchAsync(spec, runId.ToString("N"), cancellationToken).ConfigureAwait(false)) with { InjectedKeyFingerprint = keyFingerprint, McpRunToken = mcpToken };
 
         await _runs.SetRunnerHandleAsync(runId, JsonSerializer.Serialize(handle, AgentJson.Options), cancellationToken).ConfigureAwait(false);
 

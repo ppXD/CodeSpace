@@ -110,6 +110,16 @@ public static class BubblewrapSandbox
             args.Add(cmdDir);
         }
 
+        // Extra read-only dirs reachable inside the sandbox (the codespace-mcp proxy binary's dir, so the harness can
+        // spawn it at its absolute identity-bound path). --ro-bind-try (not a hard bind) so a missing dir never crashes
+        // bwrap. Empty by default → no extra ro-bind, byte-identical to a run without the tool fabric.
+        foreach (var dir in DistinctNonEmpty(plan.ReadOnlyExtraPaths))
+        {
+            args.Add("--ro-bind-try");
+            args.Add(dir);
+            args.Add(dir);
+        }
+
         // The ONLY writable host paths: this run's workspace + config-home, bound at their real paths so absolute
         // refs (CLAUDE_CONFIG_DIR, the workspace) still resolve. Applied AFTER --tmpfs /tmp so a path under /tmp
         // re-surfaces the real dir over the tmpfs.
@@ -200,6 +210,9 @@ public sealed record BwrapPlan
 
     /// <summary>Host paths bound READ-WRITE into the sandbox (this run's workspace + config-home) — the only writable host paths.</summary>
     public IReadOnlyList<string> WritablePaths { get; init; } = Array.Empty<string>();
+
+    /// <summary>Host dirs bound READ-ONLY (<c>--ro-bind-try</c>) so a needed binary stays reachable at its absolute path — the <c>codespace-mcp</c> proxy's dir. Init-only, defaulted empty → non-breaking.</summary>
+    public IReadOnlyList<string> ReadOnlyExtraPaths { get; init; } = Array.Empty<string>();
 
     /// <summary>Whether to SHARE the host network. <c>false</c> → <c>--unshare-net</c> (only loopback; no egress).</summary>
     public bool ShareNetwork { get; init; } = true;

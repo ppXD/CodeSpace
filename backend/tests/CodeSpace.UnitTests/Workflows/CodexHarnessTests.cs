@@ -1,3 +1,4 @@
+using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Agents.Harnesses.Codex;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Enums;
@@ -28,6 +29,25 @@ public class CodexHarnessTests
 
     [Fact]
     public void Kind_is_codex_cli() => Harness.Kind.ShouldBe("codex-cli");
+
+    [Fact]
+    public void Renders_an_mcp_server_into_config_toml_with_the_run_socket_and_token()
+    {
+        // Codex reads MCP-server declarations from an [mcp_servers.<name>] table in its config home's config.toml. The
+        // harness OWNS the format — it renders the TOML content from the run-scoped context (socket + token + proxy).
+        var context = new McpDeclarationContext { ProxyCommand = "/abs/codespace-mcp", SocketPath = "/tmp/cs/mcp.sock", Token = "tok-xyz", ServerName = "codespace" };
+
+        var declaration = ((IMcpHarnessDeclaration)Harness).BuildMcpDeclaration(context);
+
+        declaration.RelativeFileName.ShouldBe("config.toml");
+        declaration.Content.ShouldContain("[mcp_servers.codespace]");
+        declaration.Content.ShouldContain("command = \"/abs/codespace-mcp\"");
+        declaration.Content.ShouldContain("CODESPACE_MCP_SOCKET = \"/tmp/cs/mcp.sock\"");
+        declaration.Content.ShouldContain("CODESPACE_RUN_TOKEN = \"tok-xyz\"");
+
+        // Pinned (Rule 8): a rename silently relocates the declaration so the CLI never reads it.
+        CodexHarness.McpDeclarationFile.ShouldBe("config.toml");
+    }
 
     [Fact]
     public void Builds_a_codex_exec_json_invocation_from_the_task()

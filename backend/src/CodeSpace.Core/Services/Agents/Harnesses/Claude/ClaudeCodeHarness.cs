@@ -1,5 +1,6 @@
 using System.Text.Json;
 using CodeSpace.Core.DependencyInjection;
+using CodeSpace.Core.Services.Agents.Mcp;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Enums;
 
@@ -19,9 +20,12 @@ namespace CodeSpace.Core.Services.Agents.Harnesses.Claude;
 /// (surfaced, never dropped) and pure setup lines return null — so a CLI version bump degrades gracefully; the
 /// normalization shape tested here is the stable contract, calibrated against real output when execution is wired.</para>
 /// </summary>
-public sealed class ClaudeCodeHarness : IAgentHarness, IModelCredentialProjector, ISingletonDependency
+public sealed class ClaudeCodeHarness : IAgentHarness, IModelCredentialProjector, IMcpHarnessDeclaration, ISingletonDependency
 {
     public const string HarnessKind = "claude-code";
+
+    /// <summary>The config-home-relative file Claude Code reads MCP-server declarations from (a JSON <c>mcpServers</c> map). Pinned by a test — the runner writes the run-scoped server here.</summary>
+    public const string McpDeclarationFile = ".mcp.json";
 
     /// <summary>Air-gapped operators pin a private build via this env var (Rule 8). Renaming it breaks their pin — see the pin test.</summary>
     public const string VersionEnvVar = "CODESPACE_CLAUDE_CODE_VERSION";
@@ -171,6 +175,13 @@ public sealed class ClaudeCodeHarness : IAgentHarness, IModelCredentialProjector
         if (!SupportedProviders.Contains(provider, StringComparer.OrdinalIgnoreCase))
             throw new ArgumentException($"{Kind} cannot authenticate to model provider '{provider}'.", nameof(provider));
     }
+
+    /// <summary>Claude Code hosts an MCP server from a <c>.mcp.json</c> in its config dir (a JSON <c>mcpServers</c> map). The harness owns the format — it renders the JSON content with the run-scoped socket + token baked in; the runner just writes the bytes.</summary>
+    public McpHarnessDeclaration BuildMcpDeclaration(McpDeclarationContext context) => new()
+    {
+        RelativeFileName = McpDeclarationFile,
+        Content = McpDeclarationWriter.RenderClaudeJson(context),
+    };
 
     /// <summary>The Claude Code executable — the <see cref="CommandEnvVar"/> override (absolute path / PATH name) when set, else <c>claude</c> on PATH.</summary>
     private static string ResolveCommand() =>

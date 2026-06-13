@@ -1,5 +1,6 @@
 using System.Text.Json;
 using CodeSpace.Core.DependencyInjection;
+using CodeSpace.Core.Services.Agents.Mcp;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Enums;
 
@@ -16,9 +17,12 @@ namespace CodeSpace.Core.Services.Agents.Harnesses.Codex;
 /// table is calibrated against real <c>codex exec --json</c> output when execution is wired (B0.4); the
 /// normalization shape tested here is the stable contract.</para>
 /// </summary>
-public sealed class CodexHarness : IAgentHarness, IModelCredentialProjector, ISingletonDependency
+public sealed class CodexHarness : IAgentHarness, IModelCredentialProjector, IMcpHarnessDeclaration, ISingletonDependency
 {
     public const string HarnessKind = "codex-cli";
+
+    /// <summary>The config-home-relative file Codex reads MCP-server declarations from (a TOML <c>[mcp_servers.&lt;name&gt;]</c> table). Pinned by a test — the runner writes the run-scoped server here.</summary>
+    public const string McpDeclarationFile = "config.toml";
 
     /// <summary>Air-gapped operators pin a private build via this env var (Rule 8). Renaming it breaks their pin — see the pin test.</summary>
     public const string VersionEnvVar = "CODESPACE_CODEX_CLI_VERSION";
@@ -146,6 +150,13 @@ public sealed class CodexHarness : IAgentHarness, IModelCredentialProjector, ISi
         if (!SupportedProviders.Contains(provider, StringComparer.OrdinalIgnoreCase))
             throw new ArgumentException($"{Kind} cannot authenticate to model provider '{provider}'.", nameof(provider));
     }
+
+    /// <summary>Codex hosts an MCP server from an <c>[mcp_servers.&lt;name&gt;]</c> table in its config home's <c>config.toml</c>. The harness owns the format — it renders the TOML content with the run-scoped socket + token baked in; the runner just writes the bytes.</summary>
+    public McpHarnessDeclaration BuildMcpDeclaration(McpDeclarationContext context) => new()
+    {
+        RelativeFileName = McpDeclarationFile,
+        Content = McpDeclarationWriter.RenderCodexToml(context),
+    };
 
     /// <summary>The Codex executable — the <see cref="CommandEnvVar"/> override (absolute path / PATH name) when set, else <c>codex</c> on PATH.</summary>
     private static string ResolveCommand() =>

@@ -65,4 +65,16 @@ public sealed record SandboxHandle
     /// to re-tail). It is a hash, never the key, so persisting it is safe.
     /// </summary>
     public string? InjectedKeyFingerprint { get; init; }
+
+    /// <summary>
+    /// The per-run MCP capability token the launching run bound its tool-fabric endpoint with (null when the run has
+    /// no tool fabric). It is persisted here ONLY so a re-attach after a worker tear-down can RE-OPEN the endpoint with
+    /// the SAME token the agent's declaration file already carries — the detached agent keeps running with its config
+    /// pointing at this token, so a fresh one would lock it out. It is a LOW-VALUE per-run capability, not a durable
+    /// credential: scoped to THIS run's own (team-scoped, autonomy-gated) tools, written 0600 into the spool's
+    /// config-home, and dead the instant the run's listener closes. The <c>agent_run</c> row it rides on is
+    /// team-scoped and never reachable from inside the sandbox. Null on an older handle and for a run with no fabric.
+    /// (Unlike the model key — which is NEVER persisted — this grants nothing beyond the run's own already-gated tools.)
+    /// </summary>
+    public string? McpRunToken { get; init; }
 }
