@@ -31,7 +31,7 @@ public class IssueCreateActorFlowTests
     {
         var seed = await SeedAsync(linkActor: true);
 
-        var issue = await CreateAsync(seed.RepositoryId, seed.UserId);
+        var issue = await CreateAsync(seed.RepositoryId, seed.TeamId, seed.UserId);
 
         issue.ExternalId.ShouldBe(seed.ActorCredentialId.ToString(),
             customMessage: "with a linked actor the issue must be created by the actor's OWN credential, not the connection credential");
@@ -44,7 +44,7 @@ public class IssueCreateActorFlowTests
     {
         var seed = await SeedAsync(linkActor: true);
 
-        var issue = await CreateAsync(seed.RepositoryId, actorUserId: null);
+        var issue = await CreateAsync(seed.RepositoryId, seed.TeamId, actorUserId: null);
 
         issue.ExternalId.ShouldBe(seed.ConnectionCredentialId.ToString(),
             customMessage: "no actorUserId → unchanged behaviour: the repo's connection credential creates the issue");
@@ -55,7 +55,7 @@ public class IssueCreateActorFlowTests
     {
         var seed = await SeedAsync(linkActor: false);
 
-        var ex = await Should.ThrowAsync<ActorIdentityRequiredException>(() => CreateAsync(seed.RepositoryId, seed.UserId));
+        var ex = await Should.ThrowAsync<ActorIdentityRequiredException>(() => CreateAsync(seed.RepositoryId, seed.TeamId, seed.UserId));
 
         ex.ProviderKind.ShouldBe(ProviderKind.Git);
         ex.ProviderInstanceId.ShouldBe(seed.ProviderInstanceId);
@@ -66,7 +66,7 @@ public class IssueCreateActorFlowTests
     {
         var seed = await SeedAsync(linkActor: false);
 
-        var ex = await Should.ThrowAsync<InvalidOperationException>(() => CreateAsync(seed.RepositoryId, actorUserId: null, title: "   "));
+        var ex = await Should.ThrowAsync<InvalidOperationException>(() => CreateAsync(seed.RepositoryId, seed.TeamId, actorUserId: null, title: "   "));
 
         ex.Message.ShouldContain("title");
     }
@@ -76,18 +76,31 @@ public class IssueCreateActorFlowTests
     {
         var seed = await SeedAsync(linkActor: false);
 
-        var issue = await CreateAsync(seed.RepositoryId, actorUserId: null, labels: new[] { "bug", "p1" });
+        var issue = await CreateAsync(seed.RepositoryId, seed.TeamId, actorUserId: null, labels: new[] { "bug", "p1" });
 
         issue.Labels.Select(l => l.Name).ShouldBe(new[] { "bug", "p1" }, customMessage: "the test provider echoes the labels, proving the neutral input reaches it");
     }
 
+    [Fact]
+    public async Task A_repository_in_another_team_is_refused_fail_closed()
+    {
+        var seed = await SeedAsync(linkActor: true);
+        var otherTeam = Guid.NewGuid();
+
+        // The repo belongs to seed.TeamId; creating AS otherTeam must NOT resolve it — the tenant filter
+        // finds nothing and the service refuses with the same non-leaking "not found" as a missing repo.
+        var ex = await Should.ThrowAsync<InvalidOperationException>(() => CreateAsync(seed.RepositoryId, otherTeam, seed.UserId));
+        ex.Message.ShouldContain("not found", customMessage: "a cross-team repo is indistinguishable from a missing one (no existence leak)");
+    }
+
     // ── Helpers ────────────────────────────────────────────────────────────────
 
-    private async Task<RemoteIssue> CreateAsync(Guid repositoryId, Guid? actorUserId, string title = "Track this", string[]? labels = null)
+    private async Task<RemoteIssue> CreateAsync(Guid repositoryId, Guid teamId, Guid? actorUserId, string title = "Track this", string[]? labels = null)
     {
         using var scope = _fixture.BeginScope();
         return await scope.Resolve<IIssueService>().CreateAsync(
             repositoryId,
+            teamId,
             new CreateIssueInput { Title = title, Body = "body", Labels = labels ?? Array.Empty<string>() },
             actorUserId,
             CancellationToken.None);
@@ -147,8 +160,8 @@ public class IssueCreateActorFlowTests
 
         await db.SaveChangesAsync();
 
-        return new SeedResult(user.Id, instance.Id, repo.Id, connection.Id, actorCredentialId);
+        return new SeedResult(user.Id, team.Id, instance.Id, repo.Id, connection.Id, actorCredentialId);
     }
 
-    private sealed record SeedResult(Guid UserId, Guid ProviderInstanceId, Guid RepositoryId, Guid ConnectionCredentialId, Guid ActorCredentialId);
+    private sealed record SeedResult(Guid UserId, Guid TeamId, Guid ProviderInstanceId, Guid RepositoryId, Guid ConnectionCredentialId, Guid ActorCredentialId);
 }

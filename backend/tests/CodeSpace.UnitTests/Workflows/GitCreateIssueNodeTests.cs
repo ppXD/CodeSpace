@@ -21,18 +21,20 @@ namespace CodeSpace.UnitTests.Workflows;
 public class GitCreateIssueNodeTests
 {
     private const string Repo = "11111111-1111-1111-1111-111111111111";
+    private const string Team = "22222222-2222-2222-2222-222222222222";
 
     private sealed class StubIssueService : IIssueService
     {
         public Guid RepoId;
+        public Guid TeamId;
         public CreateIssueInput? Input;
         public Guid? ActorUserId;
         public int Calls;
         public Exception? ThrowOnCreate;
 
-        public Task<RemoteIssue> CreateAsync(Guid repositoryId, CreateIssueInput input, Guid? actorUserId, CancellationToken cancellationToken)
+        public Task<RemoteIssue> CreateAsync(Guid repositoryId, Guid teamId, CreateIssueInput input, Guid? actorUserId, CancellationToken cancellationToken)
         {
-            RepoId = repositoryId; Input = input; ActorUserId = actorUserId; Calls++;
+            RepoId = repositoryId; TeamId = teamId; Input = input; ActorUserId = actorUserId; Calls++;
             if (ThrowOnCreate != null) throw ThrowOnCreate;
             return Task.FromResult(new RemoteIssue
             {
@@ -41,8 +43,8 @@ public class GitCreateIssueNodeTests
             });
         }
 
-        public Task<RemoteIssueComment> CommentAsync(Guid r, int n, string b, Guid? a, CancellationToken c) => throw new NotImplementedException();
-        public Task<RemoteIssue> CloseAsync(Guid r, int n, Guid? a, CancellationToken c) => throw new NotImplementedException();
+        public Task<RemoteIssueComment> CommentAsync(Guid r, Guid t, int n, string b, Guid? a, CancellationToken c) => throw new NotImplementedException();
+        public Task<RemoteIssue> CloseAsync(Guid r, Guid t, int n, Guid? a, CancellationToken c) => throw new NotImplementedException();
     }
 
     [Fact]
@@ -81,6 +83,32 @@ public class GitCreateIssueNodeTests
         stub.Input!.Body.ShouldBe("details here");
         stub.Input.Labels.ShouldBe(new[] { "bug", "flaky" }, "blank label entries are dropped, real ones trimmed-and-kept");
         stub.ActorUserId.ShouldBe(actor, "a wired actAsUserId must reach the service so the issue is authored by that user");
+    }
+
+    [Fact]
+    public async Task Threads_the_run_team_from_sys_scope_into_the_service_call()
+    {
+        var stub = new StubIssueService();
+
+        await new GitCreateIssueNode(stub).RunAsync(Context(), CancellationToken.None);
+
+        stub.TeamId.ShouldBe(Guid.Parse(Team), "the run's team flows from {{sys.team_id}} so the service fail-closes the repo load to it");
+    }
+
+    [Fact]
+    public async Task Fails_closed_when_sys_scope_has_no_team()
+    {
+        var stub = new StubIssueService();
+
+        var result = await new GitCreateIssueNode(stub).RunAsync(ContextWithSys(new()
+        {
+            ["repositoryId"] = JsonSerializer.SerializeToElement(Repo),
+            ["title"] = JsonSerializer.SerializeToElement("Bug: thing broke"),
+        }, new()), CancellationToken.None);
+
+        result.Status.ShouldBe(NodeStatus.Failure);
+        result.Error.ShouldContain("team context");
+        stub.Calls.ShouldBe(0, "without a team the node must short-circuit before touching the service");
     }
 
     [Fact]
@@ -168,13 +196,17 @@ public class GitCreateIssueNodeTests
         ["title"] = JsonSerializer.SerializeToElement("Bug: thing broke"),
     });
 
-    private static NodeRunContext ContextFrom(Dictionary<string, JsonElement> inputs) => new()
+    // Default context carries the run's team in sys scope (as the engine always does) so the node resolves it.
+    private static NodeRunContext ContextFrom(Dictionary<string, JsonElement> inputs) =>
+        ContextWithSys(inputs, new() { [SystemScopeKeys.TeamId] = JsonSerializer.SerializeToElement(Team) });
+
+    private static NodeRunContext ContextWithSys(Dictionary<string, JsonElement> inputs, Dictionary<string, JsonElement> sys) => new()
     {
         Inputs = inputs,
         Config = new Dictionary<string, JsonElement>(),
         RawInputs = JsonDocument.Parse("{}").RootElement,
         RawConfig = JsonDocument.Parse("{}").RootElement,
-        Scope = new NodeRunScope { Trigger = new Dictionary<string, JsonElement>() },
+        Scope = new NodeRunScope { Trigger = new Dictionary<string, JsonElement>(), Sys = sys },
         Logger = NullLogger.Instance,
         Observability = NodeObservability.NoOp,
     };

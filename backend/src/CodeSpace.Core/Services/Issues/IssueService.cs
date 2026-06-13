@@ -25,11 +25,11 @@ public sealed class IssueService : IIssueService, IScopedDependency
         _actorCredentials = actorCredentials;
     }
 
-    public async Task<RemoteIssue> CreateAsync(Guid repositoryId, CreateIssueInput input, Guid? actorUserId, CancellationToken cancellationToken)
+    public async Task<RemoteIssue> CreateAsync(Guid repositoryId, Guid teamId, CreateIssueInput input, Guid? actorUserId, CancellationToken cancellationToken)
     {
         if (string.IsNullOrWhiteSpace(input.Title)) throw new InvalidOperationException("An issue requires a title.");
 
-        var repo = await LoadRepositoryAsync(repositoryId, cancellationToken).ConfigureAwait(false);
+        var repo = await LoadRepositoryAsync(repositoryId, teamId, cancellationToken).ConfigureAwait(false);
         EnsureCredentialBound(repo);
 
         // Per-user attribution (Model B), same as PR open: create AS the actor's own linked identity when
@@ -44,11 +44,11 @@ public sealed class IssueService : IIssueService, IScopedDependency
         return await writeCap.CreateIssueAsync(context, remote, input, cancellationToken).ConfigureAwait(false);
     }
 
-    public async Task<RemoteIssueComment> CommentAsync(Guid repositoryId, int number, string body, Guid? actorUserId, CancellationToken cancellationToken)
+    public async Task<RemoteIssueComment> CommentAsync(Guid repositoryId, Guid teamId, int number, string body, Guid? actorUserId, CancellationToken cancellationToken)
     {
         if (string.IsNullOrWhiteSpace(body)) throw new InvalidOperationException("A comment requires a body.");
 
-        var repo = await LoadRepositoryAsync(repositoryId, cancellationToken).ConfigureAwait(false);
+        var repo = await LoadRepositoryAsync(repositoryId, teamId, cancellationToken).ConfigureAwait(false);
         EnsureCredentialBound(repo);
 
         var credential = await ResolveActingCredentialAsync(repo, actorUserId, cancellationToken).ConfigureAwait(false);
@@ -61,9 +61,9 @@ public sealed class IssueService : IIssueService, IScopedDependency
         return await writeCap.CommentIssueAsync(context, remote, number, body, cancellationToken).ConfigureAwait(false);
     }
 
-    public async Task<RemoteIssue> CloseAsync(Guid repositoryId, int number, Guid? actorUserId, CancellationToken cancellationToken)
+    public async Task<RemoteIssue> CloseAsync(Guid repositoryId, Guid teamId, int number, Guid? actorUserId, CancellationToken cancellationToken)
     {
-        var repo = await LoadRepositoryAsync(repositoryId, cancellationToken).ConfigureAwait(false);
+        var repo = await LoadRepositoryAsync(repositoryId, teamId, cancellationToken).ConfigureAwait(false);
         EnsureCredentialBound(repo);
 
         var credential = await ResolveActingCredentialAsync(repo, actorUserId, cancellationToken).ConfigureAwait(false);
@@ -83,11 +83,14 @@ public sealed class IssueService : IIssueService, IScopedDependency
             ? await _actorCredentials.RequireAsync(uid, repo.ProviderInstance, cancellationToken).ConfigureAwait(false)
             : repo.Credential!;
 
-    private async Task<Repository> LoadRepositoryAsync(Guid repositoryId, CancellationToken cancellationToken) =>
+    // Fail-closed tenant scope (mirrors PullRequestService / RunCommandService): the repo resolves ONLY within
+    // the run's team, so a model-supplied / untrusted repositoryId can never reach another tenant's issues. A
+    // repo in another team falls out of the filter → the same non-leaking "not found".
+    private async Task<Repository> LoadRepositoryAsync(Guid repositoryId, Guid teamId, CancellationToken cancellationToken) =>
         await _db.Repository
             .Include(r => r.ProviderInstance)
             .Include(r => r.Credential)
-            .SingleOrDefaultAsync(r => r.Id == repositoryId && r.DeletedDate == null, cancellationToken).ConfigureAwait(false)
+            .SingleOrDefaultAsync(r => r.Id == repositoryId && r.TeamId == teamId && r.DeletedDate == null, cancellationToken).ConfigureAwait(false)
             ?? throw new InvalidOperationException($"Repository {repositoryId} not found");
 
     private static void EnsureCredentialBound(Repository repo)

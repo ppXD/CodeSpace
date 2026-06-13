@@ -1,6 +1,7 @@
 using System.Text.Json;
 using CodeSpace.Core.Services.Issues;
 using CodeSpace.Core.Services.Providers.Capabilities;
+using CodeSpace.Core.Services.Workflows.Runtime;
 using CodeSpace.Messages.Dtos.Providers;
 using CodeSpace.Messages.Enums;
 using CodeSpace.Messages.Exceptions;
@@ -64,6 +65,7 @@ public sealed class GitCloseIssueNode : INodeRuntime
     public async Task<NodeResult> RunAsync(NodeRunContext context, CancellationToken cancellationToken)
     {
         if (!TryReadRepositoryId(context, out var repoId)) return NodeResult.Fail("Input 'repositoryId' missing or not a uuid.");
+        if (!NodeScopeReader.TryReadTeamId(context, out var teamId)) return NodeResult.Fail("This run has no team context, so a repository can't be resolved.");
         if (!TryReadNumber(context, out var number)) return NodeResult.Fail("Input 'number' missing or not an integer.");
 
         var actAsUserId = TryReadActAsUserId(context, out var a) ? a : (Guid?)null;
@@ -75,7 +77,7 @@ public sealed class GitCloseIssueNode : INodeRuntime
                 target: $"git.close_issue:{repoId}:{number}",
                 method: "close_issue",
                 requestPayload: JsonSerializer.SerializeToElement(new { repository_id = repoId, issue_number = number, act_as_user_id = actAsUserId }),
-                action: ct => _issueService.CloseAsync(repoId, number, actAsUserId, ct),
+                action: ct => _issueService.CloseAsync(repoId, teamId, number, actAsUserId, ct),
                 completionExtractor: result => new ExternalCallCompletion
                 {
                     ResponsePayload = JsonSerializer.SerializeToElement(new { number = result.Number, state = result.State.ToString(), url = result.WebUrl })

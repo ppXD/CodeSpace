@@ -1,6 +1,7 @@
 using System.Text.Json;
 using CodeSpace.Core.Services.Issues;
 using CodeSpace.Core.Services.Providers.Capabilities;
+using CodeSpace.Core.Services.Workflows.Runtime;
 using CodeSpace.Messages.Dtos.Providers;
 using CodeSpace.Messages.Enums;
 using CodeSpace.Messages.Exceptions;
@@ -65,6 +66,7 @@ public sealed class GitCommentIssueNode : INodeRuntime
     public async Task<NodeResult> RunAsync(NodeRunContext context, CancellationToken cancellationToken)
     {
         if (!TryReadRepositoryId(context, out var repoId)) return NodeResult.Fail("Input 'repositoryId' missing or not a uuid.");
+        if (!NodeScopeReader.TryReadTeamId(context, out var teamId)) return NodeResult.Fail("This run has no team context, so a repository can't be resolved.");
         if (!TryReadNumber(context, out var number)) return NodeResult.Fail("Input 'number' missing or not an integer.");
         if (!TryReadBody(context, out var body)) return NodeResult.Fail("Input 'body' missing or empty.");
 
@@ -77,7 +79,7 @@ public sealed class GitCommentIssueNode : INodeRuntime
                 target: $"git.comment_issue:{repoId}:{number}",
                 method: "comment_issue",
                 requestPayload: JsonSerializer.SerializeToElement(new { repository_id = repoId, issue_number = number, body_chars = body.Length, act_as_user_id = actAsUserId }),
-                action: ct => _issueService.CommentAsync(repoId, number, body, actAsUserId, ct),
+                action: ct => _issueService.CommentAsync(repoId, teamId, number, body, actAsUserId, ct),
                 completionExtractor: result => new ExternalCallCompletion
                 {
                     ResponsePayload = JsonSerializer.SerializeToElement(new { comment_id = result.ExternalId, web_url = result.WebUrl })
