@@ -315,6 +315,28 @@ public sealed class GitLabRepositoryProvider : IRepositoryCatalogCapability, IPu
         WebUrl = issue.WebUrl
     };
 
+    public async Task<RemoteIssueComment> CommentIssueAsync(ProviderContext context, RemoteRepository repository, int number, string body, CancellationToken cancellationToken)
+    {
+        var client = await BuildClientAsync(context, cancellationToken).ConfigureAwait(false);
+
+        return await _resilience.ExecuteAsync(context.Instance, nameof(CommentIssueAsync), _ =>
+        {
+            var projectId = int.Parse(repository.ExternalId);
+
+            // GitLab issue comments are "notes" on a separate client; IssueId here is the iid (the `number`).
+            var note = client.GetProjectIssueNoteClient(projectId).Create(new ProjectIssueNoteCreate { IssueId = number, Body = body });
+
+            return Task.FromResult(new RemoteIssueComment
+            {
+                ExternalId = note.NoteId.ToString(),
+                Body = note.Body,
+                AuthorName = note.Author?.Username ?? "unknown",
+                CreatedAt = new DateTimeOffset(DateTime.SpecifyKind(note.CreatedAt, DateTimeKind.Utc), TimeSpan.Zero),
+                WebUrl = null   // GitLab issue notes carry no web URL
+            });
+        }, cancellationToken).ConfigureAwait(false);
+    }
+
     private static readonly IReadOnlyDictionary<string, string?> EmptyLabelColors = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
 
     /// <summary>

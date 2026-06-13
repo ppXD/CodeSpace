@@ -17,4 +17,12 @@ public interface IIssueService
     /// opts into per-user attribution (Model B) exactly like <c>IPullRequestService.OpenPullRequestAsync</c>.
     /// </summary>
     Task<RemoteIssue> CreateAsync(Guid repositoryId, CreateIssueInput input, Guid? actorUserId, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Post a comment on issue <paramref name="number"/> via the provider's <c>IIssueWriteCapability</c>. Same
+    /// preflight + Model B actor attribution as <see cref="CreateAsync"/>. Throws
+    /// <see cref="InvalidOperationException"/> (400) for a missing repo / blank body, on insufficient write
+    /// scope (422), or when the provider rejects it (mapped from its 4xx).
+    /// </summary>
+    Task<RemoteIssueComment> CommentAsync(Guid repositoryId, int number, string body, Guid? actorUserId, CancellationToken cancellationToken);
 }

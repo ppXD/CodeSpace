@@ -40,6 +40,8 @@ public class GitCreateIssueNodeTests
                 Body = input.Body, CreatedDate = DateTimeOffset.UnixEpoch, WebUrl = "https://example.test/issues/321",
             });
         }
+
+        public Task<RemoteIssueComment> CommentAsync(Guid r, int n, string b, Guid? a, CancellationToken c) => throw new NotImplementedException();
     }
 
     [Fact]
