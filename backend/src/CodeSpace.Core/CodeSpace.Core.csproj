@@ -52,6 +52,9 @@
     <!-- Expose `internal` members to the unit-test project so defensive helpers like
          WorkflowJsonSafeParse can be tested without resorting to reflection. -->
     <InternalsVisibleTo Include="CodeSpace.UnitTests" />
+    <!-- The integration test reaches internal executor helpers (e.g. IsMcpEndpointEnabled) to prove the
+         executor-owned MCP endpoint lifecycle through the real ExecuteAsync path. -->
+    <InternalsVisibleTo Include="CodeSpace.IntegrationTests" />
   </ItemGroup>
 
 </Project>
