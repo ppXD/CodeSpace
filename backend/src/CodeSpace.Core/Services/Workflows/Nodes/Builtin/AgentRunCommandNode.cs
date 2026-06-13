@@ -2,6 +2,7 @@ using System.Text.Json;
 using CodeSpace.Core.Services.Agents.Commands;
 using CodeSpace.Core.Services.Agents.Workspace;
 using CodeSpace.Core.Services.Workflows.Artifacts;
+using CodeSpace.Core.Services.Workflows.Runtime;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Enums;
 using Microsoft.Extensions.Logging;
@@ -89,6 +90,7 @@ public sealed class AgentRunCommandNode : INodeRuntime
             Command = command,
             Args = TryReadStringArray(context, "args"),
             RepositoryId = TryReadGuid(context, "repositoryId", out var repoId) ? repoId : (Guid?)null,
+            TeamId = TryReadTeamId(context),
             Ref = TryReadNonEmpty(context, "branch", out var branch) ? branch : null,
             AllowNetwork = TryReadBool(context, "network"),
             RunnerKind = TryReadNonEmpty(context, "runnerKind", out var rk) ? rk : null,
@@ -148,6 +150,15 @@ public sealed class AgentRunCommandNode : INodeRuntime
         id = Guid.Empty;
         if (!context.Inputs.TryGetValue(key, out var value) || value.ValueKind != JsonValueKind.String) return false;
         return Guid.TryParse(value.GetString(), out id);
+    }
+
+    /// <summary>The run's owning team from the engine's system scope (<c>{{sys.team_id}}</c>) — the repo clone is
+    /// fail-closed to it. Null when absent (e.g. a synthetic agent-tool context with no scope), which the command
+    /// service refuses for a repo-scoped run, so a model-supplied repositoryId can never escape the run's tenant.</summary>
+    private static Guid? TryReadTeamId(NodeRunContext context)
+    {
+        if (!context.Scope.Sys.TryGetValue(SystemScopeKeys.TeamId, out var value) || value.ValueKind != JsonValueKind.String) return null;
+        return Guid.TryParse(value.GetString(), out var id) ? id : null;
     }
 
     private static bool TryReadBool(NodeRunContext context, string key) =>

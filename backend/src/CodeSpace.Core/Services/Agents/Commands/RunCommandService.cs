@@ -39,7 +39,7 @@ public sealed class RunCommandService : IRunCommandService, IScopedDependency
         // Repo-scoped → clone into a fresh per-run workspace the command runs in; ephemeral → no checkout.
         // The same runnerKind selects the matching workspace provider, so a future docker/k8s pair composes here.
         var workspace = request.RepositoryId is { } repositoryId
-            ? await _workspaces.Resolve(runnerKind).PrepareAsync(await BuildWorkspaceRequestAsync(repositoryId, request.Ref, cancellationToken).ConfigureAwait(false), cancellationToken).ConfigureAwait(false)
+            ? await _workspaces.Resolve(runnerKind).PrepareAsync(await BuildWorkspaceRequestAsync(repositoryId, request.Ref, request.TeamId, cancellationToken).ConfigureAwait(false), cancellationToken).ConfigureAwait(false)
             : null;
 
         try
@@ -69,12 +69,18 @@ public sealed class RunCommandService : IRunCommandService, IScopedDependency
     /// token through the same provider auth layer the resolver uses, and reuse its provider→username table so
     /// there's one source of truth. A repo with no bound credential clones anonymously (public / local repo).
     /// </summary>
-    private async Task<WorkspaceRequest> BuildWorkspaceRequestAsync(Guid repositoryId, string? gitRef, CancellationToken cancellationToken)
+    private async Task<WorkspaceRequest> BuildWorkspaceRequestAsync(Guid repositoryId, string? gitRef, Guid? teamId, CancellationToken cancellationToken)
     {
+        // Fail-closed tenant scope: the repo is resolved ONLY within the run's team, so a model-supplied /
+        // untrusted repositoryId can never clone another tenant's repo. No team context with a repo requested is
+        // refused outright. A repo in another team falls out of the filter → the same non-leaking "not found".
+        if (teamId is not { } team)
+            throw new WorkspaceException("Cannot clone a repository without a team context for the run.");
+
         var repo = await _db.Repository
             .Include(r => r.ProviderInstance)
             .Include(r => r.Credential)
-            .SingleOrDefaultAsync(r => r.Id == repositoryId && r.DeletedDate == null, cancellationToken).ConfigureAwait(false)
+            .SingleOrDefaultAsync(r => r.Id == repositoryId && r.TeamId == team && r.DeletedDate == null, cancellationToken).ConfigureAwait(false)
             ?? throw new WorkspaceException($"Repository {repositoryId} not found.");
 
         if (string.IsNullOrWhiteSpace(repo.CloneUrlHttps))
