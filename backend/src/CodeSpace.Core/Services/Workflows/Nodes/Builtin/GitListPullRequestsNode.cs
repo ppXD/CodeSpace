@@ -35,6 +35,8 @@ public sealed class GitListPullRequestsNode : INodeRuntime
         Kind = NodeKind.Regular,
         IconKey = "git-pull-request",
         Description = "Lists the pull/merge requests on a repository, optionally filtered by state.",
+        // Synchronous + read-only → exposable as an agent tool (a non-destructive one).
+        IsAgentToolEligible = true,
         ConfigSchema = SchemaBuilder.EmptyObject(),
         InputSchema = SchemaBuilder.Parse("""
             {

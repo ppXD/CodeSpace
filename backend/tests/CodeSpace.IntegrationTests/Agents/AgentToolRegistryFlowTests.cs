@@ -30,4 +30,20 @@ public class AgentToolRegistryFlowTests
 
         registry.All.ShouldAllBe(t => !string.IsNullOrWhiteSpace(t.Kind));
     }
+
+    [Theory]
+    [InlineData("git.fetch_pr_diff")]
+    [InlineData("git.fetch_pr_checks")]
+    [InlineData("git.list_prs")]
+    public void Read_only_git_nodes_project_as_non_destructive_tools(string kind)
+    {
+        using var scope = _fixture.BeginScope();
+        var registry = scope.Resolve<IAgentToolRegistry>();
+
+        var tool = registry.Resolve(kind);
+
+        tool.ShouldNotBeNull($"the eligible read-only {kind} node must project onto the tool fabric via DI");
+        tool!.IsReadOnly.ShouldBeTrue($"{kind} only reads provider data → a read-only tool");
+        tool.IsDestructive.ShouldBeFalse($"{kind} has no side effects → not a destructive, gated tool");
+    }
 }

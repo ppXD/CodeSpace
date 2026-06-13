@@ -86,4 +86,20 @@ public class AgentToolRegistryTests
 
         Build(node).Resolve("agent.run_command").ShouldNotBeNull();
     }
+
+    [Fact]
+    public void The_read_only_git_nodes_project_as_eligible_non_destructive_tools()
+    {
+        // Manifest is static metadata + NodeAgentTool reads its risk flags from the manifest alone — neither
+        // touches the IPullRequestService, so null! is safe (and cheaper than stubbing ~10 unused methods).
+        INodeRuntime[] readNodes = { new GitFetchPrDiffNode(null!), new GitFetchPrChecksNode(null!), new GitListPullRequestsNode(null!) };
+
+        foreach (var node in readNodes)
+            node.Manifest.IsAgentToolEligible.ShouldBeTrue($"{node.TypeKey} is a synchronous read-only tool");
+
+        var registry = Build(readNodes);
+
+        registry.All.Select(t => t.Kind).ShouldBe(new[] { "git.fetch_pr_checks", "git.fetch_pr_diff", "git.list_prs" }, "sorted catalog");
+        registry.All.ShouldAllBe(t => t.IsReadOnly && !t.IsDestructive);
+    }
 }
