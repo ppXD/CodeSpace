@@ -1,3 +1,4 @@
+using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Agents.Harnesses.Claude;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Enums;
@@ -31,6 +32,27 @@ public class ClaudeCodeHarnessTests
 
     [Fact]
     public void Kind_is_claude_code() => Harness.Kind.ShouldBe("claude-code");
+
+    [Fact]
+    public void Renders_an_mcp_server_into_a_dot_mcp_json_with_the_run_socket_and_token()
+    {
+        // Claude Code reads MCP-server declarations from a JSON .mcp.json in its config dir. The harness OWNS the format
+        // — it renders the JSON content from the run-scoped context (socket + token + proxy command baked in).
+        var context = new McpDeclarationContext { ProxyCommand = "/abs/codespace-mcp", SocketPath = "/tmp/cs/mcp.sock", Token = "tok-xyz", ServerName = "codespace" };
+
+        var declaration = ((IMcpHarnessDeclaration)Harness).BuildMcpDeclaration(context);
+
+        declaration.RelativeFileName.ShouldBe(".mcp.json");
+
+        using var doc = System.Text.Json.JsonDocument.Parse(declaration.Content);   // valid JSON the harness rendered
+        var server = doc.RootElement.GetProperty("mcpServers").GetProperty("codespace");
+        server.GetProperty("command").GetString().ShouldBe("/abs/codespace-mcp");
+        server.GetProperty("env").GetProperty("CODESPACE_MCP_SOCKET").GetString().ShouldBe("/tmp/cs/mcp.sock");
+        server.GetProperty("env").GetProperty("CODESPACE_RUN_TOKEN").GetString().ShouldBe("tok-xyz");
+
+        // Pinned (Rule 8): a rename silently relocates the declaration so the CLI never reads it.
+        ClaudeCodeHarness.McpDeclarationFile.ShouldBe(".mcp.json");
+    }
 
     [Fact]
     public void Builds_a_claude_print_stream_json_invocation_from_the_task()

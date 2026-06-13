@@ -80,6 +80,20 @@ public sealed class BubblewrapSandboxTests
     }
 
     [Fact]
+    public void ReadOnlyExtraPaths_each_emit_a_ro_bind_try_and_an_empty_list_emits_none()
+    {
+        // FIX 2: the proxy binary's dir rides ReadOnlyExtraPaths → one --ro-bind-try per entry, next to the command-dir bind.
+        var withProxy = BubblewrapSandbox.BuildArgs(Plan() with { ReadOnlyExtraPaths = new[] { "/opt/cs/proxy", "/srv/extra" } });
+        Triple(withProxy, "--ro-bind-try", "/opt/cs/proxy", "/opt/cs/proxy").ShouldBeTrue("each ReadOnlyExtraPaths entry is bound read-only at its real path");
+        Triple(withProxy, "--ro-bind-try", "/srv/extra", "/srv/extra").ShouldBeTrue();
+
+        // Empty (the default) → the arg vector is byte-identical to the plan without it: NO extra ro-bind, no socket bind.
+        var baseline = BubblewrapSandbox.BuildArgs(Plan());
+        var emptyExtra = BubblewrapSandbox.BuildArgs(Plan() with { ReadOnlyExtraPaths = Array.Empty<string>() });
+        emptyExtra.ShouldBe(baseline, "an empty ReadOnlyExtraPaths must add nothing — byte-identical to the plan without the tool fabric");
+    }
+
+    [Fact]
     public void Available_is_null_off_linux() =>
         // No bwrap concept off Linux → callers run unconfined (the documented degraded trust mode). On a Linux host
         // this is environment-dependent (needs working userns), so only assert the macOS/Windows guarantee.

@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Linq;
 using System.Net.Sockets;
+using CodeSpace.Core.Services.Agents.Mcp;
 using CodeSpace.Core.Services.Agents.Sandbox.Isolation;
 using CodeSpace.Core.Services.Agents.Sandbox.Runners;
 using CodeSpace.Messages.Agents;
@@ -334,6 +335,124 @@ public sealed class LocalProcessDurableRunnerTests : IDisposable
         Directory.Exists(Path.Combine("/tmp/spool-noconfig", "agent-home")).ShouldBeFalse("no isolation requested → no per-run config home");
     }
 
+    // ─── MCP wiring: the runner writes the declaration 0600 into config-home + binds the socket (Slice 4) ────
+
+    // The harness renders the Content (FIX 3 — runner writes dumb bytes); here we bake a representative .mcp.json so the
+    // write/bind tests have realistic content carrying the socket + token.
+    private static McpServerWiring Wiring(string socketPath) => new()
+    {
+        RelativeFileName = ".mcp.json",
+        Content = McpDeclarationWriter.RenderClaudeJson(new McpDeclarationContext { ProxyCommand = "/abs/codespace-mcp", SocketPath = socketPath, Token = "tok-xyz", ServerName = "codespace" }),
+        SocketPath = socketPath,
+    };
+
+    [Fact]
+    public void WriteMcpDeclaration_writes_the_rendered_server_into_the_config_home()
+    {
+        var configHome = TempDir();
+
+        LocalProcessRunner.WriteMcpDeclaration(Wiring("/tmp/cs/mcp.sock"), configHome);
+
+        var path = Path.Combine(configHome, ".mcp.json");
+        File.Exists(path).ShouldBeTrue("the declaration is written at its config-home-relative path");
+
+        var json = File.ReadAllText(path);
+        json.ShouldContain("codespace-mcp");
+        json.ShouldContain("/tmp/cs/mcp.sock");
+        json.ShouldContain("tok-xyz", customMessage: "the run token rides the declaration so the proxy authenticates");
+    }
+
+    [Fact]
+    public void WriteMcpDeclaration_writes_the_declaration_owner_only_0600()
+    {
+        if (OperatingSystem.IsWindows()) return;   // unix file modes don't apply
+
+        var configHome = TempDir();
+
+        LocalProcessRunner.WriteMcpDeclaration(Wiring("/tmp/cs/mcp.sock"), configHome);
+
+        // The token lives in this file, so it must NOT be group/other-readable.
+        var mode = File.GetUnixFileMode(Path.Combine(configHome, ".mcp.json"));
+        mode.ShouldBe(UnixFileMode.UserRead | UnixFileMode.UserWrite, customMessage: "the token-bearing declaration must be 0600");
+    }
+
+    [Fact]
+    public void WriteMcpDeclaration_is_a_no_op_when_there_is_no_wiring_or_no_config_home()
+    {
+        var configHome = TempDir();
+
+        // No wiring → nothing written (a run without the tool fabric).
+        LocalProcessRunner.WriteMcpDeclaration(null, configHome);
+        File.Exists(Path.Combine(configHome, ".mcp.json")).ShouldBeFalse("no wiring → no declaration");
+
+        // No config-home → nowhere harness-isolated to put it → no-op (must not throw).
+        Should.NotThrow(() => LocalProcessRunner.WriteMcpDeclaration(Wiring("/tmp/cs/mcp.sock"), null));
+    }
+
+    [Fact]
+    public void BuildDurableStartInfo_writes_the_mcp_declaration_into_the_config_home_when_wired()
+    {
+        var spool = Path.Combine(Path.GetTempPath(), "codespace-mcp-decl-" + Guid.NewGuid().ToString("N"));
+        _spoolDirs.Add(spool);
+
+        var info = LocalProcessRunner.BuildDurableStartInfo(
+            new SandboxSpec { Command = "claude", ConfigHomeEnvVars = new[] { "CLAUDE_CONFIG_DIR" }, Mcp = Wiring("/tmp/cs/mcp.sock") }, spool);
+
+        // The declaration lands in the SAME per-run home the config-dir env var points at.
+        var home = info.Environment["CLAUDE_CONFIG_DIR"];
+        File.Exists(Path.Combine(home, ".mcp.json")).ShouldBeTrue("the runner writes the declaration into the per-run config-home before launch");
+    }
+
+    [Fact]
+    public void BuildDurableStartInfo_with_no_mcp_wiring_is_byte_identical_to_a_run_without_the_tool_fabric()
+    {
+        // Flag-OFF byte-identical guarantee: a spec with Mcp=null must produce the EXACT same argv + spool env as the
+        // SAME spec built again — no socket bind, no proxy ro-bind, no declaration write. Two builds of the identical
+        // Mcp-less spec must match token-for-token (the only source of divergence would be MCP wiring leaking in).
+        var spool = Path.Combine(Path.GetTempPath(), "codespace-mcp-off-" + Guid.NewGuid().ToString("N"));
+        _spoolDirs.Add(spool);
+
+        SandboxSpec Spec() => new() { Command = "claude", WorkingDirectory = spool, ConfigHomeEnvVars = new[] { "CLAUDE_CONFIG_DIR" } };
+
+        var a = LocalProcessRunner.BuildDurableStartInfo(Spec(), spool);
+        var b = LocalProcessRunner.BuildDurableStartInfo(Spec(), spool);
+
+        a.ArgumentList.ToList().ShouldBe(b.ArgumentList.ToList(), "Mcp=null must add no socket bind / ro-bind — byte-identical argv");
+
+        // And concretely: nothing references the dedicated socket subdir or a proxy bind.
+        a.ArgumentList.ShouldNotContain(Path.Combine(spool, "mcp"), customMessage: "Mcp=null must not bind the socket dir");
+        File.Exists(Path.Combine(spool, "agent-home", ".mcp.json")).ShouldBeFalse("Mcp=null must write no declaration");
+    }
+
+    [Fact]
+    public void AppendChildCommand_binds_a_dedicated_socket_dir_NOT_the_spool_dir_so_no_spool_artifacts_leak()
+    {
+        if (BubblewrapSandbox.Available is null) return;   // bwrap-only: the writable --bind only exists under confinement
+
+        var spool = Path.Combine(Path.GetTempPath(), "codespace-mcp-bind-" + Guid.NewGuid().ToString("N"));
+        _spoolDirs.Add(spool);
+
+        // The socket lives in the DEDICATED <spool>/mcp/ subdir (FIX 1) — its parent is that subdir, never the spool dir
+        // (which holds out.log/err.log/exit/pid the agent must not read or forge — design §3b / Attack 4).
+        var socketPath = Path.Combine(spool, "mcp", "mcp.sock");
+
+        var info = LocalProcessRunner.BuildDurableStartInfo(
+            new SandboxSpec { Command = "claude", WorkingDirectory = spool, ConfigHomeEnvVars = new[] { "CLAUDE_CONFIG_DIR" }, Mcp = Wiring(socketPath) }, spool);
+
+        var args = info.ArgumentList.ToList();
+        var binds = args.Select((a, i) => (a, i)).Where(t => t.a == "--bind").Select(t => args[t.i + 1]).ToList();
+
+        var boundSocketDir = Path.GetDirectoryName(socketPath)!;
+
+        // (a) the socket's dir IS bound writable (so the proxy connects), but it is NOT the spool dir.
+        binds.ShouldContain(boundSocketDir, customMessage: "the dedicated MCP socket dir must be bound writable so the proxy can reach it");
+        binds.ShouldNotContain(spool, customMessage: "the spool dir itself must NOT be a writable bind — that would expose out.log/err.log/exit/pid to the agent");
+
+        // (b) none of the spool artifacts live under the bound dir.
+        foreach (var artifact in new[] { "out.log", "err.log", "exit", "pid" })
+            File.Exists(Path.Combine(boundSocketDir, artifact)).ShouldBeFalse($"the bound socket dir must not contain the spool artifact {artifact}");
+    }
+
     [Fact]
     public async Task A_launched_process_sees_its_config_home_env_var_pointing_at_an_isolated_spool_dir()
     {
@@ -424,6 +543,12 @@ public sealed class LocalProcessDurableRunnerTests : IDisposable
         // The executor's listener and the runner/proxy connect path agree on these literals — a rename silently breaks the link.
         LocalProcessRunner.McpSocketFile.ShouldBe("mcp.sock");
 
+        // The dedicated socket-only subdir (FIX 1): a rename re-exposes the spool artifacts to the bwrap bind.
+        LocalProcessRunner.McpSocketDir.ShouldBe("mcp");
+
+        // The proxy-path override (Rule 8): a rename breaks an operator who pinned a custom codespace-mcp path.
+        LocalProcessRunner.McpProxyPathEnvVar.ShouldBe("CODESPACE_MCP_PROXY_PATH");
+
         // The usable AF_UNIX path maximum: 103 on macOS/BSD, 107 on Linux. The LOWER cap so the short-path fallback
         // fires on every host that would overflow either — a CRITICAL guard against Bind overflowing on this darwin
         // host (empirically .NET binds at length 103 and throws at 104 here).
@@ -441,7 +566,8 @@ public sealed class LocalProcessDurableRunnerTests : IDisposable
             var key = Guid.NewGuid().ToString("N");
             var path = LocalProcessRunner.McpSocketPathFor(key);
 
-            path.ShouldBe(Path.Combine("/tmp/cs", key, "mcp.sock"));
+            // FIX 1: the socket lives in the DEDICATED <spool>/mcp/ subdir, not directly in the spool dir.
+            path.ShouldBe(Path.Combine("/tmp/cs", key, "mcp", "mcp.sock"));
             path.Length.ShouldBeLessThanOrEqualTo(LocalProcessRunner.UnixSocketPathCap);
         }
         finally { Environment.SetEnvironmentVariable(LocalProcessRunner.SpoolRootEnvVar, original); }

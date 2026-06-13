@@ -52,6 +52,16 @@ public sealed record SandboxSpec
     /// disk quota + memory-RSS cap need cgroup delegation — a later slice.)
     /// </summary>
     public int MaxFileSizeMb { get; init; } = 2048;
+
+    /// <summary>
+    /// MCP tool-fabric wiring for this run: the declaration the runner writes into the per-run config-home (0600 — it
+    /// carries the run token) plus the socket it binds into the sandbox so the harness's <c>codespace-mcp</c> proxy can
+    /// reach this run's endpoint. The executor sets it AFTER opening the run's endpoint (it owns the minted token +
+    /// resolved socket path); a pure <c>IAgentHarness.BuildInvocation</c> can't, since the values are run-scoped.
+    /// <c>null</c> (default) → no tool fabric, byte-identical to a run without it. Honoured only by a runner that writes
+    /// a per-run config-home (the durable local runner); a bare-process runner ignores it.
+    /// </summary>
+    public McpServerWiring? Mcp { get; init; }
 }
 
 /// <summary>

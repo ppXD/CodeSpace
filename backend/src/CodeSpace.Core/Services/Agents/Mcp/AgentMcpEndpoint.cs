@@ -60,7 +60,12 @@ public sealed class AgentMcpEndpoint : IAsyncDisposable
         {
             Directory.CreateDirectory(Path.GetDirectoryName(socketPath)!);
 
-            Quietly(() => File.Delete(socketPath));   // clear a stale socket file from a crashed prior incarnation
+            // Clear a stale socket file from a crashed prior incarnation. CONCURRENCY NOTE: a second reattach racing the
+            // first could unlink a LIVE socket the first just bound — bounded today by the reconciler's single-flight
+            // CAS (epoch guard), which lets only the current-epoch reattach reach here; the loser's later Bind fails and
+            // the opener's fail-soft swallows it. A self-contained epoch guard inside the endpoint is deferred to a
+            // later slice (matching the design).
+            Quietly(() => File.Delete(socketPath));
 
             _listener.Bind(new UnixDomainSocketEndPoint(socketPath));
 

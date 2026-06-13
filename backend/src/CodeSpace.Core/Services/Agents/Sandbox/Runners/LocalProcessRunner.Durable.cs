@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Text;
+using CodeSpace.Core.Services.Agents.Mcp;
 using CodeSpace.Core.Services.Agents.Sandbox.Isolation;
 using CodeSpace.Messages.Agents;
 
@@ -31,14 +32,28 @@ public sealed partial class LocalProcessRunner
     private const string ExitMarkerFile = "exit";
     private const string PidFile = "pid";
 
-    /// <summary>The per-run MCP listener socket file (under the spool dir). Single source of truth so the executor's listener and the harness/proxy's connect path agree by construction on the same path.</summary>
+    /// <summary>The per-run MCP listener socket file. Single source of truth so the executor's listener and the harness/proxy's connect path agree by construction on the same path.</summary>
     internal const string McpSocketFile = "mcp.sock";
+
+    /// <summary>A DEDICATED socket-only subdir under the spool dir (<c>&lt;spool&gt;/mcp/</c>) that holds ONLY the socket. The bwrap bind binds THIS dir, never the spool dir itself — so the agent never sees the spool's <c>out.log</c> / <c>err.log</c> / <c>exit</c> / <c>pid</c> artifacts (it could otherwise read its own transcript or forge the <c>exit</c> marker — design §3b / Attack 4).</summary>
+    internal const string McpSocketDir = "mcp";
 
     /// <summary>The usable <c>AF_UNIX</c> path maximum — 103 on macOS/BSD, 107 on Linux; use the LOWER so the short-path fallback fires on every host that would overflow either. Pinned by a test: a spool path longer than this would overflow <c>Bind</c> (empirically, .NET's <c>UnixDomainSocketEndPoint</c> binds at length 103 and throws at 104 on macOS), so <see cref="McpSocketPathFor"/> falls back to a short temp path.</summary>
     internal const int UnixSocketPathCap = 103;
 
     /// <summary>Per-run isolated config home (under the spool dir) that <see cref="SandboxSpec.ConfigHomeEnvVars"/> point at — keeps a shelled-out CLI off the operator's personal dotfiles. Reaped with the spool dir.</summary>
     private const string AgentConfigHomeDir = "agent-home";
+
+    /// <summary>
+    /// Operator override for the <c>codespace-mcp</c> proxy binary's ABSOLUTE path (e.g. an air-gapped mirror, a
+    /// self-contained publish elsewhere). Default: <c>codespace-mcp</c> next to the running assembly
+    /// (<see cref="AppContext.BaseDirectory"/>). Pinned by a test (Rule 8) — renaming it silently breaks an operator who
+    /// pinned a custom proxy path.
+    /// </summary>
+    public const string McpProxyPathEnvVar = "CODESPACE_MCP_PROXY_PATH";
+
+    /// <summary>The published <c>codespace-mcp</c> binary file name (its <c>AssemblyName</c>) used to build the default path under <see cref="AppContext.BaseDirectory"/>.</summary>
+    private const string McpProxyFile = "codespace-mcp";
 
     /// <summary>Tail cadence — how often the observer re-reads the spool for new lines / checks the exit marker.</summary>
     private static readonly TimeSpan PollInterval = TimeSpan.FromMilliseconds(250);
@@ -260,6 +275,11 @@ public sealed partial class LocalProcessRunner
         var configHome = spec.ConfigHomeEnvVars.Count > 0 ? Path.Combine(spoolDir, AgentConfigHomeDir) : null;
         if (configHome is not null) Directory.CreateDirectory(configHome);
 
+        // Write the run-scoped MCP server declaration (0600 — it carries the run token) into the config-home BEFORE
+        // launch so the harness reads it on start. No-op when the run has no tool fabric (spec.Mcp null) or no
+        // config-home (the declaration has nowhere harness-isolated to live).
+        WriteMcpDeclaration(spec.Mcp, configHome);
+
         // The actual command "$@": CONFINED under bwrap when this host supports it (fresh namespaces + read-only
         // minimal root + only the workspace/config-home writable), else the bare command (unconfined fallback).
         AppendChildCommand(info.ArgumentList, spec, configHome);
@@ -301,6 +321,21 @@ public sealed partial class LocalProcessRunner
             if (!string.IsNullOrEmpty(spec.WorkingDirectory)) writable.Add(spec.WorkingDirectory);
             if (configHome is not null) writable.Add(configHome);
 
+            var readOnlyExtra = new List<string>();
+
+            // Bind the run's MCP socket writable so the spawned codespace-mcp proxy can connect to it. A SOCKET, not a
+            // dir, so bind its PARENT dir — which is the DEDICATED <spool>/mcp/ subdir holding ONLY the socket (never
+            // the spool's out.log/err.log/exit/pid — design §3b / Attack 4). The bind target must exist when bwrap
+            // mounts; --unshare-net severs TCP but a bound UDS survives — the whole reason the transport is a socket.
+            // Also bind the proxy binary's dir READ-ONLY so the harness can spawn it at its absolute identity-bound
+            // path. No-op when the run has no tool fabric.
+            if (spec.Mcp is { SocketPath: { Length: > 0 } socketPath } && Path.GetDirectoryName(socketPath) is { Length: > 0 } socketDir)
+            {
+                writable.Add(socketDir);
+
+                if (Path.GetDirectoryName(McpProxyBinaryPath()) is { Length: > 0 } proxyDir) readOnlyExtra.Add(proxyDir);
+            }
+
             args = BubblewrapSandbox.BuildArgs(new BwrapPlan
             {
                 Command = command,
@@ -308,6 +343,7 @@ public sealed partial class LocalProcessRunner
                 WorkingDirectory = spec.WorkingDirectory,
                 HomeDir = configHome,
                 WritablePaths = writable,
+                ReadOnlyExtraPaths = readOnlyExtra,
                 ShareNetwork = spec.AllowNetwork,
             });
             command = bwrap;
@@ -322,22 +358,33 @@ public sealed partial class LocalProcessRunner
         foreach (var arg in args) argv.Add(arg);
     }
 
+    /// <summary>
+    /// The ABSOLUTE host path of the <c>codespace-mcp</c> proxy binary: the <see cref="McpProxyPathEnvVar"/> override
+    /// when set (an air-gapped mirror), else <c>codespace-mcp</c> next to the running assembly. Identity-bound into the
+    /// sandbox, so this is also the in-sandbox command the harness declares — single source of truth for both the
+    /// executor's <c>McpDeclarationContext.ProxyCommand</c> and the runner's read-only bind of its dir.
+    /// </summary>
+    public static string McpProxyBinaryPath() =>
+        Environment.GetEnvironmentVariable(McpProxyPathEnvVar) is { Length: > 0 } p ? p : Path.Combine(AppContext.BaseDirectory, McpProxyFile);
+
     internal static string SpoolRoot() =>
         Environment.GetEnvironmentVariable(SpoolRootEnvVar) is { Length: > 0 } v ? v : Path.Combine(Path.GetTempPath(), "codespace", "agent-runs");
 
     internal static string SpoolDirectoryFor(string spoolKey) => Path.Combine(SpoolRoot(), spoolKey);
 
     /// <summary>
-    /// The per-run MCP listener socket path — normally <c>&lt;spoolDir&gt;/mcp.sock</c> so it's reaped with the spool
-    /// and the runner (a later slice) binds the SAME path. BUT an <c>AF_UNIX</c> address can't exceed <see
-    /// cref="UnixSocketPathCap"/> bytes, and the spool root (a temp dir + a 32-hex run key) can overflow that on macOS
-    /// — so when the canonical path is too long this falls back to a SHORT, still-unique temp path keyed by the run's
-    /// FULL 32-hex run key (matching the canonical path's uniqueness). Single source of truth: both the executor's
-    /// listener and the harness/proxy's connect path call this, so they agree by construction.
+    /// The per-run MCP listener socket path — normally <c>&lt;spoolDir&gt;/mcp/mcp.sock</c> (a DEDICATED socket-only
+    /// subdir, so the bwrap bind of its parent dir never exposes the spool's <c>out.log</c> / <c>exit</c> / etc. to the
+    /// agent — design §3b / Attack 4) so it's reaped with the spool and the runner binds the SAME path. BUT an
+    /// <c>AF_UNIX</c> address can't exceed <see cref="UnixSocketPathCap"/> bytes, and the spool root (a temp dir + a
+    /// 32-hex run key + <c>/mcp/mcp.sock</c>) can overflow that on macOS — so when the canonical path is too long this
+    /// falls back to a SHORT, still-unique temp path keyed by the run's FULL 32-hex run key whose parent (<c>cs-mcp/&lt;key&gt;</c>)
+    /// also holds only the socket. Single source of truth: both the executor's listener and the harness/proxy's connect
+    /// path call this, so they agree by construction.
     /// </summary>
     internal static string McpSocketPathFor(string spoolKey)
     {
-        var canonical = Path.Combine(SpoolDirectoryFor(spoolKey), McpSocketFile);
+        var canonical = Path.Combine(SpoolDirectoryFor(spoolKey), McpSocketDir, McpSocketFile);
 
         if (canonical.Length <= UnixSocketPathCap) return canonical;
 
@@ -345,6 +392,29 @@ public sealed partial class LocalProcessRunner
         // must live elsewhere. Keyed by the FULL run key (~temp+42 ≈ 90 chars < cap on macOS), unlinked on dispose; if
         // even this overflows a pathological temp dir, the executor's fail-soft logs a Warning rather than crashes.
         return Path.Combine(Path.GetTempPath(), "cs-mcp", spoolKey, "s");
+    }
+
+    /// <summary>
+    /// Write the harness-rendered MCP server declaration 0600 into the config-home (it carries the run token, so it must
+    /// never be group/other-readable). The harness owns the FORMAT — it already rendered <see cref="McpServerWiring.Content"/>
+    /// — so the runner stays dumb: it writes the bytes verbatim, no render. No-op when the run has no tool fabric
+    /// (<paramref name="wiring"/> null) or no config-home (nowhere harness-isolated to put it — a run without config
+    /// isolation can't host the proxy declaration without leaking it into a shared dir). The relative path is joined onto
+    /// the config-home; on POSIX the file is then chmod'd 0600 (a no-op on Windows where unix modes don't apply — the
+    /// per-run dir + token are the gate).
+    /// </summary>
+    internal static void WriteMcpDeclaration(McpServerWiring? wiring, string? configHome)
+    {
+        if (wiring is null || configHome is null) return;
+
+        var path = Path.Combine(configHome, wiring.RelativeFileName);
+
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+
+        File.WriteAllText(path, wiring.Content);
+
+        if (!OperatingSystem.IsWindows())
+            File.SetUnixFileMode(path, UnixFileMode.UserRead | UnixFileMode.UserWrite);
     }
 
     /// <summary>

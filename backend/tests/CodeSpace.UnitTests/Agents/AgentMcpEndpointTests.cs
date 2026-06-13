@@ -1,5 +1,6 @@
 using System.Net.Sockets;
 using System.Text;
+using System.Text.Json;
 using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Agents.Mcp;
 using CodeSpace.Core.Services.Agents.Tools;
@@ -22,8 +23,23 @@ public class AgentMcpEndpointTests
     [Fact]
     public void Enabling_env_var_literal_is_pinned()
     {
-        // Renaming this silently turns the feature off for an operator who enabled it via env (Rule 8).
+        // Renaming this silently turns the feature off for an operator who enabled it via env (Rule 8). The wiring is
+        // FOLDED into this one flag: a non-null endpoint (this flag on + the bind succeeded) is the only gate for
+        // writing the declaration — there is no second wiring flag.
         AgentRunExecutor.McpEndpointEnabledEnvVar.ShouldBe("CODESPACE_AGENT_MCP_ENDPOINT_ENABLED");
+    }
+
+    [Fact]
+    public void McpRunToken_survives_the_SandboxHandle_json_round_trip()
+    {
+        // The token rides the persisted handle so a re-attach after a worker tear-down re-opens the endpoint with the
+        // SAME token the agent's declaration file holds. A silent null here would lock the still-running agent out — so
+        // pin that it survives serialize→deserialize through the exact options the executor persists with.
+        var handle = new SandboxHandle { Kind = "local", ProcessId = 1, SpoolDirectory = "/tmp/s", Deadline = DateTimeOffset.UtcNow, McpRunToken = "tok" };
+
+        var roundTripped = JsonSerializer.Deserialize<SandboxHandle>(JsonSerializer.Serialize(handle, AgentJson.Options), AgentJson.Options);
+
+        roundTripped!.McpRunToken.ShouldBe("tok", customMessage: "the MCP run token must survive the handle's JSON round-trip — a null would lock the agent out on re-attach");
     }
 
     [Fact]
