@@ -1,5 +1,6 @@
 using CodeSpace.Core.DependencyInjection;
 using CodeSpace.Core.Services.Workflows.Nodes;
+using CodeSpace.Core.Services.Workflows.Runtime;
 using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Dtos.Workflows;
 using CodeSpace.Messages.Enums;
@@ -319,7 +320,11 @@ public sealed class DefinitionValidator : IScopedDependency
         }
 
         var refNodeId = segments[1];
-        var outputKey = segments[3];
+
+        // The output-key segment may carry array indices (files[2]) — validate the declared key, not
+        // the accessor. A trailing '.length' lands in a later segment, so segments[3] is already clean
+        // for it (e.g. nodes.x.outputs.subtasks.length → segments[3]=='subtasks').
+        var outputKey = StripIndices(segments[3]);
 
         if (!nodeById.TryGetValue(refNodeId, out var refNode))
         {
@@ -434,8 +439,16 @@ public sealed class DefinitionValidator : IScopedDependency
         return path.Length > 0;
     }
 
-    private static readonly System.Text.RegularExpressions.Regex TemplatePattern =
-        new(@"\{\{\s*([a-zA-Z_][a-zA-Z0-9_.]*)\s*\}\}", System.Text.RegularExpressions.RegexOptions.Compiled);
+    // Single source of truth — reuse the resolver's inline-template grammar so save-time validation and
+    // run-time resolution can never recognize a different set of {{refs}} (including array index / .length).
+    private static readonly System.Text.RegularExpressions.Regex TemplatePattern = VariableResolver.TemplatePattern;
+
+    /// <summary>Drops a segment's array-index suffix (<c>files[2]</c> → <c>files</c>) so the declared-output check sees the key, not the accessor.</summary>
+    private static string StripIndices(string segment)
+    {
+        var bracket = segment.IndexOf('[');
+        return bracket < 0 ? segment : segment[..bracket];
+    }
 
     private static IReadOnlyDictionary<string, ISet<string>> BuildUpstreamReachability(WorkflowDefinition definition)
     {

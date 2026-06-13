@@ -54,6 +54,13 @@ public class ConditionEvaluatorTests
     [InlineData("{{trigger.tags}} is_empty", false)]
     [InlineData("{{trigger.tags}} is_not_empty", true)]
     [InlineData("{{trigger.empty_arr}} is_not_empty", false)]
+    // Array index + .length inherit through WalkPath with NO ConditionEvaluator change (the binary-op
+    // tokenizer splits on the space-padded operator, so a bracket/length token survives intact).
+    [InlineData("{{trigger.tags[0]}} == \"feature\"", true)]
+    [InlineData("{{trigger.tags[1]}} == \"bug\"", true)]
+    [InlineData("{{trigger.tags.length}} == 2", true)]
+    [InlineData("{{trigger.tags.length}} > 1", true)]
+    [InlineData("{{trigger.empty_arr.length}} == 0", true)]
     // Bare truthiness
     [InlineData("{{trigger.open}}", true)]
     [InlineData("{{trigger.empty_str}}", false)]

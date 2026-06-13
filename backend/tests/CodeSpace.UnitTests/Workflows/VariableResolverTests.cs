@@ -237,4 +237,174 @@ public class VariableResolverTests
         VariableResolver.WalkPath("loop.anything", scope).ShouldBeNull();
         VariableResolver.Resolve(ParseElement("\"x={{loop.anything}}\""), scope).GetString().ShouldBe("x=");
     }
+
+    // ─── array indexing + .length ───────────────────────────────────────────────
+
+    private static NodeRunScope ScopeWithFetchOutputs(string outputsJson)
+    {
+        var scope = new NodeRunScope { Trigger = ParseDict("{}") };
+        scope.Nodes["fetch"] = ParseDict(outputsJson);
+        return scope;
+    }
+
+    [Fact]
+    public void Array_index_sole_placeholder_returns_the_native_element()
+    {
+        var scope = ScopeWithFetchOutputs("""{ "files": [ { "n": "a" }, { "n": "b" } ] }""");
+
+        var resolved = VariableResolver.Resolve(ParseElement("\"{{nodes.fetch.outputs.files[0]}}\""), scope);
+
+        resolved.ValueKind.ShouldBe(JsonValueKind.Object, "a sole index placeholder preserves the element's type");
+        resolved.GetProperty("n").GetString().ShouldBe("a");
+    }
+
+    [Fact]
+    public void Array_index_then_property_descends_into_the_element()
+    {
+        var scope = ScopeWithFetchOutputs("""{ "files": [ { "n": "a" }, { "n": "b" } ] }""");
+
+        VariableResolver.Resolve(ParseElement("\"{{nodes.fetch.outputs.files[1].n}}\""), scope).GetString().ShouldBe("b");
+    }
+
+    [Fact]
+    public void Chained_indices_walk_a_matrix()
+    {
+        var scope = ScopeWithFetchOutputs("""{ "matrix": [ [1, 2], [3, 4] ] }""");
+
+        VariableResolver.WalkPath("nodes.fetch.outputs.matrix[1][0]", scope)!.Value.GetInt32().ShouldBe(3);
+    }
+
+    [Fact]
+    public void Array_length_sole_placeholder_is_the_count_as_a_number()
+    {
+        // HEADLINE for flow.map: {{...subtasks.length}} drives the fan-out count.
+        var scope = ScopeWithFetchOutputs("""{ "subtasks": [ {}, {}, {} ] }""");
+
+        var resolved = VariableResolver.Resolve(ParseElement("\"{{nodes.fetch.outputs.subtasks.length}}\""), scope);
+
+        resolved.ValueKind.ShouldBe(JsonValueKind.Number);
+        resolved.GetInt32().ShouldBe(3);
+    }
+
+    [Fact]
+    public void Array_length_in_interpolation_stringifies_the_count()
+    {
+        var scope = ScopeWithFetchOutputs("""{ "subtasks": [ {}, {} ] }""");
+
+        VariableResolver.Resolve(ParseElement("\"count={{nodes.fetch.outputs.subtasks.length}}\""), scope)
+            .GetString().ShouldBe("count=2");
+    }
+
+    [Fact]
+    public void Empty_array_length_is_zero_not_null()
+    {
+        var scope = ScopeWithFetchOutputs("""{ "items": [] }""");
+
+        var resolved = VariableResolver.WalkPath("nodes.fetch.outputs.items.length", scope);
+
+        resolved.HasValue.ShouldBeTrue("an empty array still has a length of 0 — not a miss");
+        resolved!.Value.GetInt32().ShouldBe(0);
+    }
+
+    [Fact]
+    public void A_real_object_property_named_length_wins_over_the_pseudo()
+    {
+        // The decisive non-breaking rule: a real 'length' KEY on an object always resolves to its value;
+        // the count pseudo only fires on arrays (which can't carry a real member).
+        var scope = ScopeWithFetchOutputs("""{ "dims": { "length": 5, "width": 3 } }""");
+
+        VariableResolver.WalkPath("nodes.fetch.outputs.dims.length", scope)!.Value.GetInt32().ShouldBe(5);
+        VariableResolver.WalkPath("nodes.fetch.outputs.dims.width", scope)!.Value.GetInt32().ShouldBe(3);
+    }
+
+    [Theory]
+    [InlineData("nodes.fetch.outputs.files[5]", "out-of-bounds index")]
+    [InlineData("nodes.fetch.outputs.files[0].missing", "missing property after a valid index")]
+    [InlineData("nodes.fetch.outputs.scalar[0]", "index on a non-array")]
+    [InlineData("nodes.fetch.outputs.scalar.length", "length on a non-array/string")]
+    [InlineData("nodes.fetch.outputs.files.length.foo", "length is not the terminal segment")]
+    [InlineData("nodes.fetch.outputs.files.length[0]", "length segment carries an index")]
+    public void Index_and_length_misses_resolve_to_null(string path, string why)
+    {
+        var scope = ScopeWithFetchOutputs("""{ "files": [ { "n": "a" } ], "scalar": 42 }""");
+
+        VariableResolver.WalkPath(path, scope).ShouldBeNull(why);
+    }
+
+    [Fact]
+    public void Negative_index_via_ref_resolves_to_null()
+    {
+        // The inline regex only admits [digits]; a negative index is only reachable via a raw $ref string,
+        // and there is no Python-style wraparound — it's a clean miss.
+        var scope = ScopeWithFetchOutputs("""{ "files": [ { "n": "a" } ] }""");
+
+        var resolved = VariableResolver.Resolve(ParseElement("""{ "$ref": "nodes.fetch.outputs.files[-1]" }"""), scope);
+
+        resolved.ValueKind.ShouldBe(JsonValueKind.Null);
+    }
+
+    [Fact]
+    public void Ref_form_supports_array_index_and_length_with_no_regex_involvement()
+    {
+        var scope = ScopeWithFetchOutputs("""{ "files": [ { "n": "a" }, { "n": "b" } ] }""");
+
+        VariableResolver.Resolve(ParseElement("""{ "$ref": "nodes.fetch.outputs.files[1]" }"""), scope)
+            .GetProperty("n").GetString().ShouldBe("b");
+
+        VariableResolver.Resolve(ParseElement("""{ "$ref": "nodes.fetch.outputs.files.length" }"""), scope)
+            .GetInt32().ShouldBe(2);
+    }
+
+    [Fact]
+    public void Bare_iteration_head_supports_index_and_nested_index()
+    {
+        var indexHead = new NodeRunScope { Trigger = ParseDict("{}"), Iteration = ParseDict("""{ "items": [10, 20, 30] }""") };
+        VariableResolver.Resolve(ParseElement("\"{{items[1]}}\""), indexHead).GetInt32().ShouldBe(20);
+
+        var nestedHead = new NodeRunScope { Trigger = ParseDict("{}"), Iteration = ParseDict("""{ "item": { "tags": ["x", "y"] } }""") };
+        VariableResolver.Resolve(ParseElement("\"{{item.tags[0]}}\""), nestedHead).GetString().ShouldBe("x");
+    }
+
+    [Theory]
+    [InlineData("\"{{a[0}}\"", "unbalanced opening bracket")]
+    [InlineData("\"{{a]0}}\"", "stray closing bracket")]
+    public void Malformed_bracket_templates_stay_literal_text(string sourceJson, string why)
+    {
+        // The tightened regex requires balanced [digits]; a malformed token never matches, so it is left
+        // verbatim rather than silently captured as a (failing) reference.
+        var scope = ScopeWithFetchOutputs("""{ "a": [1, 2] }""");
+
+        var resolved = VariableResolver.Resolve(ParseElement(sourceJson), scope);
+
+        resolved.GetString().ShouldBe(JsonDocument.Parse(sourceJson).RootElement.GetString(), why);
+    }
+
+    // ─── secret-leak normalization (ExtractReferencedPaths) ──────────────────────
+
+    [Fact]
+    public void Extract_normalizes_indexed_and_length_refs_to_their_taintable_base()
+    {
+        // The secret guard compares extracted paths against SecretPaths by exact equality. An index or
+        // .length on a secret must normalize back to the base path or element-0 / the count leaks.
+        VariableResolver.ExtractReferencedPaths(ParseElement("""{ "x": "{{team.SECRET[0]}}" }"""))
+            .ShouldContain("team.SECRET", customMessage: "an indexed secret ref must still match the secret base");
+
+        VariableResolver.ExtractReferencedPaths(ParseElement("""{ "y": "{{team.SECRET.length}}" }"""))
+            .ShouldContain("team.SECRET", customMessage: "a .length of a secret must still match the secret base");
+
+        VariableResolver.ExtractReferencedPaths(ParseElement("""{ "z": { "$ref": "team.SECRET[0]" } }"""))
+            .ShouldContain("team.SECRET", customMessage: "the $ref emit point must normalize too");
+    }
+
+    [Fact]
+    public void Extract_preserves_a_mid_path_length_object_key_and_plain_paths()
+    {
+        // Only a TRAILING 'length' pseudo is stripped — a real object key named 'length' mid-path stays.
+        VariableResolver.ExtractReferencedPaths(ParseElement("""{ "z": "{{nodes.x.outputs.length.value}}" }"""))
+            .ShouldContain("nodes.x.outputs.length.value");
+
+        // Plain dotted paths (the overwhelming majority) are returned byte-identical — strip is a no-op.
+        VariableResolver.ExtractReferencedPaths(ParseElement("""{ "a": "{{team.API_KEY}}" }"""))
+            .ShouldContain("team.API_KEY");
+    }
 }
