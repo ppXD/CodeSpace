@@ -41,7 +41,8 @@ public sealed class LlmCompleteNode : INodeRuntime
                 "provider": { "type": "string", "enum": ["Anthropic"], "default": "Anthropic" },
                 "model": { "type": "string" },
                 "maxTokens": { "type": "integer", "minimum": 1, "maximum": 8192, "default": 2048 },
-                "temperature": { "type": "number", "minimum": 0, "maximum": 1, "default": 0.2 }
+                "temperature": { "type": "number", "minimum": 0, "maximum": 1, "default": 0.2 },
+                "responseSchema": { "type": "object", "description": "Optional JSON Schema. When set, the model is constrained to return JSON matching it, surfaced on the 'json' output (downstream can index into it, e.g. {{nodes.this.outputs.json.items[0]}}). Requires a provider that supports structured output." }
               },
               "required": ["provider"]
             }
@@ -61,6 +62,7 @@ public sealed class LlmCompleteNode : INodeRuntime
               "type": "object",
               "properties": {
                 "text": { "type": "string" },
+                "json": { "type": ["object","null"] },
                 "model": { "type": "string" },
                 "inputTokens": { "type": ["integer","null"] },
                 "outputTokens": { "type": ["integer","null"] }
@@ -82,6 +84,12 @@ public sealed class LlmCompleteNode : INodeRuntime
         if (string.IsNullOrWhiteSpace(userPrompt)) return NodeResult.Fail("Input 'userPrompt' is required.");
 
         var client = _clientRegistry.Resolve(provider);
+
+        // Structured mode: a responseSchema constrains the model to schema-valid JSON, surfaced on the
+        // 'json' output. Routes through the IStructuredLLMClient sibling capability — clean fail if the
+        // resolved provider doesn't offer it.
+        if (TryReadObject(context.Config, "responseSchema", out var responseSchema))
+            return await RunStructuredAsync(context, client, provider, model, systemPrompt, userPrompt, maxTokens, temperature, responseSchema, cancellationToken).ConfigureAwait(false);
 
         // Wrap the LLM call with ledger emission. The completed record's response_payload
         // carries the token counts (cheap to inline). The full text lives in workflow_artifact,
@@ -116,12 +124,69 @@ public sealed class LlmCompleteNode : INodeRuntime
         var outputs = new Dictionary<string, JsonElement>
         {
             ["text"] = JsonSerializer.SerializeToElement(completion.Text),
+            ["json"] = JsonSerializer.SerializeToElement((object?)null),
             ["model"] = JsonSerializer.SerializeToElement(completion.Model),
             ["inputTokens"] = JsonSerializer.SerializeToElement(completion.InputTokens),
             ["outputTokens"] = JsonSerializer.SerializeToElement(completion.OutputTokens)
         };
 
         return NodeResult.Ok(outputs);
+    }
+
+    private async Task<NodeResult> RunStructuredAsync(NodeRunContext context, ILLMClient client, string provider, string model, string systemPrompt, string userPrompt, int maxTokens, double temperature, JsonElement responseSchema, CancellationToken cancellationToken)
+    {
+        if (client is not IStructuredLLMClient structured)
+            return NodeResult.Fail($"Provider '{provider}' doesn't support structured output (responseSchema). Remove the schema to use plain text, or pick a provider that does.");
+
+        var completion = await context.Observability.TraceExternalCallAsync(
+            target: $"{provider.ToLowerInvariant()}:{model}",
+            method: "complete_structured",
+            requestPayload: BuildRequestPayloadAudit(model, systemPrompt, userPrompt, maxTokens, temperature),
+            action: ct => structured.CompleteStructuredAsync(new StructuredLLMCompletionRequest
+            {
+                Model = model,
+                SystemPrompt = systemPrompt,
+                UserPrompt = userPrompt,
+                JsonSchema = responseSchema,
+                MaxOutputTokens = maxTokens,
+                Temperature = temperature
+            }, ct),
+            completionExtractor: result => new ExternalCallCompletion
+            {
+                ResponsePayload = JsonSerializer.SerializeToElement(new
+                {
+                    model = result.Model,
+                    input_tokens = result.InputTokens,
+                    output_tokens = result.OutputTokens,
+                })
+            },
+            cancellationToken: cancellationToken).ConfigureAwait(false);
+
+        context.Logger.LogInformation("LLM structured completion {Model} in={InTok} out={OutTok}", completion.Model, completion.InputTokens, completion.OutputTokens);
+
+        // Emit the parsed object on 'json' (downstream can index into it); keep 'text' populated with the
+        // serialized form so a node wired to either output still works.
+        var outputs = new Dictionary<string, JsonElement>
+        {
+            ["text"] = JsonSerializer.SerializeToElement(completion.Json.GetRawText()),
+            ["json"] = completion.Json,
+            ["model"] = JsonSerializer.SerializeToElement(completion.Model),
+            ["inputTokens"] = JsonSerializer.SerializeToElement(completion.InputTokens),
+            ["outputTokens"] = JsonSerializer.SerializeToElement(completion.OutputTokens)
+        };
+
+        return NodeResult.Ok(outputs);
+    }
+
+    /// <summary>Reads a non-empty JSON object from the bag (an empty <c>{}</c> counts as absent → text path).</summary>
+    private static bool TryReadObject(IReadOnlyDictionary<string, JsonElement> bag, string key, out JsonElement value)
+    {
+        value = default;
+        if (!bag.TryGetValue(key, out var v) || v.ValueKind != JsonValueKind.Object) return false;
+        if (!v.EnumerateObject().Any()) return false;
+
+        value = v;
+        return true;
     }
 
     /// <summary>
