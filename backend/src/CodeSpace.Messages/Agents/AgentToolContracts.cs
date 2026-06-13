@@ -11,6 +11,12 @@ public sealed record AgentToolCall
 {
     public required JsonElement Input { get; init; }
     public string? IdempotencyKey { get; init; }
+
+    /// <summary>
+    /// The run's owning team, stamped onto the tool's synthetic execution scope so repo-touching tools resolve
+    /// within it (null → no team → fail-closed, today's behavior).
+    /// </summary>
+    public Guid? TeamId { get; init; }
 }
 
 /// <summary>Result of the pure, I/O-free input-validation stage — the first gate before any permission check or side effect.</summary>
