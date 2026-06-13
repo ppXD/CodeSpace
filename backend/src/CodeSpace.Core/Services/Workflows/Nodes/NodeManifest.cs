@@ -84,6 +84,17 @@ public sealed record NodeManifest
     public bool IsManual { get; init; }
 
     /// <summary>
+    /// Opt-in marker that this node is safe to expose as a SYNCHRONOUS, standalone agent tool (via the Tool
+    /// Fabric). Eligible nodes run to completion in one call against a minimal context — so a node that SUSPENDS
+    /// for an async wait (agent.code, flow.wait_*), a Trigger, or a flow/container node must leave it false.
+    ///
+    /// <para>Default <c>false</c> (fail-closed: not a tool unless it says so). A side-effecting eligible node is
+    /// still exposed — it just surfaces as a destructive, approval-gated tool. The registry projects only
+    /// eligible nodes onto <c>IAgentTool</c>.</para>
+    /// </summary>
+    public bool IsAgentToolEligible { get; init; }
+
+    /// <summary>
     /// Opt-in marker for a node that performs a write AS a CodeSpace user's own provider identity
     /// (Model B) — e.g. <c>git.pr_review</c> submitting a review as the actor. Declaring it lets the
     /// engine GENERICALLY enforce the actor's linked identity: when such a node sits downstream of an

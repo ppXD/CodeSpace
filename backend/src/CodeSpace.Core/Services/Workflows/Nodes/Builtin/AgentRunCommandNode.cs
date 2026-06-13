@@ -46,6 +46,8 @@ public sealed class AgentRunCommandNode : INodeRuntime
         // A command can mutate state / push / call out — a permanent side effect. The engine refuses
         // auto-resume on abandoned runs so we never run it twice.
         IsSideEffecting = true,
+        // Synchronous + standalone → exposable as an agent tool (a destructive, approval-gated one).
+        IsAgentToolEligible = true,
         ConfigSchema = SchemaBuilder.EmptyObject(),
         InputSchema = SchemaBuilder.Parse("""
             {
