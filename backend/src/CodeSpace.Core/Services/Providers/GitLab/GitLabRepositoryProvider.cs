@@ -337,6 +337,27 @@ public sealed class GitLabRepositoryProvider : IRepositoryCatalogCapability, IPu
         }, cancellationToken).ConfigureAwait(false);
     }
 
+    public async Task<RemoteIssue> CloseIssueAsync(ProviderContext context, RemoteRepository repository, int number, CancellationToken cancellationToken)
+    {
+        var client = await BuildClientAsync(context, cancellationToken).ConfigureAwait(false);
+
+        return await _resilience.ExecuteAsync(context.Instance, nameof(CloseIssueAsync), _ =>
+        {
+            var projectId = int.Parse(repository.ExternalId);
+
+            // GitLab closes via the state_event wire field ("close"/"reopen") — NOT the read-side
+            // state enum. IssueId here is the iid (the `number`).
+            var closed = client.Issues.Edit(new IssueEdit
+            {
+                ProjectId = projectId,
+                IssueId = number,
+                State = "close",
+            });
+
+            return Task.FromResult(ToRemoteIssue(closed));
+        }, cancellationToken).ConfigureAwait(false);
+    }
+
     private static readonly IReadOnlyDictionary<string, string?> EmptyLabelColors = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
 
     /// <summary>

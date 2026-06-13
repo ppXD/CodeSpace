@@ -42,6 +42,7 @@ public class GitCreateIssueNodeTests
         }
 
         public Task<RemoteIssueComment> CommentAsync(Guid r, int n, string b, Guid? a, CancellationToken c) => throw new NotImplementedException();
+        public Task<RemoteIssue> CloseAsync(Guid r, int n, Guid? a, CancellationToken c) => throw new NotImplementedException();
     }
 
     [Fact]

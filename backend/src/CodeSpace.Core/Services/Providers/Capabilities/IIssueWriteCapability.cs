@@ -27,4 +27,12 @@ public interface IIssueWriteCapability : IProviderCapability
     /// issue doesn't exist / issues are disabled).
     /// </summary>
     Task<RemoteIssueComment> CommentIssueAsync(ProviderContext context, RemoteRepository repository, int number, string body, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Close issue <paramref name="number"/> and return its updated state. GitHub maps to an issue update
+    /// (state=closed); GitLab to a state-event edit (state_event=close). Throws on insufficient scope (422)
+    /// or a provider 4xx (e.g. the issue doesn't exist). Idempotent at the provider — closing an already-
+    /// closed issue is a no-op that still returns the closed issue.
+    /// </summary>
+    Task<RemoteIssue> CloseIssueAsync(ProviderContext context, RemoteRepository repository, int number, CancellationToken cancellationToken);
 }
