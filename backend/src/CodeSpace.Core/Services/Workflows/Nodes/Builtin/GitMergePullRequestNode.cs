@@ -1,6 +1,7 @@
 using System.Text.Json;
 using CodeSpace.Core.Services.Providers.Capabilities;
 using CodeSpace.Core.Services.PullRequests;
+using CodeSpace.Core.Services.Workflows.Runtime;
 using CodeSpace.Messages.Dtos.Providers;
 using CodeSpace.Messages.Enums;
 using CodeSpace.Messages.Exceptions;
@@ -73,6 +74,7 @@ public sealed class GitMergePullRequestNode : INodeRuntime
         if (!TryReadRepositoryId(context, out var repoId)) return NodeResult.Fail("Input 'repositoryId' missing or not a uuid.");
         if (!TryReadNumber(context, out var number)) return NodeResult.Fail("Input 'number' missing or not an integer.");
         if (!TryReadMethod(context, out var method)) return NodeResult.Fail("Input 'method' must be one of: merge, squash, rebase.");
+        if (!NodeScopeReader.TryReadTeamId(context, out var teamId)) return NodeResult.Fail("This run has no team context, so a repository can't be resolved.");
 
         var input = new MergePullRequestInput
         {
@@ -90,7 +92,7 @@ public sealed class GitMergePullRequestNode : INodeRuntime
                 target: $"git.merge_pr:{repoId}:{number}",
                 method: "merge_pull_request",
                 requestPayload: JsonSerializer.SerializeToElement(new { repository_id = repoId, pull_request_number = number, merge_method = method.ToString(), delete_source_branch = input.DeleteSourceBranch, act_as_user_id = actAsUserId }),
-                action: ct => _prService.MergePullRequestAsync(repoId, number, input, actAsUserId, ct),
+                action: ct => _prService.MergePullRequestAsync(repoId, teamId, number, input, actAsUserId, ct),
                 completionExtractor: r => new ExternalCallCompletion
                 {
                     ResponsePayload = JsonSerializer.SerializeToElement(new { merged = r.Merged, sha = r.Sha })

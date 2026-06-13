@@ -12,19 +12,19 @@ namespace CodeSpace.Core.Services.PullRequests;
 /// </summary>
 public interface IPullRequestService
 {
-    Task<IReadOnlyList<RemotePullRequest>> ListAsync(Guid repositoryId, PullRequestState? state, int page, int perPage, CancellationToken cancellationToken);
-    Task<RemotePullRequest> GetAsync(Guid repositoryId, int number, CancellationToken cancellationToken);
-    Task<IReadOnlyList<RemotePullRequestCommit>> ListCommitsAsync(Guid repositoryId, int number, CancellationToken cancellationToken);
-    Task<IReadOnlyList<RemotePullRequestFile>> ListFilesAsync(Guid repositoryId, int number, CancellationToken cancellationToken);
-    Task<RemotePullRequestCounts> GetCountsAsync(Guid repositoryId, CancellationToken cancellationToken);
-    Task<IReadOnlyList<RemotePullRequestCheck>> ListChecksAsync(Guid repositoryId, int number, CancellationToken cancellationToken);
+    Task<IReadOnlyList<RemotePullRequest>> ListAsync(Guid repositoryId, Guid teamId, PullRequestState? state, int page, int perPage, CancellationToken cancellationToken);
+    Task<RemotePullRequest> GetAsync(Guid repositoryId, Guid teamId, int number, CancellationToken cancellationToken);
+    Task<IReadOnlyList<RemotePullRequestCommit>> ListCommitsAsync(Guid repositoryId, Guid teamId, int number, CancellationToken cancellationToken);
+    Task<IReadOnlyList<RemotePullRequestFile>> ListFilesAsync(Guid repositoryId, Guid teamId, int number, CancellationToken cancellationToken);
+    Task<RemotePullRequestCounts> GetCountsAsync(Guid repositoryId, Guid teamId, CancellationToken cancellationToken);
+    Task<IReadOnlyList<RemotePullRequestCheck>> ListChecksAsync(Guid repositoryId, Guid teamId, int number, CancellationToken cancellationToken);
 
     /// <summary>
     /// Post a top-level conversation comment on a PR/MR. Drives workflow nodes (e.g. the AI
     /// code-review template posts the model's verdict as a comment). Throws when the bound
     /// credential lacks write scope (mapped to 422 with the missing-scope hint).
     /// </summary>
-    Task<RemotePullRequestComment> PostCommentAsync(Guid repositoryId, int number, string body, CancellationToken cancellationToken);
+    Task<RemotePullRequestComment> PostCommentAsync(Guid repositoryId, Guid teamId, int number, string body, CancellationToken cancellationToken);
 
     /// <summary>
     /// Submit a review VERDICT (approve / request-changes / comment) back to a PR/MR — the write-back
@@ -41,7 +41,7 @@ public interface IPullRequestService
     /// haven't linked one, <see cref="Messages.Exceptions.ActorIdentityRequiredException"/> is thrown
     /// (mapped to <c>actor_identity_required</c>). Null = use the connection credential (unchanged).</para>
     /// </summary>
-    Task<RemotePullRequestReview> SubmitReviewAsync(Guid repositoryId, int number, PullRequestReviewVerdict verdict, string? body, Guid? actorUserId, CancellationToken cancellationToken);
+    Task<RemotePullRequestReview> SubmitReviewAsync(Guid repositoryId, Guid teamId, int number, PullRequestReviewVerdict verdict, string? body, Guid? actorUserId, CancellationToken cancellationToken);
 
     /// <summary>
     /// OPEN a pull/merge request between two existing branches via the provider's
@@ -52,7 +52,7 @@ public interface IPullRequestService
     /// the provider (mapped from its 4xx). <paramref name="actorUserId"/> opts into per-user attribution
     /// (Model B) exactly like <see cref="SubmitReviewAsync"/>.
     /// </summary>
-    Task<RemotePullRequest> OpenPullRequestAsync(Guid repositoryId, OpenPullRequestInput input, Guid? actorUserId, CancellationToken cancellationToken);
+    Task<RemotePullRequest> OpenPullRequestAsync(Guid repositoryId, Guid teamId, OpenPullRequestInput input, Guid? actorUserId, CancellationToken cancellationToken);
 
     /// <summary>
     /// MERGE an open pull/merge request via the provider's <c>IPullRequestWriteCapability</c>. Same preflight
@@ -61,5 +61,5 @@ public interface IPullRequestService
     /// repo, on insufficient write scope (422), or when the request can't be merged (conflicts / not mergeable
     /// / already merged → mapped from the provider's 4xx).
     /// </summary>
-    Task<RemotePullRequestMergeResult> MergePullRequestAsync(Guid repositoryId, int number, MergePullRequestInput input, Guid? actorUserId, CancellationToken cancellationToken);
+    Task<RemotePullRequestMergeResult> MergePullRequestAsync(Guid repositoryId, Guid teamId, int number, MergePullRequestInput input, Guid? actorUserId, CancellationToken cancellationToken);
 }

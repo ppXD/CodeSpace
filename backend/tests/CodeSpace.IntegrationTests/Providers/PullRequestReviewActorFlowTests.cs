@@ -34,7 +34,7 @@ public class PullRequestReviewActorFlowTests
     {
         var seed = await SeedAsync(linkActor: true);
 
-        var review = await SubmitAsync(seed.RepositoryId, seed.UserId);
+        var review = await SubmitAsync(seed.RepositoryId, seed.TeamId, seed.UserId);
 
         review.ExternalId.ShouldBe(seed.ActorCredentialId.ToString(),
             customMessage: "with a linked actor the write-back must use the actor's OWN credential, not the repo connection credential");
@@ -45,7 +45,7 @@ public class PullRequestReviewActorFlowTests
     {
         var seed = await SeedAsync(linkActor: true);
 
-        var review = await SubmitAsync(seed.RepositoryId, actorUserId: null);
+        var review = await SubmitAsync(seed.RepositoryId, seed.TeamId, actorUserId: null);
 
         review.ExternalId.ShouldBe(seed.ConnectionCredentialId.ToString(),
             customMessage: "no actorUserId → unchanged behaviour: the repo's connection credential authenticates");
@@ -56,19 +56,31 @@ public class PullRequestReviewActorFlowTests
     {
         var seed = await SeedAsync(linkActor: false);
 
-        var ex = await Should.ThrowAsync<ActorIdentityRequiredException>(() => SubmitAsync(seed.RepositoryId, seed.UserId));
+        var ex = await Should.ThrowAsync<ActorIdentityRequiredException>(() => SubmitAsync(seed.RepositoryId, seed.TeamId, seed.UserId));
 
         ex.ProviderKind.ShouldBe(ProviderKind.Git);
         ex.ProviderInstanceId.ShouldBe(seed.ProviderInstanceId);
     }
 
+    [Fact]
+    public async Task A_repository_in_another_team_is_refused_fail_closed()
+    {
+        var seed = await SeedAsync(linkActor: true);
+        var otherTeam = Guid.NewGuid();
+
+        // The repo belongs to seed.TeamId; submitting AS otherTeam must NOT resolve it — the tenant filter
+        // finds nothing and the service refuses with the same non-leaking "not found" as a missing repo.
+        var ex = await Should.ThrowAsync<InvalidOperationException>(() => SubmitAsync(seed.RepositoryId, otherTeam, seed.UserId));
+        ex.Message.ShouldContain("not found", customMessage: "a cross-team repo is indistinguishable from a missing one (no existence leak)");
+    }
+
     // ── Helpers ────────────────────────────────────────────────────────────────
 
-    private async Task<RemotePullRequestReview> SubmitAsync(Guid repositoryId, Guid? actorUserId)
+    private async Task<RemotePullRequestReview> SubmitAsync(Guid repositoryId, Guid teamId, Guid? actorUserId)
     {
         using var scope = _fixture.BeginScope();
         return await scope.Resolve<IPullRequestService>()
-            .SubmitReviewAsync(repositoryId, 5, PullRequestReviewVerdict.Comment, "looks good", actorUserId, CancellationToken.None);
+            .SubmitReviewAsync(repositoryId, teamId, 5, PullRequestReviewVerdict.Comment, "looks good", actorUserId, CancellationToken.None);
     }
 
     private async Task<SeedResult> SeedAsync(bool linkActor)

@@ -1,6 +1,7 @@
 using System.Text.Json;
 using CodeSpace.Core.Services.Providers.Capabilities;
 using CodeSpace.Core.Services.PullRequests;
+using CodeSpace.Core.Services.Workflows.Runtime;
 using CodeSpace.Messages.Dtos.Providers;
 using CodeSpace.Messages.Enums;
 using CodeSpace.Messages.Exceptions;
@@ -74,6 +75,7 @@ public sealed class GitPrReviewNode : INodeRuntime
         if (!TryReadRepositoryId(context, out var repoId)) return NodeResult.Fail("Input 'repositoryId' missing or not a uuid.");
         if (!TryReadNumber(context, out var number)) return NodeResult.Fail("Input 'number' missing or not an integer.");
         if (!TryReadVerdict(context, out var verdict)) return NodeResult.Fail("Input 'verdict' must be one of: approve, request_changes, comment.");
+        if (!NodeScopeReader.TryReadTeamId(context, out var teamId)) return NodeResult.Fail("This run has no team context, so a repository can't be resolved.");
 
         var body = TryReadBody(context, out var b) ? b : null;
         var actAsUserId = TryReadActAsUserId(context, out var a) ? a : (Guid?)null;
@@ -89,7 +91,7 @@ public sealed class GitPrReviewNode : INodeRuntime
                 target: $"git.submit_review:{repoId}:{number}",
                 method: "submit_review",
                 requestPayload: JsonSerializer.SerializeToElement(new { repository_id = repoId, pull_request_number = number, verdict = verdict.ToString(), body_chars = body?.Length ?? 0, act_as_user_id = actAsUserId }),
-                action: ct => _prService.SubmitReviewAsync(repoId, number, verdict, body, actAsUserId, ct),
+                action: ct => _prService.SubmitReviewAsync(repoId, teamId, number, verdict, body, actAsUserId, ct),
                 completionExtractor: result => new ExternalCallCompletion
                 {
                     ResponsePayload = JsonSerializer.SerializeToElement(new { verdict = result.Verdict.ToString(), url = result.WebUrl })

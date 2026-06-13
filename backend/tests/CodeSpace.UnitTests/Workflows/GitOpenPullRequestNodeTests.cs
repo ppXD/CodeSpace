@@ -21,18 +21,20 @@ namespace CodeSpace.UnitTests.Workflows;
 public class GitOpenPullRequestNodeTests
 {
     private const string Repo = "11111111-1111-1111-1111-111111111111";
+    private const string Team = "22222222-2222-2222-2222-222222222222";
 
     private sealed class StubPrService : IPullRequestService
     {
         public Guid RepoId;
+        public Guid TeamId;
         public OpenPullRequestInput? Input;
         public Guid? ActorUserId;
         public int Calls;
         public Exception? ThrowOnOpen;
 
-        public Task<RemotePullRequest> OpenPullRequestAsync(Guid repositoryId, OpenPullRequestInput input, Guid? actorUserId, CancellationToken cancellationToken)
+        public Task<RemotePullRequest> OpenPullRequestAsync(Guid repositoryId, Guid teamId, OpenPullRequestInput input, Guid? actorUserId, CancellationToken cancellationToken)
         {
-            RepoId = repositoryId; Input = input; ActorUserId = actorUserId; Calls++;
+            RepoId = repositoryId; TeamId = teamId; Input = input; ActorUserId = actorUserId; Calls++;
             if (ThrowOnOpen != null) throw ThrowOnOpen;
             return Task.FromResult(new RemotePullRequest
             {
@@ -42,15 +44,15 @@ public class GitOpenPullRequestNodeTests
             });
         }
 
-        public Task<IReadOnlyList<RemotePullRequest>> ListAsync(Guid r, PullRequestState? s, int p, int pp, CancellationToken c) => throw new NotImplementedException();
-        public Task<RemotePullRequest> GetAsync(Guid r, int n, CancellationToken c) => throw new NotImplementedException();
-        public Task<IReadOnlyList<RemotePullRequestCommit>> ListCommitsAsync(Guid r, int n, CancellationToken c) => throw new NotImplementedException();
-        public Task<IReadOnlyList<RemotePullRequestFile>> ListFilesAsync(Guid r, int n, CancellationToken c) => throw new NotImplementedException();
-        public Task<RemotePullRequestCounts> GetCountsAsync(Guid r, CancellationToken c) => throw new NotImplementedException();
-        public Task<IReadOnlyList<RemotePullRequestCheck>> ListChecksAsync(Guid r, int n, CancellationToken c) => throw new NotImplementedException();
-        public Task<RemotePullRequestComment> PostCommentAsync(Guid r, int n, string b, CancellationToken c) => throw new NotImplementedException();
-        public Task<RemotePullRequestReview> SubmitReviewAsync(Guid r, int n, PullRequestReviewVerdict v, string? b, Guid? a, CancellationToken c) => throw new NotImplementedException();
-        public Task<RemotePullRequestMergeResult> MergePullRequestAsync(Guid r, int n, MergePullRequestInput i, Guid? a, CancellationToken c) => throw new NotImplementedException();
+        public Task<IReadOnlyList<RemotePullRequest>> ListAsync(Guid r, Guid t, PullRequestState? s, int p, int pp, CancellationToken c) => throw new NotImplementedException();
+        public Task<RemotePullRequest> GetAsync(Guid r, Guid t, int n, CancellationToken c) => throw new NotImplementedException();
+        public Task<IReadOnlyList<RemotePullRequestCommit>> ListCommitsAsync(Guid r, Guid t, int n, CancellationToken c) => throw new NotImplementedException();
+        public Task<IReadOnlyList<RemotePullRequestFile>> ListFilesAsync(Guid r, Guid t, int n, CancellationToken c) => throw new NotImplementedException();
+        public Task<RemotePullRequestCounts> GetCountsAsync(Guid r, Guid t, CancellationToken c) => throw new NotImplementedException();
+        public Task<IReadOnlyList<RemotePullRequestCheck>> ListChecksAsync(Guid r, Guid t, int n, CancellationToken c) => throw new NotImplementedException();
+        public Task<RemotePullRequestComment> PostCommentAsync(Guid r, Guid t, int n, string b, CancellationToken c) => throw new NotImplementedException();
+        public Task<RemotePullRequestReview> SubmitReviewAsync(Guid r, Guid t, int n, PullRequestReviewVerdict v, string? b, Guid? a, CancellationToken c) => throw new NotImplementedException();
+        public Task<RemotePullRequestMergeResult> MergePullRequestAsync(Guid r, Guid t, int n, MergePullRequestInput i, Guid? a, CancellationToken c) => throw new NotImplementedException();
     }
 
     [Fact]
@@ -111,6 +113,34 @@ public class GitOpenPullRequestNodeTests
         }), CancellationToken.None);
 
         stub.ActorUserId.ShouldBe(actor, "a wired actAsUserId must reach the service so the PR is authored by that user");
+    }
+
+    [Fact]
+    public async Task Threads_the_run_team_from_sys_scope_into_the_service_call()
+    {
+        var stub = new StubPrService();
+
+        await new GitOpenPullRequestNode(stub).RunAsync(Context(), CancellationToken.None);
+
+        stub.TeamId.ShouldBe(Guid.Parse(Team), "the run's team flows from {{sys.team_id}} so the service fail-closes the repo load to it");
+    }
+
+    [Fact]
+    public async Task Fails_closed_when_sys_scope_has_no_team()
+    {
+        var stub = new StubPrService();
+
+        var result = await new GitOpenPullRequestNode(stub).RunAsync(ContextWithSys(new()
+        {
+            ["repositoryId"] = JsonSerializer.SerializeToElement(Repo),
+            ["title"] = JsonSerializer.SerializeToElement("Add feature"),
+            ["sourceBranch"] = JsonSerializer.SerializeToElement("feature"),
+            ["targetBranch"] = JsonSerializer.SerializeToElement("main"),
+        }, new()), CancellationToken.None);
+
+        result.Status.ShouldBe(NodeStatus.Failure);
+        result.Error.ShouldContain("team context");
+        stub.Calls.ShouldBe(0, "without a team the node must short-circuit before touching the service");
     }
 
     [Theory]
@@ -204,13 +234,17 @@ public class GitOpenPullRequestNodeTests
         ["targetBranch"] = JsonSerializer.SerializeToElement("main"),
     });
 
-    private static NodeRunContext ContextFrom(Dictionary<string, JsonElement> inputs) => new()
+    // Default context carries the run's team in sys scope (as the engine always does) so the node resolves it.
+    private static NodeRunContext ContextFrom(Dictionary<string, JsonElement> inputs) =>
+        ContextWithSys(inputs, new() { [SystemScopeKeys.TeamId] = JsonSerializer.SerializeToElement(Team) });
+
+    private static NodeRunContext ContextWithSys(Dictionary<string, JsonElement> inputs, Dictionary<string, JsonElement> sys) => new()
     {
         Inputs = inputs,
         Config = new Dictionary<string, JsonElement>(),
         RawInputs = JsonDocument.Parse("{}").RootElement,
         RawConfig = JsonDocument.Parse("{}").RootElement,
-        Scope = new NodeRunScope { Trigger = new Dictionary<string, JsonElement>() },
+        Scope = new NodeRunScope { Trigger = new Dictionary<string, JsonElement>(), Sys = sys },
         Logger = NullLogger.Instance,
         Observability = NodeObservability.NoOp,
     };

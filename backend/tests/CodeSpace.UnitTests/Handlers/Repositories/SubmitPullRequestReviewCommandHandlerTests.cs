@@ -15,9 +15,10 @@ public class SubmitPullRequestReviewCommandHandlerTests
     public async Task Forwards_the_route_args_and_the_callers_id_as_the_actor()
     {
         var caller = Guid.NewGuid();
+        var team = Guid.NewGuid();
         var repo = Guid.NewGuid();
         var service = new StubPrService();
-        var handler = new SubmitPullRequestReviewCommandHandler(service, new StubCurrentUser(caller));
+        var handler = new SubmitPullRequestReviewCommandHandler(service, new StubCurrentUser(caller), new StubCurrentTeam(team));
 
         var result = await handler.Handle(
             new SubmitPullRequestReviewCommand { RepositoryId = repo, Number = 7, Verdict = PullRequestReviewVerdict.RequestChanges, Body = "please fix" },
@@ -25,6 +26,7 @@ public class SubmitPullRequestReviewCommandHandlerTests
 
         service.Calls.ShouldBe(1);
         service.RepoId.ShouldBe(repo);
+        service.TeamId.ShouldBe(team, "the handler must scope the review to the current team so the repo load is fail-closed");
         service.Number.ShouldBe(7);
         service.Verdict.ShouldBe(PullRequestReviewVerdict.RequestChanges);
         service.Body.ShouldBe("please fix");
@@ -36,7 +38,7 @@ public class SubmitPullRequestReviewCommandHandlerTests
     public async Task Rejects_an_anonymous_caller_without_touching_the_service()
     {
         var service = new StubPrService();
-        var handler = new SubmitPullRequestReviewCommandHandler(service, new StubCurrentUser(null));
+        var handler = new SubmitPullRequestReviewCommandHandler(service, new StubCurrentUser(null), new StubCurrentTeam(Guid.NewGuid()));
 
         await Should.ThrowAsync<UnauthorizedAccessException>(() => handler.Handle(
             new SubmitPullRequestReviewCommand { RepositoryId = Guid.NewGuid(), Number = 1, Verdict = PullRequestReviewVerdict.Approve },
@@ -49,27 +51,37 @@ public class SubmitPullRequestReviewCommandHandlerTests
     private sealed class StubPrService : IPullRequestService
     {
         public Guid RepoId;
+        public Guid TeamId;
         public int Number;
         public PullRequestReviewVerdict Verdict;
         public string? Body;
         public Guid? ActorUserId;
         public int Calls;
 
-        public Task<RemotePullRequestReview> SubmitReviewAsync(Guid repositoryId, int number, PullRequestReviewVerdict verdict, string? body, Guid? actorUserId, CancellationToken cancellationToken)
+        public Task<RemotePullRequestReview> SubmitReviewAsync(Guid repositoryId, Guid teamId, int number, PullRequestReviewVerdict verdict, string? body, Guid? actorUserId, CancellationToken cancellationToken)
         {
-            RepoId = repositoryId; Number = number; Verdict = verdict; Body = body; ActorUserId = actorUserId; Calls++;
+            RepoId = repositoryId; TeamId = teamId; Number = number; Verdict = verdict; Body = body; ActorUserId = actorUserId; Calls++;
             return Task.FromResult(new RemotePullRequestReview { Verdict = verdict, ExternalId = "rev-1", WebUrl = "https://example.test/review/1" });
         }
 
-        public Task<IReadOnlyList<RemotePullRequest>> ListAsync(Guid r, PullRequestState? s, int p, int pp, CancellationToken c) => throw new NotImplementedException();
-        public Task<RemotePullRequest> GetAsync(Guid r, int n, CancellationToken c) => throw new NotImplementedException();
-        public Task<IReadOnlyList<RemotePullRequestCommit>> ListCommitsAsync(Guid r, int n, CancellationToken c) => throw new NotImplementedException();
-        public Task<IReadOnlyList<RemotePullRequestFile>> ListFilesAsync(Guid r, int n, CancellationToken c) => throw new NotImplementedException();
-        public Task<RemotePullRequestCounts> GetCountsAsync(Guid r, CancellationToken c) => throw new NotImplementedException();
-        public Task<IReadOnlyList<RemotePullRequestCheck>> ListChecksAsync(Guid r, int n, CancellationToken c) => throw new NotImplementedException();
-        public Task<RemotePullRequestComment> PostCommentAsync(Guid r, int n, string b, CancellationToken c) => throw new NotImplementedException();
-        public Task<RemotePullRequest> OpenPullRequestAsync(Guid r, OpenPullRequestInput i, Guid? a, CancellationToken c) => throw new NotImplementedException();
-        public Task<RemotePullRequestMergeResult> MergePullRequestAsync(Guid r, int n, MergePullRequestInput i, Guid? a, CancellationToken c) => throw new NotImplementedException();
+        public Task<IReadOnlyList<RemotePullRequest>> ListAsync(Guid r, Guid t, PullRequestState? s, int p, int pp, CancellationToken c) => throw new NotImplementedException();
+        public Task<RemotePullRequest> GetAsync(Guid r, Guid t, int n, CancellationToken c) => throw new NotImplementedException();
+        public Task<IReadOnlyList<RemotePullRequestCommit>> ListCommitsAsync(Guid r, Guid t, int n, CancellationToken c) => throw new NotImplementedException();
+        public Task<IReadOnlyList<RemotePullRequestFile>> ListFilesAsync(Guid r, Guid t, int n, CancellationToken c) => throw new NotImplementedException();
+        public Task<RemotePullRequestCounts> GetCountsAsync(Guid r, Guid t, CancellationToken c) => throw new NotImplementedException();
+        public Task<IReadOnlyList<RemotePullRequestCheck>> ListChecksAsync(Guid r, Guid t, int n, CancellationToken c) => throw new NotImplementedException();
+        public Task<RemotePullRequestComment> PostCommentAsync(Guid r, Guid t, int n, string b, CancellationToken c) => throw new NotImplementedException();
+        public Task<RemotePullRequest> OpenPullRequestAsync(Guid r, Guid t, OpenPullRequestInput i, Guid? a, CancellationToken c) => throw new NotImplementedException();
+        public Task<RemotePullRequestMergeResult> MergePullRequestAsync(Guid r, Guid t, int n, MergePullRequestInput i, Guid? a, CancellationToken c) => throw new NotImplementedException();
+    }
+
+    /// <summary>Minimal ICurrentTeam double — only Id varies; the handler reads nothing else.</summary>
+    private sealed class StubCurrentTeam : ICurrentTeam
+    {
+        public StubCurrentTeam(Guid? id) { Id = id; }
+
+        public Guid? Id { get; }
+        public bool IsSet => Id is not null;
     }
 
     /// <summary>Minimal ICurrentUser double — only Id varies; the handler reads nothing else.</summary>

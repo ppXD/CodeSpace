@@ -26,47 +26,47 @@ public sealed class PullRequestService : IPullRequestService, IScopedDependency
         _actorCredentials = actorCredentials;
     }
 
-    public async Task<IReadOnlyList<RemotePullRequest>> ListAsync(Guid repositoryId, PullRequestState? state, int page, int perPage, CancellationToken cancellationToken)
+    public async Task<IReadOnlyList<RemotePullRequest>> ListAsync(Guid repositoryId, Guid teamId, PullRequestState? state, int page, int perPage, CancellationToken cancellationToken)
     {
-        var (catalog, context, remote) = await ResolveAsync(repositoryId, cancellationToken).ConfigureAwait(false);
+        var (catalog, context, remote) = await ResolveAsync(repositoryId, teamId, cancellationToken).ConfigureAwait(false);
         return await catalog.ListPullRequestsAsync(context, remote, state, page, perPage, cancellationToken).ConfigureAwait(false);
     }
 
-    public async Task<RemotePullRequest> GetAsync(Guid repositoryId, int number, CancellationToken cancellationToken)
+    public async Task<RemotePullRequest> GetAsync(Guid repositoryId, Guid teamId, int number, CancellationToken cancellationToken)
     {
-        var (catalog, context, remote) = await ResolveAsync(repositoryId, cancellationToken).ConfigureAwait(false);
+        var (catalog, context, remote) = await ResolveAsync(repositoryId, teamId, cancellationToken).ConfigureAwait(false);
         return await catalog.GetPullRequestAsync(context, remote, number, cancellationToken).ConfigureAwait(false);
     }
 
-    public async Task<IReadOnlyList<RemotePullRequestCommit>> ListCommitsAsync(Guid repositoryId, int number, CancellationToken cancellationToken)
+    public async Task<IReadOnlyList<RemotePullRequestCommit>> ListCommitsAsync(Guid repositoryId, Guid teamId, int number, CancellationToken cancellationToken)
     {
-        var (catalog, context, remote) = await ResolveAsync(repositoryId, cancellationToken).ConfigureAwait(false);
+        var (catalog, context, remote) = await ResolveAsync(repositoryId, teamId, cancellationToken).ConfigureAwait(false);
         return await catalog.ListPullRequestCommitsAsync(context, remote, number, cancellationToken).ConfigureAwait(false);
     }
 
-    public async Task<IReadOnlyList<RemotePullRequestFile>> ListFilesAsync(Guid repositoryId, int number, CancellationToken cancellationToken)
+    public async Task<IReadOnlyList<RemotePullRequestFile>> ListFilesAsync(Guid repositoryId, Guid teamId, int number, CancellationToken cancellationToken)
     {
-        var (catalog, context, remote) = await ResolveAsync(repositoryId, cancellationToken).ConfigureAwait(false);
+        var (catalog, context, remote) = await ResolveAsync(repositoryId, teamId, cancellationToken).ConfigureAwait(false);
         return await catalog.ListPullRequestFilesAsync(context, remote, number, cancellationToken).ConfigureAwait(false);
     }
 
-    public async Task<RemotePullRequestCounts> GetCountsAsync(Guid repositoryId, CancellationToken cancellationToken)
+    public async Task<RemotePullRequestCounts> GetCountsAsync(Guid repositoryId, Guid teamId, CancellationToken cancellationToken)
     {
-        var (catalog, context, remote) = await ResolveAsync(repositoryId, cancellationToken).ConfigureAwait(false);
+        var (catalog, context, remote) = await ResolveAsync(repositoryId, teamId, cancellationToken).ConfigureAwait(false);
         return await catalog.CountPullRequestsAsync(context, remote, cancellationToken).ConfigureAwait(false);
     }
 
-    public async Task<IReadOnlyList<RemotePullRequestCheck>> ListChecksAsync(Guid repositoryId, int number, CancellationToken cancellationToken)
+    public async Task<IReadOnlyList<RemotePullRequestCheck>> ListChecksAsync(Guid repositoryId, Guid teamId, int number, CancellationToken cancellationToken)
     {
-        var (catalog, context, remote) = await ResolveAsync(repositoryId, cancellationToken).ConfigureAwait(false);
+        var (catalog, context, remote) = await ResolveAsync(repositoryId, teamId, cancellationToken).ConfigureAwait(false);
         return await catalog.ListChecksAsync(context, remote, number, cancellationToken).ConfigureAwait(false);
     }
 
-    public async Task<RemotePullRequestComment> PostCommentAsync(Guid repositoryId, int number, string body, CancellationToken cancellationToken)
+    public async Task<RemotePullRequestComment> PostCommentAsync(Guid repositoryId, Guid teamId, int number, string body, CancellationToken cancellationToken)
     {
         // Comment WRITE preflight uses the same repo/credential lookup but enforces the
         // narrower IPullRequestCommentCapability scope (e.g. GitLab requires `api`, not just `read_api`).
-        var repo = await LoadRepositoryAsync(repositoryId, cancellationToken).ConfigureAwait(false);
+        var repo = await LoadRepositoryAsync(repositoryId, teamId, cancellationToken).ConfigureAwait(false);
         EnsureCredentialBound(repo);
         _scopeChecker.EnsureCapability(repo.Credential!, repo.ProviderInstance.Provider, typeof(IPullRequestCommentCapability));
 
@@ -77,13 +77,13 @@ public sealed class PullRequestService : IPullRequestService, IScopedDependency
         return await commentCap.PostCommentAsync(context, remote, number, body, cancellationToken).ConfigureAwait(false);
     }
 
-    public async Task<RemotePullRequestReview> SubmitReviewAsync(Guid repositoryId, int number, PullRequestReviewVerdict verdict, string? body, Guid? actorUserId, CancellationToken cancellationToken)
+    public async Task<RemotePullRequestReview> SubmitReviewAsync(Guid repositoryId, Guid teamId, int number, PullRequestReviewVerdict verdict, string? body, Guid? actorUserId, CancellationToken cancellationToken)
     {
         // A comment / request-changes verdict needs something to say; approve may stand alone (LGTM).
         if (verdict != PullRequestReviewVerdict.Approve && string.IsNullOrWhiteSpace(body))
             throw new InvalidOperationException($"A '{verdict}' review requires a non-empty body.");
 
-        var repo = await LoadRepositoryAsync(repositoryId, cancellationToken).ConfigureAwait(false);
+        var repo = await LoadRepositoryAsync(repositoryId, teamId, cancellationToken).ConfigureAwait(false);
         EnsureCredentialBound(repo);
 
         // Per-user attribution (Model B): act AS the actor's own linked identity when one is wired,
@@ -99,7 +99,7 @@ public sealed class PullRequestService : IPullRequestService, IScopedDependency
         return await reviewCap.SubmitReviewAsync(context, remote, number, verdict, body, cancellationToken).ConfigureAwait(false);
     }
 
-    public async Task<RemotePullRequest> OpenPullRequestAsync(Guid repositoryId, OpenPullRequestInput input, Guid? actorUserId, CancellationToken cancellationToken)
+    public async Task<RemotePullRequest> OpenPullRequestAsync(Guid repositoryId, Guid teamId, OpenPullRequestInput input, Guid? actorUserId, CancellationToken cancellationToken)
     {
         if (string.IsNullOrWhiteSpace(input.Title)) throw new InvalidOperationException("A pull request requires a title.");
         if (string.IsNullOrWhiteSpace(input.SourceBranch) || string.IsNullOrWhiteSpace(input.TargetBranch))
@@ -107,7 +107,7 @@ public sealed class PullRequestService : IPullRequestService, IScopedDependency
         if (string.Equals(input.SourceBranch, input.TargetBranch, StringComparison.Ordinal))
             throw new InvalidOperationException("The source and target branch must differ.");
 
-        var repo = await LoadRepositoryAsync(repositoryId, cancellationToken).ConfigureAwait(false);
+        var repo = await LoadRepositoryAsync(repositoryId, teamId, cancellationToken).ConfigureAwait(false);
         EnsureCredentialBound(repo);
 
         // Per-user attribution (Model B), same as SubmitReviewAsync: open AS the actor's own linked identity
@@ -122,9 +122,9 @@ public sealed class PullRequestService : IPullRequestService, IScopedDependency
         return await writeCap.OpenPullRequestAsync(context, remote, input, cancellationToken).ConfigureAwait(false);
     }
 
-    public async Task<RemotePullRequestMergeResult> MergePullRequestAsync(Guid repositoryId, int number, MergePullRequestInput input, Guid? actorUserId, CancellationToken cancellationToken)
+    public async Task<RemotePullRequestMergeResult> MergePullRequestAsync(Guid repositoryId, Guid teamId, int number, MergePullRequestInput input, Guid? actorUserId, CancellationToken cancellationToken)
     {
-        var repo = await LoadRepositoryAsync(repositoryId, cancellationToken).ConfigureAwait(false);
+        var repo = await LoadRepositoryAsync(repositoryId, teamId, cancellationToken).ConfigureAwait(false);
         EnsureCredentialBound(repo);
 
         var credential = await ResolveActingCredentialAsync(repo, actorUserId, cancellationToken).ConfigureAwait(false);
@@ -150,9 +150,9 @@ public sealed class PullRequestService : IPullRequestService, IScopedDependency
     /// Throws InvalidOperationException (mapped to 400) or
     /// ProviderInsufficientScopeException (422) on failure.
     /// </summary>
-    private async Task<(IPullRequestCatalogCapability Catalog, ProviderContext Context, RemoteRepository Remote)> ResolveAsync(Guid repositoryId, CancellationToken cancellationToken)
+    private async Task<(IPullRequestCatalogCapability Catalog, ProviderContext Context, RemoteRepository Remote)> ResolveAsync(Guid repositoryId, Guid teamId, CancellationToken cancellationToken)
     {
-        var repo = await LoadRepositoryAsync(repositoryId, cancellationToken).ConfigureAwait(false);
+        var repo = await LoadRepositoryAsync(repositoryId, teamId, cancellationToken).ConfigureAwait(false);
         EnsureCredentialBound(repo);
         EnsureScopeCovered(repo);
 
@@ -163,11 +163,15 @@ public sealed class PullRequestService : IPullRequestService, IScopedDependency
         return (catalog, context, remote);
     }
 
-    private async Task<Repository> LoadRepositoryAsync(Guid repositoryId, CancellationToken cancellationToken) =>
+    // Fail-closed tenant scope: the repo is resolved ONLY within the caller's team, so a model-supplied /
+    // untrusted repositoryId (a git node, or — over MCP — a model) can never reach another tenant's repo and
+    // its bound credential. A repo in another team falls out of the filter → the same non-leaking "not found"
+    // as a missing repo (no existence oracle). teamId is non-nullable; Guid.Empty matches no real repo.
+    private async Task<Repository> LoadRepositoryAsync(Guid repositoryId, Guid teamId, CancellationToken cancellationToken) =>
         await _db.Repository
             .Include(r => r.ProviderInstance)
             .Include(r => r.Credential)
-            .SingleOrDefaultAsync(r => r.Id == repositoryId && r.DeletedDate == null, cancellationToken).ConfigureAwait(false)
+            .SingleOrDefaultAsync(r => r.Id == repositoryId && r.TeamId == teamId && r.DeletedDate == null, cancellationToken).ConfigureAwait(false)
             ?? throw new InvalidOperationException($"Repository {repositoryId} not found");
 
     private static void EnsureCredentialBound(Repository repo)

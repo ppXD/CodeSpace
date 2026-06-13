@@ -1,5 +1,6 @@
 using System.Text.Json;
 using CodeSpace.Core.Services.PullRequests;
+using CodeSpace.Core.Services.Workflows.Runtime;
 using CodeSpace.Messages.Dtos.Providers;
 using CodeSpace.Messages.Enums;
 using Microsoft.Extensions.Logging;
@@ -69,12 +70,13 @@ public sealed class GitFetchPrChecksNode : INodeRuntime
     {
         if (!TryReadRepositoryId(context, out var repoId)) return NodeResult.Fail("Input 'repositoryId' missing or not a uuid.");
         if (!TryReadNumber(context, out var number)) return NodeResult.Fail("Input 'number' missing or not an integer.");
+        if (!NodeScopeReader.TryReadTeamId(context, out var teamId)) return NodeResult.Fail("This run has no team context, so a repository can't be resolved.");
 
         var checks = await context.Observability.TraceExternalCallAsync(
             target: $"git.list_checks:{repoId}:{number}",
             method: "list_checks",
             requestPayload: JsonSerializer.SerializeToElement(new { repository_id = repoId, pull_request_number = number }),
-            action: ct => _prService.ListChecksAsync(repoId, number, ct),
+            action: ct => _prService.ListChecksAsync(repoId, teamId, number, ct),
             completionExtractor: result =>
             {
                 var s = SummarizeChecks(result);

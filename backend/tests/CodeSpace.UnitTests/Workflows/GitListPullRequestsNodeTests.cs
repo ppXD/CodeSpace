@@ -21,31 +21,34 @@ public class GitListPullRequestsNodeTests
 {
     private const string Repo = "11111111-1111-1111-1111-111111111111";
 
-    /// <summary>Records the list arguments + returns canned results; every other member throws (this node only lists).</summary>
+    private const string Team = "22222222-2222-2222-2222-222222222222";
+
+    /// <summary>Records the list arguments (including the team) + returns canned results; every other member throws (this node only lists).</summary>
     private sealed class StubPrService : IPullRequestService
     {
         public Guid RepoId;
+        public Guid TeamId;
         public PullRequestState? State;
         public int Page;
         public int PerPage;
         public int Calls;
         public IReadOnlyList<RemotePullRequest> Result = Array.Empty<RemotePullRequest>();
 
-        public Task<IReadOnlyList<RemotePullRequest>> ListAsync(Guid repositoryId, PullRequestState? state, int page, int perPage, CancellationToken cancellationToken)
+        public Task<IReadOnlyList<RemotePullRequest>> ListAsync(Guid repositoryId, Guid teamId, PullRequestState? state, int page, int perPage, CancellationToken cancellationToken)
         {
-            RepoId = repositoryId; State = state; Page = page; PerPage = perPage; Calls++;
+            RepoId = repositoryId; TeamId = teamId; State = state; Page = page; PerPage = perPage; Calls++;
             return Task.FromResult(Result);
         }
 
-        public Task<RemotePullRequest> GetAsync(Guid r, int n, CancellationToken c) => throw new NotImplementedException();
-        public Task<IReadOnlyList<RemotePullRequestCommit>> ListCommitsAsync(Guid r, int n, CancellationToken c) => throw new NotImplementedException();
-        public Task<IReadOnlyList<RemotePullRequestFile>> ListFilesAsync(Guid r, int n, CancellationToken c) => throw new NotImplementedException();
-        public Task<RemotePullRequestCounts> GetCountsAsync(Guid r, CancellationToken c) => throw new NotImplementedException();
-        public Task<IReadOnlyList<RemotePullRequestCheck>> ListChecksAsync(Guid r, int n, CancellationToken c) => throw new NotImplementedException();
-        public Task<RemotePullRequestComment> PostCommentAsync(Guid r, int n, string b, CancellationToken c) => throw new NotImplementedException();
-        public Task<RemotePullRequestReview> SubmitReviewAsync(Guid r, int n, PullRequestReviewVerdict v, string? b, Guid? a, CancellationToken c) => throw new NotImplementedException();
-        public Task<RemotePullRequest> OpenPullRequestAsync(Guid r, OpenPullRequestInput i, Guid? a, CancellationToken c) => throw new NotImplementedException();
-        public Task<RemotePullRequestMergeResult> MergePullRequestAsync(Guid r, int n, MergePullRequestInput i, Guid? a, CancellationToken c) => throw new NotImplementedException();
+        public Task<RemotePullRequest> GetAsync(Guid r, Guid t, int n, CancellationToken c) => throw new NotImplementedException();
+        public Task<IReadOnlyList<RemotePullRequestCommit>> ListCommitsAsync(Guid r, Guid t, int n, CancellationToken c) => throw new NotImplementedException();
+        public Task<IReadOnlyList<RemotePullRequestFile>> ListFilesAsync(Guid r, Guid t, int n, CancellationToken c) => throw new NotImplementedException();
+        public Task<RemotePullRequestCounts> GetCountsAsync(Guid r, Guid t, CancellationToken c) => throw new NotImplementedException();
+        public Task<IReadOnlyList<RemotePullRequestCheck>> ListChecksAsync(Guid r, Guid t, int n, CancellationToken c) => throw new NotImplementedException();
+        public Task<RemotePullRequestComment> PostCommentAsync(Guid r, Guid t, int n, string b, CancellationToken c) => throw new NotImplementedException();
+        public Task<RemotePullRequestReview> SubmitReviewAsync(Guid r, Guid t, int n, PullRequestReviewVerdict v, string? b, Guid? a, CancellationToken c) => throw new NotImplementedException();
+        public Task<RemotePullRequest> OpenPullRequestAsync(Guid r, Guid t, OpenPullRequestInput i, Guid? a, CancellationToken c) => throw new NotImplementedException();
+        public Task<RemotePullRequestMergeResult> MergePullRequestAsync(Guid r, Guid t, int n, MergePullRequestInput i, Guid? a, CancellationToken c) => throw new NotImplementedException();
     }
 
     private static RemotePullRequest Pr(int number) => new()
@@ -70,6 +73,31 @@ public class GitListPullRequestsNodeTests
         // DTOs serialize with default (PascalCase) property names — the same convention git.fetch_pr_diff uses
         // for its files[] output (consumed by the AI-review template), so downstream binding is consistent.
         result.Outputs["pullRequests"][0].GetProperty("Number").GetInt32().ShouldBe(1);
+    }
+
+    [Fact]
+    public async Task Threads_the_run_team_from_sys_scope_into_the_service_call()
+    {
+        var stub = new StubPrService { Result = new[] { Pr(1) } };
+
+        var result = await new GitListPullRequestsNode(stub).RunAsync(Context(Repo), CancellationToken.None);
+
+        result.Status.ShouldBe(NodeStatus.Success);
+        stub.TeamId.ShouldBe(Guid.Parse(Team), "the run's team flows from {{sys.team_id}} so the service fail-closes the repo load to it");
+    }
+
+    [Fact]
+    public async Task Fails_closed_when_sys_scope_has_no_team()
+    {
+        var stub = new StubPrService();
+
+        // No sys.team_id (e.g. a synthetic agent-tool context) → the repo can't be tenant-scoped, so refuse.
+        var result = await new GitListPullRequestsNode(stub).RunAsync(ContextWithSys(
+            new() { ["repositoryId"] = JsonSerializer.SerializeToElement(Repo) }, new()), CancellationToken.None);
+
+        result.Status.ShouldBe(NodeStatus.Failure);
+        result.Error.ShouldContain("team context");
+        stub.Calls.ShouldBe(0, "without a team the node must short-circuit before touching the service");
     }
 
     [Fact]
@@ -184,13 +212,19 @@ public class GitListPullRequestsNodeTests
         return ContextFrom(inputs);
     }
 
-    private static NodeRunContext ContextFrom(Dictionary<string, JsonElement> inputs) => new()
+    // Default context carries the run's team in sys scope (as the engine always does) so the node resolves it.
+    private static NodeRunContext ContextFrom(Dictionary<string, JsonElement> inputs) => ContextWithSys(inputs, WithTeam());
+
+    private static Dictionary<string, JsonElement> WithTeam() =>
+        new() { [SystemScopeKeys.TeamId] = JsonSerializer.SerializeToElement(Team) };
+
+    private static NodeRunContext ContextWithSys(Dictionary<string, JsonElement> inputs, Dictionary<string, JsonElement> sys) => new()
     {
         Inputs = inputs,
         Config = new Dictionary<string, JsonElement>(),
         RawInputs = JsonDocument.Parse("{}").RootElement,
         RawConfig = JsonDocument.Parse("{}").RootElement,
-        Scope = new NodeRunScope { Trigger = new Dictionary<string, JsonElement>() },
+        Scope = new NodeRunScope { Trigger = new Dictionary<string, JsonElement>(), Sys = sys },
         Logger = NullLogger.Instance,
         Observability = NodeObservability.NoOp,
     };

@@ -10,11 +10,13 @@ public sealed class SubmitPullRequestReviewCommandHandler : IRequestHandler<Subm
 {
     private readonly IPullRequestService _service;
     private readonly ICurrentUser _currentUser;
+    private readonly ICurrentTeam _currentTeam;
 
-    public SubmitPullRequestReviewCommandHandler(IPullRequestService service, ICurrentUser currentUser)
+    public SubmitPullRequestReviewCommandHandler(IPullRequestService service, ICurrentUser currentUser, ICurrentTeam currentTeam)
     {
         _service = service;
         _currentUser = currentUser;
+        _currentTeam = currentTeam;
     }
 
     public async Task<RemotePullRequestReview> Handle(SubmitPullRequestReviewCommand request, CancellationToken cancellationToken)
@@ -24,6 +26,6 @@ public sealed class SubmitPullRequestReviewCommandHandler : IRequestHandler<Subm
         // no identity to act as — reject rather than silently fall back.
         var actorUserId = _currentUser.Id ?? throw new UnauthorizedAccessException("A pull request review can only be submitted by an authenticated user.");
 
-        return await _service.SubmitReviewAsync(request.RepositoryId, request.Number, request.Verdict, request.Body, actorUserId, cancellationToken).ConfigureAwait(false);
+        return await _service.SubmitReviewAsync(request.RepositoryId, _currentTeam.Id!.Value, request.Number, request.Verdict, request.Body, actorUserId, cancellationToken).ConfigureAwait(false);
     }
 }

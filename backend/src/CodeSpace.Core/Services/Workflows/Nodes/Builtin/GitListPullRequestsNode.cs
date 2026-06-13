@@ -1,5 +1,6 @@
 using System.Text.Json;
 using CodeSpace.Core.Services.PullRequests;
+using CodeSpace.Core.Services.Workflows.Runtime;
 using CodeSpace.Messages.Enums;
 using Microsoft.Extensions.Logging;
 
@@ -65,6 +66,7 @@ public sealed class GitListPullRequestsNode : INodeRuntime
     {
         if (!TryReadRepositoryId(context, out var repoId)) return NodeResult.Fail("Input 'repositoryId' missing or not a uuid.");
         if (!TryReadState(context, out var state)) return NodeResult.Fail("Input 'state' must be one of Open, Draft, Merged, Closed.");
+        if (!NodeScopeReader.TryReadTeamId(context, out var teamId)) return NodeResult.Fail("This run has no team context, so a repository can't be resolved.");
 
         var page = ReadPositiveInt(context, "page", DefaultPage);
         var perPage = ReadPositiveInt(context, "perPage", DefaultPerPage);
@@ -73,7 +75,7 @@ public sealed class GitListPullRequestsNode : INodeRuntime
             target: $"git.list_prs:{repoId}",
             method: "list_pull_requests",
             requestPayload: JsonSerializer.SerializeToElement(new { repository_id = repoId, state = state?.ToString(), page, per_page = perPage }),
-            action: ct => _prService.ListAsync(repoId, state, page, perPage, ct),
+            action: ct => _prService.ListAsync(repoId, teamId, state, page, perPage, ct),
             completionExtractor: result => new ExternalCallCompletion
             {
                 ResponsePayload = JsonSerializer.SerializeToElement(new { count = result.Count })

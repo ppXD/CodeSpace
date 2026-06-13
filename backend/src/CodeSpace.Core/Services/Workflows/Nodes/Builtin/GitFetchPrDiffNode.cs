@@ -1,5 +1,6 @@
 using System.Text.Json;
 using CodeSpace.Core.Services.PullRequests;
+using CodeSpace.Core.Services.Workflows.Runtime;
 using CodeSpace.Messages.Enums;
 using Microsoft.Extensions.Logging;
 
@@ -60,6 +61,7 @@ public sealed class GitFetchPrDiffNode : INodeRuntime
     {
         if (!TryReadRepositoryId(context, out var repoId)) return NodeResult.Fail("Input 'repositoryId' missing or not a uuid.");
         if (!TryReadNumber(context, out var number)) return NodeResult.Fail("Input 'number' missing or not an integer.");
+        if (!NodeScopeReader.TryReadTeamId(context, out var teamId)) return NodeResult.Fail("This run has no team context, so a repository can't be resolved.");
 
         // Trace the Git provider API call. Target is "git.list_files:<repo>:<num>" so the
         // timeline shows what was fetched without dumping the whole diff into the
@@ -68,7 +70,7 @@ public sealed class GitFetchPrDiffNode : INodeRuntime
             target: $"git.list_files:{repoId}:{number}",
             method: "list_files",
             requestPayload: JsonSerializer.SerializeToElement(new { repository_id = repoId, pull_request_number = number }),
-            action: ct => _prService.ListFilesAsync(repoId, number, ct),
+            action: ct => _prService.ListFilesAsync(repoId, teamId, number, ct),
             completionExtractor: result => new ExternalCallCompletion
             {
                 ResponsePayload = JsonSerializer.SerializeToElement(new
