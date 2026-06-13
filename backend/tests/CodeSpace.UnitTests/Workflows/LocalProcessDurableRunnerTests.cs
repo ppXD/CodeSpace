@@ -483,15 +483,21 @@ public sealed class LocalProcessDurableRunnerTests : IDisposable
         }
         try { File.Delete(atCap); } catch { /* best-effort */ }
 
-        var overCap = prefix + new string('a', LocalProcessRunner.UnixSocketPathCap + 1 - prefix.Length);
-        overCap.Length.ShouldBe(LocalProcessRunner.UnixSocketPathCap + 1);
+        // A path well over BOTH platform sun_path ceilings (104 macOS / 108 Linux) MUST be rejected. UnixSocketPathCap+1
+        // is NOT a portable overflow probe: it's the macOS usable max + 1, but Linux binds happily up to 107 — so use a
+        // generous margin that overflows on every host. The cross-platform guard against the value drifting up is the
+        // UnixSocketPathCap.ShouldBe(103) pin; this bind check proves the host actually rejects an over-length path.
+        const int clearlyOverAnyCap = 130;
+
+        var overCap = prefix + new string('a', clearlyOverAnyCap - prefix.Length);
+        overCap.Length.ShouldBe(clearlyOverAnyCap);
 
         using var over = new Socket(AddressFamily.Unix, SocketType.Stream, ProtocolType.Unspecified);
         Should.Throw<Exception>(() =>
         {
-            var ep = new UnixDomainSocketEndPoint(overCap);   // the ctor itself throws on macOS; Bind throws on others
+            var ep = new UnixDomainSocketEndPoint(overCap);   // the UDS endpoint ctor (or Bind) rejects an over-length sun_path
             over.Bind(ep);
-        }).ShouldBeAssignableTo<ArgumentException>("one byte over the cap must overflow the AF_UNIX sun_path");
+        }).ShouldBeAssignableTo<ArgumentException>("a path well over the AF_UNIX sun_path cap must overflow on every host");
     }
 
     [Fact]
