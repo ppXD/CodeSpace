@@ -31,6 +31,8 @@ public sealed class GitFetchPrDiffNode : INodeRuntime
         Kind = NodeKind.Regular,
         IconKey = "file-diff",
         Description = "Fetches the unified diff for a pull/merge request.",
+        // Synchronous + read-only → exposable as an agent tool (a non-destructive one).
+        IsAgentToolEligible = true,
         ConfigSchema = SchemaBuilder.EmptyObject(),
         InputSchema = SchemaBuilder.Parse("""
             {

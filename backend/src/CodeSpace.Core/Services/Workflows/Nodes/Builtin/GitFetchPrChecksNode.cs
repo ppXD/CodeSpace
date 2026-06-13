@@ -36,6 +36,8 @@ public sealed class GitFetchPrChecksNode : INodeRuntime
         Kind = NodeKind.Regular,
         IconKey = "circle-check",
         Description = "Fetches a pull/merge request's CI checks and a green/pending/failed summary — wire allPassed into an If/else to gate on CI.",
+        // Synchronous + read-only → exposable as an agent tool (a non-destructive one).
+        IsAgentToolEligible = true,
         ConfigSchema = SchemaBuilder.EmptyObject(),
         InputSchema = SchemaBuilder.Parse("""
             {
