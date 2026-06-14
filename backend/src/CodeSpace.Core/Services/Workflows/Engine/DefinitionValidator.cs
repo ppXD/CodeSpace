@@ -45,6 +45,7 @@ public sealed class DefinitionValidator : IScopedDependency
         CheckReachability(definition, errors);
         CheckReferencePaths(definition, errors);
         CheckRetryPolicies(definition, errors);
+        CheckContainerStructure(definition, errors);
 
         return new ValidationResult(errors);
     }
@@ -169,7 +170,7 @@ public sealed class DefinitionValidator : IScopedDependency
             // body-start + body nodes (which have no top-level incoming edge) aren't flagged
             // unreachable. The body's own internal connectivity is covered by CheckAcyclic. TryGetValue
             // guards the case where `current` is an edge target that doesn't exist (CheckEdgeEndpoints flags it).
-            if (nodeById.TryGetValue(current, out var currentNode) && SafeKind(currentNode) is NodeKind.Loop or NodeKind.Try)
+            if (nodeById.TryGetValue(current, out var currentNode) && SafeKind(currentNode) is NodeKind.Loop or NodeKind.Try or NodeKind.Map)
                 foreach (var bodyNode in definition.Nodes.Where(n => n.ParentId == current)) stack.Push(bodyNode.Id);
         }
 
@@ -401,6 +402,100 @@ public sealed class DefinitionValidator : IScopedDependency
             if (retry.BackoffSeconds < 0 || retry.BackoffSeconds > RetryPlan.MaxBackoffSeconds)
                 errors.Add($"Node '{node.Id}' retry.backoffSeconds must be between 0 and {RetryPlan.MaxBackoffSeconds} (got {retry.BackoffSeconds}).");
         }
+    }
+
+    /// <summary>
+    /// Structural rules for engine-driven container nodes (Loop / Try / Map). Two checks apply to EVERY
+    /// container — no edge may cross the container boundary (the engine's <c>SubgraphView</c> silently
+    /// DROPS such an edge today, so a crossing wire would vanish at run time), and a container may not be
+    /// nested deeper than the engine's runaway cap. A <c>flow.map</c> additionally must have a non-empty
+    /// body rooted at exactly one <c>flow.map_start</c> and ending in exactly one terminal node (the
+    /// per-element result source the reduce reads). Skipped on duplicate ids (the ToDictionary would crash;
+    /// that error is already reported).
+    /// </summary>
+    private void CheckContainerStructure(WorkflowDefinition definition, List<string> errors)
+    {
+        if (HasDuplicateIds(definition)) return;
+
+        var ownerByNodeId = definition.Nodes.ToDictionary(n => n.Id, n => n.ParentId);
+
+        CheckNoEdgeCrossesContainerBoundary(definition, ownerByNodeId, errors);
+
+        foreach (var node in definition.Nodes)
+        {
+            var kind = SafeKind(node);
+            if (kind is not (NodeKind.Loop or NodeKind.Try or NodeKind.Map)) continue;
+
+            CheckContainerNestingDepth(node, ownerByNodeId, errors);
+
+            if (kind == NodeKind.Map) CheckMapBodyShape(definition, node, errors);
+        }
+    }
+
+    /// <summary>
+    /// Every edge must connect two nodes with the SAME container owner (both top-level, or both in the
+    /// same container body). A crossing edge — a body node wired to an outside node, or vice-versa — is
+    /// silently dropped by <c>SubgraphView</c> (which keeps only edges wholly inside a subgraph), so the
+    /// author's intended connection would never fire. Surface it at save time instead of at a confusing run.
+    /// </summary>
+    private static void CheckNoEdgeCrossesContainerBoundary(WorkflowDefinition definition, IReadOnlyDictionary<string, string?> ownerByNodeId, List<string> errors)
+    {
+        foreach (var edge in definition.Edges)
+        {
+            if (!ownerByNodeId.TryGetValue(edge.From, out var fromOwner)) continue;   // unknown endpoint — CheckEdgeEndpoints flags it
+            if (!ownerByNodeId.TryGetValue(edge.To, out var toOwner)) continue;
+
+            if (fromOwner != toOwner)
+                errors.Add($"Edge '{edge.From}' → '{edge.To}' crosses a container boundary. A container body connects to the rest of the graph only through the container node itself, not through its body nodes.");
+        }
+    }
+
+    /// <summary>A container may not be nested deeper than <see cref="MapPlan.MaxNestingDepth"/> containers — the save-time mirror of the engine's run-time nesting guard. Depth = the number of container ancestors via the ParentId chain.</summary>
+    private void CheckContainerNestingDepth(NodeDefinition node, IReadOnlyDictionary<string, string?> ownerByNodeId, List<string> errors)
+    {
+        // depth = the number of container ancestors via the ParentId chain. The engine refuses a container
+        // whose incoming iteration key already has MaxNestingDepth segments (one per enclosing container),
+        // so a container with >= MaxNestingDepth ancestors is over the limit — mirror that exactly here.
+        var depth = 0;
+        var ancestor = node.ParentId;
+        while (ancestor != null && ownerByNodeId.TryGetValue(ancestor, out var grandparent))
+        {
+            depth++;
+            if (depth >= MapPlan.MaxNestingDepth)
+            {
+                errors.Add($"Container '{node.Id}' is nested deeper than the {MapPlan.MaxNestingDepth}-level limit.");
+                return;
+            }
+            ancestor = grandparent;
+        }
+    }
+
+    /// <summary>
+    /// A <c>flow.map</c> body (nodes whose <c>ParentId</c> is the map) must be non-empty, rooted at exactly
+    /// one <c>flow.map_start</c>, and end in exactly one TERMINAL node — the single body node with no
+    /// in-body outgoing edge, whose output becomes each element's result. The single-terminal rule is what
+    /// lets the reduce pick a per-element result unambiguously (PR1 design lock).
+    /// </summary>
+    private void CheckMapBodyShape(WorkflowDefinition definition, NodeDefinition mapNode, List<string> errors)
+    {
+        var body = definition.Nodes.Where(n => n.ParentId == mapNode.Id).ToList();
+
+        if (body.Count == 0)
+        {
+            errors.Add($"Map '{mapNode.Id}' has an empty body. Add a flow.map_start and at least one body node.");
+            return;
+        }
+
+        var starts = body.Count(n => n.TypeKey == "flow.map_start");
+        if (starts != 1)
+            errors.Add($"Map '{mapNode.Id}' body must have exactly one flow.map_start (found {starts}).");
+
+        var bodyIds = body.Select(n => n.Id).ToHashSet();
+        var withOutgoing = definition.Edges.Where(e => bodyIds.Contains(e.From)).Select(e => e.From).ToHashSet();
+        var terminals = body.Where(n => !withOutgoing.Contains(n.Id)).ToList();
+
+        if (terminals.Count != 1)
+            errors.Add($"Map '{mapNode.Id}' body must end in exactly one terminal node (the per-element result); found {terminals.Count}.");
     }
 
     private static IEnumerable<string> ExtractRefPaths(System.Text.Json.JsonElement element)
