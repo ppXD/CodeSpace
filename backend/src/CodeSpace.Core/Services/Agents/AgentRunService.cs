@@ -2,6 +2,7 @@ using System.Text.Json;
 using CodeSpace.Core.DependencyInjection;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
+using CodeSpace.Core.Services.Agents.Sandbox;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Dtos.Agents;
 using CodeSpace.Messages.Enums;
@@ -70,6 +71,19 @@ public interface IAgentRunService
     Task<bool> CancelQueuedAsync(Guid runId, string reason, CancellationToken cancellationToken);
 
     /// <summary>
+    /// Cancel a run that is actively <see cref="AgentRunStatus.Running"/> — the operator-cancel kill path for a
+    /// branch agent whose sandbox process is already launched (the running-agent half of a run cancel, alongside
+    /// <see cref="CancelQueuedAsync"/> for the not-yet-launched half). A Running-guarded CAS → <c>Cancelled</c>
+    /// (a deliberate cancel, NOT Failed), epoch-fenced exactly like the reconciler's abandon: the kill is issued
+    /// ONLY on a won CAS, so a run that legitimately completed in the same instant (a lost CAS) is never killed
+    /// out from under its worker. On a won CAS it best-effort <c>TerminateAsync</c>s the durable process tree (so
+    /// the orphaned agent stops holding its workspace + burning the injected model credential) — the kill failing
+    /// never undoes the cancel. <paramref name="reason"/> is stamped as the run's Error. Returns whether it won
+    /// the row (false = no longer Running — already terminal / not yet launched → leave it alone).
+    /// </summary>
+    Task<bool> CancelRunningAsync(Guid runId, string reason, CancellationToken cancellationToken);
+
+    /// <summary>
     /// As <see cref="CompleteAsync(Guid,AgentRunResult,CancellationToken)"/>, but ALSO fenced on
     /// <paramref name="expectedEpoch"/> — the epoch the caller claimed with (<see cref="MarkRunningAsync"/>).
     /// The status-guarded CAS additionally requires the run still carries that epoch, so a worker whose run was
@@ -105,12 +119,14 @@ public sealed class AgentRunService : IAgentRunService, IScopedDependency
 {
     private readonly CodeSpaceDbContext _db;
     private readonly IAdmissionController _admissionController;
+    private readonly ISandboxRunnerRegistry _runners;
     private readonly ILogger<AgentRunService> _logger;
 
-    public AgentRunService(CodeSpaceDbContext db, IAdmissionController admissionController, ILogger<AgentRunService> logger)
+    public AgentRunService(CodeSpaceDbContext db, IAdmissionController admissionController, ISandboxRunnerRegistry runners, ILogger<AgentRunService> logger)
     {
         _db = db;
         _admissionController = admissionController;
+        _runners = runners;
         _logger = logger;
     }
 
@@ -292,6 +308,70 @@ public sealed class AgentRunService : IAgentRunService, IScopedDependency
 
         _logger.LogInformation("Agent run cancelled while still queued. RunId={RunId} Reason={Reason}", runId, reason);
         return true;
+    }
+
+    public async Task<bool> CancelRunningAsync(Guid runId, string reason, CancellationToken cancellationToken)
+    {
+        // Read the run's epoch + handle FRESH + untracked, then flip via a status-guarded, epoch-fenced CAS pinned
+        // to Running (mirrors the reconciler's AbandonAsync, but → Cancelled, a deliberate cancel, not Failed).
+        // Fencing on the epoch we just read means a worker whose run was reclaimed (the reclaim bumped the epoch)
+        // and then revived can't be killed by a cancel that observed the old epoch — and, crucially, a run that
+        // legitimately completed in the same instant loses the CAS, so we never kill a finished run. 0 rows = no
+        // longer Running at this epoch → leave it alone.
+        var snapshot = await _db.AgentRun.AsNoTracking()
+            .Where(r => r.Id == runId)
+            .Select(r => new { r.Status, r.FenceEpoch, r.RunnerHandleJson })
+            .SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
+
+        if (snapshot is null || snapshot.Status != AgentRunStatus.Running) return false;
+
+        var cancelled = await _db.AgentRun
+            .Where(r => r.Id == runId && r.Status == AgentRunStatus.Running && r.FenceEpoch == snapshot.FenceEpoch)
+            .ExecuteUpdateAsync(s => s
+                .SetProperty(r => r.Status, AgentRunStatus.Cancelled)
+                .SetProperty(r => r.Error, reason)
+                .SetProperty(r => r.CompletedAt, (DateTimeOffset?)DateTimeOffset.UtcNow), cancellationToken)
+            .ConfigureAwait(false);
+
+        if (cancelled == 0) return false;
+
+        // Won the CAS → kill the sandbox process tree so the orphaned agent stops holding its workspace + burning
+        // the injected model credential. Best-effort (mirrors AbandonAsync's TerminateQuietlyAsync): the cancel
+        // stands even if the kill can't be issued. Only a durable runner with a parseable handle can be killed; a
+        // non-durable / handle-less run is already Cancelled and has no detached process to reap.
+        var durable = ResolveDurableRunner(snapshot.RunnerHandleJson, out var handle);
+        if (durable is not null && handle is not null)
+            await TerminateQuietlyAsync(durable, handle, runId, cancellationToken).ConfigureAwait(false);
+
+        _logger.LogInformation("Agent run cancelled while running. RunId={RunId} Reason={Reason}", runId, reason);
+        return true;
+    }
+
+    /// <summary>Resolve the durable runner for a persisted handle, or null when the handle is absent/unparseable or its runner isn't durable (then there is no detached process to terminate). Mirrors the reconciler's resolver.</summary>
+    private ISandboxDurableRunner? ResolveDurableRunner(string? handleJson, out SandboxHandle? handle)
+    {
+        handle = null;
+
+        if (string.IsNullOrWhiteSpace(handleJson)) return null;
+
+        SandboxHandle? parsed;
+        try { parsed = JsonSerializer.Deserialize<SandboxHandle>(handleJson, AgentJson.Options); }
+        catch (JsonException) { return null; }
+
+        if (parsed is null) return null;
+
+        handle = parsed;
+        return _runners.All.FirstOrDefault(r => r.Kind == parsed.Kind) as ISandboxDurableRunner;
+    }
+
+    /// <summary>Kill the cancelled run's process tree via its durable handle, swallowing any failure (the run still reached Cancelled; at worst the process lingers to its deadline) so a kill error never propagates out of the cancel.</summary>
+    private async Task TerminateQuietlyAsync(ISandboxDurableRunner durable, SandboxHandle handle, Guid runId, CancellationToken cancellationToken)
+    {
+        try { await durable.TerminateAsync(handle, cancellationToken).ConfigureAwait(false); }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to terminate the process for cancelled run {RunId}; it may keep running until its wall-clock deadline", runId);
+        }
     }
 
     public async Task<AgentRun> GetAsync(Guid runId, CancellationToken cancellationToken) =>

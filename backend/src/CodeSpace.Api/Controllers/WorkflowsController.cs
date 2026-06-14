@@ -110,6 +110,19 @@ public class WorkflowsController : ControllerBase
         return Ok(new { resumed });
     }
 
+    /// <summary>
+    /// Operator cancel: abort a non-terminal run + tear down its branch agents and staged children. Team-scoped —
+    /// a run that isn't the caller's returns 404 (fail-closed). An already-terminal run is an idempotent no-op
+    /// reported as <c>{ cancelled: false, status }</c>; a successful flip returns <c>{ cancelled: true, status:
+    /// "Cancelled", agentRunsCancelled }</c>.
+    /// </summary>
+    [HttpPost("runs/{runId:guid}/cancel")]
+    public async Task<IActionResult> Cancel([FromRoute] Guid runId, CancellationToken cancellationToken)
+    {
+        var outcome = await _mediator.Send(new CancelRunCommand { RunId = runId }, cancellationToken).ConfigureAwait(false);
+        return outcome == null ? NotFound() : Ok(outcome);
+    }
+
     /// <summary>Editor palette: every loaded node type's manifest + JSON schemas.</summary>
     [HttpGet("node-manifests")]
     public async Task<IActionResult> ListNodeManifests([FromQuery] ListNodeManifestsQuery query, CancellationToken cancellationToken)

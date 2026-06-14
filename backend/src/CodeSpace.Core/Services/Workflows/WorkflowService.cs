@@ -3,6 +3,7 @@ using CodeSpace.Core.DependencyInjection;
 using CodeSpace.Core.Middlewares.Transactional;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
+using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Workflows.Dispatch;
 using CodeSpace.Core.Services.Workflows.Engine;
 using CodeSpace.Core.Services.Workflows.Nodes;
@@ -33,9 +34,13 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
     private readonly IWorkflowRunDispatcher _runDispatcher;
     private readonly Engine.IWorkflowResumeService _resumeService;
     private readonly IPostCommitActions _postCommit;
+    private readonly IAgentRunService _agentRunService;
     private readonly ILogger<WorkflowService> _logger;
 
-    public WorkflowService(CodeSpaceDbContext db, DefinitionValidator validator, INodeRegistry nodeRegistry, Lifecycle.IRunRecordLogger recordLogger, IRunStarter runStarter, IWorkflowRunDispatcher runDispatcher, Engine.IWorkflowResumeService resumeService, IPostCommitActions postCommit, ILogger<WorkflowService> logger)
+    /// <summary>Reason stamped on a branch agent run aborted by the kill-wave when an operator cancels its parent workflow run.</summary>
+    private const string OperatorCancelledAgentReason = "Cancelled because its parent workflow run was cancelled by an operator.";
+
+    public WorkflowService(CodeSpaceDbContext db, DefinitionValidator validator, INodeRegistry nodeRegistry, Lifecycle.IRunRecordLogger recordLogger, IRunStarter runStarter, IWorkflowRunDispatcher runDispatcher, Engine.IWorkflowResumeService resumeService, IPostCommitActions postCommit, IAgentRunService agentRunService, ILogger<WorkflowService> logger)
     {
         _db = db;
         _validator = validator;
@@ -45,6 +50,7 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
         _runDispatcher = runDispatcher;
         _resumeService = resumeService;
         _postCommit = postCommit;
+        _agentRunService = agentRunService;
         _logger = logger;
     }
 
@@ -363,6 +369,166 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
             runId, teamId, approved, actorUserId, resumed);
 
         return resumed;
+    }
+
+    public async Task<CancelRunOutcome?> CancelRunAsync(Guid runId, Guid teamId, CancellationToken cancellationToken)
+    {
+        // Tenancy + fail-closed: read the run's current status only if it's the caller's team. A foreign / phantom
+        // run returns null (the controller maps that to 404) — never a silent success, never a leak of existence.
+        var current = await _db.WorkflowRun.AsNoTracking()
+            .Where(r => r.Id == runId && r.TeamId == teamId)
+            .Select(r => (WorkflowRunStatus?)r.Status)
+            .SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
+
+        if (current is null) return null;
+
+        // Already terminal → idempotent no-op. Report the existing terminal status so the caller shows "already
+        // finished" rather than a spurious cancel.
+        if (WorkflowRunState.IsTerminal(current.Value))
+            return new CancelRunOutcome { Cancelled = false, Status = current.Value, AgentRunsCancelled = 0 };
+
+        // Status-guarded CAS from ANY non-terminal state → Cancelled (a pure UPDATE, not a tracked save on xmin, so
+        // it never races the engine's own heartbeat-driven concurrency). 0 rows = the run reached a terminal state
+        // between the read and the flip (the engine completed it, or a concurrent cancel won) → no-op, re-read.
+        var flipped = await _db.WorkflowRun
+            .Where(r => r.Id == runId && r.TeamId == teamId && r.Status == current.Value)
+            .ExecuteUpdateAsync(s => s
+                .SetProperty(r => r.Status, WorkflowRunStatus.Cancelled)
+                .SetProperty(r => r.CompletedAt, (DateTimeOffset?)DateTimeOffset.UtcNow), cancellationToken)
+            .ConfigureAwait(false);
+
+        if (flipped == 0) return await ReReadTerminalOutcomeAsync(runId, teamId, cancellationToken).ConfigureAwait(false);
+
+        var agentRunsCancelled = await TearDownCancelledRunAsync(runId, cancellationToken).ConfigureAwait(false);
+
+        await _recordLogger.RunCancelledAsync(runId, TimeSpan.Zero, cancellationToken).ConfigureAwait(false);
+
+        _logger.LogInformation("Workflow run cancelled by operator. RunId={RunId} TeamId={TeamId} From={From} AgentRunsCancelled={AgentRunsCancelled}", runId, teamId, current.Value, agentRunsCancelled);
+
+        return new CancelRunOutcome { Cancelled = true, Status = WorkflowRunStatus.Cancelled, AgentRunsCancelled = agentRunsCancelled };
+    }
+
+    /// <summary>The flip lost the CAS (the run went terminal between read and write). Re-read its now-terminal status as a clean no-op outcome.</summary>
+    private async Task<CancelRunOutcome> ReReadTerminalOutcomeAsync(Guid runId, Guid teamId, CancellationToken cancellationToken)
+    {
+        var status = await _db.WorkflowRun.AsNoTracking()
+            .Where(r => r.Id == runId && r.TeamId == teamId)
+            .Select(r => r.Status)
+            .SingleAsync(cancellationToken).ConfigureAwait(false);
+
+        return new CancelRunOutcome { Cancelled = false, Status = status, AgentRunsCancelled = 0 };
+    }
+
+    /// <summary>
+    /// Tear down a just-cancelled run, best-effort: KILL-WAVE its branch agent runs (Queued + Running), cancel its
+    /// staged non-terminal sub-workflow children, and resolve its still-pending waits so none dangle. Best-effort end
+    /// to end — one failed kill never aborts the cancel (the run is already Cancelled; the reconciler's parent-run-
+    /// terminal guard re-cleans anything missed). Returns how many branch agent runs the kill-wave flipped.
+    /// </summary>
+    private async Task<int> TearDownCancelledRunAsync(Guid runId, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var agentRunsCancelled = await KillWaveBranchAgentsAsync(runId, cancellationToken).ConfigureAwait(false);
+
+            await CancelStagedSubworkflowChildrenAsync(runId, cancellationToken).ConfigureAwait(false);
+
+            await CancelPendingWaitsAsync(runId, cancellationToken).ConfigureAwait(false);
+
+            return agentRunsCancelled;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Run {RunId} was cancelled but tearing down its agents/children failed; the reconciler will catch any orphan", runId);
+            return 0;
+        }
+    }
+
+    /// <summary>
+    /// The kill-wave: for every branch <c>AgentRun</c> the cancelled run spawned, abort it by its live status —
+    /// Queued via the agent service's Queued-guarded CAS (a worker that just claimed it loses, untouched), Running
+    /// via the epoch-fenced Running CAS + a durable process kill. Each is best-effort + idempotent; a worker landing
+    /// a run terminal in the same instant simply loses the CAS, so no in-flight completion is trampled.
+    /// </summary>
+    private async Task<int> KillWaveBranchAgentsAsync(Guid runId, CancellationToken cancellationToken)
+    {
+        var branchAgents = await _db.AgentRun.AsNoTracking()
+            .Where(r => r.WorkflowRunId == runId && (r.Status == AgentRunStatus.Queued || r.Status == AgentRunStatus.Running))
+            .Select(r => new { r.Id, r.Status })
+            .ToListAsync(cancellationToken).ConfigureAwait(false);
+
+        var cancelled = 0;
+
+        foreach (var agent in branchAgents)
+            if (await KillBranchAgentAsync(agent.Id, agent.Status, cancellationToken).ConfigureAwait(false)) cancelled++;
+
+        return cancelled;
+    }
+
+    /// <summary>
+    /// Kill one branch agent, closing the snapshot-vs-claim TOCTOU: a branch agent's executor is dispatched at
+    /// suspend time, so one read Queued can be claimed Queued → Running between the snapshot and this call. We try
+    /// the CAS for its snapshot status first; if a snapshot-Queued agent lost the Queued CAS (0 rows), re-read its
+    /// LIVE status and fall through to <see cref="IAgentRunService.CancelRunningAsync"/> when it's now Running — so a
+    /// concurrently-claimed agent is still killed rather than orphaned live under a Cancelled parent. The extra
+    /// round-trip is paid ONLY on the lost-CAS path. Both CASes are idempotent + status/epoch-guarded, so at most
+    /// one wins and a run another worker legitimately landed terminal is never trampled.
+    /// </summary>
+    private async Task<bool> KillBranchAgentAsync(Guid agentId, AgentRunStatus snapshotStatus, CancellationToken cancellationToken)
+    {
+        if (snapshotStatus == AgentRunStatus.Running)
+            return await _agentRunService.CancelRunningAsync(agentId, OperatorCancelledAgentReason, cancellationToken).ConfigureAwait(false);
+
+        if (await _agentRunService.CancelQueuedAsync(agentId, OperatorCancelledAgentReason, cancellationToken).ConfigureAwait(false))
+            return true;
+
+        // Lost the Queued CAS: a worker claimed it Queued → Running after the snapshot. Re-read its live status and
+        // kill the now-Running agent (otherwise it runs on under a Cancelled parent — the exact orphan the kill-wave
+        // exists to prevent). Any other status = already terminal → genuinely nothing to do.
+        var liveStatus = await _db.AgentRun.AsNoTracking()
+            .Where(r => r.Id == agentId)
+            .Select(r => (AgentRunStatus?)r.Status)
+            .SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
+
+        if (liveStatus != AgentRunStatus.Running) return false;
+
+        return await _agentRunService.CancelRunningAsync(agentId, OperatorCancelledAgentReason, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>Cancel the run's staged non-terminal sub-workflow children (Pending/Enqueued → Cancelled CAS), mirroring the engine's source-side cleanup. Child runs that already started running / finished are left to their own lifecycle.</summary>
+    private async Task CancelStagedSubworkflowChildrenAsync(Guid runId, CancellationToken cancellationToken)
+    {
+        var childRunIds = await _db.WorkflowRunWait.AsNoTracking()
+            .Where(w => w.RunId == runId && w.WaitKind == WorkflowWaitKinds.Subworkflow && w.Status == WorkflowWaitStatuses.Pending)
+            .Select(w => w.Token)
+            .ToListAsync(cancellationToken).ConfigureAwait(false);
+
+        var ids = childRunIds.Select(t => Guid.TryParse(t, out var id) ? id : (Guid?)null).Where(id => id.HasValue).Select(id => id!.Value).ToList();
+
+        if (ids.Count == 0) return;
+
+        await _db.WorkflowRun
+            .Where(r => ids.Contains(r.Id) && (r.Status == WorkflowRunStatus.Pending || r.Status == WorkflowRunStatus.Enqueued))
+            .ExecuteUpdateAsync(s => s
+                .SetProperty(r => r.Status, WorkflowRunStatus.Cancelled)
+                .SetProperty(r => r.CompletedAt, (DateTimeOffset?)DateTimeOffset.UtcNow), cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Resolve the cancelled run's still-pending waits so none dangle (the wait state is now moot — the run is
+    /// terminal). Flips them <c>Resolved</c> with <c>ResolvedAt</c>, mirroring the engine's own terminal-cleanup
+    /// (<c>CancelPendingWaitsAndChildrenAsync</c>) — the DB wait-status domain is Pending/Resolved (no Cancelled
+    /// value), and a Resolved wait drops out of every reconciler sweep + the run-detail's resume affordance.
+    /// </summary>
+    private async Task CancelPendingWaitsAsync(Guid runId, CancellationToken cancellationToken)
+    {
+        await _db.WorkflowRunWait
+            .Where(w => w.RunId == runId && w.Status == WorkflowWaitStatuses.Pending)
+            .ExecuteUpdateAsync(s => s
+                .SetProperty(w => w.Status, WorkflowWaitStatuses.Resolved)
+                .SetProperty(w => w.ResolvedAt, (DateTimeOffset?)DateTimeOffset.UtcNow), cancellationToken)
+            .ConfigureAwait(false);
     }
 
     public async Task<IReadOnlyList<WorkflowRunSummary>> ListRunsAsync(Guid workflowId, Guid teamId, int limit, CancellationToken cancellationToken)
