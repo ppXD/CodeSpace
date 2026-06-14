@@ -89,6 +89,31 @@ public class ToolCallKeyTests
     }
 
     [Fact]
+    public void InputHash_distinguishes_two_19_digit_integers_differing_only_in_the_last_digit()
+    {
+        // The exactly-once defect this guards: a 19-digit id does NOT overflow double but LOSES precision under the
+        // "R" round-trip, collapsing two DISTINCT ids to the SAME canonical token → the at-most-once key would merge
+        // two genuinely different calls + the second side effect would silently dedup away. Lossless Int64
+        // canonicalization keeps them distinct. (1234567890123456789 vs ...788 are equal as double.)
+        var a = ToolCallKey.InputHash(Parse("""{"id":1234567890123456789}"""));
+        var b = ToolCallKey.InputHash(Parse("""{"id":1234567890123456788}"""));
+
+        a.ShouldNotBe(b, "two distinct 19-digit integer ids MUST hash differently — the exactly-once key must never collapse distinct calls");
+    }
+
+    [Fact]
+    public void InputHash_distinguishes_two_30_digit_integers_beyond_decimal_range()
+    {
+        // The deeper tail of the same defect: a 30-digit integer exceeds BOTH Int64 (~19 digits) AND decimal (~29),
+        // so a double "R" fallback would lose precision and collapse two distinct ids. The raw-token-text fallback is
+        // lossless for any magnitude, so these stay distinct — no ceiling on the no-collapse guarantee.
+        var a = ToolCallKey.InputHash(Parse("""{"id":123456789012345678901234567890}"""));
+        var b = ToolCallKey.InputHash(Parse("""{"id":123456789012345678901234567891}"""));
+
+        a.ShouldNotBe(b, "two distinct 30-digit integer ids (beyond decimal range) MUST hash differently — raw-text canonicalization has no precision ceiling");
+    }
+
+    [Fact]
     public void InputHash_is_sensitive_to_array_order()
     {
         // Array order is SEMANTIC (a list of steps, args) — reordering is a different call, unlike object keys.

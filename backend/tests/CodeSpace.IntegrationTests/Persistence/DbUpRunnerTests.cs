@@ -83,6 +83,20 @@ public class DbUpRunnerTests
             $"Diagnose with: psql -c '\\d {tableName}' against the test database.");
     }
 
+    [Theory]
+    [InlineData("ux_tool_call_ledger_run_key", "0049_tool_call_ledger.sql")]                  // the exactly-once invariant — UNIQUE (run, idempotency_key)
+    [InlineData("idx_tool_call_ledger_team_created", "0049_tool_call_ledger.sql")]            // team-scoped audit read, newest first
+    [InlineData("idx_tool_call_ledger_approval_token", "0049_tool_call_ledger.sql")]          // respond path locates a parked approval by its server-side token
+    [InlineData("idx_tool_call_ledger_due_approvals", "0051_tool_call_ledger_due_approvals_index.sql")] // D3 reaper: partial index matching its undecided-past-deadline predicate (no full-table scan)
+    public async Task Index_exists_after_migration(string indexName, string addedBy)
+    {
+        var exists = await IndexExistsAsync(indexName).ConfigureAwait(false);
+
+        exists.ShouldBeTrue(
+            $"Index '{indexName}' must exist after migrations apply — added by {addedBy}. " +
+            $"If missing, that migration did not run (or the index was renamed). Diagnose with: psql -c '\\di {indexName}' against the test database.");
+    }
+
     private async Task<bool> TableExistsAsync(string tableName)
     {
         await using var conn = new NpgsqlConnection(_fixture.ConnectionString);
@@ -107,6 +121,20 @@ public class DbUpRunnerTests
             conn);
         cmd.Parameters.AddWithValue("@t", tableName);
         cmd.Parameters.AddWithValue("@c", columnName);
+
+        var result = await cmd.ExecuteScalarAsync().ConfigureAwait(false);
+        return (bool)result!;
+    }
+
+    private async Task<bool> IndexExistsAsync(string indexName)
+    {
+        await using var conn = new NpgsqlConnection(_fixture.ConnectionString);
+        await conn.OpenAsync().ConfigureAwait(false);
+
+        await using var cmd = new NpgsqlCommand(
+            "SELECT EXISTS (SELECT FROM pg_indexes WHERE schemaname = 'public' AND indexname = @i)",
+            conn);
+        cmd.Parameters.AddWithValue("@i", indexName);
 
         var result = await cmd.ExecuteScalarAsync().ConfigureAwait(false);
         return (bool)result!;

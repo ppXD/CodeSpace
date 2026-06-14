@@ -360,6 +360,109 @@ public class McpToolApprovalFlowTests
         (await BotMemberCountAsync(foreignChannel)).ShouldBe(0, "the bot is NEVER force-joined to the foreign team's conversation");
     }
 
+    [Fact]
+    public async Task Reattach_mid_approval_approves_through_a_new_instance_and_runs_exactly_once_across_the_boundary()
+    {
+        // DURABILITY across a WORKER TEARDOWN: a tool call parks an approval on ONE handler instance (its own DI scope
+        // = its own DbContext + connection-scoped collaborators). That scope is then DISPOSED — the worker is torn
+        // down mid-approval, exactly as a deploy / crash / reconciler reclaim would. A BRAND-NEW handler instance for
+        // the SAME run (a fresh scope = a fresh DbContext, the reattached worker) is opened; a human approves via the
+        // real respond path, and the model re-issues the exact call THROUGH THE NEW INSTANCE. The durable ledger row
+        // is the only thing that survives the boundary, so the side effect runs EXACTLY once + NO second card is
+        // posted across the two instances. The review rested this on inference; this pins it.
+        var (teamId, ownerId, channelId) = await SeedTeamChannelAsync();
+        var runId = Guid.NewGuid();
+        var tool = new CountingWriteTool();
+
+        var previous = Environment.GetEnvironmentVariable(McpRequestHandler.ApprovalBoundSecondsEnvVar);
+        Environment.SetEnvironmentVariable(McpRequestHandler.ApprovalBoundSecondsEnvVar, "1");   // first call times out → row parks, then the worker tears down
+
+        Guid ledgerId, messageId;
+
+        try
+        {
+            // ── Instance 1: park the approval, then DISPOSE the scope (worker teardown mid-approval). ──
+            using (var scope1 = _fixture.BeginScope())
+            {
+                var park = await CallToolAsync(ApprovalHandler(scope1, AgentAutonomyLevel.Standard, teamId, runId, channelId, tool), "git.open_pr", new { branch = "main" });
+
+                park.GetProperty("isError").GetBoolean().ShouldBeTrue("the first call bound-elapses to the pending-ticket while the worker is up");
+                tool.CallCount.ShouldBe(0, "no decision yet → the side effect has not run on instance 1");
+
+                ledgerId = (await ReadRunRowsAsync(teamId, runId)).ShouldHaveSingleItem().Id;
+                messageId = (await ReadRowAsync(ledgerId)).ApprovalMessageId!.Value;
+                (await ReadRowAsync(ledgerId)).Status.ShouldBe(ToolCallLedgerStatus.AwaitingApproval, "the durable row stays AwaitingApproval — it must survive the teardown");
+            }   // scope1 disposed → instance 1 + its DbContext + connection collaborators are gone
+
+            // ── A human approves out-of-band (its own scope), then instance 2 re-calls THROUGH a fresh instance. ──
+            await RespondAsync(teamId, messageId, ApproveKey, ownerId);
+
+            using (var scope2 = _fixture.BeginScope())
+            {
+                var reCall = await CallToolAsync(ApprovalHandler(scope2, AgentAutonomyLevel.Standard, teamId, runId, channelId, tool), "git.open_pr", new { branch = "main" });
+
+                reCall.GetProperty("isError").GetBoolean().ShouldBeFalse("the re-call on the NEW instance reads the durable approved row + runs the real result");
+            }
+
+            tool.CallCount.ShouldBe(1, "exactly once across the instance boundary — the durable ledger, not in-memory state, carries the decision");
+            (await ReadRowAsync(ledgerId)).Status.ShouldBe(ToolCallLedgerStatus.Succeeded);
+            (await ReadRunCardCountAsync(teamId, channelId)).ShouldBe(1, "no SECOND card was posted by the new instance — one card per (run, key) across the reattach");
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable(McpRequestHandler.ApprovalBoundSecondsEnvVar, previous);
+        }
+    }
+
+    [Fact]
+    public async Task The_reaper_expiring_a_row_wakes_a_genuinely_blocked_call_which_returns_the_Expired_terminal()
+    {
+        // REAPER vs a LIVE blocked call: a handler is GENUINELY blocked in BlockForDecisionAsync (a Task.Run-d
+        // tools/call parked in Task.WhenAny on the waiter, NOT a tiny-bound timeout), while the D3 reaper
+        // (IToolApprovalExpiryService.ExpireStaleApprovalsAsync via ExpireDueAsync) durably expires its row. The
+        // reaper's same-pod waiter wake must make the blocked call resume IMMEDIATELY, re-read the now-Expired row,
+        // and return the Expired terminal (an isError refusal carrying the expiry reason). The side effect never runs.
+        var (teamId, _, channelId) = await SeedTeamChannelAsync();
+        var runId = Guid.NewGuid();
+        var tool = new CountingWriteTool();
+
+        var previous = Environment.GetEnvironmentVariable(McpRequestHandler.ApprovalBoundSecondsEnvVar);
+        Environment.SetEnvironmentVariable(McpRequestHandler.ApprovalBoundSecondsEnvVar, "60");   // a LONG bound → the call genuinely blocks; the reaper, not the timeout, ends the wait
+
+        try
+        {
+            using var scope = _fixture.BeginScope();
+            var handler = ApprovalHandler(scope, AgentAutonomyLevel.Standard, teamId, runId, channelId, tool);
+
+            // The call BLOCKS on the waiter (60s bound) → drive it on a background task; it must NOT return until the reaper fires.
+            var call = Task.Run(() => CallToolAsync(handler, "git.open_pr", new { branch = "main" }));
+
+            var (ledgerId, _) = await WaitForPostedCardAsync(teamId, runId);   // the card posted → the handler is now parked in BlockForDecisionAsync
+
+            call.IsCompleted.ShouldBeFalse("the call is genuinely blocked on the waiter — the 60s bound has not elapsed");
+
+            // The reaper expires due rows (now far enough ahead that the deadline is past). Outside a command
+            // transaction the post-commit waiter wake runs inline → it signals the live blocked waiter. The reaper is
+            // global (team-agnostic), so a sibling test's parked row may also expire — assert THIS row was expired (≥1).
+            int expired;
+            using (var reaperScope = _fixture.BeginScope())
+                expired = await reaperScope.Resolve<IToolApprovalExpiryService>().ExpireDueAsync(DateTimeOffset.UtcNow.AddHours(1), CancellationToken.None);
+
+            expired.ShouldBeGreaterThanOrEqualTo(1, "the reaper durably expired this undecided past-deadline approval (and possibly sibling rows — it's a global sweep)");
+
+            var result = await call;   // the wake makes the blocked call resume + re-read the Expired terminal
+
+            result.GetProperty("isError").GetBoolean().ShouldBeTrue("the woken call returns the Expired terminal as a refusal");
+            Text(result).ShouldContain("expired", customMessage: "the blocked call replays the Expired terminal's reason");
+            tool.CallCount.ShouldBe(0, "an expired approval NEVER runs the side effect");
+            (await ReadRowAsync(ledgerId)).Status.ShouldBe(ToolCallLedgerStatus.Expired, "the durable row is Expired — the reaper CAS is the authority");
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable(McpRequestHandler.ApprovalBoundSecondsEnvVar, previous);
+        }
+    }
+
     // ── The REAL endpoint over a per-run UDS (Tier 🟢 — proves the endpoint threads the D2 deps + blocks over the socket) ──
 
     [Fact]
