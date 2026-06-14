@@ -460,15 +460,39 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
         var cancelled = 0;
 
         foreach (var agent in branchAgents)
-        {
-            var won = agent.Status == AgentRunStatus.Queued
-                ? await _agentRunService.CancelQueuedAsync(agent.Id, OperatorCancelledAgentReason, cancellationToken).ConfigureAwait(false)
-                : await _agentRunService.CancelRunningAsync(agent.Id, OperatorCancelledAgentReason, cancellationToken).ConfigureAwait(false);
-
-            if (won) cancelled++;
-        }
+            if (await KillBranchAgentAsync(agent.Id, agent.Status, cancellationToken).ConfigureAwait(false)) cancelled++;
 
         return cancelled;
+    }
+
+    /// <summary>
+    /// Kill one branch agent, closing the snapshot-vs-claim TOCTOU: a branch agent's executor is dispatched at
+    /// suspend time, so one read Queued can be claimed Queued → Running between the snapshot and this call. We try
+    /// the CAS for its snapshot status first; if a snapshot-Queued agent lost the Queued CAS (0 rows), re-read its
+    /// LIVE status and fall through to <see cref="IAgentRunService.CancelRunningAsync"/> when it's now Running — so a
+    /// concurrently-claimed agent is still killed rather than orphaned live under a Cancelled parent. The extra
+    /// round-trip is paid ONLY on the lost-CAS path. Both CASes are idempotent + status/epoch-guarded, so at most
+    /// one wins and a run another worker legitimately landed terminal is never trampled.
+    /// </summary>
+    private async Task<bool> KillBranchAgentAsync(Guid agentId, AgentRunStatus snapshotStatus, CancellationToken cancellationToken)
+    {
+        if (snapshotStatus == AgentRunStatus.Running)
+            return await _agentRunService.CancelRunningAsync(agentId, OperatorCancelledAgentReason, cancellationToken).ConfigureAwait(false);
+
+        if (await _agentRunService.CancelQueuedAsync(agentId, OperatorCancelledAgentReason, cancellationToken).ConfigureAwait(false))
+            return true;
+
+        // Lost the Queued CAS: a worker claimed it Queued → Running after the snapshot. Re-read its live status and
+        // kill the now-Running agent (otherwise it runs on under a Cancelled parent — the exact orphan the kill-wave
+        // exists to prevent). Any other status = already terminal → genuinely nothing to do.
+        var liveStatus = await _db.AgentRun.AsNoTracking()
+            .Where(r => r.Id == agentId)
+            .Select(r => (AgentRunStatus?)r.Status)
+            .SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
+
+        if (liveStatus != AgentRunStatus.Running) return false;
+
+        return await _agentRunService.CancelRunningAsync(agentId, OperatorCancelledAgentReason, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>Cancel the run's staged non-terminal sub-workflow children (Pending/Enqueued → Cancelled CAS), mirroring the engine's source-side cleanup. Child runs that already started running / finished are left to their own lifecycle.</summary>

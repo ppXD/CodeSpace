@@ -168,6 +168,55 @@ public class OperatorCancelFlowTests : IDisposable
     }
 
     [Fact]
+    public async Task The_reconciler_cancels_a_running_branch_agent_orphaned_under_a_terminal_parent_and_reaps_its_process()
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        // The kill-wave's snapshot-vs-claim residue: a branch agent was claimed Queued → Running with a REAL durable
+        // process AFTER the cancel resolved its wait + flipped the parent run Cancelled. The orphan is now invisible
+        // to BOTH existing guards — its wait is Resolved (so PendingAgentRunWaitIdsAsync skips it) and it's a freshly-
+        // claimed live agent (fresh lease, no stale-window, so SweepStaleRunningAsync skips it). The new parent-terminal
+        // Running sweep is the backstop: it must CANCEL the orphan (not Failed) and reap its process tree.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var workflowId = await CreateWorkflowAsync(teamId, userId, MapOverAgentCodeDefinition());
+        var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId, payloadJson: """{ "things": ["a"] }""");
+
+        var jobClient = ResolveJobClient();
+        jobClient.Clear();
+        jobClient.AutoExecute = false;
+
+        try
+        {
+            await RunEngineAsync(runId);
+            var agentId = await BranchAgentRunIdAsync(runId, "map#0");
+
+            // Claim the branch agent Running with a real detached sleeper + its handle — the live post-launch orphan.
+            var pid = await MarkRunningWithRealDurableProcessAsync(agentId);
+            ProcessAlive(pid).ShouldBeTrue("precondition: the orphaned branch agent's durable process is running");
+
+            // Reproduce the residue end-state: the parent run is terminal (Cancelled) and the orphan's AgentRun wait
+            // is already Resolved (so it is invisible to the Pending-wait guard) — exactly what the kill-wave leaves
+            // behind when a claim lands after the cancel resolved waits but before the per-agent CAS.
+            await CancelRunAndResolveWaitsAsync(runId);
+
+            using (var scope = _fixture.BeginScope())
+                await scope.Resolve<IAgentRunReconcilerService>().ReconcileAsync(CancellationToken.None);
+
+            using (var verify = _fixture.BeginScope())
+                (await verify.Resolve<CodeSpaceDbContext>().AgentRun.AsNoTracking().SingleAsync(r => r.Id == agentId)).Status
+                    .ShouldBe(AgentRunStatus.Cancelled,
+                        "the running orphan under a terminal parent is CANCELLED by the parent-terminal sweep (a deliberate cancel, not the abandon path's Failed)");
+
+            (await WaitForProcessGoneAsync(pid)).ShouldBeTrue(
+                "the parent-terminal sweep must CancelRunningAsync the orphan, reaping its process tree — check the supervisor pid is gone");
+        }
+        finally
+        {
+            jobClient.AutoExecute = true;
+        }
+    }
+
+    [Fact]
     public async Task A_different_teams_run_cannot_be_cancelled_and_is_left_untouched()
     {
         var (ownerTeamId, ownerUserId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
@@ -296,6 +345,25 @@ public class OperatorCancelFlowTests : IDisposable
         await scope.Resolve<CodeSpaceDbContext>().WorkflowRun
             .Where(r => r.Id == runId)
             .ExecuteUpdateAsync(s => s.SetProperty(r => r.Status, status));
+    }
+
+    /// <summary>Reproduce the kill-wave residue WITHOUT routing through CancelRunAsync (which would itself kill the agent): flip the run Cancelled and resolve all its pending waits in place. Leaves a live Running branch agent orphaned under a terminal parent with NO pending wait pointing at it — the exact end-state the reconciler backstop must catch.</summary>
+    private async Task CancelRunAndResolveWaitsAsync(Guid runId)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+
+        await db.WorkflowRun
+            .Where(r => r.Id == runId)
+            .ExecuteUpdateAsync(s => s
+                .SetProperty(r => r.Status, WorkflowRunStatus.Cancelled)
+                .SetProperty(r => r.CompletedAt, (DateTimeOffset?)DateTimeOffset.UtcNow));
+
+        await db.WorkflowRunWait
+            .Where(w => w.RunId == runId && w.Status == WorkflowWaitStatuses.Pending)
+            .ExecuteUpdateAsync(s => s
+                .SetProperty(w => w.Status, WorkflowWaitStatuses.Resolved)
+                .SetProperty(w => w.ResolvedAt, (DateTimeOffset?)DateTimeOffset.UtcNow));
     }
 
     private async Task BackdateAgentRunCreatedAsync(IEnumerable<Guid> agentRunIds, TimeSpan ago)

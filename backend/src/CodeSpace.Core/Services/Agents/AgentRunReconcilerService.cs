@@ -64,6 +64,11 @@ public sealed class AgentRunReconcilerService : IAgentRunReconcilerService, ISco
         "Agent run cancelled by the reconciler — its parent workflow run reached a terminal state (cancelled or " +
         "failed) before this branch was launched, so the staged run was never started.";
 
+    /// <summary>Operator-facing reason stamped on a RUNNING branch agent run the reconciler cancels because its parent workflow run is terminal — the backstop for a live agent orphaned by the operator-cancel kill-wave's snapshot-vs-claim race. Its sandbox process is reaped so it stops holding its workspace + burning the injected model credential.</summary>
+    public const string OrphanedParentTerminalRunningError =
+        "Agent run cancelled by the reconciler — it was still running while its parent workflow run had reached a " +
+        "terminal state (cancelled or failed), so the orphaned agent was stopped and its process reaped.";
+
     private readonly CodeSpaceDbContext _db;
     private readonly IAgentRunService _runs;
     private readonly IAgentRunCompletionNotifier _notifier;
@@ -83,14 +88,67 @@ public sealed class AgentRunReconcilerService : IAgentRunReconcilerService, ISco
 
     public async Task<AgentRunReconcileSummary> ReconcileAsync(CancellationToken cancellationToken)
     {
+        var orphansCancelled = await SweepRunningUnderTerminalParentAsync(cancellationToken).ConfigureAwait(false);
+
         var (abandoned, recovered, reattached) = await SweepStaleRunningAsync(cancellationToken).ConfigureAwait(false);
 
         var (resumed, reDispatched) = await ReconcilePendingWaitsAsync(cancellationToken).ConfigureAwait(false);
 
-        if (abandoned > 0 || recovered > 0 || reattached > 0 || resumed > 0 || reDispatched > 0)
-            _logger.LogInformation("AgentRunReconciler: abandoned {Abandoned}, recovered {Recovered} from spool, re-attached {Reattached} alive run(s), resumed {Resumed} stalled parent(s), re-dispatched {ReDispatched} stuck queued run(s)", abandoned, recovered, reattached, resumed, reDispatched);
+        if (orphansCancelled > 0 || abandoned > 0 || recovered > 0 || reattached > 0 || resumed > 0 || reDispatched > 0)
+            _logger.LogInformation("AgentRunReconciler: cancelled {Orphans} running orphan(s) under terminal parents, abandoned {Abandoned}, recovered {Recovered} from spool, re-attached {Reattached} alive run(s), resumed {Resumed} stalled parent(s), re-dispatched {ReDispatched} stuck queued run(s)", orphansCancelled, abandoned, recovered, reattached, resumed, reDispatched);
 
-        return new AgentRunReconcileSummary { MarkedAbandonedFromRunning = abandoned, RecoveredFromSpool = recovered, ReattachedStaleRunning = reattached, ResumedStalledParents = resumed, ReDispatchedQueued = reDispatched };
+        return new AgentRunReconcileSummary { CancelledRunningUnderTerminalParent = orphansCancelled, MarkedAbandonedFromRunning = abandoned, RecoveredFromSpool = recovered, ReattachedStaleRunning = reattached, ResumedStalledParents = resumed, ReDispatchedQueued = reDispatched };
+    }
+
+    /// <summary>
+    /// Parent-terminal backstop for the operator-cancel kill-wave: cancel any branch <see cref="AgentRunStatus.Running"/>
+    /// run whose parent workflow run is itself TERMINAL (Cancelled / Failure / Success). Unlike <see cref="SweepStaleRunningAsync"/>
+    /// this does NOT predicate on lease-expiry or event-quiet — a freshly-claimed, heartbeating, event-emitting agent
+    /// orphaned under a just-cancelled parent (the kill-wave's snapshot-vs-claim race) is live, so the liveness sweep
+    /// would never touch it. Killing it via <see cref="IAgentRunService.CancelRunningAsync"/> (Running-guarded, epoch-fenced
+    /// CAS + a best-effort durable process kill) flips it Cancelled with its process reaped — the right terminal state
+    /// for an operator cancel (not the abandon path's Failed). Idempotent + status-guarded, so a worker landing the run
+    /// terminal in the same instant simply wins the CAS and is left alone. A per-item failure is logged + retried next
+    /// sweep, never aborting the batch.
+    /// </summary>
+    private async Task<int> SweepRunningUnderTerminalParentAsync(CancellationToken cancellationToken)
+    {
+        var candidates = await _db.AgentRun.AsNoTracking()
+            .Where(r => r.Status == AgentRunStatus.Running
+                        && r.WorkflowRunId != null
+                        && _db.WorkflowRun.Any(p => p.Id == r.WorkflowRunId
+                            && (p.Status == WorkflowRunStatus.Cancelled || p.Status == WorkflowRunStatus.Failure || p.Status == WorkflowRunStatus.Success)))
+            .OrderBy(r => r.CreatedDate)
+            .Take(BatchSize)
+            .Select(r => r.Id)
+            .ToListAsync(cancellationToken)
+            .ConfigureAwait(false);
+
+        var cancelled = 0;
+
+        foreach (var runId in candidates)
+            cancelled += await CancelOrphanRunningAsync(runId, cancellationToken).ConfigureAwait(false);
+
+        return cancelled;
+    }
+
+    /// <summary>Cancel one Running branch agent orphaned under a terminal parent, via the Running-guarded CAS (+ durable kill). A failure is logged + retried next sweep — never throws out of the sweep.</summary>
+    private async Task<int> CancelOrphanRunningAsync(Guid runId, CancellationToken cancellationToken)
+    {
+        try
+        {
+            if (!await _runs.CancelRunningAsync(runId, OrphanedParentTerminalRunningError, cancellationToken).ConfigureAwait(false))
+                return 0;
+
+            await TryAppendEventAsync(runId, AgentEventKind.Error, OrphanedParentTerminalRunningError, cancellationToken).ConfigureAwait(false);
+            _logger.LogInformation("AgentRunReconciler: cancelled running agent run {RunId} whose parent workflow run is terminal (orphaned by the kill-wave race)", runId);
+            return 1;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "AgentRunReconciler: failed to cancel running orphan agent run {RunId}; will retry next sweep", runId);
+            return 0;
+        }
     }
 
     /// <summary>
@@ -451,6 +509,9 @@ internal enum StaleOutcome
 /// <summary>Diagnostic summary of one reconcile sweep. Returned for log surfacing + the recurring-job result.</summary>
 public sealed record AgentRunReconcileSummary
 {
+    /// <summary>Running branch-agent runs cancelled because their parent workflow run was terminal — the kill-wave's parent-terminal backstop (closes the snapshot-vs-claim orphan window regardless of lease/event liveness).</summary>
+    public int CancelledRunningUnderTerminalParent { get; init; }
+
     /// <summary>Running runs flipped to Failed because their worker vanished (stale heartbeat + no events) and they were not recoverable.</summary>
     public int MarkedAbandonedFromRunning { get; init; }
 
@@ -466,5 +527,5 @@ public sealed record AgentRunReconcileSummary
     /// <summary>Stuck-Queued agent runs whose dispatch was lost and were re-enqueued to the executor.</summary>
     public int ReDispatchedQueued { get; init; }
 
-    public int Total => MarkedAbandonedFromRunning + RecoveredFromSpool + ReattachedStaleRunning + ResumedStalledParents + ReDispatchedQueued;
+    public int Total => CancelledRunningUnderTerminalParent + MarkedAbandonedFromRunning + RecoveredFromSpool + ReattachedStaleRunning + ResumedStalledParents + ReDispatchedQueued;
 }
