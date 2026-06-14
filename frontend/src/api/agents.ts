@@ -59,6 +59,32 @@ export interface AgentRunEventDto {
   occurredAt: string;
 }
 
+/** Mirrors backend `ToolCallLedgerStatus` — the lifecycle outcome of one governed tool call. */
+export type ToolCallLedgerStatus =
+  | "Pending"
+  | "Succeeded"
+  | "Failed"
+  | "Denied"
+  | "AwaitingApproval"
+  | "Running"
+  | "Expired";
+
+/**
+ * Mirrors backend `ToolCallView` — one audit row of a side-effecting MCP tool call an agent run made:
+ * what tool, the outcome, when, and the approval trail. Read-only + team-scoped at the source (the API
+ * returns [] for a foreign/unknown run). `error` is already redacted at persist; read-only tools never
+ * reach the ledger, so they're absent here.
+ */
+export interface ToolCallView {
+  toolKind: string;
+  status: ToolCallLedgerStatus;
+  createdDate: string;
+  lastModifiedDate: string;
+  error: string | null;
+  approvedByUserId: string | null;
+  approvedAt: string | null;
+}
+
 /** A run is still in flight (worth polling) while Queued or Running; terminal states stop the poll. */
 export const isAgentRunActive = (status: AgentRunStatus | undefined): boolean =>
   status === "Queued" || status === "Running";
@@ -96,4 +122,6 @@ export const agentsApi = {
   getRun: (agentRunId: string) => fetchJson<AgentRunSummary>(`/api/agents/runs/${agentRunId}`),
   listRunEvents: (agentRunId: string, after = 0) =>
     fetchJson<AgentRunEventDto[]>(`/api/agents/runs/${agentRunId}/events?after=${after}`),
+  listToolCalls: (agentRunId: string) =>
+    fetchJson<ToolCallView[]>(`/api/agents/runs/${agentRunId}/tool-calls`),
 };

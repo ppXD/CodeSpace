@@ -8,6 +8,7 @@ import { useAgentRun } from "@/hooks/use-agents";
 import { useResumeRun, useWorkflowRun } from "@/hooks/use-workflows";
 
 import { AgentRunTimeline } from "./AgentRunTimeline";
+import { AgentToolCalls } from "./AgentToolCalls";
 import { JsonView } from "./JsonView";
 import { concurrentNodeKeys, runNodeKey } from "./runConcurrency";
 
@@ -187,6 +188,10 @@ function RunNodeRow({ node: n, parallel, suppressChildEmbed, depth, onOpenRun }:
       {/* An agent.code step: stream its run's live status + event timeline inline, so you watch
           the agent work in real time (and see WHY, not just a static "Suspended"/final status). */}
       {n.agentRunId && <AgentRunTimeline agentRunId={n.agentRunId} />}
+      {/* …and, alongside the narrative timeline, the GOVERNED tool-call audit: every side-effecting
+          MCP call the agent made, its outcome, and the approval trail — so an operator can see WHAT
+          the agent did, not just what it said. */}
+      {n.agentRunId && <AgentToolCalls agentRunId={n.agentRunId} />}
       {!n.error && !hasContent(n.inputs) && !hasContent(n.outputs) && !n.childRunId && !n.agentRunId && (
         <div className="wf-run-node-none">No inputs or outputs recorded.</div>
       )}

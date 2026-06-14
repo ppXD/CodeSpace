@@ -55,3 +55,18 @@ export function useAgentRunEvents(agentRunId: string | undefined, active: boolea
     refetchInterval: active ? 1000 : false,
   });
 }
+
+/**
+ * One agent run's governed tool-call audit — the durable ledger of every side-effecting MCP tool call it
+ * made (what tool, the outcome, when, who approved). Unlike the event log this is a small whole-list audit
+ * with no incremental cursor, so each tick re-pulls the full list; it polls every ~2s while the run is in
+ * flight (a new call lands mid-run) and stops once terminal. Read-only + team-scoped at the source.
+ */
+export function useToolCalls(agentRunId: string | undefined, active: boolean) {
+  return useQuery({
+    queryKey: ["agent-run-tool-calls", agentRunId],
+    queryFn: () => agentsApi.listToolCalls(agentRunId!),
+    enabled: !!agentRunId,
+    refetchInterval: active ? 2000 : false,
+  });
+}
