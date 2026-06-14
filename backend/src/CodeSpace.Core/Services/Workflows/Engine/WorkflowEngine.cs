@@ -745,8 +745,66 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
         run.CompletedAt = DateTimeOffset.UtcNow;
         await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
 
+        // A run reaching Failure/Cancelled with branch waits still parked (a terminate-mode map failure that
+        // fails the run, or an operator cancel) would otherwise leave its staged-but-undispatched AgentRun /
+        // Subworkflow children orphaned. Clean them at the source — best-effort; the reconciler's parent-run-
+        // terminal guard is the robust net that catches any orphan this misses.
+        if (status is WorkflowRunStatus.Failure or WorkflowRunStatus.Cancelled)
+            await CancelPendingWaitsAndChildrenAsync(run, cancellationToken).ConfigureAwait(false);
+
         // If this run is a sub-workflow child, wake the parent that's parked on it.
         await ResumeParentIfSubworkflowChildAsync(run, status, error, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Best-effort source-side orphan cleanup when a run lands Failure/Cancelled: resolve its still-Pending
+    /// waits (so none dangle) and mark the staged children they parked on Cancelled — Queued <c>AgentRun</c>
+    /// children via the agent service's Queued-guarded CAS (a worker that already claimed one loses, untouched),
+    /// and non-terminal <c>Subworkflow</c> children via a direct status-guarded CAS. NEVER throws out of
+    /// completion (a cleanup failure must not turn a clean terminal into a stuck run); the reconciler's
+    /// parent-run-terminal guard re-cleans anything missed.
+    /// </summary>
+    private async Task CancelPendingWaitsAndChildrenAsync(WorkflowRun run, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var pending = await _db.WorkflowRunWait.AsNoTracking()
+                .Where(w => w.RunId == run.Id && w.Status == WorkflowWaitStatuses.Pending)
+                .Select(w => new { w.WaitKind, w.Token })
+                .ToListAsync(cancellationToken).ConfigureAwait(false);
+
+            if (pending.Count == 0) return;
+
+            foreach (var wait in pending)
+                await CancelStagedChildAsync(wait.WaitKind, wait.Token, cancellationToken).ConfigureAwait(false);
+
+            await _db.WorkflowRunWait
+                .Where(w => w.RunId == run.Id && w.Status == WorkflowWaitStatuses.Pending)
+                .ExecuteUpdateAsync(s => s
+                    .SetProperty(w => w.Status, WorkflowWaitStatuses.Resolved)
+                    .SetProperty(w => w.ResolvedAt, (DateTimeOffset?)DateTimeOffset.UtcNow), cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Run {RunId} reached a terminal state but cleaning up its staged children failed; the reconciler will catch any orphan", run.Id);
+        }
+    }
+
+    /// <summary>Cancel the staged child a pending wait parked on: a Queued AgentRun (its Token is the agent-run id) or a non-terminal Subworkflow child run (its Token is the child run id). Other wait kinds (timer / approval / callback / action) have no staged child to cancel.</summary>
+    private async Task CancelStagedChildAsync(string waitKind, string token, CancellationToken cancellationToken)
+    {
+        if (!Guid.TryParse(token, out var childId)) return;
+
+        if (waitKind == WorkflowWaitKinds.AgentRun)
+            await _agentRunService.CancelQueuedAsync(childId, "Parent workflow run reached a terminal state before this branch launched.", cancellationToken).ConfigureAwait(false);
+        else if (waitKind == WorkflowWaitKinds.Subworkflow)
+            await _db.WorkflowRun
+                .Where(r => r.Id == childId && (r.Status == WorkflowRunStatus.Pending || r.Status == WorkflowRunStatus.Enqueued))
+                .ExecuteUpdateAsync(s => s
+                    .SetProperty(r => r.Status, WorkflowRunStatus.Cancelled)
+                    .SetProperty(r => r.CompletedAt, (DateTimeOffset?)DateTimeOffset.UtcNow), cancellationToken)
+                .ConfigureAwait(false);
     }
 
     /// <summary>

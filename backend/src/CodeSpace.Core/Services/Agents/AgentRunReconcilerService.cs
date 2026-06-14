@@ -59,6 +59,11 @@ public sealed class AgentRunReconcilerService : IAgentRunReconcilerService, ISco
     /// <summary>Cap on reconciler re-attach attempts for one run: past it, a still-alive-but-unattachable run is abandoned rather than reclaimed forever (the no-livelock guarantee).</summary>
     public const int MaxReattachAttempts = 3;
 
+    /// <summary>Operator-facing reason stamped on a still-Queued branch agent run the reconciler cancels because its parent workflow run reached a terminal state before the dispatch ran — so no sandbox/executor is launched for an already-dead workflow.</summary>
+    public const string OrphanedParentTerminalError =
+        "Agent run cancelled by the reconciler — its parent workflow run reached a terminal state (cancelled or " +
+        "failed) before this branch was launched, so the staged run was never started.";
+
     private readonly CodeSpaceDbContext _db;
     private readonly IAgentRunService _runs;
     private readonly IAgentRunCompletionNotifier _notifier;
@@ -280,11 +285,13 @@ public sealed class AgentRunReconcilerService : IAgentRunReconcilerService, ISco
     /// The backstop for the agent → workflow hand-off: for every workflow run still parked on a pending
     /// <c>AgentRun</c> wait, unstick the agent run it's waiting on. A run that's already terminal but whose
     /// parent never resumed (a crashed worker, a reconciler-abandoned run, or an executor whose best-effort
-    /// notify failed) → fire the completion notifier so the parent resumes. A run stuck <c>Queued</c> past
-    /// the liveness window (its dispatch lost in the crash window between the parent committing Suspended
-    /// and the executor being enqueued) → re-dispatch the executor; the claim guard makes a duplicate a
-    /// no-op. Idempotent + retried every sweep (a resume flips the wait Resolved so it drops out next tick);
-    /// a per-item failure is logged and retried, never aborting the sweep.
+    /// notify failed) → fire the completion notifier so the parent resumes. A run stuck <c>Queued</c> whose
+    /// PARENT workflow run is itself terminal (Cancelled/Failure — e.g. a map branch staged-but-undispatched
+    /// under a run later cancelled) → CANCEL it, never launch a sandbox for an already-dead workflow. A run
+    /// stuck <c>Queued</c> past the liveness window whose parent is still live (Suspended/Pending/Running) →
+    /// re-dispatch the executor (the normal durable-recovery path; the claim guard makes a duplicate a no-op).
+    /// Idempotent + retried every sweep (a resume flips the wait Resolved so it drops out next tick); a
+    /// per-item failure is logged and retried, never aborting the sweep.
     /// </summary>
     private async Task<(int Resumed, int ReDispatched)> ReconcilePendingWaitsAsync(CancellationToken cancellationToken)
     {
@@ -296,19 +303,62 @@ public sealed class AgentRunReconcilerService : IAgentRunReconcilerService, ISco
 
         var runs = await _db.AgentRun.AsNoTracking()
             .Where(r => waitingIds.Contains(r.Id))
-            .Select(r => new { r.Id, r.Status, r.CreatedDate })
+            .Select(r => new { r.Id, r.Status, r.CreatedDate, r.WorkflowRunId })
             .ToListAsync(cancellationToken)
             .ConfigureAwait(false);
+
+        var terminalParents = await TerminalParentRunIdsAsync(runs.Select(r => r.WorkflowRunId), cancellationToken).ConfigureAwait(false);
 
         var resumed = 0;
         foreach (var run in runs.Where(r => AgentRunStateMachine.IsTerminal(r.Status)))
             resumed += await TryResumeParentAsync(run.Id, run.Status, cancellationToken).ConfigureAwait(false);
 
         var reDispatched = 0;
-        foreach (var run in runs.Where(r => r.Status == AgentRunStatus.Queued && r.CreatedDate < staleThreshold))
-            reDispatched += TryReDispatch(run.Id, run.CreatedDate);
+        foreach (var run in runs.Where(r => r.Status == AgentRunStatus.Queued))
+        {
+            // A Queued branch run whose PARENT workflow run is already terminal must NEVER launch — cancel it
+            // (no sandbox/executor for a dead workflow). A still-live parent (Suspended/Pending/Running) keeps
+            // the normal stale-window re-dispatch — the durable-recovery path this guard must not break.
+            if (run.WorkflowRunId is { } parentId && terminalParents.Contains(parentId))
+                await CancelOrphanedQueuedAsync(run.Id, cancellationToken).ConfigureAwait(false);
+            else if (run.CreatedDate < staleThreshold)
+                reDispatched += TryReDispatch(run.Id, run.CreatedDate);
+        }
 
         return (resumed, reDispatched);
+    }
+
+    /// <summary>The subset of the supplied parent workflow-run ids whose run is in a TERMINAL state (Cancelled / Failure / Success) — a Queued branch agent run parked under one of these must be cancelled, not launched. Nulls (standalone agent runs with no parent) are skipped.</summary>
+    private async Task<HashSet<Guid>> TerminalParentRunIdsAsync(IEnumerable<Guid?> parentRunIds, CancellationToken cancellationToken)
+    {
+        var ids = parentRunIds.Where(id => id.HasValue).Select(id => id!.Value).Distinct().ToList();
+
+        if (ids.Count == 0) return new HashSet<Guid>();
+
+        var terminal = await _db.WorkflowRun.AsNoTracking()
+            .Where(r => ids.Contains(r.Id) && (r.Status == WorkflowRunStatus.Cancelled || r.Status == WorkflowRunStatus.Failure || r.Status == WorkflowRunStatus.Success))
+            .Select(r => r.Id)
+            .ToListAsync(cancellationToken)
+            .ConfigureAwait(false);
+
+        return terminal.ToHashSet();
+    }
+
+    /// <summary>Cancel a still-Queued branch agent run orphaned under a now-terminal parent workflow run, via the Queued-guarded CAS (a worker that just claimed it loses 0 rows and is left alone). A failure is logged + retried next sweep — never throws out of the sweep.</summary>
+    private async Task CancelOrphanedQueuedAsync(Guid runId, CancellationToken cancellationToken)
+    {
+        try
+        {
+            if (await _runs.CancelQueuedAsync(runId, OrphanedParentTerminalError, cancellationToken).ConfigureAwait(false))
+            {
+                await TryAppendEventAsync(runId, AgentEventKind.Error, OrphanedParentTerminalError, cancellationToken).ConfigureAwait(false);
+                _logger.LogInformation("AgentRunReconciler: cancelled queued agent run {RunId} whose parent workflow run is terminal (never launched)", runId);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "AgentRunReconciler: failed to cancel orphaned queued agent run {RunId}; will retry next sweep", runId);
+        }
     }
 
     /// <summary>Resume the workflow parked on a terminal agent run, via the same notifier the executor uses. A failure is logged + retried next sweep — never throws out of the sweep.</summary>

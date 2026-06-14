@@ -342,6 +342,59 @@ public class StuckRunReconcilerFlowTests
     }
 
     [Fact]
+    public async Task Stranded_suspended_multi_branch_map_with_all_waits_resolved_redispatches_and_every_branch_resumes()
+    {
+        // The K>1 generalisation of the stranded-suspended map recovery: a MULTI-branch (K=2) flow.map parked TWO
+        // real branch waits, then ALL of them resolved in the narrow flip-before-resolve window so the Suspended→
+        // Pending flip + dispatch never fired — the run is stranded Suspended with ZERO pending waits but MORE than
+        // one resolved suspending-node wait. The sibling single-element test can't catch a multi-branch re-walk bug
+        // (e.g. only one branch rehydrated, or a settled branch re-firing). The sweep must re-dispatch the run AND,
+        // on the engine re-walk, BOTH branches resume from their own rehydrated payload and the run reaches Success.
+        var key = "sp-" + Guid.NewGuid().ToString("N");
+        SuspendProbeNode.Reset(key);
+
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var workflowId = await CreateSuspendingMapWorkflowAsync(teamId, userId, key);
+        var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId, payloadJson: """{ "things": ["a", "b"] }""");
+
+        // Drive to a REAL K=2 parked state: two branches each commit their own WorkflowRunWait, the run suspends.
+        await RunEngineAsync(runId);
+        (await ReadStatusAsync(runId)).ShouldBe(WorkflowRunStatus.Suspended, "both branches parked their own real wait");
+        SuspendProbeNode.FirstPassCount(key, "a").ShouldBe(1);
+        SuspendProbeNode.FirstPassCount(key, "b").ShouldBe(1, "each branch parked exactly once");
+
+        // Reproduce the orphan end-state on BOTH real waits: resolve each in place (with its resume payload) WITHOUT
+        // routing through the resume service, so the flip + dispatch never fire. Then backdate past the grace window.
+        await ResolveWaitInPlaceAsync(runId, $"{key}::a", """{ "summary": "RES-a" }""");
+        await ResolveWaitInPlaceAsync(runId, $"{key}::b", """{ "summary": "RES-b" }""");
+        await BackdateLastModifiedAsync(runId, StuckRunReconcilerService.SuspendedStrandedAfter + TimeSpan.FromMinutes(5));
+
+        var summary = await ReconcileAsync();
+
+        summary.RedispatchedFromStrandedSuspended.ShouldBe(1,
+            "a multi-branch Suspended run with zero pending waits past the grace window is stranded — the sweep re-dispatches it once");
+        (await ReadStatusAsync(runId)).ShouldBe(WorkflowRunStatus.Enqueued, "after the CAS Suspended→Pending + dispatcher Pending→Enqueued");
+
+        // Drive the engine the way the worker would: BOTH branches must resume from their rehydrated payloads (not
+        // re-park, not re-run their first pass) and the run must walk to Success with the ordered reduce.
+        await RunEngineAsync(runId);
+
+        (await ReadStatusAsync(runId)).ShouldBe(WorkflowRunStatus.Success,
+            customMessage: "the re-dispatched multi-branch stranded run must reach Success — if it re-suspended, a branch wait wasn't rehydrated");
+
+        SuspendProbeNode.FirstPassCount(key, "a").ShouldBe(1, "branch a resumed from its wait — did NOT re-run its parking pass on the recovery re-walk");
+        SuspendProbeNode.FirstPassCount(key, "b").ShouldBe(1, "branch b likewise resumed exactly once");
+
+        using var done = _fixture.BeginScope();
+        var db = done.Resolve<CodeSpaceDbContext>();
+        var mapNode = await db.WorkflowRunNode.AsNoTracking().SingleAsync(n => n.RunId == runId && n.NodeId == "map" && n.IterationKey == "");
+        var results = System.Text.Json.JsonDocument.Parse(mapNode.OutputsJson).RootElement.GetProperty("results");
+        results.GetArrayLength().ShouldBe(2, "both branches reduced");
+        results[0].GetProperty("summary").GetString().ShouldBe("RES-a", "branch 0 resumed from its OWN rehydrated payload, ordered by index");
+        results[1].GetProperty("summary").GetString().ShouldBe("RES-b", "branch 1 resumed from its own payload — no cross-branch contamination");
+    }
+
+    [Fact]
     public async Task Suspended_with_a_pending_wait_is_NOT_swept_however_old()
     {
         // False-positive guard #1 + #2 + #4: a run legitimately parked on a human approval/action for
