@@ -121,7 +121,7 @@ export function WorkflowNode({ id, data, selected }: NodeProps) {
   const onAddFrom = useContext(NodeAddContext);
   const showAdd = d.kind !== "Terminal";
 
-  // A container (loop / try) draws only its frame + header; its body renders inside. It's its own
+  // A container (loop / try / map) draws only its frame + header; its body renders inside. It's its own
   // component so the store subscription it needs (for the resize-min) doesn't run for every node.
   if (isContainerKind(d.kind)) return <ContainerNode id={id} d={d} selected={selected} />;
 
