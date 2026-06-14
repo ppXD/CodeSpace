@@ -139,13 +139,13 @@ public sealed record NodeManifest
     /// config-gated: a node sets it true if it can EVER suspend (e.g. <c>chat.post_message</c> suspends only
     /// when <c>waitForResponse</c> is on, but still declares it true).
     ///
-    /// <para>Used by <see cref="DefinitionValidator"/> to reject a suspending node inside a <c>flow.map</c>
-    /// body: PR1 runs map bodies SYNCHRONOUSLY (durable parallel-branch resume ships in PR2), so a body
-    /// suspend would leak a committed wait row + a scheduled/staged external job behind a map the engine
-    /// can't resume. Failing it at SAVE time keeps the runtime suspend branch unreachable. Generic — the
-    /// validator needs no node-type knowledge, and a future wait node is blocked automatically by declaring
-    /// the marker. The positive complement of the <see cref="IsAgentToolEligible"/> invariant (a suspending
-    /// node is never a synchronous tool).</para>
+    /// <para>A suspending node is a first-class <c>flow.map</c> body element: each branch parks its own durable
+    /// wait under <c>&lt;mapId&gt;#&lt;i&gt;</c>, the map suspends until ALL branches resolve, and a re-walk
+    /// replays settled siblings from the ledger while re-running only the still-suspended branches. The
+    /// still-true invariant the marker carries is the positive complement of the <see cref="IsAgentToolEligible"/>
+    /// synchronous-tool gate: a node that can suspend is never exposed as a synchronous, standalone agent tool.
+    /// Generic — no node-type knowledge anywhere, and a future wait node inherits both behaviours by declaring
+    /// the marker.</para>
     ///
     /// <para>Default <c>false</c>: pure-computation + read-only + side-effecting-but-synchronous nodes leave
     /// it false.</para>

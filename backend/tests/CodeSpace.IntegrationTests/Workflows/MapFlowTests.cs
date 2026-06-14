@@ -304,6 +304,129 @@ public class MapFlowTests
         ConcurrencyProbeNode.Peak(gate).ShouldBe(expectedPeak, $"a map maxParallelism of {maxParallelism} bounds the branch wave's simultaneity");
     }
 
+    [Theory]
+    [InlineData(2, WorkflowRunStatus.Success)]                            // just one branch — well under the ceiling, runs clean
+    [InlineData(MapPlan.MaxBranchesCeiling + 1, WorkflowRunStatus.Failure)]   // one over the ceiling — admission control fails it
+    public async Task A_map_fanning_out_at_or_past_the_branch_ceiling_admits_or_fails_cleanly(int elementCount, WorkflowRunStatus expected)
+    {
+        // The platform's SOLE fan-out admission control (MapPlan.MaxBranchesCeiling): an items collection that
+        // resolves to MORE than the ceiling must fail the map cleanly with the ceiling error (never spawn a
+        // runaway wave); one at/under the ceiling runs normally. The branch body is a no-op echo, so the only
+        // variable under test is the element COUNT vs the ceiling.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var workflowId = await CreateWorkflowAsync(teamId, userId, StaticArrayMapDefinition());
+
+        var things = string.Join(",", Enumerable.Range(0, elementCount).Select(i => $"\"e{i}\""));
+        var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId, payloadJson: $$"""{ "things": [{{things}}] }""");
+
+        await RunEngineAsync(runId);
+
+        using var verify = _fixture.BeginScope();
+        var db = verify.Resolve<CodeSpaceDbContext>();
+        (await db.WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == runId)).Status.ShouldBe(expected);
+
+        var map = await MapNodeAsync(db, runId);
+
+        if (expected == WorkflowRunStatus.Failure)
+        {
+            map.Status.ShouldBe(NodeStatus.Failure);
+            map.Error.ShouldContain($"exceeding the {MapPlan.MaxBranchesCeiling}-branch ceiling",
+                customMessage: "an over-ceiling fan-out must fail with the explicit ceiling error, not silently spawn a runaway wave");
+            // Admission control trips BEFORE fan-out — no branch body node was persisted for the runaway map.
+            (await db.WorkflowRunNode.AsNoTracking().CountAsync(n => n.RunId == runId && n.NodeId == "work")).ShouldBe(0);
+        }
+        else
+        {
+            map.Status.ShouldBe(NodeStatus.Success);
+            JsonDocument.Parse(map.OutputsJson).RootElement.GetProperty("count").GetInt32().ShouldBe(elementCount);
+        }
+    }
+
+    [Fact]
+    public async Task A_branch_body_node_failure_routed_down_its_own_error_edge_keeps_the_branch_and_reduces_the_handled_path()
+    {
+        // In-body error handling (AdvanceMapBranchNodeOrAbandon's HasErrorEdge leg): a branch body node FAILS,
+        // but it has its OWN `error` edge to a recovery node. Even under the default TERMINATE map policy, that
+        // failure is HANDLED inside the branch — the map does NOT fail and the branch is NOT counted failed. The
+        // branch continues down the error leg and the recovery node's output reduces into that branch's slot.
+        var flakyKey = "boom-" + Guid.NewGuid().ToString("N");
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var workflowId = await CreateWorkflowAsync(teamId, userId, InBodyErrorEdgeMapDefinition(flakyKey));
+        // Every branch's worker node fails; each branch's OWN error edge catches it and the recovery node echoes {{item}}.
+        var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId, payloadJson: """{ "things": ["a", "b"] }""");
+
+        await RunEngineAsync(runId);
+
+        using var verify = _fixture.BeginScope();
+        var db = verify.Resolve<CodeSpaceDbContext>();
+        (await db.WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == runId)).Status
+            .ShouldBe(WorkflowRunStatus.Success, "a branch that HANDLES its own failure via an in-body error edge does NOT fail the terminate-mode map");
+
+        var outputs = JsonDocument.Parse((await MapNodeAsync(db, runId)).OutputsJson).RootElement;
+        outputs.GetProperty("count").GetInt32().ShouldBe(2);
+        outputs.GetProperty("failed").GetInt32().ShouldBe(0, "the in-body error edge handled each failure — NOT counted as a failed branch");
+
+        // Each branch's result is its HANDLED path (the recovery node's marker echoing {{item}}), ordered by index.
+        var results = outputs.GetProperty("results");
+        results.GetArrayLength().ShouldBe(2);
+        results[0].GetProperty("handled").GetString().ShouldBe("a", "branch 0 continued down its error leg, reducing the recovery node's output");
+        results[1].GetProperty("handled").GetString().ShouldBe("b", "branch 1 likewise reduced its handled path");
+    }
+
+    [Fact]
+    public async Task A_loop_nested_inside_a_map_branch_runs_end_to_end_with_correct_nested_reduce()
+    {
+        // A flow.loop INSIDE a flow.map branch runs to completion (today only structurally validated). Each map
+        // branch runs its own loop (maxIterations 2); the loop's `iterations` count surfaces as that branch's
+        // result. Pins the nested reduce: results[i].loops == 2 for every branch, ordered by element index.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var workflowId = await CreateWorkflowAsync(teamId, userId, LoopInMapBranchDefinition());
+        var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId, payloadJson: """{ "things": ["a", "b", "c"] }""");
+
+        await RunEngineAsync(runId);
+
+        using var verify = _fixture.BeginScope();
+        var db = verify.Resolve<CodeSpaceDbContext>();
+        (await db.WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == runId)).Status.ShouldBe(WorkflowRunStatus.Success);
+
+        var outputs = JsonDocument.Parse((await MapNodeAsync(db, runId)).OutputsJson).RootElement;
+        outputs.GetProperty("count").GetInt32().ShouldBe(3);
+
+        var results = outputs.GetProperty("results");
+        for (var i = 0; i < 3; i++)
+        {
+            results[i].GetProperty("item").GetString().ShouldBe(new[] { "a", "b", "c" }[i], "the branch echoed its own element");
+            results[i].GetProperty("loops").GetInt32().ShouldBe(2, "each branch's nested loop ran its 2 iterations and reduced into that branch's slot");
+        }
+    }
+
+    [Fact]
+    public async Task A_try_nested_inside_a_map_branch_catches_a_body_failure_and_reduces_the_caught_path()
+    {
+        // A flow.try INSIDE a flow.map branch runs to completion (today only structurally validated). Each map
+        // branch's try body FAILS; the try CATCHES it and routes down its catch leg. The map (terminate mode) does
+        // NOT fail — the try absorbed the failure inside the branch. The caught path's output reduces per branch.
+        var flakyKey = "trycatch-" + Guid.NewGuid().ToString("N");
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var workflowId = await CreateWorkflowAsync(teamId, userId, TryInMapBranchDefinition(flakyKey));
+        var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId, payloadJson: """{ "things": ["a", "b"] }""");
+
+        await RunEngineAsync(runId);
+
+        using var verify = _fixture.BeginScope();
+        var db = verify.Resolve<CodeSpaceDbContext>();
+        (await db.WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == runId)).Status
+            .ShouldBe(WorkflowRunStatus.Success, "the nested try CAUGHT each branch's body failure — the terminate-mode map does not fail");
+
+        var outputs = JsonDocument.Parse((await MapNodeAsync(db, runId)).OutputsJson).RootElement;
+        outputs.GetProperty("count").GetInt32().ShouldBe(2);
+        outputs.GetProperty("failed").GetInt32().ShouldBe(0, "every branch's failure was caught by its nested try — no branch is counted failed");
+
+        var results = outputs.GetProperty("results");
+        results[0].GetProperty("caught").GetString().ShouldBe("a", "the branch reduced its caught path, echoing its own element");
+        results[1].GetProperty("caught").GetString().ShouldBe("b");
+    }
+
     // ─── Helpers ────────────────────────────────────────────────────────────────
 
     private static async Task<Core.Persistence.Entities.WorkflowRunNode> MapNodeAsync(CodeSpaceDbContext db, Guid runId) =>
@@ -537,4 +660,97 @@ public class MapFlowTests
 
         return new WorkflowDefinition { SchemaVersion = 1, Nodes = nodes, Edges = edges };
     }
+
+    // manual → map(default terminate; body: ms → boom[FlakyTestNode always fails] --error--> recover[echo handled={{item}}]) → terminal.
+    // Every branch's `boom` fails but routes down its OWN error edge to `recover`, which is the branch body terminal —
+    // so the failure is HANDLED inside the branch (the AdvanceMapBranchNodeOrAbandon HasErrorEdge leg).
+    private static WorkflowDefinition InBodyErrorEdgeMapDefinition(string flakyKey) => new()
+    {
+        SchemaVersion = 1,
+        Nodes = new List<NodeDefinition>
+        {
+            new() { Id = "start", TypeKey = "trigger.manual", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
+            new() { Id = "map", TypeKey = "flow.map", Config = WorkflowsTestSeed.EmptyJson(),
+                    Inputs = WorkflowsTestSeed.Json("""{ "items": "{{trigger.things}}" }""") },
+            new() { Id = "ms", TypeKey = "flow.map_start", ParentId = "map", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
+            new() { Id = "boom", TypeKey = FlakyTestNode.Key, ParentId = "map",
+                    Config = WorkflowsTestSeed.Json($$"""{ "key": "{{flakyKey}}", "failTimes": 99 }"""), Inputs = WorkflowsTestSeed.EmptyJson() },
+            new() { Id = "recover", TypeKey = JsonEmitNode.Key, ParentId = "map", Config = WorkflowsTestSeed.EmptyJson(),
+                    Inputs = WorkflowsTestSeed.Json("""{ "handled": "{{item}}" }""") },
+            new() { Id = "end", TypeKey = "builtin.terminal", Config = WorkflowsTestSeed.EmptyJson(),
+                    Inputs = WorkflowsTestSeed.Json("""{ "count": "{{nodes.map.outputs.count}}" }""") },
+        },
+        Edges = new List<EdgeDefinition>
+        {
+            new() { From = "start", To = "map" },
+            new() { From = "map", To = "end" },
+            new() { From = "ms", To = "boom" },
+            new() { From = "boom", To = "recover", SourceHandle = WorkflowHandles.Error },   // the branch's OWN error edge
+        },
+    };
+
+    // manual → map(body: ms → loop(maxIterations 2; body: ls → noop[JsonEmit]) → leaf[echo item={{item}}, loops={{nodes.loop.outputs.iterations}}]) → terminal.
+    // A flow.loop NESTED inside each map branch: it runs its two iterations and the branch terminal `leaf` echoes
+    // the loop's iteration count into the branch's result slot. The loop body is the THREAD-SAFE JsonEmitNode (a
+    // stateless echo) rather than LoopProbeNode, whose static seen-list is not safe under the up-to-3 concurrent
+    // map branches the default parallelism fans out — the test only reads {{nodes.loop.outputs.iterations}}, never
+    // the probe's record, so this is a pure thread-safety swap with the assertion (loops == 2) unchanged.
+    private static WorkflowDefinition LoopInMapBranchDefinition() => new()
+    {
+        SchemaVersion = 1,
+        Nodes = new List<NodeDefinition>
+        {
+            new() { Id = "start", TypeKey = "trigger.manual", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
+            new() { Id = "map", TypeKey = "flow.map", Config = WorkflowsTestSeed.EmptyJson(),
+                    Inputs = WorkflowsTestSeed.Json("""{ "items": "{{trigger.things}}" }""") },
+            new() { Id = "ms", TypeKey = "flow.map_start", ParentId = "map", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
+            new() { Id = "loop", TypeKey = "flow.loop", ParentId = "map", Config = WorkflowsTestSeed.Json("""{ "maxIterations": 2 }"""), Inputs = WorkflowsTestSeed.EmptyJson() },
+            new() { Id = "ls", TypeKey = "flow.loop_start", ParentId = "loop", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
+            new() { Id = "noop", TypeKey = JsonEmitNode.Key, ParentId = "loop", Config = WorkflowsTestSeed.EmptyJson(),
+                    Inputs = WorkflowsTestSeed.Json("""{ "value": "i{{loop.index}}" }""") },
+            new() { Id = "leaf", TypeKey = JsonEmitNode.Key, ParentId = "map", Config = WorkflowsTestSeed.EmptyJson(),
+                    Inputs = WorkflowsTestSeed.Json("""{ "item": "{{item}}", "loops": "{{nodes.loop.outputs.iterations}}" }""") },
+            new() { Id = "end", TypeKey = "builtin.terminal", Config = WorkflowsTestSeed.EmptyJson(),
+                    Inputs = WorkflowsTestSeed.Json("""{ "count": "{{nodes.map.outputs.count}}" }""") },
+        },
+        Edges = new List<EdgeDefinition>
+        {
+            new() { From = "start", To = "map" },
+            new() { From = "map", To = "end" },
+            new() { From = "ms", To = "loop" },          // branch body: start → loop → branch terminal
+            new() { From = "loop", To = "leaf" },
+            new() { From = "ls", To = "noop" },           // loop body: start → no-op probe
+        },
+    };
+
+    // manual → map(default terminate; body: ms → try(body: ts → boom[FlakyTestNode always fails]) --catch--> caught[echo caught={{item}}]) → terminal.
+    // A flow.try NESTED inside each map branch: the try body fails, the try CATCHES it, and the catch terminal `caught`
+    // (the branch body terminal) echoes {{item}}. The terminate-mode map does NOT fail — the try absorbed the failure.
+    private static WorkflowDefinition TryInMapBranchDefinition(string flakyKey) => new()
+    {
+        SchemaVersion = 1,
+        Nodes = new List<NodeDefinition>
+        {
+            new() { Id = "start", TypeKey = "trigger.manual", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
+            new() { Id = "map", TypeKey = "flow.map", Config = WorkflowsTestSeed.EmptyJson(),
+                    Inputs = WorkflowsTestSeed.Json("""{ "items": "{{trigger.things}}" }""") },
+            new() { Id = "ms", TypeKey = "flow.map_start", ParentId = "map", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
+            new() { Id = "try", TypeKey = "flow.try", ParentId = "map", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
+            new() { Id = "ts", TypeKey = "flow.try_start", ParentId = "try", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
+            new() { Id = "boom", TypeKey = FlakyTestNode.Key, ParentId = "try",
+                    Config = WorkflowsTestSeed.Json($$"""{ "key": "{{flakyKey}}", "failTimes": 99 }"""), Inputs = WorkflowsTestSeed.EmptyJson() },
+            new() { Id = "caught", TypeKey = JsonEmitNode.Key, ParentId = "map", Config = WorkflowsTestSeed.EmptyJson(),
+                    Inputs = WorkflowsTestSeed.Json("""{ "caught": "{{item}}" }""") },
+            new() { Id = "end", TypeKey = "builtin.terminal", Config = WorkflowsTestSeed.EmptyJson(),
+                    Inputs = WorkflowsTestSeed.Json("""{ "count": "{{nodes.map.outputs.count}}" }""") },
+        },
+        Edges = new List<EdgeDefinition>
+        {
+            new() { From = "start", To = "map" },
+            new() { From = "map", To = "end" },
+            new() { From = "ms", To = "try" },                                       // branch body: start → try → branch terminal
+            new() { From = "try", To = "caught", SourceHandle = WorkflowHandles.Catch },
+            new() { From = "ts", To = "boom" },                                      // try body: start → failing node
+        },
+    };
 }

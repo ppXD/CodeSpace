@@ -1,6 +1,7 @@
 using System.Text.Json;
 using System.Net.Sockets;
 using CodeSpace.Core.DependencyInjection;
+using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Services.Agents.Mcp;
 using CodeSpace.Core.Services.Agents.Sandbox;
 using CodeSpace.Core.Services.Agents.Sandbox.Runners;
@@ -8,6 +9,7 @@ using CodeSpace.Core.Services.Agents.Tools;
 using CodeSpace.Core.Services.Agents.Workspace;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Enums;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 
@@ -67,6 +69,11 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
 
     private static readonly IReadOnlyDictionary<string, string> EmptySecretEnv = new Dictionary<string, string>();
 
+    /// <summary>Operator-facing reason stamped on a branch agent run the executor cancels at the claim point because its parent workflow run flipped terminal between the reconciler's dispatch and this claim — the no-sandbox-under-terminal-parent guard. Mirrors the reconciler's <c>OrphanedParentTerminalError</c> intent (which catches the still-Queued window; this closes the post-claim TOCTOU one).</summary>
+    public const string ParentTerminalAtClaimError =
+        "Agent run cancelled by the executor — its parent workflow run reached a terminal state (cancelled, " +
+        "failed, or succeeded) before this run's sandbox was launched, so no work was started for an already-finished workflow.";
+
     private readonly IAgentRunService _runs;
     private readonly IAgentHarnessRegistry _harnesses;
     private readonly ISandboxRunnerRegistry _runners;
@@ -76,9 +83,11 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     private readonly IAgentRunCompletionNotifier _notifier;
     // Mints a fresh DI scope (→ its own DbContext) for the heartbeat loop, which runs concurrently with the event stream.
     private readonly IServiceScopeFactory _scopeFactory;
+    // Reads the parent WorkflowRun's status at the claim point — the authoritative no-sandbox-under-terminal-parent guard.
+    private readonly CodeSpaceDbContext _db;
     private readonly ILogger<AgentRunExecutor> _logger;
 
-    public AgentRunExecutor(IAgentRunService runs, IAgentHarnessRegistry harnesses, ISandboxRunnerRegistry runners, IAgentWorkspaceResolver workspaceResolver, IModelCredentialResolver modelCredentials, IWorkspaceProviderRegistry workspaces, IAgentRunCompletionNotifier notifier, IServiceScopeFactory scopeFactory, ILogger<AgentRunExecutor> logger)
+    public AgentRunExecutor(IAgentRunService runs, IAgentHarnessRegistry harnesses, ISandboxRunnerRegistry runners, IAgentWorkspaceResolver workspaceResolver, IModelCredentialResolver modelCredentials, IWorkspaceProviderRegistry workspaces, IAgentRunCompletionNotifier notifier, IServiceScopeFactory scopeFactory, CodeSpaceDbContext db, ILogger<AgentRunExecutor> logger)
     {
         _runs = runs;
         _harnesses = harnesses;
@@ -88,6 +97,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         _workspaces = workspaces;
         _notifier = notifier;
         _scopeFactory = scopeFactory;
+        _db = db;
         _logger = logger;
     }
 
@@ -96,6 +106,13 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         var run = await _runs.GetAsync(agentRunId, cancellationToken).ConfigureAwait(false);
 
         if (await TryClaimAsync(agentRunId, cancellationToken).ConfigureAwait(false) is not { } claimedEpoch) return;
+
+        // Re-check the parent workflow run's status the instant after the Queued→Running claim wins, closing the TOCTOU
+        // the reconciler's guard leaves open: the reconciler reads the parent then re-dispatches, but the parent can flip
+        // terminal in the window before this claim, so without this re-check the executor would launch a sandbox under an
+        // already-dead workflow. A standalone run (no WorkflowRunId) or a live parent (Suspended/Pending/Running) proceeds
+        // EXACTLY as before — only a terminal parent aborts the launch (the run, now Running, is cancelled instead).
+        if (await AbortIfParentTerminalAsync(agentRunId, run.WorkflowRunId, claimedEpoch, cancellationToken).ConfigureAwait(false)) return;
 
         // One heartbeat spans the ENTIRE execution — streaming AND the post-CLI tail (git-diff capture +
         // completion). The tail used to run un-heartbeated, so a slow capture on a large repo could outlast the
@@ -610,7 +627,33 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         return merged;
     }
 
-    /// <summary>Claim the run (Queued → Running). Returns false when it's already Running/terminal — the exactly-once guard that stops a re-claim from re-spawning the harness.</summary>
+    /// <summary>
+    /// The authoritative no-sandbox-under-terminal-parent guard, run the instant after the Queued→Running claim wins.
+    /// A standalone run (no <paramref name="workflowRunId"/>) is unaffected — returns false (proceed) without touching
+    /// the DB. For a workflow-staged branch run, read the parent WorkflowRun's status: a LIVE parent
+    /// (Suspended/Pending/Running, or absent) returns false (proceed exactly as before); a TERMINAL parent
+    /// (Cancelled/Failure/Success) cancels this now-Running run — via the same epoch-fenced completion path the executor
+    /// uses for any outcome, which also notifies the parent — and returns true (abort the launch). This closes the TOCTOU
+    /// the reconciler's still-Queued guard can't: the parent may flip terminal between that guard's read and this claim.
+    /// </summary>
+    private async Task<bool> AbortIfParentTerminalAsync(Guid runId, Guid? workflowRunId, long claimedEpoch, CancellationToken cancellationToken)
+    {
+        if (workflowRunId is not { } parentId) return false;   // standalone run — no parent to gate on, proceed unchanged
+
+        var parentStatus = await _db.WorkflowRun.AsNoTracking()
+            .Where(r => r.Id == parentId)
+            .Select(r => (WorkflowRunStatus?)r.Status)
+            .SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
+
+        if (parentStatus is not (WorkflowRunStatus.Cancelled or WorkflowRunStatus.Failure or WorkflowRunStatus.Success)) return false;   // live parent (or absent) — proceed unchanged
+
+        _logger.LogInformation("Agent run {RunId}: parent workflow run {ParentId} is terminal ({Status}) at the claim point; cancelling instead of launching a sandbox", runId, parentId, parentStatus);
+
+        await CompleteAndNotifyAsync(runId, new AgentRunResult { Status = AgentRunStatus.Cancelled, ExitReason = "parent-terminal", Error = ParentTerminalAtClaimError }, claimedEpoch, cancellationToken).ConfigureAwait(false);
+
+        return true;
+    }
+
     /// <summary>Claim the run (Queued → Running) and return the fencing epoch to complete under, or null when it's already claimed/terminal (the exactly-once guard).</summary>
     private async Task<long?> TryClaimAsync(Guid runId, CancellationToken cancellationToken)
     {

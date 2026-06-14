@@ -60,6 +60,16 @@ public interface IAgentRunService
     Task CompleteAsync(Guid runId, AgentRunResult result, CancellationToken cancellationToken);
 
     /// <summary>
+    /// Cancel a run that is still <see cref="AgentRunStatus.Queued"/> (staged but never launched) — the
+    /// no-orphan path for a branch agent run whose parent workflow run reached a terminal state before its
+    /// dispatch ran. A status-guarded CAS pinned to <c>Queued</c> (a pure UPDATE, like <see cref="HeartbeatAsync"/>),
+    /// so it never races a worker that just claimed the run (that CAS already moved it to Running and loses 0
+    /// rows here). Idempotent + safe from multiple replicas; <paramref name="reason"/> is stamped as the run's
+    /// Error. Returns whether it won the row (false = already launched / already terminal → leave it alone).
+    /// </summary>
+    Task<bool> CancelQueuedAsync(Guid runId, string reason, CancellationToken cancellationToken);
+
+    /// <summary>
     /// As <see cref="CompleteAsync(Guid,AgentRunResult,CancellationToken)"/>, but ALSO fenced on
     /// <paramref name="expectedEpoch"/> — the epoch the caller claimed with (<see cref="MarkRunningAsync"/>).
     /// The status-guarded CAS additionally requires the run still carries that epoch, so a worker whose run was
@@ -255,6 +265,26 @@ public sealed class AgentRunService : IAgentRunService, IScopedDependency
             throw new AgentRunTransitionException($"AgentRun {runId} was no longer {current}{(expectedEpoch is { } e ? $" at epoch {e}" : "")} at completion — a concurrent transition or reclaim won the race.");
 
         _logger.LogInformation("Agent run completed. RunId={RunId} Status={Status}", runId, result.Status);
+    }
+
+    public async Task<bool> CancelQueuedAsync(Guid runId, string reason, CancellationToken cancellationToken)
+    {
+        // Tracking-free status-guarded CAS pinned to Queued (mirrors AbandonAsync's Running-guarded flip): a
+        // pure UPDATE that never participates in optimistic concurrency. Queued → Cancelled is legal
+        // (AgentRunStateMachine). If a worker already claimed the run (Queued → Running), this matches 0 rows
+        // and loses cleanly — we never trample a run that's mid-flight. 0 rows = already launched / terminal.
+        var cancelled = await _db.AgentRun
+            .Where(r => r.Id == runId && r.Status == AgentRunStatus.Queued)
+            .ExecuteUpdateAsync(s => s
+                .SetProperty(r => r.Status, AgentRunStatus.Cancelled)
+                .SetProperty(r => r.Error, reason)
+                .SetProperty(r => r.CompletedAt, (DateTimeOffset?)DateTimeOffset.UtcNow), cancellationToken)
+            .ConfigureAwait(false);
+
+        if (cancelled == 0) return false;
+
+        _logger.LogInformation("Agent run cancelled while still queued. RunId={RunId} Reason={Reason}", runId, reason);
+        return true;
     }
 
     public async Task<AgentRun> GetAsync(Guid runId, CancellationToken cancellationToken) =>

@@ -555,6 +555,83 @@ public class MapDurableResumeFlowTests
         o1Inner[1].GetProperty("summary").GetString().ShouldBe("R-o1j1");
     }
 
+    [Fact]
+    public async Task A_nested_map_in_map_resolved_via_the_immediate_barrier_free_path_resumes_each_leaf_exactly_once()
+    {
+        // (l) GAP — NESTED map-in-map over the IMMEDIATE single-wait resume path (ResumeWaitAsync), the
+        // approval/action route that flips the run Pending + re-walks at once even with siblings still parked
+        // (NO wait-for-all barrier). The barrier path is covered by the #403 nested test above; this exercises
+        // the OTHER resume route through the same nested structure. The latent risk this guards: on a barrier-
+        // free re-walk, a still-suspended inner leaf in another (or the same) outer branch must NOT re-fire its
+        // suspending node. Pins FirstPassCount == 1 per leaf across every immediate re-walk, plus the run reaches
+        // Success once the last leaf resolves — proving no inner branch re-dispatched on any barrier-free re-walk.
+        var key = "sp-" + Guid.NewGuid().ToString("N");
+        SuspendProbeNode.Reset(key);
+
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var workflowId = await CreateWorkflowAsync(teamId, userId, NestedSuspendingMapDefinition(key));
+        var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId, payloadJson: """{ "things": ["o0", "o1"] }""");
+
+        await RunEngineAsync(runId);
+
+        var leaves = new[] { "o0::j0", "o0::j1", "o1::j0", "o1::j1" };
+        await AssertSuspendedAsync(runId, "all four nested leaves parked on the first walk");
+        foreach (var leaf in leaves)
+            SuspendProbeNode.FirstPassCount(key, leaf).ShouldBe(1, $"leaf '{leaf}' parked exactly once on the first walk");
+
+        // Resolve each leaf via the IMMEDIATE single-wait path (ResumeWaitAsync re-walks at once, no barrier). After
+        // each non-final resolve the run re-suspends (other leaves still parked); the immediate re-walk re-enters the
+        // still-suspended leaves, which must short-circuit back to Suspended WITHOUT re-running their node.
+        for (var i = 0; i < leaves.Length - 1; i++)
+        {
+            (await ResolveBranchViaResumeWaitAsync(runId, key, leaves[i], $"R-{leaves[i]}")).ShouldBeTrue();
+            await RunEngineAsync(runId);
+            await AssertSuspendedAsync(runId, $"after immediate-resolving {leaves[i]}, the remaining leaves are still parked");
+        }
+
+        foreach (var leaf in leaves)
+            SuspendProbeNode.FirstPassCount(key, leaf).ShouldBe(1,
+                $"leaf '{leaf}' ran its suspending pass once — no inner branch re-fired on a barrier-free immediate re-walk");
+
+        // Resolve the LAST leaf → final immediate re-walk → the whole nested map completes.
+        (await ResolveBranchViaResumeWaitAsync(runId, key, leaves[^1], $"R-{leaves[^1]}")).ShouldBeTrue();
+        await RunEngineAsync(runId);
+
+        using var done = _fixture.BeginScope();
+        var fdb = done.Resolve<CodeSpaceDbContext>();
+        (await fdb.WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == runId)).Status.ShouldBe(WorkflowRunStatus.Success);
+
+        foreach (var leaf in leaves)
+            SuspendProbeNode.FirstPassCount(key, leaf).ShouldBe(1,
+                $"leaf '{leaf}' resumed exactly once across the whole immediate-path sequence — no nested re-dispatch");
+
+        // ORDERED NESTED REDUCE over the immediate path too — at #403 depth: assert ALL four leaves' item AND
+        // summary payloads at their exact [i][j] slots, so a misplaced slot (outer/inner element order vs the
+        // resolve order) is visible. Each leaf echoes its own element + its own resolved "R-<element>" summary.
+        var outerNode = await fdb.WorkflowRunNode.AsNoTracking().SingleAsync(n => n.RunId == runId && n.NodeId == "outer" && n.IterationKey == "");
+        var outerOutputs = JsonDocument.Parse(outerNode.OutputsJson).RootElement;
+        outerOutputs.GetProperty("count").GetInt32().ShouldBe(2, "two outer branches reduced");
+
+        var outer = outerOutputs.GetProperty("results");
+        outer.GetArrayLength().ShouldBe(2);
+
+        // outer[0] is branch o0 — its inner reduced array, element-ordered j0 then j1, each echoing its own leaf.
+        var o0Inner = outer[0].GetProperty("results");
+        o0Inner.GetArrayLength().ShouldBe(2);
+        o0Inner[0].GetProperty("item").GetString().ShouldBe("o0::j0");
+        o0Inner[0].GetProperty("summary").GetString().ShouldBe("R-o0::j0");
+        o0Inner[1].GetProperty("item").GetString().ShouldBe("o0::j1");
+        o0Inner[1].GetProperty("summary").GetString().ShouldBe("R-o0::j1");
+
+        // outer[1] is branch o1 — likewise element-ordered j0 then j1, regardless of when each leaf resolved.
+        var o1Inner = outer[1].GetProperty("results");
+        o1Inner.GetArrayLength().ShouldBe(2);
+        o1Inner[0].GetProperty("item").GetString().ShouldBe("o1::j0");
+        o1Inner[0].GetProperty("summary").GetString().ShouldBe("R-o1::j0");
+        o1Inner[1].GetProperty("item").GetString().ShouldBe("o1::j1");
+        o1Inner[1].GetProperty("summary").GetString().ShouldBe("R-o1::j1");
+    }
+
     // ─── Helpers ────────────────────────────────────────────────────────────────
 
     // Resolve ONE branch's Action wait via ResumeByActionTokenAsync — the human-click path that funnels into

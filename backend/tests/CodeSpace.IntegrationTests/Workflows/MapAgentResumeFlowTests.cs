@@ -132,10 +132,133 @@ public class MapAgentResumeFlowTests
         }
     }
 
+    [Fact]
+    public async Task A_queued_branch_agent_run_under_a_cancelled_parent_run_is_cancelled_by_the_reconciler_not_relaunched()
+    {
+        // THE RECONCILER PARENT-RUN-TERMINAL GUARD (the real PR-D1 bug): two map branches stage Queued AgentRuns,
+        // the run suspends — then the PARENT workflow run is CANCELLED (operator cancel / a terminate-mode sibling
+        // failure) while the branch dispatch was lost in the crash window. On the OLD reconciler, the stuck-Queued
+        // sweep would LAUNCH a sandbox/executor for an already-dead workflow. The guard must instead CANCEL each
+        // orphaned Queued branch run and NEVER re-dispatch it. Drives the REAL reconciler against real rows.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var workflowId = await CreateWorkflowAsync(teamId, userId, MapOverAgentCodeDefinition());
+        var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId, payloadJson: """{ "things": ["a", "b"] }""");
+
+        var jobClient = ResolveJobClient();
+        jobClient.Clear();
+        jobClient.AutoExecute = false;
+
+        try
+        {
+            // Pass 1: both branches park Queued AgentRun waits, the run suspends.
+            await RunEngineAsync(runId);
+
+            var agent0 = await BranchAgentRunIdAsync(runId, "map#0");
+            var agent1 = await BranchAgentRunIdAsync(runId, "map#1");
+
+            // The parent run lands CANCELLED (operator cancel) and the branch runs sit stuck-Queued past the
+            // liveness window — the exact orphan signature the reconciler's re-dispatch sweep used to relaunch.
+            await SetRunStatusAsync(runId, WorkflowRunStatus.Cancelled);
+            await BackdateAgentRunCreatedAsync(new[] { agent0, agent1 }, AgentRunLiveness.Window + TimeSpan.FromMinutes(5));
+
+            jobClient.Clear();   // forget pass-1 dispatches; only the reconciler's actions matter now
+
+            await ReconcileAsync();
+
+            // Assert on THIS run's specific agents (the shared DB means a concurrent test's runs can also be swept,
+            // so the global summary count isn't this run's signal). The guard cancelled BOTH orphaned branch runs and
+            // re-dispatched NEITHER — no executor was enqueued for either of OUR branch ids.
+            jobClient.Calls.Where(c => c.ServiceType == typeof(IAgentRunExecutor) && c.MethodName == nameof(IAgentRunExecutor.ExecuteAsync))
+                .Select(c => c.RunId).ShouldNotContain(agent0, "no executor/sandbox launched for branch 0 of an already-cancelled workflow");
+            jobClient.Calls.Where(c => c.ServiceType == typeof(IAgentRunExecutor) && c.MethodName == nameof(IAgentRunExecutor.ExecuteAsync))
+                .Select(c => c.RunId).ShouldNotContain(agent1, "no executor/sandbox launched for branch 1 of an already-cancelled workflow");
+
+            using var verify = _fixture.BeginScope();
+            var db = verify.Resolve<CodeSpaceDbContext>();
+            foreach (var id in new[] { agent0, agent1 })
+                (await db.AgentRun.AsNoTracking().SingleAsync(r => r.Id == id)).Status
+                    .ShouldBe(AgentRunStatus.Cancelled, "the orphaned Queued branch run was cancelled (a terminal state), not left Queued forever");
+        }
+        finally
+        {
+            jobClient.AutoExecute = true;
+        }
+    }
+
+    [Fact]
+    public async Task A_queued_branch_agent_run_under_a_still_suspended_parent_is_re_dispatched_as_before()
+    {
+        // NON-BREAKING companion: the normal durable-recovery path is PRESERVED. Same shape, but the parent run
+        // stays SUSPENDED (the legitimate parked state). A stuck-Queued branch whose dispatch was lost must STILL
+        // be re-dispatched — exactly as before the guard. The guard only fires for a TERMINAL parent.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var workflowId = await CreateWorkflowAsync(teamId, userId, MapOverAgentCodeDefinition());
+        var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId, payloadJson: """{ "things": ["a"] }""");
+
+        var jobClient = ResolveJobClient();
+        jobClient.Clear();
+        jobClient.AutoExecute = false;
+
+        try
+        {
+            await RunEngineAsync(runId);   // one branch parks a Queued AgentRun wait; the parent suspends
+
+            var agent0 = await BranchAgentRunIdAsync(runId, "map#0");
+
+            // Parent stays Suspended (the live parked state); the branch run is stuck-Queued past the window.
+            await BackdateAgentRunCreatedAsync(new[] { agent0 }, AgentRunLiveness.Window + TimeSpan.FromMinutes(5));
+
+            jobClient.Clear();
+
+            await ReconcileAsync();
+
+            // Assert on THIS run's specific agent (the shared DB means the global summary count can include a
+            // concurrent test's runs). The executor WAS re-enqueued for our live-parent branch run — the unchanged
+            // durable-recovery path the guard must NOT break.
+            jobClient.Calls.Where(c => c.ServiceType == typeof(IAgentRunExecutor) && c.MethodName == nameof(IAgentRunExecutor.ExecuteAsync))
+                .Select(c => c.RunId).ShouldContain(agent0, "the executor was re-enqueued for the live-parent branch run");
+
+            using var verify = _fixture.BeginScope();
+            (await verify.Resolve<CodeSpaceDbContext>().AgentRun.AsNoTracking().SingleAsync(r => r.Id == agent0)).Status
+                .ShouldBe(AgentRunStatus.Queued, "the branch run stays Queued (awaiting its re-dispatched executor) — NOT cancelled");
+        }
+        finally
+        {
+            jobClient.AutoExecute = true;
+        }
+    }
+
     // ─── Helpers ────────────────────────────────────────────────────────────────
 
     private static async Task<Core.Persistence.Entities.WorkflowRunNode> MapNodeAsync(CodeSpaceDbContext db, Guid runId) =>
         await db.WorkflowRunNode.AsNoTracking().SingleAsync(n => n.RunId == runId && n.NodeId == "map" && n.IterationKey == "");
+
+    private async Task<AgentRunReconcileSummary> ReconcileAsync()
+    {
+        using var scope = _fixture.BeginScope();
+        return await scope.Resolve<IAgentRunReconcilerService>().ReconcileAsync(CancellationToken.None);
+    }
+
+    // Flip the parent workflow run's status directly (the operator-cancel / terminate-failure end state) — a pure
+    // UPDATE so the audit interceptor doesn't refuse the status change on a tracked entity.
+    private async Task SetRunStatusAsync(Guid runId, WorkflowRunStatus status)
+    {
+        using var scope = _fixture.BeginScope();
+        await scope.Resolve<CodeSpaceDbContext>().WorkflowRun
+            .Where(r => r.Id == runId)
+            .ExecuteUpdateAsync(s => s.SetProperty(r => r.Status, status));
+    }
+
+    // Backdate the branch agent runs' CreatedDate past the liveness window so they look stuck-Queued to the
+    // reconciler's stale-window check. ExecuteUpdate bypasses the audit interceptor's CreatedDate freeze.
+    private async Task BackdateAgentRunCreatedAsync(IEnumerable<Guid> agentRunIds, TimeSpan ago)
+    {
+        var ids = agentRunIds.ToList();
+        using var scope = _fixture.BeginScope();
+        await scope.Resolve<CodeSpaceDbContext>().AgentRun
+            .Where(r => ids.Contains(r.Id))
+            .ExecuteUpdateAsync(s => s.SetProperty(r => r.CreatedDate, DateTimeOffset.UtcNow - ago));
+    }
 
     // Map a branch's iteration key → its AgentRun id, via the branch's pending AgentRun wait Token (== the agent run id).
     private async Task<Guid> BranchAgentRunIdAsync(Guid runId, string iterationKey)

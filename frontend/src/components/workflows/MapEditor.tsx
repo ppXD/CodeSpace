@@ -61,7 +61,7 @@ export function MapEditor({ config, inputs, onConfigChange, onInputsChange, sugg
           placeholder="Array to fan out — e.g. {{nodes.planner.outputs.json.subtasks}}"
         />
         <p className="wf-retry-hint">
-          The body runs once per element of this array, in parallel branches. Each branch reads its element as <code>{"{{item}}"}</code> / <code>{"{{index}}"}</code>. An empty array fans out zero branches (a valid no-op).
+          The body runs once per element of this array, in parallel branches. Each branch reads its element as <code>{"{{item}}"}</code> / <code>{"{{index}}"}</code>. Required — bind a non-empty collection (e.g. <code>{"{{nodes.planner.outputs.json.subtasks}}"}</code>); a missing or empty binding is a validation error.
         </p>
       </section>
 

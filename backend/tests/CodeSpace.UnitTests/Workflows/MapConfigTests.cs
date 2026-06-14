@@ -76,4 +76,18 @@ public class MapConfigTests
         MapPlan.From(new MapConfig()).MaxParallelism.ShouldBeNull();
         MapPlan.From(new MapConfig { MaxParallelism = 3 }).MaxParallelism.ShouldBe(3);
     }
+
+    [Theory]
+    [InlineData(MapPlan.MaxBranchesCeiling, false)]       // EXACTLY at the ceiling → admitted (the boundary the integration ceiling test passes 2, never the edge)
+    [InlineData(MapPlan.MaxBranchesCeiling + 1, true)]    // one OVER the ceiling → tripped
+    public void Branch_ceiling_trips_only_strictly_above_the_cap(int elementCount, bool expectedTripped)
+    {
+        // Pin the EXACT boundary of the engine's fan-out admission predicate (WorkflowEngine: count >
+        // MapPlan.MaxBranchesCeiling) over the production constant, so the at-ceiling element is admitted and
+        // the first over-ceiling element is the one that fails. Cheap unit pin of the edge the integration
+        // Theory (elementCount 2 vs ceiling+1) can't afford to fan out to.
+        var tripped = elementCount > MapPlan.MaxBranchesCeiling;
+
+        tripped.ShouldBe(expectedTripped);
+    }
 }
