@@ -1201,8 +1201,20 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
     /// Success). A non-array <c>items</c> is a clean NodeFailure. An unhandled branch failure is governed
     /// by the config's <c>errorHandling</c>: <c>terminate</c> (default) fails the map (whose own error edge
     /// can catch it); <c>continue</c> records that element's result as a failure marker + increments
-    /// <c>failed</c>, and the map proceeds. PR1: a body node that SUSPENDS fails its branch with a clear
-    /// message (durable parallel-branch resume is PR2).
+    /// <c>failed</c>, and the map proceeds.
+    ///
+    /// <para>PR2 durable parallel-branch resume: a body node that SUSPENDS parks the run under the branch's
+    /// own iteration key <c>"&lt;mapId&gt;#&lt;i&gt;"</c> — K parking branches = K independent
+    /// <c>WorkflowRunWait</c> rows. When one-or-more branches parked, the map itself SUSPENDS (it does NOT
+    /// complete): the standard <see cref="RunSuspendedException"/> propagates up through the container
+    /// dispatch and lands the run Suspended (exactly how a suspend inside a loop body parks the run). The
+    /// run stays Suspended until EVERY branch wait resolves (the wait-for-all barrier in
+    /// <see cref="WorkflowResumeService.ResumeOnWaitCompletionAsync"/>). On a re-walk this method re-enters
+    /// fresh: <see cref="RehydrateMapResultsAsync"/> replays already-finished branches from the ledger
+    /// (their terminal output reconstructed into <c>results[index]</c> WITHOUT re-running their side effects
+    /// — the exactly-once-per-branch guarantee) and re-runs ONLY still-suspended branches from their
+    /// suspended node with the resolved-wait payload. The map completes (reduce + emit) only when all
+    /// branches are terminal; otherwise it re-suspends.</para>
     /// </summary>
     private async Task<NodeStatus> ExecuteMapAsync(WorkflowRun run, WorkflowDefinition definition, NodeDefinition mapNode, NodeRunScope scope, WalkerState state, CancellationToken cancellationToken, string nodeIterationKey = NoIteration)
     {
@@ -1227,7 +1239,17 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
             var terminal = FindMapBodyTerminal(body, mapNode.Id);
             var branchParallelism = ResolveBodyParallelism(plan.MaxParallelism, _maxParallelism);
 
-            var (results, failed) = await FanOutBranchesAsync(run, definition, mapNode, body, terminal, scope, elements, plan, branchParallelism, nodeIterationKey, cancellationToken).ConfigureAwait(false);
+            // Resume-aware: read the ledger for branches that already SETTLED on an earlier engine
+            // invocation (their terminal node persisted Success/Skipped) and reconstruct their results
+            // WITHOUT re-running them. A fresh run finds no branch rows → every branch runs fresh.
+            var replay = await RehydrateMapResultsAsync(run, mapNode, terminal, elements.Count, nodeIterationKey, cancellationToken).ConfigureAwait(false);
+
+            var (results, failed, suspended) = await FanOutBranchesAsync(run, definition, mapNode, body, terminal, scope, elements, plan, branchParallelism, nodeIterationKey, replay, cancellationToken).ConfigureAwait(false);
+
+            // Any branch parked? The map itself suspends — its wait rows are persisted; the run stays
+            // Suspended until every branch resolves. Propagated like a loop-body suspend (no node.completed).
+            if (suspended > 0)
+                throw new RunSuspendedException(mapNode.Id);
 
             var outputs = BuildMapOutputs(plan.ResultKey, results, failed);
             scope.Nodes[mapNode.Id] = outputs;
@@ -1247,31 +1269,40 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
     /// <summary>
     /// Dispatch every element-branch as a bounded-parallel batch (Task.WhenAll over a SemaphoreSlim) and
     /// collect the per-element terminal outputs into <c>results[index]</c>, IN ELEMENT ORDER (a fixed
-    /// array indexed by element position, so task-completion order never reshuffles the reduce). A branch
-    /// failure is honoured per the map's error policy: <c>terminate</c> rethrows the first branch's
-    /// failure to fail the map; <c>continue</c> stores a failure marker at that index + counts it. Returns
-    /// the ordered results + the failed-branch count.
+    /// array indexed by element position, so task-completion order never reshuffles the reduce). An
+    /// already-SETTLED branch (its terminal persisted on a prior engine invocation — see
+    /// <paramref name="replay"/>) is NOT re-dispatched: its replayed result is slotted in directly, so a
+    /// completed branch's side effect never re-fires on a sibling-triggered re-walk (the exactly-once-per-
+    /// branch guarantee). A branch failure is honoured per the map's error policy: <c>terminate</c> rethrows
+    /// the first branch's failure to fail the map; <c>continue</c> stores a failure marker at that index +
+    /// counts it. A branch SUSPEND parks that branch's wait (PR2) and is counted in the returned suspended
+    /// total — the caller suspends the whole map when it is &gt; 0. Returns the ordered results, the
+    /// failed-branch count, and the suspended-branch count.
     /// </summary>
-    private async Task<(IReadOnlyList<JsonElement> Results, int Failed)> FanOutBranchesAsync(WorkflowRun run, WorkflowDefinition definition, NodeDefinition mapNode, WorkflowDefinition body, NodeDefinition terminal, NodeRunScope scope, IReadOnlyList<JsonElement> elements, MapPlan plan, int branchParallelism, string nodeIterationKey, CancellationToken cancellationToken)
+    private async Task<(IReadOnlyList<JsonElement> Results, int Failed, int Suspended)> FanOutBranchesAsync(WorkflowRun run, WorkflowDefinition definition, NodeDefinition mapNode, WorkflowDefinition body, NodeDefinition terminal, NodeRunScope scope, IReadOnlyList<JsonElement> elements, MapPlan plan, int branchParallelism, string nodeIterationKey, MapReplayState replay, CancellationToken cancellationToken)
     {
-        if (elements.Count == 0) return (Array.Empty<JsonElement>(), 0);
+        if (elements.Count == 0) return (Array.Empty<JsonElement>(), 0, 0);
 
         using var gate = new SemaphoreSlim(branchParallelism);
         var tasks = new Task<MapBranchOutcome>[elements.Count];
         for (var i = 0; i < elements.Count; i++)
-            tasks[i] = RunMapBranchInChildScopeAsync(run, definition, mapNode, body, terminal, scope, elements[i], i, plan, nodeIterationKey, gate, cancellationToken);
+            tasks[i] = replay.Settled.TryGetValue(i, out var settled)
+                ? Task.FromResult(settled)
+                : RunMapBranchInChildScopeAsync(run, definition, mapNode, body, terminal, scope, elements[i], i, plan, nodeIterationKey, gate, cancellationToken);
 
         var outcomes = await Task.WhenAll(tasks).ConfigureAwait(false);
 
         var results = new JsonElement[elements.Count];
         var failed = 0;
+        var suspended = 0;
         foreach (var outcome in outcomes)
         {
             results[outcome.Index] = outcome.Result;
             if (outcome.Failed) failed++;
+            if (outcome.Suspended) suspended++;
         }
 
-        return (results, failed);
+        return (results, failed, suspended);
     }
 
     /// <summary>
@@ -1297,8 +1328,13 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
         }
     }
 
-    /// <summary>The collected result of one map element-branch: its element index (for the ordered reduce), the branch terminal's output (or a failure marker), and whether it failed.</summary>
-    private readonly record struct MapBranchOutcome(int Index, JsonElement Result, bool Failed);
+    /// <summary>
+    /// The collected result of one map element-branch: its element index (for the ordered reduce), the
+    /// branch terminal's output (or a failure marker), whether it failed, and whether it SUSPENDED (parked
+    /// its own wait under <c>"&lt;mapId&gt;#&lt;index&gt;"</c> — PR2). A suspended branch carries an empty
+    /// result placeholder; the map re-suspends rather than reducing, so the placeholder is never emitted.
+    /// </summary>
+    private readonly record struct MapBranchOutcome(int Index, JsonElement Result, bool Failed, bool Suspended = false);
 
     /// <summary>
     /// Run a map body subgraph for ONE element as a parallel WAVE — the same model as the loop body
@@ -1307,8 +1343,14 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
     /// output as that element's result. An unhandled body failure (a node that fails with no <c>error</c>
     /// edge of its own) is governed by the map's <paramref name="plan"/>: <c>terminate</c> throws
     /// <see cref="NodeFailureException"/> (fails the map); <c>continue</c> abandons the rest of the branch
-    /// and returns a failure marker. PR1: a body node that SUSPENDS fails the branch with a clear message
-    /// (durable parallel-branch resume is PR2) — it never parks the run.
+    /// and returns a failure marker.
+    ///
+    /// <para>PR2: a body node that SUSPENDS parks the run durably — <see cref="SuspendNodeAsync"/> wrote
+    /// this branch's <c>WorkflowRunWait</c> under <c>branchKey</c>, and <see cref="AdvanceMapBranchNodeOrAbandon"/>
+    /// re-threw <see cref="RunSuspendedException"/> which we catch here, returning a Suspended outcome so the
+    /// fan-out can re-suspend the whole map after EVERY branch settles. On a re-walk
+    /// <see cref="RehydrateMapBranchAsync"/> settles this branch's finished body nodes + loads its resolved
+    /// wait payload, so only the suspended node re-runs (with its decision) — the finished ones don't.</para>
     /// </summary>
     private async Task<MapBranchOutcome> RunMapBranchOnceAsync(WorkflowRun run, WorkflowDefinition definition, NodeDefinition mapNode, WorkflowDefinition body, NodeDefinition terminal, NodeRunScope scope, JsonElement element, int index, MapPlan plan, string nodeIterationKey, CancellationToken cancellationToken)
     {
@@ -1317,44 +1359,61 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
         var branchParallelism = ResolveBodyParallelism(plan.MaxParallelism, _maxParallelism);
 
         var bodyState = new WalkerState(body);
+
+        // Durable re-entry for this branch: if it already ran partway (a body node suspended on an earlier
+        // engine invocation), settle the finished body nodes + inject the resolved wait payload, so the
+        // suspended node re-runs with its decision and the completed ones aren't redone. A fresh branch
+        // finds no rows under this key and this is a no-op.
+        await RehydrateMapBranchAsync(run, body, bodyState, branchScope, branchKey, cancellationToken).ConfigureAwait(false);
+
         EnqueueReadyFrontier(bodyState, body);
 
-        while (bodyState.Ready.Count > 0)
+        try
         {
-            cancellationToken.ThrowIfCancellationRequested();
-
-            var wave = DrainReadyWave(bodyState);
-
-            var regular = new List<NodeDefinition>(wave.Count);
-            var containers = new List<NodeDefinition>();
-            foreach (var node in wave)
+            while (bodyState.Ready.Count > 0)
             {
-                if (ShouldSkip(node, bodyState))
+                cancellationToken.ThrowIfCancellationRequested();
+
+                var wave = DrainReadyWave(bodyState);
+
+                var regular = new List<NodeDefinition>(wave.Count);
+                var containers = new List<NodeDefinition>();
+                foreach (var node in wave)
                 {
-                    await MarkSkippedAsync(run, node, bodyState, cancellationToken, branchKey).ConfigureAwait(false);
-                    EnqueueDownstreamWhenReady(node, bodyState);
+                    if (ShouldSkip(node, bodyState))
+                    {
+                        await MarkSkippedAsync(run, node, bodyState, cancellationToken, branchKey).ConfigureAwait(false);
+                        EnqueueDownstreamWhenReady(node, bodyState);
+                    }
+                    else if (IsContainerNode(node)) containers.Add(node);
+                    else regular.Add(node);
                 }
-                else if (IsContainerNode(node)) containers.Add(node);
-                else regular.Add(node);
-            }
 
-            var outcomes = await RunReadyNodesAsync(run, regular, branchScope, bodyState, cancellationToken, branchKey, branchParallelism).ConfigureAwait(false);
-            for (var i = 0; i < regular.Count; i++)
-            {
-                MergeNodeOutcome(regular[i], outcomes[i], branchScope, bodyState);
-                if (AdvanceMapBranchNodeOrAbandon(mapNode, regular[i], outcomes[i].Status, bodyState, plan.ErrorHandling, out var marker))
-                    return new MapBranchOutcome(index, marker, Failed: true);
-            }
+                var outcomes = await RunReadyNodesAsync(run, regular, branchScope, bodyState, cancellationToken, branchKey, branchParallelism).ConfigureAwait(false);
+                for (var i = 0; i < regular.Count; i++)
+                {
+                    MergeNodeOutcome(regular[i], outcomes[i], branchScope, bodyState);
+                    if (AdvanceMapBranchNodeOrAbandon(mapNode, regular[i], outcomes[i].Status, bodyState, plan.ErrorHandling, out var marker))
+                        return new MapBranchOutcome(index, marker, Failed: true);
+                }
 
-            // A nested container (loop / try / map) recurses under THIS branch's key; it writes its own
-            // scope/state sequentially, so it stays off the parallel batch — exactly like a loop body.
-            foreach (var container in containers)
-            {
-                var status = await ExecuteContainerAsync(run, definition, container, branchScope, bodyState, cancellationToken, branchKey).ConfigureAwait(false);
-                bodyState.Statuses[container.Id] = status;
-                if (AdvanceMapBranchNodeOrAbandon(mapNode, container, status, bodyState, plan.ErrorHandling, out var marker))
-                    return new MapBranchOutcome(index, marker, Failed: true);
+                // A nested container (loop / try / map) recurses under THIS branch's key; it writes its own
+                // scope/state sequentially, so it stays off the parallel batch — exactly like a loop body.
+                foreach (var container in containers)
+                {
+                    var status = await ExecuteContainerAsync(run, definition, container, branchScope, bodyState, cancellationToken, branchKey).ConfigureAwait(false);
+                    bodyState.Statuses[container.Id] = status;
+                    if (AdvanceMapBranchNodeOrAbandon(mapNode, container, status, bodyState, plan.ErrorHandling, out var marker))
+                        return new MapBranchOutcome(index, marker, Failed: true);
+                }
             }
+        }
+        catch (RunSuspendedException)
+        {
+            // A body node parked this branch's wait (already persisted by SuspendNodeAsync under branchKey).
+            // Report Suspended so the fan-out re-suspends the whole map once all branches settle — never a
+            // failure, never a completed reduce. The placeholder result is discarded on the re-suspend.
+            return new MapBranchOutcome(index, EmptyJsonObject(), Failed: false, Suspended: true);
         }
 
         // The element's result is the terminal body node's output (validator enforces exactly one).
@@ -1366,27 +1425,21 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
     }
 
     /// <summary>
-    /// The map-branch variant of <see cref="AdvanceBodyNodeOrAbandon"/>: a SUSPEND fails the branch (PR1
-    /// has no durable parallel-branch resume), and an unhandled FAILURE honours the map's error policy —
-    /// <see cref="MapErrorHandling.Terminate"/> throws (fails the map), <see cref="MapErrorHandling.Continue"/>
-    /// returns <c>true</c> with a failure marker so the branch is abandoned + counted. A node with its own
-    /// <c>error</c> edge is handled regardless. Returns <c>true</c> only for the continue-abandon case;
-    /// otherwise releases the ready downstream and returns <c>false</c> (marker is unused then).
+    /// The map-branch variant of <see cref="AdvanceBodyNodeOrAbandon"/>: a SUSPEND throws
+    /// <see cref="RunSuspendedException"/> (PR2 — the branch's wait is already persisted; the catch in
+    /// <see cref="RunMapBranchOnceAsync"/> turns it into a Suspended outcome so the map re-suspends), and an
+    /// unhandled FAILURE honours the map's error policy — <see cref="MapErrorHandling.Terminate"/> throws
+    /// (fails the map), <see cref="MapErrorHandling.Continue"/> returns <c>true</c> with a failure marker so
+    /// the branch is abandoned + counted. A node with its own <c>error</c> edge is handled regardless.
+    /// Returns <c>true</c> only for the continue-abandon case; otherwise releases the ready downstream and
+    /// returns <c>false</c> (marker is unused then).
     /// </summary>
     private bool AdvanceMapBranchNodeOrAbandon(NodeDefinition mapNode, NodeDefinition node, NodeStatus status, WalkerState bodyState, MapErrorHandling errorHandling, out JsonElement marker)
     {
         marker = default;
 
         if (status == NodeStatus.Suspended)
-        {
-            var message = $"flow.map body suspension is not yet supported — node '{node.Id}' in map '{mapNode.Id}' tried to park (durable parallel-branch resume ships in PR2).";
-
-            if (errorHandling == MapErrorHandling.Terminate)
-                throw new NodeFailureException(message);
-
-            marker = BuildMapFailureMarker(message, node.Id);
-            return true;
-        }
+            throw new RunSuspendedException(node.Id);
 
         if (status == NodeStatus.Failure && !HasErrorEdge(node, bodyState))
         {
@@ -1431,6 +1484,105 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
             throw new NodeFailureException($"Map '{mapId}' body must end in exactly one terminal node (the per-element result); found {terminals.Count}.");
 
         return terminals[0];
+    }
+
+    /// <summary>The settled-branch replay set for a resuming map: element index → the branch's already-reconstructed outcome (its terminal output, replayed from the ledger). Branches NOT in this map re-run (fresh or from their suspended node).</summary>
+    private readonly record struct MapReplayState(IReadOnlyDictionary<int, MapBranchOutcome> Settled);
+
+    /// <summary>
+    /// Array-reconstructing durable re-entry for a <c>flow.map</c> on a re-walk — the map analogue of
+    /// <see cref="RehydrateLoopStateAsync"/> (which threads a scalar across COMPLETED loop passes; this
+    /// collects per-index branch RESULTS). Reads every branch row under this map's key prefix
+    /// (<c>"&lt;mapId&gt;#"</c>, scoped to the enclosing iteration key when nested), and for each branch
+    /// index whose TERMINAL body node settled Success it reconstructs <c>results[index]</c> from the
+    /// terminal's persisted outputs — WITHOUT re-running the branch. That is the exactly-once-per-branch
+    /// guarantee: a branch that already finished its work (e.g. an <c>agent.code</c> that consumed its
+    /// AgentRun) is NEVER re-dispatched when a SIBLING branch's wait resolves and triggers a re-walk.
+    /// A branch still parked (no terminal Success) is left out of the replay set so it re-runs from its
+    /// suspended node (via <see cref="RehydrateMapBranchAsync"/>); a fresh run finds no rows and replays
+    /// nothing. Results are keyed by ELEMENT INDEX, never by completion / resume order, so the ordered
+    /// reduce survives every re-walk.
+    /// </summary>
+    private async Task<MapReplayState> RehydrateMapResultsAsync(WorkflowRun run, NodeDefinition mapNode, NodeDefinition terminal, int elementCount, string nodeIterationKey, CancellationToken cancellationToken)
+    {
+        if (elementCount == 0) return new MapReplayState(new Dictionary<int, MapBranchOutcome>());
+
+        // This map's direct branches are keyed CombineIterationKey(nodeIterationKey, "<mapId>#<i>"); a
+        // nested descendant extends that with "/<inner>#<j>". We attribute a row to branch index i by the
+        // integer right after the prefix, up to the next '/', so a nested branch's rows count under the
+        // correct OUTER branch (mirrors LoopIterationIndex).
+        var branchKeyPrefix = CombineIterationKey(nodeIterationKey, $"{mapNode.Id}#");
+        var rows = await _db.WorkflowRunNode.AsNoTracking()
+            .Where(n => n.RunId == run.Id && n.IterationKey.StartsWith(branchKeyPrefix))
+            .ToListAsync(cancellationToken).ConfigureAwait(false);
+
+        if (rows.Count == 0) return new MapReplayState(new Dictionary<int, MapBranchOutcome>());
+
+        var settled = new Dictionary<int, MapBranchOutcome>();
+
+        for (var i = 0; i < elementCount; i++)
+        {
+            // The branch's terminal node row (exactly its own pass key — nested descendants have longer keys).
+            var branchKey = CombineIterationKey(nodeIterationKey, $"{mapNode.Id}#{i}");
+            var terminalRow = rows.FirstOrDefault(r => r.IterationKey == branchKey && r.NodeId == terminal.Id);
+
+            // Branch is COMPLETED iff its terminal node settled Success — replay its result, do not re-run.
+            // Anything else (still parked, partially run, or not started) is left to re-run.
+            if (terminalRow is { Status: NodeStatus.Success })
+            {
+                var terminalOutputs = ParsePayloadObject(terminalRow.OutputsJson);
+                var result = JsonSerializer.SerializeToElement(terminalOutputs);
+                settled[i] = new MapBranchOutcome(i, result, Failed: false);
+            }
+        }
+
+        return new MapReplayState(settled);
+    }
+
+    /// <summary>
+    /// Durable re-entry for ONE map element-branch — the branch analogue of <see cref="RehydrateLoopBodyAsync"/>.
+    /// Settles the branch's body nodes that already finished (Success / Skipped) into the branch walker +
+    /// scope, recomputes their edge-liveness, and loads the resolved wait payload for THIS branch key so the
+    /// suspended body node re-runs with its decision. Scoped to the branch key so branch i's resolved wait
+    /// never bleeds into branch j. No-op for a fresh branch (no rows under this key).
+    /// </summary>
+    private async Task RehydrateMapBranchAsync(WorkflowRun run, WorkflowDefinition body, WalkerState bodyState, NodeRunScope branchScope, string branchKey, CancellationToken cancellationToken)
+    {
+        var rows = await _db.WorkflowRunNode.AsNoTracking()
+            .Where(n => n.RunId == run.Id && n.IterationKey == branchKey)
+            .ToListAsync(cancellationToken).ConfigureAwait(false);
+
+        if (rows.Count == 0) return;
+
+        foreach (var row in rows)
+        {
+            // Only Success / Skipped settle (and so won't re-run). The suspended node is left unsettled so
+            // EnqueueReadyFrontier re-runs it — with the resolved payload loaded below.
+            if (row.Status is not (NodeStatus.Success or NodeStatus.Skipped)) continue;
+
+            bodyState.Statuses[row.NodeId] = row.Status;
+
+            if (row.Status != NodeStatus.Success) continue;
+
+            var outputs = ParsePayloadObject(row.OutputsJson);
+            if (outputs.Count > 0) branchScope.Nodes[row.NodeId] = outputs;
+
+            var hints = ParseRoutingHints(row.RoutingHintsJson);
+            if (hints != null) bodyState.RoutingHints[row.NodeId] = new HashSet<string>(hints);
+        }
+
+        foreach (var edge in body.Edges)
+        {
+            if (!bodyState.Statuses.TryGetValue(edge.From, out var sourceStatus)) continue;
+            bodyState.EdgeLive[edge] = IsEdgeLive(edge, sourceStatus, bodyState.RoutingHints.GetValueOrDefault(edge.From));
+        }
+
+        var resolved = await _db.WorkflowRunWait.AsNoTracking()
+            .Where(w => w.RunId == run.Id && w.IterationKey == branchKey && w.Status == WorkflowWaitStatuses.Resolved)
+            .ToListAsync(cancellationToken).ConfigureAwait(false);
+
+        foreach (var w in resolved)
+            bodyState.ResumePayloads[w.NodeId] = string.IsNullOrWhiteSpace(w.PayloadJson) ? EmptyJsonObject() : JsonDocument.Parse(w.PayloadJson).RootElement.Clone();
     }
 
     /// <summary>

@@ -25,10 +25,8 @@ namespace CodeSpace.IntegrationTests.Workflows;
 /// json.subtasks → map → results readable downstream as results / results[0] / .length); empty array →
 /// empty results no-op; non-array → clean Fail; per-element {{item}}/{{index}} scope; terminate vs
 /// continue-on-error; nested-map depth guard; bounded parallelism (maxParallelism 1 vs N, both correct).
-/// Bodies are SYNCHRONOUS — PR1 doesn't do durable parallel-branch resume (a body suspend is PR2): a
-/// suspending body node is rejected at SAVE (the real operator path), and — if validation were bypassed —
-/// the engine's runtime guard TERMINATES the run (Failure under terminate, marker+Success under continue)
-/// rather than parking it Suspended.
+/// These are the SYNCHRONOUS-body cases (the PR1 surface, still exactly correct under PR2). The durable
+/// parallel-branch suspend/resume cases (a body node that PARKS) live in <c>MapDurableResumeFlowTests</c>.
 /// </summary>
 [Collection(PostgresCollection.Name)]
 [Trait("Category", "Integration")]
@@ -212,56 +210,16 @@ public class MapFlowTests
     }
 
     [Fact]
-    public async Task A_map_body_that_suspends_is_rejected_at_save()
+    public async Task A_map_body_that_suspends_validates_at_save()
     {
-        // The PR1 honest contract, at the REAL operator path: a body node that would PARK the run
-        // (flow.wait_approval) is rejected by the validator at save time. Durable parallel-branch resume
-        // ships in PR2 — until then a suspending body can't reach the engine, so no wait row is ever
-        // committed and no resume job is ever scheduled behind a map. (Mirrors the depth-guard save test.)
+        // PR2 lifts the PR1 fail-closed guard: a body node that PARKS the run (flow.wait_approval) now VALIDATES
+        // at the real operator path. The durable parallel-branch suspend/resume behaviour itself is exercised in
+        // MapDurableResumeFlowTests — this is the save-time backstop that the guard was truly removed.
         var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
 
-        var ex = await Should.ThrowAsync<WorkflowValidationException>(() =>
-            CreateWorkflowAsync(teamId, userId, SuspendingBodyMapDefinition(errorHandling: null)));
-
-        ex.Errors.ShouldContain(e => e.Contains("cannot contain a node that waits") && e.Contains("PR2"));
-    }
-
-    [Theory]
-    [InlineData(null)]        // terminate (default): a body suspend fails the map → run Failure
-    [InlineData("continue")]  // continue: a body suspend abandons the branch with a failure marker → map survives
-    public async Task The_runtime_guard_fails_a_suspending_body_branch_without_parking_the_run(string? errorHandling)
-    {
-        // Defense-in-depth: even if a suspending body slipped past the validator (it can't — see the save test),
-        // the engine's runtime guard (AdvanceMapBranchNodeOrAbandon) must NOT leave the run Suspended. We bypass
-        // the validator by seeding the workflow_version directly, then run it. Both error-handling arms are
-        // exercised: terminate throws (run Failure), continue returns a failure marker (run Success). The single
-        // load-bearing property either way: the run reaches a TERMINAL state, never WorkflowRunStatus.Suspended.
-        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
-        var workflowId = await CreateWorkflowBypassingValidationAsync(teamId, SuspendingBodyMapDefinition(errorHandling));
-        var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId, payloadJson: """{ "things": ["a", "b"] }""");
-
-        await RunEngineAsync(runId);
-
-        using var verify = _fixture.BeginScope();
-        var db = verify.Resolve<CodeSpaceDbContext>();
-        var run = await db.WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == runId);
-
-        run.Status.ShouldNotBe(WorkflowRunStatus.Suspended,
-            "a map body suspend must terminate the run, not park it — PR1 has no durable parallel-branch resume");
-
-        if (errorHandling == null)
-        {
-            run.Status.ShouldBe(WorkflowRunStatus.Failure, "terminate mode fails the map → the run");
-            (await MapNodeAsync(db, runId)).Status.ShouldBe(NodeStatus.Failure);
-        }
-        else
-        {
-            run.Status.ShouldBe(WorkflowRunStatus.Success, "continue mode abandons the branch with a marker, the map survives");
-
-            var outputs = JsonDocument.Parse((await MapNodeAsync(db, runId)).OutputsJson).RootElement;
-            outputs.GetProperty("failed").GetInt32().ShouldBe(2, "both branches' suspend attempts become failure markers");
-            outputs.GetProperty("results")[0].TryGetProperty("error", out _).ShouldBeTrue("a suspended branch's result is a failure marker");
-        }
+        // Should NOT throw — the create succeeds and returns a workflow id.
+        var workflowId = await CreateWorkflowAsync(teamId, userId, SuspendingBodyMapDefinition(errorHandling: null));
+        workflowId.ShouldNotBe(Guid.Empty);
     }
 
     [Fact]
@@ -345,45 +303,6 @@ public class MapFlowTests
     {
         using var scope = _fixture.BeginScope();
         await scope.Resolve<IWorkflowEngine>().ExecuteRunAsync(runId, CancellationToken.None);
-    }
-
-    // Seed a workflow + committed version directly, BYPASSING DefinitionValidator. The only path to put an
-    // (intentionally invalid) suspending-body map in front of the engine — the validated CreateWorkflowCommand
-    // rejects it (see A_map_body_that_suspends_is_rejected_at_save). The version's DefinitionHash matches
-    // DefinitionHash.Compute(def) so the engine's tamper check passes.
-    private async Task<Guid> CreateWorkflowBypassingValidationAsync(Guid teamId, WorkflowDefinition definition)
-    {
-        using var scope = _fixture.BeginScope();
-        var db = scope.Resolve<CodeSpaceDbContext>();
-
-        var workflowId = Guid.NewGuid();
-        var now = DateTimeOffset.UtcNow;
-        var definitionJson = JsonSerializer.Serialize(definition, WorkflowJson.Options);
-
-        db.Workflow.Add(new Workflow
-        {
-            Id = workflowId,
-            TeamId = teamId,
-            Name = "map-unvalidated-" + Guid.NewGuid().ToString("N")[..6],
-            DefinitionJson = definitionJson,
-            LatestVersion = 1,
-            Enabled = true,
-            CreatedBy = SystemUsers.SeederId,
-            LastModifiedBy = SystemUsers.SeederId,
-        });
-        db.WorkflowVersion.Add(new WorkflowVersion
-        {
-            WorkflowId = workflowId,
-            Version = 1,
-            DefinitionJson = definitionJson,
-            DefinitionHash = DefinitionHash.Compute(definition),
-            CommittedAt = now,
-            CreatedDate = now,
-            CreatedBy = SystemUsers.SeederId,
-        });
-
-        await db.SaveChangesAsync();
-        return workflowId;
     }
 
     // manual → map(items={{trigger.things}}; body: ms → work[value={{item}}] → leaf[value={{item}}]) → terminal.
@@ -495,8 +414,8 @@ public class MapFlowTests
     }
 
     // manual → map(errorHandling; body: ms → gate[flow.wait_approval]) → terminal. The body node parks the run —
-    // which PR1 cannot do for a parallel branch. Used to prove the validator rejects this at save AND that the
-    // engine's runtime guard terminates (never parks) the run if validation were bypassed.
+    // a first-class PR2 map body element. Used here only to prove the save-time validator now ACCEPTS it; the
+    // durable parallel-branch suspend/resume behaviour itself is exercised in MapDurableResumeFlowTests.
     private static WorkflowDefinition SuspendingBodyMapDefinition(string? errorHandling)
     {
         var mapConfig = errorHandling != null ? $$"""{ "errorHandling": "{{errorHandling}}" }""" : "{}";
