@@ -2337,6 +2337,9 @@ textarea:-webkit-autofill {
 .acs-root .wf-rf-handle-catch:hover { background: var(--warn) !important; border-color: var(--warn) !important; }
 /* A try container's head icon is warn-tinted to set it apart from a loop (whose icon is accent-tinted). */
 .acs-root .wf-rf-loop[data-kind="try"] .wf-rf-loop-icon { background: color-mix(in srgb, var(--warn) 16%, transparent); color: var(--warn); }
+/* A map (fan-out) container's head icon is ink-tinted — distinct from a loop (accent) and a try (warn),
+   reading as "parallel branches" rather than "repeat" or "recover", while staying in the warm palette. */
+.acs-root .wf-rf-loop[data-kind="map"] .wf-rf-loop-icon { background: color-mix(in srgb, var(--ink-2) 12%, transparent); color: var(--ink-2); }
 .acs-root .wf-canvas .react-flow__edge.wf-rf-edge-error .react-flow__edge-path { stroke: var(--danger); stroke-dasharray: 5 3; }
 /* A flow.try catch edge — the handled-failure path, warn (amber) + dashed to read like the error edge. */
 .acs-root .wf-canvas .react-flow__edge.wf-rf-edge-catch .react-flow__edge-path { stroke: var(--warn); stroke-dasharray: 5 3; }

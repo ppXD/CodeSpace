@@ -15,18 +15,22 @@ const manifests: NodeManifestDto[] = [
   manifest("flow.loop_start", "Regular", "Loop start"),
   manifest("http.request", "Regular", "HTTP request"),
   manifest("flow.loop", "Loop", "Loop"),
+  manifest("flow.map", "Map", "Map"),
+  manifest("flow.map_start", "Regular", "Map start"),
   manifest("flow.terminal", "Terminal", "Done"),
 ];
 
 describe("NodeAddMenu", () => {
-  it("offers steps + endpoints, hides triggers and the loop_start marker", () => {
+  it("offers steps + endpoints, hides triggers and the body-start markers", () => {
     render(<NodeAddMenu at={{ x: 10, y: 10 }} manifests={manifests} onPick={() => {}} onClose={() => {}} />);
 
     expect(screen.getByText("HTTP request")).toBeTruthy();
     expect(screen.getByText("Loop")).toBeTruthy();
+    expect(screen.getByText("Map")).toBeTruthy();      // a Map container is a Step too
     expect(screen.getByText("Done")).toBeTruthy();
     expect(screen.queryByText("Manual start")).toBeNull(); // never add a second trigger
     expect(screen.queryByText("Loop start")).toBeNull();   // internal marker, auto-created with a Loop
+    expect(screen.queryByText("Map start")).toBeNull();    // internal marker, auto-created with a Map
   });
 
   it("calls onPick with the chosen manifest", () => {

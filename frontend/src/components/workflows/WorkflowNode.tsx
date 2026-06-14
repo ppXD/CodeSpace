@@ -125,10 +125,11 @@ export function WorkflowNode({ id, data, selected }: NodeProps) {
   // component so the store subscription it needs (for the resize-min) doesn't run for every node.
   if (isContainerKind(d.kind)) return <ContainerNode id={id} d={d} selected={selected} />;
 
-  // The loop body's entry marker (flow.loop_start) is source-only: the engine seeds it at the start
-  // of every iteration, so it can't have an incoming edge, and a passthrough never fails, so it must
-  // not expose an error handle either (wiring the body off that dead handle skips it every pass).
-  const isLoopStart = d.typeKey === "flow.loop_start";
+  // A loop/map body's entry marker (flow.loop_start / flow.map_start) is source-only: the engine seeds
+  // it at the start of every iteration / branch, so it can't have an incoming edge, and a passthrough
+  // never fails, so it must not expose an error handle either (wiring the body off that dead handle
+  // skips it every pass). (flow.try_start keeps the default handles — Try's body entry differs.)
+  const isLoopStart = d.typeKey === "flow.loop_start" || d.typeKey === "flow.map_start";
 
   return (
     <div className="wf-rf-node" data-kind={d.kind.toLowerCase()} data-selected={selected}>
@@ -195,6 +196,7 @@ function iconFor(d: WorkflowNodeData) {
     (d.iconKey ? ICON_BY_KEY[d.iconKey] : undefined)
     ?? (d.kind === "Trigger" ? Ic.Zap
       : d.kind === "Terminal" ? Ic.CircleStop
+      : d.kind === "Map" ? Ic.Fork
       : d.category === "AI" ? Ic.Sparkles
       : d.category === "Git" ? Ic.Branch
       : Ic.Box);
