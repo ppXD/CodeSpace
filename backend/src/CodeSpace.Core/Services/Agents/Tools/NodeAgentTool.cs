@@ -52,6 +52,16 @@ public sealed class NodeAgentTool : IAgentTool
             ? call.Input.EnumerateObject().ToDictionary(p => p.Name, p => p.Value.Clone())
             : new Dictionary<string, JsonElement>();
 
+        // Strip the act-as-user actor key from model-controlled input. ActsAsUser ("act as this CodeSpace user's
+        // own linked provider identity", Model B) is an ENGINE-RESPOND-PATH feature: it is only safe because
+        // WorkflowResumeService runs ActorIdentityRequirementGate first, proving the AUTHENTICATED responder IS
+        // that user before the node spends their stored OAuth token. No such gate runs on this synthetic tool path,
+        // so honoring a model-supplied actor id would let the model author a PR — or forge an APPROVE review — as
+        // ANY team member who linked an identity (per-user impersonation). Dropping it forces actAsUserId → null in
+        // the node, so a tool-invoked write acts as the repo CONNECTION credential, never a specific user. Generic
+        // via the manifest, so every present + future act-as-user node is covered without naming a key here.
+        if (_node.Manifest.ActsAsUser is { } actsAsUser) inputs.Remove(actsAsUser.ActorInputKey);
+
         // Stamp the run's team onto the synthetic scope's sys.team_id so repo-touching nodes resolve within it.
         // The Guid is serialized as a JSON STRING element, byte-for-byte like WorkflowEngine.BuildSysScope, so
         // NodeScopeReader.TryReadTeamId (which requires ValueKind==String + Guid.TryParse) reads it back.

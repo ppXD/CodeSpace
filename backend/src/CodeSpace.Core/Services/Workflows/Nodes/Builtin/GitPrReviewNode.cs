@@ -44,10 +44,11 @@ public sealed class GitPrReviewNode : INodeRuntime
         // Synchronous + standalone → exposable as an agent tool (a destructive, approval-gated one): it flows
         // through AgentToolGate exactly like agent.run_command, which can already review via the shell — this is
         // the safer typed alternative, not a wider attack surface. INERT until the MCP endpoint is enabled.
-        // Attribution: on the synchronous tool path NodeAgentTool stamps only sys.team_id (no actAsUserId), so a
-        // tool-invoked review acts as the repo CONNECTION credential, not a specific user (the ActsAsUser per-user
-        // attribution below is an engine-respond-path feature; it does not apply here). The ledger's agent_run_id
-        // provides traceability.
+        // Attribution: the ActsAsUser per-user attribution below is an engine-respond-path feature, gated by
+        // ActorIdentityRequirementGate (the responder must PROVE they are that user). No such gate runs on the
+        // synthetic tool path, so NodeAgentTool STRIPS the actAsUserId actor key from model input there — a
+        // tool-invoked review acts as the repo CONNECTION credential, never a specific user (so a model can't
+        // forge an APPROVE review as a teammate). The ledger's agent_run_id provides traceability.
         IsAgentToolEligible = true,
         // Acts AS the actor's own identity (Model B). Declaring this lets the engine generically gate
         // the responder's linked identity when this node sits downstream of an interactive wait whose

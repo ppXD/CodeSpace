@@ -1,9 +1,11 @@
 using System.Text.Json;
 using CodeSpace.Core.Services.Agents.Commands;
 using CodeSpace.Core.Services.Agents.Tools;
+using CodeSpace.Core.Services.PullRequests;
 using CodeSpace.Core.Services.Workflows.Nodes;
 using CodeSpace.Core.Services.Workflows.Nodes.Builtin;
 using CodeSpace.Messages.Agents;
+using CodeSpace.Messages.Dtos.Providers;
 using CodeSpace.Messages.Enums;
 using Microsoft.Extensions.Logging.Abstractions;
 using Shouldly;
@@ -151,6 +153,77 @@ public class AgentToolRegistryTests
 
         registry.Resolve("agent.run_command").ShouldNotBeNull().IsDestructive.ShouldBeTrue("agent.run_command stays destructive");
     }
+
+    [Theory]
+    [InlineData("git.open_pr")]
+    [InlineData("git.pr_review")]
+    public async Task A_model_supplied_actAsUserId_is_stripped_on_the_tool_path_so_the_write_uses_the_connection_credential(string kind)
+    {
+        // SAFETY: actAsUserId ("act as this CodeSpace user's own linked identity", Model B) is only safe on the
+        // engine respond path, where ActorIdentityRequirementGate proves the AUTHENTICATED responder IS that user
+        // before their stored OAuth token is spent. No such gate runs on the synthetic NodeAgentTool path — so a
+        // model-supplied actAsUserId there would forge a PR / an APPROVE review as ANY teammate who linked an
+        // identity. NodeAgentTool must STRIP it: the node calls the service with actorUserId == null (→ the repo
+        // CONNECTION credential), making the "not a wider attack surface" claim true.
+        var pr = new CapturingPullRequestService();
+        var node = ActAsUserNode(kind, pr);
+        var tool = new NodeAgentTool(node, NullLogger.Instance);
+
+        var teamId = Guid.NewGuid();
+        var victim = Guid.NewGuid();   // a teammate the model tries to impersonate
+        var input = JsonSerializer.SerializeToElement(new
+        {
+            repositoryId = Guid.NewGuid().ToString(),
+            title = "t", sourceBranch = "feature", targetBranch = "main",   // git.open_pr requireds
+            number = 7, verdict = "approve",                                // git.pr_review requireds
+            actAsUserId = victim.ToString(),                                // the impersonation attempt
+        });
+
+        var result = await tool.CallAsync(new AgentToolCall { Input = input, TeamId = teamId }, CancellationToken.None);
+
+        result.IsError.ShouldBeFalse($"{kind} should reach the service (fake succeeds) once actAsUserId is stripped");
+        pr.LastActorUserId.ShouldBeNull($"{kind} via the tool path must NOT honour a model-supplied actAsUserId — it acts as the connection credential, never as {victim}");
+    }
+
+    /// <summary>Captures the actorUserId the node forwards; everything else returns a minimal success shape. Only
+    /// the two act-as-user writes (open_pr / pr_review) are exercised; the rest throw so a misuse is loud.</summary>
+    private sealed class CapturingPullRequestService : IPullRequestService
+    {
+        public Guid? LastActorUserId { get; private set; }
+
+        public Task<RemotePullRequest> OpenPullRequestAsync(Guid repositoryId, Guid teamId, OpenPullRequestInput input, Guid? actorUserId, CancellationToken ct)
+        {
+            LastActorUserId = actorUserId;
+            return Task.FromResult(new RemotePullRequest
+            {
+                ExternalId = "1", Number = 1, Title = input.Title, State = PullRequestState.Open,
+                SourceBranch = input.SourceBranch, TargetBranch = input.TargetBranch,
+                CommentsCount = 0, CreatedDate = DateTimeOffset.UnixEpoch, UpdatedDate = DateTimeOffset.UnixEpoch, WebUrl = "https://x",
+            });
+        }
+
+        public Task<RemotePullRequestReview> SubmitReviewAsync(Guid repositoryId, Guid teamId, int number, PullRequestReviewVerdict verdict, string? body, Guid? actorUserId, CancellationToken ct)
+        {
+            LastActorUserId = actorUserId;
+            return Task.FromResult(new RemotePullRequestReview { Verdict = verdict, WebUrl = "https://x" });
+        }
+
+        public Task<IReadOnlyList<RemotePullRequest>> ListAsync(Guid repositoryId, Guid teamId, PullRequestState? state, int page, int perPage, CancellationToken ct) => throw new NotSupportedException();
+        public Task<RemotePullRequest> GetAsync(Guid repositoryId, Guid teamId, int number, CancellationToken ct) => throw new NotSupportedException();
+        public Task<IReadOnlyList<RemotePullRequestCommit>> ListCommitsAsync(Guid repositoryId, Guid teamId, int number, CancellationToken ct) => throw new NotSupportedException();
+        public Task<IReadOnlyList<RemotePullRequestFile>> ListFilesAsync(Guid repositoryId, Guid teamId, int number, CancellationToken ct) => throw new NotSupportedException();
+        public Task<RemotePullRequestCounts> GetCountsAsync(Guid repositoryId, Guid teamId, CancellationToken ct) => throw new NotSupportedException();
+        public Task<IReadOnlyList<RemotePullRequestCheck>> ListChecksAsync(Guid repositoryId, Guid teamId, int number, CancellationToken ct) => throw new NotSupportedException();
+        public Task<RemotePullRequestComment> PostCommentAsync(Guid repositoryId, Guid teamId, int number, string body, CancellationToken ct) => throw new NotSupportedException();
+        public Task<RemotePullRequestMergeResult> MergePullRequestAsync(Guid repositoryId, Guid teamId, int number, MergePullRequestInput input, Guid? actorUserId, CancellationToken ct) => throw new NotSupportedException();
+    }
+
+    private static INodeRuntime ActAsUserNode(string kind, IPullRequestService pr) => kind switch
+    {
+        "git.open_pr" => new GitOpenPullRequestNode(pr),
+        "git.pr_review" => new GitPrReviewNode(pr),
+        _ => throw new ArgumentOutOfRangeException(nameof(kind), kind, "not an act-as-user git-write node"),
+    };
 
     private static INodeRuntime GitWriteNode(string kind) => kind switch
     {
