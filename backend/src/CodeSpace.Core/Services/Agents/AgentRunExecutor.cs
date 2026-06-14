@@ -230,10 +230,17 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         // (stale epoch) loses the completion CAS.
         var expectedEpoch = run.FenceEpoch;
 
+        // Resolve a redactor for the re-opened endpoint's tool-result text — fresh from the run's credential, in its
+        // own try so a deleted/rotated credential degrades to the no-op redactor rather than blocking the reattach.
+        // Independent of ReattachAndFoldAsync's own resolution (which still owns the fingerprint-gated re-tail).
+        SecretRedactor reopenRedactor;
+        try { reopenRedactor = (await ResolveModelCredentialEnvAsync(task, run.TeamId, harness, cancellationToken).ConfigureAwait(false)).Redactor; }
+        catch { reopenRedactor = SecretRedactor.None; }
+
         // Re-open the run's MCP endpoint on the SAME socket+token the handle recorded at launch (the in-process listener
         // died with the original worker, but the detached agent keeps running with its declaration file pointing here).
         // Null when the run had no fabric / the flag is off → no-op. Bounded to the re-tail span like ExecuteAsync's.
-        await using var mcp = ReopenMcpEndpointForReattach(agentRunId, task.Autonomy, run.TeamId, handle, cancellationToken);
+        await using var mcp = ReopenMcpEndpointForReattach(agentRunId, task.Autonomy, run.TeamId, reopenRedactor, handle, cancellationToken);
 
         try
         {
@@ -526,18 +533,17 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     /// off; the wiring flag is NOT re-checked here (the agent's declaration already exists, so the endpoint must serve
     /// it regardless). Fail-soft via <see cref="OpenMcpEndpointIfEnabled"/>.
     /// </summary>
-    private AgentMcpEndpoint? ReopenMcpEndpointForReattach(Guid runId, AgentAutonomyLevel autonomy, Guid teamId, SandboxHandle handle, CancellationToken ct)
+    private AgentMcpEndpoint? ReopenMcpEndpointForReattach(Guid runId, AgentAutonomyLevel autonomy, Guid teamId, SecretRedactor redactor, SandboxHandle handle, CancellationToken ct)
     {
         if (handle.McpRunToken is not { Length: > 0 } token) return null;
 
         var socketPath = LocalProcessRunner.McpSocketPathFor(runId.ToString("N"));
 
-        // The reopened endpoint on a re-attach uses the NO-OP redactor: the fingerprint-verified redactor is resolved
-        // LATER, inside ReattachAndFoldAsync, where it gates the spool re-tail (redactor.Fingerprint must equal the one
-        // stamped on the handle at launch). Hoisting that resolution up here to feed the endpoint would entangle the
-        // delicate fingerprint-gated marker-only fallback, so it stays put. Residual risk is marginal — the MCP
-        // consumer is the model key's own provider — and full reattach-path tool-result redaction is a tracked follow-up.
-        return OpenMcpEndpointIfEnabled(runId, autonomy, teamId, SecretRedactor.None, socketPath, token, ct);
+        // The reopened endpoint redacts tool-result text with a redactor the caller resolved fresh from the run's
+        // credential — kept INDEPENDENT of the fold's own resolution (a second decrypt is harmless + idempotent) so the
+        // delicate fingerprint-gated marker-only re-tail in ReattachAndFoldAsync is left untouched. The caller degrades
+        // it to SecretRedactor.None on a resolution failure, so a deleted/rotated credential never blocks the reattach.
+        return OpenMcpEndpointIfEnabled(runId, autonomy, teamId, redactor, socketPath, token, ct);
     }
 
     /// <summary>
