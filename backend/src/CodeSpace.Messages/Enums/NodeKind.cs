@@ -42,5 +42,15 @@ public enum NodeKind
     /// <c>catch</c> output (the failure becomes data on the handler branch) instead of failing the run.
     /// Engine-dispatched like <see cref="Loop"/>; body nodes point back via <c>NodeDefinition.ParentId</c>.
     /// </summary>
-    Try
+    Try,
+
+    /// <summary>
+    /// Fan-out container that owns a body subgraph and runs it ONCE PER ELEMENT of a bound collection
+    /// (<c>flow.map</c>): the N element-branches run as a bounded-parallel batch, each branch sees its
+    /// element as <c>{{item}}</c> / <c>{{index}}</c>, and the per-element results reduce into a keyed
+    /// array a downstream synthesizer reads. Engine-dispatched like <see cref="Loop"/>; body nodes point
+    /// back via <c>NodeDefinition.ParentId</c>. The new lifecycle phase vs <see cref="Loop"/>: branches
+    /// are concurrent instances of one pass (not N sequential passes), and the output is the reduced array.
+    /// </summary>
+    Map
 }

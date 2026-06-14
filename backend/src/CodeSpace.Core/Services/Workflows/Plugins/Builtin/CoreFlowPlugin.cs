@@ -35,6 +35,8 @@ public sealed class CoreFlowPlugin : IPluginModule
         typeof(FlowLoopStartNode),
         typeof(FlowTryNode),
         typeof(FlowTryStartNode),
+        typeof(FlowMapNode),
+        typeof(FlowMapStartNode),
     };
 
     public IReadOnlyList<Type> RunSourceMatchers { get; } = Array.Empty<Type>();

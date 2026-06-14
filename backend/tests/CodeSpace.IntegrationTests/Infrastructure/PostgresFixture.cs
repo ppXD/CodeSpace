@@ -220,5 +220,11 @@ public sealed class PostgresFixture : IAsyncLifetime
         builder.RegisterType<Workflows.Infrastructure.ConcurrencyProbeNode>()
             .As<CodeSpace.Core.Services.Workflows.Nodes.INodeRuntime>()
             .SingleInstance();
+
+        // Test-only synchronous node that echoes its inputs as outputs (the planner bridge + per-element
+        // map transform). Stateless ⇒ thread-safe under the map fan-out. Same registration rationale.
+        builder.RegisterType<Workflows.Infrastructure.JsonEmitNode>()
+            .As<CodeSpace.Core.Services.Workflows.Nodes.INodeRuntime>()
+            .SingleInstance();
     }
 }

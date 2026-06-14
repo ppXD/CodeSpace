@@ -34,7 +34,9 @@ public class BuiltinPluginModuleTests
         module.Nodes.ShouldContain(typeof(CodeSpace.Core.Services.Workflows.Nodes.Builtin.FlowLoopStartNode));
         module.Nodes.ShouldContain(typeof(CodeSpace.Core.Services.Workflows.Nodes.Builtin.FlowTryNode));
         module.Nodes.ShouldContain(typeof(CodeSpace.Core.Services.Workflows.Nodes.Builtin.FlowTryStartNode));
-        module.Nodes.Count.ShouldBe(15);
+        module.Nodes.ShouldContain(typeof(CodeSpace.Core.Services.Workflows.Nodes.Builtin.FlowMapNode));
+        module.Nodes.ShouldContain(typeof(CodeSpace.Core.Services.Workflows.Nodes.Builtin.FlowMapStartNode));
+        module.Nodes.Count.ShouldBe(17);
         module.RunSourceMatchers.ShouldBeEmpty("manual + schedule triggers subscribe to no inbound event (schedule is producer-driven), so Core Flow still ships zero matchers");
     }
 
@@ -117,6 +119,6 @@ public class BuiltinPluginModuleTests
         };
 
         var total = all.SelectMany(p => p.Nodes).Distinct().Count();
-        total.ShouldBe(34, "34 builtin node types across 6 domain plugins — incl. the Agent plugin (agent.code + agent.run_command, now counted) — adjust this number when adding a builtin");
+        total.ShouldBe(36, "36 builtin node types across 6 domain plugins — incl. the Core Flow plugin's flow.map + flow.map_start fan-out primitives — adjust this number when adding a builtin");
     }
 }

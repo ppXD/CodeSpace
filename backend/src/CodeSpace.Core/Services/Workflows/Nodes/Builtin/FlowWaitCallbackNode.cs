@@ -24,6 +24,7 @@ public sealed class FlowWaitCallbackNode : INodeRuntime
         DisplayName = "Wait for callback",
         Category = "Logic",
         Kind = NodeKind.Regular,
+        CanSuspend = true,
         IconKey = "webhook",
         Description = "Pauses until an external system POSTs to the run's callback URL. Outputs { body } — the posted payload.",
         ConfigSchema = SchemaBuilder.EmptyObject(),

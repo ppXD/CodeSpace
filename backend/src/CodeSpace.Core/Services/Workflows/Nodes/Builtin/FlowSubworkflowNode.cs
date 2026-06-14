@@ -37,6 +37,7 @@ public sealed class FlowSubworkflowNode : INodeRuntime
         DisplayName = "Run sub-workflow",
         Category = "Logic",
         Kind = NodeKind.Regular,
+        CanSuspend = true,
         IconKey = "workflow",
         Description = "Runs another workflow as a step. The node's inputs become the child's payload; the child's outputs become this node's outputs.",
         ConfigSchema = SchemaBuilder.Parse("""

@@ -937,14 +937,17 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
         return wave;
     }
 
-    /// <summary>An engine-driven container that owns a body subgraph (a loop or a try) — dispatched specially + run sequentially, off the parallel batch.</summary>
-    private bool IsContainerNode(NodeDefinition node) => _nodeRegistry.Resolve(node.TypeKey).Manifest.Kind is NodeKind.Loop or NodeKind.Try;
+    /// <summary>An engine-driven container that owns a body subgraph (a loop, a try, or a map) — dispatched specially + run sequentially, off the parallel batch.</summary>
+    private bool IsContainerNode(NodeDefinition node) => _nodeRegistry.Resolve(node.TypeKey).Manifest.Kind is NodeKind.Loop or NodeKind.Try or NodeKind.Map;
 
-    /// <summary>Dispatch a container node on its Kind: a try runs its body once with a catch boundary; a loop re-runs per iteration. Both write their own scope/state + return the node's status.</summary>
+    /// <summary>Dispatch a container node on its Kind: a try runs its body once with a catch boundary; a map fans its body once per element; a loop re-runs per iteration. Each writes its own scope/state + returns the node's status.</summary>
     private Task<NodeStatus> ExecuteContainerAsync(WorkflowRun run, WorkflowDefinition definition, NodeDefinition node, NodeRunScope scope, WalkerState state, CancellationToken cancellationToken, string nodeIterationKey = NoIteration) =>
-        _nodeRegistry.Resolve(node.TypeKey).Manifest.Kind == NodeKind.Try
-            ? ExecuteTryAsync(run, definition, node, scope, state, cancellationToken, nodeIterationKey)
-            : ExecuteLoopAsync(run, definition, node, scope, state, cancellationToken, nodeIterationKey);
+        _nodeRegistry.Resolve(node.TypeKey).Manifest.Kind switch
+        {
+            NodeKind.Try => ExecuteTryAsync(run, definition, node, scope, state, cancellationToken, nodeIterationKey),
+            NodeKind.Map => ExecuteMapAsync(run, definition, node, scope, state, cancellationToken, nodeIterationKey),
+            _ => ExecuteLoopAsync(run, definition, node, scope, state, cancellationToken, nodeIterationKey),
+        };
 
     /// <summary>
     /// The shared post-settle tail for any node (regular or loop): a failure halts the run UNLESS the
@@ -1187,6 +1190,293 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
         // sends the run down `catch` or the default success path.
         return NodeStatus.Success;
     }
+
+    /// <summary>
+    /// Run a <c>flow.map</c> fan-out container. Resolves the <c>items</c> input to a JSON array, then
+    /// runs the body subgraph ONCE PER ELEMENT as a BOUNDED-PARALLEL batch (each branch a full body
+    /// sub-walk in its own DI lifetime scope, keyed <c>"&lt;mapId&gt;#&lt;i&gt;"</c>, seeing its element as
+    /// <c>{{item}}</c> / <c>{{index}}</c>). Each branch's terminal body-node output becomes that element's
+    /// result; the per-element results reduce — in element order — into <c>scope.Nodes[mapId] =
+    /// { &lt;resultKey&gt;: [...], count, failed }</c>. An empty array is a clean no-op (empty results,
+    /// Success). A non-array <c>items</c> is a clean NodeFailure. An unhandled branch failure is governed
+    /// by the config's <c>errorHandling</c>: <c>terminate</c> (default) fails the map (whose own error edge
+    /// can catch it); <c>continue</c> records that element's result as a failure marker + increments
+    /// <c>failed</c>, and the map proceeds. PR1: a body node that SUSPENDS fails its branch with a clear
+    /// message (durable parallel-branch resume is PR2).
+    /// </summary>
+    private async Task<NodeStatus> ExecuteMapAsync(WorkflowRun run, WorkflowDefinition definition, NodeDefinition mapNode, NodeRunScope scope, WalkerState state, CancellationToken cancellationToken, string nodeIterationKey = NoIteration)
+    {
+        var startedAt = DateTimeOffset.UtcNow;
+
+        // Nesting guard: refuse pathologically deep map-in-map (recursion + runaway safety), reusing the
+        // loop nesting cap. Depth = the number of enclosing container iterations on the key.
+        if (LoopNestingDepth(nodeIterationKey) >= MapPlan.MaxNestingDepth)
+            throw new NodeFailureException($"Map '{mapNode.Id}' is nested deeper than the {MapPlan.MaxNestingDepth}-level limit.");
+
+        await _recordLogger.NodeStartedAsync(run.Id, mapNode.Id, nodeIterationKey, EmptyJsonBag, EmptyJsonBag, cancellationToken).ConfigureAwait(false);
+
+        try
+        {
+            var plan = MapPlan.From(ParseMapConfig(mapNode.Config));
+            var elements = ResolveMapElements(mapNode, scope);
+
+            if (elements.Count > MapPlan.MaxBranchesCeiling)
+                throw new NodeFailureException($"Map '{mapNode.Id}' fans out over {elements.Count} elements, exceeding the {MapPlan.MaxBranchesCeiling}-branch ceiling.");
+
+            var body = SubgraphView(definition, n => n.ParentId == mapNode.Id);
+            var terminal = FindMapBodyTerminal(body, mapNode.Id);
+            var branchParallelism = ResolveBodyParallelism(plan.MaxParallelism, _maxParallelism);
+
+            var (results, failed) = await FanOutBranchesAsync(run, definition, mapNode, body, terminal, scope, elements, plan, branchParallelism, nodeIterationKey, cancellationToken).ConfigureAwait(false);
+
+            var outputs = BuildMapOutputs(plan.ResultKey, results, failed);
+            scope.Nodes[mapNode.Id] = outputs;
+            await _recordLogger.NodeCompletedAsync(run.Id, mapNode.Id, nodeIterationKey, outputs, null, DateTimeOffset.UtcNow - startedAt, cancellationToken).ConfigureAwait(false);
+            return NodeStatus.Success;
+        }
+        catch (NodeFailureException ex)
+        {
+            // A non-array binding, a tripped ceiling, or (terminate mode) a branch failure — expose it as
+            // the map's `error` output so the map's own error edge can catch it, then write node.failed.
+            scope.Nodes[mapNode.Id] = BuildErrorOutput(ex.Message, mapNode.Id);
+            await _recordLogger.NodeFailedAsync(run.Id, mapNode.Id, nodeIterationKey, ex.Message, DateTimeOffset.UtcNow - startedAt, cancellationToken).ConfigureAwait(false);
+            return NodeStatus.Failure;
+        }
+    }
+
+    /// <summary>
+    /// Dispatch every element-branch as a bounded-parallel batch (Task.WhenAll over a SemaphoreSlim) and
+    /// collect the per-element terminal outputs into <c>results[index]</c>, IN ELEMENT ORDER (a fixed
+    /// array indexed by element position, so task-completion order never reshuffles the reduce). A branch
+    /// failure is honoured per the map's error policy: <c>terminate</c> rethrows the first branch's
+    /// failure to fail the map; <c>continue</c> stores a failure marker at that index + counts it. Returns
+    /// the ordered results + the failed-branch count.
+    /// </summary>
+    private async Task<(IReadOnlyList<JsonElement> Results, int Failed)> FanOutBranchesAsync(WorkflowRun run, WorkflowDefinition definition, NodeDefinition mapNode, WorkflowDefinition body, NodeDefinition terminal, NodeRunScope scope, IReadOnlyList<JsonElement> elements, MapPlan plan, int branchParallelism, string nodeIterationKey, CancellationToken cancellationToken)
+    {
+        if (elements.Count == 0) return (Array.Empty<JsonElement>(), 0);
+
+        using var gate = new SemaphoreSlim(branchParallelism);
+        var tasks = new Task<MapBranchOutcome>[elements.Count];
+        for (var i = 0; i < elements.Count; i++)
+            tasks[i] = RunMapBranchInChildScopeAsync(run, definition, mapNode, body, terminal, scope, elements[i], i, plan, nodeIterationKey, gate, cancellationToken);
+
+        var outcomes = await Task.WhenAll(tasks).ConfigureAwait(false);
+
+        var results = new JsonElement[elements.Count];
+        var failed = 0;
+        foreach (var outcome in outcomes)
+        {
+            results[outcome.Index] = outcome.Result;
+            if (outcome.Failed) failed++;
+        }
+
+        return (results, failed);
+    }
+
+    /// <summary>
+    /// Run one element-branch in its OWN lifetime scope (its own DbContext + record logger), bounded by
+    /// the fan-out semaphore — so two branches running at once never share an EF change-tracker (the same
+    /// isolation <see cref="RunNodeInChildScopeAsync"/> gives parallel wave nodes). The branch body
+    /// sub-walk happens on the child-scope engine instance. On a <c>terminate</c>-mode unhandled failure
+    /// the branch throws <see cref="NodeFailureException"/>, which surfaces through Task.WhenAll to fail
+    /// the whole map; <c>continue</c> mode returns the failure marker as that element's result.
+    /// </summary>
+    private async Task<MapBranchOutcome> RunMapBranchInChildScopeAsync(WorkflowRun run, WorkflowDefinition definition, NodeDefinition mapNode, WorkflowDefinition body, NodeDefinition terminal, NodeRunScope scope, JsonElement element, int index, MapPlan plan, string nodeIterationKey, SemaphoreSlim gate, CancellationToken cancellationToken)
+    {
+        await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            await using var childScope = _lifetimeScope.BeginLifetimeScope();
+            var branchEngine = childScope.Resolve<WorkflowEngine>();
+            return await branchEngine.RunMapBranchOnceAsync(run, definition, mapNode, body, terminal, scope, element, index, plan, nodeIterationKey, cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            gate.Release();
+        }
+    }
+
+    /// <summary>The collected result of one map element-branch: its element index (for the ordered reduce), the branch terminal's output (or a failure marker), and whether it failed.</summary>
+    private readonly record struct MapBranchOutcome(int Index, JsonElement Result, bool Failed);
+
+    /// <summary>
+    /// Run a map body subgraph for ONE element as a parallel WAVE — the same model as the loop body
+    /// (<see cref="RunLoopBodyOnceAsync"/>), under iteration key <c>"&lt;mapId&gt;#&lt;index&gt;"</c> and a
+    /// per-element Iteration scope (<c>{{item}}</c> / <c>{{index}}</c>). Returns the branch's terminal-node
+    /// output as that element's result. An unhandled body failure (a node that fails with no <c>error</c>
+    /// edge of its own) is governed by the map's <paramref name="plan"/>: <c>terminate</c> throws
+    /// <see cref="NodeFailureException"/> (fails the map); <c>continue</c> abandons the rest of the branch
+    /// and returns a failure marker. PR1: a body node that SUSPENDS fails the branch with a clear message
+    /// (durable parallel-branch resume is PR2) — it never parks the run.
+    /// </summary>
+    private async Task<MapBranchOutcome> RunMapBranchOnceAsync(WorkflowRun run, WorkflowDefinition definition, NodeDefinition mapNode, WorkflowDefinition body, NodeDefinition terminal, NodeRunScope scope, JsonElement element, int index, MapPlan plan, string nodeIterationKey, CancellationToken cancellationToken)
+    {
+        var branchScope = BuildMapBranchScope(scope, element, index);
+        var branchKey = CombineIterationKey(nodeIterationKey, $"{mapNode.Id}#{index}");
+        var branchParallelism = ResolveBodyParallelism(plan.MaxParallelism, _maxParallelism);
+
+        var bodyState = new WalkerState(body);
+        EnqueueReadyFrontier(bodyState, body);
+
+        while (bodyState.Ready.Count > 0)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+
+            var wave = DrainReadyWave(bodyState);
+
+            var regular = new List<NodeDefinition>(wave.Count);
+            var containers = new List<NodeDefinition>();
+            foreach (var node in wave)
+            {
+                if (ShouldSkip(node, bodyState))
+                {
+                    await MarkSkippedAsync(run, node, bodyState, cancellationToken, branchKey).ConfigureAwait(false);
+                    EnqueueDownstreamWhenReady(node, bodyState);
+                }
+                else if (IsContainerNode(node)) containers.Add(node);
+                else regular.Add(node);
+            }
+
+            var outcomes = await RunReadyNodesAsync(run, regular, branchScope, bodyState, cancellationToken, branchKey, branchParallelism).ConfigureAwait(false);
+            for (var i = 0; i < regular.Count; i++)
+            {
+                MergeNodeOutcome(regular[i], outcomes[i], branchScope, bodyState);
+                if (AdvanceMapBranchNodeOrAbandon(mapNode, regular[i], outcomes[i].Status, bodyState, plan.ErrorHandling, out var marker))
+                    return new MapBranchOutcome(index, marker, Failed: true);
+            }
+
+            // A nested container (loop / try / map) recurses under THIS branch's key; it writes its own
+            // scope/state sequentially, so it stays off the parallel batch — exactly like a loop body.
+            foreach (var container in containers)
+            {
+                var status = await ExecuteContainerAsync(run, definition, container, branchScope, bodyState, cancellationToken, branchKey).ConfigureAwait(false);
+                bodyState.Statuses[container.Id] = status;
+                if (AdvanceMapBranchNodeOrAbandon(mapNode, container, status, bodyState, plan.ErrorHandling, out var marker))
+                    return new MapBranchOutcome(index, marker, Failed: true);
+            }
+        }
+
+        // The element's result is the terminal body node's output (validator enforces exactly one).
+        var result = branchScope.Nodes.TryGetValue(terminal.Id, out var terminalOutputs)
+            ? JsonSerializer.SerializeToElement(terminalOutputs)
+            : EmptyJsonObject();
+
+        return new MapBranchOutcome(index, result, Failed: false);
+    }
+
+    /// <summary>
+    /// The map-branch variant of <see cref="AdvanceBodyNodeOrAbandon"/>: a SUSPEND fails the branch (PR1
+    /// has no durable parallel-branch resume), and an unhandled FAILURE honours the map's error policy —
+    /// <see cref="MapErrorHandling.Terminate"/> throws (fails the map), <see cref="MapErrorHandling.Continue"/>
+    /// returns <c>true</c> with a failure marker so the branch is abandoned + counted. A node with its own
+    /// <c>error</c> edge is handled regardless. Returns <c>true</c> only for the continue-abandon case;
+    /// otherwise releases the ready downstream and returns <c>false</c> (marker is unused then).
+    /// </summary>
+    private bool AdvanceMapBranchNodeOrAbandon(NodeDefinition mapNode, NodeDefinition node, NodeStatus status, WalkerState bodyState, MapErrorHandling errorHandling, out JsonElement marker)
+    {
+        marker = default;
+
+        if (status == NodeStatus.Suspended)
+        {
+            var message = $"flow.map body suspension is not yet supported — node '{node.Id}' in map '{mapNode.Id}' tried to park (durable parallel-branch resume ships in PR2).";
+
+            if (errorHandling == MapErrorHandling.Terminate)
+                throw new NodeFailureException(message);
+
+            marker = BuildMapFailureMarker(message, node.Id);
+            return true;
+        }
+
+        if (status == NodeStatus.Failure && !HasErrorEdge(node, bodyState))
+        {
+            if (errorHandling == MapErrorHandling.Terminate)
+                throw new NodeFailureException($"Node '{node.Id}' in map '{mapNode.Id}' failed.");
+
+            marker = BuildMapFailureMarker($"Node '{node.Id}' failed.", node.Id);
+            return true;
+        }
+
+        EnqueueDownstreamWhenReady(node, bodyState);
+        return false;
+    }
+
+    /// <summary>Resolve the map's <c>items</c> input against the outer scope to a JSON array; a non-array binding is a clean NodeFailure (the map's error edge can catch it). A missing/null binding is treated as empty (a no-op).</summary>
+    private static IReadOnlyList<JsonElement> ResolveMapElements(NodeDefinition mapNode, NodeRunScope scope)
+    {
+        var resolved = VariableResolver.ResolveBag(mapNode.Inputs, scope);
+
+        if (!resolved.TryGetValue("items", out var items) || items.ValueKind is JsonValueKind.Null or JsonValueKind.Undefined)
+            return Array.Empty<JsonElement>();
+
+        if (items.ValueKind != JsonValueKind.Array)
+            throw new NodeFailureException($"Map '{mapNode.Id}' input 'items' resolved to {items.ValueKind}, but a flow.map collection must be an array.");
+
+        return items.EnumerateArray().Select(e => e.Clone()).ToList();
+    }
+
+    /// <summary>
+    /// The single body node that is the per-element result source: the lone TERMINAL of the body subgraph
+    /// (a node with no in-body outgoing edge). Save-time validation enforces exactly one, so this is a
+    /// safe single-pick at run time; a defensive throw guards a body that slipped through (e.g. a hand-
+    /// written definition). The <c>flow.map_start</c> marker is never the terminal (it always has an
+    /// outgoing edge to the body).
+    /// </summary>
+    private static NodeDefinition FindMapBodyTerminal(WorkflowDefinition body, string mapId)
+    {
+        var withOutgoing = body.Edges.Select(e => e.From).ToHashSet();
+        var terminals = body.Nodes.Where(n => !withOutgoing.Contains(n.Id)).ToList();
+
+        if (terminals.Count != 1)
+            throw new NodeFailureException($"Map '{mapId}' body must end in exactly one terminal node (the per-element result); found {terminals.Count}.");
+
+        return terminals[0];
+    }
+
+    /// <summary>
+    /// Build a per-element branch scope: the outer read-side buckets (incl. Projects + SecretPaths) plus
+    /// the Iteration slot set to <c>{{item}}</c> (the element) + <c>{{index}}</c> — mirroring
+    /// <c>FlowIterateNode.BuildIterationScope</c> so the body reads bare <c>{{item}}</c> / <c>{{index}}</c>.
+    /// A fresh Nodes bag is seeded from the outer scope so the body can read pre-map node outputs.
+    /// </summary>
+    private static NodeRunScope BuildMapBranchScope(NodeRunScope outer, JsonElement element, int index)
+    {
+        var iteration = new Dictionary<string, JsonElement>
+        {
+            ["item"] = element.Clone(),
+            ["index"] = JsonSerializer.SerializeToElement(index),
+        };
+
+        var scope = new NodeRunScope
+        {
+            Trigger = outer.Trigger, Team = outer.Team, Wf = outer.Wf, Input = outer.Input,
+            Sys = outer.Sys, Projects = outer.Projects, SecretPaths = outer.SecretPaths,
+            Iteration = iteration,
+        };
+
+        foreach (var (k, v) in outer.Nodes) scope.Nodes[k] = v;
+        return scope;
+    }
+
+    /// <summary>The reduced map output: the ordered per-element results under the configured key, the element count, and the failed-branch count (always 0 under terminate, since a failure throws instead).</summary>
+    private static IReadOnlyDictionary<string, JsonElement> BuildMapOutputs(string resultKey, IReadOnlyList<JsonElement> results, int failed) =>
+        new Dictionary<string, JsonElement>
+        {
+            [resultKey] = JsonSerializer.SerializeToElement(results),
+            ["count"] = JsonSerializer.SerializeToElement(results.Count),
+            ["failed"] = JsonSerializer.SerializeToElement(failed),
+        };
+
+    /// <summary>A continue-on-error element's placeholder result — <c>{ "error": { "message": ..., "node": ... } }</c> — mirroring the node error-output shape so a synthesizer can spot a failed element in <c>results[i].error</c>.</summary>
+    private static JsonElement BuildMapFailureMarker(string message, string nodeId) =>
+        JsonSerializer.SerializeToElement(BuildErrorOutput(message, nodeId));
+
+    private static readonly JsonSerializerOptions MapConfigJsonOptions = new() { PropertyNameCaseInsensitive = true };
+
+    private static MapConfig ParseMapConfig(JsonElement config) =>
+        config.ValueKind == JsonValueKind.Object
+            ? JsonSerializer.Deserialize<MapConfig>(config.GetRawText(), MapConfigJsonOptions) ?? new MapConfig()
+            : new MapConfig();
 
     /// <summary>The result of one loop-body pass: how many body nodes ran (for the node budget) and whether the pass failed under continue-on-error.</summary>
     private readonly record struct LoopBodyOutcome(int Executed, bool Failed);

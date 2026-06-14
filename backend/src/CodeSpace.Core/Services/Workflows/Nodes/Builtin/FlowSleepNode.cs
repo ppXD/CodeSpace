@@ -24,6 +24,7 @@ public sealed class FlowSleepNode : INodeRuntime
         DisplayName = "Sleep / delay",
         Category = "Logic",
         Kind = NodeKind.Regular,
+        CanSuspend = true,
         IconKey = "clock",
         Description = "Pauses the workflow for a fixed delay, then resumes. The run shows as Suspended while waiting.",
         ConfigSchema = SchemaBuilder.Parse("""

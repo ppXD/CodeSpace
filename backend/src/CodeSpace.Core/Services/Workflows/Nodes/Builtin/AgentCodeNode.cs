@@ -38,6 +38,7 @@ public sealed class AgentCodeNode : INodeRuntime
         DisplayName = "Run coding agent",
         Category = "Agent",
         Kind = NodeKind.Regular,
+        CanSuspend = true,
         IconKey = "agent",
         Description = "Runs a coding agent (Codex, Claude Code, …) as a step. Streams its progress live; the run's result becomes this node's output.",
         ConfigSchema = SchemaBuilder.Parse("""
