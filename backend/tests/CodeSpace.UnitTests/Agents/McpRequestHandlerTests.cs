@@ -611,4 +611,204 @@ public class McpRequestHandlerTests
             await Should.NotThrowAsync(async () => await handler.HandleAsync(Parse(req), CancellationToken.None));
         }
     }
+
+    // ── tool governance (the ToolCallLedger wiring) ───────────────────────────
+
+    [Fact]
+    public void Governance_flag_env_var_literal_is_pinned()
+    {
+        // Renaming this silently turns governance off for an operator who enabled it via env (Rule 8). A bump must be
+        // a deliberate, visible decision.
+        McpRequestHandler.GovernanceEnabledEnvVar.ShouldBe("CODESPACE_AGENT_TOOL_GOVERNANCE_ENABLED");
+    }
+
+    /// <summary>A spy ledger: records every TryClaim/RecordTerminal call. Configurable claim outcome for the dedup test,
+    /// a configurable terminal-record throw for the lost-CAS replay test, and a recorded-rows store the replay re-reads.</summary>
+    private sealed class SpyLedger : IToolCallLedgerService
+    {
+        public List<(Guid RunId, Guid TeamId, string ToolKind, string Key, string InputHash, long Epoch)> Claims { get; } = new();
+        public List<(Guid LedgerId, Guid TeamId, ToolCallLedgerStatus Status, string? ResultJson, string? Error)> Terminals { get; } = new();
+        public Func<ToolCallClaim>? ClaimResult { get; init; }
+
+        /// <summary>When set, RecordTerminalAsync throws this BEFORE recording — simulating a lost CAS / already-terminal row (FIX 2 replay path).</summary>
+        public Func<ToolCallLedgerTransitionException>? OnRecordThrow { get; init; }
+
+        /// <summary>Rows the replay path re-reads via GetForRunAsync after a lost CAS (keyed by the recorded terminal).</summary>
+        public List<Core.Persistence.Entities.ToolCallLedger> Rows { get; } = new();
+
+        public Task<ToolCallClaim> TryClaimAsync(Guid agentRunId, Guid teamId, string toolKind, string idempotencyKey, string inputHash, long fenceEpoch, CancellationToken ct)
+        {
+            Claims.Add((agentRunId, teamId, toolKind, idempotencyKey, inputHash, fenceEpoch));
+            return Task.FromResult(ClaimResult?.Invoke() ?? ToolCallClaim.Proceed(Guid.NewGuid()));
+        }
+
+        public Task RecordTerminalAsync(Guid ledgerId, Guid teamId, ToolCallLedgerStatus status, string? resultJson, string? error, CancellationToken ct)
+        {
+            if (OnRecordThrow is { } make) throw make();
+
+            Terminals.Add((ledgerId, teamId, status, resultJson, error));
+            return Task.CompletedTask;
+        }
+
+        public Task<IReadOnlyList<Core.Persistence.Entities.ToolCallLedger>> GetForRunAsync(Guid agentRunId, Guid teamId, CancellationToken ct) =>
+            Task.FromResult<IReadOnlyList<Core.Persistence.Entities.ToolCallLedger>>(Rows);
+    }
+
+    private static McpRequestHandler GovernedHandler(SpyLedger ledger, bool governanceEnabled, params IAgentTool[] tools) =>
+        new(new FakeRegistry(tools), AgentAutonomyLevel.Unleashed, Guid.NewGuid(), null, Guid.NewGuid(), ledger, fenceEpoch: 7, governanceEnabled: governanceEnabled);
+
+    [Fact]
+    public async Task Governance_OFF_writes_no_ledger_row_even_for_a_write_tool()
+    {
+        var ledger = new SpyLedger();
+        var tool = new FakeTool { Kind = "git.merge_pr", IsDestructiveOverride = true };
+
+        var result = (await Respond(GovernedHandler(ledger, governanceEnabled: false, tool), Call("git.merge_pr", "{}"))).GetProperty("result");
+
+        result.GetProperty("isError").GetBoolean().ShouldBeFalse();
+        tool.CallCount.ShouldBe(1, "flag-OFF runs the tool exactly as today");
+        ledger.Claims.ShouldBeEmpty("flag-OFF must write NO ledger row — byte-identical to today");
+        ledger.Terminals.ShouldBeEmpty();
+    }
+
+    [Fact]
+    public async Task Governance_ON_skips_the_ledger_for_a_read_only_tool()
+    {
+        var ledger = new SpyLedger();
+        var tool = new FakeTool { Kind = "git.list_prs" };   // read-only
+
+        var result = (await Respond(GovernedHandler(ledger, governanceEnabled: true, tool), Call("git.list_prs", "{}"))).GetProperty("result");
+
+        result.GetProperty("isError").GetBoolean().ShouldBeFalse();
+        tool.CallCount.ShouldBe(1, "a read-only tool still runs");
+        ledger.Claims.ShouldBeEmpty("a read-only tool is NEVER tracked — no side effect to dedup");
+        ledger.Terminals.ShouldBeEmpty();
+    }
+
+    [Fact]
+    public async Task Governance_ON_with_a_null_team_skips_the_ledger_for_a_write_tool()
+    {
+        // FIX 3: the ledger row's team_id is NOT NULL, so a governed write on a teamless run would hit an FK violation.
+        // A null-team run is skipped exactly like a read-only tool — no claim, no terminal — and the tool still runs
+        // (flag-OFF-equivalent for that call). Downstream NodeAgentTool tenancy still fail-closes on the null team.
+        var ledger = new SpyLedger();
+        var tool = new FakeTool { Kind = "git.merge_pr", IsDestructiveOverride = true };
+        var handler = new McpRequestHandler(new FakeRegistry(tool), AgentAutonomyLevel.Unleashed, teamId: null, null, Guid.NewGuid(), ledger, fenceEpoch: 7, governanceEnabled: true);
+
+        var result = (await Respond(handler, Call("git.merge_pr", "{}"))).GetProperty("result");
+
+        result.GetProperty("isError").GetBoolean().ShouldBeFalse();
+        tool.CallCount.ShouldBe(1, "a null-team governed run still runs the tool on the legacy path");
+        ledger.Claims.ShouldBeEmpty("a null-team run is NEVER tracked — the FK-violating claim is never attempted");
+        ledger.Terminals.ShouldBeEmpty();
+    }
+
+    [Fact]
+    public async Task Governance_ON_claims_and_records_a_write_tool_with_the_server_derived_key()
+    {
+        var ledger = new SpyLedger();
+        var tool = new FakeTool { Kind = "git.merge_pr", IsDestructiveOverride = true, OnCall = (_, _) => Task.FromResult(AgentToolResult.Ok(Parse("""{"merged":true}"""), 14)) };
+
+        var result = (await Respond(GovernedHandler(ledger, governanceEnabled: true, tool), Call("git.merge_pr", """{"pr":7}"""))).GetProperty("result");
+
+        result.GetProperty("isError").GetBoolean().ShouldBeFalse();
+        tool.CallCount.ShouldBe(1, "a fresh claim (Proceed) runs the side effect once");
+
+        var claim = ledger.Claims.ShouldHaveSingleItem();
+        claim.ToolKind.ShouldBe("git.merge_pr");
+        claim.Key.ShouldBe(ToolCallKey.For("git.merge_pr", ToolCallKey.InputHash(Parse("""{"pr":7}"""))), "the key is SERVER-derived from kind + canonical input, never the wire");
+        claim.Epoch.ShouldBe(7, "the run's fence epoch is recorded on the ledger row");
+
+        var terminal = ledger.Terminals.ShouldHaveSingleItem();
+        terminal.Status.ShouldBe(ToolCallLedgerStatus.Succeeded);
+        terminal.ResultJson.ShouldNotBeNull();
+        terminal.ResultJson!.ShouldContain("merged");
+    }
+
+    [Fact]
+    public async Task Governance_ON_records_a_failed_terminal_for_a_tool_error()
+    {
+        var ledger = new SpyLedger();
+        var tool = new FakeTool { Kind = "git.merge_pr", IsDestructiveOverride = true, OnCall = (_, _) => Task.FromResult(AgentToolResult.Fail("merge conflict")) };
+
+        var result = (await Respond(GovernedHandler(ledger, governanceEnabled: true, tool), Call("git.merge_pr", "{}"))).GetProperty("result");
+
+        result.GetProperty("isError").GetBoolean().ShouldBeTrue();
+        var terminal = ledger.Terminals.ShouldHaveSingleItem();
+        terminal.Status.ShouldBe(ToolCallLedgerStatus.Failed);
+        terminal.Error.ShouldBe("merge conflict");
+        terminal.ResultJson.ShouldBeNull();
+    }
+
+    [Fact]
+    public async Task Governance_ON_dedup_replays_the_prior_result_without_re_running_the_side_effect()
+    {
+        // The claim returns Duplicate (a prior terminal row for this run+key already exists): the handler must return
+        // the stored result WITHOUT calling the tool again — exactly-once.
+        var priorWire = """{"content":[{"type":"text","text":"{\"merged\":true}"}],"isError":false}""";
+        var ledger = new SpyLedger { ClaimResult = () => ToolCallClaim.Duplicate(Guid.NewGuid(), ToolCallLedgerStatus.Succeeded, priorWire, null) };
+        var tool = new FakeTool { Kind = "git.merge_pr", IsDestructiveOverride = true };
+
+        var result = (await Respond(GovernedHandler(ledger, governanceEnabled: true, tool), Call("git.merge_pr", "{}"))).GetProperty("result");
+
+        tool.CallCount.ShouldBe(0, "a duplicate MUST NOT re-run the side effect");
+        ledger.Terminals.ShouldBeEmpty("a duplicate records no new terminal");
+        result.GetProperty("isError").GetBoolean().ShouldBeFalse();
+        result.GetProperty("content")[0].GetProperty("text").GetString().ShouldContain("merged", customMessage: "the prior stored result is replayed verbatim");
+    }
+
+    [Fact]
+    public async Task Governance_ON_in_flight_returns_a_retry_message_without_running()
+    {
+        var ledger = new SpyLedger { ClaimResult = () => ToolCallClaim.InFlight(Guid.NewGuid()) };
+        var tool = new FakeTool { Kind = "git.merge_pr", IsDestructiveOverride = true };
+
+        var result = (await Respond(GovernedHandler(ledger, governanceEnabled: true, tool), Call("git.merge_pr", "{}"))).GetProperty("result");
+
+        tool.CallCount.ShouldBe(0, "an in-flight call must not double-run");
+        result.GetProperty("isError").GetBoolean().ShouldBeTrue();
+        result.GetProperty("content")[0].GetProperty("text").GetString().ShouldContain("in progress");
+    }
+
+    [Fact]
+    public async Task Governance_ON_lost_CAS_on_record_replays_the_recorded_terminal_not_a_protocol_error()
+    {
+        // FIX 2: the side effect ALREADY committed, then RecordTerminalAsync loses the CAS (a concurrent transition
+        // won / the row is already terminal → ToolCallLedgerTransitionException). The handler must NOT surface a
+        // JSON-RPC protocol error after the fact — it re-reads the recorded terminal and REPLAYS it (mirroring the
+        // Duplicate path). Here the recorded terminal is a Succeeded row whose stored wire result we replay.
+        var ledgerId = Guid.NewGuid();
+        var storedWire = """{"content":[{"type":"text","text":"{\"merged\":true}"}],"isError":false}""";
+        var ledger = new SpyLedger
+        {
+            ClaimResult = () => ToolCallClaim.Proceed(ledgerId),
+            OnRecordThrow = () => new ToolCallLedgerTransitionException("a concurrent transition won the race"),
+        };
+        ledger.Rows.Add(new Core.Persistence.Entities.ToolCallLedger { Id = ledgerId, Status = ToolCallLedgerStatus.Succeeded, ResultJson = storedWire });
+
+        var tool = new FakeTool { Kind = "git.merge_pr", IsDestructiveOverride = true, OnCall = (_, _) => Task.FromResult(AgentToolResult.Ok(Parse("""{"merged":true}"""), 14)) };
+
+        var resp = await Respond(GovernedHandler(ledger, governanceEnabled: true, tool), Call("git.merge_pr", "{}"));
+
+        resp.TryGetProperty("error", out _).ShouldBeFalse("a lost CAS AFTER the side effect committed must NOT surface a JSON-RPC protocol error");
+        tool.CallCount.ShouldBe(1, "the side effect ran exactly once (the lost CAS is on the record, not the call)");
+        resp.GetProperty("result").GetProperty("isError").GetBoolean().ShouldBeFalse();
+        resp.GetProperty("result").GetProperty("content")[0].GetProperty("text").GetString().ShouldContain("merged", customMessage: "the recorded terminal is re-read and replayed verbatim");
+    }
+
+    [Fact]
+    public async Task Governance_ON_redacts_before_persisting_the_ledger_result()
+    {
+        // Redact-before-persist: the result stored in the ledger must already be masked — the row is a leak surface.
+        const string secret = "SECRET-abc123";
+        var ledger = new SpyLedger();
+        var tool = new FakeTool { Kind = "git.merge_pr", IsDestructiveOverride = true, OnCall = (_, _) => Task.FromResult(AgentToolResult.Ok(Parse($$"""{"stdout":"KEY={{secret}}"}"""), 20)) };
+        var handler = new McpRequestHandler(new FakeRegistry(tool), AgentAutonomyLevel.Unleashed, Guid.NewGuid(), new SecretRedactor(new[] { secret }), Guid.NewGuid(), ledger, fenceEpoch: 1, governanceEnabled: true);
+
+        await Respond(handler, Call("git.merge_pr", "{}"));
+
+        var terminal = ledger.Terminals.ShouldHaveSingleItem();
+        terminal.ResultJson!.ShouldNotContain(secret, customMessage: "the ledger must store the ALREADY-REDACTED result — no raw secret at rest");
+        terminal.ResultJson!.ShouldContain(SecretRedactor.Placeholder);
+    }
 }
