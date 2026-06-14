@@ -35,6 +35,14 @@ public sealed class McpRequestHandler : IMcpRequestHandler
     /// <summary>The advertised server version (informational, sent in the initialize handshake).</summary>
     public const string ServerVersion = "0.1.0";
 
+    /// <summary>
+    /// Env flag that opts a run into tool governance (the ToolCallLedger: exactly-once + audit for side-effecting
+    /// tools). Default-OFF, opt-in ("1"/"true"/"TRUE" only — mirrors <see cref="AgentRunExecutor.IsMcpEndpointEnabled"/>):
+    /// flag-OFF writes NO ledger rows and the handler is byte-identical to its pre-governance behavior. Rule 8: pinned
+    /// by a unit test, read in production only through <see cref="IsGovernanceEnabled"/>.
+    /// </summary>
+    public const string GovernanceEnabledEnvVar = "CODESPACE_AGENT_TOOL_GOVERNANCE_ENABLED";
+
     private static readonly JsonElement NullId = JsonDocument.Parse("null").RootElement.Clone();
     private static readonly JsonElement EmptyObject = JsonDocument.Parse("{}").RootElement.Clone();
 
@@ -42,13 +50,29 @@ public sealed class McpRequestHandler : IMcpRequestHandler
     private readonly AgentAutonomyLevel _autonomy;
     private readonly Guid? _teamId;
     private readonly SecretRedactor _redactor;
+    private readonly Guid _runId;
+    private readonly IToolCallLedgerService? _ledger;
+    private readonly long _fenceEpoch;
+    private readonly bool _governanceEnabled;
 
-    public McpRequestHandler(IAgentToolRegistry registry, AgentAutonomyLevel autonomy, Guid? teamId = null, SecretRedactor? redactor = null)
+    public McpRequestHandler(IAgentToolRegistry registry, AgentAutonomyLevel autonomy, Guid? teamId = null, SecretRedactor? redactor = null, Guid runId = default, IToolCallLedgerService? ledger = null, long fenceEpoch = 0, bool governanceEnabled = false)
     {
         _registry = registry;
         _autonomy = autonomy;
         _teamId = teamId;
         _redactor = redactor ?? SecretRedactor.None;
+        _runId = runId;
+        _ledger = ledger;
+        _fenceEpoch = fenceEpoch;
+        _governanceEnabled = governanceEnabled;
+    }
+
+    /// <summary>True ONLY for "1"/"true"/"TRUE" (trimmed); fail-closed default-OFF otherwise. Mirrors <see cref="AgentRunExecutor.IsMcpEndpointEnabled"/> exactly (Rule 8). Production reads governance opt-in through this single gate.</summary>
+    public static bool IsGovernanceEnabled()
+    {
+        var raw = Environment.GetEnvironmentVariable(GovernanceEnabledEnvVar)?.Trim();
+
+        return raw is "1" or "true" or "TRUE";
     }
 
     public async Task<JsonElement?> HandleAsync(JsonElement request, CancellationToken cancellationToken)
@@ -88,6 +112,8 @@ public sealed class McpRequestHandler : IMcpRequestHandler
         // runs — a tool it can't call. A denied/needs-approval verdict short-circuits here.
         var gate = AgentToolGate.Decide(_autonomy, tool.RequiresApproval);
 
+        // This short-circuit is BEFORE the ledger branch, so a denial writes NO audit row in item C (the Denied ledger
+        // status is unused for now) — denial-auditing is deferred to the later audit slice.
         if (gate != AgentToolGateDecision.Allow) return JsonRpcResponse.Ok(id, ToolResult(isError: true, GateMessage(gate, name)));
 
         // Absent arguments default to {}; present-but-wrong-type arguments pass through verbatim so the tool's own
@@ -98,8 +124,147 @@ public sealed class McpRequestHandler : IMcpRequestHandler
 
         if (!validation.IsValid) return JsonRpcResponse.Ok(id, ToolResult(isError: true, validation.Error ?? "Invalid tool input."));
 
-        return JsonRpcResponse.Ok(id, await InvokeToolAsync(tool, arguments, cancellationToken).ConfigureAwait(false));
+        // Governance OFF / no ledger / a read-only tool / a null-team run → today's path exactly: invoke + return,
+        // no ledger row. Read-only tools are NEVER tracked (no side effect to dedup, no exactly-once need, no audit
+        // value). A null-team run is skipped too: the ledger row's team_id is NOT NULL (FK to team), so a governed
+        // side-effecting tool on a teamless run would hit a 23503 FK violation on the hot path — skipping makes it
+        // behave exactly as flag-OFF for that call (and NodeAgentTool's tenancy still fail-closes downstream).
+        if (!_governanceEnabled || _ledger is null || tool.IsReadOnly || _teamId is null)
+            return JsonRpcResponse.Ok(id, await InvokeToolAsync(tool, arguments, cancellationToken).ConfigureAwait(false));
+
+        return JsonRpcResponse.Ok(id, await InvokeWithLedgerAsync(tool, arguments, cancellationToken).ConfigureAwait(false));
     }
+
+    /// <summary>
+    /// The governed invocation of a SIDE-EFFECTING tool: derive the server-side key, claim the ledger row (INSERT-first
+    /// dedup against the unique index), and either run the side effect exactly once + record the (already-redacted)
+    /// terminal, or — on a duplicate — return the prior result WITHOUT re-running. The gate already let this through
+    /// as Allow (a Deny/RequireApproval short-circuited before the ledger), so reaching here means "run it, once".
+    /// </summary>
+    private async Task<JsonElement> InvokeWithLedgerAsync(IAgentTool tool, JsonElement arguments, CancellationToken cancellationToken)
+    {
+        var teamId = _teamId!.Value;   // a null-team run was diverted to the flag-OFF path before reaching here (team_id is NOT NULL)
+
+        var inputHash = ToolCallKey.InputHash(arguments);   // SERVER-derived — never read from the wire (no forgery surface)
+        var key = ToolCallKey.For(tool.Kind, inputHash);
+
+        var claim = await _ledger!.TryClaimAsync(_runId, teamId, tool.Kind, key, inputHash, _fenceEpoch, cancellationToken).ConfigureAwait(false);
+
+        return claim.Outcome switch
+        {
+            ToolCallClaimOutcome.Duplicate => ReplayPriorResult(claim),   // exactly-once: the side effect already ran; replay the stored (already-redacted) result
+            ToolCallClaimOutcome.InFlight => ToolResult(isError: true, "This tool call is already in progress; retry shortly."),
+            _ => await ExecuteAndRecordAsync(tool, arguments, teamId, claim.LedgerId, cancellationToken).ConfigureAwait(false),
+        };
+    }
+
+    /// <summary>
+    /// Run the side effect once, build the ALREADY-REDACTED wire result (the single <see cref="ToolResult"/> choke
+    /// point), persist that redacted payload to the ledger as the terminal (Succeeded with the verbatim wire result,
+    /// or Failed with the redacted error), and return it. Redact-BEFORE-persist: the ledger row never holds a raw
+    /// secret, and a later duplicate replays the exact bytes the model first saw.
+    ///
+    /// <para>Liveness: the claim INSERTed a Pending row. A tool call that is CANCELLED (timeout / endpoint teardown /
+    /// harness disconnect) or that throws MUST NOT leave that row stranded Pending forever — the key is deterministic,
+    /// so a re-call on the reattached run would otherwise hit InFlight indefinitely and the interrupted side effect
+    /// could never be retried. So an interruption records a terminal Failed on a BEST-EFFORT basis BEFORE propagating
+    /// (see <see cref="RecordInterruptedThenRethrow"/>). The only remaining stranded-Pending window is a hard crash
+    /// (SIGKILL) between the Pending INSERT and the recovery write; that is recovered by a future Pending-row reaper —
+    /// the item-C analogue of the run-level reconciler that recovers stranded Running runs — which is out of scope for
+    /// this PR.</para>
+    /// </summary>
+    private async Task<JsonElement> ExecuteAndRecordAsync(IAgentTool tool, JsonElement arguments, Guid teamId, Guid ledgerId, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var result = await tool.CallAsync(new AgentToolCall { Input = arguments, TeamId = _teamId }, cancellationToken).ConfigureAwait(false);
+
+            if (result.IsError)
+            {
+                var errorText = _redactor.Redact(result.Error ?? "Tool failed.");
+
+                return await RecordTerminalOrReplayAsync(teamId, ledgerId, ToolCallLedgerStatus.Failed, resultJson: null, errorText, ToolResult(isError: true, errorText), cancellationToken).ConfigureAwait(false);
+            }
+
+            var structured = DeclaresSchema(tool.OutputSchema) && result.Output.ValueKind != JsonValueKind.Undefined ? result.Output : (JsonElement?)null;
+            var wire = ToolResult(isError: false, OutputText(result.Output), structured);   // the REDACTED wire result the model receives
+
+            return await RecordTerminalOrReplayAsync(teamId, ledgerId, ToolCallLedgerStatus.Succeeded, resultJson: wire.GetRawText(), error: null, wire, cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            // The call was interrupted (timeout / teardown / disconnect). Record a terminal Failed best-effort so the
+            // Pending row is never stranded, then re-throw — cancellation must still propagate.
+            await RecordInterruptedThenRethrow(teamId, ledgerId).ConfigureAwait(false);
+            throw;
+        }
+        catch (Exception ex)
+        {
+            // A thrown tool exception is a tool failure (isError), not a protocol error. Persist the redacted message
+            // as the terminal so a re-call dedups to it rather than re-running the (partially-applied) side effect.
+            var errorText = _redactor.Redact(ex.Message);
+
+            return await RecordTerminalOrReplayAsync(teamId, ledgerId, ToolCallLedgerStatus.Failed, resultJson: null, errorText, ToolResult(isError: true, errorText), cancellationToken).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>
+    /// Record the terminal and return <paramref name="wire"/> — but if the CAS is LOST (a concurrent transition won, or
+    /// the row is already terminal: <see cref="ToolCallLedgerTransitionException"/>), the side effect has ALREADY
+    /// committed, so we must NOT surface a JSON-RPC protocol error after the fact. Instead re-read the recorded terminal
+    /// and REPLAY it (mirroring the Duplicate path). Unreachable under today's pure-C single-winner path; reachable once
+    /// durable mid-turn HITL (item D) lands — fixed now so the side effect's outcome is never masked by a late protocol
+    /// error.
+    /// </summary>
+    private async Task<JsonElement> RecordTerminalOrReplayAsync(Guid teamId, Guid ledgerId, ToolCallLedgerStatus status, string? resultJson, string? error, JsonElement wire, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await _ledger!.RecordTerminalAsync(ledgerId, teamId, status, resultJson, error, cancellationToken).ConfigureAwait(false);
+
+            return wire;
+        }
+        catch (ToolCallLedgerTransitionException)
+        {
+            return await ReplayRecordedTerminalAsync(teamId, ledgerId, cancellationToken).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>Re-read the (already-recorded) terminal row for this (run, ledger) and rebuild its wire result — a success replays the verbatim stored wire JSON, anything else rebuilds an isError result from its redacted error. Mirrors <see cref="ReplayPriorResult"/>.</summary>
+    private async Task<JsonElement> ReplayRecordedTerminalAsync(Guid teamId, Guid ledgerId, CancellationToken cancellationToken)
+    {
+        var rows = await _ledger!.GetForRunAsync(_runId, teamId, cancellationToken).ConfigureAwait(false);
+        var row = rows.FirstOrDefault(r => r.Id == ledgerId);
+
+        return row is { Status: ToolCallLedgerStatus.Succeeded, ResultJson: { Length: > 0 } stored }
+            ? JsonDocument.Parse(stored).RootElement.Clone()
+            : ToolResult(isError: true, row?.Error ?? "This tool call previously failed.");
+    }
+
+    /// <summary>
+    /// Best-effort terminal write for an interrupted call, under <see cref="CancellationToken.None"/> so cancellation
+    /// can't skip it. SWALLOWS any failure of the recovery write (e.g. the scope is disposing during teardown) — if
+    /// even this fails the row stays Pending and the future Pending-row reaper (out of scope, see
+    /// <see cref="ExecuteAndRecordAsync"/>) catches it. NEVER throws from the recovery path (the caller re-throws the
+    /// original cancellation).
+    /// </summary>
+    private async Task RecordInterruptedThenRethrow(Guid teamId, Guid ledgerId)
+    {
+        try
+        {
+            await _ledger!.RecordTerminalAsync(ledgerId, teamId, ToolCallLedgerStatus.Failed, resultJson: null, error: "tool call interrupted before completion; safe to retry", CancellationToken.None).ConfigureAwait(false);
+        }
+        catch
+        {
+            // Swallow: the row stays Pending and the future Pending-row reaper recovers it. Never throw from recovery.
+        }
+    }
+
+    /// <summary>Reconstruct the wire result from the prior terminal row WITHOUT re-running the side effect: a success replays the verbatim (already-redacted) stored wire JSON; a failure/denial rebuilds an isError result from its redacted error.</summary>
+    private JsonElement ReplayPriorResult(ToolCallClaim claim) =>
+        claim.PriorStatus == ToolCallLedgerStatus.Succeeded && claim.PriorResultJson is { Length: > 0 } stored
+            ? JsonDocument.Parse(stored).RootElement.Clone()
+            : ToolResult(isError: true, claim.PriorError ?? "This tool call previously failed.");
 
     private async Task<JsonElement> InvokeToolAsync(IAgentTool tool, JsonElement arguments, CancellationToken cancellationToken)
     {

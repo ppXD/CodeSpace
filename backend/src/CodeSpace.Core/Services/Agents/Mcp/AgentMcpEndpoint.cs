@@ -3,6 +3,7 @@ using System.Net.Sockets;
 using System.Text;
 using CodeSpace.Core.Services.Agents.Tools;
 using CodeSpace.Messages.Agents;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 
 namespace CodeSpace.Core.Services.Agents.Mcp;
@@ -36,7 +37,9 @@ public sealed class AgentMcpEndpoint : IAsyncDisposable
     private readonly string _socketPath;
     private readonly string _token;
     private readonly IAgentMcpConnectRegistry _connects;
-    private readonly IDisposable _scope;
+    private readonly IServiceScope _scope;
+    private readonly long _fenceEpoch;
+    private readonly bool _governanceEnabled;
     private readonly CancellationTokenSource _cts;
     private readonly Socket _listener;
     private readonly Task _acceptLoop;
@@ -44,7 +47,7 @@ public sealed class AgentMcpEndpoint : IAsyncDisposable
 
     private bool _disposed;
 
-    public AgentMcpEndpoint(Guid runId, IAgentToolRegistry registry, AgentAutonomyLevel autonomy, Guid teamId, SecretRedactor redactor, string socketPath, string token, IAgentMcpConnectRegistry connects, IDisposable scope, CancellationToken ct, ILogger logger)
+    public AgentMcpEndpoint(Guid runId, IAgentToolRegistry registry, AgentAutonomyLevel autonomy, Guid teamId, SecretRedactor redactor, string socketPath, string token, IAgentMcpConnectRegistry connects, IServiceScope scope, CancellationToken ct, ILogger logger, long fenceEpoch = 0, bool governanceEnabled = false)
     {
         _runId = runId;
         _registry = registry;
@@ -55,6 +58,8 @@ public sealed class AgentMcpEndpoint : IAsyncDisposable
         _token = token;
         _connects = connects;
         _scope = scope;
+        _fenceEpoch = fenceEpoch;
+        _governanceEnabled = governanceEnabled;
         _cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
         _listener = new Socket(AddressFamily.Unix, SocketType.Stream, ProtocolType.Unspecified);
 
@@ -146,7 +151,14 @@ public sealed class AgentMcpEndpoint : IAsyncDisposable
 
         if (!await IsAuthenticatedAsync(reader, ct).ConfigureAwait(false)) return;   // silent close, no oracle, before any handler
 
-        var loop = new McpFramingLoop(new McpRequestHandler(_registry, _autonomy, _teamId, _redactor));
+        // The ledger service is SCOPED (its own DbContext), and the accept loop can serve concurrent connections, so
+        // a shared instance would race the (thread-unsafe) DbContext. Mint a FRESH per-connection scope here and
+        // dispose it when this connection's pump ends. Null when governance is off → the handler is byte-identical.
+        using var connectionScope = _governanceEnabled ? _scope.ServiceProvider.CreateScope() : null;
+        var ledger = connectionScope?.ServiceProvider.GetRequiredService<IToolCallLedgerService>();
+
+        var handler = new McpRequestHandler(_registry, _autonomy, _teamId, _redactor, _runId, ledger, _fenceEpoch, _governanceEnabled);
+        var loop = new McpFramingLoop(handler);
 
         try { await loop.RunAsync(reader, writer, ct).ConfigureAwait(false); }
         catch (OperationCanceledException) { /* cancel unwound the pump */ }

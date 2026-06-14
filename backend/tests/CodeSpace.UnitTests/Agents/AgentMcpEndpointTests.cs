@@ -5,6 +5,7 @@ using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Agents.Mcp;
 using CodeSpace.Core.Services.Agents.Tools;
 using CodeSpace.Messages.Agents;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging.Abstractions;
 using Shouldly;
 
@@ -189,9 +190,12 @@ public class AgentMcpEndpointTests
         public IAgentTool? Resolve(string kind) => null;
     }
 
-    private sealed class TrackingScope : IDisposable
+    // The endpoint takes an IServiceScope (it mints per-connection child scopes for the ledger when governance is on).
+    // These tests run governance OFF, so the provider is never asked for the ledger — an empty provider suffices.
+    private sealed class TrackingScope : IServiceScope
     {
         public bool Disposed { get; private set; }
+        public IServiceProvider ServiceProvider { get; } = new ServiceCollection().BuildServiceProvider();
         public void Dispose() => Disposed = true;
     }
 

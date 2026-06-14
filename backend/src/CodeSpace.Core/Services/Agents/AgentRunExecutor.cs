@@ -155,7 +155,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
             // Open the per-run MCP endpoint (flag-OFF → null → no-op). It lives ONLY for the harness span: the harness
             // runs synchronously here (RunHarnessAsync → AttachAsync blocks until exit), and `await using` inside the
             // try tears it down on EVERY exit (success / cancel / generic catch) — NOT gated on leaveWorkspaceForReattach.
-            await using var mcp = OpenMcpEndpointIfEnabled(agentRunId, effectiveTask.Autonomy, run.TeamId, redactor, socketPath, token, cancellationToken);
+            await using var mcp = OpenMcpEndpointIfEnabled(agentRunId, effectiveTask.Autonomy, run.TeamId, redactor, socketPath, token, claimedEpoch, cancellationToken);
 
             // Wire the live CLI to the fabric ONLY when the endpoint actually opened AND the harness declares an
             // MCP-server shape — a non-null endpoint already encodes "the flag is on AND the bind succeeded", so no
@@ -240,7 +240,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         // Re-open the run's MCP endpoint on the SAME socket+token the handle recorded at launch (the in-process listener
         // died with the original worker, but the detached agent keeps running with its declaration file pointing here).
         // Null when the run had no fabric / the flag is off → no-op. Bounded to the re-tail span like ExecuteAsync's.
-        await using var mcp = ReopenMcpEndpointForReattach(agentRunId, task.Autonomy, run.TeamId, reopenRedactor, handle, cancellationToken);
+        await using var mcp = ReopenMcpEndpointForReattach(agentRunId, task.Autonomy, run.TeamId, reopenRedactor, handle, expectedEpoch, cancellationToken);
 
         try
         {
@@ -500,7 +500,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     /// (A10): a host that can't bind a UDS — though the flag is on — disposes the scope, logs a Warning, and returns
     /// null; the endpoint is optional infra, not the run, so the run still proceeds without it.
     /// </summary>
-    private AgentMcpEndpoint? OpenMcpEndpointIfEnabled(Guid runId, AgentAutonomyLevel autonomy, Guid teamId, SecretRedactor redactor, string socketPath, string token, CancellationToken ct)
+    private AgentMcpEndpoint? OpenMcpEndpointIfEnabled(Guid runId, AgentAutonomyLevel autonomy, Guid teamId, SecretRedactor redactor, string socketPath, string token, long fenceEpoch, CancellationToken ct)
     {
         if (!IsMcpEndpointEnabled()) return null;
 
@@ -508,9 +508,13 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         var registry = scope.ServiceProvider.GetRequiredService<IAgentToolRegistry>();
         var connects = scope.ServiceProvider.GetRequiredService<IAgentMcpConnectRegistry>();
 
+        // The governance flag is read ONCE here (Rule 8 single gate); the endpoint threads it + the run's fence epoch
+        // into each connection's handler so a side-effecting tool call is ledger-tracked. Flag-OFF → no ledger rows.
+        var governanceEnabled = McpRequestHandler.IsGovernanceEnabled();
+
         try
         {
-            return new AgentMcpEndpoint(runId, registry, autonomy, teamId, redactor, socketPath, token, connects, scope, ct, _logger);
+            return new AgentMcpEndpoint(runId, registry, autonomy, teamId, redactor, socketPath, token, connects, scope, ct, _logger, fenceEpoch, governanceEnabled);
         }
         // An over-length socket path throws ArgumentOutOfRangeException (UDS endpoint ctor); CreateDirectory can throw
         // IOException / UnauthorizedAccessException. The endpoint is optional infra, not the run, so any of these is a
@@ -533,7 +537,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     /// off; the wiring flag is NOT re-checked here (the agent's declaration already exists, so the endpoint must serve
     /// it regardless). Fail-soft via <see cref="OpenMcpEndpointIfEnabled"/>.
     /// </summary>
-    private AgentMcpEndpoint? ReopenMcpEndpointForReattach(Guid runId, AgentAutonomyLevel autonomy, Guid teamId, SecretRedactor redactor, SandboxHandle handle, CancellationToken ct)
+    private AgentMcpEndpoint? ReopenMcpEndpointForReattach(Guid runId, AgentAutonomyLevel autonomy, Guid teamId, SecretRedactor redactor, SandboxHandle handle, long fenceEpoch, CancellationToken ct)
     {
         if (handle.McpRunToken is not { Length: > 0 } token) return null;
 
@@ -543,7 +547,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         // credential — kept INDEPENDENT of the fold's own resolution (a second decrypt is harmless + idempotent) so the
         // delicate fingerprint-gated marker-only re-tail in ReattachAndFoldAsync is left untouched. The caller degrades
         // it to SecretRedactor.None on a resolution failure, so a deleted/rotated credential never blocks the reattach.
-        return OpenMcpEndpointIfEnabled(runId, autonomy, teamId, redactor, socketPath, token, ct);
+        return OpenMcpEndpointIfEnabled(runId, autonomy, teamId, redactor, socketPath, token, fenceEpoch, ct);
     }
 
     /// <summary>
