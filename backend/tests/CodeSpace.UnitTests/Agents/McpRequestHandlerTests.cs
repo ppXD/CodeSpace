@@ -723,6 +723,10 @@ public class McpRequestHandlerTests
 
         public Task<IReadOnlyList<Core.Persistence.Entities.ToolCallLedger>> GetForRunAsync(Guid agentRunId, Guid teamId, CancellationToken ct) =>
             Task.FromResult<IReadOnlyList<Core.Persistence.Entities.ToolCallLedger>>(Rows);
+
+        // The handler never reaps — the reaper job drives ExpireStaleApprovalsAsync, not the request handler.
+        public Task<IReadOnlyList<ExpiredToolApproval>> ExpireStaleApprovalsAsync(DateTimeOffset now, CancellationToken ct) =>
+            throw new NotImplementedException();
     }
 
     private static McpRequestHandler GovernedHandler(SpyLedger ledger, bool governanceEnabled, params IAgentTool[] tools) =>
