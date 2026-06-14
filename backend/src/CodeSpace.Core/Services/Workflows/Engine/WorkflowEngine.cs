@@ -1659,13 +1659,19 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
 
         if (rows.Count == 0) return new MapReplayState(new Dictionary<int, MapBranchOutcome>());
 
+        // Group the prefix-scoped rows by their EXACT iteration key ONCE so each branch settle is an O(1)
+        // lookup of its own-key rows, not an O(rows) re-scan — the whole rehydrate is O(K), not O(K^2) for K
+        // branches. GroupBy preserves source order within each group, so the per-branch row order (and thus
+        // FirstOrDefault selection) is identical to the previous rows.Where(...) scan: behaviour-preserving.
+        var rowsByKey = rows.GroupBy(r => r.IterationKey).ToDictionary(g => g.Key, g => (IReadOnlyList<Core.Persistence.Entities.WorkflowRunNode>)g.ToList());
+
         var settled = new Dictionary<int, MapBranchOutcome>();
 
         for (var i = 0; i < elementCount; i++)
         {
             var branchKey = CombineIterationKey(nodeIterationKey, $"{mapNode.Id}#{i}");
 
-            if (TrySettleBranch(rows, branchKey, body, terminal, errorHandling, i, out var outcome))
+            if (TrySettleBranch(rowsByKey, branchKey, body, terminal, errorHandling, i, out var outcome))
                 settled[i] = outcome;
         }
 
@@ -1679,11 +1685,11 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
     /// OWN-key rows (a nested descendant has a longer key), exactly as the live walk reduces a branch from
     /// its own-key terminal.
     /// </summary>
-    private static bool TrySettleBranch(IReadOnlyList<Core.Persistence.Entities.WorkflowRunNode> rows, string branchKey, WorkflowDefinition body, NodeDefinition terminal, MapErrorHandling errorHandling, int index, out MapBranchOutcome outcome)
+    private static bool TrySettleBranch(IReadOnlyDictionary<string, IReadOnlyList<Core.Persistence.Entities.WorkflowRunNode>> rowsByKey, string branchKey, WorkflowDefinition body, NodeDefinition terminal, MapErrorHandling errorHandling, int index, out MapBranchOutcome outcome)
     {
         outcome = default;
 
-        var ownRows = rows.Where(r => r.IterationKey == branchKey).ToList();
+        var ownRows = rowsByKey.GetValueOrDefault(branchKey) ?? Array.Empty<Core.Persistence.Entities.WorkflowRunNode>();
 
         var terminalRow = ownRows.FirstOrDefault(r => r.NodeId == terminal.Id);
 
