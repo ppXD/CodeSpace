@@ -95,6 +95,17 @@ public sealed record NodeManifest
     public bool IsAgentToolEligible { get; init; }
 
     /// <summary>
+    /// Opt-in marker that the tool projected from this node can NEVER run unattended — even at the Unleashed tier it
+    /// requires a human approval (an IRREVERSIBLE op like <c>git.merge_pr</c>). <c>NodeAgentTool</c> maps it onto
+    /// <c>IAgentTool.AlwaysRequiresApproval</c>, and the gate escalates Unleashed's Allow → RequireApproval when set.
+    ///
+    /// <para>Default <c>false</c>: every existing node is unchanged (reversible writes stay Allow-able at Unleashed).
+    /// Independent of <see cref="IsSideEffecting"/> — but in practice only a side-effecting node sets it (a read-only
+    /// tool never requires approval at all).</para>
+    /// </summary>
+    public bool AlwaysRequiresApproval { get; init; }
+
+    /// <summary>
     /// Opt-in marker for a node that performs a write AS a CodeSpace user's own provider identity
     /// (Model B) — e.g. <c>git.pr_review</c> submitting a review as the actor. Declaring it lets the
     /// engine GENERICALLY enforce the actor's linked identity: when such a node sits downstream of an

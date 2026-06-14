@@ -46,6 +46,11 @@ public interface IAgentTool
     /// <summary>Whether this tool should be gated for approval by default. Defaults to <see cref="IsDestructive"/> — risky tools ask unless a tier opens them.</summary>
     bool RequiresApproval => IsDestructive;
 
+    /// <summary>True for a tool that can NEVER run unattended — even at the Unleashed tier it requires a human approval (an
+    /// irreversible op like a merge). The gate escalates Unleashed's Allow → RequireApproval when this is set; the other
+    /// tiers are unchanged (Confined still denies, Standard/Trusted already ask). FAIL-CLOSED default: false.</summary>
+    bool AlwaysRequiresApproval => false;
+
     /// <summary>Pure, I/O-free validation of the input shape/values (e.g. a blocked-path check) — the first gate, before any permission check or side effect.</summary>
     AgentToolValidation ValidateInput(JsonElement input);
 

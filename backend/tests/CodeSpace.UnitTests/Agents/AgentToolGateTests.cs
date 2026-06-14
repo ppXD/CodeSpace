@@ -51,4 +51,18 @@ public class AgentToolGateTests
         default(AgentAutonomyLevel).ShouldBe(AgentAutonomyLevel.Confined);
         AgentToolGate.Decide(default, requiresApproval: true).ShouldBe(AgentToolGateDecision.Deny);
     }
+
+    [Theory]
+    // An ALWAYS-approve tool (an irreversible op like git.merge_pr) can NEVER reach Allow: the only cell it changes
+    // is Unleashed, where a normal gated tool would auto-run — here it escalates to RequireApproval instead.
+    [InlineData(AgentAutonomyLevel.Unleashed, true, true, AgentToolGateDecision.RequireApproval)]   // the escalation — merge never auto-runs
+    [InlineData(AgentAutonomyLevel.Unleashed, true, false, AgentToolGateDecision.Allow)]             // a normal write at Unleashed still auto-runs (F unchanged)
+    [InlineData(AgentAutonomyLevel.Standard, true, true, AgentToolGateDecision.RequireApproval)]     // Standard already asks → always-approve is a no-op
+    [InlineData(AgentAutonomyLevel.Trusted, true, true, AgentToolGateDecision.RequireApproval)]      // Trusted already asks → no-op
+    [InlineData(AgentAutonomyLevel.Confined, true, true, AgentToolGateDecision.Deny)]                // Confined still denies a gated tool
+    [InlineData(AgentAutonomyLevel.Unleashed, false, true, AgentToolGateDecision.Allow)]             // a non-approval tool is harmless regardless of the always flag
+    public void An_always_approve_tool_can_never_reach_Allow(AgentAutonomyLevel level, bool requiresApproval, bool alwaysRequiresApproval, AgentToolGateDecision expected)
+    {
+        AgentToolGate.Decide(level, requiresApproval, alwaysRequiresApproval).ShouldBe(expected);
+    }
 }

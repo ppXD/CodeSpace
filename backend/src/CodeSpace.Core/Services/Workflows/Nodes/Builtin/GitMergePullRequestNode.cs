@@ -40,6 +40,17 @@ public sealed class GitMergePullRequestNode : INodeRuntime
         // Merging integrates code — a permanent side effect. The engine refuses auto-resume on abandoned runs
         // so we never merge twice.
         IsSideEffecting = true,
+        // Synchronous + standalone → exposable as an agent tool. But unlike the reversible writes (open_pr /
+        // post_pr_comment / pr_review) this is IRREVERSIBLE, so it can NEVER auto-run: AlwaysRequiresApproval forces
+        // AgentToolGate to escalate even Unleashed's Allow → RequireApproval. Every merge, at every tier, goes through
+        // the D2 human-approval card + the C exactly-once ledger. INERT until the MCP endpoint is enabled.
+        // Attribution: the ActsAsUser per-user attribution below is an engine-respond-path feature, gated by
+        // ActorIdentityRequirementGate (the responder must PROVE they are that user). No such gate runs on the
+        // synthetic tool path, so NodeAgentTool STRIPS the actAsUserId actor key from model input there — a
+        // tool-invoked merge acts as the repo CONNECTION credential, never a specific user. The ledger's
+        // agent_run_id provides traceability.
+        IsAgentToolEligible = true,
+        AlwaysRequiresApproval = true,
         ActsAsUser = new ActsAsUserSpec { ActorInputKey = "actAsUserId", ProviderInputKey = "repositoryId", ProviderSource = ActorProviderSource.Repository, CapabilityType = typeof(IPullRequestWriteCapability) },
         ConfigSchema = SchemaBuilder.EmptyObject(),
         InputSchema = SchemaBuilder.Parse("""

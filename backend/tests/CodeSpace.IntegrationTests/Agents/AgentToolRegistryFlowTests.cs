@@ -1,5 +1,6 @@
 using System.Text.Json;
 using Autofac;
+using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Agents.Tools;
 using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.Messages.Agents;
@@ -65,15 +66,22 @@ public class AgentToolRegistryFlowTests
     }
 
     [Fact]
-    public void Git_merge_pr_is_NOT_projected_by_the_real_container()
+    public void Git_merge_pr_is_projected_by_the_real_container_as_an_always_approve_destructive_tool()
     {
-        // PIN over the REAL DI graph: git.merge_pr (irreversible) is registered as a node but DELIBERATELY left
-        // off the agent-tool surface. A future accidental flip of its IsAgentToolEligible would start projecting
-        // it here → this fails. It ships last behind a per-tool force-approval policy.
+        // PIN over the REAL DI graph: git.merge_pr (irreversible) now projects onto the agent-tool surface — but as
+        // an ALWAYS-approve tool, so it can never auto-run at any tier. A future accidental flip of either flag
+        // (un-exposing it, or dropping the always-approve guard) would fail here.
         using var scope = _fixture.BeginScope();
 
-        scope.Resolve<IAgentToolRegistry>().Resolve("git.merge_pr")
-            .ShouldBeNull("git.merge_pr stays off the agent-tool surface until a per-tool force-approval policy ships");
+        var tool = scope.Resolve<IAgentToolRegistry>().Resolve("git.merge_pr");
+
+        tool.ShouldNotBeNull("git.merge_pr now projects onto the agent-tool surface via DI");
+        tool!.IsDestructive.ShouldBeTrue("merging integrates code → a destructive tool");
+        tool.AlwaysRequiresApproval.ShouldBeTrue("git.merge_pr is irreversible → always-approve, never auto-run at any tier");
+
+        // THE invariant: an always-approve merge can never be Allow-ed (auto-run), even at the most permissive tier.
+        AgentToolGate.Decide(AgentAutonomyLevel.Unleashed, tool.RequiresApproval, tool.AlwaysRequiresApproval)
+            .ShouldBe(AgentToolGateDecision.RequireApproval, "git.merge_pr at Unleashed escalates to RequireApproval — never Allow");
     }
 
     // Forward-looking guard: every currently-eligible repo-resolving tool MUST refuse a repositoryId when the
