@@ -611,11 +611,11 @@ public sealed class DefinitionValidator : IScopedDependency
         };
     }
 
-    /// <summary>Reads a string property from a node's Config object; null when absent or not an object/string.</summary>
+    /// <summary>Reads a string property from a node's Config object; null when absent or not an object/string. Case-insensitive match mirrors the engine's <c>MapConfig</c> deserialisation, so a non-canonical spelling (e.g. <c>ResultKey</c>) the engine still honours cannot slip a reserved/invalid key past validation.</summary>
     private static string? ReadConfigString(System.Text.Json.JsonElement config, string key)
     {
         if (config.ValueKind != System.Text.Json.JsonValueKind.Object) return null;
-        if (!config.TryGetProperty(key, out var value)) return null;
+        if (!TryGetPropertyIgnoreCase(config, key, out var value)) return null;
         return value.ValueKind == System.Text.Json.JsonValueKind.String ? value.GetString() : null;
     }
 

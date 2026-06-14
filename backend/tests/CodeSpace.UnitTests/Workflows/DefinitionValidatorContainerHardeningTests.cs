@@ -270,6 +270,18 @@ public class DefinitionValidatorContainerHardeningTests
     }
 
     [Theory]
+    [InlineData("ResultKey")]   // PascalCase
+    [InlineData("RESULTKEY")]   // upper
+    public void Map_resultKey_with_non_canonical_casing_is_still_checked(string propName)
+    {
+        // The engine parses MapConfig case-insensitively, so "ResultKey":"count" still collides at
+        // run time. The validator must catch the reserved key regardless of property-name casing.
+        var result = BuildValidator().Validate(MapWith(rawConfig: $$"""{ "{{propName}}": "count" }"""));
+        result.IsValid.ShouldBeFalse();
+        result.Errors.ShouldContain(e => e.Contains("resultKey 'count'") && e.Contains("reserved"));
+    }
+
+    [Theory]
     [InlineData("iterations")]
     [InlineData("failedIterations")]
     [InlineData("terminationReason")]
@@ -356,9 +368,9 @@ public class DefinitionValidatorContainerHardeningTests
 
     // manual → map(items; body: ms → work → leaf) → terminal. The canonical valid map the hardening checks
     // must leave alone; each scenario tweaks one knob (resultKey / items) off this baseline.
-    private static WorkflowDefinition MapWith(string? resultKey = "results", string? itemsJson = """{ "items": "{{trigger.things}}" }""")
+    private static WorkflowDefinition MapWith(string? resultKey = "results", string? itemsJson = """{ "items": "{{trigger.things}}" }""", string? rawConfig = null)
     {
-        var config = resultKey == null ? "{}" : $$"""{ "resultKey": "{{resultKey}}" }""";
+        var config = rawConfig ?? (resultKey == null ? "{}" : $$"""{ "resultKey": "{{resultKey}}" }""");
 
         var map = new NodeDefinition
         {

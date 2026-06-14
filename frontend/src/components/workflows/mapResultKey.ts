@@ -1,7 +1,9 @@
 /**
  * Author-time mirror of the backend flow.map resultKey rule (DefinitionValidator + WorkflowOutputKeys.Map +
- * IdentifierPattern). The save-time validator is the hard gate; this gives inline feedback in MapEditor before
- * the operator hits Save. Kept in sync with the backend by the validator's drift-pin test.
+ * IdentifierPattern). The save-time validator is the authoritative hard gate; this is a hand-maintained copy
+ * that gives inline feedback in MapEditor before the operator hits Save. If it ever drifts from the backend
+ * the only cost is a missed/early inline hint — the backend still rejects the bad key at save, never a
+ * correctness hole. Keep the reserved set + pattern below in step with WorkflowOutputKeys.Map by hand.
  */
 
 /** The keys the map reducer always emits alongside the result array — a resultKey of one would be silently overwritten. */
