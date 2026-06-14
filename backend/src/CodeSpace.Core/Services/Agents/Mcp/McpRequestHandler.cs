@@ -151,7 +151,7 @@ public sealed class McpRequestHandler : IMcpRequestHandler
         // tool result with isError:true, not a protocol error), so the model never sees input feedback for — or
         // runs — a tool it can't call. A Deny short-circuits here; a RequireApproval that can't be served (no approval
         // surface) ALSO short-circuits to the same flat refusal — the conversation-less-run safety (fail-closed).
-        var gate = AgentToolGate.Decide(_autonomy, tool.RequiresApproval);
+        var gate = AgentToolGate.Decide(_autonomy, tool.RequiresApproval, tool.AlwaysRequiresApproval);
 
         if (gate == AgentToolGateDecision.Deny) return JsonRpcResponse.Ok(id, ToolResult(isError: true, GateMessage(gate, name)));
 

@@ -203,6 +203,40 @@ public class McpToolApprovalFlowTests
     }
 
     [Fact]
+    public async Task An_always_approve_merge_at_Unleashed_posts_a_card_and_blocks_instead_of_auto_running()
+    {
+        // THE E2 finale: git.merge_pr is irreversible (AlwaysRequiresApproval) → even at the most permissive
+        // Unleashed tier it must NOT auto-run. The gate escalates Allow → RequireApproval, so the handler posts the
+        // D2 approval card and BLOCKS — exactly the path a reversible write takes only at Standard/Trusted. A human
+        // approve then runs the merge exactly once. This is the difference from the F writes (Unleashed → straight
+        // execute, no card).
+        var (teamId, ownerId, channelId) = await SeedTeamChannelAsync();
+        var runId = Guid.NewGuid();
+        var tool = new CountingWriteTool(alwaysApprove: true);   // Kind == "git.merge_pr"
+
+        using var scope = _fixture.BeginScope();
+        var handler = ApprovalHandler(scope, AgentAutonomyLevel.Unleashed, teamId, runId, channelId, tool);
+
+        // The merge BLOCKS at Unleashed (unlike a reversible write) → run it on a background task.
+        var call = Task.Run(() => CallToolAsync(handler, "git.merge_pr", new { number = 7 }));
+
+        var (ledgerId, messageId) = await WaitForPostedCardAsync(teamId, runId);
+
+        tool.CallCount.ShouldBe(0, "the irreversible merge has NOT run while the card is pending — it never auto-ran at Unleashed");
+
+        await RespondAsync(teamId, messageId, ApproveKey, ownerId);
+
+        var result = await call;
+
+        result.GetProperty("isError").GetBoolean().ShouldBeFalse("the approved merge returns the real result");
+        tool.CallCount.ShouldBe(1, "the merge runs EXACTLY once — only after the human approval");
+
+        (await ReadRowAsync(ledgerId)).Status.ShouldBe(ToolCallLedgerStatus.Succeeded, "the AwaitingApproval row flips to Succeeded after the approved merge");
+        (await ReadInteractionStateAsync(messageId)).ShouldBe(InteractionState.Resolved, "the merge approval card is stamped resolved");
+        (await ReadRunCardCountAsync(teamId, channelId)).ShouldBe(1, "exactly one approval card was posted for the merge at Unleashed");
+    }
+
+    [Fact]
     public async Task A_run_with_no_approval_conversation_flat_refuses_with_no_card_and_no_block_the_safety()
     {
         var (teamId, _, channelId) = await SeedTeamChannelAsync();
@@ -503,16 +537,20 @@ public class McpToolApprovalFlowTests
     private const string ApproveKey = "approve";
     private const string RejectKey = "reject";
 
-    /// <summary>A side-effecting (destructive → RequireApproval at Standard/Trusted) tool that counts its invocations — the exactly-once proof asserts the count.</summary>
+    /// <summary>A side-effecting (destructive → RequireApproval at Standard/Trusted) tool that counts its invocations — the exactly-once proof asserts the count. <paramref name="alwaysApprove"/> mirrors git.merge_pr: an irreversible tool that escalates even Unleashed's Allow → RequireApproval, so it can never auto-run.</summary>
     private sealed class CountingWriteTool : IAgentTool
     {
+        private readonly bool _alwaysApprove;
+        public CountingWriteTool(bool alwaysApprove = false) => _alwaysApprove = alwaysApprove;
+
         public int CallCount { get; private set; }
-        public string Kind => "git.open_pr";
-        public string Description => "open a PR";
+        public string Kind => _alwaysApprove ? "git.merge_pr" : "git.open_pr";
+        public string Description => _alwaysApprove ? "merge a PR" : "open a PR";
         public JsonElement InputSchema { get; } = JsonDocument.Parse("""{"type":"object"}""").RootElement.Clone();
         public JsonElement OutputSchema { get; } = JsonDocument.Parse("{}").RootElement.Clone();
         public bool IsReadOnly => false;
         public bool IsDestructive => true;
+        public bool AlwaysRequiresApproval => _alwaysApprove;
 
         public AgentToolValidation ValidateInput(JsonElement input) => AgentToolValidation.Valid;
 

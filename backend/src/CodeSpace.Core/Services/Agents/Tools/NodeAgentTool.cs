@@ -43,6 +43,10 @@ public sealed class NodeAgentTool : IAgentTool
     public bool IsConcurrencySafe => !_node.Manifest.IsSideEffecting;
     public bool IsDestructive => _node.Manifest.IsSideEffecting;
 
+    // An irreversible node (git.merge_pr) declares this true → the tool can never auto-run; the gate escalates
+    // Unleashed's Allow → RequireApproval. Default false leaves every reversible write Allow-able at Unleashed.
+    public bool AlwaysRequiresApproval => _node.Manifest.AlwaysRequiresApproval;
+
     public AgentToolValidation ValidateInput(JsonElement input) =>
         input.ValueKind == JsonValueKind.Object ? AgentToolValidation.Valid : AgentToolValidation.Invalid("Tool input must be a JSON object.");
 

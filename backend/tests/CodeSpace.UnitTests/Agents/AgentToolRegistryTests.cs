@@ -1,4 +1,5 @@
 using System.Text.Json;
+using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Agents.Commands;
 using CodeSpace.Core.Services.Agents.Tools;
 using CodeSpace.Core.Services.PullRequests;
@@ -120,18 +121,29 @@ public class AgentToolRegistryTests
         tool!.IsReadOnly.ShouldBeFalse($"{kind} mutates provider state → not read-only");
         tool.IsDestructive.ShouldBeTrue($"{kind} is side-effecting → a destructive tool");
         tool.RequiresApproval.ShouldBeTrue($"{kind} is destructive → approval-gated by default");
+        tool.AlwaysRequiresApproval.ShouldBeFalse($"{kind} is REVERSIBLE → Allow-able at Unleashed (only the irreversible merge is always-approve)");
     }
 
     [Fact]
-    public void Git_merge_pr_is_NOT_eligible_and_never_resolves_as_a_tool()
+    public void Git_merge_pr_is_eligible_destructive_and_always_requires_approval()
     {
-        // PIN: git.merge_pr is irreversible — it is DELIBERATELY excluded from the agent-tool surface and ships
-        // last behind a per-tool force-approval policy. A future accidental flip of IsAgentToolEligible MUST fail
-        // here (the registry would start projecting it). Keep merge ineligible until that policy lands.
+        // PIN: git.merge_pr is now EXPOSED on the agent-tool surface — but because the merge is IRREVERSIBLE it is
+        // marked AlwaysRequiresApproval, so it can NEVER auto-run at any tier. A future accidental flip of either
+        // flag (un-exposing it, or dropping the always-approve guard) MUST fail here.
         var merge = new GitMergePullRequestNode(null!);
 
-        merge.Manifest.IsAgentToolEligible.ShouldBeFalse("git.merge_pr (irreversible) stays off the agent-tool surface until a per-tool force-approval policy ships");
-        Build(merge).Resolve("git.merge_pr").ShouldBeNull("an ineligible node is never projected onto the fabric");
+        merge.Manifest.IsAgentToolEligible.ShouldBeTrue("git.merge_pr now projects onto the agent-tool surface");
+        merge.Manifest.AlwaysRequiresApproval.ShouldBeTrue("git.merge_pr is irreversible → it must always require a human approval");
+
+        var tool = Build(merge).Resolve("git.merge_pr").ShouldNotBeNull("git.merge_pr now resolves from the registry");
+        tool.IsDestructive.ShouldBeTrue("merging integrates code → a destructive tool");
+        tool.RequiresApproval.ShouldBeTrue("git.merge_pr is destructive → approval-gated by default");
+        tool.AlwaysRequiresApproval.ShouldBeTrue("git.merge_pr can never auto-run — always-approve");
+
+        // THE invariant a future regression must not break: an always-approve merge can never be Allow-ed (auto-run),
+        // not even at the most permissive tier.
+        AgentToolGate.Decide(AgentAutonomyLevel.Unleashed, requiresApproval: true, alwaysRequiresApproval: true)
+            .ShouldBe(AgentToolGateDecision.RequireApproval, "git.merge_pr at Unleashed escalates to RequireApproval — never Allow");
     }
 
     [Fact]
