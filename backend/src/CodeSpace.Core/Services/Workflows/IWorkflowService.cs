@@ -44,6 +44,21 @@ public interface IWorkflowService
     /// </summary>
     Task<bool> ApproveRunAsync(Guid runId, Guid teamId, Guid actorUserId, bool approved, string? comment, CancellationToken cancellationToken);
 
+    /// <summary>
+    /// Operator-triggered cancel: CAS the run from any non-terminal state (Pending/Enqueued/Running/Suspended)
+    /// → <c>Cancelled</c>, then tear the whole thing down — mark its still-pending waits Cancelled, KILL-WAVE its
+    /// branch agent runs (Queued via <c>CancelQueuedAsync</c>, Running via <c>CancelRunningAsync</c> + a durable
+    /// process kill), and cancel its staged non-terminal sub-workflow children — and emit a <c>run.cancelled</c>
+    /// ledger record. The teardown is best-effort, so one failed kill never aborts the cancel; the reconciler's
+    /// parent-run-terminal guard re-cleans anything missed.
+    ///
+    /// <para>TEAM-SCOPED + fail-closed: returns <c>null</c> when the run isn't <paramref name="teamId"/>'s (a
+    /// foreign id leaks neither existence nor a spurious success). An already-terminal run is an idempotent no-op
+    /// — the returned <c>CancelRunOutcome</c> reports <c>Cancelled=false</c> with the run's existing terminal
+    /// status. Does NOT change the host-driven <c>OperationCanceledException</c> path the engine already has.</para>
+    /// </summary>
+    Task<CancelRunOutcome?> CancelRunAsync(Guid runId, Guid teamId, CancellationToken cancellationToken);
+
     IReadOnlyList<NodeManifestDto> ListNodeManifests();
 
     /// <summary>
