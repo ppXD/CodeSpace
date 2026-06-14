@@ -88,6 +88,7 @@ public class DbUpRunnerTests
     [InlineData("idx_tool_call_ledger_team_created", "0049_tool_call_ledger.sql")]            // team-scoped audit read, newest first
     [InlineData("idx_tool_call_ledger_approval_token", "0049_tool_call_ledger.sql")]          // respond path locates a parked approval by its server-side token
     [InlineData("idx_tool_call_ledger_due_approvals", "0051_tool_call_ledger_due_approvals_index.sql")] // D3 reaper: partial index matching its undecided-past-deadline predicate (no full-table scan)
+    [InlineData("idx_agent_run_inflight", "0052_agent_run_inflight_index.sql")]                          // D4a admission gate: partial (team_id) WHERE status IN ('Queued','Running') — serves both the team-scoped + global in-flight counts on the hot creation path
     public async Task Index_exists_after_migration(string indexName, string addedBy)
     {
         var exists = await IndexExistsAsync(indexName).ConfigureAwait(false);

@@ -2470,6 +2470,13 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
                 {
                     return await FinalizeFailureAsync(exec, ex.Message, cancellationToken).ConfigureAwait(false);
                 }
+                catch (AgentRunAdmissionException ex)
+                {
+                    // The fail-closed admission cap refused this agent run at staging — a clean node failure (like a
+                    // failed sub-workflow start), so the agent.code node routes to its error edge and, inside a map
+                    // branch, the map's continue-on-error / terminate policy applies. NOT a crash, NOT a leaked wait.
+                    return await FinalizeFailureAsync(exec, ex.Message, cancellationToken).ConfigureAwait(false);
+                }
             }
 
             // Success / Skipped — persist + compute the effects to merge into scope/state, advance.

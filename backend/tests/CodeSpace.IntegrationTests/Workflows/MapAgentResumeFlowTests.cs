@@ -228,6 +228,59 @@ public class MapAgentResumeFlowTests
         }
     }
 
+    [Fact]
+    public async Task A_map_fan_out_exceeding_the_per_team_cap_surfaces_over_cap_branches_as_clean_failures_while_sub_cap_branches_run()
+    {
+        // THE D4a end-to-end honesty check: a flow.map fans out MORE agent.code branches than the per-team
+        // in-flight cap allows. The over-cap branches must FAIL CLEANLY (the admission rejection wrapped into a
+        // node failure, routed via the map's continue-on-error) — NOT crash the run — while the sub-cap branch
+        // legitimately parks its real AgentRun. Sequential branch staging (maxParallelism 1) + cap 1 makes the
+        // first branch the admitted one and the rest over-cap, deterministically.
+        using var caps = WithCaps(perTeam: 1, global: 1000);
+
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var workflowId = await CreateWorkflowAsync(teamId, userId, SequentialContinueMapOverAgentCodeDefinition());
+        // Three elements → three branches; only one fits under the per-team cap of 1.
+        var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId, payloadJson: """{ "things": ["a", "b", "c"] }""");
+
+        var jobClient = ResolveJobClient();
+        jobClient.Clear();
+        jobClient.AutoExecute = false;
+
+        try
+        {
+            await RunEngineAsync(runId);
+
+            using var verify = _fixture.BeginScope();
+            var db = verify.Resolve<CodeSpaceDbContext>();
+
+            // The run did NOT crash — it suspended on the ONE admitted branch's real AgentRun wait.
+            (await db.WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == runId)).Status
+                .ShouldBe(WorkflowRunStatus.Suspended, "the sub-cap branch parks its wait; the over-cap branches fail cleanly without crashing the run");
+
+            // Exactly ONE branch was admitted → exactly ONE AgentRun row + ONE Pending agent-run wait.
+            var inflight = await db.AgentRun.AsNoTracking()
+                .CountAsync(r => r.TeamId == teamId && (r.Status == AgentRunStatus.Queued || r.Status == AgentRunStatus.Running));
+            inflight.ShouldBe(1, "only the first (sub-cap) branch staged a real AgentRun; the over-cap branches were refused pre-persist");
+
+            var agentWaits = await db.WorkflowRunWait.AsNoTracking()
+                .CountAsync(w => w.RunId == runId && w.WaitKind == WorkflowWaitKinds.AgentRun && w.Status == WorkflowWaitStatuses.Pending);
+            agentWaits.ShouldBe(1, "exactly the admitted branch parked an agent-run wait — no leaked waits for the rejected branches");
+
+            // The two over-cap branches are recorded as FAILED body nodes (clean node.failed, not a thrown crash),
+            // each carrying the admission message naming the cap's env var so an operator knows how to raise it.
+            var failedBranchNodes = await db.WorkflowRunNode.AsNoTracking()
+                .Where(n => n.RunId == runId && n.NodeId == "agent" && n.Status == NodeStatus.Failure)
+                .ToListAsync();
+            failedBranchNodes.Count.ShouldBe(2, "the two over-cap branches each failed cleanly as a node.failed record");
+            failedBranchNodes.ShouldAllBe(n => n.Error != null && n.Error.Contains(AdmissionController.MaxInflightPerTeamEnvVar));
+        }
+        finally
+        {
+            jobClient.AutoExecute = true;
+        }
+    }
+
     // ─── Helpers ────────────────────────────────────────────────────────────────
 
     private static async Task<Core.Persistence.Entities.WorkflowRunNode> MapNodeAsync(CodeSpaceDbContext db, Guid runId) =>
@@ -311,6 +364,53 @@ public class MapAgentResumeFlowTests
         using var scope = _fixture.BeginScope();
         return scope.Resolve<InMemoryBackgroundJobClient>();
     }
+
+    /// <summary>Pin the in-flight caps for one test via the env overrides; restores the prior values on Dispose so the shared-process env stays isolated.</summary>
+    private static IDisposable WithCaps(int perTeam, int global) => new CapOverride(perTeam, global);
+
+    private sealed class CapOverride : IDisposable
+    {
+        private readonly string? _perTeam = Environment.GetEnvironmentVariable(AdmissionController.MaxInflightPerTeamEnvVar);
+        private readonly string? _global = Environment.GetEnvironmentVariable(AdmissionController.MaxInflightGlobalEnvVar);
+
+        public CapOverride(int perTeam, int global)
+        {
+            Environment.SetEnvironmentVariable(AdmissionController.MaxInflightPerTeamEnvVar, perTeam.ToString());
+            Environment.SetEnvironmentVariable(AdmissionController.MaxInflightGlobalEnvVar, global.ToString());
+        }
+
+        public void Dispose()
+        {
+            Environment.SetEnvironmentVariable(AdmissionController.MaxInflightPerTeamEnvVar, _perTeam);
+            Environment.SetEnvironmentVariable(AdmissionController.MaxInflightGlobalEnvVar, _global);
+        }
+    }
+
+    // Like MapOverAgentCodeDefinition but maxParallelism=1 (branches stage SEQUENTIALLY, so the cap admits the
+    // first branch and refuses the rest deterministically) + errorHandling=continue (a rejected over-cap branch
+    // is a clean failure marker, NOT a map-terminating crash — so the admitted branch still parks its wait).
+    private static WorkflowDefinition SequentialContinueMapOverAgentCodeDefinition() => new()
+    {
+        SchemaVersion = 1,
+        Nodes = new List<NodeDefinition>
+        {
+            new() { Id = "start", TypeKey = "trigger.manual", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
+            new() { Id = "map", TypeKey = "flow.map", Config = WorkflowsTestSeed.Json("""{ "maxParallelism": 1, "errorHandling": "continue" }"""),
+                    Inputs = WorkflowsTestSeed.Json("""{ "items": "{{trigger.things}}" }""") },
+            new() { Id = "ms", TypeKey = "flow.map_start", ParentId = "map", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
+            new() { Id = "agent", TypeKey = "agent.code", ParentId = "map",
+                    Config = WorkflowsTestSeed.Json("""{"goal":"Work on {{item}}","harness":"codex-cli","model":"gpt-5.3-codex","runnerKind":"local","readOnly":true}"""),
+                    Inputs = WorkflowsTestSeed.EmptyJson() },
+            new() { Id = "end", TypeKey = "builtin.terminal", Config = WorkflowsTestSeed.EmptyJson(),
+                    Inputs = WorkflowsTestSeed.Json("""{ "count": "{{nodes.map.outputs.count}}" }""") },
+        },
+        Edges = new List<EdgeDefinition>
+        {
+            new() { From = "start", To = "map" },
+            new() { From = "map", To = "end" },
+            new() { From = "ms", To = "agent" },
+        },
+    };
 
     // manual → map(items={{trigger.things}}; body: ms → agent[REAL agent.code, read-only, analysis-only]) → synthesizer.
     // Each branch's agent.code parks a real AgentRun wait; on resume its { summary } reduces into results[i].

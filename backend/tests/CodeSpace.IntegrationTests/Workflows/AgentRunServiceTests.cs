@@ -322,6 +322,140 @@ public class AgentRunServiceTests
         }
     }
 
+    [Fact]
+    public async Task CreateAsync_rejects_the_run_that_would_breach_the_per_team_cap()
+    {
+        // The D4a chokepoint over real Postgres: with the per-team cap pinned to 2 (via the env override), seed
+        // 2 in-flight runs for the team, then the 3rd CreateAsync must throw AgentRunAdmissionException —
+        // fail-closed BEFORE the row is persisted.
+        using var caps = WithCaps(perTeam: 2, global: 1000);
+
+        var teamId = await SeedTeamAsync();
+
+        await SeedInflightRunsAsync(teamId, queued: 1, running: 1);   // 2 in flight → AT the cap
+
+        using var scope = _fixture.BeginScope();
+        var svc = scope.Resolve<IAgentRunService>();
+
+        var ex = await Should.ThrowAsync<AgentRunAdmissionException>(() =>
+            svc.CreateAsync(BuildTask(), teamId, null, null, CancellationToken.None));
+
+        ex.Message.ShouldContain(AdmissionController.MaxInflightPerTeamEnvVar);   // names the env var to raise
+
+        // The rejected run never touched the table — still exactly the 2 we seeded.
+        (await CountInflightForTeamAsync(teamId)).ShouldBe(2, "the over-cap run was refused pre-persist, not inserted");
+    }
+
+    [Fact]
+    public async Task CreateAsync_admits_a_run_while_under_the_per_team_cap()
+    {
+        using var caps = WithCaps(perTeam: 5, global: 1000);
+
+        var teamId = await SeedTeamAsync();
+
+        await SeedInflightRunsAsync(teamId, queued: 2, running: 1);   // 3 in flight, cap 5 → headroom
+
+        using var scope = _fixture.BeginScope();
+        var run = await scope.Resolve<IAgentRunService>().CreateAsync(BuildTask(), teamId, null, null, CancellationToken.None);
+
+        run.Status.ShouldBe(AgentRunStatus.Queued, "a sub-cap run is admitted + persisted Queued");
+        (await CountInflightForTeamAsync(teamId)).ShouldBe(4);
+    }
+
+    [Fact]
+    public async Task The_per_team_cap_isolates_teams_a_full_team_does_not_block_a_different_team()
+    {
+        // Per-team isolation: one team being AT its cap must not starve another team — the cap counts only the
+        // requesting team's in-flight runs.
+        using var caps = WithCaps(perTeam: 2, global: 1000);
+
+        var fullTeam = await SeedTeamAsync();
+        var otherTeam = await SeedTeamAsync();
+
+        await SeedInflightRunsAsync(fullTeam, queued: 1, running: 1);   // fullTeam is AT its cap
+        await SeedInflightRunsAsync(otherTeam, queued: 1, running: 0);  // otherTeam has plenty of headroom
+
+        using var scope = _fixture.BeginScope();
+        var svc = scope.Resolve<IAgentRunService>();
+
+        await Should.ThrowAsync<AgentRunAdmissionException>(() =>
+            svc.CreateAsync(BuildTask(), fullTeam, null, null, CancellationToken.None));
+
+        // The OTHER team, well under its own cap, is admitted normally despite the first team being full.
+        var run = await svc.CreateAsync(BuildTask(), otherTeam, null, null, CancellationToken.None);
+        run.Status.ShouldBe(AgentRunStatus.Queued, "a different team under its own cap is unaffected by a full team");
+    }
+
+    [Fact]
+    public async Task The_global_cap_trips_across_teams_even_when_each_team_is_under_its_own_cap()
+    {
+        // The deployment-wide ceiling: spread the in-flight runs across two teams so NEITHER is at its per-team
+        // cap, but TOGETHER they hit the global cap — the next create (for a third team well under its own cap)
+        // is still refused by the global gate.
+        using var caps = WithCaps(perTeam: 100, global: 3);
+
+        var teamA = await SeedTeamAsync();
+        var teamB = await SeedTeamAsync();
+        var teamC = await SeedTeamAsync();
+
+        await SeedInflightRunsAsync(teamA, queued: 1, running: 1);   // 2
+        await SeedInflightRunsAsync(teamB, queued: 1, running: 0);   // +1 = 3 global → AT the global cap
+
+        using var scope = _fixture.BeginScope();
+        var svc = scope.Resolve<IAgentRunService>();
+
+        var ex = await Should.ThrowAsync<AgentRunAdmissionException>(() =>
+            svc.CreateAsync(BuildTask(), teamC, null, null, CancellationToken.None));
+
+        ex.Message.ShouldContain(AdmissionController.MaxInflightGlobalEnvVar, customMessage: "the global gate, not the per-team gate, is the binding limit here");
+    }
+
+    // ─── Admission helpers ──────────────────────────────────────────────────────
+
+    /// <summary>Pin the in-flight caps for one test via the env overrides; restores the prior values on Dispose so the shared-process env stays isolated (mirrors AdmissionControllerTests).</summary>
+    private static IDisposable WithCaps(int perTeam, int global) => new CapOverride(perTeam, global);
+
+    private sealed class CapOverride : IDisposable
+    {
+        private readonly string? _perTeam = Environment.GetEnvironmentVariable(AdmissionController.MaxInflightPerTeamEnvVar);
+        private readonly string? _global = Environment.GetEnvironmentVariable(AdmissionController.MaxInflightGlobalEnvVar);
+
+        public CapOverride(int perTeam, int global)
+        {
+            Environment.SetEnvironmentVariable(AdmissionController.MaxInflightPerTeamEnvVar, perTeam.ToString());
+            Environment.SetEnvironmentVariable(AdmissionController.MaxInflightGlobalEnvVar, global.ToString());
+        }
+
+        public void Dispose()
+        {
+            Environment.SetEnvironmentVariable(AdmissionController.MaxInflightPerTeamEnvVar, _perTeam);
+            Environment.SetEnvironmentVariable(AdmissionController.MaxInflightGlobalEnvVar, _global);
+        }
+    }
+
+    // Insert raw in-flight (Queued/Running) AgentRun rows directly — bypassing CreateAsync (the gate under test),
+    // so the seed itself is never refused. The whole-test isolation comes from each team being a fresh GUID.
+    private async Task SeedInflightRunsAsync(Guid teamId, int queued, int running)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+
+        for (var i = 0; i < queued; i++)
+            db.AgentRun.Add(new AgentRun { Id = Guid.NewGuid(), TeamId = teamId, Harness = "codex-cli", Status = AgentRunStatus.Queued, TaskJson = "{}" });
+
+        for (var i = 0; i < running; i++)
+            db.AgentRun.Add(new AgentRun { Id = Guid.NewGuid(), TeamId = teamId, Harness = "codex-cli", Status = AgentRunStatus.Running, TaskJson = "{}" });
+
+        await db.SaveChangesAsync();
+    }
+
+    private async Task<int> CountInflightForTeamAsync(Guid teamId)
+    {
+        using var scope = _fixture.BeginScope();
+        return await scope.Resolve<CodeSpaceDbContext>().AgentRun.AsNoTracking()
+            .CountAsync(r => r.TeamId == teamId && (r.Status == AgentRunStatus.Queued || r.Status == AgentRunStatus.Running));
+    }
+
     private static AgentTask BuildTask(string goal = "Fix the failing billing tests") =>
         new() { Goal = goal, Harness = "codex-cli", Model = "gpt-5.3-codex" };
 
