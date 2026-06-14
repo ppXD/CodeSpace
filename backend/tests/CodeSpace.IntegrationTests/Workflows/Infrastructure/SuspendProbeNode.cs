@@ -61,6 +61,7 @@ public sealed class SuspendProbeNode : INodeRuntime
     {
         var key = ReadString(context.Inputs, "key");
         var element = ReadString(context.Inputs, "item");
+        var boom = ReadString(context.Inputs, "boom");
 
         // Resumed pass: a wait resolved + injected its payload. Echo the element + the resolved summary.
         if (context.ResumePayload.HasValue)
@@ -71,6 +72,15 @@ public sealed class SuspendProbeNode : INodeRuntime
                 ["summary"] = ReadOr(context.ResumePayload.Value, "summary", JsonSerializer.SerializeToElement("")),
             };
             return Task.FromResult(NodeResult.Ok(outputs));
+        }
+
+        // Boom element: count the pass (so a test can assert exactly-once on the FAILING branch too) + FAIL —
+        // the abandon point for a continue-mode map. A sibling-triggered re-walk that re-ran this would bump
+        // the count past 1, re-firing the (here, just-counted) side effect.
+        if (boom.Length > 0 && element == boom)
+        {
+            FirstPassCountByElement.AddOrUpdate($"{key}::{element}", 1, (_, n) => n + 1);
+            return Task.FromResult(NodeResult.Fail($"boom on element '{element}'"));
         }
 
         // First pass: count it (exactly-once probe) + park an Action wait. The correlation token embeds the
