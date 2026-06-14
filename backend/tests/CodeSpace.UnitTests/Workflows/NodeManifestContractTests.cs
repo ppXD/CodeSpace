@@ -313,10 +313,10 @@ public class NodeManifestContractTests
 
     // ─── CanSuspend marker contract ─────────────────────────────────────────────
     //
-    // CanSuspend marks a node TYPE whose RunAsync can park the run on a durable wait. The flow.map validator
-    // reads it to reject a suspending node in a (PR1, synchronous) map body — so a flip in either direction
-    // (a new wait node forgetting to set it, or a synchronous node setting it by mistake) is a review-visible
-    // failure here rather than a silent run-time leak (committed wait row behind an unresumable map).
+    // CanSuspend marks a node TYPE whose RunAsync can park the run on a durable wait. Such a node is a
+    // first-class flow.map body element (each branch parks its own wait, the map suspends until all resolve),
+    // and is never IsAgentToolEligible (the synchronous-tool gate). So a flip in either direction (a new wait
+    // node forgetting to set it, or a synchronous node setting it by mistake) is a review-visible failure here.
 
     [Fact]
     public void Suspending_nodes_declare_CanSuspend_true()
@@ -335,8 +335,8 @@ public class NodeManifestContractTests
     [Fact]
     public void Synchronous_nodes_declare_CanSuspend_false()
     {
-        // Pure / read-only / synchronous-side-effecting nodes never park — they must leave CanSuspend false,
-        // or the validator would wrongly reject them inside a flow.map body.
+        // Pure / read-only / synchronous-side-effecting nodes never park — they must leave CanSuspend false
+        // so they stay eligible for the synchronous agent-tool surface (the IsAgentToolEligible complement).
         new TriggerManualNode().Manifest.CanSuspend.ShouldBeFalse("a trigger never suspends");
         new TerminalNode().Manifest.CanSuspend.ShouldBeFalse("a terminal never suspends");
         new LogicMergeNode().Manifest.CanSuspend.ShouldBeFalse("logic.merge runs synchronously");
