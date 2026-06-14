@@ -467,6 +467,94 @@ public class MapDurableResumeFlowTests
             .ShouldBe(WorkflowRunStatus.Success, "single-wait resume reaches Success identically to before the reorder");
     }
 
+    [Fact]
+    public async Task A_nested_map_in_map_resumes_in_scrambled_leaf_order_with_exactly_once_and_ordered_nested_reduce()
+    {
+        // (k) GAP-3 — NESTED map-in-map durable resume (the one resume path the single-level cases above never
+        // exercise). An OUTER flow.map fans over ["o0","o1"]; each outer branch body is itself an INNER flow.map
+        // fanning over ["{{item}}::j0","{{item}}::j1"], whose body node SUSPENDS. So four leaf waits park, keyed
+        // "outer#i/inner#j". We resolve them in a SCRAMBLED order that interleaves across outer branches —
+        // o0/inner1, o1/inner0, o0/inner0, o1/inner1 — never natural order. The two latent-correctness pins:
+        //   (b) EXACTLY-ONCE — each leaf's suspending pass ran once and resumed once (FirstPassCount == 1 per
+        //       leaf across every sibling-triggered re-walk); no settled outer/inner branch re-ran;
+        //   (c) ORDERED NESTED REDUCE — outer results land in OUTER element order and each outer[i]'s inner
+        //       results land in INNER element order, REGARDLESS of the scrambled resolve order. Each leaf echoes
+        //       its own element ("o0::j1" …) + its own resolved payload, so a misplaced [i][j] slot is visible.
+        var key = "sp-" + Guid.NewGuid().ToString("N");
+        SuspendProbeNode.Reset(key);
+
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var workflowId = await CreateWorkflowAsync(teamId, userId, NestedSuspendingMapDefinition(key));
+        var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId, payloadJson: """{ "things": ["o0", "o1"] }""");
+
+        await RunEngineAsync(runId);
+
+        // All four leaves park. The run is Suspended with four Pending waits, one per "outer#i/inner#j" leaf.
+        var leaves = new[] { "o0::j0", "o0::j1", "o1::j0", "o1::j1" };
+        using (var parked = _fixture.BeginScope())
+        {
+            var db = parked.Resolve<CodeSpaceDbContext>();
+            (await db.WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == runId)).Status.ShouldBe(WorkflowRunStatus.Suspended);
+            (await db.WorkflowRunWait.AsNoTracking().CountAsync(w => w.RunId == runId && w.Status == WorkflowWaitStatuses.Pending))
+                .ShouldBe(4, "2 outer branches × 2 inner branches = 4 leaf waits, each under 'outer#i/inner#j'");
+            // Each leaf wait is keyed to its nested iteration key — the engine's outer#i/inner#j attribution.
+            var keys = await db.WorkflowRunWait.AsNoTracking().Where(w => w.RunId == runId).Select(w => w.IterationKey).ToListAsync();
+            keys.OrderBy(k => k).ShouldBe(new[] { "outer#0/inner#0", "outer#0/inner#1", "outer#1/inner#0", "outer#1/inner#1" });
+        }
+
+        foreach (var leaf in leaves)
+            SuspendProbeNode.FirstPassCount(key, leaf).ShouldBe(1, $"leaf '{leaf}' parked exactly once on the first walk");
+
+        // SCRAMBLED resolve order — interleave across outer branches, never natural order. Each non-final resolve
+        // keeps the run Suspended (siblings still parked → the wait-for-all barrier holds); the last re-dispatches.
+        (await ResolveBranchAsync(runId, key, "o0::j1", "R-o0j1")).ShouldBeTrue();
+        await AssertSuspendedAsync(runId, "three leaves still pending after the first scrambled resolve");
+
+        (await ResolveBranchAsync(runId, key, "o1::j0", "R-o1j0")).ShouldBeTrue();
+        await AssertSuspendedAsync(runId, "two leaves still pending after the second scrambled resolve");
+
+        (await ResolveBranchAsync(runId, key, "o0::j0", "R-o0j0")).ShouldBeTrue();
+        await AssertSuspendedAsync(runId, "one leaf still pending after the third scrambled resolve");
+
+        (await ResolveBranchAsync(runId, key, "o1::j1", "R-o1j1")).ShouldBeTrue();   // the LAST → re-dispatch
+        await RunEngineAsync(runId);
+
+        using var done = _fixture.BeginScope();
+        var fdb = done.Resolve<CodeSpaceDbContext>();
+        (await fdb.WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == runId)).Status.ShouldBe(WorkflowRunStatus.Success);
+
+        // EXACTLY-ONCE: every leaf's suspending pass ran exactly once across the whole multi-resume sequence —
+        // no settled outer branch (and no settled inner branch within it) re-ran on a sibling-triggered re-walk.
+        foreach (var leaf in leaves)
+            SuspendProbeNode.FirstPassCount(key, leaf).ShouldBe(1,
+                $"leaf '{leaf}' ran its suspending pass once — no nested branch re-dispatched on any scrambled re-walk");
+
+        // ORDERED NESTED REDUCE: outer[i].results is the inner reduced array; assert the EXACT [i][j] structure.
+        // outer is element order (o0, o1); each inner is element order (j0, j1) — NOT the scrambled resolve order.
+        var outerNode = await fdb.WorkflowRunNode.AsNoTracking().SingleAsync(n => n.RunId == runId && n.NodeId == "outer" && n.IterationKey == "");
+        var outerOutputs = JsonDocument.Parse(outerNode.OutputsJson).RootElement;
+        outerOutputs.GetProperty("count").GetInt32().ShouldBe(2, "two outer branches reduced");
+
+        var outer = outerOutputs.GetProperty("results");
+        outer.GetArrayLength().ShouldBe(2);
+
+        // outer[0] is branch o0 — its inner reduced array, element-ordered j0 then j1, each echoing its own leaf.
+        var o0Inner = outer[0].GetProperty("results");
+        o0Inner.GetArrayLength().ShouldBe(2);
+        o0Inner[0].GetProperty("item").GetString().ShouldBe("o0::j0");
+        o0Inner[0].GetProperty("summary").GetString().ShouldBe("R-o0j0");
+        o0Inner[1].GetProperty("item").GetString().ShouldBe("o0::j1");
+        o0Inner[1].GetProperty("summary").GetString().ShouldBe("R-o0j1");
+
+        // outer[1] is branch o1 — likewise element-ordered j0 then j1, regardless of when each leaf resolved.
+        var o1Inner = outer[1].GetProperty("results");
+        o1Inner.GetArrayLength().ShouldBe(2);
+        o1Inner[0].GetProperty("item").GetString().ShouldBe("o1::j0");
+        o1Inner[0].GetProperty("summary").GetString().ShouldBe("R-o1j0");
+        o1Inner[1].GetProperty("item").GetString().ShouldBe("o1::j1");
+        o1Inner[1].GetProperty("summary").GetString().ShouldBe("R-o1j1");
+    }
+
     // ─── Helpers ────────────────────────────────────────────────────────────────
 
     // Resolve ONE branch's Action wait via ResumeByActionTokenAsync — the human-click path that funnels into
@@ -559,6 +647,43 @@ public class MapDurableResumeFlowTests
             new() { From = "start", To = "map" },
             new() { From = "map", To = "end" },
             new() { From = "ms", To = "leaf" },
+        },
+    };
+
+    // NESTED map-in-map (GAP-3). manual → OUTER flow.map(items={{trigger.things}}; body: mso → INNER flow.map →
+    // outerTerm) → end. The inner map's items are "{{item}}::j0"/"{{item}}::j1" — resolved in the OUTER branch
+    // scope, so each carries the outer element (o0 → ["o0::j0","o0::j1"]). The inner body is mst → leaf
+    // [SuspendProbe item={{item}}], where leaf is the inner body terminal (it echoes {item,summary} on resume),
+    // so inner results[j] = that leaf's resolved result. outerTerm is a JsonEmitNode echoing the inner map's
+    // reduced array, so outer results[i] = { results: [innerArray] } — the engine's outer#i/inner#j attribution
+    // gives the [i][j] nested shape. A map body's terminal must produce SCOPE outputs (a builtin.terminal would
+    // not — its inputs become run outputs, not nodes.<id>.outputs), so JsonEmitNode is the outer body terminal.
+    private static WorkflowDefinition NestedSuspendingMapDefinition(string key) => new()
+    {
+        SchemaVersion = 1,
+        Nodes = new List<NodeDefinition>
+        {
+            new() { Id = "start", TypeKey = "trigger.manual", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
+            new() { Id = "outer", TypeKey = "flow.map", Config = WorkflowsTestSeed.EmptyJson(),
+                    Inputs = WorkflowsTestSeed.Json("""{ "items": "{{trigger.things}}" }""") },
+            new() { Id = "mso", TypeKey = "flow.map_start", ParentId = "outer", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
+            new() { Id = "inner", TypeKey = "flow.map", ParentId = "outer", Config = WorkflowsTestSeed.EmptyJson(),
+                    Inputs = WorkflowsTestSeed.Json("""{ "items": [ "{{item}}::j0", "{{item}}::j1" ] }""") },
+            new() { Id = "mst", TypeKey = "flow.map_start", ParentId = "inner", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
+            new() { Id = "leaf", TypeKey = SuspendProbeNode.Key, ParentId = "inner", Config = WorkflowsTestSeed.EmptyJson(),
+                    Inputs = WorkflowsTestSeed.Json("""{ "key": "__KEY__", "item": "{{item}}" }""".Replace("__KEY__", key)) },
+            new() { Id = "outerTerm", TypeKey = JsonEmitNode.Key, ParentId = "outer", Config = WorkflowsTestSeed.EmptyJson(),
+                    Inputs = WorkflowsTestSeed.Json("""{ "results": "{{nodes.inner.outputs.results}}" }""") },
+            new() { Id = "end", TypeKey = "builtin.terminal", Config = WorkflowsTestSeed.EmptyJson(),
+                    Inputs = WorkflowsTestSeed.Json("""{ "count": "{{nodes.outer.outputs.count}}" }""") },
+        },
+        Edges = new List<EdgeDefinition>
+        {
+            new() { From = "start", To = "outer" },
+            new() { From = "outer", To = "end" },
+            new() { From = "mso", To = "inner" },        // outer body: start → inner map → outer terminal
+            new() { From = "inner", To = "outerTerm" },
+            new() { From = "mst", To = "leaf" },          // inner body: start → suspending leaf (the inner terminal)
         },
     };
 
