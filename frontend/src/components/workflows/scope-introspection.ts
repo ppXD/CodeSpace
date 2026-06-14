@@ -229,12 +229,21 @@ export function introspectScope({ definition, currentNodeId, manifestByType, wor
     });
   }
 
-  // 6. Iteration scope — only meaningful when the current node sits downstream of a
-  //    flow.iterate. We test this by checking whether ANY upstream node is iterate.
-  const currentIsInIterationContext = Array.from(upstream).some((id) => {
-    const n = definition.nodes.find((x) => x.id === id);
-    return n?.typeKey === "flow.iterate";
-  }) || (currentNodeId != null && definition.nodes.find((n) => n.id === currentNodeId)?.typeKey === "flow.iterate");
+  // 6. Iteration scope — bare {{item}} / {{index}} resolve through NodeRunScope.Iteration, which the
+  //    engine seeds in exactly two cases:
+  //      a) flow.iterate exposes them to its DOWNSTREAM nodes (the per-item template scope), so a node
+  //         downstream of (or being) a flow.iterate is in context.
+  //      b) flow.map seeds a FRESH {item, index} per branch (BuildMapBranchScope), so every node in a
+  //         map BODY (parented — directly or transitively — under a flow.map) is in context. Crucially
+  //         this is the FIXED-name scope: a flow.loop body alone uses {{loop.<name>}} / {{loop.index}}
+  //         and does NOT seed bare item/index — but a loop (or try) body nested INSIDE a map inherits
+  //         the enclosing map's Iteration (BuildLoopScope passes outer.Iteration through), so walking the
+  //         parentId chain to any flow.map ancestor is the precise test and keeps the loop-inside-map
+  //         body covered while never leaking to an unrelated top-level node.
+  const currentIsInIterationContext =
+    Array.from(upstream).some((id) => definition.nodes.find((x) => x.id === id)?.typeKey === "flow.iterate") ||
+    (currentNodeId != null && definition.nodes.find((n) => n.id === currentNodeId)?.typeKey === "flow.iterate") ||
+    (currentNodeId != null && isInsideMapBody(definition, currentNodeId));
 
   if (currentIsInIterationContext) {
     suggestions.push(
@@ -280,6 +289,27 @@ function collectErrorSources(definition: WorkflowDefinition, currentNodeId: stri
     if (e.to === currentNodeId || ancestors.has(e.to)) sources.add(e.from);
   }
   return sources;
+}
+
+/**
+ * True when a node lives inside a flow.map body — i.e. some ancestor up its `parentId` chain is a
+ * flow.map node. Walking the whole chain (not just the direct parent) covers a node nested deeper —
+ * inside a flow.loop / flow.try body that is itself inside a map — because that body inherits the
+ * enclosing map's Iteration scope, so bare {{item}} / {{index}} genuinely resolve there. A guard
+ * against a malformed parentId cycle caps the walk at the node count.
+ */
+function isInsideMapBody(definition: WorkflowDefinition, nodeId: string): boolean {
+  const byId = new Map(definition.nodes.map((n) => [n.id, n]));
+
+  let parent = byId.get(nodeId)?.parentId ?? null;
+  const seen = new Set<string>();
+  while (parent && !seen.has(parent)) {
+    seen.add(parent);
+    const p = byId.get(parent);
+    if (p?.typeKey === "flow.map") return true;
+    parent = p?.parentId ?? null;
+  }
+  return false;
 }
 
 /** BFS backwards from a node along incoming edges. Returns ids of every ancestor. */

@@ -148,3 +148,85 @@ describe("introspectScope — wait_action surfaces the post_message action keys"
     expect(paths).toContain("nodes.wait.outputs.values");
   });
 });
+
+/**
+ * {{item}} / {{index}} discoverability. The engine seeds NodeRunScope.Iteration in two cases the picker
+ * must surface: (a) DOWNSTREAM of a flow.iterate; (b) inside a flow.map BODY (BuildMapBranchScope seeds a
+ * fresh {item,index} per branch). A loop body nested INSIDE a map inherits the map's Iteration through
+ * BuildLoopScope, so it's covered too — but a TOP-LEVEL loop body (which reads {{loop.*}}, not bare
+ * item/index) and an unrelated top-level node must NOT get them.
+ */
+describe("introspectScope — {{item}} / {{index}} in a map body", () => {
+  const mbt = new Map<string, NodeManifestDto>([
+    ["trigger.x", manifest("trigger.x", "Trigger")],
+    ["flow.map", manifest("flow.map", "Map")],
+    ["flow.map_start", manifest("flow.map_start", "Regular")],
+    ["flow.loop", manifest("flow.loop", "Loop")],
+    ["flow.loop_start", manifest("flow.loop_start", "Regular")],
+    ["flow.iterate", manifest("flow.iterate", "Regular", { results: { type: "array" } })],
+    ["regular.a", manifest("regular.a", "Regular", { value: { type: "string" } })],
+  ]);
+
+  // top trigger → mapNode (container) ; map body: mapStart → bodyNode (parentId mapNode)
+  // separately: a top-level loop (loopNode) with loopBody (parentId loopNode), unrelated to the map.
+  const def: WorkflowDefinition = {
+    schemaVersion: 1,
+    nodes: [
+      { id: "trigger", typeKey: "trigger.x", config: {}, inputs: {} },
+      { id: "mapNode", typeKey: "flow.map", config: {}, inputs: {} },
+      { id: "mapStart", typeKey: "flow.map_start", parentId: "mapNode", config: {}, inputs: {} },
+      { id: "bodyNode", typeKey: "regular.a", parentId: "mapNode", config: {}, inputs: {} },
+      { id: "loopNode", typeKey: "flow.loop", config: {}, inputs: {} },
+      { id: "loopBody", typeKey: "regular.a", parentId: "loopNode", config: {}, inputs: {} },
+      { id: "topPlain", typeKey: "regular.a", config: {}, inputs: {} },
+    ],
+    edges: [
+      { from: "trigger", to: "mapNode" },
+      { from: "mapStart", to: "bodyNode" },
+      { from: "mapNode", to: "topPlain" },
+    ],
+  };
+
+  const itemPaths = (nodeId: string) =>
+    introspectScope({ definition: def, currentNodeId: nodeId, manifestByType: mbt }).filter((s) => s.category === "iteration").map((s) => s.path);
+
+  it("offers {{item}} / {{index}} to a node inside a flow.map body", () => {
+    expect(itemPaths("bodyNode")).toEqual(["item", "index"]);
+  });
+
+  it("offers {{item}} / {{index}} to a node inside a loop body nested under a map (inherits the map's iteration)", () => {
+    const nested: WorkflowDefinition = {
+      ...def,
+      nodes: [
+        ...def.nodes,
+        // a loop whose body sits INSIDE the map body (loop parented to the map; its body parented to the loop)
+        { id: "innerLoop", typeKey: "flow.loop", parentId: "mapNode", config: {}, inputs: {} },
+        { id: "innerLoopBody", typeKey: "regular.a", parentId: "innerLoop", config: {}, inputs: {} },
+      ],
+    };
+    const paths = introspectScope({ definition: nested, currentNodeId: "innerLoopBody", manifestByType: mbt }).filter((s) => s.category === "iteration").map((s) => s.path);
+    expect(paths).toEqual(["item", "index"]);
+  });
+
+  it("does NOT offer {{item}} / {{index}} to a TOP-LEVEL loop body (it reads {{loop.*}}, not bare item/index)", () => {
+    expect(itemPaths("loopBody")).toEqual([]);
+  });
+
+  it("does NOT offer {{item}} / {{index}} to an unrelated top-level node", () => {
+    expect(itemPaths("topPlain")).toEqual([]);
+  });
+
+  it("still offers {{item}} / {{index}} downstream of a flow.iterate (existing behaviour unchanged)", () => {
+    const iterateDef: WorkflowDefinition = {
+      schemaVersion: 1,
+      nodes: [
+        { id: "trigger", typeKey: "trigger.x", config: {}, inputs: {} },
+        { id: "iter", typeKey: "flow.iterate", config: {}, inputs: {} },
+        { id: "after", typeKey: "regular.a", config: {}, inputs: {} },
+      ],
+      edges: [{ from: "trigger", to: "iter" }, { from: "iter", to: "after" }],
+    };
+    const paths = introspectScope({ definition: iterateDef, currentNodeId: "after", manifestByType: mbt }).filter((s) => s.category === "iteration").map((s) => s.path);
+    expect(paths).toEqual(["item", "index"]);
+  });
+});

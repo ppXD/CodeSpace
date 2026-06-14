@@ -10,6 +10,7 @@ import { useResumeRun, useWorkflowRun } from "@/hooks/use-workflows";
 import { AgentRunTimeline } from "./AgentRunTimeline";
 import { AgentToolCalls } from "./AgentToolCalls";
 import { JsonView } from "./JsonView";
+import { branchBadge, groupMapBranches, type MapRollup } from "./mapBranches";
 import { concurrentNodeKeys, runNodeKey } from "./runConcurrency";
 
 /**
@@ -48,6 +49,9 @@ export function RunDetailView({ runId, nested = false, depth = 0, onOpenRun }: {
   // Nodes whose execution overlapped in time — the engine ran them in a parallel wave (top-level or
   // inside a loop body). Badged in the trace so a concurrent run is legible at a glance.
   const concurrent = concurrentNodeKeys(r.nodes);
+  // Per-map element-branch rollups parsed from the engine iteration keys. Empty for a non-map run
+  // (every row has an empty iteration key) — so a non-map run renders exactly as before.
+  const mapRollups = groupMapBranches(r.nodes);
 
   return (
     <div className={nested ? "wf-detail-body wf-detail-body-nested" : "wf-detail-body"}>
@@ -92,6 +96,7 @@ export function RunDetailView({ runId, nested = false, depth = 0, onOpenRun }: {
 
       <section className="wf-section">
         <h2 className="wf-section-h">Node execution</h2>
+        {mapRollups.length > 0 && <MapRollups rollups={mapRollups} />}
         {r.nodes.length === 0 ? (
           <div className="ct-empty">
             <div className="ct-empty-h">No nodes executed yet</div>
@@ -103,6 +108,7 @@ export function RunDetailView({ runId, nested = false, depth = 0, onOpenRun }: {
               <RunNodeRow
                 key={`${n.nodeId}:${n.iterationKey}`}
                 node={n}
+                branch={branchBadge(n.iterationKey)}
                 parallel={concurrent.has(runNodeKey(n))}
                 suppressChildEmbed={n.childRunId === r.pendingWait?.token}
                 depth={depth}
@@ -120,8 +126,10 @@ export function RunDetailView({ runId, nested = false, depth = 0, onOpenRun }: {
  * One node row in the execution trace. Extracted from the trace map so it can observe its agent run's
  * LIVE status (via {@link useAgentRun}) and badge accordingly — a hook can't run inside a `.map`.
  */
-function RunNodeRow({ node: n, parallel, suppressChildEmbed, depth, onOpenRun }: {
+function RunNodeRow({ node: n, branch, parallel, suppressChildEmbed, depth, onOpenRun }: {
   node: WorkflowRunNodeSummary;
+  /** Map-branch badge for this row ("#i", or "#i/#j" nested); "" for a non-map node. */
+  branch: string;
   parallel: boolean;
   suppressChildEmbed: boolean;
   depth: number;
@@ -145,6 +153,11 @@ function RunNodeRow({ node: n, parallel, suppressChildEmbed, depth, onOpenRun }:
           </button>
         ) : (
           <span className="wf-run-node-id">{n.nodeId}</span>
+        )}
+        {/* Element-branch badge — which map element this row belongs to (#i, or #i/#j for a nested
+            map-in-map). Lets K identical body-node rows read as K distinct branches at a glance. */}
+        {branch && (
+          <span className="wf-run-node-branch" title="Map element branch (index per map level)">{branch}</span>
         )}
         {/* For an agent.code node, the raw node status is "Suspended" the whole time the agent is actually
             working (the node parks on its AgentRun wait). Surface the agent run's live status instead so the
@@ -196,6 +209,27 @@ function RunNodeRow({ node: n, parallel, suppressChildEmbed, depth, onOpenRun }:
         <div className="wf-run-node-none">No inputs or outputs recorded.</div>
       )}
     </li>
+  );
+}
+
+/**
+ * Per-map element-branch rollup — one chip per flow.map (or per OUTER-pass of a nested map), showing
+ * how its fan-out is going: total elements observed, how many finished cleanly, how many failed. Derived
+ * from the branch rows' iteration keys, so it's accurate live (as branches settle) and matches the map
+ * node's own `count` / `failed` outputs once the run completes.
+ */
+function MapRollups({ rollups }: { rollups: MapRollup[] }) {
+  return (
+    <div className="wf-map-rollups">
+      {rollups.map((m) => (
+        <div key={`${m.mapId}:${m.branchIndices.join(",")}`} className="wf-map-rollup" title={`Map "${m.mapId}" fanned out ${m.total} element-branch(es)`}>
+          <Ic.Fork size={12} />
+          <span className="wf-map-rollup-id">{m.mapId}</span>
+          <span className="wf-map-rollup-stat">{m.done}/{m.total} done</span>
+          {m.failed > 0 && <span className="wf-map-rollup-failed">{m.failed} failed</span>}
+        </div>
+      ))}
+    </div>
   );
 }
 

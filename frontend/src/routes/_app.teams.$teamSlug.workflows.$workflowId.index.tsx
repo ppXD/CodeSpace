@@ -55,7 +55,7 @@ import { NodeAddContext, type NodeAddRequest } from "@/components/workflows/node
 import { NodeAddMenu } from "@/components/workflows/NodeAddMenu";
 import { nodeIconFor } from "@/components/workflows/nodeIcon";
 import { definitionToRfNodes, fitLoopSizes, LOOP_CONTAINER_W, LOOP_CONTAINER_H } from "@/components/workflows/definitionToRfNodes";
-import { bodyStartTypeKey, CATCH_HANDLE, isBodyStartTypeKey, isContainerKind } from "@/components/workflows/workflowContainers";
+import { bodyStartTypeKey, CATCH_HANDLE, isBodyStartTypeKey, isContainerKind, sameContainerScope } from "@/components/workflows/workflowContainers";
 import { useAlert } from "@/components/dialog";
 import { WorkflowVariablesPanel } from "@/components/workflows/WorkflowVariablesPanel";
 import { RunWorkflowModal } from "@/components/workflows/RunWorkflowModal";
@@ -470,6 +470,9 @@ function Editor({ workflow, manifests, saving, onSave }: EditorProps) {
    *   3. Target is not a Trigger (Triggers have no inputs)
    *   4. Source is not a Terminal (Terminals have no outputs)
    *   5. Adding the edge wouldn't create a cycle (DAG-only)
+   *   6. Both endpoints share the same container scope — no edge may cross a container
+   *      boundary (mirrors DefinitionValidator.CheckNoEdgeCrossesContainerBoundary; the
+   *      engine's SubgraphView silently drops a crossing edge, so it would never fire).
    */
   const isValidConnection = (params: Connection | Edge) => {
     const sourceId = "source" in params ? params.source : null;
@@ -485,6 +488,11 @@ function Editor({ workflow, manifests, saving, onSave }: EditorProps) {
     if (!sourceNode || !targetNode) return false;
     if (targetNode.data.kind === "Trigger") return false;
     if (sourceNode.data.kind === "Terminal") return false;
+
+    // Cross-container guard: a body node connects to the rest of the graph only through its
+    // container node, never directly. Reject a crossing edge live (React Flow renders it as
+    // not-connectable) so the author can't draw a line that only fails at Save.
+    if (!sameContainerScope(parentScope(nodes), sourceId, targetId)) return false;
 
     // Cycle check: would the new edge create source → … → source? Walk forward from
     // the target; if we reach the source, adding the edge closes a loop.
@@ -1040,10 +1048,11 @@ function Editor({ workflow, manifests, saving, onSave }: EditorProps) {
               onRetryChange={(v) => updateRetry(selectedNode.id, v)}
               // Error routing reads/writes the node's `error` edge directly on the edges state.
               errorTarget={errorRouteTarget(edges, selectedNode.id)}
-              // Offer only valid handler targets: not self, not a Trigger, and not one that would
-              // close a cycle (mirrors isValidConnection, so the dropdown can't author a graph the
-              // backend validator would reject at save).
-              errorTargetOptions={nodes.filter((n) => n.id !== selectedNode.id && n.data.kind !== "Trigger" && !createsCycle(selectedNode.id, n.id, edges)).map((n) => ({ id: n.id, label: n.id }))}
+              // Offer only valid handler targets: not self, not a Trigger, in the SAME container scope
+              // (an error edge is just another edge — it can't cross a container boundary either), and
+              // not one that would close a cycle (mirrors isValidConnection, so the dropdown can't author
+              // a graph the backend validator would reject at save).
+              errorTargetOptions={nodes.filter((n) => n.id !== selectedNode.id && n.data.kind !== "Trigger" && sameContainerScope(parentScope(nodes), selectedNode.id, n.id) && !createsCycle(selectedNode.id, n.id, edges)).map((n) => ({ id: n.id, label: n.id }))}
               onErrorRouteChange={(targetId) => { setEdges((eds) => setErrorRoute(eds, selectedNode.id, targetId)); setUnsaved(true); }}
             />
           )}
@@ -1636,4 +1645,10 @@ function createsCycle(source: string, target: string, edges: Edge[]): boolean {
   }
 
   return false;
+}
+
+/** Map every React Flow node id to its container owner (`parentId`; undefined = top-level) — the
+ *  ownerByNodeId the cross-container connection rule (sameContainerScope) reads. */
+function parentScope(nodes: Node<WorkflowNodeData>[]): Map<string, string | null | undefined> {
+  return new Map(nodes.map((n) => [n.id, n.parentId]));
 }

@@ -1777,11 +1777,27 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
 
     /// <summary>
     /// Build a per-element branch scope: the outer read-side buckets (incl. Projects + SecretPaths) plus
-    /// the Iteration slot set to <c>{{item}}</c> (the element) + <c>{{index}}</c> — mirroring
+    /// the Iteration slot set to a FRESH <c>{{item}}</c> (the element) + <c>{{index}}</c> — mirroring
     /// <c>FlowIterateNode.BuildIterationScope</c> so the body reads bare <c>{{item}}</c> / <c>{{index}}</c>.
     /// A fresh Nodes bag is seeded from the outer scope so the body can read pre-map node outputs.
+    ///
+    /// <para><b>Nested-map shadowing is INTENTIONAL, not a bug.</b> Unlike <see cref="BuildLoopScope"/>
+    /// (which sets <c>Iteration = outer.Iteration</c> to PASS THROUGH an enclosing iterate's element),
+    /// a map REPLACES the Iteration slot with its own <c>{item, index}</c> and does NOT inherit the
+    /// outer's. This is deliberate: a map uses the FIXED names <c>{{item}}</c> / <c>{{index}}</c>, so an
+    /// inner map that inherited the outer would COLLIDE on those exact keys — the inner element would
+    /// shadow the outer one anyway, making "inheritance" a no-op at best and a confusing partial overlay
+    /// at worst. So the contract is: an inner map branch sees ITS OWN element as <c>{{item}}</c> /
+    /// <c>{{index}}</c>; the OUTER element is not in scope by default. (A node that needs the outer
+    /// element passes it down explicitly — e.g. by binding it into the inner map's <c>items</c> shape, or
+    /// reading a pre-map node output via <c>{{nodes.&lt;id&gt;.outputs.X}}</c>, which the seeded Nodes bag
+    /// preserves.) This contrasts with the loop's NAMED <c>{{loop.&lt;var&gt;}}</c> scope, which lives in a
+    /// separate slot and so can coexist with an enclosing iterate's <c>{{item}}</c> without collision —
+    /// which is exactly why the loop inherits and the map shadows. Mirrored in the <c>FlowMapNode</c> doc.</para>
+    /// <para>internal (not private) so the shadowing contract is unit-pinned directly via InternalsVisibleTo —
+    /// see <c>MapBranchScopeTests</c> — alongside <see cref="BuildLoopScope"/>'s inheriting contract.</para>
     /// </summary>
-    private static NodeRunScope BuildMapBranchScope(NodeRunScope outer, JsonElement element, int index)
+    internal static NodeRunScope BuildMapBranchScope(NodeRunScope outer, JsonElement element, int index)
     {
         var iteration = new Dictionary<string, JsonElement>
         {
