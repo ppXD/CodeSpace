@@ -3,6 +3,7 @@ import { fireEvent, render, screen, within } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
 import { MapEditor } from "./MapEditor";
+import { resultKeyError } from "./mapResultKey";
 
 // The {{}} picker is exercised elsewhere; here a plain input keeps the focus on MapEditor's logic.
 vi.mock("./VariablePickerInput", () => ({
@@ -99,5 +100,43 @@ describe("MapEditor", () => {
     rerender(<MapEditor config={{ resultKey: "answers" }} inputs={{}} onConfigChange={onConfigChange} onInputsChange={() => {}} suggestions={[]} />);
     fireEvent.change(within(section("Result key")).getByRole("textbox"), { target: { value: "" } });
     expect(onConfigChange).toHaveBeenLastCalledWith({});
+  });
+
+  it("flags a reserved result key inline (the value still patches — the save-time validator is the hard gate)", () => {
+    // "count" collides with the reducer's count output; the field shows an inline error and is marked invalid.
+    render(<Harness config={{ resultKey: "count" }} />);
+
+    const input = within(section("Result key")).getByRole("textbox") as HTMLInputElement;
+    expect(input.getAttribute("aria-invalid")).toBe("true");
+
+    const alert = within(section("Result key")).getByRole("alert");
+    expect(alert.textContent).toContain("reserved");
+  });
+
+  it("flags a non-identifier result key inline", () => {
+    render(<Harness config={{ resultKey: "my key" }} />);
+
+    expect((within(section("Result key")).getByRole("textbox") as HTMLInputElement).getAttribute("aria-invalid")).toBe("true");
+    expect(within(section("Result key")).getByRole("alert").textContent).toContain("can't be referenced");
+  });
+
+  it("accepts a valid result key with no inline error", () => {
+    render(<Harness config={{ resultKey: "answers" }} />);
+
+    const input = within(section("Result key")).getByRole("textbox") as HTMLInputElement;
+    expect(input.getAttribute("aria-invalid")).toBe("false");
+    expect(within(section("Result key")).queryByRole("alert")).toBeNull();
+  });
+
+  it("resultKeyError mirrors the backend reserved-set + identifier rule (and the blank default)", () => {
+    expect(resultKeyError("")).toBeNull();          // blank ⇒ engine default "results"
+    expect(resultKeyError("results")).toBeNull();   // the default itself
+    expect(resultKeyError("answers")).toBeNull();
+    expect(resultKeyError("_carry")).toBeNull();
+    expect(resultKeyError("count")).toContain("reserved");
+    expect(resultKeyError("failed")).toContain("reserved");
+    expect(resultKeyError("1x")).toContain("can't be referenced");
+    expect(resultKeyError("a-b")).toContain("can't be referenced");
+    expect(resultKeyError("a.b")).toContain("can't be referenced");
   });
 });

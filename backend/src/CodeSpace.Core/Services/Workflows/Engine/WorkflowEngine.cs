@@ -1747,8 +1747,8 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
         new Dictionary<string, JsonElement>
         {
             [resultKey] = JsonSerializer.SerializeToElement(results),
-            ["count"] = JsonSerializer.SerializeToElement(results.Count),
-            ["failed"] = JsonSerializer.SerializeToElement(failed),
+            [WorkflowOutputKeys.MapCount] = JsonSerializer.SerializeToElement(results.Count),
+            [WorkflowOutputKeys.MapFailed] = JsonSerializer.SerializeToElement(failed),
         };
 
     /// <summary>A continue-on-error element's placeholder result — <c>{ "error": { "message": ..., "node": ... } }</c> — mirroring the node error-output shape so a synthesizer can spot a failed element in <c>results[i].error</c>.</summary>
@@ -1985,7 +1985,7 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
     /// <summary>Build a per-iteration scope: outer read-slots + <c>loop.*</c> (vars + injected <c>index</c>) + a fresh Nodes bag seeded from <paramref name="nodesSource"/> (so the body reads pre-loop outputs, and termination reads this pass's body outputs).</summary>
     private static NodeRunScope BuildLoopScope(NodeRunScope outer, IEnumerable<KeyValuePair<string, IReadOnlyDictionary<string, JsonElement>>> nodesSource, IReadOnlyDictionary<string, JsonElement> loopVars, int index)
     {
-        var loop = new Dictionary<string, JsonElement>(loopVars) { ["index"] = JsonSerializer.SerializeToElement(index) };
+        var loop = new Dictionary<string, JsonElement>(loopVars) { [WorkflowOutputKeys.LoopIndex] = JsonSerializer.SerializeToElement(index) };
 
         var scope = new NodeRunScope
         {
@@ -2028,9 +2028,9 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
     {
         var outputs = new Dictionary<string, JsonElement>(loopVars)
         {
-            ["iterations"] = JsonSerializer.SerializeToElement(iterations),
-            ["failedIterations"] = JsonSerializer.SerializeToElement(failedIterations),
-            ["terminationReason"] = JsonSerializer.SerializeToElement(reason),
+            [WorkflowOutputKeys.LoopIterations] = JsonSerializer.SerializeToElement(iterations),
+            [WorkflowOutputKeys.LoopFailedIterations] = JsonSerializer.SerializeToElement(failedIterations),
+            [WorkflowOutputKeys.LoopTerminationReason] = JsonSerializer.SerializeToElement(reason),
         };
         return outputs;
     }
