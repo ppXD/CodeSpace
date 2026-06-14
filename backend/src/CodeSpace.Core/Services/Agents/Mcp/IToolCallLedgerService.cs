@@ -48,12 +48,31 @@ public interface IToolCallLedgerService
     /// <summary>Team-scoped focused read of one row's {Status, ApprovedAt, ResultJson, Error} — the post-wake authority a blocked handler re-reads to decide the outcome. Null when the (ledger, team) row is absent (a foreign id finds nothing — fail-closed).</summary>
     Task<ToolCallApprovalState?> ReadApprovalStateAsync(Guid ledgerId, Guid teamId, CancellationToken cancellationToken);
 
+    /// <summary>
+    /// Reaper sweep (item D3): durably expire every UNDECIDED approval past its deadline so a re-call gets a clean
+    /// terminal instead of re-opening forever. Candidate set: <c>Status == AwaitingApproval AND ApprovedAt == null AND
+    /// ApprovalDeadlineAt != null AND ApprovalDeadlineAt &lt; now</c>; each candidate gets a per-row status-guarded CAS
+    /// <c>AwaitingApproval → Expired</c> (mirrors <see cref="RecordTerminalAsync"/>'s discipline) guarded ALSO on
+    /// <c>ApprovedAt == null</c>, so an approved-but-not-yet-executed row (its execution claim in flight) is NEVER
+    /// expired. Returns only the rows whose CAS won (affected == 1), each with its <c>ApprovalMessageId</c> for the card
+    /// mirror. Team-agnostic (an internal job, no actor) but every CAS is per-row + single-winner, so two concurrent
+    /// sweeps expire each row exactly once. Bounded per run (a backlog continues on the next tick); the cap is logged,
+    /// never silently truncated.
+    /// </summary>
+    Task<IReadOnlyList<ExpiredToolApproval>> ExpireStaleApprovalsAsync(DateTimeOffset now, CancellationToken cancellationToken);
+
     /// <summary>Team-scoped audit read of a run's ledger rows, newest first (like <see cref="AgentRunService"/>.GetEventsAsync — a foreign run id returns empty).</summary>
     Task<IReadOnlyList<ToolCallLedger>> GetForRunAsync(Guid agentRunId, Guid teamId, CancellationToken cancellationToken);
 }
 
 public sealed class ToolCallLedgerService : IToolCallLedgerService, IScopedDependency
 {
+    /// <summary>The audit reason stamped on a row the reaper expires — load-bearing string the replay path surfaces to the model on a re-call.</summary>
+    public const string ApprovalExpiredError = "approval expired (no decision before the deadline)";
+
+    /// <summary>Per-sweep cap so a large backlog can't run one reaper tick forever; the next tick continues. Capping is logged (never silently truncated).</summary>
+    public const int ExpiryBatchSize = 200;
+
     private readonly CodeSpaceDbContext _db;
     private readonly ILogger<ToolCallLedgerService> _logger;
 
@@ -191,6 +210,50 @@ public sealed class ToolCallLedgerService : IToolCallLedgerService, IScopedDepen
             .Where(l => l.Id == ledgerId && l.TeamId == teamId)
             .Select(l => new ToolCallApprovalState { Status = l.Status, ApprovedAt = l.ApprovedAt, ResultJson = l.ResultJson, Error = l.Error })
             .SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
+
+    public async Task<IReadOnlyList<ExpiredToolApproval>> ExpireStaleApprovalsAsync(DateTimeOffset now, CancellationToken cancellationToken)
+    {
+        // Candidate set (bounded): undecided approvals past their deadline. ApprovedAt == null is LOAD-BEARING — an
+        // approved-but-not-yet-executed row belongs to an in-flight execution claim and must NEVER be expired. Take
+        // ExpiryBatchSize + 1 so a full page tells us the sweep was capped (logged below — no silent truncation).
+        var candidates = await _db.ToolCallLedger.AsNoTracking()
+            .Where(l => l.Status == ToolCallLedgerStatus.AwaitingApproval && l.ApprovedAt == null && l.ApprovalDeadlineAt != null && l.ApprovalDeadlineAt < now)
+            .OrderBy(l => l.ApprovalDeadlineAt)
+            .Take(ExpiryBatchSize + 1)
+            .Select(l => new { l.Id, l.TeamId, l.ApprovalMessageId })
+            .ToListAsync(cancellationToken).ConfigureAwait(false);
+
+        var capped = candidates.Count > ExpiryBatchSize;
+
+        var expired = new List<ExpiredToolApproval>(Math.Min(candidates.Count, ExpiryBatchSize));
+
+        foreach (var c in candidates.Take(ExpiryBatchSize))
+            if (await TryExpireOneAsync(c.Id, now, cancellationToken).ConfigureAwait(false))
+                expired.Add(new ExpiredToolApproval { LedgerId = c.Id, TeamId = c.TeamId, ApprovalMessageId = c.ApprovalMessageId });
+
+        if (expired.Count > 0) _logger.LogInformation("Tool call approval reaper expired {Expired} stale approval(s)", expired.Count);
+
+        if (capped) _logger.LogWarning("Tool call approval reaper hit the per-sweep cap of {Cap} — a backlog remains for the next tick", ExpiryBatchSize);
+
+        return expired;
+    }
+
+    // Per-row single-winner CAS AwaitingApproval → Expired (mirrors RecordTerminalAsync's ExecuteUpdate discipline).
+    // Guarded ALSO on ApprovedAt == null so an approved row that was concurrently stamped between the candidate read and
+    // this update is NOT expired (the not-expire-approved guard, load-bearing in BOTH the query and here). affected == 1
+    // means this sweep won the row; 0 means a concurrent sweep / approve / handler already moved it — skip it cleanly.
+    private async Task<bool> TryExpireOneAsync(Guid ledgerId, DateTimeOffset now, CancellationToken cancellationToken)
+    {
+        var affected = await _db.ToolCallLedger
+            .Where(l => l.Id == ledgerId && l.Status == ToolCallLedgerStatus.AwaitingApproval && l.ApprovedAt == null)
+            .ExecuteUpdateAsync(s => s
+                .SetProperty(l => l.Status, ToolCallLedgerStatus.Expired)
+                .SetProperty(l => l.Error, ApprovalExpiredError)
+                .SetProperty(l => l.LastModifiedDate, now), cancellationToken)
+            .ConfigureAwait(false);
+
+        return affected == 1;
+    }
 
     public async Task<IReadOnlyList<ToolCallLedger>> GetForRunAsync(Guid agentRunId, Guid teamId, CancellationToken cancellationToken) =>
         await _db.ToolCallLedger.AsNoTracking()
