@@ -46,6 +46,7 @@ import { introspectScope } from "@/components/workflows/scope-introspection";
 import { StartNodeInputsEditor } from "@/components/workflows/StartNodeInputsEditor";
 import { SubworkflowEditor } from "@/components/workflows/SubworkflowEditor";
 import { LoopEditor } from "@/components/workflows/LoopEditor";
+import { MapEditor } from "@/components/workflows/MapEditor";
 import { AgentCodeInspector } from "@/components/workflows/AgentCodeInspector";
 import { AgentPaletteSection, AGENT_DRAG_MIME } from "@/components/workflows/AgentPaletteSection";
 import { VariableTablePanel } from "@/components/workflows/VariableTablePanel";
@@ -1350,6 +1351,16 @@ function NodeInspector({
         <section className="wf-inspector-section">
           <p className="wf-retry-hint">Try body entry — added automatically inside a Try. Connect the try's body steps from here; there's nothing to configure.</p>
         </section>
+      ) : manifest.typeKey === "flow.map" ? (
+        // Map gets a fan-out settings panel (collection · branch parallelism · error handling ·
+        // result key) instead of the generic Config/Inputs forms; its body subgraph is authored on
+        // the canvas, running once per element of the bound collection.
+        <MapEditor config={config} inputs={inputs} onConfigChange={onConfigChange} onInputsChange={onInputsChange} suggestions={suggestions} />
+      ) : manifest.typeKey === "flow.map_start" ? (
+        // The map body's entry marker — auto-added inside a Map. Nothing to configure.
+        <section className="wf-inspector-section">
+          <p className="wf-retry-hint">Map body entry — added automatically inside a Map. Connect the per-element body steps from here; read the element as <code>{"{{item}}"}</code> / <code>{"{{index}}"}</code>. Nothing to configure.</p>
+        </section>
       ) : manifest.typeKey === "agent.code" ? (
         // Run-coding-agent gets a two-mode editor (bind an Agent persona ⇄ configure inline) with a
         // harness picker, instead of the generic Config/Inputs forms — the engine already supports
@@ -1402,18 +1413,18 @@ function NodeInspector({
       )}
 
       {/* Retry-on-failure — a cross-cutting engine setting, shown for any node that can fail.
-          Triggers are the run's entry point (nothing to retry). A Loop has its own iteration
-          semantics (the engine doesn't honour node-level retry on it), and loop_start is a passthrough
-          marker — both are excluded. */}
-      {manifest.kind !== "Trigger" && manifest.typeKey !== "flow.loop" && manifest.typeKey !== "flow.loop_start" && (
+          Triggers are the run's entry point (nothing to retry). A Loop / Map has its own iteration /
+          branch semantics (the engine doesn't honour node-level retry on it), and the loop_start /
+          map_start markers are passthroughs — all are excluded. */}
+      {manifest.kind !== "Trigger" && manifest.typeKey !== "flow.loop" && manifest.typeKey !== "flow.loop_start" && manifest.typeKey !== "flow.map" && manifest.typeKey !== "flow.map_start" && (
         <NodeRetryEditor value={retry} onChange={onRetryChange} />
       )}
 
       {/* Error routing — mirrors the canvas red `error` handle. Picking a target wires an error
           edge; the engine routes here on failure (after retries) instead of failing the run. Shown
-          for regular steps AND a Loop (a body failure can route the loop down its error edge); never
-          for the loop_start marker. */}
-      {(manifest.kind === "Regular" || manifest.typeKey === "flow.loop") && manifest.typeKey !== "flow.loop_start" && (
+          for regular steps AND a Loop / Map (a body/branch failure can route the container down its
+          error edge); never for the loop_start / map_start markers. */}
+      {(manifest.kind === "Regular" || manifest.typeKey === "flow.loop" || manifest.typeKey === "flow.map") && manifest.typeKey !== "flow.loop_start" && manifest.typeKey !== "flow.map_start" && (
         <section className="wf-inspector-section">
           <div className="wf-inspector-section-h">On failure</div>
           <select

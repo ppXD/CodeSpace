@@ -15,6 +15,8 @@ const manifests = new Map<string, NodeManifestDto>([
   ["flow.loop_start", manifest("flow.loop_start", "Regular", { displayName: "Loop start" })],
   ["flow.try", manifest("flow.try", "Try", { displayName: "Try / catch" })],
   ["flow.try_start", manifest("flow.try_start", "Regular", { displayName: "Try start" })],
+  ["flow.map", manifest("flow.map", "Map", { displayName: "Map" })],
+  ["flow.map_start", manifest("flow.map_start", "Regular", { displayName: "Map start" })],
   ["http.request", manifest("http.request", "Regular", { displayName: "HTTP request" })],
   ["flow.terminal", manifest("flow.terminal", "Terminal", { displayName: "Done" })],
 ]);
@@ -188,6 +190,47 @@ describe("flow.try container", () => {
     expect(out.inner.zIndex).toBe(1);
     expect(out.ts.zIndex).toBe(2);
     // The outer loop grew to wrap the inner try box → strictly bigger, no overlap.
+    expect((out.outer.style!.width as number)).toBeGreaterThan(out.inner.style!.width as number);
+  });
+});
+
+describe("flow.map container", () => {
+  it("renders a flow.map as a sized container, stacks its body above it, and locks map_start", () => {
+    const out = byId(definitionToRfNodes(
+      def([
+        node("map", "flow.map", { position: { x: 0, y: 0 } }),
+        node("ms", "flow.map_start", { parentId: "map" }),
+        node("step", "http.request", { parentId: "map", position: { x: 300, y: 72 } }),
+      ]),
+      manifests,
+    ));
+
+    // Sized box at zIndex 0; body stacked above (zIndex 1) so its handles stay clickable.
+    expect(out.map.style).toMatchObject({ width: LOOP_CONTAINER_W, height: LOOP_CONTAINER_H });
+    expect(out.map.zIndex).toBe(0);
+    expect(out.ms.zIndex).toBe(1);
+    expect(out.step.zIndex).toBe(1);
+
+    // The map's entry marker is locked inside the container (extent:"parent"); a regular body node
+    // can still be dragged out.
+    expect(out.ms.parentId).toBe("map");
+    expect(out.ms.extent).toBe("parent");
+    expect(out.step.extent).toBeUndefined();
+  });
+
+  it("auto-fits an outer map to wrap a nested map (containers nest both ways)", () => {
+    const out = byId(definitionToRfNodes(
+      def([
+        node("outer", "flow.map", { position: { x: 0, y: 0 } }),
+        node("inner", "flow.map", { parentId: "outer", position: { x: 40, y: 40 } }),
+        node("ms", "flow.map_start", { parentId: "inner", position: { x: 40, y: 60 } }),
+      ]),
+      manifests,
+    ));
+
+    expect(out.inner.zIndex).toBe(1);
+    expect(out.ms.zIndex).toBe(2);
+    // The outer map grew to wrap the inner map box → strictly bigger, no overlap.
     expect((out.outer.style!.width as number)).toBeGreaterThan(out.inner.style!.width as number);
   });
 });

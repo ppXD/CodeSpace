@@ -10,6 +10,7 @@ import type { NodeManifestDto } from "@/api/workflows";
 export function nodeIconFor(m: NodeManifestDto, size = 12) {
   if (m.kind === "Trigger") return <Ic.Zap size={size} />;
   if (m.kind === "Terminal") return <Ic.CircleStop size={size} />;
+  if (m.kind === "Map") return <Ic.Fork size={size} />;
   if (m.category === "AI") return <Ic.Sparkles size={size} />;
   if (m.category === "Git") return <Ic.Branch size={size} />;
   return <Ic.Box size={size} />;
