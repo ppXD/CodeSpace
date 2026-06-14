@@ -1,11 +1,11 @@
 name: Backend · E2E
 
-# Two E2E gates, both against a throw-away GUID Postgres (localhost:5432, matching the committed
-# appsettings.json admin connection):
+# Two E2E gates, both against a throw-away GUID Postgres:
 #
 #   1. e2e-http — the REAL ASP.NET pipeline (routing, [AllowAnonymous], model binding, the
 #      GlobalExceptionFilter) in-memory via WebApplicationFactory: the actual HTTP status code a
-#      webhook provider receives (CodeSpace.E2ETests).
+#      webhook provider receives (CodeSpace.E2ETests). Runs directly on the host runner, so it reaches
+#      Postgres at localhost:5432 (the committed appsettings.json admin connection).
 #
 #   2. e2e-engine — THE headline intelligent flow driven top-to-bottom as one engine run:
 #      trigger.manual → llm.complete(responseSchema) planner → flow.map fan-out whose body is a REAL
@@ -14,7 +14,10 @@ name: Backend · E2E
 #      that reduces the per-branch results. The Category=E2E tests live in CodeSpace.IntegrationTests
 #      (they need the full engine/sandbox DI container, not the HTTP host). bubblewrap is installed +
 #      CODESPACE_REQUIRE_SANDBOX=1 so the agent runs CONFINED (the production posture) and a degraded
-#      sandbox fails HARD rather than silently running unconfined.
+#      sandbox fails HARD rather than silently running unconfined. It runs in a PRIVILEGED container
+#      (mirroring sandbox-isolation.yml) so unprivileged user namespaces work despite ubuntu-latest's
+#      AppArmor restriction — and so reaches Postgres by the service ALIAS (postgres:5432), overridden
+#      via the TestPostgres__AdminConnectionString env var.
 
 on:
   push:
@@ -101,12 +104,26 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
+    # Runs in a PRIVILEGED container so unprivileged user namespaces work regardless of the host runner's
+    # AppArmor policy — current ubuntu-latest (Ubuntu 24.04) ships kernel.apparmor_restrict_unprivileged_userns=1,
+    # which denies unprivileged userns for an apt-installed bwrap. The bwrap-confined agent in this E2E needs
+    # working userns, so we mirror the already-green sibling sandbox-isolation.yml (`docker run --privileged
+    # dotnet/sdk:10.0 + apt install bubblewrap`) — the exact environment these tests were validated against.
+    container:
+      image: mcr.microsoft.com/dotnet/sdk:10.0
+      options: --privileged
+
     env:
       # Fail-closed: the headline E2E runs a REAL agent.code branch through the real LocalProcessRunner,
       # which confines it under bubblewrap. With REQUIRE_SANDBOX=1 a host that can't sandbox (no bwrap /
       # no unprivileged userns) makes the run fail HARD instead of silently executing the agent unconfined
       # — so green here means the agent really ran AND was really confined.
       CODESPACE_REQUIRE_SANDBOX: '1'
+      # Inside a job container the Postgres SERVICE container is reachable by its network ALIAS (`postgres`),
+      # NOT via the host port mapping (`localhost:5432` is the job container itself). Override the test
+      # admin connection string (TestPostgres:AdminConnectionString → env double-underscore form) to target
+      # the service alias. The e2e-http job stays on `localhost` because it runs directly on the host runner.
+      TestPostgres__AdminConnectionString: 'Host=postgres;Port=5432;Username=postgres;Password=123456;Database=postgres'
 
     services:
       postgres:
@@ -115,8 +132,8 @@ jobs:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: '123456'
           POSTGRES_DB: postgres
-        ports:
-          - 5432:5432
+        # No `ports:` mapping — inside a container job the service is reached by its alias on the Docker
+        # network, so the host-port publish is unnecessary.
         options: >-
           --health-cmd "pg_isready -U postgres -d postgres"
           --health-interval 5s
@@ -126,27 +143,34 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up .NET 10
-        uses: actions/setup-dotnet@v4
-        with:
-          dotnet-version: '10.0.x'
-
       - name: Install bubblewrap + util-linux (prlimit)
         # The headline E2E spawns a REAL agent process through the production runner, which wraps it in
-        # bubblewrap + prlimit (the production confinement posture). The ubuntu-latest host allows
-        # unprivileged user namespaces, so no privileged container is needed.
+        # bubblewrap + prlimit (the production confinement posture). Running as root in the SDK container, so
+        # no sudo. ca-certificates so the container can fetch packages; util-linux for prlimit.
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends bubblewrap util-linux
+          apt-get update
+          apt-get install -y --no-install-recommends bubblewrap util-linux ca-certificates
           echo "bwrap: $(bwrap --version)"
           echo "prlimit: $(prlimit --version)"
+
+      - name: Probe — unprivileged user namespaces (informational)
+        # Informational only: the authoritative gate is the test step below (REQUIRE_SANDBOX=1 → the run fails
+        # HARD if confinement is unavailable, surfacing as the headline assertion failing). This just surfaces
+        # a clear "userns works/doesn't" signal early without ever failing the job on a bwrap-flag quirk —
+        # turning an opaque "run was Failed" into a diagnosable cause.
+        run: |
+          if bwrap --ro-bind / / --dev /dev --proc /proc --unshare-all --uid 0 true; then
+            echo "✓ unprivileged user namespaces work"
+          else
+            echo "⚠ userns probe failed — the REQUIRE_SANDBOX=1 test step is authoritative and will fail hard if confinement is truly unavailable"
+          fi
 
       - name: Cache NuGet packages
         uses: actions/cache@v4
         with:
-          path: ~/.nuget/packages
-          key: nuget-e2e-engine-${{ runner.os }}-${{ hashFiles('backend/**/*.csproj') }}
-          restore-keys: nuget-e2e-engine-${{ runner.os }}-
+          path: /root/.nuget/packages
+          key: nuget-e2e-engine-${{ hashFiles('backend/**/*.csproj') }}
+          restore-keys: nuget-e2e-engine-
 
       - name: Restore
         run: dotnet restore backend/tests/CodeSpace.IntegrationTests/CodeSpace.IntegrationTests.csproj
