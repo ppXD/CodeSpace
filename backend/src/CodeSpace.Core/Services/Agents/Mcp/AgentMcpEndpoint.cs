@@ -11,7 +11,9 @@ namespace CodeSpace.Core.Services.Agents.Mcp;
 /// One run's live MCP endpoint over a PER-RUN Unix-domain socket: it binds + listens on the run's socket path, accepts
 /// connections in a loop, and for each connection validates the per-run <c>CODESPACE_RUN_TOKEN</c> on the FIRST line
 /// before serving — then pumps one <see cref="McpFramingLoop"/> (a fresh <see cref="McpRequestHandler"/> bound to the
-/// run's tool registry + autonomy + team) over the socket's <see cref="NetworkStream"/>. The connect descriptor
+/// run's tool registry + autonomy + team + secret redactor) over the socket's <see cref="NetworkStream"/>. Every
+/// tool-result text the handler returns is run through the run's <see cref="SecretRedactor"/>, so an echoed model key
+/// never reaches the model. The connect descriptor
 /// (socket path + token) is registered with the <see cref="IAgentMcpConnectRegistry"/> under the run id so a consumer
 /// (the integration test today, the <c>codespace mcp</c> proxy later) reaches exactly this run's endpoint. The
 /// endpoint's life is bounded to the harness span — the executor opens it immediately before the (synchronous) harness
@@ -30,6 +32,7 @@ public sealed class AgentMcpEndpoint : IAsyncDisposable
     private readonly IAgentToolRegistry _registry;
     private readonly AgentAutonomyLevel _autonomy;
     private readonly Guid _teamId;
+    private readonly SecretRedactor _redactor;
     private readonly string _socketPath;
     private readonly string _token;
     private readonly IAgentMcpConnectRegistry _connects;
@@ -41,12 +44,13 @@ public sealed class AgentMcpEndpoint : IAsyncDisposable
 
     private bool _disposed;
 
-    public AgentMcpEndpoint(Guid runId, IAgentToolRegistry registry, AgentAutonomyLevel autonomy, Guid teamId, string socketPath, string token, IAgentMcpConnectRegistry connects, IDisposable scope, CancellationToken ct, ILogger logger)
+    public AgentMcpEndpoint(Guid runId, IAgentToolRegistry registry, AgentAutonomyLevel autonomy, Guid teamId, SecretRedactor redactor, string socketPath, string token, IAgentMcpConnectRegistry connects, IDisposable scope, CancellationToken ct, ILogger logger)
     {
         _runId = runId;
         _registry = registry;
         _autonomy = autonomy;
         _teamId = teamId;
+        _redactor = redactor;
         _socketPath = socketPath;
         _token = token;
         _connects = connects;
@@ -142,7 +146,7 @@ public sealed class AgentMcpEndpoint : IAsyncDisposable
 
         if (!await IsAuthenticatedAsync(reader, ct).ConfigureAwait(false)) return;   // silent close, no oracle, before any handler
 
-        var loop = new McpFramingLoop(new McpRequestHandler(_registry, _autonomy, _teamId));
+        var loop = new McpFramingLoop(new McpRequestHandler(_registry, _autonomy, _teamId, _redactor));
 
         try { await loop.RunAsync(reader, writer, ct).ConfigureAwait(false); }
         catch (OperationCanceledException) { /* cancel unwound the pump */ }

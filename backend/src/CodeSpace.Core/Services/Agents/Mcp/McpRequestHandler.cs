@@ -19,11 +19,10 @@ namespace CodeSpace.Core.Services.Agents.Mcp;
 /// tool the tier does not permit comes back as a tool result with <c>isError:true</c> + a reason — never silently
 /// run. Per-call TENANCY is enforced: the handler stamps the run's <c>teamId</c> onto every <c>AgentToolCall</c>,
 /// which <c>NodeAgentTool</c> writes to the synthetic scope's <c>sys.team_id</c> so a repo-touching tool resolves
-/// the run's tenant (a foreign repository id still fail-closes; a null team → no team → fail-closed). <b>One
-/// precondition is still owed before this is wired to a live transport:</b> SECRET REDACTION — tool error text +
-/// caught exception messages are not yet run through the per-run <c>SecretRedactor</c> (which needs the run's
-/// resolved secrets), so that slice must redact them before they reach the model. Nothing in production constructs
-/// this handler yet (no transport, no DI registration).</para>
+/// the run's tenant (a foreign repository id still fail-closes; a null team → no team → fail-closed). EVERY
+/// tool-result text the model receives — success output, tool error, AND the caught-exception message — is run
+/// through the run's <see cref="SecretRedactor"/> at the single <see cref="ToolResult"/> choke point, so an echoed
+/// model key can never reach the model through a tool call.</para>
 /// </summary>
 public sealed class McpRequestHandler : IMcpRequestHandler
 {
@@ -42,12 +41,14 @@ public sealed class McpRequestHandler : IMcpRequestHandler
     private readonly IAgentToolRegistry _registry;
     private readonly AgentAutonomyLevel _autonomy;
     private readonly Guid? _teamId;
+    private readonly SecretRedactor _redactor;
 
-    public McpRequestHandler(IAgentToolRegistry registry, AgentAutonomyLevel autonomy, Guid? teamId = null)
+    public McpRequestHandler(IAgentToolRegistry registry, AgentAutonomyLevel autonomy, Guid? teamId = null, SecretRedactor? redactor = null)
     {
         _registry = registry;
         _autonomy = autonomy;
         _teamId = teamId;
+        _redactor = redactor ?? SecretRedactor.None;
     }
 
     public async Task<JsonElement?> HandleAsync(JsonElement request, CancellationToken cancellationToken)
@@ -147,11 +148,19 @@ public sealed class McpRequestHandler : IMcpRequestHandler
         return JsonSerializer.SerializeToElement(new { tools }, AgentJson.Options);
     }
 
-    private static JsonElement ToolResult(bool isError, string text) => JsonSerializer.SerializeToElement(new
+    // The SINGLE choke point for every tool-result text the model receives — success output, tool error, the caught
+    // exception message, AND the gate/validation messages all flow through here. Redact at this one point so an
+    // echoed model key (e.g. a run_command that prints an env var) can never reach the model through a tool call.
+    private JsonElement ToolResult(bool isError, string text)
     {
-        content = new[] { new { type = "text", text } },
-        isError,
-    }, AgentJson.Options);
+        text = _redactor.Redact(text);
+
+        return JsonSerializer.SerializeToElement(new
+        {
+            content = new[] { new { type = "text", text } },
+            isError,
+        }, AgentJson.Options);
+    }
 
     private static string OutputText(JsonElement output) => output.ValueKind == JsonValueKind.Undefined ? "{}" : output.GetRawText();
 

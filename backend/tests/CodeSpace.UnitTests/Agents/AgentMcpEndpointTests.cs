@@ -54,7 +54,7 @@ public class AgentMcpEndpointTests
         var runId = Guid.NewGuid();
         const string token = "the-token";
 
-        var endpoint = new AgentMcpEndpoint(runId, new EmptyRegistry(), AgentAutonomyLevel.Confined, Guid.NewGuid(), socketPath, token, connects, scope, CancellationToken.None, NullLogger.Instance);
+        var endpoint = new AgentMcpEndpoint(runId, new EmptyRegistry(), AgentAutonomyLevel.Confined, Guid.NewGuid(), SecretRedactor.None, socketPath, token, connects, scope, CancellationToken.None, NullLogger.Instance);
 
         connects.TryConnect(runId, out var connect).ShouldBeTrue(customMessage: "open endpoint must be reachable through the connect registry");
         connect.SocketPath.ShouldBe(socketPath);
@@ -90,7 +90,7 @@ public class AgentMcpEndpointTests
         var runId = Guid.NewGuid();
 
         // No connection: the accept loop is blocked in AcceptAsync; DisposeAsync cancels + disposes the listener.
-        var endpoint = new AgentMcpEndpoint(runId, new EmptyRegistry(), AgentAutonomyLevel.Standard, Guid.NewGuid(), socketPath, "tok", connects, scope, CancellationToken.None, NullLogger.Instance);
+        var endpoint = new AgentMcpEndpoint(runId, new EmptyRegistry(), AgentAutonomyLevel.Standard, Guid.NewGuid(), SecretRedactor.None, socketPath, "tok", connects, scope, CancellationToken.None, NullLogger.Instance);
 
         await Should.NotThrowAsync(async () => await endpoint.DisposeAsync());
         await Should.NotThrowAsync(async () => await endpoint.DisposeAsync());
@@ -111,7 +111,7 @@ public class AgentMcpEndpointTests
         var scope = new TrackingScope();
         var runId = Guid.NewGuid();
 
-        await using var endpoint = new AgentMcpEndpoint(runId, new EmptyRegistry(), AgentAutonomyLevel.Standard, Guid.NewGuid(), socketPath, "the-real-token", connects, scope, CancellationToken.None, NullLogger.Instance);
+        await using var endpoint = new AgentMcpEndpoint(runId, new EmptyRegistry(), AgentAutonomyLevel.Standard, Guid.NewGuid(), SecretRedactor.None, socketPath, "the-real-token", connects, scope, CancellationToken.None, NullLogger.Instance);
 
         using var client = await ConnectAsync(socketPath);
         await SendLineAsync(client, "the-WRONG-token");
@@ -137,7 +137,7 @@ public class AgentMcpEndpointTests
         var scope = new TrackingScope();
         var runId = Guid.NewGuid();
 
-        await using var endpoint = new AgentMcpEndpoint(runId, new EmptyRegistry(), AgentAutonomyLevel.Standard, Guid.NewGuid(), socketPath, "the-token", connects, scope, CancellationToken.None, NullLogger.Instance);
+        await using var endpoint = new AgentMcpEndpoint(runId, new EmptyRegistry(), AgentAutonomyLevel.Standard, Guid.NewGuid(), SecretRedactor.None, socketPath, "the-token", connects, scope, CancellationToken.None, NullLogger.Instance);
 
         // Connect then immediately close WITHOUT sending the token line → the endpoint reads EOF before any token,
         // fails closed (silent close), and never serves JSON-RPC. Dispose must still be clean.
@@ -161,7 +161,7 @@ public class AgentMcpEndpointTests
         var scope = new TrackingScope();
         var runId = Guid.NewGuid();
 
-        await using var endpoint = new AgentMcpEndpoint(runId, new EmptyRegistry(), AgentAutonomyLevel.Standard, Guid.NewGuid(), socketPath, "tok", connects, scope, CancellationToken.None, NullLogger.Instance);
+        await using var endpoint = new AgentMcpEndpoint(runId, new EmptyRegistry(), AgentAutonomyLevel.Standard, Guid.NewGuid(), SecretRedactor.None, socketPath, "tok", connects, scope, CancellationToken.None, NullLogger.Instance);
 
         // Real OS state: the socket inode must be 0600 so no other local user can connect to the run's endpoint.
         File.GetUnixFileMode(socketPath).ShouldBe(UnixFileMode.UserRead | UnixFileMode.UserWrite,

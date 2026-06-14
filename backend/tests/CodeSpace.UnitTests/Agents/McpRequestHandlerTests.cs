@@ -1,4 +1,5 @@
 using System.Text.Json;
+using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Agents.Mcp;
 using CodeSpace.Core.Services.Agents.Tools;
 using CodeSpace.Messages.Agents;
@@ -357,6 +358,85 @@ public class McpRequestHandlerTests
         resp.GetProperty("result").GetProperty("isError").GetBoolean().ShouldBeTrue();
         resp.GetProperty("result").GetProperty("content")[0].GetProperty("text").GetString().ShouldContain("not permitted");
         tool.CallCount.ShouldBe(0, "a denied tool must never execute, so it is never stamped/invoked");
+    }
+
+    // ── tools/call secret redaction ───────────────────────────────────────────
+
+    private const string Secret = "SECRET-abc123";
+
+    // A handler wired with the run's redactor: every tool-result text it returns must be masked at the single
+    // ToolResult choke point. The redactor is the LAST positional ctor arg (defaulted), so an omitted one is the
+    // no-op identity (the control test below proves it).
+    private static McpRequestHandler RedactingHandler(params IAgentTool[] tools) =>
+        new(new FakeRegistry(tools), AgentAutonomyLevel.Unleashed, Guid.NewGuid(), new SecretRedactor(new[] { Secret }));
+
+    [Fact]
+    public async Task ToolsCall_redacts_the_secret_from_SUCCESS_output()
+    {
+        // The biggest leak surface: a tool (e.g. run_command) whose successful output echoes an env var holding the
+        // model key. The success path runs through ToolResult too, so the secret must be masked, not just on errors.
+        var tool = new FakeTool { Kind = "run_command", OnCall = (_, _) => Task.FromResult(AgentToolResult.Ok(Parse($$"""{"stdout":"ANTHROPIC_API_KEY={{Secret}}"}"""), 40)) };
+
+        var text = (await Respond(RedactingHandler(tool), Call("run_command", "{}"))).GetProperty("result").GetProperty("content")[0].GetProperty("text").GetString();
+
+        text.ShouldNotContain(Secret, customMessage: "a secret echoed in SUCCESS output must be redacted before reaching the model");
+        text!.ShouldContain(SecretRedactor.Placeholder);
+    }
+
+    [Fact]
+    public async Task ToolsCall_redacts_the_secret_from_an_isError_result()
+    {
+        var tool = new FakeTool { Kind = "boom", OnCall = (_, _) => Task.FromResult(AgentToolResult.Fail($"auth failed for {Secret}")) };
+
+        var result = (await Respond(RedactingHandler(tool), Call("boom", "{}"))).GetProperty("result");
+
+        result.GetProperty("isError").GetBoolean().ShouldBeTrue();
+        var text = result.GetProperty("content")[0].GetProperty("text").GetString();
+        text.ShouldNotContain(Secret);
+        text!.ShouldContain(SecretRedactor.Placeholder);
+    }
+
+    [Fact]
+    public async Task ToolsCall_redacts_the_secret_from_a_caught_exception_message()
+    {
+        var tool = new FakeTool { Kind = "throws", OnCall = (_, _) => throw new InvalidOperationException($"connecting with {Secret} failed") };
+
+        var result = (await Respond(RedactingHandler(tool), Call("throws", "{}"))).GetProperty("result");
+
+        result.GetProperty("isError").GetBoolean().ShouldBeTrue();
+        var text = result.GetProperty("content")[0].GetProperty("text").GetString();
+        text.ShouldNotContain(Secret);
+        text!.ShouldContain(SecretRedactor.Placeholder);
+    }
+
+    [Fact]
+    public async Task ToolsCall_with_no_redactor_returns_text_verbatim_identity_control()
+    {
+        // Control: the default ctor (no redactor → SecretRedactor.None) is the identity — a value that LOOKS like a
+        // secret passes through untouched, proving the redaction in the tests above comes from the redactor, not a
+        // coincidental transform of the choke point.
+        var tool = new FakeTool { Kind = "echo", OnCall = (_, _) => Task.FromResult(AgentToolResult.Ok(Parse($$"""{"v":"{{Secret}}"}"""), 20)) };
+
+        var text = (await Respond(Handler(tool), Call("echo", "{}"))).GetProperty("result").GetProperty("content")[0].GetProperty("text").GetString();
+
+        text.ShouldBe($$"""{"v":"{{Secret}}"}""", customMessage: "with no redactor the choke point is the identity — text is verbatim");
+    }
+
+    [Fact]
+    public async Task A_gate_or_validation_message_carrying_no_secret_still_serializes_through_the_redactor()
+    {
+        // The gate/validation messages are our OWN strings (no secret), but they flow through the same redactor-bearing
+        // ToolResult — confirm they still serialize cleanly and are unchanged.
+        var denied = new FakeTool { Kind = "git.merge_pr", IsDestructiveOverride = true };
+        var invalid = new FakeTool { Kind = "needs_q", OnValidate = _ => AgentToolValidation.Invalid("must have q") };
+
+        var deniedText = (await Respond(new McpRequestHandler(new FakeRegistry(denied), AgentAutonomyLevel.Confined, Guid.NewGuid(), new SecretRedactor(new[] { Secret })), Call("git.merge_pr", "{}")))
+            .GetProperty("result").GetProperty("content")[0].GetProperty("text").GetString();
+        deniedText.ShouldContain("not permitted");
+
+        var invalidText = (await Respond(RedactingHandler(invalid), Call("needs_q", "{}")))
+            .GetProperty("result").GetProperty("content")[0].GetProperty("text").GetString();
+        invalidText.ShouldBe("must have q");
     }
 
     // ── tools/call (protocol-error plane) ─────────────────────────────────────

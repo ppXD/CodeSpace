@@ -155,7 +155,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
             // Open the per-run MCP endpoint (flag-OFF → null → no-op). It lives ONLY for the harness span: the harness
             // runs synchronously here (RunHarnessAsync → AttachAsync blocks until exit), and `await using` inside the
             // try tears it down on EVERY exit (success / cancel / generic catch) — NOT gated on leaveWorkspaceForReattach.
-            await using var mcp = OpenMcpEndpointIfEnabled(agentRunId, effectiveTask.Autonomy, run.TeamId, socketPath, token, cancellationToken);
+            await using var mcp = OpenMcpEndpointIfEnabled(agentRunId, effectiveTask.Autonomy, run.TeamId, redactor, socketPath, token, cancellationToken);
 
             // Wire the live CLI to the fabric ONLY when the endpoint actually opened AND the harness declares an
             // MCP-server shape — a non-null endpoint already encodes "the flag is on AND the bind succeeded", so no
@@ -493,7 +493,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     /// (A10): a host that can't bind a UDS — though the flag is on — disposes the scope, logs a Warning, and returns
     /// null; the endpoint is optional infra, not the run, so the run still proceeds without it.
     /// </summary>
-    private AgentMcpEndpoint? OpenMcpEndpointIfEnabled(Guid runId, AgentAutonomyLevel autonomy, Guid teamId, string socketPath, string token, CancellationToken ct)
+    private AgentMcpEndpoint? OpenMcpEndpointIfEnabled(Guid runId, AgentAutonomyLevel autonomy, Guid teamId, SecretRedactor redactor, string socketPath, string token, CancellationToken ct)
     {
         if (!IsMcpEndpointEnabled()) return null;
 
@@ -503,7 +503,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
 
         try
         {
-            return new AgentMcpEndpoint(runId, registry, autonomy, teamId, socketPath, token, connects, scope, ct, _logger);
+            return new AgentMcpEndpoint(runId, registry, autonomy, teamId, redactor, socketPath, token, connects, scope, ct, _logger);
         }
         // An over-length socket path throws ArgumentOutOfRangeException (UDS endpoint ctor); CreateDirectory can throw
         // IOException / UnauthorizedAccessException. The endpoint is optional infra, not the run, so any of these is a
@@ -532,7 +532,12 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
 
         var socketPath = LocalProcessRunner.McpSocketPathFor(runId.ToString("N"));
 
-        return OpenMcpEndpointIfEnabled(runId, autonomy, teamId, socketPath, token, ct);
+        // The reopened endpoint on a re-attach uses the NO-OP redactor: the fingerprint-verified redactor is resolved
+        // LATER, inside ReattachAndFoldAsync, where it gates the spool re-tail (redactor.Fingerprint must equal the one
+        // stamped on the handle at launch). Hoisting that resolution up here to feed the endpoint would entangle the
+        // delicate fingerprint-gated marker-only fallback, so it stays put. Residual risk is marginal — the MCP
+        // consumer is the model key's own provider — and full reattach-path tool-result redaction is a tracked follow-up.
+        return OpenMcpEndpointIfEnabled(runId, autonomy, teamId, SecretRedactor.None, socketPath, token, ct);
     }
 
     /// <summary>
