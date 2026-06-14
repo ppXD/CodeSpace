@@ -10,7 +10,7 @@ using Microsoft.Extensions.Logging;
 namespace CodeSpace.Core.Services.Workflows.Reconciliation;
 
 /// <summary>
-/// Three independent sweeps, one per stuck-state class. Order matters less than you'd think
+/// Four independent sweeps, one per stuck-state class. Order matters less than you'd think
 /// — each sweep's CAS protects against racing a normal flow or another reconciler tick.
 /// </summary>
 public sealed class StuckRunReconcilerService : IStuckRunReconcilerService, IScopedDependency
@@ -23,6 +23,24 @@ public sealed class StuckRunReconcilerService : IStuckRunReconcilerService, ISco
 
     /// <summary>Threshold for "Running but no progress" — past this AND no recent ledger activity, mark Failure.</summary>
     public static readonly TimeSpan RunningStuckAfter = TimeSpan.FromMinutes(30);
+
+    /// <summary>
+    /// Threshold for "Suspended but stranded" — past this AND zero pending waits, re-dispatch.
+    /// <para>2 minutes is safe because the predicate ALSO requires zero pending waits: every
+    /// legitimately-parked run — a human approval/action awaited for hours, a timer/delay, a
+    /// freshly-suspended map with K branch waits — HAS at least one Pending wait and is excluded
+    /// outright, regardless of age. The only durable zero-pending-wait Suspended state is the
+    /// stranded one (a resume resolved its last wait but its Suspended→Pending flip no-op'd
+    /// against an in-flight re-walk that re-suspended the run). The threshold's sole job is to
+    /// clear the sub-second resolve-then-flip window during a NORMAL last-wait resume — for that
+    /// fleeting instant the run is Suspended with zero pending waits, but a concurrent flip is
+    /// about to drive it. We measure age from <see cref="WorkflowRun.LastModifiedDate"/>: the
+    /// engine flips a run to Suspended via a TRACKED <c>run.Status = Suspended</c> + SaveChanges
+    /// (which the audit hook stamps) AFTER every branch wait is already persisted Pending, so a
+    /// freshly-suspended run always carries a FRESH LastModifiedDate. 2 min dwarfs the
+    /// sub-second window without making real recovery latency noticeable.</para>
+    /// </summary>
+    public static readonly TimeSpan SuspendedStrandedAfter = TimeSpan.FromMinutes(2);
 
     /// <summary>"Recent" ledger activity window — if a run has emitted records within this window, treat it as alive.</summary>
     public static readonly TimeSpan LedgerLivenessWindow = TimeSpan.FromMinutes(5);
@@ -48,18 +66,20 @@ public sealed class StuckRunReconcilerService : IStuckRunReconcilerService, ISco
         var redispatched = await RedispatchStuckPendingAsync(cancellationToken).ConfigureAwait(false);
         var reverted = await RevertStuckEnqueuedAsync(cancellationToken).ConfigureAwait(false);
         var abandoned = await MarkAbandonedRunningAsync(cancellationToken).ConfigureAwait(false);
+        var unstranded = await RedispatchStrandedSuspendedAsync(cancellationToken).ConfigureAwait(false);
 
         var summary = new StuckRunReconcileSummary
         {
             RedispatchedFromPending = redispatched,
             RevertedFromEnqueued = reverted,
             MarkedAbandonedFromRunning = abandoned,
+            RedispatchedFromStrandedSuspended = unstranded,
         };
 
         if (summary.Total > 0)
             _logger.LogInformation(
-                "StuckRunReconciler: redispatched={Redispatched}, reverted={Reverted}, abandoned={Abandoned}",
-                summary.RedispatchedFromPending, summary.RevertedFromEnqueued, summary.MarkedAbandonedFromRunning);
+                "StuckRunReconciler: redispatched={Redispatched}, reverted={Reverted}, abandoned={Abandoned}, unstranded={Unstranded}",
+                summary.RedispatchedFromPending, summary.RevertedFromEnqueued, summary.MarkedAbandonedFromRunning, summary.RedispatchedFromStrandedSuspended);
 
         return summary;
     }
@@ -185,5 +205,65 @@ public sealed class StuckRunReconcilerService : IStuckRunReconcilerService, ISco
         }
 
         return marked;
+    }
+
+    /// <summary>
+    /// Suspended older than threshold AND with ZERO pending waits: CAS Suspended → Pending then
+    /// re-dispatch. This is the safety net for the resume-flip-before-resolve race — the IMMEDIATE
+    /// resume path (approval/action/callback/deadline/timer) is intentionally barrier-free, so a
+    /// resume that resolves its wait in the tiny window AFTER an in-flight re-walk has already passed
+    /// that branch node leaves the run Suspended with every wait Resolved and no dispatch coming
+    /// (the resolver's flip no-op'd because the run was momentarily Running). The run is stranded.
+    /// <para>The zero-pending-waits predicate is what makes this surgical: a legitimately-parked run
+    /// (human approval awaited for hours, a timer/delay, a freshly-suspended map with K branch waits)
+    /// always HAS a Pending wait → excluded. The threshold then excludes the sub-second resolve-then-
+    /// flip window of a NORMAL last-wait resume (run momentarily Suspended with zero pending between
+    /// the resolve CAS and the flip). So only a durably-stranded run survives both filters.</para>
+    /// <para>We CAS Suspended → Pending FIRST (the dispatcher's CAS only matches Pending), then call
+    /// DispatchAsync — exactly how the resume path flips then dispatches. The rowcount guard means a
+    /// concurrent resume that already drove the run (its flip won) leaves us with 0 rows → we skip,
+    /// no double-dispatch. The resolved waits rehydrate as the suspended nodes' ResumePayloads on the
+    /// re-walk, so the run continues from where it stranded.</para>
+    /// </summary>
+    private async Task<int> RedispatchStrandedSuspendedAsync(CancellationToken cancellationToken)
+    {
+        var threshold = DateTimeOffset.UtcNow - SuspendedStrandedAfter;
+
+        var strandedIds = await _db.WorkflowRun.AsNoTracking()
+            .Where(r => r.Status == WorkflowRunStatus.Suspended
+                        && r.LastModifiedDate < threshold
+                        && !_db.WorkflowRunWait.Any(w => w.RunId == r.Id && w.Status == WorkflowWaitStatuses.Pending))
+            .OrderBy(r => r.LastModifiedDate)
+            .Take(BatchSize)
+            .Select(r => r.Id)
+            .ToListAsync(cancellationToken)
+            .ConfigureAwait(false);
+
+        var redispatched = 0;
+        foreach (var runId in strandedIds)
+        {
+            try
+            {
+                // CAS Suspended → Pending. 0 rows = a concurrent resume already flipped + is driving
+                // the dispatch (or the run advanced past Suspended). Skip — no double-dispatch.
+                var flipped = await _db.WorkflowRun
+                    .Where(r => r.Id == runId && r.Status == WorkflowRunStatus.Suspended)
+                    .ExecuteUpdateAsync(s => s.SetProperty(r => r.Status, WorkflowRunStatus.Pending), cancellationToken)
+                    .ConfigureAwait(false);
+
+                if (flipped == 0) continue;
+
+                // Now in Pending — hand back into the queue via the same path the resume uses. The
+                // dispatcher's own Pending → Enqueued CAS is the final guard against a racing dispatch.
+                if (await _dispatcher.DispatchAsync(runId, cancellationToken).ConfigureAwait(false)) redispatched++;
+            }
+            catch (Exception ex)
+            {
+                // Per-row resilience: one stranded row's failure doesn't abort the sweep.
+                _logger.LogWarning(ex, "StuckRunReconciler: re-dispatch of stranded Suspended run {RunId} failed; will retry next tick", runId);
+            }
+        }
+
+        return redispatched;
     }
 }

@@ -386,7 +386,98 @@ public class MapDurableResumeFlowTests
         results[1].GetProperty("summary").GetString().ShouldBe("RES-a");
     }
 
+    [Fact]
+    public async Task Two_map_branches_resolving_their_action_waits_concurrently_both_resolve_and_the_run_reaches_success()
+    {
+        // (i) THE PR-A REGRESSION: two map branches each park their OWN Action wait, then BOTH are resolved
+        // CONCURRENTLY (the two-near-simultaneous-human-clicks scenario) via ResumeByActionTokenAsync — the
+        // path that funnels into ResumeCoreAsync. On the OLD flip-before-resolve code, the loser of the run-
+        // flip CAS returned AlreadyResolved WITHOUT resolving its own wait → that branch's wait was orphaned
+        // → the run stranded Suspended forever (the human's decision lost). With resolve-FIRST + dispatch-on-
+        // last, the wait status CAS is the gate: BOTH callers resolve their own wait (both Resumed), and the
+        // run reaches Success. Cases a/b resolve SEQUENTIALLY and can't catch this; this one interleaves.
+        var key = "sp-" + Guid.NewGuid().ToString("N");
+        SuspendProbeNode.Reset(key);
+
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var workflowId = await CreateWorkflowAsync(teamId, userId, SuspendingMapDefinition(key));
+        var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId, payloadJson: """{ "things": ["a", "b"] }""");
+
+        await RunEngineAsync(runId);
+        await AssertSuspendedAsync(runId, "both branches parked their own Action wait");
+
+        // Each branch's wait token is "<key>::<element>" (minted by SuspendProbeNode). Fire BOTH resolves
+        // concurrently — each in its OWN DI scope, since CodeSpaceDbContext is scoped and not thread-safe.
+        var resolveA = ResolveBranchViaActionTokenAsync($"{key}::a", "approve-a", userId, teamId);
+        var resolveB = ResolveBranchViaActionTokenAsync($"{key}::b", "approve-b", userId, teamId);
+        var results = await Task.WhenAll(resolveA, resolveB);
+
+        // BOTH calls must have resolved their OWN wait — neither lost to a run-flip race before resolving.
+        results[0].ShouldBe(ActionResumeResult.Resumed, "branch a's concurrent click resolved its own wait");
+        results[1].ShouldBe(ActionResumeResult.Resumed, "branch b's concurrent click resolved its own wait");
+
+        using (var verify = _fixture.BeginScope())
+        {
+            var db = verify.Resolve<CodeSpaceDbContext>();
+            // The crux: NEITHER wait is orphaned. Both ended Resolved (on the old code one stays Pending).
+            (await db.WorkflowRunWait.AsNoTracking().CountAsync(w => w.RunId == runId && w.Status == WorkflowWaitStatuses.Pending))
+                .ShouldBe(0, "neither branch's wait is orphaned by the concurrent flip-before-resolve race");
+            (await db.WorkflowRunWait.AsNoTracking().CountAsync(w => w.RunId == runId && w.Status == WorkflowWaitStatuses.Resolved))
+                .ShouldBe(2, "both branch waits resolved with their own concurrent click");
+        }
+
+        // The run was flipped + dispatched exactly once by whichever caller resolved the LAST wait → re-walk.
+        await RunEngineAsync(runId);
+
+        using var done = _fixture.BeginScope();
+        var fdb = done.Resolve<CodeSpaceDbContext>();
+        (await fdb.WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == runId)).Status
+            .ShouldBe(WorkflowRunStatus.Success, "the map run completes — it was NOT stranded Suspended by the orphaned-wait race");
+
+        var resultsJson = JsonDocument.Parse((await MapNodeAsync(fdb, runId)).OutputsJson).RootElement.GetProperty("results");
+        resultsJson.GetArrayLength().ShouldBe(2, "both branches reduced after both concurrent resolves landed");
+    }
+
+    [Fact]
+    public async Task A_single_wait_run_resumes_identically_via_the_action_token_path()
+    {
+        // (j) NON-REGRESSION for the overwhelmingly common single-wait case: a run parked on ONE Action wait
+        // resolves, finds no other pending wait, flips + dispatches, and reaches Success — the same observable
+        // outcome as before the resolve-first reorder. A map of ONE element is the minimal single-wait shape.
+        var key = "sp-" + Guid.NewGuid().ToString("N");
+        SuspendProbeNode.Reset(key);
+
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var workflowId = await CreateWorkflowAsync(teamId, userId, SuspendingMapDefinition(key));
+        var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId, payloadJson: """{ "things": ["solo"] }""");
+
+        await RunEngineAsync(runId);
+
+        using (var parked = _fixture.BeginScope())
+            (await parked.Resolve<CodeSpaceDbContext>().WorkflowRunWait.AsNoTracking().CountAsync(w => w.RunId == runId && w.Status == WorkflowWaitStatuses.Pending))
+                .ShouldBe(1, "the single-wait run parks exactly one wait");
+
+        (await ResolveBranchViaActionTokenAsync($"{key}::solo", "approve", userId, teamId))
+            .ShouldBe(ActionResumeResult.Resumed, "the single wait resolves, no sibling pending → flip + dispatch (unchanged)");
+
+        await RunEngineAsync(runId);
+
+        using var done = _fixture.BeginScope();
+        (await done.Resolve<CodeSpaceDbContext>().WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == runId)).Status
+            .ShouldBe(WorkflowRunStatus.Success, "single-wait resume reaches Success identically to before the reorder");
+    }
+
     // ─── Helpers ────────────────────────────────────────────────────────────────
+
+    // Resolve ONE branch's Action wait via ResumeByActionTokenAsync — the human-click path that funnels into
+    // ResumeCoreAsync (the path the PR-A fix targets). Located by the stub's correlation token "<key>::<element>".
+    private async Task<ActionResumeResult> ResolveBranchViaActionTokenAsync(string token, string actionKey, Guid actorUserId, Guid teamId)
+    {
+        using var scope = _fixture.BeginScope();
+        return await scope.Resolve<IWorkflowResumeService>()
+            .ResumeByActionTokenAsync(token, actionKey, actorUserId, comment: null, values: null, teamId, CancellationToken.None);
+    }
+
 
     private static async Task<Core.Persistence.Entities.WorkflowRunNode> MapNodeAsync(CodeSpaceDbContext db, Guid runId) =>
         await db.WorkflowRunNode.AsNoTracking().SingleAsync(n => n.RunId == runId && n.NodeId == "map" && n.IterationKey == "");

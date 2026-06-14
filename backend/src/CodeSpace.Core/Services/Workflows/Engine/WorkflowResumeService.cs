@@ -14,10 +14,15 @@ namespace CodeSpace.Core.Services.Workflows.Engine;
 /// Wakes a suspended run. The single entry point for every resume signal — a scheduled timer
 /// (engine schedules <see cref="ResumeWaitAsync"/> at wake_at), a human approval, or an external
 /// callback. Every signal targets ONE specific wait (its own timer / approval / callback / action),
-/// resolves only that wait with its payload, flips the run Suspended -> Pending, and re-dispatches;
-/// the durable walker rehydrates, injects the resolved payload as the suspended node's ResumePayload,
-/// and continues. A run parked on several parallel waits resolves each independently — no signal
-/// collapses a sibling wait into the wrong decision.
+/// RESOLVES only that wait with its payload FIRST (a status-guarded CAS on the wait — the single-writer
+/// gate), THEN flips the run Suspended -> Pending and re-dispatches; the durable walker rehydrates,
+/// injects the resolved payload as the suspended node's ResumePayload, and continues. Resolving the wait
+/// BEFORE the run flip is what keeps two near-simultaneous signals safe — each lands its own payload on
+/// its own wait, so neither is orphaned by losing a run-flip race before it resolved. A run parked on
+/// several parallel waits resolves each independently — no signal collapses a sibling wait into the wrong
+/// decision. The wait-COMPLETION path (<see cref="ResumeOnWaitCompletionAsync"/>) additionally holds the
+/// run Suspended until the LAST sibling resolves (the wait-for-all barrier); the immediate signal paths
+/// re-dispatch at once and any still-suspended sibling re-parks on the re-walk.
 /// </summary>
 public interface IWorkflowResumeService
 {
@@ -26,9 +31,11 @@ public interface IWorkflowResumeService
     /// <paramref name="resumePayloadJson"/> (null for a bare timer wake → a generated resumed_at
     /// marker; an approver's decision body otherwise) as that wait's payload, injected as the node's
     /// ResumePayload on re-run. Resolves nothing else, so a run parked on several parallel waits
-    /// advances only the resolved branch and re-suspends on any sibling still pending. Returns false
-    /// (no-op) when the run isn't Suspended — already resumed, terminal, or never suspended — so
-    /// duplicate signals (a fired timer + a manual approval, a Hangfire retry) are idempotent.
+    /// advances only the resolved branch and re-suspends on any sibling still pending. Resolves the wait
+    /// FIRST (the status CAS is the single-writer gate), then flips the run Suspended -> Pending and
+    /// re-dispatches at once — the immediate path doesn't wait for sibling waits. Returns false (no-op)
+    /// when this wait was already resolved — a deadline, a sibling/duplicate signal, or a Hangfire retry
+    /// got there first — so every duplicate signal is idempotent.
     /// </summary>
     Task<bool> ResumeWaitAsync(Guid runId, Guid waitId, string? resumePayloadJson, CancellationToken cancellationToken);
 
@@ -101,87 +108,99 @@ public sealed class WorkflowResumeService : IWorkflowResumeService, IScopedDepen
 
     // Resolve ONLY waitId — every resume signal targets one specific wait (its timer / approval /
     // callback / action), so a run parked on several parallel waits resolves each independently with
-    // its own payload. The run flips Suspended -> Pending and re-dispatches; the walker advances the
-    // resolved branch and re-suspends on any sibling wait still pending.
+    // its own payload. RESOLVE-FIRST (the wait's status CAS — not the run flip — is the single-writer
+    // gate), then flip + dispatch: two branches resolving near-simultaneously each land their OWN payload
+    // on their OWN wait first, so neither is lost to a run-flip race before resolving (the orphaned-wait
+    // bug). This is the IMMEDIATE single-wait path — it re-dispatches as soon as THIS wait resolves, even
+    // when a parallel sibling wait is still pending (the approval/action path re-walks at once); the
+    // wait-for-all barrier is the wait-COMPLETION path's concern (ResumeOnWaitCompletionAsync). The bool
+    // return is derived from whether THIS call resolved its wait — preserving every caller's contract.
     private async Task<bool> ResumeCoreAsync(Guid runId, string? resumePayloadJson, Guid waitId, CancellationToken cancellationToken)
     {
-        // Single-writer gate: only one resume flips Suspended -> Pending. Concurrent signals
-        // (a fired timer + a manual resume, or a Hangfire retry of the timer job) cannot both
-        // proceed — the loser's UPDATE affects 0 rows and it no-ops.
-        var flipped = await _db.WorkflowRun
-            .Where(r => r.Id == runId && r.Status == WorkflowRunStatus.Suspended)
-            .ExecuteUpdateAsync(s => s.SetProperty(r => r.Status, WorkflowRunStatus.Pending), cancellationToken)
-            .ConfigureAwait(false);
+        // A bare timer wake supplies no payload, so we stamp a default marker; approval / callback /
+        // action supply their decision body. (This is the ONLY difference from the wait-completion path.)
+        var payload = resumePayloadJson ?? JsonSerializer.Serialize(new { resumed_at = DateTimeOffset.UtcNow.ToString("o") });
 
-        if (flipped == 0)
+        var resolved = await ResolveWaitThenDispatchAsync(runId, waitId, payload, waitForAllPending: false, cancellationToken).ConfigureAwait(false);
+
+        if (!resolved)
         {
-            _logger.LogDebug("Resume: run {RunId} not Suspended — skipping (already resumed / terminal / never suspended)", runId);
+            _logger.LogDebug("Resume: wait {WaitId} on run {RunId} already resolved — skipping (deadline / sibling / double signal)", waitId, runId);
             return false;
         }
 
-        // Resolve the ONE targeted wait + stamp the resume payload (the durable walker injects
-        // payload_jsonb as the node's ResumePayload on re-run). A bare timer wake supplies no payload,
-        // so we stamp a default marker; approval / callback / action supply their decision body. The
-        // status guard keeps this idempotent against a deadline / sibling resume that already resolved it.
+        _logger.LogInformation("Resume: run {RunId} wait {WaitId} resolved (Suspended -> Pending -> dispatched)", runId, waitId);
+        return true;
+    }
+
+    public async Task<bool> ResumeOnWaitCompletionAsync(Guid runId, Guid waitId, string resumePayloadJson, CancellationToken cancellationToken)
+    {
+        // A finished agent / child run MUST have its result consumed; the wait CAS below cannot drop it on a
+        // sibling's run-flip race (the corruption where one completer's payload landed on every parallel
+        // wait). Idempotent: an already-resolved wait (replay / double-notify) is a no-op. Unlike the
+        // immediate path, this WAITS FOR ALL — it re-dispatches only once NO pending wait remains, so K
+        // parallel completions advance the run exactly once, after the last.
+        var resolved = await ResolveWaitThenDispatchAsync(runId, waitId, resumePayloadJson, waitForAllPending: true, cancellationToken).ConfigureAwait(false);
+
+        if (!resolved)
+        {
+            _logger.LogDebug("Wait-completion resume: wait {WaitId} already resolved — skipping (replay / double-notify)", waitId);
+            return false;
+        }
+
+        _logger.LogInformation("Wait-completion resume: run {RunId} wait {WaitId} resolved (dispatched once its last sibling wait resolved)", runId, waitId);
+        return true;
+    }
+
+    // The single resolve-first concurrency core, shared by every resume signal (timer / approval /
+    // callback / action via ResumeCoreAsync; agent / sub-workflow completion via ResumeOnWaitCompletionAsync).
+    // Resolving the wait FIRST — not flipping the run first — is what makes K parallel waits safe: each
+    // signal lands its OWN payload on its OWN wait, so none is orphaned by losing a run-flip CAS before it
+    // resolved. Returns true when THIS call resolved the wait, false when it was already resolved (a deadline
+    // / sibling / replay won) — the bool every caller's return contract is derived from, NOT the run flip.
+    //
+    // <paramref name="waitForAllPending"/> is the ONE divergence between the two entry points: the wait-
+    // COMPLETION path (true) holds the run Suspended until the LAST sibling wait resolves (the wait-for-all
+    // barrier — a durably-finished unit's result must never be missed by a partial re-walk); the IMMEDIATE
+    // path (false) re-dispatches as soon as THIS wait resolves, so an approval/action click re-walks at once
+    // and the still-suspended siblings re-park on the re-walk.
+    private async Task<bool> ResolveWaitThenDispatchAsync(Guid runId, Guid waitId, string payload, bool waitForAllPending, CancellationToken cancellationToken)
+    {
         var now = DateTimeOffset.UtcNow;
-        var payload = resumePayloadJson ?? JsonSerializer.Serialize(new { resumed_at = now.ToString("o") });
-        await _db.WorkflowRunWait
-            .Where(w => w.RunId == runId && w.Status == WorkflowWaitStatuses.Pending && w.Id == waitId)
+
+        // 1. Status-guarded resolve of the ONE targeted wait. This CAS is the single-writer gate: 0 rows =
+        //    the wait was already resolved (a deadline / sibling / double signal) → the caller no-ops. The
+        //    walker injects payload_jsonb as the node's ResumePayload on re-run.
+        var resolved = await _db.WorkflowRunWait
+            .Where(w => w.Id == waitId && w.Status == WorkflowWaitStatuses.Pending)
             .ExecuteUpdateAsync(s => s
                 .SetProperty(w => w.Status, WorkflowWaitStatuses.Resolved)
                 .SetProperty(w => w.PayloadJson, payload)
                 .SetProperty(w => w.ResolvedAt, (DateTimeOffset?)now), cancellationToken)
             .ConfigureAwait(false);
 
-        // Re-dispatch via the existing Pending -> Enqueued -> engine path, deferred until AFTER this
-        // resume's transaction commits. RunAfterCommitAsync runs inline when there's no ambient
-        // transaction (a timer / callback / deadline resume), but DEFERS when one is open (a human
-        // respond folded into the RespondToMessageCommand transaction) — otherwise a worker could fetch
-        // the job before the Suspended->Pending flip is visible and CAS-no-op it into a stuck wait.
-        // The walker rehydrates and continues from the suspended node.
-        await _postCommit.RunAfterCommitAsync(ct => _dispatcher.DispatchAsync(runId, ct), cancellationToken).ConfigureAwait(false);
+        if (resolved == 0) return false;
 
-        _logger.LogInformation("Resume: run {RunId} resumed (Suspended -> Pending -> dispatched)", runId);
-        return true;
-    }
-
-    public async Task<bool> ResumeOnWaitCompletionAsync(Guid runId, Guid waitId, string resumePayloadJson, CancellationToken cancellationToken)
-    {
-        var now = DateTimeOffset.UtcNow;
-
-        // 1. Durably resolve THIS wait, independent of the run's status. A finished agent / child run MUST
-        //    have its result consumed; we cannot drop it on a sibling's run-flip CAS race (the corruption
-        //    where one completer's payload landed on every parallel wait). Idempotent: 0 rows = the wait was
-        //    already resolved (a replay / double-notify) → no-op.
-        var resolved = await _db.WorkflowRunWait
-            .Where(w => w.Id == waitId && w.Status == WorkflowWaitStatuses.Pending)
-            .ExecuteUpdateAsync(s => s
-                .SetProperty(w => w.Status, WorkflowWaitStatuses.Resolved)
-                .SetProperty(w => w.PayloadJson, resumePayloadJson)
-                .SetProperty(w => w.ResolvedAt, (DateTimeOffset?)now), cancellationToken)
-            .ConfigureAwait(false);
-
-        if (resolved == 0)
+        // 2. Wait-for-all barrier (wait-completion path only): while any sibling wait is still pending the
+        //    run stays Suspended, so no partial re-walk advances the run early or misses a wait resolved
+        //    just after the walker passed its node (the stuck race). The immediate path skips this — it
+        //    re-walks at once and the still-suspended siblings re-park.
+        if (waitForAllPending)
         {
-            _logger.LogDebug("Wait-completion resume: wait {WaitId} already resolved — skipping (replay / double-notify)", waitId);
-            return false;
+            var anyPending = await _db.WorkflowRunWait.AsNoTracking()
+                .AnyAsync(w => w.RunId == runId && w.Status == WorkflowWaitStatuses.Pending, cancellationToken)
+                .ConfigureAwait(false);
+
+            if (anyPending)
+            {
+                _logger.LogDebug("Resume: wait {WaitId} resolved; siblings still pending on run {RunId} — staying suspended", waitId, runId);
+                return true;
+            }
         }
 
-        // 2. Re-dispatch only once the LAST parallel wait resolved. While any sibling wait is still pending
-        //    the run stays Suspended — so the walker never does a partial re-walk that could miss a wait
-        //    resolved just after it passed the node (the stuck race). The last completer flips
-        //    Suspended→Pending (CAS); a concurrent last-completer loses the flip and the winner's single
-        //    re-walk consumes every resolved wait (each keyed to its own node by the walker).
-        var anyPending = await _db.WorkflowRunWait.AsNoTracking()
-            .AnyAsync(w => w.RunId == runId && w.Status == WorkflowWaitStatuses.Pending, cancellationToken)
-            .ConfigureAwait(false);
-
-        if (anyPending)
-        {
-            _logger.LogDebug("Wait-completion resume: wait {WaitId} resolved; siblings still pending on run {RunId} — staying suspended", waitId, runId);
-            return true;
-        }
-
+        // Single-writer flip gate: only one resume flips Suspended -> Pending. A concurrent sibling that
+        // already resolved its OWN wait (no orphan) but loses this CAS no-ops the dispatch — the winner's
+        // single re-walk consumes every resolved wait (each keyed to its own node by the walker).
         var flipped = await _db.WorkflowRun
             .Where(r => r.Id == runId && r.Status == WorkflowRunStatus.Suspended)
             .ExecuteUpdateAsync(s => s.SetProperty(r => r.Status, WorkflowRunStatus.Pending), cancellationToken)
@@ -189,13 +208,19 @@ public sealed class WorkflowResumeService : IWorkflowResumeService, IScopedDepen
 
         if (flipped == 0)
         {
-            _logger.LogDebug("Wait-completion resume: run {RunId} no longer Suspended — a concurrent resume is driving the dispatch", runId);
+            _logger.LogDebug("Resume: run {RunId} no longer Suspended — a concurrent resume is driving the dispatch", runId);
             return true;
         }
 
+        // Re-dispatch via the existing Pending -> Enqueued -> engine path, deferred until AFTER this
+        // resume's transaction commits. RunAfterCommitAsync runs inline when there's no ambient transaction
+        // (a timer / callback / deadline / agent-completion resume), but DEFERS when one is open (a human
+        // respond folded into the RespondToMessageCommand transaction) — otherwise a worker could fetch the
+        // job before the Suspended->Pending flip is visible and CAS-no-op it into a stuck wait. The walker
+        // rehydrates and continues from the suspended node(s).
         await _postCommit.RunAfterCommitAsync(ct => _dispatcher.DispatchAsync(runId, ct), cancellationToken).ConfigureAwait(false);
 
-        _logger.LogInformation("Wait-completion resume: run {RunId} resumed after its last parallel wait resolved", runId);
+        _logger.LogInformation("Resume: run {RunId} re-dispatched after its wait resolved", runId);
         return true;
     }
 

@@ -5,7 +5,7 @@ namespace CodeSpace.Core.Services.Workflows.Reconciliation;
 /// expected state-machine trajectory. The dispatcher's CAS + the engine's CAS give us
 /// no-double-execution; the reconciler is what gives us no-stuck-rows.
 ///
-/// <para>Three failure modes covered:</para>
+/// <para>Four failure modes covered:</para>
 /// <list type="number">
 ///   <item><b>Stuck Pending</b> (created > 2 min ago, never advanced) — process crashed
 ///       between RunStarter.SaveChanges and IWorkflowRunDispatcher.DispatchAsync, OR the
@@ -21,6 +21,13 @@ namespace CodeSpace.Core.Services.Workflows.Reconciliation;
 ///       operator sees what happened + can Replay. We CANNOT auto-replay because the original
 ///       worker may have made side-effecting calls (POST comment, send Slack); replaying
 ///       would duplicate those.</item>
+///   <item><b>Stranded Suspended</b> (status=Suspended > 2 min ago with ZERO pending waits) —
+///       a resume resolved its wait in the narrow window AFTER an in-flight re-walk had already
+///       passed that branch node, so the walk re-suspended the run while the resolver's
+///       Suspended→Pending flip became a no-op (the run was momentarily Running). The run ends
+///       Suspended with ALL waits Resolved and no dispatch coming — stranded forever. A legitimately
+///       parked run always has a Pending wait, so it is excluded; we CAS Suspended→Pending then
+///       re-dispatch (the resolved waits rehydrate as the suspended nodes' payloads on the re-walk).</item>
 /// </list>
 ///
 /// <para>Idempotent + safe to call concurrently from multiple replicas because every state
@@ -37,6 +44,7 @@ public sealed record StuckRunReconcileSummary
     public int RedispatchedFromPending { get; init; }
     public int RevertedFromEnqueued { get; init; }
     public int MarkedAbandonedFromRunning { get; init; }
+    public int RedispatchedFromStrandedSuspended { get; init; }
 
-    public int Total => RedispatchedFromPending + RevertedFromEnqueued + MarkedAbandonedFromRunning;
+    public int Total => RedispatchedFromPending + RevertedFromEnqueued + MarkedAbandonedFromRunning + RedispatchedFromStrandedSuspended;
 }

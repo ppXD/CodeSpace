@@ -200,14 +200,15 @@ public class StuckRunReconcilerFlowTests
     }
 
     [Fact]
-    public async Task Suspended_run_is_never_swept_by_the_reconciler()
+    public async Task Suspended_run_with_a_pending_wait_is_never_swept_by_the_reconciler()
     {
         // Engine v2 Phase 1: a run paused on a suspended node sits in Suspended — intentionally
-        // parked (waiting on a timer / approval / callback), NOT stuck. The reconciler's three
-        // sweeps target Pending / Enqueued / Running only, so a Suspended run — even one far
-        // older than the 30-minute abandoned-Running threshold — must survive untouched. Without
-        // this, a workflow waiting on a long sleep or a human approval would be murdered by the
-        // abandoned-Running sweep.
+        // parked (waiting on a timer / approval / callback), NOT stuck. The Pending/Enqueued/Running
+        // sweeps target their own statuses only, so they never match a Suspended row; the stranded-
+        // Suspended sweep DOES match Suspended but is gated on ZERO pending waits, so a genuinely
+        // parked run (one that still HAS a Pending wait — exactly what this stages) survives every
+        // sweep however old it is. Without this, a workflow waiting on a long sleep or a human
+        // approval would be wrongly recovered.
         var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
         var workflowId = await CreateWorkflowAsync(teamId, userId);
 
@@ -218,17 +219,251 @@ public class StuckRunReconcilerFlowTests
             startedAtAgo: StuckRunReconcilerService.RunningStuckAfter + TimeSpan.FromHours(2),
             backdateLastModified: true);
 
+        // The parked signature: an outstanding Pending wait this run is genuinely waiting on.
+        await SeedWaitAsync(runId, "start", WorkflowWaitStatuses.Pending);
+
         var summary = await ReconcileAsync();
 
         summary.MarkedAbandonedFromRunning.ShouldBe(0,
             "a Suspended run must NOT be counted as an abandoned Running run, however old it is");
+        summary.RedispatchedFromStrandedSuspended.ShouldBe(0,
+            "a Suspended run that still HAS a Pending wait is parked, not stranded — the stranded sweep must skip it");
 
         (await ReadStatusAsync(runId)).ShouldBe(WorkflowRunStatus.Suspended,
-            "a Suspended run is intentionally parked and must survive every reconciler sweep — Pending re-dispatch, " +
-            "Enqueued revert, and abandoned-Running marking all skip it because none of those scans match Suspended");
+            "a parked Suspended run must survive every reconciler sweep — the status-scoped sweeps don't match it " +
+            "and the stranded-Suspended sweep is excluded by its outstanding Pending wait");
+    }
+
+    [Fact]
+    public async Task Stranded_suspended_with_zero_pending_waits_is_redispatched_and_reaches_terminal()
+    {
+        // The resume-flip-before-resolve race's residual: a run resolved its last wait in the narrow
+        // window AFTER an in-flight re-walk passed that branch node, so the walk re-suspended the run
+        // while the resolver's Suspended→Pending flip no-op'd (the run was momentarily Running). The
+        // run is now Suspended with ALL waits Resolved and NO dispatch coming — stranded forever. We
+        // simulate that exact end-state directly (Suspended + a Resolved wait + an old LastModifiedDate),
+        // run the reconciler, and assert it re-dispatches AND — driving the engine — the run reaches
+        // its terminal Success state (the resolved wait rehydrates; the rest of the graph walks out).
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var workflowId = await CreateWorkflowAsync(teamId, userId);   // start(trigger) -> end(terminal)
+
+        var runId = await StageStuckRunAsync(
+            workflowId, teamId,
+            status: WorkflowRunStatus.Suspended,
+            createdAgo: StuckRunReconcilerService.SuspendedStrandedAfter + TimeSpan.FromMinutes(5),
+            backdateLastModified: true);
+
+        // Pre-record the trigger as already completed (as if it ran, the run suspended downstream,
+        // then stranded) so the resumed walk doesn't re-run a settled node — mirrors the durable
+        // re-entry pattern. Stamp the run's only wait as RESOLVED — the stranded signature.
+        await PreRecordNodeCompletedAsync(runId, "start");
+        await SeedWaitAsync(runId, "start", WorkflowWaitStatuses.Resolved);
+
+        var summary = await ReconcileAsync();
+
+        summary.RedispatchedFromStrandedSuspended.ShouldBe(1,
+            "a Suspended run past the grace window with zero pending waits is stranded — the 4th sweep must re-dispatch it");
+
+        (await ReadStatusAsync(runId)).ShouldBe(WorkflowRunStatus.Enqueued,
+            "after the CAS Suspended→Pending + the dispatcher's Pending→Enqueued, the row waits in Enqueued for the worker");
+
+        // Drive the engine the way the Hangfire worker would, and prove the run actually completes —
+        // the recovery is only real if the re-dispatched run reaches a terminal state, not just Enqueued.
+        await RunEngineAsync(runId);
+
+        (await ReadStatusAsync(runId)).ShouldBe(WorkflowRunStatus.Success,
+            customMessage: "the re-dispatched stranded run must walk to terminal Success — if it re-suspended or " +
+                           "stayed Enqueued, the sweep moved the row but the engine couldn't actually finish it");
+    }
+
+    [Fact]
+    public async Task Stranded_suspended_with_a_resolved_suspending_node_wait_resumes_from_payload_and_reaches_success()
+    {
+        // The FAITHFUL stranded scenario the sibling recovery test above only approximates: the orphaned wait
+        // belongs to a REAL SUSPENDING node (the SuspendProbeNode, the agent.code stand-in), not the trigger.
+        // The other test pre-records the wait on the already-settled "start" trigger, so the re-walk treats it
+        // as done and never re-runs a node that consumes its rehydrated payload — it only proves "re-queue +
+        // walk the remaining frontier". Here we drive the REAL engine to a genuine park (real branch ledger +
+        // a real WorkflowRunWait under iteration key "map#0"), then reproduce the exact orphan: stamp that
+        // suspending node's wait Resolved (with the payload it expects on resume) WITHOUT going through the
+        // resume service, so NO Suspended→Pending flip / dispatch happens — the run is stranded Suspended with
+        // its sole wait Resolved. The sweep must re-dispatch it AND, on the engine re-walk, the suspending node
+        // must actually RESUME from its rehydrated payload (proven by results[0].summary, a value the node only
+        // emits on its resumed pass) and the run must reach terminal Success — not re-strand.
+        var key = "sp-" + Guid.NewGuid().ToString("N");
+        SuspendProbeNode.Reset(key);
+
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var workflowId = await CreateSuspendingMapWorkflowAsync(teamId, userId, key);   // trigger -> map[suspending body] -> terminal
+        var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId, payloadJson: """{ "things": ["solo"] }""");
+
+        // Drive the engine to a REAL parked state: the suspending leaf node commits its own WorkflowRunWait
+        // (token "<key>::solo", iteration key "map#0") and the run flips to Suspended. One element ⇒ one wait.
+        await RunEngineAsync(runId);
+        (await ReadStatusAsync(runId)).ShouldBe(WorkflowRunStatus.Suspended, "the suspending body node parked a real wait");
+        SuspendProbeNode.FirstPassCount(key, "solo").ShouldBe(1, "the suspending node ran its first (parking) pass exactly once");
+
+        // Reproduce the orphan end-state directly on the REAL wait: resolve it (with the resume payload the node
+        // expects) but DON'T route through the resume service, so the Suspended→Pending flip + dispatch never
+        // fire. Then backdate LastModifiedDate past the grace window. Now: Suspended + zero Pending + 1 Resolved
+        // suspending-node wait + stale — the stranded signature, but with a wait that drives a node on re-walk.
+        await ResolveWaitInPlaceAsync(runId, $"{key}::solo", """{ "summary": "RES-solo" }""");
+        await BackdateLastModifiedAsync(runId, StuckRunReconcilerService.SuspendedStrandedAfter + TimeSpan.FromMinutes(5));
+
+        var summary = await ReconcileAsync();
+
+        summary.RedispatchedFromStrandedSuspended.ShouldBe(1,
+            "the stranded Suspended run (zero pending waits, past the grace window) must be re-dispatched by the 4th sweep");
+        (await ReadStatusAsync(runId)).ShouldBe(WorkflowRunStatus.Enqueued,
+            "after the CAS Suspended→Pending + the dispatcher's Pending→Enqueued, the row waits in Enqueued for the worker");
+
+        // Drive the engine the way the Hangfire worker would. The crux: the suspending node must RESUME from its
+        // rehydrated wait payload (not re-park, not re-run its first pass) and the run must walk to Success.
+        await RunEngineAsync(runId);
+
+        (await ReadStatusAsync(runId)).ShouldBe(WorkflowRunStatus.Success,
+            customMessage: "the re-dispatched stranded run must walk to terminal Success — if it re-suspended, the " +
+                           "suspending node's wait was not rehydrated as its ResumePayload and the run re-stranded");
+
+        SuspendProbeNode.FirstPassCount(key, "solo").ShouldBe(1,
+            "the suspending node did NOT re-run its parking first pass on the recovery re-walk — it RESUMED from the resolved wait");
+
+        // The observable that PROVES the resume consumed the rehydrated payload: results[0].summary is "RES-solo",
+        // a value SuspendProbeNode only emits on its RESUMED pass (echoing the resolved wait's payload). A re-walk
+        // that merely advanced the remaining frontier without resuming this node could not produce it.
+        using var done = _fixture.BeginScope();
+        var db = done.Resolve<CodeSpaceDbContext>();
+        var mapNode = await db.WorkflowRunNode.AsNoTracking().SingleAsync(n => n.RunId == runId && n.NodeId == "map" && n.IterationKey == "");
+        var results = System.Text.Json.JsonDocument.Parse(mapNode.OutputsJson).RootElement.GetProperty("results");
+        results.GetArrayLength().ShouldBe(1);
+        results[0].GetProperty("item").GetString().ShouldBe("solo", "the resumed branch echoed its own element");
+        results[0].GetProperty("summary").GetString().ShouldBe("RES-solo",
+            "the suspending node resumed from its rehydrated wait payload — this summary exists only in the resolved wait");
+    }
+
+    [Fact]
+    public async Task Suspended_with_a_pending_wait_is_NOT_swept_however_old()
+    {
+        // False-positive guard #1 + #2 + #4: a run legitimately parked on a human approval/action for
+        // hours, on a timer/delay, or a freshly-suspended map with K branch waits — ALL have at least
+        // one Pending wait. The zero-pending-waits predicate excludes them outright, regardless of age,
+        // so the sweep never murders a run that's genuinely waiting for a signal.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var workflowId = await CreateWorkflowAsync(teamId, userId);
+
+        var runId = await StageStuckRunAsync(
+            workflowId, teamId,
+            status: WorkflowRunStatus.Suspended,
+            createdAgo: StuckRunReconcilerService.SuspendedStrandedAfter + TimeSpan.FromHours(2),
+            backdateLastModified: true);
+
+        // One PENDING wait — the legitimately-parked signature (approval / timer / map branch).
+        await SeedWaitAsync(runId, "start", WorkflowWaitStatuses.Pending);
+
+        var summary = await ReconcileAsync();
+
+        summary.RedispatchedFromStrandedSuspended.ShouldBe(0,
+            "a Suspended run with a Pending wait is parked, not stranded — it must NOT be swept, however old it is");
+        (await ReadStatusAsync(runId)).ShouldBe(WorkflowRunStatus.Suspended,
+            "a run waiting on a Pending wait stays Suspended until its real signal arrives");
+    }
+
+    [Fact]
+    public async Task Suspended_with_zero_pending_waits_but_within_grace_window_is_NOT_swept()
+    {
+        // False-positive guard #3: the microsecond window during a NORMAL last-wait resume — the run
+        // is momentarily Suspended with zero pending waits between the resolve CAS and the
+        // Suspended→Pending flip. A fresh LastModifiedDate keeps it inside the grace window, so the
+        // sweep leaves it alone and lets the concurrent flip drive the dispatch.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var workflowId = await CreateWorkflowAsync(teamId, userId);
+
+        var runId = await StageStuckRunAsync(
+            workflowId, teamId,
+            status: WorkflowRunStatus.Suspended,
+            createdAgo: TimeSpan.Zero,
+            backdateLastModified: false);   // fresh LastModifiedDate — inside the grace window
+
+        await SeedWaitAsync(runId, "start", WorkflowWaitStatuses.Resolved);   // zero pending, but young
+
+        var summary = await ReconcileAsync();
+
+        summary.RedispatchedFromStrandedSuspended.ShouldBe(0,
+            "a Suspended run with zero pending waits but a FRESH LastModifiedDate is mid-resume — the grace " +
+            "window must protect it so we don't race the concurrent Suspended→Pending flip");
+        (await ReadStatusAsync(runId)).ShouldBe(WorkflowRunStatus.Suspended,
+            "within the grace window the run stays Suspended — the resume's own flip will drive it momentarily");
     }
 
     // ─── Helpers ──────────────────────────────────────────────────────────────────
+
+    private async Task RunEngineAsync(Guid runId)
+    {
+        using var scope = _fixture.BeginScope();
+        await scope.Resolve<CodeSpace.Core.Services.Workflows.Engine.IWorkflowEngine>().ExecuteRunAsync(runId, CancellationToken.None);
+    }
+
+    private async Task PreRecordNodeCompletedAsync(Guid runId, string nodeId)
+    {
+        using var scope = _fixture.BeginScope();
+        var logger = scope.Resolve<CodeSpace.Core.Services.Workflows.Lifecycle.IRunRecordLogger>();
+        var empty = (IReadOnlyDictionary<string, System.Text.Json.JsonElement>)new Dictionary<string, System.Text.Json.JsonElement>();
+        await logger.NodeStartedAsync(runId, nodeId, iterationKey: "", empty, empty, CancellationToken.None);
+        await logger.NodeCompletedAsync(runId, nodeId, iterationKey: "", empty, routingHints: null, TimeSpan.FromMilliseconds(1), CancellationToken.None);
+    }
+
+    /// <summary>
+    /// Resolve a REAL parked wait in place (located by its correlation token) WITHOUT going through the resume
+    /// service — stamping it Resolved + injecting the resume payload but firing NO Suspended→Pending flip / no
+    /// dispatch. This is precisely the orphaned-wait residue of the resume-flip-before-resolve race: the wait
+    /// resolved but the run was never re-queued, leaving it stranded Suspended.
+    /// </summary>
+    private async Task ResolveWaitInPlaceAsync(Guid runId, string token, string payloadJson)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+
+        var wait = await db.WorkflowRunWait.SingleAsync(w => w.RunId == runId && w.Token == token);
+        wait.Status = WorkflowWaitStatuses.Resolved;
+        wait.PayloadJson = payloadJson;
+        wait.ResolvedAt = DateTimeOffset.UtcNow;
+
+        await db.SaveChangesAsync();
+    }
+
+    /// <summary>
+    /// Backdate a run's LastModifiedDate via raw SQL (EF's audit hook would otherwise re-stamp it to now),
+    /// so a genuinely-suspended run looks stale to the stranded-Suspended sweep's grace-window check.
+    /// </summary>
+    private async Task BackdateLastModifiedAsync(Guid runId, TimeSpan ago)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        await db.Database.ExecuteSqlRawAsync(
+            "UPDATE workflow_run SET last_modified_date = {0} WHERE id = {1}", DateTimeOffset.UtcNow - ago, runId);
+    }
+
+    private async Task SeedWaitAsync(Guid runId, string nodeId, string status)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+
+        db.WorkflowRunWait.Add(new WorkflowRunWait
+        {
+            Id = Guid.NewGuid(),
+            RunId = runId,
+            NodeId = nodeId,
+            IterationKey = string.Empty,
+            WaitKind = WorkflowWaitKinds.Approval,
+            Token = Guid.NewGuid().ToString("N"),
+            Status = status,
+            PayloadJson = status == WorkflowWaitStatuses.Resolved ? "{}" : null,
+            CreatedAt = DateTimeOffset.UtcNow,
+            ResolvedAt = status == WorkflowWaitStatuses.Resolved ? DateTimeOffset.UtcNow : null,
+        });
+
+        await db.SaveChangesAsync();
+    }
 
     private async Task<Guid> CreateWorkflowAsync(Guid teamId, Guid userId)
     {
@@ -239,6 +474,45 @@ public class StuckRunReconcilerFlowTests
             Name = "reconciler-" + Guid.NewGuid().ToString("N")[..8],
             Description = null,
             Definition = WorkflowsTestSeed.MinimalDefinition(),
+            Activations = new List<WorkflowActivationInput>(),
+            Enabled = true,
+        });
+    }
+
+    /// <summary>
+    /// Create a workflow whose body is a 1-element flow.map over a real SUSPENDING node
+    /// (<see cref="SuspendProbeNode"/>) — the lightest faithful reuse of the proven map-resume fixtures.
+    /// Mirrors <c>MapDurableResumeFlowTests.SuspendingMapDefinition</c>: trigger → map[ms → leaf(suspend probe)]
+    /// → terminal. The leaf parks an Action wait on its first pass and, on resume, echoes { item, summary }.
+    /// </summary>
+    private async Task<Guid> CreateSuspendingMapWorkflowAsync(Guid teamId, Guid userId, string key)
+    {
+        using var scope = _fixture.BeginScopeAs(userId, teamId, Roles.Admin);
+        var mediator = scope.Resolve<IMediator>();
+        return await mediator.Send(new CreateWorkflowCommand
+        {
+            Name = "reconciler-suspend-" + Guid.NewGuid().ToString("N")[..8],
+            Description = null,
+            Definition = new CodeSpace.Messages.Dtos.Workflows.WorkflowDefinition
+            {
+                SchemaVersion = 1,
+                Nodes = new List<CodeSpace.Messages.Dtos.Workflows.NodeDefinition>
+                {
+                    new() { Id = "start", TypeKey = "trigger.manual", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
+                    new() { Id = "map", TypeKey = "flow.map", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.Json("""{ "items": "{{trigger.things}}" }""") },
+                    new() { Id = "ms", TypeKey = "flow.map_start", ParentId = "map", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
+                    new() { Id = "leaf", TypeKey = SuspendProbeNode.Key, ParentId = "map", Config = WorkflowsTestSeed.EmptyJson(),
+                            Inputs = WorkflowsTestSeed.Json("""{ "key": "__KEY__", "item": "{{item}}" }""".Replace("__KEY__", key)) },
+                    new() { Id = "end", TypeKey = "builtin.terminal", Config = WorkflowsTestSeed.EmptyJson(),
+                            Inputs = WorkflowsTestSeed.Json("""{ "count": "{{nodes.map.outputs.count}}" }""") },
+                },
+                Edges = new List<CodeSpace.Messages.Dtos.Workflows.EdgeDefinition>
+                {
+                    new() { From = "start", To = "map" },
+                    new() { From = "map", To = "end" },
+                    new() { From = "ms", To = "leaf" },
+                },
+            },
             Activations = new List<WorkflowActivationInput>(),
             Enabled = true,
         });
