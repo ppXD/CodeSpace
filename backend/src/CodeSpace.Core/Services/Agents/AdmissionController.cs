@@ -6,22 +6,36 @@ using Microsoft.EntityFrameworkCore;
 namespace CodeSpace.Core.Services.Agents;
 
 /// <summary>
-/// The fail-closed admission gate every new agent run must pass before it is persisted. Today the only
-/// limits on a <c>flow.map</c> fan-out are its per-map maxParallelism + the engine's branch ceiling — neither
-/// bounds the TOTAL in-flight agent runs across a team or the whole deployment, so several teams (or several
-/// workflows on one big team) fanning out <c>agent.code</c> branches can exhaust runner / Hangfire / model
-/// quota. This caps concurrent (Queued + Running) agent runs at two levels: per-team (so one team can't starve
-/// the others) and global (a deployment-wide ceiling). It is the single chokepoint <see cref="AgentRunService.CreateAsync"/>
-/// consults BEFORE inserting the row — the reconciler's re-dispatch / re-attach operate on already-admitted
-/// runs and are NOT re-gated, so a run is counted exactly once.
+/// The fail-closed admission gate <see cref="AgentRunService.CreateAsync"/> consults before persisting a new
+/// agent run. Today the only limits on a <c>flow.map</c> fan-out are its per-map maxParallelism + the engine's
+/// branch ceiling — neither bounds the TOTAL in-flight agent runs across a team or the whole deployment, so
+/// several teams (or several workflows on one big team) fanning out <c>agent.code</c> branches can exhaust
+/// runner / Hangfire / model quota. This applies backpressure on concurrent (Queued + Running) agent runs at
+/// two levels: per-team (so one team can't starve the others) and global (a deployment-wide guard). The
+/// reconciler's re-dispatch / re-attach operate on already-admitted runs and are NOT re-gated, so a run is
+/// counted toward the cap exactly once.
+///
+/// SOFT cap, not a hard ceiling — by design. The gate is count-then-create with no transaction / no lock /
+/// no DB constraint: <see cref="EnsureAgentRunAdmittedAsync"/> reads the counts, then <see cref="AgentRunService.CreateAsync"/>
+/// INSERTs in a separate SaveChanges. Each branch runs in its own DI scope (its own DbContext +
+/// AdmissionController), so under concurrent staging the in-flight total may OVERSHOOT the cap by up to the
+/// concurrent-staging width: per single fan-out that width is bounded by maxParallelism (≤ <c>MaxParallelismCeiling</c>
+/// = 64), but cluster-wide the global overshoot is bounded only by the number of workflows simultaneously
+/// fanning out (N fan-outs ⇒ up to N×width racing reads), i.e. NOT hard-bounded. This is acceptable
+/// backpressure — a guard against runaway exhaustion, not a precise quota. Serializing the hot creation path
+/// to make the bound hard is intentionally NOT done. If a hard global bound is ever required, the cheapest
+/// upgrade is wrapping CreateAsync's count+insert in a serializable transaction keyed by a per-team / global
+/// <c>pg_advisory_xact_lock</c> (or a partial-unique constraint) so concurrent counts serialize.
 /// </summary>
 public interface IAdmissionController
 {
     /// <summary>
-    /// Throw <see cref="AgentRunAdmissionException"/> if admitting one more agent run for <paramref name="teamId"/>
-    /// would breach the per-team OR the global in-flight cap; return cleanly when there's headroom. FAIL-CLOSED:
-    /// if the count query itself faults, the exception propagates (a creation under an unknown load is refused,
-    /// not waved through). Called pre-persist so a rejected run never touches the table.
+    /// Throw <see cref="AgentRunAdmissionException"/> if the per-team OR the global in-flight count is already at
+    /// its cap for <paramref name="teamId"/>; return cleanly when there's headroom. FAIL-CLOSED: if the count
+    /// query itself faults, the exception propagates (a creation under an unknown load is refused, not waved
+    /// through). Called pre-persist so a rejected run never touches the table. This is the COUNT half of a
+    /// count-then-create soft cap — under concurrent staging the count read here can be stale, so the cap may
+    /// overshoot (see the class doc); it is best-effort backpressure, not a serialized hard guarantee.
     /// </summary>
     Task EnsureAgentRunAdmittedAsync(Guid teamId, CancellationToken cancellationToken);
 }
@@ -29,11 +43,19 @@ public interface IAdmissionController
 public sealed class AdmissionController : IAdmissionController, IScopedDependency
 {
     // The cap pair is env-overridable (Rule 8) so an operator can tune it without a redeploy — pinned by a unit
-    // test. Defaults are chosen to NOT break an ordinary large fan-out: a single flow.map's branch ceiling is 256
-    // but its DEFAULT parallelism keeps far fewer than 50 agent runs in flight at once, so PerTeam=50 admits a
-    // normal team's concurrent work while still catching a runaway (many maps × many teams). Global=200 is the
-    // deployment-wide ceiling — roughly four saturated teams — past which the runner/model quota is at risk.
-    // An operator who legitimately runs wider raises the matching env var; the rejection message names it.
+    // test. Sizing them needs the REAL flow.map staging model, not the intuition that parallelism bounds the
+    // count: a map's branch ceiling is MapPlan.MaxBranchesCeiling = 10_000, and maxParallelism bounds only how
+    // many branches RUN AT ONCE — NOT how many are in flight. Every agent.code branch stages a Queued AgentRun
+    // and immediately suspends (releasing the parallelism gate fast), so on the first engine pass a map over N
+    // elements stages ~N in-flight (Queued) AgentRuns regardless of its parallelism. So PerTeam is the count a
+    // single fan-out is allowed to reach: at the default 50, an ordinary single flow.map over 50+ elements
+    // (e.g. "fix each of 60 failing tests with an agent") hits the cap and the 51st-onward branches are
+    // admission-rejected (each routes to its error edge / the map's continue-on-error). That is a deliberate
+    // backpressure default, not a no-op runaway guard — it WILL bite legitimate wide fan-outs, so it is the
+    // PRIMARY operator-tunable knob: a team that intends to fan out wider raises PerTeam (the rejection message
+    // names the env var). Global=200 is the deployment-wide ceiling — roughly four PerTeam-saturated teams —
+    // past which the runner/model quota is at risk. Both are SOFT caps (see the interface doc for the
+    // count-then-create overshoot semantics).
     public const string MaxInflightPerTeamEnvVar = "CODESPACE_AGENT_MAX_INFLIGHT_PER_TEAM";
     public const string MaxInflightGlobalEnvVar = "CODESPACE_AGENT_MAX_INFLIGHT_GLOBAL";
 
