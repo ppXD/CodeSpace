@@ -1,7 +1,10 @@
 using System.Text.Json;
 using CodeSpace.Core.Services.Agents.Tools;
+using CodeSpace.Core.Services.Chat;
+using CodeSpace.Core.Services.Chat.Interactions;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Agents.Mcp;
+using CodeSpace.Messages.Dtos.Chat.Interactions;
 
 namespace CodeSpace.Core.Services.Agents.Mcp;
 
@@ -43,6 +46,22 @@ public sealed class McpRequestHandler : IMcpRequestHandler
     /// </summary>
     public const string GovernanceEnabledEnvVar = "CODESPACE_AGENT_TOOL_GOVERNANCE_ENABLED";
 
+    /// <summary>
+    /// Env override for how long a side-effecting tool call BLOCKS awaiting a human approval before it returns the
+    /// pending-ticket (item D2). The actual block is <c>min(this, well-under-run-timeout)</c>; this is the operator
+    /// ceiling + the test seam (an integration test sets it tiny to exercise the timeout without a real wait). Rule 8:
+    /// pinned by a unit test, read only through <see cref="ApprovalBoundSeconds"/>; a non-positive / unparseable value
+    /// falls back to <see cref="DefaultApprovalBoundSeconds"/>.
+    /// </summary>
+    public const string ApprovalBoundSecondsEnvVar = "CODESPACE_AGENT_TOOL_APPROVAL_BOUND_SECONDS";
+
+    /// <summary>The default bounded-block window (10 minutes) when the env override is unset. A real CLI tolerates a multi-minute synchronous tools/call; past this the call returns the pending-ticket so the turn never hangs forever.</summary>
+    public const int DefaultApprovalBoundSeconds = 600;
+
+    /// <summary>The approval card's two button keys. The resolver (<see cref="IToolCallApprovalResolver"/>) only ever acts on these two; both resolve the wait (first-wins) — reject fails the call, approve stamps the decision for the handler to execute.</summary>
+    private const string ApproveKey = "approve";
+    private const string RejectKey = "reject";
+
     private static readonly JsonElement NullId = JsonDocument.Parse("null").RootElement.Clone();
     private static readonly JsonElement EmptyObject = JsonDocument.Parse("{}").RootElement.Clone();
 
@@ -54,11 +73,17 @@ public sealed class McpRequestHandler : IMcpRequestHandler
     private readonly IToolCallLedgerService? _ledger;
     private readonly long _fenceEpoch;
     private readonly bool _governanceEnabled;
-    // The conversation a run posts its tool-approval cards into — carried through but UNUSED here; a later slice reads
-    // it to route an approval card when a tool needs human sign-off (null = no approval surface, fails closed then).
+    // The conversation a run posts its tool-approval cards into (item D1). When non-null + governance + ledger + a team
+    // are all present, a RequireApproval verdict on a side-effecting tool posts an approval card here and BLOCKS the
+    // synchronous call until a human decides (item D2). Null = no approval surface → fail closed (the flat refusal).
     private readonly Guid? _approvalConversationId;
+    // D2 approval-flow collaborators — all defaulted-null so flag-OFF + every existing call site is unaffected. They
+    // are resolved per-connection by the endpoint only when governance is on; the approval path uses all three.
+    private readonly IChatBotService? _bot;
+    private readonly IToolApprovalWaiterRegistry? _waiters;
+    private readonly IInteractionComponentRegistry? _components;
 
-    public McpRequestHandler(IAgentToolRegistry registry, AgentAutonomyLevel autonomy, Guid? teamId = null, SecretRedactor? redactor = null, Guid runId = default, IToolCallLedgerService? ledger = null, long fenceEpoch = 0, bool governanceEnabled = false, Guid? approvalConversationId = null)
+    public McpRequestHandler(IAgentToolRegistry registry, AgentAutonomyLevel autonomy, Guid? teamId = null, SecretRedactor? redactor = null, Guid runId = default, IToolCallLedgerService? ledger = null, long fenceEpoch = 0, bool governanceEnabled = false, Guid? approvalConversationId = null, IChatBotService? bot = null, IToolApprovalWaiterRegistry? waiters = null, IInteractionComponentRegistry? components = null)
     {
         _registry = registry;
         _autonomy = autonomy;
@@ -69,6 +94,17 @@ public sealed class McpRequestHandler : IMcpRequestHandler
         _fenceEpoch = fenceEpoch;
         _governanceEnabled = governanceEnabled;
         _approvalConversationId = approvalConversationId;
+        _bot = bot;
+        _waiters = waiters;
+        _components = components;
+    }
+
+    /// <summary>The effective bounded-block window (seconds): the env override when positive + parseable, else <see cref="DefaultApprovalBoundSeconds"/> (Rule 8 — read only here).</summary>
+    public static int ApprovalBoundSeconds()
+    {
+        var raw = Environment.GetEnvironmentVariable(ApprovalBoundSecondsEnvVar)?.Trim();
+
+        return int.TryParse(raw, out var seconds) && seconds > 0 ? seconds : DefaultApprovalBoundSeconds;
     }
 
     /// <summary>True ONLY for "1"/"true"/"TRUE" (trimmed); fail-closed default-OFF otherwise. Mirrors <see cref="AgentRunExecutor.IsMcpEndpointEnabled"/> exactly (Rule 8). Production reads governance opt-in through this single gate.</summary>
@@ -113,12 +149,14 @@ public sealed class McpRequestHandler : IMcpRequestHandler
 
         // Authorize BEFORE validating input: a tool the run's autonomy tier won't permit is refused outright (a
         // tool result with isError:true, not a protocol error), so the model never sees input feedback for — or
-        // runs — a tool it can't call. A denied/needs-approval verdict short-circuits here.
+        // runs — a tool it can't call. A Deny short-circuits here; a RequireApproval that can't be served (no approval
+        // surface) ALSO short-circuits to the same flat refusal — the conversation-less-run safety (fail-closed).
         var gate = AgentToolGate.Decide(_autonomy, tool.RequiresApproval);
 
-        // This short-circuit is BEFORE the ledger branch, so a denial writes NO audit row in item C (the Denied ledger
-        // status is unused for now) — denial-auditing is deferred to the later audit slice.
-        if (gate != AgentToolGateDecision.Allow) return JsonRpcResponse.Ok(id, ToolResult(isError: true, GateMessage(gate, name)));
+        if (gate == AgentToolGateDecision.Deny) return JsonRpcResponse.Ok(id, ToolResult(isError: true, GateMessage(gate, name)));
+
+        if (gate == AgentToolGateDecision.RequireApproval && !CanServeApproval(tool))
+            return JsonRpcResponse.Ok(id, ToolResult(isError: true, GateMessage(gate, name)));
 
         // Absent arguments default to {}; present-but-wrong-type arguments pass through verbatim so the tool's own
         // ValidateInput rejects them (a teachable tool-result error, not a silent coercion).
@@ -127,6 +165,12 @@ public sealed class McpRequestHandler : IMcpRequestHandler
         var validation = tool.ValidateInput(arguments);
 
         if (!validation.IsValid) return JsonRpcResponse.Ok(id, ToolResult(isError: true, validation.Error ?? "Invalid tool input."));
+
+        // RequireApproval + a servable approval surface → park the call: record AwaitingApproval, post the card, and
+        // BLOCK until a human decides (or the bound elapses → pending-ticket). The side effect runs through the SAME
+        // exactly-once ledger path the Allow case uses, gated on the approval decision (see RunApprovalFlowAsync).
+        if (gate == AgentToolGateDecision.RequireApproval)
+            return JsonRpcResponse.Ok(id, await RunApprovalFlowAsync(tool, name, arguments, cancellationToken).ConfigureAwait(false));
 
         // Governance OFF / no ledger / a read-only tool / a null-team run → today's path exactly: invoke + return,
         // no ledger row. Read-only tools are NEVER tracked (no side effect to dedup, no exactly-once need, no audit
@@ -138,6 +182,18 @@ public sealed class McpRequestHandler : IMcpRequestHandler
 
         return JsonRpcResponse.Ok(id, await InvokeWithLedgerAsync(tool, arguments, cancellationToken).ConfigureAwait(false));
     }
+
+    /// <summary>
+    /// Whether a <c>RequireApproval</c> verdict can actually be SERVED as a durable approval (item D2) rather than
+    /// fail-closing to the flat refusal. Requires the full approval surface: governance on, the ledger + card-post +
+    /// waiter + component-registry collaborators all present, a non-null approval conversation, a team (the ledger row's
+    /// team_id is NOT NULL), AND a side-effecting tool (a read-only tool is never parked — it has no side effect to
+    /// gate). ANY missing piece → the call refuses EXACTLY as today (no block, no card). This is the
+    /// conversation-less-run safety: a run with no approval surface is byte-identical to its pre-D2 behavior.
+    /// </summary>
+    private bool CanServeApproval(IAgentTool tool) =>
+        _governanceEnabled && _ledger is not null && _bot is not null && _waiters is not null && _components is not null
+        && _approvalConversationId is not null && _teamId is not null && !tool.IsReadOnly;
 
     /// <summary>
     /// The governed invocation of a SIDE-EFFECTING tool: derive the server-side key, claim the ledger row (INSERT-first
@@ -161,6 +217,161 @@ public sealed class McpRequestHandler : IMcpRequestHandler
             _ => await ExecuteAndRecordAsync(tool, arguments, teamId, claim.LedgerId, cancellationToken).ConfigureAwait(false),
         };
     }
+
+    /// <summary>
+    /// The durable mid-turn HITL approval flow for a side-effecting tool the tier requires sign-off on (item D2). The
+    /// claim arbitrates exactly-once across the blocked-call wake AND a model re-call (the deterministic key): a fresh
+    /// claim parks + posts + blocks; a re-claim of the same parked row re-binds to its decision (no second card); a
+    /// terminal duplicate replays. The side effect ALWAYS runs through the single-winner AwaitingApproval→terminal CAS
+    /// in <see cref="ExecuteAndRecordAsync"/>, so whichever path wins it runs once and the other replays.
+    /// </summary>
+    private async Task<JsonElement> RunApprovalFlowAsync(IAgentTool tool, string name, JsonElement arguments, CancellationToken cancellationToken)
+    {
+        var teamId = _teamId!.Value;   // CanServeApproval already proved team + ledger + collaborators non-null
+
+        var inputHash = ToolCallKey.InputHash(arguments);   // SERVER-derived — never read from the wire
+        var key = ToolCallKey.For(tool.Kind, inputHash);
+
+        var claim = await _ledger!.TryClaimAsync(_runId, teamId, tool.Kind, key, inputHash, _fenceEpoch, cancellationToken).ConfigureAwait(false);
+
+        return claim.Outcome switch
+        {
+            ToolCallClaimOutcome.Duplicate => ReplayPriorResult(claim),                                            // already resolved — replay (approved+executed, rejected, or expired)
+            ToolCallClaimOutcome.InFlight => await ResumeOrTicketAsync(tool, arguments, teamId, claim.LedgerId, cancellationToken).ConfigureAwait(false),   // a re-call of a still-parked row — never re-post the card
+            _ => await ParkForApprovalAsync(tool, name, arguments, teamId, claim.LedgerId, cancellationToken).ConfigureAwait(false),                        // fresh claim — park + post + block
+        };
+    }
+
+    /// <summary>
+    /// A FRESH claim's park: CAS Pending → AwaitingApproval (stamping token + deadline), post the redacted approval
+    /// card (stamping its message id), then BLOCK on the bounded wait. If the CAS is lost (a concurrent path already
+    /// parked or terminated the row), DON'T post — re-bind to whatever the row became (the no-second-card guard).
+    /// </summary>
+    private async Task<JsonElement> ParkForApprovalAsync(IAgentTool tool, string name, JsonElement arguments, Guid teamId, Guid ledgerId, CancellationToken cancellationToken)
+    {
+        var token = Guid.NewGuid().ToString("N");
+        var deadlineAt = DateTimeOffset.UtcNow.AddSeconds(ApprovalBoundSeconds());
+
+        var parked = await _ledger!.TryBeginApprovalAsync(ledgerId, teamId, token, deadlineAt, cancellationToken).ConfigureAwait(false);
+
+        if (!parked) return await ResumeOrTicketAsync(tool, arguments, teamId, ledgerId, cancellationToken).ConfigureAwait(false);
+
+        var messageId = await PostApprovalCardAsync(tool, name, token, cancellationToken).ConfigureAwait(false);
+
+        await _ledger.SetApprovalMessageAsync(ledgerId, teamId, messageId, cancellationToken).ConfigureAwait(false);
+
+        return await BlockForDecisionAsync(tool, arguments, teamId, ledgerId, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Re-bind to an already-parked (or just-terminated) row WITHOUT posting a second card (§5 — one card per (run,
+    /// key)). Re-reads the durable row (the authority): a terminal row replays; an AwaitingApproval row that's already
+    /// approved runs the side effect once; a still-undecided one blocks again on a freshly-registered waiter. The card
+    /// was posted on the first park, so the existing waiter/deadline still drives it.
+    /// </summary>
+    private async Task<JsonElement> ResumeOrTicketAsync(IAgentTool tool, JsonElement arguments, Guid teamId, Guid ledgerId, CancellationToken cancellationToken)
+    {
+        var state = await _ledger!.ReadApprovalStateAsync(ledgerId, teamId, cancellationToken).ConfigureAwait(false);
+
+        if (state is null) return ToolResult(isError: true, "This tool call's approval record is missing.");
+
+        if (ToolCallLedgerStateMachine.IsTerminal(state.Status)) return ReplayTerminalState(state);
+
+        if (state.ApprovedAt is not null) return await ExecuteAndRecordAsync(tool, arguments, teamId, ledgerId, cancellationToken).ConfigureAwait(false);
+
+        return await BlockForDecisionAsync(tool, arguments, teamId, ledgerId, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// BLOCK the synchronous tools/call until a decision lands or the bound elapses. The in-memory waiter is a latency
+    /// fast-path; the durable row is the authority, so we ALWAYS re-read it after the wake. A linked CTS cancels the
+    /// leftover delay/waiter once one completes; the waiter is ALWAYS removed in finally. On ct cancellation during the
+    /// block we let it propagate — the row stays AwaitingApproval for the reaper / a reattach to resume (NOT stranded
+    /// Pending). The bound is capped under nothing here beyond the env ceiling (the run's own TimeoutSeconds cancels ct,
+    /// which we honor by propagating).
+    /// </summary>
+    private async Task<JsonElement> BlockForDecisionAsync(IAgentTool tool, JsonElement arguments, Guid teamId, Guid ledgerId, CancellationToken cancellationToken)
+    {
+        var waiter = _waiters!.Register(ledgerId);
+
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+
+        try
+        {
+            var bound = Task.Delay(TimeSpan.FromSeconds(ApprovalBoundSeconds()), linked.Token);
+
+            await Task.WhenAny(waiter.Completion, bound).ConfigureAwait(false);
+
+            linked.Cancel();   // cancel the loser (the leftover delay, or the never-signaled waiter's backing delay)
+
+            cancellationToken.ThrowIfCancellationRequested();   // the run timed out / teardown — propagate, row stays AwaitingApproval
+
+            // ALWAYS re-read the durable row — it's the authority (handles a cross-worker signal / a restart that
+            // dropped the TCS). The TCS only told us "something happened, look now".
+            var state = await _ledger!.ReadApprovalStateAsync(ledgerId, teamId, cancellationToken).ConfigureAwait(false);
+
+            if (state is null) return ToolResult(isError: true, "This tool call's approval record is missing.");
+
+            if (ToolCallLedgerStateMachine.IsTerminal(state.Status)) return ReplayTerminalState(state);   // rejected / expired by the reaper
+
+            if (state.ApprovedAt is not null) return await ExecuteAndRecordAsync(tool, arguments, teamId, ledgerId, cancellationToken).ConfigureAwait(false);   // approved → run once
+
+            return PendingTicket(ledgerId);   // the bound elapsed with no decision — the row stays AwaitingApproval
+        }
+        finally
+        {
+            _waiters.Remove(ledgerId);
+        }
+    }
+
+    /// <summary>
+    /// Build + post the REDACTED approval card into the run's approval conversation. The body names the tool + a
+    /// redacted argument summary + the run id (no secret reaches the message); the server-side <see cref="ToolCallApprovalTarget"/>
+    /// carries the token (omitted from the client-facing view). The component is built by the registry (mirrors
+    /// ChatPostMessageNode) so a future card kind is a factory change, not an edit here. Returns the posted message id.
+    /// </summary>
+    private async Task<Guid> PostApprovalCardAsync(IAgentTool tool, string name, string token, CancellationToken cancellationToken)
+    {
+        var component = _components!.Build(ApprovalButtonsConfig())
+            ?? throw new InvalidOperationException("The approval action-buttons component factory is not registered.");
+
+        var interaction = new MessageInteraction
+        {
+            Component = component,
+            Target = new ToolCallApprovalTarget { Token = token },
+            AllowedResponderUserIds = null,   // any team member may approve (team-scoped already); revisit per-actor scoping in item E
+            Resolve = new ResolvePolicy(),    // first responder wins
+        };
+
+        var posted = await _bot!.PostAsBotAsync(_approvalConversationId!.Value, ApprovalCardBody(name, tool), interaction, cancellationToken).ConfigureAwait(false);
+
+        return posted.Id;
+    }
+
+    /// <summary>The two-button approve/reject config the registry builds into an ActionButtonsComponent (mirrors ChatPostMessageNode's ShimActions shape). Both buttons resolve the wait (first-wins); reject requires a reason.</summary>
+    private static JsonElement ApprovalButtonsConfig() => JsonSerializer.SerializeToElement(new
+    {
+        kind = "action_buttons",
+        buttons = new object[]
+        {
+            new { key = ApproveKey, label = "Approve", style = "Primary" },
+            new { key = RejectKey, label = "Reject", style = "Danger", requiresComment = true },
+        },
+    }, AgentJson.Options);
+
+    /// <summary>The redacted card body: tool + a redacted argument summary + the run id. Routed through <see cref="ToolResult"/>'s redactor indirectly via the redactor here — the message must never carry a secret.</summary>
+    private string ApprovalCardBody(string name, IAgentTool tool) =>
+        _redactor.Redact($"Agent run {_runId} requests approval to run **{name}** ({tool.Description}). Approve to let it proceed, or reject to refuse it.");
+
+    /// <summary>The typed pending-ticket returned when the bound elapses with no decision — names the ledger ticket so the model (or operator) can re-issue the exact call to retry once a human approves.</summary>
+    private JsonElement PendingTicket(Guid ledgerId) =>
+        ToolResult(isError: true, $"Awaiting human approval (ticket {ledgerId}); the decision is still pending. Re-issue this exact call to retry.");
+
+    /// <summary>Rebuild a wire result from a terminal <see cref="ToolCallApprovalState"/> snapshot (mirrors <see cref="ReplayPriorResult"/>): a Succeeded row replays its stored wire JSON; anything else rebuilds an isError result from its redacted error.</summary>
+    private JsonElement ReplayTerminalState(ToolCallApprovalState state) =>
+        state is { Status: ToolCallLedgerStatus.Succeeded, ResultJson: { Length: > 0 } stored }
+            ? JsonDocument.Parse(stored).RootElement.Clone()
+            : ToolResult(isError: true, state.Error ?? "This tool call was not approved.");
 
     /// <summary>
     /// Run the side effect once, build the ALREADY-REDACTED wire result (the single <see cref="ToolResult"/> choke

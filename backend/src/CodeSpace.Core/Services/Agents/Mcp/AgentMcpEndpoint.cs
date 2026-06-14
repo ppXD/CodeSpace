@@ -2,6 +2,8 @@ using System.Collections.Concurrent;
 using System.Net.Sockets;
 using System.Text;
 using CodeSpace.Core.Services.Agents.Tools;
+using CodeSpace.Core.Services.Chat;
+using CodeSpace.Core.Services.Chat.Interactions;
 using CodeSpace.Messages.Agents;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
@@ -153,13 +155,18 @@ public sealed class AgentMcpEndpoint : IAsyncDisposable
 
         if (!await IsAuthenticatedAsync(reader, ct).ConfigureAwait(false)) return;   // silent close, no oracle, before any handler
 
-        // The ledger service is SCOPED (its own DbContext), and the accept loop can serve concurrent connections, so
-        // a shared instance would race the (thread-unsafe) DbContext. Mint a FRESH per-connection scope here and
-        // dispose it when this connection's pump ends. Null when governance is off → the handler is byte-identical.
+        // The ledger + chat-bot services are SCOPED (their own DbContext), and the accept loop can serve concurrent
+        // connections, so a shared instance would race the (thread-unsafe) DbContext. Mint a FRESH per-connection scope
+        // here and dispose it when this connection's pump ends. Null when governance is off → the handler is
+        // byte-identical. The bot + component registry + waiter registry are the durable-approval collaborators
+        // (item D2): resolved here so flag-OFF constructs none of them (the approval path is unreachable then anyway).
         using var connectionScope = _governanceEnabled ? _scope.ServiceProvider.CreateScope() : null;
         var ledger = connectionScope?.ServiceProvider.GetRequiredService<IToolCallLedgerService>();
+        var bot = connectionScope?.ServiceProvider.GetRequiredService<IChatBotService>();
+        var waiters = connectionScope?.ServiceProvider.GetRequiredService<IToolApprovalWaiterRegistry>();
+        var components = connectionScope?.ServiceProvider.GetRequiredService<IInteractionComponentRegistry>();
 
-        var handler = new McpRequestHandler(_registry, _autonomy, _teamId, _redactor, _runId, ledger, _fenceEpoch, _governanceEnabled, _approvalConversationId);
+        var handler = new McpRequestHandler(_registry, _autonomy, _teamId, _redactor, _runId, ledger, _fenceEpoch, _governanceEnabled, _approvalConversationId, bot, waiters, components);
         var loop = new McpFramingLoop(handler);
 
         try { await loop.RunAsync(reader, writer, ct).ConfigureAwait(false); }

@@ -622,6 +622,56 @@ public class McpRequestHandlerTests
         McpRequestHandler.GovernanceEnabledEnvVar.ShouldBe("CODESPACE_AGENT_TOOL_GOVERNANCE_ENABLED");
     }
 
+    [Fact]
+    public void Approval_bound_env_var_literal_and_default_are_pinned()
+    {
+        // The bound env var is the operator ceiling AND the integration test's seam to exercise the timeout without a
+        // 10-minute wait. Renaming it silently breaks an operator who pinned a custom window (Rule 8). The 600s default
+        // is the documented behavior when unset.
+        McpRequestHandler.ApprovalBoundSecondsEnvVar.ShouldBe("CODESPACE_AGENT_TOOL_APPROVAL_BOUND_SECONDS");
+        McpRequestHandler.DefaultApprovalBoundSeconds.ShouldBe(600);
+    }
+
+    [Theory]
+    [InlineData(AgentAutonomyLevel.Standard)]
+    [InlineData(AgentAutonomyLevel.Trusted)]
+    public async Task RequireApproval_with_no_approval_surface_flat_refuses_byte_identically_and_never_blocks(AgentAutonomyLevel level)
+    {
+        // The conversation-less-run safety: a governed run WITHOUT an approval conversation (and without the D2
+        // collaborators — bot / waiters / components) must behave EXACTLY as pre-D2 — the flat "requires approval"
+        // refusal, NO card, NO block. Here the handler is the governance-on, ledger-bearing one but with a null
+        // approval conversation + null collaborators (the defaulted ctor args), so CanServeApproval is false.
+        var ledger = new SpyLedger();
+        var tool = new FakeTool { Kind = "git.merge_pr", IsDestructiveOverride = true };
+        var handler = new McpRequestHandler(new FakeRegistry(tool), level, Guid.NewGuid(), null, Guid.NewGuid(), ledger, fenceEpoch: 1, governanceEnabled: true, approvalConversationId: null);
+
+        var resp = await Respond(handler, Call("git.merge_pr", "{}"));
+
+        resp.TryGetProperty("error", out _).ShouldBeFalse("a fail-closed refusal is a tool result, not a JSON-RPC error");
+        resp.GetProperty("result").GetProperty("isError").GetBoolean().ShouldBeTrue();
+        resp.GetProperty("result").GetProperty("content")[0].GetProperty("text").GetString().ShouldContain("approval");
+        tool.CallCount.ShouldBe(0, "a fail-closed RequireApproval never runs the tool");
+        ledger.Claims.ShouldBeEmpty("no approval surface → no ledger row, no card, no block — byte-identical to today");
+        ledger.Terminals.ShouldBeEmpty();
+    }
+
+    [Fact]
+    public async Task RequireApproval_flag_off_flat_refuses_without_touching_the_ledger()
+    {
+        // Flag-OFF is the strongest byte-identical guarantee: even with an approval conversation + collaborators wired,
+        // governanceEnabled:false keeps the pre-D2 flat refusal (CanServeApproval requires the flag).
+        var ledger = new SpyLedger();
+        var tool = new FakeTool { Kind = "git.merge_pr", IsDestructiveOverride = true };
+        var handler = new McpRequestHandler(new FakeRegistry(tool), AgentAutonomyLevel.Standard, Guid.NewGuid(), null, Guid.NewGuid(), ledger, fenceEpoch: 1, governanceEnabled: false, approvalConversationId: Guid.NewGuid());
+
+        var result = (await Respond(handler, Call("git.merge_pr", "{}"))).GetProperty("result");
+
+        result.GetProperty("isError").GetBoolean().ShouldBeTrue();
+        result.GetProperty("content")[0].GetProperty("text").GetString().ShouldContain("approval");
+        tool.CallCount.ShouldBe(0);
+        ledger.Claims.ShouldBeEmpty("flag-OFF writes NO ledger row even for a RequireApproval tier");
+    }
+
     /// <summary>A spy ledger: records every TryClaim/RecordTerminal call. Configurable claim outcome for the dedup test,
     /// a configurable terminal-record throw for the lost-CAS replay test, and a recorded-rows store the replay re-reads.</summary>
     private sealed class SpyLedger : IToolCallLedgerService
@@ -649,6 +699,14 @@ public class McpRequestHandlerTests
             Terminals.Add((ledgerId, teamId, status, resultJson, error));
             return Task.CompletedTask;
         }
+
+        public Task<bool> TryBeginApprovalAsync(Guid ledgerId, Guid teamId, string approvalToken, DateTimeOffset deadlineAt, CancellationToken ct) =>
+            Task.FromResult(false);
+
+        public Task SetApprovalMessageAsync(Guid ledgerId, Guid teamId, Guid messageId, CancellationToken ct) => Task.CompletedTask;
+
+        public Task<ToolCallApprovalState?> ReadApprovalStateAsync(Guid ledgerId, Guid teamId, CancellationToken ct) =>
+            Task.FromResult<ToolCallApprovalState?>(null);
 
         public Task<IReadOnlyList<Core.Persistence.Entities.ToolCallLedger>> GetForRunAsync(Guid agentRunId, Guid teamId, CancellationToken ct) =>
             Task.FromResult<IReadOnlyList<Core.Persistence.Entities.ToolCallLedger>>(Rows);
