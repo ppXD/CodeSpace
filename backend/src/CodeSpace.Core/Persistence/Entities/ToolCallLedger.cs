@@ -59,6 +59,12 @@ public class ToolCallLedger : IEntity<Guid>, IAuditable
     /// <summary>When the approval expires (item D).</summary>
     public DateTimeOffset? ApprovalDeadlineAt { get; set; }
 
+    /// <summary>The human who approved this parked call (item D). NULL until approved.</summary>
+    public Guid? ApprovedByUserId { get; set; }
+
+    /// <summary>When the call was approved (item D). NULL distinguishes a not-yet-decided AwaitingApproval row from an approved-but-not-yet-executed one — the D3 reaper only expires <c>approved_at IS NULL</c> rows.</summary>
+    public DateTimeOffset? ApprovedAt { get; set; }
+
     /// <summary>Mirrors <see cref="AgentRun.FenceEpoch"/> at record time — a reclaimed-then-revived worker's terminal CAS is fenced out (item D resume).</summary>
     public long FenceEpoch { get; set; }
 
