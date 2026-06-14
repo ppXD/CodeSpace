@@ -434,6 +434,8 @@ public sealed class DefinitionValidator : IScopedDependency
 
             CheckContainerNestingDepth(node, ownerByNodeId, errors);
 
+            CheckBodyStartCount(definition, node, kind.Value, errors);
+
             CheckBodyReachableFromStart(definition, node, kind.Value, errors);
 
             if (kind == NodeKind.Map)
@@ -455,6 +457,27 @@ public sealed class DefinitionValidator : IScopedDependency
         NodeKind.Try => "flow.try_start",
         _ => "",
     };
+
+    /// <summary>
+    /// A non-empty container body must be rooted at EXACTLY ONE <c>*_start</c> marker — for ALL THREE kinds
+    /// (map / loop / try). With zero or two starts the engine's frontier walk
+    /// (<c>EnqueueReadyFrontier</c> over the <c>SubgraphView</c>) seeds EVERY zero-incoming body node as a
+    /// root and runs that whole component once per element/iteration — silent fan-out amplification. Map's
+    /// extra body-shape rules live in <c>CheckMapBodyShape</c>; this single check owns the start-count rule
+    /// for every container so loop/try are no longer a false pass (the gap this closes), and
+    /// <c>CheckBodyReachableFromStart</c> can safely defer the wrong-count case to it.
+    /// </summary>
+    private static void CheckBodyStartCount(WorkflowDefinition definition, NodeDefinition container, NodeKind kind, List<string> errors)
+    {
+        var startTypeKey = BodyStartTypeKey(kind);
+
+        var body = definition.Nodes.Where(n => n.ParentId == container.Id).ToList();
+        if (body.Count == 0) return;   // empty body is the container's own concern (map reports it; loop/try tolerate it as a no-op walk)
+
+        var starts = body.Count(n => n.TypeKey == startTypeKey);
+        if (starts != 1)
+            errors.Add($"Container '{container.Id}' body must have exactly one {startTypeKey} (found {starts}).");
+    }
 
     /// <summary>
     /// Every node in a container body must be reachable from the body's single <c>*_start</c> marker by walking
@@ -482,7 +505,7 @@ public sealed class DefinitionValidator : IScopedDependency
 
         var bodyIds = body.Select(n => n.Id).ToHashSet();
         var starts = body.Where(n => n.TypeKey == startTypeKey).Select(n => n.Id).ToList();
-        if (starts.Count != 1) return;   // not exactly one start — the shape check reports that; reachability can't anchor
+        if (starts.Count != 1) return;   // not exactly one start — CheckBodyStartCount reports that (for all three kinds); reachability can't anchor
 
         var bodyAdjacency = BuildBodyAdjacency(definition, bodyIds);
         var reachable = new HashSet<string>();
@@ -680,10 +703,8 @@ public sealed class DefinitionValidator : IScopedDependency
             return;
         }
 
-        var starts = body.Count(n => n.TypeKey == "flow.map_start");
-        if (starts != 1)
-            errors.Add($"Map '{mapNode.Id}' body must have exactly one flow.map_start (found {starts}).");
-
+        // The exactly-one-flow.map_start rule is enforced generically for every container by
+        // CheckBodyStartCount — this method keeps only the map-specific single-terminal rule.
         var bodyIds = body.Select(n => n.Id).ToHashSet();
         var withOutgoing = definition.Edges.Where(e => bodyIds.Contains(e.From)).Select(e => e.From).ToHashSet();
         var terminals = body.Where(n => !withOutgoing.Contains(n.Id)).ToList();

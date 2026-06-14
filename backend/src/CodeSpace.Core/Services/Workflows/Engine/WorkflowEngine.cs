@@ -1742,8 +1742,8 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
         return scope;
     }
 
-    /// <summary>The reduced map output: the ordered per-element results under the configured key, the element count, and the failed-branch count (always 0 under terminate, since a failure throws instead).</summary>
-    private static IReadOnlyDictionary<string, JsonElement> BuildMapOutputs(string resultKey, IReadOnlyList<JsonElement> results, int failed) =>
+    /// <summary>The reduced map output: the ordered per-element results under the configured key, the element count, and the failed-branch count (always 0 under terminate, since a failure throws instead). internal (not private) so the reserved-set drift pin (<c>ReducerEmittedKeysPinTests</c>) asserts over the keys this actually emits, catching a new key the author forgets to add to <c>WorkflowOutputKeys.Map</c>.</summary>
+    internal static IReadOnlyDictionary<string, JsonElement> BuildMapOutputs(string resultKey, IReadOnlyList<JsonElement> results, int failed) =>
         new Dictionary<string, JsonElement>
         {
             [resultKey] = JsonSerializer.SerializeToElement(results),
@@ -1982,8 +1982,8 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
             ? JsonSerializer.Deserialize<LoopConfig>(config.GetRawText(), LoopConfigJsonOptions) ?? new LoopConfig()
             : new LoopConfig();
 
-    /// <summary>Build a per-iteration scope: outer read-slots + <c>loop.*</c> (vars + injected <c>index</c>) + a fresh Nodes bag seeded from <paramref name="nodesSource"/> (so the body reads pre-loop outputs, and termination reads this pass's body outputs).</summary>
-    private static NodeRunScope BuildLoopScope(NodeRunScope outer, IEnumerable<KeyValuePair<string, IReadOnlyDictionary<string, JsonElement>>> nodesSource, IReadOnlyDictionary<string, JsonElement> loopVars, int index)
+    /// <summary>Build a per-iteration scope: outer read-slots + <c>loop.*</c> (vars + injected <c>index</c>) + a fresh Nodes bag seeded from <paramref name="nodesSource"/> (so the body reads pre-loop outputs, and termination reads this pass's body outputs). internal (not private) so the reserved-set drift pin (<c>ReducerEmittedKeysPinTests</c>) asserts the injected <c>loop.*</c> keys (the <c>index</c>) are in <c>WorkflowOutputKeys.Loop</c>.</summary>
+    internal static NodeRunScope BuildLoopScope(NodeRunScope outer, IEnumerable<KeyValuePair<string, IReadOnlyDictionary<string, JsonElement>>> nodesSource, IReadOnlyDictionary<string, JsonElement> loopVars, int index)
     {
         var loop = new Dictionary<string, JsonElement>(loopVars) { [WorkflowOutputKeys.LoopIndex] = JsonSerializer.SerializeToElement(index) };
 
@@ -2024,7 +2024,8 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
         return termination.Logic.Equals("or", StringComparison.OrdinalIgnoreCase) ? termination.Conditions.Any(Met) : termination.Conditions.All(Met);
     }
 
-    private static IReadOnlyDictionary<string, JsonElement> BuildLoopOutputs(Dictionary<string, JsonElement> loopVars, int iterations, int failedIterations, string reason)
+    /// <summary>The reduced loop output: the threaded loop vars spread first, then iterations / failedIterations / terminationReason written after (so a same-named var is clobbered). internal (not private) so the reserved-set drift pin (<c>ReducerEmittedKeysPinTests</c>) asserts over the keys this actually emits beyond the vars, catching a new key the author forgets to add to <c>WorkflowOutputKeys.Loop</c>.</summary>
+    internal static IReadOnlyDictionary<string, JsonElement> BuildLoopOutputs(Dictionary<string, JsonElement> loopVars, int iterations, int failedIterations, string reason)
     {
         var outputs = new Dictionary<string, JsonElement>(loopVars)
         {

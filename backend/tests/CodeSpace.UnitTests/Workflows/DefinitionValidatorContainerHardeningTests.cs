@@ -182,6 +182,29 @@ public class DefinitionValidatorContainerHardeningTests
         BuildValidator().Validate(def).IsValid.ShouldBeTrue();
     }
 
+    [Theory]
+    [InlineData("flow.loop", "flow.loop_start", 0)]   // loop body with NO start — every source-only body node would fan out per iteration
+    [InlineData("flow.loop", "flow.loop_start", 2)]   // loop body with TWO starts — a 2nd component runs once per iteration
+    [InlineData("flow.try", "flow.try_start", 0)]     // try body with NO start
+    [InlineData("flow.try", "flow.try_start", 2)]     // try body with TWO starts
+    public void Loop_or_try_body_without_exactly_one_start_errors(string containerType, string startType, int startCount)
+    {
+        // loop/try had NO body-start shape check before this fix — a 0/2-start body passed everything yet the
+        // engine seeds every zero-incoming body node as a root and runs it once per iteration. Now rejected.
+        var body = new List<NodeDefinition> { Body("work", "regular.a", "c"), Body("leaf", "builtin.terminal", "c") };
+        for (var i = 0; i < startCount; i++) body.Add(Body($"s{i}", startType, "c"));
+
+        var nodes = new List<NodeDefinition> { Node("t", "trigger.x"), Node("c", containerType), Node("end", "builtin.terminal") };
+        nodes.AddRange(body);
+
+        var edges = new List<EdgeDefinition> { Edge("t", "c"), Edge("c", "end"), Edge("work", "leaf") };
+        for (var i = 0; i < startCount; i++) edges.Add(Edge($"s{i}", "work"));
+
+        var result = BuildValidator().Validate(new WorkflowDefinition { Nodes = nodes, Edges = edges });
+        result.IsValid.ShouldBeFalse();
+        result.Errors.ShouldContain(e => e.Contains($"exactly one {startType}") && e.Contains($"found {startCount}"));
+    }
+
     [Fact]
     public void Nested_container_node_reachable_in_outer_body_passes()
     {
