@@ -10,11 +10,14 @@ namespace CodeSpace.UnitTests.Workflows;
 /// <summary>
 /// Pins the container-structure rules <see cref="DefinitionValidator"/> adds for <c>flow.map</c> (which
 /// <c>flow.loop</c> never had): a non-empty body rooted at exactly one <c>flow.map_start</c> and ending
-/// in exactly one terminal (the per-element result source), no SUSPENDING node anywhere in the recursive
-/// body (PR1 runs branches synchronously — durable parallel-branch resume ships in PR2), no edge crossing
-/// the container boundary (the engine silently drops those today), and a save-time nesting-depth guard.
-/// Each rejection has its own case so a relaxed check can't slip through. A well-formed map passes — the
-/// regression backstop.
+/// in exactly one terminal (the per-element result source), no edge crossing the container boundary (the
+/// engine silently drops those today), and a save-time nesting-depth guard. Each rejection has its own
+/// case so a relaxed check can't slip through. A well-formed map passes — the regression backstop.
+///
+/// <para>PR2: a SUSPENDING body node (manifest CanSuspend) now VALIDATES — the PR1 fail-closed guard that
+/// rejected it at save time is gone, because durable parallel-branch resume now parks each branch under
+/// its own iteration key and resumes from the ledger. <see cref="Map_body_with_a_suspending_node_validates"/>
+/// is the acceptance test that the guard was truly lifted.</para>
 /// </summary>
 [Trait("Category", "Unit")]
 public class DefinitionValidatorMapTests
@@ -124,48 +127,50 @@ public class DefinitionValidatorMapTests
     }
 
     [Fact]
-    public void Map_body_with_a_suspending_node_errors()
+    public void Map_body_with_a_suspending_node_validates()
     {
-        // PR1 fail-closed: a body node that can SUSPEND (here flow.wait_approval, manifest CanSuspend=true)
-        // is rejected at save time — durable parallel-branch resume ships in PR2. Without this the run-time
-        // suspend branch would commit a wait row + schedule/stage external work behind a map it can't resume.
+        // PR2 acceptance: a body node that can SUSPEND (here flow.wait_approval, manifest CanSuspend=true)
+        // is now ALLOWED — the PR1 fail-closed guard is gone. Each branch parks under its own iteration key
+        // and the run resumes from the ledger when every branch wait resolves. This is the headline of the
+        // planner+parallel-subagents epic: a map body whose element is an agent.code that parks to an AgentRun.
         var def = new WorkflowDefinition
         {
             Nodes = new List<NodeDefinition>
             {
-                Node("t", "trigger.x"), Node("map", "flow.map"), Node("end", "builtin.terminal"),
+                Node("t", "trigger.x"),
+                NodeWithInputs("map", "flow.map", """{ "items": "{{trigger.things}}" }"""),
+                Node("end", "builtin.terminal"),
                 Body("ms", "flow.map_start", "map"),
-                Body("gate", "flow.wait_approval", "map"),   // ⇐ parks the run — unsupported in a PR1 map body
+                Body("gate", "flow.wait_approval", "map"),   // ⇐ parks the run — a first-class PR2 map body element
             },
             Edges = new List<EdgeDefinition> { Edge("t", "map"), Edge("map", "end"), Edge("ms", "gate") },
         };
 
-        var result = BuildValidator().Validate(def);
-        result.IsValid.ShouldBeFalse();
-        result.Errors.ShouldContain(e => e.Contains("cannot contain a node that waits") && e.Contains("PR2"));
+        BuildValidator().Validate(def).IsValid.ShouldBeTrue("PR2 lifts the PR1 no-suspend-in-map-body guard");
     }
 
     [Fact]
-    public void Map_body_with_a_suspending_node_in_a_NESTED_container_errors()
+    public void Map_body_with_a_suspending_node_in_a_NESTED_container_validates()
     {
-        // The suspend guard spans the map's RECURSIVE body: the approval sits inside a nested flow.loop
-        // whose ParentId is the map. The loop's own body extends the map body, so it must still be caught.
+        // PR2: the lifted guard also applies to a suspend buried in a nested container — an approval inside a
+        // flow.loop whose ParentId is the map validates just like a direct body suspend. (The other container
+        // rules — single terminal, no boundary-crossing edges, depth — still apply to the nested loop.)
         var def = new WorkflowDefinition
         {
             Nodes = new List<NodeDefinition>
             {
-                Node("t", "trigger.x"), Node("map", "flow.map"), Node("end", "builtin.terminal"),
+                Node("t", "trigger.x"),
+                NodeWithInputs("map", "flow.map", """{ "items": "{{trigger.things}}" }"""),
+                Node("end", "builtin.terminal"),
                 Body("ms", "flow.map_start", "map"),
                 Body("loop", "flow.loop", "map"),                  // nested container in the map body
                 Body("ls", "flow.loop_start", "loop"),
-                Body("gate", "flow.wait_approval", "loop"),        // ⇐ buried two levels deep, still rejected
+                Body("gate", "flow.wait_approval", "loop"),        // ⇐ buried two levels deep — now allowed
             },
             Edges = new List<EdgeDefinition> { Edge("t", "map"), Edge("map", "end"), Edge("ms", "loop"), Edge("ls", "gate") },
         };
 
-        var result = BuildValidator().Validate(def);
-        result.IsValid.ShouldBeFalse();
-        result.Errors.ShouldContain(e => e.Contains("cannot contain a node that waits") && e.Contains("gate"));
+        BuildValidator().Validate(def).IsValid.ShouldBeTrue("a suspend nested under a map body container validates in PR2");
     }
 
     [Fact]
