@@ -2,6 +2,7 @@ using System.Text.Json;
 using CodeSpace.Core.DependencyInjection;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
+using CodeSpace.Core.Services.Agents.Mcp;
 using CodeSpace.Core.Services.Chat.Interactions;
 using CodeSpace.Core.Services.Workflows.Engine;
 using CodeSpace.Messages.Dtos.Chat.Interactions;
@@ -14,12 +15,14 @@ public sealed class MessageInteractionService : IMessageInteractionService, ISco
     private readonly CodeSpaceDbContext _db;
     private readonly IWorkflowResumeService _resume;
     private readonly IResolvePolicyEvaluator _resolvePolicy;
+    private readonly IToolCallApprovalResolver _toolApprovals;
 
-    public MessageInteractionService(CodeSpaceDbContext db, IWorkflowResumeService resume, IResolvePolicyEvaluator resolvePolicy)
+    public MessageInteractionService(CodeSpaceDbContext db, IWorkflowResumeService resume, IResolvePolicyEvaluator resolvePolicy, IToolCallApprovalResolver toolApprovals)
     {
         _db = db;
         _resume = resume;
         _resolvePolicy = resolvePolicy;
+        _toolApprovals = toolApprovals;
     }
 
     public async Task RespondAsync(Guid teamId, Guid messageId, string responseKey, Guid actorUserId, string? comment, IReadOnlyDictionary<string, JsonElement>? values, CancellationToken cancellationToken)
@@ -201,6 +204,7 @@ public sealed class MessageInteractionService : IMessageInteractionService, ISco
         target switch
         {
             WorkflowWaitTarget wait => await _resume.ResumeByActionTokenAsync(wait.Token, responseKey, actorUserId, comment, values, teamId, cancellationToken).ConfigureAwait(false),
+            ToolCallApprovalTarget approval => await _toolApprovals.ResolveByTokenAsync(approval.Token, responseKey, actorUserId, teamId, cancellationToken).ConfigureAwait(false),
             _ => throw new InvalidOperationException($"Unsupported interaction target '{target.GetType().Name}'."),
         };
 }

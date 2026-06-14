@@ -19,6 +19,8 @@ public class ToolCallLedgerConfiguration : IEntityTypeConfiguration<ToolCallLedg
         builder.Property(l => l.ApprovalMessageId).HasColumnName("approval_message_id");
         builder.Property(l => l.ApprovalToken).HasColumnName("approval_token");
         builder.Property(l => l.ApprovalDeadlineAt).HasColumnName("approval_deadline_at");
+        builder.Property(l => l.ApprovedByUserId).HasColumnName("approved_by_user_id");
+        builder.Property(l => l.ApprovedAt).HasColumnName("approved_at");
         builder.Property(l => l.FenceEpoch).HasColumnName("fence_epoch");
 
         // The exactly-once invariant: one row per (run, idempotency key). A racing duplicate INSERT hits this and
