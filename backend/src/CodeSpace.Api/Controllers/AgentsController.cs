@@ -50,6 +50,14 @@ public class AgentsController : ControllerBase
         return Ok(result);
     }
 
+    /// <summary>The run's governed (side-effecting) tool-call audit — what tool, when, the outcome, and the approval trail (team-scoped). Read-only tools are absent (they skip the ledger).</summary>
+    [HttpGet("runs/{agentRunId:guid}/tool-calls")]
+    public async Task<IActionResult> ListToolCalls([FromRoute] Guid agentRunId, CancellationToken cancellationToken)
+    {
+        var result = await _mediator.Send(new ListToolCallsQuery { AgentRunId = agentRunId }, cancellationToken).ConfigureAwait(false);
+        return Ok(result);
+    }
+
     [HttpGet("{agentDefinitionId:guid}")]
     public async Task<IActionResult> Get([FromRoute] Guid agentDefinitionId, CancellationToken cancellationToken)
     {
