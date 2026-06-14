@@ -223,6 +223,40 @@ public class RunRecordViewProjectionFlowTests
     }
 
     [Fact]
+    public async Task Map_body_rows_project_container_kind_flow_map_top_level_rows_null()
+    {
+        // PR-D3 blocker: a loop body key ("<loopId>#<i>") and a map branch key ("<mapId>#<i>") share a
+        // shape, so the iteration key alone can't tell them apart. The view DTO carries ContainerKind —
+        // the typeKey of the container owning each row's innermost iteration — so the run-detail UI badges
+        // / rolls up ONLY map fan-outs. Map body rows must read "flow.map"; top-level rows must read null.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var workflowId = await CreateWorkflowAsync(teamId, userId, StaticArrayMapDefinition());
+        var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId, payloadJson: """{ "things": ["a", "b"] }""");
+        await RunEngineAsync(runId);
+
+        WorkflowRunDetail? detail;
+        using (var scope = _fixture.BeginScopeAs(userId, teamId, Roles.Admin))
+        {
+            var mediator = scope.Resolve<IMediator>();
+            detail = await mediator.Send(new GetWorkflowRunQuery { RunId = runId });
+        }
+
+        detail.ShouldNotBeNull();
+
+        var bodyRows = detail!.Nodes.Where(n => n.IterationKey.Length > 0).ToList();
+        bodyRows.ShouldNotBeEmpty("the 2-element map fans the body subgraph out into branch rows");
+        bodyRows.ShouldAllBe(n => n.ContainerKind == "flow.map",
+            "a map body row's innermost container is the flow.map — what lets the UI badge it as a branch");
+
+        var topLevelRows = detail.Nodes.Where(n => n.IterationKey.Length == 0).ToList();
+        topLevelRows.ShouldContain(n => n.NodeId == "start");
+        topLevelRows.ShouldContain(n => n.NodeId == "map");
+        topLevelRows.ShouldContain(n => n.NodeId == "end");
+        topLevelRows.ShouldAllBe(n => n.ContainerKind == null,
+            "top-level rows (incl. the map node itself) are not inside any iteration → null container kind");
+    }
+
+    [Fact]
     public async Task Node_ordering_in_view_matches_started_at_for_run_detail_chronology()
     {
         var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
@@ -344,6 +378,29 @@ public class RunRecordViewProjectionFlowTests
         using var scope = _fixture.BeginScope();
         await scope.Resolve<IWorkflowEngine>().ExecuteRunAsync(runId, CancellationToken.None);
     }
+
+    /// <summary>A static-array flow.map (mirrors MapFlowTests): items={{trigger.things}}, body fans out per element.</summary>
+    private static WorkflowDefinition StaticArrayMapDefinition() => new()
+    {
+        SchemaVersion = 1,
+        Nodes = new List<NodeDefinition>
+        {
+            new() { Id = "start", TypeKey = "trigger.manual", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
+            new() { Id = "map", TypeKey = "flow.map", Config = WorkflowsTestSeed.EmptyJson(),
+                    Inputs = WorkflowsTestSeed.Json("""{ "items": "{{trigger.things}}" }""") },
+            new() { Id = "ms", TypeKey = "flow.map_start", ParentId = "map", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
+            new() { Id = "work", TypeKey = JsonEmitNode.Key, ParentId = "map", Config = WorkflowsTestSeed.EmptyJson(),
+                    Inputs = WorkflowsTestSeed.Json("""{ "value": "{{item}}" }""") },
+            new() { Id = "end", TypeKey = "builtin.terminal", Config = WorkflowsTestSeed.EmptyJson(),
+                    Inputs = WorkflowsTestSeed.Json("""{ "count": "{{nodes.map.outputs.count}}" }""") },
+        },
+        Edges = new List<EdgeDefinition>
+        {
+            new() { From = "start", To = "map" },
+            new() { From = "map", To = "end" },
+            new() { From = "ms", To = "work" },
+        },
+    };
 
     private static WorkflowDefinition BranchedDefinition(string condition) => new()
     {

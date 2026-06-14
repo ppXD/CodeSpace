@@ -36,7 +36,7 @@ vi.mock("@/hooks/use-team-members", () => ({
 }));
 
 function node(over: Partial<WorkflowRunNodeSummary> & { nodeId: string }): WorkflowRunNodeSummary {
-  return { iterationKey: "", status: "Success", inputs: {}, outputs: {}, error: null, startedAt: null, completedAt: null, childRunId: null, ...over };
+  return { iterationKey: "", containerKind: null, status: "Success", inputs: {}, outputs: {}, error: null, startedAt: null, completedAt: null, childRunId: null, ...over };
 }
 
 function detail(over: Partial<WorkflowRunDetail>): WorkflowRunDetail {
@@ -192,13 +192,16 @@ describe("RunDetailView — parallel-wave observability", () => {
 });
 
 describe("RunDetailView — map-branch observability", () => {
+  // A flow.map element-branch body row — the backend stamps containerKind = "flow.map".
+  const mapNode = (over: Partial<WorkflowRunNodeSummary> & { nodeId: string }) => node({ containerKind: "flow.map", ...over });
+
   it("groups + badges a K-branch map run (per-element badge + per-map rollup)", () => {
     useWorkflowRunMock.mockImplementation(() => ok(detail({
       nodes: [
-        node({ nodeId: "synth", iterationKey: "" }),                          // a top-level (non-branch) node
-        node({ nodeId: "work", iterationKey: "map#0" }),
-        node({ nodeId: "work", iterationKey: "map#1" }),
-        node({ nodeId: "work", iterationKey: "map#2", status: "Failure" }),   // one branch failed
+        node({ nodeId: "synth", iterationKey: "" }),                             // a top-level (non-branch) node
+        mapNode({ nodeId: "work", iterationKey: "map#0" }),
+        mapNode({ nodeId: "work", iterationKey: "map#1" }),
+        mapNode({ nodeId: "work", iterationKey: "map#2", status: "Failure" }),   // one branch failed
       ],
     })));
 
@@ -217,11 +220,24 @@ describe("RunDetailView — map-branch observability", () => {
 
   it("badges a nested map-in-map branch as #i/#j", () => {
     useWorkflowRunMock.mockImplementation(() => ok(detail({
-      nodes: [node({ nodeId: "leaf", iterationKey: "outer#1/inner#2" })],
+      nodes: [mapNode({ nodeId: "leaf", iterationKey: "outer#1/inner#2" })],
     })));
 
     render(<RunDetailView runId="parent-1" />);
     expect(screen.getByText("#1/#2")).toBeTruthy();
+  });
+
+  it("renders a LOOP run exactly as before — no branch badges, no rollup (same key shape, but containerKind is flow.loop)", () => {
+    useWorkflowRunMock.mockImplementation(() => ok(detail({
+      nodes: [
+        node({ nodeId: "step", iterationKey: "loop#0", containerKind: "flow.loop" }),
+        node({ nodeId: "step", iterationKey: "loop#1", containerKind: "flow.loop" }),
+      ],
+    })));
+
+    const { container } = render(<RunDetailView runId="parent-1" />);
+    expect(container.querySelector(".wf-run-node-branch")).toBeNull();
+    expect(container.querySelector(".wf-map-rollups")).toBeNull();
   });
 
   it("renders a non-map run exactly as before — no branch badges, no rollup", () => {

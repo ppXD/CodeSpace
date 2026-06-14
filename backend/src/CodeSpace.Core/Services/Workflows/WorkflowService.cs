@@ -583,6 +583,11 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
         var childRunByNode = await LoadSubworkflowChildLinksAsync(runId, cancellationToken).ConfigureAwait(false);
         var agentRunByNode = await LoadAgentRunLinksAsync(runId, cancellationToken).ConfigureAwait(false);
 
+        // nodeId → typeKey from the run's VERSION-PINNED definition (the exact JSON this run executed),
+        // so each iterated row can be stamped with its owning container's kind. Disambiguates a map
+        // branch key ("<mapId>#<i>") from a loop body key ("<loopId>#<i>"), which share a shape.
+        var typeKeyByNodeId = await LoadNodeTypeKeysAsync(run.WorkflowId, run.WorkflowVersion, cancellationToken).ConfigureAwait(false);
+
         return new WorkflowRunDetail
         {
             Id = run.Id,
@@ -594,7 +599,7 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
             Error = run.Error,
             StartedAt = run.StartedAt,
             CompletedAt = run.CompletedAt,
-            Nodes = nodes.Select(n => MapRunNode(n, childRunByNode, agentRunByNode)).ToList(),
+            Nodes = nodes.Select(n => MapRunNode(n, childRunByNode, agentRunByNode, typeKeyByNodeId)).ToList(),
             Outputs = outputs,
             PendingWait = pending == null ? null : new WorkflowRunWaitInfo
             {
@@ -716,10 +721,12 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
     private static WorkflowRunNodeSummary MapRunNode(
         WorkflowRunNode n,
         IReadOnlyDictionary<(string NodeId, string IterationKey), string> childRunByNode,
-        IReadOnlyDictionary<(string NodeId, string IterationKey), string> agentRunByNode) => new()
+        IReadOnlyDictionary<(string NodeId, string IterationKey), string> agentRunByNode,
+        IReadOnlyDictionary<string, string> typeKeyByNodeId) => new()
     {
         NodeId = n.NodeId,
         IterationKey = n.IterationKey,
+        ContainerKind = ResolveContainerKind(n.IterationKey, typeKeyByNodeId),
         Status = n.Status,
         Inputs = SafeParseJson(n.InputsJson),
         Outputs = SafeParseJson(n.OutputsJson),
@@ -729,6 +736,44 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
         ChildRunId = childRunByNode.GetValueOrDefault((n.NodeId, n.IterationKey)),
         AgentRunId = agentRunByNode.GetValueOrDefault((n.NodeId, n.IterationKey))
     };
+
+    /// <summary>
+    /// nodeId → typeKey for the run's VERSION-PINNED definition (the exact JSON it executed, not the
+    /// workflow's current draft). Mirrors how the engine + <c>ActorIdentityRequirementGate</c> read the
+    /// pinned <c>WorkflowVersion.DefinitionJson</c>. Empty when the version row is missing or unparsable
+    /// (so every row falls back to a <c>null</c> container kind — no crash, just no badge).
+    /// </summary>
+    private async Task<IReadOnlyDictionary<string, string>> LoadNodeTypeKeysAsync(Guid workflowId, int version, CancellationToken cancellationToken)
+    {
+        var definitionJson = await _db.WorkflowVersion.AsNoTracking()
+            .Where(v => v.WorkflowId == workflowId && v.Version == version)
+            .Select(v => v.DefinitionJson)
+            .FirstOrDefaultAsync(cancellationToken).ConfigureAwait(false);
+
+        var definition = definitionJson == null ? null : JsonSerializer.Deserialize<WorkflowDefinition>(definitionJson, WorkflowJson.Options);
+        if (definition == null) return new Dictionary<string, string>();
+
+        return definition.Nodes.ToDictionary(node => node.Id, node => node.TypeKey);
+    }
+
+    /// <summary>
+    /// The <c>TypeKey</c> of the container that owns a row's INNERMOST iteration, or <c>null</c> for a
+    /// top-level row. The engine builds each iteration-key segment as <c>"&lt;containerId&gt;#&lt;index&gt;"</c>
+    /// (<c>/</c>-joined when nested), so the leaf container id is the text before the LAST <c>#</c> of the
+    /// LAST <c>/</c>-segment — we look that id up in the pinned definition. An unknown id (forward-compat /
+    /// stale version) yields <c>null</c>.
+    /// </summary>
+    private static string? ResolveContainerKind(string iterationKey, IReadOnlyDictionary<string, string> typeKeyByNodeId)
+    {
+        if (string.IsNullOrEmpty(iterationKey)) return null;
+
+        var lastSegment = iterationKey[(iterationKey.LastIndexOf('/') + 1)..];
+        var hash = lastSegment.LastIndexOf('#');
+        if (hash <= 0) return null;
+
+        var containerId = lastSegment[..hash];
+        return typeKeyByNodeId.GetValueOrDefault(containerId);
+    }
 
     /// <summary>Delegates to <see cref="WorkflowJsonSafeParse.SafeParse(string?)"/>.</summary>
     private static JsonElement SafeParseJson(string? raw) => WorkflowJsonSafeParse.SafeParse(raw);

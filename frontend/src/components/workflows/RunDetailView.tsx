@@ -108,7 +108,7 @@ export function RunDetailView({ runId, nested = false, depth = 0, onOpenRun }: {
               <RunNodeRow
                 key={`${n.nodeId}:${n.iterationKey}`}
                 node={n}
-                branch={branchBadge(n.iterationKey)}
+                branch={branchBadge(n)}
                 parallel={concurrent.has(runNodeKey(n))}
                 suppressChildEmbed={n.childRunId === r.pendingWait?.token}
                 depth={depth}
@@ -214,9 +214,10 @@ function RunNodeRow({ node: n, branch, parallel, suppressChildEmbed, depth, onOp
 
 /**
  * Per-map element-branch rollup — one chip per flow.map (or per OUTER-pass of a nested map), showing
- * how its fan-out is going: total elements observed, how many finished cleanly, how many failed. Derived
- * from the branch rows' iteration keys, so it's accurate live (as branches settle) and matches the map
- * node's own `count` / `failed` outputs once the run completes.
+ * how its fan-out is going: total elements observed, how many finished cleanly (`done`), how many failed.
+ * `done` counts ONLY fully-settled clean branches — a branch with a still-running / suspended row sits in
+ * `total` but neither `done` nor `failed`, so a live map reads e.g. "1/3 done" while two branches run, not
+ * a misleading "3/3". Once the run completes this matches the map node's own `count` / `failed` outputs.
  */
 function MapRollups({ rollups }: { rollups: MapRollup[] }) {
   return (

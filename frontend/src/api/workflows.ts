@@ -160,6 +160,14 @@ export interface WorkflowRunSummary {
 export interface WorkflowRunNodeSummary {
   nodeId: string;
   iterationKey: string;
+  /**
+   * The typeKey of the container that owns this row's innermost iteration — "flow.map" for a map
+   * element-branch, "flow.loop" for a loop body, "flow.try" for a try body; `null`/absent for a
+   * top-level (non-iterated) row. The engine builds a loop body key (`<loopId>#<i>`) and a map branch
+   * key (`<mapId>#<i>`) with the SAME shape, so `iterationKey` alone can't distinguish them — this is
+   * what lets the run-detail view badge / roll up ONLY map fan-outs and keep loops as plain rows.
+   */
+  containerKind?: string | null;
   status: NodeStatus;
   inputs: unknown;
   outputs: unknown;

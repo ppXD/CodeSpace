@@ -66,6 +66,18 @@ public sealed record WorkflowRunNodeSummary
 {
     public required string NodeId { get; init; }
     public required string IterationKey { get; init; }
+
+    /// <summary>
+    /// The <c>TypeKey</c> of the container that OWNS this row's innermost iteration — e.g.
+    /// <c>"flow.map"</c> for a map element-branch body node, <c>"flow.loop"</c> for a loop body node.
+    /// <c>null</c> for a top-level (non-iterated) row. The engine builds both a loop body key
+    /// (<c>"&lt;loopId&gt;#&lt;i&gt;"</c>) and a map branch key (<c>"&lt;mapId&gt;#&lt;i&gt;"</c>) with the SAME
+    /// shape, so <see cref="IterationKey"/> alone can't tell them apart — this disambiguates, letting the
+    /// run-detail UI badge / roll up ONLY map fan-outs and leave loop iterations as plain rows. Resolved
+    /// from the run's version-pinned definition by looking up the iteration key's leaf container id.
+    /// </summary>
+    public string? ContainerKind { get; init; }
+
     public required NodeStatus Status { get; init; }
     public required JsonElement Inputs { get; init; }
     public required JsonElement Outputs { get; init; }
