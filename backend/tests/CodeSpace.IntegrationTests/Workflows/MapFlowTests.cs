@@ -689,9 +689,12 @@ public class MapFlowTests
         },
     };
 
-    // manual → map(body: ms → loop(maxIterations 2; body: ls → noop[LoopProbe]) → leaf[echo item={{item}}, loops={{nodes.loop.outputs.iterations}}]) → terminal.
+    // manual → map(body: ms → loop(maxIterations 2; body: ls → noop[JsonEmit]) → leaf[echo item={{item}}, loops={{nodes.loop.outputs.iterations}}]) → terminal.
     // A flow.loop NESTED inside each map branch: it runs its two iterations and the branch terminal `leaf` echoes
-    // the loop's iteration count into the branch's result slot.
+    // the loop's iteration count into the branch's result slot. The loop body is the THREAD-SAFE JsonEmitNode (a
+    // stateless echo) rather than LoopProbeNode, whose static seen-list is not safe under the up-to-3 concurrent
+    // map branches the default parallelism fans out — the test only reads {{nodes.loop.outputs.iterations}}, never
+    // the probe's record, so this is a pure thread-safety swap with the assertion (loops == 2) unchanged.
     private static WorkflowDefinition LoopInMapBranchDefinition() => new()
     {
         SchemaVersion = 1,
@@ -703,8 +706,8 @@ public class MapFlowTests
             new() { Id = "ms", TypeKey = "flow.map_start", ParentId = "map", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
             new() { Id = "loop", TypeKey = "flow.loop", ParentId = "map", Config = WorkflowsTestSeed.Json("""{ "maxIterations": 2 }"""), Inputs = WorkflowsTestSeed.EmptyJson() },
             new() { Id = "ls", TypeKey = "flow.loop_start", ParentId = "loop", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
-            new() { Id = "noop", TypeKey = LoopProbeNode.Key, ParentId = "loop", Config = WorkflowsTestSeed.EmptyJson(),
-                    Inputs = WorkflowsTestSeed.Json("""{ "key": "loop-in-map", "value": "i{{loop.index}}" }""") },
+            new() { Id = "noop", TypeKey = JsonEmitNode.Key, ParentId = "loop", Config = WorkflowsTestSeed.EmptyJson(),
+                    Inputs = WorkflowsTestSeed.Json("""{ "value": "i{{loop.index}}" }""") },
             new() { Id = "leaf", TypeKey = JsonEmitNode.Key, ParentId = "map", Config = WorkflowsTestSeed.EmptyJson(),
                     Inputs = WorkflowsTestSeed.Json("""{ "item": "{{item}}", "loops": "{{nodes.loop.outputs.iterations}}" }""") },
             new() { Id = "end", TypeKey = "builtin.terminal", Config = WorkflowsTestSeed.EmptyJson(),

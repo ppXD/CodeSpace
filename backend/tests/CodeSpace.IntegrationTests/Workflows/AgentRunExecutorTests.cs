@@ -7,8 +7,15 @@ using CodeSpace.Core.Services.Agents.Sandbox;
 using CodeSpace.Core.Services.Agents.Sandbox.Runners;
 using CodeSpace.Core.Services.Agents.Workspace;
 using CodeSpace.IntegrationTests.Infrastructure;
+using CodeSpace.IntegrationTests.Workflows.Infrastructure;
 using CodeSpace.Messages.Agents;
+using CodeSpace.Messages.Authorization;
+using CodeSpace.Messages.Commands.Workflows;
+using CodeSpace.Messages.Constants;
+using CodeSpace.Messages.Dtos.Workflows;
 using CodeSpace.Messages.Enums;
+using MediatR;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging.Abstractions;
 using Shouldly;
 
@@ -184,6 +191,85 @@ public class AgentRunExecutorTests
         var svc = verify.Resolve<IAgentRunService>();
         (await svc.GetAsync(runId, CancellationToken.None)).Status.ShouldBe(AgentRunStatus.Running);   // untouched
         (await svc.GetEventsAsync(runId, teamId, 0, CancellationToken.None)).ShouldBeEmpty();                  // the harness was never spawned
+    }
+
+    [Theory]
+    [InlineData(WorkflowRunStatus.Cancelled)]
+    [InlineData(WorkflowRunStatus.Failure)]
+    [InlineData(WorkflowRunStatus.Success)]
+    public async Task Cancels_a_branch_run_whose_parent_workflow_is_terminal_at_the_claim_point_without_launching(WorkflowRunStatus parentStatus)
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        // The post-claim TOCTOU guard: the reconciler's still-Queued check can't see a parent that flips terminal in
+        // the window before the executor claims. After winning the Queued→Running claim, the executor re-reads the
+        // parent; a terminal parent cancels this run (never spawning a sandbox under a dead workflow) and resumes the
+        // parent off the Cancelled state. The harness echoes "must-not-run" — its absence from the log proves no launch.
+        var teamId = await SeedTeamAsync();
+        var parentRunId = await SeedParentWorkflowRunAsync(teamId, parentStatus);
+        var runId = await CreateBranchRunAsync(teamId, parentRunId);
+
+        await ExecuteAsync(runId, new ScriptedHarness("printf 'must-not-run\\n'"));
+
+        using var verify = _fixture.BeginScope();
+        var svc = verify.Resolve<IAgentRunService>();
+        var run = await svc.GetAsync(runId, CancellationToken.None);
+        run.Status.ShouldBe(AgentRunStatus.Cancelled, "a branch run under a terminal parent is cancelled at the claim, not launched");
+        run.Error.ShouldBe(AgentRunExecutor.ParentTerminalAtClaimError);
+        (await svc.GetEventsAsync(runId, teamId, 0, CancellationToken.None)).ShouldBeEmpty("no sandbox was spawned for an already-dead workflow");
+    }
+
+    [Fact]
+    public async Task Runs_a_branch_run_normally_when_its_parent_workflow_is_still_live()
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        // The non-breaking half of the claim-point guard: a LIVE parent (Suspended/Pending/Running) must proceed
+        // EXACTLY as today — claim, run the harness, complete Succeeded. Only a TERMINAL parent aborts.
+        var teamId = await SeedTeamAsync();
+        var parentRunId = await SeedParentWorkflowRunAsync(teamId, WorkflowRunStatus.Suspended);
+        var runId = await CreateBranchRunAsync(teamId, parentRunId);
+
+        await ExecuteAsync(runId, new ScriptedHarness("printf 'ran\\n'"));
+
+        using var verify = _fixture.BeginScope();
+        var svc = verify.Resolve<IAgentRunService>();
+        (await svc.GetAsync(runId, CancellationToken.None)).Status.ShouldBe(AgentRunStatus.Succeeded, "a live parent leaves the run to execute unchanged");
+        (await svc.GetEventsAsync(runId, teamId, 0, CancellationToken.None)).Select(e => e.Text).ShouldContain("ran");
+    }
+
+    private async Task<Guid> SeedParentWorkflowRunAsync(Guid teamId, WorkflowRunStatus status)
+    {
+        Guid workflowId;
+        using (var scope = _fixture.BeginScopeAs(SystemUsers.SeederId, teamId, Roles.Admin))
+            workflowId = await scope.Resolve<IMediator>().Send(new CreateWorkflowCommand
+            {
+                Name = "agent-parent-" + Guid.NewGuid().ToString("N")[..6],
+                Description = null,
+                Definition = WorkflowsTestSeed.MinimalDefinition(),
+                Activations = new List<WorkflowActivationInput>(),
+                Enabled = true,
+            });
+
+        var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
+
+        // Flip the parent to the target status via a pure UPDATE (the audit interceptor refuses a status change on a
+        // tracked entity) — the same way the map-resume tests stage a terminal/live parent.
+        using var flip = _fixture.BeginScope();
+        await flip.Resolve<CodeSpaceDbContext>().WorkflowRun
+            .Where(r => r.Id == runId)
+            .ExecuteUpdateAsync(s => s.SetProperty(r => r.Status, status));
+
+        return runId;
+    }
+
+    private async Task<Guid> CreateBranchRunAsync(Guid teamId, Guid parentRunId)
+    {
+        using var scope = _fixture.BeginScope();
+        var run = await scope.Resolve<IAgentRunService>().CreateAsync(
+            new AgentTask { Goal = "branch", Harness = "scripted", Model = "test-model" },
+            teamId, parentRunId, "map#0", CancellationToken.None);
+        return run.Id;
     }
 
     [Fact]
@@ -541,6 +627,7 @@ public class AgentRunExecutorTests
             new SingleProviderRegistry(provider),
             scope.Resolve<IAgentRunCompletionNotifier>(),
             scope.Resolve<Microsoft.Extensions.DependencyInjection.IServiceScopeFactory>(),
+            scope.Resolve<CodeSpaceDbContext>(),
             NullLogger<AgentRunExecutor>.Instance);
 
         await executor.ExecuteAsync(runId, cancellationToken);
@@ -604,6 +691,7 @@ public class AgentRunExecutorTests
             scope.Resolve<IWorkspaceProviderRegistry>(),
             scope.Resolve<IAgentRunCompletionNotifier>(),
             scope.Resolve<Microsoft.Extensions.DependencyInjection.IServiceScopeFactory>(),
+            scope.Resolve<CodeSpaceDbContext>(),
             NullLogger<AgentRunExecutor>.Instance);
 
         await executor.ExecuteAsync(runId, CancellationToken.None);

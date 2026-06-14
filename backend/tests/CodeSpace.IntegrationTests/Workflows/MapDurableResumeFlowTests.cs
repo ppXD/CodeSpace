@@ -605,12 +605,31 @@ public class MapDurableResumeFlowTests
             SuspendProbeNode.FirstPassCount(key, leaf).ShouldBe(1,
                 $"leaf '{leaf}' resumed exactly once across the whole immediate-path sequence — no nested re-dispatch");
 
+        // ORDERED NESTED REDUCE over the immediate path too — at #403 depth: assert ALL four leaves' item AND
+        // summary payloads at their exact [i][j] slots, so a misplaced slot (outer/inner element order vs the
+        // resolve order) is visible. Each leaf echoes its own element + its own resolved "R-<element>" summary.
         var outerNode = await fdb.WorkflowRunNode.AsNoTracking().SingleAsync(n => n.RunId == runId && n.NodeId == "outer" && n.IterationKey == "");
-        var outer = JsonDocument.Parse(outerNode.OutputsJson).RootElement.GetProperty("results");
+        var outerOutputs = JsonDocument.Parse(outerNode.OutputsJson).RootElement;
+        outerOutputs.GetProperty("count").GetInt32().ShouldBe(2, "two outer branches reduced");
+
+        var outer = outerOutputs.GetProperty("results");
         outer.GetArrayLength().ShouldBe(2);
-        // Ordered nested reduce holds over the immediate path too — outer/inner element order, not resolve order.
-        outer[0].GetProperty("results")[0].GetProperty("item").GetString().ShouldBe("o0::j0");
-        outer[1].GetProperty("results")[1].GetProperty("item").GetString().ShouldBe("o1::j1");
+
+        // outer[0] is branch o0 — its inner reduced array, element-ordered j0 then j1, each echoing its own leaf.
+        var o0Inner = outer[0].GetProperty("results");
+        o0Inner.GetArrayLength().ShouldBe(2);
+        o0Inner[0].GetProperty("item").GetString().ShouldBe("o0::j0");
+        o0Inner[0].GetProperty("summary").GetString().ShouldBe("R-o0::j0");
+        o0Inner[1].GetProperty("item").GetString().ShouldBe("o0::j1");
+        o0Inner[1].GetProperty("summary").GetString().ShouldBe("R-o0::j1");
+
+        // outer[1] is branch o1 — likewise element-ordered j0 then j1, regardless of when each leaf resolved.
+        var o1Inner = outer[1].GetProperty("results");
+        o1Inner.GetArrayLength().ShouldBe(2);
+        o1Inner[0].GetProperty("item").GetString().ShouldBe("o1::j0");
+        o1Inner[0].GetProperty("summary").GetString().ShouldBe("R-o1::j0");
+        o1Inner[1].GetProperty("item").GetString().ShouldBe("o1::j1");
+        o1Inner[1].GetProperty("summary").GetString().ShouldBe("R-o1::j1");
     }
 
     // ─── Helpers ────────────────────────────────────────────────────────────────

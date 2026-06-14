@@ -533,8 +533,8 @@ public class StuckRunReconcilerFlowTests
     }
 
     /// <summary>
-    /// Create a workflow whose body is a 1-element flow.map over a real SUSPENDING node
-    /// (<see cref="SuspendProbeNode"/>) — the lightest faithful reuse of the proven map-resume fixtures.
+    /// Create a workflow whose body is an N-element (parameterised by the seeded payload) flow.map over a real
+    /// SUSPENDING node (<see cref="SuspendProbeNode"/>) — the lightest faithful reuse of the proven map-resume fixtures.
     /// Mirrors <c>MapDurableResumeFlowTests.SuspendingMapDefinition</c>: trigger → map[ms → leaf(suspend probe)]
     /// → terminal. The leaf parks an Action wait on its first pass and, on resume, echoes { item, summary }.
     /// </summary>

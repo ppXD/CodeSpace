@@ -234,7 +234,7 @@ public sealed class AgentRunExecutorPushTests
     {
         var runId = Guid.NewGuid();
         var runs = new StubRuns(runId, epoch);
-        var executor = new AgentRunExecutor(runs, null!, null!, null!, null!, null!, null!, null!, NullLogger<AgentRunExecutor>.Instance);
+        var executor = new AgentRunExecutor(runs, null!, null!, null!, null!, null!, null!, null!, null!, NullLogger<AgentRunExecutor>.Instance);
         return (runId, executor, runs);
     }
 
