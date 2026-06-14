@@ -5,6 +5,7 @@ import { useHarnesses } from "@/hooks/use-agents";
 import type { ScopeSuggestion } from "./scope-introspection";
 import { VariablePickerInput } from "./VariablePickerInput";
 import { AgentSelector } from "./selectors/AgentSelector";
+import { ConversationSelector } from "./selectors/ConversationSelector";
 import { HarnessSelector } from "./selectors/HarnessSelector";
 import { ModelCredentialSelector } from "./selectors/ModelCredentialSelector";
 import { ProjectRepositorySelector } from "./selectors/ProjectRepositorySelector";
@@ -37,6 +38,7 @@ export function AgentCodeInspector({ config, inputs, onConfigChange, onInputsCha
   const model = str(config.model);
   const credentialId = str(config.modelCredentialId);
   const repositoryId = str(inputs.repositoryId);
+  const approvalConversationId = str(config.approvalConversationId);
   const timeoutSeconds = typeof config.timeoutSeconds === "number" ? config.timeoutSeconds : undefined;
   const network = config.network === true;
   const readOnly = config.readOnly === true;
@@ -141,6 +143,12 @@ export function AgentCodeInspector({ config, inputs, onConfigChange, onInputsCha
           <span className="wf-form-label">Repository</span>
           <ProjectRepositorySelector value={repositoryId} onChange={(v) => onInputsChange({ ...inputs, repositoryId: v === "" ? undefined : v })} />
           <span className="wf-form-help">Cloned into the agent's workspace before it runs. Leave empty for an analysis-only run.</span>
+        </label>
+
+        <label className="wf-form-row">
+          <span className="wf-form-label">Approval conversation</span>
+          <ConversationSelector value={approvalConversationId} onChange={(v) => patch({ approvalConversationId: v })} />
+          <span className="wf-form-help">Conversation the run posts its tool-approval cards into. Leave empty for no approval surface.</span>
         </label>
 
         <label className="wf-form-row">

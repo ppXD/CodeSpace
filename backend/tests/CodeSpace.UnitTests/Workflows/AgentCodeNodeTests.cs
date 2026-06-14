@@ -189,6 +189,58 @@ public class AgentCodeNodeTests
         result.Error.ShouldContain("modelCredentialId");
     }
 
+    // ── approvalConversationId (the MCP tool-approval surface reference) ──────────
+
+    [Fact]
+    public async Task Approval_conversation_id_is_carried_onto_the_task_from_config()
+    {
+        var conversationId = Guid.NewGuid();
+        var config = new Dictionary<string, JsonElement> { ["goal"] = Str("Fix it"), ["harness"] = Str("codex-cli"), ["approvalConversationId"] = Str(conversationId.ToString()) };
+
+        var result = await new AgentCodeNode().RunAsync(BuildContext(config, resume: null), CancellationToken.None);
+
+        result.Status.ShouldBe(NodeStatus.Suspended);
+        JsonSerializer.Deserialize<AgentTask>(result.SuspendUntil!.Payload, AgentJson.Options)!.ApprovalConversationId.ShouldBe(conversationId);
+    }
+
+    [Theory]
+    [InlineData(null)]          // absent entirely → no approval surface
+    [InlineData("")]            // picked then cleared
+    [InlineData("not-a-uuid")]  // malformed → optional config, degrades to null (NOT a node failure)
+    public async Task No_or_malformed_approval_conversation_id_is_null_and_never_fails_the_node(string? raw)
+    {
+        var config = new Dictionary<string, JsonElement> { ["goal"] = Str("Fix it"), ["harness"] = Str("codex-cli") };
+        if (raw is not null) config["approvalConversationId"] = Str(raw);
+
+        var result = await new AgentCodeNode().RunAsync(BuildContext(config, resume: null), CancellationToken.None);
+
+        result.Status.ShouldBe(NodeStatus.Suspended, "approvalConversationId is optional config, not a safety-critical input — a missing/malformed value degrades to null rather than failing the node");
+        JsonSerializer.Deserialize<AgentTask>(result.SuspendUntil!.Payload, AgentJson.Options)!.ApprovalConversationId.ShouldBeNull();
+    }
+
+    [Fact]
+    public void Approval_conversation_id_round_trips_through_the_suspend_payload_json()
+    {
+        // The task envelope is the persisted suspend payload re-read on reattach — the reference must survive serialize→deserialize.
+        var conversationId = Guid.NewGuid();
+        var task = new AgentTask { Goal = "g", Harness = "codex-cli", ApprovalConversationId = conversationId };
+
+        var json = JsonSerializer.SerializeToElement(task, AgentJson.Options);
+        var roundTripped = JsonSerializer.Deserialize<AgentTask>(json, AgentJson.Options)!;
+
+        roundTripped.ApprovalConversationId.ShouldBe(conversationId);
+    }
+
+    [Fact]
+    public void A_task_with_no_approval_conversation_id_round_trips_as_null()
+    {
+        var task = new AgentTask { Goal = "g", Harness = "codex-cli" };
+
+        var roundTripped = JsonSerializer.Deserialize<AgentTask>(JsonSerializer.SerializeToElement(task, AgentJson.Options), AgentJson.Options)!;
+
+        roundTripped.ApprovalConversationId.ShouldBeNull();
+    }
+
     [Fact]
     public async Task Resumed_success_maps_the_result_onto_outputs()
     {

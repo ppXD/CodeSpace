@@ -67,6 +67,9 @@ public sealed record AgentTask
 
     /// <summary>Wall-clock cap for the whole agent run.</summary>
     public int TimeoutSeconds { get; init; } = 1800;
+
+    /// <summary>The conversation a run posts its tool-approval cards into — null = no approval surface (which fails closed in a later slice). Stored only; nothing reads it yet.</summary>
+    public Guid? ApprovalConversationId { get; init; }
 }
 
 /// <summary>What the agent may do — the declarative half of the sandbox policy a harness maps to its flags.</summary>

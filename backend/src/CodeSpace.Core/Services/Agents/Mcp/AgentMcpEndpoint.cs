@@ -40,6 +40,7 @@ public sealed class AgentMcpEndpoint : IAsyncDisposable
     private readonly IServiceScope _scope;
     private readonly long _fenceEpoch;
     private readonly bool _governanceEnabled;
+    private readonly Guid? _approvalConversationId;
     private readonly CancellationTokenSource _cts;
     private readonly Socket _listener;
     private readonly Task _acceptLoop;
@@ -47,7 +48,7 @@ public sealed class AgentMcpEndpoint : IAsyncDisposable
 
     private bool _disposed;
 
-    public AgentMcpEndpoint(Guid runId, IAgentToolRegistry registry, AgentAutonomyLevel autonomy, Guid teamId, SecretRedactor redactor, string socketPath, string token, IAgentMcpConnectRegistry connects, IServiceScope scope, CancellationToken ct, ILogger logger, long fenceEpoch = 0, bool governanceEnabled = false)
+    public AgentMcpEndpoint(Guid runId, IAgentToolRegistry registry, AgentAutonomyLevel autonomy, Guid teamId, SecretRedactor redactor, string socketPath, string token, IAgentMcpConnectRegistry connects, IServiceScope scope, CancellationToken ct, ILogger logger, long fenceEpoch = 0, bool governanceEnabled = false, Guid? approvalConversationId = null)
     {
         _runId = runId;
         _registry = registry;
@@ -60,6 +61,7 @@ public sealed class AgentMcpEndpoint : IAsyncDisposable
         _scope = scope;
         _fenceEpoch = fenceEpoch;
         _governanceEnabled = governanceEnabled;
+        _approvalConversationId = approvalConversationId;
         _cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
         _listener = new Socket(AddressFamily.Unix, SocketType.Stream, ProtocolType.Unspecified);
 
@@ -157,7 +159,7 @@ public sealed class AgentMcpEndpoint : IAsyncDisposable
         using var connectionScope = _governanceEnabled ? _scope.ServiceProvider.CreateScope() : null;
         var ledger = connectionScope?.ServiceProvider.GetRequiredService<IToolCallLedgerService>();
 
-        var handler = new McpRequestHandler(_registry, _autonomy, _teamId, _redactor, _runId, ledger, _fenceEpoch, _governanceEnabled);
+        var handler = new McpRequestHandler(_registry, _autonomy, _teamId, _redactor, _runId, ledger, _fenceEpoch, _governanceEnabled, _approvalConversationId);
         var loop = new McpFramingLoop(handler);
 
         try { await loop.RunAsync(reader, writer, ct).ConfigureAwait(false); }

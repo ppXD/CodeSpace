@@ -49,6 +49,7 @@ public sealed class AgentCodeNode : INodeRuntime
                 "harness":        { "type": "string", "x-selector": "harness", "description": "Which coding-agent CLI runs the task (e.g. Codex, Claude Code). Pick from the available harnesses." },
                 "model":          { "type": "string", "description": "Model id within the harness's catalog. Leave empty to use the persona's model, or the harness default." },
                 "modelCredentialId": { "type": "string", "format": "uuid", "x-selector": "modelCredential", "description": "Model credential the agent authenticates with. Leave empty to use the persona's default, or the team/operator default." },
+                "approvalConversationId": { "type": "string", "format": "uuid", "x-selector": "conversation", "description": "Conversation the run posts its tool-approval cards into. Leave empty for no approval surface." },
                 "tools":          { "type": "array", "items": { "type": "string" }, "description": "Tool allow-list the agent is restricted to (e.g. Read, Grep, Bash). Empty = the harness default. Added to (not replacing) the persona's tools; enforced by harnesses that support an allow-list (Claude Code), carried otherwise (Codex restricts via sandbox)." },
                 "runnerKind":     { "type": "string", "description": "Sandbox runner (e.g. \"local\"). Defaults to the deployment default." },
                 "timeoutSeconds": { "type": "integer", "minimum": 1, "description": "Wall-clock cap for the run." },
@@ -115,6 +116,7 @@ public sealed class AgentCodeNode : INodeRuntime
             TimeoutSeconds = ReadInt(context.Config, "timeoutSeconds") ?? 1800,
             Autonomy = autonomy,
             Permissions = ResolvePermissions(context.Config, autonomy),
+            ApprovalConversationId = ReadOptionalGuid(context.Config, "approvalConversationId"),
         };
 
         return Task.FromResult(NodeResult.Suspend(new SuspensionToken
@@ -201,6 +203,10 @@ public sealed class AgentCodeNode : INodeRuntime
         var s = ReadString(bag, key);
         return string.IsNullOrWhiteSpace(s) ? null : s;
     }
+
+    /// <summary>Read an optional uuid config field. Absent / empty / unparseable → null — this is optional config, not a safety-critical input, so a malformed value degrades to null rather than failing the node.</summary>
+    private static Guid? ReadOptionalGuid(IReadOnlyDictionary<string, JsonElement> bag, string key) =>
+        Guid.TryParse(ReadOptionalString(bag, key), out var id) ? id : null;
 
     private static int? ReadInt(IReadOnlyDictionary<string, JsonElement> bag, string key) =>
         bag.TryGetValue(key, out var v) && v.ValueKind == JsonValueKind.Number && v.TryGetInt32(out var n) ? n : null;
