@@ -11,7 +11,15 @@ namespace CodeSpace.Core.Services.Agents.Mcp;
 /// </summary>
 public interface IToolApprovalWaiterRegistry
 {
-    /// <summary>Register a waiter for a ledger row; the caller awaits the handle's <see cref="IToolApprovalWaiter.Completion"/>. Overwrites any stale waiter for the id (mirrors <c>AgentMcpConnectRegistry.Register</c>).</summary>
+    /// <summary>
+    /// Register a waiter for a ledger row; the caller awaits the handle's <see cref="IToolApprovalWaiter.Completion"/>.
+    /// Overwrites any prior waiter for the id (mirrors <c>AgentMcpConnectRegistry.Register</c>) — a single waiter per
+    /// (run, key) is correct because this map is ONLY a latency fast-path: if two blocked calls for the same row race,
+    /// the resolver's <see cref="TrySignal"/> wakes whichever waiter is currently registered, the other wakes on its own
+    /// bound timeout, and BOTH then re-read the durable row + funnel through the single-winner execution-claim CAS
+    /// (<c>IToolCallLedgerService.TryBeginExecutionAsync</c>), so exactly one runs the side effect and the loser replays.
+    /// A clobbered signal therefore costs at most a few seconds of extra block, never a double-run or a lost decision.
+    /// </summary>
     IToolApprovalWaiter Register(Guid ledgerId);
 
     /// <summary>Wake the waiter for a ledger row with <paramref name="outcome"/>; returns whether a live waiter was present (false when none — the common D0 case, harmless).</summary>

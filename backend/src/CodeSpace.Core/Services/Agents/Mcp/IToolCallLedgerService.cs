@@ -35,6 +35,16 @@ public interface IToolCallLedgerService
     /// <summary>Stamp the posted approval-card message id on an AwaitingApproval row (best-effort, team-scoped) — the token + deadline already make the row resolvable, so a lost CAS here is harmless. Guards on <c>ApprovalMessageId IS NULL</c> so exactly one card is ever recorded per (run, key).</summary>
     Task SetApprovalMessageAsync(Guid ledgerId, Guid teamId, Guid messageId, CancellationToken cancellationToken);
 
+    /// <summary>
+    /// Single-winner CAS claiming an APPROVED approval row for execution: AwaitingApproval → Running, guarded on
+    /// <c>Status == AwaitingApproval AND ApprovedAt IS NOT NULL</c> (team-scoped). This is the exactly-once-after-approve
+    /// gate — it flips the row out of the approvable state BEFORE the side effect runs, so exactly one of N concurrent
+    /// executors of the same approved (run, key) wins (returns true) and runs <c>tool.CallAsync</c>; every loser sees the
+    /// row already Running/terminal, gets false, and re-reads + replays rather than re-running the side effect. Returns
+    /// false when the row is not an approved AwaitingApproval (not yet approved, already claimed, or already terminal).
+    /// </summary>
+    Task<bool> TryBeginExecutionAsync(Guid ledgerId, Guid teamId, CancellationToken cancellationToken);
+
     /// <summary>Team-scoped focused read of one row's {Status, ApprovedAt, ResultJson, Error} — the post-wake authority a blocked handler re-reads to decide the outcome. Null when the (ledger, team) row is absent (a foreign id finds nothing — fail-closed).</summary>
     Task<ToolCallApprovalState?> ReadApprovalStateAsync(Guid ledgerId, Guid teamId, CancellationToken cancellationToken);
 
@@ -154,6 +164,27 @@ public sealed class ToolCallLedgerService : IToolCallLedgerService, IScopedDepen
                 .SetProperty(l => l.ApprovalMessageId, messageId)
                 .SetProperty(l => l.LastModifiedDate, DateTimeOffset.UtcNow), cancellationToken)
             .ConfigureAwait(false);
+
+    public async Task<bool> TryBeginExecutionAsync(Guid ledgerId, Guid teamId, CancellationToken cancellationToken)
+    {
+        var now = DateTimeOffset.UtcNow;
+
+        // Single-winner CAS AwaitingApproval → Running, guarded ALSO on ApprovedAt IS NOT NULL so only an APPROVED row is
+        // claimed (mirrors RecordTerminalAsync's ExecuteUpdate discipline). This flips the row out of the approvable
+        // state BEFORE the side effect runs: of N executors racing the same approved (run, key) exactly one update
+        // affects 1 row (true → run the side effect once), every loser affects 0 (false → re-read + replay). This is the
+        // exactly-once-after-approve gate the terminal CAS alone cannot provide, since that runs AFTER the side effect.
+        var claimed = await _db.ToolCallLedger
+            .Where(l => l.Id == ledgerId && l.TeamId == teamId && l.Status == ToolCallLedgerStatus.AwaitingApproval && l.ApprovedAt != null)
+            .ExecuteUpdateAsync(s => s
+                .SetProperty(l => l.Status, ToolCallLedgerStatus.Running)
+                .SetProperty(l => l.LastModifiedDate, now), cancellationToken)
+            .ConfigureAwait(false);
+
+        if (claimed > 0) _logger.LogInformation("Tool call ledger claimed for execution. LedgerId={LedgerId}", ledgerId);
+
+        return claimed > 0;
+    }
 
     public async Task<ToolCallApprovalState?> ReadApprovalStateAsync(Guid ledgerId, Guid teamId, CancellationToken cancellationToken) =>
         await _db.ToolCallLedger.AsNoTracking()

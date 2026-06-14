@@ -249,8 +249,81 @@ public class McpToolApprovalFlowTests
 
         result.GetProperty("isError").GetBoolean().ShouldBeFalse();
         outcomes.Count(ok => ok).ShouldBe(1, "exactly one approve wins; the loser is rejected as already-resolved");
-        tool.CallCount.ShouldBe(1, "the AwaitingApproval → terminal single-winner CAS guarantees exactly one execution");
+        tool.CallCount.ShouldBe(1, "the AwaitingApproval → Running execution-claim CAS guarantees exactly one execution");
         (await ReadRowAsync(ledgerId)).Status.ShouldBe(ToolCallLedgerStatus.Succeeded);
+    }
+
+    [Fact]
+    public async Task Two_concurrent_executors_of_the_same_approved_row_run_the_side_effect_exactly_once()
+    {
+        // The exactly-once-after-approve proof at the EXECUTOR level (not the approver level): the row is already
+        // approved, then TWO handler executors race ClaimThenExecuteAsync for the same (run, key). The AwaitingApproval
+        // → Running execution-claim CAS runs BEFORE tool.CallAsync, so exactly one executor wins the claim + runs the
+        // side effect; the loser re-reads + replays. Pre-fix, both passed the ApprovedAt != null read and both called
+        // tool.CallAsync (the side effect ran TWICE). The shared tool counter is the proof.
+        var (teamId, ownerId, channelId) = await SeedTeamChannelAsync();
+        var runId = Guid.NewGuid();
+        var tool = new CountingWriteTool();
+
+        // Park + approve the row up front (one handler posts the card, one human approves), so both racing executors
+        // below find an APPROVED AwaitingApproval row and race the execution claim — not the approval decision.
+        var previous = Environment.GetEnvironmentVariable(McpRequestHandler.ApprovalBoundSecondsEnvVar);
+        Environment.SetEnvironmentVariable(McpRequestHandler.ApprovalBoundSecondsEnvVar, "1");   // first call times out → row stays approved-AwaitingApproval
+
+        try
+        {
+            using (var parkScope = _fixture.BeginScope())
+            {
+                await CallToolAsync(ApprovalHandler(parkScope, AgentAutonomyLevel.Standard, teamId, runId, channelId, tool), "git.open_pr", new { branch = "main" });
+            }
+
+            var ledgerId = (await ReadRunRowsAsync(teamId, runId)).ShouldHaveSingleItem().Id;
+            var messageId = (await ReadRowAsync(ledgerId)).ApprovalMessageId!.Value;
+
+            await RespondAsync(teamId, messageId, ApproveKey, ownerId);   // human approves → ApprovedAt stamped, row still AwaitingApproval
+
+            // Two executors re-issue the SAME approved call concurrently (each its own scope/DbContext → a real race).
+            async Task<JsonElement> ReExecuteAsync()
+            {
+                using var scope = _fixture.BeginScope();
+                return await CallToolAsync(ApprovalHandler(scope, AgentAutonomyLevel.Standard, teamId, runId, channelId, tool), "git.open_pr", new { branch = "main" });
+            }
+
+            var results = await Task.WhenAll(ReExecuteAsync(), ReExecuteAsync());
+
+            tool.CallCount.ShouldBe(1, "the execution-claim CAS runs BEFORE the side effect, so exactly one executor runs it once");
+            results.Count(r => !r.GetProperty("isError").GetBoolean()).ShouldBeGreaterThanOrEqualTo(1, "at least the winner returns the real result");
+            (await ReadRowAsync(ledgerId)).Status.ShouldBe(ToolCallLedgerStatus.Succeeded, "the winner's Running → Succeeded terminal lands");
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable(McpRequestHandler.ApprovalBoundSecondsEnvVar, previous);
+        }
+    }
+
+    [Fact]
+    public async Task A_foreign_team_approval_conversation_flat_refuses_with_no_card_and_no_foreign_bot_membership()
+    {
+        // Cross-tenant safety: the run's node config names a conversation owned by ANOTHER team. PostAsBotAsync would
+        // derive the team FROM that conversation and post the card into (+ auto-join the bot to) the foreign team's
+        // chat. The tenancy guard (ConversationBelongsToTeamAsync == _teamId) fail-closes EXACTLY like a conversation-less
+        // run: flat refusal, no card, no ledger row, and crucially NO bot membership minted in the foreign conversation.
+        var (teamA, _, _) = await SeedTeamChannelAsync();
+        var (teamB, _, foreignChannel) = await SeedTeamChannelAsync();
+        var runId = Guid.NewGuid();
+        var tool = new CountingWriteTool();
+
+        using var scope = _fixture.BeginScope();
+        var handler = ApprovalHandler(scope, AgentAutonomyLevel.Standard, teamA, runId, foreignChannel, tool);   // team-A run, team-B conversation
+
+        var result = await CallToolAsync(handler, "git.open_pr", new { branch = "main" });
+
+        result.GetProperty("isError").GetBoolean().ShouldBeTrue();
+        Text(result).ShouldContain("approval", customMessage: "a foreign-team conversation id fail-closes to the flat refusal, byte-identical to the conversation-less run");
+        tool.CallCount.ShouldBe(0, "a cross-tenant run never blocks and never runs the tool");
+        (await ReadRunRowsAsync(teamA, runId)).ShouldBeEmpty("no approval surface → no ledger row");
+        (await ReadRunCardCountAsync(teamB, foreignChannel)).ShouldBe(0, "NO card is posted into the foreign team's conversation");
+        (await BotMemberCountAsync(foreignChannel)).ShouldBe(0, "the bot is NEVER force-joined to the foreign team's conversation");
     }
 
     // ── The REAL endpoint over a per-run UDS (Tier 🟢 — proves the endpoint threads the D2 deps + blocks over the socket) ──
@@ -357,6 +430,15 @@ public class McpToolApprovalFlowTests
         using var scope = _fixture.BeginScope();
         return await scope.Resolve<CodeSpaceDbContext>().Message.AsNoTracking()
             .CountAsync(m => m.ConversationId == channelId && m.TeamId == teamId && m.InteractionJson != null && m.DeletedDate == null);
+    }
+
+    /// <summary>Count the bot members of a conversation — the cross-tenant guard must NEVER force-join the bot to a foreign conversation. IgnoreQueryFilters so bot users (hidden by the default filter) are visible to the assertion.</summary>
+    private async Task<int> BotMemberCountAsync(Guid channelId)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        return await db.ConversationMember.AsNoTracking().IgnoreQueryFilters()
+            .CountAsync(m => m.ConversationId == channelId && m.DeletedDate == null && db.User.IgnoreQueryFilters().Any(u => u.Id == m.UserId && u.IsBot));
     }
 
     private async Task<InteractionState> ReadInteractionStateAsync(Guid messageId)

@@ -25,4 +25,13 @@ public interface IChatBotService
     /// point a workflow uses to talk to chat.
     /// </summary>
     Task<MessageView> PostAsBotAsync(Guid conversationId, string body, MessageInteraction? interaction, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// True only when <paramref name="conversationId"/> exists AND belongs to <paramref name="teamId"/> — the
+    /// tenancy precondition a caller must assert BEFORE posting a card into a config-supplied conversation. <see cref="PostAsBotAsync"/>
+    /// derives the team FROM the conversation, so without this check a run could post into (and force-join the bot to) a
+    /// FOREIGN team's conversation named in unvalidated node config. A cross-team or unknown id returns false → the
+    /// caller fail-closes (no post, no bot auto-join).
+    /// </summary>
+    Task<bool> ConversationBelongsToTeamAsync(Guid conversationId, Guid teamId, CancellationToken cancellationToken);
 }

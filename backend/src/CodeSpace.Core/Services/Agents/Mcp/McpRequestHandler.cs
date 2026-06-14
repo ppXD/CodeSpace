@@ -155,7 +155,7 @@ public sealed class McpRequestHandler : IMcpRequestHandler
 
         if (gate == AgentToolGateDecision.Deny) return JsonRpcResponse.Ok(id, ToolResult(isError: true, GateMessage(gate, name)));
 
-        if (gate == AgentToolGateDecision.RequireApproval && !CanServeApproval(tool))
+        if (gate == AgentToolGateDecision.RequireApproval && !await CanServeApprovalAsync(tool, cancellationToken).ConfigureAwait(false))
             return JsonRpcResponse.Ok(id, ToolResult(isError: true, GateMessage(gate, name)));
 
         // Absent arguments default to {}; present-but-wrong-type arguments pass through verbatim so the tool's own
@@ -185,13 +185,23 @@ public sealed class McpRequestHandler : IMcpRequestHandler
 
     /// <summary>
     /// Whether a <c>RequireApproval</c> verdict can actually be SERVED as a durable approval (item D2) rather than
-    /// fail-closing to the flat refusal. Requires the full approval surface: governance on, the ledger + card-post +
-    /// waiter + component-registry collaborators all present, a non-null approval conversation, a team (the ledger row's
-    /// team_id is NOT NULL), AND a side-effecting tool (a read-only tool is never parked — it has no side effect to
-    /// gate). ANY missing piece → the call refuses EXACTLY as today (no block, no card). This is the
-    /// conversation-less-run safety: a run with no approval surface is byte-identical to its pre-D2 behavior.
+    /// fail-closing to the flat refusal. First the cheap surface check (<see cref="HasApprovalSurface"/>): governance
+    /// on, the ledger + card-post + waiter + component-registry collaborators all present, a non-null approval
+    /// conversation, a team, AND a side-effecting tool. Then the TENANCY check — the approval conversation must belong
+    /// to the run's team: the conversation id is unvalidated node config, and <see cref="IChatBotService.PostAsBotAsync"/>
+    /// derives the team FROM the conversation, so a cross-team / unknown id would post the card into (and auto-join the
+    /// bot to) a FOREIGN team's chat. A failed tenancy check fail-closes EXACTLY like the conversation-less run (no card,
+    /// no block, flat refusal). The DB read is gated behind the surface check, so flag-OFF / no-surface paths never hit it.
     /// </summary>
-    private bool CanServeApproval(IAgentTool tool) =>
+    private async Task<bool> CanServeApprovalAsync(IAgentTool tool, CancellationToken cancellationToken)
+    {
+        if (!HasApprovalSurface(tool)) return false;
+
+        return await _bot!.ConversationBelongsToTeamAsync(_approvalConversationId!.Value, _teamId!.Value, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>The cheap, synchronous half of <see cref="CanServeApprovalAsync"/>: every collaborator + conversation + team is present and the tool side-effects. ANY missing piece → the call refuses EXACTLY as pre-D2 (no DB read, no block, no card).</summary>
+    private bool HasApprovalSurface(IAgentTool tool) =>
         _governanceEnabled && _ledger is not null && _bot is not null && _waiters is not null && _components is not null
         && _approvalConversationId is not null && _teamId is not null && !tool.IsReadOnly;
 
@@ -222,12 +232,13 @@ public sealed class McpRequestHandler : IMcpRequestHandler
     /// The durable mid-turn HITL approval flow for a side-effecting tool the tier requires sign-off on (item D2). The
     /// claim arbitrates exactly-once across the blocked-call wake AND a model re-call (the deterministic key): a fresh
     /// claim parks + posts + blocks; a re-claim of the same parked row re-binds to its decision (no second card); a
-    /// terminal duplicate replays. The side effect ALWAYS runs through the single-winner AwaitingApproval→terminal CAS
-    /// in <see cref="ExecuteAndRecordAsync"/>, so whichever path wins it runs once and the other replays.
+    /// terminal duplicate replays. The side effect ALWAYS runs behind the single-winner AwaitingApproval→Running
+    /// execution claim in <see cref="ClaimThenExecuteAsync"/> (BEFORE <c>tool.CallAsync</c>), so of any number of
+    /// executors that reach an approved row exactly one runs it once and every other replays — no double side effect.
     /// </summary>
     private async Task<JsonElement> RunApprovalFlowAsync(IAgentTool tool, string name, JsonElement arguments, CancellationToken cancellationToken)
     {
-        var teamId = _teamId!.Value;   // CanServeApproval already proved team + ledger + collaborators non-null
+        var teamId = _teamId!.Value;   // CanServeApprovalAsync already proved team + ledger + collaborators non-null AND the conversation is the run's team's
 
         var inputHash = ToolCallKey.InputHash(arguments);   // SERVER-derived — never read from the wire
         var key = ToolCallKey.For(tool.Kind, inputHash);
@@ -277,9 +288,42 @@ public sealed class McpRequestHandler : IMcpRequestHandler
 
         if (ToolCallLedgerStateMachine.IsTerminal(state.Status)) return ReplayTerminalState(state);
 
-        if (state.ApprovedAt is not null) return await ExecuteAndRecordAsync(tool, arguments, teamId, ledgerId, cancellationToken).ConfigureAwait(false);
+        if (state.ApprovedAt is not null) return await ClaimThenExecuteAsync(tool, arguments, teamId, ledgerId, cancellationToken).ConfigureAwait(false);
 
         return await BlockForDecisionAsync(tool, arguments, teamId, ledgerId, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// The exactly-once-after-approve gate: claim the APPROVED row for execution (single-winner CAS AwaitingApproval →
+    /// Running) BEFORE running the side effect. ONLY the winner runs <see cref="ExecuteAndRecordAsync"/> (one
+    /// <c>tool.CallAsync</c>); a concurrent executor that LOST the claim (the row is already Running or terminal) must
+    /// NOT re-run the side effect — it re-reads the durable row and replays its terminal (or, if the winner hasn't
+    /// recorded the terminal yet, returns the in-flight retry message). This closes the pre-terminal-CAS double-run
+    /// window: two executors that both read <c>ApprovedAt != null</c> race here, not at <c>tool.CallAsync</c>.
+    /// </summary>
+    private async Task<JsonElement> ClaimThenExecuteAsync(IAgentTool tool, JsonElement arguments, Guid teamId, Guid ledgerId, CancellationToken cancellationToken)
+    {
+        var won = await _ledger!.TryBeginExecutionAsync(ledgerId, teamId, cancellationToken).ConfigureAwait(false);
+
+        if (won) return await ExecuteAndRecordAsync(tool, arguments, teamId, ledgerId, cancellationToken).ConfigureAwait(false);
+
+        return await ReplayClaimedElsewhereAsync(teamId, ledgerId, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// The loser of the execution claim: the winner already moved the row to Running (running the side effect now) or
+    /// to a terminal. Re-read the durable row (the authority): a terminal replays its stored result; a still-Running row
+    /// means the winner's side effect is in flight — return the in-flight retry message so the loser never re-runs it.
+    /// </summary>
+    private async Task<JsonElement> ReplayClaimedElsewhereAsync(Guid teamId, Guid ledgerId, CancellationToken cancellationToken)
+    {
+        var state = await _ledger!.ReadApprovalStateAsync(ledgerId, teamId, cancellationToken).ConfigureAwait(false);
+
+        if (state is null) return ToolResult(isError: true, "This tool call's approval record is missing.");
+
+        if (ToolCallLedgerStateMachine.IsTerminal(state.Status)) return ReplayTerminalState(state);
+
+        return ToolResult(isError: true, "This tool call is already in progress; retry shortly.");
     }
 
     /// <summary>
@@ -314,7 +358,7 @@ public sealed class McpRequestHandler : IMcpRequestHandler
 
             if (ToolCallLedgerStateMachine.IsTerminal(state.Status)) return ReplayTerminalState(state);   // rejected / expired by the reaper
 
-            if (state.ApprovedAt is not null) return await ExecuteAndRecordAsync(tool, arguments, teamId, ledgerId, cancellationToken).ConfigureAwait(false);   // approved → run once
+            if (state.ApprovedAt is not null) return await ClaimThenExecuteAsync(tool, arguments, teamId, ledgerId, cancellationToken).ConfigureAwait(false);   // approved → claim for execution (single-winner) → run once
 
             return PendingTicket(ledgerId);   // the bound elapsed with no decision — the row stays AwaitingApproval
         }
@@ -377,9 +421,12 @@ public sealed class McpRequestHandler : IMcpRequestHandler
     /// Run the side effect once, build the ALREADY-REDACTED wire result (the single <see cref="ToolResult"/> choke
     /// point), persist that redacted payload to the ledger as the terminal (Succeeded with the verbatim wire result,
     /// or Failed with the redacted error), and return it. Redact-BEFORE-persist: the ledger row never holds a raw
-    /// secret, and a later duplicate replays the exact bytes the model first saw.
+    /// secret, and a later duplicate replays the exact bytes the model first saw. The CALLER has already won the
+    /// single-winner claim — the Allow path via the Pending INSERT (<see cref="InvokeWithLedgerAsync"/>), the approval
+    /// path via the AwaitingApproval→Running CAS (<see cref="ClaimThenExecuteAsync"/>) — so this runs <c>tool.CallAsync</c>
+    /// exactly once; the terminal record below is Running/Pending → terminal.
     ///
-    /// <para>Liveness: the claim INSERTed a Pending row. A tool call that is CANCELLED (timeout / endpoint teardown /
+    /// <para>Liveness: the row is non-terminal (Pending on Allow, Running on the approval path). A tool call that is CANCELLED (timeout / endpoint teardown /
     /// harness disconnect) or that throws MUST NOT leave that row stranded Pending forever — the key is deterministic,
     /// so a re-call on the reattached run would otherwise hit InFlight indefinitely and the interrupted side effect
     /// could never be retried. So an interruption records a terminal Failed on a BEST-EFFORT basis BEFORE propagating
@@ -409,7 +456,8 @@ public sealed class McpRequestHandler : IMcpRequestHandler
         catch (OperationCanceledException)
         {
             // The call was interrupted (timeout / teardown / disconnect). Record a terminal Failed best-effort so the
-            // Pending row is never stranded, then re-throw — cancellation must still propagate.
+            // non-terminal row (Pending on Allow, Running on the approval path) is never stranded, then re-throw —
+            // cancellation must still propagate.
             await RecordInterruptedThenRethrow(teamId, ledgerId).ConfigureAwait(false);
             throw;
         }
@@ -459,9 +507,9 @@ public sealed class McpRequestHandler : IMcpRequestHandler
     /// <summary>
     /// Best-effort terminal write for an interrupted call, under <see cref="CancellationToken.None"/> so cancellation
     /// can't skip it. SWALLOWS any failure of the recovery write (e.g. the scope is disposing during teardown) — if
-    /// even this fails the row stays Pending and the future Pending-row reaper (out of scope, see
-    /// <see cref="ExecuteAndRecordAsync"/>) catches it. NEVER throws from the recovery path (the caller re-throws the
-    /// original cancellation).
+    /// even this fails the row stays non-terminal (Pending / Running) and the future Pending-row reaper (out of scope,
+    /// see <see cref="ExecuteAndRecordAsync"/>) catches it. NEVER throws from the recovery path (the caller re-throws
+    /// the original cancellation).
     /// </summary>
     private async Task RecordInterruptedThenRethrow(Guid teamId, Guid ledgerId)
     {
@@ -471,7 +519,7 @@ public sealed class McpRequestHandler : IMcpRequestHandler
         }
         catch
         {
-            // Swallow: the row stays Pending and the future Pending-row reaper recovers it. Never throw from recovery.
+            // Swallow: the row stays non-terminal and the future reaper recovers it. Never throw from recovery.
         }
     }
 

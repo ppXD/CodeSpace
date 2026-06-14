@@ -11,8 +11,9 @@
 -- get a row. `result_jsonb`/`error` hold the ALREADY-REDACTED tool result (the row is itself a leak surface, so the
 -- handler redacts BEFORE persisting). `team_id` keeps its FK to team (tenancy on EVERY row, team-scoped queries);
 -- `agent_run_id` is a deliberate SOFT reference (no FK, like agent_run_event) — the ledger outlives its run row.
--- `fence_epoch` mirrors agent_run.fence_epoch at record time so a reclaimed-then-revived worker's terminal CAS is
--- fenced out (the same discipline as agent_run completion).
+-- `fence_epoch` mirrors agent_run.fence_epoch at claim time and is recorded for AUDIT/forensics — the single-winner
+-- guarantee is FIRST-WRITER-WINS on `status` (the status-guarded CAS transitions), NOT an epoch comparison, so a stale
+-- revived worker is fenced by LOSING the status CAS, not by `fence_epoch`.
 --
 -- The approval_* columns + the AwaitingApproval/Expired statuses are reserved for item D (durable mid-turn HITL):
 -- nullable + unused by the C vertical (additive, no behavior). Additive + non-breaking: a brand-new table, nothing

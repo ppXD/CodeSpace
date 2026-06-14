@@ -18,6 +18,9 @@ public sealed class ToolApprovalWaiterRegistry : IToolApprovalWaiterRegistry, IS
     {
         var waiter = new Waiter();
 
+        // Last-writer-wins per ledger id. Safe because this is purely a wake latency fast-path: a clobbered signal just
+        // means the other blocked call wakes on its bound instead, and both re-read the durable row + race the
+        // single-winner execution-claim CAS — exactly one runs the side effect (see IToolApprovalWaiterRegistry.Register).
         _byLedger[ledgerId] = waiter;
 
         return waiter;
