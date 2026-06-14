@@ -503,6 +503,8 @@ public sealed class DefinitionValidator : IScopedDependency
 
         if (terminals.Count != 1)
             errors.Add($"Map '{mapNode.Id}' body must end in exactly one terminal node (the per-element result); found {terminals.Count}.");
+        else if (terminals[0].TypeKey == "flow.map_start")
+            errors.Add($"Map '{mapNode.Id}' body must contain at least one node after flow.map_start (the start marker can't be the per-element result).");
 
         CheckNoSuspendingNodeInMapBody(definition, mapNode, errors);
     }

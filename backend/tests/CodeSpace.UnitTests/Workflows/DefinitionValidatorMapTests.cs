@@ -104,6 +104,26 @@ public class DefinitionValidatorMapTests
     }
 
     [Fact]
+    public void Map_body_of_only_the_start_marker_errors()
+    {
+        // A body that is JUST flow.map_start: the start has no outgoing edge, so it is itself the single
+        // terminal ⇒ results[i] would be the passthrough start's empty output (a no-op map). Reject it.
+        var def = new WorkflowDefinition
+        {
+            Nodes = new List<NodeDefinition>
+            {
+                Node("t", "trigger.x"), Node("map", "flow.map"), Node("end", "builtin.terminal"),
+                Body("ms", "flow.map_start", "map"),
+            },
+            Edges = new List<EdgeDefinition> { Edge("t", "map"), Edge("map", "end") },
+        };
+
+        var result = BuildValidator().Validate(def);
+        result.IsValid.ShouldBeFalse();
+        result.Errors.ShouldContain(e => e.Contains("at least one node after flow.map_start"));
+    }
+
+    [Fact]
     public void Map_body_with_a_suspending_node_errors()
     {
         // PR1 fail-closed: a body node that can SUSPEND (here flow.wait_approval, manifest CanSuspend=true)
