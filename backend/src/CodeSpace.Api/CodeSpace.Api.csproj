@@ -20,4 +20,10 @@
     <ProjectReference Include="..\CodeSpace.Messages\CodeSpace.Messages.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <!-- The integration test reaches internal registrar helpers (CodeSpaceHangfireRegistrar.IsProcessingEnabled)
+         to pin the deployment-topology gate's polarity without standing up the web host. -->
+    <InternalsVisibleTo Include="CodeSpace.IntegrationTests" />
+  </ItemGroup>
+
 </Project>
