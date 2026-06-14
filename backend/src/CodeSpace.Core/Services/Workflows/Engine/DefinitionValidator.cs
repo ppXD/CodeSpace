@@ -19,6 +19,9 @@ namespace CodeSpace.Core.Services.Workflows.Engine;
 ///   - cycles (DAG only)
 ///   - unreachable nodes (everything must be reachable from trigger)
 ///   - terminal-reachable: at least one terminal reachable from trigger
+///   - container body fully reachable from its *_start marker (map / loop / try)
+///   - map resultKey + loop var names: not reserved, valid identifiers
+///   - map items binding present (no silent empty-fan-out no-op)
 ///
 /// Errors come back as a list of human-readable strings so the UI can render every problem
 /// at once instead of one-at-a-time fix-and-retry.
@@ -166,10 +169,13 @@ public sealed class DefinitionValidator : IScopedDependency
 
             foreach (var next in adjacency.GetValueOrDefault(current) ?? new List<string>()) stack.Push(next);
 
-            // A reachable container (loop / try) makes its whole body reachable — enter it so the
-            // body-start + body nodes (which have no top-level incoming edge) aren't flagged
-            // unreachable. The body's own internal connectivity is covered by CheckAcyclic. TryGetValue
-            // guards the case where `current` is an edge target that doesn't exist (CheckEdgeEndpoints flags it).
+            // A reachable container (loop / try / map) makes its whole body reachable — enter it so the
+            // body-start + body nodes (which have no top-level incoming edge) aren't flagged unreachable.
+            // This is TOP-LEVEL reachability only: it says "the body can be entered", NOT "every body node
+            // is reachable from the body's start marker". The latter is CheckBodyReachableFromStart's job
+            // (a disconnected body root is acyclic AND top-level-reachable here, yet the engine would run it
+            // once per element — that's the gap that check closes). TryGetValue guards the case where
+            // `current` is an edge target that doesn't exist (CheckEdgeEndpoints flags it).
             if (nodeById.TryGetValue(current, out var currentNode) && SafeKind(currentNode) is NodeKind.Loop or NodeKind.Try or NodeKind.Map)
                 foreach (var bodyNode in definition.Nodes.Where(n => n.ParentId == current)) stack.Push(bodyNode.Id);
         }
@@ -428,9 +434,214 @@ public sealed class DefinitionValidator : IScopedDependency
 
             CheckContainerNestingDepth(node, ownerByNodeId, errors);
 
-            if (kind == NodeKind.Map) CheckMapBodyShape(definition, node, errors);
+            CheckBodyStartCount(definition, node, kind.Value, errors);
+
+            CheckBodyReachableFromStart(definition, node, kind.Value, errors);
+
+            if (kind == NodeKind.Map)
+            {
+                CheckMapBodyShape(definition, node, errors);
+                CheckMapResultKey(node, errors);
+                CheckMapItemsBinding(node, errors);
+            }
+
+            if (kind == NodeKind.Loop) CheckLoopVariableNames(node, errors);
         }
     }
+
+    /// <summary>The body-entry marker type each container's body subgraph is rooted at — the source-only node the engine's body walk starts from.</summary>
+    private static string BodyStartTypeKey(NodeKind kind) => kind switch
+    {
+        NodeKind.Map => "flow.map_start",
+        NodeKind.Loop => "flow.loop_start",
+        NodeKind.Try => "flow.try_start",
+        _ => "",
+    };
+
+    /// <summary>
+    /// A non-empty container body must be rooted at EXACTLY ONE <c>*_start</c> marker — for ALL THREE kinds
+    /// (map / loop / try). With zero or two starts the engine's frontier walk
+    /// (<c>EnqueueReadyFrontier</c> over the <c>SubgraphView</c>) seeds EVERY zero-incoming body node as a
+    /// root and runs that whole component once per element/iteration — silent fan-out amplification. Map's
+    /// extra body-shape rules live in <c>CheckMapBodyShape</c>; this single check owns the start-count rule
+    /// for every container so loop/try are no longer a false pass (the gap this closes), and
+    /// <c>CheckBodyReachableFromStart</c> can safely defer the wrong-count case to it.
+    /// </summary>
+    private static void CheckBodyStartCount(WorkflowDefinition definition, NodeDefinition container, NodeKind kind, List<string> errors)
+    {
+        var startTypeKey = BodyStartTypeKey(kind);
+
+        var body = definition.Nodes.Where(n => n.ParentId == container.Id).ToList();
+        if (body.Count == 0) return;   // empty body is the container's own concern (map reports it; loop/try tolerate it as a no-op walk)
+
+        var starts = body.Count(n => n.TypeKey == startTypeKey);
+        if (starts != 1)
+            errors.Add($"Container '{container.Id}' body must have exactly one {startTypeKey} (found {starts}).");
+    }
+
+    /// <summary>
+    /// Every node in a container body must be reachable from the body's single <c>*_start</c> marker by walking
+    /// body-internal edges — the SAME traversal the engine uses to run the body. A body node disconnected from the
+    /// start has no incoming body edge, so the engine's frontier walk (<c>EnqueueReadyFrontier</c> over the
+    /// <c>SubgraphView</c>) treats it as a ROOT and runs it once per element/iteration — silent fan-out amplification.
+    /// This rejects it at save time. Generic across map / loop / try; <c>CheckAcyclic</c> (DAG) does NOT cover this
+    /// (a disconnected island is acyclic), nor does top-level <c>CheckReachability</c> (it only enters the body, it
+    /// doesn't walk it).
+    ///
+    /// <para>Engine-fidelity: body-internal edges are exactly the edges whose BOTH endpoints are this container's
+    /// direct body nodes (<c>ParentId == container.Id</c>) — mirroring <c>SubgraphView</c>, which keeps only edges
+    /// wholly inside the subgraph. SourceHandle is irrelevant to the walk (an in-body <c>error</c> edge is a normal
+    /// body edge the engine traverses; a try's <c>catch</c> edge is sourced from the try NODE at the parent level, so
+    /// it is never a body-internal edge). A nested container's OWN children (<c>ParentId == nestedId</c>) are NOT this
+    /// body's nodes — they're validated by the nested container's own pass — so the walk reaches the nested container
+    /// node and stops, exactly as the engine does.</para>
+    /// </summary>
+    private static void CheckBodyReachableFromStart(WorkflowDefinition definition, NodeDefinition container, NodeKind kind, List<string> errors)
+    {
+        var startTypeKey = BodyStartTypeKey(kind);
+
+        var body = definition.Nodes.Where(n => n.ParentId == container.Id).ToList();
+        if (body.Count == 0) return;   // empty-body / missing-start is reported by the container's own shape check
+
+        var bodyIds = body.Select(n => n.Id).ToHashSet();
+        var starts = body.Where(n => n.TypeKey == startTypeKey).Select(n => n.Id).ToList();
+        if (starts.Count != 1) return;   // not exactly one start — CheckBodyStartCount reports that (for all three kinds); reachability can't anchor
+
+        var bodyAdjacency = BuildBodyAdjacency(definition, bodyIds);
+        var reachable = new HashSet<string>();
+        var stack = new Stack<string>();
+        stack.Push(starts[0]);
+
+        while (stack.Count > 0)
+        {
+            var current = stack.Pop();
+            if (!reachable.Add(current)) continue;
+            foreach (var next in bodyAdjacency.GetValueOrDefault(current) ?? new List<string>()) stack.Push(next);
+        }
+
+        foreach (var node in body)
+            if (!reachable.Contains(node.Id))
+                errors.Add($"Container '{container.Id}' body node '{node.Id}' is not reachable from {startTypeKey}. Connect it (directly or transitively) to the start marker, or remove it — otherwise the engine runs it once per element/iteration.");
+    }
+
+    /// <summary>Forward adjacency restricted to body-internal edges (both endpoints in <paramref name="bodyIds"/>) — the exact edge set <c>SubgraphView</c> keeps for the container body.</summary>
+    private static Dictionary<string, List<string>> BuildBodyAdjacency(WorkflowDefinition definition, HashSet<string> bodyIds)
+    {
+        var adjacency = bodyIds.ToDictionary(id => id, _ => new List<string>());
+
+        foreach (var edge in definition.Edges)
+            if (bodyIds.Contains(edge.From) && bodyIds.Contains(edge.To)) adjacency[edge.From].Add(edge.To);
+
+        return adjacency;
+    }
+
+    /// <summary>
+    /// A <c>flow.map</c>'s <c>resultKey</c> (the output key the reduced array lands under) must be a usable
+    /// <c>{{nodes.&lt;id&gt;.outputs.&lt;key&gt;}}</c> reference AND must not collide with a key the reducer
+    /// emits. A collision (<c>count</c> / <c>failed</c>) is silent overwrite — the reducer writes the array
+    /// under <c>resultKey</c> first, then unconditionally sets <c>count</c>/<c>failed</c>, so the author's
+    /// array is destroyed. A non-identifier key can't be referenced downstream. The reserved set is
+    /// <see cref="WorkflowOutputKeys.Map"/> (Rule 8 contract-pin — shared with the engine reducer). A blank
+    /// key is fine: the engine defaults it to <c>"results"</c>.
+    /// </summary>
+    private static void CheckMapResultKey(NodeDefinition mapNode, List<string> errors)
+    {
+        var resultKey = ReadConfigString(mapNode.Config, "resultKey");
+        if (string.IsNullOrWhiteSpace(resultKey)) return;   // blank ⇒ engine default "results" (valid)
+
+        var key = resultKey.Trim();
+
+        if (WorkflowOutputKeys.Map.Contains(key))
+            errors.Add($"Map '{mapNode.Id}' resultKey '{key}' is reserved — the map always emits '{string.Join("', '", WorkflowOutputKeys.Map)}', so this would silently overwrite the result array. Choose another name.");
+        else if (!IdentifierPattern.IsMatch(key))
+            errors.Add($"Map '{mapNode.Id}' resultKey '{key}' is not a valid output key. Use letters, digits and underscores (starting with a letter or underscore) so it can be referenced as {{{{nodes.{mapNode.Id}.outputs.{key}}}}}.");
+    }
+
+    /// <summary>
+    /// Each <c>flow.loop</c> variable name must be a usable reference AND must not collide with a key the loop
+    /// emits or the iteration-scope index. The loop reducer writes <c>iterations</c> / <c>failedIterations</c> /
+    /// <c>terminationReason</c> AFTER the loop-var spread (so a same-named var is clobbered in the output bag),
+    /// and the engine injects <c>index</c> into the per-pass <c>loop.*</c> scope (so a var named <c>index</c> is
+    /// clobbered every iteration). The reserved set is <see cref="WorkflowOutputKeys.Loop"/> (Rule 8 contract-pin).
+    /// </summary>
+    private static void CheckLoopVariableNames(NodeDefinition loopNode, List<string> errors)
+    {
+        foreach (var name in ReadLoopVariableNames(loopNode.Config))
+        {
+            if (string.IsNullOrWhiteSpace(name)) continue;   // a blank/absent name is a malformed config the parser tolerates; not this check's concern
+
+            var trimmed = name.Trim();
+
+            if (WorkflowOutputKeys.Loop.Contains(trimmed))
+                errors.Add($"Loop '{loopNode.Id}' variable '{trimmed}' is reserved — the loop emits '{string.Join("', '", WorkflowOutputKeys.Loop)}', so this name would be silently clobbered at run time. Rename it.");
+            else if (!IdentifierPattern.IsMatch(trimmed))
+                errors.Add($"Loop '{loopNode.Id}' variable '{trimmed}' is not a valid name. Use letters, digits and underscores (starting with a letter or underscore) so it can be referenced as {{{{loop.{trimmed}}}}}.");
+        }
+    }
+
+    /// <summary>
+    /// A <c>flow.map</c> must bind a non-empty <c>items</c> collection (its INPUT — resolved at runtime, like
+    /// flow.iterate's). A genuinely-absent binding silently fans out ZERO branches: the map completes
+    /// <c>count: 0</c> and any downstream synthesizer runs on nothing — a green no-op that looks like success.
+    /// This rejects ONLY an absent or empty binding; ANY present non-empty value (a <c>{{...}}</c> ref, a
+    /// <c>{"$ref": "..."}</c> object, or an inline array) is accepted — the engine resolves it at run time and a
+    /// non-array failure is its own clean error. Every valid authored map binds <c>items</c>, so this rejects
+    /// only the no-op case.
+    /// </summary>
+    private static void CheckMapItemsBinding(NodeDefinition mapNode, List<string> errors)
+    {
+        if (!HasNonEmptyInput(mapNode.Inputs, "items"))
+            errors.Add($"Map '{mapNode.Id}' has no 'items' binding. Bind a collection (e.g. items = {{{{nodes.planner.outputs.json.subtasks}}}}) — without it the map fans out zero branches and silently completes as an empty no-op.");
+    }
+
+    /// <summary>True iff the inputs object has an <paramref name="key"/> property whose value is present and non-empty (a non-blank string, a non-empty array/object, or any number/bool — anything but null/undefined/blank-string/empty-collection).</summary>
+    private static bool HasNonEmptyInput(System.Text.Json.JsonElement inputs, string key)
+    {
+        if (inputs.ValueKind != System.Text.Json.JsonValueKind.Object) return false;
+        if (!inputs.TryGetProperty(key, out var value)) return false;
+
+        return value.ValueKind switch
+        {
+            System.Text.Json.JsonValueKind.Null => false,
+            System.Text.Json.JsonValueKind.Undefined => false,
+            System.Text.Json.JsonValueKind.String => !string.IsNullOrWhiteSpace(value.GetString()),
+            System.Text.Json.JsonValueKind.Array => value.GetArrayLength() > 0,
+            System.Text.Json.JsonValueKind.Object => value.EnumerateObject().Any(),
+            _ => true,
+        };
+    }
+
+    /// <summary>Reads a string property from a node's Config object; null when absent or not an object/string. Case-insensitive match mirrors the engine's <c>MapConfig</c> deserialisation, so a non-canonical spelling (e.g. <c>ResultKey</c>) the engine still honours cannot slip a reserved/invalid key past validation.</summary>
+    private static string? ReadConfigString(System.Text.Json.JsonElement config, string key)
+    {
+        if (config.ValueKind != System.Text.Json.JsonValueKind.Object) return null;
+        if (!TryGetPropertyIgnoreCase(config, key, out var value)) return null;
+        return value.ValueKind == System.Text.Json.JsonValueKind.String ? value.GetString() : null;
+    }
+
+    /// <summary>Reads the declared loop-variable names from a loop node's Config (the <c>loopVariables[].name</c> list); empty when absent or malformed. Case-insensitive property match mirrors the engine's <c>LoopConfig</c> deserialisation.</summary>
+    private static IEnumerable<string> ReadLoopVariableNames(System.Text.Json.JsonElement config)
+    {
+        if (config.ValueKind != System.Text.Json.JsonValueKind.Object) yield break;
+        if (!TryGetPropertyIgnoreCase(config, "loopVariables", out var vars) || vars.ValueKind != System.Text.Json.JsonValueKind.Array) yield break;
+
+        foreach (var v in vars.EnumerateArray())
+            if (v.ValueKind == System.Text.Json.JsonValueKind.Object && TryGetPropertyIgnoreCase(v, "name", out var name) && name.ValueKind == System.Text.Json.JsonValueKind.String)
+                yield return name.GetString() ?? "";
+    }
+
+    /// <summary>Case-insensitive single-property lookup on a JSON object — matches System.Text.Json's PropertyNameCaseInsensitive deserialisation the engine uses for LoopConfig.</summary>
+    private static bool TryGetPropertyIgnoreCase(System.Text.Json.JsonElement obj, string name, out System.Text.Json.JsonElement value)
+    {
+        foreach (var prop in obj.EnumerateObject())
+            if (string.Equals(prop.Name, name, StringComparison.OrdinalIgnoreCase)) { value = prop.Value; return true; }
+
+        value = default;
+        return false;
+    }
+
+    /// <summary>A usable output/variable key: a JS-style identifier so it round-trips through a <c>{{...}}</c> reference path (which splits on '.'). Shared by map resultKey + loop var name checks; mirrored in MapEditor.tsx for author-time feedback.</summary>
+    private static readonly System.Text.RegularExpressions.Regex IdentifierPattern = new("^[a-zA-Z_][a-zA-Z0-9_]*$", System.Text.RegularExpressions.RegexOptions.Compiled);
 
     /// <summary>
     /// Every edge must connect two nodes with the SAME container owner (both top-level, or both in the
@@ -492,10 +703,8 @@ public sealed class DefinitionValidator : IScopedDependency
             return;
         }
 
-        var starts = body.Count(n => n.TypeKey == "flow.map_start");
-        if (starts != 1)
-            errors.Add($"Map '{mapNode.Id}' body must have exactly one flow.map_start (found {starts}).");
-
+        // The exactly-one-flow.map_start rule is enforced generically for every container by
+        // CheckBodyStartCount — this method keeps only the map-specific single-terminal rule.
         var bodyIds = body.Select(n => n.Id).ToHashSet();
         var withOutgoing = definition.Edges.Where(e => bodyIds.Contains(e.From)).Select(e => e.From).ToHashSet();
         var terminals = body.Where(n => !withOutgoing.Contains(n.Id)).ToList();

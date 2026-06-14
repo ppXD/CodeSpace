@@ -2615,6 +2615,7 @@ textarea:-webkit-autofill {
 /* Node retry-on-failure editor (inspector). */
 .acs-root .wf-retry-fields { display: flex; flex-direction: column; gap: 8px; margin-top: 8px; }
 .acs-root .wf-retry-hint { font-size: 10.5px; color: var(--muted); line-height: 1.4; margin: 2px 0 0; }
+.acs-root .wf-form-error { font-size: 10.5px; color: var(--danger); line-height: 1.4; margin: 2px 0 0; }
 
 /* flow.loop inspector (Dify-style loop variables · termination · max iterations) */
 .acs-root .wf-loop-section-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }

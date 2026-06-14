@@ -1,3 +1,4 @@
+import { resultKeyError } from "./mapResultKey";
 import type { ScopeSuggestion } from "./scope-introspection";
 import { VariablePickerInput } from "./VariablePickerInput";
 
@@ -29,6 +30,7 @@ export function MapEditor({ config, inputs, onConfigChange, onInputsChange, sugg
   const errorHandling = config.errorHandling === "continue" ? "continue" : "terminate";
   const maxParallelism = typeof config.maxParallelism === "number" ? config.maxParallelism : undefined;
   const resultKey = typeof config.resultKey === "string" ? config.resultKey : "";
+  const resultKeyProblem = resultKeyError(resultKey);
 
   // Empty input ⇒ remove the key (inherit the engine-wide default); a value clamps to [1, 64].
   const setMaxParallelism = (raw: string) => {
@@ -106,10 +108,15 @@ export function MapEditor({ config, inputs, onConfigChange, onInputsChange, sugg
           placeholder="results"
           value={resultKey}
           onChange={(e) => setResultKey(e.target.value)}
+          aria-invalid={resultKeyProblem != null}
         />
-        <p className="wf-retry-hint">
-          The output key the collected array lands under. A downstream step reads it as <code>{"{{nodes."}{"<map>"}{".outputs."}{resultKey || "results"}{"}}"}</code>. Empty uses the default <code>results</code>.
-        </p>
+        {resultKeyProblem ? (
+          <p className="wf-form-error" role="alert">{resultKeyProblem}</p>
+        ) : (
+          <p className="wf-retry-hint">
+            The output key the collected array lands under. A downstream step reads it as <code>{"{{nodes."}{"<map>"}{".outputs."}{resultKey || "results"}{"}}"}</code>. Empty uses the default <code>results</code>.
+          </p>
+        )}
       </section>
     </>
   );
