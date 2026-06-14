@@ -102,4 +102,61 @@ public class AgentToolRegistryTests
         registry.All.Select(t => t.Kind).ShouldBe(new[] { "git.fetch_pr_checks", "git.fetch_pr_diff", "git.list_prs" }, "sorted catalog");
         registry.All.ShouldAllBe(t => t.IsReadOnly && !t.IsDestructive);
     }
+
+    [Theory]
+    [InlineData("git.open_pr")]
+    [InlineData("git.post_pr_comment")]
+    [InlineData("git.pr_review")]
+    public void The_three_reversible_git_write_nodes_project_as_eligible_destructive_gated_tools(string kind)
+    {
+        // null! is safe: the manifest is static metadata + NodeAgentTool reads its risk flags from the manifest
+        // alone (neither touches the IPullRequestService). Each git write is side-effecting → destructive →
+        // approval-gated by default; the autonomy tier decides whether to actually ask (D2) or ledger (C).
+        var tool = Build(GitWriteNode(kind)).Resolve(kind);
+
+        tool.ShouldNotBeNull($"{kind} is a synchronous, standalone git write → must project onto the tool fabric");
+        tool!.IsReadOnly.ShouldBeFalse($"{kind} mutates provider state → not read-only");
+        tool.IsDestructive.ShouldBeTrue($"{kind} is side-effecting → a destructive tool");
+        tool.RequiresApproval.ShouldBeTrue($"{kind} is destructive → approval-gated by default");
+    }
+
+    [Fact]
+    public void Git_merge_pr_is_NOT_eligible_and_never_resolves_as_a_tool()
+    {
+        // PIN: git.merge_pr is irreversible — it is DELIBERATELY excluded from the agent-tool surface and ships
+        // last behind a per-tool force-approval policy. A future accidental flip of IsAgentToolEligible MUST fail
+        // here (the registry would start projecting it). Keep merge ineligible until that policy lands.
+        var merge = new GitMergePullRequestNode(null!);
+
+        merge.Manifest.IsAgentToolEligible.ShouldBeFalse("git.merge_pr (irreversible) stays off the agent-tool surface until a per-tool force-approval policy ships");
+        Build(merge).Resolve("git.merge_pr").ShouldBeNull("an ineligible node is never projected onto the fabric");
+    }
+
+    [Fact]
+    public void Exposing_the_git_writes_does_not_regress_the_read_only_tools_or_run_command()
+    {
+        // No-regression guard: the three read-only git tools stay read-only/non-destructive and agent.run_command
+        // stays destructive, side by side with the newly-exposed writes — the side-effect flag is the only axis.
+        var registry = Build(
+            new GitFetchPrDiffNode(null!), new GitFetchPrChecksNode(null!), new GitListPullRequestsNode(null!),
+            new AgentRunCommandNode(new StubRunCommandService()),
+            GitWriteNode("git.open_pr"), GitWriteNode("git.post_pr_comment"), GitWriteNode("git.pr_review"));
+
+        foreach (var read in new[] { "git.fetch_pr_diff", "git.fetch_pr_checks", "git.list_prs" })
+        {
+            var tool = registry.Resolve(read).ShouldNotBeNull();
+            tool.IsReadOnly.ShouldBeTrue($"{read} stays read-only");
+            tool.IsDestructive.ShouldBeFalse($"{read} stays non-destructive");
+        }
+
+        registry.Resolve("agent.run_command").ShouldNotBeNull().IsDestructive.ShouldBeTrue("agent.run_command stays destructive");
+    }
+
+    private static INodeRuntime GitWriteNode(string kind) => kind switch
+    {
+        "git.open_pr" => new GitOpenPullRequestNode(null!),
+        "git.post_pr_comment" => new GitPostPrCommentNode(null!),
+        "git.pr_review" => new GitPrReviewNode(null!),
+        _ => throw new ArgumentOutOfRangeException(nameof(kind), kind, "not a reversible git-write node"),
+    };
 }

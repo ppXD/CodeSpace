@@ -49,6 +49,33 @@ public class AgentToolRegistryFlowTests
         tool.IsDestructive.ShouldBeFalse($"{kind} has no side effects → not a destructive, gated tool");
     }
 
+    [Theory]
+    [InlineData("git.open_pr")]
+    [InlineData("git.post_pr_comment")]
+    [InlineData("git.pr_review")]
+    public void Reversible_git_write_nodes_project_as_destructive_gated_tools(string kind)
+    {
+        using var scope = _fixture.BeginScope();
+        var tool = scope.Resolve<IAgentToolRegistry>().Resolve(kind);
+
+        tool.ShouldNotBeNull($"the eligible git-write {kind} node must project onto the tool fabric via DI");
+        tool!.IsReadOnly.ShouldBeFalse($"{kind} mutates provider state → not read-only");
+        tool.IsDestructive.ShouldBeTrue($"{kind} is side-effecting → a destructive tool");
+        tool.RequiresApproval.ShouldBeTrue($"{kind} is destructive → approval-gated through AgentToolGate, exactly like agent.run_command");
+    }
+
+    [Fact]
+    public void Git_merge_pr_is_NOT_projected_by_the_real_container()
+    {
+        // PIN over the REAL DI graph: git.merge_pr (irreversible) is registered as a node but DELIBERATELY left
+        // off the agent-tool surface. A future accidental flip of its IsAgentToolEligible would start projecting
+        // it here → this fails. It ships last behind a per-tool force-approval policy.
+        using var scope = _fixture.BeginScope();
+
+        scope.Resolve<IAgentToolRegistry>().Resolve("git.merge_pr")
+            .ShouldBeNull("git.merge_pr stays off the agent-tool surface until a per-tool force-approval policy ships");
+    }
+
     // Forward-looking guard: every currently-eligible repo-resolving tool MUST refuse a repositoryId when the
     // call carries no team (no sys.team_id). If a future eligible node forgets the NodeScopeReader.TryReadTeamId
     // check, this fails — catching a silently-reintroduced cross-tenant hole. (All 4 eligible builtins —
