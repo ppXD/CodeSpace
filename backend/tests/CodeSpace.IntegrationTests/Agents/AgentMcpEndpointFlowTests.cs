@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Net.Sockets;
 using System.Text;
 using System.Text.Json;
@@ -35,6 +36,12 @@ namespace CodeSpace.IntegrationTests.Agents;
 /// <para>Tier 🟢 high-fidelity: real production executor + real DI registry + real Postgres + real git clone + real
 /// AF_UNIX socket (Rule 12). Skips on Windows / when git is absent / on a host without UDS support so a cross-host
 /// <c>dotnet test</c> stays clean (Rule 12.1).</para>
+///
+/// <para>The three <c>..._proxy_..</c> tests raise the fidelity another notch: instead of the in-test <c>McpClient</c>
+/// they spawn the REAL <c>codespace-mcp</c> proxy BINARY (a <c>dotnet codespace-mcp.dll --proxy</c> child process) and
+/// pipe JSON-RPC over its stdin/stdout — proving the WHOLE production transport chain stdio↔proxy↔UDS↔endpoint↔handler
+/// end-to-end (the only un-runnable leg being the CLI's own config-loading, which is deployment-gated). The proxy dll
+/// is built via a build-only ProjectReference in the csproj; these tests skip if it isn't found (Rule 12.1).</para>
 /// </summary>
 [Collection(PostgresCollection.Name)]
 [Trait("Category", "Integration")]
@@ -87,6 +94,176 @@ public class AgentMcpEndpointFlowTests
 
         connects.TryConnect(runId, out _).ShouldBeFalse(customMessage: "after the harness returns the endpoint must be torn down and the seam must no longer resolve the run");
         File.Exists(socketPath).ShouldBeFalse(customMessage: "dispose must unlink the per-run socket file");
+    }
+
+    // ── REAL codespace-mcp proxy BINARY over the per-run UDS (Tier 🟢 high-fidelity) ───────────────────────────────
+    //
+    // The tests above drive the per-run socket with an IN-TEST AF_UNIX client (McpClient). The three below instead
+    // spawn the REAL `codespace-mcp` proxy as a child `dotnet codespace-mcp.dll --proxy` process — exactly what a Codex
+    // /Claude CLI does — and pipe newline-delimited JSON-RPC over its STDIN/STDOUT. The proxy itself reads the socket
+    // path + token from its env, connects the per-run UDS, sends the token as line 1, then raw-byte forwards both ways.
+    // So a passing test proves the ENTIRE production transport chain end-to-end: stdio ↔ proxy ↔ UDS ↔ endpoint
+    // accept-loop ↔ McpFramingLoop ↔ handler ↔ gate ↔ tenancy ↔ NodeAgentTool ↔ real git. The only un-runnable leg is
+    // the CLI's own config-loading (deployment-gated), which the proxy does not touch.
+
+    [Fact]
+    public async Task A_real_codespace_mcp_proxy_process_drives_a_full_session_over_the_per_run_socket()
+    {
+        if (OperatingSystem.IsWindows()) return;
+        if (!Socket.OSSupportsUnixDomainSockets) return;
+        if (!await GitAvailableAsync()) return;
+        var proxyDll = ProxyDllPathOrNull();
+        if (proxyDll is null) return;   // the build-only reference should have produced it; skip rather than fail for portability
+
+        var teamId = await SeedTeamAsync();
+        using var origin = new TempDir();
+        await SeedLocalRepoAsync(origin.Path, "README.md", "hello-from-team-a");
+        var repoId = await SeedRepositoryAsync(teamId, new Uri(origin.Path).AbsoluteUri, "main");
+
+        // A team-B repo whose id team A's run may NOT see — used to prove tenancy fail-closed travels through the proxy.
+        var teamB = await SeedTeamAsync();
+        using var originB = new TempDir();
+        await SeedLocalRepoAsync(originB.Path, "README.md", "secret-of-team-b");
+        var teamBRepoId = await SeedRepositoryAsync(teamB, new Uri(originB.Path).AbsoluteUri, "main");
+
+        // Unleashed so the destructive agent.run_command is gated-Allow. A LONG-sleeping harness keeps the endpoint open;
+        // we cancel the worker the instant the session asserts pass (the cancel-decouple pattern), so the test is bounded
+        // by the choreography, not the sleep.
+        var runId = await CreateRunAsync(teamId, AgentAutonomyLevel.Unleashed);
+
+        using var connects = ConnectRegistryFromFixture();
+        using var workerCts = new CancellationTokenSource();
+        var run = Task.Run(() => ExecuteAsync(runId, new ScriptedHarness("sleep 120"), mcpEnabled: true, cancellationToken: workerCts.Token));
+
+        try
+        {
+            var connect = await WaitForConnectAsync(connects, runId, run);
+
+            await using var proxy = RealProxyProcess.Start(proxyDll, connect.SocketPath, connect.Token);
+
+            // (a) initialize → pinned protocol version + serverInfo name (the proxy forwarded the handshake verbatim).
+            var init = await proxy.ExchangeAsync(1, "initialize");
+            init.GetProperty("result").GetProperty("protocolVersion").GetString().ShouldBe(ProtocolVersion);
+            init.GetProperty("result").GetProperty("serverInfo").GetProperty("name").GetString().ShouldBe("codespace");
+
+            // (b) tools/list → the REAL catalog (a write tool AND a read git tool both present).
+            var list = await proxy.ExchangeAsync(2, "tools/list");
+            var tools = ToolNames(list);
+            tools.ShouldContain("agent.run_command", customMessage: "the real registry must project agent.run_command over the proxy");
+            tools.ShouldContain("git.list_prs", customMessage: "the real registry must project a read git tool over the proxy");
+
+            // (c) tools/call team-A happy path → proves the FULL chain: proxy→UDS→handler→gate(Unleashed Allow)→
+            //     tenancy(team A)→NodeAgentTool→real git clone→command on the cloned repo.
+            var call = await proxy.CallToolAsync(3, "agent.run_command", new { repositoryId = repoId.ToString(), command = "cat", args = new[] { "README.md" } });
+            call.GetProperty("isError").GetBoolean().ShouldBeFalse(customMessage: "the team-A repo must resolve and the command run inside its clone, through the REAL proxy");
+            Text(call).ShouldContain("hello-from-team-a", customMessage: "the command read the team-A repo file end-to-end through the proxy binary");
+
+            // (d) a NOTIFICATION (no id) → the server emits NO response line; the raw-byte proxy forwards it and the
+            //     framing survives (proven by the next request still getting its matching reply).
+            await proxy.SendNotificationAsync("notifications/initialized");
+
+            // (e) a SUBSEQUENT cross-team call → tenancy fail-closed ("not found", no leak) travels through the real
+            //     proxy AND the session survived the notification (framing intact on one long-lived connection).
+            var crossTeam = await proxy.CallToolAsync(4, "agent.run_command", new { repositoryId = teamBRepoId.ToString(), command = "cat", args = new[] { "README.md" } });
+            crossTeam.GetProperty("isError").GetBoolean().ShouldBeTrue(customMessage: "a cross-team repo id must fail closed even through the real proxy");
+            Text(crossTeam).ShouldContain("not found", customMessage: "a cross-team repo is indistinguishable from a missing one");
+            Text(crossTeam).ShouldNotContain("secret-of-team-b");
+
+            // Close stdin → the proxy's stdin pump hits EOF → it tears the socket down and exits 0 (the happy-path exit).
+            await proxy.CompleteAndAssertCleanExitAsync();
+        }
+        finally
+        {
+            workerCts.Cancel();
+            try { await run; } catch (OperationCanceledException) { /* worker death — expected, decouples from the 120s sleep */ }
+        }
+    }
+
+    [Fact]
+    public async Task Two_concurrent_proxy_processes_each_get_their_own_served_session()
+    {
+        if (OperatingSystem.IsWindows()) return;
+        if (!Socket.OSSupportsUnixDomainSockets) return;
+        if (!await GitAvailableAsync()) return;
+        var proxyDll = ProxyDllPathOrNull();
+        if (proxyDll is null) return;
+
+        var teamId = await SeedTeamAsync();
+        var runId = await CreateRunAsync(teamId, AgentAutonomyLevel.Unleashed);
+
+        using var connects = ConnectRegistryFromFixture();
+        using var workerCts = new CancellationTokenSource();
+        var run = Task.Run(() => ExecuteAsync(runId, new ScriptedHarness("sleep 120"), mcpEnabled: true, cancellationToken: workerCts.Token));
+
+        try
+        {
+            var connect = await WaitForConnectAsync(connects, runId, run);
+
+            // TWO real proxy processes against the SAME open endpoint, concurrently — proving the accept-loop serves
+            // concurrent connections (one McpFramingLoop per connection, one ServeConnectionAsync task each).
+            await using var proxyA = RealProxyProcess.Start(proxyDll, connect.SocketPath, connect.Token);
+            await using var proxyB = RealProxyProcess.Start(proxyDll, connect.SocketPath, connect.Token);
+
+            await SessionInitAndListAsync(proxyA, "A");
+            await SessionInitAndListAsync(proxyB, "B");
+
+            await proxyA.CompleteAndAssertCleanExitAsync();
+            await proxyB.CompleteAndAssertCleanExitAsync();
+        }
+        finally
+        {
+            workerCts.Cancel();
+            try { await run; } catch (OperationCanceledException) { /* worker death — expected */ }
+        }
+    }
+
+    [Fact]
+    public async Task A_wrong_token_proxy_is_refused()
+    {
+        if (OperatingSystem.IsWindows()) return;
+        if (!Socket.OSSupportsUnixDomainSockets) return;
+        if (!await GitAvailableAsync()) return;
+        var proxyDll = ProxyDllPathOrNull();
+        if (proxyDll is null) return;
+
+        var teamId = await SeedTeamAsync();
+        var runId = await CreateRunAsync(teamId, AgentAutonomyLevel.Unleashed);
+
+        using var connects = ConnectRegistryFromFixture();
+        using var workerCts = new CancellationTokenSource();
+        var run = Task.Run(() => ExecuteAsync(runId, new ScriptedHarness("sleep 120"), mcpEnabled: true, cancellationToken: workerCts.Token));
+
+        try
+        {
+            var connect = await WaitForConnectAsync(connects, runId, run);
+
+            // The proxy sends the (tampered) token as line 1; the endpoint reads it, fails the constant-time compare, and
+            // silently closes → the proxy's socket→stdout pump hits EOF → ForwardAsync returns → the process exits. An
+            // initialize sent to its stdin gets NO reply line (the connection is already gone).
+            await using var proxy = RealProxyProcess.Start(proxyDll, connect.SocketPath, connect.Token + "-tampered");
+
+            var reply = await proxy.TryExchangeAsync(1, "initialize");
+            reply.ShouldBeNull(customMessage: "a wrong-token proxy must get no JSON-RPC reply — the endpoint closes after the bad token line");
+
+            // With the socket closed, stdin-EOF (or the already-dead socket pump) ends the proxy. It exits non-2 (a clean
+            // forward teardown, not the usage-error path) — assert it terminated rather than pinning the exact code.
+            (await proxy.WaitForExitAsync()).ShouldBeTrue(customMessage: "a refused proxy must terminate, not hang");
+        }
+        finally
+        {
+            workerCts.Cancel();
+            try { await run; } catch (OperationCanceledException) { /* worker death — expected */ }
+        }
+    }
+
+    /// <summary>Drive one proxy through initialize + tools/list, asserting both succeed (the per-connection session label aids concurrent-failure diagnosis).</summary>
+    private async Task SessionInitAndListAsync(RealProxyProcess proxy, string label)
+    {
+        var init = await proxy.ExchangeAsync(1, "initialize");
+        init.GetProperty("result").GetProperty("protocolVersion").GetString().ShouldBe(ProtocolVersion, customMessage: $"proxy {label}: initialize must succeed on its own connection");
+
+        var list = await proxy.ExchangeAsync(2, "tools/list");
+        ToolNames(list).ShouldContain("agent.run_command", customMessage: $"proxy {label}: tools/list must succeed on its own connection");
     }
 
     [Fact]
@@ -556,6 +733,152 @@ public class AgentMcpEndpointFlowTests
             await _net.DisposeAsync();
             _socket.Dispose();
         }
+    }
+
+    /// <summary>
+    /// The REAL <c>codespace-mcp</c> proxy as a spawned child process (<c>dotnet codespace-mcp.dll --proxy</c>) — exactly
+    /// what a Codex/Claude CLI launches. The socket path + token are staged into its ENV (the proxy auto-sends the token
+    /// as line 1, so the test must NOT send it); the test then writes newline-delimited JSON-RPC to its STDIN and reads
+    /// responses from its STDOUT. Dispose closes stdin, kills the process tree (even on the failure path), and drains
+    /// STDERR so a timeout failure can name what the proxy reported.
+    /// </summary>
+    private sealed class RealProxyProcess : IAsyncDisposable
+    {
+        // The proxy reads these from its env (McpProxyEnv.SocketEnvVar / TokenEnvVar — internal to CodeSpace.Mcp, which is
+        // referenced build-only so the literals are hardcoded here; pinned by McpProxyTests.Env_var_name_literals_are_pinned).
+        private const string SocketEnvVar = "CODESPACE_MCP_SOCKET";
+        private const string TokenEnvVar = "CODESPACE_RUN_TOKEN";
+
+        private static readonly TimeSpan ExchangeTimeout = TimeSpan.FromSeconds(20);
+
+        private readonly Process _process;
+        private readonly StringBuilder _stderr = new();
+
+        private RealProxyProcess(Process process)
+        {
+            _process = process;
+            _process.ErrorDataReceived += (_, e) => { if (e.Data is not null) lock (_stderr) _stderr.AppendLine(e.Data); };
+            _process.BeginErrorReadLine();
+        }
+
+        public static RealProxyProcess Start(string proxyDllPath, string socketPath, string token)
+        {
+            var psi = new ProcessStartInfo
+            {
+                FileName = "dotnet",
+                RedirectStandardInput = true,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+            };
+            psi.ArgumentList.Add(proxyDllPath);
+            psi.ArgumentList.Add("--proxy");
+            psi.Environment[SocketEnvVar] = socketPath;
+            psi.Environment[TokenEnvVar] = token;
+
+            var process = Process.Start(psi) ?? throw new InvalidOperationException("could not spawn the codespace-mcp proxy process");
+            return new RealProxyProcess(process);
+        }
+
+        /// <summary>Write one JSON-RPC request line to the proxy's stdin and read one response line from its stdout (timeout-bounded).</summary>
+        public async Task<JsonElement> ExchangeAsync(int id, string method, object? @params = null)
+        {
+            var line = await SendThenReadAsync(Serialize(id, method, @params), method).ConfigureAwait(false)
+                ?? throw await DiagnosticAsync($"the proxy closed stdout before a response to '{method}' (id {id})").ConfigureAwait(false);
+            return JsonDocument.Parse(line).RootElement.Clone();
+        }
+
+        /// <summary>tools/call over the proxy → the unwrapped <c>result</c> element (mirrors McpClient.CallToolAsync).</summary>
+        public async Task<JsonElement> CallToolAsync(int id, string name, object arguments)
+        {
+            var call = await ExchangeAsync(id, "tools/call", new { name, arguments }).ConfigureAwait(false);
+            return call.GetProperty("result");
+        }
+
+        /// <summary>Send a NOTIFICATION (no id) and read NOTHING — the server emits no response for a notification.</summary>
+        public async Task SendNotificationAsync(string method)
+        {
+            await _process.StandardInput.WriteLineAsync(JsonSerializer.Serialize(new { jsonrpc = "2.0", method })).ConfigureAwait(false);
+            await _process.StandardInput.FlushAsync().ConfigureAwait(false);
+        }
+
+        /// <summary>Like ExchangeAsync but returns null on EOF / broken pipe (the wrong-token path: the endpoint closes after the bad token line).</summary>
+        public async Task<string?> TryExchangeAsync(int id, string method)
+        {
+            try { return await SendThenReadAsync(Serialize(id, method, null), method).ConfigureAwait(false); }
+            catch (IOException) { return null; }
+        }
+
+        /// <summary>Close stdin (the happy-path completion signal) and assert the proxy exits 0 — its stdin pump hits EOF, it tears the socket down and returns.</summary>
+        public async Task CompleteAndAssertCleanExitAsync()
+        {
+            _process.StandardInput.Close();
+
+            if (!await WaitForExitAsync().ConfigureAwait(false))
+                throw await DiagnosticAsync("the proxy did not exit within 20s after stdin was closed").ConfigureAwait(false);
+
+            if (_process.ExitCode != 0)
+                throw await DiagnosticAsync($"the proxy exited {_process.ExitCode} on the happy path (expected 0)").ConfigureAwait(false);
+        }
+
+        /// <summary>Wait (timeout-bounded) for the process to exit; true if it did.</summary>
+        public async Task<bool> WaitForExitAsync()
+        {
+            try { await _process.WaitForExitAsync().WaitAsync(ExchangeTimeout).ConfigureAwait(false); return true; }
+            catch (TimeoutException) { return false; }
+        }
+
+        private async Task<string?> SendThenReadAsync(string request, string method)
+        {
+            await _process.StandardInput.WriteLineAsync(request).ConfigureAwait(false);
+            await _process.StandardInput.FlushAsync().ConfigureAwait(false);
+
+            try { return await _process.StandardOutput.ReadLineAsync().WaitAsync(ExchangeTimeout).ConfigureAwait(false); }
+            catch (TimeoutException) { throw await DiagnosticAsync($"timed out after 20s awaiting the proxy's stdout response to '{method}'").ConfigureAwait(false); }
+        }
+
+        private static string Serialize(int id, string method, object? @params) =>
+            @params is null
+                ? JsonSerializer.Serialize(new { jsonrpc = "2.0", id, method })
+                : JsonSerializer.Serialize(new { jsonrpc = "2.0", id, method, @params });
+
+        /// <summary>Build a descriptive failure that names the watched signal AND surfaces the proxy's drained STDERR for manual diagnosis (Rule 12.10).</summary>
+        private async Task<TimeoutException> DiagnosticAsync(string what)
+        {
+            await Task.Delay(50).ConfigureAwait(false);   // let any final stderr line flush before we snapshot it
+            string stderr;
+            lock (_stderr) stderr = _stderr.ToString();
+            return new TimeoutException($"Real codespace-mcp proxy E2E: {what}. Proxy STDERR was:\n{(stderr.Length == 0 ? "(empty)" : stderr)}");
+        }
+
+        public async ValueTask DisposeAsync()
+        {
+            try { _process.StandardInput.Close(); } catch { /* already closed / broken pipe */ }
+            try { _process.Kill(entireProcessTree: true); } catch { /* already exited */ }
+            try { await _process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(10)).ConfigureAwait(false); } catch { /* best-effort */ }
+            _process.Dispose();
+        }
+    }
+
+    // ── Driving the REAL codespace-mcp proxy BINARY over the real UDS ────────
+
+    /// <summary>
+    /// Resolve the built <c>codespace-mcp.dll</c> path, or null to SKIP. From the test bin (<c>AppContext.BaseDirectory</c>,
+    /// e.g. <c>.../tests/CodeSpace.IntegrationTests/bin/Debug/net10.0/</c>) we walk UP to the directory holding
+    /// <c>CodeSpace.sln</c>, then build <c>&lt;root&gt;/src/CodeSpace.Mcp/bin/&lt;Configuration&gt;/net10.0/codespace-mcp.dll</c>,
+    /// deriving <c>&lt;Configuration&gt;</c> from the test bin path. A build-only ProjectReference (csproj) guarantees the
+    /// dll is produced before these tests run; we still skip (not fail) if it's absent so the suite stays portable.
+    /// </summary>
+    private static string? ProxyDllPathOrNull()
+    {
+        var configuration = AppContext.BaseDirectory.Contains($"{Path.DirectorySeparatorChar}bin{Path.DirectorySeparatorChar}Release{Path.DirectorySeparatorChar}", StringComparison.Ordinal) ? "Release" : "Debug";
+
+        var dir = new DirectoryInfo(AppContext.BaseDirectory);
+        while (dir is not null && !File.Exists(Path.Combine(dir.FullName, "CodeSpace.sln"))) dir = dir.Parent;
+        if (dir is null) return null;
+
+        var dll = Path.Combine(dir.FullName, "src", "CodeSpace.Mcp", "bin", configuration, "net10.0", "codespace-mcp.dll");
+        return File.Exists(dll) ? dll : null;
     }
 
     private static string[] ToolNames(JsonElement listResponse) =>

@@ -37,6 +37,13 @@
     <ProjectReference Include="..\..\src\CodeSpace.Api\CodeSpace.Api.csproj" />
     <ProjectReference Include="..\..\src\CodeSpace.Core\CodeSpace.Core.csproj" />
     <ProjectReference Include="..\..\src\CodeSpace.Messages\CodeSpace.Messages.csproj" />
+    <!-- Build-only: guarantees codespace-mcp.dll is built before these tests run (the real-proxy E2E spawns it),
+         WITHOUT copying its assembly into the test bin or adding it to the test's assembly closure — keeps the
+         integration-test DI / assembly-scan unpolluted (the proxy has no project references of its own). -->
+    <ProjectReference Include="..\..\src\CodeSpace.Mcp\CodeSpace.Mcp.csproj">
+      <ReferenceOutputAssembly>false</ReferenceOutputAssembly>
+      <Private>false</Private>
+    </ProjectReference>
   </ItemGroup>
 
 </Project>
