@@ -94,8 +94,22 @@ public static class ToolCallKey
     }
 
     // Normalize the number TOKEN so 1, 1.0, and 1e0 all canonicalize identically (the model may spell the same value
-    // differently across calls). The double round-trip ("R") collapses the spellings; an integer that overflows
-    // double falls back to its raw decimal text (still stable for a given spelling, and out of range for a tool arg).
-    private static void WriteNumber(JsonElement element, StringBuilder sb) =>
+    // differently across calls) — WITHOUT ever collapsing two DISTINCT values to one string. Integers + decimals are
+    // canonicalized LOSSLESSLY: a 19-digit id does not overflow double but LOSES precision under the "R" round-trip, so
+    // two distinct large ids would canonicalize to the same string and the exactly-once key would silently merge them.
+    // Order matters — try the widest-lossless path first: an integer via Int64, else an exact decimal (which also
+    // normalizes 1 / 1.0 / 1e0 to the same "1"), and only a true float that fits neither falls back to the "R" double
+    // round-trip (still stable per spelling, and out of integer range so no id can land here).
+    private static void WriteNumber(JsonElement element, StringBuilder sb)
+    {
+        if (element.TryGetInt64(out var l)) { sb.Append(l.ToString(CultureInfo.InvariantCulture)); return; }
+
+        if (element.TryGetDecimal(out var m)) { sb.Append(NormalizeDecimal(m).ToString(CultureInfo.InvariantCulture)); return; }
+
         sb.Append(element.TryGetDouble(out var d) ? d.ToString("R", CultureInfo.InvariantCulture) : element.GetRawText());
+    }
+
+    // Strip trailing-zero scale so 1, 1.0, 1.00, and 1e0 all canonicalize to the same decimal text (the 1==1.0==1e0
+    // intent), while keeping every significant digit — distinct values never collapse. (decimal / 1.0m drops scale.)
+    private static decimal NormalizeDecimal(decimal value) => value / 1.000000000000000000000000000000000m;
 }

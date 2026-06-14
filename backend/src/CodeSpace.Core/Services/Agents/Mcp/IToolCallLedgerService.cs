@@ -113,7 +113,7 @@ public sealed class ToolCallLedgerService : IToolCallLedgerService, IScopedDepen
             // signal it's still in flight — NEVER double-run the side effect.
             _db.ChangeTracker.Clear();
 
-            return await ReadExistingClaimAsync(agentRunId, teamId, idempotencyKey, cancellationToken).ConfigureAwait(false);
+            return await ReadExistingClaimAsync(agentRunId, idempotencyKey, cancellationToken).ConfigureAwait(false);
         }
     }
 
@@ -261,10 +261,14 @@ public sealed class ToolCallLedgerService : IToolCallLedgerService, IScopedDepen
             .OrderByDescending(l => l.CreatedDate)
             .ToListAsync(cancellationToken).ConfigureAwait(false);
 
-    private async Task<ToolCallClaim> ReadExistingClaimAsync(Guid agentRunId, Guid teamId, string idempotencyKey, CancellationToken cancellationToken)
+    private async Task<ToolCallClaim> ReadExistingClaimAsync(Guid agentRunId, string idempotencyKey, CancellationToken cancellationToken)
     {
+        // Keyed on the unique index (agent_run_id, idempotency_key) — which is team-AGNOSTIC, so the winner's row is
+        // ALWAYS found here regardless of which team won. Filtering by TeamId too would let a cross-team race on the
+        // same (run, key) find nothing and throw a 500; the unique index already makes (run, key) globally unique, so
+        // the predicate is exactly the index and TeamId is read off the found row (it's invariant per run anyway).
         var existing = await _db.ToolCallLedger.AsNoTracking()
-            .SingleOrDefaultAsync(l => l.AgentRunId == agentRunId && l.TeamId == teamId && l.IdempotencyKey == idempotencyKey, cancellationToken).ConfigureAwait(false)
+            .SingleOrDefaultAsync(l => l.AgentRunId == agentRunId && l.IdempotencyKey == idempotencyKey, cancellationToken).ConfigureAwait(false)
             ?? throw new InvalidOperationException($"ToolCallLedger row for run {agentRunId} key was missing after a unique-violation race.");
 
         return ToolCallLedgerStateMachine.IsTerminal(existing.Status)

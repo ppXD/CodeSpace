@@ -279,6 +279,31 @@ public class MapFlowTests
         new[] { "a", "b", "c", "d" }.Select((_, i) => ResultValue(results, i)).ShouldBe(new[] { "a", "b", "c", "d" });
     }
 
+    [Theory]
+    [InlineData(1, 1)]   // a map maxParallelism of 1 ⇒ branches run strictly sequential (peak never exceeds 1)
+    [InlineData(2, 2)]   // a map maxParallelism of 2 ⇒ two branches overlap (peak reaches 2)
+    public async Task A_map_maxParallelism_bounds_the_branch_wave_concurrency(int maxParallelism, int expectedPeak)
+    {
+        // The cap PROOF (the synchronous Bounded_parallelism test above is byte-identical at 1 vs 4 — a peak-gauge
+        // probe records the REAL simultaneity the SemaphoreSlim(branchParallelism) allows). A cap of 1 physically
+        // forbids a second concurrent branch RunAsync (peak 1); a cap of 2 lets both overlap (peak 2). This goes RED
+        // if the branch-parallelism throttle is broken (e.g. hardcoded), unlike a synchronous-body test.
+        var gate = "map-peak-" + Guid.NewGuid().ToString("N");
+        ConcurrencyProbeNode.Arm(gate, 2);   // two branches expected through the gate
+
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var workflowId = await CreateWorkflowAsync(teamId, userId, PeakProbeMapDefinition(gate, maxParallelism));
+        var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId, payloadJson: """{ "things": ["a", "b"] }""");
+
+        await RunEngineAsync(runId);
+
+        using var verify = _fixture.BeginScope();
+        var db = verify.Resolve<CodeSpaceDbContext>();
+        (await db.WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == runId)).Status.ShouldBe(WorkflowRunStatus.Success);
+
+        ConcurrencyProbeNode.Peak(gate).ShouldBe(expectedPeak, $"a map maxParallelism of {maxParallelism} bounds the branch wave's simultaneity");
+    }
+
     // ─── Helpers ────────────────────────────────────────────────────────────────
 
     private static async Task<Core.Persistence.Entities.WorkflowRunNode> MapNodeAsync(CodeSpaceDbContext db, Guid runId) =>
@@ -332,6 +357,35 @@ public class MapFlowTests
                 new() { From = "map", To = "end" },
                 new() { From = "ms", To = "work" },
                 new() { From = "work", To = "leaf" },
+            },
+        };
+    }
+
+    // manual → map(maxParallelism; body: ms → probe[ConcurrencyProbe peak-gauge, party={{item}}]) → terminal.
+    // The peak-gauge probe holds briefly so concurrent branches overlap; ConcurrencyProbeNode.Peak(gate) then
+    // reflects the REAL simultaneity the SemaphoreSlim(branchParallelism) allowed — 1 (sequential) vs 2 (parallel).
+    private static WorkflowDefinition PeakProbeMapDefinition(string gate, int maxParallelism)
+    {
+        var probeInputs = """{ "gate": "__GATE__", "party": "{{item}}", "peak": true }""".Replace("__GATE__", gate);
+        return new WorkflowDefinition
+        {
+            SchemaVersion = 1,
+            Nodes = new List<NodeDefinition>
+            {
+                new() { Id = "start", TypeKey = "trigger.manual", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
+                new() { Id = "map", TypeKey = "flow.map", Config = WorkflowsTestSeed.Json($$"""{ "maxParallelism": {{maxParallelism}} }"""),
+                        Inputs = WorkflowsTestSeed.Json("""{ "items": "{{trigger.things}}" }""") },
+                new() { Id = "ms", TypeKey = "flow.map_start", ParentId = "map", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
+                new() { Id = "probe", TypeKey = ConcurrencyProbeNode.Key, ParentId = "map", Config = WorkflowsTestSeed.EmptyJson(),
+                        Inputs = WorkflowsTestSeed.Json(probeInputs) },
+                new() { Id = "end", TypeKey = "builtin.terminal", Config = WorkflowsTestSeed.EmptyJson(),
+                        Inputs = WorkflowsTestSeed.Json("""{ "count": "{{nodes.map.outputs.count}}" }""") },
+            },
+            Edges = new List<EdgeDefinition>
+            {
+                new() { From = "start", To = "map" },
+                new() { From = "map", To = "end" },
+                new() { From = "ms", To = "probe" },
             },
         };
     }
