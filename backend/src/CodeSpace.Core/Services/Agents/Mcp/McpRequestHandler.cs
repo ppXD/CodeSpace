@@ -107,9 +107,13 @@ public sealed class McpRequestHandler : IMcpRequestHandler
         {
             var result = await tool.CallAsync(new AgentToolCall { Input = arguments, TeamId = _teamId }, cancellationToken).ConfigureAwait(false);
 
-            return result.IsError
-                ? ToolResult(isError: true, result.Error ?? "Tool failed.")
-                : ToolResult(isError: false, OutputText(result.Output));
+            if (result.IsError) return ToolResult(isError: true, result.Error ?? "Tool failed.");
+
+            // A tool that DECLARES an outputSchema also returns structuredContent (the typed result) alongside the text
+            // (kept for clients that don't read structured output) — per the MCP structured-output contract.
+            var structured = DeclaresSchema(tool.OutputSchema) && result.Output.ValueKind != JsonValueKind.Undefined ? result.Output : (JsonElement?)null;
+
+            return ToolResult(isError: false, OutputText(result.Output), structured);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -141,28 +145,55 @@ public sealed class McpRequestHandler : IMcpRequestHandler
 
     private JsonElement ToolsListResult()
     {
-        var tools = _registry.All
-            .Select(t => new { name = t.Kind, description = t.Description, inputSchema = t.InputSchema })
-            .ToArray();
+        var tools = _registry.All.Select(ToolDescriptor).ToArray();
 
         return JsonSerializer.SerializeToElement(new { tools }, AgentJson.Options);
     }
 
+    /// <summary>Project a tool to its MCP descriptor: name/description/inputSchema, plus outputSchema ONLY when the tool
+    /// declares a meaningful one (an empty {} schema is omitted). Risk flags / aliases are deliberately NOT exposed.</summary>
+    private static Dictionary<string, object> ToolDescriptor(IAgentTool tool)
+    {
+        var descriptor = new Dictionary<string, object> { ["name"] = tool.Kind, ["description"] = tool.Description, ["inputSchema"] = tool.InputSchema };
+
+        if (DeclaresSchema(tool.OutputSchema)) descriptor["outputSchema"] = tool.OutputSchema;
+
+        return descriptor;
+    }
+
+    /// <summary>A schema is "declared" when it's a non-empty object — the empty {} default a node carries when it has no output shape is treated as absent.</summary>
+    private static bool DeclaresSchema(JsonElement schema) => schema.ValueKind == JsonValueKind.Object && schema.EnumerateObject().Any();
+
     // The SINGLE choke point for every tool-result text the model receives — success output, tool error, the caught
     // exception message, AND the gate/validation messages all flow through here. Redact at this one point so an
     // echoed model key (e.g. a run_command that prints an env var) can never reach the model through a tool call.
-    private JsonElement ToolResult(bool isError, string text)
+    private JsonElement ToolResult(bool isError, string text, JsonElement? structuredContent = null)
     {
         text = _redactor.Redact(text);
 
-        return JsonSerializer.SerializeToElement(new
+        var result = new Dictionary<string, object>
         {
-            content = new[] { new { type = "text", text } },
-            isError,
-        }, AgentJson.Options);
+            ["content"] = new[] { new { type = "text", text } },
+            ["isError"] = isError,
+        };
+
+        // structuredContent carries the same secrets the text might, so redact it too (serialize → redact → reparse).
+        if (structuredContent is { } structured) result["structuredContent"] = RedactStructured(structured);
+
+        return JsonSerializer.SerializeToElement(result, AgentJson.Options);
     }
 
     private static string OutputText(JsonElement output) => output.ValueKind == JsonValueKind.Undefined ? "{}" : output.GetRawText();
+
+    /// <summary>Redact secrets from a structured result by serializing → redacting → reparsing (Clone so it outlives the temp doc). Identity when the redactor is empty.</summary>
+    private JsonElement RedactStructured(JsonElement structured)
+    {
+        if (_redactor.IsEmpty) return structured;
+
+        using var doc = JsonDocument.Parse(_redactor.Redact(structured.GetRawText()));
+
+        return doc.RootElement.Clone();
+    }
 
     private static JsonElement Serialize(JsonRpcResponse response) => JsonSerializer.SerializeToElement(response, AgentJson.Options);
 

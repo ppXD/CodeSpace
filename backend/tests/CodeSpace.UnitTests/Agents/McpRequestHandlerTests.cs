@@ -146,14 +146,68 @@ public class McpRequestHandlerTests
     }
 
     [Fact]
-    public async Task ToolsList_does_not_leak_outputSchema_or_risk_flags_or_aliases()
+    public async Task ToolsList_omits_an_empty_outputSchema_and_never_leaks_risk_flags_or_aliases()
     {
+        // The default empty {} schema (a node with no declared output shape) is treated as absent — omitted.
         var tool = (await Respond(Handler(new FakeTool { Kind = "x" }), ListReq)).GetProperty("result").GetProperty("tools")[0];
 
         tool.TryGetProperty("outputSchema", out _).ShouldBeFalse();
         tool.TryGetProperty("isDestructive", out _).ShouldBeFalse();
         tool.TryGetProperty("isReadOnly", out _).ShouldBeFalse();
         tool.TryGetProperty("aliases", out _).ShouldBeFalse();
+    }
+
+    [Fact]
+    public async Task ToolsList_projects_a_meaningful_outputSchema()
+    {
+        var schema = """{"type":"object","properties":{"number":{"type":"integer"}}}""";
+        var tool = (await Respond(Handler(new FakeTool { Kind = "x", OutputSchema = Parse(schema) }), ListReq)).GetProperty("result").GetProperty("tools")[0];
+
+        tool.TryGetProperty("outputSchema", out var projected).ShouldBeTrue();
+        projected.GetProperty("properties").GetProperty("number").GetProperty("type").GetString().ShouldBe("integer");
+    }
+
+    [Fact]
+    public async Task ToolsCall_returns_structuredContent_when_the_tool_declares_an_outputSchema()
+    {
+        var tool = new FakeTool
+        {
+            Kind = "echo",
+            OutputSchema = Parse("""{"type":"object","properties":{"n":{"type":"integer"}}}"""),
+            OnCall = (_, _) => Task.FromResult(AgentToolResult.Ok(Parse("""{"n":42}"""), 13)),
+        };
+
+        var result = (await Respond(Handler(tool), Call("echo", "{}"))).GetProperty("result");
+
+        result.GetProperty("isError").GetBoolean().ShouldBeFalse();
+        result.GetProperty("structuredContent").GetProperty("n").GetInt32().ShouldBe(42);
+        result.GetProperty("content")[0].GetProperty("text").GetString().ShouldContain("42");   // text kept for clients that don't read structured output
+    }
+
+    [Fact]
+    public async Task ToolsCall_omits_structuredContent_when_the_tool_declares_no_outputSchema()
+    {
+        // Default {} schema → text-only result (backward-compatible with a client that predates structured output).
+        var result = (await Respond(Handler(new FakeTool { Kind = "echo" }), Call("echo", "{}"))).GetProperty("result");
+
+        result.TryGetProperty("structuredContent", out _).ShouldBeFalse();
+        result.GetProperty("content")[0].GetProperty("text").GetString().ShouldNotBeNullOrEmpty();
+    }
+
+    [Fact]
+    public async Task ToolsCall_redacts_secrets_in_structuredContent()
+    {
+        var tool = new FakeTool
+        {
+            Kind = "echo",
+            OutputSchema = Parse("""{"type":"object","properties":{"leaked":{"type":"string"}}}"""),
+            OnCall = (_, _) => Task.FromResult(AgentToolResult.Ok(Parse("""{"leaked":"SECRET-abc123"}"""), 13)),
+        };
+        var handler = new McpRequestHandler(new FakeRegistry(tool), AgentAutonomyLevel.Unleashed, null, new SecretRedactor(new[] { "SECRET-abc123" }));
+
+        var result = (await Respond(handler, Call("echo", "{}"))).GetProperty("result");
+
+        result.GetProperty("structuredContent").GetProperty("leaked").GetString().ShouldBe(SecretRedactor.Placeholder);
     }
 
     [Fact]
