@@ -37,3 +37,29 @@ export function bodyStartTypeKey(containerTypeKey: string): string | null {
 export function isBodyStartTypeKey(typeKey: string | undefined): boolean {
   return typeKey === "flow.loop_start" || typeKey === "flow.try_start" || typeKey === "flow.map_start";
 }
+
+/**
+ * Two nodes share a container scope iff they have the SAME container owner — both top-level, or both
+ * inside the SAME container body. This is the exact save-time rule the backend enforces in
+ * DefinitionValidator.CheckNoEdgeCrossesContainerBoundary: `ownerByNodeId[from] !== ownerByNodeId[to]`
+ * is a crossing edge (the engine's SubgraphView silently DROPS such an edge, so it would never fire).
+ *
+ * The container-boundary exceptions the backend documents fall out of this single rule without special
+ * casing, because they're all SAME-owner edges:
+ *   - container node ↔ an outside sibling: the container node's own owner equals its siblings' owner
+ *     (a top-level map has parent null, same as the top-level node it wires to) — same scope, allowed.
+ *   - a body-start (flow.map_start) ↔ another body node: both are parented to the container — same
+ *     scope, allowed.
+ *   - an in-body `error` edge: source + target are both body nodes — same scope, allowed.
+ *   - a try's `catch` edge: it's sourced from the try NODE at the parent level, so source + target
+ *     share the parent's owner — same scope, allowed.
+ *
+ * `ownerById` maps every node id to its container owner id (its React Flow `parentId`), with `null`/
+ * absent meaning top-level. A missing endpoint (unknown id) is treated as "can't tell" → allowed here,
+ * mirroring the backend's `continue` for an unknown endpoint (CheckEdgeEndpoints flags it separately).
+ */
+export function sameContainerScope(ownerById: ReadonlyMap<string, string | null | undefined>, fromId: string, toId: string): boolean {
+  if (!ownerById.has(fromId) || !ownerById.has(toId)) return true;
+
+  return (ownerById.get(fromId) ?? null) === (ownerById.get(toId) ?? null);
+}

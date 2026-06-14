@@ -23,6 +23,18 @@ namespace CodeSpace.Core.Services.Workflows.Nodes.Builtin;
 /// sibling is replayed from the ledger, never re-run). Nesting is supported — a map (or a loop / try) inside a
 /// map branch parks under the composed iteration key <c>&lt;outerMapId&gt;#&lt;i&gt;/&lt;innerId&gt;#&lt;j&gt;</c>
 /// and resumes the same way.</para>
+///
+/// <para><b>Nested-map iteration scope: the inner element SHADOWS the outer (by design).</b> Because a map
+/// branch reads its element through the FIXED names <c>{{item}}</c> / <c>{{index}}</c>, a map nested inside
+/// another map's branch sees ITS OWN element as <c>{{item}}</c> / <c>{{index}}</c> — the OUTER map's element
+/// is NOT in scope by default. This is intentional, not a gap: inheriting the outer would collide on the very
+/// same keys (the inner would win anyway), so the contract is clean shadowing. To use the outer element inside
+/// an inner branch, pass it down explicitly — bind it into the inner map's <c>items</c> shape, or read a
+/// pre-map node's output via <c>{{nodes.&lt;id&gt;.outputs.X}}</c> (the branch scope preserves the outer Nodes
+/// bag). Contrast <c>flow.loop</c>, whose NAMED <c>{{loop.&lt;var&gt;}}</c> scope lives in a separate slot and
+/// so coexists with an enclosing iterate's <c>{{item}}</c> — which is why a loop body INHERITS the enclosing
+/// iteration while a map body shadows it. (Engine: <c>WorkflowEngine.BuildMapBranchScope</c> vs
+/// <c>BuildLoopScope</c>.)</para>
 /// </summary>
 public sealed class FlowMapNode : INodeRuntime
 {
