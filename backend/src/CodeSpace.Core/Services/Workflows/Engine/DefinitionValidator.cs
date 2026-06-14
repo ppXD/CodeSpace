@@ -475,6 +475,13 @@ public sealed class DefinitionValidator : IScopedDependency
     /// one <c>flow.map_start</c>, and end in exactly one TERMINAL node — the single body node with no
     /// in-body outgoing edge, whose output becomes each element's result. The single-terminal rule is what
     /// lets the reduce pick a per-element result unambiguously (PR1 design lock).
+    ///
+    /// <para>PR1 fail-closed guard: NO body node may SUSPEND (park the run on a durable wait). PR1 runs map
+    /// branches SYNCHRONOUSLY — durable parallel-branch resume ships in PR2 — so a body suspend would commit
+    /// a wait row + schedule/stage an external job behind a map the engine cannot resume. Rejecting it at save
+    /// time keeps the runtime suspend branch in <c>AdvanceMapBranchNodeOrAbandon</c> genuinely unreachable.
+    /// The check spans the ENTIRE recursive body (nested loop / try / map bodies extend it) and is generic —
+    /// driven by the manifest's <see cref="NodeManifest.CanSuspend"/> marker, no node-type knowledge.</para>
     /// </summary>
     private void CheckMapBodyShape(WorkflowDefinition definition, NodeDefinition mapNode, List<string> errors)
     {
@@ -496,6 +503,41 @@ public sealed class DefinitionValidator : IScopedDependency
 
         if (terminals.Count != 1)
             errors.Add($"Map '{mapNode.Id}' body must end in exactly one terminal node (the per-element result); found {terminals.Count}.");
+
+        CheckNoSuspendingNodeInMapBody(definition, mapNode, errors);
+    }
+
+    /// <summary>
+    /// Reject any node in the map's recursive body (nested loop / try / map bodies included) whose manifest
+    /// declares <see cref="NodeManifest.CanSuspend"/> — PR1 has no durable parallel-branch resume, so a body
+    /// suspend is unsupported and must fail at save time, not leak a parked-then-failed wait at run time.
+    /// </summary>
+    private void CheckNoSuspendingNodeInMapBody(WorkflowDefinition definition, NodeDefinition mapNode, List<string> errors)
+    {
+        foreach (var descendant in DescendantsOf(definition, mapNode.Id))
+        {
+            if (!_nodeRegistry.Contains(descendant.TypeKey)) continue;   // unknown type — CheckNodeIdsAndTypes flags it
+
+            if (_nodeRegistry.Resolve(descendant.TypeKey).Manifest.CanSuspend)
+                errors.Add($"Map '{mapNode.Id}' body cannot contain a node that waits ('{descendant.Id}' is {descendant.TypeKey}) — durable parallel-branch resume ships in PR2; remove it or move it outside the map.");
+        }
+    }
+
+    /// <summary>Every node transitively under <paramref name="containerId"/> via the <c>ParentId</c> chain — the container's full recursive body, nested containers and their bodies included.</summary>
+    private static IEnumerable<NodeDefinition> DescendantsOf(WorkflowDefinition definition, string containerId)
+    {
+        var childrenByParent = definition.Nodes.Where(n => n.ParentId != null).ToLookup(n => n.ParentId!);
+
+        var stack = new Stack<string>();
+        stack.Push(containerId);
+        while (stack.Count > 0)
+        {
+            foreach (var child in childrenByParent[stack.Pop()])
+            {
+                yield return child;
+                stack.Push(child.Id);
+            }
+        }
     }
 
     private static IEnumerable<string> ExtractRefPaths(System.Text.Json.JsonElement element)

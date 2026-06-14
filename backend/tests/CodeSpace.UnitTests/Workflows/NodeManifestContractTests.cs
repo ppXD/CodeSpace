@@ -311,6 +311,38 @@ public class NodeManifestContractTests
             "builtin.terminal must use Category='Logic' to group with the other flow/logic nodes in the palette; 'Flow' leaves it as a lone section");
     }
 
+    // ─── CanSuspend marker contract ─────────────────────────────────────────────
+    //
+    // CanSuspend marks a node TYPE whose RunAsync can park the run on a durable wait. The flow.map validator
+    // reads it to reject a suspending node in a (PR1, synchronous) map body — so a flip in either direction
+    // (a new wait node forgetting to set it, or a synchronous node setting it by mistake) is a review-visible
+    // failure here rather than a silent run-time leak (committed wait row behind an unresumable map).
+
+    [Fact]
+    public void Suspending_nodes_declare_CanSuspend_true()
+    {
+        // Every node whose RunAsync can return Suspended. chat.post_message suspends only when
+        // waitForResponse is on, but is still capable of suspending, so it declares the marker.
+        new FlowWaitApprovalNode().Manifest.CanSuspend.ShouldBeTrue("flow.wait_approval parks on an Approval wait");
+        new FlowWaitCallbackNode().Manifest.CanSuspend.ShouldBeTrue("flow.wait_callback parks on a Callback wait");
+        new FlowWaitActionNode().Manifest.CanSuspend.ShouldBeTrue("flow.wait_action parks on an Action wait");
+        new FlowSleepNode().Manifest.CanSuspend.ShouldBeTrue("flow.sleep parks on a Timer wait");
+        new FlowSubworkflowNode().Manifest.CanSuspend.ShouldBeTrue("flow.subworkflow parks on a Subworkflow wait");
+        new AgentCodeNode().Manifest.CanSuspend.ShouldBeTrue("agent.code parks on an AgentRun wait");
+        new ChatPostMessageNode(null!, null!, null!).Manifest.CanSuspend.ShouldBeTrue("chat.post_message can park on an Action wait when waitForResponse is on");
+    }
+
+    [Fact]
+    public void Synchronous_nodes_declare_CanSuspend_false()
+    {
+        // Pure / read-only / synchronous-side-effecting nodes never park — they must leave CanSuspend false,
+        // or the validator would wrongly reject them inside a flow.map body.
+        new TriggerManualNode().Manifest.CanSuspend.ShouldBeFalse("a trigger never suspends");
+        new TerminalNode().Manifest.CanSuspend.ShouldBeFalse("a terminal never suspends");
+        new LogicMergeNode().Manifest.CanSuspend.ShouldBeFalse("logic.merge runs synchronously");
+        new HttpRequestNode(null!).Manifest.CanSuspend.ShouldBeFalse("http.request runs synchronously (side-effecting but not parking)");
+    }
+
     // PR-trigger schema dedup: every PR trigger must use the SAME serialised ConfigSchema JSON string.
     // If any node drifts (e.g. someone copy-edits one description and forgets the others), this
     // test fails — preventing a subtle activation-model regression where one trigger has different

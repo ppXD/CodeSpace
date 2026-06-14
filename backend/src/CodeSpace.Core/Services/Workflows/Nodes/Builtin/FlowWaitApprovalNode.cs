@@ -21,6 +21,7 @@ public sealed class FlowWaitApprovalNode : INodeRuntime
         DisplayName = "Wait for approval",
         Category = "Logic",
         Kind = NodeKind.Regular,
+        CanSuspend = true,
         IconKey = "user-check",
         Description = "Pauses until a human approves or rejects. Outputs { approved, comment, by } — branch on 'approved' with an If/else.",
         ConfigSchema = SchemaBuilder.Parse("""

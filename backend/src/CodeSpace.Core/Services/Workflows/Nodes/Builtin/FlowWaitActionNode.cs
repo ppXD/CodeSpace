@@ -24,6 +24,7 @@ public sealed class FlowWaitActionNode : INodeRuntime
         DisplayName = "Wait for action",
         Category = "Logic",
         Kind = NodeKind.Regular,
+        CanSuspend = true,
         IconKey = "mouse-pointer-click",
         Description = "Pauses until someone responds to a chat card (clicks a button or submits a form). Outputs { action, by, comment, values } — branch on 'action', read a form submission from 'values'. Wire its 'token' input from the chat.post_message that posted the card.",
         ConfigSchema = SchemaBuilder.EmptyObject(),

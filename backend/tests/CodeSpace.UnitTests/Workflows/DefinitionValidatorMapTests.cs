@@ -10,9 +10,11 @@ namespace CodeSpace.UnitTests.Workflows;
 /// <summary>
 /// Pins the container-structure rules <see cref="DefinitionValidator"/> adds for <c>flow.map</c> (which
 /// <c>flow.loop</c> never had): a non-empty body rooted at exactly one <c>flow.map_start</c> and ending
-/// in exactly one terminal (the per-element result source), no edge crossing the container boundary (the
-/// engine silently drops those today), and a save-time nesting-depth guard. Each rejection has its own
-/// case so a relaxed check can't slip through. A well-formed map passes — the regression backstop.
+/// in exactly one terminal (the per-element result source), no SUSPENDING node anywhere in the recursive
+/// body (PR1 runs branches synchronously — durable parallel-branch resume ships in PR2), no edge crossing
+/// the container boundary (the engine silently drops those today), and a save-time nesting-depth guard.
+/// Each rejection has its own case so a relaxed check can't slip through. A well-formed map passes — the
+/// regression backstop.
 /// </summary>
 [Trait("Category", "Unit")]
 public class DefinitionValidatorMapTests
@@ -26,6 +28,9 @@ public class DefinitionValidatorMapTests
             new MapStubNode("regular.b", NodeKind.Regular),
             new MapStubNode("flow.map", NodeKind.Map),
             new MapStubNode("flow.map_start", NodeKind.Regular),
+            new MapStubNode("flow.loop", NodeKind.Loop),
+            new MapStubNode("flow.loop_start", NodeKind.Regular),
+            new MapStubNode("flow.wait_approval", NodeKind.Regular, canSuspend: true),
             new MapStubNode("builtin.terminal", NodeKind.Terminal),
         };
 
@@ -99,6 +104,51 @@ public class DefinitionValidatorMapTests
     }
 
     [Fact]
+    public void Map_body_with_a_suspending_node_errors()
+    {
+        // PR1 fail-closed: a body node that can SUSPEND (here flow.wait_approval, manifest CanSuspend=true)
+        // is rejected at save time — durable parallel-branch resume ships in PR2. Without this the run-time
+        // suspend branch would commit a wait row + schedule/stage external work behind a map it can't resume.
+        var def = new WorkflowDefinition
+        {
+            Nodes = new List<NodeDefinition>
+            {
+                Node("t", "trigger.x"), Node("map", "flow.map"), Node("end", "builtin.terminal"),
+                Body("ms", "flow.map_start", "map"),
+                Body("gate", "flow.wait_approval", "map"),   // ⇐ parks the run — unsupported in a PR1 map body
+            },
+            Edges = new List<EdgeDefinition> { Edge("t", "map"), Edge("map", "end"), Edge("ms", "gate") },
+        };
+
+        var result = BuildValidator().Validate(def);
+        result.IsValid.ShouldBeFalse();
+        result.Errors.ShouldContain(e => e.Contains("cannot contain a node that waits") && e.Contains("PR2"));
+    }
+
+    [Fact]
+    public void Map_body_with_a_suspending_node_in_a_NESTED_container_errors()
+    {
+        // The suspend guard spans the map's RECURSIVE body: the approval sits inside a nested flow.loop
+        // whose ParentId is the map. The loop's own body extends the map body, so it must still be caught.
+        var def = new WorkflowDefinition
+        {
+            Nodes = new List<NodeDefinition>
+            {
+                Node("t", "trigger.x"), Node("map", "flow.map"), Node("end", "builtin.terminal"),
+                Body("ms", "flow.map_start", "map"),
+                Body("loop", "flow.loop", "map"),                  // nested container in the map body
+                Body("ls", "flow.loop_start", "loop"),
+                Body("gate", "flow.wait_approval", "loop"),        // ⇐ buried two levels deep, still rejected
+            },
+            Edges = new List<EdgeDefinition> { Edge("t", "map"), Edge("map", "end"), Edge("ms", "loop"), Edge("ls", "gate") },
+        };
+
+        var result = BuildValidator().Validate(def);
+        result.IsValid.ShouldBeFalse();
+        result.Errors.ShouldContain(e => e.Contains("cannot contain a node that waits") && e.Contains("gate"));
+    }
+
+    [Fact]
     public void Edge_crossing_the_container_boundary_errors()
     {
         // A body node wired directly to a top-level node — the engine's SubgraphView would silently drop it.
@@ -169,7 +219,7 @@ public class DefinitionValidatorMapTests
 
     private sealed class MapStubNode : INodeRuntime
     {
-        public MapStubNode(string typeKey, NodeKind kind)
+        public MapStubNode(string typeKey, NodeKind kind, bool canSuspend = false)
         {
             TypeKey = typeKey;
             Manifest = new NodeManifest
@@ -177,6 +227,7 @@ public class DefinitionValidatorMapTests
                 DisplayName = typeKey,
                 Category = "Test",
                 Kind = kind,
+                CanSuspend = canSuspend,
                 ConfigSchema = SchemaBuilder.EmptyObject(),
                 InputSchema = SchemaBuilder.EmptyObject(),
                 OutputSchema = SchemaBuilder.EmptyObject(),
