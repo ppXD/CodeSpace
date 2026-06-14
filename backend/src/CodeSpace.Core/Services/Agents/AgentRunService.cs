@@ -104,16 +104,23 @@ public interface IAgentRunService
 public sealed class AgentRunService : IAgentRunService, IScopedDependency
 {
     private readonly CodeSpaceDbContext _db;
+    private readonly IAdmissionController _admissionController;
     private readonly ILogger<AgentRunService> _logger;
 
-    public AgentRunService(CodeSpaceDbContext db, ILogger<AgentRunService> logger)
+    public AgentRunService(CodeSpaceDbContext db, IAdmissionController admissionController, ILogger<AgentRunService> logger)
     {
         _db = db;
+        _admissionController = admissionController;
         _logger = logger;
     }
 
     public async Task<AgentRun> CreateAsync(AgentTask task, Guid teamId, Guid? workflowRunId, string? nodeId, CancellationToken cancellationToken)
     {
+        // Fail-closed admission gate (D4a): refuse the run BEFORE persisting if the team or the deployment is at
+        // its in-flight cap. Throws AgentRunAdmissionException, which the engine wraps into a clean node failure
+        // so an over-cap branch routes to its error edge / the map's continue-on-error rather than crashing.
+        await _admissionController.EnsureAgentRunAdmittedAsync(teamId, cancellationToken).ConfigureAwait(false);
+
         var run = new AgentRun
         {
             Id = Guid.NewGuid(),

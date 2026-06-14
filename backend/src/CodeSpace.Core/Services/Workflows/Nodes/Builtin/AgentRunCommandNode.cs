@@ -23,6 +23,14 @@ namespace CodeSpace.Core.Services.Workflows.Nodes.Builtin;
 /// Generic across backends: the run executes on the sandbox runner named by <c>runnerKind</c> (default
 /// "local"); a future docker / k8s runner + workspace provider plug in behind the same registries unchanged.
 ///
+/// <para>ADMISSION SCOPE (D4a): this node runs the command SYNCHRONOUSLY via <see cref="IRunCommandService"/>
+/// with no durable <c>AgentRun</c> row, so it is intentionally NOT bounded by the per-team / global in-flight
+/// agent-run cap (<c>IAdmissionController</c>) — that gate counts <c>AgentRun</c> rows, which this surface never
+/// creates. Its concurrency is instead bounded by the engine's per-frontier <c>maxParallelism</c> (a run_command
+/// node holds a wave slot for its whole wall-clock duration), the node's <c>timeoutSeconds</c>, and the runner's
+/// process / file-size rlimits. A dedicated synchronous-sandbox admission notion is a follow-up (PR-D4b), not
+/// part of this in-flight agent-run cap.</para>
+///
 /// Inputs: repositoryId? · command (required) · args · branch? · network? · timeoutSeconds? · runnerKind? · maxOutputChars?
 /// Outputs: exitCode · status · stdout · stderr · stdoutBytes · stderrBytes (the original sizes, even when stdout/stderr are capped)
 /// </summary>
