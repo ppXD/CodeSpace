@@ -796,6 +796,24 @@ public class McpRequestHandlerTests
         resp.GetProperty("result").GetProperty("content")[0].GetProperty("text").GetString().ShouldContain("merged", customMessage: "the recorded terminal is re-read and replayed verbatim");
     }
 
+    // ── approvalConversationId carry-through (stored, UNUSED in this slice) ────
+
+    [Fact]
+    public async Task ApprovalConversationId_ctor_param_is_accepted_and_does_not_change_handler_behavior()
+    {
+        // D1: the handler carries the approval-conversation reference but nothing reads it yet — a handler built WITH it
+        // must behave byte-identically to one built without it (same tool result, same single invocation).
+        var conversationId = Guid.NewGuid();
+        var tool = new FakeTool { Kind = "echo", OnCall = (_, _) => Task.FromResult(AgentToolResult.Ok(Parse("""{"echoed":42}"""), 13)) };
+        var handler = new McpRequestHandler(new FakeRegistry(tool), AgentAutonomyLevel.Unleashed, null, null, default, null, 0, false, conversationId);
+
+        var result = (await Respond(handler, Call("echo", """{"x":"hi"}"""))).GetProperty("result");
+
+        result.GetProperty("isError").GetBoolean().ShouldBeFalse();
+        result.GetProperty("content")[0].GetProperty("text").GetString().ShouldBe("""{"echoed":42}""");
+        tool.CallCount.ShouldBe(1, "carrying an approval-conversation reference must not alter dispatch — it is stored, never read, in this slice");
+    }
+
     [Fact]
     public async Task Governance_ON_redacts_before_persisting_the_ledger_result()
     {

@@ -13,6 +13,9 @@ vi.mock("@/hooks/use-agents", () => ({
 vi.mock("@/hooks/use-model-credentials", () => ({
   useModelCredentials: () => ({ isLoading: false, data: [{ id: "c1", provider: "OpenAI", displayName: "Team key", status: "Active" }] }),
 }));
+vi.mock("@/hooks/use-chat", () => ({
+  useConversations: () => ({ isLoading: false, data: [{ id: "conv1", kind: "Channel", slug: "review", name: "Review" }] }),
+}));
 vi.mock("./selectors/ProjectRepositorySelector", () => ({
   ProjectRepositorySelector: ({ value }: { value: string }) => <div data-testid="repo-selector">{value}</div>,
 }));
@@ -61,5 +64,19 @@ describe("AgentCodeInspector", () => {
     const { container } = render(<AgentCodeInspector {...baseProps} config={{ harness: "codex-cli" }} />);
     const option = container.querySelector("#agentcode-model-hints option");
     expect(option?.getAttribute("value")).toBe("gpt-5-codex");
+  });
+
+  it("shows the approval-conversation picker, reflecting the saved value", () => {
+    render(<AgentCodeInspector {...baseProps} config={{ harness: "codex-cli", approvalConversationId: "conv1" }} />);
+    expect((screen.getByLabelText("Conversation") as HTMLSelectElement).value).toBe("conv1");
+  });
+
+  it("patches approvalConversationId into config when a conversation is picked", () => {
+    const onConfigChange = vi.fn();
+    render(<AgentCodeInspector {...baseProps} onConfigChange={onConfigChange} config={{ harness: "codex-cli" }} />);
+
+    fireEvent.change(screen.getByLabelText("Conversation"), { target: { value: "conv1" } });
+
+    expect(onConfigChange).toHaveBeenCalledWith({ harness: "codex-cli", approvalConversationId: "conv1" });
   });
 });

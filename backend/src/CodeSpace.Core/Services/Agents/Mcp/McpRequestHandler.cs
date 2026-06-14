@@ -54,8 +54,11 @@ public sealed class McpRequestHandler : IMcpRequestHandler
     private readonly IToolCallLedgerService? _ledger;
     private readonly long _fenceEpoch;
     private readonly bool _governanceEnabled;
+    // The conversation a run posts its tool-approval cards into — carried through but UNUSED here; a later slice reads
+    // it to route an approval card when a tool needs human sign-off (null = no approval surface, fails closed then).
+    private readonly Guid? _approvalConversationId;
 
-    public McpRequestHandler(IAgentToolRegistry registry, AgentAutonomyLevel autonomy, Guid? teamId = null, SecretRedactor? redactor = null, Guid runId = default, IToolCallLedgerService? ledger = null, long fenceEpoch = 0, bool governanceEnabled = false)
+    public McpRequestHandler(IAgentToolRegistry registry, AgentAutonomyLevel autonomy, Guid? teamId = null, SecretRedactor? redactor = null, Guid runId = default, IToolCallLedgerService? ledger = null, long fenceEpoch = 0, bool governanceEnabled = false, Guid? approvalConversationId = null)
     {
         _registry = registry;
         _autonomy = autonomy;
@@ -65,6 +68,7 @@ public sealed class McpRequestHandler : IMcpRequestHandler
         _ledger = ledger;
         _fenceEpoch = fenceEpoch;
         _governanceEnabled = governanceEnabled;
+        _approvalConversationId = approvalConversationId;
     }
 
     /// <summary>True ONLY for "1"/"true"/"TRUE" (trimmed); fail-closed default-OFF otherwise. Mirrors <see cref="AgentRunExecutor.IsMcpEndpointEnabled"/> exactly (Rule 8). Production reads governance opt-in through this single gate.</summary>
