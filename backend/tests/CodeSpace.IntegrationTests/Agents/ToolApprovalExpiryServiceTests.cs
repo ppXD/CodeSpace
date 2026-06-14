@@ -8,9 +8,12 @@ using CodeSpace.Core.Services.Chat;
 using CodeSpace.Core.Services.Chat.Interactions;
 using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.Messages.Agents;
+using CodeSpace.Messages.Commands.Agents;
 using CodeSpace.Messages.Dtos.Chat.Interactions;
 using CodeSpace.Messages.Enums;
+using MediatR;
 using Microsoft.EntityFrameworkCore;
+using Npgsql;
 using Shouldly;
 
 namespace CodeSpace.IntegrationTests.Agents;
@@ -83,6 +86,35 @@ public class ToolApprovalExpiryServiceTests
         tool.CallCount.ShouldBe(0, "an expired call never runs the side effect");
 
         (await ReadRunCardCountAsync(teamId, channelId)).ShouldBe(1, "exactly one approval card across the park + expiry + re-call — the re-call never posts a second");
+    }
+
+    [Fact]
+    public async Task Mediator_dispatch_commits_the_expired_CAS_BEFORE_it_wakes_a_same_pod_waiter()
+    {
+        var (teamId, channelId) = await SeedTeamChannelAsync();
+        var runId = Guid.NewGuid();
+
+        var (ledgerId, _) = await ParkApprovalAsync(teamId, runId, channelId);
+
+        // Drive expiry through the REAL mediator (NOT ExpireDueAsync directly) so TransactionalBehavior wraps the whole
+        // command in one transaction — the production path. The signal must fire only AFTER that transaction commits, or
+        // a same-pod handler woken inside the transaction re-reads on its OWN connection and sees the row still
+        // AwaitingApproval (the lost-fast-path race this fix closes). The recorder snapshots the row's COMMITTED status
+        // on a fresh connection at the instant of the wake — exactly what a woken handler observes.
+        var recorder = new CommittedStateRecordingWaiterRegistry(_fixture.ConnectionString);
+
+        using var scope = _fixture.BeginScope(b => b.RegisterInstance(recorder).As<IToolApprovalWaiterRegistry>().SingleInstance());
+
+        recorder.Register(ledgerId);   // a same-pod handler is blocked on THIS row
+
+        var result = await scope.Resolve<IMediator>().Send(new ExpireStaleToolApprovalsCommand(), CancellationToken.None);
+
+        result.Expired.ShouldBeGreaterThanOrEqualTo(1, "the over-deadline undecided row is durably expired");
+
+        recorder.SignalledLedgerIds.ShouldContain(ledgerId, "the same-pod waiter for the expired row was woken");
+
+        recorder.CommittedStatusAtSignal(ledgerId).ShouldBe(nameof(ToolCallLedgerStatus.Expired),
+            customMessage: "the durable CAS must be COMMITTED before the wake — a fresh-connection read at signal time saw the row as Expired, not the pre-commit AwaitingApproval. If this fails, the signal is firing inside the command transaction (see ExpireDueAsync deferring via IPostCommitActions).");
     }
 
     // ─── Park a real approval card through the real handler (times out fast → row stays AwaitingApproval, then back-date the deadline) ───
@@ -214,5 +246,48 @@ public class ToolApprovalExpiryServiceTests
         public SingleToolRegistry(IAgentTool tool) => _tool = tool;
         public IReadOnlyList<IAgentTool> All => new[] { _tool };
         public IAgentTool? Resolve(string kind) => kind == _tool.Kind ? _tool : null;
+    }
+
+    /// <summary>
+    /// A waiter registry that, at the instant the reaper signals a row, reads that row's COMMITTED status on a FRESH
+    /// connection — exactly what a same-pod blocked handler does when it wakes and re-reads on its own scope. If the
+    /// signal fired inside the still-open command transaction, this fresh connection (which sees only committed data)
+    /// reads the row as AwaitingApproval; once the CAS is committed-before-wake, it reads Expired. The whole-call
+    /// surface stays a real in-memory waiter map so the production wake path is genuinely exercised.
+    /// </summary>
+    private sealed class CommittedStateRecordingWaiterRegistry : IToolApprovalWaiterRegistry
+    {
+        private readonly string _connectionString;
+        private readonly ToolApprovalWaiterRegistry _inner = new();
+        private readonly Dictionary<Guid, string?> _committedStatusAtSignal = new();
+
+        public CommittedStateRecordingWaiterRegistry(string connectionString) => _connectionString = connectionString;
+
+        public List<Guid> SignalledLedgerIds { get; } = new();
+
+        public string? CommittedStatusAtSignal(Guid ledgerId) => _committedStatusAtSignal.GetValueOrDefault(ledgerId);
+
+        public IToolApprovalWaiter Register(Guid ledgerId) => _inner.Register(ledgerId);
+
+        public bool TrySignal(Guid ledgerId, ToolApprovalOutcome outcome)
+        {
+            SignalledLedgerIds.Add(ledgerId);
+            _committedStatusAtSignal[ledgerId] = ReadCommittedStatus(ledgerId);
+
+            return _inner.TrySignal(ledgerId, outcome);
+        }
+
+        public void Remove(Guid ledgerId) => _inner.Remove(ledgerId);
+
+        private string? ReadCommittedStatus(Guid ledgerId)
+        {
+            using var conn = new NpgsqlConnection(_connectionString);
+            conn.Open();
+
+            using var cmd = new NpgsqlCommand("SELECT status FROM tool_call_ledger WHERE id = @id", conn);
+            cmd.Parameters.AddWithValue("id", ledgerId);
+
+            return cmd.ExecuteScalar() as string;
+        }
     }
 }
