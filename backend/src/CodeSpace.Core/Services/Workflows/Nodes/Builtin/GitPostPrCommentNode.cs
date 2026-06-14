@@ -36,6 +36,13 @@ public sealed class GitPostPrCommentNode : INodeRuntime
         // Posting a comment is a permanent externally-visible side effect. Engine refuses
         // auto-resume on abandoned runs so we don't double-post.
         IsSideEffecting = true,
+        // Synchronous + standalone → exposable as an agent tool (a destructive, approval-gated one): it flows
+        // through AgentToolGate exactly like agent.run_command, which can already comment via the shell — this is
+        // the safer typed alternative, not a wider attack surface. INERT until the MCP endpoint is enabled.
+        // Attribution: on the synchronous tool path NodeAgentTool stamps only sys.team_id (no actAsUserId), so a
+        // tool-invoked comment acts as the repo CONNECTION credential, not a specific user. The ledger's
+        // agent_run_id provides traceability.
+        IsAgentToolEligible = true,
         ConfigSchema = SchemaBuilder.EmptyObject(),
         InputSchema = SchemaBuilder.Parse("""
             {

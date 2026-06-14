@@ -1,9 +1,11 @@
 using System.Text.Json;
 using CodeSpace.Core.Services.Agents.Commands;
 using CodeSpace.Core.Services.Agents.Tools;
+using CodeSpace.Core.Services.PullRequests;
 using CodeSpace.Core.Services.Workflows.Nodes;
 using CodeSpace.Core.Services.Workflows.Nodes.Builtin;
 using CodeSpace.Messages.Agents;
+using CodeSpace.Messages.Dtos.Providers;
 using CodeSpace.Messages.Enums;
 using Microsoft.Extensions.Logging.Abstractions;
 using Shouldly;
@@ -102,4 +104,132 @@ public class AgentToolRegistryTests
         registry.All.Select(t => t.Kind).ShouldBe(new[] { "git.fetch_pr_checks", "git.fetch_pr_diff", "git.list_prs" }, "sorted catalog");
         registry.All.ShouldAllBe(t => t.IsReadOnly && !t.IsDestructive);
     }
+
+    [Theory]
+    [InlineData("git.open_pr")]
+    [InlineData("git.post_pr_comment")]
+    [InlineData("git.pr_review")]
+    public void The_three_reversible_git_write_nodes_project_as_eligible_destructive_gated_tools(string kind)
+    {
+        // null! is safe: the manifest is static metadata + NodeAgentTool reads its risk flags from the manifest
+        // alone (neither touches the IPullRequestService). Each git write is side-effecting → destructive →
+        // approval-gated by default; the autonomy tier decides whether to actually ask (D2) or ledger (C).
+        var tool = Build(GitWriteNode(kind)).Resolve(kind);
+
+        tool.ShouldNotBeNull($"{kind} is a synchronous, standalone git write → must project onto the tool fabric");
+        tool!.IsReadOnly.ShouldBeFalse($"{kind} mutates provider state → not read-only");
+        tool.IsDestructive.ShouldBeTrue($"{kind} is side-effecting → a destructive tool");
+        tool.RequiresApproval.ShouldBeTrue($"{kind} is destructive → approval-gated by default");
+    }
+
+    [Fact]
+    public void Git_merge_pr_is_NOT_eligible_and_never_resolves_as_a_tool()
+    {
+        // PIN: git.merge_pr is irreversible — it is DELIBERATELY excluded from the agent-tool surface and ships
+        // last behind a per-tool force-approval policy. A future accidental flip of IsAgentToolEligible MUST fail
+        // here (the registry would start projecting it). Keep merge ineligible until that policy lands.
+        var merge = new GitMergePullRequestNode(null!);
+
+        merge.Manifest.IsAgentToolEligible.ShouldBeFalse("git.merge_pr (irreversible) stays off the agent-tool surface until a per-tool force-approval policy ships");
+        Build(merge).Resolve("git.merge_pr").ShouldBeNull("an ineligible node is never projected onto the fabric");
+    }
+
+    [Fact]
+    public void Exposing_the_git_writes_does_not_regress_the_read_only_tools_or_run_command()
+    {
+        // No-regression guard: the three read-only git tools stay read-only/non-destructive and agent.run_command
+        // stays destructive, side by side with the newly-exposed writes — the side-effect flag is the only axis.
+        var registry = Build(
+            new GitFetchPrDiffNode(null!), new GitFetchPrChecksNode(null!), new GitListPullRequestsNode(null!),
+            new AgentRunCommandNode(new StubRunCommandService()),
+            GitWriteNode("git.open_pr"), GitWriteNode("git.post_pr_comment"), GitWriteNode("git.pr_review"));
+
+        foreach (var read in new[] { "git.fetch_pr_diff", "git.fetch_pr_checks", "git.list_prs" })
+        {
+            var tool = registry.Resolve(read).ShouldNotBeNull();
+            tool.IsReadOnly.ShouldBeTrue($"{read} stays read-only");
+            tool.IsDestructive.ShouldBeFalse($"{read} stays non-destructive");
+        }
+
+        registry.Resolve("agent.run_command").ShouldNotBeNull().IsDestructive.ShouldBeTrue("agent.run_command stays destructive");
+    }
+
+    [Theory]
+    [InlineData("git.open_pr")]
+    [InlineData("git.pr_review")]
+    public async Task A_model_supplied_actAsUserId_is_stripped_on_the_tool_path_so_the_write_uses_the_connection_credential(string kind)
+    {
+        // SAFETY: actAsUserId ("act as this CodeSpace user's own linked identity", Model B) is only safe on the
+        // engine respond path, where ActorIdentityRequirementGate proves the AUTHENTICATED responder IS that user
+        // before their stored OAuth token is spent. No such gate runs on the synthetic NodeAgentTool path — so a
+        // model-supplied actAsUserId there would forge a PR / an APPROVE review as ANY teammate who linked an
+        // identity. NodeAgentTool must STRIP it: the node calls the service with actorUserId == null (→ the repo
+        // CONNECTION credential), making the "not a wider attack surface" claim true.
+        var pr = new CapturingPullRequestService();
+        var node = ActAsUserNode(kind, pr);
+        var tool = new NodeAgentTool(node, NullLogger.Instance);
+
+        var teamId = Guid.NewGuid();
+        var victim = Guid.NewGuid();   // a teammate the model tries to impersonate
+        var input = JsonSerializer.SerializeToElement(new
+        {
+            repositoryId = Guid.NewGuid().ToString(),
+            title = "t", sourceBranch = "feature", targetBranch = "main",   // git.open_pr requireds
+            number = 7, verdict = "approve",                                // git.pr_review requireds
+            actAsUserId = victim.ToString(),                                // the impersonation attempt
+        });
+
+        var result = await tool.CallAsync(new AgentToolCall { Input = input, TeamId = teamId }, CancellationToken.None);
+
+        result.IsError.ShouldBeFalse($"{kind} should reach the service (fake succeeds) once actAsUserId is stripped");
+        pr.LastActorUserId.ShouldBeNull($"{kind} via the tool path must NOT honour a model-supplied actAsUserId — it acts as the connection credential, never as {victim}");
+    }
+
+    /// <summary>Captures the actorUserId the node forwards; everything else returns a minimal success shape. Only
+    /// the two act-as-user writes (open_pr / pr_review) are exercised; the rest throw so a misuse is loud.</summary>
+    private sealed class CapturingPullRequestService : IPullRequestService
+    {
+        public Guid? LastActorUserId { get; private set; }
+
+        public Task<RemotePullRequest> OpenPullRequestAsync(Guid repositoryId, Guid teamId, OpenPullRequestInput input, Guid? actorUserId, CancellationToken ct)
+        {
+            LastActorUserId = actorUserId;
+            return Task.FromResult(new RemotePullRequest
+            {
+                ExternalId = "1", Number = 1, Title = input.Title, State = PullRequestState.Open,
+                SourceBranch = input.SourceBranch, TargetBranch = input.TargetBranch,
+                CommentsCount = 0, CreatedDate = DateTimeOffset.UnixEpoch, UpdatedDate = DateTimeOffset.UnixEpoch, WebUrl = "https://x",
+            });
+        }
+
+        public Task<RemotePullRequestReview> SubmitReviewAsync(Guid repositoryId, Guid teamId, int number, PullRequestReviewVerdict verdict, string? body, Guid? actorUserId, CancellationToken ct)
+        {
+            LastActorUserId = actorUserId;
+            return Task.FromResult(new RemotePullRequestReview { Verdict = verdict, WebUrl = "https://x" });
+        }
+
+        public Task<IReadOnlyList<RemotePullRequest>> ListAsync(Guid repositoryId, Guid teamId, PullRequestState? state, int page, int perPage, CancellationToken ct) => throw new NotSupportedException();
+        public Task<RemotePullRequest> GetAsync(Guid repositoryId, Guid teamId, int number, CancellationToken ct) => throw new NotSupportedException();
+        public Task<IReadOnlyList<RemotePullRequestCommit>> ListCommitsAsync(Guid repositoryId, Guid teamId, int number, CancellationToken ct) => throw new NotSupportedException();
+        public Task<IReadOnlyList<RemotePullRequestFile>> ListFilesAsync(Guid repositoryId, Guid teamId, int number, CancellationToken ct) => throw new NotSupportedException();
+        public Task<RemotePullRequestCounts> GetCountsAsync(Guid repositoryId, Guid teamId, CancellationToken ct) => throw new NotSupportedException();
+        public Task<IReadOnlyList<RemotePullRequestCheck>> ListChecksAsync(Guid repositoryId, Guid teamId, int number, CancellationToken ct) => throw new NotSupportedException();
+        public Task<RemotePullRequestComment> PostCommentAsync(Guid repositoryId, Guid teamId, int number, string body, CancellationToken ct) => throw new NotSupportedException();
+        public Task<RemotePullRequestMergeResult> MergePullRequestAsync(Guid repositoryId, Guid teamId, int number, MergePullRequestInput input, Guid? actorUserId, CancellationToken ct) => throw new NotSupportedException();
+    }
+
+    private static INodeRuntime ActAsUserNode(string kind, IPullRequestService pr) => kind switch
+    {
+        "git.open_pr" => new GitOpenPullRequestNode(pr),
+        "git.pr_review" => new GitPrReviewNode(pr),
+        _ => throw new ArgumentOutOfRangeException(nameof(kind), kind, "not an act-as-user git-write node"),
+    };
+
+    private static INodeRuntime GitWriteNode(string kind) => kind switch
+    {
+        "git.open_pr" => new GitOpenPullRequestNode(null!),
+        "git.post_pr_comment" => new GitPostPrCommentNode(null!),
+        "git.pr_review" => new GitPrReviewNode(null!),
+        _ => throw new ArgumentOutOfRangeException(nameof(kind), kind, "not a reversible git-write node"),
+    };
 }
