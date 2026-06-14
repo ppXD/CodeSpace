@@ -13,9 +13,15 @@ namespace CodeSpace.Core.Persistence.Entities;
 /// <para><see cref="TeamId"/> is on EVERY row (tenancy, FK to team like <see cref="AgentRun.TeamId"/>);
 /// <see cref="AgentRunId"/> is a soft cross-aggregate link (no FK, like <see cref="AgentRunEvent.AgentRunId"/>).
 /// <see cref="ResultJson"/> / <see cref="Error"/> store the ALREADY-REDACTED tool result — the row is itself a leak
-/// surface, so the handler redacts BEFORE persisting. <see cref="FenceEpoch"/> mirrors the run's epoch at record
-/// time, so a reclaimed-then-revived worker's terminal write loses the CAS (same discipline as
-/// <see cref="AgentRun.FenceEpoch"/>).</para>
+/// surface, so the handler redacts BEFORE persisting.</para>
+///
+/// <para>Concurrency protection is FIRST-WRITER-WINS on <see cref="Status"/>, NOT epoch fencing: the single-winner
+/// guarantee comes from the status-guarded CAS transitions (the Pending INSERT, AwaitingApproval → Running execution
+/// claim, then → terminal) — exactly one writer wins each transition and any racer loses cleanly and replays.
+/// <see cref="FenceEpoch"/> is RECORDED (mirrors the run's epoch at claim time) for AUDIT/forensics only; it is NOT
+/// (yet) a guard in any CAS, so a stale-epoch revived worker is fenced by losing the Status CAS, not by an epoch
+/// comparison. (An explicit epoch guard on the transitions is a possible future hardening — see <see cref="AgentRun.FenceEpoch"/>
+/// for where epoch IS load-bearing.)</para>
 ///
 /// <para>The approval columns (<see cref="ApprovalMessageId"/> / <see cref="ApprovalToken"/> /
 /// <see cref="ApprovalDeadlineAt"/>) + the <c>AwaitingApproval</c> / <c>Expired</c> statuses are reserved for item D

@@ -622,6 +622,56 @@ public class McpRequestHandlerTests
         McpRequestHandler.GovernanceEnabledEnvVar.ShouldBe("CODESPACE_AGENT_TOOL_GOVERNANCE_ENABLED");
     }
 
+    [Fact]
+    public void Approval_bound_env_var_literal_and_default_are_pinned()
+    {
+        // The bound env var is the operator ceiling AND the integration test's seam to exercise the timeout without a
+        // 10-minute wait. Renaming it silently breaks an operator who pinned a custom window (Rule 8). The 600s default
+        // is the documented behavior when unset.
+        McpRequestHandler.ApprovalBoundSecondsEnvVar.ShouldBe("CODESPACE_AGENT_TOOL_APPROVAL_BOUND_SECONDS");
+        McpRequestHandler.DefaultApprovalBoundSeconds.ShouldBe(600);
+    }
+
+    [Theory]
+    [InlineData(AgentAutonomyLevel.Standard)]
+    [InlineData(AgentAutonomyLevel.Trusted)]
+    public async Task RequireApproval_with_no_approval_surface_flat_refuses_byte_identically_and_never_blocks(AgentAutonomyLevel level)
+    {
+        // The conversation-less-run safety: a governed run WITHOUT an approval conversation (and without the D2
+        // collaborators — bot / waiters / components) must behave EXACTLY as pre-D2 — the flat "requires approval"
+        // refusal, NO card, NO block. Here the handler is the governance-on, ledger-bearing one but with a null
+        // approval conversation + null collaborators (the defaulted ctor args), so CanServeApproval is false.
+        var ledger = new SpyLedger();
+        var tool = new FakeTool { Kind = "git.merge_pr", IsDestructiveOverride = true };
+        var handler = new McpRequestHandler(new FakeRegistry(tool), level, Guid.NewGuid(), null, Guid.NewGuid(), ledger, fenceEpoch: 1, governanceEnabled: true, approvalConversationId: null);
+
+        var resp = await Respond(handler, Call("git.merge_pr", "{}"));
+
+        resp.TryGetProperty("error", out _).ShouldBeFalse("a fail-closed refusal is a tool result, not a JSON-RPC error");
+        resp.GetProperty("result").GetProperty("isError").GetBoolean().ShouldBeTrue();
+        resp.GetProperty("result").GetProperty("content")[0].GetProperty("text").GetString().ShouldContain("approval");
+        tool.CallCount.ShouldBe(0, "a fail-closed RequireApproval never runs the tool");
+        ledger.Claims.ShouldBeEmpty("no approval surface → no ledger row, no card, no block — byte-identical to today");
+        ledger.Terminals.ShouldBeEmpty();
+    }
+
+    [Fact]
+    public async Task RequireApproval_flag_off_flat_refuses_without_touching_the_ledger()
+    {
+        // Flag-OFF is the strongest byte-identical guarantee: even with an approval conversation + collaborators wired,
+        // governanceEnabled:false keeps the pre-D2 flat refusal (CanServeApproval requires the flag).
+        var ledger = new SpyLedger();
+        var tool = new FakeTool { Kind = "git.merge_pr", IsDestructiveOverride = true };
+        var handler = new McpRequestHandler(new FakeRegistry(tool), AgentAutonomyLevel.Standard, Guid.NewGuid(), null, Guid.NewGuid(), ledger, fenceEpoch: 1, governanceEnabled: false, approvalConversationId: Guid.NewGuid());
+
+        var result = (await Respond(handler, Call("git.merge_pr", "{}"))).GetProperty("result");
+
+        result.GetProperty("isError").GetBoolean().ShouldBeTrue();
+        result.GetProperty("content")[0].GetProperty("text").GetString().ShouldContain("approval");
+        tool.CallCount.ShouldBe(0);
+        ledger.Claims.ShouldBeEmpty("flag-OFF writes NO ledger row even for a RequireApproval tier");
+    }
+
     /// <summary>A spy ledger: records every TryClaim/RecordTerminal call. Configurable claim outcome for the dedup test,
     /// a configurable terminal-record throw for the lost-CAS replay test, and a recorded-rows store the replay re-reads.</summary>
     private sealed class SpyLedger : IToolCallLedgerService
@@ -649,6 +699,27 @@ public class McpRequestHandlerTests
             Terminals.Add((ledgerId, teamId, status, resultJson, error));
             return Task.CompletedTask;
         }
+
+        public Task<bool> TryBeginApprovalAsync(Guid ledgerId, Guid teamId, string approvalToken, DateTimeOffset deadlineAt, CancellationToken ct) =>
+            Task.FromResult(false);
+
+        public Task SetApprovalMessageAsync(Guid ledgerId, Guid teamId, Guid messageId, CancellationToken ct) => Task.CompletedTask;
+
+        /// <summary>Records every execution-claim attempt; returns the configured outcome (default true → the caller is the single winner).</summary>
+        public List<Guid> ExecutionClaims { get; } = new();
+        public Func<bool>? ExecutionClaimResult { get; init; }
+
+        public Task<bool> TryBeginExecutionAsync(Guid ledgerId, Guid teamId, CancellationToken ct)
+        {
+            ExecutionClaims.Add(ledgerId);
+            return Task.FromResult(ExecutionClaimResult?.Invoke() ?? true);
+        }
+
+        /// <summary>When set, ReadApprovalStateAsync returns this (the post-wake / loser-of-claim authority); else null.</summary>
+        public Func<ToolCallApprovalState?>? ApprovalState { get; init; }
+
+        public Task<ToolCallApprovalState?> ReadApprovalStateAsync(Guid ledgerId, Guid teamId, CancellationToken ct) =>
+            Task.FromResult(ApprovalState?.Invoke());
 
         public Task<IReadOnlyList<Core.Persistence.Entities.ToolCallLedger>> GetForRunAsync(Guid agentRunId, Guid teamId, CancellationToken ct) =>
             Task.FromResult<IReadOnlyList<Core.Persistence.Entities.ToolCallLedger>>(Rows);
@@ -794,6 +865,98 @@ public class McpRequestHandlerTests
         tool.CallCount.ShouldBe(1, "the side effect ran exactly once (the lost CAS is on the record, not the call)");
         resp.GetProperty("result").GetProperty("isError").GetBoolean().ShouldBeFalse();
         resp.GetProperty("result").GetProperty("content")[0].GetProperty("text").GetString().ShouldContain("merged", customMessage: "the recorded terminal is re-read and replayed verbatim");
+    }
+
+    // ── durable approval: cross-tenant guard + exactly-once-after-approve execution claim ──
+
+    /// <summary>A stub bot whose ConversationBelongsToTeamAsync answer is configurable — drives the cross-tenant gate without a DB.</summary>
+    private sealed class StubBot : Core.Services.Chat.IChatBotService
+    {
+        public bool ConversationInTeam { get; init; }
+        public int PostCount { get; private set; }
+
+        public Task<Guid> GetOrCreateTeamBotAsync(Guid teamId, CancellationToken ct) => Task.FromResult(Guid.NewGuid());
+        public Task<bool> ConversationBelongsToTeamAsync(Guid conversationId, Guid teamId, CancellationToken ct) => Task.FromResult(ConversationInTeam);
+
+        public Task<Messages.Dtos.Chat.MessageView> PostAsBotAsync(Guid conversationId, string body, Messages.Dtos.Chat.Interactions.MessageInteraction? interaction, CancellationToken ct)
+        {
+            PostCount++;
+            return Task.FromResult(new Messages.Dtos.Chat.MessageView { Id = Guid.NewGuid(), ConversationId = conversationId, AuthorUserId = Guid.NewGuid(), Body = body, CreatedDate = DateTimeOffset.UnixEpoch, IsDeleted = false, References = Array.Empty<Messages.Dtos.Chat.MessageReferenceView>() });
+        }
+    }
+
+    private sealed class StubWaiters : IToolApprovalWaiterRegistry
+    {
+        public IToolApprovalWaiter Register(Guid ledgerId) => throw new InvalidOperationException("the cross-tenant / lost-claim tests never reach a block");
+        public bool TrySignal(Guid ledgerId, ToolApprovalOutcome outcome) => false;
+        public void Remove(Guid ledgerId) { }
+    }
+
+    private sealed class StubComponents : Core.Services.Chat.Interactions.IInteractionComponentRegistry
+    {
+        public Messages.Dtos.Chat.Interactions.InteractionComponent? Build(JsonElement componentConfig) =>
+            new Messages.Dtos.Chat.Interactions.ActionButtonsComponent { Buttons = Array.Empty<Messages.Dtos.Chat.Interactions.InteractionButton>() };
+    }
+
+    private static McpRequestHandler ApprovalHandler(SpyLedger ledger, StubBot bot, params IAgentTool[] tools) =>
+        new(new FakeRegistry(tools), AgentAutonomyLevel.Standard, Guid.NewGuid(), null, Guid.NewGuid(), ledger, fenceEpoch: 1, governanceEnabled: true,
+            approvalConversationId: Guid.NewGuid(), bot, new StubWaiters(), new StubComponents());
+
+    [Theory]
+    [InlineData(AgentAutonomyLevel.Standard)]
+    [InlineData(AgentAutonomyLevel.Trusted)]
+    public async Task RequireApproval_with_a_foreign_team_conversation_flat_refuses_with_no_card_no_claim_no_block(AgentAutonomyLevel level)
+    {
+        // Cross-tenant safety (the SECURITY blocker): the approval conversation does NOT belong to the run's team, so
+        // the tenancy gate fail-closes EXACTLY like the conversation-less run — the flat refusal, NO card posted, NO
+        // ledger claim, NO block. Byte-identical to the no-surface path.
+        var ledger = new SpyLedger();
+        var bot = new StubBot { ConversationInTeam = false };
+        var tool = new FakeTool { Kind = "git.merge_pr", IsDestructiveOverride = true };
+        var handler = new McpRequestHandler(new FakeRegistry(tool), level, Guid.NewGuid(), null, Guid.NewGuid(), ledger, fenceEpoch: 1, governanceEnabled: true,
+            approvalConversationId: Guid.NewGuid(), bot, new StubWaiters(), new StubComponents());
+
+        var resp = await Respond(handler, Call("git.merge_pr", "{}"));
+
+        resp.TryGetProperty("error", out _).ShouldBeFalse("a cross-tenant fail-closed refusal is a tool result, not a JSON-RPC error");
+        resp.GetProperty("result").GetProperty("isError").GetBoolean().ShouldBeTrue();
+        resp.GetProperty("result").GetProperty("content")[0].GetProperty("text").GetString().ShouldContain("approval");
+        tool.CallCount.ShouldBe(0, "a cross-tenant run never runs the tool");
+        bot.PostCount.ShouldBe(0, "NO card is posted into the foreign conversation");
+        ledger.Claims.ShouldBeEmpty("a cross-tenant run mints no ledger row — byte-identical to the conversation-less run");
+    }
+
+    [Fact]
+    public async Task A_re_call_that_loses_the_execution_claim_does_not_re_run_the_side_effect_and_replays_the_terminal()
+    {
+        // The exactly-once-after-approve gate (the EXACTLY-ONCE blocker), unit level: a re-call hits an approved
+        // AwaitingApproval row (claim → InFlight, state.ApprovedAt != null), then LOSES the execution-claim CAS
+        // (TryBeginExecutionAsync → false, the winner already moved the row to a terminal). The handler must NOT call
+        // the tool; it re-reads the now-terminal row and replays it.
+        var ledgerId = Guid.NewGuid();
+        var storedWire = """{"content":[{"type":"text","text":"{\"merged\":true}"}],"isError":false}""";
+
+        // First read (ResumeOrTicketAsync): an APPROVED, still-AwaitingApproval row → reach ClaimThenExecuteAsync. The
+        // claim is LOST (a concurrent winner already moved it). Second read (ReplayClaimedElsewhereAsync): the now-
+        // terminal Succeeded row the winner recorded → replay it without re-running.
+        var reads = 0;
+        var ledger = new SpyLedger
+        {
+            ClaimResult = () => ToolCallClaim.InFlight(ledgerId),
+            ExecutionClaimResult = () => false,   // a concurrent winner already claimed + executed
+            ApprovalState = () => ++reads == 1
+                ? new ToolCallApprovalState { Status = ToolCallLedgerStatus.AwaitingApproval, ApprovedAt = DateTimeOffset.UtcNow }
+                : new ToolCallApprovalState { Status = ToolCallLedgerStatus.Succeeded, ApprovedAt = DateTimeOffset.UtcNow, ResultJson = storedWire },
+        };
+        var bot = new StubBot { ConversationInTeam = true };
+        var tool = new FakeTool { Kind = "git.merge_pr", IsDestructiveOverride = true, OnCall = (_, _) => Task.FromResult(AgentToolResult.Ok(Parse("""{"merged":true}"""), 14)) };
+
+        var resp = await Respond(ApprovalHandler(ledger, bot, tool), Call("git.merge_pr", "{}"));
+
+        ledger.ExecutionClaims.ShouldHaveSingleItem();
+        tool.CallCount.ShouldBe(0, "the loser of the execution claim must NEVER re-run the side effect");
+        resp.GetProperty("result").GetProperty("isError").GetBoolean().ShouldBeFalse();
+        resp.GetProperty("result").GetProperty("content")[0].GetProperty("text").GetString().ShouldContain("merged", customMessage: "the loser replays the winner's recorded terminal");
     }
 
     // ── approvalConversationId carry-through (stored, UNUSED in this slice) ────

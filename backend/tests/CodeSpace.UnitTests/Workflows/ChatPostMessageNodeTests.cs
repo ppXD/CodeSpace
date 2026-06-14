@@ -44,6 +44,8 @@ public class ChatPostMessageNodeTests
 
         public Task<Guid> GetOrCreateTeamBotAsync(Guid teamId, CancellationToken cancellationToken) => Task.FromResult(Guid.NewGuid());
 
+        public Task<bool> ConversationBelongsToTeamAsync(Guid conversationId, Guid teamId, CancellationToken cancellationToken) => Task.FromResult(true);
+
         public Task<MessageView> PostAsBotAsync(Guid conversationId, string body, MessageInteraction? interaction, CancellationToken cancellationToken)
         {
             Interaction = interaction;
