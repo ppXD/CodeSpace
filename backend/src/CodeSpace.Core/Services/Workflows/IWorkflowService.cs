@@ -46,7 +46,8 @@ public interface IWorkflowService
 
     /// <summary>
     /// Operator-triggered cancel: CAS the run from any non-terminal state (Pending/Enqueued/Running/Suspended)
-    /// → <c>Cancelled</c>, then tear the whole thing down — mark its still-pending waits Cancelled, KILL-WAVE its
+    /// → <c>Cancelled</c>, then tear the whole thing down — resolve its still-pending waits (closed as moot; the
+    /// wait-status domain has no <c>Cancelled</c> value), KILL-WAVE its
     /// branch agent runs (Queued via <c>CancelQueuedAsync</c>, Running via <c>CancelRunningAsync</c> + a durable
     /// process kill), and cancel its staged non-terminal sub-workflow children — and emit a <c>run.cancelled</c>
     /// ledger record. The teardown is best-effort, so one failed kill never aborts the cancel; the reconciler's
