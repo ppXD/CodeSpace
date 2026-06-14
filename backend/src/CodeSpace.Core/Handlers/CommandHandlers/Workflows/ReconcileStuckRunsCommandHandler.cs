@@ -22,6 +22,7 @@ public sealed class ReconcileStuckRunsCommandHandler : IRequestHandler<Reconcile
             RedispatchedFromPending = summary.RedispatchedFromPending,
             RevertedFromEnqueued = summary.RevertedFromEnqueued,
             MarkedAbandonedFromRunning = summary.MarkedAbandonedFromRunning,
+            RedispatchedFromStrandedSuspended = summary.RedispatchedFromStrandedSuspended,
         };
     }
 }

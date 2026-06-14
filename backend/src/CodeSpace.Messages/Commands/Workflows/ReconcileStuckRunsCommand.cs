@@ -19,4 +19,5 @@ public sealed record ReconcileStuckRunsResponse
     public required int RedispatchedFromPending { get; init; }
     public required int RevertedFromEnqueued { get; init; }
     public required int MarkedAbandonedFromRunning { get; init; }
+    public required int RedispatchedFromStrandedSuspended { get; init; }
 }
