@@ -233,5 +233,15 @@ public sealed class PostgresFixture : IAsyncLifetime
         builder.RegisterType<Workflows.Infrastructure.SuspendProbeNode>()
             .As<CodeSpace.Core.Services.Workflows.Nodes.INodeRuntime>()
             .SingleInstance();
+
+        // Deterministic structured-output LLM client for the headline-flow E2E's planner half. Registered as
+        // BOTH ILLMClient + IStructuredLLMClient under its OWN provider tag (DeterministicPlannerLlmClient.
+        // ProviderTag), so the LLMClientRegistry holds it ALONGSIDE the real Anthropic client (no duplicate-
+        // provider collision) and llm.complete(provider=that tag) routes through the real structured path to
+        // a fixed { subtasks: [...] } object — the honest IStructuredLLMClient-boundary fake.
+        builder.RegisterType<Workflows.Infrastructure.DeterministicPlannerLlmClient>()
+            .As<CodeSpace.Core.Services.Workflows.Llm.ILLMClient>()
+            .As<CodeSpace.Core.Services.Workflows.Llm.IStructuredLLMClient>()
+            .SingleInstance();
     }
 }

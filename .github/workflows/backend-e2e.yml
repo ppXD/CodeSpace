@@ -1,10 +1,20 @@
-name: Backend · E2E (HTTP)
+name: Backend · E2E
 
-# The E2E tier: hosts the REAL ASP.NET pipeline (routing, [AllowAnonymous], model binding, the
-# GlobalExceptionFilter) in-memory via WebApplicationFactory against a throw-away GUID Postgres
-# database — the actual HTTP status code a webhook provider receives. The factory injects its own
-# master key / JWT / OAuth config, so the only infra this needs is the Postgres service below
-# (reached at localhost:5432, matching the committed appsettings.json admin connection).
+# Two E2E gates, both against a throw-away GUID Postgres (localhost:5432, matching the committed
+# appsettings.json admin connection):
+#
+#   1. e2e-http — the REAL ASP.NET pipeline (routing, [AllowAnonymous], model binding, the
+#      GlobalExceptionFilter) in-memory via WebApplicationFactory: the actual HTTP status code a
+#      webhook provider receives (CodeSpace.E2ETests).
+#
+#   2. e2e-engine — THE headline intelligent flow driven top-to-bottom as one engine run:
+#      trigger.manual → llm.complete(responseSchema) planner → flow.map fan-out whose body is a REAL
+#      agent.code that ACTUALLY EXECUTES (real AgentRunExecutor → real LocalProcessRunner → a fake
+#      codex CLI process under REAL bubblewrap confinement → real completion → resume) → a synthesizer
+#      that reduces the per-branch results. The Category=E2E tests live in CodeSpace.IntegrationTests
+#      (they need the full engine/sandbox DI container, not the HTTP host). bubblewrap is installed +
+#      CODESPACE_REQUIRE_SANDBOX=1 so the agent runs CONFINED (the production posture) and a degraded
+#      sandbox fails HARD rather than silently running unconfined.
 
 on:
   push:
@@ -31,8 +41,8 @@ env:
   DOTNET_SKIP_FIRST_TIME_EXPERIENCE: 'true'
 
 jobs:
-  e2e:
-    name: dotnet test (E2ETests · Postgres)
+  e2e-http:
+    name: dotnet test (E2ETests · HTTP · Postgres)
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
@@ -74,7 +84,7 @@ jobs:
           dotnet test backend/tests/CodeSpace.E2ETests/CodeSpace.E2ETests.csproj
           --no-restore
           --logger "console;verbosity=normal"
-          --logger "trx;LogFileName=e2e.trx"
+          --logger "trx;LogFileName=e2e-http.trx"
           --results-directory backend/TestResults
           --blame-hang-timeout 5m
 
@@ -82,6 +92,95 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: backend-e2e-trx
+          name: backend-e2e-http-trx
+          path: backend/TestResults/*.trx
+          if-no-files-found: ignore
+
+  e2e-engine:
+    name: headline flow (planner → map → real agents → synthesizer)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    env:
+      # Fail-closed: the headline E2E runs a REAL agent.code branch through the real LocalProcessRunner,
+      # which confines it under bubblewrap. With REQUIRE_SANDBOX=1 a host that can't sandbox (no bwrap /
+      # no unprivileged userns) makes the run fail HARD instead of silently executing the agent unconfined
+      # — so green here means the agent really ran AND was really confined.
+      CODESPACE_REQUIRE_SANDBOX: '1'
+
+    services:
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: '123456'
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d postgres"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up .NET 10
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Install bubblewrap + util-linux (prlimit)
+        # The headline E2E spawns a REAL agent process through the production runner, which wraps it in
+        # bubblewrap + prlimit (the production confinement posture). The ubuntu-latest host allows
+        # unprivileged user namespaces, so no privileged container is needed.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends bubblewrap util-linux
+          echo "bwrap: $(bwrap --version)"
+          echo "prlimit: $(prlimit --version)"
+
+      - name: Cache NuGet packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.nuget/packages
+          key: nuget-e2e-engine-${{ runner.os }}-${{ hashFiles('backend/**/*.csproj') }}
+          restore-keys: nuget-e2e-engine-${{ runner.os }}-
+
+      - name: Restore
+        run: dotnet restore backend/tests/CodeSpace.IntegrationTests/CodeSpace.IntegrationTests.csproj
+
+      - name: Test (Category=E2E — the headline planner→map→real-agents→synthesizer flow)
+        run: >
+          dotnet test backend/tests/CodeSpace.IntegrationTests/CodeSpace.IntegrationTests.csproj
+          --no-restore
+          --filter "Category=E2E"
+          --logger "console;verbosity=normal"
+          --logger "trx;LogFileName=e2e-engine.trx"
+          --results-directory backend/TestResults
+          --blame-hang-timeout 5m
+
+      - name: Assert the headline E2E actually ran (no silent skip)
+        # `dotnet test --filter` EXITS 0 even when the filter matches ZERO tests, so a trait regression
+        # could make this gate pass green while exercising nothing. Read the trx counters and require at
+        # least the one headline-flow test to have executed (NOT skipped — the OS guard would skip it on a
+        # non-Linux host, but this gate IS Linux, so a skip here means the real run was silently dodged).
+        run: |
+          trx=backend/TestResults/e2e-engine.trx
+          test -f "$trx" || { echo "::error::trx not found at $trx — the test step produced no results"; exit 1; }
+          executed=$(grep -oE 'executed="[0-9]+"' "$trx" | head -1 | grep -oE '[0-9]+')
+          passed=$(grep -oE 'passed="[0-9]+"' "$trx" | head -1 | grep -oE '[0-9]+')
+          echo "executed=${executed:-0} passed=${passed:-0}"
+          if [ "${executed:-0}" -lt 1 ]; then
+            echo "::error::Expected the Category=E2E headline-flow test to run, but ${executed:-0} executed — the filter matched nothing (trait regression?) or it was silently skipped."
+            exit 1
+          fi
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-e2e-engine-trx
           path: backend/TestResults/*.trx
           if-no-files-found: ignore
