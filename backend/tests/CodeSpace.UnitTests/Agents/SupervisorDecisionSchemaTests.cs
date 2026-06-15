@@ -76,4 +76,15 @@ public class SupervisorDecisionSchemaTests
         Schema.GetProperty("properties").GetProperty("plan").GetProperty("properties").GetProperty("subtasks").GetProperty("maxItems").GetInt32().ShouldBe(20);
         Schema.GetProperty("properties").GetProperty("spawn").GetProperty("properties").GetProperty("subtaskIds").GetProperty("maxItems").GetInt32().ShouldBe(20);
     }
+
+    [Fact]
+    public void Merge_advertises_no_subtask_subset_it_cannot_honor()
+    {
+        // P2-4 honesty: the merge executor folds ALL prior agent results, so the schema must NOT advertise a
+        // subtaskIds subset the executor silently ignores. Selective merge returns with the richer-synthesis slice.
+        var merge = Schema.GetProperty("properties").GetProperty("merge");
+
+        merge.GetProperty("properties").TryGetProperty("subtaskIds", out _).ShouldBeFalse("merge must not expose a subtaskIds subset it cannot honor");
+        merge.GetProperty("required").EnumerateArray().Any().ShouldBeFalse("merge requires no fields — it folds all prior results");
+    }
 }

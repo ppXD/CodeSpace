@@ -91,16 +91,10 @@ public static class SupervisorDecisionSchema
               "type": "object",
               "additionalProperties": false,
               "properties": {
-                "subtaskIds": {
-                  "type": "array",
-                  "maxItems": 20,
-                  "items": { "type": "string" },
-                  "description": "Prior subtask ids whose recorded agent results to synthesize (empty = all prior results)."
-                },
                 "synthesisInstruction": { "type": "string", "description": "Optional instruction guiding the synthesis." }
               },
-              "required": ["subtaskIds"],
-              "description": "Required when kind == 'merge'."
+              "required": [],
+              "description": "Optional when kind == 'merge'. Merge synthesizes ALL prior agent results; it takes no subset (a selective subtask subset returns with the richer LLM-synthesis slice)."
             },
             "stop": {
               "type": "object",

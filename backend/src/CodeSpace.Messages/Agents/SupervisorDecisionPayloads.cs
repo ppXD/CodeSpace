@@ -45,11 +45,9 @@ public sealed record SupervisorRetryPayload
     public string? RevisedInstruction { get; init; }
 }
 
-/// <summary>The <c>merge</c> payload: prior subtask ids whose recorded agent results to synthesize (empty = all), plus an optional synthesis instruction.</summary>
+/// <summary>The <c>merge</c> payload: an optional instruction guiding the synthesis of ALL prior agent results. (A selective subtask subset is NOT honored today — it returns with the richer LLM-synthesis merge slice, see <c>RealSupervisorActionExecutor.Merge.cs</c>.)</summary>
 public sealed record SupervisorMergePayload
 {
-    public IReadOnlyList<string> SubtaskIds { get; init; } = Array.Empty<string>();
-
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? SynthesisInstruction { get; init; }
 }
