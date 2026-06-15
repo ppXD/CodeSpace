@@ -63,6 +63,8 @@ public sealed partial class SupervisorTurnService
             TotalSpawnedAgents = FoldTotalSpawnedAgents(priorDecisions),
             NoProgressDecisions = FoldNoProgressDecisions(priorDecisions),
             ApprovalPolicy = SupervisorGoalPlan.From(goalConfig).ApprovalPolicy,
+            AgentProfile = goalConfig?.AgentProfile,
+            SpawnedAgentTools = NormalizeTools(goalConfig?.AllowedTools),
         };
     }
 
@@ -149,6 +151,15 @@ public sealed partial class SupervisorTurnService
 
     /// <summary>The shared empty answers map for the common no-ask_human rehydrate — keeps that path allocation-light + DB-free.</summary>
     private static readonly IReadOnlyDictionary<string, string> EmptyAnswers = new Dictionary<string, string>();
+
+    /// <summary>
+    /// Normalise the supervisor config's reused <c>AllowedTools</c> into the spawned-agent tool allow-list (P2-3),
+    /// preserving the <c>AgentTask.Tools</c> tri-state exactly as agent.code's ReadStringArray: null = inherit the
+    /// harness default (and the pre-P2-3 / no-config path), present = the non-blank elements (an empty list stays
+    /// empty = no tools). Blanks are dropped so a stray <c>""</c> in the config never reads as a tool.
+    /// </summary>
+    private static IReadOnlyList<string>? NormalizeTools(IReadOnlyList<string>? allowedTools) =>
+        allowedTools?.Where(t => !string.IsNullOrWhiteSpace(t)).ToList();
 
     /// <summary>
     /// How many WorkflowRun ancestors this supervisor run already has (PR-E E5 depth cap) — walks the

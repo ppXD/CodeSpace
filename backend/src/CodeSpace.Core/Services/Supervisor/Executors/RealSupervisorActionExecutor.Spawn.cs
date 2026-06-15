@@ -3,6 +3,7 @@ using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Agents;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Constants;
+using CodeSpace.Messages.Dtos.Agents;
 using CodeSpace.Messages.Enums;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
@@ -25,7 +26,7 @@ public sealed partial class RealSupervisorActionExecutor
         var subtasks = ResolvePlannedSubtasks(context);
 
         var tasks = spawn.SubtaskIds
-            .Select(id => BuildAgentTask(subtasks, id, revisedInstruction: null, context.Goal))
+            .Select(id => BuildAgentTask(subtasks, id, revisedInstruction: null, context))
             .ToList();
 
         return await StageAgentsAndParkAsync(tasks, context, cancellationToken).ConfigureAwait(false);
@@ -39,7 +40,7 @@ public sealed partial class RealSupervisorActionExecutor
 
         var tasks = retry == null || string.IsNullOrWhiteSpace(retry.SubtaskId)
             ? new List<AgentTask>()
-            : new List<AgentTask> { BuildAgentTask(subtasks, retry.SubtaskId, retry.RevisedInstruction, context.Goal) };
+            : new List<AgentTask> { BuildAgentTask(subtasks, retry.SubtaskId, retry.RevisedInstruction, context) };
 
         return await StageAgentsAndParkAsync(tasks, context, cancellationToken).ConfigureAwait(false);
     }
@@ -84,13 +85,15 @@ public sealed partial class RealSupervisorActionExecutor
         for (var k = 0; k < tasks.Count; k++)
         {
             // Reuse a reclaimed orphan for the leading slots (crash recovery — these were created by a prior
-            // crashed pass of THIS decision); else create the durable agent run (Queued) through the admission
+            // crashed pass of THIS decision, whose persisted TaskJson was ALREADY persona-resolved, so re-running
+            // the resolver here would be redundant); else resolve the persona into the task (mirroring
+            // WorkflowEngine.StageAgentRunAsync) then create the durable agent run (Queued) through the admission
             // gate — team inherited from the supervisor run, never model-supplied. Linked to the supervisor run
             // + node so the completion notifier resumes the right run, and the reconciler's parent-terminal
             // guard governs it.
             var agentRunId = k < orphans.Count
                 ? orphans[k]
-                : (await _agentRuns.CreateAsync(tasks[k], context.TeamId, context.SupervisorRunId, context.NodeId, cancellationToken).ConfigureAwait(false)).Id;
+                : await CreateResolvedAgentRunAsync(tasks[k], context, cancellationToken).ConfigureAwait(false);
 
             StageAgentWait(context, k, agentRunId);
             agentRunIds.Add(agentRunId);
@@ -179,23 +182,88 @@ public sealed partial class RealSupervisorActionExecutor
         return lookup;
     }
 
-    /// <summary>Build the agent task for a subtask id: the revised instruction (retry) wins, else the planned instruction, else the goal as a fallback. Standard autonomy (workspace-write, no network) — the safe default.</summary>
-    private static AgentTask BuildAgentTask(IReadOnlyDictionary<string, SupervisorPlannedSubtask> subtasks, string subtaskId, string? revisedInstruction, string goal)
+    /// <summary>
+    /// Resolve the spawned task's persona (if any) into it BEFORE persisting — mirroring
+    /// <c>WorkflowEngine.StageAgentRunAsync</c> so a supervisor-supplied <c>AgentDefinitionId</c> actually MERGES
+    /// (system-prompt prepended, persona model/tools/credential folded), not just persisted inert. The merged
+    /// task is frozen into the run's TaskJson, so a crash-recovery reclaim (which reuses the already-created run)
+    /// never re-resolves — the resolve is a deterministic pre-transform on a FRESH stage only.
+    ///
+    /// <para>A missing / foreign / corrupt persona is a CLEAN node failure, mirroring
+    /// <c>WorkflowEngine.StageAgentRunAsync</c>'s <c>AgentDefinitionResolutionException</c> → node-failure
+    /// translation: the message is prefixed for the supervisor lane and re-thrown as the SAME exception type so
+    /// the turn service records a terminal failure (no stranded-Running decision) and the node fails cleanly
+    /// (composing with node retry + the <c>error</c> branch) — not a misleading engine-bootstrap failure.</para>
+    /// </summary>
+    private async Task<Guid> CreateResolvedAgentRunAsync(AgentTask task, SupervisorTurnContext context, CancellationToken cancellationToken)
+    {
+        AgentTask resolved;
+
+        try
+        {
+            resolved = await _agentDefinitionResolver.ResolveAsync(task, context.TeamId, cancellationToken).ConfigureAwait(false);
+        }
+        catch (AgentDefinitionResolutionException ex)
+        {
+            throw new AgentDefinitionResolutionException($"agent.supervisor spawn: {ex.Message}", ex);
+        }
+
+        return (await _agentRuns.CreateAsync(resolved, context.TeamId, context.SupervisorRunId, context.NodeId, cancellationToken).ConfigureAwait(false)).Id;
+    }
+
+    /// <summary>
+    /// Build the agent task for a subtask id. The GOAL folds the revised instruction (retry) wins, else the
+    /// planned instruction, else the supervisor goal. Every other field is stamped from the run's optional
+    /// <see cref="SupervisorTurnContext.AgentProfile"/> (P2-3), mirroring <c>AgentCodeNode</c>'s config→task map
+    /// so a spawned agent is a REAL team agent (repo / harness / model / persona / credential / runner / MCP /
+    /// autonomy + the supervisor's conversation as its approval surface).
+    ///
+    /// <para>BYTE-IDENTICAL when no profile: with <see cref="SupervisorTurnContext.AgentProfile"/> null/absent —
+    /// what a pre-P2-3 supervisor resolves to — every field below evaluates to today's exact value (Harness =
+    /// <c>codex-cli</c>, Autonomy = Standard, everything else null/default), so existing spawn/crash/bound/E2E
+    /// tests stay green. The approval-conversation alone is threaded from <see cref="SupervisorTurnContext.ConversationId"/>
+    /// (the supervisor's own conversation, null in the bare case) — a stored-only field that nothing reads on the
+    /// spawn path, so it doesn't perturb behaviour.</para>
+    /// </summary>
+    internal static AgentTask BuildAgentTask(IReadOnlyDictionary<string, SupervisorPlannedSubtask> subtasks, string subtaskId, string? revisedInstruction, SupervisorTurnContext context)
     {
         var planned = subtasks.GetValueOrDefault(subtaskId);
 
         var instruction = !string.IsNullOrWhiteSpace(revisedInstruction) ? revisedInstruction!
             : !string.IsNullOrWhiteSpace(planned?.Instruction) ? planned!.Instruction
-            : goal;
+            : context.Goal;
+
+        var profile = context.AgentProfile;
+        var autonomy = AutonomyOf(profile);
 
         return new AgentTask
         {
             Goal = instruction,
-            Harness = DefaultHarness,
-            Autonomy = AgentAutonomyLevel.Standard,
+            Harness = HarnessOf(profile),
+            Model = NullIfBlank(profile?.Model),
+            AgentDefinitionId = profile?.AgentDefinitionId,
+            ModelCredentialId = profile?.ModelCredentialId,
+            Tools = context.SpawnedAgentTools,
+            RunnerKind = NullIfBlank(profile?.RunnerKind),
+            RepositoryId = profile?.RepositoryId,
+            Autonomy = autonomy,
+            Permissions = AgentAutonomyPolicy.Derive(autonomy),
+            ApprovalConversationId = context.ConversationId,
+            EnableMcpEndpoint = profile?.EnableMcp,
         };
     }
 
-    /// <summary>The default harness for a supervisor-spawned agent run (matches the agent.code node's catalog default). A per-decision harness override is a later concern.</summary>
+    /// <summary>The profile's harness, else the supervisor's <c>codex-cli</c> default (matches agent.code's catalog default). Null/blank profile → byte-identical to pre-P2-3.</summary>
+    private static string HarnessOf(SupervisorAgentProfile? profile) =>
+        !string.IsNullOrWhiteSpace(profile?.Harness) ? profile!.Harness! : DefaultHarness;
+
+    /// <summary>The profile's autonomy tier parsed case-insensitively, else the safe <see cref="AgentAutonomyLevel.Standard"/> default (mirrors agent.code's ReadAutonomyLevel). Null/unrecognised → byte-identical to pre-P2-3.</summary>
+    private static AgentAutonomyLevel AutonomyOf(SupervisorAgentProfile? profile) =>
+        Enum.TryParse<AgentAutonomyLevel>(profile?.AutonomyLevel, ignoreCase: true, out var level) ? level : AgentAutonomyLevel.Standard;
+
+    /// <summary>A blank string degrades to null (the harness-default sentinel), mirroring agent.code's ReadOptionalString.</summary>
+    private static string? NullIfBlank(string? value) => string.IsNullOrWhiteSpace(value) ? null : value;
+
+    /// <summary>The default harness for a supervisor-spawned agent run (matches the agent.code node's catalog default).</summary>
     private const string DefaultHarness = "codex-cli";
 }

@@ -46,6 +46,53 @@ public sealed record SupervisorGoalConfig
     /// policy maps to the autonomy tier <c>AgentToolGate</c> reads.
     /// </summary>
     public string? ApprovalPolicy { get; init; }
+
+    /// <summary>
+    /// The DEFAULT agent profile every agent this supervisor spawns inherits (P2-3) — the supervisor's
+    /// analogue of the <c>agent.code</c> node's config: repo / harness / model / persona / credential / runner /
+    /// MCP / autonomy. Wholly OPTIONAL: when absent (or all-null), a spawned agent is the bare
+    /// <c>codex-cli</c> / Standard / no-repo task that pre-P2-3 supervisors produced, so an existing flag-on
+    /// supervisor authored before this field is byte-identical. <see cref="AllowedTools"/> stays the tool
+    /// allow-list (it is threaded into <c>AgentTask.Tools</c> here); this groups the rest so the goal / bounds /
+    /// policy concerns stay separate (Rule 18.1 — a nested data noun).
+    /// </summary>
+    public SupervisorAgentProfile? AgentProfile { get; init; }
+}
+
+/// <summary>
+/// The default envelope a supervisor stamps on every agent it spawns (P2-3, Rule 18.1 — a pure data noun in
+/// Messages). Mirrors the <c>agent.code</c> node's config→<c>AgentTask</c> mapping so a supervisor-spawned
+/// agent is a REAL team agent (persona-merged, repo-cloned, MCP-capable), not a bare skeleton. Every field is
+/// OPTIONAL and folds to the SAME default <c>agent.code</c> uses: a null harness → <c>codex-cli</c>, a null
+/// autonomy → <c>Standard</c>, a null repo → analysis-only, a null persona → a pure-inline run. The spawned
+/// task's GOAL is the supervisor's per-subtask instruction (never authored here); a persona's system prompt is
+/// merged onto it by the dispatch-time resolver, exactly as for <c>agent.code</c>.
+/// </summary>
+public sealed record SupervisorAgentProfile
+{
+    /// <summary>The repository each spawned agent clones into its workspace (the executor clones it). Null → no workspace (analysis-only). The supervisor node has no inputs, so this is authored on the profile, not bound from a trigger.</summary>
+    public Guid? RepositoryId { get; init; }
+
+    /// <summary>The harness each spawned agent runs on (e.g. <c>"codex-cli"</c>). Null / blank → the supervisor's <c>codex-cli</c> default — byte-identical to pre-P2-3.</summary>
+    public string? Harness { get; init; }
+
+    /// <summary>The model id within the harness's catalog. Null / blank → the persona's model → the harness default (the model-empty rule).</summary>
+    public string? Model { get; init; }
+
+    /// <summary>The Agent persona (<c>AgentDefinition</c>) each spawned agent embodies. Null → a pure-inline run. When set, the dispatch-time resolver merges its system prompt + model + tools + credential into the task.</summary>
+    public Guid? AgentDefinitionId { get; init; }
+
+    /// <summary>The <c>ModelCredential</c> reference each spawned agent authenticates with (decrypted just-in-time). Null → the persona default → the team/operator fallback.</summary>
+    public Guid? ModelCredentialId { get; init; }
+
+    /// <summary>The sandbox runner each spawned agent executes on (e.g. <c>"local"</c>). Null → the executor's default.</summary>
+    public string? RunnerKind { get; init; }
+
+    /// <summary>Per-run opt-in to the MCP tool-fabric endpoint for each spawned agent. Null → defer to the ambient deployment flag (an ordinary spawn is unchanged).</summary>
+    public bool? EnableMcp { get; init; }
+
+    /// <summary>The autonomy tier each spawned agent runs at, parsed case-insensitively. Null / unrecognised → the safe <c>Standard</c> default (workspace write, no network) — byte-identical to pre-P2-3.</summary>
+    public string? AutonomyLevel { get; init; }
 }
 
 /// <summary>

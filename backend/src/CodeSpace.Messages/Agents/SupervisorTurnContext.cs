@@ -73,6 +73,24 @@ public sealed record SupervisorTurnContext
     /// <see cref="Dtos.Agents.SupervisorApprovalPolicy.None"/> matches pre-E5 behaviour (no gate).
     /// </summary>
     public Dtos.Agents.SupervisorApprovalPolicy ApprovalPolicy { get; init; }
+
+    /// <summary>
+    /// The default agent profile (P2-3) every spawned agent inherits — repo / harness / model / persona /
+    /// credential / runner / MCP / autonomy — carried from the supervisor node's config so the executor's
+    /// <c>BuildAgentTask</c> stamps a REAL team agent envelope, not a bare skeleton. <c>null</c> (the default,
+    /// and what a pre-P2-3 supervisor resolves to) makes <c>BuildAgentTask</c> produce EXACTLY today's bare
+    /// task (codex-cli / Standard / no-repo), so an existing supervisor spawn is byte-identical.
+    /// </summary>
+    public Dtos.Agents.SupervisorAgentProfile? AgentProfile { get; init; }
+
+    /// <summary>
+    /// The tool allow-list each spawned agent is restricted to (P2-3) — the supervisor config's REUSED
+    /// <c>AllowedTools</c> threaded into <c>AgentTask.Tools</c>. Tri-state, matching the task envelope: <c>null</c>
+    /// (the default, and pre-P2-3) = the harness default; non-empty = exactly these (UNIONed with a persona's tools
+    /// by the dispatch-time resolver). Carried separately from <see cref="AgentProfile"/> because it reuses the
+    /// existing <c>SupervisorGoalConfig.AllowedTools</c> field rather than duplicating it on the profile.
+    /// </summary>
+    public IReadOnlyList<string>? SpawnedAgentTools { get; init; }
 }
 
 /// <summary>One prior decision replayed from the ledger — its row id + kind + emitted payload + (for a terminal) its recorded outcome. A pure data noun.</summary>

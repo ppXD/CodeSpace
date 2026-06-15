@@ -63,8 +63,23 @@ public sealed class AgentSupervisorNode : INodeRuntime
                 "maxNoProgressDecisions": { "type": "integer", "minimum": 1, "maximum": 30, "description": "Best-effort: force-stop after this many consecutive decisions produce no new agent result. Defaults to 8." },
                 "approvalPolicy": { "type": "string", "enum": ["none", "spawns"], "description": "Whether a human must approve every spawn/retry before any agent is created. 'none' (default) = autonomous; 'spawns' = the supervisor parks on an approval card before spawning." },
                 "allowedAgents": { "type": "array", "items": { "type": "string" }, "description": "Reserved — harness/agent kinds the supervisor may spawn. Stored; enforcement is a follow-up." },
-                "allowedTools": { "type": "array", "items": { "type": "string" }, "description": "Reserved — tool kinds spawned agents may use. Stored only." },
-                "acceptanceChecks": { "type": "array", "items": { "type": "string" }, "description": "Reserved — checks to verify before declaring success. Stored; the acceptance gate is a follow-up." }
+                "allowedTools": { "type": "array", "items": { "type": "string" }, "description": "Tool allow-list every spawned agent is restricted to (e.g. Read, Grep, Bash). Empty = the harness default. Added to (not replacing) a persona's tools." },
+                "acceptanceChecks": { "type": "array", "items": { "type": "string" }, "description": "Reserved — checks to verify before declaring success. Stored; the acceptance gate is a follow-up." },
+                "agentProfile": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "description": "Defaults every agent this supervisor spawns inherits — the supervisor's analogue of a coding-agent node's config. Leave empty for a bare codex-cli / analysis-only agent.",
+                  "properties": {
+                    "repositoryId": { "type": "string", "format": "uuid", "x-selector": "repository", "description": "Repository each spawned agent clones into its workspace. Leave empty for an analysis-only run with no repo." },
+                    "harness": { "type": "string", "x-selector": "harness", "description": "Which coding-agent CLI each spawned agent runs (e.g. Codex, Claude Code). Defaults to codex-cli." },
+                    "model": { "type": "string", "description": "Model id within the harness's catalog. Leave empty to use the persona's model, or the harness default." },
+                    "agentDefinitionId": { "type": "string", "format": "uuid", "x-selector": "agent", "description": "Agent persona each spawned agent embodies — its system prompt + model + tools become the defaults. Leave empty to configure inline." },
+                    "modelCredentialId": { "type": "string", "format": "uuid", "x-selector": "modelCredential", "description": "Model credential each spawned agent authenticates with. Leave empty for the persona's or the team/operator default." },
+                    "runnerKind": { "type": "string", "description": "Sandbox runner each spawned agent executes on (e.g. \"local\"). Defaults to the deployment default." },
+                    "enableMcp": { "type": "boolean", "description": "Open the MCP tool-fabric endpoint for each spawned agent. Leave unset to defer to the deployment default." },
+                    "autonomyLevel": { "type": "string", "enum": ["Confined", "Standard", "Trusted", "Unleashed"], "description": "How much each spawned agent may do — write scope + network. Confined: read-only, no network · Standard (default): workspace write, no network · Trusted: + network · Unleashed: highest." }
+                  }
+                }
               }
             }
             """),
