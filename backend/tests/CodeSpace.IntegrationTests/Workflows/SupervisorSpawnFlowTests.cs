@@ -1,5 +1,7 @@
+using System.Text.Json;
 using Autofac;
 using CodeSpace.Core.Persistence.Db;
+using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Supervisor;
 using CodeSpace.Core.Services.Workflows.Engine;
@@ -220,7 +222,115 @@ public class SupervisorSpawnFlowTests : IDisposable
         }
     }
 
+    [Fact]
+    public async Task A_crash_mid_fan_out_recovers_to_exactly_K_agents_without_orphans_or_double_spawn()
+    {
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var workflowId = await CreateWorkflowAsync(teamId, userId);
+        var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
+
+        var jobClient = ResolveJobClient();
+        jobClient.Clear();
+        jobClient.AutoExecute = false;
+
+        try
+        {
+            // ── Drive turn 0 (plan) to settle — the spawn turn (turn 1) is what we crash. ──
+            await RunEngineAsync(runId);
+            await ResolveSelfAdvanceAsync(runId);
+
+            // ── PLANT THE CRASH-MID-FAN-OUT RESIDUE (must-fix #1's State A) ──
+            // A spawn fan-out creates each agent run one-at-a-time (CreateAsync saves each) and flushes the K
+            // waits together at the END. A crash AFTER an agent was created but BEFORE the waits committed leaves:
+            //   • the spawn decision stuck Running (TryBeginExecution flipped it before the side effect; the
+            //     terminal record never ran), and
+            //   • orphan Queued agent run(s) with NO wait pointing at them.
+            // Reproduce that exact durable state: an orphan Queued agent (the real CreateAsync, so it's a faithful
+            // orphan through the admission gate) + a Running spawn decision row at turn 1, and ZERO agent waits.
+            Guid orphanAgentId;
+            using (var scope = _fixture.BeginScope())
+            {
+                var runs = scope.Resolve<IAgentRunService>();
+                orphanAgentId = (await runs.CreateAsync(new AgentTask { Goal = "do alpha", Harness = "codex-cli", Autonomy = AgentAutonomyLevel.Standard }, teamId, runId, "sup", CancellationToken.None)).Id;
+
+                var db = scope.Resolve<CodeSpaceDbContext>();
+                db.SupervisorDecisionRecord.Add(StuckRunningSpawnDecision(runId, teamId, turnNumber: 1));
+                await db.SaveChangesAsync();
+            }
+
+            // Sanity: the planted residue is exactly what a mid-fan-out crash leaves — 1 orphan, 0 waits, spawn Running.
+            using (var verify = _fixture.BeginScope())
+            {
+                var db = verify.Resolve<CodeSpaceDbContext>();
+                (await db.AgentRun.AsNoTracking().CountAsync(r => r.WorkflowRunId == runId)).ShouldBe(1, "the planted crash residue: one orphan agent");
+                (await db.WorkflowRunWait.AsNoTracking().CountAsync(w => w.RunId == runId && w.WaitKind == WorkflowWaitKinds.AgentRun)).ShouldBe(0, "no agent waits committed before the crash");
+                (await Ledger(db, runId, teamId)).Single(r => r.DecisionKind == SupervisorDecisionKinds.Spawn).Status.ShouldBe(SupervisorDecisionStatus.Running, "the spawn decision is stuck Running");
+            }
+
+            // ── RECOVER: re-dispatch the run. The node re-enters with ZERO pending agent waits (its barrier guard
+            // doesn't trip), runs turn 1, re-claims the stuck-Running spawn (InFlight, not Duplicate), and the turn
+            // service RE-EXECUTES under the existing Running claim instead of self-advancing. The executor RECLAIMS
+            // the orphan for slot 0 + creates slot 1 → exactly 2 agents, 2 waits, no leaked orphan, no double-spawn. ──
+            using (var scope = _fixture.BeginScope())
+            {
+                await scope.Resolve<CodeSpaceDbContext>().WorkflowRun
+                    .Where(r => r.Id == runId).ExecuteUpdateAsync(s => s.SetProperty(r => r.Status, WorkflowRunStatus.Enqueued));
+            }
+            await RunEngineAsync(runId);
+
+            using (var verify = _fixture.BeginScope())
+            {
+                var db = verify.Resolve<CodeSpaceDbContext>();
+
+                var agents = await db.AgentRun.AsNoTracking().Where(r => r.WorkflowRunId == runId).Select(r => r.Id).ToListAsync();
+                agents.Count.ShouldBe(2, "recovery landed EXACTLY 2 agents — the orphan was reclaimed, one new agent created (no double-spawn)");
+                agents.ShouldContain(orphanAgentId, "the reclaimed orphan is one of the two — not leaked");
+
+                var waits = await db.WorkflowRunWait.AsNoTracking()
+                    .Where(w => w.RunId == runId && w.WaitKind == WorkflowWaitKinds.AgentRun && w.Status == WorkflowWaitStatuses.Pending)
+                    .OrderBy(w => w.IterationKey).ToListAsync();
+                waits.Count.ShouldBe(2, "exactly 2 agent waits staged on recovery");
+                waits.Select(w => w.IterationKey).ShouldBe(new[] { "sup#turn1#0", "sup#turn1#1" }, "the per-turn-per-spawn keys, k=0 reusing the orphan");
+                waits.Select(w => Guid.Parse(w.Token)).ShouldBe(agents, ignoreOrder: true, "every wait token is one of the two agents — no dangling token");
+
+                (await db.WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == runId)).Status
+                    .ShouldBe(WorkflowRunStatus.Suspended, "the run parked on the 2 agent waits — it did NOT self-advance past the spawn");
+
+                var rows = await Ledger(db, runId, teamId);
+                rows.Count(r => r.DecisionKind == SupervisorDecisionKinds.Spawn).ShouldBe(1, "still exactly one spawn decision row");
+                rows.Single(r => r.DecisionKind == SupervisorDecisionKinds.Spawn).Status
+                    .ShouldBe(SupervisorDecisionStatus.Succeeded, "the recovered spawn recorded terminal — no longer stuck Running");
+            }
+        }
+        finally
+        {
+            jobClient.AutoExecute = true;
+        }
+    }
+
     // ─── Helpers ────────────────────────────────────────────────────────────────────
+
+    // The durable residue a crash mid fan-out leaves for the spawn decision: a Running row whose (run, key) +
+    // payload match what the scripted decider re-derives on re-entry, so the recovery's re-claim collides on the
+    // unique index (InFlight) and re-executes — exactly the real crashed-then-replayed path.
+    private static SupervisorDecisionRecord StuckRunningSpawnDecision(Guid runId, Guid teamId, int turnNumber)
+    {
+        var payloadJson = JsonSerializer.Serialize(new SupervisorSpawnPayload { SubtaskIds = new[] { ScriptedSupervisorDecider.SubtaskA, ScriptedSupervisorDecider.SubtaskB } }, AgentJson.Options);
+
+        return new SupervisorDecisionRecord
+        {
+            Id = Guid.NewGuid(),
+            TeamId = teamId,
+            SupervisorRunId = runId,
+            DecisionKind = SupervisorDecisionKinds.Spawn,
+            IdempotencyKey = SupervisorDecisionLog.DeriveIdempotencyKey(SupervisorDecisionKinds.Spawn, payloadJson, SupervisorTurnService.TurnDiscriminator(turnNumber)),
+            InputHash = SupervisorDecisionLog.HashPayload(payloadJson),
+            PayloadJson = payloadJson,
+            Status = SupervisorDecisionStatus.Running,
+            FenceEpoch = turnNumber,
+        };
+    }
+
 
     // Resolve the run's pending SupervisorDecision self-advance wait via the SAME entry point the engine
     // enqueues post-commit (ResumeWaitAsync) — flips the run Pending so the next RunEngineAsync runs the next turn.

@@ -85,17 +85,21 @@ public sealed partial class SupervisorTurnService : ISupervisorTurnService, ISco
         return await ExecuteUnderClaimAsync(claim.DecisionId, teamId, context, decision, cancellationToken).ConfigureAwait(false);
     }
 
-    /// <summary>Win the Pending → Running CAS, run the side effect ONCE, record the terminal; a lost CAS means a concurrent caller is executing — there's no prior terminal to read yet, so this turn re-enters next pass (a synchronous no-op execution).</summary>
+    /// <summary>
+    /// Win the Pending → Running CAS, run the side effect ONCE, record the terminal. A LOST begin-CAS is the
+    /// CRASH-RECOVERY path, NOT a concurrent racer: the engine's run-level Enqueued → Running single-writer claim
+    /// means no second walk executes this run concurrently, so a row already past Pending here was flipped Running
+    /// by a PRIOR walk that crashed before recording terminal (e.g. mid spawn fan-out — orphan agents staged, no
+    /// waits, decision stuck Running). RE-EXECUTE under the existing Running claim so the turn doesn't self-advance
+    /// past an unfinished decision; the executor's spawn staging is idempotent (it reclaims this turn's orphan
+    /// agents), so the recovery produces exactly K agents + K waits with no double-spawn.
+    /// </summary>
     private async Task<SupervisorExecution> ExecuteUnderClaimAsync(Guid decisionId, Guid teamId, SupervisorTurnContext context, SupervisorDecision decision, CancellationToken cancellationToken)
     {
         var won = await _ledger.TryBeginExecutionAsync(decisionId, teamId, cancellationToken).ConfigureAwait(false);
 
         if (!won)
-        {
-            _logger.LogInformation("Supervisor decision {DecisionId} already claimed for execution by a concurrent caller — not double-executing", decisionId);
-
-            return SupervisorExecution.Synchronous(outcomeJson: "{}");
-        }
+            _logger.LogWarning("Supervisor decision {DecisionId} was already Running (a prior walk crashed before recording terminal) — re-executing to recover, not self-advancing", decisionId);
 
         var execution = await _executor.ExecuteAsync(decision, context, cancellationToken).ConfigureAwait(false);
 
