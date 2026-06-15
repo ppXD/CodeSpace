@@ -17,6 +17,16 @@ public sealed partial class SupervisorTurnService
     {
         var rows = await _ledger.GetForRunAsync(supervisorRunId, teamId, cancellationToken).ConfigureAwait(false);
 
+        // The human answers to this run's ask_human turns, keyed by the question card's token. The answer rides
+        // the resolved Action wait's payload (the human's free-text comment), so the FOLD reads it durably from
+        // the wait on EVERY rehydrate — surviving restart — rather than relying on a separate write into the
+        // ledger row. An ask_human decision whose wait isn't yet resolved has no entry → answer stays null.
+        // Only hit the DB when the tape actually has an ask_human decision — the common (no-ask) run stays a
+        // single ledger read, byte-identical to E3 and DB-free.
+        var answersByToken = rows.Any(r => r.DecisionKind == SupervisorDecisionKinds.AskHuman)
+            ? await ResolvedAskAnswersByTokenAsync(supervisorRunId, nodeId, cancellationToken).ConfigureAwait(false)
+            : EmptyAnswers;
+
         var priorDecisions = new List<SupervisorPriorDecision>();
         SupervisorPriorDecision? inFlight = null;
 
@@ -27,7 +37,12 @@ public sealed partial class SupervisorTurnService
         // and re-claims the in-flight one rather than emitting a duplicate.
         foreach (var row in rows)
         {
-            var decision = ToPriorDecision(row);
+            var decision = FoldAskHumanAnswer(ToPriorDecision(row), answersByToken);
+
+            // Persist a newly-folded answer onto the durable ledger row (the answer becomes the ledger's record,
+            // surviving restart without re-reading the wait). Idempotent — the update no-ops when the bytes match.
+            if (decision.OutcomeJson != row.OutcomeJson)
+                await _ledger.UpdateOutcomeAsync(row.Id, teamId, decision.OutcomeJson!, cancellationToken).ConfigureAwait(false);
 
             if (SupervisorDecisionStateMachine.IsTerminal(row.Status))
                 priorDecisions.Add(decision);
@@ -47,10 +62,84 @@ public sealed partial class SupervisorTurnService
         };
     }
 
+    /// <summary>
+    /// Fold the human's answer into an ask_human decision's replayed outcome (E4): look up the recorded
+    /// question-card token in the resolved-Action-wait answers, and — when the human has replied — rewrite the
+    /// decision's <c>OutcomeJson</c> with the answer so the decider sees "you asked X, the human answered Y" on
+    /// the next turn. A non-ask_human decision, or an ask_human whose wait isn't yet resolved (no token match),
+    /// passes through unchanged. The fold is idempotent — re-running it on an already-folded outcome is a no-op.
+    /// </summary>
+    private static SupervisorPriorDecision FoldAskHumanAnswer(SupervisorPriorDecision decision, IReadOnlyDictionary<string, string> answersByToken)
+    {
+        if (decision.DecisionKind != SupervisorDecisionKinds.AskHuman) return decision;
+
+        var token = SupervisorOutcome.ReadHumanWaitToken(decision.OutcomeJson);
+
+        if (token == null || !answersByToken.TryGetValue(token, out var answer)) return decision;
+
+        var folded = SupervisorOutcome.FoldAnswer(SupervisorOutcome.ReadAskHumanQuestion(decision.OutcomeJson), token, answer);
+
+        return decision with { OutcomeJson = folded };
+    }
+
+    /// <summary>
+    /// The human answer to each resolved ask_human turn, keyed by the question card's correlation token. Read
+    /// from the durable resolved <c>Action</c> waits this node staged: the wait's resolved payload is
+    /// <c>{ action, by, comment }</c> and the answer is the human's free-text <c>comment</c>. Only RESOLVED
+    /// waits contribute (a still-pending ask hasn't been answered), so the fold writes the answer at most once
+    /// it durably exists, and re-reads it identically on every restart.
+    /// </summary>
+    private async Task<IReadOnlyDictionary<string, string>> ResolvedAskAnswersByTokenAsync(Guid supervisorRunId, string nodeId, CancellationToken cancellationToken)
+    {
+        var resolved = await _db.WorkflowRunWait.AsNoTracking()
+            .Where(w => w.RunId == supervisorRunId && w.NodeId == nodeId
+                        && w.WaitKind == WorkflowWaitKinds.Action && w.Status == WorkflowWaitStatuses.Resolved
+                        && w.IterationKey.EndsWith("#ask"))
+            .Select(w => new { w.Token, w.PayloadJson })
+            .ToListAsync(cancellationToken).ConfigureAwait(false);
+
+        var answers = new Dictionary<string, string>();
+
+        foreach (var wait in resolved)
+            answers[wait.Token] = ReadAnswerComment(wait.PayloadJson);
+
+        return answers;
+    }
+
+    /// <summary>The shared empty answers map for the common no-ask_human rehydrate — keeps that path allocation-light + DB-free.</summary>
+    private static readonly IReadOnlyDictionary<string, string> EmptyAnswers = new Dictionary<string, string>();
+
+    /// <summary>Read the human's free-text answer (the <c>comment</c>) from a resolved Action wait's <c>{ action, by, comment }</c> payload. Empty string when absent/malformed (a click with no comment).</summary>
+    private static string ReadAnswerComment(string? payloadJson)
+    {
+        if (string.IsNullOrWhiteSpace(payloadJson)) return "";
+
+        try
+        {
+            var root = JsonDocument.Parse(payloadJson).RootElement;
+
+            return root.ValueKind == JsonValueKind.Object && root.TryGetProperty("comment", out var c) && c.ValueKind == JsonValueKind.String
+                ? c.GetString() ?? ""
+                : "";
+        }
+        catch (JsonException)
+        {
+            return "";
+        }
+    }
+
     public async Task<int> CountPendingAgentWaitsAsync(Guid supervisorRunId, string nodeId, CancellationToken cancellationToken) =>
         await _db.WorkflowRunWait.AsNoTracking()
             .CountAsync(w => w.RunId == supervisorRunId && w.NodeId == nodeId
                              && w.WaitKind == WorkflowWaitKinds.AgentRun && w.Status == WorkflowWaitStatuses.Pending, cancellationToken)
+            .ConfigureAwait(false);
+
+    public async Task<string?> PendingHumanWaitTokenAsync(Guid supervisorRunId, string nodeId, CancellationToken cancellationToken) =>
+        await _db.WorkflowRunWait.AsNoTracking()
+            .Where(w => w.RunId == supervisorRunId && w.NodeId == nodeId
+                        && w.WaitKind == WorkflowWaitKinds.Action && w.Status == WorkflowWaitStatuses.Pending && w.IterationKey.EndsWith("#ask"))
+            .Select(w => w.Token)
+            .FirstOrDefaultAsync(cancellationToken)
             .ConfigureAwait(false);
 
     private static SupervisorPriorDecision ToPriorDecision(Persistence.Entities.SupervisorDecisionRecord row) => new()

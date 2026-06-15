@@ -27,9 +27,10 @@ public sealed partial class SupervisorTurnService : ISupervisorTurnService, ISco
         _logger = logger;
     }
 
-    public async Task<SupervisorTurnResult> RunTurnAsync(Guid supervisorRunId, Guid teamId, string nodeId, string goal, CancellationToken cancellationToken)
+    public async Task<SupervisorTurnResult> RunTurnAsync(Guid supervisorRunId, Guid teamId, string nodeId, string goal, Guid? conversationId, CancellationToken cancellationToken)
     {
-        var context = await RehydrateFromDecisionLogAsync(supervisorRunId, teamId, nodeId, goal, cancellationToken).ConfigureAwait(false);
+        var context = (await RehydrateFromDecisionLogAsync(supervisorRunId, teamId, nodeId, goal, cancellationToken).ConfigureAwait(false))
+            with { ConversationId = conversationId };
 
         var decision = await ChooseDecisionAsync(context, cancellationToken).ConfigureAwait(false);
 
@@ -108,26 +109,34 @@ public sealed partial class SupervisorTurnService : ISupervisorTurnService, ISco
         return execution;
     }
 
-    /// <summary>Reconstruct the suspend classification of a replayed (already-settled) decision from its recorded outcome — a spawn/retry outcome records its staged agent-run ids, so the node re-suspends on the SAME count of existing waits; everything else is a synchronous self-advance.</summary>
+    /// <summary>Reconstruct the suspend classification of a replayed (already-settled) decision from its recorded outcome — an ask_human outcome records its Action-wait token (re-park on the human's answer), a spawn/retry outcome records its staged agent-run ids (re-suspend on the SAME count of existing waits); everything else is a synchronous self-advance.</summary>
     private static SupervisorExecution ReplayExecution(string? priorOutcomeJson)
     {
         var outcome = priorOutcomeJson ?? "{}";
+
+        var humanToken = SupervisorOutcome.ReadHumanWaitToken(outcome);
+
+        if (humanToken != null) return SupervisorExecution.ParkedOnHuman(outcome, humanToken);
+
         var staged = SupervisorOutcome.ReadStagedAgentCount(outcome);
 
         return staged > 0 ? SupervisorExecution.ParkedOnAgents(outcome, staged) : SupervisorExecution.Synchronous(outcome);
     }
 
     /// <summary>
-    /// Build the node's instruction (the dual resume path): a terminal decision FINISHES; an async decision
-    /// (spawn / retry — the executor staged K agent waits) tells the node to PARK ON THOSE waits (the barrier
-    /// resumes); a synchronous non-terminal decision (plan / merge) SELF-ADVANCES on a SupervisorDecision wait.
-    /// The next-turn context folds this turn's decision in, so the next rehydrate sees TurnNumber+1.
+    /// Build the node's instruction (the three resume paths): a terminal decision FINISHES; an async agent
+    /// decision (spawn / retry — the executor staged K agent waits) tells the node to PARK ON THOSE waits (the
+    /// barrier resumes); an ask_human decision tells the node to PARK ON THE HUMAN's answer (a single Action
+    /// wait); a synchronous non-terminal decision (plan / merge) SELF-ADVANCES on a SupervisorDecision wait. The
+    /// next-turn context folds this turn's decision in, so the next rehydrate sees TurnNumber+1.
     /// </summary>
     private static SupervisorTurnResult BuildResult(SupervisorTurnContext context, SupervisorDecision decision, SupervisorExecution execution)
     {
         if (decision.IsTerminal) return SupervisorTurnResult.Finished(decision.Kind, ReadStopReason(decision));
 
         var nextTurn = context with { TurnNumber = context.TurnNumber + 1, InFlight = null };
+
+        if (execution.HumanWaitToken != null) return SupervisorTurnResult.ParkOnHuman(decision.Kind, nextTurn, execution.HumanWaitToken);
 
         return execution.ParkedAgentWaitCount > 0
             ? SupervisorTurnResult.ParkOnAgents(decision.Kind, nextTurn, execution.ParkedAgentWaitCount)

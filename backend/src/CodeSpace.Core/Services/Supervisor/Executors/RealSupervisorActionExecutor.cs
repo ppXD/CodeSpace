@@ -2,6 +2,8 @@ using System.Text.Json;
 using CodeSpace.Core.DependencyInjection;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Services.Agents;
+using CodeSpace.Core.Services.Chat;
+using CodeSpace.Core.Services.Chat.Interactions;
 using CodeSpace.Messages.Agents;
 using Microsoft.Extensions.Logging;
 
@@ -20,26 +22,32 @@ namespace CodeSpace.Core.Services.Supervisor.Executors;
 ///         them + the wait-for-all barrier resumes once all complete. ASYNC (see <c>.Spawn.cs</c>).</item>
 ///   <item><c>merge</c> → read the recorded prior-Attempt agent results by id + reduce them into a synthesis
 ///         outcome. SYNCHRONOUS (see <c>.Merge.cs</c>).</item>
-///   <item><c>ask_human</c> → a clean "not supported until E4" outcome (the decider may emit it; the executor
-///         degrades gracefully — real HITL parks in E4). SYNCHRONOUS.</item>
+///   <item><c>ask_human</c> → post a question CARD to the supervisor run's conversation (a single <c>Action</c>
+///         wait, token-correlated) + park on the human's answer; the answer is folded into the next turn. ASYNC
+///         (PARK-ON-HUMAN, see <c>.AskHuman.cs</c>). Degrades to a no-surface stop when no conversation is
+///         authored or the tenancy check fails.</item>
 ///   <item><c>stop</c> → a terminal marker (the turn service finishes the loop; this never re-suspends).</item>
 /// </list>
 ///
-/// <para>Scoped (Rule 16 — it owns its DB writes via the agent-run service + the wait staging). Exactly-once
-/// is the turn service's claim hop's job (Pending→Running before this runs once); the executor's spawn staging
-/// records the agent-run ids in the outcome so a replay re-derives the SAME park classification WITHOUT
-/// re-staging.</para>
+/// <para>Scoped (Rule 16 — it owns its DB writes via the agent-run service + the wait staging + the bot post).
+/// Exactly-once is the turn service's claim hop's job (Pending→Running before this runs once); the executor's
+/// spawn staging + the ask_human card post both record their state in the outcome so a replay re-derives the
+/// SAME park classification WITHOUT re-staging / re-posting.</para>
 /// </summary>
 public sealed partial class RealSupervisorActionExecutor : ISupervisorActionExecutor, IScopedDependency
 {
     private readonly CodeSpaceDbContext _db;
     private readonly IAgentRunService _agentRuns;
+    private readonly IChatBotService _bot;
+    private readonly IInteractionComponentRegistry _components;
     private readonly ILogger<RealSupervisorActionExecutor> _logger;
 
-    public RealSupervisorActionExecutor(CodeSpaceDbContext db, IAgentRunService agentRuns, ILogger<RealSupervisorActionExecutor> logger)
+    public RealSupervisorActionExecutor(CodeSpaceDbContext db, IAgentRunService agentRuns, IChatBotService bot, IInteractionComponentRegistry components, ILogger<RealSupervisorActionExecutor> logger)
     {
         _db = db;
         _agentRuns = agentRuns;
+        _bot = bot;
+        _components = components;
         _logger = logger;
     }
 
@@ -49,7 +57,7 @@ public sealed partial class RealSupervisorActionExecutor : ISupervisorActionExec
         SupervisorDecisionKinds.Spawn => ExecuteSpawnAsync(decision, context, cancellationToken),
         SupervisorDecisionKinds.Retry => ExecuteRetryAsync(decision, context, cancellationToken),
         SupervisorDecisionKinds.Merge => Task.FromResult(ExecuteMerge(decision, context)),
-        SupervisorDecisionKinds.AskHuman => Task.FromResult(ExecuteAskHuman()),
+        SupervisorDecisionKinds.AskHuman => ExecuteAskHumanAsync(decision, context, cancellationToken),
         SupervisorDecisionKinds.Stop => Task.FromResult(ExecuteStop(decision)),
         _ => Task.FromResult(SupervisorExecution.Synchronous(JsonSerializer.Serialize(new { unsupported = decision.Kind }, AgentJson.Options))),
     };
@@ -65,10 +73,6 @@ public sealed partial class RealSupervisorActionExecutor : ISupervisorActionExec
 
         return SupervisorExecution.Synchronous(outcome);
     }
-
-    /// <summary>E3 degrades ask_human to a clean "not supported until E4" outcome — the decider may emit it; the executor must NOT crash. SYNCHRONOUS → self-advance (E4 wires the real HITL park).</summary>
-    private static SupervisorExecution ExecuteAskHuman() =>
-        SupervisorExecution.Synchronous(JsonSerializer.Serialize(new { askHuman = "not-supported-until-e4" }, AgentJson.Options));
 
     /// <summary>A terminal stop records its outcome marker; the turn service finishes the loop (this never re-suspends).</summary>
     private static SupervisorExecution ExecuteStop(SupervisorDecision decision)

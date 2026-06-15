@@ -61,7 +61,7 @@ public class SupervisorTurnServiceTests
         var ledger = new FakeLedger();
         var service = Service(ledger);
 
-        var turn1 = await service.RunTurnAsync(_runId, _teamId, "sup", "goal", CancellationToken.None);
+        var turn1 = await service.RunTurnAsync(_runId, _teamId, "sup", "goal", conversationId: null, CancellationToken.None);
 
         turn1.IsFinished.ShouldBeFalse("a plan parks for the next turn");
         turn1.DecisionKind.ShouldBe(SupervisorDecisionKinds.Plan);
@@ -69,7 +69,7 @@ public class SupervisorTurnServiceTests
         ledger.Rows.Count.ShouldBe(1, "exactly one decision recorded");
         ledger.Rows[0].Status.ShouldBe(SupervisorDecisionStatus.Succeeded);
 
-        var turn2 = await service.RunTurnAsync(_runId, _teamId, "sup", "goal", CancellationToken.None);
+        var turn2 = await service.RunTurnAsync(_runId, _teamId, "sup", "goal", conversationId: null, CancellationToken.None);
 
         turn2.IsFinished.ShouldBeTrue("a stop finishes the loop");
         turn2.DecisionKind.ShouldBe(SupervisorDecisionKinds.Stop);
@@ -91,7 +91,7 @@ public class SupervisorTurnServiceTests
         // A decider that would NEVER stop on its own — proving the budget, not the decider, terminates.
         var service = new SupervisorTurnService(ledger, new AlwaysPlanDecider(), new StubSupervisorActionExecutor(), db: null!, NullLogger<SupervisorTurnService>.Instance);
 
-        var result = await service.RunTurnAsync(_runId, _teamId, "sup", "goal", CancellationToken.None);
+        var result = await service.RunTurnAsync(_runId, _teamId, "sup", "goal", conversationId: null, CancellationToken.None);
 
         result.IsFinished.ShouldBeTrue("the budget forces a terminal stop");
         result.DecisionKind.ShouldBe(SupervisorDecisionKinds.Stop);
@@ -108,7 +108,7 @@ public class SupervisorTurnServiceTests
         var service = new SupervisorTurnService(ledger, new StubSupervisorDecider(), executor, db: null!, NullLogger<SupervisorTurnService>.Instance);
 
         // First pass: turn 0 (plan) executes once + records terminal.
-        await service.RunTurnAsync(_runId, _teamId, "sup", "goal", CancellationToken.None);
+        await service.RunTurnAsync(_runId, _teamId, "sup", "goal", conversationId: null, CancellationToken.None);
         executor.Calls.ShouldBe(1);
         ledger.Rows.Count.ShouldBe(1);
 
@@ -197,6 +197,13 @@ public class SupervisorTurnServiceTests
 
         public Task<IReadOnlyList<SupervisorDecisionRecord>> GetForRunAsync(Guid supervisorRunId, Guid teamId, CancellationToken cancellationToken) =>
             Task.FromResult<IReadOnlyList<SupervisorDecisionRecord>>(Rows.Where(r => r.SupervisorRunId == supervisorRunId && r.TeamId == teamId).OrderBy(r => r.Sequence).ToList());
+
+        public Task UpdateOutcomeAsync(Guid decisionId, Guid teamId, string foldedOutcomeJson, CancellationToken cancellationToken)
+        {
+            var row = Rows.SingleOrDefault(r => r.Id == decisionId && r.TeamId == teamId);
+            if (row != null) row.OutcomeJson = foldedOutcomeJson;
+            return Task.CompletedTask;
+        }
 
         public Task<int> ExpireStalePendingAsync(DateTimeOffset olderThan, CancellationToken cancellationToken) => Task.FromResult(0);
     }

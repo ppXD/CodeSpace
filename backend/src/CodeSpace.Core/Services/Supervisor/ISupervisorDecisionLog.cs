@@ -48,6 +48,15 @@ public interface ISupervisorDecisionLog
     Task<IReadOnlyList<SupervisorDecisionRecord>> GetForRunAsync(Guid supervisorRunId, Guid teamId, CancellationToken cancellationToken);
 
     /// <summary>
+    /// Fold a human's ask_human answer into a SETTLED decision's recorded outcome (PR-E E4): rewrite the row's
+    /// <c>OutcomeJson</c> with <paramref name="foldedOutcomeJson"/> (the question + token + answer), team-scoped.
+    /// A status-AGNOSTIC outcome enrichment — NOT a lifecycle transition: the decision is already terminal, and
+    /// the human's durable answer (from the resolved Action wait) is being recorded onto the audit row so the
+    /// ledger is the durable answer record. Idempotent — re-writing the same bytes is a no-op.
+    /// </summary>
+    Task UpdateOutcomeAsync(Guid decisionId, Guid teamId, string foldedOutcomeJson, CancellationToken cancellationToken);
+
+    /// <summary>
     /// Reaper sweep (the maintenance job's worker): durably expire every stale UNDECIDED decision — rows still
     /// <c>Pending</c> created before <paramref name="olderThan"/>. Each candidate gets a per-row status-guarded CAS
     /// <c>Pending → Expired</c> (mirrors <see cref="RecordTerminalAsync"/>'s discipline). Team-AGNOSTIC (an internal job,
@@ -187,6 +196,20 @@ public sealed class SupervisorDecisionLog : ISupervisorDecisionLog, IScopedDepen
             .Where(d => d.SupervisorRunId == supervisorRunId && d.TeamId == teamId)
             .OrderBy(d => d.Sequence)
             .ToListAsync(cancellationToken).ConfigureAwait(false);
+
+    public async Task UpdateOutcomeAsync(Guid decisionId, Guid teamId, string foldedOutcomeJson, CancellationToken cancellationToken)
+    {
+        // A targeted outcome enrichment (NOT a status CAS — the row stays terminal). Only rewrite when the bytes
+        // actually differ, so a re-fold on every rehydrate is a no-op (idempotent, allocation-light). Team-scoped.
+        var affected = await _db.SupervisorDecisionRecord
+            .Where(d => d.Id == decisionId && d.TeamId == teamId && d.OutcomeJson != foldedOutcomeJson)
+            .ExecuteUpdateAsync(s => s
+                .SetProperty(d => d.OutcomeJson, foldedOutcomeJson)
+                .SetProperty(d => d.LastModifiedDate, DateTimeOffset.UtcNow), cancellationToken)
+            .ConfigureAwait(false);
+
+        if (affected > 0) _logger.LogInformation("Supervisor folded a human answer into ask_human decision {DecisionId}", decisionId);
+    }
 
     public async Task<int> ExpireStalePendingAsync(DateTimeOffset olderThan, CancellationToken cancellationToken)
     {
