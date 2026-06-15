@@ -39,6 +39,7 @@ public class DbUpRunnerTests
     [InlineData("agent_definition")]
     [InlineData("model_credential")]
     [InlineData("tool_call_ledger")]
+    [InlineData("supervisor_decision")]
     public async Task Table_exists_after_migration(string tableName)
     {
         var exists = await TableExistsAsync(tableName).ConfigureAwait(false);
@@ -62,6 +63,10 @@ public class DbUpRunnerTests
     [InlineData("tool_call_ledger", "idempotency_key", "0049_tool_call_ledger.sql")]        // the server-derived at-most-once handle (one terminal row per run+key — the exactly-once invariant)
     [InlineData("tool_call_ledger", "approved_by_user_id", "0050_tool_call_ledger_approval.sql")] // durable-HITL approve sub-state — who approved the parked call
     [InlineData("tool_call_ledger", "approved_at", "0050_tool_call_ledger_approval.sql")]          // durable-HITL approve sub-state — NULL distinguishes not-yet-decided from approved-but-unexecuted
+    [InlineData("supervisor_decision", "idempotency_key", "0053_supervisor_decision.sql")]         // PR-E E1: the server-derived at-most-once handle (one terminal row per run+key — the exactly-once invariant)
+    [InlineData("supervisor_decision", "payload_jsonb", "0053_supervisor_decision.sql")]           // the emitted decision — a frozen-at-insert JOURNAL field (the immutability trigger protects it)
+    [InlineData("supervisor_decision", "outcome_jsonb", "0053_supervisor_decision.sql")]           // the execution result — the deliberately-mutable CAS path
+    [InlineData("supervisor_decision", "sequence", "0053_supervisor_decision.sql")]                // per-run BIGSERIAL replay cursor
     public async Task Column_exists_after_migration(string tableName, string columnName, string addedBy)
     {
         var exists = await ColumnExistsAsync(tableName, columnName).ConfigureAwait(false);
@@ -89,6 +94,8 @@ public class DbUpRunnerTests
     [InlineData("idx_tool_call_ledger_approval_token", "0049_tool_call_ledger.sql")]          // respond path locates a parked approval by its server-side token
     [InlineData("idx_tool_call_ledger_due_approvals", "0051_tool_call_ledger_due_approvals_index.sql")] // D3 reaper: partial index matching its undecided-past-deadline predicate (no full-table scan)
     [InlineData("idx_agent_run_inflight", "0052_agent_run_inflight_index.sql")]                          // D4a admission gate: partial (team_id) WHERE status IN ('Queued','Running') — serves both the team-scoped + global in-flight counts on the hot creation path
+    [InlineData("ux_supervisor_decision_run_key", "0053_supervisor_decision.sql")]                       // PR-E E1: the exactly-once invariant — UNIQUE (supervisor_run_id, idempotency_key)
+    [InlineData("idx_sd_run_sequence", "0053_supervisor_decision.sql")]                                  // the replay tape — (supervisor_run_id, sequence)
     public async Task Index_exists_after_migration(string indexName, string addedBy)
     {
         var exists = await IndexExistsAsync(indexName).ConfigureAwait(false);

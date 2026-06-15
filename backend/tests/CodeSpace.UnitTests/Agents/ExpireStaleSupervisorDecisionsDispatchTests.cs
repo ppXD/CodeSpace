@@ -1,0 +1,120 @@
+using CodeSpace.Core.Handlers.CommandHandlers.Agents;
+using CodeSpace.Core.Jobs.RecurringJobs;
+using CodeSpace.Core.Services.Supervisor;
+using CodeSpace.Messages.Agents;
+using CodeSpace.Messages.Commands.Agents;
+using Hangfire;
+using MediatR;
+using Shouldly;
+
+namespace CodeSpace.UnitTests.Agents;
+
+/// <summary>
+/// 🟢 Unit: the supervisor-decision reaper dispatch chain stays thin (Rule 14 + Rule 16). The recurring job sends
+/// exactly the <see cref="ExpireStaleSupervisorDecisionsCommand"/> on a minutely cadence (no logic of its own), is
+/// conditionally registered behind the lane flag (so flag-OFF is byte-identical — never scheduled), and the command
+/// handler derives the cutoff + forwards to <see cref="ISupervisorDecisionLog.ExpireStalePendingAsync"/> and returns its
+/// count (no logic of its own). Hand-rolled recording doubles (no mocking lib, matching the codebase convention).
+/// </summary>
+[Trait("Category", "Unit")]
+public class ExpireStaleSupervisorDecisionsDispatchTests
+{
+    [Fact]
+    public async Task The_recurring_job_dispatches_the_expire_command_minutely()
+    {
+        var mediator = new RecordingMediator();
+        var job = new ExpireStaleSupervisorDecisionsRecurringJob(mediator);
+
+        job.JobId.ShouldBe(nameof(ExpireStaleSupervisorDecisionsRecurringJob));
+        job.CronExpression.ShouldBe(Cron.Minutely(), "the reaper runs every minute — responsive + cheap");
+
+        await job.Execute();
+
+        mediator.Sent.ShouldHaveSingleItem().ShouldBeOfType<ExpireStaleSupervisorDecisionsCommand>("the job is a thin dispatcher — it only sends the command");
+    }
+
+    [Theory]
+    [InlineData("1", true)]
+    [InlineData("true", true)]
+    [InlineData(null, false)]
+    [InlineData("0", false)]
+    public void The_job_registers_only_when_the_lane_flag_is_on(string? raw, bool expectedRegister)
+    {
+        // ShouldRegister gates the scheduler scan: flag-OFF → the reaper is never scheduled (byte-identical). Mutate the
+        // env around the read so the conditional-registration contract is pinned end-to-end.
+        var original = Environment.GetEnvironmentVariable(SupervisorLane.EnabledEnvVar);
+        try
+        {
+            Environment.SetEnvironmentVariable(SupervisorLane.EnabledEnvVar, raw);
+
+            var job = new ExpireStaleSupervisorDecisionsRecurringJob(new RecordingMediator());
+
+            job.ShouldRegister.ShouldBe(expectedRegister, "the reaper is scheduled only when the supervisor lane is enabled");
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable(SupervisorLane.EnabledEnvVar, original);
+        }
+    }
+
+    [Fact]
+    public async Task The_handler_forwards_to_the_log_and_returns_its_count()
+    {
+        var log = new RecordingDecisionLog { ToReturn = 7 };
+        var handler = new ExpireStaleSupervisorDecisionsCommandHandler(log);
+
+        var result = await handler.Handle(new ExpireStaleSupervisorDecisionsCommand(), CancellationToken.None);
+
+        log.Calls.ShouldBe(1, "the handler delegates the whole sweep to the log (Rule 16)");
+        result.Expired.ShouldBe(7, "the handler surfaces the log's expired count verbatim");
+        log.LastCutoff.ShouldBeLessThan(DateTimeOffset.UtcNow, "the cutoff is in the past — only stale rows are swept");
+    }
+
+    private sealed class RecordingMediator : IMediator
+    {
+        public List<object> Sent { get; } = new();
+
+        public Task<TResponse> Send<TResponse>(IRequest<TResponse> request, CancellationToken cancellationToken = default)
+        {
+            Sent.Add(request);
+            return Task.FromResult(default(TResponse)!);
+        }
+
+        public Task<object?> Send(object request, CancellationToken cancellationToken = default)
+        {
+            Sent.Add(request);
+            return Task.FromResult<object?>(null);
+        }
+
+        public Task Send<TRequest>(TRequest request, CancellationToken cancellationToken = default) where TRequest : IRequest
+        {
+            Sent.Add(request!);
+            return Task.CompletedTask;
+        }
+
+        public IAsyncEnumerable<TResponse> CreateStream<TResponse>(IStreamRequest<TResponse> request, CancellationToken cancellationToken = default) => throw new NotSupportedException();
+        public IAsyncEnumerable<object?> CreateStream(object request, CancellationToken cancellationToken = default) => throw new NotSupportedException();
+        public Task Publish(object notification, CancellationToken cancellationToken = default) => throw new NotSupportedException();
+        public Task Publish<TNotification>(TNotification notification, CancellationToken cancellationToken = default) where TNotification : INotification => throw new NotSupportedException();
+    }
+
+    /// <summary>Records the sweep call + returns a canned count, so the handler test asserts pure delegation. The rest of the surface is unreachable here.</summary>
+    private sealed class RecordingDecisionLog : ISupervisorDecisionLog
+    {
+        public int Calls;
+        public int ToReturn;
+        public DateTimeOffset LastCutoff;
+
+        public Task<int> ExpireStalePendingAsync(DateTimeOffset olderThan, CancellationToken cancellationToken)
+        {
+            Calls++;
+            LastCutoff = olderThan;
+            return Task.FromResult(ToReturn);
+        }
+
+        public Task<SupervisorDecisionClaim> TryClaimAsync(Guid supervisorRunId, Guid teamId, string decisionKind, string idempotencyKey, string inputHash, string payloadJson, long fenceEpoch, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<bool> TryBeginExecutionAsync(Guid decisionId, Guid teamId, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task RecordTerminalAsync(Guid decisionId, Guid teamId, SupervisorDecisionStatus status, string? outcomeJson, string? error, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<IReadOnlyList<Core.Persistence.Entities.SupervisorDecisionRecord>> GetForRunAsync(Guid supervisorRunId, Guid teamId, CancellationToken cancellationToken) => throw new NotSupportedException();
+    }
+}
