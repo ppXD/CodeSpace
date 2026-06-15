@@ -39,6 +39,17 @@ namespace CodeSpace.Core.Services.Workflows.Planning;
 /// the surface (a second in-body terminal + a conditional branch + the wait wiring), and done/rework/abort
 /// already prove the L3 re-decide loop end-to-end. Shipped done/rework/abort first.</para>
 /// PR-D.5 follow-up: ask_human-in-loop (coordinator decides ask_human → chat.post_message + flow.wait_action → continue the round).
+///
+/// <para><b>Known L3 limitations (proper home is PR-E's typed <c>stop</c> verb), documented not papered over:</b>
+/// (1) An <c>abort</c> decision terminates the loop and the run still flows synth → Done, so the RUN STATUS is
+/// Success even on abort — <c>builtin.terminal</c> is a pure success marker with no failure outcome, and giving
+/// abort a distinct Failure status would need an engine change (out of scope for this zero-new-engine-code L3
+/// template). The abort IS observable: it's on <c>{{nodes.loop.outputs.decision}}</c> and stated in the
+/// synthesizer's closing summary. PR-E's <c>stop{outcome: success|failed|abandoned}</c> gives outcome-typed
+/// termination natively. (2) The coordinated end-to-end integration covers the <c>llm.complete</c> body across
+/// rounds; the <c>agent.code</c> body that suspends per branch across rounds is covered by COMPOSITION — the
+/// coding projection's validity is unit-pinned (both kinds) and agent.code-in-map runnability by PR-D2's
+/// headline real-agent E2E — rather than a dedicated coordinated-coding E2E here.</para>
 /// </summary>
 public sealed partial class WorkflowPlanProjector
 {
