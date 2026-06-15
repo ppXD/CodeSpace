@@ -54,7 +54,8 @@ public sealed class AgentSupervisorNode : INodeRuntime
             {
               "type": "object",
               "properties": {
-                "goal": { "type": "string", "description": "The objective the supervisor pursues across its turns — the LLM decider folds it into the prompt that chooses each turn's decision (plan/spawn/retry/merge/stop)." }
+                "goal": { "type": "string", "description": "The objective the supervisor pursues across its turns — the LLM decider folds it into the prompt that chooses each turn's decision (plan/spawn/retry/merge/ask_human/stop)." },
+                "conversationId": { "type": "string", "format": "uuid", "x-selector": "conversation", "description": "Conversation the supervisor posts its ask_human questions into (and parks for the answer). Leave empty to disable mid-loop human questions." }
               }
             }
             """),
@@ -82,49 +83,63 @@ public sealed class AgentSupervisorNode : INodeRuntime
             return NodeResult.Fail("agent.supervisor could not read the run id / team id from the system scope.");
 
         var goal = ReadString(context.Config, "goal");
+        var conversationId = ReadOptionalGuid(context.Config, "conversationId");
 
         // Durable re-entry guard (the spawn/retry async barrier): a PRIOR turn may have staged K AgentRun waits
         // that are still in flight. The spawn decision is already a SETTLED ledger row, so a naive rehydrate
         // would advance past it and run the NEXT turn — abandoning the running agents. If THIS node still has
         // pending AgentRun waits, the async turn is not done: re-park on them (the wait-for-all barrier resumes
         // once all complete), never advance. This makes a restart-mid-spawn re-suspend, not skip ahead.
-        var pendingAgents = await CountPendingAgentWaitsAsync(supervisorRunId, teamId, context.NodeId, cancellationToken).ConfigureAwait(false);
+        var (pendingAgents, pendingHumanToken) = await PendingParkStateAsync(supervisorRunId, teamId, context.NodeId, cancellationToken).ConfigureAwait(false);
 
         if (pendingAgents > 0) return ReparkOnPendingAgents(context, supervisorRunId, teamId, pendingAgents);
 
-        var result = await RunTurnAsync(supervisorRunId, teamId, context.NodeId, goal, cancellationToken).ConfigureAwait(false);
+        // Durable human re-entry guard (E4): an ask_human decision is a SETTLED ledger row, so a restart while
+        // parked on the human's answer would otherwise let the next turn run (re-claim handled, but the human
+        // hasn't answered). The Action wait is still pending → re-park on the SAME wait, never advance + never
+        // re-post the question.
+        if (pendingHumanToken != null) return ReparkOnPendingHuman(context, pendingHumanToken);
+
+        var result = await RunTurnAsync(supervisorRunId, teamId, context.NodeId, goal, conversationId, cancellationToken).ConfigureAwait(false);
 
         // The node re-runs on EITHER pass identically — the durable ledger (not ResumePayload) is the source
-        // of truth, so a resumed pass (a self-advance marker OR an agent-completion barrier resume) and a
-        // first pass both just run the next turn. The turn result picks the suspend path (E3 dual resume):
+        // of truth, so a resumed pass (a self-advance marker, an agent-completion barrier resume, OR a human
+        // answer) and a first pass both just run the next turn. The turn result picks the suspend path (E4):
         //  - FINISH  → a terminal stop; the node succeeds + the run completes via the normal walk.
         //  - PARK-ON-AGENTS → a spawn/retry staged K real AgentRun waits; the node suspends on THEM (no
         //    self-advance) and the wait-for-all barrier resumes the supervisor once all K agents complete.
+        //  - PARK-ON-HUMAN → an ask_human posted a question card on a single Action wait; the node suspends
+        //    on it and the human's answer (the existing ResumeByActionToken path) resumes the next turn.
         //  - SELF-ADVANCE → a synchronous plan/merge; the node parks on a SupervisorDecision wait that
         //    self-resumes into the next turn (the E2 path).
         if (result.IsFinished) return Finish(context.Logger, result);
 
-        return result.ParkedOnAgentWaits
-            ? ParkOnAgentWaits(context.Logger, result)
+        if (result.ParkedOnAgentWaits) return ParkOnAgentWaits(context.Logger, result);
+
+        return result.ParkedOnHuman
+            ? ParkOnHuman(context.Logger, result)
             : ParkSelfAdvance(context.Logger, context.NodeId, result);
     }
 
     /// <summary>Resolve the scoped turn service in its own DI scope (the node is a singleton) and run one turn.</summary>
-    private async Task<SupervisorTurnResult> RunTurnAsync(Guid supervisorRunId, Guid teamId, string nodeId, string goal, CancellationToken cancellationToken)
+    private async Task<SupervisorTurnResult> RunTurnAsync(Guid supervisorRunId, Guid teamId, string nodeId, string goal, Guid? conversationId, CancellationToken cancellationToken)
     {
         using var scope = _scopeFactory.CreateScope();
         var turns = scope.ServiceProvider.GetRequiredService<ISupervisorTurnService>();
 
-        return await turns.RunTurnAsync(supervisorRunId, teamId, nodeId, goal, cancellationToken).ConfigureAwait(false);
+        return await turns.RunTurnAsync(supervisorRunId, teamId, nodeId, goal, conversationId, cancellationToken).ConfigureAwait(false);
     }
 
-    /// <summary>Count the run's still-pending AgentRun waits a prior async turn staged for this node (the durable-re-entry barrier guard).</summary>
-    private async Task<int> CountPendingAgentWaitsAsync(Guid supervisorRunId, Guid teamId, string nodeId, CancellationToken cancellationToken)
+    /// <summary>Read the run's pending-park state for this node (the durable re-entry guards): the count of still-pending AgentRun waits a prior spawn/retry staged, and the token of a still-pending ask_human Action wait. Read FIRST on re-entry so a restart re-parks on the existing wait rather than advancing past the (already-terminal) decision.</summary>
+    private async Task<(int PendingAgents, string? PendingHumanToken)> PendingParkStateAsync(Guid supervisorRunId, Guid teamId, string nodeId, CancellationToken cancellationToken)
     {
         using var scope = _scopeFactory.CreateScope();
         var turns = scope.ServiceProvider.GetRequiredService<ISupervisorTurnService>();
 
-        return await turns.CountPendingAgentWaitsAsync(supervisorRunId, nodeId, cancellationToken).ConfigureAwait(false);
+        var pendingAgents = await turns.CountPendingAgentWaitsAsync(supervisorRunId, nodeId, cancellationToken).ConfigureAwait(false);
+        var pendingHumanToken = await turns.PendingHumanWaitTokenAsync(supervisorRunId, nodeId, cancellationToken).ConfigureAwait(false);
+
+        return (pendingAgents, pendingHumanToken);
     }
 
     /// <summary>
@@ -206,6 +221,56 @@ public sealed class AgentSupervisorNode : INodeRuntime
         });
     }
 
+    /// <summary>
+    /// ASK-HUMAN park (E4) → the executor ALREADY posted the question card + staged a SINGLE <c>Action</c> wait
+    /// keyed <c>&lt;nodeId&gt;#turn{N}#ask</c> (token-correlated to the card). The node suspends on the SAME
+    /// <c>SupervisorAgentWaits</c> marker the agent barrier uses — "the executor already staged its external
+    /// wait(s); record node.suspended + flip the run, but stage NO extra wait + DON'T self-advance." The human's
+    /// answer rides the existing <c>ResumeByActionTokenAsync</c> path, which resolves EXACTLY that token's Action
+    /// wait + re-dispatches; a SINGLE answer resumes the turn (NOT the wait-for-all barrier — there's one wait).
+    /// Reusing the marker (vs returning a fresh Action suspend) is what avoids the engine staging a SECOND Action
+    /// wait over the executor's — the resume is token-driven, so the marker's own key is irrelevant.
+    /// </summary>
+    private static NodeResult ParkOnHuman(Microsoft.Extensions.Logging.ILogger logger, SupervisorTurnResult result)
+    {
+        var next = result.NextTurn!;
+
+        logger.LogInformation("agent.supervisor parking on a human answer after decision={Decision}; the answer resumes the next turn", result.DecisionKind);
+
+        return SuspendOnExecutorStagedWaits(next.NodeId, next.TurnNumber, next, suffix: "ask");
+    }
+
+    /// <summary>
+    /// A prior ask_human turn's <c>Action</c> wait is STILL pending (a restart re-entered before the human
+    /// answered): re-park on it WITHOUT advancing + WITHOUT re-posting (the durable human-barrier recovery).
+    /// Mirrors <see cref="ReparkOnPendingAgents"/> — the executor never re-runs (the decision is terminal); the
+    /// existing Action wait + the human's eventual answer drive the resume. The token isn't needed here (the
+    /// existing wait already carries it); the marker only records node.suspended.
+    /// </summary>
+    private static NodeResult ReparkOnPendingHuman(NodeRunContext context, string token)
+    {
+        context.Logger.LogInformation("agent.supervisor re-entered with a human question still unanswered; re-parking on it (durable recovery — no duplicate question)");
+
+        var marker = new SupervisorTurnContext { NodeId = context.NodeId };
+
+        return SuspendOnExecutorStagedWaits(context.NodeId, marker.TurnNumber, marker, suffix: "ask-repark");
+    }
+
+    /// <summary>
+    /// Suspend on the executor-staged external wait(s) via the <c>SupervisorAgentWaits</c> marker: the engine
+    /// records node.suspended + flips the run WITHOUT staging another wait + WITHOUT scheduling a self-advance
+    /// (the executor already staged the real AgentRun / Action wait, and the agents' completion / the human's
+    /// answer drives the resume). The per-suffix IterationKey keeps each marker row distinct. The payload is
+    /// observability-only — the node re-reads the durable ledger + waits on re-entry.
+    /// </summary>
+    private static NodeResult SuspendOnExecutorStagedWaits(string nodeId, int turnNumber, SupervisorTurnContext payload, string suffix) =>
+        NodeResult.Suspend(new SuspensionToken
+        {
+            Kind = WorkflowWaitKinds.SupervisorAgentWaits,
+            IterationKey = $"{nodeId}#turn{turnNumber}#{suffix}",
+            Payload = JsonSerializer.SerializeToElement(payload, AgentJson.Options),
+        });
+
     /// <summary>Read the supervisor run id (the WorkflowRun id) + team id from the engine-populated system scope.</summary>
     private static bool TryReadRunIdentity(NodeRunContext context, out Guid supervisorRunId, out Guid teamId)
     {
@@ -227,4 +292,8 @@ public sealed class AgentSupervisorNode : INodeRuntime
 
     private static string ReadString(IReadOnlyDictionary<string, JsonElement> bag, string key) =>
         bag.TryGetValue(key, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() ?? "" : "";
+
+    /// <summary>Read an optional uuid config value (the ask_human conversation), null when absent / empty / not a valid id (mirrors agent.code's ReadOptionalGuid).</summary>
+    private static Guid? ReadOptionalGuid(IReadOnlyDictionary<string, JsonElement> bag, string key) =>
+        bag.TryGetValue(key, out var v) && v.ValueKind == JsonValueKind.String && Guid.TryParse(v.GetString(), out var id) ? id : null;
 }

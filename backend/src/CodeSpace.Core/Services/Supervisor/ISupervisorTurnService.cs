@@ -26,8 +26,8 @@ public interface ISupervisorTurnService
     /// <summary>Fold the run's decision ledger (team-scoped, <c>Sequence</c> order) into a turn context: terminal decisions replayed (outcome only), the one in-flight decision identified, <c>TurnNumber</c> = decided count. <paramref name="nodeId"/> stamps the per-turn-per-spawn AgentRun wait key (<c>&lt;nodeId&gt;#turn{N}#{k}</c>). Pure-ish (reads the ledger, no writes).</summary>
     Task<SupervisorTurnContext> RehydrateFromDecisionLogAsync(Guid supervisorRunId, Guid teamId, string nodeId, string goal, CancellationToken cancellationToken);
 
-    /// <summary>Run one turn for the run: rehydrate → budget → decide → claim + execute exactly-once → record terminal → return finish / self-advance / park-on-agent-waits. The exactly-once decision step.</summary>
-    Task<SupervisorTurnResult> RunTurnAsync(Guid supervisorRunId, Guid teamId, string nodeId, string goal, CancellationToken cancellationToken);
+    /// <summary>Run one turn for the run: rehydrate → budget → decide → claim + execute exactly-once → record terminal → return finish / self-advance / park-on-agent-waits / park-on-human. The exactly-once decision step. <paramref name="conversationId"/> is the run's own team conversation an ask_human turn posts its question card into (null = no HITL surface authored → ask_human degrades to a no-surface self-advance).</summary>
+    Task<SupervisorTurnResult> RunTurnAsync(Guid supervisorRunId, Guid teamId, string nodeId, string goal, Guid? conversationId, CancellationToken cancellationToken);
 
     /// <summary>
     /// Count the run's still-PENDING <c>AgentRun</c> waits a PRIOR async turn (spawn/retry) staged for this
@@ -37,4 +37,13 @@ public interface ISupervisorTurnService
     /// 0 → no in-flight async turn, run the next turn normally.
     /// </summary>
     Task<int> CountPendingAgentWaitsAsync(Guid supervisorRunId, string nodeId, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// The correlation token of the run's still-PENDING ask_human <c>Action</c> wait this node parked on
+    /// (null when none). The HUMAN-park analogue of <see cref="CountPendingAgentWaitsAsync"/>: an ask_human
+    /// decision is a SETTLED ledger row, so a restart-while-parked would otherwise let the rehydrate advance
+    /// past it — but the human hasn't answered, so the node must re-park on the EXISTING Action wait, never
+    /// advance + never re-post the question. Non-null → re-suspend on that token; null → no parked question.
+    /// </summary>
+    Task<string?> PendingHumanWaitTokenAsync(Guid supervisorRunId, string nodeId, CancellationToken cancellationToken);
 }

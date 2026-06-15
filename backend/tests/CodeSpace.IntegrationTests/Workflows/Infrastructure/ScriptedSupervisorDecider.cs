@@ -23,13 +23,33 @@ public sealed class ScriptedSupervisorDecider : ISupervisorDecider
 
     public ScriptedSupervisorDecider(SupervisorDecisionScript script) { _script = script; }
 
+    /// <summary>The question the AskHumanStop arc asks at turn 0 — the integration test asserts the posted card body + the recorded outcome carry it.</summary>
+    public const string AskQuestion = "which approach: rewrite or patch?";
+
     public Task<SupervisorDecision> DecideAsync(SupervisorTurnContext context, CancellationToken cancellationToken)
     {
-        var decision = _script.Mode == SupervisorScriptMode.PlanSpawnStop
-            ? PlanSpawnStop(context)
-            : PlanThenStop(context);
+        var decision = _script.Mode switch
+        {
+            SupervisorScriptMode.PlanSpawnStop => PlanSpawnStop(context),
+            SupervisorScriptMode.AskHumanStop => AskHumanStop(context),
+            _ => PlanThenStop(context),
+        };
 
         return Task.FromResult(decision);
+    }
+
+    // E4 arc: turn 0 ask_human("which approach?") → turn 1 stop, but the stop's summary ECHOES the folded human
+    // answer the decider reads off the prior ask_human decision's outcome — proving the answer reached the next
+    // turn's context. A turn-0 re-entry (before the human answers) re-emits the SAME ask_human (idempotent key).
+    private static SupervisorDecision AskHumanStop(SupervisorTurnContext context)
+    {
+        if (context.TurnNumber == 0)
+            return Canonical(SupervisorDecisionKinds.AskHuman, new SupervisorAskHumanPayload { Question = AskQuestion });
+
+        var priorAsk = context.PriorDecisions.LastOrDefault(d => d.DecisionKind == SupervisorDecisionKinds.AskHuman);
+        var answer = SupervisorOutcome.ReadAskHumanAnswer(priorAsk?.OutcomeJson) ?? "<no answer folded>";
+
+        return Canonical(SupervisorDecisionKinds.Stop, new SupervisorStopPayload { Outcome = "completed", Summary = $"human said: {answer}" });
     }
 
     // E2 arc: turn 0 plan → every later turn stop. The plan still records 2 subtasks (legible replay tape).
@@ -70,10 +90,13 @@ public sealed class SupervisorDecisionScript
     public void PlanThenStop() => Mode = SupervisorScriptMode.PlanThenStop;
 
     public void PlanSpawnStop() => Mode = SupervisorScriptMode.PlanSpawnStop;
+
+    public void AskHumanStop() => Mode = SupervisorScriptMode.AskHumanStop;
 }
 
 public enum SupervisorScriptMode
 {
     PlanThenStop,
     PlanSpawnStop,
+    AskHumanStop,
 }

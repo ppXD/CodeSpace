@@ -1,4 +1,5 @@
 using System.Text.Json;
+using CodeSpace.Core.Services.Agents;
 
 namespace CodeSpace.Core.Services.Supervisor;
 
@@ -33,6 +34,65 @@ public static class SupervisorOutcome
         catch (JsonException)
         {
             return 0;
+        }
+    }
+
+    /// <summary>The Action wait IterationKey an ask_human turn parks on: <c>&lt;nodeId&gt;#turn{N}#ask</c> (mirroring the spawn key's <c>#turn{N}#{k}</c> shape). Distinct per turn so a later ask_human turn never collides with this one.</summary>
+    public static string HumanWaitKey(string nodeId, int turnNumber) => $"{nodeId}#turn{turnNumber}#ask";
+
+    /// <summary>Read the human-wait correlation token a recorded ask_human outcome posted its question card on (null when the outcome has none — a non-ask_human verb, or an ask_human that degraded to a no-surface stop). A replay re-derives the SAME park-on-human classification + token WITHOUT re-posting.</summary>
+    public static string? ReadHumanWaitToken(string? outcomeJson)
+    {
+        if (string.IsNullOrWhiteSpace(outcomeJson)) return null;
+
+        try
+        {
+            var root = JsonDocument.Parse(outcomeJson).RootElement;
+
+            return root.ValueKind == JsonValueKind.Object && root.TryGetProperty("askHumanToken", out var t) && t.ValueKind == JsonValueKind.String
+                ? t.GetString()
+                : null;
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>Read the question an ask_human outcome asked (null when absent/malformed) — folded with the recorded answer into the next turn's context so the decider sees "you asked X".</summary>
+    public static string? ReadAskHumanQuestion(string? outcomeJson) => ReadStringField(outcomeJson, "question");
+
+    /// <summary>
+    /// Build an ask_human outcome JSON from its parts — the question, the question-card wait token, and the
+    /// human's answer (null until answered). The single canonical shape the executor records on first execution
+    /// (answer null) and the rehydrate FOLD re-stamps once the human's answer durably exists, so the decider
+    /// reads "you asked X, the human answered Y" off the next turn's prior-decision outcome. Pure + deterministic.
+    /// </summary>
+    public static string FoldAnswer(string? question, string token, string? answer) =>
+        JsonSerializer.Serialize(new { question, askHumanToken = token, answer }, AgentJson.Options);
+
+    /// <summary>Read the human's recorded answer text from an ask_human outcome (null until the wait resolved + the answer was folded in). The decider sees "you asked X, the human answered Y" on the next turn.</summary>
+    public static string? ReadAskHumanAnswer(string? outcomeJson) => ReadStringField(outcomeJson, "answer");
+
+    /// <summary>Read the human's free-text answer (the <c>comment</c>) from a resolved Action wait's <c>{ action, by, comment }</c> payload. Empty string when absent/malformed (a click with no comment). The rehydrate fold AND the executor's resolved-wait recovery both read the answer through here.</summary>
+    public static string ReadAnswerComment(string? payloadJson) => ReadStringField(payloadJson, "comment") ?? "";
+
+    /// <summary>Best-effort read of a top-level string field from an outcome object (null when absent / malformed / not a string).</summary>
+    private static string? ReadStringField(string? outcomeJson, string field)
+    {
+        if (string.IsNullOrWhiteSpace(outcomeJson)) return null;
+
+        try
+        {
+            var root = JsonDocument.Parse(outcomeJson).RootElement;
+
+            return root.ValueKind == JsonValueKind.Object && root.TryGetProperty(field, out var v) && v.ValueKind == JsonValueKind.String
+                ? v.GetString()
+                : null;
+        }
+        catch (JsonException)
+        {
+            return null;
         }
     }
 
