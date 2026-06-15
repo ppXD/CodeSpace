@@ -10,8 +10,12 @@ namespace CodeSpace.Messages.Dtos.Workflows;
 public sealed record WorkflowRunDetail
 {
     public required Guid Id { get; init; }
-    public required Guid WorkflowId { get; init; }
-    public required int WorkflowVersion { get; init; }
+
+    /// <summary>Parent workflow id for an authored run. <c>null</c> for a snapshot run (it has no parent workflow).</summary>
+    public Guid? WorkflowId { get; init; }
+
+    /// <summary>Pinned version for an authored run. <c>null</c> for a snapshot run.</summary>
+    public int? WorkflowVersion { get; init; }
 
     /// <summary>Open-string source identifier (from request.source_type). e.g. "manual", "provider.github.pull_request".</summary>
     public required string SourceType { get; init; }

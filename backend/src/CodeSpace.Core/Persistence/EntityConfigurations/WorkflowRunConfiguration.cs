@@ -13,7 +13,13 @@ public class WorkflowRunConfiguration : IEntityTypeConfiguration<WorkflowRun>
         builder.Property(r => r.Status).HasConversion<string>().HasMaxLength(16);
         builder.Property(r => r.OutputsJson).HasColumnName("outputs_jsonb").HasColumnType("jsonb");
 
-        builder.HasOne(r => r.Workflow).WithMany().HasForeignKey(r => r.WorkflowId);
+        // Inline frozen definition for a SNAPSHOT run (dynamic-workflows substrate). NULL for an
+        // authored run, which loads its definition from the pinned WorkflowVersion instead.
+        builder.Property(r => r.DefinitionSnapshotJson).HasColumnName("definition_snapshot_jsonb").HasColumnType("jsonb");
+        builder.Property(r => r.DefinitionSnapshotHash).HasColumnName("definition_snapshot_hash");
+
+        // WorkflowId is nullable now (a snapshot run has no parent workflow), so the FK is optional.
+        builder.HasOne(r => r.Workflow).WithMany().HasForeignKey(r => r.WorkflowId).IsRequired(false);
 
         builder.HasOne(r => r.RunRequest).WithMany().HasForeignKey(r => r.RunRequestId).IsRequired();
 

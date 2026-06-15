@@ -3,10 +3,17 @@ using CodeSpace.Messages.Enums;
 namespace CodeSpace.Core.Persistence.Entities;
 
 /// <summary>
-/// One execution. Pinned to <see cref="WorkflowVersion"/> via composite FK
+/// One execution. An AUTHORED run is pinned to <see cref="WorkflowVersion"/> via composite FK
 /// (WorkflowId, WorkflowVersion) so the engine reads the EXACT JSON that was live when
 /// this run started — never the latest one. Status moves Pending → Running → Success/Failure;
 /// Cancelled is operator-initiated mid-flight.
+///
+/// <para>A SNAPSHOT run (dynamic-workflows substrate) instead carries its own frozen definition
+/// inline via <see cref="DefinitionSnapshotJson"/> + <see cref="DefinitionSnapshotHash"/> and
+/// leaves <see cref="WorkflowId"/> / <see cref="WorkflowVersion"/> null — there is NO Workflow
+/// row and NO WorkflowVersion row behind it. The engine forks on
+/// <see cref="DefinitionSnapshotJson"/>: null ⇒ the authored (WorkflowId, Version) lookup;
+/// non-null ⇒ the inline snapshot. Everything downstream walks the loaded definition unchanged.</para>
 ///
 /// Source-of-run metadata (kind / payload) lives on <see cref="WorkflowRunRequest"/>. Every
 /// run row carries a back-pointer via <see cref="RunRequestId"/>; the engine resolves the
@@ -15,8 +22,27 @@ namespace CodeSpace.Core.Persistence.Entities;
 public class WorkflowRun : IEntity<Guid>, IAuditable
 {
     public Guid Id { get; set; }
-    public Guid WorkflowId { get; set; }
-    public int WorkflowVersion { get; set; }
+
+    /// <summary>Parent workflow id for an authored run. NULL for a snapshot run (it carries its own <see cref="DefinitionSnapshotJson"/>).</summary>
+    public Guid? WorkflowId { get; set; }
+
+    /// <summary>Pinned version for an authored run. NULL for a snapshot run.</summary>
+    public int? WorkflowVersion { get; set; }
+
+    /// <summary>
+    /// The inline FROZEN <c>WorkflowDefinition</c> JSON this run executes when it is NOT backed by a
+    /// <see cref="WorkflowVersion"/>. NULL for authored runs (they load definition_json from their
+    /// pinned version). When non-null the engine deserialises + walks this JSON directly and creates
+    /// NO Workflow / WorkflowVersion row. The dynamic-workflows substrate.
+    /// </summary>
+    public string? DefinitionSnapshotJson { get; set; }
+
+    /// <summary>
+    /// SHA-256 canonical hash of <see cref="DefinitionSnapshotJson"/> (same <c>DefinitionHash.Compute</c>
+    /// a <see cref="WorkflowVersion"/> row carries). The engine recomputes + compares it at load time;
+    /// a mismatch throws the same tamper exception as a drifted authored version. NULL for authored runs.
+    /// </summary>
+    public string? DefinitionSnapshotHash { get; set; }
 
     /// <summary>
     /// Denormalised from <c>workflow.team_id</c> at row insert. Every team-scoped query filters
@@ -76,7 +102,8 @@ public class WorkflowRun : IEntity<Guid>, IAuditable
     public DateTimeOffset LastModifiedDate { get; set; }
     public Guid LastModifiedBy { get; set; }
 
-    public Workflow Workflow { get; set; } = default!;
+    /// <summary>Nav to the parent workflow for an authored run. NULL for a snapshot run (no parent workflow).</summary>
+    public Workflow? Workflow { get; set; }
 
     /// <summary>Nav property to the upstream request. Always present (FK is NOT NULL).</summary>
     public WorkflowRunRequest RunRequest { get; set; } = default!;

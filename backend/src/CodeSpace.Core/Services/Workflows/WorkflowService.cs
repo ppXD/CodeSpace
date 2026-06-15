@@ -271,10 +271,15 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
         // runs return null and we conflate not-found with not-yours per the standard pattern.
         var original = await _db.WorkflowRun.AsNoTracking()
             .Include(r => r.RunRequest)
-            .Where(r => r.Id == originalRunId && r.Workflow.TeamId == teamId)
+            .Where(r => r.Id == originalRunId && r.TeamId == teamId)
             .SingleOrDefaultAsync(cancellationToken)
             .ConfigureAwait(false)
             ?? throw new KeyNotFoundException($"WorkflowRun {originalRunId} not found in team {teamId}.");
+
+        // Replay re-runs through the authored (WorkflowId, Version) path. A snapshot run has neither
+        // — replaying an inline-definition run is a later dynamic-workflows slice, not this substrate.
+        if (original.WorkflowId is null)
+            throw new NotSupportedException($"WorkflowRun {originalRunId} is a snapshot run (no parent workflow) and cannot be replayed yet.");
 
         // Clone the snapshot rows onto the new run id BEFORE we save the run. The engine
         // detects an existing snapshot to fork into the replay path; ordering matters less
@@ -292,8 +297,8 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
         var replayRunId = await _runStarter.StartAsync(new RunSourceEnvelope
         {
             TeamId = teamId,
-            WorkflowId = original.WorkflowId,
-            WorkflowVersion = original.WorkflowVersion,
+            WorkflowId = original.WorkflowId.Value,
+            WorkflowVersion = original.WorkflowVersion!.Value,
             SourceType = WorkflowRunSourceTypes.Replay,
             ActorType = WorkflowRunActorTypes.User,
             ActorId = actorUserId,
@@ -338,7 +343,7 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
     {
         // Tenancy — the run's workflow must belong to the caller's team (404 conflated with not-yours).
         var exists = await _db.WorkflowRun
-            .AnyAsync(r => r.Id == runId && r.Workflow.TeamId == teamId, cancellationToken).ConfigureAwait(false);
+            .AnyAsync(r => r.Id == runId && r.TeamId == teamId, cancellationToken).ConfigureAwait(false);
         if (!exists) throw new KeyNotFoundException($"WorkflowRun {runId} not found in team {teamId}.");
 
         // Resolve the run's pending Approval wait — the OLDEST one, so two parallel approvals resolve
@@ -564,7 +569,10 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
             .SingleOrDefaultAsync(r => r.Id == runId, cancellationToken)
             .ConfigureAwait(false);
         if (run == null) return null;
-        if (run.Workflow.TeamId != teamId) return null;
+
+        // Tenancy via the denormalised run.TeamId — same value as run.Workflow.TeamId for an authored
+        // run, and the ONLY team source for a snapshot run (which has no parent Workflow row).
+        if (run.TeamId != teamId) return null;
 
         var nodes = await _db.WorkflowRunNode.Where(n => n.RunId == runId).OrderBy(n => n.StartedAt).ToListAsync(cancellationToken).ConfigureAwait(false);
         var normalizedPayload = SafeParseJson(run.RunRequest?.NormalizedPayloadJson);
@@ -586,7 +594,7 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
         // nodeId → typeKey from the run's VERSION-PINNED definition (the exact JSON this run executed),
         // so each iterated row can be stamped with its owning container's kind. Disambiguates a map
         // branch key ("<mapId>#<i>") from a loop body key ("<loopId>#<i>"), which share a shape.
-        var typeKeyByNodeId = await LoadNodeTypeKeysAsync(run.WorkflowId, run.WorkflowVersion, cancellationToken).ConfigureAwait(false);
+        var typeKeyByNodeId = await LoadNodeTypeKeysAsync(run, cancellationToken).ConfigureAwait(false);
 
         return new WorkflowRunDetail
         {
@@ -743,10 +751,13 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
     /// pinned <c>WorkflowVersion.DefinitionJson</c>. Empty when the version row is missing or unparsable
     /// (so every row falls back to a <c>null</c> container kind — no crash, just no badge).
     /// </summary>
-    private async Task<IReadOnlyDictionary<string, string>> LoadNodeTypeKeysAsync(Guid workflowId, int version, CancellationToken cancellationToken)
+    private async Task<IReadOnlyDictionary<string, string>> LoadNodeTypeKeysAsync(WorkflowRun run, CancellationToken cancellationToken)
     {
-        var definitionJson = await _db.WorkflowVersion.AsNoTracking()
-            .Where(v => v.WorkflowId == workflowId && v.Version == version)
+        // A snapshot run's definition is inline on the run row (no workflow_version to read); an
+        // authored run reads its version-pinned JSON. Either way we map nodeId → typeKey from the
+        // EXACT JSON this run executed.
+        var definitionJson = run.DefinitionSnapshotJson ?? await _db.WorkflowVersion.AsNoTracking()
+            .Where(v => v.WorkflowId == run.WorkflowId && v.Version == run.WorkflowVersion)
             .Select(v => v.DefinitionJson)
             .FirstOrDefaultAsync(cancellationToken).ConfigureAwait(false);
 
