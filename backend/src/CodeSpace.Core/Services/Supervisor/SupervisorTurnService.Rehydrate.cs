@@ -1,6 +1,8 @@
 using System.Text.Json;
 using CodeSpace.Core.Services.Agents;
 using CodeSpace.Messages.Agents;
+using CodeSpace.Messages.Constants;
+using Microsoft.EntityFrameworkCore;
 
 namespace CodeSpace.Core.Services.Supervisor;
 
@@ -11,7 +13,7 @@ namespace CodeSpace.Core.Services.Supervisor;
 /// </summary>
 public sealed partial class SupervisorTurnService
 {
-    public async Task<SupervisorTurnContext> RehydrateFromDecisionLogAsync(Guid supervisorRunId, Guid teamId, string goal, CancellationToken cancellationToken)
+    public async Task<SupervisorTurnContext> RehydrateFromDecisionLogAsync(Guid supervisorRunId, Guid teamId, string nodeId, string goal, CancellationToken cancellationToken)
     {
         var rows = await _ledger.GetForRunAsync(supervisorRunId, teamId, cancellationToken).ConfigureAwait(false);
 
@@ -36,11 +38,20 @@ public sealed partial class SupervisorTurnService
         return new SupervisorTurnContext
         {
             Goal = goal,
+            SupervisorRunId = supervisorRunId,
+            TeamId = teamId,
+            NodeId = nodeId,
             TurnNumber = priorDecisions.Count,
             PriorDecisions = priorDecisions,
             InFlight = inFlight,
         };
     }
+
+    public async Task<int> CountPendingAgentWaitsAsync(Guid supervisorRunId, string nodeId, CancellationToken cancellationToken) =>
+        await _db.WorkflowRunWait.AsNoTracking()
+            .CountAsync(w => w.RunId == supervisorRunId && w.NodeId == nodeId
+                             && w.WaitKind == WorkflowWaitKinds.AgentRun && w.Status == WorkflowWaitStatuses.Pending, cancellationToken)
+            .ConfigureAwait(false);
 
     private static SupervisorPriorDecision ToPriorDecision(Persistence.Entities.SupervisorDecisionRecord row) => new()
     {

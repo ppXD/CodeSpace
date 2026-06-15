@@ -2312,6 +2312,17 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
 
         var waitKind = ValidateWaitKind(node.Id, token.Kind);
 
+        // SupervisorAgentWaits is a SUSPEND MARKER, not a wait the engine stages: a spawn/retry turn's executor
+        // ALREADY staged the K real AgentRun waits (keyed <nodeId>#turn{N}#{k}). We record node.suspended (the
+        // run-detail surface) but stage NO extra wait + schedule NO self-advance — the agents' completion +
+        // the wait-for-all barrier drive the supervisor's next turn. The K AgentRun rows are dispatched by the
+        // post-Suspended-commit DispatchPendingAgentRunAsync (the SAME path agent.code uses).
+        if (waitKind == WorkflowWaitKinds.SupervisorAgentWaits)
+        {
+            await _recordLogger.NodeSuspendedAsync(run.Id, node.Id, token.IterationKey ?? iterationKey, waitKind, wakeAt: null, cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
         // A self-re-entrant node (agent.supervisor) supplies a per-suspension key (<nodeId>#turn{N}) so the
         // SAME node id parks a DISTINCT (run, node, iteration) row each turn — no unique-index collision, no
         // NodeId-keyed resume-payload clobber. Otherwise use the walk-context key (NoIteration at top level,
@@ -2373,9 +2384,9 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
 
     internal static string ValidateWaitKind(string nodeId, string kind)
     {
-        if (kind is WorkflowWaitKinds.Timer or WorkflowWaitKinds.Approval or WorkflowWaitKinds.Callback or WorkflowWaitKinds.Subworkflow or WorkflowWaitKinds.Action or WorkflowWaitKinds.AgentRun or WorkflowWaitKinds.SupervisorDecision) return kind;
+        if (kind is WorkflowWaitKinds.Timer or WorkflowWaitKinds.Approval or WorkflowWaitKinds.Callback or WorkflowWaitKinds.Subworkflow or WorkflowWaitKinds.Action or WorkflowWaitKinds.AgentRun or WorkflowWaitKinds.SupervisorDecision or WorkflowWaitKinds.SupervisorAgentWaits) return kind;
 
-        throw new NodeFailureException($"Node '{nodeId}' suspended with unknown wait kind '{kind}'. Expected Timer, Approval, Callback, Subworkflow, Action, AgentRun, or SupervisorDecision.");
+        throw new NodeFailureException($"Node '{nodeId}' suspended with unknown wait kind '{kind}'. Expected Timer, Approval, Callback, Subworkflow, Action, AgentRun, SupervisorDecision, or SupervisorAgentWaits.");
     }
 
     /// <summary>

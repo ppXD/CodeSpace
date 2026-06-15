@@ -22,9 +22,9 @@ public class SupervisorTurnLoopTests
     // ── The stub decider's deterministic script (turn 0 plan → turn 1 stop) ──────────
 
     [Fact]
-    public void Turn0_plans_with_the_fixed_subtask_list()
+    public async Task Turn0_plans_with_the_fixed_subtask_list()
     {
-        var decision = _decider.Decide(Context(turnNumber: 0));
+        var decision = await _decider.DecideAsync(Context(turnNumber: 0), CancellationToken.None);
 
         decision.Kind.ShouldBe(SupervisorDecisionKinds.Plan);
         decision.IsTerminal.ShouldBeFalse("a plan is not terminal — the loop re-enters for the next turn");
@@ -37,20 +37,20 @@ public class SupervisorTurnLoopTests
     [InlineData(1)]
     [InlineData(2)]
     [InlineData(5)]
-    public void Every_turn_after_the_first_stops(int turnNumber)
+    public async Task Every_turn_after_the_first_stops(int turnNumber)
     {
-        var decision = _decider.Decide(Context(turnNumber));
+        var decision = await _decider.DecideAsync(Context(turnNumber), CancellationToken.None);
 
         decision.Kind.ShouldBe(SupervisorDecisionKinds.Stop);
         decision.IsTerminal.ShouldBeTrue("a stop ends the loop");
     }
 
     [Fact]
-    public void The_decider_is_deterministic_in_the_turn_number()
+    public async Task The_decider_is_deterministic_in_the_turn_number()
     {
         // Same turn → byte-identical payload (the exactly-once-on-replay property the ledger relies on).
-        _decider.Decide(Context(0)).PayloadJson.ShouldBe(_decider.Decide(Context(0)).PayloadJson);
-        _decider.Decide(Context(1)).PayloadJson.ShouldBe(_decider.Decide(Context(1)).PayloadJson);
+        (await _decider.DecideAsync(Context(0), CancellationToken.None)).PayloadJson.ShouldBe((await _decider.DecideAsync(Context(0), CancellationToken.None)).PayloadJson);
+        (await _decider.DecideAsync(Context(1), CancellationToken.None)).PayloadJson.ShouldBe((await _decider.DecideAsync(Context(1), CancellationToken.None)).PayloadJson);
     }
 
     // ── Per-turn idempotency key + IterationKey are DISTINCT per turn (must-fix #1) ──
@@ -96,11 +96,12 @@ public class SupervisorTurnLoopTests
     {
         var executor = new StubSupervisorActionExecutor();
 
-        var planOutcome = await executor.ExecuteAsync(_decider.Decide(Context(0)), Context(0), CancellationToken.None);
-        JsonDocument.Parse(planOutcome).RootElement.GetProperty("planned").EnumerateArray().Count().ShouldBe(StubSupervisorDecider.StubPlannedSubtasks.Count);
+        var planOutcome = await executor.ExecuteAsync(await _decider.DecideAsync(Context(0), CancellationToken.None), Context(0), CancellationToken.None);
+        planOutcome.ParkedAgentWaitCount.ShouldBe(0, "the stub's outcomes are all synchronous (no staged agent waits)");
+        JsonDocument.Parse(planOutcome.OutcomeJson).RootElement.GetProperty("planned").EnumerateArray().Count().ShouldBe(StubSupervisorDecider.StubPlannedSubtasks.Count);
 
-        var stopOutcome = await executor.ExecuteAsync(_decider.Decide(Context(1)), Context(1), CancellationToken.None);
-        JsonDocument.Parse(stopOutcome).RootElement.GetProperty("stopped").GetBoolean().ShouldBeTrue();
+        var stopOutcome = await executor.ExecuteAsync(await _decider.DecideAsync(Context(1), CancellationToken.None), Context(1), CancellationToken.None);
+        JsonDocument.Parse(stopOutcome.OutcomeJson).RootElement.GetProperty("stopped").GetBoolean().ShouldBeTrue();
     }
 
     // ── Pins (Rule 8) ────────────────────────────────────────────────────────────────

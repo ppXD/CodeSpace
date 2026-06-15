@@ -4,18 +4,44 @@ namespace CodeSpace.Core.Services.Supervisor;
 
 /// <summary>
 /// Executes the SIDE EFFECT of a claimed supervisor decision (PR-E E2 seam, Rule 7) — the action half of a
-/// turn, run EXACTLY ONCE behind the ledger's Pending → Running claim. E2 ships a STUB
-/// (<c>StubSupervisorActionExecutor</c>: plan → record a fixed planned-list outcome; stop → a completion
-/// marker — neither touches the real plan/spawn machinery). E3 swaps in the real executors (spawn an
-/// agent.code child, fan out subtasks, …) behind the SAME interface, so the turn loop + claim hop never
+/// turn, run EXACTLY ONCE behind the ledger's Pending → Running claim. E2 shipped a STUB; E3 swaps in the
+/// real <c>RealSupervisorActionExecutor</c> behind the SAME interface (spawn fans out real agent.code child
+/// runs, plan calls the real planner, merge synthesizes prior results), so the turn loop + claim hop never
 /// change.
 ///
-/// <para>Pure-of-ledger: the executor performs the action and returns the outcome JSON; the turn service
-/// owns the claim + the terminal record. Deterministic for the stub (same decision → same outcome). The
-/// stub is stateless → a singleton; E3's real executors pick their own lifetime.</para>
+/// <para>Pure-of-ledger: the executor performs the action and returns a <see cref="SupervisorExecution"/>
+/// (the outcome JSON recorded as the ledger row's terminal outcome + the DUAL-PATH classification the node
+/// reads to decide how to suspend). The turn service owns the claim + the terminal record. SYNCHRONOUS verbs
+/// (plan / merge / stop / ask_human) settle in-process (<see cref="SupervisorExecution.ParkedAgentWaitCount"/>
+/// == 0 → the node self-advances or finishes); ASYNC verbs (spawn / retry) stage K real <c>AgentRun</c>
+/// <c>WorkflowRunWait</c> rows themselves (count &gt; 0 → the node parks on THOSE waits, the barrier resumes
+/// it once all K finish). The real executor is scoped (it touches the DB + the agent-run service).</para>
 /// </summary>
 public interface ISupervisorActionExecutor
 {
-    /// <summary>Run the decision's side effect and return its outcome JSON (recorded as the ledger row's terminal outcome). Called ONCE per decision, after the caller won the Pending → Running claim.</summary>
-    Task<string> ExecuteAsync(SupervisorDecision decision, SupervisorTurnContext context, CancellationToken cancellationToken);
+    /// <summary>Run the decision's side effect and return its outcome + suspend classification. Called ONCE per decision, after the caller won the Pending → Running claim.</summary>
+    Task<SupervisorExecution> ExecuteAsync(SupervisorDecision decision, SupervisorTurnContext context, CancellationToken cancellationToken);
+}
+
+/// <summary>
+/// What executing one decision resolved to (PR-E E3 — a data noun): the terminal outcome JSON (recorded on the
+/// ledger row) plus the DUAL-PATH suspend classification. <see cref="ParkedAgentWaitCount"/> == 0 means the
+/// decision was SYNCHRONOUS — the node self-advances to the next turn (plan / merge) or finishes (stop). A
+/// value &gt; 0 means the executor staged that many real <c>AgentRun</c> waits (spawn / retry) and the node
+/// must SUSPEND on them — NOT self-advance — so the wait-for-all barrier (resumed by the agents' completion)
+/// drives the next turn.
+/// </summary>
+public sealed record SupervisorExecution
+{
+    /// <summary>The terminal outcome JSON recorded as the decision's ledger outcome (e.g. the planned subtasks, the spawned agent-run ids, the merge synthesis, the stop summary).</summary>
+    public required string OutcomeJson { get; init; }
+
+    /// <summary>How many real <c>AgentRun</c> waits the executor staged for this decision. 0 = synchronous (self-advance / finish); &gt; 0 = async (the node parks on these waits; the barrier resumes once all complete).</summary>
+    public int ParkedAgentWaitCount { get; init; }
+
+    /// <summary>A synchronous execution — the node self-advances (plan / merge) or finishes (stop). The common shape for the in-process verbs.</summary>
+    public static SupervisorExecution Synchronous(string outcomeJson) => new() { OutcomeJson = outcomeJson, ParkedAgentWaitCount = 0 };
+
+    /// <summary>An async execution that staged <paramref name="agentWaitCount"/> real AgentRun waits — the node parks on them (the barrier drives the resume).</summary>
+    public static SupervisorExecution ParkedOnAgents(string outcomeJson, int agentWaitCount) => new() { OutcomeJson = outcomeJson, ParkedAgentWaitCount = agentWaitCount };
 }
