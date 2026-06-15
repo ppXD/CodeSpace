@@ -58,8 +58,9 @@ public class TaskLaunchFlowTests
 
         // A chat task at an explicit quick effort, analysis-only (no repo → no clone, the proven fake-CLI shape).
         // The launch service derives the seed, routes (explicit tier ⇒ no confirm; quick ⇒ single-agent), projects
-        // single-agent, and starts the snapshot run. (Explicit standard/deep now route the multi-agent map-fanout
-        // shape — covered by PlanMapSynthFanoutFlowTests; this single-agent E2E pins the quick tier.)
+        // single-agent, and starts the snapshot run. (Explicit standard routes the multi-agent map-fanout shape
+        // — covered by PlanMapSynthFanoutFlowTests; deep routes the supervisor lane — covered by
+        // SupervisorProjectionFlowTests; this single-agent E2E pins the quick tier.)
         var request = new TaskLaunchRequest
         {
             TeamId = teamId,

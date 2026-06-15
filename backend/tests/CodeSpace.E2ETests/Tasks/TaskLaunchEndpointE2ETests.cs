@@ -52,7 +52,7 @@ public sealed class TaskLaunchEndpointE2ETests : IClassFixture<TaskLaunchApiFact
             Content = JsonContent.Create(new
             {
                 taskText = "Work on the auth refactor",
-                effort = "quick",   // quick → single-agent (the shape this single-agent E2E asserts); standard/deep now route map-fanout
+                effort = "quick",   // quick → single-agent (the shape this single-agent E2E asserts); standard → map-fanout, deep → supervisor
                 harness = "codex-cli",
                 runnerKind = "local",
                 autonomy = "Confined",

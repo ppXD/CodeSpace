@@ -2,11 +2,13 @@ using CodeSpace.Core.Services.Tasks.Bounds;
 using CodeSpace.Core.Services.Tasks.Bounds.Presets.Deep;
 using CodeSpace.Core.Services.Tasks.Bounds.Presets.Quick;
 using CodeSpace.Core.Services.Tasks.Bounds.Presets.Standard;
+using CodeSpace.Core.Services.Tasks.Capabilities;
 using CodeSpace.Core.Services.Tasks.Effort;
 using CodeSpace.Core.Services.Tasks.Effort.Classifiers.Heuristic;
 using CodeSpace.Core.Services.Tasks.Recipes;
 using CodeSpace.Core.Services.Tasks.Recipes.MapFanout;
 using CodeSpace.Core.Services.Tasks.Recipes.SingleAgent;
+using CodeSpace.Core.Services.Tasks.Recipes.Supervisor;
 using CodeSpace.Messages.Tasks;
 using CodeSpace.Messages.Tasks.Effort;
 using Shouldly;
@@ -14,20 +16,24 @@ using Shouldly;
 namespace CodeSpace.UnitTests.Workflows;
 
 /// <summary>
-/// Pins the L2 effort router over the REAL production registries (the heuristic classifier, the single-agent
-/// recipe, the three bounds presets) — the FLAT pipeline that turns a request into a RoutePlan. Covers the
-/// non-auto operator path (no classifier, no confirm card, the requested tier + its caps), the auto path (the
-/// heuristic always-confirms, with confirm options DERIVED from the bounds registry), the RequestedProjection
-/// escape hatch, and the CapsOverride merge. The GENERICITY contract test (a fake classifier / recipe / bounds
-/// resolved with zero router edit) lives in <see cref="EffortRouterGenericityTests"/>.
+/// Pins the L2 effort router over the REAL production registries (the heuristic classifier, the single-agent /
+/// map-fanout / supervisor recipes, the three bounds presets) — the FLAT pipeline that turns a request into a
+/// RoutePlan. Covers the non-auto operator path (no classifier, no confirm card, the requested tier + its caps),
+/// the auto path (the heuristic always-confirms, with confirm options DERIVED from the bounds registry), the
+/// RequestedProjection escape hatch, and the CapsOverride merge. The supervisor-lane DEGRADE pins (lane on →
+/// supervisor, lane off → map-fanout + DegradedReason) live in <see cref="EffortRouterDegradeTests"/>; the
+/// GENERICITY contract test lives in <see cref="EffortRouterGenericityTests"/>. The supervisor-lane capability
+/// is reported AVAILABLE here (a fixed probe) so an explicit <c>deep</c> reaches the supervisor recipe
+/// deterministically, independent of the ambient env flag.
 /// </summary>
 [Trait("Category", "Unit")]
 public class EffortRouterTests
 {
     private static EffortRouter Router() => new(
         new EffortClassifierRegistry(new IEffortClassifier[] { new HeuristicEffortClassifier() }),
-        new TaskRecipeRegistry(new ITaskRecipe[] { new SingleAgentRecipe(), new MapFanoutRecipe() }),
-        new BoundsPresetRegistry(new IBoundsPreset[] { new QuickBoundsPreset(), new StandardBoundsPreset(), new DeepBoundsPreset() }));
+        new TaskRecipeRegistry(new ITaskRecipe[] { new SingleAgentRecipe(), new MapFanoutRecipe(), new SupervisorRecipe() }),
+        new BoundsPresetRegistry(new IBoundsPreset[] { new QuickBoundsPreset(), new StandardBoundsPreset(), new DeepBoundsPreset() }),
+        new CapabilityProbeRegistry(new ICapabilityProbe[] { new FixedProbe(TaskCapabilities.SupervisorLane, available: true) }));
 
     private static EffortRouteRequest Request(string goal, string? requestedEffort = null, string? requestedRecipe = null, string? requestedProjection = null, RouteCaps? capsOverride = null) => new()
     {
@@ -120,17 +126,28 @@ public class EffortRouterTests
         plan.ProjectionKind.ShouldBe(TaskProjectionKinds.SingleAgent);
     }
 
-    // ─── THE gap-closure pins: an explicit effort tier (no requested recipe) → the recipe that SERVES it ───
+    // ─── THE effort-tier pins: an explicit effort tier (no requested recipe) → the recipe that SERVES it ───
 
-    [Theory]
-    [InlineData(TaskEffortModes.Standard)]   // standard → map-fanout (MapFanoutRecipe.ServesEfforts)
-    [InlineData(TaskEffortModes.Deep)]       // deep → map-fanout too (PR6 supervisor deferred)
-    public async Task Explicit_standard_or_deep_routes_the_map_fanout_recipe_and_plan_map_synth_projection(string tier)
+    [Fact]
+    public async Task Explicit_standard_routes_the_map_fanout_recipe_and_plan_map_synth_projection()
     {
-        var plan = await Router().RouteAsync(Request("Improve onboarding", requestedEffort: tier), CancellationToken.None);
+        var plan = await Router().RouteAsync(Request("Improve onboarding", requestedEffort: TaskEffortModes.Standard), CancellationToken.None);
 
-        plan.RecipeKind.ShouldBe(TaskRecipeKinds.MapFanout, $"explicit '{tier}' is served by the map-fanout recipe — the gap PR3 left open");
+        plan.RecipeKind.ShouldBe(TaskRecipeKinds.MapFanout, "explicit 'standard' is served by the map-fanout recipe");
         plan.ProjectionKind.ShouldBe(TaskProjectionKinds.PlanMapSynth, "the map-fanout recipe's default projection is the planner→map→synth graph");
+        plan.NeedsConfirmCard.ShouldBeFalse("an explicit operator tier never confirms");
+    }
+
+    [Fact]
+    public async Task Explicit_deep_routes_the_supervisor_recipe_when_the_lane_is_available()
+    {
+        // PR6: deep now routes the supervisor recipe (the lane capability is reported available here). The
+        // lane-off degrade back to map-fanout is pinned in EffortRouterDegradeTests.
+        var plan = await Router().RouteAsync(Request("Ship the whole feature", requestedEffort: TaskEffortModes.Deep), CancellationToken.None);
+
+        plan.RecipeKind.ShouldBe(TaskRecipeKinds.Supervisor, "explicit 'deep' is served by the supervisor recipe");
+        plan.ProjectionKind.ShouldBe(TaskProjectionKinds.Supervisor, "the supervisor recipe's default projection is the durable supervisor lane");
+        plan.DegradedReason.ShouldBeNull("the lane is available, so no degrade fired");
         plan.NeedsConfirmCard.ShouldBeFalse("an explicit operator tier never confirms");
     }
 
@@ -155,5 +172,14 @@ public class EffortRouterTests
         plan.NeedsConfirmCard.ShouldBeTrue("the auto path always confirms — it never silently escalates to map-fanout");
         plan.RecipeKind.ShouldBe(TaskRecipeKinds.SingleAgent, "the heuristic suggests the conservative single-agent recipe");
         plan.ProjectionKind.ShouldBe(TaskProjectionKinds.SingleAgent);
+    }
+
+    /// <summary>A test probe reporting a fixed availability for one capability — lets the router pin reach the supervisor recipe deterministically, independent of the ambient env flag.</summary>
+    private sealed class FixedProbe : ICapabilityProbe
+    {
+        private readonly bool _available;
+        public FixedProbe(string capability, bool available) { Capability = capability; _available = available; }
+        public string Capability { get; }
+        public bool IsAvailable() => _available;
     }
 }

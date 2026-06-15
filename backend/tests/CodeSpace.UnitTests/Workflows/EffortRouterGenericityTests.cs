@@ -1,6 +1,7 @@
 using CodeSpace.Core.Services.Tasks.Bounds;
 using CodeSpace.Core.Services.Tasks.Bounds.Presets.Quick;
 using CodeSpace.Core.Services.Tasks.Bounds.Presets.Standard;
+using CodeSpace.Core.Services.Tasks.Capabilities;
 using CodeSpace.Core.Services.Tasks.Effort;
 using CodeSpace.Core.Services.Tasks.Effort.Classifiers.Heuristic;
 using CodeSpace.Core.Services.Tasks.Recipes;
@@ -58,7 +59,8 @@ public class EffortRouterGenericityTests
         var router = new EffortRouter(
             new EffortClassifierRegistry(new IEffortClassifier[] { new HeuristicEffortClassifier(), new FakeClassifier() }),
             new TaskRecipeRegistry(new ITaskRecipe[] { new SingleAgentRecipe(), new FakeRecipe() }),
-            new BoundsPresetRegistry(new IBoundsPreset[] { new QuickBoundsPreset(), new StandardBoundsPreset(), new FakeBounds() }));
+            new BoundsPresetRegistry(new IBoundsPreset[] { new QuickBoundsPreset(), new StandardBoundsPreset(), new FakeBounds() }),
+            new CapabilityProbeRegistry(Array.Empty<ICapabilityProbe>()));
 
         // RequestedEffort = the fake bounds kind so the effort-mode ≡ preset-kind convention resolves the fake caps;
         // RequestedRecipe = the fake recipe so its DefaultProjectionKind drives the projection.
@@ -92,7 +94,8 @@ public class EffortRouterGenericityTests
         var router = new EffortRouter(
             new EffortClassifierRegistry(new IEffortClassifier[] { new HeuristicEffortClassifier(), new FakeClassifier() }),
             new TaskRecipeRegistry(new ITaskRecipe[] { new SingleAgentRecipe() }),
-            new BoundsPresetRegistry(new IBoundsPreset[] { new QuickBoundsPreset(), new StandardBoundsPreset() }));
+            new BoundsPresetRegistry(new IBoundsPreset[] { new QuickBoundsPreset(), new StandardBoundsPreset() }),
+            new CapabilityProbeRegistry(Array.Empty<ICapabilityProbe>()));
 
         var plan = await router.RouteAsync(Request(), CancellationToken.None);
 
@@ -127,6 +130,8 @@ public class EffortRouterGenericityTests
         public string DefaultProjectionKind => FakeProjection;
         public bool RequiresPlanReview => true;
         public IReadOnlyList<string> RecommendedPhaseLabels => new[] { "Fake phase" };
+        public string? RequiresCapability => null;
+        public string? DegradesToRecipe => null;
     }
 
     /// <summary>A fake recipe that DECLARES it serves an open tier the production core never named — proves RecipeForEffort is purely data-driven.</summary>
@@ -141,6 +146,8 @@ public class EffortRouterGenericityTests
         public string DefaultProjectionKind => FakeRecipe.FakeProjection;
         public bool RequiresPlanReview => false;
         public IReadOnlyList<string> RecommendedPhaseLabels => Array.Empty<string>();
+        public string? RequiresCapability => null;
+        public string? DegradesToRecipe => null;
     }
 
     private sealed class FakeBounds : IBoundsPreset

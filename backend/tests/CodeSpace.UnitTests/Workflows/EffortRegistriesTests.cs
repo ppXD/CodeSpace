@@ -146,6 +146,8 @@ public class EffortRegistriesTests
         public string DefaultProjectionKind => TaskProjectionKinds.SingleAgent;
         public bool RequiresPlanReview => false;
         public IReadOnlyList<string> RecommendedPhaseLabels => Array.Empty<string>();
+        public string? RequiresCapability => null;
+        public string? DegradesToRecipe => null;
     }
 
     private sealed class FakeBounds : IBoundsPreset
