@@ -51,7 +51,7 @@ public class SupervisorDeciderTests
     {
         var prior = new SupervisorPriorDecision
         {
-            Sequence = 1, DecisionKind = SupervisorDecisionKinds.Plan, Status = SupervisorDecisionStatus.Succeeded,
+            Id = Guid.NewGuid(), Sequence = 1, DecisionKind = SupervisorDecisionKinds.Plan, Status = SupervisorDecisionStatus.Succeeded,
             PayloadJson = """{"subtasks":[]}""", OutcomeJson = """{"planned":[]}""",
         };
 

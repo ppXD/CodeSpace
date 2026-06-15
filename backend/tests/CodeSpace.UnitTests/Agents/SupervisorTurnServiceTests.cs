@@ -152,8 +152,66 @@ public class SupervisorTurnServiceTests
         ledger.Rows.Count.ShouldBe(1, "still exactly one row");
     }
 
+    // ── P1-1 CROWN JEWEL: a crashed in-flight decision REPLAYS FROZEN, independent of decider determinism ──
+
+    [Fact]
+    public async Task Replaying_an_in_flight_turn_re_executes_the_frozen_decision_even_when_the_decider_is_non_deterministic()
+    {
+        // Simulate a crash mid-execution: turn 0's decision A (a plan) was claimed (INSERTed Pending) by a prior
+        // walk that crashed BEFORE recording terminal — so the ledger holds ONE non-terminal A row. On re-entry
+        // RehydrateFromDecisionLog folds it into context.InFlight; the fix replays A FROZEN (decider + bounds NOT
+        // re-run) UNDER A's existing claim id (win the still-Pending begin-CAS → execute once → record terminal).
+        // The decider here is NON-DETERMINISTIC — it would emit a DIFFERENT decision B on this turn. WITHOUT the
+        // fix RunTurnAsync would ask the decider, get B, derive B's DIFFERENT key, find no match, INSERT a 2nd row,
+        // execute B, and STRAND the A row forever. WITH the fix the decider is never consulted on replay, so its B
+        // output is irrelevant and the ledger stays a single A row that the recovery finishes.
+        var ledger = new FakeSupervisorDecisionLog();
+        var plannedA = """{"subtasks":["a"]}""";
+        ledger.SeedPending(_runId, _teamId, SupervisorDecisionKinds.Plan, plannedA);
+        var inFlightId = ledger.Rows[0].Id;
+
+        var decider = new NonDeterministicDecider(SupervisorDecisionKinds.Plan, plannedA, SupervisorDecisionKinds.Stop, """{"reason":"divergent-B"}""");
+        var executor = new CountingExecutor();
+        var service = new SupervisorTurnService(ledger, decider, executor, db: null!, NullLogger<SupervisorTurnService>.Instance);
+
+        var result = await service.RunTurnAsync(_runId, _teamId, "sup", "goal", conversationId: null, goalConfig: null, CancellationToken.None);
+
+        result.DecisionKind.ShouldBe(SupervisorDecisionKinds.Plan, "the REPLAYED decision is the frozen in-flight A (plan), NOT the decider's divergent B (stop)");
+        result.IsFinished.ShouldBeFalse("A is a plan → the turn self-advances, NOT B's stop");
+
+        decider.CallCount.ShouldBe(0, "the decider was NOT consulted to produce the replayed decision — replay is frozen, independent of decider determinism");
+        executor.Calls.ShouldBe(1, "the frozen A side effect re-executed exactly once on recovery");
+
+        ledger.Rows.Count.ShouldBe(1, "EXACTLY ONE row for the turn — no divergent B row, no stranded A (without the fix the decider's B would derive a different key → a 2nd row + a strand)");
+        ledger.Rows[0].Id.ShouldBe(inFlightId, "the single row is the SAME in-flight A row, re-executed under its existing claim");
+        ledger.Rows[0].DecisionKind.ShouldBe(SupervisorDecisionKinds.Plan);
+        ledger.Rows[0].PayloadJson.ShouldBe(plannedA, "the single row is A's frozen payload");
+        ledger.Rows[0].Status.ShouldBe(SupervisorDecisionStatus.Succeeded, "the crashed A row reached terminal on recovery — no strand");
+    }
+
     private SupervisorTurnService Service(FakeSupervisorDecisionLog ledger) =>
         new(ledger, new StubSupervisorDecider(), new StubSupervisorActionExecutor(), db: null!, NullLogger<SupervisorTurnService>.Instance);
+
+    /// <summary>A decider that emits decision A on its FIRST call and a DIFFERENT decision B on every later one — models a non-deterministic real LLM re-asked on the same turn after a crash. The crown-jewel test asserts the replay ignores it entirely (CallCount stays 0).</summary>
+    private sealed class NonDeterministicDecider : ISupervisorDecider
+    {
+        private readonly SupervisorDecision _first;
+        private readonly SupervisorDecision _later;
+
+        public NonDeterministicDecider(string firstKind, string firstPayload, string laterKind, string laterPayload)
+        {
+            _first = new SupervisorDecision { Kind = firstKind, PayloadJson = firstPayload };
+            _later = new SupervisorDecision { Kind = laterKind, PayloadJson = laterPayload };
+        }
+
+        public int CallCount { get; private set; }
+
+        public Task<SupervisorDecision> DecideAsync(SupervisorTurnContext context, CancellationToken cancellationToken)
+        {
+            CallCount++;
+            return Task.FromResult(CallCount == 1 ? _first : _later);
+        }
+    }
 
     /// <summary>A decider that always plans — used to prove the budget (not the decider) is what terminates a runaway loop.</summary>
     private sealed class AlwaysPlanDecider : ISupervisorDecider

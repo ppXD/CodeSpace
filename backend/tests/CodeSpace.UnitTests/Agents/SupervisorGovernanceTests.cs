@@ -165,6 +165,7 @@ public class SupervisorGovernanceTests
         // when its answer happens to read "approve".
         var contentAsk = new SupervisorPriorDecision
         {
+            Id = Guid.NewGuid(),
             Sequence = 1,
             DecisionKind = SupervisorDecisionKinds.AskHuman,
             Status = SupervisorDecisionStatus.Succeeded,
@@ -186,7 +187,7 @@ public class SupervisorGovernanceTests
             PriorDecisions = new[]
             {
                 ApprovalCardWith(SupervisorApprovalRequest.ApproveReply),
-                new SupervisorPriorDecision { Sequence = 2, DecisionKind = SupervisorDecisionKinds.Spawn, Status = SupervisorDecisionStatus.Succeeded, PayloadJson = "{}", OutcomeJson = """{"agentCount":2}""" },
+                new SupervisorPriorDecision { Id = Guid.NewGuid(), Sequence = 2, DecisionKind = SupervisorDecisionKinds.Spawn, Status = SupervisorDecisionStatus.Succeeded, PayloadJson = "{}", OutcomeJson = """{"agentCount":2}""" },
             },
         };
 
@@ -215,6 +216,7 @@ public class SupervisorGovernanceTests
 
     private static SupervisorPriorDecision ApprovalCardWith(string? foldedAnswer) => new()
     {
+        Id = Guid.NewGuid(),
         Sequence = 1,
         DecisionKind = SupervisorDecisionKinds.AskHuman,
         Status = SupervisorDecisionStatus.Succeeded,
@@ -225,6 +227,7 @@ public class SupervisorGovernanceTests
     private static SupervisorTurnContext ContextEndingWith(SupervisorDecision approvalCard, string? foldedAnswer) =>
         ContextOf(new SupervisorPriorDecision
         {
+            Id = Guid.NewGuid(),
             Sequence = 1,
             DecisionKind = approvalCard.Kind,
             Status = SupervisorDecisionStatus.Succeeded,
