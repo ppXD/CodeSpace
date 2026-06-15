@@ -8,7 +8,7 @@ namespace CodeSpace.IntegrationTests.Workflows;
 
 /// <summary>
 /// Rule-12.5 DRIFT DETECTOR for the inline codex-event mirror the <see cref="SubtaskAwareFakeCli"/> emits in
-/// <see cref="HeadlineFlowE2ETests"/>. The fake CLI hand-prints JSONL shaped like <c>codex exec --json</c>;
+/// <see cref="HeadlineFlowE2ETests"/> and <see cref="PlannerCodingFlowE2ETests"/>. The fake CLI hand-prints JSONL shaped like <c>codex exec --json</c>;
 /// this pins that mirror against the PRODUCTION harness so a divergence fails LOUDLY here instead of silently
 /// passing a stale shape in the E2E.
 ///

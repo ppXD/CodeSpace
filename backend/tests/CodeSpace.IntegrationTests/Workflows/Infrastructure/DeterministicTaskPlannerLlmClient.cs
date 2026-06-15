@@ -25,6 +25,20 @@ public sealed class DeterministicTaskPlannerLlmClient : ILLMClient, IStructuredL
     /// <summary>The fixed subtask titles the planner emits — three subtasks the projected map fans out over.</summary>
     public static readonly IReadOnlyList<string> SubtaskTitles = new[] { "Audit", "Refactor", "Verify" };
 
+    /// <summary>The <c>recommendedWorkflowKind</c> the projector switches a CODING plan on (→ an agent.code body).</summary>
+    public const string CodingKind = "coding";
+
+    /// <summary>The default <c>recommendedWorkflowKind</c> — the analysis path (→ an llm.complete body).</summary>
+    public const string AnalysisKind = "analysis";
+
+    private readonly string _recommendedWorkflowKind;
+
+    /// <summary>Default ctor — Autofac resolves this at the fixture root, emitting the ANALYSIS path (the byte-identical behaviour the existing PlannerProjectionFlowTests + retarget seam depend on).</summary>
+    public DeterministicTaskPlannerLlmClient() : this(AnalysisKind) { }
+
+    /// <summary>Kind-selecting ctor — a test instantiates this in its own child-scope registry to drive the CODING projection path (<see cref="CodingKind"/> ⇒ agent.code body).</summary>
+    public DeterministicTaskPlannerLlmClient(string recommendedWorkflowKind) { _recommendedWorkflowKind = recommendedWorkflowKind; }
+
     public string Provider => ProviderTag;
 
     /// <summary>Plain-text path — used by the projected body (analysis) + synthesizer llm.complete nodes. Echoes the prompt deterministically.</summary>
@@ -44,7 +58,7 @@ public sealed class DeterministicTaskPlannerLlmClient : ILLMClient, IStructuredL
             }).ToArray(),
             successCriteria = new[] { "All subtasks complete" },
             risks = new[] { "Unknowns surface mid-run" },
-            recommendedWorkflowKind = "analysis",
+            recommendedWorkflowKind = _recommendedWorkflowKind,
         });
 
         return Task.FromResult(new StructuredLLMCompletion { Json = json, Model = request.Model, InputTokens = 11, OutputTokens = 23 });
