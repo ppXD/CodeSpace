@@ -27,19 +27,25 @@ public sealed class WorkflowPlanningService : IWorkflowPlanningService, IScopedD
     private readonly IWorkflowPlanner _planner;
     private readonly IWorkflowPlanProjector _projector;
     private readonly DefinitionValidator _validator;
+    private readonly IRepoGroundingProvider _grounding;
 
-    public WorkflowPlanningService(IWorkflowPlanner planner, IWorkflowPlanProjector projector, DefinitionValidator validator)
+    public WorkflowPlanningService(IWorkflowPlanner planner, IWorkflowPlanProjector projector, DefinitionValidator validator, IRepoGroundingProvider grounding)
     {
         _planner = planner;
         _projector = projector;
         _validator = validator;
+        _grounding = grounding;
     }
 
     public async Task<PlanWorkflowFromTaskResult> PlanFromTaskAsync(WorkflowPlanRequest request, CancellationToken cancellationToken)
     {
         if (!IsEnabled()) return new PlanWorkflowFromTaskResult { PlannerEnabled = false };
 
-        var plan = await _planner.PlanAsync(request, cancellationToken).ConfigureAwait(false);
+        // Service-level grounding (most generic — every planner backend consumes request.GroundingContext). Team
+        // from request.TeamId (sourced from ICurrentTeam upstream, never the wire); a repo outside the team → null.
+        var grounding = await _grounding.BuildGroundingAsync(request.RepositoryId, request.TeamId, cancellationToken).ConfigureAwait(false);
+
+        var plan = await _planner.PlanAsync(request with { GroundingContext = grounding }, cancellationToken).ConfigureAwait(false);
 
         var definition = _projector.Project(plan);
 
