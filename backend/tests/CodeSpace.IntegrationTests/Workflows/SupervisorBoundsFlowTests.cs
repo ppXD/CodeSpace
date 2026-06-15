@@ -166,6 +166,70 @@ public class SupervisorBoundsFlowTests : IDisposable
         }
     }
 
+    // ── Approve-then-proceed: the human approves, the re-emitted spawn EXECUTES (not re-gated) ──
+
+    [Fact]
+    public async Task An_approved_spawn_executes_rather_than_being_re_gated_into_another_ask_human()
+    {
+        SetScript(s => s.PlanThenSpawnForever());
+
+        var (teamId, userId, conversationId) = await SeedTeamWithConversationAsync();
+        var config = $$"""{"goal":"ship it","approvalPolicy":"spawns","conversationId":"{{conversationId}}"}""";
+        var workflowId = await CreateWorkflowAsync(teamId, userId, config);
+        var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
+
+        var jobClient = ResolveJobClient();
+        jobClient.Clear();
+        jobClient.AutoExecute = false;
+
+        try
+        {
+            // Turn 0 plan → self-advance. Turn 1 spawn → gated into an ask_human approval card + parks (zero agents).
+            await RunEngineAsync(runId);
+            await ResolveSelfAdvanceAsync(runId);
+            await RunEngineAsync(runId);
+
+            string token;
+            using (var verify = _fixture.BeginScope())
+            {
+                var db = verify.Resolve<CodeSpaceDbContext>();
+                token = (await db.WorkflowRunWait.AsNoTracking()
+                    .SingleAsync(w => w.RunId == runId && w.WaitKind == WorkflowWaitKinds.Action && w.Status == WorkflowWaitStatuses.Pending && w.IterationKey.EndsWith("#ask"))).Token;
+                (await db.AgentRun.AsNoTracking().CountAsync(r => r.WorkflowRunId == runId)).ShouldBe(0, "still gated — no agent until the human approves");
+            }
+
+            // The human APPROVES via the real token-correlated resume path → turn 2's re-emitted spawn is bound to
+            // the approval and EXECUTES (it is NOT re-gated into a second ask_human — the dead-end the fix removes).
+            await ApproveAsync(token, userId, teamId);
+            await RunEngineAsync(runId);
+
+            using (var verify = _fixture.BeginScope())
+            {
+                var db = verify.Resolve<CodeSpaceDbContext>();
+
+                (await db.WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == runId)).Status
+                    .ShouldBe(WorkflowRunStatus.Suspended, "the approved spawn ran + parked on its agent barrier — NOT another approval park");
+
+                (await db.AgentRun.AsNoTracking().CountAsync(r => r.WorkflowRunId == runId))
+                    .ShouldBe(2, "the human-approved spawn EXECUTED — 2 agents staged (the approve-then-proceed binding, not a re-gate dead-end)");
+
+                // It parked on the spawn's AgentRun barrier (NOT a second ask_human approval Action wait).
+                (await db.WorkflowRunWait.AsNoTracking().CountAsync(w => w.RunId == runId && w.WaitKind == WorkflowWaitKinds.AgentRun && w.Status == WorkflowWaitStatuses.Pending))
+                    .ShouldBe(2, "parked on the 2 agent waits the approved spawn staged");
+                (await db.WorkflowRunWait.AsNoTracking().CountAsync(w => w.RunId == runId && w.WaitKind == WorkflowWaitKinds.Action && w.Status == WorkflowWaitStatuses.Pending && w.IterationKey.EndsWith("#ask")))
+                    .ShouldBe(0, "no second approval card — the approval was bound to the re-emitted spawn");
+
+                var rows = await Ledger(db, runId, teamId);
+                rows.Count(r => r.DecisionKind == SupervisorDecisionKinds.Spawn).ShouldBe(1, customMessage: "exactly one spawn SETTLED — the approval let it proceed once, instead of looping ask→approve→ask forever");
+                rows.Count(r => r.DecisionKind == SupervisorDecisionKinds.AskHuman).ShouldBe(1, "exactly the ONE approval card — not a second one");
+            }
+        }
+        finally
+        {
+            jobClient.AutoExecute = true;
+        }
+    }
+
     // ── Round budget from the operator's config is honoured ──────────────────────────
 
     [Fact]
@@ -221,6 +285,15 @@ public class SupervisorBoundsFlowTests : IDisposable
 
         using var scope = _fixture.BeginScope();
         await scope.Resolve<IWorkflowResumeService>().ResumeWaitAsync(runId, waitId, null, CancellationToken.None);
+    }
+
+    private async Task ApproveAsync(string token, Guid actorUserId, Guid teamId)
+    {
+        using var scope = _fixture.BeginScope();
+        var result = await scope.Resolve<IWorkflowResumeService>()
+            .ResumeByActionTokenAsync(token, Core.Services.Supervisor.Executors.RealSupervisorActionExecutor.AnswerActionKey, actorUserId, SupervisorApprovalRequest.ApproveReply, values: null, teamId, CancellationToken.None);
+
+        result.ShouldBe(ActionResumeResult.Resumed, "the human's approval resolves the supervisor's approval ask wait via the existing token-correlated resume path");
     }
 
     private async Task SimulateAgentCompletionAsync(Guid agentRunId)

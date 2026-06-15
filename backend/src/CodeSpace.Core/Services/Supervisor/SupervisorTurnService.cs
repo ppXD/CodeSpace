@@ -92,14 +92,27 @@ public sealed partial class SupervisorTurnService : ISupervisorTurnService, ISco
     /// Route a SIDE-EFFECTING decision through the governance gate (PR-E E5, Rule 7 — reuses
     /// <see cref="SupervisorGovernance"/> over <c>AgentToolGate</c>): Allow → unchanged; Deny → fail-closed
     /// force-STOP (no side effect, recorded reason); RequireApproval → rewrite into an ask_human APPROVAL card
-    /// that parks for a human before any agent is created (reusing E4's durable HITL park). A non-side-effecting
-    /// decision (plan / merge / stop / ask_human) is Allow and passes through unchanged.
+    /// that parks for a human before any agent is created (reusing E4's durable HITL park) — UNLESS this decision
+    /// was JUST approved (the immediately-preceding decided decision is this gate's own approval card with an
+    /// approving answer), in which case the approval is bound to it and it PROCEEDS once (approve-then-proceed,
+    /// not a permanent block). A non-side-effecting decision (plan / merge / stop / ask_human) is Allow and passes
+    /// through unchanged.
     /// </summary>
     private SupervisorDecision GateSideEffectingDecision(SupervisorTurnContext context, SupervisorDecision decision)
     {
         var verdict = SupervisorGovernance.Decide(decision.Kind, context.ApprovalPolicy);
 
         if (verdict == AgentToolGateDecision.Allow) return decision;
+
+        // Approve-then-proceed: a side effect a human just approved is bound to its approval and runs ONCE,
+        // rather than being re-gated into another ask_human (which would loop the run to a no-progress / budget
+        // force-STOP and never execute the approved spawn).
+        if (verdict == AgentToolGateDecision.RequireApproval && SupervisorApprovalRequest.WasJustApproved(context))
+        {
+            _logger.LogInformation("Supervisor governance approval was granted for a {Kind} decision at turn {Turn} (policy {Policy}) — proceeding with the human-approved side effect", decision.Kind, context.TurnNumber, context.ApprovalPolicy);
+
+            return decision;
+        }
 
         if (verdict == AgentToolGateDecision.Deny)
         {

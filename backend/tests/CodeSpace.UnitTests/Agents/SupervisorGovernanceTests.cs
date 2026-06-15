@@ -93,6 +93,113 @@ public class SupervisorGovernanceTests
 
         rewritten.Kind.ShouldBe(SupervisorDecisionKinds.AskHuman, "the gated spawn parks for a human BEFORE any agent is created");
         rewritten.PayloadJson.ShouldContain("Approve spawning 2 agent");
+
+        // The question text (as the next turn reads it back) carries the marker the gate recognises its OWN card by.
+        var question = System.Text.Json.JsonDocument.Parse(rewritten.PayloadJson).RootElement.GetProperty("question").GetString();
+        question.ShouldContain(SupervisorApprovalRequest.ApprovalMarker, customMessage: "every approval card carries the marker the next turn recognises its own approval by");
         rewritten.IsTerminal.ShouldBeFalse();
     }
+
+    // ── Approve-then-proceed: a just-approved spawn is bound to its approval, not re-gated ──
+
+    [Fact]
+    public void A_spawn_right_after_an_approved_approval_card_is_recognised_as_just_approved()
+    {
+        // The immediately-preceding decided decision is THIS gate's own approval card, folded with an approving
+        // answer → the re-emitted spawn is bound to the approval and proceeds (no second ask_human, no dead-end).
+        var context = ContextEndingWith(ApprovalCard(), foldedAnswer: SupervisorApprovalRequest.ApproveReply);
+
+        SupervisorApprovalRequest.WasJustApproved(context).ShouldBeTrue();
+    }
+
+    [Theory]
+    [InlineData("reject")]
+    [InlineData("Reject it")]
+    [InlineData("")]
+    [InlineData(null)]
+    public void A_non_approving_answer_does_not_grant_a_pass(string? answer)
+    {
+        // Reject / empty / unanswered → fail-closed: the spawn stays gated.
+        SupervisorApprovalRequest.WasJustApproved(ContextEndingWith(ApprovalCard(), answer)).ShouldBeFalse();
+    }
+
+    [Fact]
+    public void An_approved_content_ask_human_is_not_an_approval_card_so_grants_no_pass()
+    {
+        // A CONTENT ask_human the decider itself raised (no approval marker) MUST NOT grant a spurious pass even
+        // when its answer happens to read "approve".
+        var contentAsk = new SupervisorPriorDecision
+        {
+            Sequence = 1,
+            DecisionKind = SupervisorDecisionKinds.AskHuman,
+            Status = SupervisorDecisionStatus.Succeeded,
+            PayloadJson = """{"question":"which approach: rewrite or patch?"}""",
+            OutcomeJson = SupervisorOutcome.FoldAnswer("which approach: rewrite or patch?", "tok", "approve the rewrite"),
+        };
+
+        SupervisorApprovalRequest.WasJustApproved(ContextOf(contentAsk)).ShouldBeFalse();
+    }
+
+    [Fact]
+    public void An_approval_card_that_is_not_the_LAST_decision_grants_no_pass()
+    {
+        // A fresh spawn on a LATER turn (an approval card exists earlier, but a settled spawn is the most recent
+        // decision) is gated again — the approval binds to ONE re-emitted decision only.
+        var context = new SupervisorTurnContext
+        {
+            ApprovalPolicy = SupervisorApprovalPolicy.Spawns,
+            PriorDecisions = new[]
+            {
+                ApprovalCardWith(SupervisorApprovalRequest.ApproveReply),
+                new SupervisorPriorDecision { Sequence = 2, DecisionKind = SupervisorDecisionKinds.Spawn, Status = SupervisorDecisionStatus.Succeeded, PayloadJson = "{}", OutcomeJson = """{"agentCount":2}""" },
+            },
+        };
+
+        SupervisorApprovalRequest.WasJustApproved(context).ShouldBeFalse();
+    }
+
+    [Fact]
+    public void No_prior_decisions_grants_no_pass()
+    {
+        SupervisorApprovalRequest.WasJustApproved(new SupervisorTurnContext()).ShouldBeFalse();
+    }
+
+    // ── Pins (Rule 8) — the approval-binding reply words are load-bearing ─────────────
+
+    [Fact]
+    public void The_approval_reply_word_and_marker_are_pinned()
+    {
+        // The gate matches the folded human answer against ApproveReply + recognises its own card by ApprovalMarker.
+        // A reword silently breaks approve-then-proceed, so pin the literals (Rule 8).
+        SupervisorApprovalRequest.ApproveReply.ShouldBe("approve");
+        SupervisorApprovalRequest.ApprovalMarker.ShouldBe("Reply 'approve' to proceed or 'reject' to stop.");
+    }
+
+    private static SupervisorDecision ApprovalCard() =>
+        SupervisorApprovalRequest.IntoAskHuman(new SupervisorDecision { Kind = SupervisorDecisionKinds.Spawn, PayloadJson = """{"subtaskIds":["a","b"]}""" });
+
+    private static SupervisorPriorDecision ApprovalCardWith(string? foldedAnswer) => new()
+    {
+        Sequence = 1,
+        DecisionKind = SupervisorDecisionKinds.AskHuman,
+        Status = SupervisorDecisionStatus.Succeeded,
+        PayloadJson = ApprovalCard().PayloadJson,
+        OutcomeJson = SupervisorOutcome.FoldAnswer("q", "tok", foldedAnswer),
+    };
+
+    private static SupervisorTurnContext ContextEndingWith(SupervisorDecision approvalCard, string? foldedAnswer) =>
+        ContextOf(new SupervisorPriorDecision
+        {
+            Sequence = 1,
+            DecisionKind = approvalCard.Kind,
+            Status = SupervisorDecisionStatus.Succeeded,
+            PayloadJson = approvalCard.PayloadJson,
+            OutcomeJson = SupervisorOutcome.FoldAnswer("q", "tok", foldedAnswer),
+        });
+
+    private static SupervisorTurnContext ContextOf(SupervisorPriorDecision last) => new()
+    {
+        ApprovalPolicy = SupervisorApprovalPolicy.Spawns,
+        PriorDecisions = new[] { last },
+    };
 }
