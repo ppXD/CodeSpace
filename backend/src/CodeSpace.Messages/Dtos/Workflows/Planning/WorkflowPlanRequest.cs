@@ -27,4 +27,15 @@ public sealed record WorkflowPlanRequest
     /// present, the planner frames it honestly (it is supplementary context, not "I analyzed your codebase").
     /// </summary>
     public string? GroundingContext { get; init; }
+
+    /// <summary>
+    /// When <c>true</c>, the planning service picks the L3 CHECKPOINT-COORDINATED projection (a <c>flow.loop</c>
+    /// where a coordinator re-decides between bounded rounds) instead of the one-shot projection. Default
+    /// <c>false</c> ⇒ the existing one-shot graph (byte-identical). The GOALS-not-graphs surface: the operator
+    /// flips this + sets <see cref="Coordination"/>; the projector generates the loop graph.
+    /// </summary>
+    public bool Coordinated { get; init; }
+
+    /// <summary>The round cap + per-round parallelism for the coordinated projection. Only consumed when <see cref="Coordinated"/> is <c>true</c>; defaults apply when absent.</summary>
+    public CoordinationOptions? Coordination { get; init; }
 }

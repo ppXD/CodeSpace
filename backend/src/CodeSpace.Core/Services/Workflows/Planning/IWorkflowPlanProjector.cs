@@ -16,4 +16,13 @@ namespace CodeSpace.Core.Services.Workflows.Planning;
 public interface IWorkflowPlanProjector
 {
     WorkflowDefinition Project(PlannedWorkflow plan);
+
+    /// <summary>
+    /// Project a plan onto the L3 CHECKPOINT-COORDINATED variant: a <c>flow.loop</c> graph where a
+    /// coordinator <c>llm.complete</c> re-decides BETWEEN rounds (plan → parallel work → coordinator judges →
+    /// rework/done/abort across bounded rounds). Built entirely by composing existing nodes — no new engine
+    /// code. Same always-valid contract as <see cref="Project"/>; <paramref name="options"/> folds the round
+    /// cap + per-round parallelism into the generated loop/map config.
+    /// </summary>
+    WorkflowDefinition ProjectCoordinated(PlannedWorkflow plan, CoordinationOptions options);
 }

@@ -339,7 +339,16 @@ public sealed class DefinitionValidator : IScopedDependency
             return;
         }
 
-        if (!reachableUpstream[node.Id].Contains(refNodeId))
+        // A CONTAINER node's own config/inputs may reference its OWN body nodes — a body node's output is
+        // resolved against the just-finished body scope at run time, not the top-level edge graph. This is
+        // the loop's documented contract (a loopVariable's `update` reads {{nodes.<bodyNode>.outputs.X}} at
+        // pass-end — WorkflowEngine.ApplyLoopVarUpdates), and the symmetric case for a map/try reading a body
+        // result. Such a body node is NOT top-level-upstream of the container, so skip the upstream edge
+        // check for it — the output-key existence check below still applies. (refNode.ParentId == node.Id =>
+        // refNode is a direct child of this container's body.)
+        var refIsOwnBodyNode = refNode.ParentId == node.Id && SafeKind(node) is NodeKind.Loop or NodeKind.Try or NodeKind.Map;
+
+        if (!refIsOwnBodyNode && !reachableUpstream[node.Id].Contains(refNodeId))
         {
             errors.Add($"Node '{node.Id}' {source} references '{refNodeId}', which is not upstream of it. Add an edge or restructure.");
             return;
