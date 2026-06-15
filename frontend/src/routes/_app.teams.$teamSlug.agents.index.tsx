@@ -2,6 +2,7 @@ import { createFileRoute } from "@tanstack/react-router";
 
 import { Ic } from "@/_imported/ai-code-space/icons";
 import { ApiError } from "@/api/request";
+import { AgentScorecardPanel } from "@/components/workflows/AgentScorecardPanel";
 import { useAgentDefinitions } from "@/hooks/use-agents";
 
 /**
@@ -32,6 +33,11 @@ function AgentsListPage() {
       </div>
 
       <div className="ct-body">
+        {/* The measurement spine — the team's agent success rate + latency over its run history, above the
+            persona library. Self-contained (own fetch, team-scoped at the source); renders nothing while
+            loading so the list below isn't pushed around. */}
+        <AgentScorecardPanel />
+
         {agents.isLoading && (
           <div className="ct-empty"><div className="ct-empty-h">Loading…</div></div>
         )}

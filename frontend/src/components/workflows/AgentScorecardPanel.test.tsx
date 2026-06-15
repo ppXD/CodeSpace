@@ -1,0 +1,80 @@
+import { render, screen, within } from "@testing-library/react";
+import { describe, expect, it } from "vitest";
+
+import type { AgentRunScorecard } from "@/api/agents";
+import { AgentScorecardView } from "./AgentScorecardPanel";
+
+/**
+ * The scorecard view is the measurement-spine surface — it must render the team's REAL success rate + latency
+ * percentiles + per-harness comparison faithfully (the API's job is to compute them; the view's job is to show
+ * them without inventing anything). These pin: the headline stats, the per-harness rows, the duration
+ * formatting, the deliberate ABSENCE of a cost figure (not aggregated yet), and the empty state.
+ */
+const card: AgentRunScorecard = {
+  overall: { harness: "(all)", total: 4, succeeded: 3, successRate: 0.75, p50DurationSeconds: 20, p95DurationSeconds: 95 },
+  harnesses: [
+    { harness: "claude-code", total: 1, succeeded: 1, successRate: 1.0, p50DurationSeconds: 5, p95DurationSeconds: 5 },
+    { harness: "codex-cli", total: 3, succeeded: 2, successRate: 2 / 3, p50DurationSeconds: 20, p95DurationSeconds: 95 },
+  ],
+};
+
+describe("AgentScorecardView", () => {
+  it("renders the overall headline stats — success rate, P50/P95 latency, runs scored", () => {
+    render(<AgentScorecardView card={card} />);
+
+    // Scope to the headline strip — the per-harness table repeats some of these values (e.g. P50=20s on
+    // codex-cli), so the headline assertion must read its own region, paired with its label.
+    const head = (label: string) => screen.getByText(label).parentElement!;
+
+    // Success rate as a clean whole-number percentage.
+    expect(within(head("Success rate")).getByText("75%")).toBeInTheDocument();
+    // P50 = 20s (under a minute → seconds), P95 = 95s (over a minute → "1m 35s").
+    expect(within(head("P50 latency")).getByText("20s")).toBeInTheDocument();
+    expect(within(head("P95 latency")).getByText("1m 35s")).toBeInTheDocument();
+    // Runs scored = succeeded / total.
+    expect(within(head("Runs scored")).getByText("3/4")).toBeInTheDocument();
+  });
+
+  it("renders a per-harness comparison row for each harness", () => {
+    render(<AgentScorecardView card={card} />);
+
+    const table = screen.getByRole("table");
+    expect(within(table).getByText("claude-code")).toBeInTheDocument();
+    expect(within(table).getByText("codex-cli")).toBeInTheDocument();
+
+    // claude-code: 100%, 1/1.  codex-cli: 67%, 2/3.
+    expect(within(table).getByText("100%")).toBeInTheDocument();
+    expect(within(table).getByText("67%")).toBeInTheDocument();
+    expect(within(table).getByText("1/1")).toBeInTheDocument();
+    expect(within(table).getByText("2/3")).toBeInTheDocument();
+  });
+
+  it("does NOT surface a cost/token figure (the scorer doesn't aggregate it yet — no fabricated number)", () => {
+    render(<AgentScorecardView card={card} />);
+
+    expect(screen.queryByText(/cost/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/token/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/\$/)).not.toBeInTheDocument();
+  });
+
+  it("shows the empty state when no runs have been scored yet", () => {
+    const empty: AgentRunScorecard = { overall: { harness: "(all)", total: 0, succeeded: 0, successRate: 0, p50DurationSeconds: null, p95DurationSeconds: null }, harnesses: [] };
+
+    render(<AgentScorecardView card={empty} />);
+
+    expect(screen.getByText(/No runs scored yet/)).toBeInTheDocument();
+    expect(screen.queryByRole("table")).not.toBeInTheDocument();
+  });
+
+  it("renders an em-dash for a harness with no latency to show", () => {
+    const noLatency: AgentRunScorecard = {
+      overall: { harness: "(all)", total: 1, succeeded: 0, successRate: 0, p50DurationSeconds: null, p95DurationSeconds: null },
+      harnesses: [{ harness: "codex-cli", total: 1, succeeded: 0, successRate: 0, p50DurationSeconds: null, p95DurationSeconds: null }],
+    };
+
+    render(<AgentScorecardView card={noLatency} />);
+
+    // Both the headline P50/P95 and the row's latency cells fall back to an em-dash.
+    expect(screen.getAllByText("—").length).toBeGreaterThanOrEqual(2);
+  });
+});

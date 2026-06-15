@@ -1,6 +1,6 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 
-import { agentsApi, isAgentRunActive, lastEventSequence, mergeRunEvents, type AgentRunEventDto } from "@/api/agents";
+import { agentsApi, isAgentRunActive, lastEventSequence, mergeRunEvents, type AgentRunEventDto, type ScorecardFilters } from "@/api/agents";
 
 /**
  * Agent-persona data hooks. The library list backs the editor's persona picker + (later) the Agents
@@ -68,5 +68,19 @@ export function useToolCalls(agentRunId: string | undefined, active: boolean) {
     queryFn: () => agentsApi.listToolCalls(agentRunId!),
     enabled: !!agentRunId,
     refetchInterval: active ? 2000 : false,
+  });
+}
+
+/**
+ * The team's agent-run scorecard — per-harness + overall success rate and latency over its terminal runs.
+ * Team-scoped at the source (the X-Team-Id header), so it's keyed only by the filters; switching team
+ * invalidates the whole cache (see useToolCalls / useAgentDefinitions). A short staleTime keeps an operator's
+ * repeated visits cheap without going stale across a working session.
+ */
+export function useAgentScorecard(filters: ScorecardFilters = {}) {
+  return useQuery({
+    queryKey: ["agent-scorecard", filters.since ?? null, filters.harness ?? null],
+    queryFn: () => agentsApi.getScorecard(filters),
+    staleTime: 30 * 1000,
   });
 }
