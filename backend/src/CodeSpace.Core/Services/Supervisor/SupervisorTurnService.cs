@@ -35,11 +35,35 @@ public sealed partial class SupervisorTurnService : ISupervisorTurnService, ISco
         var context = (await RehydrateFromDecisionLogAsync(supervisorRunId, teamId, nodeId, goal, goalConfig, cancellationToken).ConfigureAwait(false))
             with { ConversationId = conversationId };
 
+        if (context.InFlight != null) return await ReplayInFlightTurnAsync(teamId, context, cancellationToken).ConfigureAwait(false);
+
         var depth = await SupervisorDepthAsync(supervisorRunId, teamId, cancellationToken).ConfigureAwait(false);
 
         var decision = await ChooseDecisionAsync(context, plan, depth, cancellationToken).ConfigureAwait(false);
 
         var execution = await ClaimAndExecuteAsync(supervisorRunId, teamId, context, decision, cancellationToken).ConfigureAwait(false);
+
+        return BuildResult(context, decision, execution);
+    }
+
+    /// <summary>
+    /// Replay a crashed-mid-execution decision (<see cref="SupervisorTurnContext.InFlight"/>) FROZEN — the decider +
+    /// bounds are NOT re-run. The in-flight row exists ONLY because the decision was already chosen, passed pre-bounds
+    /// + post-gate, and claimed (INSERTed) in a prior walk that then crashed before recording terminal; re-judging it
+    /// (re-asking the decider, re-running bounds) could force-stop or diverge from an already-committed decision, so
+    /// replay must just FINISH it. This makes recovery INDEPENDENT OF DECIDER DETERMINISM (P1-1): a non-deterministic
+    /// real LLM re-asked on the same turn would emit a DIFFERENT decision → a different idempotency key → a divergent
+    /// 2nd ledger row + a stranded in-flight row. We re-enter execution DIRECTLY on the persisted row id
+    /// (<c>InFlight.Id</c>) — SKIPPING TryClaim / DeriveDecisionKey entirely, so no key is derived on replay (which
+    /// would otherwise break on the jsonb whitespace-normalization of the read-back payload).
+    /// ask_human is terminal-on-park (its wait token is recorded via RecordTerminal), so InFlight is only ever a
+    /// crashed plan / spawn / retry / merge / stop — never an ask_human awaiting an answer.
+    /// </summary>
+    private async Task<SupervisorTurnResult> ReplayInFlightTurnAsync(Guid teamId, SupervisorTurnContext context, CancellationToken cancellationToken)
+    {
+        var decision = new SupervisorDecision { Kind = context.InFlight!.DecisionKind, PayloadJson = context.InFlight.PayloadJson };
+
+        var execution = await ExecuteUnderClaimAsync(context.InFlight.Id, teamId, context, decision, cancellationToken).ConfigureAwait(false);
 
         return BuildResult(context, decision, execution);
     }

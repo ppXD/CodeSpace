@@ -75,9 +75,11 @@ public sealed record SupervisorTurnContext
     public Dtos.Agents.SupervisorApprovalPolicy ApprovalPolicy { get; init; }
 }
 
-/// <summary>One prior decision replayed from the ledger — its kind + emitted payload + (for a terminal) its recorded outcome. A pure data noun.</summary>
+/// <summary>One prior decision replayed from the ledger — its row id + kind + emitted payload + (for a terminal) its recorded outcome. A pure data noun.</summary>
 public sealed record SupervisorPriorDecision
 {
+    /// <summary>The ledger row id — the in-flight decision's claim identity, so a frozen replay re-executes UNDER the existing claim (no key re-derivation, which jsonb whitespace-normalization would otherwise break).</summary>
+    public required Guid Id { get; init; }
     public required long Sequence { get; init; }
     public required string DecisionKind { get; init; }
     public required SupervisorDecisionStatus Status { get; init; }

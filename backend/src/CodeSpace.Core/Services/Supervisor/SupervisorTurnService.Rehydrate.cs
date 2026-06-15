@@ -199,6 +199,7 @@ public sealed partial class SupervisorTurnService
 
     private static SupervisorPriorDecision ToPriorDecision(Persistence.Entities.SupervisorDecisionRecord row) => new()
     {
+        Id = row.Id,
         Sequence = row.Sequence,
         DecisionKind = row.DecisionKind,
         Status = row.Status,
