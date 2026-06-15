@@ -112,6 +112,14 @@ public class CodeSpaceHangfireRegistrar : HangfireRegistrarBase
         {
             var job = (IRecurringJob)app.ApplicationServices.GetRequiredService(type);
 
+            // A conditionally-registered job (feature-gated, e.g. a flag-OFF lane's reaper) is skipped ENTIRELY when it
+            // opts out — no recurring entry is created, so flag-OFF is byte-identical (no tick ever fires).
+            if (job is IConditionalRecurringJob { ShouldRegister: false })
+            {
+                Log.Information("Recurring job {Job} skipped — conditional registration is off", job.GetType().FullName);
+                continue;
+            }
+
             if (string.IsNullOrEmpty(job.CronExpression))
             {
                 Log.Error("Recurring job cron expression empty, {Job}", job.GetType().FullName);

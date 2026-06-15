@@ -56,6 +56,7 @@ public class CodeSpaceDbContext : DbContext, IUnitOfWork
     public DbSet<AgentDefinition> AgentDefinition => Set<AgentDefinition>();
     public DbSet<ModelCredential> ModelCredential => Set<ModelCredential>();
     public DbSet<ToolCallLedger> ToolCallLedger => Set<ToolCallLedger>();
+    public DbSet<SupervisorDecisionRecord> SupervisorDecisionRecord => Set<SupervisorDecisionRecord>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
