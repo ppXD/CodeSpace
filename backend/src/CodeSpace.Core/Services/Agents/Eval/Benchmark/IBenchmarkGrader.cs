@@ -1,0 +1,46 @@
+using CodeSpace.Core.Services.Agents.Sandbox;
+using CodeSpace.Messages.Agents.Benchmark;
+
+namespace CodeSpace.Core.Services.Agents.Eval.Benchmark;
+
+/// <summary>
+/// The pluggable GRADING ORACLE (Rule 7 / ISP — narrow on purpose): given a finished benchmark run and the
+/// workspace it left behind, decide whether the task was actually SOLVED. The instrument ships exactly one
+/// implementation in slice-1 — <see cref="Graders.TestsPassGrader"/> — and resolves graders by
+/// <see cref="BenchmarkGradingKind"/> through <c>IBenchmarkGraderRegistry</c>, so an LLM-judge or diff-match
+/// grader lands later as a SIBLING implementation with a new kind, never by widening this contract.
+///
+/// <para><b>Honest by construction:</b> a grader is handed the run's WORKSPACE + a runner, not the agent — it
+/// reaches an independent verdict (the tests-pass grader re-runs the repo's own tests), so the score is never the
+/// model's opinion of itself.</para>
+/// </summary>
+public interface IBenchmarkGrader
+{
+    /// <summary>The grading kind this grader implements — the key the registry resolves by.</summary>
+    BenchmarkGradingKind Kind { get; }
+
+    /// <summary>
+    /// Grade the run described by <paramref name="context"/> and return a pass/fail verdict with a one-line detail.
+    /// MUST be independent of the agent's self-report. A grader that cannot reach a verdict (no workspace, no test
+    /// command) returns a FAILED grade with a descriptive detail rather than throwing — a non-gradable run is a
+    /// fail, not an instrument crash. Throws only for genuine infrastructure failures.
+    /// </summary>
+    Task<BenchmarkGrade> GradeAsync(BenchmarkGradingContext context, CancellationToken cancellationToken);
+}
+
+/// <summary>
+/// Everything a grader needs to reach an independent verdict on a finished run: the task being graded, the
+/// post-run workspace directory (null when the run had no workspace), and the runner to execute a grading command
+/// in. Kept as a record so a new grading kind that needs more (e.g. the golden patch for diff-match) extends it
+/// without changing the <see cref="IBenchmarkGrader"/> signature.
+/// </summary>
+public sealed record BenchmarkGradingContext
+{
+    public required BenchmarkTask Task { get; init; }
+
+    /// <summary>Absolute path to the workspace the agent ran in (its changes are on disk here). Null = the run had no workspace, which the tests-pass grader treats as ungradable → fail.</summary>
+    public string? WorkspaceDirectory { get; init; }
+
+    /// <summary>The sandbox runner the grader runs its grading command in — the SAME runner kind the agent ran on, so the test command executes in an environment consistent with the run.</summary>
+    public required ISandboxRunner Runner { get; init; }
+}
