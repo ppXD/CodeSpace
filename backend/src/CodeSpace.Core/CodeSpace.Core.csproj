@@ -31,6 +31,11 @@
     <PackageReference Include="Hangfire" Version="1.8.*" />
     <PackageReference Include="Cronos" Version="0.8.*" />
 
+    <!-- Transitive-vuln pin: Hangfire 1.8 floors Newtonsoft.Json at 11.0.1, which has a high-severity
+         deep-nesting DoS (GHSA-5crp-9r3c-p9vr). Hangfire runs on 13.x; pin the patched version (the rest
+         of the tree already resolves 13.0.3). The codebase itself uses System.Text.Json, not Newtonsoft. -->
+    <PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
+
     <PackageReference Include="dbup-core" Version="6.0.*" />
     <PackageReference Include="dbup-postgresql" Version="6.0.*" />
     <PackageReference Include="System.IdentityModel.Tokens.Jwt" Version="8.5.0" />
