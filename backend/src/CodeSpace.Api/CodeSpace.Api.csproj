@@ -18,7 +18,46 @@
   <ItemGroup>
     <ProjectReference Include="..\CodeSpace.Core\CodeSpace.Core.csproj" />
     <ProjectReference Include="..\CodeSpace.Messages\CodeSpace.Messages.csproj" />
+    <!-- The codespace-mcp proxy: the per-run MCP tool fabric a CLI harness launches as its MCP server. It is a
+         STANDALONE process (its own runtimeconfig/deps), NOT a library, so it is referenced build-only
+         (ReferenceOutputAssembly=false) — the API never links it. The reference exists so building/publishing the
+         API also builds the proxy; the CopyMcpProxyToOutput target below lands its files at the path
+         LocalProcessRunner.McpProxyBinaryPath() resolves (codespace-mcp next to the API assembly). -->
+    <ProjectReference Include="..\CodeSpace.Mcp\CodeSpace.Mcp.csproj">
+      <ReferenceOutputAssembly>false</ReferenceOutputAssembly>
+      <Private>false</Private>
+    </ProjectReference>
   </ItemGroup>
+
+  <!--
+    Land the codespace-mcp proxy binary (+ its runtime sidecars) IN the API's build AND publish output, at
+    AppContext.BaseDirectory/codespace-mcp — exactly where LocalProcessRunner.McpProxyBinaryPath() looks. Without
+    this the MCP endpoint, even when enabled, fails closed to a tool-less run (BuildMcpWiring's File.Exists guard)
+    because the proxy was in no publish path. A CI smoke (McpProxyPackagingSmoke / publish e2e) asserts File.Exists
+    at the published path. Air-gapped operators can still override the location via CODESPACE_MCP_PROXY_PATH.
+
+    We resolve the proxy's own output by building it for the SAME configuration/TFM and globbing codespace-mcp.*
+    (the apphost, .dll, .deps.json, .runtimeconfig.json), so a runtimeconfig/deps rename never silently drops a file.
+  -->
+  <Target Name="CopyMcpProxyToOutput" AfterTargets="Build">
+    <PropertyGroup>
+      <McpProxyOutDir>$(MSBuildThisFileDirectory)..\CodeSpace.Mcp\bin\$(Configuration)\$(TargetFramework)\</McpProxyOutDir>
+    </PropertyGroup>
+    <ItemGroup>
+      <McpProxyFiles Include="$(McpProxyOutDir)codespace-mcp*" />
+    </ItemGroup>
+    <Copy SourceFiles="@(McpProxyFiles)" DestinationFolder="$(OutDir)" SkipUnchangedFiles="true" Condition="'@(McpProxyFiles)' != ''" />
+  </Target>
+
+  <Target Name="PublishMcpProxy" AfterTargets="Publish">
+    <PropertyGroup>
+      <McpProxyOutDir>$(MSBuildThisFileDirectory)..\CodeSpace.Mcp\bin\$(Configuration)\$(TargetFramework)\</McpProxyOutDir>
+    </PropertyGroup>
+    <ItemGroup>
+      <McpProxyFiles Include="$(McpProxyOutDir)codespace-mcp*" />
+    </ItemGroup>
+    <Copy SourceFiles="@(McpProxyFiles)" DestinationFolder="$(PublishDir)" SkipUnchangedFiles="true" Condition="'@(McpProxyFiles)' != ''" />
+  </Target>
 
   <ItemGroup>
     <!-- The integration test reaches internal registrar helpers (CodeSpaceHangfireRegistrar.IsProcessingEnabled)

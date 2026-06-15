@@ -49,6 +49,16 @@ public class AgentMcpEndpointFlowTests
 {
     private const string ProtocolVersion = "2024-11-05";
 
+    /// <summary>
+    /// ON-DEMAND gate for the real-CLI config-load smoke. Default-OFF so CI (which has no proprietary <c>claude</c>
+    /// binary) skips it; a developer sets it to "1" with a real <c>claude</c> on PATH (or via
+    /// <c>CODESPACE_CLAUDE_CODE_PATH</c>) to prove the REAL CLI loads the harness-rendered <c>.mcp.json</c> and lists
+    /// the codespace MCP tools over the real proxy + endpoint. We do NOT fake the CLI — the CI-runnable proof is the
+    /// 🟢 <c>A_real_codespace_mcp_proxy_process_...</c> tests (real proxy binary over the real UDS); this closes the
+    /// last (deployment-gated) leg on demand.
+    /// </summary>
+    private const string RealCliSmokeEnvVar = "CODESPACE_RUN_REAL_CLI_MCP_SMOKE";
+
     private readonly PostgresFixture _fixture;
 
     public AgentMcpEndpointFlowTests(PostgresFixture fixture) { _fixture = fixture; }
@@ -254,6 +264,75 @@ public class AgentMcpEndpointFlowTests
             workerCts.Cancel();
             try { await run; } catch (OperationCanceledException) { /* worker death — expected */ }
         }
+    }
+
+    [Fact]
+    public async Task On_demand_the_real_claude_cli_loads_the_rendered_declaration_and_lists_the_codespace_tools()
+    {
+        // ON-DEMAND ONLY (Rule 12 fidelity honesty): default-OFF so CI — which lacks the proprietary `claude` binary —
+        // skips. A developer sets CODESPACE_RUN_REAL_CLI_MCP_SMOKE=1 with a real `claude` on PATH to prove the LAST,
+        // deployment-gated leg: the real CLI parses the harness-rendered .mcp.json + connects the codespace MCP server
+        // through the real proxy + endpoint and lists its tools. We do NOT fake the CLI — if the gate is off or the
+        // binary is absent we skip rather than assert a stand-in.
+        if (Environment.GetEnvironmentVariable(RealCliSmokeEnvVar) is not ("1" or "true" or "TRUE")) return;
+        if (OperatingSystem.IsWindows()) return;
+        if (!Socket.OSSupportsUnixDomainSockets) return;
+        var proxyDll = ProxyDllPathOrNull();
+        if (proxyDll is null) return;
+        var claude = ResolveClaudeOrNull();
+        if (claude is null) return;   // no real CLI present → skip (do not fake)
+
+        var teamId = await SeedTeamAsync();
+        var runId = await CreateRunAsync(teamId, AgentAutonomyLevel.Unleashed);
+
+        using var connects = ConnectRegistryFromFixture();
+        using var workerCts = new CancellationTokenSource();
+        var run = Task.Run(() => ExecuteAsync(runId, new ScriptedHarness("sleep 120"), mcpEnabled: true, cancellationToken: workerCts.Token));
+
+        try
+        {
+            var connect = await WaitForConnectAsync(connects, runId, run);
+
+            // Render the REAL Claude harness declaration (the production .mcp.json) pointing at this run's socket+token
+            // and the real proxy dll launcher, then write it into a temp config home the CLI will read.
+            using var home = new TempDir();
+            var context = new McpDeclarationContext { ProxyCommand = "dotnet", SocketPath = connect.SocketPath, Token = connect.Token, ServerName = "codespace" };
+            var declaration = ((IMcpHarnessDeclaration)new CodeSpace.Core.Services.Agents.Harnesses.Claude.ClaudeCodeHarness()).BuildMcpDeclaration(context);
+            await File.WriteAllTextAsync(Path.Combine(home.Path, declaration.RelativeFileName), declaration.Content);
+
+            // Run the real CLI's MCP listing against the rendered config home. `claude mcp list` connects each declared
+            // server and reports it — no model call, so no gateway needed. Assert it sees the codespace server.
+            var psi = new ProcessStartInfo { FileName = claude, RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false, WorkingDirectory = home.Path };
+            psi.Environment["CLAUDE_CONFIG_DIR"] = home.Path;
+            psi.ArgumentList.Add("mcp");
+            psi.ArgumentList.Add("list");
+
+            using var proc = Process.Start(psi)!;
+            var stdout = await proc.StandardOutput.ReadToEndAsync();
+            await proc.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(30));
+
+            stdout.ShouldContain("codespace", customMessage: $"the real claude CLI must load the rendered declaration and list the codespace server. stdout was:\n{stdout}");
+        }
+        finally
+        {
+            workerCts.Cancel();
+            try { await run; } catch (OperationCanceledException) { /* worker death — expected */ }
+        }
+    }
+
+    /// <summary>The real claude binary: the CODESPACE_CLAUDE_CODE_PATH override, else `claude` on PATH if present; null to skip the on-demand smoke.</summary>
+    private static string? ResolveClaudeOrNull()
+    {
+        var configured = Environment.GetEnvironmentVariable("CODESPACE_CLAUDE_CODE_PATH");
+        if (!string.IsNullOrEmpty(configured)) return File.Exists(configured) ? configured : null;
+
+        try
+        {
+            using var probe = Process.Start(new ProcessStartInfo { FileName = "claude", RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false, ArgumentList = { "--version" } });
+            probe!.WaitForExit(5000);
+            return probe.ExitCode == 0 ? "claude" : null;
+        }
+        catch { return null; }
     }
 
     /// <summary>Drive one proxy through initialize + tools/list, asserting both succeed (the per-connection session label aids concurrent-failure diagnosis).</summary>
@@ -533,6 +612,126 @@ public class AgentMcpEndpointFlowTests
             (await scope.Resolve<IAgentRunService>().GetAsync(runId, CancellationToken.None)).Status.ShouldBe(AgentRunStatus.Running, "a second worker death leaves the run Running for the next reconciler pass");
     }
 
+    // ── PR-C: allow-list augmentation + governance closed-loop in a real executor run ──────────────────────────────
+
+    [Fact]
+    public async Task A_restricted_run_with_the_endpoint_open_receives_the_tier_permitted_mcp_tools_in_the_allow_list()
+    {
+        if (OperatingSystem.IsWindows()) return;
+        if (!Socket.OSSupportsUnixDomainSockets) return;
+
+        var teamId = await SeedTeamAsync();
+        // Unleashed so every tool (incl. the destructive ones) is tier-permitted → projected into the allow-list.
+        var runId = await CreateRunAsync(teamId, AgentAutonomyLevel.Unleashed, tools: new[] { "Read", "Grep" });
+
+        var harness = new AllowedToolsCapturingHarness("printf 'done\\n'");
+
+        // Endpoint flag ON + a declaring + tool-projecting harness + the proxy present → the wiring is written, so the
+        // executor augments the harness allow-list with the governed mcp__codespace__* names before BuildInvocation.
+        await ExecuteAsync(runId, harness, mcpEnabled: true);
+
+        var tools = harness.CapturedTools.ShouldNotBeNull(customMessage: "the executor must have invoked BuildInvocation with a Tools list");
+
+        // Additive: the author's restricted tools stay, AND the governed codespace tools are merged in.
+        tools.ShouldContain("Read");
+        tools.ShouldContain("Grep");
+        tools.ShouldContain("mcp__codespace__agent.run_command", customMessage: "a RESTRICTED run must still receive the governed codespace tools the open endpoint serves");
+        tools.ShouldContain("mcp__codespace__git.list_prs", customMessage: "the read git tool is projected too");
+        tools.ShouldAllBe(t => !t.StartsWith("mcp__") || t.StartsWith("mcp__codespace__"), customMessage: "only the codespace server's tools are added");
+
+        using var scope = _fixture.BeginScope();
+        (await scope.Resolve<IAgentRunService>().GetAsync(runId, CancellationToken.None)).Status.ShouldBe(AgentRunStatus.Succeeded);
+    }
+
+    [Fact]
+    public async Task A_default_all_run_is_not_narrowed_no_allowed_tools_are_forced()
+    {
+        if (OperatingSystem.IsWindows()) return;
+        if (!Socket.OSSupportsUnixDomainSockets) return;
+
+        var teamId = await SeedTeamAsync();
+        var runId = await CreateRunAsync(teamId, AgentAutonomyLevel.Unleashed, tools: null);   // author named NO tools → harness-default-all
+
+        var harness = new AllowedToolsCapturingHarness("printf 'done\\n'");
+
+        await ExecuteAsync(runId, harness, mcpEnabled: true);
+
+        // No regression: a default-all run keeps a null/empty allow-list so the CLI default still reaches the MCP tools —
+        // augmenting must NOT convert it into a restricted list of only the codespace tools.
+        (harness.CapturedTools is null || harness.CapturedTools.Count == 0)
+            .ShouldBeTrue(customMessage: "a default-all run must NOT be narrowed to a restricted allow-list by the augmentation");
+
+        using var scope = _fixture.BeginScope();
+        (await scope.Resolve<IAgentRunService>().GetAsync(runId, CancellationToken.None)).Status.ShouldBe(AgentRunStatus.Succeeded);
+    }
+
+    [Fact]
+    public async Task A_side_effecting_governed_call_writes_a_ledger_row_a_read_only_call_does_not()
+    {
+        if (OperatingSystem.IsWindows()) return;
+        if (!Socket.OSSupportsUnixDomainSockets) return;
+        if (!await GitAvailableAsync()) return;
+
+        var teamId = await SeedTeamAsync();
+        using var origin = new TempDir();
+        await SeedLocalRepoAsync(origin.Path, "README.md", "hello-from-team-a");
+        var repoId = await SeedRepositoryAsync(teamId, new Uri(origin.Path).AbsoluteUri, "main");
+
+        // Unleashed so the destructive agent.run_command is gated-Allow (runs once through the ledger, not parked).
+        var runId = await CreateRunAsync(teamId, AgentAutonomyLevel.Unleashed);
+
+        using var connects = ConnectRegistryFromFixture();
+        // Endpoint AND governance ON → the side-effecting path routes through the exactly-once ToolCallLedger.
+        var run = RunExecutorInBackground(runId, new ScriptedHarness("sleep 6"), governanceEnabled: true);
+
+        var connect = await WaitForConnectAsync(connects, runId);
+        await using var client = await McpClient.ConnectAsync(connect);
+
+        // (a) a READ-ONLY tool (git.list_prs) — served BEFORE the ledger (the IsReadOnly short-circuit), so it writes
+        //     NO ledger row REGARDLESS of its own outcome (it errors here only because the seeded local-file repo has
+        //     no real provider API to list PRs against — the short-circuit fires before any of that). We assert the
+        //     "no row" property below, not the tool's success.
+        await client.CallToolAsync(1, "git.list_prs", new { repositoryId = repoId.ToString(), state = "open" });
+
+        // (b) a SIDE-EFFECTING governed tool (agent.run_command) — routes through the ledger → exactly one terminal row.
+        var writeCall = await client.CallToolAsync(2, "agent.run_command", new { repositoryId = repoId.ToString(), command = "cat", args = new[] { "README.md" } });
+        writeCall.GetProperty("isError").GetBoolean().ShouldBeFalse(customMessage: "the team-A repo resolves and the command runs in its clone");
+
+        await run;   // the sleeping harness returns → the run completes; the ledger rows persist
+
+        // The audit query (GetForRunAsync) surfaces EXACTLY the side-effecting call — proving the governance loop ran
+        // end-to-end in a real executor run, and that the read-only call was NOT tracked (the IsReadOnly short-circuit).
+        using var scope = _fixture.BeginScope();
+        var rows = await scope.Resolve<IToolCallLedgerService>().GetForRunAsync(runId, teamId, CancellationToken.None);
+
+        var row = rows.ShouldHaveSingleItem();
+        row.ToolKind.ShouldBe("agent.run_command", customMessage: "only the side-effecting tool is ledger-tracked; the read-only call wrote no row");
+        row.Status.ShouldBe(ToolCallLedgerStatus.Succeeded);
+        rows.ShouldNotContain(r => r.ToolKind == "git.list_prs", customMessage: "a read-only tool is served BEFORE the ledger — never a ledger row (the IsReadOnly short-circuit), even when the tool itself errors");
+    }
+
+    [Fact]
+    public async Task A_missing_proxy_under_governance_still_fails_closed_no_declaration_no_ledger_run_succeeds()
+    {
+        if (OperatingSystem.IsWindows()) return;
+        if (!Socket.OSSupportsUnixDomainSockets) return;
+
+        var teamId = await SeedTeamAsync();
+        var runId = await CreateRunAsync(teamId, AgentAutonomyLevel.Unleashed);
+
+        // Endpoint + governance ON but the proxy binary is missing → fail-closed: no declaration is written (the CLI
+        // would have no MCP server to reach), and the run still completes (the fabric is optional infra). The clear
+        // per-run Warning is logged by BuildMcpWiring; the boot diagnostic (LogMcpProxyReadiness) is unit-pinned.
+        await ExecuteAsync(runId, new DeclaringScriptedHarness("printf 'done\\n'"), mcpEnabled: true, proxyPresent: false, governanceEnabled: true);
+
+        var declarationPath = Path.Combine(LocalProcessRunner.SpoolDirectoryFor(runId.ToString("N")), "agent-home", ".mcp.json");
+        File.Exists(declarationPath).ShouldBeFalse(customMessage: "a missing proxy binary must fail closed — no declaration pointing at it");
+
+        using var scope = _fixture.BeginScope();
+        (await scope.Resolve<IToolCallLedgerService>().GetForRunAsync(runId, teamId, CancellationToken.None)).ShouldBeEmpty(customMessage: "no MCP server reachable → no tool calls → no ledger rows");
+        (await scope.Resolve<IAgentRunService>().GetAsync(runId, CancellationToken.None)).Status.ShouldBe(AgentRunStatus.Succeeded, customMessage: "the tool fabric is optional infra; a missing proxy binary does not fail the run");
+    }
+
     // ── Driving the REAL executor ───────────────────────────────────────────
 
     /// <summary>Resolve the connect-registry SINGLETON from the fixture; it is the same instance the executor's MCP scope registers into.</summary>
@@ -543,7 +742,7 @@ public class AgentMcpEndpointFlowTests
     }
 
     /// <summary>Start the real ExecuteAsync (flag ON) on a background task so the test can drive JSON-RPC while the harness sleeps.</summary>
-    private Task RunExecutorInBackground(Guid runId, IAgentHarness harness) => Task.Run(() => ExecuteAsync(runId, harness, mcpEnabled: true));
+    private Task RunExecutorInBackground(Guid runId, IAgentHarness harness, bool governanceEnabled = false) => Task.Run(() => ExecuteAsync(runId, harness, mcpEnabled: true, governanceEnabled: governanceEnabled));
 
     /// <summary>
     /// Drive the REAL ExecuteAsync. The wiring is FOLDED into the single endpoint flag (FIX 4): when it's on AND the
@@ -552,12 +751,15 @@ public class AgentMcpEndpointFlowTests
     /// at a real existing stand-in (the test only File.Exists-checks it; the scripted harness runs /bin/sh, not the proxy);
     /// when false we point it at a missing path to exercise the fail-closed "no declaration" branch.
     /// </summary>
-    private async Task ExecuteAsync(Guid runId, IAgentHarness harness, bool mcpEnabled, bool proxyPresent = true, CancellationToken cancellationToken = default)
+    private async Task ExecuteAsync(Guid runId, IAgentHarness harness, bool mcpEnabled, bool proxyPresent = true, bool governanceEnabled = false, CancellationToken cancellationToken = default)
     {
         var previousEndpoint = Environment.GetEnvironmentVariable(AgentRunExecutor.McpEndpointEnabledEnvVar);
         var previousProxy = Environment.GetEnvironmentVariable(LocalProcessRunner.McpProxyPathEnvVar);
+        var previousGovernance = Environment.GetEnvironmentVariable(McpRequestHandler.GovernanceEnabledEnvVar);
         Environment.SetEnvironmentVariable(AgentRunExecutor.McpEndpointEnabledEnvVar, mcpEnabled ? "true" : null);
         Environment.SetEnvironmentVariable(LocalProcessRunner.McpProxyPathEnvVar, mcpEnabled ? (proxyPresent ? StandInProxyPath() : "/nonexistent/codespace-mcp") : null);
+        // The endpoint reads IsGovernanceEnabled() once at open, so the loop only runs E2E when this is set ON too.
+        Environment.SetEnvironmentVariable(McpRequestHandler.GovernanceEnabledEnvVar, governanceEnabled ? "true" : null);
 
         try
         {
@@ -568,6 +770,7 @@ public class AgentMcpEndpointFlowTests
         {
             Environment.SetEnvironmentVariable(AgentRunExecutor.McpEndpointEnabledEnvVar, previousEndpoint);
             Environment.SetEnvironmentVariable(LocalProcessRunner.McpProxyPathEnvVar, previousProxy);
+            Environment.SetEnvironmentVariable(McpRequestHandler.GovernanceEnabledEnvVar, previousGovernance);
         }
     }
 
@@ -889,11 +1092,11 @@ public class AgentMcpEndpointFlowTests
 
     // ── Seeding (mirrors McpToolTeamScopeFlowTests + AgentRunExecutorTests) ──
 
-    private async Task<Guid> CreateRunAsync(Guid teamId, AgentAutonomyLevel autonomy)
+    private async Task<Guid> CreateRunAsync(Guid teamId, AgentAutonomyLevel autonomy, IReadOnlyList<string>? tools = null)
     {
         using var scope = _fixture.BeginScope();
         var run = await scope.Resolve<IAgentRunService>().CreateAsync(
-            new AgentTask { Goal = "scripted", Harness = "scripted", Model = "test-model", TimeoutSeconds = 1800, Autonomy = autonomy },
+            new AgentTask { Goal = "scripted", Harness = "scripted", Model = "test-model", TimeoutSeconds = 1800, Autonomy = autonomy, Tools = tools },
             teamId, null, null, CancellationToken.None);
         return run.Id;
     }
@@ -1017,6 +1220,49 @@ public class AgentMcpEndpointFlowTests
             TimeoutSeconds = task.TimeoutSeconds,
             ConfigHomeEnvVars = new[] { "CLAUDE_CONFIG_DIR" },   // gives the runner a per-run home to write the declaration into
         };
+
+        public McpHarnessDeclaration BuildMcpDeclaration(McpDeclarationContext context) => new() { RelativeFileName = ".mcp.json", Content = McpDeclarationWriter.RenderClaudeJson(context) };
+
+        public AgentEvent? ParseEvent(string rawLine) =>
+            string.IsNullOrWhiteSpace(rawLine) ? null : new AgentEvent { Kind = AgentEventKind.AssistantMessage, Text = rawLine.Trim() };
+
+        public AgentRunResult BuildResult(IReadOnlyList<AgentEvent> events, int exitCode) =>
+            exitCode == 0
+                ? new AgentRunResult { Status = AgentRunStatus.Succeeded, ExitReason = "completed", Summary = events.Count > 0 ? events[^1].Text : null }
+                : new AgentRunResult { Status = AgentRunStatus.Failed, ExitReason = "non-zero-exit", Error = $"exit {exitCode}" };
+    }
+
+    /// <summary>
+    /// A declaring scripted harness that ALSO mirrors ClaudeCodeHarness's allow-list projection: it CAPTURES the
+    /// <c>task.Tools</c> the executor hands BuildInvocation (so the test can assert the augmented mcp__codespace__*
+    /// names landed). It declares an MCP server + a config home so the wiring is written (which triggers the
+    /// augmentation), and runs /bin/sh — no real CLI. This proves the augmentation end-to-end in a REAL executor run.
+    /// </summary>
+    private sealed class AllowedToolsCapturingHarness : IAgentHarness, IMcpHarnessDeclaration
+    {
+        private readonly string _script;
+
+        public AllowedToolsCapturingHarness(string script) => _script = script;
+
+        public IReadOnlyList<string>? CapturedTools { get; private set; }
+
+        public string Kind => "scripted";
+        public string Version => "test";
+        public IReadOnlyList<string> Models { get; } = new[] { "test-model" };
+
+        public SandboxSpec BuildInvocation(AgentTask task)
+        {
+            CapturedTools = task.Tools;   // the executor augments task.Tools BEFORE calling this (when the wiring landed)
+
+            return new SandboxSpec
+            {
+                Command = "/bin/sh",
+                Args = new[] { "-c", _script },
+                WorkingDirectory = task.WorkspaceDirectory,
+                TimeoutSeconds = task.TimeoutSeconds,
+                ConfigHomeEnvVars = new[] { "CLAUDE_CONFIG_DIR" },
+            };
+        }
 
         public McpHarnessDeclaration BuildMcpDeclaration(McpDeclarationContext context) => new() { RelativeFileName = ".mcp.json", Content = McpDeclarationWriter.RenderClaudeJson(context) };
 
