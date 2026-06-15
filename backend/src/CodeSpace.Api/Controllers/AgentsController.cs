@@ -66,6 +66,14 @@ public class AgentsController : ControllerBase
         return Ok(result);
     }
 
+    /// <summary>The team's supervisor-run scorecard — the cross-run roll-up (avg decisions/replan rounds, overall ground-truth spawn success, outcome distribution) + recent per-run scores over the durable supervisor lane. Optional since filter windows the trend. Team-scoped (the team is the X-Team-Id header, never the query string); empty when no supervisor runs exist.</summary>
+    [HttpGet("supervisor-scorecard")]
+    public async Task<IActionResult> GetSupervisorScorecard([FromQuery] GetSupervisorScorecardQuery query, CancellationToken cancellationToken)
+    {
+        var result = await _mediator.Send(query, cancellationToken).ConfigureAwait(false);
+        return Ok(result);
+    }
+
     [HttpGet("{agentDefinitionId:guid}")]
     public async Task<IActionResult> Get([FromRoute] Guid agentDefinitionId, CancellationToken cancellationToken)
     {
