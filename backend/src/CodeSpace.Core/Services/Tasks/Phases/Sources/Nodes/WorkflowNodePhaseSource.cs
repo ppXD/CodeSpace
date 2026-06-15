@@ -1,0 +1,177 @@
+using System.Text.Json;
+using CodeSpace.Core.DependencyInjection;
+using CodeSpace.Core.Persistence.Db;
+using CodeSpace.Core.Services.Workflows;
+using CodeSpace.Messages.Constants;
+using CodeSpace.Messages.Dtos.Workflows;
+using CodeSpace.Messages.Enums;
+using CodeSpace.Messages.Tasks.Phases;
+using Microsoft.EntityFrameworkCore;
+
+namespace CodeSpace.Core.Services.Tasks.Phases.Sources.Nodes;
+
+/// <summary>
+/// The STRUCTURAL phase source — it reuses <see cref="IWorkflowService.GetRunAsync"/> (team-scoped) wholesale and
+/// projects ONE <see cref="RunPhase"/> per TOP-LEVEL node (a row with an empty <see cref="WorkflowRunNodeSummary.IterationKey"/> —
+/// not a container-internal branch). Map fan-outs roll up: a top-level node whose DIRECT branch rows carry
+/// <c>ContainerKind == "flow.map"</c> and an <c>IterationKey</c> prefixed <c>"&lt;mapNodeId&gt;#"</c> becomes a single
+/// 'map' phase whose Agents are those branches' agent refs + a count/failed metric from the map node's output roll-up.
+/// A plain top-level node carrying an <c>AgentRunId</c> (agent.code / agent.supervisor) becomes an 'agent' phase with
+/// one ref; everything else is a plain 'node' phase. The node→agentRunId + branch ContainerKind are ALREADY resolved
+/// on the summary rows (PR1-PR6 substrate), so this never re-queries waits.
+///
+/// <para>Each <see cref="PhaseAgentRef"/> carries the GROUND-TRUTH <c>AgentRunStatus</c> name (read team-scoped from
+/// the <c>AgentRun</c> rows in ONE batch query, mirroring <c>SupervisorScorecardService</c>'s id-set fold), exactly
+/// like the supervisor source — never the structural <c>NodeStatus</c> name. A ref whose agent row is missing
+/// (team-foreign, or not yet created) falls back to the owning node's status name. READ-ONLY.</para>
+/// </summary>
+public sealed class WorkflowNodePhaseSource : IRunPhaseSource, IScopedDependency
+{
+    public const string Key = "node-summary";
+
+    private const string MapContainerKind = "flow.map";
+
+    private readonly IWorkflowService _workflows;
+    private readonly CodeSpaceDbContext _db;
+
+    public WorkflowNodePhaseSource(IWorkflowService workflows, CodeSpaceDbContext db)
+    {
+        _workflows = workflows;
+        _db = db;
+    }
+
+    public string SourceKey => Key;
+
+    public async Task<IReadOnlyList<RunPhase>> ContributeAsync(RunPhaseContext context, CancellationToken cancellationToken)
+    {
+        var run = await _workflows.GetRunAsync(context.RunId, context.TeamId, cancellationToken).ConfigureAwait(false);
+
+        if (run == null) return Array.Empty<RunPhase>();
+
+        var agentStatusById = await AgentStatusesAsync(context.TeamId, run.Nodes, cancellationToken).ConfigureAwait(false);
+
+        return ProjectNodes(run.Nodes, agentStatusById);
+    }
+
+    /// <summary>The REAL status of every node-referenced agent run, keyed by id, team-scoped — the ground-truth fold (mirrors <c>SupervisorScorecardService.SpawnedAgentStatusesByRunAsync</c>'s id-set query). ONE batch query, never per-ref.</summary>
+    private async Task<IReadOnlyDictionary<Guid, AgentRunStatus>> AgentStatusesAsync(Guid teamId, IReadOnlyList<WorkflowRunNodeSummary> nodes, CancellationToken cancellationToken)
+    {
+        var ids = nodes
+            .Where(n => !string.IsNullOrEmpty(n.AgentRunId) && Guid.TryParse(n.AgentRunId, out _))
+            .Select(n => Guid.Parse(n.AgentRunId!))
+            .Distinct()
+            .ToList();
+
+        if (ids.Count == 0) return EmptyStatuses;
+
+        return (await _db.AgentRun.AsNoTracking()
+                .Where(r => r.TeamId == teamId && ids.Contains(r.Id))
+                .Select(r => new { r.Id, r.Status })
+                .ToListAsync(cancellationToken).ConfigureAwait(false))
+            .ToDictionary(r => r.Id, r => r.Status);
+    }
+
+    /// <summary>The pure projection step — node summaries + the already-resolved ground-truth agent statuses → phases. Separated from the DB read so it is unit-testable without a DbContext.</summary>
+    public static IReadOnlyList<RunPhase> ProjectNodes(IReadOnlyList<WorkflowRunNodeSummary> nodes, IReadOnlyDictionary<Guid, AgentRunStatus> agentStatusById)
+    {
+        var topLevel = OrderTopLevel(nodes);
+
+        return topLevel.Select((node, index) => ToPhase(node, index, nodes, agentStatusById)).ToList();
+    }
+
+    private static IReadOnlyList<WorkflowRunNodeSummary> OrderTopLevel(IReadOnlyList<WorkflowRunNodeSummary> nodes) =>
+        nodes
+            .Where(n => string.IsNullOrEmpty(n.IterationKey))
+            .OrderBy(n => n.StartedAt ?? DateTimeOffset.MaxValue)
+            .ToList();
+
+    private static RunPhase ToPhase(WorkflowRunNodeSummary node, int order, IReadOnlyList<WorkflowRunNodeSummary> allRows, IReadOnlyDictionary<Guid, AgentRunStatus> agentStatusById)
+    {
+        var branches = MapBranchesOf(node.NodeId, allRows);
+
+        if (branches.Count > 0) return MapPhase(node, order, branches, agentStatusById);
+
+        if (!string.IsNullOrEmpty(node.AgentRunId)) return AgentPhase(node, order, agentStatusById);
+
+        return PlainPhase(node, order);
+    }
+
+    /// <summary>The map element-branch rows belonging DIRECTLY to this node: a branch carries ContainerKind=="flow.map" and an iteration key whose remainder after the "&lt;nodeId&gt;#" prefix has NO '/' — i.e. the engine's "&lt;mapId&gt;#&lt;i&gt;" shape, excluding a nested grandchild like "&lt;mapId&gt;#&lt;i&gt;/&lt;innerKey&gt;" (the engine composes nested keys as "&lt;outerKey&gt;/&lt;segment&gt;"). So the fan-out folds ONLY its own direct elements, matching the outer map's count/failed metric.</summary>
+    private static IReadOnlyList<WorkflowRunNodeSummary> MapBranchesOf(string nodeId, IReadOnlyList<WorkflowRunNodeSummary> allRows)
+    {
+        var prefix = nodeId + "#";
+
+        return allRows
+            .Where(r => r.ContainerKind == MapContainerKind && IsDirectBranch(r.IterationKey, prefix))
+            .OrderBy(r => r.IterationKey, StringComparer.Ordinal)
+            .ToList();
+    }
+
+    /// <summary>A direct branch of the map: the key starts with "&lt;nodeId&gt;#" and the remainder after that prefix carries NO '/' (a '/' marks a nested-container segment, i.e. a grandchild — not this map's direct element).</summary>
+    private static bool IsDirectBranch(string iterationKey, string prefix) =>
+        iterationKey.StartsWith(prefix, StringComparison.Ordinal) &&
+        iterationKey.AsSpan(prefix.Length).IndexOf('/') < 0;
+
+    private static RunPhase MapPhase(WorkflowRunNodeSummary node, int order, IReadOnlyList<WorkflowRunNodeSummary> branches, IReadOnlyDictionary<Guid, AgentRunStatus> agentStatusById)
+    {
+        var agents = branches.Where(b => !string.IsNullOrEmpty(b.AgentRunId)).Select(b => ToAgentRef(b, agentStatusById)).ToList();
+
+        return BasePhase(node, order, kind: "map", label: "Fan out", agents) with { Metrics = MapMetrics(node, agents) };
+    }
+
+    private static RunPhase AgentPhase(WorkflowRunNodeSummary node, int order, IReadOnlyDictionary<Guid, AgentRunStatus> agentStatusById)
+    {
+        var agents = new[] { ToAgentRef(node, agentStatusById) };
+
+        return BasePhase(node, order, kind: "agent", label: node.NodeId, agents) with
+        {
+            Metrics = AgentMetrics(agents),
+        };
+    }
+
+    private static RunPhase PlainPhase(WorkflowRunNodeSummary node, int order) =>
+        BasePhase(node, order, kind: "node", label: node.NodeId, Array.Empty<PhaseAgentRef>());
+
+    private static RunPhase BasePhase(WorkflowRunNodeSummary node, int order, string kind, string label, IReadOnlyList<PhaseAgentRef> agents) => new()
+    {
+        Id = node.NodeId,
+        Label = label,
+        Kind = kind,
+        Status = PhaseStatusMap.FromNode(node.Status),
+        Order = order,
+        Agents = agents,
+        SourceKey = Key,
+        Summary = node.Error,
+        StartedAt = node.StartedAt,
+        CompletedAt = node.CompletedAt,
+    };
+
+    /// <summary>The agent ref for a node row, carrying the GROUND-TRUTH AgentRunStatus name read team-scoped — falling back to the owning node's status name only when the agent row is missing (team-foreign or not yet created).</summary>
+    private static PhaseAgentRef ToAgentRef(WorkflowRunNodeSummary node, IReadOnlyDictionary<Guid, AgentRunStatus> agentStatusById)
+    {
+        var agentRunId = Guid.Parse(node.AgentRunId!);
+
+        return new()
+        {
+            AgentRunId = agentRunId,
+            NodeId = node.NodeId,
+            IterationKey = string.IsNullOrEmpty(node.IterationKey) ? null : node.IterationKey,
+            Status = agentStatusById.TryGetValue(agentRunId, out var status) ? status.ToString() : node.Status.ToString(),
+        };
+    }
+
+    /// <summary>Map metrics: agent count + the engine's own count/failed roll-up off the map node's OutputsJson (best-effort — absent keys read 0).</summary>
+    private static PhaseMetrics MapMetrics(WorkflowRunNodeSummary node, IReadOnlyList<PhaseAgentRef> agents) => new()
+    {
+        AgentCount = agents.Count,
+        FailedCount = ReadIntOutput(node.Outputs, WorkflowOutputKeys.MapFailed),
+        SucceededCount = Math.Max(0, ReadIntOutput(node.Outputs, WorkflowOutputKeys.MapCount) - ReadIntOutput(node.Outputs, WorkflowOutputKeys.MapFailed)),
+    };
+
+    private static PhaseMetrics AgentMetrics(IReadOnlyList<PhaseAgentRef> agents) => new() { AgentCount = agents.Count };
+
+    private static int ReadIntOutput(JsonElement outputs, string key) =>
+        outputs.ValueKind == JsonValueKind.Object && outputs.TryGetProperty(key, out var v) && v.ValueKind == JsonValueKind.Number && v.TryGetInt32(out var n) ? n : 0;
+
+    private static readonly IReadOnlyDictionary<Guid, AgentRunStatus> EmptyStatuses = new Dictionary<Guid, AgentRunStatus>();
+}
