@@ -1,5 +1,6 @@
 using CodeSpace.Core.DependencyInjection;
 using CodeSpace.Core.Persistence.Db;
+using CodeSpace.Core.Services.Agents;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Dtos.Agents;
 using Microsoft.Extensions.Logging;
@@ -195,11 +196,34 @@ public sealed partial class SupervisorTurnService : ISupervisorTurnService, ISco
         if (!won)
             _logger.LogWarning("Supervisor decision {DecisionId} was already Running (a prior walk crashed before recording terminal) — re-executing to recover, not self-advancing", decisionId);
 
-        var execution = await _executor.ExecuteAsync(decision, context, cancellationToken).ConfigureAwait(false);
+        var execution = await ExecuteOrTerminalizeFailureAsync(decisionId, teamId, context, decision, cancellationToken).ConfigureAwait(false);
 
         await _ledger.RecordTerminalAsync(decisionId, teamId, SupervisorDecisionStatus.Succeeded, execution.OutcomeJson, error: null, cancellationToken).ConfigureAwait(false);
 
         return execution;
+    }
+
+    /// <summary>
+    /// Run the side effect, but if a spawn/retry references an unresolvable persona (missing / foreign / corrupt
+    /// — <see cref="AgentDefinitionResolutionException"/>, which the executor prefixes for the supervisor lane),
+    /// record the decision as a terminal FAILURE before re-throwing. Without this the exception would escape with
+    /// the row left stranded <c>Running</c> (the terminal record below never runs), and a re-walk would re-enter
+    /// the same in-flight decision and re-throw forever. Recording Failed here makes the persona error a CLEAN,
+    /// terminal node failure (the node's <c>RunAsync</c> surfaces the re-thrown message → node retry + the
+    /// <c>error</c> branch compose), mirroring <c>WorkflowEngine.StageAgentRunAsync</c> for an <c>agent.code</c> node.
+    /// </summary>
+    private async Task<SupervisorExecution> ExecuteOrTerminalizeFailureAsync(Guid decisionId, Guid teamId, SupervisorTurnContext context, SupervisorDecision decision, CancellationToken cancellationToken)
+    {
+        try
+        {
+            return await _executor.ExecuteAsync(decision, context, cancellationToken).ConfigureAwait(false);
+        }
+        catch (AgentDefinitionResolutionException ex)
+        {
+            await _ledger.RecordTerminalAsync(decisionId, teamId, SupervisorDecisionStatus.Failed, outcomeJson: null, error: ex.Message, cancellationToken).ConfigureAwait(false);
+
+            throw;
+        }
     }
 
     /// <summary>Reconstruct the suspend classification of a replayed (already-settled) decision from its recorded outcome — an ask_human outcome records its Action-wait token (re-park on the human's answer), a spawn/retry outcome records its staged agent-run ids (re-suspend on the SAME count of existing waits); everything else is a synchronous self-advance.</summary>

@@ -38,14 +38,16 @@ public sealed partial class RealSupervisorActionExecutor : ISupervisorActionExec
 {
     private readonly CodeSpaceDbContext _db;
     private readonly IAgentRunService _agentRuns;
+    private readonly IAgentDefinitionResolver _agentDefinitionResolver;
     private readonly IChatBotService _bot;
     private readonly IInteractionComponentRegistry _components;
     private readonly ILogger<RealSupervisorActionExecutor> _logger;
 
-    public RealSupervisorActionExecutor(CodeSpaceDbContext db, IAgentRunService agentRuns, IChatBotService bot, IInteractionComponentRegistry components, ILogger<RealSupervisorActionExecutor> logger)
+    public RealSupervisorActionExecutor(CodeSpaceDbContext db, IAgentRunService agentRuns, IAgentDefinitionResolver agentDefinitionResolver, IChatBotService bot, IInteractionComponentRegistry components, ILogger<RealSupervisorActionExecutor> logger)
     {
         _db = db;
         _agentRuns = agentRuns;
+        _agentDefinitionResolver = agentDefinitionResolver;
         _bot = bot;
         _components = components;
         _logger = logger;
