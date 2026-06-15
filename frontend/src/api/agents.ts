@@ -85,6 +85,39 @@ export interface ToolCallView {
   approvedAt: string | null;
 }
 
+/**
+ * Mirrors backend `HarnessScore` — the success + latency rollup for one harness (or, with harness `"(all)"`,
+ * across every harness). `total` counts only TERMINAL runs (Succeeded / Failed / Cancelled / TimedOut); a
+ * still-running run is not scored. `successRate` is `succeeded / total` in 0..1 (0 when there are no terminal
+ * runs). The P50/P95 durations are the median / 95th-percentile run length in seconds over the runs that have
+ * one, or null when none do. Cost/token is deliberately ABSENT — the backend scorer does not aggregate it yet
+ * (token usage lives in the per-run result envelope but isn't rolled up), so surfacing a number would fabricate it.
+ */
+export interface HarnessScore {
+  harness: string;
+  total: number;
+  succeeded: number;
+  successRate: number;
+  p50DurationSeconds: number | null;
+  p95DurationSeconds: number | null;
+}
+
+/**
+ * Mirrors backend `AgentRunScorecard` — the team's per-harness + overall success/latency view, the measurement
+ * spine that turns "is the agent working" into an auditable number. `harnesses` is sorted by harness name;
+ * `overall` is the rollup across them all (its `harness` is `"(all)"`). Team-scoped at the source.
+ */
+export interface AgentRunScorecard {
+  harnesses: HarnessScore[];
+  overall: HarnessScore;
+}
+
+/** Optional filters the scorecard query supports — a trend window (`since`, ISO) and/or a single harness. */
+export interface ScorecardFilters {
+  since?: string;
+  harness?: string;
+}
+
 /** A run is still in flight (worth polling) while Queued or Running; terminal states stop the poll. */
 export const isAgentRunActive = (status: AgentRunStatus | undefined): boolean =>
   status === "Queued" || status === "Running";
@@ -124,4 +157,11 @@ export const agentsApi = {
     fetchJson<AgentRunEventDto[]>(`/api/agents/runs/${agentRunId}/events?after=${after}`),
   listToolCalls: (agentRunId: string) =>
     fetchJson<ToolCallView[]>(`/api/agents/runs/${agentRunId}/tool-calls`),
+  getScorecard: (filters: ScorecardFilters = {}) => {
+    const params = new URLSearchParams();
+    if (filters.since) params.set("since", filters.since);
+    if (filters.harness) params.set("harness", filters.harness);
+    const qs = params.toString();
+    return fetchJson<AgentRunScorecard>(`/api/agents/scorecard${qs ? `?${qs}` : ""}`);
+  },
 };

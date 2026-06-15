@@ -58,6 +58,14 @@ public class AgentsController : ControllerBase
         return Ok(result);
     }
 
+    /// <summary>The team's agent-run scorecard — per-harness + overall success rate and latency (P50/P95) over its terminal runs. Optional since/harness filters narrow the window. Team-scoped (the team is the X-Team-Id header, never the query string).</summary>
+    [HttpGet("scorecard")]
+    public async Task<IActionResult> GetScorecard([FromQuery] GetAgentScorecardQuery query, CancellationToken cancellationToken)
+    {
+        var result = await _mediator.Send(query, cancellationToken).ConfigureAwait(false);
+        return Ok(result);
+    }
+
     [HttpGet("{agentDefinitionId:guid}")]
     public async Task<IActionResult> Get([FromRoute] Guid agentDefinitionId, CancellationToken cancellationToken)
     {
