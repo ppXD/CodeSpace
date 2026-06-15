@@ -1,5 +1,6 @@
 using System.Text.Json;
 using CodeSpace.Core.DependencyInjection;
+using CodeSpace.Core.Services.Agents.Harnesses.Codex;
 using CodeSpace.Messages.Dtos.Workflows;
 using CodeSpace.Messages.Dtos.Workflows.Planning;
 
@@ -81,7 +82,8 @@ public sealed class WorkflowPlanProjector : IWorkflowPlanProjector, IScopedDepen
     /// <summary>The per-branch body node — the only place the recommended-kind switch decides a node type (coding → agent.code, else → llm.complete). Each reads its element as {{item.title}}/{{item.instruction}}.</summary>
     private static NodeDefinition BodyNode(string bodyTypeKey) => bodyTypeKey == "agent.code"
         ? new() { Id = "body", TypeKey = "agent.code", ParentId = "map", Label = "Agent",
-                  Config = Json("""{ "goal": "{{item.title}}: {{item.instruction}}", "harness": "codex-cli", "autonomyLevel": "Confined", "readOnly": true }"""),
+                  // harness from CodexHarness.HarnessKind (the const that owns the wire string) so a rename can't silently drift (Rule 8); an anon object keeps the {{item.*}} refs literal without brace-escaping.
+                  Config = JsonSerializer.SerializeToElement(new { goal = "{{item.title}}: {{item.instruction}}", harness = CodexHarness.HarnessKind, autonomyLevel = "Confined", readOnly = true }),
                   Inputs = Empty() }
         : new() { Id = "body", TypeKey = "llm.complete", ParentId = "map", Label = "Work the subtask",
                   Config = Json("""{ "provider": "Anthropic" }"""),

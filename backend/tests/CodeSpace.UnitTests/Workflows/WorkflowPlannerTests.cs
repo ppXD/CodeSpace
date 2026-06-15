@@ -85,17 +85,26 @@ public class WorkflowPlannerTests
     [Fact]
     public async Task Flag_off_returns_disabled_result_without_invoking_the_planner()
     {
+        // The flag lives in the process-global env; restore it in finally so a leftover value can't bleed into
+        // another test (symmetry with Flag_on). null IS the default — only this service reads this var.
+        var original = Environment.GetEnvironmentVariable(WorkflowPlanningService.EnabledEnvVar);
         Environment.SetEnvironmentVariable(WorkflowPlanningService.EnabledEnvVar, null);
+        try
+        {
+            var planner = new RecordingPlanner();
+            var service = new WorkflowPlanningService(planner, new WorkflowPlanProjector(), BuildValidator());
 
-        var planner = new RecordingPlanner();
-        var service = new WorkflowPlanningService(planner, new WorkflowPlanProjector(), BuildValidator());
+            var result = await service.PlanFromTaskAsync(SampleRequest(), CancellationToken.None);
 
-        var result = await service.PlanFromTaskAsync(SampleRequest(), CancellationToken.None);
-
-        result.PlannerEnabled.ShouldBeFalse();
-        result.Plan.ShouldBeNull();
-        result.Definition.ShouldBeNull();
-        planner.Invocations.ShouldBe(0, "the planner must not be called when the flag is off");
+            result.PlannerEnabled.ShouldBeFalse();
+            result.Plan.ShouldBeNull();
+            result.Definition.ShouldBeNull();
+            planner.Invocations.ShouldBe(0, "the planner must not be called when the flag is off");
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable(WorkflowPlanningService.EnabledEnvVar, original);
+        }
     }
 
     [Fact]
@@ -122,14 +131,16 @@ public class WorkflowPlannerTests
 
     // ── Projection validates + the map items binding resolves to the subtasks ──
 
-    [Fact]
-    public void Projection_of_a_representative_plan_passes_DefinitionValidator()
+    [Theory]
+    [InlineData("analysis")]   // llm.complete body
+    [InlineData("coding")]     // agent.code body — a CanSuspend node + a structurally different graph; the flagship path must also validate
+    public void Projection_of_a_representative_plan_passes_DefinitionValidator(string recommendedKind)
     {
-        var definition = new WorkflowPlanProjector().Project(SamplePlan("analysis"));
+        var definition = new WorkflowPlanProjector().Project(SamplePlan(recommendedKind));
 
         var result = BuildValidator().Validate(definition);
 
-        result.IsValid.ShouldBeTrue($"projected definition must validate; errors: {string.Join("; ", result.Errors)}");
+        result.IsValid.ShouldBeTrue($"projected {recommendedKind} definition must validate; errors: {string.Join("; ", result.Errors)}");
     }
 
     [Fact]

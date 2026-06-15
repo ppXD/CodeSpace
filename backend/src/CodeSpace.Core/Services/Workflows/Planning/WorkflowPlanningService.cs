@@ -21,6 +21,9 @@ public sealed class WorkflowPlanningService : IWorkflowPlanningService, IScopedD
     /// </summary>
     public const string EnabledEnvVar = "CODESPACE_WORKFLOW_PLANNER_ENABLED";
 
+    // Single-impl assumption: today the only IWorkflowPlanner is LlmWorkflowPlanner (structured_llm). When a 2nd
+    // backend lands (agent_planner / template), this bare injection becomes a silent Autofac last-wins — add an
+    // IWorkflowPlannerRegistry (mirroring IAgentHarnessRegistry) keyed by a Kind on the request and inject THAT.
     private readonly IWorkflowPlanner _planner;
     private readonly IWorkflowPlanProjector _projector;
     private readonly DefinitionValidator _validator;

@@ -33,6 +33,13 @@ namespace CodeSpace.IntegrationTests.Workflows;
 /// call resolves it via a child-scope registry holding only that client (deterministic plan); the projected
 /// llm.complete nodes (singletons bound to the ROOT registry) reach it after we retarget their provider to the
 /// fake tag — so the flow runs with no API key.</para>
+///
+/// <para>Scope: this exercises the ANALYSIS path (recommendedWorkflowKind="analysis" → an llm.complete body),
+/// which runs with no sandbox. That BOTH projection shapes (analysis→llm.complete and coding→agent.code) emit a
+/// definition the real DefinitionValidator accepts is pinned by the unit Theory
+/// (WorkflowPlannerTests.Projection_of_a_representative_plan_passes_DefinitionValidator); the agent.code body's
+/// real RUNNABILITY is covered by the planner→map→real-agent E2E (PR-D2). Together they cover both paths without
+/// requiring a sandbox here.</para>
 /// </summary>
 [Collection(PostgresCollection.Name)]
 [Trait("Category", "Integration")]
@@ -110,6 +117,16 @@ public class PlannerProjectionFlowTests
         mapOut.GetProperty("count").GetInt32().ShouldBe(DeterministicTaskPlannerLlmClient.SubtaskTitles.Count,
             "one branch fanned out per planned subtask");
         mapOut.GetProperty("failed").GetInt32().ShouldBe(0);
+
+        // Prove the LOAD-BEARING resolution, not just the width: the projector bakes subtasks camelCase so the body's
+        // case-sensitive {{item.title}}/{{item.instruction}} refs resolve. Branch map#0's body echoed the FIRST
+        // subtask's title+instruction (the fake returns "done: {prompt}") — if camelCase resolution silently failed,
+        // the prompt would be literal "{{item.title}}: ..." and this would miss the real title.
+        var firstTitle = DeterministicTaskPlannerLlmClient.SubtaskTitles[0];
+        var bodyBranch = await db.WorkflowRunNode.AsNoTracking().SingleAsync(n => n.RunId == runId && n.NodeId == "body" && n.IterationKey == "map#0");
+        var bodyText = JsonDocument.Parse(bodyBranch.OutputsJson!).RootElement.GetProperty("text").GetString();
+        bodyText.ShouldContain(firstTitle, Case.Sensitive, $"branch map#0 must resolve {{{{item.title}}}} to the planned subtask '{firstTitle}' — proves the camelCase-baked subtasks resolve through the case-sensitive item refs");
+        bodyText.ShouldNotContain("{{item.", customMessage: "an unresolved {{item.*}} ref means the baked-default key casing didn't match the body refs");
     }
 
     // ─── Helpers ─────────────────────────────────────────────────────────────
