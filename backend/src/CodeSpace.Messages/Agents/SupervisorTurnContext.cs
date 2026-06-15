@@ -50,6 +50,29 @@ public sealed record SupervisorTurnContext
 
     /// <summary>The single in-flight (non-terminal) decision, if any — a turn crashed AFTER claiming but BEFORE recording terminal. The resume target the turn re-claims (idempotent), never re-emits. Null on the common path.</summary>
     public SupervisorPriorDecision? InFlight { get; init; }
+
+    /// <summary>
+    /// The total number of agents this run has spawned so far, SUMMED from the durable ledger (every prior
+    /// <c>spawn</c> / <c>retry</c> decision's recorded <c>agentCount</c>) — a LEDGER FACT folded on rehydrate,
+    /// so it survives replay and can't be reset by re-entering the node (PR-E E5 total-spawn cap). The turn loop
+    /// fail-closed force-STOPs when a further spawn would push this past the run's <c>MaxTotalSpawns</c>.
+    /// </summary>
+    public int TotalSpawnedAgents { get; init; }
+
+    /// <summary>
+    /// How many of the MOST RECENT consecutive decisions produced NO new SETTLED agent result, folded from the
+    /// durable ledger (PR-E E5 best-effort no-progress guard). A spawn/retry that staged agents whose outcomes
+    /// the merge has not yet folded counts as no-progress; a fresh agent result resets it to 0. The turn loop
+    /// force-STOPs at the run's no-progress cap.
+    /// </summary>
+    public int NoProgressDecisions { get; init; }
+
+    /// <summary>
+    /// The approval policy in force for this run (PR-E E5 governance) — carried so the executor / turn loop routes
+    /// every side-effecting decision through <c>AgentToolGate</c> at the policy-derived tier. Default
+    /// <see cref="Dtos.Agents.SupervisorApprovalPolicy.None"/> matches pre-E5 behaviour (no gate).
+    /// </summary>
+    public Dtos.Agents.SupervisorApprovalPolicy ApprovalPolicy { get; init; }
 }
 
 /// <summary>One prior decision replayed from the ledger — its kind + emitted payload + (for a terminal) its recorded outcome. A pure data noun.</summary>

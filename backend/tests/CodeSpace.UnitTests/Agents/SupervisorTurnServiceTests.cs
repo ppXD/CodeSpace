@@ -30,7 +30,7 @@ public class SupervisorTurnServiceTests
         var ledger = new FakeLedger();
         ledger.SeedTerminal(_runId, _teamId, SupervisorDecisionKinds.Plan, """{"subtasks":["a"]}""", """{"planned":["a"]}""");
 
-        var context = await Service(ledger).RehydrateFromDecisionLogAsync(_runId, _teamId, "sup", "goal", CancellationToken.None);
+        var context = await Service(ledger).RehydrateFromDecisionLogAsync(_runId, _teamId, "sup", "goal", goalConfig: null, CancellationToken.None);
 
         context.TurnNumber.ShouldBe(1, "one decided decision → the next turn is turn 1");
         context.PriorDecisions.Count.ShouldBe(1);
@@ -46,7 +46,7 @@ public class SupervisorTurnServiceTests
         ledger.SeedTerminal(_runId, _teamId, SupervisorDecisionKinds.Plan, """{"subtasks":["a"]}""", """{"planned":["a"]}""");
         ledger.SeedPending(_runId, _teamId, SupervisorDecisionKinds.Stop, """{"reason":"x"}""");
 
-        var context = await Service(ledger).RehydrateFromDecisionLogAsync(_runId, _teamId, "sup", "goal", CancellationToken.None);
+        var context = await Service(ledger).RehydrateFromDecisionLogAsync(_runId, _teamId, "sup", "goal", goalConfig: null, CancellationToken.None);
 
         context.TurnNumber.ShouldBe(1, "an in-flight (non-terminal) row is NOT a decided decision");
         context.InFlight.ShouldNotBeNull();
@@ -61,7 +61,7 @@ public class SupervisorTurnServiceTests
         var ledger = new FakeLedger();
         var service = Service(ledger);
 
-        var turn1 = await service.RunTurnAsync(_runId, _teamId, "sup", "goal", conversationId: null, CancellationToken.None);
+        var turn1 = await service.RunTurnAsync(_runId, _teamId, "sup", "goal", conversationId: null, goalConfig: null, CancellationToken.None);
 
         turn1.IsFinished.ShouldBeFalse("a plan parks for the next turn");
         turn1.DecisionKind.ShouldBe(SupervisorDecisionKinds.Plan);
@@ -69,7 +69,7 @@ public class SupervisorTurnServiceTests
         ledger.Rows.Count.ShouldBe(1, "exactly one decision recorded");
         ledger.Rows[0].Status.ShouldBe(SupervisorDecisionStatus.Succeeded);
 
-        var turn2 = await service.RunTurnAsync(_runId, _teamId, "sup", "goal", conversationId: null, CancellationToken.None);
+        var turn2 = await service.RunTurnAsync(_runId, _teamId, "sup", "goal", conversationId: null, goalConfig: null, CancellationToken.None);
 
         turn2.IsFinished.ShouldBeTrue("a stop finishes the loop");
         turn2.DecisionKind.ShouldBe(SupervisorDecisionKinds.Stop);
@@ -91,7 +91,7 @@ public class SupervisorTurnServiceTests
         // A decider that would NEVER stop on its own — proving the budget, not the decider, terminates.
         var service = new SupervisorTurnService(ledger, new AlwaysPlanDecider(), new StubSupervisorActionExecutor(), db: null!, NullLogger<SupervisorTurnService>.Instance);
 
-        var result = await service.RunTurnAsync(_runId, _teamId, "sup", "goal", conversationId: null, CancellationToken.None);
+        var result = await service.RunTurnAsync(_runId, _teamId, "sup", "goal", conversationId: null, goalConfig: null, CancellationToken.None);
 
         result.IsFinished.ShouldBeTrue("the budget forces a terminal stop");
         result.DecisionKind.ShouldBe(SupervisorDecisionKinds.Stop);
@@ -108,7 +108,7 @@ public class SupervisorTurnServiceTests
         var service = new SupervisorTurnService(ledger, new StubSupervisorDecider(), executor, db: null!, NullLogger<SupervisorTurnService>.Instance);
 
         // First pass: turn 0 (plan) executes once + records terminal.
-        await service.RunTurnAsync(_runId, _teamId, "sup", "goal", conversationId: null, CancellationToken.None);
+        await service.RunTurnAsync(_runId, _teamId, "sup", "goal", conversationId: null, goalConfig: null, CancellationToken.None);
         executor.Calls.ShouldBe(1);
         ledger.Rows.Count.ShouldBe(1);
 

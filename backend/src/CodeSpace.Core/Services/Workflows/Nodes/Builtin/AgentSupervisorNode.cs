@@ -4,6 +4,7 @@ using CodeSpace.Core.Services.Supervisor;
 using CodeSpace.Core.Services.Workflows.Runtime;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Constants;
+using CodeSpace.Messages.Dtos.Agents;
 using CodeSpace.Messages.Enums;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
@@ -55,7 +56,15 @@ public sealed class AgentSupervisorNode : INodeRuntime
               "type": "object",
               "properties": {
                 "goal": { "type": "string", "description": "The objective the supervisor pursues across its turns — the LLM decider folds it into the prompt that chooses each turn's decision (plan/spawn/retry/merge/ask_human/stop)." },
-                "conversationId": { "type": "string", "format": "uuid", "x-selector": "conversation", "description": "Conversation the supervisor posts its ask_human questions into (and parks for the answer). Leave empty to disable mid-loop human questions." }
+                "conversationId": { "type": "string", "format": "uuid", "x-selector": "conversation", "description": "Conversation the supervisor posts its ask_human + approval questions into (and parks for the answer). Leave empty to disable mid-loop human questions + approval gating." },
+                "maxRounds": { "type": "integer", "minimum": 1, "maximum": 30, "description": "Hard cap on how many decisions (turns) the supervisor may take before it force-stops. Defaults to 30; you can only tighten it below the ceiling." },
+                "maxParallelism": { "type": "integer", "minimum": 1, "maximum": 20, "description": "Max agents one spawn decision may fan out at once. Defaults to 20 (the schema ceiling)." },
+                "maxTotalSpawns": { "type": "integer", "minimum": 1, "maximum": 1000, "description": "Max agents the whole run may spawn in total before it force-stops. Defaults to 50." },
+                "maxNoProgressDecisions": { "type": "integer", "minimum": 1, "maximum": 30, "description": "Best-effort: force-stop after this many consecutive decisions produce no new agent result. Defaults to 8." },
+                "approvalPolicy": { "type": "string", "enum": ["none", "spawns"], "description": "Whether a human must approve every spawn/retry before any agent is created. 'none' (default) = autonomous; 'spawns' = the supervisor parks on an approval card before spawning." },
+                "allowedAgents": { "type": "array", "items": { "type": "string" }, "description": "Reserved — harness/agent kinds the supervisor may spawn. Stored; enforcement is a follow-up." },
+                "allowedTools": { "type": "array", "items": { "type": "string" }, "description": "Reserved — tool kinds spawned agents may use. Stored only." },
+                "acceptanceChecks": { "type": "array", "items": { "type": "string" }, "description": "Reserved — checks to verify before declaring success. Stored; the acceptance gate is a follow-up." }
               }
             }
             """),
@@ -82,6 +91,7 @@ public sealed class AgentSupervisorNode : INodeRuntime
         if (!TryReadRunIdentity(context, out var supervisorRunId, out var teamId))
             return NodeResult.Fail("agent.supervisor could not read the run id / team id from the system scope.");
 
+        var goalConfig = ReadGoalConfig(context.Config);
         var goal = ReadString(context.Config, "goal");
         var conversationId = ReadOptionalGuid(context.Config, "conversationId");
 
@@ -100,7 +110,7 @@ public sealed class AgentSupervisorNode : INodeRuntime
         // re-post the question.
         if (pendingHumanToken != null) return ReparkOnPendingHuman(context, pendingHumanToken);
 
-        var result = await RunTurnAsync(supervisorRunId, teamId, context.NodeId, goal, conversationId, cancellationToken).ConfigureAwait(false);
+        var result = await RunTurnAsync(supervisorRunId, teamId, context.NodeId, goal, conversationId, goalConfig, cancellationToken).ConfigureAwait(false);
 
         // The node re-runs on EITHER pass identically — the durable ledger (not ResumePayload) is the source
         // of truth, so a resumed pass (a self-advance marker, an agent-completion barrier resume, OR a human
@@ -122,12 +132,12 @@ public sealed class AgentSupervisorNode : INodeRuntime
     }
 
     /// <summary>Resolve the scoped turn service in its own DI scope (the node is a singleton) and run one turn.</summary>
-    private async Task<SupervisorTurnResult> RunTurnAsync(Guid supervisorRunId, Guid teamId, string nodeId, string goal, Guid? conversationId, CancellationToken cancellationToken)
+    private async Task<SupervisorTurnResult> RunTurnAsync(Guid supervisorRunId, Guid teamId, string nodeId, string goal, Guid? conversationId, SupervisorGoalConfig? goalConfig, CancellationToken cancellationToken)
     {
         using var scope = _scopeFactory.CreateScope();
         var turns = scope.ServiceProvider.GetRequiredService<ISupervisorTurnService>();
 
-        return await turns.RunTurnAsync(supervisorRunId, teamId, nodeId, goal, conversationId, cancellationToken).ConfigureAwait(false);
+        return await turns.RunTurnAsync(supervisorRunId, teamId, nodeId, goal, conversationId, goalConfig, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>Read the run's pending-park state for this node (the durable re-entry guards): the count of still-pending AgentRun waits a prior spawn/retry staged, and the token of a still-pending ask_human Action wait. Read FIRST on re-entry so a restart re-parks on the existing wait rather than advancing past the (already-terminal) decision.</summary>
@@ -296,4 +306,19 @@ public sealed class AgentSupervisorNode : INodeRuntime
     /// <summary>Read an optional uuid config value (the ask_human conversation), null when absent / empty / not a valid id (mirrors agent.code's ReadOptionalGuid).</summary>
     private static Guid? ReadOptionalGuid(IReadOnlyDictionary<string, JsonElement> bag, string key) =>
         bag.TryGetValue(key, out var v) && v.ValueKind == JsonValueKind.String && Guid.TryParse(v.GetString(), out var id) ? id : null;
+
+    /// <summary>
+    /// Parse the operator's GOAL + limits + approval policy out of the node's raw config (PR-E E5) — the
+    /// turn service resolves it into a <c>SupervisorGoalPlan</c> + reads every bound from it. Deserialised
+    /// case-insensitively (mirrors the engine's <c>MapConfig</c> read), tolerating a malformed object → a
+    /// null config → all SupervisorLane defaults (pre-E5 behaviour). The lenient clamp/default lives in the
+    /// plan, not here — the node only lifts the bytes.
+    /// </summary>
+    private static SupervisorGoalConfig? ReadGoalConfig(IReadOnlyDictionary<string, JsonElement> bag)
+    {
+        try { return JsonSerializer.Deserialize<SupervisorGoalConfig>(JsonSerializer.Serialize(bag), GoalConfigOptions); }
+        catch (JsonException) { return null; }
+    }
+
+    private static readonly JsonSerializerOptions GoalConfigOptions = new() { PropertyNameCaseInsensitive = true };
 }

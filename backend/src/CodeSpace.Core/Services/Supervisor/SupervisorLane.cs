@@ -20,9 +20,36 @@ public static class SupervisorLane
     /// loop counts DECIDED decisions from the durable ledger and, when the count would meet/exceed this,
     /// forces a terminal <c>stop</c> ("budget exhausted") instead of asking the decider — so a runaway loop
     /// always terminates. Counted from the ledger (never an in-memory tally), so it survives a restart/replay
-    /// and can't be reset by re-entering the node.
+    /// and can't be reset by re-entering the node. An operator's <c>MaxRounds</c> may TIGHTEN it below this,
+    /// never raise it past this hard ceiling.
     /// </summary>
     public const int DecisionBudget = 30;
+
+    /// <summary>
+    /// The default cap on how many agents one supervisor run may spawn IN TOTAL across the whole run (PR-E E5),
+    /// summed from the durable ledger. Load-bearing + fail-closed: at the cap a further spawn FORCE-STOPS the run
+    /// with a distinct terminal reason. An operator's <c>MaxTotalSpawns</c> tunes it within
+    /// <c>[1, MaxTotalSpawnsCeiling]</c>. Pinned by a unit test (Rule 8).
+    /// </summary>
+    public const int DefaultMaxTotalSpawns = 50;
+
+    /// <summary>The hard ceiling an operator's <c>MaxTotalSpawns</c> is clamped to — a fat-fingered config can't disable the bound. Pinned by a unit test (Rule 8).</summary>
+    public const int MaxTotalSpawnsCeiling = 1_000;
+
+    /// <summary>
+    /// The default cap on consecutive decisions that produce NO new SETTLED agent result before the no-progress
+    /// guard FORCE-STOPS the run (PR-E E5). BEST-EFFORT (demoted per the design): it stops a decider that loops
+    /// without ever advancing the work; a long-running spawn whose agents haven't settled yet does NOT trip it
+    /// (its decision is a park, not a fresh decided turn). Counted from the durable ledger. Pinned (Rule 8).
+    /// </summary>
+    public const int DefaultMaxNoProgressDecisions = 8;
+
+    /// <summary>
+    /// The cap on supervisor-spawns-supervisor nesting depth (PR-E E5) — reuses the <c>SubworkflowService.MaxDepth</c>
+    /// precedent (a supervisor whose ancestor chain already has this many supervisor runs FORCE-STOPS at turn 0,
+    /// before deciding). Guards against a recursive supervisor fan-out exhausting the deployment. Pinned (Rule 8).
+    /// </summary>
+    public const int MaxSupervisorDepth = 8;
 
     /// <summary>Reads the env var through the single gate. Default-OFF: true only for the explicit on-values.</summary>
     public static bool IsEnabled() => IsEnabled(Environment.GetEnvironmentVariable(EnabledEnvVar));

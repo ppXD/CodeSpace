@@ -1,4 +1,5 @@
 using CodeSpace.Messages.Agents;
+using CodeSpace.Messages.Dtos.Agents;
 
 namespace CodeSpace.Core.Services.Supervisor;
 
@@ -23,11 +24,11 @@ namespace CodeSpace.Core.Services.Supervisor;
 /// </summary>
 public interface ISupervisorTurnService
 {
-    /// <summary>Fold the run's decision ledger (team-scoped, <c>Sequence</c> order) into a turn context: terminal decisions replayed (outcome only), the one in-flight decision identified, <c>TurnNumber</c> = decided count. <paramref name="nodeId"/> stamps the per-turn-per-spawn AgentRun wait key (<c>&lt;nodeId&gt;#turn{N}#{k}</c>). Pure-ish (reads the ledger, no writes).</summary>
-    Task<SupervisorTurnContext> RehydrateFromDecisionLogAsync(Guid supervisorRunId, Guid teamId, string nodeId, string goal, CancellationToken cancellationToken);
+    /// <summary>Fold the run's decision ledger (team-scoped, <c>Sequence</c> order) into a turn context: terminal decisions replayed (outcome only), the one in-flight decision identified, <c>TurnNumber</c> = decided count, plus the LEDGER-FACT bound counters (total-spawned, no-progress) the E5 bounds read. <paramref name="nodeId"/> stamps the per-turn-per-spawn AgentRun wait key (<c>&lt;nodeId&gt;#turn{N}#{k}</c>). <paramref name="goalConfig"/> supplies the approval policy stamped on the context. Pure-ish (reads the ledger, no writes).</summary>
+    Task<SupervisorTurnContext> RehydrateFromDecisionLogAsync(Guid supervisorRunId, Guid teamId, string nodeId, string goal, SupervisorGoalConfig? goalConfig, CancellationToken cancellationToken);
 
-    /// <summary>Run one turn for the run: rehydrate → budget → decide → claim + execute exactly-once → record terminal → return finish / self-advance / park-on-agent-waits / park-on-human. The exactly-once decision step. <paramref name="conversationId"/> is the run's own team conversation an ask_human turn posts its question card into (null = no HITL surface authored → ask_human degrades to a no-surface self-advance).</summary>
-    Task<SupervisorTurnResult> RunTurnAsync(Guid supervisorRunId, Guid teamId, string nodeId, string goal, Guid? conversationId, CancellationToken cancellationToken);
+    /// <summary>Run one turn for the run: rehydrate → BOUNDS (fail-closed force-STOP) → governance gate → decide → claim + execute exactly-once → record terminal → return finish / self-advance / park-on-agent-waits / park-on-human. The exactly-once decision step. <paramref name="conversationId"/> is the run's own team conversation an ask_human / approval turn posts its card into (null = no HITL surface authored → ask_human / a gated spawn degrades to a no-surface stop). <paramref name="goalConfig"/> is the operator's GOAL + limits + approval policy (null = all SupervisorLane defaults, pre-E5 behaviour).</summary>
+    Task<SupervisorTurnResult> RunTurnAsync(Guid supervisorRunId, Guid teamId, string nodeId, string goal, Guid? conversationId, SupervisorGoalConfig? goalConfig, CancellationToken cancellationToken);
 
     /// <summary>
     /// Count the run's still-PENDING <c>AgentRun</c> waits a PRIOR async turn (spawn/retry) staged for this
@@ -46,4 +47,12 @@ public interface ISupervisorTurnService
     /// advance + never re-post the question. Non-null → re-suspend on that token; null → no parked question.
     /// </summary>
     Task<string?> PendingHumanWaitTokenAsync(Guid supervisorRunId, string nodeId, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// How many WorkflowRun ancestors this supervisor run has — the PR-E E5 depth-cap input (a recursive
+    /// supervisor-spawns-supervisor fan-out nested beyond <c>SupervisorLane.MaxSupervisorDepth</c> ancestors
+    /// force-STOPs at turn 0). Walks the durable <c>parent_run_id</c> chain, team-scoped, bounded so a corrupt
+    /// cycle can't loop. A top-level supervisor reads 0.
+    /// </summary>
+    Task<int> SupervisorDepthAsync(Guid supervisorRunId, Guid teamId, CancellationToken cancellationToken);
 }
