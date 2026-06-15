@@ -36,6 +36,16 @@ namespace CodeSpace.Core.Services.Workflows.Reconciliation;
 ///       pending wait), so the reconciler re-fires the self-advance. The resume's own wait-status CAS makes
 ///       a re-fire racing a still-live original idempotent. Sweep runs ONLY when the supervisor lane is
 ///       enabled, so a flag-OFF deployment is byte-identical (no extra query).</item>
+///   <item><b>Abandoned-Running supervisor run</b> (status=Running, no ledger activity in 5 min, started
+///       > 30 min ago, AND a non-terminal <c>SupervisorDecisionRecord</c> — PR-E P1-2, flag-gated) — a worker
+///       died mid-supervisor-decision, leaving the run Running with a Pending/Running decision row the
+///       frozen-replay path (PR-1) can finish deterministically. This sweep runs BEFORE the abandoned-Running
+///       failure sweep so it RE-DISPATCHES the run (CAS Running→Pending) instead of failing it; the engine
+///       re-walk rehydrates the in-flight decision and replays it exactly-once. BOUNDED: a deterministically
+///       crashing run is recovered at most <see cref="StuckRunReconcilerService.MaxSupervisorRunRecoveries"/>
+///       times (counted from durable <c>supervisor.run_recovered</c> ledger records), after which it falls
+///       through to the abandoned-Running failure sweep and terminates cleanly — never an infinite loop.
+///       Flag-OFF byte-identical (no extra query when the lane is off).</item>
 /// </list>
 ///
 /// <para>Idempotent + safe to call concurrently from multiple replicas because every state
@@ -57,5 +67,8 @@ public sealed record StuckRunReconcileSummary
     /// <summary>Supervisor self-advances re-fired because the post-commit ResumeWaitAsync enqueue was lost (PR-E E2). 0 when the supervisor lane is off.</summary>
     public int RecoveredSupervisorAdvance { get; init; }
 
-    public int Total => RedispatchedFromPending + RevertedFromEnqueued + MarkedAbandonedFromRunning + RedispatchedFromStrandedSuspended + RecoveredSupervisorAdvance;
+    /// <summary>Abandoned-Running supervisor runs with a recoverable in-flight decision that were re-dispatched instead of failed (PR-E P1-2). 0 when the supervisor lane is off.</summary>
+    public int RecoveredAbandonedSupervisorRun { get; init; }
+
+    public int Total => RedispatchedFromPending + RevertedFromEnqueued + MarkedAbandonedFromRunning + RedispatchedFromStrandedSuspended + RecoveredSupervisorAdvance + RecoveredAbandonedSupervisorRun;
 }

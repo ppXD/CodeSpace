@@ -26,6 +26,7 @@ public class WorkflowRunRecordTypesTests
     [InlineData("run.failed",            nameof(WorkflowRunRecordTypes.RunFailed))]
     [InlineData("run.cancelled",         nameof(WorkflowRunRecordTypes.RunCancelled))]
     [InlineData("run.replayed",          nameof(WorkflowRunRecordTypes.RunReplayed))]
+    [InlineData("supervisor.run_recovered", nameof(WorkflowRunRecordTypes.SupervisorRunRecovered))]
     // Node + iteration + external_call + log.
     [InlineData("node.started",          nameof(WorkflowRunRecordTypes.NodeStarted))]
     [InlineData("node.completed",        nameof(WorkflowRunRecordTypes.NodeCompleted))]

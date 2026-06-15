@@ -5,6 +5,7 @@ using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Supervisor;
 using CodeSpace.Core.Services.Workflows.Engine;
+using CodeSpace.Core.Services.Workflows.Reconciliation;
 using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.IntegrationTests.Infrastructure.Jobs;
 using CodeSpace.IntegrationTests.Workflows.Infrastructure;
@@ -401,7 +402,273 @@ public class SupervisorSpawnFlowTests : IDisposable
         }
     }
 
+    [Fact]
+    public async Task A_worker_death_mid_decision_is_recovered_by_the_real_reconciler_to_success_without_double_spawn()
+    {
+        // 🟢 THE PR-E P1-2 CROWN JEWEL (high fidelity — REAL fault residue + REAL reconciler via the mediator
+        // command + REAL engine re-walk + REAL agent barrier over Postgres). A worker died MID-supervisor-decision:
+        // the fault decorator leaves the spawn decision stuck Running with one committed orphan + zero waits, and we
+        // stamp the WORKER-DEATH SIGNATURE the engine's catch never wrote — run Status=Running, StartedAt + latest
+        // ledger backdated past the thresholds. The reconciler must RE-DISPATCH it (NOT fail it), and the engine
+        // re-walk must replay the frozen in-flight spawn exactly-once (reclaim the orphan → exactly 2 agents), then
+        // — once both agents complete — resume to turn 2 stop → Success. The recovery is driven by the REAL
+        // reconciler (mediator ReconcileStuckRunsCommand), never a manual Enqueue flip (Rule 12.4 / 12.9).
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var workflowId = await CreateWorkflowAsync(teamId, userId);
+        var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
+
+        var jobClient = ResolveJobClient();
+        jobClient.Clear();
+        jobClient.AutoExecute = false;
+
+        try
+        {
+            // Drive turn 0 (plan) + self-advance, then crash turn 1 (spawn) mid-fan-out via the real turn service.
+            await RunEngineAsync(runId);
+            await ResolveSelfAdvanceAsync(runId);
+            await Should.ThrowAsync<InvalidOperationException>(() => RunTurnWithSpawnFaultAsync(runId, teamId, throwOnCall: 2));
+
+            // Stamp the AUTHENTIC worker-death signature: the run is Running (the engine's catch never fired — the
+            // host died), StartedAt + the latest ledger record backdated past the abandoned thresholds. This is the
+            // exact durable state a pod that crashed mid-decision leaves behind.
+            await StampWorkerDeathSignatureAsync(runId);
+
+            using (var verify = _fixture.BeginScope())
+            {
+                var db = verify.Resolve<CodeSpaceDbContext>();
+                var spawn = await db.SupervisorDecisionRecord.AsNoTracking().SingleAsync(d => d.SupervisorRunId == runId && d.DecisionKind == SupervisorDecisionKinds.Spawn);
+                spawn.Status.ShouldBe(SupervisorDecisionStatus.Running, "precondition: a recoverable non-terminal spawn decision the frozen-replay path can finish");
+            }
+
+            // ── RECOVER via the REAL reconciler. It re-dispatches the abandoned-Running supervisor run (Running→
+            // Pending→Enqueued) instead of failing it; AutoExecute is off so the engine doesn't auto-run yet. ──
+            var summary = await ReconcileAsync();
+
+            summary.RecoveredAbandonedSupervisorRun.ShouldBe(1, "the reconciler must RE-DISPATCH the abandoned-Running supervisor run, not fail it");
+            summary.MarkedAbandonedFromRunning.ShouldBe(0, "the recovery sweep ran FIRST + flipped the run out of Running, so the abandoned sweep must not also fail it");
+            (await ReadStatusAsync(runId)).ShouldBe(WorkflowRunStatus.Enqueued, "the recovered run was re-dispatched into Enqueued, waiting for the worker");
+
+            (await CountRecoveryMarkersAsync(runId)).ShouldBe(1, "exactly one durable supervisor.run_recovered marker — the bound counter advanced by one");
+
+            // Drive the engine the way the worker would: the re-walk rehydrates the frozen spawn, reclaims the
+            // orphan, stages exactly 2 agents + 2 waits, and re-suspends on them (no double-spawn).
+            await RunEngineAsync(runId);
+
+            Guid agent0, agent1;
+            using (var verify = _fixture.BeginScope())
+            {
+                var db = verify.Resolve<CodeSpaceDbContext>();
+                var agents = await db.AgentRun.AsNoTracking().Where(r => r.WorkflowRunId == runId).Select(r => r.Id).ToListAsync();
+                agents.Count.ShouldBe(2, "the recovery replayed the frozen spawn exactly-once — exactly 2 agents, the orphan reclaimed, no double-spawn");
+
+                var waits = await db.WorkflowRunWait.AsNoTracking()
+                    .Where(w => w.RunId == runId && w.WaitKind == WorkflowWaitKinds.AgentRun && w.Status == WorkflowWaitStatuses.Pending)
+                    .OrderBy(w => w.IterationKey).ToListAsync();
+                waits.Count.ShouldBe(2, "exactly 2 agent waits staged on recovery");
+                agent0 = Guid.Parse(waits[0].Token);
+                agent1 = Guid.Parse(waits[1].Token);
+
+                (await db.WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == runId)).Status.ShouldBe(WorkflowRunStatus.Suspended, "the recovered run parked on its 2 agent waits");
+            }
+
+            // Both agents complete → the barrier resumes → turn 2 stop → the run reaches terminal Success.
+            await SimulateAgentCompletionAsync(agent0, "ALPHA");
+            await SimulateAgentCompletionAsync(agent1, "BETA");
+            await RunEngineAsync(runId);
+
+            using (var verify = _fixture.BeginScope())
+            {
+                var db = verify.Resolve<CodeSpaceDbContext>();
+
+                (await db.WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == runId)).Status
+                    .ShouldBe(WorkflowRunStatus.Success,
+                        customMessage: "the worker-death-recovered supervisor run must walk to terminal SUCCESS — if it's Failure the reconciler failed it instead of recovering; if Suspended the re-walk didn't finish");
+
+                (await db.AgentRun.AsNoTracking().CountAsync(r => r.WorkflowRunId == runId))
+                    .ShouldBe(2, "still exactly 2 agents end-to-end — no double-spawn across the whole recovery");
+
+                (await Ledger(db, runId, teamId)).Count(r => r.DecisionKind == SupervisorDecisionKinds.Spawn)
+                    .ShouldBe(1, "exactly one spawn decision row — the frozen replay deduped, never re-claimed");
+            }
+        }
+        finally
+        {
+            jobClient.AutoExecute = true;
+        }
+    }
+
+    [Fact]
+    public async Task A_supervisor_run_already_at_the_recovery_cap_is_NOT_recovered_and_falls_through_to_failure()
+    {
+        // 🟢 THE LOOP-GUARD PROOF. A deterministically-crashing supervisor run does NOT advance TurnNumber and a
+        // re-dispatch RESETS StartedAt, so an unbounded recovery would re-dispatch it forever. We simulate a run
+        // that has ALREADY been recovered MaxSupervisorRunRecoveries times (plant that many durable
+        // supervisor.run_recovered markers) + the worker-death signature + a still-stuck-Running decision. The
+        // reconciler must NOT recover it again (the cap is reached) — instead it falls through to the abandoned-
+        // Running sweep, which marks it Failure. This proves the loop terminates: K recoveries, then a clean fail.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var workflowId = await CreateWorkflowAsync(teamId, userId);
+        var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
+
+        var jobClient = ResolveJobClient();
+        jobClient.Clear();
+        jobClient.AutoExecute = false;
+
+        try
+        {
+            // Leave an authentic stuck-Running spawn decision via the fault, then stamp the worker-death signature.
+            await RunEngineAsync(runId);
+            await ResolveSelfAdvanceAsync(runId);
+            await Should.ThrowAsync<InvalidOperationException>(() => RunTurnWithSpawnFaultAsync(runId, teamId, throwOnCall: 2));
+            await StampWorkerDeathSignatureAsync(runId);
+
+            // Plant the recovery budget as ALREADY SPENT: MaxSupervisorRunRecoveries durable recovery markers, as if
+            // prior reconciler ticks had each re-dispatched this deterministically-crashing run. The candidate query
+            // counts these and excludes a run at/over the cap.
+            await PlantRecoveryMarkersAsync(runId, StuckRunReconcilerService.MaxSupervisorRunRecoveries);
+
+            var summary = await ReconcileAsync();
+
+            summary.RecoveredAbandonedSupervisorRun.ShouldBe(0,
+                "a run already at the recovery cap must NOT be re-dispatched — the loop-guard stops here");
+            summary.MarkedAbandonedFromRunning.ShouldBe(1,
+                "at the cap the run falls through to the abandoned-Running sweep, which fails it cleanly — the loop TERMINATES");
+
+            using (var verify = _fixture.BeginScope())
+            {
+                var db = verify.Resolve<CodeSpaceDbContext>();
+                var run = await db.WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == runId);
+                run.Status.ShouldBe(WorkflowRunStatus.Failure,
+                    customMessage: "the deterministically-crashing run terminates in Failure once the recovery budget is exhausted — it does NOT loop forever");
+                run.Error.ShouldNotBeNullOrEmpty();
+                run.Error!.ShouldContain("abandoned", customMessage: "the failure surfaces the abandoned reason for the operator");
+
+                (await CountRecoveryMarkersAsync(runId)).ShouldBe(StuckRunReconcilerService.MaxSupervisorRunRecoveries,
+                    "no NEW recovery marker was appended — the sweep skipped the at-cap run entirely");
+            }
+        }
+        finally
+        {
+            jobClient.AutoExecute = true;
+        }
+    }
+
+    [Fact]
+    public async Task With_the_supervisor_lane_OFF_an_abandoned_running_supervisor_run_is_failed_exactly_as_today()
+    {
+        // FLAG-OFF byte-identical: with the lane disabled the new recovery sweep returns 0 immediately (no extra
+        // query, no behaviour), so a stale-Running supervisor run is FAILED by the abandoned-Running sweep exactly
+        // as it would be today — the recovery is gated entirely behind the lane flag.
+        var flagBeforeThisTest = Environment.GetEnvironmentVariable(SupervisorLane.EnabledEnvVar);
+
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var workflowId = await CreateWorkflowAsync(teamId, userId);
+        var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
+
+        var jobClient = ResolveJobClient();
+        jobClient.Clear();
+        jobClient.AutoExecute = false;
+
+        try
+        {
+            // Build the recoverable residue WHILE the lane is on (the fault needs the lane), then stamp the signature.
+            await RunEngineAsync(runId);
+            await ResolveSelfAdvanceAsync(runId);
+            await Should.ThrowAsync<InvalidOperationException>(() => RunTurnWithSpawnFaultAsync(runId, teamId, throwOnCall: 2));
+            await StampWorkerDeathSignatureAsync(runId);
+
+            // Now flip the lane OFF for the reconcile: the recovery sweep must be a no-op.
+            Environment.SetEnvironmentVariable(SupervisorLane.EnabledEnvVar, "0");
+
+            var summary = await ReconcileAsync();
+
+            summary.RecoveredAbandonedSupervisorRun.ShouldBe(0, "lane OFF → the supervisor-run recovery sweep is a no-op (byte-identical to today)");
+            summary.MarkedAbandonedFromRunning.ShouldBe(1, "with the recovery sweep disabled, the stale-Running run is failed by the abandoned sweep exactly as today");
+
+            (await ReadStatusAsync(runId)).ShouldBe(WorkflowRunStatus.Failure, "lane OFF → the run is FAILED, not recovered");
+            (await CountRecoveryMarkersAsync(runId)).ShouldBe(0, "no recovery marker written when the lane is off");
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable(SupervisorLane.EnabledEnvVar, flagBeforeThisTest);
+            jobClient.AutoExecute = true;
+        }
+    }
+
     // ─── Helpers ────────────────────────────────────────────────────────────────────
+
+    private async Task<ReconcileStuckRunsResponse> ReconcileAsync()
+    {
+        using var scope = _fixture.BeginScope();
+        return await scope.Resolve<IMediator>().Send(new ReconcileStuckRunsCommand());
+    }
+
+    private async Task<WorkflowRunStatus> ReadStatusAsync(Guid runId)
+    {
+        using var scope = _fixture.BeginScope();
+        return await scope.Resolve<CodeSpaceDbContext>().WorkflowRun.AsNoTracking().Where(r => r.Id == runId).Select(r => r.Status).SingleAsync();
+    }
+
+    private async Task<int> CountRecoveryMarkersAsync(Guid runId)
+    {
+        using var scope = _fixture.BeginScope();
+        return await scope.Resolve<CodeSpaceDbContext>().WorkflowRunRecord.AsNoTracking()
+            .CountAsync(rec => rec.RunId == runId && rec.RecordType == WorkflowRunRecordTypes.SupervisorRunRecovered);
+    }
+
+    /// <summary>
+    /// Stamp the durable WORKER-DEATH signature on a run left mid-supervisor-decision: Status=Running (the host
+    /// died, so the engine's catch never failed it), StartedAt + the latest ledger record backdated past the
+    /// abandoned thresholds. Raw SQL because EF's audit hook + ExecuteUpdate-bypass would otherwise re-stamp now.
+    /// This is what the reconciler's recoverable-candidate query keys on (Running + stale-StartedAt + stale-ledger).
+    /// </summary>
+    private async Task StampWorkerDeathSignatureAsync(Guid runId)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+
+        var stale = DateTimeOffset.UtcNow - (StuckRunReconcilerService.RunningStuckAfter + TimeSpan.FromMinutes(5));
+
+        // status is stored as the enum's string name (HasConversion<string>), so pass the name, not the int.
+        await db.Database.ExecuteSqlRawAsync(
+            "UPDATE workflow_run SET status = {0}, started_at = {1} WHERE id = {2}", WorkflowRunStatus.Running.ToString(), stale, runId);
+
+        await BackdateLedgerAsync(db, runId, stale);
+    }
+
+    /// <summary>
+    /// Backdate EVERY ledger record's occurred_at past the liveness window so the run looks abandoned (the candidate
+    /// query keys staleness on MAX(occurred_at), and a turn-0 supervisor run emits fresh node.started/run.started).
+    /// workflow_run_record is append-only with an UPDATE-rejecting trigger, so we briefly DISABLE the trigger around
+    /// the backdate — a test-fixture-only operation to simulate elapsed time, the production guarantee is untouched.
+    /// </summary>
+    private static async Task BackdateLedgerAsync(CodeSpaceDbContext db, Guid runId, DateTimeOffset occurredAt)
+    {
+        await db.Database.ExecuteSqlRawAsync("ALTER TABLE workflow_run_record DISABLE TRIGGER workflow_run_record_enforce_immutability");
+        try
+        {
+            await db.Database.ExecuteSqlRawAsync("UPDATE workflow_run_record SET occurred_at = {0} WHERE run_id = {1}", occurredAt, runId);
+        }
+        finally
+        {
+            await db.Database.ExecuteSqlRawAsync("ALTER TABLE workflow_run_record ENABLE TRIGGER workflow_run_record_enforce_immutability");
+        }
+    }
+
+    /// <summary>Plant <paramref name="count"/> durable supervisor.run_recovered markers, as if prior reconciler ticks had each re-dispatched this run — pre-spends the recovery budget so the cap test can prove the loop terminates.</summary>
+    private async Task PlantRecoveryMarkersAsync(Guid runId, int count)
+    {
+        using var scope = _fixture.BeginScope();
+        var logger = scope.Resolve<CodeSpace.Core.Services.Workflows.Lifecycle.IRunRecordLogger>();
+
+        for (var attempt = 1; attempt <= count; attempt++)
+            await logger.SupervisorRunRecoveredAsync(runId, attempt, CancellationToken.None);
+
+        // The markers were just written fresh — re-backdate the whole ledger so the run STILL looks abandoned to
+        // the post-cap failure sweep (whose liveness check is on MAX(occurred_at) across all this run's records).
+        var stale = DateTimeOffset.UtcNow - (StuckRunReconcilerService.RunningStuckAfter + TimeSpan.FromMinutes(5));
+        await BackdateLedgerAsync(scope.Resolve<CodeSpaceDbContext>(), runId, stale);
+    }
 
     // The durable residue a crash mid fan-out leaves for the spawn decision: a Running row whose (run, key) +
     // payload match what the scripted decider re-derives on re-entry, so the recovery's re-claim collides on the

@@ -1,4 +1,6 @@
+using CodeSpace.Core.Services.Supervisor;
 using CodeSpace.Core.Services.Workflows.Reconciliation;
+using CodeSpace.Messages.Agents;
 using Shouldly;
 
 namespace CodeSpace.UnitTests.Workflows;
@@ -24,27 +26,41 @@ public class StuckRunReconcilerSummaryTests
     }
 
     [Fact]
-    public void Total_includes_the_stranded_suspended_count()
+    public void Total_includes_every_sweep_count()
     {
-        // The 4th sweep's count MUST roll into Total — otherwise the recurring-job log line +
-        // any "did the reconciler do anything" check silently under-reports stranded recoveries.
+        // Every sweep's count MUST roll into Total — otherwise the recurring-job log line +
+        // any "did the reconciler do anything" check silently under-reports recoveries. This
+        // covers all six fields, incl. the supervisor self-advance + abandoned-supervisor-run ones.
         var summary = new StuckRunReconcileSummary
         {
             RedispatchedFromPending = 1,
             RevertedFromEnqueued = 2,
             MarkedAbandonedFromRunning = 3,
             RedispatchedFromStrandedSuspended = 4,
+            RecoveredSupervisorAdvance = 5,
+            RecoveredAbandonedSupervisorRun = 6,
         };
 
-        summary.Total.ShouldBe(10, "Total must sum all four sweep counts, including the stranded-Suspended one");
+        summary.Total.ShouldBe(21, "Total must sum ALL sweep counts, including the abandoned-supervisor-run recovery");
     }
 
     [Fact]
-    public void Total_counts_only_the_stranded_field_when_it_is_the_only_nonzero()
+    public void Total_counts_only_the_abandoned_supervisor_run_field_when_it_is_the_only_nonzero()
     {
-        // Guards specifically against the new field being dropped from the Total sum.
-        var summary = new StuckRunReconcileSummary { RedispatchedFromStrandedSuspended = 7 };
+        // Guards specifically against the new PR-E P1-2 field being dropped from the Total sum.
+        var summary = new StuckRunReconcileSummary { RecoveredAbandonedSupervisorRun = 7 };
 
         summary.Total.ShouldBe(7);
+    }
+
+    [Fact]
+    public void MaxSupervisorRunRecoveries_is_three()
+    {
+        // THE LOOP-GUARD cap (PR-E P1-2). Pinned because it is load-bearing: a deterministically
+        // crashing supervisor run is re-dispatched at most this many times (counted from durable
+        // supervisor.run_recovered ledger records) before it falls through to the abandoned-Running
+        // failure sweep + terminates. Raising it lets a deterministic crash loop longer; lowering it
+        // risks failing a run that a couple more transient retries would have recovered. 3 is chosen.
+        StuckRunReconcilerService.MaxSupervisorRunRecoveries.ShouldBe(3);
     }
 }
