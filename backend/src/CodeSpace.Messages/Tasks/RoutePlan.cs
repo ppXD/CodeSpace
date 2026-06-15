@@ -41,4 +41,10 @@ public sealed record RoutePlan
 
     /// <summary>When the router fell back to a degraded route, the reason why; null on the happy path.</summary>
     public string? DegradedReason { get; init; }
+
+    /// <summary>The classifier's full decision (signals + suggestions + provenance) the router routed from (PR3). Null when no classifier ran (an explicit operator effort) or for a hand-built route (PR2 tests).</summary>
+    public Effort.EffortDecision? Decision { get; init; }
+
+    /// <summary>The confirm card to show before running, when the route was auto-classified below the confidence floor (PR3). Null when no confirmation is needed.</summary>
+    public Effort.ConfirmCard? Confirm { get; init; }
 }
