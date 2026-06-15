@@ -72,9 +72,11 @@ jobs:
       # LocalProcessRunner.McpProxyBinaryPath() resolves (next to the API assembly). Without this the MCP endpoint —
       # even when enabled — fails closed to a tool-less run because the proxy was in no publish path. The unit suite
       # also asserts File.Exists from the test bin (same ProjectReference mechanism); this proves the PUBLISH output.
+      # No --no-restore here: this job's restore targets the unit test project, which does NOT reference the API, so
+      # the API has no assets file yet — the publish must restore it (and its build-only CodeSpace.Mcp reference).
       - name: Proxy packaging smoke (publish output)
         run: >
-          dotnet publish backend/src/CodeSpace.Api/CodeSpace.Api.csproj -c Release -o backend/publish-smoke --no-restore
+          dotnet publish backend/src/CodeSpace.Api/CodeSpace.Api.csproj -c Release -o backend/publish-smoke
           && test -f backend/publish-smoke/codespace-mcp
           && echo "codespace-mcp proxy is packaged in the API publish output"
           || (echo "::error::codespace-mcp proxy MISSING from the API publish output — the CopyMcpProxyToOutput/PublishMcpProxy target or the CodeSpace.Mcp ProjectReference regressed" && exit 1)
