@@ -1,4 +1,5 @@
 using CodeSpace.Messages.Commands.Tasks;
+using CodeSpace.Messages.Queries.Tasks;
 using MediatR;
 using Microsoft.AspNetCore.Mvc;
 
@@ -24,5 +25,19 @@ public class TasksController : ControllerBase
     {
         var result = await _mediator.Send(command, cancellationToken).ConfigureAwait(false);
         return Ok(result);
+    }
+
+    /// <summary>
+    /// The background-tasks UI phase tree for one task run — the merged, Order-sorted phases the projector derives
+    /// from the run's durable substrate (structural nodes + supervisor decisions). A harmless READ: team-scoped via
+    /// <c>ICurrentTeam</c> (the X-Team-Id header, never the route), and a foreign / absent run is 404-conflated (the
+    /// projector returns null → NotFound — existence is never leaked). No flag.
+    /// </summary>
+    [HttpGet("{runId:guid}/phases")]
+    public async Task<IActionResult> GetPhases([FromRoute] Guid runId, CancellationToken cancellationToken)
+    {
+        var result = await _mediator.Send(new GetTaskRunPhasesQuery { RunId = runId }, cancellationToken).ConfigureAwait(false);
+
+        return result == null ? NotFound() : Ok(result);
     }
 }
