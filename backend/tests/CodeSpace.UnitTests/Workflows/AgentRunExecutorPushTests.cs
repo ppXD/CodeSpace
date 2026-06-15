@@ -52,6 +52,39 @@ public sealed class AgentRunExecutorPushTests
         }
     }
 
+    // ─── MCP endpoint gate (per-run opt-in OR ambient flag) ──────────────────
+
+    [Fact]
+    public void McpEndpointEnabledEnvVar_name_is_pinned() =>
+        // Renaming this silently turns the fabric OFF for any operator who enabled it via env (Rule 8).
+        AgentRunExecutor.McpEndpointEnabledEnvVar.ShouldBe("CODESPACE_AGENT_MCP_ENDPOINT_ENABLED");
+
+    [Theory]
+    // ambient flag value × per-run opt-in → resolved gate. The gate is the OR of the two: a per-run opt-in can
+    // turn the fabric ON without flipping the ambient flag, but cannot turn it OFF when the operator enabled it.
+    [InlineData(null, null, false)]    // neither → off (byte-identical to today)
+    [InlineData(null, false, false)]   // explicit per-run false ≠ on (still defers to ambient)
+    [InlineData(null, true, true)]     // per-run opt-in turns it on with the ambient flag off — the benchmark cli-mcp case
+    [InlineData("1", null, true)]      // ambient on → on regardless of the per-run signal
+    [InlineData("1", false, true)]     // ambient wins (no per-run OFF override)
+    [InlineData("1", true, true)]
+    public void ShouldOpenMcpEndpoint_is_the_or_of_the_ambient_flag_and_the_per_run_opt_in(string? envValue, bool? perRunOptIn, bool expected)
+    {
+        var original = Environment.GetEnvironmentVariable(AgentRunExecutor.McpEndpointEnabledEnvVar);
+        try
+        {
+            Environment.SetEnvironmentVariable(AgentRunExecutor.McpEndpointEnabledEnvVar, envValue);
+
+            var task = new AgentTask { Goal = "g", Harness = "codex-cli", EnableMcpEndpoint = perRunOptIn };
+
+            AgentRunExecutor.ShouldOpenMcpEndpoint(task).ShouldBe(expected);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable(AgentRunExecutor.McpEndpointEnabledEnvVar, original);
+        }
+    }
+
     // ─── Deterministic branch name ───────────────────────────────────────────
 
     [Fact]
