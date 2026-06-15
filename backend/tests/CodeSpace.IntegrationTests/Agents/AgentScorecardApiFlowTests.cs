@@ -57,7 +57,7 @@ public class AgentScorecardApiFlowTests
         var codex = card.Harnesses.Single(h => h.Harness == "codex-cli");
         codex.Total.ShouldBe(3);
         codex.Succeeded.ShouldBe(2);
-        codex.P50DurationSeconds.ShouldNotBeNull("the median latency is a real number, computed from the seeded durations");
+        codex.P50DurationSeconds!.Value.ShouldBe(20, 0.5, "median of the seeded 10/20/30s codex runs (nearest-rank) is 20s — the real P50");
         codex.P95DurationSeconds!.Value.ShouldBe(30, 0.5, "the slowest codex run was 30s — the real P95");
 
         card.Harnesses.Single(h => h.Harness == "claude-code").SuccessRate.ShouldBe(1.0);
