@@ -72,6 +72,18 @@ public class EffortRouterGenericityTests
     }
 
     [Fact]
+    public void RecipeForEffort_is_data_driven_a_fake_recipe_claiming_a_tier_resolves_with_zero_router_edit()
+    {
+        // The effort→recipe map is pure data (ITaskRecipe.ServesEfforts), not a switch: a fake recipe that
+        // DECLARES it serves an open tier the production core never named becomes the recipe for that tier with
+        // ZERO edit to the registry / router. Mirrors how a new IAgentHarness self-registers.
+        var registry = new TaskRecipeRegistry(new ITaskRecipe[] { new SingleAgentRecipe(), new TierClaimingRecipe() });
+
+        registry.RecipeForEffort(TierClaimingRecipe.ServedTier).RecipeKind.ShouldBe(FakeRecipeKind,
+            "the registry resolved the recipe whose ServesEfforts contains the tier — no per-tier branching");
+    }
+
+    [Fact]
     public async Task Auto_path_routes_via_the_registry_Default_classifier_not_a_named_type()
     {
         // Proves the auto path is purely a registry.Default lookup, never a hardcoded concrete classifier: even
@@ -108,12 +120,27 @@ public class EffortRouterGenericityTests
     {
         public const string FakeProjection = "fake-projection";
         public string RecipeKind => FakeRecipeKind;
+        public IReadOnlyList<string> ServesEfforts => Array.Empty<string>();
         public string GoalFrame => "a fake recipe";
         public string BoundsPreset => FakeBoundsKind;
         public string RecommendedAutonomy => "Confined";
         public string DefaultProjectionKind => FakeProjection;
         public bool RequiresPlanReview => true;
         public IReadOnlyList<string> RecommendedPhaseLabels => new[] { "Fake phase" };
+    }
+
+    /// <summary>A fake recipe that DECLARES it serves an open tier the production core never named — proves RecipeForEffort is purely data-driven.</summary>
+    private sealed class TierClaimingRecipe : ITaskRecipe
+    {
+        public const string ServedTier = "some-tier";
+        public string RecipeKind => FakeRecipeKind;
+        public IReadOnlyList<string> ServesEfforts => new[] { ServedTier };
+        public string GoalFrame => "a tier-claiming fake recipe";
+        public string BoundsPreset => FakeBoundsKind;
+        public string RecommendedAutonomy => "Confined";
+        public string DefaultProjectionKind => FakeRecipe.FakeProjection;
+        public bool RequiresPlanReview => false;
+        public IReadOnlyList<string> RecommendedPhaseLabels => Array.Empty<string>();
     }
 
     private sealed class FakeBounds : IBoundsPreset

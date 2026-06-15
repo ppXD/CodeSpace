@@ -16,6 +16,8 @@ public sealed class SingleAgentRecipe : ITaskRecipe, ISingletonDependency
 {
     public string RecipeKind => TaskRecipeKinds.SingleAgent;
 
+    public IReadOnlyList<string> ServesEfforts => new[] { TaskEffortModes.Quick };
+
     public string GoalFrame => "One agent works the whole task end to end in a single run.";
 
     public string BoundsPreset => TaskEffortModes.Standard;

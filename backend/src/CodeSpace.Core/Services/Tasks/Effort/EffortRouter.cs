@@ -60,12 +60,19 @@ public sealed class EffortRouter : IEffortRouter, IScopedDependency
     private static bool IsExplicitOperatorEffort(string? requestedEffort) =>
         !string.IsNullOrWhiteSpace(requestedEffort) && !string.Equals(requestedEffort.Trim(), TaskEffortModes.Auto, StringComparison.OrdinalIgnoreCase);
 
-    /// <summary>The decision when the operator chose the effort verbatim — no signals, full confidence, the requested (or default) recipe.</summary>
+    /// <summary>
+    /// The decision when the operator chose the effort verbatim — no signals, full confidence. The recipe is the
+    /// operator's pin if set, else the DEFAULT SHAPE for the explicit tier (<c>RecipeForEffort</c>, data-driven —
+    /// no hardcoded switch): explicit <c>standard</c> / <c>deep</c> ⇒ map-fanout, explicit <c>quick</c> ⇒
+    /// single-agent. (The AUTO path is unchanged — the heuristic still suggests single-agent + always confirms;
+    /// the operator escalates by picking standard/deep in the confirm card, which re-enters HERE as an explicit
+    /// tier. A later structured_llm classifier may suggest map-fanout directly.)
+    /// </summary>
     private EffortDecision OperatorDecision(EffortRouteRequest request) => new()
     {
         Signals = new EffortSignals(),
         SuggestedEffort = request.RequestedEffort!.Trim(),
-        SuggestedRecipe = request.RequestedRecipe ?? _recipes.Default.RecipeKind,
+        SuggestedRecipe = request.RequestedRecipe ?? _recipes.RecipeForEffort(request.RequestedEffort!.Trim()).RecipeKind,
         Confidence = 1.0,
         ClassifierKind = "operator",
     };

@@ -57,19 +57,20 @@ public class EffortRouterFlowTests
         var workflowCountBefore = await CountWorkflowsAsync(teamId);
         var versionCountBefore = await CountWorkflowVersionsAsync();
 
-        // ── L2: the REAL router turns an operator-chosen-standard request into a RoutePlan. ──
+        // ── L2: the REAL router turns an operator-chosen-quick request into a RoutePlan. (Explicit standard/deep
+        //    now route the multi-agent map-fanout shape — see PlanMapSynthFanoutFlowTests; quick stays single-agent.) ──
         var request = new EffortRouteRequest
         {
             Seed = new TaskLaunchSeed { Goal = "Work on the auth refactor", SurfaceKind = "test", TeamId = teamId },
-            RequestedEffort = TaskEffortModes.Standard,
+            RequestedEffort = TaskEffortModes.Quick,
         };
 
         var plan = await RouteAsync(request);
 
-        plan.EffortMode.ShouldBe(TaskEffortModes.Standard);
+        plan.EffortMode.ShouldBe(TaskEffortModes.Quick);
         plan.ProjectionKind.ShouldBe(TaskProjectionKinds.SingleAgent, "the single-agent recipe's default projection");
         plan.NeedsConfirmCard.ShouldBeFalse("an explicit operator tier never confirms");
-        plan.Caps.MaxParallelism.ShouldBe(3, "the standard preset's caps reached the plan");
+        plan.Caps.MaxParallelism.ShouldBe(1, "the quick preset's caps reached the plan");
 
         // ── L3: the RoutePlan drives the projection factory → a snapshot run. ──
         var context = new TaskBuildContext
@@ -187,6 +188,7 @@ public class EffortRouterFlowTests
         public const string FakeKind = "fake-recipe";
         public const string FakeProjection = "fake-projection";
         public string RecipeKind => FakeKind;
+        public IReadOnlyList<string> ServesEfforts => Array.Empty<string>();
         public string GoalFrame => "a fake recipe";
         public string BoundsPreset => FakeBounds.FakeKind;
         public string RecommendedAutonomy => "Confined";

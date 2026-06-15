@@ -25,6 +25,11 @@ public sealed class TaskRecipeRegistry : ITaskRecipeRegistry, ISingletonDependen
         if (duplicates.Count > 0)
             throw new InvalidOperationException($"Duplicate ITaskRecipe kinds: {string.Join(", ", duplicates)}");
 
+        var contestedEfforts = list.SelectMany(r => r.ServesEfforts).GroupBy(e => e).Where(g => g.Count() > 1).Select(g => g.Key).ToList();
+
+        if (contestedEfforts.Count > 0)
+            throw new InvalidOperationException($"Effort tiers claimed by more than one ITaskRecipe (each tier must map to at most one recipe): {string.Join(", ", contestedEfforts)}");
+
         _byKind = list.ToDictionary(r => r.RecipeKind);
         All = list;
 
@@ -48,4 +53,7 @@ public sealed class TaskRecipeRegistry : ITaskRecipeRegistry, ISingletonDependen
 
     public bool TryResolve(string recipeKind, out ITaskRecipe recipe) =>
         _byKind.TryGetValue(recipeKind, out recipe!);
+
+    public ITaskRecipe RecipeForEffort(string effortMode) =>
+        All.FirstOrDefault(r => r.ServesEfforts.Contains(effortMode)) ?? Default;
 }
