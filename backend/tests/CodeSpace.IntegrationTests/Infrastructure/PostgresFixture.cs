@@ -243,5 +243,14 @@ public sealed class PostgresFixture : IAsyncLifetime
             .As<CodeSpace.Core.Services.Workflows.Llm.ILLMClient>()
             .As<CodeSpace.Core.Services.Workflows.Llm.IStructuredLLMClient>()
             .SingleInstance();
+
+        // Planner-shaped structured fake for the task-first planner E2E (PR-D Slice 1). Under its OWN provider
+        // tag, so the projected graph's llm.complete body + synthesizer nodes (which hold the ROOT registry)
+        // can resolve it once the test retargets their provider — letting the planned flow fan out + synthesize
+        // with no API key.
+        builder.RegisterType<Workflows.Infrastructure.DeterministicTaskPlannerLlmClient>()
+            .As<CodeSpace.Core.Services.Workflows.Llm.ILLMClient>()
+            .As<CodeSpace.Core.Services.Workflows.Llm.IStructuredLLMClient>()
+            .SingleInstance();
     }
 }

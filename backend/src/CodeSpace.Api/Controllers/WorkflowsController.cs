@@ -123,6 +123,19 @@ public class WorkflowsController : ControllerBase
         return outcome == null ? NotFound() : Ok(outcome);
     }
 
+    /// <summary>
+    /// Plan a workflow from a free-text task. Returns <c>{ plannerEnabled, plan, definition }</c> — the planner
+    /// emits a reviewable plan and a validated (but unsaved, unrun) definition the operator can save+run through
+    /// the normal pipeline. When the planner is disabled, returns <c>{ plannerEnabled: false }</c> with no plan.
+    /// Team comes from <c>ICurrentTeam</c> in the handler, never this body.
+    /// </summary>
+    [HttpPost("plan-from-task")]
+    public async Task<IActionResult> PlanFromTask([FromBody] PlanWorkflowFromTaskCommand command, CancellationToken cancellationToken)
+    {
+        var result = await _mediator.Send(command, cancellationToken).ConfigureAwait(false);
+        return Ok(result);
+    }
+
     /// <summary>Editor palette: every loaded node type's manifest + JSON schemas.</summary>
     [HttpGet("node-manifests")]
     public async Task<IActionResult> ListNodeManifests([FromQuery] ListNodeManifestsQuery query, CancellationToken cancellationToken)

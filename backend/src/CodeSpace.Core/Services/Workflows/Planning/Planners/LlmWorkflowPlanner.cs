@@ -1,0 +1,92 @@
+using System.Text;
+using System.Text.Json;
+using CodeSpace.Core.DependencyInjection;
+using CodeSpace.Core.Services.Workflows.Llm;
+using CodeSpace.Messages.Dtos.Workflows.Planning;
+
+namespace CodeSpace.Core.Services.Workflows.Planning.Planners;
+
+/// <summary>
+/// The structured-LLM <see cref="IWorkflowPlanner"/> (Rule 18.3 — an impl in the <c>Planners/</c> variant
+/// folder). It resolves a structured-capable LLM client through the SAME <see cref="ILLMClientRegistry"/>
+/// the <c>llm.complete</c> node uses, sends a system+user prompt constrained by
+/// <see cref="PlannerSchema.ResponseSchema"/>, and deserializes the schema-valid object into a
+/// <see cref="PlannedWorkflow"/>. Fails cleanly when no registered provider offers structured output.
+///
+/// <para>The planner produces DATA only — it never wires nodes or runs anything. The grounding context
+/// (when present) is framed honestly as supplementary repo context, never as "I analyzed your codebase".</para>
+/// </summary>
+public sealed class LlmWorkflowPlanner : IWorkflowPlanner, IScopedDependency
+{
+    private readonly ILLMClientRegistry _clientRegistry;
+
+    public LlmWorkflowPlanner(ILLMClientRegistry clientRegistry) { _clientRegistry = clientRegistry; }
+
+    public async Task<PlannedWorkflow> PlanAsync(WorkflowPlanRequest request, CancellationToken cancellationToken)
+    {
+        var structured = ResolveStructuredClient();
+
+        var completion = await structured.CompleteStructuredAsync(BuildRequest(request), cancellationToken).ConfigureAwait(false);
+
+        return Deserialize(completion.Json);
+    }
+
+    /// <summary>The first registered client that ALSO offers structured output (ISP feature-detect via cast). A deployment with only a plain-text provider gets a clean failure, not a malformed plan.</summary>
+    private IStructuredLLMClient ResolveStructuredClient()
+    {
+        var structured = _clientRegistry.All.OfType<IStructuredLLMClient>().FirstOrDefault();
+
+        if (structured == null)
+            throw new InvalidOperationException("No structured-output-capable LLM provider is registered. The task planner needs a provider that supports schema-constrained JSON.");
+
+        return structured;
+    }
+
+    private static StructuredLLMCompletionRequest BuildRequest(WorkflowPlanRequest request) => new()
+    {
+        Model = DefaultModel,
+        SystemPrompt = SystemPrompt,
+        UserPrompt = BuildUserPrompt(request),
+        JsonSchema = PlannerSchema.ResponseSchema,
+        MaxOutputTokens = 4096,
+        Temperature = 0.2,
+    };
+
+    private static string BuildUserPrompt(WorkflowPlanRequest request)
+    {
+        var builder = new StringBuilder();
+
+        builder.AppendLine("Task to plan:");
+        builder.AppendLine(request.TaskText);
+
+        if (!string.IsNullOrWhiteSpace(request.GroundingContext))
+        {
+            builder.AppendLine();
+            builder.AppendLine("Supplementary context (a top-level summary, not a full analysis) — use it only where it helps:");
+            builder.AppendLine(request.GroundingContext);
+        }
+
+        return builder.ToString();
+    }
+
+    private static PlannedWorkflow Deserialize(JsonElement json)
+    {
+        var plan = json.Deserialize<PlannedWorkflow>(PlannerSchema.Options);
+
+        if (plan == null || plan.Subtasks.Count == 0)
+            throw new InvalidOperationException("The planner returned an empty plan (no subtasks). The response did not conform to the planner schema.");
+
+        return plan;
+    }
+
+    /// <summary>Mirrors <c>LlmCompleteNode.DefaultModelFor("Anthropic")</c> — the default structured-capable model. A future per-team override is a Slice-N concern, not Slice 1.</summary>
+    private const string DefaultModel = "claude-sonnet-4-5";
+
+    private const string SystemPrompt =
+        "You are a senior engineer turning a free-text task into a concrete, reviewable plan. " +
+        "Break the task into a small number of ordered, independently-executable subtasks (1–20). " +
+        "Give each subtask a stable id, a short title, and a concrete instruction. " +
+        "State the success criteria a reviewer would check and the main risks. " +
+        "Set recommendedWorkflowKind to 'coding' when the subtasks are code changes a coding agent should make, " +
+        "otherwise 'analysis'. Return ONLY the schema-constrained JSON.";
+}
