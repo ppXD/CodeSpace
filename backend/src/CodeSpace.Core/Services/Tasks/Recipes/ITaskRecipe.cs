@@ -20,6 +20,15 @@ public interface ITaskRecipe
     /// <summary>The recipe kind this impl handles — the open string the registry indexes + resolves it by (e.g. <c>"single-agent"</c>). Mirrors <c>IAgentHarness.Kind</c>.</summary>
     string RecipeKind { get; }
 
+    /// <summary>
+    /// The OPEN-STRING effort tiers this recipe is the DEFAULT SHAPE for — the data that drives effort→recipe
+    /// routing WITHOUT a hardcoded switch (the registry resolves the recipe whose <c>ServesEfforts</c> contains
+    /// the explicit tier). A recipe DECLARES its own purpose here (Rule 7 — cohesive to the recipe, not a wider
+    /// router concern); each tier is claimed by AT MOST one recipe (the registry asserts no overlap). Empty ⇒
+    /// the recipe is opt-in only (never the default for any tier — reached only by an explicit RequestedRecipe).
+    /// </summary>
+    IReadOnlyList<string> ServesEfforts { get; }
+
     /// <summary>A one-line prose frame describing what this recipe does — provenance / a UI hint.</summary>
     string GoalFrame { get; }
 

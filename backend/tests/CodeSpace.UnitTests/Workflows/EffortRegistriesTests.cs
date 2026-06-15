@@ -139,6 +139,7 @@ public class EffortRegistriesTests
     {
         public FakeRecipe(string kind) => RecipeKind = kind;
         public string RecipeKind { get; }
+        public IReadOnlyList<string> ServesEfforts => Array.Empty<string>();
         public string GoalFrame => "fake";
         public string BoundsPreset => TaskEffortModes.Standard;
         public string RecommendedAutonomy => "Standard";

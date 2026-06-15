@@ -5,6 +5,7 @@ using CodeSpace.Core.Services.Tasks.Bounds.Presets.Standard;
 using CodeSpace.Core.Services.Tasks.Effort;
 using CodeSpace.Core.Services.Tasks.Effort.Classifiers.Heuristic;
 using CodeSpace.Core.Services.Tasks.Recipes;
+using CodeSpace.Core.Services.Tasks.Recipes.MapFanout;
 using CodeSpace.Core.Services.Tasks.Recipes.SingleAgent;
 using CodeSpace.Messages.Tasks;
 using CodeSpace.Messages.Tasks.Effort;
@@ -25,7 +26,7 @@ public class EffortRouterTests
 {
     private static EffortRouter Router() => new(
         new EffortClassifierRegistry(new IEffortClassifier[] { new HeuristicEffortClassifier() }),
-        new TaskRecipeRegistry(new ITaskRecipe[] { new SingleAgentRecipe() }),
+        new TaskRecipeRegistry(new ITaskRecipe[] { new SingleAgentRecipe(), new MapFanoutRecipe() }),
         new BoundsPresetRegistry(new IBoundsPreset[] { new QuickBoundsPreset(), new StandardBoundsPreset(), new DeepBoundsPreset() }));
 
     private static EffortRouteRequest Request(string goal, string? requestedEffort = null, string? requestedRecipe = null, string? requestedProjection = null, RouteCaps? capsOverride = null) => new()
@@ -43,8 +44,8 @@ public class EffortRouterTests
         var plan = await Router().RouteAsync(Request("anything at all", requestedEffort: TaskEffortModes.Standard), CancellationToken.None);
 
         plan.EffortMode.ShouldBe(TaskEffortModes.Standard);
-        plan.ProjectionKind.ShouldBe(TaskProjectionKinds.SingleAgent, "the single-agent recipe's default projection");
-        plan.RecipeKind.ShouldBe(TaskRecipeKinds.SingleAgent);
+        plan.ProjectionKind.ShouldBe(TaskProjectionKinds.PlanMapSynth, "explicit 'standard' routes the map-fanout recipe's default projection");
+        plan.RecipeKind.ShouldBe(TaskRecipeKinds.MapFanout, "explicit 'standard' is served by the map-fanout recipe");
         plan.BoundsPreset.ShouldBe(TaskEffortModes.Standard);
 
         plan.WasAutoClassified.ShouldBeFalse();
@@ -116,6 +117,43 @@ public class EffortRouterTests
         var plan = await Router().RouteAsync(Request("x", requestedEffort: TaskEffortModes.Quick, requestedRecipe: "no-such-recipe"), CancellationToken.None);
 
         plan.RecipeKind.ShouldBe(TaskRecipeKinds.SingleAgent, "an unknown recipe fails open to the safe default — never throws");
+        plan.ProjectionKind.ShouldBe(TaskProjectionKinds.SingleAgent);
+    }
+
+    // ─── THE gap-closure pins: an explicit effort tier (no requested recipe) → the recipe that SERVES it ───
+
+    [Theory]
+    [InlineData(TaskEffortModes.Standard)]   // standard → map-fanout (MapFanoutRecipe.ServesEfforts)
+    [InlineData(TaskEffortModes.Deep)]       // deep → map-fanout too (PR6 supervisor deferred)
+    public async Task Explicit_standard_or_deep_routes_the_map_fanout_recipe_and_plan_map_synth_projection(string tier)
+    {
+        var plan = await Router().RouteAsync(Request("Improve onboarding", requestedEffort: tier), CancellationToken.None);
+
+        plan.RecipeKind.ShouldBe(TaskRecipeKinds.MapFanout, $"explicit '{tier}' is served by the map-fanout recipe — the gap PR3 left open");
+        plan.ProjectionKind.ShouldBe(TaskProjectionKinds.PlanMapSynth, "the map-fanout recipe's default projection is the planner→map→synth graph");
+        plan.NeedsConfirmCard.ShouldBeFalse("an explicit operator tier never confirms");
+    }
+
+    [Fact]
+    public async Task Explicit_quick_stays_single_agent()
+    {
+        var plan = await Router().RouteAsync(Request("Fix a typo", requestedEffort: TaskEffortModes.Quick), CancellationToken.None);
+
+        plan.RecipeKind.ShouldBe(TaskRecipeKinds.SingleAgent, "explicit 'quick' is served by the single-agent recipe");
+        plan.ProjectionKind.ShouldBe(TaskProjectionKinds.SingleAgent);
+    }
+
+    [Fact]
+    public async Task Auto_path_still_suggests_single_agent_and_confirms_even_with_map_fanout_registered()
+    {
+        // The heuristic baseline stays conservative: it suggests single-agent + always asks the operator to
+        // confirm. Escalation to map-fanout happens only when the operator picks standard/deep in the confirm
+        // card, which re-enters as an EXPLICIT tier (the cases above).
+        var plan = await Router().RouteAsync(Request("Refactor the auth module across files and add tests"), CancellationToken.None);
+
+        plan.WasAutoClassified.ShouldBeTrue();
+        plan.NeedsConfirmCard.ShouldBeTrue("the auto path always confirms — it never silently escalates to map-fanout");
+        plan.RecipeKind.ShouldBe(TaskRecipeKinds.SingleAgent, "the heuristic suggests the conservative single-agent recipe");
         plan.ProjectionKind.ShouldBe(TaskProjectionKinds.SingleAgent);
     }
 }

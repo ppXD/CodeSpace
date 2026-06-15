@@ -41,7 +41,7 @@ public class TaskLaunchFlowTests
     public TaskLaunchFlowTests(PostgresFixture fixture) { _fixture = fixture; }
 
     [Fact]
-    public async Task Chat_launch_at_standard_effort_projects_and_runs_a_real_agent_to_success_with_no_workflow_row()
+    public async Task Chat_launch_at_quick_effort_projects_and_runs_a_real_agent_to_success_with_no_workflow_row()
     {
         if (OperatingSystem.IsWindows()) return;   // the fake CLI is a /bin/sh script the runner spawns
 
@@ -56,16 +56,17 @@ public class TaskLaunchFlowTests
         var workflowCountBefore = await CountWorkflowsAsync(teamId);
         var versionCountBefore = await CountWorkflowVersionsAsync();
 
-        // A chat task at an explicit standard effort, analysis-only (no repo → no clone, the proven fake-CLI
-        // shape). The launch service derives the seed, routes (explicit tier ⇒ no confirm), projects single-agent,
-        // and starts the snapshot run.
+        // A chat task at an explicit quick effort, analysis-only (no repo → no clone, the proven fake-CLI shape).
+        // The launch service derives the seed, routes (explicit tier ⇒ no confirm; quick ⇒ single-agent), projects
+        // single-agent, and starts the snapshot run. (Explicit standard/deep now route the multi-agent map-fanout
+        // shape — covered by PlanMapSynthFanoutFlowTests; this single-agent E2E pins the quick tier.)
         var request = new TaskLaunchRequest
         {
             TeamId = teamId,
             ActorUserId = userId,
             SurfaceKind = TaskLaunchSurfaceKinds.Chat,
             TaskText = "Work on the auth refactor",
-            RequestedEffort = TaskEffortModes.Standard,
+            RequestedEffort = TaskEffortModes.Quick,
             Autonomy = "Confined",
             Overrides = new TaskExecutionOverrides { Harness = "codex-cli", RunnerKind = "local" },
         };
@@ -74,7 +75,7 @@ public class TaskLaunchFlowTests
 
         result.ProjectionKind.ShouldBe(TaskProjectionKinds.SingleAgent);
         result.SurfaceKind.ShouldBe(TaskLaunchSurfaceKinds.Chat);
-        result.Route.EffortMode.ShouldBe(TaskEffortModes.Standard);
+        result.Route.EffortMode.ShouldBe(TaskEffortModes.Quick);
         result.Route.NeedsConfirmCard.ShouldBeFalse("an explicit operator tier never confirms");
         result.LinkedEntity.ShouldBeNull("a free-text chat task has no source entity");
 
@@ -165,7 +166,7 @@ public class TaskLaunchFlowTests
             SurfaceKind = TaskLaunchSurfaceKinds.Chat,
             TaskText = "Touch the bound repo",
             RepositoryId = repoId,
-            RequestedEffort = TaskEffortModes.Standard,
+            RequestedEffort = TaskEffortModes.Quick,
         };
 
         var result = await LaunchAsync(request);
@@ -256,7 +257,7 @@ public class TaskLaunchFlowTests
             TeamId = teamId,
             ActorUserId = userId,
             SurfaceKind = FakeSurfaceSeedProvider.Surface,
-            RequestedEffort = TaskEffortModes.Standard,
+            RequestedEffort = TaskEffortModes.Quick,
             Autonomy = "Confined",
             Overrides = new TaskExecutionOverrides { Harness = "codex-cli", RunnerKind = "local" },
             SurfacePayload = payload,
