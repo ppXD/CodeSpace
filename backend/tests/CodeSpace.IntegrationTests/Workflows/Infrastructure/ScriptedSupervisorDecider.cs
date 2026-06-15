@@ -32,11 +32,19 @@ public sealed class ScriptedSupervisorDecider : ISupervisorDecider
         {
             SupervisorScriptMode.PlanSpawnStop => PlanSpawnStop(context),
             SupervisorScriptMode.AskHumanStop => AskHumanStop(context),
+            SupervisorScriptMode.PlanThenSpawnForever => PlanThenSpawnForever(context),
             _ => PlanThenStop(context),
         };
 
         return Task.FromResult(decision);
     }
+
+    // E5 arc: turn 0 plan(2) → EVERY later turn spawn(both). The decider NEVER stops on its own — it's the
+    // BOUND (total-spawn cap) or the GOVERNANCE gate that must stop it, so the integration test proves the
+    // fail-closed force-STOP / approval-park, not a cooperative decider.
+    private static SupervisorDecision PlanThenSpawnForever(SupervisorTurnContext context) => context.TurnNumber == 0
+        ? Plan(context.Goal)
+        : Canonical(SupervisorDecisionKinds.Spawn, new SupervisorSpawnPayload { SubtaskIds = new[] { SubtaskA, SubtaskB } });
 
     // E4 arc: turn 0 ask_human("which approach?") → turn 1 stop, but the stop's summary ECHOES the folded human
     // answer the decider reads off the prior ask_human decision's outcome — proving the answer reached the next
@@ -92,6 +100,8 @@ public sealed class SupervisorDecisionScript
     public void PlanSpawnStop() => Mode = SupervisorScriptMode.PlanSpawnStop;
 
     public void AskHumanStop() => Mode = SupervisorScriptMode.AskHumanStop;
+
+    public void PlanThenSpawnForever() => Mode = SupervisorScriptMode.PlanThenSpawnForever;
 }
 
 public enum SupervisorScriptMode
@@ -99,4 +109,5 @@ public enum SupervisorScriptMode
     PlanThenStop,
     PlanSpawnStop,
     AskHumanStop,
+    PlanThenSpawnForever,
 }

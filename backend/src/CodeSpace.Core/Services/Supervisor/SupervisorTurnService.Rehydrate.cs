@@ -2,6 +2,7 @@ using System.Text.Json;
 using CodeSpace.Core.Services.Agents;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Constants;
+using CodeSpace.Messages.Dtos.Agents;
 using Microsoft.EntityFrameworkCore;
 
 namespace CodeSpace.Core.Services.Supervisor;
@@ -13,7 +14,7 @@ namespace CodeSpace.Core.Services.Supervisor;
 /// </summary>
 public sealed partial class SupervisorTurnService
 {
-    public async Task<SupervisorTurnContext> RehydrateFromDecisionLogAsync(Guid supervisorRunId, Guid teamId, string nodeId, string goal, CancellationToken cancellationToken)
+    public async Task<SupervisorTurnContext> RehydrateFromDecisionLogAsync(Guid supervisorRunId, Guid teamId, string nodeId, string goal, SupervisorGoalConfig? goalConfig, CancellationToken cancellationToken)
     {
         var rows = await _ledger.GetForRunAsync(supervisorRunId, teamId, cancellationToken).ConfigureAwait(false);
 
@@ -59,8 +60,48 @@ public sealed partial class SupervisorTurnService
             TurnNumber = priorDecisions.Count,
             PriorDecisions = priorDecisions,
             InFlight = inFlight,
+            TotalSpawnedAgents = FoldTotalSpawnedAgents(priorDecisions),
+            NoProgressDecisions = FoldNoProgressDecisions(priorDecisions),
+            ApprovalPolicy = SupervisorGoalPlan.From(goalConfig).ApprovalPolicy,
         };
     }
+
+    /// <summary>
+    /// Sum the agents this run has spawned so far from the DURABLE ledger — every prior <c>spawn</c> / <c>retry</c>
+    /// decision's recorded <c>agentCount</c> (the E5 total-spawn cap counter). A LEDGER FACT, so it survives replay
+    /// + can't be reset by re-entering the node: a re-entry re-reads the same settled spawn outcomes and re-derives
+    /// the same total, so the cap can't be sidestepped by restarting.
+    /// </summary>
+    private static int FoldTotalSpawnedAgents(IReadOnlyList<SupervisorPriorDecision> priorDecisions) =>
+        priorDecisions
+            .Where(d => d.DecisionKind is SupervisorDecisionKinds.Spawn or SupervisorDecisionKinds.Retry)
+            .Sum(d => SupervisorOutcome.ReadStagedAgentCount(d.OutcomeJson));
+
+    /// <summary>
+    /// Count the MOST RECENT consecutive decisions that produced no new SETTLED agent result (the E5 best-effort
+    /// no-progress counter, folded from the durable ledger). A decision "made progress" if it staged agents whose
+    /// results a later turn can fold (spawn/retry with agents) OR it is a merge that read prior results; a run of
+    /// decisions that spawned nothing + merged nothing (e.g. the decider looping on plan / a degraded ask_human)
+    /// accumulates. A spawn/retry resets the counter (it advanced the work). DEMOTED to best-effort per the design
+    /// — a long-running spawn whose agents haven't settled is a PARK (not a fresh decided turn), so it never trips.
+    /// </summary>
+    private static int FoldNoProgressDecisions(IReadOnlyList<SupervisorPriorDecision> priorDecisions)
+    {
+        var streak = 0;
+
+        foreach (var decision in priorDecisions)
+            streak = MadeProgress(decision) ? 0 : streak + 1;
+
+        return streak;
+    }
+
+    /// <summary>A decision advanced the work if it spawned/retried agents (the work fans out) or merged prior results (it consumed them). Plan / ask_human / a zero-agent spawn make no fresh progress toward a settled result.</summary>
+    private static bool MadeProgress(SupervisorPriorDecision decision) => decision.DecisionKind switch
+    {
+        SupervisorDecisionKinds.Spawn or SupervisorDecisionKinds.Retry => SupervisorOutcome.ReadStagedAgentCount(decision.OutcomeJson) > 0,
+        SupervisorDecisionKinds.Merge => true,
+        _ => false,
+    };
 
     /// <summary>
     /// Fold the human's answer into an ask_human decision's replayed outcome (E4): look up the recorded
@@ -109,6 +150,39 @@ public sealed partial class SupervisorTurnService
     /// <summary>The shared empty answers map for the common no-ask_human rehydrate — keeps that path allocation-light + DB-free.</summary>
     private static readonly IReadOnlyDictionary<string, string> EmptyAnswers = new Dictionary<string, string>();
 
+    /// <summary>
+    /// How many WorkflowRun ancestors this supervisor run already has (PR-E E5 depth cap) — walks the
+    /// <c>parent_run_id</c> chain exactly as <c>SubworkflowService.EnsureWithinDepthAsync</c> does, bounded by
+    /// <see cref="SupervisorLane.MaxSupervisorDepth"/> so a corrupt cycle can't loop forever. The pre-decision
+    /// depth bound force-STOPs a supervisor nested beyond this many ancestors (a recursive supervisor-spawns-
+    /// supervisor fan-out), at turn 0, before it can spawn. A top-level supervisor (no parent) reads depth 0.
+    /// </summary>
+    public async Task<int> SupervisorDepthAsync(Guid supervisorRunId, Guid teamId, CancellationToken cancellationToken)
+    {
+        // A pure-unit context (no DbContext) has no run hierarchy → depth 0 (top-level), so the depth bound
+        // never trips a db-less test. The real engine always supplies _db; only fakes pass db: null!.
+        if (_db == null) return 0;
+
+        var depth = 0;
+
+        var cursor = await _db.WorkflowRun.AsNoTracking()
+            .Where(r => r.Id == supervisorRunId && r.TeamId == teamId)
+            .Select(r => r.ParentRunId)
+            .FirstOrDefaultAsync(cancellationToken).ConfigureAwait(false);
+
+        while (cursor.HasValue && depth < SupervisorLane.MaxSupervisorDepth)
+        {
+            depth++;
+
+            cursor = await _db.WorkflowRun.AsNoTracking()
+                .Where(r => r.Id == cursor.Value)
+                .Select(r => r.ParentRunId)
+                .FirstOrDefaultAsync(cancellationToken).ConfigureAwait(false);
+        }
+
+        return depth;
+    }
+
     public async Task<int> CountPendingAgentWaitsAsync(Guid supervisorRunId, string nodeId, CancellationToken cancellationToken) =>
         await _db.WorkflowRunWait.AsNoTracking()
             .CountAsync(w => w.RunId == supervisorRunId && w.NodeId == nodeId
@@ -146,15 +220,20 @@ public sealed partial class SupervisorTurnService
     /// <summary>The per-turn discriminator <c>turn{N}</c> — the ledger-key analogue of the wait's IterationKey turn segment.</summary>
     internal static string TurnDiscriminator(int turnNumber) => $"turn{turnNumber}";
 
-    /// <summary>The forced terminal decision when the budget is exhausted — a <c>stop</c> with a fixed "budget exhausted" reason, deterministic so a re-entry after the budget tripped re-derives it identically.</summary>
-    private static SupervisorDecision ForcedBudgetStop() => new()
+    /// <summary>
+    /// The forced terminal decision when a fail-closed bound or governance refusal trips (PR-E E2/E5) — a
+    /// <c>stop</c> stamping the DISTINCT <paramref name="reason"/> (a <see cref="SupervisorStopReasons"/> value).
+    /// DETERMINISTIC given (reason): a re-entry after the same bound tripped re-derives the identical stop, so the
+    /// per-turn idempotency key is stable and the run terminates cleanly with the operator-legible reason.
+    /// </summary>
+    private static SupervisorDecision ForcedStop(string reason) => new()
     {
         Kind = SupervisorDecisionKinds.Stop,
-        PayloadJson = JsonSerializer.Serialize(new { reason = BudgetExhaustedReason }, AgentJson.Options),
+        PayloadJson = JsonSerializer.Serialize(new { reason }, AgentJson.Options),
     };
 
-    /// <summary>The terminal reason stamped on a budget-forced stop. Surfaced as the node's terminal reason.</summary>
-    public const string BudgetExhaustedReason = "budget exhausted";
+    /// <summary>The terminal reason stamped on a budget-forced stop (back-compat alias for the E2 reason; points at the E5 vocabulary). Surfaced as the node's terminal reason.</summary>
+    public const string BudgetExhaustedReason = SupervisorStopReasons.BudgetExhausted;
 
     /// <summary>Read the <c>reason</c> from a stop decision's payload for the node's terminal output (best-effort; null when absent/malformed).</summary>
     private static string? ReadStopReason(SupervisorDecision decision)

@@ -1,0 +1,59 @@
+using CodeSpace.Messages.Dtos.Agents;
+
+namespace CodeSpace.Core.Services.Supervisor;
+
+/// <summary>
+/// The turn loop's RESOLVED view of a supervisor node's <see cref="SupervisorGoalConfig"/> — the clamped /
+/// defaulted limits + approval policy it actually enforces (PR-E E5). Mirrors <c>MapPlan</c> /
+/// <c>LoopPlan</c>: a pure value with ALL normalisation in one place so the turn loop never trusts a raw
+/// config field. Parsed leniently — a null / blank / out-of-range field falls back to the safe
+/// <see cref="SupervisorLane"/> default, so a pre-E5 supervisor (goal only) resolves to exactly the historical
+/// bounds (decision budget 30, no approval gate).
+///
+/// <para>The bounds READ from this plan; the SupervisorLane consts are the fallbacks. An operator may TIGHTEN a
+/// bound below its default but never raise <see cref="MaxRounds"/> past the hard <see cref="SupervisorLane.DecisionBudget"/>
+/// ceiling (a runaway loop always terminates regardless of config).</para>
+/// </summary>
+public sealed record SupervisorGoalPlan
+{
+    /// <summary>The decision (turn) budget this run enforces — clamped to <c>[1, DecisionBudget]</c>; the operator can only tighten it. At/over this the turn loop force-STOPs ("budget exhausted").</summary>
+    public required int MaxRounds { get; init; }
+
+    /// <summary>Max agents one spawn decision may fan out — clamped to <c>[1, SpawnKCeiling]</c> (the schema's hard maxItems). A spawn beyond it force-STOPs ("spawn fan-out exceeds cap").</summary>
+    public required int MaxParallelism { get; init; }
+
+    /// <summary>Max agents the whole run may spawn in total (summed from the ledger) — clamped to <c>[1, MaxTotalSpawnsCeiling]</c>. At the cap a further spawn force-STOPs ("total spawn cap reached").</summary>
+    public required int MaxTotalSpawns { get; init; }
+
+    /// <summary>Consecutive no-new-result decisions before the best-effort no-progress guard force-STOPs ("no progress"). Clamped to <c>[1, NoProgressCeiling]</c>.</summary>
+    public required int MaxNoProgressDecisions { get; init; }
+
+    /// <summary>Which decisions require a human approval before their side effect fires — maps to the autonomy tier <c>AgentToolGate</c> reads.</summary>
+    public required SupervisorApprovalPolicy ApprovalPolicy { get; init; }
+
+    /// <summary>The hard ceiling on a single spawn decision's fan-out — the schema's <c>maxItems</c> on <c>spawn.subtaskIds</c> ([1,20]). The runtime guard pins to the SAME literal so a schema-bypassing decider can't fan out wider.</summary>
+    public const int SpawnKCeiling = 20;
+
+    /// <summary>Normalise the operator's config into a safe plan: every limit clamped, every absent field defaulted, the approval policy parsed leniently. A null config (no E5 fields authored) yields the all-defaults plan.</summary>
+    public static SupervisorGoalPlan From(SupervisorGoalConfig? config) => new()
+    {
+        MaxRounds = Clamp(config?.MaxRounds, SupervisorLane.DecisionBudget, max: SupervisorLane.DecisionBudget),
+        MaxParallelism = Clamp(config?.MaxParallelism, SpawnKCeiling, max: SpawnKCeiling),
+        MaxTotalSpawns = Clamp(config?.MaxTotalSpawns, SupervisorLane.DefaultMaxTotalSpawns, max: SupervisorLane.MaxTotalSpawnsCeiling),
+        MaxNoProgressDecisions = Clamp(config?.MaxNoProgressDecisions, SupervisorLane.DefaultMaxNoProgressDecisions, max: NoProgressCeiling),
+        ApprovalPolicy = ParseApprovalPolicy(config?.ApprovalPolicy),
+    };
+
+    /// <summary>A no-progress cap ceiling so a fat-fingered config can't push it arbitrarily high (still bounded by MaxRounds regardless).</summary>
+    private const int NoProgressCeiling = SupervisorLane.DecisionBudget;
+
+    /// <summary>Clamp an optional operator value into <c>[1, max]</c>; null / out-of-range falls back to <paramref name="default"/>. Mirrors AdmissionController.ParseCap.</summary>
+    private static int Clamp(int? raw, int @default, int max) =>
+        raw is { } value ? Math.Clamp(value, 1, max) : @default;
+
+    /// <summary>Lenient parse — only the explicit gate values opt into approval; anything else (null, blank, typo) is the safe default None (no gate, pre-E5 behaviour).</summary>
+    private static SupervisorApprovalPolicy ParseApprovalPolicy(string? raw) =>
+        raw?.Trim().ToLowerInvariant() is "spawns" or "side-effects" or "side_effects"
+            ? SupervisorApprovalPolicy.Spawns
+            : SupervisorApprovalPolicy.None;
+}

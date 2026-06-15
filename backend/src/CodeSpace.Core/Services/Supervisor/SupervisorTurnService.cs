@@ -1,6 +1,7 @@
 using CodeSpace.Core.DependencyInjection;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Messages.Agents;
+using CodeSpace.Messages.Dtos.Agents;
 using Microsoft.Extensions.Logging;
 
 namespace CodeSpace.Core.Services.Supervisor;
@@ -27,12 +28,16 @@ public sealed partial class SupervisorTurnService : ISupervisorTurnService, ISco
         _logger = logger;
     }
 
-    public async Task<SupervisorTurnResult> RunTurnAsync(Guid supervisorRunId, Guid teamId, string nodeId, string goal, Guid? conversationId, CancellationToken cancellationToken)
+    public async Task<SupervisorTurnResult> RunTurnAsync(Guid supervisorRunId, Guid teamId, string nodeId, string goal, Guid? conversationId, SupervisorGoalConfig? goalConfig, CancellationToken cancellationToken)
     {
-        var context = (await RehydrateFromDecisionLogAsync(supervisorRunId, teamId, nodeId, goal, cancellationToken).ConfigureAwait(false))
+        var plan = SupervisorGoalPlan.From(goalConfig);
+
+        var context = (await RehydrateFromDecisionLogAsync(supervisorRunId, teamId, nodeId, goal, goalConfig, cancellationToken).ConfigureAwait(false))
             with { ConversationId = conversationId };
 
-        var decision = await ChooseDecisionAsync(context, cancellationToken).ConfigureAwait(false);
+        var depth = await SupervisorDepthAsync(supervisorRunId, teamId, cancellationToken).ConfigureAwait(false);
+
+        var decision = await ChooseDecisionAsync(context, plan, depth, cancellationToken).ConfigureAwait(false);
 
         var execution = await ClaimAndExecuteAsync(supervisorRunId, teamId, context, decision, cancellationToken).ConfigureAwait(false);
 
@@ -40,22 +45,72 @@ public sealed partial class SupervisorTurnService : ISupervisorTurnService, ISco
     }
 
     /// <summary>
-    /// Pick the next decision. Budget is the FAIL-CLOSED gate, checked BEFORE asking the decider and counted
-    /// from the durable ledger (<see cref="SupervisorTurnContext.TurnNumber"/> = decided-decision count) so it
-    /// survives replay and can't be reset by re-entering the node: at/over <c>DecisionBudget</c> we force a
-    /// terminal <c>stop</c> rather than emit one more decision. A re-entry after the budget tripped re-derives
-    /// the same forced stop deterministically.
+    /// Pick the next decision behind the fail-closed bounds + governance gate, all counted from the DURABLE
+    /// ledger (never an in-memory tally) so they survive replay + can't be reset by re-entering the node. The
+    /// order is deterministic so a re-entry re-derives the SAME forced stop:
+    /// <list type="number">
+    ///   <item>PRE-DECISION bounds (the run can't even ask for one more decision): depth cap (a supervisor nested
+    ///         beyond <c>MaxSupervisorDepth</c> supervisor-ancestors), round budget (<c>TurnNumber</c> ≥ the run's
+    ///         <c>MaxRounds</c>), best-effort no-progress (consecutive no-new-result decisions ≥ the cap). Each
+    ///         FORCE-STOPs with a distinct terminal reason instead of asking the decider.</item>
+    ///   <item>ask the decider for the next decision;</item>
+    ///   <item>POST-DECISION bounds + GOVERNANCE on the chosen decision: a spawn whose K exceeds the per-decision
+    ///         fan-out cap, or whose total would breach <c>MaxTotalSpawns</c>, is REFUSED → force-STOP; a
+    ///         side-effecting decision the governance gate DENIES is refused → force-STOP; one it RequireApproves
+    ///         is rewritten into an ask_human approval park (the human's answer gates the next turn) — never an
+    ///         ungated side effect.</item>
+    /// </list>
     /// </summary>
-    private async Task<SupervisorDecision> ChooseDecisionAsync(SupervisorTurnContext context, CancellationToken cancellationToken)
+    private async Task<SupervisorDecision> ChooseDecisionAsync(SupervisorTurnContext context, SupervisorGoalPlan plan, int depth, CancellationToken cancellationToken)
     {
-        if (context.TurnNumber >= SupervisorLane.DecisionBudget)
-        {
-            _logger.LogWarning("Supervisor decision budget exhausted at turn {Turn} (budget {Budget}) — forcing terminal stop", context.TurnNumber, SupervisorLane.DecisionBudget);
+        var preBound = SupervisorBounds.PreDecision(context, plan, depth);
 
-            return ForcedBudgetStop();
+        if (preBound != null) return ForcedStop(preBound);
+
+        var decision = await _decider.DecideAsync(context, cancellationToken).ConfigureAwait(false);
+
+        return ApplyPostDecisionGate(context, plan, decision);
+    }
+
+    /// <summary>
+    /// Apply the per-decision bounds + governance to the decider's chosen decision. A bound breach FORCE-STOPs
+    /// (fail-closed — no side effect). A governance verdict reshapes a side-effecting decision: Deny → force-STOP;
+    /// RequireApproval → an ask_human approval card that gates the effect behind a human (reusing E4's HITL park);
+    /// Allow → the decision proceeds unchanged. The post-decision spawn-count bound is checked FIRST so an
+    /// over-cap spawn stops cleanly even under an approval policy.
+    /// </summary>
+    private SupervisorDecision ApplyPostDecisionGate(SupervisorTurnContext context, SupervisorGoalPlan plan, SupervisorDecision decision)
+    {
+        var postBound = SupervisorBounds.PostDecision(context, plan, decision);
+
+        if (postBound != null) return ForcedStop(postBound);
+
+        return GateSideEffectingDecision(context, decision);
+    }
+
+    /// <summary>
+    /// Route a SIDE-EFFECTING decision through the governance gate (PR-E E5, Rule 7 — reuses
+    /// <see cref="SupervisorGovernance"/> over <c>AgentToolGate</c>): Allow → unchanged; Deny → fail-closed
+    /// force-STOP (no side effect, recorded reason); RequireApproval → rewrite into an ask_human APPROVAL card
+    /// that parks for a human before any agent is created (reusing E4's durable HITL park). A non-side-effecting
+    /// decision (plan / merge / stop / ask_human) is Allow and passes through unchanged.
+    /// </summary>
+    private SupervisorDecision GateSideEffectingDecision(SupervisorTurnContext context, SupervisorDecision decision)
+    {
+        var verdict = SupervisorGovernance.Decide(decision.Kind, context.ApprovalPolicy);
+
+        if (verdict == AgentToolGateDecision.Allow) return decision;
+
+        if (verdict == AgentToolGateDecision.Deny)
+        {
+            _logger.LogWarning("Supervisor governance DENIED a {Kind} decision at turn {Turn} (policy {Policy}) — forcing terminal stop", decision.Kind, context.TurnNumber, context.ApprovalPolicy);
+
+            return ForcedStop(SupervisorStopReasons.GovernanceDenied);
         }
 
-        return await _decider.DecideAsync(context, cancellationToken).ConfigureAwait(false);
+        _logger.LogInformation("Supervisor governance requires approval for a {Kind} decision at turn {Turn} (policy {Policy}) — parking for a human before the side effect", decision.Kind, context.TurnNumber, context.ApprovalPolicy);
+
+        return SupervisorApprovalRequest.IntoAskHuman(decision);
     }
 
     /// <summary>
