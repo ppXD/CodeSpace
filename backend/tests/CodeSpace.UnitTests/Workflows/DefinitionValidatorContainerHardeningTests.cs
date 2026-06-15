@@ -346,7 +346,66 @@ public class DefinitionValidatorContainerHardeningTests
         result.IsValid.ShouldBeTrue(string.Join(" || ", result.Errors));
     }
 
-    // ─── 4. Rule-8 drift pin: validator reserved sets == engine reducer key constants ──
+    // ─── 4. A container's own config may reference its OWN body node's output ──────
+    //  (the loop's `update` reads {{nodes.<bodyNode>.outputs.X}} at pass-end — the L3 coordinator pattern).
+
+    [Fact]
+    public void Loop_config_referencing_its_own_body_node_output_passes()
+    {
+        // The L3 checkpoint-coordinator wiring: a loop variable's `update` reads a body node's output at
+        // pass-end (resolved against the just-finished body scope, NOT the top-level edge graph). The body
+        // node is not top-level-upstream of the loop, but the reference is legitimate — accept it.
+        var loop = new NodeDefinition
+        {
+            Id = "loop", TypeKey = "flow.loop",
+            Config = Parse("""{ "loopVariables": [ { "name": "acc", "value": "x", "update": "{{nodes.work.outputs.value}}" } ], "maxIterations": 2 }"""),
+            Inputs = Empty(),
+        };
+
+        var def = new WorkflowDefinition
+        {
+            Nodes = new List<NodeDefinition>
+            {
+                Node("t", "trigger.x"),
+                loop,
+                Node("end", "builtin.terminal"),
+                Body("ls", "flow.loop_start", "loop"),
+                Body("work", "regular.a", "loop"),   // the body node the loop's update reads
+            },
+            Edges = new List<EdgeDefinition> { Edge("t", "loop"), Edge("loop", "end"), Edge("ls", "work") },
+        };
+
+        BuildValidator().Validate(def).IsValid.ShouldBeTrue(string.Join(" || ", BuildValidator().Validate(def).Errors));
+    }
+
+    [Fact]
+    public void Top_level_node_referencing_another_containers_body_node_still_errors()
+    {
+        // The escape is SCOPED to a container reading its OWN body — a regular top-level node reaching INTO a
+        // loop's body node is still the not-upstream error (a body node's output isn't in the top-level scope).
+        var loop = new NodeDefinition { Id = "loop", TypeKey = "flow.loop", Config = Parse("""{ "maxIterations": 1 }"""), Inputs = Empty() };
+        var sink = new NodeDefinition { Id = "sink", TypeKey = "regular.a", Config = Empty(), Inputs = Parse("""{ "x": "{{nodes.work.outputs.value}}" }""") };
+
+        var def = new WorkflowDefinition
+        {
+            Nodes = new List<NodeDefinition>
+            {
+                Node("t", "trigger.x"),
+                loop,
+                sink,
+                Node("end", "builtin.terminal"),
+                Body("ls", "flow.loop_start", "loop"),
+                Body("work", "regular.a", "loop"),
+            },
+            Edges = new List<EdgeDefinition> { Edge("t", "loop"), Edge("loop", "sink"), Edge("sink", "end"), Edge("ls", "work") },
+        };
+
+        var result = BuildValidator().Validate(def);
+        result.IsValid.ShouldBeFalse();
+        result.Errors.ShouldContain(e => e.Contains("'work'") && e.Contains("not upstream"));
+    }
+
+    // ─── 5. Rule-8 drift pin: validator reserved sets == engine reducer key constants ──
 
     [Fact]
     public void Map_reserved_set_is_pinned_to_the_engine_reducer_keys()

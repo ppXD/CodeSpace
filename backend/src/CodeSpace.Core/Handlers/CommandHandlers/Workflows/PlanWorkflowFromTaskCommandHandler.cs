@@ -24,5 +24,19 @@ public sealed class PlanWorkflowFromTaskCommandHandler : IRequestHandler<PlanWor
     }
 
     public Task<PlanWorkflowFromTaskResult> Handle(PlanWorkflowFromTaskCommand request, CancellationToken cancellationToken) =>
-        _service.PlanFromTaskAsync(new WorkflowPlanRequest { TaskText = request.TaskText, TeamId = _currentTeam.Id!.Value, RepositoryId = request.RepositoryId }, cancellationToken);
+        _service.PlanFromTaskAsync(new WorkflowPlanRequest
+        {
+            TaskText = request.TaskText,
+            TeamId = _currentTeam.Id!.Value,
+            RepositoryId = request.RepositoryId,
+            Coordinated = request.Coordinated,
+            Coordination = request.Coordinated ? BuildCoordination(request) : null,
+        }, cancellationToken);
+
+    /// <summary>The operator's coordination goals → the projection's <see cref="CoordinationOptions"/>; absent knobs fall back to the option defaults.</summary>
+    private static CoordinationOptions BuildCoordination(PlanWorkflowFromTaskCommand request) => new()
+    {
+        MaxRounds = request.MaxRounds ?? CoordinationOptions.DefaultMaxRounds,
+        MaxParallelism = request.MaxParallelism,
+    };
 }

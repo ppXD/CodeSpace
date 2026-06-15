@@ -47,12 +47,18 @@ public sealed class WorkflowPlanningService : IWorkflowPlanningService, IScopedD
 
         var plan = await _planner.PlanAsync(request with { GroundingContext = grounding }, cancellationToken).ConfigureAwait(false);
 
-        var definition = _projector.Project(plan);
+        var definition = ProjectFor(request, plan);
 
         EnsureValidProjection(definition);
 
         return new PlanWorkflowFromTaskResult { PlannerEnabled = true, Plan = plan, Definition = definition };
     }
+
+    /// <summary>Pick the projection the operator asked for: the L3 coordinated <c>flow.loop</c> variant when <c>Coordinated</c>, else the one-shot graph (the default — byte-identical to the original).</summary>
+    private WorkflowDefinition ProjectFor(WorkflowPlanRequest request, PlannedWorkflow plan) =>
+        request.Coordinated
+            ? _projector.ProjectCoordinated(plan, request.Coordination ?? new CoordinationOptions())
+            : _projector.Project(plan);
 
     /// <summary>The projector promises a valid definition. If it ever doesn't, fail loudly — that's a projector bug, not operator input.</summary>
     private void EnsureValidProjection(WorkflowDefinition definition)

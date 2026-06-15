@@ -183,6 +183,140 @@ public class WorkflowPlannerTests
         body.ParentId.ShouldBe("map");
     }
 
+    // ── PR-D.5: CoordinatorSchema commit-contract pin ─────────────────────────
+
+    [Fact]
+    public void CoordinatorSchema_shape_is_pinned()
+    {
+        var root = CoordinatorSchema.ResponseSchema;
+
+        root.GetProperty("type").GetString().ShouldBe("object");
+        root.GetProperty("additionalProperties").GetBoolean().ShouldBeFalse();
+
+        var required = root.GetProperty("required").EnumerateArray().Select(e => e.GetString()).ToList();
+        required.ShouldBe(new[] { "decision" });
+
+        var props = root.GetProperty("properties");
+
+        // decision: the enum the loop's termination depends on — all four values pinned.
+        var decisionEnum = props.GetProperty("decision").GetProperty("enum").EnumerateArray().Select(e => e.GetString()).ToList();
+        decisionEnum.ShouldBe(new[] { "done", "rework", "ask_human", "abort" });
+
+        // reworkSubtasks reuses the planner's {id,title,instruction} subtask shape so a rework round re-seeds the map.
+        var item = props.GetProperty("reworkSubtasks").GetProperty("items");
+        item.GetProperty("additionalProperties").GetBoolean().ShouldBeFalse();
+        item.GetProperty("required").EnumerateArray().Select(e => e.GetString()).ToList().ShouldBe(new[] { "id", "title", "instruction" });
+
+        props.GetProperty("riskLevel").GetProperty("enum").EnumerateArray().Select(e => e.GetString()).ToList().ShouldBe(new[] { "low", "medium", "high" });
+    }
+
+    [Fact]
+    public void CoordinatorDecision_round_trips_from_a_schema_valid_object()
+    {
+        var schemaValid = JsonSerializer.SerializeToElement(new
+        {
+            decision = "rework",
+            summary = "Round 1 partial; one subtask needs another pass.",
+            reworkSubtasks = new object[] { new { id = "r1", title = "Retry", instruction = "Fix the gap" } },
+            riskLevel = "medium",
+        });
+
+        var decision = schemaValid.Deserialize<CoordinatorDecision>(CoordinatorSchema.Options);
+
+        decision.ShouldNotBeNull();
+        decision!.Decision.ShouldBe("rework");
+        decision.ReworkSubtasks.Count.ShouldBe(1);
+        decision.ReworkSubtasks[0].Title.ShouldBe("Retry");
+        decision.RiskLevel.ShouldBe("medium");
+    }
+
+    // ── PR-D.5: the coordinated projection validates (both body kinds) ─────────
+
+    [Theory]
+    [InlineData("analysis")]   // coordinator + map body = llm.complete
+    [InlineData("coding")]     // map body = agent.code (a CanSuspend node inside a map inside a loop)
+    public void Coordinated_projection_passes_DefinitionValidator(string recommendedKind)
+    {
+        var definition = new WorkflowPlanProjector().ProjectCoordinated(SamplePlan(recommendedKind), new CoordinationOptions());
+
+        var result = BuildValidator().Validate(definition);
+
+        result.IsValid.ShouldBeTrue($"coordinated {recommendedKind} definition must validate; errors: {string.Join("; ", result.Errors)}");
+    }
+
+    [Fact]
+    public void Coordinated_loop_wires_the_two_loop_variables_termination_and_round_cap()
+    {
+        var definition = new WorkflowPlanProjector().ProjectCoordinated(SamplePlan("analysis"), new CoordinationOptions { MaxRounds = 7 });
+
+        var loop = definition.Nodes.Single(n => n.Id == "loop");
+        loop.TypeKey.ShouldBe("flow.loop");
+
+        var vars = loop.Config.GetProperty("loopVariables").EnumerateArray().ToList();
+        vars.Count.ShouldBe(2);
+
+        // subtasks: seeds round 1 from the baked input, re-seeds from the coordinator's reworkSubtasks.
+        var subtasksVar = vars.Single(v => v.GetProperty("name").GetString() == "subtasks");
+        subtasksVar.GetProperty("ref").GetString().ShouldBe("{{input.subtasks}}");
+        subtasksVar.GetProperty("update").GetString().ShouldBe("{{nodes.coordinator.outputs.json.reworkSubtasks}}");
+
+        // decision: starts "rework", updates from the coordinator's decision — drives termination.
+        var decisionVar = vars.Single(v => v.GetProperty("name").GetString() == "decision");
+        decisionVar.GetProperty("value").GetString().ShouldBe("rework");
+        decisionVar.GetProperty("update").GetString().ShouldBe("{{nodes.coordinator.outputs.json.decision}}");
+
+        // termination: OR over decision eq done / abort.
+        var termination = loop.Config.GetProperty("termination");
+        termination.GetProperty("logic").GetString().ShouldBe("or");
+        var conditions = termination.GetProperty("conditions").EnumerateArray().ToList();
+        conditions.Select(c => c.GetProperty("value").GetString()).OrderBy(v => v).ShouldBe(new[] { "abort", "done" });
+        conditions.ShouldAllBe(c => c.GetProperty("ref").GetString() == "{{loop.decision}}" && c.GetProperty("op").GetString() == "eq");
+
+        // maxIterations == the operator's round cap.
+        loop.Config.GetProperty("maxIterations").GetInt32().ShouldBe(7);
+    }
+
+    [Fact]
+    public void Coordinated_map_binds_items_to_the_loop_subtasks_and_coordinator_carries_the_schema()
+    {
+        var definition = new WorkflowPlanProjector().ProjectCoordinated(SamplePlan("analysis"), new CoordinationOptions());
+
+        // The map fans over the CURRENT ROUND's subtasks (the loop var), not the static input.
+        var map = definition.Nodes.Single(n => n.Id == "map");
+        map.TypeKey.ShouldBe("flow.map");
+        map.ParentId.ShouldBe("loop");
+        map.Inputs.GetProperty("items").GetString().ShouldBe("{{loop.subtasks}}");
+
+        // The coordinator is an llm.complete carrying the CoordinatorSchema as its responseSchema (so its decision lands on `json`).
+        var coordinator = definition.Nodes.Single(n => n.Id == "coordinator");
+        coordinator.TypeKey.ShouldBe("llm.complete");
+        coordinator.ParentId.ShouldBe("loop");
+        coordinator.Config.GetProperty("provider").GetString().ShouldBe("Anthropic");
+        var schema = coordinator.Config.GetProperty("responseSchema");
+        schema.GetProperty("required").EnumerateArray().Select(e => e.GetString()).ShouldBe(new[] { "decision" });
+        coordinator.Inputs.GetProperty("userPrompt").GetString().ShouldContain("{{nodes.map.outputs.results}}",
+            customMessage: "the coordinator must fold the round's map results into its prompt so it can judge");
+    }
+
+    [Fact]
+    public void Coordinated_false_path_yields_the_one_shot_shape_no_loop()
+    {
+        // The default (one-shot) projection has NO flow.loop — coordinated mode is the only thing that adds one.
+        var oneShot = new WorkflowPlanProjector().Project(SamplePlan("analysis"));
+
+        oneShot.Nodes.ShouldNotContain(n => n.TypeKey == "flow.loop");
+        oneShot.Nodes.ShouldContain(n => n.Id == "map" && n.ParentId == null, "the one-shot map is top-level, not inside a loop");
+    }
+
+    [Fact]
+    public void Coordinated_map_parallelism_cap_folds_into_the_map_config()
+    {
+        var definition = new WorkflowPlanProjector().ProjectCoordinated(SamplePlan("analysis"), new CoordinationOptions { MaxParallelism = 3 });
+
+        var map = definition.Nodes.Single(n => n.Id == "map");
+        map.Config.GetProperty("maxParallelism").GetInt32().ShouldBe(3);
+    }
+
     // ── Service folds the grounding into the request before planning ──────────
 
     [Fact]
@@ -348,6 +482,8 @@ public class WorkflowPlannerTests
             new LogicIfNode(),
             new FlowMapNode(),
             new FlowMapStartNode(),
+            new FlowLoopNode(),
+            new FlowLoopStartNode(),
             new AgentCodeNode(),
             new LlmCompleteNode(emptyRegistry),
             new TerminalNode(),

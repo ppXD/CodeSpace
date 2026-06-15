@@ -22,6 +22,20 @@ public sealed record PlanWorkflowFromTaskCommand : ICommand<PlanWorkflowFromTask
 
     /// <summary>Optional repository the task concerns. Resolved TEAM-SCOPED to ground the plan in its top-level layout; a repo outside the team yields no grounding.</summary>
     public Guid? RepositoryId { get; init; }
+
+    /// <summary>
+    /// When <c>true</c>, project the L3 CHECKPOINT-COORDINATED variant (a bounded-round <c>flow.loop</c> where a
+    /// coordinator re-decides between rounds) instead of the one-shot graph. Default <c>false</c> ⇒ the existing
+    /// one-shot projection. The operator sets the goals (coordinated / rounds / parallelism); the projector
+    /// generates the loop graph.
+    /// </summary>
+    public bool Coordinated { get; init; }
+
+    /// <summary>Round cap for the coordinated projection (the loop's <c>maxIterations</c>). Null ⇒ the projection default. Ignored when <see cref="Coordinated"/> is false.</summary>
+    public int? MaxRounds { get; init; }
+
+    /// <summary>Per-round fan-out cap for the coordinated projection (the map's <c>maxParallelism</c>). Null ⇒ the engine-wide default. Ignored when <see cref="Coordinated"/> is false.</summary>
+    public int? MaxParallelism { get; init; }
 }
 
 /// <summary>

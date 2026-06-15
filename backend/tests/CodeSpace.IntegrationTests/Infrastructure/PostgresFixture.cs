@@ -252,5 +252,15 @@ public sealed class PostgresFixture : IAsyncLifetime
             .As<CodeSpace.Core.Services.Workflows.Llm.ILLMClient>()
             .As<CodeSpace.Core.Services.Workflows.Llm.IStructuredLLMClient>()
             .SingleInstance();
+
+        // Coordinated (L3 checkpoint-coordinator) structured fake for PR-D.5. ONE shared SingleInstance plays
+        // both roles in a run: the planner (schema has `subtasks`) and the coordinator (schema has `decision`,
+        // alternating rework→done by round). Registered at root so the planning child scope AND the engine's
+        // retargeted llm.complete nodes resolve the SAME instance — the coordinator's round counter is shared
+        // across the two engine rounds. The single coordinated test Reset()s the counter at its start.
+        builder.RegisterType<Workflows.Infrastructure.DeterministicCoordinatedLlmClient>()
+            .As<CodeSpace.Core.Services.Workflows.Llm.ILLMClient>()
+            .As<CodeSpace.Core.Services.Workflows.Llm.IStructuredLLMClient>()
+            .SingleInstance();
     }
 }

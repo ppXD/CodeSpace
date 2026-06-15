@@ -27,15 +27,13 @@ namespace CodeSpace.Core.Services.Workflows.Planning;
 /// <para>The projection ALWAYS validates (DefinitionValidator) — the planning service enforces that before
 /// returning, and a unit test pins it. Nothing here runs: it is a definition the human must save+run.</para>
 /// </summary>
-public sealed class WorkflowPlanProjector : IWorkflowPlanProjector, IScopedDependency
+public sealed partial class WorkflowPlanProjector : IWorkflowPlanProjector, IScopedDependency
 {
     private const string CodingKind = "coding";
 
     public WorkflowDefinition Project(PlannedWorkflow plan)
     {
-        var bodyTypeKey = string.Equals(plan.RecommendedWorkflowKind, CodingKind, StringComparison.OrdinalIgnoreCase)
-            ? "agent.code"
-            : "llm.complete";
+        var bodyTypeKey = ResolveBodyTypeKey(plan);
 
         return new WorkflowDefinition
         {
@@ -44,6 +42,10 @@ public sealed class WorkflowPlanProjector : IWorkflowPlanProjector, IScopedDepen
             Edges = BuildEdges(),
         };
     }
+
+    /// <summary>The per-branch body node type the recommended-kind switch decides — <c>coding</c> ⇒ <c>agent.code</c>, anything else ⇒ <c>llm.complete</c>. Shared by the one-shot and coordinated projections so the switch never drifts.</summary>
+    private static string ResolveBodyTypeKey(PlannedWorkflow plan) =>
+        string.Equals(plan.RecommendedWorkflowKind, CodingKind, StringComparison.OrdinalIgnoreCase) ? "agent.code" : "llm.complete";
 
     /// <summary>The declared <c>subtasks</c> Input whose DEFAULT bakes the plan's subtasks as a resolvable array — the source the map's <c>{{input.subtasks}}</c> binding fans out over.</summary>
     private static WorkflowVariable SubtasksInput(PlannedWorkflow plan) => new()
