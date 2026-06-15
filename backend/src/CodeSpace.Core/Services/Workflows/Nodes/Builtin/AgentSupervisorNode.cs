@@ -31,7 +31,7 @@ namespace CodeSpace.Core.Services.Workflows.Nodes.Builtin;
 /// rather than touching the ledger, so a deployment that never authors an agent.supervisor node is
 /// byte-identical to today and an accidental one degrades to a clean node failure.</para>
 ///
-/// Config: goal? (the run-level objective the supervisor pursues; opaque to E2's stub decider)
+/// Config: goal? (the run-level objective the supervisor pursues — the real LlmSupervisorDecider folds it into its prompt; the test stub follows a fixed script regardless)
 /// Outputs: status · decision (the terminal decision kind) · reason (terminal reason) · turns (decided count)
 /// </summary>
 public sealed class AgentSupervisorNode : INodeRuntime
@@ -54,7 +54,7 @@ public sealed class AgentSupervisorNode : INodeRuntime
             {
               "type": "object",
               "properties": {
-                "goal": { "type": "string", "description": "The objective the supervisor pursues across its turns. Optional in E2 (the stub decider follows a fixed plan→stop script regardless)." }
+                "goal": { "type": "string", "description": "The objective the supervisor pursues across its turns — the LLM decider folds it into the prompt that chooses each turn's decision (plan/spawn/retry/merge/stop)." }
               }
             }
             """),
