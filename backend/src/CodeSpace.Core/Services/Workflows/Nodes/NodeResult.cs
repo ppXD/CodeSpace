@@ -81,4 +81,14 @@ public sealed record SuspensionToken
     /// exactly like a human response.
     /// </summary>
     public JsonElement? TimeoutPayload { get; init; }
+
+    /// <summary>
+    /// Optional per-suspension iteration key the engine stamps on the wait row (and the node.suspended
+    /// record) INSTEAD of the walk-context key. A SELF-RE-ENTRANT node (e.g. <c>agent.supervisor</c>) parks
+    /// the SAME node id on a distinct row each turn by supplying <c>&lt;nodeId&gt;#turn{N}</c> here, so the
+    /// <c>(run, node, iteration)</c> unique index never collides across turns and a per-turn ResumePayload is
+    /// keyed to its own turn (no NodeId-keyed clobber). Null ⇒ the engine uses the walk-context key (the
+    /// default — a top-level node's <c>NoIteration</c>, a map branch's <c>&lt;mapId&gt;#&lt;i&gt;</c>).
+    /// </summary>
+    public string? IterationKey { get; init; }
 }

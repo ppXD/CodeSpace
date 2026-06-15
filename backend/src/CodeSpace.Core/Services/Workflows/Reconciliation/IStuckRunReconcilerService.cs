@@ -28,6 +28,14 @@ namespace CodeSpace.Core.Services.Workflows.Reconciliation;
 ///       Suspended with ALL waits Resolved and no dispatch coming — stranded forever. A legitimately
 ///       parked run always has a Pending wait, so it is excluded; we CAS Suspended→Pending then
 ///       re-dispatch (the resolved waits rehydrate as the suspended nodes' payloads on the re-walk).</item>
+///   <item><b>Supervisor self-advance lost</b> (status=Suspended > 2 min ago with a pending
+///       <c>SupervisorDecision</c> wait — PR-E E2, flag-gated) — a supervisor turn parks on a wait that
+///       self-advances (no external work item), but the post-Suspended-commit <c>ResumeWaitAsync</c>
+///       enqueue was lost (a crash between commit and enqueue, or a dropped Hangfire job). Unlike every
+///       other wait this run will NEVER be woken externally, and the Stranded sweep excludes it (it HAS a
+///       pending wait), so the reconciler re-fires the self-advance. The resume's own wait-status CAS makes
+///       a re-fire racing a still-live original idempotent. Sweep runs ONLY when the supervisor lane is
+///       enabled, so a flag-OFF deployment is byte-identical (no extra query).</item>
 /// </list>
 ///
 /// <para>Idempotent + safe to call concurrently from multiple replicas because every state
@@ -46,5 +54,8 @@ public sealed record StuckRunReconcileSummary
     public int MarkedAbandonedFromRunning { get; init; }
     public int RedispatchedFromStrandedSuspended { get; init; }
 
-    public int Total => RedispatchedFromPending + RevertedFromEnqueued + MarkedAbandonedFromRunning + RedispatchedFromStrandedSuspended;
+    /// <summary>Supervisor self-advances re-fired because the post-commit ResumeWaitAsync enqueue was lost (PR-E E2). 0 when the supervisor lane is off.</summary>
+    public int RecoveredSupervisorAdvance { get; init; }
+
+    public int Total => RedispatchedFromPending + RevertedFromEnqueued + MarkedAbandonedFromRunning + RedispatchedFromStrandedSuspended + RecoveredSupervisorAdvance;
 }

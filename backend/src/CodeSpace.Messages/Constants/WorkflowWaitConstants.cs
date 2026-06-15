@@ -36,6 +36,16 @@ public static class WorkflowWaitKinds
     /// mapped onto <c>{ status, summary, changedFiles, branch, error }</c>.
     /// </summary>
     public const string AgentRun = "AgentRun";
+
+    /// <summary>
+    /// A <c>agent.supervisor</c> turn parking itself to advance to the NEXT turn (PR-E E2). Unlike every
+    /// other wait kind this has NO external work item to wait on — it is a SELF-ADVANCE: the engine, once
+    /// the run commits Suspended, durably schedules the run to resume (resolve this wait + re-dispatch) so
+    /// the supervisor node re-enters and emits its next decision from the durable ledger. The wait's
+    /// <c>Token</c> is a per-turn marker; the per-turn <c>IterationKey</c> (<c>&lt;nodeId&gt;#turn{N}</c>)
+    /// keeps each turn's row distinct. Survives a restart via the reconciler's supervisor self-advance sweep.
+    /// </summary>
+    public const string SupervisorDecision = "SupervisorDecision";
 }
 
 /// <summary>Lifecycle of a <c>workflow_run_wait</c> row. CHECK-constrained at the DB layer.</summary>

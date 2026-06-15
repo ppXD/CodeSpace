@@ -20,6 +20,8 @@ public class WorkflowWaitKindsTests
     [InlineData(WorkflowWaitKinds.Callback, "Callback")]
     [InlineData(WorkflowWaitKinds.Subworkflow, "Subworkflow")]
     [InlineData(WorkflowWaitKinds.Action, "Action")]
+    [InlineData(WorkflowWaitKinds.AgentRun, "AgentRun")]
+    [InlineData(WorkflowWaitKinds.SupervisorDecision, "SupervisorDecision")]
     public void Wait_kind_literals_are_pinned(string actual, string expected)
     {
         actual.ShouldBe(expected);
@@ -31,6 +33,8 @@ public class WorkflowWaitKindsTests
     [InlineData(WorkflowWaitKinds.Callback)]
     [InlineData(WorkflowWaitKinds.Subworkflow)]
     [InlineData(WorkflowWaitKinds.Action)]
+    [InlineData(WorkflowWaitKinds.AgentRun)]
+    [InlineData(WorkflowWaitKinds.SupervisorDecision)]
     public void ValidateWaitKind_admits_every_known_kind(string kind)
     {
         WorkflowEngine.ValidateWaitKind("node-1", kind).ShouldBe(kind);
@@ -43,6 +47,6 @@ public class WorkflowWaitKindsTests
 
         ex.Message.ShouldContain("node-1");
         ex.Message.ShouldContain("Telepathy");
-        ex.Message.ShouldContain("Action", customMessage: "the error must list the admitted kinds so an author sees Action is now valid");
+        ex.Message.ShouldContain("SupervisorDecision", customMessage: "the error must list the admitted kinds so an author sees SupervisorDecision is now valid");
     }
 }

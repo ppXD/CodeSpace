@@ -10,7 +10,7 @@ public class WorkflowRunWaitConfiguration : IEntityTypeConfiguration<WorkflowRun
     {
         builder.HasKey(w => w.Id);
 
-        builder.Property(w => w.WaitKind).HasMaxLength(16);
+        builder.Property(w => w.WaitKind).HasMaxLength(24);   // widened with 0054 to fit 'SupervisorDecision' (18) — keep in lockstep with the migration's VARCHAR(24)
         builder.Property(w => w.Status).HasMaxLength(16);
         builder.Property(w => w.Token).HasMaxLength(128);
         builder.Property(w => w.NodeId).HasMaxLength(128);
