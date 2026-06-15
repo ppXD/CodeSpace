@@ -82,11 +82,12 @@ public class SupervisorTurnLoopTests
     [Fact]
     public void The_per_turn_iteration_key_mirrors_the_flow_map_scheme()
     {
-        // The node mints <nodeId>#turn{N}; assert the shape directly (the engine stamps it on the wait row,
-        // so each turn parks a distinct (run, node, iteration) row).
-        IterationKeyFor("sup", 0).ShouldBe("sup#turn0");
-        IterationKeyFor("sup", 1).ShouldBe("sup#turn1");
-        IterationKeyFor("sup", 0).ShouldNotBe(IterationKeyFor("sup", 1));
+        // The node mints the self-advance key via SupervisorOutcome.SelfAdvanceWaitKey (the SAME production
+        // helper AgentSupervisorNode.ParkSelfAdvance calls) — assert the shape directly off it, so this test
+        // and the node can never drift on the wait-key string the engine stamps on each turn's wait row.
+        SupervisorOutcome.SelfAdvanceWaitKey("sup", 0).ShouldBe("sup#turn0");
+        SupervisorOutcome.SelfAdvanceWaitKey("sup", 1).ShouldBe("sup#turn1");
+        SupervisorOutcome.SelfAdvanceWaitKey("sup", 0).ShouldNotBe(SupervisorOutcome.SelfAdvanceWaitKey("sup", 1));
     }
 
     // ── The stub executor's deterministic per-kind outcome ───────────────────────────
@@ -115,7 +116,4 @@ public class SupervisorTurnLoopTests
     }
 
     private static SupervisorTurnContext Context(int turnNumber) => new() { Goal = "ship it", TurnNumber = turnNumber };
-
-    // Mirrors AgentSupervisorNode.Park's key scheme so the test pins the contract without reaching into the node.
-    private static string IterationKeyFor(string nodeId, int turnNumber) => $"{nodeId}#turn{turnNumber}";
 }

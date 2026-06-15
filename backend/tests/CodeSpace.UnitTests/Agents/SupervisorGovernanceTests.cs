@@ -49,6 +49,41 @@ public class SupervisorGovernanceTests
         SupervisorGovernance.Decide(SupervisorDecisionKinds.Spawn, (SupervisorApprovalPolicy)999).ShouldBe(AgentToolGateDecision.Deny, "fail-closed");
     }
 
+    // ── The Deny verdict + its GovernanceDenied reason literal (ingredient pins) ─────
+    // The end-to-end force-STOP wiring (Deny → ForcedStop(GovernanceDenied), no agent staged) is driven through
+    // the REAL SupervisorTurnService by SupervisorTurnServiceTests.A_governance_denied_side_effecting_decision_
+    // force_stops_and_stages_no_agent. THESE two pin the ingredients that wiring composes, in isolation (Rule 8).
+
+    [Theory]
+    [InlineData(SupervisorDecisionKinds.Spawn)]
+    [InlineData(SupervisorDecisionKinds.Retry)]
+    public void The_deny_verdict_and_its_governance_denied_reason_literal_are_pinned(string kind)
+    {
+        // The two literals the SupervisorTurnService.GateSideEffectingDecision Deny branch composes — an unmapped
+        // policy → Deny, and the operator-legible reason that branch force-STOPS with. Pinned so a reword of either
+        // is a visible decision (Rule 8); the composition itself is asserted by the turn-service test named above.
+        SupervisorGovernance.Decide(kind, (SupervisorApprovalPolicy)999).ShouldBe(AgentToolGateDecision.Deny, "an unmapped policy → Confined → the gate DENIES the side effect (fail-closed)");
+        SupervisorStopReasons.GovernanceDenied.ShouldBe("governance denied the side effect", "the DENY branch force-STOPS with this distinct, operator-legible reason");
+    }
+
+    [Fact]
+    public void The_governance_denied_reason_differs_from_the_other_bound_reasons()
+    {
+        // The DENY branch must surface a DISTINCT reason so an operator can tell a governance refusal apart from a
+        // budget / cap / no-progress force-stop. Pin the distinctness so the reasons can't silently collapse.
+        var reasons = new[]
+        {
+            SupervisorStopReasons.GovernanceDenied,
+            SupervisorStopReasons.BudgetExhausted,
+            SupervisorStopReasons.TotalSpawnCapReached,
+            SupervisorStopReasons.SpawnFanOutExceedsCap,
+            SupervisorStopReasons.DepthCapExceeded,
+            SupervisorStopReasons.NoProgress,
+        };
+
+        reasons.Distinct().Count().ShouldBe(reasons.Length, "every force-stop reason is distinct — GovernanceDenied is its own operator-legible signal");
+    }
+
     [Theory]
     [InlineData(SupervisorDecisionKinds.Plan)]
     [InlineData(SupervisorDecisionKinds.Merge)]

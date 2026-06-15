@@ -1,8 +1,9 @@
-using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Supervisor;
 using CodeSpace.Core.Services.Supervisor.Deciders;
 using CodeSpace.Core.Services.Supervisor.Executors;
 using CodeSpace.Messages.Agents;
+using CodeSpace.Messages.Dtos.Agents;
+using CodeSpace.UnitTests.Infrastructure;
 using Microsoft.Extensions.Logging.Abstractions;
 using Shouldly;
 
@@ -27,7 +28,7 @@ public class SupervisorTurnServiceTests
     [Fact]
     public async Task Rehydrate_folds_a_terminal_decision_and_sets_the_turn_number()
     {
-        var ledger = new FakeLedger();
+        var ledger = new FakeSupervisorDecisionLog();
         ledger.SeedTerminal(_runId, _teamId, SupervisorDecisionKinds.Plan, """{"subtasks":["a"]}""", """{"planned":["a"]}""");
 
         var context = await Service(ledger).RehydrateFromDecisionLogAsync(_runId, _teamId, "sup", "goal", goalConfig: null, CancellationToken.None);
@@ -42,7 +43,7 @@ public class SupervisorTurnServiceTests
     [Fact]
     public async Task Rehydrate_identifies_the_one_in_flight_decision()
     {
-        var ledger = new FakeLedger();
+        var ledger = new FakeSupervisorDecisionLog();
         ledger.SeedTerminal(_runId, _teamId, SupervisorDecisionKinds.Plan, """{"subtasks":["a"]}""", """{"planned":["a"]}""");
         ledger.SeedPending(_runId, _teamId, SupervisorDecisionKinds.Stop, """{"reason":"x"}""");
 
@@ -58,7 +59,7 @@ public class SupervisorTurnServiceTests
     [Fact]
     public async Task Turn1_plans_and_parks_then_turn2_stops_and_finishes()
     {
-        var ledger = new FakeLedger();
+        var ledger = new FakeSupervisorDecisionLog();
         var service = Service(ledger);
 
         var turn1 = await service.RunTurnAsync(_runId, _teamId, "sup", "goal", conversationId: null, goalConfig: null, CancellationToken.None);
@@ -82,7 +83,7 @@ public class SupervisorTurnServiceTests
     [Fact]
     public async Task Budget_exhausted_forces_a_clean_terminal_stop()
     {
-        var ledger = new FakeLedger();
+        var ledger = new FakeSupervisorDecisionLog();
 
         // Seed DecisionBudget decided decisions so TurnNumber == budget → the decider is never asked.
         for (var i = 0; i < SupervisorLane.DecisionBudget; i++)
@@ -98,12 +99,39 @@ public class SupervisorTurnServiceTests
         result.TerminalReason.ShouldBe(SupervisorTurnService.BudgetExhaustedReason);
     }
 
+    // ── Governance DENY → force-STOP=GovernanceDenied, no agent staged (the fail-closed branch) ──
+
+    [Theory]
+    [InlineData(SupervisorDecisionKinds.Spawn)]
+    [InlineData(SupervisorDecisionKinds.Retry)]
+    public void A_governance_denied_side_effecting_decision_force_stops_and_stages_no_agent(string kind)
+    {
+        // Drive the REAL Deny wiring (SupervisorTurnService.GateSideEffectingDecision) end-to-end, not its two
+        // ingredients in isolation. The branch is unreachable from operator config today (ParseApprovalPolicy
+        // clamps every unknown policy to None), so we inject the unmapped policy directly into the gate's context
+        // — the same forward-compat exposure a future irreversible/merge-PR policy would open. Asserts the gate
+        // turns the denied side effect into a force-STOP carrying the GovernanceDenied reason and stages NO agent.
+        var executor = new CountingExecutor();
+        var service = new SupervisorTurnService(new FakeSupervisorDecisionLog(), new StubSupervisorDecider(), executor, db: null!, NullLogger<SupervisorTurnService>.Instance);
+
+        var context = new SupervisorTurnContext { Goal = "goal", TurnNumber = 0, ApprovalPolicy = (SupervisorApprovalPolicy)999 };
+        var spawn = new SupervisorDecision { Kind = kind, PayloadJson = """{"subtaskIds":["a","b"]}""" };
+
+        var gated = service.GateSideEffectingDecision(context, spawn);
+        var result = SupervisorTurnService.BuildResult(context, gated, SupervisorExecution.Synchronous("{}"));
+
+        result.IsFinished.ShouldBeTrue("an unmapped policy → Confined → the gate DENIES → the turn force-STOPS");
+        result.DecisionKind.ShouldBe(SupervisorDecisionKinds.Stop);
+        result.TerminalReason.ShouldBe(SupervisorStopReasons.GovernanceDenied, "the DENY branch surfaces the distinct, operator-legible governance-refused reason");
+        executor.Calls.ShouldBe(0, "the gate refused BEFORE any execute — no agent was staged");
+    }
+
     // ── Replay: a re-run of a settled turn does NOT re-execute the side effect ───────
 
     [Fact]
     public async Task Replaying_a_settled_turn_does_not_double_execute()
     {
-        var ledger = new FakeLedger();
+        var ledger = new FakeSupervisorDecisionLog();
         var executor = new CountingExecutor();
         var service = new SupervisorTurnService(ledger, new StubSupervisorDecider(), executor, db: null!, NullLogger<SupervisorTurnService>.Instance);
 
@@ -124,7 +152,7 @@ public class SupervisorTurnServiceTests
         ledger.Rows.Count.ShouldBe(1, "still exactly one row");
     }
 
-    private SupervisorTurnService Service(FakeLedger ledger) =>
+    private SupervisorTurnService Service(FakeSupervisorDecisionLog ledger) =>
         new(ledger, new StubSupervisorDecider(), new StubSupervisorActionExecutor(), db: null!, NullLogger<SupervisorTurnService>.Instance);
 
     /// <summary>A decider that always plans — used to prove the budget (not the decider) is what terminates a runaway loop.</summary>
@@ -144,67 +172,5 @@ public class SupervisorTurnServiceTests
             Calls++;
             return Task.FromResult(SupervisorExecution.Synchronous("{}"));
         }
-    }
-
-    /// <summary>
-    /// An in-memory <see cref="ISupervisorDecisionLog"/> faithfully modelling the E1 invariants the loop relies on:
-    /// a unique <c>(run, key)</c> index (a duplicate claim returns the prior terminal / in-flight, never a 2nd row),
-    /// a Pending → Running execution claim (single-winner), and a terminal record. Sequence is insertion order.
-    /// </summary>
-    private sealed class FakeLedger : ISupervisorDecisionLog
-    {
-        public List<SupervisorDecisionRecord> Rows { get; } = new();
-        private long _seq;
-
-        public void SeedTerminal(Guid runId, Guid teamId, string kind, string payloadJson, string outcomeJson) =>
-            Rows.Add(new SupervisorDecisionRecord { Id = Guid.NewGuid(), TeamId = teamId, SupervisorRunId = runId, Sequence = ++_seq, DecisionKind = kind, IdempotencyKey = $"{kind}:{Rows.Count}", InputHash = "h", PayloadJson = payloadJson, Status = SupervisorDecisionStatus.Succeeded, OutcomeJson = outcomeJson });
-
-        public void SeedPending(Guid runId, Guid teamId, string kind, string payloadJson) =>
-            Rows.Add(new SupervisorDecisionRecord { Id = Guid.NewGuid(), TeamId = teamId, SupervisorRunId = runId, Sequence = ++_seq, DecisionKind = kind, IdempotencyKey = $"{kind}:{Rows.Count}", InputHash = "h", PayloadJson = payloadJson, Status = SupervisorDecisionStatus.Pending });
-
-        public Task<SupervisorDecisionClaim> TryClaimAsync(Guid supervisorRunId, Guid teamId, string decisionKind, string idempotencyKey, string inputHash, string payloadJson, long fenceEpoch, CancellationToken cancellationToken)
-        {
-            var existing = Rows.FirstOrDefault(r => r.SupervisorRunId == supervisorRunId && r.IdempotencyKey == idempotencyKey);
-
-            if (existing != null)
-                return Task.FromResult(SupervisorDecisionStateMachine.IsTerminal(existing.Status)
-                    ? SupervisorDecisionClaim.Duplicate(existing.Id, existing.Status, existing.OutcomeJson, existing.Error)
-                    : SupervisorDecisionClaim.InFlight(existing.Id));
-
-            var row = new SupervisorDecisionRecord { Id = Guid.NewGuid(), TeamId = teamId, SupervisorRunId = supervisorRunId, Sequence = ++_seq, DecisionKind = decisionKind, IdempotencyKey = idempotencyKey, InputHash = inputHash, PayloadJson = payloadJson, Status = SupervisorDecisionStatus.Pending, FenceEpoch = fenceEpoch };
-            Rows.Add(row);
-            return Task.FromResult(SupervisorDecisionClaim.Proceed(row.Id));
-        }
-
-        public Task<bool> TryBeginExecutionAsync(Guid decisionId, Guid teamId, CancellationToken cancellationToken)
-        {
-            var row = Rows.Single(r => r.Id == decisionId);
-
-            if (row.Status != SupervisorDecisionStatus.Pending) return Task.FromResult(false);
-
-            row.Status = SupervisorDecisionStatus.Running;
-            return Task.FromResult(true);
-        }
-
-        public Task RecordTerminalAsync(Guid decisionId, Guid teamId, SupervisorDecisionStatus status, string? outcomeJson, string? error, CancellationToken cancellationToken)
-        {
-            var row = Rows.Single(r => r.Id == decisionId);
-            row.Status = status;
-            row.OutcomeJson = outcomeJson;
-            row.Error = error;
-            return Task.CompletedTask;
-        }
-
-        public Task<IReadOnlyList<SupervisorDecisionRecord>> GetForRunAsync(Guid supervisorRunId, Guid teamId, CancellationToken cancellationToken) =>
-            Task.FromResult<IReadOnlyList<SupervisorDecisionRecord>>(Rows.Where(r => r.SupervisorRunId == supervisorRunId && r.TeamId == teamId).OrderBy(r => r.Sequence).ToList());
-
-        public Task UpdateOutcomeAsync(Guid decisionId, Guid teamId, string foldedOutcomeJson, CancellationToken cancellationToken)
-        {
-            var row = Rows.SingleOrDefault(r => r.Id == decisionId && r.TeamId == teamId);
-            if (row != null) row.OutcomeJson = foldedOutcomeJson;
-            return Task.CompletedTask;
-        }
-
-        public Task<int> ExpireStalePendingAsync(DateTimeOffset olderThan, CancellationToken cancellationToken) => Task.FromResult(0);
     }
 }

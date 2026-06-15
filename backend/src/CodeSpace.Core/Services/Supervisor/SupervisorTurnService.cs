@@ -79,7 +79,7 @@ public sealed partial class SupervisorTurnService : ISupervisorTurnService, ISco
     /// Allow → the decision proceeds unchanged. The post-decision spawn-count bound is checked FIRST so an
     /// over-cap spawn stops cleanly even under an approval policy.
     /// </summary>
-    private SupervisorDecision ApplyPostDecisionGate(SupervisorTurnContext context, SupervisorGoalPlan plan, SupervisorDecision decision)
+    internal SupervisorDecision ApplyPostDecisionGate(SupervisorTurnContext context, SupervisorGoalPlan plan, SupervisorDecision decision)
     {
         var postBound = SupervisorBounds.PostDecision(context, plan, decision);
 
@@ -98,7 +98,7 @@ public sealed partial class SupervisorTurnService : ISupervisorTurnService, ISco
     /// not a permanent block). A non-side-effecting decision (plan / merge / stop / ask_human) is Allow and passes
     /// through unchanged.
     /// </summary>
-    private SupervisorDecision GateSideEffectingDecision(SupervisorTurnContext context, SupervisorDecision decision)
+    internal SupervisorDecision GateSideEffectingDecision(SupervisorTurnContext context, SupervisorDecision decision)
     {
         var verdict = SupervisorGovernance.Decide(decision.Kind, context.ApprovalPolicy);
 
@@ -114,6 +114,7 @@ public sealed partial class SupervisorTurnService : ISupervisorTurnService, ISco
             return decision;
         }
 
+        // Intentionally unreachable from operator config today (ParseApprovalPolicy maps every unknown policy to None) — fail-closed defense-in-depth for the future irreversible/merge-PR path; the Deny→GovernanceDenied force-stop wiring is driven end-to-end by SupervisorTurnServiceTests.A_governance_denied_side_effecting_decision_force_stops_and_stages_no_agent.
         if (verdict == AgentToolGateDecision.Deny)
         {
             _logger.LogWarning("Supervisor governance DENIED a {Kind} decision at turn {Turn} (policy {Policy}) — forcing terminal stop", decision.Kind, context.TurnNumber, context.ApprovalPolicy);
@@ -198,7 +199,7 @@ public sealed partial class SupervisorTurnService : ISupervisorTurnService, ISco
     /// wait); a synchronous non-terminal decision (plan / merge) SELF-ADVANCES on a SupervisorDecision wait. The
     /// next-turn context folds this turn's decision in, so the next rehydrate sees TurnNumber+1.
     /// </summary>
-    private static SupervisorTurnResult BuildResult(SupervisorTurnContext context, SupervisorDecision decision, SupervisorExecution execution)
+    internal static SupervisorTurnResult BuildResult(SupervisorTurnContext context, SupervisorDecision decision, SupervisorExecution execution)
     {
         if (decision.IsTerminal) return SupervisorTurnResult.Finished(decision.Kind, ReadStopReason(decision));
 

@@ -204,7 +204,7 @@ public sealed class AgentSupervisorNode : INodeRuntime
         return NodeResult.Suspend(new SuspensionToken
         {
             Kind = WorkflowWaitKinds.SupervisorDecision,
-            IterationKey = $"{nodeId}#turn{next.TurnNumber}",
+            IterationKey = SupervisorOutcome.SelfAdvanceWaitKey(nodeId, next.TurnNumber),
             Payload = JsonSerializer.SerializeToElement(next, AgentJson.Options),
         });
     }
