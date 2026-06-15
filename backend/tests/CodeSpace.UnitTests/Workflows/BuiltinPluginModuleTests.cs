@@ -100,7 +100,8 @@ public class BuiltinPluginModuleTests
         module.Name.ShouldBe("Agent");
         module.Nodes.ShouldContain(typeof(CodeSpace.Core.Services.Workflows.Nodes.Builtin.AgentCodeNode));
         module.Nodes.ShouldContain(typeof(CodeSpace.Core.Services.Workflows.Nodes.Builtin.AgentRunCommandNode));
-        module.Nodes.Count.ShouldBe(2);
+        module.Nodes.ShouldContain(typeof(CodeSpace.Core.Services.Workflows.Nodes.Builtin.AgentSupervisorNode));
+        module.Nodes.Count.ShouldBe(3);
     }
 
     [Fact]
@@ -119,6 +120,6 @@ public class BuiltinPluginModuleTests
         };
 
         var total = all.SelectMany(p => p.Nodes).Distinct().Count();
-        total.ShouldBe(36, "36 builtin node types across 6 domain plugins — incl. the Core Flow plugin's flow.map + flow.map_start fan-out primitives — adjust this number when adding a builtin");
+        total.ShouldBe(37, "37 builtin node types across 6 domain plugins — incl. the Agent plugin's agent.supervisor turn-loop node (PR-E E2) — adjust this number when adding a builtin");
     }
 }

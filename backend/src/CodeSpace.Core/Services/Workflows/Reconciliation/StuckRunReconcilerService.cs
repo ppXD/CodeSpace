@@ -1,6 +1,8 @@
 using CodeSpace.Core.DependencyInjection;
 using CodeSpace.Core.Persistence.Db;
+using CodeSpace.Core.Services.Supervisor;
 using CodeSpace.Core.Services.Workflows.Dispatch;
+using CodeSpace.Core.Services.Workflows.Engine;
 using CodeSpace.Core.Services.Workflows.Lifecycle;
 using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Enums;
@@ -45,18 +47,27 @@ public sealed class StuckRunReconcilerService : IStuckRunReconcilerService, ISco
     /// <summary>"Recent" ledger activity window — if a run has emitted records within this window, treat it as alive.</summary>
     public static readonly TimeSpan LedgerLivenessWindow = TimeSpan.FromMinutes(5);
 
+    /// <summary>
+    /// Threshold for "supervisor self-advance lost" (PR-E E2) — a run Suspended past this with a pending
+    /// <c>SupervisorDecision</c> wait. 2 min dwarfs the sub-second post-commit enqueue window, so a healthy
+    /// turn that's mid-flight (its <c>ResumeWaitAsync</c> already enqueued) is never re-fired prematurely.
+    /// </summary>
+    public static readonly TimeSpan SupervisorAdvanceLostAfter = TimeSpan.FromMinutes(2);
+
     /// <summary>Batch size per sweep — bounds the work the reconciler can do in one tick so a backlog doesn't run forever.</summary>
     public const int BatchSize = 50;
 
     private readonly CodeSpaceDbContext _db;
     private readonly IWorkflowRunDispatcher _dispatcher;
+    private readonly IWorkflowResumeService _resumeService;
     private readonly IRunRecordLogger _recordLogger;
     private readonly ILogger<StuckRunReconcilerService> _logger;
 
-    public StuckRunReconcilerService(CodeSpaceDbContext db, IWorkflowRunDispatcher dispatcher, IRunRecordLogger recordLogger, ILogger<StuckRunReconcilerService> logger)
+    public StuckRunReconcilerService(CodeSpaceDbContext db, IWorkflowRunDispatcher dispatcher, IWorkflowResumeService resumeService, IRunRecordLogger recordLogger, ILogger<StuckRunReconcilerService> logger)
     {
         _db = db;
         _dispatcher = dispatcher;
+        _resumeService = resumeService;
         _recordLogger = recordLogger;
         _logger = logger;
     }
@@ -67,6 +78,7 @@ public sealed class StuckRunReconcilerService : IStuckRunReconcilerService, ISco
         var reverted = await RevertStuckEnqueuedAsync(cancellationToken).ConfigureAwait(false);
         var abandoned = await MarkAbandonedRunningAsync(cancellationToken).ConfigureAwait(false);
         var unstranded = await RedispatchStrandedSuspendedAsync(cancellationToken).ConfigureAwait(false);
+        var supervisorAdvances = await RecoverSupervisorAdvancesAsync(cancellationToken).ConfigureAwait(false);
 
         var summary = new StuckRunReconcileSummary
         {
@@ -74,12 +86,13 @@ public sealed class StuckRunReconcilerService : IStuckRunReconcilerService, ISco
             RevertedFromEnqueued = reverted,
             MarkedAbandonedFromRunning = abandoned,
             RedispatchedFromStrandedSuspended = unstranded,
+            RecoveredSupervisorAdvance = supervisorAdvances,
         };
 
         if (summary.Total > 0)
             _logger.LogInformation(
-                "StuckRunReconciler: redispatched={Redispatched}, reverted={Reverted}, abandoned={Abandoned}, unstranded={Unstranded}",
-                summary.RedispatchedFromPending, summary.RevertedFromEnqueued, summary.MarkedAbandonedFromRunning, summary.RedispatchedFromStrandedSuspended);
+                "StuckRunReconciler: redispatched={Redispatched}, reverted={Reverted}, abandoned={Abandoned}, unstranded={Unstranded}, supervisorAdvances={SupervisorAdvances}",
+                summary.RedispatchedFromPending, summary.RevertedFromEnqueued, summary.MarkedAbandonedFromRunning, summary.RedispatchedFromStrandedSuspended, summary.RecoveredSupervisorAdvance);
 
         return summary;
     }
@@ -265,5 +278,52 @@ public sealed class StuckRunReconcilerService : IStuckRunReconcilerService, ISco
         }
 
         return redispatched;
+    }
+
+    /// <summary>
+    /// PR-E E2 — supervisor self-advance recovery. A run Suspended past the threshold with a pending
+    /// <c>SupervisorDecision</c> wait will NEVER be woken externally (the wait has no external work item),
+    /// and the Stranded sweep above excludes it (it HAS a pending wait). If the post-commit
+    /// <see cref="WorkflowEngine.DispatchPendingSupervisorAdvanceAsync"/> enqueue was lost (a crash between
+    /// the Suspended commit and the enqueue, or a dropped Hangfire job), only this sweep re-fires the
+    /// self-advance — calling <see cref="IWorkflowResumeService.ResumeWaitAsync"/> exactly as the engine
+    /// does, which resolves the wait + flips Suspended → Pending + re-dispatches. The resume's own
+    /// wait-status CAS makes a re-fire racing a still-live original a no-op (idempotent). Runs ONLY when the
+    /// supervisor lane is enabled, so a flag-OFF deployment is byte-identical (no extra query, no behaviour).
+    /// </summary>
+    private async Task<int> RecoverSupervisorAdvancesAsync(CancellationToken cancellationToken)
+    {
+        if (!SupervisorLane.IsEnabled()) return 0;
+
+        var threshold = DateTimeOffset.UtcNow - SupervisorAdvanceLostAfter;
+
+        var stale = await _db.WorkflowRunWait.AsNoTracking()
+            .Where(w => w.WaitKind == WorkflowWaitKinds.SupervisorDecision
+                        && w.Status == WorkflowWaitStatuses.Pending
+                        && w.CreatedAt < threshold
+                        && _db.WorkflowRun.Any(r => r.Id == w.RunId && r.Status == WorkflowRunStatus.Suspended))
+            .OrderBy(w => w.CreatedAt)
+            .Take(BatchSize)
+            .Select(w => new { w.RunId, w.Id })
+            .ToListAsync(cancellationToken)
+            .ConfigureAwait(false);
+
+        var recovered = 0;
+        foreach (var wait in stale)
+        {
+            try
+            {
+                // Re-fire the SAME self-advance the engine enqueued. ResumeWaitAsync's wait CAS no-ops a
+                // wait already resolved by a still-live original, so a re-fire is safe.
+                if (await _resumeService.ResumeWaitAsync(wait.RunId, wait.Id, null, cancellationToken).ConfigureAwait(false)) recovered++;
+            }
+            catch (Exception ex)
+            {
+                // Per-row resilience: one stuck supervisor wait's failure doesn't abort the sweep.
+                _logger.LogWarning(ex, "StuckRunReconciler: supervisor self-advance recovery for run {RunId} wait {WaitId} failed; will retry next tick", wait.RunId, wait.Id);
+            }
+        }
+
+        return recovered;
     }
 }

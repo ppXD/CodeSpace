@@ -59,6 +59,14 @@ public sealed record NodeRunContext
     public required ILogger Logger { get; init; }
 
     /// <summary>
+    /// This node's own id within the definition. Set by the engine. Almost no node needs it — the engine
+    /// owns identity/persistence — but a SELF-RE-ENTRANT node (e.g. <c>agent.supervisor</c>) uses it to mint a
+    /// per-suspension <see cref="SuspensionToken.IterationKey"/> (<c>&lt;nodeId&gt;#turn{N}</c>) so the same
+    /// node parks a distinct wait row each turn. Empty default keeps every other node + test untouched.
+    /// </summary>
+    public string NodeId { get; init; } = "";
+
+    /// <summary>
     /// Per-node observability handle. Nodes use this to wrap external calls (HTTP, LLM, Git
     /// provider APIs) and to persist large payloads as artifacts. See
     /// <see cref="INodeObservability"/> for the contract.

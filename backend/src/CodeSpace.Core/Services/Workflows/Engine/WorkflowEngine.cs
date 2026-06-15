@@ -223,6 +223,7 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
             // child could finish and try to resume the parent before the parent was parked.
             await DispatchPendingSubworkflowChildAsync(run.Id, cancellationToken).ConfigureAwait(false);
             await DispatchPendingAgentRunAsync(run.Id, cancellationToken).ConfigureAwait(false);
+            await DispatchPendingSupervisorAdvanceAsync(run.Id, cancellationToken).ConfigureAwait(false);
         }
         catch (WorkflowSecretLeakException ex)
         {
@@ -791,7 +792,7 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
         }
     }
 
-    /// <summary>Cancel the staged child a pending wait parked on: a Queued AgentRun (its Token is the agent-run id) or a non-terminal Subworkflow child run (its Token is the child run id). Other wait kinds (timer / approval / callback / action) have no staged child to cancel.</summary>
+    /// <summary>Cancel the staged child a pending wait parked on: a Queued AgentRun (its Token is the agent-run id) or a non-terminal Subworkflow child run (its Token is the child run id). Other wait kinds (timer / approval / callback / action / supervisor-decision) have no staged child to cancel — a SupervisorDecision wait's self-advance is gated on the wait still being Pending, so the caller's resolve of the wait (in <see cref="CancelPendingWaitsAndChildrenAsync"/>) already neutralises any in-flight or reconciler-re-fired advance once the run is terminal.</summary>
     private async Task CancelStagedChildAsync(string waitKind, string token, CancellationToken cancellationToken)
     {
         if (!Guid.TryParse(token, out var childId)) return;
@@ -849,6 +850,30 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
         foreach (var token in tokens)
             if (Guid.TryParse(token, out var agentRunId))
                 _backgroundJobClient.Enqueue<IAgentRunExecutor>(e => e.ExecuteAsync(agentRunId, CancellationToken.None));
+    }
+
+    /// <summary>
+    /// Advance the supervisor turn a just-suspended <c>agent.supervisor</c> node parked on. A
+    /// <c>SupervisorDecision</c> wait has NO external work item — it is a SELF-ADVANCE: now that the run is
+    /// COMMITTED Suspended, enqueue a resume of its own pending wait, which resolves the wait + flips
+    /// Suspended → Pending + re-dispatches, so the supervisor node re-enters for the next turn (reading the
+    /// next decision from its durable ledger, NOT from the resume payload — a bare marker suffices). Reuses
+    /// the SAME post-commit <c>Enqueue&lt;IWorkflowResumeService&gt;.ResumeWaitAsync</c> machinery the timer
+    /// wait self-wakes through — no parallel scheduler. Deferring to AFTER the Suspended commit (like the
+    /// agent-run dispatch) means the resume can't run before the wait it resolves is visible. The resume's
+    /// own wait-status CAS makes a double-enqueue (a Hangfire retry, the reconciler re-fire) idempotent.
+    /// Enqueues EVERY pending supervisor wait so a future multi-turn fan-out is covered; E2 parks one per turn.
+    /// </summary>
+    private async Task DispatchPendingSupervisorAdvanceAsync(Guid runId, CancellationToken cancellationToken)
+    {
+        var waitIds = await _db.WorkflowRunWait.AsNoTracking()
+            .Where(w => w.RunId == runId && w.WaitKind == WorkflowWaitKinds.SupervisorDecision && w.Status == WorkflowWaitStatuses.Pending)
+            .Select(w => w.Id)
+            .ToListAsync(cancellationToken)
+            .ConfigureAwait(false);
+
+        foreach (var waitId in waitIds)
+            _backgroundJobClient.Enqueue<IWorkflowResumeService>(s => s.ResumeWaitAsync(runId, waitId, null, CancellationToken.None));
     }
 
     /// <summary>
@@ -2286,6 +2311,12 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
             ?? throw new NodeFailureException($"Node '{node.Id}' returned Suspended without a SuspensionToken.");
 
         var waitKind = ValidateWaitKind(node.Id, token.Kind);
+
+        // A self-re-entrant node (agent.supervisor) supplies a per-suspension key (<nodeId>#turn{N}) so the
+        // SAME node id parks a DISTINCT (run, node, iteration) row each turn — no unique-index collision, no
+        // NodeId-keyed resume-payload clobber. Otherwise use the walk-context key (NoIteration at top level,
+        // <mapId>#<i> in a map branch). The key is stamped on BOTH the wait row and the node.suspended record.
+        iterationKey = string.IsNullOrEmpty(token.IterationKey) ? iterationKey : token.IterationKey;
         // A Timer wait's wake_at IS its delay; any OTHER wait may carry a DeadlineAt (a bounded wait) —
         // reuse the wake_at column so the row + run-detail surface "auto-wakes at X" uniformly.
         var wakeAt = waitKind == WorkflowWaitKinds.Timer ? ReadWakeAt(token) : token.DeadlineAt;
@@ -2342,9 +2373,9 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
 
     internal static string ValidateWaitKind(string nodeId, string kind)
     {
-        if (kind is WorkflowWaitKinds.Timer or WorkflowWaitKinds.Approval or WorkflowWaitKinds.Callback or WorkflowWaitKinds.Subworkflow or WorkflowWaitKinds.Action or WorkflowWaitKinds.AgentRun) return kind;
+        if (kind is WorkflowWaitKinds.Timer or WorkflowWaitKinds.Approval or WorkflowWaitKinds.Callback or WorkflowWaitKinds.Subworkflow or WorkflowWaitKinds.Action or WorkflowWaitKinds.AgentRun or WorkflowWaitKinds.SupervisorDecision) return kind;
 
-        throw new NodeFailureException($"Node '{nodeId}' suspended with unknown wait kind '{kind}'. Expected Timer, Approval, Callback, Subworkflow, Action, or AgentRun.");
+        throw new NodeFailureException($"Node '{nodeId}' suspended with unknown wait kind '{kind}'. Expected Timer, Approval, Callback, Subworkflow, Action, AgentRun, or SupervisorDecision.");
     }
 
     /// <summary>
@@ -2649,6 +2680,7 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
             Logger = nodeLogger,
             Observability = observability,
             ResumePayload = exec.ResumePayload,
+            NodeId = exec.Node.Id,
         };
     }
 
