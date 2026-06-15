@@ -176,7 +176,7 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
         await _recordLogger.RunStartedAsync(run.Id, cancellationToken).ConfigureAwait(false);
 
         var (definition, releaseHash) = await LoadDefinitionAndHashAsync(run, cancellationToken).ConfigureAwait(false);
-        await _recordLogger.ReleaseLoadedAsync(run.Id, run.WorkflowVersion, releaseHash, definition.Nodes.Count, definition.Edges.Count, cancellationToken).ConfigureAwait(false);
+        await _recordLogger.ReleaseLoadedAsync(run.Id, run.WorkflowVersion ?? 0, releaseHash, definition.Nodes.Count, definition.Edges.Count, cancellationToken).ConfigureAwait(false);
 
         // Fork on snapshot existence. First-run path builds scope from current variable state
         // + writes the snapshot. Replay path reads plain values from snapshot (frozen) and
@@ -303,6 +303,18 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
     /// </summary>
     private async Task<(WorkflowDefinition Definition, string DefinitionHash)> LoadDefinitionAndHashAsync(WorkflowRun run, CancellationToken cancellationToken)
     {
+        // Fork on definition source. A SNAPSHOT run carries its own frozen definition inline (no
+        // Workflow / WorkflowVersion row); an AUTHORED run loads its pinned version — byte-identical
+        // to the pre-snapshot path. Both apply the SAME canonical-hash tamper check.
+        if (run.DefinitionSnapshotJson != null)
+            return LoadDefinitionFromSnapshot(run);
+
+        return await LoadDefinitionFromVersionAsync(run, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>Authored-run load: read the pinned <c>workflow_version</c> JSON + hash and tamper-check it. Byte-identical to the pre-snapshot behaviour.</summary>
+    private async Task<(WorkflowDefinition Definition, string DefinitionHash)> LoadDefinitionFromVersionAsync(WorkflowRun run, CancellationToken cancellationToken)
+    {
         var version = await _db.WorkflowVersion
             .SingleAsync(v => v.WorkflowId == run.WorkflowId && v.Version == run.WorkflowVersion, cancellationToken)
             .ConfigureAwait(false);
@@ -312,9 +324,27 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
 
         var recomputed = DefinitionHash.Compute(definition);
         if (!string.Equals(recomputed, version.DefinitionHash, StringComparison.Ordinal))
-            throw new ReleaseTamperedException(run.WorkflowId, run.WorkflowVersion, version.DefinitionHash, recomputed);
+            throw new ReleaseTamperedException(run.WorkflowId!.Value, run.WorkflowVersion!.Value, version.DefinitionHash, recomputed);
 
         return (definition, version.DefinitionHash);
+    }
+
+    /// <summary>
+    /// Snapshot-run load: deserialise the run's inline frozen definition and tamper-check it against
+    /// its stored snapshot hash with the SAME canonical hash + same exception semantics as an authored
+    /// version. No DB read — the definition travels on the run row itself.
+    /// </summary>
+    private static (WorkflowDefinition Definition, string DefinitionHash) LoadDefinitionFromSnapshot(WorkflowRun run)
+    {
+        var definition = JsonSerializer.Deserialize<WorkflowDefinition>(run.DefinitionSnapshotJson!, WorkflowJson.Options)
+            ?? throw new InvalidOperationException($"WorkflowRun {run.Id} has an empty definition snapshot.");
+
+        var storedHash = run.DefinitionSnapshotHash ?? string.Empty;
+        var recomputed = DefinitionHash.Compute(definition);
+        if (!string.Equals(recomputed, storedHash, StringComparison.Ordinal))
+            throw ReleaseTamperedException.ForSnapshot(run.Id, storedHash, recomputed);
+
+        return (definition, storedHash);
     }
 
     /// <summary>
@@ -342,9 +372,11 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
         var sys = BuildSysScope(run);
 
         // Fetch typed sets ONCE so we can both build scope AND persist snapshot rows
-        // without a second round-trip per scope.
-        var wfResolved = await _variableService.GetAllForEngineAsync(VariableScope.Workflow, run.WorkflowId, cancellationToken).ConfigureAwait(false);
-        var teamResolved = await _variableService.GetAllForEngineAsync(VariableScope.Team, run.Workflow.TeamId, cancellationToken).ConfigureAwait(false);
+        // without a second round-trip per scope. A snapshot run has no parent workflow, so its
+        // workflow-scope lookup runs against Guid.Empty (resolves to no rows) and team scope reads
+        // the run's denormalised TeamId — same value an authored run's run.Workflow.TeamId carries.
+        var wfResolved = await _variableService.GetAllForEngineAsync(VariableScope.Workflow, WorkflowScopeId(run), cancellationToken).ConfigureAwait(false);
+        var teamResolved = await _variableService.GetAllForEngineAsync(VariableScope.Team, run.TeamId, cancellationToken).ConfigureAwait(false);
 
         var wf = BagFromResolved(wfResolved);
         var team = BagFromResolved(teamResolved);
@@ -352,7 +384,7 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
         // Project scope — load only the projects this definition references (via slug),
         // not every project in the team. Falls back to an empty bag when the definition
         // contains no project.* refs (cheap).
-        var (projects, projectSecretPaths) = await LoadReferencedProjectVariablesAsync(run.Workflow.TeamId, run.WorkflowId, definition, cancellationToken).ConfigureAwait(false);
+        var (projects, projectSecretPaths) = await LoadReferencedProjectVariablesAsync(run.TeamId, WorkflowScopeId(run), definition, cancellationToken).ConfigureAwait(false);
 
         var secretPaths = CollectSecretPaths(wfResolved, teamResolved, projectSecretPaths);
 
@@ -390,11 +422,11 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
         var wf = BuildScopeFromSnapshot(snapshot, "Workflow");
         var team = BuildScopeFromSnapshot(snapshot, "Team");
 
-        var wfSecretNames = await MergeCurrentSecretsAsync(wf, VariableScope.Workflow, run.WorkflowId, cancellationToken).ConfigureAwait(false);
-        var teamSecretNames = await MergeCurrentSecretsAsync(team, VariableScope.Team, run.Workflow.TeamId, cancellationToken).ConfigureAwait(false);
+        var wfSecretNames = await MergeCurrentSecretsAsync(wf, VariableScope.Workflow, WorkflowScopeId(run), cancellationToken).ConfigureAwait(false);
+        var teamSecretNames = await MergeCurrentSecretsAsync(team, VariableScope.Team, run.TeamId, cancellationToken).ConfigureAwait(false);
 
         // Project scope — load fresh (no snapshot path for projects).
-        var (projects, projectSecretPaths) = await LoadReferencedProjectVariablesAsync(run.Workflow.TeamId, run.WorkflowId, definition, cancellationToken).ConfigureAwait(false);
+        var (projects, projectSecretPaths) = await LoadReferencedProjectVariablesAsync(run.TeamId, WorkflowScopeId(run), definition, cancellationToken).ConfigureAwait(false);
 
         // Secret-paths used by the engine's Terminal-output leak guard. Replay re-resolves
         // secrets from the live table (see MergeCurrentSecretsAsync), so we use the same
@@ -646,6 +678,9 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
         var sourceType = run.RunRequest?.SourceType ?? string.Empty;
         var userIdValue = run.CreatedBy == Guid.Empty ? (Guid?)null : run.CreatedBy;
 
+        // WorkflowId / WorkflowVersion are nullable — a snapshot run has neither, so {{sys.workflow_id}}
+        // / {{sys.workflow_version}} resolve to JSON null (same shape as {{sys.user_id}} for an
+        // anonymous run). TeamId reads the denormalised run column (always present, snapshot or not).
         return new Dictionary<string, JsonElement>
         {
             [SystemScopeKeys.WorkflowId]      = ToJson(run.WorkflowId),
@@ -653,7 +688,7 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
             [SystemScopeKeys.WorkflowVersion] = ToJson(run.WorkflowVersion),
             [SystemScopeKeys.SourceType]      = ToJson(sourceType),
             [SystemScopeKeys.StartedAt]       = ToJson(startedAt),
-            [SystemScopeKeys.TeamId]          = ToJson(run.Workflow.TeamId),
+            [SystemScopeKeys.TeamId]          = ToJson(run.TeamId),
             [SystemScopeKeys.UserId]          = userIdValue.HasValue ? ToJson(userIdValue.Value) : ToJsonNull(),
         };
     }
@@ -691,9 +726,17 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
 
         if (requiredNames.Count == 0) return;
 
-        var ctx = new MissingRequiredInputContext(requiredNames, resolvedInputs.Keys.ToList(), run.Workflow.TeamId, run.WorkflowId);
+        var ctx = new MissingRequiredInputContext(requiredNames, resolvedInputs.Keys.ToList(), run.TeamId, WorkflowScopeId(run));
         MissingRequiredInputValidator.EnsureSatisfied(ctx);
     }
+
+    /// <summary>
+    /// The workflow id to use for workflow-scoped variable lookups + diagnostic context. A snapshot
+    /// run has no parent workflow, so it resolves to <see cref="Guid.Empty"/> — a workflow-scope
+    /// variable query against Guid.Empty matches no rows (snapshot runs carry no <c>wf.*</c>
+    /// variables), and the value only ever appears in fail-fast exception text otherwise.
+    /// </summary>
+    private static Guid WorkflowScopeId(WorkflowRun run) => run.WorkflowId ?? Guid.Empty;
 
     private static IReadOnlyDictionary<string, JsonElement> BuildInputScope(WorkflowDefinition definition, IReadOnlyDictionary<string, JsonElement> triggerPayload)
     {

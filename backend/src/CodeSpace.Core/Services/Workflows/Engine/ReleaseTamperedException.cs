@@ -30,6 +30,24 @@ public sealed class ReleaseTamperedException : Exception
         RecomputedHash = recomputedHash;
     }
 
+    /// <summary>
+    /// Private ctor for the snapshot-run variant — there is no (workflowId, version) pin, so the run
+    /// id identifies the tampered release instead. Routed through <see cref="ForSnapshot"/>.
+    /// </summary>
+    private ReleaseTamperedException(string message) : base(message) { }
+
+    /// <summary>
+    /// Snapshot-run tamper exception: a run's inline <c>definition_snapshot_jsonb</c> no longer hashes
+    /// to its stored <c>definition_snapshot_hash</c> — the frozen definition was mutated in the DB
+    /// outside the run-start path. Same fatal semantics as an authored-version tamper.
+    /// </summary>
+    public static ReleaseTamperedException ForSnapshot(Guid runId, string storedHash, string recomputedHash) =>
+        new(
+            $"Release tampering detected for snapshot run {runId}: " +
+            $"stored hash = '{storedHash}', recomputed hash from current definition_snapshot_jsonb = '{recomputedHash}'. " +
+            $"A snapshot run's definition is frozen at run start — the JSON has been mutated outside that path. " +
+            $"The engine refuses to execute a tampered snapshot.");
+
     public Guid WorkflowId { get; }
     public int WorkflowVersion { get; }
     public string StoredHash { get; }

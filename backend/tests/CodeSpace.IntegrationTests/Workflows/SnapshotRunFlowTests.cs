@@ -1,0 +1,452 @@
+using System.Text.Json;
+using Autofac;
+using CodeSpace.Core.Persistence.Db;
+using CodeSpace.Core.Persistence.Entities;
+using CodeSpace.Core.Services.Chat;
+using CodeSpace.Core.Services.Credentials;
+using CodeSpace.Core.Services.Workflows;
+using CodeSpace.Core.Services.Workflows.Engine;
+using CodeSpace.Core.Services.Workflows.RunSources;
+using CodeSpace.IntegrationTests.Infrastructure;
+using CodeSpace.IntegrationTests.Workflows.Infrastructure;
+using CodeSpace.Messages.Constants;
+using CodeSpace.Messages.Credentials;
+using CodeSpace.Messages.Dtos.Workflows;
+using CodeSpace.Messages.Enums;
+using CodeSpace.Messages.Exceptions;
+using Microsoft.EntityFrameworkCore;
+using Shouldly;
+
+namespace CodeSpace.IntegrationTests.Workflows;
+
+/// <summary>
+/// Dynamic-workflows substrate (PR1) — a <c>WorkflowRun</c> whose definition is an INLINE FROZEN
+/// SNAPSHOT carried by the run itself, with NO <c>workflow</c> row and NO <c>workflow_version</c>
+/// row. The run flows through the EXACT same durable engine (executor → suspend/resume → dispatch)
+/// as an authored run; only the definition SOURCE forks. This is the load-bearing tier: the engine
+/// is real, Postgres is real, and the runs are staged by the real <see cref="IRunFromSnapshotStarter"/>.
+///
+/// <para>Pinned guarantees:
+///   (a) a snapshot run walks start → terminal and lands Success through the real engine;
+///   (b) NO workflow / workflow_version row is created for it (the substrate's core promise);
+///   (c) a SUSPEND → RESUME cycle re-loads the inline snapshot on re-entry (durable resume reads
+///       the run's own definition, not a version row);
+///   (d) a corrupted snapshot hash trips the same tamper guard an authored version gets;
+///   (e) the AUTHORED path is unaffected — proven by the rest of the engine/workflow suites.</para>
+///
+/// <para>Tier: high-fidelity — real <see cref="IRunFromSnapshotStarter"/> (runs DefinitionValidator
+/// + DefinitionHash + the dispatcher's CAS) and real <see cref="IWorkflowEngine"/> over real
+/// Postgres. No mocks.</para>
+/// </summary>
+[Collection(PostgresCollection.Name)]
+[Trait("Category", "Integration")]
+public class SnapshotRunFlowTests
+{
+    private readonly PostgresFixture _fixture;
+    public SnapshotRunFlowTests(PostgresFixture fixture) { _fixture = fixture; }
+
+    [Fact]
+    public async Task Snapshot_run_walks_to_terminal_success_through_the_real_engine()
+    {
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+
+        var runId = await StartSnapshotAsync(teamId, userId, EchoInputDefinition(), launchPayloadJson: """{"ticket":"SNAP-1"}""");
+
+        await RunEngineAsync(runId);
+
+        var run = await LoadRunAsync(runId);
+        run.Status.ShouldBe(WorkflowRunStatus.Success,
+            customMessage: "a snapshot run must validate + walk start → terminal through the real engine, same as an authored run");
+        run.WorkflowId.ShouldBeNull("a snapshot run is not a child of any workflow");
+        run.WorkflowVersion.ShouldBeNull("a snapshot run has no pinned version");
+        run.DefinitionSnapshotJson.ShouldNotBeNull("the inline frozen definition is the run's own definition source");
+
+        using var outputs = JsonDocument.Parse(run.OutputsJson!);
+        outputs.RootElement.GetProperty("echoed").GetString().ShouldBe("SNAP-1",
+            customMessage: "the launch payload must map by-name onto {{input.ticket}} for a snapshot run too");
+    }
+
+    [Fact]
+    public async Task Snapshot_run_creates_no_workflow_and_no_workflow_version_row()
+    {
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+
+        var workflowCountBefore = await CountWorkflowsAsync(teamId);
+        var versionCountBefore = await CountWorkflowVersionsAsync();
+
+        var runId = await StartSnapshotAsync(teamId, userId, EchoInputDefinition(), launchPayloadJson: "{}");
+        await RunEngineAsync(runId);
+
+        (await LoadRunAsync(runId)).Status.ShouldBe(WorkflowRunStatus.Success);
+
+        // The substrate's core promise: a one-shot snapshot run is a RUN, not a persisted/listable
+        // workflow. Zero new rows in either table — counting both team-scoped (workflow) and
+        // global (workflow_version, which has no team column) confirms NOTHING leaked.
+        (await CountWorkflowsAsync(teamId)).ShouldBe(workflowCountBefore,
+            customMessage: "a snapshot run must create NO workflow row — it is not a child of any workflow");
+        (await CountWorkflowVersionsAsync()).ShouldBe(versionCountBefore,
+            customMessage: "a snapshot run must create NO workflow_version row — its definition is inline on the run");
+
+        // And the run row itself points at neither (the FK columns the migration relaxed to NULL).
+        var run = await LoadRunAsync(runId);
+        run.WorkflowId.ShouldBeNull();
+        run.WorkflowVersion.ShouldBeNull();
+    }
+
+    [Fact]
+    public async Task Snapshot_run_suspends_then_resumes_reloading_the_inline_definition_on_reentry()
+    {
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+
+        var runId = await StartSnapshotAsync(teamId, userId, ApprovalDefinition(), launchPayloadJson: "{}");
+
+        // Pass 1 — the wait_approval node parks the run. It is NOT terminal.
+        await RunEngineAsync(runId);
+        (await LoadRunAsync(runId)).Status.ShouldBe(WorkflowRunStatus.Suspended,
+            customMessage: "the wait_approval node must suspend the snapshot run, same as on an authored run");
+
+        // Resolve the wait + flip Suspended → Pending (mirrors the operator-approve resume path),
+        // then re-dispatch into the engine. The durable walker re-enters and MUST re-load the
+        // inline snapshot from the run row (there is no workflow_version to fall back to) to
+        // continue past the resumed node.
+        await ResumeApprovalWaitAsync(runId);
+        await RunEngineAsync(runId);
+
+        var run = await LoadRunAsync(runId);
+        run.Status.ShouldBe(WorkflowRunStatus.Success,
+            customMessage: "durable resume must re-load the inline snapshot on re-entry and walk the run to its terminal — " +
+                           "if the engine couldn't source the definition from the run, the resumed pass would fail to find the graph");
+        run.WorkflowId.ShouldBeNull();
+    }
+
+    [Fact]
+    public async Task Snapshot_run_with_a_corrupted_hash_trips_the_tamper_guard()
+    {
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+
+        var runId = await StartSnapshotAsync(teamId, userId, EchoInputDefinition(), launchPayloadJson: "{}");
+
+        // Corrupt the stored snapshot hash so it no longer matches the frozen definition_json. This
+        // is exactly the authored-version tamper case (release_hash drift), applied to the inline
+        // snapshot — the engine must refuse with the same fatal Failure semantics.
+        await CorruptSnapshotHashAsync(runId);
+
+        await RunEngineAsync(runId);
+
+        var run = await LoadRunAsync(runId);
+        run.Status.ShouldBe(WorkflowRunStatus.Failure,
+            customMessage: "a snapshot whose hash no longer matches its definition_json must be rejected pre-walk, like a tampered authored version");
+        run.Error.ShouldNotBeNull();
+        run.Error!.ShouldContain("tampering",
+            customMessage: "the bootstrap-failure ledger surfaces the tamper exception so the operator sees the cause");
+    }
+
+    [Fact]
+    public async Task Snapshot_run_pre_flights_the_act_as_user_identity_gate_on_resume()
+    {
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var channelId = await SeedChannelAsync(teamId, userId);
+
+        // Identity NOT linked → the gate must throw at click time. The whole point: on a snapshot run
+        // the gate sources the definition from the run's INLINE snapshot. If the gate still read only
+        // workflow_version (WorkflowId/WorkflowVersion are NULL for a snapshot run), it would find no
+        // definition and silently no-op — letting the wait resolve with NO identity pre-flight.
+        var (repoId, providerInstanceId) = await SeedRepoAsync(teamId, userId, linkIdentity: false);
+
+        var runId = await StartSnapshotAsync(teamId, userId, ReviewDefinition(channelId, userId, repoId), launchPayloadJson: "{}");
+
+        await RunEngineAsync(runId);   // posts the card + parks on flow.wait_action (git.pr_review downstream)
+        var messageId = await ReadPostedMessageIdAsync(runId);
+
+        var ex = await Should.ThrowAsync<ActorIdentityRequiredException>(() => RespondAsync(teamId, messageId, userId));
+        ex.ProviderInstanceId.ShouldBe(providerInstanceId,
+            customMessage: "the gate must derive the act-as-user requirement from the snapshot run's INLINE definition — " +
+                           "a workflow_version-only read would no-op (WorkflowId/WorkflowVersion are NULL on a snapshot run)");
+
+        var run = await LoadRunAsync(runId);
+        run.Status.ShouldBe(WorkflowRunStatus.Suspended,
+            customMessage: "the wait must NOT resolve — the snapshot run stays parked so a retry-after-link can succeed");
+        run.WorkflowId.ShouldBeNull("a snapshot run is not a child of any workflow");
+    }
+
+    [Fact]
+    public async Task Snapshot_run_with_a_corrupted_definition_json_trips_the_tamper_guard()
+    {
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+
+        var runId = await StartSnapshotAsync(teamId, userId, EchoInputDefinition(), launchPayloadJson: "{}");
+
+        // The INVERSE of the hash-corruption case: mutate the frozen definition_json out-of-band while
+        // leaving the stored hash untouched. On re-load the engine recomputes the hash from the mutated
+        // JSON, finds it no longer matches the (untouched) stored hash, and must refuse — proving the
+        // guard catches a tampered definition, not just a tampered hash.
+        await CorruptSnapshotJsonAsync(runId);
+
+        await RunEngineAsync(runId);
+
+        var run = await LoadRunAsync(runId);
+        run.Status.ShouldBe(WorkflowRunStatus.Failure,
+            customMessage: "a snapshot whose definition_json was mutated out-of-band must be rejected pre-walk by the recompute-vs-stored-hash check");
+        run.Error.ShouldNotBeNull();
+        run.Error!.ShouldContain("tampering");
+    }
+
+    [Fact]
+    public async Task Starting_a_snapshot_run_with_an_invalid_definition_is_rejected_before_any_db_write()
+    {
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+
+        var runsBefore = await CountRunsAsync(teamId);
+
+        // The starter must DefinitionValidator-validate BEFORE staging — a dangling edge (To a node that
+        // doesn't exist) is rejected, and the throw lands strictly before any workflow_run row is written.
+        await Should.ThrowAsync<WorkflowValidationException>(() =>
+            StartSnapshotAsync(teamId, userId, InvalidDanglingEdgeDefinition(), launchPayloadJson: "{}"));
+
+        (await CountRunsAsync(teamId)).ShouldBe(runsBefore,
+            customMessage: "an invalid definition must be rejected before any DB write — no orphaned run row left behind");
+    }
+
+    // ─── Definitions ────────────────────────────────────────────────────────────
+
+    /// <summary>manual → terminal. One declared input "ticket"; the terminal echoes {{input.ticket}}.</summary>
+    private static WorkflowDefinition EchoInputDefinition()
+    {
+        var terminalInputsJson = JsonSerializer.Serialize(new { echoed = "{{input.ticket}}" });
+
+        return new WorkflowDefinition
+        {
+            SchemaVersion = 1,
+            Inputs = new[] { new WorkflowVariable { Name = "ticket", Schema = WorkflowsTestSeed.Json("""{"type":"string"}"""), Required = false } },
+            Nodes = new List<NodeDefinition>
+            {
+                new() { Id = "start", TypeKey = "trigger.manual", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
+                new() { Id = "end",   TypeKey = "builtin.terminal", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.Json(terminalInputsJson) },
+            },
+            Edges = new List<EdgeDefinition> { new() { From = "start", To = "end" } },
+        };
+    }
+
+    /// <summary>manual → wait_approval → terminal. The approval node suspends the run for the resume test.</summary>
+    private static WorkflowDefinition ApprovalDefinition() => new()
+    {
+        SchemaVersion = 1,
+        Nodes = new List<NodeDefinition>
+        {
+            new() { Id = "start", TypeKey = "trigger.manual", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
+            new() { Id = "approval", TypeKey = "flow.wait_approval", Config = WorkflowsTestSeed.Json("""{"prompt":"Ship the snapshot run?"}"""), Inputs = WorkflowsTestSeed.EmptyJson() },
+            new() { Id = "end", TypeKey = "builtin.terminal", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
+        },
+        Edges = new List<EdgeDefinition>
+        {
+            new() { From = "start", To = "approval" },
+            new() { From = "approval", To = "end" },
+        },
+    };
+
+    /// <summary>manual → post → wait → git.pr_review (acts AS the responder) → terminal. git.pr_review's actAsUserId is wired to the wait's `by`, so resolving the wait must pre-flight the responder's linked identity.</summary>
+    private static WorkflowDefinition ReviewDefinition(Guid channelId, Guid reviewerId, Guid repoId) => new()
+    {
+        SchemaVersion = 1,
+        Nodes = new List<NodeDefinition>
+        {
+            new() { Id = "start", TypeKey = "trigger.manual", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
+            new()
+            {
+                Id = "post",
+                TypeKey = "chat.post_message",
+                Config = WorkflowsTestSeed.EmptyJson(),
+                Inputs = WorkflowsTestSeed.Json(JsonSerializer.Serialize(new
+                {
+                    conversationId = channelId.ToString(),
+                    body = "Review PR #5?",
+                    actions = new[] { new { key = "approve", label = "Approve" } },
+                    allowedResponderUserIds = new[] { reviewerId.ToString() },
+                })),
+            },
+            new() { Id = "wait", TypeKey = "flow.wait_action", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.Json("""{ "token": "{{nodes.post.outputs.token}}" }""") },
+            new()
+            {
+                Id = "review",
+                TypeKey = "git.pr_review",
+                Config = WorkflowsTestSeed.EmptyJson(),
+                Inputs = WorkflowsTestSeed.Json(JsonSerializer.Serialize(new
+                {
+                    repositoryId = repoId.ToString(),
+                    number = 5,
+                    verdict = "{{nodes.wait.outputs.action}}",
+                    actAsUserId = "{{nodes.wait.outputs.by}}",
+                })),
+            },
+            new() { Id = "end", TypeKey = "builtin.terminal", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
+        },
+        Edges = new List<EdgeDefinition>
+        {
+            new() { From = "start", To = "post" },
+            new() { From = "post", To = "wait" },
+            new() { From = "wait", To = "review" },
+            new() { From = "review", To = "end" },
+        },
+    };
+
+    /// <summary>A structurally INVALID definition: an edge whose <c>To</c> targets a node that doesn't exist. DefinitionValidator rejects it, so the starter must throw before any DB write.</summary>
+    private static WorkflowDefinition InvalidDanglingEdgeDefinition() => new()
+    {
+        SchemaVersion = 1,
+        Nodes = new List<NodeDefinition>
+        {
+            new() { Id = "start", TypeKey = "trigger.manual", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
+        },
+        Edges = new List<EdgeDefinition> { new() { From = "start", To = "ghost" } },   // 'ghost' node doesn't exist
+    };
+
+    // ─── Helpers ────────────────────────────────────────────────────────────────
+
+    private async Task<Guid> StartSnapshotAsync(Guid teamId, Guid userId, WorkflowDefinition definition, string? launchPayloadJson)
+    {
+        using var scope = _fixture.BeginScope();
+        var starter = scope.Resolve<IRunFromSnapshotStarter>();
+        return await starter.StartFromSnapshotAsync(definition, teamId, userId, launchPayloadJson, CancellationToken.None);
+    }
+
+    private async Task RunEngineAsync(Guid runId)
+    {
+        using var scope = _fixture.BeginScope();
+        await scope.Resolve<IWorkflowEngine>().ExecuteRunAsync(runId, CancellationToken.None);
+    }
+
+    /// <summary>Resolve the run's pending approval wait + flip Suspended → Pending, mirroring the operator-approve resume path. The resume service re-dispatches so the next RunEngineAsync re-enters the durable walker.</summary>
+    private async Task ResumeApprovalWaitAsync(Guid runId)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+
+        var waitId = await db.WorkflowRunWait.AsNoTracking()
+            .Where(w => w.RunId == runId && w.Status == WorkflowWaitStatuses.Pending)
+            .Select(w => w.Id)
+            .SingleAsync();
+
+        var payload = JsonSerializer.Serialize(new { approved = true, comment = "ok" });
+        var resumed = await scope.Resolve<IWorkflowResumeService>().ResumeWaitAsync(runId, waitId, payload, CancellationToken.None);
+        resumed.ShouldBeTrue("resolving the snapshot run's pending wait must flip Suspended → Pending and re-dispatch");
+    }
+
+    private async Task CorruptSnapshotHashAsync(Guid runId)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        await db.Database.ExecuteSqlInterpolatedAsync(
+            $"UPDATE workflow_run SET definition_snapshot_hash = 'deadbeef-not-the-real-hash' WHERE id = {runId}");
+    }
+
+    /// <summary>Mutate the frozen definition_json out-of-band (flip the terminal's echoed expression) while leaving the stored hash untouched — the recompute-vs-stored-hash check must then fire.</summary>
+    private async Task CorruptSnapshotJsonAsync(Guid runId)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        await db.Database.ExecuteSqlInterpolatedAsync(
+            $"UPDATE workflow_run SET definition_snapshot_jsonb = replace(definition_snapshot_jsonb::text, 'input.ticket', 'input.tampered')::jsonb WHERE id = {runId}");
+    }
+
+    private async Task<int> CountRunsAsync(Guid teamId)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        return await db.WorkflowRun.AsNoTracking().CountAsync(r => r.TeamId == teamId);
+    }
+
+    private async Task<WorkflowRun> LoadRunAsync(Guid runId)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        return await db.WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == runId);
+    }
+
+    private async Task<int> CountWorkflowsAsync(Guid teamId)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        return await db.Workflow.AsNoTracking().CountAsync(w => w.TeamId == teamId);
+    }
+
+    private async Task<int> CountWorkflowVersionsAsync()
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        return await db.WorkflowVersion.AsNoTracking().CountAsync();
+    }
+
+    private async Task RespondAsync(Guid teamId, Guid messageId, Guid actorUserId)
+    {
+        using var scope = _fixture.BeginScope();
+        await scope.Resolve<IMessageInteractionService>().RespondAsync(teamId, messageId, "approve", actorUserId, null, null, default);
+    }
+
+    private async Task<Guid> ReadPostedMessageIdAsync(Guid runId)
+    {
+        using var verify = _fixture.BeginScope();
+        var db = verify.Resolve<CodeSpaceDbContext>();
+        (await db.WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == runId)).Status.ShouldBe(WorkflowRunStatus.Suspended);
+        var post = await db.WorkflowRunNode.AsNoTracking().SingleAsync(n => n.RunId == runId && n.NodeId == "post");
+        return Guid.Parse(JsonDocument.Parse(post.OutputsJson).RootElement.GetProperty("messageId").GetString()!);
+    }
+
+    private async Task<Guid> SeedChannelAsync(Guid teamId, Guid ownerId)
+    {
+        using var scope = _fixture.BeginScope();
+        var slug = "snap-ident-" + Guid.NewGuid().ToString("N")[..8];
+        return await scope.Resolve<IConversationService>().CreateChannelAsync(teamId, slug, slug, isPrivate: false, ownerId, default);
+    }
+
+    /// <summary>Seed a Git provider instance + connection-credentialled repo under the existing team; optionally link the owner's own identity on that instance. Mirrors ResponderIdentityPrecheckFlowTests' seed.</summary>
+    private async Task<(Guid RepositoryId, Guid ProviderInstanceId)> SeedRepoAsync(Guid teamId, Guid ownerId, bool linkIdentity)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        var encryptor = scope.Resolve<IPayloadEncryptor>();
+        var serializer = scope.Resolve<ICredentialPayloadSerializer>();
+
+        string Pat(string token) => encryptor.Encrypt(serializer.Serialize(new PatPayload { Token = token }));
+        var suffix = Guid.NewGuid().ToString("N")[..8];
+
+        var instance = new ProviderInstance
+        {
+            Id = Guid.NewGuid(), TeamId = teamId, Provider = ProviderKind.Git, DisplayName = "instance",
+            BaseUrl = $"https://git-{suffix}.local", OauthClientId = "client", OauthClientSecretEnc = encryptor.Encrypt("secret")
+        };
+        var connection = new Credential
+        {
+            Id = Guid.NewGuid(), TeamId = teamId, ProviderInstanceId = instance.Id, Ownership = CredentialOwnership.TeamService,
+            AuthType = AuthType.Pat, DisplayName = "connection", EncryptedPayload = Pat("conn"), Status = CredentialStatus.Active
+        };
+        var repo = new Repository
+        {
+            Id = Guid.NewGuid(), TeamId = teamId, ProviderInstanceId = instance.Id, CredentialId = connection.Id,
+            ExternalId = $"ext-{suffix}", NamespacePath = "acme", Name = "api", FullPath = "acme/api",
+            DefaultBranch = "main", Visibility = RepositoryVisibility.Private, WebUrl = "https://git.local/acme/api", Status = RepositoryStatus.Active
+        };
+
+        db.ProviderInstance.Add(instance);
+        db.Credential.Add(connection);
+        db.Repository.Add(repo);
+
+        if (linkIdentity)
+        {
+            var actorCred = new Credential
+            {
+                Id = Guid.NewGuid(), TeamId = teamId, ProviderInstanceId = instance.Id, OwnerUserId = ownerId,
+                Ownership = CredentialOwnership.Personal, AuthType = AuthType.Pat, DisplayName = "actor", EncryptedPayload = Pat("actor"), Status = CredentialStatus.Active
+            };
+            db.Credential.Add(actorCred);
+            db.UserProviderIdentity.Add(new UserProviderIdentity
+            {
+                Id = Guid.NewGuid(), UserId = ownerId, ProviderInstanceId = instance.Id, CredentialId = actorCred.Id,
+                ProviderUserId = "42", ProviderUsername = "tester"
+            });
+        }
+
+        await db.SaveChangesAsync();
+
+        return (repo.Id, instance.Id);
+    }
+}

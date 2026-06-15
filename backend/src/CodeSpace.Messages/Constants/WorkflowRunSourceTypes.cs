@@ -19,6 +19,13 @@ public static class WorkflowRunSourceTypes
     /// <summary>Operator-initiated replay of an existing run.</summary>
     public const string Replay = "replay";
 
+    /// <summary>
+    /// A one-shot run whose definition is an inline frozen snapshot carried by the run itself
+    /// (dynamic-workflows substrate) — there is NO backing Workflow row. Staged via
+    /// <c>IRunFromSnapshotStarter</c>.
+    /// </summary>
+    public const string Snapshot = "snapshot";
+
     /// <summary>Cron / scheduled fire. Used by the scheduler producer.</summary>
     public const string ScheduleCron = "schedule.cron";
 

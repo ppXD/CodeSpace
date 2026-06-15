@@ -67,6 +67,8 @@ public class DbUpRunnerTests
     [InlineData("supervisor_decision", "payload_jsonb", "0053_supervisor_decision.sql")]           // the emitted decision — a frozen-at-insert JOURNAL field (the immutability trigger protects it)
     [InlineData("supervisor_decision", "outcome_jsonb", "0053_supervisor_decision.sql")]           // the execution result — the deliberately-mutable CAS path
     [InlineData("supervisor_decision", "sequence", "0053_supervisor_decision.sql")]                // per-run BIGSERIAL replay cursor
+    [InlineData("workflow_run", "definition_snapshot_jsonb", "0056_workflow_run_definition_snapshot.sql")] // dynamic-WF substrate: the inline frozen definition a snapshot run walks (NULL for authored runs)
+    [InlineData("workflow_run", "definition_snapshot_hash", "0056_workflow_run_definition_snapshot.sql")]  // SHA-256 of the snapshot — same tamper-check as workflow_version.definition_hash
     public async Task Column_exists_after_migration(string tableName, string columnName, string addedBy)
     {
         var exists = await ColumnExistsAsync(tableName, columnName).ConfigureAwait(false);
@@ -104,6 +106,34 @@ public class DbUpRunnerTests
         exists.ShouldBeTrue(
             $"Index '{indexName}' must exist after migrations apply — added by {addedBy}. " +
             $"If missing, that migration did not run (or the index was renamed). Diagnose with: psql -c '\\di {indexName}' against the test database.");
+    }
+
+    [Theory]
+    [InlineData("workflow_run", "workflow_id", "0056_workflow_run_definition_snapshot.sql")]      // relaxed to NULL so a snapshot run carries no parent workflow
+    [InlineData("workflow_run", "workflow_version", "0056_workflow_run_definition_snapshot.sql")] // relaxed to NULL so a snapshot run carries no pinned version
+    public async Task Column_is_nullable_after_migration(string tableName, string columnName, string changedBy)
+    {
+        var isNullable = await ColumnIsNullableAsync(tableName, columnName).ConfigureAwait(false);
+
+        isNullable.ShouldBeTrue(
+            $"Column '{tableName}.{columnName}' must be NULL-able after migrations apply — relaxed by {changedBy} so a snapshot run " +
+            $"(inline frozen definition, no parent workflow) can leave it NULL. If still NOT NULL, that migration did not run. " +
+            $"Diagnose with: psql -c '\\d {tableName}' against the test database.");
+    }
+
+    private async Task<bool> ColumnIsNullableAsync(string tableName, string columnName)
+    {
+        await using var conn = new NpgsqlConnection(_fixture.ConnectionString);
+        await conn.OpenAsync().ConfigureAwait(false);
+
+        await using var cmd = new NpgsqlCommand(
+            "SELECT is_nullable FROM information_schema.columns WHERE table_schema = 'public' AND table_name = @t AND column_name = @c",
+            conn);
+        cmd.Parameters.AddWithValue("@t", tableName);
+        cmd.Parameters.AddWithValue("@c", columnName);
+
+        var result = await cmd.ExecuteScalarAsync().ConfigureAwait(false);
+        return result is string s && s == "YES";
     }
 
     private async Task<bool> TableExistsAsync(string tableName)

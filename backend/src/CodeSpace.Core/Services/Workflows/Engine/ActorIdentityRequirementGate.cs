@@ -72,12 +72,15 @@ public sealed class ActorIdentityRequirementGate : IActorIdentityRequirementGate
     {
         var run = await _db.WorkflowRun.AsNoTracking()
             .Where(r => r.Id == runId)
-            .Select(r => new { r.WorkflowId, r.WorkflowVersion, r.RunRequestId })
+            .Select(r => new { r.WorkflowId, r.WorkflowVersion, r.RunRequestId, r.DefinitionSnapshotJson })
             .SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
 
         if (run == null) return Array.Empty<ActorIdentityRequirementPlan.Requirement>();
 
-        var definitionJson = await _db.WorkflowVersion.AsNoTracking()
+        // A snapshot run's definition is inline on the run row (no workflow_version to read); an
+        // authored run reads its version-pinned JSON. Either way the gate walks the EXACT JSON this
+        // run executes — without this fork a snapshot run's act-as-user pre-flight is a silent no-op.
+        var definitionJson = run.DefinitionSnapshotJson ?? await _db.WorkflowVersion.AsNoTracking()
             .Where(v => v.WorkflowId == run.WorkflowId && v.Version == run.WorkflowVersion)
             .Select(v => v.DefinitionJson)
             .SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
