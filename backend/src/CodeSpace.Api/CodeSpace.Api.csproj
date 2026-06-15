@@ -46,6 +46,10 @@
     <ItemGroup>
       <McpProxyFiles Include="$(McpProxyOutDir)codespace-mcp*" />
     </ItemGroup>
+    <!-- The build-only ProjectReference to CodeSpace.Mcp forces its build first, so this glob is reliably non-empty.
+         An empty glob means that ordering broke (reference dropped / output renamed / path changed) — fail LOUD here
+         rather than silently producing a proxy-less output that only the CI smoke or a runtime tool-less run catches. -->
+    <Error Condition="'@(McpProxyFiles)' == ''" Text="MCP proxy build output not found under $(McpProxyOutDir) (glob codespace-mcp*) — codespace-mcp would be missing from $(OutDir). Check the build-only ProjectReference to CodeSpace.Mcp." />
     <Copy SourceFiles="@(McpProxyFiles)" DestinationFolder="$(OutDir)" SkipUnchangedFiles="true" Condition="'@(McpProxyFiles)' != ''" />
   </Target>
 
@@ -56,6 +60,9 @@
     <ItemGroup>
       <McpProxyFiles Include="$(McpProxyOutDir)codespace-mcp*" />
     </ItemGroup>
+    <!-- Same loud-on-regression guard on the PUBLISH path: a proxy-less publish artifact would silently ship a
+         deployment whose MCP endpoint fails closed to a tool-less run — only the CI publish smoke catches it today. -->
+    <Error Condition="'@(McpProxyFiles)' == ''" Text="MCP proxy build output not found under $(McpProxyOutDir) (glob codespace-mcp*) — codespace-mcp would be missing from the publish artifact $(PublishDir). Check the build-only ProjectReference to CodeSpace.Mcp." />
     <Copy SourceFiles="@(McpProxyFiles)" DestinationFolder="$(PublishDir)" SkipUnchangedFiles="true" Condition="'@(McpProxyFiles)' != ''" />
   </Target>
 
