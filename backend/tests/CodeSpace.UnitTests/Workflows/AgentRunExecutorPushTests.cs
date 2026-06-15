@@ -1,8 +1,10 @@
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Agents;
+using CodeSpace.Core.Services.Agents.Sandbox.Runners;
 using CodeSpace.Core.Services.Agents.Workspace;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Enums;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Shouldly;
 
@@ -83,6 +85,107 @@ public sealed class AgentRunExecutorPushTests
         {
             Environment.SetEnvironmentVariable(AgentRunExecutor.McpEndpointEnabledEnvVar, original);
         }
+    }
+
+    // ─── Health / graceful degradation: the boot readiness diagnostic ────────
+
+    [Fact]
+    public void LogMcpProxyReadiness_warns_clearly_when_the_endpoint_is_on_but_the_proxy_is_missing()
+    {
+        WithMcpEnv(endpoint: "true", proxyPath: "/nonexistent/codespace-mcp", () =>
+        {
+            var logger = new CapturingLogger();
+
+            AgentRunExecutor.LogMcpProxyReadiness(logger);
+
+            var warning = logger.Entries.ShouldHaveSingleItem();
+            warning.Level.ShouldBe(LogLevel.Warning, customMessage: "a missing proxy under an enabled endpoint must be a clear fail-closed Warning, not silent");
+            warning.Message.ShouldContain("/nonexistent/codespace-mcp", customMessage: "the diagnostic names the resolved path the operator must fix");
+            warning.Message.ShouldContain("TOOL-LESS", customMessage: "the diagnostic states the consequence (runs fail closed to a tool-less run)");
+        });
+    }
+
+    [Fact]
+    public void LogMcpProxyReadiness_confirms_at_information_when_the_endpoint_is_on_and_the_proxy_resolves()
+    {
+        // /bin/sh always exists on the POSIX CI; on Windows fall back to any present file so the test is cross-host.
+        var presentBinary = OperatingSystem.IsWindows() ? Environment.ProcessPath! : "/bin/sh";
+
+        WithMcpEnv(endpoint: "true", proxyPath: presentBinary, () =>
+        {
+            var logger = new CapturingLogger();
+
+            AgentRunExecutor.LogMcpProxyReadiness(logger);
+
+            logger.Entries.ShouldHaveSingleItem().Level.ShouldBe(LogLevel.Information, customMessage: "a present proxy under an enabled endpoint is a confirming Information line");
+        });
+    }
+
+    [Fact]
+    public void LogMcpProxyReadiness_is_silent_when_the_endpoint_is_off()
+    {
+        WithMcpEnv(endpoint: null, proxyPath: "/nonexistent/codespace-mcp", () =>
+        {
+            var logger = new CapturingLogger();
+
+            AgentRunExecutor.LogMcpProxyReadiness(logger);
+
+            logger.Entries.ShouldBeEmpty(customMessage: "endpoint OFF → no proxy to warn about → no log (byte-identical to today)");
+        });
+    }
+
+    // ─── Proxy packaging CI smoke ────────────────────────────────────────────
+
+    [Fact]
+    public void The_codespace_mcp_proxy_binary_is_packaged_at_the_resolved_path()
+    {
+        // CI smoke: the proxy must be co-located with the running assembly at LocalProcessRunner.McpProxyBinaryPath()
+        // (the SAME default the API publish target lands it at via the build-only ProjectReference + copy target). This
+        // test bin gets it through the UnitTests project's ProjectReference to CodeSpace.Mcp — the same packaging
+        // mechanism. A regression (the copy target dropped, the assembly name changed) fails here, in always-run unit CI,
+        // BEFORE a deployment discovers a tool-less run. Skip the env override so we assert the DEFAULT resolution.
+        var original = Environment.GetEnvironmentVariable(LocalProcessRunner.McpProxyPathEnvVar);
+        try
+        {
+            Environment.SetEnvironmentVariable(LocalProcessRunner.McpProxyPathEnvVar, null);
+
+            File.Exists(LocalProcessRunner.McpProxyBinaryPath()).ShouldBeTrue(
+                customMessage: $"codespace-mcp must be packaged next to the assembly at '{LocalProcessRunner.McpProxyBinaryPath()}'. If this fails, the API csproj CopyMcpProxyToOutput/PublishMcpProxy target or the CodeSpace.Mcp ProjectReference regressed.");
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable(LocalProcessRunner.McpProxyPathEnvVar, original);
+        }
+    }
+
+    private static void WithMcpEnv(string? endpoint, string? proxyPath, Action body)
+    {
+        var prevEndpoint = Environment.GetEnvironmentVariable(AgentRunExecutor.McpEndpointEnabledEnvVar);
+        var prevProxy = Environment.GetEnvironmentVariable(LocalProcessRunner.McpProxyPathEnvVar);
+        try
+        {
+            Environment.SetEnvironmentVariable(AgentRunExecutor.McpEndpointEnabledEnvVar, endpoint);
+            Environment.SetEnvironmentVariable(LocalProcessRunner.McpProxyPathEnvVar, proxyPath);
+
+            body();
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable(AgentRunExecutor.McpEndpointEnabledEnvVar, prevEndpoint);
+            Environment.SetEnvironmentVariable(LocalProcessRunner.McpProxyPathEnvVar, prevProxy);
+        }
+    }
+
+    private sealed class CapturingLogger : ILogger
+    {
+        public List<(LogLevel Level, string Message)> Entries { get; } = new();
+
+        public IDisposable BeginScope<TState>(TState state) where TState : notnull => NullScope.Instance;
+        public bool IsEnabled(LogLevel logLevel) => true;
+        public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter) =>
+            Entries.Add((logLevel, formatter(state, exception)));
+
+        private sealed class NullScope : IDisposable { public static readonly NullScope Instance = new(); public void Dispose() { } }
     }
 
     // ─── Deterministic branch name ───────────────────────────────────────────

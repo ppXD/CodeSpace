@@ -16,7 +16,10 @@ namespace CodeSpace.Core.Services.Agents.Mcp;
 /// notification: the handler runs NOTHING and returns null (no reply). Protocol-level problems (malformed envelope,
 /// unknown method, bad params) use the JSON-RPC error channel; a well-formed call whose TOOL fails comes back as a
 /// normal result with <c>isError:true</c> so the model can read and retry. HandleAsync never throws except to
-/// propagate cancellation.
+/// propagate cancellation — the governance/approval path does DB writes + a chat-bot card post OUTSIDE the per-call
+/// tool try/catch, so <see cref="DispatchToolCallAsync"/> wraps the whole <c>tools/call</c> dispatch in a defensive
+/// catch that degrades a transient DB/chat fault to a retryable <c>isError</c> result rather than dropping the
+/// connection (NOT fail-open: a throw means the claim/approval gate never passed, so no side effect runs ungoverned).
 ///
 /// <para>Tool calls are gated by the run's autonomy tier via <see cref="AgentToolGate"/>: a gated (destructive)
 /// tool the tier does not permit comes back as a tool result with <c>isError:true</c> + a reason — never silently
@@ -129,9 +132,31 @@ public sealed class McpRequestHandler : IMcpRequestHandler
         {
             "initialize" => Serialize(JsonRpcResponse.Ok(id, InitializeResult())),
             "tools/list" => Serialize(JsonRpcResponse.Ok(id, ToolsListResult())),
-            "tools/call" => Serialize(await HandleToolCallAsync(id, request, cancellationToken).ConfigureAwait(false)),
+            "tools/call" => Serialize(await DispatchToolCallAsync(id, request, cancellationToken).ConfigureAwait(false)),
             _ => Serialize(JsonRpcResponse.Fail(id, Error(JsonRpcError.MethodNotFound, $"Method not found: {method}"))),
         };
+    }
+
+    /// <summary>
+    /// The defensive boundary around the tools/call path: the governance + durable-approval flow performs DB writes
+    /// (the ledger claim / approval CAS chain / state reads) and a chat-bot card post OUTSIDE the per-call
+    /// <c>tool.CallAsync</c> try/catch. A transient Postgres/chat fault on any of those would otherwise escape
+    /// <see cref="HandleAsync"/> (violating its "never throws except cancellation" contract), propagate out of the
+    /// framing loop, and drop the run's MCP connection for the rest of the turn. We degrade it instead to a RETRYABLE
+    /// tool result (isError) the model can re-issue — NOT fail-open (no side effect runs ungoverned: a throw means the
+    /// claim/approval gate never passed) and the visible-degradation posture is preserved. Cancellation still
+    /// propagates. The message routes through the <see cref="ToolResult"/> redactor choke point.
+    /// </summary>
+    private async Task<JsonRpcResponse> DispatchToolCallAsync(JsonElement id, JsonElement request, CancellationToken cancellationToken)
+    {
+        try
+        {
+            return await HandleToolCallAsync(id, request, cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return JsonRpcResponse.Ok(id, ToolResult(isError: true, "This tool call could not be governed right now; retry shortly."));
+        }
     }
 
     private async Task<JsonRpcResponse> HandleToolCallAsync(JsonElement id, JsonElement request, CancellationToken cancellationToken)

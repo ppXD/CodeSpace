@@ -66,6 +66,28 @@ public class AgentToolRegistryFlowTests
     }
 
     [Fact]
+    public void The_real_catalogs_read_only_set_is_exactly_the_curated_ungoverned_allowlist()
+    {
+        // FAIL-CLOSED SYSTEMIC PIN (governance integrity). A tool's IsReadOnly drives the read-only SHORT-CIRCUIT in
+        // McpRequestHandler that runs BEFORE the exactly-once ledger + AgentToolGate — i.e. read-only tools are
+        // ungoverned by construction. IsReadOnly is derived from NodeManifest.IsSideEffecting, which DEFAULTS false:
+        // a future tool-eligible node that forgets to mark itself side-effecting would silently project as read-only
+        // and thereby bypass governance entirely. This pin asserts the REAL DI catalog's read-only set is EXACTLY this
+        // curated allowlist. Adding a genuinely read-only tool is a CONSCIOUS one-line edit here; a side-effecting tool
+        // that forgot the flag shows up as an unexpected read-only entry and fails RED — surfacing the missing
+        // IsSideEffecting=true before it can ship as an ungoverned side effect.
+        using var scope = _fixture.BeginScope();
+        var registry = scope.Resolve<IAgentToolRegistry>();
+
+        var readOnlyKinds = registry.All.Where(t => t.IsReadOnly).Select(t => t.Kind).OrderBy(k => k).ToArray();
+
+        readOnlyKinds.ShouldBe(new[] { "git.fetch_pr_checks", "git.fetch_pr_diff", "git.list_prs" }, "the read-only (ledger-short-circuit, ungoverned) tool set must stay EXACTLY this curated allowlist — a new read-only tool is a conscious edit here; an unexpected entry means a side-effecting node forgot IsSideEffecting=true");
+
+        registry.All.Where(t => !t.IsReadOnly).ShouldAllBe(t => t.IsDestructive && t.RequiresApproval,
+            "every NON-read-only tool routes through the governed path — side-effecting, approval-gated by default");
+    }
+
+    [Fact]
     public void Git_merge_pr_is_projected_by_the_real_container_as_an_always_approve_destructive_tool()
     {
         // PIN over the REAL DI graph: git.merge_pr (irreversible) now projects onto the agent-tool surface — but as

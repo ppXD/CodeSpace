@@ -176,9 +176,16 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
 
             // Wire the live CLI to the fabric ONLY when the endpoint actually opened AND the harness declares an
             // MCP-server shape — a non-null endpoint already encodes "the flag is on AND the bind succeeded", so no
-            // second flag. Otherwise the spec carries no Mcp and the run is unchanged. The token rides the handle so a
+            // second flag. Otherwise the wiring is null and the run is unchanged. The token rides the handle so a
             // re-attach re-binds the same one the agent's declaration file already holds.
-            var spec = harness.BuildInvocation(effectiveTask) with { Mcp = BuildMcpWiring(agentRunId, mcp, harness, socketPath, token) };
+            var mcpWiring = BuildMcpWiring(agentRunId, mcp, harness, socketPath, token);
+
+            // When the declaration WAS written (the CLI will load the codespace server), merge the run's tier-permitted
+            // mcp__codespace__* tool names into the harness allow-list — so a run that set a RESTRICTED task.Tools still
+            // receives the governed tools the endpoint serves (today the harness projects ONLY task.Tools, so a restricted
+            // run couldn't call them). Additive + tier-filtered; a no-op when the author named no tools (the CLI default
+            // already reaches a declared MCP server's tools). Drives BuildInvocation off the augmented task.
+            var spec = harness.BuildInvocation(AugmentToolsForMcp(effectiveTask, mcp, mcpWiring)) with { Mcp = mcpWiring };
 
             // The MCP token rides the durable handle whenever the ENDPOINT opened (not only when a declaration was
             // written) so a re-attach re-binds the SAME socket+token — the detached agent's declaration file still
@@ -509,6 +516,31 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     internal static bool ShouldOpenMcpEndpoint(AgentTask task) => IsMcpEndpointEnabled() || task.EnableMcpEndpoint == true;
 
     /// <summary>
+    /// A BOOT diagnostic the worker host calls once at startup so a mis-configured tool fabric is VISIBLE at deploy time,
+    /// not silently discovered as a tool-less run hours later: when the endpoint is enabled deployment-wide
+    /// (<see cref="IsMcpEndpointEnabled"/>) but the <c>codespace-mcp</c> proxy binary can't be resolved at
+    /// <see cref="LocalProcessRunner.McpProxyBinaryPath"/>, log a clear Warning naming the resolved path + the override
+    /// env var; otherwise (endpoint enabled AND the binary present) log a confirming Information line. A no-op when the
+    /// endpoint is OFF (nothing to warn about). Pure logging — never throws, never fails boot (the fabric is optional
+    /// infra). The per-run <see cref="BuildMcpWiring"/> ALSO fail-closes + logs per run; this is the proactive deploy-time
+    /// half of the same fail-closed signal. Internal + static so it's unit-pinnable without a host.
+    /// </summary>
+    public static void LogMcpProxyReadiness(ILogger logger)
+    {
+        if (!IsMcpEndpointEnabled()) return;
+
+        var proxyPath = LocalProcessRunner.McpProxyBinaryPath();
+
+        if (File.Exists(proxyPath))
+        {
+            logger.LogInformation("MCP tool fabric enabled ({EnvVar}=on); codespace-mcp proxy resolved at '{ProxyPath}'", McpEndpointEnabledEnvVar, proxyPath);
+            return;
+        }
+
+        logger.LogWarning("MCP tool fabric is enabled ({EnvVar}=on) but the codespace-mcp proxy binary was NOT found at '{ProxyPath}'. Agent runs will fail closed to a TOOL-LESS run (no MCP wiring written). Publish the proxy alongside the worker or set {OverrideEnvVar} to its absolute path.", McpEndpointEnabledEnvVar, proxyPath, LocalProcessRunner.McpProxyPathEnvVar);
+    }
+
+    /// <summary>
     /// The run's per-run UDS socket path + a freshly-minted capability token, computed once so the endpoint listener,
     /// the harness's declaration file, and the durable handle (for a re-attach) all agree on the same pair. The socket
     /// path uses the SAME <see cref="LocalProcessRunner.McpSocketPathFor"/> the runner binds, so they match by
@@ -606,6 +638,22 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         var declaration = declarer.BuildMcpDeclaration(context);
 
         return new McpServerWiring { RelativeFileName = declaration.RelativeFileName, Content = declaration.Content, SocketPath = socketPath };
+    }
+
+    /// <summary>
+    /// Merge the run's tier-permitted <c>mcp__codespace__*</c> tool names into the task's harness allow-list — but ONLY
+    /// when the endpoint opened AND a declaration was actually written (a non-null <paramref name="wiring"/>: the CLI will
+    /// load the codespace server, so the names resolve). The endpoint computes the tier-filtered set from the SAME
+    /// registry + autonomy + server name it serves with, so the allow-list and the endpoint gate agree by construction.
+    /// Additive (the author's tools win order); tier-filtered (a Denied tool is never offered); a no-op when the author
+    /// named no tools (<see cref="McpAllowedTools.Augment"/> leaves a null/empty list untouched so the CLI default still
+    /// reaches the MCP tools). Returns the task UNCHANGED whenever the fabric isn't actually serving — byte-identical.
+    /// </summary>
+    private static AgentTask AugmentToolsForMcp(AgentTask task, AgentMcpEndpoint? endpoint, McpServerWiring? wiring)
+    {
+        if (endpoint is null || wiring is null) return task;
+
+        return task with { Tools = McpAllowedTools.Augment(task.Tools, endpoint.AllowedToolNames()) };
     }
 
     /// <summary>

@@ -680,6 +680,12 @@ public class McpRequestHandlerTests
         public List<(Guid LedgerId, Guid TeamId, ToolCallLedgerStatus Status, string? ResultJson, string? Error)> Terminals { get; } = new();
         public Func<ToolCallClaim>? ClaimResult { get; init; }
 
+        /// <summary>When set, TryClaimAsync THROWS this (a transient DB fault) instead of returning — the defensive-boundary test seam.</summary>
+        public Func<Exception>? OnClaimThrow { get; init; }
+
+        /// <summary>When set, TryBeginApprovalAsync THROWS this (a transient DB fault) instead of returning — the defensive-boundary test seam for the approval path.</summary>
+        public Func<Exception>? OnBeginApprovalThrow { get; init; }
+
         /// <summary>When set, RecordTerminalAsync throws this BEFORE recording — simulating a lost CAS / already-terminal row (FIX 2 replay path).</summary>
         public Func<ToolCallLedgerTransitionException>? OnRecordThrow { get; init; }
 
@@ -689,6 +695,9 @@ public class McpRequestHandlerTests
         public Task<ToolCallClaim> TryClaimAsync(Guid agentRunId, Guid teamId, string toolKind, string idempotencyKey, string inputHash, long fenceEpoch, CancellationToken ct)
         {
             Claims.Add((agentRunId, teamId, toolKind, idempotencyKey, inputHash, fenceEpoch));
+
+            if (OnClaimThrow is { } make) throw make();
+
             return Task.FromResult(ClaimResult?.Invoke() ?? ToolCallClaim.Proceed(Guid.NewGuid()));
         }
 
@@ -700,8 +709,12 @@ public class McpRequestHandlerTests
             return Task.CompletedTask;
         }
 
-        public Task<bool> TryBeginApprovalAsync(Guid ledgerId, Guid teamId, string approvalToken, DateTimeOffset deadlineAt, CancellationToken ct) =>
-            Task.FromResult(false);
+        public Task<bool> TryBeginApprovalAsync(Guid ledgerId, Guid teamId, string approvalToken, DateTimeOffset deadlineAt, CancellationToken ct)
+        {
+            if (OnBeginApprovalThrow is { } make) throw make();
+
+            return Task.FromResult(false);
+        }
 
         public Task SetApprovalMessageAsync(Guid ledgerId, Guid teamId, Guid messageId, CancellationToken ct) => Task.CompletedTask;
 
@@ -869,6 +882,72 @@ public class McpRequestHandlerTests
         tool.CallCount.ShouldBe(1, "the side effect ran exactly once (the lost CAS is on the record, not the call)");
         resp.GetProperty("result").GetProperty("isError").GetBoolean().ShouldBeFalse();
         resp.GetProperty("result").GetProperty("content")[0].GetProperty("text").GetString().ShouldContain("merged", customMessage: "the recorded terminal is re-read and replayed verbatim");
+    }
+
+    // ── governance defensive boundary (a transient DB/chat fault degrades to a retryable result, never drops the connection) ──
+
+    [Fact]
+    public async Task Governance_ON_a_transient_ledger_claim_fault_yields_a_retryable_isError_result_and_HandleAsync_does_not_throw()
+    {
+        // The PRODUCTION-POSTURE blocker: the ledger claim runs OUTSIDE the per-call tool.CallAsync try/catch. A
+        // transient Postgres/Npgsql fault on TryClaimAsync would otherwise escape HandleAsync (its "never throws except
+        // cancellation" contract), propagate out of the framing loop, and drop the run's MCP connection for the rest of
+        // the turn. The defensive boundary must degrade it to a retryable tool result (isError) instead — NOT fail-open
+        // (the tool never runs: the claim gate never passed), NOT a JSON-RPC protocol error.
+        var ledger = new SpyLedger { OnClaimThrow = () => new InvalidOperationException("transient Npgsql connection reset") };
+        var tool = new FakeTool { Kind = "git.merge_pr", IsDestructiveOverride = true };
+
+        JsonElement resp = default;
+        await Should.NotThrowAsync(async () => resp = await Respond(GovernedHandler(ledger, governanceEnabled: true, tool), Call("git.merge_pr", "{}")));
+
+        resp.TryGetProperty("error", out _).ShouldBeFalse("a governance fault is a tool result, not a JSON-RPC protocol error");
+        var result = resp.GetProperty("result");
+        result.GetProperty("isError").GetBoolean().ShouldBeTrue();
+        result.GetProperty("content")[0].GetProperty("text").GetString().ShouldContain("retry", customMessage: "the model must see a retryable signal, not a dropped connection");
+        tool.CallCount.ShouldBe(0, "a claim fault means the gate never passed — the side effect must NOT run (not fail-open)");
+        ledger.Claims.ShouldHaveSingleItem("the claim was attempted (it threw); no terminal was recorded");
+        ledger.Terminals.ShouldBeEmpty();
+    }
+
+    [Fact]
+    public async Task Governance_ON_a_transient_approval_begin_fault_yields_a_retryable_isError_result_and_HandleAsync_does_not_throw()
+    {
+        // Same defensive boundary, but on the durable-approval path: TryBeginApprovalAsync (the CAS that parks the call
+        // for human sign-off) throws a transient fault. A RequireApproval tier with a SERVABLE approval surface reaches
+        // it; the throw must degrade to the retryable tool result, never escape HandleAsync, never run the tool.
+        var ledger = new SpyLedger
+        {
+            ClaimResult = () => ToolCallClaim.Proceed(Guid.NewGuid()),   // fresh claim → park path → TryBeginApprovalAsync
+            OnBeginApprovalThrow = () => new InvalidOperationException("transient Npgsql connection reset"),
+        };
+        var bot = new StubBot { ConversationInTeam = true };
+        var tool = new FakeTool { Kind = "git.merge_pr", IsDestructiveOverride = true };
+
+        JsonElement resp = default;
+        await Should.NotThrowAsync(async () => resp = await Respond(ApprovalHandler(ledger, bot, tool), Call("git.merge_pr", "{}")));
+
+        resp.TryGetProperty("error", out _).ShouldBeFalse("an approval-path fault is a tool result, not a JSON-RPC protocol error");
+        var result = resp.GetProperty("result");
+        result.GetProperty("isError").GetBoolean().ShouldBeTrue();
+        result.GetProperty("content")[0].GetProperty("text").GetString().ShouldContain("retry");
+        tool.CallCount.ShouldBe(0, "an approval-begin fault means the call never parked or approved — the side effect must NOT run");
+    }
+
+    [Fact]
+    public async Task Governance_ON_a_transient_fault_still_redacts_the_degraded_message_through_the_choke_point()
+    {
+        // The defensive boundary's message goes through ToolResult — the single redactor choke point — so even were the
+        // canned phrase ever to carry a secret-shaped fragment, it would be masked. Here the redactor is wired and the
+        // degraded result must contain no value the redactor would mask (control: a redactor that masks the literal
+        // "retry" proves the message flowed through it).
+        var ledger = new SpyLedger { OnClaimThrow = () => new InvalidOperationException("transient fault") };
+        var tool = new FakeTool { Kind = "git.merge_pr", IsDestructiveOverride = true };
+        var handler = new McpRequestHandler(new FakeRegistry(tool), AgentAutonomyLevel.Unleashed, Guid.NewGuid(), new SecretRedactor(new[] { "retry" }), Guid.NewGuid(), ledger, fenceEpoch: 1, governanceEnabled: true);
+
+        var text = (await Respond(handler, Call("git.merge_pr", "{}"))).GetProperty("result").GetProperty("content")[0].GetProperty("text").GetString();
+
+        text.ShouldNotContain("retry", customMessage: "the degraded message must flow through the redactor choke point");
+        text!.ShouldContain(SecretRedactor.Placeholder);
     }
 
     // ── durable approval: cross-tenant guard + exactly-once-after-approve execution claim ──

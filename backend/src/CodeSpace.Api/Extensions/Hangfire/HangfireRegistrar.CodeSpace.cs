@@ -1,7 +1,10 @@
 using CodeSpace.Core.Constants;
 using CodeSpace.Core.Jobs;
+using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Jobs;
 using Hangfire;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 using Serilog;
 
 namespace CodeSpace.Api.Extensions.Hangfire;
@@ -79,6 +82,13 @@ public class CodeSpaceHangfireRegistrar : HangfireRegistrarBase
             Log.Information("Hangfire processing disabled ({EnvVar}={Value}): this pod enqueues but does not process jobs", ProcessingEnabledEnvVar, Environment.GetEnvironmentVariable(ProcessingEnabledEnvVar));
             return;
         }
+
+        // WORKER-ONLY: agent runs (and thus the per-run MCP endpoint) execute only on a processing pod, so the
+        // deploy-time tool-fabric readiness diagnostic belongs here — a public (non-processing) pod never opens an
+        // endpoint, so a missing proxy binary there is irrelevant. Surfaces a clear Warning when the endpoint is
+        // enabled but the codespace-mcp proxy is missing (fail-closed → tool-less runs), so it's caught at boot, not
+        // hours later. No-op + never-throws when the endpoint is off.
+        AgentRunExecutor.LogMcpProxyReadiness(app.ApplicationServices.GetRequiredService<ILoggerFactory>().CreateLogger<AgentRunExecutor>());
 
         // A non-processing pod must NOT own recurring-job scheduling/execution.
         ScanHangfireRecurringJobs(app);

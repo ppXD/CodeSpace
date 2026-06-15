@@ -100,6 +100,17 @@ public sealed class AgentMcpEndpoint : IAsyncDisposable
         _acceptLoop = AcceptLoopAsync(_cts.Token);
     }
 
+    /// <summary>
+    /// The fully-qualified <c>mcp__codespace__&lt;Kind&gt;</c> names of every registry tool this run's autonomy tier can
+    /// call — the additive, tier-filtered set the executor MERGES into a CLI harness's <c>--allowed-tools</c> so a run
+    /// with a restricted author tool list still reaches the governed codespace tools the open endpoint serves. Computed
+    /// from the SAME registry + autonomy this endpoint serves with (and the SAME server name the handler advertises), so
+    /// the allow-list and the endpoint gate agree by construction. A tool the tier is Denied is omitted (never offered a
+    /// name it would be refused).
+    /// </summary>
+    public IReadOnlyList<string> AllowedToolNames() =>
+        McpAllowedTools.QualifiedNames(_registry.All, _autonomy, McpRequestHandler.ServerName).ToArray();
+
     public async ValueTask DisposeAsync()
     {
         if (_disposed) return;

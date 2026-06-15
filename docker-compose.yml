@@ -36,5 +36,44 @@ services:
       timeout: 3s
       retries: 10
 
+  # The CodeSpace API/worker. Commented out by default so the local-dev flow stays "compose up Postgres +
+  # `dotnet run`" — uncomment (or `docker compose --profile app up`) to run the full stack in containers. This
+  # service is the place the production MCP tool-fabric POSTURE lives: a Hangfire processing pod (it leaves
+  # CODESPACE_HANGFIRE_PROCESSING_ENABLED unset → default-ON), so agent runs — and the per-run MCP endpoint — execute
+  # HERE. The MCP endpoint + tool governance are turned ON for this WORKER via the env flags below; the code defaults
+  # stay fail-closed default-OFF (the unit-pinned flag constants are unchanged), so a deployment that does NOT set
+  # these env vars is byte-identical to today. Every flag is ${VAR:-default} → env-overridable per environment.
+  #
+  # SAFETY: read-only tools (the registry's IsReadOnly tools) are served UNCONDITIONALLY — McpRequestHandler
+  # short-circuits IsReadOnly BEFORE the governance ledger, so listing/reading never needs approval or a ledger row.
+  # Side-effecting tools route through the exactly-once ToolCallLedger + the AgentToolGate approval matrix
+  # (fail-closed: an un-approvable destructive tool is refused, never silently run). A public-facing (non-worker)
+  # pod would additionally set CODESPACE_HANGFIRE_PROCESSING_ENABLED=false so it serves HTTP but runs no agent/MCP.
+  api:
+    profiles: ["app"]
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: codespace-api
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "5099:8080"
+    environment:
+      ASPNETCORE_ENVIRONMENT: Production
+      ASPNETCORE_URLS: http://+:8080
+      CodeSpaceStore__ConnectionString: "Host=postgres;Port=5432;Database=codespace;Username=codespace;Password=codespace"
+      # ── MCP tool-fabric POSTURE (worker-only; this service IS the worker) ──────────────────────────────────
+      # Open the per-run MCP endpoint for every agent run (the governed tool fabric the CLI harness reaches).
+      CODESPACE_AGENT_MCP_ENDPOINT_ENABLED: "${CODESPACE_AGENT_MCP_ENDPOINT_ENABLED:-true}"
+      # Route side-effecting tool calls through the exactly-once ledger + durable HITL approval. Read-only tools
+      # are unaffected (served before the ledger). Default-ON here so the governance closed-loop actually runs.
+      CODESPACE_AGENT_TOOL_GOVERNANCE_ENABLED: "${CODESPACE_AGENT_TOOL_GOVERNANCE_ENABLED:-true}"
+      # The codespace-mcp proxy is published next to the API by the csproj target, so the default path resolves;
+      # set this only to point at an air-gapped mirror or a custom location.
+      CODESPACE_MCP_PROXY_PATH: "${CODESPACE_MCP_PROXY_PATH:-}"
+
 volumes:
   codespace-pgdata:
