@@ -14,9 +14,11 @@
 -- for AUDIT/forensics — the single-winner guarantee is FIRST-WRITER-WINS on `status` (the status-guarded CAS
 -- transitions, esp. the Pending → Running claim BEFORE the side effect), NOT an epoch comparison.
 --
--- The JOURNAL fields (payload_jsonb, sequence, decision_kind, idempotency_key) are FROZEN at insert; the STATUS PATH
--- (status, outcome_jsonb, error) is the deliberately-mutable CAS path. A BEFORE UPDATE OR DELETE trigger enforces that
--- split (mirrors 0015's append-only pattern, refined to a frozen-vs-CAS column split). The `AwaitingApproval` status is
+-- The JOURNAL + IDENTITY fields (payload_jsonb, sequence, decision_kind, idempotency_key, team_id, supervisor_run_id,
+-- fence_epoch) are FROZEN at insert; the STATUS PATH (status, outcome_jsonb, error) is the deliberately-mutable CAS
+-- path. A BEFORE UPDATE OR DELETE trigger enforces that split (mirrors 0015's append-only pattern, refined to a
+-- frozen-vs-CAS column split). Freezing the identity columns too means a decision can never be re-tenanted or re-homed
+-- to another run by a stray UPDATE — defense-in-depth on the tenancy boundary. The `AwaitingApproval` status is
 -- reserved for a later HITL slice — unused by E1.
 --
 -- PURE SUBSTRATE: nothing writes this table until the supervisor node/loop wiring lands (E2). A brand-new table,
@@ -47,7 +49,11 @@ CREATE TABLE IF NOT EXISTS supervisor_decision (
 CREATE UNIQUE INDEX IF NOT EXISTS ux_supervisor_decision_run_key ON supervisor_decision(supervisor_run_id, idempotency_key);
 
 -- The replay tape: a run's decisions in BIGSERIAL order. Every replay/audit read traverses this index.
-CREATE INDEX IF NOT EXISTS idx_sd_run_sequence ON supervisor_decision(supervisor_run_id, sequence);
+CREATE INDEX IF NOT EXISTS idx_supervisor_decision_run_sequence ON supervisor_decision(supervisor_run_id, sequence);
+
+-- The reaper's candidate scan (ExpireStalePendingAsync: status = 'Pending' AND created_date < cutoff). A PARTIAL index
+-- on the stale-Pending predicate keeps the recurring sweep O(stale) not O(table) once the ledger grows.
+CREATE INDEX IF NOT EXISTS idx_supervisor_decision_pending_created ON supervisor_decision(created_date) WHERE status = 'Pending';
 
 -- ─── Frozen-vs-CAS immutability trigger ────────────────────────────────────────
 -- The JOURNAL fields are frozen-at-insert; the status path is the deliberately-mutable CAS path. A DB-layer trigger
@@ -64,13 +70,17 @@ BEGIN
             OLD.supervisor_run_id, OLD.sequence, OLD.decision_kind;
     END IF;
 
-    IF (NEW.payload_jsonb     IS DISTINCT FROM OLD.payload_jsonb
-        OR NEW.sequence       IS DISTINCT FROM OLD.sequence
-        OR NEW.decision_kind  IS DISTINCT FROM OLD.decision_kind
-        OR NEW.idempotency_key IS DISTINCT FROM OLD.idempotency_key) THEN
+    IF (NEW.payload_jsonb      IS DISTINCT FROM OLD.payload_jsonb
+        OR NEW.sequence        IS DISTINCT FROM OLD.sequence
+        OR NEW.decision_kind   IS DISTINCT FROM OLD.decision_kind
+        OR NEW.idempotency_key IS DISTINCT FROM OLD.idempotency_key
+        OR NEW.team_id         IS DISTINCT FROM OLD.team_id
+        OR NEW.supervisor_run_id IS DISTINCT FROM OLD.supervisor_run_id
+        OR NEW.fence_epoch     IS DISTINCT FROM OLD.fence_epoch) THEN
         RAISE EXCEPTION
-            'supervisor_decision journal fields are frozen at insert — UPDATE of payload_jsonb/sequence/decision_kind/'
-            'idempotency_key rejected (run=%, sequence=%, kind=%). Only the status path (status/outcome_jsonb/error) is mutable.',
+            'supervisor_decision journal + identity fields are frozen at insert — UPDATE of payload_jsonb/sequence/'
+            'decision_kind/idempotency_key/team_id/supervisor_run_id/fence_epoch rejected (run=%, sequence=%, kind=%). '
+            'Only the status path (status/outcome_jsonb/error) is mutable.',
             OLD.supervisor_run_id, OLD.sequence, OLD.decision_kind;
     END IF;
 

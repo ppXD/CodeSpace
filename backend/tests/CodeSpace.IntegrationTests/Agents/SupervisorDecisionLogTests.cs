@@ -251,6 +251,11 @@ public class SupervisorDecisionLogTests
             ExecRawAsync("UPDATE supervisor_decision SET payload_jsonb = '{\"tampered\":true}'::jsonb WHERE id = @id", decisionId));
         journalUpdate.MessageText.ShouldContain("frozen", Case.Insensitive, "the trigger names the frozen-journal contract it enforced");
 
+        // An IDENTITY-column UPDATE (team_id) is rejected too — a decision can never be re-tenanted by a stray UPDATE
+        // (defense-in-depth on the tenancy boundary; team_id/supervisor_run_id/fence_epoch are frozen alongside the journal).
+        await Should.ThrowAsync<PostgresException>(() =>
+            ExecRawAsync("UPDATE supervisor_decision SET team_id = @id WHERE id = @id", decisionId));
+
         // A DELETE is rejected too — the ledger is permanent audit.
         await Should.ThrowAsync<PostgresException>(() =>
             ExecRawAsync("DELETE FROM supervisor_decision WHERE id = @id", decisionId));

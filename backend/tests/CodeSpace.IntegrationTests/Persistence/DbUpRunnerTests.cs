@@ -95,7 +95,8 @@ public class DbUpRunnerTests
     [InlineData("idx_tool_call_ledger_due_approvals", "0051_tool_call_ledger_due_approvals_index.sql")] // D3 reaper: partial index matching its undecided-past-deadline predicate (no full-table scan)
     [InlineData("idx_agent_run_inflight", "0052_agent_run_inflight_index.sql")]                          // D4a admission gate: partial (team_id) WHERE status IN ('Queued','Running') — serves both the team-scoped + global in-flight counts on the hot creation path
     [InlineData("ux_supervisor_decision_run_key", "0053_supervisor_decision.sql")]                       // PR-E E1: the exactly-once invariant — UNIQUE (supervisor_run_id, idempotency_key)
-    [InlineData("idx_sd_run_sequence", "0053_supervisor_decision.sql")]                                  // the replay tape — (supervisor_run_id, sequence)
+    [InlineData("idx_supervisor_decision_run_sequence", "0053_supervisor_decision.sql")]                 // the replay tape — (supervisor_run_id, sequence)
+    [InlineData("idx_supervisor_decision_pending_created", "0053_supervisor_decision.sql")]              // the reaper's partial index — created_date WHERE status='Pending'
     public async Task Index_exists_after_migration(string indexName, string addedBy)
     {
         var exists = await IndexExistsAsync(indexName).ConfigureAwait(false);
