@@ -36,15 +36,17 @@ namespace CodeSpace.Core.Services.Supervisor.Executors;
 /// </summary>
 public sealed partial class RealSupervisorActionExecutor
 {
-    /// <summary>Ask the human: post the question card + park on the single Action wait, or re-park on the existing wait a prior crashed pass already posted (no double-ask), or degrade when no usable conversation is authored.</summary>
+    /// <summary>Ask the human: post the question card + park on the single Action wait; or, on a crash-recovery re-entry where this turn's wait already exists, EITHER re-park on the still-pending wait (no double-ask) OR — when the human already answered while the decision was stuck non-terminal — fold that answer in + self-advance (never re-park on a Resolved wait that will never be resumed again); or degrade when no usable conversation is authored.</summary>
     private async Task<SupervisorExecution> ExecuteAskHumanAsync(SupervisorDecision decision, SupervisorTurnContext context, CancellationToken cancellationToken)
     {
         var ask = Deserialize<SupervisorAskHumanPayload>(decision.PayloadJson) ?? new SupervisorAskHumanPayload { Question = "" };
 
-        var existingToken = await ExistingTurnAskWaitTokenAsync(context, cancellationToken).ConfigureAwait(false);
+        var existing = await ExistingTurnAskWaitAsync(context, cancellationToken).ConfigureAwait(false);
 
-        if (existingToken != null)
-            return ReparkOnExistingAsk(context, ask.Question, existingToken);
+        if (existing is { } wait)
+            return wait.Status == WorkflowWaitStatuses.Resolved
+                ? AdvanceWithResolvedAnswer(context, ask.Question, wait.Token, wait.PayloadJson)
+                : ReparkOnExistingAsk(context, ask.Question, wait.Token);
 
         if (!await CanPostToConversationAsync(context, cancellationToken).ConfigureAwait(false))
             return DegradeNoSurface(ask.Question);
@@ -78,6 +80,23 @@ public sealed partial class RealSupervisorActionExecutor
         return SupervisorExecution.ParkedOnHuman(AskOutcome(question, token, answer: null), token);
     }
 
+    /// <summary>
+    /// Crash-recovery where THIS turn's ask wait already exists AND is RESOLVED: the human answered while the
+    /// decision was stuck non-terminal (a crash landed after the card+wait committed but before the terminal
+    /// record, then the answer resolved the wait before the run was re-dispatched). Re-parking here would suspend
+    /// on an already-Resolved wait that the resume path will never fire again → permanent hang; recording
+    /// <c>answer:null</c> would clobber the human's durable answer. Instead fold the answer into the outcome +
+    /// self-advance — the next turn's decider proceeds with "you asked X, the human answered Y" in context.
+    /// </summary>
+    private SupervisorExecution AdvanceWithResolvedAnswer(SupervisorTurnContext context, string question, string token, string? waitPayloadJson)
+    {
+        var answer = SupervisorOutcome.ReadAnswerComment(waitPayloadJson);
+
+        _logger.LogInformation("Supervisor ask_human wait at turn {Turn} on node {NodeId} was already resolved during a crash-recovery re-entry — folding the human's answer + self-advancing (no re-park on the resolved wait)", context.TurnNumber, context.NodeId);
+
+        return SupervisorExecution.Synchronous(AskOutcome(question, token, answer));
+    }
+
     /// <summary>No usable conversation (none authored, or the tenancy check failed) → degrade to a SYNCHRONOUS no-surface outcome so the node self-advances rather than hanging on a card no one can answer.</summary>
     private SupervisorExecution DegradeNoSurface(string question)
     {
@@ -93,13 +112,16 @@ public sealed partial class RealSupervisorActionExecutor
         context.ConversationId is { } conversationId
         && await _bot.ConversationBelongsToTeamAsync(conversationId, context.TeamId, cancellationToken).ConfigureAwait(false);
 
-    /// <summary>This turn's already-staged ask_human Action wait token, or null when none — the recovery anchor for a crash AFTER the card + wait committed but before the terminal was recorded.</summary>
-    private async Task<string?> ExistingTurnAskWaitTokenAsync(SupervisorTurnContext context, CancellationToken cancellationToken) =>
+    /// <summary>This turn's already-staged ask_human Action wait (token + status + resolved payload), or null when none — the recovery anchor for a crash AFTER the card + wait committed but before the terminal was recorded. The status distinguishes a still-Pending wait (re-park, no double-ask) from one the human already Resolved (fold the answer + self-advance — never re-park on a wait the resume path won't fire again).</summary>
+    private async Task<ExistingAskWait?> ExistingTurnAskWaitAsync(SupervisorTurnContext context, CancellationToken cancellationToken) =>
         await _db.WorkflowRunWait.AsNoTracking()
             .Where(w => w.RunId == context.SupervisorRunId && w.NodeId == context.NodeId
                         && w.WaitKind == WorkflowWaitKinds.Action && w.IterationKey == SupervisorOutcome.HumanWaitKey(context.NodeId, context.TurnNumber))
-            .Select(w => w.Token)
+            .Select(w => new ExistingAskWait(w.Token, w.Status, w.PayloadJson))
             .FirstOrDefaultAsync(cancellationToken).ConfigureAwait(false);
+
+    /// <summary>This turn's existing ask_human Action wait, read on a crash-recovery re-entry: the correlation token, the wait status (Pending → re-park; Resolved → fold + self-advance), and the resolved payload (the human's <c>{ action, by, comment }</c> answer, null while Pending). A reference type so an empty <c>FirstOrDefaultAsync</c> projection reads as null (a struct would project to a non-null default).</summary>
+    private sealed record ExistingAskWait(string Token, string Status, string? PayloadJson);
 
     /// <summary>Stage the single Action wait the ask_human turn parks on, keyed <c>&lt;nodeId&gt;#turn{N}#ask</c>. Token = the card's correlation token (the human's answer via ResumeByActionTokenAsync resolves the wait by it). Distinct per turn → no collision with a later ask_human.</summary>
     private void StageAskWait(SupervisorTurnContext context, string token)

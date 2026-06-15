@@ -36,6 +36,10 @@ namespace CodeSpace.IntegrationTests.Workflows;
 ///   <item>RESTART-WHILE-PARKED: drive to the ask park, then re-dispatch the Suspended run (the crash-recovery
 ///         path) — it re-parks on the SAME Action wait with NO duplicate question card posted, then the answer
 ///         resumes it.</item>
+///   <item>CRASH-AFTER-WAIT-BEFORE-TERMINAL + CONCURRENT ANSWER: a crash leaves the ask_human decision stuck
+///         Running, then the human answers (resolving the wait) before re-dispatch — the recovery folds the
+///         answer + self-advances to Success rather than re-parking on the already-resolved wait (which would
+///         hang forever) or clobbering the answer to null.</item>
 /// </list>
 /// </summary>
 [Collection(PostgresCollection.Name)]
@@ -193,6 +197,68 @@ public class SupervisorAskHumanFlowTests : IDisposable
 
             var stop = (await Ledger(db, runId, teamId)).Single(d => d.DecisionKind == SupervisorDecisionKinds.Stop);
             JsonDocument.Parse(stop.OutcomeJson!).RootElement.GetProperty("summary").GetString().ShouldBe("human said: rewrite");
+        }
+    }
+
+    [Fact]
+    public async Task A_crash_after_the_wait_but_before_terminal_then_an_answer_recovers_to_success_with_the_answer_preserved()
+    {
+        var (teamId, userId, conversationId) = await SeedTeamWithConversationAsync();
+        var runId = await CreateSupervisorRunAsync(teamId, userId, conversationId);
+
+        var jobClient = ResolveJobClient();
+        jobClient.Clear();
+
+        // Drive to the ask park: turn 0 ask_human posts a card + parks on the Action wait.
+        await RunEngineAsync(runId);
+
+        string token;
+        using (var verify = _fixture.BeginScope())
+        {
+            var db = verify.Resolve<CodeSpaceDbContext>();
+            token = (await db.WorkflowRunWait.AsNoTracking().SingleAsync(w => w.RunId == runId && w.WaitKind == WorkflowWaitKinds.Action && w.Status == WorkflowWaitStatuses.Pending)).Token;
+        }
+
+        // SIMULATE THE CRASH SUB-WINDOW: a crash landed after the executor committed the card + Action wait but
+        // BEFORE RecordTerminalAsync, leaving the ask_human decision row stuck Running (the reaper only sweeps
+        // Pending; the stuck-run reconciler only touches WorkflowRun). Force the ledger row back to Running to
+        // reproduce exactly that residue.
+        using (var scope = _fixture.BeginScope())
+        {
+            await scope.Resolve<CodeSpaceDbContext>().SupervisorDecisionRecord
+                .Where(d => d.SupervisorRunId == runId && d.DecisionKind == SupervisorDecisionKinds.AskHuman)
+                .ExecuteUpdateAsync(s => s.SetProperty(d => d.Status, SupervisorDecisionStatus.Running));
+        }
+
+        // The human answers (resolves the wait → Resolved) WHILE the decision is still stuck Running. The real
+        // resume path re-dispatches the run; drive the engine to recover. The recovered turn folds the answer +
+        // self-advances onto a SupervisorDecision wait; drain its post-commit re-dispatch so turn 1 (stop) runs.
+        await AnswerAsync(token, "patch it", userId, teamId);
+        await RunEngineAsync(runId);
+        await jobClient.WaitForPendingAsync();
+
+        using (var verify = _fixture.BeginScope())
+        {
+            var db = verify.Resolve<CodeSpaceDbContext>();
+
+            // The recovery does NOT re-park on the already-Resolved wait (which would never be resumed again →
+            // permanent hang). It folds the answer + self-advances → turn 1 stop → Success.
+            (await db.WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == runId)).Status
+                .ShouldBe(WorkflowRunStatus.Success, "the crash-then-answer sub-window recovers to Success — NOT Suspended-forever on a resolved wait");
+
+            // The human's durable answer is PRESERVED in the terminal ask_human outcome — never clobbered to null.
+            var ask = (await Ledger(db, runId, teamId)).Single(d => d.DecisionKind == SupervisorDecisionKinds.AskHuman);
+            ask.Status.ShouldBe(SupervisorDecisionStatus.Succeeded, "the recovered decision settled terminal (Running → Succeeded)");
+            SupervisorOutcome.ReadAskHumanAnswer(ask.OutcomeJson).ShouldBe("patch it", "the answer is preserved in the outcome — NOT clobbered to null by a blind re-park");
+
+            // The answer reached the next turn's context (the decider echoed it into the stop summary).
+            var stop = (await Ledger(db, runId, teamId)).Single(d => d.DecisionKind == SupervisorDecisionKinds.Stop);
+            JsonDocument.Parse(stop.OutcomeJson!).RootElement.GetProperty("summary").GetString()
+                .ShouldBe("human said: patch it", "turn 1's decider saw the recovered answer in its context");
+
+            // Still exactly one question card — the recovery never re-posted.
+            (await db.Message.AsNoTracking().IgnoreQueryFilters().CountAsync(m => m.ConversationId == conversationId && m.InteractionJson != null && m.DeletedDate == null))
+                .ShouldBe(1, "exactly one question card — the crash-recovery never re-posted");
         }
     }
 

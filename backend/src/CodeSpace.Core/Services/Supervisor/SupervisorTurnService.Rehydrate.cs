@@ -101,32 +101,13 @@ public sealed partial class SupervisorTurnService
         var answers = new Dictionary<string, string>();
 
         foreach (var wait in resolved)
-            answers[wait.Token] = ReadAnswerComment(wait.PayloadJson);
+            answers[wait.Token] = SupervisorOutcome.ReadAnswerComment(wait.PayloadJson);
 
         return answers;
     }
 
     /// <summary>The shared empty answers map for the common no-ask_human rehydrate — keeps that path allocation-light + DB-free.</summary>
     private static readonly IReadOnlyDictionary<string, string> EmptyAnswers = new Dictionary<string, string>();
-
-    /// <summary>Read the human's free-text answer (the <c>comment</c>) from a resolved Action wait's <c>{ action, by, comment }</c> payload. Empty string when absent/malformed (a click with no comment).</summary>
-    private static string ReadAnswerComment(string? payloadJson)
-    {
-        if (string.IsNullOrWhiteSpace(payloadJson)) return "";
-
-        try
-        {
-            var root = JsonDocument.Parse(payloadJson).RootElement;
-
-            return root.ValueKind == JsonValueKind.Object && root.TryGetProperty("comment", out var c) && c.ValueKind == JsonValueKind.String
-                ? c.GetString() ?? ""
-                : "";
-        }
-        catch (JsonException)
-        {
-            return "";
-        }
-    }
 
     public async Task<int> CountPendingAgentWaitsAsync(Guid supervisorRunId, string nodeId, CancellationToken cancellationToken) =>
         await _db.WorkflowRunWait.AsNoTracking()
