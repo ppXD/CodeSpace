@@ -46,4 +46,19 @@ public interface ITaskRecipe
 
     /// <summary>The phase labels this recipe recommends — a UI hint for the run's phase tree.</summary>
     IReadOnlyList<string> RecommendedPhaseLabels { get; }
+
+    /// <summary>
+    /// The OPEN-STRING deployment capability this recipe's projection needs at EXECUTION (a
+    /// <c>TaskCapabilities</c> value an <c>ICapabilityProbe</c> answers for); null = none needed. A recipe
+    /// DECLARES its own precondition here (Rule 7 — cohesive recipe metadata, not a wider router concern): the
+    /// router checks the probe registry and, when the capability is unavailable, degrades to
+    /// <see cref="DegradesToRecipe"/> rather than projecting a run that would fail its own execution-time gate.
+    /// </summary>
+    string? RequiresCapability { get; }
+
+    /// <summary>
+    /// The OPEN-STRING recipe kind to fall back to when <see cref="RequiresCapability"/> is unavailable; null =
+    /// fall to the registry <c>Default</c>. The data the router's degrade step reads (no hardcoded fallback map).
+    /// </summary>
+    string? DegradesToRecipe { get; }
 }

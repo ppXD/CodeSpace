@@ -29,4 +29,8 @@ public sealed class SingleAgentRecipe : ITaskRecipe, ISingletonDependency
     public bool RequiresPlanReview => false;
 
     public IReadOnlyList<string> RecommendedPhaseLabels => new[] { "Run the task" };
+
+    public string? RequiresCapability => null;
+
+    public string? DegradesToRecipe => null;
 }

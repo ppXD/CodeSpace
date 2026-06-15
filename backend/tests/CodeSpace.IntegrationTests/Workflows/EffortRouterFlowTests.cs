@@ -57,8 +57,9 @@ public class EffortRouterFlowTests
         var workflowCountBefore = await CountWorkflowsAsync(teamId);
         var versionCountBefore = await CountWorkflowVersionsAsync();
 
-        // ── L2: the REAL router turns an operator-chosen-quick request into a RoutePlan. (Explicit standard/deep
-        //    now route the multi-agent map-fanout shape — see PlanMapSynthFanoutFlowTests; quick stays single-agent.) ──
+        // ── L2: the REAL router turns an operator-chosen-quick request into a RoutePlan. (Explicit standard routes
+        //    the multi-agent map-fanout shape — see PlanMapSynthFanoutFlowTests; deep routes the supervisor lane —
+        //    see SupervisorProjectionFlowTests; quick stays single-agent.) ──
         var request = new EffortRouteRequest
         {
             Seed = new TaskLaunchSeed { Goal = "Work on the auth refactor", SurfaceKind = "test", TeamId = teamId },
@@ -195,6 +196,8 @@ public class EffortRouterFlowTests
         public string DefaultProjectionKind => FakeProjection;
         public bool RequiresPlanReview => true;
         public IReadOnlyList<string> RecommendedPhaseLabels => new[] { "Fake phase" };
+        public string? RequiresCapability => null;
+        public string? DegradesToRecipe => null;
     }
 
     private sealed class FakeBounds : IBoundsPreset

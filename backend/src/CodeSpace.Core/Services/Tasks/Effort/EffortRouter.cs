@@ -1,5 +1,6 @@
 using CodeSpace.Core.DependencyInjection;
 using CodeSpace.Core.Services.Tasks.Bounds;
+using CodeSpace.Core.Services.Tasks.Capabilities;
 using CodeSpace.Core.Services.Tasks.Recipes;
 using CodeSpace.Messages.Tasks;
 using CodeSpace.Messages.Tasks.Effort;
@@ -7,25 +8,27 @@ using CodeSpace.Messages.Tasks.Effort;
 namespace CodeSpace.Core.Services.Tasks.Effort;
 
 /// <summary>
-/// Default <see cref="IEffortRouter"/> — a FLAT pipeline of named steps (Rule 4/5) over the three open-string
-/// registries + the pure <c>EffortPolicy</c>. It names NO concrete classifier / recipe / preset type: every
-/// branch point is a registry lookup, so a new classification / recipe / bounds strategy needs zero edit here
-/// (the fake-classifier contract test proves it). The pipeline: resolve the decision (operator short-circuit vs
-/// the default classifier) → policy-decide the effort mode → resolve the recipe (fail-open) → resolve the
-/// projection → resolve the bounds preset + merge any caps override → assemble the RoutePlan + a derived confirm
-/// card.
+/// Default <see cref="IEffortRouter"/> — a FLAT pipeline of named steps (Rule 4/5) over the open-string
+/// registries + the pure <c>EffortPolicy</c>. It names NO concrete classifier / recipe / preset / capability
+/// type: every branch point is a registry lookup, so a new classification / recipe / bounds / capability
+/// strategy needs zero edit here (the fake-probe + fake-recipe contract test proves it). The pipeline: resolve
+/// the decision (operator short-circuit vs the default classifier) → policy-decide the effort mode → resolve the
+/// recipe (fail-open) → resolve the projection → DEGRADE if the recipe's required capability is unavailable →
+/// resolve the bounds preset + merge any caps override → assemble the RoutePlan + a derived confirm card.
 /// </summary>
 public sealed class EffortRouter : IEffortRouter, IScopedDependency
 {
     private readonly IEffortClassifierRegistry _classifiers;
     private readonly ITaskRecipeRegistry _recipes;
     private readonly IBoundsPresetRegistry _bounds;
+    private readonly ICapabilityProbeRegistry _capabilities;
 
-    public EffortRouter(IEffortClassifierRegistry classifiers, ITaskRecipeRegistry recipes, IBoundsPresetRegistry bounds)
+    public EffortRouter(IEffortClassifierRegistry classifiers, ITaskRecipeRegistry recipes, IBoundsPresetRegistry bounds, ICapabilityProbeRegistry capabilities)
     {
         _classifiers = classifiers;
         _recipes = recipes;
         _bounds = bounds;
+        _capabilities = capabilities;
     }
 
     public async Task<RoutePlan> RouteAsync(EffortRouteRequest request, CancellationToken ct)
@@ -38,13 +41,38 @@ public sealed class EffortRouter : IEffortRouter, IScopedDependency
 
         var projectionKind = request.RequestedProjection ?? recipe.DefaultProjectionKind;
 
-        var (preset, caps) = ResolveCaps(request, effortMode, recipe);
+        var (effectiveRecipe, effectiveProjection, degradedReason) = DegradeIfCapabilityUnavailable(request, recipe, projectionKind);
+
+        var (preset, caps) = ResolveCaps(request, effortMode, effectiveRecipe);
 
         var needsConfirmCard = wasAutoClassified && decision.Confidence < EffortPolicy.ConfirmConfidenceFloor;
 
         var confirm = needsConfirmCard ? BuildConfirmCard(decision) : null;
 
-        return BuildPlan(decision, wasAutoClassified, effortMode, recipe, projectionKind, preset, caps, needsConfirmCard, confirm);
+        return BuildPlan(decision, wasAutoClassified, effortMode, effectiveRecipe, effectiveProjection, preset, caps, needsConfirmCard, confirm, degradedReason);
+    }
+
+    /// <summary>
+    /// When the resolved recipe DECLARES a required capability (<c>ITaskRecipe.RequiresCapability</c>) that the
+    /// probe registry reports unavailable, DEGRADE to the recipe's fallback (<c>DegradesToRecipe</c>, else the
+    /// registry Default), recompute the projection from the fallback's default, and set a non-null
+    /// DegradedReason — NEVER silent. The honest fallback the operator gets instead of a run that would fail its
+    /// own execution-time gate. A recipe with no required capability (or an available one) passes through
+    /// unchanged with a null reason. Data-driven — the router names no concrete recipe / capability (only the
+    /// open strings the recipe itself declares), so a new gated recipe needs zero edit here.
+    /// </summary>
+    private (ITaskRecipe Recipe, string ProjectionKind, string? DegradedReason) DegradeIfCapabilityUnavailable(EffortRouteRequest request, ITaskRecipe recipe, string projectionKind)
+    {
+        if (recipe.RequiresCapability == null || _capabilities.IsAvailable(recipe.RequiresCapability))
+            return (recipe, projectionKind, null);
+
+        var fallback = recipe.DegradesToRecipe != null && _recipes.TryResolve(recipe.DegradesToRecipe, out var named) ? named : _recipes.Default;
+
+        var fallbackProjection = request.RequestedProjection ?? fallback.DefaultProjectionKind;
+
+        var reason = $"the '{recipe.RecipeKind}' recipe needs the '{recipe.RequiresCapability}' capability, which is unavailable; degraded to '{fallback.RecipeKind}'";
+
+        return (fallback, fallbackProjection, reason);
     }
 
     /// <summary>An explicit non-auto operator effort is a DECISION (no classifier runs, confidence 1.0); a null / "auto" effort asks the default classifier.</summary>
@@ -63,10 +91,11 @@ public sealed class EffortRouter : IEffortRouter, IScopedDependency
     /// <summary>
     /// The decision when the operator chose the effort verbatim — no signals, full confidence. The recipe is the
     /// operator's pin if set, else the DEFAULT SHAPE for the explicit tier (<c>RecipeForEffort</c>, data-driven —
-    /// no hardcoded switch): explicit <c>standard</c> / <c>deep</c> ⇒ map-fanout, explicit <c>quick</c> ⇒
-    /// single-agent. (The AUTO path is unchanged — the heuristic still suggests single-agent + always confirms;
-    /// the operator escalates by picking standard/deep in the confirm card, which re-enters HERE as an explicit
-    /// tier. A later structured_llm classifier may suggest map-fanout directly.)
+    /// no hardcoded switch): explicit <c>quick</c> ⇒ single-agent, <c>standard</c> ⇒ map-fanout, <c>deep</c> ⇒
+    /// supervisor (degraded to map-fanout when the supervisor lane is unavailable). (The AUTO path is unchanged —
+    /// the heuristic still suggests single-agent + always confirms; the operator escalates by picking
+    /// standard/deep in the confirm card, which re-enters HERE as an explicit tier. A later structured_llm
+    /// classifier may suggest map-fanout / supervisor directly.)
     /// </summary>
     private EffortDecision OperatorDecision(EffortRouteRequest request) => new()
     {
@@ -136,7 +165,7 @@ public sealed class EffortRouter : IEffortRouter, IScopedDependency
     private static string BuildHint(RouteCaps caps) =>
         $"parallelism {caps.MaxParallelism?.ToString() ?? "default"}, rounds {caps.MaxRounds?.ToString() ?? "default"}, spawns {caps.MaxTotalSpawns?.ToString() ?? "default"}";
 
-    private static RoutePlan BuildPlan(EffortDecision decision, bool wasAutoClassified, string effortMode, ITaskRecipe recipe, string projectionKind, IBoundsPreset? preset, RouteCaps caps, bool needsConfirmCard, ConfirmCard? confirm) => new()
+    private static RoutePlan BuildPlan(EffortDecision decision, bool wasAutoClassified, string effortMode, ITaskRecipe recipe, string projectionKind, IBoundsPreset? preset, RouteCaps caps, bool needsConfirmCard, ConfirmCard? confirm, string? degradedReason) => new()
     {
         EffortMode = effortMode,
         RecipeKind = recipe.RecipeKind,
@@ -148,7 +177,7 @@ public sealed class EffortRouter : IEffortRouter, IScopedDependency
         NeedsPlanReview = recipe.RequiresPlanReview,
         WasAutoClassified = wasAutoClassified,
         ClassifierConfidence = decision.Confidence,
-        DegradedReason = null,                       // reserved for the deferred lane-availability degrade phase (always null until then)
+        DegradedReason = degradedReason,             // set (non-null) when a capability degrade fired, null otherwise — never silent
         Decision = decision,
         Confirm = confirm,
     };

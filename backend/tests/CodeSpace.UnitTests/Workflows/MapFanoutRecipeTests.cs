@@ -1,6 +1,7 @@
 using CodeSpace.Core.Services.Tasks.Recipes;
 using CodeSpace.Core.Services.Tasks.Recipes.MapFanout;
 using CodeSpace.Core.Services.Tasks.Recipes.SingleAgent;
+using CodeSpace.Core.Services.Tasks.Recipes.Supervisor;
 using CodeSpace.Messages.Tasks;
 using CodeSpace.Messages.Tasks.Effort;
 using Shouldly;
@@ -31,16 +32,17 @@ public class MapFanoutRecipeTests
     }
 
     [Fact]
-    public void Map_fanout_serves_standard_and_deep_single_agent_serves_quick()
+    public void Map_fanout_serves_standard_single_agent_serves_quick_supervisor_serves_deep()
     {
-        new MapFanoutRecipe().ServesEfforts.ShouldBe(new[] { TaskEffortModes.Standard, TaskEffortModes.Deep }, ignoreOrder: true);
+        new MapFanoutRecipe().ServesEfforts.ShouldBe(new[] { TaskEffortModes.Standard }, "PR6 moved deep to the supervisor recipe — map-fanout now serves standard only");
         new SingleAgentRecipe().ServesEfforts.ShouldBe(new[] { TaskEffortModes.Quick });
+        new SupervisorRecipe().ServesEfforts.ShouldBe(new[] { TaskEffortModes.Deep });
     }
 
     [Theory]
     [InlineData(TaskEffortModes.Quick, TaskRecipeKinds.SingleAgent)]    // quick → single-agent
     [InlineData(TaskEffortModes.Standard, TaskRecipeKinds.MapFanout)]   // standard → map-fanout
-    [InlineData(TaskEffortModes.Deep, TaskRecipeKinds.MapFanout)]       // deep → map-fanout
+    [InlineData(TaskEffortModes.Deep, TaskRecipeKinds.Supervisor)]      // deep → supervisor (PR6)
     public void RecipeForEffort_resolves_the_recipe_that_serves_the_tier(string effort, string expectedRecipeKind)
     {
         var registry = ProductionRegistry();
@@ -68,7 +70,7 @@ public class MapFanoutRecipeTests
     }
 
     private static TaskRecipeRegistry ProductionRegistry() =>
-        new(new ITaskRecipe[] { new SingleAgentRecipe(), new MapFanoutRecipe() });
+        new(new ITaskRecipe[] { new SingleAgentRecipe(), new MapFanoutRecipe(), new SupervisorRecipe() });
 
     /// <summary>A test-only recipe that ALSO claims the 'standard' tier — used to prove the registry's no-overlap ctor assert fires.</summary>
     private sealed class OverlappingRecipe : ITaskRecipe
@@ -81,5 +83,7 @@ public class MapFanoutRecipeTests
         public string DefaultProjectionKind => TaskProjectionKinds.SingleAgent;
         public bool RequiresPlanReview => false;
         public IReadOnlyList<string> RecommendedPhaseLabels => Array.Empty<string>();
+        public string? RequiresCapability => null;
+        public string? DegradesToRecipe => null;
     }
 }
