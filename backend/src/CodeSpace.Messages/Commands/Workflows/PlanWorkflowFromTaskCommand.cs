@@ -12,14 +12,15 @@ namespace CodeSpace.Messages.Commands.Workflows;
 /// is plain data the operator saves+runs through the existing create/run pipeline.
 ///
 /// <para>Tenancy: <see cref="IRequireTeamMembership"/>; the team is resolved from <c>ICurrentTeam</c>, never
-/// this body. <see cref="RepositoryId"/> is a forward hint for Slice-2 grounding (unused in Slice 1).</para>
+/// this body. <see cref="RepositoryId"/> grounds the plan in the repo's top-level layout, resolved TEAM-SCOPED
+/// against the caller's team — a repo outside the team yields no grounding (fail-closed, never a cross-team read).</para>
 /// </summary>
 public sealed record PlanWorkflowFromTaskCommand : ICommand<PlanWorkflowFromTaskResult>, IRequireTeamMembership
 {
     /// <summary>The operator's free-text task to plan.</summary>
     public required string TaskText { get; init; }
 
-    /// <summary>Optional repository the task concerns — a forward hint for retrieval grounding (Slice 2). Unused in Slice 1.</summary>
+    /// <summary>Optional repository the task concerns. Resolved TEAM-SCOPED to ground the plan in its top-level layout; a repo outside the team yields no grounding.</summary>
     public Guid? RepositoryId { get; init; }
 }
 

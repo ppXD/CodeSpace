@@ -1,12 +1,17 @@
 using System.Text.Json;
+using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Workflows.Engine;
 using CodeSpace.Core.Services.Workflows.Llm;
 using CodeSpace.Core.Services.Workflows.Nodes;
 using CodeSpace.Core.Services.Workflows.Nodes.Builtin;
 using CodeSpace.Core.Services.Workflows.Planning;
+using CodeSpace.Core.Services.Workflows.Planning.Planners;
 using CodeSpace.Messages.Commands.Workflows;
+using CodeSpace.Messages.Dtos.Providers;
 using CodeSpace.Messages.Dtos.Workflows;
 using CodeSpace.Messages.Dtos.Workflows.Planning;
+using CodeSpace.Messages.Enums;
+using Microsoft.Extensions.Logging.Abstractions;
 using Shouldly;
 
 namespace CodeSpace.UnitTests.Workflows;
@@ -92,7 +97,7 @@ public class WorkflowPlannerTests
         try
         {
             var planner = new RecordingPlanner();
-            var service = new WorkflowPlanningService(planner, new WorkflowPlanProjector(), BuildValidator());
+            var service = new WorkflowPlanningService(planner, new WorkflowPlanProjector(), BuildValidator(), new RecordingGrounding());
 
             var result = await service.PlanFromTaskAsync(SampleRequest(), CancellationToken.None);
 
@@ -114,7 +119,7 @@ public class WorkflowPlannerTests
         try
         {
             var planner = new RecordingPlanner(SamplePlan("analysis"));
-            var service = new WorkflowPlanningService(planner, new WorkflowPlanProjector(), BuildValidator());
+            var service = new WorkflowPlanningService(planner, new WorkflowPlanProjector(), BuildValidator(), new RecordingGrounding());
 
             var result = await service.PlanFromTaskAsync(SampleRequest(), CancellationToken.None);
 
@@ -178,6 +183,106 @@ public class WorkflowPlannerTests
         body.ParentId.ShouldBe("map");
     }
 
+    // ── Service folds the grounding into the request before planning ──────────
+
+    [Fact]
+    public async Task Flag_on_grounds_with_the_request_repository_and_team_then_passes_it_to_the_planner()
+    {
+        Environment.SetEnvironmentVariable(WorkflowPlanningService.EnabledEnvVar, "1");
+        try
+        {
+            var repositoryId = Guid.NewGuid();
+            var teamId = Guid.NewGuid();
+            var planner = new RecordingPlanner(SamplePlan("analysis"));
+            var grounding = new RecordingGrounding("Repository top-level layout for acme/api. Top-level entries:\n- src (directory)");
+            var service = new WorkflowPlanningService(planner, new WorkflowPlanProjector(), BuildValidator(), grounding);
+
+            await service.PlanFromTaskAsync(new WorkflowPlanRequest { TaskText = "do it", TeamId = teamId, RepositoryId = repositoryId }, CancellationToken.None);
+
+            // The service grounded against the SAME repo + team the request carried (team never the wire — sourced upstream).
+            grounding.Invocations.ShouldBe(1);
+            grounding.SeenRepositoryId.ShouldBe(repositoryId);
+            grounding.SeenTeamId.ShouldBe(teamId);
+
+            // ...and folded the result into request.GroundingContext so the planner SAW it (the planner stays a pure consumer).
+            planner.LastRequest.ShouldNotBeNull();
+            planner.LastRequest!.GroundingContext.ShouldContain("Repository top-level layout");
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable(WorkflowPlanningService.EnabledEnvVar, null);
+        }
+    }
+
+    // ── RepoGroundingProvider: null repo + honest string assembly ─────────────
+
+    [Fact]
+    public async Task Grounding_for_a_null_repository_is_null_so_the_planner_runs_task_only()
+    {
+        // null repositoryId returns before any DB/provider use — db is never dereferenced, so null! is safe here.
+        var provider = new RepoGroundingProvider(db: null!, registry: null!, scopeChecker: null!, logger: NullLogger<RepoGroundingProvider>.Instance);
+
+        var grounding = await provider.BuildGroundingAsync(repositoryId: null, teamId: Guid.NewGuid(), CancellationToken.None);
+
+        grounding.ShouldBeNull();
+    }
+
+    [Fact]
+    public void Grounding_summary_is_an_honest_top_level_layout_and_never_over_claims()
+    {
+        var repo = new Repository
+        {
+            Id = Guid.NewGuid(), TeamId = Guid.NewGuid(), FullPath = "acme/api", DefaultBranch = "main",
+            ProviderInstance = new ProviderInstance { Provider = ProviderKind.Git },
+        };
+        var entries = new RemoteTreeEntry[]
+        {
+            new() { Name = "src", Path = "src", Type = RemoteTreeEntryType.Directory },
+            new() { Name = "README.md", Path = "README.md", Type = RemoteTreeEntryType.File },
+        };
+
+        var summary = RepoGroundingProvider.BuildSummary(repo, entries);
+
+        // Honest framing: the repo + a real top-level entry are named, framed as a layout only.
+        summary.ShouldContain("acme/api");
+        summary.ShouldContain("top-level layout", Case.Insensitive);
+        summary.ShouldContain("src");
+        summary.ShouldContain("README.md");
+
+        // Over-claim guard: a top-level listing must NEVER claim the code was analyzed or read.
+        summary.ShouldNotContain("analyzed your codebase", Case.Insensitive);
+        summary.ShouldNotContain("read your code", Case.Insensitive);
+    }
+
+    // ── Planner prompt folds grounding in honestly (over-claim guard) ──────────
+
+    [Fact]
+    public void Planner_user_prompt_with_grounding_frames_it_as_top_level_and_never_over_claims()
+    {
+        var prompt = LlmWorkflowPlanner.BuildUserPromptForTest(new WorkflowPlanRequest
+        {
+            TaskText = "Improve onboarding",
+            TeamId = Guid.NewGuid(),
+            GroundingContext = "Repository top-level layout for acme/api. Top-level entries:\n- src (directory)",
+        });
+
+        prompt.ShouldContain("Improve onboarding");
+        prompt.ShouldContain("top-level", Case.Insensitive);
+        prompt.ShouldContain("src");
+
+        prompt.ShouldNotContain("analyzed your codebase", Case.Insensitive);
+        prompt.ShouldNotContain("read your code", Case.Insensitive);
+    }
+
+    [Fact]
+    public void Planner_user_prompt_without_grounding_omits_the_layout_section()
+    {
+        var prompt = LlmWorkflowPlanner.BuildUserPromptForTest(new WorkflowPlanRequest { TaskText = "Just the task", TeamId = Guid.NewGuid() });
+
+        prompt.ShouldContain("Just the task");
+        prompt.ShouldNotContain("top-level layout", Case.Insensitive);
+    }
+
     // ── Helpers ────────────────────────────────────────────────────────────────
 
     private static WorkflowPlanRequest SampleRequest() =>
@@ -224,10 +329,34 @@ public class WorkflowPlannerTests
 
         public int Invocations { get; private set; }
 
+        /// <summary>The request the planner last SAW — proves the service folded the grounding into request.GroundingContext before calling it.</summary>
+        public WorkflowPlanRequest? LastRequest { get; private set; }
+
         public Task<PlannedWorkflow> PlanAsync(WorkflowPlanRequest request, CancellationToken cancellationToken)
         {
             Invocations++;
+            LastRequest = request;
             return Task.FromResult(_plan ?? throw new InvalidOperationException("no plan configured"));
+        }
+    }
+
+    /// <summary>A grounding provider that echoes a canned string and records what it was asked to ground — lets the service test prove the repositoryId/teamId threading without a DB.</summary>
+    private sealed class RecordingGrounding : IRepoGroundingProvider
+    {
+        private readonly string? _grounding;
+
+        public RecordingGrounding(string? grounding = null) { _grounding = grounding; }
+
+        public Guid? SeenRepositoryId { get; private set; }
+        public Guid SeenTeamId { get; private set; }
+        public int Invocations { get; private set; }
+
+        public Task<string?> BuildGroundingAsync(Guid? repositoryId, Guid teamId, CancellationToken cancellationToken)
+        {
+            Invocations++;
+            SeenRepositoryId = repositoryId;
+            SeenTeamId = teamId;
+            return Task.FromResult(_grounding);
         }
     }
 }

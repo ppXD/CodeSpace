@@ -61,13 +61,32 @@ public sealed class TestRemoteHookStore
     }
 }
 
-public sealed class TestRepositoryProvider : IRepositoryCatalogCapability, ICredentialProbeCapability, IPullRequestReviewCapability, IPullRequestWriteCapability, IIssueWriteCapability, IRepositoryAccessCapability, IWebhookRegistrationCapability, IWebhookSignatureVerifier, IWebhookEventNormalizer
+public sealed class TestRepositoryProvider : IRepositoryCatalogCapability, ICredentialProbeCapability, IPullRequestReviewCapability, IPullRequestWriteCapability, IIssueWriteCapability, IRepositoryAccessCapability, IRepositorySourceCapability, IWebhookRegistrationCapability, IWebhookSignatureVerifier, IWebhookEventNormalizer
 {
+    /// <summary>The deterministic root-tree entries the source capability returns — grounding tests assert these surface in the planner's grounding string.</summary>
+    public static readonly IReadOnlyList<string> RootEntryNames = new[] { "src", "README.md" };
+
     private readonly TestRemoteHookStore _hookStore;
 
     public TestRepositoryProvider(TestRemoteHookStore hookStore) { _hookStore = hookStore; }
 
     public ProviderKind Kind => ProviderKind.Git;
+
+    // ── IRepositorySourceCapability (the Code-tab read path the planner grounds against) ──
+
+    public Task<IReadOnlyList<RemoteBranch>> ListBranchesAsync(ProviderContext context, RemoteRepository repository, CancellationToken cancellationToken) =>
+        Task.FromResult<IReadOnlyList<RemoteBranch>>(new[] { new RemoteBranch { Name = repository.DefaultBranch, IsDefault = true } });
+
+    // One non-recursive root listing: a directory + a file, deterministic so a grounding test asserts they surface.
+    public Task<IReadOnlyList<RemoteTreeEntry>> ListTreeAsync(ProviderContext context, RemoteRepository repository, string? path, string? reference, CancellationToken cancellationToken) =>
+        Task.FromResult<IReadOnlyList<RemoteTreeEntry>>(new[]
+        {
+            new RemoteTreeEntry { Name = "src", Path = "src", Type = RemoteTreeEntryType.Directory },
+            new RemoteTreeEntry { Name = "README.md", Path = "README.md", Type = RemoteTreeEntryType.File, Size = 12 },
+        });
+
+    public Task<RemoteFileContent> GetFileAsync(ProviderContext context, RemoteRepository repository, string path, string? reference, CancellationToken cancellationToken) =>
+        Task.FromResult(new RemoteFileContent { Path = path, Name = path, Size = 0, Text = "" });
 
     public Task<RemoteRepository> GetByExternalIdAsync(ProviderContext context, string externalId, CancellationToken cancellationToken) => Task.FromResult(BuildRemoteRepo(externalId, externalId));
 

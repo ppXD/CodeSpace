@@ -15,9 +15,16 @@ public sealed record WorkflowPlanRequest
     public required Guid TeamId { get; init; }
 
     /// <summary>
+    /// Optional repository the task concerns. The planning service resolves it TEAM-SCOPED (against <see cref="TeamId"/>)
+    /// to build <see cref="GroundingContext"/>; a repo outside the team yields no grounding (fail-closed, never a
+    /// cross-team read). <c>null</c> ⇒ the planner runs task-text-only.
+    /// </summary>
+    public Guid? RepositoryId { get; init; }
+
+    /// <summary>
     /// Optional grounding the planner folds into its prompt (e.g. an honest "top-level repo layout" summary).
-    /// Stays <c>null</c> in Slice 1 — Slice 2 fills it with real retrieval. When present, the planner frames it
-    /// honestly (it is supplementary context, not "I analyzed your codebase").
+    /// The planning service assembles it from <see cref="RepositoryId"/>; the planner is a pure consumer. When
+    /// present, the planner frames it honestly (it is supplementary context, not "I analyzed your codebase").
     /// </summary>
     public string? GroundingContext { get; init; }
 }

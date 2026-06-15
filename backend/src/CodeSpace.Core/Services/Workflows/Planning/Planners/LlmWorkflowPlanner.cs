@@ -52,6 +52,9 @@ public sealed class LlmWorkflowPlanner : IWorkflowPlanner, IScopedDependency
         Temperature = 0.2,
     };
 
+    /// <summary>Internal test accessor (InternalsVisibleTo) — pins the prompt framing + over-claim guard directly, without a real LLM round-trip.</summary>
+    internal static string BuildUserPromptForTest(WorkflowPlanRequest request) => BuildUserPrompt(request);
+
     private static string BuildUserPrompt(WorkflowPlanRequest request)
     {
         var builder = new StringBuilder();
@@ -62,7 +65,7 @@ public sealed class LlmWorkflowPlanner : IWorkflowPlanner, IScopedDependency
         if (!string.IsNullOrWhiteSpace(request.GroundingContext))
         {
             builder.AppendLine();
-            builder.AppendLine("Supplementary context (a top-level summary, not a full analysis) — use it only where it helps:");
+            builder.AppendLine("Repository top-level layout (use it to ground the plan). This is a top-level listing only — it is NOT a full code analysis, so do not assume anything below the named entries:");
             builder.AppendLine(request.GroundingContext);
         }
 

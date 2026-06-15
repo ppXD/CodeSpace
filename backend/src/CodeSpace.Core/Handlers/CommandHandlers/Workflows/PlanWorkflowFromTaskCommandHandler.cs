@@ -7,8 +7,10 @@ using MediatR;
 namespace CodeSpace.Core.Handlers.CommandHandlers.Workflows;
 
 /// <summary>
-/// Thin dispatcher (Rule 16): resolves the team from <see cref="ICurrentTeam"/> (never the request body) and
-/// delegates to <see cref="IWorkflowPlanningService"/>. GroundingContext stays null in Slice 1 (Slice 2 fills it).
+/// Thin dispatcher (Rule 16): resolves the team from <see cref="ICurrentTeam"/> (never the request body), threads
+/// the optional <see cref="PlanWorkflowFromTaskCommand.RepositoryId"/>, and delegates to
+/// <see cref="IWorkflowPlanningService"/>. The service resolves the repo TEAM-SCOPED and assembles the grounding;
+/// the handler holds no grounding logic.
 /// </summary>
 public sealed class PlanWorkflowFromTaskCommandHandler : IRequestHandler<PlanWorkflowFromTaskCommand, PlanWorkflowFromTaskResult>
 {
@@ -22,5 +24,5 @@ public sealed class PlanWorkflowFromTaskCommandHandler : IRequestHandler<PlanWor
     }
 
     public Task<PlanWorkflowFromTaskResult> Handle(PlanWorkflowFromTaskCommand request, CancellationToken cancellationToken) =>
-        _service.PlanFromTaskAsync(new WorkflowPlanRequest { TaskText = request.TaskText, TeamId = _currentTeam.Id!.Value }, cancellationToken);
+        _service.PlanFromTaskAsync(new WorkflowPlanRequest { TaskText = request.TaskText, TeamId = _currentTeam.Id!.Value, RepositoryId = request.RepositoryId }, cancellationToken);
 }
