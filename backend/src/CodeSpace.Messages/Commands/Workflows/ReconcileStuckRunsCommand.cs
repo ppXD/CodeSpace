@@ -20,4 +20,10 @@ public sealed record ReconcileStuckRunsResponse
     public required int RevertedFromEnqueued { get; init; }
     public required int MarkedAbandonedFromRunning { get; init; }
     public required int RedispatchedFromStrandedSuspended { get; init; }
+
+    /// <summary>Supervisor self-advances re-fired because the post-commit ResumeWaitAsync enqueue was lost (PR-E E2). 0 when the supervisor lane is off.</summary>
+    public required int RecoveredSupervisorAdvance { get; init; }
+
+    /// <summary>Abandoned-Running supervisor runs with a recoverable in-flight decision that were re-dispatched instead of failed (PR-E P1-2). 0 when the supervisor lane is off.</summary>
+    public required int RecoveredAbandonedSupervisorRun { get; init; }
 }

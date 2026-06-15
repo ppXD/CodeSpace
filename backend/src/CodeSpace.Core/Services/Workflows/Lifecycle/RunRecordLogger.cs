@@ -76,6 +76,12 @@ public sealed class RunRecordLogger : IRunRecordLogger, IScopedDependency
         await InsertAsync(runId, WorkflowRunRecordTypes.RunReplayed, nodeId: null, iterationKey: string.Empty, payload, correlationId: null, parentRecordId: null, cancellationToken).ConfigureAwait(false);
     }
 
+    public async Task SupervisorRunRecoveredAsync(Guid runId, int attempt, CancellationToken cancellationToken)
+    {
+        var payload = JsonSerializer.Serialize(new { attempt });
+        await InsertAsync(runId, WorkflowRunRecordTypes.SupervisorRunRecovered, nodeId: null, iterationKey: string.Empty, payload, correlationId: null, parentRecordId: null, cancellationToken).ConfigureAwait(false);
+    }
+
     public async Task<Guid> NodeStartedAsync(Guid runId, string nodeId, string iterationKey, IReadOnlyDictionary<string, JsonElement> resolvedInputs, IReadOnlyDictionary<string, JsonElement> resolvedConfig, CancellationToken cancellationToken)
     {
         // Payload includes BOTH inputs + config. Both come pre-redacted from the engine

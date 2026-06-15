@@ -49,6 +49,14 @@ public static class WorkflowRunRecordTypes
     /// <summary>Engine forked into the replay path (snapshot rows pre-existing). Payload: {"parent_run_id":"...","snapshot_count":N}.</summary>
     public const string RunReplayed = "run.replayed";
 
+    /// <summary>
+    /// The stuck-run reconciler re-dispatched an abandoned-Running supervisor run that has a recoverable
+    /// in-flight decision (PR-E P1-2). Payload: {"attempt":N}. ONE record is appended per recovery attempt,
+    /// so its per-run count IS the durable recovery counter the reconciler bounds against — a deterministically
+    /// crashing run accumulates these until the cap, then falls through to the abandoned-Running failure sweep.
+    /// </summary>
+    public const string SupervisorRunRecovered = "supervisor.run_recovered";
+
     // ─── Node lifecycle ───────────────────────────────────────────────────────
     // The (run_id, node_id, iteration_key) cell can transition Pending → Running → terminal.
     // The view projects status from the latest record_type for the cell.

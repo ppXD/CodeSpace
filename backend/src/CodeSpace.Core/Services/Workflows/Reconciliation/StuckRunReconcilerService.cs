@@ -4,6 +4,7 @@ using CodeSpace.Core.Services.Supervisor;
 using CodeSpace.Core.Services.Workflows.Dispatch;
 using CodeSpace.Core.Services.Workflows.Engine;
 using CodeSpace.Core.Services.Workflows.Lifecycle;
+using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Enums;
 using Microsoft.EntityFrameworkCore;
@@ -57,6 +58,20 @@ public sealed class StuckRunReconcilerService : IStuckRunReconcilerService, ISco
     /// <summary>Batch size per sweep — bounds the work the reconciler can do in one tick so a backlog doesn't run forever.</summary>
     public const int BatchSize = 50;
 
+    /// <summary>
+    /// THE LOOP-GUARD (PR-E P1-2). The hard cap on how many times the reconciler re-dispatches a single
+    /// abandoned-Running supervisor run with a recoverable in-flight decision. A mid-decision crash does NOT
+    /// advance the supervisor's TurnNumber, and a re-dispatch RESETS <see cref="WorkflowRun.StartedAt"/> (the
+    /// engine's Enqueued→Running CAS stamps it), so an UNBOUNDED recovery would re-dispatch a DETERMINISTICALLY
+    /// crashing run every ~30 min forever — the run never terminates, never fails, and the supervisor's own
+    /// MaxRounds/no-progress bounds can't catch it because the turn never settles. So we count the durable
+    /// <c>supervisor.run_recovered</c> ledger records per run and STOP recovering at this cap; a run at/over it is
+    /// left Running for <see cref="MarkAbandonedRunningAsync"/> to fail cleanly. Counted from the ledger (never an
+    /// in-memory tally), so the bound survives a restart + can't be reset by re-dispatching. Small by design — a
+    /// transient pod crash recovers in 1; a deterministic crash burns the budget then terminates.
+    /// </summary>
+    public const int MaxSupervisorRunRecoveries = 3;
+
     private readonly CodeSpaceDbContext _db;
     private readonly IWorkflowRunDispatcher _dispatcher;
     private readonly IWorkflowResumeService _resumeService;
@@ -76,6 +91,12 @@ public sealed class StuckRunReconcilerService : IStuckRunReconcilerService, ISco
     {
         var redispatched = await RedispatchStuckPendingAsync(cancellationToken).ConfigureAwait(false);
         var reverted = await RevertStuckEnqueuedAsync(cancellationToken).ConfigureAwait(false);
+
+        // BEFORE the abandoned-Running failure sweep: a recovered supervisor run is flipped Running→Pending here,
+        // so it no longer matches MarkAbandonedRunningAsync's Status==Running query in this same pass. A run at/over
+        // the recovery cap is NOT recovered → it falls through to MarkAbandonedRunningAsync → Failure (clean termination).
+        var recoveredSupervisorRuns = await RecoverAbandonedSupervisorRunsAsync(cancellationToken).ConfigureAwait(false);
+
         var abandoned = await MarkAbandonedRunningAsync(cancellationToken).ConfigureAwait(false);
         var unstranded = await RedispatchStrandedSuspendedAsync(cancellationToken).ConfigureAwait(false);
         var supervisorAdvances = await RecoverSupervisorAdvancesAsync(cancellationToken).ConfigureAwait(false);
@@ -87,12 +108,13 @@ public sealed class StuckRunReconcilerService : IStuckRunReconcilerService, ISco
             MarkedAbandonedFromRunning = abandoned,
             RedispatchedFromStrandedSuspended = unstranded,
             RecoveredSupervisorAdvance = supervisorAdvances,
+            RecoveredAbandonedSupervisorRun = recoveredSupervisorRuns,
         };
 
         if (summary.Total > 0)
             _logger.LogInformation(
-                "StuckRunReconciler: redispatched={Redispatched}, reverted={Reverted}, abandoned={Abandoned}, unstranded={Unstranded}, supervisorAdvances={SupervisorAdvances}",
-                summary.RedispatchedFromPending, summary.RevertedFromEnqueued, summary.MarkedAbandonedFromRunning, summary.RedispatchedFromStrandedSuspended, summary.RecoveredSupervisorAdvance);
+                "StuckRunReconciler: redispatched={Redispatched}, reverted={Reverted}, abandoned={Abandoned}, unstranded={Unstranded}, supervisorAdvances={SupervisorAdvances}, supervisorRunsRecovered={SupervisorRunsRecovered}",
+                summary.RedispatchedFromPending, summary.RevertedFromEnqueued, summary.MarkedAbandonedFromRunning, summary.RedispatchedFromStrandedSuspended, summary.RecoveredSupervisorAdvance, summary.RecoveredAbandonedSupervisorRun);
 
         return summary;
     }
@@ -326,4 +348,99 @@ public sealed class StuckRunReconcilerService : IStuckRunReconcilerService, ISco
 
         return recovered;
     }
+
+    /// <summary>
+    /// PR-E P1-2 — abandoned-Running supervisor recovery (THE worker-death crash-recovery loop). A worker that
+    /// died MID-supervisor-decision left the run Running with a NON-terminal <c>SupervisorDecisionRecord</c> (the
+    /// turn crashed after claiming the decision but before recording terminal — no exception reached the engine's
+    /// catch, so the run was never failed). PR-1's frozen-replay can finish that in-flight decision
+    /// deterministically on a re-walk, but nothing re-dispatches the Running-stuck run — so without this sweep it
+    /// falls to <see cref="MarkAbandonedRunningAsync"/> and is FAILED instead of recovered. This sweep runs FIRST
+    /// (the flip Running→Pending takes it out of that sweep's Status==Running query in the same pass) and CAS-flips
+    /// each recoverable candidate Running→Pending then re-dispatches; the engine re-walk rehydrates the in-flight
+    /// decision into <c>context.InFlight</c> and replays it exactly-once.
+    /// <para>★ BOUNDED (the loop-guard): a mid-decision crash does NOT advance TurnNumber and a re-dispatch RESETS
+    /// StartedAt, so an UNBOUNDED recovery would re-dispatch a DETERMINISTICALLY-crashing run forever. The candidate
+    /// query EXCLUDES any run that already has <see cref="MaxSupervisorRunRecoveries"/> durable
+    /// <c>supervisor.run_recovered</c> records — that run is left Running for <see cref="MarkAbandonedRunningAsync"/>
+    /// to fail cleanly. So a transient crash recovers; a deterministic crash recovers K times then TERMINATES.</para>
+    /// <para>Runs ONLY when the supervisor lane is enabled, so a flag-OFF deployment is byte-identical (no extra query).</para>
+    /// </summary>
+    private async Task<int> RecoverAbandonedSupervisorRunsAsync(CancellationToken cancellationToken)
+    {
+        if (!SupervisorLane.IsEnabled()) return 0;
+
+        var candidates = await FindRecoverableSupervisorRunsAsync(cancellationToken).ConfigureAwait(false);
+
+        var recovered = 0;
+        foreach (var runId in candidates)
+            if (await TryRecoverSupervisorRunAsync(runId, cancellationToken).ConfigureAwait(false)) recovered++;
+
+        return recovered;
+    }
+
+    /// <summary>
+    /// The recoverable set: a Running run, started past the threshold, with a stale ledger (same liveness as
+    /// <see cref="MarkAbandonedRunningAsync"/>), that HAS a non-terminal <c>SupervisorDecisionRecord</c> and is
+    /// UNDER the recovery cap. Non-terminal is classified by the state machine (built once into
+    /// <see cref="NonTerminalDecisionStatuses"/>) so the predicate can't drift from <c>IsTerminal</c>; the cap is
+    /// the count of durable <c>supervisor.run_recovered</c> records — a ledger fact, so the bound survives restart.
+    /// </summary>
+    private async Task<List<Guid>> FindRecoverableSupervisorRunsAsync(CancellationToken cancellationToken)
+    {
+        var runningThreshold = DateTimeOffset.UtcNow - RunningStuckAfter;
+        var livenessThreshold = DateTimeOffset.UtcNow - LedgerLivenessWindow;
+
+        return await (
+            from run in _db.WorkflowRun.AsNoTracking()
+            where run.Status == WorkflowRunStatus.Running && run.StartedAt < runningThreshold
+            let mostRecentLedger = _db.WorkflowRunRecord.AsNoTracking().Where(rec => rec.RunId == run.Id).Max(rec => (DateTimeOffset?)rec.OccurredAt)
+            where mostRecentLedger == null || mostRecentLedger < livenessThreshold
+            where _db.SupervisorDecisionRecord.Any(d => d.SupervisorRunId == run.Id && NonTerminalDecisionStatuses.Contains(d.Status))
+            where _db.WorkflowRunRecord.Count(rec => rec.RunId == run.Id && rec.RecordType == WorkflowRunRecordTypes.SupervisorRunRecovered) < MaxSupervisorRunRecoveries
+            orderby run.StartedAt
+            select run.Id
+        ).Take(BatchSize).ToListAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Recover one candidate: append the durable recovery marker FIRST (the bound counter — counted before the next
+    /// pass even if the dispatch then fails), CAS Running→Pending (0 rows = a racing live worker re-claimed it →
+    /// skip, never touch), then re-dispatch via the same path the resume uses. The dispatcher's own Pending→Enqueued
+    /// CAS is the final guard against a racing dispatch; the engine re-walk replays the in-flight decision.
+    /// </summary>
+    private async Task<bool> TryRecoverSupervisorRunAsync(Guid runId, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var attempt = await CountPriorRecoveriesAsync(runId, cancellationToken).ConfigureAwait(false) + 1;
+            await _recordLogger.SupervisorRunRecoveredAsync(runId, attempt, cancellationToken).ConfigureAwait(false);
+
+            var flipped = await _db.WorkflowRun
+                .Where(r => r.Id == runId && r.Status == WorkflowRunStatus.Running)
+                .ExecuteUpdateAsync(s => s.SetProperty(r => r.Status, WorkflowRunStatus.Pending), cancellationToken)
+                .ConfigureAwait(false);
+
+            if (flipped == 0) return false;
+
+            return await _dispatcher.DispatchAsync(runId, cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            // Per-row resilience: one run's recovery failure doesn't abort the sweep.
+            _logger.LogWarning(ex, "StuckRunReconciler: abandoned-supervisor-run recovery for run {RunId} failed; will retry next tick", runId);
+            return false;
+        }
+    }
+
+    /// <summary>Count this run's durable <c>supervisor.run_recovered</c> records — the per-run recovery attempts so far (the loop-guard counter).</summary>
+    private async Task<int> CountPriorRecoveriesAsync(Guid runId, CancellationToken cancellationToken) =>
+        await _db.WorkflowRunRecord.AsNoTracking()
+            .CountAsync(rec => rec.RunId == runId && rec.RecordType == WorkflowRunRecordTypes.SupervisorRunRecovered, cancellationToken)
+            .ConfigureAwait(false);
+
+    /// <summary>The non-terminal <c>SupervisorDecisionStatus</c> set, derived ONCE from the state machine so the recoverable predicate can't drift from <see cref="SupervisorDecisionStateMachine.IsTerminal"/>.
+    /// Includes <c>AwaitingApproval</c> (reserved/unused today). When the HITL-approval slice lands, such a decision parks the run <c>Suspended</c>, not <c>Running</c>, so this Running-only sweep still won't yank a legitimately-awaiting-approval run — revisit this predicate if that ever changes.</summary>
+    private static readonly SupervisorDecisionStatus[] NonTerminalDecisionStatuses =
+        Enum.GetValues<SupervisorDecisionStatus>().Where(s => !SupervisorDecisionStateMachine.IsTerminal(s)).ToArray();
 }

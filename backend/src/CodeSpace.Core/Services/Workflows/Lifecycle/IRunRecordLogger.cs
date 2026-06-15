@@ -48,6 +48,14 @@ public interface IRunRecordLogger
     Task RunReplayedAsync(Guid runId, Guid? parentRunId, int snapshotCount, CancellationToken cancellationToken);
 
     /// <summary>
+    /// Emit <c>supervisor.run_recovered</c> — the reconciler re-dispatched an abandoned-Running supervisor run
+    /// with a recoverable in-flight decision (PR-E P1-2). One record per recovery attempt; the per-run COUNT of
+    /// these is the durable bound the reconciler counts before re-dispatching. <paramref name="attempt"/> is the
+    /// 1-based ordinal of this recovery (count of prior recovery records + 1).
+    /// </summary>
+    Task SupervisorRunRecoveredAsync(Guid runId, int attempt, CancellationToken cancellationToken);
+
+    /// <summary>
     /// Emit <c>node.started</c>. Returns the new record's id so callers can chain nested
     /// events (e.g. external calls made by this node) as <c>parent_record_id</c>.
     /// </summary>
