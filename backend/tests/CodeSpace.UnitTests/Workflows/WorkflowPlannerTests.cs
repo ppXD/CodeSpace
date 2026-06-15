@@ -254,6 +254,41 @@ public class WorkflowPlannerTests
         summary.ShouldNotContain("read your code", Case.Insensitive);
     }
 
+    [Fact]
+    public void Grounding_summary_for_an_empty_root_says_so_honestly()
+    {
+        var repo = new Repository
+        {
+            Id = Guid.NewGuid(), TeamId = Guid.NewGuid(), FullPath = "acme/api", DefaultBranch = "main",
+            ProviderInstance = new ProviderInstance { Provider = ProviderKind.Git },
+        };
+
+        var summary = RepoGroundingProvider.BuildSummary(repo, Array.Empty<RemoteTreeEntry>());
+
+        summary.ShouldContain("acme/api");
+        summary.ShouldContain("empty", Case.Insensitive, "an empty root must be stated honestly, not faked into entries");
+        summary.ShouldNotContain("Top-level entries:", customMessage: "no entries header when the root is empty");
+    }
+
+    [Fact]
+    public void Grounding_summary_caps_a_wide_root_and_reports_the_remainder()
+    {
+        var repo = new Repository
+        {
+            Id = Guid.NewGuid(), TeamId = Guid.NewGuid(), FullPath = "acme/api", DefaultBranch = "main",
+            ProviderInstance = new ProviderInstance { Provider = ProviderKind.Git },
+        };
+        // 42 entries — two past the 40-entry cap that keeps the prompt bounded for a wide repo root.
+        var entries = Enumerable.Range(0, 42).Select(i => new RemoteTreeEntry { Name = $"e{i}", Path = $"e{i}", Type = RemoteTreeEntryType.File }).ToArray();
+
+        var summary = RepoGroundingProvider.BuildSummary(repo, entries);
+
+        summary.ShouldContain("e0");
+        summary.ShouldContain("e39", customMessage: "the first 40 entries are listed");
+        summary.ShouldNotContain("- e40 ", customMessage: "the 41st entry is past the cap and must not be listed");
+        summary.ShouldContain("and 2 more", customMessage: "the truncated remainder is reported honestly");
+    }
+
     // ── Planner prompt folds grounding in honestly (over-claim guard) ──────────
 
     [Fact]

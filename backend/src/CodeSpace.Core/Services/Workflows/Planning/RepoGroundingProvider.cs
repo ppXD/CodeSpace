@@ -50,10 +50,11 @@ public sealed class RepoGroundingProvider : IRepoGroundingProvider, IScopedDepen
 
             return BuildSummary(repo, entries);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             // Grounding is best-effort: any failure (provider 4xx/5xx, insufficient scope, transport) degrades the
-            // plan to task-text-only. Never surface out of the planning call.
+            // plan to task-text-only. Never surface out of the planning call. Host cancellation is NOT swallowed — it
+            // propagates so a cancelled planning request aborts rather than silently continuing task-only.
             _logger.LogDebug(ex, "Repo grounding skipped for repository {RepositoryId} (team {TeamId}); planning continues task-only", repositoryId, teamId);
             return null;
         }
