@@ -98,20 +98,26 @@ public class ChatSchemaRoundTripTests
         var (teamId, userId) = await SeedTeamAsync();
         var conversationId = await SeedBareChannelAsync(teamId, userId);
 
+        // Stamp each id with an EXPLICIT, strictly-increasing timestamp (1ms apart) instead of relying on
+        // wall-clock spacing between calls. Guid.CreateVersion7() has no within-millisecond monotonic counter
+        // (the sub-ms bits are random), so two ids minted in the same millisecond — likely under CI load —
+        // sort in random relative order. Distinct millisecond timestamps make ORDER BY id deterministic while
+        // still proving the invariant: a v4 NewGuid() swap ignores the timestamp → random order → still fails.
+        var baseTime = DateTimeOffset.UtcNow;
         var ids = new List<Guid>();
         using (var scope = _fixture.BeginScope())
         {
             var db = scope.Resolve<CodeSpaceDbContext>();
             for (var i = 0; i < 5; i++)
             {
-                var id = Guid.CreateVersion7();
+                var id = Guid.CreateVersion7(baseTime.AddMilliseconds(i));
                 ids.Add(id);
                 db.Message.Add(new Message
                 {
                     Id = id, ConversationId = conversationId, TeamId = teamId,
                     AuthorUserId = userId, Body = $"msg {i}", CreatedDate = DateTimeOffset.UtcNow,
                 });
-                await db.SaveChangesAsync();   // separate saves → distinct creation instants
+                await db.SaveChangesAsync();
             }
         }
 
