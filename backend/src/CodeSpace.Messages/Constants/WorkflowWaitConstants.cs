@@ -46,6 +46,18 @@ public static class WorkflowWaitKinds
     /// keeps each turn's row distinct. Survives a restart via the reconciler's supervisor self-advance sweep.
     /// </summary>
     public const string SupervisorDecision = "SupervisorDecision";
+
+    /// <summary>
+    /// A <c>agent.supervisor</c> turn that PARKED ON the K real <c>AgentRun</c> waits a spawn/retry staged
+    /// (PR-E E3). A SUSPEND MARKER, NOT a wait the engine stages: the executor already created the K
+    /// <see cref="AgentRun"/> waits (keyed <c>&lt;nodeId&gt;#turn{N}#{k}</c>), so the engine, on seeing this
+    /// kind, records node.suspended + flips the run Suspended WITHOUT adding another wait row and WITHOUT
+    /// scheduling a self-advance. The wait-for-all barrier (the agents' completion notifier resolving each
+    /// AgentRun wait → re-dispatch once the last completes) drives the supervisor's next turn — the agent
+    /// completions, not a self-advance, resume it. The per-turn <c>IterationKey</c> keeps the marker row
+    /// distinct from a later turn's.
+    /// </summary>
+    public const string SupervisorAgentWaits = "SupervisorAgentWaits";
 }
 
 /// <summary>Lifecycle of a <c>workflow_run_wait</c> row. CHECK-constrained at the DB layer.</summary>

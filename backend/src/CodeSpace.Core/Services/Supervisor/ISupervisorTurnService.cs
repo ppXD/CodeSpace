@@ -23,9 +23,18 @@ namespace CodeSpace.Core.Services.Supervisor;
 /// </summary>
 public interface ISupervisorTurnService
 {
-    /// <summary>Fold the run's decision ledger (team-scoped, <c>Sequence</c> order) into a turn context: terminal decisions replayed (outcome only), the one in-flight decision identified, <c>TurnNumber</c> = decided count. Pure-ish (reads the ledger, no writes).</summary>
-    Task<SupervisorTurnContext> RehydrateFromDecisionLogAsync(Guid supervisorRunId, Guid teamId, string goal, CancellationToken cancellationToken);
+    /// <summary>Fold the run's decision ledger (team-scoped, <c>Sequence</c> order) into a turn context: terminal decisions replayed (outcome only), the one in-flight decision identified, <c>TurnNumber</c> = decided count. <paramref name="nodeId"/> stamps the per-turn-per-spawn AgentRun wait key (<c>&lt;nodeId&gt;#turn{N}#{k}</c>). Pure-ish (reads the ledger, no writes).</summary>
+    Task<SupervisorTurnContext> RehydrateFromDecisionLogAsync(Guid supervisorRunId, Guid teamId, string nodeId, string goal, CancellationToken cancellationToken);
 
-    /// <summary>Run one turn for the run: rehydrate → budget → decide → claim + execute exactly-once → record terminal → return finish/park. The exactly-once decision step.</summary>
-    Task<SupervisorTurnResult> RunTurnAsync(Guid supervisorRunId, Guid teamId, string goal, CancellationToken cancellationToken);
+    /// <summary>Run one turn for the run: rehydrate → budget → decide → claim + execute exactly-once → record terminal → return finish / self-advance / park-on-agent-waits. The exactly-once decision step.</summary>
+    Task<SupervisorTurnResult> RunTurnAsync(Guid supervisorRunId, Guid teamId, string nodeId, string goal, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Count the run's still-PENDING <c>AgentRun</c> waits a PRIOR async turn (spawn/retry) staged for this
+    /// node. Read FIRST on re-entry: a restart between staging the agents + their completion would otherwise let
+    /// the rehydrate advance past the (already-terminal) spawn decision and skip ahead — but those agents are
+    /// still running, so the node must re-park on THEM, never advance. &gt; 0 → re-suspend on the existing waits;
+    /// 0 → no in-flight async turn, run the next turn normally.
+    /// </summary>
+    Task<int> CountPendingAgentWaitsAsync(Guid supervisorRunId, string nodeId, CancellationToken cancellationToken);
 }

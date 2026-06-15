@@ -15,8 +15,24 @@ namespace CodeSpace.Messages.Agents;
 /// </summary>
 public sealed record SupervisorTurnContext
 {
-    /// <summary>The run-level goal the supervisor is pursuing (carried from node config; opaque to E2's stub decider).</summary>
+    /// <summary>The run-level goal the supervisor is pursuing (carried from node config).</summary>
     public string Goal { get; init; } = "";
+
+    /// <summary>
+    /// The supervisor run id (the WorkflowRun id) — the executor links spawned agent runs + their AgentRun waits
+    /// to it (E3). Carried so the executor stays a pure-of-engine service (Rule 16). <see cref="Guid.Empty"/> in a
+    /// pure-unit context that never spawns.
+    /// </summary>
+    public Guid SupervisorRunId { get; init; }
+
+    /// <summary>The run's team (tenancy) — spawned agent runs inherit it; never model-supplied. <see cref="Guid.Empty"/> in a pure-unit context.</summary>
+    public Guid TeamId { get; init; }
+
+    /// <summary>
+    /// The <c>agent.supervisor</c> node id — the prefix of the per-turn-per-spawn AgentRun wait IterationKey
+    /// (<c>&lt;nodeId&gt;#turn{N}#{k}</c>, must-fix #1). Empty in a pure-unit context that never spawns.
+    /// </summary>
+    public string NodeId { get; init; } = "";
 
     /// <summary>The 0-based number of the turn about to run = how many prior DECIDED (terminal) decisions exist. Drives the next decision + the per-turn IterationKey.</summary>
     public int TurnNumber { get; init; }

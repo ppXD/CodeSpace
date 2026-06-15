@@ -262,5 +262,14 @@ public sealed class PostgresFixture : IAsyncLifetime
             .As<CodeSpace.Core.Services.Workflows.Llm.ILLMClient>()
             .As<CodeSpace.Core.Services.Workflows.Llm.IStructuredLLMClient>()
             .SingleInstance();
+
+        // PR-E E3 supervisor: a deterministic, test-controllable decider registered OVER the production
+        // LlmSupervisorDecider (last-wins), so the supervisor node's own DI scope resolves THIS — driving the
+        // REAL turn service + executor with no LLM. The fixture-singleton script knob lets a test pick the arc
+        // (default plan→stop keeps the E2 flow green; the E3 crown-jewel flips it to plan→spawn→stop).
+        builder.RegisterType<Workflows.Infrastructure.SupervisorDecisionScript>().AsSelf().SingleInstance();
+        builder.RegisterType<Workflows.Infrastructure.ScriptedSupervisorDecider>()
+            .As<CodeSpace.Core.Services.Supervisor.ISupervisorDecider>()
+            .InstancePerLifetimeScope();
     }
 }

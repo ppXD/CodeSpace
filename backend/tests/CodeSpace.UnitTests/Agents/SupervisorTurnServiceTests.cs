@@ -30,7 +30,7 @@ public class SupervisorTurnServiceTests
         var ledger = new FakeLedger();
         ledger.SeedTerminal(_runId, _teamId, SupervisorDecisionKinds.Plan, """{"subtasks":["a"]}""", """{"planned":["a"]}""");
 
-        var context = await Service(ledger).RehydrateFromDecisionLogAsync(_runId, _teamId, "goal", CancellationToken.None);
+        var context = await Service(ledger).RehydrateFromDecisionLogAsync(_runId, _teamId, "sup", "goal", CancellationToken.None);
 
         context.TurnNumber.ShouldBe(1, "one decided decision → the next turn is turn 1");
         context.PriorDecisions.Count.ShouldBe(1);
@@ -46,7 +46,7 @@ public class SupervisorTurnServiceTests
         ledger.SeedTerminal(_runId, _teamId, SupervisorDecisionKinds.Plan, """{"subtasks":["a"]}""", """{"planned":["a"]}""");
         ledger.SeedPending(_runId, _teamId, SupervisorDecisionKinds.Stop, """{"reason":"x"}""");
 
-        var context = await Service(ledger).RehydrateFromDecisionLogAsync(_runId, _teamId, "goal", CancellationToken.None);
+        var context = await Service(ledger).RehydrateFromDecisionLogAsync(_runId, _teamId, "sup", "goal", CancellationToken.None);
 
         context.TurnNumber.ShouldBe(1, "an in-flight (non-terminal) row is NOT a decided decision");
         context.InFlight.ShouldNotBeNull();
@@ -61,7 +61,7 @@ public class SupervisorTurnServiceTests
         var ledger = new FakeLedger();
         var service = Service(ledger);
 
-        var turn1 = await service.RunTurnAsync(_runId, _teamId, "goal", CancellationToken.None);
+        var turn1 = await service.RunTurnAsync(_runId, _teamId, "sup", "goal", CancellationToken.None);
 
         turn1.IsFinished.ShouldBeFalse("a plan parks for the next turn");
         turn1.DecisionKind.ShouldBe(SupervisorDecisionKinds.Plan);
@@ -69,7 +69,7 @@ public class SupervisorTurnServiceTests
         ledger.Rows.Count.ShouldBe(1, "exactly one decision recorded");
         ledger.Rows[0].Status.ShouldBe(SupervisorDecisionStatus.Succeeded);
 
-        var turn2 = await service.RunTurnAsync(_runId, _teamId, "goal", CancellationToken.None);
+        var turn2 = await service.RunTurnAsync(_runId, _teamId, "sup", "goal", CancellationToken.None);
 
         turn2.IsFinished.ShouldBeTrue("a stop finishes the loop");
         turn2.DecisionKind.ShouldBe(SupervisorDecisionKinds.Stop);
@@ -89,9 +89,9 @@ public class SupervisorTurnServiceTests
             ledger.SeedTerminal(_runId, _teamId, SupervisorDecisionKinds.Plan, $$"""{"turn":{{i}}}""", "{}");
 
         // A decider that would NEVER stop on its own — proving the budget, not the decider, terminates.
-        var service = new SupervisorTurnService(ledger, new AlwaysPlanDecider(), new StubSupervisorActionExecutor(), NullLogger<SupervisorTurnService>.Instance);
+        var service = new SupervisorTurnService(ledger, new AlwaysPlanDecider(), new StubSupervisorActionExecutor(), db: null!, NullLogger<SupervisorTurnService>.Instance);
 
-        var result = await service.RunTurnAsync(_runId, _teamId, "goal", CancellationToken.None);
+        var result = await service.RunTurnAsync(_runId, _teamId, "sup", "goal", CancellationToken.None);
 
         result.IsFinished.ShouldBeTrue("the budget forces a terminal stop");
         result.DecisionKind.ShouldBe(SupervisorDecisionKinds.Stop);
@@ -105,17 +105,17 @@ public class SupervisorTurnServiceTests
     {
         var ledger = new FakeLedger();
         var executor = new CountingExecutor();
-        var service = new SupervisorTurnService(ledger, new StubSupervisorDecider(), executor, NullLogger<SupervisorTurnService>.Instance);
+        var service = new SupervisorTurnService(ledger, new StubSupervisorDecider(), executor, db: null!, NullLogger<SupervisorTurnService>.Instance);
 
         // First pass: turn 0 (plan) executes once + records terminal.
-        await service.RunTurnAsync(_runId, _teamId, "goal", CancellationToken.None);
+        await service.RunTurnAsync(_runId, _teamId, "sup", "goal", CancellationToken.None);
         executor.Calls.ShouldBe(1);
         ledger.Rows.Count.ShouldBe(1);
 
         // SIMULATE A REPLAY of turn 0 at the SAME turn number — re-derive the same per-turn key. The unique
         // index dedups to the prior terminal row (Duplicate) → the side effect is NOT re-run (no double-plan).
         var replayContext = new SupervisorTurnContext { Goal = "goal", TurnNumber = 0 };
-        var decision = new StubSupervisorDecider().Decide(replayContext);
+        var decision = await new StubSupervisorDecider().DecideAsync(replayContext, CancellationToken.None);
         var key = SupervisorDecisionLog.DeriveIdempotencyKey(decision.Kind, decision.PayloadJson, SupervisorTurnService.TurnDiscriminator(0));
         var claim = await ledger.TryClaimAsync(_runId, _teamId, decision.Kind, key, "h", decision.PayloadJson, 0, CancellationToken.None);
 
@@ -125,12 +125,13 @@ public class SupervisorTurnServiceTests
     }
 
     private SupervisorTurnService Service(FakeLedger ledger) =>
-        new(ledger, new StubSupervisorDecider(), new StubSupervisorActionExecutor(), NullLogger<SupervisorTurnService>.Instance);
+        new(ledger, new StubSupervisorDecider(), new StubSupervisorActionExecutor(), db: null!, NullLogger<SupervisorTurnService>.Instance);
 
     /// <summary>A decider that always plans — used to prove the budget (not the decider) is what terminates a runaway loop.</summary>
     private sealed class AlwaysPlanDecider : ISupervisorDecider
     {
-        public SupervisorDecision Decide(SupervisorTurnContext context) => new() { Kind = SupervisorDecisionKinds.Plan, PayloadJson = """{"x":1}""" };
+        public Task<SupervisorDecision> DecideAsync(SupervisorTurnContext context, CancellationToken cancellationToken) =>
+            Task.FromResult(new SupervisorDecision { Kind = SupervisorDecisionKinds.Plan, PayloadJson = """{"x":1}""" });
     }
 
     /// <summary>Counts ExecuteAsync calls — proves the side effect runs exactly once (no double-execute on replay).</summary>
@@ -138,10 +139,10 @@ public class SupervisorTurnServiceTests
     {
         public int Calls { get; private set; }
 
-        public Task<string> ExecuteAsync(SupervisorDecision decision, SupervisorTurnContext context, CancellationToken cancellationToken)
+        public Task<SupervisorExecution> ExecuteAsync(SupervisorDecision decision, SupervisorTurnContext context, CancellationToken cancellationToken)
         {
             Calls++;
-            return Task.FromResult("{}");
+            return Task.FromResult(SupervisorExecution.Synchronous("{}"));
         }
     }
 

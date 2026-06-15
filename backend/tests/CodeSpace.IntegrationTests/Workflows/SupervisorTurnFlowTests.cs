@@ -44,6 +44,11 @@ public class SupervisorTurnFlowTests : IDisposable
         _fixture = fixture;
         _flagBefore = Environment.GetEnvironmentVariable(SupervisorLane.EnabledEnvVar);
         Environment.SetEnvironmentVariable(SupervisorLane.EnabledEnvVar, "1");
+
+        // The scripted decider drives the REAL turn service with no LLM. This E2 flow pins the plan→stop arc;
+        // reset the shared fixture-singleton script (the E3 crown-jewel flips it to plan→spawn→stop).
+        using var scope = _fixture.BeginScope();
+        scope.Resolve<CodeSpace.IntegrationTests.Workflows.Infrastructure.SupervisorDecisionScript>().PlanThenStop();
     }
 
     public void Dispose() => Environment.SetEnvironmentVariable(SupervisorLane.EnabledEnvVar, _flagBefore);
