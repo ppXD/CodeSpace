@@ -2,6 +2,7 @@ using Autofac;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Credentials;
+using CodeSpace.Core.Services.Providers.Scopes;
 using CodeSpace.Core.Services.Workflows.Planning;
 using CodeSpace.IntegrationTests.Binding;
 using CodeSpace.IntegrationTests.Infrastructure;
@@ -83,9 +84,35 @@ public class PlannerGroundingFlowTests
         }
     }
 
+    [Fact]
+    public async Task A_provider_read_failure_degrades_grounding_to_null_and_the_planner_still_runs_task_only()
+    {
+        Environment.SetEnvironmentVariable(WorkflowPlanningService.EnabledEnvVar, "1");
+        try
+        {
+            // The repo IS in the caller's team — the team-scoped DB load succeeds and the real RepoGroundingProvider
+            // proceeds to the provider read. We then make that read THROW (scope check) to prove the catch-block
+            // degrade-to-null path: grounding becomes null, but planning never fails.
+            var seed = await SeedTeamWithBoundRepoAsync();
+
+            var recorder = await PlanWithRecordingPlannerAsync(seed.TeamId, seed.UserId, seed.RepositoryId, configure: b =>
+                b.RegisterInstance(new ThrowingScopeChecker()).As<IScopeChecker>().SingleInstance());
+
+            // The planner STILL ran (the provider failure degraded grounding, it did not fail the planning call)...
+            recorder.LastRequest.ShouldNotBeNull("a provider read failure must degrade grounding, never fail planning");
+
+            // ...with NO grounding folded in (the catch returned null).
+            recorder.LastRequest!.GroundingContext.ShouldBeNull("a provider/scope read failure must degrade grounding to null");
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable(WorkflowPlanningService.EnabledEnvVar, null);
+        }
+    }
+
     // ─── Helpers ─────────────────────────────────────────────────────────────
 
-    private async Task<RecordingWorkflowPlanner> PlanWithRecordingPlannerAsync(Guid teamId, Guid userId, Guid repositoryId)
+    private async Task<RecordingWorkflowPlanner> PlanWithRecordingPlannerAsync(Guid teamId, Guid userId, Guid repositoryId, Action<ContainerBuilder>? configure = null)
     {
         var recorder = new RecordingWorkflowPlanner();
 
@@ -96,6 +123,8 @@ public class PlannerGroundingFlowTests
             b.RegisterInstance(new TestCurrentUser(userId, "test", Roles.Admin)).As<CodeSpace.Core.Services.Identity.ICurrentUser>().SingleInstance();
             b.RegisterInstance(new TestCurrentTeam(teamId)).As<CodeSpace.Core.Services.Identity.ICurrentTeam>().SingleInstance();
             b.RegisterInstance(recorder).As<IWorkflowPlanner>().SingleInstance();
+
+            configure?.Invoke(b);
         });
 
         await scope.Resolve<IMediator>().Send(new PlanWorkflowFromTaskCommand { TaskText = "Improve onboarding", RepositoryId = repositoryId });
@@ -156,5 +185,15 @@ public class PlannerGroundingFlowTests
                 RecommendedWorkflowKind = "analysis",
             });
         }
+    }
+
+    /// <summary>Throws from the scope-check seam RepoGroundingProvider hits AFTER the team-scoped DB load — models a provider/scope read failure so the test exercises the catch-block degrade-to-null path.</summary>
+    private sealed class ThrowingScopeChecker : IScopeChecker
+    {
+        public ScopeCheckOutcome Check(ProviderKind kind, Type capabilityType, IReadOnlyCollection<string>? grantedScopes) =>
+            throw new InvalidOperationException("scope check unavailable");
+
+        public void EnsureCapability(Credential credential, ProviderKind kind, Type capabilityType) =>
+            throw new InvalidOperationException("scope check unavailable");
     }
 }
