@@ -7,21 +7,24 @@ namespace CodeSpace.Core.Services.Agents.Eval.Benchmark;
 /// oracle. Deliberately TINY (Rule 2 / the slice-1 scope guard): this is enough to prove the instrument
 /// end-to-end — task → mode → grade → scorecard row — NOT a 20-task real-model suite (an explicit follow-on).
 ///
-/// <para>Each task's <see cref="BenchmarkTask.FixtureRef"/> names a fixture the corpus knows how to materialise
-/// as a self-contained, OFFLINE local repo: a directory with a check script that exits non-zero until the agent
-/// makes the documented one-line edit, and a <see cref="BenchmarkTask.TestCommand"/> that re-runs that check.
-/// The fixtures need no network, no model key, no package manager — so CI runs them through the
-/// <c>SubtaskAwareFakeCli</c>/<c>FakeCli</c> to prove the PLUMBING, and a real-model run on demand produces the
-/// real comparison numbers.</para>
+/// <para>Each task's <see cref="BenchmarkTask.FixtureRef"/> names a fixture that <see cref="SeedBenchmarkFixtures.Stage"/>
+/// materialises as a self-contained, OFFLINE local repo: a directory with a check script that exits non-zero until the
+/// agent makes the documented one-line edit, plus the editable solution file, re-run by the
+/// <see cref="BenchmarkTask.TestCommand"/>. The fixtures need no network, no model key, no package manager — so CI runs
+/// them through the fake CLI to prove the PLUMBING, and a real-model run on demand produces the real comparison numbers.</para>
 /// </summary>
 public static class SeedBenchmarkCorpus
 {
-    /// <summary>The default modes every seed task is compared across — the three the platform ships an execution path for.</summary>
+    /// <summary>
+    /// The default modes every seed task is compared across — the two the single-run <c>BenchmarkRunner</c> can drive
+    /// end-to-end today. <see cref="BenchmarkMode.WorkflowMap"/> is deliberately NOT here: it needs the composed
+    /// planner→<c>flow.map</c>→synthesizer engine (a workflow, not a single agent run), which this slice does not wire,
+    /// so listing it would make the shipped corpus throw on every task. It lands when the workflow-driving harness does.
+    /// </summary>
     public static readonly IReadOnlyList<BenchmarkMode> DefaultModes = new[]
     {
         BenchmarkMode.HarnessCli,
         BenchmarkMode.HarnessCliWithMcp,
-        BenchmarkMode.WorkflowMap,
     };
 
     /// <summary>The default test command for every seed fixture — run the fixture's own POSIX check script. Independent of the agent (Rule 7 honesty): the grader re-runs THIS, never the model's self-report.</summary>

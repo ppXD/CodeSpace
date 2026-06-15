@@ -34,6 +34,16 @@ public sealed record BenchmarkResult
     public required BenchmarkGrade Grade { get; init; }
 
     /// <summary>
+    /// Whether the run-scoped MCP tool-fabric endpoint was actually OPENED for this run — the resolved state of the
+    /// executor's per-run gate, recorded by the runner from the SAME gate the executor used so a row can never be
+    /// mislabeled. This is the load-bearing distinction between <see cref="BenchmarkMode.HarnessCli"/> (false) and
+    /// <see cref="BenchmarkMode.HarnessCliWithMcp"/> (true): the two modes run the SAME task in the SAME process and
+    /// differ observably here, not merely in the scorecard label, so "does the tool fabric move the number" is a real
+    /// side-by-side comparison rather than two identically-executed rows.
+    /// </summary>
+    public required bool McpEndpointEnabled { get; init; }
+
+    /// <summary>
     /// PLAN-QUALITY hook (defined now for PR-D's plan-review gate; only meaningful for <see cref="BenchmarkMode.WorkflowMap"/>):
     /// did the generated plan run all the way to a successful composed result with ZERO human edits. Null for the
     /// non-planning modes (no plan to assess) and until PR-D wires the no-human-edits signal — defining the field now

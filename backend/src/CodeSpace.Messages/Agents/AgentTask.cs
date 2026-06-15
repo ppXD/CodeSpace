@@ -70,6 +70,17 @@ public sealed record AgentTask
 
     /// <summary>The conversation a run posts its tool-approval cards into — null = no approval surface (which fails closed in a later slice). Stored only; nothing reads it yet.</summary>
     public Guid? ApprovalConversationId { get; init; }
+
+    /// <summary>
+    /// Per-run opt-in to the in-process MCP tool-fabric endpoint, layered OVER the deployment-wide
+    /// <c>CODESPACE_AGENT_MCP_ENDPOINT_ENABLED</c> env flag: <c>true</c> forces the endpoint open for THIS run even
+    /// when the ambient flag is off; <c>null</c> (default) defers to the ambient flag, so an ordinary run is unchanged.
+    /// The executor's single gate ORs the two (<c>AgentRunExecutor.ShouldOpenMcpEndpoint</c>), so two runs in the SAME
+    /// process can genuinely differ on whether the fabric is reachable — which is what the benchmark instrument's
+    /// CLI-vs-CLI+MCP comparison requires (one mode sets this true, the other leaves it null). There is no per-run way
+    /// to force the endpoint OFF when the ambient flag is on — fail-open toward the operator's deployment intent.
+    /// </summary>
+    public bool? EnableMcpEndpoint { get; init; }
 }
 
 /// <summary>What the agent may do — the declarative half of the sandbox policy a harness maps to its flags.</summary>

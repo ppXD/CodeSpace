@@ -8,10 +8,9 @@ namespace CodeSpace.Messages.Agents.Benchmark;
 /// the scorecard is what turns "mode X is better" into a number.
 ///
 /// <para>v1 fixtures are SELF-CONTAINED, LOCAL, OFFLINE (no network, no model key needed in CI): a fixture is a
-/// directory the runner copies into the workspace; the agent's job is to make <see cref="TestCommand"/> exit 0;
-/// the <see cref="BenchmarkGradingKind.TestsPass"/> grader re-runs that command afterwards. The seed corpus
-/// (<c>SeedBenchmarkCorpus</c>) materialises each fixture as a tiny shell-scriptable repo with a failing check
-/// the agent must fix.</para>
+/// directory staged into the workspace; the agent's job is to make <see cref="TestCommand"/> exit 0; the
+/// <see cref="BenchmarkGradingKind.TestsPass"/> grader re-runs that command afterwards. <c>SeedBenchmarkFixtures</c>
+/// materialises each seed fixture as a tiny shell-scriptable repo with a failing check the agent must fix.</para>
 /// </summary>
 public sealed record BenchmarkTask
 {
@@ -22,9 +21,9 @@ public sealed record BenchmarkTask
     public required string Description { get; init; }
 
     /// <summary>
-    /// Reference to the repo fixture this task stages. v1 = the NAME of a seed fixture the corpus knows how to
-    /// materialise locally (a folder of files). A future remote corpus carries a clone URL + ref here behind the
-    /// same field — the runner only ever hands it to the fixture provider, never interprets it.
+    /// Reference to the repo fixture this task stages. v1 = the NAME of a seed fixture <c>SeedBenchmarkFixtures.Stage</c>
+    /// materialises locally (a folder of files). A future remote corpus carries a clone URL + ref here behind the same
+    /// field — the runner only ever hands it to the fixture stager, never interprets it.
     /// </summary>
     public required string FixtureRef { get; init; }
 

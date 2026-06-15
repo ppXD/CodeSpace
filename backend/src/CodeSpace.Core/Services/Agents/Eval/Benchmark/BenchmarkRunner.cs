@@ -13,13 +13,15 @@ namespace CodeSpace.Core.Services.Agents.Eval.Benchmark;
 /// registry, and the grader registry; the model behind the CLI is the environment's (a fake CLI in CI).
 ///
 /// <para><b>Mode handling.</b> <see cref="BenchmarkMode.HarnessCli"/> and <see cref="BenchmarkMode.HarnessCliWithMcp"/>
-/// run identically through this runner — they differ only by whether the deployment-level MCP-endpoint flag
-/// (<c>CODESPACE_AGENT_MCP_ENDPOINT_ENABLED</c>) is on, which the operator sets for the run batch (a process-wide
-/// flag a service must not flip mid-flight under concurrency); the runner records the distinguishing mode LABEL on
-/// the result either way. <see cref="BenchmarkMode.WorkflowMap"/> is driven through the composed
-/// planner→<c>flow.map</c>→synthesizer ENGINE path, which needs a seeded workflow + the engine — so it is exercised
-/// by the benchmark integration harness (reusing the D2 headline-flow path), NOT this single-run service; calling it
-/// here throws so the boundary is explicit, never a silent fake.</para>
+/// are GENUINELY differentiated within a SINGLE process: the runner stamps the per-run opt-in
+/// <c>AgentTask.EnableMcpEndpoint</c> from the mode, so the cli-mcp run opens the run-scoped MCP tool-fabric endpoint
+/// while the cli run does not — they execute observably differently, not merely under different scorecard labels. The
+/// resolved gate state (the SAME <c>AgentRunExecutor.ShouldOpenMcpEndpoint</c> the executor consults) is recorded on
+/// <see cref="BenchmarkResult.McpEndpointEnabled"/>, so a row can never be mislabeled relative to what the executor did.
+/// <see cref="BenchmarkMode.WorkflowMap"/> is RESERVED, not wired in this slice: it would run through the composed
+/// planner→<c>flow.map</c>→synthesizer ENGINE path (a workflow, not a single agent run), which this single-run runner
+/// does not orchestrate — requesting it throws a clear "not yet wired" so the boundary is explicit, never a silent fake.
+/// The seed corpus therefore ships only the two runnable modes (see <c>SeedBenchmarkCorpus.DefaultModes</c>).</para>
 /// </summary>
 public sealed class BenchmarkRunner : IBenchmarkRunner, IScopedDependency
 {
@@ -42,9 +44,15 @@ public sealed class BenchmarkRunner : IBenchmarkRunner, IScopedDependency
     public async Task<BenchmarkResult> RunAsync(BenchmarkTask task, BenchmarkMode mode, string workspaceDirectory, Guid teamId, CancellationToken cancellationToken)
     {
         if (mode == BenchmarkMode.WorkflowMap)
-            throw new NotSupportedException("BenchmarkMode.WorkflowMap is driven through the composed planner→flow.map→synthesizer engine path by the benchmark integration harness, not this single-run runner. See the benchmark integration test that reuses the D2 headline-flow path.");
+            throw new NotSupportedException("BenchmarkMode.WorkflowMap is reserved and not yet wired: it runs through the composed planner→flow.map→synthesizer ENGINE path (a workflow, not a single agent run), which this single-run runner does not orchestrate. Run the two harness-CLI modes here; the seed corpus ships only those.");
 
-        var run = await CreateRunAsync(task, workspaceDirectory, teamId, cancellationToken).ConfigureAwait(false);
+        var agentTask = BuildAgentTask(task, mode, workspaceDirectory);
+
+        // The SAME gate the executor will consult to decide whether to open the run's MCP endpoint — recorded on the
+        // result so the cli vs cli-mcp rows can never be mislabeled relative to what the run actually did.
+        var mcpEnabled = AgentRunExecutor.ShouldOpenMcpEndpoint(agentTask);
+
+        var run = await _runs.CreateAsync(agentTask, teamId, null, null, cancellationToken).ConfigureAwait(false);
 
         await _executor.ExecuteAsync(run.Id, cancellationToken).ConfigureAwait(false);
 
@@ -52,24 +60,25 @@ public sealed class BenchmarkRunner : IBenchmarkRunner, IScopedDependency
 
         var grade = await GradeAsync(task, workspaceDirectory, cancellationToken).ConfigureAwait(false);
 
-        return BuildResult(task, mode, completed, grade);
+        return BuildResult(task, mode, completed, grade, mcpEnabled);
     }
 
-    /// <summary>Create the agent run for this task with the pre-staged workspace pinned directly (no RepositoryId → the executor uses the task's WorkspaceDirectory as the sandbox cwd). The autonomy stays Standard so the agent may write inside its workspace.</summary>
-    private async Task<AgentRun> CreateRunAsync(BenchmarkTask task, string workspaceDirectory, Guid teamId, CancellationToken cancellationToken)
+    /// <summary>
+    /// Build the agent-task envelope for this (task, mode): the pre-staged workspace is pinned directly (no RepositoryId →
+    /// the executor uses WorkspaceDirectory as the sandbox cwd), autonomy stays Standard so the agent may write inside its
+    /// workspace, and the per-run MCP opt-in is set IFF the mode is <see cref="BenchmarkMode.HarnessCliWithMcp"/> — the one
+    /// knob that genuinely differentiates the two harness-CLI modes within a single process.
+    /// </summary>
+    private static AgentTask BuildAgentTask(BenchmarkTask task, BenchmarkMode mode, string workspaceDirectory) => new()
     {
-        var agentTask = new AgentTask
-        {
-            Goal = task.Goal,
-            Harness = task.Harness,
-            RunnerKind = DefaultRunnerKind,
-            WorkspaceDirectory = workspaceDirectory,
-            Autonomy = AgentAutonomyLevel.Standard,
-            TimeoutSeconds = task.TimeoutSeconds,
-        };
-
-        return await _runs.CreateAsync(agentTask, teamId, null, null, cancellationToken).ConfigureAwait(false);
-    }
+        Goal = task.Goal,
+        Harness = task.Harness,
+        RunnerKind = DefaultRunnerKind,
+        WorkspaceDirectory = workspaceDirectory,
+        Autonomy = AgentAutonomyLevel.Standard,
+        TimeoutSeconds = task.TimeoutSeconds,
+        EnableMcpEndpoint = mode == BenchmarkMode.HarnessCliWithMcp ? true : null,
+    };
 
     /// <summary>Grade the finished run with the task's oracle, against the post-run workspace, on the same runner kind the agent ran on. The grader is independent of the agent (it re-runs the repo's tests).</summary>
     private async Task<BenchmarkGrade> GradeAsync(BenchmarkTask task, string workspaceDirectory, CancellationToken cancellationToken)
@@ -86,8 +95,8 @@ public sealed class BenchmarkRunner : IBenchmarkRunner, IScopedDependency
         return await grader.GradeAsync(context, cancellationToken).ConfigureAwait(false);
     }
 
-    /// <summary>Fold the recorded run + the grade into a result row. Duration is the run's wall-clock when both timestamps exist (mirroring the scorecard's own projection); null otherwise.</summary>
-    private static BenchmarkResult BuildResult(BenchmarkTask task, BenchmarkMode mode, AgentRun run, BenchmarkGrade grade) => new()
+    /// <summary>Fold the recorded run + the grade into a result row. Duration is the run's wall-clock when both timestamps exist (mirroring the scorecard's own projection); null otherwise. <paramref name="mcpEnabled"/> is the executor's resolved MCP gate for this run — the observable cli vs cli-mcp distinction.</summary>
+    private static BenchmarkResult BuildResult(BenchmarkTask task, BenchmarkMode mode, AgentRun run, BenchmarkGrade grade, bool mcpEnabled) => new()
     {
         TaskId = task.Id,
         Mode = mode,
@@ -95,6 +104,7 @@ public sealed class BenchmarkRunner : IBenchmarkRunner, IScopedDependency
         RunStatus = run.Status,
         DurationSeconds = run.StartedAt is { } started && run.CompletedAt is { } completed ? (completed - started).TotalSeconds : null,
         Grade = grade,
-        PlanRanCleanWithNoHumanEdits = null,   // only meaningful for WorkflowMap (driven by the integration harness); PR-D wires the no-human-edits signal.
+        McpEndpointEnabled = mcpEnabled,
+        PlanRanCleanWithNoHumanEdits = null,   // only meaningful for WorkflowMap (reserved, not wired in this slice); PR-D wires the no-human-edits signal.
     };
 }

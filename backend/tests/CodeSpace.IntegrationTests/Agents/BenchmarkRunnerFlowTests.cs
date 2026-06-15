@@ -83,6 +83,40 @@ public sealed class BenchmarkRunnerFlowTests
     }
 
     [Fact]
+    public async Task The_same_task_through_both_cli_modes_differs_observably_on_the_mcp_fabric_not_just_the_label()
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        using var cli = new FakeBenchmarkCli();
+        var teamId = await SeedTeamAsync();
+
+        // The SAME task, the SAME staged start-state, run through both harness-CLI modes in the SAME process. The only
+        // intended difference is whether the run-scoped MCP tool fabric is reachable — driven per-run, not by a process-
+        // wide flag the runner can't thread. So the two modes must NOT be byte-identical-but-relabelled.
+        using var ws1 = BenchmarkFixture.StageSolved();
+        using var ws2 = BenchmarkFixture.StageSolved();
+
+        var cliRun = await RunAsync(TestsPassTask(), BenchmarkMode.HarnessCli, ws1.Directory, teamId);
+        var mcpRun = await RunAsync(TestsPassTask(), BenchmarkMode.HarnessCliWithMcp, ws2.Directory, teamId);
+
+        // The load-bearing distinction: the cli-mcp run actually opened the run-scoped MCP endpoint (the executor's
+        // resolved per-run gate), the bare cli run did not — recorded on the result, so the two rows can never be
+        // mislabeled-identical the way a label-only difference would be.
+        cliRun.McpEndpointEnabled.ShouldBeFalse("the bare CLI mode runs with NO tool fabric — the baseline");
+        mcpRun.McpEndpointEnabled.ShouldBeTrue("the cli-mcp mode opens the run-scoped MCP endpoint in the SAME process — the fabric is genuinely reachable, not just a different label");
+        mcpRun.McpEndpointEnabled.ShouldNotBe(cliRun.McpEndpointEnabled, "two modes that execute byte-identically and differ only in their scorecard label would be a mislabeled comparison; these differ on the fabric");
+
+        // Everything else is held equal so the comparison is honest: same objective grade, both runs complete.
+        cliRun.RunStatus.ShouldBe(AgentRunStatus.Succeeded);
+        mcpRun.RunStatus.ShouldBe(AgentRunStatus.Succeeded);
+        cliRun.Grade.Passed.ShouldBe(mcpRun.Grade.Passed, "the same staged start-state grades the same under the objective oracle");
+
+        // And they land as the two distinct comparable rows the scorecard exists to lay side by side.
+        var card = BenchmarkScorecard.Compute(new[] { cliRun, mcpRun });
+        card.Harnesses.Select(h => h.Harness).ShouldBe(new[] { "bench:cli", "bench:cli-mcp" });
+    }
+
+    [Fact]
     public async Task Two_modes_over_a_solved_and_a_failing_task_compare_side_by_side()
     {
         if (OperatingSystem.IsWindows()) return;

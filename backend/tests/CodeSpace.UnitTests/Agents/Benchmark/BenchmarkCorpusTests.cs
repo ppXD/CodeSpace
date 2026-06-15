@@ -32,6 +32,34 @@ public class BenchmarkCorpusTests
         ids.Distinct().Count().ShouldBe(ids.Count, "a task id is the scorecard + result row key, so it must be unique within the corpus");
     }
 
+    [Fact]
+    public void Seed_corpus_ships_only_the_modes_the_single_run_runner_can_drive()
+    {
+        // WorkflowMap is reserved + engine-driven; the single-run runner throws for it, so listing it here would make
+        // iterating the shipped corpus throw on every task. The corpus must be runnable end-to-end.
+        SeedBenchmarkCorpus.DefaultModes.ShouldBe(new[] { BenchmarkMode.HarnessCli, BenchmarkMode.HarnessCliWithMcp });
+        SeedBenchmarkCorpus.DefaultModes.ShouldNotContain(BenchmarkMode.WorkflowMap, "WorkflowMap is reserved/not-yet-wired — it must not be in the shipped corpus");
+    }
+
+    [Fact]
+    public void Every_seed_fixture_ref_is_materialisable()
+    {
+        // Closes the "dead data" gap: each FixtureRef the corpus names must be one the stager knows how to write,
+        // so a corpus task can actually be staged + run, not just described. (Staging + check exit-code is exercised
+        // against a real runner in SeedBenchmarkFixturesTests.)
+        var dir = Path.Combine(Path.GetTempPath(), "cs-bench-corpus-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            foreach (var task in SeedBenchmarkCorpus.Tasks)
+                Should.NotThrow(() => SeedBenchmarkFixtures.Stage(task.FixtureRef, Path.Combine(dir, task.FixtureRef)),
+                    customMessage: $"the corpus names fixture '{task.FixtureRef}' but the stager can't materialise it");
+        }
+        finally
+        {
+            try { Directory.Delete(dir, recursive: true); } catch { /* best-effort */ }
+        }
+    }
+
     [Theory]
     [InlineData(BenchmarkMode.HarnessCli, "bench:cli")]
     [InlineData(BenchmarkMode.HarnessCliWithMcp, "bench:cli-mcp")]

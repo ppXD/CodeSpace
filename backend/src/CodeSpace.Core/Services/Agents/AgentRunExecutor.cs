@@ -172,7 +172,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
             // Open the per-run MCP endpoint (flag-OFF → null → no-op). It lives ONLY for the harness span: the harness
             // runs synchronously here (RunHarnessAsync → AttachAsync blocks until exit), and `await using` inside the
             // try tears it down on EVERY exit (success / cancel / generic catch) — NOT gated on leaveWorkspaceForReattach.
-            await using var mcp = OpenMcpEndpointIfEnabled(agentRunId, effectiveTask.Autonomy, run.TeamId, redactor, socketPath, token, claimedEpoch, effectiveTask.ApprovalConversationId, cancellationToken);
+            await using var mcp = OpenMcpEndpointIfEnabled(effectiveTask, agentRunId, effectiveTask.Autonomy, run.TeamId, redactor, socketPath, token, claimedEpoch, effectiveTask.ApprovalConversationId, cancellationToken);
 
             // Wire the live CLI to the fabric ONLY when the endpoint actually opened AND the harness declares an
             // MCP-server shape — a non-null endpoint already encodes "the flag is on AND the bind succeeded", so no
@@ -257,7 +257,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         // Re-open the run's MCP endpoint on the SAME socket+token the handle recorded at launch (the in-process listener
         // died with the original worker, but the detached agent keeps running with its declaration file pointing here).
         // Null when the run had no fabric / the flag is off → no-op. Bounded to the re-tail span like ExecuteAsync's.
-        await using var mcp = ReopenMcpEndpointForReattach(agentRunId, task.Autonomy, run.TeamId, reopenRedactor, handle, expectedEpoch, task.ApprovalConversationId, cancellationToken);
+        await using var mcp = ReopenMcpEndpointForReattach(task, agentRunId, task.Autonomy, run.TeamId, reopenRedactor, handle, expectedEpoch, task.ApprovalConversationId, cancellationToken);
 
         try
         {
@@ -500,6 +500,15 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     }
 
     /// <summary>
+    /// The single per-run gate deciding whether the MCP endpoint opens for THIS run: the deployment-wide env flag
+    /// (<see cref="IsMcpEndpointEnabled"/>) OR the task's explicit per-run opt-in (<see cref="AgentTask.EnableMcpEndpoint"/>).
+    /// Fail-open toward the operator: a per-run opt-in can turn the fabric ON for one run without flipping the ambient
+    /// flag, but cannot turn it OFF when the operator enabled it deployment-wide. Pure + internal so it's unit-pinned and
+    /// the benchmark runner can read the SAME gate to record what the executor actually did (no mislabeled rows).
+    /// </summary>
+    internal static bool ShouldOpenMcpEndpoint(AgentTask task) => IsMcpEndpointEnabled() || task.EnableMcpEndpoint == true;
+
+    /// <summary>
     /// The run's per-run UDS socket path + a freshly-minted capability token, computed once so the endpoint listener,
     /// the harness's declaration file, and the durable handle (for a re-attach) all agree on the same pair. The socket
     /// path uses the SAME <see cref="LocalProcessRunner.McpSocketPathFor"/> the runner binds, so they match by
@@ -509,17 +518,18 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         (LocalProcessRunner.McpSocketPathFor(runId.ToString("N")), McpRunToken.Mint());
 
     /// <summary>
-    /// Open the run's per-run UDS MCP endpoint on the given socket + token when the endpoint flag is ON — null otherwise,
-    /// so the flag-OFF path is byte-identical. Mints a DEDICATED DI scope (its own DbContext) because the framing loop
+    /// Open the run's per-run UDS MCP endpoint on the given socket + token when the run's MCP gate is ON
+    /// (<see cref="ShouldOpenMcpEndpoint"/> — the ambient env flag OR the task's per-run opt-in) — null otherwise, so the
+    /// gate-OFF path is byte-identical. Mints a DEDICATED DI scope (its own DbContext) because the framing loop
     /// runs CONCURRENTLY with the harness + the event-append path, so it must not share the heartbeat / streaming scope.
     /// The scope is held for the endpoint's life and disposed in the endpoint's <see cref="AgentMcpEndpoint.DisposeAsync"/>.
     /// The connect registry is a DI singleton, so resolving it from this scope hands a consumer the same map. Fail-soft
-    /// (A10): a host that can't bind a UDS — though the flag is on — disposes the scope, logs a Warning, and returns
+    /// (A10): a host that can't bind a UDS — though the gate is on — disposes the scope, logs a Warning, and returns
     /// null; the endpoint is optional infra, not the run, so the run still proceeds without it.
     /// </summary>
-    private AgentMcpEndpoint? OpenMcpEndpointIfEnabled(Guid runId, AgentAutonomyLevel autonomy, Guid teamId, SecretRedactor redactor, string socketPath, string token, long fenceEpoch, Guid? approvalConversationId, CancellationToken ct)
+    private AgentMcpEndpoint? OpenMcpEndpointIfEnabled(AgentTask task, Guid runId, AgentAutonomyLevel autonomy, Guid teamId, SecretRedactor redactor, string socketPath, string token, long fenceEpoch, Guid? approvalConversationId, CancellationToken ct)
     {
-        if (!IsMcpEndpointEnabled()) return null;
+        if (!ShouldOpenMcpEndpoint(task)) return null;
 
         var scope = _scopeFactory.CreateScope();
         var registry = scope.ServiceProvider.GetRequiredService<IAgentToolRegistry>();
@@ -550,11 +560,12 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     /// The in-process listener died with the original worker, but the setsid-detached agent keeps running with its 0600
     /// declaration file pointing at THIS socket+token — a fresh token would lock it out. The socket path is reconstructed
     /// from the run id (the single-source-of-truth <see cref="LocalProcessRunner.McpSocketPathFor"/>, the SAME the
-    /// launch bound). Null — no re-open — when the run had no fabric (handle carries no token) or the endpoint flag is
-    /// off; the wiring flag is NOT re-checked here (the agent's declaration already exists, so the endpoint must serve
-    /// it regardless). Fail-soft via <see cref="OpenMcpEndpointIfEnabled"/>.
+    /// launch bound). Null — no re-open — when the run had no fabric (handle carries no token) or the run's MCP gate is
+    /// off (<see cref="ShouldOpenMcpEndpoint"/> — ambient flag OR per-run opt-in, the SAME gate the launch used, so a
+    /// run opened via the per-run opt-in re-opens here too); the wiring flag is NOT re-checked here (the agent's
+    /// declaration already exists, so the endpoint must serve it regardless). Fail-soft via <see cref="OpenMcpEndpointIfEnabled"/>.
     /// </summary>
-    private AgentMcpEndpoint? ReopenMcpEndpointForReattach(Guid runId, AgentAutonomyLevel autonomy, Guid teamId, SecretRedactor redactor, SandboxHandle handle, long fenceEpoch, Guid? approvalConversationId, CancellationToken ct)
+    private AgentMcpEndpoint? ReopenMcpEndpointForReattach(AgentTask task, Guid runId, AgentAutonomyLevel autonomy, Guid teamId, SecretRedactor redactor, SandboxHandle handle, long fenceEpoch, Guid? approvalConversationId, CancellationToken ct)
     {
         if (handle.McpRunToken is not { Length: > 0 } token) return null;
 
@@ -564,7 +575,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         // credential — kept INDEPENDENT of the fold's own resolution (a second decrypt is harmless + idempotent) so the
         // delicate fingerprint-gated marker-only re-tail in ReattachAndFoldAsync is left untouched. The caller degrades
         // it to SecretRedactor.None on a resolution failure, so a deleted/rotated credential never blocks the reattach.
-        return OpenMcpEndpointIfEnabled(runId, autonomy, teamId, redactor, socketPath, token, fenceEpoch, approvalConversationId, ct);
+        return OpenMcpEndpointIfEnabled(task, runId, autonomy, teamId, redactor, socketPath, token, fenceEpoch, approvalConversationId, ct);
     }
 
     /// <summary>
