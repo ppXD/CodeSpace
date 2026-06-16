@@ -133,7 +133,7 @@ public class NodeAgentToolTests
     [Fact]
     public async Task A_real_run_command_node_projects_as_a_destructive_tool_and_runs()
     {
-        var node = new AgentRunCommandNode(new StubRunCommandService());
+        var node = new AgentRunCommandNode(new StubRunCommandService(), null!);
         IAgentTool tool = Tool(node);
 
         tool.Kind.ShouldBe("agent.run_command");

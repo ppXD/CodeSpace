@@ -1,6 +1,7 @@
 using System.Text.Json;
 using CodeSpace.Core.Services.Agents.Commands;
 using CodeSpace.Core.Services.Agents.Workspace;
+using CodeSpace.Core.Services.Workflows.Artifacts;
 using CodeSpace.Core.Services.Workflows.Nodes;
 using CodeSpace.Core.Services.Workflows.Nodes;
 using CodeSpace.Core.Services.Workflows.Nodes.Builtin;
@@ -44,7 +45,7 @@ public class AgentRunCommandNodeTests
     {
         var stub = new StubRunCommandService { Result = new() { Status = SandboxStatus.Success, ExitCode = 0, Stdout = "all tests passed", Stderr = "" } };
 
-        var result = await new AgentRunCommandNode(stub).RunAsync(Context(), CancellationToken.None);
+        var result = await new AgentRunCommandNode(stub, new FakeArtifactStore()).RunAsync(Context(), CancellationToken.None);
 
         result.Status.ShouldBe(NodeStatus.Success);
         stub.Calls.ShouldBe(1);
@@ -66,7 +67,7 @@ public class AgentRunCommandNodeTests
         // with status=Failed + the exit code so the workflow can branch (tests-passed? → open PR).
         var stub = new StubRunCommandService { Result = new() { Status = SandboxStatus.Failed, ExitCode = 1, Stdout = "1 test failed", Stderr = "boom" } };
 
-        var result = await new AgentRunCommandNode(stub).RunAsync(Context(), CancellationToken.None);
+        var result = await new AgentRunCommandNode(stub, new FakeArtifactStore()).RunAsync(Context(), CancellationToken.None);
 
         result.Status.ShouldBe(NodeStatus.Success, "a non-zero command exit must NOT fail the node — the workflow branches on the status output");
         result.Outputs["status"].GetString().ShouldBe("Failed");
@@ -79,7 +80,7 @@ public class AgentRunCommandNodeTests
     {
         var stub = new StubRunCommandService { Result = new() { Status = SandboxStatus.TimedOut, ExitCode = -1, Stdout = "", Stderr = "" } };
 
-        var result = await new AgentRunCommandNode(stub).RunAsync(Context(), CancellationToken.None);
+        var result = await new AgentRunCommandNode(stub, new FakeArtifactStore()).RunAsync(Context(), CancellationToken.None);
 
         result.Status.ShouldBe(NodeStatus.Success);
         result.Outputs["status"].GetString().ShouldBe("TimedOut");
@@ -91,7 +92,7 @@ public class AgentRunCommandNodeTests
     {
         var stub = new StubRunCommandService();
 
-        await new AgentRunCommandNode(stub).RunAsync(ContextFrom(new()
+        await new AgentRunCommandNode(stub, new FakeArtifactStore()).RunAsync(ContextFrom(new()
         {
             ["command"] = JsonSerializer.SerializeToElement("echo"),
         }), CancellationToken.None);
@@ -104,7 +105,7 @@ public class AgentRunCommandNodeTests
     {
         var stub = new StubRunCommandService();
 
-        await new AgentRunCommandNode(stub).RunAsync(ContextFrom(new()
+        await new AgentRunCommandNode(stub, new FakeArtifactStore()).RunAsync(ContextFrom(new()
         {
             ["repositoryId"] = JsonSerializer.SerializeToElement(Repo),
             ["command"] = JsonSerializer.SerializeToElement("make"),
@@ -127,7 +128,7 @@ public class AgentRunCommandNodeTests
     {
         var stub = new StubRunCommandService();
 
-        var result = await new AgentRunCommandNode(stub).RunAsync(ContextFrom(new()
+        var result = await new AgentRunCommandNode(stub, new FakeArtifactStore()).RunAsync(ContextFrom(new()
         {
             ["repositoryId"] = JsonSerializer.SerializeToElement(Repo),
         }), CancellationToken.None);
@@ -142,7 +143,7 @@ public class AgentRunCommandNodeTests
     {
         var stub = new StubRunCommandService { Throw = new WorkspaceException("clone failed: ref not found") };
 
-        var result = await new AgentRunCommandNode(stub).RunAsync(Context(), CancellationToken.None);
+        var result = await new AgentRunCommandNode(stub, new FakeArtifactStore()).RunAsync(Context(), CancellationToken.None);
 
         result.Status.ShouldBe(NodeStatus.Failure);
         result.Error.ShouldContain("workspace");
@@ -156,7 +157,7 @@ public class AgentRunCommandNodeTests
         var bigErr = new string('e', 4000);
         var stub = new StubRunCommandService { Result = new() { Status = SandboxStatus.Success, ExitCode = 0, Stdout = bigOut, Stderr = bigErr } };
 
-        var result = await new AgentRunCommandNode(stub).RunAsync(ContextFrom(new()
+        var result = await new AgentRunCommandNode(stub, new FakeArtifactStore()).RunAsync(ContextFrom(new()
         {
             ["command"] = JsonSerializer.SerializeToElement("npm"),
             ["maxOutputChars"] = JsonSerializer.SerializeToElement(200),
@@ -174,7 +175,7 @@ public class AgentRunCommandNodeTests
     {
         var stub = new StubRunCommandService { Result = new() { Status = SandboxStatus.Success, ExitCode = 0, Stdout = "all 42 tests passed", Stderr = "" } };
 
-        var result = await new AgentRunCommandNode(stub).RunAsync(Context(), CancellationToken.None);
+        var result = await new AgentRunCommandNode(stub, new FakeArtifactStore()).RunAsync(Context(), CancellationToken.None);
 
         result.Outputs["stdout"].GetString().ShouldBe("all 42 tests passed", "no cap → verbatim (non-breaking default)");
         result.Outputs["stdoutBytes"].GetInt32().ShouldBe("all 42 tests passed".Length);
@@ -187,7 +188,7 @@ public class AgentRunCommandNodeTests
         var team = Guid.Parse("22222222-2222-2222-2222-222222222222");
         var stub = new StubRunCommandService();
 
-        await new AgentRunCommandNode(stub).RunAsync(ContextWithSys(
+        await new AgentRunCommandNode(stub, new FakeArtifactStore()).RunAsync(ContextWithSys(
             new() { ["repositoryId"] = JsonSerializer.SerializeToElement(Repo), ["command"] = JsonSerializer.SerializeToElement("npm") },
             new() { [SystemScopeKeys.TeamId] = JsonSerializer.SerializeToElement(team) }), CancellationToken.None);
 
@@ -199,9 +200,105 @@ public class AgentRunCommandNodeTests
     {
         var stub = new StubRunCommandService();
 
-        await new AgentRunCommandNode(stub).RunAsync(Context(), CancellationToken.None);   // Context()'s scope has no sys.team_id
+        await new AgentRunCommandNode(stub, new FakeArtifactStore()).RunAsync(Context(), CancellationToken.None);   // Context()'s scope has no sys.team_id
 
         stub.Request!.TeamId.ShouldBeNull("no sys.team_id (e.g. a synthetic agent-tool context) → null → the service fails closed on a repo-scoped run");
+    }
+
+    [Fact]
+    public async Task Caps_stdout_stderr_inline_but_preserves_the_FULL_streams_in_the_artifact_store()
+    {
+        // D5 — no truncation data-loss: the inline stdout/stderr are the small preview, but the COMPLETE streams
+        // are stored verbatim under the run's team in the content-addressed artifact store + their ids surface.
+        var team = Guid.Parse("22222222-2222-2222-2222-222222222222");
+        var bigOut = new string('o', 5000);
+        var bigErr = new string('e', 4000);
+        var stub = new StubRunCommandService { Result = new() { Status = SandboxStatus.Success, ExitCode = 0, Stdout = bigOut, Stderr = bigErr } };
+        var artifacts = new FakeArtifactStore();
+
+        var result = await new AgentRunCommandNode(stub, artifacts).RunAsync(ContextWithSys(
+            new() { ["command"] = JsonSerializer.SerializeToElement("npm"), ["maxOutputChars"] = JsonSerializer.SerializeToElement(200) },
+            new() { [SystemScopeKeys.TeamId] = JsonSerializer.SerializeToElement(team) }), CancellationToken.None);
+
+        result.Outputs["stdout"].GetString()!.Length.ShouldBeLessThan(5000, "inline stdout is the capped preview");
+        result.Outputs["stderr"].GetString()!.Length.ShouldBeLessThan(4000, "inline stderr is the capped preview");
+
+        artifacts.Puts.Count.ShouldBe(2, "both truncated streams were preserved in full");
+        result.Outputs.ContainsKey("stdoutArtifactId").ShouldBeTrue();
+        result.Outputs.ContainsKey("stderrArtifactId").ShouldBeTrue();
+        artifacts.Puts.ShouldAllBe(p => p.TeamId == team, "stored under the run's team (tenancy)");
+        System.Text.Encoding.UTF8.GetString(artifacts.Puts[0].Bytes).ShouldBe(bigOut, "the FULL stdout is preserved verbatim — not the preview");
+        System.Text.Encoding.UTF8.GetString(artifacts.Puts[1].Bytes).ShouldBe(bigErr, "the FULL stderr is preserved verbatim");
+    }
+
+    [Fact]
+    public async Task No_artifact_is_stored_when_the_output_fits_within_the_cap()
+    {
+        var stub = new StubRunCommandService { Result = new() { Status = SandboxStatus.Success, ExitCode = 0, Stdout = "small", Stderr = "" } };
+        var artifacts = new FakeArtifactStore();
+
+        var result = await new AgentRunCommandNode(stub, artifacts).RunAsync(ContextWithSys(
+            new() { ["command"] = JsonSerializer.SerializeToElement("npm"), ["maxOutputChars"] = JsonSerializer.SerializeToElement(200) },
+            new() { [SystemScopeKeys.TeamId] = JsonSerializer.SerializeToElement(Guid.NewGuid()) }), CancellationToken.None);
+
+        artifacts.Puts.ShouldBeEmpty("nothing was dropped → no full-content artifact needed");
+        result.Outputs.ContainsKey("stdoutArtifactId").ShouldBeFalse();
+        result.Outputs.ContainsKey("stderrArtifactId").ShouldBeFalse();
+    }
+
+    [Fact]
+    public async Task Truncated_output_with_no_team_scope_keeps_the_preview_but_stores_nothing()
+    {
+        // Ephemeral / agent-tool context with no team → can't store under a tenant; fail-safe to the
+        // preview-only behaviour (exactly as before D5), never a crash.
+        var bigOut = new string('o', 5000);
+        var stub = new StubRunCommandService { Result = new() { Status = SandboxStatus.Success, ExitCode = 0, Stdout = bigOut, Stderr = "" } };
+        var artifacts = new FakeArtifactStore();
+
+        var result = await new AgentRunCommandNode(stub, artifacts).RunAsync(ContextFrom(new()
+        {
+            ["command"] = JsonSerializer.SerializeToElement("npm"),
+            ["maxOutputChars"] = JsonSerializer.SerializeToElement(200),
+        }), CancellationToken.None);   // ContextFrom's scope has no sys.team_id
+
+        artifacts.Puts.ShouldBeEmpty("no team scope → no tenant to store under; preview-only, no crash");
+        result.Outputs.ContainsKey("stdoutArtifactId").ShouldBeFalse();
+        result.Outputs["stdout"].GetString()!.Length.ShouldBeLessThan(5000, "still capped to the preview");
+    }
+
+    [Fact]
+    public async Task A_failing_artifact_store_does_NOT_fail_an_otherwise_successful_command_node()
+    {
+        // The node's contract: a COMPLETED command always yields a successful node (it fails only on a command
+        // infrastructure error). A best-effort full-output preservation that throws (DB/disk hiccup) must NOT
+        // break that — the node stays successful with the capped preview, just no artifact id.
+        var bigOut = new string('o', 5000);
+        var stub = new StubRunCommandService { Result = new() { Status = SandboxStatus.Success, ExitCode = 0, Stdout = bigOut, Stderr = "" } };
+        var artifacts = new FakeArtifactStore { ThrowOnPut = new InvalidOperationException("store down") };
+
+        var result = await new AgentRunCommandNode(stub, artifacts).RunAsync(ContextWithSys(
+            new() { ["command"] = JsonSerializer.SerializeToElement("npm"), ["maxOutputChars"] = JsonSerializer.SerializeToElement(200) },
+            new() { [SystemScopeKeys.TeamId] = JsonSerializer.SerializeToElement(Guid.NewGuid()) }), CancellationToken.None);
+
+        result.Status.ShouldBe(NodeStatus.Success, "a storage failure must not fail an otherwise-successful command node");
+        result.Outputs.ContainsKey("stdoutArtifactId").ShouldBeFalse("the failed store surfaces no artifact id — the preview is still there");
+        result.Outputs["stdout"].GetString()!.Length.ShouldBeLessThan(5000, "the inline preview is intact");
+    }
+
+    private sealed class FakeArtifactStore : IArtifactStore
+    {
+        public readonly List<(Guid TeamId, byte[] Bytes, string ContentType)> Puts = new();
+        public Exception? ThrowOnPut;
+
+        public Task<Guid> PutAsync(Guid teamId, ReadOnlyMemory<byte> bytes, string contentType, CancellationToken cancellationToken)
+        {
+            if (ThrowOnPut != null) throw ThrowOnPut;
+            Puts.Add((teamId, bytes.ToArray(), contentType));
+            return Task.FromResult(Guid.NewGuid());
+        }
+
+        public Task<ArtifactBytes?> GetBytesAsync(Guid teamId, Guid artifactId, CancellationToken cancellationToken) => Task.FromResult<ArtifactBytes?>(null);
+        public Task<ArtifactMetadata?> GetMetadataAsync(Guid teamId, Guid artifactId, CancellationToken cancellationToken) => Task.FromResult<ArtifactMetadata?>(null);
     }
 
     private static NodeRunContext Context() => ContextFrom(new()
