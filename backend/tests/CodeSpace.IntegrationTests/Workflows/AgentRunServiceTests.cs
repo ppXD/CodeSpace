@@ -74,6 +74,450 @@ public class AgentRunServiceTests
     }
 
     [Fact]
+    public async Task AppendEventsAsync_persists_a_batch_in_strict_emission_order()
+    {
+        // D1: the buffered writer flushes many events in ONE batched call. The per-run BIGSERIAL `sequence`
+        // (the canonical order the live log + replay cursor read by) MUST be assigned in emission order — even
+        // though the random-Guid PK would let EF's change tracker scramble a plain AddRange. Mixed payloads
+        // (some with data_json, some without) exercise the NULL element in the jsonb array.
+        var teamId = await SeedTeamAsync();
+
+        Guid runId;
+        using (var scope = _fixture.BeginScope())
+        {
+            var svc = scope.Resolve<IAgentRunService>();
+            runId = (await svc.CreateAsync(BuildTask(), teamId, null, null, CancellationToken.None)).Id;
+            await svc.MarkRunningAsync(runId, CancellationToken.None);
+        }
+
+        var batch = new[]
+        {
+            new AgentEvent { Kind = AgentEventKind.Started, Text = "one" },
+            new AgentEvent { Kind = AgentEventKind.AssistantMessage, Text = "two", Data = JsonSerializer.SerializeToElement(new { step = 2 }) },
+            new AgentEvent { Kind = AgentEventKind.CommandExecuted, Text = "three" },
+            new AgentEvent { Kind = AgentEventKind.AssistantMessage, Text = "four", Data = JsonSerializer.SerializeToElement(new { step = 4 }) },
+            new AgentEvent { Kind = AgentEventKind.Completed, Text = "five" },
+        };
+
+        using (var scope = _fixture.BeginScope())
+            await scope.Resolve<IAgentRunService>().AppendEventsAsync(runId, batch, CancellationToken.None);
+
+        using (var scope = _fixture.BeginScope())
+        {
+            var events = await scope.Resolve<IAgentRunService>().GetEventsAsync(runId, teamId, 0, CancellationToken.None);
+
+            events.Select(e => e.Text).ShouldBe(new[] { "one", "two", "three", "four", "five" }, "the batch reads back in EXACT emission order");
+            events.Select(e => e.Sequence).ShouldBe(events.Select(e => e.Sequence).OrderBy(s => s), "the BIGSERIAL sequence is strictly ascending in emission order");
+            events[1].DataJson!.ShouldContain("\"step\": 2");   // jsonb round-trips reformatted (space after colon)
+            events[2].DataJson.ShouldBeNull("an event with no payload persists NULL data_json");
+        }
+    }
+
+    [Fact]
+    public async Task AppendEventsAsync_keeps_global_order_across_multiple_batches()
+    {
+        // D1: the writer flushes in several batches over the run's life (checkpoint flushes + a final flush).
+        // Each batch is its own call; the global sequence must stay monotonic ACROSS batches so a cursor read
+        // (sequence > N) never skips or reorders an event from an earlier batch.
+        var teamId = await SeedTeamAsync();
+
+        Guid runId;
+        using (var scope = _fixture.BeginScope())
+        {
+            var svc = scope.Resolve<IAgentRunService>();
+            runId = (await svc.CreateAsync(BuildTask(), teamId, null, null, CancellationToken.None)).Id;
+            await svc.MarkRunningAsync(runId, CancellationToken.None);
+        }
+
+        using (var scope = _fixture.BeginScope())
+        {
+            var svc = scope.Resolve<IAgentRunService>();
+            await svc.AppendEventsAsync(runId, new[] { Ev("a1"), Ev("a2") }, CancellationToken.None);
+            await svc.AppendEventsAsync(runId, new[] { Ev("b1"), Ev("b2"), Ev("b3") }, CancellationToken.None);
+            await svc.AppendEventsAsync(runId, new[] { Ev("c1") }, CancellationToken.None);
+        }
+
+        using (var scope = _fixture.BeginScope())
+        {
+            var events = await scope.Resolve<IAgentRunService>().GetEventsAsync(runId, teamId, 0, CancellationToken.None);
+
+            events.Select(e => e.Text).ShouldBe(new[] { "a1", "a2", "b1", "b2", "b3", "c1" }, "every batch appends after the previous one, in order");
+
+            // The incremental live cursor: reading strictly after the 2nd event yields exactly the tail, in order.
+            var tail = await scope.Resolve<IAgentRunService>().GetEventsAsync(runId, teamId, events[1].Sequence, CancellationToken.None);
+            tail.Select(e => e.Text).ShouldBe(new[] { "b1", "b2", "b3", "c1" });
+        }
+
+        static AgentEvent Ev(string text) => new() { Kind = AgentEventKind.AssistantMessage, Text = text };
+    }
+
+    [Fact]
+    public async Task AppendEventsAsync_persists_a_large_batch_in_order_in_one_statement()
+    {
+        // D1 scale: a busy run can flush hundreds of events at once. The single unnest INSERT must carry an
+        // arbitrarily large batch (the parameter count is FIXED at four — one array per column — so there is no
+        // placeholder explosion / 65535-parameter ceiling) and still serial-stamp every row in emission order.
+        var teamId = await SeedTeamAsync();
+
+        Guid runId;
+        using (var scope = _fixture.BeginScope())
+        {
+            var svc = scope.Resolve<IAgentRunService>();
+            runId = (await svc.CreateAsync(BuildTask(), teamId, null, null, CancellationToken.None)).Id;
+            await svc.MarkRunningAsync(runId, CancellationToken.None);
+        }
+
+        const int n = 300;
+        var batch = Enumerable.Range(0, n)
+            .Select(i => new AgentEvent { Kind = AgentEventKind.AssistantMessage, Text = $"line-{i:D4}" })
+            .ToArray();
+
+        using (var scope = _fixture.BeginScope())
+            await scope.Resolve<IAgentRunService>().AppendEventsAsync(runId, batch, CancellationToken.None);
+
+        using (var scope = _fixture.BeginScope())
+        {
+            var events = await scope.Resolve<IAgentRunService>().GetEventsAsync(runId, teamId, 0, CancellationToken.None);
+
+            events.Count.ShouldBe(n, "every event in the large batch landed");
+            events.Select(e => e.Text).ShouldBe(Enumerable.Range(0, n).Select(i => $"line-{i:D4}"), "the whole batch reads back in exact emission order");
+        }
+    }
+
+    [Fact]
+    public async Task AppendEventsAsync_concurrent_runs_keep_per_run_order_and_isolation()
+    {
+        // D1 concurrency + multi-agent: two runs append batches CONCURRENTLY (the real fan-out shape — many agents
+        // streaming at once). The global BIGSERIAL interleaves across runs, but each run's read MUST return exactly
+        // its own events, complete and in per-run emission order — no loss, no cross-run leakage, no reorder.
+        var teamId = await SeedTeamAsync();
+
+        Guid runA, runB;
+        using (var scope = _fixture.BeginScope())
+        {
+            var svc = scope.Resolve<IAgentRunService>();
+            runA = (await svc.CreateAsync(BuildTask(), teamId, null, null, CancellationToken.None)).Id;
+            runB = (await svc.CreateAsync(BuildTask(), teamId, null, null, CancellationToken.None)).Id;
+            await svc.MarkRunningAsync(runA, CancellationToken.None);
+            await svc.MarkRunningAsync(runB, CancellationToken.None);
+        }
+
+        const int batches = 20;
+        const int perBatch = 5;
+
+        // Each run drives its own DbContext scope (a real worker = its own connection); the two interleave freely.
+        async Task DriveAsync(Guid runId, string prefix)
+        {
+            for (var b = 0; b < batches; b++)
+            {
+                using var scope = _fixture.BeginScope();
+                var events = Enumerable.Range(0, perBatch)
+                    .Select(i => new AgentEvent { Kind = AgentEventKind.AssistantMessage, Text = $"{prefix}-{b:D2}-{i}" })
+                    .ToArray();
+                await scope.Resolve<IAgentRunService>().AppendEventsAsync(runId, events, CancellationToken.None);
+            }
+        }
+
+        await Task.WhenAll(DriveAsync(runA, "A"), DriveAsync(runB, "B"));
+
+        using (var scope = _fixture.BeginScope())
+        {
+            var svc = scope.Resolve<IAgentRunService>();
+
+            var a = await svc.GetEventsAsync(runA, teamId, 0, CancellationToken.None);
+            var bEvents = await svc.GetEventsAsync(runB, teamId, 0, CancellationToken.None);
+
+            var expectedA = Enumerable.Range(0, batches).SelectMany(b => Enumerable.Range(0, perBatch).Select(i => $"A-{b:D2}-{i}"));
+            var expectedB = Enumerable.Range(0, batches).SelectMany(b => Enumerable.Range(0, perBatch).Select(i => $"B-{b:D2}-{i}"));
+
+            a.Select(e => e.Text).ShouldBe(expectedA, "run A reads back exactly its own events, in per-run emission order");
+            bEvents.Select(e => e.Text).ShouldBe(expectedB, "run B reads back exactly its own events, in per-run emission order");
+            a.ShouldAllBe(e => e.Text.StartsWith("A-"), "no run-B event leaked into run A");
+            bEvents.ShouldAllBe(e => e.Text.StartsWith("B-"), "no run-A event leaked into run B");
+        }
+    }
+
+    [Fact]
+    public async Task AppendEventsAsync_with_an_empty_batch_is_a_noop()
+    {
+        var teamId = await SeedTeamAsync();
+
+        Guid runId;
+        using (var scope = _fixture.BeginScope())
+        {
+            var svc = scope.Resolve<IAgentRunService>();
+            runId = (await svc.CreateAsync(BuildTask(), teamId, null, null, CancellationToken.None)).Id;
+            await svc.MarkRunningAsync(runId, CancellationToken.None);
+        }
+
+        using (var scope = _fixture.BeginScope())
+            await scope.Resolve<IAgentRunService>().AppendEventsAsync(runId, Array.Empty<AgentEvent>(), CancellationToken.None);
+
+        using (var scope = _fixture.BeginScope())
+            (await scope.Resolve<IAgentRunService>().GetEventsAsync(runId, teamId, 0, CancellationToken.None)).ShouldBeEmpty();
+    }
+
+    [Fact]
+    public async Task AppendEventsAsync_rejects_the_whole_batch_atomically_when_it_violates_a_constraint()
+    {
+        // D1 atomicity: the entire offset-reasoning rests on each flush being ONE all-or-nothing statement. A
+        // constraint-violating batch (here: a foreign-key violation — the run was never created) must commit ZERO
+        // rows — never a torn prefix. If a future refactor split the batch into per-row inserts without a
+        // transaction, a mid-batch failure could leave a partial prefix the flush-before-offset invariant no longer
+        // protects (the cursor would point into a gap with orphaned later events, and the append-only log could
+        // never repair it). We pin the single-statement guarantee.
+        var teamId = await SeedTeamAsync();
+
+        Guid goodRun;
+        using (var scope = _fixture.BeginScope())
+        {
+            var svc = scope.Resolve<IAgentRunService>();
+            goodRun = (await svc.CreateAsync(BuildTask(), teamId, null, null, CancellationToken.None)).Id;
+            await svc.MarkRunningAsync(goodRun, CancellationToken.None);
+            await svc.AppendEventsAsync(goodRun, new[] { Ev("baseline-1"), Ev("baseline-2"), Ev("baseline-3") }, CancellationToken.None);
+        }
+
+        var orphanRun = Guid.NewGuid();   // never created → agent_run_id FK has nothing to reference
+        var rejected = new[] { Ev("torn-1"), Ev("torn-2"), Ev("torn-3"), Ev("torn-4"), Ev("torn-5") };
+
+        using (var scope = _fixture.BeginScope())
+            await Should.ThrowAsync<Exception>(() => scope.Resolve<IAgentRunService>().AppendEventsAsync(orphanRun, rejected, CancellationToken.None));
+
+        using (var scope = _fixture.BeginScope())
+        {
+            // Zero rows landed for the violating batch — the INSERT was rejected wholesale, not row-by-row.
+            (await scope.Resolve<CodeSpaceDbContext>().AgentRunEvent.AsNoTracking().CountAsync(e => e.AgentRunId == orphanRun))
+                .ShouldBe(0, "a constraint-violating batch commits NONE of its rows (single atomic statement)");
+
+            // The unrelated good run is untouched — exactly its baseline, still in order.
+            (await scope.Resolve<IAgentRunService>().GetEventsAsync(goodRun, teamId, 0, CancellationToken.None)).Select(e => e.Text)
+                .ShouldBe(new[] { "baseline-1", "baseline-2", "baseline-3" });
+        }
+
+        static AgentEvent Ev(string text) => new() { Kind = AgentEventKind.AssistantMessage, Text = text };
+    }
+
+    [Fact]
+    public async Task AppendEventsAsync_under_heavy_concurrent_fan_out_keeps_per_run_order_and_global_uniqueness()
+    {
+        // D1 concurrency at fan-out scale (6 real agents streaming at once): STRONGER than the 2-run test —
+        // it also asserts the GLOBAL BIGSERIAL stream has NO duplicate sequence across all runs and NO loss
+        // (total persisted == every event), and that the raw global stream filtered to one run matches that
+        // run's per-run cursor order. Catches a dropped ORDER BY, an AddRange scramble, or a serial-allocation
+        // collision that only manifests under real contention.
+        var teamId = await SeedTeamAsync();
+
+        const int runCount = 6, batches = 30, perBatch = 8;
+        const int perRun = batches * perBatch;   // 240
+
+        var runIds = new Guid[runCount];
+        using (var scope = _fixture.BeginScope())
+        {
+            var svc = scope.Resolve<IAgentRunService>();
+            for (var r = 0; r < runCount; r++)
+            {
+                runIds[r] = (await svc.CreateAsync(BuildTask(), teamId, null, null, CancellationToken.None)).Id;
+                await svc.MarkRunningAsync(runIds[r], CancellationToken.None);
+            }
+        }
+
+        async Task DriveAsync(int r)
+        {
+            var letter = (char)('A' + r);
+            for (var b = 0; b < batches; b++)
+            {
+                using var scope = _fixture.BeginScope();   // own connection per batch (a real worker's own scope)
+                var events = Enumerable.Range(0, perBatch)
+                    .Select(i => new AgentEvent { Kind = AgentEventKind.AssistantMessage, Text = $"{letter}-{b:D2}-{i}" })
+                    .ToArray();
+                await scope.Resolve<IAgentRunService>().AppendEventsAsync(runIds[r], events, CancellationToken.None);
+            }
+        }
+
+        await Task.WhenAll(Enumerable.Range(0, runCount).Select(DriveAsync));
+
+        using (var scope = _fixture.BeginScope())
+        {
+            var svc = scope.Resolve<IAgentRunService>();
+
+            var allSequences = new List<long>();
+            for (var r = 0; r < runCount; r++)
+            {
+                var letter = (char)('A' + r);
+                var events = await svc.GetEventsAsync(runIds[r], teamId, 0, CancellationToken.None);
+
+                var expected = Enumerable.Range(0, batches).SelectMany(b => Enumerable.Range(0, perBatch).Select(i => $"{letter}-{b:D2}-{i}"));
+                events.Select(e => e.Text).ShouldBe(expected, $"run {letter} reads back its {perRun} events in exact per-run emission order");
+                events.Select(e => e.Sequence).ShouldBe(events.Select(e => e.Sequence).OrderBy(s => s), $"run {letter} sequences strictly ascending");
+                allSequences.AddRange(events.Select(e => e.Sequence));
+            }
+
+            allSequences.Count.ShouldBe(runCount * perRun, "no event lost across the fan-out");
+            allSequences.Distinct().Count().ShouldBe(allSequences.Count, "every event got a UNIQUE global BIGSERIAL sequence — no collision under contention");
+        }
+    }
+
+    [Fact]
+    public async Task GetEventsAsync_live_cursor_drains_a_growing_log_exactly_once_under_a_contended_global_sequence()
+    {
+        // D1 live cursor (the operator/supervisor stream polled WHILE the run appends). The per-run cursor reads
+        // `agent_run_id = A AND sequence > N ORDER BY sequence`. The hazard: a row whose global BIGSERIAL is
+        // assigned-then-committed out of order relative to the cursor's position would be SKIPPED forever (silent
+        // loss invisible to any read-after-settle test). To make the global serial space genuinely CONTENDED while
+        // run A streams, TWO other "noise" runs commit concurrently throughout — so A's serials interleave with
+        // theirs and a noise commit lands between two A commits. The reader (cursor over A) must still observe
+        // every A row EXACTLY ONCE, in order, never tripped by a sibling run's interleaved serial.
+        var teamId = await SeedTeamAsync();
+
+        Guid runId, noise1, noise2;
+        using (var scope = _fixture.BeginScope())
+        {
+            var svc = scope.Resolve<IAgentRunService>();
+            runId = (await svc.CreateAsync(BuildTask(), teamId, null, null, CancellationToken.None)).Id;
+            noise1 = (await svc.CreateAsync(BuildTask(), teamId, null, null, CancellationToken.None)).Id;
+            noise2 = (await svc.CreateAsync(BuildTask(), teamId, null, null, CancellationToken.None)).Id;
+            await svc.MarkRunningAsync(runId, CancellationToken.None);
+            await svc.MarkRunningAsync(noise1, CancellationToken.None);
+            await svc.MarkRunningAsync(noise2, CancellationToken.None);
+        }
+
+        const int batches = 40, perBatch = 5;
+        const int total = batches * perBatch;   // 200
+        var expected = Enumerable.Range(0, batches).SelectMany(b => Enumerable.Range(0, perBatch).Select(i => $"c-{b:D2}-{i}")).ToList();
+
+        // Noise writers hammer the OTHER two runs (own scopes) until told to stop — contending the global serial.
+        using var noiseStop = new CancellationTokenSource();
+        async Task NoiseAsync(Guid id)
+        {
+            var n = 0;
+            while (!noiseStop.IsCancellationRequested)
+            {
+                using var scope = _fixture.BeginScope();
+                var events = Enumerable.Range(0, 3).Select(i => new AgentEvent { Kind = AgentEventKind.AssistantMessage, Text = $"noise-{n}-{i}" }).ToArray();
+                try { await scope.Resolve<IAgentRunService>().AppendEventsAsync(id, events, noiseStop.Token); }
+                catch (OperationCanceledException) { break; }
+                n++;
+            }
+        }
+        var noiseTasks = new[] { Task.Run(() => NoiseAsync(noise1)), Task.Run(() => NoiseAsync(noise2)) };
+
+        var writer = Task.Run(async () =>
+        {
+            for (var b = 0; b < batches; b++)
+            {
+                using var scope = _fixture.BeginScope();
+                var events = Enumerable.Range(0, perBatch).Select(i => new AgentEvent { Kind = AgentEventKind.AssistantMessage, Text = $"c-{b:D2}-{i}" }).ToArray();
+                await scope.Resolve<IAgentRunService>().AppendEventsAsync(runId, events, CancellationToken.None);
+                await Task.Delay(1);
+            }
+        });
+
+        var seenTexts = new List<string>();
+        var seenSeqs = new List<long>();
+        var reader = Task.Run(async () =>
+        {
+            long cursor = 0;
+            var deadline = DateTimeOffset.UtcNow.AddSeconds(30);
+            while (seenTexts.Count < total && DateTimeOffset.UtcNow <= deadline)
+            {
+                int got;
+                using (var scope = _fixture.BeginScope())
+                {
+                    var page = await scope.Resolve<IAgentRunService>().GetEventsAsync(runId, teamId, cursor, CancellationToken.None);
+                    got = page.Count;
+                    if (got > 0)
+                    {
+                        seenTexts.AddRange(page.Select(e => e.Text));
+                        seenSeqs.AddRange(page.Select(e => e.Sequence));
+                        cursor = page[^1].Sequence;
+                    }
+                }
+                if (got == 0) await Task.Delay(5);   // pace the poll only when caught up
+            }
+        });
+
+        await Task.WhenAll(writer, reader);
+        noiseStop.Cancel();
+        await Task.WhenAll(noiseTasks);
+
+        seenTexts.Count.ShouldBe(total, $"the cursor stream observed every committed row exactly once (saw {seenTexts.Count}/{total} — a skip means a sibling run's interleaved serial tripped the per-run cursor)");
+        seenSeqs.SequenceEqual(seenSeqs.OrderBy(s => s)).ShouldBeTrue("observed sequences strictly ascending — no row re-read out of order");
+        seenSeqs.Distinct().Count().ShouldBe(seenSeqs.Count, "no row observed twice");
+        seenTexts.ShouldBe(expected, "the live stream reconstructs the exact emission order");
+
+        using (var scope = _fixture.BeginScope())
+            (await scope.Resolve<IAgentRunService>().GetEventsAsync(runId, teamId, 0, CancellationToken.None)).Select(e => e.Text)
+                .ShouldBe(expected, "a post-settle full read matches the live-observed order");
+    }
+
+    [Fact]
+    public async Task AppendEventsAsync_round_trips_structured_payloads_keeping_the_null_data_array_row_aligned()
+    {
+        // D1 data fidelity at scale: every 3rd event carries a DISTINCT structured payload, the rest carry none —
+        // exercising interleaved NULL / non-NULL elements through unnest({3}::text[]) + CAST(e.data AS jsonb). A
+        // parallel-array desync would mis-attribute payloads to the wrong row (invisible at 5 rows, corrupting the
+        // replay/observability read once D3 makes structured payloads the norm). Also pins unicode / escapes /
+        // empty-object / json-null / large-blob / SQL-injection fidelity through the CAST + text binding.
+        var teamId = await SeedTeamAsync();
+
+        Guid runId;
+        using (var scope = _fixture.BeginScope())
+        {
+            var svc = scope.Resolve<IAgentRunService>();
+            runId = (await svc.CreateAsync(BuildTask(), teamId, null, null, CancellationToken.None)).Id;
+            await svc.MarkRunningAsync(runId, CancellationToken.None);
+        }
+
+        const int n = 300;
+        const string bigBlob = "X";
+        var batch = new AgentEvent[n];
+        for (var i = 0; i < n; i++)
+            batch[i] = (i % 3 == 0)
+                ? new AgentEvent { Kind = AgentEventKind.ToolCall, Text = $"row-{i:D4}", Data = JsonSerializer.SerializeToElement(new { idx = i, phase = "build" }) }
+                : new AgentEvent { Kind = AgentEventKind.AssistantMessage, Text = $"row-{i:D4}" };   // no payload → NULL data_json
+
+        // Splice in edge-case fidelity rows (each with its own index so misattribution is detectable).
+        batch[30] = new AgentEvent { Kind = AgentEventKind.ToolCall, Text = "row-0030", Data = JsonSerializer.SerializeToElement(new { idx = 30, nested = new[] { 1, 2, 3 }, who = "café-🚀-naïve" }) };
+        batch[60] = new AgentEvent { Kind = AgentEventKind.ToolCall, Text = "row-0060", Data = JsonSerializer.SerializeToElement(new { idx = 60, q = "he said \"hi\"\tand\\back", line = "a\nb" }) };
+        batch[90] = new AgentEvent { Kind = AgentEventKind.ToolCall, Text = "row-0090", Data = JsonSerializer.SerializeToElement(new { }) };                       // empty object
+        batch[120] = new AgentEvent { Kind = AgentEventKind.ToolCall, Text = "row-0120", Data = JsonSerializer.Deserialize<JsonElement>("null") };                 // json null literal
+        batch[150] = new AgentEvent { Kind = AgentEventKind.ToolCall, Text = "row-0150", Data = JsonSerializer.SerializeToElement(new { idx = 150, blob = new string('X', 100_000), end = "SENTINEL" }) };
+        batch[180] = new AgentEvent { Kind = AgentEventKind.AssistantMessage, Text = "row-0180'; DROP TABLE agent_run_event; --\nsecond line\twith\ttabs" };          // injection + meta chars in text
+
+        using (var scope = _fixture.BeginScope())
+            await scope.Resolve<IAgentRunService>().AppendEventsAsync(runId, batch, CancellationToken.None);
+
+        using (var scope = _fixture.BeginScope())
+        {
+            var events = await scope.Resolve<IAgentRunService>().GetEventsAsync(runId, teamId, 0, CancellationToken.None);
+
+            events.Count.ShouldBe(n, "every row landed (table intact — the injection string was bound, not executed)");
+            events.Select(e => e.Text).ShouldBe(Enumerable.Range(0, n).Select(i => i == 180 ? "row-0180'; DROP TABLE agent_run_event; --\nsecond line\twith\ttabs" : $"row-{i:D4}"), "text round-trips verbatim incl. newlines/tabs/quotes");
+
+            // Each payload-bearing row carries ITS OWN index — proves the data[] NULL/non-NULL elements stayed row-aligned.
+            for (var i = 0; i < n; i++)
+            {
+                if (i is 90 or 120 or 180) continue;   // empty-object / json-null / text-only injection row handled below
+                if (i % 3 == 0)
+                {
+                    events[i].DataJson.ShouldNotBeNull($"row {i} carries a structured payload");
+                    JsonSerializer.Deserialize<JsonElement>(events[i].DataJson!).GetProperty("idx").GetInt32().ShouldBe(i, $"row {i}'s payload was NOT shifted onto another row");
+                }
+                else
+                {
+                    events[i].DataJson.ShouldBeNull($"row {i} has no payload → NULL data_json (no column shift)");
+                }
+            }
+
+            events[30].DataJson!.ShouldContain("🚀", Case.Sensitive);   // unicode/emoji survive
+            events[60].DataJson!.ShouldContain("\\t");                   // escapes survive (jsonb keeps the escape)
+            events[90].DataJson.ShouldBe("{}", "empty object round-trips");
+            events[120].DataJson.ShouldBe("null", "json null literal round-trips as a jsonb null, distinct from a missing payload");
+            events[150].DataJson!.ShouldContain("SENTINEL", customMessage: "the 100KB payload is untruncated");
+        }
+    }
+
+    [Fact]
     public async Task Reading_events_for_another_teams_run_returns_empty()
     {
         // The events read is team-scoped: a foreign run id leaks neither events nor the run's existence.

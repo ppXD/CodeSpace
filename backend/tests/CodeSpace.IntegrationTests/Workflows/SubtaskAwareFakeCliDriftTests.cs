@@ -62,4 +62,37 @@ public class SubtaskAwareFakeCliDriftTests
         // ScriptBody adds/removes/reorders a line, this catches the drift between the script and its declaration.
         SubtaskAwareFakeCli.EmittedEventTypes.ShouldBe(new[] { "agent_reasoning", "agent_message", "task_complete" });
     }
+
+    [Fact]
+    public void The_high_volume_fake_cli_lines_still_parse_into_the_expected_per_line_shape()
+    {
+        // Rule-12.5 drift pin for HighVolumeSubtaskFakeCli (the driver of the two D1 map-fan-out E2E tests). It
+        // hand-prints N "agent_message" lines tagged "<goal>#NNN" + a "task_complete" terminal; if codex's
+        // type→kind mapping or the message→Text fold ever drifts, those E2E tests would silently parse a different
+        // shape and their "every line present, in order" assertions would become meaningless. Pin it here loudly.
+        var harness = new CodexHarness();
+        const string goal = "Work on alpha";
+
+        var lines = new[]
+        {
+            $$"""{"type":"agent_message","message":"{{goal}}#001"}""",
+            $$"""{"type":"agent_message","message":"{{goal}}#060"}""",
+            """{"type":"task_complete","message":"completed"}""",
+        };
+
+        var parsed = lines.Select(harness.ParseEvent).ToList();
+
+        parsed.ShouldAllBe(e => e != null, "every high-volume fake line must still parse through the real CodexHarness.ParseEvent");
+        parsed.Select(e => e!.Kind).ShouldBe(new[] { AgentEventKind.AssistantMessage, AgentEventKind.AssistantMessage, AgentEventKind.Completed },
+            customMessage: "the high-volume fake's agent_message/task_complete must keep normalizing to AssistantMessage/Completed — the kinds the two map E2E tests filter + assert on");
+
+        // The parsed AssistantMessage Text must equal what ExpectedLinesFor predicts — the exact contract the E2E
+        // tests assert each branch's log against (a per-line tag drift would desync the fake from its expectation).
+        var expected = HighVolumeSubtaskFakeCli.ExpectedLinesFor(goal);
+        parsed[0]!.Text.ShouldBe(expected[0]);     // "<goal>#001"
+        parsed[1]!.Text.ShouldBe(expected[^1]);    // "<goal>#060"
+        expected.Count.ShouldBe(HighVolumeSubtaskFakeCli.LineCount);
+
+        harness.BuildResult(parsed!, exitCode: 0).Status.ShouldBe(AgentRunStatus.Succeeded);
+    }
 }

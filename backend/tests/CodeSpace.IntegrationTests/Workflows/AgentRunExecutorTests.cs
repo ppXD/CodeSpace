@@ -90,6 +90,136 @@ public class AgentRunExecutorTests
     }
 
     [Fact]
+    public async Task A_failed_checkpoint_flush_lands_the_run_Failed_and_does_NOT_advance_the_durable_offset()
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        // D1 flush-before-offset invariant (the core durability contract). The executor's CheckpointHandleOffset
+        // awaits FlushAsync (→ AppendEventsAsync) BEFORE persisting the advanced StdoutOffset. We inject a DB
+        // failure on the FIRST batched flush (the first checkpoint): the offset-advancing write must NEVER run, so
+        // the persisted StdoutOffset stays at its launch value (0). If the two awaits were ever reordered, a crash
+        // in that gap would advance the durable offset past events that never landed → permanent silent data loss
+        // on re-attach. Also pins that a DB-layer flush failure is a CLEAN Failed (generic catch), not a stranded
+        // Running (only a worker tear-down / OperationCanceledException leaves it Running).
+        var teamId = await SeedTeamAsync();
+        var runId = await CreateScriptedRunAsync(teamId);
+
+        // Two polls' worth of lines so a real checkpoint flush fires (>=2 lines in the first poll → one batched call).
+        var instrumented = await ExecuteInstrumentedAsync(runId,
+            new ScriptedHarness("printf 'l1\\nl2\\n'; sleep 0.6; printf 'l3\\nl4\\n'; sleep 0.6"),
+            throwOnAppendEventsCall: 1);
+
+        instrumented.BatchedCalls.ShouldBeGreaterThanOrEqualTo(1, "the first checkpoint flush was attempted (and faulted)");
+
+        using var scope = _fixture.BeginScope();
+        var run = await scope.Resolve<IAgentRunService>().GetAsync(runId, CancellationToken.None);
+
+        run.Status.ShouldBe(AgentRunStatus.Failed, "a DB-layer flush failure is a clean Failed, not a stranded Running");
+        (run.Error ?? "").ShouldContain(InstrumentedAgentRunService.AppendEventsFaultMessage, customMessage: "the run carries the redacted flush-fault cause");
+
+        JsonSerializer.Deserialize<SandboxHandle>(run.RunnerHandleJson!, AgentJson.Options)!.StdoutOffset
+            .ShouldBe(0, "the throw in FlushAsync short-circuited BEFORE SetRunnerHandleAsync — the durable offset never advanced past unflushed events");
+    }
+
+    [Fact]
+    public async Task Durable_path_batches_event_writes_one_flush_per_checkpoint_never_one_per_line()
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        // D1 perf thesis (otherwise behaviourally uncovered): "one batched INSERT per checkpoint, not one per
+        // line". A regression that flushed per-line (or bypassed the buffer to AppendEventAsync) passes every
+        // ORDER/scale test while silently destroying the round-trip reduction. We count: K lines emitted in P
+        // bursts must issue ~P batched calls (a >4x reduction), and the single-row path must stay at ZERO.
+        var teamId = await SeedTeamAsync();
+        var runId = await CreateScriptedRunAsync(teamId);
+
+        // 120 lines in 12 bursts of 10 (each burst lands in one poll; sleep 0.4 > the 250ms poll → one checkpoint per burst).
+        const int total = 120;
+        var instrumented = await ExecuteInstrumentedAsync(runId,
+            new ScriptedHarness("for b in $(seq 0 11); do for i in $(seq 0 9); do printf 'line-%03d\\n' $((b*10+i)); done; sleep 0.4; done"));
+
+        using var scope = _fixture.BeginScope();
+        var svc = scope.Resolve<IAgentRunService>();
+
+        (await svc.GetAsync(runId, CancellationToken.None)).Status.ShouldBe(AgentRunStatus.Succeeded);
+
+        var events = await svc.GetEventsAsync(runId, teamId, 0, CancellationToken.None);
+        events.Count.ShouldBe(total, "every emitted line persisted");
+        instrumented.TotalEvents.ShouldBe(total, "the counter saw every event through the batched path");
+        instrumented.PerEventCalls.ShouldBe(0, "the PRIMARY per-line guard: the durable streaming hot path NEVER falls back to the single-row append (a revert to AppendEventAsync per line trips here)");
+        instrumented.BatchedCalls.ShouldBeGreaterThan(1, "real per-checkpoint flushing — not one giant end-of-run flush");
+        instrumented.BatchedCalls.ShouldBeLessThanOrEqualTo(total / 4, customMessage: $"the round-trip-reduction guard: even a per-line flush THROUGH the batched path (batch-of-1) is caught — a ≥4x reduction means ≤{total / 4} flushes for {total} events; saw {instrumented.BatchedCalls}");
+    }
+
+    [Fact]
+    public async Task A_256_cap_auto_flush_commits_durably_with_the_offset_left_unadvanced()
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        // D1 cap-flush durability. BufferAsync's MaxBuffered=256 auto-flush is the ONE flush trigger NOT paired
+        // with an offset persist (it fires mid-onLine-sweep, before the poll's onCheckpoint). We emit >256 lines
+        // in one burst so the cap trips (call #1 commits 256), then FAULT the following checkpoint flush (call #2):
+        // the run fails, but the cap-flushed 256 events stay DURABLE and the StdoutOffset stays at 0 — proving a
+        // cap flush commits events with no paired offset advance. A regression that advanced the offset on a cap
+        // flush would lose this burst on reattach; one that drained the buffer before the append would lose them
+        // outright. (Bounded re-delivery of such offset-behind-committed events on reattach is pinned by the
+        // reattach crash-window test; here we pin the cap flush's durability + offset-unpaired property.)
+        var teamId = await SeedTeamAsync();
+        var runId = await CreateScriptedRunAsync(teamId);
+
+        // Lead with a sleep so the first spool poll(s) read an EMPTY file (the child is still sleeping → no
+        // checkpoint), then the whole 400-line burst is written in one shot (≈10ms) and lands in a single LATER
+        // poll's read — deterministically tripping the 256 cap on flush call #1, regardless of CI scheduling
+        // jitter (the burst can't be bisected by a poll because it's written entirely within one inter-poll gap).
+        var instrumented = await ExecuteInstrumentedAsync(runId,
+            new ScriptedHarness("sleep 0.4; for i in $(seq 1 400); do printf 'line-%04d\\n' $i; done; sleep 0.8"),
+            throwOnAppendEventsCall: 2);
+
+        instrumented.BatchedCalls.ShouldBeGreaterThanOrEqualTo(2, "the cap auto-flush (call 1) then the faulting checkpoint flush (call 2) both fired");
+
+        using var scope = _fixture.BeginScope();
+        var svc = scope.Resolve<IAgentRunService>();
+
+        var run = await svc.GetAsync(runId, CancellationToken.None);
+        run.Status.ShouldBe(AgentRunStatus.Failed, "the checkpoint flush after the cap flush faulted");
+
+        var events = await svc.GetEventsAsync(runId, teamId, 0, CancellationToken.None);
+        events.Count.ShouldBe(256, "the cap auto-flush committed exactly its 256-event batch — durable despite the later flush failing");
+        events.Select(e => e.Text).ShouldBe(Enumerable.Range(1, 256).Select(i => $"line-{i:D4}"), "the cap-flushed prefix is in order");
+
+        JsonSerializer.Deserialize<SandboxHandle>(run.RunnerHandleJson!, AgentJson.Options)!.StdoutOffset
+            .ShouldBe(0, "the cap flush did NOT advance the durable offset — only a checkpoint does, and that one faulted before SetRunnerHandleAsync");
+    }
+
+    [Fact]
+    public async Task Durable_path_persists_a_600_line_stream_crossing_the_256_cap_in_strict_global_order()
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        // D1 ordering through the REAL BufferedEventWriter at scale: a 600-line burst trips BufferAsync's
+        // MaxBuffered=256 auto-flush (the one flush trigger NOT aligned to a checkpoint), then the per-poll
+        // checkpoint flush + the final flush concatenate into ONE globally-monotonic per-run sequence. A
+        // double-flush of a buffered batch, or a 256-flush/checkpoint-flush collision, would scramble or
+        // duplicate the cursor invisibly. Existing ordering tests call the service directly with pre-built
+        // batches; the only writer-driven tests emit <=6 lines and never cross the cap.
+        var teamId = await SeedTeamAsync();
+        var runId = await CreateScriptedRunAsync(teamId);
+
+        const int total = 600;
+        await ExecuteAsync(runId, new ScriptedHarness("for i in $(seq 1 600); do printf 'line-%04d\\n' $i; done; sleep 0.3"));
+
+        using var scope = _fixture.BeginScope();
+        var svc = scope.Resolve<IAgentRunService>();
+
+        (await svc.GetAsync(runId, CancellationToken.None)).Status.ShouldBe(AgentRunStatus.Succeeded);
+
+        var events = await svc.GetEventsAsync(runId, teamId, 0, CancellationToken.None);
+        events.Count.ShouldBe(total, "no line lost crossing the 256 cap + multiple checkpoints + the final flush");
+        events.Select(e => e.Text).ShouldBe(Enumerable.Range(1, total).Select(i => $"line-{i:D4}"), "strict global order preserved across every flush boundary");
+        events.Select(e => e.Sequence).SequenceEqual(events.Select(e => e.Sequence).OrderBy(s => s)).ShouldBeTrue("per-run sequence strictly ascending, no gaps, no duplicates");
+    }
+
+    [Fact]
     public async Task Injects_the_decrypted_model_credential_into_the_child_env_and_freezes_only_the_reference()
     {
         if (OperatingSystem.IsWindows()) return;
@@ -695,6 +825,33 @@ public class AgentRunExecutorTests
             NullLogger<AgentRunExecutor>.Instance);
 
         await executor.ExecuteAsync(runId, CancellationToken.None);
+    }
+
+    /// <summary>
+    /// Drives the executor with the real services EXCEPT IAgentRunService is wrapped in <see cref="InstrumentedAgentRunService"/>
+    /// (passed as the FIRST ctor arg, so the BufferedEventWriter writes through it) — counting batched/per-event appends and,
+    /// when <paramref name="throwOnAppendEventsCall"/> &gt; 0, faulting the Nth batched flush. Returns the decorator so the test
+    /// can assert its counters. The injected service shares the scope's DbContext, so all reads/writes stay consistent.
+    /// </summary>
+    private async Task<InstrumentedAgentRunService> ExecuteInstrumentedAsync(Guid runId, IAgentHarness harness, int throwOnAppendEventsCall = 0)
+    {
+        using var scope = _fixture.BeginScope();
+        var instrumented = new InstrumentedAgentRunService(scope.Resolve<IAgentRunService>()) { ThrowOnAppendEventsCall = throwOnAppendEventsCall };
+
+        var executor = new AgentRunExecutor(
+            instrumented,
+            new AgentHarnessRegistry(new[] { harness }),
+            scope.Resolve<ISandboxRunnerRegistry>(),
+            scope.Resolve<IAgentWorkspaceResolver>(),
+            scope.Resolve<IModelCredentialResolver>(),
+            scope.Resolve<IWorkspaceProviderRegistry>(),
+            scope.Resolve<IAgentRunCompletionNotifier>(),
+            scope.Resolve<Microsoft.Extensions.DependencyInjection.IServiceScopeFactory>(),
+            scope.Resolve<CodeSpaceDbContext>(),
+            NullLogger<AgentRunExecutor>.Instance);
+
+        await executor.ExecuteAsync(runId, CancellationToken.None);
+        return instrumented;
     }
 
     private async Task<Guid> CreateScriptedRunAsync(Guid teamId, int timeoutSeconds = 1800)

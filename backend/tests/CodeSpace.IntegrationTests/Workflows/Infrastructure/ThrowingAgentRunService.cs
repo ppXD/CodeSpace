@@ -43,6 +43,8 @@ public sealed class ThrowingAgentRunService : IAgentRunService
 
     public Task<AgentRunEvent> AppendEventAsync(Guid runId, AgentEvent @event, CancellationToken cancellationToken) => _inner.AppendEventAsync(runId, @event, cancellationToken);
 
+    public Task AppendEventsAsync(Guid runId, IReadOnlyList<AgentEvent> events, CancellationToken cancellationToken) => _inner.AppendEventsAsync(runId, events, cancellationToken);
+
     public Task CompleteAsync(Guid runId, AgentRunResult result, CancellationToken cancellationToken) => _inner.CompleteAsync(runId, result, cancellationToken);
 
     public Task CompleteAsync(Guid runId, AgentRunResult result, long expectedEpoch, CancellationToken cancellationToken) => _inner.CompleteAsync(runId, result, expectedEpoch, cancellationToken);
