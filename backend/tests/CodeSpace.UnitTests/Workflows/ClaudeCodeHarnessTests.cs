@@ -157,6 +157,27 @@ public class ClaudeCodeHarnessTests
         events[0].Text.ShouldBe("Planning the fix.");
     }
 
+    [Fact]
+    public void An_assistant_turn_with_two_tool_use_blocks_emits_both()
+    {
+        // The exact regression first-block-only caused: a turn that calls two tools must surface BOTH, in order
+        // — the prior code returned on the first block and silently dropped the second tool call.
+        var events = Harness.ParseEvents("""{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Read","input":{"file_path":"src/a.cs"}},{"type":"tool_use","name":"Bash","input":{"command":"npm test"}}]}}""");
+
+        events.Count.ShouldBe(2, "both tool_use blocks of the same turn are surfaced, not just the first");
+        events[0].Kind.ShouldBe(AgentEventKind.ToolCall);
+        events[0].Text.ShouldBe("src/a.cs");
+        events[1].Kind.ShouldBe(AgentEventKind.CommandExecuted);
+        events[1].Text.ShouldBe("npm test");
+    }
+
+    [Fact]
+    public void An_assistant_turn_with_no_meaningful_blocks_emits_nothing()
+    {
+        // An empty content array (or only unrecognized / empty blocks) yields zero events — never a phantom row.
+        Harness.ParseEvents("""{"type":"assistant","message":{"content":[]}}""").ShouldBeEmpty();
+    }
+
     [Theory]
     // shell tool → command; edit/write tools → file change; anything else → a generic tool call.
     [InlineData("""{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"npm test"}}]}}""", AgentEventKind.CommandExecuted, "npm test")]

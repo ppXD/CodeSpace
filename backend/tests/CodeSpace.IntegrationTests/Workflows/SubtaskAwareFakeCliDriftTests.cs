@@ -14,7 +14,7 @@ namespace CodeSpace.IntegrationTests.Workflows;
 ///
 /// <para>The pin runs the fake's three documented event lines (the SAME types the canonical
 /// <c>RealHarnessExecutionTests.CodexFixture</c> mirror uses) through the REAL
-/// <see cref="CodexHarness.ParseEvent"/> + <see cref="CodexHarness.BuildResult"/> and asserts they normalize to
+/// <see cref="CodexHarness.ParseEvents"/> + <see cref="CodexHarness.BuildResult"/> and asserts they normalize to
 /// the kinds + summary the E2E relies on. If the production codex contract changes such that these shapes no
 /// longer parse the way the fake assumes, this test breaks — exactly the "mirror diverged from prod" signal
 /// Rule 12.5 mandates. It is a pure check (no DB), but it's tagged Integration so it runs in the SAME CI gate
