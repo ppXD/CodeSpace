@@ -553,6 +553,30 @@ public class AgentRunExecutorTests
     }
 
     [Fact]
+    public async Task Persists_token_usage_extracted_from_the_run_stream()
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        // D3b-i end-to-end: a harness whose BuildResult reads usage off the event stream (like the real Codex/
+        // Claude adapters) must land that figure in the persisted result_jsonb — the cost-accounting input the
+        // per-team budget cap consumes. Drives the REAL executor + spool path, then reads it back from the DB.
+        var teamId = await SeedTeamAsync();
+        var runId = await CreateScriptedRunAsync(teamId);
+
+        const string script = """printf 'working on it\n{"type":"token_count","info":{"total_token_usage":{"input_tokens":1450,"output_tokens":260}}}\n'""";
+        await ExecuteAsync(runId, new UsageReportingHarness(script));
+
+        using var scope = _fixture.BeginScope();
+        var run = await scope.Resolve<IAgentRunService>().GetAsync(runId, CancellationToken.None);
+        run.Status.ShouldBe(AgentRunStatus.Succeeded);
+
+        var result = JsonSerializer.Deserialize<AgentRunResult>(run.ResultJson!, AgentJson.Options)!;
+        result.TokenUsage.ShouldNotBeNull("the usage reported in the stream is persisted to result_jsonb for cost accounting");
+        result.TokenUsage!.InputTokens.ShouldBe(1450);
+        result.TokenUsage.OutputTokens.ShouldBe(260);
+    }
+
+    [Fact]
     public async Task Captures_the_faithful_transcript_including_a_line_ParseEvent_dropped()
     {
         if (OperatingSystem.IsWindows()) return;
@@ -963,6 +987,41 @@ public class AgentRunExecutorTests
             exitCode == 0
                 ? new AgentRunResult { Status = AgentRunStatus.Succeeded, ExitReason = "completed", Summary = events.Count > 0 ? events[^1].Text : null }
                 : new AgentRunResult { Status = AgentRunStatus.Failed, ExitReason = "non-zero-exit", Error = $"exit {exitCode}" };
+    }
+
+    /// <summary>A scripted harness (kind "scripted") whose ParseEvent attaches the raw JSON as Data and whose BuildResult reads token usage off the events via <see cref="AgentTokenUsageReader"/> — exactly as the real Codex/Claude adapters do — so the executor→persist path for AgentRunResult.TokenUsage is exercised end-to-end.</summary>
+    private sealed class UsageReportingHarness : IAgentHarness
+    {
+        private readonly string _script;
+
+        public UsageReportingHarness(string script) => _script = script;
+
+        public string Kind => "scripted";
+        public string Version => "test";
+        public IReadOnlyList<string> Models { get; } = new[] { "test-model" };
+
+        public SandboxSpec BuildInvocation(AgentTask task) => new() { Command = "/bin/sh", Args = new[] { "-c", _script }, WorkingDirectory = task.WorkspaceDirectory, TimeoutSeconds = task.TimeoutSeconds };
+
+        public AgentEvent? ParseEvent(string rawLine)
+        {
+            var line = rawLine.Trim();
+            if (line.Length == 0) return null;
+
+            if (line.StartsWith('{'))
+                try { using var doc = JsonDocument.Parse(line); return new AgentEvent { Kind = AgentEventKind.Warning, Text = "usage", Data = doc.RootElement.Clone() }; }
+                catch (JsonException) { /* fall through to plain text */ }
+
+            return new AgentEvent { Kind = AgentEventKind.AssistantMessage, Text = line };
+        }
+
+        public AgentRunResult BuildResult(IReadOnlyList<AgentEvent> events, int exitCode) =>
+            new()
+            {
+                Status = exitCode == 0 ? AgentRunStatus.Succeeded : AgentRunStatus.Failed,
+                ExitReason = exitCode == 0 ? "completed" : "non-zero-exit",
+                Summary = events.LastOrDefault(e => e.Kind == AgentEventKind.AssistantMessage)?.Text,
+                TokenUsage = AgentTokenUsageReader.TryRead(events),
+            };
     }
 
     /// <summary>A scripted harness that ALSO projects a model credential (kind "scripted-projector"): maps the resolved credential to one env var and — critically — carries <c>task.Environment</c> (the injected secret) into the sandbox spec, exactly as the real harnesses do.</summary>
