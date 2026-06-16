@@ -43,6 +43,7 @@ public class SupervisorBuildAgentTaskTests
         task.RepositoryId.ShouldBeNull("no repo → analysis-only");
         task.ApprovalConversationId.ShouldBeNull("no supervisor conversation → no approval surface");
         task.EnableMcpEndpoint.ShouldBeNull("no MCP opt-in → defer to the ambient flag");
+        task.PushProducedBranch.ShouldBeNull("no push opt-in → defer to the ambient flag (a spawn pushes no branch unless the deployment flag is on)");
 
         // Permissions are DERIVED from the (default Standard) autonomy via AgentAutonomyPolicy — which for
         // Standard is value-equal to the AgentTask record's own default (no network, workspace write), so the
@@ -76,6 +77,7 @@ public class SupervisorBuildAgentTaskTests
                 ModelCredentialId = credentialId,
                 RunnerKind = "local",
                 EnableMcp = true,
+                PushBranch = true,
                 AutonomyLevel = "trusted",   // case-insensitive parse
             },
         };
@@ -93,6 +95,7 @@ public class SupervisorBuildAgentTaskTests
         task.Autonomy.ShouldBe(AgentAutonomyLevel.Trusted, "the profile autonomy parses case-insensitively");
         task.ApprovalConversationId.ShouldBe(conversationId, "the supervisor's conversation becomes the approval surface");
         task.EnableMcpEndpoint.ShouldBe(true);
+        task.PushProducedBranch.ShouldBe(true, "the profile's push opt-in threads to the spawned task so each branch agent publishes its own branch");
     }
 
     [Theory]

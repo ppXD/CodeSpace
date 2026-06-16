@@ -91,6 +91,9 @@ public sealed record SupervisorAgentProfile
     /// <summary>Per-run opt-in to the MCP tool-fabric endpoint for each spawned agent. Null → defer to the ambient deployment flag (an ordinary spawn is unchanged).</summary>
     public bool? EnableMcp { get; init; }
 
+    /// <summary>Per-run opt-in to publishing each spawned agent's diff as its own branch (the one-agent-one-branch fan-out, so the supervisor's per-turn spawns each land on their own branch). Null → defer to the ambient deployment push flag (an ordinary spawn is unchanged).</summary>
+    public bool? PushBranch { get; init; }
+
     /// <summary>The autonomy tier each spawned agent runs at, parsed case-insensitively. Null / unrecognised → the safe <c>Standard</c> default (workspace write, no network) — byte-identical to pre-P2-3.</summary>
     public string? AutonomyLevel { get; init; }
 }

@@ -56,7 +56,8 @@ public sealed class AgentCodeNode : INodeRuntime
                 "timeoutSeconds": { "type": "integer", "minimum": 1, "description": "Wall-clock cap for the run." },
                 "autonomyLevel":  { "type": "string", "enum": ["Confined", "Standard", "Trusted", "Unleashed"], "description": "How much the agent may do — one dial that sets write scope + network. Confined: read-only, no network · Standard (default): workspace write, no network · Trusted: + network · Unleashed: highest, admin/controlled runners. The network/readOnly fields below are advanced per-field overrides of this tier." },
                 "network":        { "type": "boolean", "description": "Advanced override of the tier's network posture. Leave unset to inherit the autonomy level." },
-                "readOnly":       { "type": "boolean", "description": "Advanced override: force analysis-only (no writes), regardless of the autonomy level. Leave unset to inherit the tier." }
+                "readOnly":       { "type": "boolean", "description": "Advanced override: force analysis-only (no writes), regardless of the autonomy level. Leave unset to inherit the tier." },
+                "pushBranch":     { "type": "boolean", "description": "Per-run opt-in: publish the agent's diff as its own branch (codespace/agent/<runId>) even when the deployment-wide push flag is off — the knob a one-agent-one-branch fan-out sets so each agent's work lands on its own branch. Leave unset to defer to the deployment flag." }
               },
               "required": ["harness"]
             }
@@ -118,6 +119,7 @@ public sealed class AgentCodeNode : INodeRuntime
             Autonomy = autonomy,
             Permissions = ResolvePermissions(context.Config, autonomy),
             ApprovalConversationId = ReadOptionalGuid(context.Config, "approvalConversationId"),
+            PushProducedBranch = ReadOptionalBool(context.Config, "pushBranch"),
         };
 
         return Task.FromResult(NodeResult.Suspend(new SuspensionToken
