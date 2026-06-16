@@ -33,6 +33,9 @@ public class WorkflowRunRecordTypesTests
     [InlineData("node.failed",           nameof(WorkflowRunRecordTypes.NodeFailed))]
     [InlineData("node.skipped",          nameof(WorkflowRunRecordTypes.NodeSkipped))]
     [InlineData("node.suspended",        nameof(WorkflowRunRecordTypes.NodeSuspended))]
+    // attempt.failed is a NON-node.* sub-event by design (stays out of the workflow_run_node `node.%` view); a
+    // silent rename would break that exclusion + the run-detail chaining, so pin the literal (Rule 8).
+    [InlineData("attempt.failed",        nameof(WorkflowRunRecordTypes.AttemptFailed))]
     [InlineData("iteration.started",     nameof(WorkflowRunRecordTypes.IterationStarted))]
     [InlineData("iteration.completed",   nameof(WorkflowRunRecordTypes.IterationCompleted))]
     [InlineData("external_call.started", nameof(WorkflowRunRecordTypes.ExternalCallStarted))]

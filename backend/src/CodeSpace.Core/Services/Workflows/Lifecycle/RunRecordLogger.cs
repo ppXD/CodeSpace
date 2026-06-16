@@ -111,6 +111,15 @@ public sealed class RunRecordLogger : IRunRecordLogger, IScopedDependency
         await InsertAsync(runId, WorkflowRunRecordTypes.NodeFailed, nodeId, iterationKey, payload, correlationId: null, parentRecordId: null, cancellationToken).ConfigureAwait(false);
     }
 
+    public async Task AttemptFailedAsync(Guid runId, string nodeId, string iterationKey, int attempt, int maxAttempts, string error, TimeSpan duration, double retryInSeconds, Guid? parentRecordId, CancellationToken cancellationToken)
+    {
+        // The full per-attempt error is kept (it can differ from the FINAL error on node.failed) — the durable
+        // answer to "what did attempt 2 actually see". Chains to the node.started row via parent_record_id, exactly
+        // as external_call.* rows do, so the run-detail tree nests the attempt under its node.
+        var payload = JsonSerializer.Serialize(new { attempt, max_attempts = maxAttempts, error, duration_ms = (long)duration.TotalMilliseconds, retry_in_seconds = retryInSeconds });
+        await InsertAsync(runId, WorkflowRunRecordTypes.AttemptFailed, nodeId, iterationKey, payload, correlationId: null, parentRecordId, cancellationToken).ConfigureAwait(false);
+    }
+
     public async Task NodeSkippedAsync(Guid runId, string nodeId, string iterationKey, string reason, CancellationToken cancellationToken)
     {
         var payload = JsonSerializer.Serialize(new { reason, outputs = EmptyObject() });

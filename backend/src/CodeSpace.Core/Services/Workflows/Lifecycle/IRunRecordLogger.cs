@@ -74,6 +74,14 @@ public interface IRunRecordLogger
     /// <summary>Emit <c>node.failed</c>. <paramref name="error"/> is the human-readable failure reason.</summary>
     Task NodeFailedAsync(Guid runId, string nodeId, string iterationKey, string error, TimeSpan duration, CancellationToken cancellationToken);
 
+    /// <summary>
+    /// Emit <c>attempt.failed</c> — the durable, structured record of ONE failed-but-will-be-retried node attempt,
+    /// chained to the node.started row via <paramref name="parentRecordId"/>. A node-scoped SUB-event (NOT under
+    /// <c>node.*</c>, so it never enters the cell-state view); the count of these for a cell + 1 is the attempt
+    /// the node ultimately settled on. Replaces the lossy free-text retry Warn log as the queryable retry history.
+    /// </summary>
+    Task AttemptFailedAsync(Guid runId, string nodeId, string iterationKey, int attempt, int maxAttempts, string error, TimeSpan duration, double retryInSeconds, Guid? parentRecordId, CancellationToken cancellationToken);
+
     /// <summary>Emit <c>node.skipped</c>. <paramref name="reason"/> documents why (e.g. "all-incoming-edges-dead").</summary>
     Task NodeSkippedAsync(Guid runId, string nodeId, string iterationKey, string reason, CancellationToken cancellationToken);
 
