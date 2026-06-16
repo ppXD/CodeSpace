@@ -27,6 +27,7 @@ public sealed class ListAgentRunEventsQueryHandler : IRequestHandler<ListAgentRu
             Kind = e.Kind,
             Text = e.Text,
             Data = e.DataJson,
+            DataArtifactId = e.DataArtifactId,
             OccurredAt = e.OccurredAt,
         }).ToList();
     }

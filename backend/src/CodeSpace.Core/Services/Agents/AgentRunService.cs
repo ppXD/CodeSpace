@@ -260,13 +260,14 @@ public sealed class AgentRunService : IAgentRunService, IScopedDependency
         // thus serial-stamps) the rows in array order. This holds because Postgres never parallelizes the writing
         // side of a single INSERT … SELECT — the ModifyTable node consumes the sorted stream row-by-row and calls
         // nextval() in that order; the ordering tests (single batch, cross-batch monotonicity, 300-row) guard it.
-        // The parameter count is FIXED at four regardless of batch size (one array per column, fully bound — never
-        // string-concatenated), so a 256-event flush is one bind, not 769 placeholders. `id` + `occurred_at` use
-        // their column defaults (gen_random_uuid() / NOW()); append-only INSERT — the immutability trigger
+        // The parameter count is FIXED at five regardless of batch size (one array per column, fully bound — never
+        // string-concatenated), so a 256-event flush is one bind, not hundreds of placeholders. `id` + `occurred_at`
+        // use their column defaults (gen_random_uuid() / NOW()); append-only INSERT — the immutability trigger
         // (UPDATE/DELETE-only) is unaffected.
         var kinds = new string[events.Count];
         var texts = new string[events.Count];
         var data = new string?[events.Count];
+        var dataArtifactIds = new Guid?[events.Count];
 
         for (var i = 0; i < events.Count; i++)
         {
@@ -275,13 +276,45 @@ public sealed class AgentRunService : IAgentRunService, IScopedDependency
             data[i] = events[i].Data?.GetRawText();
         }
 
+        await OffloadLargeDataPayloadsAsync(runId, data, dataArtifactIds, cancellationToken).ConfigureAwait(false);
+
         const string sql =
-            "INSERT INTO agent_run_event (agent_run_id, kind, text, data_json) " +
-            "SELECT {0}, e.kind, e.text, CAST(e.data AS jsonb) " +
-            "FROM unnest({1}::text[], {2}::text[], {3}::text[]) WITH ORDINALITY AS e(kind, text, data, ord) " +
+            "INSERT INTO agent_run_event (agent_run_id, kind, text, data_json, data_artifact_id) " +
+            "SELECT {0}, e.kind, e.text, CAST(e.data AS jsonb), e.data_artifact_id " +
+            "FROM unnest({1}::text[], {2}::text[], {3}::text[], {4}::uuid[]) WITH ORDINALITY AS e(kind, text, data, data_artifact_id, ord) " +
             "ORDER BY e.ord";
 
-        await _db.Database.ExecuteSqlRawAsync(sql, new object[] { runId, kinds, texts, data }, cancellationToken).ConfigureAwait(false);
+        await _db.Database.ExecuteSqlRawAsync(sql, new object[] { runId, kinds, texts, data, dataArtifactIds }, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// D2 #1: offload any oversize structured payload (data_json) in the batch to the content-addressed artifact
+    /// store via the shared <see cref="IArtifactOffloader"/>, nulling the inline value + recording the ref in the
+    /// parallel <paramref name="dataArtifactIds"/> array. The common case — every payload small or absent — does
+    /// ZERO work (no team lookup, no store call), so the batched-write hot path is unchanged; the team id is
+    /// resolved once, lazily, only when something actually needs offloading.
+    /// </summary>
+    private async Task OffloadLargeDataPayloadsAsync(Guid runId, string?[] data, Guid?[] dataArtifactIds, CancellationToken cancellationToken)
+    {
+        Guid? teamId = null;
+
+        for (var i = 0; i < data.Length; i++)
+        {
+            if (data[i] is not { } payload || System.Text.Encoding.UTF8.GetByteCount(payload) <= ArtifactStoreConfig.InlineThresholdBytes)
+                continue;
+
+            teamId ??= await _db.AgentRun.AsNoTracking().Where(r => r.Id == runId).Select(r => (Guid?)r.TeamId)
+                .SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false)
+                ?? throw new KeyNotFoundException($"AgentRun {runId} not found — cannot offload its event payload.");
+
+            var (_, artifactId) = await _offloader.OffloadIfLargeAsync(teamId.Value, payload, "application/json", cancellationToken).ConfigureAwait(false);
+
+            if (artifactId is { })
+            {
+                data[i] = null;
+                dataArtifactIds[i] = artifactId;
+            }
+        }
     }
 
     public Task CompleteAsync(Guid runId, AgentRunResult result, CancellationToken cancellationToken) =>

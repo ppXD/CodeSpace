@@ -498,7 +498,7 @@ public class AgentRunServiceTests
             // Each payload-bearing row carries ITS OWN index — proves the data[] NULL/non-NULL elements stayed row-aligned.
             for (var i = 0; i < n; i++)
             {
-                if (i is 90 or 120 or 180) continue;   // empty-object / json-null / text-only injection row handled below
+                if (i is 90 or 120 or 150 or 180) continue;   // empty-object / json-null / 100KB-offloaded / text-only injection — handled below
                 if (i % 3 == 0)
                 {
                     events[i].DataJson.ShouldNotBeNull($"row {i} carries a structured payload");
@@ -514,7 +514,64 @@ public class AgentRunServiceTests
             events[60].DataJson!.ShouldContain("\\t");                   // escapes survive (jsonb keeps the escape)
             events[90].DataJson.ShouldBe("{}", "empty object round-trips");
             events[120].DataJson.ShouldBe("null", "json null literal round-trips as a jsonb null, distinct from a missing payload");
-            events[150].DataJson!.ShouldContain("SENTINEL", customMessage: "the 100KB payload is untruncated");
+
+            // Row 150's ~100KB payload exceeds the 8KiB inline threshold → D2 #1 offloads it: the row keeps only
+            // the ref, and the full untruncated payload is recoverable from the artifact store.
+            events[150].DataJson.ShouldBeNull("the 100KB payload was offloaded, not kept inline");
+            events[150].DataArtifactId.ShouldNotBeNull();
+            var offloaded = await scope.Resolve<IArtifactStore>().GetBytesAsync(teamId, events[150].DataArtifactId!.Value, CancellationToken.None);
+            System.Text.Encoding.UTF8.GetString(offloaded!.Bytes).ShouldContain("SENTINEL", customMessage: "the 100KB payload is recoverable + untruncated from the artifact store");
+        }
+    }
+
+    [Fact]
+    public async Task AppendEventsAsync_offloads_a_large_data_json_payload_keeping_only_the_ref()
+    {
+        // D2 #1: a large structured event payload (data_json) is offloaded to the artifact store and the event row
+        // keeps only data_artifact_id — so the append-only log stays bounded even when D3 emits big tool_result /
+        // reasoning blocks. Small payloads stay inline (common case). Mixed batch proves per-row routing + order.
+        var teamId = await SeedTeamAsync();
+
+        Guid runId;
+        using (var scope = _fixture.BeginScope())
+        {
+            var svc = scope.Resolve<IAgentRunService>();
+            runId = (await svc.CreateAsync(BuildTask(), teamId, null, null, CancellationToken.None)).Id;
+            await svc.MarkRunningAsync(runId, CancellationToken.None);
+        }
+
+        var bigPayload = JsonSerializer.SerializeToElement(new { tag = "big-tool-result", blob = new string('x', ArtifactStoreConfig.DefaultInlineThresholdBytes + 500) });
+        var batch = new[]
+        {
+            new AgentEvent { Kind = AgentEventKind.ToolCall, Text = "small", Data = JsonSerializer.SerializeToElement(new { k = "v" }) },   // small → inline
+            new AgentEvent { Kind = AgentEventKind.ToolCall, Text = "big", Data = bigPayload },                                            // large → offload
+            new AgentEvent { Kind = AgentEventKind.AssistantMessage, Text = "no-data" },                                                   // no payload
+        };
+
+        using (var scope = _fixture.BeginScope())
+            await scope.Resolve<IAgentRunService>().AppendEventsAsync(runId, batch, CancellationToken.None);
+
+        using (var scope = _fixture.BeginScope())
+        {
+            var events = await scope.Resolve<IAgentRunService>().GetEventsAsync(runId, teamId, 0, CancellationToken.None);
+
+            events.Select(e => e.Text).ShouldBe(new[] { "small", "big", "no-data" }, "order preserved through the offload");
+
+            events[0].DataJson.ShouldNotBeNull("a small payload stays inline");
+            events[0].DataArtifactId.ShouldBeNull();
+
+            events[1].DataJson.ShouldBeNull("the large payload was moved out of the row");
+            events[1].DataArtifactId.ShouldNotBeNull("the row keeps only the ref");
+
+            events[2].DataJson.ShouldBeNull("no payload");
+            events[2].DataArtifactId.ShouldBeNull();
+
+            // The full payload round-trips from the artifact store as valid JSON.
+            var artifact = await scope.Resolve<IArtifactStore>().GetBytesAsync(teamId, events[1].DataArtifactId!.Value, CancellationToken.None);
+            artifact.ShouldNotBeNull();
+            artifact!.ContentType.ShouldBe("application/json");
+            var recovered = System.Text.Encoding.UTF8.GetString(artifact.Bytes);
+            JsonDocument.Parse(recovered).RootElement.GetProperty("tag").GetString().ShouldBe("big-tool-result", "the offloaded structured payload is recoverable in full");
         }
     }
 

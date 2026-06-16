@@ -19,6 +19,9 @@ public class AgentRunEventConfiguration : IEntityTypeConfiguration<AgentRunEvent
 
         builder.Property(e => e.DataJson).HasColumnName("data_json").HasColumnType("jsonb");
 
+        // D2 #1: ref to the offloaded structured payload when data_json was too large to keep inline.
+        builder.Property(e => e.DataArtifactId).HasColumnName("data_artifact_id");
+
         builder.HasOne(e => e.Run).WithMany().HasForeignKey(e => e.AgentRunId);
     }
 }

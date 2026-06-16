@@ -35,8 +35,11 @@ public class AgentRunEvent : IEntity<Guid>
     /// <summary>Human-readable one-line rendering for the live stream.</summary>
     public string Text { get; set; } = default!;
 
-    /// <summary>Optional structured payload (tool args, changed path, command, test counts, …) as JSON; NULL when the native event carried none.</summary>
+    /// <summary>Optional structured payload (tool args, changed path, command, test counts, …) as JSON; NULL when the native event carried none OR when the payload was large enough to offload (then <see cref="DataArtifactId"/> holds the ref).</summary>
     public string? DataJson { get; set; }
+
+    /// <summary>D2 #1 — when a large structured payload was offloaded to the artifact store, the artifact id holding the full JSON; <see cref="DataJson"/> is then NULL. NULL when the payload is inline (small) or absent.</summary>
+    public Guid? DataArtifactId { get; set; }
 
     public DateTimeOffset OccurredAt { get; set; } = DateTimeOffset.UtcNow;
 
