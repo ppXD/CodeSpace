@@ -76,6 +76,15 @@ public static class WorkflowRunRecordTypes
     /// <summary>Node suspended awaiting external input. Payload: {"resume_token":"..."}.</summary>
     public const string NodeSuspended = "node.suspended";
 
+    // ─── Retry attempts ──────────────────────────────────────────────────────
+    // A node-scoped SUB-event (like external_call.*): deliberately NOT under the node.* prefix so it stays
+    // OUT of the workflow_run_node cell-state view (which projects record_type LIKE 'node.%'). One row per
+    // FAILED-but-retried attempt, chained to the node.started row via parent_record_id — the durable,
+    // queryable retry history that replaces the lossy free-text Warn log.
+
+    /// <summary>A node attempt failed and WILL be retried. Payload: {"attempt":N,"max_attempts":M,"error":"...","duration_ms":N,"retry_in_seconds":S}.</summary>
+    public const string AttemptFailed = "attempt.failed";
+
     // ─── Iteration boundaries (flow.iterate, future flow.subworkflow) ─────────
 
     /// <summary>flow.iterate about to begin walking items. Payload: {"item_count":N}.</summary>

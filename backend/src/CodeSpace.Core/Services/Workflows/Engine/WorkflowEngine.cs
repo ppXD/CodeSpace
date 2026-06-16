@@ -2561,6 +2561,7 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
 
         for (var attempt = 1; attempt <= plan.MaxAttempts; attempt++)
         {
+            var attemptStartedAt = DateTimeOffset.UtcNow;
             var (result, thrownError) = await RunNodeOnceAsync(exec, cancellationToken).ConfigureAwait(false);
 
             // A suspend parks the run by design — never a failure, never retried. A sub-workflow
@@ -2596,7 +2597,7 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
             if (attempt == plan.MaxAttempts)
                 return await FinalizeFailureAsync(exec, lastError, cancellationToken).ConfigureAwait(false);
 
-            await LogRetryAndWaitAsync(exec, attempt, plan, lastError, cancellationToken).ConfigureAwait(false);
+            await LogRetryAndWaitAsync(exec, attempt, plan, lastError, attemptStartedAt, cancellationToken).ConfigureAwait(false);
         }
 
         // Defensive: the loop always returns on its final attempt.
@@ -2677,8 +2678,14 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
     /// retry story — then await the bounded backoff. Cancelling during the wait throws
     /// OperationCanceledException, which propagates to the run-level cancel handler.
     /// </summary>
-    private async Task LogRetryAndWaitAsync(NodeExecution exec, int attempt, RetryPlan plan, string error, CancellationToken cancellationToken)
+    private async Task LogRetryAndWaitAsync(NodeExecution exec, int attempt, RetryPlan plan, string error, DateTimeOffset attemptStartedAt, CancellationToken cancellationToken)
     {
+        // Durable, queryable record of THIS failed attempt — chained to the node.started row (parent_record_id),
+        // carrying the attempt index, the full per-attempt error, how long it ran, and the backoff before the next
+        // try. This is the structured retry history (reconstructable from the DB), keyed to the node's iteration
+        // so a map-branch / loop-iteration retry is addressable. The Warn line below stays for the live timeline.
+        await _recordLogger.AttemptFailedAsync(exec.Run.Id, exec.Node.Id, exec.IterationKey, attempt, plan.MaxAttempts, error, DateTimeOffset.UtcNow - attemptStartedAt, plan.BackoffSeconds, exec.ParentRecordId, cancellationToken).ConfigureAwait(false);
+
         var waitHint = plan.BackoffSeconds > 0 ? $" Retrying in {plan.BackoffSeconds:0.##}s." : " Retrying now.";
         var message = $"Attempt {attempt}/{plan.MaxAttempts} failed: {Truncate(error, 200)}.{waitHint}";
 
