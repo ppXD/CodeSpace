@@ -229,7 +229,19 @@ public sealed class ChatPostMessageNode : INodeRuntime
         MessageView posted;
         try
         {
-            posted = await _bot.PostAsBotAsync(conversationId, body, interaction, cancellationToken).ConfigureAwait(false);
+            // Trace the side-effecting post so EVERY external effect is queryable in the ledger (mirrors
+            // GitPostPrCommentNode). Body content is summarised (length only) to keep the ledger small — the
+            // full body lives in the node inputs payload already (redacted upstream by the engine if needed).
+            posted = await context.Observability.TraceExternalCallAsync(
+                target: $"chat.post_message:{conversationId}",
+                method: "post_message",
+                requestPayload: JsonSerializer.SerializeToElement(new { conversation_id = conversationId, body_chars = body.Length, interactive = interaction != null }),
+                action: ct => _bot.PostAsBotAsync(conversationId, body, interaction, ct),
+                completionExtractor: result => new ExternalCallCompletion
+                {
+                    ResponsePayload = JsonSerializer.SerializeToElement(new { message_id = result.Id.ToString() })
+                },
+                cancellationToken: cancellationToken).ConfigureAwait(false);
         }
         catch (KeyNotFoundException ex)
         {
