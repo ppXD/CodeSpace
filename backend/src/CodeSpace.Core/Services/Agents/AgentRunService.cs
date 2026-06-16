@@ -351,10 +351,11 @@ public sealed class AgentRunService : IAgentRunService, IScopedDependency
         if (!AgentRunStateMachine.IsLegalTransition(current, result.Status))
             throw new AgentRunTransitionException($"Illegal AgentRun transition {current} → {result.Status} (run {runId}).");
 
-        // D2: a large unified diff is offloaded to the artifact store (content-addressed, team-scoped) and the
-        // ref kept in PatchArtifactId — so result_jsonb stays bounded instead of carrying an unbounded diff. A
-        // small diff stays inline. Done BEFORE serialize so the persisted result already carries the ref.
+        // D2/D3: large fields (the unified diff, the faithful raw transcript) are offloaded to the content-addressed
+        // artifact store (team-scoped) and only the ref kept — so result_jsonb stays bounded instead of carrying an
+        // unbounded blob. Small fields stay inline. Done BEFORE serialize so the persisted result carries the refs.
         result = await OffloadLargePatchAsync(result, snapshot.TeamId, cancellationToken).ConfigureAwait(false);
+        result = await OffloadLargeTranscriptAsync(result, snapshot.TeamId, cancellationToken).ConfigureAwait(false);
 
         var resultJson = JsonSerializer.Serialize(result, AgentJson.Options);
 
@@ -384,6 +385,19 @@ public sealed class AgentRunService : IAgentRunService, IScopedDependency
         var (inline, artifactId) = await _offloader.OffloadIfLargeAsync(teamId, result.Patch, "text/x-diff", cancellationToken).ConfigureAwait(false);
 
         return artifactId is null ? result : result with { Patch = inline, PatchArtifactId = artifactId };
+    }
+
+    /// <summary>
+    /// D3: offload the faithful raw transcript (usually larger than the inline threshold for a real run) to the
+    /// artifact store, keeping only <see cref="AgentRunResult.TranscriptArtifactId"/> — the durable "replay the
+    /// exact session" record, fetched on demand rather than bloating result_jsonb. Small/empty transcripts stay
+    /// inline. Idempotent (sha-dedup), so a re-completion reuses the same artifact id.
+    /// </summary>
+    private async Task<AgentRunResult> OffloadLargeTranscriptAsync(AgentRunResult result, Guid teamId, CancellationToken cancellationToken)
+    {
+        var (inline, artifactId) = await _offloader.OffloadIfLargeAsync(teamId, result.Transcript, "text/plain", cancellationToken).ConfigureAwait(false);
+
+        return artifactId is null ? result : result with { Transcript = inline, TranscriptArtifactId = artifactId };
     }
 
     public async Task<bool> CancelQueuedAsync(Guid runId, string reason, CancellationToken cancellationToken)

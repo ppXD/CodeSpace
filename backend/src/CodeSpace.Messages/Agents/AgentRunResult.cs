@@ -29,6 +29,12 @@ public sealed record AgentRunResult
     /// <summary>When the diff was offloaded (D2: larger than the artifact inline threshold), the artifact-store id holding the full unified diff; <see cref="Patch"/> is then empty. Null when the diff is inline (small) or absent.</summary>
     public Guid? PatchArtifactId { get; init; }
 
+    /// <summary>D3: the FAITHFUL raw harness stream (every redacted line, including ones ParseEvent dropped) — the durable "replay the exact session" record. Inline when small; a larger transcript is offloaded and this is cleared, with <see cref="TranscriptArtifactId"/> holding the ref. Empty when there was no stream.</summary>
+    public string Transcript { get; init; } = "";
+
+    /// <summary>D3: when the transcript was offloaded (larger than the inline threshold — the common case for a real run), the artifact-store id holding the full raw stream; <see cref="Transcript"/> is then empty. Null when inline (small) or absent.</summary>
+    public Guid? TranscriptArtifactId { get; init; }
+
     /// <summary>Branch the sandbox pushed, when the run produced one (the output handoff for opening a PR).</summary>
     public string? ProducedBranch { get; init; }
 
