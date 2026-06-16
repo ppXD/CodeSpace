@@ -33,14 +33,18 @@ namespace CodeSpace.Core.Services.Workflows.Nodes.Builtin;
 ///
 /// Inputs: repositoryId? · command (required) · args · branch? · network? · timeoutSeconds? · runnerKind? · maxOutputChars?
 /// Outputs: exitCode · status · stdout · stderr · stdoutBytes · stderrBytes (the original sizes, even when stdout/stderr are capped)
+///          · stdoutArtifactId? · stderrArtifactId? (D5 — when the cap DROPPED content, the FULL stream is preserved in the
+///          artifact store and its id surfaces here; the inline stdout/stderr stay the preview, so no truncation data-loss)
 /// </summary>
 public sealed class AgentRunCommandNode : INodeRuntime
 {
     private readonly IRunCommandService _runCommand;
+    private readonly IArtifactStore _artifacts;
 
-    public AgentRunCommandNode(IRunCommandService runCommand)
+    public AgentRunCommandNode(IRunCommandService runCommand, IArtifactStore artifacts)
     {
         _runCommand = runCommand;
+        _artifacts = artifacts;
     }
 
     public string TypeKey => "agent.run_command";
@@ -83,7 +87,9 @@ public sealed class AgentRunCommandNode : INodeRuntime
                 "stdout":      { "type": "string" },
                 "stderr":      { "type": "string" },
                 "stdoutBytes": { "type": "integer" },
-                "stderrBytes": { "type": "integer" }
+                "stderrBytes": { "type": "integer" },
+                "stdoutArtifactId": { "type": "string", "format": "uuid", "description": "Set only when stdout was capped — the artifact id holding the FULL stdout (fetch via /api/artifacts/{id}). Absent when nothing was dropped." },
+                "stderrArtifactId": { "type": "string", "format": "uuid", "description": "Set only when stderr was capped — the artifact id holding the FULL stderr. Absent when nothing was dropped." }
               }
             }
             """)
@@ -93,12 +99,14 @@ public sealed class AgentRunCommandNode : INodeRuntime
     {
         if (!TryReadNonEmpty(context, "command", out var command)) return NodeResult.Fail("Input 'command' is required.");
 
+        var hasTeam = NodeScopeReader.TryReadTeamId(context, out var teamId);
+
         var request = new RunCommandRequest
         {
             Command = command,
             Args = TryReadStringArray(context, "args"),
             RepositoryId = TryReadGuid(context, "repositoryId", out var repoId) ? repoId : (Guid?)null,
-            TeamId = NodeScopeReader.TryReadTeamId(context, out var teamId) ? teamId : (Guid?)null,
+            TeamId = hasTeam ? teamId : (Guid?)null,
             Ref = TryReadNonEmpty(context, "branch", out var branch) ? branch : null,
             AllowNetwork = TryReadBool(context, "network"),
             RunnerKind = TryReadNonEmpty(context, "runnerKind", out var rk) ? rk : null,
@@ -132,6 +140,12 @@ public sealed class AgentRunCommandNode : INodeRuntime
         var stdout = OutputCap.Apply(result.Stdout, maxOutputChars);
         var stderr = OutputCap.Apply(result.Stderr, maxOutputChars);
 
+        // D5 — when the cap DROPPED content, preserve the FULL stream in the artifact store so the complete
+        // output is durably recoverable (no truncation data-loss). The inline stdout/stderr stay the preview.
+        var teamScope = hasTeam ? teamId : (Guid?)null;
+        var stdoutArtifactId = await PreserveFullIfTruncatedAsync(teamScope, stdout, result.Stdout, context.Logger, cancellationToken).ConfigureAwait(false);
+        var stderrArtifactId = await PreserveFullIfTruncatedAsync(teamScope, stderr, result.Stderr, context.Logger, cancellationToken).ConfigureAwait(false);
+
         var outputs = new Dictionary<string, JsonElement>
         {
             ["exitCode"] = JsonSerializer.SerializeToElement(result.ExitCode),
@@ -142,7 +156,38 @@ public sealed class AgentRunCommandNode : INodeRuntime
             ["stderrBytes"] = JsonSerializer.SerializeToElement(stderr.OriginalLength)
         };
 
+        if (stdoutArtifactId is { } sa) outputs["stdoutArtifactId"] = JsonSerializer.SerializeToElement(sa);
+        if (stderrArtifactId is { } se) outputs["stderrArtifactId"] = JsonSerializer.SerializeToElement(se);
+
         return NodeResult.Ok(outputs);
+    }
+
+    /// <summary>
+    /// When the output cap DROPPED content, store the FULL stream in the content-addressed artifact store so the
+    /// run keeps the small inline preview AND the complete output stays durably recoverable (D5 — no truncation
+    /// data-loss). Stores UNCONDITIONALLY on truncation (not size-gated like <c>IArtifactOffloader</c>): a value
+    /// larger than the cap but under the inline threshold would otherwise still be silently lost. An ephemeral run
+    /// with no team scope can't store under a tenant → skip; the preview is the only record, exactly as before.
+    ///
+    /// <para>BEST-EFFORT: a finished command always yields a SUCCESSFUL node (this node fails only on a COMMAND
+    /// infrastructure error — clone/runner). A storage hiccup is not that, so a <c>PutAsync</c> failure is logged
+    /// and swallowed (no artifact id surfaces, the inline preview remains) rather than failing an otherwise-good
+    /// command — preserving the node's "command completed → node succeeds" contract.</para>
+    /// </summary>
+    private async Task<Guid?> PreserveFullIfTruncatedAsync(Guid? teamId, OutputCap.Result capped, string? full, ILogger logger, CancellationToken cancellationToken)
+    {
+        if (!capped.Truncated || teamId is not { } tid || string.IsNullOrEmpty(full)) return null;
+
+        try
+        {
+            var bytes = System.Text.Encoding.UTF8.GetBytes(full);
+            return await _artifacts.PutAsync(tid, bytes, "text/plain", cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "Failed to preserve the full command output to the artifact store; keeping the capped preview only.");
+            return null;
+        }
     }
 
     private static bool TryReadNonEmpty(NodeRunContext context, string key, out string text)

@@ -84,7 +84,7 @@ public class AgentToolRegistryTests
     [Fact]
     public void The_real_run_command_node_is_marked_tool_eligible_and_appears_in_the_catalog()
     {
-        var node = new AgentRunCommandNode(new StubRunCommandService());
+        var node = new AgentRunCommandNode(new StubRunCommandService(), null!);
         node.Manifest.IsAgentToolEligible.ShouldBeTrue("agent.run_command is a synchronous, standalone tool");
 
         Build(node).Resolve("agent.run_command").ShouldNotBeNull();
@@ -153,7 +153,7 @@ public class AgentToolRegistryTests
         // stays destructive, side by side with the newly-exposed writes — the side-effect flag is the only axis.
         var registry = Build(
             new GitFetchPrDiffNode(null!), new GitFetchPrChecksNode(null!), new GitListPullRequestsNode(null!),
-            new AgentRunCommandNode(new StubRunCommandService()),
+            new AgentRunCommandNode(new StubRunCommandService(), null!),
             GitWriteNode("git.open_pr"), GitWriteNode("git.post_pr_comment"), GitWriteNode("git.pr_review"));
 
         foreach (var read in new[] { "git.fetch_pr_diff", "git.fetch_pr_checks", "git.list_prs" })
