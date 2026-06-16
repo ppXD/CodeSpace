@@ -196,7 +196,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
 
             result = await EnrichWithWorkspaceChangesAsync(agentRunId, result, workspace, cancellationToken).ConfigureAwait(false);
 
-            result = await PushProducedBranchIfEnabledAsync(agentRunId, result, workspace, claimedEpoch, cancellationToken).ConfigureAwait(false);
+            result = await PushProducedBranchIfEnabledAsync(agentRunId, effectiveTask, result, workspace, claimedEpoch, cancellationToken).ConfigureAwait(false);
 
             await CompleteAndNotifyAsync(agentRunId, result, claimedEpoch, cancellationToken).ConfigureAwait(false);
         }
@@ -441,9 +441,9 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     /// surfaced as a Warning event on the timeline (token already redacted in the message) so the operator sees
     /// WHY no branch appeared. Cancellation still propagates (worker torn down).</para>
     /// </summary>
-    internal async Task<AgentRunResult> PushProducedBranchIfEnabledAsync(Guid runId, AgentRunResult result, IWorkspaceHandle? workspace, long claimedEpoch, CancellationToken cancellationToken)
+    internal async Task<AgentRunResult> PushProducedBranchIfEnabledAsync(Guid runId, AgentTask task, AgentRunResult result, IWorkspaceHandle? workspace, long claimedEpoch, CancellationToken cancellationToken)
     {
-        if (!IsPushEnabled()) return result;
+        if (!ShouldPushProducedBranch(task)) return result;
         if (result.Status != AgentRunStatus.Succeeded) return result;
         if (result.ChangedFiles.Count == 0 && string.IsNullOrEmpty(result.Patch)) return result;
         if (workspace is not IWorkspacePushHandle pushHandle) return result;
@@ -497,6 +497,16 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
 
         return raw is "1" or "true" or "TRUE";
     }
+
+    /// <summary>
+    /// The single per-run gate deciding whether THIS run pushes a produced branch: the deployment-wide env flag
+    /// (<see cref="IsPushEnabled"/>) OR the task's explicit per-run opt-in (<see cref="AgentTask.PushProducedBranch"/>).
+    /// Fail-open toward the operator (a per-run opt-in turns push ON for one run without flipping the ambient flag, but
+    /// cannot turn it OFF when the operator enabled it deployment-wide) — the SAME shape as
+    /// <see cref="ShouldOpenMcpEndpoint"/>. This is the gate the one-agent-one-branch fan-out trips per branch agent.
+    /// Pure + internal so it's unit-pinned and production reads it through this single gate.
+    /// </summary>
+    internal static bool ShouldPushProducedBranch(AgentTask task) => IsPushEnabled() || task.PushProducedBranch == true;
 
     /// <summary>True ONLY for "1"/"true"/"TRUE" (trimmed); fail-closed default-OFF otherwise. Mirrors <see cref="IsPushEnabled"/> exactly (Rule 8). Internal so it's unit-pinned; production reads it through this single gate.</summary>
     internal static bool IsMcpEndpointEnabled()

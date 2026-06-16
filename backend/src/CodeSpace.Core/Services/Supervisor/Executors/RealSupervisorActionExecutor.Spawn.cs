@@ -250,6 +250,7 @@ public sealed partial class RealSupervisorActionExecutor
             Permissions = AgentAutonomyPolicy.Derive(autonomy),
             ApprovalConversationId = context.ConversationId,
             EnableMcpEndpoint = profile?.EnableMcp,
+            PushProducedBranch = profile?.PushBranch,
         };
     }
 

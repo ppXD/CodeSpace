@@ -346,6 +346,31 @@ public class AgentCodeNodeTests
         task.Autonomy.ShouldBe(AgentAutonomyLevel.Standard, "an unknown tier degrades to the safe default, never throws");
     }
 
+    // ── pushBranch config → the per-run push opt-in on the task ─────────────────
+
+    [Theory]
+    [InlineData(true, true)]    // explicit opt-in → carried through so the fan-out branch agent publishes its branch
+    [InlineData(false, false)]  // explicit opt-out → carried as false (defers to the ambient flag at the executor gate)
+    public async Task PushBranch_config_is_carried_onto_the_task(bool configured, bool expected)
+    {
+        var config = new Dictionary<string, JsonElement> { ["goal"] = Str("g"), ["harness"] = Str("codex-cli"), ["pushBranch"] = Bool(configured) };
+
+        var result = await new AgentCodeNode().RunAsync(BuildContext(config, resume: null), CancellationToken.None);
+
+        JsonSerializer.Deserialize<AgentTask>(result.SuspendUntil!.Payload, AgentJson.Options)!.PushProducedBranch.ShouldBe(expected);
+    }
+
+    [Fact]
+    public async Task No_push_branch_config_leaves_the_task_deferring_to_the_ambient_flag()
+    {
+        // Absent → null → the executor's ShouldPushProducedBranch defers entirely to the env flag, so an ordinary
+        // authored node is byte-identical to before this knob existed.
+        var result = await new AgentCodeNode().RunAsync(BuildContext(RequiredConfig(), resume: null), CancellationToken.None);
+
+        JsonSerializer.Deserialize<AgentTask>(result.SuspendUntil!.Payload, AgentJson.Options)!.PushProducedBranch
+            .ShouldBeNull("no pushBranch config → null = defer to the deployment-wide flag (no behaviour change)");
+    }
+
     private static JsonElement Str(string s) => JsonSerializer.SerializeToElement(s);
     private static JsonElement Num(int n) => JsonSerializer.SerializeToElement(n);
     private static JsonElement Bool(bool b) => JsonSerializer.SerializeToElement(b);

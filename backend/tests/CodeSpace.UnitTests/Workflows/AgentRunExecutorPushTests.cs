@@ -54,6 +54,34 @@ public sealed class AgentRunExecutorPushTests
         }
     }
 
+    // ─── Branch-push gate (per-run opt-in OR ambient flag) ───────────────────
+
+    [Theory]
+    // ambient flag value × per-run opt-in → resolved gate. The gate is the OR of the two: a per-run opt-in turns
+    // push ON without flipping the ambient flag, but cannot turn it OFF when the operator enabled it deployment-wide.
+    [InlineData(null, null, false)]    // neither → off (byte-identical to today: an ordinary run pushes nothing)
+    [InlineData(null, false, false)]   // explicit per-run false ≠ on (still defers to ambient)
+    [InlineData(null, true, true)]     // per-run opt-in turns it on with the ambient flag off — the fan-out branch-agent case
+    [InlineData("1", null, true)]      // ambient on → on regardless of the per-run signal
+    [InlineData("1", false, true)]     // ambient wins (no per-run OFF override)
+    [InlineData("1", true, true)]
+    public void ShouldPushProducedBranch_is_the_or_of_the_ambient_flag_and_the_per_run_opt_in(string? envValue, bool? perRunOptIn, bool expected)
+    {
+        var original = Environment.GetEnvironmentVariable(AgentRunExecutor.PushEnabledEnvVar);
+        try
+        {
+            Environment.SetEnvironmentVariable(AgentRunExecutor.PushEnabledEnvVar, envValue);
+
+            var task = new AgentTask { Goal = "g", Harness = "codex-cli", PushProducedBranch = perRunOptIn };
+
+            AgentRunExecutor.ShouldPushProducedBranch(task).ShouldBe(expected);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable(AgentRunExecutor.PushEnabledEnvVar, original);
+        }
+    }
+
     // ─── MCP endpoint gate (per-run opt-in OR ambient flag) ──────────────────
 
     [Fact]
@@ -218,7 +246,7 @@ public sealed class AgentRunExecutorPushTests
             var (runId, executor, runs) = NewExecutor(epoch: ClaimedEpoch);
             var handle = new RecordingPushHandle();
 
-            var result = await executor.PushProducedBranchIfEnabledAsync(runId, SucceededWithChanges(), handle, ClaimedEpoch, CancellationToken.None);
+            var result = await executor.PushProducedBranchIfEnabledAsync(runId, DefaultTask, SucceededWithChanges(), handle, ClaimedEpoch, CancellationToken.None);
 
             result.ProducedBranch.ShouldBeNull();
             handle.PushCalled.ShouldBeFalse("flag OFF → no side effect");
@@ -234,7 +262,7 @@ public sealed class AgentRunExecutorPushTests
             var handle = new RecordingPushHandle();
 
             var failed = SucceededWithChanges() with { Status = AgentRunStatus.Failed };
-            var result = await executor.PushProducedBranchIfEnabledAsync(runId, failed, handle, ClaimedEpoch, CancellationToken.None);
+            var result = await executor.PushProducedBranchIfEnabledAsync(runId, DefaultTask, failed, handle, ClaimedEpoch, CancellationToken.None);
 
             result.ProducedBranch.ShouldBeNull();
             handle.PushCalled.ShouldBeFalse("a non-Succeeded run never pushes");
@@ -248,7 +276,7 @@ public sealed class AgentRunExecutorPushTests
             var handle = new RecordingPushHandle();
 
             var noChanges = new AgentRunResult { Status = AgentRunStatus.Succeeded, ExitReason = "completed" };   // no ChangedFiles, no Patch
-            var result = await executor.PushProducedBranchIfEnabledAsync(runId, noChanges, handle, ClaimedEpoch, CancellationToken.None);
+            var result = await executor.PushProducedBranchIfEnabledAsync(runId, DefaultTask, noChanges, handle, ClaimedEpoch, CancellationToken.None);
 
             result.ProducedBranch.ShouldBeNull();
             handle.PushCalled.ShouldBeFalse("nothing changed → nothing to push");
@@ -260,7 +288,7 @@ public sealed class AgentRunExecutorPushTests
         {
             var (runId, executor, _) = NewExecutor(epoch: ClaimedEpoch);
 
-            var result = await executor.PushProducedBranchIfEnabledAsync(runId, SucceededWithChanges(), new ReadOnlyHandle(), ClaimedEpoch, CancellationToken.None);
+            var result = await executor.PushProducedBranchIfEnabledAsync(runId, DefaultTask, SucceededWithChanges(), new ReadOnlyHandle(), ClaimedEpoch, CancellationToken.None);
 
             result.ProducedBranch.ShouldBeNull("a handle that doesn't implement IWorkspacePushHandle is skipped");
         });
@@ -271,7 +299,7 @@ public sealed class AgentRunExecutorPushTests
         {
             var (runId, executor, _) = NewExecutor(epoch: ClaimedEpoch);
 
-            var result = await executor.PushProducedBranchIfEnabledAsync(runId, SucceededWithChanges(), workspace: null, ClaimedEpoch, CancellationToken.None);
+            var result = await executor.PushProducedBranchIfEnabledAsync(runId, DefaultTask, SucceededWithChanges(), workspace: null, ClaimedEpoch, CancellationToken.None);
 
             result.ProducedBranch.ShouldBeNull();
         });
@@ -283,11 +311,27 @@ public sealed class AgentRunExecutorPushTests
             var (runId, executor, _) = NewExecutor(epoch: ClaimedEpoch);
             var handle = new RecordingPushHandle();
 
-            var result = await executor.PushProducedBranchIfEnabledAsync(runId, SucceededWithChanges(), handle, ClaimedEpoch, CancellationToken.None);
+            var result = await executor.PushProducedBranchIfEnabledAsync(runId, DefaultTask, SucceededWithChanges(), handle, ClaimedEpoch, CancellationToken.None);
 
             handle.PushCalled.ShouldBeTrue();
             handle.BranchPushed.ShouldBe(AgentRunExecutor.BuildBranchName(runId), "the deterministic run-derived branch name is pushed");
             result.ProducedBranch.ShouldBe(handle.BranchPushed, "the pushed branch is folded into the result so the node's branch output carries it");
+        });
+
+    [Fact]
+    public async Task Per_run_opt_in_pushes_with_the_ambient_flag_off() =>
+        // The one-agent-one-branch fan-out case: the env flag is OFF, but the task opted in per-run → the branch
+        // is pushed for THIS run without flipping the global flag (every other run stays byte-identical).
+        await WithFlagAsync(null, async () =>
+        {
+            var (runId, executor, _) = NewExecutor(epoch: ClaimedEpoch);
+            var handle = new RecordingPushHandle();
+
+            var optedIn = new AgentTask { Goal = "g", Harness = "codex-cli", PushProducedBranch = true };
+            var result = await executor.PushProducedBranchIfEnabledAsync(runId, optedIn, SucceededWithChanges(), handle, ClaimedEpoch, CancellationToken.None);
+
+            handle.PushCalled.ShouldBeTrue("the per-run opt-in pushes even with the ambient flag off");
+            result.ProducedBranch.ShouldBe(handle.BranchPushed, "the pushed branch is folded into the result");
         });
 
     [Fact]
@@ -297,7 +341,7 @@ public sealed class AgentRunExecutorPushTests
             var (runId, executor, _) = NewExecutor(epoch: ClaimedEpoch);
             var handle = new RecordingPushHandle { ReturnBranch = null };   // e.g. no changes to commit / anonymous clone
 
-            var result = await executor.PushProducedBranchIfEnabledAsync(runId, SucceededWithChanges(), handle, ClaimedEpoch, CancellationToken.None);
+            var result = await executor.PushProducedBranchIfEnabledAsync(runId, DefaultTask, SucceededWithChanges(), handle, ClaimedEpoch, CancellationToken.None);
 
             handle.PushCalled.ShouldBeTrue();
             result.ProducedBranch.ShouldBeNull("a null push result means no branch — the result is unchanged");
@@ -311,7 +355,7 @@ public sealed class AgentRunExecutorPushTests
             var (runId, executor, _) = NewExecutor(epoch: ClaimedEpoch + 1);
             var handle = new RecordingPushHandle();
 
-            var result = await executor.PushProducedBranchIfEnabledAsync(runId, SucceededWithChanges(), handle, ClaimedEpoch, CancellationToken.None);
+            var result = await executor.PushProducedBranchIfEnabledAsync(runId, DefaultTask, SucceededWithChanges(), handle, ClaimedEpoch, CancellationToken.None);
 
             handle.PushCalled.ShouldBeFalse("a reclaimed run (epoch bumped) skips the side effect — its completion loses the CAS anyway");
             result.ProducedBranch.ShouldBeNull();
@@ -326,7 +370,7 @@ public sealed class AgentRunExecutorPushTests
             var (runId, executor, runs) = NewExecutor(epoch: ClaimedEpoch);
             var handle = new RecordingPushHandle { ThrowOnPush = new WorkspaceException("git push failed: token *** rejected") };
 
-            var result = await executor.PushProducedBranchIfEnabledAsync(runId, SucceededWithChanges(), handle, ClaimedEpoch, CancellationToken.None);
+            var result = await executor.PushProducedBranchIfEnabledAsync(runId, DefaultTask, SucceededWithChanges(), handle, ClaimedEpoch, CancellationToken.None);
 
             result.Status.ShouldBe(AgentRunStatus.Succeeded, "a push failure NEVER flips a Succeeded run to Failed");
             result.ProducedBranch.ShouldBeNull();
@@ -343,7 +387,7 @@ public sealed class AgentRunExecutorPushTests
             var handle = new RecordingPushHandle { ThrowOnPush = new OperationCanceledException() };
 
             await Should.ThrowAsync<OperationCanceledException>(async () =>
-                await executor.PushProducedBranchIfEnabledAsync(runId, SucceededWithChanges(), handle, ClaimedEpoch, CancellationToken.None));
+                await executor.PushProducedBranchIfEnabledAsync(runId, DefaultTask, SucceededWithChanges(), handle, ClaimedEpoch, CancellationToken.None));
         });
 
     // ─── Helpers ─────────────────────────────────────────────────────────────
@@ -364,6 +408,9 @@ public sealed class AgentRunExecutorPushTests
 
     private static AgentRunResult SucceededWithChanges() =>
         new() { Status = AgentRunStatus.Succeeded, ExitReason = "completed", ChangedFiles = new[] { "src/foo.cs" }, Patch = "diff --git ..." };
+
+    /// <summary>A task with NO per-run push opt-in — so the push decision in these tests is driven purely by the env flag (the gate's OR is exercised separately by the per-run tests). Mirrors how an ordinary run looks.</summary>
+    private static AgentTask DefaultTask => new() { Goal = "g", Harness = "codex-cli" };
 
     /// <summary>Build an executor whose only live dependency is a stub run service (the epoch re-read + the warning append); every other ctor dep is null because the push step never touches it.</summary>
     private static (Guid RunId, AgentRunExecutor Executor, StubRuns Runs) NewExecutor(long epoch)
