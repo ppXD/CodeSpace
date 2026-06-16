@@ -3,6 +3,7 @@ using CodeSpace.Core.DependencyInjection;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Agents.Sandbox;
+using CodeSpace.Core.Services.Workflows.Artifacts;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Dtos.Agents;
 using CodeSpace.Messages.Enums;
@@ -123,13 +124,15 @@ public sealed class AgentRunService : IAgentRunService, IScopedDependency
     private readonly CodeSpaceDbContext _db;
     private readonly IAdmissionController _admissionController;
     private readonly ISandboxRunnerRegistry _runners;
+    private readonly IArtifactStore _artifacts;
     private readonly ILogger<AgentRunService> _logger;
 
-    public AgentRunService(CodeSpaceDbContext db, IAdmissionController admissionController, ISandboxRunnerRegistry runners, ILogger<AgentRunService> logger)
+    public AgentRunService(CodeSpaceDbContext db, IAdmissionController admissionController, ISandboxRunnerRegistry runners, IArtifactStore artifacts, ILogger<AgentRunService> logger)
     {
         _db = db;
         _admissionController = admissionController;
         _runners = runners;
+        _artifacts = artifacts;
         _logger = logger;
     }
 
@@ -304,14 +307,21 @@ public sealed class AgentRunService : IAgentRunService, IScopedDependency
         // carries that epoch — so a worker whose run was reclaimed (the reclaim bumps fence_epoch) and then
         // revived matches 0 rows and loses, instead of double-completing. A null epoch (an unfenced caller)
         // keeps the status-only guard.
-        var current = await _db.AgentRun.AsNoTracking()
+        var snapshot = await _db.AgentRun.AsNoTracking()
             .Where(r => r.Id == runId)
-            .Select(r => (AgentRunStatus?)r.Status)
+            .Select(r => new { r.Status, r.TeamId })
             .SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false)
             ?? throw new KeyNotFoundException($"AgentRun {runId} not found.");
 
+        var current = snapshot.Status;
+
         if (!AgentRunStateMachine.IsLegalTransition(current, result.Status))
             throw new AgentRunTransitionException($"Illegal AgentRun transition {current} → {result.Status} (run {runId}).");
+
+        // D2: a large unified diff is offloaded to the artifact store (content-addressed, team-scoped) and the
+        // ref kept in PatchArtifactId — so result_jsonb stays bounded instead of carrying an unbounded diff. A
+        // small diff stays inline. Done BEFORE serialize so the persisted result already carries the ref.
+        result = await OffloadLargePatchAsync(result, snapshot.TeamId, cancellationToken).ConfigureAwait(false);
 
         var resultJson = JsonSerializer.Serialize(result, AgentJson.Options);
 
@@ -328,6 +338,24 @@ public sealed class AgentRunService : IAgentRunService, IScopedDependency
             throw new AgentRunTransitionException($"AgentRun {runId} was no longer {current}{(expectedEpoch is { } e ? $" at epoch {e}" : "")} at completion — a concurrent transition or reclaim won the race.");
 
         _logger.LogInformation("Agent run completed. RunId={RunId} Status={Status}", runId, result.Status);
+    }
+
+    /// <summary>
+    /// D2: if the unified diff is larger than the artifact inline threshold, offload it to the content-addressed
+    /// artifact store (team-scoped) and return the result with <c>Patch</c> cleared + <c>PatchArtifactId</c> set —
+    /// so <c>result_jsonb</c> stays bounded. A small/empty diff is returned unchanged (stays inline). Idempotent:
+    /// the store dedups by sha, so a re-completion (reattach) reuses the same artifact id.
+    /// </summary>
+    private async Task<AgentRunResult> OffloadLargePatchAsync(AgentRunResult result, Guid teamId, CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrEmpty(result.Patch)) return result;
+
+        var bytes = System.Text.Encoding.UTF8.GetBytes(result.Patch);
+        if (bytes.Length <= ArtifactStoreConfig.InlineThresholdBytes) return result;
+
+        var artifactId = await _artifacts.PutAsync(teamId, bytes, "text/x-diff", cancellationToken).ConfigureAwait(false);
+
+        return result with { Patch = "", PatchArtifactId = artifactId };
     }
 
     public async Task<bool> CancelQueuedAsync(Guid runId, string reason, CancellationToken cancellationToken)

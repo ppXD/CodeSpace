@@ -17,7 +17,7 @@ namespace CodeSpace.IntegrationTests.Workflows;
 ///   - Idempotent dedup: same bytes from the same team → same id
 ///   - Tenant isolation: team A's artifact invisible to team B
 ///   - Metadata-only read: returns size + sha + content type without bytes
-///   - Threshold rejection: oversize bytes raise InvalidOperationException
+///   - Threshold offload (D2): oversize bytes go out-of-band (storage_url) + round-trip identical; dedup holds
 ///   - Immutability trigger: UPDATE rejected
 ///   - Immutability trigger: DELETE rejected by default
 ///   - Immutability trigger: DELETE allowed when session bypass set
@@ -176,25 +176,60 @@ public class ArtifactStoreFlowTests
     }
 
     [Fact]
-    public async Task Put_bytes_over_threshold_throws_InvalidOperationException_with_actionable_message()
+    public async Task Put_bytes_over_threshold_offloads_out_of_band_and_round_trips_identical_bytes()
     {
+        // D2: oversize bytes are no longer rejected — they're offloaded to the IArtifactBlobBackend and the row
+        // keeps only a storage_url (inline_bytes null), yet GetBytesAsync transparently resolves them back.
         var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
 
-        // Default threshold is 8 KiB; create 16 KiB to comfortably exceed it.
-        var oversize = new byte[16 * 1024];
-        Array.Fill<byte>(oversize, 0x42);
+        // Default threshold is 8 KiB; create 64 KiB of pseudo-random bytes (not all-same, so it's a real payload).
+        var oversize = new byte[64 * 1024];
+        for (var i = 0; i < oversize.Length; i++) oversize[i] = (byte)((i * 31 + 7) & 0xFF);
 
-        using var scope = _fixture.BeginScope();
-        var store = scope.Resolve<IArtifactStore>();
+        Guid artifactId;
+        using (var scope = _fixture.BeginScope())
+            artifactId = await scope.Resolve<IArtifactStore>().PutAsync(teamId, oversize, "application/octet-stream", CancellationToken.None);
 
-        var ex = await Should.ThrowAsync<InvalidOperationException>(async () =>
+        // The DB row is the metadata-only shape: inline_bytes NULL, storage_url set, size recorded.
+        using (var scope = _fixture.BeginScope())
         {
-            await store.PutAsync(teamId, oversize, "application/octet-stream", CancellationToken.None);
-        });
+            var row = await scope.Resolve<CodeSpaceDbContext>().WorkflowArtifact.AsNoTracking().SingleAsync(a => a.Id == artifactId);
+            row.InlineBytes.ShouldBeNull("an offloaded artifact keeps NO bytes in the DB row");
+            row.StorageUrl.ShouldNotBeNullOrEmpty("the offloaded row references the out-of-band blob");
+            row.StorageUrl!.ShouldStartWith("file://", Case.Sensitive);
+            row.SizeBytes.ShouldBe(oversize.Length);
+        }
 
-        // Error message must surface both the size + the env-var override knob (Rule 8 escape hatch).
-        ex.Message.ShouldContain("inline threshold");
-        ex.Message.ShouldContain(ArtifactStoreConfig.InlineThresholdEnvVar);
+        // GetBytesAsync resolves the storage_url through the backend → exact bytes back.
+        using (var scope = _fixture.BeginScope())
+        {
+            var fetched = await scope.Resolve<IArtifactStore>().GetBytesAsync(teamId, artifactId, CancellationToken.None);
+            fetched.ShouldNotBeNull();
+            fetched!.Bytes.ShouldBe(oversize, "the offloaded bytes round-trip byte-for-byte");
+            fetched.Sha256.ShouldBe(ArtifactStore.ComputeSha256Hex(oversize));
+        }
+    }
+
+    [Fact]
+    public async Task Put_same_oversize_bytes_twice_dedups_to_one_id_via_the_backend()
+    {
+        // Content-addressed offload is idempotent: the same large payload from the same team returns the same id,
+        // and the backend's content-addressed write is a no-op the second time.
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var oversize = new byte[32 * 1024];
+        for (var i = 0; i < oversize.Length; i++) oversize[i] = (byte)((i * 17 + 3) & 0xFF);
+
+        Guid id1, id2;
+        using (var scope = _fixture.BeginScope())
+            id1 = await scope.Resolve<IArtifactStore>().PutAsync(teamId, oversize, "application/octet-stream", CancellationToken.None);
+        using (var scope = _fixture.BeginScope())
+            id2 = await scope.Resolve<IArtifactStore>().PutAsync(teamId, oversize, "application/octet-stream", CancellationToken.None);
+
+        id2.ShouldBe(id1, "the same oversize content dedups to one artifact id");
+
+        using (var scope = _fixture.BeginScope())
+            (await scope.Resolve<CodeSpaceDbContext>().WorkflowArtifact.AsNoTracking().CountAsync(a => a.TeamId == teamId && a.SizeBytes == oversize.Length))
+                .ShouldBe(1, "no duplicate offloaded row");
     }
 
     [Fact]
