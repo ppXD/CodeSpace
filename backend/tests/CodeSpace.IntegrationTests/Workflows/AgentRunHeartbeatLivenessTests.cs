@@ -41,7 +41,7 @@ public class AgentRunHeartbeatLivenessTests
             Guid runId;
             using (var scope = _fixture.BeginScope())
                 runId = (await scope.Resolve<IAgentRunService>().CreateAsync(
-                    new AgentTask { Goal = "quiet", Harness = "codex-cli", Model = "test-model" }, teamId, null, null, CancellationToken.None)).Id;
+                    new AgentTask { Goal = "quiet", Harness = "codex-cli", Model = "test-model" }, teamId, null, null, iterationKey: "", cancellationToken: CancellationToken.None)).Id;
 
             // MarkRunningAsync stamps a fresh HeartbeatAt — exactly what the executor's heartbeat loop keeps
             // refreshed. We append NO events, so the heartbeat is the ONLY liveness signal protecting this run.

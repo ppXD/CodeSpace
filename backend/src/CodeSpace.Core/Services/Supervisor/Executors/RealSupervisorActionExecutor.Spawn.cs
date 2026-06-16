@@ -208,7 +208,11 @@ public sealed partial class RealSupervisorActionExecutor
             throw new AgentDefinitionResolutionException($"agent.supervisor spawn: {ex.Message}", ex);
         }
 
-        return (await _agentRuns.CreateAsync(resolved, context.TeamId, context.SupervisorRunId, context.NodeId, cancellationToken).ConfigureAwait(false)).Id;
+        // Stamp the owning TURN cell (<nodeId>#turn{N}) so a supervisor's spawned agents are addressable by the
+        // turn that spawned them (D4) — the turn-grain analogue of the per-spawn wait key <nodeId>#turn{N}#{k}.
+        var turnCellKey = $"{context.NodeId}#turn{context.TurnNumber}";
+
+        return (await _agentRuns.CreateAsync(resolved, context.TeamId, context.SupervisorRunId, context.NodeId, turnCellKey, cancellationToken).ConfigureAwait(false)).Id;
     }
 
     /// <summary>

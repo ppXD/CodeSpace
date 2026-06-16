@@ -65,7 +65,7 @@ public sealed class InstrumentedAgentRunService : IAgentRunService
     }
 
     // ── pure delegation ───────────────────────────────────────────────────────
-    public Task<AgentRun> CreateAsync(AgentTask task, Guid teamId, Guid? workflowRunId, string? nodeId, CancellationToken cancellationToken) => _inner.CreateAsync(task, teamId, workflowRunId, nodeId, cancellationToken);
+    public Task<AgentRun> CreateAsync(AgentTask task, Guid teamId, Guid? workflowRunId, string? nodeId, string iterationKey = "", CancellationToken cancellationToken = default) => _inner.CreateAsync(task, teamId, workflowRunId, nodeId, iterationKey, cancellationToken);
 
     public Task<long> MarkRunningAsync(Guid runId, CancellationToken cancellationToken) => _inner.MarkRunningAsync(runId, cancellationToken);
 

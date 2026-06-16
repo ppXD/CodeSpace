@@ -1097,7 +1097,7 @@ public class AgentMcpEndpointFlowTests
         using var scope = _fixture.BeginScope();
         var run = await scope.Resolve<IAgentRunService>().CreateAsync(
             new AgentTask { Goal = "scripted", Harness = "scripted", Model = "test-model", TimeoutSeconds = 1800, Autonomy = autonomy, Tools = tools },
-            teamId, null, null, CancellationToken.None);
+            teamId, null, null, iterationKey: "", cancellationToken: CancellationToken.None);
         return run.Id;
     }
 

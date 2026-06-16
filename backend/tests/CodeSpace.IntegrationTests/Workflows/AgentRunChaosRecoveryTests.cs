@@ -39,7 +39,7 @@ public class AgentRunChaosRecoveryTests
 
         Guid runId;
         using (var scope = _fixture.BeginScope())
-            runId = (await scope.Resolve<IAgentRunService>().CreateAsync(BuildTask(), teamId, null, null, CancellationToken.None)).Id;
+            runId = (await scope.Resolve<IAgentRunService>().CreateAsync(BuildTask(), teamId, null, null, iterationKey: "", cancellationToken: CancellationToken.None)).Id;
         using (var scope = _fixture.BeginScope())
             await scope.Resolve<IAgentRunService>().MarkRunningAsync(runId, CancellationToken.None);
 

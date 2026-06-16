@@ -27,6 +27,29 @@ public class AgentRunServiceTests
     public AgentRunServiceTests(PostgresFixture fixture) { _fixture = fixture; }
 
     [Fact]
+    public async Task CreateAsync_persists_the_owning_cell_iteration_key()
+    {
+        // D4: the iteration key passed at creation is the agent run's owning workflow CELL — it must round-trip
+        // verbatim (a map/loop branch key) and default to "" for a top-level / standalone run.
+        var teamId = await SeedTeamAsync();
+
+        Guid branchRunId, topLevelRunId;
+        using (var scope = _fixture.BeginScope())
+        {
+            var svc = scope.Resolve<IAgentRunService>();
+            branchRunId = (await svc.CreateAsync(BuildTask(), teamId, Guid.NewGuid(), "agent", iterationKey: "map#2", cancellationToken: CancellationToken.None)).Id;
+            topLevelRunId = (await svc.CreateAsync(BuildTask(), teamId, null, null, cancellationToken: CancellationToken.None)).Id;
+        }
+
+        using var verify = _fixture.BeginScope();
+        var db = verify.Resolve<CodeSpaceDbContext>();
+        (await db.AgentRun.AsNoTracking().SingleAsync(r => r.Id == branchRunId)).IterationKey
+            .ShouldBe("map#2", "a branch agent run round-trips its owning cell key verbatim");
+        (await db.AgentRun.AsNoTracking().SingleAsync(r => r.Id == topLevelRunId)).IterationKey
+            .ShouldBe("", "a top-level / standalone run defaults to the empty (NoIteration) cell key");
+    }
+
+    [Fact]
     public async Task Full_lifecycle_create_run_append_events_complete()
     {
         var teamId = await SeedTeamAsync();
@@ -34,7 +57,7 @@ public class AgentRunServiceTests
         Guid runId;
         using (var scope = _fixture.BeginScope())
         {
-            var run = await scope.Resolve<IAgentRunService>().CreateAsync(BuildTask(), teamId, null, null, CancellationToken.None);
+            var run = await scope.Resolve<IAgentRunService>().CreateAsync(BuildTask(), teamId, null, null, iterationKey: "", cancellationToken: CancellationToken.None);
             run.Status.ShouldBe(AgentRunStatus.Queued);
             runId = run.Id;
         }
@@ -87,7 +110,7 @@ public class AgentRunServiceTests
         using (var scope = _fixture.BeginScope())
         {
             var svc = scope.Resolve<IAgentRunService>();
-            runId = (await svc.CreateAsync(BuildTask(), teamId, null, null, CancellationToken.None)).Id;
+            runId = (await svc.CreateAsync(BuildTask(), teamId, null, null, iterationKey: "", cancellationToken: CancellationToken.None)).Id;
             await svc.MarkRunningAsync(runId, CancellationToken.None);
         }
 
@@ -126,7 +149,7 @@ public class AgentRunServiceTests
         using (var scope = _fixture.BeginScope())
         {
             var svc = scope.Resolve<IAgentRunService>();
-            runId = (await svc.CreateAsync(BuildTask(), teamId, null, null, CancellationToken.None)).Id;
+            runId = (await svc.CreateAsync(BuildTask(), teamId, null, null, iterationKey: "", cancellationToken: CancellationToken.None)).Id;
             await svc.MarkRunningAsync(runId, CancellationToken.None);
         }
 
@@ -164,7 +187,7 @@ public class AgentRunServiceTests
         using (var scope = _fixture.BeginScope())
         {
             var svc = scope.Resolve<IAgentRunService>();
-            runId = (await svc.CreateAsync(BuildTask(), teamId, null, null, CancellationToken.None)).Id;
+            runId = (await svc.CreateAsync(BuildTask(), teamId, null, null, iterationKey: "", cancellationToken: CancellationToken.None)).Id;
             await svc.MarkRunningAsync(runId, CancellationToken.None);
         }
 
@@ -197,8 +220,8 @@ public class AgentRunServiceTests
         using (var scope = _fixture.BeginScope())
         {
             var svc = scope.Resolve<IAgentRunService>();
-            runA = (await svc.CreateAsync(BuildTask(), teamId, null, null, CancellationToken.None)).Id;
-            runB = (await svc.CreateAsync(BuildTask(), teamId, null, null, CancellationToken.None)).Id;
+            runA = (await svc.CreateAsync(BuildTask(), teamId, null, null, iterationKey: "", cancellationToken: CancellationToken.None)).Id;
+            runB = (await svc.CreateAsync(BuildTask(), teamId, null, null, iterationKey: "", cancellationToken: CancellationToken.None)).Id;
             await svc.MarkRunningAsync(runA, CancellationToken.None);
             await svc.MarkRunningAsync(runB, CancellationToken.None);
         }
@@ -247,7 +270,7 @@ public class AgentRunServiceTests
         using (var scope = _fixture.BeginScope())
         {
             var svc = scope.Resolve<IAgentRunService>();
-            runId = (await svc.CreateAsync(BuildTask(), teamId, null, null, CancellationToken.None)).Id;
+            runId = (await svc.CreateAsync(BuildTask(), teamId, null, null, iterationKey: "", cancellationToken: CancellationToken.None)).Id;
             await svc.MarkRunningAsync(runId, CancellationToken.None);
         }
 
@@ -273,7 +296,7 @@ public class AgentRunServiceTests
         using (var scope = _fixture.BeginScope())
         {
             var svc = scope.Resolve<IAgentRunService>();
-            goodRun = (await svc.CreateAsync(BuildTask(), teamId, null, null, CancellationToken.None)).Id;
+            goodRun = (await svc.CreateAsync(BuildTask(), teamId, null, null, iterationKey: "", cancellationToken: CancellationToken.None)).Id;
             await svc.MarkRunningAsync(goodRun, CancellationToken.None);
             await svc.AppendEventsAsync(goodRun, new[] { Ev("baseline-1"), Ev("baseline-2"), Ev("baseline-3") }, CancellationToken.None);
         }
@@ -317,7 +340,7 @@ public class AgentRunServiceTests
             var svc = scope.Resolve<IAgentRunService>();
             for (var r = 0; r < runCount; r++)
             {
-                runIds[r] = (await svc.CreateAsync(BuildTask(), teamId, null, null, CancellationToken.None)).Id;
+                runIds[r] = (await svc.CreateAsync(BuildTask(), teamId, null, null, iterationKey: "", cancellationToken: CancellationToken.None)).Id;
                 await svc.MarkRunningAsync(runIds[r], CancellationToken.None);
             }
         }
@@ -374,9 +397,9 @@ public class AgentRunServiceTests
         using (var scope = _fixture.BeginScope())
         {
             var svc = scope.Resolve<IAgentRunService>();
-            runId = (await svc.CreateAsync(BuildTask(), teamId, null, null, CancellationToken.None)).Id;
-            noise1 = (await svc.CreateAsync(BuildTask(), teamId, null, null, CancellationToken.None)).Id;
-            noise2 = (await svc.CreateAsync(BuildTask(), teamId, null, null, CancellationToken.None)).Id;
+            runId = (await svc.CreateAsync(BuildTask(), teamId, null, null, iterationKey: "", cancellationToken: CancellationToken.None)).Id;
+            noise1 = (await svc.CreateAsync(BuildTask(), teamId, null, null, iterationKey: "", cancellationToken: CancellationToken.None)).Id;
+            noise2 = (await svc.CreateAsync(BuildTask(), teamId, null, null, iterationKey: "", cancellationToken: CancellationToken.None)).Id;
             await svc.MarkRunningAsync(runId, CancellationToken.None);
             await svc.MarkRunningAsync(noise1, CancellationToken.None);
             await svc.MarkRunningAsync(noise2, CancellationToken.None);
@@ -465,7 +488,7 @@ public class AgentRunServiceTests
         using (var scope = _fixture.BeginScope())
         {
             var svc = scope.Resolve<IAgentRunService>();
-            runId = (await svc.CreateAsync(BuildTask(), teamId, null, null, CancellationToken.None)).Id;
+            runId = (await svc.CreateAsync(BuildTask(), teamId, null, null, iterationKey: "", cancellationToken: CancellationToken.None)).Id;
             await svc.MarkRunningAsync(runId, CancellationToken.None);
         }
 
@@ -536,7 +559,7 @@ public class AgentRunServiceTests
         using (var scope = _fixture.BeginScope())
         {
             var svc = scope.Resolve<IAgentRunService>();
-            runId = (await svc.CreateAsync(BuildTask(), teamId, null, null, CancellationToken.None)).Id;
+            runId = (await svc.CreateAsync(BuildTask(), teamId, null, null, iterationKey: "", cancellationToken: CancellationToken.None)).Id;
             await svc.MarkRunningAsync(runId, CancellationToken.None);
         }
 
@@ -586,7 +609,7 @@ public class AgentRunServiceTests
         using (var scope = _fixture.BeginScope())
         {
             var svc = scope.Resolve<IAgentRunService>();
-            runId = (await svc.CreateAsync(BuildTask(), teamId, null, null, CancellationToken.None)).Id;
+            runId = (await svc.CreateAsync(BuildTask(), teamId, null, null, iterationKey: "", cancellationToken: CancellationToken.None)).Id;
             await svc.MarkRunningAsync(runId, CancellationToken.None);
         }
 
@@ -626,7 +649,7 @@ public class AgentRunServiceTests
         using (var scope = _fixture.BeginScope())
         {
             var svc = scope.Resolve<IAgentRunService>();
-            runId = (await svc.CreateAsync(BuildTask(), teamId, null, null, CancellationToken.None)).Id;
+            runId = (await svc.CreateAsync(BuildTask(), teamId, null, null, iterationKey: "", cancellationToken: CancellationToken.None)).Id;
             await svc.MarkRunningAsync(runId, CancellationToken.None);
         }
 
@@ -659,7 +682,7 @@ public class AgentRunServiceTests
         using (var scope = _fixture.BeginScope())
         {
             var svc = scope.Resolve<IAgentRunService>();
-            runId = (await svc.CreateAsync(BuildTask(), teamId, null, null, CancellationToken.None)).Id;
+            runId = (await svc.CreateAsync(BuildTask(), teamId, null, null, iterationKey: "", cancellationToken: CancellationToken.None)).Id;
             await svc.MarkRunningAsync(runId, CancellationToken.None);
         }
 
@@ -698,7 +721,7 @@ public class AgentRunServiceTests
         using (var scope = _fixture.BeginScope())
         {
             var svc = scope.Resolve<IAgentRunService>();
-            runId = (await svc.CreateAsync(BuildTask(), teamId, null, null, CancellationToken.None)).Id;
+            runId = (await svc.CreateAsync(BuildTask(), teamId, null, null, iterationKey: "", cancellationToken: CancellationToken.None)).Id;
             await svc.MarkRunningAsync(runId, CancellationToken.None);
         }
 
@@ -730,7 +753,7 @@ public class AgentRunServiceTests
         using (var scope = _fixture.BeginScope())
         {
             var svc = scope.Resolve<IAgentRunService>();
-            var run = await svc.CreateAsync(BuildTask(), ownerTeam, null, null, CancellationToken.None);
+            var run = await svc.CreateAsync(BuildTask(), ownerTeam, null, null, iterationKey: "", cancellationToken: CancellationToken.None);
             runId = run.Id;
             await svc.MarkRunningAsync(runId, CancellationToken.None);
             await svc.AppendEventAsync(runId, new AgentEvent { Kind = AgentEventKind.AssistantMessage, Text = "owner-only" }, CancellationToken.None);
@@ -752,7 +775,7 @@ public class AgentRunServiceTests
         using var scope = _fixture.BeginScope();
         var svc = scope.Resolve<IAgentRunService>();
 
-        var run = await svc.CreateAsync(BuildTask(), teamId, null, null, CancellationToken.None);
+        var run = await svc.CreateAsync(BuildTask(), teamId, null, null, iterationKey: "", cancellationToken: CancellationToken.None);
 
         // Queued → Succeeded is illegal — a run can't succeed without running.
         await Should.ThrowAsync<AgentRunTransitionException>(() =>
@@ -766,7 +789,7 @@ public class AgentRunServiceTests
         using var scope = _fixture.BeginScope();
         var svc = scope.Resolve<IAgentRunService>();
 
-        var run = await svc.CreateAsync(BuildTask(), teamId, null, null, CancellationToken.None);
+        var run = await svc.CreateAsync(BuildTask(), teamId, null, null, iterationKey: "", cancellationToken: CancellationToken.None);
         await svc.MarkRunningAsync(run.Id, CancellationToken.None);
 
         await Should.ThrowAsync<AgentRunTransitionException>(() =>
@@ -781,7 +804,7 @@ public class AgentRunServiceTests
         Guid runId;
         using (var scope = _fixture.BeginScope())
         {
-            var run = await scope.Resolve<IAgentRunService>().CreateAsync(BuildTask(), teamId, null, null, CancellationToken.None);
+            var run = await scope.Resolve<IAgentRunService>().CreateAsync(BuildTask(), teamId, null, null, iterationKey: "", cancellationToken: CancellationToken.None);
             runId = run.Id;
         }
 
@@ -800,7 +823,7 @@ public class AgentRunServiceTests
 
         Guid runId;
         using (var scope = _fixture.BeginScope())
-            runId = (await scope.Resolve<IAgentRunService>().CreateAsync(BuildTask(), teamId, null, null, CancellationToken.None)).Id;
+            runId = (await scope.Resolve<IAgentRunService>().CreateAsync(BuildTask(), teamId, null, null, iterationKey: "", cancellationToken: CancellationToken.None)).Id;
 
         long epoch;
         using (var scope = _fixture.BeginScope())
@@ -828,7 +851,7 @@ public class AgentRunServiceTests
         using (var scope = _fixture.BeginScope())
         {
             var svc = scope.Resolve<IAgentRunService>();
-            runId = (await svc.CreateAsync(BuildTask(), teamId, null, null, CancellationToken.None)).Id;
+            runId = (await svc.CreateAsync(BuildTask(), teamId, null, null, iterationKey: "", cancellationToken: CancellationToken.None)).Id;
             claimedEpoch = await svc.MarkRunningAsync(runId, CancellationToken.None);
         }
 
@@ -855,7 +878,7 @@ public class AgentRunServiceTests
 
         Guid runId;
         using (var scope = _fixture.BeginScope())
-            runId = (await scope.Resolve<IAgentRunService>().CreateAsync(BuildTask(), teamId, null, null, CancellationToken.None)).Id;
+            runId = (await scope.Resolve<IAgentRunService>().CreateAsync(BuildTask(), teamId, null, null, iterationKey: "", cancellationToken: CancellationToken.None)).Id;
 
         using (var scope = _fixture.BeginScope())
             await scope.Resolve<IAgentRunService>().MarkRunningAsync(runId, CancellationToken.None);
@@ -889,7 +912,7 @@ public class AgentRunServiceTests
         using (var scope = _fixture.BeginScope())
         {
             var svc = scope.Resolve<IAgentRunService>();
-            runId = (await svc.CreateAsync(BuildTask(), teamId, null, null, CancellationToken.None)).Id;
+            runId = (await svc.CreateAsync(BuildTask(), teamId, null, null, iterationKey: "", cancellationToken: CancellationToken.None)).Id;
             claimedEpoch = await svc.MarkRunningAsync(runId, CancellationToken.None);
         }
 
@@ -921,7 +944,7 @@ public class AgentRunServiceTests
         using (var scope = _fixture.BeginScope())
         {
             var svc = scope.Resolve<IAgentRunService>();
-            runId = (await svc.CreateAsync(BuildTask(), teamId, null, null, CancellationToken.None)).Id;
+            runId = (await svc.CreateAsync(BuildTask(), teamId, null, null, iterationKey: "", cancellationToken: CancellationToken.None)).Id;
             epoch = await svc.MarkRunningAsync(runId, CancellationToken.None);
             await svc.CompleteAsync(runId, new AgentRunResult { Status = AgentRunStatus.Succeeded, ExitReason = "completed" }, epoch, CancellationToken.None);
         }
@@ -950,7 +973,7 @@ public class AgentRunServiceTests
         using (var scope = _fixture.BeginScope())
         {
             var svc = scope.Resolve<IAgentRunService>();
-            runId = (await svc.CreateAsync(BuildTask(), teamId, null, null, CancellationToken.None)).Id;
+            runId = (await svc.CreateAsync(BuildTask(), teamId, null, null, iterationKey: "", cancellationToken: CancellationToken.None)).Id;
             originalEpoch = await svc.MarkRunningAsync(runId, CancellationToken.None);
         }
 
@@ -984,7 +1007,7 @@ public class AgentRunServiceTests
         var svc = scope.Resolve<IAgentRunService>();
 
         var ex = await Should.ThrowAsync<AgentRunAdmissionException>(() =>
-            svc.CreateAsync(BuildTask(), teamId, null, null, CancellationToken.None));
+            svc.CreateAsync(BuildTask(), teamId, null, null, iterationKey: "", cancellationToken: CancellationToken.None));
 
         ex.Message.ShouldContain(AdmissionController.MaxInflightPerTeamEnvVar);   // names the env var to raise
 
@@ -1002,7 +1025,7 @@ public class AgentRunServiceTests
         await SeedInflightRunsAsync(teamId, queued: 2, running: 1);   // 3 in flight, cap 5 → headroom
 
         using var scope = _fixture.BeginScope();
-        var run = await scope.Resolve<IAgentRunService>().CreateAsync(BuildTask(), teamId, null, null, CancellationToken.None);
+        var run = await scope.Resolve<IAgentRunService>().CreateAsync(BuildTask(), teamId, null, null, iterationKey: "", cancellationToken: CancellationToken.None);
 
         run.Status.ShouldBe(AgentRunStatus.Queued, "a sub-cap run is admitted + persisted Queued");
         (await CountInflightForTeamAsync(teamId)).ShouldBe(4);
@@ -1025,10 +1048,10 @@ public class AgentRunServiceTests
         var svc = scope.Resolve<IAgentRunService>();
 
         await Should.ThrowAsync<AgentRunAdmissionException>(() =>
-            svc.CreateAsync(BuildTask(), fullTeam, null, null, CancellationToken.None));
+            svc.CreateAsync(BuildTask(), fullTeam, null, null, iterationKey: "", cancellationToken: CancellationToken.None));
 
         // The OTHER team, well under its own cap, is admitted normally despite the first team being full.
-        var run = await svc.CreateAsync(BuildTask(), otherTeam, null, null, CancellationToken.None);
+        var run = await svc.CreateAsync(BuildTask(), otherTeam, null, null, iterationKey: "", cancellationToken: CancellationToken.None);
         run.Status.ShouldBe(AgentRunStatus.Queued, "a different team under its own cap is unaffected by a full team");
     }
 
@@ -1051,7 +1074,7 @@ public class AgentRunServiceTests
         var svc = scope.Resolve<IAgentRunService>();
 
         var ex = await Should.ThrowAsync<AgentRunAdmissionException>(() =>
-            svc.CreateAsync(BuildTask(), teamC, null, null, CancellationToken.None));
+            svc.CreateAsync(BuildTask(), teamC, null, null, iterationKey: "", cancellationToken: CancellationToken.None));
 
         ex.Message.ShouldContain(AdmissionController.MaxInflightGlobalEnvVar, customMessage: "the global gate, not the per-team gate, is the binding limit here");
     }

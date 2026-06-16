@@ -31,6 +31,18 @@ public class AgentRun : IEntity<Guid>, IAuditable
     /// <summary>The agent.code node id within that run. NULL for a standalone agent run.</summary>
     public string? NodeId { get; set; }
 
+    /// <summary>
+    /// The owning workflow CELL's iteration key — the same value the engine stamps on the spawning node's
+    /// <c>workflow_run_node</c> / <c>workflow_run_wait</c> row, so this run is addressable by the full
+    /// <c>(WorkflowRunId, NodeId, IterationKey)</c> cell rather than just the node. Empty string for a
+    /// top-level node, a standalone run, or the non-container case (the engine's <c>NoIteration</c> convention).
+    /// For a map branch / loop iteration it is <c>&lt;nodeId&gt;#&lt;index&gt;</c> (nested keys combine); for a
+    /// supervisor turn-spawn it is the turn cell <c>&lt;nodeId&gt;#turn{N}</c>. The D4 correlation spine — N
+    /// agent branches under one map node are now distinguishable, and a future from-cell rerun can target one
+    /// branch's agent run.
+    /// </summary>
+    public string IterationKey { get; set; } = "";
+
     /// <summary>Harness kind (e.g. "codex-cli"), denormalized for list/filtering. Also present inside <see cref="TaskJson"/>.</summary>
     public string Harness { get; set; } = default!;
 
