@@ -63,6 +63,10 @@ public sealed class RunPhaseProjector : IRunPhaseProjector, IScopedDependency
         {
             return await source.ContributeAsync(context, cancellationToken).ConfigureAwait(false);
         }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "Run phase source {SourceKey} failed for run {RunId}; degrading to fewer phases", source.SourceKey, context.RunId);

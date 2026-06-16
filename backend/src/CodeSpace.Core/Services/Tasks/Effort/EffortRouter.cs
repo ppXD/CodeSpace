@@ -1,7 +1,9 @@
 using CodeSpace.Core.DependencyInjection;
+using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Tasks.Bounds;
 using CodeSpace.Core.Services.Tasks.Capabilities;
 using CodeSpace.Core.Services.Tasks.Recipes;
+using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Tasks;
 using CodeSpace.Messages.Tasks.Effort;
 
@@ -126,7 +128,7 @@ public sealed class EffortRouter : IEffortRouter, IScopedDependency
         return (preset, caps);
     }
 
-    /// <summary>Merge the operator's override onto the preset's caps — each SET override field wins (tightening / overriding); an unset override field keeps the preset's value.</summary>
+    /// <summary>Merge the operator's override onto the preset's caps — a SET numeric override replaces the preset's value; the AutonomyCeiling is TIGHTEN-ONLY (an override may lower it, never raise it — the privilege bound stays un-bypassable); an unset override field keeps the preset's value.</summary>
     private static RouteCaps MergeCaps(RouteCaps baseCaps, RouteCaps? @override)
     {
         if (@override == null) return baseCaps;
@@ -137,10 +139,20 @@ public sealed class EffortRouter : IEffortRouter, IScopedDependency
             MaxRounds = @override.MaxRounds ?? baseCaps.MaxRounds,
             MaxTotalSpawns = @override.MaxTotalSpawns ?? baseCaps.MaxTotalSpawns,
             MaxCostUsd = @override.MaxCostUsd ?? baseCaps.MaxCostUsd,
-            AutonomyCeiling = string.IsNullOrWhiteSpace(@override.AutonomyCeiling) ? baseCaps.AutonomyCeiling : @override.AutonomyCeiling,
+            AutonomyCeiling = TightenCeiling(baseCaps.AutonomyCeiling, @override.AutonomyCeiling),
             RequiresApproval = @override.RequiresApproval || baseCaps.RequiresApproval,
             Extra = @override.Extra.Count > 0 ? @override.Extra : baseCaps.Extra,
         };
+    }
+
+    /// <summary>The autonomy ceiling an override yields — the stricter (lower-privilege) of base and override, so an override can only LOWER the ceiling, never raise it. A blank override keeps the preset's ceiling.</summary>
+    private static string TightenCeiling(string baseCeiling, string? overrideCeiling)
+    {
+        if (string.IsNullOrWhiteSpace(overrideCeiling)) return baseCeiling;
+
+        var tightened = AgentAutonomyPolicy.Clamp(AgentAutonomyPolicy.Parse(overrideCeiling, AgentAutonomyLevel.Unleashed), AgentAutonomyPolicy.Parse(baseCeiling, AgentAutonomyLevel.Unleashed));
+
+        return tightened.ToString();
     }
 
     /// <summary>The confirm card — one option per AVAILABLE bounds preset (= available effort tier), DERIVED from the registry (no hardcoded button list). The operator's answer re-enters RouteAsync as RequestedEffort.</summary>

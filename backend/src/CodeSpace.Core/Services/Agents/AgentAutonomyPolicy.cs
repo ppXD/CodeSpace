@@ -14,6 +14,21 @@ namespace CodeSpace.Core.Services.Agents;
 /// </summary>
 public static class AgentAutonomyPolicy
 {
+    /// <summary>
+    /// Clamps a REQUESTED tier down to a CEILING — the lower (less privileged) of the two. The enum is ascending
+    /// capability (Confined &lt; Standard &lt; Trusted &lt; Unleashed), so <see cref="Math.Min(int,int)"/> over the
+    /// underlying ints is the clamp: a Quick/Standard route (ceiling Standard) can never run a requested Trusted /
+    /// Unleashed. Applying it at the SINGLE choke point that stamps the tier (the task launch's agent-profile build)
+    /// is what makes the ceiling un-bypassable — the clamped tier is the one that flows through projection → the node
+    /// config → <see cref="Derive"/> → the sandbox runner.
+    /// </summary>
+    public static AgentAutonomyLevel Clamp(AgentAutonomyLevel requested, AgentAutonomyLevel ceiling) =>
+        (AgentAutonomyLevel)Math.Min((int)requested, (int)ceiling);
+
+    /// <summary>Parse an autonomy tier string case-insensitively (mirrors agent.code's ReadAutonomyLevel); null / blank / unrecognised → the supplied fallback. The single tier parser, reused by the launch clamp and the caps-override merge.</summary>
+    public static AgentAutonomyLevel Parse(string? value, AgentAutonomyLevel fallback) =>
+        Enum.TryParse<AgentAutonomyLevel>(value, ignoreCase: true, out var level) ? level : fallback;
+
     /// <summary>Derives the baseline <see cref="AgentPermissions"/> for a tier. Unknown values fall back to the safe default.</summary>
     public static AgentPermissions Derive(AgentAutonomyLevel level) => level switch
     {

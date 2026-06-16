@@ -40,4 +40,30 @@ public class AgentAutonomyPolicyTests
         // never a silent fall-through to Derive's safe-default arm.
         Enum.GetValues<AgentAutonomyLevel>().Length.ShouldBe(4);
     }
+
+    [Theory]
+    // Requested ABOVE the ceiling → clamped DOWN to the ceiling (the privilege-escalation hole this closes).
+    [InlineData(AgentAutonomyLevel.Unleashed, AgentAutonomyLevel.Standard, AgentAutonomyLevel.Standard)]
+    [InlineData(AgentAutonomyLevel.Trusted, AgentAutonomyLevel.Standard, AgentAutonomyLevel.Standard)]
+    [InlineData(AgentAutonomyLevel.Unleashed, AgentAutonomyLevel.Confined, AgentAutonomyLevel.Confined)]
+    // Requested AT or BELOW the ceiling → kept verbatim (the clamp never escalates, never tightens what's already safe).
+    [InlineData(AgentAutonomyLevel.Confined, AgentAutonomyLevel.Trusted, AgentAutonomyLevel.Confined)]
+    [InlineData(AgentAutonomyLevel.Standard, AgentAutonomyLevel.Standard, AgentAutonomyLevel.Standard)]
+    [InlineData(AgentAutonomyLevel.Standard, AgentAutonomyLevel.Unleashed, AgentAutonomyLevel.Standard)]
+    // No ceiling (the top tier) → a no-op, the request passes through unchanged.
+    [InlineData(AgentAutonomyLevel.Trusted, AgentAutonomyLevel.Unleashed, AgentAutonomyLevel.Trusted)]
+    public void Clamp_takes_the_lower_of_requested_and_ceiling(AgentAutonomyLevel requested, AgentAutonomyLevel ceiling, AgentAutonomyLevel expected)
+    {
+        AgentAutonomyPolicy.Clamp(requested, ceiling).ShouldBe(expected);
+    }
+
+    [Fact]
+    public void Clamp_is_symmetric_in_its_arguments_since_it_is_the_min()
+    {
+        // Defensive: the clamp is order-independent (it's Math.Min over the ints), so swapping requested/ceiling
+        // yields the same tier. Pins that the enum stays ASCENDING by privilege — if a future reorder broke that,
+        // Min would silently pick the wrong tier and this guards against it together with the Theory above.
+        AgentAutonomyPolicy.Clamp(AgentAutonomyLevel.Unleashed, AgentAutonomyLevel.Standard)
+            .ShouldBe(AgentAutonomyPolicy.Clamp(AgentAutonomyLevel.Standard, AgentAutonomyLevel.Unleashed));
+    }
 }
