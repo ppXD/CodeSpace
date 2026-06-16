@@ -64,6 +64,19 @@ public class ChatPostMessageFlowTests
         // Authored by the team bot (hidden by the global filter — bypass to inspect).
         var author = await db.User.AsNoTracking().IgnoreQueryFilters().SingleAsync(u => u.Id == message.AuthorUserId);
         author.IsBot.ShouldBeTrue("the workflow posts as the CodeSpace bot, never a human");
+
+        // Provenance: the side-effecting post is traced as an external_call pair in the ledger (mirrors git/http),
+        // so EVERY external effect (MCP + git + chat) is queryable for audit + rerun — chat is no longer the blind spot.
+        var callRecords = await db.WorkflowRunRecord.AsNoTracking()
+            .Where(r => r.RunId == runId && (r.RecordType == WorkflowRunRecordTypes.ExternalCallStarted || r.RecordType == WorkflowRunRecordTypes.ExternalCallCompleted))
+            .OrderBy(r => r.Sequence)
+            .ToListAsync();
+
+        callRecords.Count.ShouldBe(2, "chat.post_message MUST emit one external_call.started + one completed — got: " + string.Join(",", callRecords.Select(r => r.RecordType)));
+        var startedCall = callRecords.Single(r => r.RecordType == WorkflowRunRecordTypes.ExternalCallStarted);
+        startedCall.CorrelationId.ShouldBe(callRecords.Single(r => r.RecordType == WorkflowRunRecordTypes.ExternalCallCompleted).CorrelationId,
+            "the started + completed rows share a correlation id so the run-detail UI pairs the post with its result");
+        JsonDocument.Parse(startedCall.PayloadJson).RootElement.GetProperty("method").GetString().ShouldBe("post_message");
     }
 
     [Fact]
