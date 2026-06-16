@@ -57,6 +57,9 @@ public interface IAgentRunService
     /// <summary>Append one normalized event to the run's append-only log. Sequence + timestamp are DB-assigned.</summary>
     Task<AgentRunEvent> AppendEventAsync(Guid runId, AgentEvent @event, CancellationToken cancellationToken);
 
+    /// <summary>Append a BATCH of events as ONE round-trip (AddRange + a single SaveChanges) — the hot-path write-cost fix for the agent tail loop, where one INSERT per line does not scale (and gets worse with faithful multi-block reasoning capture). The global BIGSERIAL <c>Sequence</c> is assigned by the DB in insertion order, so the batch preserves emission order. An empty batch is a no-op.</summary>
+    Task AppendEventsAsync(Guid runId, IReadOnlyList<AgentEvent> events, CancellationToken cancellationToken);
+
     /// <summary>Land a terminal result (the target state is <paramref name="result"/>'s Status); stores the result + CompletedAt. Throws when the transition is illegal or the result's status isn't terminal.</summary>
     Task CompleteAsync(Guid runId, AgentRunResult result, CancellationToken cancellationToken);
 
@@ -239,6 +242,43 @@ public sealed class AgentRunService : IAgentRunService, IScopedDependency
         await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
 
         return record;
+    }
+
+    public async Task AppendEventsAsync(Guid runId, IReadOnlyList<AgentEvent> events, CancellationToken cancellationToken)
+    {
+        if (events.Count == 0) return;
+
+        // ONE round-trip, ONE statement, with the per-run BIGSERIAL `sequence` assigned in STRICT emission order.
+        // EF's batched AddRange does NOT preserve insert order for same-type rows — it sorts the modification
+        // commands (by primary key, among other keys), and our PK is a random Guid, so the change tracker would
+        // scramble the order in which Postgres assigns the serial. The live log + replay cursor both read by
+        // `sequence`, so a scrambled serial = a scrambled stream. We pin the order in SQL instead: unnest the
+        // three parallel arrays WITH ORDINALITY and INSERT … SELECT … ORDER BY ord, so Postgres produces (and
+        // thus serial-stamps) the rows in array order. This holds because Postgres never parallelizes the writing
+        // side of a single INSERT … SELECT — the ModifyTable node consumes the sorted stream row-by-row and calls
+        // nextval() in that order; the ordering tests (single batch, cross-batch monotonicity, 300-row) guard it.
+        // The parameter count is FIXED at four regardless of batch size (one array per column, fully bound — never
+        // string-concatenated), so a 256-event flush is one bind, not 769 placeholders. `id` + `occurred_at` use
+        // their column defaults (gen_random_uuid() / NOW()); append-only INSERT — the immutability trigger
+        // (UPDATE/DELETE-only) is unaffected.
+        var kinds = new string[events.Count];
+        var texts = new string[events.Count];
+        var data = new string?[events.Count];
+
+        for (var i = 0; i < events.Count; i++)
+        {
+            kinds[i] = events[i].Kind.ToString();   // matches the entity's HasConversion<string>() (enum member name)
+            texts[i] = events[i].Text;
+            data[i] = events[i].Data?.GetRawText();
+        }
+
+        const string sql =
+            "INSERT INTO agent_run_event (agent_run_id, kind, text, data_json) " +
+            "SELECT {0}, e.kind, e.text, CAST(e.data AS jsonb) " +
+            "FROM unnest({1}::text[], {2}::text[], {3}::text[]) WITH ORDINALITY AS e(kind, text, data, ord) " +
+            "ORDER BY e.ord";
+
+        await _db.Database.ExecuteSqlRawAsync(sql, new object[] { runId, kinds, texts, data }, cancellationToken).ConfigureAwait(false);
     }
 
     public Task CompleteAsync(Guid runId, AgentRunResult result, CancellationToken cancellationToken) =>

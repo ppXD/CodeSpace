@@ -328,6 +328,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         }
 
         var events = new List<AgentEvent>();
+        var writer = new BufferedEventWriter(_runs, runId);   // same batched-append + flush-at-checkpoint path as the live tail
 
         async Task PersistLineAsync(string line)
         {
@@ -336,11 +337,14 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
 
             var redacted = Redact(normalized, redactor);
 
-            await _runs.AppendEventAsync(runId, redacted, cancellationToken).ConfigureAwait(false);
+            await writer.BufferAsync(redacted, cancellationToken).ConfigureAwait(false);
             events.Add(redacted);
         }
 
-        var sandbox = await durable.AttachAsync(handle, (line, _) => PersistLineAsync(line), cancellationToken, CheckpointHandleOffset(runId, handle)).ConfigureAwait(false);
+        var sandbox = await durable.AttachAsync(handle, (line, _) => PersistLineAsync(line), cancellationToken, CheckpointHandleOffset(runId, handle, writer)).ConfigureAwait(false);
+
+        // Final flush for the terminal-drain lines (no trailing checkpoint), as in the live path.
+        await writer.FlushAsync(cancellationToken).ConfigureAwait(false);
 
         return sandbox.Status == SandboxStatus.TimedOut
             ? new AgentRunResult { Status = AgentRunStatus.TimedOut, ExitReason = "timed-out", Error = "The agent run exceeded its time budget and was terminated." }
@@ -740,6 +744,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     private async Task<AgentRunResult> RunHarnessAsync(Guid runId, IAgentHarness harness, ISandboxRunner runner, SandboxSpec spec, string? mcpToken, SecretRedactor redactor, CancellationToken cancellationToken)
     {
         var events = new List<AgentEvent>();
+        var writer = new BufferedEventWriter(_runs, runId);   // batches the DB inserts; flushed at each spool checkpoint + once at the end
 
         async Task PersistLineAsync(string line)
         {
@@ -749,8 +754,8 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
             // Strip any secret the CLI echoed BEFORE the append-only log freezes it (the log can't be edited later).
             var redacted = Redact(normalized, redactor);
 
-            await _runs.AppendEventAsync(runId, redacted, cancellationToken).ConfigureAwait(false);
-            events.Add(redacted);
+            await writer.BufferAsync(redacted, cancellationToken).ConfigureAwait(false);   // buffered — one batched INSERT per spool checkpoint, not one per line
+            events.Add(redacted);   // in-memory, for the harness's result fold
         }
 
         // The heartbeat is owned by ExecuteAsync (it spans the whole run, including the completion tail), so
@@ -758,7 +763,12 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         // redactor's fingerprint is stamped onto the durable handle so a re-attach can prove it rebuilt the SAME
         // key before re-tailing the spool (a rotated/deleted key → marker-only, never an unmaskable leak). The MCP
         // token rides the handle too so a re-attach re-binds the SAME socket+token the agent's declaration carries.
-        var sandbox = await RunSandboxAsync(runId, runner, spec, PersistLineAsync, redactor.Fingerprint, mcpToken, cancellationToken).ConfigureAwait(false);
+        var sandbox = await RunSandboxAsync(runId, runner, spec, PersistLineAsync, writer, redactor.Fingerprint, mcpToken, cancellationToken).ConfigureAwait(false);
+
+        // Final flush: the durable runner's terminal-drain paths (CompleteFromSpool/Timeout/Vanished) deliver the last
+        // lines WITHOUT a trailing checkpoint, so anything buffered after the last checkpoint must be flushed here
+        // before the result is folded + the run completes. (A no-op when the buffer is already empty.)
+        await writer.FlushAsync(cancellationToken).ConfigureAwait(false);
 
         // Events are already redacted, so a result the harness folds from them (summary / error) is redacted too.
         return sandbox.Status == SandboxStatus.TimedOut
@@ -794,11 +804,12 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     /// otherwise the live-stream / batch path. Feature-detected via <c>runner is ISandboxDurableRunner</c>, so
     /// a runner that can't be durable transparently falls back to streaming.
     /// </summary>
-    private async Task<SandboxResult> RunSandboxAsync(Guid runId, ISandboxRunner runner, SandboxSpec spec, Func<string, Task> persistLine, string? keyFingerprint, string? mcpToken, CancellationToken cancellationToken)
+    private async Task<SandboxResult> RunSandboxAsync(Guid runId, ISandboxRunner runner, SandboxSpec spec, Func<string, Task> persistLine, BufferedEventWriter writer, string? keyFingerprint, string? mcpToken, CancellationToken cancellationToken)
     {
         if (runner is ISandboxDurableRunner durable)
-            return await RunDurableAsync(runId, durable, spec, persistLine, keyFingerprint, mcpToken, cancellationToken).ConfigureAwait(false);
+            return await RunDurableAsync(runId, durable, spec, persistLine, writer, keyFingerprint, mcpToken, cancellationToken).ConfigureAwait(false);
 
+        // Non-durable fallback (no spool/checkpoint): the writer's size cap + the caller's final flush drain it.
         return await RunAndStreamAsync(runner, spec, persistLine, cancellationToken).ConfigureAwait(false);
     }
 
@@ -808,7 +819,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     /// observer dies mid-tail. On a host-shutdown cancel the attach stops observing WITHOUT killing the
     /// process (leaving the run Running for re-attach/recovery); only the spec timeout terminates it.
     /// </summary>
-    private async Task<SandboxResult> RunDurableAsync(Guid runId, ISandboxDurableRunner durable, SandboxSpec spec, Func<string, Task> persistLine, string? keyFingerprint, string? mcpToken, CancellationToken cancellationToken)
+    private async Task<SandboxResult> RunDurableAsync(Guid runId, ISandboxDurableRunner durable, SandboxSpec spec, Func<string, Task> persistLine, BufferedEventWriter writer, string? keyFingerprint, string? mcpToken, CancellationToken cancellationToken)
     {
         // Stamp the injected-key fingerprint + the MCP run token onto the handle at launch. The fingerprint lets a
         // re-attach verify it rebuilt the same redactor before re-tailing (rotated/deleted credential → marker-only);
@@ -819,12 +830,62 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
 
         // Checkpoint the advancing spool offset onto the handle as we tail, so a backend restart mid-run can
         // re-attach (ReattachAsync) and resume from here instead of re-emitting the whole spool.
-        return await durable.AttachAsync(handle, (line, _) => persistLine(line), cancellationToken, CheckpointHandleOffset(runId, handle)).ConfigureAwait(false);
+        return await durable.AttachAsync(handle, (line, _) => persistLine(line), cancellationToken, CheckpointHandleOffset(runId, handle, writer)).ConfigureAwait(false);
     }
 
-    /// <summary>The onCheckpoint callback for <see cref="ISandboxDurableRunner.AttachAsync"/>: persist the advanced spool offset onto the run's handle (re-serialising the same handle with the new offset) so a re-attach resumes there. A pure UPDATE via <see cref="IAgentRunService.SetRunnerHandleAsync"/>, never blocking completion.</summary>
-    private Func<long, CancellationToken, Task> CheckpointHandleOffset(Guid runId, SandboxHandle handle) =>
-        (offset, ct) => _runs.SetRunnerHandleAsync(runId, JsonSerializer.Serialize(handle with { StdoutOffset = offset }, AgentJson.Options), ct);
+    /// <summary>
+    /// The onCheckpoint callback for <see cref="ISandboxDurableRunner.AttachAsync"/>: FLUSH the buffered events for the
+    /// poll's lines, THEN persist the advanced spool offset onto the handle. The flush-before-offset ordering is the
+    /// durability invariant — the persisted offset must never run ahead of flushed events, so a re-attach at worst
+    /// re-emits the last batch (never loses a line). A pure jsonb UPDATE for the offset; never blocks completion.
+    /// </summary>
+    private Func<long, CancellationToken, Task> CheckpointHandleOffset(Guid runId, SandboxHandle handle, BufferedEventWriter writer) =>
+        async (offset, ct) =>
+        {
+            await writer.FlushAsync(ct).ConfigureAwait(false);
+            await _runs.SetRunnerHandleAsync(runId, JsonSerializer.Serialize(handle with { StdoutOffset = offset }, AgentJson.Options), ct).ConfigureAwait(false);
+        };
+
+    /// <summary>
+    /// Buffers redacted agent events and flushes them as ONE batched insert (instead of one INSERT per stdout line —
+    /// the hot-path write-cost fix that also scales to faithful multi-block reasoning capture). Flushed by the spool
+    /// <see cref="CheckpointHandleOffset"/> callback BEFORE the offset advances (so the durable offset never runs ahead
+    /// of flushed events) and once more after the sandbox returns (the terminal drain has no trailing checkpoint). The
+    /// size cap bounds memory and gives the non-durable / checkpoint-less path a periodic flush. Single-threaded by
+    /// construction: the durable tail loop awaits each <c>onLine</c> then <c>onCheckpoint</c> sequentially, and the
+    /// final flush runs after the attach returns — so no buffer lock is needed.
+    /// </summary>
+    private sealed class BufferedEventWriter
+    {
+        private const int MaxBuffered = 256;   // memory cap; the per-poll checkpoint is the normal flush trigger
+
+        private readonly IAgentRunService _runs;
+        private readonly Guid _runId;
+        private readonly List<AgentEvent> _pending = new();
+
+        public BufferedEventWriter(IAgentRunService runs, Guid runId)
+        {
+            _runs = runs;
+            _runId = runId;
+        }
+
+        public async Task BufferAsync(AgentEvent @event, CancellationToken cancellationToken)
+        {
+            _pending.Add(@event);
+
+            if (_pending.Count >= MaxBuffered) await FlushAsync(cancellationToken).ConfigureAwait(false);
+        }
+
+        public async Task FlushAsync(CancellationToken cancellationToken)
+        {
+            if (_pending.Count == 0) return;
+
+            var batch = _pending.ToList();
+            _pending.Clear();
+
+            await _runs.AppendEventsAsync(_runId, batch, cancellationToken).ConfigureAwait(false);
+        }
+    }
 
     /// <summary>Stream the harness live when the runner supports it (events land as emitted); otherwise run batch and replay captured stdout through the same per-line path.</summary>
     private static async Task<SandboxResult> RunAndStreamAsync(ISandboxRunner runner, SandboxSpec spec, Func<string, Task> persistLine, CancellationToken cancellationToken)

@@ -112,6 +112,222 @@ public sealed class AgentRunReattachFlowTests : IDisposable
     }
 
     [Fact]
+    public async Task Crash_between_a_batch_flush_and_the_offset_persist_re_emits_exactly_the_uncheckpointed_batch()
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        // D1 bounded crash re-delivery (the documented "at worst re-emits the last batch, never loses a line"
+        // floor). A dead observer FLUSHES a batch (committing it) then crashes BEFORE persisting the advanced
+        // offset — exactly the gap the flush-before-offset ordering leaves open. On reattach the durable offset is
+        // still behind that batch, so the re-tail re-emits it. We pin: NO line lost, and the duplicate set is
+        // EXACTLY the un-checkpointed batch (not the whole prefix → unbounded growth, not zero → loss), each
+        // duplicate a NEW append (greater Sequence), never a rewrite.
+        var teamId = await SeedTeamAsync();
+        var runId = await CreateScriptedRunAsync(teamId);
+        using (var scope = _fixture.BeginScope())
+            await scope.Resolve<IAgentRunService>().MarkRunningAsync(runId, CancellationToken.None);
+
+        var spec = new SandboxSpec { Command = "/bin/sh", Args = new[] { "-c", "printf 'step1\\nstep2\\nstep3\\n'; sleep 3; printf 'step4\\nstep5\\nstep6\\n'" }, TimeoutSeconds = 60 };
+
+        var flushedTexts = new List<string>();   // whatever the first non-empty checkpoint flushed (the un-checkpointed batch)
+        using (var scope = _fixture.BeginScope())
+        {
+            var runner = (ISandboxDurableRunner)scope.Resolve<ISandboxRunnerRegistry>().Resolve(LocalProcessRunner.LocalKind);
+            var svc = scope.Resolve<IAgentRunService>();
+
+            var handle = await runner.LaunchAsync(spec, runId.ToString("N"), CancellationToken.None);
+            _pidsToKill.Add(handle.ProcessId);
+            _spoolDirs.Add(handle.SpoolDirectory);
+            await svc.SetRunnerHandleAsync(runId, JsonSerializer.Serialize(handle, AgentJson.Options), CancellationToken.None);   // StdoutOffset = 0
+
+            var buffered = new List<AgentEvent>();
+            await Should.ThrowAsync<CrashSimulation>(() => runner.AttachAsync(handle,
+                (line, _) => { buffered.Add(new AgentEvent { Kind = AgentEventKind.AssistantMessage, Text = line.Trim() }); return Task.CompletedTask; },
+                CancellationToken.None,
+                async (_, _) =>
+                {
+                    if (buffered.Count == 0) return;   // wait for a checkpoint that actually carries a batch
+
+                    flushedTexts = buffered.Select(e => e.Text).ToList();
+                    await svc.AppendEventsAsync(runId, buffered.ToList(), CancellationToken.None);   // the batch COMMITS
+                    buffered.Clear();
+                    throw new CrashSimulation();        // ... then crash BEFORE SetRunnerHandleAsync → the offset never advances
+                }));
+        }
+
+        flushedTexts.ShouldNotBeEmpty("the dead observer flushed at least one line before crashing");
+
+        using (var scope = _fixture.BeginScope())
+        {
+            var svc = scope.Resolve<IAgentRunService>();
+            (await svc.GetAsync(runId, CancellationToken.None)).Status.ShouldBe(AgentRunStatus.Running);
+            JsonSerializer.Deserialize<SandboxHandle>((await svc.GetAsync(runId, CancellationToken.None)).RunnerHandleJson!, AgentJson.Options)!.StdoutOffset
+                .ShouldBe(0, "the crash hit AFTER the flush committed but BEFORE the offset advanced");
+            (await svc.GetEventsAsync(runId, teamId, 0, CancellationToken.None)).Select(e => e.Text).ShouldBe(flushedTexts, "exactly the flushed batch is durable so far");
+        }
+
+        using (var scope = _fixture.BeginScope())
+            (await scope.Resolve<IAgentRunService>().ReclaimForReattachAsync(runId, CancellationToken.None)).ShouldBeTrue();
+
+        await ReattachAsync(runId, new ScriptedHarness());
+
+        using (var scope = _fixture.BeginScope())
+        {
+            var svc = scope.Resolve<IAgentRunService>();
+            (await svc.GetAsync(runId, CancellationToken.None)).Status.ShouldBe(AgentRunStatus.Succeeded, "the re-attached observer tailed the live process to completion");
+
+            var events = await svc.GetEventsAsync(runId, teamId, 0, CancellationToken.None);
+            var texts = events.Select(e => e.Text).ToList();
+            var allSteps = new[] { "step1", "step2", "step3", "step4", "step5", "step6" };
+
+            foreach (var s in allSteps) texts.ShouldContain(s, $"{s} is never lost");
+            texts.Count.ShouldBe(allSteps.Length + flushedTexts.Count, "exactly the un-checkpointed batch is re-emitted — nothing more (no whole-prefix re-emit), nothing less (no loss)");
+
+            foreach (var s in allSteps)
+                texts.Count(t => t == s).ShouldBe(flushedTexts.Contains(s) ? 2 : 1, $"{s} appears {(flushedTexts.Contains(s) ? "twice (flushed-then-re-emitted)" : "once")}");
+
+            foreach (var s in flushedTexts)
+            {
+                var seqs = events.Where(e => e.Text == s).Select(e => e.Sequence).OrderBy(x => x).ToList();
+                seqs[1].ShouldBeGreaterThan(seqs[0], $"the re-emitted {s} is a NEW append (greater Sequence), not a rewrite of the append-only log");
+            }
+        }
+    }
+
+    [Fact]
+    public async Task A_transient_flush_failure_that_commits_nothing_recovers_a_complete_gap_free_log_on_reattach()
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        // The RECOVERY half of the flush-before-offset contract: when a checkpoint flush FAILS before committing
+        // (a transient DB blip), nothing is persisted AND the offset never advanced — so reattach re-tails from 0
+        // and reconstructs the FULL log exactly once. A transient flush failure must cost AT MOST a re-emit of the
+        // un-checkpointed batch, never a permanent hole.
+        var teamId = await SeedTeamAsync();
+        var runId = await CreateScriptedRunAsync(teamId);
+        using (var scope = _fixture.BeginScope())
+            await scope.Resolve<IAgentRunService>().MarkRunningAsync(runId, CancellationToken.None);
+
+        var spec = new SandboxSpec { Command = "/bin/sh", Args = new[] { "-c", "printf 'step1\\nstep2\\nstep3\\n'; sleep 3; printf 'step4\\nstep5\\nstep6\\n'" }, TimeoutSeconds = 60 };
+
+        using (var scope = _fixture.BeginScope())
+        {
+            var runner = (ISandboxDurableRunner)scope.Resolve<ISandboxRunnerRegistry>().Resolve(LocalProcessRunner.LocalKind);
+            var svc = scope.Resolve<IAgentRunService>();
+
+            var handle = await runner.LaunchAsync(spec, runId.ToString("N"), CancellationToken.None);
+            _pidsToKill.Add(handle.ProcessId);
+            _spoolDirs.Add(handle.SpoolDirectory);
+            await svc.SetRunnerHandleAsync(runId, JsonSerializer.Serialize(handle, AgentJson.Options), CancellationToken.None);
+
+            var sawLine = false;
+            await Should.ThrowAsync<CrashSimulation>(() => runner.AttachAsync(handle,
+                (_, _) => { sawLine = true; return Task.CompletedTask; },
+                CancellationToken.None,
+                (_, _) => sawLine ? throw new CrashSimulation() : Task.CompletedTask));   // the flush throws BEFORE committing anything
+        }
+
+        using (var scope = _fixture.BeginScope())
+        {
+            var svc = scope.Resolve<IAgentRunService>();
+            (await svc.GetAsync(runId, CancellationToken.None)).Status.ShouldBe(AgentRunStatus.Running);
+            JsonSerializer.Deserialize<SandboxHandle>((await svc.GetAsync(runId, CancellationToken.None)).RunnerHandleJson!, AgentJson.Options)!.StdoutOffset.ShouldBe(0);
+            (await svc.GetEventsAsync(runId, teamId, 0, CancellationToken.None)).ShouldBeEmpty("the failed flush committed nothing");
+        }
+
+        using (var scope = _fixture.BeginScope())
+            (await scope.Resolve<IAgentRunService>().ReclaimForReattachAsync(runId, CancellationToken.None)).ShouldBeTrue();
+
+        await ReattachAsync(runId, new ScriptedHarness());
+
+        using (var scope = _fixture.BeginScope())
+        {
+            var svc = scope.Resolve<IAgentRunService>();
+            (await svc.GetAsync(runId, CancellationToken.None)).Status.ShouldBe(AgentRunStatus.Succeeded);
+
+            var events = await svc.GetEventsAsync(runId, teamId, 0, CancellationToken.None);
+            events.Select(e => e.Text).ShouldBe(new[] { "step1", "step2", "step3", "step4", "step5", "step6" }, "the full log is recovered exactly once — no gap, no duplicate");
+            events.Select(e => e.Sequence).SequenceEqual(events.Select(e => e.Sequence).OrderBy(s => s)).ShouldBeTrue("sequences strictly ascending");
+        }
+    }
+
+    [Fact]
+    public async Task Reattach_drains_exactly_the_post_offset_tail_via_the_final_flush_never_the_whole_spool_nor_zero()
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        // D1 terminal-drain final-flush floor. The terminal drain has NO trailing checkpoint, so the executor's
+        // FINAL FlushAsync (after AttachAsync returns) is the ONLY thing that persists the last batch. A regression
+        // that dropped the final flush would silently TRUNCATE the tail of EVERY run while it still completes
+        // Succeeded. We pre-stage a fully-emitted, exited spool with the dead observer's checkpoint at offset O
+        // (after step3): reattach must append EXACTLY [O,end) = step4..step6 — never the whole spool (a re-emit
+        // from 0), never zero (a dropped final flush).
+        var teamId = await SeedTeamAsync();
+        var runId = await CreateScriptedRunAsync(teamId);
+        using (var scope = _fixture.BeginScope())
+            await scope.Resolve<IAgentRunService>().MarkRunningAsync(runId, CancellationToken.None);
+
+        var spoolDir = NewSpoolDir();
+        const string prefix = "step1\nstep2\nstep3\n";
+        await File.WriteAllTextAsync(Path.Combine(spoolDir, "out.log"), prefix + "step4\nstep5\nstep6\n");
+        await File.WriteAllTextAsync(Path.Combine(spoolDir, "exit"), "0");
+
+        var handle = new SandboxHandle { Kind = "local", ProcessId = 2147480010, SpoolDirectory = spoolDir, Deadline = DateTimeOffset.UtcNow.AddMinutes(10), StdoutOffset = prefix.Length };
+        using (var scope = _fixture.BeginScope())
+            await scope.Resolve<IAgentRunService>().SetRunnerHandleAsync(runId, JsonSerializer.Serialize(handle, AgentJson.Options), CancellationToken.None);
+
+        using (var scope = _fixture.BeginScope())
+            (await scope.Resolve<IAgentRunService>().ReclaimForReattachAsync(runId, CancellationToken.None)).ShouldBeTrue();
+
+        await ReattachAsync(runId, new ScriptedHarness());
+
+        using (var scope = _fixture.BeginScope())
+        {
+            var svc = scope.Resolve<IAgentRunService>();
+            (await svc.GetAsync(runId, CancellationToken.None)).Status.ShouldBe(AgentRunStatus.Succeeded, "the exit marker said 0");
+
+            var events = await svc.GetEventsAsync(runId, teamId, 0, CancellationToken.None);
+            events.Select(e => e.Text).ShouldBe(new[] { "step4", "step5", "step6" }, "the terminal drain re-emitted EXACTLY [O,end) — the final flush captured the un-checkpointed tail, and the pre-offset prefix was NOT re-read");
+            events.Select(e => e.Sequence).SequenceEqual(events.Select(e => e.Sequence).OrderBy(s => s)).ShouldBeTrue("the drain batch's sequences are contiguous + ascending (one ordered flush)");
+        }
+    }
+
+    [Fact]
+    public async Task A_fully_checkpointed_reattach_is_a_log_no_op()
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        // D1 upper bound on re-delivery: a reattach whose persisted offset is ALREADY at the full spool length must
+        // re-read NOTHING — appending zero events while completing cleanly. Catches the stale-handle / resume-from-0
+        // bug that would balloon the log by the whole spool on every reattach.
+        var teamId = await SeedTeamAsync();
+        var runId = await CreateScriptedRunAsync(teamId);
+        using (var scope = _fixture.BeginScope())
+            await scope.Resolve<IAgentRunService>().MarkRunningAsync(runId, CancellationToken.None);
+
+        var spoolDir = NewSpoolDir();
+        const string allOutput = "line1\nline2\nline3\n";
+        await File.WriteAllTextAsync(Path.Combine(spoolDir, "out.log"), allOutput);
+        await File.WriteAllTextAsync(Path.Combine(spoolDir, "exit"), "0");
+
+        var handle = new SandboxHandle { Kind = "local", ProcessId = 2147480011, SpoolDirectory = spoolDir, Deadline = DateTimeOffset.UtcNow.AddMinutes(10), StdoutOffset = allOutput.Length };
+        using (var scope = _fixture.BeginScope())
+            await scope.Resolve<IAgentRunService>().SetRunnerHandleAsync(runId, JsonSerializer.Serialize(handle, AgentJson.Options), CancellationToken.None);
+
+        using (var scope = _fixture.BeginScope())
+            (await scope.Resolve<IAgentRunService>().ReclaimForReattachAsync(runId, CancellationToken.None)).ShouldBeTrue();
+
+        await ReattachAsync(runId, new ScriptedHarness());
+
+        using (var scope = _fixture.BeginScope())
+        {
+            var svc = scope.Resolve<IAgentRunService>();
+            (await svc.GetAsync(runId, CancellationToken.None)).Status.ShouldBe(AgentRunStatus.Succeeded);
+            (await svc.GetEventsAsync(runId, teamId, 0, CancellationToken.None)).ShouldBeEmpty("the offset was already at the spool end → the reattach re-read nothing (a log no-op)");
+        }
+    }
+
+    [Fact]
     public async Task Re_attach_redacts_an_echoed_model_key_in_the_resumed_tail()
     {
         if (OperatingSystem.IsWindows()) return;
@@ -298,6 +514,9 @@ public sealed class AgentRunReattachFlowTests : IDisposable
             Environment.SetEnvironmentVariable(AgentRunReconcilerService.LivenessWindowEnvVar, originalWindow);
         }
     }
+
+    /// <summary>Marks a deliberately-injected observer crash in a flush/checkpoint callback — distinct from any real failure so the test's Should.ThrowAsync can't be fooled.</summary>
+    private sealed class CrashSimulation : Exception { }
 
     // ── helpers ─────────────────────────────────────────────────────────────────────────────────────────
 
