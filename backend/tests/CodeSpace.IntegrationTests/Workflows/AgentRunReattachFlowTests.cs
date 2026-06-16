@@ -284,11 +284,22 @@ public sealed class AgentRunReattachFlowTests : IDisposable
         using (var scope = _fixture.BeginScope())
         {
             var svc = scope.Resolve<IAgentRunService>();
-            (await svc.GetAsync(runId, CancellationToken.None)).Status.ShouldBe(AgentRunStatus.Succeeded, "the exit marker said 0");
+            var run = await svc.GetAsync(runId, CancellationToken.None);
+            run.Status.ShouldBe(AgentRunStatus.Succeeded, "the exit marker said 0");
 
             var events = await svc.GetEventsAsync(runId, teamId, 0, CancellationToken.None);
             events.Select(e => e.Text).ShouldBe(new[] { "step4", "step5", "step6" }, "the terminal drain re-emitted EXACTLY [O,end) — the final flush captured the un-checkpointed tail, and the pre-offset prefix was NOT re-read");
             events.Select(e => e.Sequence).SequenceEqual(events.Select(e => e.Sequence).OrderBy(s => s)).ShouldBeTrue("the drain batch's sequences are contiguous + ascending (one ordered flush)");
+
+            // D3a: the reattach path captures its OWN transcript, scoped to the RESUMED tail [O,end). A small tail
+            // stays inline. It must carry exactly the post-offset lines (step4..step6) and NOT the pre-crash prefix
+            // (step1..step3) — that prefix lived in the dead observer's process and is never re-read into the tail.
+            var result = JsonSerializer.Deserialize<AgentRunResult>(run.ResultJson!, AgentJson.Options)!;
+            result.TranscriptArtifactId.ShouldBeNull("a tiny resumed-tail transcript stays inline");
+            var lines = result.Transcript.Split('\n');
+            lines.ShouldContain("step4");
+            lines.ShouldContain("step6");
+            result.Transcript.ShouldNotContain("step1", customMessage: "the reattach transcript is the resumed TAIL only — the pre-offset prefix is not in it (documented tail-only contract)");
         }
     }
 

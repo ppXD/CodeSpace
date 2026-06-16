@@ -6,6 +6,7 @@ using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Agents.Sandbox;
 using CodeSpace.Core.Services.Agents.Sandbox.Runners;
 using CodeSpace.Core.Services.Agents.Workspace;
+using CodeSpace.Core.Services.Workflows.Artifacts;
 using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.IntegrationTests.Workflows.Infrastructure;
 using CodeSpace.Messages.Agents;
@@ -549,6 +550,69 @@ public class AgentRunExecutorTests
 
         var result = JsonSerializer.Deserialize<AgentRunResult>(run.ResultJson!, AgentJson.Options)!;
         result.Patch.ShouldBeEmpty("no workspace → the capture step is a no-op and the patch stays empty");
+    }
+
+    [Fact]
+    public async Task Captures_the_faithful_transcript_including_a_line_ParseEvent_dropped()
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        // D3a faithfulness: the transcript is the RAW redacted stream, captured BEFORE the parse filter — not a
+        // re-render of the parsed events. The scripted harness's ParseEvent DROPS whitespace-only lines (returns
+        // null), so the middle line never becomes an event; it MUST still be in the transcript. This is the whole
+        // point of a separate transcript: "replay the exact session", including what the normalizer discarded.
+        var teamId = await SeedTeamAsync();
+        var runId = await CreateScriptedRunAsync(teamId);
+
+        await ExecuteAsync(runId, new ScriptedHarness("printf 'alpha\\n   \\nbeta\\n'"));
+
+        using var scope = _fixture.BeginScope();
+        var svc = scope.Resolve<IAgentRunService>();
+
+        var run = await svc.GetAsync(runId, CancellationToken.None);
+        run.Status.ShouldBe(AgentRunStatus.Succeeded);
+
+        // The parsed event log dropped the whitespace-only line — only the two real lines survive normalization.
+        (await svc.GetEventsAsync(runId, teamId, 0, CancellationToken.None)).Select(e => e.Text).ShouldBe(new[] { "alpha", "beta" });
+
+        // The transcript is faithful: a small one stays inline in result_jsonb and carries EVERY raw line IN ORDER —
+        // including the whitespace-only middle line ParseEvent dropped, sandwiched between alpha and beta.
+        var result = JsonSerializer.Deserialize<AgentRunResult>(run.ResultJson!, AgentJson.Options)!;
+        result.TranscriptArtifactId.ShouldBeNull("a tiny transcript stays inline");
+        var lines = result.Transcript.Split('\n');
+        lines[..3].ShouldBe(new[] { "alpha", "   ", "beta" }, "every raw line is in stream order — the dropped whitespace line is preserved between the two real ones, captured before the parse filter");
+    }
+
+    [Fact]
+    public async Task A_large_run_transcript_is_offloaded_to_an_artifact_and_recoverable_in_full()
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        // D3a high-perf: a real run's transcript can be large (a long agent session). It must NOT bloat the
+        // result_jsonb row read on every resume — it's offloaded to the content-addressed store, the result keeps
+        // only the ref, and the full raw stream round-trips on demand. Drives the REAL executor + spool path.
+        var teamId = await SeedTeamAsync();
+        var runId = await CreateScriptedRunAsync(teamId);
+
+        // ~18 KiB (500 × ~37 B) over the 8 KiB inline threshold; distinctive head/tail lines to prove full-fidelity recovery.
+        await ExecuteAsync(runId, new ScriptedHarness("for i in $(seq 1 500); do printf 'transcript line %04d padding-padding\\n' $i; done"));
+
+        using var scope = _fixture.BeginScope();
+        var svc = scope.Resolve<IAgentRunService>();
+
+        var run = await svc.GetAsync(runId, CancellationToken.None);
+        run.Status.ShouldBe(AgentRunStatus.Succeeded);
+
+        var result = JsonSerializer.Deserialize<AgentRunResult>(run.ResultJson!, AgentJson.Options)!;
+        result.Transcript.ShouldBe("", "the large transcript was moved out of result_jsonb");
+        result.TranscriptArtifactId.ShouldNotBeNull("the result keeps only a reference to the offloaded transcript");
+
+        var artifact = await scope.Resolve<IArtifactStore>().GetBytesAsync(teamId, result.TranscriptArtifactId!.Value, CancellationToken.None);
+        artifact.ShouldNotBeNull();
+        var recovered = System.Text.Encoding.UTF8.GetString(artifact!.Bytes);
+        recovered.ShouldContain("transcript line 0001 padding-padding", customMessage: "the first raw line round-trips from the store");
+        recovered.ShouldContain("transcript line 0500 padding-padding", customMessage: "the last raw line round-trips — the whole session is durable, not a head-truncated sample");
+        artifact.ContentType.ShouldBe("text/plain");
     }
 
     private async Task<Guid> CreateRepoRunAsync(Guid teamId, Guid repositoryId)

@@ -328,10 +328,13 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         }
 
         var events = new List<AgentEvent>();
+        var transcript = new System.Text.StringBuilder();   // D3: the faithful raw stream of the RESUMED tail (the pre-crash prefix lived in the dead observer's run)
         var writer = new BufferedEventWriter(_runs, runId);   // same batched-append + flush-at-checkpoint path as the live tail
 
         async Task PersistLineAsync(string line)
         {
+            transcript.AppendLine(redactor.Redact(line));
+
             var normalized = harness.ParseEvent(line);
             if (normalized is null) return;
 
@@ -346,9 +349,11 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         // Final flush for the terminal-drain lines (no trailing checkpoint), as in the live path.
         await writer.FlushAsync(cancellationToken).ConfigureAwait(false);
 
-        return sandbox.Status == SandboxStatus.TimedOut
+        var result = sandbox.Status == SandboxStatus.TimedOut
             ? new AgentRunResult { Status = AgentRunStatus.TimedOut, ExitReason = "timed-out", Error = "The agent run exceeded its time budget and was terminated." }
             : harness.BuildResult(events, sandbox.ExitCode);
+
+        return result with { Transcript = transcript.ToString() };
     }
 
     /// <summary>Fallback when the credential can't be re-resolved to redact a re-attached tail: complete from the exit marker WITHOUT re-tailing (so no unredacted line reaches the log) — Succeeded/Failed by the code if it's present, Failed if the process is gone, or null (leave Running for a later sweep) if it's still alive and we can't safely observe it.</summary>
@@ -744,10 +749,16 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     private async Task<AgentRunResult> RunHarnessAsync(Guid runId, IAgentHarness harness, ISandboxRunner runner, SandboxSpec spec, string? mcpToken, SecretRedactor redactor, CancellationToken cancellationToken)
     {
         var events = new List<AgentEvent>();
+        var transcript = new System.Text.StringBuilder();   // D3: the FAITHFUL raw stream — every redacted line, incl. ones ParseEvent drops
         var writer = new BufferedEventWriter(_runs, runId);   // batches the DB inserts; flushed at each spool checkpoint + once at the end
 
         async Task PersistLineAsync(string line)
         {
+            // Capture the faithful transcript FIRST — redact the raw line, then keep it whether or not ParseEvent
+            // surfaces an event. ParseEvent drops blank/unrecognized lines; the transcript keeps them so a replay is
+            // exact. Redacted before it's held, so no secret reaches the offloaded artifact.
+            transcript.AppendLine(redactor.Redact(line));
+
             var normalized = harness.ParseEvent(line);
             if (normalized is null) return;
 
@@ -771,9 +782,12 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         await writer.FlushAsync(cancellationToken).ConfigureAwait(false);
 
         // Events are already redacted, so a result the harness folds from them (summary / error) is redacted too.
-        return sandbox.Status == SandboxStatus.TimedOut
+        var result = sandbox.Status == SandboxStatus.TimedOut
             ? new AgentRunResult { Status = AgentRunStatus.TimedOut, ExitReason = "timed-out", Error = "The agent run exceeded its time budget and was terminated." }
             : harness.BuildResult(events, sandbox.ExitCode);
+
+        // D3: attach the faithful raw transcript (offloaded to an artifact at completion if large — the common case).
+        return result with { Transcript = transcript.ToString() };
     }
 
     /// <summary>Redact any echoed secret out of a normalized event — its text AND its structured payload — before it reaches the append-only log. No-op when the run has no secret.</summary>

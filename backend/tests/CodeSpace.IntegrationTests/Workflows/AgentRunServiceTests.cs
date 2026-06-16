@@ -648,6 +648,78 @@ public class AgentRunServiceTests
     }
 
     [Fact]
+    public async Task Completing_with_a_large_transcript_offloads_it_to_an_artifact_and_keeps_only_the_ref()
+    {
+        // D3a: the faithful raw transcript must NOT bloat result_jsonb — it's offloaded to the content-addressed
+        // artifact store (team-scoped) and the result keeps only TranscriptArtifactId. The full transcript
+        // round-trips from the store, byte-for-byte — the durable "replay the exact session" record.
+        var teamId = await SeedTeamAsync();
+
+        Guid runId;
+        using (var scope = _fixture.BeginScope())
+        {
+            var svc = scope.Resolve<IAgentRunService>();
+            runId = (await svc.CreateAsync(BuildTask(), teamId, null, null, CancellationToken.None)).Id;
+            await svc.MarkRunningAsync(runId, CancellationToken.None);
+        }
+
+        // ~50 KiB transcript — comfortably over the 8 KiB inline threshold. Distinctive content for fidelity.
+        var bigTranscript = string.Concat(Enumerable.Range(0, 1000).Select(i => $"[raw] harness stream line {i:D4}\n"));
+        bigTranscript.Length.ShouldBeGreaterThan(ArtifactStoreConfig.DefaultInlineThresholdBytes, "the transcript must exceed the inline threshold to exercise offload");
+
+        using (var scope = _fixture.BeginScope())
+            await scope.Resolve<IAgentRunService>().CompleteAsync(runId,
+                new AgentRunResult { Status = AgentRunStatus.Succeeded, ExitReason = "completed", Transcript = bigTranscript },
+                CancellationToken.None);
+
+        using (var scope = _fixture.BeginScope())
+        {
+            var run = await scope.Resolve<IAgentRunService>().GetAsync(runId, CancellationToken.None);
+            var stored = JsonSerializer.Deserialize<AgentRunResult>(run.ResultJson!, AgentJson.Options)!;
+
+            stored.Transcript.ShouldBe("", "the large transcript was moved out of result_jsonb");
+            stored.TranscriptArtifactId.ShouldNotBeNull("the result keeps a reference to the offloaded transcript");
+            run.ResultJson!.Length.ShouldBeLessThan(bigTranscript.Length, "result_jsonb no longer carries the full transcript");
+
+            var artifact = await scope.Resolve<IArtifactStore>().GetBytesAsync(teamId, stored.TranscriptArtifactId!.Value, CancellationToken.None);
+            artifact.ShouldNotBeNull();
+            System.Text.Encoding.UTF8.GetString(artifact!.Bytes).ShouldBe(bigTranscript, "the offloaded transcript is recoverable in full");
+            artifact.ContentType.ShouldBe("text/plain");
+        }
+    }
+
+    [Fact]
+    public async Task Completing_with_a_small_transcript_keeps_it_inline_with_no_artifact()
+    {
+        // A small transcript stays inline in result_jsonb (no offload, no artifact ref).
+        var teamId = await SeedTeamAsync();
+
+        Guid runId;
+        using (var scope = _fixture.BeginScope())
+        {
+            var svc = scope.Resolve<IAgentRunService>();
+            runId = (await svc.CreateAsync(BuildTask(), teamId, null, null, CancellationToken.None)).Id;
+            await svc.MarkRunningAsync(runId, CancellationToken.None);
+        }
+
+        const string smallTranscript = "[raw] started\n[raw] done\n";
+
+        using (var scope = _fixture.BeginScope())
+            await scope.Resolve<IAgentRunService>().CompleteAsync(runId,
+                new AgentRunResult { Status = AgentRunStatus.Succeeded, ExitReason = "completed", Transcript = smallTranscript },
+                CancellationToken.None);
+
+        using (var scope = _fixture.BeginScope())
+        {
+            var run = await scope.Resolve<IAgentRunService>().GetAsync(runId, CancellationToken.None);
+            var stored = JsonSerializer.Deserialize<AgentRunResult>(run.ResultJson!, AgentJson.Options)!;
+
+            stored.Transcript.ShouldBe(smallTranscript, "a small transcript stays inline");
+            stored.TranscriptArtifactId.ShouldBeNull("no artifact is created for an inline transcript");
+        }
+    }
+
+    [Fact]
     public async Task Reading_events_for_another_teams_run_returns_empty()
     {
         // The events read is team-scoped: a foreign run id leaks neither events nor the run's existence.
