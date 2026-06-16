@@ -371,6 +371,90 @@ public class AgentCodeNodeTests
             .ShouldBeNull("no pushBranch config → null = defer to the deployment-wide flag (no behaviour change)");
     }
 
+    // ── mode (the model-authored intent) → base permissions + push, composing under the existing precedence ─────
+
+    [Theory]
+    // research → analysis-only base: ReadOnly write scope, network off, and no produced branch (push false).
+    [InlineData("research", AgentNetworkAccess.Off, AgentWriteScope.ReadOnly, false)]
+    // code → the tier-derived base (Standard = workspace write, no network) AND publishes its own branch (push true).
+    [InlineData("code", AgentNetworkAccess.Off, AgentWriteScope.Workspace, true)]
+    public async Task Mode_authors_the_base_permissions_and_push(string mode, AgentNetworkAccess network, AgentWriteScope writeScope, bool push)
+    {
+        var config = new Dictionary<string, JsonElement> { ["goal"] = Str("g"), ["harness"] = Str("codex-cli"), ["mode"] = Str(mode) };
+
+        var result = await new AgentCodeNode().RunAsync(BuildContext(config, resume: null), CancellationToken.None);
+
+        var task = JsonSerializer.Deserialize<AgentTask>(result.SuspendUntil!.Payload, AgentJson.Options)!;
+        task.Permissions.Network.ShouldBe(network);
+        task.Permissions.WriteScope.ShouldBe(writeScope);
+        task.PushProducedBranch.ShouldBe(push);
+    }
+
+    [Fact]
+    public async Task Mode_code_does_not_override_a_low_autonomy_tier_so_the_ceiling_clamp_still_bounds_it()
+    {
+        // mode=code is a BASE — it derives the tier's write posture, it never RAISES the tier. A Confined ceiling
+        // (the clamp at the launch choke point) therefore still caps the agent to ReadOnly even when the model
+        // authored mode=code. This is what makes mode clamp-safe.
+        var config = new Dictionary<string, JsonElement> { ["goal"] = Str("g"), ["harness"] = Str("codex-cli"), ["mode"] = Str("code"), ["autonomyLevel"] = Str("Confined") };
+
+        var result = await new AgentCodeNode().RunAsync(BuildContext(config, resume: null), CancellationToken.None);
+
+        var task = JsonSerializer.Deserialize<AgentTask>(result.SuspendUntil!.Payload, AgentJson.Options)!;
+        task.Permissions.WriteScope.ShouldBe(AgentWriteScope.ReadOnly, "mode=code derives the Confined tier's read-only posture — it never lifts the autonomy ceiling");
+    }
+
+    [Fact]
+    public async Task Explicit_read_only_override_wins_over_mode_code()
+    {
+        // The explicit per-field override is the HIGHEST precedence layer — it must override the mode=code base.
+        var config = new Dictionary<string, JsonElement> { ["goal"] = Str("g"), ["harness"] = Str("codex-cli"), ["mode"] = Str("code"), ["readOnly"] = Bool(true) };
+
+        var result = await new AgentCodeNode().RunAsync(BuildContext(config, resume: null), CancellationToken.None);
+
+        JsonSerializer.Deserialize<AgentTask>(result.SuspendUntil!.Payload, AgentJson.Options)!.Permissions.WriteScope
+            .ShouldBe(AgentWriteScope.ReadOnly, "an explicit readOnly override is the top precedence layer — it wins over the mode base");
+    }
+
+    [Fact]
+    public async Task Explicit_push_branch_override_wins_over_mode_research()
+    {
+        // mode=research's base is push=false, but an explicit pushBranch=true is the higher precedence layer.
+        var config = new Dictionary<string, JsonElement> { ["goal"] = Str("g"), ["harness"] = Str("codex-cli"), ["mode"] = Str("research"), ["pushBranch"] = Bool(true) };
+
+        var result = await new AgentCodeNode().RunAsync(BuildContext(config, resume: null), CancellationToken.None);
+
+        JsonSerializer.Deserialize<AgentTask>(result.SuspendUntil!.Payload, AgentJson.Options)!.PushProducedBranch
+            .ShouldBe(true, "an explicit pushBranch override wins over the mode=research base");
+    }
+
+    [Fact]
+    public async Task Absent_mode_is_byte_identical_to_today_deferring_to_the_tier_and_the_push_flag()
+    {
+        // Regression pin: a node with no mode resolves EXACTLY as before this knob existed — Standard tier base
+        // (Workspace write, no network) and null push (defer to the deployment flag).
+        var result = await new AgentCodeNode().RunAsync(BuildContext(RequiredConfig(), resume: null), CancellationToken.None);
+
+        var task = JsonSerializer.Deserialize<AgentTask>(result.SuspendUntil!.Payload, AgentJson.Options)!;
+        task.Permissions.ShouldBe(new AgentPermissions(), "no mode → the tier-derived baseline, byte-identical to before the mode knob existed");
+        task.PushProducedBranch.ShouldBeNull("no mode and no explicit pushBranch → null = defer to the deployment-wide flag");
+    }
+
+    [Fact]
+    public async Task Unrecognized_mode_degrades_to_unset_and_never_throws()
+    {
+        // An unknown mode value (the responseSchema enum is the hard bound; the prompt is soft) degrades to the
+        // safe Unset default — today's behaviour — rather than failing the node, mirroring ReadAutonomyLevel.
+        var config = new Dictionary<string, JsonElement> { ["goal"] = Str("g"), ["harness"] = Str("codex-cli"), ["mode"] = Str("bogus") };
+
+        var result = await new AgentCodeNode().RunAsync(BuildContext(config, resume: null), CancellationToken.None);
+
+        result.Status.ShouldBe(NodeStatus.Suspended, "an unknown mode degrades to Unset (today's behaviour), never throws");
+        var task = JsonSerializer.Deserialize<AgentTask>(result.SuspendUntil!.Payload, AgentJson.Options)!;
+        task.Permissions.ShouldBe(new AgentPermissions());
+        task.PushProducedBranch.ShouldBeNull();
+    }
+
     private static JsonElement Str(string s) => JsonSerializer.SerializeToElement(s);
     private static JsonElement Num(int n) => JsonSerializer.SerializeToElement(n);
     private static JsonElement Bool(bool b) => JsonSerializer.SerializeToElement(b);

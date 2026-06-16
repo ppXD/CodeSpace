@@ -244,6 +244,15 @@ public sealed class PostgresFixture : IAsyncLifetime
             .As<CodeSpace.Core.Services.Workflows.Llm.IStructuredLLMClient>()
             .SingleInstance();
 
+        // Deterministic SPEC-planner structured fake for the plan-map-dynamic flow (PR-B): under its OWN provider
+        // tag (DeterministicSpecPlannerLlmClient.ProviderTag = "TestSpecPlanner"), so it sits alongside the string
+        // planner fake + the real client with no duplicate-provider collision. It emits an OBJECT-ARRAY
+        // { subtasks: [{ name, goal, mode }] } — the model-authored per-agent spec the dynamic body fans out over.
+        builder.RegisterType<Workflows.Infrastructure.DeterministicSpecPlannerLlmClient>()
+            .As<CodeSpace.Core.Services.Workflows.Llm.ILLMClient>()
+            .As<CodeSpace.Core.Services.Workflows.Llm.IStructuredLLMClient>()
+            .SingleInstance();
+
         // Planner-shaped structured fake for the task-first planner E2E (PR-D Slice 1). Under its OWN provider
         // tag, so the projected graph's llm.complete body + synthesizer nodes (which hold the ROOT registry)
         // can resolve it once the test retargets their provider — letting the planned flow fan out + synthesize

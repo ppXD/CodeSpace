@@ -57,7 +57,8 @@ public sealed class AgentCodeNode : INodeRuntime
                 "autonomyLevel":  { "type": "string", "enum": ["Confined", "Standard", "Trusted", "Unleashed"], "description": "How much the agent may do — one dial that sets write scope + network. Confined: read-only, no network · Standard (default): workspace write, no network · Trusted: + network · Unleashed: highest, admin/controlled runners. The network/readOnly fields below are advanced per-field overrides of this tier." },
                 "network":        { "type": "boolean", "description": "Advanced override of the tier's network posture. Leave unset to inherit the autonomy level." },
                 "readOnly":       { "type": "boolean", "description": "Advanced override: force analysis-only (no writes), regardless of the autonomy level. Leave unset to inherit the tier." },
-                "pushBranch":     { "type": "boolean", "description": "Per-run opt-in: publish the agent's diff as its own branch (codespace/agent/<runId>) even when the deployment-wide push flag is off — the knob a one-agent-one-branch fan-out sets so each agent's work lands on its own branch. Leave unset to defer to the deployment flag." }
+                "pushBranch":     { "type": "boolean", "description": "Per-run opt-in: publish the agent's diff as its own branch (codespace/agent/<runId>) even when the deployment-wide push flag is off — the knob a one-agent-one-branch fan-out sets so each agent's work lands on its own branch. Leave unset to defer to the deployment flag." },
+                "mode":           { "type": "string", "enum": ["research", "code"], "description": "The model-authored intent of this run — the BASE the planner picks per fan-out subtask. research: analysis-only (read-only, no network, no produced branch); code: edits the codebase (workspace write, publishes its own branch). The autonomyLevel tier + the network/readOnly/pushBranch overrides still layer ON TOP, so the autonomy ceiling clamp always bounds it. Leave unset for today's tier-derived behaviour." }
               },
               "required": ["harness"]
             }
@@ -104,6 +105,7 @@ public sealed class AgentCodeNode : INodeRuntime
         if (!TryReadRepositoryId(context, out var repositoryId)) return Fail("Input 'repositoryId' must be a repository id (uuid).");
 
         var autonomy = ReadAutonomyLevel(context.Config);
+        var mode = ReadMode(context.Config);
 
         var task = new AgentTask
         {
@@ -117,9 +119,9 @@ public sealed class AgentCodeNode : INodeRuntime
             RunnerKind = ReadOptionalString(context.Config, "runnerKind"),
             TimeoutSeconds = ReadInt(context.Config, "timeoutSeconds") ?? 1800,
             Autonomy = autonomy,
-            Permissions = ResolvePermissions(context.Config, autonomy),
+            Permissions = ResolvePermissions(context.Config, autonomy, mode),
             ApprovalConversationId = ReadOptionalGuid(context.Config, "approvalConversationId"),
-            PushProducedBranch = ReadOptionalBool(context.Config, "pushBranch"),
+            PushProducedBranch = ResolvePushBranch(context.Config, mode),
         };
 
         return Task.FromResult(NodeResult.Suspend(new SuspensionToken
@@ -218,14 +220,24 @@ public sealed class AgentCodeNode : INodeRuntime
     private static AgentAutonomyLevel ReadAutonomyLevel(IReadOnlyDictionary<string, JsonElement> bag) =>
         Enum.TryParse<AgentAutonomyLevel>(ReadString(bag, "autonomyLevel"), ignoreCase: true, out var level) ? level : AgentAutonomyLevel.Standard;
 
+    /// <summary>Reads the model-authored <c>mode</c> (case-insensitive); absent / unrecognized → <see cref="AgentMode.Unset"/> (today's behaviour, never a throw — mirrors <see cref="ReadAutonomyLevel"/>).</summary>
+    private static AgentMode ReadMode(IReadOnlyDictionary<string, JsonElement> bag) =>
+        Enum.TryParse<AgentMode>(ReadString(bag, "mode"), ignoreCase: true, out var mode) ? mode : AgentMode.Unset;
+
     /// <summary>
-    /// Derives permissions from the tier, then layers explicit per-field overrides on top (like allow-rules over a
-    /// mode) — an override applies ONLY when the field is explicitly present, so a tier-only config inherits cleanly
-    /// and a legacy network/readOnly config keeps its exact prior meaning.
+    /// Resolves permissions over THREE layers, low→high: the mode BASE (the model's intent), the autonomy TIER, then
+    /// explicit per-field overrides. <see cref="AgentMode.Research"/> is the most restrictive base (ReadOnly + no
+    /// network — always safe); <see cref="AgentMode.Code"/> / <see cref="AgentMode.Unset"/> use the tier-derived
+    /// baseline (byte-identical to before this knob existed). An override applies ONLY when the field is explicitly
+    /// present, so a tier-only config inherits cleanly and a legacy network/readOnly config keeps its prior meaning.
+    /// Clamp-safe: Code's base is still <see cref="AgentAutonomyPolicy.Derive"/> of the (already-clamped) tier, so a
+    /// Standard/Confined ceiling still caps the write scope — mode never raises the tier or turns network on by itself.
     /// </summary>
-    private static AgentPermissions ResolvePermissions(IReadOnlyDictionary<string, JsonElement> bag, AgentAutonomyLevel autonomy)
+    private static AgentPermissions ResolvePermissions(IReadOnlyDictionary<string, JsonElement> bag, AgentAutonomyLevel autonomy, AgentMode mode)
     {
-        var permissions = AgentAutonomyPolicy.Derive(autonomy);
+        var permissions = mode == AgentMode.Research
+            ? new AgentPermissions { Network = AgentNetworkAccess.Off, WriteScope = AgentWriteScope.ReadOnly }
+            : AgentAutonomyPolicy.Derive(autonomy);
 
         if (ReadOptionalBool(bag, "network") is { } network)
             permissions = permissions with { Network = network ? AgentNetworkAccess.On : AgentNetworkAccess.Off };
@@ -235,6 +247,15 @@ public sealed class AgentCodeNode : INodeRuntime
 
         return permissions;
     }
+
+    /// <summary>
+    /// Resolves the per-run push opt-in over the mode base: an explicit <c>pushBranch</c> always wins; else
+    /// <see cref="AgentMode.Code"/> → true (the branch a coding agent produces), <see cref="AgentMode.Research"/> →
+    /// false (analysis produces no branch), <see cref="AgentMode.Unset"/> → null (defer to the deployment flag —
+    /// byte-identical to before this knob existed). Mirrors the precedence shape of <see cref="ResolvePermissions"/>.
+    /// </summary>
+    private static bool? ResolvePushBranch(IReadOnlyDictionary<string, JsonElement> bag, AgentMode mode) =>
+        ReadOptionalBool(bag, "pushBranch") ?? mode switch { AgentMode.Code => true, AgentMode.Research => false, _ => (bool?)null };
 
     /// <summary>A tri-state bool read: present-true / present-false / absent (null) — so an override only fires when explicitly set.</summary>
     private static bool? ReadOptionalBool(IReadOnlyDictionary<string, JsonElement> bag, string key) =>
@@ -256,4 +277,23 @@ public sealed class AgentCodeNode : INodeRuntime
     {
         if (payload.ValueKind == JsonValueKind.Object && payload.TryGetProperty(key, out var v)) outputs[key] = v.Clone();
     }
+}
+
+/// <summary>
+/// The model-authored INTENT of an agent run — a BOUNDED vocabulary the planner picks per fan-out subtask, mapped
+/// to a permission/push BASE by <see cref="AgentCodeNode"/>. It is NODE-PRIVATE: it never reaches the
+/// <see cref="AgentTask"/> envelope — the node resolves it into concrete <c>Permissions</c> + <c>PushProducedBranch</c>
+/// at suspend time, so the agent layer's wire contract is unchanged. Unrecognized / absent → <see cref="Unset"/>,
+/// which is today's tier-derived behaviour (never a throw).
+/// </summary>
+internal enum AgentMode
+{
+    /// <summary>Analysis-only: read-only, no network, no produced branch — the most restrictive base, always safe.</summary>
+    Research,
+
+    /// <summary>Edits the codebase: workspace write (the tier-derived posture) and publishes its own branch.</summary>
+    Code,
+
+    /// <summary>No mode authored — the tier-derived baseline + defer-to-the-flag push (byte-identical to before this knob existed).</summary>
+    Unset,
 }

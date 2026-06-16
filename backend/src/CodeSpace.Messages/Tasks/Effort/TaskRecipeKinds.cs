@@ -15,6 +15,9 @@ public static class TaskRecipeKinds
     /// <summary>RESERVED: a planner fans the task out over a <c>flow.map</c> then a synthesizer reduces. No recipe yet.</summary>
     public const string MapFanout = "map-fanout";
 
+    /// <summary>Like <see cref="MapFanout"/>, but the planner authors a per-subtask <c>mode</c> the body maps to permissions. Opt-in only — serves no effort tier, reached by an explicit RequestedRecipe.</summary>
+    public const string MapFanoutDynamic = "map-fanout-dynamic";
+
     /// <summary>RESERVED: a continuous durable supervisor lane. No recipe yet.</summary>
     public const string Supervisor = "supervisor";
 
