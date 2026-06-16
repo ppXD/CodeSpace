@@ -11,8 +11,9 @@ namespace CodeSpace.Core.Services.Supervisor.Executors;
 /// agent results by id + fold them into one synthesis outcome. Each merged entry now carries the FULL
 /// <see cref="AgentRunResult"/> work products — <c>summary</c> AND <c>changedFiles</c> / <c>producedBranch</c> /
 /// <c>patch</c> / <c>error</c> — so the synthesis no longer discards what each agent actually produced (the
-/// branch + diff a downstream PR-open step consumes). The patch is already length-capped by the executor's
-/// <c>TruncatePatch</c>, so it passes through as-is. The decision self-advances after recording (SYNCHRONOUS).
+/// branch + diff a downstream PR-open step consumes). A large diff that was offloaded to the artifact store
+/// (D2: PatchArtifactId set, inline Patch empty) is RESOLVED back here, so the merge never silently loses a
+/// big agent's work product. The decision self-advances after recording (now ASYNC — it resolves artifacts).
 ///
 /// <para>DEFERRED (not this slice): (1) folding the per-branch patches into ONE branch via a real git
 /// rebase / conflict-resolve — today each agent's branch + diff is carried side-by-side, not merged on disk;
@@ -21,13 +22,13 @@ namespace CodeSpace.Core.Services.Supervisor.Executors;
 /// </summary>
 public sealed partial class RealSupervisorActionExecutor
 {
-    private SupervisorExecution ExecuteMerge(SupervisorDecision decision, SupervisorTurnContext context)
+    private async Task<SupervisorExecution> ExecuteMergeAsync(SupervisorDecision decision, SupervisorTurnContext context, CancellationToken cancellationToken)
     {
         var merge = Deserialize<SupervisorMergePayload>(decision.PayloadJson) ?? new SupervisorMergePayload();
 
         var agentRunIds = ResolveAgentRunIdsToMerge(context);
 
-        var results = ReadAgentResults(agentRunIds, context.TeamId);
+        var results = await ReadAgentResultsAsync(agentRunIds, context.TeamId, cancellationToken).ConfigureAwait(false);
 
         var outcome = JsonSerializer.Serialize(new
         {
@@ -49,29 +50,34 @@ public sealed partial class RealSupervisorActionExecutor
             .ToList();
 
     /// <summary>Load each agent run's FULL terminal result by id, TEAM-SCOPED (defense-in-depth — the ids are this run's own recorded spawns, but a cross-team id never resolves) — every merged entry projects the complete work products the synthesis records. A missing / non-terminal run contributes its status, not a crash.</summary>
-    private IReadOnlyList<object> ReadAgentResults(IReadOnlyList<Guid> agentRunIds, Guid teamId)
+    private async Task<IReadOnlyList<object>> ReadAgentResultsAsync(IReadOnlyList<Guid> agentRunIds, Guid teamId, CancellationToken cancellationToken)
     {
         if (agentRunIds.Count == 0) return Array.Empty<object>();
 
-        var runs = _db.AgentRun.AsNoTracking()
+        var runs = await _db.AgentRun.AsNoTracking()
             .Where(r => agentRunIds.Contains(r.Id) && r.TeamId == teamId)
             .Select(r => new { r.Id, r.Status, r.ResultJson })
-            .ToList();
+            .ToListAsync(cancellationToken)
+            .ConfigureAwait(false);
 
         // Preserve the spawn order (the query may return rows in any order).
         var byId = runs.ToDictionary(r => r.Id);
 
-        return agentRunIds
-            .Where(byId.ContainsKey)
-            .Select(id => byId[id])
-            .Select(r => ProjectContribution(r.Id, r.Status, r.ResultJson))
-            .ToList();
+        var ordered = agentRunIds.Where(byId.ContainsKey).Select(id => byId[id]).ToList();
+
+        var contributions = new List<object>(ordered.Count);
+        foreach (var r in ordered)
+            contributions.Add(await ProjectContributionAsync(r.Id, r.Status, r.ResultJson, teamId, cancellationToken).ConfigureAwait(false));
+
+        return contributions;
     }
 
-    /// <summary>Project ONE agent run's full contribution into the merge outcome — the real work products (summary + changedFiles + producedBranch + patch + error), not just the summary. A missing / unparseable result still contributes its status. The shape round-trips through <c>AgentJson.Options</c>.</summary>
-    private static object ProjectContribution(Guid agentRunId, Messages.Enums.AgentRunStatus status, string? resultJson)
+    /// <summary>Project ONE agent run's full contribution into the merge outcome — the real work products (summary + changedFiles + producedBranch + patch + error), not just the summary. When the diff was offloaded (D2: PatchArtifactId set, Patch empty), the full diff is RESOLVED back from the artifact store so the merge synthesis never silently loses a large agent's work product. A missing / unparseable result still contributes its status. The shape round-trips through <c>AgentJson.Options</c>.</summary>
+    private async Task<object> ProjectContributionAsync(Guid agentRunId, Messages.Enums.AgentRunStatus status, string? resultJson, Guid teamId, CancellationToken cancellationToken)
     {
         var result = string.IsNullOrWhiteSpace(resultJson) ? null : Deserialize<AgentRunResult>(resultJson);
+
+        var patch = await ResolvePatchAsync(result, teamId, cancellationToken).ConfigureAwait(false);
 
         return new
         {
@@ -80,8 +86,21 @@ public sealed partial class RealSupervisorActionExecutor
             summary = result?.Summary,
             changedFiles = result?.ChangedFiles ?? Array.Empty<string>(),
             producedBranch = result?.ProducedBranch,
-            patch = result?.Patch ?? "",
+            patch,
+            patchArtifactId = result?.PatchArtifactId,
             error = result?.Error,
         };
+    }
+
+    /// <summary>The inline patch when present; otherwise the full diff resolved from the artifact store via the D2 PatchArtifactId ref (so an offloaded large diff is folded into the merge, not lost). Empty when there's neither.</summary>
+    private async Task<string> ResolvePatchAsync(AgentRunResult? result, Guid teamId, CancellationToken cancellationToken)
+    {
+        if (result == null) return "";
+        if (!string.IsNullOrEmpty(result.Patch)) return result.Patch;
+        if (result.PatchArtifactId is not { } artifactId) return "";
+
+        var bytes = await _artifacts.GetBytesAsync(teamId, artifactId, cancellationToken).ConfigureAwait(false);
+
+        return bytes == null ? "" : System.Text.Encoding.UTF8.GetString(bytes.Bytes);
     }
 }

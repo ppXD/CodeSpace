@@ -4,6 +4,7 @@ using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Chat;
 using CodeSpace.Core.Services.Chat.Interactions;
+using CodeSpace.Core.Services.Workflows.Artifacts;
 using CodeSpace.Messages.Agents;
 using Microsoft.Extensions.Logging;
 
@@ -41,15 +42,17 @@ public sealed partial class RealSupervisorActionExecutor : ISupervisorActionExec
     private readonly IAgentDefinitionResolver _agentDefinitionResolver;
     private readonly IChatBotService _bot;
     private readonly IInteractionComponentRegistry _components;
+    private readonly IArtifactStore _artifacts;
     private readonly ILogger<RealSupervisorActionExecutor> _logger;
 
-    public RealSupervisorActionExecutor(CodeSpaceDbContext db, IAgentRunService agentRuns, IAgentDefinitionResolver agentDefinitionResolver, IChatBotService bot, IInteractionComponentRegistry components, ILogger<RealSupervisorActionExecutor> logger)
+    public RealSupervisorActionExecutor(CodeSpaceDbContext db, IAgentRunService agentRuns, IAgentDefinitionResolver agentDefinitionResolver, IChatBotService bot, IInteractionComponentRegistry components, IArtifactStore artifacts, ILogger<RealSupervisorActionExecutor> logger)
     {
         _db = db;
         _agentRuns = agentRuns;
         _agentDefinitionResolver = agentDefinitionResolver;
         _bot = bot;
         _components = components;
+        _artifacts = artifacts;
         _logger = logger;
     }
 
@@ -58,7 +61,7 @@ public sealed partial class RealSupervisorActionExecutor : ISupervisorActionExec
         SupervisorDecisionKinds.Plan => Task.FromResult(ExecutePlan(decision)),
         SupervisorDecisionKinds.Spawn => ExecuteSpawnAsync(decision, context, cancellationToken),
         SupervisorDecisionKinds.Retry => ExecuteRetryAsync(decision, context, cancellationToken),
-        SupervisorDecisionKinds.Merge => Task.FromResult(ExecuteMerge(decision, context)),
+        SupervisorDecisionKinds.Merge => ExecuteMergeAsync(decision, context, cancellationToken),
         SupervisorDecisionKinds.AskHuman => ExecuteAskHumanAsync(decision, context, cancellationToken),
         SupervisorDecisionKinds.Stop => Task.FromResult(ExecuteStop(decision)),
         _ => Task.FromResult(SupervisorExecution.Synchronous(JsonSerializer.Serialize(new { unsupported = decision.Kind }, AgentJson.Options))),

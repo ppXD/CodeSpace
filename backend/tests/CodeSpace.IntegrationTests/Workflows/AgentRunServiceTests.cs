@@ -3,6 +3,7 @@ using Autofac;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Agents;
+using CodeSpace.Core.Services.Workflows.Artifacts;
 using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Enums;
@@ -514,6 +515,78 @@ public class AgentRunServiceTests
             events[90].DataJson.ShouldBe("{}", "empty object round-trips");
             events[120].DataJson.ShouldBe("null", "json null literal round-trips as a jsonb null, distinct from a missing payload");
             events[150].DataJson!.ShouldContain("SENTINEL", customMessage: "the 100KB payload is untruncated");
+        }
+    }
+
+    [Fact]
+    public async Task Completing_with_a_large_patch_offloads_it_to_an_artifact_and_keeps_only_the_ref()
+    {
+        // D2: a large unified diff must NOT bloat result_jsonb — it's offloaded to the content-addressed artifact
+        // store (team-scoped) and the result keeps only PatchArtifactId. The full diff round-trips from the store.
+        var teamId = await SeedTeamAsync();
+
+        Guid runId;
+        using (var scope = _fixture.BeginScope())
+        {
+            var svc = scope.Resolve<IAgentRunService>();
+            runId = (await svc.CreateAsync(BuildTask(), teamId, null, null, CancellationToken.None)).Id;
+            await svc.MarkRunningAsync(runId, CancellationToken.None);
+        }
+
+        // ~40 KiB diff — comfortably over the 8 KiB inline threshold. Distinctive content so we can verify fidelity.
+        var bigPatch = string.Concat(Enumerable.Range(0, 1000).Select(i => $"+added line {i:D4} to the file\n"));
+        bigPatch.Length.ShouldBeGreaterThan(ArtifactStoreConfig.DefaultInlineThresholdBytes, "the diff must exceed the inline threshold to exercise offload");
+
+        using (var scope = _fixture.BeginScope())
+            await scope.Resolve<IAgentRunService>().CompleteAsync(runId,
+                new AgentRunResult { Status = AgentRunStatus.Succeeded, ExitReason = "completed", Patch = bigPatch, ChangedFiles = new[] { "src/a.ts" } },
+                CancellationToken.None);
+
+        using (var scope = _fixture.BeginScope())
+        {
+            var run = await scope.Resolve<IAgentRunService>().GetAsync(runId, CancellationToken.None);
+            var stored = JsonSerializer.Deserialize<AgentRunResult>(run.ResultJson!, AgentJson.Options)!;
+
+            stored.Patch.ShouldBe("", "the large diff was moved out of result_jsonb");
+            stored.PatchArtifactId.ShouldNotBeNull("the result keeps a reference to the offloaded diff");
+            run.ResultJson!.Length.ShouldBeLessThan(bigPatch.Length, "result_jsonb no longer carries the full diff");
+
+            // The full diff round-trips from the artifact store, byte-for-byte.
+            var artifact = await scope.Resolve<IArtifactStore>().GetBytesAsync(teamId, stored.PatchArtifactId!.Value, CancellationToken.None);
+            artifact.ShouldNotBeNull();
+            System.Text.Encoding.UTF8.GetString(artifact!.Bytes).ShouldBe(bigPatch, "the offloaded diff is recoverable in full");
+            artifact.ContentType.ShouldBe("text/x-diff");
+        }
+    }
+
+    [Fact]
+    public async Task Completing_with_a_small_patch_keeps_it_inline_with_no_artifact()
+    {
+        // A small diff stays inline in result_jsonb (no offload, no artifact ref) — the common case is unchanged.
+        var teamId = await SeedTeamAsync();
+
+        Guid runId;
+        using (var scope = _fixture.BeginScope())
+        {
+            var svc = scope.Resolve<IAgentRunService>();
+            runId = (await svc.CreateAsync(BuildTask(), teamId, null, null, CancellationToken.None)).Id;
+            await svc.MarkRunningAsync(runId, CancellationToken.None);
+        }
+
+        const string smallPatch = "+one small change\n-one removed line\n";
+
+        using (var scope = _fixture.BeginScope())
+            await scope.Resolve<IAgentRunService>().CompleteAsync(runId,
+                new AgentRunResult { Status = AgentRunStatus.Succeeded, ExitReason = "completed", Patch = smallPatch },
+                CancellationToken.None);
+
+        using (var scope = _fixture.BeginScope())
+        {
+            var run = await scope.Resolve<IAgentRunService>().GetAsync(runId, CancellationToken.None);
+            var stored = JsonSerializer.Deserialize<AgentRunResult>(run.ResultJson!, AgentJson.Options)!;
+
+            stored.Patch.ShouldBe(smallPatch, "a small diff stays inline");
+            stored.PatchArtifactId.ShouldBeNull("no artifact is created for an inline diff");
         }
     }
 

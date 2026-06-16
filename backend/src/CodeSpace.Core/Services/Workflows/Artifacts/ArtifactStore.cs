@@ -11,14 +11,21 @@ namespace CodeSpace.Core.Services.Workflows.Artifacts;
 /// <c>(team_id, sha256)</c> unique index; idempotent <see cref="PutAsync"/> returns the
 /// existing id on duplicate.
 ///
-/// Inline storage only — bytes over <see cref="ArtifactStoreConfig.InlineThresholdBytes"/>
-/// raise an explicit exception so callers fail loudly rather than silently truncating.
+/// Bytes up to <see cref="ArtifactStoreConfig.InlineThresholdBytes"/> live inline in the DB row; larger payloads
+/// are offloaded to the <see cref="IArtifactBlobBackend"/> (out-of-band) and the row keeps only a
+/// <c>storage_url</c> reference. Either way the metadata row (sha, size, content type, tenant) is the durable
+/// source of truth.
 /// </summary>
 public sealed class ArtifactStore : IArtifactStore, IScopedDependency
 {
     private readonly CodeSpaceDbContext _db;
+    private readonly IArtifactBlobBackend _blobs;
 
-    public ArtifactStore(CodeSpaceDbContext db) { _db = db; }
+    public ArtifactStore(CodeSpaceDbContext db, IArtifactBlobBackend blobs)
+    {
+        _db = db;
+        _blobs = blobs;
+    }
 
     public async Task<Guid> PutAsync(Guid teamId, ReadOnlyMemory<byte> bytes, string contentType, CancellationToken cancellationToken)
     {
@@ -37,16 +44,11 @@ public sealed class ArtifactStore : IArtifactStore, IScopedDependency
 
         if (existing.HasValue) return existing.Value;
 
-        var threshold = ArtifactStoreConfig.InlineThresholdBytes;
-        if (bytes.Length > threshold)
-        {
-            // Storage-URL path isn't wired yet. Reject explicitly so callers know they need
-            // a different storage backend rather than silently dropping bytes.
-            throw new InvalidOperationException(
-                $"Artifact size {bytes.Length} exceeds the inline threshold {threshold} bytes. " +
-                $"Set {ArtifactStoreConfig.InlineThresholdEnvVar} to raise the limit (capped at PostgreSQL's bytea max), " +
-                "or wait for the storage_url backend.");
-        }
+        // Size-routed storage: small payloads stay inline in the DB row; large ones are offloaded to the
+        // out-of-band backend (content-addressed by sha, so the write is idempotent) and the row keeps only the
+        // storage_url. Exactly one of inline_bytes / storage_url is set (the table's CHECK enforces it).
+        var offload = bytes.Length > ArtifactStoreConfig.InlineThresholdBytes;
+        var storageUrl = offload ? await _blobs.WriteAsync(sha, bytes, cancellationToken).ConfigureAwait(false) : null;
 
         var artifact = new WorkflowArtifact
         {
@@ -55,8 +57,8 @@ public sealed class ArtifactStore : IArtifactStore, IScopedDependency
             Sha256 = sha,
             ContentType = contentType,
             SizeBytes = bytes.Length,
-            InlineBytes = bytes.ToArray(),
-            StorageUrl = null,
+            InlineBytes = offload ? null : bytes.ToArray(),
+            StorageUrl = storageUrl,
             CreatedAt = DateTimeOffset.UtcNow,
         };
 
@@ -93,18 +95,18 @@ public sealed class ArtifactStore : IArtifactStore, IScopedDependency
 
         if (row == null) return null;
 
-        // Inline only — PutAsync rejects oversize content so every row has bytes.
-        if (row.InlineBytes == null)
-            throw new InvalidOperationException(
-                $"Artifact {artifactId} has no inline bytes (storage_url={row.StorageUrl}); " +
-                "out-of-band storage backend not wired.");
+        // Inline rows carry their bytes directly; offloaded rows resolve their storage_url through the backend.
+        var bytes = row.InlineBytes
+            ?? await _blobs.ReadAsync(
+                row.StorageUrl ?? throw new InvalidOperationException($"Artifact {artifactId} has neither inline bytes nor a storage_url."),
+                cancellationToken).ConfigureAwait(false);
 
         return new ArtifactBytes
         {
             Id = row.Id,
             Sha256 = row.Sha256,
             ContentType = row.ContentType,
-            Bytes = row.InlineBytes,
+            Bytes = bytes,
         };
     }
 
