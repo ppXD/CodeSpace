@@ -46,7 +46,7 @@ public sealed class RunFromSnapshotStarter : IRunFromSnapshotStarter, IScopedDep
         var (definitionJson, definitionHash) = Freeze(definition);
         var payloadJson = NormalizePayload(launchPayloadJson);
 
-        var runId = await StageAsync(teamId, actorUserId, definitionJson, definitionHash, payloadJson, cancellationToken).ConfigureAwait(false);
+        var runId = await StageAsync(teamId, actorUserId, definitionJson, definitionHash, payloadJson, WorkflowRunSourceTypes.Snapshot, parentRunId: null, causationRequestId: null, cancellationToken).ConfigureAwait(false);
 
         await _recordLogger.RunQueuedAsync(runId, WorkflowRunSourceTypes.Snapshot, actorUserId, cancellationToken).ConfigureAwait(false);
 
@@ -59,6 +59,27 @@ public sealed class RunFromSnapshotStarter : IRunFromSnapshotStarter, IScopedDep
         _logger.LogInformation(
             "Snapshot run queued. TeamId={TeamId} RunId={RunId} Hash={Hash} Nodes={NodeCount} Edges={EdgeCount}",
             teamId, runId, definitionHash, definition.Nodes.Count, definition.Edges.Count);
+
+        return runId;
+    }
+
+    /// <summary>
+    /// Replay a snapshot/dynamic run: clone its EXACT frozen definition (<paramref name="definitionJson"/> +
+    /// <paramref name="definitionHash"/>) onto a NEW snapshot run — no re-validate / re-freeze, so replay
+    /// reproduces the definition the original ran byte-for-byte (the engine's snapshot tamper-check passes
+    /// because the hash travels with it). This is the snapshot analogue of <see cref="IRunStarter"/>'s authored
+    /// replay path: STAGE-ONLY (one tx) + <c>run.queued</c>(Replay), carrying the replay lineage
+    /// (<paramref name="parentRunId"/> drives the engine's <c>run.replayed</c>; <paramref name="causationRequestId"/>
+    /// links back to the original request). The caller clones the variable snapshot then dispatches — exactly as
+    /// the authored-replay path does, so the engine's variable-presence fork takes the replay scope.
+    /// </summary>
+    public async Task<Guid> StageReplayFromSnapshotAsync(string definitionJson, string definitionHash, Guid teamId, Guid actorUserId, string payloadJson, Guid parentRunId, Guid causationRequestId, CancellationToken cancellationToken)
+    {
+        var runId = await StageAsync(teamId, actorUserId, definitionJson, definitionHash, NormalizePayload(payloadJson), WorkflowRunSourceTypes.Replay, parentRunId, causationRequestId, cancellationToken).ConfigureAwait(false);
+
+        await _recordLogger.RunQueuedAsync(runId, WorkflowRunSourceTypes.Replay, actorUserId, cancellationToken).ConfigureAwait(false);
+
+        _logger.LogInformation("Snapshot run replay staged. TeamId={TeamId} ReplayRunId={RunId} ParentRunId={ParentRunId} Hash={Hash}", teamId, runId, parentRunId, definitionHash);
 
         return runId;
     }
@@ -86,11 +107,13 @@ public sealed class RunFromSnapshotStarter : IRunFromSnapshotStarter, IScopedDep
 
     /// <summary>
     /// Stage the request + snapshot-run pair in ONE transaction. The request carries source/actor
-    /// metadata (WorkflowId left NULL — there is no workflow); the run carries the inline frozen
-    /// definition + hash with WorkflowId / WorkflowVersion NULL. Status starts Pending — the
-    /// post-commit dispatch flips it to Enqueued.
+    /// metadata (WorkflowId left NULL — there is no workflow) plus the optional
+    /// <paramref name="causationRequestId"/> linking a replay back to the original request; the run
+    /// carries the inline frozen definition + hash with WorkflowId / WorkflowVersion NULL and an
+    /// optional <paramref name="parentRunId"/> (set on a replay — the engine emits <c>run.replayed</c>
+    /// from it). Status starts Pending — the post-commit dispatch flips it to Enqueued.
     /// </summary>
-    private async Task<Guid> StageAsync(Guid teamId, Guid actorUserId, string definitionJson, string definitionHash, string payloadJson, CancellationToken cancellationToken)
+    private async Task<Guid> StageAsync(Guid teamId, Guid actorUserId, string definitionJson, string definitionHash, string payloadJson, string sourceType, Guid? parentRunId, Guid? causationRequestId, CancellationToken cancellationToken)
     {
         var requestId = Guid.NewGuid();
         var runId = Guid.NewGuid();
@@ -101,7 +124,8 @@ public sealed class RunFromSnapshotStarter : IRunFromSnapshotStarter, IScopedDep
             Id = requestId,
             TeamId = teamId,
             WorkflowId = null,
-            SourceType = WorkflowRunSourceTypes.Snapshot,
+            SourceType = sourceType,
+            CausationId = causationRequestId,
             ActorType = WorkflowRunActorTypes.User,
             ActorId = actorUserId,
             NormalizedPayloadJson = payloadJson,
@@ -116,6 +140,7 @@ public sealed class RunFromSnapshotStarter : IRunFromSnapshotStarter, IScopedDep
             Id = runId,
             WorkflowId = null,
             WorkflowVersion = null,
+            ParentRunId = parentRunId,
             DefinitionSnapshotJson = definitionJson,
             DefinitionSnapshotHash = definitionHash,
             ReleaseHashAtRun = definitionHash,
