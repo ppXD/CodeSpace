@@ -124,15 +124,15 @@ public sealed class AgentRunService : IAgentRunService, IScopedDependency
     private readonly CodeSpaceDbContext _db;
     private readonly IAdmissionController _admissionController;
     private readonly ISandboxRunnerRegistry _runners;
-    private readonly IArtifactStore _artifacts;
+    private readonly IArtifactOffloader _offloader;
     private readonly ILogger<AgentRunService> _logger;
 
-    public AgentRunService(CodeSpaceDbContext db, IAdmissionController admissionController, ISandboxRunnerRegistry runners, IArtifactStore artifacts, ILogger<AgentRunService> logger)
+    public AgentRunService(CodeSpaceDbContext db, IAdmissionController admissionController, ISandboxRunnerRegistry runners, IArtifactOffloader offloader, ILogger<AgentRunService> logger)
     {
         _db = db;
         _admissionController = admissionController;
         _runners = runners;
-        _artifacts = artifacts;
+        _offloader = offloader;
         _logger = logger;
     }
 
@@ -348,14 +348,9 @@ public sealed class AgentRunService : IAgentRunService, IScopedDependency
     /// </summary>
     private async Task<AgentRunResult> OffloadLargePatchAsync(AgentRunResult result, Guid teamId, CancellationToken cancellationToken)
     {
-        if (string.IsNullOrEmpty(result.Patch)) return result;
+        var (inline, artifactId) = await _offloader.OffloadIfLargeAsync(teamId, result.Patch, "text/x-diff", cancellationToken).ConfigureAwait(false);
 
-        var bytes = System.Text.Encoding.UTF8.GetBytes(result.Patch);
-        if (bytes.Length <= ArtifactStoreConfig.InlineThresholdBytes) return result;
-
-        var artifactId = await _artifacts.PutAsync(teamId, bytes, "text/x-diff", cancellationToken).ConfigureAwait(false);
-
-        return result with { Patch = "", PatchArtifactId = artifactId };
+        return artifactId is null ? result : result with { Patch = inline, PatchArtifactId = artifactId };
     }
 
     public async Task<bool> CancelQueuedAsync(Guid runId, string reason, CancellationToken cancellationToken)

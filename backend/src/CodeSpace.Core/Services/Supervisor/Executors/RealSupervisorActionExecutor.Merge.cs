@@ -92,15 +92,9 @@ public sealed partial class RealSupervisorActionExecutor
         };
     }
 
-    /// <summary>The inline patch when present; otherwise the full diff resolved from the artifact store via the D2 PatchArtifactId ref (so an offloaded large diff is folded into the merge, not lost). Empty when there's neither.</summary>
-    private async Task<string> ResolvePatchAsync(AgentRunResult? result, Guid teamId, CancellationToken cancellationToken)
-    {
-        if (result == null) return "";
-        if (!string.IsNullOrEmpty(result.Patch)) return result.Patch;
-        if (result.PatchArtifactId is not { } artifactId) return "";
-
-        var bytes = await _artifacts.GetBytesAsync(teamId, artifactId, cancellationToken).ConfigureAwait(false);
-
-        return bytes == null ? "" : System.Text.Encoding.UTF8.GetString(bytes.Bytes);
-    }
+    /// <summary>The inline patch when present; otherwise the full diff resolved from the artifact store via the D2 PatchArtifactId ref (so an offloaded large diff is folded into the merge, not lost). Empty when there's neither. Routes through the shared <see cref="IArtifactOffloader"/> — the same primitive the producer used.</summary>
+    private Task<string> ResolvePatchAsync(AgentRunResult? result, Guid teamId, CancellationToken cancellationToken) =>
+        result == null
+            ? Task.FromResult("")
+            : _offloader.ResolveAsync(teamId, result.Patch, result.PatchArtifactId, cancellationToken);
 }
