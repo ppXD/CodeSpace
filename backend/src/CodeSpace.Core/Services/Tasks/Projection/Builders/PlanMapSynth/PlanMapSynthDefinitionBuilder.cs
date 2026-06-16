@@ -1,5 +1,6 @@
 using System.Text.Json;
 using CodeSpace.Core.DependencyInjection;
+using CodeSpace.Core.Services.Tasks.Projection.Builders.PlanMap;
 using CodeSpace.Messages.Dtos.Workflows;
 using CodeSpace.Messages.Tasks;
 
@@ -7,95 +8,23 @@ namespace CodeSpace.Core.Services.Tasks.Projection.Builders.PlanMapSynth;
 
 /// <summary>
 /// The <c>plan-map-synth</c> projection (Rule 18.3 — one impl beside its variant folder): the FIRST multi-agent
-/// task shape. A planner decomposes the task into subtasks, a <c>flow.map</c> fans those out over one real
-/// <c>agent.code</c> body per subtask, and a synthesizer reduces the per-branch results into the run's output.
-/// This is the PRODUCTION HOME of the planner→map→synthesizer graph that previously lived ONLY inline in
-/// <c>HeadlineFlowE2ETests.HeadlineFlowDefinition()</c> — the node shape here MIRRORS that proven graph EXACTLY
-/// so it actually runs:
+/// task shape. A planner decomposes the task into a list of subtask STRINGS, a <c>flow.map</c> fans those out over
+/// one real <c>agent.code</c> body per subtask (goal = <c>"Work on {{item}}"</c>), and a synthesizer reduces the
+/// per-branch results into the run's output. It shares the planner→map→agent→synth→done skeleton with its
+/// model-authored sibling <c>plan-map-dynamic</c> via <see cref="PlanMapBuilderBase"/>, specializing only the
+/// planner schema (a plain <c>string[]</c>), the planner prompt, and the body goal binding; it authors no
+/// per-branch mode, so the body agent inherits the profile's posture (the historical behaviour).
 ///
-/// <para>
-///   <c>trigger.manual</c> (start)
-///   → <c>llm.complete</c> (planner): a <c>responseSchema</c> forces structured output, surfaced on
-///     <c>json.subtasks</c> — the SAME shape the map binds; the seed goal frames a "decompose into subtasks"
-///     instruction; the profile's model maps onto the node (AddIfPresent — absent ⇒ the node/deployment default).
-///   → <c>flow.map</c>: <c>items = {{nodes.planner.outputs.json.subtasks}}</c> (the EXACT headline binding).
-///   → <c>flow.map_start</c> (the body root, parented to the map).
-///   → <c>agent.code</c> (the body, parented to the map): goal bound from <c>{{item}}</c> so each branch works
-///     its OWN subtask; harness/model/credential/runner/autonomy/tools + repositoryId map from the profile via
-///     the SHARED <see cref="AgentNodeMapping"/> — so a fan-out branch runs IDENTICALLY to an authored / a
-///     single-agent agent.code node.
-///   → <c>llm.complete</c> (synth): a REAL reduce — the model is asked to combine the per-subtask results into
-///     one coherent answer that addresses the seed goal. The provider/model come from the profile (the SAME
-///     wiring the planner node uses; default provider Anthropic like <c>WorkflowPlanProjector</c>'s synth); the
-///     userPrompt embeds the goal AND the WHOLE <c>{{nodes.map.outputs.results}}</c> array, so the reduce is
-///     generic over ANY subtask count (never a fixed element-indexed width). This replaces the prior
-///     <c>builtin.terminal</c> raw-array pass-through (which did NO reduce — it just re-bound the results array).
-///   → <c>builtin.terminal</c> (done): binds the synth's <c>text</c> output into the run's <c>combined</c> output.
-/// </para>
-///
-/// <para><b>Build stays PURE.</b> The planner is a NODE that runs at EXECUTION — not a build-time LLM call — so
-/// <see cref="Build"/> is a pure function of its <see cref="TaskBuildContext"/> (no DB / no LLM), exactly like
-/// the single-agent builder. (This is why PR5 mirrors the headline planner-as-node graph rather than reusing
-/// <c>IWorkflowPlanProjector.Project</c>'s plan-FIRST shape, which would require running the planner before
-/// Build.) The graph is parameter-driven over a fixed skeleton, so the output ALWAYS passes the real
-/// <c>DefinitionValidator</c>. Self-registers via <see cref="ISingletonDependency"/>; a new projection is a
-/// sibling builder folder, never an edit here.</para>
+/// <para><b>Build stays PURE</b> — the planner is a NODE that runs at EXECUTION, not a build-time LLM call — so the
+/// output always passes the real <c>DefinitionValidator</c>. Self-registers via <see cref="ISingletonDependency"/>;
+/// a new projection is a sibling builder folder (like plan-map-dynamic), never an edit here.</para>
 /// </summary>
-public sealed class PlanMapSynthDefinitionBuilder : IWorkflowDefinitionBuilder, ISingletonDependency
+public sealed class PlanMapSynthDefinitionBuilder : PlanMapBuilderBase, ISingletonDependency
 {
-    public string ProjectionKind => TaskProjectionKinds.PlanMapSynth;
-
-    public WorkflowDefinition Build(TaskBuildContext context) => new()
-    {
-        SchemaVersion = WorkflowDefinition.CurrentSchemaVersion,
-        Nodes = BuildNodes(context),
-        Edges = BuildEdges(),
-    };
-
-    private static IReadOnlyList<NodeDefinition> BuildNodes(TaskBuildContext context) => new List<NodeDefinition>
-    {
-        new() { Id = "start", TypeKey = "trigger.manual", Label = "Start", Config = Empty(), Inputs = Empty() },
-
-        new() { Id = "planner", TypeKey = "llm.complete", Label = "Plan",
-                Config = PlannerConfig(context), Inputs = PlannerInputs(context) },
-
-        new() { Id = "map", TypeKey = "flow.map", Label = "Fan out", Config = MapConfigJson(context), Inputs = MapInputs() },
-
-        new() { Id = "ms", TypeKey = "flow.map_start", Label = "Subtask", ParentId = "map", Config = Empty(), Inputs = Empty() },
-
-        new() { Id = "agent", TypeKey = "agent.code", Label = "Work the subtask", ParentId = "map",
-                Config = AgentNodeMapping.BuildAgentConfig(BranchGoal, context.AgentProfile), Inputs = AgentNodeMapping.BuildAgentInputs(context) },
-
-        new() { Id = "synth", TypeKey = "llm.complete", Label = "Synthesize",
-                Config = SynthConfig(context), Inputs = SynthInputs(context) },
-
-        new() { Id = "done", TypeKey = "builtin.terminal", Label = "Done", Config = Empty(), Inputs = DoneInputs() },
-    };
-
-    private static IReadOnlyList<EdgeDefinition> BuildEdges() => new List<EdgeDefinition>
-    {
-        new() { From = "start", To = "planner" },
-        new() { From = "planner", To = "map" },
-        new() { From = "map", To = "synth" },
-        new() { From = "synth", To = "done" },
-        new() { From = "ms", To = "agent" },
-    };
-
-    /// <summary>The planner Config — a <c>responseSchema</c> forcing a <c>{ subtasks: string[] }</c> object (surfaced on <c>json</c>, the shape the map binds) + the profile's model (AddIfPresent). The provider is the node's own default (the deployment-configured LLM); a test retargets it at the IStructuredLLMClient seam, never the builder.</summary>
-    private static JsonElement PlannerConfig(TaskBuildContext context)
-    {
-        var config = new Dictionary<string, object?>
-        {
-            ["responseSchema"] = SubtasksSchema(),
-        };
-
-        AddIfPresent(config, "model", NullIfBlank(context.AgentProfile?.Model));
-
-        return JsonSerializer.SerializeToElement(config);
-    }
+    public override string ProjectionKind => TaskProjectionKinds.PlanMapSynth;
 
     /// <summary>The structured-output schema — a <c>subtasks</c> string array, the EXACT shape <c>flow.map</c>'s items binding (<c>{{nodes.planner.outputs.json.subtasks}}</c>) reads.</summary>
-    private static object SubtasksSchema() => new
+    protected override object SubtasksResponseSchema() => new
     {
         type = "object",
         properties = new { subtasks = new { type = "array", items = new { type = "string" } } },
@@ -103,58 +32,11 @@ public sealed class PlanMapSynthDefinitionBuilder : IWorkflowDefinitionBuilder, 
     };
 
     /// <summary>The planner Inputs — the seed goal framed as a "decompose into subtasks" instruction (the userPrompt the structured LLM completes).</summary>
-    private static JsonElement PlannerInputs(TaskBuildContext context) => JsonSerializer.SerializeToElement(new
+    protected override JsonElement PlannerInputs(TaskBuildContext context) => JsonSerializer.SerializeToElement(new
     {
         userPrompt = $"Decompose this task into a list of independent subtasks that can be worked in parallel: {context.Seed.Goal}",
     });
 
-    /// <summary>The map Inputs — fan out over the planner's typed subtasks array (the EXACT headline binding).</summary>
-    private static JsonElement MapInputs() => JsonSerializer.SerializeToElement(new
-    {
-        items = "{{nodes.planner.outputs.json.subtasks}}",
-    });
-
-    /// <summary>The map Config — carries the route's <see cref="RouteCaps.MaxParallelism"/> cap so the fan-out is bounded (the engine reads the <c>maxParallelism</c> key into the branch SemaphoreSlim via <c>MapConfig</c>). Only the one key is written, and only when the cap is set — an absent cap leaves the map unbounded (its prior behaviour, no config / hash change).</summary>
-    private static JsonElement MapConfigJson(TaskBuildContext context) =>
-        context.Route.Caps.MaxParallelism is { } cap
-            ? JsonSerializer.SerializeToElement(new { maxParallelism = cap })
-            : Empty();
-
-    /// <summary>The synth Config — the LLM the reduce runs on. Provider defaults to Anthropic (the same default the planner node + <c>WorkflowPlanProjector</c>'s synth use); the profile's model maps on via AddIfPresent (absent ⇒ the node/deployment default). A test retargets the provider at the ILLMClient seam, never the builder.</summary>
-    private static JsonElement SynthConfig(TaskBuildContext context)
-    {
-        var config = new Dictionary<string, object?>
-        {
-            ["provider"] = "Anthropic",
-        };
-
-        AddIfPresent(config, "model", NullIfBlank(context.AgentProfile?.Model));
-
-        return JsonSerializer.SerializeToElement(config);
-    }
-
-    /// <summary>The synth Inputs — a REAL reduce prompt: combine ALL per-branch results into one coherent answer that addresses the seed goal. The userPrompt embeds the goal AND the WHOLE map results array (<c>{{nodes.map.outputs.results}}</c>), so the reduce is generic over ANY subtask count — never a fixed element-indexed width.</summary>
-    private static JsonElement SynthInputs(TaskBuildContext context) => JsonSerializer.SerializeToElement(new
-    {
-        systemPrompt = "Combine the per-subtask results into one coherent answer that addresses the goal.",
-        userPrompt = $"Goal: {context.Seed.Goal}\n\nPer-subtask results:\n{{{{nodes.map.outputs.results}}}}",
-    });
-
-    /// <summary>The done terminal Inputs — bind the synth's reduced <c>text</c> output into the run's <c>combined</c> output (the llm.complete node's output key is <c>text</c>).</summary>
-    private static JsonElement DoneInputs() => JsonSerializer.SerializeToElement(new
-    {
-        combined = "{{nodes.synth.outputs.text}}",
-    });
-
-    /// <summary>The body agent's goal — bound from the map's per-branch <c>{{item}}</c> (this branch's subtask), so each branch works its OWN element. Matches the headline body's goal binding.</summary>
-    private const string BranchGoal = "Work on {{item}}";
-
-    private static string? NullIfBlank(string? value) => string.IsNullOrWhiteSpace(value) ? null : value;
-
-    private static void AddIfPresent(Dictionary<string, object?> bag, string key, object? value)
-    {
-        if (value != null) bag[key] = value;
-    }
-
-    private static JsonElement Empty() => JsonDocument.Parse("{}").RootElement.Clone();
+    /// <summary>The body agent's goal — bound from the map's per-branch <c>{{item}}</c> (this branch's subtask string), so each branch works its OWN element.</summary>
+    protected override string BranchGoal => "Work on {{item}}";
 }

@@ -24,9 +24,11 @@ internal static class AgentNodeMapping
     /// <summary>
     /// The <c>agent.code</c> Config — maps the resolved profile onto the EXACT keys <c>AgentCodeNode</c> reads,
     /// with the supplied <paramref name="goal"/> (a literal for single-agent, a <c>{{item}}</c> binding for a map
-    /// body). Optional knobs are added only when present so a bare profile stays minimal.
+    /// body) and an optional <paramref name="mode"/> (the model-authored intent — a <c>{{item.mode}}</c> binding the
+    /// dynamic fan-out body passes per branch; omitted when null/blank so the two existing callers emit identical
+    /// JSON). Optional knobs are added only when present so a bare profile stays minimal.
     /// </summary>
-    public static JsonElement BuildAgentConfig(string goal, ResolvedAgentProfile? profile)
+    public static JsonElement BuildAgentConfig(string goal, ResolvedAgentProfile? profile, string? mode = null)
     {
         var config = new Dictionary<string, object?>
         {
@@ -40,6 +42,7 @@ internal static class AgentNodeMapping
         AddIfPresent(config, "runnerKind", NullIfBlank(profile?.RunnerKind));
         AddIfPresent(config, "autonomyLevel", NullIfBlank(profile?.AutonomyLevel));
         AddIfPresent(config, "tools", profile?.AllowedTools);
+        AddIfPresent(config, "mode", NullIfBlank(mode));
 
         return JsonSerializer.SerializeToElement(config);
     }

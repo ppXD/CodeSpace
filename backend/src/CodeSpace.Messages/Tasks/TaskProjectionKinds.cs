@@ -16,6 +16,9 @@ public static class TaskProjectionKinds
     /// <summary>RESERVED: a planner fans the task out over a <c>flow.map</c> then a synthesizer reduces. No builder yet.</summary>
     public const string PlanMapSynth = "plan-map-synth";
 
+    /// <summary>Like <see cref="PlanMapSynth"/>, but the planner AUTHORS a per-subtask <c>mode</c> (research/code) the body maps to permissions — the model decides each agent's intent. Opt-in (no recipe serves a tier).</summary>
+    public const string PlanMapDynamic = "plan-map-dynamic";
+
     /// <summary>RESERVED: a coordinated multi-round loop over a checkpoint coordinator. No builder yet.</summary>
     public const string CoordinatedLoop = "coordinated-loop";
 
