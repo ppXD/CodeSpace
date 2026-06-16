@@ -118,6 +118,18 @@ public class EffortRouterTests
     }
 
     [Fact]
+    public async Task CapsOverride_autonomy_ceiling_tightens_only_never_escalates()
+    {
+        // A looser override ceiling (Unleashed) on a Standard route must NOT raise the ceiling — the privilege
+        // bound stays un-bypassable; a stricter override (Confined) lowers it.
+        var loosen = await Router().RouteAsync(Request("x", requestedEffort: TaskEffortModes.Standard, capsOverride: new RouteCaps { AutonomyCeiling = "Unleashed" }), CancellationToken.None);
+        loosen.Caps.AutonomyCeiling.ShouldBe("Standard", "an override can never RAISE the autonomy ceiling above the preset");
+
+        var tighten = await Router().RouteAsync(Request("x", requestedEffort: TaskEffortModes.Standard, capsOverride: new RouteCaps { AutonomyCeiling = "Confined" }), CancellationToken.None);
+        tighten.Caps.AutonomyCeiling.ShouldBe("Confined", "an override may LOWER the ceiling to a stricter tier");
+    }
+
+    [Fact]
     public async Task Unknown_requested_recipe_fails_open_to_the_default_recipe_without_throwing()
     {
         var plan = await Router().RouteAsync(Request("x", requestedEffort: TaskEffortModes.Quick, requestedRecipe: "no-such-recipe"), CancellationToken.None);

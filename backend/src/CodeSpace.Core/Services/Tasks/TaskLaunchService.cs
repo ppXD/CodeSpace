@@ -1,8 +1,10 @@
 using CodeSpace.Core.DependencyInjection;
 using CodeSpace.Core.Persistence.Db;
+using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Tasks.Effort;
 using CodeSpace.Core.Services.Tasks.Launch;
 using CodeSpace.Core.Services.Tasks.Projection;
+using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Commands.Tasks;
 using CodeSpace.Messages.Tasks;
 using CodeSpace.Messages.Tasks.Effort;
@@ -41,7 +43,7 @@ public sealed class TaskLaunchService : ITaskLaunchService, IScopedDependency
 
         var route = await _router.RouteAsync(BuildRouteRequest(seed, request), cancellationToken).ConfigureAwait(false);
 
-        var profile = BuildAgentProfile(request, seed);
+        var profile = BuildAgentProfile(request, seed, route);
 
         var context = new TaskBuildContext { Seed = seed, Route = route, AgentProfile = profile, GroundingContext = seed.GroundingContext };
 
@@ -79,8 +81,8 @@ public sealed class TaskLaunchService : ITaskLaunchService, IScopedDependency
         RequestedRecipe = request.RequestedRecipe,
     };
 
-    /// <summary>Pure mapping: the request overrides + (seed repo ?? request repo) + request autonomy → the agent envelope the projection stamps. Every field optional, folding to agent.code's own defaults.</summary>
-    private static ResolvedAgentProfile BuildAgentProfile(TaskLaunchRequest request, TaskLaunchSeed seed) => new()
+    /// <summary>Pure mapping: the request overrides + (seed repo ?? request repo) + the CLAMPED autonomy → the agent envelope the projection stamps. Every field optional, folding to agent.code's own defaults. Internal (not private) so the clamp choke point is unit-pinned directly (InternalsVisibleTo), not only through integration coverage.</summary>
+    internal static ResolvedAgentProfile BuildAgentProfile(TaskLaunchRequest request, TaskLaunchSeed seed, RoutePlan route) => new()
     {
         RepositoryId = seed.RepositoryId ?? request.RepositoryId,
         Harness = request.Overrides.Harness,
@@ -88,6 +90,23 @@ public sealed class TaskLaunchService : ITaskLaunchService, IScopedDependency
         AgentDefinitionId = request.Overrides.AgentDefinitionId,
         ModelCredentialId = request.Overrides.ModelCredentialId,
         RunnerKind = request.Overrides.RunnerKind,
-        AutonomyLevel = request.Autonomy,
+        AutonomyLevel = ClampAutonomy(request, route),
     };
+
+    /// <summary>
+    /// The SINGLE choke point that pins the run's autonomy: clamp the operator's requested tier down to the route's
+    /// <see cref="RouteCaps.AutonomyCeiling"/>, and stamp the CLAMPED tier string. A blank / unrecognised request
+    /// folds to the route's recipe/effort default (NOT Unleashed); a blank / unrecognised ceiling means "no ceiling"
+    /// (the top tier, so the clamp is a no-op and the requested tier passes through). The clamped string is what
+    /// flows through projection → the agent.code node config → <c>AgentAutonomyPolicy.Derive</c> → the sandbox
+    /// runner, so a Quick/Standard route can never run Trusted/Unleashed however the caller asks.
+    /// </summary>
+    private static string ClampAutonomy(TaskLaunchRequest request, RoutePlan route)
+    {
+        var requested = AgentAutonomyPolicy.Parse(request.Autonomy, AgentAutonomyPolicy.Parse(route.RecommendedAutonomy, AgentAutonomyLevel.Standard));
+
+        var ceiling = AgentAutonomyPolicy.Parse(route.Caps.AutonomyCeiling, AgentAutonomyLevel.Unleashed);
+
+        return AgentAutonomyPolicy.Clamp(requested, ceiling).ToString();
+    }
 }

@@ -55,7 +55,7 @@ public sealed class PlanMapSynthDefinitionBuilder : IWorkflowDefinitionBuilder, 
         new() { Id = "planner", TypeKey = "llm.complete", Label = "Plan",
                 Config = PlannerConfig(context), Inputs = PlannerInputs(context) },
 
-        new() { Id = "map", TypeKey = "flow.map", Label = "Fan out", Config = Empty(), Inputs = MapInputs() },
+        new() { Id = "map", TypeKey = "flow.map", Label = "Fan out", Config = MapConfigJson(context), Inputs = MapInputs() },
 
         new() { Id = "ms", TypeKey = "flow.map_start", Label = "Subtask", ParentId = "map", Config = Empty(), Inputs = Empty() },
 
@@ -105,6 +105,12 @@ public sealed class PlanMapSynthDefinitionBuilder : IWorkflowDefinitionBuilder, 
     {
         items = "{{nodes.planner.outputs.json.subtasks}}",
     });
+
+    /// <summary>The map Config — carries the route's <see cref="RouteCaps.MaxParallelism"/> cap so the fan-out is bounded (the engine reads the <c>maxParallelism</c> key into the branch SemaphoreSlim via <c>MapConfig</c>). Only the one key is written, and only when the cap is set — an absent cap leaves the map unbounded (its prior behaviour, no config / hash change).</summary>
+    private static JsonElement MapConfigJson(TaskBuildContext context) =>
+        context.Route.Caps.MaxParallelism is { } cap
+            ? JsonSerializer.SerializeToElement(new { maxParallelism = cap })
+            : Empty();
 
     /// <summary>The synth Inputs — reduce ALL per-branch results into the run's <c>combined</c> output by binding the WHOLE map results array (<c>{{nodes.map.outputs.results}}</c>). Generic over ANY subtask count — the same whole-array reduce the real <c>WorkflowPlanProjector</c> synth and the headline flow use, NOT a fixed element-indexed width.</summary>
     private static JsonElement SynthInputs() => JsonSerializer.SerializeToElement(new

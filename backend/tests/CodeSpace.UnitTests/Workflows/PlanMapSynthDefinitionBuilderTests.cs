@@ -35,10 +35,10 @@ public class PlanMapSynthDefinitionBuilderTests
         new TerminalNode(),
     }));
 
-    private static TaskBuildContext Context(ResolvedAgentProfile? profile = null, Guid? seedRepo = null) => new()
+    private static TaskBuildContext Context(ResolvedAgentProfile? profile = null, Guid? seedRepo = null, RouteCaps? caps = null) => new()
     {
         Seed = new TaskLaunchSeed { Goal = "Improve the onboarding module", SurfaceKind = "chat", TeamId = Guid.NewGuid(), RepositoryId = seedRepo },
-        Route = new RoutePlan { ProjectionKind = TaskProjectionKinds.PlanMapSynth },
+        Route = new RoutePlan { ProjectionKind = TaskProjectionKinds.PlanMapSynth, Caps = caps ?? new RouteCaps() },
         AgentProfile = profile,
     };
 
@@ -115,6 +115,29 @@ public class PlanMapSynthDefinitionBuilderTests
 
         map.Inputs.GetProperty("items").GetString().ShouldBe("{{nodes.planner.outputs.json.subtasks}}",
             "the map fans out over the planner's typed subtasks array — the exact headline binding");
+    }
+
+    [Fact]
+    public void Map_config_carries_the_route_parallelism_cap_so_the_fanout_is_bounded()
+    {
+        var map = Builder.Build(Context(caps: new RouteCaps { MaxParallelism = 3 })).Nodes.Single(n => n.Id == "map");
+
+        // The engine reads this maxParallelism into the branch SemaphoreSlim (MapConfig → MapPlan); without it the
+        // fan-out ran unbounded-parallel, defeating Standard's MaxParallelism=3 bound.
+        map.Config.GetProperty("maxParallelism").GetInt32().ShouldBe(3,
+            customMessage: "the route's RouteCaps.MaxParallelism must reach the flow.map Config or the fan-out ignores the cap");
+    }
+
+    [Fact]
+    public void Map_config_is_empty_when_no_parallelism_cap_so_an_absent_cap_stays_unbounded()
+    {
+        var map = Builder.Build(Context(caps: new RouteCaps())).Nodes.Single(n => n.Id == "map");
+
+        // Absent cap ⇒ the prior behaviour: no key, the map inherits the engine-wide default (no config/hash change).
+        map.Config.TryGetProperty("maxParallelism", out _).ShouldBeFalse(
+            "no cap set must leave the map unbounded — only write the key when the route actually caps parallelism");
+        map.Config.ValueKind.ShouldBe(JsonValueKind.Object);
+        map.Config.EnumerateObject().ShouldBeEmpty("a capless map Config stays an empty object, byte-identical to the prior Empty()");
     }
 
     [Fact]
