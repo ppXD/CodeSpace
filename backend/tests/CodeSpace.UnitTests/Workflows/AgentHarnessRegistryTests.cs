@@ -17,7 +17,7 @@ public class AgentHarnessRegistryTests
         public IReadOnlyList<string> Models { get; } = new[] { "m" };
 
         public SandboxSpec BuildInvocation(AgentTask task) => new() { Command = "x" };
-        public AgentEvent? ParseEvent(string rawLine) => null;
+        public IReadOnlyList<AgentEvent> ParseEvents(string rawLine) => Array.Empty<AgentEvent>();
         public AgentRunResult BuildResult(IReadOnlyList<AgentEvent> events, int exitCode) =>
             new() { Status = AgentRunStatus.Succeeded, ExitReason = "completed" };
     }

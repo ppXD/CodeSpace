@@ -980,8 +980,8 @@ public class AgentRunExecutorTests
 
         public SandboxSpec BuildInvocation(AgentTask task) => new() { Command = "/bin/sh", Args = new[] { "-c", _script }, WorkingDirectory = task.WorkspaceDirectory, TimeoutSeconds = task.TimeoutSeconds };
 
-        public AgentEvent? ParseEvent(string rawLine) =>
-            string.IsNullOrWhiteSpace(rawLine) ? null : new AgentEvent { Kind = AgentEventKind.AssistantMessage, Text = rawLine.Trim() };
+        public IReadOnlyList<AgentEvent> ParseEvents(string rawLine) =>
+            string.IsNullOrWhiteSpace(rawLine) ? Array.Empty<AgentEvent>() : new[] { new AgentEvent { Kind = AgentEventKind.AssistantMessage, Text = rawLine.Trim() } };
 
         public AgentRunResult BuildResult(IReadOnlyList<AgentEvent> events, int exitCode) =>
             exitCode == 0
@@ -1002,16 +1002,16 @@ public class AgentRunExecutorTests
 
         public SandboxSpec BuildInvocation(AgentTask task) => new() { Command = "/bin/sh", Args = new[] { "-c", _script }, WorkingDirectory = task.WorkspaceDirectory, TimeoutSeconds = task.TimeoutSeconds };
 
-        public AgentEvent? ParseEvent(string rawLine)
+        public IReadOnlyList<AgentEvent> ParseEvents(string rawLine)
         {
             var line = rawLine.Trim();
-            if (line.Length == 0) return null;
+            if (line.Length == 0) return Array.Empty<AgentEvent>();
 
             if (line.StartsWith('{'))
-                try { using var doc = JsonDocument.Parse(line); return new AgentEvent { Kind = AgentEventKind.Warning, Text = "usage", Data = doc.RootElement.Clone() }; }
+                try { using var doc = JsonDocument.Parse(line); return new[] { new AgentEvent { Kind = AgentEventKind.Warning, Text = "usage", Data = doc.RootElement.Clone() } }; }
                 catch (JsonException) { /* fall through to plain text */ }
 
-            return new AgentEvent { Kind = AgentEventKind.AssistantMessage, Text = line };
+            return new[] { new AgentEvent { Kind = AgentEventKind.AssistantMessage, Text = line } };
         }
 
         public AgentRunResult BuildResult(IReadOnlyList<AgentEvent> events, int exitCode) =>
@@ -1044,8 +1044,8 @@ public class AgentRunExecutorTests
 
         public SandboxSpec BuildInvocation(AgentTask task) => new() { Command = "/bin/sh", Args = new[] { "-c", _script }, WorkingDirectory = task.WorkspaceDirectory, Environment = task.Environment, TimeoutSeconds = task.TimeoutSeconds };
 
-        public AgentEvent? ParseEvent(string rawLine) =>
-            string.IsNullOrWhiteSpace(rawLine) ? null : new AgentEvent { Kind = AgentEventKind.AssistantMessage, Text = rawLine.Trim() };
+        public IReadOnlyList<AgentEvent> ParseEvents(string rawLine) =>
+            string.IsNullOrWhiteSpace(rawLine) ? Array.Empty<AgentEvent>() : new[] { new AgentEvent { Kind = AgentEventKind.AssistantMessage, Text = rawLine.Trim() } };
 
         public AgentRunResult BuildResult(IReadOnlyList<AgentEvent> events, int exitCode) =>
             exitCode == 0
@@ -1076,10 +1076,10 @@ public class AgentRunExecutorTests
 
         public SandboxSpec BuildInvocation(AgentTask task) => new() { Command = "/bin/sh", Args = new[] { "-c", $"echo \"${_envVar}\"" }, WorkingDirectory = task.WorkspaceDirectory, Environment = task.Environment, TimeoutSeconds = task.TimeoutSeconds };
 
-        public AgentEvent? ParseEvent(string rawLine)
+        public IReadOnlyList<AgentEvent> ParseEvents(string rawLine)
         {
             var line = rawLine.Trim();
-            return line.Length == 0 ? null : new AgentEvent { Kind = AgentEventKind.AssistantMessage, Text = line, Data = JsonSerializer.SerializeToElement(new { line }) };
+            return line.Length == 0 ? Array.Empty<AgentEvent>() : new[] { new AgentEvent { Kind = AgentEventKind.AssistantMessage, Text = line, Data = JsonSerializer.SerializeToElement(new { line }) } };
         }
 
         public AgentRunResult BuildResult(IReadOnlyList<AgentEvent> events, int exitCode) =>

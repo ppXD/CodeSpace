@@ -47,8 +47,8 @@ public abstract class AgentHarnessContractTests
     [InlineData("   ")]
     [InlineData("not json {")]
     [InlineData("a plain log line, not a structured event")]
-    public void ParseEvent_returns_null_for_non_event_lines_and_never_throws(string line) =>
-        Harness.ParseEvent(line).ShouldBeNull();
+    public void ParseEvents_returns_no_events_for_non_event_lines_and_never_throws(string line) =>
+        Harness.ParseEvents(line).ShouldBeEmpty();
 
     [Fact]
     public void BuildResult_maps_exit_zero_to_succeeded() =>

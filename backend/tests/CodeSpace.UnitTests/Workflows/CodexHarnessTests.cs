@@ -105,19 +105,19 @@ public class CodexHarnessTests
     [InlineData("{\"type\":\"some_future_event\"}", AgentEventKind.Warning)]
     public void Parses_native_types_to_normalized_kinds(string line, AgentEventKind expected)
     {
-        Harness.ParseEvent(line)!.Kind.ShouldBe(expected);
+        Harness.ParseEvents(line).Single().Kind.ShouldBe(expected);
     }
 
     [Fact]
     public void Parses_the_nested_msg_envelope()
     {
-        Harness.ParseEvent("{\"msg\":{\"type\":\"agent_message\",\"message\":\"done\"}}")!.Kind.ShouldBe(AgentEventKind.AssistantMessage);
+        Harness.ParseEvents("{\"msg\":{\"type\":\"agent_message\",\"message\":\"done\"}}").Single().Kind.ShouldBe(AgentEventKind.AssistantMessage);
     }
 
     [Fact]
     public void Extracts_a_human_readable_line_into_text()
     {
-        Harness.ParseEvent("{\"type\":\"exec_command\",\"command\":\"npm test\"}")!.Text.ShouldBe("npm test");
+        Harness.ParseEvents("{\"type\":\"exec_command\",\"command\":\"npm test\"}").Single().Text.ShouldBe("npm test");
     }
 
     [Theory]
@@ -125,9 +125,9 @@ public class CodexHarnessTests
     [InlineData("   ")]
     [InlineData("Codex v0.2.0 starting…")]
     [InlineData("not json {")]
-    public void Returns_null_for_blank_or_non_json_lines(string line)
+    public void Returns_no_events_for_blank_or_non_json_lines(string line)
     {
-        Harness.ParseEvent(line).ShouldBeNull();
+        Harness.ParseEvents(line).ShouldBeEmpty();
     }
 
     [Fact]
@@ -185,7 +185,7 @@ public class CodexHarnessTests
     {
         // D3b-i: a real codex token_count event carries the cumulative usage under info.total_token_usage.
         // Parsed via the harness (so Data is the real root), it must surface as AgentRunResult.TokenUsage.
-        var tokenCount = Harness.ParseEvent("{\"type\":\"token_count\",\"info\":{\"total_token_usage\":{\"input_tokens\":1850,\"output_tokens\":420}}}")!;
+        var tokenCount = Harness.ParseEvents("{\"type\":\"token_count\",\"info\":{\"total_token_usage\":{\"input_tokens\":1850,\"output_tokens\":420}}}").Single();
         var events = new[] { new AgentEvent { Kind = AgentEventKind.AssistantMessage, Text = "done" }, tokenCount };
 
         var result = Harness.BuildResult(events, exitCode: 0);

@@ -326,8 +326,8 @@ public sealed class AgentBranchPushFlowTests
 
         public SandboxSpec BuildInvocation(AgentTask task) => new() { Command = "/bin/sh", Args = new[] { "-c", _script }, WorkingDirectory = task.WorkspaceDirectory, TimeoutSeconds = task.TimeoutSeconds };
 
-        public AgentEvent? ParseEvent(string rawLine) =>
-            string.IsNullOrWhiteSpace(rawLine) ? null : new AgentEvent { Kind = AgentEventKind.AssistantMessage, Text = rawLine.Trim() };
+        public IReadOnlyList<AgentEvent> ParseEvents(string rawLine) =>
+            string.IsNullOrWhiteSpace(rawLine) ? Array.Empty<AgentEvent>() : new[] { new AgentEvent { Kind = AgentEventKind.AssistantMessage, Text = rawLine.Trim() } };
 
         public AgentRunResult BuildResult(IReadOnlyList<AgentEvent> events, int exitCode) =>
             exitCode == 0

@@ -24,7 +24,7 @@ public class ListHarnessesQueryHandlerTests
         public IReadOnlyList<string> Models { get; }
 
         public SandboxSpec BuildInvocation(AgentTask task) => new() { Command = "x" };
-        public AgentEvent? ParseEvent(string rawLine) => null;
+        public IReadOnlyList<AgentEvent> ParseEvents(string rawLine) => Array.Empty<AgentEvent>();
         public AgentRunResult BuildResult(IReadOnlyList<AgentEvent> events, int exitCode) =>
             new() { Status = AgentRunStatus.Succeeded, ExitReason = "completed" };
     }
@@ -44,7 +44,7 @@ public class ListHarnessesQueryHandlerTests
         public IReadOnlyList<string> SupportedProviders { get; }
 
         public SandboxSpec BuildInvocation(AgentTask task) => new() { Command = "x" };
-        public AgentEvent? ParseEvent(string rawLine) => null;
+        public IReadOnlyList<AgentEvent> ParseEvents(string rawLine) => Array.Empty<AgentEvent>();
         public AgentRunResult BuildResult(IReadOnlyList<AgentEvent> events, int exitCode) =>
             new() { Status = AgentRunStatus.Succeeded, ExitReason = "completed" };
         public IReadOnlyDictionary<string, string> ProjectToEnv(ResolvedModelCredential credential) =>

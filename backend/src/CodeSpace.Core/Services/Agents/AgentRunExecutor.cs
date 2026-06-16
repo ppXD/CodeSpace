@@ -335,13 +335,13 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         {
             transcript.AppendLine(redactor.Redact(line));
 
-            var normalized = harness.ParseEvent(line);
-            if (normalized is null) return;
+            foreach (var normalized in harness.ParseEvents(line))
+            {
+                var redacted = Redact(normalized, redactor);
 
-            var redacted = Redact(normalized, redactor);
-
-            await writer.BufferAsync(redacted, cancellationToken).ConfigureAwait(false);
-            events.Add(redacted);
+                await writer.BufferAsync(redacted, cancellationToken).ConfigureAwait(false);
+                events.Add(redacted);
+            }
         }
 
         var sandbox = await durable.AttachAsync(handle, (line, _) => PersistLineAsync(line), cancellationToken, CheckpointHandleOffset(runId, handle, writer)).ConfigureAwait(false);
@@ -754,19 +754,20 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
 
         async Task PersistLineAsync(string line)
         {
-            // Capture the faithful transcript FIRST — redact the raw line, then keep it whether or not ParseEvent
-            // surfaces an event. ParseEvent drops blank/unrecognized lines; the transcript keeps them so a replay is
-            // exact. Redacted before it's held, so no secret reaches the offloaded artifact.
+            // Capture the faithful transcript FIRST — redact the raw line, then keep it whether or not ParseEvents
+            // surfaces any event. ParseEvents drops blank/unrecognized lines; the transcript keeps them so a replay
+            // is exact. Redacted before it's held, so no secret reaches the offloaded artifact.
             transcript.AppendLine(redactor.Redact(line));
 
-            var normalized = harness.ParseEvent(line);
-            if (normalized is null) return;
+            // ONE native line can carry several content blocks (reasoning + tool_use + text) → several events, in
+            // stream order. Each is redacted BEFORE the append-only log freezes it (the log can't be edited later).
+            foreach (var normalized in harness.ParseEvents(line))
+            {
+                var redacted = Redact(normalized, redactor);
 
-            // Strip any secret the CLI echoed BEFORE the append-only log freezes it (the log can't be edited later).
-            var redacted = Redact(normalized, redactor);
-
-            await writer.BufferAsync(redacted, cancellationToken).ConfigureAwait(false);   // buffered — one batched INSERT per spool checkpoint, not one per line
-            events.Add(redacted);   // in-memory, for the harness's result fold
+                await writer.BufferAsync(redacted, cancellationToken).ConfigureAwait(false);   // buffered — one batched INSERT per spool checkpoint, not one per line
+                events.Add(redacted);   // in-memory, for the harness's result fold
+            }
         }
 
         // The heartbeat is owned by ExecuteAsync (it spans the whole run, including the completion tail), so

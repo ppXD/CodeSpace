@@ -12,7 +12,7 @@ namespace CodeSpace.Core.Services.Agents.Harnesses.Codex;
 ///
 /// <para><b>Fidelity note:</b> the CLI surface (<c>exec</c>, <c>--json</c>, <c>--model</c>, <c>--sandbox</c>)
 /// is well-documented, so <see cref="BuildInvocation"/> is exact. The JSONL event <i>type</i> names are
-/// version-dependent, so <see cref="ParseEvent"/> classifies by tolerant keyword match and maps anything
+/// version-dependent, so <see cref="ParseEvents"/> classifies by tolerant keyword match and maps anything
 /// it can't place to <see cref="AgentEventKind.Warning"/> (surfaced, never dropped). The exact type→kind
 /// table is calibrated against real <c>codex exec --json</c> output when execution is wired (B0.4); the
 /// normalization shape tested here is the stable contract.</para>
@@ -88,22 +88,25 @@ public sealed class CodexHarness : IAgentHarness, IModelCredentialProjector, IMc
         };
     }
 
-    public AgentEvent? ParseEvent(string rawLine)
+    public IReadOnlyList<AgentEvent> ParseEvents(string rawLine)
     {
         var line = rawLine.Trim();
-        if (line.Length == 0) return null;
+        if (line.Length == 0) return Array.Empty<AgentEvent>();
 
         JsonElement root;
         using (var doc = TryParse(line))
         {
-            if (doc is null || doc.RootElement.ValueKind != JsonValueKind.Object) return null;
+            if (doc is null || doc.RootElement.ValueKind != JsonValueKind.Object) return Array.Empty<AgentEvent>();
             root = doc.RootElement.Clone();
         }
 
         var type = ReadType(root);
-        if (type is null) return null;
+        if (type is null) return Array.Empty<AgentEvent>();
 
-        return new AgentEvent { Kind = MapKind(type), Text = ReadText(root, type), Data = root };
+        // Codex's `exec --json` emits ONE event object per JSONL line, so a line maps to a single event (the full
+        // root is retained as Data, and a large payload is offloaded downstream). The list contract lets a future
+        // multi-block stream surface several — Codex just never packs more than one per line today.
+        return new[] { new AgentEvent { Kind = MapKind(type), Text = ReadText(root, type), Data = root } };
     }
 
     public AgentRunResult BuildResult(IReadOnlyList<AgentEvent> events, int exitCode)
