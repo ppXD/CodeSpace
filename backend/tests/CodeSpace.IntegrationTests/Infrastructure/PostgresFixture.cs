@@ -263,6 +263,27 @@ public sealed class PostgresFixture : IAsyncLifetime
             .As<CodeSpace.Core.Services.Workflows.Llm.IStructuredLLMClient>()
             .SingleInstance();
 
+        // S0a real-model phase-authorship instrument: a RECORD/REPLAY decorator over the REAL AnthropicClient,
+        // under its OWN provider tag (RecordReplayStructuredLLMClient.ProviderTag), so the LLMClientRegistry holds
+        // it alongside the real client + the deterministic fakes without a duplicate-provider collision. The
+        // RealModelPhaseAuthorshipFlowTests retarget the planner node at this tag; every OTHER test ignores it.
+        // Mode is decided per-fixture: RECORD when a real API key is present (the inner real client can reach a
+        // model + the transcript is written), else REPLAY from the committed cassette. Construction is cheap +
+        // never calls a model, so registering it for all fixtures is harmless — it only delegates on a real call.
+        builder.Register(c =>
+            {
+                var inner = c.Resolve<CodeSpace.Core.Services.Workflows.Llm.Anthropic.AnthropicClient>();
+                var cassettePath = Workflows.Infrastructure.RealModelCassettePaths.PlannerCassettePath;
+                var hasKey = !string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable(CodeSpace.Core.Services.Workflows.Llm.Anthropic.AnthropicClient.ApiKeyEnvVar));
+
+                return hasKey
+                    ? Workflows.Infrastructure.RecordReplayStructuredLLMClient.ForRecording(inner, cassettePath)
+                    : Workflows.Infrastructure.RecordReplayStructuredLLMClient.ForReplay(cassettePath);
+            })
+            .As<CodeSpace.Core.Services.Workflows.Llm.ILLMClient>()
+            .As<CodeSpace.Core.Services.Workflows.Llm.IStructuredLLMClient>()
+            .SingleInstance();
+
         // PR-E E3 supervisor: a deterministic, test-controllable decider registered OVER the production
         // LlmSupervisorDecider (last-wins), so the supervisor node's own DI scope resolves THIS — driving the
         // REAL turn service + executor with no LLM. The fixture-singleton script knob lets a test pick the arc
