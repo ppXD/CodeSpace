@@ -26,8 +26,13 @@ public interface IAgentHarness
     /// <summary>Translate the task envelope into a concrete sandbox invocation (executable + args + env + cwd + timeout) for an <see cref="ISandboxRunner"/>.</summary>
     SandboxSpec BuildInvocation(AgentTask task);
 
-    /// <summary>Map one line of the harness's native output stream to a normalized <see cref="AgentEvent"/>; returns null for lines that carry no event (blank / unparseable noise).</summary>
-    AgentEvent? ParseEvent(string rawLine);
+    /// <summary>
+    /// Map one line of the harness's native output stream to zero or more normalized <see cref="AgentEvent"/>s.
+    /// ONE native line can carry several content blocks (e.g. a Claude assistant turn with reasoning + a tool_use +
+    /// text) — each becomes its own event, in stream order, so the durable log is FAITHFUL rather than first-block-only.
+    /// Returns an empty list for lines that carry no event (blank / setup / unparseable noise) — never null.
+    /// </summary>
+    IReadOnlyList<AgentEvent> ParseEvents(string rawLine);
 
     /// <summary>Fold the run's normalized events + process exit code into the normalized <see cref="AgentRunResult"/>.</summary>
     AgentRunResult BuildResult(IReadOnlyList<AgentEvent> events, int exitCode);

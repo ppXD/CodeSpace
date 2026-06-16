@@ -649,8 +649,8 @@ public sealed class AgentRunReattachFlowTests : IDisposable
 
         public SandboxSpec BuildInvocation(AgentTask task) => new() { Command = "/bin/sh", Args = new[] { "-c", "true" }, TimeoutSeconds = task.TimeoutSeconds };
 
-        public AgentEvent? ParseEvent(string rawLine) =>
-            string.IsNullOrWhiteSpace(rawLine) ? null : new AgentEvent { Kind = AgentEventKind.AssistantMessage, Text = rawLine.Trim() };
+        public IReadOnlyList<AgentEvent> ParseEvents(string rawLine) =>
+            string.IsNullOrWhiteSpace(rawLine) ? Array.Empty<AgentEvent>() : new[] { new AgentEvent { Kind = AgentEventKind.AssistantMessage, Text = rawLine.Trim() } };
 
         public AgentRunResult BuildResult(IReadOnlyList<AgentEvent> events, int exitCode) =>
             exitCode == 0
@@ -676,10 +676,10 @@ public sealed class AgentRunReattachFlowTests : IDisposable
 
         public SandboxSpec BuildInvocation(AgentTask task) => new() { Command = "/bin/sh", Args = new[] { "-c", "true" }, Environment = task.Environment, TimeoutSeconds = task.TimeoutSeconds };
 
-        public AgentEvent? ParseEvent(string rawLine)
+        public IReadOnlyList<AgentEvent> ParseEvents(string rawLine)
         {
             var line = rawLine.Trim();
-            return line.Length == 0 ? null : new AgentEvent { Kind = AgentEventKind.AssistantMessage, Text = line, Data = JsonSerializer.SerializeToElement(new { line }) };
+            return line.Length == 0 ? Array.Empty<AgentEvent>() : new[] { new AgentEvent { Kind = AgentEventKind.AssistantMessage, Text = line, Data = JsonSerializer.SerializeToElement(new { line }) } };
         }
 
         public AgentRunResult BuildResult(IReadOnlyList<AgentEvent> events, int exitCode) =>

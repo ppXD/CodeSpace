@@ -100,30 +100,30 @@ public sealed class ClaudeCodeHarness : IAgentHarness, IModelCredentialProjector
         };
     }
 
-    public AgentEvent? ParseEvent(string rawLine)
+    public IReadOnlyList<AgentEvent> ParseEvents(string rawLine)
     {
         var line = rawLine.Trim();
-        if (line.Length == 0) return null;
+        if (line.Length == 0) return Array.Empty<AgentEvent>();
 
         JsonElement root;
         using (var doc = TryParse(line))
         {
-            if (doc is null || doc.RootElement.ValueKind != JsonValueKind.Object) return null;
+            if (doc is null || doc.RootElement.ValueKind != JsonValueKind.Object) return Array.Empty<AgentEvent>();
             root = doc.RootElement.Clone();
         }
 
         var type = ReadString(root, "type");
-        if (type.Length == 0) return null;
+        if (type.Length == 0) return Array.Empty<AgentEvent>();
 
         if (type.Contains("result", StringComparison.OrdinalIgnoreCase))
-            return new AgentEvent { Kind = IsErrorResult(root) ? AgentEventKind.Error : AgentEventKind.Completed, Text = ReadResultText(root), Data = root };
+            return new[] { new AgentEvent { Kind = IsErrorResult(root) ? AgentEventKind.Error : AgentEventKind.Completed, Text = ReadResultText(root), Data = root } };
 
         if (type is "assistant" or "user")
-            return ReadContentEvent(root);
+            return ReadContentEvents(root);
 
-        if (type is "system") return null;   // init / setup lines carry no run step
+        if (type is "system") return Array.Empty<AgentEvent>();   // init / setup lines carry no run step
 
-        return new AgentEvent { Kind = AgentEventKind.Warning, Text = type, Data = root };   // unknown → surfaced, never dropped
+        return new[] { new AgentEvent { Kind = AgentEventKind.Warning, Text = type, Data = root } };   // unknown → surfaced, never dropped
     }
 
     public AgentRunResult BuildResult(IReadOnlyList<AgentEvent> events, int exitCode)
@@ -195,11 +195,19 @@ public sealed class ClaudeCodeHarness : IAgentHarness, IModelCredentialProjector
     private static string PermissionMode(AgentPermissions permissions) =>
         permissions.WriteScope == AgentWriteScope.ReadOnly ? "plan" : "bypassPermissions";
 
-    /// <summary>Classify an assistant/user turn from the first meaningful content block (text → message, tool_use → command/file/tool, tool_result → command output).</summary>
-    private static AgentEvent? ReadContentEvent(JsonElement root)
+    /// <summary>
+    /// Map EVERY content block of an assistant/user turn to its own event, in stream order — text → AssistantMessage,
+    /// thinking → Reasoning, tool_use → command/file/tool, tool_result → command output. A single turn routinely
+    /// carries several blocks (reasoning, then a tool_use, then text); emitting them all is what makes the durable
+    /// log a faithful replay instead of a first-block-only summary. Each event keeps its OWN block as Data (a large
+    /// reasoning / tool_result payload is offloaded downstream), so the row stays bounded.
+    /// </summary>
+    private static IReadOnlyList<AgentEvent> ReadContentEvents(JsonElement root)
     {
-        if (!root.TryGetProperty("message", out var message) || message.ValueKind != JsonValueKind.Object) return null;
-        if (!message.TryGetProperty("content", out var content) || content.ValueKind != JsonValueKind.Array) return null;
+        if (!root.TryGetProperty("message", out var message) || message.ValueKind != JsonValueKind.Object) return Array.Empty<AgentEvent>();
+        if (!message.TryGetProperty("content", out var content) || content.ValueKind != JsonValueKind.Array) return Array.Empty<AgentEvent>();
+
+        var events = new List<AgentEvent>();
 
         foreach (var block in content.EnumerateArray())
         {
@@ -208,17 +216,21 @@ public sealed class ClaudeCodeHarness : IAgentHarness, IModelCredentialProjector
             var blockType = ReadString(block, "type");
 
             if (blockType == "text" && ReadString(block, "text") is { Length: > 0 } text)
-                return new AgentEvent { Kind = AgentEventKind.AssistantMessage, Text = text, Data = block.Clone() };
-
-            if (blockType == "tool_use")
-                return new AgentEvent { Kind = ClassifyTool(ReadString(block, "name")), Text = ToolText(block), Data = block.Clone() };
-
-            if (blockType == "tool_result" && ReadResultBlockText(block) is { Length: > 0 } resultText)
-                return new AgentEvent { Kind = AgentEventKind.CommandExecuted, Text = resultText, Data = block.Clone() };
+                events.Add(new AgentEvent { Kind = AgentEventKind.AssistantMessage, Text = text, Data = block.Clone() });
+            else if (blockType == "thinking" && ReadThinkingText(block) is { Length: > 0 } thinking)
+                events.Add(new AgentEvent { Kind = AgentEventKind.Reasoning, Text = thinking, Data = block.Clone() });
+            else if (blockType == "tool_use")
+                events.Add(new AgentEvent { Kind = ClassifyTool(ReadString(block, "name")), Text = ToolText(block), Data = block.Clone() });
+            else if (blockType == "tool_result" && ReadResultBlockText(block) is { Length: > 0 } resultText)
+                events.Add(new AgentEvent { Kind = AgentEventKind.CommandExecuted, Text = resultText, Data = block.Clone() });
         }
 
-        return null;
+        return events;
     }
+
+    /// <summary>A Claude <c>thinking</c> block carries its raw reasoning under <c>thinking</c> (older builds: <c>text</c>) — the durable reasoning trace.</summary>
+    private static string ReadThinkingText(JsonElement block) =>
+        ReadString(block, "thinking") is { Length: > 0 } t ? t : ReadString(block, "text");
 
     /// <summary>Tool name → normalized kind, tolerant (Claude's built-ins: Bash, Edit/Write/MultiEdit/NotebookEdit, Read/Grep/Glob, MCP tools).</summary>
     private static AgentEventKind ClassifyTool(string name)

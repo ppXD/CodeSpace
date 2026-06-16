@@ -121,10 +121,40 @@ public class ClaudeCodeHarnessTests
     [Fact]
     public void Parses_an_assistant_text_block_as_an_assistant_message()
     {
-        var ev = Harness.ParseEvent("""{"type":"assistant","message":{"content":[{"type":"text","text":"Looking into the billing tests."}]}}""");
+        var ev = Harness.ParseEvents("""{"type":"assistant","message":{"content":[{"type":"text","text":"Looking into the billing tests."}]}}""").Single();
 
-        ev!.Kind.ShouldBe(AgentEventKind.AssistantMessage);
+        ev.Kind.ShouldBe(AgentEventKind.AssistantMessage);
         ev.Text.ShouldBe("Looking into the billing tests.");
+    }
+
+    [Fact]
+    public void Emits_every_content_block_of_a_multi_block_assistant_turn_in_order()
+    {
+        // D3b-ii crown jewel: ONE assistant line routinely carries reasoning + text + a tool_use. The faithful log
+        // must surface ALL of them, in stream order — not just the first block. A regression to first-block-only
+        // (the prior behavior) silently drops the agent's reasoning and its tool call from the durable trace.
+        var events = Harness.ParseEvents("""{"type":"assistant","message":{"content":[{"type":"thinking","thinking":"The failing test is in Invoice.cs — I should read it first."},{"type":"text","text":"Let me inspect the billing code."},{"type":"tool_use","name":"Bash","input":{"command":"npm test"}}]}}""");
+
+        events.Count.ShouldBe(3, "every block becomes its own event — reasoning, message, and tool call");
+
+        events[0].Kind.ShouldBe(AgentEventKind.Reasoning, "the thinking block is captured as reasoning — not dropped");
+        events[0].Text.ShouldBe("The failing test is in Invoice.cs — I should read it first.");
+
+        events[1].Kind.ShouldBe(AgentEventKind.AssistantMessage);
+        events[1].Text.ShouldBe("Let me inspect the billing code.");
+
+        events[2].Kind.ShouldBe(AgentEventKind.CommandExecuted, "the tool_use after the text is still surfaced");
+        events[2].Text.ShouldBe("npm test");
+    }
+
+    [Fact]
+    public void A_thinking_only_assistant_turn_surfaces_one_reasoning_event()
+    {
+        var events = Harness.ParseEvents("""{"type":"assistant","message":{"content":[{"type":"thinking","thinking":"Planning the fix."}]}}""");
+
+        events.ShouldHaveSingleItem();
+        events[0].Kind.ShouldBe(AgentEventKind.Reasoning);
+        events[0].Text.ShouldBe("Planning the fix.");
     }
 
     [Theory]
@@ -134,27 +164,27 @@ public class ClaudeCodeHarnessTests
     [InlineData("""{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Read","input":{"file_path":"src/Invoice.cs"}}]}}""", AgentEventKind.ToolCall, "src/Invoice.cs")]
     public void Classifies_tool_use_blocks_by_tool_name(string json, AgentEventKind expected, string expectedText)
     {
-        var ev = Harness.ParseEvent(json);
+        var ev = Harness.ParseEvents(json).Single();
 
-        ev!.Kind.ShouldBe(expected);
+        ev.Kind.ShouldBe(expected);
         ev.Text.ShouldBe(expectedText, customMessage: "the tool line renders its most descriptive input field");
     }
 
     [Fact]
     public void Parses_a_tool_result_as_command_output()
     {
-        var ev = Harness.ParseEvent("""{"type":"user","message":{"content":[{"type":"tool_result","content":"3 passing, 0 failing"}]}}""");
+        var ev = Harness.ParseEvents("""{"type":"user","message":{"content":[{"type":"tool_result","content":"3 passing, 0 failing"}]}}""").Single();
 
-        ev!.Kind.ShouldBe(AgentEventKind.CommandExecuted);
+        ev.Kind.ShouldBe(AgentEventKind.CommandExecuted);
         ev.Text.ShouldBe("3 passing, 0 failing");
     }
 
     [Fact]
     public void Parses_the_result_event_as_completed_with_its_summary()
     {
-        var ev = Harness.ParseEvent("""{"type":"result","subtype":"success","result":"Fixed the billing tests.","is_error":false}""");
+        var ev = Harness.ParseEvents("""{"type":"result","subtype":"success","result":"Fixed the billing tests.","is_error":false}""").Single();
 
-        ev!.Kind.ShouldBe(AgentEventKind.Completed);
+        ev.Kind.ShouldBe(AgentEventKind.Completed);
         ev.Text.ShouldBe("Fixed the billing tests.");
     }
 
@@ -164,15 +194,15 @@ public class ClaudeCodeHarnessTests
     public void Parses_an_error_result_event_as_an_error_not_completed(string json)
     {
         // A failed result must surface as Error so the timeline doesn't render a failure as a clean "done".
-        var ev = Harness.ParseEvent(json);
+        var ev = Harness.ParseEvents(json).Single();
 
-        ev!.Kind.ShouldBe(AgentEventKind.Error);
+        ev.Kind.ShouldBe(AgentEventKind.Error);
     }
 
     [Fact]
     public void System_init_lines_carry_no_event()
     {
-        Harness.ParseEvent("""{"type":"system","subtype":"init","cwd":"/tmp/ws"}""").ShouldBeNull();
+        Harness.ParseEvents("""{"type":"system","subtype":"init","cwd":"/tmp/ws"}""").ShouldBeEmpty();
     }
 
     [Theory]
@@ -181,17 +211,17 @@ public class ClaudeCodeHarnessTests
     [InlineData("not json at all")]
     [InlineData("[1,2,3]")]                 // valid json but not an object
     [InlineData("""{"foo":"bar"}""")]       // object with no type
-    public void Returns_null_for_blank_or_typeless_lines(string line)
+    public void Returns_no_events_for_blank_or_typeless_lines(string line)
     {
-        Harness.ParseEvent(line).ShouldBeNull();
+        Harness.ParseEvents(line).ShouldBeEmpty();
     }
 
     [Fact]
     public void An_unknown_event_type_is_surfaced_as_a_warning_never_dropped()
     {
-        var ev = Harness.ParseEvent("""{"type":"some_future_event_kind","detail":"x"}""");
+        var ev = Harness.ParseEvents("""{"type":"some_future_event_kind","detail":"x"}""").Single();
 
-        ev!.Kind.ShouldBe(AgentEventKind.Warning);
+        ev.Kind.ShouldBe(AgentEventKind.Warning);
         ev.Text.ShouldBe("some_future_event_kind");
     }
 
@@ -231,7 +261,7 @@ public class ClaudeCodeHarnessTests
     {
         // D3b-i: Claude's final result line carries a usage object; parsed via the harness (so Data is the
         // real root) it must surface as AgentRunResult.TokenUsage for cost accounting.
-        var resultLine = Harness.ParseEvent("""{"type":"result","subtype":"success","result":"done","is_error":false,"usage":{"input_tokens":920,"output_tokens":175,"cache_read_input_tokens":40}}""")!;
+        var resultLine = Harness.ParseEvents("""{"type":"result","subtype":"success","result":"done","is_error":false,"usage":{"input_tokens":920,"output_tokens":175,"cache_read_input_tokens":40}}""").Single();
         var events = new[] { new AgentEvent { Kind = AgentEventKind.AssistantMessage, Text = "working" }, resultLine };
 
         var result = Harness.BuildResult(events, exitCode: 0);
