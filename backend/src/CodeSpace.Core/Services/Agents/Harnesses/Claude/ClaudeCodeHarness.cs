@@ -133,8 +133,12 @@ public sealed class ClaudeCodeHarness : IAgentHarness, IModelCredentialProjector
                        ?? events.LastOrDefault(e => e.Kind == AgentEventKind.Completed)
                        ?? events.LastOrDefault(e => e.Kind == AgentEventKind.AssistantMessage))?.Text;
 
+        // D3b-i: cost-accounting figure — Claude's final result line carries a usage object; the reader
+        // tolerantly extracts input/output tokens from it. Null when the stream carried none. On failure too.
+        var usage = AgentTokenUsageReader.TryRead(events);
+
         if (exitCode == 0)
-            return new AgentRunResult { Status = AgentRunStatus.Succeeded, ExitReason = "completed", Summary = summary, ChangedFiles = changedFiles };
+            return new AgentRunResult { Status = AgentRunStatus.Succeeded, ExitReason = "completed", Summary = summary, ChangedFiles = changedFiles, TokenUsage = usage };
 
         // Surface the most actionable text we have: an explicit Error event, else the CLI's final
         // message (on a non-zero exit that's the failure reason — e.g. a provider 401), else the bare
@@ -144,7 +148,7 @@ public sealed class ClaudeCodeHarness : IAgentHarness, IModelCredentialProjector
                     ?? (string.IsNullOrWhiteSpace(summary) ? null : summary)
                     ?? $"claude exited with code {exitCode}";
 
-        return new AgentRunResult { Status = AgentRunStatus.Failed, ExitReason = "non-zero-exit", Summary = summary, ChangedFiles = changedFiles, Error = error };
+        return new AgentRunResult { Status = AgentRunStatus.Failed, ExitReason = "non-zero-exit", Summary = summary, ChangedFiles = changedFiles, Error = error, TokenUsage = usage };
     }
 
     /// <summary>Direct Anthropic, or any Anthropic-compatible gateway/proxy via a base-URL + auth-token override ("Custom").</summary>

@@ -111,8 +111,12 @@ public sealed class CodexHarness : IAgentHarness, IModelCredentialProjector, IMc
         var changedFiles = events.Where(e => e.Kind == AgentEventKind.FileChanged).Select(e => e.Text).Where(t => t.Length > 0).Distinct().ToList();
         var summary = (events.LastOrDefault(e => e.Kind == AgentEventKind.FinalSummary) ?? events.LastOrDefault(e => e.Kind == AgentEventKind.AssistantMessage))?.Text;
 
+        // D3b-i: cost-accounting figure — Codex emits a cumulative token_count event per turn, so the last
+        // recognizable usage is the run total. Null when the stream carried none. Useful on failure too.
+        var usage = AgentTokenUsageReader.TryRead(events);
+
         if (exitCode == 0)
-            return new AgentRunResult { Status = AgentRunStatus.Succeeded, ExitReason = "completed", Summary = summary, ChangedFiles = changedFiles };
+            return new AgentRunResult { Status = AgentRunStatus.Succeeded, ExitReason = "completed", Summary = summary, ChangedFiles = changedFiles, TokenUsage = usage };
 
         // Prefer an explicit Error event, else the CLI's final message (on a non-zero exit that's the
         // failure reason — e.g. a provider 401), else the bare exit code — so the real reason reaches
@@ -121,7 +125,7 @@ public sealed class CodexHarness : IAgentHarness, IModelCredentialProjector, IMc
                     ?? (string.IsNullOrWhiteSpace(summary) ? null : summary)
                     ?? $"codex exited with code {exitCode}";
 
-        return new AgentRunResult { Status = AgentRunStatus.Failed, ExitReason = "non-zero-exit", Summary = summary, ChangedFiles = changedFiles, Error = error };
+        return new AgentRunResult { Status = AgentRunStatus.Failed, ExitReason = "non-zero-exit", Summary = summary, ChangedFiles = changedFiles, Error = error, TokenUsage = usage };
     }
 
     /// <summary>Codex drives OpenAI + any OpenAI-API-compatible endpoint (OpenRouter, a self-hosted gateway, a local Ollama) via a base-URL override.</summary>

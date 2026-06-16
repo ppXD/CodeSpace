@@ -181,6 +181,29 @@ public class CodexHarnessTests
     }
 
     [Fact]
+    public void Build_result_populates_token_usage_from_a_token_count_event()
+    {
+        // D3b-i: a real codex token_count event carries the cumulative usage under info.total_token_usage.
+        // Parsed via the harness (so Data is the real root), it must surface as AgentRunResult.TokenUsage.
+        var tokenCount = Harness.ParseEvent("{\"type\":\"token_count\",\"info\":{\"total_token_usage\":{\"input_tokens\":1850,\"output_tokens\":420}}}")!;
+        var events = new[] { new AgentEvent { Kind = AgentEventKind.AssistantMessage, Text = "done" }, tokenCount };
+
+        var result = Harness.BuildResult(events, exitCode: 0);
+
+        result.TokenUsage.ShouldNotBeNull("the run's token usage is captured for cost accounting");
+        result.TokenUsage!.InputTokens.ShouldBe(1850);
+        result.TokenUsage.OutputTokens.ShouldBe(420);
+    }
+
+    [Fact]
+    public void Build_result_leaves_token_usage_null_when_the_stream_reported_none()
+    {
+        var events = new[] { new AgentEvent { Kind = AgentEventKind.AssistantMessage, Text = "done" } };
+
+        Harness.BuildResult(events, exitCode: 0).TokenUsage.ShouldBeNull("no usage event → no figure, never a fabricated zero");
+    }
+
+    [Fact]
     public void Version_uses_the_default_then_the_env_override()
     {
         var original = System.Environment.GetEnvironmentVariable(CodexHarness.VersionEnvVar);

@@ -227,6 +227,29 @@ public class ClaudeCodeHarnessTests
     }
 
     [Fact]
+    public void Build_result_populates_token_usage_from_the_result_lines_usage_object()
+    {
+        // D3b-i: Claude's final result line carries a usage object; parsed via the harness (so Data is the
+        // real root) it must surface as AgentRunResult.TokenUsage for cost accounting.
+        var resultLine = Harness.ParseEvent("""{"type":"result","subtype":"success","result":"done","is_error":false,"usage":{"input_tokens":920,"output_tokens":175,"cache_read_input_tokens":40}}""")!;
+        var events = new[] { new AgentEvent { Kind = AgentEventKind.AssistantMessage, Text = "working" }, resultLine };
+
+        var result = Harness.BuildResult(events, exitCode: 0);
+
+        result.TokenUsage.ShouldNotBeNull("the run's token usage is captured for cost accounting");
+        result.TokenUsage!.InputTokens.ShouldBe(920);
+        result.TokenUsage.OutputTokens.ShouldBe(175);
+    }
+
+    [Fact]
+    public void Build_result_leaves_token_usage_null_when_the_stream_reported_none()
+    {
+        var events = new[] { new AgentEvent { Kind = AgentEventKind.AssistantMessage, Text = "done" } };
+
+        Harness.BuildResult(events, exitCode: 0).TokenUsage.ShouldBeNull("no usage object → no figure, never a fabricated zero");
+    }
+
+    [Fact]
     public void Build_result_falls_back_to_an_exit_code_error_when_no_error_event()
     {
         Harness.BuildResult(Array.Empty<AgentEvent>(), exitCode: 137).Error.ShouldContain("137");
