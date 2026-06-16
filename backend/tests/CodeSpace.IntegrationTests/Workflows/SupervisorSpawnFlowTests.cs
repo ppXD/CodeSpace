@@ -112,6 +112,11 @@ public class SupervisorSpawnFlowTests : IDisposable
                 spawned.Count.ShouldBe(2);
                 spawned.ShouldAllBe(r => r.TeamId == teamId && r.WorkflowRunId == runId && r.NodeId == "sup" && r.Status == AgentRunStatus.Queued);
 
+                // D4: both spawns of turn 1 carry the TURN-grain owning cell key (<nodeId>#turn{N}) — addressable to
+                // the turn that spawned them. (The finer per-spawn #{k} grain lives on the wait rows above; the agent
+                // run records the turn cell.) A reverted/empty key would fail here.
+                spawned.Select(r => r.IterationKey).Distinct().ShouldBe(new[] { "sup#turn1" });
+
                 // Both were dispatched to the executor on suspend (the post-commit DispatchPendingAgentRunAsync).
                 var dispatched = jobClient.Calls.Where(c => c.ServiceType == typeof(IAgentRunExecutor) && c.MethodName == nameof(IAgentRunExecutor.ExecuteAsync)).Select(c => c.RunId).ToList();
                 dispatched.ShouldContain(agent0);
@@ -345,7 +350,7 @@ public class SupervisorSpawnFlowTests : IDisposable
             using (var scope = _fixture.BeginScope())
             {
                 var runs = scope.Resolve<IAgentRunService>();
-                orphanAgentId = (await runs.CreateAsync(new AgentTask { Goal = "do alpha", Harness = "codex-cli", Autonomy = AgentAutonomyLevel.Standard }, teamId, runId, "sup", CancellationToken.None)).Id;
+                orphanAgentId = (await runs.CreateAsync(new AgentTask { Goal = "do alpha", Harness = "codex-cli", Autonomy = AgentAutonomyLevel.Standard }, teamId, runId, "sup", iterationKey: "", cancellationToken: CancellationToken.None)).Id;
 
                 var db = scope.Resolve<CodeSpaceDbContext>();
                 db.SupervisorDecisionRecord.Add(StuckRunningSpawnDecision(runId, teamId, turnNumber: 1));

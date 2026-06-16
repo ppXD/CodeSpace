@@ -26,11 +26,11 @@ public sealed class ThrowingAgentRunService : IAgentRunService
     /// <summary>The message the injected fault carries — asserted by the test so the throw can't be confused with a real failure.</summary>
     public const string FaultMessage = "injected fault: simulated crash mid spawn fan-out";
 
-    public Task<AgentRun> CreateAsync(AgentTask task, Guid teamId, Guid? workflowRunId, string? nodeId, CancellationToken cancellationToken)
+    public Task<AgentRun> CreateAsync(AgentTask task, Guid teamId, Guid? workflowRunId, string? nodeId, string iterationKey = "", CancellationToken cancellationToken = default)
     {
         if (++_calls == _throwOnCall) throw new InvalidOperationException(FaultMessage);
 
-        return _inner.CreateAsync(task, teamId, workflowRunId, nodeId, cancellationToken);
+        return _inner.CreateAsync(task, teamId, workflowRunId, nodeId, iterationKey, cancellationToken);
     }
 
     public Task<long> MarkRunningAsync(Guid runId, CancellationToken cancellationToken) => _inner.MarkRunningAsync(runId, cancellationToken);

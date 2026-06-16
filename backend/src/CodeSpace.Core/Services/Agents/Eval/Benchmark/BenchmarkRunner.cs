@@ -52,7 +52,7 @@ public sealed class BenchmarkRunner : IBenchmarkRunner, IScopedDependency
         // result so the cli vs cli-mcp rows can never be mislabeled relative to what the run actually did.
         var mcpEnabled = AgentRunExecutor.ShouldOpenMcpEndpoint(agentTask);
 
-        var run = await _runs.CreateAsync(agentTask, teamId, null, null, cancellationToken).ConfigureAwait(false);
+        var run = await _runs.CreateAsync(agentTask, teamId, null, null, iterationKey: "", cancellationToken).ConfigureAwait(false);
 
         await _executor.ExecuteAsync(run.Id, cancellationToken).ConfigureAwait(false);
 

@@ -281,6 +281,96 @@ public class MapAgentResumeFlowTests
         }
     }
 
+    [Fact]
+    public async Task Each_map_branch_agent_run_is_stamped_with_its_own_cell_iteration_key()
+    {
+        // D4 correlation spine: N agent.code branches under ONE map node used to be INDISTINGUISHABLE in the
+        // agent-run store — every branch shared (WorkflowRunId, NodeId). Now each AgentRun carries its owning
+        // CELL's iteration key (<mapId>#<i>) — byte-identical to the value the engine stamps on that branch's
+        // WorkflowRunWait + workflow_run_node cell — so a branch's agent run is addressable, and a future
+        // from-cell rerun can target ONE branch's run rather than all N.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var workflowId = await CreateWorkflowAsync(teamId, userId, MapOverAgentCodeDefinition());
+        var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId, payloadJson: """{ "things": ["a", "b", "c"] }""");
+
+        var jobClient = ResolveJobClient();
+        jobClient.Clear();
+        jobClient.AutoExecute = false;   // binary-less harness must not run; we only need the staged rows
+
+        try
+        {
+            await RunEngineAsync(runId);   // 3 branches each park a real AgentRun under map#0 / map#1 / map#2
+
+            using var verify = _fixture.BeginScope();
+            var db = verify.Resolve<CodeSpaceDbContext>();
+
+            (await db.WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == runId)).Status.ShouldBe(WorkflowRunStatus.Suspended);
+
+            var agentRuns = await db.AgentRun.AsNoTracking().Where(r => r.WorkflowRunId == runId).ToListAsync();
+
+            agentRuns.Count.ShouldBe(3, "each of the 3 map branches staged its own agent run");
+            agentRuns.ShouldAllBe(r => r.NodeId == "agent", "all three share the map-body node id — only the iteration key distinguishes them");
+            // Each branch's agent run carries its OWN cell iteration key — the N runs under one node are now
+            // distinguishable (D4); previously all three shared (WorkflowRunId, NodeId) and collapsed to one identity.
+            agentRuns.Select(r => r.IterationKey).OrderBy(k => k).ShouldBe(new[] { "map#0", "map#1", "map#2" });
+
+            // The iteration key on each agent run is byte-identical to the value on its OWN wait row (the wait
+            // Token == the agent run id), proving the agent run joins back to its EXACT (run, node, iteration)
+            // cell — not an approximation.
+            foreach (var ar in agentRuns)
+            {
+                var waitKey = await db.WorkflowRunWait.AsNoTracking()
+                    .Where(w => w.RunId == runId && w.WaitKind == WorkflowWaitKinds.AgentRun && w.Token == ar.Id.ToString())
+                    .Select(w => w.IterationKey).SingleAsync();
+                ar.IterationKey.ShouldBe(waitKey,
+                    customMessage: $"agent run {ar.Id} must carry the SAME cell key as its wait row — exact (run, node, iteration) correlation");
+            }
+        }
+        finally
+        {
+            jobClient.AutoExecute = true;
+        }
+    }
+
+    [Fact]
+    public async Task A_loop_body_agent_run_is_stamped_with_its_loop_iteration_cell_key()
+    {
+        // Companion to the map crown-jewel — the AgentRun.IterationKey doc + migration both claim loop coverage.
+        // A flow.loop body's agent.code parks its AgentRun under the loop's iteration cell <loopId>#<i>, proving
+        // the SAME engine threading (SuspendNodeAsync → CreateAsync) covers loop iterations, not just map branches.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var workflowId = await CreateWorkflowAsync(teamId, userId, LoopOverAgentCodeDefinition());
+        var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId, payloadJson: "{}");
+
+        var jobClient = ResolveJobClient();
+        jobClient.Clear();
+        jobClient.AutoExecute = false;
+
+        try
+        {
+            await RunEngineAsync(runId);   // iteration 0's agent.code parks one AgentRun under loop#0
+
+            using var verify = _fixture.BeginScope();
+            var db = verify.Resolve<CodeSpaceDbContext>();
+
+            (await db.WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == runId)).Status.ShouldBe(WorkflowRunStatus.Suspended);
+
+            var agentRun = await db.AgentRun.AsNoTracking().SingleAsync(r => r.WorkflowRunId == runId);
+            agentRun.NodeId.ShouldBe("agent");
+            agentRun.IterationKey.ShouldBe("loop#0",
+                customMessage: "a loop-body agent run carries its iteration cell key <loopId>#<i> — NOT empty (D4, same threading as map)");
+
+            var waitKey = await db.WorkflowRunWait.AsNoTracking()
+                .Where(w => w.RunId == runId && w.WaitKind == WorkflowWaitKinds.AgentRun && w.Token == agentRun.Id.ToString())
+                .Select(w => w.IterationKey).SingleAsync();
+            agentRun.IterationKey.ShouldBe(waitKey, "the loop-body agent run shares its wait row's exact cell key");
+        }
+        finally
+        {
+            jobClient.AutoExecute = true;
+        }
+    }
+
     // ─── Helpers ────────────────────────────────────────────────────────────────
 
     private static async Task<Core.Persistence.Entities.WorkflowRunNode> MapNodeAsync(CodeSpaceDbContext db, Guid runId) =>
@@ -434,6 +524,29 @@ public class MapAgentResumeFlowTests
             new() { From = "start", To = "map" },
             new() { From = "map", To = "end" },
             new() { From = "ms", To = "agent" },
+        },
+    };
+
+    // manual → loop(maxIterations:1; body: ls → agent[REAL agent.code]) → terminal. The body's agent.code parks
+    // an AgentRun under the loop iteration cell loop#0 — the loop analogue of the map branch case.
+    private static WorkflowDefinition LoopOverAgentCodeDefinition() => new()
+    {
+        SchemaVersion = 1,
+        Nodes = new List<NodeDefinition>
+        {
+            new() { Id = "start", TypeKey = "trigger.manual", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
+            new() { Id = "loop", TypeKey = "flow.loop", Config = WorkflowsTestSeed.Json("""{ "maxIterations": 1 }"""), Inputs = WorkflowsTestSeed.EmptyJson() },
+            new() { Id = "ls", TypeKey = "flow.loop_start", ParentId = "loop", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
+            new() { Id = "agent", TypeKey = "agent.code", ParentId = "loop",
+                    Config = WorkflowsTestSeed.Json("""{"goal":"Work the loop body","harness":"codex-cli","model":"gpt-5.3-codex","runnerKind":"local","readOnly":true}"""),
+                    Inputs = WorkflowsTestSeed.EmptyJson() },
+            new() { Id = "end", TypeKey = "builtin.terminal", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
+        },
+        Edges = new List<EdgeDefinition>
+        {
+            new() { From = "start", To = "loop" },
+            new() { From = "loop", To = "end" },
+            new() { From = "ls", To = "agent" },
         },
     };
 }

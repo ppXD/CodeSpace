@@ -66,7 +66,7 @@ public sealed class AgentRunSpoolReaperFlowTests : IDisposable
         using (var scope = _fixture.BeginScope())
         {
             var svc = scope.Resolve<IAgentRunService>();
-            runId = (await svc.CreateAsync(BuildTask(), teamId, null, null, CancellationToken.None)).Id;
+            runId = (await svc.CreateAsync(BuildTask(), teamId, null, null, iterationKey: "", cancellationToken: CancellationToken.None)).Id;
             await svc.MarkRunningAsync(runId, CancellationToken.None);
             await svc.SetRunnerHandleAsync(runId, HandleJson(dir), CancellationToken.None);
         }
@@ -118,7 +118,7 @@ public sealed class AgentRunSpoolReaperFlowTests : IDisposable
         using (var scope = _fixture.BeginScope())
         {
             var svc = scope.Resolve<IAgentRunService>();
-            runId = (await svc.CreateAsync(BuildTask(), teamId, null, null, CancellationToken.None)).Id;
+            runId = (await svc.CreateAsync(BuildTask(), teamId, null, null, iterationKey: "", cancellationToken: CancellationToken.None)).Id;
             var epoch = await svc.MarkRunningAsync(runId, CancellationToken.None);
             await svc.SetRunnerHandleAsync(runId, HandleJson(spoolDir), CancellationToken.None);
             await svc.CompleteAsync(runId, new AgentRunResult { Status = AgentRunStatus.Succeeded, ExitReason = "done" }, epoch, CancellationToken.None);

@@ -2382,7 +2382,7 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
         var correlationToken = waitKind switch
         {
             WorkflowWaitKinds.Subworkflow => (await StageSubworkflowChildAsync(run, token, cancellationToken).ConfigureAwait(false)).ToString(),
-            WorkflowWaitKinds.AgentRun => (await StageAgentRunAsync(run, node, token, cancellationToken).ConfigureAwait(false)).ToString(),
+            WorkflowWaitKinds.AgentRun => (await StageAgentRunAsync(run, node, token, iterationKey, cancellationToken).ConfigureAwait(false)).ToString(),
             _ => token.CorrelationToken ?? Guid.NewGuid().ToString("N"),
         };
 
@@ -2440,7 +2440,7 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
     /// the wait it resumes through exists. Returns the agent-run id, which becomes the wait's
     /// correlation token. A malformed envelope is a clean node failure.
     /// </summary>
-    private async Task<Guid> StageAgentRunAsync(WorkflowRun run, NodeDefinition node, SuspensionToken token, CancellationToken cancellationToken)
+    private async Task<Guid> StageAgentRunAsync(WorkflowRun run, NodeDefinition node, SuspensionToken token, string iterationKey, CancellationToken cancellationToken)
     {
         AgentTask task;
 
@@ -2466,7 +2466,10 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
             throw new NodeFailureException($"Node '{node.Id}': {ex.Message}");
         }
 
-        var agentRun = await _agentRunService.CreateAsync(task, run.TeamId, run.Id, node.Id, cancellationToken).ConfigureAwait(false);
+        // iterationKey is the engine's authoritative effective cell key for this suspension (computed in
+        // SuspendNodeAsync from the branch key ?? the token's own key) — identical to the value stamped on the
+        // wait row + workflow_run_node cell, so the agent run joins back to its EXACT cell (D4).
+        var agentRun = await _agentRunService.CreateAsync(task, run.TeamId, run.Id, node.Id, iterationKey, cancellationToken).ConfigureAwait(false);
 
         return agentRun.Id;
     }

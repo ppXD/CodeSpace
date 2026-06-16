@@ -13,6 +13,10 @@ public class AgentRunConfiguration : IEntityTypeConfiguration<AgentRun>
         // Stored as its string name (matches WorkflowRun); 16 chars covers the longest value ("Succeeded"/"Cancelled").
         builder.Property(r => r.Status).HasConversion<string>().HasMaxLength(16);
 
+        // D4 — the owning workflow cell's iteration key (matches workflow_run_node.iteration_key: TEXT NOT NULL
+        // DEFAULT ''). Empty for a top-level / standalone / non-container run.
+        builder.Property(r => r.IterationKey).HasColumnName("iteration_key");
+
         builder.Property(r => r.TaskJson).HasColumnName("task_jsonb").HasColumnType("jsonb");
         builder.Property(r => r.ResultJson).HasColumnName("result_jsonb").HasColumnType("jsonb");
         builder.Property(r => r.RunnerHandleJson).HasColumnName("runner_handle").HasColumnType("jsonb");

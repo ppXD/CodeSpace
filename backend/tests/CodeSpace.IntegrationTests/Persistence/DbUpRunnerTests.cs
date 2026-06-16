@@ -60,6 +60,7 @@ public class DbUpRunnerTests
     [InlineData("agent_run", "fence_epoch", "0046_agent_run_fence_epoch.sql")]             // monotonic fencing token — completion CAS rejects a reclaimed-then-revived worker
     [InlineData("agent_run", "lease_expires_at", "0047_agent_run_lease.sql")]              // DB-owned lease the worker renews; reconciler reclaims on lapse (ground-truth liveness)
     [InlineData("agent_run", "reattach_attempts", "0048_agent_run_reattach_attempts.sql")] // reconciler re-attach reclaim count; bounds attempts so an unattachable-but-alive run is abandoned, not reclaimed forever
+    [InlineData("agent_run", "iteration_key", "0058_agent_run_iteration_key.sql")]          // D4 — owning workflow cell key; the N agent branches a map/loop fan-out spawns under one node become addressable
     [InlineData("tool_call_ledger", "idempotency_key", "0049_tool_call_ledger.sql")]        // the server-derived at-most-once handle (one terminal row per run+key — the exactly-once invariant)
     [InlineData("tool_call_ledger", "approved_by_user_id", "0050_tool_call_ledger_approval.sql")] // durable-HITL approve sub-state — who approved the parked call
     [InlineData("tool_call_ledger", "approved_at", "0050_tool_call_ledger_approval.sql")]          // durable-HITL approve sub-state — NULL distinguishes not-yet-decided from approved-but-unexecuted

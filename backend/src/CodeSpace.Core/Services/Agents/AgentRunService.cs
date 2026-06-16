@@ -21,8 +21,8 @@ namespace CodeSpace.Core.Services.Agents;
 /// </summary>
 public interface IAgentRunService
 {
-    /// <summary>Persist a new run in <see cref="AgentRunStatus.Queued"/> with <paramref name="task"/> as its envelope. workflowRunId/nodeId soft-link the spawning agent.code node (null for a standalone run).</summary>
-    Task<AgentRun> CreateAsync(AgentTask task, Guid teamId, Guid? workflowRunId, string? nodeId, CancellationToken cancellationToken);
+    /// <summary>Persist a new run in <see cref="AgentRunStatus.Queued"/> with <paramref name="task"/> as its envelope. workflowRunId/nodeId/iterationKey soft-link the owning workflow CELL — iterationKey is the spawning node's cell key (empty for a top-level node or a standalone run), so the N branches a map/loop fan-out spawns under one node stay distinguishable (D4 correlation spine).</summary>
+    Task<AgentRun> CreateAsync(AgentTask task, Guid teamId, Guid? workflowRunId, string? nodeId, string iterationKey = "", CancellationToken cancellationToken = default);
 
     /// <summary>
     /// Queued → Running; stamps StartedAt + an initial heartbeat, BUMPS the fencing epoch, and returns the new
@@ -136,7 +136,7 @@ public sealed class AgentRunService : IAgentRunService, IScopedDependency
         _logger = logger;
     }
 
-    public async Task<AgentRun> CreateAsync(AgentTask task, Guid teamId, Guid? workflowRunId, string? nodeId, CancellationToken cancellationToken)
+    public async Task<AgentRun> CreateAsync(AgentTask task, Guid teamId, Guid? workflowRunId, string? nodeId, string iterationKey = "", CancellationToken cancellationToken = default)
     {
         // Fail-closed admission gate (D4a): refuse the run BEFORE persisting if the team or the deployment is at
         // its in-flight cap. Throws AgentRunAdmissionException, which the engine wraps into a clean node failure
@@ -149,6 +149,7 @@ public sealed class AgentRunService : IAgentRunService, IScopedDependency
             TeamId = teamId,
             WorkflowRunId = workflowRunId,
             NodeId = nodeId,
+            IterationKey = iterationKey,
             Harness = task.Harness,
             Status = AgentRunStatus.Queued,
             TaskJson = JsonSerializer.Serialize(task, AgentJson.Options),
