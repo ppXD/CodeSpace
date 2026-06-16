@@ -4,6 +4,7 @@ using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Chat;
 using CodeSpace.Core.Services.Credentials;
+using CodeSpace.Core.Services.Variables;
 using CodeSpace.Core.Services.Workflows;
 using CodeSpace.Core.Services.Workflows.Engine;
 using CodeSpace.Core.Services.Workflows.RunSources;
@@ -32,7 +33,12 @@ namespace CodeSpace.IntegrationTests.Workflows;
 ///   (c) a SUSPEND → RESUME cycle re-loads the inline snapshot on re-entry (durable resume reads
 ///       the run's own definition, not a version row);
 ///   (d) a corrupted snapshot hash trips the same tamper guard an authored version gets;
-///   (e) the AUTHORED path is unaffected — proven by the rest of the engine/workflow suites.</para>
+///   (e) the AUTHORED path is unaffected — proven by the rest of the engine/workflow suites;
+///   (f) a finished snapshot/dynamic run is REPLAYABLE — replay clones the run's exact frozen
+///       definition + variable snapshot onto a NEW snapshot run that re-walks the engine, freezing
+///       plain values against live mutation and carrying replay lineage. This used to throw
+///       NotSupportedException (snapshot runs had no persisted version to re-pin); the
+///       <c>WorkflowService.ReplayRunAsync</c> snapshot branch closes that gap.</para>
 ///
 /// <para>Tier: high-fidelity — real <see cref="IRunFromSnapshotStarter"/> (runs DefinitionValidator
 /// + DefinitionHash + the dispatcher's CAS) and real <see cref="IWorkflowEngine"/> over real
@@ -207,6 +213,103 @@ public class SnapshotRunFlowTests
             customMessage: "an invalid definition must be rejected before any DB write — no orphaned run row left behind");
     }
 
+    [Fact]
+    public async Task Replaying_a_snapshot_run_clones_the_frozen_definition_and_freezes_variable_values()
+    {
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+
+        // The snapshot run reads + freezes this team variable on its first pass.
+        await SetTeamVarAsync(teamId, userId, "MIRROR", "snapshot-frozen-value");
+
+        var originalRunId = await StartSnapshotAsync(teamId, userId, EchoTeamVarSnapshotDefinition(), launchPayloadJson: "{}");
+        await RunEngineAsync(originalRunId);
+
+        var original = await LoadRunAsync(originalRunId);
+        original.Status.ShouldBe(WorkflowRunStatus.Success);
+        JsonDocument.Parse(original.OutputsJson!).RootElement.GetProperty("out").GetString().ShouldBe("snapshot-frozen-value");
+
+        // Mutate the LIVE team variable after the original froze it. A correct replay must read the frozen
+        // snapshot value, NOT this mutated live value — same rotation-safety contract authored replays obey.
+        await SetTeamVarAsync(teamId, userId, "MIRROR", "mutated-after-original");
+
+        // THE HEADLINE: replaying a snapshot/dynamic run used to throw NotSupportedException. It now stages a
+        // NEW snapshot run carrying the original's EXACT frozen definition + a clone of its variable snapshot.
+        var replayRunId = await ReplayAsync(originalRunId, teamId, userId);
+        await RunEngineAsync(replayRunId);
+
+        var replay = await LoadRunAsync(replayRunId);
+
+        replay.Status.ShouldBe(WorkflowRunStatus.Success,
+            customMessage: "a replayed snapshot run must walk start → terminal through the real engine");
+        replay.WorkflowId.ShouldBeNull("the replay of a snapshot run is itself a snapshot run — not a child of any workflow");
+        replay.WorkflowVersion.ShouldBeNull();
+        replay.DefinitionSnapshotJson.ShouldBe(original.DefinitionSnapshotJson,
+            customMessage: "replay must clone the original's EXACT frozen definition JSON byte-for-byte (no re-validate / re-freeze)");
+        replay.DefinitionSnapshotHash.ShouldBe(original.DefinitionSnapshotHash,
+            customMessage: "replay reuses the original hash — the engine's snapshot tamper-check passes because the hash travels with the JSON");
+        replay.ParentRunId.ShouldBe(originalRunId, "replay lineage: the new run points back at the original");
+
+        JsonDocument.Parse(replay.OutputsJson!).RootElement.GetProperty("out").GetString()
+            .ShouldBe("snapshot-frozen-value",
+                customMessage: "replay MUST read the FROZEN snapshot value, NOT the (now-mutated) live variable — " +
+                               "proving the cloned variable snapshot drove the replay scope path, not a fresh re-resolution");
+
+        var request = await LoadRequestAsync(replay.RunRequestId);
+        request.SourceType.ShouldBe(WorkflowRunSourceTypes.Replay, "the replay run's request is sourced as a replay");
+        request.CausationId.ShouldBe(original.RunRequestId, "replay lineage: the request links back to the original's request");
+
+        (await HasRunReplayedRecordAsync(replayRunId)).ShouldBeTrue(
+            "the engine emits run.replayed once the cloned snapshot drives the replay scope path");
+    }
+
+    [Fact]
+    public async Task Replaying_a_variable_less_snapshot_run_re_runs_from_the_frozen_payload_and_carries_lineage()
+    {
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+
+        // No team/workflow variables → the original captures an EMPTY snapshot. Replay still works: it clones
+        // the frozen definition + the frozen launch payload and re-runs through the engine. Proves the slice
+        // doesn't depend on the original having variables to freeze (the common task-launch case).
+        var originalRunId = await StartSnapshotAsync(teamId, userId, EchoInputDefinition(), launchPayloadJson: """{"ticket":"SNAP-R"}""");
+        await RunEngineAsync(originalRunId);
+        var original = await LoadRunAsync(originalRunId);
+        original.Status.ShouldBe(WorkflowRunStatus.Success);
+
+        var replayRunId = await ReplayAsync(originalRunId, teamId, userId);
+        await RunEngineAsync(replayRunId);
+
+        var replay = await LoadRunAsync(replayRunId);
+        replay.Status.ShouldBe(WorkflowRunStatus.Success);
+        replay.WorkflowId.ShouldBeNull("the replay of a snapshot run is still a snapshot run");
+        replay.ParentRunId.ShouldBe(originalRunId, "replay lineage is preserved even with an empty variable snapshot");
+
+        JsonDocument.Parse(replay.OutputsJson!).RootElement.GetProperty("echoed").GetString()
+            .ShouldBe("SNAP-R", customMessage: "the replay reuses the original's frozen launch payload byte-for-byte");
+
+        var request = await LoadRequestAsync(replay.RunRequestId);
+        request.SourceType.ShouldBe(WorkflowRunSourceTypes.Replay);
+        request.CausationId.ShouldBe(original.RunRequestId, "replay lineage: the request links back to the original's request");
+
+        (await HasRunReplayedRecordAsync(replayRunId)).ShouldBeFalse(
+            customMessage: "an empty variable snapshot takes the engine's FRESH scope path (isReplay=false), so replay lineage lives on " +
+                           "ParentRunId + the request — NOT a run.replayed record. Pinned so a future engine change can't silently flip this asymmetry.");
+    }
+
+    [Fact]
+    public async Task Replaying_another_teams_run_is_rejected_as_not_found()
+    {
+        var (teamA, userA) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var (teamB, userB) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+
+        var runId = await StartSnapshotAsync(teamA, userA, EchoInputDefinition(), launchPayloadJson: "{}");
+        await RunEngineAsync(runId);
+
+        // Tenancy boundary: team B must NOT be able to replay team A's run. The load filters on
+        // (id, team) and conflates not-found with not-yours — a cross-team replay is a KeyNotFound,
+        // never a silent stage under the wrong team.
+        await Should.ThrowAsync<KeyNotFoundException>(() => ReplayAsync(runId, teamB, userB));
+    }
+
     // ─── Definitions ────────────────────────────────────────────────────────────
 
     /// <summary>manual → terminal. One declared input "ticket"; the terminal echoes {{input.ticket}}.</summary>
@@ -226,6 +329,18 @@ public class SnapshotRunFlowTests
             Edges = new List<EdgeDefinition> { new() { From = "start", To = "end" } },
         };
     }
+
+    /// <summary>manual → terminal echoing {{team.MIRROR}} → output "out". Proves a snapshot run freezes its team-scoped plain variable and that REPLAY reads the frozen value, not the live (mutated) one.</summary>
+    private static WorkflowDefinition EchoTeamVarSnapshotDefinition() => new()
+    {
+        SchemaVersion = 1,
+        Nodes = new List<NodeDefinition>
+        {
+            new() { Id = "start", TypeKey = "trigger.manual", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
+            new() { Id = "end",   TypeKey = "builtin.terminal", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.Json("""{"out":"{{team.MIRROR}}"}""") },
+        },
+        Edges = new List<EdgeDefinition> { new() { From = "start", To = "end" } },
+    };
 
     /// <summary>manual → wait_approval → terminal. The approval node suspends the run for the resume test.</summary>
     private static WorkflowDefinition ApprovalDefinition() => new()
@@ -307,6 +422,38 @@ public class SnapshotRunFlowTests
         using var scope = _fixture.BeginScope();
         var starter = scope.Resolve<IRunFromSnapshotStarter>();
         return await starter.StartFromSnapshotAsync(definition, teamId, userId, launchPayloadJson, CancellationToken.None);
+    }
+
+    /// <summary>Replay a finished run via the real production seam — the same call the ReplayRunCommand handler makes.</summary>
+    private async Task<Guid> ReplayAsync(Guid originalRunId, Guid teamId, Guid actorUserId)
+    {
+        using var scope = _fixture.BeginScope();
+        return await scope.Resolve<IWorkflowService>().ReplayRunAsync(originalRunId, teamId, actorUserId, CancellationToken.None);
+    }
+
+    private async Task SetTeamVarAsync(Guid teamId, Guid userId, string name, string value)
+    {
+        using var scope = _fixture.BeginScope();
+        await scope.Resolve<IVariableService>().SetAsync(
+            VariableScope.Team, teamId, teamId, name, VariableValueType.String,
+            JsonString(value), null, userId, CancellationToken.None);
+    }
+
+    private static JsonElement JsonString(string s) => JsonDocument.Parse(JsonSerializer.Serialize(s)).RootElement.Clone();
+
+    private async Task<WorkflowRunRequest> LoadRequestAsync(Guid requestId)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        return await db.WorkflowRunRequest.AsNoTracking().SingleAsync(r => r.Id == requestId);
+    }
+
+    private async Task<bool> HasRunReplayedRecordAsync(Guid runId)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        return await db.WorkflowRunRecord.AsNoTracking()
+            .AnyAsync(r => r.RunId == runId && r.RecordType == WorkflowRunRecordTypes.RunReplayed);
     }
 
     private async Task RunEngineAsync(Guid runId)

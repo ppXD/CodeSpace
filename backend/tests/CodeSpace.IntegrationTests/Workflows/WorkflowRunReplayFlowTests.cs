@@ -3,6 +3,7 @@ using Autofac;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Variables;
+using CodeSpace.Core.Services.Workflows;
 using CodeSpace.Core.Services.Workflows.Engine;
 using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.IntegrationTests.Workflows.Infrastructure;
@@ -160,6 +161,48 @@ public class WorkflowRunReplayFlowTests
             .ShouldBe("original-payload", "replay request must copy the parent's normalised payload byte-equivalent");
         JsonDocument.Parse(replayRun.OutputsJson).RootElement.GetProperty("echoed").GetString()
             .ShouldBe("original-payload");
+    }
+
+    [Fact]
+    public async Task Authored_run_replays_through_the_real_service_seam_with_lineage()
+    {
+        // Regression for the snapshot-replay refactor: WorkflowService.ReplayRunAsync now BRANCHES
+        // (snapshot vs authored). The other tests in this file hand-stage rows via StageReplayAsync and
+        // BYPASS the service, so this is the one test that drives the AUTHORED branch through the REAL
+        // IWorkflowService.ReplayRunAsync seam — proving the refactor left the authored path intact
+        // end-to-end (re-pin version + clone payload + lineage + dispatch).
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+
+        var def = EchoTriggerFieldDef("title", outputName: "echoed");
+        var (workflowId, _) = await CreateWorkflowOnlyAsync(teamId, userId, def);
+        var originalRunId = await QueueRunWithTriggerAsync(workflowId, """{"title":"authored-original"}""");
+        await RunEngineAsync(originalRunId);
+
+        Guid replayRunId;
+        Guid originalRequestId;
+        using (var scope = _fixture.BeginScope())
+        {
+            originalRequestId = await scope.Resolve<CodeSpaceDbContext>().WorkflowRun.AsNoTracking()
+                .Where(r => r.Id == originalRunId).Select(r => r.RunRequestId).SingleAsync();
+            replayRunId = await scope.Resolve<IWorkflowService>().ReplayRunAsync(originalRunId, teamId, userId, CancellationToken.None);
+        }
+        await RunEngineAsync(replayRunId);
+
+        using var verify = _fixture.BeginScope();
+        var db = verify.Resolve<CodeSpaceDbContext>();
+        var replay = await db.WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == replayRunId);
+
+        replay.Status.ShouldBe(WorkflowRunStatus.Success, "the authored replay branch must walk to terminal through the real seam");
+        replay.WorkflowId.ShouldBe(workflowId, "an authored replay RE-PINS the original workflow (unlike a snapshot replay, which stays version-less)");
+        replay.WorkflowVersion.ShouldNotBeNull("an authored replay re-pins the original version");
+        replay.ParentRunId.ShouldBe(originalRunId, "replay lineage");
+
+        var request = await db.WorkflowRunRequest.AsNoTracking().SingleAsync(r => r.Id == replay.RunRequestId);
+        request.SourceType.ShouldBe(WorkflowRunSourceTypes.Replay);
+        request.CausationId.ShouldBe(originalRequestId, "replay lineage: the request links back to the original's request");
+
+        JsonDocument.Parse(replay.OutputsJson).RootElement.GetProperty("echoed").GetString()
+            .ShouldBe("authored-original", "authored replay reuses the parent's frozen trigger payload byte-for-byte");
     }
 
     [Fact]

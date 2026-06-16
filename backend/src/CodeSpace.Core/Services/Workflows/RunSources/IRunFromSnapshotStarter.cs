@@ -27,4 +27,16 @@ public interface IRunFromSnapshotStarter
     /// <c>WorkflowValidationException</c> for an invalid definition (before any DB write).
     /// </summary>
     Task<Guid> StartFromSnapshotAsync(WorkflowDefinition definition, Guid teamId, Guid actorUserId, string? launchPayloadJson, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Replay a finished snapshot/dynamic run: clone its EXACT frozen definition (<paramref name="definitionJson"/>
+    /// + <paramref name="definitionHash"/>) onto a NEW snapshot run — no re-validate / re-freeze, so replay
+    /// reproduces the definition that ran byte-for-byte. STAGE-ONLY (one tx) + <c>run.queued</c>(Replay), carrying
+    /// the replay lineage (<paramref name="parentRunId"/> drives the engine's <c>run.replayed</c>;
+    /// <paramref name="causationRequestId"/> links to the original request). Unlike <see cref="StartFromSnapshotAsync"/>
+    /// this does NOT dispatch — the caller (<c>WorkflowService.ReplayRunAsync</c>) clones the original's variable
+    /// snapshot then dispatches, exactly as the authored-replay path does, so the engine's variable-presence fork
+    /// takes the replay scope. Returns the new <c>workflow_run.id</c>.
+    /// </summary>
+    Task<Guid> StageReplayFromSnapshotAsync(string definitionJson, string definitionHash, Guid teamId, Guid actorUserId, string payloadJson, Guid parentRunId, Guid causationRequestId, CancellationToken cancellationToken);
 }

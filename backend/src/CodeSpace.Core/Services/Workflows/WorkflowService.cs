@@ -31,6 +31,7 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
     private readonly INodeRegistry _nodeRegistry;
     private readonly Lifecycle.IRunRecordLogger _recordLogger;
     private readonly IRunStarter _runStarter;
+    private readonly RunSources.IRunFromSnapshotStarter _snapshotStarter;
     private readonly IWorkflowRunDispatcher _runDispatcher;
     private readonly Engine.IWorkflowResumeService _resumeService;
     private readonly IPostCommitActions _postCommit;
@@ -40,13 +41,14 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
     /// <summary>Reason stamped on a branch agent run aborted by the kill-wave when an operator cancels its parent workflow run.</summary>
     private const string OperatorCancelledAgentReason = "Cancelled because its parent workflow run was cancelled by an operator.";
 
-    public WorkflowService(CodeSpaceDbContext db, DefinitionValidator validator, INodeRegistry nodeRegistry, Lifecycle.IRunRecordLogger recordLogger, IRunStarter runStarter, IWorkflowRunDispatcher runDispatcher, Engine.IWorkflowResumeService resumeService, IPostCommitActions postCommit, IAgentRunService agentRunService, ILogger<WorkflowService> logger)
+    public WorkflowService(CodeSpaceDbContext db, DefinitionValidator validator, INodeRegistry nodeRegistry, Lifecycle.IRunRecordLogger recordLogger, IRunStarter runStarter, RunSources.IRunFromSnapshotStarter snapshotStarter, IWorkflowRunDispatcher runDispatcher, Engine.IWorkflowResumeService resumeService, IPostCommitActions postCommit, IAgentRunService agentRunService, ILogger<WorkflowService> logger)
     {
         _db = db;
         _validator = validator;
         _nodeRegistry = nodeRegistry;
         _recordLogger = recordLogger;
         _runStarter = runStarter;
+        _snapshotStarter = snapshotStarter;
         _runDispatcher = runDispatcher;
         _resumeService = resumeService;
         _postCommit = postCommit;
@@ -276,38 +278,53 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
             .ConfigureAwait(false)
             ?? throw new KeyNotFoundException($"WorkflowRun {originalRunId} not found in team {teamId}.");
 
-        // Replay re-runs through the authored (WorkflowId, Version) path. A snapshot run has neither
-        // — replaying an inline-definition run is a later dynamic-workflows slice, not this substrate.
-        if (original.WorkflowId is null)
-            throw new NotSupportedException($"WorkflowRun {originalRunId} is a snapshot run (no parent workflow) and cannot be replayed yet.");
-
-        // Clone the snapshot rows onto the new run id BEFORE we save the run. The engine
-        // detects an existing snapshot to fork into the replay path; ordering matters less
-        // since SaveChangesAsync is a single transaction, but writing snapshot+run in one
-        // atomic batch keeps the engine from ever seeing a half-staged replay.
+        // The original's variable snapshot (its frozen plain values). Cloned onto the new run below — the
+        // engine's variable-presence fork then takes the REPLAY scope path (frozen plains + re-resolved secrets)
+        // and emits run.replayed. Loaded BEFORE the branch since both authored + snapshot replays clone it.
+        // A run with NO snapshotted plain/secret variables (e.g. a payload-only or project-only definition)
+        // has an empty snapshot, so replay re-runs through the FRESH scope path — project-scoped values are
+        // re-resolved live on replay by design, identical to the authored path (projects are shared config
+        // namespaces, intentionally never frozen).
         var originalSnapshot = await _db.WorkflowRunVariable.AsNoTracking()
             .Where(v => v.RunId == originalRunId)
             .ToListAsync(cancellationToken)
             .ConfigureAwait(false);
 
-        // Replay envelope carries the lineage fields (CausationRequestId + ParentRunId +
-        // ReleaseHashAtRun) so the unified starter writes them onto the request + run rows
-        // for us. Replay-specific snapshot cloning still happens below because it lives
-        // outside the (request + run) trio the starter owns.
-        var replayRunId = await _runStarter.StartAsync(new RunSourceEnvelope
+        // Stage the replay run. The ONLY thing that differs between an authored and a snapshot/dynamic run is the
+        // definition SOURCE: an authored run re-pins (WorkflowId, Version); a snapshot run carries its frozen
+        // definition INLINE, so replay clones that exact frozen JSON + hash onto a NEW snapshot run (no
+        // re-validate / re-freeze — replay reproduces what ran, and the engine's snapshot tamper-check passes
+        // because the hash travels with it). Both branches STAGE-ONLY here; the variable clone + dispatch below
+        // are shared, so the durable engine resumes identically regardless of definition source. This is what
+        // makes the entire snapshot/dynamic (task-launch) surface replayable — it used to throw NotSupported.
+        Guid replayRunId;
+        if (original.WorkflowId is null)
         {
-            TeamId = teamId,
-            WorkflowId = original.WorkflowId.Value,
-            WorkflowVersion = original.WorkflowVersion!.Value,
-            SourceType = WorkflowRunSourceTypes.Replay,
-            ActorType = WorkflowRunActorTypes.User,
-            ActorId = actorUserId,
-            NormalizedPayloadJson = original.RunRequest?.NormalizedPayloadJson ?? "{}",
-            CreatedBy = actorUserId,
-            CausationRequestId = original.RunRequestId,
-            ParentRunId = originalRunId,
-            ReleaseHashAtRun = original.ReleaseHashAtRun,
-        }, cancellationToken).ConfigureAwait(false);
+            replayRunId = await _snapshotStarter.StageReplayFromSnapshotAsync(
+                original.DefinitionSnapshotJson ?? throw new InvalidOperationException($"Snapshot run {originalRunId} has no inline definition to replay."),
+                original.DefinitionSnapshotHash ?? string.Empty,
+                teamId, actorUserId, original.RunRequest?.NormalizedPayloadJson ?? "{}",
+                parentRunId: originalRunId, causationRequestId: original.RunRequestId, cancellationToken).ConfigureAwait(false);
+        }
+        else
+        {
+            // Replay envelope carries the lineage fields (CausationRequestId + ParentRunId + ReleaseHashAtRun)
+            // so the unified starter writes them onto the request + run rows for us.
+            replayRunId = await _runStarter.StartAsync(new RunSourceEnvelope
+            {
+                TeamId = teamId,
+                WorkflowId = original.WorkflowId.Value,
+                WorkflowVersion = original.WorkflowVersion!.Value,
+                SourceType = WorkflowRunSourceTypes.Replay,
+                ActorType = WorkflowRunActorTypes.User,
+                ActorId = actorUserId,
+                NormalizedPayloadJson = original.RunRequest?.NormalizedPayloadJson ?? "{}",
+                CreatedBy = actorUserId,
+                CausationRequestId = original.RunRequestId,
+                ParentRunId = originalRunId,
+                ReleaseHashAtRun = original.ReleaseHashAtRun,
+            }, cancellationToken).ConfigureAwait(false);
+        }
 
         var now = DateTimeOffset.UtcNow;
         foreach (var s in originalSnapshot)
@@ -333,8 +350,8 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
         await _postCommit.RunAfterCommitAsync(ct => _runDispatcher.DispatchAsync(replayRunId, ct), cancellationToken).ConfigureAwait(false);
 
         _logger.LogInformation(
-            "Workflow run replay queued. OriginalRunId={Original} ReplayRunId={Replay} WorkflowId={Workflow} TeamId={Team} SnapshotCount={SnapshotCount}",
-            originalRunId, replayRunId, original.WorkflowId, teamId, originalSnapshot.Count);
+            "Workflow run replay queued. OriginalRunId={Original} ReplayRunId={Replay} Snapshot={IsSnapshot} WorkflowId={Workflow} TeamId={Team} SnapshotCount={SnapshotCount}",
+            originalRunId, replayRunId, original.WorkflowId is null, original.WorkflowId, teamId, originalSnapshot.Count);
 
         return replayRunId;
     }
