@@ -54,6 +54,8 @@ public class PlanMapSynthFanoutFlowTests
 {
     private readonly PostgresFixture _fixture;
 
+    private const string SeedGoal = "Improve the onboarding module across the codebase";
+
     public PlanMapSynthFanoutFlowTests(PostgresFixture fixture) { _fixture = fixture; }
 
     [Fact]
@@ -141,20 +143,30 @@ public class PlanMapSynthFanoutFlowTests
             customMessage: "each agent's resolved goal must be 'Work on <subtask>' for the planner's OWN subtasks — proving the map's {{item}} binding resolved per branch and the goal propagated through the fan-out");
     }
 
-    /// <summary>The synthesizer reduced the WHOLE map results array into the run's combined output — generic over the subtask count: EVERY real per-branch summary is present, not just a fixed first-N.</summary>
+    /// <summary>The synthesizer ran a REAL llm.complete REDUCE over the WHOLE map results array (NOT a raw-array re-bind): the run's combined output is the deterministic synth client's transform of a prompt that embeds the goal AND every per-branch summary — proving the synth READ all branches, generic over the subtask count.</summary>
     private static async Task AssertSynthComposedRealResultsAsync(CodeSpaceDbContext db, Guid runId)
     {
         var run = await db.WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == runId);
 
         var combined = JsonDocument.Parse(run.OutputsJson).RootElement.GetProperty("combined");
-        combined.ValueKind.ShouldBe(JsonValueKind.Array, "the synth binds the WHOLE {{nodes.map.outputs.results}} array — generic over any subtask count, not a fixed-width string");
-        combined.GetArrayLength().ShouldBe(DeterministicPlannerLlmClient.Subtasks.Count, "the combined output carries EVERY fanned-out branch result");
+        combined.ValueKind.ShouldBe(JsonValueKind.String, "the synth is a REAL llm.complete reduce now — its text output is one string, not the raw {{nodes.map.outputs.results}} array the old builtin.terminal passed through");
 
-        var combinedSummaries = combined.EnumerateArray().Select(r => r.GetProperty("summary").GetString()).OrderBy(s => s).ToList();
-        var expectedSummaries = DeterministicPlannerLlmClient.Subtasks.Select(s => SubtaskAwareFakeCli.ExpectedSummaryFor($"Work on {s}")).OrderBy(s => s).ToList();
+        var reduced = combined.GetString()!;
+        reduced.ShouldStartWith(DeterministicSynthLlmClient.Prefix,
+            customMessage: "the combined output is the deterministic synth client's REDUCE — a raw-array re-bind could never carry this marker, proving an llm.complete node ran");
 
-        combinedSummaries.ShouldBe(expectedSummaries,
-            customMessage: "the combined output must carry the real fake-CLI-derived summary the executor folded for EVERY subtask — proving the whole-array reduce surfaced all branches");
+        // The reduce prompt embeds the goal AND the WHOLE per-branch results array (each carrying its real
+        // fake-CLI-derived summary). The deterministic synth echoes its prompt, so EVERY subtask's real summary
+        // must be present in the reduced output — proving the synth read all fanned-out branches, not a first-N.
+        foreach (var subtask in DeterministicPlannerLlmClient.Subtasks)
+        {
+            var expectedSummary = SubtaskAwareFakeCli.ExpectedSummaryFor($"Work on {subtask}");
+            reduced.ShouldContain(expectedSummary,
+                customMessage: $"the synth reduce must have read subtask '{subtask}'s real folded summary from the results array — its absence means the reduce didn't see all branches");
+        }
+
+        reduced.ShouldContain(SeedGoal,
+            customMessage: "the reduce prompt embeds the seed goal — proving the synth addresses the goal, not just concatenates branches");
 
         var mapNode = await db.WorkflowRunNode.AsNoTracking().SingleAsync(n => n.RunId == runId && n.NodeId == "map" && n.IterationKey == "");
         var mapOut = JsonDocument.Parse(mapNode.OutputsJson!).RootElement;
@@ -169,7 +181,7 @@ public class PlanMapSynthFanoutFlowTests
         using var scope = _fixture.BeginScope();
         var request = new EffortRouteRequest
         {
-            Seed = new TaskLaunchSeed { Goal = "Improve the onboarding module across the codebase", SurfaceKind = "test", TeamId = teamId },
+            Seed = new TaskLaunchSeed { Goal = SeedGoal, SurfaceKind = "test", TeamId = teamId },
             RequestedEffort = TaskEffortModes.Standard,
         };
 
@@ -183,30 +195,35 @@ public class PlanMapSynthFanoutFlowTests
 
         var context = new TaskBuildContext
         {
-            Seed = new TaskLaunchSeed { Goal = "Improve the onboarding module across the codebase", SurfaceKind = "test", TeamId = teamId },
+            Seed = new TaskLaunchSeed { Goal = SeedGoal, SurfaceKind = "test", TeamId = teamId },
             Route = route,
             AgentProfile = new ResolvedAgentProfile { Harness = "codex-cli", RunnerKind = "local", AutonomyLevel = "Confined" },
         };
 
         var builder = scope.Resolve<ITaskProjectionRegistry>().Resolve(route.ProjectionKind);
 
-        var definition = RetargetPlannerToFake(builder.Build(context));
+        var definition = RetargetLlmNodesToFakes(builder.Build(context));
 
         return await scope.Resolve<IRunFromSnapshotStarter>().StartFromSnapshotAsync(definition, teamId, userId, launchPayloadJson: null, CancellationToken.None);
     }
 
-    /// <summary>Test-only adaptation: rewrite ONLY the planner's <c>llm.complete</c> provider to the deterministic fake's tag, so the engine resolves the fixed-subtasks fake (no API key). The agent.code body + the graph SHAPE are left exactly as the production builder emitted them.</summary>
-    private static WorkflowDefinition RetargetPlannerToFake(WorkflowDefinition definition) => definition with
+    /// <summary>Test-only adaptation: rewrite the BOTH <c>llm.complete</c> providers — the PLANNER node to the structured planner fake, the SYNTH node to the plain-text synth fake — so the engine resolves the deterministic fakes (no API key). Retarget is BY NODE ID (the graph now has two llm.complete nodes); the agent.code body + the graph SHAPE are left exactly as the production builder emitted them.</summary>
+    private static WorkflowDefinition RetargetLlmNodesToFakes(WorkflowDefinition definition) => definition with
     {
         Nodes = definition.Nodes.Select(RetargetNode).ToList(),
     };
 
-    private static NodeDefinition RetargetNode(NodeDefinition node)
+    private static NodeDefinition RetargetNode(NodeDefinition node) => node.Id switch
     {
-        if (node.TypeKey != "llm.complete") return node;
+        "planner" => RetargetProvider(node, DeterministicPlannerLlmClient.ProviderTag),
+        "synth" => RetargetProvider(node, DeterministicSynthLlmClient.ProviderTag),
+        _ => node,
+    };
 
+    private static NodeDefinition RetargetProvider(NodeDefinition node, string providerTag)
+    {
         var config = node.Config.Deserialize<Dictionary<string, JsonElement>>() ?? new();
-        config["provider"] = JsonSerializer.SerializeToElement(DeterministicPlannerLlmClient.ProviderTag);
+        config["provider"] = JsonSerializer.SerializeToElement(providerTag);
 
         return node with { Config = JsonSerializer.SerializeToElement(config) };
     }

@@ -24,9 +24,13 @@ namespace CodeSpace.Core.Services.Tasks.Projection.Builders.PlanMapSynth;
 ///     its OWN subtask; harness/model/credential/runner/autonomy/tools + repositoryId map from the profile via
 ///     the SHARED <see cref="AgentNodeMapping"/> — so a fan-out branch runs IDENTICALLY to an authored / a
 ///     single-agent agent.code node.
-///   → <c>builtin.terminal</c> (synth): reduces the WHOLE <c>{{nodes.map.outputs.results}}</c> array into the
-///     run's <c>combined</c> output — generic over ANY subtask count, the same whole-array reduce the headline
-///     synth and <c>WorkflowPlanProjector</c> use (never a fixed element-indexed width).
+///   → <c>llm.complete</c> (synth): a REAL reduce — the model is asked to combine the per-subtask results into
+///     one coherent answer that addresses the seed goal. The provider/model come from the profile (the SAME
+///     wiring the planner node uses; default provider Anthropic like <c>WorkflowPlanProjector</c>'s synth); the
+///     userPrompt embeds the goal AND the WHOLE <c>{{nodes.map.outputs.results}}</c> array, so the reduce is
+///     generic over ANY subtask count (never a fixed element-indexed width). This replaces the prior
+///     <c>builtin.terminal</c> raw-array pass-through (which did NO reduce — it just re-bound the results array).
+///   → <c>builtin.terminal</c> (done): binds the synth's <c>text</c> output into the run's <c>combined</c> output.
 /// </para>
 ///
 /// <para><b>Build stays PURE.</b> The planner is a NODE that runs at EXECUTION — not a build-time LLM call — so
@@ -62,7 +66,10 @@ public sealed class PlanMapSynthDefinitionBuilder : IWorkflowDefinitionBuilder, 
         new() { Id = "agent", TypeKey = "agent.code", Label = "Work the subtask", ParentId = "map",
                 Config = AgentNodeMapping.BuildAgentConfig(BranchGoal, context.AgentProfile), Inputs = AgentNodeMapping.BuildAgentInputs(context) },
 
-        new() { Id = "synth", TypeKey = "builtin.terminal", Label = "Synthesize", Config = Empty(), Inputs = SynthInputs() },
+        new() { Id = "synth", TypeKey = "llm.complete", Label = "Synthesize",
+                Config = SynthConfig(context), Inputs = SynthInputs(context) },
+
+        new() { Id = "done", TypeKey = "builtin.terminal", Label = "Done", Config = Empty(), Inputs = DoneInputs() },
     };
 
     private static IReadOnlyList<EdgeDefinition> BuildEdges() => new List<EdgeDefinition>
@@ -70,6 +77,7 @@ public sealed class PlanMapSynthDefinitionBuilder : IWorkflowDefinitionBuilder, 
         new() { From = "start", To = "planner" },
         new() { From = "planner", To = "map" },
         new() { From = "map", To = "synth" },
+        new() { From = "synth", To = "done" },
         new() { From = "ms", To = "agent" },
     };
 
@@ -112,10 +120,30 @@ public sealed class PlanMapSynthDefinitionBuilder : IWorkflowDefinitionBuilder, 
             ? JsonSerializer.SerializeToElement(new { maxParallelism = cap })
             : Empty();
 
-    /// <summary>The synth Inputs — reduce ALL per-branch results into the run's <c>combined</c> output by binding the WHOLE map results array (<c>{{nodes.map.outputs.results}}</c>). Generic over ANY subtask count — the same whole-array reduce the real <c>WorkflowPlanProjector</c> synth and the headline flow use, NOT a fixed element-indexed width.</summary>
-    private static JsonElement SynthInputs() => JsonSerializer.SerializeToElement(new
+    /// <summary>The synth Config — the LLM the reduce runs on. Provider defaults to Anthropic (the same default the planner node + <c>WorkflowPlanProjector</c>'s synth use); the profile's model maps on via AddIfPresent (absent ⇒ the node/deployment default). A test retargets the provider at the ILLMClient seam, never the builder.</summary>
+    private static JsonElement SynthConfig(TaskBuildContext context)
     {
-        combined = "{{nodes.map.outputs.results}}",
+        var config = new Dictionary<string, object?>
+        {
+            ["provider"] = "Anthropic",
+        };
+
+        AddIfPresent(config, "model", NullIfBlank(context.AgentProfile?.Model));
+
+        return JsonSerializer.SerializeToElement(config);
+    }
+
+    /// <summary>The synth Inputs — a REAL reduce prompt: combine ALL per-branch results into one coherent answer that addresses the seed goal. The userPrompt embeds the goal AND the WHOLE map results array (<c>{{nodes.map.outputs.results}}</c>), so the reduce is generic over ANY subtask count — never a fixed element-indexed width.</summary>
+    private static JsonElement SynthInputs(TaskBuildContext context) => JsonSerializer.SerializeToElement(new
+    {
+        systemPrompt = "Combine the per-subtask results into one coherent answer that addresses the goal.",
+        userPrompt = $"Goal: {context.Seed.Goal}\n\nPer-subtask results:\n{{{{nodes.map.outputs.results}}}}",
+    });
+
+    /// <summary>The done terminal Inputs — bind the synth's reduced <c>text</c> output into the run's <c>combined</c> output (the llm.complete node's output key is <c>text</c>).</summary>
+    private static JsonElement DoneInputs() => JsonSerializer.SerializeToElement(new
+    {
+        combined = "{{nodes.synth.outputs.text}}",
     });
 
     /// <summary>The body agent's goal — bound from the map's per-branch <c>{{item}}</c> (this branch's subtask), so each branch works its OWN element. Matches the headline body's goal binding.</summary>
