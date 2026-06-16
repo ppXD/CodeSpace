@@ -52,7 +52,9 @@ public static class PlanMapSynthPlannerRequest
             AgentProfile = new ResolvedAgentProfile { Harness = "codex-cli", RunnerKind = "local", AutonomyLevel = "Confined" },
         };
 
-        return new PlanMapSynthDefinitionBuilder().Build(context).Nodes.Single(n => n.TypeKey == "llm.complete");
+        // The graph now has TWO llm.complete nodes (planner + synth); select the planner by id (the synth is a
+        // separate node whose request the drift detector does not pin).
+        return new PlanMapSynthDefinitionBuilder().Build(context).Nodes.Single(n => n.Id == "planner");
     }
 
     /// <summary>A standard-effort route with no parallelism cap — matches what <c>EffortRouter.RouteAsync</c> produces for the real-model test, and what the builder reads (only <c>Caps.MaxParallelism</c> touches the graph).</summary>

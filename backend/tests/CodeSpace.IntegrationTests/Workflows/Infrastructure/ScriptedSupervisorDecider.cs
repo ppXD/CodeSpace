@@ -31,6 +31,7 @@ public sealed class ScriptedSupervisorDecider : ISupervisorDecider
         var decision = _script.Mode switch
         {
             SupervisorScriptMode.PlanSpawnStop => PlanSpawnStop(context),
+            SupervisorScriptMode.PlanSpawnMergeStop => PlanSpawnMergeStop(context),
             SupervisorScriptMode.AskHumanStop => AskHumanStop(context),
             SupervisorScriptMode.PlanThenSpawnForever => PlanThenSpawnForever(context),
             _ => PlanThenStop(context),
@@ -73,6 +74,16 @@ public sealed class ScriptedSupervisorDecider : ISupervisorDecider
         _ => Canonical(SupervisorDecisionKinds.Stop, new SupervisorStopPayload { Outcome = "completed", Summary = "both subtasks done" }),
     };
 
+    // Merge arc: turn 0 plan(2) → turn 1 spawn(both) → turn 2 merge → turn 3 stop. The merge folds the prior
+    // spawn's agent results (the executor resolves the staged ids itself), proving the full-contribution fold.
+    private static SupervisorDecision PlanSpawnMergeStop(SupervisorTurnContext context) => context.TurnNumber switch
+    {
+        0 => Plan(context.Goal),
+        1 => Canonical(SupervisorDecisionKinds.Spawn, new SupervisorSpawnPayload { SubtaskIds = new[] { SubtaskA, SubtaskB } }),
+        2 => Canonical(SupervisorDecisionKinds.Merge, new SupervisorMergePayload { SynthesisInstruction = "combine both branches" }),
+        _ => Canonical(SupervisorDecisionKinds.Stop, new SupervisorStopPayload { Outcome = "completed", Summary = "merged" }),
+    };
+
     private static SupervisorDecision Plan(string goal) => Canonical(SupervisorDecisionKinds.Plan, new SupervisorPlanPayload
     {
         Goal = goal,
@@ -99,6 +110,8 @@ public sealed class SupervisorDecisionScript
 
     public void PlanSpawnStop() => Mode = SupervisorScriptMode.PlanSpawnStop;
 
+    public void PlanSpawnMergeStop() => Mode = SupervisorScriptMode.PlanSpawnMergeStop;
+
     public void AskHumanStop() => Mode = SupervisorScriptMode.AskHumanStop;
 
     public void PlanThenSpawnForever() => Mode = SupervisorScriptMode.PlanThenSpawnForever;
@@ -108,6 +121,7 @@ public enum SupervisorScriptMode
 {
     PlanThenStop,
     PlanSpawnStop,
+    PlanSpawnMergeStop,
     AskHumanStop,
     PlanThenSpawnForever,
 }

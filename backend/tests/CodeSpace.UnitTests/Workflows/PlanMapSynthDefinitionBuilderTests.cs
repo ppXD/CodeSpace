@@ -11,13 +11,13 @@ using Shouldly;
 namespace CodeSpace.UnitTests.Workflows;
 
 /// <summary>
-/// Pins the plan-map-synth projection builder: the emitted graph MIRRORS the proven HeadlineFlow shape
-/// (<c>trigger.manual → llm.complete(planner, responseSchema) → flow.map(items=planner.json.subtasks) →
-/// flow.map_start → agent.code(body, {{item}}) → builtin.terminal(synth, results[i].summary)</c>), it ALWAYS
-/// passes the REAL <see cref="DefinitionValidator"/> over the real node manifests (so the planner's json output,
-/// the map items binding, and the synth's results refs all validate), and the
-/// <see cref="ResolvedAgentProfile"/> + seed goal map onto the planner model + the agent.code body via the
-/// SAME shared mapping the single-agent builder uses.
+/// Pins the plan-map-synth projection builder: the emitted graph is
+/// <c>trigger.manual → llm.complete(planner, responseSchema) → flow.map(items=planner.json.subtasks) →
+/// flow.map_start → agent.code(body, {{item}}) → llm.complete(synth, REAL reduce over the results array) →
+/// builtin.terminal(done, combined=synth.text)</c>, it ALWAYS passes the REAL <see cref="DefinitionValidator"/>
+/// over the real node manifests (so the planner's json output, the map items binding, the synth's prompt refs,
+/// and the done node's synth-text ref all validate), and the <see cref="ResolvedAgentProfile"/> + seed goal map
+/// onto the planner model + the agent.code body via the SAME shared mapping the single-agent builder uses.
 /// </summary>
 [Trait("Category", "Unit")]
 public class PlanMapSynthDefinitionBuilderTests
@@ -59,14 +59,15 @@ public class PlanMapSynthDefinitionBuilderTests
         byId["map"].ShouldBe("flow.map");
         byId["ms"].ShouldBe("flow.map_start");
         byId["agent"].ShouldBe("agent.code");
-        byId["synth"].ShouldBe("builtin.terminal");
+        byId["synth"].ShouldBe("llm.complete");   // the synth is a REAL llm.complete reduce now, not a builtin.terminal raw-bind
+        byId["done"].ShouldBe("builtin.terminal");
 
         // The body nodes are parented to the map so the engine fans them out per subtask.
         def.Nodes.Single(n => n.Id == "ms").ParentId.ShouldBe("map");
         def.Nodes.Single(n => n.Id == "agent").ParentId.ShouldBe("map");
 
         def.Edges.Select(e => (e.From, e.To)).ShouldBe(
-            new[] { ("start", "planner"), ("planner", "map"), ("map", "synth"), ("ms", "agent") }, ignoreOrder: true);
+            new[] { ("start", "planner"), ("planner", "map"), ("map", "synth"), ("synth", "done"), ("ms", "agent") }, ignoreOrder: true);
     }
 
     [Fact]
@@ -150,13 +151,28 @@ public class PlanMapSynthDefinitionBuilderTests
     }
 
     [Fact]
-    public void Synth_reduces_the_whole_results_array_generic_over_subtask_count()
+    public void Synth_is_a_real_llm_reduce_over_the_whole_results_array_generic_over_subtask_count()
     {
-        var synth = Builder.Build(Context()).Nodes.Single(n => n.Id == "synth");
+        var def = Builder.Build(Context());
+        var synth = def.Nodes.Single(n => n.Id == "synth");
 
-        // Binds the WHOLE results array — generic over ANY subtask count, NOT a fixed element-indexed width.
-        synth.Inputs.GetProperty("combined").GetString().ShouldBe("{{nodes.map.outputs.results}}",
-            "the synth reduces the whole map results array (the headline / WorkflowPlanProjector reduce), so the run output carries every fanned-out branch regardless of how many subtasks the planner emits");
+        // The synth is a REAL llm.complete reduce (provider default Anthropic), NOT a builtin.terminal raw-bind.
+        synth.TypeKey.ShouldBe("llm.complete");
+        synth.Config.GetProperty("provider").GetString().ShouldBe("Anthropic");
+
+        // The userPrompt embeds the seed goal AND the WHOLE results array — generic over ANY subtask count, NOT a
+        // fixed element-indexed width — so the reduce sees every fanned-out branch regardless of subtask count.
+        var userPrompt = synth.Inputs.GetProperty("userPrompt").GetString()!;
+        userPrompt.ShouldContain("{{nodes.map.outputs.results}}",
+            customMessage: "the synth reduce binds the whole map results array (generic over any subtask count)");
+        userPrompt.ShouldContain("Improve the onboarding module",
+            customMessage: "the reduce prompt embeds the seed goal so the synthesis addresses the goal, not just the branch results");
+
+        // The done terminal binds the synth's reduced text into the run's combined output.
+        var done = def.Nodes.Single(n => n.Id == "done");
+        done.TypeKey.ShouldBe("builtin.terminal");
+        done.Inputs.GetProperty("combined").GetString().ShouldBe("{{nodes.synth.outputs.text}}",
+            "the done node surfaces the synth's reduced text as the run's combined output");
     }
 
     [Fact]

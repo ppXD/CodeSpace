@@ -263,6 +263,15 @@ public sealed class PostgresFixture : IAsyncLifetime
             .As<CodeSpace.Core.Services.Workflows.Llm.IStructuredLLMClient>()
             .SingleInstance();
 
+        // Deterministic plain-text synthesizer fake for the plan-map-synth flow's synth llm.complete reduce.
+        // Under its OWN provider tag (DeterministicSynthLlmClient.ProviderTag = "TestSynth"), so the registry
+        // holds it alongside the planner fakes + the real client (no duplicate-provider collision). Plain-text
+        // ILLMClient ONLY (the synth is a text reduce, not structured) — a test retargets the synth node's
+        // provider to this tag, getting a deterministic, recognisable reduce of the per-branch results array.
+        builder.RegisterType<Workflows.Infrastructure.DeterministicSynthLlmClient>()
+            .As<CodeSpace.Core.Services.Workflows.Llm.ILLMClient>()
+            .SingleInstance();
+
         // S0a real-model phase-authorship instrument: a RECORD/REPLAY decorator over the REAL AnthropicClient,
         // under its OWN provider tag (RecordReplayStructuredLLMClient.ProviderTag), so the LLMClientRegistry holds
         // it alongside the real client + the deterministic fakes without a duplicate-provider collision. The

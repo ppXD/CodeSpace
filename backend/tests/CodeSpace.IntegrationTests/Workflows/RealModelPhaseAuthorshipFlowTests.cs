@@ -181,18 +181,23 @@ public sealed class RealModelPhaseAuthorshipFlowTests
         return await scope.Resolve<IRunFromSnapshotStarter>().StartFromSnapshotAsync(definition, teamId, userId, launchPayloadJson: null, CancellationToken.None);
     }
 
-    /// <summary>Test-only adaptation: rewrite ONLY the planner's <c>llm.complete</c> provider to the RecordReplay decorator's tag, so the engine resolves the real/recorded model. The agent.code body + the graph SHAPE are left exactly as the production builder emitted them.</summary>
+    /// <summary>Test-only adaptation: rewrite the PLANNER node's <c>llm.complete</c> provider to the RecordReplay decorator's tag (the real/recorded model — the ONLY real model under test), and the SYNTH node's to the deterministic plain-text synth fake. The synth MUST NOT hit the RecordReplay decorator — it has no cassette for the synth request and would throw; only the planner's decision authorship is under test here. Retarget is BY NODE ID (the graph now has two llm.complete nodes). The agent.code body + the graph SHAPE are left exactly as the production builder emitted them.</summary>
     private static WorkflowDefinition RetargetPlannerToRealModel(WorkflowDefinition definition) => definition with
     {
         Nodes = definition.Nodes.Select(RetargetNode).ToList(),
     };
 
-    private static NodeDefinition RetargetNode(NodeDefinition node)
+    private static NodeDefinition RetargetNode(NodeDefinition node) => node.Id switch
     {
-        if (node.TypeKey != "llm.complete") return node;
+        "planner" => RetargetProvider(node, RecordReplayStructuredLLMClient.ProviderTag),
+        "synth" => RetargetProvider(node, DeterministicSynthLlmClient.ProviderTag),
+        _ => node,
+    };
 
+    private static NodeDefinition RetargetProvider(NodeDefinition node, string providerTag)
+    {
         var config = node.Config.Deserialize<Dictionary<string, JsonElement>>() ?? new();
-        config["provider"] = JsonSerializer.SerializeToElement(RecordReplayStructuredLLMClient.ProviderTag);
+        config["provider"] = JsonSerializer.SerializeToElement(providerTag);
 
         return node with { Config = JsonSerializer.SerializeToElement(config) };
     }

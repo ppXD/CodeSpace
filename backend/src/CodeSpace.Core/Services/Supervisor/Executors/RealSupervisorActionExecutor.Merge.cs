@@ -8,9 +8,16 @@ namespace CodeSpace.Core.Services.Supervisor.Executors;
 
 /// <summary>
 /// The SYNCHRONOUS merge half of the real executor (Rule 10 <c>.Merge.cs</c>): read the recorded prior-Attempt
-/// agent results by id + reduce them into one synthesis outcome. A THIN array fold (the minimal E3 synthesis —
-/// collect each spawned agent's summary by subtask), NOT a second LLM call; a richer LLM synthesis is a later
-/// slice. The decision self-advances after recording (SYNCHRONOUS).
+/// agent results by id + fold them into one synthesis outcome. Each merged entry now carries the FULL
+/// <see cref="AgentRunResult"/> work products — <c>summary</c> AND <c>changedFiles</c> / <c>producedBranch</c> /
+/// <c>patch</c> / <c>error</c> — so the synthesis no longer discards what each agent actually produced (the
+/// branch + diff a downstream PR-open step consumes). The patch is already length-capped by the executor's
+/// <c>TruncatePatch</c>, so it passes through as-is. The decision self-advances after recording (SYNCHRONOUS).
+///
+/// <para>DEFERRED (not this slice): (1) folding the per-branch patches into ONE branch via a real git
+/// rebase / conflict-resolve — today each agent's branch + diff is carried side-by-side, not merged on disk;
+/// (2) a second LLM-synthesis pass over the folded contributions (the deep merge stays a deterministic fold,
+/// no model call). Both return with the richer LLM-synthesis merge slice.</para>
 /// </summary>
 public sealed partial class RealSupervisorActionExecutor
 {
@@ -41,7 +48,7 @@ public sealed partial class RealSupervisorActionExecutor
             .SelectMany(d => SupervisorOutcome.ReadStagedAgentRunIds(d.OutcomeJson))
             .ToList();
 
-    /// <summary>Load each agent run's terminal summary by id, TEAM-SCOPED (defense-in-depth — the ids are this run's own recorded spawns, but a cross-team id never resolves) — the reduced view the synthesis records. A missing / non-terminal run contributes its status, not a crash.</summary>
+    /// <summary>Load each agent run's FULL terminal result by id, TEAM-SCOPED (defense-in-depth — the ids are this run's own recorded spawns, but a cross-team id never resolves) — every merged entry projects the complete work products the synthesis records. A missing / non-terminal run contributes its status, not a crash.</summary>
     private IReadOnlyList<object> ReadAgentResults(IReadOnlyList<Guid> agentRunIds, Guid teamId)
     {
         if (agentRunIds.Count == 0) return Array.Empty<object>();
@@ -57,16 +64,24 @@ public sealed partial class RealSupervisorActionExecutor
         return agentRunIds
             .Where(byId.ContainsKey)
             .Select(id => byId[id])
-            .Select(r => (object)new { agentRunId = r.Id, status = r.Status.ToString(), summary = ReadSummary(r.ResultJson) })
+            .Select(r => ProjectContribution(r.Id, r.Status, r.ResultJson))
             .ToList();
     }
 
-    private static string? ReadSummary(string? resultJson)
+    /// <summary>Project ONE agent run's full contribution into the merge outcome — the real work products (summary + changedFiles + producedBranch + patch + error), not just the summary. A missing / unparseable result still contributes its status. The shape round-trips through <c>AgentJson.Options</c>.</summary>
+    private static object ProjectContribution(Guid agentRunId, Messages.Enums.AgentRunStatus status, string? resultJson)
     {
-        if (string.IsNullOrWhiteSpace(resultJson)) return null;
+        var result = string.IsNullOrWhiteSpace(resultJson) ? null : Deserialize<AgentRunResult>(resultJson);
 
-        var result = Deserialize<AgentRunResult>(resultJson);
-
-        return result?.Summary;
+        return new
+        {
+            agentRunId,
+            status = status.ToString(),
+            summary = result?.Summary,
+            changedFiles = result?.ChangedFiles ?? Array.Empty<string>(),
+            producedBranch = result?.ProducedBranch,
+            patch = result?.Patch ?? "",
+            error = result?.Error,
+        };
     }
 }
