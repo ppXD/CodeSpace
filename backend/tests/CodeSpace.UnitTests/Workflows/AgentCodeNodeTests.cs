@@ -268,6 +268,40 @@ public class AgentCodeNodeTests
         result.Error.ShouldContain("patch did not apply");
     }
 
+    [Fact]
+    public async Task Resumed_multi_repo_run_surfaces_the_change_set_outputs()
+    {
+        // A multi-repo run's resume payload carries repositoryResults + changeSetId; the node surfaces them so a
+        // downstream git.open_change_set can bind the per-repo branches.
+        var resume = JsonDocument.Parse("""
+            {"status":"Succeeded","summary":"Coordinated change.","changedFiles":["web.txt"],"branch":"codespace/run-x","changeSetId":"cs-abc",
+             "repositoryResults":[
+               {"alias":"web","repositoryId":"11111111-1111-1111-1111-111111111111","producedBranch":"codespace/run-x","baseSha":"base-web"},
+               {"alias":"api","repositoryId":"22222222-2222-2222-2222-222222222222","producedBranch":"codespace/run-x","baseSha":"base-api"}]}
+            """).RootElement;
+
+        var result = await new AgentCodeNode().RunAsync(BuildContext(new(), resume), CancellationToken.None);
+
+        result.Status.ShouldBe(NodeStatus.Success);
+        result.Outputs["changeSetId"].GetString().ShouldBe("cs-abc");
+        result.Outputs["repositoryResults"].GetArrayLength().ShouldBe(2);
+        result.Outputs["repositoryResults"][0].GetProperty("alias").GetString().ShouldBe("web");
+        result.Outputs["repositoryResults"][0].GetProperty("producedBranch").GetString().ShouldBe("codespace/run-x");
+    }
+
+    [Fact]
+    public async Task Resumed_single_repo_run_omits_the_change_set_outputs()
+    {
+        // A single-repo run's payload has no repositoryResults/changeSetId — the node must not invent them (the
+        // single-repo output shape is unchanged).
+        var resume = JsonDocument.Parse("""{"status":"Succeeded","summary":"Done.","changedFiles":["a.ts"],"branch":"agent/x"}""").RootElement;
+
+        var result = await new AgentCodeNode().RunAsync(BuildContext(new(), resume), CancellationToken.None);
+
+        result.Outputs.ContainsKey("repositoryResults").ShouldBeFalse();
+        result.Outputs.ContainsKey("changeSetId").ShouldBeFalse();
+    }
+
     // ── Autonomy tier → permissions ─────────────────────────────────────────────
 
     [Theory]

@@ -94,7 +94,11 @@ public sealed class WorkflowResumeAgentRunCompletionNotifier : IAgentRunCompleti
             summary = result?.Summary,
             changedFiles = result?.ChangedFiles,
             branch = result?.ProducedBranch,
+            // Multi-repo: the per-repo change set the agent.code node surfaces for a downstream git.open_change_set.
+            // Null/empty for a single-repo run, so the node's single-repo outputs are unchanged.
+            repositoryResults = result?.RepositoryResults,
+            changeSetId = result?.ChangeSetId,
             error = result?.Error ?? run.Error,
-        });
+        }, AgentJson.Options);
     }
 }

@@ -79,7 +79,22 @@ public sealed class AgentCodeNode : INodeRuntime
                 "status":       { "type": "string" },
                 "summary":      { "type": "string" },
                 "changedFiles": { "type": "array", "items": { "type": "string" } },
-                "branch":       { "type": "string" }
+                "branch":       { "type": "string" },
+                "changeSetId":  { "type": ["string","null"], "description": "Multi-repo run only: a stable id for the SET of branches this run produced. Null for a single-repo run." },
+                "repositoryResults": {
+                  "type": "array",
+                  "description": "Multi-repo run only: one entry per writable repo (alias, repositoryId, producedBranch, baseSha) — the change set to feed git.open_change_set. Empty for a single-repo run (use 'branch' instead).",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "alias":          { "type": "string" },
+                      "repositoryId":   { "type": ["string","null"] },
+                      "changedFiles":   { "type": "array", "items": { "type": "string" } },
+                      "producedBranch": { "type": ["string","null"] },
+                      "baseSha":        { "type": ["string","null"] }
+                    }
+                  }
+                }
               }
             }
             """),
@@ -145,6 +160,10 @@ public sealed class AgentCodeNode : INodeRuntime
         CopyIfPresent(payload, "summary", outputs);
         CopyIfPresent(payload, "changedFiles", outputs);
         CopyIfPresent(payload, "branch", outputs);
+        // Multi-repo: the per-repo change set (each writable repo's branch) + its id, so a downstream
+        // git.open_change_set can open a PR per repo. Absent/empty for a single-repo run.
+        CopyIfPresent(payload, "repositoryResults", outputs);
+        CopyIfPresent(payload, "changeSetId", outputs);
 
         return NodeResult.Ok(outputs);
     }
