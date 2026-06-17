@@ -1,3 +1,5 @@
+using System.Text.Json;
+
 namespace CodeSpace.Messages.Dtos.Agents;
 
 /// <summary>
@@ -76,8 +78,18 @@ public sealed record SupervisorGoalConfig
 /// </summary>
 public sealed record SupervisorAgentProfile
 {
-    /// <summary>The repository each spawned agent clones into its workspace (the executor clones it). Null → no workspace (analysis-only). The supervisor node has no inputs, so this is authored on the profile, not bound from a trigger.</summary>
+    /// <summary>The repository each spawned agent clones into its workspace (the executor clones it). Null → no workspace (analysis-only). The supervisor node has no inputs, so this is authored on the profile, not bound from a trigger. The PRIMARY repo when <see cref="RelatedRepositories"/> are also authored.</summary>
     public Guid? RepositoryId { get; init; }
+
+    /// <summary>
+    /// Multi-repo (resolver loop #379, S7): the authored <c>relatedRepositories</c> array — each
+    /// <c>{repositoryId, alias?, access?}</c> — that each spawned agent ALSO clones alongside the primary
+    /// <see cref="RepositoryId"/>, for a coordinated change across e.g. a frontend + backend. Captured as the RAW
+    /// element (not a typed list) so the executor parses it through the SHARED <c>AgentWorkspaceAuthoring</c> the
+    /// agent.code node uses — ONE authored-repos → workspace projection, no per-producer mirror (Rule 7), and no
+    /// brittle enum-deserialization of <c>access</c>. Null / absent / empty → a single-repo spawn (byte-identical).
+    /// </summary>
+    public JsonElement? RelatedRepositories { get; init; }
 
     /// <summary>The harness each spawned agent runs on (e.g. <c>"codex-cli"</c>). Null / blank → the supervisor's <c>codex-cli</c> default — byte-identical to pre-P2-3.</summary>
     public string? Harness { get; init; }
