@@ -78,6 +78,10 @@ public sealed class SupervisorDefinitionBuilder : IWorkflowDefinitionBuilder, IS
         AddIfPresent(config, "maxParallelism", context.Route.Caps.MaxParallelism);
         AddIfPresent(config, "maxRounds", context.Route.Caps.MaxRounds);
         AddIfPresent(config, "maxTotalSpawns", context.Route.Caps.MaxTotalSpawns);
+        // Forwards the cost cap the SAME way as the sibling caps. No bounds preset / CapsOverride sets
+        // Caps.MaxCostUsd yet, so a task-launched supervisor omits it today (the cost cap is reachable via a
+        // hand-authored agent.supervisor node config); wiring a launch-surface budget producer is a follow-up.
+        AddIfPresent(config, "maxCostUsd", context.Route.Caps.MaxCostUsd);
         AddIfPresent(config, "agentProfile", BuildAgentProfile(context.AgentProfile));
 
         return JsonSerializer.SerializeToElement(config);

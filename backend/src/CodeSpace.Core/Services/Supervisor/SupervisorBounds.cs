@@ -48,6 +48,11 @@ public static class SupervisorBounds
 
         if (context.TotalSpawnedAgents + k > plan.MaxTotalSpawns) return SupervisorStopReasons.TotalSpawnCapReached;
 
+        // SOTA #4: realized-spend backpressure. STRICT > matches the total-spawn convention above (exactly-at-budget
+        // still proceeds; spend that has ALREADY EXCEEDED the cap stops the next spend-incurring decision). Spend lands
+        // only at agent completion, so this sees the PRIOR wave's realized cost — worst-case overshoot is one wave.
+        if (plan.MaxCostUsd is { } cap && context.RunSpendUsd > cap) return SupervisorStopReasons.CostCapReached;
+
         return null;
     }
 

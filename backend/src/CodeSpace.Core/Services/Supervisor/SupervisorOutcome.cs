@@ -1,5 +1,6 @@
 using System.Text.Json;
 using CodeSpace.Core.Services.Agents;
+using CodeSpace.Core.Services.Agents.Cost;
 using CodeSpace.Messages.Agents;
 
 namespace CodeSpace.Core.Services.Supervisor;
@@ -133,7 +134,7 @@ public static class SupervisorOutcome
     /// Reads only bounded fields off the result — never the patch/transcript — so it needs no artifact-store fetch
     /// and stays a pure function of immutable post-terminal state (replay-deterministic).
     /// </summary>
-    public static SupervisorAgentResult ProjectCompact(Guid agentRunId, string statusName, string? rowError, string? resultJson)
+    public static SupervisorAgentResult ProjectCompact(Guid agentRunId, string statusName, string? rowError, string? resultJson, string? model = null)
     {
         var result = string.IsNullOrWhiteSpace(resultJson) ? null : TryDeserializeResult(resultJson);
 
@@ -145,8 +146,28 @@ public static class SupervisorOutcome
             Error = result?.Error ?? rowError,
             ChangedFiles = result?.ChangedFiles ?? Array.Empty<string>(),
             ProducedBranch = result?.ProducedBranch,
+            // SOTA #4: the priced inputs ride inline so the cost bound sums realized spend straight off the durable
+            // outcome (no new query, replay-deterministic). Tokens come from the result; the model is the agent's
+            // task model (passed in by the rehydrate fold, which has TaskJson) — null when the caller has no model.
+            InputTokens = result?.TokenUsage?.InputTokens ?? 0,
+            OutputTokens = result?.TokenUsage?.OutputTokens ?? 0,
+            Model = model,
         };
     }
+
+    /// <summary>
+    /// The summed USD spend of these compact results, priced via <see cref="AgentCostPricing"/> (SOTA #4) — the pure
+    /// figure the supervisor's cost bound compares to <c>MaxCostUsd</c>. An unpriceable result (unknown/blank model,
+    /// or a result folded before token fields existed → 0 tokens) contributes 0 (fail-open), so a usage-silent agent
+    /// can never spuriously inflate the bill nor block the run; the agent-COUNT cap still bounds it.
+    ///
+    /// <para>NOTE — intentional asymmetry with the read plane (<c>TeamCostService</c>): a KNOWN-model agent that
+    /// captured no usage prices here to a REAL $0 (tokens default to 0), whereas the bill treats it as unknown-cost.
+    /// Both contribute 0, so the strict <c>&gt;</c> cap is unaffected either way; the divergence only matters if a
+    /// future change surfaces unknown-cost FROM the fold — align <see cref="ProjectCompact"/> then, not now.</para>
+    /// </summary>
+    public static decimal SpendUsd(IReadOnlyList<SupervisorAgentResult> agentResults) =>
+        agentResults.Sum(r => AgentCostPricing.CostUsd(r.Model, r.InputTokens, r.OutputTokens) ?? 0m);
 
     /// <summary>Best-effort deserialize of a persisted <c>AgentRunResult</c> (null on malformed) — the compact projection tolerates a corrupt result the same way the merge path does.</summary>
     private static AgentRunResult? TryDeserializeResult(string resultJson)

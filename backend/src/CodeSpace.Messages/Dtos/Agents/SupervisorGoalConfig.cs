@@ -32,6 +32,9 @@ public sealed record SupervisorGoalConfig
     /// <summary>Optional cap on how many agents the supervisor may spawn IN TOTAL across the whole run (summed from the ledger). Null = the <c>SupervisorLane.DefaultMaxTotalSpawns</c> default. Clamped to <c>[1, MaxTotalSpawnsCeiling]</c>.</summary>
     public int? MaxTotalSpawns { get; init; }
 
+    /// <summary>Optional cap on the run's REALIZED USD spend (summed priced agent token usage, SOTA #4). Null = no cost cap (the agent-count cap still bounds the run). A negative value resolves to null (no budget, not a zero budget). At/below the cap proceeds; spend ABOVE it force-STOPs the next spend-incurring decision.</summary>
+    public decimal? MaxCostUsd { get; init; }
+
     /// <summary>Optional cap on consecutive decisions producing no new settled agent result before the best-effort no-progress guard force-STOPs. Null = the <c>SupervisorLane.DefaultMaxNoProgressDecisions</c> default.</summary>
     public int? MaxNoProgressDecisions { get; init; }
 

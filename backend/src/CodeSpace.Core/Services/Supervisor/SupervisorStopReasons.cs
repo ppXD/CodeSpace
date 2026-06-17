@@ -18,6 +18,9 @@ public static class SupervisorStopReasons
     /// <summary>The total-spawned cap (<c>MaxTotalSpawns</c>) would be breached by a further spawn — the run has spawned its allotted agents.</summary>
     public const string TotalSpawnCapReached = "total spawn cap reached";
 
+    /// <summary>The run's REALIZED spend (summed agent token cost) EXCEEDED <c>MaxCostUsd</c> (SOTA #4) — a further spend-incurring decision is refused. Realized-spend backpressure: exactly-at-budget proceeds, spend ABOVE budget force-STOPs (a terminal stop salvages already-paid-for work).</summary>
+    public const string CostCapReached = "cost cap reached";
+
     /// <summary>A single spawn decision's fan-out (K) exceeds the per-decision cap (<c>MaxParallelism</c> ≤ the schema maxItems) — refused.</summary>
     public const string SpawnFanOutExceedsCap = "spawn fan-out exceeds cap";
 

@@ -60,6 +60,15 @@ public sealed record SupervisorTurnContext
     public int TotalSpawnedAgents { get; init; }
 
     /// <summary>
+    /// The run's REALIZED USD spend so far (SOTA #4), SUMMED from the durable ledger — every prior spawn/retry
+    /// decision's folded agent token usage, priced. A LEDGER FACT folded on rehydrate (like <see cref="TotalSpawnedAgents"/>),
+    /// so it survives replay + re-entry deterministically. The turn loop force-STOPs when this EXCEEDS the run's
+    /// <c>MaxCostUsd</c> (realized-spend backpressure — exactly-at-budget proceeds, like the total-spawn cap). 0 when
+    /// no spend is known yet (fail-open — cost never blocks the first spawn).
+    /// </summary>
+    public decimal RunSpendUsd { get; init; }
+
+    /// <summary>
     /// How many of the MOST RECENT consecutive decisions produced NO new SETTLED agent result, folded from the
     /// durable ledger (PR-E E5 best-effort no-progress guard). A spawn/retry that staged agents whose outcomes
     /// the merge has not yet folded counts as no-progress; a fresh agent result resets it to 0. The turn loop

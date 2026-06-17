@@ -74,6 +74,14 @@ public class AgentsController : ControllerBase
         return Ok(result);
     }
 
+    /// <summary>The team's token + estimated-USD spend roll-up over its agent runs, with an optional since window — the auditable bill over the previously-dead TokenUsage. Team-scoped (the team is the X-Team-Id header, never the query string); runs with no captured usage or an unpriced model are surfaced as unknown-cost, not silently undercounted.</summary>
+    [HttpGet("cost")]
+    public async Task<IActionResult> GetCost([FromQuery] GetTeamCostRollupQuery query, CancellationToken cancellationToken)
+    {
+        var result = await _mediator.Send(query, cancellationToken).ConfigureAwait(false);
+        return Ok(result);
+    }
+
     [HttpGet("{agentDefinitionId:guid}")]
     public async Task<IActionResult> Get([FromRoute] Guid agentDefinitionId, CancellationToken cancellationToken)
     {
