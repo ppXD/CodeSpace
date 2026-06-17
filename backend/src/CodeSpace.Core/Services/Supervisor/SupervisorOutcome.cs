@@ -250,6 +250,28 @@ public static class SupervisorOutcome
         }
     }
 
+    /// <summary>
+    /// Read the build/test VERDICT off a <c>resolve</c> decision's folded outcome (resolver loop #379, S3): the
+    /// resolver agent's compact result drives it — <see cref="SupervisorResolutionVerdict.Unknown"/> when no result is
+    /// folded yet (still parked), <see cref="SupervisorResolutionVerdict.Verified"/> when the resolver SUCCEEDED AND
+    /// its summary carries <see cref="SupervisorResolverRecipe.TestsPassedMarker"/> (the instruction-encoded green
+    /// signal), else <see cref="SupervisorResolutionVerdict.Unverified"/>. Pure + deterministic; S4 gates acceptance
+    /// on <c>Verified</c>. A multi-result outcome (shouldn't happen for resolve — it stages K=1) takes the first.
+    /// </summary>
+    public static SupervisorResolutionVerdict ReadResolutionVerdict(string? resolveOutcomeJson)
+    {
+        var results = ReadAgentResults(resolveOutcomeJson);
+
+        if (results.Count == 0) return SupervisorResolutionVerdict.Unknown;
+
+        var resolver = results[0];
+
+        var verified = string.Equals(resolver.Status, "Succeeded", StringComparison.OrdinalIgnoreCase)
+            && resolver.Summary?.Contains(SupervisorResolverRecipe.TestsPassedMarker, StringComparison.Ordinal) == true;
+
+        return verified ? SupervisorResolutionVerdict.Verified : SupervisorResolutionVerdict.Unverified;
+    }
+
     /// <summary>Read the folded compact agent results from a spawn/retry outcome (empty when absent/malformed/not-yet-folded). The decider sees these via the rendered outcome; a merge / scorecard can also read them.</summary>
     public static IReadOnlyList<SupervisorAgentResult> ReadAgentResults(string? outcomeJson)
     {
