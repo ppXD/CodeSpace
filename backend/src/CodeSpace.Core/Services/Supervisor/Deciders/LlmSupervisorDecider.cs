@@ -100,13 +100,16 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
 
         if (agentResults.Count > 0)
         {
-            builder.AppendLine($"- {prior.DecisionKind}{(isLatestSpawn ? " (latest spawn/retry — act on THESE results)" : "")}: payload={prior.PayloadJson}");
+            builder.AppendLine($"- {prior.DecisionKind}{(isLatestSpawn ? " (latest — act on THESE results)" : "")}: payload={prior.PayloadJson}");
             for (var k = 0; k < agentResults.Count; k++)
             {
                 var r = agentResults[k];
                 var detail = !string.IsNullOrWhiteSpace(r.Error) ? $"error: {r.Error}" : !string.IsNullOrWhiteSpace(r.Summary) ? r.Summary : "(no summary)";
                 builder.AppendLine($"    agent {k}: {r.Status} — {detail}");
             }
+
+            if (prior.DecisionKind == SupervisorDecisionKinds.Resolve) AppendResolutionVerdict(builder, prior);
+
             return;
         }
 
@@ -120,6 +123,19 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
         }
 
         builder.AppendLine($"- {prior.DecisionKind}: payload={prior.PayloadJson} outcome={prior.OutcomeJson ?? "(none)"}");
+    }
+
+    /// <summary>Render the resolver's build/test VERDICT (S3) so the decider acts on it: a VERIFIED resolution may be accepted (merge again / open a PR); an UNVERIFIED one must NOT be accepted (retry within the cap, or stop and leave the conflict for a human).</summary>
+    private static void AppendResolutionVerdict(StringBuilder builder, SupervisorPriorDecision prior)
+    {
+        var verdict = SupervisorOutcome.ReadResolutionVerdict(prior.OutcomeJson);
+
+        builder.AppendLine(verdict switch
+        {
+            SupervisorResolutionVerdict.Verified => "    resolution VERIFIED — the reconciliation built and passed the tests; it is safe to accept (merge again / open a PR).",
+            SupervisorResolutionVerdict.Unverified => "    resolution NOT verified — the reconciliation did not pass the build/tests; do NOT accept it. Retry the resolution or stop and leave the conflict for a human.",
+            _ => "    resolution verdict unknown — the resolver has not produced a verified result.",
+        });
     }
 
     /// <summary>Render a conflicted merge integration legibly: what conflicted, where the agents' work is preserved, and the two moves available (spawn a resolver to reconcile + verify, or stop and leave it for a human).</summary>

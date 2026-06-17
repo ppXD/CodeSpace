@@ -1,3 +1,4 @@
+using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Agents.Eval;
 using CodeSpace.Core.Services.Supervisor;
 using CodeSpace.Core.Services.Supervisor.Deciders;
@@ -117,6 +118,66 @@ public class SupervisorResolverTests
     {
         SupervisorDecisionKinds.StagesAgents(kind).ShouldBe(expected);
     }
+
+    // ── S3: the build/test verification verdict ────────────────────────────────────
+
+    /// <summary>A resolve outcome whose folded resolver agent terminated with the given status + summary (the shape FoldAgentResults persists for a resolve decision after the barrier).</summary>
+    private static string ResolveOutcome(string status, string? summary)
+    {
+        var result = new SupervisorAgentResult { AgentRunId = Guid.NewGuid(), Status = status, Summary = summary };
+        return System.Text.Json.JsonSerializer.Serialize(new { agentRunIds = new[] { result.AgentRunId }, agentCount = 1, agentResults = new[] { result } }, AgentJson.Options);
+    }
+
+    [Fact]
+    public void ReadResolutionVerdict_is_Verified_only_when_the_resolver_succeeded_with_the_marker()
+    {
+        SupervisorOutcome.ReadResolutionVerdict(ResolveOutcome("Succeeded", $"reconciled cleanly. {SupervisorResolverRecipe.TestsPassedMarker}"))
+            .ShouldBe(SupervisorResolutionVerdict.Verified);
+    }
+
+    [Theory]
+    [InlineData("Succeeded", "reconciled but tests still failing")]   // succeeded, NO marker → unverified
+    [InlineData("Failed", "build broke")]                            // didn't even succeed
+    [InlineData("Cancelled", null)]                                  // killed mid-run
+    public void ReadResolutionVerdict_is_Unverified_without_a_verified_pass(string status, string? summary)
+    {
+        SupervisorOutcome.ReadResolutionVerdict(ResolveOutcome(status, summary))
+            .ShouldBe(SupervisorResolutionVerdict.Unverified, "no green-tests marker on a terminal resolver ⇒ NOT safe to accept");
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("""{"agentRunIds":["x"],"agentCount":1}""")]   // staged but not yet folded (still parked)
+    public void ReadResolutionVerdict_is_Unknown_when_no_resolver_result_is_folded(string? outcomeJson)
+    {
+        SupervisorOutcome.ReadResolutionVerdict(outcomeJson).ShouldBe(SupervisorResolutionVerdict.Unknown);
+    }
+
+    [Fact]
+    public void The_decider_prompt_renders_a_verified_resolution_as_safe_to_accept()
+    {
+        var resolve = new SupervisorPriorDecision { Id = Guid.NewGuid(), Sequence = 3, DecisionKind = SupervisorDecisionKinds.Resolve, Status = SupervisorDecisionStatus.Succeeded, PayloadJson = "{}", OutcomeJson = ResolveOutcome("Succeeded", $"done {SupervisorResolverRecipe.TestsPassedMarker}") };
+
+        var prompt = LlmSupervisorDecider.BuildUserPromptForTest(Context(turnNumber: 4, resolve));
+
+        prompt.ShouldContain("resolution VERIFIED", Case.Insensitive);
+        prompt.ShouldContain("safe to accept", Case.Insensitive);
+    }
+
+    [Fact]
+    public void The_decider_prompt_renders_an_unverified_resolution_as_do_not_accept()
+    {
+        var resolve = new SupervisorPriorDecision { Id = Guid.NewGuid(), Sequence = 3, DecisionKind = SupervisorDecisionKinds.Resolve, Status = SupervisorDecisionStatus.Succeeded, PayloadJson = "{}", OutcomeJson = ResolveOutcome("Succeeded", "tests still red") };
+
+        var prompt = LlmSupervisorDecider.BuildUserPromptForTest(Context(turnNumber: 4, resolve));
+
+        prompt.ShouldContain("NOT verified", Case.Insensitive);
+        prompt.ShouldContain("do NOT accept", Case.Insensitive);
+    }
+
+    private static SupervisorTurnContext Context(int turnNumber, params SupervisorPriorDecision[] prior) =>
+        new() { Goal = "ship", TurnNumber = turnNumber, PriorDecisions = prior };
 
     [Fact]
     public void The_eval_scorecard_counts_resolve_decisions()
