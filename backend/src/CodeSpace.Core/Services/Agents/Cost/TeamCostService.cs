@@ -69,8 +69,11 @@ public sealed class TeamCostService : ITeamCostService, IScopedDependency
         if (runId is { } id) query = query.Where(r => r.WorkflowRunId == id);
         if (since is { } from) query = query.Where(r => r.CreatedDate >= from);
 
+        // A STANDALONE agent run (no owning workflow) keys on its OWN id, so each forms its own singleton run in the
+        // per-run breakdown rather than collapsing every standalone run of the team into one synthetic Guid.Empty
+        // group. The summed totals are unaffected (they sum over the rows, not the grouping).
         return await query
-            .Select(r => new CostRow { WorkflowRunId = r.WorkflowRunId ?? Guid.Empty, ResultJson = r.ResultJson!, TaskJson = r.TaskJson, CreatedAt = r.CreatedDate })
+            .Select(r => new CostRow { WorkflowRunId = r.WorkflowRunId ?? r.Id, ResultJson = r.ResultJson!, TaskJson = r.TaskJson, CreatedAt = r.CreatedDate })
             .ToListAsync(cancellationToken)
             .ConfigureAwait(false);
     }

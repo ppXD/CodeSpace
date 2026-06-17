@@ -27,6 +27,9 @@ public static class AgentCostPricing
     /// </summary>
     public const string PriceTableEnvVar = "CODESPACE_AGENT_MODEL_PRICES";
 
+    /// <summary>An absurd upper bound on a per-million price (USD). No real model is within four orders of magnitude of this; an env entry above it is a fat-finger and is SKIPPED (lenient). Bounding the price keeps <see cref="CostUsd"/> arithmetic far below <c>decimal.MaxValue</c> even at <c>int.MaxValue</c> tokens — so a malformed override can never overflow the pricing math into a throw (the "pricing never throws" contract).</summary>
+    internal const decimal MaxPricePerMillionUsd = 100_000m;
+
     /// <summary>The seeded default prices (USD per 1,000,000 tokens, input/output), cache-dated to the claude-api skill (2026-05-26). Codex/OpenAI models are intentionally ABSENT → UNKNOWN until an operator adds them via the env override. Prices drift — the env override is the correction path.</summary>
     private static readonly IReadOnlyDictionary<string, ModelPrice> DefaultPrices = new Dictionary<string, ModelPrice>(StringComparer.OrdinalIgnoreCase)
     {
@@ -48,7 +51,12 @@ public static class AgentCostPricing
 
         if (!ResolveTable().TryGetValue(model.Trim(), out var price)) return null;
 
-        return inputTokens * price.InputPerMillionUsd / 1_000_000m + outputTokens * price.OutputPerMillionUsd / 1_000_000m;
+        // Clamp negative token counts to 0: a harness/corrupt result reporting a negative count must NEVER yield a
+        // negative cost — that would SUBTRACT from the summed RunSpendUsd the cost cap reads, masking real spend.
+        var input = Math.Max(0, inputTokens);
+        var output = Math.Max(0, outputTokens);
+
+        return input * price.InputPerMillionUsd / 1_000_000m + output * price.OutputPerMillionUsd / 1_000_000m;
     }
 
     /// <summary>The effective price for <paramref name="model"/> (env override layered over the defaults), or null when unknown. Internal so it's unit-pinned.</summary>
@@ -86,9 +94,12 @@ public static class AgentCostPricing
 
         if (name.Length == 0 || parts.Length != 2) return false;
 
-        if (!decimal.TryParse(parts[0], NumberStyles.Number, CultureInfo.InvariantCulture, out var input) ||
-            !decimal.TryParse(parts[1], NumberStyles.Number, CultureInfo.InvariantCulture, out var output) ||
-            input < 0 || output < 0)
+        // AllowDecimalPoint only (no thousands separators / sign): "2,5" is AMBIGUOUS across cultures, so reject it
+        // rather than silently misparse a comma as a 1000s-group (NumberStyles.Number would turn "2,5" into 25).
+        // Out-of-range values (negative, or absurdly large enough to overflow CostUsd) are SKIPPED, not fatal.
+        if (!decimal.TryParse(parts[0], NumberStyles.AllowDecimalPoint, CultureInfo.InvariantCulture, out var input) ||
+            !decimal.TryParse(parts[1], NumberStyles.AllowDecimalPoint, CultureInfo.InvariantCulture, out var output) ||
+            input < 0 || output < 0 || input > MaxPricePerMillionUsd || output > MaxPricePerMillionUsd)
             return false;
 
         model = name;

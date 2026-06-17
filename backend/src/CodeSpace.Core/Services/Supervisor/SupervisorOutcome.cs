@@ -160,6 +160,11 @@ public static class SupervisorOutcome
     /// figure the supervisor's cost bound compares to <c>MaxCostUsd</c>. An unpriceable result (unknown/blank model,
     /// or a result folded before token fields existed → 0 tokens) contributes 0 (fail-open), so a usage-silent agent
     /// can never spuriously inflate the bill nor block the run; the agent-COUNT cap still bounds it.
+    ///
+    /// <para>NOTE — intentional asymmetry with the read plane (<c>TeamCostService</c>): a KNOWN-model agent that
+    /// captured no usage prices here to a REAL $0 (tokens default to 0), whereas the bill treats it as unknown-cost.
+    /// Both contribute 0, so the strict <c>&gt;</c> cap is unaffected either way; the divergence only matters if a
+    /// future change surfaces unknown-cost FROM the fold — align <see cref="ProjectCompact"/> then, not now.</para>
     /// </summary>
     public static decimal SpendUsd(IReadOnlyList<SupervisorAgentResult> agentResults) =>
         agentResults.Sum(r => AgentCostPricing.CostUsd(r.Model, r.InputTokens, r.OutputTokens) ?? 0m);

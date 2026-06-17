@@ -82,13 +82,14 @@ public class SupervisorDefinitionBuilderTests
     [Fact]
     public void Supervisor_config_folds_the_caps_into_the_bounds()
     {
-        var caps = new RouteCaps { MaxParallelism = 5, MaxRounds = 6, MaxTotalSpawns = 20 };
+        var caps = new RouteCaps { MaxParallelism = 5, MaxRounds = 6, MaxTotalSpawns = 20, MaxCostUsd = 12.50m };
 
         var sup = Builder.Build(Context(caps: caps)).Nodes.Single(n => n.Id == "sup");
 
         sup.Config.GetProperty("maxParallelism").GetInt32().ShouldBe(5, "the route's parallelism cap folds onto the supervisor bound");
         sup.Config.GetProperty("maxRounds").GetInt32().ShouldBe(6);
         sup.Config.GetProperty("maxTotalSpawns").GetInt32().ShouldBe(20);
+        sup.Config.GetProperty("maxCostUsd").GetDecimal().ShouldBe(12.50m, "the route's cost cap folds onto the supervisor bound as a JSON number (SOTA #4)");
     }
 
     [Theory]
@@ -128,6 +129,7 @@ public class SupervisorDefinitionBuilderTests
         sup.Config.TryGetProperty("maxParallelism", out _).ShouldBeFalse("an unset cap omits the key — the node falls to its SupervisorLane default");
         sup.Config.TryGetProperty("maxRounds", out _).ShouldBeFalse();
         sup.Config.TryGetProperty("maxTotalSpawns", out _).ShouldBeFalse();
+        sup.Config.TryGetProperty("maxCostUsd", out _).ShouldBeFalse("an unset cost cap omits the key — the run has no cost budget (SOTA #4 default)");
 
         // approvalPolicy is always present — it defaults to 'none' (the autonomous, pre-approval posture).
         sup.Config.GetProperty("approvalPolicy").GetString().ShouldBe("none");

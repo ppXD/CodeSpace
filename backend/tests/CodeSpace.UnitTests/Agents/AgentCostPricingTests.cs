@@ -86,6 +86,42 @@ public sealed class AgentCostPricingTests
         });
     }
 
+    [Fact]
+    public void An_absurd_env_price_is_skipped_so_pricing_never_overflows_into_a_throw()
+    {
+        // A fat-fingered price big enough to overflow decimal * int.MaxValue would crash supervisor rehydrate AND
+        // 500 the cost read query (neither catches OverflowException). It must be SKIPPED at parse, never priced.
+        WithPriceEnv("m=99999999999999999999/1", () =>
+        {
+            Should.NotThrow(() => AgentCostPricing.CostUsd("m", int.MaxValue, int.MaxValue));
+            AgentCostPricing.CostUsd("m", int.MaxValue, int.MaxValue).ShouldBeNull("the absurd price is out of range → entry skipped → model unknown");
+        });
+
+        // And a SANE max-tier price at int.MaxValue tokens stays well within decimal range (no overflow).
+        Should.NotThrow(() => AgentCostPricing.CostUsd("claude-fable-5", int.MaxValue, int.MaxValue));
+    }
+
+    [Theory]
+    [InlineData("m=2,5/1")]    // comma is AMBIGUOUS (decimal vs thousands) → rejected, not silently parsed as 25
+    [InlineData("m=1/2,5")]
+    public void Env_override_rejects_thousands_separator_ambiguous_prices(string entry)
+    {
+        WithPriceEnv(entry, () => AgentCostPricing.CostUsd("m", 1_000_000, 1_000_000).ShouldBeNull("a comma-bearing price is ambiguous → skipped → model unknown (never a 10x misparse)"));
+    }
+
+    [Fact]
+    public void Negative_token_counts_clamp_to_zero_so_a_corrupt_count_cannot_produce_a_negative_cost()
+    {
+        // A harness/corrupt result reporting a negative token count must never yield a negative cost — that would
+        // SUBTRACT from the summed spend the cost cap reads, masking real spend.
+        AgentCostPricing.CostUsd("claude-opus-4-8", -1_000_000, -1_000_000).ShouldBe(0m);
+        AgentCostPricing.CostUsd("claude-opus-4-8", -1_000_000, 1_000_000).ShouldBe(25m, "the negative input clamps to 0; the positive output still prices");
+    }
+
+    [Fact]
+    public void MaxPricePerMillionUsd_const_is_pinned() =>
+        AgentCostPricing.MaxPricePerMillionUsd.ShouldBe(100_000m);
+
     private static void WithPriceEnv(string value, Action body)
     {
         var original = Environment.GetEnvironmentVariable(AgentCostPricing.PriceTableEnvVar);

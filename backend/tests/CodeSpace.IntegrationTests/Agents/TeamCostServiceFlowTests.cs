@@ -124,6 +124,85 @@ public class TeamCostServiceFlowTests
         rollup.EstimatedCostUsd.ShouldBe(5m, "the handler scopes to the caller's team via ICurrentTeam — team B's $45 is invisible");
     }
 
+    [Fact]
+    public async Task The_since_window_excludes_runs_created_before_the_horizon()
+    {
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+
+        var recent = Guid.NewGuid();
+        var old = Guid.NewGuid();
+        await SeedTerminalAgentAsync(teamId, recent, model: "claude-opus-4-8", input: 1_000_000, output: 0, createdAt: DateTimeOffset.UtcNow.AddHours(-1));
+        await SeedTerminalAgentAsync(teamId, old, model: "claude-opus-4-8", input: 1_000_000, output: 0, createdAt: DateTimeOffset.UtcNow.AddDays(-30));
+
+        using var scope = _fixture.BeginScope();
+        var rollup = await scope.Resolve<ITeamCostService>().ComputeRollupAsync(teamId, since: DateTimeOffset.UtcNow.AddDays(-7), CancellationToken.None);
+
+        rollup.Runs.ShouldContain(r => r.WorkflowRunId == recent, "the 1-hour-old run is inside the 7-day window");
+        rollup.Runs.ShouldNotContain(r => r.WorkflowRunId == old, "the 30-day-old run is before the window — its tokens + cost must be excluded");
+        rollup.TotalInputTokens.ShouldBe(1_000_000, "only the in-window run's tokens are summed — proving the CreatedDate >= from predicate is real, not inverted");
+        rollup.EstimatedCostUsd.ShouldBe(5m);
+    }
+
+    [Fact]
+    public async Task An_all_unknown_window_reports_null_cost_not_zero_while_a_priceable_zero_run_reports_zero()
+    {
+        var (allUnknownTeam, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var (pricedZeroTeam, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+
+        // Crown-jewel fail-open distinction: NO priceable run -> EstimatedCostUsd is null (unknown), NOT a real $0.
+        await SeedTerminalAgentAsync(allUnknownTeam, Guid.NewGuid(), model: "gpt-5-codex", input: 5_000_000, output: 0);
+        await SeedTerminalAgentAsync(allUnknownTeam, Guid.NewGuid(), model: "another-unknown", input: 1_000_000, output: 0);
+
+        var unknownRollup = await ComputeRollupAsync(allUnknownTeam);
+        unknownRollup.EstimatedCostUsd.ShouldBeNull("nothing in the window was priceable — null is distinct from a real $0");
+        unknownRollup.UnknownCostRuns.ShouldBe(2);
+        unknownRollup.TotalInputTokens.ShouldBe(6_000_000, "the tokens are still summed even when unpriceable");
+
+        // A KNOWN model with 0 tokens prices to a real $0 (priced, free) — distinct from unknown.
+        await SeedTerminalAgentAsync(pricedZeroTeam, Guid.NewGuid(), model: "claude-opus-4-8", input: 0, output: 0);
+
+        var pricedRollup = await ComputeRollupAsync(pricedZeroTeam);
+        pricedRollup.EstimatedCostUsd.ShouldBe(0m, "a known model that cost nothing is a real $0 — NOT null/unknown");
+        pricedRollup.UnknownCostRuns.ShouldBe(0);
+    }
+
+    [Fact]
+    public async Task A_malformed_result_row_degrades_to_unknown_without_crashing_the_rollup()
+    {
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+
+        var good = Guid.NewGuid();
+        await SeedTerminalAgentAsync(teamId, good, model: "claude-opus-4-8", input: 1_000_000, output: 0);   // $5
+        // Valid jsonb but the WRONG SHAPE for AgentRunResult (an array, not an object) — result_jsonb is a jsonb
+        // column so structurally-invalid JSON can't even be stored; this is the realistic corrupt-row the
+        // defensive TryDeserialize catch must tolerate. It passes the terminal filter, then degrades to unknown.
+        await SeedAgentAsync(teamId, Guid.NewGuid(), model: "claude-opus-4-8", AgentRunStatus.Succeeded, resultJson: "[]");
+
+        var rollup = await ComputeRollupAsync(teamId);
+
+        rollup.EstimatedCostUsd.ShouldBe(5m, "the good run still prices; the corrupt row degrades to unknown rather than crashing or being counted");
+        rollup.UnknownCostRuns.ShouldBe(1, "the malformed row is surfaced as unknown-cost");
+        rollup.WindowRunCount.ShouldBe(2, "both terminal rows are counted — the rollup completes");
+    }
+
+    [Fact]
+    public async Task The_per_run_breakdown_truncates_past_the_cap_while_totals_cover_the_full_window()
+    {
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+
+        const int runs = TeamCostService.RecentRunCap + 5;   // 105 distinct runs
+        await SeedManyTerminalRunsAsync(teamId, runs, model: "claude-opus-4-8", input: 1_000_000, output: 0);   // $5 each
+
+        var rollup = await ComputeRollupAsync(teamId);
+
+        rollup.WindowRunCount.ShouldBe(runs, "the window held all 105 runs");
+        rollup.Truncated.ShouldBeTrue("the per-run breakdown is capped");
+        rollup.Runs.Count.ShouldBe(TeamCostService.RecentRunCap, "the breakdown is bounded to the cap");
+        rollup.RunCount.ShouldBe(TeamCostService.RecentRunCap);
+        rollup.TotalInputTokens.ShouldBe((long)runs * 1_000_000, "the SUMMED totals cover the FULL window, not just the capped breakdown");
+        rollup.EstimatedCostUsd.ShouldBe(runs * 5m, "the summed cost covers every run in the window");
+    }
+
     // ─── Helpers ────────────────────────────────────────────────────────────────────
 
     private async Task<TeamCostRollup> ComputeRollupAsync(Guid teamId)
@@ -132,13 +211,13 @@ public class TeamCostServiceFlowTests
         return await scope.Resolve<ITeamCostService>().ComputeRollupAsync(teamId, since: null, CancellationToken.None);
     }
 
-    private Task SeedTerminalAgentAsync(Guid teamId, Guid runId, string model, int input, int output) =>
-        SeedAgentAsync(teamId, runId, model, AgentRunStatus.Succeeded, ResultJson(input, output));
+    private Task SeedTerminalAgentAsync(Guid teamId, Guid runId, string model, int input, int output, DateTimeOffset? createdAt = null) =>
+        SeedAgentAsync(teamId, runId, model, AgentRunStatus.Succeeded, ResultJson(input, output), createdAt);
 
     private Task SeedRunningAgentAsync(Guid teamId, Guid runId, string model) =>
         SeedAgentAsync(teamId, runId, model, AgentRunStatus.Running, resultJson: null);
 
-    private async Task SeedAgentAsync(Guid teamId, Guid runId, string model, AgentRunStatus status, string? resultJson)
+    private async Task SeedAgentAsync(Guid teamId, Guid runId, string model, AgentRunStatus status, string? resultJson, DateTimeOffset? createdAt = null)
     {
         using var scope = _fixture.BeginScope();
         var db = scope.Resolve<CodeSpaceDbContext>();
@@ -152,7 +231,30 @@ public class TeamCostServiceFlowTests
             Status = status,
             TaskJson = JsonSerializer.Serialize(new AgentTask { Goal = "g", Harness = "claude-code", Model = model }, AgentJson.Options),
             ResultJson = resultJson,
+            // The auditing interceptor only stamps CreatedDate when it is default, so an explicit value survives
+            // (the since-window test relies on it).
+            CreatedDate = createdAt ?? default,
         });
+
+        await db.SaveChangesAsync();
+    }
+
+    private async Task SeedManyTerminalRunsAsync(Guid teamId, int count, string model, int input, int output)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+
+        for (var i = 0; i < count; i++)
+            db.AgentRun.Add(new AgentRun
+            {
+                Id = Guid.NewGuid(),
+                TeamId = teamId,
+                WorkflowRunId = Guid.NewGuid(),
+                Harness = "claude-code",
+                Status = AgentRunStatus.Succeeded,
+                TaskJson = JsonSerializer.Serialize(new AgentTask { Goal = "g", Harness = "claude-code", Model = model }, AgentJson.Options),
+                ResultJson = ResultJson(input, output),
+            });
 
         await db.SaveChangesAsync();
     }
