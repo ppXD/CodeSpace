@@ -38,6 +38,15 @@ public sealed record AgentRunResult
     /// <summary>Branch the sandbox pushed, when the run produced one (the output handoff for opening a PR).</summary>
     public string? ProducedBranch { get; init; }
 
+    /// <summary>
+    /// The cloned base revision the <see cref="Patch"/> is rooted at — the exact commit this agent saw. The integrity
+    /// anchor for on-disk branch integration (SOTA #3): the integrator checks out THIS SHA before <c>git apply --3way</c>
+    /// so the pre-image resolves against the commit the agent actually edited, and REFUSES a set whose contributions
+    /// report differing base SHAs (a stale-base patch otherwise applies "cleanly" onto a moved tree and silently grafts
+    /// incoherent work). Null when the run had no workspace, or for a re-attached run with no surviving clone.
+    /// </summary>
+    public string? BaseSha { get; init; }
+
     public AgentTokenUsage? TokenUsage { get; init; }
 
     /// <summary>Failure detail when <see cref="Status"/> is <see cref="AgentRunStatus.Failed"/>.</summary>

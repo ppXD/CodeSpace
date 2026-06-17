@@ -2,9 +2,11 @@ using System.Text.Json;
 using CodeSpace.Core.DependencyInjection;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Services.Agents;
+using CodeSpace.Core.Services.Agents.Workspace;
 using CodeSpace.Core.Services.Chat;
 using CodeSpace.Core.Services.Chat.Interactions;
 using CodeSpace.Core.Services.Workflows.Artifacts;
+using CodeSpace.Core.Services.Workflows.Llm;
 using CodeSpace.Messages.Agents;
 using Microsoft.Extensions.Logging;
 
@@ -43,9 +45,12 @@ public sealed partial class RealSupervisorActionExecutor : ISupervisorActionExec
     private readonly IChatBotService _bot;
     private readonly IInteractionComponentRegistry _components;
     private readonly IArtifactOffloader _offloader;
+    private readonly IBranchIntegrator _integrator;
+    private readonly IAgentWorkspaceResolver _workspaces;
+    private readonly ILLMClientRegistry _llm;
     private readonly ILogger<RealSupervisorActionExecutor> _logger;
 
-    public RealSupervisorActionExecutor(CodeSpaceDbContext db, IAgentRunService agentRuns, IAgentDefinitionResolver agentDefinitionResolver, IChatBotService bot, IInteractionComponentRegistry components, IArtifactOffloader offloader, ILogger<RealSupervisorActionExecutor> logger)
+    public RealSupervisorActionExecutor(CodeSpaceDbContext db, IAgentRunService agentRuns, IAgentDefinitionResolver agentDefinitionResolver, IChatBotService bot, IInteractionComponentRegistry components, IArtifactOffloader offloader, IBranchIntegrator integrator, IAgentWorkspaceResolver workspaces, ILLMClientRegistry llm, ILogger<RealSupervisorActionExecutor> logger)
     {
         _db = db;
         _agentRuns = agentRuns;
@@ -53,6 +58,9 @@ public sealed partial class RealSupervisorActionExecutor : ISupervisorActionExec
         _bot = bot;
         _components = components;
         _offloader = offloader;
+        _integrator = integrator;
+        _workspaces = workspaces;
+        _llm = llm;
         _logger = logger;
     }
 

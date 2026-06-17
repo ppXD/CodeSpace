@@ -120,6 +120,6 @@ public class BuiltinPluginModuleTests
         };
 
         var total = all.SelectMany(p => p.Nodes).Distinct().Count();
-        total.ShouldBe(37, "37 builtin node types across 6 domain plugins — incl. the Agent plugin's agent.supervisor turn-loop node (PR-E E2) — adjust this number when adding a builtin");
+        total.ShouldBe(38, "38 builtin node types across 6 domain plugins — incl. the Git plugin's git.integrate branch-integration node (SOTA #3) — adjust this number when adding a builtin");
     }
 }

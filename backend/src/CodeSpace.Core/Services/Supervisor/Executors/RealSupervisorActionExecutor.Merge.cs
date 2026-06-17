@@ -8,17 +8,16 @@ namespace CodeSpace.Core.Services.Supervisor.Executors;
 
 /// <summary>
 /// The SYNCHRONOUS merge half of the real executor (Rule 10 <c>.Merge.cs</c>): read the recorded prior-Attempt
-/// agent results by id + fold them into one synthesis outcome. Each merged entry now carries the FULL
-/// <see cref="AgentRunResult"/> work products — <c>summary</c> AND <c>changedFiles</c> / <c>producedBranch</c> /
-/// <c>patch</c> / <c>error</c> — so the synthesis no longer discards what each agent actually produced (the
-/// branch + diff a downstream PR-open step consumes). A large diff that was offloaded to the artifact store
-/// (D2: PatchArtifactId set, inline Patch empty) is RESOLVED back here, so the merge never silently loses a
-/// big agent's work product. The decision self-advances after recording (now ASYNC — it resolves artifacts).
+/// agent results by id + fold them into one outcome. Each merged entry carries the FULL <see cref="AgentRunResult"/>
+/// work products — <c>summary</c> AND <c>changedFiles</c> / <c>producedBranch</c> / <c>patch</c> / <c>error</c> — so
+/// the synthesis never discards what each agent produced (the branch + diff a downstream PR-open step consumes). A
+/// large diff that was offloaded to the artifact store (D2: PatchArtifactId set, inline Patch empty) is RESOLVED back
+/// here, so the merge never silently loses a big agent's work product.
 ///
-/// <para>DEFERRED (not this slice): (1) folding the per-branch patches into ONE branch via a real git
-/// rebase / conflict-resolve — today each agent's branch + diff is carried side-by-side, not merged on disk;
-/// (2) a second LLM-synthesis pass over the folded contributions (the deep merge stays a deterministic fold,
-/// no model call). Both return with the richer LLM-synthesis merge slice.</para>
+/// <para>SOTA #3: when the integrate gate is on (<c>RealSupervisorActionExecutor.Integrate.cs</c>) the fold is
+/// AUGMENTED with an <c>integration</c> key (the K diffs INTEGRATED on disk into one reviewable branch, fail-safe)
+/// and a <c>synthesis</c> key (a model reduce over the K REAL diffs). With the gate OFF the outcome is byte-identical
+/// to pre-SOTA-#3: exactly <c>{ merged, count, synthesisInstruction }</c> — no clone, no LLM call.</para>
 /// </summary>
 public sealed partial class RealSupervisorActionExecutor
 {
@@ -28,19 +27,37 @@ public sealed partial class RealSupervisorActionExecutor
 
         var agentRunIds = ResolveAgentRunIdsToMerge(context);
 
-        var results = await ReadAgentResultsAsync(agentRunIds, context.TeamId, cancellationToken).ConfigureAwait(false);
+        var merged = await ReadMergedAgentsAsync(agentRunIds, context.TeamId, cancellationToken).ConfigureAwait(false);
 
-        var outcome = JsonSerializer.Serialize(new
+        // The deterministic fold — byte-identical to pre-SOTA-#3: an ordered dictionary whose first three keys
+        // serialize exactly as the old anonymous { merged, count, synthesisInstruction }. The optional integration +
+        // synthesis keys are layered ONLY when the gate is on (RealSupervisorActionExecutor.Integrate.cs).
+        var outcome = new Dictionary<string, object?>
         {
-            merged = results,
-            count = results.Count,
-            synthesisInstruction = merge.SynthesisInstruction,
-        }, AgentJson.Options);
+            ["merged"] = merged.Select(ProjectMergedEntry).ToList(),
+            ["count"] = merged.Count,
+            ["synthesisInstruction"] = merge.SynthesisInstruction,
+        };
 
-        _logger.LogInformation("Supervisor merged {Count} prior agent result(s)", results.Count);
+        await AugmentWithIntegrationAndSynthesisAsync(outcome, context, merged, cancellationToken).ConfigureAwait(false);
 
-        return SupervisorExecution.Synchronous(outcome);
+        _logger.LogInformation("Supervisor merged {Count} prior agent result(s)", merged.Count);
+
+        return SupervisorExecution.Synchronous(JsonSerializer.Serialize(outcome, AgentJson.Options));
     }
+
+    /// <summary>The byte-identical-to-today merged-array entry: the 8 work-product fields, NO baseSha (baseSha stays internal to <see cref="MergedAgent"/> for the integrate step, so the gate-OFF outcome is unchanged).</summary>
+    private static object ProjectMergedEntry(MergedAgent a) => new
+    {
+        agentRunId = a.AgentRunId,
+        status = a.Status,
+        summary = a.Summary,
+        changedFiles = a.ChangedFiles,
+        producedBranch = a.ProducedBranch,
+        patch = a.Patch,
+        patchArtifactId = a.PatchArtifactId,
+        error = a.Error,
+    };
 
     /// <summary>Collect the agent-run ids recorded by EVERY prior spawn/retry decision (in order) — the merge folds all prior Attempt results.</summary>
     private static IReadOnlyList<Guid> ResolveAgentRunIdsToMerge(SupervisorTurnContext context) =>
@@ -49,10 +66,10 @@ public sealed partial class RealSupervisorActionExecutor
             .SelectMany(d => SupervisorOutcome.ReadStagedAgentRunIds(d.OutcomeJson))
             .ToList();
 
-    /// <summary>Load each agent run's FULL terminal result by id, TEAM-SCOPED (defense-in-depth — the ids are this run's own recorded spawns, but a cross-team id never resolves) — every merged entry projects the complete work products the synthesis records. A missing / non-terminal run contributes its status, not a crash.</summary>
-    private async Task<IReadOnlyList<object>> ReadAgentResultsAsync(IReadOnlyList<Guid> agentRunIds, Guid teamId, CancellationToken cancellationToken)
+    /// <summary>Load each agent run's FULL terminal result by id, TEAM-SCOPED (defense-in-depth — the ids are this run's own recorded spawns, but a cross-team id never resolves) into the typed <see cref="MergedAgent"/> the merged-array projection AND the integrate step both consume (one read). A missing / non-terminal run contributes its status, not a crash. Preserves spawn order.</summary>
+    private async Task<IReadOnlyList<MergedAgent>> ReadMergedAgentsAsync(IReadOnlyList<Guid> agentRunIds, Guid teamId, CancellationToken cancellationToken)
     {
-        if (agentRunIds.Count == 0) return Array.Empty<object>();
+        if (agentRunIds.Count == 0) return Array.Empty<MergedAgent>();
 
         var runs = await _db.AgentRun.AsNoTracking()
             .Where(r => agentRunIds.Contains(r.Id) && r.TeamId == teamId)
@@ -60,20 +77,19 @@ public sealed partial class RealSupervisorActionExecutor
             .ToListAsync(cancellationToken)
             .ConfigureAwait(false);
 
-        // Preserve the spawn order (the query may return rows in any order).
         var byId = runs.ToDictionary(r => r.Id);
 
         var ordered = agentRunIds.Where(byId.ContainsKey).Select(id => byId[id]).ToList();
 
-        var contributions = new List<object>(ordered.Count);
+        var merged = new List<MergedAgent>(ordered.Count);
         foreach (var r in ordered)
-            contributions.Add(await ProjectContributionAsync(r.Id, r.Status, r.Error, r.ResultJson, teamId, cancellationToken).ConfigureAwait(false));
+            merged.Add(await ProjectMergedAgentAsync(r.Id, r.Status, r.Error, r.ResultJson, teamId, cancellationToken).ConfigureAwait(false));
 
-        return contributions;
+        return merged;
     }
 
-    /// <summary>Project ONE agent run's full contribution into the merge outcome — the real work products (summary + changedFiles + producedBranch + patch + error), not just the summary. The compact fields come from the SHARED <see cref="SupervisorOutcome.ProjectCompact"/> (the one source of truth the decider-visibility fold also uses, so they can't drift), which folds the ROW error for a cancelled/abandoned agent whose result is null. The unbounded patch layers on top: when the diff was offloaded (D2: PatchArtifactId set, Patch empty) the full diff is RESOLVED back from the artifact store so the merge synthesis never silently loses a large agent's work product. A missing / unparseable result still contributes its status. The shape round-trips through <c>AgentJson.Options</c>.</summary>
-    private async Task<object> ProjectContributionAsync(Guid agentRunId, Messages.Enums.AgentRunStatus status, string? rowError, string? resultJson, Guid teamId, CancellationToken cancellationToken)
+    /// <summary>Project ONE agent run into the typed <see cref="MergedAgent"/> — the compact fields from the SHARED <see cref="SupervisorOutcome.ProjectCompact"/> (one source of truth the decider-visibility fold also uses, so they can't drift; it folds the ROW error for a cancelled/abandoned agent whose result is null) PLUS the resolved (offloaded-aware) patch + the recorded base SHA (the integrate anchor). A missing / unparseable result still contributes its status.</summary>
+    private async Task<MergedAgent> ProjectMergedAgentAsync(Guid agentRunId, Messages.Enums.AgentRunStatus status, string? rowError, string? resultJson, Guid teamId, CancellationToken cancellationToken)
     {
         var compact = SupervisorOutcome.ProjectCompact(agentRunId, status.ToString(), rowError, resultJson);
 
@@ -81,16 +97,17 @@ public sealed partial class RealSupervisorActionExecutor
 
         var patch = await ResolvePatchAsync(result, teamId, cancellationToken).ConfigureAwait(false);
 
-        return new
+        return new MergedAgent
         {
-            agentRunId = compact.AgentRunId,
-            status = compact.Status,
-            summary = compact.Summary,
-            changedFiles = compact.ChangedFiles,
-            producedBranch = compact.ProducedBranch,
-            patch,
-            patchArtifactId = result?.PatchArtifactId,
-            error = compact.Error,
+            AgentRunId = compact.AgentRunId,
+            Status = compact.Status,
+            Summary = compact.Summary,
+            ChangedFiles = compact.ChangedFiles,
+            ProducedBranch = compact.ProducedBranch,
+            Patch = patch,
+            PatchArtifactId = result?.PatchArtifactId,
+            Error = compact.Error,
+            BaseSha = result?.BaseSha,
         };
     }
 
@@ -99,4 +116,18 @@ public sealed partial class RealSupervisorActionExecutor
         result == null
             ? Task.FromResult("")
             : _offloader.ResolveAsync(teamId, result.Patch, result.PatchArtifactId, cancellationToken);
+
+    /// <summary>One merged agent's full work products — the typed holder the merged-array projection AND the SOTA #3 integrate step both read (so the gate-OFF array stays byte-identical while the integrate step gets baseSha + the resolved patch). Internal scratch, not a persisted noun.</summary>
+    private sealed class MergedAgent
+    {
+        public required Guid AgentRunId { get; init; }
+        public required string Status { get; init; }
+        public string? Summary { get; init; }
+        public IReadOnlyList<string> ChangedFiles { get; init; } = Array.Empty<string>();
+        public string? ProducedBranch { get; init; }
+        public string Patch { get; init; } = "";
+        public Guid? PatchArtifactId { get; init; }
+        public string? Error { get; init; }
+        public string? BaseSha { get; init; }
+    }
 }

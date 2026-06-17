@@ -82,6 +82,60 @@ public sealed class AgentRunExecutorPushTests
         }
     }
 
+    // ─── Branch-integration gate (per-run opt-in OR ambient flag) ────────────
+
+    [Fact]
+    public void IntegrateBranchEnabledEnvVar_name_is_pinned() =>
+        // Renaming this silently turns on-disk integration OFF for any operator who enabled it via env (Rule 8).
+        AgentRunExecutor.IntegrateBranchEnabledEnvVar.ShouldBe("CODESPACE_AGENT_INTEGRATE_BRANCH_ENABLED");
+
+    [Theory]
+    [InlineData("1", true)]
+    [InlineData("true", true)]
+    [InlineData("TRUE", true)]
+    [InlineData(" true ", true)]   // trimmed
+    [InlineData(null, false)]
+    [InlineData("", false)]
+    [InlineData("0", false)]
+    [InlineData("false", false)]
+    [InlineData("garbage", false)]
+    public void IsIntegrateEnabled_is_true_only_for_explicit_enable_values(string? value, bool expected)
+    {
+        var original = Environment.GetEnvironmentVariable(AgentRunExecutor.IntegrateBranchEnabledEnvVar);
+        try
+        {
+            Environment.SetEnvironmentVariable(AgentRunExecutor.IntegrateBranchEnabledEnvVar, value);
+
+            AgentRunExecutor.IsIntegrateEnabled().ShouldBe(expected);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable(AgentRunExecutor.IntegrateBranchEnabledEnvVar, original);
+        }
+    }
+
+    [Theory]
+    // ambient flag value × per-run opt-in → resolved gate. The OR shape mirrors push exactly: a per-run opt-in turns
+    // integration ON without flipping the ambient flag, but cannot turn it OFF when the operator enabled it.
+    [InlineData(null, false, false)]   // neither → off (byte-identical to today: the merge produces only the side-by-side fold)
+    [InlineData(null, true, true)]     // per-run opt-in turns it on with the ambient flag off
+    [InlineData("1", false, true)]     // ambient on → on regardless of the per-run signal
+    [InlineData("1", true, true)]
+    public void ShouldIntegrate_is_the_or_of_the_ambient_flag_and_the_per_run_opt_in(string? envValue, bool perRunOptIn, bool expected)
+    {
+        var original = Environment.GetEnvironmentVariable(AgentRunExecutor.IntegrateBranchEnabledEnvVar);
+        try
+        {
+            Environment.SetEnvironmentVariable(AgentRunExecutor.IntegrateBranchEnabledEnvVar, envValue);
+
+            AgentRunExecutor.ShouldIntegrate(perRunOptIn).ShouldBe(expected);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable(AgentRunExecutor.IntegrateBranchEnabledEnvVar, original);
+        }
+    }
+
     // ─── MCP endpoint gate (per-run opt-in OR ambient flag) ──────────────────
 
     [Fact]
