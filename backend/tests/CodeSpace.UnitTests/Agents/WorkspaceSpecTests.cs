@@ -43,6 +43,55 @@ public class WorkspaceSpecTests
         WorkspaceSpec.FromRepository(Guid.NewGuid(), "release/1.2").Repositories[0].Ref.ShouldBe("release/1.2");
     }
 
+    // ── WorkspaceSpec.FromAuthoredRepos: the multi-repo authoring projection ──────────
+
+    [Fact]
+    public void FromAuthoredRepos_returns_null_with_no_related_repos_so_single_repo_stays_byte_identical()
+    {
+        WorkspaceSpec.FromAuthoredRepos(Guid.NewGuid(), primaryRef: null, Array.Empty<WorkspaceRepositorySpec>())
+            .ShouldBeNull("no related repos → null Workspace → the resolver derives the single-repo workspace");
+    }
+
+    [Fact]
+    public void FromAuthoredRepos_assembles_the_primary_plus_related()
+    {
+        var web = Guid.NewGuid();
+        var api = Guid.NewGuid();
+
+        var spec = WorkspaceSpec.FromAuthoredRepos(web, "main", new[]
+        {
+            new WorkspaceRepositorySpec { Alias = "api", RepositoryId = api, Access = WorkspaceAccess.Read },
+        })!;
+
+        spec.Repositories.Count.ShouldBe(2);
+        spec.PrimaryAlias.ShouldBe(WorkspaceSpec.DefaultAlias);
+
+        var primary = spec.Repositories.Single(r => r.IsPrimary);
+        primary.Alias.ShouldBe(WorkspaceSpec.DefaultAlias, "the primary keeps the legacy default alias for byte-identical cwd");
+        primary.RepositoryId.ShouldBe(web);
+        primary.Ref.ShouldBe("main");
+        primary.Access.ShouldBe(WorkspaceAccess.Write);
+
+        var related = spec.Repositories.Single(r => !r.IsPrimary);
+        related.Alias.ShouldBe("api");
+        related.RepositoryId.ShouldBe(api);
+        related.Access.ShouldBe(WorkspaceAccess.Read);
+    }
+
+    [Fact]
+    public void FromAuthoredRepos_normalizes_a_blank_or_colliding_alias_to_a_stable_unique_one()
+    {
+        var spec = WorkspaceSpec.FromAuthoredRepos(Guid.NewGuid(), null, new[]
+        {
+            new WorkspaceRepositorySpec { Alias = "", RepositoryId = Guid.NewGuid(), Access = WorkspaceAccess.Read },                         // blank → repo-2
+            new WorkspaceRepositorySpec { Alias = WorkspaceSpec.DefaultAlias, RepositoryId = Guid.NewGuid(), Access = WorkspaceAccess.Read }, // collides with primary "repo" → repo-3
+        })!;
+
+        var aliases = spec.Repositories.Select(r => r.Alias).ToList();
+        aliases.ShouldBe(new[] { WorkspaceSpec.DefaultAlias, "repo-2", "repo-3" });
+        aliases.Distinct().Count().ShouldBe(3, "every alias is unique (the provider's mount-layout guard needs it)");
+    }
+
     // ── WorkspaceSpec.Primary: resolution precedence ─────────────────────────────────
 
     [Fact]

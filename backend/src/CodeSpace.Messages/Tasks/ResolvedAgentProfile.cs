@@ -1,3 +1,5 @@
+using CodeSpace.Messages.Agents;
+
 namespace CodeSpace.Messages.Tasks;
 
 /// <summary>
@@ -11,8 +13,11 @@ namespace CodeSpace.Messages.Tasks;
 /// </summary>
 public sealed record ResolvedAgentProfile
 {
-    /// <summary>The repository the agent clones into its workspace (the executor clones it). Null → no workspace (analysis-only).</summary>
+    /// <summary>The repository the agent clones into its workspace (the executor clones it) — the PRIMARY repo of a multi-repo workspace. Null → no workspace (analysis-only).</summary>
     public Guid? RepositoryId { get; init; }
+
+    /// <summary>Multi-repo: the RELATED repositories the agent's workspace also clones (alias + access; the primary is <see cref="RepositoryId"/>). Null / empty → a single-repo workspace (byte-identical). The projection emits these onto the agent.code node's <c>relatedRepositories</c> input, which the node folds into <c>AgentTask.Workspace</c>.</summary>
+    public IReadOnlyList<WorkspaceRepositorySpec>? RelatedRepositories { get; init; }
 
     /// <summary>The harness the agent runs on (e.g. <c>"codex-cli"</c>). Null / blank → the projection's harness default.</summary>
     public string? Harness { get; init; }

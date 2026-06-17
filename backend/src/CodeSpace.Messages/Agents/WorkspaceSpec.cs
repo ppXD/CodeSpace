@@ -43,6 +43,46 @@ public sealed record WorkspaceSpec
         CwdMode = WorkspaceCwdMode.Auto,
     };
 
+    /// <summary>
+    /// Build the AUTHORED multi-repo workspace from a primary repo + a list of related repos — the centralization
+    /// point every producer (the agent.code node, the projection builders) funnels through so the projection logic
+    /// lives in ONE place. Returns NULL when there are NO related repos, so a caller does
+    /// <c>Workspace = FromAuthoredRepos(primaryId, ref, related)</c> and a no-related-repos run keeps <c>Workspace</c>
+    /// null → the resolver falls back to <see cref="FromRepository"/> → BYTE-IDENTICAL single-repo execution.
+    ///
+    /// <para>The primary keeps the exact <see cref="FromRepository"/> defaults (alias "repo", writable, primary) so a
+    /// one-related-repo workspace's primary repo runs identically. Each related repo gets a unique alias (its authored
+    /// alias, else <c>repo-2</c>, <c>repo-3</c>, …) defaulting to read-only context unless authored writable.</para>
+    /// </summary>
+    public static WorkspaceSpec? FromAuthoredRepos(Guid primaryRepositoryId, string? primaryRef, IReadOnlyList<WorkspaceRepositorySpec> relatedRepositories)
+    {
+        if (relatedRepositories.Count == 0) return null;
+
+        var primary = new WorkspaceRepositorySpec { Alias = DefaultAlias, RepositoryId = primaryRepositoryId, Ref = primaryRef, Path = DefaultAlias, Access = WorkspaceAccess.Write, IsPrimary = true };
+
+        var taken = new HashSet<string>(StringComparer.Ordinal) { DefaultAlias };
+        var repos = new List<WorkspaceRepositorySpec> { primary };
+
+        for (var i = 0; i < relatedRepositories.Count; i++)
+        {
+            var related = relatedRepositories[i];
+            var alias = NormalizeAlias(related.Alias, i, taken);
+            taken.Add(alias);
+
+            repos.Add(related with { Alias = alias, IsPrimary = false });
+        }
+
+        return new WorkspaceSpec { Repositories = repos, PrimaryAlias = DefaultAlias, CwdMode = WorkspaceCwdMode.Auto };
+    }
+
+    /// <summary>Give a related repo a unique, non-empty alias — its authored alias when usable + free, else a stable <c>repo-{n}</c>. The provider's mount-layout validation is the fail-loud backstop for any still-unsafe value.</summary>
+    private static string NormalizeAlias(string? authored, int index, HashSet<string> taken)
+    {
+        var candidate = string.IsNullOrWhiteSpace(authored) ? "" : authored.Trim();
+
+        return string.IsNullOrEmpty(candidate) || taken.Contains(candidate) ? $"repo-{index + 2}" : candidate;
+    }
+
     /// <summary>The resolved primary repo: the <see cref="PrimaryAlias"/> match, else the explicit <see cref="WorkspaceRepositorySpec.IsPrimary"/>, else the first writable, else the first. Null only when <see cref="Repositories"/> is empty (an invalid spec).</summary>
     public WorkspaceRepositorySpec? Primary =>
         (PrimaryAlias is { } alias ? Repositories.FirstOrDefault(r => r.Alias == alias) : null)

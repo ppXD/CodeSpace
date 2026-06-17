@@ -1,5 +1,6 @@
 using System.Text.Json;
 using CodeSpace.Core.Services.Tasks.Projection.Builders.SingleAgent;
+using CodeSpace.Messages.Agents;
 using CodeSpace.Core.Services.Workflows.Engine;
 using CodeSpace.Core.Services.Workflows.Nodes;
 using CodeSpace.Core.Services.Workflows.Nodes.Builtin;
@@ -140,6 +141,39 @@ public class SingleAgentDefinitionBuilderTests
         var def = Builder.Build(Context(Seed(seedRepo), new ResolvedAgentProfile { RepositoryId = profileRepo }));
 
         AgentInputsOf(def).GetProperty("repositoryId").GetString().ShouldBe(profileRepo.ToString());
+    }
+
+    [Fact]
+    public void Profile_related_repositories_project_onto_the_agent_code_relatedRepositories_input()
+    {
+        var web = Guid.NewGuid();
+        var api = Guid.NewGuid();
+
+        var def = Builder.Build(Context(Seed(), new ResolvedAgentProfile
+        {
+            RepositoryId = web,
+            RelatedRepositories = new[] { new WorkspaceRepositorySpec { Alias = "api", RepositoryId = api, Access = WorkspaceAccess.Write } },
+        }));
+
+        var inputs = AgentInputsOf(def);
+        inputs.GetProperty("repositoryId").GetString().ShouldBe(web.ToString());
+
+        var related = inputs.GetProperty("relatedRepositories");
+        related.GetArrayLength().ShouldBe(1, "the projection lane carries the related repos onto the SAME input the editor + AgentCodeNode use");
+        related[0].GetProperty("repositoryId").GetString().ShouldBe(api.ToString());
+        related[0].GetProperty("alias").GetString().ShouldBe("api");
+        related[0].GetProperty("access").GetString().ShouldBe("write");
+
+        RealValidator().Validate(def).IsValid.ShouldBeTrue();
+    }
+
+    [Fact]
+    public void No_related_repositories_omits_the_input_byte_identical()
+    {
+        // A profile with no related repos must NOT add a relatedRepositories key — a single-repo projection is unchanged.
+        var def = Builder.Build(Context(Seed(), new ResolvedAgentProfile { RepositoryId = Guid.NewGuid() }));
+
+        AgentInputsOf(def).TryGetProperty("relatedRepositories", out _).ShouldBeFalse();
     }
 
     [Fact]

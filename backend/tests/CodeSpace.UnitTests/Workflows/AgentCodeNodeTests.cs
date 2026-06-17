@@ -71,6 +71,48 @@ public class AgentCodeNodeTests
     }
 
     [Fact]
+    public async Task Related_repositories_input_projects_a_multi_repo_workspace()
+    {
+        var web = Guid.NewGuid();
+        var api = Guid.NewGuid();
+        var inputs = new Dictionary<string, JsonElement>
+        {
+            ["repositoryId"] = Str(web.ToString()),
+            ["relatedRepositories"] = JsonSerializer.SerializeToElement(new[] { new { repositoryId = api.ToString(), alias = "api", access = "write" } }),
+        };
+
+        var result = await new AgentCodeNode().RunAsync(BuildContext(RequiredConfig(), resume: null, inputs), CancellationToken.None);
+
+        result.Status.ShouldBe(NodeStatus.Suspended);
+        var task = JsonSerializer.Deserialize<AgentTask>(result.SuspendUntil!.Payload, AgentJson.Options)!;
+
+        task.RepositoryId.ShouldBe(web, "the primary stays on the legacy field too");
+        task.Workspace.ShouldNotBeNull();
+        task.Workspace!.Repositories.Count.ShouldBe(2);
+
+        var primary = task.Workspace.Repositories.Single(r => r.IsPrimary);
+        primary.RepositoryId.ShouldBe(web);
+        primary.Access.ShouldBe(WorkspaceAccess.Write);
+
+        var related = task.Workspace.Repositories.Single(r => !r.IsPrimary);
+        related.RepositoryId.ShouldBe(api);
+        related.Alias.ShouldBe("api");
+        related.Access.ShouldBe(WorkspaceAccess.Write);
+    }
+
+    [Fact]
+    public async Task No_related_repositories_keeps_the_workspace_null_byte_identical()
+    {
+        var inputs = new Dictionary<string, JsonElement> { ["repositoryId"] = Str(Guid.NewGuid().ToString()) };
+
+        var result = await new AgentCodeNode().RunAsync(BuildContext(RequiredConfig(), resume: null, inputs), CancellationToken.None);
+
+        result.Status.ShouldBe(NodeStatus.Suspended);
+        JsonSerializer.Deserialize<AgentTask>(result.SuspendUntil!.Payload, AgentJson.Options)!.Workspace
+            .ShouldBeNull("no related repos → null Workspace → the resolver derives the single-repo workspace (byte-identical)");
+    }
+
+    [Fact]
     public async Task Malformed_repository_input_fails_the_node()
     {
         var inputs = new Dictionary<string, JsonElement> { ["repositoryId"] = Str("not-a-uuid") };
