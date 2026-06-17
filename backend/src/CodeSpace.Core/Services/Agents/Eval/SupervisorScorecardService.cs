@@ -124,7 +124,7 @@ public sealed class SupervisorScorecardService : ISupervisorScorecardService, IS
     /// <summary>The agent-run ids a run spawned, gathered from every spawn/retry decision's recorded outcome (the same ids a merge reads).</summary>
     private static IReadOnlyList<Guid> SpawnedAgentIds(IReadOnlyList<SupervisorDecisionRecord> decisions) =>
         decisions
-            .Where(d => d.DecisionKind is SupervisorDecisionKinds.Spawn or SupervisorDecisionKinds.Retry)
+            .Where(d => SupervisorDecisionKinds.StagesAgents(d.DecisionKind))
             .SelectMany(d => SupervisorOutcome.ReadStagedAgentRunIds(d.OutcomeJson))
             .ToList();
 
@@ -142,7 +142,7 @@ public sealed class SupervisorScorecardService : ISupervisorScorecardService, IS
     private static SupervisorDecisionSummary ToSummary(SupervisorDecisionRecord row) => new()
     {
         Kind = row.DecisionKind,
-        StagedAgentCount = row.DecisionKind is SupervisorDecisionKinds.Spawn or SupervisorDecisionKinds.Retry ? SupervisorOutcome.ReadStagedAgentCount(row.OutcomeJson) : 0,
+        StagedAgentCount = SupervisorDecisionKinds.StagesAgents(row.DecisionKind) ? SupervisorOutcome.ReadStagedAgentCount(row.OutcomeJson) : 0,
         StopReason = row.DecisionKind == SupervisorDecisionKinds.Stop ? ReadStopReason(row.PayloadJson) : null,
     };
 

@@ -34,7 +34,7 @@ public static class SupervisorResolverRecipe
     {
         var sb = new StringBuilder();
 
-        sb.AppendLine($"The parallel agents' work for this goal could not be automatically combined — there is an integration conflict to resolve.");
+        sb.AppendLine("The parallel agents' work for this goal could not be automatically combined — there is an integration conflict to resolve.");
         sb.AppendLine($"Goal: {goal}");
         sb.AppendLine();
 

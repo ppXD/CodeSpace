@@ -69,7 +69,7 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
         {
             // The index of the MOST RECENT spawn/retry — the one whose agent results the decider should act on
             // (a later retry's results supersede the original spawn's). Marked so the model targets the freshest.
-            var latestSpawnIndex = LastIndexOf(context.PriorDecisions, d => d.DecisionKind is SupervisorDecisionKinds.Spawn or SupervisorDecisionKinds.Retry);
+            var latestSpawnIndex = LastIndexOf(context.PriorDecisions, d => SupervisorDecisionKinds.StagesAgents(d.DecisionKind));
 
             builder.AppendLine("Prior decisions (in order, with their recorded outcomes):");
             for (var i = 0; i < context.PriorDecisions.Count; i++)
@@ -94,7 +94,7 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
     /// </summary>
     private static void AppendPriorDecision(StringBuilder builder, SupervisorPriorDecision prior, bool isLatestSpawn)
     {
-        var agentResults = prior.DecisionKind is SupervisorDecisionKinds.Spawn or SupervisorDecisionKinds.Retry
+        var agentResults = SupervisorDecisionKinds.StagesAgents(prior.DecisionKind)
             ? SupervisorOutcome.ReadAgentResults(prior.OutcomeJson)
             : Array.Empty<SupervisorAgentResult>();
 

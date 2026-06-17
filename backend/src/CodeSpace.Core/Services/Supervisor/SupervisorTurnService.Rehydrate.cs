@@ -32,7 +32,7 @@ public sealed partial class SupervisorTurnService
         // (SOTA #2). Folded into each TERMINAL spawn/retry decision's outcome below so the decider can SEE what its
         // agents produced. DB-gated: only hit it when the tape actually has a spawn/retry — a no-spawn run stays a
         // single ledger read, byte-identical to the pre-#2 path.
-        var agentResultsById = rows.Any(r => r.DecisionKind is SupervisorDecisionKinds.Spawn or SupervisorDecisionKinds.Retry)
+        var agentResultsById = rows.Any(r => SupervisorDecisionKinds.StagesAgents(r.DecisionKind))
             ? await CompactAgentResultsByIdAsync(rows, teamId, cancellationToken).ConfigureAwait(false)
             : EmptyAgentResults;
 
@@ -93,7 +93,7 @@ public sealed partial class SupervisorTurnService
     /// </summary>
     private static int FoldTotalSpawnedAgents(IReadOnlyList<SupervisorPriorDecision> priorDecisions) =>
         priorDecisions
-            .Where(d => d.DecisionKind is SupervisorDecisionKinds.Spawn or SupervisorDecisionKinds.Retry)
+            .Where(d => SupervisorDecisionKinds.StagesAgents(d.DecisionKind))
             .Sum(d => SupervisorOutcome.ReadStagedAgentCount(d.OutcomeJson));
 
     /// <summary>
@@ -105,7 +105,7 @@ public sealed partial class SupervisorTurnService
     /// </summary>
     private static decimal FoldRunSpendUsd(IReadOnlyList<SupervisorPriorDecision> priorDecisions) =>
         priorDecisions
-            .Where(d => d.DecisionKind is SupervisorDecisionKinds.Spawn or SupervisorDecisionKinds.Retry)
+            .Where(d => SupervisorDecisionKinds.StagesAgents(d.DecisionKind))
             .Sum(d => SupervisorOutcome.SpendUsd(SupervisorOutcome.ReadAgentResults(d.OutcomeJson)));
 
     /// <summary>
@@ -126,13 +126,10 @@ public sealed partial class SupervisorTurnService
         return streak;
     }
 
-    /// <summary>A decision advanced the work if it spawned/retried agents (the work fans out) or merged prior results (it consumed them). Plan / ask_human / a zero-agent spawn make no fresh progress toward a settled result.</summary>
-    private static bool MadeProgress(SupervisorPriorDecision decision) => decision.DecisionKind switch
-    {
-        SupervisorDecisionKinds.Spawn or SupervisorDecisionKinds.Retry => SupervisorOutcome.ReadStagedAgentCount(decision.OutcomeJson) > 0,
-        SupervisorDecisionKinds.Merge => true,
-        _ => false,
-    };
+    /// <summary>A decision advanced the work if it staged agents (spawn/retry/resolve — the work fans out) or merged prior results (it consumed them). Plan / ask_human / a zero-agent spawn make no fresh progress toward a settled result.</summary>
+    private static bool MadeProgress(SupervisorPriorDecision decision) =>
+        SupervisorDecisionKinds.StagesAgents(decision.DecisionKind) ? SupervisorOutcome.ReadStagedAgentCount(decision.OutcomeJson) > 0
+        : decision.DecisionKind == SupervisorDecisionKinds.Merge;
 
     /// <summary>
     /// Fold the human's answer into an ask_human decision's replayed outcome (E4): look up the recorded
@@ -204,7 +201,7 @@ public sealed partial class SupervisorTurnService
     /// </summary>
     private static SupervisorPriorDecision FoldAgentResults(SupervisorPriorDecision decision, IReadOnlyDictionary<Guid, SupervisorAgentResult> resultsById)
     {
-        if (decision.DecisionKind is not (SupervisorDecisionKinds.Spawn or SupervisorDecisionKinds.Retry)) return decision;
+        if (!SupervisorDecisionKinds.StagesAgents(decision.DecisionKind)) return decision;
 
         if (SupervisorOutcome.ReadAgentResults(decision.OutcomeJson).Count > 0) return decision;   // already folded — durable + immutable; don't re-fold (no redundant UPDATE)
 
@@ -231,7 +228,7 @@ public sealed partial class SupervisorTurnService
     private async Task<IReadOnlyDictionary<Guid, SupervisorAgentResult>> CompactAgentResultsByIdAsync(IReadOnlyList<Persistence.Entities.SupervisorDecisionRecord> rows, Guid teamId, CancellationToken cancellationToken)
     {
         var ids = rows
-            .Where(r => r.DecisionKind is SupervisorDecisionKinds.Spawn or SupervisorDecisionKinds.Retry)
+            .Where(r => SupervisorDecisionKinds.StagesAgents(r.DecisionKind))
             .SelectMany(r => SupervisorOutcome.ReadStagedAgentRunIds(r.OutcomeJson))
             .Distinct()
             .ToList();

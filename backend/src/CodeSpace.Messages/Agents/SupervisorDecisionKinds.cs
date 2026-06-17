@@ -42,4 +42,14 @@ public static class SupervisorDecisionKinds
 
     /// <summary>Terminate the supervisor turn loop — the run completes via the normal walk. The fail-closed budget-exhaustion verb too.</summary>
     public const string Stop = "stop";
+
+    /// <summary>
+    /// Whether a verb STAGES real <c>agent.code</c> child runs (<see cref="Spawn"/> / <see cref="Retry"/> /
+    /// <see cref="Resolve"/> — all create agent runs + park on them, recording <c>{agentRunIds, agentCount}</c>).
+    /// The SINGLE classifier every "did this verb produce agents" path shares — the rehydrate folds (spend / total
+    /// / progress / agent-results), the phase projector, the eval scorecard, and the decider's agent-result
+    /// rendering — so a new agent-staging verb is recognized in ONE place, never by editing N drifting
+    /// <c>is Spawn or Retry</c> copies (the resolver loop #379 added <see cref="Resolve"/> here exactly once).
+    /// </summary>
+    public static bool StagesAgents(string decisionKind) => decisionKind is Spawn or Retry or Resolve;
 }

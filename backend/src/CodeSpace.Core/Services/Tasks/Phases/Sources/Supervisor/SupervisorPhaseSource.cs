@@ -93,7 +93,7 @@ public sealed class SupervisorPhaseSource : IRunPhaseSource, IScopedDependency
             .ToList();
 
     private static IReadOnlyList<Guid> StagedAgentIds(SupervisorDecisionRecord decision) =>
-        decision.DecisionKind is SupervisorDecisionKinds.Spawn or SupervisorDecisionKinds.Retry
+        SupervisorDecisionKinds.StagesAgents(decision.DecisionKind)
             ? SupervisorOutcome.ReadStagedAgentRunIds(decision.OutcomeJson)
             : Array.Empty<Guid>();
 
@@ -111,6 +111,7 @@ public sealed class SupervisorPhaseSource : IRunPhaseSource, IScopedDependency
         SupervisorDecisionKinds.Retry => "Retry",
         SupervisorDecisionKinds.AskHuman => "Ask human",
         SupervisorDecisionKinds.Merge => "Merge",
+        SupervisorDecisionKinds.Resolve => agentCount > 0 ? "Resolve conflict" : "Resolve",
         SupervisorDecisionKinds.Stop => "Stop",
         _ => decision.DecisionKind,
     };

@@ -39,6 +39,7 @@ public static class SupervisorEvalScorecard
             PlanCount = planCount,
             SpawnCount = Count(decisions, SupervisorDecisionKinds.Spawn),
             RetryCount = Count(decisions, SupervisorDecisionKinds.Retry),
+            ResolveCount = Count(decisions, SupervisorDecisionKinds.Resolve),
             MergeCount = Count(decisions, SupervisorDecisionKinds.Merge),
             AskHumanCount = Count(decisions, SupervisorDecisionKinds.AskHuman),
             StopCount = Count(decisions, SupervisorDecisionKinds.Stop),

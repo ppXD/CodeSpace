@@ -1,7 +1,9 @@
+using CodeSpace.Core.Services.Agents.Eval;
 using CodeSpace.Core.Services.Supervisor;
 using CodeSpace.Core.Services.Supervisor.Deciders;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Dtos.Agents;
+using CodeSpace.Messages.Enums;
 using Shouldly;
 
 namespace CodeSpace.UnitTests.Agents;
@@ -98,6 +100,41 @@ public class SupervisorResolverTests
     public void Resolve_is_side_effecting_so_it_is_governed_like_a_spawn()
     {
         SupervisorGovernance.IsSideEffecting(SupervisorDecisionKinds.Resolve).ShouldBeTrue("resolve stages a real agent run — it must route through the governance gate");
+    }
+
+    [Theory]
+    // The single classifier the rehydrate folds (spend / total / progress / agent-results), the phase projector, the
+    // scorecard, and the decider's agent-result rendering all share — so the resolver agent's spend counts toward the
+    // cost cap, its run appears on the Agent-Board, and its result reaches the decider. A drift here is a real bug.
+    [InlineData(SupervisorDecisionKinds.Spawn, true)]
+    [InlineData(SupervisorDecisionKinds.Retry, true)]
+    [InlineData(SupervisorDecisionKinds.Resolve, true)]
+    [InlineData(SupervisorDecisionKinds.Plan, false)]
+    [InlineData(SupervisorDecisionKinds.Merge, false)]
+    [InlineData(SupervisorDecisionKinds.AskHuman, false)]
+    [InlineData(SupervisorDecisionKinds.Stop, false)]
+    public void StagesAgents_is_true_exactly_for_the_agent_staging_verbs(string kind, bool expected)
+    {
+        SupervisorDecisionKinds.StagesAgents(kind).ShouldBe(expected);
+    }
+
+    [Fact]
+    public void The_eval_scorecard_counts_resolve_decisions()
+    {
+        var score = SupervisorEvalScorecard.Score(new SupervisorRunOutcome
+        {
+            SupervisorRunId = Guid.NewGuid(),
+            Decisions = new[]
+            {
+                new SupervisorDecisionSummary { Kind = SupervisorDecisionKinds.Plan, StagedAgentCount = 0 },
+                new SupervisorDecisionSummary { Kind = SupervisorDecisionKinds.Resolve, StagedAgentCount = 1 },
+                new SupervisorDecisionSummary { Kind = SupervisorDecisionKinds.Stop, StagedAgentCount = 0, StopReason = "done" },
+            },
+            SpawnedAgentStatuses = Array.Empty<AgentRunStatus>(),
+            TerminalStatus = WorkflowRunStatus.Success,
+        });
+
+        score.ResolveCount.ShouldBe(1, "a resolve attempt is now a first-class per-verb metric on the scorecard");
     }
 
     // ── The dedicated resolve-attempt bound ────────────────────────────────────────────

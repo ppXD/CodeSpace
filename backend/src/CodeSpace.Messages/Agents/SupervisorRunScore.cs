@@ -84,6 +84,7 @@ public sealed record SupervisorRunScore
     public required int PlanCount { get; init; }
     public required int SpawnCount { get; init; }
     public required int RetryCount { get; init; }
+    public required int ResolveCount { get; init; }
     public required int MergeCount { get; init; }
     public required int AskHumanCount { get; init; }
     public required int StopCount { get; init; }
