@@ -292,14 +292,17 @@ public class AgentCodeNodeTests
     [Fact]
     public async Task Resumed_single_repo_run_omits_the_change_set_outputs()
     {
-        // A single-repo run's payload has no repositoryResults/changeSetId — the node must not invent them (the
-        // single-repo output shape is unchanged).
-        var resume = JsonDocument.Parse("""{"status":"Succeeded","summary":"Done.","changedFiles":["a.ts"],"branch":"agent/x"}""").RootElement;
+        // The ACTUAL single-repo resume payload the notifier builds carries an EMPTY repositoryResults array + a null
+        // changeSetId (AgentRunResult defaults them so). The node must NOT add those keys — the single-repo output bag
+        // stays byte-identical (no repositoryResults / changeSetId).
+        var resume = JsonDocument.Parse("""
+            {"status":"Succeeded","summary":"Done.","changedFiles":["a.ts"],"branch":"agent/x","repositoryResults":[],"changeSetId":null}
+            """).RootElement;
 
         var result = await new AgentCodeNode().RunAsync(BuildContext(new(), resume), CancellationToken.None);
 
-        result.Outputs.ContainsKey("repositoryResults").ShouldBeFalse();
-        result.Outputs.ContainsKey("changeSetId").ShouldBeFalse();
+        result.Outputs.ContainsKey("repositoryResults").ShouldBeFalse("an empty change set must not add a repositoryResults key");
+        result.Outputs.ContainsKey("changeSetId").ShouldBeFalse("a null change-set id must not add a changeSetId key");
     }
 
     // ── Autonomy tier → permissions ─────────────────────────────────────────────

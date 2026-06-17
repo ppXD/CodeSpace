@@ -160,10 +160,12 @@ public sealed class AgentCodeNode : INodeRuntime
         CopyIfPresent(payload, "summary", outputs);
         CopyIfPresent(payload, "changedFiles", outputs);
         CopyIfPresent(payload, "branch", outputs);
-        // Multi-repo: the per-repo change set (each writable repo's branch) + its id, so a downstream
-        // git.open_change_set can open a PR per repo. Absent/empty for a single-repo run.
-        CopyIfPresent(payload, "repositoryResults", outputs);
-        CopyIfPresent(payload, "changeSetId", outputs);
+        // Multi-repo ONLY: the per-repo change set (each writable repo's branch) + its id, so a downstream
+        // git.open_change_set can open a PR per repo. A single-repo run's payload carries an EMPTY array + a null id
+        // (the resume payload serializes them), so we copy them ONLY when meaningful — keeping the single-repo output
+        // bag byte-identical (no repositoryResults/changeSetId keys added).
+        CopyIfNonEmptyArray(payload, "repositoryResults", outputs);
+        CopyIfNonNull(payload, "changeSetId", outputs);
 
         return NodeResult.Ok(outputs);
     }
@@ -296,6 +298,20 @@ public sealed class AgentCodeNode : INodeRuntime
     private static void CopyIfPresent(JsonElement payload, string key, Dictionary<string, JsonElement> outputs)
     {
         if (payload.ValueKind == JsonValueKind.Object && payload.TryGetProperty(key, out var v)) outputs[key] = v.Clone();
+    }
+
+    /// <summary>Copy an array output ONLY when it is non-empty — a single-repo run's empty change set must not add a <c>repositoryResults: []</c> key (byte-identical).</summary>
+    private static void CopyIfNonEmptyArray(JsonElement payload, string key, Dictionary<string, JsonElement> outputs)
+    {
+        if (payload.ValueKind == JsonValueKind.Object && payload.TryGetProperty(key, out var v) && v.ValueKind == JsonValueKind.Array && v.GetArrayLength() > 0)
+            outputs[key] = v.Clone();
+    }
+
+    /// <summary>Copy a scalar output ONLY when it is non-null — a single-repo run's null change-set id must not add a <c>changeSetId: null</c> key (byte-identical).</summary>
+    private static void CopyIfNonNull(JsonElement payload, string key, Dictionary<string, JsonElement> outputs)
+    {
+        if (payload.ValueKind == JsonValueKind.Object && payload.TryGetProperty(key, out var v) && v.ValueKind != JsonValueKind.Null)
+            outputs[key] = v.Clone();
     }
 }
 

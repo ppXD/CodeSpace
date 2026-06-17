@@ -1,3 +1,4 @@
+using System.Net.Http;
 using CodeSpace.Core.Services.PullRequests;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Dtos.Providers;
@@ -64,6 +65,55 @@ public sealed class ChangeSetServiceTests
         api.Disposition.ShouldBe(ChangeSetPullRequestDisposition.Failed);
         api.Error.ShouldNotBeNullOrEmpty();
         api.Number.ShouldBeNull();
+    }
+
+    [Fact]
+    public async Task A_transient_infrastructure_failure_is_isolated_not_thrown()
+    {
+        // The honesty invariant must hold for a TRANSIENT failure too (a network blip that survived the resilience
+        // layer's retries surfaces as a raw HttpRequestException, NOT a typed provider exception). web opens; api is
+        // isolated as Failed — the set is never sunk by an un-typed exception.
+        var stub = new RecordingPrService { ThrowForRepo = { [Api] = new HttpRequestException("connection reset") } };
+
+        var result = await Service(stub).OpenPullRequestsAsync(Team, Spec(
+            (Web, "b", "main"),
+            (Api, "b", "main")), actorUserId: null, CancellationToken.None);
+
+        result.OpenedCount.ShouldBe(1);
+        result.FailedCount.ShouldBe(1);
+        result.PullRequests.Single(p => p.RepositoryId == Web).Disposition.ShouldBe(ChangeSetPullRequestDisposition.Opened);
+        var api = result.PullRequests.Single(p => p.RepositoryId == Api);
+        api.Disposition.ShouldBe(ChangeSetPullRequestDisposition.Failed);
+        api.Error.ShouldNotContain("connection reset", customMessage: "an unknown exception's raw message must not leak into the per-repo error");
+    }
+
+    [Fact]
+    public async Task A_non_caller_cancellation_is_isolated_like_any_transient_error()
+    {
+        // An OperationCanceledException whose token is NOT the caller's (e.g. an SDK read timeout) is a transient
+        // failure, not a run cancellation — it must be isolated, not abort the set.
+        var stub = new RecordingPrService { ThrowForRepo = { [Api] = new OperationCanceledException() } };
+
+        var result = await Service(stub).OpenPullRequestsAsync(Team, Spec(
+            (Web, "b", "main"),
+            (Api, "b", "main")), actorUserId: null, CancellationToken.None);
+
+        result.OpenedCount.ShouldBe(1);
+        result.FailedCount.ShouldBe(1);
+        result.PullRequests.Single(p => p.RepositoryId == Api).Disposition.ShouldBe(ChangeSetPullRequestDisposition.Failed);
+    }
+
+    [Fact]
+    public async Task A_genuine_caller_cancellation_propagates()
+    {
+        // When the run's own token is signalled (operator kill / run timeout) the whole set aborts — it is NOT
+        // swallowed into a Failed disposition.
+        using var cts = new CancellationTokenSource();
+        cts.Cancel();
+        var stub = new RecordingPrService();
+
+        await Should.ThrowAsync<OperationCanceledException>(() =>
+            Service(stub).OpenPullRequestsAsync(Team, Spec((Web, "b", "main")), actorUserId: null, cts.Token));
     }
 
     [Fact]

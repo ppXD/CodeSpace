@@ -21,6 +21,13 @@ namespace CodeSpace.Core.Services.Workflows.Nodes.Builtin;
 /// <para>v1 opens each PR as the repository's CONNECTION credential (no act-as-user): per-user attribution on a
 /// fan-out of N opens would need the per-node identity-proof gate the single <c>git.open_pr</c> uses, which is a
 /// follow-on. The single-PR node remains the attributed, agent-tool-eligible surface.</para>
+///
+/// <para>Re-run: like <c>git.open_pr</c>, this has no PR-dedup of its own — a from-node re-run is gated by the
+/// side-effect approval card (IsSideEffecting), and a re-open of an existing head/base is rejected by the provider
+/// (a 422 mapped to a Failed disposition), so a deliberate re-run never creates duplicate PRs but DOES report the
+/// already-open repos as Failed. Authoring: bind <c>repositories</c> from an upstream agent.code run's
+/// <c>repositoryResults</c> (repositoryId + the produced branch as <c>sourceBranch</c>), supplying each repo's base as
+/// <c>targetBranch</c> — auto-resolving the base from the repo's default branch is a follow-on.</para>
 /// </summary>
 public sealed class GitOpenChangeSetNode : INodeRuntime
 {
