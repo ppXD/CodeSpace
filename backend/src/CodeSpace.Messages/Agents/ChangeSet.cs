@@ -12,7 +12,7 @@ public sealed record ChangeSetPullRequest
     /// <summary>The head branch with the changes (this repo's produced branch). Empty/whitespace ⇒ the repo had no changes ⇒ the open is SKIPPED, not failed.</summary>
     public required string SourceBranch { get; init; }
 
-    /// <summary>The base branch to open the PR into (this repo's own default / base ref).</summary>
+    /// <summary>The base ref to open the PR into (from <see cref="RepositoryRunResult.BaseBranch"/> — usually the repo's default branch, but a tag when an author pinned one, in which case the provider rejects it and this repo lands a per-repo Failed). Empty/whitespace ⇒ the base could not be resolved ⇒ the open is FAILED (the repo has work but no PR target), not skipped.</summary>
     public required string TargetBranch { get; init; }
 }
 

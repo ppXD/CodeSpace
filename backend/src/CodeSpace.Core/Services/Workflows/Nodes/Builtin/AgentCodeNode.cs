@@ -96,7 +96,7 @@ public sealed class AgentCodeNode : INodeRuntime
                 "changeSetId":  { "type": ["string","null"], "description": "Multi-repo run only: a stable id for the SET of branches this run produced. Null for a single-repo run." },
                 "repositoryResults": {
                   "type": "array",
-                  "description": "Multi-repo run only: one entry per writable repo (alias, repositoryId, producedBranch, baseSha) — the change set to feed git.open_change_set. Empty for a single-repo run (use 'branch' instead).",
+                  "description": "Multi-repo run only: one entry per writable repo — bind this whole array straight into git.open_change_set's 'repositories' input (it reads producedBranch + baseBranch) to open a PR per repo. Empty for a single-repo run (use 'branch' instead).",
                   "items": {
                     "type": "object",
                     "properties": {
@@ -104,7 +104,8 @@ public sealed class AgentCodeNode : INodeRuntime
                       "repositoryId":   { "type": ["string","null"] },
                       "changedFiles":   { "type": "array", "items": { "type": "string" } },
                       "producedBranch": { "type": ["string","null"] },
-                      "baseSha":        { "type": ["string","null"] }
+                      "baseSha":        { "type": ["string","null"] },
+                      "baseBranch":     { "type": ["string","null"] }
                     }
                   }
                 }

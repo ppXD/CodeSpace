@@ -68,6 +68,9 @@ public sealed record WorkspaceRepositoryHandle
 
     /// <summary>Whether the agent may write this repo or only read it as context.</summary>
     public required Messages.Agents.WorkspaceAccess Access { get; init; }
+
+    /// <summary>The ref this repo was cloned at — the PR base for the branch the agent produces, carried through so a downstream change-set PR-open needs no separately-authored target. Usually the repo's default branch; a tag when an author pinned one (a non-branch ref then makes that repo's open a per-repo Failed). Null when the clone carried no ref.</summary>
+    public string? BaseBranch { get; init; }
 }
 
 /// <summary>

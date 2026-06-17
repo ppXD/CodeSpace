@@ -132,6 +132,27 @@ public sealed class ChangeSetServiceTests
     }
 
     [Fact]
+    public async Task A_repo_with_a_head_branch_but_no_base_is_failed_not_skipped()
+    {
+        // The base couldn't be resolved (no ref recorded for this repo) — it has work to land but no PR target, so it's
+        // a per-repo FAILURE (distinct from the no-changes Skip), and it must never reach the provider as an empty target.
+        var stub = new RecordingPrService();
+
+        var result = await Service(stub).OpenPullRequestsAsync(Team, Spec(
+            (Web, "codespace/run-x", "main"),
+            (Api, "codespace/run-x", "")), actorUserId: null, CancellationToken.None);   // api: head but no base
+
+        result.OpenedCount.ShouldBe(1);
+        result.FailedCount.ShouldBe(1);
+        result.SkippedCount.ShouldBe(0);
+        stub.Calls.Count.ShouldBe(1, "the no-base repo never reaches the provider");
+
+        var api = result.PullRequests.Single(p => p.RepositoryId == Api);
+        api.Disposition.ShouldBe(ChangeSetPullRequestDisposition.Failed);
+        api.Error.ShouldContain("base");
+    }
+
+    [Fact]
     public async Task Threads_the_actor_user_through_to_each_open()
     {
         var stub = new RecordingPrService();
