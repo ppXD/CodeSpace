@@ -73,10 +73,13 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
         }
 
         builder.AppendLine();
-        builder.AppendLine("Choose the single next action. After planning, spawn agents over the planned subtask ids; once their results are recorded, merge them, then stop. Return ONLY the schema-constrained JSON.");
+        builder.AppendLine("Choose the single next action. After planning, spawn agents over the planned subtask ids; once their results are recorded, INSPECT each agent's status and error in the most recent spawn OR retry outcome above, RETRY any subtask that failed or did not satisfy the goal (optionally with a revised instruction), then merge the successful results, then stop. Return ONLY the schema-constrained JSON.");
 
         return builder.ToString();
     }
+
+    /// <summary>Internal test accessor (InternalsVisibleTo) — pins the system-prompt guidance as a tested contract (the inspect-and-retry framing; no unconditional merge-then-stop rail).</summary>
+    internal static string SystemPromptForTest => SystemPrompt;
 
     private static SupervisorModelDecision Deserialize(JsonElement json)
     {
@@ -103,7 +106,10 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
         "On each turn you emit ONE action from a fixed vocabulary: 'plan' (decompose the goal into subtasks), " +
         "'spawn' (fan out coding agents over planned subtask ids), 'retry' (re-run one subtask), " +
         "'merge' (synthesize the agents' results), 'ask_human' (ask a question), 'stop' (finish). " +
-        "Plan first, then spawn over the planned subtask ids, then merge, then stop. " +
+        "Plan first. Then drive the subtasks to completion: spawn over the planned subtask ids, inspect each agent's " +
+        "recorded status, error and summary in the most recent spawn OR retry outcome, retry any subtask that FAILED or " +
+        "did not satisfy the goal (optionally with a revised instruction), and merge only once the results you need have " +
+        "succeeded. Stop when the goal is met or a bound forces it. " +
         "You never name node types, run ids, or graph wiring — only the action + its payload. " +
         "Return ONLY the schema-constrained JSON.";
 }

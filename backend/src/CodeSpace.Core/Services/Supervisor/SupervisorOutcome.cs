@@ -1,5 +1,6 @@
 using System.Text.Json;
 using CodeSpace.Core.Services.Agents;
+using CodeSpace.Messages.Agents;
 
 namespace CodeSpace.Core.Services.Supervisor;
 
@@ -120,6 +121,76 @@ public static class SupervisorOutcome
         catch (JsonException)
         {
             return Array.Empty<Guid>();
+        }
+    }
+
+    /// <summary>
+    /// Project ONE spawned agent's terminal facts into the compact, decider-visible <see cref="SupervisorAgentResult"/>
+    /// (SOTA #2) — the SINGLE source of truth both the rehydrate fold (decider view) and the <c>merge</c> executor
+    /// consume, so the two can never drift on which fields an agent exposes. <paramref name="statusName"/> is the
+    /// authoritative AgentRun ROW status; <paramref name="rowError"/> is the ROW error (a cancelled/abandoned agent
+    /// sets it with a NULL <paramref name="resultJson"/>), so the error surfaces even when the run wrote no result.
+    /// Reads only bounded fields off the result — never the patch/transcript — so it needs no artifact-store fetch
+    /// and stays a pure function of immutable post-terminal state (replay-deterministic).
+    /// </summary>
+    public static SupervisorAgentResult ProjectCompact(Guid agentRunId, string statusName, string? rowError, string? resultJson)
+    {
+        var result = string.IsNullOrWhiteSpace(resultJson) ? null : TryDeserializeResult(resultJson);
+
+        return new SupervisorAgentResult
+        {
+            AgentRunId = agentRunId,
+            Status = statusName,
+            Summary = result?.Summary,
+            Error = result?.Error ?? rowError,
+            ChangedFiles = result?.ChangedFiles ?? Array.Empty<string>(),
+            ProducedBranch = result?.ProducedBranch,
+        };
+    }
+
+    /// <summary>Best-effort deserialize of a persisted <c>AgentRunResult</c> (null on malformed) — the compact projection tolerates a corrupt result the same way the merge path does.</summary>
+    private static AgentRunResult? TryDeserializeResult(string resultJson)
+    {
+        try { return JsonSerializer.Deserialize<AgentRunResult>(resultJson, AgentJson.Options); }
+        catch (JsonException) { return null; }
+    }
+
+    /// <summary>
+    /// Fold the spawned agents' COMPACT results into a spawn/retry decision's recorded outcome (SOTA #2), ADDITIVELY:
+    /// the existing <c>agentRunIds</c> + <c>agentCount</c> are read OFF THE INPUT and re-emitted byte-intact (so the
+    /// E5 counters that read <c>agentCount</c> are unperturbed), with an <c>agentResults</c> array appended. Returns
+    /// the input UNCHANGED when it staged no agents (a zero-agent spawn keeps its <c>note</c> field — re-emitting a
+    /// fixed shape would drop it + trigger a spurious write). Deterministic + idempotent: same terminal agents →
+    /// same bytes, so the rehydrate persist no-ops after the first post-barrier stamp.
+    /// </summary>
+    public static string FoldAgentResults(string? spawnOutcomeJson, IReadOnlyList<SupervisorAgentResult> agentResults)
+    {
+        var agentRunIds = ReadStagedAgentRunIds(spawnOutcomeJson);
+
+        if (agentRunIds.Count == 0) return spawnOutcomeJson ?? "";
+
+        var agentCount = ReadStagedAgentCount(spawnOutcomeJson);
+
+        return JsonSerializer.Serialize(new { agentRunIds, agentCount, agentResults }, AgentJson.Options);
+    }
+
+    /// <summary>Read the folded compact agent results from a spawn/retry outcome (empty when absent/malformed/not-yet-folded). The decider sees these via the rendered outcome; a merge / scorecard can also read them.</summary>
+    public static IReadOnlyList<SupervisorAgentResult> ReadAgentResults(string? outcomeJson)
+    {
+        if (string.IsNullOrWhiteSpace(outcomeJson)) return Array.Empty<SupervisorAgentResult>();
+
+        try
+        {
+            var root = JsonDocument.Parse(outcomeJson).RootElement;
+
+            if (root.ValueKind != JsonValueKind.Object || !root.TryGetProperty("agentResults", out var arr) || arr.ValueKind != JsonValueKind.Array)
+                return Array.Empty<SupervisorAgentResult>();
+
+            return arr.Deserialize<List<SupervisorAgentResult>>(AgentJson.Options) ?? (IReadOnlyList<SupervisorAgentResult>)Array.Empty<SupervisorAgentResult>();
+        }
+        catch (JsonException)
+        {
+            return Array.Empty<SupervisorAgentResult>();
         }
     }
 }

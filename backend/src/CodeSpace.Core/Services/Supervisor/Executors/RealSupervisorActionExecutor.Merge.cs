@@ -56,7 +56,7 @@ public sealed partial class RealSupervisorActionExecutor
 
         var runs = await _db.AgentRun.AsNoTracking()
             .Where(r => agentRunIds.Contains(r.Id) && r.TeamId == teamId)
-            .Select(r => new { r.Id, r.Status, r.ResultJson })
+            .Select(r => new { r.Id, r.Status, r.Error, r.ResultJson })
             .ToListAsync(cancellationToken)
             .ConfigureAwait(false);
 
@@ -67,28 +67,30 @@ public sealed partial class RealSupervisorActionExecutor
 
         var contributions = new List<object>(ordered.Count);
         foreach (var r in ordered)
-            contributions.Add(await ProjectContributionAsync(r.Id, r.Status, r.ResultJson, teamId, cancellationToken).ConfigureAwait(false));
+            contributions.Add(await ProjectContributionAsync(r.Id, r.Status, r.Error, r.ResultJson, teamId, cancellationToken).ConfigureAwait(false));
 
         return contributions;
     }
 
-    /// <summary>Project ONE agent run's full contribution into the merge outcome — the real work products (summary + changedFiles + producedBranch + patch + error), not just the summary. When the diff was offloaded (D2: PatchArtifactId set, Patch empty), the full diff is RESOLVED back from the artifact store so the merge synthesis never silently loses a large agent's work product. A missing / unparseable result still contributes its status. The shape round-trips through <c>AgentJson.Options</c>.</summary>
-    private async Task<object> ProjectContributionAsync(Guid agentRunId, Messages.Enums.AgentRunStatus status, string? resultJson, Guid teamId, CancellationToken cancellationToken)
+    /// <summary>Project ONE agent run's full contribution into the merge outcome — the real work products (summary + changedFiles + producedBranch + patch + error), not just the summary. The compact fields come from the SHARED <see cref="SupervisorOutcome.ProjectCompact"/> (the one source of truth the decider-visibility fold also uses, so they can't drift), which folds the ROW error for a cancelled/abandoned agent whose result is null. The unbounded patch layers on top: when the diff was offloaded (D2: PatchArtifactId set, Patch empty) the full diff is RESOLVED back from the artifact store so the merge synthesis never silently loses a large agent's work product. A missing / unparseable result still contributes its status. The shape round-trips through <c>AgentJson.Options</c>.</summary>
+    private async Task<object> ProjectContributionAsync(Guid agentRunId, Messages.Enums.AgentRunStatus status, string? rowError, string? resultJson, Guid teamId, CancellationToken cancellationToken)
     {
+        var compact = SupervisorOutcome.ProjectCompact(agentRunId, status.ToString(), rowError, resultJson);
+
         var result = string.IsNullOrWhiteSpace(resultJson) ? null : Deserialize<AgentRunResult>(resultJson);
 
         var patch = await ResolvePatchAsync(result, teamId, cancellationToken).ConfigureAwait(false);
 
         return new
         {
-            agentRunId,
-            status = status.ToString(),
-            summary = result?.Summary,
-            changedFiles = result?.ChangedFiles ?? Array.Empty<string>(),
-            producedBranch = result?.ProducedBranch,
+            agentRunId = compact.AgentRunId,
+            status = compact.Status,
+            summary = compact.Summary,
+            changedFiles = compact.ChangedFiles,
+            producedBranch = compact.ProducedBranch,
             patch,
             patchArtifactId = result?.PatchArtifactId,
-            error = result?.Error,
+            error = compact.Error,
         };
     }
 

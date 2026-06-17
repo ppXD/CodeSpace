@@ -48,11 +48,12 @@ public interface ISupervisorDecisionLog
     Task<IReadOnlyList<SupervisorDecisionRecord>> GetForRunAsync(Guid supervisorRunId, Guid teamId, CancellationToken cancellationToken);
 
     /// <summary>
-    /// Fold a human's ask_human answer into a SETTLED decision's recorded outcome (PR-E E4): rewrite the row's
-    /// <c>OutcomeJson</c> with <paramref name="foldedOutcomeJson"/> (the question + token + answer), team-scoped.
-    /// A status-AGNOSTIC outcome enrichment — NOT a lifecycle transition: the decision is already terminal, and
-    /// the human's durable answer (from the resolved Action wait) is being recorded onto the audit row so the
-    /// ledger is the durable answer record. Idempotent — re-writing the same bytes is a no-op.
+    /// Fold a SETTLED-outcome enrichment into a SETTLED decision's recorded outcome — an ask_human answer (PR-E E4)
+    /// OR a spawn/retry decision's settled agent results (SOTA #2): rewrite the row's <c>OutcomeJson</c> with
+    /// <paramref name="foldedOutcomeJson"/>, team-scoped. A status-AGNOSTIC outcome enrichment — NOT a lifecycle
+    /// transition: the decision is already terminal, and a durable fact (the human's answer from the resolved Action
+    /// wait, or the spawned agents' terminal results) is being recorded onto the audit row so the ledger is the
+    /// durable record the decider reads next turn. Idempotent — re-writing the same bytes is a no-op.
     /// </summary>
     Task UpdateOutcomeAsync(Guid decisionId, Guid teamId, string foldedOutcomeJson, CancellationToken cancellationToken);
 
@@ -208,7 +209,7 @@ public sealed class SupervisorDecisionLog : ISupervisorDecisionLog, IScopedDepen
                 .SetProperty(d => d.LastModifiedDate, DateTimeOffset.UtcNow), cancellationToken)
             .ConfigureAwait(false);
 
-        if (affected > 0) _logger.LogInformation("Supervisor folded a human answer into ask_human decision {DecisionId}", decisionId);
+        if (affected > 0) _logger.LogInformation("Supervisor folded a settled outcome enrichment into decision {DecisionId}", decisionId);
     }
 
     public async Task<int> ExpireStalePendingAsync(DateTimeOffset olderThan, CancellationToken cancellationToken)
