@@ -68,7 +68,20 @@ public sealed class AgentCodeNode : INodeRuntime
             {
               "type": "object",
               "properties": {
-                "repositoryId": { "type": "string", "format": "uuid", "x-selector": "repository", "description": "The repository the agent works in — cloned into its workspace before it runs. Pick one, or switch to Expression to bind it from the trigger (e.g. {{trigger.repositoryId}}). Leave empty for an analysis-only run with no repo." }
+                "repositoryId": { "type": "string", "format": "uuid", "x-selector": "repository", "description": "The PRIMARY repository the agent works in — cloned into its workspace before it runs. Pick one, or switch to Expression to bind it from the trigger (e.g. {{trigger.repositoryId}}). Leave empty for an analysis-only run with no repo." },
+                "relatedRepositories": {
+                  "type": "array",
+                  "description": "Multi-repo: ALSO clone these repositories into the workspace (for a coordinated change across e.g. a frontend + backend). The primary is repositoryId; leave empty for a single-repo run.",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "repositoryId": { "type": "string", "format": "uuid" },
+                      "alias": { "type": "string", "description": "The short name + mount folder for this repo (e.g. 'api'). Defaults to repo-2, repo-3, …" },
+                      "access": { "type": "string", "enum": ["read", "write"], "description": "read = context-only (default); write = the agent may edit + branch it." }
+                    },
+                    "required": ["repositoryId"]
+                  }
+                }
               }
             }
             """),
@@ -123,6 +136,16 @@ public sealed class AgentCodeNode : INodeRuntime
         var autonomy = ReadAutonomyLevel(context.Config);
         var mode = ReadMode(context.Config);
 
+        // Multi-repo: authored RELATED repos (the primary is repositoryId) project onto a WorkspaceSpec. No related
+        // repos → null Workspace → the resolver derives the single-repo workspace from RepositoryId → BYTE-IDENTICAL.
+        var related = ReadRelatedRepositories(context);
+
+        // Fail loud rather than silently drop the authored multi-repo intent: related repos are meaningless without a
+        // primary (the workspace has nowhere to anchor + nothing writable to default to).
+        if (related.Count > 0 && repositoryId is null) return Fail("Input 'relatedRepositories' requires a primary 'repositoryId' — pick the primary repository, or remove the related ones.");
+
+        var workspace = repositoryId is { } primaryId ? WorkspaceSpec.FromAuthoredRepos(primaryId, primaryRef: null, related) : null;
+
         var task = new AgentTask
         {
             Goal = goal,
@@ -132,6 +155,7 @@ public sealed class AgentCodeNode : INodeRuntime
             ModelCredentialId = modelCredentialId,
             Tools = ReadStringArray(context.Config, "tools"),
             RepositoryId = repositoryId,
+            Workspace = workspace,
             RunnerKind = ReadOptionalString(context.Config, "runnerKind"),
             TimeoutSeconds = ReadInt(context.Config, "timeoutSeconds") ?? 1800,
             Autonomy = autonomy,
@@ -217,6 +241,33 @@ public sealed class AgentCodeNode : INodeRuntime
 
         repositoryId = id;
         return true;
+    }
+
+    /// <summary>
+    /// Parse the authored <c>relatedRepositories</c> input — an array of {repositoryId, alias?, access?} — into
+    /// related <see cref="WorkspaceRepositorySpec"/>s (access defaults to read-only context). A malformed/idless entry
+    /// is skipped (lenient — the editor validates). Absent / empty → no related repos → a single-repo run.
+    /// </summary>
+    private static IReadOnlyList<WorkspaceRepositorySpec> ReadRelatedRepositories(NodeRunContext context)
+    {
+        if (!context.Inputs.TryGetValue("relatedRepositories", out var value) || value.ValueKind != JsonValueKind.Array) return Array.Empty<WorkspaceRepositorySpec>();
+
+        var list = new List<WorkspaceRepositorySpec>();
+
+        foreach (var element in value.EnumerateArray())
+        {
+            if (element.ValueKind != JsonValueKind.Object) continue;
+            if (!element.TryGetProperty("repositoryId", out var idEl) || idEl.ValueKind != JsonValueKind.String || !Guid.TryParse(idEl.GetString(), out var repoId)) continue;
+
+            var alias = element.TryGetProperty("alias", out var aliasEl) && aliasEl.ValueKind == JsonValueKind.String ? (aliasEl.GetString() ?? "").Trim() : "";
+            var access = element.TryGetProperty("access", out var accessEl) && accessEl.ValueKind == JsonValueKind.String && string.Equals(accessEl.GetString(), "write", StringComparison.OrdinalIgnoreCase)
+                ? WorkspaceAccess.Write
+                : WorkspaceAccess.Read;
+
+            list.Add(new WorkspaceRepositorySpec { Alias = alias, RepositoryId = repoId, Access = access });
+        }
+
+        return list;
     }
 
     private static string ReadString(IReadOnlyDictionary<string, JsonElement> bag, string key) =>

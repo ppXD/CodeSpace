@@ -1,5 +1,6 @@
 using System.Text.Json;
 using CodeSpace.Core.Services.Tasks.Projection.Builders.SingleAgent;
+using CodeSpace.Messages.Agents;
 using CodeSpace.Core.Services.Workflows.Engine;
 using CodeSpace.Core.Services.Workflows.Nodes;
 using CodeSpace.Core.Services.Workflows.Nodes.Builtin;
@@ -140,6 +141,57 @@ public class SingleAgentDefinitionBuilderTests
         var def = Builder.Build(Context(Seed(seedRepo), new ResolvedAgentProfile { RepositoryId = profileRepo }));
 
         AgentInputsOf(def).GetProperty("repositoryId").GetString().ShouldBe(profileRepo.ToString());
+    }
+
+    [Fact]
+    public void Profile_related_repositories_project_onto_the_agent_code_relatedRepositories_input()
+    {
+        var web = Guid.NewGuid();
+        var api = Guid.NewGuid();
+
+        var def = Builder.Build(Context(Seed(), new ResolvedAgentProfile
+        {
+            RepositoryId = web,
+            RelatedRepositories = new[] { new WorkspaceRepositorySpec { Alias = "api", RepositoryId = api, Access = WorkspaceAccess.Write } },
+        }));
+
+        var inputs = AgentInputsOf(def);
+        inputs.GetProperty("repositoryId").GetString().ShouldBe(web.ToString());
+
+        var related = inputs.GetProperty("relatedRepositories");
+        related.GetArrayLength().ShouldBe(1, "the projection lane carries the related repos onto the SAME input the editor + AgentCodeNode use");
+        related[0].GetProperty("repositoryId").GetString().ShouldBe(api.ToString());
+        related[0].GetProperty("alias").GetString().ShouldBe("api");
+        related[0].GetProperty("access").GetString().ShouldBe("write");
+
+        RealValidator().Validate(def).IsValid.ShouldBeTrue();
+    }
+
+    [Fact]
+    public void No_related_repositories_omits_the_input_byte_identical()
+    {
+        // A profile with no related repos must NOT add a relatedRepositories key — a single-repo projection is unchanged.
+        var def = Builder.Build(Context(Seed(), new ResolvedAgentProfile { RepositoryId = Guid.NewGuid() }));
+
+        AgentInputsOf(def).TryGetProperty("relatedRepositories", out _).ShouldBeFalse();
+    }
+
+    [Fact]
+    public void Related_repository_with_read_access_and_blank_alias_emits_read_and_omits_the_alias()
+    {
+        // The projection lane must agree with the editor + node on the defaults: a blank alias is emitted as null
+        // (the node re-derives repo-N) and Read access is emitted as "read" — else the projected workspace diverges.
+        var api = Guid.NewGuid();
+        var def = Builder.Build(Context(Seed(), new ResolvedAgentProfile
+        {
+            RepositoryId = Guid.NewGuid(),
+            RelatedRepositories = new[] { new WorkspaceRepositorySpec { Alias = "  ", RepositoryId = api, Access = WorkspaceAccess.Read } },
+        }));
+
+        var entry = AgentInputsOf(def).GetProperty("relatedRepositories")[0];
+        entry.GetProperty("repositoryId").GetString().ShouldBe(api.ToString());
+        entry.GetProperty("access").GetString().ShouldBe("read", "Read access is emitted as 'read'");
+        (entry.GetProperty("alias").ValueKind == JsonValueKind.Null).ShouldBeTrue("a blank alias is emitted null so the node re-derives repo-N");
     }
 
     [Fact]

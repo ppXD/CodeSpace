@@ -1,5 +1,6 @@
 using System.Text.Json;
 using CodeSpace.Core.Services.Agents.Harnesses.Codex;
+using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Tasks;
 
 namespace CodeSpace.Core.Services.Tasks.Projection.Builders;
@@ -47,7 +48,13 @@ internal static class AgentNodeMapping
         return JsonSerializer.SerializeToElement(config);
     }
 
-    /// <summary>The <c>agent.code</c> Inputs — the bound <c>repositoryId</c> from the profile, else the seed's repo. Absent when neither names one (an analysis-only run), matching an authored node with no repo bound.</summary>
+    /// <summary>
+    /// The <c>agent.code</c> Inputs — the bound <c>repositoryId</c> (primary) from the profile, else the seed's repo,
+    /// plus the multi-repo <c>relatedRepositories</c> when the profile authored any (the SAME {repositoryId, alias,
+    /// access} shape <c>AgentCodeNode</c> reads + the editor emits, so the projection lane and the authored node
+    /// produce an identical workspace). Absent when neither names a repo (an analysis-only run); the related-repos
+    /// key is omitted entirely when none, keeping a single-repo projection byte-identical.
+    /// </summary>
     public static JsonElement BuildAgentInputs(TaskBuildContext context)
     {
         var repositoryId = context.AgentProfile?.RepositoryId ?? context.Seed.RepositoryId;
@@ -55,8 +62,22 @@ internal static class AgentNodeMapping
         var inputs = new Dictionary<string, object?>();
 
         AddIfPresent(inputs, "repositoryId", repositoryId?.ToString());
+        AddIfPresent(inputs, "relatedRepositories", BuildRelatedRepositories(context.AgentProfile?.RelatedRepositories));
 
         return JsonSerializer.SerializeToElement(inputs);
+    }
+
+    /// <summary>Project the profile's related repos onto the authored {repositoryId, alias, access} input shape; null (omitted) when none, so a single-repo projection is unchanged.</summary>
+    private static List<Dictionary<string, object?>>? BuildRelatedRepositories(IReadOnlyList<WorkspaceRepositorySpec>? related)
+    {
+        if (related is not { Count: > 0 }) return null;
+
+        return related.Select(r => new Dictionary<string, object?>
+        {
+            ["repositoryId"] = r.RepositoryId.ToString(),
+            ["alias"] = NullIfBlank(r.Alias),
+            ["access"] = r.Access == WorkspaceAccess.Write ? "write" : "read",
+        }).ToList();
     }
 
     /// <summary>The profile's harness, else the codex-cli default (matches AgentCodeNode's catalog default; mirrors RealSupervisorActionExecutor.HarnessOf).</summary>
