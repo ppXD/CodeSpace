@@ -150,6 +150,37 @@ public sealed class AgentWorkspacePushFlowTests
         (await ctx.RemoteHasBranchAsync(ctx.BranchName)).ShouldBeFalse("git push was never invoked — no branch appeared");
     }
 
+    [Fact]
+    public async Task Multi_repo_pushes_each_writable_repo_to_its_OWN_remote()
+    {
+        // CROWN JEWEL for multi-repo PR3: a two-repo workspace pushes EACH repo by alias to ITS OWN bare remote
+        // under the same run-derived branch name — the change set. The thing a fake can't prove: web's branch lands
+        // on web's remote and api's on api's, never crossed.
+        if (OperatingSystem.IsWindows()) return;
+        if (!await GitAvailableAsync()) return;
+
+        using var ctx = new MultiRepoPushTestContext();
+        await ctx.SeedBareRemotesAsync();
+
+        await using var handle = await ctx.CloneBothWithTokensAsync();
+
+        var webDir = handle.Repositories.Single(r => r.Alias == "web").Directory;
+        var apiDir = handle.Repositories.Single(r => r.Alias == "api").Directory;
+        await File.WriteAllTextAsync(Path.Combine(webDir, "web-change.txt"), "web work");
+        await File.WriteAllTextAsync(Path.Combine(apiDir, "api-change.txt"), "api work");
+
+        var push = (IWorkspacePushHandle)handle;
+        (await push.PushChangesAsync("web", ctx.BranchName, CancellationToken.None)).ShouldBe(ctx.BranchName);
+        (await push.PushChangesAsync("api", ctx.BranchName, CancellationToken.None)).ShouldBe(ctx.BranchName);
+
+        (await ctx.RemoteHasBranchAsync("web", ctx.BranchName)).ShouldBeTrue("web's branch is on web's remote");
+        (await ctx.RemoteBranchContainsFileAsync("web", ctx.BranchName, "web-change.txt")).ShouldBeTrue();
+        (await ctx.RemoteHasBranchAsync("api", ctx.BranchName)).ShouldBeTrue("api's branch is on api's remote");
+        (await ctx.RemoteBranchContainsFileAsync("api", ctx.BranchName, "api-change.txt")).ShouldBeTrue();
+
+        (await ctx.RemoteBranchContainsFileAsync("api", ctx.BranchName, "web-change.txt")).ShouldBeFalse("web's file never crossed onto api's remote");
+    }
+
     // ─── Helpers ─────────────────────────────────────────────────────────────
 
     private static IWorkspacePushHandle Push(IWorkspaceHandle handle) => (IWorkspacePushHandle)handle;
@@ -225,6 +256,80 @@ public sealed class AgentWorkspacePushFlowTests
 
         public async Task<bool> RemoteBranchContainsTextAsync(string branch, string file, string text) =>
             (await RunGitAsync(_root, "--git-dir", _bareRemote, "show", $"{branch}:{file}")).Contains(text);
+
+        private static LocalGitWorkspaceProvider NewProvider() =>
+            new(new SandboxRunnerRegistry(new ISandboxRunner[] { new LocalProcessRunner() }), NullLogger<LocalGitWorkspaceProvider>.Instance);
+
+        private static async Task<string> RunGitAsync(string workdir, params string[] args)
+        {
+            var result = await new LocalProcessRunner().RunAsync(
+                new SandboxSpec { Command = "git", Args = args, WorkingDirectory = workdir, TimeoutSeconds = 60 }, CancellationToken.None);
+
+            if (result.Status != SandboxStatus.Success)
+                throw new InvalidOperationException($"git {string.Join(' ', args)} failed: {result.Stderr}");
+
+            return result.Stdout;
+        }
+
+        public void Dispose()
+        {
+            try { Directory.Delete(_root, recursive: true); } catch { /* best-effort */ }
+        }
+    }
+
+    /// <summary>Two bare remotes ("web" + "api"), each seeded with one commit; clones BOTH into a single multi-repo workspace (both writable, web primary) carrying tokens so per-repo push takes the authenticated path. GUID-suffixed under one IDisposable root.</summary>
+    private sealed class MultiRepoPushTestContext : IDisposable
+    {
+        private const string Token = "super-secret-push-token";
+
+        private readonly string _root = Path.Combine(Path.GetTempPath(), "cs-push-multi-" + Guid.NewGuid().ToString("N"));
+        private readonly Dictionary<string, string> _bareByAlias = new();
+
+        public string BranchName { get; } = "codespace/agent/" + Guid.NewGuid().ToString("N");
+
+        public MultiRepoPushTestContext() => Directory.CreateDirectory(_root);
+
+        public async Task SeedBareRemotesAsync()
+        {
+            await SeedOneAsync("web");
+            await SeedOneAsync("api");
+        }
+
+        private async Task SeedOneAsync(string alias)
+        {
+            var bare = Path.Combine(_root, $"{alias}.git");
+            _bareByAlias[alias] = bare;
+            await RunGitAsync(_root, "init", "--bare", "-b", "main", bare);
+
+            var seed = Path.Combine(_root, $"seed-{alias}");
+            Directory.CreateDirectory(seed);
+            await RunGitAsync(seed, "clone", bare, seed);
+            await RunGitAsync(seed, "config", "user.email", "test@codespace.dev");
+            await RunGitAsync(seed, "config", "user.name", "Test");
+            await RunGitAsync(seed, "config", "commit.gpgsign", "false");
+            await File.WriteAllTextAsync(Path.Combine(seed, $"{alias}.txt"), "base");
+            await RunGitAsync(seed, "add", ".");
+            await RunGitAsync(seed, "commit", "-m", "seed");
+            await RunGitAsync(seed, "push", "origin", "main");
+        }
+
+        public Task<IWorkspaceHandle> CloneBothWithTokensAsync() => NewProvider().PrepareAsync(new WorkspaceProvisionRequest
+        {
+            PrimaryAlias = "web",
+            Repositories = new[]
+            {
+                new WorkspaceRepositoryProvision { Alias = "web", IsPrimary = true, Access = WorkspaceAccess.Write, CloneRequest = new WorkspaceRequest { RepositoryUrl = RemoteUrl("web"), Token = Token, TokenUsername = "x-access-token" } },
+                new WorkspaceRepositoryProvision { Alias = "api", Access = WorkspaceAccess.Write, CloneRequest = new WorkspaceRequest { RepositoryUrl = RemoteUrl("api"), Token = Token, TokenUsername = "x-access-token" } },
+            },
+        }, CancellationToken.None);
+
+        public async Task<bool> RemoteHasBranchAsync(string alias, string branch) =>
+            (await RunGitAsync(_root, "--git-dir", _bareByAlias[alias], "branch", "--list", branch)).Trim().Length > 0;
+
+        public async Task<bool> RemoteBranchContainsFileAsync(string alias, string branch, string file) =>
+            (await RunGitAsync(_root, "--git-dir", _bareByAlias[alias], "ls-tree", "-r", "--name-only", branch)).Split('\n').Any(l => l.Trim() == file);
+
+        private string RemoteUrl(string alias) => new Uri(_bareByAlias[alias]).AbsoluteUri;
 
         private static LocalGitWorkspaceProvider NewProvider() =>
             new(new SandboxRunnerRegistry(new ISandboxRunner[] { new LocalProcessRunner() }), NullLogger<LocalGitWorkspaceProvider>.Instance);

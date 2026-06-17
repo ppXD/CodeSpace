@@ -38,13 +38,23 @@ public interface IWorkspaceHandle : IAsyncDisposable
     /// <summary>The repositories materialised in this workspace, each with its on-disk directory + access — the multi-repo materialisation result. A single-repo workspace has exactly one entry whose directory equals <see cref="Directory"/>.</summary>
     IReadOnlyList<WorkspaceRepositoryHandle> Repositories { get; }
 
+    /// <summary>The alias of the PRIMARY repo (the one the top-level capture/push targets, and the change set's anchor) — always one of <see cref="Repositories"/>'s aliases.</summary>
+    string PrimaryAlias { get; }
+
     /// <summary>
-    /// Capture the agent's changes versus the cloned base — the unified diff + the changed-file paths
+    /// Capture the PRIMARY repo's changes versus the cloned base — the unified diff + the changed-file paths
     /// (ground truth from git, covering staged, unstaged, and committed work). Returns an empty
     /// <see cref="WorkspaceChanges"/> when nothing changed. Throws <see cref="WorkspaceException"/> on a
     /// git failure. Call before <see cref="IAsyncDisposable.DisposeAsync"/> removes the directory.
     /// </summary>
     Task<WorkspaceChanges> CaptureChangesAsync(CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Multi-repo PR3: capture the changes of the repo named <paramref name="alias"/> (one of <see cref="Repositories"/>).
+    /// Same semantics as the primary-only overload, scoped to one repo. Throws <see cref="WorkspaceException"/> for an
+    /// unknown alias or a git failure.
+    /// </summary>
+    Task<WorkspaceChanges> CaptureChangesAsync(string alias, CancellationToken cancellationToken);
 }
 
 /// <summary>One repository materialised inside a workspace (multi-repo PR2): its alias, on-disk directory, and access. A pure handle-side noun co-located with the contract it belongs to.</summary>
@@ -69,10 +79,18 @@ public sealed record WorkspaceRepositoryHandle
 public interface IWorkspacePushHandle
 {
     /// <summary>
-    /// Commit everything in the clone and force-push it to <paramref name="branchName"/> on the origin
+    /// Commit everything in the PRIMARY clone and force-push it to <paramref name="branchName"/> on the origin
     /// remote, returning the pushed branch name on success. Returns null when the run made no changes
     /// (nothing to commit) or the clone carries no push credential (an anonymous clone) — neither is a
     /// failure. Throws <see cref="WorkspaceException"/> (with the token REDACTED) on a git failure.
     /// </summary>
     Task<string?> PushChangesAsync(string branchName, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Multi-repo PR3: commit + push the repo named <paramref name="alias"/> (one of <c>Repositories</c>) to
+    /// <paramref name="branchName"/> on ITS own origin. Same semantics as the primary-only overload, scoped to
+    /// one repo — each repo pushes to its distinct remote, so the same branch name across the set is fine.
+    /// Throws <see cref="WorkspaceException"/> for an unknown / read-only alias or a git failure.
+    /// </summary>
+    Task<string?> PushChangesAsync(string alias, string branchName, CancellationToken cancellationToken);
 }
