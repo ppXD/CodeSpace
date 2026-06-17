@@ -176,7 +176,124 @@ public sealed class SupervisorMergeIntegrateFlowTests : IDisposable
         outcome.GetProperty("merged").GetArrayLength().ShouldBe(3, "the side-by-side fold still records ALL three agents (incl. the failed one)");
     }
 
+    [Fact]
+    public async Task Merge_after_a_verified_resolution_surfaces_the_resolver_branch_without_re_integrating()
+    {
+        if (!await GitReadyAsync()) return;
+
+        using var remote = new BareRemote();
+        var baseSha = await remote.SeedBaseAsync(new() { ["f.txt"] = "shared\n" });
+
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var repoId = await SeedBoundRepositoryAsync(teamId, remote.Url, "main");
+        var runId = await SeedSupervisorRunAsync(teamId, userId);
+
+        // Two agents edited the SAME line — re-integrating them would CONFLICT. The verified resolver already
+        // reconciled them into its own tested branch, so a merge MUST surface THAT branch, never re-run the integrator.
+        var patchA = await remote.MakePatchAsync(baseSha, d => File.WriteAllText(Path.Combine(d, "f.txt"), "A-change\n"));
+        var patchB = await remote.MakePatchAsync(baseSha, d => File.WriteAllText(Path.Combine(d, "f.txt"), "B-change\n"));
+        var idA = await SeedAgentRunAsync(runId, teamId, "do alpha", baseSha, patchA, "codespace/agent/a");
+        var idB = await SeedAgentRunAsync(runId, teamId, "do beta", baseSha, patchB, "codespace/agent/b");
+
+        const string resolverBranch = "codespace/resolve/reconciled";
+        var outcome = await ExecuteMergeAfterResolveAsync(runId, teamId, repoId, resolverBranch, verified: true, idA, idB);
+
+        var integration = outcome.GetProperty("integration");
+        integration.GetProperty("status").GetString().ShouldBe("Clean",
+            customMessage: "a VERIFIED resolution short-circuits — the integrator (which would CONFLICT on these same-line edits) is never run");
+        integration.GetProperty("integratedBranch").GetString().ShouldBe(resolverBranch,
+            customMessage: "the surfaced head is the resolver's OWN tested branch — exactly what a downstream git.open_pr targets");
+        integration.GetProperty("via").GetString().ShouldBe("resolution", customMessage: "the block is honestly marked as resolution-sourced, not integrator-sourced");
+        (await remote.RemoteHasBranchAsync($"codespace/integration/{runId:N}/turn3")).ShouldBeFalse(
+            "the integrator was bypassed — no fresh integration branch was pushed to the remote");
+    }
+
+    [Fact]
+    public async Task Merge_after_an_unverified_resolution_falls_through_to_the_integrator()
+    {
+        if (!await GitReadyAsync()) return;
+
+        using var remote = new BareRemote();
+        var baseSha = await remote.SeedBaseAsync(new() { ["a.txt"] = "base-a\n", ["b.txt"] = "base-b\n" });
+
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var repoId = await SeedBoundRepositoryAsync(teamId, remote.Url, "main");
+        var runId = await SeedSupervisorRunAsync(teamId, userId);
+
+        // Disjoint files → the integrator integrates cleanly. The resolution is UNVERIFIED (tests red), so it must
+        // NOT short-circuit: the merge runs the integrator and produces the INTEGRATOR's branch, proving the
+        // unverified resolution was correctly ignored (the safety floor — never accept an unverified resolution).
+        var patchA = await remote.MakePatchAsync(baseSha, d => File.WriteAllText(Path.Combine(d, "a.txt"), "edited-a\n"));
+        var patchB = await remote.MakePatchAsync(baseSha, d => File.WriteAllText(Path.Combine(d, "b.txt"), "edited-b\n"));
+        var idA = await SeedAgentRunAsync(runId, teamId, "do alpha", baseSha, patchA, "codespace/agent/a");
+        var idB = await SeedAgentRunAsync(runId, teamId, "do beta", baseSha, patchB, "codespace/agent/b");
+
+        var outcome = await ExecuteMergeAfterResolveAsync(runId, teamId, repoId, "codespace/resolve/bad", verified: false, idA, idB);
+
+        var integration = outcome.GetProperty("integration");
+        integration.GetProperty("status").GetString().ShouldBe("Clean", "the integrator ran (the unverified resolution did not short-circuit)");
+        integration.GetProperty("integratedBranch").GetString().ShouldBe($"codespace/integration/{runId:N}/turn3",
+            customMessage: "the surfaced head is the INTEGRATOR's branch — an unverified resolution's branch must never be accepted");
+        integration.TryGetProperty("via", out _).ShouldBeFalse("the integrator path records no resolution 'via' marker");
+        (await remote.RemoteHasBranchAsync($"codespace/integration/{runId:N}/turn3")).ShouldBeTrue("the integrator really pushed its reviewable branch");
+    }
+
     // ─── Drive the real executor ───────────────────────────────────────────────────
+
+    /// <summary>Execute a <c>merge</c> against a tape that already holds spawn → conflicted-merge → resolve (verified or not, with a pushed branch) — the resolver-loop shape S5's short-circuit (or fall-through) is asserted against.</summary>
+    private async Task<JsonElement> ExecuteMergeAfterResolveAsync(Guid runId, Guid teamId, Guid repoId, string resolverBranch, bool verified, params Guid[] agentRunIds)
+    {
+        using var scope = _fixture.BeginScope();
+        var executor = scope.Resolve<ISupervisorActionExecutor>();
+
+        var resolverResult = new SupervisorAgentResult
+        {
+            AgentRunId = Guid.NewGuid(),
+            Status = "Succeeded",
+            Summary = verified ? $"reconciled. {SupervisorResolverRecipe.TestsPassedMarker}" : "reconciled but tests still red",
+            ProducedBranch = resolverBranch,
+        };
+
+        var context = new SupervisorTurnContext
+        {
+            Goal = Goal,
+            SupervisorRunId = runId,
+            TeamId = teamId,
+            NodeId = NodeId,
+            TurnNumber = 3,
+            PriorDecisions = new[]
+            {
+                new SupervisorPriorDecision
+                {
+                    Id = Guid.NewGuid(), Sequence = 1, DecisionKind = SupervisorDecisionKinds.Spawn, Status = SupervisorDecisionStatus.Succeeded,
+                    PayloadJson = """{"subtaskIds":["s1","s2"]}""",
+                    OutcomeJson = JsonSerializer.Serialize(new { agentRunIds, agentCount = agentRunIds.Length }, AgentJson.Options),
+                },
+                new SupervisorPriorDecision
+                {
+                    Id = Guid.NewGuid(), Sequence = 2, DecisionKind = SupervisorDecisionKinds.Merge, Status = SupervisorDecisionStatus.Succeeded,
+                    PayloadJson = "{}",
+                    OutcomeJson = JsonSerializer.Serialize(new { integration = new { status = "Conflicted", integratedBranch = (string?)null } }, AgentJson.Options),
+                },
+                new SupervisorPriorDecision
+                {
+                    Id = Guid.NewGuid(), Sequence = 3, DecisionKind = SupervisorDecisionKinds.Resolve, Status = SupervisorDecisionStatus.Succeeded,
+                    PayloadJson = "{}",
+                    OutcomeJson = JsonSerializer.Serialize(new { agentRunIds = new[] { resolverResult.AgentRunId }, agentCount = 1, agentResults = new[] { resolverResult } }, AgentJson.Options),
+                },
+            },
+            AgentProfile = new SupervisorAgentProfile { RepositoryId = repoId, IntegrateBranches = true },
+        };
+
+        var decision = new SupervisorDecision
+        {
+            Kind = SupervisorDecisionKinds.Merge,
+            PayloadJson = JsonSerializer.Serialize(new SupervisorMergePayload { SynthesisInstruction = "finalize" }, AgentJson.Options),
+        };
+
+        var execution = await executor.ExecuteAsync(decision, context, CancellationToken.None);
+        return JsonDocument.Parse(execution.OutcomeJson).RootElement.Clone();
+    }
 
     private async Task<JsonElement> ExecuteMergeAsync(Guid runId, Guid teamId, bool integrate, params Guid[] agentRunIds) =>
         JsonDocument.Parse(await ExecuteMergeRawAsync(runId, teamId, integrate, agentRunIds)).RootElement.Clone();

@@ -272,6 +272,54 @@ public static class SupervisorOutcome
         return verified ? SupervisorResolutionVerdict.Verified : SupervisorResolutionVerdict.Unverified;
     }
 
+    /// <summary>
+    /// Fold the run's FINAL reviewable integrated branch off the durable decision tape (resolver loop #379, S5) — the
+    /// head a downstream <c>git.open_pr</c> / <c>git.open_change_set</c> node targets. A single reverse walk (latest
+    /// decision wins) over two sources, uniformly: a <c>merge</c> that integrated CLEAN surfaces its
+    /// <c>integration.integratedBranch</c>; a VERIFIED <c>resolve</c> surfaces the resolver's OWN pushed branch (the
+    /// reconciled merge IS the resolver's branch — see <c>RealSupervisorActionExecutor.Integrate.cs</c>). Null when
+    /// neither exists yet (an analysis-only run, or a conflict that was never resolved). Pure + replay-deterministic.
+    /// </summary>
+    public static string? ReadFinalIntegratedBranch(IReadOnlyList<SupervisorPriorDecision> priorDecisions)
+    {
+        for (var i = priorDecisions.Count - 1; i >= 0; i--)
+        {
+            var decision = priorDecisions[i];
+
+            if (decision.DecisionKind == SupervisorDecisionKinds.Merge && ReadIntegration(decision.OutcomeJson) is { IntegratedBranch: { Length: > 0 } cleanBranch })
+                return cleanBranch;
+
+            if (ResolvedBranch(decision) is { } resolvedBranch) return resolvedBranch;
+
+            // A spawn / retry (or an unverified / branchless resolve) that NOTHING later merged or resolved means the
+            // run's latest work is UN-combined — there is no clean reviewable head, and an earlier branch must not be
+            // surfaced past fresh un-integrated work (a downstream open_pr would ship a PR missing it). This mirrors
+            // Part B's disqualifier (AcceptedResolutionBranch): the most-recent agent-staging decision must itself be
+            // the accepted resolution, else the integrator runs / there is nothing clean to surface.
+            if (SupervisorDecisionKinds.StagesAgents(decision.DecisionKind)) return null;
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// The reviewable branch a VERIFIED <c>resolve</c> decision contributes — its first folded resolver agent's
+    /// pushed branch — or null when the decision isn't a resolve, the resolution wasn't
+    /// <see cref="SupervisorResolutionVerdict.Verified"/>, or the resolver pushed nothing. The SINGLE encoding of
+    /// "an accepted resolution's tested branch" that both the final-branch reader (<see cref="ReadFinalIntegratedBranch"/>)
+    /// and the merge short-circuit (<c>RealSupervisorActionExecutor.AcceptedResolutionBranch</c>) share, so the
+    /// acceptance rule can never drift between the two (Rule 7 — recognise the verb in ONE place, exactly like
+    /// <see cref="SupervisorDecisionKinds.StagesAgents"/>). Pure + replay-deterministic.
+    /// </summary>
+    public static string? ResolvedBranch(SupervisorPriorDecision decision)
+    {
+        if (decision.DecisionKind != SupervisorDecisionKinds.Resolve) return null;
+
+        if (ReadResolutionVerdict(decision.OutcomeJson) != SupervisorResolutionVerdict.Verified) return null;
+
+        return ReadAgentResults(decision.OutcomeJson).FirstOrDefault()?.ProducedBranch is { Length: > 0 } branch ? branch : null;
+    }
+
     /// <summary>Read the folded compact agent results from a spawn/retry outcome (empty when absent/malformed/not-yet-folded). The decider sees these via the rendered outcome; a merge / scorecard can also read them.</summary>
     public static IReadOnlyList<SupervisorAgentResult> ReadAgentResults(string? outcomeJson)
     {

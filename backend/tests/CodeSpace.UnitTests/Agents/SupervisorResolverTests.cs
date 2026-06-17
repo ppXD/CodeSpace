@@ -1,3 +1,4 @@
+using System.Text.Json;
 using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Agents.Eval;
 using CodeSpace.Core.Services.Supervisor;
@@ -175,6 +176,175 @@ public class SupervisorResolverTests
         prompt.ShouldContain("NOT verified", Case.Insensitive);
         prompt.ShouldContain("do NOT accept", Case.Insensitive);
     }
+
+    // ── S5: the run's final integrated branch (the open_pr output surface) ──────────
+
+    /// <summary>A resolve outcome whose folded resolver agent pushed <paramref name="producedBranch"/> (S5 reads ProducedBranch off the first folded result) and ended with the given status/summary.</summary>
+    private static string ResolveOutcomeWithBranch(string status, string? summary, string? producedBranch)
+    {
+        var result = new SupervisorAgentResult { AgentRunId = Guid.NewGuid(), Status = status, Summary = summary, ProducedBranch = producedBranch };
+        return JsonSerializer.Serialize(new { agentRunIds = new[] { result.AgentRunId }, agentCount = 1, agentResults = new[] { result } }, AgentJson.Options);
+    }
+
+    /// <summary>A merge outcome carrying an <c>integration</c> block of the given status + (clean) branch — the shape <c>ProjectIntegrationResult</c> records.</summary>
+    private static string MergeOutcome(string integrationStatus, string? integratedBranch) =>
+        JsonSerializer.Serialize(new { merged = Array.Empty<object>(), count = 0, integration = new { status = integrationStatus, integratedBranch } }, AgentJson.Options);
+
+    private static SupervisorPriorDecision Decision(string kind, long seq, string? outcomeJson) =>
+        new() { Id = Guid.NewGuid(), Sequence = seq, DecisionKind = kind, Status = SupervisorDecisionStatus.Succeeded, PayloadJson = "{}", OutcomeJson = outcomeJson };
+
+    private static readonly string VerifiedSummary = $"reconciled cleanly. {SupervisorResolverRecipe.TestsPassedMarker}";
+
+    [Fact]
+    public void ReadFinalIntegratedBranch_is_null_on_an_empty_tape() =>
+        SupervisorOutcome.ReadFinalIntegratedBranch(Array.Empty<SupervisorPriorDecision>()).ShouldBeNull();
+
+    [Fact]
+    public void ReadFinalIntegratedBranch_surfaces_a_clean_merge_branch() =>
+        SupervisorOutcome.ReadFinalIntegratedBranch(new[] { Decision(SupervisorDecisionKinds.Merge, 2, MergeOutcome("Clean", "codespace/integration/x")) })
+            .ShouldBe("codespace/integration/x");
+
+    [Theory]
+    [InlineData("Conflicted", null)]   // the K branches couldn't auto-combine → no branch
+    [InlineData("Skipped", null)]      // nothing to integrate
+    [InlineData("Failed", null)]       // a git infrastructure error
+    [InlineData("Clean", "")]          // clean but an empty branch string → never surfaced
+    public void ReadFinalIntegratedBranch_ignores_a_merge_without_a_clean_branch(string status, string? branch) =>
+        SupervisorOutcome.ReadFinalIntegratedBranch(new[] { Decision(SupervisorDecisionKinds.Merge, 2, MergeOutcome(status, branch)) })
+            .ShouldBeNull();
+
+    [Fact]
+    public void ReadFinalIntegratedBranch_surfaces_a_verified_resolvers_own_branch()
+    {
+        var tape = new[]
+        {
+            Decision(SupervisorDecisionKinds.Spawn, 1, "{}"),
+            Decision(SupervisorDecisionKinds.Merge, 2, MergeOutcome("Conflicted", null)),
+            Decision(SupervisorDecisionKinds.Resolve, 3, ResolveOutcomeWithBranch("Succeeded", VerifiedSummary, "codespace/resolve/r")),
+        };
+
+        SupervisorOutcome.ReadFinalIntegratedBranch(tape).ShouldBe("codespace/resolve/r", "a VERIFIED resolver's own tested branch IS the reconciled merge");
+    }
+
+    [Fact]
+    public void ReadFinalIntegratedBranch_ignores_an_unverified_resolution() =>
+        SupervisorOutcome.ReadFinalIntegratedBranch(new[] { Decision(SupervisorDecisionKinds.Resolve, 3, ResolveOutcomeWithBranch("Succeeded", "tests still red", "codespace/resolve/r")) })
+            .ShouldBeNull("a resolution that didn't pass tests must NEVER surface a branch a downstream open_pr would ship");
+
+    [Fact]
+    public void ReadFinalIntegratedBranch_ignores_a_verified_resolution_that_pushed_no_branch() =>
+        SupervisorOutcome.ReadFinalIntegratedBranch(new[] { Decision(SupervisorDecisionKinds.Resolve, 3, ResolveOutcomeWithBranch("Succeeded", VerifiedSummary, null)) })
+            .ShouldBeNull();
+
+    [Fact]
+    public void ReadFinalIntegratedBranch_takes_the_latest_when_a_clean_merge_follows_a_resolution()
+    {
+        var tape = new[]
+        {
+            Decision(SupervisorDecisionKinds.Resolve, 3, ResolveOutcomeWithBranch("Succeeded", VerifiedSummary, "codespace/resolve/r")),
+            Decision(SupervisorDecisionKinds.Merge, 4, MergeOutcome("Clean", "codespace/integration/later")),
+        };
+
+        SupervisorOutcome.ReadFinalIntegratedBranch(tape).ShouldBe("codespace/integration/later", "the LATEST integration wins (a fresh wave merged after the resolution)");
+    }
+
+    [Fact]
+    public void ReadFinalIntegratedBranch_skips_a_reconflicted_merge_after_a_verified_resolution()
+    {
+        // Defensive: even if a merge AFTER a verified resolution re-conflicted (Part B should prevent this, but the
+        // reader must be robust regardless), the reverse walk skips the no-branch conflicted merge and surfaces the
+        // verified resolver branch — a verified resolution is never buried by a later failed integration.
+        var tape = new[]
+        {
+            Decision(SupervisorDecisionKinds.Resolve, 3, ResolveOutcomeWithBranch("Succeeded", VerifiedSummary, "codespace/resolve/r")),
+            Decision(SupervisorDecisionKinds.Merge, 4, MergeOutcome("Conflicted", null)),
+        };
+
+        SupervisorOutcome.ReadFinalIntegratedBranch(tape).ShouldBe("codespace/resolve/r");
+    }
+
+    [Fact]
+    public void ReadFinalIntegratedBranch_takes_the_latest_of_multiple_clean_merges()
+    {
+        var tape = new[]
+        {
+            Decision(SupervisorDecisionKinds.Merge, 2, MergeOutcome("Clean", "codespace/integration/wave1")),
+            Decision(SupervisorDecisionKinds.Merge, 4, MergeOutcome("Clean", "codespace/integration/wave2")),
+        };
+
+        SupervisorOutcome.ReadFinalIntegratedBranch(tape).ShouldBe("codespace/integration/wave2");
+    }
+
+    [Theory]
+    [InlineData("not json")]
+    [InlineData("{}")]
+    [InlineData("""{"integration":"oops"}""")]   // integration present but not an object
+    public void ReadFinalIntegratedBranch_tolerates_a_malformed_merge_outcome(string outcomeJson) =>
+        SupervisorOutcome.ReadFinalIntegratedBranch(new[] { Decision(SupervisorDecisionKinds.Merge, 2, outcomeJson) })
+            .ShouldBeNull();
+
+    [Fact]
+    public void ReadFinalIntegratedBranch_ignores_plan_spawn_and_stop_decisions()
+    {
+        var tape = new[]
+        {
+            Decision(SupervisorDecisionKinds.Plan, 1, "{}"),
+            Decision(SupervisorDecisionKinds.Spawn, 2, "{}"),
+            Decision(SupervisorDecisionKinds.Stop, 3, "{}"),
+        };
+
+        SupervisorOutcome.ReadFinalIntegratedBranch(tape).ShouldBeNull("only a clean merge or a verified resolve is a reviewable integrated branch");
+    }
+
+    // S5 review fold: a spawn/retry that NOTHING later merged/resolved is a barrier — the run's latest work is
+    // un-combined, so an earlier branch must NOT be surfaced past it (this is what keeps Part A consistent with Part B).
+    [Fact]
+    public void ReadFinalIntegratedBranch_returns_null_when_a_spawn_follows_a_verified_resolution_unmerged()
+    {
+        var tape = new[]
+        {
+            Decision(SupervisorDecisionKinds.Resolve, 3, ResolveOutcomeWithBranch("Succeeded", VerifiedSummary, "codespace/resolve/r")),
+            Decision(SupervisorDecisionKinds.Spawn, 4, "{}"),   // a fresh wave staged AFTER the resolution, never merged
+        };
+
+        SupervisorOutcome.ReadFinalIntegratedBranch(tape).ShouldBeNull("the resolver branch is STALE once a new wave is spawned — surfacing it would ship a PR missing that wave (matches Part B's disqualifier)");
+    }
+
+    [Fact]
+    public void ReadFinalIntegratedBranch_returns_null_when_a_spawn_follows_a_clean_merge_unmerged()
+    {
+        var tape = new[]
+        {
+            Decision(SupervisorDecisionKinds.Merge, 2, MergeOutcome("Clean", "codespace/integration/wave1")),
+            Decision(SupervisorDecisionKinds.Spawn, 3, "{}"),   // wave2 staged after wave1 integrated, never re-merged
+        };
+
+        SupervisorOutcome.ReadFinalIntegratedBranch(tape).ShouldBeNull("wave1's clean branch is stale once wave2 is spawned un-integrated");
+    }
+
+    // ── The SHARED verified-resolution-branch predicate (Part A + Part B call this one helper — Rule 7) ──
+
+    [Fact]
+    public void ResolvedBranch_returns_the_branch_only_for_a_verified_resolve_that_pushed()
+    {
+        SupervisorOutcome.ResolvedBranch(Decision(SupervisorDecisionKinds.Resolve, 1, ResolveOutcomeWithBranch("Succeeded", VerifiedSummary, "codespace/resolve/r")))
+            .ShouldBe("codespace/resolve/r");
+    }
+
+    [Theory]
+    [InlineData(SupervisorDecisionKinds.Spawn)]
+    [InlineData(SupervisorDecisionKinds.Retry)]
+    [InlineData(SupervisorDecisionKinds.Merge)]
+    public void ResolvedBranch_is_null_for_a_non_resolve_decision(string kind) =>
+        SupervisorOutcome.ResolvedBranch(Decision(kind, 1, ResolveOutcomeWithBranch("Succeeded", VerifiedSummary, "codespace/resolve/r"))).ShouldBeNull();
+
+    [Fact]
+    public void ResolvedBranch_is_null_for_an_unverified_resolve() =>
+        SupervisorOutcome.ResolvedBranch(Decision(SupervisorDecisionKinds.Resolve, 1, ResolveOutcomeWithBranch("Succeeded", "tests red", "codespace/resolve/r"))).ShouldBeNull();
+
+    [Fact]
+    public void ResolvedBranch_is_null_for_a_verified_resolve_that_pushed_no_branch() =>
+        SupervisorOutcome.ResolvedBranch(Decision(SupervisorDecisionKinds.Resolve, 1, ResolveOutcomeWithBranch("Succeeded", VerifiedSummary, null))).ShouldBeNull();
 
     private static SupervisorTurnContext Context(int turnNumber, params SupervisorPriorDecision[] prior) =>
         new() { Goal = "ship", TurnNumber = turnNumber, PriorDecisions = prior };

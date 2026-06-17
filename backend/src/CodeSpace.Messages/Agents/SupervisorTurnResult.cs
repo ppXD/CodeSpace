@@ -28,6 +28,14 @@ public sealed record SupervisorTurnResult
     /// <summary>The terminal reason on finish (e.g. the stop reason, or "budget exhausted"). Null while parking.</summary>
     public string? TerminalReason { get; init; }
 
+    /// <summary>
+    /// The run's final reviewable integrated branch on finish (resolver loop #379, S5) — the head a downstream
+    /// <c>git.open_pr</c> / <c>git.open_change_set</c> node targets. Folded from the durable ledger: the most recent
+    /// <c>merge</c> that integrated CLEAN, OR — when the conflict was resolved — the VERIFIED resolver's own tested
+    /// branch (latest wins). Null while parking + when no clean integration exists (analysis-only / unresolved conflict).
+    /// </summary>
+    public string? IntegratedBranch { get; init; }
+
     /// <summary>The folded context for the NEXT turn — carried as the self-advance park wait's payload. Null on finish.</summary>
     public SupervisorTurnContext? NextTurn { get; init; }
 
@@ -47,8 +55,8 @@ public sealed record SupervisorTurnResult
     /// <summary>True when this turn parked on a human answer (ask_human) — the node suspends on a single Action wait keyed to <see cref="HumanWaitToken"/>.</summary>
     public bool ParkedOnHuman => !IsFinished && HumanWaitToken != null;
 
-    public static SupervisorTurnResult Finished(string decisionKind, string? terminalReason) =>
-        new() { IsFinished = true, DecisionKind = decisionKind, TerminalReason = terminalReason };
+    public static SupervisorTurnResult Finished(string decisionKind, string? terminalReason, string? integratedBranch = null) =>
+        new() { IsFinished = true, DecisionKind = decisionKind, TerminalReason = terminalReason, IntegratedBranch = integratedBranch };
 
     /// <summary>A SYNCHRONOUS non-terminal decision (plan / merge) — the node self-advances on a SupervisorDecision wait carrying the next-turn context.</summary>
     public static SupervisorTurnResult SelfAdvance(string decisionKind, SupervisorTurnContext nextTurn) =>

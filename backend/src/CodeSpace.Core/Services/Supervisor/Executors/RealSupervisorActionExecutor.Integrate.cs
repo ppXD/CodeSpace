@@ -41,10 +41,48 @@ public sealed partial class RealSupervisorActionExecutor
         // failure degrades to a note, NEVER crashing the merge turn (which would strand the decision row Running).
         outcome["synthesis"] = await TrySynthesizeAsync(context.Goal, merged, profile, cancellationToken).ConfigureAwait(false);
 
-        // Integration (facet a) writes a branch — only with a resolvable repository.
+        // Integration (facet a) writes a branch — only with a resolvable repository. EXCEPT when the conflict was
+        // already RESOLVED: a VERIFIED resolver's own tested branch IS the reconciled merge, so re-running the
+        // integrator over the original conflicting branches would just re-conflict (resolver loop #379, S5). In that
+        // case surface the resolver branch as a Clean integration without touching git.
         if (profile?.RepositoryId is { } repoId)
-            outcome["integration"] = await IntegrateMergedAsync(repoId, context, merged, cancellationToken).ConfigureAwait(false);
+            outcome["integration"] = AcceptedResolutionBranch(context) is { } resolvedBranch
+                ? ResolutionIntegration(resolvedBranch)
+                : await IntegrateMergedAsync(repoId, context, merged, cancellationToken).ConfigureAwait(false);
     }
+
+    /// <summary>
+    /// The branch a VERIFIED resolver produced — but ONLY when the most recent agent-staging decision (spawn / retry /
+    /// resolve) was a verified <c>resolve</c> (resolver loop #379, S5). That means the conflict is reconciled into the
+    /// resolver's OWN tested branch and a <c>merge</c> must surface IT, not re-integrate. Null when the latest staging
+    /// was a normal spawn/retry (there's fresh agent work to combine → run the integrator) or the resolution wasn't
+    /// verified (the safety floor already withheld acceptance). Reads only durable folded state — pure + replay-safe.
+    /// </summary>
+    private static string? AcceptedResolutionBranch(SupervisorTurnContext context)
+    {
+        var lastStaging = context.PriorDecisions.LastOrDefault(d => SupervisorDecisionKinds.StagesAgents(d.DecisionKind));
+
+        // The most-recent agent-staging decision must ITSELF be the accepted resolution — a spawn/retry after it means
+        // fresh work to combine, so the integrator runs. The "verified resolve → its branch" rule is the SHARED
+        // SupervisorOutcome.ResolvedBranch (the same encoding the node-output reader uses, so the two never drift).
+        return lastStaging is null ? null : SupervisorOutcome.ResolvedBranch(lastStaging);
+    }
+
+    /// <summary>
+    /// The integration block for an ACCEPTED resolution (S5): the resolver's own tested branch surfaced as a Clean
+    /// integration WITHOUT re-running the integrator. <c>status</c> + <c>integratedBranch</c> are the load-bearing
+    /// fields (read by <see cref="SupervisorOutcome.ReadIntegration"/>); <c>via</c> + <c>reason</c> are DESCRIPTIVE
+    /// audit metadata in the persisted ledger only — no reader or gate branches on them (the acceptance decision is
+    /// keyed off the resolve verdict via <see cref="SupervisorOutcome.ResolvedBranch"/>, NEVER off <c>via</c>). No
+    /// <c>outcomes</c> array (no per-contribution apply happened — the resolver did the reconciliation).
+    /// </summary>
+    private static object ResolutionIntegration(string resolvedBranch) => new
+    {
+        status = "Clean",
+        integratedBranch = resolvedBranch,
+        via = "resolution",   // descriptive audit only (see doc) — no code branches on this; the gate is the resolve verdict
+        reason = "a verified resolver agent reconciled the conflicting branches into one tested branch",
+    };
 
     // ── Facet (b): the model synthesis reduce over the K real diffs ──────────────────
 
