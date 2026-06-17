@@ -68,8 +68,15 @@ public sealed record AgentRunResult
 /// <summary>One writable repository's outcome in a multi-repo workspace run (multi-repo PR3, Rule 18.1 noun): which repo (by alias), what it changed, the branch it produced, and the base it was rooted at.</summary>
 public sealed record RepositoryRunResult
 {
-    /// <summary>The repo's alias within the workspace (the join key back to the run's <c>WorkspaceSpec</c> for its repository id).</summary>
+    /// <summary>The repo's alias within the workspace (the human-facing handle the WORKSPACE.md + UI use).</summary>
     public required string Alias { get; init; }
+
+    /// <summary>
+    /// The repository this outcome belongs to — the STABLE identity a downstream Change-Set step (open a PR per repo,
+    /// integrate) needs, since <see cref="AgentRunResult"/> is persisted standalone (the alias→repo map lives only on
+    /// the run's authoring <c>WorkspaceSpec</c>). Null only when the run had no resolvable spec (a degraded path).
+    /// </summary>
+    public Guid? RepositoryId { get; init; }
 
     /// <summary>Repo-relative paths the agent changed in this repo (git ground truth).</summary>
     public IReadOnlyList<string> ChangedFiles { get; init; } = Array.Empty<string>();

@@ -43,6 +43,25 @@ public sealed class LocalGitWorkspaceProviderTests
         LocalGitWorkspaceProvider.BuildAuthenticatedUrl("https://git.local:8443/org/repo.git", "oauth2", "t")
             .ShouldBe("https://oauth2:t@git.local:8443/org/repo.git");
 
+    [Fact]
+    public void Redact_scrubs_both_the_raw_token_and_its_url_encoded_form()
+    {
+        // The push argv embeds Uri.EscapeDataString(token); a token with URL-special chars appears ENCODED in a
+        // failing push command, so redacting only the raw literal would leak the reversible encoded form.
+        const string token = "p@ss/w+rd=secret";
+        var leak = $"git push https://x-access-token:{Uri.EscapeDataString(token)}@host/r.git refused; raw {token} too";
+
+        var redacted = LocalGitWorkspaceProvider.Redact(leak, token);
+
+        redacted.ShouldNotContain(token, Case.Insensitive, "the raw token literal must be scrubbed");
+        redacted.ShouldNotContain(Uri.EscapeDataString(token), Case.Insensitive, "the percent-encoded token (as it appears in the push argv) must ALSO be scrubbed");
+        redacted.ShouldContain("***");
+    }
+
+    [Fact]
+    public void Redact_is_a_noop_without_a_token() =>
+        LocalGitWorkspaceProvider.Redact("nothing to hide here", null).ShouldBe("nothing to hide here");
+
     // ─── Real clone mechanics ────────────────────────────────────────────────
 
     [Fact]

@@ -202,7 +202,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
 
             var result = await RunHarnessAsync(agentRunId, harness, runner, spec, mcpToken, redactor, cancellationToken).ConfigureAwait(false);
 
-            result = await EnrichWithWorkspaceChangesAsync(agentRunId, result, workspace, cancellationToken).ConfigureAwait(false);
+            result = await EnrichWithWorkspaceChangesAsync(agentRunId, effectiveTask, result, workspace, cancellationToken).ConfigureAwait(false);
 
             result = await PushProducedBranchIfEnabledAsync(agentRunId, effectiveTask, result, workspace, claimedEpoch, cancellationToken).ConfigureAwait(false);
 
@@ -409,7 +409,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     /// agent's self-report). No-op when the run had no workspace. Best-effort: a capture failure is logged
     /// and the result kept as-is, never flipping an otherwise-successful run to Failed over a git hiccup.
     /// </summary>
-    private async Task<AgentRunResult> EnrichWithWorkspaceChangesAsync(Guid runId, AgentRunResult result, IWorkspaceHandle? workspace, CancellationToken cancellationToken)
+    private async Task<AgentRunResult> EnrichWithWorkspaceChangesAsync(Guid runId, AgentTask task, AgentRunResult result, IWorkspaceHandle? workspace, CancellationToken cancellationToken)
     {
         if (workspace is null) return result;
 
@@ -422,7 +422,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
             // Multi-repo: ALSO surface every writable repo's outcome as a Change Set. A single-repo workspace skips
             // this branch entirely, so its result is unchanged (RepositoryResults empty, ChangeSetId null).
             if (workspace.Repositories.Count > 1)
-                result = await CaptureRepositoryResultsAsync(runId, result, workspace, changes, cancellationToken).ConfigureAwait(false);
+                result = await CaptureRepositoryResultsAsync(runId, task, result, workspace, changes, cancellationToken).ConfigureAwait(false);
 
             return result;
         }
@@ -439,26 +439,57 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     /// <summary>
     /// Multi-repo: capture EVERY writable repo's diff into <see cref="AgentRunResult.RepositoryResults"/> + stamp the
     /// run's <see cref="AgentRunResult.ChangeSetId"/>. The primary's already-captured changes are reused (no second git
-    /// call), so the top-level fields and the primary's per-repo entry agree. The push step fills in each entry's
-    /// produced branch.
+    /// call), so the top-level fields and the primary's per-repo entry agree; each entry carries its <see cref="RepositoryRunResult.RepositoryId"/>
+    /// resolved from the run's authoring spec. The push step fills in each entry's produced branch.
+    ///
+    /// <para>Per-repo ISOLATED + best-effort: a SECONDARY repo's capture failure is logged and that repo is dropped from
+    /// the set — it must never abort the whole capture (which would discard the repos that captured fine and silently
+    /// degrade a multi-repo run to look single-repo). The primary's capture already succeeded (it's the top-level diff),
+    /// so the change set always carries at least the primary.</para>
     /// </summary>
-    private async Task<AgentRunResult> CaptureRepositoryResultsAsync(Guid runId, AgentRunResult result, IWorkspaceHandle workspace, WorkspaceChanges primaryChanges, CancellationToken cancellationToken)
+    private async Task<AgentRunResult> CaptureRepositoryResultsAsync(Guid runId, AgentTask task, AgentRunResult result, IWorkspaceHandle workspace, WorkspaceChanges primaryChanges, CancellationToken cancellationToken)
     {
+        var repoIds = task.Workspace?.Repositories.ToDictionary(r => r.Alias, r => r.RepositoryId);
         var perRepo = new List<RepositoryRunResult>();
 
         foreach (var repo in workspace.Repositories.Where(r => r.Access == WorkspaceAccess.Write))
         {
             cancellationToken.ThrowIfCancellationRequested();
 
-            var changes = repo.Alias == workspace.PrimaryAlias ? primaryChanges : await workspace.CaptureChangesAsync(repo.Alias, cancellationToken).ConfigureAwait(false);
+            var changes = await CaptureOneRepoOrNullAsync(runId, repo, workspace, primaryChanges, cancellationToken).ConfigureAwait(false);
 
-            perRepo.Add(new RepositoryRunResult { Alias = repo.Alias, ChangedFiles = changes.ChangedFiles, BaseSha = changes.BaseSha, Access = WorkspaceAccess.Write });
+            if (changes is null) continue;   // a secondary repo's capture failed (already logged) — drop it, keep the rest
+
+            perRepo.Add(new RepositoryRunResult
+            {
+                Alias = repo.Alias,
+                RepositoryId = repoIds is not null && repoIds.TryGetValue(repo.Alias, out var id) ? id : null,
+                ChangedFiles = changes.ChangedFiles,
+                BaseSha = changes.BaseSha,
+                Access = WorkspaceAccess.Write,
+            });
         }
 
         return result with { RepositoryResults = perRepo, ChangeSetId = ChangeSetIdFor(runId) };
     }
 
-    /// <summary>The stable id for the SET of branches a multi-repo run produces — run-id-derived so a re-run never forks a second change set. Internal + static so it's unit-pinned.</summary>
+    /// <summary>Capture one writable repo's changes (the primary's are already in hand, so reuse them). Returns null when a SECONDARY repo's capture fails — logged, isolated, never aborting the whole change set. Cancellation still propagates.</summary>
+    private async Task<WorkspaceChanges?> CaptureOneRepoOrNullAsync(Guid runId, WorkspaceRepositoryHandle repo, IWorkspaceHandle workspace, WorkspaceChanges primaryChanges, CancellationToken cancellationToken)
+    {
+        if (repo.Alias == workspace.PrimaryAlias) return primaryChanges;
+
+        try
+        {
+            return await workspace.CaptureChangesAsync(repo.Alias, cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogWarning(ex, "Agent run {RunId}: failed to capture changes for repo '{Alias}'; dropping it from the change set, keeping the others", runId, repo.Alias);
+            return null;
+        }
+    }
+
+    /// <summary>The stable id for the SET of branches a multi-repo run produces — run-id-derived, so a re-push of the SAME run reuses it (idempotent) and its non-null-ness distinguishes a multi-repo run from a single-repo one. A workflow RETRY of agent.code is a new run id → a new change set (like the produced branch names). Internal + static so it's unit-pinned.</summary>
     internal static string ChangeSetIdFor(Guid runId) => $"cs-{runId:N}";
 
     /// <summary>
@@ -535,9 +566,13 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     /// Multi-repo: push EACH writable repo (from <see cref="AgentRunResult.RepositoryResults"/>) to its own origin under
     /// the SAME run-id-derived branch name (distinct remotes, so a shared name is coherent), folding each pushed branch
     /// back into its per-repo entry. The top-level <see cref="AgentRunResult.ProducedBranch"/> mirrors the PRIMARY repo's
-    /// branch so an existing single-branch consumer keeps working. Each push self-gates (returns null for an unchanged
-    /// repo). Runs inside the caller's best-effort try/catch — one repo's push failure aborts the rest (the run stays
-    /// Succeeded with whatever branches were folded so far).
+    /// branch so an existing single-branch consumer keeps working. Each push self-gates (returns null for an unchanged repo).
+    ///
+    /// <para>Per-repo ISOLATED + best-effort: each repo's push is wrapped independently, so ONE repo's failure (a 403, a
+    /// network blip) never discards the branches that already pushed — those are folded + persisted, and the failed repo
+    /// gets a redacted Warning on the timeline naming it. This is why it does NOT propagate to the caller's catch: that
+    /// catch returns the UNMODIFIED result, which would orphan already-pushed remote branches (live on the remote but
+    /// recorded as no-branch). Cancellation still propagates (worker torn down).</para>
     /// </summary>
     private async Task<AgentRunResult> PushRepositoryResultsAsync(Guid runId, AgentRunResult result, IWorkspaceHandle workspace, IWorkspacePushHandle pushHandle, CancellationToken cancellationToken)
     {
@@ -549,7 +584,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         {
             cancellationToken.ThrowIfCancellationRequested();
 
-            var pushed = await pushHandle.PushChangesAsync(repo.Alias, branchName, cancellationToken).ConfigureAwait(false);
+            var pushed = await PushOneRepoOrNullAsync(runId, repo.Alias, branchName, pushHandle, cancellationToken).ConfigureAwait(false);
 
             updated.Add(repo with { ProducedBranch = pushed });
 
@@ -557,6 +592,21 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         }
 
         return result with { RepositoryResults = updated, ProducedBranch = primaryBranch };
+    }
+
+    /// <summary>Push one repo by alias, ISOLATING its failure: a <see cref="WorkspaceException"/> is logged + surfaced as a per-repo Warning on the timeline (token already redacted) and returns null, so a sibling repo's already-pushed branch is never discarded. Cancellation propagates.</summary>
+    private async Task<string?> PushOneRepoOrNullAsync(Guid runId, string alias, string branchName, IWorkspacePushHandle pushHandle, CancellationToken cancellationToken)
+    {
+        try
+        {
+            return await pushHandle.PushChangesAsync(alias, branchName, cancellationToken).ConfigureAwait(false);
+        }
+        catch (WorkspaceException ex)
+        {
+            _logger.LogWarning(ex, "Agent run {RunId}: failed to push repo '{Alias}'; keeping the other repos' branches in the change set", runId, alias);
+            await AppendPushFailureWarningAsync(runId, $"[{alias}] {ex.Message}", cancellationToken).ConfigureAwait(false);
+            return null;
+        }
     }
 
     /// <summary>Append a Warning event so the operator sees on the timeline WHY no branch appeared — not only in an ILogger line. Best-effort: a failure to record the warning never masks the run's success.</summary>

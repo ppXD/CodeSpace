@@ -514,36 +514,80 @@ public class AgentRunExecutorTests
     }
 
     [Fact]
-    public async Task A_multi_repo_run_surfaces_per_repo_results_and_a_change_set_id()
+    public async Task A_multi_repo_run_surfaces_per_repo_results_branches_and_a_change_set_id()
     {
-        // Multi-repo PR3 end-to-end: a workspace with TWO writable repos yields a RepositoryResults entry per repo
-        // + a run-id-derived ChangeSetId in the persisted result_jsonb (proving the new noun round-trips). The
-        // top-level fields keep mirroring the PRIMARY repo so an existing single-branch consumer is unaffected.
+        // Multi-repo PR3 end-to-end through real execution + persistence: a workspace with two WRITABLE repos
+        // (web primary, api) + one READ-ONLY context repo (docs) yields a RepositoryResults entry per WRITABLE repo
+        // — each carrying its repo identity AND its pushed branch — plus a run-id-derived ChangeSetId, all round-tripped
+        // through result_jsonb. The read-only repo is excluded; the top-level fields keep mirroring the PRIMARY repo.
         if (OperatingSystem.IsWindows()) return;
 
         var teamId = await SeedTeamAsync();
-        var runId = await CreateScriptedRunAsync(teamId);
+        var webId = Guid.NewGuid();
+        var apiId = Guid.NewGuid();
+        var docsId = Guid.NewGuid();
+        var runId = await CreateMultiRepoRunAsync(teamId, push: true,
+            ("web", webId, WorkspaceAccess.Write, true),
+            ("api", apiId, WorkspaceAccess.Write, false),
+            ("docs", docsId, WorkspaceAccess.Read, false));
 
-        await ExecuteWithRecordingWorkspaceAsync(runId, new ScriptedHarness("printf 'done\\n'"), new MultiRepoRecordingWorkspaceProvider(), CancellationToken.None);
+        var provider = new MultiRepoRecordingWorkspaceProvider(repos: new[]
+        {
+            ("web", WorkspaceAccess.Write, true),
+            ("api", WorkspaceAccess.Write, false),
+            ("docs", WorkspaceAccess.Read, false),
+        });
+
+        await ExecuteWithRecordingWorkspaceAsync(runId, new ScriptedHarness("printf 'done\\n'"), provider, CancellationToken.None);
 
         using var scope = _fixture.BeginScope();
         var run = await scope.Resolve<IAgentRunService>().GetAsync(runId, CancellationToken.None);
         run.Status.ShouldBe(AgentRunStatus.Succeeded);
 
         var result = JsonSerializer.Deserialize<AgentRunResult>(run.ResultJson!, AgentJson.Options)!;
+        var branch = AgentRunExecutor.BuildBranchName(runId);
 
         result.ChangeSetId.ShouldBe(AgentRunExecutor.ChangeSetIdFor(runId), "a multi-repo run stamps a run-id-derived change-set id");
-        result.RepositoryResults.Count.ShouldBe(2, "one entry per writable repo");
+        result.RepositoryResults.Select(r => r.Alias).ShouldBe(new[] { "web", "api" }, ignoreOrder: true,
+            "only WRITABLE repos form the change set — the read-only 'docs' context repo is excluded");
 
         var web = result.RepositoryResults.Single(r => r.Alias == "web");
         var api = result.RepositoryResults.Single(r => r.Alias == "api");
+        web.RepositoryId.ShouldBe(webId, "each per-repo result carries its repo identity (the downstream PR-open key)");
+        api.RepositoryId.ShouldBe(apiId);
         web.ChangedFiles.ShouldBe(new[] { "web.txt" });
-        web.BaseSha.ShouldBe("base-web");
-        api.ChangedFiles.ShouldBe(new[] { "api.txt" });
-        api.BaseSha.ShouldBe("base-api");
+        web.ProducedBranch.ShouldBe(branch, "each writable repo's pushed branch round-trips through result_jsonb");
+        api.ProducedBranch.ShouldBe(branch);
 
         result.ChangedFiles.ShouldBe(new[] { "web.txt" }, "the top-level fields mirror the PRIMARY repo");
-        result.BaseSha.ShouldBe("base-web");
+        result.ProducedBranch.ShouldBe(branch, "the top-level branch mirrors the primary repo's branch");
+    }
+
+    [Fact]
+    public async Task A_secondary_repo_capture_failure_drops_only_that_repo_and_keeps_the_change_set()
+    {
+        // The per-repo capture-isolation fix: a SECONDARY repo's capture hiccup drops only that repo — it must never
+        // abort the whole change set (which would silently degrade a multi-repo run to look single-repo) nor fail the run.
+        if (OperatingSystem.IsWindows()) return;
+
+        var teamId = await SeedTeamAsync();
+        var runId = await CreateMultiRepoRunAsync(teamId, push: false,
+            ("web", Guid.NewGuid(), WorkspaceAccess.Write, true),
+            ("api", Guid.NewGuid(), WorkspaceAccess.Write, false));
+
+        var provider = new MultiRepoRecordingWorkspaceProvider(
+            repos: new[] { ("web", WorkspaceAccess.Write, true), ("api", WorkspaceAccess.Write, false) },
+            throwCaptureFor: new HashSet<string> { "api" });
+
+        await ExecuteWithRecordingWorkspaceAsync(runId, new ScriptedHarness("printf 'done\\n'"), provider, CancellationToken.None);
+
+        using var scope = _fixture.BeginScope();
+        var run = await scope.Resolve<IAgentRunService>().GetAsync(runId, CancellationToken.None);
+        run.Status.ShouldBe(AgentRunStatus.Succeeded, "a secondary repo's capture hiccup never fails the run");
+
+        var result = JsonSerializer.Deserialize<AgentRunResult>(run.ResultJson!, AgentJson.Options)!;
+        result.RepositoryResults.Select(r => r.Alias).ShouldBe(new[] { "web" }, "the failed 'api' repo is dropped; the captured 'web' repo is kept");
+        result.ChangeSetId.ShouldBe(AgentRunExecutor.ChangeSetIdFor(runId), "the change set is still stamped — the run is NOT degraded to look single-repo");
     }
 
     [Fact]
@@ -956,35 +1000,56 @@ public class AgentRunExecutorTests
         }
     }
 
-    /// <summary>A multi-repo workspace (two writable repos: "web" primary + "api") whose per-alias capture returns distinct, deterministic changes — drives the executor's multi-repo Enrich path without needing real git.</summary>
+    /// <summary>A configurable multi-repo workspace whose per-alias capture returns distinct, deterministic changes and whose push (it IS an <see cref="IWorkspacePushHandle"/>) echoes the branch — drives the executor's multi-repo Enrich + Push paths without real git. A capture can be made to throw to exercise per-repo isolation.</summary>
     private sealed class MultiRepoRecordingWorkspaceProvider : IWorkspaceProvider
     {
+        private readonly IReadOnlyList<(string alias, WorkspaceAccess access, bool primary)> _repos;
+        private readonly HashSet<string> _throwCaptureFor;
+
+        public MultiRepoRecordingWorkspaceProvider(IReadOnlyList<(string alias, WorkspaceAccess access, bool primary)>? repos = null, HashSet<string>? throwCaptureFor = null)
+        {
+            _repos = repos ?? new[] { ("web", WorkspaceAccess.Write, true), ("api", WorkspaceAccess.Write, false) };
+            _throwCaptureFor = throwCaptureFor ?? new HashSet<string>();
+        }
+
         public string Kind => LocalProcessRunner.LocalKind;
 
         public Task<IWorkspaceHandle> PrepareAsync(WorkspaceProvisionRequest request, CancellationToken cancellationToken)
         {
             var root = Path.Combine(Path.GetTempPath(), "cs-multirepo-test-" + Guid.NewGuid().ToString("N"));
             Directory.CreateDirectory(root);
-            return Task.FromResult<IWorkspaceHandle>(new Handle(root));
+            return Task.FromResult<IWorkspaceHandle>(new Handle(root, _repos, _throwCaptureFor));
         }
 
-        private sealed class Handle : IWorkspaceHandle
+        private sealed class Handle : IWorkspaceHandle, IWorkspacePushHandle
         {
             private readonly string _root;
-            public Handle(string root) { _root = root; Directory = root; }
-            public string Directory { get; }
-            public string PrimaryAlias => "web";
+            private readonly IReadOnlyList<(string alias, WorkspaceAccess access, bool primary)> _repos;
+            private readonly HashSet<string> _throwCaptureFor;
 
-            public IReadOnlyList<WorkspaceRepositoryHandle> Repositories => new[]
+            public Handle(string root, IReadOnlyList<(string alias, WorkspaceAccess access, bool primary)> repos, HashSet<string> throwCaptureFor)
             {
-                new WorkspaceRepositoryHandle { Alias = "web", Directory = Path.Combine(_root, "web"), Access = WorkspaceAccess.Write },
-                new WorkspaceRepositoryHandle { Alias = "api", Directory = Path.Combine(_root, "api"), Access = WorkspaceAccess.Write },
-            };
+                _root = root; Directory = root; _repos = repos; _throwCaptureFor = throwCaptureFor;
+            }
 
-            public Task<WorkspaceChanges> CaptureChangesAsync(CancellationToken cancellationToken) => CaptureChangesAsync("web", cancellationToken);
+            public string Directory { get; }
+            public string PrimaryAlias => _repos.First(r => r.primary).alias;
 
-            public Task<WorkspaceChanges> CaptureChangesAsync(string alias, CancellationToken cancellationToken) =>
-                Task.FromResult(new WorkspaceChanges { BaseSha = $"base-{alias}", Patch = $"diff for {alias}", ChangedFiles = new[] { $"{alias}.txt" } });
+            public IReadOnlyList<WorkspaceRepositoryHandle> Repositories =>
+                _repos.Select(r => new WorkspaceRepositoryHandle { Alias = r.alias, Directory = Path.Combine(_root, r.alias), Access = r.access }).ToList();
+
+            public Task<WorkspaceChanges> CaptureChangesAsync(CancellationToken cancellationToken) => CaptureChangesAsync(PrimaryAlias, cancellationToken);
+
+            public Task<WorkspaceChanges> CaptureChangesAsync(string alias, CancellationToken cancellationToken)
+            {
+                if (_throwCaptureFor.Contains(alias)) throw new WorkspaceException($"simulated capture failure for '{alias}'");
+
+                return Task.FromResult(new WorkspaceChanges { BaseSha = $"base-{alias}", Patch = $"diff for {alias}", ChangedFiles = new[] { $"{alias}.txt" } });
+            }
+
+            // Each writable repo "pushes" by echoing the branch (records nothing — the executor folds it into the result).
+            public Task<string?> PushChangesAsync(string alias, string branchName, CancellationToken cancellationToken) => Task.FromResult<string?>(branchName);
+            public Task<string?> PushChangesAsync(string branchName, CancellationToken cancellationToken) => Task.FromResult<string?>(branchName);
 
             public ValueTask DisposeAsync()
             {
@@ -1044,6 +1109,23 @@ public class AgentRunExecutorTests
         using var scope = _fixture.BeginScope();
         var run = await scope.Resolve<IAgentRunService>().CreateAsync(
             new AgentTask { Goal = "scripted", Harness = "scripted", Model = "test-model", TimeoutSeconds = timeoutSeconds },
+            teamId, null, null, iterationKey: "", cancellationToken: CancellationToken.None);
+        return run.Id;
+    }
+
+    /// <summary>Create a run whose task carries a multi-repo <see cref="WorkspaceSpec"/> (so the executor can resolve each per-repo result's RepositoryId from the authoring spec), optionally opting into branch push.</summary>
+    private async Task<Guid> CreateMultiRepoRunAsync(Guid teamId, bool push, params (string alias, Guid repoId, WorkspaceAccess access, bool primary)[] repos)
+    {
+        using var scope = _fixture.BeginScope();
+
+        var spec = new WorkspaceSpec
+        {
+            PrimaryAlias = repos.First(r => r.primary).alias,
+            Repositories = repos.Select(r => new WorkspaceRepositorySpec { Alias = r.alias, RepositoryId = r.repoId, Access = r.access, IsPrimary = r.primary }).ToList(),
+        };
+
+        var run = await scope.Resolve<IAgentRunService>().CreateAsync(
+            new AgentTask { Goal = "scripted", Harness = "scripted", Model = "test-model", TimeoutSeconds = 1800, Workspace = spec, PushProducedBranch = push },
             teamId, null, null, iterationKey: "", cancellationToken: CancellationToken.None);
         return run.Id;
     }

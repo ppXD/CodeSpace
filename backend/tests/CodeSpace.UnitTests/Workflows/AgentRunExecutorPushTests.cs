@@ -477,6 +477,29 @@ public sealed class AgentRunExecutorPushTests
             result.RepositoryResults.Single(r => r.Alias == "api").ProducedBranch.ShouldBe(AgentRunExecutor.BuildBranchName(runId));
         });
 
+    [Fact]
+    public async Task A_multi_repo_per_repo_push_failure_is_isolated_keeping_the_others() =>
+        await WithFlagAsync("1", async () =>
+        {
+            // The core push-isolation fix: 'web' pushes successfully, then 'api' throws. 'api''s failure must NOT
+            // discard 'web''s already-pushed branch (the orphaned-litter bug); 'api' gets a per-repo warning + null
+            // branch; the run stays Succeeded.
+            var (runId, executor, runs) = NewExecutor(epoch: ClaimedEpoch);
+            var handle = new MultiRepoRecordingPushHandle { ThrowForAliases = { "api" } };
+
+            var result = await executor.PushProducedBranchIfEnabledAsync(runId, DefaultTask, MultiRepoSucceeded(runId), handle, ClaimedEpoch, CancellationToken.None);
+
+            var expected = AgentRunExecutor.BuildBranchName(runId);
+            result.Status.ShouldBe(AgentRunStatus.Succeeded, "one repo's push failure never fails the run");
+            result.RepositoryResults.Single(r => r.Alias == "web").ProducedBranch.ShouldBe(expected, "the repo that pushed BEFORE the failure keeps its branch — never discarded");
+            result.RepositoryResults.Single(r => r.Alias == "api").ProducedBranch.ShouldBeNull("the failed repo has no branch");
+            result.ProducedBranch.ShouldBe(expected, "the top-level still mirrors the primary's branch");
+
+            runs.AppendedEvents.Count.ShouldBe(1, "the operator gets a per-repo warning naming the failed repo");
+            runs.AppendedEvents[0].Kind.ShouldBe(AgentEventKind.Warning);
+            runs.AppendedEvents[0].Text.ShouldContain("[api]", customMessage: "the warning names the failed repo");
+        });
+
     // ─── Best-effort failure handling ────────────────────────────────────────
 
     [Fact]
@@ -595,6 +618,7 @@ public sealed class AgentRunExecutorPushTests
     {
         public Dictionary<string, string?> PushedByAlias { get; } = new();
         public HashSet<string> NullForAliases { get; } = new();
+        public HashSet<string> ThrowForAliases { get; } = new();
 
         public string Directory => "/tmp/fake-multi";
         public string PrimaryAlias => "web";
@@ -607,6 +631,8 @@ public sealed class AgentRunExecutorPushTests
 
         public Task<string?> PushChangesAsync(string alias, string branchName, CancellationToken cancellationToken)
         {
+            if (ThrowForAliases.Contains(alias)) throw new WorkspaceException($"git push failed for '{alias}': *** rejected");
+
             var pushed = NullForAliases.Contains(alias) ? null : branchName;
             PushedByAlias[alias] = pushed;
             return Task.FromResult(pushed);

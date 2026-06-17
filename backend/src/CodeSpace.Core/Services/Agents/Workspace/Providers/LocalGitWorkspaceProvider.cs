@@ -308,9 +308,22 @@ public sealed class LocalGitWorkspaceProvider : IWorkspaceProvider, IWorkspaceJa
     private static string Summarize(string stderr) =>
         string.IsNullOrWhiteSpace(stderr) ? "(no stderr)" : stderr.Trim().Replace("\n", " ");
 
-    /// <summary>Strip any echoed token from surfaced output so it never reaches a log / exception message. Internal so the <c>LocalGitBranchIntegrator</c> reuses the SAME redaction over its own git output (co-located secret hygiene).</summary>
-    internal static string Redact(string text, string? token) =>
-        string.IsNullOrEmpty(token) ? text : text.Replace(token, "***");
+    /// <summary>
+    /// Strip any echoed token from surfaced output so it never reaches a log / exception message. Redacts BOTH the raw
+    /// token AND its percent-encoded form, because <see cref="BuildAuthenticatedUrl"/> embeds <c>Uri.EscapeDataString(token)</c>
+    /// in the push argv — a token with URL-special characters (@ / + = %) appears ENCODED in a failing push command, so
+    /// redacting only the raw literal would leak the reversible encoded form. Internal so the <c>LocalGitBranchIntegrator</c>
+    /// reuses the SAME redaction over its own git output (co-located secret hygiene).
+    /// </summary>
+    internal static string Redact(string text, string? token)
+    {
+        if (string.IsNullOrEmpty(token)) return text;
+
+        var redacted = text.Replace(token, "***");
+        var encoded = Uri.EscapeDataString(token);
+
+        return encoded == token ? redacted : redacted.Replace(encoded, "***");
+    }
 
     private sealed class LocalWorkspaceHandle : IWorkspaceHandle, IWorkspacePushHandle
     {
