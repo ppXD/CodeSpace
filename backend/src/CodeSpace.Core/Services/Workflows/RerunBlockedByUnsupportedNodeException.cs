@@ -6,11 +6,13 @@ namespace CodeSpace.Core.Services.Workflows;
 /// would re-stage an agent run / child / decision) or a CONTAINER (Map/Loop/Try, which would re-run its whole
 /// body atomically). Fail-closed.
 ///
-/// <para>A SIDE-EFFECTING node (git write / chat post / http) in the closure is NOT refused — the engine
-/// approval-gates it at runtime (D7-3): it suspends on an Approval wait so the operator confirms the re-fire
-/// (or rejects to skip it). A side-effecting node that is UPSTREAM (kept + reused, never re-executed) is also
-/// fine. The global filter maps THIS exception to 422 with the offending node id(s) so the operator knows
-/// exactly which node blocks the rerun.</para>
+/// <para>A purely SIDE-EFFECTING node (a Regular node like a git write / http POST / git issue op — IsSideEffecting
+/// but NOT CanSuspend) in the closure is NOT refused — the engine approval-gates it at runtime (D7-3): it suspends
+/// on an Approval wait so the operator confirms the re-fire (or rejects to skip it). A node that is BOTH
+/// side-effecting AND suspendable (e.g. <c>chat.post_message</c> with waitForResponse) is refused HERE via the
+/// CanSuspend arm — re-staging its wait isn't supported yet, and fail-closed wins over the runtime gate. A node
+/// UPSTREAM (kept + reused, never re-executed) is always fine. The global filter maps THIS exception to 422 with
+/// the offending node id(s) so the operator knows exactly which node blocks the rerun.</para>
 /// </summary>
 public sealed class RerunBlockedByUnsupportedNodeException : Exception
 {

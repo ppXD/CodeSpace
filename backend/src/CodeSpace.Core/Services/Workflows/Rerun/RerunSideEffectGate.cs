@@ -12,8 +12,10 @@ namespace CodeSpace.Core.Services.Workflows.Rerun;
 /// gate is conditioned on the run's source being <c>rerun</c>.
 ///
 /// <para>Kept as a registry-free / engine-free static so the truth table is unit-testable; the engine calls it
-/// inside the per-node execution path. Suspendable (<c>CanSuspend</c>) / container nodes never reach this gate —
-/// the rerun staging refuses them up front (<see cref="RerunBlockedByUnsupportedNodeException"/>), and reused
+/// inside the per-node execution path. This gate therefore governs only PURELY side-effecting nodes (IsSideEffecting
+/// but NOT CanSuspend — git writes / http POST / git issue ops). A node that is BOTH side-effecting AND suspendable
+/// (e.g. <c>chat.post_message</c> with waitForResponse), a CanSuspend node, or a container never reaches this gate —
+/// the rerun staging refuses them up front (<see cref="RerunBlockedByUnsupportedNodeException"/>) — and reused
 /// upstream cells are pre-seeded + settled so they never execute.</para>
 /// </summary>
 public static class RerunSideEffectGate

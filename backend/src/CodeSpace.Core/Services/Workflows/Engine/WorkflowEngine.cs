@@ -2623,6 +2623,9 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
     ///         with no other live input is skipped, mirroring an untaken branch).</item>
     /// </list>
     /// Returns null when no gate applies. Reused upstream cells never reach here — they're pre-seeded + settled.
+    /// The gate guarantees no SILENT re-fire and exactly-once on the happy path; a crash AFTER an approved fire
+    /// but BEFORE node.completed commits is the engine-wide at-least-once boundary for ANY side-effecting node
+    /// (the gate is about human confirmation, not crash-atomicity — unchanged from a normal run).
     /// </summary>
     private async Task<NodeRunOutcome?> ApplyRerunSideEffectGateAsync(NodeExecution exec, CancellationToken cancellationToken)
     {

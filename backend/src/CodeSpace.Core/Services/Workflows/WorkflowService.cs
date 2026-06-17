@@ -405,9 +405,11 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
 
     /// <summary>
     /// FAIL-CLOSED rerun-capability gate: a re-run node whose re-execution isn't supported yet is refused —
-    /// a SUSPENDABLE node (<c>CanSuspend</c> — agent.code / subworkflow / supervisor, which would re-stage an
-    /// agent run / child / decision) or a CONTAINER (a Map/Loop/Try, which would re-run its whole body). A
-    /// SIDE-EFFECTING node is NOT refused here: the engine approval-gates it at runtime (D7-3). A node UPSTREAM
+    /// a SUSPENDABLE node (<c>CanSuspend</c> — agent.code / subworkflow / supervisor / chat.post_message with
+    /// waitForResponse, which would re-stage an agent run / child / decision / interactive wait) or a CONTAINER
+    /// (a Map/Loop/Try, which would re-run its whole body). A purely SIDE-EFFECTING node (IsSideEffecting but not
+    /// CanSuspend) is NOT refused here: the engine approval-gates it at runtime (D7-3); a node that is BOTH
+    /// side-effecting and suspendable is refused via the CanSuspend arm (fail-closed wins). A node UPSTREAM
     /// (kept + reused, never re-executed) is always fine; only the re-run closure is scanned.
     /// </summary>
     private void EnsureNoUnsupportedNodeInClosure(WorkflowDefinition definition, RerunPlan plan)

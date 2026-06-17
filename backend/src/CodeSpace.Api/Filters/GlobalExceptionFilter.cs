@@ -169,9 +169,10 @@ public sealed class GlobalExceptionFilter : IExceptionFilter
 
             case RerunBlockedByUnsupportedNodeException blocked:
                 // 422 — valid request, blocked by a domain rule: the re-run closure contains a node whose rerun
-                // isn't supported yet (a suspendable agent/subworkflow/supervisor node, or a Map/Loop/Try
-                // container). Side-effecting nodes are NOT blocked here — the engine approval-gates them at
-                // runtime. The message names the offending node(s) so the operator knows where to rerun-from.
+                // isn't supported yet (a suspendable agent/subworkflow/supervisor/interactive node, or a
+                // Map/Loop/Try container). A PURELY side-effecting node is NOT blocked here — the engine
+                // approval-gates it at runtime; a both-side-effecting-and-suspendable node is blocked via the
+                // CanSuspend arm. The message names the offending node(s) so the operator knows where to rerun-from.
                 _logger.LogInformation("Rerun blocked by unsupported node at {Path}: nodes={Nodes}", path, string.Join(", ", blocked.BlockedNodeIds));
                 context.Result = BuildProblemResult(StatusCodes.Status422UnprocessableEntity, "rerun_blocked_unsupported_node", blocked.Message);
                 break;
