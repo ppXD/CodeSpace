@@ -46,8 +46,11 @@ public sealed record AgentTask
     /// <summary>Sandbox runner to execute on — e.g. "local", "docker", "k8s". Null → the executor's default. The knob for choosing / overriding the execution backend per run.</summary>
     public string? RunnerKind { get; init; }
 
-    /// <summary>Bound repository the agent works in — the executor clones it into the workspace before running the harness. Null → no workspace (analysis-only / no-repo run). One workspace source among future others (raw URL, upstream-produced); all resolve to a <c>WorkspaceRequest</c>.</summary>
+    /// <summary>Bound repository the agent works in — the executor clones it into the workspace before running the harness. Null → no workspace (analysis-only / no-repo run). One workspace source among future others (raw URL, upstream-produced); all resolve to a <c>WorkspaceRequest</c>. The legacy single-repo field — superseded by <see cref="Workspace"/>, kept for back-compat (a null <see cref="Workspace"/> derives a single-repo workspace from this).</summary>
     public Guid? RepositoryId { get; init; }
+
+    /// <summary>The authored multi-repo workspace (multi-repo PR1) — WHICH repos the agent works across + each repo's access + the cwd mode. Null (the default) derives a single-repo workspace from <see cref="RepositoryId"/>, so an existing run is byte-identical. When set, it is the canonical workspace intent and <see cref="RepositoryId"/> is ignored.</summary>
+    public WorkspaceSpec? Workspace { get; init; }
 
     /// <summary>Isolated working directory the agent runs in (the executor prepares it from <see cref="RepositoryId"/>). Null → the runner's default.</summary>
     public string? WorkspaceDirectory { get; init; }

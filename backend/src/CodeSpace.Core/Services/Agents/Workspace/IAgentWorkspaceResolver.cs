@@ -15,13 +15,14 @@ namespace CodeSpace.Core.Services.Agents.Workspace;
 /// </summary>
 public interface IAgentWorkspaceResolver
 {
-    /// <summary>Resolve the workspace for this run, or <c>null</c> when none is needed. Throws <see cref="WorkspaceException"/> when a workspace is required but can't be resolved (repo missing, no clone URL).</summary>
+    /// <summary>Resolve the workspace for this run, or <c>null</c> when none is needed. Throws <see cref="WorkspaceException"/> when a workspace is required but can't be resolved (repo missing, no clone URL), when the authored <c>WorkspaceSpec</c> has MORE THAN ONE repository (not yet executable — a later slice), or when it has none.</summary>
     Task<WorkspaceRequest?> ResolveAsync(AgentTask task, Guid teamId, CancellationToken cancellationToken);
 
     /// <summary>
     /// Resolve a workspace directly from a repository id (team-scoped) — the seam an integration step / a node holding
     /// only a <c>RepositoryId</c> (not a whole <see cref="AgentTask"/>) uses to obtain the clone URL + push token.
-    /// Throws <see cref="WorkspaceException"/> when the repository can't be resolved (missing, no clone URL).
+    /// <paramref name="ref"/> overrides the checked-out ref (null → the repository's default branch). Throws
+    /// <see cref="WorkspaceException"/> when the repository can't be resolved (missing, no clone URL).
     /// </summary>
-    Task<WorkspaceRequest?> ResolveByRepositoryIdAsync(Guid repositoryId, Guid teamId, CancellationToken cancellationToken);
+    Task<WorkspaceRequest?> ResolveByRepositoryIdAsync(Guid repositoryId, Guid teamId, CancellationToken cancellationToken, string? @ref = null);
 }

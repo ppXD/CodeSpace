@@ -10,12 +10,18 @@ using Microsoft.EntityFrameworkCore;
 namespace CodeSpace.Core.Services.Agents.Workspace;
 
 /// <summary>
-/// Resolves the agent workspace from the task's bound <c>RepositoryId</c> — the first (and common)
-/// workspace source. Loads the repository (team-scoped) with its provider instance + credential, then
-/// produces a <see cref="WorkspaceRequest"/>: the HTTPS clone URL, the default branch, and a short-lived
-/// access token resolved through the same <see cref="IProviderAuthResolver"/> the providers use (so OAuth
-/// refresh + every auth type are handled in one place). A run with no <c>RepositoryId</c> needs no
-/// workspace and resolves to <c>null</c>.
+/// Resolves the agent workspace from the task's <see cref="WorkspaceSpec"/> (multi-repo PR1) — the canonical
+/// workspace source, with the legacy bound <c>RepositoryId</c> as a back-compat shorthand a null spec derives
+/// from. Loads each repository (team-scoped) with its provider instance + credential, then produces a
+/// <see cref="WorkspaceRequest"/>: the HTTPS clone URL, the ref (the spec's per-repo ref, else the repo's
+/// default branch), and a short-lived access token resolved through the same <see cref="IProviderAuthResolver"/>
+/// the providers use (so OAuth refresh + every auth type are handled in one place). A run with no workspace
+/// (no spec and no <c>RepositoryId</c>) resolves to <c>null</c>.
+///
+/// <para>Multi-repo PR1 scope: the data model + canonicalization land here; a workspace with MORE THAN ONE repo
+/// is not yet executable (the multi-dir handle + clone arrives a slice later) and is REFUSED with a clear error,
+/// so a single-repo run is byte-identical and a premature multi-repo authoring fails loud rather than silently
+/// dropping repos.</para>
 /// </summary>
 public sealed class RepositoryWorkspaceResolver : IAgentWorkspaceResolver, IScopedDependency
 {
@@ -28,12 +34,29 @@ public sealed class RepositoryWorkspaceResolver : IAgentWorkspaceResolver, IScop
         _auth = auth;
     }
 
-    public Task<WorkspaceRequest?> ResolveAsync(AgentTask task, Guid teamId, CancellationToken cancellationToken) =>
-        task.RepositoryId is { } repositoryId
-            ? ResolveByRepositoryIdAsync(repositoryId, teamId, cancellationToken)
-            : Task.FromResult<WorkspaceRequest?>(null);
+    public async Task<WorkspaceRequest?> ResolveAsync(AgentTask task, Guid teamId, CancellationToken cancellationToken)
+    {
+        var spec = CanonicalWorkspace(task);
 
-    public async Task<WorkspaceRequest?> ResolveByRepositoryIdAsync(Guid repositoryId, Guid teamId, CancellationToken cancellationToken)
+        if (spec is null) return null;
+
+        if (spec.Repositories.Count > 1)
+            throw new WorkspaceException("Multi-repo workspaces are not yet executable — this run authored more than one repository. Single-repo runs are unaffected.");
+
+        var primary = spec.Primary
+            ?? throw new WorkspaceException("Workspace spec has no repositories to resolve.");
+
+        // async (not a bare Task return) so the guard throws above surface as a faulted Task AT THE AWAIT, matching
+        // the interface's async contract — a future caller that captures the Task (Task.WhenAll, deferred await)
+        // sees the exception where it awaits, not synchronously at the call site.
+        return await ResolveByRepositoryIdAsync(primary.RepositoryId, teamId, cancellationToken, primary.Ref).ConfigureAwait(false);
+    }
+
+    /// <summary>The canonical workspace for a task: the authored <see cref="AgentTask.Workspace"/>, else a single-repo workspace derived from the legacy <see cref="AgentTask.RepositoryId"/>, else null (a no-repo run).</summary>
+    internal static WorkspaceSpec? CanonicalWorkspace(AgentTask task) =>
+        task.Workspace ?? (task.RepositoryId is { } id ? WorkspaceSpec.FromRepository(id) : null);
+
+    public async Task<WorkspaceRequest?> ResolveByRepositoryIdAsync(Guid repositoryId, Guid teamId, CancellationToken cancellationToken, string? @ref = null)
     {
         var repo = await LoadRepositoryAsync(repositoryId, teamId, cancellationToken).ConfigureAwait(false);
 
@@ -45,7 +68,8 @@ public sealed class RepositoryWorkspaceResolver : IAgentWorkspaceResolver, IScop
         return new WorkspaceRequest
         {
             RepositoryUrl = repo.CloneUrlHttps,
-            Ref = repo.DefaultBranch,
+            // The spec's per-repo ref when authored, else the repository's default branch (the legacy behaviour).
+            Ref = string.IsNullOrWhiteSpace(@ref) ? repo.DefaultBranch : @ref,
             Token = token,
             TokenUsername = token is null ? null : TokenUsernameFor(repo.ProviderInstance.Provider),
         };

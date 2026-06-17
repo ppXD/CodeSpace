@@ -92,6 +92,35 @@ public class RepositoryWorkspaceResolverTests
         await Should.ThrowAsync<WorkspaceException>(async () => await ResolveAsync(TaskFor(repoId), teamId));
     }
 
+    [Fact]
+    public async Task An_authored_single_repo_workspace_resolves_through_the_same_path_as_the_legacy_repository_id()
+    {
+        var teamId = await SeedTeamAsync();
+        var repoId = await SeedRepoAsync(teamId, ProviderKind.GitHub, "https://github.com/org/repo.git", "main", token: "ghp_abc");
+
+        // The canonical path the resolver now routes EVERY single-repo run through: an authored WorkspaceSpec with a
+        // null per-repo ref must resolve byte-identically to the legacy RepositoryId path (default branch, token, username).
+        var request = await ResolveAsync(new AgentTask { Goal = "g", Harness = "h", Model = "m", Workspace = WorkspaceSpec.FromRepository(repoId) }, teamId);
+
+        request.ShouldNotBeNull();
+        request!.RepositoryUrl.ShouldBe("https://github.com/org/repo.git");
+        request.Ref.ShouldBe("main", "a null per-repo ref falls back to the repo's default branch — byte-identical to the RepositoryId path");
+        request.Token.ShouldBe("ghp_abc");
+        request.TokenUsername.ShouldBe("x-access-token");
+    }
+
+    [Fact]
+    public async Task An_authored_per_repo_ref_overrides_the_default_branch()
+    {
+        var teamId = await SeedTeamAsync();
+        var repoId = await SeedRepoAsync(teamId, ProviderKind.GitHub, "https://github.com/org/repo.git", "main", token: "ghp_abc");
+
+        // The one NEW production branch in ResolveByRepositoryIdAsync: the spec's per-repo ref wins over the default branch.
+        var request = await ResolveAsync(new AgentTask { Goal = "g", Harness = "h", Model = "m", Workspace = WorkspaceSpec.FromRepository(repoId, "release/1.2") }, teamId);
+
+        request!.Ref.ShouldBe("release/1.2", "the authored per-repo ref overrides the repository's default branch");
+    }
+
     // ─── Helpers ─────────────────────────────────────────────────────────────
 
     private static AgentTask TaskFor(Guid repositoryId) => new() { Goal = "g", Harness = "h", Model = "m", RepositoryId = repositoryId };
