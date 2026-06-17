@@ -32,6 +32,15 @@ public interface IWorkflowService
     /// </summary>
     Task<Guid> ReplayRunAsync(Guid originalRunId, Guid teamId, Guid actorUserId, CancellationToken cancellationToken);
 
+    /// <summary>
+    /// Re-run a prior run STARTING FROM <paramref name="fromNodeId"/> (D7): forks a new run that REUSES the
+    /// upstream cells (pre-seeded from the original) and re-runs the chosen node + its transitive downstream.
+    /// Returns the new run's id. Refuses (before any write): a cross-team / unknown / container-internal
+    /// from-node, a re-run closure containing an effectful node (slice-1 fail-closed), or an upstream node that
+    /// didn't settle reusably in the original.
+    /// </summary>
+    Task<Guid> RerunFromNodeAsync(Guid originalRunId, string fromNodeId, Guid teamId, Guid actorUserId, CancellationToken cancellationToken);
+
     Task<IReadOnlyList<WorkflowRunSummary>> ListRunsAsync(Guid workflowId, Guid teamId, int limit, CancellationToken cancellationToken);
     Task<WorkflowRunDetail?> GetRunAsync(Guid runId, Guid teamId, CancellationToken cancellationToken);
 

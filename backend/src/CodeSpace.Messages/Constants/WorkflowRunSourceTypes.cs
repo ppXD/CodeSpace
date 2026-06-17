@@ -19,6 +19,11 @@ public static class WorkflowRunSourceTypes
     /// <summary>Operator-initiated replay of an existing run.</summary>
     public const string Replay = "replay";
 
+    /// <summary>Operator-initiated re-run of an existing run STARTING FROM a chosen node — upstream cells are
+    /// reused (pre-seeded from the original), the chosen node + its downstream re-run. A replay with a pruned
+    /// frontier (D7). Lineage rides on <c>ParentRunId</c> + the request causation, same as a replay.</summary>
+    public const string Rerun = "rerun";
+
     /// <summary>
     /// A one-shot run whose definition is an inline frozen snapshot carried by the run itself
     /// (dynamic-workflows substrate) — there is NO backing Workflow row. Staged via

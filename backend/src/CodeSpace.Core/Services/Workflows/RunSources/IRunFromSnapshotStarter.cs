@@ -38,5 +38,5 @@ public interface IRunFromSnapshotStarter
     /// snapshot then dispatches, exactly as the authored-replay path does, so the engine's variable-presence fork
     /// takes the replay scope. Returns the new <c>workflow_run.id</c>.
     /// </summary>
-    Task<Guid> StageReplayFromSnapshotAsync(string definitionJson, string definitionHash, Guid teamId, Guid actorUserId, string payloadJson, Guid parentRunId, Guid causationRequestId, CancellationToken cancellationToken);
+    Task<Guid> StageReplayFromSnapshotAsync(string definitionJson, string definitionHash, Guid teamId, Guid actorUserId, string payloadJson, string sourceType, Guid parentRunId, Guid causationRequestId, CancellationToken cancellationToken);
 }

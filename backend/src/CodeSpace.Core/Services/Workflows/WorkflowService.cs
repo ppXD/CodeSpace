@@ -36,12 +36,13 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
     private readonly Engine.IWorkflowResumeService _resumeService;
     private readonly IPostCommitActions _postCommit;
     private readonly IAgentRunService _agentRunService;
+    private readonly Rerun.IRerunCellSeeder _cellSeeder;
     private readonly ILogger<WorkflowService> _logger;
 
     /// <summary>Reason stamped on a branch agent run aborted by the kill-wave when an operator cancels its parent workflow run.</summary>
     private const string OperatorCancelledAgentReason = "Cancelled because its parent workflow run was cancelled by an operator.";
 
-    public WorkflowService(CodeSpaceDbContext db, DefinitionValidator validator, INodeRegistry nodeRegistry, Lifecycle.IRunRecordLogger recordLogger, IRunStarter runStarter, RunSources.IRunFromSnapshotStarter snapshotStarter, IWorkflowRunDispatcher runDispatcher, Engine.IWorkflowResumeService resumeService, IPostCommitActions postCommit, IAgentRunService agentRunService, ILogger<WorkflowService> logger)
+    public WorkflowService(CodeSpaceDbContext db, DefinitionValidator validator, INodeRegistry nodeRegistry, Lifecycle.IRunRecordLogger recordLogger, IRunStarter runStarter, RunSources.IRunFromSnapshotStarter snapshotStarter, IWorkflowRunDispatcher runDispatcher, Engine.IWorkflowResumeService resumeService, IPostCommitActions postCommit, IAgentRunService agentRunService, Rerun.IRerunCellSeeder cellSeeder, ILogger<WorkflowService> logger)
     {
         _db = db;
         _validator = validator;
@@ -53,6 +54,7 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
         _resumeService = resumeService;
         _postCommit = postCommit;
         _agentRunService = agentRunService;
+        _cellSeeder = cellSeeder;
         _logger = logger;
     }
 
@@ -269,91 +271,189 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
 
     public async Task<Guid> ReplayRunAsync(Guid originalRunId, Guid teamId, Guid actorUserId, CancellationToken cancellationToken)
     {
-        // Load original run + verify team ownership in one query — phantom or cross-team
-        // runs return null and we conflate not-found with not-yours per the standard pattern.
-        var original = await _db.WorkflowRun.AsNoTracking()
+        var original = await LoadRunForForkAsync(originalRunId, teamId, cancellationToken).ConfigureAwait(false);
+        var snapshot = await LoadVariableSnapshotAsync(originalRunId, cancellationToken).ConfigureAwait(false);
+
+        var replayRunId = await StageForkedRunAsync(original, snapshot, WorkflowRunSourceTypes.Replay, teamId, actorUserId, cancellationToken).ConfigureAwait(false);
+
+        await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+        await DispatchAfterCommitAsync(replayRunId, cancellationToken).ConfigureAwait(false);
+
+        _logger.LogInformation(
+            "Workflow run replay queued. OriginalRunId={Original} ReplayRunId={Replay} Snapshot={IsSnapshot} TeamId={Team} SnapshotCount={SnapshotCount}",
+            originalRunId, replayRunId, original.WorkflowId is null, teamId, snapshot.Count);
+
+        return replayRunId;
+    }
+
+    public async Task<Guid> RerunFromNodeAsync(Guid originalRunId, string fromNodeId, Guid teamId, Guid actorUserId, CancellationToken cancellationToken)
+    {
+        var original = await LoadRunForForkAsync(originalRunId, teamId, cancellationToken).ConfigureAwait(false);
+
+        // Plan over the EXACT definition the original ran (snapshot inline JSON or the pinned authored version) —
+        // never today's LatestVersion — so the re-run closure + the pre-seed set match what actually executed.
+        var definition = await LoadOriginalDefinitionAsync(original, cancellationToken).ConfigureAwait(false);
+        var plan = Rerun.RerunFromNodePlanner.Plan(definition, fromNodeId);
+
+        // Fail-closed, ALL before any write. (a) no effectful node may re-run un-gated (would repeat a side
+        // effect / re-bill an agent — approval-gated rerun is a follow-up); (b) every KEPT (reused) node must
+        // have settled cleanly in the original so there is an output to carry forward.
+        EnsureNoEffectfulNodeInClosure(definition, plan);
+        var keptToSeed = await ResolveReusableKeptCellsAsync(originalRunId, definition, plan, cancellationToken).ConfigureAwait(false);
+
+        var snapshot = await LoadVariableSnapshotAsync(originalRunId, cancellationToken).ConfigureAwait(false);
+
+        var rerunRunId = await StageForkedRunAsync(original, snapshot, WorkflowRunSourceTypes.Rerun, teamId, actorUserId, cancellationToken).ConfigureAwait(false);
+
+        // Pre-seed the kept (reused) upstream cells onto the fork; the engine's RehydrateFromLedger then settles
+        // them and the frontier resumes at fromNode. The sentinel (empty original snapshot) forces the replay
+        // scope path. All these writes land in the command's ambient transaction; dispatch fires post-commit.
+        await _cellSeeder.SeedKeptCellsAsync(originalRunId, rerunRunId, keptToSeed, writeEmptySnapshotSentinel: snapshot.Count == 0, cancellationToken).ConfigureAwait(false);
+
+        await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+        await DispatchAfterCommitAsync(rerunRunId, cancellationToken).ConfigureAwait(false);
+
+        _logger.LogInformation(
+            "Workflow run rerun-from-node queued. OriginalRunId={Original} RerunRunId={Rerun} FromNode={FromNode} ReRun={ReRunCount} Reused={ReusedCount} Snapshot={IsSnapshot} TeamId={Team}",
+            originalRunId, rerunRunId, fromNodeId, plan.ReRunNodeIds.Count, keptToSeed.Count, original.WorkflowId is null, teamId);
+
+        return rerunRunId;
+    }
+
+    // ── Fork helpers — shared by replay + rerun (both fork a NEW run from the original; never mutate it) ──
+
+    /// <summary>Load the original run (with its request) verifying team ownership; phantom / cross-team conflate to KeyNotFound (404).</summary>
+    private async Task<WorkflowRun> LoadRunForForkAsync(Guid originalRunId, Guid teamId, CancellationToken cancellationToken) =>
+        await _db.WorkflowRun.AsNoTracking()
             .Include(r => r.RunRequest)
             .Where(r => r.Id == originalRunId && r.TeamId == teamId)
             .SingleOrDefaultAsync(cancellationToken)
             .ConfigureAwait(false)
             ?? throw new KeyNotFoundException($"WorkflowRun {originalRunId} not found in team {teamId}.");
 
-        // The original's variable snapshot (its frozen plain values). Cloned onto the new run below — the
-        // engine's variable-presence fork then takes the REPLAY scope path (frozen plains + re-resolved secrets)
-        // and emits run.replayed. Loaded BEFORE the branch since both authored + snapshot replays clone it.
-        // A run with NO snapshotted plain/secret variables (e.g. a payload-only or project-only definition)
-        // has an empty snapshot, so replay re-runs through the FRESH scope path — project-scoped values are
-        // re-resolved live on replay by design, identical to the authored path (projects are shared config
-        // namespaces, intentionally never frozen).
-        var originalSnapshot = await _db.WorkflowRunVariable.AsNoTracking()
-            .Where(v => v.RunId == originalRunId)
-            .ToListAsync(cancellationToken)
-            .ConfigureAwait(false);
+    private async Task<List<WorkflowRunVariable>> LoadVariableSnapshotAsync(Guid runId, CancellationToken cancellationToken) =>
+        await _db.WorkflowRunVariable.AsNoTracking().Where(v => v.RunId == runId).ToListAsync(cancellationToken).ConfigureAwait(false);
 
-        // Stage the replay run. The ONLY thing that differs between an authored and a snapshot/dynamic run is the
-        // definition SOURCE: an authored run re-pins (WorkflowId, Version); a snapshot run carries its frozen
-        // definition INLINE, so replay clones that exact frozen JSON + hash onto a NEW snapshot run (no
-        // re-validate / re-freeze — replay reproduces what ran, and the engine's snapshot tamper-check passes
-        // because the hash travels with it). Both branches STAGE-ONLY here; the variable clone + dispatch below
-        // are shared, so the durable engine resumes identically regardless of definition source. This is what
-        // makes the entire snapshot/dynamic (task-launch) surface replayable — it used to throw NotSupported.
-        Guid replayRunId;
+    /// <summary>
+    /// Stage a forked run from the original + clone its variable snapshot — STAGE-ONLY (caller saves + dispatches).
+    /// The ONLY thing that differs by source is the definition: an authored run re-pins (WorkflowId, Version); a
+    /// snapshot run carries its frozen definition inline (no re-validate/re-freeze — the engine's tamper-check
+    /// passes because the hash travels with it). The cloned snapshot makes the engine take the REPLAY scope path
+    /// (frozen plains + re-resolved secrets). Lineage (ParentRunId + causation) is stamped for both.
+    /// </summary>
+    private async Task<Guid> StageForkedRunAsync(WorkflowRun original, List<WorkflowRunVariable> snapshot, string sourceType, Guid teamId, Guid actorUserId, CancellationToken cancellationToken)
+    {
+        Guid forkRunId;
         if (original.WorkflowId is null)
-        {
-            replayRunId = await _snapshotStarter.StageReplayFromSnapshotAsync(
-                original.DefinitionSnapshotJson ?? throw new InvalidOperationException($"Snapshot run {originalRunId} has no inline definition to replay."),
+            forkRunId = await _snapshotStarter.StageReplayFromSnapshotAsync(
+                original.DefinitionSnapshotJson ?? throw new InvalidOperationException($"Snapshot run {original.Id} has no inline definition to fork."),
                 original.DefinitionSnapshotHash ?? string.Empty,
-                teamId, actorUserId, original.RunRequest?.NormalizedPayloadJson ?? "{}",
-                parentRunId: originalRunId, causationRequestId: original.RunRequestId, cancellationToken).ConfigureAwait(false);
-        }
+                teamId, actorUserId, original.RunRequest?.NormalizedPayloadJson ?? "{}", sourceType,
+                parentRunId: original.Id, causationRequestId: original.RunRequestId, cancellationToken).ConfigureAwait(false);
         else
-        {
-            // Replay envelope carries the lineage fields (CausationRequestId + ParentRunId + ReleaseHashAtRun)
-            // so the unified starter writes them onto the request + run rows for us.
-            replayRunId = await _runStarter.StartAsync(new RunSourceEnvelope
+            forkRunId = await _runStarter.StartAsync(new RunSourceEnvelope
             {
                 TeamId = teamId,
                 WorkflowId = original.WorkflowId.Value,
                 WorkflowVersion = original.WorkflowVersion!.Value,
-                SourceType = WorkflowRunSourceTypes.Replay,
+                SourceType = sourceType,
                 ActorType = WorkflowRunActorTypes.User,
                 ActorId = actorUserId,
                 NormalizedPayloadJson = original.RunRequest?.NormalizedPayloadJson ?? "{}",
                 CreatedBy = actorUserId,
                 CausationRequestId = original.RunRequestId,
-                ParentRunId = originalRunId,
+                ParentRunId = original.Id,
                 ReleaseHashAtRun = original.ReleaseHashAtRun,
             }, cancellationToken).ConfigureAwait(false);
-        }
 
         var now = DateTimeOffset.UtcNow;
-        foreach (var s in originalSnapshot)
-        {
+        foreach (var s in snapshot)
             _db.WorkflowRunVariable.Add(new WorkflowRunVariable
             {
                 Id = Guid.NewGuid(),
-                RunId = replayRunId,
+                RunId = forkRunId,
                 Scope = s.Scope,
                 Name = s.Name,
                 ValueType = s.ValueType,
                 ValuePlain = s.ValuePlain,
                 CapturedAt = now,
             });
+
+        return forkRunId;
+    }
+
+    /// <summary>
+    /// Dispatch after the (transactional) commit, mirroring RunManuallyAsync — the command pipeline's
+    /// TransactionalBehavior owns the commit, so RunAfterCommitAsync fires the dispatch only once the run's rows
+    /// (and a rerun's pre-seeded cells) are durable; a worker can never pick up the run before then. The
+    /// reconciler backstops a dropped dispatch.
+    /// </summary>
+    private async Task DispatchAfterCommitAsync(Guid runId, CancellationToken cancellationToken) =>
+        await _postCommit.RunAfterCommitAsync(ct => _runDispatcher.DispatchAsync(runId, ct), cancellationToken).ConfigureAwait(false);
+
+    /// <summary>Deserialize the EXACT definition the original ran — a snapshot run's inline frozen JSON, or an authored run's pinned version JSON. Mirrors the engine's definition-source fork.</summary>
+    private async Task<WorkflowDefinition> LoadOriginalDefinitionAsync(WorkflowRun original, CancellationToken cancellationToken)
+    {
+        var json = original.WorkflowId is null
+            ? original.DefinitionSnapshotJson ?? throw new InvalidOperationException($"Snapshot run {original.Id} has no inline definition.")
+            : (await _db.WorkflowVersion.AsNoTracking().SingleAsync(v => v.WorkflowId == original.WorkflowId && v.Version == original.WorkflowVersion, cancellationToken).ConfigureAwait(false)).DefinitionJson;
+
+        return System.Text.Json.JsonSerializer.Deserialize<WorkflowDefinition>(json, WorkflowJson.Options)
+            ?? throw new InvalidOperationException($"Run {original.Id} has an empty definition.");
+    }
+
+    /// <summary>
+    /// FAIL-CLOSED side-effect gate (slice-1): a re-run node that would re-fire a side effect
+    /// (<c>IsSideEffecting</c>), suspend (<c>CanSuspend</c> — agent.code / subworkflow / supervisor), or re-run a
+    /// whole effectful body (a Map/Loop/Try container) is refused — approval-gated rerun is the follow-up (D7-3).
+    /// A side-effecting node UPSTREAM (kept + reused, never re-executed) is fine; only the re-run closure is scanned.
+    /// </summary>
+    private void EnsureNoEffectfulNodeInClosure(WorkflowDefinition definition, RerunPlan plan)
+    {
+        var typeByNode = definition.Nodes.ToDictionary(n => n.Id, n => n.TypeKey);
+
+        var blocked = plan.ReRunNodeIds
+            .Where(id => typeByNode.TryGetValue(id, out var typeKey) && IsEffectful(_nodeRegistry.Resolve(typeKey).Manifest))
+            .OrderBy(id => id)
+            .ToList();
+
+        if (blocked.Count > 0) throw new RerunBlockedBySideEffectException(blocked);
+    }
+
+    private static bool IsEffectful(NodeManifest manifest) =>
+        manifest.IsSideEffecting || manifest.CanSuspend || manifest.Kind is NodeKind.Map or NodeKind.Loop or NodeKind.Try;
+
+    /// <summary>
+    /// The kept (reused) top-level cells to pre-seed = the plan's KEPT set intersected with the original's
+    /// actually-settled cells. A kept node that settled cleanly (Success / Skipped / Failure-with-error-edge) is
+    /// reused; a kept node that did NOT settle cleanly (Running / Failure-without-error-edge) is a hard refuse —
+    /// there is no reusable outcome. A kept node with NO cell never ran in the original (a dead branch); it is
+    /// neither seeded nor refused — the engine re-skips it via edge-liveness from the reused routing hints.
+    /// </summary>
+    private async Task<IReadOnlySet<string>> ResolveReusableKeptCellsAsync(Guid originalRunId, WorkflowDefinition definition, RerunPlan plan, CancellationToken cancellationToken)
+    {
+        if (plan.KeptNodeIds.Count == 0) return plan.KeptNodeIds;
+
+        var cells = await _db.WorkflowRunNode.AsNoTracking()
+            .Where(n => n.RunId == originalRunId && n.IterationKey == "" && plan.KeptNodeIds.Contains(n.NodeId))
+            .ToDictionaryAsync(n => n.NodeId, cancellationToken).ConfigureAwait(false);
+
+        var seed = new HashSet<string>();
+        foreach (var keptId in plan.KeptNodeIds)
+        {
+            if (!cells.TryGetValue(keptId, out var cell)) continue;   // never ran (dead branch) — engine re-skips
+
+            var reusable = cell.Status is NodeStatus.Success or NodeStatus.Skipped
+                || (cell.Status == NodeStatus.Failure && definition.Edges.Any(e => e.From == keptId && e.SourceHandle == WorkflowHandles.Error));
+
+            if (!reusable)
+                throw new RerunUpstreamNotReusableException(
+                    $"Cannot reuse upstream node '{keptId}': it did not complete reusably in run {originalRunId} (status {cell.Status}). Re-run from an earlier node, or replay the whole run.");
+
+            seed.Add(keptId);
         }
 
-        await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
-
-        // Dispatch after commit (same as RunManuallyAsync). ReplayRunCommand is currently a non-
-        // transactional IRequest, so RunAfterCommitAsync runs inline (the SaveChanges above already
-        // auto-committed) — unchanged behavior today, and automatically post-commit-safe if replay is
-        // ever folded into the transactional ICommand pipeline. Reconciler backstops a dropped dispatch.
-        await _postCommit.RunAfterCommitAsync(ct => _runDispatcher.DispatchAsync(replayRunId, ct), cancellationToken).ConfigureAwait(false);
-
-        _logger.LogInformation(
-            "Workflow run replay queued. OriginalRunId={Original} ReplayRunId={Replay} Snapshot={IsSnapshot} WorkflowId={Workflow} TeamId={Team} SnapshotCount={SnapshotCount}",
-            originalRunId, replayRunId, original.WorkflowId is null, original.WorkflowId, teamId, originalSnapshot.Count);
-
-        return replayRunId;
+        return seed;
     }
 
     public async Task<bool> ApproveRunAsync(Guid runId, Guid teamId, Guid actorUserId, bool approved, string? comment, CancellationToken cancellationToken)

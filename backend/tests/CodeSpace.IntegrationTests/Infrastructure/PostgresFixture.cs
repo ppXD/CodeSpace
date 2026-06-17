@@ -227,6 +227,13 @@ public sealed class PostgresFixture : IAsyncLifetime
             .As<CodeSpace.Core.Services.Workflows.Nodes.INodeRuntime>()
             .SingleInstance();
 
+        // Test-only SIDE-EFFECTING node that counts its RunAsync invocations per config key — the from-node
+        // rerun discriminator (a reused upstream node never re-executes ⇒ its counter is unchanged). Same
+        // registration rationale: engine/validator accept "test.mutating_probe", palette never sees it.
+        builder.RegisterType<Workflows.Infrastructure.MutatingProbeNode>()
+            .As<CodeSpace.Core.Services.Workflows.Nodes.INodeRuntime>()
+            .SingleInstance();
+
         // Test-only SUSPENDING body node for the flow.map durable parallel-branch resume (PR2) tests — the
         // hermetic stand-in for an agent.code that parks to an AgentRun (parks an Action wait, no external
         // staging). Same registration rationale: engine/validator see it, palette doesn't.
