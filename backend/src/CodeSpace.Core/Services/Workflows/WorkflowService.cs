@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using CodeSpace.Core.DependencyInjection;
 using CodeSpace.Core.Middlewares.Transactional;
 using CodeSpace.Core.Persistence.Db;
@@ -321,6 +322,152 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
         return rerunRunId;
     }
 
+    public async Task<Guid> RerunMapBranchAsync(Guid originalRunId, string mapNodeId, int branchIndex, Guid teamId, Guid actorUserId, CancellationToken cancellationToken)
+    {
+        var original = await LoadRunForForkAsync(originalRunId, teamId, cancellationToken).ConfigureAwait(false);
+        var definition = await LoadOriginalDefinitionAsync(original, cancellationToken).ConfigureAwait(false);
+
+        // Fail-closed, ALL before any write. (1) the target must be a TOP-LEVEL flow.map; (2) its body must be
+        // re-runnable (pure compute/read only — no side-effecting / suspendable / nested-container body node, v1);
+        // (3) the original map must have SUCCEEDED (a Success map ⇒ every branch settled cleanly — this subsumes
+        // "suspended sibling" and "terminate-mode-failed map", both non-Success → refuse); (4) the branch index
+        // must be within the original fan-out. The plan re-runs FROM the map (so the map re-enters + its
+        // downstream synthesizer re-runs); the gate exempts ONLY this map from the container refusal.
+        EnsureTargetIsTopLevelMap(definition, mapNodeId);
+        EnsureMapItemsReplayDeterministic(definition, mapNodeId);
+        EnsureBranchBodyIsRerunnable(definition, mapNodeId);
+
+        var plan = Rerun.RerunFromNodePlanner.Plan(definition, mapNodeId);
+        EnsureNoUnsupportedNodeInClosure(definition, plan, exemptMapId: mapNodeId);
+
+        await EnsureOriginalMapSucceededAsync(originalRunId, mapNodeId, cancellationToken).ConfigureAwait(false);
+        var branchCount = await ResolveOriginalBranchCountAsync(originalRunId, mapNodeId, cancellationToken).ConfigureAwait(false);
+        EnsureBranchIndexInRange(branchIndex, branchCount, mapNodeId);
+
+        // The map is the re-run root, so it + its downstream are RE-RUN; everything upstream is KEPT (incl. the
+        // node binding the map's items — guaranteeing the fork re-resolves the SAME element array, so the seeded
+        // sibling indices align). Seed the kept upstream (D7-2) + the N-1 NON-target sibling branch cells.
+        var keptToSeed = await ResolveReusableKeptCellsAsync(originalRunId, definition, plan, cancellationToken).ConfigureAwait(false);
+        var snapshot = await LoadVariableSnapshotAsync(originalRunId, cancellationToken).ConfigureAwait(false);
+
+        var rerunRunId = await StageForkedRunAsync(original, snapshot, WorkflowRunSourceTypes.Rerun, teamId, actorUserId, cancellationToken).ConfigureAwait(false);
+
+        await _cellSeeder.SeedKeptCellsAsync(originalRunId, rerunRunId, keptToSeed, writeEmptySnapshotSentinel: snapshot.Count == 0, cancellationToken).ConfigureAwait(false);
+        await _cellSeeder.SeedSiblingBranchCellsAsync(originalRunId, rerunRunId, mapNodeId, branchIndex, branchCount, cancellationToken).ConfigureAwait(false);
+
+        await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+        await DispatchAfterCommitAsync(rerunRunId, cancellationToken).ConfigureAwait(false);
+
+        _logger.LogInformation(
+            "Workflow map-branch rerun queued. OriginalRunId={Original} RerunRunId={Rerun} Map={Map} Branch={Branch}/{BranchCount} Reused={ReusedCount} Snapshot={IsSnapshot} TeamId={Team}",
+            originalRunId, rerunRunId, mapNodeId, branchIndex, branchCount, keptToSeed.Count, original.WorkflowId is null, teamId);
+
+        return rerunRunId;
+    }
+
+    /// <summary>Gate: <paramref name="mapNodeId"/> must resolve to a TOP-LEVEL (ParentId==null) node whose manifest Kind is Map. Else 400.</summary>
+    private void EnsureTargetIsTopLevelMap(WorkflowDefinition definition, string mapNodeId)
+    {
+        var node = definition.Nodes.FirstOrDefault(n => n.Id == mapNodeId)
+            ?? throw new RerunTargetNotFoundException($"Map node '{mapNodeId}' not found in the run's definition.");
+
+        if (node.ParentId != null)
+            throw new RerunTargetNotFoundException($"Node '{mapNodeId}' is inside a container; only a top-level map's branch can be re-run.");
+
+        if (_nodeRegistry.Resolve(node.TypeKey).Manifest.Kind != NodeKind.Map)
+            throw new RerunTargetNotFoundException($"Node '{mapNodeId}' is not a map; map-branch rerun requires a flow.map target.");
+    }
+
+    // The map's items binding re-resolves at execution time from scope. On a fork, BuildScopeForReplay FREEZES
+    // trigger.* + plain wf/team + upstream node outputs (all KEPT+seeded), but RE-RESOLVES project.* and
+    // secret-typed wf/team LIVE (project is never snapshotted; secrets honour rotation). If the map's items bind
+    // to a live-re-resolved scope, an operator editing that variable between runs would change the branch space
+    // — and the seeded siblings (indexed by the ORIGINAL fan-out) would misalign with the fork's elements →
+    // silent wrong-element attribution. So sibling reuse is sound ONLY when items resolve from a frozen/kept
+    // source (trigger / upstream node output / a literal array). Refuse the live-re-resolved scopes, fail-closed.
+    private static readonly Regex LiveReResolvedItemsScope = new(@"\{\{\s*(project|wf|team|sys)\.", RegexOptions.Compiled);
+
+    /// <summary>Gate: refuse when the map's <c>items</c> bind to a scope that re-resolves live on replay (project / wf /
+    /// team / sys) — the branch space could differ on rerun, making sibling reuse unsound. A literal array or a
+    /// trigger / upstream-node binding is frozen-or-kept and deterministic, so it is allowed.</summary>
+    private static void EnsureMapItemsReplayDeterministic(WorkflowDefinition definition, string mapNodeId)
+    {
+        var mapNode = definition.Nodes.First(n => n.Id == mapNodeId);   // existence already enforced by EnsureTargetIsTopLevelMap
+
+        if (mapNode.Inputs.ValueKind != JsonValueKind.Object
+            || !mapNode.Inputs.TryGetProperty("items", out var items)
+            || items.ValueKind != JsonValueKind.String)
+            return;   // a literal array / absent items is frozen in the definition → deterministic on replay
+
+        if (LiveReResolvedItemsScope.IsMatch(items.GetString() ?? string.Empty))
+            throw new RerunUpstreamNotReusableException(
+                $"Map '{mapNodeId}' binds its items to a variable scope (project / wf / team / sys) that is re-resolved live on replay; the branch space could differ on rerun, so reusing the sibling branches would be unsound. Replay the whole run instead.");
+    }
+
+    /// <summary>Gate (v1): a re-run map branch body may contain only pure compute/read nodes — refuse a side-effecting,
+    /// suspendable, or nested-container body node (the D7-3-gate-inside-a-branch + agent-re-stage compositions are
+    /// deferred to a follow-up). Scans the static body subgraph (ParentId == mapNodeId), fail-closed.</summary>
+    private void EnsureBranchBodyIsRerunnable(WorkflowDefinition definition, string mapNodeId)
+    {
+        var blocked = definition.Nodes
+            .Where(n => n.ParentId == mapNodeId)
+            .Where(n =>
+            {
+                var m = _nodeRegistry.Resolve(n.TypeKey).Manifest;
+                return m.IsSideEffecting || m.CanSuspend || m.Kind is NodeKind.Map or NodeKind.Loop or NodeKind.Try;
+            })
+            .Select(n => n.Id)
+            .OrderBy(id => id)
+            .ToList();
+
+        if (blocked.Count > 0) throw new RerunBlockedByUnsupportedNodeException(blocked);
+    }
+
+    /// <summary>Gate: the original map must have COMPLETED Successfully. A Success map guarantees every branch settled
+    /// cleanly (the engine re-suspends the map while any branch is parked, and terminate-mode failures fail the map),
+    /// so this single check subsumes "a sibling is still suspended/running" and "terminate-mode map failed" — both
+    /// leave the map non-Success → no clean aggregate to reuse → 422.</summary>
+    private async Task EnsureOriginalMapSucceededAsync(Guid originalRunId, string mapNodeId, CancellationToken cancellationToken)
+    {
+        var status = await _db.WorkflowRunNode.AsNoTracking()
+            .Where(n => n.RunId == originalRunId && n.NodeId == mapNodeId && n.IterationKey == WorkflowIterationKeys.TopLevel)
+            .Select(n => (NodeStatus?)n.Status)
+            .SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
+
+        if (status != NodeStatus.Success)
+            throw new RerunUpstreamNotReusableException(
+                $"Cannot re-run a branch of map '{mapNodeId}': it did not complete successfully in run {originalRunId} (status {status?.ToString() ?? "never ran"}). Replay the whole run instead.");
+    }
+
+    /// <summary>The number of branches the original map fanned out over = the count of DISTINCT direct branch keys
+    /// (<c>"&lt;mapId&gt;#&lt;i&gt;"</c>, integer i, no nested '/'). Branches are contiguous 0..N-1, so the distinct count is N.</summary>
+    private async Task<int> ResolveOriginalBranchCountAsync(Guid originalRunId, string mapNodeId, CancellationToken cancellationToken)
+    {
+        var prefix = $"{mapNodeId}#";
+        var keys = await _db.WorkflowRunNode.AsNoTracking()
+            .Where(n => n.RunId == originalRunId && n.IterationKey.StartsWith(prefix))
+            .Select(n => n.IterationKey)
+            .Distinct()
+            .ToListAsync(cancellationToken).ConfigureAwait(false);
+
+        // Keep only DIRECT branch keys "<mapId>#<int>" (a nested descendant has "<mapId>#<i>/<inner>#<j>").
+        var directIndices = new HashSet<int>();
+        foreach (var key in keys)
+        {
+            var rest = key[prefix.Length..];
+            if (!rest.Contains('/') && int.TryParse(rest, out var i) && i >= 0) directIndices.Add(i);
+        }
+
+        return directIndices.Count;
+    }
+
+    private static void EnsureBranchIndexInRange(int branchIndex, int branchCount, string mapNodeId)
+    {
+        if (branchIndex < 0 || branchIndex >= branchCount)
+            throw new RerunTargetNotFoundException(
+                $"Branch index {branchIndex} is out of range for map '{mapNodeId}' (the original fanned out over {branchCount} branch(es), valid indices 0..{branchCount - 1}).");
+    }
+
     // ── Fork helpers — shared by replay + rerun (both fork a NEW run from the original; never mutate it) ──
 
     /// <summary>Load the original run (with its request) verifying team ownership; phantom / cross-team conflate to KeyNotFound (404).</summary>
@@ -412,20 +559,25 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
     /// side-effecting and suspendable is refused via the CanSuspend arm (fail-closed wins). A node UPSTREAM
     /// (kept + reused, never re-executed) is always fine; only the re-run closure is scanned.
     /// </summary>
-    private void EnsureNoUnsupportedNodeInClosure(WorkflowDefinition definition, RerunPlan plan)
+    private void EnsureNoUnsupportedNodeInClosure(WorkflowDefinition definition, RerunPlan plan, string? exemptMapId = null)
     {
         var typeByNode = definition.Nodes.ToDictionary(n => n.Id, n => n.TypeKey);
 
         var blocked = plan.ReRunNodeIds
-            .Where(id => typeByNode.TryGetValue(id, out var typeKey) && IsRerunUnsupported(_nodeRegistry.Resolve(typeKey).Manifest))
+            .Where(id => typeByNode.TryGetValue(id, out var typeKey) && IsRerunUnsupported(_nodeRegistry.Resolve(typeKey).Manifest, id, exemptMapId))
             .OrderBy(id => id)
             .ToList();
 
         if (blocked.Count > 0) throw new RerunBlockedByUnsupportedNodeException(blocked);
     }
 
-    private static bool IsRerunUnsupported(NodeManifest manifest) =>
-        manifest.CanSuspend || manifest.Kind is NodeKind.Map or NodeKind.Loop or NodeKind.Try;
+    /// <summary><paramref name="exemptMapId"/> (D7-4) exempts EXACTLY that one map id from the container arm — it is the
+    /// rerun-by-branch target, which re-enters + replays its siblings. Every OTHER map, every Loop/Try, and every
+    /// suspendable node stays refused (fail-closed). The from-node path passes null → no exemption (byte-identical).</summary>
+    private static bool IsRerunUnsupported(NodeManifest manifest, string nodeId, string? exemptMapId) =>
+        manifest.CanSuspend
+        || (manifest.Kind == NodeKind.Map && nodeId != exemptMapId)
+        || manifest.Kind is NodeKind.Loop or NodeKind.Try;
 
     /// <summary>
     /// The kept (reused) top-level cells to pre-seed = the plan's KEPT set intersected with the original's

@@ -110,6 +110,17 @@ public class WorkflowsController : ControllerBase
     }
 
     /// <summary>
+    /// Re-run ONE branch of a top-level flow.map in an existing run (D7). Forks a new run that reuses the N-1
+    /// sibling branches and re-runs the chosen branch + the map's downstream synthesizer. Returns the new run's id.
+    /// </summary>
+    [HttpPost("runs/{runId:guid}/rerun-map-branch")]
+    public async Task<IActionResult> RerunMapBranch([FromRoute] Guid runId, [FromBody] RerunMapBranchCommand command, CancellationToken cancellationToken)
+    {
+        var newRunId = await _mediator.Send(command with { OriginalRunId = runId }, cancellationToken).ConfigureAwait(false);
+        return Ok(new { runId = newRunId });
+    }
+
+    /// <summary>
     /// Resolve a pending approval on a Suspended run with a human decision (approve / reject +
     /// optional comment) and resume it. Returns <c>{ resumed }</c> — false when the run has no
     /// pending approval wait.

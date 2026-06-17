@@ -41,6 +41,15 @@ public interface IWorkflowService
     /// </summary>
     Task<Guid> RerunFromNodeAsync(Guid originalRunId, string fromNodeId, Guid teamId, Guid actorUserId, CancellationToken cancellationToken);
 
+    /// <summary>
+    /// Re-run ONE branch of a top-level flow.map (D7): forks a new run that REUSES the N-1 sibling branches
+    /// (pre-seeded from the original) and re-runs the chosen branch + the map's downstream (the synthesizer
+    /// re-runs over the new aggregate). Returns the new run's id. Refuses (before any write): a cross-team /
+    /// unknown / non-top-level / non-map target, a branch index out of range, an original map that didn't
+    /// complete successfully, or a branch body containing a side-effecting / suspendable / nested-container node.
+    /// </summary>
+    Task<Guid> RerunMapBranchAsync(Guid originalRunId, string mapNodeId, int branchIndex, Guid teamId, Guid actorUserId, CancellationToken cancellationToken);
+
     Task<IReadOnlyList<WorkflowRunSummary>> ListRunsAsync(Guid workflowId, Guid teamId, int limit, CancellationToken cancellationToken);
     Task<WorkflowRunDetail?> GetRunAsync(Guid runId, Guid teamId, CancellationToken cancellationToken);
 

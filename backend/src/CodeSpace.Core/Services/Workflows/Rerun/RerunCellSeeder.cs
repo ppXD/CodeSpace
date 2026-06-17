@@ -31,6 +31,17 @@ public interface IRerunCellSeeder
     /// scope path rather than the fresh path. Pure INSERTs onto the new run — never touches the original.
     /// </summary>
     Task SeedKeptCellsAsync(Guid originalRunId, Guid newRunId, IReadOnlySet<string> keptNodeIds, bool writeEmptySnapshotSentinel, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Pre-seed the REUSED sibling branches of a map-branch rerun (D7-4). For a top-level map <paramref name="mapNodeId"/>
+    /// fanned out over <paramref name="branchCount"/> elements, re-emits every NON-target branch's cells faithfully
+    /// (each row's real NodeId + status + outputs, under the branch key <c>"&lt;mapId&gt;#&lt;j&gt;"</c>) so the engine's
+    /// <c>RehydrateMapResults</c>/<c>TrySettleBranch</c> REPLAYS those siblings (no side-effect re-fire) on the fork.
+    /// The TARGET branch (<paramref name="targetIndex"/>) is OMITTED — with no rows under its key, the map re-runs it
+    /// fresh. The map's OWN top-level cell is NOT seeded here (the planner keeps it in the re-run set), so the map
+    /// re-enters and re-aggregates. Branch cells are terminal-record-only (no node.started) — the reuse discriminator.
+    /// </summary>
+    Task SeedSiblingBranchCellsAsync(Guid originalRunId, Guid newRunId, string mapNodeId, int targetIndex, int branchCount, CancellationToken cancellationToken);
 }
 
 public sealed class RerunCellSeeder : IRerunCellSeeder, IScopedDependency
@@ -57,7 +68,7 @@ public sealed class RerunCellSeeder : IRerunCellSeeder, IScopedDependency
                 .ToListAsync(cancellationToken).ConfigureAwait(false);
 
             foreach (var cell in cells)
-                await ReEmitAsync(newRunId, cell, originalRunId, cancellationToken).ConfigureAwait(false);
+                await ReEmitAsync(newRunId, cell, WorkflowIterationKeys.TopLevel, originalRunId, cancellationToken).ConfigureAwait(false);
         }
 
         if (writeEmptySnapshotSentinel)
@@ -73,32 +84,59 @@ public sealed class RerunCellSeeder : IRerunCellSeeder, IScopedDependency
             });
     }
 
-    private async Task ReEmitAsync(Guid newRunId, WorkflowRunNode cell, Guid originalRunId, CancellationToken cancellationToken)
+    public async Task SeedSiblingBranchCellsAsync(Guid originalRunId, Guid newRunId, string mapNodeId, int targetIndex, int branchCount, CancellationToken cancellationToken)
+    {
+        // A top-level map's branch key is exactly "<mapId>#<i>" (CombineIterationKey("", seg) == seg). Load the
+        // original's branch-scoped rows, group by EXACT key, and re-emit each NON-target branch faithfully.
+        var prefix = $"{mapNodeId}#";
+        var rows = await _db.WorkflowRunNode.AsNoTracking()
+            .Where(n => n.RunId == originalRunId && n.IterationKey.StartsWith(prefix))
+            .ToListAsync(cancellationToken).ConfigureAwait(false);
+
+        var byKey = rows.GroupBy(r => r.IterationKey).ToDictionary(g => g.Key, g => g.ToList());
+
+        for (var j = 0; j < branchCount; j++)
+        {
+            if (j == targetIndex) continue;   // OMIT the target branch → no rows under its key → the map re-runs it fresh
+
+            var branchKey = $"{mapNodeId}#{j}";
+            if (!byKey.TryGetValue(branchKey, out var branchRows)) continue;   // sibling never produced direct cells — nothing to replay
+
+            // Re-emit EVERY row this sibling settled (the terminal AND any error-edge / continue-abandon body row),
+            // carrying each row's REAL NodeId — TrySettleBranch reads the terminal by id (and, continue mode, the
+            // abandon body node by id), so faithful per-row reproduction settles the sibling exactly as the original.
+            foreach (var cell in branchRows)
+                await ReEmitAsync(newRunId, cell, branchKey, originalRunId, cancellationToken).ConfigureAwait(false);
+        }
+    }
+
+    private async Task ReEmitAsync(Guid newRunId, WorkflowRunNode cell, string iterationKey, Guid originalRunId, CancellationToken cancellationToken)
     {
         switch (cell.Status)
         {
             case NodeStatus.Success:
                 // routingHints MUST carry over — null hints make IsEdgeLive treat every handle as live, so a
                 // dead branch the original routed around would wrongly re-enliven on the fork.
-                await _recordLogger.NodeCompletedAsync(newRunId, cell.NodeId, WorkflowIterationKeys.TopLevel, ParseOutputs(cell.OutputsJson), ParseHints(cell.RoutingHintsJson), TimeSpan.Zero, cancellationToken).ConfigureAwait(false);
+                await _recordLogger.NodeCompletedAsync(newRunId, cell.NodeId, iterationKey, ParseOutputs(cell.OutputsJson), ParseHints(cell.RoutingHintsJson), TimeSpan.Zero, cancellationToken).ConfigureAwait(false);
                 break;
 
             case NodeStatus.Skipped:
-                await _recordLogger.NodeSkippedAsync(newRunId, cell.NodeId, WorkflowIterationKeys.TopLevel, $"Reused from run {originalRunId}.", cancellationToken).ConfigureAwait(false);
+                await _recordLogger.NodeSkippedAsync(newRunId, cell.NodeId, iterationKey, $"Reused from run {originalRunId}.", cancellationToken).ConfigureAwait(false);
                 break;
 
             case NodeStatus.Failure:
-                // A kept Failure cell is always error-edge-handled (the service refuses an un-handled failed
-                // upstream); RehydrateFromLedger re-settles it as a failed source + rebuilds the error output.
-                await _recordLogger.NodeFailedAsync(newRunId, cell.NodeId, WorkflowIterationKeys.TopLevel, cell.Error ?? "(failed)", TimeSpan.Zero, cancellationToken).ConfigureAwait(false);
+                // A re-emitted Failure cell is either a top-level kept failure (error-edge-handled) OR a map
+                // sibling's continue-mode abandon row (a failed body node with no error edge) — both round-trip
+                // faithfully: RehydrateFromLedger / TrySettleBranch re-settle it from the node.failed record.
+                await _recordLogger.NodeFailedAsync(newRunId, cell.NodeId, iterationKey, cell.Error ?? "(failed)", TimeSpan.Zero, cancellationToken).ConfigureAwait(false);
                 break;
 
             default:
-                // Defence-in-depth: ResolveReusableKeptCellsAsync only ever passes Success / Skipped /
-                // error-edge-handled Failure cells. A non-terminal status reaching here is a contract breach —
-                // fail loudly rather than silently drop a kept cell (which would orphan the fork's frontier).
+                // Defence-in-depth: callers only ever pass settled (Success / Skipped / Failure) cells. A
+                // non-terminal status reaching here is a contract breach — fail loudly rather than silently
+                // drop a reused cell (which would orphan the fork's frontier or mis-settle a sibling).
                 throw new InvalidOperationException(
-                    $"Cannot re-emit kept cell '{cell.NodeId}' from run {originalRunId}: unexpected non-terminal status {cell.Status}.");
+                    $"Cannot re-emit reused cell '{cell.NodeId}' (iteration '{iterationKey}') from run {originalRunId}: unexpected non-terminal status {cell.Status}.");
         }
     }
 
