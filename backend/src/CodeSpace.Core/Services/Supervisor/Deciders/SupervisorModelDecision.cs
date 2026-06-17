@@ -23,5 +23,7 @@ public sealed record SupervisorModelDecision
 
     public SupervisorMergePayload? Merge { get; init; }
 
+    public SupervisorResolvePayload? Resolve { get; init; }
+
     public SupervisorStopPayload? Stop { get; init; }
 }

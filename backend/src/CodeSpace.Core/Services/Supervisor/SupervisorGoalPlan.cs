@@ -28,6 +28,9 @@ public sealed record SupervisorGoalPlan
     /// <summary>Consecutive no-new-result decisions before the best-effort no-progress guard force-STOPs ("no progress"). Clamped to <c>[1, NoProgressCeiling]</c>.</summary>
     public required int MaxNoProgressDecisions { get; init; }
 
+    /// <summary>Max <c>resolve</c> attempts against a conflicted integration (resolver loop #379) before a further resolve force-STOPs ("resolve attempts exhausted") and the conflict falls back to the humans. Clamped to <c>[1, MaxResolveAttemptsCeiling]</c>.</summary>
+    public required int MaxResolveAttempts { get; init; }
+
     /// <summary>Which decisions require a human approval before their side effect fires — maps to the autonomy tier <c>AgentToolGate</c> reads.</summary>
     public required SupervisorApprovalPolicy ApprovalPolicy { get; init; }
 
@@ -44,6 +47,7 @@ public sealed record SupervisorGoalPlan
         MaxParallelism = Clamp(config?.MaxParallelism, SpawnKCeiling, max: SpawnKCeiling),
         MaxTotalSpawns = Clamp(config?.MaxTotalSpawns, SupervisorLane.DefaultMaxTotalSpawns, max: SupervisorLane.MaxTotalSpawnsCeiling),
         MaxNoProgressDecisions = Clamp(config?.MaxNoProgressDecisions, SupervisorLane.DefaultMaxNoProgressDecisions, max: NoProgressCeiling),
+        MaxResolveAttempts = Clamp(config?.MaxResolveAttempts, SupervisorLane.DefaultMaxResolveAttempts, max: SupervisorLane.MaxResolveAttemptsCeiling),
         ApprovalPolicy = ParseApprovalPolicy(config?.ApprovalPolicy),
         MaxCostUsd = NormalizeCost(config?.MaxCostUsd),
     };

@@ -8,7 +8,9 @@ namespace CodeSpace.Core.Services.Supervisor.Deciders;
 /// (Rule 18) and pinned by a unit test — a drift in the schema is a contract change a reviewer must see, not
 /// an invisible refactor. Mirrors <c>PlannerSchema.ResponseSchema</c>.
 ///
-/// <para>The model picks ONE <c>kind</c> from the six-verb vocabulary and supplies that verb's bounded
+/// <para>The model picks ONE <c>kind</c> from the seven-verb vocabulary (the resolver loop #379 added <c>resolve</c>,
+/// which intentionally carries NO payload sub-object — the server assembles the resolver task deterministically from
+/// durable data, so the model only picks the verb) and supplies that verb's bounded
 /// payload (the schema documents each verb's fields). Per-verb payloads are bounded (subtasks [1..20],
 /// spawn/merge subtask-id lists [1..20]) so a decision never fans out an unbounded wave. The schema is
 /// <c>additionalProperties: false</c> at the root + every payload object, and — CRITICALLY — carries NO
@@ -26,8 +28,8 @@ public static class SupervisorDecisionSchema
           "properties": {
             "kind": {
               "type": "string",
-              "enum": ["plan", "spawn", "retry", "ask_human", "merge", "stop"],
-              "description": "The single next action. 'plan' decomposes the goal; 'spawn' fans out agents over planned subtasks; 'retry' re-runs one subtask; 'merge' synthesizes prior agent results; 'ask_human' asks a question; 'stop' ends the run."
+              "enum": ["plan", "spawn", "retry", "ask_human", "merge", "resolve", "stop"],
+              "description": "The single next action. 'plan' decomposes the goal; 'spawn' fans out agents over planned subtasks; 'retry' re-runs one subtask; 'merge' synthesizes prior agent results; 'resolve' spawns ONE agent to reconcile a CONFLICTED integration (choose it only after a merge reported INTEGRATION CONFLICTED — the server assembles the resolver task from the conflict); 'ask_human' asks a question; 'stop' ends the run."
             },
             "plan": {
               "type": "object",

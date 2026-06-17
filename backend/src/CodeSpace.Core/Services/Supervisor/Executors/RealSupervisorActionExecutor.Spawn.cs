@@ -237,12 +237,25 @@ public sealed partial class RealSupervisorActionExecutor
             : !string.IsNullOrWhiteSpace(planned?.Instruction) ? planned!.Instruction
             : context.Goal;
 
+        return BuildTaskWithGoal(instruction, context);
+    }
+
+    /// <summary>
+    /// Build a spawned agent's task from a GOAL string + the run's profile — the shared field-stamping the spawn,
+    /// retry, AND resolve (#379) paths reuse so a supervisor-spawned agent is always a REAL team agent (repo /
+    /// harness / model / persona / credential / runner / MCP / autonomy + the supervisor's conversation as its
+    /// approval surface), regardless of which verb spawned it. <paramref name="forcePushBranch"/> overrides the
+    /// profile's push opt-in to TRUE (the resolver MUST push its reconciled branch so a downstream PR-open has a
+    /// head); spawn/retry pass false → byte-identical to before (the profile's <c>PushBranch</c> wins).
+    /// </summary>
+    internal static AgentTask BuildTaskWithGoal(string goal, SupervisorTurnContext context, bool forcePushBranch = false)
+    {
         var profile = context.AgentProfile;
         var autonomy = AutonomyOf(profile);
 
         return new AgentTask
         {
-            Goal = instruction,
+            Goal = goal,
             Harness = HarnessOf(profile),
             Model = NullIfBlank(profile?.Model),
             AgentDefinitionId = profile?.AgentDefinitionId,
@@ -254,7 +267,7 @@ public sealed partial class RealSupervisorActionExecutor
             Permissions = AgentAutonomyPolicy.Derive(autonomy),
             ApprovalConversationId = context.ConversationId,
             EnableMcpEndpoint = profile?.EnableMcp,
-            PushProducedBranch = profile?.PushBranch,
+            PushProducedBranch = forcePushBranch ? true : profile?.PushBranch,
         };
     }
 

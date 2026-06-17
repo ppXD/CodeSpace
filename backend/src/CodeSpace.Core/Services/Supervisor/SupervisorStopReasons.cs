@@ -32,4 +32,7 @@ public static class SupervisorStopReasons
 
     /// <summary>The governance gate DENIED a side-effecting decision at the run's approval policy tier — refused (fail-closed, no side effect).</summary>
     public const string GovernanceDenied = "governance denied the side effect";
+
+    /// <summary>The resolver loop (#379) exhausted its <c>MaxResolveAttempts</c> budget — a further <c>resolve</c> is refused so a conflict that won't reconcile falls back fail-safe to the humans (the K agent branches remain), never an unbounded resolve loop.</summary>
+    public const string ResolveAttemptsExceeded = "resolve attempts exhausted";
 }

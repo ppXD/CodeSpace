@@ -70,6 +70,7 @@ public sealed partial class RealSupervisorActionExecutor : ISupervisorActionExec
         SupervisorDecisionKinds.Spawn => ExecuteSpawnAsync(decision, context, cancellationToken),
         SupervisorDecisionKinds.Retry => ExecuteRetryAsync(decision, context, cancellationToken),
         SupervisorDecisionKinds.Merge => ExecuteMergeAsync(decision, context, cancellationToken),
+        SupervisorDecisionKinds.Resolve => ExecuteResolveAsync(decision, context, cancellationToken),
         SupervisorDecisionKinds.AskHuman => ExecuteAskHumanAsync(decision, context, cancellationToken),
         SupervisorDecisionKinds.Stop => Task.FromResult(ExecuteStop(decision)),
         _ => Task.FromResult(SupervisorExecution.Synchronous(JsonSerializer.Serialize(new { unsupported = decision.Kind }, AgentJson.Options))),

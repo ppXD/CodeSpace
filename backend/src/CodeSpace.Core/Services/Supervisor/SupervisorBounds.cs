@@ -42,6 +42,13 @@ public static class SupervisorBounds
     {
         if (!SupervisorGovernance.IsSideEffecting(decision.Kind)) return null;
 
+        // Resolver loop (#379): a resolve attempt past the dedicated cap force-STOPs so a conflict that won't reconcile
+        // falls back fail-safe to the humans. Counted from the ledger tape (replay-deterministic) — the CURRENT resolve
+        // isn't on the tape yet, so cap=1 allows the first and refuses the second.
+        if (decision.Kind == SupervisorDecisionKinds.Resolve
+            && context.PriorDecisions.Count(d => d.DecisionKind == SupervisorDecisionKinds.Resolve) >= plan.MaxResolveAttempts)
+            return SupervisorStopReasons.ResolveAttemptsExceeded;
+
         var k = SpawnCount(decision);
 
         if (k > plan.MaxParallelism) return SupervisorStopReasons.SpawnFanOutExceedsCap;
@@ -59,7 +66,7 @@ public static class SupervisorBounds
     /// <summary>How many agents the decision would spawn: a spawn fans out its <c>subtaskIds</c>; a retry is exactly one. Best-effort read — a malformed payload reads 0 (it stages nothing, so it can't breach a count bound).</summary>
     internal static int SpawnCount(SupervisorDecision decision)
     {
-        if (decision.Kind == SupervisorDecisionKinds.Retry) return 1;
+        if (decision.Kind is SupervisorDecisionKinds.Retry or SupervisorDecisionKinds.Resolve) return 1;
 
         if (decision.Kind != SupervisorDecisionKinds.Spawn) return 0;
 
