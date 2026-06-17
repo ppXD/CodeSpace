@@ -73,13 +73,13 @@ public sealed class RunFromSnapshotStarter : IRunFromSnapshotStarter, IScopedDep
     /// links back to the original request). The caller clones the variable snapshot then dispatches — exactly as
     /// the authored-replay path does, so the engine's variable-presence fork takes the replay scope.
     /// </summary>
-    public async Task<Guid> StageReplayFromSnapshotAsync(string definitionJson, string definitionHash, Guid teamId, Guid actorUserId, string payloadJson, Guid parentRunId, Guid causationRequestId, CancellationToken cancellationToken)
+    public async Task<Guid> StageReplayFromSnapshotAsync(string definitionJson, string definitionHash, Guid teamId, Guid actorUserId, string payloadJson, string sourceType, Guid parentRunId, Guid causationRequestId, CancellationToken cancellationToken)
     {
-        var runId = await StageAsync(teamId, actorUserId, definitionJson, definitionHash, NormalizePayload(payloadJson), WorkflowRunSourceTypes.Replay, parentRunId, causationRequestId, cancellationToken).ConfigureAwait(false);
+        var runId = await StageAsync(teamId, actorUserId, definitionJson, definitionHash, NormalizePayload(payloadJson), sourceType, parentRunId, causationRequestId, cancellationToken).ConfigureAwait(false);
 
-        await _recordLogger.RunQueuedAsync(runId, WorkflowRunSourceTypes.Replay, actorUserId, cancellationToken).ConfigureAwait(false);
+        await _recordLogger.RunQueuedAsync(runId, sourceType, actorUserId, cancellationToken).ConfigureAwait(false);
 
-        _logger.LogInformation("Snapshot run replay staged. TeamId={TeamId} ReplayRunId={RunId} ParentRunId={ParentRunId} Hash={Hash}", teamId, runId, parentRunId, definitionHash);
+        _logger.LogInformation("Snapshot run fork staged. Source={SourceType} TeamId={TeamId} ForkRunId={RunId} ParentRunId={ParentRunId} Hash={Hash}", sourceType, teamId, runId, parentRunId, definitionHash);
 
         return runId;
     }

@@ -2826,8 +2826,10 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
         await _recordLogger.NodeSkippedAsync(run.Id, node.Id, iterationKey, reason: "all-incoming-dead", cancellationToken).ConfigureAwait(false);
     }
 
-    /// <summary>Empty iteration key — used for every non-flow.iterate node.</summary>
-    private const string NoIteration = "";
+    /// <summary>Empty iteration key — used for every non-flow.iterate node. Aliases the shared
+    /// <see cref="WorkflowIterationKeys.TopLevel"/> so the engine, the rerun seeder, and the rerun
+    /// reusability resolver all read the same sentinel (no silent drift if it ever changes).</summary>
+    private const string NoIteration = WorkflowIterationKeys.TopLevel;
 
     private sealed class NodeFailureException : Exception
     {

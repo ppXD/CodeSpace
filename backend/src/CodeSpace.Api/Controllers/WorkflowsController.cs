@@ -99,6 +99,17 @@ public class WorkflowsController : ControllerBase
     }
 
     /// <summary>
+    /// Re-run an existing run STARTING FROM a chosen node (D7). Forks a new run that reuses the upstream cells
+    /// (pre-seeded from the original) and re-runs the chosen node + its downstream. Returns the new run's id.
+    /// </summary>
+    [HttpPost("runs/{runId:guid}/rerun-from-node")]
+    public async Task<IActionResult> RerunFromNode([FromRoute] Guid runId, [FromBody] RerunRunFromNodeCommand command, CancellationToken cancellationToken)
+    {
+        var newRunId = await _mediator.Send(command with { OriginalRunId = runId }, cancellationToken).ConfigureAwait(false);
+        return Ok(new { runId = newRunId });
+    }
+
+    /// <summary>
     /// Resolve a pending approval on a Suspended run with a human decision (approve / reject +
     /// optional comment) and resume it. Returns <c>{ resumed }</c> — false when the run has no
     /// pending approval wait.

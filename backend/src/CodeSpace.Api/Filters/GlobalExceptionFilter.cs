@@ -160,6 +160,25 @@ public sealed class GlobalExceptionFilter : IExceptionFilter
                 context.Result = BuildProblemResult(StatusCodes.Status409Conflict, "duplicate_resource", "A resource with the same identifying fields already exists.");
                 break;
 
+            case RerunTargetNotFoundException:
+                // 400 — the chosen from-node is invalid (unknown id, or a container-internal node). The message
+                // names the node / the container to rerun instead, so surface it verbatim (unlike the generic 404).
+                _logger.LogInformation("Rerun target invalid at {Path}: {Message}", path, context.Exception.Message);
+                context.Result = BuildProblemResult(StatusCodes.Status400BadRequest, "rerun_target_invalid", context.Exception.Message);
+                break;
+
+            case RerunBlockedBySideEffectException blocked:
+                // 422 — valid request, blocked by a domain rule (no un-gated effectful re-run). The message names
+                // the offending node(s) so the operator knows where to rerun-from instead.
+                _logger.LogInformation("Rerun blocked by side effect at {Path}: nodes={Nodes}", path, string.Join(", ", blocked.BlockedNodeIds));
+                context.Result = BuildProblemResult(StatusCodes.Status422UnprocessableEntity, "rerun_blocked_side_effect", blocked.Message);
+                break;
+
+            case RerunUpstreamNotReusableException:
+                _logger.LogInformation("Rerun upstream not reusable at {Path}: {Message}", path, context.Exception.Message);
+                context.Result = BuildProblemResult(StatusCodes.Status422UnprocessableEntity, "rerun_upstream_not_reusable", context.Exception.Message);
+                break;
+
             case InvalidOperationException invalid:
                 _logger.LogWarning(context.Exception, "Invalid operation at {Path}", path);
                 context.Result = BuildProblemResult(StatusCodes.Status400BadRequest, "invalid_request", invalid.Message);

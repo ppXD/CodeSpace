@@ -22,6 +22,7 @@ public class WorkflowRunSourceTypesTests
     [Theory]
     [InlineData("manual",         nameof(WorkflowRunSourceTypes.Manual))]
     [InlineData("replay",         nameof(WorkflowRunSourceTypes.Replay))]
+    [InlineData("rerun",          nameof(WorkflowRunSourceTypes.Rerun))]
     [InlineData("snapshot",       nameof(WorkflowRunSourceTypes.Snapshot))]
     [InlineData("schedule.cron",  nameof(WorkflowRunSourceTypes.ScheduleCron))]
     [InlineData("api",            nameof(WorkflowRunSourceTypes.Api))]
