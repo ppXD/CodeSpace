@@ -249,7 +249,7 @@ public sealed partial class SupervisorTurnService : ISupervisorTurnService, ISco
     /// </summary>
     internal static SupervisorTurnResult BuildResult(SupervisorTurnContext context, SupervisorDecision decision, SupervisorExecution execution)
     {
-        if (decision.IsTerminal) return SupervisorTurnResult.Finished(decision.Kind, ReadStopReason(decision));
+        if (decision.IsTerminal) return SupervisorTurnResult.Finished(decision.Kind, ReadStopReason(decision), SupervisorOutcome.ReadFinalIntegratedBranch(context.PriorDecisions));
 
         var nextTurn = context with { TurnNumber = context.TurnNumber + 1, InFlight = null };
 

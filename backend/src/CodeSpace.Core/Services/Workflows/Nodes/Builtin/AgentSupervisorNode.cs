@@ -33,7 +33,9 @@ namespace CodeSpace.Core.Services.Workflows.Nodes.Builtin;
 /// byte-identical to today and an accidental one degrades to a clean node failure.</para>
 ///
 /// Config: goal? (the run-level objective the supervisor pursues — the real LlmSupervisorDecider folds it into its prompt; the test stub follows a fixed script regardless)
-/// Outputs: status · decision (the terminal decision kind) · reason (terminal reason) · turns (decided count)
+/// Outputs: status · decision (the terminal decision kind) · reason (terminal reason) · turns (decided count) ·
+/// integratedBranch (resolver loop #379, S5 — the run's final reviewable branch: the latest clean merge's, or a
+/// VERIFIED resolver's own tested branch; "" when none, so a downstream git.open_pr can bind it directly)
 /// </summary>
 public sealed class AgentSupervisorNode : INodeRuntime
 {
@@ -89,10 +91,11 @@ public sealed class AgentSupervisorNode : INodeRuntime
             {
               "type": "object",
               "properties": {
-                "status":   { "type": "string" },
-                "decision": { "type": "string" },
-                "reason":   { "type": "string" },
-                "turns":    { "type": "integer" }
+                "status":           { "type": "string" },
+                "decision":         { "type": "string" },
+                "reason":           { "type": "string" },
+                "turns":            { "type": "integer" },
+                "integratedBranch": { "type": "string" }
               }
             }
             """),
@@ -200,6 +203,8 @@ public sealed class AgentSupervisorNode : INodeRuntime
             ["decision"] = JsonSerializer.SerializeToElement(result.DecisionKind),
             ["reason"] = JsonSerializer.SerializeToElement(result.TerminalReason ?? ""),
             ["turns"] = JsonSerializer.SerializeToElement((result.NextTurn?.TurnNumber ?? 0)),
+            // The run's final reviewable integrated branch (S5) — "" when none, so a downstream git.open_pr binds it directly.
+            ["integratedBranch"] = JsonSerializer.SerializeToElement(result.IntegratedBranch ?? ""),
         };
 
         return NodeResult.Ok(outputs);

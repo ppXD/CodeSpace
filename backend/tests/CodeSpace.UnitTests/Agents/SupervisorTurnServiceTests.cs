@@ -1,3 +1,5 @@
+using System.Text.Json;
+using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Supervisor;
 using CodeSpace.Core.Services.Supervisor.Deciders;
 using CodeSpace.Core.Services.Supervisor.Executors;
@@ -143,6 +145,39 @@ public class SupervisorTurnServiceTests
 
         var resolve = service.GateSideEffectingDecision(context, new SupervisorDecision { Kind = SupervisorDecisionKinds.Resolve, PayloadJson = "{}" });
         resolve.Kind.ShouldBe(SupervisorDecisionKinds.AskHuman, "a resolve under the SAME autonomous policy is rewritten into an approval card — it parks for a human before any autonomous re-merge");
+    }
+
+    // ── Resolver loop #379 S5: a terminal stop surfaces the run's final integrated branch (node output) ──
+
+    [Fact]
+    public void BuildResult_on_a_terminal_stop_surfaces_the_final_integrated_branch()
+    {
+        // Part A wiring: on a terminal stop, BuildResult folds the run's final reviewable branch off the tape onto
+        // the turn result, so the node emits it as `integratedBranch` for a downstream git.open_pr. Here the tape's
+        // latest integration is a VERIFIED resolution → its OWN tested branch is the run's reconciled head.
+        var resolverResult = new SupervisorAgentResult { AgentRunId = Guid.NewGuid(), Status = "Succeeded", Summary = $"done {SupervisorResolverRecipe.TestsPassedMarker}", ProducedBranch = "codespace/resolve/final" };
+        var resolve = new SupervisorPriorDecision
+        {
+            Id = Guid.NewGuid(), Sequence = 3, DecisionKind = SupervisorDecisionKinds.Resolve, Status = SupervisorDecisionStatus.Succeeded, PayloadJson = "{}",
+            OutcomeJson = JsonSerializer.Serialize(new { agentRunIds = new[] { resolverResult.AgentRunId }, agentCount = 1, agentResults = new[] { resolverResult } }, AgentJson.Options),
+        };
+        var context = new SupervisorTurnContext { Goal = "goal", TurnNumber = 4, PriorDecisions = new[] { resolve } };
+
+        var result = SupervisorTurnService.BuildResult(context, new SupervisorDecision { Kind = SupervisorDecisionKinds.Stop, PayloadJson = "{}" }, SupervisorExecution.Synchronous("{}"));
+
+        result.IsFinished.ShouldBeTrue();
+        result.IntegratedBranch.ShouldBe("codespace/resolve/final", "the node surfaces the run's final reviewable branch so a downstream open_pr can bind it directly");
+    }
+
+    [Fact]
+    public void BuildResult_carries_no_integrated_branch_when_the_tape_has_no_clean_integration()
+    {
+        var context = new SupervisorTurnContext { Goal = "goal", TurnNumber = 1, PriorDecisions = Array.Empty<SupervisorPriorDecision>() };
+
+        var result = SupervisorTurnService.BuildResult(context, new SupervisorDecision { Kind = SupervisorDecisionKinds.Stop, PayloadJson = "{}" }, SupervisorExecution.Synchronous("{}"));
+
+        result.IsFinished.ShouldBeTrue();
+        result.IntegratedBranch.ShouldBeNull("a run that never produced a clean integration surfaces no branch (the node emits an empty string)");
     }
 
     // ── Replay: a re-run of a settled turn does NOT re-execute the side effect ───────
