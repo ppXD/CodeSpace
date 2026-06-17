@@ -57,6 +57,11 @@ public sealed class LocalGitWorkspaceProvider : IWorkspaceProvider, IWorkspaceJa
         var workspaceRoot = Path.Combine(WorkspacesRoot, Guid.NewGuid().ToString("N"));
         var single = request.Repositories.Count == 1;
 
+        // Fail loud BEFORE any clone if a multi-repo provision's per-repo mount segments are unsafe or collide.
+        // This is the universal choke point every caller (resolver, run-command, a future planner that AUTHORS specs)
+        // funnels through, so a spec can never traverse outside the workspace root nor clobber a sibling clone.
+        if (!single) ValidateMultiRepoLayout(request);
+
         try
         {
             // Multi-repo: pre-create the root so each repo can clone into its own <root>/<path> subdir. Single-repo:
@@ -86,9 +91,43 @@ public sealed class LocalGitWorkspaceProvider : IWorkspaceProvider, IWorkspaceJa
         }
     }
 
-    /// <summary>The on-disk directory a repo clones into: the workspace root itself for a single-repo provision (flat, byte-identical), else <c>&lt;root&gt;/&lt;path ?? alias&gt;</c>.</summary>
+    /// <summary>The on-disk directory a repo clones into: the workspace root itself for a single-repo provision (flat, byte-identical), else <c>&lt;root&gt;/&lt;path ?? alias&gt;</c> — the segment is <see cref="ValidateMultiRepoLayout"/>-checked to be a single safe directory name, so the combine can never escape the root.</summary>
     private static string RepoDirectory(string workspaceRoot, WorkspaceRepositoryProvision repo, bool single) =>
         single ? workspaceRoot : Path.Combine(workspaceRoot, string.IsNullOrWhiteSpace(repo.Path) ? repo.Alias : repo.Path);
+
+    /// <summary>
+    /// Validate a multi-repo provision's per-repo mount layout BEFORE cloning: every alias is unique, every mount
+    /// segment (<c>Path ?? Alias</c>) is a SAFE single directory name, and no two repos map to the same subdir.
+    /// Throws a clear <see cref="WorkspaceException"/> on any violation — a fail-loud author-time-style error rather
+    /// than a path traversal outside the workspace root, a silent sibling clobber, or an opaque mid-clone git error.
+    /// Single-repo provisions are exempt (they clone flat into the GUID root regardless of alias/path).
+    /// </summary>
+    private static void ValidateMultiRepoLayout(WorkspaceProvisionRequest request)
+    {
+        var aliases = new HashSet<string>(StringComparer.Ordinal);
+        var segments = new HashSet<string>(StringComparer.Ordinal);
+
+        foreach (var repo in request.Repositories)
+        {
+            if (!aliases.Add(repo.Alias))
+                throw new WorkspaceException($"Duplicate repository alias '{repo.Alias}' in the workspace provision — each repository needs a unique alias.");
+
+            var segment = string.IsNullOrWhiteSpace(repo.Path) ? repo.Alias : repo.Path;
+
+            if (!IsSafeMountSegment(segment))
+                throw new WorkspaceException($"Unsafe repository mount path '{segment}' (alias '{repo.Alias}') — a repository path must be a single directory name, never rooted, '.', '..', or containing a path separator.");
+
+            if (!segments.Add(segment))
+                throw new WorkspaceException($"Two repositories map to the same mount path '{segment}' in the workspace provision — each repository needs a distinct path.");
+        }
+    }
+
+    /// <summary>A safe mount segment is a single directory NAME: non-empty, not <c>.</c>/<c>..</c>, not rooted, and free of path separators — so <c>Path.Combine(root, segment)</c> can never resolve outside <c>root</c>. Pure + internal so it's unit-pinned.</summary>
+    internal static bool IsSafeMountSegment(string segment) =>
+        !string.IsNullOrWhiteSpace(segment)
+        && segment != "." && segment != ".."
+        && segment.IndexOf('/') < 0 && segment.IndexOf('\\') < 0
+        && !Path.IsPathRooted(segment);
 
     /// <summary>Clone one repo, strip its token from the persisted remote, and read its base revision — the per-repo unit of the workspace.</summary>
     private async Task<MaterializedRepo> MaterializeAsync(WorkspaceRepositoryProvision repo, string directory, CancellationToken cancellationToken)

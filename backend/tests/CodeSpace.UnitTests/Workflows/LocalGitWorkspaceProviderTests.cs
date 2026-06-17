@@ -235,7 +235,7 @@ public sealed class LocalGitWorkspaceProviderTests
             File.Exists(Path.Combine(apiRepo.Directory, "api.txt")).ShouldBeTrue("the api repo is cloned into its subdir");
 
             var manifest = await File.ReadAllTextAsync(Path.Combine(root, "WORKSPACE.md"));
-            manifest.ShouldContain("web", customMessage: "the manifest lists the repos");
+            manifest.ShouldContain("primary, writable", customMessage: "the manifest marks the primary writable repo");
             manifest.ShouldContain("read-only context", customMessage: "the manifest records the api repo's read-only access");
         }
 
@@ -303,6 +303,134 @@ public sealed class LocalGitWorkspaceProviderTests
             IsPrimary = r.primary,
         }).ToList(),
     };
+
+    // ─── Multi-repo layout safety: traversal / collision guard (fold of the slice-2 review) ───
+
+    [Theory]
+    [InlineData("web", true)]
+    [InlineData("api-service", true)]
+    [InlineData("", false)]
+    [InlineData(".", false)]
+    [InlineData("..", false)]
+    [InlineData("../escape", false)]
+    [InlineData("a/b", false)]
+    [InlineData("a\\b", false)]
+    [InlineData("/etc/cron.d", false)]
+    public void IsSafeMountSegment_accepts_only_a_single_unrooted_directory_name(string segment, bool expectedSafe) =>
+        LocalGitWorkspaceProvider.IsSafeMountSegment(segment).ShouldBe(expectedSafe);
+
+    [Fact]
+    public async Task A_multi_repo_provision_with_a_traversing_mount_path_is_refused_before_any_clone()
+    {
+        // A repo whose mount path escapes the workspace root (.. or absolute) must fail LOUD at provision time,
+        // never clone outside the per-run GUID dir (which would escape isolation + survive DisposeAsync).
+        var provision = new WorkspaceProvisionRequest
+        {
+            PrimaryAlias = "web",
+            Repositories = new[]
+            {
+                new WorkspaceRepositoryProvision { Alias = "web", CloneRequest = new WorkspaceRequest { RepositoryUrl = "file:///x" }, IsPrimary = true },
+                new WorkspaceRepositoryProvision { Alias = "evil", Path = "../escape", CloneRequest = new WorkspaceRequest { RepositoryUrl = "file:///y" } },
+            },
+        };
+
+        (await Should.ThrowAsync<WorkspaceException>(() => NewProvider().PrepareAsync(provision, CancellationToken.None)))
+            .Message.ShouldContain("Unsafe repository mount path");
+    }
+
+    [Fact]
+    public async Task A_multi_repo_provision_with_a_duplicate_alias_is_refused()
+    {
+        var provision = MultiRepo(
+            (alias: "api", path: "/tmp/whatever", access: WorkspaceAccess.Write, primary: true),
+            (alias: "api", path: "/tmp/whatever2", access: WorkspaceAccess.Write, primary: false));
+
+        (await Should.ThrowAsync<WorkspaceException>(() => NewProvider().PrepareAsync(provision, CancellationToken.None)))
+            .Message.ShouldContain("Duplicate repository alias");
+    }
+
+    [Fact]
+    public async Task Clones_a_repo_into_an_explicit_mount_path_distinct_from_its_alias()
+    {
+        if (!await GitAvailableAsync()) return;
+
+        using var web = new TempDir();
+        using var lib = new TempDir();
+        await SeedOriginAsync(web.Path, "web.txt", "w");
+        await SeedOriginAsync(lib.Path, "lib.txt", "l");
+
+        var provision = new WorkspaceProvisionRequest
+        {
+            PrimaryAlias = "web",
+            Repositories = new[]
+            {
+                new WorkspaceRepositoryProvision { Alias = "web", CloneRequest = new WorkspaceRequest { RepositoryUrl = AsFileUrl(web.Path) }, IsPrimary = true },
+                // An explicit single-segment mount path that differs from the alias (the Path-wins-over-alias branch).
+                new WorkspaceRepositoryProvision { Alias = "lib", Path = "shared", CloneRequest = new WorkspaceRequest { RepositoryUrl = AsFileUrl(lib.Path) }, Access = WorkspaceAccess.Read },
+            },
+        };
+
+        await using var handle = await NewProvider().PrepareAsync(provision, CancellationToken.None);
+
+        var libRepo = handle.Repositories.Single(r => r.Alias == "lib");
+        libRepo.Directory.ShouldBe(Path.Combine(handle.Directory, "shared"), "the repo clones into its explicit mount Path, not its alias");
+        File.Exists(Path.Combine(libRepo.Directory, "lib.txt")).ShouldBeTrue();
+    }
+
+    [Fact]
+    public async Task Multi_repo_clone_strips_each_repos_token_from_its_own_git_config()
+    {
+        // The per-repo secret-hygiene invariant: a token on ANY repo is stripped from THAT repo's .git/config.
+        if (!await GitAvailableAsync()) return;
+
+        using var web = new TempDir();
+        using var api = new TempDir();
+        await SeedOriginAsync(web.Path, "web.txt", "w");
+        await SeedOriginAsync(api.Path, "api.txt", "a");
+
+        var provision = new WorkspaceProvisionRequest
+        {
+            PrimaryAlias = "web",
+            Repositories = new[]
+            {
+                new WorkspaceRepositoryProvision { Alias = "web", CloneRequest = new WorkspaceRequest { RepositoryUrl = AsFileUrl(web.Path), Token = "web-secret-token", TokenUsername = "x-access-token" }, IsPrimary = true },
+                new WorkspaceRepositoryProvision { Alias = "api", CloneRequest = new WorkspaceRequest { RepositoryUrl = AsFileUrl(api.Path), Token = "api-secret-token", TokenUsername = "x-access-token" }, Access = WorkspaceAccess.Write },
+            },
+        };
+
+        await using var handle = await NewProvider().PrepareAsync(provision, CancellationToken.None);
+
+        foreach (var repo in handle.Repositories)
+        {
+            var config = await File.ReadAllTextAsync(Path.Combine(repo.Directory, ".git", "config"));
+            config.ShouldNotContain("secret-token", Case.Insensitive, $"the {repo.Alias} repo's token must be stripped from its persisted remote");
+        }
+    }
+
+    [Fact]
+    public async Task A_later_repos_clone_failure_removes_the_whole_partial_workspace()
+    {
+        // repo[0] clones fine, repo[1]'s origin is missing → the whole workspace tree (incl. the succeeded repo[0])
+        // is removed by the catch, leaking nothing.
+        if (!await GitAvailableAsync()) return;
+
+        using var web = new TempDir();
+        await SeedOriginAsync(web.Path, "web.txt", "w");
+        var missing = Path.Combine(Path.GetTempPath(), "does-not-exist-" + Guid.NewGuid().ToString("N"));
+
+        var provision = MultiRepo(
+            (alias: "web", path: web.Path, access: WorkspaceAccess.Write, primary: true),
+            (alias: "api", path: missing, access: WorkspaceAccess.Write, primary: false));
+
+        var before = Directory.Exists(LocalGitWorkspaceProvider.WorkspacesRoot)
+            ? Directory.GetDirectories(LocalGitWorkspaceProvider.WorkspacesRoot).Length : 0;
+
+        await Should.ThrowAsync<WorkspaceException>(() => NewProvider().PrepareAsync(provision, CancellationToken.None));
+
+        var after = Directory.Exists(LocalGitWorkspaceProvider.WorkspacesRoot)
+            ? Directory.GetDirectories(LocalGitWorkspaceProvider.WorkspacesRoot).Length : 0;
+        after.ShouldBe(before, "a partial multi-repo clone leaves no workspace dir behind");
+    }
 
     // ─── Workspace janitor (reclaim clones orphaned by a crashed worker) ──────
 
