@@ -466,6 +466,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
                 RepositoryId = repoIds is not null && repoIds.TryGetValue(repo.Alias, out var id) ? id : null,
                 ChangedFiles = changes.ChangedFiles,
                 BaseSha = changes.BaseSha,
+                BaseBranch = repo.BaseBranch,
                 Access = WorkspaceAccess.Write,
             });
         }

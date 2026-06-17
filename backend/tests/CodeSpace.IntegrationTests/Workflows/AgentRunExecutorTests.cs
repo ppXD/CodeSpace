@@ -558,6 +558,8 @@ public class AgentRunExecutorTests
         web.ChangedFiles.ShouldBe(new[] { "web.txt" });
         web.ProducedBranch.ShouldBe(branch, "each writable repo's pushed branch round-trips through result_jsonb");
         api.ProducedBranch.ShouldBe(branch);
+        web.BaseBranch.ShouldBe("main-web", "each per-repo result carries its resolved base branch — the PR target a downstream git.open_change_set binds verbatim");
+        api.BaseBranch.ShouldBe("main-api");
 
         result.ChangedFiles.ShouldBe(new[] { "web.txt" }, "the top-level fields mirror the PRIMARY repo");
         result.ProducedBranch.ShouldBe(branch, "the top-level branch mirrors the primary repo's branch");
@@ -1036,7 +1038,7 @@ public class AgentRunExecutorTests
             public string PrimaryAlias => _repos.First(r => r.primary).alias;
 
             public IReadOnlyList<WorkspaceRepositoryHandle> Repositories =>
-                _repos.Select(r => new WorkspaceRepositoryHandle { Alias = r.alias, Directory = Path.Combine(_root, r.alias), Access = r.access }).ToList();
+                _repos.Select(r => new WorkspaceRepositoryHandle { Alias = r.alias, Directory = Path.Combine(_root, r.alias), Access = r.access, BaseBranch = $"main-{r.alias}" }).ToList();
 
             public Task<WorkspaceChanges> CaptureChangesAsync(CancellationToken cancellationToken) => CaptureChangesAsync(PrimaryAlias, cancellationToken);
 

@@ -120,7 +120,6 @@ public sealed class GitOpenChangeSetNodeTests
     [InlineData("missing")]   // no repositories key
     [InlineData("empty")]     // empty array
     [InlineData("no-repo-id")]
-    [InlineData("no-target")]
     public async Task Fails_on_a_malformed_repositories_array(string shape)
     {
         var stub = new StubChangeSetService();
@@ -130,7 +129,6 @@ public sealed class GitOpenChangeSetNodeTests
         {
             "empty" => JsonSerializer.SerializeToElement(Array.Empty<object>()),
             "no-repo-id" => JsonSerializer.SerializeToElement(new[] { new { sourceBranch = "b", targetBranch = "main" } }),
-            "no-target" => JsonSerializer.SerializeToElement(new[] { new { repositoryId = Web, sourceBranch = "b" } }),
             _ => JsonSerializer.SerializeToElement("not-an-array"),
         };
         if (shape == "missing") inputs.Remove("repositories");
@@ -140,6 +138,69 @@ public sealed class GitOpenChangeSetNodeTests
         result.Status.ShouldBe(NodeStatus.Failure);
         result.Error.ShouldContain("repositories");
         stub.Calls.ShouldBe(0, "a malformed array must short-circuit before any open");
+    }
+
+    [Fact]
+    public async Task Binds_agent_code_repositoryResults_verbatim_via_producedBranch_and_baseBranch()
+    {
+        var stub = new StubChangeSetService();
+
+        // The exact shape agent.code emits as repositoryResults — fed straight in, no re-authoring of source/target.
+        await new GitOpenChangeSetNode(stub).RunAsync(ContextFrom(new()
+        {
+            ["repositories"] = JsonSerializer.SerializeToElement(new[]
+            {
+                new { alias = "web", repositoryId = Web, producedBranch = "codespace/run-x", baseSha = "abc", baseBranch = "main" },
+                new { alias = "api", repositoryId = Api, producedBranch = "codespace/run-x", baseSha = "def", baseBranch = "develop" },
+            }),
+            ["title"] = JsonSerializer.SerializeToElement("Coordinated change"),
+        }), CancellationToken.None);
+
+        stub.Calls.ShouldBe(1);
+        var web = stub.Spec!.Repositories.Single(r => r.RepositoryId == Web);
+        web.SourceBranch.ShouldBe("codespace/run-x", "producedBranch is read as the head with no sourceBranch present");
+        web.TargetBranch.ShouldBe("main", "baseBranch is read as the PR target with no targetBranch present");
+        stub.Spec.Repositories.Single(r => r.RepositoryId == Api).TargetBranch.ShouldBe("develop");
+    }
+
+    [Fact]
+    public async Task Prefers_producedBranch_over_a_hand_authored_sourceBranch_alias()
+    {
+        var stub = new StubChangeSetService();
+
+        await new GitOpenChangeSetNode(stub).RunAsync(ContextFrom(new()
+        {
+            ["repositories"] = JsonSerializer.SerializeToElement(new[]
+            {
+                // Both keys present (unusual) — the canonical repositoryResults field wins.
+                new { repositoryId = Web, producedBranch = "from-results", sourceBranch = "hand-authored", baseBranch = "main", targetBranch = "ignored" },
+            }),
+            ["title"] = JsonSerializer.SerializeToElement("t"),
+        }), CancellationToken.None);
+
+        var web = stub.Spec!.Repositories.Single();
+        web.SourceBranch.ShouldBe("from-results");
+        web.TargetBranch.ShouldBe("main");
+    }
+
+    [Fact]
+    public async Task Passes_an_entry_with_no_head_or_base_through_to_the_service_to_classify()
+    {
+        var stub = new StubChangeSetService();
+
+        // A degraded repositoryResults entry (no branch at all) is NOT a node-level malformation — the service decides
+        // Skipped (no head) vs Failed (head, no base), so binding the whole array verbatim never crashes the node.
+        var result = await new GitOpenChangeSetNode(stub).RunAsync(ContextFrom(new()
+        {
+            ["repositories"] = JsonSerializer.SerializeToElement(new[] { new { repositoryId = Web } }),
+            ["title"] = JsonSerializer.SerializeToElement("t"),
+        }), CancellationToken.None);
+
+        result.Status.ShouldBe(NodeStatus.Success);
+        stub.Calls.ShouldBe(1);
+        var only = stub.Spec!.Repositories.Single();
+        only.SourceBranch.ShouldBe("");
+        only.TargetBranch.ShouldBe("");
     }
 
     // ── Helpers ──────────────────────────────────────────────────────────────

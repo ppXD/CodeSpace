@@ -164,6 +164,10 @@ public sealed class AgentWorkspacePushFlowTests
 
         await using var handle = await ctx.CloneBothWithTokensAsync();
 
+        // Each handle carries the resolved clone ref as its BaseBranch — the PR target threaded into the change set.
+        handle.Repositories.Single(r => r.Alias == "web").BaseBranch.ShouldBe("main", "the cloned ref surfaces as the per-repo base branch");
+        handle.Repositories.Single(r => r.Alias == "api").BaseBranch.ShouldBe("main");
+
         var webDir = handle.Repositories.Single(r => r.Alias == "web").Directory;
         var apiDir = handle.Repositories.Single(r => r.Alias == "api").Directory;
         await File.WriteAllTextAsync(Path.Combine(webDir, "web-change.txt"), "web work");
@@ -318,8 +322,8 @@ public sealed class AgentWorkspacePushFlowTests
             PrimaryAlias = "web",
             Repositories = new[]
             {
-                new WorkspaceRepositoryProvision { Alias = "web", IsPrimary = true, Access = WorkspaceAccess.Write, CloneRequest = new WorkspaceRequest { RepositoryUrl = RemoteUrl("web"), Token = Token, TokenUsername = "x-access-token" } },
-                new WorkspaceRepositoryProvision { Alias = "api", Access = WorkspaceAccess.Write, CloneRequest = new WorkspaceRequest { RepositoryUrl = RemoteUrl("api"), Token = Token, TokenUsername = "x-access-token" } },
+                new WorkspaceRepositoryProvision { Alias = "web", IsPrimary = true, Access = WorkspaceAccess.Write, CloneRequest = new WorkspaceRequest { RepositoryUrl = RemoteUrl("web"), Ref = "main", Token = Token, TokenUsername = "x-access-token" } },
+                new WorkspaceRepositoryProvision { Alias = "api", Access = WorkspaceAccess.Write, CloneRequest = new WorkspaceRequest { RepositoryUrl = RemoteUrl("api"), Ref = "main", Token = Token, TokenUsername = "x-access-token" } },
             },
         }, CancellationToken.None);
 

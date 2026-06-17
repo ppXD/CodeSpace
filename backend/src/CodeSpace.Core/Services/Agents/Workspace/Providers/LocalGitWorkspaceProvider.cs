@@ -141,7 +141,7 @@ public sealed class LocalGitWorkspaceProvider : IWorkspaceProvider, IWorkspaceJa
 
         // Carry the SAME short-lived clone credential forward (in-memory only, never persisted / never in .git/config —
         // origin was stripped) so a later push re-injects auth into the push argv without a second auth round-trip.
-        return new MaterializedRepo(repo.Alias, directory, repo.Access, repo.CloneRequest.RepositoryUrl, repo.CloneRequest.TokenUsername, repo.CloneRequest.Token, baseSha);
+        return new MaterializedRepo(repo.Alias, directory, repo.Access, repo.CloneRequest.RepositoryUrl, repo.CloneRequest.TokenUsername, repo.CloneRequest.Token, baseSha, repo.CloneRequest.Ref);
     }
 
     /// <summary>Where the harness runs: Auto → the primary repo's dir for one repo (the invariant), the workspace root for many; or the explicit mode.</summary>
@@ -179,8 +179,8 @@ public sealed class LocalGitWorkspaceProvider : IWorkspaceProvider, IWorkspaceJa
         }
     }
 
-    /// <summary>One cloned repo's runtime state (Rule 18-adjacent — a private provider noun): alias, on-disk dir, access, and the in-memory clone credential carried forward for a later push.</summary>
-    private sealed record MaterializedRepo(string Alias, string Directory, WorkspaceAccess Access, string RepositoryUrl, string? TokenUsername, string? Token, string BaseSha);
+    /// <summary>One cloned repo's runtime state (Rule 18-adjacent — a private provider noun): alias, on-disk dir, access, the in-memory clone credential carried forward for a later push, the cloned base SHA, and the base ref (the ref the clone was performed at — usually a branch, but a tag when one was authored) the produced branch should target.</summary>
+    private sealed record MaterializedRepo(string Alias, string Directory, WorkspaceAccess Access, string RepositoryUrl, string? TokenUsername, string? Token, string BaseSha, string? BaseBranch);
 
     /// <summary>Record the cloned HEAD revision so <see cref="LocalWorkspaceHandle.CaptureChangesAsync"/> can diff the agent's work against it — robust whether the agent commits or leaves changes uncommitted.</summary>
     private async Task<string> ReadBaseShaAsync(string directory, CancellationToken cancellationToken)
@@ -348,7 +348,7 @@ public sealed class LocalGitWorkspaceProvider : IWorkspaceProvider, IWorkspaceJa
         public string PrimaryAlias => _primary.Alias;
 
         public IReadOnlyList<WorkspaceRepositoryHandle> Repositories =>
-            _repos.Select(r => new WorkspaceRepositoryHandle { Alias = r.Alias, Directory = r.Directory, Access = r.Access }).ToList();
+            _repos.Select(r => new WorkspaceRepositoryHandle { Alias = r.Alias, Directory = r.Directory, Access = r.Access, BaseBranch = r.BaseBranch }).ToList();
 
         public Task<WorkspaceChanges> CaptureChangesAsync(CancellationToken cancellationToken) =>
             // The PRIMARY repo's changes. For a single-repo workspace the primary IS the only repo, so this is

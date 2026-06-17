@@ -87,6 +87,9 @@ public sealed record RepositoryRunResult
     /// <summary>The cloned base revision this repo's work is rooted at (the SOTA #3 integrity anchor, per repo).</summary>
     public string? BaseSha { get; init; }
 
+    /// <summary>The ref this repo was cloned at — the PR base for <see cref="ProducedBranch"/>, so a downstream <c>git.open_change_set</c> can open a PR per repo by binding this result verbatim (no separately-authored target). Usually the repo's default branch; a tag when an author pinned one in the run's <c>WorkspaceSpec.Ref</c> — a non-branch ref makes that repo's open a per-repo Failed (resolving a real base from a tag clone is a follow-on). Null when the run had no resolvable ref.</summary>
+    public string? BaseBranch { get; init; }
+
     /// <summary>The repo's access in the workspace (always <see cref="WorkspaceAccess.Write"/> for an entry that produced an outcome).</summary>
     public WorkspaceAccess Access { get; init; } = WorkspaceAccess.Write;
 }

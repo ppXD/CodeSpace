@@ -55,6 +55,12 @@ public sealed class ChangeSetService : IChangeSetService, IScopedDependency
         if (string.IsNullOrWhiteSpace(repo.SourceBranch))
             return new ChangeSetPullRequestOutcome { RepositoryId = repo.RepositoryId, Disposition = ChangeSetPullRequestDisposition.Skipped, Error = "no source branch — the repository produced no changes" };
 
+        // A repo that produced a head branch but carries no base (the resolver never recorded a ref for it) can't open a
+        // PR — it's a Failure of THIS repo, not a reason to skip it (it has work to land) and not a reason to sink the
+        // set. Classify it here rather than letting an empty TargetBranch reach the provider as an opaque rejection.
+        if (string.IsNullOrWhiteSpace(repo.TargetBranch))
+            return new ChangeSetPullRequestOutcome { RepositoryId = repo.RepositoryId, Disposition = ChangeSetPullRequestDisposition.Failed, Error = "no base branch — the repository's base could not be resolved, so its produced branch has no PR target." };
+
         var input = new OpenPullRequestInput { Title = spec.Title, SourceBranch = repo.SourceBranch, TargetBranch = repo.TargetBranch, Body = spec.Body, Draft = spec.Draft };
 
         try
