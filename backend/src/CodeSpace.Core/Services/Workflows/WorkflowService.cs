@@ -328,11 +328,12 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
         var definition = await LoadOriginalDefinitionAsync(original, cancellationToken).ConfigureAwait(false);
 
         // Fail-closed, ALL before any write. (1) the target must be a TOP-LEVEL flow.map; (2) its body must be
-        // re-runnable (pure compute/read only — no side-effecting / suspendable / nested-container body node, v1);
-        // (3) the original map must have SUCCEEDED (a Success map ⇒ every branch settled cleanly — this subsumes
-        // "suspended sibling" and "terminate-mode-failed map", both non-Success → refuse); (4) the branch index
-        // must be within the original fan-out. The plan re-runs FROM the map (so the map re-enters + its
-        // downstream synthesizer re-runs); the gate exempts ONLY this map from the container refusal.
+        // re-runnable per the D7-5 allowlist (pure + purely-side-effecting [D7-3-gated] + agent.code [re-stage];
+        // refuse other-suspendable / both-flagged / nested-container); (3) the original map must have SUCCEEDED (a
+        // Success map ⇒ every branch settled cleanly — this subsumes "suspended sibling" and "terminate-mode-failed
+        // map", both non-Success → refuse); (4) the branch index must be within the original fan-out. The plan re-runs
+        // FROM the map (so the map re-enters + its downstream synthesizer re-runs); the gate exempts ONLY this map from
+        // the container refusal.
         EnsureTargetIsTopLevelMap(definition, mapNodeId);
         EnsureMapItemsReplayDeterministic(definition, mapNodeId);
         EnsureBranchBodyIsRerunnable(definition, mapNodeId);
@@ -404,18 +405,24 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
                 $"Map '{mapNodeId}' binds its items to a variable scope (project / wf / team / sys) that is re-resolved live on replay; the branch space could differ on rerun, so reusing the sibling branches would be unsound. Replay the whole run instead.");
     }
 
-    /// <summary>Gate (v1): a re-run map branch body may contain only pure compute/read nodes — refuse a side-effecting,
-    /// suspendable, or nested-container body node (the D7-3-gate-inside-a-branch + agent-re-stage compositions are
-    /// deferred to a follow-up). Scans the static body subgraph (ParentId == mapNodeId), fail-closed.</summary>
+    /// <summary>Gate (D7-5): a re-run map branch body may contain — pure compute/read nodes; a PURELY side-effecting
+    /// node (IsSideEffecting &amp;&amp; !CanSuspend, which parks on the D7-3 approval gate at runtime: approve → fire once /
+    /// reject → skip); and an <c>agent.code</c> node (CanSuspend &amp;&amp; IsRerunnableWhenSuspendable, which re-stages a fresh
+    /// AgentRun with NO human gate). It REFUSES — any OTHER suspendable node (wait_* strand the fork, subworkflow forks
+    /// an ungated child closure, supervisor has a distinct per-turn shape, sleep unanalyzed); a node that is BOTH
+    /// side-effecting AND suspendable (chat.post_message — the gate cannot compose with the node's own post-then-suspend);
+    /// and a nested container (Map/Loop/Try — separate hard problem). The fail-closed allowlist lives in
+    /// <see cref="Rerun.RerunBranchBodyPolicy"/>; this scans the DIRECT body subgraph (ParentId == mapNodeId).</summary>
     private void EnsureBranchBodyIsRerunnable(WorkflowDefinition definition, string mapNodeId)
     {
+        // LOAD-BEARING: the one-level ParentId==mapNodeId scan is COMPLETE only because the policy refuses every direct
+        // Map/Loop/Try (the only nesting mechanism) — no descendant of an admitted body can exist. A future
+        // nested-container lift MUST add recursion here before the policy drops its container arm.
+        // An unregistered TypeKey (a since-removed plugin in a frozen snapshot def) is fail-closed REFUSED, not a
+        // 500: we can't prove it safe to re-run, so it joins the blocked list and surfaces the typed 422.
         var blocked = definition.Nodes
             .Where(n => n.ParentId == mapNodeId)
-            .Where(n =>
-            {
-                var m = _nodeRegistry.Resolve(n.TypeKey).Manifest;
-                return m.IsSideEffecting || m.CanSuspend || m.Kind is NodeKind.Map or NodeKind.Loop or NodeKind.Try;
-            })
+            .Where(n => !_nodeRegistry.Contains(n.TypeKey) || Rerun.RerunBranchBodyPolicy.IsRefusedAsBranchBody(_nodeRegistry.Resolve(n.TypeKey).Manifest))
             .Select(n => n.Id)
             .OrderBy(id => id)
             .ToList();
