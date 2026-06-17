@@ -11,6 +11,14 @@ public sealed record WorkspaceChanges
     /// <summary>Unified diff (git format) of all changes vs the cloned base. Empty string when nothing changed.</summary>
     public required string Patch { get; init; }
 
+    /// <summary>
+    /// The cloned base revision the <see cref="Patch"/> is rooted at — the exact commit the agent saw, captured at
+    /// clone (the SHA the diff is taken against). The integrity anchor for on-disk branch integration: the integrator
+    /// checks out THIS SHA before applying the patch so a 3-way apply resolves against the right pre-image, and
+    /// refuses a contribution whose base disagrees. Null only when no workspace recorded it.
+    /// </summary>
+    public string? BaseSha { get; init; }
+
     /// <summary>Repo-relative paths the agent changed (added / modified / deleted).</summary>
     public IReadOnlyList<string> ChangedFiles { get; init; } = Array.Empty<string>();
 

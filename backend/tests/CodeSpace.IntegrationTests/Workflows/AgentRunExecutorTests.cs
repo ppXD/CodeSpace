@@ -856,6 +856,9 @@ public class AgentRunExecutorTests
     {
         public Task<WorkspaceRequest?> ResolveAsync(AgentTask task, Guid teamId, CancellationToken cancellationToken) =>
             Task.FromResult<WorkspaceRequest?>(new WorkspaceRequest { RepositoryUrl = "file:///dev/null" });
+
+        public Task<WorkspaceRequest?> ResolveByRepositoryIdAsync(Guid repositoryId, Guid teamId, CancellationToken cancellationToken) =>
+            Task.FromResult<WorkspaceRequest?>(new WorkspaceRequest { RepositoryUrl = "file:///dev/null" });
     }
 
     private sealed class SingleProviderRegistry : IWorkspaceProviderRegistry

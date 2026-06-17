@@ -60,6 +60,14 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     public const string PushEnabledEnvVar = "CODESPACE_AGENT_PUSH_BRANCH_ENABLED";
 
     /// <summary>
+    /// Operators opt INTO on-disk integration of K parallel agent contributions into ONE branch (a side-effecting
+    /// write to the user's remote — SOTA #3) by setting this to "1"/"true". Fail-closed default-OFF
+    /// (absent/""/"0"/"false"/anything else → no clone, no integration, no LLM synthesis call, byte-identical to
+    /// today). Pinned by a test (Rule 8) — renaming it silently turns the feature off for an operator who enabled it.
+    /// </summary>
+    public const string IntegrateBranchEnabledEnvVar = "CODESPACE_AGENT_INTEGRATE_BRANCH_ENABLED";
+
+    /// <summary>
     /// Operators opt INTO the in-process MCP endpoint (the run-scoped tool-fabric server a CLI harness can later
     /// reach) by setting this to "1"/"true". Fail-closed default-OFF (absent/""/"0"/"false"/anything else → no
     /// endpoint is minted, so the run is byte-identical to today). Pinned by a test (Rule 8) — renaming it silently
@@ -408,7 +416,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         try
         {
             var changes = await workspace.CaptureChangesAsync(cancellationToken).ConfigureAwait(false);
-            return result with { ChangedFiles = changes.ChangedFiles, Patch = TruncatePatch(changes.Patch, MaxPatchChars) };
+            return result with { ChangedFiles = changes.ChangedFiles, Patch = TruncatePatch(changes.Patch, MaxPatchChars), BaseSha = changes.BaseSha };
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -516,6 +524,23 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     /// Pure + internal so it's unit-pinned and production reads it through this single gate.
     /// </summary>
     internal static bool ShouldPushProducedBranch(AgentTask task) => IsPushEnabled() || task.PushProducedBranch == true;
+
+    /// <summary>True ONLY for "1"/"true"/"TRUE" (trimmed); fail-closed default-OFF for null / "" / "0" / "false" / anything else. Mirrors <see cref="IsPushEnabled"/> exactly (Rule 8). Internal so it's unit-pinned; production reads it through this single gate.</summary>
+    internal static bool IsIntegrateEnabled()
+    {
+        var raw = Environment.GetEnvironmentVariable(IntegrateBranchEnabledEnvVar)?.Trim();
+
+        return raw is "1" or "true" or "TRUE";
+    }
+
+    /// <summary>
+    /// The single gate deciding whether a run INTEGRATES its parallel agent contributions on disk: the
+    /// deployment-wide env flag (<see cref="IsIntegrateEnabled"/>) OR an explicit per-run/profile opt-in. Fail-open
+    /// toward the operator (a per-run opt-in turns integration ON for one run without flipping the ambient flag) —
+    /// the SAME shape as <see cref="ShouldPushProducedBranch"/>. Pure + internal so it's unit-pinned and production
+    /// reads it through this single gate.
+    /// </summary>
+    internal static bool ShouldIntegrate(bool perRunOptIn) => IsIntegrateEnabled() || perRunOptIn;
 
     /// <summary>True ONLY for "1"/"true"/"TRUE" (trimmed); fail-closed default-OFF otherwise. Mirrors <see cref="IsPushEnabled"/> exactly (Rule 8). Internal so it's unit-pinned; production reads it through this single gate.</summary>
     internal static bool IsMcpEndpointEnabled()

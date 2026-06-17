@@ -94,6 +94,9 @@ public sealed record SupervisorAgentProfile
     /// <summary>Per-run opt-in to publishing each spawned agent's diff as its own branch (the one-agent-one-branch fan-out, so the supervisor's per-turn spawns each land on their own branch). Null → defer to the ambient deployment push flag (an ordinary spawn is unchanged).</summary>
     public bool? PushBranch { get; init; }
 
+    /// <summary>Per-run opt-in to INTEGRATING the spawned agents' diffs into one reviewable branch at <c>merge</c> time (SOTA #3 — integrate, not narrate), plus a model synthesis over their diffs. Null / false → defer to the ambient integrate flag; the merge produces only the deterministic side-by-side fold (byte-identical to pre-SOTA-#3). Requires <see cref="RepositoryId"/> for the on-disk integration half.</summary>
+    public bool? IntegrateBranches { get; init; }
+
     /// <summary>The autonomy tier each spawned agent runs at, parsed case-insensitively. Null / unrecognised → the safe <c>Standard</c> default (workspace write, no network) — byte-identical to pre-P2-3.</summary>
     public string? AutonomyLevel { get; init; }
 }

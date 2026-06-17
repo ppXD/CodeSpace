@@ -24,7 +24,8 @@ public sealed class LocalGitWorkspaceProvider : IWorkspaceProvider, IWorkspaceJa
     private const int CloneTimeoutSeconds = 300;
     private const int CaptureTimeoutSeconds = 120;
     private const int PushTimeoutSeconds = 300;
-    private static readonly string WorkspacesRoot = Path.Combine(Path.GetTempPath(), "codespace-agent-workspaces");
+    /// <summary>Root for transient agent scratch clones (agent workspaces + branch-integration clones), under the worker's temp dir. Internal so the <c>LocalGitBranchIntegrator</c> stages its integration clone here too and the same janitor reclaims a leaked one.</summary>
+    internal static readonly string WorkspacesRoot = Path.Combine(Path.GetTempPath(), "codespace-agent-workspaces");
 
     /// <summary>
     /// Operators tune how long an orphaned workspace lingers before the janitor reclaims it (a TimeSpan,
@@ -199,8 +200,8 @@ public sealed class LocalGitWorkspaceProvider : IWorkspaceProvider, IWorkspaceJa
     private static string Summarize(string stderr) =>
         string.IsNullOrWhiteSpace(stderr) ? "(no stderr)" : stderr.Trim().Replace("\n", " ");
 
-    /// <summary>Strip any echoed token from surfaced output so it never reaches a log / exception message.</summary>
-    private static string Redact(string text, string? token) =>
+    /// <summary>Strip any echoed token from surfaced output so it never reaches a log / exception message. Internal so the <c>LocalGitBranchIntegrator</c> reuses the SAME redaction over its own git output (co-located secret hygiene).</summary>
+    internal static string Redact(string text, string? token) =>
         string.IsNullOrEmpty(token) ? text : text.Replace(token, "***");
 
     private sealed class LocalWorkspaceHandle : IWorkspaceHandle, IWorkspacePushHandle
@@ -238,6 +239,7 @@ public sealed class LocalGitWorkspaceProvider : IWorkspaceProvider, IWorkspaceJa
             return new WorkspaceChanges
             {
                 Patch = patch,
+                BaseSha = _baseSha,
                 ChangedFiles = names.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries),
             };
         }

@@ -28,10 +28,13 @@ public sealed class RepositoryWorkspaceResolver : IAgentWorkspaceResolver, IScop
         _auth = auth;
     }
 
-    public async Task<WorkspaceRequest?> ResolveAsync(AgentTask task, Guid teamId, CancellationToken cancellationToken)
-    {
-        if (task.RepositoryId is not { } repositoryId) return null;
+    public Task<WorkspaceRequest?> ResolveAsync(AgentTask task, Guid teamId, CancellationToken cancellationToken) =>
+        task.RepositoryId is { } repositoryId
+            ? ResolveByRepositoryIdAsync(repositoryId, teamId, cancellationToken)
+            : Task.FromResult<WorkspaceRequest?>(null);
 
+    public async Task<WorkspaceRequest?> ResolveByRepositoryIdAsync(Guid repositoryId, Guid teamId, CancellationToken cancellationToken)
+    {
         var repo = await LoadRepositoryAsync(repositoryId, teamId, cancellationToken).ConfigureAwait(false);
 
         if (string.IsNullOrWhiteSpace(repo.CloneUrlHttps))
