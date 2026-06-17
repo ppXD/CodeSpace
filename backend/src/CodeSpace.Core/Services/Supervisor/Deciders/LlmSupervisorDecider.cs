@@ -98,19 +98,40 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
             ? SupervisorOutcome.ReadAgentResults(prior.OutcomeJson)
             : Array.Empty<SupervisorAgentResult>();
 
-        if (agentResults.Count == 0)
+        if (agentResults.Count > 0)
         {
-            builder.AppendLine($"- {prior.DecisionKind}: payload={prior.PayloadJson} outcome={prior.OutcomeJson ?? "(none)"}");
+            builder.AppendLine($"- {prior.DecisionKind}{(isLatestSpawn ? " (latest spawn/retry — act on THESE results)" : "")}: payload={prior.PayloadJson}");
+            for (var k = 0; k < agentResults.Count; k++)
+            {
+                var r = agentResults[k];
+                var detail = !string.IsNullOrWhiteSpace(r.Error) ? $"error: {r.Error}" : !string.IsNullOrWhiteSpace(r.Summary) ? r.Summary : "(no summary)";
+                builder.AppendLine($"    agent {k}: {r.Status} — {detail}");
+            }
             return;
         }
 
-        builder.AppendLine($"- {prior.DecisionKind}{(isLatestSpawn ? " (latest spawn/retry — act on THESE results)" : "")}: payload={prior.PayloadJson}");
-        for (var k = 0; k < agentResults.Count; k++)
+        // A merge whose on-disk integration CONFLICTED is rendered as a legible, actionable block (resolver loop #379) —
+        // the conflicted files + the PRESERVED agent branches + the resolve-or-stop choice — so the decider acts on the
+        // conflict rather than parsing it out of raw outcome jsonb. A clean/skipped merge keeps the compact line below.
+        if (prior.DecisionKind == SupervisorDecisionKinds.Merge && SupervisorOutcome.ReadIntegration(prior.OutcomeJson) is { IsConflicted: true } integration)
         {
-            var r = agentResults[k];
-            var detail = !string.IsNullOrWhiteSpace(r.Error) ? $"error: {r.Error}" : !string.IsNullOrWhiteSpace(r.Summary) ? r.Summary : "(no summary)";
-            builder.AppendLine($"    agent {k}: {r.Status} — {detail}");
+            AppendConflictedMerge(builder, integration);
+            return;
         }
+
+        builder.AppendLine($"- {prior.DecisionKind}: payload={prior.PayloadJson} outcome={prior.OutcomeJson ?? "(none)"}");
+    }
+
+    /// <summary>Render a conflicted merge integration legibly: what conflicted, where the agents' work is preserved, and the two moves available (spawn a resolver to reconcile + verify, or stop and leave it for a human).</summary>
+    private static void AppendConflictedMerge(StringBuilder builder, SupervisorIntegrationOutcome integration)
+    {
+        builder.AppendLine("- merge: INTEGRATION CONFLICTED — the agents' work could not be auto-combined.");
+        builder.AppendLine($"    conflicted files: {(integration.ConflictedFiles.Count > 0 ? string.Join(", ", integration.ConflictedFiles) : "(unspecified)")}");
+
+        if (!string.IsNullOrWhiteSpace(integration.Reason)) builder.AppendLine($"    reason: {integration.Reason}");
+        if (integration.PreservedBranches.Count > 0) builder.AppendLine($"    the agents' work is PRESERVED on branches: {string.Join(", ", integration.PreservedBranches)}");
+
+        builder.AppendLine("    To resolve: spawn ONE agent to reconcile these branches, build, and run the tests, then merge again. Or stop to leave the conflict for a human.");
     }
 
     /// <summary>The index of the LAST element matching the predicate, or -1 — used to tag the most-recent spawn/retry.</summary>
@@ -150,6 +171,9 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
         "recorded status, error and summary in the most recent spawn OR retry outcome, retry any subtask that FAILED or " +
         "did not satisfy the goal (optionally with a revised instruction), and merge only once the results you need have " +
         "succeeded. Stop when the goal is met or a bound forces it. " +
+        "If a merge reports INTEGRATION CONFLICTED, the agents' work could not be auto-combined; you may spawn ONE agent " +
+        "to reconcile the preserved branches, build, and run the tests (then merge again), or stop to leave the conflict " +
+        "for a human — never accept an unverified resolution. " +
         "You never name node types, run ids, or graph wiring — only the action + its payload. " +
         "Return ONLY the schema-constrained JSON.";
 }

@@ -95,6 +95,97 @@ public class SupervisorDeciderTests
         system.ShouldNotContain("then merge, then stop", Case.Insensitive, "the unconditional merge-then-stop rail is GONE — it would override the conditional retry guidance");
     }
 
+    // ── Resolver loop #379 S1: the decider PERCEIVES an integration conflict ─────────
+
+    /// <summary>
+    /// A merge outcome carrying a conflicted on-disk integration block, shaped EXACTLY as ProjectIntegrationResult emits
+    /// it: an APPLIED contribution carries fallbackBranch null (LocalGitBranchIntegrator.Applied() sets none); only the
+    /// CONFLICTED contribution carries its preserved branch (FallbackBranch = ProducedBranch). The reader must collect
+    /// only the non-applied branch — the applied agent's branch is not surfaced here (the resolver's full re-merge set
+    /// is assembled from the spawn's agent results, not this block).
+    /// </summary>
+    private const string ConflictedMergeOutcome = """
+        {"synthesis":{"text":"combined"},"integration":{"status":"Conflicted","integratedBranch":null,"appliedCount":0,"reason":"a contribution conflicted while integrating","excludedAgents":[],"outcomes":[
+          {"label":"agent-a","disposition":"Applied","reason":null,"conflictedFiles":[],"fallbackBranch":null},
+          {"label":"agent-b","disposition":"Conflicted","reason":"textual conflict","conflictedFiles":["src/Foo.cs","src/Bar.cs"],"fallbackBranch":"codespace/agent/bbb"}
+        ]}}
+        """;
+
+    private static SupervisorPriorDecision MergeDecision(string outcomeJson) => new()
+    {
+        Id = Guid.NewGuid(), Sequence = 3, DecisionKind = SupervisorDecisionKinds.Merge, Status = SupervisorDecisionStatus.Succeeded,
+        PayloadJson = "{}", OutcomeJson = outcomeJson,
+    };
+
+    [Fact]
+    public void ReadIntegration_parses_a_conflicted_block_aggregating_files_and_preserved_branches()
+    {
+        var integration = SupervisorOutcome.ReadIntegration(ConflictedMergeOutcome);
+
+        integration.ShouldNotBeNull();
+        integration!.IsConflicted.ShouldBeTrue();
+        integration.Status.ShouldBe("Conflicted");
+        integration.ConflictedFiles.ShouldBe(new[] { "src/Foo.cs", "src/Bar.cs" });
+        integration.PreservedBranches.ShouldBe(new[] { "codespace/agent/bbb" }, "only a NON-applied contribution carries a fallbackBranch (the integrator's contract); the applied agent's branch is not in this block");
+        integration.Reason.ShouldBe("a contribution conflicted while integrating");
+        integration.IntegratedBranch.ShouldBeNull();
+    }
+
+    [Fact]
+    public void ReadIntegration_reads_a_clean_integration_as_not_conflicted()
+    {
+        var clean = SupervisorOutcome.ReadIntegration("""{"integration":{"status":"Clean","integratedBranch":"codespace/integration/run/turn1","appliedCount":2,"reason":null,"outcomes":[]}}""");
+
+        clean.ShouldNotBeNull();
+        clean!.IsConflicted.ShouldBeFalse();
+        clean.IntegratedBranch.ShouldBe("codespace/integration/run/turn1");
+        clean.ConflictedFiles.ShouldBeEmpty();
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("not json")]
+    [InlineData("""{"planned":[]}""")]            // a merge/plan outcome with no integration block
+    [InlineData("""{"integration":{"reason":"x"}}""")]  // integration object but no status
+    [InlineData("""{"integration":"x"}""")]            // integration present but not an object
+    [InlineData("""{"integration":{"status":5}}""")]    // status present but not a string
+    public void ReadIntegration_returns_null_when_absent_or_malformed(string? outcomeJson)
+    {
+        SupervisorOutcome.ReadIntegration(outcomeJson).ShouldBeNull();
+    }
+
+    [Fact]
+    public void The_user_prompt_renders_a_conflicted_merge_as_a_legible_actionable_block()
+    {
+        var prompt = LlmSupervisorDecider.BuildUserPromptForTest(Context(turnNumber: 3, MergeDecision(ConflictedMergeOutcome)));
+
+        prompt.ShouldContain("INTEGRATION CONFLICTED", Case.Insensitive, "the decider sees the conflict framed as actionable, not buried in raw jsonb");
+        prompt.ShouldContain("src/Foo.cs", Case.Insensitive);
+        prompt.ShouldContain("src/Bar.cs", Case.Insensitive, "the conflicted files are named so a resolver knows what to reconcile");
+        prompt.ShouldContain("codespace/agent/bbb", Case.Insensitive, "the preserved branches are named — the resolver's inputs");
+        prompt.ShouldContain("spawn ONE agent", Case.Insensitive, "the resolve move is spelled out");
+        prompt.ShouldContain("stop to leave the conflict for a human", Case.Insensitive, "the fail-safe move is offered too");
+    }
+
+    [Fact]
+    public void A_clean_merge_does_NOT_render_the_conflict_block()
+    {
+        // Behavior-preserving: only a CONFLICTED integration gets the legible block; a clean merge keeps the compact line.
+        var prompt = LlmSupervisorDecider.BuildUserPromptForTest(Context(turnNumber: 3, MergeDecision("""{"integration":{"status":"Clean","integratedBranch":"b","outcomes":[]}}""")));
+
+        prompt.ShouldNotContain("INTEGRATION CONFLICTED");
+    }
+
+    [Fact]
+    public void The_system_prompt_offers_the_resolve_or_stop_choice_and_forbids_an_unverified_resolution()
+    {
+        var system = LlmSupervisorDecider.SystemPromptForTest;
+
+        system.ShouldContain("INTEGRATION CONFLICTED", Case.Insensitive);
+        system.ShouldContain("never accept an unverified resolution", Case.Insensitive, "the safety floor is in the rails — no blind accept");
+    }
+
     [Fact]
     public async Task A_deployment_with_no_structured_provider_fails_closed_to_a_terminal_stop()
     {
