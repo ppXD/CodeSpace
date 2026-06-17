@@ -129,22 +129,8 @@ public class WorkspaceSpecTests
             .ShouldBeNull();
     }
 
-    [Fact]
-    public async Task ResolveAsync_refuses_a_multi_repo_workspace_in_slice_1()
-    {
-        var resolver = new RepositoryWorkspaceResolver(db: null!, auth: null!);
-        var task = new AgentTask
-        {
-            Goal = "g",
-            Harness = "claude-code",
-            Workspace = new WorkspaceSpec { Repositories = new[] { Repo("web", WorkspaceAccess.Write, isPrimary: true), Repo("api", WorkspaceAccess.Write) } },
-        };
-
-        // The Count > 1 guard throws BEFORE touching the (null) DB — a premature multi-repo run fails loud,
-        // never silently drops a repo. Single-repo resolution (which hits the DB) is covered at the integration tier.
-        (await Should.ThrowAsync<WorkspaceException>(() => resolver.ResolveAsync(task, Guid.NewGuid(), CancellationToken.None)))
-            .Message.ShouldContain("Multi-repo");
-    }
+    // (The slice-1 "multi-repo is refused" guard was intentionally LIFTED in the clone slice — multi-repo now
+    //  resolves every repo into a provision, covered by RepositoryWorkspaceResolverTests at the integration tier.)
 
     [Fact]
     public async Task ResolveAsync_refuses_an_empty_repositories_spec_with_a_distinct_error()

@@ -39,7 +39,7 @@ public sealed class RunCommandService : IRunCommandService, IScopedDependency
         // Repo-scoped → clone into a fresh per-run workspace the command runs in; ephemeral → no checkout.
         // The same runnerKind selects the matching workspace provider, so a future docker/k8s pair composes here.
         var workspace = request.RepositoryId is { } repositoryId
-            ? await _workspaces.Resolve(runnerKind).PrepareAsync(await BuildWorkspaceRequestAsync(repositoryId, request.Ref, request.TeamId, cancellationToken).ConfigureAwait(false), cancellationToken).ConfigureAwait(false)
+            ? await _workspaces.Resolve(runnerKind).PrepareAsync(WorkspaceProvisionRequest.FromSingle(await BuildWorkspaceRequestAsync(repositoryId, request.Ref, request.TeamId, cancellationToken).ConfigureAwait(false)), cancellationToken).ConfigureAwait(false)
             : null;
 
         try

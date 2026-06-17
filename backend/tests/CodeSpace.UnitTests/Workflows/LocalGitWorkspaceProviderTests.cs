@@ -53,7 +53,7 @@ public sealed class LocalGitWorkspaceProviderTests
         using var origin = new TempDir();
         await SeedOriginAsync(origin.Path, "README.md", "hello-agent");
 
-        var handle = await NewProvider().PrepareAsync(new WorkspaceRequest { RepositoryUrl = AsFileUrl(origin.Path) }, CancellationToken.None);
+        var handle = await NewProvider().PrepareAsync(WorkspaceProvisionRequest.FromSingle(new WorkspaceRequest { RepositoryUrl = AsFileUrl(origin.Path) }), CancellationToken.None);
 
         string dir;
         await using (handle)
@@ -78,7 +78,7 @@ public sealed class LocalGitWorkspaceProviderTests
         await WriteAndCommitAsync(origin.Path, "feature.txt", "feature-content");
 
         await using var handle = await NewProvider().PrepareAsync(
-            new WorkspaceRequest { RepositoryUrl = AsFileUrl(origin.Path), Ref = "feature" }, CancellationToken.None);
+            WorkspaceProvisionRequest.FromSingle(new WorkspaceRequest { RepositoryUrl = AsFileUrl(origin.Path), Ref = "feature" }), CancellationToken.None);
 
         File.Exists(Path.Combine(handle.Directory, "feature.txt")).ShouldBeTrue("the requested branch is checked out");
     }
@@ -94,7 +94,7 @@ public sealed class LocalGitWorkspaceProviderTests
         await SeedOriginAsync(origin.Path, "README.md", "x");
 
         await using var handle = await NewProvider().PrepareAsync(
-            new WorkspaceRequest { RepositoryUrl = AsFileUrl(origin.Path), Token = "secret-token", TokenUsername = "x-access-token" }, CancellationToken.None);
+            WorkspaceProvisionRequest.FromSingle(new WorkspaceRequest { RepositoryUrl = AsFileUrl(origin.Path), Token = "secret-token", TokenUsername = "x-access-token" }), CancellationToken.None);
 
         var config = await File.ReadAllTextAsync(Path.Combine(handle.Directory, ".git", "config"));
         config.ShouldNotContain("secret-token", Case.Insensitive, "the token must be stripped from the persisted remote");
@@ -108,7 +108,7 @@ public sealed class LocalGitWorkspaceProviderTests
         var missing = Path.Combine(Path.GetTempPath(), "does-not-exist-" + Guid.NewGuid().ToString("N"));
 
         await Should.ThrowAsync<WorkspaceException>(async () =>
-            await NewProvider().PrepareAsync(new WorkspaceRequest { RepositoryUrl = AsFileUrl(missing) }, CancellationToken.None));
+            await NewProvider().PrepareAsync(WorkspaceProvisionRequest.FromSingle(new WorkspaceRequest { RepositoryUrl = AsFileUrl(missing) }), CancellationToken.None));
     }
 
     [Fact]
@@ -125,7 +125,7 @@ public sealed class LocalGitWorkspaceProviderTests
         await SeedOriginAsync(origin.Path, "keep.txt", "original");
         await WriteAndCommitAsync(origin.Path, "remove.txt", "to be deleted");
 
-        await using var handle = await NewProvider().PrepareAsync(new WorkspaceRequest { RepositoryUrl = AsFileUrl(origin.Path) }, CancellationToken.None);
+        await using var handle = await NewProvider().PrepareAsync(WorkspaceProvisionRequest.FromSingle(new WorkspaceRequest { RepositoryUrl = AsFileUrl(origin.Path) }), CancellationToken.None);
 
         // The "agent" edits a tracked file, adds a new one, and deletes another.
         await File.WriteAllTextAsync(Path.Combine(handle.Directory, "keep.txt"), "edited by agent");
@@ -148,7 +148,7 @@ public sealed class LocalGitWorkspaceProviderTests
         using var origin = new TempDir();
         await SeedOriginAsync(origin.Path, "README.md", "unchanged");
 
-        await using var handle = await NewProvider().PrepareAsync(new WorkspaceRequest { RepositoryUrl = AsFileUrl(origin.Path) }, CancellationToken.None);
+        await using var handle = await NewProvider().PrepareAsync(WorkspaceProvisionRequest.FromSingle(new WorkspaceRequest { RepositoryUrl = AsFileUrl(origin.Path) }), CancellationToken.None);
 
         var changes = await handle.CaptureChangesAsync(CancellationToken.None);
 
@@ -166,7 +166,7 @@ public sealed class LocalGitWorkspaceProviderTests
         using var origin = new TempDir();
         await SeedOriginAsync(origin.Path, "README.md", "base");
 
-        await using var handle = await NewProvider().PrepareAsync(new WorkspaceRequest { RepositoryUrl = AsFileUrl(origin.Path) }, CancellationToken.None);
+        await using var handle = await NewProvider().PrepareAsync(WorkspaceProvisionRequest.FromSingle(new WorkspaceRequest { RepositoryUrl = AsFileUrl(origin.Path) }), CancellationToken.None);
 
         await File.WriteAllTextAsync(Path.Combine(handle.Directory, "feature.txt"), "committed change");
         await RunGitAsync(handle.Directory, "config", "user.email", "agent@codespace.dev");
@@ -180,6 +180,129 @@ public sealed class LocalGitWorkspaceProviderTests
         changes.ChangedFiles.ShouldContain("feature.txt", "committed work is captured vs the base");
         changes.Patch.ShouldContain("committed change");
     }
+
+    // ─── Multi-repo workspace (multi-repo PR2) ────────────────────────────────
+
+    [Fact]
+    public async Task Single_repo_workspace_clones_flat_at_the_root_with_no_manifest()
+    {
+        // The locked invariant: a single-repo workspace clones flat into the root, cwd IS that clone, and there is
+        // NO WORKSPACE.md — byte-identical to before. The one Repositories entry's directory equals Directory.
+        if (!await GitAvailableAsync()) return;
+
+        using var origin = new TempDir();
+        await SeedOriginAsync(origin.Path, "README.md", "x");
+
+        await using var handle = await NewProvider().PrepareAsync(WorkspaceProvisionRequest.FromSingle(new WorkspaceRequest { RepositoryUrl = AsFileUrl(origin.Path) }), CancellationToken.None);
+
+        handle.Repositories.Count.ShouldBe(1);
+        handle.Repositories[0].Directory.ShouldBe(handle.Directory, "single-repo cwd IS the clone (not a subdir)");
+        Directory.Exists(Path.Combine(handle.Directory, ".git")).ShouldBeTrue();
+        File.Exists(Path.Combine(handle.Directory, "WORKSPACE.md")).ShouldBeFalse("a single-repo workspace is left pristine — no manifest");
+    }
+
+    [Fact]
+    public async Task Clones_multiple_repos_under_a_shared_root_with_a_manifest()
+    {
+        if (!await GitAvailableAsync()) return;
+
+        using var web = new TempDir();
+        using var api = new TempDir();
+        await SeedOriginAsync(web.Path, "web.txt", "web-content");
+        await SeedOriginAsync(api.Path, "api.txt", "api-content");
+
+        var provision = MultiRepo(
+            (alias: "web", path: web.Path, access: WorkspaceAccess.Write, primary: true),
+            (alias: "api", path: api.Path, access: WorkspaceAccess.Read, primary: false));
+
+        string root;
+        await using (var handle = await NewProvider().PrepareAsync(provision, CancellationToken.None))
+        {
+            root = handle.Directory;
+
+            handle.Repositories.Count.ShouldBe(2);
+            var webRepo = handle.Repositories.Single(r => r.Alias == "web");
+            var apiRepo = handle.Repositories.Single(r => r.Alias == "api");
+
+            // Auto cwd for a multi-repo workspace is the shared root; each repo is a sibling subdir under it.
+            handle.Directory.ShouldBe(root);
+            webRepo.Directory.ShouldBe(Path.Combine(root, "web"));
+            apiRepo.Directory.ShouldBe(Path.Combine(root, "api"));
+            webRepo.Access.ShouldBe(WorkspaceAccess.Write);
+            apiRepo.Access.ShouldBe(WorkspaceAccess.Read);
+
+            File.Exists(Path.Combine(webRepo.Directory, "web.txt")).ShouldBeTrue("the web repo is cloned into its subdir");
+            File.Exists(Path.Combine(apiRepo.Directory, "api.txt")).ShouldBeTrue("the api repo is cloned into its subdir");
+
+            var manifest = await File.ReadAllTextAsync(Path.Combine(root, "WORKSPACE.md"));
+            manifest.ShouldContain("web", customMessage: "the manifest lists the repos");
+            manifest.ShouldContain("read-only context", customMessage: "the manifest records the api repo's read-only access");
+        }
+
+        Directory.Exists(root).ShouldBeFalse("DisposeAsync removes the WHOLE multi-repo tree");
+    }
+
+    [Fact]
+    public async Task Multi_repo_capture_returns_the_primary_repos_changes()
+    {
+        // Slice-2 scope: capture targets the PRIMARY repo. A secondary repo's edit is NOT in the captured diff yet
+        // (per-repo result surfacing is the next slice). This pins the primary-capture boundary explicitly.
+        if (!await GitAvailableAsync()) return;
+
+        using var web = new TempDir();
+        using var api = new TempDir();
+        await SeedOriginAsync(web.Path, "web.txt", "web-base");
+        await SeedOriginAsync(api.Path, "api.txt", "api-base");
+
+        var provision = MultiRepo(
+            (alias: "web", path: web.Path, access: WorkspaceAccess.Write, primary: true),
+            (alias: "api", path: api.Path, access: WorkspaceAccess.Write, primary: false));
+
+        await using var handle = await NewProvider().PrepareAsync(provision, CancellationToken.None);
+
+        var webDir = handle.Repositories.Single(r => r.Alias == "web").Directory;
+        var apiDir = handle.Repositories.Single(r => r.Alias == "api").Directory;
+        await File.WriteAllTextAsync(Path.Combine(webDir, "web.txt"), "edited in primary");
+        await File.WriteAllTextAsync(Path.Combine(apiDir, "api.txt"), "edited in secondary");
+
+        var changes = await handle.CaptureChangesAsync(CancellationToken.None);
+
+        changes.ChangedFiles.ShouldBe(new[] { "web.txt" }, "capture returns ONLY the primary repo's changes in this slice");
+        changes.Patch.ShouldContain("edited in primary");
+        changes.Patch.ShouldNotContain("edited in secondary", customMessage: "a secondary repo's edit is not in the primary capture");
+    }
+
+    [Fact]
+    public async Task PrimaryRepo_cwd_mode_points_cwd_at_the_primary_subdir_in_a_multi_repo_workspace()
+    {
+        if (!await GitAvailableAsync()) return;
+
+        using var web = new TempDir();
+        using var api = new TempDir();
+        await SeedOriginAsync(web.Path, "web.txt", "w");
+        await SeedOriginAsync(api.Path, "api.txt", "a");
+
+        var provision = MultiRepo(
+            (alias: "web", path: web.Path, access: WorkspaceAccess.Write, primary: true),
+            (alias: "api", path: api.Path, access: WorkspaceAccess.Read, primary: false)) with { CwdMode = WorkspaceCwdMode.PrimaryRepo };
+
+        await using var handle = await NewProvider().PrepareAsync(provision, CancellationToken.None);
+
+        handle.Directory.ShouldBe(handle.Repositories.Single(r => r.Alias == "web").Directory, "PrimaryRepo cwd mode runs the harness inside the primary repo even in a multi-repo workspace");
+    }
+
+    /// <summary>Build a multi-repo provision from (alias, local-origin-path, access, primary) tuples, with Auto cwd.</summary>
+    private static WorkspaceProvisionRequest MultiRepo(params (string alias, string path, WorkspaceAccess access, bool primary)[] repos) => new()
+    {
+        PrimaryAlias = repos.FirstOrDefault(r => r.primary).alias,
+        Repositories = repos.Select(r => new WorkspaceRepositoryProvision
+        {
+            Alias = r.alias,
+            CloneRequest = new WorkspaceRequest { RepositoryUrl = AsFileUrl(r.path) },
+            Access = r.access,
+            IsPrimary = r.primary,
+        }).ToList(),
+    };
 
     // ─── Workspace janitor (reclaim clones orphaned by a crashed worker) ──────
 

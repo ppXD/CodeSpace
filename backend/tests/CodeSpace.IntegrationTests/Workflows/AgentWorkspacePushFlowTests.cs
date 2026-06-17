@@ -197,10 +197,10 @@ public sealed class AgentWorkspacePushFlowTests
         public Task<IWorkspaceHandle> CloneWithTokenAsync() =>
             // A file:// remote ignores the token; the point is that the handle CARRIES a token, so PushChangesAsync
             // takes the authenticated path (re-injecting it into the push argv) rather than short-circuiting.
-            NewProvider().PrepareAsync(new WorkspaceRequest { RepositoryUrl = RemoteUrl, Token = Token, TokenUsername = "x-access-token" }, CancellationToken.None);
+            NewProvider().PrepareAsync(WorkspaceProvisionRequest.FromSingle(new WorkspaceRequest { RepositoryUrl = RemoteUrl, Token = Token, TokenUsername = "x-access-token" }), CancellationToken.None);
 
         public Task<IWorkspaceHandle> CloneAnonymousAsync() =>
-            NewProvider().PrepareAsync(new WorkspaceRequest { RepositoryUrl = RemoteUrl }, CancellationToken.None);
+            NewProvider().PrepareAsync(WorkspaceProvisionRequest.FromSingle(new WorkspaceRequest { RepositoryUrl = RemoteUrl }), CancellationToken.None);
 
         /// <summary>Delete the bare remote AFTER the clone so a subsequent push to it fails — the failing push URL embeds the token, exercising the redaction path.</summary>
         public void DestroyBareRemote() => Directory.Delete(_bareRemote, recursive: true);

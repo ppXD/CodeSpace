@@ -35,7 +35,7 @@ public sealed class WorkspaceProviderRegistryTests
 
         public string Kind { get; }
 
-        public Task<IWorkspaceHandle> PrepareAsync(WorkspaceRequest request, CancellationToken cancellationToken) =>
+        public Task<IWorkspaceHandle> PrepareAsync(WorkspaceProvisionRequest request, CancellationToken cancellationToken) =>
             throw new NotSupportedException("not exercised in registry tests");
     }
 }

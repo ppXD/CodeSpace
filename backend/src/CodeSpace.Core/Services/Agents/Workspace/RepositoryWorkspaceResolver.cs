@@ -34,22 +34,29 @@ public sealed class RepositoryWorkspaceResolver : IAgentWorkspaceResolver, IScop
         _auth = auth;
     }
 
-    public async Task<WorkspaceRequest?> ResolveAsync(AgentTask task, Guid teamId, CancellationToken cancellationToken)
+    public async Task<WorkspaceProvisionRequest?> ResolveAsync(AgentTask task, Guid teamId, CancellationToken cancellationToken)
     {
         var spec = CanonicalWorkspace(task);
 
         if (spec is null) return null;
 
-        if (spec.Repositories.Count > 1)
-            throw new WorkspaceException("Multi-repo workspaces are not yet executable — this run authored more than one repository. Single-repo runs are unaffected.");
+        if (spec.Repositories.Count == 0)
+            throw new WorkspaceException("Workspace spec has no repositories to resolve.");
 
-        var primary = spec.Primary
-            ?? throw new WorkspaceException("Workspace spec has no repositories to resolve.");
+        // Resolve EVERY repo in the spec into a concrete clone instruction (multi-repo PR2 — single-repo is the
+        // 1-element case, byte-identical). Each repo's clone is the same per-repo WorkspaceRequest the legacy path
+        // produced, honouring the spec's per-repo ref.
+        var provisions = new List<WorkspaceRepositoryProvision>(spec.Repositories.Count);
 
-        // async (not a bare Task return) so the guard throws above surface as a faulted Task AT THE AWAIT, matching
-        // the interface's async contract — a future caller that captures the Task (Task.WhenAll, deferred await)
-        // sees the exception where it awaits, not synchronously at the call site.
-        return await ResolveByRepositoryIdAsync(primary.RepositoryId, teamId, cancellationToken, primary.Ref).ConfigureAwait(false);
+        foreach (var repo in spec.Repositories)
+        {
+            var clone = await ResolveByRepositoryIdAsync(repo.RepositoryId, teamId, cancellationToken, repo.Ref).ConfigureAwait(false)
+                ?? throw new WorkspaceException($"Repository {repo.RepositoryId} could not be resolved.");
+
+            provisions.Add(new WorkspaceRepositoryProvision { Alias = repo.Alias, CloneRequest = clone, Path = repo.Path, Access = repo.Access, IsPrimary = repo.IsPrimary });
+        }
+
+        return new WorkspaceProvisionRequest { Repositories = provisions, PrimaryAlias = spec.PrimaryAlias, CwdMode = spec.CwdMode };
     }
 
     /// <summary>The canonical workspace for a task: the authored <see cref="AgentTask.Workspace"/>, else a single-repo workspace derived from the legacy <see cref="AgentTask.RepositoryId"/>, else null (a no-repo run).</summary>

@@ -20,19 +20,23 @@ public interface IWorkspaceProvider
     string Kind { get; }
 
     /// <summary>
-    /// Clone / check out per <paramref name="request"/> into a fresh isolated directory and return a
-    /// handle to it. Throws <see cref="WorkspaceException"/> on failure (clone error, missing ref, git
-    /// unavailable). The returned handle's <see cref="IWorkspaceHandle.DisposeAsync"/> removes the
-    /// directory — the run owns it for its lifetime.
+    /// Clone / check out every repository in <paramref name="request"/> into a fresh isolated workspace and
+    /// return a handle to it. A single-repo provision clones flat at the workspace root (byte-identical to
+    /// before); a multi-repo provision clones each repo into a <c>&lt;root&gt;/&lt;path&gt;</c> subdir. Throws
+    /// <see cref="WorkspaceException"/> on failure (clone error, missing ref, git unavailable). The returned
+    /// handle's <see cref="IWorkspaceHandle.DisposeAsync"/> removes the whole workspace — the run owns it.
     /// </summary>
-    Task<IWorkspaceHandle> PrepareAsync(WorkspaceRequest request, CancellationToken cancellationToken);
+    Task<IWorkspaceHandle> PrepareAsync(WorkspaceProvisionRequest request, CancellationToken cancellationToken);
 }
 
-/// <summary>A prepared workspace. <see cref="DisposeAsync"/> removes the working directory (best-effort).</summary>
+/// <summary>A prepared workspace. <see cref="DisposeAsync"/> removes the working directory tree (best-effort).</summary>
 public interface IWorkspaceHandle : IAsyncDisposable
 {
-    /// <summary>Absolute path to the prepared working directory the agent runs in.</summary>
+    /// <summary>Absolute path to the prepared working directory the agent runs in (the cwd — the repo root for a single-repo workspace, the shared root for a multi-repo one, per the provision's cwd mode).</summary>
     string Directory { get; }
+
+    /// <summary>The repositories materialised in this workspace, each with its on-disk directory + access — the multi-repo materialisation result. A single-repo workspace has exactly one entry whose directory equals <see cref="Directory"/>.</summary>
+    IReadOnlyList<WorkspaceRepositoryHandle> Repositories { get; }
 
     /// <summary>
     /// Capture the agent's changes versus the cloned base — the unified diff + the changed-file paths
@@ -41,6 +45,19 @@ public interface IWorkspaceHandle : IAsyncDisposable
     /// git failure. Call before <see cref="IAsyncDisposable.DisposeAsync"/> removes the directory.
     /// </summary>
     Task<WorkspaceChanges> CaptureChangesAsync(CancellationToken cancellationToken);
+}
+
+/// <summary>One repository materialised inside a workspace (multi-repo PR2): its alias, on-disk directory, and access. A pure handle-side noun co-located with the contract it belongs to.</summary>
+public sealed record WorkspaceRepositoryHandle
+{
+    /// <summary>The short name the provision referred to this repo by (e.g. "web", "api").</summary>
+    public required string Alias { get; init; }
+
+    /// <summary>Absolute path to this repo's clone on disk (equals the workspace <see cref="IWorkspaceHandle.Directory"/> for a single-repo workspace; a subdir under it for a multi-repo one).</summary>
+    public required string Directory { get; init; }
+
+    /// <summary>Whether the agent may write this repo or only read it as context.</summary>
+    public required Messages.Agents.WorkspaceAccess Access { get; init; }
 }
 
 /// <summary>
