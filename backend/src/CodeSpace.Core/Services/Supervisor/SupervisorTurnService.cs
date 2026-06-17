@@ -125,7 +125,7 @@ public sealed partial class SupervisorTurnService : ISupervisorTurnService, ISco
     /// </summary>
     internal SupervisorDecision GateSideEffectingDecision(SupervisorTurnContext context, SupervisorDecision decision)
     {
-        var verdict = SupervisorGovernance.Decide(decision.Kind, context.ApprovalPolicy);
+        var verdict = SupervisorGovernance.Decide(decision.Kind, context.ApprovalPolicy, irreversible: SupervisorGovernance.IsIrreversible(decision.Kind));
 
         if (verdict == AgentToolGateDecision.Allow) return decision;
 

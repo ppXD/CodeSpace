@@ -25,11 +25,21 @@ public static class SupervisorGovernance
         decisionKind is SupervisorDecisionKinds.Spawn or SupervisorDecisionKinds.Retry or SupervisorDecisionKinds.Resolve;
 
     /// <summary>
+    /// Whether a decision is IRREVERSIBLE enough to ALWAYS require a human (resolver loop #379, S4 — the safety
+    /// floor): a <c>resolve</c> dispatches an agent to autonomously RE-MERGE code, a higher-stakes act than a normal
+    /// spawn, so it escalates Allow → RequireApproval even under the most permissive policy (the human approves the
+    /// attempt before any autonomous reconciliation runs). The reserved <c>alwaysRequiresApproval</c> cell is exactly
+    /// this case. Pinned by a unit test (Rule 8) so widening it (e.g. a future merge-PR/push verb) is a visible decision.
+    /// </summary>
+    public static bool IsIrreversible(string decisionKind) => decisionKind == SupervisorDecisionKinds.Resolve;
+
+    /// <summary>
     /// The governance verdict for a decision under the run's approval policy. A non-side-effecting decision is
     /// always <see cref="AgentToolGateDecision.Allow"/> (nothing to gate). A side-effecting one routes through
     /// <see cref="AgentToolGate.Decide"/> with the policy-derived tier: Allow → run the side effect now;
     /// RequireApproval → park for a human before it; Deny → refuse it (fail-closed). <paramref name="irreversible"/>
-    /// forwards to the gate's always-approve cell (reserved for a future merge-PR / push).
+    /// forwards to the gate's always-approve cell, escalating even an autonomous tier to RequireApproval (see
+    /// <see cref="IsIrreversible"/> — the resolver loop #379 drives this for <c>resolve</c>).
     /// </summary>
     public static AgentToolGateDecision Decide(string decisionKind, SupervisorApprovalPolicy policy, bool irreversible = false)
     {
