@@ -31,6 +31,9 @@ public sealed record SupervisorGoalPlan
     /// <summary>Which decisions require a human approval before their side effect fires — maps to the autonomy tier <c>AgentToolGate</c> reads.</summary>
     public required SupervisorApprovalPolicy ApprovalPolicy { get; init; }
 
+    /// <summary>The run's realized-spend cap in USD (SOTA #4), or null = no cost cap (the agent-count cap still bounds the run). When set, spend ABOVE it force-STOPs the next spend-incurring decision ("cost cap reached"). Unbounded above — an operator may set any positive ceiling (cost is realized after the fact, so a generous cap can't over-spawn beyond the count cap).</summary>
+    public decimal? MaxCostUsd { get; init; }
+
     /// <summary>The hard ceiling on a single spawn decision's fan-out — the schema's <c>maxItems</c> on <c>spawn.subtaskIds</c> ([1,20]). The runtime guard pins to the SAME literal so a schema-bypassing decider can't fan out wider.</summary>
     public const int SpawnKCeiling = 20;
 
@@ -42,7 +45,11 @@ public sealed record SupervisorGoalPlan
         MaxTotalSpawns = Clamp(config?.MaxTotalSpawns, SupervisorLane.DefaultMaxTotalSpawns, max: SupervisorLane.MaxTotalSpawnsCeiling),
         MaxNoProgressDecisions = Clamp(config?.MaxNoProgressDecisions, SupervisorLane.DefaultMaxNoProgressDecisions, max: NoProgressCeiling),
         ApprovalPolicy = ParseApprovalPolicy(config?.ApprovalPolicy),
+        MaxCostUsd = NormalizeCost(config?.MaxCostUsd),
     };
+
+    /// <summary>A cost cap is kept verbatim when positive; null / zero / negative resolves to null (no budget — never a zero budget that would block the first spawn before any spend is even known). Unlike the count caps there is no ceiling: realized spend can't run away because the agent-count cap bounds how many agents ever spawn.</summary>
+    private static decimal? NormalizeCost(decimal? raw) => raw is { } value && value > 0m ? value : null;
 
     /// <summary>A no-progress cap ceiling so a fat-fingered config can't push it arbitrarily high (still bounded by MaxRounds regardless).</summary>
     private const int NoProgressCeiling = SupervisorLane.DecisionBudget;

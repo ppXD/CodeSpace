@@ -31,4 +31,13 @@ public sealed record SupervisorAgentResult
 
     /// <summary>The branch the agent's sandbox pushed (the PR-open handoff), null when it pushed none.</summary>
     public string? ProducedBranch { get; init; }
+
+    /// <summary>Input (prompt) tokens the agent consumed (0 when its harness reported none). Rides INLINE in the durable agentResults array so the supervisor's cost bound (SOTA #4) sums realized spend straight off the ledger — no new query, replay-deterministic. Defaults 0 so an outcome folded before this field existed contributes 0 (fail-open back-compat).</summary>
+    public int InputTokens { get; init; }
+
+    /// <summary>Output (completion) tokens the agent produced (0 when its harness reported none). See <see cref="InputTokens"/>.</summary>
+    public int OutputTokens { get; init; }
+
+    /// <summary>The model the agent ran on (from its <c>AgentTask</c>), used to PRICE <see cref="InputTokens"/>/<see cref="OutputTokens"/>. Null/blank/unknown → unpriceable → the run contributes 0 to summed cost (fail-open).</summary>
+    public string? Model { get; init; }
 }

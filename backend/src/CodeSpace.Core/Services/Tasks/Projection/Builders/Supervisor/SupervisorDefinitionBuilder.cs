@@ -78,6 +78,7 @@ public sealed class SupervisorDefinitionBuilder : IWorkflowDefinitionBuilder, IS
         AddIfPresent(config, "maxParallelism", context.Route.Caps.MaxParallelism);
         AddIfPresent(config, "maxRounds", context.Route.Caps.MaxRounds);
         AddIfPresent(config, "maxTotalSpawns", context.Route.Caps.MaxTotalSpawns);
+        AddIfPresent(config, "maxCostUsd", context.Route.Caps.MaxCostUsd);
         AddIfPresent(config, "agentProfile", BuildAgentProfile(context.AgentProfile));
 
         return JsonSerializer.SerializeToElement(config);

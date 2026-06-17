@@ -77,6 +77,25 @@ public class SupervisorBoundsTests
         SupervisorGoalPlan.From(new SupervisorGoalConfig { ApprovalPolicy = raw }).ApprovalPolicy.ShouldBe(expected);
     }
 
+    [Fact]
+    public void MaxCostUsd_is_null_by_default_so_a_pre_SOTA4_supervisor_has_no_cost_cap()
+    {
+        // No cap authored → the run is bounded by the agent-COUNT cap alone (SOTA #4 fail-open default).
+        SupervisorGoalPlan.From(null).MaxCostUsd.ShouldBeNull();
+        SupervisorGoalPlan.From(new SupervisorGoalConfig { Goal = "ship it" }).MaxCostUsd.ShouldBeNull();
+    }
+
+    [Theory]
+    [InlineData(12.50, 12.50)]   // a positive budget is kept verbatim (no clamp ceiling — cost can't run away past the count cap)
+    [InlineData(0.0, null)]      // a zero budget resolves to null (no budget — would otherwise block the first spawn before any spend is known)
+    [InlineData(-5.0, null)]     // a negative budget resolves to null (no budget, not a zero budget)
+    public void MaxCostUsd_normalizes_non_positive_to_no_cap(double configured, double? expected)
+    {
+        var plan = SupervisorGoalPlan.From(new SupervisorGoalConfig { MaxCostUsd = (decimal)configured });
+
+        plan.MaxCostUsd.ShouldBe(expected is { } e ? (decimal)e : null);
+    }
+
     // ── PRE-DECISION bounds: each force-STOP reason at its limit ──────────────────────
 
     [Fact]
@@ -159,6 +178,60 @@ public class SupervisorBoundsTests
         SupervisorBounds.PostDecision(Context(turn: 1, totalSpawned: 50), plan, Stop()).ShouldBeNull("a stop creates no agents");
     }
 
+    // ── POST-DECISION cost cap (SOTA #4): realized-spend backpressure ─────────────────
+
+    [Fact]
+    public void Cost_cap_force_stops_the_next_spend_when_realized_spend_exceeds_the_budget()
+    {
+        var plan = SupervisorGoalPlan.From(new SupervisorGoalConfig { MaxCostUsd = 10m });
+
+        // Realized spend ABOVE the budget → the next spend-incurring decision is refused.
+        SupervisorBounds.PostDecision(Context(turn: 2, runSpend: 10.01m), plan, Spawn("a")).ShouldBe(SupervisorStopReasons.CostCapReached);
+        SupervisorBounds.PostDecision(Context(turn: 2, runSpend: 25m), plan, Retry()).ShouldBe(SupervisorStopReasons.CostCapReached, "a retry is a spend too");
+    }
+
+    [Fact]
+    public void Cost_cap_proceeds_at_or_below_the_budget_strict_greater_than()
+    {
+        var plan = SupervisorGoalPlan.From(new SupervisorGoalConfig { MaxCostUsd = 10m });
+
+        // STRICT > matches the total-spawn convention: exactly-at-budget still proceeds (salvage already-paid work).
+        SupervisorBounds.PostDecision(Context(turn: 2, runSpend: 10m), plan, Spawn("a")).ShouldBeNull("exactly at the budget proceeds");
+        SupervisorBounds.PostDecision(Context(turn: 2, runSpend: 9.99m), plan, Spawn("a")).ShouldBeNull("under the budget proceeds");
+        SupervisorBounds.PostDecision(Context(turn: 0, runSpend: 0m), plan, Spawn("a")).ShouldBeNull("no spend yet → the first spawn is never blocked (fail-open)");
+    }
+
+    [Fact]
+    public void No_cost_cap_never_force_stops_on_cost_however_large_the_spend()
+    {
+        // MaxCostUsd null (the default — no budget authored) → cost never trips, only the count cap bounds the run.
+        var plan = SupervisorGoalPlan.From(new SupervisorGoalConfig { MaxTotalSpawns = 50 });
+        plan.MaxCostUsd.ShouldBeNull();
+
+        SupervisorBounds.PostDecision(Context(turn: 5, totalSpawned: 1, runSpend: 9_999m), plan, Spawn("a")).ShouldBeNull();
+    }
+
+    [Fact]
+    public void Spend_is_only_metered_on_side_effecting_decisions()
+    {
+        // The cost bound, like the count caps, only refuses a spawn/retry — a plan/merge/stop spends no agent tokens.
+        var plan = SupervisorGoalPlan.From(new SupervisorGoalConfig { MaxCostUsd = 1m });
+
+        SupervisorBounds.PostDecision(Context(turn: 1, runSpend: 1_000m), plan, Plan()).ShouldBeNull("a plan incurs no agent spend");
+        SupervisorBounds.PostDecision(Context(turn: 1, runSpend: 1_000m), plan, Stop()).ShouldBeNull("a stop incurs no agent spend");
+    }
+
+    [Fact]
+    public void Count_caps_take_precedence_over_the_cost_cap()
+    {
+        // Both the total-spawn cap AND the cost cap are breached → the count cap reason wins (it is checked first),
+        // so a re-entry re-derives the SAME deterministic stop regardless of which the operator reads as "the" cause.
+        var plan = SupervisorGoalPlan.From(new SupervisorGoalConfig { MaxTotalSpawns = 1, MaxCostUsd = 1m });
+
+        SupervisorBounds.PostDecision(Context(turn: 2, totalSpawned: 1, runSpend: 1_000m), plan, Spawn("a"))
+            .ShouldBe(SupervisorStopReasons.TotalSpawnCapReached, "the count cap is checked before the cost cap");
+    }
+
     // ── Spawn-K schema cap pinned + the runtime guard matches it ──────────────────────
 
     [Fact]
@@ -191,6 +264,7 @@ public class SupervisorBoundsTests
         // changes what an operator sees — pin the literals (Rule 8).
         SupervisorStopReasons.BudgetExhausted.ShouldBe("budget exhausted");
         SupervisorStopReasons.TotalSpawnCapReached.ShouldBe("total spawn cap reached");
+        SupervisorStopReasons.CostCapReached.ShouldBe("cost cap reached");
         SupervisorStopReasons.SpawnFanOutExceedsCap.ShouldBe("spawn fan-out exceeds cap");
         SupervisorStopReasons.DepthCapExceeded.ShouldBe("supervisor nesting cap exceeded");
         SupervisorStopReasons.NoProgress.ShouldBe("no progress");
@@ -199,8 +273,8 @@ public class SupervisorBoundsTests
 
     // ─── Helpers ────────────────────────────────────────────────────────────────────
 
-    private static SupervisorTurnContext Context(int turn, int totalSpawned = 0, int noProgress = 0) =>
-        new() { Goal = "g", TurnNumber = turn, TotalSpawnedAgents = totalSpawned, NoProgressDecisions = noProgress };
+    private static SupervisorTurnContext Context(int turn, int totalSpawned = 0, int noProgress = 0, decimal runSpend = 0m) =>
+        new() { Goal = "g", TurnNumber = turn, TotalSpawnedAgents = totalSpawned, NoProgressDecisions = noProgress, RunSpendUsd = runSpend };
 
     private static SupervisorDecision Spawn(params string[] ids) => new()
     {

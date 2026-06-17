@@ -77,6 +77,7 @@ public sealed partial class SupervisorTurnService
             PriorDecisions = priorDecisions,
             InFlight = inFlight,
             TotalSpawnedAgents = FoldTotalSpawnedAgents(priorDecisions),
+            RunSpendUsd = FoldRunSpendUsd(priorDecisions),
             NoProgressDecisions = FoldNoProgressDecisions(priorDecisions),
             ApprovalPolicy = SupervisorGoalPlan.From(goalConfig).ApprovalPolicy,
             AgentProfile = goalConfig?.AgentProfile,
@@ -94,6 +95,18 @@ public sealed partial class SupervisorTurnService
         priorDecisions
             .Where(d => d.DecisionKind is SupervisorDecisionKinds.Spawn or SupervisorDecisionKinds.Retry)
             .Sum(d => SupervisorOutcome.ReadStagedAgentCount(d.OutcomeJson));
+
+    /// <summary>
+    /// Sum the run's REALIZED USD spend from the DURABLE ledger (SOTA #4) — every prior spawn/retry decision's folded
+    /// <c>agentResults</c> (each carrying its priced tokens + model), priced via <see cref="SupervisorOutcome.SpendUsd"/>.
+    /// A LEDGER FACT exactly like <see cref="FoldTotalSpawnedAgents"/>: it reads off OutcomeJson (no new query), so it
+    /// survives replay + re-entry deterministically. An outcome not yet folded (or folded before token fields existed)
+    /// has no agentResults → 0 (fail-open), so cost is realized-spend backpressure that can never block the first spawn.
+    /// </summary>
+    private static decimal FoldRunSpendUsd(IReadOnlyList<SupervisorPriorDecision> priorDecisions) =>
+        priorDecisions
+            .Where(d => d.DecisionKind is SupervisorDecisionKinds.Spawn or SupervisorDecisionKinds.Retry)
+            .Sum(d => SupervisorOutcome.SpendUsd(SupervisorOutcome.ReadAgentResults(d.OutcomeJson)));
 
     /// <summary>
     /// Count the MOST RECENT consecutive decisions that produced no new SETTLED agent result (the E5 best-effort
@@ -227,10 +240,20 @@ public sealed partial class SupervisorTurnService
 
         var runs = await _db.AgentRun.AsNoTracking()
             .Where(r => ids.Contains(r.Id) && r.TeamId == teamId)
-            .Select(r => new { r.Id, r.Status, r.Error, r.ResultJson })
+            .Select(r => new { r.Id, r.Status, r.Error, r.ResultJson, r.TaskJson })
             .ToListAsync(cancellationToken).ConfigureAwait(false);
 
-        return runs.ToDictionary(r => r.Id, r => SupervisorOutcome.ProjectCompact(r.Id, r.Status.ToString(), r.Error, r.ResultJson));
+        // SOTA #4: thread the agent's model (from TaskJson — there is no Model column) into ProjectCompact so the
+        // durable agentResults carry the priced inputs. Reuses the existing team-scoped load — no extra query.
+        return runs.ToDictionary(r => r.Id, r => SupervisorOutcome.ProjectCompact(r.Id, r.Status.ToString(), r.Error, r.ResultJson, ReadModel(r.TaskJson)));
+    }
+
+    /// <summary>The agent's model off its task envelope (TaskJson), best-effort (malformed → null) — the price key for the cost fold.</summary>
+    private static string? ReadModel(string? taskJson)
+    {
+        if (string.IsNullOrWhiteSpace(taskJson)) return null;
+        try { return JsonSerializer.Deserialize<AgentTask>(taskJson, AgentJson.Options)?.Model; }
+        catch (JsonException) { return null; }
     }
 
     /// <summary>
