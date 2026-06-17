@@ -103,18 +103,26 @@ describe("RelatedRepositoriesEditor", () => {
     expect(onChange.mock.calls[0]![0]).toEqual([{ repositoryId: "repo-1", access: "write" }]);
   });
 
-  it("malformed entries are dropped (defensive)", () => {
+  it("malformed entries are dropped + survivors keep their content + order", () => {
+    const onChange = vi.fn();
     const value = [
       { repositoryId: "repo-1", access: "read" },
       null,
       "not-an-object",
-      { repositoryId: 42 },
+      { repositoryId: 42 },                          // non-string id → coerced to an empty-id in-progress row
       { repositoryId: "repo-2", access: "write" },
     ];
 
-    render(<RelatedRepositoriesEditor value={value} onChange={() => {}} />);
+    render(<RelatedRepositoriesEditor value={value} onChange={onChange} />);
 
-    // null / non-object are dropped; { repositoryId: 42 } keeps an empty-id in-progress row.
-    expect(screen.queryAllByTestId("related-repositories-row")).toHaveLength(3);
+    const rows = screen.getAllByTestId("related-repositories-row");
+    expect(rows).toHaveLength(3);   // null + non-object dropped; 3 survive
+
+    // The surviving entries keep their repo + access (not corrupted), in order — assert via the row selects.
+    expect((within(rows[0]!).getByLabelText("Repository") as HTMLSelectElement).value).toBe("repo-1");
+    expect((within(rows[0]!).getByLabelText("Access") as HTMLSelectElement).value).toBe("read");
+    expect((within(rows[1]!).getByLabelText("Repository") as HTMLSelectElement).value).toBe("");   // coerced empty-id
+    expect((within(rows[2]!).getByLabelText("Repository") as HTMLSelectElement).value).toBe("repo-2");
+    expect((within(rows[2]!).getByLabelText("Access") as HTMLSelectElement).value).toBe("write");
   });
 });

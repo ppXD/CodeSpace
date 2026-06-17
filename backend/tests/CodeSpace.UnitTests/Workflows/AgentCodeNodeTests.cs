@@ -113,6 +113,48 @@ public class AgentCodeNodeTests
     }
 
     [Fact]
+    public async Task Related_repositories_without_a_primary_repository_fails_the_node()
+    {
+        // Fail loud rather than silently drop the authored multi-repo intent (e.g. an expression-bound primary that
+        // resolved empty at runtime). Without a primary the workspace has nowhere to anchor.
+        var inputs = new Dictionary<string, JsonElement>
+        {
+            ["relatedRepositories"] = JsonSerializer.SerializeToElement(new[] { new { repositoryId = Guid.NewGuid().ToString(), access = "write" } }),
+        };
+
+        var result = await new AgentCodeNode().RunAsync(BuildContext(RequiredConfig(), resume: null, inputs), CancellationToken.None);
+
+        result.Status.ShouldBe(NodeStatus.Failure);
+        result.Error.ShouldContain("relatedRepositories");
+        result.Error.ShouldContain("primary");
+    }
+
+    [Fact]
+    public async Task Related_repositories_default_to_read_and_skip_a_malformed_entry()
+    {
+        var web = Guid.NewGuid();
+        var api = Guid.NewGuid();
+        var inputs = new Dictionary<string, JsonElement>
+        {
+            ["repositoryId"] = Str(web.ToString()),
+            // api: no access → defaults to Read. Plus a non-object + an idless entry that must be SKIPPED, not throw.
+            ["relatedRepositories"] = JsonSerializer.SerializeToElement(new object[]
+            {
+                new { repositoryId = api.ToString() },
+                "not-an-object",
+                new { alias = "ghost" },   // no repositoryId → skipped
+            }),
+        };
+
+        var result = await new AgentCodeNode().RunAsync(BuildContext(RequiredConfig(), resume: null, inputs), CancellationToken.None);
+
+        result.Status.ShouldBe(NodeStatus.Suspended);
+        var task = JsonSerializer.Deserialize<AgentTask>(result.SuspendUntil!.Payload, AgentJson.Options)!;
+        task.Workspace!.Repositories.Count.ShouldBe(2, "only the primary + the one well-formed related repo (malformed entries skipped)");
+        task.Workspace.Repositories.Single(r => !r.IsPrimary).Access.ShouldBe(WorkspaceAccess.Read, "a related repo with no authored access defaults to read-only context");
+    }
+
+    [Fact]
     public async Task Malformed_repository_input_fails_the_node()
     {
         var inputs = new Dictionary<string, JsonElement> { ["repositoryId"] = Str("not-a-uuid") };

@@ -139,6 +139,11 @@ public sealed class AgentCodeNode : INodeRuntime
         // Multi-repo: authored RELATED repos (the primary is repositoryId) project onto a WorkspaceSpec. No related
         // repos → null Workspace → the resolver derives the single-repo workspace from RepositoryId → BYTE-IDENTICAL.
         var related = ReadRelatedRepositories(context);
+
+        // Fail loud rather than silently drop the authored multi-repo intent: related repos are meaningless without a
+        // primary (the workspace has nowhere to anchor + nothing writable to default to).
+        if (related.Count > 0 && repositoryId is null) return Fail("Input 'relatedRepositories' requires a primary 'repositoryId' — pick the primary repository, or remove the related ones.");
+
         var workspace = repositoryId is { } primaryId ? WorkspaceSpec.FromAuthoredRepos(primaryId, primaryRef: null, related) : null;
 
         var task = new AgentTask

@@ -92,6 +92,40 @@ public class WorkspaceSpecTests
         aliases.Distinct().Count().ShouldBe(3, "every alias is unique (the provider's mount-layout guard needs it)");
     }
 
+    [Fact]
+    public void FromAuthoredRepos_keeps_aliases_unique_when_an_authored_alias_collides_with_a_generated_fallback()
+    {
+        // The adversarial case: an authored "repo-3" must not collide with the repo-N a LATER blank repo falls back to.
+        // The fallback loops past taken, so the blank one gets repo-2 (the next free), not a duplicate repo-3.
+        var spec = WorkspaceSpec.FromAuthoredRepos(Guid.NewGuid(), null, new[]
+        {
+            new WorkspaceRepositorySpec { Alias = "repo-3", RepositoryId = Guid.NewGuid() },
+            new WorkspaceRepositorySpec { Alias = "", RepositoryId = Guid.NewGuid() },
+        })!;
+
+        var aliases = spec.Repositories.Select(r => r.Alias).ToList();
+        aliases.ShouldContain("repo-3");
+        aliases.Distinct().Count().ShouldBe(aliases.Count, "no two repos share an alias — else the provider refuses the whole workspace at clone time");
+    }
+
+    [Theory]
+    [InlineData("../etc")]   // traversal
+    [InlineData("a/b")]      // path separator
+    [InlineData(".")]        // single dot
+    [InlineData("..")]       // double dot
+    public void FromAuthoredRepos_replaces_an_unsafe_authored_alias_with_a_safe_fallback(string unsafeAlias)
+    {
+        // An unsafe authored alias must NEVER reach the clone as a mount segment — the factory falls back to repo-N so
+        // the spec is safe BY CONSTRUCTION (the provider's IsSafeMountSegment stays as defence-in-depth).
+        var spec = WorkspaceSpec.FromAuthoredRepos(Guid.NewGuid(), null, new[]
+        {
+            new WorkspaceRepositorySpec { Alias = unsafeAlias, RepositoryId = Guid.NewGuid() },
+        })!;
+
+        var related = spec.Repositories.Single(r => !r.IsPrimary);
+        related.Alias.ShouldBe("repo-2", $"the unsafe alias '{unsafeAlias}' is replaced with a safe repo-N");
+    }
+
     // ── WorkspaceSpec.Primary: resolution precedence ─────────────────────────────────
 
     [Fact]

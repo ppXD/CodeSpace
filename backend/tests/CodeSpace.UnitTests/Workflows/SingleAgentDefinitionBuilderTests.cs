@@ -177,6 +177,24 @@ public class SingleAgentDefinitionBuilderTests
     }
 
     [Fact]
+    public void Related_repository_with_read_access_and_blank_alias_emits_read_and_omits_the_alias()
+    {
+        // The projection lane must agree with the editor + node on the defaults: a blank alias is emitted as null
+        // (the node re-derives repo-N) and Read access is emitted as "read" — else the projected workspace diverges.
+        var api = Guid.NewGuid();
+        var def = Builder.Build(Context(Seed(), new ResolvedAgentProfile
+        {
+            RepositoryId = Guid.NewGuid(),
+            RelatedRepositories = new[] { new WorkspaceRepositorySpec { Alias = "  ", RepositoryId = api, Access = WorkspaceAccess.Read } },
+        }));
+
+        var entry = AgentInputsOf(def).GetProperty("relatedRepositories")[0];
+        entry.GetProperty("repositoryId").GetString().ShouldBe(api.ToString());
+        entry.GetProperty("access").GetString().ShouldBe("read", "Read access is emitted as 'read'");
+        (entry.GetProperty("alias").ValueKind == JsonValueKind.Null).ShouldBeTrue("a blank alias is emitted null so the node re-derives repo-N");
+    }
+
+    [Fact]
     public void Terminal_surfaces_the_agent_result_outputs()
     {
         var inputs = TerminalInputsOf(Builder.Build(Context(Seed(), profile: null)));

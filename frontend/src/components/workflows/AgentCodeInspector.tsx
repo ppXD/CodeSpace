@@ -142,7 +142,7 @@ export function AgentCodeInspector({ config, inputs, onConfigChange, onInputsCha
 
         <label className="wf-form-row">
           <span className="wf-form-label">Repository</span>
-          <ProjectRepositorySelector value={repositoryId} onChange={(v) => onInputsChange({ ...inputs, repositoryId: v === "" ? undefined : v })} />
+          <ProjectRepositorySelector value={repositoryId} onChange={(v) => onInputsChange({ ...inputs, repositoryId: v === "" ? undefined : v, ...(v === "" ? { relatedRepositories: undefined } : {}) })} />
           <span className="wf-form-help">Cloned into the agent's workspace before it runs. Leave empty for an analysis-only run.</span>
         </label>
 
