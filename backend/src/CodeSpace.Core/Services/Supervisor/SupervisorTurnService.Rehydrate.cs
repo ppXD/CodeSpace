@@ -174,26 +174,39 @@ public sealed partial class SupervisorTurnService
     /// <summary>
     /// Fold a TERMINAL spawn/retry decision's spawned-agent COMPACT results into its replayed outcome (SOTA #2) —
     /// the FoldAskHumanAnswer analogue for the spawn path, so the decider sees "you spawned these, here is what each
-    /// produced" on the next turn. A non-spawn/retry decision, a zero-agent spawn (no recorded ids), or a spawn
-    /// whose agents the results map doesn't yet have (the park window — no settled rows) passes through UNCHANGED.
-    /// The early-return keys on the results map's MEMBERSHIP, not on the agent having a result row: a terminal Failed
-    /// agent whose ResultJson is null still folds <c>{status:Failed, error:&lt;rowError&gt;}</c> — the exact signal the
-    /// slice exists to surface. Ids are iterated in RECORDED spawn order (replay-deterministic), never DB-row order.
+    /// produced" on the next turn. Pass-through UNCHANGED for: a non-spawn/retry decision; a zero-agent spawn (no
+    /// recorded ids); and — the redundant-write guard — a spawn whose outcome is ALREADY folded (it carries
+    /// agentResults). Skipping an already-folded outcome is sound because a fold runs only AFTER the barrier (all K
+    /// agents terminal) so the first fold is complete + the terminal AgentRun rows are immutable; re-folding would
+    /// only re-emit a byte-divergent-but-equal jsonb that the persist guard then no-ops at the DB anyway. Skipping it
+    /// keeps the in-memory OutcomeJson == the read-back, so the loop's byte-compare is false and NO redundant UPDATE
+    /// is issued on later rehydrates.
+    ///
+    /// <para>Every staged id maps to a result: a resolved agent → its compact result (a terminal Failed agent whose
+    /// ResultJson is null still folds <c>{status:Failed, error:&lt;rowError&gt;}</c> — the signal the slice exists to
+    /// surface); an UNRESOLVED id (deleted / out-of-team — not reachable today since AgentRun rows are append-only +
+    /// parent-terminal-guarded) → an explicit <c>Unknown</c> placeholder, so the folded set is always N-for-N and the
+    /// decider never sees a silent hole shorter than agentCount. Ids are iterated in RECORDED spawn order
+    /// (replay-deterministic), never DB-row order.</para>
     /// </summary>
     private static SupervisorPriorDecision FoldAgentResults(SupervisorPriorDecision decision, IReadOnlyDictionary<Guid, SupervisorAgentResult> resultsById)
     {
         if (decision.DecisionKind is not (SupervisorDecisionKinds.Spawn or SupervisorDecisionKinds.Retry)) return decision;
 
+        if (SupervisorOutcome.ReadAgentResults(decision.OutcomeJson).Count > 0) return decision;   // already folded — durable + immutable; don't re-fold (no redundant UPDATE)
+
         var ids = SupervisorOutcome.ReadStagedAgentRunIds(decision.OutcomeJson);
 
         if (ids.Count == 0) return decision;
 
-        var folded = ids.Where(resultsById.ContainsKey).Select(id => resultsById[id]).ToList();
-
-        if (folded.Count == 0) return decision;
+        var folded = ids.Select(id => resultsById.TryGetValue(id, out var r) ? r : UnknownAgentResult(id)).ToList();
 
         return decision with { OutcomeJson = SupervisorOutcome.FoldAgentResults(decision.OutcomeJson, folded) };
     }
+
+    /// <summary>The placeholder for a staged agent-run id that no longer resolves (deleted / out-of-team) — keeps the folded set N-for-N so the decider sees an explicit "this agent is gone" rather than a silently shorter list. Not reachable today (AgentRun rows are append-only), but fail-legible if it ever is.</summary>
+    private static SupervisorAgentResult UnknownAgentResult(Guid agentRunId) =>
+        new() { AgentRunId = agentRunId, Status = "Unknown", Error = "agent run not found (deleted or out-of-team)" };
 
     /// <summary>
     /// The COMPACT terminal result of every agent staged by THIS run's spawn/retry decisions, keyed by agent-run id

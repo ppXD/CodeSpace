@@ -97,10 +97,12 @@ public sealed class SupervisorAgentResultsRehydrateFlowTests
         SupervisorOutcome.ReadAgentResults(afterFirst).Count.ShouldBe(1, "the agent result was folded + persisted onto the ledger row");
         SupervisorOutcome.ReadStagedAgentCount(afterFirst).ShouldBe(1, "agentCount stays intact through the persisted fold");
 
-        // Re-rehydrate → the stored outcome converges to identical bytes (idempotent — same terminal facts re-fold
-        // to the same value; jsonb-normalized read-back is stable across rehydrates).
-        await RehydrateAsync(runId, teamId);
-        (await LedgerOutcomeAsync(runId, teamId, SupervisorDecisionKinds.Spawn)).ShouldBe(afterFirst, "re-rehydrate re-folds to identical stored bytes — converges, no drift");
+        // Re-rehydrate → the orchestrator SKIPS the already-folded row (returns it verbatim), so the in-memory
+        // outcome equals the durable read-back and NO redundant write is issued (the skip the review asked for).
+        var ctx2 = await RehydrateAsync(runId, teamId);
+        var spawn2 = ctx2.PriorDecisions.Single(d => d.DecisionKind == SupervisorDecisionKinds.Spawn);
+        spawn2.OutcomeJson.ShouldBe(afterFirst, "2nd rehydrate returns the already-folded row verbatim — no re-fold, no redundant UPDATE");
+        (await LedgerOutcomeAsync(runId, teamId, SupervisorDecisionKinds.Spawn)).ShouldBe(afterFirst, "the durable row is unchanged across the second rehydrate");
     }
 
     [Fact]
@@ -123,6 +125,32 @@ public sealed class SupervisorAgentResultsRehydrateFlowTests
         // The durable row was never rewritten with an agent-results fold (it would be clobbered by RecordTerminalAsync).
         SupervisorOutcome.ReadAgentResults(await LedgerOutcomeAsync(runId, teamId, SupervisorDecisionKinds.Spawn))
             .ShouldBeEmpty("the non-terminal ledger row carries no folded agentResults");
+    }
+
+    [Fact]
+    public async Task Rehydrate_folds_an_Unknown_placeholder_for_a_staged_id_that_no_longer_resolves()
+    {
+        // Forward-looking robustness: a staged agent-run id with NO resolvable AgentRun row (deleted / out-of-team —
+        // not reachable today) folds an explicit Unknown placeholder, so the folded set is N-for-N and the decider
+        // never sees a silent hole shorter than agentCount.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedSupervisorRunAsync(teamId, userId);
+
+        var okId = Guid.NewGuid();
+        var ghostId = Guid.NewGuid();   // never seeded — no AgentRun row exists for it
+        await SeedAgentRunAsync(runId, teamId, okId, AgentRunStatus.Succeeded, rowError: null, resultJson: ResultJson(summary: "done"));
+        await SeedSpawnDecisionAsync(runId, teamId, sequence: 1, SupervisorDecisionStatus.Succeeded, SpawnOutcome(okId, ghostId));
+
+        var context = await RehydrateAsync(runId, teamId);
+        var spawn = context.PriorDecisions.Single(d => d.DecisionKind == SupervisorDecisionKinds.Spawn);
+        var results = SupervisorOutcome.ReadAgentResults(spawn.OutcomeJson);
+
+        results.Count.ShouldBe(2, "the folded set is N-for-N even when an id does not resolve");
+        results.Single(r => r.AgentRunId == okId).Status.ShouldBe("Succeeded");
+        var ghost = results.Single(r => r.AgentRunId == ghostId);
+        ghost.Status.ShouldBe("Unknown", "an unresolved staged id folds an explicit Unknown placeholder, not a silent omission");
+        ghost.Error.ShouldNotBeNull();
+        SupervisorOutcome.ReadStagedAgentCount(spawn.OutcomeJson).ShouldBe(2, "agentCount stays intact");
     }
 
     // ─── Seeding + helpers ─────────────────────────────────────────────────────────────
