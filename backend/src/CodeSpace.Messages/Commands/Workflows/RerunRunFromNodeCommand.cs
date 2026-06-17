@@ -10,9 +10,11 @@ namespace CodeSpace.Messages.Commands.Workflows;
 /// snapshot; lineage rides on <c>ParentRunId</c> + the request causation.
 ///
 /// <para>Tenancy: the original run must belong to the caller's current team (404 conflated with not-yours).
-/// Refuses (before any write): an unknown / container-internal from-node, a re-run closure containing an
-/// effectful node (slice-1 fail-closed — approval-gated rerun is a follow-up), or an upstream node that didn't
-/// settle reusably. Returns the new <c>WorkflowRun.Id</c>.</para>
+/// Refuses (before any write): an unknown / container-internal from-node, a re-run closure containing a node
+/// whose rerun isn't supported yet (a suspendable agent/subworkflow/supervisor node, or a Map/Loop/Try
+/// container), or an upstream node that didn't settle reusably. A SIDE-EFFECTING node in the closure is NOT
+/// refused — the engine approval-gates it at runtime (it suspends on an Approval wait; approve to re-fire,
+/// reject to skip). Returns the new <c>WorkflowRun.Id</c>.</para>
 /// </summary>
 public sealed record RerunRunFromNodeCommand : ICommand<Guid>, IRequireTeamMembership
 {

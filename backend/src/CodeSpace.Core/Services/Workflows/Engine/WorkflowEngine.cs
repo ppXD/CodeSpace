@@ -2559,6 +2559,12 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
         var resumePayload = state.ResumePayloads.TryGetValue(node.Id, out var rp) ? rp : (JsonElement?)null;
         var exec = new NodeExecution(run, node, runtime, scope, state, resolvedInputs, resolvedConfig, parentRecordId, resumePayload, startedAt, iterationKey);
 
+        // D7-3 rerun side-effect gate: on a from-node rerun, a re-run side-effecting node parks for human
+        // approval before it can re-fire (approve → run it; reject → skip it). Returns null for every other
+        // node (normal/replay run, or a pure node) so the standard execution proceeds unchanged.
+        var gateOutcome = await ApplyRerunSideEffectGateAsync(exec, cancellationToken).ConfigureAwait(false);
+        if (gateOutcome is { } gated) return gated;
+
         var plan = RetryPlan.From(node.Retry);
         var lastError = "Node failed.";
 
@@ -2605,6 +2611,37 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
 
         // Defensive: the loop always returns on its final attempt.
         return await FinalizeFailureAsync(exec, lastError, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// D7-3 rerun side-effect gate. On a from-node RERUN, a side-effecting node must not silently re-fire:
+    /// <list type="bullet">
+    ///   <item>First reach (no resume payload) → park on an Approval wait (<see cref="SuspendNodeAsync"/>) and
+    ///         return a Suspended outcome; <see cref="AdvanceAfterNodeSettled"/> then lands the run Suspended.</item>
+    ///   <item>Resumed + approved → return null so the caller runs the node for real (fires the side effect).</item>
+    ///   <item>Resumed + rejected → write node.skipped and return Skipped, so the effect never fires (downstream
+    ///         with no other live input is skipped, mirroring an untaken branch).</item>
+    /// </list>
+    /// Returns null when no gate applies. Reused upstream cells never reach here — they're pre-seeded + settled.
+    /// </summary>
+    private async Task<NodeRunOutcome?> ApplyRerunSideEffectGateAsync(NodeExecution exec, CancellationToken cancellationToken)
+    {
+        if (!Rerun.RerunSideEffectGate.ShouldGate(exec.Run.RunRequest?.SourceType, exec.Runtime.Manifest))
+            return null;
+
+        if (exec.ResumePayload is not { } approval)
+        {
+            var token = Rerun.RerunSideEffectGate.BuildApprovalToken(exec.Node.Id, exec.Runtime.Manifest.DisplayName);
+            await SuspendNodeAsync(exec.Run, exec.Node, NodeResult.Suspend(token), cancellationToken, exec.IterationKey).ConfigureAwait(false);
+            return new NodeRunOutcome(NodeStatus.Suspended, null, null, null);
+        }
+
+        if (Rerun.RerunSideEffectGate.IsApproved(approval))
+            return null;   // approved → fall through and run the node (fire the side effect)
+
+        // Rejected → skip the node so its side effect never fires.
+        await _recordLogger.NodeSkippedAsync(exec.Run.Id, exec.Node.Id, exec.IterationKey, reason: "rerun side-effect re-fire rejected by operator", cancellationToken).ConfigureAwait(false);
+        return new NodeRunOutcome(NodeStatus.Skipped, null, null, null);
     }
 
     /// <summary>
