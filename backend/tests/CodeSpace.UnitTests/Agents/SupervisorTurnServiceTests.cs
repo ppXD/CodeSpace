@@ -126,6 +126,25 @@ public class SupervisorTurnServiceTests
         executor.Calls.ShouldBe(0, "the gate refused BEFORE any execute — no agent was staged");
     }
 
+    // ── Resolver loop #379 S4: a resolve is irreversible → HITL even under the autonomous policy ──
+
+    [Fact]
+    public void A_resolve_parks_for_approval_under_the_autonomous_policy_but_a_spawn_does_not()
+    {
+        // The safety floor wired end-to-end through the REAL gate: under None (autonomous) a spawn runs unchanged,
+        // but a resolve — which dispatches an agent to autonomously RE-MERGE code — escalates to a human approval
+        // card (it parks), because GateSideEffectingDecision passes irreversible=IsIrreversible(kind) for resolve.
+        var service = new SupervisorTurnService(new FakeSupervisorDecisionLog(), new StubSupervisorDecider(), new CountingExecutor(), db: null!, NullLogger<SupervisorTurnService>.Instance);
+
+        var context = new SupervisorTurnContext { Goal = "goal", SupervisorRunId = _runId, TeamId = _teamId, NodeId = "sup", TurnNumber = 1, ApprovalPolicy = SupervisorApprovalPolicy.None, ConversationId = Guid.NewGuid() };
+
+        var spawn = service.GateSideEffectingDecision(context, new SupervisorDecision { Kind = SupervisorDecisionKinds.Spawn, PayloadJson = """{"subtaskIds":["a"]}""" });
+        spawn.Kind.ShouldBe(SupervisorDecisionKinds.Spawn, "a normal spawn under the autonomous policy is NOT gated — it runs unchanged");
+
+        var resolve = service.GateSideEffectingDecision(context, new SupervisorDecision { Kind = SupervisorDecisionKinds.Resolve, PayloadJson = "{}" });
+        resolve.Kind.ShouldBe(SupervisorDecisionKinds.AskHuman, "a resolve under the SAME autonomous policy is rewritten into an approval card — it parks for a human before any autonomous re-merge");
+    }
+
     // ── Replay: a re-run of a settled turn does NOT re-execute the side effect ───────
 
     [Fact]

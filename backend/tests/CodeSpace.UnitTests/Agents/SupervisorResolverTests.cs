@@ -198,6 +198,38 @@ public class SupervisorResolverTests
         score.ResolveCount.ShouldBe(1, "a resolve attempt is now a first-class per-verb metric on the scorecard");
     }
 
+    // ── S4: the irreversible HITL acceptance gate (the safety floor) ───────────────────
+
+    [Theory]
+    [InlineData(SupervisorDecisionKinds.Resolve, true)]
+    [InlineData(SupervisorDecisionKinds.Spawn, false)]
+    [InlineData(SupervisorDecisionKinds.Retry, false)]
+    [InlineData(SupervisorDecisionKinds.Merge, false)]
+    [InlineData(SupervisorDecisionKinds.Stop, false)]
+    public void Only_resolve_is_irreversible(string kind, bool expected)
+    {
+        SupervisorGovernance.IsIrreversible(kind).ShouldBe(expected, "a resolve autonomously re-merges code — it ALWAYS needs a human; the other verbs don't");
+    }
+
+    [Fact]
+    public void A_resolve_requires_human_approval_even_under_the_autonomous_policy()
+    {
+        // The safety floor: under None (autonomous) a spawn runs without approval, but a resolve ESCALATES to
+        // RequireApproval — a model never autonomously re-merges code without a human OK.
+        SupervisorGovernance.Decide(SupervisorDecisionKinds.Spawn, SupervisorApprovalPolicy.None, irreversible: SupervisorGovernance.IsIrreversible(SupervisorDecisionKinds.Spawn))
+            .ShouldBe(AgentToolGateDecision.Allow, "a normal spawn under the autonomous policy still runs autonomously");
+
+        SupervisorGovernance.Decide(SupervisorDecisionKinds.Resolve, SupervisorApprovalPolicy.None, irreversible: SupervisorGovernance.IsIrreversible(SupervisorDecisionKinds.Resolve))
+            .ShouldBe(AgentToolGateDecision.RequireApproval, "a resolve under the SAME autonomous policy escalates to a human approval — the irreversible floor");
+    }
+
+    [Fact]
+    public void A_resolve_still_requires_approval_under_the_approve_spawns_policy()
+    {
+        SupervisorGovernance.Decide(SupervisorDecisionKinds.Resolve, SupervisorApprovalPolicy.Spawns, irreversible: true)
+            .ShouldBe(AgentToolGateDecision.RequireApproval);
+    }
+
     // ── The dedicated resolve-attempt bound ────────────────────────────────────────────
 
     private static SupervisorTurnContext ContextWithResolves(int priorResolves)
