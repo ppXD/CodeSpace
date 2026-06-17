@@ -52,6 +52,19 @@ public sealed record SupervisorMergePayload
     public string? SynthesisInstruction { get; init; }
 }
 
+/// <summary>
+/// The <c>resolve</c> payload (resolver loop #379): the decider only CHOOSES to attempt resolution — the resolver
+/// task's content (which branches, which conflicted files, the build/test instruction) is assembled DETERMINISTICALLY
+/// by <c>RealSupervisorActionExecutor.Resolve</c> from the durable conflicted-merge + spawn outcomes, never by the
+/// model. The single optional <see cref="Note"/> lets the decider record WHY it chose to attempt (audit only — it
+/// never steers the resolution), so the payload carries no branch/file fields the model could get wrong.
+/// </summary>
+public sealed record SupervisorResolvePayload
+{
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? Note { get; init; }
+}
+
 /// <summary>The <c>ask_human</c> payload: the question to ask (parked for E4).</summary>
 public sealed record SupervisorAskHumanPayload
 {

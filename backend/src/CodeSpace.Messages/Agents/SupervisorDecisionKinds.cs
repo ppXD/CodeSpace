@@ -31,6 +31,15 @@ public static class SupervisorDecisionKinds
     /// <summary>Synthesize the recorded prior-Attempt agent results into one outcome. SYNCHRONOUS — a thin reduce over the prior agent runs' <c>ResultJson</c>; the node self-advances.</summary>
     public const string Merge = "merge";
 
+    /// <summary>
+    /// Attempt to resolve a CONFLICTED integration (resolver loop #379): spawn ONE real <c>agent.code</c> run that
+    /// reconciles the prior agents' preserved branches, builds, and runs the tests. ASYNC — stages a single AgentRun
+    /// wait + parks (the K=1 spawn shape). The resolver task's CONTENT (instruction + branch set + conflicted files)
+    /// is assembled DETERMINISTICALLY by the executor from durable data, never authored by the model — the decider
+    /// only CHOOSES to attempt (this verb) vs <see cref="Stop"/> (leave the conflict for a human).
+    /// </summary>
+    public const string Resolve = "resolve";
+
     /// <summary>Terminate the supervisor turn loop — the run completes via the normal walk. The fail-closed budget-exhaustion verb too.</summary>
     public const string Stop = "stop";
 }

@@ -38,6 +38,9 @@ public sealed record SupervisorGoalConfig
     /// <summary>Optional cap on consecutive decisions producing no new settled agent result before the best-effort no-progress guard force-STOPs. Null = the <c>SupervisorLane.DefaultMaxNoProgressDecisions</c> default.</summary>
     public int? MaxNoProgressDecisions { get; init; }
 
+    /// <summary>Optional cap on how many <c>resolve</c> attempts the supervisor may make against a conflicted integration (resolver loop #379). Null = the <c>SupervisorLane.DefaultMaxResolveAttempts</c> default (1). Clamped to <c>[1, MaxResolveAttemptsCeiling]</c>.</summary>
+    public int? MaxResolveAttempts { get; init; }
+
     /// <summary>Optional acceptance checks the operator wants verified before the supervisor declares success. RESERVED — stored + parsed; the enforcing acceptance gate is a follow-up.</summary>
     public IReadOnlyList<string>? AcceptanceChecks { get; init; }
 

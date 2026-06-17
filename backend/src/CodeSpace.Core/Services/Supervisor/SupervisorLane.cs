@@ -51,6 +51,17 @@ public static class SupervisorLane
     /// </summary>
     public const int MaxSupervisorDepth = 8;
 
+    /// <summary>
+    /// The default cap on how many <c>resolve</c> attempts one supervisor run may make against a conflicted
+    /// integration (resolver loop #379) — small on purpose: a resolution that fails this many times should fall
+    /// back fail-safe to the humans (the K agent branches remain), never an unbounded resolve loop burning agents +
+    /// tokens. An operator's <c>MaxResolveAttempts</c> tunes it within <c>[1, MaxResolveAttemptsCeiling]</c>. Pinned (Rule 8).
+    /// </summary>
+    public const int DefaultMaxResolveAttempts = 1;
+
+    /// <summary>The hard ceiling an operator's <c>MaxResolveAttempts</c> is clamped to — a conflict the model can't reconcile in a few tries is for a human, not an infinite retry. Pinned (Rule 8).</summary>
+    public const int MaxResolveAttemptsCeiling = 5;
+
     /// <summary>Reads the env var through the single gate. Default-OFF: true only for the explicit on-values.</summary>
     public static bool IsEnabled() => IsEnabled(Environment.GetEnvironmentVariable(EnabledEnvVar));
 

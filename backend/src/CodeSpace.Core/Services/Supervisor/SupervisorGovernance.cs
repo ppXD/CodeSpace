@@ -20,9 +20,9 @@ namespace CodeSpace.Core.Services.Supervisor;
 /// </summary>
 public static class SupervisorGovernance
 {
-    /// <summary>Whether a decision kind has a SIDE EFFECT the gate governs (creates agent runs). Plan/merge/stop/ask_human are read-only / terminal / already-human and pass through ungated.</summary>
+    /// <summary>Whether a decision kind has a SIDE EFFECT the gate governs (creates agent runs). Spawn/retry/resolve all stage real agent runs; plan/merge/stop/ask_human are read-only / terminal / already-human and pass through ungated.</summary>
     public static bool IsSideEffecting(string decisionKind) =>
-        decisionKind is SupervisorDecisionKinds.Spawn or SupervisorDecisionKinds.Retry;
+        decisionKind is SupervisorDecisionKinds.Spawn or SupervisorDecisionKinds.Retry or SupervisorDecisionKinds.Resolve;
 
     /// <summary>
     /// The governance verdict for a decision under the run's approval policy. A non-side-effecting decision is

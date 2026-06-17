@@ -26,8 +26,8 @@ public static class SupervisorDecisionSchema
           "properties": {
             "kind": {
               "type": "string",
-              "enum": ["plan", "spawn", "retry", "ask_human", "merge", "stop"],
-              "description": "The single next action. 'plan' decomposes the goal; 'spawn' fans out agents over planned subtasks; 'retry' re-runs one subtask; 'merge' synthesizes prior agent results; 'ask_human' asks a question; 'stop' ends the run."
+              "enum": ["plan", "spawn", "retry", "ask_human", "merge", "resolve", "stop"],
+              "description": "The single next action. 'plan' decomposes the goal; 'spawn' fans out agents over planned subtasks; 'retry' re-runs one subtask; 'merge' synthesizes prior agent results; 'resolve' spawns ONE agent to reconcile a CONFLICTED integration (choose it only after a merge reported INTEGRATION CONFLICTED — the server assembles the resolver task from the conflict); 'ask_human' asks a question; 'stop' ends the run."
             },
             "plan": {
               "type": "object",

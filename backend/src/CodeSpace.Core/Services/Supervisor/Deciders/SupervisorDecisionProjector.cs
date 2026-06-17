@@ -24,6 +24,7 @@ public static class SupervisorDecisionProjector
         SupervisorDecisionKinds.Retry => Canonical(SupervisorDecisionKinds.Retry, model.Retry ?? new SupervisorRetryPayload { SubtaskId = "" }),
         SupervisorDecisionKinds.AskHuman => Canonical(SupervisorDecisionKinds.AskHuman, model.AskHuman ?? new SupervisorAskHumanPayload { Question = "" }),
         SupervisorDecisionKinds.Merge => Canonical(SupervisorDecisionKinds.Merge, model.Merge ?? new SupervisorMergePayload()),
+        SupervisorDecisionKinds.Resolve => Canonical(SupervisorDecisionKinds.Resolve, model.Resolve ?? new SupervisorResolvePayload()),
         SupervisorDecisionKinds.Stop => Canonical(SupervisorDecisionKinds.Stop, model.Stop ?? new SupervisorStopPayload { Outcome = "completed" }),
         _ => Canonical(SupervisorDecisionKinds.Stop, new SupervisorStopPayload { Outcome = "unknown-decision", Summary = $"The decider emitted an unrecognized kind '{model.Kind}'." }),
     };
