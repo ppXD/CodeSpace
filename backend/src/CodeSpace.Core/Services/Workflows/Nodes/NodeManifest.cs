@@ -151,6 +151,24 @@ public sealed record NodeManifest
     /// it false.</para>
     /// </summary>
     public bool CanSuspend { get; init; }
+
+    /// <summary>
+    /// Opt-in marker (D7-5) that a <see cref="CanSuspend"/> node is PROVEN to re-run cleanly as a re-run
+    /// <c>flow.map</c> branch body — the engine itself drives its wait to completion on the fork, so re-running
+    /// the branch re-stages the work without a stranded wait, an ungated child closure, or a distinct suspend
+    /// shape. <c>agent.code</c> sets it (a re-run branch re-stages a FRESH <c>AgentRun</c> under the branch's
+    /// iteration key, mechanically identical to the shipped original-run map durable resume).
+    ///
+    /// <para>Default <c>false</c> — FAIL-CLOSED: bare <see cref="CanSuspend"/> is NOT sufficient. The other
+    /// suspendable nodes each break in a different way and stay refused until analyzed: <c>flow.wait_*</c>
+    /// strand the fork (a fresh wait is minted but no human / webhook re-issues the original signal),
+    /// <c>flow.subworkflow</c> forks an entire ungated child run whose side effects bypass the branch-body
+    /// gate, <c>agent.supervisor</c> has a distinct per-turn wait shape, and a node that is BOTH side-effecting
+    /// AND suspendable (<c>chat.post_message</c>) cannot compose with the D7-3 approval gate (the gate would
+    /// fire its effect then mis-skip it on the node's own resume). A new suspendable node author sets this
+    /// only after proving the substrate (Rule 7 — narrow start, widen deliberately).</para>
+    /// </summary>
+    public bool IsRerunnableWhenSuspendable { get; init; }
 }
 
 /// <summary>

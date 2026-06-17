@@ -17,6 +17,19 @@ namespace CodeSpace.Core.Services.Workflows.Rerun;
 /// (e.g. <c>chat.post_message</c> with waitForResponse), a CanSuspend node, or a container never reaches this gate —
 /// the rerun staging refuses them up front (<see cref="RerunBlockedByUnsupportedNodeException"/>) — and reused
 /// upstream cells are pre-seeded + settled so they never execute.</para>
+///
+/// <para>D7-5: the gate also runs for a re-run map-branch BODY node (a purely side-effecting node admitted by
+/// <see cref="RerunBranchBodyPolicy"/>). There it parks under the branch's iteration key (<c>&lt;mapId&gt;#&lt;i&gt;</c>),
+/// so the wait ROW — keyed (RunId, NodeId, IterationKey) — is what disambiguates per-branch resume; the per-node
+/// correlation token is NOT iteration-aware and is never read for Approval resolution (waitId-keyed), so it stays
+/// the same string. A re-run targets exactly ONE branch, but that branch's body may contain MORE THAN ONE
+/// side-effecting node (a parallel wave), so N&gt;1 Pending gate waits can be live under <c>&lt;mapId&gt;#&lt;i&gt;</c>
+/// at once (each a distinct NodeId, so no unique-index collision). Exactly-once is preserved NOT by "one wait at a
+/// time" but by the branch-level still-suspended short-circuit: <c>RehydrateMapBranchAsync</c> reports the branch
+/// still-suspended while ANY of its waits is Pending, and the branch re-suspends as a whole — so no gated node in
+/// the branch fires until EVERY gate in that branch is resolved. WARNING: a future "optimization" that let an
+/// approved node advance while a sibling gate in the same branch is still Pending would re-fire the un-approved
+/// sibling's effect on the next walk — do not advance a branch past a Pending gate.</para>
 /// </summary>
 public static class RerunSideEffectGate
 {

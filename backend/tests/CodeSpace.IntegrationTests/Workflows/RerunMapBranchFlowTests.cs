@@ -3,6 +3,8 @@ using Autofac;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Services.Workflows;
 using CodeSpace.Core.Services.Workflows.Engine;
+using CodeSpace.Core.Services.Workflows.Nodes;
+using CodeSpace.Core.Services.Workflows.Rerun;
 using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.IntegrationTests.Workflows.Infrastructure;
 using CodeSpace.Messages.Authorization;
@@ -26,8 +28,16 @@ namespace CodeSpace.IntegrationTests.Workflows;
 ///
 /// <para>Tier: high-fidelity. The crown jewel uses a per-element <see cref="FlakyTestNode"/> (pure, failTimes=0)
 /// whose <c>AttemptsFor</c> counter per element proves a reused sibling never re-executes (counter unchanged)
-/// while the target branch fires once more. v1 supports PURE branch bodies only; side-effecting / suspendable /
-/// nested-container bodies are refused (each pinned).</para>
+/// while the target branch fires once more.</para>
+///
+/// <para>D7-5 lifts the pure-body-only restriction to a fail-closed ALLOWLIST (<see cref="RerunBranchBodyPolicy"/>):
+/// a re-run branch body may be PURE, PURELY side-effecting (routes through the D7-3 approval gate at runtime —
+/// approve → fire once / reject → skip, proven here with a per-element <see cref="MutatingProbeNode"/> counter), or
+/// <c>agent.code</c> (re-stages a fresh AgentRun — proven in <c>RerunMapBranchAgentFlowTests</c>, the E2E tier). It
+/// still REFUSES any other suspendable node (un-opted <see cref="SuspendProbeNode"/>), a BOTH side-effecting AND
+/// suspendable node (<see cref="BothFlagsProbeNode"/>, the chat.post_message corruption guard), and a nested
+/// container — each pinned. A real-registry drift-detector here fails the instant a new CanSuspend node author
+/// forgets the opt-in.</para>
 /// </summary>
 [Collection(PostgresCollection.Name)]
 [Trait("Category", "Integration")]
@@ -198,32 +208,159 @@ public class RerunMapBranchFlowTests
     }
 
     [Fact]
-    public async Task Rerun_map_branch_with_a_side_effecting_body_node_is_refused()
+    public async Task Rerun_side_effecting_map_branch_parks_on_approval_then_approve_fires_target_once_and_siblings_never_refire()
     {
-        // v1 supports PURE branch bodies only — a side-effecting body node is refused (the D7-3-gate-inside-a-
-        // branch composition is a follow-up). Pin it so lifting the restriction is a visible decision.
+        // CROWN JEWEL (D7-5 side-effecting body). Map over 4 elements; each branch body is a PURELY side-effecting
+        // MutatingProbe keyed per element. Original: each fires once (counter[e_i]==1), map Success. Rerun branch 2:
+        // the re-run target's side-effecting node parks on the D7-3 Approval gate (under map#2) — it does NOT
+        // silently re-fire (counter[e2] still 1, run Suspended). On approve it fires EXACTLY ONCE (counter[e2]==2),
+        // while the 3 seeded siblings are replayed terminal-only: ZERO node.started, counters unchanged at 1.
         var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
-        var probeKey = "mapbranch-sebody-" + Guid.NewGuid().ToString("N");
-        MutatingProbeNode.Reset(probeKey);
+        var probeKey = "mapbranch-se-approve-" + Guid.NewGuid().ToString("N");
+        for (var i = 0; i < 4; i++) MutatingProbeNode.Reset($"{probeKey}-e{i}");
+
         var workflowId = await CreateWorkflowAsync(teamId, userId, SideEffectingBodyMapDef(probeKey));
         var originalRunId = await RunFreshAsync(workflowId, teamId, FourElements);
+        await AssertRunStatusAsync(originalRunId, WorkflowRunStatus.Success);
+        for (var i = 0; i < 4; i++) MutatingProbeNode.ExecutionsFor($"{probeKey}-e{i}").ShouldBe(1, $"branch e{i} fired once on the original");
 
-        var before = await RunCountAsync(teamId);
-        var ex = await Should.ThrowAsync<RerunBlockedByUnsupportedNodeException>(async () =>
-            await RerunMapBranchAsync(originalRunId, "map", 0, teamId, userId));
-        ex.BlockedNodeIds.ShouldContain("se", "the side-effecting body node is named");
+        var rerunId = await RerunMapBranchAsync(originalRunId, "map", 2, teamId, userId);
+        await RunEngineAsync(rerunId);
 
-        (await RunCountAsync(teamId)).ShouldBe(before, "a side-effecting-body rerun must write nothing");
+        // Parked on the gate — the side effect has NOT re-fired.
+        await AssertRunStatusAsync(rerunId, WorkflowRunStatus.Suspended, "the re-run side-effecting branch parks on the approval gate");
+        (await PendingApprovalWaitCountAsync(rerunId)).ShouldBe(1, "exactly one rerun-gate Approval wait is parked (for the single re-run branch)");
+        MutatingProbeNode.ExecutionsFor($"{probeKey}-e2").ShouldBe(1, "the gate must NOT let the side effect fire before approval");
+
+        (await ApproveRerunGateAsync(rerunId, teamId, userId, approved: true)).ShouldBeTrue();
+        await RunEngineAsync(rerunId);
+
+        await AssertRunStatusAsync(rerunId, WorkflowRunStatus.Success);
+        MutatingProbeNode.ExecutionsFor($"{probeKey}-e2").ShouldBe(2, "the approved target fired EXACTLY once more");
+        MutatingProbeNode.ExecutionsFor($"{probeKey}-e0").ShouldBe(1, "sibling 0 was replayed — its side effect must NOT re-fire");
+        MutatingProbeNode.ExecutionsFor($"{probeKey}-e1").ShouldBe(1, "sibling 1 replayed, no re-fire");
+        MutatingProbeNode.ExecutionsFor($"{probeKey}-e3").ShouldBe(1, "sibling 3 replayed, no re-fire");
+        (await BranchStartedCountAsync(rerunId, "se", "map#0")).ShouldBe(0, "a replayed sibling branch carries zero node.started on the fork");
+        (await BranchStartedCountAsync(rerunId, "se", "map#1")).ShouldBe(0);
+        (await BranchStartedCountAsync(rerunId, "se", "map#3")).ShouldBe(0);
     }
 
     [Fact]
-    public async Task Rerun_map_branch_with_a_suspendable_body_node_is_refused()
+    public async Task Rerun_side_effecting_map_branch_reject_skips_the_target_and_no_branch_refires()
     {
+        // CROWN JEWEL — the fail-closed reject path. Rerun branch 1, then REJECT the gate: the side effect NEVER
+        // fires (counter[e1] stays 1), the target branch settles Skipped, the run lands terminal (not stuck), and
+        // no sibling re-fires. Anything but an explicit approve must not fire the effect.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var probeKey = "mapbranch-se-reject-" + Guid.NewGuid().ToString("N");
+        for (var i = 0; i < 4; i++) MutatingProbeNode.Reset($"{probeKey}-e{i}");
+
+        var workflowId = await CreateWorkflowAsync(teamId, userId, SideEffectingBodyMapDef(probeKey));
+        var originalRunId = await RunFreshAsync(workflowId, teamId, FourElements);
+        await AssertRunStatusAsync(originalRunId, WorkflowRunStatus.Success);
+
+        var rerunId = await RerunMapBranchAsync(originalRunId, "map", 1, teamId, userId);
+        await RunEngineAsync(rerunId);
+        await AssertRunStatusAsync(rerunId, WorkflowRunStatus.Suspended);
+        (await PendingApprovalWaitCountAsync(rerunId)).ShouldBe(1, "exactly one rerun-gate Approval wait is parked before the reject");
+
+        (await ApproveRerunGateAsync(rerunId, teamId, userId, approved: false)).ShouldBeTrue();
+        await RunEngineAsync(rerunId);
+
+        for (var i = 0; i < 4; i++)
+            MutatingProbeNode.ExecutionsFor($"{probeKey}-e{i}").ShouldBe(1, $"reject + replay must leave every counter at its original 1 — the effect never re-fired (e{i})");
+
+        // The target branch's terminal was Skipped (the rejected node) → a Failed:false empty branch, so the map
+        // still SUCCEEDS even under the default Terminate mode (a skipped branch is not a failed branch).
+        (await BranchTerminalSkippedAsync(rerunId, "se", "map#1")).ShouldBeTrue("the rejected side-effecting node settled node.skipped");
+        await AssertRunStatusAsync(rerunId, WorkflowRunStatus.Success, "a rejected (skipped) side-effecting branch settles the fork to Success — NOT a Failure, NOT stuck Suspended");
+        (await PendingApprovalWaitCountAsync(rerunId)).ShouldBe(0, "the gate wait resolved on reject — none stranded");
+        (await BranchStartedCountAsync(rerunId, "se", "map#0")).ShouldBe(0, "siblings stay replayed under reject too");
+        (await BranchStartedCountAsync(rerunId, "se", "map#2")).ShouldBe(0);
+        (await BranchStartedCountAsync(rerunId, "se", "map#3")).ShouldBe(0);
+    }
+
+    [Fact]
+    public async Task Rerun_branch_with_two_parallel_side_effecting_nodes_holds_both_until_both_approved_then_each_fires_once()
+    {
+        // The exactly-once-via-still-suspended regression (the doc-invariant finding): a single re-run branch
+        // body whose parallel wave has TWO side-effecting nodes parks TWO gate waits at once. Neither effect
+        // fires until BOTH are approved — the branch re-suspends as a whole while ANY gate is Pending, so an
+        // approved node never advances past an un-approved sibling. Then each fires EXACTLY once.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var probeKey = "mapbranch-diamond-" + Guid.NewGuid().ToString("N");
+        MutatingProbeNode.Reset($"{probeKey}-A");
+        MutatingProbeNode.Reset($"{probeKey}-B");
+
+        var workflowId = await CreateWorkflowAsync(teamId, userId, TwoSideEffectsDiamondMapDef(probeKey));
+        var originalRunId = await RunFreshAsync(workflowId, teamId, """{ "things": ["x"] }""");
+        await AssertRunStatusAsync(originalRunId, WorkflowRunStatus.Success);
+        MutatingProbeNode.ExecutionsFor($"{probeKey}-A").ShouldBe(1, "seA fired once on the original");
+        MutatingProbeNode.ExecutionsFor($"{probeKey}-B").ShouldBe(1, "seB fired once on the original");
+
+        var rerunId = await RerunMapBranchAsync(originalRunId, "map", 0, teamId, userId);
+        await RunEngineAsync(rerunId);
+
+        // BOTH gates park at once under map#0; neither effect has re-fired.
+        await AssertRunStatusAsync(rerunId, WorkflowRunStatus.Suspended);
+        (await PendingApprovalWaitCountAsync(rerunId)).ShouldBe(2, "a parallel two-side-effect branch body parks TWO gate waits under map#0 simultaneously");
+        MutatingProbeNode.ExecutionsFor($"{probeKey}-A").ShouldBe(1, "no effect fires before approval");
+        MutatingProbeNode.ExecutionsFor($"{probeKey}-B").ShouldBe(1);
+
+        // Approve the FIRST gate. The branch re-suspends (the other gate is still Pending) — the approved node
+        // MUST NOT advance/fire while its sibling gate is unresolved.
+        (await ApproveRerunGateAsync(rerunId, teamId, userId, approved: true)).ShouldBeTrue();
+        await RunEngineAsync(rerunId);
+        await AssertRunStatusAsync(rerunId, WorkflowRunStatus.Suspended, "still parked on the second gate");
+        (await PendingApprovalWaitCountAsync(rerunId)).ShouldBe(1, "one gate resolved, one still pending");
+        MutatingProbeNode.ExecutionsFor($"{probeKey}-A").ShouldBe(1, "the approved node MUST NOT fire while its sibling gate is still pending");
+        MutatingProbeNode.ExecutionsFor($"{probeKey}-B").ShouldBe(1);
+
+        // Approve the SECOND gate. Now the branch advances and BOTH nodes fire — each EXACTLY once.
+        (await ApproveRerunGateAsync(rerunId, teamId, userId, approved: true)).ShouldBeTrue();
+        await RunEngineAsync(rerunId);
+        await AssertRunStatusAsync(rerunId, WorkflowRunStatus.Success);
+        MutatingProbeNode.ExecutionsFor($"{probeKey}-A").ShouldBe(2, "seA fired exactly once more after both gates approved");
+        MutatingProbeNode.ExecutionsFor($"{probeKey}-B").ShouldBe(2, "seB fired exactly once more after both gates approved");
+    }
+
+    [Fact]
+    public async Task Rerun_reject_of_a_non_terminal_side_effecting_node_cascades_skip_to_the_distinct_branch_terminal()
+    {
+        // Reject a side-effecting node that is NOT the branch terminal: it settles Skipped, and the dead-edge
+        // cascade skips the distinct downstream terminal too — the branch yields an empty result and the map
+        // still SUCCEEDS (a skipped branch is Failed:false).
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var probeKey = "mapbranch-cascade-" + Guid.NewGuid().ToString("N");
+        for (var i = 0; i < 4; i++) MutatingProbeNode.Reset($"{probeKey}-e{i}");
+
+        var workflowId = await CreateWorkflowAsync(teamId, userId, SideEffectingThenEmitMapDef(probeKey));
+        var originalRunId = await RunFreshAsync(workflowId, teamId, FourElements);
+        await AssertRunStatusAsync(originalRunId, WorkflowRunStatus.Success);
+
+        var rerunId = await RerunMapBranchAsync(originalRunId, "map", 1, teamId, userId);
+        await RunEngineAsync(rerunId);
+        await AssertRunStatusAsync(rerunId, WorkflowRunStatus.Suspended);
+
+        (await ApproveRerunGateAsync(rerunId, teamId, userId, approved: false)).ShouldBeTrue();
+        await RunEngineAsync(rerunId);
+
+        MutatingProbeNode.ExecutionsFor($"{probeKey}-e1").ShouldBe(1, "the rejected side-effecting node never re-fired");
+        (await BranchTerminalSkippedAsync(rerunId, "se", "map#1")).ShouldBeTrue("the rejected non-terminal node settled Skipped");
+        (await BranchTerminalSkippedAsync(rerunId, "emit", "map#1")).ShouldBeTrue("the distinct downstream terminal cascaded to Skipped via the dead edge");
+        await AssertRunStatusAsync(rerunId, WorkflowRunStatus.Success, "a fully-skipped branch is Failed:false → the map still succeeds");
+    }
+
+    [Fact]
+    public async Task Rerun_map_branch_with_an_unopted_suspendable_body_node_is_refused()
+    {
+        // An un-opted suspendable body (SuspendProbe is CanSuspend WITHOUT IsRerunnableWhenSuspendable) stays
+        // refused — only agent.code opts in. Pins the allowlist: lifting CanSuspend was NOT wholesale.
         var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
         var probeKey = "mapbranch-suspbody-" + Guid.NewGuid().ToString("N");
         SuspendProbeNode.Reset(probeKey);
         var workflowId = await CreateWorkflowAsync(teamId, userId, SuspendableBodyMapDef(probeKey));
-        // The original parks on the suspendable body — that's fine; gate 4 (static body scan) refuses regardless.
+        // The original parks on the suspendable body — that's fine; the body-scan gate refuses regardless.
         var originalRunId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId, payloadJson: FourElements);
         await RunEngineAsync(originalRunId);
 
@@ -233,6 +370,60 @@ public class RerunMapBranchFlowTests
         ex.BlockedNodeIds.ShouldContain("susp");
 
         (await RunCountAsync(teamId)).ShouldBe(before);
+    }
+
+    [Fact]
+    public async Task Rerun_map_branch_with_a_both_side_effecting_and_suspendable_body_node_is_refused()
+    {
+        // The both-flag corruption guard (chat.post_message class): a node that is BOTH IsSideEffecting AND
+        // CanSuspend is refused — the D7-3 gate would fire its effect on the approved walk then mis-skip it on the
+        // node's own suspend-resume. BothFlagsProbe is the hermetic stand-in; the real-registry drift-detector
+        // (below) proves chat.post_message itself is refused.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var probeKey = "mapbranch-both-" + Guid.NewGuid().ToString("N");
+        var workflowId = await CreateWorkflowAsync(teamId, userId, BothFlagsBodyMapDef(probeKey));
+        var originalRunId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId, payloadJson: FourElements);
+        await RunEngineAsync(originalRunId);
+
+        var before = await RunCountAsync(teamId);
+        var ex = await Should.ThrowAsync<RerunBlockedByUnsupportedNodeException>(async () =>
+            await RerunMapBranchAsync(originalRunId, "map", 0, teamId, userId));
+        ex.BlockedNodeIds.ShouldContain("both", "the both-flagged body node is named");
+
+        (await RunCountAsync(teamId)).ShouldBe(before, "a both-flagged-body rerun must write nothing");
+    }
+
+    [Fact]
+    public async Task RerunBranchBodyPolicy_over_the_real_registry_admits_only_agentcode_among_suspendable_nodes()
+    {
+        // DRIFT-DETECTOR over the REAL node registry: the fail-closed allowlist must admit agent.code as the SOLE
+        // suspendable branch body, refuse every other CanSuspend node, and refuse every both-flagged node. This
+        // fails the instant a new CanSuspend node author forgets the opt-in, or a both-flagged node is admitted.
+        using var scope = _fixture.BeginScope();
+        var registry = scope.Resolve<INodeRegistry>();
+
+        var admittedSuspendable = registry.All
+            .Where(n => n.Manifest.CanSuspend && !RerunBranchBodyPolicy.IsRefusedAsBranchBody(n.Manifest))
+            .Select(n => n.TypeKey)
+            .OrderBy(k => k)
+            .ToList();
+
+        // agent.code must be the ONLY admitted suspendable branch body; a new CanSuspend node forgetting
+        // IsRerunnableWhenSuspendable (fail-closed default), or wrongly opting in, breaks this.
+        admittedSuspendable.ShouldHaveSingleItem().ShouldBe("agent.code");
+
+        registry.All
+            .Where(n => n.Manifest.IsSideEffecting && n.Manifest.CanSuspend)
+            .ShouldAllBe(n => RerunBranchBodyPolicy.IsRefusedAsBranchBody(n.Manifest),
+                "every BOTH side-effecting AND suspendable node (e.g. chat.post_message) is refused — the gate can't compose with the node's own suspend");
+
+        // The ADMIT arm: every PURELY side-effecting node (git writes / http POST / issue ops / agent.run_command)
+        // is admitted as a branch body — it routes through the D7-3 RerunSideEffectGate at runtime. Pin the set is
+        // non-empty so a registry that lost all such nodes can't make this assertion vacuously true.
+        var purelySideEffecting = registry.All.Where(n => n.Manifest.IsSideEffecting && !n.Manifest.CanSuspend).ToList();
+        purelySideEffecting.ShouldNotBeEmpty("the production registry ships purely side-effecting nodes (git.open_pr, http.request, …)");
+        purelySideEffecting.ShouldAllBe(n => !RerunBranchBodyPolicy.IsRefusedAsBranchBody(n.Manifest),
+            "every purely side-effecting node is ADMITTED as a re-run branch body (gated at runtime by the D7-3 approval gate)");
     }
 
     [Fact]
@@ -444,6 +635,55 @@ public class RerunMapBranchFlowTests
         },
     };
 
+    // map body = a parallel diamond with TWO side-effecting nodes (seA, seB), per-element-keyed, merging into a
+    // single JsonEmitNode terminal "merge". Both are admitted (purely side-effecting); on a rerun both park gates.
+    private static WorkflowDefinition TwoSideEffectsDiamondMapDef(string probeKey) => new()
+    {
+        SchemaVersion = 1,
+        Nodes = new List<NodeDefinition>
+        {
+            new() { Id = "start", TypeKey = "trigger.manual", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
+            new() { Id = "map", TypeKey = "flow.map", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.Json("""{ "items": "{{trigger.things}}" }""") },
+            new() { Id = "ms", TypeKey = "flow.map_start", ParentId = "map", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
+            new() { Id = "seA", TypeKey = MutatingProbeNode.Key, ParentId = "map", Config = WorkflowsTestSeed.Json($$"""{ "key": "{{probeKey}}-A" }"""), Inputs = WorkflowsTestSeed.EmptyJson() },
+            new() { Id = "seB", TypeKey = MutatingProbeNode.Key, ParentId = "map", Config = WorkflowsTestSeed.Json($$"""{ "key": "{{probeKey}}-B" }"""), Inputs = WorkflowsTestSeed.EmptyJson() },
+            new() { Id = "merge", TypeKey = JsonEmitNode.Key, ParentId = "map", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.Json("""{ "item": "{{item}}" }""") },
+            new() { Id = "end", TypeKey = "builtin.terminal", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
+        },
+        Edges = new List<EdgeDefinition>
+        {
+            new() { From = "start", To = "map" },
+            new() { From = "map", To = "end" },
+            new() { From = "ms", To = "seA" },
+            new() { From = "ms", To = "seB" },
+            new() { From = "seA", To = "merge" },
+            new() { From = "seB", To = "merge" },
+        },
+    };
+
+    // map body = side-effecting "se" → pure JsonEmitNode terminal "emit". A reject of "se" skips it AND cascades
+    // the skip to the distinct downstream terminal "emit".
+    private static WorkflowDefinition SideEffectingThenEmitMapDef(string probeKey) => new()
+    {
+        SchemaVersion = 1,
+        Nodes = new List<NodeDefinition>
+        {
+            new() { Id = "start", TypeKey = "trigger.manual", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
+            new() { Id = "map", TypeKey = "flow.map", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.Json("""{ "items": "{{trigger.things}}" }""") },
+            new() { Id = "ms", TypeKey = "flow.map_start", ParentId = "map", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
+            new() { Id = "se", TypeKey = MutatingProbeNode.Key, ParentId = "map", Config = WorkflowsTestSeed.Json($$"""{ "key": "{{probeKey}}-{{"{{"}}item{{"}}"}}" }"""), Inputs = WorkflowsTestSeed.EmptyJson() },
+            new() { Id = "emit", TypeKey = JsonEmitNode.Key, ParentId = "map", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.Json("""{ "item": "{{item}}" }""") },
+            new() { Id = "end", TypeKey = "builtin.terminal", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
+        },
+        Edges = new List<EdgeDefinition>
+        {
+            new() { From = "start", To = "map" },
+            new() { From = "map", To = "end" },
+            new() { From = "ms", To = "se" },
+            new() { From = "se", To = "emit" },
+        },
+    };
+
     // map body contains a CanSuspend node ("susp" = SuspendProbe) → gate 4 refuses.
     private static WorkflowDefinition SuspendableBodyMapDef(string probeKey) => new()
     {
@@ -461,6 +701,26 @@ public class RerunMapBranchFlowTests
             new() { From = "start", To = "map" },
             new() { From = "map", To = "end" },
             new() { From = "ms", To = "susp" },
+        },
+    };
+
+    // map body contains a BOTH side-effecting AND suspendable node ("both" = BothFlagsProbe) → the both-flag arm refuses.
+    private static WorkflowDefinition BothFlagsBodyMapDef(string probeKey) => new()
+    {
+        SchemaVersion = 1,
+        Nodes = new List<NodeDefinition>
+        {
+            new() { Id = "start", TypeKey = "trigger.manual", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
+            new() { Id = "map", TypeKey = "flow.map", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.Json("""{ "items": "{{trigger.things}}" }""") },
+            new() { Id = "ms", TypeKey = "flow.map_start", ParentId = "map", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
+            new() { Id = "both", TypeKey = BothFlagsProbeNode.Key, ParentId = "map", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
+            new() { Id = "end", TypeKey = "builtin.terminal", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
+        },
+        Edges = new List<EdgeDefinition>
+        {
+            new() { From = "start", To = "map" },
+            new() { From = "map", To = "end" },
+            new() { From = "ms", To = "both" },
         },
     };
 
@@ -569,4 +829,29 @@ public class RerunMapBranchFlowTests
         using var scope = _fixture.BeginScope();
         return await scope.Resolve<CodeSpaceDbContext>().WorkflowRun.AsNoTracking().CountAsync(r => r.TeamId == teamId);
     }
+
+    /// <summary>Resolve a pending rerun-gate Approval wait through the REAL ResumeRunCommand chain (→ ApproveRunAsync), as an operator would.</summary>
+    private async Task<bool> ApproveRerunGateAsync(Guid runId, Guid teamId, Guid userId, bool approved)
+    {
+        using var scope = _fixture.BeginScopeAs(userId, teamId, Roles.Admin);
+        return await scope.Resolve<IMediator>().Send(new ResumeRunCommand { RunId = runId, Approved = approved, Comment = approved ? "go" : "skip" });
+    }
+
+    private async Task<int> PendingApprovalWaitCountAsync(Guid runId)
+    {
+        using var scope = _fixture.BeginScope();
+        return await scope.Resolve<CodeSpaceDbContext>().WorkflowRunWait.AsNoTracking()
+            .CountAsync(w => w.RunId == runId && w.Status == WorkflowWaitStatuses.Pending && w.WaitKind == WorkflowWaitKinds.Approval);
+    }
+
+    private async Task<bool> BranchTerminalSkippedAsync(Guid runId, string nodeId, string branchKey)
+    {
+        using var scope = _fixture.BeginScope();
+        var status = await scope.Resolve<CodeSpaceDbContext>().WorkflowRunNode.AsNoTracking()
+            .Where(n => n.RunId == runId && n.NodeId == nodeId && n.IterationKey == branchKey)
+            .Select(n => (NodeStatus?)n.Status)
+            .SingleOrDefaultAsync();
+        return status == NodeStatus.Skipped;
+    }
+
 }
