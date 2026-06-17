@@ -1,5 +1,6 @@
 using System.Text.Json;
 using CodeSpace.Core.Services.Agents;
+using CodeSpace.Core.Services.Agents.Workspace;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Enums;
@@ -145,7 +146,7 @@ public sealed class AgentCodeNode : INodeRuntime
         // primary (the workspace has nowhere to anchor + nothing writable to default to).
         if (related.Count > 0 && repositoryId is null) return Fail("Input 'relatedRepositories' requires a primary 'repositoryId' — pick the primary repository, or remove the related ones.");
 
-        var workspace = repositoryId is { } primaryId ? WorkspaceSpec.FromAuthoredRepos(primaryId, primaryRef: null, related) : null;
+        var workspace = AgentWorkspaceAuthoring.ResolveAuthoredWorkspace(repositoryId, related);
 
         var task = new AgentTask
         {
@@ -249,27 +250,10 @@ public sealed class AgentCodeNode : INodeRuntime
     /// related <see cref="WorkspaceRepositorySpec"/>s (access defaults to read-only context). A malformed/idless entry
     /// is skipped (lenient — the editor validates). Absent / empty → no related repos → a single-repo run.
     /// </summary>
-    private static IReadOnlyList<WorkspaceRepositorySpec> ReadRelatedRepositories(NodeRunContext context)
-    {
-        if (!context.Inputs.TryGetValue("relatedRepositories", out var value) || value.ValueKind != JsonValueKind.Array) return Array.Empty<WorkspaceRepositorySpec>();
-
-        var list = new List<WorkspaceRepositorySpec>();
-
-        foreach (var element in value.EnumerateArray())
-        {
-            if (element.ValueKind != JsonValueKind.Object) continue;
-            if (!element.TryGetProperty("repositoryId", out var idEl) || idEl.ValueKind != JsonValueKind.String || !Guid.TryParse(idEl.GetString(), out var repoId)) continue;
-
-            var alias = element.TryGetProperty("alias", out var aliasEl) && aliasEl.ValueKind == JsonValueKind.String ? (aliasEl.GetString() ?? "").Trim() : "";
-            var access = element.TryGetProperty("access", out var accessEl) && accessEl.ValueKind == JsonValueKind.String && string.Equals(accessEl.GetString(), "write", StringComparison.OrdinalIgnoreCase)
-                ? WorkspaceAccess.Write
-                : WorkspaceAccess.Read;
-
-            list.Add(new WorkspaceRepositorySpec { Alias = alias, RepositoryId = repoId, Access = access });
-        }
-
-        return list;
-    }
+    private static IReadOnlyList<WorkspaceRepositorySpec> ReadRelatedRepositories(NodeRunContext context) =>
+        context.Inputs.TryGetValue("relatedRepositories", out var value)
+            ? AgentWorkspaceAuthoring.ParseRelatedRepositories(value)
+            : Array.Empty<WorkspaceRepositorySpec>();
 
     private static string ReadString(IReadOnlyDictionary<string, JsonElement> bag, string key) =>
         bag.TryGetValue(key, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() ?? "" : "";
