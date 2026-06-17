@@ -1,3 +1,5 @@
+using System.Text.Json;
+using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Agents.Workspace;
 using CodeSpace.Messages.Agents;
 using Shouldly;
@@ -75,6 +77,17 @@ public class WorkspaceSpecTests
             .Primary!.Alias.ShouldBe("x");
     }
 
+    [Fact]
+    public void Primary_falls_through_when_the_PrimaryAlias_matches_no_repo()
+    {
+        // A stale/typo'd PrimaryAlias must not return null — it falls through to the IsPrimary/writable/first chain.
+        new WorkspaceSpec
+        {
+            PrimaryAlias = "typo-does-not-exist",
+            Repositories = new[] { Repo("api", WorkspaceAccess.Read), Repo("web", WorkspaceAccess.Write) },
+        }.Primary!.Alias.ShouldBe("web", "an unmatched PrimaryAlias falls through to the first writable repo, not null");
+    }
+
     // ── Resolver canonicalization (pure) ─────────────────────────────────────────────
 
     [Fact]
@@ -117,7 +130,7 @@ public class WorkspaceSpecTests
     }
 
     [Fact]
-    public void ResolveAsync_refuses_a_multi_repo_workspace_in_slice_1()
+    public async Task ResolveAsync_refuses_a_multi_repo_workspace_in_slice_1()
     {
         var resolver = new RepositoryWorkspaceResolver(db: null!, auth: null!);
         var task = new AgentTask
@@ -129,8 +142,62 @@ public class WorkspaceSpecTests
 
         // The Count > 1 guard throws BEFORE touching the (null) DB — a premature multi-repo run fails loud,
         // never silently drops a repo. Single-repo resolution (which hits the DB) is covered at the integration tier.
-        Should.Throw<WorkspaceException>(() => resolver.ResolveAsync(task, Guid.NewGuid(), CancellationToken.None))
+        (await Should.ThrowAsync<WorkspaceException>(() => resolver.ResolveAsync(task, Guid.NewGuid(), CancellationToken.None)))
             .Message.ShouldContain("Multi-repo");
+    }
+
+    [Fact]
+    public async Task ResolveAsync_refuses_an_empty_repositories_spec_with_a_distinct_error()
+    {
+        var resolver = new RepositoryWorkspaceResolver(db: null!, auth: null!);
+        var task = new AgentTask
+        {
+            Goal = "g",
+            Harness = "claude-code",
+            Workspace = new WorkspaceSpec { Repositories = Array.Empty<WorkspaceRepositorySpec>() },
+        };
+
+        // Count == 0 slips PAST the multi-repo (>1) guard, then Primary is null → the distinct no-repositories
+        // throw (NOT the multi-repo message, and NOT an NPE on primary.RepositoryId). Also db-less.
+        var ex = await Should.ThrowAsync<WorkspaceException>(() => resolver.ResolveAsync(task, Guid.NewGuid(), CancellationToken.None));
+        ex.Message.ShouldContain("no repositories");
+        ex.Message.ShouldNotContain("Multi-repo");
+    }
+
+    // ── AgentJson persistence round-trip (the resolver reads a DESERIALIZED Workspace at execution) ───
+
+    [Fact]
+    public void AgentTask_Workspace_round_trips_through_AgentJson()
+    {
+        // AgentRunService persists the task as task_jsonb via AgentJson.Options and the executor deserializes it
+        // before resolving the workspace — so the spec (incl. the WorkspaceAccess / WorkspaceCwdMode enums) must
+        // survive the canonical serialization, or the resolver reads a corrupted/empty Workspace at run time.
+        var task = new AgentTask
+        {
+            Goal = "g",
+            Harness = "claude-code",
+            Workspace = new WorkspaceSpec
+            {
+                PrimaryAlias = "web",
+                CwdMode = WorkspaceCwdMode.WorkspaceRoot,
+                Repositories = new[]
+                {
+                    new WorkspaceRepositorySpec { Alias = "web", RepositoryId = Guid.NewGuid(), Ref = "main", Path = "web", Access = WorkspaceAccess.Write, IsPrimary = true },
+                    Repo("api", WorkspaceAccess.Read),
+                },
+            },
+        };
+
+        var rehydrated = JsonSerializer.Deserialize<AgentTask>(JsonSerializer.Serialize(task, AgentJson.Options), AgentJson.Options)!;
+
+        var ws = rehydrated.Workspace.ShouldNotBeNull();
+        ws.PrimaryAlias.ShouldBe("web");
+        ws.CwdMode.ShouldBe(WorkspaceCwdMode.WorkspaceRoot, "the cwd-mode enum survives the round-trip");
+        ws.Repositories.Count.ShouldBe(2);
+        ws.Repositories[0].RepositoryId.ShouldBe(task.Workspace!.Repositories[0].RepositoryId);
+        ws.Repositories[0].Access.ShouldBe(WorkspaceAccess.Write, "the access enum survives the round-trip");
+        ws.Repositories[1].Access.ShouldBe(WorkspaceAccess.Read);
+        ws.Primary!.Alias.ShouldBe("web");
     }
 
     private static WorkspaceRepositorySpec Repo(string alias, WorkspaceAccess access, bool isPrimary = false) =>

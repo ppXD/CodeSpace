@@ -34,11 +34,11 @@ public sealed class RepositoryWorkspaceResolver : IAgentWorkspaceResolver, IScop
         _auth = auth;
     }
 
-    public Task<WorkspaceRequest?> ResolveAsync(AgentTask task, Guid teamId, CancellationToken cancellationToken)
+    public async Task<WorkspaceRequest?> ResolveAsync(AgentTask task, Guid teamId, CancellationToken cancellationToken)
     {
         var spec = CanonicalWorkspace(task);
 
-        if (spec is null) return Task.FromResult<WorkspaceRequest?>(null);
+        if (spec is null) return null;
 
         if (spec.Repositories.Count > 1)
             throw new WorkspaceException("Multi-repo workspaces are not yet executable — this run authored more than one repository. Single-repo runs are unaffected.");
@@ -46,7 +46,10 @@ public sealed class RepositoryWorkspaceResolver : IAgentWorkspaceResolver, IScop
         var primary = spec.Primary
             ?? throw new WorkspaceException("Workspace spec has no repositories to resolve.");
 
-        return ResolveByRepositoryIdAsync(primary.RepositoryId, teamId, cancellationToken, primary.Ref);
+        // async (not a bare Task return) so the guard throws above surface as a faulted Task AT THE AWAIT, matching
+        // the interface's async contract — a future caller that captures the Task (Task.WhenAll, deferred await)
+        // sees the exception where it awaits, not synchronously at the call site.
+        return await ResolveByRepositoryIdAsync(primary.RepositoryId, teamId, cancellationToken, primary.Ref).ConfigureAwait(false);
     }
 
     /// <summary>The canonical workspace for a task: the authored <see cref="AgentTask.Workspace"/>, else a single-repo workspace derived from the legacy <see cref="AgentTask.RepositoryId"/>, else null (a no-repo run).</summary>
