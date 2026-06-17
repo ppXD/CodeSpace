@@ -296,6 +296,56 @@ public class SupervisorResolverTests
         SupervisorOutcome.ReadFinalIntegratedBranch(tape).ShouldBeNull("only a clean merge or a verified resolve is a reviewable integrated branch");
     }
 
+    // S5 review fold: a spawn/retry that NOTHING later merged/resolved is a barrier — the run's latest work is
+    // un-combined, so an earlier branch must NOT be surfaced past it (this is what keeps Part A consistent with Part B).
+    [Fact]
+    public void ReadFinalIntegratedBranch_returns_null_when_a_spawn_follows_a_verified_resolution_unmerged()
+    {
+        var tape = new[]
+        {
+            Decision(SupervisorDecisionKinds.Resolve, 3, ResolveOutcomeWithBranch("Succeeded", VerifiedSummary, "codespace/resolve/r")),
+            Decision(SupervisorDecisionKinds.Spawn, 4, "{}"),   // a fresh wave staged AFTER the resolution, never merged
+        };
+
+        SupervisorOutcome.ReadFinalIntegratedBranch(tape).ShouldBeNull("the resolver branch is STALE once a new wave is spawned — surfacing it would ship a PR missing that wave (matches Part B's disqualifier)");
+    }
+
+    [Fact]
+    public void ReadFinalIntegratedBranch_returns_null_when_a_spawn_follows_a_clean_merge_unmerged()
+    {
+        var tape = new[]
+        {
+            Decision(SupervisorDecisionKinds.Merge, 2, MergeOutcome("Clean", "codespace/integration/wave1")),
+            Decision(SupervisorDecisionKinds.Spawn, 3, "{}"),   // wave2 staged after wave1 integrated, never re-merged
+        };
+
+        SupervisorOutcome.ReadFinalIntegratedBranch(tape).ShouldBeNull("wave1's clean branch is stale once wave2 is spawned un-integrated");
+    }
+
+    // ── The SHARED verified-resolution-branch predicate (Part A + Part B call this one helper — Rule 7) ──
+
+    [Fact]
+    public void ResolvedBranch_returns_the_branch_only_for_a_verified_resolve_that_pushed()
+    {
+        SupervisorOutcome.ResolvedBranch(Decision(SupervisorDecisionKinds.Resolve, 1, ResolveOutcomeWithBranch("Succeeded", VerifiedSummary, "codespace/resolve/r")))
+            .ShouldBe("codespace/resolve/r");
+    }
+
+    [Theory]
+    [InlineData(SupervisorDecisionKinds.Spawn)]
+    [InlineData(SupervisorDecisionKinds.Retry)]
+    [InlineData(SupervisorDecisionKinds.Merge)]
+    public void ResolvedBranch_is_null_for_a_non_resolve_decision(string kind) =>
+        SupervisorOutcome.ResolvedBranch(Decision(kind, 1, ResolveOutcomeWithBranch("Succeeded", VerifiedSummary, "codespace/resolve/r"))).ShouldBeNull();
+
+    [Fact]
+    public void ResolvedBranch_is_null_for_an_unverified_resolve() =>
+        SupervisorOutcome.ResolvedBranch(Decision(SupervisorDecisionKinds.Resolve, 1, ResolveOutcomeWithBranch("Succeeded", "tests red", "codespace/resolve/r"))).ShouldBeNull();
+
+    [Fact]
+    public void ResolvedBranch_is_null_for_a_verified_resolve_that_pushed_no_branch() =>
+        SupervisorOutcome.ResolvedBranch(Decision(SupervisorDecisionKinds.Resolve, 1, ResolveOutcomeWithBranch("Succeeded", VerifiedSummary, null))).ShouldBeNull();
+
     private static SupervisorTurnContext Context(int turnNumber, params SupervisorPriorDecision[] prior) =>
         new() { Goal = "ship", TurnNumber = turnNumber, PriorDecisions = prior };
 

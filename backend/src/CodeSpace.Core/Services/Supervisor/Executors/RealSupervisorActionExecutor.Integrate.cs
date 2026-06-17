@@ -62,19 +62,25 @@ public sealed partial class RealSupervisorActionExecutor
     {
         var lastStaging = context.PriorDecisions.LastOrDefault(d => SupervisorDecisionKinds.StagesAgents(d.DecisionKind));
 
-        if (lastStaging is null || lastStaging.DecisionKind != SupervisorDecisionKinds.Resolve) return null;
-
-        if (SupervisorOutcome.ReadResolutionVerdict(lastStaging.OutcomeJson) != SupervisorResolutionVerdict.Verified) return null;
-
-        return SupervisorOutcome.ReadAgentResults(lastStaging.OutcomeJson).FirstOrDefault()?.ProducedBranch is { Length: > 0 } branch ? branch : null;
+        // The most-recent agent-staging decision must ITSELF be the accepted resolution — a spawn/retry after it means
+        // fresh work to combine, so the integrator runs. The "verified resolve → its branch" rule is the SHARED
+        // SupervisorOutcome.ResolvedBranch (the same encoding the node-output reader uses, so the two never drift).
+        return lastStaging is null ? null : SupervisorOutcome.ResolvedBranch(lastStaging);
     }
 
-    /// <summary>The integration block for an ACCEPTED resolution (S5): the resolver's tested branch surfaced as a Clean integration (<c>via="resolution"</c>) WITHOUT re-running the integrator — the shape <c>SupervisorOutcome.ReadIntegration</c> + the node output reader consume to target a downstream open_pr. No <c>outcomes</c> array (no per-contribution apply happened — the resolver did the reconciliation).</summary>
+    /// <summary>
+    /// The integration block for an ACCEPTED resolution (S5): the resolver's own tested branch surfaced as a Clean
+    /// integration WITHOUT re-running the integrator. <c>status</c> + <c>integratedBranch</c> are the load-bearing
+    /// fields (read by <see cref="SupervisorOutcome.ReadIntegration"/>); <c>via</c> + <c>reason</c> are DESCRIPTIVE
+    /// audit metadata in the persisted ledger only — no reader or gate branches on them (the acceptance decision is
+    /// keyed off the resolve verdict via <see cref="SupervisorOutcome.ResolvedBranch"/>, NEVER off <c>via</c>). No
+    /// <c>outcomes</c> array (no per-contribution apply happened — the resolver did the reconciliation).
+    /// </summary>
     private static object ResolutionIntegration(string resolvedBranch) => new
     {
         status = "Clean",
         integratedBranch = resolvedBranch,
-        via = "resolution",
+        via = "resolution",   // descriptive audit only (see doc) — no code branches on this; the gate is the resolve verdict
         reason = "a verified resolver agent reconciled the conflicting branches into one tested branch",
     };
 
