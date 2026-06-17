@@ -435,7 +435,7 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
         if (plan.KeptNodeIds.Count == 0) return plan.KeptNodeIds;
 
         var cells = await _db.WorkflowRunNode.AsNoTracking()
-            .Where(n => n.RunId == originalRunId && n.IterationKey == "" && plan.KeptNodeIds.Contains(n.NodeId))
+            .Where(n => n.RunId == originalRunId && n.IterationKey == WorkflowIterationKeys.TopLevel && plan.KeptNodeIds.Contains(n.NodeId))
             .ToDictionaryAsync(n => n.NodeId, cancellationToken).ConfigureAwait(false);
 
         var seed = new HashSet<string>();

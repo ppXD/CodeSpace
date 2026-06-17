@@ -3,6 +3,7 @@ using CodeSpace.Core.DependencyInjection;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Workflows.Lifecycle;
+using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Enums;
 using Microsoft.EntityFrameworkCore;
 
@@ -52,7 +53,7 @@ public sealed class RerunCellSeeder : IRerunCellSeeder, IScopedDependency
         if (keptNodeIds.Count > 0)
         {
             var cells = await _db.WorkflowRunNode.AsNoTracking()
-                .Where(n => n.RunId == originalRunId && n.IterationKey == "" && keptNodeIds.Contains(n.NodeId))
+                .Where(n => n.RunId == originalRunId && n.IterationKey == WorkflowIterationKeys.TopLevel && keptNodeIds.Contains(n.NodeId))
                 .ToListAsync(cancellationToken).ConfigureAwait(false);
 
             foreach (var cell in cells)
@@ -79,18 +80,25 @@ public sealed class RerunCellSeeder : IRerunCellSeeder, IScopedDependency
             case NodeStatus.Success:
                 // routingHints MUST carry over — null hints make IsEdgeLive treat every handle as live, so a
                 // dead branch the original routed around would wrongly re-enliven on the fork.
-                await _recordLogger.NodeCompletedAsync(newRunId, cell.NodeId, "", ParseOutputs(cell.OutputsJson), ParseHints(cell.RoutingHintsJson), TimeSpan.Zero, cancellationToken).ConfigureAwait(false);
+                await _recordLogger.NodeCompletedAsync(newRunId, cell.NodeId, WorkflowIterationKeys.TopLevel, ParseOutputs(cell.OutputsJson), ParseHints(cell.RoutingHintsJson), TimeSpan.Zero, cancellationToken).ConfigureAwait(false);
                 break;
 
             case NodeStatus.Skipped:
-                await _recordLogger.NodeSkippedAsync(newRunId, cell.NodeId, "", $"Reused from run {originalRunId}.", cancellationToken).ConfigureAwait(false);
+                await _recordLogger.NodeSkippedAsync(newRunId, cell.NodeId, WorkflowIterationKeys.TopLevel, $"Reused from run {originalRunId}.", cancellationToken).ConfigureAwait(false);
                 break;
 
             case NodeStatus.Failure:
                 // A kept Failure cell is always error-edge-handled (the service refuses an un-handled failed
                 // upstream); RehydrateFromLedger re-settles it as a failed source + rebuilds the error output.
-                await _recordLogger.NodeFailedAsync(newRunId, cell.NodeId, "", cell.Error ?? "(failed)", TimeSpan.Zero, cancellationToken).ConfigureAwait(false);
+                await _recordLogger.NodeFailedAsync(newRunId, cell.NodeId, WorkflowIterationKeys.TopLevel, cell.Error ?? "(failed)", TimeSpan.Zero, cancellationToken).ConfigureAwait(false);
                 break;
+
+            default:
+                // Defence-in-depth: ResolveReusableKeptCellsAsync only ever passes Success / Skipped /
+                // error-edge-handled Failure cells. A non-terminal status reaching here is a contract breach —
+                // fail loudly rather than silently drop a kept cell (which would orphan the fork's frontier).
+                throw new InvalidOperationException(
+                    $"Cannot re-emit kept cell '{cell.NodeId}' from run {originalRunId}: unexpected non-terminal status {cell.Status}.");
         }
     }
 

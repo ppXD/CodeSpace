@@ -57,6 +57,22 @@ public class RerunFromNodePlannerTests
     }
 
     [Fact]
+    public void Branch_kept_upstream_keeps_both_handle_arms_and_reruns_only_the_join()
+    {
+        // The discriminating case for handle-agnostic KEEP: branch→(true)T→J, branch→(false)F→J; rerun from the
+        // join J. J is the only re-run node; the branch AND both its handle arms (the taken T and the skipped F)
+        // are all KEPT — the frozen branch decision is reused wholesale, never re-derived. A planner that tied
+        // KEEP to the live handle would wrongly drop the skipped arm.
+        var plan = RerunFromNodePlanner.Plan(
+            Def([N("branch"), N("T"), N("F"), N("J")],
+                E("branch", "T", "true"), E("branch", "F", "false"), E("T", "J"), E("F", "J")), "J");
+
+        plan.ReRunNodeIds.ShouldBe(new[] { "J" }, ignoreOrder: true);
+        plan.KeptNodeIds.ShouldBe(new[] { "branch", "T", "F" }, ignoreOrder: true,
+            "a kept upstream branch reuses BOTH handle arms — the frozen routing is carried forward, not re-decided");
+    }
+
+    [Fact]
     public void Container_as_fromNode_is_an_atomic_top_level_unit()
     {
         // A→map→C; map owns a body {bstart,b1}. Rerun from map: top-level re-run is {map,C}; the traversal stops

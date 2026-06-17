@@ -85,6 +85,12 @@ public class RerunFromNodeFlowTests
         var transformCell = await LoadCellAsync(rerunId, "transform");
         JsonDocument.Parse(transformCell.OutputsJson).RootElement.GetProperty("n").GetInt32()
             .ShouldBe(1, "the re-run transform must echo the REUSED mutator output, not a recomputed one");
+
+        // Exactly-once-on-fork: after the walk, every cell — reused or re-run — carries exactly ONE terminal
+        // record. A reused cell that the engine wrongly re-settled, or a re-run node that double-fired, would
+        // show two. This pins the durable ledger's exactly-once property across the rerun re-walk.
+        foreach (var n in new[] { "start", "mutator", "transform", "end" })
+            (await TerminalRecordCountAsync(rerunId, n)).ShouldBe(1, $"node '{n}' must have exactly one terminal record on the fork");
     }
 
     [Fact]
@@ -128,14 +134,24 @@ public class RerunFromNodeFlowTests
         (await NodeStartedCountAsync(rerunId, "f")).ShouldBe(0, "the reused skipped branch did not re-run");
         (await NodeStartedCountAsync(rerunId, "t")).ShouldBe(0, "the reused taken branch did not re-run");
         (await NodeStartedCountAsync(rerunId, "j")).ShouldBe(1, "the join re-ran exactly once");
+
+        // Load-bearing routing-hints carry-forward: the kept branch cell's frozen hints MUST survive onto the
+        // fork. A seeder that dropped them would re-emit the iff cell with null hints — and null hints make
+        // IsEdgeLive treat BOTH handles as live, so the originally-dead 'false' edge would re-enliven. Assert the
+        // exact frozen hint is carried so this test fails if hints are ever dropped.
+        var iffCell = await LoadCellAsync(rerunId, "iff");
+        iffCell.RoutingHintsJson.ShouldNotBeNull("the reused branch cell must carry its frozen routing hints, not null");
+        JsonDocument.Parse(iffCell.RoutingHintsJson!).RootElement.EnumerateArray().Select(e => e.GetString())
+            .ShouldBe(new[] { "true" }, "the carried-forward hint must be the original frozen decision ('true'), so the dead 'false' edge stays dead");
     }
 
     [Fact]
-    public async Task Rerun_reuses_failed_upstream_that_had_an_error_edge()
+    public async Task Rerun_reuses_failed_upstream_and_a_re_run_node_consumes_the_rebuilt_error_output()
     {
-        // start → flaky(always fails) =(error)=> caught → end ; flaky =(normal)=> ok (skipped). The original
-        // routes the error branch to Success. Rerun from "end" reuses flaky as a FAILED source (the NodeFailed
-        // seeder path), ok as Skipped, caught as Success — proving a clean-failure-with-error-edge is reusable.
+        // start → flaky(always fails) =(error)=> caught(reads {{flaky.error.message}}) → end ; flaky =(normal)=> ok.
+        // The original routes the error branch. Rerun from "caught": flaky is REUSED as a failed source (the
+        // NodeFailed seeder path), and caught RE-RUNS — so this proves the full rehydrate→BuildErrorOutput→
+        // downstream-consume path: a re-run node reads the error output rebuilt from the reused failed cell.
         var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
         var flakyKey = "rerun-failed-" + Guid.NewGuid().ToString("N");
         var workflowId = await CreateWorkflowAsync(teamId, userId, FailWithErrorEdgeDef(flakyKey));
@@ -144,7 +160,7 @@ public class RerunFromNodeFlowTests
         (await LoadCellAsync(originalRunId, "flaky")).Status.ShouldBe(NodeStatus.Failure);
         var attemptsAfterOriginal = FlakyTestNode.AttemptsFor(flakyKey);
 
-        var rerunId = await RerunAsync(originalRunId, "end", teamId, userId);
+        var rerunId = await RerunAsync(originalRunId, "caught", teamId, userId);
         await RunEngineAsync(rerunId);
 
         await AssertRunStatusAsync(rerunId, WorkflowRunStatus.Success);
@@ -153,7 +169,13 @@ public class RerunFromNodeFlowTests
         (await NodeStartedCountAsync(rerunId, "flaky")).ShouldBe(0, "the reused failed node did not re-run");
         FlakyTestNode.AttemptsFor(flakyKey).ShouldBe(attemptsAfterOriginal,
             "reuse must not re-invoke the failing node (attempt count unchanged from the original run)");
-        (await NodeStartedCountAsync(rerunId, "end")).ShouldBe(1, "the terminal re-ran exactly once");
+        (await NodeStartedCountAsync(rerunId, "caught")).ShouldBe(1, "the from-node re-ran exactly once");
+
+        // The crux: the RE-RUN caught node resolved {{nodes.flaky.outputs.error.message}} from the error output
+        // the engine REBUILT from the reused (failed) flaky cell — not from a stale copy.
+        var caughtCell = await LoadCellAsync(rerunId, "caught");
+        JsonDocument.Parse(caughtCell.OutputsJson).RootElement.GetProperty("msg").GetString()
+            .ShouldContain("flaky failure", customMessage: "the re-run node must consume the rebuilt error output of the reused failed upstream");
     }
 
     [Fact]
@@ -220,9 +242,12 @@ public class RerunFromNodeFlowTests
         var db = scope.Resolve<CodeSpaceDbContext>();
         var original = await db.WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == originalRunId);
         var rerun = await db.WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == rerunId);
+        var rerunRequest = await db.WorkflowRunRequest.AsNoTracking().SingleAsync(r => r.Id == rerun.RunRequestId);
 
         rerun.WorkflowId.ShouldBeNull("a snapshot-origin rerun stays version-less (no Workflow row)");
         rerun.DefinitionSnapshotJson.ShouldBe(original.DefinitionSnapshotJson, "the fork carries the original's frozen inline definition");
+        rerunRequest.SourceType.ShouldBe(WorkflowRunSourceTypes.Rerun,
+            "the snapshot-fork must carry source=rerun (the sourceType threaded into StageReplayFromSnapshotAsync)");
         (await NodeStartedCountAsync(rerunId, "start")).ShouldBe(0, "the snapshot-origin upstream was reused");
         (await NodeStartedCountAsync(rerunId, "a")).ShouldBe(1, "the from-node re-ran exactly once");
     }
@@ -426,6 +451,69 @@ public class RerunFromNodeFlowTests
         (await RunCountAsync(teamId)).ShouldBe(before, "a non-reusable-upstream rerun must write nothing");
     }
 
+    [Fact]
+    public async Task Rerun_when_a_kept_upstream_is_still_suspended_is_refused_and_writes_nothing()
+    {
+        // start → suspendprobe(parks an Action wait) → downstream → end. The original SUSPENDS at suspendprobe;
+        // downstream never runs. Rerun from "downstream" keeps suspendprobe, whose cell is non-terminal
+        // (Suspended) → no reusable outcome → hard refuse (the in-flight-upstream guard).
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var probeKey = "rerun-suspended-" + Guid.NewGuid().ToString("N");
+        SuspendProbeNode.Reset(probeKey);
+
+        var workflowId = await CreateWorkflowAsync(teamId, userId, SuspendThenDownstreamDef(probeKey));
+        var originalRunId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
+        await RunEngineAsync(originalRunId);
+        await AssertRunStatusAsync(originalRunId, WorkflowRunStatus.Suspended);
+
+        var before = await RunCountAsync(teamId);
+        await Should.ThrowAsync<RerunUpstreamNotReusableException>(async () =>
+            await RerunAsync(originalRunId, "downstream", teamId, userId));
+
+        (await RunCountAsync(teamId)).ShouldBe(before, "a rerun over an in-flight (suspended) kept upstream must write nothing");
+    }
+
+    [Fact]
+    public async Task Rerun_with_a_container_in_the_closure_is_refused_and_writes_nothing()
+    {
+        // The slice-1 conservative gate: a Map/Loop/Try container in the re-run closure is refused by KIND (re-
+        // running a container re-runs its whole body atomically; approval-gated container rerun is the D7-3/4
+        // follow-up). Here the loop body is PURE (json_emit) yet the loop is still refused — this PINS that
+        // intended conservatism so a future body-effectfulness relaxation is a deliberate, test-visible change.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var workflowId = await CreateWorkflowAsync(teamId, userId, PureBodiedLoopDef());
+        var originalRunId = await RunFreshAsync(workflowId, teamId);
+        await AssertRunStatusAsync(originalRunId, WorkflowRunStatus.Success);
+
+        var before = await RunCountAsync(teamId);
+        var ex = await Should.ThrowAsync<RerunBlockedBySideEffectException>(async () =>
+            await RerunAsync(originalRunId, "start", teamId, userId));   // closure includes the loop container
+        ex.BlockedNodeIds.ShouldContain("loop", "a container in the closure is refused by Kind (slice-1 conservatism)");
+
+        (await RunCountAsync(teamId)).ShouldBe(before, "a container-blocked rerun must write nothing");
+    }
+
+    [Fact]
+    public async Task Rerun_with_a_suspendable_node_in_the_closure_is_refused_and_writes_nothing()
+    {
+        // CanSuspend is part of the effectful gate (re-running a parking node re-stages an external wait / agent
+        // run). start → suspendprobe(CanSuspend) → end; rerun from "start" puts suspendprobe in the closure → refused.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var probeKey = "rerun-cansuspend-" + Guid.NewGuid().ToString("N");
+        SuspendProbeNode.Reset(probeKey);
+
+        var workflowId = await CreateWorkflowAsync(teamId, userId, SuspendInlineDef(probeKey));
+        var originalRunId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
+        await RunEngineAsync(originalRunId);   // suspends; the gate fires regardless of the original's state
+
+        var before = await RunCountAsync(teamId);
+        var ex = await Should.ThrowAsync<RerunBlockedBySideEffectException>(async () =>
+            await RerunAsync(originalRunId, "start", teamId, userId));
+        ex.BlockedNodeIds.ShouldContain("suspendprobe", "a CanSuspend node in the closure is refused");
+
+        (await RunCountAsync(teamId)).ShouldBe(before, "a suspend-blocked rerun must write nothing");
+    }
+
     // ─────────────────────────────────────────────────────────────────────────────
     //  Workflow definition builders
     // ─────────────────────────────────────────────────────────────────────────────
@@ -523,7 +611,8 @@ public class RerunFromNodeFlowTests
             new() { Id = "start", TypeKey = "trigger.manual", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
             new() { Id = "flaky", TypeKey = FlakyTestNode.Key, Config = WorkflowsTestSeed.Json($$"""{"key":"{{flakyKey}}","failTimes":99}"""), Inputs = WorkflowsTestSeed.EmptyJson() },
             new() { Id = "ok", TypeKey = JsonEmitNode.Key, Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.Json("""{"tag":"ok"}""") },
-            new() { Id = "caught", TypeKey = JsonEmitNode.Key, Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.Json("""{"tag":"caught"}""") },
+            // caught CONSUMES the failed upstream's rebuilt error output — the path the rerun must reconstruct.
+            new() { Id = "caught", TypeKey = JsonEmitNode.Key, Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.Json("""{"msg":"{{nodes.flaky.outputs.error.message}}"}""") },
             new() { Id = "end", TypeKey = "builtin.terminal", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
         },
         Edges = new List<EdgeDefinition>
@@ -590,6 +679,63 @@ public class RerunFromNodeFlowTests
             new() { From = "start", To = "a" },
             new() { From = "a", To = "b" },
             new() { From = "b", To = "end" },
+        },
+    };
+
+    // start → suspendprobe(parks an Action wait) → downstream → end.
+    private static WorkflowDefinition SuspendThenDownstreamDef(string probeKey) => new()
+    {
+        SchemaVersion = 1,
+        Nodes = new List<NodeDefinition>
+        {
+            new() { Id = "start", TypeKey = "trigger.manual", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
+            new() { Id = "suspendprobe", TypeKey = SuspendProbeNode.Key, Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.Json($$"""{"key":"{{probeKey}}","item":"x"}""") },
+            new() { Id = "downstream", TypeKey = JsonEmitNode.Key, Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.Json("""{"tag":"downstream"}""") },
+            new() { Id = "end", TypeKey = "builtin.terminal", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
+        },
+        Edges = new List<EdgeDefinition>
+        {
+            new() { From = "start", To = "suspendprobe" },
+            new() { From = "suspendprobe", To = "downstream" },
+            new() { From = "downstream", To = "end" },
+        },
+    };
+
+    // start → suspendprobe(CanSuspend) → end.
+    private static WorkflowDefinition SuspendInlineDef(string probeKey) => new()
+    {
+        SchemaVersion = 1,
+        Nodes = new List<NodeDefinition>
+        {
+            new() { Id = "start", TypeKey = "trigger.manual", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
+            new() { Id = "suspendprobe", TypeKey = SuspendProbeNode.Key, Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.Json($$"""{"key":"{{probeKey}}","item":"x"}""") },
+            new() { Id = "end", TypeKey = "builtin.terminal", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
+        },
+        Edges = new List<EdgeDefinition>
+        {
+            new() { From = "start", To = "suspendprobe" },
+            new() { From = "suspendprobe", To = "end" },
+        },
+    };
+
+    // start → loop(1 pass; body: loop_start → bodyjson — PURE, no side effects) → end. The loop is still
+    // refused in a rerun closure by KIND (slice-1 conservatism), independent of its pure body.
+    private static WorkflowDefinition PureBodiedLoopDef() => new()
+    {
+        SchemaVersion = 1,
+        Nodes = new List<NodeDefinition>
+        {
+            new() { Id = "start", TypeKey = "trigger.manual", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
+            new() { Id = "loop", TypeKey = "flow.loop", Config = WorkflowsTestSeed.Json("""{"maxIterations":1}"""), Inputs = WorkflowsTestSeed.EmptyJson() },
+            new() { Id = "ls", TypeKey = "flow.loop_start", ParentId = "loop", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
+            new() { Id = "bodyjson", TypeKey = JsonEmitNode.Key, ParentId = "loop", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.Json("""{"tag":"body"}""") },
+            new() { Id = "end", TypeKey = "builtin.terminal", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
+        },
+        Edges = new List<EdgeDefinition>
+        {
+            new() { From = "start", To = "loop" },
+            new() { From = "loop", To = "end" },
+            new() { From = "ls", To = "bodyjson" },
         },
     };
 
@@ -665,6 +811,16 @@ public class RerunFromNodeFlowTests
         using var scope = _fixture.BeginScope();
         return await scope.Resolve<CodeSpaceDbContext>().WorkflowRunRecord.AsNoTracking()
             .CountAsync(r => r.RunId == runId && r.NodeId == nodeId && r.IterationKey == "" && r.RecordType == WorkflowRunRecordTypes.NodeStarted);
+    }
+
+    private static readonly string[] TerminalRecordTypes =
+        { WorkflowRunRecordTypes.NodeCompleted, WorkflowRunRecordTypes.NodeSkipped, WorkflowRunRecordTypes.NodeFailed };
+
+    private async Task<int> TerminalRecordCountAsync(Guid runId, string nodeId)
+    {
+        using var scope = _fixture.BeginScope();
+        return await scope.Resolve<CodeSpaceDbContext>().WorkflowRunRecord.AsNoTracking()
+            .CountAsync(r => r.RunId == runId && r.NodeId == nodeId && r.IterationKey == "" && TerminalRecordTypes.Contains(r.RecordType));
     }
 
     private async Task<int> RecordCountAsync(Guid runId)
