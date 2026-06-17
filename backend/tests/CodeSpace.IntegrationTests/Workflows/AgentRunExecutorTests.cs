@@ -857,7 +857,7 @@ public class AgentRunExecutorTests
         public Task<WorkspaceRequest?> ResolveAsync(AgentTask task, Guid teamId, CancellationToken cancellationToken) =>
             Task.FromResult<WorkspaceRequest?>(new WorkspaceRequest { RepositoryUrl = "file:///dev/null" });
 
-        public Task<WorkspaceRequest?> ResolveByRepositoryIdAsync(Guid repositoryId, Guid teamId, CancellationToken cancellationToken) =>
+        public Task<WorkspaceRequest?> ResolveByRepositoryIdAsync(Guid repositoryId, Guid teamId, CancellationToken cancellationToken, string? @ref = null) =>
             Task.FromResult<WorkspaceRequest?>(new WorkspaceRequest { RepositoryUrl = "file:///dev/null" });
     }
 

@@ -186,7 +186,7 @@ public class GitIntegrateNodeTests
 
         public Task<WorkspaceRequest?> ResolveAsync(AgentTask task, Guid teamId, CancellationToken cancellationToken) => throw new NotSupportedException();
 
-        public Task<WorkspaceRequest?> ResolveByRepositoryIdAsync(Guid repositoryId, Guid teamId, CancellationToken cancellationToken) =>
-            Task.FromResult(ReturnNull ? null : new WorkspaceRequest { RepositoryUrl = "file:///remote.git", Ref = "main", Token = "tok", TokenUsername = "x-access-token" });
+        public Task<WorkspaceRequest?> ResolveByRepositoryIdAsync(Guid repositoryId, Guid teamId, CancellationToken cancellationToken, string? @ref = null) =>
+            Task.FromResult(ReturnNull ? null : new WorkspaceRequest { RepositoryUrl = "file:///remote.git", Ref = @ref ?? "main", Token = "tok", TokenUsername = "x-access-token" });
     }
 }

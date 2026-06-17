@@ -21,7 +21,8 @@ public interface IAgentWorkspaceResolver
     /// <summary>
     /// Resolve a workspace directly from a repository id (team-scoped) — the seam an integration step / a node holding
     /// only a <c>RepositoryId</c> (not a whole <see cref="AgentTask"/>) uses to obtain the clone URL + push token.
-    /// Throws <see cref="WorkspaceException"/> when the repository can't be resolved (missing, no clone URL).
+    /// <paramref name="ref"/> overrides the checked-out ref (null → the repository's default branch). Throws
+    /// <see cref="WorkspaceException"/> when the repository can't be resolved (missing, no clone URL).
     /// </summary>
-    Task<WorkspaceRequest?> ResolveByRepositoryIdAsync(Guid repositoryId, Guid teamId, CancellationToken cancellationToken);
+    Task<WorkspaceRequest?> ResolveByRepositoryIdAsync(Guid repositoryId, Guid teamId, CancellationToken cancellationToken, string? @ref = null);
 }
