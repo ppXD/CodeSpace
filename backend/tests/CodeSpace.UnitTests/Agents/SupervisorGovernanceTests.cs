@@ -147,6 +147,20 @@ public class SupervisorGovernanceTests
         SupervisorApprovalRequest.WasJustApproved(context).ShouldBeTrue();
     }
 
+    [Fact]
+    public void A_resolve_right_after_its_approved_approval_card_is_recognised_as_just_approved()
+    {
+        // Resolver loop #379 S4 — the highest-stakes verb's approve-then-proceed: a resolve escalates to an approval
+        // card (QuestionFor's default arm "Approve the 'resolve' action? <marker>"), so once a human approves it the
+        // re-emitted resolve MUST be recognised as just-approved + PROCEED once — never re-park into a second card
+        // (which would loop the run to a no-progress force-STOP and the resolution would never run).
+        var resolveCard = SupervisorApprovalRequest.IntoAskHuman(new SupervisorDecision { Kind = SupervisorDecisionKinds.Resolve, PayloadJson = "{}" });
+
+        var context = ContextEndingWith(resolveCard, foldedAnswer: SupervisorApprovalRequest.ApproveReply);
+
+        SupervisorApprovalRequest.WasJustApproved(context).ShouldBeTrue("the resolve approval card carries the marker, so an approved resolve is bound to it and proceeds (no infinite re-park)");
+    }
+
     [Theory]
     [InlineData("reject")]
     [InlineData("Reject it")]
