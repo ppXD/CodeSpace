@@ -412,25 +412,230 @@ public class RerunFromNodeFlowTests
         (await RunCountAsync(teamId)).ShouldBe(before, "an unknown from-node must write nothing");
     }
 
+    // ─────────────────────────────────────────────────────────────────────────────
+    //  D7-3 — a re-run side-effecting node is approval-gated (not silently re-fired)
+    // ─────────────────────────────────────────────────────────────────────────────
+
     [Fact]
-    public async Task Rerun_with_a_side_effecting_node_in_the_closure_is_refused_and_writes_nothing()
+    public async Task Rerun_gates_a_re_run_side_effecting_node_until_approved_then_fires_exactly_once()
     {
-        // Rerun FROM the side-effecting node itself → it is inside the re-run closure → the gate refuses (slice-1
-        // fail-closed: re-running it would re-fire the side effect / re-bill). The blocked id is surfaced.
+        // CROWN JEWEL. start → mutator(side-effecting) → transform(pure) → end. Rerun FROM the mutator: it is in
+        // the re-run closure, so the engine PARKS it on an Approval wait — the side effect does NOT fire while
+        // the run is Suspended (counter unchanged). On approve, the mutator runs exactly once (counter +1), the
+        // pure transform re-runs un-gated, and the run reaches Success.
         var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
-        var probeKey = "rerun-gate-" + Guid.NewGuid().ToString("N");
+        var probeKey = "rerun-gate-approve-" + Guid.NewGuid().ToString("N");
         MutatingProbeNode.Reset(probeKey);
 
         var workflowId = await CreateWorkflowAsync(teamId, userId, MutatorTransformDef(probeKey));
         var originalRunId = await RunFreshAsync(workflowId, teamId);
+        await AssertRunStatusAsync(originalRunId, WorkflowRunStatus.Success);
+        MutatingProbeNode.ExecutionsFor(probeKey).ShouldBe(1, "the original run fired the side effect once");
+
+        var rerunId = await RerunAsync(originalRunId, "mutator", teamId, userId);
+        await RunEngineAsync(rerunId);
+
+        await AssertRunStatusAsync(rerunId, WorkflowRunStatus.Suspended);
+        MutatingProbeNode.ExecutionsFor(probeKey).ShouldBe(1,
+            "the re-run side-effecting node MUST NOT fire while parked on the approval gate (would be 2 if it re-fired silently)");
+        (await PendingApprovalWaitCountAsync(rerunId)).ShouldBe(1, "the gate parks exactly one Approval wait");
+        (await NodeStartedCountAsync(rerunId, "transform")).ShouldBe(0, "downstream of the gate has not run yet");
+
+        (await ApproveRerunGateAsync(rerunId, teamId, userId, approved: true)).ShouldBeTrue();
+        await RunEngineAsync(rerunId);
+
+        await AssertRunStatusAsync(rerunId, WorkflowRunStatus.Success);
+        MutatingProbeNode.ExecutionsFor(probeKey).ShouldBe(2,
+            "after approval the side effect fires EXACTLY once on the rerun (suspend+resume must not double-fire)");
+        (await TerminalRecordCountAsync(rerunId, "mutator")).ShouldBe(1, "the gated node has exactly one terminal record after the walk");
+        (await NodeStartedCountAsync(rerunId, "transform")).ShouldBe(1, "the pure downstream re-ran once, un-gated, after approval");
+    }
+
+    [Fact]
+    public async Task Rerun_rejected_side_effect_gate_skips_the_node_and_never_fires()
+    {
+        // Reject the gate → the side-effecting node is SKIPPED (its effect never fires) and its downstream, having
+        // no other live input, is skipped too. The run still completes (a rejected gate is a clean outcome).
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var probeKey = "rerun-gate-reject-" + Guid.NewGuid().ToString("N");
+        MutatingProbeNode.Reset(probeKey);
+
+        var workflowId = await CreateWorkflowAsync(teamId, userId, MutatorTransformDef(probeKey));
+        var originalRunId = await RunFreshAsync(workflowId, teamId);
+        MutatingProbeNode.ExecutionsFor(probeKey).ShouldBe(1);
+
+        var rerunId = await RerunAsync(originalRunId, "mutator", teamId, userId);
+        await RunEngineAsync(rerunId);
+        await AssertRunStatusAsync(rerunId, WorkflowRunStatus.Suspended);
+
+        (await ApproveRerunGateAsync(rerunId, teamId, userId, approved: false)).ShouldBeTrue();
+        await RunEngineAsync(rerunId);
+
+        await AssertRunStatusAsync(rerunId, WorkflowRunStatus.Success);
+        MutatingProbeNode.ExecutionsFor(probeKey).ShouldBe(1, "a rejected gate must NEVER fire the side effect");
+        (await LoadCellAsync(rerunId, "mutator")).Status.ShouldBe(NodeStatus.Skipped, "a rejected side-effecting node is skipped");
+        (await LoadCellAsync(rerunId, "transform")).Status.ShouldBe(NodeStatus.Skipped, "downstream with no other live input is skipped");
+        (await NodeStartedCountAsync(rerunId, "transform")).ShouldBe(0, "the skipped downstream never started — the reject genuinely propagated, not silently ran");
+    }
+
+    [Fact]
+    public async Task Side_effecting_node_runs_without_a_gate_on_a_normal_run()
+    {
+        // Control: the gate is RERUN-ONLY. A normal (manual) run fires the side-effecting node straight away — it
+        // never suspends and stages no Approval wait. This pins that the gate does not over-fire on first runs.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var probeKey = "rerun-gate-normal-" + Guid.NewGuid().ToString("N");
+        MutatingProbeNode.Reset(probeKey);
+
+        var workflowId = await CreateWorkflowAsync(teamId, userId, MutatorTransformDef(probeKey));
+        var runId = await RunFreshAsync(workflowId, teamId);
+
+        await AssertRunStatusAsync(runId, WorkflowRunStatus.Success);
+        MutatingProbeNode.ExecutionsFor(probeKey).ShouldBe(1, "a normal run fires the side effect without a gate");
+        (await PendingApprovalWaitCountAsync(runId)).ShouldBe(0, "a normal run stages no rerun approval gate");
+    }
+
+    [Fact]
+    public async Task Rerun_does_not_gate_a_reused_upstream_side_effecting_node()
+    {
+        // A side-effecting node that is REUSED (upstream of the from-node) is pre-seeded + settled, so it never
+        // executes — and therefore never trips the gate. Rerun FROM "transform" (downstream of the mutator):
+        // the run completes straight to Success with no approval wait, and the reused mutator never re-fires.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var probeKey = "rerun-gate-reused-" + Guid.NewGuid().ToString("N");
+        MutatingProbeNode.Reset(probeKey);
+
+        var workflowId = await CreateWorkflowAsync(teamId, userId, MutatorTransformDef(probeKey));
+        var originalRunId = await RunFreshAsync(workflowId, teamId);
+
+        var rerunId = await RerunAsync(originalRunId, "transform", teamId, userId);
+        await RunEngineAsync(rerunId);
+
+        await AssertRunStatusAsync(rerunId, WorkflowRunStatus.Success, "a reused side-effecting upstream creates no gate");
+        (await PendingApprovalWaitCountAsync(rerunId)).ShouldBe(0, "no gate is staged for a reused (never-executed) side-effecting node");
+        MutatingProbeNode.ExecutionsFor(probeKey).ShouldBe(1, "the reused side-effecting node did not re-fire");
+        (await NodeStartedCountAsync(rerunId, "mutator")).ShouldBe(0, "the reused side-effecting node did not re-run");
+    }
+
+    [Fact]
+    public async Task Rerun_gates_each_re_run_side_effecting_node_independently_one_approval_at_a_time()
+    {
+        // start → fork(pure) → {a(side-effecting), b(side-effecting)} → join(pure) → end. Rerun FROM the fork puts
+        // BOTH side-effecting arms in the closure → TWO independent gates. They resolve one approval at a time
+        // (the oldest-pending rule); after both, each fired exactly once and the run completes.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var keyA = "rerun-gate-parA-" + Guid.NewGuid().ToString("N");
+        var keyB = "rerun-gate-parB-" + Guid.NewGuid().ToString("N");
+        MutatingProbeNode.Reset(keyA);
+        MutatingProbeNode.Reset(keyB);
+
+        var workflowId = await CreateWorkflowAsync(teamId, userId, TwoSideEffectDiamondDef(keyA, keyB));
+        var originalRunId = await RunFreshAsync(workflowId, teamId);
+        MutatingProbeNode.ExecutionsFor(keyA).ShouldBe(1);
+        MutatingProbeNode.ExecutionsFor(keyB).ShouldBe(1);
+
+        var rerunId = await RerunAsync(originalRunId, "fork", teamId, userId);
+        await RunEngineAsync(rerunId);
+
+        await AssertRunStatusAsync(rerunId, WorkflowRunStatus.Suspended);
+        (await PendingApprovalWaitCountAsync(rerunId)).ShouldBe(2, "both side-effecting arms park independent gates");
+
+        // First approval resolves the oldest gate; the run is still parked on the second.
+        (await ApproveRerunGateAsync(rerunId, teamId, userId, approved: true)).ShouldBeTrue();
+        await RunEngineAsync(rerunId);
+        await AssertRunStatusAsync(rerunId, WorkflowRunStatus.Suspended, "still parked on the second gate");
+        (await PendingApprovalWaitCountAsync(rerunId)).ShouldBe(1);
+        // EXACTLY ONE arm advanced (which one is wave-order-dependent, so assert the sum): one fired (→2), the
+        // other is still gated (→1). This would fail if approving one gate wrongly released BOTH arms.
+        (MutatingProbeNode.ExecutionsFor(keyA) + MutatingProbeNode.ExecutionsFor(keyB)).ShouldBe(3,
+            "one arm fired on the first approval; the other is still parked on its independent gate");
+
+        (await ApproveRerunGateAsync(rerunId, teamId, userId, approved: true)).ShouldBeTrue();
+        await RunEngineAsync(rerunId);
+
+        await AssertRunStatusAsync(rerunId, WorkflowRunStatus.Success);
+        MutatingProbeNode.ExecutionsFor(keyA).ShouldBe(2, "arm A fired exactly once on the rerun");
+        MutatingProbeNode.ExecutionsFor(keyB).ShouldBe(2, "arm B fired exactly once on the rerun");
+    }
+
+    [Fact]
+    public async Task Rerun_gate_re_walk_before_approval_does_not_fire_and_keeps_exactly_one_wait()
+    {
+        // Durability crown: a spurious re-dispatch (reconciler / duplicate worker) that re-walks the fork BEFORE
+        // the operator approves must be a safe idempotent no-op — the side effect stays un-fired and the run
+        // re-parks on a single Approval wait (the prior pending wait is replaced, never duplicated). Only after a
+        // real approval does it fire, exactly once.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var probeKey = "rerun-gate-rewalk-" + Guid.NewGuid().ToString("N");
+        MutatingProbeNode.Reset(probeKey);
+
+        var workflowId = await CreateWorkflowAsync(teamId, userId, MutatorTransformDef(probeKey));
+        var originalRunId = await RunFreshAsync(workflowId, teamId);
+
+        var rerunId = await RerunAsync(originalRunId, "mutator", teamId, userId);
+        await RunEngineAsync(rerunId);
+        await AssertRunStatusAsync(rerunId, WorkflowRunStatus.Suspended);
+        MutatingProbeNode.ExecutionsFor(probeKey).ShouldBe(1);
+
+        // Simulate a spurious re-dispatch of the still-unapproved fork (the reconciler flips a stuck run back to
+        // Enqueued) and re-walk — the gate must re-suspend without firing or leaking a second wait.
+        await ForceEnqueuedAsync(rerunId);
+        await RunEngineAsync(rerunId);
+
+        await AssertRunStatusAsync(rerunId, WorkflowRunStatus.Suspended, "a re-walk before approval re-parks the gate");
+        MutatingProbeNode.ExecutionsFor(probeKey).ShouldBe(1, "the unapproved re-walk MUST NOT fire the side effect");
+        (await PendingApprovalWaitCountAsync(rerunId)).ShouldBe(1, "the re-suspend replaces the prior wait — never a duplicate");
+
+        (await ApproveRerunGateAsync(rerunId, teamId, userId, approved: true)).ShouldBeTrue();
+        await RunEngineAsync(rerunId);
+        await AssertRunStatusAsync(rerunId, WorkflowRunStatus.Success);
+        MutatingProbeNode.ExecutionsFor(probeKey).ShouldBe(2, "after approval the side effect fires exactly once despite the earlier spurious re-walk");
+    }
+
+    [Fact]
+    public async Task Rerun_rejected_gate_skips_the_node_without_taking_its_error_edge()
+    {
+        // Semantics pin: a rejected gate SKIPS the node — it is NOT a failure, so a downstream error-branch
+        // handler is NOT taken (a skip kills every handle, including 'error'). Reject ≠ error.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var probeKey = "rerun-gate-erroredge-" + Guid.NewGuid().ToString("N");
+        MutatingProbeNode.Reset(probeKey);
+
+        var workflowId = await CreateWorkflowAsync(teamId, userId, SideEffectWithErrorEdgeDef(probeKey));
+        var originalRunId = await RunFreshAsync(workflowId, teamId);
+
+        var rerunId = await RerunAsync(originalRunId, "mutator", teamId, userId);
+        await RunEngineAsync(rerunId);
+        await AssertRunStatusAsync(rerunId, WorkflowRunStatus.Suspended);
+
+        (await ApproveRerunGateAsync(rerunId, teamId, userId, approved: false)).ShouldBeTrue();
+        await RunEngineAsync(rerunId);
+
+        await AssertRunStatusAsync(rerunId, WorkflowRunStatus.Success);
+        MutatingProbeNode.ExecutionsFor(probeKey).ShouldBe(1, "a rejected gate never fires the side effect");
+        (await LoadCellAsync(rerunId, "mutator")).Status.ShouldBe(NodeStatus.Skipped);
+        (await LoadCellAsync(rerunId, "caught")).Status.ShouldBe(NodeStatus.Skipped,
+            "a rejected (skipped) node is NOT a failure — its error edge is dead, so the handler is not taken");
+        (await NodeStartedCountAsync(rerunId, "caught")).ShouldBe(0, "the error handler never ran on a reject");
+    }
+
+    [Fact]
+    public async Task Rerun_with_a_side_effecting_AND_suspendable_node_in_the_closure_is_refused_and_writes_nothing()
+    {
+        // Precedence pin: a node that is BOTH side-effecting AND suspendable (the chat.post_message shape) is
+        // refused at staging via the CanSuspend arm — fail-closed wins, it never reaches the runtime side-effect
+        // gate. (No frontend / docs should imply such a node is approval-gated; this is the conservative path.)
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var workflowId = await CreateWorkflowAsync(teamId, userId, BothFlagsDef());
+        var originalRunId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
+        await RunEngineAsync(originalRunId);   // suspends at the both-flags node; the gate fires regardless
+
         var before = await RunCountAsync(teamId);
+        var ex = await Should.ThrowAsync<RerunBlockedByUnsupportedNodeException>(async () =>
+            await RerunAsync(originalRunId, "start", teamId, userId));
+        ex.BlockedNodeIds.ShouldContain("bothflags", "a side-effecting+suspendable node is refused via the CanSuspend arm, not approval-gated");
 
-        var ex = await Should.ThrowAsync<RerunBlockedBySideEffectException>(async () =>
-            await RerunAsync(originalRunId, "mutator", teamId, userId));
-        ex.BlockedNodeIds.ShouldContain("mutator", "the refusal must name the effectful node in the closure");
-
-        (await RunCountAsync(teamId)).ShouldBe(before, "a side-effect-blocked rerun must write nothing");
-        MutatingProbeNode.ExecutionsFor(probeKey).ShouldBe(1, "the side effect is not re-fired by a refused rerun");
+        (await RunCountAsync(teamId)).ShouldBe(before, "a both-flags-blocked rerun must write nothing");
     }
 
     [Fact]
@@ -476,19 +681,19 @@ public class RerunFromNodeFlowTests
     [Fact]
     public async Task Rerun_with_a_container_in_the_closure_is_refused_and_writes_nothing()
     {
-        // The slice-1 conservative gate: a Map/Loop/Try container in the re-run closure is refused by KIND (re-
-        // running a container re-runs its whole body atomically; approval-gated container rerun is the D7-3/4
-        // follow-up). Here the loop body is PURE (json_emit) yet the loop is still refused — this PINS that
-        // intended conservatism so a future body-effectfulness relaxation is a deliberate, test-visible change.
+        // A Map/Loop/Try container in the re-run closure is refused by KIND — re-running a container re-runs its
+        // whole body atomically, which isn't supported yet (the D7-4 container-rerun slice). Here the loop body
+        // is PURE (json_emit) yet the loop is still refused — this PINS that conservatism so a future
+        // body-effectfulness relaxation is a deliberate, test-visible change.
         var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
         var workflowId = await CreateWorkflowAsync(teamId, userId, PureBodiedLoopDef());
         var originalRunId = await RunFreshAsync(workflowId, teamId);
         await AssertRunStatusAsync(originalRunId, WorkflowRunStatus.Success);
 
         var before = await RunCountAsync(teamId);
-        var ex = await Should.ThrowAsync<RerunBlockedBySideEffectException>(async () =>
+        var ex = await Should.ThrowAsync<RerunBlockedByUnsupportedNodeException>(async () =>
             await RerunAsync(originalRunId, "start", teamId, userId));   // closure includes the loop container
-        ex.BlockedNodeIds.ShouldContain("loop", "a container in the closure is refused by Kind (slice-1 conservatism)");
+        ex.BlockedNodeIds.ShouldContain("loop", "a container in the closure is refused by Kind (rerun-unsupported)");
 
         (await RunCountAsync(teamId)).ShouldBe(before, "a container-blocked rerun must write nothing");
     }
@@ -496,8 +701,9 @@ public class RerunFromNodeFlowTests
     [Fact]
     public async Task Rerun_with_a_suspendable_node_in_the_closure_is_refused_and_writes_nothing()
     {
-        // CanSuspend is part of the effectful gate (re-running a parking node re-stages an external wait / agent
-        // run). start → suspendprobe(CanSuspend) → end; rerun from "start" puts suspendprobe in the closure → refused.
+        // A CanSuspend node in the closure is rerun-unsupported (re-running a parking node re-stages an external
+        // wait / agent run). start → suspendprobe(CanSuspend) → end; rerun from "start" puts suspendprobe in the
+        // closure → refused (distinct from a SIDE-EFFECTING node, which is approval-gated rather than refused).
         var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
         var probeKey = "rerun-cansuspend-" + Guid.NewGuid().ToString("N");
         SuspendProbeNode.Reset(probeKey);
@@ -507,9 +713,9 @@ public class RerunFromNodeFlowTests
         await RunEngineAsync(originalRunId);   // suspends; the gate fires regardless of the original's state
 
         var before = await RunCountAsync(teamId);
-        var ex = await Should.ThrowAsync<RerunBlockedBySideEffectException>(async () =>
+        var ex = await Should.ThrowAsync<RerunBlockedByUnsupportedNodeException>(async () =>
             await RerunAsync(originalRunId, "start", teamId, userId));
-        ex.BlockedNodeIds.ShouldContain("suspendprobe", "a CanSuspend node in the closure is refused");
+        ex.BlockedNodeIds.ShouldContain("suspendprobe", "a CanSuspend node in the closure is refused (rerun-unsupported)");
 
         (await RunCountAsync(teamId)).ShouldBe(before, "a suspend-blocked rerun must write nothing");
     }
@@ -739,6 +945,66 @@ public class RerunFromNodeFlowTests
         },
     };
 
+    // start → fork(pure) → {a (side-effecting), b (side-effecting)} → join(pure) → end.
+    private static WorkflowDefinition TwoSideEffectDiamondDef(string keyA, string keyB) => new()
+    {
+        SchemaVersion = 1,
+        Nodes = new List<NodeDefinition>
+        {
+            new() { Id = "start", TypeKey = "trigger.manual", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
+            new() { Id = "fork", TypeKey = JsonEmitNode.Key, Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.Json("""{"tag":"fork"}""") },
+            new() { Id = "a", TypeKey = MutatingProbeNode.Key, Config = WorkflowsTestSeed.Json($$"""{"key":"{{keyA}}"}"""), Inputs = WorkflowsTestSeed.EmptyJson() },
+            new() { Id = "b", TypeKey = MutatingProbeNode.Key, Config = WorkflowsTestSeed.Json($$"""{"key":"{{keyB}}"}"""), Inputs = WorkflowsTestSeed.EmptyJson() },
+            new() { Id = "join", TypeKey = JsonEmitNode.Key, Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.Json("""{"tag":"join"}""") },
+            new() { Id = "end", TypeKey = "builtin.terminal", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
+        },
+        Edges = new List<EdgeDefinition>
+        {
+            new() { From = "start", To = "fork" },
+            new() { From = "fork", To = "a" },
+            new() { From = "fork", To = "b" },
+            new() { From = "a", To = "join" },
+            new() { From = "b", To = "join" },
+            new() { From = "join", To = "end" },
+        },
+    };
+
+    // start → mutator(side-effecting) =(error)=> caught ; mutator → end.
+    private static WorkflowDefinition SideEffectWithErrorEdgeDef(string probeKey) => new()
+    {
+        SchemaVersion = 1,
+        Nodes = new List<NodeDefinition>
+        {
+            new() { Id = "start", TypeKey = "trigger.manual", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
+            new() { Id = "mutator", TypeKey = MutatingProbeNode.Key, Config = WorkflowsTestSeed.Json($$"""{"key":"{{probeKey}}"}"""), Inputs = WorkflowsTestSeed.EmptyJson() },
+            new() { Id = "caught", TypeKey = JsonEmitNode.Key, Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.Json("""{"tag":"caught"}""") },
+            new() { Id = "end", TypeKey = "builtin.terminal", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
+        },
+        Edges = new List<EdgeDefinition>
+        {
+            new() { From = "start", To = "mutator" },
+            new() { From = "mutator", To = "end" },
+            new() { From = "mutator", To = "caught", SourceHandle = WorkflowHandles.Error },
+        },
+    };
+
+    // start → bothflags(IsSideEffecting AND CanSuspend) → end.
+    private static WorkflowDefinition BothFlagsDef() => new()
+    {
+        SchemaVersion = 1,
+        Nodes = new List<NodeDefinition>
+        {
+            new() { Id = "start", TypeKey = "trigger.manual", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
+            new() { Id = "bothflags", TypeKey = BothFlagsProbeNode.Key, Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
+            new() { Id = "end", TypeKey = "builtin.terminal", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
+        },
+        Edges = new List<EdgeDefinition>
+        {
+            new() { From = "start", To = "bothflags" },
+            new() { From = "bothflags", To = "end" },
+        },
+    };
+
     // ─────────────────────────────────────────────────────────────────────────────
     //  Run-staging + query helpers
     // ─────────────────────────────────────────────────────────────────────────────
@@ -784,6 +1050,14 @@ public class RerunFromNodeFlowTests
         await scope.Resolve<IWorkflowEngine>().ExecuteRunAsync(runId, CancellationToken.None);
     }
 
+    /// <summary>Flip a Suspended run back to Enqueued — simulates a spurious reconciler / duplicate-worker re-dispatch so a re-walk can be exercised.</summary>
+    private async Task ForceEnqueuedAsync(Guid runId)
+    {
+        using var scope = _fixture.BeginScope();
+        await scope.Resolve<CodeSpaceDbContext>().Database
+            .ExecuteSqlInterpolatedAsync($"UPDATE workflow_run SET status = 'Enqueued' WHERE id = {runId}");
+    }
+
     private async Task SetTeamVarAsync(Guid teamId, Guid userId, string name, string value)
     {
         using var scope = _fixture.BeginScope();
@@ -792,11 +1066,25 @@ public class RerunFromNodeFlowTests
             JsonDocument.Parse(JsonSerializer.Serialize(value)).RootElement.Clone(), null, userId, CancellationToken.None);
     }
 
-    private async Task AssertRunStatusAsync(Guid runId, WorkflowRunStatus expected)
+    private async Task AssertRunStatusAsync(Guid runId, WorkflowRunStatus expected, string? because = null)
     {
         using var scope = _fixture.BeginScope();
         var run = await scope.Resolve<CodeSpaceDbContext>().WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == runId);
-        run.Status.ShouldBe(expected, $"run {runId} status; error={run.Error}");
+        run.Status.ShouldBe(expected, $"{because} (run {runId} status; error={run.Error})");
+    }
+
+    /// <summary>Resolve the rerun gate's pending Approval wait through the REAL ResumeRunCommand chain (→ ApproveRunAsync), as an operator would.</summary>
+    private async Task<bool> ApproveRerunGateAsync(Guid runId, Guid teamId, Guid userId, bool approved)
+    {
+        using var scope = _fixture.BeginScopeAs(userId, teamId, Roles.Admin);
+        return await scope.Resolve<IMediator>().Send(new ResumeRunCommand { RunId = runId, Approved = approved, Comment = approved ? "go" : "skip" });
+    }
+
+    private async Task<int> PendingApprovalWaitCountAsync(Guid runId)
+    {
+        using var scope = _fixture.BeginScope();
+        return await scope.Resolve<CodeSpaceDbContext>().WorkflowRunWait.AsNoTracking()
+            .CountAsync(w => w.RunId == runId && w.Status == WorkflowWaitStatuses.Pending && w.WaitKind == WorkflowWaitKinds.Approval);
     }
 
     private async Task<WorkflowRunNode> LoadCellAsync(Guid runId, string nodeId)

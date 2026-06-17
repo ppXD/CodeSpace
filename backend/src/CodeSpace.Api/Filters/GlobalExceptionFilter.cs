@@ -167,11 +167,14 @@ public sealed class GlobalExceptionFilter : IExceptionFilter
                 context.Result = BuildProblemResult(StatusCodes.Status400BadRequest, "rerun_target_invalid", context.Exception.Message);
                 break;
 
-            case RerunBlockedBySideEffectException blocked:
-                // 422 — valid request, blocked by a domain rule (no un-gated effectful re-run). The message names
-                // the offending node(s) so the operator knows where to rerun-from instead.
-                _logger.LogInformation("Rerun blocked by side effect at {Path}: nodes={Nodes}", path, string.Join(", ", blocked.BlockedNodeIds));
-                context.Result = BuildProblemResult(StatusCodes.Status422UnprocessableEntity, "rerun_blocked_side_effect", blocked.Message);
+            case RerunBlockedByUnsupportedNodeException blocked:
+                // 422 — valid request, blocked by a domain rule: the re-run closure contains a node whose rerun
+                // isn't supported yet (a suspendable agent/subworkflow/supervisor/interactive node, or a
+                // Map/Loop/Try container). A PURELY side-effecting node is NOT blocked here — the engine
+                // approval-gates it at runtime; a both-side-effecting-and-suspendable node is blocked via the
+                // CanSuspend arm. The message names the offending node(s) so the operator knows where to rerun-from.
+                _logger.LogInformation("Rerun blocked by unsupported node at {Path}: nodes={Nodes}", path, string.Join(", ", blocked.BlockedNodeIds));
+                context.Result = BuildProblemResult(StatusCodes.Status422UnprocessableEntity, "rerun_blocked_unsupported_node", blocked.Message);
                 break;
 
             case RerunUpstreamNotReusableException:

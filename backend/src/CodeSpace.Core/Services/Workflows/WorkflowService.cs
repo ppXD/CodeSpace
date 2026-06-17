@@ -295,10 +295,11 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
         var definition = await LoadOriginalDefinitionAsync(original, cancellationToken).ConfigureAwait(false);
         var plan = Rerun.RerunFromNodePlanner.Plan(definition, fromNodeId);
 
-        // Fail-closed, ALL before any write. (a) no effectful node may re-run un-gated (would repeat a side
-        // effect / re-bill an agent — approval-gated rerun is a follow-up); (b) every KEPT (reused) node must
-        // have settled cleanly in the original so there is an output to carry forward.
-        EnsureNoEffectfulNodeInClosure(definition, plan);
+        // Fail-closed, ALL before any write. (a) no UNSUPPORTED node may be in the re-run closure — a
+        // suspendable agent/subworkflow/supervisor node or a Map/Loop/Try container (re-running those isn't
+        // supported yet); a side-effecting node IS allowed (the engine approval-gates it at runtime, D7-3);
+        // (b) every KEPT (reused) node must have settled cleanly in the original so there is an output to carry.
+        EnsureNoUnsupportedNodeInClosure(definition, plan);
         var keptToSeed = await ResolveReusableKeptCellsAsync(originalRunId, definition, plan, cancellationToken).ConfigureAwait(false);
 
         var snapshot = await LoadVariableSnapshotAsync(originalRunId, cancellationToken).ConfigureAwait(false);
@@ -403,25 +404,28 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
     }
 
     /// <summary>
-    /// FAIL-CLOSED side-effect gate (slice-1): a re-run node that would re-fire a side effect
-    /// (<c>IsSideEffecting</c>), suspend (<c>CanSuspend</c> — agent.code / subworkflow / supervisor), or re-run a
-    /// whole effectful body (a Map/Loop/Try container) is refused — approval-gated rerun is the follow-up (D7-3).
-    /// A side-effecting node UPSTREAM (kept + reused, never re-executed) is fine; only the re-run closure is scanned.
+    /// FAIL-CLOSED rerun-capability gate: a re-run node whose re-execution isn't supported yet is refused —
+    /// a SUSPENDABLE node (<c>CanSuspend</c> — agent.code / subworkflow / supervisor / chat.post_message with
+    /// waitForResponse, which would re-stage an agent run / child / decision / interactive wait) or a CONTAINER
+    /// (a Map/Loop/Try, which would re-run its whole body). A purely SIDE-EFFECTING node (IsSideEffecting but not
+    /// CanSuspend) is NOT refused here: the engine approval-gates it at runtime (D7-3); a node that is BOTH
+    /// side-effecting and suspendable is refused via the CanSuspend arm (fail-closed wins). A node UPSTREAM
+    /// (kept + reused, never re-executed) is always fine; only the re-run closure is scanned.
     /// </summary>
-    private void EnsureNoEffectfulNodeInClosure(WorkflowDefinition definition, RerunPlan plan)
+    private void EnsureNoUnsupportedNodeInClosure(WorkflowDefinition definition, RerunPlan plan)
     {
         var typeByNode = definition.Nodes.ToDictionary(n => n.Id, n => n.TypeKey);
 
         var blocked = plan.ReRunNodeIds
-            .Where(id => typeByNode.TryGetValue(id, out var typeKey) && IsEffectful(_nodeRegistry.Resolve(typeKey).Manifest))
+            .Where(id => typeByNode.TryGetValue(id, out var typeKey) && IsRerunUnsupported(_nodeRegistry.Resolve(typeKey).Manifest))
             .OrderBy(id => id)
             .ToList();
 
-        if (blocked.Count > 0) throw new RerunBlockedBySideEffectException(blocked);
+        if (blocked.Count > 0) throw new RerunBlockedByUnsupportedNodeException(blocked);
     }
 
-    private static bool IsEffectful(NodeManifest manifest) =>
-        manifest.IsSideEffecting || manifest.CanSuspend || manifest.Kind is NodeKind.Map or NodeKind.Loop or NodeKind.Try;
+    private static bool IsRerunUnsupported(NodeManifest manifest) =>
+        manifest.CanSuspend || manifest.Kind is NodeKind.Map or NodeKind.Loop or NodeKind.Try;
 
     /// <summary>
     /// The kept (reused) top-level cells to pre-seed = the plan's KEPT set intersected with the original's

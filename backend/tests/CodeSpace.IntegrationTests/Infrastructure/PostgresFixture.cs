@@ -234,6 +234,12 @@ public sealed class PostgresFixture : IAsyncLifetime
             .As<CodeSpace.Core.Services.Workflows.Nodes.INodeRuntime>()
             .SingleInstance();
 
+        // Test-only node that is BOTH IsSideEffecting AND CanSuspend — pins the from-node rerun precedence
+        // (a both-flags node is refused at staging via the CanSuspend arm, never reaching the runtime gate).
+        builder.RegisterType<Workflows.Infrastructure.BothFlagsProbeNode>()
+            .As<CodeSpace.Core.Services.Workflows.Nodes.INodeRuntime>()
+            .SingleInstance();
+
         // Test-only SUSPENDING body node for the flow.map durable parallel-branch resume (PR2) tests — the
         // hermetic stand-in for an agent.code that parks to an AgentRun (parks an Action wait, no external
         // staging). Same registration rationale: engine/validator see it, palette doesn't.
