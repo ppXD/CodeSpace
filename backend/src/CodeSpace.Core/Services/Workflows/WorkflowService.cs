@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using CodeSpace.Core.DependencyInjection;
 using CodeSpace.Core.Middlewares.Transactional;
 using CodeSpace.Core.Persistence.Db;
@@ -333,6 +334,7 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
         // must be within the original fan-out. The plan re-runs FROM the map (so the map re-enters + its
         // downstream synthesizer re-runs); the gate exempts ONLY this map from the container refusal.
         EnsureTargetIsTopLevelMap(definition, mapNodeId);
+        EnsureMapItemsReplayDeterministic(definition, mapNodeId);
         EnsureBranchBodyIsRerunnable(definition, mapNodeId);
 
         var plan = Rerun.RerunFromNodePlanner.Plan(definition, mapNodeId);
@@ -374,6 +376,32 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
 
         if (_nodeRegistry.Resolve(node.TypeKey).Manifest.Kind != NodeKind.Map)
             throw new RerunTargetNotFoundException($"Node '{mapNodeId}' is not a map; map-branch rerun requires a flow.map target.");
+    }
+
+    // The map's items binding re-resolves at execution time from scope. On a fork, BuildScopeForReplay FREEZES
+    // trigger.* + plain wf/team + upstream node outputs (all KEPT+seeded), but RE-RESOLVES project.* and
+    // secret-typed wf/team LIVE (project is never snapshotted; secrets honour rotation). If the map's items bind
+    // to a live-re-resolved scope, an operator editing that variable between runs would change the branch space
+    // — and the seeded siblings (indexed by the ORIGINAL fan-out) would misalign with the fork's elements →
+    // silent wrong-element attribution. So sibling reuse is sound ONLY when items resolve from a frozen/kept
+    // source (trigger / upstream node output / a literal array). Refuse the live-re-resolved scopes, fail-closed.
+    private static readonly Regex LiveReResolvedItemsScope = new(@"\{\{\s*(project|wf|team|sys)\.", RegexOptions.Compiled);
+
+    /// <summary>Gate: refuse when the map's <c>items</c> bind to a scope that re-resolves live on replay (project / wf /
+    /// team / sys) — the branch space could differ on rerun, making sibling reuse unsound. A literal array or a
+    /// trigger / upstream-node binding is frozen-or-kept and deterministic, so it is allowed.</summary>
+    private static void EnsureMapItemsReplayDeterministic(WorkflowDefinition definition, string mapNodeId)
+    {
+        var mapNode = definition.Nodes.First(n => n.Id == mapNodeId);   // existence already enforced by EnsureTargetIsTopLevelMap
+
+        if (mapNode.Inputs.ValueKind != JsonValueKind.Object
+            || !mapNode.Inputs.TryGetProperty("items", out var items)
+            || items.ValueKind != JsonValueKind.String)
+            return;   // a literal array / absent items is frozen in the definition → deterministic on replay
+
+        if (LiveReResolvedItemsScope.IsMatch(items.GetString() ?? string.Empty))
+            throw new RerunUpstreamNotReusableException(
+                $"Map '{mapNodeId}' binds its items to a variable scope (project / wf / team / sys) that is re-resolved live on replay; the branch space could differ on rerun, so reusing the sibling branches would be unsound. Replay the whole run instead.");
     }
 
     /// <summary>Gate (v1): a re-run map branch body may contain only pure compute/read nodes — refuse a side-effecting,

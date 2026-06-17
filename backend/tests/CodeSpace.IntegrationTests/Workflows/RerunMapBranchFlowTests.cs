@@ -68,15 +68,18 @@ public class RerunMapBranchFlowTests
         FlakyTestNode.AttemptsFor($"{key}-e3").ShouldBe(1, "sibling 3 was replayed");
 
         // node.started discriminator at the BRANCH grain: reused siblings carry zero starts on the fork; the
-        // target branch carries a real start.
-        (await BranchStartedCountAsync(rerunId, "flaky", "map#0")).ShouldBe(0, "sibling 0 branch did not re-run");
-        (await BranchStartedCountAsync(rerunId, "flaky", "map#1")).ShouldBe(0);
-        (await BranchStartedCountAsync(rerunId, "flaky", "map#3")).ShouldBe(0);
-        (await BranchStartedCountAsync(rerunId, "flaky", "map#2")).ShouldBe(1, "the target branch re-ran");
+        // target branch carries a real start (asserted on the branch terminal `echo`).
+        (await BranchStartedCountAsync(rerunId, "echo", "map#0")).ShouldBe(0, "sibling 0 branch did not re-run");
+        (await BranchStartedCountAsync(rerunId, "echo", "map#1")).ShouldBe(0);
+        (await BranchStartedCountAsync(rerunId, "echo", "map#3")).ShouldBe(0);
+        (await BranchStartedCountAsync(rerunId, "echo", "map#2")).ShouldBe(1, "the target branch re-ran");
 
-        // The map re-aggregated in element order: results[i].attempts == 1 for siblings, 2 for the re-run target.
+        // The map re-aggregated in ELEMENT ORDER: results[i].item == "e<i>" for EVERY index (proving siblings
+        // slot at their original positions, not shuffled), and attempts == 1 for siblings, 2 for the re-run target.
         var results = await LoadMapResultsAsync(rerunId, "map");
         results.GetArrayLength().ShouldBe(4);
+        for (var i = 0; i < 4; i++)
+            results[i].GetProperty("item").GetString().ShouldBe($"e{i}", $"results[{i}] must hold element e{i} in order");
         results[0].GetProperty("attempts").GetInt32().ShouldBe(1);
         results[1].GetProperty("attempts").GetInt32().ShouldBe(1);
         results[2].GetProperty("attempts").GetInt32().ShouldBe(2, "the re-run branch's fresh result slots back at index 2");
@@ -84,9 +87,9 @@ public class RerunMapBranchFlowTests
 
         // The downstream synthesizer re-ran over the new aggregate.
         (await NodeStartedCountAsync(rerunId, "synth")).ShouldBe(1, "the synthesizer re-ran over the re-aggregated map results");
-        var synthCell = await LoadCellAsync(rerunId, "synth");
-        JsonDocument.Parse(synthCell.OutputsJson).RootElement.GetProperty("agg")[2].GetProperty("attempts").GetInt32()
-            .ShouldBe(2, "the synthesizer observed the re-run branch's new value");
+        var agg = JsonDocument.Parse((await LoadCellAsync(rerunId, "synth")).OutputsJson).RootElement.GetProperty("agg");
+        agg[2].GetProperty("item").GetString().ShouldBe("e2");
+        agg[2].GetProperty("attempts").GetInt32().ShouldBe(2, "the synthesizer observed the re-run branch's new value");
     }
 
     [Fact]
@@ -265,11 +268,75 @@ public class RerunMapBranchFlowTests
         (await RunCountAsync(teamB)).ShouldBe(before);
     }
 
+    [Fact]
+    public async Task Rerun_map_branch_with_items_bound_to_a_live_re_resolved_scope_is_refused()
+    {
+        // The map binds items to {{wf.*}} — a scope that re-resolves LIVE on replay (so do project.* and
+        // secret wf/team). The branch space could differ on rerun → reusing siblings by index would be unsound,
+        // so it is refused. (Guards the silent wrong-element-attribution corruption.) Gate runs early, so the
+        // original need only exist.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var workflowId = await CreateWorkflowAsync(teamId, userId, LiveScopeItemsMapDef());
+        var originalRunId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId, payloadJson: "{}");
+        await RunEngineAsync(originalRunId);
+
+        var before = await RunCountAsync(teamId);
+        await Should.ThrowAsync<RerunUpstreamNotReusableException>(async () =>
+            await RerunMapBranchAsync(originalRunId, "map", 0, teamId, userId));
+
+        (await RunCountAsync(teamId)).ShouldBe(before, "an items-binding to a live-re-resolved scope must write nothing");
+    }
+
+    [Fact]
+    public async Task Rerun_the_last_map_branch_index()
+    {
+        // Boundary: rerun the highest valid index (N-1). Proves the index gate + seeder handle the edge.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var key = "mapbranch-last-" + Guid.NewGuid().ToString("N");
+        var workflowId = await CreateWorkflowAsync(teamId, userId, CountingMapDef(key));
+        var originalRunId = await RunFreshAsync(workflowId, teamId, FourElements);
+
+        var rerunId = await RerunMapBranchAsync(originalRunId, "map", 3, teamId, userId);
+        await RunEngineAsync(rerunId);
+
+        await AssertRunStatusAsync(rerunId, WorkflowRunStatus.Success);
+        FlakyTestNode.AttemptsFor($"{key}-e0").ShouldBe(1);
+        FlakyTestNode.AttemptsFor($"{key}-e3").ShouldBe(2, "the last branch re-ran exactly once");
+        var results = await LoadMapResultsAsync(rerunId, "map");
+        results[3].GetProperty("item").GetString().ShouldBe("e3");
+        results[3].GetProperty("attempts").GetInt32().ShouldBe(2);
+        results[0].GetProperty("attempts").GetInt32().ShouldBe(1);
+    }
+
+    [Fact]
+    public async Task Rerun_the_only_branch_of_a_single_element_map()
+    {
+        // Degenerate: a 1-element map — rerun index 0 has NO siblings to reuse; the map re-enters and re-runs
+        // the only branch. Proves branchCount==1 + the no-sibling seeding path.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var key = "mapbranch-solo-" + Guid.NewGuid().ToString("N");
+        var workflowId = await CreateWorkflowAsync(teamId, userId, CountingMapDef(key));
+        var originalRunId = await RunFreshAsync(workflowId, teamId, """{ "things": ["solo"] }""");
+        FlakyTestNode.AttemptsFor($"{key}-solo").ShouldBe(1);
+
+        var rerunId = await RerunMapBranchAsync(originalRunId, "map", 0, teamId, userId);
+        await RunEngineAsync(rerunId);
+
+        await AssertRunStatusAsync(rerunId, WorkflowRunStatus.Success);
+        FlakyTestNode.AttemptsFor($"{key}-solo").ShouldBe(2, "the only branch re-ran exactly once");
+        var results = await LoadMapResultsAsync(rerunId, "map");
+        results.GetArrayLength().ShouldBe(1);
+        results[0].GetProperty("item").GetString().ShouldBe("solo");
+        results[0].GetProperty("attempts").GetInt32().ShouldBe(2);
+    }
+
     // ─────────────────────────────────────────────────────────────────────────────
     //  Definition builders
     // ─────────────────────────────────────────────────────────────────────────────
 
-    // start → map(items={{trigger.things}}; body: ms → flaky[per-element counter, failTimes=0]) → synth(reads results) → end.
+    // start → map(items={{trigger.things}}; body: ms → flaky[per-element counter] → echo[carries {{item}} + the count])
+    //   → synth(reads results) → end. The branch terminal `echo` records BOTH the element identity ({{item}}) and the
+    // attempt count, so results[i].item proves element-order alignment at EVERY index (not just the re-run one).
     private static WorkflowDefinition CountingMapDef(string counterPrefix) => new()
     {
         SchemaVersion = 1,
@@ -280,6 +347,8 @@ public class RerunMapBranchFlowTests
             new() { Id = "ms", TypeKey = "flow.map_start", ParentId = "map", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
             new() { Id = "flaky", TypeKey = FlakyTestNode.Key, ParentId = "map",
                     Config = WorkflowsTestSeed.Json($$"""{ "key": "{{counterPrefix}}-{{"{{"}}item{{"}}"}}", "failTimes": 0 }"""), Inputs = WorkflowsTestSeed.EmptyJson() },
+            new() { Id = "echo", TypeKey = JsonEmitNode.Key, ParentId = "map", Config = WorkflowsTestSeed.EmptyJson(),
+                    Inputs = WorkflowsTestSeed.Json("""{ "item": "{{item}}", "attempts": "{{nodes.flaky.outputs.attempts}}" }""") },
             new() { Id = "synth", TypeKey = JsonEmitNode.Key, Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.Json("""{ "agg": "{{nodes.map.outputs.results}}" }""") },
             new() { Id = "end", TypeKey = "builtin.terminal", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
         },
@@ -289,6 +358,7 @@ public class RerunMapBranchFlowTests
             new() { From = "map", To = "synth" },
             new() { From = "synth", To = "end" },
             new() { From = "ms", To = "flaky" },
+            new() { From = "flaky", To = "echo" },
         },
     };
 
@@ -331,6 +401,26 @@ public class RerunMapBranchFlowTests
             new() { From = "start", To = "map" },
             new() { From = "map", To = "end" },
             new() { From = "ms", To = "flaky" },
+        },
+    };
+
+    // map binds items to {{wf.*}} — a live-re-resolved scope on replay → the items-determinism gate refuses.
+    private static WorkflowDefinition LiveScopeItemsMapDef() => new()
+    {
+        SchemaVersion = 1,
+        Nodes = new List<NodeDefinition>
+        {
+            new() { Id = "start", TypeKey = "trigger.manual", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
+            new() { Id = "map", TypeKey = "flow.map", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.Json("""{ "items": "{{wf.shards}}" }""") },
+            new() { Id = "ms", TypeKey = "flow.map_start", ParentId = "map", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
+            new() { Id = "echo", TypeKey = JsonEmitNode.Key, ParentId = "map", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.Json("""{ "v": "{{item}}" }""") },
+            new() { Id = "end", TypeKey = "builtin.terminal", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
+        },
+        Edges = new List<EdgeDefinition>
+        {
+            new() { From = "start", To = "map" },
+            new() { From = "map", To = "end" },
+            new() { From = "ms", To = "echo" },
         },
     };
 
