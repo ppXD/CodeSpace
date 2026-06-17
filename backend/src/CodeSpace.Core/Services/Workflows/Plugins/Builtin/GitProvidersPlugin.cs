@@ -25,6 +25,7 @@ public sealed class GitProvidersPlugin : IPluginModule
         typeof(GitPostPrCommentNode),
         typeof(GitPrReviewNode),
         typeof(GitOpenPullRequestNode),
+        typeof(GitOpenChangeSetNode),
         typeof(GitMergePullRequestNode),
         typeof(GitIntegrateNode),
         typeof(GitCreateIssueNode),

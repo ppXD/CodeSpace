@@ -120,6 +120,6 @@ public class BuiltinPluginModuleTests
         };
 
         var total = all.SelectMany(p => p.Nodes).Distinct().Count();
-        total.ShouldBe(38, "38 builtin node types across 6 domain plugins — incl. the Git plugin's git.integrate branch-integration node (SOTA #3) — adjust this number when adding a builtin");
+        total.ShouldBe(39, "39 builtin node types across 6 domain plugins — incl. the Git plugin's git.open_change_set multi-repo Change-Set node (multi-repo PR4) — adjust this number when adding a builtin");
     }
 }
