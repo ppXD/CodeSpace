@@ -514,6 +514,59 @@ public class AgentRunExecutorTests
     }
 
     [Fact]
+    public async Task A_multi_repo_run_surfaces_per_repo_results_and_a_change_set_id()
+    {
+        // Multi-repo PR3 end-to-end: a workspace with TWO writable repos yields a RepositoryResults entry per repo
+        // + a run-id-derived ChangeSetId in the persisted result_jsonb (proving the new noun round-trips). The
+        // top-level fields keep mirroring the PRIMARY repo so an existing single-branch consumer is unaffected.
+        if (OperatingSystem.IsWindows()) return;
+
+        var teamId = await SeedTeamAsync();
+        var runId = await CreateScriptedRunAsync(teamId);
+
+        await ExecuteWithRecordingWorkspaceAsync(runId, new ScriptedHarness("printf 'done\\n'"), new MultiRepoRecordingWorkspaceProvider(), CancellationToken.None);
+
+        using var scope = _fixture.BeginScope();
+        var run = await scope.Resolve<IAgentRunService>().GetAsync(runId, CancellationToken.None);
+        run.Status.ShouldBe(AgentRunStatus.Succeeded);
+
+        var result = JsonSerializer.Deserialize<AgentRunResult>(run.ResultJson!, AgentJson.Options)!;
+
+        result.ChangeSetId.ShouldBe(AgentRunExecutor.ChangeSetIdFor(runId), "a multi-repo run stamps a run-id-derived change-set id");
+        result.RepositoryResults.Count.ShouldBe(2, "one entry per writable repo");
+
+        var web = result.RepositoryResults.Single(r => r.Alias == "web");
+        var api = result.RepositoryResults.Single(r => r.Alias == "api");
+        web.ChangedFiles.ShouldBe(new[] { "web.txt" });
+        web.BaseSha.ShouldBe("base-web");
+        api.ChangedFiles.ShouldBe(new[] { "api.txt" });
+        api.BaseSha.ShouldBe("base-api");
+
+        result.ChangedFiles.ShouldBe(new[] { "web.txt" }, "the top-level fields mirror the PRIMARY repo");
+        result.BaseSha.ShouldBe("base-web");
+    }
+
+    [Fact]
+    public async Task A_single_repo_run_leaves_repository_results_empty_and_no_change_set_id()
+    {
+        // The byte-identical acceptance gate: a single-repo workspace (Repositories.Count == 1) takes the unchanged
+        // path — RepositoryResults stays empty and ChangeSetId null; only the top-level fields carry the outcome.
+        if (OperatingSystem.IsWindows()) return;
+
+        var teamId = await SeedTeamAsync();
+        var runId = await CreateScriptedRunAsync(teamId);
+
+        await ExecuteWithRecordingWorkspaceAsync(runId, new ScriptedHarness("printf 'done\\n'"), new RecordingWorkspaceProvider(), CancellationToken.None);
+
+        using var scope = _fixture.BeginScope();
+        var run = await scope.Resolve<IAgentRunService>().GetAsync(runId, CancellationToken.None);
+
+        var result = JsonSerializer.Deserialize<AgentRunResult>(run.ResultJson!, AgentJson.Options)!;
+        result.RepositoryResults.ShouldBeEmpty("a single-repo run surfaces no per-repo change set");
+        result.ChangeSetId.ShouldBeNull();
+    }
+
+    [Fact]
     public async Task A_capture_infra_failure_does_not_flip_a_succeeded_run_to_failed()
     {
         if (OperatingSystem.IsWindows()) return;
@@ -833,7 +886,7 @@ public class AgentRunExecutorTests
         Directory.Exists(provider.PreparedDirectory!).ShouldBeFalse("the clone is removed once the run lands terminal");
     }
 
-    private async Task ExecuteWithRecordingWorkspaceAsync(Guid runId, IAgentHarness harness, RecordingWorkspaceProvider provider, CancellationToken cancellationToken)
+    private async Task ExecuteWithRecordingWorkspaceAsync(Guid runId, IAgentHarness harness, IWorkspaceProvider provider, CancellationToken cancellationToken)
     {
         using var scope = _fixture.BeginScope();
         var executor = new AgentRunExecutor(
@@ -890,12 +943,52 @@ public class AgentRunExecutorTests
             private readonly RecordingWorkspaceProvider _owner;
             public Handle(RecordingWorkspaceProvider owner, string directory) { _owner = owner; Directory = directory; }
             public string Directory { get; }
+            public string PrimaryAlias => "repo";
             public IReadOnlyList<WorkspaceRepositoryHandle> Repositories => new[] { new WorkspaceRepositoryHandle { Alias = "repo", Directory = Directory, Access = WorkspaceAccess.Write } };
             public Task<WorkspaceChanges> CaptureChangesAsync(CancellationToken cancellationToken) => Task.FromResult(new WorkspaceChanges { Patch = "" });
+            public Task<WorkspaceChanges> CaptureChangesAsync(string alias, CancellationToken cancellationToken) => CaptureChangesAsync(cancellationToken);
             public ValueTask DisposeAsync()
             {
                 _owner.Disposed = true;
                 try { if (System.IO.Directory.Exists(Directory)) System.IO.Directory.Delete(Directory, recursive: true); } catch { /* best-effort */ }
+                return ValueTask.CompletedTask;
+            }
+        }
+    }
+
+    /// <summary>A multi-repo workspace (two writable repos: "web" primary + "api") whose per-alias capture returns distinct, deterministic changes — drives the executor's multi-repo Enrich path without needing real git.</summary>
+    private sealed class MultiRepoRecordingWorkspaceProvider : IWorkspaceProvider
+    {
+        public string Kind => LocalProcessRunner.LocalKind;
+
+        public Task<IWorkspaceHandle> PrepareAsync(WorkspaceProvisionRequest request, CancellationToken cancellationToken)
+        {
+            var root = Path.Combine(Path.GetTempPath(), "cs-multirepo-test-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(root);
+            return Task.FromResult<IWorkspaceHandle>(new Handle(root));
+        }
+
+        private sealed class Handle : IWorkspaceHandle
+        {
+            private readonly string _root;
+            public Handle(string root) { _root = root; Directory = root; }
+            public string Directory { get; }
+            public string PrimaryAlias => "web";
+
+            public IReadOnlyList<WorkspaceRepositoryHandle> Repositories => new[]
+            {
+                new WorkspaceRepositoryHandle { Alias = "web", Directory = Path.Combine(_root, "web"), Access = WorkspaceAccess.Write },
+                new WorkspaceRepositoryHandle { Alias = "api", Directory = Path.Combine(_root, "api"), Access = WorkspaceAccess.Write },
+            };
+
+            public Task<WorkspaceChanges> CaptureChangesAsync(CancellationToken cancellationToken) => CaptureChangesAsync("web", cancellationToken);
+
+            public Task<WorkspaceChanges> CaptureChangesAsync(string alias, CancellationToken cancellationToken) =>
+                Task.FromResult(new WorkspaceChanges { BaseSha = $"base-{alias}", Patch = $"diff for {alias}", ChangedFiles = new[] { $"{alias}.txt" } });
+
+            public ValueTask DisposeAsync()
+            {
+                try { if (System.IO.Directory.Exists(_root)) System.IO.Directory.Delete(_root, recursive: true); } catch { /* best-effort */ }
                 return ValueTask.CompletedTask;
             }
         }

@@ -415,6 +415,68 @@ public sealed class AgentRunExecutorPushTests
             result.ProducedBranch.ShouldBeNull();
         });
 
+    // ─── Multi-repo per-repo push (multi-repo PR3) ───────────────────────────
+
+    [Fact]
+    public void ChangeSetIdFor_is_run_id_derived() =>
+        // Pinned: the change-set id is the stable run-id-derived handle a downstream integration references.
+        AgentRunExecutor.ChangeSetIdFor(Guid.Parse("11111111-1111-1111-1111-111111111111"))
+            .ShouldBe("cs-11111111111111111111111111111111");
+
+    [Fact]
+    public async Task A_multi_repo_run_pushes_each_writable_repo_and_folds_per_repo_branches() =>
+        await WithFlagAsync("1", async () =>
+        {
+            var (runId, executor, _) = NewExecutor(epoch: ClaimedEpoch);
+            var handle = new MultiRepoRecordingPushHandle();
+
+            var result = await executor.PushProducedBranchIfEnabledAsync(runId, DefaultTask, MultiRepoSucceeded(runId), handle, ClaimedEpoch, CancellationToken.None);
+
+            var expected = AgentRunExecutor.BuildBranchName(runId);
+            handle.PushedByAlias.Keys.ShouldBe(new[] { "web", "api" }, ignoreOrder: true, "every writable repo is pushed, each to its own remote");
+            handle.PushedByAlias["web"].ShouldBe(expected, "each repo pushes under the same run-derived branch name (distinct remotes)");
+            handle.PushedByAlias["api"].ShouldBe(expected);
+
+            result.RepositoryResults.Single(r => r.Alias == "web").ProducedBranch.ShouldBe(expected);
+            result.RepositoryResults.Single(r => r.Alias == "api").ProducedBranch.ShouldBe(expected);
+            result.ProducedBranch.ShouldBe(expected, "the top-level ProducedBranch mirrors the PRIMARY (web) repo's branch");
+        });
+
+    [Fact]
+    public async Task A_multi_repo_run_records_null_for_a_secondary_repo_that_did_not_change() =>
+        await WithFlagAsync("1", async () =>
+        {
+            // The agent touched only the primary; the secondary's push self-gates to null. The change set records
+            // the per-repo truth (web a branch, api none) and the top-level still mirrors the primary.
+            var (runId, executor, _) = NewExecutor(epoch: ClaimedEpoch);
+            var handle = new MultiRepoRecordingPushHandle { NullForAliases = { "api" } };
+
+            var result = await executor.PushProducedBranchIfEnabledAsync(runId, DefaultTask, MultiRepoSucceeded(runId), handle, ClaimedEpoch, CancellationToken.None);
+
+            var expected = AgentRunExecutor.BuildBranchName(runId);
+            result.RepositoryResults.Single(r => r.Alias == "web").ProducedBranch.ShouldBe(expected);
+            result.RepositoryResults.Single(r => r.Alias == "api").ProducedBranch.ShouldBeNull("the unchanged secondary repo produced no branch");
+            result.ProducedBranch.ShouldBe(expected, "the top-level still mirrors the primary's branch");
+        });
+
+    [Fact]
+    public async Task A_multi_repo_run_pushes_even_when_the_primary_top_level_shows_no_change() =>
+        await WithFlagAsync("1", async () =>
+        {
+            // Multi-repo skips the single-repo "top-level empty → return" gate: a secondary repo may carry changes
+            // the primary's top-level fields don't reflect. Each per-repo push self-gates instead.
+            var (runId, executor, _) = NewExecutor(epoch: ClaimedEpoch);
+            var handle = new MultiRepoRecordingPushHandle();
+
+            // Top-level ChangedFiles + Patch are EMPTY (primary unchanged) but RepositoryResults still lists both repos.
+            var input = MultiRepoSucceeded(runId) with { ChangedFiles = Array.Empty<string>(), Patch = "" };
+
+            var result = await executor.PushProducedBranchIfEnabledAsync(runId, DefaultTask, input, handle, ClaimedEpoch, CancellationToken.None);
+
+            handle.PushedByAlias.Count.ShouldBe(2, "the empty top-level gate does not short-circuit a multi-repo push");
+            result.RepositoryResults.Single(r => r.Alias == "api").ProducedBranch.ShouldBe(AgentRunExecutor.BuildBranchName(runId));
+        });
+
     // ─── Best-effort failure handling ────────────────────────────────────────
 
     [Fact]
@@ -463,6 +525,22 @@ public sealed class AgentRunExecutorPushTests
     private static AgentRunResult SucceededWithChanges() =>
         new() { Status = AgentRunStatus.Succeeded, ExitReason = "completed", ChangedFiles = new[] { "src/foo.cs" }, Patch = "diff --git ..." };
 
+    /// <summary>A succeeded MULTI-repo result as the Enrich step would build it: top-level = primary (web), plus a RepositoryResults entry per writable repo (web primary + api) and the run's change-set id.</summary>
+    private static AgentRunResult MultiRepoSucceeded(Guid runId) => new()
+    {
+        Status = AgentRunStatus.Succeeded,
+        ExitReason = "completed",
+        ChangedFiles = new[] { "web.txt" },
+        Patch = "diff --git a/web.txt b/web.txt",
+        BaseSha = "base-web",
+        ChangeSetId = AgentRunExecutor.ChangeSetIdFor(runId),
+        RepositoryResults = new[]
+        {
+            new RepositoryRunResult { Alias = "web", ChangedFiles = new[] { "web.txt" }, BaseSha = "base-web" },
+            new RepositoryRunResult { Alias = "api", ChangedFiles = new[] { "api.txt" }, BaseSha = "base-api" },
+        },
+    };
+
     /// <summary>A task with NO per-run push opt-in — so the push decision in these tests is driven purely by the env flag (the gate's OR is exercised separately by the per-run tests). Mirrors how an ordinary run looks.</summary>
     private static AgentTask DefaultTask => new() { Goal = "g", Harness = "codex-cli" };
 
@@ -484,6 +562,9 @@ public sealed class AgentRunExecutorPushTests
 
         public string Directory => "/tmp/fake";
 
+        public string PrimaryAlias => "repo";
+
+        // Empty (Count 0, not >1) keeps the executor on the single-repo push path; the alias overloads are never hit.
         public IReadOnlyList<WorkspaceRepositoryHandle> Repositories => Array.Empty<WorkspaceRepositoryHandle>();
 
         public Task<string?> PushChangesAsync(string branchName, CancellationToken cancellationToken)
@@ -497,9 +578,45 @@ public sealed class AgentRunExecutorPushTests
             return Task.FromResult(ReturnBranch == "set-on-push" ? branchName : ReturnBranch);
         }
 
+        public Task<string?> PushChangesAsync(string alias, string branchName, CancellationToken cancellationToken) =>
+            throw new NotSupportedException("single-repo push path only");
+
         public Task<WorkspaceChanges> CaptureChangesAsync(CancellationToken cancellationToken) =>
             throw new NotSupportedException();
 
+        public Task<WorkspaceChanges> CaptureChangesAsync(string alias, CancellationToken cancellationToken) =>
+            throw new NotSupportedException();
+
+        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+    }
+
+    /// <summary>A MULTI-repo push handle (web primary + api, both writable) recording each per-alias push. Drives the executor's multi-repo push fan-out; a configurable alias set returns null to model an unchanged repo.</summary>
+    private sealed class MultiRepoRecordingPushHandle : IWorkspaceHandle, IWorkspacePushHandle
+    {
+        public Dictionary<string, string?> PushedByAlias { get; } = new();
+        public HashSet<string> NullForAliases { get; } = new();
+
+        public string Directory => "/tmp/fake-multi";
+        public string PrimaryAlias => "web";
+
+        public IReadOnlyList<WorkspaceRepositoryHandle> Repositories => new[]
+        {
+            new WorkspaceRepositoryHandle { Alias = "web", Directory = "/tmp/fake-multi/web", Access = WorkspaceAccess.Write },
+            new WorkspaceRepositoryHandle { Alias = "api", Directory = "/tmp/fake-multi/api", Access = WorkspaceAccess.Write },
+        };
+
+        public Task<string?> PushChangesAsync(string alias, string branchName, CancellationToken cancellationToken)
+        {
+            var pushed = NullForAliases.Contains(alias) ? null : branchName;
+            PushedByAlias[alias] = pushed;
+            return Task.FromResult(pushed);
+        }
+
+        public Task<string?> PushChangesAsync(string branchName, CancellationToken cancellationToken) =>
+            throw new NotSupportedException("multi-repo path uses the alias overload");
+
+        public Task<WorkspaceChanges> CaptureChangesAsync(CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<WorkspaceChanges> CaptureChangesAsync(string alias, CancellationToken cancellationToken) => throw new NotSupportedException();
         public ValueTask DisposeAsync() => ValueTask.CompletedTask;
     }
 
@@ -507,8 +624,10 @@ public sealed class AgentRunExecutorPushTests
     private sealed class ReadOnlyHandle : IWorkspaceHandle
     {
         public string Directory => "/tmp/fake";
+        public string PrimaryAlias => "repo";
         public IReadOnlyList<WorkspaceRepositoryHandle> Repositories => Array.Empty<WorkspaceRepositoryHandle>();
         public Task<WorkspaceChanges> CaptureChangesAsync(CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<WorkspaceChanges> CaptureChangesAsync(string alias, CancellationToken cancellationToken) => throw new NotSupportedException();
         public ValueTask DisposeAsync() => ValueTask.CompletedTask;
     }
 

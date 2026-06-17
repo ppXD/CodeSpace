@@ -291,6 +291,94 @@ public sealed class LocalGitWorkspaceProviderTests
         handle.Directory.ShouldBe(handle.Repositories.Single(r => r.Alias == "web").Directory, "PrimaryRepo cwd mode runs the harness inside the primary repo even in a multi-repo workspace");
     }
 
+    // ─── Multi-repo per-repo capture/push (multi-repo PR3) ────────────────────
+
+    [Fact]
+    public async Task PrimaryAlias_reports_the_primary_repos_alias()
+    {
+        if (!await GitAvailableAsync()) return;
+
+        using var web = new TempDir();
+        using var api = new TempDir();
+        await SeedOriginAsync(web.Path, "web.txt", "w");
+        await SeedOriginAsync(api.Path, "api.txt", "a");
+
+        await using var handle = await NewProvider().PrepareAsync(MultiRepo(
+            (alias: "web", path: web.Path, access: WorkspaceAccess.Write, primary: true),
+            (alias: "api", path: api.Path, access: WorkspaceAccess.Read, primary: false)), CancellationToken.None);
+
+        handle.PrimaryAlias.ShouldBe("web");
+    }
+
+    [Fact]
+    public async Task Capture_by_alias_returns_each_repos_own_changes()
+    {
+        // The slice-3 surface: each writable repo is captured INDEPENDENTLY by alias — web's diff has only web's
+        // edit, api's only api's. This is what the executor folds into RepositoryResults.
+        if (!await GitAvailableAsync()) return;
+
+        using var web = new TempDir();
+        using var api = new TempDir();
+        await SeedOriginAsync(web.Path, "web.txt", "web-base");
+        await SeedOriginAsync(api.Path, "api.txt", "api-base");
+
+        await using var handle = await NewProvider().PrepareAsync(MultiRepo(
+            (alias: "web", path: web.Path, access: WorkspaceAccess.Write, primary: true),
+            (alias: "api", path: api.Path, access: WorkspaceAccess.Write, primary: false)), CancellationToken.None);
+
+        var webDir = handle.Repositories.Single(r => r.Alias == "web").Directory;
+        var apiDir = handle.Repositories.Single(r => r.Alias == "api").Directory;
+        await File.WriteAllTextAsync(Path.Combine(webDir, "web.txt"), "edited in web");
+        await File.WriteAllTextAsync(Path.Combine(apiDir, "api.txt"), "edited in api");
+
+        var webChanges = await handle.CaptureChangesAsync("web", CancellationToken.None);
+        var apiChanges = await handle.CaptureChangesAsync("api", CancellationToken.None);
+
+        webChanges.ChangedFiles.ShouldBe(new[] { "web.txt" });
+        webChanges.Patch.ShouldContain("edited in web");
+        webChanges.Patch.ShouldNotContain("edited in api", customMessage: "the web capture is scoped to the web repo");
+
+        apiChanges.ChangedFiles.ShouldBe(new[] { "api.txt" });
+        apiChanges.Patch.ShouldContain("edited in api");
+    }
+
+    [Fact]
+    public async Task Capture_by_an_unknown_alias_throws()
+    {
+        if (!await GitAvailableAsync()) return;
+
+        using var web = new TempDir();
+        using var api = new TempDir();
+        await SeedOriginAsync(web.Path, "web.txt", "w");
+        await SeedOriginAsync(api.Path, "api.txt", "a");
+
+        await using var handle = await NewProvider().PrepareAsync(MultiRepo(
+            (alias: "web", path: web.Path, access: WorkspaceAccess.Write, primary: true),
+            (alias: "api", path: api.Path, access: WorkspaceAccess.Write, primary: false)), CancellationToken.None);
+
+        (await Should.ThrowAsync<WorkspaceException>(() => handle.CaptureChangesAsync("nope", CancellationToken.None)))
+            .Message.ShouldContain("Unknown repository alias");
+    }
+
+    [Fact]
+    public async Task Push_by_a_read_only_alias_is_refused_before_any_git()
+    {
+        // A read-only context repo must never be pushed — the alias-scoped push fails loud BEFORE touching git.
+        if (!await GitAvailableAsync()) return;
+
+        using var web = new TempDir();
+        using var api = new TempDir();
+        await SeedOriginAsync(web.Path, "web.txt", "w");
+        await SeedOriginAsync(api.Path, "api.txt", "a");
+
+        await using var handle = await NewProvider().PrepareAsync(MultiRepo(
+            (alias: "web", path: web.Path, access: WorkspaceAccess.Write, primary: true),
+            (alias: "api", path: api.Path, access: WorkspaceAccess.Read, primary: false)), CancellationToken.None);
+
+        (await Should.ThrowAsync<WorkspaceException>(() => ((IWorkspacePushHandle)handle).PushChangesAsync("api", "codespace/run-x", CancellationToken.None)))
+            .Message.ShouldContain("read-only context");
+    }
+
     /// <summary>Build a multi-repo provision from (alias, local-origin-path, access, primary) tuples, with Auto cwd.</summary>
     private static WorkspaceProvisionRequest MultiRepo(params (string alias, string path, WorkspaceAccess access, bool primary)[] repos) => new()
     {

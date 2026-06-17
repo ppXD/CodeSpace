@@ -415,8 +415,16 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
 
         try
         {
+            // The PRIMARY repo's diff is git ground truth for the top-level fields — byte-identical to a single-repo run.
             var changes = await workspace.CaptureChangesAsync(cancellationToken).ConfigureAwait(false);
-            return result with { ChangedFiles = changes.ChangedFiles, Patch = TruncatePatch(changes.Patch, MaxPatchChars), BaseSha = changes.BaseSha };
+            result = result with { ChangedFiles = changes.ChangedFiles, Patch = TruncatePatch(changes.Patch, MaxPatchChars), BaseSha = changes.BaseSha };
+
+            // Multi-repo: ALSO surface every writable repo's outcome as a Change Set. A single-repo workspace skips
+            // this branch entirely, so its result is unchanged (RepositoryResults empty, ChangeSetId null).
+            if (workspace.Repositories.Count > 1)
+                result = await CaptureRepositoryResultsAsync(runId, result, workspace, changes, cancellationToken).ConfigureAwait(false);
+
+            return result;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -427,6 +435,31 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
             return result;
         }
     }
+
+    /// <summary>
+    /// Multi-repo: capture EVERY writable repo's diff into <see cref="AgentRunResult.RepositoryResults"/> + stamp the
+    /// run's <see cref="AgentRunResult.ChangeSetId"/>. The primary's already-captured changes are reused (no second git
+    /// call), so the top-level fields and the primary's per-repo entry agree. The push step fills in each entry's
+    /// produced branch.
+    /// </summary>
+    private async Task<AgentRunResult> CaptureRepositoryResultsAsync(Guid runId, AgentRunResult result, IWorkspaceHandle workspace, WorkspaceChanges primaryChanges, CancellationToken cancellationToken)
+    {
+        var perRepo = new List<RepositoryRunResult>();
+
+        foreach (var repo in workspace.Repositories.Where(r => r.Access == WorkspaceAccess.Write))
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+
+            var changes = repo.Alias == workspace.PrimaryAlias ? primaryChanges : await workspace.CaptureChangesAsync(repo.Alias, cancellationToken).ConfigureAwait(false);
+
+            perRepo.Add(new RepositoryRunResult { Alias = repo.Alias, ChangedFiles = changes.ChangedFiles, BaseSha = changes.BaseSha, Access = WorkspaceAccess.Write });
+        }
+
+        return result with { RepositoryResults = perRepo, ChangeSetId = ChangeSetIdFor(runId) };
+    }
+
+    /// <summary>The stable id for the SET of branches a multi-repo run produces — run-id-derived so a re-run never forks a second change set. Internal + static so it's unit-pinned.</summary>
+    internal static string ChangeSetIdFor(Guid runId) => $"cs-{runId:N}";
 
     /// <summary>
     /// Cap the inlined diff so a runaway / binary diff can't bloat the persisted run row (read on every
@@ -462,8 +495,13 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     {
         if (!ShouldPushProducedBranch(task)) return result;
         if (result.Status != AgentRunStatus.Succeeded) return result;
-        if (result.ChangedFiles.Count == 0 && string.IsNullOrEmpty(result.Patch)) return result;
         if (workspace is not IWorkspacePushHandle pushHandle) return result;
+
+        var multiRepo = workspace.Repositories.Count > 1;
+
+        // Single-repo: skip the push when nothing changed (byte-identical gate). Multi-repo skips this global gate —
+        // a secondary repo may have changes the primary's top-level fields don't reflect; each per-repo push self-gates.
+        if (!multiRepo && result.ChangedFiles.Count == 0 && string.IsNullOrEmpty(result.Patch)) return result;
 
         // No-replay: a reclaimed run (epoch bumped) would lose the completion CAS anyway — don't fire the side
         // effect. Read FRESH + untracked (GetAsync is AsNoTracking) so we see the reclaimer's bumped epoch.
@@ -477,6 +515,8 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
 
         try
         {
+            if (multiRepo) return await PushRepositoryResultsAsync(runId, result, workspace, pushHandle, cancellationToken).ConfigureAwait(false);
+
             var branch = await pushHandle.PushChangesAsync(BuildBranchName(runId), cancellationToken).ConfigureAwait(false);
 
             return branch is null ? result : result with { ProducedBranch = branch };
@@ -489,6 +529,34 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
             await AppendPushFailureWarningAsync(runId, ex.Message, cancellationToken).ConfigureAwait(false);
             return result;
         }
+    }
+
+    /// <summary>
+    /// Multi-repo: push EACH writable repo (from <see cref="AgentRunResult.RepositoryResults"/>) to its own origin under
+    /// the SAME run-id-derived branch name (distinct remotes, so a shared name is coherent), folding each pushed branch
+    /// back into its per-repo entry. The top-level <see cref="AgentRunResult.ProducedBranch"/> mirrors the PRIMARY repo's
+    /// branch so an existing single-branch consumer keeps working. Each push self-gates (returns null for an unchanged
+    /// repo). Runs inside the caller's best-effort try/catch — one repo's push failure aborts the rest (the run stays
+    /// Succeeded with whatever branches were folded so far).
+    /// </summary>
+    private async Task<AgentRunResult> PushRepositoryResultsAsync(Guid runId, AgentRunResult result, IWorkspaceHandle workspace, IWorkspacePushHandle pushHandle, CancellationToken cancellationToken)
+    {
+        var branchName = BuildBranchName(runId);
+        var updated = new List<RepositoryRunResult>(result.RepositoryResults.Count);
+        string? primaryBranch = null;
+
+        foreach (var repo in result.RepositoryResults)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+
+            var pushed = await pushHandle.PushChangesAsync(repo.Alias, branchName, cancellationToken).ConfigureAwait(false);
+
+            updated.Add(repo with { ProducedBranch = pushed });
+
+            if (repo.Alias == workspace.PrimaryAlias) primaryBranch = pushed;
+        }
+
+        return result with { RepositoryResults = updated, ProducedBranch = primaryBranch };
     }
 
     /// <summary>Append a Warning event so the operator sees on the timeline WHY no branch appeared — not only in an ILogger line. Best-effort: a failure to record the warning never masks the run's success.</summary>

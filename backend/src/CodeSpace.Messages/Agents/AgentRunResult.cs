@@ -51,6 +51,37 @@ public sealed record AgentRunResult
 
     /// <summary>Failure detail when <see cref="Status"/> is <see cref="AgentRunStatus.Failed"/>.</summary>
     public string? Error { get; init; }
+
+    /// <summary>
+    /// Per-repository outcomes for a MULTI-repo workspace run (multi-repo PR3) — one entry per WRITABLE repo, each
+    /// with its own changed files + produced branch + base SHA. EMPTY for a single-repo run, whose single outcome is
+    /// the top-level <see cref="ChangedFiles"/>/<see cref="Patch"/>/<see cref="ProducedBranch"/>/<see cref="BaseSha"/>;
+    /// those top-level fields continue to mirror the PRIMARY repo even when this is populated, so an existing consumer
+    /// (the agent.code node's branch output, audit) is unaffected. The per-repo branches together form the <see cref="ChangeSetId"/>.
+    /// </summary>
+    public IReadOnlyList<RepositoryRunResult> RepositoryResults { get; init; } = Array.Empty<RepositoryRunResult>();
+
+    /// <summary>A stable id for the SET of branches a MULTI-repo run produced (a Change Set the downstream integration / PR-open consumes — the SOTA #3 Change-Set spine on the repo axis). Null for a single-repo run (no change-set concept).</summary>
+    public string? ChangeSetId { get; init; }
+}
+
+/// <summary>One writable repository's outcome in a multi-repo workspace run (multi-repo PR3, Rule 18.1 noun): which repo (by alias), what it changed, the branch it produced, and the base it was rooted at.</summary>
+public sealed record RepositoryRunResult
+{
+    /// <summary>The repo's alias within the workspace (the join key back to the run's <c>WorkspaceSpec</c> for its repository id).</summary>
+    public required string Alias { get; init; }
+
+    /// <summary>Repo-relative paths the agent changed in this repo (git ground truth).</summary>
+    public IReadOnlyList<string> ChangedFiles { get; init; } = Array.Empty<string>();
+
+    /// <summary>The branch this repo's changes were pushed to (the per-repo PR-open handoff), or null when nothing was pushed / it had no changes.</summary>
+    public string? ProducedBranch { get; init; }
+
+    /// <summary>The cloned base revision this repo's work is rooted at (the SOTA #3 integrity anchor, per repo).</summary>
+    public string? BaseSha { get; init; }
+
+    /// <summary>The repo's access in the workspace (always <see cref="WorkspaceAccess.Write"/> for an entry that produced an outcome).</summary>
+    public WorkspaceAccess Access { get; init; } = WorkspaceAccess.Write;
 }
 
 public sealed record AgentTokenUsage

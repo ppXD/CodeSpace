@@ -332,14 +332,23 @@ public sealed class LocalGitWorkspaceProvider : IWorkspaceProvider, IWorkspaceJa
 
         public string Directory { get; }
 
+        public string PrimaryAlias => _primary.Alias;
+
         public IReadOnlyList<WorkspaceRepositoryHandle> Repositories =>
             _repos.Select(r => new WorkspaceRepositoryHandle { Alias = r.Alias, Directory = r.Directory, Access = r.Access }).ToList();
 
         public Task<WorkspaceChanges> CaptureChangesAsync(CancellationToken cancellationToken) =>
-            // Capture the PRIMARY repo's changes (multi-repo PR2 scope — per-repo capture across every writable repo
-            // arrives in the result-generalization slice). For a single-repo workspace the primary IS the only repo,
-            // so this is byte-identical to before.
+            // The PRIMARY repo's changes. For a single-repo workspace the primary IS the only repo, so this is
+            // byte-identical to before; the multi-repo executor captures each writable repo via the alias overload.
             CaptureRepoChangesAsync(_primary, cancellationToken);
+
+        public Task<WorkspaceChanges> CaptureChangesAsync(string alias, CancellationToken cancellationToken) =>
+            CaptureRepoChangesAsync(RepoByAlias(alias), cancellationToken);
+
+        /// <summary>Resolve a repo by its workspace alias, failing loud on an unknown alias (a caller bug — the executor iterates <see cref="Repositories"/>).</summary>
+        private MaterializedRepo RepoByAlias(string alias) =>
+            _repos.FirstOrDefault(r => r.Alias == alias)
+                ?? throw new WorkspaceException($"Unknown repository alias '{alias}' in the workspace.");
 
         private async Task<WorkspaceChanges> CaptureRepoChangesAsync(MaterializedRepo repo, CancellationToken cancellationToken)
         {
@@ -359,10 +368,23 @@ public sealed class LocalGitWorkspaceProvider : IWorkspaceProvider, IWorkspaceJa
             };
         }
 
-        public async Task<string?> PushChangesAsync(string branchName, CancellationToken cancellationToken)
-        {
-            var repo = _primary;
+        public Task<string?> PushChangesAsync(string branchName, CancellationToken cancellationToken) =>
+            // The PRIMARY repo (byte-identical to before for a single-repo workspace); the multi-repo executor pushes
+            // each writable repo via the alias overload.
+            PushRepoChangesAsync(_primary, branchName, cancellationToken);
 
+        public Task<string?> PushChangesAsync(string alias, string branchName, CancellationToken cancellationToken)
+        {
+            var repo = RepoByAlias(alias);
+
+            if (repo.Access != WorkspaceAccess.Write)
+                throw new WorkspaceException($"Repository '{alias}' is read-only context and cannot be pushed.");
+
+            return PushRepoChangesAsync(repo, branchName, cancellationToken);
+        }
+
+        private async Task<string?> PushRepoChangesAsync(MaterializedRepo repo, string branchName, CancellationToken cancellationToken)
+        {
             // An anonymous clone carries no push credential — short-circuit WITHOUT invoking git (no remote to
             // push to, no credential to re-inject). Not a failure: the run simply produces no branch.
             if (string.IsNullOrEmpty(repo.Token)) return null;
