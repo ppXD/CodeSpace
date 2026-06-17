@@ -28,6 +28,14 @@ public sealed partial class SupervisorTurnService
             ? await ResolvedAskAnswersByTokenAsync(supervisorRunId, nodeId, cancellationToken).ConfigureAwait(false)
             : EmptyAnswers;
 
+        // The COMPACT terminal results of every agent this run's spawn/retry decisions staged, keyed by agent-run id
+        // (SOTA #2). Folded into each TERMINAL spawn/retry decision's outcome below so the decider can SEE what its
+        // agents produced. DB-gated: only hit it when the tape actually has a spawn/retry — a no-spawn run stays a
+        // single ledger read, byte-identical to the pre-#2 path.
+        var agentResultsById = rows.Any(r => r.DecisionKind is SupervisorDecisionKinds.Spawn or SupervisorDecisionKinds.Retry)
+            ? await CompactAgentResultsByIdAsync(rows, teamId, cancellationToken).ConfigureAwait(false)
+            : EmptyAgentResults;
+
         var priorDecisions = new List<SupervisorPriorDecision>();
         SupervisorPriorDecision? inFlight = null;
 
@@ -40,15 +48,23 @@ public sealed partial class SupervisorTurnService
         {
             var decision = FoldAskHumanAnswer(ToPriorDecision(row), answersByToken);
 
-            // Persist a newly-folded answer onto the durable ledger row (the answer becomes the ledger's record,
-            // surviving restart without re-reading the wait). Idempotent — the update no-ops when the bytes match.
-            if (decision.OutcomeJson != row.OutcomeJson)
-                await _ledger.UpdateOutcomeAsync(row.Id, teamId, decision.OutcomeJson!, cancellationToken).ConfigureAwait(false);
-
+            // The agent-results fold (SOTA #2) applies ONLY to a TERMINAL spawn/retry decision: its agents are
+            // durable terminal facts only once the decision is terminal AND the barrier resumed, and a Running
+            // spawn row carrying agentRunIds (the re-park shape) must NEVER be rewritten here — it would be
+            // clobbered by the later RecordTerminalAsync.
             if (SupervisorDecisionStateMachine.IsTerminal(row.Status))
+            {
+                decision = FoldAgentResults(decision, agentResultsById);
                 priorDecisions.Add(decision);
+            }
             else
                 inFlight = decision;
+
+            // Persist a newly-folded outcome (an ask_human answer OR settled agent results) onto the durable ledger
+            // row, surviving restart without re-resolving. Idempotent — no-ops when the bytes match. After the fold,
+            // so a non-terminal row (no agent fold) only ever persists an ask_human answer change.
+            if (decision.OutcomeJson != row.OutcomeJson)
+                await _ledger.UpdateOutcomeAsync(row.Id, teamId, decision.OutcomeJson!, cancellationToken).ConfigureAwait(false);
         }
 
         return new SupervisorTurnContext
@@ -151,6 +167,71 @@ public sealed partial class SupervisorTurnService
 
     /// <summary>The shared empty answers map for the common no-ask_human rehydrate — keeps that path allocation-light + DB-free.</summary>
     private static readonly IReadOnlyDictionary<string, string> EmptyAnswers = new Dictionary<string, string>();
+
+    /// <summary>The shared empty agent-results map for the common no-spawn rehydrate — keeps that path allocation-light + DB-free (the EmptyAnswers analogue for SOTA #2).</summary>
+    private static readonly IReadOnlyDictionary<Guid, SupervisorAgentResult> EmptyAgentResults = new Dictionary<Guid, SupervisorAgentResult>();
+
+    /// <summary>
+    /// Fold a TERMINAL spawn/retry decision's spawned-agent COMPACT results into its replayed outcome (SOTA #2) —
+    /// the FoldAskHumanAnswer analogue for the spawn path, so the decider sees "you spawned these, here is what each
+    /// produced" on the next turn. Pass-through UNCHANGED for: a non-spawn/retry decision; a zero-agent spawn (no
+    /// recorded ids); and — the redundant-write guard — a spawn whose outcome is ALREADY folded (it carries
+    /// agentResults). Skipping an already-folded outcome is sound because a fold runs only AFTER the barrier (all K
+    /// agents terminal) so the first fold is complete + the terminal AgentRun rows are immutable; re-folding would
+    /// only re-emit a byte-divergent-but-equal jsonb that the persist guard then no-ops at the DB anyway. Skipping it
+    /// keeps the in-memory OutcomeJson == the read-back, so the loop's byte-compare is false and NO redundant UPDATE
+    /// is issued on later rehydrates.
+    ///
+    /// <para>Every staged id maps to a result: a resolved agent → its compact result (a terminal Failed agent whose
+    /// ResultJson is null still folds <c>{status:Failed, error:&lt;rowError&gt;}</c> — the signal the slice exists to
+    /// surface); an UNRESOLVED id (deleted / out-of-team — not reachable today since AgentRun rows are append-only +
+    /// parent-terminal-guarded) → an explicit <c>Unknown</c> placeholder, so the folded set is always N-for-N and the
+    /// decider never sees a silent hole shorter than agentCount. Ids are iterated in RECORDED spawn order
+    /// (replay-deterministic), never DB-row order.</para>
+    /// </summary>
+    private static SupervisorPriorDecision FoldAgentResults(SupervisorPriorDecision decision, IReadOnlyDictionary<Guid, SupervisorAgentResult> resultsById)
+    {
+        if (decision.DecisionKind is not (SupervisorDecisionKinds.Spawn or SupervisorDecisionKinds.Retry)) return decision;
+
+        if (SupervisorOutcome.ReadAgentResults(decision.OutcomeJson).Count > 0) return decision;   // already folded — durable + immutable; don't re-fold (no redundant UPDATE)
+
+        var ids = SupervisorOutcome.ReadStagedAgentRunIds(decision.OutcomeJson);
+
+        if (ids.Count == 0) return decision;
+
+        var folded = ids.Select(id => resultsById.TryGetValue(id, out var r) ? r : UnknownAgentResult(id)).ToList();
+
+        return decision with { OutcomeJson = SupervisorOutcome.FoldAgentResults(decision.OutcomeJson, folded) };
+    }
+
+    /// <summary>The placeholder for a staged agent-run id that no longer resolves (deleted / out-of-team) — keeps the folded set N-for-N so the decider sees an explicit "this agent is gone" rather than a silently shorter list. Not reachable today (AgentRun rows are append-only), but fail-legible if it ever is.</summary>
+    private static SupervisorAgentResult UnknownAgentResult(Guid agentRunId) =>
+        new() { AgentRunId = agentRunId, Status = "Unknown", Error = "agent run not found (deleted or out-of-team)" };
+
+    /// <summary>
+    /// The COMPACT terminal result of every agent staged by THIS run's spawn/retry decisions, keyed by agent-run id
+    /// (SOTA #2) — the ResolvedAskAnswersByTokenAsync analogue. Collects the ids off every spawn/retry outcome, then
+    /// loads each AgentRun's {Status, Error, ResultJson} TEAM-SCOPED (defense-in-depth, mirroring the merge read,
+    /// NOW including Error so a cancelled/abandoned agent's reason survives), and projects each through the SHARED
+    /// <see cref="SupervisorOutcome.ProjectCompact"/> (the one source of truth the merge consumes too).
+    /// </summary>
+    private async Task<IReadOnlyDictionary<Guid, SupervisorAgentResult>> CompactAgentResultsByIdAsync(IReadOnlyList<Persistence.Entities.SupervisorDecisionRecord> rows, Guid teamId, CancellationToken cancellationToken)
+    {
+        var ids = rows
+            .Where(r => r.DecisionKind is SupervisorDecisionKinds.Spawn or SupervisorDecisionKinds.Retry)
+            .SelectMany(r => SupervisorOutcome.ReadStagedAgentRunIds(r.OutcomeJson))
+            .Distinct()
+            .ToList();
+
+        if (ids.Count == 0) return EmptyAgentResults;
+
+        var runs = await _db.AgentRun.AsNoTracking()
+            .Where(r => ids.Contains(r.Id) && r.TeamId == teamId)
+            .Select(r => new { r.Id, r.Status, r.Error, r.ResultJson })
+            .ToListAsync(cancellationToken).ConfigureAwait(false);
+
+        return runs.ToDictionary(r => r.Id, r => SupervisorOutcome.ProjectCompact(r.Id, r.Status.ToString(), r.Error, r.ResultJson));
+    }
 
     /// <summary>
     /// Normalise the supervisor config's reused <c>AllowedTools</c> into the spawned-agent tool allow-list (P2-3),

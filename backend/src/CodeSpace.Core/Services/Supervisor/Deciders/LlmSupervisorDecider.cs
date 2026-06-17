@@ -67,15 +67,58 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
         }
         else
         {
+            // The index of the MOST RECENT spawn/retry — the one whose agent results the decider should act on
+            // (a later retry's results supersede the original spawn's). Marked so the model targets the freshest.
+            var latestSpawnIndex = LastIndexOf(context.PriorDecisions, d => d.DecisionKind is SupervisorDecisionKinds.Spawn or SupervisorDecisionKinds.Retry);
+
             builder.AppendLine("Prior decisions (in order, with their recorded outcomes):");
-            foreach (var prior in context.PriorDecisions)
-                builder.AppendLine($"- {prior.DecisionKind}: payload={prior.PayloadJson} outcome={prior.OutcomeJson ?? "(none)"}");
+            for (var i = 0; i < context.PriorDecisions.Count; i++)
+                AppendPriorDecision(builder, context.PriorDecisions[i], isLatestSpawn: i == latestSpawnIndex);
         }
 
         builder.AppendLine();
-        builder.AppendLine("Choose the single next action. After planning, spawn agents over the planned subtask ids; once their results are recorded, merge them, then stop. Return ONLY the schema-constrained JSON.");
+        builder.AppendLine("Choose the single next action. After planning, spawn agents over the planned subtask ids; once their results are recorded, INSPECT each agent's status and error in the most recent spawn OR retry outcome above, RETRY any subtask that failed or did not satisfy the goal (optionally with a revised instruction), then merge the successful results, then stop. Return ONLY the schema-constrained JSON.");
 
         return builder.ToString();
+    }
+
+    /// <summary>Internal test accessor (InternalsVisibleTo) — pins the system-prompt guidance as a tested contract (the inspect-and-retry framing; no unconditional merge-then-stop rail).</summary>
+    internal static string SystemPromptForTest => SystemPrompt;
+
+    /// <summary>
+    /// Render one prior decision for the decider. A spawn/retry that carries folded agent results (SOTA #2) is
+    /// rendered as one LABELED line per agent — <c>status — summary/error</c>, NOT the raw outcome jsonb — so the
+    /// model reads each agent's outcome legibly without the agent-run GUIDs (noise it never acts on) and the failed
+    /// agents stand out as the retry signal. The most-recent spawn/retry is tagged so the model targets the freshest
+    /// results. Every other decision keeps the compact payload+outcome line.
+    /// </summary>
+    private static void AppendPriorDecision(StringBuilder builder, SupervisorPriorDecision prior, bool isLatestSpawn)
+    {
+        var agentResults = prior.DecisionKind is SupervisorDecisionKinds.Spawn or SupervisorDecisionKinds.Retry
+            ? SupervisorOutcome.ReadAgentResults(prior.OutcomeJson)
+            : Array.Empty<SupervisorAgentResult>();
+
+        if (agentResults.Count == 0)
+        {
+            builder.AppendLine($"- {prior.DecisionKind}: payload={prior.PayloadJson} outcome={prior.OutcomeJson ?? "(none)"}");
+            return;
+        }
+
+        builder.AppendLine($"- {prior.DecisionKind}{(isLatestSpawn ? " (latest spawn/retry — act on THESE results)" : "")}: payload={prior.PayloadJson}");
+        for (var k = 0; k < agentResults.Count; k++)
+        {
+            var r = agentResults[k];
+            var detail = !string.IsNullOrWhiteSpace(r.Error) ? $"error: {r.Error}" : !string.IsNullOrWhiteSpace(r.Summary) ? r.Summary : "(no summary)";
+            builder.AppendLine($"    agent {k}: {r.Status} — {detail}");
+        }
+    }
+
+    /// <summary>The index of the LAST element matching the predicate, or -1 — used to tag the most-recent spawn/retry.</summary>
+    private static int LastIndexOf(IReadOnlyList<SupervisorPriorDecision> decisions, Func<SupervisorPriorDecision, bool> predicate)
+    {
+        for (var i = decisions.Count - 1; i >= 0; i--)
+            if (predicate(decisions[i])) return i;
+        return -1;
     }
 
     private static SupervisorModelDecision Deserialize(JsonElement json)
@@ -103,7 +146,10 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
         "On each turn you emit ONE action from a fixed vocabulary: 'plan' (decompose the goal into subtasks), " +
         "'spawn' (fan out coding agents over planned subtask ids), 'retry' (re-run one subtask), " +
         "'merge' (synthesize the agents' results), 'ask_human' (ask a question), 'stop' (finish). " +
-        "Plan first, then spawn over the planned subtask ids, then merge, then stop. " +
+        "Plan first. Then drive the subtasks to completion: spawn over the planned subtask ids, inspect each agent's " +
+        "recorded status, error and summary in the most recent spawn OR retry outcome, retry any subtask that FAILED or " +
+        "did not satisfy the goal (optionally with a revised instruction), and merge only once the results you need have " +
+        "succeeded. Stop when the goal is met or a bound forces it. " +
         "You never name node types, run ids, or graph wiring — only the action + its payload. " +
         "Return ONLY the schema-constrained JSON.";
 }

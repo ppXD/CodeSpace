@@ -63,6 +63,39 @@ public class SupervisorDeciderTests
     }
 
     [Fact]
+    public void The_user_prompt_surfaces_each_spawned_agents_status_summary_and_error()
+    {
+        // SOTA #2 — the decider must SEE what its agents produced. A spawn decision whose outcome carries the
+        // folded agentResults[] renders each agent's status + summary + error verbatim into the prompt.
+        var spawn = new SupervisorPriorDecision
+        {
+            Id = Guid.NewGuid(), Sequence = 2, DecisionKind = SupervisorDecisionKinds.Spawn, Status = SupervisorDecisionStatus.Succeeded,
+            PayloadJson = """{"subtaskIds":["s1","s2"]}""",
+            OutcomeJson = """{"agentRunIds":["a","b"],"agentCount":2,"agentResults":[{"agentRunId":"a","status":"Succeeded","summary":"added the endpoint"},{"agentRunId":"b","status":"Failed","error":"tests failed: NRE in FooService"}]}""",
+        };
+
+        var prompt = LlmSupervisorDecider.BuildUserPromptForTest(Context(turnNumber: 2, spawn));
+
+        prompt.ShouldContain("Succeeded");
+        prompt.ShouldContain("added the endpoint", Case.Insensitive, "the decider sees a successful agent's summary");
+        prompt.ShouldContain("Failed");
+        prompt.ShouldContain("NRE in FooService", Case.Insensitive, "the decider sees the failed agent's error — the signal it needs to retry");
+    }
+
+    [Fact]
+    public void The_system_prompt_instructs_inspect_and_retry_without_an_unconditional_merge_then_stop_rail()
+    {
+        // The visibility fold is necessary-but-not-sufficient: the rails must INSTRUCT the model to act on what it
+        // sees. The old fixed "plan, then spawn, then merge, then stop" rail is REPLACED (not appended) — co-presence
+        // would leave two conflicting directives and the rail would win at temp 0.2.
+        var system = LlmSupervisorDecider.SystemPromptForTest;
+
+        system.ShouldContain("retry", Case.Insensitive, "the supervisor is instructed to retry a failed subtask");
+        system.ShouldContain("inspect", Case.Insensitive, "...after inspecting each agent's status/error");
+        system.ShouldNotContain("then merge, then stop", Case.Insensitive, "the unconditional merge-then-stop rail is GONE — it would override the conditional retry guidance");
+    }
+
+    [Fact]
     public async Task A_deployment_with_no_structured_provider_fails_closed_to_a_terminal_stop()
     {
         var decider = new LlmSupervisorDecider(new FakeRegistry(structured: null));
