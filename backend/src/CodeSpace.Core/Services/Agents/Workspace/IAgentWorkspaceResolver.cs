@@ -15,8 +15,8 @@ namespace CodeSpace.Core.Services.Agents.Workspace;
 /// </summary>
 public interface IAgentWorkspaceResolver
 {
-    /// <summary>Resolve the workspace for this run, or <c>null</c> when none is needed. Throws <see cref="WorkspaceException"/> when a workspace is required but can't be resolved (repo missing, no clone URL), when the authored <c>WorkspaceSpec</c> has MORE THAN ONE repository (not yet executable — a later slice), or when it has none.</summary>
-    Task<WorkspaceRequest?> ResolveAsync(AgentTask task, Guid teamId, CancellationToken cancellationToken);
+    /// <summary>Resolve the multi-repo workspace provision for this run (single-repo = a 1-element provision), or <c>null</c> when none is needed. Throws <see cref="WorkspaceException"/> when a workspace is required but a repository can't be resolved (missing, no clone URL), or when the authored <c>WorkspaceSpec</c> has none.</summary>
+    Task<WorkspaceProvisionRequest?> ResolveAsync(AgentTask task, Guid teamId, CancellationToken cancellationToken);
 
     /// <summary>
     /// Resolve a workspace directly from a repository id (team-scoped) — the seam an integration step / a node holding

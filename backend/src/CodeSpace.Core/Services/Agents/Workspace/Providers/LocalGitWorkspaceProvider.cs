@@ -47,32 +47,140 @@ public sealed class LocalGitWorkspaceProvider : IWorkspaceProvider, IWorkspaceJa
 
     public string Kind => LocalProcessRunner.LocalKind;
 
-    public async Task<IWorkspaceHandle> PrepareAsync(WorkspaceRequest request, CancellationToken cancellationToken)
+    public async Task<IWorkspaceHandle> PrepareAsync(WorkspaceProvisionRequest request, CancellationToken cancellationToken)
     {
+        if (request.Repositories.Count == 0)
+            throw new WorkspaceException("Workspace provision has no repositories to clone.");
+
         Directory.CreateDirectory(WorkspacesRoot);
 
-        var directory = Path.Combine(WorkspacesRoot, Guid.NewGuid().ToString("N"));
+        var workspaceRoot = Path.Combine(WorkspacesRoot, Guid.NewGuid().ToString("N"));
+        var single = request.Repositories.Count == 1;
+
+        // Fail loud BEFORE any clone if a multi-repo provision's per-repo mount segments are unsafe or collide.
+        // This is the universal choke point every caller (resolver, run-command, a future planner that AUTHORS specs)
+        // funnels through, so a spec can never traverse outside the workspace root nor clobber a sibling clone.
+        if (!single) ValidateMultiRepoLayout(request);
 
         try
         {
-            await CloneAsync(request, directory, cancellationToken).ConfigureAwait(false);
+            // Multi-repo: pre-create the root so each repo can clone into its own <root>/<path> subdir. Single-repo:
+            // leave the root uncreated and clone FLAT into it (git creates the dir) — byte-identical to before.
+            if (!single) Directory.CreateDirectory(workspaceRoot);
 
-            if (!string.IsNullOrEmpty(request.Token))
-                await StripTokenFromRemoteAsync(request.RepositoryUrl, directory, cancellationToken).ConfigureAwait(false);
+            var materialized = new List<MaterializedRepo>(request.Repositories.Count);
 
-            var baseSha = await ReadBaseShaAsync(directory, cancellationToken).ConfigureAwait(false);
+            foreach (var repo in request.Repositories)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                materialized.Add(await MaterializeAsync(repo, RepoDirectory(workspaceRoot, repo, single), cancellationToken).ConfigureAwait(false));
+            }
 
-            // Carry the SAME short-lived clone credential forward onto the handle so a later push can
-            // re-inject auth into the push argv WITHOUT a second auth round-trip. It is never persisted
-            // (the handle is in-memory) and never written to .git/config (origin was stripped after clone).
-            return new LocalWorkspaceHandle(directory, baseSha, request.RepositoryUrl, request.TokenUsername, request.Token, _runners.Resolve(Kind), _logger);
+            // Only a genuine multi-repo workspace gets a manifest at the root; a single-repo clone is left pristine.
+            if (!single) await WriteWorkspaceManifestAsync(workspaceRoot, request, materialized, cancellationToken).ConfigureAwait(false);
+
+            var primaryAlias = (request.Primary ?? throw new WorkspaceException("Workspace provision has no resolvable primary repository.")).Alias;
+            var cwd = ResolveCwd(request.CwdMode, workspaceRoot, materialized, primaryAlias, single);
+
+            return new LocalWorkspaceHandle(workspaceRoot, cwd, materialized, primaryAlias, _runners.Resolve(Kind), _logger);
         }
         catch
         {
-            TryDeleteDirectory(directory);
+            TryDeleteDirectory(workspaceRoot);
             throw;
         }
     }
+
+    /// <summary>The on-disk directory a repo clones into: the workspace root itself for a single-repo provision (flat, byte-identical), else <c>&lt;root&gt;/&lt;path ?? alias&gt;</c> — the segment is <see cref="ValidateMultiRepoLayout"/>-checked to be a single safe directory name, so the combine can never escape the root.</summary>
+    private static string RepoDirectory(string workspaceRoot, WorkspaceRepositoryProvision repo, bool single) =>
+        single ? workspaceRoot : Path.Combine(workspaceRoot, string.IsNullOrWhiteSpace(repo.Path) ? repo.Alias : repo.Path);
+
+    /// <summary>
+    /// Validate a multi-repo provision's per-repo mount layout BEFORE cloning: every alias is unique, every mount
+    /// segment (<c>Path ?? Alias</c>) is a SAFE single directory name, and no two repos map to the same subdir.
+    /// Throws a clear <see cref="WorkspaceException"/> on any violation — a fail-loud author-time-style error rather
+    /// than a path traversal outside the workspace root, a silent sibling clobber, or an opaque mid-clone git error.
+    /// Single-repo provisions are exempt (they clone flat into the GUID root regardless of alias/path).
+    /// </summary>
+    private static void ValidateMultiRepoLayout(WorkspaceProvisionRequest request)
+    {
+        var aliases = new HashSet<string>(StringComparer.Ordinal);
+        var segments = new HashSet<string>(StringComparer.Ordinal);
+
+        foreach (var repo in request.Repositories)
+        {
+            if (!aliases.Add(repo.Alias))
+                throw new WorkspaceException($"Duplicate repository alias '{repo.Alias}' in the workspace provision — each repository needs a unique alias.");
+
+            var segment = string.IsNullOrWhiteSpace(repo.Path) ? repo.Alias : repo.Path;
+
+            if (!IsSafeMountSegment(segment))
+                throw new WorkspaceException($"Unsafe repository mount path '{segment}' (alias '{repo.Alias}') — a repository path must be a single directory name, never rooted, '.', '..', or containing a path separator.");
+
+            if (!segments.Add(segment))
+                throw new WorkspaceException($"Two repositories map to the same mount path '{segment}' in the workspace provision — each repository needs a distinct path.");
+        }
+    }
+
+    /// <summary>A safe mount segment is a single directory NAME: non-empty, not <c>.</c>/<c>..</c>, not rooted, and free of path separators — so <c>Path.Combine(root, segment)</c> can never resolve outside <c>root</c>. Pure + internal so it's unit-pinned.</summary>
+    internal static bool IsSafeMountSegment(string segment) =>
+        !string.IsNullOrWhiteSpace(segment)
+        && segment != "." && segment != ".."
+        && segment.IndexOf('/') < 0 && segment.IndexOf('\\') < 0
+        && !Path.IsPathRooted(segment);
+
+    /// <summary>Clone one repo, strip its token from the persisted remote, and read its base revision — the per-repo unit of the workspace.</summary>
+    private async Task<MaterializedRepo> MaterializeAsync(WorkspaceRepositoryProvision repo, string directory, CancellationToken cancellationToken)
+    {
+        await CloneAsync(repo.CloneRequest, directory, cancellationToken).ConfigureAwait(false);
+
+        if (!string.IsNullOrEmpty(repo.CloneRequest.Token))
+            await StripTokenFromRemoteAsync(repo.CloneRequest.RepositoryUrl, directory, cancellationToken).ConfigureAwait(false);
+
+        var baseSha = await ReadBaseShaAsync(directory, cancellationToken).ConfigureAwait(false);
+
+        // Carry the SAME short-lived clone credential forward (in-memory only, never persisted / never in .git/config —
+        // origin was stripped) so a later push re-injects auth into the push argv without a second auth round-trip.
+        return new MaterializedRepo(repo.Alias, directory, repo.Access, repo.CloneRequest.RepositoryUrl, repo.CloneRequest.TokenUsername, repo.CloneRequest.Token, baseSha);
+    }
+
+    /// <summary>Where the harness runs: Auto → the primary repo's dir for one repo (the invariant), the workspace root for many; or the explicit mode.</summary>
+    private static string ResolveCwd(WorkspaceCwdMode mode, string workspaceRoot, IReadOnlyList<MaterializedRepo> repos, string primaryAlias, bool single) => mode switch
+    {
+        WorkspaceCwdMode.WorkspaceRoot => workspaceRoot,
+        WorkspaceCwdMode.PrimaryRepo => PrimaryDir(repos, primaryAlias),
+        _ => single ? PrimaryDir(repos, primaryAlias) : workspaceRoot,   // Auto
+    };
+
+    private static string PrimaryDir(IReadOnlyList<MaterializedRepo> repos, string primaryAlias) =>
+        repos.First(r => r.Alias == primaryAlias).Directory;
+
+    /// <summary>Write a WORKSPACE.md at the multi-repo root so the harness knows it is in a multi-repo workspace, which repos are present, which is primary, and each one's access. Best-effort: a manifest write failure must not fail provisioning (the clones already succeeded).</summary>
+    private async Task WriteWorkspaceManifestAsync(string workspaceRoot, WorkspaceProvisionRequest request, IReadOnlyList<MaterializedRepo> repos, CancellationToken cancellationToken)
+    {
+        var primaryAlias = request.Primary?.Alias;
+
+        var lines = repos.Select(r =>
+        {
+            var role = r.Alias == primaryAlias ? "primary, " : "";
+            var access = r.Access == WorkspaceAccess.Write ? "writable" : "read-only context";
+            return $"- `{r.Alias}/` ({role}{access})";
+        });
+
+        var body = $"# Workspace\n\nThis is a MULTI-REPO workspace. The harness runs at the workspace root; each repository is a sibling folder below.\n\n{string.Join('\n', lines)}\n\nMake coordinated changes only in the writable repositories; treat read-only repositories as context.\n";
+
+        try
+        {
+            await File.WriteAllTextAsync(Path.Combine(workspaceRoot, "WORKSPACE.md"), body, cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to write WORKSPACE.md to {Root}; the multi-repo workspace is materialised but unannotated", workspaceRoot);
+        }
+    }
+
+    /// <summary>One cloned repo's runtime state (Rule 18-adjacent — a private provider noun): alias, on-disk dir, access, and the in-memory clone credential carried forward for a later push.</summary>
+    private sealed record MaterializedRepo(string Alias, string Directory, WorkspaceAccess Access, string RepositoryUrl, string? TokenUsername, string? Token, string BaseSha);
 
     /// <summary>Record the cloned HEAD revision so <see cref="LocalWorkspaceHandle.CaptureChangesAsync"/> can diff the agent's work against it — robust whether the agent commits or leaves changes uncommitted.</summary>
     private async Task<string> ReadBaseShaAsync(string directory, CancellationToken cancellationToken)
@@ -206,77 +314,86 @@ public sealed class LocalGitWorkspaceProvider : IWorkspaceProvider, IWorkspaceJa
 
     private sealed class LocalWorkspaceHandle : IWorkspaceHandle, IWorkspacePushHandle
     {
-        private readonly string _baseSha;
-        private readonly string _repositoryUrl;
-        private readonly string? _tokenUsername;
-        private readonly string? _token;
+        private readonly string _workspaceRoot;
+        private readonly IReadOnlyList<MaterializedRepo> _repos;
+        private readonly MaterializedRepo _primary;
         private readonly ISandboxRunner _runner;
         private readonly ILogger _logger;
 
-        public LocalWorkspaceHandle(string directory, string baseSha, string repositoryUrl, string? tokenUsername, string? token, ISandboxRunner runner, ILogger logger)
+        public LocalWorkspaceHandle(string workspaceRoot, string cwd, IReadOnlyList<MaterializedRepo> repos, string primaryAlias, ISandboxRunner runner, ILogger logger)
         {
-            Directory = directory;
-            _baseSha = baseSha;
-            _repositoryUrl = repositoryUrl;
-            _tokenUsername = tokenUsername;
-            _token = token;
+            _workspaceRoot = workspaceRoot;
+            Directory = cwd;
+            _repos = repos;
+            _primary = repos.First(r => r.Alias == primaryAlias);
             _runner = runner;
             _logger = logger;
         }
 
         public string Directory { get; }
 
-        public async Task<WorkspaceChanges> CaptureChangesAsync(CancellationToken cancellationToken)
+        public IReadOnlyList<WorkspaceRepositoryHandle> Repositories =>
+            _repos.Select(r => new WorkspaceRepositoryHandle { Alias = r.Alias, Directory = r.Directory, Access = r.Access }).ToList();
+
+        public Task<WorkspaceChanges> CaptureChangesAsync(CancellationToken cancellationToken) =>
+            // Capture the PRIMARY repo's changes (multi-repo PR2 scope — per-repo capture across every writable repo
+            // arrives in the result-generalization slice). For a single-repo workspace the primary IS the only repo,
+            // so this is byte-identical to before.
+            CaptureRepoChangesAsync(_primary, cancellationToken);
+
+        private async Task<WorkspaceChanges> CaptureRepoChangesAsync(MaterializedRepo repo, CancellationToken cancellationToken)
         {
             // Stage everything (new, modified, deleted) so the diff vs the cloned base is complete, then
             // read the patch + the changed-file names. `--cached <base>` captures committed AND uncommitted
             // work, so it's robust whether the agent committed or just edited the working tree.
-            await RunGitOrThrowAsync(new[] { "add", "-A" }, cancellationToken).ConfigureAwait(false);
+            await RunGitOrThrowAsync(repo, new[] { "add", "-A" }, cancellationToken).ConfigureAwait(false);
 
-            var patch = await RunGitOrThrowAsync(new[] { "diff", "--cached", "--no-color", _baseSha }, cancellationToken).ConfigureAwait(false);
-            var names = await RunGitOrThrowAsync(new[] { "diff", "--cached", "--name-only", _baseSha }, cancellationToken).ConfigureAwait(false);
+            var patch = await RunGitOrThrowAsync(repo, new[] { "diff", "--cached", "--no-color", repo.BaseSha }, cancellationToken).ConfigureAwait(false);
+            var names = await RunGitOrThrowAsync(repo, new[] { "diff", "--cached", "--name-only", repo.BaseSha }, cancellationToken).ConfigureAwait(false);
 
             return new WorkspaceChanges
             {
                 Patch = patch,
-                BaseSha = _baseSha,
+                BaseSha = repo.BaseSha,
                 ChangedFiles = names.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries),
             };
         }
 
         public async Task<string?> PushChangesAsync(string branchName, CancellationToken cancellationToken)
         {
+            var repo = _primary;
+
             // An anonymous clone carries no push credential — short-circuit WITHOUT invoking git (no remote to
             // push to, no credential to re-inject). Not a failure: the run simply produces no branch.
-            if (string.IsNullOrEmpty(_token)) return null;
+            if (string.IsNullOrEmpty(repo.Token)) return null;
 
-            await RunGitOrThrowAsync(new[] { "checkout", "-b", branchName }, cancellationToken).ConfigureAwait(false);
-            await RunGitOrThrowAsync(new[] { "add", "-A" }, cancellationToken).ConfigureAwait(false);
+            await RunGitOrThrowAsync(repo, new[] { "checkout", "-b", branchName }, cancellationToken).ConfigureAwait(false);
+            await RunGitOrThrowAsync(repo, new[] { "add", "-A" }, cancellationToken).ConfigureAwait(false);
 
             // A run that changed nothing has nothing to push. The agent may either leave its edits for us to commit
             // OR commit them itself — so push when we just made a commit, OR when the branch tip already differs
             // from the cloned base (a harness that committed its own work leaves a clean tree, so there is nothing
             // new to commit, but the branch still carries the change). This mirrors CaptureChangesAsync's base-SHA
             // semantics so push and capture agree on "did this run change anything".
-            var committed = await CommitOrDetectEmptyAsync(branchName, cancellationToken).ConfigureAwait(false);
+            var committed = await CommitOrDetectEmptyAsync(repo, branchName, cancellationToken).ConfigureAwait(false);
 
-            if (!committed && !await HeadDiffersFromBaseAsync(cancellationToken).ConfigureAwait(false)) return null;
+            if (!committed && !await HeadDiffersFromBaseAsync(repo, cancellationToken).ConfigureAwait(false)) return null;
 
             // Re-inject the SAME clone credential into the push ARGV only (never as a remote, never into
             // .git/config — origin was stripped after clone). Plain --force, not --force-with-lease: the branch
             // name is run-unique so lease protection is vacuous, and its no-remote-tracking-ref semantics vary by
             // git version. The push gets a bounded timeout so a hung push can't delay run completion.
-            var authedUrl = BuildAuthenticatedUrl(_repositoryUrl, _tokenUsername, _token);
+            var authedUrl = BuildAuthenticatedUrl(repo.RepositoryUrl, repo.TokenUsername, repo.Token);
 
-            await RunGitOrThrowAsync(new[] { "push", "--force", authedUrl, $"{branchName}:{branchName}" }, cancellationToken, PushTimeoutSeconds).ConfigureAwait(false);
+            await RunGitOrThrowAsync(repo, new[] { "push", "--force", authedUrl, $"{branchName}:{branchName}" }, cancellationToken, PushTimeoutSeconds).ConfigureAwait(false);
 
             return branchName;
         }
 
         /// <summary>Commit everything staged under a fixed CodeSpace identity; returns false (no commit) when there was nothing to commit. The identity is set inline via <c>-c</c> so the clone's git config is never mutated.</summary>
-        private async Task<bool> CommitOrDetectEmptyAsync(string branchName, CancellationToken cancellationToken)
+        private async Task<bool> CommitOrDetectEmptyAsync(MaterializedRepo repo, string branchName, CancellationToken cancellationToken)
         {
-            var result = await RunGitAsync(new[] { "-c", "user.name=CodeSpace", "-c", "user.email=agent@codespace.local", "commit", "-m", $"Agent run {branchName}" }, cancellationToken, PushTimeoutSeconds).ConfigureAwait(false);
+            var result = await RunGitAsync(repo, new[] { "-c", "user.name=CodeSpace", "-c", "user.email=agent@codespace.local", "commit", "-m", $"Agent run {branchName}" }, cancellationToken, PushTimeoutSeconds).ConfigureAwait(false);
 
             if (result.Status == SandboxStatus.Success) return true;
 
@@ -285,7 +402,7 @@ public sealed class LocalGitWorkspaceProvider : IWorkspaceProvider, IWorkspaceJa
             if (output.Contains("nothing to commit", StringComparison.OrdinalIgnoreCase) || output.Contains("working tree clean", StringComparison.OrdinalIgnoreCase))
                 return false;
 
-            throw new WorkspaceException($"git commit failed (exit {result.ExitCode}): {Redact(Summarize(result.Stderr), _token)}");
+            throw new WorkspaceException($"git commit failed (exit {result.ExitCode}): {Redact(Summarize(result.Stderr), repo.Token)}");
         }
 
         /// <summary>True when the branch tip differs from the cloned base — covers a harness that COMMITTED its own
@@ -293,52 +410,54 @@ public sealed class LocalGitWorkspaceProvider : IWorkspaceProvider, IWorkspaceJa
         /// same base SHA <see cref="CaptureChangesAsync"/> uses. <c>git diff --quiet</c> exits 0 when identical,
         /// non-zero when different; a non-zero exit is the signal, not a failure, so this never throws (and on a
         /// genuine git error it fails toward pushing rather than silently dropping the agent's work).</summary>
-        private async Task<bool> HeadDiffersFromBaseAsync(CancellationToken cancellationToken)
+        private async Task<bool> HeadDiffersFromBaseAsync(MaterializedRepo repo, CancellationToken cancellationToken)
         {
-            var result = await RunGitAsync(new[] { "diff", "--quiet", _baseSha, "HEAD" }, cancellationToken, CaptureTimeoutSeconds).ConfigureAwait(false);
+            var result = await RunGitAsync(repo, new[] { "diff", "--quiet", repo.BaseSha, "HEAD" }, cancellationToken, CaptureTimeoutSeconds).ConfigureAwait(false);
             return result.ExitCode != 0;
         }
 
-        private async Task<string> RunGitOrThrowAsync(IReadOnlyList<string> args, CancellationToken cancellationToken, int timeoutSeconds = CaptureTimeoutSeconds)
+        private async Task<string> RunGitOrThrowAsync(MaterializedRepo repo, IReadOnlyList<string> args, CancellationToken cancellationToken, int timeoutSeconds = CaptureTimeoutSeconds)
         {
-            var result = await RunGitAsync(args, cancellationToken, timeoutSeconds).ConfigureAwait(false);
+            var result = await RunGitAsync(repo, args, cancellationToken, timeoutSeconds).ConfigureAwait(false);
 
             if (result.Status != SandboxStatus.Success)
                 // Redact any echoed token (the push argv embeds the authed URL) so it never reaches a log / exception.
-                throw new WorkspaceException($"git {string.Join(' ', RedactArgs(args))} failed (exit {result.ExitCode}): {Redact(result.Stderr.Trim(), _token)}");
+                throw new WorkspaceException($"git {string.Join(' ', RedactArgs(args, repo.Token))} failed (exit {result.ExitCode}): {Redact(result.Stderr.Trim(), repo.Token)}");
 
             return result.Stdout;
         }
 
-        /// <summary>Run a git command through the SAME unconfined batch path the diff-capture uses (the handle's runner with the clone as cwd — host network, not bubblewrapped). Returns the raw result so a caller can classify it (e.g. detect "nothing to commit") rather than always throw.</summary>
-        private async Task<SandboxResult> RunGitAsync(IReadOnlyList<string> args, CancellationToken cancellationToken, int timeoutSeconds)
+        /// <summary>Run a git command in a SPECIFIC repo's clone (its directory as cwd) through the same unconfined batch path — host network, not bubblewrapped. Returns the raw result so a caller can classify it (e.g. detect "nothing to commit") rather than always throw.</summary>
+        private async Task<SandboxResult> RunGitAsync(MaterializedRepo repo, IReadOnlyList<string> args, CancellationToken cancellationToken, int timeoutSeconds)
         {
             try
             {
                 return await _runner.RunAsync(
-                    new SandboxSpec { Command = "git", Args = args, WorkingDirectory = Directory, TimeoutSeconds = timeoutSeconds }, cancellationToken).ConfigureAwait(false);
+                    new SandboxSpec { Command = "git", Args = args, WorkingDirectory = repo.Directory, TimeoutSeconds = timeoutSeconds }, cancellationToken).ConfigureAwait(false);
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
                 // Honour the IWorkspaceHandle contract: a git failure — including an INFRASTRUCTURE failure the
                 // runner throws (git not on PATH, the working directory removed mid-run) — surfaces as a
                 // WorkspaceException, never a raw Win32Exception/IOException leaking to the caller.
-                throw new WorkspaceException($"git {string.Join(' ', RedactArgs(args))} could not run: {Redact(ex.Message, _token)}", ex);
+                throw new WorkspaceException($"git {string.Join(' ', RedactArgs(args, repo.Token))} could not run: {Redact(ex.Message, repo.Token)}", ex);
             }
         }
 
         /// <summary>Redact the token from the echoed argv (the push command carries the authed URL) before it lands in an exception message.</summary>
-        private IEnumerable<string> RedactArgs(IReadOnlyList<string> args) => args.Select(a => Redact(a, _token));
+        private static IEnumerable<string> RedactArgs(IReadOnlyList<string> args, string? token) => args.Select(a => Redact(a, token));
 
         public ValueTask DisposeAsync()
         {
             try
             {
-                if (System.IO.Directory.Exists(Directory)) System.IO.Directory.Delete(Directory, recursive: true);
+                // Remove the WHOLE workspace tree (every cloned repo), not just the cwd — for a multi-repo workspace
+                // the cwd may be the root while each repo is a subdir; for single-repo the root IS the clone.
+                if (System.IO.Directory.Exists(_workspaceRoot)) System.IO.Directory.Delete(_workspaceRoot, recursive: true);
             }
             catch (Exception ex)
             {
-                _logger.LogWarning(ex, "Failed to remove agent workspace {Directory}", Directory);
+                _logger.LogWarning(ex, "Failed to remove agent workspace {Directory}", _workspaceRoot);
             }
 
             return ValueTask.CompletedTask;

@@ -160,8 +160,8 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
 
             // Materialise the workspace (clone the bound repo) before the harness runs. Null = no workspace
             // for this run. The handle's lifetime is the run's — DisposeAsync removes the clone afterwards.
-            var workspaceRequest = await _workspaceResolver.ResolveAsync(task, run.TeamId, cancellationToken).ConfigureAwait(false);
-            workspace = workspaceRequest is null ? null : await _workspaces.Resolve(runnerKind).PrepareAsync(workspaceRequest, cancellationToken).ConfigureAwait(false);
+            var workspaceProvision = await _workspaceResolver.ResolveAsync(task, run.TeamId, cancellationToken).ConfigureAwait(false);
+            workspace = workspaceProvision is null ? null : await _workspaces.Resolve(runnerKind).PrepareAsync(workspaceProvision, cancellationToken).ConfigureAwait(false);
 
             // Resolve + decrypt the model credential JUST-IN-TIME (team from the run row, never the envelope) and
             // project it onto the harness's env vars. The secret lives only in this in-memory effectiveTask →

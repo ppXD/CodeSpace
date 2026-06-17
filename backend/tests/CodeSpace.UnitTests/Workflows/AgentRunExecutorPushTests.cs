@@ -484,6 +484,8 @@ public sealed class AgentRunExecutorPushTests
 
         public string Directory => "/tmp/fake";
 
+        public IReadOnlyList<WorkspaceRepositoryHandle> Repositories => Array.Empty<WorkspaceRepositoryHandle>();
+
         public Task<string?> PushChangesAsync(string branchName, CancellationToken cancellationToken)
         {
             PushCalled = true;
@@ -505,6 +507,7 @@ public sealed class AgentRunExecutorPushTests
     private sealed class ReadOnlyHandle : IWorkspaceHandle
     {
         public string Directory => "/tmp/fake";
+        public IReadOnlyList<WorkspaceRepositoryHandle> Repositories => Array.Empty<WorkspaceRepositoryHandle>();
         public Task<WorkspaceChanges> CaptureChangesAsync(CancellationToken cancellationToken) => throw new NotSupportedException();
         public ValueTask DisposeAsync() => ValueTask.CompletedTask;
     }

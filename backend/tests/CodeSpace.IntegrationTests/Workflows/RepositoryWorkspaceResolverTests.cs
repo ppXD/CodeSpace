@@ -121,11 +121,62 @@ public class RepositoryWorkspaceResolverTests
         request!.Ref.ShouldBe("release/1.2", "the authored per-repo ref overrides the repository's default branch");
     }
 
+    [Fact]
+    public async Task A_multi_repo_workspace_resolves_every_repo_into_a_provision()
+    {
+        var teamId = await SeedTeamAsync();
+        var webId = await SeedRepoAsync(teamId, ProviderKind.GitHub, "https://github.com/org/web.git", "main", token: "ghp_web");
+        var apiId = await SeedRepoAsync(teamId, ProviderKind.GitLab, "https://gitlab.com/org/api.git", "develop", token: "glpat_api");
+
+        var task = new AgentTask
+        {
+            Goal = "g", Harness = "h", Model = "m",
+            Workspace = new WorkspaceSpec
+            {
+                PrimaryAlias = "web",
+                Repositories = new[]
+                {
+                    new WorkspaceRepositorySpec { Alias = "web", RepositoryId = webId, Access = WorkspaceAccess.Write, IsPrimary = true },
+                    new WorkspaceRepositorySpec { Alias = "api", RepositoryId = apiId, Ref = "release/2.0", Access = WorkspaceAccess.Read },
+                },
+            },
+        };
+
+        var provision = await ResolveProvisionAsync(task, teamId);
+
+        provision.ShouldNotBeNull();
+        provision!.Repositories.Count.ShouldBe(2, "every repo in the spec resolves into the provision (the >1 guard is lifted)");
+
+        var web = provision.Repositories.Single(r => r.Alias == "web");
+        web.CloneRequest.RepositoryUrl.ShouldBe("https://github.com/org/web.git");
+        web.CloneRequest.Ref.ShouldBe("main", "null per-repo ref → the repo's default branch");
+        web.CloneRequest.Token.ShouldBe("ghp_web");
+        web.CloneRequest.TokenUsername.ShouldBe("x-access-token");
+        web.Access.ShouldBe(WorkspaceAccess.Write);
+
+        var api = provision.Repositories.Single(r => r.Alias == "api");
+        api.CloneRequest.RepositoryUrl.ShouldBe("https://gitlab.com/org/api.git");
+        api.CloneRequest.Ref.ShouldBe("release/2.0", "the per-repo ref is honoured per repository");
+        api.CloneRequest.TokenUsername.ShouldBe("oauth2", "each repo resolves its own provider-appropriate auth");
+        api.Access.ShouldBe(WorkspaceAccess.Read);
+
+        provision.Primary!.Alias.ShouldBe("web");
+    }
+
     // ─── Helpers ─────────────────────────────────────────────────────────────
 
     private static AgentTask TaskFor(Guid repositoryId) => new() { Goal = "g", Harness = "h", Model = "m", RepositoryId = repositoryId };
 
+    /// <summary>Resolve and unwrap to the PRIMARY repo's clone request — so the single-repo assertions read the same WorkspaceRequest shape as before. Multi-repo resolution is asserted on the full provision in the dedicated multi-repo test.</summary>
     private async Task<WorkspaceRequest?> ResolveAsync(AgentTask task, Guid teamId)
+    {
+        using var scope = _fixture.BeginScope();
+        var provision = await scope.Resolve<IAgentWorkspaceResolver>().ResolveAsync(task, teamId, CancellationToken.None);
+        return provision?.Primary?.CloneRequest;
+    }
+
+    /// <summary>Resolve to the full multi-repo provision (no unwrap) — for the multi-repo resolution test.</summary>
+    private async Task<WorkspaceProvisionRequest?> ResolveProvisionAsync(AgentTask task, Guid teamId)
     {
         using var scope = _fixture.BeginScope();
         return await scope.Resolve<IAgentWorkspaceResolver>().ResolveAsync(task, teamId, CancellationToken.None);

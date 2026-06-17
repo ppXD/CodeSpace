@@ -854,8 +854,8 @@ public class AgentRunExecutorTests
     /// <summary>Always returns a request, so the executor materialises a workspace — the fake provider ignores its contents.</summary>
     private sealed class FixedWorkspaceResolver : IAgentWorkspaceResolver
     {
-        public Task<WorkspaceRequest?> ResolveAsync(AgentTask task, Guid teamId, CancellationToken cancellationToken) =>
-            Task.FromResult<WorkspaceRequest?>(new WorkspaceRequest { RepositoryUrl = "file:///dev/null" });
+        public Task<WorkspaceProvisionRequest?> ResolveAsync(AgentTask task, Guid teamId, CancellationToken cancellationToken) =>
+            Task.FromResult<WorkspaceProvisionRequest?>(WorkspaceProvisionRequest.FromSingle(new WorkspaceRequest { RepositoryUrl = "file:///dev/null" }));
 
         public Task<WorkspaceRequest?> ResolveByRepositoryIdAsync(Guid repositoryId, Guid teamId, CancellationToken cancellationToken, string? @ref = null) =>
             Task.FromResult<WorkspaceRequest?>(new WorkspaceRequest { RepositoryUrl = "file:///dev/null" });
@@ -877,7 +877,7 @@ public class AgentRunExecutorTests
 
         public string Kind => LocalProcessRunner.LocalKind;
 
-        public Task<IWorkspaceHandle> PrepareAsync(WorkspaceRequest request, CancellationToken cancellationToken)
+        public Task<IWorkspaceHandle> PrepareAsync(WorkspaceProvisionRequest request, CancellationToken cancellationToken)
         {
             var dir = Path.Combine(Path.GetTempPath(), "cs-ws-reattach-test-" + Guid.NewGuid().ToString("N"));
             Directory.CreateDirectory(dir);
@@ -890,6 +890,7 @@ public class AgentRunExecutorTests
             private readonly RecordingWorkspaceProvider _owner;
             public Handle(RecordingWorkspaceProvider owner, string directory) { _owner = owner; Directory = directory; }
             public string Directory { get; }
+            public IReadOnlyList<WorkspaceRepositoryHandle> Repositories => new[] { new WorkspaceRepositoryHandle { Alias = "repo", Directory = Directory, Access = WorkspaceAccess.Write } };
             public Task<WorkspaceChanges> CaptureChangesAsync(CancellationToken cancellationToken) => Task.FromResult(new WorkspaceChanges { Patch = "" });
             public ValueTask DisposeAsync()
             {
