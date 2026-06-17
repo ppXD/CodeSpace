@@ -1,6 +1,7 @@
 using System.Text.Json;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Agents;
+using CodeSpace.Core.Services.Agents.Workspace;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Dtos.Agents;
@@ -263,6 +264,9 @@ public sealed partial class RealSupervisorActionExecutor
             Tools = context.SpawnedAgentTools,
             RunnerKind = NullIfBlank(profile?.RunnerKind),
             RepositoryId = profile?.RepositoryId,
+            // Multi-repo (S7): the authored related repos project onto a Workspace via the SHARED authoring底層 the
+            // agent.code node uses — no related repos → null → byte-identical single-repo spawn (RepositoryId drives it).
+            Workspace = AgentWorkspaceAuthoring.ResolveAuthoredWorkspace(profile?.RepositoryId, AgentWorkspaceAuthoring.ParseRelatedRepositories(profile?.RelatedRepositories ?? default)),
             Autonomy = autonomy,
             Permissions = AgentAutonomyPolicy.Derive(autonomy),
             ApprovalConversationId = context.ConversationId,

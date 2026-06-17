@@ -73,7 +73,20 @@ public sealed class AgentSupervisorNode : INodeRuntime
                   "additionalProperties": false,
                   "description": "Defaults every agent this supervisor spawns inherits — the supervisor's analogue of a coding-agent node's config. Leave empty for a bare codex-cli / analysis-only agent.",
                   "properties": {
-                    "repositoryId": { "type": "string", "format": "uuid", "x-selector": "repository", "description": "Repository each spawned agent clones into its workspace. Leave empty for an analysis-only run with no repo." },
+                    "repositoryId": { "type": "string", "format": "uuid", "x-selector": "repository", "description": "The PRIMARY repository each spawned agent clones into its workspace. Leave empty for an analysis-only run with no repo." },
+                    "relatedRepositories": {
+                      "type": "array",
+                      "description": "Multi-repo: each spawned agent ALSO clones these repositories alongside the primary (for a coordinated change across e.g. a frontend + backend). The primary is repositoryId; leave empty for a single-repo run.",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "repositoryId": { "type": "string", "format": "uuid" },
+                          "alias": { "type": "string", "description": "The short name + mount folder for this repo (e.g. 'api'). Defaults to repo-2, repo-3, …" },
+                          "access": { "type": "string", "enum": ["read", "write"], "description": "read = context-only (default); write = the agent may edit + branch it." }
+                        },
+                        "required": ["repositoryId"]
+                      }
+                    },
                     "harness": { "type": "string", "x-selector": "harness", "description": "Which coding-agent CLI each spawned agent runs (e.g. Codex, Claude Code). Defaults to codex-cli." },
                     "model": { "type": "string", "description": "Model id within the harness's catalog. Leave empty to use the persona's model, or the harness default." },
                     "agentDefinitionId": { "type": "string", "format": "uuid", "x-selector": "agent", "description": "Agent persona each spawned agent embodies — its system prompt + model + tools become the defaults. Leave empty to configure inline." },

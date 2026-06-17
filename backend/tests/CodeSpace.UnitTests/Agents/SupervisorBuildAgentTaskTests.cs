@@ -1,3 +1,4 @@
+using System.Text.Json;
 using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Supervisor.Executors;
 using CodeSpace.Messages.Agents;
@@ -53,6 +54,7 @@ public class SupervisorBuildAgentTaskTests
         task.Permissions.ShouldBe(AgentAutonomyPolicy.Derive(AgentAutonomyLevel.Standard), "Standard autonomy derives the no-network/workspace-write posture (value-equal to pre-P2-3's untouched default)");
         task.Environment.ShouldBeEmpty("untouched → the record default empty environment");
         task.TimeoutSeconds.ShouldBe(1800, "untouched → the record default timeout");
+        task.Workspace.ShouldBeNull("no profile → no related repos → null Workspace → byte-identical single-repo execution (S7)");
     }
 
     [Fact]
@@ -96,6 +98,60 @@ public class SupervisorBuildAgentTaskTests
         task.ApprovalConversationId.ShouldBe(conversationId, "the supervisor's conversation becomes the approval surface");
         task.EnableMcpEndpoint.ShouldBe(true);
         task.PushProducedBranch.ShouldBe(true, "the profile's push opt-in threads to the spawned task so each branch agent publishes its own branch");
+    }
+
+    // ── S7-A: multi-repo — the authored related repos project onto a Workspace via the SHARED authoring底層 ──
+
+    [Fact]
+    public void Authored_related_repositories_project_onto_a_multi_repo_workspace()
+    {
+        var primary = Guid.NewGuid();
+        var related = Guid.NewGuid();
+
+        var context = new SupervisorTurnContext
+        {
+            Goal = "ship across the frontend + backend",
+            AgentProfile = new SupervisorAgentProfile
+            {
+                RepositoryId = primary,
+                RelatedRepositories = JsonDocument.Parse($$"""[{"repositoryId":"{{related}}","alias":"api","access":"write"}]""").RootElement,
+            },
+        };
+
+        var task = Build(context);
+
+        task.RepositoryId.ShouldBe(primary, "the primary still drives the legacy single-repo field");
+        task.Workspace.ShouldNotBeNull("authored related repos project onto a multi-repo workspace through the SAME AgentWorkspaceAuthoring the agent.code node uses — no second parse");
+        task.Workspace!.Repositories.Count.ShouldBe(2, "primary + one related repo");
+        task.Workspace.Repositories.ShouldContain(r => r.RepositoryId == primary && r.IsPrimary);
+
+        var api = task.Workspace.Repositories.Single(r => r.RepositoryId == related);
+        api.Alias.ShouldBe("api");
+        api.Access.ShouldBe(WorkspaceAccess.Write, "the authored write access flows through the shared parse (which the supervisor never re-implements)");
+    }
+
+    [Fact]
+    public void A_profile_with_a_primary_but_no_related_repos_leaves_the_workspace_null()
+    {
+        var task = Build(new SupervisorTurnContext { Goal = "g", AgentProfile = new SupervisorAgentProfile { RepositoryId = Guid.NewGuid() } });
+
+        task.RepositoryId.ShouldNotBeNull();
+        task.Workspace.ShouldBeNull("no related repos → null Workspace → the executor derives the single-repo workspace from RepositoryId → BYTE-IDENTICAL single-repo spawn");
+    }
+
+    [Theory]
+    [InlineData("\"not-an-array\"")]   // a non-array value
+    [InlineData("[]")]                  // an empty array
+    [InlineData("[{\"alias\":\"orphan\"}]")]   // an idless entry — skipped
+    public void A_malformed_or_empty_related_repositories_value_degrades_to_single_repo(string relatedJson)
+    {
+        var context = new SupervisorTurnContext
+        {
+            Goal = "g",
+            AgentProfile = new SupervisorAgentProfile { RepositoryId = Guid.NewGuid(), RelatedRepositories = JsonDocument.Parse(relatedJson).RootElement },
+        };
+
+        Build(context).Workspace.ShouldBeNull("a non-array / empty / all-idless relatedRepositories is lenient → no related → single-repo (never a stranded spawn)");
     }
 
     [Theory]
