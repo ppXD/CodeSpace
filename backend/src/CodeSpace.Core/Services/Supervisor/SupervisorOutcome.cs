@@ -195,6 +195,61 @@ public static class SupervisorOutcome
         return JsonSerializer.Serialize(new { agentRunIds, agentCount, agentResults }, AgentJson.Options);
     }
 
+    /// <summary>
+    /// Read the on-disk INTEGRATION block a <c>merge</c> outcome records (SOTA #3 / resolver loop #379) into the
+    /// compact, decider-visible <see cref="SupervisorIntegrationOutcome"/> — null when the outcome carries no
+    /// <c>integration</c> object (the gate was off, or the verb wasn't a merge) or it's malformed. Aggregates the
+    /// per-contribution <c>conflictedFiles</c> (deduped, order-preserved) + the preserved <c>fallbackBranch</c>es so
+    /// the decider sees one legible "these files conflicted, these branches are preserved" signal. Best-effort + pure.
+    /// </summary>
+    public static SupervisorIntegrationOutcome? ReadIntegration(string? outcomeJson)
+    {
+        if (string.IsNullOrWhiteSpace(outcomeJson)) return null;
+
+        try
+        {
+            var root = JsonDocument.Parse(outcomeJson).RootElement;
+
+            if (root.ValueKind != JsonValueKind.Object || !root.TryGetProperty("integration", out var integration) || integration.ValueKind != JsonValueKind.Object)
+                return null;
+
+            if (!integration.TryGetProperty("status", out var statusEl) || statusEl.ValueKind != JsonValueKind.String)
+                return null;
+
+            var conflictedFiles = new List<string>();
+            var preservedBranches = new List<string>();
+
+            if (integration.TryGetProperty("outcomes", out var outcomes) && outcomes.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var o in outcomes.EnumerateArray())
+                {
+                    if (o.ValueKind != JsonValueKind.Object) continue;
+
+                    if (o.TryGetProperty("conflictedFiles", out var files) && files.ValueKind == JsonValueKind.Array)
+                        foreach (var f in files.EnumerateArray())
+                            if (f.ValueKind == JsonValueKind.String && f.GetString() is { Length: > 0 } path && !conflictedFiles.Contains(path))
+                                conflictedFiles.Add(path);
+
+                    if (o.TryGetProperty("fallbackBranch", out var fb) && fb.ValueKind == JsonValueKind.String && fb.GetString() is { Length: > 0 } branch && !preservedBranches.Contains(branch))
+                        preservedBranches.Add(branch);
+                }
+            }
+
+            return new SupervisorIntegrationOutcome
+            {
+                Status = statusEl.GetString()!,
+                Reason = integration.TryGetProperty("reason", out var r) && r.ValueKind == JsonValueKind.String ? r.GetString() : null,
+                IntegratedBranch = integration.TryGetProperty("integratedBranch", out var ib) && ib.ValueKind == JsonValueKind.String ? ib.GetString() : null,
+                ConflictedFiles = conflictedFiles,
+                PreservedBranches = preservedBranches,
+            };
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+    }
+
     /// <summary>Read the folded compact agent results from a spawn/retry outcome (empty when absent/malformed/not-yet-folded). The decider sees these via the rendered outcome; a merge / scorecard can also read them.</summary>
     public static IReadOnlyList<SupervisorAgentResult> ReadAgentResults(string? outcomeJson)
     {
