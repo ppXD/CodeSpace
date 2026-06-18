@@ -178,6 +178,49 @@ public class SupervisorDeciderTests
         clean.ConflictedFiles.ShouldBeEmpty();
     }
 
+    /// <summary>A MULTI-repo integration block (resolver loop #379 S7-C): the aggregate status + a per-repo repositories[] array, each with its own outcomes. One repo conflicts, one is clean.</summary>
+    private const string MultiRepoConflictedOutcome = """
+        {"integration":{"status":"Conflicted","reason":"1 of 2 repositories could not be auto-combined","repositories":[
+          {"repositoryId":"11111111-1111-1111-1111-111111111111","alias":"web","status":"Clean","integratedBranch":"codespace/integration/run/turn1","appliedCount":2,"reason":null,"excludedAgents":[],"outcomes":[
+            {"label":"agent-a","disposition":"Applied","reason":null,"conflictedFiles":[],"fallbackBranch":null}]},
+          {"repositoryId":"22222222-2222-2222-2222-222222222222","alias":"api","status":"Conflicted","integratedBranch":null,"appliedCount":0,"reason":"a contribution conflicted while integrating","excludedAgents":[],"outcomes":[
+            {"label":"agent-b","disposition":"Conflicted","reason":"textual conflict","conflictedFiles":["api/Svc.cs","api/Dto.cs"],"fallbackBranch":"codespace/agent/b-api"}]}
+        ]}}
+        """;
+
+    [Fact]
+    public void ReadIntegration_aggregates_conflicts_across_a_multi_repo_block()
+    {
+        // S7-C — a multi-repo conflict is legible off the SAME ReadIntegration the single-repo path feeds: the aggregate
+        // status is Conflicted, and the conflicted files + preserved branches are unioned across every repo's outcomes,
+        // so the decider's existing conflict rendering shows the multi-repo conflict without any decider change.
+        var integration = SupervisorOutcome.ReadIntegration(MultiRepoConflictedOutcome);
+
+        integration.ShouldNotBeNull();
+        integration!.IsConflicted.ShouldBeTrue("the aggregate status is Conflicted when ANY repo conflicts");
+        integration.Status.ShouldBe("Conflicted");
+        integration.Reason.ShouldBe("1 of 2 repositories could not be auto-combined");
+        integration.ConflictedFiles.ShouldBe(new[] { "api/Svc.cs", "api/Dto.cs" }, "conflicted files are unioned across every repo's outcomes");
+        integration.PreservedBranches.ShouldBe(new[] { "codespace/agent/b-api" }, "the conflicted repo's preserved branch is surfaced for the resolver");
+        integration.IntegratedBranch.ShouldBeNull("a multi-repo block has no single integrated branch — the per-repo branches live in repositories[] (S7-D)");
+    }
+
+    [Fact]
+    public void ReadIntegration_reads_an_all_clean_multi_repo_block_as_not_conflicted()
+    {
+        var clean = SupervisorOutcome.ReadIntegration("""
+            {"integration":{"status":"Clean","reason":null,"repositories":[
+              {"repositoryId":"11111111-1111-1111-1111-111111111111","alias":"web","status":"Clean","integratedBranch":"codespace/integration/run/turn1/web","outcomes":[{"label":"a","disposition":"Applied","conflictedFiles":[],"fallbackBranch":null}]},
+              {"repositoryId":"22222222-2222-2222-2222-222222222222","alias":"api","status":"Clean","integratedBranch":"codespace/integration/run/turn1/api","outcomes":[{"label":"a","disposition":"Applied","conflictedFiles":[],"fallbackBranch":null}]}
+            ]}}
+            """);
+
+        clean.ShouldNotBeNull();
+        clean!.IsConflicted.ShouldBeFalse("all repos integrated cleanly");
+        clean.ConflictedFiles.ShouldBeEmpty();
+        clean.PreservedBranches.ShouldBeEmpty();
+    }
+
     [Theory]
     [InlineData(null)]
     [InlineData("")]

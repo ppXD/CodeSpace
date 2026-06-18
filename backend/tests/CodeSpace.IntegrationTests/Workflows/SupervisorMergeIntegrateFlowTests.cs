@@ -238,7 +238,267 @@ public sealed class SupervisorMergeIntegrateFlowTests : IDisposable
         (await remote.RemoteHasBranchAsync($"codespace/integration/{runId:N}/turn3")).ShouldBeTrue("the integrator really pushed its reviewable branch");
     }
 
+    [Fact]
+    public async Task Multi_repo_integrates_each_writable_repo_on_its_own_axis()
+    {
+        // Resolver loop #379 S7-C — a MULTI-repo run integrates EACH writable repo on its own axis: two agents, each
+        // touching DISJOINT files in BOTH repos, integrate cleanly into a per-repo branch on each repo's OWN remote.
+        // The aggregate status is Clean; the repositories[] array carries one block per repo, each really pushed.
+        if (!await GitReadyAsync()) return;
+
+        using var web = new BareRemote();
+        using var api = new BareRemote();
+        var webBase = await web.SeedBaseAsync(new() { ["web_a.txt"] = "wa\n", ["web_b.txt"] = "wb\n" });
+        var apiBase = await api.SeedBaseAsync(new() { ["api_a.txt"] = "aa\n", ["api_b.txt"] = "ab\n" });
+
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var webRepoId = await SeedBoundRepositoryAsync(teamId, web.Url, "main");
+        var apiRepoId = await SeedBoundRepositoryAsync(teamId, api.Url, "main");
+        var runId = await SeedSupervisorRunAsync(teamId, userId);
+
+        var webPatchA = await web.MakePatchAsync(webBase, d => File.WriteAllText(Path.Combine(d, "web_a.txt"), "web-A\n"));
+        var apiPatchA = await api.MakePatchAsync(apiBase, d => File.WriteAllText(Path.Combine(d, "api_a.txt"), "api-A\n"));
+        var webPatchB = await web.MakePatchAsync(webBase, d => File.WriteAllText(Path.Combine(d, "web_b.txt"), "web-B\n"));
+        var apiPatchB = await api.MakePatchAsync(apiBase, d => File.WriteAllText(Path.Combine(d, "api_b.txt"), "api-B\n"));
+
+        var idA = await SeedMultiRepoAgentRunAsync(runId, teamId, "alpha", ("web", webRepoId, webBase, webPatchA, "codespace/agent/a"), ("api", apiRepoId, apiBase, apiPatchA, "codespace/agent/a"));
+        var idB = await SeedMultiRepoAgentRunAsync(runId, teamId, "beta", ("web", webRepoId, webBase, webPatchB, "codespace/agent/b"), ("api", apiRepoId, apiBase, apiPatchB, "codespace/agent/b"));
+
+        var outcome = await ExecuteMultiRepoMergeAsync(runId, teamId, webRepoId, idA, idB);
+        var integration = outcome.GetProperty("integration");
+
+        integration.GetProperty("status").GetString().ShouldBe("Clean", "both repos integrate cleanly on disjoint files");
+        var repos = integration.GetProperty("repositories").EnumerateArray().ToList();
+        repos.Count.ShouldBe(2, "one integration block per writable repo");
+
+        // The synthesis reduce narrates EVERY repo's diff (not just the primary's) — the deterministic fake echoes its
+        // prompt, so a SECONDARY (api) hunk body proves the per-repo diffs were threaded in (S7-C synthesis fix).
+        var synthesisText = outcome.GetProperty("synthesis").GetProperty("text").GetString();
+        synthesisText.ShouldContain("api-A", customMessage: "the multi-repo synthesis prompt carried the SECONDARY api repo's real diff, not only the primary web repo's");
+
+        var webBlock = repos.Single(r => r.GetProperty("alias").GetString() == "web");
+        var apiBlock = repos.Single(r => r.GetProperty("alias").GetString() == "api");
+        webBlock.GetProperty("repositoryId").GetGuid().ShouldBe(webRepoId, "each block names its repository — the per-repo key the resolution loop acts on");
+        webBlock.GetProperty("status").GetString().ShouldBe("Clean");
+        apiBlock.GetProperty("status").GetString().ShouldBe("Clean");
+
+        var branch = $"codespace/integration/{runId:N}/turn1";
+        (await web.RemoteFileAsync(branch, "web_a.txt")).ShouldContain("web-A", customMessage: "agent A's web change landed on the web integrated branch");
+        (await web.RemoteFileAsync(branch, "web_b.txt")).ShouldContain("web-B", customMessage: "agent B's web change landed too — the web repo integrated on its own axis");
+        (await api.RemoteFileAsync(branch, "api_a.txt")).ShouldContain("api-A", customMessage: "agent A's api change landed on the api integrated branch (its OWN remote)");
+        (await api.RemoteFileAsync(branch, "api_b.txt")).ShouldContain("api-B", customMessage: "agent B's api change landed too — INTEGRATED per repo, not narrated");
+    }
+
+    [Fact]
+    public async Task Multi_repo_with_one_conflicting_repo_aggregates_to_Conflicted_and_isolates_the_clean_repo()
+    {
+        // S7-C — when ONE repo conflicts (both agents edit the same api file) but another is clean (disjoint web files),
+        // the aggregate is Conflicted (so the decider resolves), the clean web repo STILL pushes its integrated branch
+        // (per-repo fail-safe — one conflicting repo never sinks a clean sibling), and the conflicted api repo pushes
+        // none. ReadIntegration surfaces the api conflict's files for the resolver.
+        if (!await GitReadyAsync()) return;
+
+        using var web = new BareRemote();
+        using var api = new BareRemote();
+        var webBase = await web.SeedBaseAsync(new() { ["web_a.txt"] = "wa\n", ["web_b.txt"] = "wb\n" });
+        var apiBase = await api.SeedBaseAsync(new() { ["shared.txt"] = "shared\n" });
+
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var webRepoId = await SeedBoundRepositoryAsync(teamId, web.Url, "main");
+        var apiRepoId = await SeedBoundRepositoryAsync(teamId, api.Url, "main");
+        var runId = await SeedSupervisorRunAsync(teamId, userId);
+
+        var webPatchA = await web.MakePatchAsync(webBase, d => File.WriteAllText(Path.Combine(d, "web_a.txt"), "web-A\n"));
+        var webPatchB = await web.MakePatchAsync(webBase, d => File.WriteAllText(Path.Combine(d, "web_b.txt"), "web-B\n"));
+        var apiPatchA = await api.MakePatchAsync(apiBase, d => File.WriteAllText(Path.Combine(d, "shared.txt"), "A-wins\n"));
+        var apiPatchB = await api.MakePatchAsync(apiBase, d => File.WriteAllText(Path.Combine(d, "shared.txt"), "B-wins\n"));
+
+        var idA = await SeedMultiRepoAgentRunAsync(runId, teamId, "alpha", ("web", webRepoId, webBase, webPatchA, "codespace/agent/a"), ("api", apiRepoId, apiBase, apiPatchA, "codespace/agent/a-api"));
+        var idB = await SeedMultiRepoAgentRunAsync(runId, teamId, "beta", ("web", webRepoId, webBase, webPatchB, "codespace/agent/b"), ("api", apiRepoId, apiBase, apiPatchB, "codespace/agent/b-api"));
+
+        var outcome = await ExecuteMultiRepoMergeAsync(runId, teamId, webRepoId, idA, idB);
+        var integration = outcome.GetProperty("integration");
+
+        integration.GetProperty("status").GetString().ShouldBe("Conflicted", "one conflicting repo makes the aggregate Conflicted");
+        var repos = integration.GetProperty("repositories").EnumerateArray().ToList();
+        repos.Single(r => r.GetProperty("alias").GetString() == "web").GetProperty("status").GetString().ShouldBe("Clean", "the clean web repo is isolated — a conflicting sibling never sinks it");
+        repos.Single(r => r.GetProperty("alias").GetString() == "api").GetProperty("status").GetString().ShouldBe("Conflicted");
+
+        var branch = $"codespace/integration/{runId:N}/turn1";
+        (await web.RemoteHasBranchAsync(branch)).ShouldBeTrue("the clean web repo really pushed its integrated branch");
+        (await api.RemoteHasBranchAsync(branch)).ShouldBeFalse("the conflicted api repo pushed NO branch — its agent branches remain for the resolver");
+
+        // The conflict is legible off the SAME ReadIntegration the decider feeds — the api file is surfaced for the resolver.
+        var read = SupervisorOutcome.ReadIntegration(outcome.GetRawText());
+        read!.IsConflicted.ShouldBeTrue();
+        read.ConflictedFiles.ShouldContain("shared.txt", customMessage: "the conflicted repo's file is surfaced across the multi-repo block for the decider/resolver");
+    }
+
+    [Fact]
+    public async Task Multi_repo_disjoint_fan_out_integrates_clean_without_a_spurious_conflict()
+    {
+        // BLOCKER regression guard (S7-C review): the capture layer emits a RepositoryRunResult for EVERY writable repo,
+        // even one an agent NEVER touched (empty patch, no branch). Agent A works ONLY on web, agent B ONLY on api — so
+        // each has a vacuous no-op entry for the OTHER repo. Those must be DROPPED, not fed to the integrator (which
+        // would refuse them as "no patch and no branch" → spurious Conflicted). The normal disjoint fan-out is Clean.
+        if (!await GitReadyAsync()) return;
+
+        using var web = new BareRemote();
+        using var api = new BareRemote();
+        var webBase = await web.SeedBaseAsync(new() { ["web.txt"] = "w\n" });
+        var apiBase = await api.SeedBaseAsync(new() { ["api.txt"] = "a\n" });
+
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var webRepoId = await SeedBoundRepositoryAsync(teamId, web.Url, "main");
+        var apiRepoId = await SeedBoundRepositoryAsync(teamId, api.Url, "main");
+        var runId = await SeedSupervisorRunAsync(teamId, userId);
+
+        var webPatchA = await web.MakePatchAsync(webBase, d => File.WriteAllText(Path.Combine(d, "web.txt"), "web-by-A\n"));
+        var apiPatchB = await api.MakePatchAsync(apiBase, d => File.WriteAllText(Path.Combine(d, "api.txt"), "api-by-B\n"));
+
+        // Agent A touched ONLY web (its api entry is a vacuous no-op: empty patch, no branch); agent B touched ONLY api.
+        var idA = await SeedMultiRepoAgentRunAsync(runId, teamId, "alpha", ("web", webRepoId, webBase, webPatchA, "codespace/agent/a"), ("api", apiRepoId, apiBase, "", null));
+        var idB = await SeedMultiRepoAgentRunAsync(runId, teamId, "beta", ("web", webRepoId, webBase, "", null), ("api", apiRepoId, apiBase, apiPatchB, "codespace/agent/b"));
+
+        var integration = (await ExecuteMultiRepoMergeAsync(runId, teamId, webRepoId, idA, idB)).GetProperty("integration");
+
+        integration.GetProperty("status").GetString().ShouldBe("Clean", "a disjoint fan-out has ZERO real conflicts — the untouched no-op entries are dropped, not refused");
+        var repos = integration.GetProperty("repositories").EnumerateArray().ToList();
+        repos.Single(r => r.GetProperty("alias").GetString() == "web").GetProperty("appliedCount").GetInt32().ShouldBe(1, "only agent A's real web change is integrated — agent B's no-op web entry is dropped, not a contribution");
+        repos.Single(r => r.GetProperty("alias").GetString() == "api").GetProperty("appliedCount").GetInt32().ShouldBe(1, "only agent B's real api change is integrated");
+
+        var branch = $"codespace/integration/{runId:N}/turn1";
+        (await web.RemoteFileAsync(branch, "web.txt")).ShouldContain("web-by-A");
+        (await api.RemoteFileAsync(branch, "api.txt")).ShouldContain("api-by-B", customMessage: "each repo integrated its ONE real contribution — no spurious conflict from a sibling's untouched entry");
+    }
+
+    [Fact]
+    public async Task Multi_repo_names_a_no_base_contribution_in_the_repo_block_excludedAgents()
+    {
+        // Per-repo honesty (S7-C review): a contribution with NO base revision is EXCLUDED from that repo's integration
+        // and NAMED in its block's excludedAgents — the per-repo analogue of the single-repo honesty invariant — while
+        // the based contribution still applies. Proven per repo, where a silently-dropped contribution would hide.
+        if (!await GitReadyAsync()) return;
+
+        using var api = new BareRemote();
+        var apiBase = await api.SeedBaseAsync(new() { ["api.txt"] = "a\n" });
+
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var apiRepoId = await SeedBoundRepositoryAsync(teamId, api.Url, "main");
+        var runId = await SeedSupervisorRunAsync(teamId, userId);
+
+        var apiPatchA = await api.MakePatchAsync(apiBase, d => File.WriteAllText(Path.Combine(d, "api.txt"), "api-by-A\n"));
+
+        // Agent A has a real api change with a base; agent B touched api (a real patch) but recorded NO base (a re-attached
+        // run) → B is excluded + named, A applies. The multi-repo path runs because the agents carry per-repo results.
+        var idA = await SeedMultiRepoAgentRunAsync(runId, teamId, "alpha", ("api", apiRepoId, apiBase, apiPatchA, "codespace/agent/a"));
+        var idB = await SeedMultiRepoAgentRunAsync(runId, teamId, "beta", ("api", apiRepoId, null, "patch-with-no-base", "codespace/agent/b"));
+
+        var integration = (await ExecuteMultiRepoMergeAsync(runId, teamId, apiRepoId, idA, idB)).GetProperty("integration");
+
+        var apiBlock = integration.GetProperty("repositories").EnumerateArray().Single(r => r.GetProperty("alias").GetString() == "api");
+        apiBlock.GetProperty("status").GetString().ShouldBe("Clean", "the no-base contribution is EXCLUDED, so the one based contribution still integrates cleanly");
+        apiBlock.GetProperty("appliedCount").GetInt32().ShouldBe(1);
+        apiBlock.GetProperty("excludedAgents").EnumerateArray().Select(e => e.GetString()).ShouldContain(idB.ToString(), customMessage: "the no-base agent is named per-repo — a dropped contribution is never silently hidden");
+    }
+
+    [Fact]
+    public async Task Multi_repo_unresolvable_repo_degrades_to_Skipped_without_sinking_the_clean_sibling_or_stranding_the_turn()
+    {
+        // Per-repo fail-safe (S7-C review major): the resolver THROWS for a deleted / cross-team repo (never returns
+        // null). A ghost repo id must degrade to a NAMED Skipped block — never abort the loop (sinking the clean web
+        // sibling) nor escape and strand the merge decision Running. The merge completes; web still pushed its branch.
+        if (!await GitReadyAsync()) return;
+
+        using var web = new BareRemote();
+        var webBase = await web.SeedBaseAsync(new() { ["web.txt"] = "w\n" });
+
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var webRepoId = await SeedBoundRepositoryAsync(teamId, web.Url, "main");
+        var runId = await SeedSupervisorRunAsync(teamId, userId);
+
+        var webPatch = await web.MakePatchAsync(webBase, d => File.WriteAllText(Path.Combine(d, "web.txt"), "web-edited\n"));
+        var ghostRepoId = Guid.NewGuid();   // never bound — the real resolver throws "not found for this team"
+
+        var idA = await SeedMultiRepoAgentRunAsync(runId, teamId, "alpha", ("web", webRepoId, webBase, webPatch, "codespace/agent/a"), ("ghost", ghostRepoId, "ghostbase", "patch-for-the-ghost-repo", "codespace/agent/a-ghost"));
+
+        var integration = (await ExecuteMultiRepoMergeAsync(runId, teamId, webRepoId, idA)).GetProperty("integration");
+
+        integration.GetProperty("repositories").EnumerateArray().Single(r => r.GetProperty("alias").GetString() == "web").GetProperty("status").GetString().ShouldBe("Clean", "the clean web repo is not sunk by the unresolvable ghost");
+        var ghostBlock = integration.GetProperty("repositories").EnumerateArray().Single(r => r.GetProperty("alias").GetString() == "ghost");
+        ghostBlock.GetProperty("status").GetString().ShouldBe("Skipped", "an unresolvable repo degrades to a named Skipped block, never throws");
+        ghostBlock.GetProperty("repositoryId").GetGuid().ShouldBe(ghostRepoId);
+
+        (await web.RemoteHasBranchAsync($"codespace/integration/{runId:N}/turn1")).ShouldBeTrue("the clean web repo still pushed its integrated branch — the turn completed, the ghost did not strand it");
+    }
+
+    [Fact]
+    public async Task Multi_repo_names_null_repository_id_work_as_a_skipped_block()
+    {
+        // Per-repo honesty (S7-C review minor): per-repo work with a NULL repository id (a degraded capture with no
+        // resolvable spec) can't be cloned — it is NAMED as a Skipped block (not silently dropped), so an operator
+        // reading repositories[] sees the uncombined work and which agent produced it.
+        if (!await GitReadyAsync()) return;
+
+        using var web = new BareRemote();
+        var webBase = await web.SeedBaseAsync(new() { ["web.txt"] = "w\n" });
+
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var webRepoId = await SeedBoundRepositoryAsync(teamId, web.Url, "main");
+        var runId = await SeedSupervisorRunAsync(teamId, userId);
+
+        var webPatch = await web.MakePatchAsync(webBase, d => File.WriteAllText(Path.Combine(d, "web.txt"), "web-edited\n"));
+
+        // Agent A has a real web change PLUS a degraded "orphan" entry whose repository id is null (no resolvable spec).
+        var idA = await SeedMultiRepoAgentRunAsync(runId, teamId, "alpha", ("web", webRepoId, webBase, webPatch, "codespace/agent/a"), ("orphan", null, "orphanbase", "patch-with-no-repo-id", "codespace/agent/a-orphan"));
+
+        var integration = (await ExecuteMultiRepoMergeAsync(runId, teamId, webRepoId, idA)).GetProperty("integration");
+
+        integration.GetProperty("repositories").EnumerateArray().Single(r => r.GetProperty("alias").GetString() == "web").GetProperty("status").GetString().ShouldBe("Clean");
+
+        var orphanBlock = integration.GetProperty("repositories").EnumerateArray().Single(r => r.GetProperty("alias").GetString() == "orphan");
+        orphanBlock.GetProperty("status").GetString().ShouldBe("Skipped", "null-id work is named Skipped, never silently omitted from the aggregate");
+        orphanBlock.GetProperty("repositoryId").ValueKind.ShouldBe(JsonValueKind.Null);
+        orphanBlock.GetProperty("excludedAgents").EnumerateArray().Select(e => e.GetString()).ShouldContain(idA.ToString(), customMessage: "the agent whose null-id work remains on its branch is named");
+    }
+
     // ─── Drive the real executor ───────────────────────────────────────────────────
+
+    /// <summary>Execute a multi-repo <c>merge</c>: the profile's primary repo is set explicitly (the agents carry per-repo results), the integrate gate on.</summary>
+    private async Task<JsonElement> ExecuteMultiRepoMergeAsync(Guid runId, Guid teamId, Guid primaryRepoId, params Guid[] agentRunIds)
+    {
+        using var scope = _fixture.BeginScope();
+        var executor = scope.Resolve<ISupervisorActionExecutor>();
+
+        var context = new SupervisorTurnContext
+        {
+            Goal = Goal,
+            SupervisorRunId = runId,
+            TeamId = teamId,
+            NodeId = NodeId,
+            TurnNumber = 1,
+            PriorDecisions = new[]
+            {
+                new SupervisorPriorDecision
+                {
+                    Id = Guid.NewGuid(), Sequence = 1, DecisionKind = SupervisorDecisionKinds.Spawn, Status = SupervisorDecisionStatus.Succeeded,
+                    PayloadJson = """{"subtaskIds":["s1","s2"]}""",
+                    OutcomeJson = JsonSerializer.Serialize(new { agentRunIds, agentCount = agentRunIds.Length }, AgentJson.Options),
+                },
+            },
+            AgentProfile = new SupervisorAgentProfile { RepositoryId = primaryRepoId, IntegrateBranches = true },
+        };
+
+        var decision = new SupervisorDecision
+        {
+            Kind = SupervisorDecisionKinds.Merge,
+            PayloadJson = JsonSerializer.Serialize(new SupervisorMergePayload { SynthesisInstruction = "combine both branches" }, AgentJson.Options),
+        };
+
+        var execution = await executor.ExecuteAsync(decision, context, CancellationToken.None);
+        return JsonDocument.Parse(execution.OutcomeJson).RootElement.Clone();
+    }
+
 
     /// <summary>Execute a <c>merge</c> against a tape that already holds spawn → conflicted-merge → resolve (verified or not, with a pushed branch) — the resolver-loop shape S5's short-circuit (or fall-through) is asserted against.</summary>
     private async Task<JsonElement> ExecuteMergeAfterResolveAsync(Guid runId, Guid teamId, Guid repoId, string resolverBranch, bool verified, params Guid[] agentRunIds)
@@ -401,6 +661,42 @@ public sealed class SupervisorMergeIntegrateFlowTests : IDisposable
         return id;
     }
 
+    /// <summary>Seed a Succeeded MULTI-repo AgentRun whose ResultJson carries per-repo <see cref="RepositoryRunResult"/>s (each with its own base SHA + per-repo diff + produced branch), exactly as the multi-repo capture+offload path (S7-C0) persists. The top-level fields mirror the PRIMARY (first) repo. Nullable fields let a test express an UNTOUCHED repo (empty Patch + null Branch), a NO-BASE contribution (null BaseSha), or a degraded NULL-id entry (null RepoId).</summary>
+    private async Task<Guid> SeedMultiRepoAgentRunAsync(Guid runId, Guid teamId, string summary, params (string Alias, Guid? RepoId, string? BaseSha, string Patch, string? Branch)[] perRepo)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        var id = Guid.NewGuid();
+        var now = DateTimeOffset.UtcNow;
+        var primary = perRepo[0];
+
+        var resultJson = JsonSerializer.Serialize(new AgentRunResult
+        {
+            Status = AgentRunStatus.Succeeded,
+            ExitReason = "completed",
+            Summary = summary,
+            Patch = primary.Patch,
+            BaseSha = primary.BaseSha,
+            ChangedFiles = new[] { $"{primary.Alias}.txt" },
+            ProducedBranch = primary.Branch,
+            ChangeSetId = $"cs-{id:N}",
+            RepositoryResults = perRepo.Select(r => new RepositoryRunResult
+            {
+                Alias = r.Alias, RepositoryId = r.RepoId, BaseSha = r.BaseSha, BaseBranch = "main",
+                Patch = r.Patch, ProducedBranch = r.Branch, ChangedFiles = new[] { $"{r.Alias}.txt" }, Access = WorkspaceAccess.Write,
+            }).ToArray(),
+        }, AgentJson.Options);
+
+        db.AgentRun.Add(new AgentRun
+        {
+            Id = id, TeamId = teamId, WorkflowRunId = runId, NodeId = NodeId, IterationKey = $"{NodeId}#turn0#{id:N}",
+            Harness = "codex-cli", Status = AgentRunStatus.Succeeded, TaskJson = "{}", ResultJson = resultJson,
+            CreatedDate = now, CreatedBy = Guid.Empty, LastModifiedDate = now, LastModifiedBy = Guid.Empty,
+        });
+        await db.SaveChangesAsync();
+        return id;
+    }
+
     /// <summary>Seed a Failed AgentRun with NO ResultJson (so no base, no diff) — the shape a failed / abandoned / analysis-only spawn persists. The merge folds it into the side-by-side array but the integration step excludes it (no base).</summary>
     private async Task<Guid> SeedFailedAgentRunAsync(Guid runId, Guid teamId, string error)
     {
@@ -426,7 +722,9 @@ public sealed class SupervisorMergeIntegrateFlowTests : IDisposable
         var db = scope.Resolve<CodeSpaceDbContext>();
 
         var instanceId = Guid.NewGuid();
-        db.ProviderInstance.Add(new ProviderInstance { Id = instanceId, TeamId = teamId, Provider = ProviderKind.GitHub, DisplayName = "local", BaseUrl = "https://local" });
+        // Unique BaseUrl per call so seeding TWO repos for one team (a multi-repo run) doesn't collide on the
+        // (team, provider, url) unique index; the integrator uses the repo's CloneUrlHttps, not this base url.
+        db.ProviderInstance.Add(new ProviderInstance { Id = instanceId, TeamId = teamId, Provider = ProviderKind.GitHub, DisplayName = "local", BaseUrl = $"https://local/{instanceId:N}" });
 
         var serializer = scope.Resolve<CodeSpace.Core.Services.Credentials.ICredentialPayloadSerializer>();
         var encryptor = scope.Resolve<CodeSpace.Core.Services.Credentials.IPayloadEncryptor>();

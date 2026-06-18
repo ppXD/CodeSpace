@@ -44,12 +44,19 @@ public sealed partial class RealSupervisorActionExecutor
         // Integration (facet a) writes a branch — only with a resolvable repository. EXCEPT when the conflict was
         // already RESOLVED: a VERIFIED resolver's own tested branch IS the reconciled merge, so re-running the
         // integrator over the original conflicting branches would just re-conflict (resolver loop #379, S5). In that
-        // case surface the resolver branch as a Clean integration without touching git.
+        // case surface the resolver branch as a Clean integration without touching git. A MULTI-repo run (the agents
+        // produced per-repo results) integrates EACH writable repo on its own axis (S7-C); a single-repo run keeps the
+        // byte-identical flat path.
         if (profile?.RepositoryId is { } repoId)
             outcome["integration"] = AcceptedResolutionBranch(context) is { } resolvedBranch
                 ? ResolutionIntegration(resolvedBranch)
-                : await IntegrateMergedAsync(repoId, context, merged, cancellationToken).ConfigureAwait(false);
+                : HasPerRepoResults(merged)
+                    ? await IntegrateMultiRepoAsync(context, merged, cancellationToken).ConfigureAwait(false)
+                    : await IntegrateMergedAsync(repoId, context, merged, cancellationToken).ConfigureAwait(false);
     }
+
+    /// <summary>Whether this merge spans MULTIPLE repositories — ANY merged agent recorded per-repo results (a multi-repo workspace run). A single-repo run has none, so it takes the byte-identical flat <see cref="IntegrateMergedAsync"/> path.</summary>
+    private static bool HasPerRepoResults(IReadOnlyList<MergedAgent> merged) => merged.Any(m => m.RepositoryResults.Count > 0);
 
     /// <summary>
     /// The branch a VERIFIED resolver produced — but ONLY when the most recent agent-staging decision (spawn / retry /
@@ -132,7 +139,15 @@ public sealed partial class RealSupervisorActionExecutor
         {
             sb.Append("=== Agent ").Append(a.AgentRunId).Append(" (").Append(a.Status).Append(") ===\n");
             if (!string.IsNullOrWhiteSpace(a.Summary)) sb.Append("Summary: ").Append(a.Summary).Append('\n');
-            sb.Append("Diff:\n").Append(string.IsNullOrEmpty(a.Patch) ? "(no diff captured)" : a.Patch).Append("\n\n");
+
+            // Multi-repo: narrate EACH repo's real diff (so the synthesis covers the whole change set, not just the
+            // primary repo's top-level patch); a single-repo agent (no per-repo results) keeps the byte-identical
+            // top-level Diff: section.
+            if (a.RepositoryResults.Count > 0)
+                foreach (var repo in a.RepositoryResults.Where(r => !IsUntouched(r)))
+                    sb.Append("Diff [").Append(repo.Alias).Append("]:\n").Append(string.IsNullOrEmpty(repo.Patch) ? "(no diff captured)" : repo.Patch).Append("\n\n");
+            else
+                sb.Append("Diff:\n").Append(string.IsNullOrEmpty(a.Patch) ? "(no diff captured)" : a.Patch).Append("\n\n");
         }
 
         return sb.ToString();
@@ -142,7 +157,19 @@ public sealed partial class RealSupervisorActionExecutor
 
     private async Task<object> IntegrateMergedAsync(Guid repoId, SupervisorTurnContext context, IReadOnlyList<MergedAgent> merged, CancellationToken cancellationToken)
     {
-        var workspace = await _workspaces.ResolveByRepositoryIdAsync(repoId, context.TeamId, cancellationToken).ConfigureAwait(false);
+        // The resolver THROWS WorkspaceException for a deleted / cross-team / no-clone-URL repo (it never returns null
+        // for those), so the resolve is wrapped: an unresolvable repo degrades to a Skipped outcome — it must never
+        // escape and strand the merge decision Running (the turn service only catches AgentDefinitionResolutionException).
+        WorkspaceRequest? workspace;
+        try
+        {
+            workspace = await _workspaces.ResolveByRepositoryIdAsync(repoId, context.TeamId, cancellationToken).ConfigureAwait(false);
+        }
+        catch (WorkspaceException ex)
+        {
+            _logger.LogWarning(ex, "Supervisor branch integration could not resolve the repository; keeping the side-by-side fold");
+            return new { status = "Skipped", reason = ex.Message };
+        }
 
         if (workspace is null) return new { status = "Skipped", reason = "the repository could not be resolved to a clone target" };
 
@@ -201,6 +228,192 @@ public sealed partial class RealSupervisorActionExecutor
         appliedCount = result.AppliedCount,
         reason = result.Reason,
         excludedAgents,
-        outcomes = result.Outcomes.Select(o => new { label = o.Label, disposition = o.Disposition.ToString(), reason = o.Reason, conflictedFiles = o.ConflictedFiles, fallbackBranch = o.FallbackBranch }).ToList(),
+        outcomes = ProjectOutcomes(result),
     };
+
+    /// <summary>The per-contribution outcomes array — the ONE projection both the single-repo flat block (<see cref="ProjectIntegrationResult"/>) and the per-repo block (<see cref="ProjectRepoBlock"/>) emit, so the two shapes can't drift (the write-side analogue of the read-side <see cref="SupervisorOutcome.ReadIntegration"/> unification).</summary>
+    private static object ProjectOutcomes(IntegrationResult result) =>
+        result.Outcomes.Select(o => new { label = o.Label, disposition = o.Disposition.ToString(), reason = o.Reason, conflictedFiles = o.ConflictedFiles, fallbackBranch = o.FallbackBranch }).ToList();
+
+    // ── Facet (a), multi-repo: integrate EACH writable repo on its own axis (resolver loop #379, S7-C) ──────────────
+
+    /// <summary>
+    /// Multi-repo integration: run the patch-based <see cref="IBranchIntegrator"/> ONCE PER WRITABLE repo — each a
+    /// single-repo set over that repo's per-repo contributions — and aggregate the per-repo blocks into one integration
+    /// outcome. A repo with no resolvable clone / no recorded base is Skipped (named), a git infrastructure failure is
+    /// Failed (named); neither crashes the turn — the fail-safe is per repo, exactly like the single-repo path. The
+    /// aggregate <c>status</c> is the worst per-repo outcome, so the decider perceives "a conflict" off the SAME
+    /// <see cref="SupervisorOutcome.ReadIntegration"/> the single-repo path feeds; the per-repo detail rides in
+    /// <c>repositories[]</c> for the per-repo resolution loop (S7-D). Each repo integrates into its OWN origin under
+    /// the shared per-turn branch name (distinct remotes → no collision), like the agents' per-repo push.
+    /// </summary>
+    private async Task<object> IntegrateMultiRepoAsync(SupervisorTurnContext context, IReadOnlyList<MergedAgent> merged, CancellationToken cancellationToken)
+    {
+        var repos = CollectWritableRepos(merged);
+
+        var blocks = new List<(string Status, object Block)>(repos.Count);
+
+        foreach (var repo in repos)
+            blocks.Add(await IntegrateOneRepoAsync(repo, context, merged, cancellationToken).ConfigureAwait(false));
+
+        // Honesty: per-repo work whose repository id is NULL (a degraded capture with no resolvable spec) can't be
+        // cloned, so it's named as a Skipped block rather than silently dropped — an operator reading repositories[]
+        // sees the uncombined work, mirroring the integrator's own "a dropped contribution is loudly named" invariant.
+        blocks.AddRange(UnresolvableRepoBlocks(merged));
+
+        var status = AggregateStatus(blocks.Select(b => b.Status).ToList());
+
+        _logger.LogInformation("Supervisor integrated {RepoCount} repository axis(es) → {Status}", repos.Count, status);
+
+        return new
+        {
+            status,
+            reason = AggregateReason(blocks),
+            repositories = blocks.Select(b => b.Block).ToList(),
+        };
+    }
+
+    /// <summary>The writable repos to integrate, in first-seen spawn order, deduped by repository id — the union across the agents' per-repo results. A per-repo entry with a NULL repository id (a degraded capture with no resolvable spec) can't be cloned, so it is skipped here (its work stays on its branch); a repo every agent left null contributes nothing to integrate.</summary>
+    private static IReadOnlyList<(Guid RepositoryId, string Alias)> CollectWritableRepos(IReadOnlyList<MergedAgent> merged)
+    {
+        var seen = new HashSet<Guid>();
+        var repos = new List<(Guid, string)>();
+
+        foreach (var agent in merged)
+            foreach (var repo in agent.RepositoryResults)
+                if (repo.RepositoryId is { } id && seen.Add(id))
+                    repos.Add((id, repo.Alias));
+
+        return repos;
+    }
+
+    /// <summary>Synthetic Skipped blocks for per-repo work whose repository id is NULL (a degraded capture) — grouped by alias, naming the agents whose work remains on their branches. A vacuous untouched null-id entry is dropped (nothing to combine); a real one is NAMED so the aggregate never silently omits uncombined work. Skipped (not Conflicted) — a missing spec is a degraded state, not a merge conflict.</summary>
+    private static IEnumerable<(string Status, object Block)> UnresolvableRepoBlocks(IReadOnlyList<MergedAgent> merged) =>
+        merged
+            .SelectMany(agent => agent.RepositoryResults.Where(r => r.RepositoryId is null && !IsUntouched(r)).Select(r => (agent, r)))
+            .GroupBy(x => x.r.Alias)
+            .Select(g => ("Skipped", (object)new
+            {
+                repositoryId = (Guid?)null,
+                alias = g.Key,
+                status = "Skipped",
+                reason = "no resolvable repository id for this repo — the agents' work remains on their branches",
+                excludedAgents = g.Select(x => x.agent.AgentRunId.ToString()).Distinct().ToList(),
+            }));
+
+    /// <summary>Integrate ONE repo's per-repo contributions, returning its (status, block) pair. Mirrors the single-repo <see cref="IntegrateMergedAsync"/> fail-safe — unresolvable repo / no base → Skipped, git failure → Failed — scoped to this repo's per-repo patches + base. A repo an agent never TOUCHED (the capture layer still emits a vacuous entry) is dropped from the contributions so a disjoint fan-out doesn't spuriously conflict.</summary>
+    private async Task<(string Status, object Block)> IntegrateOneRepoAsync((Guid RepositoryId, string Alias) repo, SupervisorTurnContext context, IReadOnlyList<MergedAgent> merged, CancellationToken cancellationToken)
+    {
+        // This repo's REAL contributions: each agent's per-repo entry that ACTUALLY changed it. The capture layer emits
+        // a RepositoryRunResult for EVERY writable repo — including one an agent never touched (empty patch, no branch).
+        // A vacuous untouched entry is DROPPED (not integrated, NOT reported excluded — it isn't lost work): otherwise
+        // the integrator refuses it as "no patch and no branch" and the common disjoint fan-out (agent A → web only,
+        // agent B → api only) would spuriously abort each repo as Conflicted.
+        var touched = merged
+            .Select(agent => (agent, repoResult: agent.RepositoryResults.FirstOrDefault(r => r.RepositoryId == repo.RepositoryId)))
+            .Where(x => x.repoResult is { } rr && !IsUntouched(rr))
+            .Select(x => (x.agent, RepoResult: x.repoResult!))
+            .ToList();
+
+        var eligible = touched.Where(x => !string.IsNullOrEmpty(x.RepoResult.BaseSha)).ToList();
+        var excluded = touched.Where(x => string.IsNullOrEmpty(x.RepoResult.BaseSha)).Select(x => x.agent.AgentRunId.ToString()).ToList();
+
+        var baseBranch = eligible.Count > 0 ? eligible[0].RepoResult.BaseBranch : null;
+
+        // The resolver THROWS for a deleted / cross-team / no-clone-URL repo (never returns null for those), so the
+        // resolve is wrapped SEPARATELY → a Skipped block: an unresolvable repo must never abort the loop (sinking a
+        // clean sibling) nor escape and strand the merge turn. A git failure DURING integrate is a distinct Failed.
+        WorkspaceRequest? workspace;
+        try
+        {
+            workspace = await _workspaces.ResolveByRepositoryIdAsync(repo.RepositoryId, context.TeamId, cancellationToken, baseBranch).ConfigureAwait(false);
+        }
+        catch (WorkspaceException ex)
+        {
+            _logger.LogWarning(ex, "Supervisor could not resolve repository '{Alias}' to integrate; surfacing a Skipped block", repo.Alias);
+            return ("Skipped", RepoSkipBlock(repo, "Skipped", ex.Message, excluded));
+        }
+
+        if (workspace is null) return ("Skipped", RepoSkipBlock(repo, "Skipped", "the repository could not be resolved to a clone target", excluded));
+
+        if (eligible.Count == 0) return ("Skipped", RepoSkipBlock(repo, "Skipped", "no agent changed this repository with a recorded base revision", excluded));
+
+        var request = BuildPerRepoIntegrationRequest(repo.RepositoryId, context, workspace, eligible[0].RepoResult.BaseSha!, eligible);
+
+        try
+        {
+            var result = await _integrator.IntegrateAsync(request, cancellationToken).ConfigureAwait(false);
+            return (result.Status.ToString(), ProjectRepoBlock(repo, result, excluded));
+        }
+        catch (WorkspaceException ex)
+        {
+            _logger.LogWarning(ex, "Supervisor per-repo integration failed for '{Alias}'; keeping the side-by-side fold", repo.Alias);
+            return ("Failed", RepoSkipBlock(repo, "Failed", ex.Message, excluded));
+        }
+    }
+
+    /// <summary>A per-repo entry the agent never actually CHANGED — no diff (inline empty AND no offload ref) AND no pushed branch. The capture layer emits one <see cref="RepositoryRunResult"/> per writable repo even for an untouched one; integrating its vacuous "no patch, no branch" entry would make the integrator refuse the whole repo set, so it is dropped from the contributions — there is nothing to combine, and it is not lost work.</summary>
+    private static bool IsUntouched(RepositoryRunResult repo) =>
+        string.IsNullOrEmpty(repo.Patch) && repo.PatchArtifactId is null && string.IsNullOrEmpty(repo.ProducedBranch);
+
+    private static IntegrationRequest BuildPerRepoIntegrationRequest(Guid repoId, SupervisorTurnContext context, WorkspaceRequest workspace, string baseSha, IReadOnlyList<(MergedAgent Agent, RepositoryRunResult RepoResult)> eligible) => new()
+    {
+        TeamId = context.TeamId,
+        RepositoryUrl = workspace.RepositoryUrl,
+        BaseRef = workspace.Ref,
+        BaseSha = baseSha,
+        Token = workspace.Token,
+        TokenUsername = workspace.TokenUsername,
+        IntegrationBranch = $"codespace/integration/{context.SupervisorRunId:N}/turn{context.TurnNumber}",
+        Depth = 0,
+        Contributions = eligible.Select(x => new BranchContribution
+        {
+            Label = x.Agent.AgentRunId.ToString(),
+            SourceRepositoryId = repoId,
+            BaseSha = x.RepoResult.BaseSha,
+            Patch = x.RepoResult.Patch,            // already resolved in .Merge.cs (offloaded per-repo diffs folded back)
+            ProducedBranch = x.RepoResult.ProducedBranch,
+        }).ToList(),
+    };
+
+    /// <summary>One repo's integration block: the flat <see cref="ProjectIntegrationResult"/> fields PLUS its repository id + alias (the per-repo key the resolution loop, S7-D, acts on).</summary>
+    private static object ProjectRepoBlock((Guid RepositoryId, string Alias) repo, IntegrationResult result, IReadOnlyList<string> excludedAgents) => new
+    {
+        repositoryId = repo.RepositoryId,
+        alias = repo.Alias,
+        status = result.Status.ToString(),
+        integratedBranch = result.IntegratedBranch,
+        appliedCount = result.AppliedCount,
+        reason = result.Reason,
+        excludedAgents,
+        outcomes = ProjectOutcomes(result),
+    };
+
+    /// <summary>One repo's NON-integrated block (Skipped / Failed) — no <see cref="IntegrationResult"/>, so no outcomes/branch, but still names the repo + why so the aggregate stays honest about what didn't combine.</summary>
+    private static object RepoSkipBlock((Guid RepositoryId, string Alias) repo, string status, string reason, IReadOnlyList<string> excludedAgents) => new
+    {
+        repositoryId = repo.RepositoryId,
+        alias = repo.Alias,
+        status,
+        reason,
+        excludedAgents,
+    };
+
+    /// <summary>The worst-of aggregate over the per-repo statuses: <c>Conflicted</c> if ANY repo could not auto-combine (Conflicted / Failed / Partial), else <c>Clean</c> if at least one repo integrated cleanly, else <c>Skipped</c> (nothing to combine). Drives the decider's resolve-or-stop choice off the SAME ReadIntegration the single-repo path feeds.</summary>
+    private static string AggregateStatus(IReadOnlyList<string> statuses)
+    {
+        if (statuses.Any(s => s is "Conflicted" or "Failed" or "Partial")) return "Conflicted";
+        if (statuses.Any(s => s == "Clean")) return "Clean";
+        return "Skipped";
+    }
+
+    /// <summary>A human-readable note on the multi-repo aggregate: which repos didn't auto-combine, or that all did. Null nothing-extra contract matches the single-repo <c>reason</c>.</summary>
+    private static string? AggregateReason(IReadOnlyList<(string Status, object Block)> blocks)
+    {
+        var notClean = blocks.Where(b => b.Status is not ("Clean" or "Empty")).ToList();
+
+        if (notClean.Count == 0) return blocks.Count == 0 ? "no resolvable repository among the per-repo results" : null;
+
+        return $"{notClean.Count} of {blocks.Count} repositor{(blocks.Count == 1 ? "y" : "ies")} could not be auto-combined";
+    }
 }
