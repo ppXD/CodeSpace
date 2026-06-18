@@ -29,8 +29,21 @@ public sealed record SupervisorAgentResult
     /// <summary>The git ground-truth repo-relative paths the agent changed (never the diff body). Defaults to empty and NEVER serializes null, so a consumer can always treat it as an array.</summary>
     public IReadOnlyList<string> ChangedFiles { get; init; } = Array.Empty<string>();
 
-    /// <summary>The branch the agent's sandbox pushed (the PR-open handoff), null when it pushed none.</summary>
+    /// <summary>The branch the agent's sandbox pushed (the PR-open handoff), null when it pushed none. In a MULTI-repo run this mirrors the PRIMARY repo's branch (the legacy compat field); the full per-repo set is in <see cref="RepositoryResults"/>.</summary>
     public string? ProducedBranch { get; init; }
+
+    /// <summary>
+    /// The agent's PER-REPOSITORY outcomes for a MULTI-repo workspace run (resolver loop #379 S7-B) — the compact
+    /// projection of <c>AgentRunResult.RepositoryResults</c>, one entry per WRITABLE repo (alias + repository id +
+    /// the branch it pushed + base). EMPTY for a single-repo run, whose single outcome is the top-level
+    /// <see cref="ChangedFiles"/>/<see cref="ProducedBranch"/> — so a single-repo decision's folded agentResults are
+    /// behaviour-identical (every consumer reads the same top-level fields). Surfaced INLINE in the durable
+    /// <c>agentResults</c> array (like <see cref="ProducedBranch"/>) so the resolver loop's per-repo branch collection
+    /// reads it straight off the ledger — replay-deterministic, no DB round-trip (S7-D). Defaults to empty and NEVER
+    /// serializes null, so a consumer can always treat it as an array. Bounded (one entry per repo, paths not diffs),
+    /// so it stays token-cheap; the decider prompt renders it field-selectively, never the raw array.
+    /// </summary>
+    public IReadOnlyList<RepositoryRunResult> RepositoryResults { get; init; } = Array.Empty<RepositoryRunResult>();
 
     /// <summary>Input (prompt) tokens the agent consumed (0 when its harness reported none). Rides INLINE in the durable agentResults array so the supervisor's cost bound (SOTA #4) sums realized spend straight off the ledger — no new query, replay-deterministic. Defaults 0 so an outcome folded before this field existed contributes 0 (fail-open back-compat).</summary>
     public int InputTokens { get; init; }

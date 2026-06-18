@@ -146,6 +146,10 @@ public static class SupervisorOutcome
             Error = result?.Error ?? rowError,
             ChangedFiles = result?.ChangedFiles ?? Array.Empty<string>(),
             ProducedBranch = result?.ProducedBranch,
+            // Resolver loop #379 S7-B: carry the agent's per-repo outcomes into the compact so the per-repo resolution
+            // loop reads each repo's pushed branch straight off the ledger (replay-deterministic). Empty for a
+            // single-repo run → the top-level ProducedBranch/ChangedFiles remain the one outcome (behaviour-identical).
+            RepositoryResults = result?.RepositoryResults ?? Array.Empty<RepositoryRunResult>(),
             // SOTA #4: the priced inputs ride inline so the cost bound sums realized spend straight off the durable
             // outcome (no new query, replay-deterministic). Tokens come from the result; the model is the agent's
             // task model (passed in by the rehydrate fold, which has TaskJson) — null when the caller has no model.
