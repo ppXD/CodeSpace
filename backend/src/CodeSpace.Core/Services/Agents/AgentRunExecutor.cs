@@ -465,6 +465,9 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
                 Alias = repo.Alias,
                 RepositoryId = repoIds is not null && repoIds.TryGetValue(repo.Alias, out var id) ? id : null,
                 ChangedFiles = changes.ChangedFiles,
+                // Capture this repo's diff (capped inline like the top-level patch) — the durable, base-anchored input
+                // the supervisor's per-repo on-disk integration consumes; a large one is offloaded at completion.
+                Patch = TruncatePatch(changes.Patch, MaxPatchChars),
                 BaseSha = changes.BaseSha,
                 BaseBranch = repo.BaseBranch,
                 Access = WorkspaceAccess.Write,

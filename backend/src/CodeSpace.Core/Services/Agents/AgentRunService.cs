@@ -356,6 +356,7 @@ public sealed class AgentRunService : IAgentRunService, IScopedDependency
         // artifact store (team-scoped) and only the ref kept — so result_jsonb stays bounded instead of carrying an
         // unbounded blob. Small fields stay inline. Done BEFORE serialize so the persisted result carries the refs.
         result = await OffloadLargePatchAsync(result, snapshot.TeamId, cancellationToken).ConfigureAwait(false);
+        result = await OffloadLargeRepositoryPatchesAsync(result, snapshot.TeamId, cancellationToken).ConfigureAwait(false);
         result = await OffloadLargeTranscriptAsync(result, snapshot.TeamId, cancellationToken).ConfigureAwait(false);
 
         var resultJson = JsonSerializer.Serialize(result, AgentJson.Options);
@@ -386,6 +387,29 @@ public sealed class AgentRunService : IAgentRunService, IScopedDependency
         var (inline, artifactId) = await _offloader.OffloadIfLargeAsync(teamId, result.Patch, "text/x-diff", cancellationToken).ConfigureAwait(false);
 
         return artifactId is null ? result : result with { Patch = inline, PatchArtifactId = artifactId };
+    }
+
+    /// <summary>
+    /// D2 (multi-repo): offload EACH writable repo's per-repo diff exactly like the top-level patch — a per-repo diff
+    /// larger than the inline threshold moves to the team-scoped artifact store, clearing its inline <c>Patch</c> +
+    /// setting <c>PatchArtifactId</c>, so <c>result_jsonb</c> stays bounded even for a many-repo change set. A
+    /// single-repo run has no <see cref="AgentRunResult.RepositoryResults"/> → a no-op (byte-identical). Idempotent
+    /// (the store dedups by sha), so a re-completion reuses the same artifact ids.
+    /// </summary>
+    private async Task<AgentRunResult> OffloadLargeRepositoryPatchesAsync(AgentRunResult result, Guid teamId, CancellationToken cancellationToken)
+    {
+        if (result.RepositoryResults.Count == 0) return result;
+
+        var offloaded = new List<RepositoryRunResult>(result.RepositoryResults.Count);
+
+        foreach (var repo in result.RepositoryResults)
+        {
+            var (inline, artifactId) = await _offloader.OffloadIfLargeAsync(teamId, repo.Patch, "text/x-diff", cancellationToken).ConfigureAwait(false);
+
+            offloaded.Add(artifactId is null ? repo : repo with { Patch = inline, PatchArtifactId = artifactId });
+        }
+
+        return result with { RepositoryResults = offloaded };
     }
 
     /// <summary>

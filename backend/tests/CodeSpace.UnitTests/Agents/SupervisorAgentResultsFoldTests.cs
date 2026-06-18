@@ -136,6 +136,30 @@ public class SupervisorAgentResultsFoldTests
             .RepositoryResults.ShouldBeEmpty("a corrupt result degrades to empty per-repo outcomes, never a crash");
     }
 
+    [Fact]
+    public void ProjectCompact_STRIPS_the_unbounded_per_repo_patch_from_the_compact()
+    {
+        // S7-C0 — the per-repo DIFF is unbounded, so the compact (decider-visible, durable ledger) drops it EXACTLY as
+        // it omits the top-level Patch; the merge's per-repo integrate reads the full diff off the DB AgentRunResult,
+        // never off this compact, so the ledger stays token-cheap. The BOUNDED per-repo facts are preserved.
+        var repoId = Guid.NewGuid();
+
+        var compact = SupervisorOutcome.ProjectCompact(Guid.NewGuid(), "Succeeded", rowError: null, ResultJson(
+            producedBranch: "codespace/agent/api", repositoryResults: new[]
+            {
+                new RepositoryRunResult { Alias = "repo", RepositoryId = repoId, ProducedBranch = "codespace/agent/api", BaseSha = "abc123", BaseBranch = "main", Patch = "diff --git a/Foo.cs\n+lots of unbounded diff lines", PatchArtifactId = Guid.NewGuid(), Access = WorkspaceAccess.Write },
+            }));
+
+        var repo = compact.RepositoryResults.Single();
+        repo.Patch.ShouldBe("", "the unbounded per-repo diff is stripped from the compact — kept token-cheap like the omitted top-level Patch");
+        repo.PatchArtifactId.ShouldBeNull("the compact references no per-repo artifact — the merge reads the diff off the DB AgentRunResult");
+
+        repo.RepositoryId.ShouldBe(repoId, "the bounded per-repo facts the resolver loop needs ARE preserved");
+        repo.ProducedBranch.ShouldBe("codespace/agent/api");
+        repo.BaseSha.ShouldBe("abc123");
+        repo.BaseBranch.ShouldBe("main");
+    }
+
     // ── FoldAgentResults: additive, byte-stable, idempotent ──────────────────────────
 
     [Fact]

@@ -671,6 +671,59 @@ public class AgentRunServiceTests
     }
 
     [Fact]
+    public async Task Completing_with_a_large_per_repo_patch_offloads_it_keeping_only_the_ref()
+    {
+        // S7-C0: a MULTI-repo run's per-repo diff must not bloat result_jsonb any more than the top-level one — each
+        // per-repo patch over the inline threshold is offloaded (Patch cleared + PatchArtifactId set), the small one
+        // stays inline, and both round-trip from the team-scoped artifact store.
+        var teamId = await SeedTeamAsync();
+
+        Guid runId;
+        using (var scope = _fixture.BeginScope())
+        {
+            var svc = scope.Resolve<IAgentRunService>();
+            runId = (await svc.CreateAsync(BuildTask(), teamId, null, null, iterationKey: "", cancellationToken: CancellationToken.None)).Id;
+            await svc.MarkRunningAsync(runId, CancellationToken.None);
+        }
+
+        var bigPatch = string.Concat(Enumerable.Range(0, 1000).Select(i => $"+web line {i:D4}\n"));
+        bigPatch.Length.ShouldBeGreaterThan(ArtifactStoreConfig.DefaultInlineThresholdBytes, "the per-repo diff must exceed the inline threshold to exercise offload");
+        const string smallPatch = "+one api change\n";
+
+        using (var scope = _fixture.BeginScope())
+            await scope.Resolve<IAgentRunService>().CompleteAsync(runId, new AgentRunResult
+            {
+                Status = AgentRunStatus.Succeeded, ExitReason = "completed", ChangeSetId = "cs-test",
+                RepositoryResults = new[]
+                {
+                    new RepositoryRunResult { Alias = "web", RepositoryId = Guid.NewGuid(), Patch = bigPatch, BaseSha = "base-web", Access = WorkspaceAccess.Write },
+                    new RepositoryRunResult { Alias = "api", RepositoryId = Guid.NewGuid(), Patch = smallPatch, BaseSha = "base-api", Access = WorkspaceAccess.Write },
+                },
+            }, CancellationToken.None);
+
+        using (var scope = _fixture.BeginScope())
+        {
+            var run = await scope.Resolve<IAgentRunService>().GetAsync(runId, CancellationToken.None);
+            var stored = JsonSerializer.Deserialize<AgentRunResult>(run.ResultJson!, AgentJson.Options)!;
+
+            var web = stored.RepositoryResults.Single(r => r.Alias == "web");
+            web.Patch.ShouldBe("", "the large per-repo diff was moved out of result_jsonb");
+            web.PatchArtifactId.ShouldNotBeNull("the per-repo result keeps a reference to the offloaded diff");
+            run.ResultJson!.Length.ShouldBeLessThan(bigPatch.Length, "result_jsonb no longer carries the full per-repo diff");
+
+            var api = stored.RepositoryResults.Single(r => r.Alias == "api");
+            api.Patch.ShouldBe(smallPatch, "a small per-repo diff stays inline");
+            api.PatchArtifactId.ShouldBeNull("no artifact is created for an inline per-repo diff");
+
+            // The full per-repo diff round-trips from the artifact store, byte-for-byte.
+            var artifact = await scope.Resolve<IArtifactStore>().GetBytesAsync(teamId, web.PatchArtifactId!.Value, CancellationToken.None);
+            artifact.ShouldNotBeNull();
+            System.Text.Encoding.UTF8.GetString(artifact!.Bytes).ShouldBe(bigPatch, "the offloaded per-repo diff is recoverable in full");
+            artifact.ContentType.ShouldBe("text/x-diff");
+        }
+    }
+
+    [Fact]
     public async Task Completing_with_a_large_transcript_offloads_it_to_an_artifact_and_keeps_only_the_ref()
     {
         // D3a: the faithful raw transcript must NOT bloat result_jsonb — it's offloaded to the content-addressed
