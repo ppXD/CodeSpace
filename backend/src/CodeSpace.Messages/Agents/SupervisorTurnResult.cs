@@ -37,12 +37,13 @@ public sealed record SupervisorTurnResult
     public string? IntegratedBranch { get; init; }
 
     /// <summary>
-    /// The run's final PER-REPO reviewable integrated branches on finish (resolver loop #379, S7-D1) — the MULTI-repo
+    /// The run's final PER-REPO reviewable branches on finish (resolver loop #379, S7-D1/S7-E) — the MULTI-repo
     /// complement of <see cref="IntegratedBranch"/> (single-valued, hence empty for a multi-repo run, which integrates
-    /// each repo on its own axis with no single branch). Each carries a repo's id + alias + reconciled head. EMPTY for a
-    /// single-repo run (which surfaces <see cref="IntegratedBranch"/>) and while parking. Defaults to empty and NEVER
-    /// serializes null, so a consumer can always treat it as an array. NOT a verbatim <c>git.open_change_set</c> bind —
-    /// see <see cref="SupervisorRepositoryBranch"/> (the head is under <c>integratedBranch</c>, no base is carried).
+    /// each repo on its own axis with no single branch). Each carries a repo's id + alias + reconciled head
+    /// (<c>sourceBranch</c>) + PR base (<c>targetBranch</c>). EMPTY for a single-repo run (which surfaces
+    /// <see cref="IntegratedBranch"/>) and while parking. Defaults to empty and NEVER serializes null, so a consumer can
+    /// always treat it as an array. Binds VERBATIM into <c>git.open_change_set</c>'s <c>repositories</c> input (open one
+    /// PR per repo) — see <see cref="SupervisorRepositoryBranch"/>.
     /// </summary>
     public IReadOnlyList<SupervisorRepositoryBranch> RepositoryBranches { get; init; } = Array.Empty<SupervisorRepositoryBranch>();
 

@@ -402,7 +402,8 @@ public static class SupervisorOutcome
                     {
                         RepositoryId = repo.TryGetProperty("repositoryId", out var id) && id.ValueKind == JsonValueKind.String && Guid.TryParse(id.GetString(), out var g) ? g : null,
                         Alias = repo.TryGetProperty("alias", out var a) && a.ValueKind == JsonValueKind.String ? a.GetString() ?? "" : "",
-                        IntegratedBranch = branch,
+                        SourceBranch = branch,
+                        TargetBranch = repo.TryGetProperty("baseBranch", out var bb) && bb.ValueKind == JsonValueKind.String ? bb.GetString() ?? "" : "",
                     });
             }
 
@@ -458,7 +459,7 @@ public static class SupervisorOutcome
 
         return resolver.RepositoryResults
             .Where(r => !string.IsNullOrEmpty(r.ProducedBranch))
-            .Select(r => new SupervisorRepositoryBranch { RepositoryId = r.RepositoryId, Alias = r.Alias, IntegratedBranch = r.ProducedBranch! })
+            .Select(r => new SupervisorRepositoryBranch { RepositoryId = r.RepositoryId, Alias = r.Alias, SourceBranch = r.ProducedBranch!, TargetBranch = r.BaseBranch ?? "" })
             .ToList();
     }
 

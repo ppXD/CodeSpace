@@ -90,18 +90,19 @@ public sealed partial class RealSupervisorActionExecutor
 
         return SupervisorOutcome.ResolvedRepositoryBranches(lastStaging)
             .Where(b => b.RepositoryId is not null)
-            .ToDictionary(b => b.RepositoryId!.Value, b => b.IntegratedBranch);
+            .ToDictionary(b => b.RepositoryId!.Value, b => b.SourceBranch);
     }
 
     private static readonly IReadOnlyDictionary<Guid, string> EmptyResolution = new Dictionary<Guid, string>();
 
-    /// <summary>One repo's ACCEPTED-resolution block (S7-D2): the resolver's reconciled branch surfaced as a Clean per-repo block WITHOUT re-running the integrator (which would re-conflict). <c>via</c>/<c>reason</c> are descriptive audit only — the gate is the resolve verdict via <see cref="SupervisorOutcome.ResolvedRepositoryBranches"/>. Shape-compatible with <see cref="ProjectRepoBlock"/> so <see cref="SupervisorOutcome.ReadFinalRepositoryBranches"/> reads it uniformly.</summary>
-    private static object ResolvedRepoBlock((Guid RepositoryId, string Alias) repo, string resolvedBranch) => new
+    /// <summary>One repo's ACCEPTED-resolution block (S7-D2): the resolver's reconciled branch surfaced as a Clean per-repo block WITHOUT re-running the integrator (which would re-conflict). Carries the same <c>baseBranch</c> PR target as <see cref="ProjectRepoBlock"/> (S7-E) so the node-output reader binds it. <c>via</c>/<c>reason</c> are descriptive audit only — the gate is the resolve verdict via <see cref="SupervisorOutcome.ResolvedRepositoryBranches"/>. Shape-compatible with <see cref="ProjectRepoBlock"/> so <see cref="SupervisorOutcome.ReadFinalRepositoryBranches"/> reads it uniformly.</summary>
+    private static object ResolvedRepoBlock((Guid RepositoryId, string Alias) repo, string resolvedBranch, string baseBranch) => new
     {
         repositoryId = repo.RepositoryId,
         alias = repo.Alias,
         status = "Clean",
         integratedBranch = resolvedBranch,
+        baseBranch,
         via = "resolution",
         reason = "a verified resolver agent reconciled this repository's conflicting branches into one tested branch",
     };
@@ -282,6 +283,11 @@ public sealed partial class RealSupervisorActionExecutor
     {
         var repos = CollectWritableRepos(merged);
 
+        // Each repo's PR base branch (the ref the agents — and therefore the integration — were rooted at, slice 4.1),
+        // threaded into every per-repo block as `baseBranch` so the node output binds verbatim into git.open_change_set
+        // as the per-repo PR target (S7-E). Computed ONCE off the merged agents' per-repo results, the single source.
+        var baseByRepo = BaseBranchByRepo(merged);
+
         // A VERIFIED multi-repo resolution reconciled some repos into the resolver's OWN per-repo branches (S7-D2): for
         // THOSE repos, re-running the integrator over the original conflicting branches would just re-conflict, so we
         // surface the resolver's reconciled branch (per-repo short-circuit — the multi-repo analogue of S5's single
@@ -293,8 +299,8 @@ public sealed partial class RealSupervisorActionExecutor
 
         foreach (var repo in repos)
             blocks.Add(resolved.TryGetValue(repo.RepositoryId, out var resolvedBranch)
-                ? ("Clean", ResolvedRepoBlock(repo, resolvedBranch))
-                : await IntegrateOneRepoAsync(repo, context, merged, cancellationToken).ConfigureAwait(false));
+                ? ("Clean", ResolvedRepoBlock(repo, resolvedBranch, baseByRepo.GetValueOrDefault(repo.RepositoryId, "")))
+                : await IntegrateOneRepoAsync(repo, context, merged, baseByRepo.GetValueOrDefault(repo.RepositoryId, ""), cancellationToken).ConfigureAwait(false));
 
         // Honesty: per-repo work whose repository id is NULL (a degraded capture with no resolvable spec) can't be
         // cloned, so it's named as a Skipped block rather than silently dropped — an operator reading repositories[]
@@ -341,8 +347,8 @@ public sealed partial class RealSupervisorActionExecutor
                 excludedAgents = g.Select(x => x.agent.AgentRunId.ToString()).Distinct().ToList(),
             }));
 
-    /// <summary>Integrate ONE repo's per-repo contributions, returning its (status, block) pair. Mirrors the single-repo <see cref="IntegrateMergedAsync"/> fail-safe — unresolvable repo / no base → Skipped, git failure → Failed — scoped to this repo's per-repo patches + base. A repo an agent never TOUCHED (the capture layer still emits a vacuous entry) is dropped from the contributions so a disjoint fan-out doesn't spuriously conflict.</summary>
-    private async Task<(string Status, object Block)> IntegrateOneRepoAsync((Guid RepositoryId, string Alias) repo, SupervisorTurnContext context, IReadOnlyList<MergedAgent> merged, CancellationToken cancellationToken)
+    /// <summary>Integrate ONE repo's per-repo contributions, returning its (status, block) pair. Mirrors the single-repo <see cref="IntegrateMergedAsync"/> fail-safe — unresolvable repo / no base → Skipped, git failure → Failed — scoped to this repo's per-repo patches + base. A repo an agent never TOUCHED (the capture layer still emits a vacuous entry) is dropped from the contributions so a disjoint fan-out doesn't spuriously conflict. <paramref name="baseBranch"/> is the repo's PR base (the ref it was rooted at), threaded onto the block so the node output binds verbatim into git.open_change_set (S7-E).</summary>
+    private async Task<(string Status, object Block)> IntegrateOneRepoAsync((Guid RepositoryId, string Alias) repo, SupervisorTurnContext context, IReadOnlyList<MergedAgent> merged, string baseBranch, CancellationToken cancellationToken)
     {
         // This repo's REAL contributions: each agent's per-repo entry that ACTUALLY changed it. The capture layer emits
         // a RepositoryRunResult for EVERY writable repo — including one an agent never touched (empty patch, no branch).
@@ -358,15 +364,13 @@ public sealed partial class RealSupervisorActionExecutor
         var eligible = touched.Where(x => !string.IsNullOrEmpty(x.RepoResult.BaseSha)).ToList();
         var excluded = touched.Where(x => string.IsNullOrEmpty(x.RepoResult.BaseSha)).Select(x => x.agent.AgentRunId.ToString()).ToList();
 
-        var baseBranch = eligible.Count > 0 ? eligible[0].RepoResult.BaseBranch : null;
-
         // The resolver THROWS for a deleted / cross-team / no-clone-URL repo (never returns null for those), so the
         // resolve is wrapped SEPARATELY → a Skipped block: an unresolvable repo must never abort the loop (sinking a
         // clean sibling) nor escape and strand the merge turn. A git failure DURING integrate is a distinct Failed.
         WorkspaceRequest? workspace;
         try
         {
-            workspace = await _workspaces.ResolveByRepositoryIdAsync(repo.RepositoryId, context.TeamId, cancellationToken, baseBranch).ConfigureAwait(false);
+            workspace = await _workspaces.ResolveByRepositoryIdAsync(repo.RepositoryId, context.TeamId, cancellationToken, string.IsNullOrEmpty(baseBranch) ? null : baseBranch).ConfigureAwait(false);
         }
         catch (WorkspaceException ex)
         {
@@ -383,13 +387,26 @@ public sealed partial class RealSupervisorActionExecutor
         try
         {
             var result = await _integrator.IntegrateAsync(request, cancellationToken).ConfigureAwait(false);
-            return (result.Status.ToString(), ProjectRepoBlock(repo, result, excluded));
+            return (result.Status.ToString(), ProjectRepoBlock(repo, result, excluded, baseBranch));
         }
         catch (WorkspaceException ex)
         {
             _logger.LogWarning(ex, "Supervisor per-repo integration failed for '{Alias}'; keeping the side-by-side fold", repo.Alias);
             return ("Failed", RepoSkipBlock(repo, "Failed", ex.Message, excluded));
         }
+    }
+
+    /// <summary>Each repo's PR base branch — the ref the agents were rooted at (slice 4.1's <see cref="RepositoryRunResult.BaseBranch"/>), first-seen per repository id. The PR target a downstream git.open_change_set opens each per-repo PR into (S7-E). Empty entry for a repo whose agents recorded no base.</summary>
+    private static IReadOnlyDictionary<Guid, string> BaseBranchByRepo(IReadOnlyList<MergedAgent> merged)
+    {
+        var map = new Dictionary<Guid, string>();
+
+        foreach (var agent in merged)
+            foreach (var repo in agent.RepositoryResults)
+                if (repo.RepositoryId is { } id && !string.IsNullOrEmpty(repo.BaseBranch) && !map.ContainsKey(id))
+                    map[id] = repo.BaseBranch!;
+
+        return map;
     }
 
     /// <summary>A per-repo entry the agent never actually CHANGED — no diff (inline empty AND no offload ref) AND no pushed branch. The capture layer emits one <see cref="RepositoryRunResult"/> per writable repo even for an untouched one; integrating its vacuous "no patch, no branch" entry would make the integrator refuse the whole repo set, so it is dropped from the contributions — there is nothing to combine, and it is not lost work.</summary>
@@ -416,13 +433,14 @@ public sealed partial class RealSupervisorActionExecutor
         }).ToList(),
     };
 
-    /// <summary>One repo's integration block: the flat <see cref="ProjectIntegrationResult"/> fields PLUS its repository id + alias (the per-repo key the resolution loop, S7-D, acts on).</summary>
-    private static object ProjectRepoBlock((Guid RepositoryId, string Alias) repo, IntegrationResult result, IReadOnlyList<string> excludedAgents) => new
+    /// <summary>One repo's integration block: the flat <see cref="ProjectIntegrationResult"/> fields PLUS its repository id + alias (the per-repo key the resolution loop acts on) + <c>baseBranch</c> (the PR target the node-output reader surfaces so a downstream git.open_change_set binds it — S7-E).</summary>
+    private static object ProjectRepoBlock((Guid RepositoryId, string Alias) repo, IntegrationResult result, IReadOnlyList<string> excludedAgents, string baseBranch) => new
     {
         repositoryId = repo.RepositoryId,
         alias = repo.Alias,
         status = result.Status.ToString(),
         integratedBranch = result.IntegratedBranch,
+        baseBranch,
         appliedCount = result.AppliedCount,
         reason = result.Reason,
         excludedAgents,

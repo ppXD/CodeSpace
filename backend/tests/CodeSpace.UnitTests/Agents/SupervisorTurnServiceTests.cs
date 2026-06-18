@@ -222,7 +222,7 @@ public class SupervisorTurnServiceTests
         // its output bag is byte-identical to pre-S7-D1 (mirrors the existing integratedBranch-only single-repo output).
         var multi = AgentSupervisorNode.Finish(NullLogger.Instance, SupervisorTurnResult.Finished("stop", "done", integratedBranch: null, repositoryBranches: new[]
         {
-            new SupervisorRepositoryBranch { RepositoryId = Guid.NewGuid(), Alias = "web", IntegratedBranch = "codespace/integration/run/turn1" },
+            new SupervisorRepositoryBranch { RepositoryId = Guid.NewGuid(), Alias = "web", SourceBranch = "codespace/integration/run/turn1" },
         })).Outputs;
 
         multi.ContainsKey("repositoryBranches").ShouldBeTrue("a multi-repo run surfaces its per-repo integrated branches");

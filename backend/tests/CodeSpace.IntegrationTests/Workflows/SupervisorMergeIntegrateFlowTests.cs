@@ -295,7 +295,8 @@ public sealed class SupervisorMergeIntegrateFlowTests : IDisposable
             new SupervisorPriorDecision { Id = Guid.NewGuid(), Sequence = 1, DecisionKind = SupervisorDecisionKinds.Merge, Status = SupervisorDecisionStatus.Succeeded, PayloadJson = "{}", OutcomeJson = outcome.GetRawText() },
         });
         finalBranches.Select(r => r.Alias).ShouldBe(new[] { "web", "api" }, ignoreOrder: true, "the S7-D1 node-output reader surfaces both repos' integrated branches off the real multi-repo merge");
-        finalBranches.ShouldAllBe(r => r.IntegratedBranch == branch);
+        finalBranches.ShouldAllBe(r => r.SourceBranch == branch);
+        finalBranches.ShouldAllBe(r => r.TargetBranch == "main", "S7-E: each per-repo branch carries its PR base (the ref it was rooted at) so git.open_change_set binds it as targetBranch");
         finalBranches.Single(r => r.Alias == "web").RepositoryId.ShouldBe(webRepoId, "the per-repo PR-open key round-trips through the reader's Guid parse off the REAL producer block");
         finalBranches.Single(r => r.Alias == "api").RepositoryId.ShouldBe(apiRepoId);
     }
@@ -525,8 +526,13 @@ public sealed class SupervisorMergeIntegrateFlowTests : IDisposable
         {
             new SupervisorPriorDecision { Id = Guid.NewGuid(), Sequence = 1, DecisionKind = SupervisorDecisionKinds.Merge, Status = SupervisorDecisionStatus.Succeeded, PayloadJson = "{}", OutcomeJson = outcome.GetRawText() },
         });
-        finalBranches.Single(b => b.Alias == "web").IntegratedBranch.ShouldBe($"codespace/integration/{runId:N}/turn4");
-        finalBranches.Single(b => b.Alias == "api").IntegratedBranch.ShouldBe(apiResolved, "the accepted resolver branch is the node's per-repo head for api");
+        var webFinal = finalBranches.Single(b => b.Alias == "web");
+        webFinal.SourceBranch.ShouldBe($"codespace/integration/{runId:N}/turn4");
+        webFinal.TargetBranch.ShouldBe("main", "S7-E: the re-integrated repo carries its PR base for git.open_change_set");
+
+        var apiFinal = finalBranches.Single(b => b.Alias == "api");
+        apiFinal.SourceBranch.ShouldBe(apiResolved, "the accepted resolver branch is the node's per-repo head for api");
+        apiFinal.TargetBranch.ShouldBe("main", "S7-E: the accepted-resolution repo carries its PR base too");
     }
 
     [Fact]
