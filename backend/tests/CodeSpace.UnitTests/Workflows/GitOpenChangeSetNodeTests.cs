@@ -164,6 +164,34 @@ public sealed class GitOpenChangeSetNodeTests
     }
 
     [Fact]
+    public async Task Binds_supervisor_repositoryBranches_verbatim_via_sourceBranch_and_targetBranch()
+    {
+        var stub = new StubChangeSetService();
+
+        // The exact shape agent.supervisor emits as repositoryBranches (the SupervisorRepositoryBranch noun serialized) —
+        // fed straight into git.open_change_set, proving the resolver loop's last mile is a workflow edge, not a new node.
+        var repositoryBranches = new[]
+        {
+            new SupervisorRepositoryBranch { RepositoryId = Web, Alias = "web", SourceBranch = "codespace/integration/run/turn4", TargetBranch = "main" },
+            new SupervisorRepositoryBranch { RepositoryId = Api, Alias = "api", SourceBranch = "codespace/resolve/api-reconciled", TargetBranch = "develop" },
+        };
+
+        await new GitOpenChangeSetNode(stub).RunAsync(ContextFrom(new()
+        {
+            ["repositories"] = JsonSerializer.SerializeToElement(repositoryBranches, CodeSpace.Core.Services.Agents.AgentJson.Options),
+            ["title"] = JsonSerializer.SerializeToElement("Coordinated multi-repo change"),
+        }), CancellationToken.None);
+
+        stub.Calls.ShouldBe(1);
+        var web = stub.Spec!.Repositories.Single(r => r.RepositoryId == Web);
+        web.SourceBranch.ShouldBe("codespace/integration/run/turn4", "the supervisor's reconciled head binds as the PR source via sourceBranch");
+        web.TargetBranch.ShouldBe("main", "the supervisor's per-repo base binds as the PR target via targetBranch");
+        var api = stub.Spec.Repositories.Single(r => r.RepositoryId == Api);
+        api.SourceBranch.ShouldBe("codespace/resolve/api-reconciled", "an accepted-resolution branch opens its PR too — the loop's last mile");
+        api.TargetBranch.ShouldBe("develop");
+    }
+
+    [Fact]
     public async Task Prefers_producedBranch_over_a_hand_authored_sourceBranch_alias()
     {
         var stub = new StubChangeSetService();

@@ -11,7 +11,9 @@ namespace CodeSpace.Core.Services.Workflows.Nodes.Builtin;
 /// <summary>
 /// Converges a MULTI-repo Change Set into reviewable output: opens ONE pull/merge request per repository in the set,
 /// the cross-repo analogue of <c>git.open_pr</c>. Wire its <c>repositories</c> input from an upstream multi-repo
-/// <c>agent.code</c> run's <c>repositoryResults</c> output (each repo's produced branch → that repo's PR).
+/// <c>agent.code</c> run's <c>repositoryResults</c> output (each repo's produced branch → that repo's PR) OR a
+/// multi-repo <c>agent.supervisor</c> run's <c>repositoryBranches</c> output (each repo's reconciled head via
+/// <c>sourceBranch</c>/<c>targetBranch</c>) — both bind here verbatim, so this is the ONE per-repo PR-open seam.
 ///
 /// <para>Thin over <see cref="IChangeSetService"/> (Rule 16): the per-repo loop, the team-scoped open, and the
 /// failure-isolation policy live in the service. Like <c>git.integrate</c>, a per-repo provider rejection is a routable

@@ -109,7 +109,7 @@ public sealed class AgentSupervisorNode : INodeRuntime
                 "reason":           { "type": "string" },
                 "turns":            { "type": "integer" },
                 "integratedBranch": { "type": "string" },
-                "repositoryBranches": { "type": "array", "items": { "type": "object" }, "description": "Multi-repo only: per-repo {repositoryId, alias, integratedBranch} reconciled heads. Carries an integratedBranch (the supervisor's vocabulary), NOT a producedBranch/baseBranch — so it is NOT a verbatim git.open_change_set bind; a per-repo PR-open maps integratedBranch->sourceBranch with a separately chosen base. Omitted for a single-repo run (which uses integratedBranch)." }
+                "repositoryBranches": { "type": "array", "items": { "type": "object" }, "description": "Multi-repo only: per-repo {repositoryId, alias, sourceBranch, targetBranch} reconciled heads + PR bases. Binds VERBATIM into git.open_change_set's repositories input (it reads sourceBranch/targetBranch) — wire agent.supervisor.repositoryBranches → git.open_change_set.repositories to open one PR per repo. Omitted for a single-repo run (which uses integratedBranch)." }
               }
             }
             """),

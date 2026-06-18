@@ -356,7 +356,7 @@ public class SupervisorResolverTests
             integration = new
             {
                 status = aggregateStatus,
-                repositories = repos.Select(r => new { repositoryId = r.RepoId, alias = r.Alias, status = r.Status, integratedBranch = r.Branch }).ToArray(),
+                repositories = repos.Select(r => new { repositoryId = r.RepoId, alias = r.Alias, status = r.Status, integratedBranch = r.Branch, baseBranch = $"base-{r.Alias}" }).ToArray(),
             },
         }, AgentJson.Options);
 
@@ -377,7 +377,9 @@ public class SupervisorResolverTests
 
         branches.Count.ShouldBe(2);
         branches.Single(b => b.Alias == "web").RepositoryId.ShouldBe(webId, "each per-repo branch names its repo — the per-repo PR-open key");
-        branches.Single(b => b.Alias == "api").IntegratedBranch.ShouldBe("codespace/integration/run/turn1");
+        var api = branches.Single(b => b.Alias == "api");
+        api.SourceBranch.ShouldBe("codespace/integration/run/turn1");
+        api.TargetBranch.ShouldBe("base-api", "S7-E: the merge block's baseBranch is surfaced as the PR target so git.open_change_set binds it");
     }
 
     [Fact]
@@ -432,7 +434,7 @@ public class SupervisorResolverTests
         var branches = SupervisorOutcome.ReadFinalRepositoryBranches(tape);
 
         branches.Count.ShouldBe(2, "the latest merge wins");
-        branches.ShouldAllBe(b => b.IntegratedBranch == "codespace/integration/run/turn3");
+        branches.ShouldAllBe(b => b.SourceBranch == "codespace/integration/run/turn3");
     }
 
     [Theory]
@@ -458,7 +460,7 @@ public class SupervisorResolverTests
         var branch = SupervisorOutcome.ReadFinalRepositoryBranches(tape).ShouldHaveSingleItem();
         branch.RepositoryId.ShouldBeNull();
         branch.Alias.ShouldBe("orphan");
-        branch.IntegratedBranch.ShouldBe("codespace/integration/run/turn1");
+        branch.SourceBranch.ShouldBe("codespace/integration/run/turn1");
     }
 
     // ── S7-D2: per-repo RESOLUTION (one multi-repo resolver; per-repo accept) ──────────
@@ -469,7 +471,9 @@ public class SupervisorResolverTests
         var result = new SupervisorAgentResult
         {
             AgentRunId = Guid.NewGuid(), Status = status, Summary = summary, ProducedBranch = repos.FirstOrDefault().Branch,
-            RepositoryResults = repos.Select(r => new RepositoryRunResult { Alias = r.Alias, RepositoryId = r.RepoId, ProducedBranch = r.Branch, Access = WorkspaceAccess.Write }).ToArray(),
+            // Each per-repo entry carries its base (the ref the resolver reconciled onto) so the resolve-only node-output
+            // path (ReadFinalRepositoryBranches → ResolvedRepositoryBranches) surfaces TargetBranch for git.open_change_set.
+            RepositoryResults = repos.Select(r => new RepositoryRunResult { Alias = r.Alias, RepositoryId = r.RepoId, ProducedBranch = r.Branch, BaseBranch = $"base-{r.Alias}", Access = WorkspaceAccess.Write }).ToArray(),
         };
         return JsonSerializer.Serialize(new { agentRunIds = new[] { result.AgentRunId }, agentCount = 1, agentResults = new[] { result } }, AgentJson.Options);
     }
@@ -501,8 +505,10 @@ public class SupervisorResolverTests
         var branches = SupervisorOutcome.ResolvedRepositoryBranches(decision);
 
         branches.Count.ShouldBe(2);
-        branches.Single(b => b.Alias == "api").RepositoryId.ShouldBe(apiId);
-        branches.Single(b => b.Alias == "api").IntegratedBranch.ShouldBe("codespace/resolve/api");
+        var api = branches.Single(b => b.Alias == "api");
+        api.RepositoryId.ShouldBe(apiId);
+        api.SourceBranch.ShouldBe("codespace/resolve/api");
+        api.TargetBranch.ShouldBe("base-api", "S7-E: a verified resolver's per-repo base flows to TargetBranch so a stop-after-resolve run's PRs have a target");
     }
 
     [Fact]
@@ -534,8 +540,12 @@ public class SupervisorResolverTests
             Decision(SupervisorDecisionKinds.Resolve, 3, ResolveOutcomeWithRepos("Succeeded", VerifiedSummary, ("web", Guid.NewGuid(), "codespace/resolve/web"), ("api", Guid.NewGuid(), "codespace/resolve/api"))),
         };
 
-        SupervisorOutcome.ReadFinalRepositoryBranches(tape).Select(b => b.Alias)
-            .ShouldBe(new[] { "web", "api" }, ignoreOrder: true, "a stop right after a verified multi-repo resolve surfaces the resolver's per-repo reconciled branches");
+        var branches = SupervisorOutcome.ReadFinalRepositoryBranches(tape);
+
+        branches.Select(b => b.Alias).ShouldBe(new[] { "web", "api" }, ignoreOrder: true, "a stop right after a verified multi-repo resolve surfaces the resolver's per-repo reconciled branches");
+        var api = branches.Single(b => b.Alias == "api");
+        api.SourceBranch.ShouldBe("codespace/resolve/api", "the resolver's reconciled head is the PR source");
+        api.TargetBranch.ShouldBe("base-api", "S7-E: the full stop-after-resolve node-output path carries the PR base too — git.open_change_set binds it");
     }
 
     [Fact]
