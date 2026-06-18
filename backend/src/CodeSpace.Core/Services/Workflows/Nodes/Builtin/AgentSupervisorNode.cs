@@ -108,7 +108,8 @@ public sealed class AgentSupervisorNode : INodeRuntime
                 "decision":         { "type": "string" },
                 "reason":           { "type": "string" },
                 "turns":            { "type": "integer" },
-                "integratedBranch": { "type": "string" }
+                "integratedBranch": { "type": "string" },
+                "repositoryBranches": { "type": "array", "items": { "type": "object" }, "description": "Multi-repo only: per-repo {repositoryId, alias, integratedBranch} reconciled heads. Carries an integratedBranch (the supervisor's vocabulary), NOT a producedBranch/baseBranch — so it is NOT a verbatim git.open_change_set bind; a per-repo PR-open maps integratedBranch->sourceBranch with a separately chosen base. Omitted for a single-repo run (which uses integratedBranch)." }
               }
             }
             """),
@@ -205,8 +206,8 @@ public sealed class AgentSupervisorNode : INodeRuntime
         });
     }
 
-    /// <summary>Terminal turn → the node succeeds; the run completes via the normal walk.</summary>
-    private static NodeResult Finish(Microsoft.Extensions.Logging.ILogger logger, SupervisorTurnResult result)
+    /// <summary>Terminal turn → the node succeeds; the run completes via the normal walk. Internal so a unit test can pin the output bag (notably the multi-repo `repositoryBranches` emit-only-when-non-empty byte-identity guard).</summary>
+    internal static NodeResult Finish(Microsoft.Extensions.Logging.ILogger logger, SupervisorTurnResult result)
     {
         logger.LogInformation("agent.supervisor finished: decision={Decision} reason={Reason}", result.DecisionKind, result.TerminalReason);
 
@@ -219,6 +220,11 @@ public sealed class AgentSupervisorNode : INodeRuntime
             // The run's final reviewable integrated branch (S5) — "" when none, so a downstream git.open_pr binds it directly.
             ["integratedBranch"] = JsonSerializer.SerializeToElement(result.IntegratedBranch ?? ""),
         };
+
+        // Multi-repo (S7-D1): the per-repo integrated branches a downstream per-repo PR-open targets. Emitted ONLY when
+        // non-empty — a single-repo run surfaces the single integratedBranch above, so its output bag is byte-identical.
+        if (result.RepositoryBranches.Count > 0)
+            outputs["repositoryBranches"] = JsonSerializer.SerializeToElement(result.RepositoryBranches, AgentJson.Options);
 
         return NodeResult.Ok(outputs);
     }
