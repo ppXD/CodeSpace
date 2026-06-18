@@ -461,6 +461,126 @@ public class SupervisorResolverTests
         branch.IntegratedBranch.ShouldBe("codespace/integration/run/turn1");
     }
 
+    // ── S7-D2: per-repo RESOLUTION (one multi-repo resolver; per-repo accept) ──────────
+
+    /// <summary>A resolve outcome whose single resolver agent is MULTI-repo — its RepositoryResults carry each repo's reconciled, pushed branch (the shape the multi-repo capture+offload path persists).</summary>
+    private static string ResolveOutcomeWithRepos(string status, string summary, params (string Alias, Guid? RepoId, string? Branch)[] repos)
+    {
+        var result = new SupervisorAgentResult
+        {
+            AgentRunId = Guid.NewGuid(), Status = status, Summary = summary, ProducedBranch = repos.FirstOrDefault().Branch,
+            RepositoryResults = repos.Select(r => new RepositoryRunResult { Alias = r.Alias, RepositoryId = r.RepoId, ProducedBranch = r.Branch, Access = WorkspaceAccess.Write }).ToArray(),
+        };
+        return JsonSerializer.Serialize(new { agentRunIds = new[] { result.AgentRunId }, agentCount = 1, agentResults = new[] { result } }, AgentJson.Options);
+    }
+
+    /// <summary>A MULTI-repo conflicted merge: per-repo blocks, each with its own status + (for a Conflicted block) outcomes carrying conflicted files.</summary>
+    private static string MultiRepoConflictedMerge(params (string Alias, Guid? RepoId, string Status, string[]? Files)[] repos) =>
+        JsonSerializer.Serialize(new
+        {
+            integration = new
+            {
+                status = "Conflicted",
+                repositories = repos.Select(r => new
+                {
+                    repositoryId = r.RepoId,
+                    alias = r.Alias,
+                    status = r.Status,
+                    outcomes = r.Files is null ? Array.Empty<object>() : new[] { new { label = "agent", disposition = "Conflicted", conflictedFiles = r.Files, fallbackBranch = $"codespace/agent/{r.Alias}" } },
+                }).ToArray(),
+            },
+        }, AgentJson.Options);
+
+    [Fact]
+    public void ResolvedRepositoryBranches_surfaces_a_verified_multi_repo_resolvers_per_repo_branches()
+    {
+        var apiId = Guid.NewGuid();
+        var decision = Decision(SupervisorDecisionKinds.Resolve, 3, ResolveOutcomeWithRepos("Succeeded", VerifiedSummary,
+            ("web", Guid.NewGuid(), "codespace/resolve/web"), ("api", apiId, "codespace/resolve/api")));
+
+        var branches = SupervisorOutcome.ResolvedRepositoryBranches(decision);
+
+        branches.Count.ShouldBe(2);
+        branches.Single(b => b.Alias == "api").RepositoryId.ShouldBe(apiId);
+        branches.Single(b => b.Alias == "api").IntegratedBranch.ShouldBe("codespace/resolve/api");
+    }
+
+    [Fact]
+    public void ResolvedRepositoryBranches_is_empty_for_an_unverified_or_single_repo_resolve()
+    {
+        SupervisorOutcome.ResolvedRepositoryBranches(Decision(SupervisorDecisionKinds.Resolve, 3, ResolveOutcomeWithRepos("Succeeded", "tests red", ("web", Guid.NewGuid(), "b"))))
+            .ShouldBeEmpty("an unverified resolution surfaces no per-repo branches");
+
+        SupervisorOutcome.ResolvedRepositoryBranches(Decision(SupervisorDecisionKinds.Resolve, 3, ResolveOutcomeWithBranch("Succeeded", VerifiedSummary, "codespace/resolve/r")))
+            .ShouldBeEmpty("a single-repo resolver (no RepositoryResults) surfaces via ResolvedBranch, not here");
+    }
+
+    [Fact]
+    public void ResolvedBranch_is_null_for_a_MULTI_repo_resolver()
+    {
+        // A multi-repo resolver's top-level ProducedBranch mirrors only the primary — surfacing it as THE single branch
+        // would drop the other repos, so ResolvedBranch returns null (the per-repo branches go through ResolvedRepositoryBranches).
+        SupervisorOutcome.ResolvedBranch(Decision(SupervisorDecisionKinds.Resolve, 3, ResolveOutcomeWithRepos("Succeeded", VerifiedSummary, ("web", Guid.NewGuid(), "codespace/resolve/web"))))
+            .ShouldBeNull();
+    }
+
+    [Fact]
+    public void ReadFinalRepositoryBranches_surfaces_a_verified_multi_repo_resolution_on_stop_after_resolve()
+    {
+        var tape = new[]
+        {
+            Decision(SupervisorDecisionKinds.Spawn, 1, "{}"),
+            Decision(SupervisorDecisionKinds.Merge, 2, MultiRepoConflictedMerge(("api", Guid.NewGuid(), "Conflicted", new[] { "api/Svc.cs" }))),
+            Decision(SupervisorDecisionKinds.Resolve, 3, ResolveOutcomeWithRepos("Succeeded", VerifiedSummary, ("web", Guid.NewGuid(), "codespace/resolve/web"), ("api", Guid.NewGuid(), "codespace/resolve/api"))),
+        };
+
+        SupervisorOutcome.ReadFinalRepositoryBranches(tape).Select(b => b.Alias)
+            .ShouldBe(new[] { "web", "api" }, ignoreOrder: true, "a stop right after a verified multi-repo resolve surfaces the resolver's per-repo reconciled branches");
+    }
+
+    [Fact]
+    public void ReadConflictedRepos_reads_only_the_conflicted_repos_of_a_multi_repo_merge()
+    {
+        var apiId = Guid.NewGuid();
+        var tape = new[]
+        {
+            Decision(SupervisorDecisionKinds.Merge, 2, MultiRepoConflictedMerge(
+                ("web", Guid.NewGuid(), "Clean", null),
+                ("api", apiId, "Conflicted", new[] { "api/Svc.cs", "api/Dto.cs" }))),
+        };
+
+        var conflicted = SupervisorOutcome.ReadConflictedRepos(tape);
+
+        conflicted.Count.ShouldBe(1, "only the Conflicted repos are surfaced for resolution — the clean repo is already integrated");
+        conflicted[0].RepositoryId.ShouldBe(apiId);
+        conflicted[0].Alias.ShouldBe("api");
+        conflicted[0].ConflictedFiles.ShouldBe(new[] { "api/Svc.cs", "api/Dto.cs" });
+    }
+
+    [Fact]
+    public void ReadConflictedRepos_is_empty_for_a_single_repo_conflicted_merge() =>
+        SupervisorOutcome.ReadConflictedRepos(new[] { Decision(SupervisorDecisionKinds.Merge, 2, MergeOutcome("Conflicted", null)) })
+            .ShouldBeEmpty("a single-repo conflicted merge (no repositories[]) yields no per-repo conflicted blocks — the flat resolve path handles it");
+
+    [Fact]
+    public void BuildMultiRepoInstruction_names_each_repos_subdirectory_branches_files_and_the_verified_marker()
+    {
+        var instruction = SupervisorResolverRecipe.BuildMultiRepoInstruction("ship the coordinated feature", new[]
+        {
+            new ResolverRepoSection { Alias = "web", Branches = new[] { "codespace/agent/web-a", "codespace/agent/web-b" }, ConflictedFiles = new[] { "web/App.tsx" } },
+            new ResolverRepoSection { Alias = "api", Branches = new[] { "codespace/agent/api-a" } },
+        });
+
+        instruction.ShouldContain("./web");
+        instruction.ShouldContain("./api", customMessage: "each conflicted repo's subdirectory is named so the resolver reconciles it in place");
+        instruction.ShouldContain("codespace/agent/web-a");
+        instruction.ShouldContain("codespace/agent/web-b");
+        instruction.ShouldContain("codespace/agent/api-a", customMessage: "every per-repo branch to reconcile is named — assembled from the spawn's agentResults, not the model");
+        instruction.ShouldContain("web/App.tsx", customMessage: "the conflicted files are named per repo");
+        instruction.ShouldContain(SupervisorResolverRecipe.TestsPassedMarker);
+        instruction.ShouldContain("ship the coordinated feature", Case.Insensitive);
+    }
+
     private static SupervisorTurnContext Context(int turnNumber, params SupervisorPriorDecision[] prior) =>
         new() { Goal = "ship", TurnNumber = turnNumber, PriorDecisions = prior };
 

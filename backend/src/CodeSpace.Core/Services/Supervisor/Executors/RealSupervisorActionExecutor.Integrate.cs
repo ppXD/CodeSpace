@@ -76,6 +76,37 @@ public sealed partial class RealSupervisorActionExecutor
     }
 
     /// <summary>
+    /// The PER-REPO reconciled branches a VERIFIED MULTI-repo resolution contributes (resolver loop #379, S7-D2),
+    /// keyed by repository id — but ONLY when the most recent agent-staging decision IS that verified resolve (the
+    /// same disqualifier as <see cref="AcceptedResolutionBranch"/>: a spawn/retry after it means fresh work). The
+    /// multi-repo analogue of <see cref="AcceptedResolutionBranch"/>, off the SHARED <see cref="SupervisorOutcome.ResolvedRepositoryBranches"/>
+    /// (so the acceptance rule never drifts — Rule 7). Empty for a single-repo / unverified / non-resolve last staging.
+    /// </summary>
+    private static IReadOnlyDictionary<Guid, string> AcceptedResolutionRepositories(SupervisorTurnContext context)
+    {
+        var lastStaging = context.PriorDecisions.LastOrDefault(d => SupervisorDecisionKinds.StagesAgents(d.DecisionKind));
+
+        if (lastStaging is null) return EmptyResolution;
+
+        return SupervisorOutcome.ResolvedRepositoryBranches(lastStaging)
+            .Where(b => b.RepositoryId is not null)
+            .ToDictionary(b => b.RepositoryId!.Value, b => b.IntegratedBranch);
+    }
+
+    private static readonly IReadOnlyDictionary<Guid, string> EmptyResolution = new Dictionary<Guid, string>();
+
+    /// <summary>One repo's ACCEPTED-resolution block (S7-D2): the resolver's reconciled branch surfaced as a Clean per-repo block WITHOUT re-running the integrator (which would re-conflict). <c>via</c>/<c>reason</c> are descriptive audit only — the gate is the resolve verdict via <see cref="SupervisorOutcome.ResolvedRepositoryBranches"/>. Shape-compatible with <see cref="ProjectRepoBlock"/> so <see cref="SupervisorOutcome.ReadFinalRepositoryBranches"/> reads it uniformly.</summary>
+    private static object ResolvedRepoBlock((Guid RepositoryId, string Alias) repo, string resolvedBranch) => new
+    {
+        repositoryId = repo.RepositoryId,
+        alias = repo.Alias,
+        status = "Clean",
+        integratedBranch = resolvedBranch,
+        via = "resolution",
+        reason = "a verified resolver agent reconciled this repository's conflicting branches into one tested branch",
+    };
+
+    /// <summary>
     /// The integration block for an ACCEPTED resolution (S5): the resolver's own tested branch surfaced as a Clean
     /// integration WITHOUT re-running the integrator. <c>status</c> + <c>integratedBranch</c> are the load-bearing
     /// fields (read by <see cref="SupervisorOutcome.ReadIntegration"/>); <c>via</c> + <c>reason</c> are DESCRIPTIVE
@@ -251,10 +282,19 @@ public sealed partial class RealSupervisorActionExecutor
     {
         var repos = CollectWritableRepos(merged);
 
+        // A VERIFIED multi-repo resolution reconciled some repos into the resolver's OWN per-repo branches (S7-D2): for
+        // THOSE repos, re-running the integrator over the original conflicting branches would just re-conflict, so we
+        // surface the resolver's reconciled branch (per-repo short-circuit — the multi-repo analogue of S5's single
+        // ResolutionIntegration). A repo NOT in this map (e.g. one that integrated cleanly the first time) re-integrates
+        // normally, so the merge's repositories[] is the COMPLETE set: clean repos + resolved repos.
+        var resolved = AcceptedResolutionRepositories(context);
+
         var blocks = new List<(string Status, object Block)>(repos.Count);
 
         foreach (var repo in repos)
-            blocks.Add(await IntegrateOneRepoAsync(repo, context, merged, cancellationToken).ConfigureAwait(false));
+            blocks.Add(resolved.TryGetValue(repo.RepositoryId, out var resolvedBranch)
+                ? ("Clean", ResolvedRepoBlock(repo, resolvedBranch))
+                : await IntegrateOneRepoAsync(repo, context, merged, cancellationToken).ConfigureAwait(false));
 
         // Honesty: per-repo work whose repository id is NULL (a degraded capture with no resolvable spec) can't be
         // cloned, so it's named as a Skipped block rather than silently dropped — an operator reading repositories[]

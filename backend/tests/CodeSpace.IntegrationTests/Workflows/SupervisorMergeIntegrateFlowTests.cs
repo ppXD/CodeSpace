@@ -473,7 +473,149 @@ public sealed class SupervisorMergeIntegrateFlowTests : IDisposable
         orphanBlock.GetProperty("excludedAgents").EnumerateArray().Select(e => e.GetString()).ShouldContain(idA.ToString(), customMessage: "the agent whose null-id work remains on its branch is named");
     }
 
+    [Fact]
+    public async Task Multi_repo_merge_after_a_verified_resolution_accepts_the_resolver_branch_per_repo_without_re_conflicting()
+    {
+        // Resolver loop #379 S7-D2 — the full multi-repo recovery loop's ACCEPTANCE: after a verified multi-repo
+        // resolution, a merge accepts EACH resolved repo's reconciled branch (per-repo short-circuit — re-integrating
+        // the original same-line api branches would re-conflict), while an originally-CLEAN repo (web, disjoint)
+        // re-integrates normally. The resulting repositories[] is the COMPLETE set: web (integrator) + api (resolver).
+        if (!await GitReadyAsync()) return;
+
+        using var web = new BareRemote();
+        using var api = new BareRemote();
+        var webBase = await web.SeedBaseAsync(new() { ["web_a.txt"] = "wa\n", ["web_b.txt"] = "wb\n" });
+        var apiBase = await api.SeedBaseAsync(new() { ["shared.txt"] = "shared\n" });
+
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var webRepoId = await SeedBoundRepositoryAsync(teamId, web.Url, "main");
+        var apiRepoId = await SeedBoundRepositoryAsync(teamId, api.Url, "main");
+        var runId = await SeedSupervisorRunAsync(teamId, userId);
+
+        var webPatchA = await web.MakePatchAsync(webBase, d => File.WriteAllText(Path.Combine(d, "web_a.txt"), "web-A\n"));
+        var webPatchB = await web.MakePatchAsync(webBase, d => File.WriteAllText(Path.Combine(d, "web_b.txt"), "web-B\n"));
+        var apiPatchA = await api.MakePatchAsync(apiBase, d => File.WriteAllText(Path.Combine(d, "shared.txt"), "A-wins\n"));
+        var apiPatchB = await api.MakePatchAsync(apiBase, d => File.WriteAllText(Path.Combine(d, "shared.txt"), "B-wins\n"));
+
+        var idA = await SeedMultiRepoAgentRunAsync(runId, teamId, "alpha", ("web", webRepoId, webBase, webPatchA, "codespace/agent/a"), ("api", apiRepoId, apiBase, apiPatchA, "codespace/agent/a-api"));
+        var idB = await SeedMultiRepoAgentRunAsync(runId, teamId, "beta", ("web", webRepoId, webBase, webPatchB, "codespace/agent/b"), ("api", apiRepoId, apiBase, apiPatchB, "codespace/agent/b-api"));
+
+        const string apiResolved = "codespace/resolve/api-reconciled";
+        var outcome = await ExecuteMultiRepoMergeAfterResolveAsync(runId, teamId, webRepoId, new[] { idA, idB }, verified: true, (apiRepoId, "api", apiResolved));
+        var integration = outcome.GetProperty("integration");
+
+        integration.GetProperty("status").GetString().ShouldBe("Clean", "web re-integrates clean + api is accepted from the verified resolution → the aggregate is Clean");
+        var repos = integration.GetProperty("repositories").EnumerateArray().ToList();
+
+        var apiBlock = repos.Single(r => r.GetProperty("alias").GetString() == "api");
+        apiBlock.GetProperty("status").GetString().ShouldBe("Clean");
+        apiBlock.GetProperty("integratedBranch").GetString().ShouldBe(apiResolved, "api surfaces the RESOLVER's reconciled branch — re-integrating the original same-line branches would re-conflict");
+        apiBlock.GetProperty("via").GetString().ShouldBe("resolution", "the api block is honestly marked resolution-sourced");
+
+        var webBlock = repos.Single(r => r.GetProperty("alias").GetString() == "web");
+        webBlock.GetProperty("status").GetString().ShouldBe("Clean", "the originally-clean web repo re-integrates normally on disjoint files");
+        webBlock.GetProperty("integratedBranch").GetString().ShouldBe($"codespace/integration/{runId:N}/turn4");
+
+        (await web.RemoteHasBranchAsync($"codespace/integration/{runId:N}/turn4")).ShouldBeTrue("web really re-integrated + pushed its branch");
+        (await api.RemoteHasBranchAsync($"codespace/integration/{runId:N}/turn4")).ShouldBeFalse("api was NOT re-integrated — the verified resolver branch is accepted, the integrator bypassed for api (it would re-conflict)");
+
+        // S7-D1/D2 round-trip: the node-output reader surfaces BOTH heads off the REAL merge outcome — the re-integrated
+        // web branch AND the accepted api resolver branch — tying ResolvedRepoBlock's shape to ReadFinalRepositoryBranches.
+        var finalBranches = SupervisorOutcome.ReadFinalRepositoryBranches(new[]
+        {
+            new SupervisorPriorDecision { Id = Guid.NewGuid(), Sequence = 1, DecisionKind = SupervisorDecisionKinds.Merge, Status = SupervisorDecisionStatus.Succeeded, PayloadJson = "{}", OutcomeJson = outcome.GetRawText() },
+        });
+        finalBranches.Single(b => b.Alias == "web").IntegratedBranch.ShouldBe($"codespace/integration/{runId:N}/turn4");
+        finalBranches.Single(b => b.Alias == "api").IntegratedBranch.ShouldBe(apiResolved, "the accepted resolver branch is the node's per-repo head for api");
+    }
+
+    [Fact]
+    public async Task Multi_repo_merge_after_an_UNVERIFIED_resolution_re_integrates_and_re_conflicts_the_repo()
+    {
+        // The safety floor (S7-D2): an UNVERIFIED multi-repo resolution must NEVER be accepted. The merge re-integrates
+        // the original same-line api branches (which re-conflict) instead of surfacing the resolver's branch; the clean
+        // web repo still integrates. So the aggregate is Conflicted, api carries NO resolution marker, and the resolver
+        // branch is not pushed/accepted — exactly the single-repo unverified-fall-through behaviour, per repo.
+        if (!await GitReadyAsync()) return;
+
+        using var web = new BareRemote();
+        using var api = new BareRemote();
+        var webBase = await web.SeedBaseAsync(new() { ["web_a.txt"] = "wa\n", ["web_b.txt"] = "wb\n" });
+        var apiBase = await api.SeedBaseAsync(new() { ["shared.txt"] = "shared\n" });
+
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var webRepoId = await SeedBoundRepositoryAsync(teamId, web.Url, "main");
+        var apiRepoId = await SeedBoundRepositoryAsync(teamId, api.Url, "main");
+        var runId = await SeedSupervisorRunAsync(teamId, userId);
+
+        var webPatchA = await web.MakePatchAsync(webBase, d => File.WriteAllText(Path.Combine(d, "web_a.txt"), "web-A\n"));
+        var webPatchB = await web.MakePatchAsync(webBase, d => File.WriteAllText(Path.Combine(d, "web_b.txt"), "web-B\n"));
+        var apiPatchA = await api.MakePatchAsync(apiBase, d => File.WriteAllText(Path.Combine(d, "shared.txt"), "A-wins\n"));
+        var apiPatchB = await api.MakePatchAsync(apiBase, d => File.WriteAllText(Path.Combine(d, "shared.txt"), "B-wins\n"));
+
+        var idA = await SeedMultiRepoAgentRunAsync(runId, teamId, "alpha", ("web", webRepoId, webBase, webPatchA, "codespace/agent/a"), ("api", apiRepoId, apiBase, apiPatchA, "codespace/agent/a-api"));
+        var idB = await SeedMultiRepoAgentRunAsync(runId, teamId, "beta", ("web", webRepoId, webBase, webPatchB, "codespace/agent/b"), ("api", apiRepoId, apiBase, apiPatchB, "codespace/agent/b-api"));
+
+        var integration = (await ExecuteMultiRepoMergeAfterResolveAsync(runId, teamId, webRepoId, new[] { idA, idB }, verified: false, (apiRepoId, "api", "codespace/resolve/api-bad"))).GetProperty("integration");
+
+        integration.GetProperty("status").GetString().ShouldBe("Conflicted", "an unverified resolution does not short-circuit — api re-integrates and re-conflicts");
+        var repos = integration.GetProperty("repositories").EnumerateArray().ToList();
+
+        var apiBlock = repos.Single(r => r.GetProperty("alias").GetString() == "api");
+        apiBlock.GetProperty("status").GetString().ShouldBe("Conflicted", "the unverified api resolution is rejected — the integrator re-ran and the same-line branches re-conflicted");
+        apiBlock.TryGetProperty("via", out _).ShouldBeFalse("a re-integrated (not accepted) api block carries no resolution 'via' marker");
+
+        repos.Single(r => r.GetProperty("alias").GetString() == "web").GetProperty("status").GetString().ShouldBe("Clean", "the clean web repo still integrates");
+        (await api.RemoteHasBranchAsync($"codespace/integration/{runId:N}/turn4")).ShouldBeFalse("a re-conflicted api pushes no branch; the unverified resolver branch is NOT accepted");
+    }
+
     // ─── Drive the real executor ───────────────────────────────────────────────────
+
+    /// <summary>Execute a multi-repo <c>merge</c> against a tape that already holds spawn → conflicted-multi-repo-merge → multi-repo-resolve (the resolver's RepositoryResults carry each resolved repo's reconciled branch). <paramref name="verified"/> flips the RESOLUTION_VERIFIED marker so a test can drive both the accept (verified → per-repo short-circuit) and the safety-floor (unverified → re-integrate + re-conflict) paths.</summary>
+    private async Task<JsonElement> ExecuteMultiRepoMergeAfterResolveAsync(Guid runId, Guid teamId, Guid primaryRepoId, Guid[] agentRunIds, bool verified, params (Guid RepoId, string Alias, string Branch)[] resolverRepos)
+    {
+        using var scope = _fixture.BeginScope();
+        var executor = scope.Resolve<ISupervisorActionExecutor>();
+
+        var resolverResult = new SupervisorAgentResult
+        {
+            AgentRunId = Guid.NewGuid(),
+            Status = "Succeeded",
+            Summary = verified ? $"reconciled each conflicted repository. {SupervisorResolverRecipe.TestsPassedMarker}" : "reconciled but the tests are still red",
+            ProducedBranch = resolverRepos[0].Branch,
+            RepositoryResults = resolverRepos.Select(r => new RepositoryRunResult { Alias = r.Alias, RepositoryId = r.RepoId, ProducedBranch = r.Branch, Access = WorkspaceAccess.Write }).ToArray(),
+        };
+
+        var conflictedMerge = JsonSerializer.Serialize(new
+        {
+            integration = new
+            {
+                status = "Conflicted",
+                repositories = resolverRepos.Select(r => new { repositoryId = r.RepoId, alias = r.Alias, status = "Conflicted", outcomes = new[] { new { label = "agent", disposition = "Conflicted", conflictedFiles = new[] { "shared.txt" }, fallbackBranch = $"codespace/agent/{r.Alias}" } } }).ToArray(),
+            },
+        }, AgentJson.Options);
+
+        var context = new SupervisorTurnContext
+        {
+            Goal = Goal,
+            SupervisorRunId = runId,
+            TeamId = teamId,
+            NodeId = NodeId,
+            TurnNumber = 4,
+            PriorDecisions = new[]
+            {
+                new SupervisorPriorDecision { Id = Guid.NewGuid(), Sequence = 1, DecisionKind = SupervisorDecisionKinds.Spawn, Status = SupervisorDecisionStatus.Succeeded, PayloadJson = """{"subtaskIds":["s1","s2"]}""", OutcomeJson = JsonSerializer.Serialize(new { agentRunIds, agentCount = agentRunIds.Length }, AgentJson.Options) },
+                new SupervisorPriorDecision { Id = Guid.NewGuid(), Sequence = 2, DecisionKind = SupervisorDecisionKinds.Merge, Status = SupervisorDecisionStatus.Succeeded, PayloadJson = "{}", OutcomeJson = conflictedMerge },
+                new SupervisorPriorDecision { Id = Guid.NewGuid(), Sequence = 3, DecisionKind = SupervisorDecisionKinds.Resolve, Status = SupervisorDecisionStatus.Succeeded, PayloadJson = "{}", OutcomeJson = JsonSerializer.Serialize(new { agentRunIds = new[] { resolverResult.AgentRunId }, agentCount = 1, agentResults = new[] { resolverResult } }, AgentJson.Options) },
+            },
+            AgentProfile = new SupervisorAgentProfile { RepositoryId = primaryRepoId, IntegrateBranches = true },
+        };
+
+        var decision = new SupervisorDecision { Kind = SupervisorDecisionKinds.Merge, PayloadJson = JsonSerializer.Serialize(new SupervisorMergePayload { SynthesisInstruction = "finalize" }, AgentJson.Options) };
+
+        var execution = await executor.ExecuteAsync(decision, context, CancellationToken.None);
+        return JsonDocument.Parse(execution.OutcomeJson).RootElement.Clone();
+    }
 
     /// <summary>Execute a multi-repo <c>merge</c>: the profile's primary repo is set explicitly (the agents carry per-repo results), the integrate gate on.</summary>
     private async Task<JsonElement> ExecuteMultiRepoMergeAsync(Guid runId, Guid teamId, Guid primaryRepoId, params Guid[] agentRunIds)
