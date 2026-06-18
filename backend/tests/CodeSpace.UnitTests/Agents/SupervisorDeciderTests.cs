@@ -83,6 +83,42 @@ public class SupervisorDeciderTests
     }
 
     [Fact]
+    public void The_user_prompt_is_UNCHANGED_by_per_repo_RepositoryResults()
+    {
+        // Resolver loop #379 S7-B — surfacing per-repo RepositoryResults into the compact must NOT change what the
+        // decider SEES: the labeled rendering reads agentResults field-selectively (status / summary / error), never
+        // the raw per-repo array. So a multi-repo spawn's prompt is byte-identical to the same spawn without per-repo
+        // data — single-repo decider behaviour is preserved and a multi-repo run adds no prompt bloat. Built via the
+        // REAL fold helper (valid Guids) so the labeled path — not the raw-jsonb fallback — is exercised.
+        var agentId = Guid.NewGuid();
+        var spawnOutcome = $$"""{"agentRunIds":["{{agentId}}"],"agentCount":1}""";
+
+        SupervisorAgentResult Result(IReadOnlyList<RepositoryRunResult> repos) => new()
+        {
+            AgentRunId = agentId, Status = "Succeeded", Summary = "coordinated change", ProducedBranch = "codespace/agent/api", RepositoryResults = repos,
+        };
+
+        var withoutPerRepo = SupervisorOutcome.FoldAgentResults(spawnOutcome, new[] { Result(Array.Empty<RepositoryRunResult>()) });
+        var withPerRepo = SupervisorOutcome.FoldAgentResults(spawnOutcome, new[] { Result(new[]
+        {
+            new RepositoryRunResult { Alias = "repo", RepositoryId = Guid.NewGuid(), ProducedBranch = "codespace/agent/api", BaseBranch = "main", Access = WorkspaceAccess.Write },
+            new RepositoryRunResult { Alias = "web", RepositoryId = Guid.NewGuid(), ProducedBranch = "codespace/agent/web", BaseBranch = "develop", Access = WorkspaceAccess.Write },
+        }) }) ;
+
+        SupervisorPriorDecision Spawn(string outcome) => new()
+        {
+            Id = Guid.NewGuid(), Sequence = 2, DecisionKind = SupervisorDecisionKinds.Spawn, Status = SupervisorDecisionStatus.Succeeded,
+            PayloadJson = """{"subtaskIds":["s1"]}""", OutcomeJson = outcome,
+        };
+
+        var promptWithout = LlmSupervisorDecider.BuildUserPromptForTest(Context(turnNumber: 2, Spawn(withoutPerRepo)));
+        var promptWith = LlmSupervisorDecider.BuildUserPromptForTest(Context(turnNumber: 2, Spawn(withPerRepo)));
+
+        promptWith.ShouldBe(promptWithout, "per-repo RepositoryResults are not rendered into the decider prompt — the field-selective labeled rendering keeps single-repo behaviour identical and adds no multi-repo bloat");
+        promptWith.ShouldNotContain("codespace/agent/web", Case.Insensitive, "the per-repo branches never leak into the prompt as raw text");
+    }
+
+    [Fact]
     public void The_system_prompt_instructs_inspect_and_retry_without_an_unconditional_merge_then_stop_rail()
     {
         // The visibility fold is necessary-but-not-sufficient: the rails must INSTRUCT the model to act on what it

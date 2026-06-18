@@ -80,6 +80,49 @@ public sealed class SupervisorAgentResultsRehydrateFlowTests
     }
 
     [Fact]
+    public async Task Rehydrate_folds_a_multi_repo_agents_per_repo_results_into_the_compact()
+    {
+        // Resolver loop #379 S7-B — a MULTI-repo agent's per-repo outcomes (result_jsonb RepositoryResults) survive the
+        // rehydrate fold into the durable compact agentResults, so the resolver loop reads each repo's pushed branch +
+        // identity straight off the ledger (S7-D). A SINGLE-repo agent in the same spawn folds EMPTY per-repo results —
+        // the 1-repo case, behaviour-identical.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedSupervisorRunAsync(teamId, userId);
+
+        var multiId = Guid.NewGuid();
+        var singleId = Guid.NewGuid();
+        var apiRepo = Guid.NewGuid();
+        var webRepo = Guid.NewGuid();
+
+        await SeedAgentRunAsync(runId, teamId, multiId, AgentRunStatus.Succeeded, rowError: null, resultJson: ResultJson(
+            summary: "coordinated change", producedBranch: "codespace/agent/api", repositoryResults: new[]
+            {
+                new RepositoryRunResult { Alias = "repo", RepositoryId = apiRepo, ChangedFiles = new[] { "Api/Foo.cs" }, ProducedBranch = "codespace/agent/api", BaseSha = "a1b2c3d4", BaseBranch = "main", Access = WorkspaceAccess.Write },
+                new RepositoryRunResult { Alias = "web", RepositoryId = webRepo, ChangedFiles = new[] { "web/Bar.tsx" }, ProducedBranch = "codespace/agent/web", BaseBranch = "develop", Access = WorkspaceAccess.Write },
+            }));
+        await SeedAgentRunAsync(runId, teamId, singleId, AgentRunStatus.Succeeded, rowError: null,
+            resultJson: ResultJson(summary: "single repo", producedBranch: "codespace/agent/solo"));
+
+        await SeedSpawnDecisionAsync(runId, teamId, sequence: 1, SupervisorDecisionStatus.Succeeded, SpawnOutcome(multiId, singleId));
+
+        var context = await RehydrateAsync(runId, teamId);
+
+        var spawn = context.PriorDecisions.Single(d => d.DecisionKind == SupervisorDecisionKinds.Spawn);
+        var results = SupervisorOutcome.ReadAgentResults(spawn.OutcomeJson);
+
+        var multi = results.Single(r => r.AgentRunId == multiId);
+        multi.RepositoryResults.Count.ShouldBe(2, "the multi-repo agent's per-repo outcomes are folded into the durable compact");
+        multi.RepositoryResults.Select(r => r.ProducedBranch).ShouldBe(new[] { "codespace/agent/api", "codespace/agent/web" });
+        multi.RepositoryResults.Single(r => r.Alias == "web").RepositoryId.ShouldBe(webRepo, "per-repo identity survives the durable ledger — the per-repo resolution/PR-open key");
+        multi.RepositoryResults.Single(r => r.Alias == "repo").BaseBranch.ShouldBe("main");
+        multi.RepositoryResults.Single(r => r.Alias == "repo").BaseSha.ShouldBe("a1b2c3d4", "the per-repo integrity anchor (SOTA #3 stale-base refusal SHA) survives real persistence — S7-C/D's per-repo integrate consumes it");
+
+        var single = results.Single(r => r.AgentRunId == singleId);
+        single.RepositoryResults.ShouldBeEmpty("a single-repo agent folds no per-repo entries — the 1-repo case, behaviour-identical");
+        single.ProducedBranch.ShouldBe("codespace/agent/solo", "its one outcome stays on the top-level field");
+    }
+
+    [Fact]
     public async Task Rehydrate_persists_the_fold_once_and_is_idempotent_on_re_rehydrate()
     {
         var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
@@ -259,7 +302,7 @@ public sealed class SupervisorAgentResultsRehydrateFlowTests
     private static string SpawnOutcome(params Guid[] agentRunIds) =>
         JsonSerializer.Serialize(new { agentRunIds, agentCount = agentRunIds.Length }, AgentJson.Options);
 
-    private static string ResultJson(string? summary = null, string[]? changedFiles = null, string? producedBranch = null) =>
+    private static string ResultJson(string? summary = null, string[]? changedFiles = null, string? producedBranch = null, RepositoryRunResult[]? repositoryResults = null) =>
         JsonSerializer.Serialize(new AgentRunResult
         {
             Status = AgentRunStatus.Succeeded,
@@ -267,5 +310,6 @@ public sealed class SupervisorAgentResultsRehydrateFlowTests
             Summary = summary,
             ChangedFiles = changedFiles ?? Array.Empty<string>(),
             ProducedBranch = producedBranch,
+            RepositoryResults = repositoryResults ?? Array.Empty<RepositoryRunResult>(),
         }, AgentJson.Options);
 }
