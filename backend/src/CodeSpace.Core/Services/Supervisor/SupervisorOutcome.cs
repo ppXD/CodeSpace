@@ -340,6 +340,75 @@ public static class SupervisorOutcome
     }
 
     /// <summary>
+    /// Fold the run's FINAL per-repo reviewable integrated branches off the durable tape (resolver loop #379, S7-D1) —
+    /// the MULTI-repo complement of <see cref="ReadFinalIntegratedBranch"/> (which is single-valued and so empty for a
+    /// multi-repo run). A reverse walk (latest wins) returns the most recent <c>merge</c> whose per-repo
+    /// <c>repositories[]</c> block carries any CLEAN repo (each with its own integrated branch); a fresh spawn / retry /
+    /// resolve that nothing later merged is the same BARRIER as <see cref="ReadFinalIntegratedBranch"/> (don't surface a
+    /// stale set past un-integrated work). EMPTY for a single-repo run (no <c>repositories[]</c>) — it surfaces the
+    /// single <see cref="ReadFinalIntegratedBranch"/> instead. Pure + replay-deterministic.
+    /// </summary>
+    public static IReadOnlyList<SupervisorRepositoryBranch> ReadFinalRepositoryBranches(IReadOnlyList<SupervisorPriorDecision> priorDecisions)
+    {
+        for (var i = priorDecisions.Count - 1; i >= 0; i--)
+        {
+            var decision = priorDecisions[i];
+
+            if (decision.DecisionKind == SupervisorDecisionKinds.Merge)
+            {
+                var branches = ReadMergeRepositoryBranches(decision.OutcomeJson);
+                if (branches.Count > 0) return branches;
+            }
+
+            // The same disqualifier as ReadFinalIntegratedBranch: fresh agent-staging work nothing later merged means
+            // there is no clean per-repo set to surface (an earlier merge's branches would be stale past it).
+            if (SupervisorDecisionKinds.StagesAgents(decision.DecisionKind)) return Array.Empty<SupervisorRepositoryBranch>();
+        }
+
+        return Array.Empty<SupervisorRepositoryBranch>();
+    }
+
+    /// <summary>Read the CLEAN per-repo integrated branches off ONE multi-repo merge's <c>integration.repositories[]</c> block — each repo whose status is <c>Clean</c> with a non-empty <c>integratedBranch</c>. Empty for a single-repo merge (no <c>repositories[]</c>) or a block with no clean repos. Best-effort + pure.</summary>
+    private static IReadOnlyList<SupervisorRepositoryBranch> ReadMergeRepositoryBranches(string? outcomeJson)
+    {
+        if (string.IsNullOrWhiteSpace(outcomeJson)) return Array.Empty<SupervisorRepositoryBranch>();
+
+        try
+        {
+            var root = JsonDocument.Parse(outcomeJson).RootElement;
+
+            if (root.ValueKind != JsonValueKind.Object || !root.TryGetProperty("integration", out var integration) || integration.ValueKind != JsonValueKind.Object)
+                return Array.Empty<SupervisorRepositoryBranch>();
+
+            if (!integration.TryGetProperty("repositories", out var repositories) || repositories.ValueKind != JsonValueKind.Array)
+                return Array.Empty<SupervisorRepositoryBranch>();
+
+            var branches = new List<SupervisorRepositoryBranch>();
+
+            foreach (var repo in repositories.EnumerateArray())
+            {
+                if (repo.ValueKind != JsonValueKind.Object) continue;
+
+                if (!(repo.TryGetProperty("status", out var s) && s.ValueKind == JsonValueKind.String && s.GetString() == "Clean")) continue;
+
+                if (repo.TryGetProperty("integratedBranch", out var ib) && ib.ValueKind == JsonValueKind.String && ib.GetString() is { Length: > 0 } branch)
+                    branches.Add(new SupervisorRepositoryBranch
+                    {
+                        RepositoryId = repo.TryGetProperty("repositoryId", out var id) && id.ValueKind == JsonValueKind.String && Guid.TryParse(id.GetString(), out var g) ? g : null,
+                        Alias = repo.TryGetProperty("alias", out var a) && a.ValueKind == JsonValueKind.String ? a.GetString() ?? "" : "",
+                        IntegratedBranch = branch,
+                    });
+            }
+
+            return branches;
+        }
+        catch (JsonException)
+        {
+            return Array.Empty<SupervisorRepositoryBranch>();
+        }
+    }
+
+    /// <summary>
     /// The reviewable branch a VERIFIED <c>resolve</c> decision contributes — its first folded resolver agent's
     /// pushed branch — or null when the decision isn't a resolve, the resolution wasn't
     /// <see cref="SupervisorResolutionVerdict.Verified"/>, or the resolver pushed nothing. The SINGLE encoding of

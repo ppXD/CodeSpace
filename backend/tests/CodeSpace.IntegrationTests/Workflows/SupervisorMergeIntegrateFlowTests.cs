@@ -287,6 +287,17 @@ public sealed class SupervisorMergeIntegrateFlowTests : IDisposable
         (await web.RemoteFileAsync(branch, "web_b.txt")).ShouldContain("web-B", customMessage: "agent B's web change landed too — the web repo integrated on its own axis");
         (await api.RemoteFileAsync(branch, "api_a.txt")).ShouldContain("api-A", customMessage: "agent A's api change landed on the api integrated branch (its OWN remote)");
         (await api.RemoteFileAsync(branch, "api_b.txt")).ShouldContain("api-B", customMessage: "agent B's api change landed too — INTEGRATED per repo, not narrated");
+
+        // S7-D1: the per-repo node-output reader surfaces these REAL integrated branches off a terminal tape — ties the
+        // ReadFinalRepositoryBranches reader to the REAL multi-repo merge producer (catches any block-shape drift).
+        var finalBranches = SupervisorOutcome.ReadFinalRepositoryBranches(new[]
+        {
+            new SupervisorPriorDecision { Id = Guid.NewGuid(), Sequence = 1, DecisionKind = SupervisorDecisionKinds.Merge, Status = SupervisorDecisionStatus.Succeeded, PayloadJson = "{}", OutcomeJson = outcome.GetRawText() },
+        });
+        finalBranches.Select(r => r.Alias).ShouldBe(new[] { "web", "api" }, ignoreOrder: true, "the S7-D1 node-output reader surfaces both repos' integrated branches off the real multi-repo merge");
+        finalBranches.ShouldAllBe(r => r.IntegratedBranch == branch);
+        finalBranches.Single(r => r.Alias == "web").RepositoryId.ShouldBe(webRepoId, "the per-repo PR-open key round-trips through the reader's Guid parse off the REAL producer block");
+        finalBranches.Single(r => r.Alias == "api").RepositoryId.ShouldBe(apiRepoId);
     }
 
     [Fact]

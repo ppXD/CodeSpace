@@ -3,6 +3,7 @@ using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Supervisor;
 using CodeSpace.Core.Services.Supervisor.Deciders;
 using CodeSpace.Core.Services.Supervisor.Executors;
+using CodeSpace.Core.Services.Workflows.Nodes.Builtin;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Dtos.Agents;
 using CodeSpace.UnitTests.Infrastructure;
@@ -178,6 +179,59 @@ public class SupervisorTurnServiceTests
 
         result.IsFinished.ShouldBeTrue();
         result.IntegratedBranch.ShouldBeNull("a run that never produced a clean integration surfaces no branch (the node emits an empty string)");
+        result.RepositoryBranches.ShouldBeEmpty("a single-repo / no-integration run surfaces no per-repo branches either");
+    }
+
+    [Fact]
+    public void BuildResult_on_a_terminal_stop_surfaces_the_per_repo_integrated_branches_for_a_multi_repo_run()
+    {
+        // S7-D1 wiring: a MULTI-repo run has no single integratedBranch (each repo integrates on its own axis), so
+        // BuildResult folds the per-repo branches off the latest clean multi-repo merge onto RepositoryBranches — the
+        // node surfaces them as `repositoryBranches` for a downstream per-repo PR-open.
+        var webId = Guid.NewGuid();
+        var apiId = Guid.NewGuid();
+        var merge = new SupervisorPriorDecision
+        {
+            Id = Guid.NewGuid(), Sequence = 2, DecisionKind = SupervisorDecisionKinds.Merge, Status = SupervisorDecisionStatus.Succeeded, PayloadJson = "{}",
+            OutcomeJson = JsonSerializer.Serialize(new
+            {
+                integration = new
+                {
+                    status = "Clean",
+                    repositories = new[]
+                    {
+                        new { repositoryId = webId, alias = "web", status = "Clean", integratedBranch = "codespace/integration/run/turn1" },
+                        new { repositoryId = apiId, alias = "api", status = "Clean", integratedBranch = "codespace/integration/run/turn1" },
+                    },
+                },
+            }, AgentJson.Options),
+        };
+        var context = new SupervisorTurnContext { Goal = "goal", TurnNumber = 2, PriorDecisions = new[] { merge } };
+
+        var result = SupervisorTurnService.BuildResult(context, new SupervisorDecision { Kind = SupervisorDecisionKinds.Stop, PayloadJson = "{}" }, SupervisorExecution.Synchronous("{}"));
+
+        result.IntegratedBranch.ShouldBeNull("a multi-repo run has no single integrated branch");
+        result.RepositoryBranches.Count.ShouldBe(2, "each cleanly-integrated repo surfaces its own branch");
+        result.RepositoryBranches.Single(b => b.Alias == "api").RepositoryId.ShouldBe(apiId);
+    }
+
+    [Fact]
+    public void Finish_emits_the_repositoryBranches_output_ONLY_for_a_multi_repo_run()
+    {
+        // S7-D1 node guard: a multi-repo run surfaces `repositoryBranches`; a single-repo run OMITS the key entirely so
+        // its output bag is byte-identical to pre-S7-D1 (mirrors the existing integratedBranch-only single-repo output).
+        var multi = AgentSupervisorNode.Finish(NullLogger.Instance, SupervisorTurnResult.Finished("stop", "done", integratedBranch: null, repositoryBranches: new[]
+        {
+            new SupervisorRepositoryBranch { RepositoryId = Guid.NewGuid(), Alias = "web", IntegratedBranch = "codespace/integration/run/turn1" },
+        })).Outputs;
+
+        multi.ContainsKey("repositoryBranches").ShouldBeTrue("a multi-repo run surfaces its per-repo integrated branches");
+        multi["repositoryBranches"].GetArrayLength().ShouldBe(1);
+
+        var single = AgentSupervisorNode.Finish(NullLogger.Instance, SupervisorTurnResult.Finished("stop", "done", integratedBranch: "codespace/integration/x")).Outputs;
+
+        single.ContainsKey("repositoryBranches").ShouldBeFalse("a single-repo run omits the key — its output bag is byte-identical to pre-S7-D1");
+        single["integratedBranch"].GetString().ShouldBe("codespace/integration/x");
     }
 
     // ── Replay: a re-run of a settled turn does NOT re-execute the side effect ───────

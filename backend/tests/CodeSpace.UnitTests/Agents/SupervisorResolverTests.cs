@@ -346,6 +346,121 @@ public class SupervisorResolverTests
     public void ResolvedBranch_is_null_for_a_verified_resolve_that_pushed_no_branch() =>
         SupervisorOutcome.ResolvedBranch(Decision(SupervisorDecisionKinds.Resolve, 1, ResolveOutcomeWithBranch("Succeeded", VerifiedSummary, null))).ShouldBeNull();
 
+    // ── S7-D1: per-repo node output (ReadFinalRepositoryBranches) — the MULTI-repo complement of ReadFinalIntegratedBranch ──
+
+    /// <summary>A MULTI-repo merge outcome: the aggregate status + a per-repo <c>repositories[]</c> array, each block its own status/integratedBranch.</summary>
+    private static string MultiRepoMergeOutcome(string aggregateStatus, params (string Alias, Guid? RepoId, string Status, string? Branch)[] repos) =>
+        JsonSerializer.Serialize(new
+        {
+            merged = Array.Empty<object>(), count = 0,
+            integration = new
+            {
+                status = aggregateStatus,
+                repositories = repos.Select(r => new { repositoryId = r.RepoId, alias = r.Alias, status = r.Status, integratedBranch = r.Branch }).ToArray(),
+            },
+        }, AgentJson.Options);
+
+    [Fact]
+    public void ReadFinalRepositoryBranches_surfaces_each_clean_repos_branch()
+    {
+        var webId = Guid.NewGuid();
+        var apiId = Guid.NewGuid();
+        var tape = new[]
+        {
+            Decision(SupervisorDecisionKinds.Spawn, 1, "{}"),
+            Decision(SupervisorDecisionKinds.Merge, 2, MultiRepoMergeOutcome("Clean",
+                ("web", webId, "Clean", "codespace/integration/run/turn1"),
+                ("api", apiId, "Clean", "codespace/integration/run/turn1"))),
+        };
+
+        var branches = SupervisorOutcome.ReadFinalRepositoryBranches(tape);
+
+        branches.Count.ShouldBe(2);
+        branches.Single(b => b.Alias == "web").RepositoryId.ShouldBe(webId, "each per-repo branch names its repo — the per-repo PR-open key");
+        branches.Single(b => b.Alias == "api").IntegratedBranch.ShouldBe("codespace/integration/run/turn1");
+    }
+
+    [Fact]
+    public void ReadFinalRepositoryBranches_includes_only_the_CLEAN_repos_of_a_partial_conflict()
+    {
+        var tape = new[]
+        {
+            Decision(SupervisorDecisionKinds.Spawn, 1, "{}"),
+            Decision(SupervisorDecisionKinds.Merge, 2, MultiRepoMergeOutcome("Conflicted",
+                ("web", Guid.NewGuid(), "Clean", "codespace/integration/run/turn1"),
+                ("api", Guid.NewGuid(), "Conflicted", null))),
+        };
+
+        var branches = SupervisorOutcome.ReadFinalRepositoryBranches(tape);
+
+        branches.Select(b => b.Alias).ShouldBe(new[] { "web" }, "only the cleanly-integrated repo surfaces a branch; the conflicted repo has none (its resolution is S7-D2)");
+    }
+
+    [Fact]
+    public void ReadFinalRepositoryBranches_is_empty_for_a_single_repo_merge()
+    {
+        // A single-repo run uses the flat integratedBranch (ReadFinalIntegratedBranch); its block has no repositories[].
+        var tape = new[] { Decision(SupervisorDecisionKinds.Merge, 2, MergeOutcome("Clean", "codespace/integration/x")) };
+
+        SupervisorOutcome.ReadFinalRepositoryBranches(tape).ShouldBeEmpty("a single-repo merge has no per-repo repositories[] — it surfaces the single integratedBranch instead");
+        SupervisorOutcome.ReadFinalIntegratedBranch(tape).ShouldBe("codespace/integration/x", "...and the single-repo reader still surfaces the one branch (the two are complementary)");
+    }
+
+    [Fact]
+    public void ReadFinalRepositoryBranches_returns_empty_when_a_spawn_follows_the_merge_unmerged()
+    {
+        var tape = new[]
+        {
+            Decision(SupervisorDecisionKinds.Merge, 2, MultiRepoMergeOutcome("Clean", ("web", Guid.NewGuid(), "Clean", "codespace/integration/run/turn1"))),
+            Decision(SupervisorDecisionKinds.Spawn, 3, "{}"),   // a fresh wave staged after the merge, never re-merged
+        };
+
+        SupervisorOutcome.ReadFinalRepositoryBranches(tape).ShouldBeEmpty("the per-repo set is STALE once a new wave is spawned un-integrated — the same barrier as ReadFinalIntegratedBranch");
+    }
+
+    [Fact]
+    public void ReadFinalRepositoryBranches_takes_the_latest_multi_repo_merge()
+    {
+        var tape = new[]
+        {
+            Decision(SupervisorDecisionKinds.Merge, 2, MultiRepoMergeOutcome("Clean", ("web", Guid.NewGuid(), "Clean", "codespace/integration/run/turn1"))),
+            Decision(SupervisorDecisionKinds.Merge, 4, MultiRepoMergeOutcome("Clean",
+                ("web", Guid.NewGuid(), "Clean", "codespace/integration/run/turn3"),
+                ("api", Guid.NewGuid(), "Clean", "codespace/integration/run/turn3"))),
+        };
+
+        var branches = SupervisorOutcome.ReadFinalRepositoryBranches(tape);
+
+        branches.Count.ShouldBe(2, "the latest merge wins");
+        branches.ShouldAllBe(b => b.IntegratedBranch == "codespace/integration/run/turn3");
+    }
+
+    [Theory]
+    [InlineData("not json")]
+    [InlineData("{}")]
+    [InlineData("""{"integration":"oops"}""")]                              // integration present but not an object
+    [InlineData("""{"integration":{"status":"Clean","repositories":"oops"}}""")]   // repositories present but not an array
+    [InlineData("""{"integration":{"status":"Clean","repositories":[{"status":"Clean"}]}}""")]  // clean repo but NO integratedBranch
+    public void ReadFinalRepositoryBranches_tolerates_a_malformed_or_branchless_block(string outcomeJson) =>
+        SupervisorOutcome.ReadFinalRepositoryBranches(new[] { Decision(SupervisorDecisionKinds.Merge, 2, outcomeJson) })
+            .ShouldBeEmpty("a malformed / branchless multi-repo block degrades to empty, never a crash");
+
+    [Fact]
+    public void ReadFinalRepositoryBranches_tolerates_a_null_repository_id_on_a_clean_block()
+    {
+        // A degraded clean block whose repositoryId is null/non-Guid still surfaces its branch (alias + branch are
+        // present) with RepositoryId null — the reader never throws on the Guid.TryParse round-trip.
+        var tape = new[]
+        {
+            Decision(SupervisorDecisionKinds.Merge, 2, """{"integration":{"status":"Clean","repositories":[{"repositoryId":null,"alias":"orphan","status":"Clean","integratedBranch":"codespace/integration/run/turn1"}]}}"""),
+        };
+
+        var branch = SupervisorOutcome.ReadFinalRepositoryBranches(tape).ShouldHaveSingleItem();
+        branch.RepositoryId.ShouldBeNull();
+        branch.Alias.ShouldBe("orphan");
+        branch.IntegratedBranch.ShouldBe("codespace/integration/run/turn1");
+    }
+
     private static SupervisorTurnContext Context(int turnNumber, params SupervisorPriorDecision[] prior) =>
         new() { Goal = "ship", TurnNumber = turnNumber, PriorDecisions = prior };
 
