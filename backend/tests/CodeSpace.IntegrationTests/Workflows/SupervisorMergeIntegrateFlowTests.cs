@@ -6,12 +6,18 @@ using CodeSpace.Core.Services.Agents.Sandbox;
 using CodeSpace.Core.Services.Agents.Sandbox.Runners;
 using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Supervisor;
+using CodeSpace.Core.Services.Workflows.Engine;
 using CodeSpace.IntegrationTests.Infrastructure;
+using CodeSpace.IntegrationTests.Infrastructure.Jobs;
 using CodeSpace.IntegrationTests.Workflows.Infrastructure;
 using CodeSpace.Messages.Agents;
+using CodeSpace.Messages.Authorization;
+using CodeSpace.Messages.Commands.Workflows;
 using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Dtos.Agents;
+using CodeSpace.Messages.Dtos.Workflows;
 using CodeSpace.Messages.Enums;
+using MediatR;
 using Microsoft.EntityFrameworkCore;
 using Shouldly;
 
@@ -41,6 +47,7 @@ public sealed class SupervisorMergeIntegrateFlowTests : IDisposable
 
     private readonly PostgresFixture _fixture;
     private readonly string? _flagBefore;
+    private readonly string? _laneBefore;
 
     public SupervisorMergeIntegrateFlowTests(PostgresFixture fixture)
     {
@@ -48,9 +55,21 @@ public sealed class SupervisorMergeIntegrateFlowTests : IDisposable
         // Drive the gate purely by the per-run profile opt-in: ensure the ambient flag is OFF so the gate-OFF test is deterministic.
         _flagBefore = Environment.GetEnvironmentVariable(AgentRunExecutor.IntegrateBranchEnabledEnvVar);
         Environment.SetEnvironmentVariable(AgentRunExecutor.IntegrateBranchEnabledEnvVar, null);
+        _laneBefore = Environment.GetEnvironmentVariable(SupervisorLane.EnabledEnvVar);
     }
 
-    public void Dispose() => Environment.SetEnvironmentVariable(AgentRunExecutor.IntegrateBranchEnabledEnvVar, _flagBefore);
+    // Restore ALL shared/process-global state in Dispose (xUnit runs it even on a test-body throw), so the composition
+    // test's lane-flag + decision-script + integrate-flag + AutoExecute mutations can never leak to the 95-class shared
+    // Postgres collection — the convention SupervisorSpawnFlowTests / SupervisorMergeFoldFlowTests follow.
+    public void Dispose()
+    {
+        Environment.SetEnvironmentVariable(AgentRunExecutor.IntegrateBranchEnabledEnvVar, _flagBefore);
+        Environment.SetEnvironmentVariable(SupervisorLane.EnabledEnvVar, _laneBefore);
+
+        using var scope = _fixture.BeginScope();
+        scope.Resolve<SupervisorDecisionScript>().PlanThenStop();
+        scope.Resolve<InMemoryBackgroundJobClient>().AutoExecute = true;
+    }
 
     [Fact]
     public async Task Integrate_optIn_produces_a_clean_integrated_branch_and_a_synthesis_over_the_real_diffs()
@@ -755,6 +774,179 @@ public sealed class SupervisorMergeIntegrateFlowTests : IDisposable
     /// <summary>The repository this run's team owns (seeded just before) — the profile's RepositoryId for the integrate path. Team-scoped because the Postgres fixture is shared across tests.</summary>
     private static Guid Repo(ILifetimeScope scope, Guid teamId) =>
         scope.Resolve<CodeSpaceDbContext>().Repository.AsNoTracking().Single(r => r.TeamId == teamId).Id;
+
+    [Fact]
+    public async Task A_multi_repo_supervisor_run_wires_its_per_repo_branches_into_git_open_change_set()
+    {
+        // S7-E composition (the resolver loop's last mile, end-to-end through the ENGINE): a REAL multi-turn supervisor
+        // run (plan → spawn → merge, across resumes) integrates two repos cleanly and STOPS with a repositoryBranches
+        // output; the engine then resolves {{nodes.sup.outputs.repositoryBranches}} into the downstream
+        // git.open_change_set node's repositories input, so a per-repo PR-open entry flows through for EACH repo —
+        // proving the node-to-node wiring with NO new node. (The open itself hits the real provider; a file:// remote
+        // has none, so each repo reports a Failed disposition — what matters is BOTH repos' heads reached the node.)
+        if (!await GitReadyAsync()) return;
+
+        // Enable the lane + integrate gate + the merge script for this run. ALL of these (+ AutoExecute) are restored
+        // by Dispose (which xUnit runs even on a throw), so nothing leaks to the shared collection — no per-test finally.
+        Environment.SetEnvironmentVariable(SupervisorLane.EnabledEnvVar, "1");
+        Environment.SetEnvironmentVariable(AgentRunExecutor.IntegrateBranchEnabledEnvVar, "1");
+        using (var s = _fixture.BeginScope()) s.Resolve<SupervisorDecisionScript>().PlanSpawnMergeStop();
+
+        var jobClient = ResolveJobClient();
+        jobClient.Clear();
+        jobClient.AutoExecute = false;   // the binary-less harness must not run; we complete the spawned agents below
+
+        using var web = new BareRemote();
+        using var api = new BareRemote();
+        var webBase = await web.SeedBaseAsync(new() { ["web_a.txt"] = "wa\n", ["web_b.txt"] = "wb\n" });
+        var apiBase = await api.SeedBaseAsync(new() { ["api_a.txt"] = "aa\n", ["api_b.txt"] = "ab\n" });
+
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var webId = await SeedBoundRepositoryAsync(teamId, web.Url, "main");
+        var apiId = await SeedBoundRepositoryAsync(teamId, api.Url, "main");
+        var workflowId = await CreateSupervisorChangeSetWorkflowAsync(teamId, userId, webId, apiId);
+        var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
+
+        var webPatchA = await web.MakePatchAsync(webBase, d => File.WriteAllText(Path.Combine(d, "web_a.txt"), "web-A\n"));
+        var apiPatchA = await api.MakePatchAsync(apiBase, d => File.WriteAllText(Path.Combine(d, "api_a.txt"), "api-A\n"));
+        var webPatchB = await web.MakePatchAsync(webBase, d => File.WriteAllText(Path.Combine(d, "web_b.txt"), "web-B\n"));
+        var apiPatchB = await api.MakePatchAsync(apiBase, d => File.WriteAllText(Path.Combine(d, "api_b.txt"), "api-B\n"));
+
+        // turn 0 plan → self-advance → turn 1 spawn (stages 2 real agent runs + parks the agent barrier).
+        await RunEngineAsync(runId);
+        await ResolveSelfAdvanceAsync(runId);
+        await RunEngineAsync(runId);
+
+        var agentIds = await StagedAgentIdsAsync(runId);
+        agentIds.Count.ShouldBe(2, "the spawn staged two real agent runs over the planned subtasks");
+
+        // Complete the two agents with DISJOINT multi-repo results so the merge integrates each repo cleanly.
+        await CompleteMultiRepoAgentAsync(agentIds[0], ("web", webId, webBase, webPatchA), ("api", apiId, apiBase, apiPatchA));
+        await CompleteMultiRepoAgentAsync(agentIds[1], ("web", webId, webBase, webPatchB), ("api", apiId, apiBase, apiPatchB));
+
+        // The barrier resumes → turn 2 merge (real git, clean multi-repo integration → repositoryBranches).
+        await RunEngineAsync(runId);
+        // The merge self-advances → turn 3 stop → the sup node finishes → the engine walks to git.open_change_set.
+        await ResolveSelfAdvanceAsync(runId);
+        await RunEngineAsync(runId);
+
+        using var verify = _fixture.BeginScope();
+        var db = verify.Resolve<CodeSpaceDbContext>();
+
+        (await db.WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == runId)).Status
+            .ShouldBe(WorkflowRunStatus.Success, "the supervisor stopped, then git.open_change_set ran (per-repo failures are routable) → the run completes");
+
+        // The supervisor node re-enters once per turn (one WorkflowRunNode row each); the TERMINAL execution (the
+        // stop turn) is the one that emitted repositoryBranches. Pick it and assert both repos' branches surfaced.
+        var supRows = await db.WorkflowRunNode.AsNoTracking().Where(n => n.RunId == runId && n.NodeId == "sup").ToListAsync();
+        var supOut = supRows.Select(n => JsonDocument.Parse(n.OutputsJson).RootElement).First(o => o.TryGetProperty("repositoryBranches", out _));
+        supOut.GetProperty("repositoryBranches").GetArrayLength().ShouldBe(2, "the multi-repo merge surfaced a per-repo reconciled branch for each repo");
+
+        // THE COMPOSITION PROOF: the engine resolved {{nodes.sup.outputs.repositoryBranches}} into the change-set
+        // node's repositories input, so BOTH repos' heads flowed through to the one generic per-repo PR-open node.
+        var csOut = JsonDocument.Parse((await db.WorkflowRunNode.AsNoTracking().SingleAsync(n => n.RunId == runId && n.NodeId == "cs")).OutputsJson).RootElement;
+        var prRepoIds = csOut.GetProperty("pullRequests").EnumerateArray().Select(p => Guid.Parse(p.GetProperty("repositoryId").GetString()!)).ToList();
+        prRepoIds.ShouldBe(new[] { webId, apiId }, ignoreOrder: true, "the engine wired the supervisor's per-repo branches into git.open_change_set — both repos reached the PR-open node, no new node + no re-authoring");
+    }
+
+    // ─── Engine-drive helpers (the supervisor flow-test convention: drive the real engine + resume + agent completion) ──
+
+    private InMemoryBackgroundJobClient ResolveJobClient()
+    {
+        using var scope = _fixture.BeginScope();
+        return scope.Resolve<InMemoryBackgroundJobClient>();
+    }
+
+    private async Task RunEngineAsync(Guid runId)
+    {
+        using var scope = _fixture.BeginScope();
+        await scope.Resolve<IWorkflowEngine>().ExecuteRunAsync(runId, CancellationToken.None);
+    }
+
+    private async Task ResolveSelfAdvanceAsync(Guid runId)
+    {
+        Guid waitId;
+        using (var verify = _fixture.BeginScope())
+            waitId = (await verify.Resolve<CodeSpaceDbContext>().WorkflowRunWait.AsNoTracking()
+                .SingleAsync(w => w.RunId == runId && w.WaitKind == WorkflowWaitKinds.SupervisorDecision && w.Status == WorkflowWaitStatuses.Pending)).Id;
+
+        using var scope = _fixture.BeginScope();
+        await scope.Resolve<IWorkflowResumeService>().ResumeWaitAsync(runId, waitId, null, CancellationToken.None);
+    }
+
+    private async Task<IReadOnlyList<Guid>> StagedAgentIdsAsync(Guid runId)
+    {
+        using var verify = _fixture.BeginScope();
+        var tokens = await verify.Resolve<CodeSpaceDbContext>().WorkflowRunWait.AsNoTracking()
+            .Where(w => w.RunId == runId && w.WaitKind == WorkflowWaitKinds.AgentRun && w.Status == WorkflowWaitStatuses.Pending)
+            .OrderBy(w => w.IterationKey).Select(w => w.Token).ToListAsync();
+        return tokens.Select(Guid.Parse).ToList();
+    }
+
+    /// <summary>Complete one staged agent run with a MULTI-repo result (disjoint per-repo patches), driving the executor's terminal path (MarkRunning → Complete → Notify) without the sandboxed CLI — so the supervisor's merge integrates real per-repo patches.</summary>
+    private async Task CompleteMultiRepoAgentAsync(Guid agentRunId, params (string Alias, Guid RepoId, string BaseSha, string Patch)[] perRepo)
+    {
+        using var scope = _fixture.BeginScope();
+        var runs = scope.Resolve<IAgentRunService>();
+        var notifier = scope.Resolve<IAgentRunCompletionNotifier>();
+
+        var result = new AgentRunResult
+        {
+            Status = AgentRunStatus.Succeeded,
+            ExitReason = "completed",
+            Summary = "did the subtask",
+            ChangeSetId = $"cs-{agentRunId:N}",
+            RepositoryResults = perRepo.Select(r => new RepositoryRunResult
+            {
+                Alias = r.Alias, RepositoryId = r.RepoId, BaseSha = r.BaseSha, BaseBranch = "main",
+                Patch = r.Patch, ProducedBranch = $"codespace/agent/{agentRunId:N}", ChangedFiles = new[] { $"{r.Alias}.txt" }, Access = WorkspaceAccess.Write,
+            }).ToArray(),
+        };
+
+        await runs.MarkRunningAsync(agentRunId, CancellationToken.None);
+        await runs.CompleteAsync(agentRunId, result, CancellationToken.None);
+        await notifier.NotifyCompletedAsync(agentRunId, CancellationToken.None);
+    }
+
+    /// <summary>manual → sup (agent.supervisor, multi-repo profile: web primary + api related) → cs (git.open_change_set, repositories bound from sup.repositoryBranches) → terminal.</summary>
+    private async Task<Guid> CreateSupervisorChangeSetWorkflowAsync(Guid teamId, Guid userId, Guid webId, Guid apiId)
+    {
+        var supConfig = $$"""
+            {
+              "goal": "ship the coordinated feature",
+              "agentProfile": {
+                "repositoryId": "{{webId}}",
+                "relatedRepositories": [ { "repositoryId": "{{apiId}}", "alias": "api", "access": "write" } ]
+              }
+            }
+            """;
+
+        using var scope = _fixture.BeginScopeAs(userId, teamId, Roles.Admin);
+        return await scope.Resolve<IMediator>().Send(new CreateWorkflowCommand
+        {
+            Name = "sup-cs-" + Guid.NewGuid().ToString("N")[..6],
+            Description = null,
+            Definition = new WorkflowDefinition
+            {
+                SchemaVersion = 1,
+                Nodes = new List<NodeDefinition>
+                {
+                    new() { Id = "start", TypeKey = "trigger.manual", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
+                    new() { Id = "sup", TypeKey = "agent.supervisor", Config = WorkflowsTestSeed.Json(supConfig), Inputs = WorkflowsTestSeed.EmptyJson() },
+                    new() { Id = "cs", TypeKey = "git.open_change_set", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.Json("""{ "repositories": "{{nodes.sup.outputs.repositoryBranches}}", "title": "Coordinated multi-repo change" }""") },
+                    new() { Id = "end", TypeKey = "builtin.terminal", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
+                },
+                Edges = new List<EdgeDefinition>
+                {
+                    new() { From = "start", To = "sup" },
+                    new() { From = "sup", To = "cs" },
+                    new() { From = "cs", To = "end" },
+                },
+            },
+            Activations = new List<WorkflowActivationInput>(),
+            Enabled = true,
+        });
+    }
 
     // ─── Seed ──────────────────────────────────────────────────────────────────────
 
