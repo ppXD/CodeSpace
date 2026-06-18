@@ -97,6 +97,8 @@ public sealed partial class RealSupervisorActionExecutor
 
         var patch = await ResolvePatchAsync(result, teamId, cancellationToken).ConfigureAwait(false);
 
+        var repositoryResults = await ResolveRepositoryPatchesAsync(result, teamId, cancellationToken).ConfigureAwait(false);
+
         return new MergedAgent
         {
             AgentRunId = compact.AgentRunId,
@@ -108,7 +110,30 @@ public sealed partial class RealSupervisorActionExecutor
             PatchArtifactId = result?.PatchArtifactId,
             Error = compact.Error,
             BaseSha = result?.BaseSha,
+            RepositoryResults = repositoryResults,
         };
+    }
+
+    /// <summary>
+    /// Resolve each writable repo's per-repo diff (offloaded ones fetched back, team-scoped) so the multi-repo per-repo
+    /// integrate has every repo's inline patch in hand — the per-repo analogue of <see cref="ResolvePatchAsync"/>. EMPTY
+    /// for a single-repo run (no <see cref="AgentRunResult.RepositoryResults"/>), so the single-repo integrate path is
+    /// untouched. The artifact id is cleared once resolved (the inline <c>Patch</c> now carries the full diff).
+    /// </summary>
+    private async Task<IReadOnlyList<RepositoryRunResult>> ResolveRepositoryPatchesAsync(AgentRunResult? result, Guid teamId, CancellationToken cancellationToken)
+    {
+        if (result is null || result.RepositoryResults.Count == 0) return Array.Empty<RepositoryRunResult>();
+
+        var resolved = new List<RepositoryRunResult>(result.RepositoryResults.Count);
+
+        foreach (var repo in result.RepositoryResults)
+        {
+            var patch = await _offloader.ResolveAsync(teamId, repo.Patch, repo.PatchArtifactId, cancellationToken).ConfigureAwait(false);
+
+            resolved.Add(repo with { Patch = patch, PatchArtifactId = null });
+        }
+
+        return resolved;
     }
 
     /// <summary>The inline patch when present; otherwise the full diff resolved from the artifact store via the D2 PatchArtifactId ref (so an offloaded large diff is folded into the merge, not lost). Empty when there's neither. Routes through the shared <see cref="IArtifactOffloader"/> — the same primitive the producer used.</summary>
@@ -129,5 +154,8 @@ public sealed partial class RealSupervisorActionExecutor
         public Guid? PatchArtifactId { get; init; }
         public string? Error { get; init; }
         public string? BaseSha { get; init; }
+
+        /// <summary>This agent's PER-REPO work products (multi-repo run), each with its diff RESOLVED (offloaded fetched back) — what the per-repo integrate (<c>.Integrate.cs</c>) feeds the integrator one repo at a time. Empty for a single-repo agent (its one outcome is the top-level <see cref="Patch"/>/<see cref="BaseSha"/>/<see cref="ProducedBranch"/>).</summary>
+        public IReadOnlyList<RepositoryRunResult> RepositoryResults { get; init; } = Array.Empty<RepositoryRunResult>();
     }
 }

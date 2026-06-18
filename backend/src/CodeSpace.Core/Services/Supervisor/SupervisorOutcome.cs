@@ -219,7 +219,9 @@ public static class SupervisorOutcome
     /// compact, decider-visible <see cref="SupervisorIntegrationOutcome"/> — null when the outcome carries no
     /// <c>integration</c> object (the gate was off, or the verb wasn't a merge) or it's malformed. Aggregates the
     /// per-contribution <c>conflictedFiles</c> (deduped, order-preserved) + the preserved <c>fallbackBranch</c>es so
-    /// the decider sees one legible "these files conflicted, these branches are preserved" signal. Best-effort + pure.
+    /// the decider sees one legible "these files conflicted, these branches are preserved" signal — across the
+    /// top-level <c>outcomes</c> (a single-repo block) OR every <c>repositories[].outcomes</c> (a multi-repo block,
+    /// S7-C), so a multi-repo conflict is legible off the SAME reader. Best-effort + pure.
     /// </summary>
     public static SupervisorIntegrationOutcome? ReadIntegration(string? outcomeJson)
     {
@@ -238,20 +240,17 @@ public static class SupervisorOutcome
             var conflictedFiles = new List<string>();
             var preservedBranches = new List<string>();
 
-            if (integration.TryGetProperty("outcomes", out var outcomes) && outcomes.ValueKind == JsonValueKind.Array)
+            // Multi-repo (S7-C): collect across EVERY repo's outcomes; single-repo: the top-level outcomes array. A
+            // multi-repo block has no single integratedBranch — the per-repo branches live in repositories[] (S7-D).
+            if (integration.TryGetProperty("repositories", out var repositories) && repositories.ValueKind == JsonValueKind.Array)
             {
-                foreach (var o in outcomes.EnumerateArray())
-                {
-                    if (o.ValueKind != JsonValueKind.Object) continue;
-
-                    if (o.TryGetProperty("conflictedFiles", out var files) && files.ValueKind == JsonValueKind.Array)
-                        foreach (var f in files.EnumerateArray())
-                            if (f.ValueKind == JsonValueKind.String && f.GetString() is { Length: > 0 } path && !conflictedFiles.Contains(path))
-                                conflictedFiles.Add(path);
-
-                    if (o.TryGetProperty("fallbackBranch", out var fb) && fb.ValueKind == JsonValueKind.String && fb.GetString() is { Length: > 0 } branch && !preservedBranches.Contains(branch))
-                        preservedBranches.Add(branch);
-                }
+                foreach (var repo in repositories.EnumerateArray())
+                    if (repo.ValueKind == JsonValueKind.Object && repo.TryGetProperty("outcomes", out var repoOutcomes))
+                        CollectOutcomeDetail(repoOutcomes, conflictedFiles, preservedBranches);
+            }
+            else if (integration.TryGetProperty("outcomes", out var outcomes))
+            {
+                CollectOutcomeDetail(outcomes, conflictedFiles, preservedBranches);
             }
 
             return new SupervisorIntegrationOutcome
@@ -266,6 +265,25 @@ public static class SupervisorOutcome
         catch (JsonException)
         {
             return null;
+        }
+    }
+
+    /// <summary>Accumulate one <c>outcomes</c> array's conflicted files + preserved fallback branches into the running aggregate (deduped, order-preserved). The single per-contribution reader both the single-repo top-level outcomes and each multi-repo repository's outcomes feed, so the two shapes can't drift.</summary>
+    private static void CollectOutcomeDetail(JsonElement outcomes, List<string> conflictedFiles, List<string> preservedBranches)
+    {
+        if (outcomes.ValueKind != JsonValueKind.Array) return;
+
+        foreach (var o in outcomes.EnumerateArray())
+        {
+            if (o.ValueKind != JsonValueKind.Object) continue;
+
+            if (o.TryGetProperty("conflictedFiles", out var files) && files.ValueKind == JsonValueKind.Array)
+                foreach (var f in files.EnumerateArray())
+                    if (f.ValueKind == JsonValueKind.String && f.GetString() is { Length: > 0 } path && !conflictedFiles.Contains(path))
+                        conflictedFiles.Add(path);
+
+            if (o.TryGetProperty("fallbackBranch", out var fb) && fb.ValueKind == JsonValueKind.String && fb.GetString() is { Length: > 0 } branch && !preservedBranches.Contains(branch))
+                preservedBranches.Add(branch);
         }
     }
 
