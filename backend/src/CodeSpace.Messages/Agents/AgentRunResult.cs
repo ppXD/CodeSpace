@@ -81,6 +81,18 @@ public sealed record RepositoryRunResult
     /// <summary>Repo-relative paths the agent changed in this repo (git ground truth).</summary>
     public IReadOnlyList<string> ChangedFiles { get; init; } = Array.Empty<string>();
 
+    /// <summary>
+    /// The inline unified diff (git format) of this repo's changes vs its <see cref="BaseSha"/> — the durable,
+    /// base-anchored input a per-repo on-disk integration consumes (the same role the top-level <see cref="AgentRunResult.Patch"/>
+    /// plays for a single-repo run). Empty when this repo changed nothing OR when the diff was large enough to offload
+    /// (then <see cref="PatchArtifactId"/> holds the ref). Capped inline like the top-level patch so a many-repo run's
+    /// result row stays bounded.
+    /// </summary>
+    public string Patch { get; init; } = "";
+
+    /// <summary>When this repo's diff was offloaded (larger than the artifact inline threshold), the artifact-store id holding the full unified diff; <see cref="Patch"/> is then empty. Null when the diff is inline (small) or absent. Mirrors the top-level <see cref="AgentRunResult.PatchArtifactId"/>.</summary>
+    public Guid? PatchArtifactId { get; init; }
+
     /// <summary>The branch this repo's changes were pushed to (the per-repo PR-open handoff), or null when nothing was pushed / it had no changes.</summary>
     public string? ProducedBranch { get; init; }
 
@@ -92,6 +104,16 @@ public sealed record RepositoryRunResult
 
     /// <summary>The repo's access in the workspace (always <see cref="WorkspaceAccess.Write"/> for an entry that produced an outcome).</summary>
     public WorkspaceAccess Access { get; init; } = WorkspaceAccess.Write;
+
+    /// <summary>
+    /// The DIFF-FREE projection of this per-repo result — the bounded facts (alias / repository id / changed files /
+    /// produced branch / base) with the unbounded <see cref="Patch"/> + <see cref="PatchArtifactId"/> cleared. The
+    /// single shared way every TOKEN-CHEAP surface (the supervisor's decider-visible compact, the agent.code node
+    /// output) drops the diff — exactly as those surfaces already exclude the top-level patch — so the diff lives only
+    /// on the durable <c>AgentRunResult</c> (where the on-disk integration reads it) and never bloats a ledger row or
+    /// an <c>outputs_jsonb</c>. One place, so the two surfaces can't drift on which fields are "heavy".
+    /// </summary>
+    public RepositoryRunResult WithoutDiff() => this with { Patch = "", PatchArtifactId = null };
 }
 
 public sealed record AgentTokenUsage

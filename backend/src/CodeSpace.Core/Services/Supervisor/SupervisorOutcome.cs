@@ -146,10 +146,12 @@ public static class SupervisorOutcome
             Error = result?.Error ?? rowError,
             ChangedFiles = result?.ChangedFiles ?? Array.Empty<string>(),
             ProducedBranch = result?.ProducedBranch,
-            // Resolver loop #379 S7-B: carry the agent's per-repo outcomes into the compact so the per-repo resolution
-            // loop reads each repo's pushed branch straight off the ledger (replay-deterministic). Empty for a
+            // Resolver loop #379 S7-B/S7-C0: carry the agent's per-repo outcomes into the compact so the per-repo
+            // resolution loop reads each repo's pushed branch straight off the ledger (replay-deterministic). The
+            // unbounded per-repo DIFF is stripped (the merge reads it off the DB AgentRunResult, never this compact),
+            // exactly as the compact omits the top-level Patch — so the ledger stays token-cheap. Empty for a
             // single-repo run → the top-level ProducedBranch/ChangedFiles remain the one outcome (behaviour-identical).
-            RepositoryResults = result?.RepositoryResults ?? Array.Empty<RepositoryRunResult>(),
+            RepositoryResults = StripPerRepoPatches(result?.RepositoryResults),
             // SOTA #4: the priced inputs ride inline so the cost bound sums realized spend straight off the durable
             // outcome (no new query, replay-deterministic). Tokens come from the result; the model is the agent's
             // task model (passed in by the rehydrate fold, which has TaskJson) — null when the caller has no model.
@@ -172,6 +174,19 @@ public static class SupervisorOutcome
     /// </summary>
     public static decimal SpendUsd(IReadOnlyList<SupervisorAgentResult> agentResults) =>
         agentResults.Sum(r => AgentCostPricing.CostUsd(r.Model, r.InputTokens, r.OutputTokens) ?? 0m);
+
+    /// <summary>
+    /// Project the per-repo results into the COMPACT (decider-visible, durable-ledger) shape: the bounded per-repo
+    /// facts (alias / repository id / produced branch / base / changed files) MINUS the unbounded per-repo diff
+    /// (<c>Patch</c> + <c>PatchArtifactId</c> cleared) — the same reason the compact omits the top-level Patch. The
+    /// merge's per-repo integrate reads the FULL diff off the DB <c>AgentRunResult</c>, never off this compact, so the
+    /// ledger stays token-cheap. Empty (never null) for a single-repo run. Reuses the one <see cref="RepositoryRunResult"/>
+    /// noun (no near-duplicate compact shape) — the projection just clears the heavy fields.
+    /// </summary>
+    private static IReadOnlyList<RepositoryRunResult> StripPerRepoPatches(IReadOnlyList<RepositoryRunResult>? repos) =>
+        repos is null or { Count: 0 }
+            ? Array.Empty<RepositoryRunResult>()
+            : repos.Select(r => r.WithoutDiff()).ToList();
 
     /// <summary>Best-effort deserialize of a persisted <c>AgentRunResult</c> (null on malformed) — the compact projection tolerates a corrupt result the same way the merge path does.</summary>
     private static AgentRunResult? TryDeserializeResult(string resultJson)

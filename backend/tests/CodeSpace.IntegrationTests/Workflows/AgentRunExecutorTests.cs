@@ -560,9 +560,14 @@ public class AgentRunExecutorTests
         api.ProducedBranch.ShouldBe(branch);
         web.BaseBranch.ShouldBe("main-web", "each per-repo result carries its resolved base branch — the PR target a downstream git.open_change_set binds verbatim");
         api.BaseBranch.ShouldBe("main-api");
+        // S7-C0: each writable repo's per-repo DIFF is captured + round-trips through result_jsonb — the durable,
+        // base-anchored input the supervisor's per-repo on-disk integration consumes (small here → stays inline).
+        web.Patch.ShouldBe("diff for web", "each writable repo's per-repo diff round-trips through result_jsonb");
+        api.Patch.ShouldBe("diff for api");
 
         result.ChangedFiles.ShouldBe(new[] { "web.txt" }, "the top-level fields mirror the PRIMARY repo");
         result.ProducedBranch.ShouldBe(branch, "the top-level branch mirrors the primary repo's branch");
+        result.Patch.ShouldBe("diff for web", "the top-level patch mirrors the PRIMARY repo's per-repo diff");
     }
 
     [Fact]

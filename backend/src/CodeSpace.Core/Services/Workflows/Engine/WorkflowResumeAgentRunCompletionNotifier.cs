@@ -83,8 +83,8 @@ public sealed class WorkflowResumeAgentRunCompletionNotifier : IAgentRunCompleti
         await _resumeService.ResumeOnWaitCompletionAsync(run.WorkflowRunId!.Value, waitId.Value, BuildResumePayload(run), cancellationToken).ConfigureAwait(false);
     }
 
-    /// <summary>Map the durable run + its <c>AgentRunResult</c> onto the flat payload the agent.code node reads on resume.</summary>
-    private static string BuildResumePayload(AgentRun run)
+    /// <summary>Map the durable run + its <c>AgentRunResult</c> onto the flat payload the agent.code node reads on resume. Internal so a unit test can pin the projection (notably the DIFF-FREE per-repo change set) without a full resume flow.</summary>
+    internal static string BuildResumePayload(AgentRun run)
     {
         var result = string.IsNullOrWhiteSpace(run.ResultJson) ? null : JsonSerializer.Deserialize<AgentRunResult>(run.ResultJson!, AgentJson.Options);
 
@@ -95,8 +95,10 @@ public sealed class WorkflowResumeAgentRunCompletionNotifier : IAgentRunCompleti
             changedFiles = result?.ChangedFiles,
             branch = result?.ProducedBranch,
             // Multi-repo: the per-repo change set the agent.code node surfaces for a downstream git.open_change_set.
-            // Null/empty for a single-repo run, so the node's single-repo outputs are unchanged.
-            repositoryResults = result?.RepositoryResults,
+            // Null/empty for a single-repo run, so the node's single-repo outputs are unchanged. DIFF-FREE (the same
+            // WithoutDiff projection the supervisor compact uses) — the node output exposes each repo's branch + base
+            // for PR-open, NEVER the raw per-repo diff, exactly as it already excludes the top-level patch.
+            repositoryResults = result?.RepositoryResults?.Select(r => r.WithoutDiff()).ToList(),
             changeSetId = result?.ChangeSetId,
             error = result?.Error ?? run.Error,
         }, AgentJson.Options);
