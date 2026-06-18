@@ -360,6 +360,12 @@ public static class SupervisorOutcome
                 if (branches.Count > 0) return branches;
             }
 
+            // A VERIFIED MULTI-repo resolve surfaces the resolver's OWN per-repo reconciled branches (S7-D2) — checked
+            // BEFORE the barrier (mirroring ReadFinalIntegratedBranch's ResolvedBranch-before-barrier), so a run that
+            // STOPPED right after the resolution (no subsequent merge) still surfaces its per-repo heads.
+            var resolved = ResolvedRepositoryBranches(decision);
+            if (resolved.Count > 0) return resolved;
+
             // The same disqualifier as ReadFinalIntegratedBranch: fresh agent-staging work nothing later merged means
             // there is no clean per-repo set to surface (an earlier merge's branches would be stale past it).
             if (SupervisorDecisionKinds.StagesAgents(decision.DecisionKind)) return Array.Empty<SupervisorRepositoryBranch>();
@@ -409,13 +415,13 @@ public static class SupervisorOutcome
     }
 
     /// <summary>
-    /// The reviewable branch a VERIFIED <c>resolve</c> decision contributes — its first folded resolver agent's
-    /// pushed branch — or null when the decision isn't a resolve, the resolution wasn't
-    /// <see cref="SupervisorResolutionVerdict.Verified"/>, or the resolver pushed nothing. The SINGLE encoding of
-    /// "an accepted resolution's tested branch" that both the final-branch reader (<see cref="ReadFinalIntegratedBranch"/>)
-    /// and the merge short-circuit (<c>RealSupervisorActionExecutor.AcceptedResolutionBranch</c>) share, so the
-    /// acceptance rule can never drift between the two (Rule 7 — recognise the verb in ONE place, exactly like
-    /// <see cref="SupervisorDecisionKinds.StagesAgents"/>). Pure + replay-deterministic.
+    /// The SINGLE reviewable branch a VERIFIED SINGLE-repo <c>resolve</c> decision contributes — its first folded
+    /// resolver agent's pushed branch — or null when the decision isn't a resolve, the resolution wasn't
+    /// <see cref="SupervisorResolutionVerdict.Verified"/>, the resolver pushed nothing, OR the resolver was MULTI-repo
+    /// (it has per-repo <c>RepositoryResults</c> → there is no single branch; use <see cref="ResolvedRepositoryBranches"/>).
+    /// The SINGLE encoding of "an accepted single-repo resolution's tested branch" both the final-branch reader
+    /// (<see cref="ReadFinalIntegratedBranch"/>) and the merge short-circuit (<c>RealSupervisorActionExecutor</c>) share,
+    /// so the acceptance rule can never drift (Rule 7). Pure + replay-deterministic.
     /// </summary>
     public static string? ResolvedBranch(SupervisorPriorDecision decision)
     {
@@ -423,7 +429,122 @@ public static class SupervisorOutcome
 
         if (ReadResolutionVerdict(decision.OutcomeJson) != SupervisorResolutionVerdict.Verified) return null;
 
-        return ReadAgentResults(decision.OutcomeJson).FirstOrDefault()?.ProducedBranch is { Length: > 0 } branch ? branch : null;
+        var resolver = ReadAgentResults(decision.OutcomeJson).FirstOrDefault();
+
+        // A MULTI-repo resolver has per-repo RepositoryResults — its top-level ProducedBranch mirrors only the PRIMARY
+        // repo, so surfacing it as THE single integrated branch would drop every other repo. The per-repo branches go
+        // through ResolvedRepositoryBranches instead; this single-branch encoding is single-repo only.
+        if (resolver is null || resolver.RepositoryResults.Count > 0) return null;
+
+        return resolver.ProducedBranch is { Length: > 0 } branch ? branch : null;
+    }
+
+    /// <summary>
+    /// The PER-REPO reviewable branches a VERIFIED MULTI-repo <c>resolve</c> decision contributes (resolver loop #379,
+    /// S7-D2) — the multi-repo resolver's own <c>RepositoryResults</c> (each repo's reconciled, pushed branch). Empty
+    /// when the decision isn't a verified resolve OR the resolver was single-repo (use <see cref="ResolvedBranch"/>).
+    /// The SINGLE encoding of "an accepted multi-repo resolution's per-repo branches" both the node-output reader
+    /// (<see cref="ReadFinalRepositoryBranches"/>) and the merge short-circuit share (Rule 7). Pure + replay-deterministic.
+    /// </summary>
+    public static IReadOnlyList<SupervisorRepositoryBranch> ResolvedRepositoryBranches(SupervisorPriorDecision decision)
+    {
+        if (decision.DecisionKind != SupervisorDecisionKinds.Resolve) return Array.Empty<SupervisorRepositoryBranch>();
+
+        if (ReadResolutionVerdict(decision.OutcomeJson) != SupervisorResolutionVerdict.Verified) return Array.Empty<SupervisorRepositoryBranch>();
+
+        var resolver = ReadAgentResults(decision.OutcomeJson).FirstOrDefault();
+
+        if (resolver is null) return Array.Empty<SupervisorRepositoryBranch>();
+
+        return resolver.RepositoryResults
+            .Where(r => !string.IsNullOrEmpty(r.ProducedBranch))
+            .Select(r => new SupervisorRepositoryBranch { RepositoryId = r.RepositoryId, Alias = r.Alias, IntegratedBranch = r.ProducedBranch! })
+            .ToList();
+    }
+
+    /// <summary>
+    /// The per-repository CONFLICTED blocks of the most recent <c>merge</c> whose multi-repo integration conflicted
+    /// (resolver loop #379, S7-D2) — each conflicted repo's id + alias + the files that conflicted, the durable input
+    /// the per-repo resolver recipe is assembled from. Empty when no prior merge has a multi-repo <c>repositories[]</c>
+    /// block with a Conflicted repo (a single-repo conflict, or none). Walks newest-first; pure + best-effort.
+    /// </summary>
+    public static IReadOnlyList<SupervisorConflictedRepo> ReadConflictedRepos(IReadOnlyList<SupervisorPriorDecision> priorDecisions)
+    {
+        for (var i = priorDecisions.Count - 1; i >= 0; i--)
+        {
+            var decision = priorDecisions[i];
+
+            if (decision.DecisionKind != SupervisorDecisionKinds.Merge) continue;
+
+            var conflicted = ReadConflictedReposFromMerge(decision.OutcomeJson);
+
+            if (conflicted.Count > 0) return conflicted;
+        }
+
+        return Array.Empty<SupervisorConflictedRepo>();
+    }
+
+    /// <summary>
+    /// Whether a <c>merge</c> outcome's integration block is MULTI-repo — it carries a per-repo <c>repositories[]</c>
+    /// array (resolver loop #379, S7-D2). The routing key for resolution: a multi-repo conflict takes the per-repo
+    /// resolver path EVEN when no repo is exactly "Conflicted" (e.g. it aggregated to Conflicted via a Failed repo) —
+    /// so it never misroutes to the single-repo flat path. Best-effort + pure.
+    /// </summary>
+    public static bool HasPerRepoIntegration(string? outcomeJson)
+    {
+        if (string.IsNullOrWhiteSpace(outcomeJson)) return false;
+
+        try
+        {
+            var root = JsonDocument.Parse(outcomeJson).RootElement;
+
+            return root.ValueKind == JsonValueKind.Object && root.TryGetProperty("integration", out var integration) && integration.ValueKind == JsonValueKind.Object
+                && integration.TryGetProperty("repositories", out var repositories) && repositories.ValueKind == JsonValueKind.Array;
+        }
+        catch (JsonException)
+        {
+            return false;
+        }
+    }
+
+    /// <summary>Read the Conflicted per-repo blocks off ONE multi-repo merge's <c>integration.repositories[]</c> — each with its repo id + alias + conflicted files (deduped, order-preserved). Empty for a single-repo merge or an all-clean block. Best-effort + pure.</summary>
+    private static IReadOnlyList<SupervisorConflictedRepo> ReadConflictedReposFromMerge(string? outcomeJson)
+    {
+        if (string.IsNullOrWhiteSpace(outcomeJson)) return Array.Empty<SupervisorConflictedRepo>();
+
+        try
+        {
+            var root = JsonDocument.Parse(outcomeJson).RootElement;
+
+            if (root.ValueKind != JsonValueKind.Object || !root.TryGetProperty("integration", out var integration) || integration.ValueKind != JsonValueKind.Object
+                || !integration.TryGetProperty("repositories", out var repositories) || repositories.ValueKind != JsonValueKind.Array)
+                return Array.Empty<SupervisorConflictedRepo>();
+
+            var conflicted = new List<SupervisorConflictedRepo>();
+
+            foreach (var repo in repositories.EnumerateArray())
+            {
+                if (repo.ValueKind != JsonValueKind.Object) continue;
+
+                if (!(repo.TryGetProperty("status", out var s) && s.ValueKind == JsonValueKind.String && s.GetString() == "Conflicted")) continue;
+
+                var files = new List<string>();
+                CollectOutcomeDetail(repo.TryGetProperty("outcomes", out var o) ? o : default, files, new List<string>());
+
+                conflicted.Add(new SupervisorConflictedRepo
+                {
+                    RepositoryId = repo.TryGetProperty("repositoryId", out var id) && id.ValueKind == JsonValueKind.String && Guid.TryParse(id.GetString(), out var g) ? g : null,
+                    Alias = repo.TryGetProperty("alias", out var a) && a.ValueKind == JsonValueKind.String ? a.GetString() ?? "" : "",
+                    ConflictedFiles = files,
+                });
+            }
+
+            return conflicted;
+        }
+        catch (JsonException)
+        {
+            return Array.Empty<SupervisorConflictedRepo>();
+        }
     }
 
     /// <summary>Read the folded compact agent results from a spawn/retry outcome (empty when absent/malformed/not-yet-folded). The decider sees these via the rendered outcome; a merge / scorecard can also read them.</summary>

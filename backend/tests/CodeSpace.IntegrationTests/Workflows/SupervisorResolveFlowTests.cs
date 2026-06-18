@@ -83,6 +83,82 @@ public sealed class SupervisorResolveFlowTests
         (await StagedAgentRunsAsync(runId)).ShouldBeEmpty($"the '{shape}' fail-safe must stage no agent — resolve is a clean no-op, never a stranded run");
     }
 
+    [Fact]
+    public async Task Multi_repo_resolve_stages_one_resolver_whose_goal_reconciles_each_conflicted_repo_in_its_subdirectory()
+    {
+        // S7-D2: a MULTI-repo conflict (the merge's per-repo repositories[] has a Conflicted repo) stages ONE resolver
+        // whose goal names each conflicted repo's subdirectory + its FULL per-repo branch set (from the spawn's per-repo
+        // agentResults) + the conflicted files + the verified marker — deterministically assembled, the model authored nothing.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedSupervisorRunAsync(teamId, userId);
+        var primaryId = Guid.NewGuid();
+        var apiId = Guid.NewGuid();
+
+        var context = new SupervisorTurnContext
+        {
+            Goal = Goal,
+            SupervisorRunId = runId,
+            TeamId = teamId,
+            NodeId = NodeId,
+            TurnNumber = 2,
+            PriorDecisions = new[]
+            {
+                SpawnWithPerRepoBranches((apiId, "api", "codespace/agent/a-api"), (apiId, "api", "codespace/agent/b-api")),
+                MultiRepoConflictedMerge((apiId, "api", new[] { "api/Svc.cs" })),
+            },
+            // The profile is genuinely multi-repo (primary + a related 'api' repo) — so BuildTaskWithGoal projects the
+            // multi-repo Workspace the ./api instruction depends on, matching a real multi-repo supervisor run.
+            AgentProfile = new SupervisorAgentProfile
+            {
+                RepositoryId = primaryId,
+                RelatedRepositories = JsonDocument.Parse($$"""[{"repositoryId":"{{apiId}}","alias":"api","access":"write"}]""").RootElement,
+            },
+        };
+
+        await ExecuteResolveAsync(context);
+
+        var staged = await StagedAgentRunsAsync(runId);
+        staged.Count.ShouldBe(1, "a multi-repo resolve stages exactly ONE resolver (the K=1 shape) over the multi-repo workspace");
+
+        var task = JsonSerializer.Deserialize<AgentTask>(staged[0].TaskJson, AgentJson.Options)!;
+        task.Workspace.ShouldNotBeNull("the resolver runs in the profile's MULTI-repo workspace, not a single-repo clone");
+        task.Workspace!.Repositories.Select(r => r.Alias).ShouldContain("api", customMessage: "the workspace really contains the 'api' subdirectory the resolver's ./api instruction navigates into");
+        task.Goal.ShouldContain("./api", customMessage: "the conflicted repo's subdirectory is named so the resolver reconciles it in place");
+        task.Goal.ShouldContain("codespace/agent/a-api");
+        task.Goal.ShouldContain("codespace/agent/b-api", customMessage: "EVERY per-repo branch to reconcile is named (from the spawn's per-repo agentResults)");
+        task.Goal.ShouldContain("api/Svc.cs", customMessage: "the per-repo conflicted file is named");
+        task.Goal.ShouldContain(SupervisorResolverRecipe.TestsPassedMarker);
+        task.PushProducedBranch.ShouldBe(true, "the resolver MUST push its reconciled per-repo branches");
+    }
+
+    /// <summary>A prior spawn whose folded agentResults carry PER-REPO results (each entry's RepositoryResults names a repo + its produced branch) — the multi-repo shape S7-C0 persists.</summary>
+    private static SupervisorPriorDecision SpawnWithPerRepoBranches(params (Guid RepoId, string Alias, string Branch)[] entries)
+    {
+        var results = entries.Select(e => new SupervisorAgentResult
+        {
+            AgentRunId = Guid.NewGuid(), Status = "Succeeded", ProducedBranch = e.Branch,
+            RepositoryResults = new[] { new RepositoryRunResult { Alias = e.Alias, RepositoryId = e.RepoId, ProducedBranch = e.Branch, Access = WorkspaceAccess.Write } },
+        }).ToArray();
+        var ids = results.Select(r => r.AgentRunId).ToArray();
+
+        return new SupervisorPriorDecision
+        {
+            Id = Guid.NewGuid(), Sequence = 1, DecisionKind = SupervisorDecisionKinds.Spawn, Status = SupervisorDecisionStatus.Succeeded,
+            PayloadJson = "{}",
+            OutcomeJson = JsonSerializer.Serialize(new { agentRunIds = ids, agentCount = ids.Length, agentResults = results }, AgentJson.Options),
+        };
+    }
+
+    /// <summary>A MULTI-repo conflicted merge: a per-repo repositories[] block with a Conflicted entry per given repo (carrying its conflicted files).</summary>
+    private static SupervisorPriorDecision MultiRepoConflictedMerge(params (Guid RepoId, string Alias, string[] Files)[] conflicted) => MergeDecision(JsonSerializer.Serialize(new
+    {
+        integration = new
+        {
+            status = "Conflicted",
+            repositories = conflicted.Select(c => new { repositoryId = c.RepoId, alias = c.Alias, status = "Conflicted", outcomes = new[] { new { label = "agent", disposition = "Conflicted", conflictedFiles = c.Files, fallbackBranch = $"codespace/agent/{c.Alias}" } } }).ToArray(),
+        },
+    }, AgentJson.Options));
+
     // ─── Drive the real executor ───────────────────────────────────────────────────
 
     private async Task ExecuteResolveAsync(SupervisorTurnContext context)
