@@ -32,19 +32,18 @@ public class LiteLLMOpenAIReflectorTests
     public async Task Reflects_v1_models_and_enriches_known_ids_from_the_catalog()
     {
         const string response = """
-            { "object": "list", "data": [ { "id": "gpt-5.4-codex" }, { "id": "my-co/custom-model" } ] }
+            { "object": "list", "data": [ { "id": "gpt-5.4" }, { "id": "gpt-5.4-codex" }, { "id": "my-co/custom-model" } ] }
             """;
         var reflector = new LiteLLMOpenAIReflector(new StubHttpClientFactory(new CapturingHandler(response)));
 
         var models = await reflector.ListModelsAsync(Credential("https://gateway.local"), CancellationToken.None);
 
-        models.Select(m => m.ModelId).ShouldBe(new[] { "gpt-5.4-codex", "my-co/custom-model" });
+        models.Select(m => m.ModelId).ShouldBe(new[] { "gpt-5.4", "gpt-5.4-codex", "my-co/custom-model" });
 
-        var codex = models.Single(m => m.ModelId == "gpt-5.4-codex");
-        codex.Capabilities.SupportsToolUse.ShouldBeTrue("a known id is enriched from BuiltinModelCatalog");
-
-        var custom = models.Single(m => m.ModelId == "my-co/custom-model");
-        custom.Capabilities.SupportsToolUse.ShouldBeFalse("an unknown id gets the all-false floor");
+        // A known STRUCTURED id is enriched to true; a known non-structured (codex) and an unknown id both take the false floor.
+        models.Single(m => m.ModelId == "gpt-5.4").SupportsStructuredOutput.ShouldBeTrue("a known structured id is enriched from BuiltinModelCatalog");
+        models.Single(m => m.ModelId == "gpt-5.4-codex").SupportsStructuredOutput.ShouldBeFalse("codex is tool-use only, not structured");
+        models.Single(m => m.ModelId == "my-co/custom-model").SupportsStructuredOutput.ShouldBeFalse("an unknown id gets the false floor");
     }
 
     [Fact]

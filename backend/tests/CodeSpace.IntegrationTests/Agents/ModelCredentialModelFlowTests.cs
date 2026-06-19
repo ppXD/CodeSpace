@@ -32,8 +32,7 @@ public class ModelCredentialModelFlowTests
         var teamId = await SeedTeamAsync();
         var credId = await SeedCredentialAsync(teamId, "Anthropic", key: "sk-x");
 
-        await AddModelAsync(credId, "claude-opus-4-8", displayName: "Opus 4.8", source: ModelSource.Reflected,
-            structured: true, toolUse: true, recommendedForSupervisor: true);
+        await AddModelAsync(credId, "claude-opus-4-8", displayName: "Opus 4.8", source: ModelSource.Reflected, structured: true);
         await AddModelAsync(credId, "claude-haiku-4-5");   // defaults
 
         using var scope = _fixture.BeginScope();
@@ -46,14 +45,11 @@ public class ModelCredentialModelFlowTests
         opus.DisplayName.ShouldBe("Opus 4.8");
         opus.Source.ShouldBe(ModelSource.Reflected);
         opus.SupportsStructuredOutput.ShouldBeTrue();
-        opus.SupportsToolUse.ShouldBeTrue();
-        opus.RecommendedForSupervisor.ShouldBeTrue();
         opus.Enabled.ShouldBeTrue();
 
         var haiku = credential.Models.Single(m => m.ModelId == "claude-haiku-4-5");
         haiku.Source.ShouldBe(ModelSource.Manual, "an added model defaults to operator-typed");
-        haiku.SupportsStructuredOutput.ShouldBeFalse();
-        haiku.RecommendedForSupervisor.ShouldBeFalse("capabilities default to the declares-nothing floor");
+        haiku.SupportsStructuredOutput.ShouldBeFalse("the capability defaults to the declares-nothing floor");
         haiku.Enabled.ShouldBeTrue("a freshly added model is usable by default");
     }
 
@@ -130,9 +126,7 @@ public class ModelCredentialModelFlowTests
             var row = await db.ModelCredentialModel.AsNoTracking().SingleAsync(m => m.ModelCredentialId == credId);
             row.Enabled.ShouldBeTrue("DB default: enabled = TRUE");
             row.Source.ShouldBe(ModelSource.Manual, "DB default: source = 'Manual' (string, not an int)");
-            row.SupportsStructuredOutput.ShouldBeFalse();
-            row.SupportsToolUse.ShouldBeFalse();
-            row.RecommendedForSupervisor.ShouldBeFalse("DB default: capability floor = FALSE");
+            row.SupportsStructuredOutput.ShouldBeFalse("DB default: capability floor = FALSE");
             row.DisplayName.ShouldBeNull("nullable, no default → NULL");
         }
     }
@@ -165,8 +159,7 @@ public class ModelCredentialModelFlowTests
 
     // ─── Seeding helpers (mirror ModelCredentialResolverFlowTests) ───
 
-    private async Task AddModelAsync(Guid credId, string modelId, string? displayName = null, ModelSource source = ModelSource.Manual,
-        bool structured = false, bool toolUse = false, bool recommendedForSupervisor = false)
+    private async Task AddModelAsync(Guid credId, string modelId, string? displayName = null, ModelSource source = ModelSource.Manual, bool structured = false)
     {
         using var scope = _fixture.BeginScope();
         var db = scope.Resolve<CodeSpaceDbContext>();
@@ -178,8 +171,6 @@ public class ModelCredentialModelFlowTests
             DisplayName = displayName,
             Source = source,
             SupportsStructuredOutput = structured,
-            SupportsToolUse = toolUse,
-            RecommendedForSupervisor = recommendedForSupervisor,
         });
         await db.SaveChangesAsync();
     }

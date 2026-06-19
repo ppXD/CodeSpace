@@ -196,21 +196,20 @@ public sealed class ModelCredentialService : IModelCredentialService, IScopedDep
                 if (row.Source == ModelSource.Manual) continue;   // never clobber an operator's manual row
 
                 row.DisplayName = rm.DisplayName;
-                ApplyCapabilities(row, rm.Capabilities);
+                row.SupportsStructuredOutput = rm.SupportsStructuredOutput;
                 row.Enabled = true;   // a re-appeared model is re-enabled
             }
             else
             {
-                var added = new ModelCredentialModel
+                _db.ModelCredentialModel.Add(new ModelCredentialModel
                 {
                     Id = Guid.NewGuid(),
                     ModelCredentialId = credentialId,
                     ModelId = rm.ModelId,
                     DisplayName = rm.DisplayName,
                     Source = ModelSource.Reflected,
-                };
-                ApplyCapabilities(added, rm.Capabilities);
-                _db.ModelCredentialModel.Add(added);
+                    SupportsStructuredOutput = rm.SupportsStructuredOutput,
+                });
             }
         }
 
@@ -225,13 +224,6 @@ public sealed class ModelCredentialService : IModelCredentialService, IScopedDep
 
     /// <summary>A stable 64-bit key for the credential's advisory lock (the first 8 bytes of its Guid). A collision between two unrelated credentials would only serialize their refreshes — a harmless perf nudge, never a correctness issue.</summary>
     private static long AdvisoryLockKey(Guid credentialId) => BitConverter.ToInt64(credentialId.ToByteArray());
-
-    private static void ApplyCapabilities(ModelCredentialModel row, ModelCapabilityFlags caps)
-    {
-        row.SupportsStructuredOutput = caps.SupportsStructuredOutput;
-        row.SupportsToolUse = caps.SupportsToolUse;
-        row.RecommendedForSupervisor = caps.RecommendedForSupervisor;
-    }
 
     private static CredentialedModelSummary ToModelSummary(ModelCredentialModel m) => new()
     {

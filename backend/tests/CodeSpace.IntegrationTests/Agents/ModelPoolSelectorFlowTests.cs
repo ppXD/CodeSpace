@@ -42,13 +42,14 @@ public class ModelPoolSelectorFlowTests
     }
 
     [Fact]
-    public async Task It_prefers_a_supervisor_recommended_model()
+    public async Task An_unpinned_pick_is_deterministic_by_model_id_order()
     {
         var teamId = await SeedTeamAsync();
         var credId = await SeedCredentialAsync(teamId, "Anthropic", key: "sk");
-        await AddModelAsync(credId, "claude-sonnet-4-6", structured: true);                      // capable, not recommended
-        await AddModelAsync(credId, "claude-opus-4-8", structured: true, recommended: true);     // recommended
+        await AddModelAsync(credId, "claude-sonnet-4-6", structured: true);
+        await AddModelAsync(credId, "claude-opus-4-8", structured: true);
 
+        // No pin, no recommendation flag — the total order (model id, then row id) decides; 'opus' sorts before 'sonnet'.
         (await SelectAsync(teamId, "Anthropic"))!.ModelId.ShouldBe("claude-opus-4-8");
     }
 
@@ -87,10 +88,10 @@ public class ModelPoolSelectorFlowTests
     {
         var teamId = await SeedTeamAsync();
         var credId = await SeedCredentialAsync(teamId, "Anthropic", key: "sk");
-        await AddModelAsync(credId, "claude-opus-4-8", structured: true, recommended: true);
+        await AddModelAsync(credId, "claude-opus-4-8", structured: true);
         await AddModelAsync(credId, "claude-sonnet-4-6", structured: true);
 
-        // The pin overrides the recommended-preference.
+        // The pin overrides the default id-order pick (opus would sort first).
         (await SelectAsync(teamId, "Anthropic", pinned: "claude-sonnet-4-6"))!.ModelId.ShouldBe("claude-sonnet-4-6");
 
         // A pin that isn't a qualifying pool model → null (never silently substituted).
@@ -141,8 +142,8 @@ public class ModelPoolSelectorFlowTests
         var teamId = await SeedTeamAsync();
         var credA = await SeedCredentialAsync(teamId, "Anthropic", key: "sk-a");
         var credB = await SeedCredentialAsync(teamId, "Anthropic", key: "sk-b");
-        await AddModelAsync(credA, "claude-opus-4-8", structured: true, recommended: true);
-        await AddModelAsync(credB, "claude-opus-4-8", structured: true, recommended: true);
+        await AddModelAsync(credA, "claude-opus-4-8", structured: true);
+        await AddModelAsync(credB, "claude-opus-4-8", structured: true);
 
         // The total tie-break (model id, then row id) makes the pick STABLE across calls — never an arbitrary key.
         (await SelectAsync(teamId, "Anthropic"))!.Credential.ApiKey
@@ -170,14 +171,14 @@ public class ModelPoolSelectorFlowTests
         return await scope.Resolve<IModelPoolSelector>().SelectAsync(teamId, provider, requireStructured, allowed, pinned, CancellationToken.None);
     }
 
-    private async Task AddModelAsync(Guid credId, string modelId, bool structured = false, bool enabled = true, bool recommended = false)
+    private async Task AddModelAsync(Guid credId, string modelId, bool structured = false, bool enabled = true)
     {
         using var scope = _fixture.BeginScope();
         var db = scope.Resolve<CodeSpaceDbContext>();
         db.ModelCredentialModel.Add(new ModelCredentialModel
         {
             Id = Guid.NewGuid(), ModelCredentialId = credId, ModelId = modelId, Source = ModelSource.Manual,
-            SupportsStructuredOutput = structured, RecommendedForSupervisor = recommended, Enabled = enabled,
+            SupportsStructuredOutput = structured, Enabled = enabled,
         });
         await db.SaveChangesAsync();
     }
