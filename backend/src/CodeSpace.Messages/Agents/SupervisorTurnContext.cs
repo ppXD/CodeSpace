@@ -102,13 +102,14 @@ public sealed record SupervisorTurnContext
     public IReadOnlyList<string>? SpawnedAgentTools { get; init; }
 
     /// <summary>
-    /// The operator's ALLOWED MODEL POOL for spawned agents (the model analogue of the bound repos) — the
-    /// model-authored per-agent model is clamped to this by <c>SupervisorModelClamp</c>. Null / empty = no restriction
-    /// (the supervisor may pick any model — byte-identical). Threaded from <c>SupervisorGoalConfig.AllowedModels</c>.
+    /// The operator's ALLOWED MODEL POOL for spawned agents (the model analogue of the bound repos) — a list of
+    /// credentialed-model ROW ids. Every dispatched agent's effective model must resolve to a row in this pool and runs
+    /// on that row's credential; out of pool → fail closed. Null / empty = the pool is ALL the team's credentialed
+    /// models. Threaded from <c>SupervisorGoalConfig.AllowedModelIds</c>.
     /// </summary>
-    public IReadOnlyList<string>? AllowedModels { get; init; }
+    public IReadOnlyList<Guid>? AllowedModelIds { get; init; }
 
-    /// <summary>The credentialed-model ROW id the supervisor's own decider runs on (carried from <c>SupervisorGoalConfig.SupervisorModelId</c>). REQUIRED — the decider resolves this row to its model + credential and fails closed when null/unresolvable. Distinct from the agent pool (<see cref="AllowedModels"/>): the brain is the operator's explicit pick, never bounded by the agent allow-list.</summary>
+    /// <summary>The credentialed-model ROW id the supervisor's own decider runs on (carried from <c>SupervisorGoalConfig.SupervisorModelId</c>). REQUIRED — the decider resolves this row to its model + credential and fails closed when null/unresolvable. Distinct from the agent pool (<see cref="AllowedModelIds"/>): the brain is the operator's explicit pick, never bounded by the agent allow-list.</summary>
     public Guid? SupervisorModelId { get; init; }
 }
 

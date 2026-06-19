@@ -61,7 +61,9 @@ public class SupervisorCostCapFlowTests : IDisposable
 
         var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
         // Tiny $0.01 budget; high spawn cap so it is unambiguously the COST cap that trips. The spawned agents run on
-        // a priceable opus model (via the agentProfile), so their realized spend is real USD the bound can read.
+        // a priceable opus model (via the agentProfile) — credentialed so the option-B dispatch gate resolves it (else
+        // the spawn would fail on the model gate before the cost logic), so their realized spend is real USD the bound reads.
+        await WorkflowsTestSeed.SeedCredentialedModelAsync(_fixture, teamId, "claude-opus-4-8");
         var config = """{"goal":"ship it","maxCostUsd":0.01,"maxTotalSpawns":50,"agentProfile":{"model":"claude-opus-4-8"}}""";
         var workflowId = await CreateWorkflowAsync(teamId, userId, config);
         var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);

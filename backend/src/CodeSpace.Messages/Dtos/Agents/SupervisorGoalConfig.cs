@@ -76,13 +76,14 @@ public sealed record SupervisorGoalConfig
     public Guid? SupervisorModelId { get; init; }
 
     /// <summary>
-    /// The operator's ALLOWED MODEL POOL for the agents this supervisor dispatches — a list of model ids the
-    /// model-authored per-agent <c>spawn.agents[].model</c> must be one of. Null / empty = NO restriction (the
-    /// supervisor may pick any model — byte-identical to before): the boundary is opt-in. When non-empty, a dispatch
-    /// authoring a model OUTSIDE the pool FAILS CLOSED (the per-agent model privilege gate, the model analogue of the
-    /// repo/autonomy clamps). The operator bounds the pool; the supervisor's intelligence picks within it.
+    /// The operator's ALLOWED MODEL POOL for the agents this supervisor dispatches — a multi-select of credentialed-model
+    /// ROW ids (<c>ModelCredentialModel</c> ids), the model analogue of the bound repos. Every dispatched agent's
+    /// effective model (model-authored, profile default, OR persona) must resolve to a row in this pool, and runs on
+    /// THAT row's credential; out of pool → FAILS CLOSED. Row ids (not names) are unambiguous — the same model id under
+    /// two credentials picks the right key. Null / empty = the pool is ALL the team's credentialed models (every
+    /// dispatched model must still be a credentialed row — just not narrowed to a subset).
     /// </summary>
-    public IReadOnlyList<string>? AllowedModels { get; init; }
+    public IReadOnlyList<Guid>? AllowedModelIds { get; init; }
 }
 
 /// <summary>

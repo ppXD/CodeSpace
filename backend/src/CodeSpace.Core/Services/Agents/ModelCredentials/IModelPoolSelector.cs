@@ -31,6 +31,24 @@ public interface IModelPoolSelector
     /// exactly one (model, credential) pair, so the same model id under two credentials is never a guess.
     /// </summary>
     Task<ModelPoolPick?> ResolveByRowIdAsync(Guid teamId, Guid modelCredentialModelId, bool requireStructured, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Resolve a supervisor-dispatched agent's effective model NAME (the L4 model authors a name, not a row id) to a
+    /// credentialed-model row → its canonical model id + the BACKING credential id (the agent plane resolves the key
+    /// from that id at execution; this never decrypts). Bounded to the operator's allowed pool when
+    /// <paramref name="allowedRowIds"/> is non-empty; null/empty = ALL the team's credentialed models. The row must be
+    /// ENABLED under an ACTIVE credential. <c>null</c> = the name is not a credentialed model in the (bounded) pool →
+    /// the spawn fails closed. So a dispatched agent can only run a model the team credentialed, on that model's own key.
+    /// </summary>
+    Task<ModelDispatchRef?> ResolveDispatchAsync(Guid teamId, string modelName, IReadOnlyList<Guid>? allowedRowIds, CancellationToken cancellationToken);
+}
+
+/// <summary>The agent-dispatch resolution: the canonical model id + the BACKING credential's id. Distinct from <see cref="ModelPoolPick"/> (the in-process plane, which carries the decrypted key) — the agent plane wants the credential REFERENCE (a Guid it resolves to env at execution), never the secret in-process.</summary>
+public sealed record ModelDispatchRef
+{
+    public required string ModelId { get; init; }
+
+    public required Guid ModelCredentialId { get; init; }
 }
 
 /// <summary>The resolved pick: a model id from the pool + the decrypted credential of the row that backs it. Transient — carries a secret, never persisted.</summary>
