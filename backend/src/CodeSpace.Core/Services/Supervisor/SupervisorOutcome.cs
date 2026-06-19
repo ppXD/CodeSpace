@@ -622,4 +622,63 @@ public static class SupervisorOutcome
             return Array.Empty<SupervisorAgentResult>();
         }
     }
+
+    /// <summary>Read the model-authored SEMANTIC PHASES off a <c>plan</c> decision's outcome (L4 arc C) — empty when the plan recorded no phases (a flat plan) or the json is malformed. Pure; the phase projection (C2) reads it.</summary>
+    public static IReadOnlyList<SupervisorPlanPhase> ReadPlanPhases(string? planOutcomeJson)
+    {
+        if (string.IsNullOrWhiteSpace(planOutcomeJson)) return Array.Empty<SupervisorPlanPhase>();
+
+        try
+        {
+            var root = JsonDocument.Parse(planOutcomeJson).RootElement;
+
+            if (root.ValueKind != JsonValueKind.Object || !root.TryGetProperty("phases", out var arr) || arr.ValueKind != JsonValueKind.Array)
+                return Array.Empty<SupervisorPlanPhase>();
+
+            return arr.Deserialize<List<SupervisorPlanPhase>>(AgentJson.Options) ?? (IReadOnlyList<SupervisorPlanPhase>)Array.Empty<SupervisorPlanPhase>();
+        }
+        catch (JsonException)
+        {
+            return Array.Empty<SupervisorPlanPhase>();
+        }
+    }
+
+    /// <summary>Read the plan-local subtask ids off a <c>spawn</c> decision's PAYLOAD (the fan-out order) — empty when absent/malformed. The spawn outcome's <c>agentRunIds[i]</c> corresponds to this payload's <c>subtaskIds[i]</c> (same staging order), so a phase's grouped subtasks map to the agents that ran them (C2).</summary>
+    public static IReadOnlyList<string> ReadSpawnSubtaskIds(string? spawnPayloadJson)
+    {
+        if (string.IsNullOrWhiteSpace(spawnPayloadJson)) return Array.Empty<string>();
+
+        try
+        {
+            var root = JsonDocument.Parse(spawnPayloadJson).RootElement;
+
+            if (root.ValueKind != JsonValueKind.Object || !root.TryGetProperty("subtaskIds", out var arr) || arr.ValueKind != JsonValueKind.Array)
+                return Array.Empty<string>();
+
+            return arr.EnumerateArray().Where(e => e.ValueKind == JsonValueKind.String).Select(e => e.GetString()!).ToList();
+        }
+        catch (JsonException)
+        {
+            return Array.Empty<string>();
+        }
+    }
+
+    /// <summary>Read the single plan-local subtask id off a <c>retry</c> decision's PAYLOAD — null when absent/malformed. A retry re-runs ONE subtask as a fresh agent, so the phase projection (C2) remaps that subtask to the retry's fresh agent (latest attempt wins) rather than the original failed one.</summary>
+    public static string? ReadRetrySubtaskId(string? retryPayloadJson)
+    {
+        if (string.IsNullOrWhiteSpace(retryPayloadJson)) return null;
+
+        try
+        {
+            var root = JsonDocument.Parse(retryPayloadJson).RootElement;
+
+            return root.ValueKind == JsonValueKind.Object && root.TryGetProperty("subtaskId", out var id) && id.ValueKind == JsonValueKind.String
+                ? id.GetString()
+                : null;
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+    }
 }
