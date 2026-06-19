@@ -67,6 +67,7 @@ public class LlmCompleteNodeTests
         public static StubPoolSelector Empty() => new(null);
         public Task<ModelPoolPick?> SelectAsync(Guid teamId, string provider, bool requireStructured, IReadOnlyList<string>? allowedModels, string? pinnedModel, CancellationToken cancellationToken) => Task.FromResult(_pick);
         public Task<ModelPoolPick?> ResolveByRowIdAsync(Guid teamId, Guid modelCredentialModelId, bool requireStructured, CancellationToken cancellationToken) => Task.FromResult(_pick);
+        public Task<ModelDispatchRef?> ResolveDispatchAsync(Guid teamId, string modelName, IReadOnlyList<Guid>? allowedRowIds, CancellationToken cancellationToken) => Task.FromResult<ModelDispatchRef?>(null);
     }
 
     /// <summary>Minimal scope factory that hands the node a scope resolving exactly the stub selector (the node resolves IModelPoolSelector per-call from a fresh scope, mirroring production's captive-dependency avoidance).</summary>

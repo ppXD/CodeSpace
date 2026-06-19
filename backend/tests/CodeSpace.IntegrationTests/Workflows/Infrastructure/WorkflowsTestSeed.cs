@@ -130,6 +130,26 @@ public static class WorkflowsTestSeed
     public static string PoolModelIdFor(string provider) =>
         provider == RecordReplayStructuredLLMClient.ProviderTag ? PlanMapSynthPlannerRequest.DefaultModel : $"{provider}-model";
 
+    /// <summary>Seed a team credential + one enabled credentialed-model row (keyless — a fake CLI never authenticates). Returns the credential id (a supervisor-dispatched agent resolving this model runs on it) + the row id (an allowed-pool entry).</summary>
+    public static async Task<(Guid CredentialId, Guid RowId)> SeedCredentialedModelAsync(PostgresFixture fixture, Guid teamId, string modelId)
+    {
+        using var scope = fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+
+        var credId = Guid.NewGuid();
+        db.ModelCredential.Add(new ModelCredential
+        {
+            Id = credId, TeamId = teamId, Provider = "Anthropic", DisplayName = "test cred",
+            Status = CredentialStatus.Active, CreatedBy = SystemUsers.SeederId, LastModifiedBy = SystemUsers.SeederId,
+        });
+
+        var rowId = Guid.NewGuid();
+        db.ModelCredentialModel.Add(new ModelCredentialModel { Id = rowId, ModelCredentialId = credId, ModelId = modelId, Source = ModelSource.Manual, Enabled = true });
+
+        await db.SaveChangesAsync().ConfigureAwait(false);
+        return (credId, rowId);
+    }
+
     /// <summary>Minimal valid definition — trigger → terminal — useful as a baseline for CRUD tests.</summary>
     public static WorkflowDefinition MinimalDefinition() => new()
     {

@@ -314,28 +314,22 @@ public class SupervisorBuildAgentTaskTests
     }
 
     [Fact]
-    public void An_authored_model_in_the_allowed_pool_is_stamped()
+    public void An_authored_dispatch_model_is_stamped_raw()
     {
-        var ctx = new SupervisorTurnContext { Goal = "g", AllowedModels = new[] { "claude-opus-4-8", "gpt-5.4-codex" } };
-
-        BuildWithSpec(ctx, new SupervisorAgentDispatch { SubtaskId = SubtaskId, Model = "claude-opus-4-8" }).Model.ShouldBe("claude-opus-4-8");
+        // BuildTaskWithGoal is a pure projection — it stamps the authored model NAME verbatim. The pool gate (the model
+        // must resolve to a credentialed row in the allowed pool) runs POST-resolution in CreateResolvedAgentRunAsync,
+        // where the effective (incl. persona-filled) model is known; it's exercised at the integration tier.
+        BuildWithSpec(new SupervisorTurnContext { Goal = "g" }, new SupervisorAgentDispatch { SubtaskId = SubtaskId, Model = "claude-opus-4-8" })
+            .Model.ShouldBe("claude-opus-4-8");
     }
 
     [Fact]
-    public void An_authored_model_outside_the_allowed_pool_fails_closed_through_the_clamp()
+    public void The_dispatch_model_wins_over_the_profile_default_then_falls_back_to_it()
     {
-        var ctx = new SupervisorTurnContext { Goal = "g", AllowedModels = new[] { "claude-opus-4-8" } };
+        var ctx = new SupervisorTurnContext { Goal = "g", AgentProfile = new SupervisorAgentProfile { Model = "profile-model" } };
 
-        Should.Throw<SupervisorModelAccessException>(() => BuildWithSpec(ctx, new SupervisorAgentDispatch { SubtaskId = SubtaskId, Model = "rogue-model" }));
-    }
-
-    [Fact]
-    public void No_pool_leaves_an_authored_model_byte_identical()
-    {
-        // No AllowedModels on the context (the pre-S4 path) → the authored model passes through unclamped.
-        var task = BuildWithSpec(new SupervisorTurnContext { Goal = "g" }, new SupervisorAgentDispatch { SubtaskId = SubtaskId, Model = "any-model" });
-
-        task.Model.ShouldBe("any-model");
+        BuildWithSpec(ctx, new SupervisorAgentDispatch { SubtaskId = SubtaskId, Model = "authored-model" }).Model.ShouldBe("authored-model", "an authored per-agent model wins");
+        BuildWithSpec(ctx, new SupervisorAgentDispatch { SubtaskId = SubtaskId }).Model.ShouldBe("profile-model", "no authored model → the profile default is stamped");
     }
 
     [Fact]

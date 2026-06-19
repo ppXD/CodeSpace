@@ -75,6 +75,28 @@ public sealed class ModelPoolSelector : IModelPoolSelector, IScopedDependency
         return ToPick(row.ModelId, row.Provider, row.EncryptedApiKey, row.BaseUrl);
     }
 
+    public async Task<ModelDispatchRef?> ResolveDispatchAsync(Guid teamId, string modelName, IReadOnlyList<Guid>? allowedRowIds, CancellationToken cancellationToken)
+    {
+        // The L4 brain authored a model NAME for this agent — resolve it to a credentialed row the team owns, bounded by
+        // the operator's allowed pool (empty = ALL team rows). Case-insensitive name match (parity with the in-process
+        // path). No structured requirement — a coding agent doesn't need structured output. None → null (fail closed).
+        var nameLower = modelName.Trim().ToLower();
+
+        var query = _db.ModelCredentialModel.AsNoTracking()
+            .Where(m => m.Enabled && m.ModelId.ToLower() == nameLower
+                && m.Credential.TeamId == teamId && m.Credential.DeletedDate == null && m.Credential.Status == CredentialStatus.Active);
+
+        if (allowedRowIds is { Count: > 0 }) query = query.Where(m => allowedRowIds.Contains(m.Id));
+
+        // Tie-break by row id for a deterministic pick when two credentials of the team back the same model id.
+        var row = await query
+            .OrderBy(m => m.Id)
+            .Select(m => new { m.ModelId, m.ModelCredentialId })
+            .FirstOrDefaultAsync(cancellationToken).ConfigureAwait(false);
+
+        return row == null ? null : new ModelDispatchRef { ModelId = row.ModelId, ModelCredentialId = row.ModelCredentialId };
+    }
+
     private ModelPoolPick ToPick(string modelId, string provider, string? encryptedApiKey, string? baseUrl) => new()
     {
         ModelId = modelId,

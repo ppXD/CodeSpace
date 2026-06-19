@@ -67,6 +67,9 @@ public class SupervisorRichSpawnFlowTests : IDisposable
     {
         var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
         var repoId = await SeedRepositoryAsync(teamId);
+        // The persona's model must be a credentialed pool row (option B) — seed it; the spawned agent runs on THIS
+        // credential (proving the dispatched-agent credential comes from the matched pool row, not the persona/profile).
+        var (credentialId, _) = await WorkflowsTestSeed.SeedCredentialedModelAsync(_fixture, teamId, PersonaModel);
         var personaId = await SeedPersonaAsync(teamId, PersonaPrompt, PersonaModel, $"[\"{PersonaTool}\"]");
         var conversationId = Guid.NewGuid();   // the supervisor's approval conversation — a reference, nothing posts on this path
 
@@ -96,7 +99,7 @@ public class SupervisorRichSpawnFlowTests : IDisposable
             var tasks = spawned.Select(r => JsonSerializer.Deserialize<AgentTask>(r.TaskJson, AgentJson.Options)!).ToList();
 
             foreach (var task in tasks)
-                AssertRichTeamAgent(task, repoId, personaId, conversationId);
+                AssertRichTeamAgent(task, repoId, personaId, conversationId, credentialId);
 
             // The per-subtask goal floor is the persona prompt PREPENDED to the planned instruction (the merge),
             // distinct per agent — proving the goal fold + the persona compose both ran on the real path.
@@ -156,7 +159,7 @@ public class SupervisorRichSpawnFlowTests : IDisposable
     }
 
     /// <summary>Assert one spawned task is a REAL team agent: every profile field + the persona-merged model / tools / credential — what an agent.code node with the same config would produce.</summary>
-    private static void AssertRichTeamAgent(AgentTask task, Guid repoId, Guid personaId, Guid conversationId)
+    private static void AssertRichTeamAgent(AgentTask task, Guid repoId, Guid personaId, Guid conversationId, Guid expectedCredentialId)
     {
         task.Harness.ShouldBe(ProfileHarness, "the profile harness overrides the codex-cli default");
         task.RepositoryId.ShouldBe(repoId, "the profile repo is stamped (the executor clones it)");
@@ -168,7 +171,7 @@ public class SupervisorRichSpawnFlowTests : IDisposable
 
         task.AgentDefinitionId.ShouldBe(personaId, "the persona reference is preserved as provenance");
         task.Model.ShouldBe(PersonaModel, "the persona model fills in (the node profile set no model) — the persona-merge ran");
-        task.ModelCredentialId.ShouldBeNull("neither the profile nor the persona pinned a credential → team/operator fallback");
+        task.ModelCredentialId.ShouldBe(expectedCredentialId, "option B: the effective (persona) model resolved to its credentialed pool row → the agent runs on THAT row's credential");
 
         // Tools are the persona's UNIONed with the node's allow-list (supplement, never narrow) — the merge ran.
         task.Tools.ShouldBe(new[] { PersonaTool, "Grep", "Bash" },
@@ -285,8 +288,9 @@ public class SupervisorRichSpawnFlowTests : IDisposable
         var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
         var personaId = await SeedPersonaAsync(teamId, PersonaPrompt, PersonaModel, toolsJson: null);   // PersonaModel = "claude-opus"
 
-        // The pool allows a DIFFERENT model than the persona's → the resolved persona model is out of pool.
-        var workflowId = await CreatePersonaPoolWorkflowAsync(teamId, userId, personaId);
+        // The pool allows a DIFFERENT credentialed model than the persona's → the resolved persona model is out of pool.
+        var (_, allowedRowId) = await WorkflowsTestSeed.SeedCredentialedModelAsync(_fixture, teamId, "only-allowed-model");
+        var workflowId = await CreatePersonaPoolWorkflowAsync(teamId, userId, personaId, allowedRowId);
         var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
 
         var jobClient = ResolveJobClient();
@@ -314,10 +318,10 @@ public class SupervisorRichSpawnFlowTests : IDisposable
         }
     }
 
-    private async Task<Guid> CreatePersonaPoolWorkflowAsync(Guid teamId, Guid userId, Guid personaId)
+    private async Task<Guid> CreatePersonaPoolWorkflowAsync(Guid teamId, Guid userId, Guid personaId, Guid allowedRowId)
     {
         using var scope = _fixture.BeginScopeAs(userId, teamId, Roles.Admin);
-        var config = $$"""{ "goal": "ship it", "allowedModels": ["only-allowed-model"], "agentProfile": { "agentDefinitionId": "{{personaId}}" } }""";
+        var config = $$"""{ "goal": "ship it", "allowedModelIds": ["{{allowedRowId}}"], "agentProfile": { "agentDefinitionId": "{{personaId}}" } }""";
         return await scope.Resolve<IMediator>().Send(new CreateWorkflowCommand
         {
             Name = "sup-pool-" + Guid.NewGuid().ToString("N")[..6],

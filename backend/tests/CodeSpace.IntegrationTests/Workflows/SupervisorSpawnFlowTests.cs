@@ -247,13 +247,15 @@ public class SupervisorSpawnFlowTests : IDisposable
     [Fact]
     public async Task A_dispatch_authoring_a_model_outside_the_pool_fails_the_spawn_cleanly()
     {
-        // S4 safety: a model-authored dispatch whose model is OUTSIDE the operator's allowed pool throws the model
-        // clamp; the turn service terminalizes the spawn as a CLEAN Failed (never stranded Running), staging no agents.
-        // Also proves the config round-trip: allowedModels on the node config threads into the turn context's pool.
+        // Option B: a model-authored dispatch whose model is NOT a credentialed model in the operator's allowed pool
+        // (here: "rogue-model", out of the seeded one-row pool) fails the dispatch resolution; the turn service
+        // terminalizes the spawn as a CLEAN Failed (never stranded Running), staging no agents. Also proves the config
+        // round-trip: allowedModelIds on the node config threads into the turn context's pool.
         using (var s = _fixture.BeginScope()) s.Resolve<SupervisorDecisionScript>().PlanSpawnBadModelStop();
 
         var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
-        var workflowId = await CreateWorkflowAsync(teamId, userId, """{"goal":"ship the feature","allowedModels":["allowed-model"]}""");
+        var (_, allowedRowId) = await WorkflowsTestSeed.SeedCredentialedModelAsync(_fixture, teamId, "allowed-model");   // the only model in the pool; the dispatch authors "rogue-model" (out of pool)
+        var workflowId = await CreateWorkflowAsync(teamId, userId, $$"""{"goal":"ship the feature","allowedModelIds":["{{allowedRowId}}"]}""");
         var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
 
         var jobClient = ResolveJobClient();

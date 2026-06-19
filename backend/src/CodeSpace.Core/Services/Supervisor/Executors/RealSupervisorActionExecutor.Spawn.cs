@@ -215,18 +215,35 @@ public sealed partial class RealSupervisorActionExecutor
             throw new AgentDefinitionResolutionException($"agent.supervisor spawn: {ex.Message}", ex);
         }
 
-        // POST-RESOLUTION model gate: the dispatch-time resolver may have filled a null task model with the PERSONA's
-        // model AFTER the pre-resolution clamp in BuildTaskWithGoal, so re-clamp the EFFECTIVE model against the
-        // operator's pool — else a persona reference could run a pool-excluded model. Fail-closed (terminalized by the
-        // turn service's catch). No pool / null model → no-op (byte-identical). The pre-resolution clamp still gates
-        // the common case (a directly-authored model) early, before any resolution.
-        SupervisorModelClamp.ClampModel(resolved.Model, profileModel: null, context.AllowedModels);
+        // POST-RESOLUTION pool gate (option B): the EFFECTIVE model — model-authored, profile default, OR a persona-
+        // filled one (resolved just above) — must be a credentialed model in the operator's allowed pool (empty pool =
+        // ALL the team's credentialed models), and the agent runs on THAT row's credential. A null model is the harness
+        // default (no name → no gate). Out of pool → fail-closed (terminalized by the turn service's catch), so the pool
+        // is not bypassable via a persona reference or a profile default.
+        resolved = await ApplyDispatchModelAsync(resolved, context, cancellationToken).ConfigureAwait(false);
 
         // Stamp the owning TURN cell (<nodeId>#turn{N}) so a supervisor's spawned agents are addressable by the
         // turn that spawned them (D4) — the turn-grain analogue of the per-spawn wait key <nodeId>#turn{N}#{k}.
         var turnCellKey = $"{context.NodeId}#turn{context.TurnNumber}";
 
         return (await _agentRuns.CreateAsync(resolved, context.TeamId, context.SupervisorRunId, context.NodeId, turnCellKey, cancellationToken).ConfigureAwait(false)).Id;
+    }
+
+    /// <summary>
+    /// Resolve the spawned agent's effective model NAME to a credentialed pool row (option B): the model + the credential
+    /// it runs on both come from that row, so a dispatched agent can only run a model the team credentialed — and on that
+    /// model's own key. Bounded to the operator's <see cref="SupervisorTurnContext.AllowedModelIds"/> pool (empty = all
+    /// the team's credentialed models). A null effective model is the harness default (no name → no gate). Out of pool →
+    /// <see cref="SupervisorModelAccessException"/> (fail-closed, terminalized by the turn service's catch).
+    /// </summary>
+    private async Task<AgentTask> ApplyDispatchModelAsync(AgentTask resolved, SupervisorTurnContext context, CancellationToken cancellationToken)
+    {
+        if (NullIfBlank(resolved.Model) is not { } effectiveModel) return resolved;
+
+        var dispatch = await _modelSelector.ResolveDispatchAsync(context.TeamId, effectiveModel, context.AllowedModelIds, cancellationToken).ConfigureAwait(false)
+            ?? throw new SupervisorModelAccessException($"agent.supervisor spawn requests model '{effectiveModel}', which is not a credentialed model in this run's allowed model pool.");
+
+        return resolved with { Model = dispatch.ModelId, ModelCredentialId = dispatch.ModelCredentialId };
     }
 
     /// <summary>
@@ -293,9 +310,10 @@ public sealed partial class RealSupervisorActionExecutor
         {
             Goal = goal,
             Harness = NullIfBlank(spec?.Harness) ?? HarnessOf(profile),
-            // The model-authored per-agent model is CLAMPED to the operator's allowed pool (no pool → unbounded,
-            // byte-identical). Throws SupervisorModelAccessException on an out-of-pool model — fail-closed, terminalized.
-            Model = SupervisorModelClamp.ClampModel(spec?.Model, profile?.Model, context.AllowedModels),
+            // Stamp the RAW authored model name (L4 dispatch wins over the profile default). The pool gate runs
+            // POST-resolution in CreateResolvedAgentRunAsync — where the EFFECTIVE model (incl. a persona-filled one) is
+            // known — so this stays a pure projection. A null name → the harness default (no pool gate; no name).
+            Model = NullIfBlank(spec?.Model) ?? NullIfBlank(profile?.Model),
             AgentDefinitionId = profile?.AgentDefinitionId,
             ModelCredentialId = profile?.ModelCredentialId,
             Tools = context.SpawnedAgentTools,
