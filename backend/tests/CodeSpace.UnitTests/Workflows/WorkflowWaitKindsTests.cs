@@ -22,6 +22,7 @@ public class WorkflowWaitKindsTests
     [InlineData(WorkflowWaitKinds.Action, "Action")]
     [InlineData(WorkflowWaitKinds.AgentRun, "AgentRun")]
     [InlineData(WorkflowWaitKinds.SupervisorDecision, "SupervisorDecision")]
+    [InlineData(WorkflowWaitKinds.Decision, "Decision")]
     public void Wait_kind_literals_are_pinned(string actual, string expected)
     {
         actual.ShouldBe(expected);
@@ -35,6 +36,7 @@ public class WorkflowWaitKindsTests
     [InlineData(WorkflowWaitKinds.Action)]
     [InlineData(WorkflowWaitKinds.AgentRun)]
     [InlineData(WorkflowWaitKinds.SupervisorDecision)]
+    [InlineData(WorkflowWaitKinds.Decision)]
     public void ValidateWaitKind_admits_every_known_kind(string kind)
     {
         WorkflowEngine.ValidateWaitKind("node-1", kind).ShouldBe(kind);
