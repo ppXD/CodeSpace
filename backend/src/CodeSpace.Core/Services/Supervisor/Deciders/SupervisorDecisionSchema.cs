@@ -103,7 +103,22 @@ public static class SupervisorDecisionSchema
               "additionalProperties": false,
               "properties": {
                 "outcome": { "type": "string", "description": "Terminal outcome label (e.g. 'completed', 'failed', 'abandoned')." },
-                "summary": { "type": "string", "description": "Short summary of what the supervisor accomplished." }
+                "summary": { "type": "string", "description": "Short summary of what the supervisor accomplished." },
+                "acceptance": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "command": {
+                      "type": "array",
+                      "minItems": 1,
+                      "items": { "type": "string" },
+                      "description": "An argv the server runs against the produced workspace to OBJECTIVELY verify the result (non-zero exit = not accepted). Authoring a runnable command makes 'done' a server-verified fact, not a self-report."
+                    },
+                    "description": { "type": "string", "description": "Optional human-readable description of what the acceptance check proves." }
+                  },
+                  "required": ["command"],
+                  "description": "Optional model-authored definition of done for the terminal result — a server-run acceptance check, AND-ed against the operator's own acceptance floor."
+                }
               },
               "required": ["outcome", "summary"],
               "description": "Required when kind == 'stop'."

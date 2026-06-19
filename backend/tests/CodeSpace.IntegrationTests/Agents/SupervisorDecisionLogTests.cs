@@ -2,7 +2,9 @@ using System.Text.Json;
 using Autofac;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
+using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Supervisor;
+using CodeSpace.Core.Services.Supervisor.Deciders;
 using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Enums;
@@ -329,6 +331,74 @@ public class SupervisorDecisionLogTests
 
         expired.ShouldBe(0, "a Running row is not Pending — the reaper's candidate query excludes it");
         (await ReadRowAsync(decisionId)).Status.ShouldBe(SupervisorDecisionStatus.Running, "the in-flight row is untouched");
+    }
+
+    // ── A1: a model-authored acceptance spec is CARRIED durably (so A3 can later read it off the replayed tape) ──
+    // NOTE: the PayloadJson column is jsonb (Postgres normalizes whitespace), so the durable guarantee is SEMANTIC
+    // round-trip — the carried acceptance deserializes back intact. Canonical-byte / idempotency-key stability is a
+    // pure-projector concern proven at the unit tier (SupervisorAcceptanceSpecTests); here we prove durable carry.
+
+    [Fact]
+    public async Task A_stop_decisions_authored_acceptance_survives_a_real_persist_and_replay_round_trip()
+    {
+        // A1 is "carried, not consumed": the model authors the acceptance on a stop, the projector freezes it into
+        // the canonical PayloadJson, and the ledger must persist it so a later turn (A3) can read it off the durable
+        // tape. Prove the full canonical → real Postgres → replay → deserialize path preserves it.
+        var teamId = await SeedTeamAsync();
+        var runId = Guid.NewGuid();
+
+        var canonical = SupervisorDecisionProjector.Project(new SupervisorModelDecision
+        {
+            Kind = SupervisorDecisionKinds.Stop,
+            Stop = new SupervisorStopPayload
+            {
+                Outcome = "completed",
+                Summary = "done",
+                Acceptance = new SupervisorAcceptanceSpec { Command = new[] { "dotnet", "test" }, Description = "suite green" },
+            },
+        }).PayloadJson;
+
+        using (var scope = _fixture.BeginScope())
+            await Log(scope).TryClaimAsync(runId, teamId, "stop", "stop:accept", InputHash, canonical, 0, CancellationToken.None);
+
+        SupervisorDecisionRecord replayed;
+        using (var scope = _fixture.BeginScope())
+            replayed = (await Log(scope).GetForRunAsync(runId, teamId, CancellationToken.None)).Single();
+
+        var stop = JsonSerializer.Deserialize<SupervisorStopPayload>(replayed.PayloadJson, AgentJson.Options)!;
+        stop.Outcome.ShouldBe("completed");
+        stop.Summary.ShouldBe("done");
+        stop.Acceptance.ShouldNotBeNull("the carried acceptance survived the real persist + replay — the tape A3 reads");
+        stop.Acceptance!.Command.ShouldBe(new[] { "dotnet", "test" });
+        stop.Acceptance.Description.ShouldBe("suite green");
+    }
+
+    [Fact]
+    public async Task A_stop_without_acceptance_replays_with_no_acceptance_leaked()
+    {
+        // Back-compat at the persistence tier: a stop the model authors WITHOUT acceptance canonicalizes to the
+        // exact pre-field bytes (the idempotency-key input), and replays with NO acceptance — the optional field
+        // never leaks a spurious value onto a plain stop.
+        var teamId = await SeedTeamAsync();
+        var runId = Guid.NewGuid();
+
+        var canonical = SupervisorDecisionProjector.Project(new SupervisorModelDecision
+        {
+            Kind = SupervisorDecisionKinds.Stop,
+            Stop = new SupervisorStopPayload { Outcome = "completed", Summary = "done" },
+        }).PayloadJson;
+
+        canonical.ShouldBe("""{"outcome":"completed","summary":"done"}""", "no acceptance authored → the pre-field idempotency-key bytes");
+
+        using (var scope = _fixture.BeginScope())
+            await Log(scope).TryClaimAsync(runId, teamId, "stop", "stop:plain", InputHash, canonical, 0, CancellationToken.None);
+
+        SupervisorDecisionRecord replayed;
+        using (var verify = _fixture.BeginScope())
+            replayed = (await Log(verify).GetForRunAsync(runId, teamId, CancellationToken.None)).Single();
+
+        JsonSerializer.Deserialize<SupervisorStopPayload>(replayed.PayloadJson, AgentJson.Options)!.Acceptance
+            .ShouldBeNull("a plain stop replays with no acceptance — the optional field never leaks");
     }
 
     private static ISupervisorDecisionLog Log(ILifetimeScope scope) => scope.Resolve<ISupervisorDecisionLog>();

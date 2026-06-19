@@ -71,10 +71,19 @@ public sealed record SupervisorAskHumanPayload
     public required string Question { get; init; }
 }
 
-/// <summary>The <c>stop</c> payload: the terminal outcome label + a short summary.</summary>
+/// <summary>The <c>stop</c> payload: the terminal outcome label + a short summary, plus an optional model-authored acceptance check.</summary>
 public sealed record SupervisorStopPayload
 {
     public required string Outcome { get; init; }
 
     public string Summary { get; init; } = "";
+
+    /// <summary>
+    /// Optional model-authored OBJECTIVE acceptance for the terminal result — the L3→L4 "definition of done": a
+    /// server-run check the supervisor declares so "done" is a verified fact, not a self-report. Null-omitted
+    /// (<c>[JsonIgnore(WhenWritingNull)]</c>) so a stop WITHOUT acceptance serializes byte-identical to before —
+    /// the idempotency-key bytes are unchanged and exactly-once replay is unaffected. See <see cref="SupervisorAcceptanceSpec"/>.
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public SupervisorAcceptanceSpec? Acceptance { get; init; }
 }
