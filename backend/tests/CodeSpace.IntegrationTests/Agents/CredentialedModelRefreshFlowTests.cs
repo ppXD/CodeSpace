@@ -38,7 +38,7 @@ public class CredentialedModelRefreshFlowTests
         var credId = await AddCredentialAsync(userId, teamId);
 
         var count = await RefreshAsync(userId, teamId, credId, Reflectable(
-            Model("claude-opus-4-8", structured: true, toolUse: true, recommended: true),
+            Model("claude-opus-4-8", structured: true),
             Model("custom/x")));
 
         count.ShouldBe(2);
@@ -49,7 +49,6 @@ public class CredentialedModelRefreshFlowTests
         var opus = rows.Single(r => r.ModelId == "claude-opus-4-8");
         opus.Source.ShouldBe(ModelSource.Reflected);
         opus.SupportsStructuredOutput.ShouldBeTrue();
-        opus.RecommendedForSupervisor.ShouldBeTrue();
         opus.Enabled.ShouldBeTrue();
     }
 
@@ -60,8 +59,8 @@ public class CredentialedModelRefreshFlowTests
         var credId = await AddCredentialAsync(userId, teamId);
         await SendAsync(userId, teamId, new AddCredentialedModelCommand { ModelCredentialId = credId, ModelId = "gpt-5.4" });
 
-        // The gateway reflects the SAME id WITH capabilities — the operator's manual row must stay sovereign.
-        await RefreshAsync(userId, teamId, credId, Reflectable(Model("gpt-5.4", structured: true, toolUse: true)));
+        // The gateway reflects the SAME id WITH a capability — the operator's manual row must stay sovereign.
+        await RefreshAsync(userId, teamId, credId, Reflectable(Model("gpt-5.4", structured: true)));
 
         var row = (await RowsAsync(credId)).ShouldHaveSingleItem();
         row.Source.ShouldBe(ModelSource.Manual, "a reflected id matching a manual row leaves the manual row untouched");
@@ -131,10 +130,10 @@ public class CredentialedModelRefreshFlowTests
 
     // ─── Helpers ───
 
-    private static ReflectedModel Model(string id, bool structured = false, bool toolUse = false, bool recommended = false) => new()
+    private static ReflectedModel Model(string id, bool structured = false) => new()
     {
         ModelId = id,
-        Capabilities = new ModelCapabilityFlags { SupportsStructuredOutput = structured, SupportsToolUse = toolUse, RecommendedForSupervisor = recommended },
+        SupportsStructuredOutput = structured,
     };
 
     private static FakeReflector Reflectable(params ReflectedModel[] models) => new(canReflect: true, models);

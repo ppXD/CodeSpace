@@ -45,11 +45,11 @@ public sealed class ModelPoolSelector : IModelPoolSelector, IScopedDependency
         else if (allowed != null)
             query = query.Where(m => allowed.Contains(m.ModelId.ToLower()));
 
-        // Prefer a recommended model; tie-break by model id, then row id for a TOTAL order so the pick is stable even
-        // when two credentials of the same provider carry the same recommended model.
+        // Deterministic total order (model id, then row id) so an unpinned pick is stable even when two credentials of
+        // the same provider carry the same model id. The operator picks the brain explicitly (SupervisorModel); this
+        // order only decides an unpinned/ambient pick.
         var row = await query
-            .OrderByDescending(m => m.RecommendedForSupervisor)
-            .ThenBy(m => m.ModelId)
+            .OrderBy(m => m.ModelId)
             .ThenBy(m => m.Id)
             .Select(m => new { m.ModelId, m.Credential.Provider, m.Credential.EncryptedApiKey, m.Credential.BaseUrl })
             .FirstOrDefaultAsync(cancellationToken).ConfigureAwait(false);

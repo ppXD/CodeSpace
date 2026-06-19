@@ -21,9 +21,7 @@ public class ModelCredentialModelTests
         model.Enabled.ShouldBeTrue("a freshly added model is usable by default");
         model.Source.ShouldBe(ModelSource.Manual, "the default authoring mode is operator-typed");
 
-        model.SupportsStructuredOutput.ShouldBeFalse();
-        model.SupportsToolUse.ShouldBeFalse();
-        model.RecommendedForSupervisor.ShouldBeFalse("capabilities default to a safe declares-nothing floor");
+        model.SupportsStructuredOutput.ShouldBeFalse("the capability defaults to a safe declares-nothing floor");
 
         model.DisplayName.ShouldBeNull("null DisplayName falls back to the wire ModelId");
     }

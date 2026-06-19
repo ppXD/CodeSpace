@@ -8,8 +8,8 @@
 -- `model_id` is the wire id a harness/decider passes (e.g. 'claude-sonnet-4-5', 'gpt-5.4-codex'); UNIQUE per
 -- credential (not global — the same id can be backed by two credentials). `source` is 'Manual' (operator-typed)
 -- or 'Reflected' (discovered from the provider's model endpoint); a refresh re-writes Reflected rows but never
--- touches Manual ones. The three capability booleans are the per-model boundary the supervisor/agent scheduling
--- reads (all default FALSE = declares nothing — a safe floor). `enabled` soft-hides a row without deleting it.
+-- touches Manual ones. `supports_structured_output` is the per-model capability the scheduler gates on (the
+-- decider/planner need it; defaults FALSE — a safe floor). `enabled` soft-hides a row without deleting it.
 --
 -- Additive + non-breaking: a brand-new table, nothing else touched. A credential with no rows resolves exactly
 -- as before (the just-in-time resolver does not read this table). Idempotent (IF NOT EXISTS).
@@ -21,8 +21,6 @@ CREATE TABLE IF NOT EXISTS model_credential_model (
     display_name               TEXT    NULL,
     source                     TEXT    NOT NULL DEFAULT 'Manual',
     supports_structured_output BOOLEAN NOT NULL DEFAULT FALSE,
-    supports_tool_use          BOOLEAN NOT NULL DEFAULT FALSE,
-    recommended_for_supervisor BOOLEAN NOT NULL DEFAULT FALSE,
     enabled                    BOOLEAN NOT NULL DEFAULT TRUE
 );
 

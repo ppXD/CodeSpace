@@ -50,7 +50,7 @@ public sealed class LiteLLMOpenAIReflector : IModelReflector, ISingletonDependen
             .Where(id => !string.IsNullOrWhiteSpace(id))
             .Select(id => id!.Trim())
             .Distinct(StringComparer.Ordinal)
-            .Select(id => new ReflectedModel { ModelId = id, Capabilities = BuiltinModelCatalog.For(id) })
+            .Select(id => new ReflectedModel { ModelId = id, SupportsStructuredOutput = BuiltinModelCatalog.SupportsStructuredOutput(id) })
             .ToList();
     }
 

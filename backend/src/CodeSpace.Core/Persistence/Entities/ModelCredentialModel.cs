@@ -8,9 +8,11 @@ namespace CodeSpace.Core.Persistence.Entities;
 /// credential, so "a model with no key" is structurally impossible rather than a runtime guard. The team's
 /// usable model pool is the union of its active credentials' <see cref="Enabled"/> rows.
 ///
-/// <para>Carries the per-model capability boundary (the three <c>Supports*</c>/<c>Recommended*</c> flags) that
-/// supervisor/agent scheduling reads — a capability is the MODEL's, not the credential's (one key backs models
-/// of differing capability) nor the harness's (the harness only constrains which models it can invoke).</para>
+/// <para>Carries the per-model capability boundary — the single <see cref="SupportsStructuredOutput"/> flag the
+/// scheduler gates on (the decider/planner need structured output; a free-text run does not). A capability is the
+/// MODEL's, not the credential's (one key backs models of differing capability) nor the harness's (the harness only
+/// constrains which models it can invoke). A new orthogonal capability arrives as a new flag here only when a real
+/// reader lands — never speculatively.</para>
 /// </summary>
 public class ModelCredentialModel : IEntity<Guid>
 {
@@ -28,14 +30,8 @@ public class ModelCredentialModel : IEntity<Guid>
     /// <summary>Whether the operator typed this model (<see cref="ModelSource.Manual"/>) or a refresh reflected it (<see cref="ModelSource.Reflected"/>). The refresh upsert preserves Manual rows.</summary>
     public ModelSource Source { get; set; } = ModelSource.Manual;
 
-    /// <summary>Capability: the model can return structured / JSON-schema output — the decider-eligibility gate.</summary>
+    /// <summary>Capability: the model can return structured / JSON-schema output — the decider/planner eligibility gate (the one capability the scheduler reads).</summary>
     public bool SupportsStructuredOutput { get; set; }
-
-    /// <summary>Capability: the model is suitable for tool-using agents. Suitability, not a claim about native tool APIs — the harness often provides the tools.</summary>
-    public bool SupportsToolUse { get; set; }
-
-    /// <summary>Capability: a high-trust model recommended to drive the supervisor decider — a scheduling tie-break, never a hard gate.</summary>
-    public bool RecommendedForSupervisor { get; set; }
 
     /// <summary>Operator soft-hide without deleting — a disabled row is not part of the usable pool. Defaults true (a freshly added model is usable).</summary>
     public bool Enabled { get; set; } = true;

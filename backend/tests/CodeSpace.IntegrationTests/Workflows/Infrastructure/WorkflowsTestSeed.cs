@@ -116,7 +116,6 @@ public static class WorkflowsTestSeed
                 ModelId = PoolModelIdFor(provider),
                 Source = ModelSource.Manual,
                 SupportsStructuredOutput = true,
-                RecommendedForSupervisor = true,
                 Enabled = true,
             });
         }
