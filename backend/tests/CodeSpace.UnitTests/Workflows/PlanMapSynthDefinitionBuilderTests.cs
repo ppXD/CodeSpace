@@ -28,7 +28,7 @@ public class PlanMapSynthDefinitionBuilderTests
     private static DefinitionValidator RealValidator() => new(new NodeRegistry(new INodeRuntime[]
     {
         new TriggerManualNode(),
-        new LlmCompleteNode(new LLMClientRegistry(Array.Empty<ILLMClient>())),
+        new LlmCompleteNode(new LLMClientRegistry(Array.Empty<ILLMClient>()), null!),
         new FlowMapNode(),
         new FlowMapStartNode(),
         new AgentCodeNode(),

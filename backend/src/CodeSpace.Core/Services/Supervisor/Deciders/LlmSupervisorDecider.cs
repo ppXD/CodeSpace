@@ -2,6 +2,7 @@ using System.Text;
 using System.Text.Json;
 using CodeSpace.Core.DependencyInjection;
 using CodeSpace.Core.Services.Agents;
+using CodeSpace.Core.Services.Agents.ModelCredentials;
 using CodeSpace.Core.Services.Workflows.Llm;
 using CodeSpace.Messages.Agents;
 
@@ -24,9 +25,9 @@ namespace CodeSpace.Core.Services.Supervisor.Deciders;
 public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
 {
     private readonly ILLMClientRegistry _clientRegistry;
-    private readonly ISupervisorModelSelector _modelSelector;
+    private readonly IModelPoolSelector _modelSelector;
 
-    public LlmSupervisorDecider(ILLMClientRegistry clientRegistry, ISupervisorModelSelector modelSelector)
+    public LlmSupervisorDecider(ILLMClientRegistry clientRegistry, IModelPoolSelector modelSelector)
     {
         _clientRegistry = clientRegistry;
         _modelSelector = modelSelector;
@@ -41,7 +42,7 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
         // The brain's model + key come from the POOL — exactly like the agents it spawns. The selector picks a
         // structured-capable model the operator credentialed (within the allowed pool, the supervisorModel pin if any,
         // preferring a recommended one). Nothing qualifies → fail-closed: no env "system" key, no default model.
-        var pick = await _modelSelector.SelectAsync(context.TeamId, structured.Provider, context.AllowedModels, context.SupervisorModel, cancellationToken).ConfigureAwait(false);
+        var pick = await _modelSelector.SelectAsync(context.TeamId, structured.Provider, requireStructured: true, context.AllowedModels, context.SupervisorModel, cancellationToken).ConfigureAwait(false);
 
         if (pick == null) return NoPoolModelStop();
 
@@ -52,7 +53,7 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
         return SupervisorDecisionProjector.Project(model);
     }
 
-    private static StructuredLLMCompletionRequest BuildRequest(SupervisorTurnContext context, SupervisorModelPick pick) => new()
+    private static StructuredLLMCompletionRequest BuildRequest(SupervisorTurnContext context, ModelPoolPick pick) => new()
     {
         // The model id AND the credential both come from the one chosen pool row — nothing guessed, nothing hidden.
         Model = pick.ModelId,

@@ -20,7 +20,13 @@ public static class PlanMapSynthPlannerRequest
     /// <summary>The fixed goal the real-model test launches with — the input the planner decomposes. Stable so the recorded cassette stays valid run-to-run.</summary>
     public const string Goal = "Improve the onboarding module across the codebase";
 
-    /// <summary>The node default model an absent-profile-model planner resolves to (mirrors <c>LlmCompleteNode.DefaultModelFor("Anthropic")</c>).</summary>
+    /// <summary>
+    /// The REAL model id the planner node resolves for the RecordReplay tag — a genuine Anthropic model, because in
+    /// RECORD mode the engine sends it to the live API. After S6b the model is pool-driven, so this is ALSO the model
+    /// id seeded onto the RecordReplay credential in <c>WorkflowsTestSeed.SeedInProcessModelPool</c>: the two MUST agree
+    /// or the cassette key — which hashes <c>request.Model</c> — would move out from under
+    /// <c>PlannerCassetteDriftTests.ExpectedPlannerKey</c>.
+    /// </summary>
     public const string DefaultModel = "claude-sonnet-4-5";
 
     public static TaskLaunchSeed Seed(Guid teamId) => new() { Goal = Goal, SurfaceKind = "test", TeamId = teamId };

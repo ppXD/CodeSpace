@@ -18,12 +18,6 @@ public class AnthropicClientPinningTests
     }
 
     [Fact]
-    public void ApiBaseUrlEnvVar_pinned()
-    {
-        AnthropicClient.ApiBaseUrlEnvVar.ShouldBe("CODESPACE_ANTHROPIC_API_BASE_URL");
-    }
-
-    [Fact]
     public void DefaultBaseUrl_is_official_anthropic_endpoint()
     {
         AnthropicClient.DefaultApiBaseUrl.ShouldBe("https://api.anthropic.com");

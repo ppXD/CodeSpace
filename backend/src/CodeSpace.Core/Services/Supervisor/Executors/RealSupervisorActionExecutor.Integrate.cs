@@ -26,9 +26,6 @@ namespace CodeSpace.Core.Services.Supervisor.Executors;
 /// </summary>
 public sealed partial class RealSupervisorActionExecutor
 {
-    /// <summary>The model id the synthesis reduce uses when the profile names none — a REAL provider model (never the literal "default", which a real API rejects), matching every other LLM caller's default.</summary>
-    private const string SynthesisDefaultModel = "claude-sonnet-4-5";
-
     /// <summary>Layer the integration + synthesis keys onto the fold outcome — ONLY when the gate is on AND there are agents to combine. A no-op (returns immediately) keeps the gate-OFF path byte-identical.</summary>
     private async Task AugmentWithIntegrationAndSynthesisAsync(Dictionary<string, object?> outcome, SupervisorTurnContext context, IReadOnlyList<MergedAgent> merged, CancellationToken cancellationToken)
     {
@@ -39,7 +36,7 @@ public sealed partial class RealSupervisorActionExecutor
 
         // Synthesis (facet b) reads the diffs — no repo needed; runs whenever the gate is on. Best-effort: a model
         // failure degrades to a note, NEVER crashing the merge turn (which would strand the decision row Running).
-        outcome["synthesis"] = await TrySynthesizeAsync(context.Goal, merged, profile, cancellationToken).ConfigureAwait(false);
+        outcome["synthesis"] = await TrySynthesizeAsync(context.TeamId, context.Goal, merged, profile, cancellationToken).ConfigureAwait(false);
 
         // Integration (facet a) writes a branch — only with a resolvable repository. EXCEPT when the conflict was
         // already RESOLVED: a VERIFIED resolver's own tested branch IS the reconciled merge, so re-running the
@@ -125,12 +122,12 @@ public sealed partial class RealSupervisorActionExecutor
 
     // ── Facet (b): the model synthesis reduce over the K real diffs ──────────────────
 
-    /// <summary>Best-effort wrapper: synthesis is a non-essential enrichment, so ANY failure (a model 4xx/5xx, a missing key, a transport / serialization fault) degrades to a note — it must never escape and strand the turn. Cancellation still propagates.</summary>
-    private async Task<object> TrySynthesizeAsync(string goal, IReadOnlyList<MergedAgent> merged, SupervisorAgentProfile? profile, CancellationToken cancellationToken)
+    /// <summary>Best-effort wrapper: synthesis is a non-essential enrichment, so ANY failure (a model 4xx/5xx, a missing pool model, a transport / serialization fault) degrades to a note — it must never escape and strand the turn. Cancellation still propagates.</summary>
+    private async Task<object> TrySynthesizeAsync(Guid teamId, string goal, IReadOnlyList<MergedAgent> merged, SupervisorAgentProfile? profile, CancellationToken cancellationToken)
     {
         try
         {
-            return await SynthesizeAsync(goal, merged, profile, cancellationToken).ConfigureAwait(false);
+            return await SynthesizeAsync(teamId, goal, merged, profile, cancellationToken).ConfigureAwait(false);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -139,7 +136,7 @@ public sealed partial class RealSupervisorActionExecutor
         }
     }
 
-    private async Task<object> SynthesizeAsync(string goal, IReadOnlyList<MergedAgent> merged, SupervisorAgentProfile? profile, CancellationToken cancellationToken)
+    private async Task<object> SynthesizeAsync(Guid teamId, string goal, IReadOnlyList<MergedAgent> merged, SupervisorAgentProfile? profile, CancellationToken cancellationToken)
     {
         // The synthesis is a plain-TEXT reduce, so it prefers a dedicated text-completion provider (the established
         // synth seam) and falls back to any registered client — in production the structured-capable provider also
@@ -149,9 +146,17 @@ public sealed partial class RealSupervisorActionExecutor
 
         if (client is null) return new { note = "no LLM provider available for synthesis" };
 
+        // Pure pool-driven (S6b): the model + credential come from the team's pool for the chosen client's provider —
+        // the profile's model is a PIN (it must be a qualifying pool model), else the pool's recommended one. A text
+        // reduce doesn't need structured output. No pool model → degrade to a note (never an env key, never a default).
+        var pick = await _modelSelector.SelectAsync(teamId, client.Provider, requireStructured: false, allowedModels: null, pinnedModel: profile?.Model, cancellationToken).ConfigureAwait(false);
+
+        if (pick is null) return new { note = $"no pool model available for synthesis on provider '{client.Provider}'" };
+
         var request = new LLMCompletionRequest
         {
-            Model = string.IsNullOrWhiteSpace(profile?.Model) ? SynthesisDefaultModel : profile!.Model!,
+            Model = pick.ModelId,
+            Credential = pick.Credential,
             SystemPrompt = "You are combining the work of several parallel coding agents into ONE coherent change. Each agent's unified diff follows. Produce a concise synthesis: what the combined change does, how the pieces fit, and any overlaps or risks a reviewer should check. Do not invent changes that are not in the diffs.",
             UserPrompt = BuildSynthesisPrompt(goal, merged),
         };

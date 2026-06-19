@@ -1,6 +1,9 @@
 using System.Text.Json;
+using CodeSpace.Core.Services.Agents.ModelCredentials;
 using CodeSpace.Core.Services.Workflows.Llm;
+using CodeSpace.Core.Services.Workflows.Runtime;
 using CodeSpace.Messages.Enums;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 
 namespace CodeSpace.Core.Services.Workflows.Nodes.Builtin;
@@ -17,8 +20,16 @@ namespace CodeSpace.Core.Services.Workflows.Nodes.Builtin;
 public sealed class LlmCompleteNode : INodeRuntime
 {
     private readonly ILLMClientRegistry _clientRegistry;
+    private readonly IServiceScopeFactory _scopeFactory;
 
-    public LlmCompleteNode(ILLMClientRegistry clientRegistry) { _clientRegistry = clientRegistry; }
+    // The node is a DI SINGLETON, so it must NOT capture the scoped IModelPoolSelector (which holds a scoped
+    // DbContext) — concurrent flow.map branches would then share one DbContext and collide. Resolve the selector
+    // from a FRESH scope per RunAsync (same pattern as AgentSupervisorNode); the returned pick is a detached POCO.
+    public LlmCompleteNode(ILLMClientRegistry clientRegistry, IServiceScopeFactory scopeFactory)
+    {
+        _clientRegistry = clientRegistry;
+        _scopeFactory = scopeFactory;
+    }
 
     public string TypeKey => "llm.complete";
 
@@ -39,7 +50,7 @@ public sealed class LlmCompleteNode : INodeRuntime
               "type": "object",
               "properties": {
                 "provider": { "type": "string", "enum": ["Anthropic"], "default": "Anthropic" },
-                "model": { "type": "string" },
+                "model": { "type": "string", "description": "Optional. Pins ONE model from the team's credentialed-model pool for this provider; it must be an enabled pool model. Omit to let the pool pick (its recommended model)." },
                 "maxTokens": { "type": "integer", "minimum": 1, "maximum": 8192, "default": 2048 },
                 "temperature": { "type": "number", "minimum": 0, "maximum": 1, "default": 0.2 },
                 "responseSchema": { "type": "object", "description": "Optional JSON Schema. When set, the model is constrained to return JSON matching it, surfaced on the 'json' output (downstream can index into it, e.g. {{nodes.this.outputs.json.items[0]}}). Requires a provider that supports structured output." }
@@ -74,7 +85,7 @@ public sealed class LlmCompleteNode : INodeRuntime
     public async Task<NodeResult> RunAsync(NodeRunContext context, CancellationToken cancellationToken)
     {
         var provider = ReadString(context.Config, "provider", "Anthropic");
-        var model = ReadString(context.Config, "model", DefaultModelFor(provider));
+        var modelPin = ReadStringOrNull(context.Config, "model");   // optional pin; null = let the pool pick its recommended model
         var maxTokens = ReadInt(context.Config, "maxTokens", 2048);
         var temperature = ReadDouble(context.Config, "temperature", 0.2);
 
@@ -85,23 +96,38 @@ public sealed class LlmCompleteNode : INodeRuntime
 
         var client = _clientRegistry.Resolve(provider);
 
+        var requireStructured = TryReadObject(context.Config, "responseSchema", out var responseSchema);
+
+        // Pure pool-driven (S6b): the model + credential come ENTIRELY from the team's credentialed-model pool for this
+        // provider — no env key, no default model. The config 'model' is a PIN (must be an enabled pool model), else the
+        // pool's recommended one. A structured node narrows to a structured-capable pool model. Fail closed when nothing
+        // qualifies — never silently substitute or reach an ambient env key.
+        if (!NodeScopeReader.TryReadTeamId(context, out var teamId))
+            return NodeResult.Fail("The run carries no team context — llm.complete resolves its model + credential from the team's pool.");
+
+        var pick = await ResolvePoolPickAsync(teamId, provider, requireStructured, modelPin, cancellationToken).ConfigureAwait(false);
+
+        if (pick is null)
+            return NodeResult.Fail(NoPoolModelMessage(provider, modelPin, requireStructured));
+
         // Structured mode: a responseSchema constrains the model to schema-valid JSON, surfaced on the
         // 'json' output. Routes through the IStructuredLLMClient sibling capability — clean fail if the
         // resolved provider doesn't offer it.
-        if (TryReadObject(context.Config, "responseSchema", out var responseSchema))
-            return await RunStructuredAsync(context, client, provider, model, systemPrompt, userPrompt, maxTokens, temperature, responseSchema, cancellationToken).ConfigureAwait(false);
+        if (requireStructured)
+            return await RunStructuredAsync(context, client, provider, pick, systemPrompt, userPrompt, maxTokens, temperature, responseSchema, cancellationToken).ConfigureAwait(false);
 
         // Wrap the LLM call with ledger emission. The completed record's response_payload
         // carries the token counts (cheap to inline). The full text lives in workflow_artifact,
         // keeping the ledger payload small while still preserving the model output for replay
         // / audit.
         var completion = await context.Observability.TraceExternalCallAsync(
-            target: $"{provider.ToLowerInvariant()}:{model}",
+            target: $"{provider.ToLowerInvariant()}:{pick.ModelId}",
             method: "complete",
-            requestPayload: BuildRequestPayloadAudit(model, systemPrompt, userPrompt, maxTokens, temperature),
+            requestPayload: BuildRequestPayloadAudit(pick.ModelId, systemPrompt, userPrompt, maxTokens, temperature),
             action: ct => client.CompleteAsync(new LLMCompletionRequest
             {
-                Model = model,
+                Model = pick.ModelId,
+                Credential = pick.Credential,
                 SystemPrompt = systemPrompt,
                 UserPrompt = userPrompt,
                 MaxOutputTokens = maxTokens,
@@ -133,18 +159,19 @@ public sealed class LlmCompleteNode : INodeRuntime
         return NodeResult.Ok(outputs);
     }
 
-    private async Task<NodeResult> RunStructuredAsync(NodeRunContext context, ILLMClient client, string provider, string model, string systemPrompt, string userPrompt, int maxTokens, double temperature, JsonElement responseSchema, CancellationToken cancellationToken)
+    private async Task<NodeResult> RunStructuredAsync(NodeRunContext context, ILLMClient client, string provider, ModelPoolPick pick, string systemPrompt, string userPrompt, int maxTokens, double temperature, JsonElement responseSchema, CancellationToken cancellationToken)
     {
         if (client is not IStructuredLLMClient structured)
             return NodeResult.Fail($"Provider '{provider}' doesn't support structured output (responseSchema). Remove the schema to use plain text, or pick a provider that does.");
 
         var completion = await context.Observability.TraceExternalCallAsync(
-            target: $"{provider.ToLowerInvariant()}:{model}",
+            target: $"{provider.ToLowerInvariant()}:{pick.ModelId}",
             method: "complete_structured",
-            requestPayload: BuildRequestPayloadAudit(model, systemPrompt, userPrompt, maxTokens, temperature),
+            requestPayload: BuildRequestPayloadAudit(pick.ModelId, systemPrompt, userPrompt, maxTokens, temperature),
             action: ct => structured.CompleteStructuredAsync(new StructuredLLMCompletionRequest
             {
-                Model = model,
+                Model = pick.ModelId,
+                Credential = pick.Credential,
                 SystemPrompt = systemPrompt,
                 UserPrompt = userPrompt,
                 JsonSchema = responseSchema,
@@ -205,17 +232,36 @@ public sealed class LlmCompleteNode : INodeRuntime
             user_prompt_chars = userPrompt?.Length ?? 0,
         });
 
-    private static string DefaultModelFor(string provider) => provider switch
+    /// <summary>Resolve the pool pick in a FRESH DI scope (the node is a singleton — it must not capture the scoped selector's DbContext, which concurrent map branches would share + collide on). The pick is a detached POCO, safe to use after the scope disposes.</summary>
+    private async Task<ModelPoolPick?> ResolvePoolPickAsync(Guid teamId, string provider, bool requireStructured, string? modelPin, CancellationToken cancellationToken)
     {
-        "Anthropic" => "claude-sonnet-4-5",
-        _ => "default"
-    };
+        using var scope = _scopeFactory.CreateScope();
+        var selector = scope.ServiceProvider.GetRequiredService<IModelPoolSelector>();
+
+        return await selector.SelectAsync(teamId, provider, requireStructured, allowedModels: null, pinnedModel: modelPin, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>The fail-closed message when nothing in the team's pool qualifies — names the provider, the pin (if any), and the structured requirement so the operator knows exactly what to add to the pool.</summary>
+    private static string NoPoolModelMessage(string provider, string? modelPin, bool requireStructured)
+    {
+        var pinPart = modelPin is null ? "" : $" matching '{modelPin}'";
+        var structuredPart = requireStructured ? " with structured output" : "";
+        return $"No model is available in the team's pool for provider '{provider}'{pinPart}{structuredPart}. Add a credentialed, enabled model to run this node.";
+    }
 
     private static string ReadString(IReadOnlyDictionary<string, JsonElement> bag, string key, string fallback)
     {
         if (!bag.TryGetValue(key, out var value)) return fallback;
         if (value.ValueKind != JsonValueKind.String) return fallback;
         return value.GetString() ?? fallback;
+    }
+
+    /// <summary>An optional string config value — null when absent, non-string, or blank (so an empty <c>model</c> means "no pin", not a pin on "").</summary>
+    private static string? ReadStringOrNull(IReadOnlyDictionary<string, JsonElement> bag, string key)
+    {
+        if (!bag.TryGetValue(key, out var value) || value.ValueKind != JsonValueKind.String) return null;
+        var s = value.GetString();
+        return string.IsNullOrWhiteSpace(s) ? null : s;
     }
 
     private static int ReadInt(IReadOnlyDictionary<string, JsonElement> bag, string key, int fallback)

@@ -1,6 +1,7 @@
 using System.Text;
 using System.Text.Json;
 using CodeSpace.Core.DependencyInjection;
+using CodeSpace.Core.Services.Agents.ModelCredentials;
 using CodeSpace.Core.Services.Workflows.Llm;
 using CodeSpace.Messages.Dtos.Workflows.Planning;
 
@@ -19,14 +20,24 @@ namespace CodeSpace.Core.Services.Workflows.Planning.Planners;
 public sealed class LlmWorkflowPlanner : IWorkflowPlanner, IScopedDependency
 {
     private readonly ILLMClientRegistry _clientRegistry;
+    private readonly IModelPoolSelector _modelSelector;
 
-    public LlmWorkflowPlanner(ILLMClientRegistry clientRegistry) { _clientRegistry = clientRegistry; }
+    public LlmWorkflowPlanner(ILLMClientRegistry clientRegistry, IModelPoolSelector modelSelector)
+    {
+        _clientRegistry = clientRegistry;
+        _modelSelector = modelSelector;
+    }
 
     public async Task<PlannedWorkflow> PlanAsync(WorkflowPlanRequest request, CancellationToken cancellationToken)
     {
         var structured = ResolveStructuredClient();
 
-        var completion = await structured.CompleteStructuredAsync(BuildRequest(request), cancellationToken).ConfigureAwait(false);
+        var pick = await _modelSelector.SelectAsync(request.TeamId, structured.Provider, requireStructured: true, allowedModels: null, pinnedModel: null, cancellationToken).ConfigureAwait(false);
+
+        if (pick == null)
+            throw new InvalidOperationException($"No structured-capable model is available in the team's pool for provider '{structured.Provider}'. Add a credentialed model (with structured output) to plan tasks.");
+
+        var completion = await structured.CompleteStructuredAsync(BuildRequest(request, pick), cancellationToken).ConfigureAwait(false);
 
         return Deserialize(completion.Json);
     }
@@ -42,9 +53,10 @@ public sealed class LlmWorkflowPlanner : IWorkflowPlanner, IScopedDependency
         return structured;
     }
 
-    private static StructuredLLMCompletionRequest BuildRequest(WorkflowPlanRequest request) => new()
+    private static StructuredLLMCompletionRequest BuildRequest(WorkflowPlanRequest request, ModelPoolPick pick) => new()
     {
-        Model = DefaultModel,
+        Model = pick.ModelId,
+        Credential = pick.Credential,
         SystemPrompt = SystemPrompt,
         UserPrompt = BuildUserPrompt(request),
         JsonSchema = PlannerSchema.ResponseSchema,
@@ -81,9 +93,6 @@ public sealed class LlmWorkflowPlanner : IWorkflowPlanner, IScopedDependency
 
         return plan;
     }
-
-    /// <summary>Mirrors <c>LlmCompleteNode.DefaultModelFor("Anthropic")</c> — the default structured-capable model. A future per-team override is a Slice-N concern, not Slice 1.</summary>
-    private const string DefaultModel = "claude-sonnet-4-5";
 
     private const string SystemPrompt =
         "You are a senior engineer turning a free-text task into a concrete, reviewable plan. " +
