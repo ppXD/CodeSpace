@@ -1,9 +1,11 @@
 using System.Text.Json;
 using CodeSpace.Core.Services.Agents;
 using CodeSpace.Messages.Agents;
+using CodeSpace.Messages.Agents.Benchmark;
 using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Dtos.Agents;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging;
 
 namespace CodeSpace.Core.Services.Supervisor;
 
@@ -36,6 +38,10 @@ public sealed partial class SupervisorTurnService
             ? await CompactAgentResultsByIdAsync(rows, teamId, cancellationToken).ConfigureAwait(false)
             : EmptyAgentResults;
 
+        // The operator's OBJECTIVE acceptance command (L4 A3) — the argv a resolve verdict is graded against. Null
+        // (none / all-blank) → no objective grade runs, the resolver self-report marker stands (byte-identical to pre-A3).
+        var acceptanceCommand = NormalizeCommand(goalConfig?.AcceptanceChecks);
+
         var priorDecisions = new List<SupervisorPriorDecision>();
         SupervisorPriorDecision? inFlight = null;
 
@@ -55,6 +61,7 @@ public sealed partial class SupervisorTurnService
             if (SupervisorDecisionStateMachine.IsTerminal(row.Status))
             {
                 decision = FoldAgentResults(decision, agentResultsById);
+                decision = await FoldAcceptanceGradeAsync(decision, goalConfig, acceptanceCommand, teamId, cancellationToken).ConfigureAwait(false);
                 priorDecisions.Add(decision);
             }
             else
@@ -214,6 +221,55 @@ public sealed partial class SupervisorTurnService
         return decision with { OutcomeJson = SupervisorOutcome.FoldAgentResults(decision.OutcomeJson, folded) };
     }
 
+    /// <summary>
+    /// Fold the OBJECTIVE acceptance grade onto a TERMINAL resolve decision (resolver loop #379, L4 A3) — the server-run
+    /// verdict that REPLACES the resolver's self-reported marker. Runs the operator's acceptance command against the
+    /// resolver's produced branch EXACTLY ONCE: the <see cref="SupervisorOutcome.ReadAcceptanceGradePassed"/> once-guard
+    /// short-circuits every later replay, so the clone+run never re-fires and the accept boundary stays a pure tape read
+    /// (the named replay-safety risk, defeated structurally). Returns the decision UNCHANGED for any non-resolve verb or
+    /// when no acceptance command is configured (byte-identical to pre-A3). FAIL-CLOSED: a missing branch/repo, a failed
+    /// grade, or any unexpected error folds <c>passed:false</c> (Unverified) — never a silent accept, never a throw that
+    /// would strand the terminal row. Only a genuine cancellation propagates.
+    /// </summary>
+    private async Task<SupervisorPriorDecision> FoldAcceptanceGradeAsync(SupervisorPriorDecision decision, SupervisorGoalConfig? goalConfig, IReadOnlyList<string>? command, Guid teamId, CancellationToken cancellationToken)
+    {
+        if (decision.DecisionKind != SupervisorDecisionKinds.Resolve) return decision;
+
+        if (command is null) return decision;
+
+        if (SupervisorOutcome.ReadAcceptanceGradePassed(decision.OutcomeJson).HasValue) return decision;   // already graded — durable on the tape; never re-clone+run
+
+        // SINGLE-repo resolve only (A3): a multi-repo resolver's top-level ProducedBranch mirrors ONLY the primary repo,
+        // so grading it would gate EVERY repo's per-repo branch on a primary-only check (a FALSE accept if a secondary
+        // is broken). Defer the per-repo grade — fall back to the marker verdict (byte-identical), mirroring how
+        // SupervisorOutcome.ResolvedBranch self-excludes a multi-repo resolver via the same RepositoryResults signal.
+        if (SupervisorOutcome.ReadAgentResults(decision.OutcomeJson).FirstOrDefault()?.RepositoryResults.Count > 0) return decision;
+
+        var grade = await GradeResolveAcceptanceAsync(decision, goalConfig, command, teamId, cancellationToken).ConfigureAwait(false);
+
+        return decision with { OutcomeJson = SupervisorOutcome.FoldAcceptanceGrade(decision.OutcomeJson, grade.Passed, grade.Detail) };
+    }
+
+    /// <summary>Grade one resolve decision's branch against the operator command, fail-closed: no branch/repo → not-accepted; the grader is itself fail-closed; any unexpected non-cancellation escape degrades to not-accepted so the terminal fold can never crash and strand the row.</summary>
+    private async Task<BenchmarkGrade> GradeResolveAcceptanceAsync(SupervisorPriorDecision decision, SupervisorGoalConfig? goalConfig, IReadOnlyList<string> command, Guid teamId, CancellationToken cancellationToken)
+    {
+        var branch = SupervisorOutcome.ReadAgentResults(decision.OutcomeJson).FirstOrDefault()?.ProducedBranch;
+        var repositoryId = goalConfig?.AgentProfile?.RepositoryId;
+
+        if (string.IsNullOrEmpty(branch) || repositoryId is null)
+            return new BenchmarkGrade { Passed = false, Detail = "no-branch-or-repo" };
+
+        try
+        {
+            return await _acceptanceGrader.GradeAsync(repositoryId.Value, teamId, branch, command, SupervisorLane.AcceptanceGradeTimeoutSeconds, cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogWarning(ex, "Acceptance grade for resolve decision {DecisionId} failed unexpectedly; recording not-accepted", decision.Id);
+            return new BenchmarkGrade { Passed = false, Detail = $"grade-error: {ex.Message}" };
+        }
+    }
+
     /// <summary>The placeholder for a staged agent-run id that no longer resolves (deleted / out-of-team) — keeps the folded set N-for-N so the decider sees an explicit "this agent is gone" rather than a silently shorter list. Not reachable today (AgentRun rows are append-only), but fail-legible if it ever is.</summary>
     private static SupervisorAgentResult UnknownAgentResult(Guid agentRunId) =>
         new() { AgentRunId = agentRunId, Status = "Unknown", Error = "agent run not found (deleted or out-of-team)" };
@@ -261,6 +317,14 @@ public sealed partial class SupervisorTurnService
     /// </summary>
     private static IReadOnlyList<string>? NormalizeTools(IReadOnlyList<string>? allowedTools) =>
         allowedTools?.Where(t => !string.IsNullOrWhiteSpace(t)).ToList();
+
+    /// <summary>Normalise the operator's acceptance command (L4 A3) into a runnable argv: drop blank elements, and — UNLIKE the tool tri-state — collapse an empty/all-blank list to <c>null</c> ("no objective grade; the resolver self-report marker stands"), so a configured-but-empty list never grades.</summary>
+    private static IReadOnlyList<string>? NormalizeCommand(IReadOnlyList<string>? command)
+    {
+        var argv = command?.Where(a => !string.IsNullOrWhiteSpace(a)).ToList();
+
+        return argv is { Count: > 0 } ? argv : null;
+    }
 
     /// <summary>
     /// How many WorkflowRun ancestors this supervisor run already has (PR-E E5 depth cap) — walks the

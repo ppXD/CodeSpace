@@ -215,6 +215,51 @@ public static class SupervisorOutcome
     }
 
     /// <summary>
+    /// Fold an OBJECTIVE acceptance grade onto an already-agent-folded resolve outcome (resolver loop #379, L4 A3) — the
+    /// server-run verdict that REPLACES the resolver's self-reported marker. Re-emits the existing
+    /// <c>agentRunIds</c>/<c>agentCount</c>/<c>agentResults</c> BYTE-INTACT (read off the input, exactly as
+    /// <see cref="FoldAgentResults"/>) and appends a single <c>acceptanceGrade</c> object, so the only byte change is the
+    /// new key — the rehydrate fold runs this AT MOST ONCE (guarded by <see cref="ReadAcceptanceGradePassed"/> having no
+    /// value yet), persists it, and every later replay reads the folded verdict off the durable tape (the grade I/O
+    /// never re-runs). Pure.
+    /// </summary>
+    public static string FoldAcceptanceGrade(string? resolveOutcomeJson, bool passed, string detail)
+    {
+        var agentRunIds = ReadStagedAgentRunIds(resolveOutcomeJson);
+        var agentCount = ReadStagedAgentCount(resolveOutcomeJson);
+        var agentResults = ReadAgentResults(resolveOutcomeJson);
+
+        return JsonSerializer.Serialize(new { agentRunIds, agentCount, agentResults, acceptanceGrade = new { passed, detail } }, AgentJson.Options);
+    }
+
+    /// <summary>
+    /// Read the folded objective acceptance verdict off a resolve outcome (L4 A3): <c>true</c>/<c>false</c> = the
+    /// server grade's pass/fail, <c>null</c> = NO grade was folded (no operator acceptance command configured), so the
+    /// caller falls back to the self-reported marker — byte-identical to pre-A3. Best-effort + pure. Doubles as the
+    /// fold's "already graded → don't re-grade" once-guard (a non-null value means the grade is durable on the tape).
+    /// </summary>
+    public static bool? ReadAcceptanceGradePassed(string? resolveOutcomeJson)
+    {
+        if (string.IsNullOrWhiteSpace(resolveOutcomeJson)) return null;
+
+        try
+        {
+            var root = JsonDocument.Parse(resolveOutcomeJson).RootElement;
+
+            if (root.ValueKind != JsonValueKind.Object || !root.TryGetProperty("acceptanceGrade", out var grade) || grade.ValueKind != JsonValueKind.Object)
+                return null;
+
+            return grade.TryGetProperty("passed", out var passed) && passed.ValueKind is JsonValueKind.True or JsonValueKind.False
+                ? passed.GetBoolean()
+                : null;
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>
     /// Read the on-disk INTEGRATION block a <c>merge</c> outcome records (SOTA #3 / resolver loop #379) into the
     /// compact, decider-visible <see cref="SupervisorIntegrationOutcome"/> — null when the outcome carries no
     /// <c>integration</c> object (the gate was off, or the verb wasn't a merge) or it's malformed. Aggregates the
@@ -303,10 +348,20 @@ public static class SupervisorOutcome
 
         var resolver = results[0];
 
-        var verified = string.Equals(resolver.Status, "Succeeded", StringComparison.OrdinalIgnoreCase)
+        var markerVerified = string.Equals(resolver.Status, "Succeeded", StringComparison.OrdinalIgnoreCase)
             && resolver.Summary?.Contains(SupervisorResolverRecipe.TestsPassedMarker, StringComparison.Ordinal) == true;
 
-        return verified ? SupervisorResolutionVerdict.Verified : SupervisorResolutionVerdict.Unverified;
+        // A3: when a server grade was folded (an operator acceptance command ran objectively against the resolver's
+        // branch), the verdict is OBJECTIVE — Verified iff the grade passed AND the self-report marker still holds (AND,
+        // so the server check can only TIGHTEN, never manufacture, acceptance). Absent grade → the exact pre-A3
+        // marker-only read (byte-identical, no idempotency-key drift). This is a PURE read off already-folded bytes —
+        // the grade I/O ran once at the fold, never here at the accept boundary.
+        var gradePassed = ReadAcceptanceGradePassed(resolveOutcomeJson);
+
+        if (gradePassed.HasValue)
+            return gradePassed.Value && markerVerified ? SupervisorResolutionVerdict.Verified : SupervisorResolutionVerdict.Unverified;
+
+        return markerVerified ? SupervisorResolutionVerdict.Verified : SupervisorResolutionVerdict.Unverified;
     }
 
     /// <summary>
