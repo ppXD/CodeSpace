@@ -164,6 +164,87 @@ public class SupervisorSpawnFlowTests : IDisposable
     }
 
     [Fact]
+    public async Task A_spawn_with_per_agent_dispatch_stages_two_agents_with_distinct_roles_and_overrides()
+    {
+        // L4 arc B headline: ONE spawn fans out TWO agents the MODEL shaped differently — the per-agent role folds into
+        // each goal, and the harness/autonomy requests reach the persisted task (autonomy clamped to the ceiling).
+        using (var s = _fixture.BeginScope()) s.Resolve<SupervisorDecisionScript>().PlanSpawnDispatchStop();
+
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var workflowId = await CreateWorkflowAsync(teamId, userId);
+        var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
+
+        var jobClient = ResolveJobClient();
+        jobClient.Clear();
+        jobClient.AutoExecute = false;
+
+        try
+        {
+            await RunEngineAsync(runId);
+            await ResolveSelfAdvanceAsync(runId);
+            await RunEngineAsync(runId);   // turn 1: spawn with agents[]
+
+            using var verify = _fixture.BeginScope();
+            var db = verify.Resolve<CodeSpaceDbContext>();
+
+            var tasks = (await db.AgentRun.AsNoTracking().Where(r => r.WorkflowRunId == runId).Select(r => r.TaskJson).ToListAsync())
+                .Select(j => JsonSerializer.Deserialize<AgentTask>(j!, AgentJson.Options)!)
+                .ToList();
+            tasks.Count.ShouldBe(2, "the spawn staged two real agent runs");
+
+            var backend = tasks.Single(t => t.Goal.Contains("backend implementer"));
+            backend.Goal.ShouldBe("As the backend implementer, do alpha", "the role folds into the agent's goal + the planned instruction");
+            backend.Harness.ShouldBe("claude-code", "the per-agent harness override reached the persisted task");
+            backend.Autonomy.ShouldBe(AgentAutonomyLevel.Confined, "the per-agent autonomy request (≤ the Standard ceiling) reached the persisted task");
+
+            var frontend = tasks.Single(t => t.Goal.Contains("frontend adapter"));
+            frontend.Goal.ShouldBe("As the frontend adapter, do beta");
+            frontend.Harness.ShouldBe("codex-cli", "no override → the default harness");
+            frontend.Autonomy.ShouldBe(AgentAutonomyLevel.Standard, "no autonomy request → the default ceiling");
+        }
+        finally
+        {
+            jobClient.AutoExecute = true;
+        }
+    }
+
+    [Fact]
+    public async Task A_dispatch_to_an_unbound_repo_fails_the_spawn_cleanly_without_stranding_the_run()
+    {
+        // L4 arc B safety: a model-authored dispatch targeting a repo the operator did NOT bind throws the repo clamp;
+        // the turn service must terminalize the spawn as a CLEAN Failed (not a stranded-Running decision), staging no agents.
+        using (var s = _fixture.BeginScope()) s.Resolve<SupervisorDecisionScript>().PlanSpawnBadRepoStop();
+
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var workflowId = await CreateWorkflowAsync(teamId, userId);
+        var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
+
+        var jobClient = ResolveJobClient();
+        jobClient.Clear();
+        jobClient.AutoExecute = false;
+
+        try
+        {
+            await RunEngineAsync(runId);
+            await ResolveSelfAdvanceAsync(runId);
+            try { await RunEngineAsync(runId); } catch { /* the clamp failure surfaces through the node; the decision terminalized below */ }
+
+            using var verify = _fixture.BeginScope();
+            var db = verify.Resolve<CodeSpaceDbContext>();
+
+            var spawn = (await db.SupervisorDecisionRecord.AsNoTracking().Where(r => r.SupervisorRunId == runId && r.DecisionKind == SupervisorDecisionKinds.Spawn).ToListAsync()).Single();
+            spawn.Status.ShouldBe(SupervisorDecisionStatus.Failed, "the repo clamp violation terminalized the spawn as a CLEAN failure — never stranded Running");
+            spawn.Error.ShouldContain("did not bind", Case.Insensitive, "the failure reason is the legible clamp message");
+
+            (await db.AgentRun.AsNoTracking().CountAsync(r => r.WorkflowRunId == runId)).ShouldBe(0, "no agent was staged — the clamp rejected the dispatch before any run was created");
+        }
+        finally
+        {
+            jobClient.AutoExecute = true;
+        }
+    }
+
+    [Fact]
     public async Task A_restart_mid_spawn_does_not_double_spawn()
     {
         var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);

@@ -207,12 +207,14 @@ public sealed partial class SupervisorTurnService : ISupervisorTurnService, ISco
 
     /// <summary>
     /// Run the side effect, but if a spawn/retry references an unresolvable persona (missing / foreign / corrupt
-    /// — <see cref="AgentDefinitionResolutionException"/>, which the executor prefixes for the supervisor lane),
-    /// record the decision as a terminal FAILURE before re-throwing. Without this the exception would escape with
-    /// the row left stranded <c>Running</c> (the terminal record below never runs), and a re-walk would re-enter
-    /// the same in-flight decision and re-throw forever. Recording Failed here makes the persona error a CLEAN,
-    /// terminal node failure (the node's <c>RunAsync</c> surfaces the re-thrown message → node retry + the
-    /// <c>error</c> branch compose), mirroring <c>WorkflowEngine.StageAgentRunAsync</c> for an <c>agent.code</c> node.
+    /// — <see cref="AgentDefinitionResolutionException"/>, which the executor prefixes for the supervisor lane) OR a
+    /// model-authored per-agent dispatch escapes the repo privilege gate (<see cref="SupervisorRepoAccessException"/>,
+    /// L4 arc B — an out-of-set or access-escalating repo), record the decision as a terminal FAILURE before
+    /// re-throwing. Without this the exception would escape with the row left stranded <c>Running</c> (the terminal
+    /// record below never runs), and a re-walk would re-enter the same in-flight decision and re-throw forever.
+    /// Recording Failed here makes it a CLEAN, terminal node failure (the node's <c>RunAsync</c> surfaces the re-thrown
+    /// message → node retry + the <c>error</c> branch compose), mirroring <c>WorkflowEngine.StageAgentRunAsync</c> for an
+    /// <c>agent.code</c> node.
     /// </summary>
     private async Task<SupervisorExecution> ExecuteOrTerminalizeFailureAsync(Guid decisionId, Guid teamId, SupervisorTurnContext context, SupervisorDecision decision, CancellationToken cancellationToken)
     {
@@ -220,7 +222,7 @@ public sealed partial class SupervisorTurnService : ISupervisorTurnService, ISco
         {
             return await _executor.ExecuteAsync(decision, context, cancellationToken).ConfigureAwait(false);
         }
-        catch (AgentDefinitionResolutionException ex)
+        catch (Exception ex) when (ex is AgentDefinitionResolutionException or SupervisorRepoAccessException)
         {
             await _ledger.RecordTerminalAsync(decisionId, teamId, SupervisorDecisionStatus.Failed, outcomeJson: null, error: ex.Message, cancellationToken).ConfigureAwait(false);
 

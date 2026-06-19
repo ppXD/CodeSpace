@@ -1,5 +1,6 @@
 using System.Text.Json;
 using CodeSpace.Core.Services.Agents;
+using CodeSpace.Core.Services.Supervisor;
 using CodeSpace.Core.Services.Supervisor.Executors;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Dtos.Agents;
@@ -212,8 +213,134 @@ public class SupervisorBuildAgentTaskTests
             .Goal.ShouldBe("the revised thing", "the revised retry instruction wins over the planned one");
     }
 
+    // ── L4 arc B: a model-authored per-agent dispatch overrides + is clamped ───────────
+
+    [Fact]
+    public void A_dispatch_role_folds_into_the_agents_goal()
+    {
+        BuildWithSpec(new SupervisorTurnContext { Goal = "the goal" }, new SupervisorAgentDispatch { SubtaskId = SubtaskId, Role = "security reviewer" })
+            .Goal.ShouldBe("As the security reviewer, the goal", "the role's only sink is the goal prompt — there is no AgentTask.Role field");
+    }
+
+    [Fact]
+    public void A_dispatch_goal_override_replaces_the_instruction_and_keeps_the_role()
+    {
+        BuildWithSpec(new SupervisorTurnContext { Goal = "the goal" }, new SupervisorAgentDispatch { SubtaskId = SubtaskId, GoalOverride = "do X instead", Role = "impl" })
+            .Goal.ShouldBe("As the impl, do X instead");
+    }
+
+    [Fact]
+    public void A_dispatch_overrides_the_harness_and_model_requests()
+    {
+        var ctx = new SupervisorTurnContext { Goal = "g", AgentProfile = new SupervisorAgentProfile { Harness = "codex-cli", Model = "profile-model", AutonomyLevel = "standard" } };
+
+        var task = BuildWithSpec(ctx, new SupervisorAgentDispatch { SubtaskId = SubtaskId, Harness = "claude-code", Model = "claude-opus" });
+
+        task.Harness.ShouldBe("claude-code", "the per-agent harness request wins over the profile");
+        task.Model.ShouldBe("claude-opus");
+    }
+
+    [Theory]
+    [InlineData("standard", "unleashed", AgentAutonomyLevel.Standard)]   // request ABOVE the ceiling → clamped down
+    [InlineData("trusted", "confined", AgentAutonomyLevel.Confined)]     // request BELOW the ceiling → honored (a model may lower its own autonomy)
+    [InlineData("standard", null, AgentAutonomyLevel.Standard)]          // no request → the ceiling
+    [InlineData("trusted", "trusted", AgentAutonomyLevel.Trusted)]       // equal → the ceiling
+    [InlineData("confined", "unleashed", AgentAutonomyLevel.Confined)]   // can never escalate past a confined ceiling
+    public void A_dispatch_autonomy_is_clamped_to_the_profile_ceiling(string profileTier, string? requested, AgentAutonomyLevel expected)
+    {
+        var ctx = new SupervisorTurnContext { Goal = "g", AgentProfile = new SupervisorAgentProfile { AutonomyLevel = profileTier } };
+
+        var task = BuildWithSpec(ctx, new SupervisorAgentDispatch { SubtaskId = SubtaskId, AutonomyLevel = requested });
+
+        task.Autonomy.ShouldBe(expected);
+        task.Permissions.ShouldBe(AgentAutonomyPolicy.Derive(expected), "permissions derive from the CLAMPED autonomy, never the raw request");
+    }
+
+    [Fact]
+    public void A_dispatch_targets_a_subset_of_the_bound_repos()
+    {
+        var primary = Guid.NewGuid(); var api = Guid.NewGuid(); var sdk = Guid.NewGuid();
+
+        var task = BuildWithSpec(BoundContext(primary, api, sdk),
+            new SupervisorAgentDispatch { SubtaskId = SubtaskId, TargetRepos = JsonDocument.Parse($$"""[{"repositoryId":"{{api}}","alias":"api","access":"write"}]""").RootElement });
+
+        task.Workspace!.Repositories.Count.ShouldBe(2, "primary + the one targeted related repo (sdk dropped)");
+        task.Workspace.Repositories.ShouldContain(r => r.RepositoryId == api);
+        task.Workspace.Repositories.ShouldNotContain(r => r.RepositoryId == sdk, "a related repo the agent did not target is excluded");
+    }
+
+    [Fact]
+    public void A_dispatch_primary_override_within_bound_becomes_the_agents_primary()
+    {
+        var primary = Guid.NewGuid(); var api = Guid.NewGuid(); var sdk = Guid.NewGuid();
+
+        // api is bound WRITE, so it is a valid writable primary override.
+        BuildWithSpec(BoundContext(primary, api, sdk), new SupervisorAgentDispatch { SubtaskId = SubtaskId, RepositoryId = api })
+            .RepositoryId.ShouldBe(api, "the per-agent primary override (a write-bound repo) becomes the agent's primary");
+    }
+
+    [Fact]
+    public void A_primary_override_to_a_related_repo_is_cloned_once_not_duplicated()
+    {
+        var primary = Guid.NewGuid(); var api = Guid.NewGuid(); var sdk = Guid.NewGuid();
+
+        // Override the primary to the write-bound RELATED repo `api` (TargetRepos left unset). The chosen primary must be
+        // cloned ONCE (as primary), never also as a related mount, and the operator's profile primary is replaced.
+        var task = BuildWithSpec(BoundContext(primary, api, sdk), new SupervisorAgentDispatch { SubtaskId = SubtaskId, RepositoryId = api });
+
+        task.RepositoryId.ShouldBe(api);
+        task.Workspace!.Repositories.Count(r => r.RepositoryId == api).ShouldBe(1, "the overridden primary is cloned ONCE — never duplicated as both primary and related");
+        task.Workspace.Repositories.Single(r => r.RepositoryId == api).IsPrimary.ShouldBeTrue();
+        task.Workspace.Repositories.ShouldNotContain(r => r.RepositoryId == primary, "a primary override REPLACES the operator's profile primary (not auto-added)");
+    }
+
+    [Fact]
+    public void A_dispatch_to_an_unbound_repo_fails_closed_through_the_clamp()
+    {
+        var ctx = BoundContext(Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid());
+        var unbound = Guid.NewGuid();
+
+        Should.Throw<SupervisorRepoAccessException>(() => BuildWithSpec(ctx,
+            new SupervisorAgentDispatch { SubtaskId = SubtaskId, TargetRepos = JsonDocument.Parse($$"""[{"repositoryId":"{{unbound}}"}]""").RootElement }));
+    }
+
+    [Fact]
+    public void A_dispatch_read_to_write_upgrade_fails_closed_through_the_clamp()
+    {
+        var primary = Guid.NewGuid(); var api = Guid.NewGuid(); var sdk = Guid.NewGuid();   // sdk is bound READ-only
+
+        Should.Throw<SupervisorRepoAccessException>(() => BuildWithSpec(BoundContext(primary, api, sdk),
+            new SupervisorAgentDispatch { SubtaskId = SubtaskId, TargetRepos = JsonDocument.Parse($$"""[{"repositoryId":"{{sdk}}","access":"write"}]""").RootElement }));
+    }
+
+    [Fact]
+    public void Passing_a_null_dispatch_is_byte_identical_to_the_no_dispatch_overload()
+    {
+        var ctx = new SupervisorTurnContext { Goal = "g", AgentProfile = new SupervisorAgentProfile { RepositoryId = Guid.NewGuid(), Harness = "claude-code", AutonomyLevel = "trusted" } };
+
+        var withNull = RealSupervisorActionExecutor.BuildAgentTask(EmptySubtasks, SubtaskId, revisedInstruction: null, ctx, spec: null);
+        var without = RealSupervisorActionExecutor.BuildAgentTask(EmptySubtasks, SubtaskId, revisedInstruction: null, ctx);
+
+        JsonSerializer.Serialize(withNull, AgentJson.Options).ShouldBe(JsonSerializer.Serialize(without, AgentJson.Options),
+            "spec=null builds the EXACT same task as the no-spec path — a no-dispatch spawn is byte-identical");
+    }
+
     private static AgentTask Build(SupervisorTurnContext context) =>
         RealSupervisorActionExecutor.BuildAgentTask(EmptySubtasks, SubtaskId, revisedInstruction: null, context);
+
+    private static AgentTask BuildWithSpec(SupervisorTurnContext context, SupervisorAgentDispatch spec) =>
+        RealSupervisorActionExecutor.BuildAgentTask(EmptySubtasks, spec.SubtaskId, spec.GoalOverride, context, spec);
+
+    /// <summary>A context whose profile binds a primary (write) + api (write) + sdk (read) — the operator bound set the per-agent clamp validates against.</summary>
+    private static SupervisorTurnContext BoundContext(Guid primary, Guid apiWrite, Guid sdkRead) => new()
+    {
+        Goal = "ship",
+        AgentProfile = new SupervisorAgentProfile
+        {
+            RepositoryId = primary,
+            RelatedRepositories = JsonDocument.Parse($$"""[{"repositoryId":"{{apiWrite}}","alias":"api","access":"write"},{"repositoryId":"{{sdkRead}}","alias":"sdk","access":"read"}]""").RootElement,
+        },
+    };
 
     private static readonly IReadOnlyDictionary<string, SupervisorPlannedSubtask> EmptySubtasks = new Dictionary<string, SupervisorPlannedSubtask>();
 }
