@@ -30,10 +30,20 @@ public sealed record SupervisorPlannedSubtask
     public required string Instruction { get; init; }
 }
 
-/// <summary>The <c>spawn</c> payload: prior-plan subtask ids to fan out as parallel agent runs (K = the list length).</summary>
+/// <summary>The <c>spawn</c> payload: prior-plan subtask ids to fan out as parallel agent runs (K = the list length), plus an optional per-agent dispatch override per subtask (L4 arc B).</summary>
 public sealed record SupervisorSpawnPayload
 {
     public IReadOnlyList<string> SubtaskIds { get; init; } = Array.Empty<string>();
+
+    /// <summary>
+    /// Optional model-authored per-agent dispatch specs (L4 arc B) — one <see cref="SupervisorAgentDispatch"/> per
+    /// subtask the model wants to give a distinct role / repo subset / execution envelope, keyed by
+    /// <see cref="SupervisorAgentDispatch.SubtaskId"/>. Null-omitted (<c>[JsonIgnore(WhenWritingNull)]</c>) so a spawn
+    /// WITHOUT per-agent specs serializes byte-identical to the plain <see cref="SubtaskIds"/> fan-out — the
+    /// idempotency-key bytes are unchanged. Absent ⇒ every staged agent inherits the run-level profile (today's behaviour).
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public IReadOnlyList<SupervisorAgentDispatch>? Agents { get; init; }
 }
 
 /// <summary>The <c>retry</c> payload: ONE prior subtask id re-run as a fresh agent attempt, optionally with a revised instruction.</summary>
