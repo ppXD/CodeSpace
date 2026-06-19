@@ -30,6 +30,7 @@ public sealed class CoreFlowPlugin : IPluginModule
         typeof(FlowWaitApprovalNode),
         typeof(FlowWaitCallbackNode),
         typeof(FlowWaitActionNode),
+        typeof(FlowDecisionNode),
         typeof(FlowSubworkflowNode),
         typeof(FlowLoopNode),
         typeof(FlowLoopStartNode),

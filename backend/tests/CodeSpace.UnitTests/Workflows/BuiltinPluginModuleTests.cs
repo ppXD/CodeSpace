@@ -29,6 +29,7 @@ public class BuiltinPluginModuleTests
         module.Nodes.ShouldContain(typeof(CodeSpace.Core.Services.Workflows.Nodes.Builtin.FlowWaitApprovalNode));
         module.Nodes.ShouldContain(typeof(CodeSpace.Core.Services.Workflows.Nodes.Builtin.FlowWaitCallbackNode));
         module.Nodes.ShouldContain(typeof(CodeSpace.Core.Services.Workflows.Nodes.Builtin.FlowWaitActionNode));
+        module.Nodes.ShouldContain(typeof(CodeSpace.Core.Services.Workflows.Nodes.Builtin.FlowDecisionNode));
         module.Nodes.ShouldContain(typeof(CodeSpace.Core.Services.Workflows.Nodes.Builtin.FlowSubworkflowNode));
         module.Nodes.ShouldContain(typeof(CodeSpace.Core.Services.Workflows.Nodes.Builtin.FlowLoopNode));
         module.Nodes.ShouldContain(typeof(CodeSpace.Core.Services.Workflows.Nodes.Builtin.FlowLoopStartNode));
@@ -36,7 +37,7 @@ public class BuiltinPluginModuleTests
         module.Nodes.ShouldContain(typeof(CodeSpace.Core.Services.Workflows.Nodes.Builtin.FlowTryStartNode));
         module.Nodes.ShouldContain(typeof(CodeSpace.Core.Services.Workflows.Nodes.Builtin.FlowMapNode));
         module.Nodes.ShouldContain(typeof(CodeSpace.Core.Services.Workflows.Nodes.Builtin.FlowMapStartNode));
-        module.Nodes.Count.ShouldBe(17);
+        module.Nodes.Count.ShouldBe(18);
         module.RunSourceMatchers.ShouldBeEmpty("manual + schedule triggers subscribe to no inbound event (schedule is producer-driven), so Core Flow still ships zero matchers");
     }
 
@@ -120,6 +121,6 @@ public class BuiltinPluginModuleTests
         };
 
         var total = all.SelectMany(p => p.Nodes).Distinct().Count();
-        total.ShouldBe(39, "39 builtin node types across 6 domain plugins — incl. the Git plugin's git.open_change_set multi-repo Change-Set node (multi-repo PR4) — adjust this number when adding a builtin");
+        total.ShouldBe(40, "40 builtin node types across 6 domain plugins — incl. the Core Flow plugin's flow.decision Decision-substrate node (D1) — adjust this number when adding a builtin");
     }
 }

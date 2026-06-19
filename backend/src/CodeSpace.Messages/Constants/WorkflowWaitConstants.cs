@@ -58,6 +58,17 @@ public static class WorkflowWaitKinds
     /// distinct from a later turn's.
     /// </summary>
     public const string SupervisorAgentWaits = "SupervisorAgentWaits";
+
+    /// <summary>
+    /// A generic DECISION the run is parked on (the durable Decision substrate, D1). The node raised a typed
+    /// <c>DecisionRequest</c> and suspends until it is answered — by a human (the resume API / the "Needs decision"
+    /// queue), a policy auto-answer, a supervisor arbiter, or the bounded-wait deadline applying the default. The wait's
+    /// <c>Payload</c> carries the <c>DecisionRequest</c> envelope while parked, then the <c>DecisionAnswer</c> on
+    /// resolve (overwrite-on-resolve, same as every other wait). Always BOUNDED (a mandatory <c>DeadlineAt</c> +
+    /// default-on-timeout) so a decision can never hang forever. The structured, policy-gated sibling of
+    /// <see cref="Approval"/> — that is the binary special case (<c>decisionType=approve_action</c>).
+    /// </summary>
+    public const string Decision = "Decision";
 }
 
 /// <summary>Lifecycle of a <c>workflow_run_wait</c> row. CHECK-constrained at the DB layer.</summary>

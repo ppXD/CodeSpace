@@ -2427,9 +2427,9 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
 
     internal static string ValidateWaitKind(string nodeId, string kind)
     {
-        if (kind is WorkflowWaitKinds.Timer or WorkflowWaitKinds.Approval or WorkflowWaitKinds.Callback or WorkflowWaitKinds.Subworkflow or WorkflowWaitKinds.Action or WorkflowWaitKinds.AgentRun or WorkflowWaitKinds.SupervisorDecision or WorkflowWaitKinds.SupervisorAgentWaits) return kind;
+        if (kind is WorkflowWaitKinds.Timer or WorkflowWaitKinds.Approval or WorkflowWaitKinds.Callback or WorkflowWaitKinds.Subworkflow or WorkflowWaitKinds.Action or WorkflowWaitKinds.AgentRun or WorkflowWaitKinds.SupervisorDecision or WorkflowWaitKinds.SupervisorAgentWaits or WorkflowWaitKinds.Decision) return kind;
 
-        throw new NodeFailureException($"Node '{nodeId}' suspended with unknown wait kind '{kind}'. Expected Timer, Approval, Callback, Subworkflow, Action, AgentRun, SupervisorDecision, or SupervisorAgentWaits.");
+        throw new NodeFailureException($"Node '{nodeId}' suspended with unknown wait kind '{kind}'. Expected Timer, Approval, Callback, Subworkflow, Action, AgentRun, SupervisorDecision, SupervisorAgentWaits, or Decision.");
     }
 
     /// <summary>
