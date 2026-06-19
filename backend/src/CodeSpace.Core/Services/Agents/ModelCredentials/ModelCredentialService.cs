@@ -3,6 +3,7 @@ using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Credentials;
 using CodeSpace.Core.Services.Identity;
+using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Dtos.ModelCredentials;
 using CodeSpace.Messages.Enums;
 using Microsoft.EntityFrameworkCore;
@@ -14,12 +15,14 @@ public sealed class ModelCredentialService : IModelCredentialService, IScopedDep
     private readonly CodeSpaceDbContext _db;
     private readonly ICurrentTeam _currentTeam;
     private readonly IPayloadEncryptor _encryptor;
+    private readonly IModelReflector _reflector;
 
-    public ModelCredentialService(CodeSpaceDbContext db, ICurrentTeam currentTeam, IPayloadEncryptor encryptor)
+    public ModelCredentialService(CodeSpaceDbContext db, ICurrentTeam currentTeam, IPayloadEncryptor encryptor, IModelReflector reflector)
     {
         _db = db;
         _currentTeam = currentTeam;
         _encryptor = encryptor;
+        _reflector = reflector;
     }
 
     public async Task<IReadOnlyList<ModelCredentialSummary>> ListAsync(string? provider, CancellationToken cancellationToken)
@@ -146,6 +149,88 @@ public sealed class ModelCredentialService : IModelCredentialService, IScopedDep
         await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
 
         return row.Id;
+    }
+
+    public async Task<int> RefreshModelsAsync(Guid credentialId, CancellationToken cancellationToken)
+    {
+        var credential = await LoadActiveAsync(credentialId, cancellationToken).ConfigureAwait(false);   // team-scope guard
+
+        // Serialize concurrent refreshes of the SAME credential (a double-click / two operators) so they don't race
+        // the (credential, model id) unique index into a 23505 that would poison the ambient transaction. A
+        // txn-scoped advisory lock blocks the second refresh until the first commits + releases it — the second then
+        // reads the first's rows and UPDATEs (no colliding insert). Per-credential, so unrelated refreshes never block.
+        await _db.Database.ExecuteSqlInterpolatedAsync($"SELECT pg_advisory_xact_lock({AdvisoryLockKey(credentialId)})", cancellationToken).ConfigureAwait(false);
+
+        var resolved = new ResolvedModelCredential
+        {
+            Provider = credential.Provider,
+            ApiKey = string.IsNullOrEmpty(credential.EncryptedApiKey) ? null : _encryptor.Decrypt(credential.EncryptedApiKey),
+            BaseUrl = credential.BaseUrl,
+        };
+
+        if (!_reflector.CanReflect(resolved)) return 0;   // manual-only credential — a no-op, never an error
+
+        var reflected = await _reflector.ListModelsAsync(resolved, cancellationToken).ConfigureAwait(false);
+
+        return await UpsertReflectedAsync(credentialId, reflected, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Reconcile the credential's list with the freshly-reflected set: a NEW reflected id is added; an EXISTING
+    /// reflected row is refreshed + re-enabled; a MANUAL row is NEVER touched (an operator's hand-entry is sovereign);
+    /// a previously-reflected row that VANISHED from the listing is disabled (provenance kept), never deleted. Returns
+    /// the count reflected.
+    /// </summary>
+    private async Task<int> UpsertReflectedAsync(Guid credentialId, IReadOnlyList<ReflectedModel> reflected, CancellationToken cancellationToken)
+    {
+        var existing = await _db.ModelCredentialModel.Where(m => m.ModelCredentialId == credentialId).ToListAsync(cancellationToken).ConfigureAwait(false);
+        var byModelId = existing.ToDictionary(m => m.ModelId, StringComparer.Ordinal);
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+
+        foreach (var rm in reflected)
+        {
+            seen.Add(rm.ModelId);
+
+            if (byModelId.TryGetValue(rm.ModelId, out var row))
+            {
+                if (row.Source == ModelSource.Manual) continue;   // never clobber an operator's manual row
+
+                row.DisplayName = rm.DisplayName;
+                ApplyCapabilities(row, rm.Capabilities);
+                row.Enabled = true;   // a re-appeared model is re-enabled
+            }
+            else
+            {
+                var added = new ModelCredentialModel
+                {
+                    Id = Guid.NewGuid(),
+                    ModelCredentialId = credentialId,
+                    ModelId = rm.ModelId,
+                    DisplayName = rm.DisplayName,
+                    Source = ModelSource.Reflected,
+                };
+                ApplyCapabilities(added, rm.Capabilities);
+                _db.ModelCredentialModel.Add(added);
+            }
+        }
+
+        // A previously-reflected model that vanished from the listing → disable (keep provenance), never delete.
+        foreach (var row in existing.Where(m => m.Source == ModelSource.Reflected && !seen.Contains(m.ModelId)))
+            row.Enabled = false;
+
+        await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+
+        return reflected.Count;
+    }
+
+    /// <summary>A stable 64-bit key for the credential's advisory lock (the first 8 bytes of its Guid). A collision between two unrelated credentials would only serialize their refreshes — a harmless perf nudge, never a correctness issue.</summary>
+    private static long AdvisoryLockKey(Guid credentialId) => BitConverter.ToInt64(credentialId.ToByteArray());
+
+    private static void ApplyCapabilities(ModelCredentialModel row, ModelCapabilityFlags caps)
+    {
+        row.SupportsStructuredOutput = caps.SupportsStructuredOutput;
+        row.SupportsToolUse = caps.SupportsToolUse;
+        row.RecommendedForSupervisor = caps.RecommendedForSupervisor;
     }
 
     private static CredentialedModelSummary ToModelSummary(ModelCredentialModel m) => new()
