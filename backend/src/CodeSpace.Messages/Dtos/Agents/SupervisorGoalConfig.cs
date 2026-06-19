@@ -67,11 +67,13 @@ public sealed record SupervisorGoalConfig
     public SupervisorAgentProfile? AgentProfile { get; init; }
 
     /// <summary>
-    /// The model the SUPERVISOR's own decider runs on (the "brain", distinct from the agents it spawns). Null / blank
-    /// → the deployment default. STORED + threaded through the turn context; the in-process decider consuming it (so a
-    /// team's supervisor is no longer hardcoded to one model) is a later slice — for now this is byte-identical config.
+    /// The credentialed-model ROW (a <c>ModelCredentialModel</c> id) the SUPERVISOR's own decider runs on — the "brain",
+    /// distinct from the agents it spawns. REQUIRED whenever the supervisor runs: the decider resolves this exact row to
+    /// its model + backing credential (it must be a team-owned, enabled, structured-capable row), so the brain is never
+    /// guessed and never hardcoded. A row id (not a name) is unambiguous — the same model id under two credentials picks
+    /// the right key. Null → the decider fails closed (the UI may recommend a default, but the input must be present).
     /// </summary>
-    public string? SupervisorModel { get; init; }
+    public Guid? SupervisorModelId { get; init; }
 
     /// <summary>
     /// The operator's ALLOWED MODEL POOL for the agents this supervisor dispatches — a list of model ids the

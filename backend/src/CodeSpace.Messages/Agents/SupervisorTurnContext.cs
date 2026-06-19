@@ -108,8 +108,8 @@ public sealed record SupervisorTurnContext
     /// </summary>
     public IReadOnlyList<string>? AllowedModels { get; init; }
 
-    /// <summary>The model the supervisor's own decider runs on (carried from <c>SupervisorGoalConfig.SupervisorModel</c>). Null = the deployment default. Stored for the in-process decider-rooting slice; unused by the spawn path.</summary>
-    public string? SupervisorModel { get; init; }
+    /// <summary>The credentialed-model ROW id the supervisor's own decider runs on (carried from <c>SupervisorGoalConfig.SupervisorModelId</c>). REQUIRED — the decider resolves this row to its model + credential and fails closed when null/unresolvable. Distinct from the agent pool (<see cref="AllowedModels"/>): the brain is the operator's explicit pick, never bounded by the agent allow-list.</summary>
+    public Guid? SupervisorModelId { get; init; }
 }
 
 /// <summary>One prior decision replayed from the ledger — its row id + kind + emitted payload + (for a terminal) its recorded outcome. A pure data noun.</summary>
