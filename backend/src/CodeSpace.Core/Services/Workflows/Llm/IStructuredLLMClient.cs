@@ -1,4 +1,6 @@
 using System.Text.Json;
+using System.Text.Json.Serialization;
+using CodeSpace.Messages.Agents;
 
 namespace CodeSpace.Core.Services.Workflows.Llm;
 
@@ -36,6 +38,16 @@ public sealed record StructuredLLMCompletionRequest
 
     public int MaxOutputTokens { get; init; } = 2048;
     public double Temperature { get; init; } = 0.2;
+
+    /// <summary>
+    /// The resolved credential (key + base URL) this call authenticates with — the in-process plane's analogue of the
+    /// agent plane's just-in-time credential injection. The caller resolves it (team credential &gt; operator-global)
+    /// and passes it so the client uses the TEAM's key, not a hardcoded env read. Null = the client falls back to its
+    /// operator-global env key (the single-tenant convenience, kept until every caller is migrated). Transient +
+    /// <c>[JsonIgnore]</c> so the secret never serializes into a log or a persisted request.
+    /// </summary>
+    [JsonIgnore]
+    public ResolvedModelCredential? Credential { get; init; }
 }
 
 public sealed record StructuredLLMCompletion

@@ -3,6 +3,7 @@ using System.Text;
 using System.Text.Json;
 using CodeSpace.Core.Services.Workflows.Llm;
 using CodeSpace.Core.Services.Workflows.Llm.Anthropic;
+using CodeSpace.Messages.Agents;
 using Shouldly;
 
 namespace CodeSpace.UnitTests.Workflows;
@@ -20,11 +21,15 @@ public class AnthropicClientStructuredTests
     private sealed class CapturingHandler : HttpMessageHandler
     {
         public string? RequestBody;
+        public string? ApiKeyHeader;
+        public string? RequestUri;
         private readonly string _responseJson;
         public CapturingHandler(string responseJson) { _responseJson = responseJson; }
 
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
         {
+            ApiKeyHeader = request.Headers.TryGetValues("x-api-key", out var v) ? v.FirstOrDefault() : null;
+            RequestUri = request.RequestUri?.ToString();
             RequestBody = request.Content is null ? null : await request.Content.ReadAsStringAsync(cancellationToken);
             return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(_responseJson, Encoding.UTF8, "application/json") };
         }
@@ -100,6 +105,46 @@ public class AnthropicClientStructuredTests
     }
 
     /// <summary>Sets the API-key + base-url env vars for the duration of the call, then restores them.</summary>
+    [Fact]
+    public async Task The_request_credentials_key_and_base_url_win_over_the_env()
+    {
+        const string response = """{ "model": "m", "content": [ { "type": "tool_use", "name": "respond", "input": {} } ] }""";
+        var handler = new CapturingHandler(response);
+        var client = new AnthropicClient(new StubHttpClientFactory(handler));
+        var schema = JsonDocument.Parse("""{ "type": "object" }""").RootElement;
+
+        // env is set to test-key / https://test.invalid — the resolved credential must override BOTH (the team's key).
+        await WithApiKeyAsync<int>(async () =>
+        {
+            await client.CompleteStructuredAsync(new StructuredLLMCompletionRequest
+            {
+                Model = "m", SystemPrompt = "s", UserPrompt = "u", JsonSchema = schema,
+                Credential = new ResolvedModelCredential { Provider = "Anthropic", ApiKey = "team-key", BaseUrl = "https://team.gateway" },
+            }, CancellationToken.None);
+            return 0;
+        });
+
+        handler.ApiKeyHeader.ShouldBe("team-key", "the resolved credential's key authenticates the call, not the env key");
+        handler.RequestUri!.ShouldStartWith("https://team.gateway");   // the credential's base URL wins over the env base URL
+    }
+
+    [Fact]
+    public async Task Without_a_credential_the_env_key_is_the_backstop()
+    {
+        const string response = """{ "model": "m", "content": [ { "type": "tool_use", "name": "respond", "input": {} } ] }""";
+        var handler = new CapturingHandler(response);
+        var client = new AnthropicClient(new StubHttpClientFactory(handler));
+        var schema = JsonDocument.Parse("""{ "type": "object" }""").RootElement;
+
+        await WithApiKeyAsync<int>(async () =>
+        {
+            await client.CompleteStructuredAsync(new StructuredLLMCompletionRequest { Model = "m", SystemPrompt = "s", UserPrompt = "u", JsonSchema = schema }, CancellationToken.None);
+            return 0;
+        });
+
+        handler.ApiKeyHeader.ShouldBe("test-key", "no credential → the operator-global env key is the backstop (kept until every caller is migrated)");
+    }
+
     private static async Task<T> WithApiKeyAsync<T>(Func<Task<T>> action)
     {
         var oldKey = Environment.GetEnvironmentVariable(AnthropicClient.ApiKeyEnvVar);
