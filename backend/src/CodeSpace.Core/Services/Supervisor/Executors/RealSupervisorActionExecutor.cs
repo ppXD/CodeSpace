@@ -81,9 +81,13 @@ public sealed partial class RealSupervisorActionExecutor : ISupervisorActionExec
     {
         var plan = Deserialize<SupervisorPlanPayload>(decision.PayloadJson) ?? new SupervisorPlanPayload();
 
-        var outcome = JsonSerializer.Serialize(new { planned = plan.Subtasks, count = plan.Subtasks.Count }, AgentJson.Options);
+        // L4 arc C: a plan that authored semantic phases records them alongside the subtasks (the scorecard / tasks-phases
+        // surface projects them); a flat plan records only planned/count → byte-identical to before.
+        var outcome = plan.Phases is { Count: > 0 }
+            ? JsonSerializer.Serialize(new { planned = plan.Subtasks, count = plan.Subtasks.Count, phases = plan.Phases }, AgentJson.Options)
+            : JsonSerializer.Serialize(new { planned = plan.Subtasks, count = plan.Subtasks.Count }, AgentJson.Options);
 
-        _logger.LogInformation("Supervisor plan recorded {Count} subtask(s)", plan.Subtasks.Count);
+        _logger.LogInformation("Supervisor plan recorded {Count} subtask(s) in {PhaseCount} phase(s)", plan.Subtasks.Count, plan.Phases?.Count ?? 0);
 
         return SupervisorExecution.Synchronous(outcome);
     }

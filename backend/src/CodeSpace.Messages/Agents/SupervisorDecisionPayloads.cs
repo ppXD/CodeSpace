@@ -18,6 +18,14 @@ public sealed record SupervisorPlanPayload
     public string Goal { get; init; } = "";
 
     public IReadOnlyList<SupervisorPlannedSubtask> Subtasks { get; init; } = Array.Empty<SupervisorPlannedSubtask>();
+
+    /// <summary>
+    /// Optional model-authored SEMANTIC PHASES (L4 arc C) grouping the <see cref="Subtasks"/> into named, accepting
+    /// stages. Null-omitted (<c>[JsonIgnore(WhenWritingNull)]</c>) so a flat-subtask plan serializes byte-identical to
+    /// before (the idempotency-key bytes are unchanged). Absent ⇒ the plan is the flat subtask list. See <see cref="SupervisorPlanPhase"/>.
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public IReadOnlyList<SupervisorPlanPhase>? Phases { get; init; }
 }
 
 /// <summary>One planned subtask the supervisor can later spawn / retry by <see cref="Id"/>.</summary>
