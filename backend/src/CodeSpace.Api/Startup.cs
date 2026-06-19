@@ -68,6 +68,12 @@ public class Startup
         // OAuth clients (GitHub / GitLab) and any future outbound HTTP consumer go through
         // IHttpClientFactory so we get proper socket lifecycle management + connection pool reuse.
         services.AddHttpClient();
+        // Model reflection GETs an operator-supplied gateway with the decrypted key as a Bearer header, so it uses a
+        // dedicated client with redirects DISABLED (a same-host https→http downgrade redirect would not strip the
+        // header) and a tight timeout (an arbitrary gateway must never wedge the request thread on the 100s default).
+        services.AddHttpClient(CodeSpace.Core.Services.Agents.ModelCredentials.Reflectors.LiteLLMOpenAIReflector.HttpClientName,
+                c => c.Timeout = TimeSpan.FromSeconds(15))
+            .ConfigurePrimaryHttpMessageHandler(() => new System.Net.Http.SocketsHttpHandler { AllowAutoRedirect = false });
         // Background janitor that sweeps expired oauth_pending_state rows every 5 minutes.
         // ConsumeAsync drops a row on successful flow, but abandoned flows (user closed tab)
         // would accumulate without this.

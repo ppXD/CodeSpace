@@ -3,6 +3,7 @@ using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Credentials;
 using CodeSpace.Core.Services.Identity;
+using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Dtos.ModelCredentials;
 using CodeSpace.Messages.Enums;
 using Microsoft.EntityFrameworkCore;
@@ -14,12 +15,14 @@ public sealed class ModelCredentialService : IModelCredentialService, IScopedDep
     private readonly CodeSpaceDbContext _db;
     private readonly ICurrentTeam _currentTeam;
     private readonly IPayloadEncryptor _encryptor;
+    private readonly IModelReflector _reflector;
 
-    public ModelCredentialService(CodeSpaceDbContext db, ICurrentTeam currentTeam, IPayloadEncryptor encryptor)
+    public ModelCredentialService(CodeSpaceDbContext db, ICurrentTeam currentTeam, IPayloadEncryptor encryptor, IModelReflector reflector)
     {
         _db = db;
         _currentTeam = currentTeam;
         _encryptor = encryptor;
+        _reflector = reflector;
     }
 
     public async Task<IReadOnlyList<ModelCredentialSummary>> ListAsync(string? provider, CancellationToken cancellationToken)
@@ -146,6 +149,92 @@ public sealed class ModelCredentialService : IModelCredentialService, IScopedDep
         await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
 
         return row.Id;
+    }
+
+    public async Task<int> RefreshModelsAsync(Guid credentialId, CancellationToken cancellationToken)
+    {
+        var credential = await LoadActiveAsync(credentialId, cancellationToken).ConfigureAwait(false);   // team-scope guard
+
+        var resolved = new ResolvedModelCredential
+        {
+            Provider = credential.Provider,
+            ApiKey = string.IsNullOrEmpty(credential.EncryptedApiKey) ? null : _encryptor.Decrypt(credential.EncryptedApiKey),
+            BaseUrl = credential.BaseUrl,
+        };
+
+        if (!_reflector.CanReflect(resolved)) return 0;   // manual-only credential — a no-op, never an error
+
+        var reflected = await _reflector.ListModelsAsync(resolved, cancellationToken).ConfigureAwait(false);
+
+        return await UpsertReflectedAsync(credentialId, reflected, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Reconcile the credential's list with the freshly-reflected set: a NEW reflected id is added; an EXISTING
+    /// reflected row is refreshed + re-enabled; a MANUAL row is NEVER touched (an operator's hand-entry is sovereign);
+    /// a previously-reflected row that VANISHED from the listing is disabled (provenance kept), never deleted. Returns
+    /// the count reflected.
+    /// </summary>
+    private async Task<int> UpsertReflectedAsync(Guid credentialId, IReadOnlyList<ReflectedModel> reflected, CancellationToken cancellationToken)
+    {
+        var existing = await _db.ModelCredentialModel.Where(m => m.ModelCredentialId == credentialId).ToListAsync(cancellationToken).ConfigureAwait(false);
+        var byModelId = existing.ToDictionary(m => m.ModelId, StringComparer.Ordinal);
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+
+        foreach (var rm in reflected)
+        {
+            seen.Add(rm.ModelId);
+
+            if (byModelId.TryGetValue(rm.ModelId, out var row))
+            {
+                if (row.Source == ModelSource.Manual) continue;   // never clobber an operator's manual row
+
+                row.DisplayName = rm.DisplayName;
+                ApplyCapabilities(row, rm.Capabilities);
+                row.Enabled = true;   // a re-appeared model is re-enabled
+            }
+            else
+            {
+                var added = new ModelCredentialModel
+                {
+                    Id = Guid.NewGuid(),
+                    ModelCredentialId = credentialId,
+                    ModelId = rm.ModelId,
+                    DisplayName = rm.DisplayName,
+                    Source = ModelSource.Reflected,
+                };
+                ApplyCapabilities(added, rm.Capabilities);
+                _db.ModelCredentialModel.Add(added);
+            }
+        }
+
+        // A previously-reflected model that vanished from the listing → disable (keep provenance), never delete.
+        foreach (var row in existing.Where(m => m.Source == ModelSource.Reflected && !seen.Contains(m.ModelId)))
+            row.Enabled = false;
+
+        try
+        {
+            await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+        }
+        catch (DbUpdateException ex) when (IsUniqueViolation(ex))
+        {
+            // A concurrent refresh won the (credential, model id) race — its rows are already written, so this
+            // refresh is a benign no-op (the convergent listing) rather than a 500. The refresh endpoint is the one
+            // re-triggerable action, so a double-click / two-operator overlap is expected, not exotic.
+        }
+
+        return reflected.Count;
+    }
+
+    /// <summary>A Postgres unique-constraint violation (23505) — a concurrent writer beat us to the (credential, model id) index. Mirrors <c>ConversationService.IsUniqueViolation</c>.</summary>
+    private static bool IsUniqueViolation(DbUpdateException ex) =>
+        ex.InnerException is Npgsql.PostgresException { SqlState: "23505" };
+
+    private static void ApplyCapabilities(ModelCredentialModel row, ModelCapabilityFlags caps)
+    {
+        row.SupportsStructuredOutput = caps.SupportsStructuredOutput;
+        row.SupportsToolUse = caps.SupportsToolUse;
+        row.RecommendedForSupervisor = caps.RecommendedForSupervisor;
     }
 
     private static CredentialedModelSummary ToModelSummary(ModelCredentialModel m) => new()
