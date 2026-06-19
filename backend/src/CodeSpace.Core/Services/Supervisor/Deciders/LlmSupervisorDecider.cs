@@ -35,16 +35,21 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
 
     public async Task<SupervisorDecision> DecideAsync(SupervisorTurnContext context, CancellationToken cancellationToken)
     {
-        var structured = _clientRegistry.All.OfType<IStructuredLLMClient>().FirstOrDefault();
+        // The brain model is the operator's REQUIRED explicit pick (one credentialed-model ROW, never the agent pool
+        // and never a guessed default). Absent → fail closed.
+        if (context.SupervisorModelId is not { } brainModelId) return NoBrainModelStop();
 
-        if (structured == null) return NoModelStop();
-
-        // The brain's model + key come from the POOL — exactly like the agents it spawns. The selector picks a
-        // structured-capable model the operator credentialed (within the allowed pool, the supervisorModel pin if any,
-        // preferring a recommended one). Nothing qualifies → fail-closed: no env "system" key, no default model.
-        var pick = await _modelSelector.SelectAsync(context.TeamId, structured.Provider, requireStructured: true, context.AllowedModels, context.SupervisorModel, cancellationToken).ConfigureAwait(false);
+        // Resolve that exact row → its model id + decrypted credential (team-owned, enabled, structured-capable). A
+        // missing / disabled / revoked / non-structured row → fail closed: no env "system" key, no substitute model.
+        var pick = await _modelSelector.ResolveByRowIdAsync(context.TeamId, brainModelId, requireStructured: true, cancellationToken).ConfigureAwait(false);
 
         if (pick == null) return NoPoolModelStop();
+
+        // The brain model's OWN provider determines the structured client that serves it (multi-provider-ready) — not a
+        // first-registered guess. No structured client for that provider → fail closed.
+        var structured = _clientRegistry.All.OfType<IStructuredLLMClient>().FirstOrDefault(c => string.Equals(c.Provider, pick.Credential.Provider, StringComparison.OrdinalIgnoreCase));
+
+        if (structured == null) return NoModelStop();
 
         var completion = await structured.CompleteStructuredAsync(BuildRequest(context, pick), cancellationToken).ConfigureAwait(false);
 
@@ -182,6 +187,13 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
 
         return model;
     }
+
+    /// <summary>Fail-closed terminal stop when the operator did not pick a required supervisor brain model (<c>supervisorModelId</c>). The decision is the operator's — the supervisor never guesses its own model. Deterministic so a replay re-derives it.</summary>
+    private static SupervisorDecision NoBrainModelStop() => new()
+    {
+        Kind = SupervisorDecisionKinds.Stop,
+        PayloadJson = JsonSerializer.Serialize(new SupervisorStopPayload { Outcome = "no-model", Summary = "No supervisor brain model is selected — set 'supervisorModelId' to a credentialed, structured-capable model." }, AgentJson.Options),
+    };
 
     /// <summary>Fail-closed terminal stop when no structured-LLM provider is registered — the lane is on but no model is configured. Deterministic so a replay re-derives it.</summary>
     private static SupervisorDecision NoModelStop() => new()

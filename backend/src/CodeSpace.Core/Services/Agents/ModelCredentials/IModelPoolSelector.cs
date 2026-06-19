@@ -22,6 +22,15 @@ public interface IModelPoolSelector
     /// spawn clamp).
     /// </summary>
     Task<ModelPoolPick?> SelectAsync(Guid teamId, string provider, bool requireStructured, IReadOnlyList<string>? allowedModels, string? pinnedModel, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Resolve ONE credentialed-model row the operator picked by id (the supervisor's brain model) → its model id + the
+    /// decrypted backing credential. Team-scoped, must be ENABLED under an ACTIVE credential, and (when
+    /// <paramref name="requireStructured"/>) structured-output-capable. <c>null</c> when the row is missing / disabled /
+    /// revoked / not the team's / not structured → the caller fails closed. Unambiguous by construction: a row id names
+    /// exactly one (model, credential) pair, so the same model id under two credentials is never a guess.
+    /// </summary>
+    Task<ModelPoolPick?> ResolveByRowIdAsync(Guid teamId, Guid modelCredentialModelId, bool requireStructured, CancellationToken cancellationToken);
 }
 
 /// <summary>The resolved pick: a model id from the pool + the decrypted credential of the row that backs it. Transient — carries a secret, never persisted.</summary>

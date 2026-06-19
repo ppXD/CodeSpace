@@ -46,8 +46,8 @@ public sealed class ModelPoolSelector : IModelPoolSelector, IScopedDependency
             query = query.Where(m => allowed.Contains(m.ModelId.ToLower()));
 
         // Deterministic total order (model id, then row id) so an unpinned pick is stable even when two credentials of
-        // the same provider carry the same model id. The operator picks the brain explicitly (SupervisorModel); this
-        // order only decides an unpinned/ambient pick.
+        // the same provider carry the same model id. The supervisor brain is picked by row id (ResolveByRowIdAsync), so
+        // this name/provider path only decides an unpinned/ambient pick (planner / synthesis / llm.complete).
         var row = await query
             .OrderBy(m => m.ModelId)
             .ThenBy(m => m.Id)
@@ -56,17 +56,35 @@ public sealed class ModelPoolSelector : IModelPoolSelector, IScopedDependency
 
         if (row == null) return null;
 
-        return new ModelPoolPick
-        {
-            ModelId = row.ModelId,
-            Credential = new ResolvedModelCredential
-            {
-                Provider = row.Provider,
-                ApiKey = string.IsNullOrEmpty(row.EncryptedApiKey) ? null : _encryptor.Decrypt(row.EncryptedApiKey),
-                BaseUrl = row.BaseUrl,
-            },
-        };
+        return ToPick(row.ModelId, row.Provider, row.EncryptedApiKey, row.BaseUrl);
     }
+
+    public async Task<ModelPoolPick?> ResolveByRowIdAsync(Guid teamId, Guid modelCredentialModelId, bool requireStructured, CancellationToken cancellationToken)
+    {
+        // The operator picked ONE exact row (the brain model) — resolve it under the same team / enabled / active /
+        // structured guards as the pool query, so a missing / disabled / revoked / non-structured / cross-team row
+        // fails closed rather than running an unbacked or wrong-capability model.
+        var row = await _db.ModelCredentialModel.AsNoTracking()
+            .Where(m => m.Id == modelCredentialModelId && m.Enabled && (!requireStructured || m.SupportsStructuredOutput)
+                && m.Credential.TeamId == teamId && m.Credential.DeletedDate == null && m.Credential.Status == CredentialStatus.Active)
+            .Select(m => new { m.ModelId, m.Credential.Provider, m.Credential.EncryptedApiKey, m.Credential.BaseUrl })
+            .FirstOrDefaultAsync(cancellationToken).ConfigureAwait(false);
+
+        if (row == null) return null;
+
+        return ToPick(row.ModelId, row.Provider, row.EncryptedApiKey, row.BaseUrl);
+    }
+
+    private ModelPoolPick ToPick(string modelId, string provider, string? encryptedApiKey, string? baseUrl) => new()
+    {
+        ModelId = modelId,
+        Credential = new ResolvedModelCredential
+        {
+            Provider = provider,
+            ApiKey = string.IsNullOrEmpty(encryptedApiKey) ? null : _encryptor.Decrypt(encryptedApiKey),
+            BaseUrl = baseUrl,
+        },
+    };
 
     private static string? NullIfBlank(string? value) => string.IsNullOrWhiteSpace(value) ? null : value.Trim();
 }

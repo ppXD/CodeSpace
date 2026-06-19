@@ -90,7 +90,7 @@ public sealed partial class SupervisorTurnService
             AgentProfile = goalConfig?.AgentProfile,
             SpawnedAgentTools = NormalizeTools(goalConfig?.AllowedTools),
             AllowedModels = NormalizeModels(goalConfig?.AllowedModels),
-            SupervisorModel = string.IsNullOrWhiteSpace(goalConfig?.SupervisorModel) ? null : goalConfig!.SupervisorModel!.Trim(),
+            SupervisorModelId = goalConfig?.SupervisorModelId,
         };
     }
 

@@ -19,8 +19,10 @@ namespace CodeSpace.UnitTests.Agents;
 [Trait("Category", "Unit")]
 public class SupervisorDeciderTests
 {
+    private static readonly Guid BrainModelId = Guid.Parse("11111111-1111-1111-1111-111111111111");
+
     private static SupervisorTurnContext Context(int turnNumber = 0, params SupervisorPriorDecision[] prior) =>
-        new() { Goal = "ship the feature", TurnNumber = turnNumber, PriorDecisions = prior };
+        new() { Goal = "ship the feature", TurnNumber = turnNumber, PriorDecisions = prior, SupervisorModelId = BrainModelId };
 
     // ── The decider folds context → a schema-valid canonical decision ────────────────
 
@@ -278,6 +280,19 @@ public class SupervisorDeciderTests
     }
 
     [Fact]
+    public async Task A_run_with_no_selected_brain_model_fails_closed_to_a_terminal_stop()
+    {
+        // supervisorModelId is REQUIRED — the operator must pick the brain model; the supervisor never guesses its own.
+        var decider = new LlmSupervisorDecider(new FakeRegistry(new FakeStructuredClient(new SupervisorModelDecision { Kind = SupervisorDecisionKinds.Plan })), FakeSelector.WithModel());
+
+        var decision = await decider.DecideAsync(Context() with { SupervisorModelId = null }, CancellationToken.None);
+
+        decision.Kind.ShouldBe(SupervisorDecisionKinds.Stop);
+        decision.IsTerminal.ShouldBeTrue("no brain model selected → a clean fail-closed stop");
+        JsonDocument.Parse(decision.PayloadJson).RootElement.GetProperty("outcome").GetString().ShouldBe("no-model");
+    }
+
+    [Fact]
     public async Task A_run_whose_credentialed_pool_has_no_model_fails_closed_to_a_terminal_stop()
     {
         // The structured provider IS registered, but the team's credentialed-model pool yields nothing (none
@@ -393,5 +408,7 @@ public class SupervisorDeciderTests
         public static FakeSelector Empty() => new(null);
 
         public Task<ModelPoolPick?> SelectAsync(Guid teamId, string provider, bool requireStructured, IReadOnlyList<string>? allowedModels, string? pinnedModel, CancellationToken cancellationToken) => Task.FromResult(_pick);
+
+        public Task<ModelPoolPick?> ResolveByRowIdAsync(Guid teamId, Guid modelCredentialModelId, bool requireStructured, CancellationToken cancellationToken) => Task.FromResult(_pick);
     }
 }
