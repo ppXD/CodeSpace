@@ -155,6 +155,12 @@ public sealed class ModelCredentialService : IModelCredentialService, IScopedDep
     {
         var credential = await LoadActiveAsync(credentialId, cancellationToken).ConfigureAwait(false);   // team-scope guard
 
+        // Serialize concurrent refreshes of the SAME credential (a double-click / two operators) so they don't race
+        // the (credential, model id) unique index into a 23505 that would poison the ambient transaction. A
+        // txn-scoped advisory lock blocks the second refresh until the first commits + releases it — the second then
+        // reads the first's rows and UPDATEs (no colliding insert). Per-credential, so unrelated refreshes never block.
+        await _db.Database.ExecuteSqlInterpolatedAsync($"SELECT pg_advisory_xact_lock({AdvisoryLockKey(credentialId)})", cancellationToken).ConfigureAwait(false);
+
         var resolved = new ResolvedModelCredential
         {
             Provider = credential.Provider,
@@ -212,23 +218,13 @@ public sealed class ModelCredentialService : IModelCredentialService, IScopedDep
         foreach (var row in existing.Where(m => m.Source == ModelSource.Reflected && !seen.Contains(m.ModelId)))
             row.Enabled = false;
 
-        try
-        {
-            await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
-        }
-        catch (DbUpdateException ex) when (IsUniqueViolation(ex))
-        {
-            // A concurrent refresh won the (credential, model id) race — its rows are already written, so this
-            // refresh is a benign no-op (the convergent listing) rather than a 500. The refresh endpoint is the one
-            // re-triggerable action, so a double-click / two-operator overlap is expected, not exotic.
-        }
+        await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
 
         return reflected.Count;
     }
 
-    /// <summary>A Postgres unique-constraint violation (23505) — a concurrent writer beat us to the (credential, model id) index. Mirrors <c>ConversationService.IsUniqueViolation</c>.</summary>
-    private static bool IsUniqueViolation(DbUpdateException ex) =>
-        ex.InnerException is Npgsql.PostgresException { SqlState: "23505" };
+    /// <summary>A stable 64-bit key for the credential's advisory lock (the first 8 bytes of its Guid). A collision between two unrelated credentials would only serialize their refreshes — a harmless perf nudge, never a correctness issue.</summary>
+    private static long AdvisoryLockKey(Guid credentialId) => BitConverter.ToInt64(credentialId.ToByteArray());
 
     private static void ApplyCapabilities(ModelCredentialModel row, ModelCapabilityFlags caps)
     {

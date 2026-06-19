@@ -119,11 +119,10 @@ public class CredentialedModelRefreshFlowTests
 
         var models = new[] { Model("a"), Model("b"), Model("c") };
 
-        // Two refreshes race the (credential, model id) unique index — the loser's 23505 is a benign no-op, so neither
-        // throws (no unhandled 500 out of the thin handler) and the list converges to exactly the reflected set.
-        await Task.WhenAll(
-            RefreshAsync(userId, teamId, credId, new FakeReflector(true, models)),
-            RefreshAsync(userId, teamId, credId, new FakeReflector(true, models)));
+        // Several refreshes contend for the same credential — the per-credential advisory lock serializes them, so
+        // none races the (credential, model id) unique index into a 23505 (no unhandled 500 out of the thin handler)
+        // and the list converges to exactly the reflected set.
+        await Task.WhenAll(Enumerable.Range(0, 4).Select(_ => RefreshAsync(userId, teamId, credId, new FakeReflector(true, models))));
 
         // No duplicates after a concurrent refresh — the list converges to exactly the reflected set.
         var ids = (await RowsAsync(credId)).Select(r => r.ModelId).OrderBy(x => x).ToList();
