@@ -65,6 +65,22 @@ public sealed record SupervisorGoalConfig
     /// policy concerns stay separate (Rule 18.1 — a nested data noun).
     /// </summary>
     public SupervisorAgentProfile? AgentProfile { get; init; }
+
+    /// <summary>
+    /// The model the SUPERVISOR's own decider runs on (the "brain", distinct from the agents it spawns). Null / blank
+    /// → the deployment default. STORED + threaded through the turn context; the in-process decider consuming it (so a
+    /// team's supervisor is no longer hardcoded to one model) is a later slice — for now this is byte-identical config.
+    /// </summary>
+    public string? SupervisorModel { get; init; }
+
+    /// <summary>
+    /// The operator's ALLOWED MODEL POOL for the agents this supervisor dispatches — a list of model ids the
+    /// model-authored per-agent <c>spawn.agents[].model</c> must be one of. Null / empty = NO restriction (the
+    /// supervisor may pick any model — byte-identical to before): the boundary is opt-in. When non-empty, a dispatch
+    /// authoring a model OUTSIDE the pool FAILS CLOSED (the per-agent model privilege gate, the model analogue of the
+    /// repo/autonomy clamps). The operator bounds the pool; the supervisor's intelligence picks within it.
+    /// </summary>
+    public IReadOnlyList<string>? AllowedModels { get; init; }
 }
 
 /// <summary>

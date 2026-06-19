@@ -215,6 +215,13 @@ public sealed partial class RealSupervisorActionExecutor
             throw new AgentDefinitionResolutionException($"agent.supervisor spawn: {ex.Message}", ex);
         }
 
+        // POST-RESOLUTION model gate: the dispatch-time resolver may have filled a null task model with the PERSONA's
+        // model AFTER the pre-resolution clamp in BuildTaskWithGoal, so re-clamp the EFFECTIVE model against the
+        // operator's pool — else a persona reference could run a pool-excluded model. Fail-closed (terminalized by the
+        // turn service's catch). No pool / null model → no-op (byte-identical). The pre-resolution clamp still gates
+        // the common case (a directly-authored model) early, before any resolution.
+        SupervisorModelClamp.ClampModel(resolved.Model, profileModel: null, context.AllowedModels);
+
         // Stamp the owning TURN cell (<nodeId>#turn{N}) so a supervisor's spawned agents are addressable by the
         // turn that spawned them (D4) — the turn-grain analogue of the per-spawn wait key <nodeId>#turn{N}#{k}.
         var turnCellKey = $"{context.NodeId}#turn{context.TurnNumber}";
@@ -286,7 +293,9 @@ public sealed partial class RealSupervisorActionExecutor
         {
             Goal = goal,
             Harness = NullIfBlank(spec?.Harness) ?? HarnessOf(profile),
-            Model = NullIfBlank(spec?.Model) ?? NullIfBlank(profile?.Model),
+            // The model-authored per-agent model is CLAMPED to the operator's allowed pool (no pool → unbounded,
+            // byte-identical). Throws SupervisorModelAccessException on an out-of-pool model — fail-closed, terminalized.
+            Model = SupervisorModelClamp.ClampModel(spec?.Model, profile?.Model, context.AllowedModels),
             AgentDefinitionId = profile?.AgentDefinitionId,
             ModelCredentialId = profile?.ModelCredentialId,
             Tools = context.SpawnedAgentTools,
