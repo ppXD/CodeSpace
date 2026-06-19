@@ -50,10 +50,36 @@ public static class SupervisorDecisionSchema
                     },
                     "required": ["id", "title", "instruction"]
                   }
+                },
+                "phases": {
+                  "type": "array",
+                  "minItems": 1,
+                  "maxItems": 20,
+                  "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                      "id": { "type": "string", "description": "Stable, plan-local id for the phase." },
+                      "title": { "type": "string", "description": "Short human title for the phase (e.g. 'Investigate', 'Implement', 'Review')." },
+                      "subtaskIds": { "type": "array", "items": { "type": "string" }, "description": "The plan-local subtask ids this phase groups." },
+                      "acceptance": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "properties": {
+                          "command": { "type": "array", "minItems": 1, "items": { "type": "string" }, "description": "An argv the server runs to OBJECTIVELY verify this phase is done." },
+                          "description": { "type": "string", "description": "Optional human-readable description of the phase's acceptance check." }
+                        },
+                        "required": ["command"],
+                        "description": "Optional per-phase acceptance check (recorded + projected; enforcement is a follow-up)."
+                      }
+                    },
+                    "required": ["id", "title"]
+                  },
+                  "description": "Optional semantic phases (L4) grouping subtasks into named, accepting stages — for a legible plan. Absent → the flat subtask plan."
                 }
               },
               "required": ["goal", "subtasks"],
-              "description": "Required when kind == 'plan'."
+              "description": "Required when kind == 'plan'. Decompose into 'subtasks'; optionally group them into named 'phases'."
             },
             "spawn": {
               "type": "object",
