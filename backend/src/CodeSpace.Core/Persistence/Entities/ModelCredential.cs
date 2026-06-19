@@ -48,4 +48,12 @@ public class ModelCredential : IEntity<Guid>, IAuditable
     public DateTimeOffset? DeletedDate { get; set; }
 
     public Team Team { get; set; } = default!;
+
+    /// <summary>
+    /// The models this credential can run — the maintained list (operator-typed + provider-reflected). A
+    /// credential predating the catalog has an EMPTY list, which keeps just-in-time resolution byte-identical:
+    /// <see cref="Services.Agents.ModelCredentialResolver"/> never reads this navigation, so the pool it backs
+    /// is additive metadata, not a gate on existing runs.
+    /// </summary>
+    public ICollection<ModelCredentialModel> Models { get; set; } = new List<ModelCredentialModel>();
 }
