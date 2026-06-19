@@ -287,6 +287,41 @@ public class AgentCodeNodeTests
         JsonSerializer.Deserialize<AgentTask>(result.SuspendUntil!.Payload, AgentJson.Options)!.ApprovalConversationId.ShouldBe(conversationId);
     }
 
+    [Fact]
+    public async Task A_picked_credentialed_model_is_carried_onto_the_task_as_a_reference()
+    {
+        var modelRowId = Guid.NewGuid();
+        var config = new Dictionary<string, JsonElement> { ["goal"] = Str("Fix it"), ["harness"] = Str("codex-cli"), ["modelCredentialModelId"] = Str(modelRowId.ToString()) };
+
+        var result = await new AgentCodeNode().RunAsync(BuildContext(config, resume: null), CancellationToken.None);
+
+        result.Status.ShouldBe(NodeStatus.Suspended);
+        // The node stays PURE — it carries the reference; the dispatch-time resolver expands it into model + credential.
+        JsonSerializer.Deserialize<AgentTask>(result.SuspendUntil!.Payload, AgentJson.Options)!.ModelCredentialModelId.ShouldBe(modelRowId);
+    }
+
+    [Fact]
+    public async Task A_malformed_credentialed_model_id_fails_the_node()
+    {
+        var config = new Dictionary<string, JsonElement> { ["goal"] = Str("Fix it"), ["harness"] = Str("codex-cli"), ["modelCredentialModelId"] = Str("not-a-uuid") };
+
+        var result = await new AgentCodeNode().RunAsync(BuildContext(config, resume: null), CancellationToken.None);
+
+        result.Status.ShouldBe(NodeStatus.Failure);
+        result.Error.ShouldContain("modelCredentialModelId");
+    }
+
+    [Fact]
+    public async Task An_unset_credentialed_model_is_omitted_from_the_staged_task_json()
+    {
+        // Byte-identity: [JsonIgnore(WhenWritingNull)] keeps an unset reference OUT of the persisted task_json, so an
+        // existing run's envelope is unchanged by the new field.
+        var result = await new AgentCodeNode().RunAsync(BuildContext(RequiredConfig(), resume: null), CancellationToken.None);
+
+        result.Status.ShouldBe(NodeStatus.Suspended);
+        result.SuspendUntil!.Payload.GetRawText().ShouldNotContain("modelCredentialModelId");
+    }
+
     [Theory]
     [InlineData(null)]          // absent entirely → no approval surface
     [InlineData("")]            // picked then cleared

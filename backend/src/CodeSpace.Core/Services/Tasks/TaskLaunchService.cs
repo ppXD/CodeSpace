@@ -89,6 +89,7 @@ public sealed class TaskLaunchService : ITaskLaunchService, IScopedDependency
         Model = request.Overrides.Model,
         AgentDefinitionId = request.Overrides.AgentDefinitionId,
         ModelCredentialId = request.Overrides.ModelCredentialId,
+        ModelCredentialModelId = request.Overrides.ModelCredentialModelId,
         RunnerKind = request.Overrides.RunnerKind,
         AutonomyLevel = ClampAutonomy(request, route),
     };

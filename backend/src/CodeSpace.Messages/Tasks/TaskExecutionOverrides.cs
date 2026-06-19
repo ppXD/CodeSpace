@@ -27,4 +27,7 @@ public sealed record TaskExecutionOverrides
 
     /// <summary>The <c>ModelCredential</c> reference the agent authenticates with. Null → the persona default → the team/operator fallback.</summary>
     public Guid? ModelCredentialId { get; init; }
+
+    /// <summary>A picked credentialed model (a <c>ModelCredentialModel</c> row) — sets BOTH the model and its backing credential from one choice, taking precedence over <see cref="Model"/> / <see cref="ModelCredentialId"/>. Null → those loose fields.</summary>
+    public Guid? ModelCredentialModelId { get; init; }
 }

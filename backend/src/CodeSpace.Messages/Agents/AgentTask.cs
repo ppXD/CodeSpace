@@ -1,3 +1,5 @@
+using System.Text.Json.Serialization;
+
 namespace CodeSpace.Messages.Agents;
 
 /// <summary>
@@ -34,6 +36,17 @@ public sealed record AgentTask
     /// env, never persisting the secret. Null = fall back to a team default / operator-global key at resolve time.
     /// </summary>
     public Guid? ModelCredentialId { get; init; }
+
+    /// <summary>
+    /// Optional reference to a SPECIFIC credentialed model — a <c>ModelCredentialModel</c> row that is a model id
+    /// PAIRED with its backing credential. When set, the dispatch-time <c>IAgentDefinitionResolver</c> EXPANDS it into
+    /// <see cref="Model"/> + <see cref="ModelCredentialId"/> from that row (the operator picked one concrete model from
+    /// a credential's list), taking node-level precedence over a persona's defaults. Null (the default) → the loose
+    /// <see cref="Model"/> + <see cref="ModelCredentialId"/> path, byte-identical to before. Carried as provenance after
+    /// expansion. <c>[JsonIgnore(WhenWritingNull)]</c> so an unset reference adds nothing to the persisted task_json.
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public Guid? ModelCredentialModelId { get; init; }
 
     /// <summary>
     /// Tool allow-list the harness restricts the agent to — null = the harness's default toolset, empty = no tools,
