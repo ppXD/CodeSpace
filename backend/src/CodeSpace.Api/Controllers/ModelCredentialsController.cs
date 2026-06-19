@@ -43,4 +43,28 @@ public class ModelCredentialsController : ControllerBase
         var id = await _mediator.Send(new RevokeModelCredentialCommand { Id = credentialId }, cancellationToken).ConfigureAwait(false);
         return Ok(new { id });
     }
+
+    // ── A credential's maintained model list (the pick-or-type surface) — a sub-resource of the credential ──
+
+    [HttpGet("{credentialId:guid}/models")]
+    public async Task<IActionResult> ListModels([FromRoute] Guid credentialId, CancellationToken cancellationToken)
+    {
+        var result = await _mediator.Send(new ListCredentialedModelsQuery { ModelCredentialId = credentialId }, cancellationToken).ConfigureAwait(false);
+        return Ok(result);
+    }
+
+    [HttpPost("{credentialId:guid}/models")]
+    public async Task<IActionResult> AddModel([FromRoute] Guid credentialId, [FromBody] AddCredentialedModelCommand command, CancellationToken cancellationToken)
+    {
+        // Route id is authoritative; merge into the command so the body can't target a different credential.
+        var id = await _mediator.Send(command with { ModelCredentialId = credentialId }, cancellationToken).ConfigureAwait(false);
+        return Ok(new { id });
+    }
+
+    [HttpDelete("{credentialId:guid}/models/{modelRowId:guid}")]
+    public async Task<IActionResult> RemoveModel([FromRoute] Guid credentialId, [FromRoute] Guid modelRowId, CancellationToken cancellationToken)
+    {
+        var id = await _mediator.Send(new RemoveCredentialedModelCommand { ModelCredentialId = credentialId, ModelRowId = modelRowId }, cancellationToken).ConfigureAwait(false);
+        return Ok(new { id });
+    }
 }

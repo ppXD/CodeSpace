@@ -97,6 +97,65 @@ public sealed class ModelCredentialService : IModelCredentialService, IScopedDep
             ?? throw new KeyNotFoundException($"Model credential {id} not found.");
     }
 
+    public async Task<IReadOnlyList<CredentialedModelSummary>> ListModelsAsync(Guid credentialId, CancellationToken cancellationToken)
+    {
+        await LoadActiveAsync(credentialId, cancellationToken).ConfigureAwait(false);   // team-scope guard
+
+        var rows = await _db.ModelCredentialModel.AsNoTracking()
+            .Where(m => m.ModelCredentialId == credentialId)
+            .OrderBy(m => m.ModelId)
+            .ToListAsync(cancellationToken).ConfigureAwait(false);
+
+        return rows.Select(ToModelSummary).ToList();
+    }
+
+    public async Task<Guid> AddModelAsync(Guid credentialId, string modelId, string? displayName, CancellationToken cancellationToken)
+    {
+        var normalized = (modelId ?? "").Trim();
+
+        if (normalized.Length == 0) throw new ArgumentException("A model id is required.", nameof(modelId));
+
+        await LoadActiveAsync(credentialId, cancellationToken).ConfigureAwait(false);   // team-scope guard
+
+        if (await _db.ModelCredentialModel.AnyAsync(m => m.ModelCredentialId == credentialId && m.ModelId == normalized, cancellationToken).ConfigureAwait(false))
+            throw new InvalidOperationException($"Model '{normalized}' is already on this credential.");
+
+        var row = new ModelCredentialModel
+        {
+            Id = Guid.NewGuid(),
+            ModelCredentialId = credentialId,
+            ModelId = normalized,
+            DisplayName = NullIfBlank(displayName),
+            Source = ModelSource.Manual,
+        };
+
+        await _db.ModelCredentialModel.AddAsync(row, cancellationToken).ConfigureAwait(false);
+        await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+
+        return row.Id;
+    }
+
+    public async Task<Guid> RemoveModelAsync(Guid credentialId, Guid modelRowId, CancellationToken cancellationToken)
+    {
+        await LoadActiveAsync(credentialId, cancellationToken).ConfigureAwait(false);   // team-scope guard
+
+        var row = await _db.ModelCredentialModel.FirstOrDefaultAsync(m => m.Id == modelRowId && m.ModelCredentialId == credentialId, cancellationToken).ConfigureAwait(false)
+            ?? throw new KeyNotFoundException($"Model {modelRowId} not found on credential {credentialId}.");
+
+        _db.ModelCredentialModel.Remove(row);
+        await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+
+        return row.Id;
+    }
+
+    private static CredentialedModelSummary ToModelSummary(ModelCredentialModel m) => new()
+    {
+        Id = m.Id,
+        ModelId = m.ModelId,
+        DisplayName = m.DisplayName,
+        Enabled = m.Enabled,
+    };
+
     private ModelCredentialSummary ToSummary(ModelCredential c) => new()
     {
         Id = c.Id,
