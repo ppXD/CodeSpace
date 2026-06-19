@@ -34,6 +34,8 @@ public sealed class ScriptedSupervisorDecider : ISupervisorDecider
             SupervisorScriptMode.PlanSpawnMergeStop => PlanSpawnMergeStop(context),
             SupervisorScriptMode.AskHumanStop => AskHumanStop(context),
             SupervisorScriptMode.PlanThenSpawnForever => PlanThenSpawnForever(context),
+            SupervisorScriptMode.PlanSpawnDispatchStop => PlanSpawnDispatchStop(context),
+            SupervisorScriptMode.PlanSpawnBadRepoStop => PlanSpawnBadRepoStop(context),
             _ => PlanThenStop(context),
         };
 
@@ -84,6 +86,39 @@ public sealed class ScriptedSupervisorDecider : ISupervisorDecider
         _ => Canonical(SupervisorDecisionKinds.Stop, new SupervisorStopPayload { Outcome = "completed", Summary = "merged" }),
     };
 
+    /// <summary>The guid a bad dispatch targets — never bound by any test profile, so the per-agent repo clamp rejects it.</summary>
+    public static readonly Guid UnboundRepo = Guid.Parse("dead0000-0000-0000-0000-00000000beef");
+
+    // L4 arc B: turn 0 plan(2) → turn 1 spawn with PER-AGENT dispatch (each subtask a distinct role + override) → turn 2
+    // stop. Proves one spawn fans out two agents with DIFFERENT model-authored shapes.
+    private static SupervisorDecision PlanSpawnDispatchStop(SupervisorTurnContext context) => context.TurnNumber switch
+    {
+        0 => Plan(context.Goal),
+        1 => Canonical(SupervisorDecisionKinds.Spawn, new SupervisorSpawnPayload
+        {
+            SubtaskIds = new[] { SubtaskA, SubtaskB },
+            Agents = new[]
+            {
+                new SupervisorAgentDispatch { SubtaskId = SubtaskA, Role = "backend implementer", Harness = "claude-code", AutonomyLevel = "confined" },
+                new SupervisorAgentDispatch { SubtaskId = SubtaskB, Role = "frontend adapter" },
+            },
+        }),
+        _ => Canonical(SupervisorDecisionKinds.Stop, new SupervisorStopPayload { Outcome = "completed", Summary = "dispatched" }),
+    };
+
+    // L4 arc B: a spawn whose dispatch targets a repo the operator did NOT bind → the per-agent repo clamp throws, and
+    // the turn service must terminalize the spawn as a CLEAN failure (no stranded-Running decision, no crash).
+    private static SupervisorDecision PlanSpawnBadRepoStop(SupervisorTurnContext context) => context.TurnNumber == 0
+        ? Plan(context.Goal)
+        : Canonical(SupervisorDecisionKinds.Spawn, new SupervisorSpawnPayload
+        {
+            SubtaskIds = new[] { SubtaskA },
+            Agents = new[]
+            {
+                new SupervisorAgentDispatch { SubtaskId = SubtaskA, TargetRepos = JsonSerializer.SerializeToElement(new[] { new { repositoryId = UnboundRepo } }) },
+            },
+        });
+
     private static SupervisorDecision Plan(string goal) => Canonical(SupervisorDecisionKinds.Plan, new SupervisorPlanPayload
     {
         Goal = goal,
@@ -115,6 +150,10 @@ public sealed class SupervisorDecisionScript
     public void AskHumanStop() => Mode = SupervisorScriptMode.AskHumanStop;
 
     public void PlanThenSpawnForever() => Mode = SupervisorScriptMode.PlanThenSpawnForever;
+
+    public void PlanSpawnDispatchStop() => Mode = SupervisorScriptMode.PlanSpawnDispatchStop;
+
+    public void PlanSpawnBadRepoStop() => Mode = SupervisorScriptMode.PlanSpawnBadRepoStop;
 }
 
 public enum SupervisorScriptMode
@@ -122,6 +161,8 @@ public enum SupervisorScriptMode
     PlanThenStop,
     PlanSpawnStop,
     PlanSpawnMergeStop,
+    PlanSpawnDispatchStop,
+    PlanSpawnBadRepoStop,
     AskHumanStop,
     PlanThenSpawnForever,
 }

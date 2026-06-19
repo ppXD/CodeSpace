@@ -26,12 +26,18 @@ public sealed partial class RealSupervisorActionExecutor
         var spawn = Deserialize<SupervisorSpawnPayload>(decision.PayloadJson) ?? new SupervisorSpawnPayload();
         var subtasks = ResolvePlannedSubtasks(context);
 
+        // Fan out over the subtask ids; for each, apply the model-authored per-agent dispatch override (L4 arc B) when
+        // the spawn carries one keyed by that subtask id, else build a homogeneous profile clone (byte-identical to before).
         var tasks = spawn.SubtaskIds
-            .Select(id => BuildAgentTask(subtasks, id, revisedInstruction: null, context))
+            .Select(id => { var spec = DispatchFor(spawn, id); return BuildAgentTask(subtasks, id, spec?.GoalOverride, context, spec); })
             .ToList();
 
         return await StageAgentsAndParkAsync(tasks, context, cancellationToken).ConfigureAwait(false);
     }
+
+    /// <summary>The model-authored per-agent dispatch for a subtask id (the FIRST matching <c>agents[]</c> entry — lenient on duplicates), or null. A spawn with no <c>agents[]</c> returns null for every id → byte-identical homogeneous fan-out.</summary>
+    private static SupervisorAgentDispatch? DispatchFor(SupervisorSpawnPayload spawn, string subtaskId) =>
+        spawn.Agents?.FirstOrDefault(a => a.SubtaskId == subtaskId);
 
     /// <summary>Retry: re-run ONE prior subtask as a FRESH agent run (a new Attempt), optionally with a revised instruction. Same stage-K-waits + barrier as spawn (here K = 1).</summary>
     private async Task<SupervisorExecution> ExecuteRetryAsync(SupervisorDecision decision, SupervisorTurnContext context, CancellationToken cancellationToken)
@@ -230,7 +236,7 @@ public sealed partial class RealSupervisorActionExecutor
     /// (the supervisor's own conversation, null in the bare case) — a stored-only field that nothing reads on the
     /// spawn path, so it doesn't perturb behaviour.</para>
     /// </summary>
-    internal static AgentTask BuildAgentTask(IReadOnlyDictionary<string, SupervisorPlannedSubtask> subtasks, string subtaskId, string? revisedInstruction, SupervisorTurnContext context)
+    internal static AgentTask BuildAgentTask(IReadOnlyDictionary<string, SupervisorPlannedSubtask> subtasks, string subtaskId, string? revisedInstruction, SupervisorTurnContext context, SupervisorAgentDispatch? spec = null)
     {
         var planned = subtasks.GetValueOrDefault(subtaskId);
 
@@ -238,8 +244,12 @@ public sealed partial class RealSupervisorActionExecutor
             : !string.IsNullOrWhiteSpace(planned?.Instruction) ? planned!.Instruction
             : context.Goal;
 
-        return BuildTaskWithGoal(instruction, context);
+        return BuildTaskWithGoal(WithRole(spec?.Role, instruction), context, spec: spec);
     }
+
+    /// <summary>Fold a model-authored role into the agent's GOAL so it runs in-role — the role's only sink (there is no <c>AgentTask.Role</c> field; it shapes the prompt, never a privilege). Blank role → the plain instruction (byte-identical to a no-dispatch spawn).</summary>
+    private static string WithRole(string? role, string instruction) =>
+        string.IsNullOrWhiteSpace(role) ? instruction : $"As the {role.Trim()}, {instruction}";
 
     /// <summary>
     /// Build a spawned agent's task from a GOAL string + the run's profile — the shared field-stamping the spawn,
@@ -249,24 +259,42 @@ public sealed partial class RealSupervisorActionExecutor
     /// profile's push opt-in to TRUE (the resolver MUST push its reconciled branch so a downstream PR-open has a
     /// head); spawn/retry pass false → byte-identical to before (the profile's <c>PushBranch</c> wins).
     /// </summary>
-    internal static AgentTask BuildTaskWithGoal(string goal, SupervisorTurnContext context, bool forcePushBranch = false)
+    internal static AgentTask BuildTaskWithGoal(string goal, SupervisorTurnContext context, bool forcePushBranch = false, SupervisorAgentDispatch? spec = null)
     {
         var profile = context.AgentProfile;
-        var autonomy = AutonomyOf(profile);
+        var boundRelated = AgentWorkspaceAuthoring.ParseRelatedRepositories(profile?.RelatedRepositories ?? default);
+
+        // L4 arc B — the model PROPOSES this agent's repos + autonomy on the per-agent dispatch; the server CLAMPS.
+        // The primary + related subset must be within the operator's bound repos (B2, throws on an out-of-set repo or
+        // a read→write escalation), and autonomy can only LOWER past the profile ceiling. With no dispatch (spec null)
+        // every clamp collapses to the profile value → byte-identical to a pre-L4 homogeneous spawn.
+        var repositoryId = SupervisorRepoClamp.ClampPrimary(spec?.RepositoryId, profile?.RepositoryId, boundRelated);
+        var related = spec?.TargetRepos is { } targetRepos
+            ? SupervisorRepoClamp.IntersectWithBoundRepos(targetRepos, profile?.RepositoryId, boundRelated)
+            : boundRelated;
+
+        // A per-agent repo authoring (a primary override, or a TargetRepos subset) may name a repo that is ALSO the
+        // resolved primary — drop the primary from the related set so it is cloned ONCE (as the writable primary), never
+        // into two mounts. Only when the model authored repos, so a role-only / no-dispatch spawn keeps the profile's
+        // repos verbatim (byte-identical).
+        if (spec?.RepositoryId is not null || spec?.TargetRepos is not null)
+            related = related.Where(r => r.RepositoryId != repositoryId).ToList();
+
+        var autonomy = ClampAutonomy(spec?.AutonomyLevel, AutonomyOf(profile));
 
         return new AgentTask
         {
             Goal = goal,
-            Harness = HarnessOf(profile),
-            Model = NullIfBlank(profile?.Model),
+            Harness = NullIfBlank(spec?.Harness) ?? HarnessOf(profile),
+            Model = NullIfBlank(spec?.Model) ?? NullIfBlank(profile?.Model),
             AgentDefinitionId = profile?.AgentDefinitionId,
             ModelCredentialId = profile?.ModelCredentialId,
             Tools = context.SpawnedAgentTools,
             RunnerKind = NullIfBlank(profile?.RunnerKind),
-            RepositoryId = profile?.RepositoryId,
-            // Multi-repo (S7): the authored related repos project onto a Workspace via the SHARED authoring底層 the
-            // agent.code node uses — no related repos → null → byte-identical single-repo spawn (RepositoryId drives it).
-            Workspace = AgentWorkspaceAuthoring.ResolveAuthoredWorkspace(profile?.RepositoryId, AgentWorkspaceAuthoring.ParseRelatedRepositories(profile?.RelatedRepositories ?? default)),
+            RepositoryId = repositoryId,
+            // The authored related repos project onto a Workspace via the SHARED authoring底層 the agent.code node uses —
+            // no related repos → null → byte-identical single-repo spawn (RepositoryId drives it).
+            Workspace = AgentWorkspaceAuthoring.ResolveAuthoredWorkspace(repositoryId, related),
             Autonomy = autonomy,
             Permissions = AgentAutonomyPolicy.Derive(autonomy),
             ApprovalConversationId = context.ConversationId,
@@ -282,6 +310,10 @@ public sealed partial class RealSupervisorActionExecutor
     /// <summary>The profile's autonomy tier parsed case-insensitively, else the safe <see cref="AgentAutonomyLevel.Standard"/> default (mirrors agent.code's ReadAutonomyLevel). Null/unrecognised → byte-identical to pre-P2-3.</summary>
     private static AgentAutonomyLevel AutonomyOf(SupervisorAgentProfile? profile) =>
         Enum.TryParse<AgentAutonomyLevel>(profile?.AutonomyLevel, ignoreCase: true, out var level) ? level : AgentAutonomyLevel.Standard;
+
+    /// <summary>Clamp a model-authored autonomy REQUEST to the run profile's <paramref name="ceiling"/> (L4 arc B): the request wins only when it is MORE restrictive than the ceiling (the enum is ordered Confined &lt; Standard &lt; Trusted &lt; Unleashed); an absent / unparseable / equal-or-higher request keeps the ceiling — so the model can lower its own autonomy but NEVER raise it past the operator's grant. No request → the ceiling (byte-identical).</summary>
+    private static AgentAutonomyLevel ClampAutonomy(string? requested, AgentAutonomyLevel ceiling) =>
+        Enum.TryParse<AgentAutonomyLevel>(requested, ignoreCase: true, out var level) && level < ceiling ? level : ceiling;
 
     /// <summary>A blank string degrades to null (the harness-default sentinel), mirroring agent.code's ReadOptionalString.</summary>
     private static string? NullIfBlank(string? value) => string.IsNullOrWhiteSpace(value) ? null : value;
