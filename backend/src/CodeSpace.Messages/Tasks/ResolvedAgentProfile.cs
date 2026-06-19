@@ -31,6 +31,9 @@ public sealed record ResolvedAgentProfile
     /// <summary>The <c>ModelCredential</c> reference the agent authenticates with (decrypted just-in-time). Null → the persona default → the team/operator fallback.</summary>
     public Guid? ModelCredentialId { get; init; }
 
+    /// <summary>A picked credentialed model (a <c>ModelCredentialModel</c> row) — sets BOTH the model id and its backing credential from one choice; the dispatch-time resolver expands it, taking precedence over <see cref="Model"/> / <see cref="ModelCredentialId"/>. Null → those loose fields.</summary>
+    public Guid? ModelCredentialModelId { get; init; }
+
     /// <summary>The sandbox runner the agent executes on (e.g. <c>"local"</c>). Null → the executor's default.</summary>
     public string? RunnerKind { get; init; }
 

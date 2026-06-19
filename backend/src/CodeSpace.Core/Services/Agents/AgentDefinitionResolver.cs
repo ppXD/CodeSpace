@@ -3,6 +3,7 @@ using CodeSpace.Core.DependencyInjection;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Messages.Agents;
+using CodeSpace.Messages.Enums;
 using Microsoft.EntityFrameworkCore;
 
 namespace CodeSpace.Core.Services.Agents;
@@ -30,6 +31,11 @@ public sealed class AgentDefinitionResolver : IAgentDefinitionResolver, IScopedD
 
     public async Task<AgentTask> ResolveAsync(AgentTask task, Guid teamId, CancellationToken cancellationToken)
     {
+        // A picked credentialed model expands FIRST — into the loose Model + ModelCredentialId — so it applies to
+        // BOTH an inline run (which returns just below) and a persona run (where it then takes node-level precedence
+        // over the persona). No reference set → unchanged, byte-identical.
+        task = await ApplyCredentialedModelAsync(task, teamId, cancellationToken).ConfigureAwait(false);
+
         if (task.AgentDefinitionId is not { } id) return task;   // pure-inline run — unchanged, byte-for-byte today's behavior
 
         var persona = await LoadPersonaAsync(id, teamId, cancellationToken).ConfigureAwait(false);
@@ -47,6 +53,28 @@ public sealed class AgentDefinitionResolver : IAgentDefinitionResolver, IScopedD
         var modelCredentialId = ResolveModelCredentialId(task.ModelCredentialId, persona.ModelCredentialId);
 
         return task with { Goal = goal, Model = model, Tools = tools, ModelCredentialId = modelCredentialId };
+    }
+
+    /// <summary>
+    /// Expand a picked <c>ModelCredentialModel</c> reference into the loose Model + ModelCredentialId — the operator
+    /// chose one concrete credentialed model, so it sets BOTH axes (a model id paired with its backing credential).
+    /// The row must be ENABLED and under an ACTIVE, non-deleted credential of the run's team (the same scoping the
+    /// credential resolver uses); a missing / disabled / revoked one FAILS CLOSED (a clean node failure) rather than
+    /// silently falling back — the operator's explicit choice is honoured or surfaced, never substituted. A disabled
+    /// model is "not part of the usable pool", so a pinned-then-disabled model fails rather than runs. No reference →
+    /// the task is returned untouched (byte-identical).
+    /// </summary>
+    private async Task<AgentTask> ApplyCredentialedModelAsync(AgentTask task, Guid teamId, CancellationToken cancellationToken)
+    {
+        if (task.ModelCredentialModelId is not { } rowId) return task;
+
+        var row = await _db.ModelCredentialModel.AsNoTracking()
+            .Where(m => m.Id == rowId && m.Enabled && m.Credential.TeamId == teamId && m.Credential.DeletedDate == null && m.Credential.Status == CredentialStatus.Active)
+            .Select(m => new { m.ModelId, m.ModelCredentialId })
+            .SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false)
+            ?? throw new AgentDefinitionResolutionException($"Selected model {rowId} is not an active, enabled credentialed model for this team.");
+
+        return task with { Model = row.ModelId, ModelCredentialId = row.ModelCredentialId };
     }
 
     private async Task<AgentDefinition> LoadPersonaAsync(Guid id, Guid teamId, CancellationToken cancellationToken) =>

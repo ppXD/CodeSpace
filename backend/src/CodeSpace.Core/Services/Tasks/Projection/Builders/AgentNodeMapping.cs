@@ -40,6 +40,7 @@ internal static class AgentNodeMapping
         AddIfPresent(config, "model", NullIfBlank(profile?.Model));
         AddIfPresent(config, "agentDefinitionId", profile?.AgentDefinitionId?.ToString());
         AddIfPresent(config, "modelCredentialId", profile?.ModelCredentialId?.ToString());
+        AddIfPresent(config, "modelCredentialModelId", profile?.ModelCredentialModelId?.ToString());
         AddIfPresent(config, "runnerKind", NullIfBlank(profile?.RunnerKind));
         AddIfPresent(config, "autonomyLevel", NullIfBlank(profile?.AutonomyLevel));
         AddIfPresent(config, "tools", profile?.AllowedTools);

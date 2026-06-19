@@ -52,6 +52,7 @@ public sealed class AgentCodeNode : INodeRuntime
                 "harness":        { "type": "string", "x-selector": "harness", "description": "Which coding-agent CLI runs the task (e.g. Codex, Claude Code). Pick from the available harnesses." },
                 "model":          { "type": "string", "description": "Model id within the harness's catalog. Leave empty to use the persona's model, or the harness default." },
                 "modelCredentialId": { "type": "string", "format": "uuid", "x-selector": "modelCredential", "description": "Model credential the agent authenticates with. Leave empty to use the persona's default, or the team/operator default." },
+                "modelCredentialModelId": { "type": "string", "format": "uuid", "x-selector": "credentialedModel", "description": "Pick a specific model from a credential's maintained list — sets BOTH the model and its backing credential from one choice. Takes precedence over 'model' / 'modelCredentialId' above. Leave empty to use those loose fields." },
                 "approvalConversationId": { "type": "string", "format": "uuid", "x-selector": "conversation", "description": "Conversation the run posts its tool-approval cards into. Leave empty for no approval surface." },
                 "tools":          { "type": "array", "items": { "type": "string" }, "description": "Tool allow-list the agent is restricted to (e.g. Read, Grep, Bash). Empty = the harness default. Added to (not replacing) the persona's tools; enforced by harnesses that support an allow-list (Claude Code), carried otherwise (Codex restricts via sandbox)." },
                 "runnerKind":     { "type": "string", "description": "Sandbox runner (e.g. \"local\"). Defaults to the deployment default." },
@@ -127,6 +128,8 @@ public sealed class AgentCodeNode : INodeRuntime
 
         if (!TryReadModelCredentialId(context, out var modelCredentialId)) return Fail("Config 'modelCredentialId' must be a model credential id (uuid).");
 
+        if (!TryReadModelCredentialModelId(context, out var modelCredentialModelId)) return Fail("Config 'modelCredentialModelId' must be a credentialed-model id (uuid).");
+
         if (string.IsNullOrWhiteSpace(harness)) return Fail("Config 'harness' is required.");
 
         // A persona supplies the prompt floor (its system prompt), so 'goal' is only required without one.
@@ -155,6 +158,7 @@ public sealed class AgentCodeNode : INodeRuntime
             Model = ReadOptionalString(context.Config, "model"),
             AgentDefinitionId = agentDefinitionId,
             ModelCredentialId = modelCredentialId,
+            ModelCredentialModelId = modelCredentialModelId,
             Tools = ReadStringArray(context.Config, "tools"),
             RepositoryId = repositoryId,
             Workspace = workspace,
@@ -225,6 +229,21 @@ public sealed class AgentCodeNode : INodeRuntime
         if (!Guid.TryParse(raw, out var id)) return false;
 
         modelCredentialId = id;
+        return true;
+    }
+
+    /// <summary>Read the optional <c>modelCredentialModelId</c> config (a picked credentialed model). Absent / empty → null. Present-but-malformed → false (a clean node failure). The dispatch-time resolver expands it into model + credential.</summary>
+    private static bool TryReadModelCredentialModelId(NodeRunContext context, out Guid? modelCredentialModelId)
+    {
+        modelCredentialModelId = null;
+
+        var raw = ReadString(context.Config, "modelCredentialModelId");
+
+        if (string.IsNullOrWhiteSpace(raw)) return true;
+
+        if (!Guid.TryParse(raw, out var id)) return false;
+
+        modelCredentialModelId = id;
         return true;
     }
 
