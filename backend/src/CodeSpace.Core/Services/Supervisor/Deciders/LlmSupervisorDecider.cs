@@ -24,8 +24,13 @@ namespace CodeSpace.Core.Services.Supervisor.Deciders;
 public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
 {
     private readonly ILLMClientRegistry _clientRegistry;
+    private readonly ISupervisorModelSelector _modelSelector;
 
-    public LlmSupervisorDecider(ILLMClientRegistry clientRegistry) { _clientRegistry = clientRegistry; }
+    public LlmSupervisorDecider(ILLMClientRegistry clientRegistry, ISupervisorModelSelector modelSelector)
+    {
+        _clientRegistry = clientRegistry;
+        _modelSelector = modelSelector;
+    }
 
     public async Task<SupervisorDecision> DecideAsync(SupervisorTurnContext context, CancellationToken cancellationToken)
     {
@@ -33,21 +38,30 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
 
         if (structured == null) return NoModelStop();
 
-        var completion = await structured.CompleteStructuredAsync(BuildRequest(context), cancellationToken).ConfigureAwait(false);
+        // The brain's model + key come from the POOL — exactly like the agents it spawns. The selector picks a
+        // structured-capable model the operator credentialed (within the allowed pool, the supervisorModel pin if any,
+        // preferring a recommended one). Nothing qualifies → fail-closed: no env "system" key, no default model.
+        var pick = await _modelSelector.SelectAsync(context.TeamId, structured.Provider, context.AllowedModels, context.SupervisorModel, cancellationToken).ConfigureAwait(false);
+
+        if (pick == null) return NoPoolModelStop();
+
+        var completion = await structured.CompleteStructuredAsync(BuildRequest(context, pick), cancellationToken).ConfigureAwait(false);
 
         var model = Deserialize(completion.Json);
 
         return SupervisorDecisionProjector.Project(model);
     }
 
-    private static StructuredLLMCompletionRequest BuildRequest(SupervisorTurnContext context) => new()
+    private static StructuredLLMCompletionRequest BuildRequest(SupervisorTurnContext context, SupervisorModelPick pick) => new()
     {
-        Model = DefaultModel,
+        // The model id AND the credential both come from the one chosen pool row — nothing guessed, nothing hidden.
+        Model = pick.ModelId,
         SystemPrompt = SystemPrompt,
         UserPrompt = BuildUserPrompt(context),
         JsonSchema = SupervisorDecisionSchema.ResponseSchema,
         MaxOutputTokens = 4096,
         Temperature = 0.2,
+        Credential = pick.Credential,
     };
 
     /// <summary>Internal test accessor (InternalsVisibleTo) — pins the context→prompt framing directly, without a real LLM round-trip.</summary>
@@ -175,8 +189,12 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
         PayloadJson = JsonSerializer.Serialize(new SupervisorStopPayload { Outcome = "no-model", Summary = "No structured-output LLM provider is configured for the supervisor lane." }, AgentJson.Options),
     };
 
-    /// <summary>Mirrors the planner's default structured-capable model. A per-team override is a later concern.</summary>
-    private const string DefaultModel = "claude-sonnet-4-5";
+    /// <summary>Fail-closed terminal stop when the team's credentialed-model POOL has no structured-capable model the brain can run (none configured, or none within the allowed pool / pin) — it stops cleanly rather than guessing a model or key. The pool analogue of <see cref="NoModelStop"/>.</summary>
+    private static SupervisorDecision NoPoolModelStop() => new()
+    {
+        Kind = SupervisorDecisionKinds.Stop,
+        PayloadJson = JsonSerializer.Serialize(new SupervisorStopPayload { Outcome = "no-model", Summary = "No structured-output model is available in the team's credentialed model pool — add a model credential with a structured-capable model, or widen the allowed model pool." }, AgentJson.Options),
+    };
 
     private const string SystemPrompt =
         "You are a software-delivery supervisor driving a bounded loop of decisions toward a goal. " +

@@ -268,12 +268,39 @@ public class SupervisorDeciderTests
     [Fact]
     public async Task A_deployment_with_no_structured_provider_fails_closed_to_a_terminal_stop()
     {
-        var decider = new LlmSupervisorDecider(new FakeRegistry(structured: null));
+        var decider = new LlmSupervisorDecider(new FakeRegistry(structured: null), FakeSelector.WithModel());
 
         var decision = await decider.DecideAsync(Context(), CancellationToken.None);
 
         decision.Kind.ShouldBe(SupervisorDecisionKinds.Stop);
         decision.IsTerminal.ShouldBeTrue("no model → a clean one-turn no-op stop, never a crash");
+    }
+
+    [Fact]
+    public async Task A_run_whose_credentialed_pool_has_no_model_fails_closed_to_a_terminal_stop()
+    {
+        // The structured provider IS registered, but the team's credentialed-model pool yields nothing (none
+        // configured, or none within the allowed pool) → the brain stops cleanly rather than guess a model or key.
+        var decider = new LlmSupervisorDecider(new FakeRegistry(new FakeStructuredClient(new SupervisorModelDecision { Kind = SupervisorDecisionKinds.Plan })), FakeSelector.Empty());
+
+        var decision = await decider.DecideAsync(Context(), CancellationToken.None);
+
+        decision.Kind.ShouldBe(SupervisorDecisionKinds.Stop);
+        decision.IsTerminal.ShouldBeTrue("an empty pool → a clean fail-closed stop");
+        JsonDocument.Parse(decision.PayloadJson).RootElement.GetProperty("outcome").GetString().ShouldBe("no-model");
+    }
+
+    [Fact]
+    public async Task The_decider_calls_with_the_model_the_selector_picked_from_the_pool()
+    {
+        var fake = new FakeStructuredClient(new SupervisorModelDecision { Kind = SupervisorDecisionKinds.Plan });
+        var decider = new LlmSupervisorDecider(new FakeRegistry(fake), FakeSelector.WithModel("claude-opus-4-8"));
+
+        await decider.DecideAsync(Context(), CancellationToken.None);
+
+        // The brain's model is whatever the pool selector chose — there is no default; the pool/pin logic lives in
+        // the selector (integration-tested), and the decider simply uses the chosen row's model id.
+        fake.LastModel.ShouldBe("claude-opus-4-8");
     }
 
     // ── The projector maps each verb to its canonical payload ────────────────────────
@@ -321,7 +348,7 @@ public class SupervisorDeciderTests
         SupervisorDecisionProjector.Project(fill(new SupervisorModelDecision { Kind = kind }));
 
     private static LlmSupervisorDecider Decider(SupervisorModelDecision model) =>
-        new(new FakeRegistry(new FakeStructuredClient(model)));
+        new(new FakeRegistry(new FakeStructuredClient(model)), FakeSelector.WithModel());
 
     // ── Fakes at the honest IStructuredLLMClient seam ────────────────────────────────
 
@@ -338,6 +365,7 @@ public class SupervisorDeciderTests
     private sealed class FakeStructuredClient : ILLMClient, IStructuredLLMClient
     {
         private readonly SupervisorModelDecision _model;
+        public string? LastModel;
 
         public FakeStructuredClient(SupervisorModelDecision model) => _model = model;
 
@@ -346,7 +374,23 @@ public class SupervisorDeciderTests
         public Task<LLMCompletion> CompleteAsync(LLMCompletionRequest request, CancellationToken cancellationToken) =>
             Task.FromResult(new LLMCompletion { Text = "", Model = request.Model });
 
-        public Task<StructuredLLMCompletion> CompleteStructuredAsync(StructuredLLMCompletionRequest request, CancellationToken cancellationToken) =>
-            Task.FromResult(new StructuredLLMCompletion { Json = JsonSerializer.SerializeToElement(_model, SupervisorDecisionSchema.Options), Model = request.Model });
+        public Task<StructuredLLMCompletion> CompleteStructuredAsync(StructuredLLMCompletionRequest request, CancellationToken cancellationToken)
+        {
+            LastModel = request.Model;
+            return Task.FromResult(new StructuredLLMCompletion { Json = JsonSerializer.SerializeToElement(_model, SupervisorDecisionSchema.Options), Model = request.Model });
+        }
+    }
+
+    private sealed class FakeSelector : ISupervisorModelSelector
+    {
+        private readonly SupervisorModelPick? _pick;
+        private FakeSelector(SupervisorModelPick? pick) => _pick = pick;
+
+        public static FakeSelector WithModel(string modelId = "claude-sonnet-4-5") =>
+            new(new SupervisorModelPick { ModelId = modelId, Credential = new ResolvedModelCredential { Provider = "TestSupervisor", ApiKey = "sk-test" } });
+
+        public static FakeSelector Empty() => new(null);
+
+        public Task<SupervisorModelPick?> SelectAsync(Guid teamId, string provider, IReadOnlyList<string>? allowedModels, string? pinnedModel, CancellationToken cancellationToken) => Task.FromResult(_pick);
     }
 }

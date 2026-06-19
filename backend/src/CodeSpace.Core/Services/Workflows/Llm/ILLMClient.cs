@@ -1,3 +1,6 @@
+using System.Text.Json.Serialization;
+using CodeSpace.Messages.Agents;
+
 namespace CodeSpace.Core.Services.Workflows.Llm;
 
 /// <summary>
@@ -29,6 +32,10 @@ public sealed record LLMCompletionRequest
     public required string UserPrompt { get; init; }
     public int MaxOutputTokens { get; init; } = 2048;
     public double Temperature { get; init; } = 0.2;
+
+    /// <summary>The resolved credential (key + base URL) this call authenticates with. Null = the client's operator-global env key. Transient + <c>[JsonIgnore]</c> so the secret never serializes. See <c>StructuredLLMCompletionRequest.Credential</c>.</summary>
+    [JsonIgnore]
+    public ResolvedModelCredential? Credential { get; init; }
 }
 
 public sealed record LLMCompletion

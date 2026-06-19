@@ -2,6 +2,7 @@ using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using CodeSpace.Messages.Agents;
 
 namespace CodeSpace.Core.Services.Workflows.Llm.Anthropic;
 
@@ -47,7 +48,7 @@ public sealed class AnthropicClient : ILLMClient, IStructuredLLMClient
             Messages = new[] { new AnthropicMessage { Role = "user", Content = request.UserPrompt } }
         };
 
-        var parsed = await PostMessagesAsync(body, cancellationToken).ConfigureAwait(false);
+        var parsed = await PostMessagesAsync(body, request.Credential, cancellationToken).ConfigureAwait(false);
 
         var text = string.Join("\n", parsed.Content?.Where(c => c.Type == "text").Select(c => c.Text ?? "") ?? Array.Empty<string>());
 
@@ -75,7 +76,7 @@ public sealed class AnthropicClient : ILLMClient, IStructuredLLMClient
             ToolChoice = new AnthropicToolChoice { Type = "tool", Name = StructuredToolName }
         };
 
-        var parsed = await PostMessagesAsync(body, cancellationToken).ConfigureAwait(false);
+        var parsed = await PostMessagesAsync(body, request.Credential, cancellationToken).ConfigureAwait(false);
 
         var toolUse = parsed.Content?.FirstOrDefault(c => c.Type == "tool_use" && c.Name == StructuredToolName);
 
@@ -91,14 +92,16 @@ public sealed class AnthropicClient : ILLMClient, IStructuredLLMClient
         };
     }
 
-    private async Task<AnthropicMessageResponse> PostMessagesAsync(AnthropicMessageRequest body, CancellationToken cancellationToken)
+    private async Task<AnthropicMessageResponse> PostMessagesAsync(AnthropicMessageRequest body, ResolvedModelCredential? credential, CancellationToken cancellationToken)
     {
-        var apiKey = Environment.GetEnvironmentVariable(ApiKeyEnvVar);
+        // The resolved credential's key wins (so a TEAM's key authenticates the call); the operator-global env key is
+        // the fallback for the single-tenant convenience + any caller not yet passing a credential (removed in S6b).
+        var apiKey = NullIfBlank(credential?.ApiKey) ?? Environment.GetEnvironmentVariable(ApiKeyEnvVar);
 
         if (string.IsNullOrWhiteSpace(apiKey))
-            throw new InvalidOperationException($"Anthropic API key not configured. Set the {ApiKeyEnvVar} environment variable.");
+            throw new InvalidOperationException($"Anthropic API key not configured. Pass a model credential or set the {ApiKeyEnvVar} environment variable.");
 
-        var baseUrl = Environment.GetEnvironmentVariable(ApiBaseUrlEnvVar) ?? DefaultApiBaseUrl;
+        var baseUrl = NullIfBlank(credential?.BaseUrl) ?? Environment.GetEnvironmentVariable(ApiBaseUrlEnvVar) ?? DefaultApiBaseUrl;
         var http = _httpClientFactory.CreateClient(nameof(AnthropicClient));
         http.BaseAddress = new Uri(baseUrl);
         http.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
@@ -114,6 +117,8 @@ public sealed class AnthropicClient : ILLMClient, IStructuredLLMClient
         return JsonSerializer.Deserialize<AnthropicMessageResponse>(responseBody)
             ?? throw new InvalidOperationException("Anthropic API returned empty body.");
     }
+
+    private static string? NullIfBlank(string? value) => string.IsNullOrWhiteSpace(value) ? null : value;
 
     private sealed class AnthropicMessageRequest
     {
