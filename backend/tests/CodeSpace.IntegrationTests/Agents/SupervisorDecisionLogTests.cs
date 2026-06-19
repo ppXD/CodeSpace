@@ -401,6 +401,68 @@ public class SupervisorDecisionLogTests
             .ShouldBeNull("a plain stop replays with no acceptance — the optional field never leaks");
     }
 
+    // ── B1: a spawn's model-authored per-agent dispatch is CARRIED durably (so the executor reads it off the tape) ──
+
+    [Fact]
+    public async Task A_spawn_decisions_per_agent_dispatch_survives_a_real_persist_and_replay()
+    {
+        var teamId = await SeedTeamAsync();
+        var runId = Guid.NewGuid();
+        var repo = Guid.NewGuid();
+
+        var canonical = SupervisorDecisionProjector.Project(new SupervisorModelDecision
+        {
+            Kind = SupervisorDecisionKinds.Spawn,
+            Spawn = new SupervisorSpawnPayload
+            {
+                SubtaskIds = new[] { "s1", "s2" },
+                Agents = new[]
+                {
+                    new SupervisorAgentDispatch { SubtaskId = "s1", Role = "backend implementer", Harness = "codex-cli", RepositoryId = repo, AutonomyLevel = "trusted" },
+                    new SupervisorAgentDispatch { SubtaskId = "s2", Role = "frontend adapter" },
+                },
+            },
+        }).PayloadJson;
+
+        using (var scope = _fixture.BeginScope())
+            await Log(scope).TryClaimAsync(runId, teamId, "spawn", "spawn:agents", InputHash, canonical, 0, CancellationToken.None);
+
+        SupervisorDecisionRecord replayed;
+        using (var scope = _fixture.BeginScope())
+            replayed = (await Log(scope).GetForRunAsync(runId, teamId, CancellationToken.None)).Single();
+
+        var spawn = JsonSerializer.Deserialize<SupervisorSpawnPayload>(replayed.PayloadJson, AgentJson.Options)!;
+        spawn.SubtaskIds.ShouldBe(new[] { "s1", "s2" });
+        spawn.Agents.ShouldNotBeNull("the per-agent dispatch survived the real persist + replay — the tape the executor reads");
+        spawn.Agents!.Count.ShouldBe(2);
+        spawn.Agents[0].Role.ShouldBe("backend implementer");
+        spawn.Agents[0].RepositoryId.ShouldBe(repo);
+        spawn.Agents[0].AutonomyLevel.ShouldBe("trusted");
+        spawn.Agents[1].Role.ShouldBe("frontend adapter");
+    }
+
+    [Fact]
+    public async Task A_spawn_without_per_agent_dispatch_replays_with_none()
+    {
+        var teamId = await SeedTeamAsync();
+        var runId = Guid.NewGuid();
+
+        var canonical = SupervisorDecisionProjector.Project(new SupervisorModelDecision
+        {
+            Kind = SupervisorDecisionKinds.Spawn,
+            Spawn = new SupervisorSpawnPayload { SubtaskIds = new[] { "s1" } },
+        }).PayloadJson;
+
+        canonical.ShouldBe("""{"subtaskIds":["s1"]}""", "no per-agent specs → the pre-field idempotency-key bytes");
+
+        using (var scope = _fixture.BeginScope())
+            await Log(scope).TryClaimAsync(runId, teamId, "spawn", "spawn:plain", InputHash, canonical, 0, CancellationToken.None);
+
+        using var verify = _fixture.BeginScope();
+        JsonSerializer.Deserialize<SupervisorSpawnPayload>((await Log(verify).GetForRunAsync(runId, teamId, CancellationToken.None)).Single().PayloadJson, AgentJson.Options)!.Agents
+            .ShouldBeNull("a plain spawn replays with no per-agent dispatch — the optional field never leaks");
+    }
+
     private static ISupervisorDecisionLog Log(ILifetimeScope scope) => scope.Resolve<ISupervisorDecisionLog>();
 
     private async Task<SupervisorDecisionRecord> ReadRowAsync(Guid decisionId)

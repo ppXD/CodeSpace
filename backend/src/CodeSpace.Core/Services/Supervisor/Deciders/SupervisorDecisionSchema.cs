@@ -65,10 +65,31 @@ public static class SupervisorDecisionSchema
                   "maxItems": 20,
                   "items": { "type": "string" },
                   "description": "Plan-local subtask ids (from a prior 'plan') to fan out as parallel agent runs."
+                },
+                "agents": {
+                  "type": "array",
+                  "minItems": 1,
+                  "maxItems": 20,
+                  "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                      "subtaskId": { "type": "string", "description": "The plan-local subtask this agent runs (its fan-out key)." },
+                      "role": { "type": "string", "description": "Optional semantic role for this agent (e.g. 'backend implementer', 'security reviewer') — descriptive context, never a privilege." },
+                      "goalOverride": { "type": "string", "description": "Optional replacement instruction for this agent's subtask." },
+                      "repositoryId": { "type": "string", "description": "Optional primary repository (must be one the operator already bound; clamped server-side)." },
+                      "targetRepos": { "type": "array", "items": { "type": "object", "additionalProperties": false, "properties": { "repositoryId": { "type": "string" }, "alias": { "type": "string" }, "access": { "type": "string", "enum": ["read", "write"] } }, "required": ["repositoryId"] }, "description": "Optional related-repo subset for this agent — clamped to a subset of the operator's bound repos with no access upgrade." },
+                      "harness": { "type": "string", "description": "Optional harness request (granted only if the operator allow-list permits)." },
+                      "model": { "type": "string", "description": "Optional model request." },
+                      "autonomyLevel": { "type": "string", "enum": ["confined", "standard", "trusted", "unleashed"], "description": "Optional autonomy request (one of the four tiers) — clamped to the run profile's ceiling, never raised past it." }
+                    },
+                    "required": ["subtaskId"]
+                  },
+                  "description": "Optional per-agent dispatch overrides (L4) — one per subtask the model wants to give a distinct role / repo subset / execution envelope. The model proposes; the server clamps every field. Absent → every agent inherits the run-level profile."
                 }
               },
               "required": ["subtaskIds"],
-              "description": "Required when kind == 'spawn'."
+              "description": "Required when kind == 'spawn'. Fan out over 'subtaskIds'; optionally author a per-agent 'agents[]' override keyed by subtaskId."
             },
             "retry": {
               "type": "object",
