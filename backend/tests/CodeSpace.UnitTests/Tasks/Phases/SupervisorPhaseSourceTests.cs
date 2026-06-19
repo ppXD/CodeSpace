@@ -103,7 +103,121 @@ public class SupervisorPhaseSourceTests
         phase.Status.ShouldBe(PhaseStatus.Pending);
     }
 
-    private static SupervisorDecisionRecord Decision(long sequence, string kind, SupervisorDecisionStatus status, string? outcomeJson = null) => new()
+    // ── L4 arc C: model-authored semantic phases project as their own band ─────────────
+
+    [Fact]
+    public void A_flat_plan_adds_no_authored_phases()
+    {
+        var plan = Decision(1, SupervisorDecisionKinds.Plan, SupervisorDecisionStatus.Succeeded, outcomeJson: """{"planned":[],"count":0}""");
+
+        SupervisorPhaseSource.ProjectDecisions(new[] { plan }, EmptyStatuses).Count
+            .ShouldBe(1, "a flat plan (no phases) contributes only the per-decision phase — the board is verbatim");
+    }
+
+    [Fact]
+    public void A_phased_plan_projects_its_phases_grouping_the_agents_that_ran_their_subtasks()
+    {
+        var agentA = Guid.NewGuid();
+        var agentB = Guid.NewGuid();
+
+        // plan grouped sa → Implement, sb → Verify (Verify carries an acceptance command).
+        var plan = Decision(1, SupervisorDecisionKinds.Plan, SupervisorDecisionStatus.Succeeded, outcomeJson:
+            """{"planned":[],"count":2,"phases":[{"id":"impl","title":"Implement","subtaskIds":["sa"]},{"id":"verify","title":"Verify","subtaskIds":["sb"],"acceptance":{"command":["sh","check.sh"]}}]}""");
+        // the spawn fanned out [sa, sb] → [agentA, agentB] (subtaskIds[i] ↔ agentRunIds[i]).
+        var spawn = Decision(2, SupervisorDecisionKinds.Spawn, SupervisorDecisionStatus.Succeeded,
+            outcomeJson: $$"""{"agentCount":2,"agentRunIds":["{{agentA}}","{{agentB}}"]}""", payloadJson: """{"subtaskIds":["sa","sb"]}""");
+
+        var statuses = new Dictionary<Guid, AgentRunStatus> { [agentA] = AgentRunStatus.Succeeded, [agentB] = AgentRunStatus.Succeeded };
+
+        var all = SupervisorPhaseSource.ProjectDecisions(new[] { plan, spawn }, statuses);
+
+        // the per-decision phases (Plan, Spawn) PLUS the two authored phases, in their own band after the tape.
+        var authored = all.Where(p => p.Kind == "phase").ToList();
+        authored.Select(p => p.Label).ShouldBe(new[] { "Implement", "Verify" });
+        authored.Select(p => p.Order).ShouldBe(new[] { SupervisorPhaseSource.PhaseOrderBase + 0, SupervisorPhaseSource.PhaseOrderBase + 1 });
+
+        var implement = authored.Single(p => p.Label == "Implement");
+        implement.Agents.Single().AgentRunId.ShouldBe(agentA, "the Implement phase groups the agent that ran its subtask sa");
+        implement.Status.ShouldBe(PhaseStatus.Succeeded, "all of the phase's agents succeeded → the phase succeeded");
+
+        var verify = authored.Single(p => p.Label == "Verify");
+        verify.Agents.Single().AgentRunId.ShouldBe(agentB);
+        verify.Summary.ShouldBe("sh check.sh", "the phase's acceptance command surfaces for the board");
+    }
+
+    [Fact]
+    public void A_phase_status_folds_to_failed_when_one_of_its_agents_failed()
+    {
+        var agentA = Guid.NewGuid();
+
+        var plan = Decision(1, SupervisorDecisionKinds.Plan, SupervisorDecisionStatus.Succeeded, outcomeJson:
+            """{"planned":[],"count":1,"phases":[{"id":"impl","title":"Implement","subtaskIds":["sa"]}]}""");
+        var spawn = Decision(2, SupervisorDecisionKinds.Spawn, SupervisorDecisionStatus.Succeeded,
+            outcomeJson: $$"""{"agentCount":1,"agentRunIds":["{{agentA}}"]}""", payloadJson: """{"subtaskIds":["sa"]}""");
+
+        var statuses = new Dictionary<Guid, AgentRunStatus> { [agentA] = AgentRunStatus.Failed };
+
+        SupervisorPhaseSource.ProjectDecisions(new[] { plan, spawn }, statuses).Single(p => p.Kind == "phase")
+            .Status.ShouldBe(PhaseStatus.Failed, "a phase with a failed agent folds to Failed");
+    }
+
+    [Fact]
+    public void A_phase_with_no_staged_agents_yet_is_pending()
+    {
+        var plan = Decision(1, SupervisorDecisionKinds.Plan, SupervisorDecisionStatus.Succeeded, outcomeJson:
+            """{"planned":[],"count":1,"phases":[{"id":"impl","title":"Implement","subtaskIds":["sa"]}]}""");
+
+        // No spawn yet → no subtask→agent mapping → the phase has no children → Pending.
+        var phase = SupervisorPhaseSource.ProjectDecisions(new[] { plan }, EmptyStatuses).Single(p => p.Kind == "phase");
+
+        phase.Agents.ShouldBeEmpty();
+        phase.Status.ShouldBe(PhaseStatus.Pending);
+    }
+
+    [Fact]
+    public void A_re_planned_run_projects_the_latest_plans_phases()
+    {
+        var agentA = Guid.NewGuid();
+
+        // plan-1 grouped "old" → an early phase; plan-2 RE-planned grouping "sa" → Build; the spawn ran plan-2's subtask.
+        var plan1 = Decision(1, SupervisorDecisionKinds.Plan, SupervisorDecisionStatus.Succeeded, outcomeJson:
+            """{"planned":[],"count":1,"phases":[{"id":"stale","title":"Investigate","subtaskIds":["old"]}]}""");
+        var plan2 = Decision(2, SupervisorDecisionKinds.Plan, SupervisorDecisionStatus.Succeeded, outcomeJson:
+            """{"planned":[],"count":1,"phases":[{"id":"build","title":"Build","subtaskIds":["sa"]}]}""");
+        var spawn = Decision(3, SupervisorDecisionKinds.Spawn, SupervisorDecisionStatus.Succeeded,
+            outcomeJson: $$"""{"agentCount":1,"agentRunIds":["{{agentA}}"]}""", payloadJson: """{"subtaskIds":["sa"]}""");
+
+        var statuses = new Dictionary<Guid, AgentRunStatus> { [agentA] = AgentRunStatus.Succeeded };
+
+        var authored = SupervisorPhaseSource.ProjectDecisions(new[] { plan1, plan2, spawn }, statuses).Where(p => p.Kind == "phase").ToList();
+
+        authored.Select(p => p.Label).ShouldBe(new[] { "Build" }, "the phases track the LATEST plan — the one the spawns were built from, not the stale first plan");
+        authored.Single().Agents.Single().AgentRunId.ShouldBe(agentA);
+    }
+
+    [Fact]
+    public void A_retried_subtask_phase_shows_the_latest_attempt_not_the_failed_original()
+    {
+        var failedAgent = Guid.NewGuid();
+        var retryAgent = Guid.NewGuid();
+
+        var plan = Decision(1, SupervisorDecisionKinds.Plan, SupervisorDecisionStatus.Succeeded, outcomeJson:
+            """{"planned":[],"count":1,"phases":[{"id":"impl","title":"Implement","subtaskIds":["sa"]}]}""");
+        var spawn = Decision(2, SupervisorDecisionKinds.Spawn, SupervisorDecisionStatus.Succeeded,
+            outcomeJson: $$"""{"agentCount":1,"agentRunIds":["{{failedAgent}}"]}""", payloadJson: """{"subtaskIds":["sa"]}""");
+        // the supervisor RETRIED sa → a fresh agent that succeeded.
+        var retry = Decision(3, SupervisorDecisionKinds.Retry, SupervisorDecisionStatus.Succeeded,
+            outcomeJson: $$"""{"agentCount":1,"agentRunIds":["{{retryAgent}}"]}""", payloadJson: """{"subtaskId":"sa"}""");
+
+        var statuses = new Dictionary<Guid, AgentRunStatus> { [failedAgent] = AgentRunStatus.Failed, [retryAgent] = AgentRunStatus.Succeeded };
+
+        var implement = SupervisorPhaseSource.ProjectDecisions(new[] { plan, spawn, retry }, statuses).Single(p => p.Kind == "phase");
+
+        implement.Agents.Single().AgentRunId.ShouldBe(retryAgent, "the retried subtask shows its FRESH agent (latest attempt wins), not the original failed one");
+        implement.Status.ShouldBe(PhaseStatus.Succeeded, "the subtask ultimately succeeded → the phase succeeded (ground-truth, not the stale failure)");
+    }
+
+    private static SupervisorDecisionRecord Decision(long sequence, string kind, SupervisorDecisionStatus status, string? outcomeJson = null, string payloadJson = "{}") => new()
     {
         Id = Guid.NewGuid(),
         TeamId = Guid.NewGuid(),
@@ -113,7 +227,7 @@ public class SupervisorPhaseSourceTests
         IdempotencyKey = $"{kind}:{sequence}",
         InputHash = "hash",
         Status = status,
-        PayloadJson = "{}",
+        PayloadJson = payloadJson,
         OutcomeJson = outcomeJson,
         CreatedDate = DateTimeOffset.UtcNow,
         LastModifiedDate = DateTimeOffset.UtcNow,

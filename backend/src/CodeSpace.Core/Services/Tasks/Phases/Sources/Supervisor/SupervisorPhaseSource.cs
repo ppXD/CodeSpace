@@ -47,9 +47,105 @@ public sealed class SupervisorPhaseSource : IRunPhaseSource, IScopedDependency
         return ProjectDecisions(decisions, agentStatusById);
     }
 
-    /// <summary>The pure projection step — decisions + the already-resolved ground-truth agent statuses → phases. Separated from the DB read so it is unit-testable without a DbContext.</summary>
-    public static IReadOnlyList<RunPhase> ProjectDecisions(IReadOnlyList<SupervisorDecisionRecord> decisions, IReadOnlyDictionary<Guid, AgentRunStatus> agentStatusById) =>
-        decisions.Select(d => ToPhase(d, agentStatusById)).ToList();
+    /// <summary>High base offset for the model-authored SEMANTIC PHASES (L4 arc C) — they sort AFTER both the structural node phases AND the per-decision tape, as their own top-level band on the board.</summary>
+    public const int PhaseOrderBase = 2_000_000;
+
+    /// <summary>The pure projection step — decisions + the already-resolved ground-truth agent statuses → phases. Separated from the DB read so it is unit-testable without a DbContext. One phase per decision, PLUS the model-authored semantic phases (L4 arc C) when the plan grouped its subtasks; a flat plan adds none (the per-decision board verbatim).</summary>
+    public static IReadOnlyList<RunPhase> ProjectDecisions(IReadOnlyList<SupervisorDecisionRecord> decisions, IReadOnlyDictionary<Guid, AgentRunStatus> agentStatusById)
+    {
+        var phases = decisions.Select(d => ToPhase(d, agentStatusById)).ToList();
+
+        phases.AddRange(AuthoredPhases(decisions, agentStatusById));
+
+        return phases;
+    }
+
+    /// <summary>
+    /// L4 arc C: the model-authored semantic phases off the <c>plan</c> decision, projected as their OWN
+    /// <see cref="RunPhase"/>s so the board reads "Investigate / Implement / Review" rather than a flat decision tape.
+    /// Additive — a flat plan (no phases) contributes none. Each phase's children are the agents the spawns staged for
+    /// its grouped subtasks (a phase's <c>subtaskIds</c> mapped through the spawn payload's <c>subtaskIds[i]</c> ↔ outcome
+    /// <c>agentRunIds[i]</c> staging order), with the ground-truth status; its status folds from those children.
+    /// </summary>
+    private static IReadOnlyList<RunPhase> AuthoredPhases(IReadOnlyList<SupervisorDecisionRecord> decisions, IReadOnlyDictionary<Guid, AgentRunStatus> agentStatusById)
+    {
+        // The LATEST plan — matching the executor, which resolves a spawn's subtasks from the most recent plan
+        // (ResolvePlannedSubtasks). On a re-plan, the phases must track the same plan the spawns were built from.
+        var plan = decisions.LastOrDefault(d => d.DecisionKind == SupervisorDecisionKinds.Plan);
+        var authored = SupervisorOutcome.ReadPlanPhases(plan?.OutcomeJson);
+
+        if (authored.Count == 0) return Array.Empty<RunPhase>();
+
+        var subtaskAgents = SubtaskAgentMap(decisions);
+
+        return authored.Select((phase, index) => ToAuthoredPhase(phase, index, plan!, subtaskAgents, agentStatusById)).ToList();
+    }
+
+    private static RunPhase ToAuthoredPhase(SupervisorPlanPhase phase, int index, SupervisorDecisionRecord plan, IReadOnlyDictionary<string, Guid> subtaskAgents, IReadOnlyDictionary<Guid, AgentRunStatus> agentStatusById)
+    {
+        var agents = phase.SubtaskIds
+            .Select(subtaskAgents.GetValueOrDefault)
+            .Where(id => id != Guid.Empty && agentStatusById.ContainsKey(id))
+            .Select(id => new PhaseAgentRef { AgentRunId = id, Status = agentStatusById[id].ToString() })
+            .ToList();
+
+        return new RunPhase
+        {
+            Id = $"phase-{phase.Id}",
+            Label = phase.Title,
+            Kind = "phase",
+            Status = PhaseStatusFromAgents(agents),
+            Order = PhaseOrderBase + index,
+            Agents = agents,
+            Metrics = MetricsFor(agents),
+            Summary = PhaseAcceptanceSummary(phase.Acceptance),
+            SourceKey = Key,
+            StartedAt = plan.CreatedDate,
+            CompletedAt = null,
+        };
+    }
+
+    /// <summary>
+    /// subtaskId → the agent-run id that ran it, walking <c>spawn</c> AND <c>retry</c> decisions in Sequence order so the
+    /// CHRONOLOGICALLY-LATEST attempt wins (a spawn fans the payload <c>subtaskIds[i]</c> ↔ outcome <c>agentRunIds[i]</c>;
+    /// a retry re-runs ONE subtask as a fresh agent). So a subtask that failed and was retried shows the retry's fresh
+    /// agent (ground-truth), not the original failed one.
+    /// </summary>
+    private static IReadOnlyDictionary<string, Guid> SubtaskAgentMap(IReadOnlyList<SupervisorDecisionRecord> decisions)
+    {
+        var map = new Dictionary<string, Guid>();
+
+        foreach (var d in decisions.Where(d => d.DecisionKind is SupervisorDecisionKinds.Spawn or SupervisorDecisionKinds.Retry).OrderBy(d => d.Sequence))
+        {
+            var agentIds = SupervisorOutcome.ReadStagedAgentRunIds(d.OutcomeJson);
+
+            if (d.DecisionKind == SupervisorDecisionKinds.Spawn)
+            {
+                var subtaskIds = SupervisorOutcome.ReadSpawnSubtaskIds(d.PayloadJson);
+
+                for (var i = 0; i < Math.Min(subtaskIds.Count, agentIds.Count); i++)
+                    map[subtaskIds[i]] = agentIds[i];
+            }
+            else if (SupervisorOutcome.ReadRetrySubtaskId(d.PayloadJson) is { } retried && agentIds.Count > 0)
+                map[retried] = agentIds[0];
+        }
+
+        return map;
+    }
+
+    /// <summary>A phase's status folds from its agents: none → Pending; any failed/cancelled/timed-out → Failed; all succeeded → Succeeded; else still Active.</summary>
+    private static PhaseStatus PhaseStatusFromAgents(IReadOnlyList<PhaseAgentRef> agents)
+    {
+        if (agents.Count == 0) return PhaseStatus.Pending;
+
+        if (agents.Any(a => a.Status is nameof(AgentRunStatus.Failed) or nameof(AgentRunStatus.Cancelled) or nameof(AgentRunStatus.TimedOut))) return PhaseStatus.Failed;
+
+        return agents.All(a => a.Status == nameof(AgentRunStatus.Succeeded)) ? PhaseStatus.Succeeded : PhaseStatus.Active;
+    }
+
+    /// <summary>A phase's acceptance rendered for the board: the human description, else the argv command joined — null when the phase declared no acceptance.</summary>
+    private static string? PhaseAcceptanceSummary(SupervisorAcceptanceSpec? acceptance) =>
+        acceptance == null ? null : acceptance.Description ?? string.Join(" ", acceptance.Command);
 
     /// <summary>The REAL terminal status of every agent any spawn/retry decision staged, keyed by id, team-scoped — the ground-truth fold (mirrors <c>SupervisorScorecardService.SpawnedAgentStatusesByRunAsync</c>).</summary>
     private async Task<IReadOnlyDictionary<Guid, AgentRunStatus>> SpawnedAgentStatusesAsync(Guid teamId, IReadOnlyList<SupervisorDecisionRecord> decisions, CancellationToken cancellationToken)
