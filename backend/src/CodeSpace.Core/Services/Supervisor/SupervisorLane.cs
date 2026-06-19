@@ -62,6 +62,9 @@ public static class SupervisorLane
     /// <summary>The hard ceiling an operator's <c>MaxResolveAttempts</c> is clamped to — a conflict the model can't reconcile in a few tries is for a human, not an infinite retry. Pinned (Rule 8).</summary>
     public const int MaxResolveAttemptsCeiling = 5;
 
+    /// <summary>Wall-clock cap (seconds) for the OBJECTIVE acceptance grade — re-cloning a resolver's branch and running the operator's acceptance command (L4 A3). A hung check is a non-accept, not a hang. An operator-tunable field is a follow-up. Pinned (Rule 8).</summary>
+    public const int AcceptanceGradeTimeoutSeconds = 120;
+
     /// <summary>Reads the env var through the single gate. Default-OFF: true only for the explicit on-values.</summary>
     public static bool IsEnabled() => IsEnabled(Environment.GetEnvironmentVariable(EnabledEnvVar));
 

@@ -18,14 +18,16 @@ public sealed partial class SupervisorTurnService : ISupervisorTurnService, ISco
     private readonly ISupervisorDecider _decider;
     private readonly ISupervisorActionExecutor _executor;
     private readonly CodeSpaceDbContext _db;
+    private readonly ISupervisorAcceptanceGrader _acceptanceGrader;
     private readonly ILogger<SupervisorTurnService> _logger;
 
-    public SupervisorTurnService(ISupervisorDecisionLog ledger, ISupervisorDecider decider, ISupervisorActionExecutor executor, CodeSpaceDbContext db, ILogger<SupervisorTurnService> logger)
+    public SupervisorTurnService(ISupervisorDecisionLog ledger, ISupervisorDecider decider, ISupervisorActionExecutor executor, CodeSpaceDbContext db, ISupervisorAcceptanceGrader acceptanceGrader, ILogger<SupervisorTurnService> logger)
     {
         _ledger = ledger;
         _decider = decider;
         _executor = executor;
         _db = db;
+        _acceptanceGrader = acceptanceGrader;
         _logger = logger;
     }
 
