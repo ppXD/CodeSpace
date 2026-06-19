@@ -43,4 +43,29 @@ public sealed record BenchmarkGradingContext
 
     /// <summary>The sandbox runner the grader runs its grading command in — the SAME runner kind the agent ran on, so the test command executes in an environment consistent with the run.</summary>
     public required ISandboxRunner Runner { get; init; }
+
+    /// <summary>
+    /// Build a grading context for an AD-HOC command grade — a caller that holds only a test command + a prepared
+    /// workspace + a runner, not a corpus <see cref="BenchmarkTask"/> (e.g. the supervisor's objective acceptance
+    /// gate). The corpus-only fields are pinned here ONCE, so the <see cref="Graders.TestsPassGrader"/> oracle is
+    /// reused verbatim (it reads only <see cref="BenchmarkTask.TestCommand"/> + <see cref="BenchmarkTask.TimeoutSeconds"/>)
+    /// without any caller hand-stubbing a fake task or duplicating the run-command→exit-code logic.
+    /// </summary>
+    public static BenchmarkGradingContext ForCommand(IReadOnlyList<string> command, int timeoutSeconds, string workspaceDirectory, ISandboxRunner runner) => new()
+    {
+        Task = new BenchmarkTask
+        {
+            Id = "ad-hoc-command",
+            Description = "ad-hoc command grade",
+            FixtureRef = "",
+            Goal = "",
+            Grading = BenchmarkGradingKind.TestsPass,
+            Harness = "",
+            Modes = Array.Empty<BenchmarkMode>(),
+            TestCommand = command,
+            TimeoutSeconds = timeoutSeconds,
+        },
+        WorkspaceDirectory = workspaceDirectory,
+        Runner = runner,
+    };
 }
