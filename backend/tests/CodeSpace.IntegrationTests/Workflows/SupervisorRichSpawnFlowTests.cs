@@ -274,6 +274,72 @@ public class SupervisorRichSpawnFlowTests : IDisposable
         };
     }
 
+    [Fact]
+    public async Task A_persona_model_outside_the_allowed_pool_fails_the_spawn_closed()
+    {
+        // S4 backstop: the operator's pool must gate the PERSONA model too. A plain spawn (no per-agent model) lets the
+        // dispatch-time resolver fill the profile persona's model AFTER the pre-resolution clamp — so a persona that
+        // references a pool-EXCLUDED model must still fail closed, else the pool is bypassable via a persona reference.
+        using (var s = _fixture.BeginScope()) s.Resolve<SupervisorDecisionScript>().PlanSpawnStop();
+
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var personaId = await SeedPersonaAsync(teamId, PersonaPrompt, PersonaModel, toolsJson: null);   // PersonaModel = "claude-opus"
+
+        // The pool allows a DIFFERENT model than the persona's → the resolved persona model is out of pool.
+        var workflowId = await CreatePersonaPoolWorkflowAsync(teamId, userId, personaId);
+        var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
+
+        var jobClient = ResolveJobClient();
+        jobClient.Clear();
+        jobClient.AutoExecute = false;
+
+        try
+        {
+            await RunEngineAsync(runId);
+            await ResolveSelfAdvanceAsync(runId);
+            try { await RunEngineAsync(runId); } catch { /* the clamp failure surfaces through the node; asserted below */ }
+
+            using var verify = _fixture.BeginScope();
+            var db = verify.Resolve<CodeSpaceDbContext>();
+
+            var spawn = await db.SupervisorDecisionRecord.AsNoTracking().SingleAsync(d => d.SupervisorRunId == runId && d.DecisionKind == SupervisorDecisionKinds.Spawn);
+            spawn.Status.ShouldBe(SupervisorDecisionStatus.Failed, "the persona's pool-excluded model terminalized the spawn — the pool is NOT bypassable via a persona reference");
+            spawn.Error.ShouldContain("allowed model pool", Case.Insensitive);
+
+            (await db.AgentRun.AsNoTracking().CountAsync(r => r.WorkflowRunId == runId)).ShouldBe(0, "no agent staged — the post-resolution clamp rejected the persona model");
+        }
+        finally
+        {
+            jobClient.AutoExecute = true;
+        }
+    }
+
+    private async Task<Guid> CreatePersonaPoolWorkflowAsync(Guid teamId, Guid userId, Guid personaId)
+    {
+        using var scope = _fixture.BeginScopeAs(userId, teamId, Roles.Admin);
+        var config = $$"""{ "goal": "ship it", "allowedModels": ["only-allowed-model"], "agentProfile": { "agentDefinitionId": "{{personaId}}" } }""";
+        return await scope.Resolve<IMediator>().Send(new CreateWorkflowCommand
+        {
+            Name = "sup-pool-" + Guid.NewGuid().ToString("N")[..6],
+            Description = null,
+            Definition = SupervisorDefinitionWithConfig(config),
+            Activations = new List<WorkflowActivationInput>(),
+            Enabled = true,
+        });
+    }
+
+    private static WorkflowDefinition SupervisorDefinitionWithConfig(string config) => new()
+    {
+        SchemaVersion = 1,
+        Nodes = new List<NodeDefinition>
+        {
+            new() { Id = "start", TypeKey = "trigger.manual", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
+            new() { Id = "sup", TypeKey = "agent.supervisor", Config = WorkflowsTestSeed.Json(config), Inputs = WorkflowsTestSeed.EmptyJson() },
+            new() { Id = "end", TypeKey = "builtin.terminal", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
+        },
+        Edges = new List<EdgeDefinition> { new() { From = "start", To = "sup" }, new() { From = "sup", To = "end" } },
+    };
+
     private async Task<Guid> CreateBadPersonaWorkflowAsync(Guid teamId, Guid userId, Guid missingPersonaId)
     {
         using var scope = _fixture.BeginScopeAs(userId, teamId, Roles.Admin);

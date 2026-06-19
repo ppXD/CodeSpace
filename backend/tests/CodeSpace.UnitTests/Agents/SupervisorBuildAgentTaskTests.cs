@@ -314,6 +314,31 @@ public class SupervisorBuildAgentTaskTests
     }
 
     [Fact]
+    public void An_authored_model_in_the_allowed_pool_is_stamped()
+    {
+        var ctx = new SupervisorTurnContext { Goal = "g", AllowedModels = new[] { "claude-opus-4-8", "gpt-5.4-codex" } };
+
+        BuildWithSpec(ctx, new SupervisorAgentDispatch { SubtaskId = SubtaskId, Model = "claude-opus-4-8" }).Model.ShouldBe("claude-opus-4-8");
+    }
+
+    [Fact]
+    public void An_authored_model_outside_the_allowed_pool_fails_closed_through_the_clamp()
+    {
+        var ctx = new SupervisorTurnContext { Goal = "g", AllowedModels = new[] { "claude-opus-4-8" } };
+
+        Should.Throw<SupervisorModelAccessException>(() => BuildWithSpec(ctx, new SupervisorAgentDispatch { SubtaskId = SubtaskId, Model = "rogue-model" }));
+    }
+
+    [Fact]
+    public void No_pool_leaves_an_authored_model_byte_identical()
+    {
+        // No AllowedModels on the context (the pre-S4 path) → the authored model passes through unclamped.
+        var task = BuildWithSpec(new SupervisorTurnContext { Goal = "g" }, new SupervisorAgentDispatch { SubtaskId = SubtaskId, Model = "any-model" });
+
+        task.Model.ShouldBe("any-model");
+    }
+
+    [Fact]
     public void Passing_a_null_dispatch_is_byte_identical_to_the_no_dispatch_overload()
     {
         var ctx = new SupervisorTurnContext { Goal = "g", AgentProfile = new SupervisorAgentProfile { RepositoryId = Guid.NewGuid(), Harness = "claude-code", AutonomyLevel = "trusted" } };

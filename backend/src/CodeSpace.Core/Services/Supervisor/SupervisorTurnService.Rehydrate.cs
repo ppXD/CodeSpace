@@ -89,6 +89,8 @@ public sealed partial class SupervisorTurnService
             ApprovalPolicy = SupervisorGoalPlan.From(goalConfig).ApprovalPolicy,
             AgentProfile = goalConfig?.AgentProfile,
             SpawnedAgentTools = NormalizeTools(goalConfig?.AllowedTools),
+            AllowedModels = NormalizeModels(goalConfig?.AllowedModels),
+            SupervisorModel = string.IsNullOrWhiteSpace(goalConfig?.SupervisorModel) ? null : goalConfig!.SupervisorModel!.Trim(),
         };
     }
 
@@ -317,6 +319,14 @@ public sealed partial class SupervisorTurnService
     /// </summary>
     private static IReadOnlyList<string>? NormalizeTools(IReadOnlyList<string>? allowedTools) =>
         allowedTools?.Where(t => !string.IsNullOrWhiteSpace(t)).ToList();
+
+    /// <summary>Normalise the operator's allowed model pool: drop blanks + trim, and collapse an empty / all-blank list to <c>null</c> ("no restriction") so a configured-but-empty pool reads as unbounded (byte-identical), never as "no model allowed".</summary>
+    private static IReadOnlyList<string>? NormalizeModels(IReadOnlyList<string>? allowedModels)
+    {
+        var models = allowedModels?.Where(m => !string.IsNullOrWhiteSpace(m)).Select(m => m.Trim()).ToList();
+
+        return models is { Count: > 0 } ? models : null;
+    }
 
     /// <summary>Normalise the operator's acceptance command (L4 A3) into a runnable argv: drop blank elements, and — UNLIKE the tool tri-state — collapse an empty/all-blank list to <c>null</c> ("no objective grade; the resolver self-report marker stands"), so a configured-but-empty list never grades.</summary>
     private static IReadOnlyList<string>? NormalizeCommand(IReadOnlyList<string>? command)

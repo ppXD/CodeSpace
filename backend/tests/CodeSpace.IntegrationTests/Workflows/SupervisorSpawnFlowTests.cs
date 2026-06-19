@@ -245,6 +245,43 @@ public class SupervisorSpawnFlowTests : IDisposable
     }
 
     [Fact]
+    public async Task A_dispatch_authoring_a_model_outside_the_pool_fails_the_spawn_cleanly()
+    {
+        // S4 safety: a model-authored dispatch whose model is OUTSIDE the operator's allowed pool throws the model
+        // clamp; the turn service terminalizes the spawn as a CLEAN Failed (never stranded Running), staging no agents.
+        // Also proves the config round-trip: allowedModels on the node config threads into the turn context's pool.
+        using (var s = _fixture.BeginScope()) s.Resolve<SupervisorDecisionScript>().PlanSpawnBadModelStop();
+
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var workflowId = await CreateWorkflowAsync(teamId, userId, """{"goal":"ship the feature","allowedModels":["allowed-model"]}""");
+        var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
+
+        var jobClient = ResolveJobClient();
+        jobClient.Clear();
+        jobClient.AutoExecute = false;
+
+        try
+        {
+            await RunEngineAsync(runId);
+            await ResolveSelfAdvanceAsync(runId);
+            try { await RunEngineAsync(runId); } catch { /* the clamp failure surfaces through the node; the decision terminalized below */ }
+
+            using var verify = _fixture.BeginScope();
+            var db = verify.Resolve<CodeSpaceDbContext>();
+
+            var spawn = (await db.SupervisorDecisionRecord.AsNoTracking().Where(r => r.SupervisorRunId == runId && r.DecisionKind == SupervisorDecisionKinds.Spawn).ToListAsync()).Single();
+            spawn.Status.ShouldBe(SupervisorDecisionStatus.Failed, "the model clamp violation terminalized the spawn as a CLEAN failure — never stranded Running");
+            spawn.Error.ShouldContain("allowed model pool", Case.Insensitive, "the failure reason is the legible clamp message");
+
+            (await db.AgentRun.AsNoTracking().CountAsync(r => r.WorkflowRunId == runId)).ShouldBe(0, "no agent was staged — the clamp rejected the dispatch before any run was created");
+        }
+        finally
+        {
+            jobClient.AutoExecute = true;
+        }
+    }
+
+    [Fact]
     public async Task A_restart_mid_spawn_does_not_double_spawn()
     {
         var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
@@ -815,14 +852,14 @@ public class SupervisorSpawnFlowTests : IDisposable
         await notifier.NotifyCompletedAsync(agentRunId, CancellationToken.None);
     }
 
-    private async Task<Guid> CreateWorkflowAsync(Guid teamId, Guid userId)
+    private async Task<Guid> CreateWorkflowAsync(Guid teamId, Guid userId, string? supervisorConfig = null)
     {
         using var scope = _fixture.BeginScopeAs(userId, teamId, Roles.Admin);
         return await scope.Resolve<IMediator>().Send(new CreateWorkflowCommand
         {
             Name = "sup-spawn-" + Guid.NewGuid().ToString("N")[..6],
             Description = null,
-            Definition = SupervisorDefinition(),
+            Definition = SupervisorDefinition(supervisorConfig),
             Activations = new List<WorkflowActivationInput>(),
             Enabled = true,
         });
@@ -859,13 +896,13 @@ public class SupervisorSpawnFlowTests : IDisposable
     }
 
     // manual → sup (agent.supervisor) → terminal
-    private static WorkflowDefinition SupervisorDefinition() => new()
+    private static WorkflowDefinition SupervisorDefinition(string? supervisorConfig = null) => new()
     {
         SchemaVersion = 1,
         Nodes = new List<NodeDefinition>
         {
             new() { Id = "start", TypeKey = "trigger.manual", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
-            new() { Id = "sup", TypeKey = "agent.supervisor", Config = WorkflowsTestSeed.Json("""{"goal":"ship the feature"}"""), Inputs = WorkflowsTestSeed.EmptyJson() },
+            new() { Id = "sup", TypeKey = "agent.supervisor", Config = WorkflowsTestSeed.Json(supervisorConfig ?? """{"goal":"ship the feature"}"""), Inputs = WorkflowsTestSeed.EmptyJson() },
             new() { Id = "end", TypeKey = "builtin.terminal", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
         },
         Edges = new List<EdgeDefinition>

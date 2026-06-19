@@ -67,6 +67,8 @@ public sealed class AgentSupervisorNode : INodeRuntime
                 "approvalPolicy": { "type": "string", "enum": ["none", "spawns"], "description": "Whether a human must approve every spawn/retry before any agent is created. 'none' (default) = autonomous; 'spawns' = the supervisor parks on an approval card before spawning." },
                 "allowedAgents": { "type": "array", "items": { "type": "string" }, "description": "Reserved — harness/agent kinds the supervisor may spawn. Stored; enforcement is a follow-up." },
                 "allowedTools": { "type": "array", "items": { "type": "string" }, "description": "Tool allow-list every spawned agent is restricted to (e.g. Read, Grep, Bash). Empty = the harness default. Added to (not replacing) a persona's tools." },
+                "supervisorModel": { "type": "string", "description": "The model the supervisor's own decision-making brain runs on (distinct from the agents it spawns). Leave empty for the deployment default." },
+                "allowedModels": { "type": "array", "items": { "type": "string" }, "description": "Allowed model pool for the agents the supervisor dispatches — when set, a per-agent model the supervisor picks must be one of these. Empty = no restriction (the supervisor may pick any model)." },
                 "acceptanceChecks": { "type": "array", "items": { "type": "string" }, "description": "Reserved — checks to verify before declaring success. Stored; the acceptance gate is a follow-up." },
                 "agentProfile": {
                   "type": "object",

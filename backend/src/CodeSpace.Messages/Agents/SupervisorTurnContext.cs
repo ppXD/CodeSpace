@@ -100,6 +100,16 @@ public sealed record SupervisorTurnContext
     /// existing <c>SupervisorGoalConfig.AllowedTools</c> field rather than duplicating it on the profile.
     /// </summary>
     public IReadOnlyList<string>? SpawnedAgentTools { get; init; }
+
+    /// <summary>
+    /// The operator's ALLOWED MODEL POOL for spawned agents (the model analogue of the bound repos) — the
+    /// model-authored per-agent model is clamped to this by <c>SupervisorModelClamp</c>. Null / empty = no restriction
+    /// (the supervisor may pick any model — byte-identical). Threaded from <c>SupervisorGoalConfig.AllowedModels</c>.
+    /// </summary>
+    public IReadOnlyList<string>? AllowedModels { get; init; }
+
+    /// <summary>The model the supervisor's own decider runs on (carried from <c>SupervisorGoalConfig.SupervisorModel</c>). Null = the deployment default. Stored for the in-process decider-rooting slice; unused by the spawn path.</summary>
+    public string? SupervisorModel { get; init; }
 }
 
 /// <summary>One prior decision replayed from the ledger — its row id + kind + emitted payload + (for a terminal) its recorded outcome. A pure data noun.</summary>

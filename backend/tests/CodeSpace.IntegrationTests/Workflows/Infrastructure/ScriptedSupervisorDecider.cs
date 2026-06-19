@@ -36,6 +36,7 @@ public sealed class ScriptedSupervisorDecider : ISupervisorDecider
             SupervisorScriptMode.PlanThenSpawnForever => PlanThenSpawnForever(context),
             SupervisorScriptMode.PlanSpawnDispatchStop => PlanSpawnDispatchStop(context),
             SupervisorScriptMode.PlanSpawnBadRepoStop => PlanSpawnBadRepoStop(context),
+            SupervisorScriptMode.PlanSpawnBadModelStop => PlanSpawnBadModelStop(context),
             _ => PlanThenStop(context),
         };
 
@@ -119,6 +120,19 @@ public sealed class ScriptedSupervisorDecider : ISupervisorDecider
             },
         });
 
+    // S4: a spawn whose dispatch authors a model OUTSIDE the operator's allowed pool → the per-agent model clamp throws,
+    // and the turn service must terminalize the spawn as a CLEAN failure (no stranded-Running decision, no agent staged).
+    private static SupervisorDecision PlanSpawnBadModelStop(SupervisorTurnContext context) => context.TurnNumber == 0
+        ? Plan(context.Goal)
+        : Canonical(SupervisorDecisionKinds.Spawn, new SupervisorSpawnPayload
+        {
+            SubtaskIds = new[] { SubtaskA },
+            Agents = new[]
+            {
+                new SupervisorAgentDispatch { SubtaskId = SubtaskA, Model = "rogue-model" },
+            },
+        });
+
     private static SupervisorDecision Plan(string goal) => Canonical(SupervisorDecisionKinds.Plan, new SupervisorPlanPayload
     {
         Goal = goal,
@@ -154,6 +168,8 @@ public sealed class SupervisorDecisionScript
     public void PlanSpawnDispatchStop() => Mode = SupervisorScriptMode.PlanSpawnDispatchStop;
 
     public void PlanSpawnBadRepoStop() => Mode = SupervisorScriptMode.PlanSpawnBadRepoStop;
+
+    public void PlanSpawnBadModelStop() => Mode = SupervisorScriptMode.PlanSpawnBadModelStop;
 }
 
 public enum SupervisorScriptMode
@@ -163,6 +179,7 @@ public enum SupervisorScriptMode
     PlanSpawnMergeStop,
     PlanSpawnDispatchStop,
     PlanSpawnBadRepoStop,
+    PlanSpawnBadModelStop,
     AskHumanStop,
     PlanThenSpawnForever,
 }
