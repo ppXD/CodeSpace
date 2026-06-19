@@ -60,9 +60,76 @@ public static class WorkflowsTestSeed
             LastModifiedBy = SystemUsers.SeederId,
         });
 
+        SeedInProcessModelPool(db, teamId);
+
         await db.SaveChangesAsync().ConfigureAwait(false);
         return (teamId, userId);
     }
+
+    /// <summary>
+    /// The provider tags every in-process LLM caller (planner / synth / llm.complete / coordinator) is retargeted to
+    /// in these flow tests — one deterministic fake client per tag, registered in <c>PostgresFixture</c>. After the
+    /// S6b switch the in-process plane is PURE pool-driven (no env key, no default model): a caller resolves its
+    /// model + credential ENTIRELY from the team's credentialed-model pool, so a team running any of these fakes must
+    /// carry a credentialed, enabled, structured-capable model for that provider. Sourced from each fake's own
+    /// <c>ProviderTag</c> constant so a tag rename is a compile error here, never a silent pool miss.
+    /// </summary>
+    private static readonly IReadOnlyList<string> InProcessFakeProviderTags = new[]
+    {
+        DeterministicPlannerLlmClient.ProviderTag,
+        DeterministicSpecPlannerLlmClient.ProviderTag,
+        DeterministicTaskPlannerLlmClient.ProviderTag,
+        DeterministicCoordinatedLlmClient.ProviderTag,
+        DeterministicSynthLlmClient.ProviderTag,
+        RecordReplayStructuredLLMClient.ProviderTag,
+    };
+
+    /// <summary>
+    /// Seed the team's in-process model pool: one KEYLESS credential + one enabled, structured-capable model per fake
+    /// provider tag. The fakes ignore the credential (they're deterministic, never reach a real API), so a keyless row
+    /// is correct for CI — the pool only has to make the pool-driven selector RESOLVE (provider + structured + enabled),
+    /// not authenticate. The llm.complete nodes in these tests pin no <c>model</c>, so a single recommended model per
+    /// tag is the one the null-pin selector picks. (Recording a real cassette needs the real key seeded onto the
+    /// matching tag's credential instead — the human-gated real-model tier, out of CI scope.)
+    /// </summary>
+    private static void SeedInProcessModelPool(CodeSpaceDbContext db, Guid teamId)
+    {
+        foreach (var provider in InProcessFakeProviderTags)
+        {
+            var credId = Guid.NewGuid();
+            db.ModelCredential.Add(new ModelCredential
+            {
+                Id = credId,
+                TeamId = teamId,
+                Provider = provider,
+                DisplayName = $"{provider} (test pool)",
+                EncryptedApiKey = null,   // keyless: the fake client never authenticates
+                Status = CredentialStatus.Active,
+                CreatedBy = SystemUsers.SeederId,
+                LastModifiedBy = SystemUsers.SeederId,
+            });
+
+            db.ModelCredentialModel.Add(new ModelCredentialModel
+            {
+                Id = Guid.NewGuid(),
+                ModelCredentialId = credId,
+                ModelId = PoolModelIdFor(provider),
+                Source = ModelSource.Manual,
+                SupportsStructuredOutput = true,
+                RecommendedForSupervisor = true,
+                Enabled = true,
+            });
+        }
+    }
+
+    /// <summary>
+    /// The pool model id for a fake provider tag. The deterministic fakes ignore the model, so a self-documenting
+    /// placeholder is enough — EXCEPT the RecordReplay tag, whose RECORD mode sends the model to the real Anthropic API
+    /// and whose cassette key hashes it: that tag must carry the SAME real model id the cassette mirror pins
+    /// (<see cref="PlanMapSynthPlannerRequest.DefaultModel"/>), or a future record/replay would key-mismatch.
+    /// </summary>
+    public static string PoolModelIdFor(string provider) =>
+        provider == RecordReplayStructuredLLMClient.ProviderTag ? PlanMapSynthPlannerRequest.DefaultModel : $"{provider}-model";
 
     /// <summary>Minimal valid definition — trigger → terminal — useful as a baseline for CRUD tests.</summary>
     public static WorkflowDefinition MinimalDefinition() => new()

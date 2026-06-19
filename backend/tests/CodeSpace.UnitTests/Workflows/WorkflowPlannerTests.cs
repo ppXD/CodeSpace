@@ -485,7 +485,7 @@ public class WorkflowPlannerTests
             new FlowLoopNode(),
             new FlowLoopStartNode(),
             new AgentCodeNode(),
-            new LlmCompleteNode(emptyRegistry),
+            new LlmCompleteNode(emptyRegistry, null!),   // manifest-only (validator reads Manifest, never RunAsync) → selector unused
             new TerminalNode(),
         };
 

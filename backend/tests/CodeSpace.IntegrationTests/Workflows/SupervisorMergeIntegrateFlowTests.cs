@@ -104,7 +104,8 @@ public sealed class SupervisorMergeIntegrateFlowTests : IDisposable
         var synthesisText = synthesis.GetProperty("text").GetString();
         synthesisText.ShouldContain("agent-a-edited-LINE", customMessage: "the synthesis prompt carried agent A's real diff hunk body, not just its summary");
         synthesisText.ShouldContain("+agent-b-edited-LINE", customMessage: "the synthesis prompt carried agent B's real unified-diff add line");
-        synthesis.GetProperty("model").GetString().ShouldBe("claude-sonnet-4-5", customMessage: "a blank profile model resolves to a REAL model id — never the literal \"default\" that 400s the real API");
+        synthesis.GetProperty("model").GetString().ShouldBe(WorkflowsTestSeed.PoolModelIdFor(DeterministicSynthLlmClient.ProviderTag),
+            customMessage: "S6b: a blank profile model resolves to the team's POOL model for the synth provider — never the literal \"default\", never an env key");
     }
 
     [Fact]

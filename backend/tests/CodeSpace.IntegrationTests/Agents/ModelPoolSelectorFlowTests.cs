@@ -1,8 +1,8 @@
 using Autofac;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
+using CodeSpace.Core.Services.Agents.ModelCredentials;
 using CodeSpace.Core.Services.Credentials;
-using CodeSpace.Core.Services.Supervisor;
 using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.Messages.Enums;
 using Shouldly;
@@ -10,19 +10,21 @@ using Shouldly;
 namespace CodeSpace.IntegrationTests.Agents;
 
 /// <summary>
-/// The supervisor brain's POOL-DRIVEN model selection (<see cref="ISupervisorModelSelector"/>) against real Postgres:
-/// the brain's model + key come entirely from the team's credentialed-model pool — a structured-capable, enabled
-/// model under an active credential of the right provider, bounded by the allowed pool (empty = all), the pin if set,
+/// The shared POOL-DRIVEN model selection (<see cref="IModelPoolSelector"/>) every in-process LLM caller uses — the
+/// supervisor decider, the workflow planner, the <c>llm.complete</c> node, the supervisor synthesis — against real
+/// Postgres: the model + key come entirely from the team's credentialed-model pool. A qualifying row is an enabled
+/// model under an active credential of the right provider, narrowed to structured-capable only when the caller asks
+/// (the decider/planner do; a free-text reduce does not), bounded by the allowed pool (empty = all), the pin if set,
 /// preferring a supervisor-recommended one — and the backing credential is decrypted. Nothing qualifies → null
-/// (the brain fails closed). No env "system" key, no default model.
+/// (the caller fails closed). No env "system" key, no default model.
 /// </summary>
 [Collection(PostgresCollection.Name)]
 [Trait("Category", "Integration")]
-public class SupervisorModelSelectorFlowTests
+public class ModelPoolSelectorFlowTests
 {
     private readonly PostgresFixture _fixture;
 
-    public SupervisorModelSelectorFlowTests(PostgresFixture fixture) { _fixture = fixture; }
+    public ModelPoolSelectorFlowTests(PostgresFixture fixture) { _fixture = fixture; }
 
     [Fact]
     public async Task It_picks_a_structured_capable_model_and_decrypts_its_credential()
@@ -48,6 +50,18 @@ public class SupervisorModelSelectorFlowTests
         await AddModelAsync(credId, "claude-opus-4-8", structured: true, recommended: true);     // recommended
 
         (await SelectAsync(teamId, "Anthropic"))!.ModelId.ShouldBe("claude-opus-4-8");
+    }
+
+    [Fact]
+    public async Task A_free_text_caller_may_pick_a_non_structured_model()
+    {
+        var teamId = await SeedTeamAsync();
+        var credId = await SeedCredentialAsync(teamId, "Anthropic", key: "sk");
+        await AddModelAsync(credId, "claude-haiku-4-5", structured: false);   // not structured-capable
+
+        // requireStructured:false (a free-text reduce, e.g. synthesis) accepts it; requireStructured:true excludes it.
+        (await SelectAsync(teamId, "Anthropic", requireStructured: false))!.ModelId.ShouldBe("claude-haiku-4-5");
+        (await SelectAsync(teamId, "Anthropic", requireStructured: true)).ShouldBeNull();
     }
 
     [Fact]
@@ -150,10 +164,10 @@ public class SupervisorModelSelectorFlowTests
 
     // ─── Helpers ───
 
-    private async Task<SupervisorModelPick?> SelectAsync(Guid teamId, string provider, IReadOnlyList<string>? allowed = null, string? pinned = null)
+    private async Task<ModelPoolPick?> SelectAsync(Guid teamId, string provider, bool requireStructured = true, IReadOnlyList<string>? allowed = null, string? pinned = null)
     {
         using var scope = _fixture.BeginScope();
-        return await scope.Resolve<ISupervisorModelSelector>().SelectAsync(teamId, provider, allowed, pinned, CancellationToken.None);
+        return await scope.Resolve<IModelPoolSelector>().SelectAsync(teamId, provider, requireStructured, allowed, pinned, CancellationToken.None);
     }
 
     private async Task AddModelAsync(Guid credId, string modelId, bool structured = false, bool enabled = true, bool recommended = false)

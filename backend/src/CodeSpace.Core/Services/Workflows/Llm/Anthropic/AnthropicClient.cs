@@ -7,10 +7,11 @@ using CodeSpace.Messages.Agents;
 namespace CodeSpace.Core.Services.Workflows.Llm.Anthropic;
 
 /// <summary>
-/// Anthropic Messages API client. Reads the API key from the
-/// <c>CODESPACE_ANTHROPIC_API_KEY</c> environment variable so an operator can plug in a key
-/// without code changes; per Rule 8 the constant name is pinned by a unit test so future
-/// renames are visible at compile time.
+/// Anthropic Messages API client. The API key + base url come ENTIRELY from the per-call
+/// <see cref="ResolvedModelCredential"/> the in-process plane resolves from the team's model pool — there is no
+/// ambient env-key backstop on the call path (removed in S6b). The <c>CODESPACE_ANTHROPIC_API_KEY</c> constant
+/// survives only as the name the AGENT plane's operator-global fallback + the cassette record-mode gate read
+/// INDEPENDENTLY; per Rule 8 it stays pinned by a unit test so a rename is visible at compile time.
 ///
 /// Implements <see cref="ILLMClient"/> (free-text completion) AND the sibling
 /// <see cref="IStructuredLLMClient"/> (schema-constrained JSON) — the latter via Anthropic's
@@ -24,7 +25,6 @@ namespace CodeSpace.Core.Services.Workflows.Llm.Anthropic;
 public sealed class AnthropicClient : ILLMClient, IStructuredLLMClient
 {
     public const string ApiKeyEnvVar = "CODESPACE_ANTHROPIC_API_KEY";
-    public const string ApiBaseUrlEnvVar = "CODESPACE_ANTHROPIC_API_BASE_URL";
     public const string DefaultApiBaseUrl = "https://api.anthropic.com";
     public const string AnthropicVersion = "2023-06-01";
 
@@ -94,14 +94,16 @@ public sealed class AnthropicClient : ILLMClient, IStructuredLLMClient
 
     private async Task<AnthropicMessageResponse> PostMessagesAsync(AnthropicMessageRequest body, ResolvedModelCredential? credential, CancellationToken cancellationToken)
     {
-        // The resolved credential's key wins (so a TEAM's key authenticates the call); the operator-global env key is
-        // the fallback for the single-tenant convenience + any caller not yet passing a credential (removed in S6b).
-        var apiKey = NullIfBlank(credential?.ApiKey) ?? Environment.GetEnvironmentVariable(ApiKeyEnvVar);
+        // Pure pool-driven (S6b): the credential is the ONLY key source — the in-process plane resolves it from the
+        // team's credentialed-model pool and passes it here. There is NO ambient env-key backstop: a caller without a
+        // credential fails closed rather than silently borrowing an operator-global key. (The env var const survives
+        // for the AGENT plane's operator-global fallback + the cassette record-mode gate, which read it independently.)
+        var apiKey = NullIfBlank(credential?.ApiKey);
 
         if (string.IsNullOrWhiteSpace(apiKey))
-            throw new InvalidOperationException($"Anthropic API key not configured. Pass a model credential or set the {ApiKeyEnvVar} environment variable.");
+            throw new InvalidOperationException("Anthropic API key not configured. The in-process plane must pass a model credential resolved from the team's pool.");
 
-        var baseUrl = NullIfBlank(credential?.BaseUrl) ?? Environment.GetEnvironmentVariable(ApiBaseUrlEnvVar) ?? DefaultApiBaseUrl;
+        var baseUrl = NullIfBlank(credential?.BaseUrl) ?? DefaultApiBaseUrl;
         var http = _httpClientFactory.CreateClient(nameof(AnthropicClient));
         http.BaseAddress = new Uri(baseUrl);
         http.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));

@@ -1,4 +1,5 @@
 using System.Text.Json;
+using CodeSpace.Core.Services.Agents.ModelCredentials;
 using CodeSpace.Core.Services.Supervisor;
 using CodeSpace.Core.Services.Supervisor.Deciders;
 using CodeSpace.Core.Services.Workflows.Llm;
@@ -381,16 +382,16 @@ public class SupervisorDeciderTests
         }
     }
 
-    private sealed class FakeSelector : ISupervisorModelSelector
+    private sealed class FakeSelector : IModelPoolSelector
     {
-        private readonly SupervisorModelPick? _pick;
-        private FakeSelector(SupervisorModelPick? pick) => _pick = pick;
+        private readonly ModelPoolPick? _pick;
+        private FakeSelector(ModelPoolPick? pick) => _pick = pick;
 
         public static FakeSelector WithModel(string modelId = "claude-sonnet-4-5") =>
-            new(new SupervisorModelPick { ModelId = modelId, Credential = new ResolvedModelCredential { Provider = "TestSupervisor", ApiKey = "sk-test" } });
+            new(new ModelPoolPick { ModelId = modelId, Credential = new ResolvedModelCredential { Provider = "TestSupervisor", ApiKey = "sk-test" } });
 
         public static FakeSelector Empty() => new(null);
 
-        public Task<SupervisorModelPick?> SelectAsync(Guid teamId, string provider, IReadOnlyList<string>? allowedModels, string? pinnedModel, CancellationToken cancellationToken) => Task.FromResult(_pick);
+        public Task<ModelPoolPick?> SelectAsync(Guid teamId, string provider, bool requireStructured, IReadOnlyList<string>? allowedModels, string? pinnedModel, CancellationToken cancellationToken) => Task.FromResult(_pick);
     }
 }

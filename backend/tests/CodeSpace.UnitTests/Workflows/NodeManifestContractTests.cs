@@ -153,7 +153,7 @@ public class NodeManifestContractTests
     {
         // null! suppresses the warning — manifest construction doesn't touch the deps.
         yield return new object[] { new HttpRequestNode(null!) };
-        yield return new object[] { new LlmCompleteNode(null!) };
+        yield return new object[] { new LlmCompleteNode(null!, null!) };
         yield return new object[] { new GitPostPrCommentNode(null!) };
     }
 
