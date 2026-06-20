@@ -66,6 +66,11 @@ public sealed class ClaudeCodeHarness : IAgentHarness, IModelCredentialProjector
         // --output-format stream-json REQUIRES --verbose in --print mode (the CLI rejects it otherwise).
         var args = new List<string> { "--print", "--output-format", "stream-json", "--verbose" };
 
+        // B1: the unattended operating contract as a system-prompt append (composes with any persona/goal prompt) — tell
+        // the model not to wait on stdin, to raise a genuine blocker via the decision tool, and not to end by asking.
+        args.Add("--append-system-prompt");
+        args.Add(AgentOperatingContract.SystemDirective);
+
         // Omit --model when blank so the CLI picks its own default (the Model=empty rule).
         if (!string.IsNullOrWhiteSpace(task.Model))
         {

@@ -85,6 +85,15 @@ public class CodexHarnessTests
     }
 
     [Fact]
+    public void Does_not_yet_inject_the_operating_contract_codex_has_no_native_system_prompt_flag()
+    {
+        // B1 asymmetry pin: Claude injects AgentOperatingContract via --append-system-prompt; Codex exec has no native
+        // system-prompt flag, and prepending to the prompt would conflate it with the goal, so the Codex projection is a
+        // deferred follow-up. This pins the CURRENT state so wiring it later is a conscious change, not a silent surprise.
+        Harness.BuildInvocation(Task()).Args[^1].ShouldBe("Fix the failing billing tests", "the prompt is the bare goal — no operating contract is prepended (deferred)");
+    }
+
+    [Fact]
     public void Read_only_scope_maps_to_the_read_only_sandbox()
     {
         var spec = Harness.BuildInvocation(Task(scope: AgentWriteScope.ReadOnly));
