@@ -72,6 +72,10 @@ public sealed class CodexHarness : IAgentHarness, IModelCredentialProjector, IMc
 
         args.Add("--sandbox");
         args.Add(SandboxMode(task.Permissions));
+
+        // B1 asymmetry: Codex exec has NO native system-prompt flag (Claude uses --append-system-prompt). Prepending the
+        // operating contract to the prompt positional conflates it with the goal (and pollutes goal-reading consumers),
+        // so the Codex projection is deferred to a proper non-goal channel (AGENTS.md / a config key) — see the B1 follow-up.
         args.Add(task.Goal);
 
         return new SandboxSpec

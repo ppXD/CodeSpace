@@ -60,7 +60,7 @@ public class ClaudeCodeHarnessTests
         var spec = Harness.BuildInvocation(Task());
 
         spec.Command.ShouldBe("claude");
-        spec.Args.ShouldBe(new[] { "--print", "--output-format", "stream-json", "--verbose", "--model", "claude-opus-4-8", "--permission-mode", "bypassPermissions", "Fix the failing billing tests" });
+        spec.Args.ShouldBe(new[] { "--print", "--output-format", "stream-json", "--verbose", "--append-system-prompt", AgentOperatingContract.SystemDirective, "--model", "claude-opus-4-8", "--permission-mode", "bypassPermissions", "Fix the failing billing tests" });
         spec.WorkingDirectory.ShouldBe("/tmp/ws");
         spec.TimeoutSeconds.ShouldBe(900);
     }
@@ -81,7 +81,20 @@ public class ClaudeCodeHarnessTests
         var spec = Harness.BuildInvocation(Task(model: model));
 
         spec.Args.ShouldNotContain("--model", customMessage: "a blank model must omit --model so the CLI uses its own default (the Model=empty rule)");
-        spec.Args.ShouldBe(new[] { "--print", "--output-format", "stream-json", "--verbose", "--permission-mode", "bypassPermissions", "Fix the failing billing tests" });
+        spec.Args.ShouldBe(new[] { "--print", "--output-format", "stream-json", "--verbose", "--append-system-prompt", AgentOperatingContract.SystemDirective, "--permission-mode", "bypassPermissions", "Fix the failing billing tests" });
+    }
+
+    [Fact]
+    public void Injects_the_operating_contract_as_a_system_prompt_before_the_prompt_positional()
+    {
+        // B1: the unattended operating contract rides as --append-system-prompt (composing with any persona/goal), and
+        // the goal stays the trailing positional — so the directive never swallows or reorders the prompt.
+        var args = Harness.BuildInvocation(Task()).Args.ToList();
+
+        var at = args.IndexOf("--append-system-prompt");
+        at.ShouldBeGreaterThanOrEqualTo(0, "the operating contract is injected as a system prompt");
+        args[at + 1].ShouldBe(AgentOperatingContract.SystemDirective);
+        args[^1].ShouldBe("Fix the failing billing tests", "the goal remains the trailing positional argument");
     }
 
     [Theory]
