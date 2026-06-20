@@ -1,62 +1,10 @@
-import { createFileRoute, useNavigate } from "@tanstack/react-router";
-
-import { IssuesListBody } from "@/_imported/ai-code-space/repo-detail";
-import { useRepositoryByFullPath } from "@/hooks/use-repositories";
+import { Outlet, createFileRoute } from "@tanstack/react-router";
 
 /**
- * Issues list at `/teams/{slug}/repositories/{fullPath}/issues`. State filter + page are URL
- * search params so deep links like `.../issues?state=Closed&page=3` are shareable. Mirrors the
- * Pulls list route; `$repoFullPath` is the URL-encoded provider fullPath, decoded once at the edge.
+ * Issues subtree layout. Pure pass-through — the issue list lives at the index child, the issue detail
+ * at the `$number` child. Splitting them gives shareable URLs for both and keeps the detail free of the
+ * list's required search params (mirrors the Pulls subtree).
  */
-type IssueFilter = "Open" | "Closed";
-
-interface IssuesSearch {
-  state: IssueFilter;
-  page: number;
-}
-
 export const Route = createFileRoute("/_app/teams/$teamSlug/repositories/$repoFullPath/issues")({
-  validateSearch: (raw: Record<string, unknown>): IssuesSearch => {
-    const rawState = String(raw.state ?? "Open");
-    const state: IssueFilter = rawState === "Closed" ? "Closed" : "Open";
-
-    const rawPage = Number(raw.page);
-    const page = Number.isFinite(rawPage) && rawPage >= 1 ? Math.floor(rawPage) : 1;
-
-    return { state, page };
-  },
-  component: IssuesRoute,
+  component: () => <Outlet />,
 });
-
-function IssuesRoute() {
-  const { teamSlug, repoFullPath } = Route.useParams();
-  const { state, page } = Route.useSearch();
-  const navigate = useNavigate();
-
-  // URL uses the readable fullPath; the list body still takes the UUID.
-  const fullPath = decodeURIComponent(repoFullPath);
-  const { repo, isLoading, notFound } = useRepositoryByFullPath(fullPath);
-
-  if (isLoading) return null;
-  if (notFound || !repo) return null;
-
-  return (
-    <IssuesListBody
-      repoId={repo.id}
-      filter={state}
-      page={page}
-      onFilterChange={(next) => navigate({
-        to: "/teams/$teamSlug/repositories/$repoFullPath/issues",
-        params: { teamSlug, repoFullPath: encodeURIComponent(fullPath) },
-        // Filter change resets to page 1 — paging through "Closed" then clicking "Open" should
-        // land on page 1 of Open, not page 17 of whatever happens to live there.
-        search: { state: next, page: 1 },
-      })}
-      onPageChange={(next) => navigate({
-        to: "/teams/$teamSlug/repositories/$repoFullPath/issues",
-        params: { teamSlug, repoFullPath: encodeURIComponent(fullPath) },
-        search: { state, page: next },
-      })}
-    />
-  );
-}

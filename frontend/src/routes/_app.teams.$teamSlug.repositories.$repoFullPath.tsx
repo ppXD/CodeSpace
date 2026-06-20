@@ -65,9 +65,11 @@ function pickActiveTabFromPath(pathname: string): DetailTab {
   // creates a mismatch. Segment 5 is always the tab regardless of encoding.
   const segs = pathname.split("/").filter(Boolean);
   // ["teams", teamSlug, "repositories", encodedFullPath, tab, ...rest]
-  const seg = (segs[4] ?? "overview") as DetailTab;
+  const seg = segs[4] ?? "overview";
+  // Releases lives under the Code tab (reached from its sidebar card), so keep Code lit there.
+  if (seg === "releases") return "code";
   const known: DetailTab[] = ["overview", "code", "issues", "pulls"];
-  return known.includes(seg) ? seg : "overview";
+  return known.includes(seg as DetailTab) ? (seg as DetailTab) : "overview";
 }
 
 function tabToPath(tab: DetailTab) {

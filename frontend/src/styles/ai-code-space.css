@@ -4072,6 +4072,27 @@ body.chat-resizing .acs-root .app { transition: none; }
 .acs-root .cb-release-more { display: inline-block; margin-top: 12px; background: none; border: 0; padding: 0; font-size: 13px; font-weight: 500; color: var(--accent); cursor: pointer; }
 .acs-root .cb-release-more:hover { text-decoration: underline; }
 
+/* ── Releases page: release cards + tag rows (reuses .pr-card/.pr-toolbar/.pr-tabs chrome) ── */
+.acs-root .rel-list { display: flex; flex-direction: column; }
+.acs-root .rel-card { padding: 18px 20px; border-bottom: 1px solid var(--line); }
+.acs-root .rel-card:last-child { border-bottom: 0; }
+.acs-root .rel-card-h { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.acs-root .rel-card-ic { color: #2D6A48; flex-shrink: 0; }
+.acs-root .rel-card-tag { font-size: 17px; font-weight: 600; color: var(--ink); letter-spacing: -0.01em; }
+.acs-root .rel-card-meta { display: inline-flex; align-items: center; gap: 10px; flex-wrap: wrap; font-size: 12.5px; color: var(--muted); margin-left: auto; }
+.acs-root .rel-card-tagname { display: inline-flex; align-items: center; gap: 4px; font-family: 'Geist Mono',monospace; font-size: 11.5px; }
+.acs-root .rel-card-tagname svg { color: var(--muted-2); }
+.acs-root .rel-card-b { margin-top: 12px; }
+.acs-root .rel-assets { margin-top: 14px; border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; }
+.acs-root .rel-assets-h { display: flex; align-items: center; gap: 6px; padding: 8px 12px; background: var(--panel-2); font-size: 12px; font-weight: 600; color: var(--muted); border-bottom: 1px solid var(--line); }
+.acs-root .rel-assets-c { color: var(--ink-2); background: var(--line); border-radius: 999px; padding: 0 7px; font-variant-numeric: tabular-nums; }
+.acs-root .rel-asset { display: flex; align-items: center; gap: 8px; padding: 8px 12px; font-size: 13px; color: var(--accent); text-decoration: none; border-bottom: 1px solid var(--line); }
+.acs-root .rel-asset:last-child { border-bottom: 0; }
+.acs-root .rel-asset:hover { background: rgba(31,30,29,.018); }
+.acs-root .rel-asset svg { color: var(--muted-2); }
+.acs-root .rel-asset-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.acs-root .rel-asset-size { color: var(--muted); font-variant-numeric: tabular-nums; }
+
 /* Languages bar + legend. */
 .acs-root .cb-lang-bar { display: flex; height: 8px; border-radius: 999px; overflow: hidden; background: var(--line); }
 .acs-root .cb-lang-seg { height: 100%; min-width: 2px; }

@@ -19,7 +19,7 @@ using ProviderInstance = CodeSpace.Core.Persistence.Entities.ProviderInstance;
 
 namespace CodeSpace.Core.Services.Providers.GitLab;
 
-public sealed class GitLabRepositoryProvider : IRepositoryCatalogCapability, IPullRequestCatalogCapability, IPullRequestCommentCapability, IPullRequestReviewCapability, IPullRequestWriteCapability, IIssueCatalogCapability, IIssueWriteCapability, IRepositoryAccessCapability, IRepositorySourceCapability, IRepositoryInsightsCapability, IRepositoryHistoryCapability, IRepositoryMarkdownRenderCapability, ICredentialProbeCapability, IWebhookRegistrationCapability, IWebhookSignatureVerifier, IWebhookEventNormalizer
+public sealed class GitLabRepositoryProvider : IRepositoryCatalogCapability, IPullRequestCatalogCapability, IPullRequestCommentCapability, IPullRequestReviewCapability, IPullRequestWriteCapability, IIssueCatalogCapability, IIssueWriteCapability, IReleaseCatalogCapability, IRepositoryAccessCapability, IRepositorySourceCapability, IRepositoryInsightsCapability, IRepositoryHistoryCapability, IRepositoryMarkdownRenderCapability, ICredentialProbeCapability, IWebhookRegistrationCapability, IWebhookSignatureVerifier, IWebhookEventNormalizer
 {
     private readonly IProviderAuthResolver _authResolver;
     private readonly IExternalCallResilience _resilience;
@@ -403,6 +403,7 @@ public sealed class GitLabRepositoryProvider : IRepositoryCatalogCapability, IPu
         Body = issue.Description,
         AuthorLogin = issue.Author?.Username,
         Labels = (issue.Labels ?? Array.Empty<string>()).Select(n => new LabelRef { Name = n, Color = null }).ToList(),
+        Assignees = (issue.Assignees ?? Array.Empty<Assignee>()).Select(a => a.Username).Where(u => !string.IsNullOrEmpty(u)).ToList(),
         CommentsCount = issue.UserNotesCount,
         MilestoneTitle = issue.Milestone?.Title,
         CreatedDate = new DateTimeOffset(DateTime.SpecifyKind(issue.CreatedAt, DateTimeKind.Utc), TimeSpan.Zero),
@@ -410,6 +411,82 @@ public sealed class GitLabRepositoryProvider : IRepositoryCatalogCapability, IPu
         ClosedDate = issue.ClosedAt == default ? null : new DateTimeOffset(DateTime.SpecifyKind(issue.ClosedAt, DateTimeKind.Utc), TimeSpan.Zero),
         WebUrl = issue.WebUrl
     };
+
+    public async Task<RemoteIssue> GetIssueAsync(ProviderContext context, RemoteRepository repository, int number, CancellationToken cancellationToken)
+    {
+        var client = await BuildClientAsync(context, cancellationToken).ConfigureAwait(false);
+
+        return await _resilience.ExecuteAsync(context.Instance, nameof(GetIssueAsync), _ =>
+        {
+            var projectId = int.Parse(repository.ExternalId);
+            // Issues.Get(projectId, issueIid) — `number` is the per-repo iid shown to users.
+            var issue = client.Issues.Get(projectId, number);
+            return Task.FromResult(ToRemoteIssue(issue));
+        }, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<IReadOnlyList<RemoteIssueComment>> ListIssueCommentsAsync(ProviderContext context, RemoteRepository repository, int number, CancellationToken cancellationToken)
+    {
+        var client = await BuildClientAsync(context, cancellationToken).ConfigureAwait(false);
+
+        return await _resilience.ExecuteAsync(context.Instance, nameof(ListIssueCommentsAsync), _ =>
+        {
+            var projectId = int.Parse(repository.ExternalId);
+            // GitLab issue "notes" carry both human comments and system events; the Conversation wants only
+            // the human ones (System == false). Oldest-first for the timeline.
+            var notes = client.GetProjectIssueNoteClient(projectId).ForIssue(number)
+                .Where(n => !n.System)
+                .OrderBy(n => n.CreatedAt);
+
+            return Task.FromResult((IReadOnlyList<RemoteIssueComment>)notes.Select(n => new RemoteIssueComment
+            {
+                ExternalId = n.NoteId.ToString(),
+                Body = n.Body,
+                AuthorName = n.Author?.Username ?? "unknown",
+                CreatedAt = new DateTimeOffset(DateTime.SpecifyKind(n.CreatedAt, DateTimeKind.Utc), TimeSpan.Zero),
+                WebUrl = null
+            }).ToList());
+        }, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<IReadOnlyList<RemoteIssueEvent>> ListIssueEventsAsync(ProviderContext context, RemoteRepository repository, int number, CancellationToken cancellationToken)
+    {
+        var client = await BuildClientAsync(context, cancellationToken).ConfigureAwait(false);
+
+        return await _resilience.ExecuteAsync(context.Instance, nameof(ListIssueEventsAsync), _ =>
+        {
+            var projectId = int.Parse(repository.ExternalId);
+            // GitLab's activity is the SYSTEM notes — whose body is already the human line we want
+            // ("assigned to @x", "changed milestone to %1.1.1", "mentioned in merge request !84").
+            var notes = client.GetProjectIssueNoteClient(projectId).ForIssue(number)
+                .Where(n => n.System)
+                .OrderBy(n => n.CreatedAt);
+
+            return Task.FromResult((IReadOnlyList<RemoteIssueEvent>)notes.Select(n => new RemoteIssueEvent
+            {
+                ExternalId = n.NoteId.ToString(),
+                Kind = ClassifyGitLabSystemNote(n.Body),
+                Summary = n.Body,
+                ActorLogin = n.Author?.Username,
+                CreatedDate = new DateTimeOffset(DateTime.SpecifyKind(n.CreatedAt, DateTimeKind.Utc), TimeSpan.Zero)
+            }).ToList());
+        }, cancellationToken).ConfigureAwait(false);
+    }
+
+    // Keyword-classify a GitLab system-note body into the same Kind vocabulary GitHub's structured events use,
+    // purely to pick the timeline icon — the Summary text itself is the note body verbatim.
+    private static string ClassifyGitLabSystemNote(string? body)
+    {
+        var b = (body ?? string.Empty).ToLowerInvariant();
+        if (b.Contains("assigned")) return "assigned";
+        if (b.Contains("milestone")) return "milestoned";
+        if (b.Contains("label")) return "labeled";
+        if (b.Contains("mentioned") || b.Contains("merge request")) return "mentioned";
+        if (b.Contains("closed")) return "closed";
+        if (b.Contains("reopened")) return "reopened";
+        if (b.Contains("changed the description") || b.Contains("changed title")) return "renamed";
+        return "other";
+    }
 
     public async Task<RemoteIssueComment> CommentIssueAsync(ProviderContext context, RemoteRepository repository, int number, string body, CancellationToken cancellationToken)
     {
@@ -1327,6 +1404,67 @@ public sealed class GitLabRepositoryProvider : IRepositoryCatalogCapability, IPu
         WebUrl = string.IsNullOrWhiteSpace(release.Links?.Self) ? $"{repository.WebUrl}/-/releases/{release.TagName}" : release.Links!.Self,
         IsPrerelease = false   // GitLab releases have no pre-release flag.
     };
+
+    // ── IReleaseCatalogCapability ──
+
+    public async Task<IReadOnlyList<RemoteRelease>> ListReleasesAsync(ProviderContext context, RemoteRepository repository, int page, int perPage, CancellationToken cancellationToken)
+    {
+        var client = await BuildClientAsync(context, cancellationToken).ConfigureAwait(false);
+
+        return await _resilience.ExecuteAsync(context.Instance, nameof(ListReleasesAsync), _ =>
+        {
+            var projectId = int.Parse(repository.ExternalId);
+            var skip = (page - 1) * perPage;
+            var releases = client.GetReleases(projectId).All.Skip(skip).Take(perPage).ToList();
+
+            // GitLab returns releases newest-first, so the first item on page 1 is the latest.
+            return Task.FromResult((IReadOnlyList<RemoteRelease>)releases.Select((r, i) => ToRemoteReleaseDetail(r, repository, isLatest: page == 1 && i == 0)).ToList());
+        }, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<IReadOnlyList<RemoteTag>> ListTagsAsync(ProviderContext context, RemoteRepository repository, int page, int perPage, CancellationToken cancellationToken)
+    {
+        var client = await BuildClientAsync(context, cancellationToken).ConfigureAwait(false);
+
+        return await _resilience.ExecuteAsync(context.Instance, nameof(ListTagsAsync), _ =>
+        {
+            var projectId = int.Parse(repository.ExternalId);
+            var skip = (page - 1) * perPage;
+            var tags = client.GetRepository(projectId).Tags.All.Skip(skip).Take(perPage).ToList();
+
+            return Task.FromResult((IReadOnlyList<RemoteTag>)tags.Select(t => new RemoteTag
+            {
+                Name = t.Name,
+                CommitSha = t.Commit?.Id.ToString() ?? string.Empty,
+                Message = string.IsNullOrWhiteSpace(t.Message) ? null : t.Message,
+                WebUrl = $"{repository.WebUrl}/-/tags/{Uri.EscapeDataString(t.Name)}"
+            }).ToList());
+        }, cancellationToken).ConfigureAwait(false);
+    }
+
+    private static RemoteRelease ToRemoteReleaseDetail(ReleaseInfo r, RemoteRepository repository, bool isLatest)
+    {
+        var assets = new List<RemoteReleaseAsset>();
+        // Source archives (zip/tar.gz/tar.bz2/tar) GitLab generates per release.
+        foreach (var s in r.Assets?.Sources ?? Array.Empty<ReleaseAssetSource>())
+            assets.Add(new RemoteReleaseAsset { Name = $"Source code ({s.Format})", DownloadUrl = s.Url, SizeBytes = null });
+        // Uploaded/linked assets.
+        foreach (var l in r.Assets?.Links ?? Array.Empty<ReleaseLink>())
+            assets.Add(new RemoteReleaseAsset { Name = l.Name, DownloadUrl = string.IsNullOrWhiteSpace(l.DirectAssetUrl) ? l.Url : l.DirectAssetUrl, SizeBytes = null });
+
+        return new RemoteRelease
+        {
+            TagName = r.TagName,
+            Name = string.IsNullOrWhiteSpace(r.Name) ? null : r.Name,
+            Body = string.IsNullOrWhiteSpace(r.Description) ? null : r.Description,
+            AuthorLogin = r.Author?.Username,
+            PublishedDate = r.ReleasedAt == default ? null : new DateTimeOffset(DateTime.SpecifyKind(r.ReleasedAt, DateTimeKind.Utc), TimeSpan.Zero),
+            WebUrl = string.IsNullOrWhiteSpace(r.Links?.Self) ? $"{repository.WebUrl}/-/releases/{r.TagName}" : r.Links!.Self,
+            IsPrerelease = false,
+            IsLatest = isLatest,
+            Assets = assets
+        };
+    }
 
     public async Task<IReadOnlyList<RemoteLanguage>> GetLanguagesAsync(ProviderContext context, RemoteRepository repository, CancellationToken cancellationToken)
     {

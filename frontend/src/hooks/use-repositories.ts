@@ -214,6 +214,36 @@ export function useRepositoryIssueCounts(repositoryId: string | null) {
   });
 }
 
+/** Single issue with body + sidebar fields — the in-app detail. Same cache family as the list. */
+export function useRepositoryIssue(repositoryId: string | null, number: number | null) {
+  return useQuery({
+    queryKey: ["repository", repositoryId, "issues", "detail", number],
+    queryFn: () => repositoriesApi.getIssue(repositoryId!, number!),
+    enabled: repositoryId != null && number != null,
+    staleTime: 30_000,
+  });
+}
+
+/** Issue comments (Conversation). */
+export function useRepositoryIssueComments(repositoryId: string | null, number: number | null) {
+  return useQuery({
+    queryKey: ["repository", repositoryId, "issues", "comments", number],
+    queryFn: () => repositoriesApi.listIssueComments(repositoryId!, number!),
+    enabled: repositoryId != null && number != null,
+    staleTime: 30_000,
+  });
+}
+
+/** Issue activity-timeline events. */
+export function useRepositoryIssueEvents(repositoryId: string | null, number: number | null) {
+  return useQuery({
+    queryKey: ["repository", repositoryId, "issues", "events", number],
+    queryFn: () => repositoriesApi.listIssueEvents(repositoryId!, number!),
+    enabled: repositoryId != null && number != null,
+    staleTime: 30_000,
+  });
+}
+
 /**
  * Files-tab data. Patch text can be large — the `enabled` gate lets the caller
  * defer the fetch until the user actually clicks the Files changed tab.
@@ -331,6 +361,28 @@ export function useRepositoryLatestRelease(repositoryId: string | null) {
     queryFn: () => repositoriesApi.getLatestRelease(repositoryId!),
     enabled: repositoryId != null,
     staleTime: SOURCE_STALE_MS,
+  });
+}
+
+/** Releases list for the Releases page. Same page placeholder discipline as the PR/issue lists. */
+export function useRepositoryReleases(repositoryId: string | null, page: number) {
+  return useQuery({
+    queryKey: ["repository", repositoryId, "source", "releases", page],
+    queryFn: () => repositoriesApi.listReleases(repositoryId!, page, PR_PAGE_SIZE),
+    enabled: repositoryId != null,
+    staleTime: SOURCE_STALE_MS,
+    placeholderData: (prev, prevQuery) => (prevQuery && prevQuery.queryKey[1] === repositoryId ? prev : undefined),
+  });
+}
+
+/** Git tags for the Releases page's Tags tab. */
+export function useRepositoryTags(repositoryId: string | null, page: number) {
+  return useQuery({
+    queryKey: ["repository", repositoryId, "source", "tags", page],
+    queryFn: () => repositoriesApi.listTags(repositoryId!, page, PR_PAGE_SIZE),
+    enabled: repositoryId != null,
+    staleTime: SOURCE_STALE_MS,
+    placeholderData: (prev, prevQuery) => (prevQuery && prevQuery.queryKey[1] === repositoryId ? prev : undefined),
   });
 }
 

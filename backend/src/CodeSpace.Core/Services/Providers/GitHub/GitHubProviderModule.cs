@@ -50,6 +50,9 @@ public sealed class GitHubProviderModule : IProviderModule
         // a subset of repo content reads, no separate scope.
         [typeof(IPullRequestCatalogCapability)] = ScopeRequirement.AnyOf(GitHubScopes.Repo, GitHubScopes.PublicRepo),
 
+        // Listing releases + tags is a repo READ — same `repo`/`public_repo` family as the other reads.
+        [typeof(IReleaseCatalogCapability)] = ScopeRequirement.AnyOf(GitHubScopes.Repo, GitHubScopes.PublicRepo),
+
         // Posting PR conversation comments writes to the underlying issue — `repo` is the
         // canonical write-capable scope. `public_repo` works for public-only repos.
         [typeof(IPullRequestCommentCapability)] = ScopeRequirement.AnyOf(GitHubScopes.Repo, GitHubScopes.PublicRepo),

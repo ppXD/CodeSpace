@@ -21,6 +21,15 @@ public interface IIssueService
     /// <summary>Total open + closed issue counts for the repository — one provider round-trip. Same read preflight as <see cref="ListAsync"/>.</summary>
     Task<RemoteIssueCounts> GetCountsAsync(Guid repositoryId, Guid teamId, CancellationToken cancellationToken);
 
+    /// <summary>Single issue with body + sidebar fields — the in-app detail header. Same read preflight as <see cref="ListAsync"/>.</summary>
+    Task<RemoteIssue> GetAsync(Guid repositoryId, Guid teamId, int number, CancellationToken cancellationToken);
+
+    /// <summary>User comments on the issue (Conversation), oldest-first. Same read preflight.</summary>
+    Task<IReadOnlyList<RemoteIssueComment>> ListCommentsAsync(Guid repositoryId, Guid teamId, int number, CancellationToken cancellationToken);
+
+    /// <summary>Activity-timeline events on the issue, oldest-first. Same read preflight.</summary>
+    Task<IReadOnlyList<RemoteIssueEvent>> ListEventsAsync(Guid repositoryId, Guid teamId, int number, CancellationToken cancellationToken);
+
     /// <summary>
     /// CREATE an issue via the provider's <c>IIssueWriteCapability</c>. Throws
     /// <see cref="InvalidOperationException"/> (400) for a missing repo / blank title, on insufficient write

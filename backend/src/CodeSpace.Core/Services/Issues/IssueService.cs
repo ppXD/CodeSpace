@@ -38,6 +38,24 @@ public sealed class IssueService : IIssueService, IScopedDependency
         return await catalog.CountIssuesAsync(context, remote, cancellationToken).ConfigureAwait(false);
     }
 
+    public async Task<RemoteIssue> GetAsync(Guid repositoryId, Guid teamId, int number, CancellationToken cancellationToken)
+    {
+        var (catalog, context, remote) = await ResolveCatalogAsync(repositoryId, teamId, cancellationToken).ConfigureAwait(false);
+        return await catalog.GetIssueAsync(context, remote, number, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<IReadOnlyList<RemoteIssueComment>> ListCommentsAsync(Guid repositoryId, Guid teamId, int number, CancellationToken cancellationToken)
+    {
+        var (catalog, context, remote) = await ResolveCatalogAsync(repositoryId, teamId, cancellationToken).ConfigureAwait(false);
+        return await catalog.ListIssueCommentsAsync(context, remote, number, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<IReadOnlyList<RemoteIssueEvent>> ListEventsAsync(Guid repositoryId, Guid teamId, int number, CancellationToken cancellationToken)
+    {
+        var (catalog, context, remote) = await ResolveCatalogAsync(repositoryId, teamId, cancellationToken).ConfigureAwait(false);
+        return await catalog.ListIssueEventsAsync(context, remote, number, cancellationToken).ConfigureAwait(false);
+    }
+
     /// <summary>
     /// Shared READ preflight (mirrors <c>PullRequestService.ResolveAsync</c>): repo lookup → credential
     /// null-check → catalog scope check → capability + provider-context + remote-repository shape. Reads use
