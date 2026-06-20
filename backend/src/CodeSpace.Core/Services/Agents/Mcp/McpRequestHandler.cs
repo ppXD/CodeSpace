@@ -437,7 +437,16 @@ public sealed class McpRequestHandler : IMcpRequestHandler
         var inputHash = ToolCallKey.InputHash(arguments);   // SERVER-derived — never read from the wire
         var key = ToolCallKey.For(tool.Kind, inputHash);
 
-        var claim = await _ledger!.TryClaimAsync(_runId, teamId, tool.Kind, key, inputHash, _fenceEpoch, cancellationToken).ConfigureAwait(false);
+        // D5c guardrail: bound this run's concurrent pending decisions (backpressure on a runaway agent raising many
+        // DISTINCT asks). Count its OTHER pending decisions (exclude THIS key so a re-issue stays exempt — it replays via
+        // the claim's Duplicate path, AC1), checked BEFORE the claim so a rejected raise never INSERTs a ghost row that
+        // burns the dedupe key. Returned as isError (a throw would be degraded to a generic retryable error by the outer
+        // dispatch catch); a count fault propagates → the raise fails closed (never silently admitted over the cap).
+        var otherPending = await _ledger!.CountPendingDecisionsAsync(_runId, teamId, key, cancellationToken).ConfigureAwait(false);
+
+        if (DecisionBounds.PendingCapBreach(otherPending) is { } breach) return ToolResult(isError: true, breach);
+
+        var claim = await _ledger.TryClaimAsync(_runId, teamId, tool.Kind, key, inputHash, _fenceEpoch, cancellationToken).ConfigureAwait(false);
 
         return claim.Outcome switch
         {

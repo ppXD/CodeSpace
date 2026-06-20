@@ -9,6 +9,7 @@ using CodeSpace.Core.Services.Chat;
 using CodeSpace.Core.Services.Chat.Interactions;
 using CodeSpace.Core.Services.Decisions;
 using CodeSpace.IntegrationTests.Infrastructure;
+using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Dtos.Decisions;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Enums;
@@ -416,6 +417,138 @@ public class McpDecisionFlowTests
     }
 
     // ─── Build the handler with the decision surface ─────────────────────────────
+
+    [Fact]
+    public async Task Raising_a_decision_past_the_per_run_cap_is_refused_before_it_parks()
+    {
+        // D5c: a run already holding the cap's-worth of pending decisions cannot raise another distinct one — it is
+        // refused (isError, naming the env var) BEFORE the claim, so no ghost row is staged. The default cap is 3.
+        var (teamId, _, channelId) = await SeedTeamChannelAsync();
+        var runId = Guid.NewGuid();
+
+        for (var i = 0; i < DecisionBounds.DefaultMaxPendingPerRun; i++)
+            await SeedPendingDecisionAsync(teamId, runId, $"decision.request:seeded-{i}");
+
+        using var scope = _fixture.BeginScope();
+        var handler = DecisionHandler(scope, AgentAutonomyLevel.Standard, teamId, runId, channelId);
+
+        // A NEW (distinct-key) decision → the gate counts the 3 seeded pending → at the cap → isError, no block.
+        var result = await CallToolAsync(handler, new { question = "one too many?", decisionType = "confirm" });
+
+        result.GetProperty("isError").GetBoolean().ShouldBeTrue("a run at its pending-decision cap cannot raise another");
+        Text(result).ShouldContain(DecisionBounds.MaxPendingPerRunEnvVar, customMessage: "the refusal names the env var to raise");
+
+        (await ReadRunRowsAsync(teamId, runId)).Count.ShouldBe(DecisionBounds.DefaultMaxPendingPerRun, "the refused raise staged NO ghost row — only the 3 seeded remain");
+    }
+
+    [Fact]
+    public async Task CountPendingDecisions_excludes_the_given_key_so_a_re_issue_stays_exempt()
+    {
+        // The re-issue exemption: the cap count EXCLUDES the key being raised, so re-issuing an already-pending decision
+        // (same key) sees only the OTHERS — under the cap → admitted → it replays via the claim's Duplicate path (AC1).
+        var (teamId, _, _) = await SeedTeamChannelAsync();
+        var runId = Guid.NewGuid();
+
+        await SeedPendingDecisionAsync(teamId, runId, "decision.request:k1");
+        await SeedPendingDecisionAsync(teamId, runId, "decision.request:k2");
+        await SeedPendingDecisionAsync(teamId, runId, "decision.request:k3");
+
+        using var scope = _fixture.BeginScope();
+        var ledger = scope.Resolve<IToolCallLedgerService>();
+
+        (await ledger.CountPendingDecisionsAsync(runId, teamId, "decision.request:k1", CancellationToken.None))
+            .ShouldBe(2, "re-issuing k1 excludes it — only the 2 OTHER pending count, so it is under the cap (exempt)");
+        (await ledger.CountPendingDecisionsAsync(runId, teamId, "decision.request:none", CancellationToken.None))
+            .ShouldBe(3, "a brand-new key excludes nothing — all 3 count against the cap");
+        (await ledger.CountPendingDecisionsAsync(Guid.NewGuid(), teamId, "decision.request:none", CancellationToken.None))
+            .ShouldBe(0, "another run's pending decisions never count against this run");
+    }
+
+    [Fact]
+    public async Task A_decision_under_the_per_run_cap_is_admitted_and_parks()
+    {
+        // The symmetric counterpart to the at-cap refusal: a run holding cap-1 pending decisions can still raise one more
+        // — it is admitted (the gate returns null), parks its own row, and is NOT refused with the cap message.
+        var (teamId, _, channelId) = await SeedTeamChannelAsync();
+        var runId = Guid.NewGuid();
+
+        for (var i = 0; i < DecisionBounds.DefaultMaxPendingPerRun - 1; i++)
+            await SeedPendingDecisionAsync(teamId, runId, $"decision.request:seeded-{i}");
+
+        var previous = Environment.GetEnvironmentVariable(McpRequestHandler.ApprovalBoundSecondsEnvVar);
+        Environment.SetEnvironmentVariable(McpRequestHandler.ApprovalBoundSecondsEnvVar, "1");   // tiny bound → park + return a ticket without blocking
+
+        try
+        {
+            using var scope = _fixture.BeginScope();
+            var handler = DecisionHandler(scope, AgentAutonomyLevel.Standard, teamId, runId, channelId);
+
+            var result = await CallToolAsync(handler, new { question = "under the cap?", decisionType = "confirm" });
+
+            Text(result).ShouldNotContain(DecisionBounds.MaxPendingPerRunEnvVar, customMessage: "a raise under the cap is admitted, never refused");
+            (await ReadRunRowsAsync(teamId, runId)).Count.ShouldBe(DecisionBounds.DefaultMaxPendingPerRun, "the admitted raise staged its own row — cap-1 seeded + 1 new");
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable(McpRequestHandler.ApprovalBoundSecondsEnvVar, previous);
+        }
+    }
+
+    [Fact]
+    public async Task Re_issuing_an_already_pending_decision_at_the_cap_is_exempt_end_to_end()
+    {
+        // The re-issue exemption proven through the REAL handler: a run AT its cap re-issues an already-pending decision
+        // (same args → same key) — the gate EXCLUDES that key, sees only the OTHERS (under the cap), admits it, and the
+        // claim replays it (AC1) rather than refusing with the cap message.
+        var (teamId, _, channelId) = await SeedTeamChannelAsync();
+        var runId = Guid.NewGuid();
+
+        var previous = Environment.GetEnvironmentVariable(McpRequestHandler.ApprovalBoundSecondsEnvVar);
+        Environment.SetEnvironmentVariable(McpRequestHandler.ApprovalBoundSecondsEnvVar, "1");
+
+        try
+        {
+            using var scope = _fixture.BeginScope();
+            var handler = DecisionHandler(scope, AgentAutonomyLevel.Standard, teamId, runId, channelId);
+
+            // Raise A through the handler so its row carries the REAL derived key, then fill the run to its cap.
+            var argsA = new { question = "the one I'll re-issue?", decisionType = "confirm" };
+            await CallToolAsync(handler, argsA);
+            for (var i = 0; i < DecisionBounds.DefaultMaxPendingPerRun - 1; i++)
+                await SeedPendingDecisionAsync(teamId, runId, $"decision.request:other-{i}");
+
+            (await ReadRunRowsAsync(teamId, runId)).Count.ShouldBe(DecisionBounds.DefaultMaxPendingPerRun, "the run is at its cap (A + cap-1 seeded)");
+
+            var reIssue = await CallToolAsync(handler, argsA);   // same args → same key → excluded from the count → admitted
+
+            Text(reIssue).ShouldNotContain(DecisionBounds.MaxPendingPerRunEnvVar, customMessage: "re-issuing an already-pending decision at the cap is exempt — it replays (AC1), never refused");
+            (await ReadRunRowsAsync(teamId, runId)).Count.ShouldBe(DecisionBounds.DefaultMaxPendingPerRun, "the re-issue staged NO new row — it replayed the existing one");
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable(McpRequestHandler.ApprovalBoundSecondsEnvVar, previous);
+        }
+    }
+
+    private async Task SeedPendingDecisionAsync(Guid teamId, Guid runId, string idempotencyKey)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        db.ToolCallLedger.Add(new ToolCallLedger
+        {
+            Id = Guid.NewGuid(),
+            TeamId = teamId,
+            AgentRunId = runId,
+            ToolKind = "decision.request",
+            IdempotencyKey = idempotencyKey,
+            InputHash = new string('0', 64),
+            Status = ToolCallLedgerStatus.AwaitingApproval,
+            ApprovalDeadlineAt = DateTimeOffset.UtcNow.AddMinutes(10),
+            CreatedBy = SystemUsers.SeederId,
+            LastModifiedBy = SystemUsers.SeederId,
+        });
+        await db.SaveChangesAsync();
+    }
 
     private McpRequestHandler DecisionHandler(ILifetimeScope scope, AgentAutonomyLevel autonomy, Guid teamId, Guid runId, Guid channelId, SecretRedactor? redactor = null) =>
         new(new SingleToolRegistry(new DecisionRequestTool()), autonomy, teamId, redactor, runId,
