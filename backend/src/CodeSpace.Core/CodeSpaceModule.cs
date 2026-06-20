@@ -39,6 +39,7 @@ public class CodeSpaceModule : Autofac.Module
         RegisterProviderModules(builder);
         RegisterPluginModules(builder);
         RegisterLLMProviderModules(builder);
+        RegisterFirstPartyAgentTools(builder);
         RegisterDependency(builder);
         RegisterCurrentUser(builder);
         RegisterAmbient(builder);
@@ -201,6 +202,21 @@ public class CodeSpaceModule : Autofac.Module
         }
 
         builder.RegisterType<LLMClientRegistry>().As<ILLMClientRegistry>().SingleInstance();
+    }
+
+    /// <summary>
+    /// Registers the FIRST-PARTY agent tools that are not workflow nodes (Rule 18.3 — an MCP-native capability, not a
+    /// graph step). Today: <see cref="Services.Agents.Tools.DecisionRequestTool"/> (Decision substrate D2), gated on
+    /// tool governance — the decision flow needs the ledger + approval surface, which only exist when governance is on.
+    /// Gating at REGISTRATION (not just at the handler) keeps a governance-OFF process byte-identical to pre-D2: the
+    /// tool is absent from the DI <c>IEnumerable&lt;IAgentTool&gt;</c>, so the catalog and <c>tools/list</c> never mention
+    /// it. Read through the single <see cref="Services.Agents.Mcp.McpRequestHandler.IsGovernanceEnabled"/> gate (Rule 8).
+    /// </summary>
+    private void RegisterFirstPartyAgentTools(ContainerBuilder builder)
+    {
+        if (!Services.Agents.Mcp.McpRequestHandler.IsGovernanceEnabled()) return;
+
+        builder.RegisterType<Services.Agents.Tools.DecisionRequestTool>().As<Services.Agents.Tools.IAgentTool>().SingleInstance();
     }
 
     private void RegisterDependency(ContainerBuilder builder)

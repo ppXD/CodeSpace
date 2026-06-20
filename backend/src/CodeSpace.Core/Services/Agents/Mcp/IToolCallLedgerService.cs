@@ -2,6 +2,7 @@ using CodeSpace.Core.DependencyInjection;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Messages.Agents;
+using CodeSpace.Messages.Decisions;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
 
@@ -47,6 +48,19 @@ public interface IToolCallLedgerService
 
     /// <summary>Team-scoped focused read of one row's {Status, ApprovedAt, ResultJson, Error} — the post-wake authority a blocked handler re-reads to decide the outcome. Null when the (ledger, team) row is absent (a foreign id finds nothing — fail-closed).</summary>
     Task<ToolCallApprovalState?> ReadApprovalStateAsync(Guid ledgerId, Guid teamId, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Record the TYPED answer to a parked agent-grain <c>decision.request</c> (Decision substrate D2): single-winner CAS
+    /// <c>AwaitingApproval → Succeeded</c> stamping the serialized <c>DecisionAnswer</c> as <c>ResultJson</c>, team-scoped.
+    /// A decision has NO side effect to execute — the answer IS the terminal result — so it resolves straight out of
+    /// AwaitingApproval, NEVER through the Running execution claim. Guarded ALSO on <c>ToolKind == 'decision.request'</c>
+    /// so this can never flip a real side-effecting approval row to Succeeded without its Running hop (the safety
+    /// invariant the widened <see cref="ToolCallLedgerStateMachine.IsLegalTransition"/> edge rests on). The
+    /// <c>Status == AwaitingApproval</c> guard makes a dup-click / cross-pod race idempotent: exactly one wins (true), the
+    /// loser sees the row already Succeeded → affected 0 → false (AC2 resolve-once). Mirrors the direct-CAS discipline of
+    /// the reject / expire paths.
+    /// </summary>
+    Task<bool> TryAnswerDecisionAsync(Guid ledgerId, Guid teamId, string answerJson, CancellationToken cancellationToken);
 
     /// <summary>
     /// Reaper sweep (item D3): durably expire every UNDECIDED approval past its deadline so a re-call gets a clean
@@ -210,6 +224,29 @@ public sealed class ToolCallLedgerService : IToolCallLedgerService, IScopedDepen
             .Where(l => l.Id == ledgerId && l.TeamId == teamId)
             .Select(l => new ToolCallApprovalState { Status = l.Status, ApprovedAt = l.ApprovedAt, ResultJson = l.ResultJson, Error = l.Error })
             .SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
+
+    public async Task<bool> TryAnswerDecisionAsync(Guid ledgerId, Guid teamId, string answerJson, CancellationToken cancellationToken)
+    {
+        var now = DateTimeOffset.UtcNow;
+
+        // Single-winner CAS AwaitingApproval → Succeeded for a DECISION answer (mirrors the reject / expire direct-CAS
+        // discipline). The ToolKind == 'decision.request' guard is LOAD-BEARING: it makes it physically impossible for a
+        // decision answer to flip a real side-effecting approval row (which must always go through the Running execution
+        // claim). The Status == AwaitingApproval guard is the resolve-once invariant: a dup-click / cross-pod race leaves
+        // exactly one winner (affected 1 → true), every loser sees the row already Succeeded (affected 0 → false). The
+        // answer IS the terminal — store it as ResultJson; there is no side effect to run.
+        var flipped = await _db.ToolCallLedger
+            .Where(l => l.Id == ledgerId && l.TeamId == teamId && l.Status == ToolCallLedgerStatus.AwaitingApproval && l.ToolKind == DecisionToolKinds.DecisionRequest)
+            .ExecuteUpdateAsync(s => s
+                .SetProperty(l => l.Status, ToolCallLedgerStatus.Succeeded)
+                .SetProperty(l => l.ResultJson, answerJson)
+                .SetProperty(l => l.LastModifiedDate, now), cancellationToken)
+            .ConfigureAwait(false);
+
+        if (flipped > 0) _logger.LogInformation("Decision answered. LedgerId={LedgerId}", ledgerId);
+
+        return flipped > 0;
+    }
 
     public async Task<IReadOnlyList<ExpiredToolApproval>> ExpireStaleApprovalsAsync(DateTimeOffset now, CancellationToken cancellationToken)
     {
