@@ -388,6 +388,20 @@ public class AgentCodeNodeTests
     }
 
     [Fact]
+    public async Task Resumed_needs_review_run_does_not_proceed_as_a_success()
+    {
+        // Slice A1 consumer contract: a run re-graded to NeedsReview (it raised a decision still unanswered) is NOT
+        // a clean success — the node must NOT consume it as if the work finished. It maps to a clean node failure so
+        // the workflow doesn't proceed on un-reviewed work (the decision itself stays answerable via the queue).
+        var resume = JsonDocument.Parse("""{"status":"NeedsReview","summary":"I need a decision on the API shape."}""").RootElement;
+
+        var result = await new AgentCodeNode().RunAsync(BuildContext(new(), resume), CancellationToken.None);
+
+        result.Status.ShouldBe(NodeStatus.Failure, "NeedsReview is a non-success terminal — the node fails cleanly rather than emitting success outputs");
+        result.Error.ShouldContain("NeedsReview");
+    }
+
+    [Fact]
     public async Task Resumed_multi_repo_run_surfaces_the_change_set_outputs()
     {
         // A multi-repo run's resume payload carries repositoryResults + changeSetId; the node surfaces them so a

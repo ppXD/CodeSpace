@@ -2,6 +2,7 @@ using System.Text.Json;
 using CodeSpace.Core.DependencyInjection;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
+using CodeSpace.Core.Services.Agents.Mcp;
 using CodeSpace.Core.Services.Agents.Sandbox;
 using CodeSpace.Core.Services.Workflows.Artifacts;
 using CodeSpace.Messages.Agents;
@@ -125,14 +126,16 @@ public sealed class AgentRunService : IAgentRunService, IScopedDependency
     private readonly IAdmissionController _admissionController;
     private readonly ISandboxRunnerRegistry _runners;
     private readonly IArtifactOffloader _offloader;
+    private readonly IToolCallLedgerService _ledger;
     private readonly ILogger<AgentRunService> _logger;
 
-    public AgentRunService(CodeSpaceDbContext db, IAdmissionController admissionController, ISandboxRunnerRegistry runners, IArtifactOffloader offloader, ILogger<AgentRunService> logger)
+    public AgentRunService(CodeSpaceDbContext db, IAdmissionController admissionController, ISandboxRunnerRegistry runners, IArtifactOffloader offloader, IToolCallLedgerService ledger, ILogger<AgentRunService> logger)
     {
         _db = db;
         _admissionController = admissionController;
         _runners = runners;
         _offloader = offloader;
+        _ledger = ledger;
         _logger = logger;
     }
 
@@ -348,6 +351,16 @@ public sealed class AgentRunService : IAgentRunService, IScopedDependency
             ?? throw new KeyNotFoundException($"AgentRun {runId} not found.");
 
         var current = snapshot.Status;
+
+        // Completion contract (Slice A1): a run can NEVER land Succeeded while a decision it raised is still unanswered —
+        // re-grade Succeeded → NeedsReview(NeedsDecision) so the unanswered ask isn't buried under "success". Enforced at
+        // THIS choke point (every normal completion) AND mirrored in the reconciler's spool recovery, so the invariant
+        // holds on every terminal write path. Only a would-be Succeeded needs the lookup; every other terminal passes through.
+        if (result.Status == AgentRunStatus.Succeeded)
+        {
+            var pendingDecisionId = await _ledger.FindBlockingDecisionIdAsync(runId, cancellationToken).ConfigureAwait(false);
+            result = AgentCompletionContract.ApplyPendingDecision(result, pendingDecisionId);
+        }
 
         if (!AgentRunStateMachine.IsLegalTransition(current, result.Status))
             throw new AgentRunTransitionException($"Illegal AgentRun transition {current} → {result.Status} (run {runId}).");
