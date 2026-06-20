@@ -54,7 +54,7 @@ public sealed class DecisionQueueService : IDecisionQueueService, IScopedDepende
             .Select(l => new AgentDecisionRow(l.Id, l.CreatedDate, l.ApprovalMessageId, l.DecisionEnvelopeJson))
             .ToListAsync(cancellationToken).ConfigureAwait(false);
 
-    /// <summary>Node-grain: Pending <c>flow.decision</c> waits, team via the owning run; the envelope is stashed in the wait's payload_jsonb while Pending (overwritten by the answer only on resolve). NOTE: unlike the agent grain (redacted at park), this payload carries the engine's existing suspend-payload posture — see <see cref="Messages.Dtos.Decisions.PendingDecision"/> for the redaction caveat (the engine suspend-payload redaction is a tracked follow-up).</summary>
+    /// <summary>Node-grain: Pending <c>flow.decision</c> waits, team via the owning run; the envelope is stashed in the wait's payload_jsonb while Pending (overwritten by the answer only on resolve). Like the agent grain, it is REDACTED at park — <c>FlowDecisionNode</c> builds the envelope from the engine's redacted config, so a secret ref in decision text is a "[REDACTED: path]" marker here.</summary>
     private async Task<List<NodeDecisionRow>> ReadNodeGrainAsync(Guid teamId, CancellationToken cancellationToken) =>
         await _db.WorkflowRunWait.AsNoTracking()
             .Where(w => w.WaitKind == WorkflowWaitKinds.Decision && w.Status == WorkflowWaitStatuses.Pending

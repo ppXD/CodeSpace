@@ -38,6 +38,17 @@ public sealed record NodeRunContext
     public required IReadOnlyDictionary<string, JsonElement> Config { get; init; }
 
     /// <summary>
+    /// <see cref="Config"/> with every secret-referencing key replaced by a redaction marker (the engine's per-node
+    /// <c>IPayloadRedactor.RedactBag</c> output — the same redaction the node.started record gets). A node that persists
+    /// config text to a HUMAN surface that outlives the run (a suspend payload the queue / run-detail reads, an
+    /// approval prompt) MUST read those human-facing fields from here, NOT <see cref="Config"/>, so a <c>{{team.SECRET}}</c>
+    /// in author-written decision/approval text never lands as plaintext. NULL only when no caller set it (tests that
+    /// don't exercise redaction); the engine ALWAYS sets it, so a node falls back to <see cref="Config"/> only off the
+    /// engine path. Functional (non-human) config — read straight from <see cref="Config"/> as before.
+    /// </summary>
+    public IReadOnlyDictionary<string, JsonElement>? RedactedConfig { get; init; }
+
+    /// <summary>
     /// Raw, un-resolved config from the NodeDefinition — {{ref}} templates still intact.
     /// Iteration-style nodes (flow.iterate) use this to re-resolve templates per iteration
     /// with a different (item/index-populated) scope. Most nodes should use <see cref="Config"/>.

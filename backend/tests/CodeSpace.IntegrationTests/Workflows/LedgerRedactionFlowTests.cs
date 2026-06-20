@@ -177,6 +177,101 @@ public class LedgerRedactionFlowTests
             "Non-secret variable resolution MUST pass through to the ledger unchanged — no false-positive redaction on plain String type");
     }
 
+    [Fact]
+    public async Task A_flow_decision_suspend_payload_redacts_a_secret_in_the_question()
+    {
+        // The parked flow.decision wait payload IS the DecisionRequest envelope — read back by the team-wide "Needs
+        // decision" queue + the run-detail surface (HUMAN surfaces that outlive the run). A {{team.SECRET}} in the
+        // author-written question must land as the redaction marker, NOT plaintext (the node-grain analog of the agent
+        // grain redacting its envelope at park).
+        const string Sentinel = "sk-DECISION-DO-NOT-LEAK-12345678";
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+
+        using (var setup = _fixture.BeginScope())
+        {
+            await setup.Resolve<IVariableService>().SetAsync(
+                VariableScope.Team, teamId, teamId, "API_KEY", VariableValueType.Secret,
+                JsonString(Sentinel), null, userId, CancellationToken.None);
+        }
+
+        var def = new WorkflowDefinition
+        {
+            SchemaVersion = 1,
+            Nodes = new List<NodeDefinition>
+            {
+                new() { Id = "start",  TypeKey = "trigger.manual", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
+                new() { Id = "decide", TypeKey = "flow.decision",
+                        Config = WorkflowsTestSeed.Json("""{ "question": "Ship with key {{team.API_KEY}}?", "decisionType": "confirm" }"""),
+                        Inputs = WorkflowsTestSeed.EmptyJson() },
+                new() { Id = "end",    TypeKey = "builtin.terminal", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
+            },
+            Edges = new List<EdgeDefinition>
+            {
+                new() { From = "start",  To = "decide" },
+                new() { From = "decide", To = "end" },
+            },
+        };
+
+        var workflowId = await CreateWorkflowAsync(teamId, userId, def);
+        var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
+        await RunEngineAsync(runId);
+
+        using var verify = _fixture.BeginScope();
+        var db = verify.Resolve<CodeSpaceDbContext>();
+
+        var wait = await db.WorkflowRunWait.AsNoTracking().SingleAsync(w => w.RunId == runId && w.WaitKind == WorkflowWaitKinds.Decision);
+        var question = JsonDocument.Parse(wait.PayloadJson!).RootElement.GetProperty("question").GetString();
+
+        question.ShouldBe("[REDACTED: team.API_KEY]", "the suspend payload's human-facing question must be the redaction marker, not the plaintext secret");
+        wait.PayloadJson!.Contains(Sentinel).ShouldBeFalse("the secret plaintext must NEVER land in the suspend payload (a human surface the queue + run-detail read)");
+    }
+
+    [Fact]
+    public async Task A_flow_wait_approval_suspend_payload_redacts_a_secret_in_the_prompt()
+    {
+        // Same human-surface leak class as flow.decision: the approval prompt is persisted to the wait payload and
+        // rendered verbatim on the run-detail surface, so a {{team.SECRET}} in it must be the redaction marker.
+        const string Sentinel = "sk-APPROVAL-DO-NOT-LEAK-87654321";
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+
+        using (var setup = _fixture.BeginScope())
+        {
+            await setup.Resolve<IVariableService>().SetAsync(
+                VariableScope.Team, teamId, teamId, "API_KEY", VariableValueType.Secret,
+                JsonString(Sentinel), null, userId, CancellationToken.None);
+        }
+
+        var def = new WorkflowDefinition
+        {
+            SchemaVersion = 1,
+            Nodes = new List<NodeDefinition>
+            {
+                new() { Id = "start",   TypeKey = "trigger.manual",     Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
+                new() { Id = "approve", TypeKey = "flow.wait_approval",
+                        Config = WorkflowsTestSeed.Json("""{ "prompt": "Deploy with key {{team.API_KEY}}?" }"""),
+                        Inputs = WorkflowsTestSeed.EmptyJson() },
+                new() { Id = "end",     TypeKey = "builtin.terminal",   Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
+            },
+            Edges = new List<EdgeDefinition>
+            {
+                new() { From = "start",   To = "approve" },
+                new() { From = "approve", To = "end" },
+            },
+        };
+
+        var workflowId = await CreateWorkflowAsync(teamId, userId, def);
+        var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
+        await RunEngineAsync(runId);
+
+        using var verify = _fixture.BeginScope();
+        var db = verify.Resolve<CodeSpaceDbContext>();
+
+        var wait = await db.WorkflowRunWait.AsNoTracking().SingleAsync(w => w.RunId == runId && w.WaitKind == WorkflowWaitKinds.Approval);
+        JsonDocument.Parse(wait.PayloadJson!).RootElement.GetProperty("prompt").GetString()
+            .ShouldBe("[REDACTED: team.API_KEY]", "the approval prompt on the human run-detail surface must be the marker, not plaintext");
+        wait.PayloadJson!.Contains(Sentinel).ShouldBeFalse("the secret plaintext must NEVER land in the approval suspend payload");
+    }
+
     // ─── Helpers ────────────────────────────────────────────────────────────────
 
     private async Task<Guid> CreateWorkflowAsync(Guid teamId, Guid userId, WorkflowDefinition def)

@@ -2557,7 +2557,7 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
         // On a resumed run the node was suspended; rehydrate loaded its resolved wait's payload
         // into state.ResumePayloads. The node knows it's being resumed via this.
         var resumePayload = state.ResumePayloads.TryGetValue(node.Id, out var rp) ? rp : (JsonElement?)null;
-        var exec = new NodeExecution(run, node, runtime, scope, state, resolvedInputs, resolvedConfig, parentRecordId, resumePayload, startedAt, iterationKey);
+        var exec = new NodeExecution(run, node, runtime, scope, state, resolvedInputs, resolvedConfig, redactedConfig, parentRecordId, resumePayload, startedAt, iterationKey);
 
         // D7-3 rerun side-effect gate: on a from-node rerun, a re-run side-effecting node parks for human
         // approval before it can re-fire (approve → run it; reject → skip it). Returns null for every other
@@ -2762,7 +2762,7 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
     /// values into one argument so the helpers stay under Rule 1's 5-param cap — a data holder with
     /// no behaviour.
     /// </summary>
-    private sealed record NodeExecution(WorkflowRun Run, NodeDefinition Node, INodeRuntime Runtime, NodeRunScope Scope, WalkerState State, IReadOnlyDictionary<string, JsonElement> ResolvedInputs, IReadOnlyDictionary<string, JsonElement> ResolvedConfig, Guid ParentRecordId, JsonElement? ResumePayload, DateTimeOffset StartedAt, string IterationKey);
+    private sealed record NodeExecution(WorkflowRun Run, NodeDefinition Node, INodeRuntime Runtime, NodeRunScope Scope, WalkerState State, IReadOnlyDictionary<string, JsonElement> ResolvedInputs, IReadOnlyDictionary<string, JsonElement> ResolvedConfig, IReadOnlyDictionary<string, JsonElement> RedactedConfig, Guid ParentRecordId, JsonElement? ResumePayload, DateTimeOffset StartedAt, string IterationKey);
 
     /// <summary>
     /// Assemble the <see cref="NodeRunContext"/> the node sees. Pulls the per-node logger
@@ -2778,6 +2778,7 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
         {
             Inputs = exec.ResolvedInputs,
             Config = exec.ResolvedConfig,
+            RedactedConfig = exec.RedactedConfig,
             RawInputs = exec.Node.Inputs,
             RawConfig = exec.Node.Config,
             Scope = exec.Scope,

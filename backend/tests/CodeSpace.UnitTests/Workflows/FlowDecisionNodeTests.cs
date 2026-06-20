@@ -133,10 +133,35 @@ public class FlowDecisionNodeTests
         result.Outputs["timedOut"].GetBoolean().ShouldBeFalse();
     }
 
-    private static NodeRunContext Context(string config, JsonElement? resume) => new()
+    [Fact]
+    public async Task The_envelope_is_built_from_the_redacted_config_when_the_engine_sets_it()
+    {
+        // The wait payload is a HUMAN surface (the cross-grain queue / run-detail), so a {{team.SECRET}} in
+        // author-written decision text must surface as the REDACTED marker, not plaintext — mirroring the agent grain.
+        const string resolved = """{ "question": "deploy with key sk-SECRET-PLAINTEXT?", "decisionType": "confirm" }""";
+        const string redacted = """{ "question": "deploy with key [REDACTED: team.KEY]?", "decisionType": "confirm" }""";
+
+        var result = await new FlowDecisionNode().RunAsync(Context(resolved, resume: null, redactedConfig: redacted), CancellationToken.None);
+
+        var req = JsonSerializer.Deserialize<DecisionRequest>(result.SuspendUntil!.Payload, Json)!;
+        req.Question.ShouldBe("deploy with key [REDACTED: team.KEY]?", "the human-facing question comes from the REDACTED config");
+        req.Question.ShouldNotContain("sk-SECRET-PLAINTEXT");
+    }
+
+    [Fact]
+    public async Task Without_a_redacted_config_it_falls_back_to_the_resolved_config()
+    {
+        // Off the engine path (RedactedConfig null) it reads Config unchanged — the existing tests' posture.
+        var result = await new FlowDecisionNode().RunAsync(Context("""{ "question": "plain" }""", resume: null), CancellationToken.None);
+
+        JsonSerializer.Deserialize<DecisionRequest>(result.SuspendUntil!.Payload, Json)!.Question.ShouldBe("plain");
+    }
+
+    private static NodeRunContext Context(string config, JsonElement? resume, string? redactedConfig = null) => new()
     {
         Inputs = new Dictionary<string, JsonElement>(),
         Config = JsonDocument.Parse(config).RootElement.EnumerateObject().ToDictionary(p => p.Name, p => p.Value.Clone()),
+        RedactedConfig = redactedConfig is null ? null : JsonDocument.Parse(redactedConfig).RootElement.EnumerateObject().ToDictionary(p => p.Name, p => p.Value.Clone()),
         RawInputs = JsonDocument.Parse("{}").RootElement,
         RawConfig = JsonDocument.Parse(config).RootElement,
         Scope = new NodeRunScope

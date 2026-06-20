@@ -9,11 +9,10 @@ namespace CodeSpace.Messages.Dtos.Decisions;
 /// <c>DecisionRequest</c> envelope (stashed at park on both backends), so the queue needs no grain-specific knowledge
 /// beyond the envelope. A Rule 18.1 pure data noun.
 ///
-/// <para>REDACTION POSTURE differs by grain (this row is a human surface): the AGENT-grain envelope is redacted at park
-/// by the run's <c>SecretRedactor</c> (see <c>McpRequestHandler.ParkDecisionAsync</c>). The NODE-grain envelope is the
-/// workflow's RESOLVED suspend payload — it inherits the engine's existing suspend-payload posture, which does NOT yet
-/// additionally redact (the same plaintext already visible via the run-detail Pending-wait payload), so a workflow
-/// author must not place secret refs in human-facing decision text until the engine suspend-payload redaction lands.</para>
+/// <para>REDACTION (this row is a human surface): BOTH grains' envelopes are redacted, each at park. The AGENT grain
+/// runs its envelope through the run's <c>SecretRedactor</c> (<c>McpRequestHandler.ParkDecisionAsync</c>); the NODE grain
+/// builds its envelope from the engine's REDACTED config (<c>FlowDecisionNode</c> reads <c>NodeRunContext.RedactedConfig</c>),
+/// so a <c>{{team.SECRET}}</c> in author-written decision text surfaces as a "[REDACTED: path]" marker, not plaintext.</para>
 /// </summary>
 public sealed record PendingDecision
 {
