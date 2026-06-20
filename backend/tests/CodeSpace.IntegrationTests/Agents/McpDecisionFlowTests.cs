@@ -215,7 +215,7 @@ public class McpDecisionFlowTests
         using var scope = _fixture.BeginScope();
         var handler = DecisionHandler(scope, AgentAutonomyLevel.Standard, teamId, runId, channelId);
 
-        var call = Task.Run(() => CallToolAsync(handler, new { question = "Stash check: which path?", decisionType = "choose_one", options = new[] { new { id = "a", label = "A" } }, riskLevel = "high", policy = "human_required" }));
+        var call = Task.Run(() => CallToolAsync(handler, new { question = "Stash check: which path?", decisionType = "choose_one", options = new[] { new { id = "a", label = "A" } }, riskLevel = "high", policy = "supervisor_first" }));
 
         var (ledgerId, messageId) = await WaitForPostedCardAsync(teamId, runId);
 
@@ -225,7 +225,37 @@ public class McpDecisionFlowTests
         var env = JsonSerializer.Deserialize<CodeSpace.Messages.Decisions.DecisionRequest>(envelopeJson!, new JsonSerializerOptions(JsonSerializerDefaults.Web))!;
         env.Question.ShouldBe("Stash check: which path?");
         env.RiskLevel.ShouldBe("high");
+        env.Policy.ShouldBe(CodeSpace.Messages.Decisions.DecisionPolicies.HumanRequired, "the agent-grain park applies the D4 fail-closed floor — high risk clamps the declared supervisor_first → human_required");
         env.ResumeBackend.ShouldBe(CodeSpace.Messages.Decisions.DecisionResumeBackends.ToolLedger);
+
+        await RespondAsync(teamId, messageId, "a", ownerId);
+        await call;
+    }
+
+    [Fact]
+    public async Task A_string_isSideEffecting_option_is_parsed_as_the_safety_flag_and_floors_to_human()
+    {
+        // isSideEffecting is a fail-closed security signal feeding the policy floor — a model emitting the STRING "true"
+        // (not a boolean) must NOT silently drop it (which would let an irreversible decision auto-resolve). An
+        // otherwise-auto-able supervisor_first decision with a string-"true" side-effecting option must stash human_required.
+        var (teamId, ownerId, channelId) = await SeedTeamChannelAsync();
+        var runId = Guid.NewGuid();
+
+        using var scope = _fixture.BeginScope();
+        var handler = DecisionHandler(scope, AgentAutonomyLevel.Standard, teamId, runId, channelId);
+
+        var call = Task.Run(() => CallToolAsync(handler, new
+        {
+            question = "deploy?", decisionType = "choose_one",
+            options = new object[] { new { id = "a", label = "A" }, new { id = "b", label = "B", isSideEffecting = "true" } },
+            recommendedOption = "a", blockingReason = "ready", riskLevel = "low", policy = "supervisor_first",
+        }));
+
+        var (ledgerId, messageId) = await WaitForPostedCardAsync(teamId, runId);
+
+        var env = JsonSerializer.Deserialize<CodeSpace.Messages.Decisions.DecisionRequest>((await ReadRowAsync(ledgerId)).DecisionEnvelopeJson!, new JsonSerializerOptions(JsonSerializerDefaults.Web))!;
+        env.Options[1].IsSideEffecting.ShouldBeTrue("a string \"true\" isSideEffecting is parsed as the safety flag, not dropped");
+        env.Policy.ShouldBe(CodeSpace.Messages.Decisions.DecisionPolicies.HumanRequired, "a side-effecting option floors the decision to human even when declared supervisor_first");
 
         await RespondAsync(teamId, messageId, "a", ownerId);
         await call;

@@ -56,7 +56,7 @@ public class FlowDecisionNodeTests
         req.RecommendedOption.ShouldBe("a");
         req.BlockingReason.ShouldBe("the schema diverged");
         req.RiskLevel.ShouldBe(DecisionRiskLevels.Low);
-        req.Policy.ShouldBe(DecisionPolicies.SupervisorFirst);
+        req.Policy.ShouldBe(DecisionPolicies.HumanRequired, "the D4 floor clamps the declared supervisor_first → human_required because option b is side-effecting (an irreversible choice is human-only)");
         req.Scope.ShouldBe(DecisionScopes.Node);
         req.RequesterType.ShouldBe(DecisionRequesterTypes.WorkflowNode);
         req.ResumeBackend.ShouldBe(DecisionResumeBackends.WorkflowWait);

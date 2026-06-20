@@ -1,4 +1,5 @@
 using System.Text.Json;
+using CodeSpace.Core.Services.Decisions;
 using CodeSpace.Core.Services.Workflows.Runtime;
 using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Decisions;
@@ -105,7 +106,7 @@ public sealed class FlowDecisionNode : INodeRuntime
         var config = context.RedactedConfig ?? context.Config;
         var timeoutSeconds = ReadInt(config, "timeoutSeconds", DefaultTimeoutSeconds);
 
-        return new DecisionRequest
+        var draft = new DecisionRequest
         {
             Id = Guid.NewGuid(),
             RootTraceId = rootTraceId,
@@ -129,6 +130,10 @@ public sealed class FlowDecisionNode : INodeRuntime
             ResumeBackend = DecisionResumeBackends.WorkflowWait,
             Status = DecisionStatuses.Pending,
         };
+
+        // The fail-closed floor clamps the declared policy up to human_required for a high-stakes ask — the stashed
+        // envelope carries the EFFECTIVE policy, so the queue + the D4 arbiter never auto-resolve what only a human may.
+        return draft with { Policy = DecisionPolicyFloor.Effective(draft) };
     }
 
     /// <summary>The default decision injected when the bounded-wait deadline fires — a DecisionAnswer shaped exactly like a real answer, so the resumed pass maps it identically (the run always makes progress).</summary>
