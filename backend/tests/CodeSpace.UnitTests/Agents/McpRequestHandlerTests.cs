@@ -734,8 +734,9 @@ public class McpRequestHandlerTests
         public Task<ToolCallApprovalState?> ReadApprovalStateAsync(Guid ledgerId, Guid teamId, CancellationToken ct) =>
             Task.FromResult(ApprovalState?.Invoke());
 
-        // Decision answer-CAS — unused by the approval-path handler tests (no decision.request flows here).
+        // Decision answer-CAS + envelope stash — unused by the approval-path handler tests (no decision.request flows here).
         public Task<bool> TryAnswerDecisionAsync(Guid ledgerId, Guid teamId, string answerJson, CancellationToken ct) => Task.FromResult(false);
+        public Task SetDecisionEnvelopeAsync(Guid ledgerId, Guid teamId, string envelopeJson, CancellationToken ct) => Task.CompletedTask;
 
         public Task<IReadOnlyList<Core.Persistence.Entities.ToolCallLedger>> GetForRunAsync(Guid agentRunId, Guid teamId, CancellationToken ct) =>
             Task.FromResult<IReadOnlyList<Core.Persistence.Entities.ToolCallLedger>>(Rows);

@@ -16,6 +16,7 @@ public class ToolCallLedgerConfiguration : IEntityTypeConfiguration<ToolCallLedg
         builder.Property(l => l.InputHash).HasMaxLength(64);
         builder.Property(l => l.IdempotencyKey).HasMaxLength(200);
         builder.Property(l => l.ResultJson).HasColumnName("result_jsonb").HasColumnType("jsonb");
+        builder.Property(l => l.DecisionEnvelopeJson).HasColumnName("decision_envelope_jsonb").HasColumnType("jsonb");
         builder.Property(l => l.ApprovalMessageId).HasColumnName("approval_message_id");
         builder.Property(l => l.ApprovalToken).HasColumnName("approval_token");
         builder.Property(l => l.ApprovalDeadlineAt).HasColumnName("approval_deadline_at");
