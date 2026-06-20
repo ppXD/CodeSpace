@@ -19,7 +19,7 @@ using RepositoryRole = CodeSpace.Messages.Enums.RepositoryRole;
 
 namespace CodeSpace.Core.Services.Providers.GitHub;
 
-public sealed class GitHubRepositoryProvider : IRepositoryCatalogCapability, IPullRequestCatalogCapability, IPullRequestCommentCapability, IPullRequestReviewCapability, IPullRequestWriteCapability, IIssueCatalogCapability, IIssueWriteCapability, IRepositoryAccessCapability, IRepositorySourceCapability, IRepositoryInsightsCapability, IRepositoryHistoryCapability, IRepositoryMarkdownRenderCapability, ICredentialProbeCapability, IWebhookRegistrationCapability, IWebhookSignatureVerifier, IWebhookEventNormalizer
+public sealed class GitHubRepositoryProvider : IRepositoryCatalogCapability, IPullRequestCatalogCapability, IPullRequestCommentCapability, IPullRequestReviewCapability, IPullRequestWriteCapability, IIssueCatalogCapability, IIssueWriteCapability, IReleaseCatalogCapability, IRepositoryAccessCapability, IRepositorySourceCapability, IRepositoryInsightsCapability, IRepositoryHistoryCapability, IRepositoryMarkdownRenderCapability, ICredentialProbeCapability, IWebhookRegistrationCapability, IWebhookSignatureVerifier, IWebhookEventNormalizer
 {
     private readonly IProviderAuthResolver _authResolver;
     private readonly IExternalCallResilience _resilience;
@@ -402,12 +402,94 @@ public sealed class GitHubRepositoryProvider : IRepositoryCatalogCapability, IPu
         Body = issue.Body,
         AuthorLogin = issue.User?.Login,
         Labels = ToLabelRefs(issue.Labels),
+        Assignees = issue.Assignees?.Select(a => a.Login).ToList() ?? new List<string>(),
         CommentsCount = issue.Comments,
         MilestoneTitle = issue.Milestone?.Title,
         CreatedDate = issue.CreatedAt,
         ClosedDate = issue.ClosedAt,
         WebUrl = issue.HtmlUrl
     };
+
+    public async Task<RemoteIssue> GetIssueAsync(ProviderContext context, RemoteRepository repository, int number, CancellationToken cancellationToken)
+    {
+        var client = await BuildClientAsync(context, cancellationToken).ConfigureAwait(false);
+
+        return await _resilience.ExecuteAsync(context.Instance, nameof(GetIssueAsync), async _ =>
+        {
+            var issue = await client.Issue.Get(repository.NamespacePath, repository.Name, number).ConfigureAwait(false);
+            return ToRemoteIssue(issue);
+        }, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<IReadOnlyList<RemoteIssueComment>> ListIssueCommentsAsync(ProviderContext context, RemoteRepository repository, int number, CancellationToken cancellationToken)
+    {
+        var client = await BuildClientAsync(context, cancellationToken).ConfigureAwait(false);
+
+        return await _resilience.ExecuteAsync(context.Instance, nameof(ListIssueCommentsAsync), async _ =>
+        {
+            var comments = await client.Issue.Comment.GetAllForIssue(repository.NamespacePath, repository.Name, number).ConfigureAwait(false);
+            return (IReadOnlyList<RemoteIssueComment>)comments.Select(c => new RemoteIssueComment
+            {
+                ExternalId = c.Id.ToString(),
+                Body = c.Body,
+                AuthorName = c.User?.Login ?? "unknown",
+                CreatedAt = c.CreatedAt,
+                WebUrl = c.HtmlUrl
+            }).ToList();
+        }, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<IReadOnlyList<RemoteIssueEvent>> ListIssueEventsAsync(ProviderContext context, RemoteRepository repository, int number, CancellationToken cancellationToken)
+    {
+        var client = await BuildClientAsync(context, cancellationToken).ConfigureAwait(false);
+
+        return await _resilience.ExecuteAsync(context.Instance, nameof(ListIssueEventsAsync), async _ =>
+        {
+            try
+            {
+                var events = await client.Issue.Events.GetAllForIssue(repository.NamespacePath, repository.Name, number).ConfigureAwait(false);
+                // Only the events that carry meaning for the activity timeline; unmapped ones (subscribed,
+                // pinned, …) drop to null and are filtered out.
+                return (IReadOnlyList<RemoteIssueEvent>)events.Select(ToRemoteIssueEvent).OfType<RemoteIssueEvent>().ToList();
+            }
+            catch (AuthorizationException)
+            {
+                return (IReadOnlyList<RemoteIssueEvent>)Array.Empty<RemoteIssueEvent>();
+            }
+        }, cancellationToken).ConfigureAwait(false);
+    }
+
+    private static RemoteIssueEvent? ToRemoteIssueEvent(IssueEvent e)
+    {
+        // Synthesise GitHub's structured events into the same human lines GitLab's system notes already
+        // carry, so both providers render identically. Unmapped events return null (filtered by the caller).
+        var (kind, summary) = e.Event.Value switch
+        {
+            EventInfoState.Assigned => ("assigned", $"assigned to {e.Assignee?.Login ?? "someone"}"),
+            EventInfoState.Unassigned => ("unassigned", $"unassigned {e.Assignee?.Login ?? "someone"}"),
+            EventInfoState.Labeled => ("labeled", $"added the {e.Label?.Name} label"),
+            EventInfoState.Unlabeled => ("unlabeled", $"removed the {e.Label?.Name} label"),
+            EventInfoState.Milestoned => ("milestoned", $"added this to the {e.Milestone?.Title} milestone"),
+            EventInfoState.Demilestoned => ("demilestoned", $"removed this from the {e.Milestone?.Title} milestone"),
+            EventInfoState.Closed => ("closed", "closed this"),
+            EventInfoState.Reopened => ("reopened", "reopened this"),
+            EventInfoState.Renamed => ("renamed", "renamed this"),
+            EventInfoState.Referenced => ("referenced", "referenced this in a commit"),
+            EventInfoState.Crossreferenced => ("mentioned", "mentioned this elsewhere"),
+            EventInfoState.Mentioned => ("mentioned", "was mentioned"),
+            _ => (null, null)
+        };
+        if (kind == null) return null;
+
+        return new RemoteIssueEvent
+        {
+            ExternalId = e.Id.ToString(),
+            Kind = kind,
+            Summary = summary!,
+            ActorLogin = e.Actor?.Login,
+            CreatedDate = e.CreatedAt
+        };
+    }
 
     public async Task<RemoteIssueComment> CommentIssueAsync(ProviderContext context, RemoteRepository repository, int number, string body, CancellationToken cancellationToken)
     {
@@ -792,6 +874,75 @@ public sealed class GitHubRepositoryProvider : IRepositoryCatalogCapability, IPu
         WebUrl = release.HtmlUrl,
         IsPrerelease = release.Prerelease
     };
+
+    // ── IReleaseCatalogCapability ──
+
+    public async Task<IReadOnlyList<RemoteRelease>> ListReleasesAsync(ProviderContext context, RemoteRepository repository, int page, int perPage, CancellationToken cancellationToken)
+    {
+        var client = await BuildClientAsync(context, cancellationToken).ConfigureAwait(false);
+
+        return await _resilience.ExecuteAsync(context.Instance, nameof(ListReleasesAsync), async _ =>
+        {
+            var options = new ApiOptions { PageCount = 1, PageSize = perPage, StartPage = page };
+            var releases = await client.Repository.Release.GetAll(repository.NamespacePath, repository.Name, options).ConfigureAwait(false);
+
+            // The "Latest" badge marks ONE release (GitHub's GetLatest = newest published non-prerelease).
+            // Only resolve it on page 1 where it can appear; skip the extra call on deeper pages.
+            string? latestTag = null;
+            if (page == 1)
+            {
+                try { latestTag = (await client.Repository.Release.GetLatest(repository.NamespacePath, repository.Name).ConfigureAwait(false)).TagName; }
+                catch (NotFoundException) { /* no published-stable release → no badge */ }
+            }
+
+            return (IReadOnlyList<RemoteRelease>)releases.Where(r => !r.Draft).Select(r => ToRemoteReleaseDetail(r, r.TagName == latestTag)).ToList();
+        }, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<IReadOnlyList<RemoteTag>> ListTagsAsync(ProviderContext context, RemoteRepository repository, int page, int perPage, CancellationToken cancellationToken)
+    {
+        var client = await BuildClientAsync(context, cancellationToken).ConfigureAwait(false);
+
+        return await _resilience.ExecuteAsync(context.Instance, nameof(ListTagsAsync), async _ =>
+        {
+            var options = new ApiOptions { PageCount = 1, PageSize = perPage, StartPage = page };
+            var tags = await client.Repository.GetAllTags(repository.NamespacePath, repository.Name, options).ConfigureAwait(false);
+
+            // RepositoryTag carries only name + commit ref — no annotation message (that needs a second
+            // git/tags fetch per tag, not worth it for the list). The tag page is /releases/tag/{name}.
+            return (IReadOnlyList<RemoteTag>)tags.Select(t => new RemoteTag
+            {
+                Name = t.Name,
+                CommitSha = t.Commit?.Sha ?? string.Empty,
+                Message = null,
+                WebUrl = $"{repository.WebUrl}/releases/tag/{Uri.EscapeDataString(t.Name)}"
+            }).ToList();
+        }, cancellationToken).ConfigureAwait(false);
+    }
+
+    private static RemoteRelease ToRemoteReleaseDetail(Release r, bool isLatest)
+    {
+        var assets = new List<RemoteReleaseAsset>();
+        foreach (var a in r.Assets ?? (IReadOnlyList<ReleaseAsset>)Array.Empty<ReleaseAsset>())
+            assets.Add(new RemoteReleaseAsset { Name = a.Name, DownloadUrl = a.BrowserDownloadUrl, SizeBytes = a.Size });
+
+        // GitHub auto-generates the source archives — surfaced under Assets in its UI, so we mirror that.
+        if (!string.IsNullOrEmpty(r.ZipballUrl)) assets.Add(new RemoteReleaseAsset { Name = "Source code (zip)", DownloadUrl = r.ZipballUrl, SizeBytes = null });
+        if (!string.IsNullOrEmpty(r.TarballUrl)) assets.Add(new RemoteReleaseAsset { Name = "Source code (tar.gz)", DownloadUrl = r.TarballUrl, SizeBytes = null });
+
+        return new RemoteRelease
+        {
+            TagName = r.TagName,
+            Name = string.IsNullOrWhiteSpace(r.Name) ? null : r.Name,
+            Body = string.IsNullOrWhiteSpace(r.Body) ? null : r.Body,
+            AuthorLogin = r.Author?.Login,
+            PublishedDate = r.PublishedAt ?? r.CreatedAt,
+            WebUrl = r.HtmlUrl,
+            IsPrerelease = r.Prerelease,
+            IsLatest = isLatest,
+            Assets = assets
+        };
+    }
 
     public async Task<IReadOnlyList<RemoteLanguage>> GetLanguagesAsync(ProviderContext context, RemoteRepository repository, CancellationToken cancellationToken)
     {

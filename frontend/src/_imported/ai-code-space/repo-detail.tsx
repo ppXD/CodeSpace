@@ -4,12 +4,15 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
 import { ApiError } from "@/api/request";
-import type { LabelRef, PullRequestState, RemoteIssue, RemotePullRequest, RemotePullRequestCheck, RemotePullRequestCommit, RemotePullRequestFile } from "@/api/types";
+import type { LabelRef, PullRequestState, RemoteIssue, RemoteIssueComment, RemoteIssueEvent, RemotePullRequest, RemotePullRequestCheck, RemotePullRequestCommit, RemotePullRequestFile, RemoteRelease, RemoteTag } from "@/api/types";
 import { useProviderInstances } from "@/hooks/use-credentials";
 import {
   PR_PAGE_SIZE,
   useRepository,
+  useRepositoryIssue,
+  useRepositoryIssueComments,
   useRepositoryIssueCounts,
+  useRepositoryIssueEvents,
   useRepositoryIssues,
   useRepositoryPullRequest,
   useRepositoryPullRequestChecks,
@@ -17,9 +20,12 @@ import {
   useRepositoryPullRequestCounts,
   useRepositoryPullRequestFiles,
   useRepositoryPullRequests,
+  useRepositoryReleases,
   useRepositoryStats,
+  useRepositoryTags,
 } from "@/hooks/use-repositories";
 import { PrReviewActions } from "@/components/repositories/PrReviewActions";
+import { formatBytes } from "@/lib/codeTree";
 
 import { DiffViewer } from "./diff-viewer";
 import { Ic } from "./icons";
@@ -359,14 +365,15 @@ interface IssuesListBodyProps {
   page: number;
   onFilterChange: (next: IssueFilter) => void;
   onPageChange: (next: number) => void;
+  onSelectIssue: (number: number) => void;
 }
 
 /**
  * Issues tab body. All state lives in the URL; this is a pure read of `filter`/`page` props
- * plus two change-callbacks (mirrors PullRequestsListBody). The server filters by state, so
+ * plus change-callbacks (mirrors PullRequestsListBody). The server filters by state, so
  * rows render directly — no local re-filter. Counts power the filter chips + true pagination.
  */
-export function IssuesListBody({ repoId, filter, page, onFilterChange, onPageChange }: IssuesListBodyProps) {
+export function IssuesListBody({ repoId, filter, page, onFilterChange, onPageChange, onSelectIssue }: IssuesListBodyProps) {
   const repository = useRepository(repoId);
   const instances = useProviderInstances();
   const repo = repository.data;
@@ -442,7 +449,7 @@ export function IssuesListBody({ repoId, filter, page, onFilterChange, onPageCha
         {issues.length > 0 && (
           <div className="pr-list" data-stale={query.isPlaceholderData}>
             {issues.map(issue => (
-              <IssueRow key={issue.externalId} issue={issue} />
+              <IssueRow key={issue.externalId} issue={issue} onSelect={() => onSelectIssue(issue.number)} />
             ))}
           </div>
         )}
@@ -461,14 +468,14 @@ export function IssuesListBody({ repoId, filter, page, onFilterChange, onPageCha
   );
 }
 
-function IssueRow({ issue }: { issue: RemoteIssue }) {
-  // No in-app issue detail yet — a click opens the issue on the provider. Meta line mirrors the
-  // PR row: #number · opened/closed relative · by author · milestone, with a comment chip right.
+function IssueRow({ issue, onSelect }: { issue: RemoteIssue; onSelect: () => void }) {
+  // Row click opens the in-app issue detail. Meta line mirrors the PR row: #number ·
+  // opened/closed relative · by author · milestone, with a comment chip on the right.
   const closed = issue.state === "Closed";
   const stateDate = closed ? (issue.closedDate ?? issue.createdDate) : issue.createdDate;
 
   return (
-    <div className="pr-row" onClick={() => window.open(issue.webUrl, "_blank", "noopener")}>
+    <div className="pr-row" onClick={onSelect}>
       <div className="pr-row-state" data-state={closed ? "closed" : "open"}>
         {closed ? <Ic.IssueClosed size={15} /> : <Ic.IssueOpen size={15} />}
       </div>
@@ -497,6 +504,309 @@ function IssueRow({ issue }: { issue: RemoteIssue }) {
           <span>{issue.commentsCount}</span>
         </div>
       )}
+    </div>
+  );
+}
+
+// ── Issue detail ─────────────────────────────────────────────────────────────
+// In-app issue view — mirrors the PR detail's .prd-* layout but simpler (no sub-tabs):
+// a single Conversation→Activity timeline (body, then comments + events interleaved by
+// date) plus a right sidebar (Assignees · Labels · Milestone). There's no in-app write
+// surface yet, so commenting/closing points to the provider.
+
+interface IssueDetailRouteProps {
+  repoId: string;
+  number: number;
+  onBack: () => void;
+}
+
+export function IssueDetailRoute({ repoId, number, onBack }: IssueDetailRouteProps) {
+  const repository = useRepository(repoId);
+  const instances = useProviderInstances();
+  const repo = repository.data;
+  const instance = repo ? instances.data?.find(i => i.id === repo.providerInstanceId) : null;
+  const providerLabel = instance ? PROVIDER_LABEL[instance.provider] : "provider";
+
+  const detailQuery = useRepositoryIssue(repoId, number);
+  const commentsQuery = useRepositoryIssueComments(repoId, number);
+  const eventsQuery = useRepositoryIssueEvents(repoId, number);
+
+  if (detailQuery.isLoading) {
+    return (
+      <div className="pr-panel">
+        <PrDetailBackLink onBack={onBack} label="issues" />
+        <div className="pr-card"><div className="pr-empty">
+          <div className="pr-empty-h">Loading issue…</div>
+          <div className="pr-empty-p">Fetching #{number} live from {providerLabel}.</div>
+        </div></div>
+      </div>
+    );
+  }
+
+  if (detailQuery.error instanceof ApiError) {
+    return (
+      <div className="pr-panel">
+        <PrDetailBackLink onBack={onBack} label="issues" />
+        <div className="cn-banner cn-banner-err">
+          <div className="cn-banner-h">Couldn't load issue #{number}</div>
+          <div className="cn-banner-p">{detailQuery.error.message}</div>
+        </div>
+      </div>
+    );
+  }
+
+  if (!detailQuery.data) return null;
+  const issue = detailQuery.data;
+  const closed = issue.state === "Closed";
+
+  return (
+    <div className="pr-panel prd">
+      <PrDetailBackLink onBack={onBack} label="issues" />
+
+      <div className="prd-head">
+        <div className="prd-title-row">
+          <h1 className="prd-title">{issue.title}<span className="prd-num">#{issue.number}</span></h1>
+          <span className="prd-pill" data-state={closed ? "closed" : "open"}>
+            {closed ? <Ic.IssueClosed size={14} /> : <Ic.IssueOpen size={14} />}
+            {closed ? "Closed" : "Open"}
+          </span>
+        </div>
+        <div className="prd-sub">
+          <span className="prd-sub-author">{issue.authorLogin ?? "unknown"}</span>
+          {" "}{closed ? "closed this issue" : "opened this issue"}{" · "}
+          <span>{formatRelative(closed ? (issue.closedDate ?? issue.createdDate) : issue.createdDate)}</span>
+        </div>
+      </div>
+
+      <div className="prd-grid">
+        <div className="prd-main">
+          <IssueConversation issue={issue} comments={commentsQuery.data ?? []} events={eventsQuery.data ?? []} />
+        </div>
+
+        <aside className="prd-side">
+          <PrSidebarBlock title="Assignees">
+            {(issue.assignees?.length ?? 0) === 0
+              ? <span className="prd-side-empty">No one</span>
+              : issue.assignees!.map(a => <UserChip key={a} login={a} />)}
+          </PrSidebarBlock>
+
+          <PrSidebarBlock title="Labels">
+            {issue.labels.length === 0
+              ? <span className="prd-side-empty">None yet</span>
+              : <div className="prd-side-labels">{issue.labels.map(l => <PrLabel key={l.name} label={l} />)}</div>}
+          </PrSidebarBlock>
+
+          <PrSidebarBlock title="Milestone">
+            {issue.milestoneTitle
+              ? <span className="prd-side-milestone">{issue.milestoneTitle}</span>
+              : <span className="prd-side-empty">No milestone</span>}
+          </PrSidebarBlock>
+
+          <div className="prd-side-foot">
+            <button className="btn btn-ghost" onClick={() => window.open(issue.webUrl, "_blank", "noopener")}>
+              <Ic.ArrowOut size={12} /> Open on {providerLabel}
+            </button>
+          </div>
+        </aside>
+      </div>
+    </div>
+  );
+}
+
+/** Body card + a single chronological timeline interleaving user comments (cards) and activity events (rows). */
+function IssueConversation({ issue, comments, events }: { issue: RemoteIssue; comments: RemoteIssueComment[]; events: RemoteIssueEvent[] }) {
+  type Item = { date: string } & ({ t: "comment"; c: RemoteIssueComment } | { t: "event"; e: RemoteIssueEvent });
+  const items: Item[] = [
+    ...comments.map(c => ({ date: c.createdAt, t: "comment" as const, c })),
+    ...events.map(e => ({ date: e.createdDate, t: "event" as const, e })),
+  ].sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
+
+  return (
+    <div className="prd-conv">
+      <CommentCard author={issue.authorLogin ?? "unknown"} date={issue.createdDate} body={issue.body} emptyText="No description provided." />
+      {items.map((it, i) => it.t === "comment"
+        ? <CommentCard key={`c${i}`} author={it.c.authorName} date={it.c.createdAt} body={it.c.body} emptyText="(no content)" />
+        : <IssueEventRow key={`e${i}`} event={it.e} />)}
+    </div>
+  );
+}
+
+/** A comment card (avatar + author + markdown body) — used for the issue body and each comment. */
+function CommentCard({ author, date, body, emptyText }: { author: string; date: string; body?: string | null; emptyText: string }) {
+  return (
+    <div className="prd-card">
+      <div className="prd-card-h">
+        <div className="prd-card-h-l">
+          <div className="prd-avatar">{author.charAt(0).toUpperCase()}</div>
+          <div>
+            <div className="prd-card-h-name">{author}</div>
+            <div className="prd-card-h-sub">commented {formatRelative(date)}</div>
+          </div>
+        </div>
+      </div>
+      <div className="prd-card-b">
+        {body && body.trim().length > 0
+          ? <div className="prd-body prd-markdown"><ReactMarkdown remarkPlugins={[remarkGfm]} components={{ a: ({ href, children, ...rest }) => <a href={href} target="_blank" rel="noopener noreferrer" {...rest}>{children}</a> }}>{body}</ReactMarkdown></div>
+          : <div className="prd-body-empty">{emptyText}</div>}
+      </div>
+    </div>
+  );
+}
+
+function IssueEventRow({ event }: { event: RemoteIssueEvent }) {
+  return (
+    <div className="prd-evt" data-kind={event.kind}>
+      <div className="prd-evt-icon">{issueEventIcon(event.kind)}</div>
+      <div className="prd-evt-text">
+        {event.actorLogin && <><span className="prd-evt-name">{event.actorLogin}</span>{" "}</>}{event.summary}
+      </div>
+      <div className="prd-evt-right">
+        <span className="prd-evt-time">{formatRelative(event.createdDate)}</span>
+      </div>
+    </div>
+  );
+}
+
+function issueEventIcon(kind: string) {
+  switch (kind) {
+    case "assigned": case "unassigned": return <Ic.Users size={12} />;
+    case "labeled": case "unlabeled": return <Ic.Tag size={12} />;
+    case "milestoned": case "demilestoned": return <Ic.Milestone size={12} />;
+    case "closed": return <Ic.IssueClosed size={12} />;
+    case "reopened": return <Ic.IssueOpen size={12} />;
+    case "mentioned": case "referenced": return <Ic.Commit size={12} />;
+    default: return <Ic.Dot size={12} />;
+  }
+}
+
+// ── Releases page ────────────────────────────────────────────────────────────
+// In-app Releases page reached from the Code tab's Releases card. Releases / Tags tabs
+// (GitHub style): each release shows its tag · Latest badge · author · date · notes ·
+// assets; the Tags tab is a version list. Reuses the .pr-* toolbar + Pager.
+
+type ReleasesTab = "releases" | "tags";
+
+interface ReleasesPanelProps {
+  repoId: string;
+  tab: ReleasesTab;
+  page: number;
+  onTabChange: (next: ReleasesTab) => void;
+  onPageChange: (next: number) => void;
+  onBack: () => void;
+}
+
+export function ReleasesPanel({ repoId, tab, page, onTabChange, onPageChange, onBack }: ReleasesPanelProps) {
+  const repository = useRepository(repoId);
+  const instances = useProviderInstances();
+  const repo = repository.data;
+  const instance = repo ? instances.data?.find(i => i.id === repo.providerInstanceId) : null;
+  const providerLabel = instance ? PROVIDER_LABEL[instance.provider] : "provider";
+
+  const releasesQuery = useRepositoryReleases(repoId, page);
+  const tagsQuery = useRepositoryTags(repoId, page);
+  const activeQuery = tab === "releases" ? releasesQuery : tagsQuery;
+  const count = activeQuery.data?.length ?? 0;
+  const hasNextPage = count === PR_PAGE_SIZE;
+  const providerReleasesPath = instance?.provider === "GitLab" ? "/-/releases" : "/releases";
+
+  return (
+    <div className="pr-panel">
+      <PrDetailBackLink onBack={onBack} label="code" />
+
+      <div className="pr-card">
+        <div className="pr-toolbar">
+          <div className="pr-tabs">
+            <button className="pr-tab" data-active={tab === "releases"} onClick={() => onTabChange("releases")}>
+              <Ic.Release size={13} /> Releases
+            </button>
+            <button className="pr-tab" data-active={tab === "tags"} onClick={() => onTabChange("tags")}>
+              <Ic.Tag size={13} /> Tags
+            </button>
+          </div>
+          {repo && (
+            <button className="btn btn-ghost" onClick={() => window.open(`${repo.webUrl}${providerReleasesPath}`, "_blank", "noopener")} title={`View on ${providerLabel}`}>
+              <Ic.ArrowOut size={12} /> Open on {providerLabel}
+            </button>
+          )}
+        </div>
+
+        {activeQuery.error instanceof ApiError && (
+          <div className="pr-empty"><div className="pr-empty-h">Couldn't load {tab}</div><div className="pr-empty-p">{activeQuery.error.message}</div></div>
+        )}
+        {!activeQuery.error && count === 0 && activeQuery.isFetching && (
+          <div className="pr-empty"><div className="pr-empty-h">Loading {tab}…</div><div className="pr-empty-p">Fetching live from {providerLabel}.</div></div>
+        )}
+        {!activeQuery.error && count === 0 && !activeQuery.isFetching && (
+          <div className="pr-empty"><div className="pr-empty-h">No {tab} yet</div><div className="pr-empty-p">{tab === "releases" ? "When a release is published it'll appear here." : "This repository has no tags."}</div></div>
+        )}
+
+        {tab === "releases" && (releasesQuery.data?.length ?? 0) > 0 && (
+          <div className="rel-list" data-stale={releasesQuery.isPlaceholderData}>
+            {releasesQuery.data!.map(r => <ReleaseCard key={r.tagName} release={r} />)}
+          </div>
+        )}
+        {tab === "tags" && (tagsQuery.data?.length ?? 0) > 0 && (
+          <div className="pr-list" data-stale={tagsQuery.isPlaceholderData}>
+            {tagsQuery.data!.map(t => <TagRow key={t.name} tag={t} />)}
+          </div>
+        )}
+
+        {(page > 1 || hasNextPage) && (
+          <Pager current={page} totalPages={null} hasNext={hasNextPage} loading={activeQuery.isPlaceholderData} onChange={onPageChange} />
+        )}
+      </div>
+    </div>
+  );
+}
+
+function ReleaseCard({ release }: { release: RemoteRelease }) {
+  return (
+    <div className="rel-card">
+      <div className="rel-card-h">
+        <Ic.Tag size={16} className="rel-card-ic" />
+        <span className="rel-card-tag">{release.name ?? release.tagName}</span>
+        {release.isLatest && <span className="cb-release-badge">Latest</span>}
+        {release.isPrerelease && <span className="cb-release-badge" data-pre="true">Pre-release</span>}
+        <div className="rel-card-meta">
+          {release.authorLogin && <span>{release.authorLogin}</span>}
+          {release.publishedDate && <span>released {formatRelative(release.publishedDate)}</span>}
+          <span className="rel-card-tagname"><Ic.Tag size={11} /> {release.tagName}</span>
+        </div>
+      </div>
+      {release.body && release.body.trim().length > 0 && (
+        <div className="rel-card-b prd-markdown">
+          <ReactMarkdown remarkPlugins={[remarkGfm]} components={{ a: ({ href, children, ...rest }) => <a href={href} target="_blank" rel="noopener noreferrer" {...rest}>{children}</a> }}>
+            {release.body}
+          </ReactMarkdown>
+        </div>
+      )}
+      {(release.assets?.length ?? 0) > 0 && (
+        <div className="rel-assets">
+          <div className="rel-assets-h"><Ic.Box size={12} /> Assets <span className="rel-assets-c">{release.assets!.length}</span></div>
+          {release.assets!.map(a => (
+            <a key={a.name + a.downloadUrl} className="rel-asset" href={a.downloadUrl} target="_blank" rel="noopener noreferrer">
+              <Ic.File size={13} />
+              <span className="rel-asset-name">{a.name}</span>
+              {a.sizeBytes != null && <span className="rel-asset-size">{formatBytes(a.sizeBytes)}</span>}
+            </a>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function TagRow({ tag }: { tag: RemoteTag }) {
+  return (
+    <div className="pr-row" onClick={() => tag.webUrl && window.open(tag.webUrl, "_blank", "noopener")}>
+      <div className="pr-row-state" data-state="open"><Ic.Tag size={14} /></div>
+      <div className="pr-row-main">
+        <div className="pr-row-title"><span className="pr-row-title-text">{tag.name}</span></div>
+        <div className="pr-row-meta">
+          {tag.commitSha && <code className="prd-commit-sha">{tag.commitSha.slice(0, 7)}</code>}
+          {tag.message && <span>{tag.message}</span>}
+        </div>
+      </div>
     </div>
   );
 }
@@ -1470,11 +1780,11 @@ function PrTab({ active, onClick, children }: { active: boolean; onClick: () => 
   );
 }
 
-function PrDetailBackLink({ onBack }: { onBack: () => void }) {
+function PrDetailBackLink({ onBack, label = "pull requests" }: { onBack: () => void; label?: string }) {
   return (
     <div className="prd-back">
       <button className="btn btn-ghost" onClick={onBack}>
-        <Ic.ChevronLeft size={13} /> Back to pull requests
+        <Ic.ChevronLeft size={13} /> Back to {label}
       </button>
     </div>
   );

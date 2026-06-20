@@ -6,7 +6,6 @@ import remarkGfm from "remark-gfm";
 
 import { ApiError } from "@/api/request";
 import type { RemoteBranch, RemoteCommitSummary, RemoteFileContent, RemoteLanguage, RemoteRelease, RemoteRepositoryStats, RemoteTreeEntry, RepositoryDetail } from "@/api/types";
-import { useProviderInstances } from "@/hooks/use-credentials";
 import {
   useRenderMarkdown,
   useRepository,
@@ -27,6 +26,8 @@ import { Ic } from "./icons";
 
 interface CodeBrowserBodyProps {
   repoId: string;
+  /** Navigate to the in-app Releases page — wired by the Code route; the Releases card calls it. */
+  onOpenReleases: () => void;
 }
 
 /**
@@ -36,13 +37,12 @@ interface CodeBrowserBodyProps {
  *
  * Branch / path / open-file / filter are local state. Switching branch or navigating resets the filter.
  */
-export function CodeBrowserBody({ repoId }: CodeBrowserBodyProps) {
+export function CodeBrowserBody({ repoId, onOpenReleases }: CodeBrowserBodyProps) {
   const repository = useRepository(repoId);
   const branches = useRepositoryBranches(repoId);
   const stats = useRepositoryStats(repoId);
   const languages = useRepositoryLanguages(repoId);
   const latestRelease = useRepositoryLatestRelease(repoId);
-  const instances = useProviderInstances();
 
   const [branch, setBranch] = useState<string | null>(null);
   const [path, setPath] = useState("");
@@ -150,7 +150,7 @@ export function CodeBrowserBody({ repoId }: CodeBrowserBodyProps) {
         <ReleasesCard
           release={latestRelease.data}
           releaseCount={stats.data?.releaseCount ?? null}
-          releasesUrl={buildReleasesUrl(repo.webUrl, instances.data?.find(i => i.id === repo.providerInstanceId)?.provider)}
+          onOpenReleases={onOpenReleases}
         />
         <LanguagesPanel languages={languages.data} />
       </aside>
@@ -539,10 +539,9 @@ function RepoStatsCard({ stats }: { stats?: RemoteRepositoryStats }) {
 
 /** GitHub-style Releases box: total count, the latest release (tag · Latest/Pre-release badge · date),
  *  and a "+N releases" link to the provider's releases page. Hidden entirely when the repo has none. */
-function ReleasesCard({ release, releaseCount, releasesUrl }: { release?: RemoteRelease | null; releaseCount: number | null; releasesUrl: string }) {
+function ReleasesCard({ release, releaseCount, onOpenReleases }: { release?: RemoteRelease | null; releaseCount: number | null; onOpenReleases: () => void }) {
   if ((releaseCount == null || releaseCount === 0) && !release) return null;
 
-  const openReleases = () => window.open(releasesUrl, "_blank", "noopener");
   const remaining = releaseCount != null ? Math.max(0, releaseCount - 1) : 0;
 
   return (
@@ -554,7 +553,7 @@ function ReleasesCard({ release, releaseCount, releasesUrl }: { release?: Remote
 
       {release ? (
         <>
-          <button className="cb-release" onClick={() => window.open(release.webUrl, "_blank", "noopener")} title={`Open ${release.tagName} on the provider`}>
+          <button className="cb-release" onClick={onOpenReleases} title="View releases">
             <Ic.Tag size={16} className="cb-release-ic" />
             <span className="cb-release-main">
               <span className="cb-release-tag">
@@ -565,21 +564,16 @@ function ReleasesCard({ release, releaseCount, releasesUrl }: { release?: Remote
             </span>
           </button>
           {remaining > 0 && (
-            <button className="cb-release-more" onClick={openReleases}>+ {formatCount(remaining)} release{remaining === 1 ? "" : "s"}</button>
+            <button className="cb-release-more" onClick={onOpenReleases}>+ {formatCount(remaining)} release{remaining === 1 ? "" : "s"}</button>
           )}
         </>
       ) : (
-        <button className="cb-release-more" onClick={openReleases}>View all releases</button>
+        <button className="cb-release-more" onClick={onOpenReleases}>View all releases</button>
       )}
     </div>
   );
 }
 
-/** Releases-list page on the provider — GitLab nests it under `/-/`, GitHub doesn't. */
-function buildReleasesUrl(repoWebUrl: string, provider?: string): string {
-  const base = repoWebUrl.replace(/\/$/, "");
-  return provider === "GitLab" ? `${base}/-/releases` : `${base}/releases`;
-}
 
 function AboutCard({ description }: { description?: string | null }) {
   const hasDescription = !!description && description.trim().length > 0;

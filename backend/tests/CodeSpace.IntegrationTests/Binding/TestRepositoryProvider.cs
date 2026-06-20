@@ -61,7 +61,7 @@ public sealed class TestRemoteHookStore
     }
 }
 
-public sealed class TestRepositoryProvider : IRepositoryCatalogCapability, ICredentialProbeCapability, IPullRequestReviewCapability, IPullRequestWriteCapability, IIssueCatalogCapability, IIssueWriteCapability, IRepositoryInsightsCapability, IRepositoryAccessCapability, IRepositorySourceCapability, IWebhookRegistrationCapability, IWebhookSignatureVerifier, IWebhookEventNormalizer
+public sealed class TestRepositoryProvider : IRepositoryCatalogCapability, ICredentialProbeCapability, IPullRequestReviewCapability, IPullRequestWriteCapability, IIssueCatalogCapability, IIssueWriteCapability, IReleaseCatalogCapability, IRepositoryInsightsCapability, IRepositoryAccessCapability, IRepositorySourceCapability, IWebhookRegistrationCapability, IWebhookSignatureVerifier, IWebhookEventNormalizer
 {
     /// <summary>The deterministic root-tree entries the source capability returns — grounding tests assert these surface in the planner's grounding string.</summary>
     public static readonly IReadOnlyList<string> RootEntryNames = new[] { "src", "README.md" };
@@ -167,6 +167,32 @@ public sealed class TestRepositoryProvider : IRepositoryCatalogCapability, ICred
     public Task<RemoteIssueCounts> CountIssuesAsync(ProviderContext context, RemoteRepository repository, CancellationToken cancellationToken) =>
         Task.FromResult(new RemoteIssueCounts { Open = 3, Closed = 5 });
 
+    // Echoes the number + repo path into the detail so a test asserts the lookup reached the provider.
+    public Task<RemoteIssue> GetIssueAsync(ProviderContext context, RemoteRepository repository, int number, CancellationToken cancellationToken) =>
+        Task.FromResult(new RemoteIssue
+        {
+            ExternalId = $"issue-{number}",
+            Number = number,
+            Title = $"Issue {number} in {repository.FullPath}",
+            State = IssueState.Open,
+            Body = "detail body",
+            Assignees = new[] { "mindy" },
+            CreatedDate = DateTimeOffset.UnixEpoch,
+            WebUrl = $"https://test.local/{repository.FullPath}/-/issues/{number}"
+        });
+
+    public Task<IReadOnlyList<RemoteIssueComment>> ListIssueCommentsAsync(ProviderContext context, RemoteRepository repository, int number, CancellationToken cancellationToken) =>
+        Task.FromResult((IReadOnlyList<RemoteIssueComment>)new[]
+        {
+            new RemoteIssueComment { ExternalId = "c1", Body = $"comment on {number}", AuthorName = "tester", CreatedAt = DateTimeOffset.UnixEpoch, WebUrl = null }
+        }.ToList());
+
+    public Task<IReadOnlyList<RemoteIssueEvent>> ListIssueEventsAsync(ProviderContext context, RemoteRepository repository, int number, CancellationToken cancellationToken) =>
+        Task.FromResult((IReadOnlyList<RemoteIssueEvent>)new[]
+        {
+            new RemoteIssueEvent { ExternalId = "e1", Kind = "closed", Summary = "closed this", ActorLogin = "tester", CreatedDate = DateTimeOffset.UnixEpoch }
+        }.ToList());
+
     // ── IRepositoryInsightsCapability (Code-tab right rail: stats · languages · latest release) ──
 
     public Task<RemoteRepositoryStats> GetStatsAsync(ProviderContext context, RemoteRepository repository, CancellationToken cancellationToken) =>
@@ -185,6 +211,26 @@ public sealed class TestRepositoryProvider : IRepositoryCatalogCapability, ICred
             WebUrl = $"https://test.local/{repository.FullPath}/-/releases/3.0.5",
             IsPrerelease = false
         });
+
+    // ── IReleaseCatalogCapability (Releases page: releases + tags) — echoes page so a test asserts paging flows through ──
+
+    public Task<IReadOnlyList<RemoteRelease>> ListReleasesAsync(ProviderContext context, RemoteRepository repository, int page, int perPage, CancellationToken cancellationToken) =>
+        Task.FromResult((IReadOnlyList<RemoteRelease>)new[]
+        {
+            new RemoteRelease
+            {
+                TagName = $"3.0.{page}", Name = "Release", Body = "notes", AuthorLogin = "vlvvh",
+                PublishedDate = DateTimeOffset.UnixEpoch, WebUrl = $"https://test.local/{repository.FullPath}/-/releases/3.0.{page}",
+                IsLatest = page == 1, IsPrerelease = false,
+                Assets = new[] { new RemoteReleaseAsset { Name = "Source code (zip)", DownloadUrl = "https://test.local/x.zip", SizeBytes = null } }.ToList()
+            }
+        }.ToList());
+
+    public Task<IReadOnlyList<RemoteTag>> ListTagsAsync(ProviderContext context, RemoteRepository repository, int page, int perPage, CancellationToken cancellationToken) =>
+        Task.FromResult((IReadOnlyList<RemoteTag>)new[]
+        {
+            new RemoteTag { Name = $"3.0.{page}", CommitSha = "abc1234", Message = null, WebUrl = $"https://test.local/{repository.FullPath}/-/tags/3.0.{page}" }
+        }.ToList());
 
     // Echoes the acting credential's id back as the created issue's ExternalId so a test can assert WHICH
     // credential created it (actor vs connection). Reflects the input title/body/labels.

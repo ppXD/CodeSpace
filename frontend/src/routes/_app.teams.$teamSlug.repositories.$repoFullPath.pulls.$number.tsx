@@ -1,4 +1,4 @@
-import { createFileRoute, useNavigate } from "@tanstack/react-router";
+import { createFileRoute, useNavigate, useRouter } from "@tanstack/react-router";
 
 import { PullRequestDetailRoute } from "@/_imported/ai-code-space/repo-detail";
 import { useRepositoryByFullPath } from "@/hooks/use-repositories";
@@ -21,6 +21,7 @@ function PullRequestDetailPageRoute() {
   const { teamSlug, repoFullPath, number: numberParam } = Route.useParams();
   const number = Number(numberParam);
   const navigate = useNavigate();
+  const router = useRouter();
 
   // URL uses the readable fullPath; the detail component still takes the UUID.
   const fullPath = decodeURIComponent(repoFullPath);
@@ -33,13 +34,21 @@ function PullRequestDetailPageRoute() {
     <PullRequestDetailRoute
       repoId={repo.id}
       number={number}
-      onBack={() => navigate({
-        to: "/teams/$teamSlug/repositories/$repoFullPath/pulls",
-        params: { teamSlug, repoFullPath: encodeURIComponent(fullPath) },
-        // Land back on the default list view; the prior filter/page lives in
-        // the browser's back-stack if the user wants exactly where they came from.
-        search: { state: "Open", page: 1 },
-      })}
+      onBack={() => {
+        // Return to EXACTLY where the user came from — the prior list page with its
+        // filter + page intact — by walking the history stack. Only fall back to the
+        // default list when there's no in-app history (the detail link was opened
+        // directly / in a new tab), so we never strand the user on a blank back-stack.
+        if (router.history.canGoBack()) {
+          router.history.back();
+          return;
+        }
+        navigate({
+          to: "/teams/$teamSlug/repositories/$repoFullPath/pulls",
+          params: { teamSlug, repoFullPath: encodeURIComponent(fullPath) },
+          search: { state: "Open", page: 1 },
+        });
+      }}
     />
   );
 }

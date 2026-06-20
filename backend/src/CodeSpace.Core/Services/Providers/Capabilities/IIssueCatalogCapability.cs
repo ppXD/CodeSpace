@@ -29,4 +29,24 @@ public interface IIssueCatalogCapability : IProviderCapability
     /// walking every page.
     /// </summary>
     Task<RemoteIssueCounts> CountIssuesAsync(ProviderContext context, RemoteRepository repository, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Fetch a single issue with its full body + sidebar fields (assignees, labels, milestone). The
+    /// in-app issue-detail header + sidebar. <paramref name="number"/> is the per-repo number (#42 / iid),
+    /// NOT the global <see cref="RemoteIssue.ExternalId"/>. Mirrors <c>GetPullRequestAsync</c>.
+    /// </summary>
+    Task<RemoteIssue> GetIssueAsync(ProviderContext context, RemoteRepository repository, int number, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// User comments on the issue, oldest-first — the Conversation timeline. Excludes system/activity
+    /// notes (those come from <see cref="ListIssueEventsAsync"/>). GitHub issue comments; GitLab non-system notes.
+    /// </summary>
+    Task<IReadOnlyList<RemoteIssueComment>> ListIssueCommentsAsync(ProviderContext context, RemoteRepository repository, int number, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Activity-timeline events (assigned / labeled / milestoned / closed / mentioned), oldest-first. GitHub's
+    /// structured issue events synthesised to text; GitLab system notes (whose body is already human text).
+    /// Resilient — a provider/scope that can't read events returns an empty list rather than throwing.
+    /// </summary>
+    Task<IReadOnlyList<RemoteIssueEvent>> ListIssueEventsAsync(ProviderContext context, RemoteRepository repository, int number, CancellationToken cancellationToken);
 }

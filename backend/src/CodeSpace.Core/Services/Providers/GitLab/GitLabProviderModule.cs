@@ -52,6 +52,9 @@ public sealed class GitLabProviderModule : IProviderModule
         // surface — same scope family as repo catalog.
         [typeof(IPullRequestCatalogCapability)] = ScopeRequirement.AnyOf(GitLabScopes.Api, GitLabScopes.ReadApi),
 
+        // Listing releases + tags reads via the API — same `api`/`read_api` family.
+        [typeof(IReleaseCatalogCapability)] = ScopeRequirement.AnyOf(GitLabScopes.Api, GitLabScopes.ReadApi),
+
         // Posting MR comments needs WRITE scope — `api` only (read_api is read-only).
         [typeof(IPullRequestCommentCapability)] = ScopeRequirement.Of(GitLabScopes.Api),
 

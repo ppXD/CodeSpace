@@ -307,6 +307,8 @@ export interface RemoteIssue {
   body?: string | null;
   authorLogin?: string | null;
   labels: LabelRef[];
+  /** Logins assigned to the issue — detail-only sidebar field; empty on list rows. */
+  assignees?: string[];
   /** Comment count — GitHub `comments`, GitLab `user_notes_count`. Powers the row's comment chip. */
   commentsCount: number;
   milestoneTitle?: string | null;
@@ -319,6 +321,26 @@ export interface RemoteIssue {
 export interface RemoteIssueCounts {
   open: number;
   closed: number;
+}
+
+/** One user comment on an issue — the Conversation timeline. */
+export interface RemoteIssueComment {
+  externalId: string;
+  body?: string | null;
+  authorName: string;
+  createdAt: string;
+  webUrl?: string | null;
+}
+
+/** One activity-timeline event on an issue (assigned / labeled / milestoned / closed / mentioned). */
+export interface RemoteIssueEvent {
+  externalId: string;
+  /** Normalised kind for icon selection (assigned, labeled, milestoned, closed, reopened, renamed, referenced, mentioned, other). */
+  kind: string;
+  /** Human line, e.g. "changed milestone to 1.1.1". */
+  summary: string;
+  actorLogin?: string | null;
+  createdDate: string;
 }
 
 /** Mirrors backend PullRequestCheckStatus enum. */
@@ -426,13 +448,35 @@ export interface RemoteLanguage {
   percent: number;
 }
 
-/** The repository's latest release for the Code tab's Releases card. Null from the API when none exist. */
+/** A release — the Code tab's latest-release card (body/assets unused there) and the Releases page (full). */
 export interface RemoteRelease {
   tagName: string;
   name?: string | null;
+  /** Release notes (markdown). Populated on the Releases-page list; null on the latest-release card. */
+  body?: string | null;
+  authorLogin?: string | null;
   publishedDate?: string | null;
   webUrl: string;
   isPrerelease: boolean;
+  /** True only for the repository's single "Latest" release. */
+  isLatest?: boolean;
+  assets?: RemoteReleaseAsset[];
+}
+
+/** One downloadable release asset (uploaded file or source archive). */
+export interface RemoteReleaseAsset {
+  name: string;
+  downloadUrl: string;
+  /** Null for assets the provider doesn't size (GitLab links, source archives). */
+  sizeBytes?: number | null;
+}
+
+/** One git tag — the Releases page's Tags tab. */
+export interface RemoteTag {
+  name: string;
+  commitSha: string;
+  message?: string | null;
+  webUrl?: string | null;
 }
 
 /** One commit as the Code tab's header bar / file-row last-commit column show it. */

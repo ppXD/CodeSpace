@@ -25,6 +25,9 @@ public sealed record RemoteIssue
     /// <summary>Labels with provider-supplied colours where available (GitLab issue lists return names only → null colour).</summary>
     public IReadOnlyList<LabelRef> Labels { get; init; } = Array.Empty<LabelRef>();
 
+    /// <summary>Logins of users assigned to the issue. Detail-only sidebar field; empty on list responses.</summary>
+    public IReadOnlyList<string> Assignees { get; init; } = Array.Empty<string>();
+
     /// <summary>Comment count — GitHub <c>comments</c>, GitLab <c>user_notes_count</c>. 0 when none; powers the list's comment chip.</summary>
     public int CommentsCount { get; init; }
 

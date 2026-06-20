@@ -124,6 +124,22 @@ public class RepositoriesController : ControllerBase
         return Ok(result);
     }
 
+    /// <summary>Live releases list (newest-first, with notes + assets) for the Releases page. Paginated.</summary>
+    [HttpGet("{repositoryId:guid}/releases")]
+    public async Task<IActionResult> ListReleases([FromRoute] Guid repositoryId, [FromQuery] ListReleasesQuery query, CancellationToken cancellationToken)
+    {
+        var result = await _mediator.Send(query with { RepositoryId = repositoryId }, cancellationToken).ConfigureAwait(false);
+        return Ok(result);
+    }
+
+    /// <summary>Live git tags (newest-first) for the Releases page's Tags tab. Paginated.</summary>
+    [HttpGet("{repositoryId:guid}/tags")]
+    public async Task<IActionResult> ListTags([FromRoute] Guid repositoryId, [FromQuery] ListTagsQuery query, CancellationToken cancellationToken)
+    {
+        var result = await _mediator.Send(query with { RepositoryId = repositoryId }, cancellationToken).ConfigureAwait(false);
+        return Ok(result);
+    }
+
     /// <summary>
     /// Latest commit on a path/ref — the Code tab's header bar. `path` (query) omitted ⇒ repo root;
     /// `ref` omitted ⇒ the default branch. 200 with a null body when the path has no history.
@@ -238,6 +254,30 @@ public class RepositoriesController : ControllerBase
     public async Task<IActionResult> GetIssueCounts([FromRoute] Guid repositoryId, CancellationToken cancellationToken)
     {
         var result = await _mediator.Send(new GetIssueCountsQuery { RepositoryId = repositoryId }, cancellationToken).ConfigureAwait(false);
+        return Ok(result);
+    }
+
+    /// <summary>Single issue with body + sidebar fields for the in-app detail view. `number` is the per-repo #N / iid.</summary>
+    [HttpGet("{repositoryId:guid}/issues/{number:int}")]
+    public async Task<IActionResult> GetIssue([FromRoute] Guid repositoryId, [FromRoute] int number, CancellationToken cancellationToken)
+    {
+        var result = await _mediator.Send(new GetIssueQuery { RepositoryId = repositoryId, Number = number }, cancellationToken).ConfigureAwait(false);
+        return Ok(result);
+    }
+
+    /// <summary>User comments on an issue (Conversation), oldest-first.</summary>
+    [HttpGet("{repositoryId:guid}/issues/{number:int}/comments")]
+    public async Task<IActionResult> ListIssueComments([FromRoute] Guid repositoryId, [FromRoute] int number, CancellationToken cancellationToken)
+    {
+        var result = await _mediator.Send(new ListIssueCommentsQuery { RepositoryId = repositoryId, Number = number }, cancellationToken).ConfigureAwait(false);
+        return Ok(result);
+    }
+
+    /// <summary>Activity-timeline events on an issue (assigned / labeled / milestoned / closed / mentioned), oldest-first.</summary>
+    [HttpGet("{repositoryId:guid}/issues/{number:int}/events")]
+    public async Task<IActionResult> ListIssueEvents([FromRoute] Guid repositoryId, [FromRoute] int number, CancellationToken cancellationToken)
+    {
+        var result = await _mediator.Send(new ListIssueEventsQuery { RepositoryId = repositoryId, Number = number }, cancellationToken).ConfigureAwait(false);
         return Ok(result);
     }
 

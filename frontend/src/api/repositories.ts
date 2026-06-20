@@ -1,5 +1,5 @@
 import { fetchJson } from "./request";
-import type { BulkBindResult, IssueState, PullRequestReviewVerdict, PullRequestState, RemoteBranch, RemoteIssue, RemoteIssueCounts, RemoteRelease, RemoteCommitSummary, RemoteFileContent, RemoteLanguage, RemotePullRequest, RemotePullRequestCheck, RemotePullRequestCommit, RemotePullRequestCounts, RemotePullRequestFile, RemotePullRequestReview, RemoteRenderedMarkdown, RemoteRepositoryPage, RemoteRepositoryStats, RemoteTreeEntry, RepositoryDetail, RepositorySummary } from "./types";
+import type { BulkBindResult, IssueState, PullRequestReviewVerdict, PullRequestState, RemoteBranch, RemoteIssue, RemoteIssueComment, RemoteIssueCounts, RemoteIssueEvent, RemoteRelease, RemoteTag, RemoteCommitSummary, RemoteFileContent, RemoteLanguage, RemotePullRequest, RemotePullRequestCheck, RemotePullRequestCommit, RemotePullRequestCounts, RemotePullRequestFile, RemotePullRequestReview, RemoteRenderedMarkdown, RemoteRepositoryPage, RemoteRepositoryStats, RemoteTreeEntry, RepositoryDetail, RepositorySummary } from "./types";
 
 export interface BindRepositoryInput {
   providerInstanceId: string;
@@ -107,6 +107,18 @@ export const repositoriesApi = {
   getIssueCounts: (repositoryId: string) =>
     fetchJson<RemoteIssueCounts>(`/api/repositories/${encodeURIComponent(repositoryId)}/issues/counts`),
 
+  // Single-issue live fetch — body + sidebar fields (assignees / labels / milestone) for the in-app detail.
+  getIssue: (repositoryId: string, number: number) =>
+    fetchJson<RemoteIssue>(`/api/repositories/${encodeURIComponent(repositoryId)}/issues/${number}`),
+
+  // User comments (Conversation), oldest-first.
+  listIssueComments: (repositoryId: string, number: number) =>
+    fetchJson<RemoteIssueComment[]>(`/api/repositories/${encodeURIComponent(repositoryId)}/issues/${number}/comments`),
+
+  // Activity-timeline events (assigned / labeled / milestoned / closed / mentioned), oldest-first.
+  listIssueEvents: (repositoryId: string, number: number) =>
+    fetchJson<RemoteIssueEvent[]>(`/api/repositories/${encodeURIComponent(repositoryId)}/issues/${number}/events`),
+
   // Submit a review back to the PR/MR AS the caller's own linked identity (Model B). Returns 428
   // actor_identity_required (surfaced as ApiError) when the caller hasn't linked one — the global
   // ActorIdentityGate catches that and prompts a link, then the caller retries.
@@ -152,6 +164,18 @@ export const repositoriesApi = {
   // Latest release for the Code tab's Releases card. Resolves to null when the repo has no releases.
   getLatestRelease: (repositoryId: string) =>
     fetchJson<RemoteRelease | null>(`/api/repositories/${encodeURIComponent(repositoryId)}/releases/latest`),
+
+  // Releases list (newest-first, with notes + assets) for the in-app Releases page.
+  listReleases: (repositoryId: string, page = 1, perPage = 30) => {
+    const params = new URLSearchParams({ page: String(page), perPage: String(perPage) });
+    return fetchJson<RemoteRelease[]>(`/api/repositories/${encodeURIComponent(repositoryId)}/releases?${params.toString()}`);
+  },
+
+  // Git tags (newest-first) for the Releases page's Tags tab.
+  listTags: (repositoryId: string, page = 1, perPage = 30) => {
+    const params = new URLSearchParams({ page: String(page), perPage: String(perPage) });
+    return fetchJson<RemoteTag[]>(`/api/repositories/${encodeURIComponent(repositoryId)}/tags?${params.toString()}`);
+  },
 
   // Latest commit on a path/ref — the header bar. Null body when the path has no history.
   getLatestCommit: (repositoryId: string, path?: string, ref?: string) => {
