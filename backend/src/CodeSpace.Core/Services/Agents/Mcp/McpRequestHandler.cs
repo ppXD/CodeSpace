@@ -2,6 +2,7 @@ using System.Text.Json;
 using CodeSpace.Core.Services.Agents.Tools;
 using CodeSpace.Core.Services.Chat;
 using CodeSpace.Core.Services.Chat.Interactions;
+using CodeSpace.Core.Services.Decisions;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Agents.Mcp;
 using CodeSpace.Messages.Decisions;
@@ -559,7 +560,7 @@ public sealed class McpRequestHandler : IMcpRequestHandler
     {
         var options = ReadDecisionOptions(args);
 
-        return new DecisionRequest
+        var draft = new DecisionRequest
         {
             Id = ledgerId,
             RootTraceId = _runId,
@@ -583,6 +584,10 @@ public sealed class McpRequestHandler : IMcpRequestHandler
             ResumeBackend = DecisionResumeBackends.ToolLedger,
             Status = DecisionStatuses.Pending,
         };
+
+        // The fail-closed floor clamps the agent's declared policy up to human_required for a high-stakes ask — the
+        // stashed envelope carries the EFFECTIVE policy so the queue + the D4 arbiter never auto-resolve a human-only one.
+        return draft with { Policy = DecisionPolicyFloor.Effective(draft) };
     }
 
     private static string? ReadDecisionString(JsonElement obj, string name) =>
@@ -599,11 +604,16 @@ public sealed class McpRequestHandler : IMcpRequestHandler
             {
                 Id = ReadDecisionString(o, "id") ?? "",
                 Label = ReadDecisionString(o, "label") ?? "",
-                IsSideEffecting = o.TryGetProperty("isSideEffecting", out var s) && s.ValueKind == JsonValueKind.True,
+                IsSideEffecting = ReadSideEffecting(o),
             })
             .Where(o => o.Id.Length > 0)
             .ToList();
     }
+
+    /// <summary>The isSideEffecting flag drives the fail-closed policy floor (an irreversible option → human-only), so parse it LENIENTLY: a JSON boolean true OR a string "true" (a non-conformant model emitting the string form must not silently drop the safety flag).</summary>
+    private static bool ReadSideEffecting(JsonElement option) =>
+        option.TryGetProperty("isSideEffecting", out var s)
+        && (s.ValueKind == JsonValueKind.True || (s.ValueKind == JsonValueKind.String && bool.TryParse(s.GetString(), out var b) && b));
 
     /// <summary>Build + post the REDACTED decision card into the run's approval conversation: the body carries the question + (redacted) blocking reason + recommendation; the buttons are the typed options (or a free-text submit). The server-side <see cref="DecisionRequestTarget"/> carries the resolution token (omitted from the client view).</summary>
     private async Task<Guid> PostDecisionCardAsync(DecisionRequest request, string token, CancellationToken cancellationToken)
