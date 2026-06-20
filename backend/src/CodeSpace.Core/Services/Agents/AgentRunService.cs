@@ -352,14 +352,21 @@ public sealed class AgentRunService : IAgentRunService, IScopedDependency
 
         var current = snapshot.Status;
 
-        // Completion contract (Slice A1): a run can NEVER land Succeeded while a decision it raised is still unanswered —
+        // Completion contract: a run can NEVER land Succeeded while a decision it raised is still unanswered —
         // re-grade Succeeded → NeedsReview(NeedsDecision) so the unanswered ask isn't buried under "success". Enforced at
         // THIS choke point (every normal completion) AND mirrored in the reconciler's spool recovery, so the invariant
         // holds on every terminal write path. Only a would-be Succeeded needs the lookup; every other terminal passes through.
         if (result.Status == AgentRunStatus.Succeeded)
         {
+            // A1 (HARD gate): a raised-but-unanswered decision can never be buried under a green Succeeded.
             var pendingDecisionId = await _ledger.FindBlockingDecisionIdAsync(runId, cancellationToken).ConfigureAwait(false);
             result = AgentCompletionContract.ApplyPendingDecision(result, pendingDecisionId);
+
+            // A2 (BEST-EFFORT net, opt-in): if no decision fired but the agent's FINAL message reads as an unresolved
+            // question handed back to the human, re-grade to NeedsReview(NeedsReview). A1 takes precedence — this runs
+            // only while still Succeeded, so a concrete decision outranks the heuristic. Flag-gated default-OFF.
+            if (result.Status == AgentRunStatus.Succeeded && FinalOutputReview.Enabled)
+                result = FinalOutputReview.ReGrade(result);
         }
 
         if (!AgentRunStateMachine.IsLegalTransition(current, result.Status))

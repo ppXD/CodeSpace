@@ -1311,6 +1311,108 @@ public class AgentRunServiceTests
         }
     }
 
+    // ─── A2 final-output review (best-effort net, opt-in): a question-ending success → NeedsReview(NeedsReview) ────
+
+    [Fact]
+    public async Task With_review_enabled_completing_a_run_whose_final_output_asks_a_question_re_grades_to_needs_review()
+    {
+        // Slice A2 (opt-in best-effort net): a would-be success whose FINAL message ends on an unresolved question is
+        // re-graded to NeedsReview(NeedsReview) — carrying NO decision id (it's a heuristic, not a raised decision).
+        using var review = WithFinalOutputReview(true);
+
+        var teamId = await SeedTeamAsync();
+
+        Guid runId;
+        using (var scope = _fixture.BeginScope())
+        {
+            var svc = scope.Resolve<IAgentRunService>();
+            runId = (await svc.CreateAsync(BuildTask(), teamId, null, null, iterationKey: "", cancellationToken: CancellationToken.None)).Id;
+            await svc.MarkRunningAsync(runId, CancellationToken.None);
+        }
+
+        using (var scope = _fixture.BeginScope())
+            await scope.Resolve<IAgentRunService>().CompleteAsync(runId,
+                new AgentRunResult { Status = AgentRunStatus.Succeeded, ExitReason = "completed", Summary = "I drafted the migration. Should I apply it?" }, CancellationToken.None);
+
+        using (var scope = _fixture.BeginScope())
+        {
+            var run = await scope.Resolve<IAgentRunService>().GetAsync(runId, CancellationToken.None);
+            run.Status.ShouldBe(AgentRunStatus.NeedsReview, "a question-ending success is re-graded when the net is enabled");
+
+            var stored = JsonSerializer.Deserialize<AgentRunResult>(run.ResultJson!, AgentJson.Options)!;
+            stored.CompletionDisposition.ShouldBe(CompletionDisposition.NeedsReview);
+            stored.PendingDecisionId.ShouldBeNull("A2 is a heuristic — it carries no decision id");
+        }
+    }
+
+    [Fact]
+    public async Task With_review_disabled_a_question_ending_success_stays_succeeded()
+    {
+        // Default-OFF: the heuristic must not change behaviour unless an operator opts in.
+        using var review = WithFinalOutputReview(false);
+
+        var teamId = await SeedTeamAsync();
+
+        Guid runId;
+        using (var scope = _fixture.BeginScope())
+        {
+            var svc = scope.Resolve<IAgentRunService>();
+            runId = (await svc.CreateAsync(BuildTask(), teamId, null, null, iterationKey: "", cancellationToken: CancellationToken.None)).Id;
+            await svc.MarkRunningAsync(runId, CancellationToken.None);
+        }
+
+        using (var scope = _fixture.BeginScope())
+            await scope.Resolve<IAgentRunService>().CompleteAsync(runId,
+                new AgentRunResult { Status = AgentRunStatus.Succeeded, ExitReason = "completed", Summary = "Should I apply it?" }, CancellationToken.None);
+
+        using (var scope = _fixture.BeginScope())
+            (await scope.Resolve<IAgentRunService>().GetAsync(runId, CancellationToken.None)).Status
+                .ShouldBe(AgentRunStatus.Succeeded, "with the net off (default), a question-ending success is unchanged");
+    }
+
+    [Fact]
+    public async Task A_pending_decision_outranks_the_final_output_heuristic()
+    {
+        // Precedence: when BOTH a real unanswered decision AND a question-ending summary are present, A1 wins — the run
+        // is NeedsReview(NeedsDecision) carrying the decision id, not the weaker NeedsReview(NeedsReview).
+        using var review = WithFinalOutputReview(true);
+
+        var teamId = await SeedTeamAsync();
+
+        Guid runId;
+        using (var scope = _fixture.BeginScope())
+        {
+            var svc = scope.Resolve<IAgentRunService>();
+            runId = (await svc.CreateAsync(BuildTask(), teamId, null, null, iterationKey: "", cancellationToken: CancellationToken.None)).Id;
+            await svc.MarkRunningAsync(runId, CancellationToken.None);
+        }
+
+        var decisionId = await SeedLedgerRowAsync(teamId, runId, ToolCallLedgerStatus.AwaitingApproval, DecisionToolKinds.DecisionRequest);
+
+        using (var scope = _fixture.BeginScope())
+            await scope.Resolve<IAgentRunService>().CompleteAsync(runId,
+                new AgentRunResult { Status = AgentRunStatus.Succeeded, ExitReason = "completed", Summary = "Should I apply it?" }, CancellationToken.None);
+
+        using (var scope = _fixture.BeginScope())
+        {
+            var stored = JsonSerializer.Deserialize<AgentRunResult>(
+                (await scope.Resolve<IAgentRunService>().GetAsync(runId, CancellationToken.None)).ResultJson!, AgentJson.Options)!;
+            stored.Status.ShouldBe(AgentRunStatus.NeedsReview);
+            stored.CompletionDisposition.ShouldBe(CompletionDisposition.NeedsDecision, "the raised decision (A1) outranks the final-output heuristic (A2)");
+            stored.PendingDecisionId.ShouldBe(decisionId);
+        }
+    }
+
+    private static IDisposable WithFinalOutputReview(bool enabled) => new FinalOutputReviewFlag(enabled);
+
+    /// <summary>Scope the A2 opt-in flag for one test; restores the prior value on Dispose (the shared-process env stays isolated — the PostgresCollection runs these sequentially).</summary>
+    private sealed class FinalOutputReviewFlag : IDisposable
+    {
+        private readonly string? _prior = Environment.GetEnvironmentVariable(FinalOutputReview.EnabledEnvVar);
+        public FinalOutputReviewFlag(bool enabled) => Environment.SetEnvironmentVariable(FinalOutputReview.EnabledEnvVar, enabled ? "true" : null);
+        public void Dispose() => Environment.SetEnvironmentVariable(FinalOutputReview.EnabledEnvVar, _prior);
+    }
+
     private const string ZeroHash = "0000000000000000000000000000000000000000000000000000000000000000";
 
     /// <summary>Plant a ledger row for a run directly (bypassing the MCP park path) so the completion gate sees a real decision.request / approval row in the given state.</summary>
