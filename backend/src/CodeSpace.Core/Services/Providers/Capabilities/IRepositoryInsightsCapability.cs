@@ -18,4 +18,11 @@ public interface IRepositoryInsightsCapability : IProviderCapability
 
     /// <summary>Language composition (descending by percent). Empty when the provider reports none.</summary>
     Task<IReadOnlyList<RemoteLanguage>> GetLanguagesAsync(ProviderContext context, RemoteRepository repository, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// The single latest release for the right-rail Releases card. Null when the repo has no releases.
+    /// Best-effort like the stats — a provider that can't read releases returns null rather than throwing.
+    /// Both insights implementers (GitHub, GitLab) support releases, so this belongs on the shared interface.
+    /// </summary>
+    Task<RemoteRelease?> GetLatestReleaseAsync(ProviderContext context, RemoteRepository repository, CancellationToken cancellationToken);
 }

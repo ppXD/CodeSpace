@@ -10,4 +10,7 @@ public interface IRepositoryInsightsService
 {
     Task<RemoteRepositoryStats> GetStatsAsync(Guid repositoryId, CancellationToken cancellationToken);
     Task<IReadOnlyList<RemoteLanguage>> GetLanguagesAsync(Guid repositoryId, CancellationToken cancellationToken);
+
+    /// <summary>The repository's latest release for the right-rail Releases card. Null when there are none.</summary>
+    Task<RemoteRelease?> GetLatestReleaseAsync(Guid repositoryId, CancellationToken cancellationToken);
 }

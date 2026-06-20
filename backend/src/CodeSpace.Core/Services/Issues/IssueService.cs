@@ -6,6 +6,7 @@ using CodeSpace.Core.Services.Providers.Capabilities;
 using CodeSpace.Core.Services.Providers.Identity;
 using CodeSpace.Core.Services.Providers.Scopes;
 using CodeSpace.Messages.Dtos.Providers;
+using CodeSpace.Messages.Enums;
 using Microsoft.EntityFrameworkCore;
 
 namespace CodeSpace.Core.Services.Issues;
@@ -23,6 +24,36 @@ public sealed class IssueService : IIssueService, IScopedDependency
         _registry = registry;
         _scopeChecker = scopeChecker;
         _actorCredentials = actorCredentials;
+    }
+
+    public async Task<IReadOnlyList<RemoteIssue>> ListAsync(Guid repositoryId, Guid teamId, IssueState? state, int page, int perPage, CancellationToken cancellationToken)
+    {
+        var (catalog, context, remote) = await ResolveCatalogAsync(repositoryId, teamId, cancellationToken).ConfigureAwait(false);
+        return await catalog.ListIssuesAsync(context, remote, state, page, perPage, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<RemoteIssueCounts> GetCountsAsync(Guid repositoryId, Guid teamId, CancellationToken cancellationToken)
+    {
+        var (catalog, context, remote) = await ResolveCatalogAsync(repositoryId, teamId, cancellationToken).ConfigureAwait(false);
+        return await catalog.CountIssuesAsync(context, remote, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Shared READ preflight (mirrors <c>PullRequestService.ResolveAsync</c>): repo lookup → credential
+    /// null-check → catalog scope check → capability + provider-context + remote-repository shape. Reads use
+    /// the repo's connection credential — no Model-B actor attribution (listing isn't a per-user write).
+    /// </summary>
+    private async Task<(IIssueCatalogCapability Catalog, ProviderContext Context, RemoteRepository Remote)> ResolveCatalogAsync(Guid repositoryId, Guid teamId, CancellationToken cancellationToken)
+    {
+        var repo = await LoadRepositoryAsync(repositoryId, teamId, cancellationToken).ConfigureAwait(false);
+        EnsureCredentialBound(repo);
+        _scopeChecker.EnsureCapability(repo.Credential!, repo.ProviderInstance.Provider, typeof(IIssueCatalogCapability));
+
+        var catalog = _registry.Require<IIssueCatalogCapability>(repo.ProviderInstance.Provider);
+        var context = new ProviderContext(repo.ProviderInstance, repo.Credential!);
+        var remote = repo.ToRemoteRepository();
+
+        return (catalog, context, remote);
     }
 
     public async Task<RemoteIssue> CreateAsync(Guid repositoryId, Guid teamId, CreateIssueInput input, Guid? actorUserId, CancellationToken cancellationToken)

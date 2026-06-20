@@ -19,7 +19,7 @@ using RepositoryRole = CodeSpace.Messages.Enums.RepositoryRole;
 
 namespace CodeSpace.Core.Services.Providers.GitHub;
 
-public sealed class GitHubRepositoryProvider : IRepositoryCatalogCapability, IPullRequestCatalogCapability, IPullRequestCommentCapability, IPullRequestReviewCapability, IPullRequestWriteCapability, IIssueWriteCapability, IRepositoryAccessCapability, IRepositorySourceCapability, IRepositoryInsightsCapability, IRepositoryHistoryCapability, IRepositoryMarkdownRenderCapability, ICredentialProbeCapability, IWebhookRegistrationCapability, IWebhookSignatureVerifier, IWebhookEventNormalizer
+public sealed class GitHubRepositoryProvider : IRepositoryCatalogCapability, IPullRequestCatalogCapability, IPullRequestCommentCapability, IPullRequestReviewCapability, IPullRequestWriteCapability, IIssueCatalogCapability, IIssueWriteCapability, IRepositoryAccessCapability, IRepositorySourceCapability, IRepositoryInsightsCapability, IRepositoryHistoryCapability, IRepositoryMarkdownRenderCapability, ICredentialProbeCapability, IWebhookRegistrationCapability, IWebhookSignatureVerifier, IWebhookEventNormalizer
 {
     private readonly IProviderAuthResolver _authResolver;
     private readonly IExternalCallResilience _resilience;
@@ -314,6 +314,71 @@ public sealed class GitHubRepositoryProvider : IRepositoryCatalogCapability, IPu
         }, cancellationToken).ConfigureAwait(false);
     }
 
+    public async Task<IReadOnlyList<RemoteIssue>> ListIssuesAsync(ProviderContext context, RemoteRepository repository, IssueState? stateFilter, int page, int perPage, CancellationToken cancellationToken)
+    {
+        var client = await BuildClientAsync(context, cancellationToken).ConfigureAwait(false);
+
+        return await _resilience.ExecuteAsync(context.Instance, nameof(ListIssuesAsync), async _ =>
+        {
+            // Use the Search API (`is:issue`) — NOT the REST /issues list. GitHub's REST issues endpoint
+            // returns pull requests as issues too; filtering them client-side would leave variable-density
+            // pages and break count-based pagination (some issues become unreachable). Search excludes PRs
+            // server-side, so page N holds exactly the Nth page of real issues — and its TotalCount is the
+            // same number CountIssuesAsync reports, keeping the pager honest.
+            var request = new SearchIssuesRequest
+            {
+                Repos = SingleRepoCollection(repository),
+                Type = IssueTypeQualifier.Issue,
+                SortField = IssueSearchSort.Created,
+                Order = SortDirection.Descending,
+                Page = page,
+                PerPage = perPage
+            };
+            if (stateFilter is { } s) request.State = s == IssueState.Closed ? ItemState.Closed : ItemState.Open;
+
+            var result = await client.Search.SearchIssues(request).ConfigureAwait(false);
+            return (IReadOnlyList<RemoteIssue>)result.Items.Select(ToRemoteIssue).ToList();
+        }, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<RemoteIssueCounts> CountIssuesAsync(ProviderContext context, RemoteRepository repository, CancellationToken cancellationToken)
+    {
+        var client = await BuildClientAsync(context, cancellationToken).ConfigureAwait(false);
+
+        return await _resilience.ExecuteAsync(context.Instance, nameof(CountIssuesAsync), async _ =>
+        {
+            // Same Search-API approach as CountPullRequestsAsync, but Type=Issue so PRs are excluded
+            // from the totals. PerPage=1 keeps the body tiny — we only read TotalCount.
+            var openTask = client.Search.SearchIssues(BuildIssueCountSearch(repository, ItemState.Open));
+            var closedTask = client.Search.SearchIssues(BuildIssueCountSearch(repository, ItemState.Closed));
+
+            await Task.WhenAll(openTask, closedTask).ConfigureAwait(false);
+
+            return new RemoteIssueCounts
+            {
+                Open = openTask.Result.TotalCount,
+                Closed = closedTask.Result.TotalCount
+            };
+        }, cancellationToken).ConfigureAwait(false);
+    }
+
+    private static SearchIssuesRequest BuildIssueCountSearch(RemoteRepository repository, ItemState state) => new()
+    {
+        Repos = SingleRepoCollection(repository),
+        Type = IssueTypeQualifier.Issue,
+        State = state,
+        PerPage = 1
+    };
+
+    private static RepositoryCollection SingleRepoCollection(RemoteRepository repository)
+    {
+        // RepositoryCollection has only a default ctor + Add(owner, name) — the string-init shape isn't
+        // supported, so build it imperatively. Produces the `repo:owner/name` search qualifier.
+        var repos = new RepositoryCollection();
+        repos.Add(repository.NamespacePath, repository.Name);
+        return repos;
+    }
+
     public async Task<RemoteIssue> CreateIssueAsync(ProviderContext context, RemoteRepository repository, CreateIssueInput input, CancellationToken cancellationToken)
     {
         var client = await BuildClientAsync(context, cancellationToken).ConfigureAwait(false);
@@ -337,7 +402,10 @@ public sealed class GitHubRepositoryProvider : IRepositoryCatalogCapability, IPu
         Body = issue.Body,
         AuthorLogin = issue.User?.Login,
         Labels = ToLabelRefs(issue.Labels),
+        CommentsCount = issue.Comments,
+        MilestoneTitle = issue.Milestone?.Title,
         CreatedDate = issue.CreatedAt,
+        ClosedDate = issue.ClosedAt,
         WebUrl = issue.HtmlUrl
     };
 
@@ -694,6 +762,36 @@ public sealed class GitHubRepositoryProvider : IRepositoryCatalogCapability, IPu
             };
         }, cancellationToken).ConfigureAwait(false);
     }
+
+    public async Task<RemoteRelease?> GetLatestReleaseAsync(ProviderContext context, RemoteRepository repository, CancellationToken cancellationToken)
+    {
+        var client = await BuildClientAsync(context, cancellationToken).ConfigureAwait(false);
+
+        return await _resilience.ExecuteAsync(context.Instance, nameof(GetLatestReleaseAsync), async _ =>
+        {
+            try
+            {
+                // GetLatest = GitHub's "Latest"-badged release (newest published, non-draft, non-prerelease).
+                // It 404s when the repo has no such release (none at all, or only drafts/prereleases) — which
+                // we map to null so the card just shows the count + link rather than erroring the Code view.
+                var release = await client.Repository.Release.GetLatest(repository.NamespacePath, repository.Name).ConfigureAwait(false);
+                return ToRemoteRelease(release);
+            }
+            catch (NotFoundException)
+            {
+                return null;
+            }
+        }, cancellationToken).ConfigureAwait(false);
+    }
+
+    private static RemoteRelease ToRemoteRelease(Release release) => new()
+    {
+        TagName = release.TagName,
+        Name = string.IsNullOrWhiteSpace(release.Name) ? null : release.Name,
+        PublishedDate = release.PublishedAt ?? release.CreatedAt,
+        WebUrl = release.HtmlUrl,
+        IsPrerelease = release.Prerelease
+    };
 
     public async Task<IReadOnlyList<RemoteLanguage>> GetLanguagesAsync(ProviderContext context, RemoteRepository repository, CancellationToken cancellationToken)
     {

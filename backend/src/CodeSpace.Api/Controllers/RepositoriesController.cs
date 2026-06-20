@@ -116,6 +116,14 @@ public class RepositoriesController : ControllerBase
         return Ok(result);
     }
 
+    /// <summary>Latest release for the Code tab's Releases card. 200 with a null body when the repo has no releases.</summary>
+    [HttpGet("{repositoryId:guid}/releases/latest")]
+    public async Task<IActionResult> GetLatestRelease([FromRoute] Guid repositoryId, CancellationToken cancellationToken)
+    {
+        var result = await _mediator.Send(new GetLatestReleaseQuery { RepositoryId = repositoryId }, cancellationToken).ConfigureAwait(false);
+        return Ok(result);
+    }
+
     /// <summary>
     /// Latest commit on a path/ref — the Code tab's header bar. `path` (query) omitted ⇒ repo root;
     /// `ref` omitted ⇒ the default branch. 200 with a null body when the path has no history.
@@ -210,6 +218,26 @@ public class RepositoriesController : ControllerBase
     public async Task<IActionResult> GetPullRequestCounts([FromRoute] Guid repositoryId, CancellationToken cancellationToken)
     {
         var result = await _mediator.Send(new GetPullRequestCountsQuery { RepositoryId = repositoryId }, cancellationToken).ConfigureAwait(false);
+        return Ok(result);
+    }
+
+    /// <summary>
+    /// Live issue fetch — never cached locally, mirroring the PR list. `state` accepts the IssueState
+    /// enum names (Open, Closed); omit for "all". Pull requests are excluded (GitHub returns PRs as
+    /// issues — the provider filters them out so this is issues-only).
+    /// </summary>
+    [HttpGet("{repositoryId:guid}/issues")]
+    public async Task<IActionResult> ListIssues([FromRoute] Guid repositoryId, [FromQuery] ListIssuesQuery query, CancellationToken cancellationToken)
+    {
+        var result = await _mediator.Send(query with { RepositoryId = repositoryId }, cancellationToken).ConfigureAwait(false);
+        return Ok(result);
+    }
+
+    /// <summary>Total open + closed issue counts for the repository. One round-trip per provider.</summary>
+    [HttpGet("{repositoryId:guid}/issues/counts")]
+    public async Task<IActionResult> GetIssueCounts([FromRoute] Guid repositoryId, CancellationToken cancellationToken)
+    {
+        var result = await _mediator.Send(new GetIssueCountsQuery { RepositoryId = repositoryId }, cancellationToken).ConfigureAwait(false);
         return Ok(result);
     }
 

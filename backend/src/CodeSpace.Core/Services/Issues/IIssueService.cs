@@ -1,15 +1,26 @@
 using CodeSpace.Messages.Dtos.Providers;
+using CodeSpace.Messages.Enums;
 
 namespace CodeSpace.Core.Services.Issues;
 
 /// <summary>
-/// Issue write operations against bound repositories. Does the full preflight (repo lookup, credential
-/// null-check, write-scope + Write-role check, Model-B actor attribution) then invokes the provider's
-/// <c>IIssueWriteCapability</c>. Consumers (workflow nodes, future chat tool-calls, integration tests)
-/// don't see any of that wiring — mirrors <c>IPullRequestService</c>.
+/// Issue read + write operations against bound repositories. Each method does the full preflight (repo
+/// lookup, credential null-check, scope check; writes add Write-role + Model-B actor attribution) then
+/// invokes the provider's <c>IIssueCatalogCapability</c> (reads) or <c>IIssueWriteCapability</c> (writes).
+/// Consumers (Mediator handlers, workflow nodes, future chat tool-calls, integration tests) don't see any
+/// of that wiring — mirrors <c>IPullRequestService</c>.
 /// </summary>
 public interface IIssueService
 {
+    /// <summary>
+    /// LIST issues filtered by state, one page at a time, via the provider's <c>IIssueCatalogCapability</c>.
+    /// Read preflight (repo lookup, credential null-check, read-scope check) — no actor attribution.
+    /// </summary>
+    Task<IReadOnlyList<RemoteIssue>> ListAsync(Guid repositoryId, Guid teamId, IssueState? state, int page, int perPage, CancellationToken cancellationToken);
+
+    /// <summary>Total open + closed issue counts for the repository — one provider round-trip. Same read preflight as <see cref="ListAsync"/>.</summary>
+    Task<RemoteIssueCounts> GetCountsAsync(Guid repositoryId, Guid teamId, CancellationToken cancellationToken);
+
     /// <summary>
     /// CREATE an issue via the provider's <c>IIssueWriteCapability</c>. Throws
     /// <see cref="InvalidOperationException"/> (400) for a missing repo / blank title, on insufficient write

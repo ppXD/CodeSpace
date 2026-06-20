@@ -34,6 +34,12 @@ public sealed class RepositoryInsightsService : IRepositoryInsightsService, ISco
         return await insights.GetLanguagesAsync(context, remote, cancellationToken).ConfigureAwait(false);
     }
 
+    public async Task<RemoteRelease?> GetLatestReleaseAsync(Guid repositoryId, CancellationToken cancellationToken)
+    {
+        var (insights, context, remote) = await ResolveAsync(repositoryId, cancellationToken).ConfigureAwait(false);
+        return await insights.GetLatestReleaseAsync(context, remote, cancellationToken).ConfigureAwait(false);
+    }
+
     /// <summary>Same preflight as RepositorySourceService — repo lookup → credential null-check → source-read scope → capability.</summary>
     private async Task<(IRepositoryInsightsCapability Insights, ProviderContext Context, RemoteRepository Remote)> ResolveAsync(Guid repositoryId, CancellationToken cancellationToken)
     {

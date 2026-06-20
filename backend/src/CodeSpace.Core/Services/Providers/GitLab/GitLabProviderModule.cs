@@ -61,6 +61,10 @@ public sealed class GitLabProviderModule : IProviderModule
         // Opening an MR is a WRITE — `api` only (no narrower scope can create).
         [typeof(IPullRequestWriteCapability)] = ScopeRequirement.Of(GitLabScopes.Api),
 
+        // Listing issues hits /projects/:id/issues — part of the regular API surface, same `api`/`read_api`
+        // family as listing MRs. (`read_repository` is clone-only and can't reach this endpoint.)
+        [typeof(IIssueCatalogCapability)] = ScopeRequirement.AnyOf(GitLabScopes.Api, GitLabScopes.ReadApi),
+
         // Creating an issue is a WRITE — `api` only, same as opening an MR.
         [typeof(IIssueWriteCapability)] = ScopeRequirement.Of(GitLabScopes.Api),
 
