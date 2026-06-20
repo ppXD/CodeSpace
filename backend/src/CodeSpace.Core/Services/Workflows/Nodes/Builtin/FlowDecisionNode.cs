@@ -96,7 +96,14 @@ public sealed class FlowDecisionNode : INodeRuntime
     private static DecisionRequest BuildRequest(NodeRunContext context)
     {
         var rootTraceId = ReadRunId(context);
-        var timeoutSeconds = ReadInt(context.Config, "timeoutSeconds", DefaultTimeoutSeconds);
+
+        // The envelope is persisted to the wait payload + read back by the team-wide "Needs decision" queue / the
+        // run-detail surface — both HUMAN surfaces that outlive the run. So build EVERY field from the REDACTED config
+        // (a {{team.SECRET}} in author-written question / options / blockingReason becomes a "[REDACTED: path]" marker),
+        // mirroring the agent grain (which redacts its envelope at park). Functional fields bear no secret refs, so the
+        // redacted bag is identical to the resolved one for them. Falls back to Config only off the engine path (tests).
+        var config = context.RedactedConfig ?? context.Config;
+        var timeoutSeconds = ReadInt(config, "timeoutSeconds", DefaultTimeoutSeconds);
 
         return new DecisionRequest
         {
@@ -106,17 +113,17 @@ public sealed class FlowDecisionNode : INodeRuntime
             NodeId = context.NodeId,
             Scope = DecisionScopes.Node,
             RequesterType = DecisionRequesterTypes.WorkflowNode,
-            DecisionType = ReadString(context.Config, "decisionType", DecisionTypes.Confirm),
-            Question = ReadString(context.Config, "question", ""),
-            Options = ReadOptions(context.Config),
-            RecommendedOption = ReadStringOrNull(context.Config, "recommendedOption"),
-            BlockingReason = ReadStringOrNull(context.Config, "blockingReason"),
-            ContextSummary = ReadStringOrNull(context.Config, "contextSummary"),
-            AnswerSchema = ReadObjectRaw(context.Config, "answerSchema"),
-            RiskLevel = ReadString(context.Config, "riskLevel", DecisionRiskLevels.Medium),
-            Policy = ReadString(context.Config, "policy", DecisionPolicies.HumanRequired),
-            ConfidenceRequired = ReadDoubleOrNull(context.Config, "confidenceRequired"),
-            DefaultAction = ReadStringOrNull(context.Config, "defaultAction"),
+            DecisionType = ReadString(config, "decisionType", DecisionTypes.Confirm),
+            Question = ReadString(config, "question", ""),
+            Options = ReadOptions(config),
+            RecommendedOption = ReadStringOrNull(config, "recommendedOption"),
+            BlockingReason = ReadStringOrNull(config, "blockingReason"),
+            ContextSummary = ReadStringOrNull(config, "contextSummary"),
+            AnswerSchema = ReadObjectRaw(config, "answerSchema"),
+            RiskLevel = ReadString(config, "riskLevel", DecisionRiskLevels.Medium),
+            Policy = ReadString(config, "policy", DecisionPolicies.HumanRequired),
+            ConfidenceRequired = ReadDoubleOrNull(config, "confidenceRequired"),
+            DefaultAction = ReadStringOrNull(config, "defaultAction"),
             TimeoutAt = DateTimeOffset.UtcNow.AddSeconds(timeoutSeconds),
             DedupeKey = $"{rootTraceId:N}:{context.NodeId}",
             ResumeBackend = DecisionResumeBackends.WorkflowWait,

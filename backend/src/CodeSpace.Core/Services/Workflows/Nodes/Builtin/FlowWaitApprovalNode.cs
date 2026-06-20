@@ -60,8 +60,11 @@ public sealed class FlowWaitApprovalNode : INodeRuntime
             return Task.FromResult(NodeResult.Ok(outputs));
         }
 
-        // First pass: park the run on an Approval wait (no timer — wakes only on the decision).
-        var prompt = ReadString(context.Config, "prompt");
+        // First pass: park the run on an Approval wait (no timer — wakes only on the decision). The prompt is persisted
+        // to the wait payload + rendered VERBATIM on the run-detail surface (a HUMAN surface outliving the run), so read
+        // it from the REDACTED config — a {{team.SECRET}} in the approval prompt becomes a "[REDACTED: path]" marker, not
+        // plaintext (same invariant FlowDecisionNode upholds; falls back to Config only off the engine path).
+        var prompt = ReadString(context.RedactedConfig ?? context.Config, "prompt");
         var payload = JsonSerializer.SerializeToElement(new { prompt });
         return Task.FromResult(NodeResult.Suspend(new SuspensionToken { Kind = WorkflowWaitKinds.Approval, Payload = payload }));
     }
