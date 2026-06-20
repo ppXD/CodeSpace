@@ -467,6 +467,11 @@ public sealed class McpRequestHandler : IMcpRequestHandler
 
         var request = BuildDecisionRequest(arguments, ledgerId, key, deadlineAt);
 
+        // Stash the ALREADY-REDACTED envelope on the row so the cross-grain "Needs decision" queue (D3) can project this
+        // decision's question / options / risk / policy without re-reading the card (symmetric with the node-grain
+        // wait-payload stash). Redacted here because the queue is another human surface — same invariant the card upholds.
+        await _ledger.SetDecisionEnvelopeAsync(ledgerId, teamId, _redactor.Redact(JsonSerializer.Serialize(request, AgentJson.Options)), cancellationToken).ConfigureAwait(false);
+
         var messageId = await PostDecisionCardAsync(request, token, cancellationToken).ConfigureAwait(false);
 
         await _ledger.SetApprovalMessageAsync(ledgerId, teamId, messageId, cancellationToken).ConfigureAwait(false);

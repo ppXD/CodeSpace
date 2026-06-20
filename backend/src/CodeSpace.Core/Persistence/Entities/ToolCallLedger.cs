@@ -51,6 +51,17 @@ public class ToolCallLedger : IEntity<Guid>, IAuditable
     /// <summary>The ALREADY-REDACTED tool-result content on a terminal success. NULL while Pending / on a failure.</summary>
     public string? ResultJson { get; set; }
 
+    /// <summary>
+    /// The parked agent-grain <c>decision.request</c> envelope (a serialized <c>DecisionRequest</c>, redacted at park by
+    /// the run's <c>SecretRedactor</c>), stashed so the cross-grain "Needs decision" queue (Decision substrate D3) can
+    /// PROJECT this decision's question / options / risk / policy WITHOUT re-reading the posted card. Mirrors the
+    /// node-grain stash MECHANISM (<c>workflow_run_wait.payload_jsonb</c> holds the flow.decision envelope while Pending)
+    /// — though that node-grain payload carries the engine's existing suspend-payload posture, NOT this column's
+    /// park-time redaction. NULL on a real side-effecting approval row (only a decision row sets it); untouched by the
+    /// approval / answer CAS. jsonb.
+    /// </summary>
+    public string? DecisionEnvelopeJson { get; set; }
+
     /// <summary>Terminal failure / denial reason (already redacted). NULL on success / while Pending.</summary>
     public string? Error { get; set; }
 

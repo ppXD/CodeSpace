@@ -62,6 +62,9 @@ public interface IToolCallLedgerService
     /// </summary>
     Task<bool> TryAnswerDecisionAsync(Guid ledgerId, Guid teamId, string answerJson, CancellationToken cancellationToken);
 
+    /// <summary>Stash the parked agent-grain decision's (ALREADY-REDACTED) <c>DecisionRequest</c> envelope on its row (best-effort, team-scoped) so the cross-grain "Needs decision" queue (D3) can project its question / options / risk / policy without re-reading the card. Guarded on <c>ToolKind == 'decision.request'</c> so it only ever writes a decision row; set once at park, untouched by the answer CAS.</summary>
+    Task SetDecisionEnvelopeAsync(Guid ledgerId, Guid teamId, string envelopeJson, CancellationToken cancellationToken);
+
     /// <summary>
     /// Reaper sweep (item D3): durably expire every UNDECIDED approval past its deadline so a re-call gets a clean
     /// terminal instead of re-opening forever. Candidate set: <c>Status == AwaitingApproval AND ApprovedAt == null AND
@@ -247,6 +250,16 @@ public sealed class ToolCallLedgerService : IToolCallLedgerService, IScopedDepen
 
         return flipped > 0;
     }
+
+    public async Task SetDecisionEnvelopeAsync(Guid ledgerId, Guid teamId, string envelopeJson, CancellationToken cancellationToken) =>
+        // Best-effort field set on the parked decision row (mirrors SetApprovalMessageAsync). The ToolKind guard means it
+        // can only ever touch a decision row — never a real side-effecting approval row.
+        await _db.ToolCallLedger
+            .Where(l => l.Id == ledgerId && l.TeamId == teamId && l.ToolKind == DecisionToolKinds.DecisionRequest)
+            .ExecuteUpdateAsync(s => s
+                .SetProperty(l => l.DecisionEnvelopeJson, envelopeJson)
+                .SetProperty(l => l.LastModifiedDate, DateTimeOffset.UtcNow), cancellationToken)
+            .ConfigureAwait(false);
 
     public async Task<IReadOnlyList<ExpiredToolApproval>> ExpireStaleApprovalsAsync(DateTimeOffset now, CancellationToken cancellationToken)
     {

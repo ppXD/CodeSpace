@@ -190,13 +190,43 @@ public class McpDecisionFlowTests
 
         var call = Task.Run(() => CallToolAsync(handler, new { question = "pick a path", decisionType = "choose_one", options = new[] { new { id = "a", label = $"use {secret}" }, new { id = "b", label = "B" } } }));
 
-        var (_, messageId) = await WaitForPostedCardAsync(teamId, runId);
+        var (ledgerId, messageId) = await WaitForPostedCardAsync(teamId, runId);
 
         var interactionJson = await ReadInteractionJsonAsync(messageId);
         interactionJson.ShouldNotContain(secret, customMessage: "an echoed run secret in an option label must be redacted before reaching the human card — the same invariant the card body upholds");
 
+        // The STASHED envelope (read back by the cross-grain queue, another human surface) must be redacted too.
+        (await ReadRowAsync(ledgerId)).DecisionEnvelopeJson.ShouldNotContain(secret, customMessage: "the queue's stashed envelope must be redacted just like the card");
+
         await RespondAsync(teamId, messageId, "a", ownerId);
         await call;   // unblock the parked call so the test doesn't leak a blocked task
+    }
+
+    [Fact]
+    public async Task A_parked_decision_stashes_its_envelope_so_the_queue_can_project_it()
+    {
+        // D3 prerequisite: the real handler park must persist the DecisionRequest envelope on the ledger row (the
+        // node-grain stashes it in the wait payload; this is the symmetric agent-grain stash the queue reads).
+        var (teamId, ownerId, channelId) = await SeedTeamChannelAsync();
+        var runId = Guid.NewGuid();
+
+        using var scope = _fixture.BeginScope();
+        var handler = DecisionHandler(scope, AgentAutonomyLevel.Standard, teamId, runId, channelId);
+
+        var call = Task.Run(() => CallToolAsync(handler, new { question = "Stash check: which path?", decisionType = "choose_one", options = new[] { new { id = "a", label = "A" } }, riskLevel = "high", policy = "human_required" }));
+
+        var (ledgerId, messageId) = await WaitForPostedCardAsync(teamId, runId);
+
+        var envelopeJson = (await ReadRowAsync(ledgerId)).DecisionEnvelopeJson;
+        envelopeJson.ShouldNotBeNull("the park must stash the envelope so the queue can project the decision without reading the card");
+
+        var env = JsonSerializer.Deserialize<CodeSpace.Messages.Decisions.DecisionRequest>(envelopeJson!, new JsonSerializerOptions(JsonSerializerDefaults.Web))!;
+        env.Question.ShouldBe("Stash check: which path?");
+        env.RiskLevel.ShouldBe("high");
+        env.ResumeBackend.ShouldBe(CodeSpace.Messages.Decisions.DecisionResumeBackends.ToolLedger);
+
+        await RespondAsync(teamId, messageId, "a", ownerId);
+        await call;
     }
 
     // ─── Build the handler with the decision surface ─────────────────────────────
