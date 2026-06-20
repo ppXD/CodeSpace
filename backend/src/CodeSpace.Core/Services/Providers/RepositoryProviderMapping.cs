@@ -25,4 +25,23 @@ public static class RepositoryProviderMapping
         CloneUrlSsh = repo.CloneUrlSsh,
         Archived = repo.Archived
     };
+
+    /// <summary>
+    /// Copy live provider state onto a persisted repo row — name / path / visibility / default branch /
+    /// description / clone URLs / archived. Identity-bearing fields (Id, ExternalId, CreatedDate) are left
+    /// untouched. Shared by bind/resurrect and the read-through metadata refresh so the two can't drift.
+    /// </summary>
+    public static void ApplyRemoteMetadata(this Repository repo, RemoteRepository remote)
+    {
+        repo.NamespacePath = remote.NamespacePath;
+        repo.Name = remote.Name;
+        repo.FullPath = remote.FullPath;
+        repo.DefaultBranch = remote.DefaultBranch;
+        repo.Visibility = remote.Visibility;
+        repo.Description = remote.Description;
+        repo.WebUrl = remote.WebUrl;
+        repo.CloneUrlHttps = remote.CloneUrlHttps;
+        repo.CloneUrlSsh = remote.CloneUrlSsh;
+        repo.Archived = remote.Archived;
+    }
 }

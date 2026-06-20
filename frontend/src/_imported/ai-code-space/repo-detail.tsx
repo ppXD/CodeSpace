@@ -256,7 +256,6 @@ export function RepoDetailHeader({ repoId, activeTab, onTabChange, teamSlug, chi
             <button className="btn" onClick={() => window.open(repo.webUrl, "_blank", "noopener")}>
               <Ic.ArrowOut size={13} /> Open on {instance ? PROVIDER_LABEL[instance.provider] : "provider"}
             </button>
-            <button className="btn btn-icon"><Ic.More size={14} /></button>
           </div>
         </div>
 

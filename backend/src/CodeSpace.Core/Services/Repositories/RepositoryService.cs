@@ -2,10 +2,13 @@ using CodeSpace.Core.DependencyInjection;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Identity;
+using CodeSpace.Core.Services.Providers;
+using CodeSpace.Core.Services.Providers.Capabilities;
 using CodeSpace.Messages.Dtos.Projects;
 using CodeSpace.Messages.Dtos.Repositories;
 using CodeSpace.Messages.Enums;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging;
 
 namespace CodeSpace.Core.Services.Repositories;
 
@@ -13,11 +16,15 @@ public sealed class RepositoryService : IRepositoryService, IScopedDependency
 {
     private readonly CodeSpaceDbContext _db;
     private readonly ICurrentTeam _currentTeam;
+    private readonly IProviderRegistry _registry;
+    private readonly ILogger<RepositoryService> _logger;
 
-    public RepositoryService(CodeSpaceDbContext db, ICurrentTeam currentTeam)
+    public RepositoryService(CodeSpaceDbContext db, ICurrentTeam currentTeam, IProviderRegistry registry, ILogger<RepositoryService> logger)
     {
         _db = db;
         _currentTeam = currentTeam;
+        _registry = registry;
+        _logger = logger;
     }
 
     public async Task<IReadOnlyList<RepositorySummary>> ListAsync(Guid? providerInstanceId, Guid? projectId, CancellationToken cancellationToken)
@@ -76,6 +83,11 @@ public sealed class RepositoryService : IRepositoryService, IScopedDependency
 
     public async Task<RepositoryDetail?> GetAsync(Guid repositoryId, CancellationToken cancellationToken)
     {
+        // Read-through refresh: the stored metadata (visibility, default branch, description, archived, …)
+        // is a snapshot from bind time and drifts when the repo changes on the provider (e.g. a repo flipped
+        // private→public). Best-effort re-sync from the provider before projecting so the detail is current.
+        await RefreshMetadataBestEffortAsync(repositoryId, cancellationToken).ConfigureAwait(false);
+
         // Phase 3.1 — Repository:Project is N:M. The detail DTO surfaces every active
         // project link; the legacy ProjectId/Slug/Name fields are derived from the first
         // link (by ascending CreatedDate) so existing SPA breadcrumbs keep working until
@@ -133,6 +145,39 @@ public sealed class RepositoryService : IRepositoryService, IScopedDependency
             CreatedDate = bare.Repo.CreatedDate,
             ActiveWebhooksCount = bare.ActiveWebhooksCount,
         };
+    }
+
+    /// <summary>
+    /// Best-effort live re-sync of a repo's mirror-of-remote metadata. Loads the current repo from the
+    /// provider and applies it via the shared <see cref="RepositoryProviderMapping.ApplyRemoteMetadata"/>,
+    /// stamping <c>LastSyncedDate</c>. Any failure (unbound / missing credential / insufficient scope /
+    /// rate limit / network) is swallowed — the detail still renders from the last-known stored values
+    /// rather than erroring over a freshness refresh. Uses the repo's OWN connection credential, so it
+    /// needs no per-caller scope (membership is already enforced by the query's IRequireRepositoryAccess).
+    /// </summary>
+    private async Task RefreshMetadataBestEffortAsync(Guid repositoryId, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var repo = await _db.Repository
+                .Include(r => r.ProviderInstance)
+                .Include(r => r.Credential)
+                .SingleOrDefaultAsync(r => r.Id == repositoryId && r.DeletedDate == null, cancellationToken).ConfigureAwait(false);
+
+            if (repo?.Credential == null) return;   // unbound / no credential → nothing live to read
+
+            var catalog = _registry.Require<IRepositoryCatalogCapability>(repo.ProviderInstance.Provider);
+            var context = new ProviderContext(repo.ProviderInstance, repo.Credential);
+            var remote = await catalog.GetByExternalIdAsync(context, repo.ExternalId, cancellationToken).ConfigureAwait(false);
+
+            repo.ApplyRemoteMetadata(remote);
+            repo.LastSyncedDate = DateTimeOffset.UtcNow;
+            await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Best-effort metadata refresh failed for repository {RepositoryId}; serving stored values", repositoryId);
+        }
     }
 
     public async Task RelinkCredentialAsync(Guid repositoryId, Guid newCredentialId, CancellationToken cancellationToken)

@@ -318,29 +318,11 @@ public sealed class RepositoryBindingService : IRepositoryBindingService, IScope
         candidate.CredentialId = ctx.Credential.Id;
         candidate.Status = RepositoryStatus.Active;
         candidate.LastError = null;
-        ApplyRemoteMetadata(candidate, ctx.Remote);
+        // Resurrect refreshes mirror-of-remote fields (path/name/visibility/default branch may have
+        // drifted while unbound). Same shared mapping the read-through refresh uses, so they can't diverge.
+        candidate.ApplyRemoteMetadata(ctx.Remote);
 
         return ctx with { ExistingRepository = candidate };
-    }
-
-    /// <summary>
-    /// Refresh fields that mirror remote state. Called on resurrect because the repo's
-    /// path / name / visibility / default branch may have changed while it was unbound on
-    /// our side. Identity-bearing fields (Id, ExternalId, CreatedDate) are deliberately
-    /// untouched — that's the whole point of resurrecting instead of re-creating.
-    /// </summary>
-    private static void ApplyRemoteMetadata(Repository repo, RemoteRepository remote)
-    {
-        repo.NamespacePath = remote.NamespacePath;
-        repo.Name = remote.Name;
-        repo.FullPath = remote.FullPath;
-        repo.DefaultBranch = remote.DefaultBranch;
-        repo.Visibility = remote.Visibility;
-        repo.Description = remote.Description;
-        repo.WebUrl = remote.WebUrl;
-        repo.CloneUrlHttps = remote.CloneUrlHttps;
-        repo.CloneUrlSsh = remote.CloneUrlSsh;
-        repo.Archived = remote.Archived;
     }
 
     private static BindContext GenerateWebhookIdAndSecret(BindContext ctx)
