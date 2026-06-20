@@ -4,6 +4,7 @@ using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Agents.Benchmark;
 using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Dtos.Agents;
+using CodeSpace.Messages.Dtos.Decisions;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
 
@@ -37,6 +38,14 @@ public sealed partial class SupervisorTurnService
         var agentResultsById = rows.Any(r => SupervisorDecisionKinds.StagesAgents(r.DecisionKind))
             ? await CompactAgentResultsByIdAsync(rows, teamId, cancellationToken).ConfigureAwait(false)
             : EmptyAgentResults;
+
+        // D4c-2: the PENDING decisions this run's child agent runs are blocked on — read off the cross-grain queue for the
+        // arbiter to drain THIS turn (auto-answer or leave for a human). DB-gated on the SAME StagesAgents predicate as the
+        // agent-results fold so a no-spawn run never hits the queue read (byte-identical, single ledger read); an empty
+        // child-id set is a free no-DB return (ListPendingForAgentRunsAsync short-circuits on it).
+        var pendingChildDecisions = rows.Any(r => SupervisorDecisionKinds.StagesAgents(r.DecisionKind))
+            ? await _decisionQueue.ListPendingForAgentRunsAsync(StagedChildAgentRunIds(rows), teamId, cancellationToken).ConfigureAwait(false)
+            : EmptyPendingDecisions;
 
         // The operator's OBJECTIVE acceptance command (L4 A3) — the argv a resolve verdict is graded against. Null
         // (none / all-blank) → no objective grade runs, the resolver self-report marker stands (byte-identical to pre-A3).
@@ -91,8 +100,20 @@ public sealed partial class SupervisorTurnService
             SpawnedAgentTools = NormalizeTools(goalConfig?.AllowedTools),
             AllowedModelIds = NormalizeModelIds(goalConfig?.AllowedModelIds),
             SupervisorModelId = goalConfig?.SupervisorModelId,
+            PendingChildDecisions = pendingChildDecisions,
         };
     }
+
+    /// <summary>The shared empty pending-decision list for the common no-spawn rehydrate — keeps that path allocation-light + DB-free (the EmptyAgentResults analogue for D4c-2).</summary>
+    private static readonly IReadOnlyList<PendingDecision> EmptyPendingDecisions = Array.Empty<PendingDecision>();
+
+    /// <summary>The DISTINCT agent-run ids this run's spawn/retry/resolve decisions staged (in recorded spawn order) — the key both the agent-results fold and the pending-decision read fan out over. Lifted so the two reads share ONE id source.</summary>
+    private static List<Guid> StagedChildAgentRunIds(IReadOnlyList<Persistence.Entities.SupervisorDecisionRecord> rows) =>
+        rows
+            .Where(r => SupervisorDecisionKinds.StagesAgents(r.DecisionKind))
+            .SelectMany(r => SupervisorOutcome.ReadStagedAgentRunIds(r.OutcomeJson))
+            .Distinct()
+            .ToList();
 
     /// <summary>
     /// Sum the agents this run has spawned so far from the DURABLE ledger — every prior <c>spawn</c> / <c>retry</c>
@@ -285,11 +306,7 @@ public sealed partial class SupervisorTurnService
     /// </summary>
     private async Task<IReadOnlyDictionary<Guid, SupervisorAgentResult>> CompactAgentResultsByIdAsync(IReadOnlyList<Persistence.Entities.SupervisorDecisionRecord> rows, Guid teamId, CancellationToken cancellationToken)
     {
-        var ids = rows
-            .Where(r => SupervisorDecisionKinds.StagesAgents(r.DecisionKind))
-            .SelectMany(r => SupervisorOutcome.ReadStagedAgentRunIds(r.OutcomeJson))
-            .Distinct()
-            .ToList();
+        var ids = StagedChildAgentRunIds(rows);
 
         if (ids.Count == 0) return EmptyAgentResults;
 

@@ -3,7 +3,9 @@ using Autofac;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Agents;
+using CodeSpace.Core.Services.Decisions;
 using CodeSpace.Core.Services.Supervisor;
+using CodeSpace.Core.Services.Supervisor.Arbiter;
 using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.IntegrationTests.Workflows.Infrastructure;
 using CodeSpace.Messages.Agents;
@@ -301,6 +303,9 @@ public sealed class SupervisorAcceptanceFoldFlowTests
             scope.Resolve<ISupervisorActionExecutor>(),
             scope.Resolve<CodeSpaceDbContext>(),
             grader,
+            scope.Resolve<IDecisionQueueService>(),
+            scope.Resolve<IDecisionArbiter>(),
+            scope.Resolve<IDecisionAnswerService>(),
             scope.Resolve<ILogger<SupervisorTurnService>>());
 
         return await service.RehydrateFromDecisionLogAsync(runId, teamId, NodeId, Goal, goalConfig, CancellationToken.None);

@@ -1,6 +1,8 @@
 using CodeSpace.Core.DependencyInjection;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Services.Agents;
+using CodeSpace.Core.Services.Decisions;
+using CodeSpace.Core.Services.Supervisor.Arbiter;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Dtos.Agents;
 using Microsoft.Extensions.Logging;
@@ -19,15 +21,21 @@ public sealed partial class SupervisorTurnService : ISupervisorTurnService, ISco
     private readonly ISupervisorActionExecutor _executor;
     private readonly CodeSpaceDbContext _db;
     private readonly ISupervisorAcceptanceGrader _acceptanceGrader;
+    private readonly IDecisionQueueService _decisionQueue;
+    private readonly IDecisionArbiter _arbiter;
+    private readonly IDecisionAnswerService _decisionAnswer;
     private readonly ILogger<SupervisorTurnService> _logger;
 
-    public SupervisorTurnService(ISupervisorDecisionLog ledger, ISupervisorDecider decider, ISupervisorActionExecutor executor, CodeSpaceDbContext db, ISupervisorAcceptanceGrader acceptanceGrader, ILogger<SupervisorTurnService> logger)
+    public SupervisorTurnService(ISupervisorDecisionLog ledger, ISupervisorDecider decider, ISupervisorActionExecutor executor, CodeSpaceDbContext db, ISupervisorAcceptanceGrader acceptanceGrader, IDecisionQueueService decisionQueue, IDecisionArbiter arbiter, IDecisionAnswerService decisionAnswer, ILogger<SupervisorTurnService> logger)
     {
         _ledger = ledger;
         _decider = decider;
         _executor = executor;
         _db = db;
         _acceptanceGrader = acceptanceGrader;
+        _decisionQueue = decisionQueue;
+        _arbiter = arbiter;
+        _decisionAnswer = decisionAnswer;
         _logger = logger;
     }
 
@@ -88,11 +96,17 @@ public sealed partial class SupervisorTurnService : ISupervisorTurnService, ISco
     ///         ungated side effect.</item>
     /// </list>
     /// </summary>
-    private async Task<SupervisorDecision> ChooseDecisionAsync(SupervisorTurnContext context, SupervisorGoalPlan plan, int depth, CancellationToken cancellationToken)
+    internal async Task<SupervisorDecision> ChooseDecisionAsync(SupervisorTurnContext context, SupervisorGoalPlan plan, int depth, CancellationToken cancellationToken)
     {
         var preBound = SupervisorBounds.PreDecision(context, plan, depth);
 
         if (preBound != null) return ForcedStop(preBound);
+
+        // D4c-2: BEFORE the delivery decider, drain this run's blocked child decisions — the arbiter auto-answers the
+        // ones it is confident about (within the fail-closed floor) and leaves the rest in the cross-grain queue for a
+        // human. A pure side-channel (it resolves CHILD-grain decisions, never the supervisor's own turn), so it always
+        // falls through to the decider; skipped on a force-stopping run (it runs only past the pre-bound guard).
+        await ArbitratePendingChildDecisionsAsync(context, cancellationToken).ConfigureAwait(false);
 
         var decision = await _decider.DecideAsync(context, cancellationToken).ConfigureAwait(false);
 
