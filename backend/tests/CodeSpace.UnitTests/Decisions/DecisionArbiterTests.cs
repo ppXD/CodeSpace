@@ -67,6 +67,16 @@ public class DecisionArbiterTests
         LlmDecisionArbiter.Project(new ArbiterModelDecision { Kind = "answer", Answer = new ArbiterModelAnswer { SelectedOptions = new[] { "a" } }, Rationale = "   " })
             .Rationale.ShouldNotBeNullOrWhiteSpace();
 
+    [Fact]
+    public void A_free_text_answer_projects_its_text()
+    {
+        var verdict = LlmDecisionArbiter.Project(new ArbiterModelDecision { Kind = "answer", Answer = new ArbiterModelAnswer { FreeText = "rename to user_id" }, Rationale = "obvious, low-risk" });
+
+        verdict.IsAnswer.ShouldBeTrue();
+        verdict.FreeText.ShouldBe("rename to user_id");
+        verdict.SelectedOptions.ShouldBeEmpty();
+    }
+
     // ── Fail-closed to ESCALATE (the safe default — unlike the supervisor decider, which stops) ──
 
     [Fact]
@@ -91,6 +101,45 @@ public class DecisionArbiterTests
         var arbiter = new LlmDecisionArbiter(new FakeRegistry(structured: null), FakeSelector.WithModel());
 
         (await arbiter.DecideAsync(Decision(), TeamId, BrainModelId, "goal", CancellationToken.None)).Kind.ShouldBe(ArbiterVerdictKinds.Escalate);
+    }
+
+    [Fact]
+    public async Task A_type_mismatched_verdict_fails_closed_to_escalate()
+    {
+        // The forced-tool path doesn't hard-validate, so the model CAN emit `answer` as a string — Deserialize THROWS
+        // (it does not return null). The arbiter must catch it and escalate, never let it throw past the caller.
+        var arbiter = new LlmDecisionArbiter(new FakeRegistry(new FakeRawArbiterClient("""{"kind":"answer","answer":"oops not an object","rationale":"x"}""")), FakeSelector.WithModel());
+
+        (await arbiter.DecideAsync(Decision(), TeamId, BrainModelId, "goal", CancellationToken.None)).Kind.ShouldBe(ArbiterVerdictKinds.Escalate);
+    }
+
+    [Fact]
+    public async Task A_throwing_brain_call_fails_closed_to_escalate()
+    {
+        // A transient API / transport error (429, 500, no-tool-block) throws out of CompleteStructuredAsync — escalate, never throw.
+        var arbiter = new LlmDecisionArbiter(new FakeRegistry(new FakeThrowingArbiterClient()), FakeSelector.WithModel());
+
+        (await arbiter.DecideAsync(Decision(), TeamId, BrainModelId, "goal", CancellationToken.None)).Kind.ShouldBe(ArbiterVerdictKinds.Escalate);
+    }
+
+    [Fact]
+    public async Task A_null_verdict_fails_closed_to_escalate()
+    {
+        // The JSON literal `null` is the one shape Deserialize returns null for — the explicit "no decision" safety net.
+        var arbiter = new LlmDecisionArbiter(new FakeRegistry(new FakeRawArbiterClient("null")), FakeSelector.WithModel());
+
+        (await arbiter.DecideAsync(Decision(), TeamId, BrainModelId, "goal", CancellationToken.None)).Kind.ShouldBe(ArbiterVerdictKinds.Escalate);
+    }
+
+    [Fact]
+    public async Task Cancellation_propagates_it_is_not_swallowed_as_an_escalation()
+    {
+        // The run is being torn down — there is no human to escalate to. Cancellation must NOT degrade to a verdict.
+        using var cts = new CancellationTokenSource();
+        cts.Cancel();
+        var arbiter = new LlmDecisionArbiter(new FakeRegistry(new FakeThrowingArbiterClient(new OperationCanceledException())), FakeSelector.WithModel());
+
+        await Should.ThrowAsync<OperationCanceledException>(() => arbiter.DecideAsync(Decision(), TeamId, BrainModelId, "goal", cts.Token));
     }
 
     // ── With the brain: the arbiter calls the picked model + projects its verdict ──
@@ -118,6 +167,50 @@ public class DecisionArbiterTests
         prompt.ShouldContain("Path A", Case.Insensitive);
         prompt.ShouldContain("Recommended option: a");
         prompt.ShouldContain("Risk: low", Case.Insensitive);
+    }
+
+    [Fact]
+    public void The_prompt_marks_irreversible_options_and_folds_context_and_blocking_reason()
+    {
+        var decision = new PendingDecision
+        {
+            Id = Guid.NewGuid(),
+            Grain = DecisionResumeBackends.ToolLedger,
+            RootTraceId = Guid.NewGuid(),
+            DecisionType = DecisionTypes.ChooseOne,
+            Question = "Drop the legacy column?",
+            Options = new[] { new DecisionOption { Id = "drop", Label = "Drop it", IsSideEffecting = true }, new DecisionOption { Id = "keep", Label = "Keep it" } },
+            BlockingReason = "the column is referenced by a view",
+            ContextSummary = "12 rows still populate it",
+            RiskLevel = "high",
+            Policy = DecisionPolicies.HumanRequired,
+            CreatedAt = DateTimeOffset.UnixEpoch,
+        };
+
+        var prompt = LlmDecisionArbiter.BuildUserPromptForTest(decision, "clean up the schema");
+
+        prompt.ShouldContain("(irreversible)");
+        prompt.ShouldContain("the column is referenced by a view");
+        prompt.ShouldContain("12 rows still populate it");
+    }
+
+    [Fact]
+    public void A_free_text_decision_with_no_options_prompts_for_free_text()
+    {
+        var decision = new PendingDecision
+        {
+            Id = Guid.NewGuid(),
+            Grain = DecisionResumeBackends.ToolLedger,
+            RootTraceId = Guid.NewGuid(),
+            DecisionType = DecisionTypes.FreeText,
+            Question = "What should the table be named?",
+            Options = Array.Empty<DecisionOption>(),
+            RiskLevel = "low",
+            Policy = DecisionPolicies.SupervisorFirst,
+            CreatedAt = DateTimeOffset.UnixEpoch,
+        };
+
+        LlmDecisionArbiter.BuildUserPromptForTest(decision, "name the table").ShouldContain("free-text answer expected");
     }
 
     [Fact]
@@ -160,6 +253,36 @@ public class DecisionArbiterTests
             LastModel = request.Model;
             return Task.FromResult(new StructuredLLMCompletion { Json = JsonSerializer.SerializeToElement(_model, ArbiterDecisionSchema.Options), Model = request.Model });
         }
+    }
+
+    /// <summary>Returns a verbatim JSON payload — lets a test feed a type-mismatched or null shape the strongly-typed fake cannot emit.</summary>
+    private sealed class FakeRawArbiterClient : ILLMClient, IStructuredLLMClient
+    {
+        private readonly string _rawJson;
+        public FakeRawArbiterClient(string rawJson) => _rawJson = rawJson;
+
+        public string Provider => "TestArbiter";
+
+        public Task<LLMCompletion> CompleteAsync(LLMCompletionRequest request, CancellationToken cancellationToken) =>
+            Task.FromResult(new LLMCompletion { Text = "", Model = request.Model });
+
+        public Task<StructuredLLMCompletion> CompleteStructuredAsync(StructuredLLMCompletionRequest request, CancellationToken cancellationToken) =>
+            Task.FromResult(new StructuredLLMCompletion { Json = JsonDocument.Parse(_rawJson).RootElement.Clone(), Model = request.Model });
+    }
+
+    /// <summary>Throws from the brain call — models a transient API / transport error (429, 500, no-tool-block) or, with a cancellation, the torn-down run.</summary>
+    private sealed class FakeThrowingArbiterClient : ILLMClient, IStructuredLLMClient
+    {
+        private readonly Exception _toThrow;
+        public FakeThrowingArbiterClient(Exception? toThrow = null) => _toThrow = toThrow ?? new InvalidOperationException("brain unreachable");
+
+        public string Provider => "TestArbiter";
+
+        public Task<LLMCompletion> CompleteAsync(LLMCompletionRequest request, CancellationToken cancellationToken) =>
+            Task.FromResult(new LLMCompletion { Text = "", Model = request.Model });
+
+        public Task<StructuredLLMCompletion> CompleteStructuredAsync(StructuredLLMCompletionRequest request, CancellationToken cancellationToken) =>
+            throw _toThrow;
     }
 
     private sealed class FakeSelector : IModelPoolSelector

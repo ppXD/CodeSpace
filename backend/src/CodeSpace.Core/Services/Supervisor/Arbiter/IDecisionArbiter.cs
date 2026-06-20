@@ -43,19 +43,31 @@ public sealed class LlmDecisionArbiter : IDecisionArbiter, IScopedDependency
     {
         if (supervisorModelId is not { } brainModelId) return ArbiterVerdict.Escalate("No supervisor brain model is configured — escalated to a human.");
 
-        var pick = await _modelSelector.ResolveByRowIdAsync(teamId, brainModelId, requireStructured: true, cancellationToken).ConfigureAwait(false);
+        // The arbiter NEVER throws — its caller (the supervisor turn) relies on ALWAYS getting a verdict. Any failure of
+        // the model resolution, the brain call (a transient API error, a no-tool-block / non-2xx response), or the parse
+        // (the forced-tool path doesn't hard-validate, so a type-mismatched verdict makes Deserialize throw — not return
+        // null) means the supervisor can't responsibly decide → escalate to a human, the safe default. Cancellation still
+        // propagates (the run is being torn down — there is no human to escalate to).
+        try
+        {
+            var pick = await _modelSelector.ResolveByRowIdAsync(teamId, brainModelId, requireStructured: true, cancellationToken).ConfigureAwait(false);
 
-        if (pick == null) return ArbiterVerdict.Escalate("No structured-capable brain model is available in the team's pool — escalated to a human.");
+            if (pick == null) return ArbiterVerdict.Escalate("No structured-capable brain model is available in the team's pool — escalated to a human.");
 
-        var structured = _clientRegistry.All.OfType<IStructuredLLMClient>().FirstOrDefault(c => string.Equals(c.Provider, pick.Credential.Provider, StringComparison.OrdinalIgnoreCase));
+            var structured = _clientRegistry.All.OfType<IStructuredLLMClient>().FirstOrDefault(c => string.Equals(c.Provider, pick.Credential.Provider, StringComparison.OrdinalIgnoreCase));
 
-        if (structured == null) return ArbiterVerdict.Escalate("No structured-output provider for the brain model — escalated to a human.");
+            if (structured == null) return ArbiterVerdict.Escalate("No structured-output provider for the brain model — escalated to a human.");
 
-        var completion = await structured.CompleteStructuredAsync(BuildRequest(decision, goal, pick), cancellationToken).ConfigureAwait(false);
+            var completion = await structured.CompleteStructuredAsync(BuildRequest(decision, goal, pick), cancellationToken).ConfigureAwait(false);
 
-        var model = completion.Json.Deserialize<ArbiterModelDecision>(ArbiterDecisionSchema.Options);
+            var model = completion.Json.Deserialize<ArbiterModelDecision>(ArbiterDecisionSchema.Options);
 
-        return model is null ? ArbiterVerdict.Escalate("The arbiter returned no decision — escalated to a human.") : Project(model);
+            return model is null ? ArbiterVerdict.Escalate("The arbiter returned no decision — escalated to a human.") : Project(model);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return ArbiterVerdict.Escalate("The arbiter could not produce a valid decision — escalated to a human.");
+        }
     }
 
     private static StructuredLLMCompletionRequest BuildRequest(PendingDecision decision, string goal, ModelPoolPick pick) => new()
