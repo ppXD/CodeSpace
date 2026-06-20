@@ -53,6 +53,21 @@ public sealed record AgentRunResult
     public string? Error { get; init; }
 
     /// <summary>
+    /// Slice A completion contract: the "what happens next" overlay on <see cref="Status"/>. Defaults to
+    /// <see cref="CompletionDisposition.Completed"/> so a harness that just sets <see cref="Status"/> keeps the normal
+    /// disposition; the contract re-grades a would-be <see cref="AgentRunStatus.Succeeded"/> to
+    /// <see cref="AgentRunStatus.NeedsReview"/> and sets this to the reason a human is needed.
+    /// </summary>
+    public CompletionDisposition CompletionDisposition { get; init; } = CompletionDisposition.Completed;
+
+    /// <summary>
+    /// When <see cref="CompletionDisposition"/> is <see cref="CompletionDisposition.NeedsDecision"/>, the ledger id of the
+    /// still-unanswered <c>decision.request</c> the run raised — the handle a reviewer (or the "Needs decision" queue)
+    /// resolves. Null in every other case.
+    /// </summary>
+    public Guid? PendingDecisionId { get; init; }
+
+    /// <summary>
     /// Per-repository outcomes for a MULTI-repo workspace run (multi-repo PR3) — one entry per WRITABLE repo, each
     /// with its own changed files + produced branch + base SHA. EMPTY for a single-repo run, whose single outcome is
     /// the top-level <see cref="ChangedFiles"/>/<see cref="Patch"/>/<see cref="ProducedBranch"/>/<see cref="BaseSha"/>;

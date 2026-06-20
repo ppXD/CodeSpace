@@ -19,7 +19,9 @@ public static class EvalScorecard
 
     public static AgentRunScorecard Compute(IReadOnlyList<AgentRunOutcome> outcomes)
     {
-        var terminal = outcomes.Where(o => IsTerminal(o.Status)).ToList();
+        // The canonical terminal set (AgentRunStateMachine) — NOT a hand-rolled copy, so a new terminal (NeedsReview)
+        // is counted in the denominator the moment it exists rather than silently dropped like an in-flight run.
+        var terminal = outcomes.Where(o => AgentRunStateMachine.IsTerminal(o.Status)).ToList();
 
         var byHarness = terminal
             .GroupBy(o => o.Harness, StringComparer.Ordinal)
@@ -29,9 +31,6 @@ public static class EvalScorecard
 
         return new AgentRunScorecard { Harnesses = byHarness, Overall = Score(OverallLabel, terminal) };
     }
-
-    private static bool IsTerminal(AgentRunStatus status) =>
-        status is AgentRunStatus.Succeeded or AgentRunStatus.Failed or AgentRunStatus.Cancelled or AgentRunStatus.TimedOut;
 
     private static HarnessScore Score(string harness, IReadOnlyList<AgentRunOutcome> runs)
     {

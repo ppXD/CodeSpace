@@ -2,6 +2,7 @@ using System.Text.Json;
 using CodeSpace.Core.DependencyInjection;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
+using CodeSpace.Core.Services.Agents.Mcp;
 using CodeSpace.Core.Services.Agents.Sandbox;
 using CodeSpace.Core.Services.Jobs;
 using CodeSpace.Messages.Agents;
@@ -74,15 +75,17 @@ public sealed class AgentRunReconcilerService : IAgentRunReconcilerService, ISco
     private readonly IAgentRunCompletionNotifier _notifier;
     private readonly ICodeSpaceBackgroundJobClient _jobs;
     private readonly ISandboxRunnerRegistry _runners;
+    private readonly IToolCallLedgerService _ledger;
     private readonly ILogger<AgentRunReconcilerService> _logger;
 
-    public AgentRunReconcilerService(CodeSpaceDbContext db, IAgentRunService runs, IAgentRunCompletionNotifier notifier, ICodeSpaceBackgroundJobClient jobs, ISandboxRunnerRegistry runners, ILogger<AgentRunReconcilerService> logger)
+    public AgentRunReconcilerService(CodeSpaceDbContext db, IAgentRunService runs, IAgentRunCompletionNotifier notifier, ICodeSpaceBackgroundJobClient jobs, ISandboxRunnerRegistry runners, IToolCallLedgerService ledger, ILogger<AgentRunReconcilerService> logger)
     {
         _db = db;
         _runs = runs;
         _notifier = notifier;
         _jobs = jobs;
         _runners = runners;
+        _ledger = ledger;
         _logger = logger;
     }
 
@@ -289,9 +292,20 @@ public sealed class AgentRunReconcilerService : IAgentRunReconcilerService, ISco
     /// </summary>
     private async Task<StaleOutcome> RecoverFromSpoolAsync(Guid runId, int exitCode, CancellationToken cancellationToken)
     {
-        var status = exitCode == 0 ? AgentRunStatus.Succeeded : AgentRunStatus.Failed;
-        var error = status == AgentRunStatus.Failed ? $"{RecoveredError} The agent exited with code {exitCode}." : null;
-        var resultJson = JsonSerializer.Serialize(new AgentRunResult { Status = status, ExitReason = "recovered-from-spool", Error = error }, AgentJson.Options);
+        var result = new AgentRunResult { Status = exitCode == 0 ? AgentRunStatus.Succeeded : AgentRunStatus.Failed, ExitReason = "recovered-from-spool", Error = exitCode == 0 ? null : $"{RecoveredError} The agent exited with code {exitCode}." };
+
+        // Completion contract (Slice A1): even on this crash-recovery path, a clean exit can't be called Succeeded while a
+        // decision the run raised is still unanswered — re-grade to NeedsReview(NeedsDecision) so the invariant holds here
+        // too, mirroring AgentRunService.CompleteCoreAsync. Only a would-be Succeeded needs the lookup.
+        if (result.Status == AgentRunStatus.Succeeded)
+        {
+            var pendingDecisionId = await _ledger.FindBlockingDecisionIdAsync(runId, cancellationToken).ConfigureAwait(false);
+            result = AgentCompletionContract.ApplyPendingDecision(result, pendingDecisionId);
+        }
+
+        var status = result.Status;
+        var error = result.Error;
+        var resultJson = JsonSerializer.Serialize(result, AgentJson.Options);
 
         var transitioned = await _db.AgentRun
             .Where(r => r.Id == runId && r.Status == AgentRunStatus.Running)
@@ -304,7 +318,12 @@ public sealed class AgentRunReconcilerService : IAgentRunReconcilerService, ISco
 
         if (transitioned == 0) return StaleOutcome.LeftAlone;   // a worker (or another replica) landed it first
 
-        var kind = status == AgentRunStatus.Succeeded ? AgentEventKind.Completed : AgentEventKind.Error;
+        var kind = status switch
+        {
+            AgentRunStatus.Succeeded => AgentEventKind.Completed,
+            AgentRunStatus.NeedsReview => AgentEventKind.Warning,   // recovered clean, but a raised decision is still unanswered — needs a human
+            _ => AgentEventKind.Error,
+        };
         await TryAppendEventAsync(runId, kind, $"{RecoveredError} (exit {exitCode})", cancellationToken).ConfigureAwait(false);
 
         _logger.LogInformation("AgentRunReconciler: recovered agent run {RunId} from its durable spool as {Status} (exit {Exit})", runId, status, exitCode);

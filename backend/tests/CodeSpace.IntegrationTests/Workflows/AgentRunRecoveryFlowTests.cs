@@ -8,6 +8,8 @@ using CodeSpace.Core.Services.Agents.Sandbox;
 using CodeSpace.Core.Services.Agents.Sandbox.Runners;
 using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.Messages.Agents;
+using CodeSpace.Messages.Constants;
+using CodeSpace.Messages.Decisions;
 using CodeSpace.Messages.Enums;
 using Microsoft.EntityFrameworkCore;
 using Shouldly;
@@ -126,6 +128,37 @@ public class AgentRunRecoveryFlowTests : IDisposable
     }
 
     [Fact]
+    public async Task Durable_run_finished_unobserved_with_an_unanswered_decision_is_recovered_as_needs_review()
+    {
+        // Slice A1 completion contract on the CRASH-RECOVERY path: even when the reconciler salvages a run from its
+        // exit-0 spool marker (it finished cleanly while unobserved), a decision it raised that's still unanswered
+        // means it can't be called Succeeded — it's recovered as NeedsReview, mirroring AgentRunService.CompleteAsync,
+        // so the invariant holds on BOTH terminal write paths.
+        if (OperatingSystem.IsWindows()) return;
+
+        var teamId = await SeedTeamAsync();
+        var runId = await SeedDurableRunAsync(teamId, processId: DeadPid(), exitCode: 0);
+        var decisionId = await SeedPendingDecisionAsync(teamId, runId);
+
+        AgentRunReconcileSummary summary;
+        using (var scope = _fixture.BeginScope())
+            summary = await scope.Resolve<IAgentRunReconcilerService>().ReconcileAsync(CancellationToken.None);
+
+        summary.RecoveredFromSpool.ShouldBeGreaterThanOrEqualTo(1, "the exit-0 marker still drives a spool recovery");
+
+        using var verify = _fixture.BeginScope();
+        var db = verify.Resolve<CodeSpaceDbContext>();
+        var run = await db.AgentRun.AsNoTracking().SingleAsync(r => r.Id == runId);
+
+        run.Status.ShouldBe(AgentRunStatus.NeedsReview, "a clean exit can't bury an unanswered decision even on the recovery path");
+        var stored = JsonSerializer.Deserialize<AgentRunResult>(run.ResultJson!, AgentJson.Options)!;
+        stored.CompletionDisposition.ShouldBe(CompletionDisposition.NeedsDecision);
+        stored.PendingDecisionId.ShouldBe(decisionId);
+        (await db.AgentRunEvent.AsNoTracking().AnyAsync(e => e.AgentRunId == runId && e.Kind == AgentEventKind.Warning))
+            .ShouldBeTrue("the recovered NeedsReview is recorded as a Warning, not a Completed/Error event");
+    }
+
+    [Fact]
     public async Task Durable_run_that_failed_unobserved_is_recovered_as_failed_with_the_exit_code()
     {
         if (OperatingSystem.IsWindows()) return;
@@ -234,6 +267,24 @@ public class AgentRunRecoveryFlowTests : IDisposable
         using var verify = _fixture.BeginScope();
         (await verify.Resolve<CodeSpaceDbContext>().AgentRun.AsNoTracking().SingleAsync(r => r.Id == runId)).Status
             .ShouldBe(AgentRunStatus.Running, "a valid lease (a live worker) protects the run despite a stale heartbeat");
+    }
+
+    /// <summary>Plant an unanswered agent-grain decision (an AwaitingApproval <c>decision.request</c> ledger row) for a run — what the completion contract checks at recovery.</summary>
+    private async Task<Guid> SeedPendingDecisionAsync(Guid teamId, Guid runId)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+
+        var id = Guid.NewGuid();
+        db.ToolCallLedger.Add(new ToolCallLedger
+        {
+            Id = id, TeamId = teamId, AgentRunId = runId, ToolKind = DecisionToolKinds.DecisionRequest,
+            IdempotencyKey = $"decision.request:{id:N}", InputHash = new string('0', 64), Status = ToolCallLedgerStatus.AwaitingApproval,
+            CreatedBy = SystemUsers.SeederId, LastModifiedBy = SystemUsers.SeederId,
+        });
+
+        await db.SaveChangesAsync();
+        return id;
     }
 
     /// <summary>Seed a stale (20-min) Running run carrying a durable handle that points at a spool dir with an optional exit marker — the post-crash state the reconciler probes.</summary>

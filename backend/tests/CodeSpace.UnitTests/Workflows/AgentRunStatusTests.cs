@@ -11,8 +11,9 @@ public class AgentRunStatusTests
     {
         // Pinned: the durable AgentRun lifecycle vocabulary. Removing a value is a breaking change
         // (orphans persisted rows whose status string no longer maps). Adding one is fine.
+        // NeedsReview is the Slice A completion-contract terminal (a would-be success a human must resolve).
         Enum.GetNames<AgentRunStatus>().ShouldBe(
-            new[] { "Queued", "Running", "Succeeded", "Failed", "Cancelled", "TimedOut" },
+            new[] { "Queued", "Running", "Succeeded", "Failed", "Cancelled", "TimedOut", "NeedsReview" },
             ignoreOrder: true);
     }
 }

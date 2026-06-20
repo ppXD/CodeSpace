@@ -95,6 +95,16 @@ public interface IToolCallLedgerService
     /// <summary>Count a run's OTHER pending agent-grain decisions — the AwaitingApproval <c>decision.request</c> rows for <paramref name="agentRunId"/> whose idempotency key is NOT <paramref name="excludeIdempotencyKey"/> (Decision substrate D5c per-run cap). Excluding the key being raised keeps a re-issue of an already-pending decision exempt (it replays, AC1). NOT try/caught — a fault propagates so an over-cap check under DB stress fails closed.</summary>
     Task<int> CountPendingDecisionsAsync(Guid agentRunId, Guid teamId, string excludeIdempotencyKey, CancellationToken cancellationToken);
 
+    /// <summary>
+    /// The oldest decision this run raised that is still UNANSWERED — a <c>decision.request</c> row for
+    /// <paramref name="agentRunId"/> in <see cref="ToolCallLedgerStatus.Pending"/> / <see cref="ToolCallLedgerStatus.AwaitingApproval"/>
+    /// (answered decisions are <see cref="ToolCallLedgerStatus.Succeeded"/>) — or null when none is outstanding. The completion
+    /// contract's input (<c>AgentCompletionContract.ApplyPendingDecision</c>): a run with one of these can't land Succeeded.
+    /// Scoped by <paramref name="agentRunId"/> ALONE — it is globally unique, so a run's decisions are uniquely scoped and the
+    /// reconciler (which lacks the team id) can call it too (same reasoning as <c>ReadExistingClaimAsync</c>).
+    /// </summary>
+    Task<Guid?> FindBlockingDecisionIdAsync(Guid agentRunId, CancellationToken cancellationToken);
+
     /// <summary>Team-scoped audit read of a run's ledger rows, newest first (like <see cref="AgentRunService"/>.GetEventsAsync — a foreign run id returns empty).</summary>
     Task<IReadOnlyList<ToolCallLedger>> GetForRunAsync(Guid agentRunId, Guid teamId, CancellationToken cancellationToken);
 }
@@ -441,6 +451,14 @@ public sealed class ToolCallLedgerService : IToolCallLedgerService, IScopedDepen
             .Where(l => l.AgentRunId == agentRunId && l.TeamId == teamId && l.ToolKind == DecisionToolKinds.DecisionRequest
                 && l.Status == ToolCallLedgerStatus.AwaitingApproval && l.ApprovedAt == null && l.IdempotencyKey != excludeIdempotencyKey)
             .CountAsync(cancellationToken).ConfigureAwait(false);
+
+    public async Task<Guid?> FindBlockingDecisionIdAsync(Guid agentRunId, CancellationToken cancellationToken) =>
+        await _db.ToolCallLedger.AsNoTracking()
+            .Where(l => l.AgentRunId == agentRunId && l.ToolKind == DecisionToolKinds.DecisionRequest
+                && (l.Status == ToolCallLedgerStatus.Pending || l.Status == ToolCallLedgerStatus.AwaitingApproval) && l.ApprovedAt == null)
+            .OrderBy(l => l.CreatedDate)
+            .Select(l => (Guid?)l.Id)
+            .FirstOrDefaultAsync(cancellationToken).ConfigureAwait(false);
 
     public async Task<IReadOnlyList<ToolCallLedger>> GetForRunAsync(Guid agentRunId, Guid teamId, CancellationToken cancellationToken) =>
         await _db.ToolCallLedger.AsNoTracking()

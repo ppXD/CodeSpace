@@ -48,6 +48,23 @@ public class EvalScorecardTests
     }
 
     [Fact]
+    public void Needs_review_counts_as_a_terminal_non_success_not_an_in_flight_drop()
+    {
+        // Slice A1: NeedsReview (a would-be success re-graded because a decision was left unanswered) is a TERMINAL
+        // status, so it counts in the denominator like Failed — NOT excluded like Queued/Running. Dropping it would
+        // inflate the success rate and hide the unanswered-decision failure surface.
+        var card = EvalScorecard.Compute(new[]
+        {
+            Run("h", AgentRunStatus.Succeeded), Run("h", AgentRunStatus.Succeeded),
+            Run("h", AgentRunStatus.NeedsReview),
+        });
+
+        card.Overall.Total.ShouldBe(3, "NeedsReview is terminal — counted in the denominator, not dropped like an in-flight run");
+        card.Overall.Succeeded.ShouldBe(2, "NeedsReview is not a success");
+        card.Overall.SuccessRate.ShouldBe(2.0 / 3.0, 1e-9);
+    }
+
+    [Fact]
     public void Success_rate_counts_only_succeeded_against_all_terminal_runs()
     {
         var card = EvalScorecard.Compute(new[]

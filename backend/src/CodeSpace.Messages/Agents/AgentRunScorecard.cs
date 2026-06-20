@@ -20,7 +20,7 @@ public sealed record HarnessScore
 {
     public required string Harness { get; init; }
 
-    /// <summary>Terminal runs scored (Succeeded / Failed / Cancelled / TimedOut). In-flight runs are not counted.</summary>
+    /// <summary>Terminal runs scored (every terminal status — including NeedsReview, the unanswered-decision re-grade). In-flight (Queued / Running) runs are not counted.</summary>
     public required int Total { get; init; }
     public required int Succeeded { get; init; }
 

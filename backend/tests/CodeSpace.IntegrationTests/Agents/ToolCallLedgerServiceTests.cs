@@ -5,6 +5,8 @@ using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Agents.Mcp;
 using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.Messages.Agents;
+using CodeSpace.Messages.Constants;
+using CodeSpace.Messages.Decisions;
 using CodeSpace.Messages.Enums;
 using Shouldly;
 
@@ -191,6 +193,61 @@ public class ToolCallLedgerServiceTests
 
         using var verify = _fixture.BeginScope();
         (await Svc(verify).GetForRunAsync(runId, teamId, CancellationToken.None)).Count.ShouldBe(2, "two distinct keys → two rows");
+    }
+
+    [Fact]
+    public async Task FindBlockingDecisionId_returns_the_oldest_unanswered_decision_excluding_answered_approved_and_non_decision_rows()
+    {
+        // Pins the completion-contract discriminator directly over Postgres (the gate tests only ever exercise it at
+        // N=1): with several rows on one run, FindBlockingDecisionIdAsync returns the OLDEST still-unanswered
+        // decision.request (by CreatedDate) — both unanswered statuses (Pending + AwaitingApproval) qualify — while an
+        // ANSWERED (Succeeded) decision, an ApprovedAt-stamped row, and a non-decision approval (git.open_pr) are all
+        // excluded. Distinct explicit CreatedDates make the ordering deterministic (the auditor preserves a set value).
+        var teamId = await SeedTeamAsync();
+        var runId = Guid.NewGuid();
+
+        var t0 = DateTimeOffset.UtcNow.AddMinutes(-10);
+        var oldestUnanswered = Guid.NewGuid();
+        var newerUnanswered = Guid.NewGuid();
+
+        await SeedDecisionRowAsync(teamId, runId, Guid.NewGuid(), ToolCallLedgerStatus.Succeeded, t0.AddMinutes(-5));                                  // answered → excluded
+        await SeedDecisionRowAsync(teamId, runId, Guid.NewGuid(), ToolCallLedgerStatus.AwaitingApproval, t0.AddMinutes(-4), approvedAt: t0);            // ApprovedAt set → excluded
+        await SeedDecisionRowAsync(teamId, runId, Guid.NewGuid(), ToolCallLedgerStatus.AwaitingApproval, t0.AddMinutes(-3), toolKind: "git.open_pr");  // not a decision → excluded
+        await SeedDecisionRowAsync(teamId, runId, oldestUnanswered, ToolCallLedgerStatus.Pending, t0.AddMinutes(1));                                   // unanswered (Pending) → the oldest candidate
+        await SeedDecisionRowAsync(teamId, runId, newerUnanswered, ToolCallLedgerStatus.AwaitingApproval, t0.AddMinutes(2));                           // unanswered (AwaitingApproval), newer
+
+        using var scope = _fixture.BeginScope();
+        (await Svc(scope).FindBlockingDecisionIdAsync(runId, CancellationToken.None))
+            .ShouldBe(oldestUnanswered, "the OLDEST unanswered decision.request is returned; answered / approved / non-decision rows are excluded");
+    }
+
+    [Fact]
+    public async Task FindBlockingDecisionId_returns_null_when_no_decision_is_outstanding()
+    {
+        var teamId = await SeedTeamAsync();
+        var runId = Guid.NewGuid();
+
+        await SeedDecisionRowAsync(teamId, runId, Guid.NewGuid(), ToolCallLedgerStatus.Succeeded, DateTimeOffset.UtcNow);                              // answered decision
+        await SeedDecisionRowAsync(teamId, runId, Guid.NewGuid(), ToolCallLedgerStatus.AwaitingApproval, DateTimeOffset.UtcNow, toolKind: "git.open_pr");  // a pending side-effecting approval, not a decision
+
+        using var scope = _fixture.BeginScope();
+        (await Svc(scope).FindBlockingDecisionIdAsync(runId, CancellationToken.None))
+            .ShouldBeNull("no unanswered decision.request → nothing blocks a clean completion");
+    }
+
+    private async Task SeedDecisionRowAsync(Guid teamId, Guid runId, Guid id, ToolCallLedgerStatus status, DateTimeOffset createdDate, string toolKind = DecisionToolKinds.DecisionRequest, DateTimeOffset? approvedAt = null)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+
+        db.ToolCallLedger.Add(new ToolCallLedger
+        {
+            Id = id, TeamId = teamId, AgentRunId = runId, ToolKind = toolKind,
+            IdempotencyKey = $"{toolKind}:{id:N}", InputHash = InputHash, Status = status, ApprovedAt = approvedAt,
+            CreatedDate = createdDate, LastModifiedDate = createdDate, CreatedBy = SystemUsers.SeederId, LastModifiedBy = SystemUsers.SeederId,
+        });
+
+        await db.SaveChangesAsync();
     }
 
     private static IToolCallLedgerService Svc(ILifetimeScope scope) => scope.Resolve<IToolCallLedgerService>();

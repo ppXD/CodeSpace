@@ -6,6 +6,8 @@ using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Workflows.Artifacts;
 using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.Messages.Agents;
+using CodeSpace.Messages.Constants;
+using CodeSpace.Messages.Decisions;
 using CodeSpace.Messages.Enums;
 using Microsoft.EntityFrameworkCore;
 using Shouldly;
@@ -1130,6 +1132,203 @@ public class AgentRunServiceTests
             svc.CreateAsync(BuildTask(), teamC, null, null, iterationKey: "", cancellationToken: CancellationToken.None));
 
         ex.Message.ShouldContain(AdmissionController.MaxInflightGlobalEnvVar, customMessage: "the global gate, not the per-team gate, is the binding limit here");
+    }
+
+    // ─── Completion contract (Slice A1): no run lands Succeeded while a decision it raised is unanswered ─────────
+
+    [Theory]
+    [InlineData(ToolCallLedgerStatus.AwaitingApproval)]   // parked, waiting for an answer — the common case
+    [InlineData(ToolCallLedgerStatus.Pending)]            // claimed but not yet parked (a crash stranded it before the park CAS) — still unanswered, so it must still block a clean success
+    public async Task Completing_a_run_with_an_unanswered_decision_re_grades_to_needs_review(ToolCallLedgerStatus decisionStatus)
+    {
+        // The core invariant: a would-be Succeeded run that left a decision.request unanswered is re-graded to
+        // NeedsReview(NeedsDecision) carrying the decision id — the ask isn't buried under "success", and the captured
+        // work (the summary) is preserved for a reviewer. BOTH unanswered statuses (Pending + AwaitingApproval) block,
+        // pinning each half of FindBlockingDecisionIdAsync's status predicate.
+        var teamId = await SeedTeamAsync();
+
+        Guid runId;
+        using (var scope = _fixture.BeginScope())
+        {
+            var svc = scope.Resolve<IAgentRunService>();
+            runId = (await svc.CreateAsync(BuildTask(), teamId, null, null, iterationKey: "", cancellationToken: CancellationToken.None)).Id;
+            await svc.MarkRunningAsync(runId, CancellationToken.None);
+        }
+
+        var decisionId = await SeedLedgerRowAsync(teamId, runId, decisionStatus, DecisionToolKinds.DecisionRequest);
+
+        using (var scope = _fixture.BeginScope())
+            await scope.Resolve<IAgentRunService>().CompleteAsync(runId,
+                new AgentRunResult { Status = AgentRunStatus.Succeeded, ExitReason = "completed", Summary = "did the work" }, CancellationToken.None);
+
+        using (var scope = _fixture.BeginScope())
+        {
+            var run = await scope.Resolve<IAgentRunService>().GetAsync(runId, CancellationToken.None);
+            run.Status.ShouldBe(AgentRunStatus.NeedsReview, "a would-be success with a pending decision is re-graded — never silently Succeeded");
+
+            var stored = JsonSerializer.Deserialize<AgentRunResult>(run.ResultJson!, AgentJson.Options)!;
+            stored.Status.ShouldBe(AgentRunStatus.NeedsReview);
+            stored.CompletionDisposition.ShouldBe(CompletionDisposition.NeedsDecision);
+            stored.PendingDecisionId.ShouldBe(decisionId, "the result carries the unanswered decision's id for a reviewer / the queue to resolve");
+            stored.Summary.ShouldBe("did the work", "the captured work is preserved — only the verdict changed");
+        }
+    }
+
+    [Fact]
+    public async Task Completing_a_run_with_no_pending_decision_stays_a_clean_success()
+    {
+        var teamId = await SeedTeamAsync();
+
+        Guid runId;
+        using (var scope = _fixture.BeginScope())
+        {
+            var svc = scope.Resolve<IAgentRunService>();
+            runId = (await svc.CreateAsync(BuildTask(), teamId, null, null, iterationKey: "", cancellationToken: CancellationToken.None)).Id;
+            await svc.MarkRunningAsync(runId, CancellationToken.None);
+        }
+
+        using (var scope = _fixture.BeginScope())
+            await scope.Resolve<IAgentRunService>().CompleteAsync(runId,
+                new AgentRunResult { Status = AgentRunStatus.Succeeded, ExitReason = "completed" }, CancellationToken.None);
+
+        using (var scope = _fixture.BeginScope())
+        {
+            var run = await scope.Resolve<IAgentRunService>().GetAsync(runId, CancellationToken.None);
+            run.Status.ShouldBe(AgentRunStatus.Succeeded);
+
+            var stored = JsonSerializer.Deserialize<AgentRunResult>(run.ResultJson!, AgentJson.Options)!;
+            stored.CompletionDisposition.ShouldBe(CompletionDisposition.Completed, "a clean success carries the Completed disposition");
+            stored.PendingDecisionId.ShouldBeNull();
+        }
+    }
+
+    [Fact]
+    public async Task Completing_a_run_whose_decision_was_already_answered_stays_a_clean_success()
+    {
+        // Precision: the gate fires ONLY on an UNANSWERED decision. An answered one (its row flipped to Succeeded) is
+        // no longer outstanding, so the run lands a clean Succeeded.
+        var teamId = await SeedTeamAsync();
+
+        Guid runId;
+        using (var scope = _fixture.BeginScope())
+        {
+            var svc = scope.Resolve<IAgentRunService>();
+            runId = (await svc.CreateAsync(BuildTask(), teamId, null, null, iterationKey: "", cancellationToken: CancellationToken.None)).Id;
+            await svc.MarkRunningAsync(runId, CancellationToken.None);
+        }
+
+        await SeedLedgerRowAsync(teamId, runId, ToolCallLedgerStatus.Succeeded, DecisionToolKinds.DecisionRequest);   // answered
+
+        using (var scope = _fixture.BeginScope())
+            await scope.Resolve<IAgentRunService>().CompleteAsync(runId,
+                new AgentRunResult { Status = AgentRunStatus.Succeeded, ExitReason = "completed" }, CancellationToken.None);
+
+        using (var scope = _fixture.BeginScope())
+            (await scope.Resolve<IAgentRunService>().GetAsync(runId, CancellationToken.None)).Status
+                .ShouldBe(AgentRunStatus.Succeeded, "an answered decision is not outstanding — the run succeeds cleanly");
+    }
+
+    [Fact]
+    public async Task Completing_a_run_with_only_a_pending_side_effecting_approval_stays_succeeded()
+    {
+        // Precision: the completion contract is DECISION-specific. A pending side-effecting approval row (git.open_pr —
+        // the approve_action gate's concern) is NOT a decision.request, so it does not re-grade the run to NeedsReview.
+        var teamId = await SeedTeamAsync();
+
+        Guid runId;
+        using (var scope = _fixture.BeginScope())
+        {
+            var svc = scope.Resolve<IAgentRunService>();
+            runId = (await svc.CreateAsync(BuildTask(), teamId, null, null, iterationKey: "", cancellationToken: CancellationToken.None)).Id;
+            await svc.MarkRunningAsync(runId, CancellationToken.None);
+        }
+
+        await SeedLedgerRowAsync(teamId, runId, ToolCallLedgerStatus.AwaitingApproval, "git.open_pr");
+
+        using (var scope = _fixture.BeginScope())
+            await scope.Resolve<IAgentRunService>().CompleteAsync(runId,
+                new AgentRunResult { Status = AgentRunStatus.Succeeded, ExitReason = "completed" }, CancellationToken.None);
+
+        using (var scope = _fixture.BeginScope())
+            (await scope.Resolve<IAgentRunService>().GetAsync(runId, CancellationToken.None)).Status
+                .ShouldBe(AgentRunStatus.Succeeded, "a pending approval is not a decision — the completion contract leaves it alone");
+    }
+
+    [Fact]
+    public async Task Completing_a_failed_run_with_a_pending_decision_stays_failed()
+    {
+        // The gate re-grades ONLY a would-be success. A genuinely Failed run with a leftover pending decision stays
+        // Failed — its status is already the final word.
+        var teamId = await SeedTeamAsync();
+
+        Guid runId;
+        using (var scope = _fixture.BeginScope())
+        {
+            var svc = scope.Resolve<IAgentRunService>();
+            runId = (await svc.CreateAsync(BuildTask(), teamId, null, null, iterationKey: "", cancellationToken: CancellationToken.None)).Id;
+            await svc.MarkRunningAsync(runId, CancellationToken.None);
+        }
+
+        await SeedLedgerRowAsync(teamId, runId, ToolCallLedgerStatus.AwaitingApproval, DecisionToolKinds.DecisionRequest);
+
+        using (var scope = _fixture.BeginScope())
+            await scope.Resolve<IAgentRunService>().CompleteAsync(runId,
+                new AgentRunResult { Status = AgentRunStatus.Failed, ExitReason = "non-zero-exit", Error = "boom" }, CancellationToken.None);
+
+        using (var scope = _fixture.BeginScope())
+            (await scope.Resolve<IAgentRunService>().GetAsync(runId, CancellationToken.None)).Status
+                .ShouldBe(AgentRunStatus.Failed, "the contract re-grades only a would-be success, never a failure");
+    }
+
+    [Fact]
+    public async Task Completing_a_run_with_an_answered_and_an_unanswered_decision_re_grades_to_the_unanswered_one()
+    {
+        // A run can raise several decisions over its life. An ANSWERED sibling must neither suppress the re-grade nor
+        // leak its own id — the run lands NeedsReview carrying the STILL-unanswered decision's id (not the answered one).
+        var teamId = await SeedTeamAsync();
+
+        Guid runId;
+        using (var scope = _fixture.BeginScope())
+        {
+            var svc = scope.Resolve<IAgentRunService>();
+            runId = (await svc.CreateAsync(BuildTask(), teamId, null, null, iterationKey: "", cancellationToken: CancellationToken.None)).Id;
+            await svc.MarkRunningAsync(runId, CancellationToken.None);
+        }
+
+        await SeedLedgerRowAsync(teamId, runId, ToolCallLedgerStatus.Succeeded, DecisionToolKinds.DecisionRequest);                       // an earlier decision, already answered
+        var unansweredId = await SeedLedgerRowAsync(teamId, runId, ToolCallLedgerStatus.AwaitingApproval, DecisionToolKinds.DecisionRequest);   // still open
+
+        using (var scope = _fixture.BeginScope())
+            await scope.Resolve<IAgentRunService>().CompleteAsync(runId,
+                new AgentRunResult { Status = AgentRunStatus.Succeeded, ExitReason = "completed" }, CancellationToken.None);
+
+        using (var scope = _fixture.BeginScope())
+        {
+            var run = await scope.Resolve<IAgentRunService>().GetAsync(runId, CancellationToken.None);
+            run.Status.ShouldBe(AgentRunStatus.NeedsReview, "an answered sibling must not let the run succeed while another decision is open");
+            JsonSerializer.Deserialize<AgentRunResult>(run.ResultJson!, AgentJson.Options)!.PendingDecisionId
+                .ShouldBe(unansweredId, "the re-grade carries the UNANSWERED decision's id, never the answered sibling's");
+        }
+    }
+
+    private const string ZeroHash = "0000000000000000000000000000000000000000000000000000000000000000";
+
+    /// <summary>Plant a ledger row for a run directly (bypassing the MCP park path) so the completion gate sees a real decision.request / approval row in the given state.</summary>
+    private async Task<Guid> SeedLedgerRowAsync(Guid teamId, Guid runId, ToolCallLedgerStatus status, string toolKind)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+
+        var id = Guid.NewGuid();
+        db.ToolCallLedger.Add(new ToolCallLedger
+        {
+            Id = id, TeamId = teamId, AgentRunId = runId, ToolKind = toolKind,
+            IdempotencyKey = $"{toolKind}:{id:N}", InputHash = ZeroHash, Status = status,
+            CreatedBy = SystemUsers.SeederId, LastModifiedBy = SystemUsers.SeederId,
+        });
+
+        await db.SaveChangesAsync();
+        return id;
     }
 
     // ─── Admission helpers ──────────────────────────────────────────────────────
