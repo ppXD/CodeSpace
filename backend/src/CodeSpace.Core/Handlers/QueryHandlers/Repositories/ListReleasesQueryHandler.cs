@@ -1,4 +1,4 @@
-using CodeSpace.Core.Services.Releases;
+using CodeSpace.Core.Services.ReleaseCatalog;
 using CodeSpace.Messages.Dtos.Providers;
 using CodeSpace.Messages.Queries.Repositories;
 using MediatR;

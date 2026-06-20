@@ -3,7 +3,7 @@ using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Credentials;
 using CodeSpace.Core.Services.Issues;
-using CodeSpace.Core.Services.Releases;
+using CodeSpace.Core.Services.ReleaseCatalog;
 using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.Messages.Credentials;
 using CodeSpace.Messages.Enums;
