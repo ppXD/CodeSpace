@@ -421,16 +421,16 @@ public sealed class McpRequestHandler : IMcpRequestHandler
     /// </summary>
     private async Task<JsonElement> RunDecisionFlowAsync(IAgentTool tool, JsonElement arguments, CancellationToken cancellationToken)
     {
-        if (!HasDecisionSurface()) return ToolResult(isError: true, "This run has no decision surface configured; a decision cannot be raised here.");
+        // A decision can ALWAYS be raised when the durable substrate is present (governance + ledger + waiter + team) — its
+        // CORE answer surface is the durable ledger row + the team-wide "Needs decision" queue, NOT a chat conversation. A
+        // chat card is OPTIONAL notification (posted only when a conversation is configured + team-owned, in ParkDecisionAsync).
+        // So a plain agent.code / workflow / supervisor-spawn run with NO conversation still parks a real, queue-answerable
+        // decision — never a flat refusal. This decouples "can ask" from "has a chat surface" (the generic ask-human spine).
+        if (!CanRaiseDecision()) return ToolResult(isError: true, "This run cannot raise a decision — decision governance is not enabled here.");
 
         var validation = tool.ValidateInput(arguments);
 
         if (!validation.IsValid) return ToolResult(isError: true, validation.Error ?? "Invalid decision input.");
-
-        // Tenancy: the card posts into the run's approval conversation — verify it belongs to the run's team (the
-        // conversation id is unvalidated node config; mirrors CanServeApprovalAsync). A foreign id → fail-closed.
-        if (!await _bot!.ConversationBelongsToTeamAsync(_approvalConversationId!.Value, _teamId!.Value, cancellationToken).ConfigureAwait(false))
-            return ToolResult(isError: true, "This run has no decision surface configured; a decision cannot be raised here.");
 
         var teamId = _teamId!.Value;
 
@@ -456,10 +456,13 @@ public sealed class McpRequestHandler : IMcpRequestHandler
         };
     }
 
-    /// <summary>Every collaborator the decision flow needs is present (governance + ledger + card-post + waiter + component registry + an approval conversation + a team). ANY missing piece → fail-closed (no DB read, no card, the flat refusal).</summary>
-    private bool HasDecisionSurface() =>
-        _governanceEnabled && _ledger is not null && _bot is not null && _waiters is not null && _components is not null
-        && _approvalConversationId is not null && _teamId is not null;
+    /// <summary>The CORE requirements to raise + park + block on a decision: the durable ledger (the row + the cross-grain "Needs decision" queue, which IS the answer surface), the in-process waiter (the block fast-path), the team (tenancy), behind the governance flag. A chat conversation is deliberately NOT required — a card is optional notification (see <see cref="HasDecisionCardSurface"/>), so every run shape (plain agent / workflow / supervisor-spawn) inherits ask-human.</summary>
+    private bool CanRaiseDecision() =>
+        _governanceEnabled && _ledger is not null && _waiters is not null && _teamId is not null;
+
+    /// <summary>Whether a chat decision-card can ALSO be posted as a notification — only when the bot + component registry + an approval conversation are all configured. A run without these still parks a queue-answerable decision; the card is a convenience surface, never a gate on raising.</summary>
+    private bool HasDecisionCardSurface() =>
+        _bot is not null && _components is not null && _approvalConversationId is not null;
 
     /// <summary>
     /// A FRESH decision claim's park: CAS Pending → AwaitingApproval (stamping token + the bounded deadline), post the
@@ -482,9 +485,15 @@ public sealed class McpRequestHandler : IMcpRequestHandler
         // wait-payload stash). Redacted here because the queue is another human surface — same invariant the card upholds.
         await _ledger.SetDecisionEnvelopeAsync(ledgerId, teamId, _redactor.Redact(JsonSerializer.Serialize(request, AgentJson.Options)), cancellationToken).ConfigureAwait(false);
 
-        var messageId = await PostDecisionCardAsync(request, token, cancellationToken).ConfigureAwait(false);
+        // OPTIONAL notification: ALSO post a chat decision-card when (and only when) a conversation surface is configured AND
+        // belongs to the run's team. A foreign / absent conversation skips the card (never a cross-tenant leak, never a flat
+        // refusal) — the decision is already durably parked + queue-answerable above, so the card just mirrors it for chat answerers.
+        if (await ShouldPostDecisionCardAsync(teamId, cancellationToken).ConfigureAwait(false))
+        {
+            var messageId = await PostDecisionCardAsync(request, token, cancellationToken).ConfigureAwait(false);
 
-        await _ledger.SetApprovalMessageAsync(ledgerId, teamId, messageId, cancellationToken).ConfigureAwait(false);
+            await _ledger.SetApprovalMessageAsync(ledgerId, teamId, messageId, cancellationToken).ConfigureAwait(false);
+        }
 
         return await BlockForDecisionAnswerAsync(teamId, ledgerId, cancellationToken).ConfigureAwait(false);
     }
@@ -625,6 +634,10 @@ public sealed class McpRequestHandler : IMcpRequestHandler
         && (s.ValueKind == JsonValueKind.True || (s.ValueKind == JsonValueKind.String && bool.TryParse(s.GetString(), out var b) && b));
 
     /// <summary>Build + post the REDACTED decision card into the run's approval conversation: the body carries the question + (redacted) blocking reason + recommendation; the buttons are the typed options (or a free-text submit). The server-side <see cref="DecisionRequestTarget"/> carries the resolution token (omitted from the client view).</summary>
+    /// <summary>Whether to ALSO post the chat decision-card: a card surface is configured (<see cref="HasDecisionCardSurface"/>) AND the configured conversation belongs to the run's team. A foreign conversation is an operator misconfiguration — skip the card (never a cross-tenant leak), but the decision still parks + is answerable in the queue (the card is never a gate). Mirrors CanServeApprovalAsync's tenancy check, but as a card-only guard rather than a raise-gate.</summary>
+    private async Task<bool> ShouldPostDecisionCardAsync(Guid teamId, CancellationToken cancellationToken) =>
+        HasDecisionCardSurface() && await _bot!.ConversationBelongsToTeamAsync(_approvalConversationId!.Value, teamId, cancellationToken).ConfigureAwait(false);
+
     private async Task<Guid> PostDecisionCardAsync(DecisionRequest request, string token, CancellationToken cancellationToken)
     {
         var component = _components!.Build(DecisionButtonsConfig(request))
