@@ -1442,6 +1442,25 @@ public sealed class GitLabRepositoryProvider : IRepositoryCatalogCapability, IPu
         }, cancellationToken).ConfigureAwait(false);
     }
 
+    public async Task<RemoteRelease> GetReleaseAsync(ProviderContext context, RemoteRepository repository, string tag, CancellationToken cancellationToken)
+    {
+        var client = await BuildClientAsync(context, cancellationToken).ConfigureAwait(false);
+
+        return await _resilience.ExecuteAsync(context.Instance, nameof(GetReleaseAsync), _ =>
+        {
+            var projectId = int.Parse(repository.ExternalId);
+            var releases = client.GetReleases(projectId);
+
+            var release = releases[tag];   // by-tag indexer
+
+            // "Latest" badge: the newest release (releases come back released_at-desc) is the latest.
+            var latest = releases.All.FirstOrDefault();
+            var isLatest = latest != null && latest.TagName == release.TagName;
+
+            return Task.FromResult(ToRemoteReleaseDetail(release, repository, isLatest));
+        }, cancellationToken).ConfigureAwait(false);
+    }
+
     private static RemoteRelease ToRemoteReleaseDetail(ReleaseInfo r, RemoteRepository repository, bool isLatest)
     {
         var assets = new List<RemoteReleaseAsset>();

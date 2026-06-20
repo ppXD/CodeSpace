@@ -232,6 +232,16 @@ public sealed class TestRepositoryProvider : IRepositoryCatalogCapability, ICred
             new RemoteTag { Name = $"3.0.{page}", CommitSha = "abc1234", Message = null, WebUrl = $"https://test.local/{repository.FullPath}/-/tags/3.0.{page}" }
         }.ToList());
 
+    // Echoes the requested tag back so a detail test asserts it flowed through to the provider.
+    public Task<RemoteRelease> GetReleaseAsync(ProviderContext context, RemoteRepository repository, string tag, CancellationToken cancellationToken) =>
+        Task.FromResult(new RemoteRelease
+        {
+            TagName = tag, Name = $"Release {tag}", Body = "notes", AuthorLogin = "vlvvh",
+            PublishedDate = DateTimeOffset.UnixEpoch, WebUrl = $"https://test.local/{repository.FullPath}/-/releases/{tag}",
+            IsLatest = tag == "3.0.5", IsPrerelease = false,
+            Assets = new[] { new RemoteReleaseAsset { Name = "Source code (zip)", DownloadUrl = "https://test.local/x.zip", SizeBytes = null } }.ToList()
+        });
+
     // Echoes the acting credential's id back as the created issue's ExternalId so a test can assert WHICH
     // credential created it (actor vs connection). Reflects the input title/body/labels.
     public Task<RemoteIssue> CreateIssueAsync(ProviderContext context, RemoteRepository repository, CreateIssueInput input, CancellationToken cancellationToken) =>

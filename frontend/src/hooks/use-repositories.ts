@@ -386,6 +386,16 @@ export function useRepositoryTags(repositoryId: string | null, page: number) {
   });
 }
 
+/** Single release by tag — the release-detail page. */
+export function useRepositoryRelease(repositoryId: string | null, tag: string | null) {
+  return useQuery({
+    queryKey: ["repository", repositoryId, "source", "release", tag],
+    queryFn: () => repositoriesApi.getRelease(repositoryId!, tag!),
+    enabled: repositoryId != null && tag != null && tag.length > 0,
+    staleTime: SOURCE_STALE_MS,
+  });
+}
+
 /** Latest commit on the current path/ref — the header bar above the file list. */
 export function useRepositoryLatestCommit(repositoryId: string | null, path: string, ref: string | null, enabled = true) {
   return useQuery({

@@ -20,6 +20,7 @@ import {
   useRepositoryPullRequestCounts,
   useRepositoryPullRequestFiles,
   useRepositoryPullRequests,
+  useRepositoryRelease,
   useRepositoryReleases,
   useRepositoryStats,
   useRepositoryTags,
@@ -692,9 +693,10 @@ interface ReleasesPanelProps {
   onTabChange: (next: ReleasesTab) => void;
   onPageChange: (next: number) => void;
   onBack: () => void;
+  onSelectRelease: (tag: string) => void;
 }
 
-export function ReleasesPanel({ repoId, tab, page, onTabChange, onPageChange, onBack }: ReleasesPanelProps) {
+export function ReleasesPanel({ repoId, tab, page, onTabChange, onPageChange, onBack, onSelectRelease }: ReleasesPanelProps) {
   const repository = useRepository(repoId);
   const instances = useProviderInstances();
   const repo = repository.data;
@@ -741,7 +743,7 @@ export function ReleasesPanel({ repoId, tab, page, onTabChange, onPageChange, on
 
         {tab === "releases" && (releasesQuery.data?.length ?? 0) > 0 && (
           <div className="rel-list" data-stale={releasesQuery.isPlaceholderData}>
-            {releasesQuery.data!.map(r => <ReleaseCard key={r.tagName} release={r} />)}
+            {releasesQuery.data!.map(r => <ReleaseCard key={r.tagName} release={r} onSelect={() => onSelectRelease(r.tagName)} />)}
           </div>
         )}
         {tab === "tags" && (tagsQuery.data?.length ?? 0) > 0 && (
@@ -758,12 +760,12 @@ export function ReleasesPanel({ repoId, tab, page, onTabChange, onPageChange, on
   );
 }
 
-function ReleaseCard({ release }: { release: RemoteRelease }) {
+function ReleaseCard({ release, onSelect }: { release: RemoteRelease; onSelect: () => void }) {
   return (
     <div className="rel-card">
       <div className="rel-card-h">
         <Ic.Tag size={16} className="rel-card-ic" />
-        <span className="rel-card-tag">{release.name ?? release.tagName}</span>
+        <button className="rel-card-tag" onClick={onSelect} title={`Open ${release.name ?? release.tagName}`}>{release.name ?? release.tagName}</button>
         {release.isLatest && <span className="cb-release-badge">Latest</span>}
         {release.isPrerelease && <span className="cb-release-badge" data-pre="true">Pre-release</span>}
         <div className="rel-card-meta">
@@ -805,6 +807,99 @@ function TagRow({ tag }: { tag: RemoteTag }) {
           {tag.commitSha && <code className="prd-commit-sha">{tag.commitSha.slice(0, 7)}</code>}
           {tag.message && <span>{tag.message}</span>}
         </div>
+      </div>
+    </div>
+  );
+}
+
+// ── Release detail ───────────────────────────────────────────────────────────
+// Single-release page (GitHub layout): "Releases / {tag}" breadcrumb back-link, the
+// title + Latest/Pre-release badge, an author·date·tag·open-on-provider sub-line, then
+// the full markdown notes and the assets list. Reached from a release card's title.
+
+interface ReleaseDetailRouteProps {
+  repoId: string;
+  tag: string;
+  onBack: () => void;
+}
+
+export function ReleaseDetailRoute({ repoId, tag, onBack }: ReleaseDetailRouteProps) {
+  const repository = useRepository(repoId);
+  const instances = useProviderInstances();
+  const repo = repository.data;
+  const instance = repo ? instances.data?.find(i => i.id === repo.providerInstanceId) : null;
+  const providerLabel = instance ? PROVIDER_LABEL[instance.provider] : "provider";
+
+  const query = useRepositoryRelease(repoId, tag);
+
+  if (query.isLoading) {
+    return (
+      <div className="pr-panel">
+        <PrDetailBackLink onBack={onBack} label="releases" />
+        <div className="pr-card"><div className="pr-empty">
+          <div className="pr-empty-h">Loading release…</div>
+          <div className="pr-empty-p">Fetching {tag} live from {providerLabel}.</div>
+        </div></div>
+      </div>
+    );
+  }
+
+  if (query.error instanceof ApiError) {
+    return (
+      <div className="pr-panel">
+        <PrDetailBackLink onBack={onBack} label="releases" />
+        <div className="cn-banner cn-banner-err">
+          <div className="cn-banner-h">Couldn't load release {tag}</div>
+          <div className="cn-banner-p">{query.error.message}</div>
+        </div>
+      </div>
+    );
+  }
+
+  if (!query.data) return null;
+  const r = query.data;
+
+  return (
+    <div className="pr-panel prd">
+      <PrDetailBackLink onBack={onBack} label="releases" />
+
+      <div className="prd-head">
+        <div className="prd-title-row">
+          <h1 className="prd-title">{r.name ?? r.tagName}</h1>
+          {r.isLatest && <span className="cb-release-badge">Latest</span>}
+          {r.isPrerelease && <span className="cb-release-badge" data-pre="true">Pre-release</span>}
+        </div>
+        <div className="prd-sub">
+          {r.authorLogin && <><span className="prd-sub-author">{r.authorLogin}</span> released this </>}
+          {r.publishedDate && <span>{formatRelative(r.publishedDate)}</span>}
+          {" · "}
+          <span className="rel-card-tagname"><Ic.Tag size={11} /> {r.tagName}</span>
+          {" · "}
+          <a href={r.webUrl} target="_blank" rel="noopener noreferrer">Open on {providerLabel}</a>
+        </div>
+      </div>
+
+      <div className="prd-main">
+        <div className="prd-card">
+          <div className="prd-card-b">
+            {r.body && r.body.trim().length > 0
+              ? <div className="prd-body prd-markdown"><ReactMarkdown remarkPlugins={[remarkGfm]} components={{ a: ({ href, children, ...rest }) => <a href={href} target="_blank" rel="noopener noreferrer" {...rest}>{children}</a> }}>{r.body}</ReactMarkdown></div>
+              : <div className="prd-body-empty">No release notes.</div>}
+          </div>
+        </div>
+
+        {(r.assets?.length ?? 0) > 0 && (
+          <div className="rel-assets">
+            <div className="rel-assets-h"><Ic.Box size={12} /> Assets <span className="rel-assets-c">{r.assets!.length}</span></div>
+            {r.assets!.map(a => (
+              <a key={a.name + a.downloadUrl} className="rel-asset" href={a.downloadUrl} target="_blank" rel="noopener noreferrer">
+                <Ic.File size={13} />
+                <span className="rel-asset-name">{a.name}</span>
+                {a.sizeBytes != null && <span className="rel-asset-size">{formatBytes(a.sizeBytes)}</span>}
+              </a>
+            ))}
+          </div>
+        )}
       </div>
     </div>
   );

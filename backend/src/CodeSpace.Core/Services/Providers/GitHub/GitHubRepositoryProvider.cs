@@ -920,6 +920,23 @@ public sealed class GitHubRepositoryProvider : IRepositoryCatalogCapability, IPu
         }, cancellationToken).ConfigureAwait(false);
     }
 
+    public async Task<RemoteRelease> GetReleaseAsync(ProviderContext context, RemoteRepository repository, string tag, CancellationToken cancellationToken)
+    {
+        var client = await BuildClientAsync(context, cancellationToken).ConfigureAwait(false);
+
+        return await _resilience.ExecuteAsync(context.Instance, nameof(GetReleaseAsync), async _ =>
+        {
+            var release = await client.Repository.Release.Get(repository.NamespacePath, repository.Name, tag).ConfigureAwait(false);
+
+            // "Latest" badge: compare against the repo's GetLatest tag (best-effort — 404 → no badge).
+            string? latestTag = null;
+            try { latestTag = (await client.Repository.Release.GetLatest(repository.NamespacePath, repository.Name).ConfigureAwait(false)).TagName; }
+            catch (NotFoundException) { /* no published-stable release */ }
+
+            return ToRemoteReleaseDetail(release, release.TagName == latestTag);
+        }, cancellationToken).ConfigureAwait(false);
+    }
+
     private static RemoteRelease ToRemoteReleaseDetail(Release r, bool isLatest)
     {
         var assets = new List<RemoteReleaseAsset>();

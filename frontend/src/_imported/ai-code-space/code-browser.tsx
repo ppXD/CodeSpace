@@ -557,7 +557,7 @@ function ReleasesCard({ release, releaseCount, onOpenReleases }: { release?: Rem
             <Ic.Tag size={16} className="cb-release-ic" />
             <span className="cb-release-main">
               <span className="cb-release-tag">
-                {release.tagName}
+                {release.name ?? release.tagName}
                 <span className="cb-release-badge" data-pre={release.isPrerelease}>{release.isPrerelease ? "Pre-release" : "Latest"}</span>
               </span>
               {release.publishedDate && <span className="cb-release-date">{relativeTime(release.publishedDate)}</span>}

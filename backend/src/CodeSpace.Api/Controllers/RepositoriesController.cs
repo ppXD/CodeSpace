@@ -140,6 +140,14 @@ public class RepositoriesController : ControllerBase
         return Ok(result);
     }
 
+    /// <summary>Single release by tag for the in-app release-detail page. Tag is a query value to survive slashes/dots.</summary>
+    [HttpGet("{repositoryId:guid}/release")]
+    public async Task<IActionResult> GetRelease([FromRoute] Guid repositoryId, [FromQuery] string tag, CancellationToken cancellationToken)
+    {
+        var result = await _mediator.Send(new GetReleaseQuery { RepositoryId = repositoryId, Tag = tag }, cancellationToken).ConfigureAwait(false);
+        return Ok(result);
+    }
+
     /// <summary>
     /// Latest commit on a path/ref — the Code tab's header bar. `path` (query) omitted ⇒ repo root;
     /// `ref` omitted ⇒ the default branch. 200 with a null body when the path has no history.
