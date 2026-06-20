@@ -55,13 +55,14 @@ public class DecisionReaperFlowTests
     }
 
     [Fact]
-    public async Task An_overdue_decision_with_no_default_is_left_pending_and_its_re_examination_deferred()
+    public async Task An_overdue_no_default_decision_is_converted_to_human_required()
     {
-        // No DefaultAction → the reaper cannot apply a safe default, so it LEAVES the row Pending for a human (convert-to-
-        // human is D5d) — never a blind expire. The starvation guard: it ALSO pushes the deadline forward so the row leaves
-        // the overdue candidate set and can't re-fill the page every tick (starving newer defaultable rows).
+        // D5d: an auto/supervisor decision with no safe DefaultAction times out → CONVERT-TO-HUMAN. It is never defaulted
+        // (no blind expire), its policy is re-stamped human_required (durably escalated — the supervisor can never auto-answer
+        // it now, and the queue shows it as human-only), and its reaper re-examination is deferred (starvation guard) — all
+        // while staying AwaitingApproval for a person.
         var teamId = await SeedTeamAsync();
-        var ledgerId = await SeedDecisionAsync(teamId, deadlineAt: Past, defaultAction: null);
+        var ledgerId = await SeedDecisionAsync(teamId, deadlineAt: Past, defaultAction: null);   // seeded supervisor_first
 
         var timedOut = await ReapAsync();
 
@@ -69,7 +70,25 @@ public class DecisionReaperFlowTests
 
         var row = await ReadRowAsync(ledgerId);
         row.Status.ShouldBe(ToolCallLedgerStatus.AwaitingApproval, "it stays parked for a human");
-        row.ApprovalDeadlineAt!.Value.ShouldBeGreaterThan(DateTimeOffset.UtcNow, "its reaper re-examination is deferred (deadline pushed forward) so it leaves the overdue set — no starvation of defaultable rows");
+        row.ApprovalDeadlineAt!.Value.ShouldBeGreaterThan(DateTimeOffset.UtcNow, "its reaper re-examination is deferred so it leaves the overdue set — no starvation of defaultable rows");
+
+        var envelope = JsonSerializer.Deserialize<DecisionRequest>(row.DecisionEnvelopeJson!, Json)!;
+        envelope.Policy.ShouldBe(DecisionPolicies.HumanRequired, "the decision is durably escalated to human-only (convert-to-human)");
+    }
+
+    [Fact]
+    public async Task A_human_only_decision_with_a_default_is_converted_not_defaulted()
+    {
+        // The floor wins over a configured default: a decision the floor reserves for a person (human_required) is NEVER
+        // auto-resolved on timeout EVEN IF it carries a DefaultAction — the default would defeat the floor's "a human must
+        // decide". It stays AwaitingApproval, never Succeeded.
+        var teamId = await SeedTeamAsync();
+        var ledgerId = await SeedDecisionAsync(teamId, deadlineAt: Past, defaultAction: "a", policy: DecisionPolicies.HumanRequired);
+
+        var timedOut = await ReapAsync();
+
+        timedOut.ShouldNotContain(t => t.LedgerId == ledgerId, "a human-only decision is never auto-defaulted, even with a DefaultAction");
+        (await ReadRowAsync(ledgerId)).Status.ShouldBe(ToolCallLedgerStatus.AwaitingApproval, "the floor wins — it stays parked for a human, not Succeeded-by-default");
     }
 
     [Fact]
@@ -212,7 +231,7 @@ public class DecisionReaperFlowTests
 
     // ─── Seeding ──────────────────────────────────────────────────────────────────
 
-    private async Task<Guid> SeedDecisionAsync(Guid teamId, DateTimeOffset deadlineAt, string? defaultAction)
+    private async Task<Guid> SeedDecisionAsync(Guid teamId, DateTimeOffset deadlineAt, string? defaultAction, string policy = DecisionPolicies.SupervisorFirst)
     {
         using var scope = _fixture.BeginScope();
         var db = scope.Resolve<CodeSpaceDbContext>();
@@ -231,7 +250,7 @@ public class DecisionReaperFlowTests
             RecommendedOption = "a",
             BlockingReason = "the agent is blocked",
             RiskLevel = DecisionRiskLevels.Low,
-            Policy = DecisionPolicies.SupervisorFirst,
+            Policy = policy,
             DefaultAction = defaultAction,
             TimeoutAt = deadlineAt,
             DedupeKey = Guid.NewGuid().ToString("N"),

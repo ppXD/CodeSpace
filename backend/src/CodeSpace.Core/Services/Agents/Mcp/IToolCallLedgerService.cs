@@ -356,22 +356,22 @@ public sealed class ToolCallLedgerService : IToolCallLedgerService, IScopedDepen
         return timedOut;
     }
 
-    /// <summary>How far a no-default overdue decision's reaper re-examination is pushed out (D5b starvation guard). Re-examined hourly, it never re-fills the head of the ascending-deadline page — so an answerable (defaulted) row is never starved behind a backlog of un-defaultable ones — while staying AwaitingApproval for a human in the queue (the full policy convert-to-human is D5d).</summary>
+    /// <summary>How far a convert-to-human / deferred overdue decision's reaper re-examination is pushed out (D5b starvation guard). Re-examined hourly, it never re-fills the head of the ascending-deadline page — so an answerable (defaulted) row is never starved behind a backlog of human-only ones — while staying AwaitingApproval for a human in the queue.</summary>
     public static readonly TimeSpan DecisionDeferBackoff = TimeSpan.FromHours(1);
 
-    // Apply ONE overdue decision's default via the shared answer CAS. A row with no parseable envelope or no DefaultAction
-    // has NO safe default to apply: it is never blind-expired (that would surface to the agent as an error) and never left
-    // perpetually overdue (it would re-fill the head of the ascending-deadline page every tick and STARVE newer defaultable
-    // rows — the AC4 hole). Instead its reaper re-examination is DEFERRED (deadline pushed out) so the page drains; it stays
-    // AwaitingApproval for a human (convert-to-human is D5d). The answer CAS is single-winner — a tick losing to a human
-    // answer returns null.
+    // Resolve ONE overdue decision per the DoD #4 ladder (its policy is already the floored/effective one, stamped at park).
+    // A decision the floor reserves for a person (Policy == human_required) OR one with no safe DefaultAction is NEVER
+    // auto-resolved on timeout (that would defeat the floor / surface a blind expire as an error) → CONVERT-TO-HUMAN (D5d):
+    // it stays AwaitingApproval for a person and is escalated/deferred, never expired. Only an auto/supervisor decision WITH
+    // a configured default is EXPIRED-WITH-DEFAULT via the shared single-winner answer CAS (a tick losing to a human answer
+    // returns null). An unreadable envelope can't be defaulted either → convert-to-human path (defer).
     private async Task<TimedOutDecision?> TryTimeoutOneAsync(Guid ledgerId, Guid teamId, Guid? approvalMessageId, string? envelopeJson, DateTimeOffset now, CancellationToken cancellationToken)
     {
         var request = TryDeserializeEnvelope(envelopeJson);
 
-        if (request is null || string.IsNullOrWhiteSpace(request.DefaultAction))
+        if (request is null || IsHumanRequired(request.Policy) || string.IsNullOrWhiteSpace(request.DefaultAction))
         {
-            await DeferDecisionReexaminationAsync(ledgerId, teamId, now, cancellationToken).ConfigureAwait(false);
+            await ConvertToHumanOrDeferAsync(ledgerId, teamId, request, now, cancellationToken).ConfigureAwait(false);
 
             return null;
         }
@@ -381,6 +381,35 @@ public sealed class ToolCallLedgerService : IToolCallLedgerService, IScopedDepen
         var won = await TryAnswerDecisionAsync(ledgerId, teamId, answerJson, cancellationToken).ConfigureAwait(false);
 
         return won ? new TimedOutDecision { LedgerId = ledgerId, TeamId = teamId, ApprovalMessageId = approvalMessageId } : null;
+    }
+
+    private static bool IsHumanRequired(string policy) => string.Equals(policy, DecisionPolicies.HumanRequired, StringComparison.OrdinalIgnoreCase);
+
+    // Convert-to-human (D5d): an overdue decision that can't be auto-resolved (no safe default, or already human-only, or an
+    // unreadable envelope). An auto/supervisor decision that timed out with no default is ESCALATED — its envelope policy is
+    // re-stamped human_required (so it durably becomes human-only: the supervisor can never auto-answer it now, and the queue
+    // shows it as such) with a fresh deadline, alongside the column bump. An already-human-only / unreadable row has nothing
+    // to re-stamp, so it just defers. Either way it stays AwaitingApproval for a person — never expired, never auto-answered.
+    private async Task ConvertToHumanOrDeferAsync(Guid ledgerId, Guid teamId, DecisionRequest? request, DateTimeOffset now, CancellationToken cancellationToken)
+    {
+        if (request is null || IsHumanRequired(request.Policy))
+        {
+            await DeferDecisionReexaminationAsync(ledgerId, teamId, now, cancellationToken).ConfigureAwait(false);
+
+            return;
+        }
+
+        var deferredUntil = now + DecisionDeferBackoff;
+
+        var escalated = JsonSerializer.Serialize(request with { Policy = DecisionPolicies.HumanRequired, TimeoutAt = deferredUntil }, DecisionJson);
+
+        await _db.ToolCallLedger
+            .Where(l => l.Id == ledgerId && l.TeamId == teamId && l.Status == ToolCallLedgerStatus.AwaitingApproval && l.ToolKind == DecisionToolKinds.DecisionRequest)
+            .ExecuteUpdateAsync(s => s
+                .SetProperty(l => l.DecisionEnvelopeJson, escalated)
+                .SetProperty(l => l.ApprovalDeadlineAt, deferredUntil)
+                .SetProperty(l => l.LastModifiedDate, now), cancellationToken)
+            .ConfigureAwait(false);
     }
 
     // Push a no-default overdue decision's deadline out so it leaves the reaper's overdue candidate set (the starvation
