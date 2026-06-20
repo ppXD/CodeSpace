@@ -159,24 +159,9 @@ public class McpDecisionFlowTests
         (await ReadRowAsync(ledgerId)).Status.ShouldBe(ToolCallLedgerStatus.Succeeded, "the row is Succeeded exactly once");
     }
 
-    [Fact]
-    public async Task A_run_with_no_decision_surface_fail_closes_with_no_card_and_no_row()
-    {
-        var (teamId, _, _) = await SeedTeamChannelAsync();
-        var runId = Guid.NewGuid();
-
-        using var scope = _fixture.BeginScope();
-        // Governance ON + collaborators wired, but NO decision conversation → fail-closed (the agent must not proceed as if it asked).
-        var handler = new McpRequestHandler(new SingleToolRegistry(new DecisionRequestTool()), AgentAutonomyLevel.Standard, teamId, null, runId,
-            scope.Resolve<IToolCallLedgerService>(), 0, governanceEnabled: true, approvalConversationId: null,
-            scope.Resolve<IChatBotService>(), scope.Resolve<IToolApprovalWaiterRegistry>(), scope.Resolve<IInteractionComponentRegistry>());
-
-        var result = await CallToolAsync(handler, new { question = "ok?" });
-
-        result.GetProperty("isError").GetBoolean().ShouldBeTrue();
-        Text(result).ShouldContain("decision surface", customMessage: "no surface → fail-closed, the agent does not silently proceed");
-        (await ReadRunRowsAsync(teamId, runId)).ShouldBeEmpty("no surface → no ledger row");
-    }
+    // (Slice 0 — the old "no chat conversation → fail-closed isError + no row" test was removed: that behavior is replaced
+    // by the decoupled "parks a queue-answerable decision" path, covered by A_run_with_no_chat_conversation_still_parks_a_
+    // queue_answerable_decision; the genuine fail-closed case — governance off — is covered by Decision_governance_disabled_refuses.)
 
     [Fact]
     public async Task An_option_label_that_echoes_a_run_secret_is_redacted_on_the_card()
@@ -548,6 +533,96 @@ public class McpDecisionFlowTests
             LastModifiedBy = SystemUsers.SeederId,
         });
         await db.SaveChangesAsync();
+    }
+
+    [Fact]
+    public async Task A_run_with_no_chat_conversation_still_parks_a_queue_answerable_decision()
+    {
+        // Slice 0 — the decision substrate is DECOUPLED from chat: a plain agent.code run with NO approval conversation
+        // still raises a real, durable, queue-answerable decision (not a flat "no decision surface" refusal). The core
+        // answer surface is the durable ledger + the cross-grain queue; the chat card is optional notification.
+        var (teamId, ownerId, _) = await SeedTeamChannelAsync();
+        var runId = Guid.NewGuid();
+
+        using var scope = _fixture.BeginScope();
+        var handler = DecisionHandlerCfg(scope, teamId, runId, conversationId: null);   // NO chat conversation
+
+        var call = Task.Run(() => CallToolAsync(handler, new { question = "pick", decisionType = "choose_one", options = new[] { new { id = "a", label = "A" }, new { id = "b", label = "B" } } }));
+
+        var (ledgerId, approvalMessageId) = await WaitForParkedDecisionAsync(teamId, runId);
+        approvalMessageId.ShouldBeNull("no chat card is posted when there's no conversation — but the decision still parked");
+
+        // Answer through the cross-grain QUEUE (not a card) → unblocks the mid-run call.
+        (await AnswerViaQueueAsync(ledgerId, new[] { "b" }, null, teamId, ownerId)).Outcome.ShouldBe(DecisionAnswerOutcome.Answered);
+
+        var result = await call;
+        result.GetProperty("isError").GetBoolean().ShouldBeFalse("the queue answer unblocks the mid-run call — no chat surface needed");
+        result.GetProperty("structuredContent").GetProperty("selectedOptions")[0].GetString().ShouldBe("b");
+    }
+
+    [Fact]
+    public async Task A_foreign_approval_conversation_skips_the_card_but_still_parks_the_decision()
+    {
+        // Security + decoupling: a configured-but-FOREIGN conversation (another team's channel) must NOT receive a card
+        // (no cross-tenant leak) — yet the decision still parks + is queue-answerable. The card tenancy is a card-only guard,
+        // never a gate on raising.
+        var (teamId, ownerId, _) = await SeedTeamChannelAsync();
+        var (otherTeam, _, foreignChannel) = await SeedTeamChannelAsync();
+        var runId = Guid.NewGuid();
+
+        using var scope = _fixture.BeginScope();
+        var handler = DecisionHandlerCfg(scope, teamId, runId, conversationId: foreignChannel);   // a DIFFERENT team's channel
+
+        var call = Task.Run(() => CallToolAsync(handler, new { question = "ok?", decisionType = "choose_one", options = new[] { new { id = "a", label = "A" }, new { id = "b", label = "B" } } }));
+
+        var (ledgerId, approvalMessageId) = await WaitForParkedDecisionAsync(teamId, runId);
+        approvalMessageId.ShouldBeNull("a foreign conversation is skipped — no card is posted (no cross-tenant leak)");
+        (await ReadRunCardCountAsync(otherTeam, foreignChannel)).ShouldBe(0, "no message was posted into the foreign team's channel");
+
+        (await AnswerViaQueueAsync(ledgerId, new[] { "a" }, null, teamId, ownerId)).Outcome.ShouldBe(DecisionAnswerOutcome.Answered, "and the decision is still answerable in the queue");
+        (await call).GetProperty("isError").GetBoolean().ShouldBeFalse();
+    }
+
+    [Fact]
+    public async Task Decision_governance_disabled_refuses_to_raise()
+    {
+        // The CORE gate (CanRaiseDecision): governance off → no decision can be raised (defensive; the tool isn't even
+        // registered when governance is off). Distinct from the chat surface — this is the real "cannot park" case.
+        var (teamId, _, _) = await SeedTeamChannelAsync();
+        var runId = Guid.NewGuid();
+
+        using var scope = _fixture.BeginScope();
+        var handler = DecisionHandlerCfg(scope, teamId, runId, conversationId: null, governanceEnabled: false);
+
+        var result = await CallToolAsync(handler, new { question = "pick", decisionType = "confirm" });
+
+        result.GetProperty("isError").GetBoolean().ShouldBeTrue("governance off → a decision cannot be raised");
+        Text(result).ShouldContain("governance", Case.Insensitive);
+    }
+
+    private McpRequestHandler DecisionHandlerCfg(ILifetimeScope scope, Guid teamId, Guid runId, Guid? conversationId, bool governanceEnabled = true) =>
+        new(new SingleToolRegistry(new DecisionRequestTool()), AgentAutonomyLevel.Standard, teamId, null, runId,
+            scope.Resolve<IToolCallLedgerService>(), 0, governanceEnabled: governanceEnabled, approvalConversationId: conversationId,
+            scope.Resolve<IChatBotService>(), scope.Resolve<IToolApprovalWaiterRegistry>(), scope.Resolve<IInteractionComponentRegistry>());
+
+    private async Task<(Guid LedgerId, Guid? ApprovalMessageId)> WaitForParkedDecisionAsync(Guid teamId, Guid runId)
+    {
+        for (var i = 0; i < 200; i++)   // ~10s budget under full-suite Postgres contention
+        {
+            using (var scope = _fixture.BeginScope())
+            {
+                var row = await scope.Resolve<CodeSpaceDbContext>().ToolCallLedger.AsNoTracking()
+                    .Where(l => l.AgentRunId == runId && l.TeamId == teamId && l.ToolKind == "decision.request" && l.Status == ToolCallLedgerStatus.AwaitingApproval)
+                    .Select(l => new { l.Id, l.ApprovalMessageId })
+                    .FirstOrDefaultAsync();
+
+                if (row is not null) return (row.Id, row.ApprovalMessageId);
+            }
+
+            await Task.Delay(50);
+        }
+
+        throw new TimeoutException($"No parked decision for run {runId} within 10s — a decision.request must park to the durable ledger regardless of a chat surface (Slice 0).");
     }
 
     private McpRequestHandler DecisionHandler(ILifetimeScope scope, AgentAutonomyLevel autonomy, Guid teamId, Guid runId, Guid channelId, SecretRedactor? redactor = null) =>
