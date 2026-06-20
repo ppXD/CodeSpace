@@ -81,12 +81,15 @@ public sealed class RepositoryService : IRepositoryService, IScopedDependency
         }).ToList();
     }
 
-    public async Task<RepositoryDetail?> GetAsync(Guid repositoryId, CancellationToken cancellationToken)
+    public async Task<RepositoryDetail?> GetAsync(Guid repositoryId, bool refresh, CancellationToken cancellationToken)
     {
-        // Read-through refresh: the stored metadata (visibility, default branch, description, archived, …)
+        // Stale-while-revalidate: the stored metadata (visibility, default branch, description, archived, …)
         // is a snapshot from bind time and drifts when the repo changes on the provider (e.g. a repo flipped
-        // private→public). Best-effort re-sync from the provider before projecting so the detail is current.
-        await RefreshMetadataBestEffortAsync(repositoryId, cancellationToken).ConfigureAwait(false);
+        // private→public). The default read serves that snapshot instantly so the detail page never blocks on
+        // the network; the page then issues a second refresh=true read in the background, and ONLY that path
+        // pays the provider round-trip to re-sync + persist the live values.
+        if (refresh)
+            await RefreshMetadataBestEffortAsync(repositoryId, cancellationToken).ConfigureAwait(false);
 
         // Phase 3.1 — Repository:Project is N:M. The detail DTO surfaces every active
         // project link; the legacy ProjectId/Slug/Name fields are derived from the first

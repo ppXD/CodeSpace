@@ -12,5 +12,5 @@ public sealed class GetRepositoryQueryHandler : IRequestHandler<GetRepositoryQue
     public GetRepositoryQueryHandler(IRepositoryService service) { _service = service; }
 
     public async Task<RepositoryDetail?> Handle(GetRepositoryQuery request, CancellationToken cancellationToken) =>
-        await _service.GetAsync(request.RepositoryId, cancellationToken).ConfigureAwait(false);
+        await _service.GetAsync(request.RepositoryId, request.Refresh, cancellationToken).ConfigureAwait(false);
 }

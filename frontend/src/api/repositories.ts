@@ -24,7 +24,8 @@ export const repositoriesApi = {
     return fetchJson<RepositorySummary[]>(`/api/repositories${qs ? `?${qs}` : ""}`);
   },
 
-  get: (repositoryId: string) => fetchJson<RepositoryDetail>(`/api/repositories/${repositoryId}`),
+  get: (repositoryId: string, refresh = false) =>
+    fetchJson<RepositoryDetail>(`/api/repositories/${repositoryId}${refresh ? "?refresh=true" : ""}`),
 
   bind: (input: BindRepositoryInput) => fetchJson<{ id: string }>("/api/repositories/bind", {
     method: "POST",

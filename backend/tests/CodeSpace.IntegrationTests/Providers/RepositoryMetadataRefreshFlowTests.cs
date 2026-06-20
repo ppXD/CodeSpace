@@ -12,10 +12,11 @@ using Shouldly;
 namespace CodeSpace.IntegrationTests.Providers;
 
 /// <summary>
-/// Read-through metadata refresh: <see cref="IRepositoryService.GetAsync"/> re-syncs the stored repo
-/// metadata from the provider before returning, so the detail header reflects live state (e.g. a repo
-/// flipped private→public). The test provider's <c>GetByExternalIdAsync</c> always reports the repo as
-/// Private on <c>main</c>, so a repo seeded as Public on a stale branch must come back refreshed + persisted.
+/// Stale-while-revalidate metadata refresh: <see cref="IRepositoryService.GetAsync"/> serves the stored
+/// snapshot instantly by default, and ONLY re-syncs from the provider when called with refresh=true (the
+/// background read the detail page issues after its instant paint). The test provider's
+/// <c>GetByExternalIdAsync</c> always reports the repo as Private on <c>main</c>, so a repo seeded as Public
+/// on a stale branch comes back refreshed+persisted with refresh=true, but untouched with refresh=false.
 /// </summary>
 [Collection(PostgresCollection.Name)]
 [Trait("Category", "Integration")]
@@ -26,12 +27,12 @@ public class RepositoryMetadataRefreshFlowTests
     public RepositoryMetadataRefreshFlowTests(PostgresFixture fixture) { _fixture = fixture; }
 
     [Fact]
-    public async Task GetAsync_refreshes_stale_metadata_from_the_provider_and_persists_it()
+    public async Task GetAsync_with_refresh_resyncs_stale_metadata_from_the_provider_and_persists_it()
     {
         var seed = await SeedAsync(withCredential: true, visibility: RepositoryVisibility.Public, defaultBranch: "stale-branch");
 
         using var scope = _fixture.BeginScope();
-        var detail = await scope.Resolve<IRepositoryService>().GetAsync(seed.RepositoryId, CancellationToken.None);
+        var detail = await scope.Resolve<IRepositoryService>().GetAsync(seed.RepositoryId, refresh: true, CancellationToken.None);
 
         detail.ShouldNotBeNull();
         detail!.Visibility.ShouldBe(RepositoryVisibility.Private, customMessage: "stale Public must be refreshed to the provider's live Private");
@@ -45,17 +46,39 @@ public class RepositoryMetadataRefreshFlowTests
     }
 
     [Fact]
-    public async Task GetAsync_serves_stored_values_when_the_repo_has_no_credential()
+    public async Task GetAsync_with_refresh_but_no_credential_keeps_stored_values()
     {
         // No credential → nothing live to read; the refresh no-ops and the detail renders from stored state.
         var seed = await SeedAsync(withCredential: false, visibility: RepositoryVisibility.Public, defaultBranch: "dev");
 
         using var scope = _fixture.BeginScope();
-        var detail = await scope.Resolve<IRepositoryService>().GetAsync(seed.RepositoryId, CancellationToken.None);
+        var detail = await scope.Resolve<IRepositoryService>().GetAsync(seed.RepositoryId, refresh: true, CancellationToken.None);
 
         detail.ShouldNotBeNull();
         detail!.Visibility.ShouldBe(RepositoryVisibility.Public, customMessage: "no credential → keep stored, don't error");
         detail.DefaultBranch.ShouldBe("dev");
+    }
+
+    [Fact]
+    public async Task GetAsync_without_refresh_serves_the_stored_snapshot_and_skips_the_provider()
+    {
+        // The default (refresh=false) read is the instant path the detail page paints from — it must NOT pay
+        // the provider round-trip. Seeded stale Public on `stale-branch` stays exactly that, and the row is
+        // never re-synced (LastSyncedDate stays null), proving the provider was not called + nothing persisted.
+        var seed = await SeedAsync(withCredential: true, visibility: RepositoryVisibility.Public, defaultBranch: "stale-branch");
+
+        using var scope = _fixture.BeginScope();
+        var detail = await scope.Resolve<IRepositoryService>().GetAsync(seed.RepositoryId, refresh: false, CancellationToken.None);
+
+        detail.ShouldNotBeNull();
+        detail!.Visibility.ShouldBe(RepositoryVisibility.Public, customMessage: "no refresh → serve the stored snapshot unchanged");
+        detail.DefaultBranch.ShouldBe("stale-branch");
+        detail.LastSyncedDate.ShouldBeNull(customMessage: "refresh=false must not re-sync, so LastSyncedDate stays unstamped");
+
+        // And nothing was persisted — a fresh read still sees the stale seed values.
+        using var verify = _fixture.BeginScope();
+        var stored = await verify.Resolve<CodeSpaceDbContext>().Repository.AsNoTracking().SingleAsync(r => r.Id == seed.RepositoryId);
+        stored.Visibility.ShouldBe(RepositoryVisibility.Public);
     }
 
     private async Task<SeedResult> SeedAsync(bool withCredential, RepositoryVisibility visibility, string defaultBranch)
