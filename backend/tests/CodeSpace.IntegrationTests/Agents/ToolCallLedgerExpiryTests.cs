@@ -4,6 +4,7 @@ using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Agents.Mcp;
 using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.Messages.Agents;
+using CodeSpace.Messages.Decisions;
 using CodeSpace.Messages.Enums;
 using Microsoft.EntityFrameworkCore;
 using Shouldly;
@@ -94,6 +95,25 @@ public class ToolCallLedgerExpiryTests
     }
 
     [Fact]
+    public async Task Does_not_expire_a_decision_request_row_even_when_past_the_deadline()
+    {
+        // Decision substrate D5a: a parked decision.request row is AwaitingApproval with an ApprovalDeadlineAt too, but it
+        // belongs to the DECISION reaper (a timeout DecisionAnswer honouring DefaultAction / convert-to-human), NOT this
+        // generic approval Expired CAS — which would surface to the agent as an error and discard the default. The two
+        // reapers are disjoint by ToolKind; this is the first-ever coverage of that split.
+        var teamId = await SeedTeamAsync();
+        var ledgerId = await SeedAsync(teamId, deadlineAt: Past, toolKind: DecisionToolKinds.DecisionRequest);
+
+        var expired = await ExpireAsync(DateTimeOffset.UtcNow);
+
+        expired.ShouldNotContain(e => e.LedgerId == ledgerId, "a decision.request row is excluded by the ToolKind guard — the approval reaper never touches it");
+
+        var row = await ReadRowAsync(ledgerId);
+        row.Status.ShouldBe(ToolCallLedgerStatus.AwaitingApproval, "the decision row stays parked for its own reaper / a human in the queue");
+        row.Error.ShouldBeNull("it was never stamped with the generic approval-expired error");
+    }
+
+    [Fact]
     public async Task Does_not_expire_a_null_deadline_row()
     {
         // A null deadline means no expiry was ever set (e.g. a synchronous Pending path that never parked) — never reap it.
@@ -170,7 +190,7 @@ public class ToolCallLedgerExpiryTests
         return await scope.Resolve<CodeSpaceDbContext>().ToolCallLedger.AsNoTracking().SingleAsync(l => l.Id == ledgerId);
     }
 
-    private async Task<Guid> SeedAsync(Guid teamId, DateTimeOffset? deadlineAt, ToolCallLedgerStatus status = ToolCallLedgerStatus.AwaitingApproval, DateTimeOffset? approvedAt = null, Guid? approvalMessageId = null)
+    private async Task<Guid> SeedAsync(Guid teamId, DateTimeOffset? deadlineAt, ToolCallLedgerStatus status = ToolCallLedgerStatus.AwaitingApproval, DateTimeOffset? approvedAt = null, Guid? approvalMessageId = null, string toolKind = "git.open_pr")
     {
         using var scope = _fixture.BeginScope();
         var db = scope.Resolve<CodeSpaceDbContext>();
@@ -181,8 +201,8 @@ public class ToolCallLedgerExpiryTests
             Id = id,
             TeamId = teamId,
             AgentRunId = Guid.NewGuid(),
-            ToolKind = "git.open_pr",
-            IdempotencyKey = $"git.open_pr:{id:N}",
+            ToolKind = toolKind,
+            IdempotencyKey = $"{toolKind}:{id:N}",
             InputHash = InputHash,
             Status = status,
             ApprovalToken = $"tok-{id:N}",
