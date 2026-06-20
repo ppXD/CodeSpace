@@ -11,11 +11,15 @@ using CodeSpace.Messages.Exceptions;
 using NGitLab;
 using NGitLab.Models;
 using GitLabMergeRequestState = NGitLab.Models.MergeRequestState;
+// Both CodeSpace.Messages.Enums and NGitLab.Models define an `IssueState`; the alias pins the
+// unqualified name to our neutral enum and gives NGitLab's a distinct name for IssueQuery.State.
+using GitLabIssueState = NGitLab.Models.IssueState;
+using IssueState = CodeSpace.Messages.Enums.IssueState;
 using ProviderInstance = CodeSpace.Core.Persistence.Entities.ProviderInstance;
 
 namespace CodeSpace.Core.Services.Providers.GitLab;
 
-public sealed class GitLabRepositoryProvider : IRepositoryCatalogCapability, IPullRequestCatalogCapability, IPullRequestCommentCapability, IPullRequestReviewCapability, IPullRequestWriteCapability, IIssueWriteCapability, IRepositoryAccessCapability, IRepositorySourceCapability, IRepositoryInsightsCapability, IRepositoryHistoryCapability, IRepositoryMarkdownRenderCapability, ICredentialProbeCapability, IWebhookRegistrationCapability, IWebhookSignatureVerifier, IWebhookEventNormalizer
+public sealed class GitLabRepositoryProvider : IRepositoryCatalogCapability, IPullRequestCatalogCapability, IPullRequestCommentCapability, IPullRequestReviewCapability, IPullRequestWriteCapability, IIssueCatalogCapability, IIssueWriteCapability, IRepositoryAccessCapability, IRepositorySourceCapability, IRepositoryInsightsCapability, IRepositoryHistoryCapability, IRepositoryMarkdownRenderCapability, ICredentialProbeCapability, IWebhookRegistrationCapability, IWebhookSignatureVerifier, IWebhookEventNormalizer
 {
     private readonly IProviderAuthResolver _authResolver;
     private readonly IExternalCallResilience _resilience;
@@ -276,6 +280,94 @@ public sealed class GitLabRepositoryProvider : IRepositoryCatalogCapability, IPu
         }, cancellationToken).ConfigureAwait(false);
     }
 
+    public async Task<IReadOnlyList<RemoteIssue>> ListIssuesAsync(ProviderContext context, RemoteRepository repository, IssueState? stateFilter, int page, int perPage, CancellationToken cancellationToken)
+    {
+        var client = await BuildClientAsync(context, cancellationToken).ConfigureAwait(false);
+
+        return await _resilience.ExecuteAsync(context.Instance, nameof(ListIssuesAsync), _ =>
+        {
+            var projectId = int.Parse(repository.ExternalId);
+
+            // Issues are simpler than MRs — opened/closed only, no merged sub-state to fan out across.
+            // Single-state fast path for every filter; null State = all states. NGitLab's iterator pages
+            // internally and Skip/Take walks pages 1..N, mirroring FetchSingleStatePage for MRs.
+            var query = new IssueQuery
+            {
+                State = MapIssueStateFilterToGitLab(stateFilter),
+                OrderBy = "created_at",
+                Sort = "desc",
+                PerPage = perPage
+            };
+            var skip = (page - 1) * perPage;
+            var issues = client.Issues.Get(projectId, query).Skip(skip).Take(perPage).ToList();
+
+            return Task.FromResult((IReadOnlyList<RemoteIssue>)issues.Select(ToRemoteIssue).ToList());
+        }, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<RemoteIssueCounts> CountIssuesAsync(ProviderContext context, RemoteRepository repository, CancellationToken cancellationToken)
+    {
+        var client = await BuildClientAsync(context, cancellationToken).ConfigureAwait(false);
+
+        return await _resilience.ExecuteAsync(context.Instance, nameof(CountIssuesAsync), async _ =>
+        {
+            // GitLab GraphQL exposes issues(state){count} directly — one round-trip for both buckets.
+            // Mirrors CountPullRequestsAsync; falls back to REST X-Total when GraphQL is unavailable
+            // (token lacks read_api → project comes back null).
+            var query = new GraphQLQuery
+            {
+                Query = """
+                    query CountIssues($fullPath: ID!) {
+                      project(fullPath: $fullPath) {
+                        opened: issues(state: opened) { count }
+                        closed: issues(state: closed) { count }
+                      }
+                    }
+                """
+            };
+            query.Variables["fullPath"] = repository.FullPath;
+
+            var response = await client.GraphQL.ExecuteAsync<GitLabIssueCountsResponse>(query, _).ConfigureAwait(false);
+            var project = response?.Project;
+
+            if (project != null)
+            {
+                return new RemoteIssueCounts
+                {
+                    Open = project.Opened?.Count ?? 0,
+                    Closed = project.Closed?.Count ?? 0
+                };
+            }
+
+            return await CountIssuesViaXTotalAsync(context, int.Parse(repository.ExternalId), _).ConfigureAwait(false);
+        }, cancellationToken).ConfigureAwait(false);
+    }
+
+    private sealed record GitLabIssueCountsResponse(GitLabIssueCountsProject? Project);
+    private sealed record GitLabIssueCountsProject(GitLabCountsBucket? Opened, GitLabCountsBucket? Closed);
+
+    /// <summary>Issue counts via the REST <c>X-Total</c> header — the read_api-less fallback, mirroring <see cref="CountViaXTotalAsync"/> for MRs.</summary>
+    private async Task<RemoteIssueCounts> CountIssuesViaXTotalAsync(ProviderContext context, int projectId, CancellationToken cancellationToken)
+    {
+        var auth = await _authResolver.ResolveAsync(context, cancellationToken).ConfigureAwait(false);
+        var host = string.IsNullOrWhiteSpace(context.Instance.ApiUrl) ? context.Instance.BaseUrl : context.Instance.ApiUrl;
+
+        var openTask = FetchStateCountAsync(host, projectId, "issues", "opened", auth, cancellationToken);
+        var closedTask = FetchStateCountAsync(host, projectId, "issues", "closed", auth, cancellationToken);
+
+        await Task.WhenAll(openTask, closedTask).ConfigureAwait(false);
+
+        return new RemoteIssueCounts { Open = openTask.Result, Closed = closedTask.Result };
+    }
+
+    private static GitLabIssueState? MapIssueStateFilterToGitLab(IssueState? state) => state switch
+    {
+        null => null,
+        IssueState.Open => GitLabIssueState.opened,
+        IssueState.Closed => GitLabIssueState.closed,
+        _ => null
+    };
+
     public async Task<RemoteIssue> CreateIssueAsync(ProviderContext context, RemoteRepository repository, CreateIssueInput input, CancellationToken cancellationToken)
     {
         var client = await BuildClientAsync(context, cancellationToken).ConfigureAwait(false);
@@ -311,7 +403,11 @@ public sealed class GitLabRepositoryProvider : IRepositoryCatalogCapability, IPu
         Body = issue.Description,
         AuthorLogin = issue.Author?.Username,
         Labels = (issue.Labels ?? Array.Empty<string>()).Select(n => new LabelRef { Name = n, Color = null }).ToList(),
+        CommentsCount = issue.UserNotesCount,
+        MilestoneTitle = issue.Milestone?.Title,
         CreatedDate = new DateTimeOffset(DateTime.SpecifyKind(issue.CreatedAt, DateTimeKind.Utc), TimeSpan.Zero),
+        // ClosedAt is a non-nullable DateTime on NGitLab — default(DateTime) is the only "not closed" signal.
+        ClosedDate = issue.ClosedAt == default ? null : new DateTimeOffset(DateTime.SpecifyKind(issue.ClosedAt, DateTimeKind.Utc), TimeSpan.Zero),
         WebUrl = issue.WebUrl
     };
 
@@ -505,9 +601,9 @@ public sealed class GitLabRepositoryProvider : IRepositoryCatalogCapability, IPu
         var auth = await _authResolver.ResolveAsync(context, cancellationToken).ConfigureAwait(false);
         var host = string.IsNullOrWhiteSpace(context.Instance.ApiUrl) ? context.Instance.BaseUrl : context.Instance.ApiUrl;
 
-        var openTask = FetchStateCountAsync(host, projectId, "opened", auth, cancellationToken);
-        var closedTask = FetchStateCountAsync(host, projectId, "closed", auth, cancellationToken);
-        var mergedTask = FetchStateCountAsync(host, projectId, "merged", auth, cancellationToken);
+        var openTask = FetchStateCountAsync(host, projectId, "merge_requests", "opened", auth, cancellationToken);
+        var closedTask = FetchStateCountAsync(host, projectId, "merge_requests", "closed", auth, cancellationToken);
+        var mergedTask = FetchStateCountAsync(host, projectId, "merge_requests", "merged", auth, cancellationToken);
 
         await Task.WhenAll(openTask, closedTask, mergedTask).ConfigureAwait(false);
 
@@ -523,13 +619,13 @@ public sealed class GitLabRepositoryProvider : IRepositoryCatalogCapability, IPu
     }
 
     /// <summary>
-    /// Hits the merge-requests REST endpoint with PerPage=1, parses the <c>X-Total</c>
-    /// header. Returns 0 when the header is missing (GitLab's >10k pagination cutoff) or
-    /// the response is non-success — counts should never error out the whole call.
+    /// Hits the project <paramref name="resource"/> REST endpoint (<c>merge_requests</c> / <c>issues</c>)
+    /// with PerPage=1, parses the <c>X-Total</c> header. Returns 0 when the header is missing (GitLab's
+    /// >10k pagination cutoff) or the response is non-success — counts should never error out the whole call.
     /// </summary>
-    private static async Task<int> FetchStateCountAsync(string host, int projectId, string state, ResolvedAuth auth, CancellationToken cancellationToken)
+    private static async Task<int> FetchStateCountAsync(string host, int projectId, string resource, string state, ResolvedAuth auth, CancellationToken cancellationToken)
     {
-        var url = $"{host.TrimEnd('/')}/api/v4/projects/{projectId}/merge_requests?state={state}&per_page=1";
+        var url = $"{host.TrimEnd('/')}/api/v4/projects/{projectId}/{resource}?state={state}&per_page=1";
         using var request = new HttpRequestMessage(HttpMethod.Get, url);
 
         // GitLab accepts the OAuth Bearer token via the standard Authorization header
@@ -1206,6 +1302,31 @@ public sealed class GitLabRepositoryProvider : IRepositoryCatalogCapability, IPu
             };
         }, cancellationToken).ConfigureAwait(false);
     }
+
+    public async Task<RemoteRelease?> GetLatestReleaseAsync(ProviderContext context, RemoteRepository repository, CancellationToken cancellationToken)
+    {
+        var client = await BuildClientAsync(context, cancellationToken).ConfigureAwait(false);
+
+        return await _resilience.ExecuteAsync(context.Instance, nameof(GetLatestReleaseAsync), _ =>
+        {
+            var projectId = int.Parse(repository.ExternalId);
+
+            // GitLab returns releases newest-first (released_at desc), so the first is the latest. The
+            // iterator is lazy — FirstOrDefault pulls only what it needs. Null when the project has none.
+            var release = client.GetReleases(projectId).All.FirstOrDefault();
+            return Task.FromResult(release == null ? null : ToRemoteRelease(release, repository));
+        }, cancellationToken).ConfigureAwait(false);
+    }
+
+    private static RemoteRelease ToRemoteRelease(ReleaseInfo release, RemoteRepository repository) => new()
+    {
+        TagName = release.TagName,
+        Name = string.IsNullOrWhiteSpace(release.Name) ? null : release.Name,
+        // ReleasedAt is a non-nullable DateTime on NGitLab — default means "no date reported".
+        PublishedDate = release.ReleasedAt == default ? null : new DateTimeOffset(DateTime.SpecifyKind(release.ReleasedAt, DateTimeKind.Utc), TimeSpan.Zero),
+        WebUrl = string.IsNullOrWhiteSpace(release.Links?.Self) ? $"{repository.WebUrl}/-/releases/{release.TagName}" : release.Links!.Self,
+        IsPrerelease = false   // GitLab releases have no pre-release flag.
+    };
 
     public async Task<IReadOnlyList<RemoteLanguage>> GetLanguagesAsync(ProviderContext context, RemoteRepository repository, CancellationToken cancellationToken)
     {

@@ -1,7 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import { repositoriesApi, type BindRepositoriesBulkInput } from "@/api/repositories";
-import type { PullRequestReviewVerdict, PullRequestState } from "@/api/types";
+import type { IssueState, PullRequestReviewVerdict, PullRequestState } from "@/api/types";
 
 /** Live source reads (branches/tree/file) share a 60s staleTime — source changes far less
  *  often than the user clicks around the tree, so we avoid re-fetching every navigation. */
@@ -186,6 +186,35 @@ export function useRepositoryPullRequestCounts(repositoryId: string | null) {
 }
 
 /**
+ * Issue list — same pagination + placeholder discipline as useRepositoryPullRequests.
+ * `state` undefined = all states (the "All" filter). Across page/state changes within the
+ * SAME repo we keep the previous result so the list doesn't flicker to empty between fetches;
+ * across a REPO change we drop the placeholder so the previous repo's issues don't linger.
+ */
+export function useRepositoryIssues(repositoryId: string | null, state: IssueState | undefined, page: number) {
+  return useQuery({
+    queryKey: ["repository", repositoryId, "issues", state ?? "all", page],
+    queryFn: () => repositoriesApi.listIssues(repositoryId!, state, page, PR_PAGE_SIZE),
+    enabled: repositoryId != null,
+    staleTime: 30_000,
+    placeholderData: (previousData, previousQuery) => {
+      if (previousQuery && previousQuery.queryKey[1] === repositoryId) return previousData;
+      return undefined;
+    },
+  });
+}
+
+/** Total open + closed issue counts. Long staleTime like the PR counts — stable across paging. */
+export function useRepositoryIssueCounts(repositoryId: string | null) {
+  return useQuery({
+    queryKey: ["repository", repositoryId, "issues", "counts"],
+    queryFn: () => repositoriesApi.getIssueCounts(repositoryId!),
+    enabled: repositoryId != null,
+    staleTime: 120_000,
+  });
+}
+
+/**
  * Files-tab data. Patch text can be large — the `enabled` gate lets the caller
  * defer the fetch until the user actually clicks the Files changed tab.
  */
@@ -290,6 +319,16 @@ export function useRepositoryLanguages(repositoryId: string | null) {
   return useQuery({
     queryKey: ["repository", repositoryId, "source", "languages"],
     queryFn: () => repositoriesApi.getLanguages(repositoryId!),
+    enabled: repositoryId != null,
+    staleTime: SOURCE_STALE_MS,
+  });
+}
+
+/** Latest release for the Code tab's Releases card. Resolves to null when the repo has no releases. */
+export function useRepositoryLatestRelease(repositoryId: string | null) {
+  return useQuery({
+    queryKey: ["repository", repositoryId, "source", "latest-release"],
+    queryFn: () => repositoriesApi.getLatestRelease(repositoryId!),
     enabled: repositoryId != null,
     staleTime: SOURCE_STALE_MS,
   });

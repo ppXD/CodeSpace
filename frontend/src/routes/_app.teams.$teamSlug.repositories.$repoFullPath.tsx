@@ -6,8 +6,8 @@ import { useRepositoryByFullPath } from "@/hooks/use-repositories";
 /**
  * Repo-detail layout. Renders the breadcrumb / title / per-repo tab strip and
  * leaves the tab body to the sub-route via <Outlet/>. The tab strip is shared
- * across /overview, /pulls, /pulls/{n}, /issues, /branches, /activity so it
- * doesn't remount per tab — counts query stays warm, no flicker.
+ * across /overview, /code, /issues, /pulls, /pulls/{n} so it doesn't remount
+ * per tab — counts query stays warm, no flicker.
  *
  * URL contract: `$repoFullPath` is the provider-side fullPath ("acme/postboy.api"),
  * URL-encoded so the slash survives as `%2F` and the whole identifier stays a single
@@ -66,7 +66,7 @@ function pickActiveTabFromPath(pathname: string): DetailTab {
   const segs = pathname.split("/").filter(Boolean);
   // ["teams", teamSlug, "repositories", encodedFullPath, tab, ...rest]
   const seg = (segs[4] ?? "overview") as DetailTab;
-  const known: DetailTab[] = ["overview", "code", "pulls", "issues", "branches", "activity"];
+  const known: DetailTab[] = ["overview", "code", "issues", "pulls"];
   return known.includes(seg) ? seg : "overview";
 }
 
@@ -76,9 +76,7 @@ function tabToPath(tab: DetailTab) {
   switch (tab) {
     case "overview": return "/teams/$teamSlug/repositories/$repoFullPath/overview" as const;
     case "code": return "/teams/$teamSlug/repositories/$repoFullPath/code" as const;
-    case "pulls": return "/teams/$teamSlug/repositories/$repoFullPath/pulls" as const;
     case "issues": return "/teams/$teamSlug/repositories/$repoFullPath/issues" as const;
-    case "branches": return "/teams/$teamSlug/repositories/$repoFullPath/branches" as const;
-    case "activity": return "/teams/$teamSlug/repositories/$repoFullPath/activity" as const;
+    case "pulls": return "/teams/$teamSlug/repositories/$repoFullPath/pulls" as const;
   }
 }

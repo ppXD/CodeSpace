@@ -4,11 +4,13 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
 import { ApiError } from "@/api/request";
-import type { LabelRef, PullRequestState, RemotePullRequest, RemotePullRequestCheck, RemotePullRequestCommit, RemotePullRequestFile } from "@/api/types";
+import type { LabelRef, PullRequestState, RemoteIssue, RemotePullRequest, RemotePullRequestCheck, RemotePullRequestCommit, RemotePullRequestFile } from "@/api/types";
 import { useProviderInstances } from "@/hooks/use-credentials";
 import {
   PR_PAGE_SIZE,
   useRepository,
+  useRepositoryIssueCounts,
+  useRepositoryIssues,
   useRepositoryPullRequest,
   useRepositoryPullRequestChecks,
   useRepositoryPullRequestCommits,
@@ -32,7 +34,7 @@ import { Pager } from "./pager";
  *                        every sub-route (no re-mount on tab switch).
  *
  *   RepoOverviewBody   — Overview tab body (stats, description, clone URLs).
- *   RepoStubBody       — Issues / Branches / Activity placeholder tab body.
+ *   IssuesListBody     — Issues list body (filter + paginated list).
  *   PullRequestsListBody — Pull requests list body (filter + paginated list).
  *   PullRequestDetailRoute — Pull request detail body (header + tabs + grid).
  *
@@ -41,7 +43,7 @@ import { Pager } from "./pager";
  * the header — no duplicate fetches.
  */
 
-export type DetailTab = "overview" | "code" | "pulls" | "issues" | "branches" | "activity";
+export type DetailTab = "overview" | "code" | "issues" | "pulls";
 
 const PROVIDER_LABEL: Record<string, string> = { GitHub: "GitHub", GitLab: "GitLab", Git: "Git" };
 
@@ -96,6 +98,10 @@ export function RepoDetailHeader({ repoId, activeTab, onTabChange, teamSlug, chi
   //      duplicate request, no second loading state.
   const counts = useRepositoryPullRequestCounts(repoId);
 
+  // Issue counts power the Issues tab badge (total open+closed, same convention as the PR badge) AND
+  // warm the cache so the Issues tab's own counts read is a free hit when the user clicks in.
+  const issueCounts = useRepositoryIssueCounts(repoId);
+
   // Star / fork counts power the GitHub-style pills on the right of the title row. Shared with the
   // Code tab's stats (same query key), so this is a free cache hit there.
   const stats = useRepositoryStats(repoId);
@@ -122,13 +128,12 @@ export function RepoDetailHeader({ repoId, activeTab, onTabChange, teamSlug, chi
   // the top level a single "all activity" total conveys repo busyness better
   // than just the live-open subset.
   const prTotal = counts.data ? counts.data.open + counts.data.closed : undefined;
+  const issueTotal = issueCounts.data ? issueCounts.data.open + issueCounts.data.closed : undefined;
   const detailTabs: Array<[DetailTab, string, number?]> = [
     ["overview", "Overview"],
     ["code", "Code"],
+    ["issues", "Issues", issueTotal],
     ["pulls", "Pull requests", prTotal],
-    ["issues", "Issues"],
-    ["branches", "Branches"],
-    ["activity", "Activity"],
   ];
 
   if (repository.isLoading || instances.isLoading) {
@@ -339,43 +344,159 @@ export function RepoOverviewBody({ repoId }: RepoOverviewBodyProps) {
   );
 }
 
-interface RepoStubBodyProps {
+// ── Issues panel ──────────────────────────────────────────────────────────────
+// Same GitHub-inspired layout as the Pull-requests panel — reuses every .pr-* class
+// (filter tabs, rows, coloured labels, comment chip) so the two tabs read identically.
+// Issues have only Open/Closed states (no draft/merged), so the filter is the same two tabs
+// as the Pulls panel. There's no in-app issue detail yet, so a row click opens the issue on
+// the provider in a new tab.
+
+type IssueFilter = "Open" | "Closed";
+
+interface IssuesListBodyProps {
   repoId: string;
-  kind: "issues" | "branches" | "activity";
+  filter: IssueFilter;
+  page: number;
+  onFilterChange: (next: IssueFilter) => void;
+  onPageChange: (next: number) => void;
 }
 
 /**
- * Placeholder body for tabs we haven't built provider-side queries for yet
- * (issues / branches / activity). Honest copy + a "View on {provider}" escape
- * hatch so the user can always reach the real data. Resolves repo + instance
- * internally to derive the provider label + outbound web URL.
+ * Issues tab body. All state lives in the URL; this is a pure read of `filter`/`page` props
+ * plus two change-callbacks (mirrors PullRequestsListBody). The server filters by state, so
+ * rows render directly — no local re-filter. Counts power the filter chips + true pagination.
  */
-export function RepoStubBody({ repoId, kind }: RepoStubBodyProps) {
+export function IssuesListBody({ repoId, filter, page, onFilterChange, onPageChange }: IssuesListBodyProps) {
   const repository = useRepository(repoId);
   const instances = useProviderInstances();
-
   const repo = repository.data;
   const instance = repo ? instances.data?.find(i => i.id === repo.providerInstanceId) : null;
+  const providerLabel = instance ? PROVIDER_LABEL[instance.provider] : "provider";
+  const repoWebUrl = repo?.webUrl ?? "";
 
-  if (!repo) return null;
+  const query = useRepositoryIssues(repoId, filter, page);
+  const countsQuery = useRepositoryIssueCounts(repoId);
 
-  const heading = kind === "issues" ? "Issues" : kind === "branches" ? "Branches" : "Activity";
-  const Icon = kind === "issues" ? Ic.Dot : kind === "branches" ? Ic.Branch : Ic.Clock;
-  const iconSize = kind === "issues" ? 18 : 20;
+  const goToFilter = (next: IssueFilter) => {
+    if (next === filter) return;
+    onFilterChange(next);
+  };
+
+  const issues = query.data ?? [];
+
+  // Total pages from the cheap counts call; fall back to "is the current page full?" when counts
+  // are still loading or errored.
+  const counts = countsQuery.data;
+  const bucketTotal = counts ? (filter === "Open" ? counts.open : counts.closed) : null;
+  const totalPages = bucketTotal != null ? Math.max(1, Math.ceil(bucketTotal / PR_PAGE_SIZE)) : null;
+  const hasNextPage = totalPages != null ? page < totalPages : issues.length === PR_PAGE_SIZE;
 
   return (
-    <div className="rd-stub">
-      <div className="rd-stub-icon">
-        <Icon size={iconSize} />
+    <div className="pr-panel">
+      {query.error instanceof ApiError && (
+        <div className="cn-banner cn-banner-err">
+          <div className="cn-banner-h">Couldn't load issues</div>
+          <div className="cn-banner-p">{query.error.message}</div>
+        </div>
+      )}
+
+      <div className="pr-card">
+        <div className="pr-toolbar">
+          <div className="pr-tabs">
+            <button className="pr-tab" data-active={filter === "Open"} onClick={() => goToFilter("Open")}>
+              <Ic.IssueOpen size={13} /> Open
+              {counts && <span className="pr-tab-count">{counts.open.toLocaleString()}</span>}
+            </button>
+            <button className="pr-tab" data-active={filter === "Closed"} onClick={() => goToFilter("Closed")}>
+              <Ic.IssueClosed size={13} /> Closed
+              {counts && <span className="pr-tab-count">{counts.closed.toLocaleString()}</span>}
+            </button>
+          </div>
+          <button
+            className="btn btn-ghost"
+            onClick={() => window.open(`${repoWebUrl}/issues`, "_blank", "noopener")}
+            title={`View all issues on ${providerLabel}`}
+          >
+            <Ic.ArrowOut size={12} /> Open on {providerLabel}
+          </button>
+        </div>
+
+        {!query.error && issues.length === 0 && query.isFetching && (
+          <div className="pr-empty">
+            <div className="pr-empty-h">Loading issues…</div>
+            <div className="pr-empty-p">Fetching live from {providerLabel}.</div>
+          </div>
+        )}
+
+        {!query.error && issues.length === 0 && !query.isFetching && (
+          <div className="pr-empty">
+            <div className="pr-empty-h">No {filter.toLowerCase()} issues</div>
+            <div className="pr-empty-p">
+              {filter === "Closed"
+                ? (page > 1 ? `No more closed issues past page ${page - 1}.` : "No closed issues yet.")
+                : "When someone opens an issue on this repository, it'll show up here."}
+            </div>
+          </div>
+        )}
+
+        {issues.length > 0 && (
+          <div className="pr-list" data-stale={query.isPlaceholderData}>
+            {issues.map(issue => (
+              <IssueRow key={issue.externalId} issue={issue} />
+            ))}
+          </div>
+        )}
+
+        {(page > 1 || hasNextPage) && (
+          <Pager
+            current={page}
+            totalPages={totalPages}
+            hasNext={hasNextPage}
+            loading={query.isPlaceholderData}
+            onChange={onPageChange}
+          />
+        )}
       </div>
-      <div className="rd-stub-h">{heading}</div>
-      <div className="rd-stub-p">
-        These are fetched live from {instance ? PROVIDER_LABEL[instance.provider] : "the provider"} —
-        not cached locally. Wiring is coming in the next slice.
+    </div>
+  );
+}
+
+function IssueRow({ issue }: { issue: RemoteIssue }) {
+  // No in-app issue detail yet — a click opens the issue on the provider. Meta line mirrors the
+  // PR row: #number · opened/closed relative · by author · milestone, with a comment chip right.
+  const closed = issue.state === "Closed";
+  const stateDate = closed ? (issue.closedDate ?? issue.createdDate) : issue.createdDate;
+
+  return (
+    <div className="pr-row" onClick={() => window.open(issue.webUrl, "_blank", "noopener")}>
+      <div className="pr-row-state" data-state={closed ? "closed" : "open"}>
+        {closed ? <Ic.IssueClosed size={15} /> : <Ic.IssueOpen size={15} />}
       </div>
-      <button className="btn" style={{ marginTop: 14 }} onClick={() => window.open(repo.webUrl, "_blank", "noopener")}>
-        <Ic.ArrowOut size={13} /> View on {instance ? PROVIDER_LABEL[instance.provider] : "provider"}
-      </button>
+      <div className="pr-row-main">
+        <div className="pr-row-title">
+          <span className="pr-row-title-text">{issue.title}</span>
+          {issue.labels.slice(0, 3).map(l => <PrLabel key={l.name} label={l} />)}
+        </div>
+        <div className="pr-row-meta">
+          <span className="pr-row-num">#{issue.number}</span>
+          <span>{closed ? "closed" : "opened"} {formatRelative(stateDate)}</span>
+          {issue.authorLogin && (
+            <span>by <span className="pr-row-author">{issue.authorLogin}</span></span>
+          )}
+          {issue.milestoneTitle && (
+            <span className="pr-row-milestone" title={`Milestone: ${issue.milestoneTitle}`}>
+              <Ic.Milestone size={11} />
+              <span>{issue.milestoneTitle}</span>
+            </span>
+          )}
+        </div>
+      </div>
+      {issue.commentsCount > 0 && (
+        <div className="pr-row-comments" title={`${issue.commentsCount} comment${issue.commentsCount === 1 ? "" : "s"}`}>
+          <Ic.Chat size={12} />
+          <span>{issue.commentsCount}</span>
+        </div>
+      )}
     </div>
   );
 }

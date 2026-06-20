@@ -46,6 +46,8 @@ public class GitCommentIssueNodeTests
 
         public Task<RemoteIssue> CreateAsync(Guid r, Guid t, CreateIssueInput i, Guid? a, CancellationToken c) => throw new NotImplementedException();
         public Task<RemoteIssue> CloseAsync(Guid r, Guid t, int n, Guid? a, CancellationToken c) => throw new NotImplementedException();
+        public Task<IReadOnlyList<RemoteIssue>> ListAsync(Guid r, Guid t, IssueState? s, int p, int pp, CancellationToken c) => throw new NotImplementedException();
+        public Task<RemoteIssueCounts> GetCountsAsync(Guid r, Guid t, CancellationToken c) => throw new NotImplementedException();
     }
 
     [Fact]

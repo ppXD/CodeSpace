@@ -292,6 +292,35 @@ export interface RemotePullRequestCounts {
   closed: number;
 }
 
+/** Provider-neutral issue lifecycle state. Both GitHub and GitLab issues are open or closed. */
+export type IssueState = "Open" | "Closed";
+
+/**
+ * Provider-neutral issue shape — the Issues tab list row. Pull requests are excluded server-side
+ * (GitHub returns PRs as issues; the provider filters them out). `number` is the per-repo `#N`.
+ */
+export interface RemoteIssue {
+  externalId: string;
+  number: number;
+  title: string;
+  state: IssueState;
+  body?: string | null;
+  authorLogin?: string | null;
+  labels: LabelRef[];
+  /** Comment count — GitHub `comments`, GitLab `user_notes_count`. Powers the row's comment chip. */
+  commentsCount: number;
+  milestoneTitle?: string | null;
+  createdDate: string;
+  /** Null while open — lets the row render "closed N ago" vs "opened N ago". */
+  closedDate?: string | null;
+  webUrl: string;
+}
+
+export interface RemoteIssueCounts {
+  open: number;
+  closed: number;
+}
+
 /** Mirrors backend PullRequestCheckStatus enum. */
 export type PullRequestCheckStatus = "Pending" | "Success" | "Failure" | "Cancelled" | "Skipped" | "Neutral";
 
@@ -395,6 +424,15 @@ export interface RemoteRepositoryStats {
 export interface RemoteLanguage {
   name: string;
   percent: number;
+}
+
+/** The repository's latest release for the Code tab's Releases card. Null from the API when none exist. */
+export interface RemoteRelease {
+  tagName: string;
+  name?: string | null;
+  publishedDate?: string | null;
+  webUrl: string;
+  isPrerelease: boolean;
 }
 
 /** One commit as the Code tab's header bar / file-row last-commit column show it. */

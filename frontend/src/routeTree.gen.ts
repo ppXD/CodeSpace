@@ -39,8 +39,6 @@ import { Route as AppTeamsTeamSlugRepositoriesRepoFullPathPullsRouteImport } fro
 import { Route as AppTeamsTeamSlugRepositoriesRepoFullPathOverviewRouteImport } from './routes/_app.teams.$teamSlug.repositories.$repoFullPath.overview'
 import { Route as AppTeamsTeamSlugRepositoriesRepoFullPathIssuesRouteImport } from './routes/_app.teams.$teamSlug.repositories.$repoFullPath.issues'
 import { Route as AppTeamsTeamSlugRepositoriesRepoFullPathCodeRouteImport } from './routes/_app.teams.$teamSlug.repositories.$repoFullPath.code'
-import { Route as AppTeamsTeamSlugRepositoriesRepoFullPathBranchesRouteImport } from './routes/_app.teams.$teamSlug.repositories.$repoFullPath.branches'
-import { Route as AppTeamsTeamSlugRepositoriesRepoFullPathActivityRouteImport } from './routes/_app.teams.$teamSlug.repositories.$repoFullPath.activity'
 import { Route as AppTeamsTeamSlugRepositoriesRepoFullPathPullsIndexRouteImport } from './routes/_app.teams.$teamSlug.repositories.$repoFullPath.pulls.index'
 import { Route as AppTeamsTeamSlugRepositoriesRepoFullPathPullsNumberRouteImport } from './routes/_app.teams.$teamSlug.repositories.$repoFullPath.pulls.$number'
 
@@ -214,18 +212,6 @@ const AppTeamsTeamSlugRepositoriesRepoFullPathCodeRoute =
     path: '/code',
     getParentRoute: () => AppTeamsTeamSlugRepositoriesRepoFullPathRoute,
   } as any)
-const AppTeamsTeamSlugRepositoriesRepoFullPathBranchesRoute =
-  AppTeamsTeamSlugRepositoriesRepoFullPathBranchesRouteImport.update({
-    id: '/branches',
-    path: '/branches',
-    getParentRoute: () => AppTeamsTeamSlugRepositoriesRepoFullPathRoute,
-  } as any)
-const AppTeamsTeamSlugRepositoriesRepoFullPathActivityRoute =
-  AppTeamsTeamSlugRepositoriesRepoFullPathActivityRouteImport.update({
-    id: '/activity',
-    path: '/activity',
-    getParentRoute: () => AppTeamsTeamSlugRepositoriesRepoFullPathRoute,
-  } as any)
 const AppTeamsTeamSlugRepositoriesRepoFullPathPullsIndexRoute =
   AppTeamsTeamSlugRepositoriesRepoFullPathPullsIndexRouteImport.update({
     id: '/',
@@ -261,8 +247,6 @@ export interface FileRoutesByFullPath {
   '/teams/$teamSlug/repositories/': typeof AppTeamsTeamSlugRepositoriesIndexRoute
   '/teams/$teamSlug/settings/': typeof AppTeamsTeamSlugSettingsIndexRoute
   '/teams/$teamSlug/workflows/': typeof AppTeamsTeamSlugWorkflowsIndexRoute
-  '/teams/$teamSlug/repositories/$repoFullPath/activity': typeof AppTeamsTeamSlugRepositoriesRepoFullPathActivityRoute
-  '/teams/$teamSlug/repositories/$repoFullPath/branches': typeof AppTeamsTeamSlugRepositoriesRepoFullPathBranchesRoute
   '/teams/$teamSlug/repositories/$repoFullPath/code': typeof AppTeamsTeamSlugRepositoriesRepoFullPathCodeRoute
   '/teams/$teamSlug/repositories/$repoFullPath/issues': typeof AppTeamsTeamSlugRepositoriesRepoFullPathIssuesRoute
   '/teams/$teamSlug/repositories/$repoFullPath/overview': typeof AppTeamsTeamSlugRepositoriesRepoFullPathOverviewRoute
@@ -289,8 +273,6 @@ export interface FileRoutesByTo {
   '/teams/$teamSlug/repositories': typeof AppTeamsTeamSlugRepositoriesIndexRoute
   '/teams/$teamSlug/settings': typeof AppTeamsTeamSlugSettingsIndexRoute
   '/teams/$teamSlug/workflows': typeof AppTeamsTeamSlugWorkflowsIndexRoute
-  '/teams/$teamSlug/repositories/$repoFullPath/activity': typeof AppTeamsTeamSlugRepositoriesRepoFullPathActivityRoute
-  '/teams/$teamSlug/repositories/$repoFullPath/branches': typeof AppTeamsTeamSlugRepositoriesRepoFullPathBranchesRoute
   '/teams/$teamSlug/repositories/$repoFullPath/code': typeof AppTeamsTeamSlugRepositoriesRepoFullPathCodeRoute
   '/teams/$teamSlug/repositories/$repoFullPath/issues': typeof AppTeamsTeamSlugRepositoriesRepoFullPathIssuesRoute
   '/teams/$teamSlug/repositories/$repoFullPath/overview': typeof AppTeamsTeamSlugRepositoriesRepoFullPathOverviewRoute
@@ -325,8 +307,6 @@ export interface FileRoutesById {
   '/_app/teams/$teamSlug/repositories/': typeof AppTeamsTeamSlugRepositoriesIndexRoute
   '/_app/teams/$teamSlug/settings/': typeof AppTeamsTeamSlugSettingsIndexRoute
   '/_app/teams/$teamSlug/workflows/': typeof AppTeamsTeamSlugWorkflowsIndexRoute
-  '/_app/teams/$teamSlug/repositories/$repoFullPath/activity': typeof AppTeamsTeamSlugRepositoriesRepoFullPathActivityRoute
-  '/_app/teams/$teamSlug/repositories/$repoFullPath/branches': typeof AppTeamsTeamSlugRepositoriesRepoFullPathBranchesRoute
   '/_app/teams/$teamSlug/repositories/$repoFullPath/code': typeof AppTeamsTeamSlugRepositoriesRepoFullPathCodeRoute
   '/_app/teams/$teamSlug/repositories/$repoFullPath/issues': typeof AppTeamsTeamSlugRepositoriesRepoFullPathIssuesRoute
   '/_app/teams/$teamSlug/repositories/$repoFullPath/overview': typeof AppTeamsTeamSlugRepositoriesRepoFullPathOverviewRoute
@@ -362,8 +342,6 @@ export interface FileRouteTypes {
     | '/teams/$teamSlug/repositories/'
     | '/teams/$teamSlug/settings/'
     | '/teams/$teamSlug/workflows/'
-    | '/teams/$teamSlug/repositories/$repoFullPath/activity'
-    | '/teams/$teamSlug/repositories/$repoFullPath/branches'
     | '/teams/$teamSlug/repositories/$repoFullPath/code'
     | '/teams/$teamSlug/repositories/$repoFullPath/issues'
     | '/teams/$teamSlug/repositories/$repoFullPath/overview'
@@ -390,8 +368,6 @@ export interface FileRouteTypes {
     | '/teams/$teamSlug/repositories'
     | '/teams/$teamSlug/settings'
     | '/teams/$teamSlug/workflows'
-    | '/teams/$teamSlug/repositories/$repoFullPath/activity'
-    | '/teams/$teamSlug/repositories/$repoFullPath/branches'
     | '/teams/$teamSlug/repositories/$repoFullPath/code'
     | '/teams/$teamSlug/repositories/$repoFullPath/issues'
     | '/teams/$teamSlug/repositories/$repoFullPath/overview'
@@ -425,8 +401,6 @@ export interface FileRouteTypes {
     | '/_app/teams/$teamSlug/repositories/'
     | '/_app/teams/$teamSlug/settings/'
     | '/_app/teams/$teamSlug/workflows/'
-    | '/_app/teams/$teamSlug/repositories/$repoFullPath/activity'
-    | '/_app/teams/$teamSlug/repositories/$repoFullPath/branches'
     | '/_app/teams/$teamSlug/repositories/$repoFullPath/code'
     | '/_app/teams/$teamSlug/repositories/$repoFullPath/issues'
     | '/_app/teams/$teamSlug/repositories/$repoFullPath/overview'
@@ -658,20 +632,6 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AppTeamsTeamSlugRepositoriesRepoFullPathCodeRouteImport
       parentRoute: typeof AppTeamsTeamSlugRepositoriesRepoFullPathRoute
     }
-    '/_app/teams/$teamSlug/repositories/$repoFullPath/branches': {
-      id: '/_app/teams/$teamSlug/repositories/$repoFullPath/branches'
-      path: '/branches'
-      fullPath: '/teams/$teamSlug/repositories/$repoFullPath/branches'
-      preLoaderRoute: typeof AppTeamsTeamSlugRepositoriesRepoFullPathBranchesRouteImport
-      parentRoute: typeof AppTeamsTeamSlugRepositoriesRepoFullPathRoute
-    }
-    '/_app/teams/$teamSlug/repositories/$repoFullPath/activity': {
-      id: '/_app/teams/$teamSlug/repositories/$repoFullPath/activity'
-      path: '/activity'
-      fullPath: '/teams/$teamSlug/repositories/$repoFullPath/activity'
-      preLoaderRoute: typeof AppTeamsTeamSlugRepositoriesRepoFullPathActivityRouteImport
-      parentRoute: typeof AppTeamsTeamSlugRepositoriesRepoFullPathRoute
-    }
     '/_app/teams/$teamSlug/repositories/$repoFullPath/pulls/': {
       id: '/_app/teams/$teamSlug/repositories/$repoFullPath/pulls/'
       path: '/'
@@ -722,8 +682,6 @@ const AppTeamsTeamSlugRepositoriesRepoFullPathPullsRouteWithChildren =
   )
 
 interface AppTeamsTeamSlugRepositoriesRepoFullPathRouteChildren {
-  AppTeamsTeamSlugRepositoriesRepoFullPathActivityRoute: typeof AppTeamsTeamSlugRepositoriesRepoFullPathActivityRoute
-  AppTeamsTeamSlugRepositoriesRepoFullPathBranchesRoute: typeof AppTeamsTeamSlugRepositoriesRepoFullPathBranchesRoute
   AppTeamsTeamSlugRepositoriesRepoFullPathCodeRoute: typeof AppTeamsTeamSlugRepositoriesRepoFullPathCodeRoute
   AppTeamsTeamSlugRepositoriesRepoFullPathIssuesRoute: typeof AppTeamsTeamSlugRepositoriesRepoFullPathIssuesRoute
   AppTeamsTeamSlugRepositoriesRepoFullPathOverviewRoute: typeof AppTeamsTeamSlugRepositoriesRepoFullPathOverviewRoute
@@ -733,10 +691,6 @@ interface AppTeamsTeamSlugRepositoriesRepoFullPathRouteChildren {
 
 const AppTeamsTeamSlugRepositoriesRepoFullPathRouteChildren: AppTeamsTeamSlugRepositoriesRepoFullPathRouteChildren =
   {
-    AppTeamsTeamSlugRepositoriesRepoFullPathActivityRoute:
-      AppTeamsTeamSlugRepositoriesRepoFullPathActivityRoute,
-    AppTeamsTeamSlugRepositoriesRepoFullPathBranchesRoute:
-      AppTeamsTeamSlugRepositoriesRepoFullPathBranchesRoute,
     AppTeamsTeamSlugRepositoriesRepoFullPathCodeRoute:
       AppTeamsTeamSlugRepositoriesRepoFullPathCodeRoute,
     AppTeamsTeamSlugRepositoriesRepoFullPathIssuesRoute:

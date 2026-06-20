@@ -4052,6 +4052,26 @@ body.chat-resizing .acs-root .app { transition: none; }
 .acs-root .cb-about-desc { font-size: 13.5px; line-height: 1.55; color: var(--ink-2); margin: 0; }
 .acs-root .cb-about-empty { font-size: 13px; color: var(--muted-2); font-style: italic; margin: 0; }
 
+/* Stats summary card (GitLab "Project information" style): icon · bold count · label per row. No title. */
+.acs-root .cb-stat-list { display: flex; flex-direction: column; gap: 11px; }
+.acs-root .cb-stat-row { display: flex; align-items: center; gap: 9px; font-size: 13.5px; color: var(--muted); }
+.acs-root .cb-stat-ic { display: inline-flex; color: var(--muted-2); flex-shrink: 0; }
+.acs-root .cb-stat-val { color: var(--ink); font-weight: 600; font-variant-numeric: tabular-nums; }
+
+/* Releases card (GitHub style): title + count pill, latest release line, "+N releases" link. */
+.acs-root .cb-side-title-row { display: flex; align-items: center; gap: 8px; }
+.acs-root .cb-side-badge { font-size: 11px; font-weight: 600; color: var(--ink-2); background: var(--line); border-radius: 999px; padding: 1px 8px; font-variant-numeric: tabular-nums; text-transform: none; letter-spacing: 0; }
+.acs-root .cb-release { display: flex; align-items: flex-start; gap: 10px; width: 100%; text-align: left; background: none; border: 0; padding: 0; cursor: pointer; }
+.acs-root .cb-release-ic { color: #2D6A48; flex-shrink: 0; margin-top: 1px; }
+.acs-root .cb-release-main { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.acs-root .cb-release-tag { display: inline-flex; align-items: center; gap: 8px; font-size: 14px; font-weight: 600; color: var(--ink); letter-spacing: -0.01em; }
+.acs-root .cb-release:hover .cb-release-tag { color: var(--accent); }
+.acs-root .cb-release-badge { font-size: 10.5px; font-weight: 600; line-height: 16px; padding: 0 7px; border-radius: 999px; color: #2D6A48; background: #EAF4EE; border: 1px solid #D6E9DD; }
+.acs-root .cb-release-badge[data-pre="true"] { color: var(--accent); background: var(--accent-soft); border-color: #EBCFC1; }
+.acs-root .cb-release-date { font-size: 12px; color: var(--muted); }
+.acs-root .cb-release-more { display: inline-block; margin-top: 12px; background: none; border: 0; padding: 0; font-size: 13px; font-weight: 500; color: var(--accent); cursor: pointer; }
+.acs-root .cb-release-more:hover { text-decoration: underline; }
+
 /* Languages bar + legend. */
 .acs-root .cb-lang-bar { display: flex; height: 8px; border-radius: 999px; overflow: hidden; background: var(--line); }
 .acs-root .cb-lang-seg { height: 100%; min-width: 2px; }

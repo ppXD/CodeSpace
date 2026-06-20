@@ -1,5 +1,5 @@
 import { fetchJson } from "./request";
-import type { BulkBindResult, PullRequestReviewVerdict, PullRequestState, RemoteBranch, RemoteCommitSummary, RemoteFileContent, RemoteLanguage, RemotePullRequest, RemotePullRequestCheck, RemotePullRequestCommit, RemotePullRequestCounts, RemotePullRequestFile, RemotePullRequestReview, RemoteRenderedMarkdown, RemoteRepositoryPage, RemoteRepositoryStats, RemoteTreeEntry, RepositoryDetail, RepositorySummary } from "./types";
+import type { BulkBindResult, IssueState, PullRequestReviewVerdict, PullRequestState, RemoteBranch, RemoteIssue, RemoteIssueCounts, RemoteRelease, RemoteCommitSummary, RemoteFileContent, RemoteLanguage, RemotePullRequest, RemotePullRequestCheck, RemotePullRequestCommit, RemotePullRequestCounts, RemotePullRequestFile, RemotePullRequestReview, RemoteRenderedMarkdown, RemoteRepositoryPage, RemoteRepositoryStats, RemoteTreeEntry, RepositoryDetail, RepositorySummary } from "./types";
 
 export interface BindRepositoryInput {
   providerInstanceId: string;
@@ -93,6 +93,20 @@ export const repositoriesApi = {
   getPullRequestCounts: (repositoryId: string) =>
     fetchJson<RemotePullRequestCounts>(`/api/repositories/${encodeURIComponent(repositoryId)}/pull-requests/counts`),
 
+  // Live issue listing, paginated — mirrors listPullRequests. `state` omitted = all states; pull
+  // requests are excluded server-side. Callers detect "more available" when length === perPage.
+  listIssues: (repositoryId: string, state?: IssueState, page = 1, perPage = 30) => {
+    const params = new URLSearchParams();
+    if (state) params.set("state", state);
+    params.set("page", String(page));
+    params.set("perPage", String(perPage));
+    return fetchJson<RemoteIssue[]>(`/api/repositories/${encodeURIComponent(repositoryId)}/issues?${params.toString()}`);
+  },
+
+  // Total open + closed issue counts. Cheap one-shot per repo (GitHub Search / GitLab GraphQL).
+  getIssueCounts: (repositoryId: string) =>
+    fetchJson<RemoteIssueCounts>(`/api/repositories/${encodeURIComponent(repositoryId)}/issues/counts`),
+
   // Submit a review back to the PR/MR AS the caller's own linked identity (Model B). Returns 428
   // actor_identity_required (surfaced as ApiError) when the caller hasn't linked one — the global
   // ActorIdentityGate catches that and prompts a link, then the caller retries.
@@ -134,6 +148,10 @@ export const repositoriesApi = {
 
   getLanguages: (repositoryId: string) =>
     fetchJson<RemoteLanguage[]>(`/api/repositories/${encodeURIComponent(repositoryId)}/languages`),
+
+  // Latest release for the Code tab's Releases card. Resolves to null when the repo has no releases.
+  getLatestRelease: (repositoryId: string) =>
+    fetchJson<RemoteRelease | null>(`/api/repositories/${encodeURIComponent(repositoryId)}/releases/latest`),
 
   // Latest commit on a path/ref — the header bar. Null body when the path has no history.
   getLatestCommit: (repositoryId: string, path?: string, ref?: string) => {

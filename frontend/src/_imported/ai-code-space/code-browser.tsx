@@ -5,7 +5,8 @@ import rehypeSanitize, { defaultSchema } from "rehype-sanitize";
 import remarkGfm from "remark-gfm";
 
 import { ApiError } from "@/api/request";
-import type { RemoteBranch, RemoteCommitSummary, RemoteFileContent, RemoteLanguage, RemoteTreeEntry, RepositoryDetail } from "@/api/types";
+import type { RemoteBranch, RemoteCommitSummary, RemoteFileContent, RemoteLanguage, RemoteRelease, RemoteRepositoryStats, RemoteTreeEntry, RepositoryDetail } from "@/api/types";
+import { useProviderInstances } from "@/hooks/use-credentials";
 import {
   useRenderMarkdown,
   useRepository,
@@ -13,6 +14,7 @@ import {
   useRepositoryFile,
   useRepositoryLanguages,
   useRepositoryLatestCommit,
+  useRepositoryLatestRelease,
   useRepositoryStats,
   useRepositoryTree,
   useRepositoryTreeCommits,
@@ -39,6 +41,8 @@ export function CodeBrowserBody({ repoId }: CodeBrowserBodyProps) {
   const branches = useRepositoryBranches(repoId);
   const stats = useRepositoryStats(repoId);
   const languages = useRepositoryLanguages(repoId);
+  const latestRelease = useRepositoryLatestRelease(repoId);
+  const instances = useProviderInstances();
 
   const [branch, setBranch] = useState<string | null>(null);
   const [path, setPath] = useState("");
@@ -142,6 +146,12 @@ export function CodeBrowserBody({ repoId }: CodeBrowserBodyProps) {
 
       <aside className="cb-side">
         <AboutCard description={repo.description} />
+        <RepoStatsCard stats={stats.data} />
+        <ReleasesCard
+          release={latestRelease.data}
+          releaseCount={stats.data?.releaseCount ?? null}
+          releasesUrl={buildReleasesUrl(repo.webUrl, instances.data?.find(i => i.id === repo.providerInstanceId)?.provider)}
+        />
         <LanguagesPanel languages={languages.data} />
       </aside>
     </div>
@@ -497,7 +507,79 @@ function DocContent({ repoId, entry, content, isLoading, webUrl, gitRef }: {
     : <pre className="cb-doc-text">{content.text}</pre>;
 }
 
-// ── Right rail: About + Languages ─────────────────────────────────────────────
+// ── Right rail: About · Stats · Releases · Languages ──────────────────────────
+
+/** GitLab "Project information"-style summary: icon · bold count · label, one row each. Rows whose
+ *  number the provider didn't supply are omitted; the whole card hides when none are available. */
+function RepoStatsCard({ stats }: { stats?: RemoteRepositoryStats }) {
+  const rows = [
+    stats?.commitCount != null && { icon: <Ic.Commit size={15} />, value: formatCount(stats.commitCount), label: "Commits" },
+    stats?.branchCount != null && { icon: <Ic.Branch size={15} />, value: formatCount(stats.branchCount), label: "Branches" },
+    stats?.tagCount != null && { icon: <Ic.Tag size={15} />, value: formatCount(stats.tagCount), label: "Tags" },
+    stats?.storageBytes != null && { icon: <Ic.Storage size={15} />, value: formatBytes(stats.storageBytes), label: "Storage" },
+    stats?.releaseCount != null && { icon: <Ic.Release size={15} />, value: formatCount(stats.releaseCount), label: "Releases" },
+  ].filter(Boolean) as Array<{ icon: ReactNode; value: string; label: string }>;
+
+  if (rows.length === 0) return null;
+
+  return (
+    <div className="cb-side-card">
+      <div className="cb-stat-list">
+        {rows.map(r => (
+          <div key={r.label} className="cb-stat-row">
+            <span className="cb-stat-ic">{r.icon}</span>
+            <b className="cb-stat-val">{r.value}</b>
+            <span className="cb-stat-label">{r.label}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+/** GitHub-style Releases box: total count, the latest release (tag · Latest/Pre-release badge · date),
+ *  and a "+N releases" link to the provider's releases page. Hidden entirely when the repo has none. */
+function ReleasesCard({ release, releaseCount, releasesUrl }: { release?: RemoteRelease | null; releaseCount: number | null; releasesUrl: string }) {
+  if ((releaseCount == null || releaseCount === 0) && !release) return null;
+
+  const openReleases = () => window.open(releasesUrl, "_blank", "noopener");
+  const remaining = releaseCount != null ? Math.max(0, releaseCount - 1) : 0;
+
+  return (
+    <div className="cb-side-card">
+      <div className="cb-side-title cb-side-title-row">
+        <span>Releases</span>
+        {releaseCount != null && releaseCount > 0 && <span className="cb-side-badge">{formatCount(releaseCount)}</span>}
+      </div>
+
+      {release ? (
+        <>
+          <button className="cb-release" onClick={() => window.open(release.webUrl, "_blank", "noopener")} title={`Open ${release.tagName} on the provider`}>
+            <Ic.Tag size={16} className="cb-release-ic" />
+            <span className="cb-release-main">
+              <span className="cb-release-tag">
+                {release.tagName}
+                <span className="cb-release-badge" data-pre={release.isPrerelease}>{release.isPrerelease ? "Pre-release" : "Latest"}</span>
+              </span>
+              {release.publishedDate && <span className="cb-release-date">{relativeTime(release.publishedDate)}</span>}
+            </span>
+          </button>
+          {remaining > 0 && (
+            <button className="cb-release-more" onClick={openReleases}>+ {formatCount(remaining)} release{remaining === 1 ? "" : "s"}</button>
+          )}
+        </>
+      ) : (
+        <button className="cb-release-more" onClick={openReleases}>View all releases</button>
+      )}
+    </div>
+  );
+}
+
+/** Releases-list page on the provider — GitLab nests it under `/-/`, GitHub doesn't. */
+function buildReleasesUrl(repoWebUrl: string, provider?: string): string {
+  const base = repoWebUrl.replace(/\/$/, "");
+  return provider === "GitLab" ? `${base}/-/releases` : `${base}/releases`;
+}
 
 function AboutCard({ description }: { description?: string | null }) {
   const hasDescription = !!description && description.trim().length > 0;

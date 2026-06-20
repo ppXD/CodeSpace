@@ -61,6 +61,10 @@ public sealed class GitHubProviderModule : IProviderModule
         // Opening a PR is a repo write — same `repo`/`public_repo` scope family.
         [typeof(IPullRequestWriteCapability)] = ScopeRequirement.AnyOf(GitHubScopes.Repo, GitHubScopes.PublicRepo),
 
+        // Listing issues is a repo READ — same `repo`/`public_repo` family as listing PRs (GitHub treats
+        // issue reads as a subset of repo content reads, no separate scope).
+        [typeof(IIssueCatalogCapability)] = ScopeRequirement.AnyOf(GitHubScopes.Repo, GitHubScopes.PublicRepo),
+
         // Creating an issue is a repo write — same `repo`/`public_repo` family as opening a PR.
         [typeof(IIssueWriteCapability)] = ScopeRequirement.AnyOf(GitHubScopes.Repo, GitHubScopes.PublicRepo),
 

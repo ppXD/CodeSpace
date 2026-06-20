@@ -61,7 +61,7 @@ public sealed class TestRemoteHookStore
     }
 }
 
-public sealed class TestRepositoryProvider : IRepositoryCatalogCapability, ICredentialProbeCapability, IPullRequestReviewCapability, IPullRequestWriteCapability, IIssueWriteCapability, IRepositoryAccessCapability, IRepositorySourceCapability, IWebhookRegistrationCapability, IWebhookSignatureVerifier, IWebhookEventNormalizer
+public sealed class TestRepositoryProvider : IRepositoryCatalogCapability, ICredentialProbeCapability, IPullRequestReviewCapability, IPullRequestWriteCapability, IIssueCatalogCapability, IIssueWriteCapability, IRepositoryInsightsCapability, IRepositoryAccessCapability, IRepositorySourceCapability, IWebhookRegistrationCapability, IWebhookSignatureVerifier, IWebhookEventNormalizer
 {
     /// <summary>The deterministic root-tree entries the source capability returns — grounding tests assert these surface in the planner's grounding string.</summary>
     public static readonly IReadOnlyList<string> RootEntryNames = new[] { "src", "README.md" };
@@ -145,6 +145,46 @@ public sealed class TestRepositoryProvider : IRepositoryCatalogCapability, ICred
     // Echoes the acting credential's id back as the merge result's Sha so a test can assert WHICH credential merged.
     public Task<RemotePullRequestMergeResult> MergePullRequestAsync(ProviderContext context, RemoteRepository repository, int number, MergePullRequestInput input, CancellationToken cancellationToken) =>
         Task.FromResult(new RemotePullRequestMergeResult { Merged = true, Sha = context.Credential.Id.ToString(), Message = $"merged via {input.Method}" });
+
+    // Echoes the state filter + page + perPage into the single returned issue's ExternalId so a catalog
+    // test can assert all three flowed through the service preflight to the provider unchanged.
+    public Task<IReadOnlyList<RemoteIssue>> ListIssuesAsync(ProviderContext context, RemoteRepository repository, IssueState? stateFilter, int page, int perPage, CancellationToken cancellationToken) =>
+        Task.FromResult((IReadOnlyList<RemoteIssue>)new[]
+        {
+            new RemoteIssue
+            {
+                ExternalId = $"{stateFilter?.ToString() ?? "All"}-p{page}-pp{perPage}",
+                Number = page,
+                Title = $"{stateFilter?.ToString() ?? "All"} issue",
+                State = stateFilter ?? IssueState.Open,
+                CommentsCount = perPage,
+                CreatedDate = DateTimeOffset.UnixEpoch,
+                WebUrl = $"https://test.local/{repository.FullPath}/-/issues/{page}"
+            }
+        }.ToList());
+
+    // Fixed totals so a test asserts the counts flow through verbatim (3 open, 5 closed).
+    public Task<RemoteIssueCounts> CountIssuesAsync(ProviderContext context, RemoteRepository repository, CancellationToken cancellationToken) =>
+        Task.FromResult(new RemoteIssueCounts { Open = 3, Closed = 5 });
+
+    // ── IRepositoryInsightsCapability (Code-tab right rail: stats · languages · latest release) ──
+
+    public Task<RemoteRepositoryStats> GetStatsAsync(ProviderContext context, RemoteRepository repository, CancellationToken cancellationToken) =>
+        Task.FromResult(new RemoteRepositoryStats { CommitCount = 304, BranchCount = 47, TagCount = 20, ReleaseCount = 19, StorageBytes = 491520 });
+
+    public Task<IReadOnlyList<RemoteLanguage>> GetLanguagesAsync(ProviderContext context, RemoteRepository repository, CancellationToken cancellationToken) =>
+        Task.FromResult((IReadOnlyList<RemoteLanguage>)new[] { new RemoteLanguage { Name = "C#", Percent = 100 } }.ToList());
+
+    // Echoes the repo's full path into the tag so a test asserts the release flowed through unchanged.
+    public Task<RemoteRelease?> GetLatestReleaseAsync(ProviderContext context, RemoteRepository repository, CancellationToken cancellationToken) =>
+        Task.FromResult<RemoteRelease?>(new RemoteRelease
+        {
+            TagName = "3.0.5",
+            Name = $"Release for {repository.FullPath}",
+            PublishedDate = DateTimeOffset.UnixEpoch,
+            WebUrl = $"https://test.local/{repository.FullPath}/-/releases/3.0.5",
+            IsPrerelease = false
+        });
 
     // Echoes the acting credential's id back as the created issue's ExternalId so a test can assert WHICH
     // credential created it (actor vs connection). Reflects the input title/body/labels.
