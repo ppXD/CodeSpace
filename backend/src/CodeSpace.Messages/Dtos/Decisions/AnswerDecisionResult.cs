@@ -14,6 +14,9 @@ public enum DecisionAnswerOutcome
 
     /// <summary>The answer doesn't fit the decision — an option id that isn't one of the choices, or an empty answer to a free-text ask.</summary>
     Invalid,
+
+    /// <summary>A non-human author (the supervisor arbiter) tried to answer a decision the fail-closed floor reserves for a human (high-risk / irreversible / no-recommendation). Defense-in-depth: the arbiter should escalate these, never auto-answer — only ever returned to the supervisor path, never the human one.</summary>
+    RequiresHuman,
 }
 
 /// <summary>The result of an <c>AnswerDecisionCommand</c> — the outcome plus an optional human-readable reason. A Rule 18.1 pure data noun.</summary>

@@ -168,6 +168,36 @@ public class DecisionFlowTests
             .ShouldBe(DecisionAnswerOutcome.NotFound, "a foreign team can't see or answer the decision");
     }
 
+    [Fact]
+    public async Task A_supervisor_auto_answers_an_arbitratable_node_decision_without_a_user_identity()
+    {
+        // D4b: the supervisor arbiter can also answer a NODE-grain (flow.decision) decision that's arbitratable. A
+        // supervisor has NO user identity, so the answer path must SKIP the act-as-user gate the human path runs — this
+        // proves that skip doesn't crash on a null user + the run resumes with AnsweredBy=supervisor.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var workflowId = await CreateWorkflowAsync(teamId, userId, ArbitratableDecisionDefinition());
+        var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
+        await RunEngineAsync(runId);
+
+        var waitId = (await SingleWaitAsync(runId)).Id;
+
+        using (var scope = _fixture.BeginScope())
+        {
+            (await scope.Resolve<IDecisionAnswerService>().AnswerAsSupervisorAsync(waitId, new[] { "b" }, null, "the build is green", teamId, CancellationToken.None))
+                .Outcome.ShouldBe(DecisionAnswerOutcome.Answered, "the supervisor auto-answers the arbitratable node decision");
+        }
+
+        await RunEngineAsync(runId);
+
+        using (var verify = _fixture.BeginScope())
+        {
+            var node = await verify.Resolve<CodeSpaceDbContext>().WorkflowRunNode.AsNoTracking().SingleAsync(n => n.RunId == runId && n.NodeId == "decide");
+            var outputs = JsonDocument.Parse(node.OutputsJson).RootElement;
+            outputs.GetProperty("selectedOption").GetString().ShouldBe("b");
+            outputs.GetProperty("answeredBy").GetString().ShouldBe(DecisionAnsweredByKinds.Supervisor);
+        }
+    }
+
     // ─── Helpers ────────────────────────────────────────────────────────────────
 
     private async Task<AnswerDecisionResult> AnswerViaQueueAsync(Guid decisionId, IReadOnlyList<string> selectedOptions, string? freeText, Guid teamId, Guid actorUserId)
@@ -215,6 +245,25 @@ public class DecisionFlowTests
             new() { Id = "start", TypeKey = "trigger.manual", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
             new() { Id = "decide", TypeKey = "flow.decision",
                     Config = WorkflowsTestSeed.Json("""{ "question": "Which migration path?", "decisionType": "choose_one", "options": [ {"id":"a","label":"Path A"}, {"id":"b","label":"Path B"} ], "policy": "human_required", "timeoutSeconds": 600, "defaultAction": "a" }"""),
+                    Inputs = WorkflowsTestSeed.EmptyJson() },
+            new() { Id = "end", TypeKey = "builtin.terminal", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
+        },
+        Edges = new List<EdgeDefinition>
+        {
+            new() { From = "start", To = "decide" },
+            new() { From = "decide", To = "end" },
+        },
+    };
+
+    /// <summary>A flow.decision that PASSES the fail-closed floor (supervisor_first + a recommendation + blocking reason + low risk + no side-effecting option), so the supervisor arbiter may auto-answer it.</summary>
+    private static WorkflowDefinition ArbitratableDecisionDefinition() => new()
+    {
+        SchemaVersion = 1,
+        Nodes = new List<NodeDefinition>
+        {
+            new() { Id = "start", TypeKey = "trigger.manual", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
+            new() { Id = "decide", TypeKey = "flow.decision",
+                    Config = WorkflowsTestSeed.Json("""{ "question": "Which path?", "decisionType": "choose_one", "options": [ {"id":"a","label":"A"}, {"id":"b","label":"B"} ], "recommendedOption": "a", "blockingReason": "ready", "riskLevel": "low", "policy": "supervisor_first", "timeoutSeconds": 600, "defaultAction": "a" }"""),
                     Inputs = WorkflowsTestSeed.EmptyJson() },
             new() { Id = "end", TypeKey = "builtin.terminal", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
         },

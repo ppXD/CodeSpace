@@ -75,6 +75,29 @@ public class DecisionQueueFlowTests
         queue.ShouldHaveSingleItem().Question.ShouldBe("Pending node", "a Resolved Decision wait carries the ANSWER, not a pending question — it must not appear");
     }
 
+    [Fact]
+    public async Task ListPendingForAgentRuns_returns_only_the_named_runs_pending_decisions()
+    {
+        // D4b: the supervisor arbiter reads the pending decisions of ITS children (a set of agent runs) — not the
+        // whole team's queue, not a sibling run's, not the already-answered ones.
+        var teamId = await SeedTeamAsync();
+        var runA = Guid.NewGuid();
+        var runB = Guid.NewGuid();
+        var now = DateTimeOffset.UtcNow;
+
+        var dA = await SeedAgentDecisionAsync(teamId, "A pending", now.AddMinutes(2), ToolCallLedgerStatus.AwaitingApproval, runA);
+        await SeedAgentDecisionAsync(teamId, "B pending", now.AddMinutes(1), ToolCallLedgerStatus.AwaitingApproval, runB);   // a sibling run → excluded
+        await SeedAgentDecisionAsync(teamId, "A answered", now.AddMinutes(3), ToolCallLedgerStatus.Succeeded, runA);          // resolved → excluded
+
+        using var scope = _fixture.BeginScope();
+        var pending = await scope.Resolve<IDecisionQueueService>().ListPendingForAgentRunsAsync(new[] { runA }, teamId, CancellationToken.None);
+
+        pending.ShouldHaveSingleItem().Id.ShouldBe(dA, "only run A's PENDING decision");
+
+        (await scope.Resolve<IDecisionQueueService>().ListPendingForAgentRunsAsync(Array.Empty<Guid>(), teamId, CancellationToken.None))
+            .ShouldBeEmpty("an empty run set yields nothing");
+    }
+
     // ─── Drive the real service ───────────────────────────────────────────────────
 
     private async Task<IReadOnlyList<Messages.Dtos.Decisions.PendingDecision>> ListPendingAsync(Guid teamId)
@@ -106,13 +129,13 @@ public class DecisionQueueFlowTests
         ResumeBackend = grain,
     };
 
-    private async Task<Guid> SeedAgentDecisionAsync(Guid teamId, string question, DateTimeOffset deadline, ToolCallLedgerStatus status)
+    private async Task<Guid> SeedAgentDecisionAsync(Guid teamId, string question, DateTimeOffset deadline, ToolCallLedgerStatus status, Guid? agentRunId = null)
     {
         using var scope = _fixture.BeginScope();
         var db = scope.Resolve<CodeSpaceDbContext>();
 
         var ledgerId = Guid.NewGuid();
-        var runId = Guid.NewGuid();
+        var runId = agentRunId ?? Guid.NewGuid();
         var envelope = Envelope(question, deadline, DecisionResumeBackends.ToolLedger, nodeId: null, agentRunId: runId, workflowRunId: null);
 
         db.ToolCallLedger.Add(new ToolCallLedger

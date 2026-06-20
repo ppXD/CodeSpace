@@ -310,10 +310,109 @@ public class McpDecisionFlowTests
         await call;
     }
 
+    [Fact]
+    public async Task A_supervisor_auto_answers_an_arbitratable_agent_decision_with_a_rationale()
+    {
+        // D4b: the supervisor arbiter auto-answers a low-risk, arbitratable decision (supervisor_first, past the floor) —
+        // the blocked mid-run call unblocks with AnsweredBy=supervisor + the REQUIRED rationale (AC3).
+        var (teamId, ownerId, channelId) = await SeedTeamChannelAsync();
+        var runId = Guid.NewGuid();
+
+        using var scope = _fixture.BeginScope();
+        var handler = DecisionHandler(scope, AgentAutonomyLevel.Standard, teamId, runId, channelId);
+
+        var call = Task.Run(() => CallToolAsync(handler, new
+        {
+            question = "which path?", decisionType = "choose_one",
+            options = new[] { new { id = "a", label = "A" }, new { id = "b", label = "B" } },
+            recommendedOption = "a", blockingReason = "the build is green", riskLevel = "low", policy = "supervisor_first",
+        }));
+
+        var (ledgerId, _) = await WaitForPostedCardAsync(teamId, runId);
+
+        (await AnswerAsSupervisorAsync(ledgerId, new[] { "b" }, null, "the diff is clean and reversible", teamId)).Outcome
+            .ShouldBe(DecisionAnswerOutcome.Answered);
+
+        var answer = (await call).GetProperty("structuredContent");
+        answer.GetProperty("answeredBy").GetString().ShouldBe("supervisor", "the arbiter authored the answer");
+        answer.GetProperty("rationale").GetString().ShouldBe("the diff is clean and reversible", "a non-human answer carries its rationale (AC3)");
+        answer.GetProperty("selectedOptions")[0].GetString().ShouldBe("b");
+    }
+
+    [Fact]
+    public async Task A_supervisor_cannot_auto_answer_a_human_only_decision()
+    {
+        // Defense-in-depth: even if the arbiter mis-decides, the answer service re-runs the fail-closed floor — a
+        // high-risk decision is human-only, so the supervisor path returns RequiresHuman and the decision stays parked.
+        var (teamId, ownerId, channelId) = await SeedTeamChannelAsync();
+        var runId = Guid.NewGuid();
+
+        using var scope = _fixture.BeginScope();
+        var handler = DecisionHandler(scope, AgentAutonomyLevel.Standard, teamId, runId, channelId);
+
+        var call = Task.Run(() => CallToolAsync(handler, new
+        {
+            question = "deploy to prod?", decisionType = "choose_one", options = new[] { new { id = "a", label = "A" } },
+            recommendedOption = "a", blockingReason = "ready", riskLevel = "high", policy = "supervisor_first",
+        }));
+
+        var (ledgerId, messageId) = await WaitForPostedCardAsync(teamId, runId);
+
+        (await AnswerAsSupervisorAsync(ledgerId, new[] { "a" }, null, "looks fine to me", teamId)).Outcome
+            .ShouldBe(DecisionAnswerOutcome.RequiresHuman, "the floor forbids the supervisor from auto-answering a high-risk decision");
+
+        (await ReadRowAsync(ledgerId)).Status.ShouldBe(ToolCallLedgerStatus.AwaitingApproval, "the decision stays parked for a human");
+
+        await RespondAsync(teamId, messageId, "a", ownerId);   // a human still can answer it
+        (await call).GetProperty("isError").GetBoolean().ShouldBeFalse();
+    }
+
+    [Fact]
+    public async Task A_supervisor_cannot_auto_answer_a_decision_the_raiser_declared_human_required()
+    {
+        // The floor re-check honors an EXPLICITLY-declared human_required even with otherwise-clean danger signals — the
+        // raiser reserved it for a person ("no auto / supervisor answer"), so the supervisor must not auto-answer it.
+        var (teamId, ownerId, channelId) = await SeedTeamChannelAsync();
+        var runId = Guid.NewGuid();
+
+        using var scope = _fixture.BeginScope();
+        var handler = DecisionHandler(scope, AgentAutonomyLevel.Standard, teamId, runId, channelId);
+
+        var call = Task.Run(() => CallToolAsync(handler, new
+        {
+            question = "ok?", decisionType = "choose_one", options = new[] { new { id = "a", label = "A" } },
+            recommendedOption = "a", blockingReason = "ready", riskLevel = "low", policy = "human_required",
+        }));
+
+        var (ledgerId, messageId) = await WaitForPostedCardAsync(teamId, runId);
+
+        (await AnswerAsSupervisorAsync(ledgerId, new[] { "a" }, null, "looks fine", teamId)).Outcome
+            .ShouldBe(DecisionAnswerOutcome.RequiresHuman, "an explicitly-declared human_required is human-only even with clean signals");
+
+        await RespondAsync(teamId, messageId, "a", ownerId);
+        await call;
+    }
+
+    [Fact]
+    public async Task A_supervisor_answer_with_a_blank_rationale_is_rejected()
+    {
+        // AC3 — a non-human answer is never silent. Rejected up front, before any decision is even read.
+        var (teamId, _, _) = await SeedTeamChannelAsync();
+
+        (await AnswerAsSupervisorAsync(Guid.NewGuid(), new[] { "a" }, null, "   ", teamId)).Outcome
+            .ShouldBe(DecisionAnswerOutcome.Invalid, "a supervisor answer must carry a rationale");
+    }
+
     private async Task<AnswerDecisionResult> AnswerViaQueueAsync(Guid decisionId, IReadOnlyList<string> selectedOptions, string? freeText, Guid teamId, Guid actorUserId)
     {
         using var scope = _fixture.BeginScope();
         return await scope.Resolve<IDecisionAnswerService>().AnswerAsync(decisionId, selectedOptions, freeText, teamId, actorUserId, CancellationToken.None);
+    }
+
+    private async Task<AnswerDecisionResult> AnswerAsSupervisorAsync(Guid decisionId, IReadOnlyList<string> selectedOptions, string? freeText, string rationale, Guid teamId)
+    {
+        using var scope = _fixture.BeginScope();
+        return await scope.Resolve<IDecisionAnswerService>().AnswerAsSupervisorAsync(decisionId, selectedOptions, freeText, rationale, teamId, CancellationToken.None);
     }
 
     // ─── Build the handler with the decision surface ─────────────────────────────
