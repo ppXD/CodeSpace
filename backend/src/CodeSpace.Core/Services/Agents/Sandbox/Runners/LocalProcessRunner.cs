@@ -141,7 +141,7 @@ public sealed partial class LocalProcessRunner : ISandboxRunner, ISandboxStreamR
         return info;
     }
 
-    /// <summary>Reduce the inherited worker environment to <see cref="EnvAllowlist"/>, then layer the spec's own variables on top so an injected value always wins over an allow-listed one.</summary>
+    /// <summary>Reduce the inherited worker environment to <see cref="EnvAllowlist"/> over a <see cref="NonInteractiveEnv"/> base, then layer the spec's own variables on top — so a spec-injected value wins over an allow-listed inherited one, which wins over a non-interactive default.</summary>
     internal static void ApplyEnvironment(ProcessStartInfo info, SandboxSpec spec)
     {
         var preserved = new List<KeyValuePair<string, string?>>();
@@ -149,6 +149,14 @@ public sealed partial class LocalProcessRunner : ISandboxRunner, ISandboxStreamR
             if (info.Environment.TryGetValue(name, out var value)) preserved.Add(new(name, value));
 
         info.Environment.Clear();
+
+        // C1: the non-interactive BASE of a scrubbed env — a nested apt/npm/pip/git prompt auto-defaults instead of
+        // reading EOF / hanging until the wall-clock timeout kills the tree (a useless TimedOut, never a decide). Lowest
+        // precedence: an allow-listed inherited value, then an explicit spec.Environment value, layered on top still
+        // wins (operator intent > default). Flows through the bwrap path too — it has no --clearenv, so the confined
+        // child inherits this env.
+        foreach (var (key, value) in NonInteractiveEnv.Defaults) info.Environment[key] = value;
+
         foreach (var kept in preserved) info.Environment[kept.Key] = kept.Value;
 
         foreach (var (key, value) in spec.Environment) info.Environment[key] = value;

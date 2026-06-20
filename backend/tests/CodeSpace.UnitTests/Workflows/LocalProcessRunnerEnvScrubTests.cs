@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using CodeSpace.Core.Services.Agents.Sandbox;
 using CodeSpace.Core.Services.Agents.Sandbox.Runners;
 using CodeSpace.Messages.Agents;
 using Shouldly;
@@ -82,6 +83,88 @@ public sealed class LocalProcessRunnerEnvScrubTests
             stdout.ShouldNotContain("worker-secret");           // nor its VALUE
         }
         finally { Environment.SetEnvironmentVariable(sentinel, null); }
+    }
+
+    // ── C1: non-interactive env defaults (a nested tool's prompt auto-defaults instead of hanging) ────────────────
+
+    [Fact]
+    public void NonInteractiveEnv_defaults_pinned() =>
+        // Each entry makes a common toolchain non-interactive. Changing the set changes how every agent child behaves
+        // toward prompts — pin it so it's a visible, reviewed decision (Rule 8).
+        NonInteractiveEnv.Defaults.ShouldBe(new Dictionary<string, string>
+        {
+            ["CI"] = "1",
+            ["DEBIAN_FRONTEND"] = "noninteractive",
+            ["DEBCONF_NONINTERACTIVE_SEEN"] = "true",
+            ["NPM_CONFIG_YES"] = "true",
+            ["PIP_NO_INPUT"] = "1",
+            ["GIT_TERMINAL_PROMPT"] = "0",
+        }, ignoreOrder: true);
+
+    [Fact]
+    public void Injects_the_non_interactive_defaults_into_the_scrubbed_child_env()
+    {
+        var info = LocalProcessRunner.BuildStartInfo(EnvSpec());
+
+        foreach (var (key, value) in NonInteractiveEnv.Defaults)
+            info.Environment[key].ShouldBe(value, $"{key} is injected so a nested tool takes its non-interactive default");
+
+        info.Environment["INJECTED"].ShouldBe("ok", "the spec's own env still survives alongside the defaults");
+    }
+
+    [Fact]
+    public void An_explicit_spec_value_overrides_a_non_interactive_default()
+    {
+        // Operator intent wins: a task that deliberately sets one of these (e.g. to re-enable a prompt path) is honoured.
+        var spec = EnvSpec() with { Environment = new Dictionary<string, string> { ["INJECTED"] = "ok", ["GIT_TERMINAL_PROMPT"] = "1" } };
+
+        LocalProcessRunner.BuildStartInfo(spec).Environment["GIT_TERMINAL_PROMPT"].ShouldBe("1", "an explicit spec value overrides the non-interactive default");
+    }
+
+    [Fact]
+    public async Task A_real_child_process_sees_the_non_interactive_defaults()
+    {
+        if (OperatingSystem.IsWindows()) return;   // uses `env`; the dict-level tests cover the logic cross-platform
+
+        var spec = new SandboxSpec { Command = "/bin/sh", Args = new[] { "-c", "env" }, TimeoutSeconds = 30 };
+
+        using var process = Process.Start(LocalProcessRunner.BuildStartInfo(spec))!;
+        var stdout = await process.StandardOutput.ReadToEndAsync();
+        await process.WaitForExitAsync();
+
+        stdout.ShouldContain("CI=1");
+        stdout.ShouldContain("DEBIAN_FRONTEND=noninteractive");
+        stdout.ShouldContain("GIT_TERMINAL_PROMPT=0");
+    }
+
+    [Fact]
+    public async Task A_child_that_branches_on_the_prompt_takes_the_non_interactive_path_and_never_hangs()
+    {
+        // Gate #6: a child that WOULD block on a prompt instead takes its non-interactive branch because CI=1 is
+        // injected, so it finishes immediately rather than sitting until the wall-clock timeout. The teeth are REAL: the
+        // `else` branch reads from a FIFO that NOBODY writes — opening a FIFO for read blocks until a writer appears —
+        // so if the injection were missing the child would genuinely HANG there until the short timeout fired
+        // (TimedOut), exactly the silent hang C1 exists to prevent. With C1 present it takes the echo branch and never
+        // opens the FIFO → fast Success.
+        if (OperatingSystem.IsWindows()) return;
+
+        var fifo = Path.Combine(Path.GetTempPath(), "cs-c1-fifo-" + Guid.NewGuid().ToString("N"));
+        using (var mkfifo = Process.Start("mkfifo", fifo)!) await mkfifo.WaitForExitAsync();
+        try
+        {
+            var spec = new SandboxSpec
+            {
+                Command = "/bin/sh",
+                Args = new[] { "-c", $"if [ \"$CI\" = \"1\" ]; then echo NONINTERACTIVE; else read line < {fifo}; fi" },
+                TimeoutSeconds = 5,
+            };
+
+            var result = await new LocalProcessRunner().RunAsync(spec, CancellationToken.None);
+
+            result.Status.ShouldBe(SandboxStatus.Success, "CI=1 makes the child take the non-interactive branch — it never blocks on the no-writer FIFO until the timeout (a missing injection would TimedOut here)");
+            result.Stdout.ShouldContain("NONINTERACTIVE");
+        }
+        finally { File.Delete(fifo); }
     }
 
     private static SandboxSpec EnvSpec() => new()
