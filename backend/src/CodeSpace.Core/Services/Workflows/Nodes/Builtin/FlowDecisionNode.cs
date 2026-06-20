@@ -83,7 +83,7 @@ public sealed class FlowDecisionNode : INodeRuntime
         // First pass: build the typed envelope + park on a BOUNDED Decision wait (the deadline applies the default so
         // it can never hang). The (run, node, iteration) unique index makes a re-suspend idempotent.
         var request = BuildRequest(context);
-        var timeoutAnswer = BuildTimeoutAnswer(request);
+        var timeoutAnswer = DecisionAnswer.Timeout(request, request.Id);
 
         return Task.FromResult(NodeResult.Suspend(new SuspensionToken
         {
@@ -135,16 +135,6 @@ public sealed class FlowDecisionNode : INodeRuntime
         // envelope carries the EFFECTIVE policy, so the queue + the D4 arbiter never auto-resolve what only a human may.
         return draft with { Policy = DecisionPolicyFloor.Effective(draft) };
     }
-
-    /// <summary>The default decision injected when the bounded-wait deadline fires — a DecisionAnswer shaped exactly like a real answer, so the resumed pass maps it identically (the run always makes progress).</summary>
-    private static DecisionAnswer BuildTimeoutAnswer(DecisionRequest request) => new()
-    {
-        DecisionId = request.Id,
-        AnsweredBy = DecisionAnsweredByKinds.Timeout,
-        SelectedOptions = request.DefaultAction is { } d ? new[] { d } : Array.Empty<string>(),
-        Rationale = "No answer before the deadline; applied the configured default.",
-        TimedOut = true,
-    };
 
     private static Dictionary<string, JsonElement> MapAnswerToOutputs(JsonElement resumePayload)
     {

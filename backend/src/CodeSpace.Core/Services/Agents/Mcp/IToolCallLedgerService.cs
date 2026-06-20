@@ -1,3 +1,4 @@
+using System.Text.Json;
 using CodeSpace.Core.DependencyInjection;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
@@ -77,6 +78,19 @@ public interface IToolCallLedgerService
     /// never silently truncated.
     /// </summary>
     Task<IReadOnlyList<ExpiredToolApproval>> ExpireStaleApprovalsAsync(DateTimeOffset now, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Decision reaper sweep (Decision substrate D5b, AC4 never-hang): for every UNDECIDED <c>decision.request</c> row
+    /// past its deadline, apply the configured default so a stranded agent (disconnect / pod restart / lost waiter) never
+    /// hangs. Candidate set is the <c>ToolKind == decision.request</c> COMPLEMENT of <see cref="ExpireStaleApprovalsAsync"/>'s
+    /// (the two reapers are disjoint by kind, D5a): <c>AwaitingApproval AND ApprovedAt == null AND ApprovalDeadlineAt &lt; now</c>.
+    /// Each candidate's stashed envelope is read for its <c>DefaultAction</c>; a row WITH a default is answered by the
+    /// shared answer CAS (<see cref="TryAnswerDecisionAsync"/> → <c>Succeeded</c> carrying a <c>DecisionAnswer.Timeout</c>,
+    /// NOT the approval <c>Expired</c> terminal — so the blocked call reads the default, not an error). A row with NO
+    /// default is LEFT Pending (convert-to-human is D5d). Single-winner per row (a reaper tick racing a human answer leaves
+    /// one winner via the same CAS); team-agnostic; bounded per sweep (cap logged, never silently truncated).
+    /// </summary>
+    Task<IReadOnlyList<TimedOutDecision>> ExpireStaleDecisionsAsync(DateTimeOffset now, CancellationToken cancellationToken);
 
     /// <summary>Team-scoped audit read of a run's ledger rows, newest first (like <see cref="AgentRunService"/>.GetEventsAsync — a foreign run id returns empty).</summary>
     Task<IReadOnlyList<ToolCallLedger>> GetForRunAsync(Guid agentRunId, Guid teamId, CancellationToken cancellationToken);
@@ -307,6 +321,87 @@ public sealed class ToolCallLedgerService : IToolCallLedgerService, IScopedDepen
             .ConfigureAwait(false);
 
         return affected == 1;
+    }
+
+    // The decision envelope + answer are serialized Web-default (camelCase) on the agent grain — the SAME options
+    // DecisionAnswerService / DecisionQueueService use, so the reaper's timeout answer round-trips identically.
+    private static readonly JsonSerializerOptions DecisionJson = new(JsonSerializerDefaults.Web);
+
+    public async Task<IReadOnlyList<TimedOutDecision>> ExpireStaleDecisionsAsync(DateTimeOffset now, CancellationToken cancellationToken)
+    {
+        // The decision-only complement of ExpireStaleApprovalsAsync's candidate set (disjoint by ToolKind, D5a). Selecting
+        // the stashed envelope avoids a second read — the DefaultAction lives inside it, not in a column.
+        var candidates = await _db.ToolCallLedger.AsNoTracking()
+            .Where(l => l.Status == ToolCallLedgerStatus.AwaitingApproval && l.ApprovedAt == null && l.ToolKind == DecisionToolKinds.DecisionRequest && l.ApprovalDeadlineAt != null && l.ApprovalDeadlineAt < now)
+            .OrderBy(l => l.ApprovalDeadlineAt)
+            .Take(ExpiryBatchSize + 1)
+            .Select(l => new { l.Id, l.TeamId, l.ApprovalMessageId, l.DecisionEnvelopeJson })
+            .ToListAsync(cancellationToken).ConfigureAwait(false);
+
+        var capped = candidates.Count > ExpiryBatchSize;
+
+        var timedOut = new List<TimedOutDecision>(Math.Min(candidates.Count, ExpiryBatchSize));
+
+        foreach (var c in candidates.Take(ExpiryBatchSize))
+            if (await TryTimeoutOneAsync(c.Id, c.TeamId, c.ApprovalMessageId, c.DecisionEnvelopeJson, now, cancellationToken).ConfigureAwait(false) is { } row)
+                timedOut.Add(row);
+
+        if (timedOut.Count > 0) _logger.LogInformation("Decision reaper applied the default to {Count} timed-out decision(s)", timedOut.Count);
+
+        if (capped) _logger.LogWarning("Decision reaper hit the per-sweep cap of {Cap} — a backlog remains for the next tick", ExpiryBatchSize);
+
+        return timedOut;
+    }
+
+    /// <summary>How far a no-default overdue decision's reaper re-examination is pushed out (D5b starvation guard). Re-examined hourly, it never re-fills the head of the ascending-deadline page — so an answerable (defaulted) row is never starved behind a backlog of un-defaultable ones — while staying AwaitingApproval for a human in the queue (the full policy convert-to-human is D5d).</summary>
+    public static readonly TimeSpan DecisionDeferBackoff = TimeSpan.FromHours(1);
+
+    // Apply ONE overdue decision's default via the shared answer CAS. A row with no parseable envelope or no DefaultAction
+    // has NO safe default to apply: it is never blind-expired (that would surface to the agent as an error) and never left
+    // perpetually overdue (it would re-fill the head of the ascending-deadline page every tick and STARVE newer defaultable
+    // rows — the AC4 hole). Instead its reaper re-examination is DEFERRED (deadline pushed out) so the page drains; it stays
+    // AwaitingApproval for a human (convert-to-human is D5d). The answer CAS is single-winner — a tick losing to a human
+    // answer returns null.
+    private async Task<TimedOutDecision?> TryTimeoutOneAsync(Guid ledgerId, Guid teamId, Guid? approvalMessageId, string? envelopeJson, DateTimeOffset now, CancellationToken cancellationToken)
+    {
+        var request = TryDeserializeEnvelope(envelopeJson);
+
+        if (request is null || string.IsNullOrWhiteSpace(request.DefaultAction))
+        {
+            await DeferDecisionReexaminationAsync(ledgerId, teamId, now, cancellationToken).ConfigureAwait(false);
+
+            return null;
+        }
+
+        var answerJson = JsonSerializer.Serialize(DecisionAnswer.Timeout(request, ledgerId), DecisionJson);
+
+        var won = await TryAnswerDecisionAsync(ledgerId, teamId, answerJson, cancellationToken).ConfigureAwait(false);
+
+        return won ? new TimedOutDecision { LedgerId = ledgerId, TeamId = teamId, ApprovalMessageId = approvalMessageId } : null;
+    }
+
+    // Push a no-default overdue decision's deadline out so it leaves the reaper's overdue candidate set (the starvation
+    // guard). ToolKind + Status guarded so it only ever bumps a still-pending decision row; the column deadline is
+    // reaper-internal for a decision (the queue / display read the envelope's TimeoutAt), so this never moves what a human
+    // sees — only when the reaper next re-checks. Idempotent under concurrent sweeps (both set the same future instant).
+    private async Task DeferDecisionReexaminationAsync(Guid ledgerId, Guid teamId, DateTimeOffset now, CancellationToken cancellationToken)
+    {
+        var deferredUntil = now + DecisionDeferBackoff;
+
+        await _db.ToolCallLedger
+            .Where(l => l.Id == ledgerId && l.TeamId == teamId && l.Status == ToolCallLedgerStatus.AwaitingApproval && l.ToolKind == DecisionToolKinds.DecisionRequest)
+            .ExecuteUpdateAsync(s => s
+                .SetProperty(l => l.ApprovalDeadlineAt, deferredUntil)
+                .SetProperty(l => l.LastModifiedDate, now), cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    private static DecisionRequest? TryDeserializeEnvelope(string? envelopeJson)
+    {
+        if (string.IsNullOrWhiteSpace(envelopeJson)) return null;
+
+        try { return JsonSerializer.Deserialize<DecisionRequest>(envelopeJson, DecisionJson); }
+        catch (JsonException) { return null; }
     }
 
     public async Task<IReadOnlyList<ToolCallLedger>> GetForRunAsync(Guid agentRunId, Guid teamId, CancellationToken cancellationToken) =>

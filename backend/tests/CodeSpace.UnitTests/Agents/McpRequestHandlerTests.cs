@@ -741,8 +741,10 @@ public class McpRequestHandlerTests
         public Task<IReadOnlyList<Core.Persistence.Entities.ToolCallLedger>> GetForRunAsync(Guid agentRunId, Guid teamId, CancellationToken ct) =>
             Task.FromResult<IReadOnlyList<Core.Persistence.Entities.ToolCallLedger>>(Rows);
 
-        // The handler never reaps — the reaper job drives ExpireStaleApprovalsAsync, not the request handler.
+        // The handler never reaps — the reaper jobs drive ExpireStale*Async, not the request handler.
         public Task<IReadOnlyList<ExpiredToolApproval>> ExpireStaleApprovalsAsync(DateTimeOffset now, CancellationToken ct) =>
+            throw new NotImplementedException();
+        public Task<IReadOnlyList<CodeSpace.Messages.Decisions.TimedOutDecision>> ExpireStaleDecisionsAsync(DateTimeOffset now, CancellationToken ct) =>
             throw new NotImplementedException();
     }
 
