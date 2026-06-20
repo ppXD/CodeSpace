@@ -93,6 +93,7 @@ public class ListToolCallsQueryHandlerTests
         public Task<bool> TryAnswerDecisionAsync(Guid ledgerId, Guid teamId, string answerJson, CancellationToken cancellationToken) => throw new NotImplementedException();
         public Task SetDecisionEnvelopeAsync(Guid ledgerId, Guid teamId, string envelopeJson, CancellationToken cancellationToken) => throw new NotImplementedException();
         public Task<IReadOnlyList<ExpiredToolApproval>> ExpireStaleApprovalsAsync(DateTimeOffset now, CancellationToken cancellationToken) => throw new NotImplementedException();
+        public Task<IReadOnlyList<CodeSpace.Messages.Decisions.TimedOutDecision>> ExpireStaleDecisionsAsync(DateTimeOffset now, CancellationToken cancellationToken) => throw new NotImplementedException();
     }
 
     private sealed class StubCurrentTeam : ICurrentTeam

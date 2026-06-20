@@ -31,4 +31,20 @@ public sealed record DecisionAnswer
 
     /// <summary>True when the bounded-wait deadline applied the default rather than anyone answering.</summary>
     public bool TimedOut { get; init; }
+
+    /// <summary>
+    /// The default answer the bounded-wait deadline injects (AC4 — a decision never hangs): the configured
+    /// <see cref="DecisionRequest.DefaultAction"/> (empty selection when there is none), stamped <c>Timeout</c> with a
+    /// rationale and shaped EXACTLY like a real answer so EVERY grain (a node wait + an agent ledger row) maps it
+    /// identically. <paramref name="decisionId"/> is the grain's durable handle — the node passes the request id, the
+    /// agent reaper passes the tool-ledger row id (each the queue handle for its backend).
+    /// </summary>
+    public static DecisionAnswer Timeout(DecisionRequest request, Guid decisionId) => new()
+    {
+        DecisionId = decisionId,
+        AnsweredBy = DecisionAnsweredByKinds.Timeout,
+        SelectedOptions = string.IsNullOrWhiteSpace(request.DefaultAction) ? Array.Empty<string>() : new[] { request.DefaultAction },
+        Rationale = "No answer before the deadline; applied the configured default.",
+        TimedOut = true,
+    };
 }
