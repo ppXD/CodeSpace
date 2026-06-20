@@ -1,3 +1,5 @@
+using CodeSpace.Messages.Dtos.Decisions;
+
 namespace CodeSpace.Messages.Agents;
 
 /// <summary>
@@ -111,6 +113,15 @@ public sealed record SupervisorTurnContext
 
     /// <summary>The credentialed-model ROW id the supervisor's own decider runs on (carried from <c>SupervisorGoalConfig.SupervisorModelId</c>). REQUIRED — the decider resolves this row to its model + credential and fails closed when null/unresolvable. Distinct from the agent pool (<see cref="AllowedModelIds"/>): the brain is the operator's explicit pick, never bounded by the agent allow-list.</summary>
     public Guid? SupervisorModelId { get; init; }
+
+    /// <summary>
+    /// The PENDING decisions this run's CHILD agent runs raised and are blocked on (Decision substrate D4c-2), read off
+    /// the cross-grain queue on rehydrate (soonest-deadline first). The arbiter drains these BEFORE the decider each turn:
+    /// it auto-answers the ones it is confident about (low/med risk, within the fail-closed floor) and LEAVES the rest in
+    /// the queue for a human. Empty (the common no-pending-child path) keeps the turn byte-identical to pre-D4c-2 + DB-free.
+    /// A pure data noun (Rule 18.1) — the projected <see cref="PendingDecision"/>, never the Core entity.
+    /// </summary>
+    public IReadOnlyList<PendingDecision> PendingChildDecisions { get; init; } = Array.Empty<PendingDecision>();
 }
 
 /// <summary>One prior decision replayed from the ledger — its row id + kind + emitted payload + (for a terminal) its recorded outcome. A pure data noun.</summary>
