@@ -264,10 +264,14 @@ public sealed class ToolCallLedgerService : IToolCallLedgerService, IScopedDepen
     public async Task<IReadOnlyList<ExpiredToolApproval>> ExpireStaleApprovalsAsync(DateTimeOffset now, CancellationToken cancellationToken)
     {
         // Candidate set (bounded): undecided approvals past their deadline. ApprovedAt == null is LOAD-BEARING — an
-        // approved-but-not-yet-executed row belongs to an in-flight execution claim and must NEVER be expired. Take
-        // ExpiryBatchSize + 1 so a full page tells us the sweep was capped (logged below — no silent truncation).
+        // approved-but-not-yet-executed row belongs to an in-flight execution claim and must NEVER be expired. The
+        // ToolKind != DecisionRequest guard is LOAD-BEARING too (Decision substrate D5a): a parked decision.request row
+        // is ALSO AwaitingApproval with an ApprovalDeadlineAt, but it must terminate via its OWN reaper (a timeout
+        // DecisionAnswer that honours DefaultAction / convert-to-human), NOT this generic approval Expired CAS — which
+        // would surface to the agent as an error and discard the decision's default. The two reapers are disjoint by
+        // ToolKind. Take ExpiryBatchSize + 1 so a full page tells us the sweep was capped (logged below — no silent truncation).
         var candidates = await _db.ToolCallLedger.AsNoTracking()
-            .Where(l => l.Status == ToolCallLedgerStatus.AwaitingApproval && l.ApprovedAt == null && l.ApprovalDeadlineAt != null && l.ApprovalDeadlineAt < now)
+            .Where(l => l.Status == ToolCallLedgerStatus.AwaitingApproval && l.ApprovedAt == null && l.ToolKind != DecisionToolKinds.DecisionRequest && l.ApprovalDeadlineAt != null && l.ApprovalDeadlineAt < now)
             .OrderBy(l => l.ApprovalDeadlineAt)
             .Take(ExpiryBatchSize + 1)
             .Select(l => new { l.Id, l.TeamId, l.ApprovalMessageId })
@@ -295,7 +299,7 @@ public sealed class ToolCallLedgerService : IToolCallLedgerService, IScopedDepen
     private async Task<bool> TryExpireOneAsync(Guid ledgerId, DateTimeOffset now, CancellationToken cancellationToken)
     {
         var affected = await _db.ToolCallLedger
-            .Where(l => l.Id == ledgerId && l.Status == ToolCallLedgerStatus.AwaitingApproval && l.ApprovedAt == null)
+            .Where(l => l.Id == ledgerId && l.Status == ToolCallLedgerStatus.AwaitingApproval && l.ApprovedAt == null && l.ToolKind != DecisionToolKinds.DecisionRequest)
             .ExecuteUpdateAsync(s => s
                 .SetProperty(l => l.Status, ToolCallLedgerStatus.Expired)
                 .SetProperty(l => l.Error, ApprovalExpiredError)
