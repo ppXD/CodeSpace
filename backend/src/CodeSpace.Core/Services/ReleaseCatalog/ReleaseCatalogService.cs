@@ -34,6 +34,12 @@ public sealed class ReleaseCatalogService : IReleaseCatalogService, IScopedDepen
         return await catalog.ListTagsAsync(context, remote, page, perPage, cancellationToken).ConfigureAwait(false);
     }
 
+    public async Task<RemoteRelease> GetReleaseAsync(Guid repositoryId, string tag, CancellationToken cancellationToken)
+    {
+        var (catalog, context, remote) = await ResolveAsync(repositoryId, cancellationToken).ConfigureAwait(false);
+        return await catalog.GetReleaseAsync(context, remote, tag, cancellationToken).ConfigureAwait(false);
+    }
+
     /// <summary>Same preflight as RepositoryInsightsService — repo lookup → credential null-check → source-read scope → capability.</summary>
     private async Task<(IReleaseCatalogCapability Catalog, ProviderContext Context, RemoteRepository Remote)> ResolveAsync(Guid repositoryId, CancellationToken cancellationToken)
     {

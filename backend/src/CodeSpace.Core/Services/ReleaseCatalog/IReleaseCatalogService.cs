@@ -14,4 +14,7 @@ public interface IReleaseCatalogService
 {
     Task<IReadOnlyList<RemoteRelease>> ListReleasesAsync(Guid repositoryId, int page, int perPage, CancellationToken cancellationToken);
     Task<IReadOnlyList<RemoteTag>> ListTagsAsync(Guid repositoryId, int page, int perPage, CancellationToken cancellationToken);
+
+    /// <summary>Single release by tag for the in-app release-detail page. Same read preflight as the lists.</summary>
+    Task<RemoteRelease> GetReleaseAsync(Guid repositoryId, string tag, CancellationToken cancellationToken);
 }

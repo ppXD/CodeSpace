@@ -177,6 +177,12 @@ export const repositoriesApi = {
     return fetchJson<RemoteTag[]>(`/api/repositories/${encodeURIComponent(repositoryId)}/tags?${params.toString()}`);
   },
 
+  // Single release by tag for the in-app release-detail page. Tag is a query value (survives slashes/dots).
+  getRelease: (repositoryId: string, tag: string) => {
+    const params = new URLSearchParams({ tag });
+    return fetchJson<RemoteRelease>(`/api/repositories/${encodeURIComponent(repositoryId)}/release?${params.toString()}`);
+  },
+
   // Latest commit on a path/ref — the header bar. Null body when the path has no history.
   getLatestCommit: (repositoryId: string, path?: string, ref?: string) => {
     const params = new URLSearchParams();

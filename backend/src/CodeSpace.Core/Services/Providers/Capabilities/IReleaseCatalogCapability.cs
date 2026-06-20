@@ -20,4 +20,11 @@ public interface IReleaseCatalogCapability : IProviderCapability
 
     /// <summary>Git tags newest-first, one page at a time — the Tags tab's version list. Lightweight tags have a null message.</summary>
     Task<IReadOnlyList<RemoteTag>> ListTagsAsync(ProviderContext context, RemoteRepository repository, int page, int perPage, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Fetch a single release by its tag name with full notes + assets — the in-app release-detail page.
+    /// Sets <see cref="RemoteRelease.IsLatest"/> by comparing against the repo's latest release. Throws when
+    /// the tag has no release (mapped to 404 by the resilience/error layer).
+    /// </summary>
+    Task<RemoteRelease> GetReleaseAsync(ProviderContext context, RemoteRepository repository, string tag, CancellationToken cancellationToken);
 }

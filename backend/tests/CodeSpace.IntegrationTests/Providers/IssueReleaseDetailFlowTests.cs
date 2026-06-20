@@ -78,6 +78,21 @@ public class IssueReleaseDetailFlowTests
         tags.ShouldHaveSingleItem().Name.ShouldBe("3.0.1");
     }
 
+    [Theory]
+    [InlineData("3.0.5", true)]
+    [InlineData("3.0.1", false)]
+    public async Task GetRelease_forwards_the_tag_and_flags_latest(string tag, bool expectLatest)
+    {
+        var seed = await SeedAsync();
+
+        using var scope = _fixture.BeginScope();
+        var release = await scope.Resolve<IReleaseCatalogService>().GetReleaseAsync(seed.RepositoryId, tag, CancellationToken.None);
+
+        release.TagName.ShouldBe(tag, customMessage: "the tag must reach the provider");
+        release.IsLatest.ShouldBe(expectLatest);
+        release.Assets.ShouldNotBeEmpty();
+    }
+
     private async Task<SeedResult> SeedAsync()
     {
         using var scope = _fixture.BeginScope();
