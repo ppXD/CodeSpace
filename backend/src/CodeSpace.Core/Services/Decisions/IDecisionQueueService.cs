@@ -20,6 +20,9 @@ namespace CodeSpace.Core.Services.Decisions;
 public interface IDecisionQueueService
 {
     Task<IReadOnlyList<PendingDecision>> ListPendingAsync(Guid teamId, CancellationToken cancellationToken);
+
+    /// <summary>The pending AGENT-grain decisions raised by a specific set of agent runs (the supervisor arbiter's children, D4) — team-scoped, soonest-deadline first. Node-grain decisions don't apply (a supervisor's children are agent.code runs). Empty input → empty result.</summary>
+    Task<IReadOnlyList<PendingDecision>> ListPendingForAgentRunsAsync(IReadOnlyCollection<Guid> agentRunIds, Guid teamId, CancellationToken cancellationToken);
 }
 
 public sealed class DecisionQueueService : IDecisionQueueService, IScopedDependency
@@ -43,6 +46,24 @@ public sealed class DecisionQueueService : IDecisionQueueService, IScopedDepende
         foreach (var r in nodeRows) Append(pending, Project(r.Id, r.CreatedAt, answerMessageId: null, r.PayloadJson));
 
         // Soonest-deadline first (an unbounded one sorts last), then oldest — the operator triages the most urgent first.
+        return pending.OrderBy(p => p.DeadlineAt ?? DateTimeOffset.MaxValue).ThenBy(p => p.CreatedAt).ToList();
+    }
+
+    public async Task<IReadOnlyList<PendingDecision>> ListPendingForAgentRunsAsync(IReadOnlyCollection<Guid> agentRunIds, Guid teamId, CancellationToken cancellationToken)
+    {
+        if (agentRunIds.Count == 0) return Array.Empty<PendingDecision>();
+
+        var rows = await _db.ToolCallLedger.AsNoTracking()
+            .Where(l => l.TeamId == teamId && l.ToolKind == DecisionToolKinds.DecisionRequest
+                && l.Status == ToolCallLedgerStatus.AwaitingApproval && l.ApprovedAt == null
+                && agentRunIds.Contains(l.AgentRunId))
+            .Select(l => new AgentDecisionRow(l.Id, l.CreatedDate, l.ApprovalMessageId, l.DecisionEnvelopeJson))
+            .ToListAsync(cancellationToken).ConfigureAwait(false);
+
+        var pending = new List<PendingDecision>(rows.Count);
+
+        foreach (var r in rows) Append(pending, Project(r.Id, r.CreatedDate, r.ApprovalMessageId, r.DecisionEnvelopeJson));
+
         return pending.OrderBy(p => p.DeadlineAt ?? DateTimeOffset.MaxValue).ThenBy(p => p.CreatedAt).ToList();
     }
 

@@ -24,6 +24,16 @@ namespace CodeSpace.Core.Services.Decisions;
 public interface IDecisionAnswerService
 {
     Task<AnswerDecisionResult> AnswerAsync(Guid decisionId, IReadOnlyList<string> selectedOptions, string? freeText, Guid teamId, Guid actorUserId, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Answer a decision AS THE SUPERVISOR ARBITER (Decision substrate D4) — the auto-answer the arbiter writes when it
+    /// decides a low/med-risk decision itself rather than escalating to a human. Stamps <c>AnsweredBy=supervisor</c> + a
+    /// REQUIRED rationale (AC3 — an auto-answer is never silent) + no user id, and SKIPS the act-as-user identity gate (a
+    /// supervisor is not a human acting-as-user). DEFENSE-IN-DEPTH: re-runs the fail-closed floor on the stashed envelope
+    /// and returns <see cref="DecisionAnswerOutcome.RequiresHuman"/> if the decision is human-only — the supervisor can
+    /// NEVER auto-resolve what the floor reserves for a person, even if the arbiter's own check is wrong.
+    /// </summary>
+    Task<AnswerDecisionResult> AnswerAsSupervisorAsync(Guid decisionId, IReadOnlyList<string> selectedOptions, string? freeText, string rationale, Guid teamId, CancellationToken cancellationToken);
 }
 
 public sealed class DecisionAnswerService : IDecisionAnswerService, IScopedDependency
@@ -45,7 +55,17 @@ public sealed class DecisionAnswerService : IDecisionAnswerService, IScopedDepen
         _identityGate = identityGate;
     }
 
-    public async Task<AnswerDecisionResult> AnswerAsync(Guid decisionId, IReadOnlyList<string> selectedOptions, string? freeText, Guid teamId, Guid actorUserId, CancellationToken cancellationToken)
+    public Task<AnswerDecisionResult> AnswerAsync(Guid decisionId, IReadOnlyList<string> selectedOptions, string? freeText, Guid teamId, Guid actorUserId, CancellationToken cancellationToken) =>
+        AnswerCoreAsync(decisionId, selectedOptions, freeText, DecisionAuthor.Human(actorUserId), teamId, cancellationToken);
+
+    public Task<AnswerDecisionResult> AnswerAsSupervisorAsync(Guid decisionId, IReadOnlyList<string> selectedOptions, string? freeText, string rationale, Guid teamId, CancellationToken cancellationToken) =>
+        // AC3 — a non-human answer is NEVER silent: a blank rationale is rejected up front (the C# string type is only a
+        // compile-time hint; "" / "   " / null! would otherwise persist a silent auto-answer).
+        string.IsNullOrWhiteSpace(rationale)
+            ? Task.FromResult(AnswerDecisionResult.Of(DecisionAnswerOutcome.Invalid, "a supervisor answer requires a non-empty rationale (AC3 — an auto-answer is never silent)."))
+            : AnswerCoreAsync(decisionId, selectedOptions, freeText, DecisionAuthor.Supervisor(rationale), teamId, cancellationToken);
+
+    private async Task<AnswerDecisionResult> AnswerCoreAsync(Guid decisionId, IReadOnlyList<string> selectedOptions, string? freeText, DecisionAuthor author, Guid teamId, CancellationToken cancellationToken)
     {
         // Read each grain REGARDLESS of status (team-scoped) so an already-resolved decision is "already resolved", and
         // only a truly-absent / cross-team id is "not found" (no cross-team existence leak — neither distinguishes which).
@@ -55,7 +75,7 @@ public sealed class DecisionAnswerService : IDecisionAnswerService, IScopedDepen
         {
             if (agent.Status != ToolCallLedgerStatus.AwaitingApproval) return AnswerDecisionResult.Of(DecisionAnswerOutcome.AlreadyResolved);
 
-            return await AnswerAgentAsync(decisionId, agent.EnvelopeJson, selectedOptions, freeText, teamId, actorUserId, cancellationToken).ConfigureAwait(false);
+            return await AnswerAgentAsync(decisionId, agent.EnvelopeJson, selectedOptions, freeText, author, teamId, cancellationToken).ConfigureAwait(false);
         }
 
         var node = await ReadNodeAsync(decisionId, teamId, cancellationToken).ConfigureAwait(false);
@@ -64,18 +84,20 @@ public sealed class DecisionAnswerService : IDecisionAnswerService, IScopedDepen
         {
             if (node.Status != WorkflowWaitStatuses.Pending) return AnswerDecisionResult.Of(DecisionAnswerOutcome.AlreadyResolved);
 
-            return await AnswerNodeAsync(decisionId, node.RunId, node.NodeId, node.EnvelopeJson, selectedOptions, freeText, actorUserId, cancellationToken).ConfigureAwait(false);
+            return await AnswerNodeAsync(decisionId, node.RunId, node.NodeId, node.EnvelopeJson, selectedOptions, freeText, author, cancellationToken).ConfigureAwait(false);
         }
 
         return AnswerDecisionResult.Of(DecisionAnswerOutcome.NotFound);
     }
 
     // ── Agent grain: TryAnswerDecisionAsync (the same CAS the card uses) + wake the blocked in-process call ──
-    private async Task<AnswerDecisionResult> AnswerAgentAsync(Guid ledgerId, string? envelopeJson, IReadOnlyList<string> selectedOptions, string? freeText, Guid teamId, Guid actorUserId, CancellationToken cancellationToken)
+    private async Task<AnswerDecisionResult> AnswerAgentAsync(Guid ledgerId, string? envelopeJson, IReadOnlyList<string> selectedOptions, string? freeText, DecisionAuthor author, Guid teamId, CancellationToken cancellationToken)
     {
+        if (Floored(author, envelopeJson)) return AnswerDecisionResult.Of(DecisionAnswerOutcome.RequiresHuman);
+
         if (!Validate(envelopeJson, selectedOptions, freeText, out var error)) return AnswerDecisionResult.Of(DecisionAnswerOutcome.Invalid, error);
 
-        var json = BuildAnswerJson(ledgerId, selectedOptions, freeText, actorUserId);
+        var json = BuildAnswerJson(ledgerId, selectedOptions, freeText, author);
 
         var won = await _ledger.TryAnswerDecisionAsync(ledgerId, teamId, json, cancellationToken).ConfigureAwait(false);
 
@@ -87,22 +109,42 @@ public sealed class DecisionAnswerService : IDecisionAnswerService, IScopedDepen
     }
 
     // ── Node grain: resume the parked run from the exact flow.decision node ──
-    private async Task<AnswerDecisionResult> AnswerNodeAsync(Guid waitId, Guid runId, string nodeId, string? envelopeJson, IReadOnlyList<string> selectedOptions, string? freeText, Guid actorUserId, CancellationToken cancellationToken)
+    private async Task<AnswerDecisionResult> AnswerNodeAsync(Guid waitId, Guid runId, string nodeId, string? envelopeJson, IReadOnlyList<string> selectedOptions, string? freeText, DecisionAuthor author, CancellationToken cancellationToken)
     {
+        if (Floored(author, envelopeJson)) return AnswerDecisionResult.Of(DecisionAnswerOutcome.RequiresHuman);
+
         if (!Validate(envelopeJson, selectedOptions, freeText, out var error)) return AnswerDecisionResult.Of(DecisionAnswerOutcome.Invalid, error);
 
         // Same act-as-user pre-flight the chat-Action resume path applies (ResumeByActionTokenAsync): if resolving this
         // decision makes a DOWNSTREAM node act AS the answerer on a provider they haven't linked (or lack repo access
         // for), refuse UP FRONT (throws ActorIdentityRequiredException → 428 / ActorRepoPermissionDeniedException → 403,
         // mapped by the global filter) instead of the run failing later in the background. Runs BEFORE the resume, so the
-        // run stays parked for the retry. Agent-grain decisions have no downstream workflow node, so this is node-only.
-        await _identityGate.EnsureResponderCanActAsUserAsync(runId, nodeId, actorUserId, cancellationToken).ConfigureAwait(false);
+        // run stays parked for the retry. ONLY for a HUMAN author — a supervisor isn't acting-as-user. Agent-grain
+        // decisions have no downstream workflow node, so this is node-only.
+        if (author.IsHuman) await _identityGate.EnsureResponderCanActAsUserAsync(runId, nodeId, author.UserId!.Value, cancellationToken).ConfigureAwait(false);
 
-        var json = BuildAnswerJson(waitId, selectedOptions, freeText, actorUserId);
+        var json = BuildAnswerJson(waitId, selectedOptions, freeText, author);
 
         var resolved = await _resume.ResumeWaitAsync(runId, waitId, json, cancellationToken).ConfigureAwait(false);
 
         return AnswerDecisionResult.Of(resolved ? DecisionAnswerOutcome.Answered : DecisionAnswerOutcome.AlreadyResolved);
+    }
+
+    /// <summary>
+    /// Defense-in-depth: a NON-human author may answer ONLY a decision whose EFFECTIVE policy is auto / supervisor —
+    /// never one the floor reserves for a person, whether by a danger SIGNAL (approve_action / side-effecting / high-risk
+    /// / no recommendation-or-reason) OR by an explicitly-declared <c>human_required</c> ("no auto / supervisor answer").
+    /// Re-derived from the stashed envelope here so a wrong arbiter check can't slip a human-only decision through. A
+    /// missing / unreadable envelope can't be proven safe, so it floors too. Always false for a human author (a human
+    /// answers what the floor reserves for them — that is the point).
+    /// </summary>
+    private static bool Floored(DecisionAuthor author, string? envelopeJson)
+    {
+        if (author.IsHuman) return false;
+
+        var env = TryDeserializeEnvelope(envelopeJson);
+
+        return env is null || DecisionPolicyFloor.Effective(env) == DecisionPolicies.HumanRequired;
     }
 
     private async Task<AgentDecision?> ReadAgentAsync(Guid decisionId, Guid teamId, CancellationToken cancellationToken) =>
@@ -118,15 +160,24 @@ public sealed class DecisionAnswerService : IDecisionAnswerService, IScopedDepen
             .Select(w => new NodeDecision(w.Status, w.RunId, w.NodeId, w.PayloadJson))
             .FirstOrDefaultAsync(cancellationToken).ConfigureAwait(false);
 
-    private static string BuildAnswerJson(Guid decisionId, IReadOnlyList<string> selectedOptions, string? freeText, Guid actorUserId) =>
+    private static string BuildAnswerJson(Guid decisionId, IReadOnlyList<string> selectedOptions, string? freeText, DecisionAuthor author) =>
         JsonSerializer.Serialize(new DecisionAnswer
         {
             DecisionId = decisionId,
-            AnsweredBy = DecisionAnsweredByKinds.Human,
+            AnsweredBy = author.AnsweredBy,
             SelectedOptions = selectedOptions,
             FreeText = string.IsNullOrWhiteSpace(freeText) ? null : freeText,
-            AnsweredByUserId = actorUserId,
+            Rationale = author.Rationale,           // REQUIRED for a non-human answer (AC3); null for a human
+            AnsweredByUserId = author.UserId,
         }, Json);
+
+    private static DecisionRequest? TryDeserializeEnvelope(string? envelopeJson)
+    {
+        if (string.IsNullOrWhiteSpace(envelopeJson)) return null;
+
+        try { return JsonSerializer.Deserialize<DecisionRequest>(envelopeJson, Json); }
+        catch (JsonException) { return null; }
+    }
 
     /// <summary>
     /// Defense-in-depth validation against the stashed envelope (the resume mechanisms are tolerant, but a clearly-wrong
@@ -166,4 +217,14 @@ public sealed class DecisionAnswerService : IDecisionAnswerService, IScopedDepen
     private sealed record AgentDecision(ToolCallLedgerStatus Status, string? EnvelopeJson);
 
     private sealed record NodeDecision(string Status, Guid RunId, string NodeId, string? EnvelopeJson);
+
+    /// <summary>Who is recording an answer — the one axis that differs between a human (from the queue / card) and the supervisor arbiter (D4). A human carries a user id + no rationale (+ the act-as-user gate); the supervisor carries a required rationale + no user id (+ no gate, + the floor re-check). Keeps the routing one shared path.</summary>
+    private sealed record DecisionAuthor(string AnsweredBy, Guid? UserId, string? Rationale)
+    {
+        public static DecisionAuthor Human(Guid userId) => new(DecisionAnsweredByKinds.Human, userId, null);
+
+        public static DecisionAuthor Supervisor(string rationale) => new(DecisionAnsweredByKinds.Supervisor, null, rationale);
+
+        public bool IsHuman => AnsweredBy == DecisionAnsweredByKinds.Human;
+    }
 }
