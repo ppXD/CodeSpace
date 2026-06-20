@@ -7,7 +7,9 @@ using CodeSpace.Core.Services.Agents.Mcp;
 using CodeSpace.Core.Services.Agents.Tools;
 using CodeSpace.Core.Services.Chat;
 using CodeSpace.Core.Services.Chat.Interactions;
+using CodeSpace.Core.Services.Decisions;
 using CodeSpace.IntegrationTests.Infrastructure;
+using CodeSpace.Messages.Dtos.Decisions;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Enums;
 using Microsoft.EntityFrameworkCore;
@@ -227,6 +229,61 @@ public class McpDecisionFlowTests
 
         await RespondAsync(teamId, messageId, "a", ownerId);
         await call;
+    }
+
+    [Fact]
+    public async Task A_queue_answer_resolves_an_agent_decision_and_unblocks_the_mid_run_call()
+    {
+        // D3b: answering an agent-grain decision through the QUEUE service (not the chat card) must resolve it and wake
+        // the blocked mid-run call with the typed answer — the same durable CAS the card uses, so it's resolve-once.
+        var (teamId, ownerId, channelId) = await SeedTeamChannelAsync();
+        var runId = Guid.NewGuid();
+
+        using var scope = _fixture.BeginScope();
+        var handler = DecisionHandler(scope, AgentAutonomyLevel.Standard, teamId, runId, channelId);
+
+        var call = Task.Run(() => CallToolAsync(handler, new { question = "pick", decisionType = "choose_one", options = new[] { new { id = "a", label = "A" }, new { id = "b", label = "B" } } }));
+
+        var (ledgerId, _) = await WaitForPostedCardAsync(teamId, runId);
+
+        (await AnswerViaQueueAsync(ledgerId, new[] { "b" }, null, teamId, ownerId)).Outcome.ShouldBe(DecisionAnswerOutcome.Answered);
+
+        var result = await call;
+        result.GetProperty("isError").GetBoolean().ShouldBeFalse("the queue answer unblocks the mid-run call");
+        result.GetProperty("structuredContent").GetProperty("selectedOptions")[0].GetString().ShouldBe("b");
+
+        (await ReadRowAsync(ledgerId)).Status.ShouldBe(ToolCallLedgerStatus.Succeeded);
+
+        (await AnswerViaQueueAsync(ledgerId, new[] { "a" }, null, teamId, ownerId)).Outcome.ShouldBe(DecisionAnswerOutcome.AlreadyResolved, "resolve-once: a second answer is an idempotent no-op");
+    }
+
+    [Fact]
+    public async Task An_unknown_option_in_a_queue_answer_is_rejected_as_invalid()
+    {
+        var (teamId, ownerId, channelId) = await SeedTeamChannelAsync();
+        var runId = Guid.NewGuid();
+
+        using var scope = _fixture.BeginScope();
+        var handler = DecisionHandler(scope, AgentAutonomyLevel.Standard, teamId, runId, channelId);
+
+        var call = Task.Run(() => CallToolAsync(handler, new { question = "pick", decisionType = "choose_one", options = new[] { new { id = "a", label = "A" } } }));
+
+        var (ledgerId, messageId) = await WaitForPostedCardAsync(teamId, runId);
+
+        (await AnswerViaQueueAsync(ledgerId, new[] { "nope" }, null, teamId, ownerId)).Outcome.ShouldBe(DecisionAnswerOutcome.Invalid, "an option that isn't one of the choices is rejected");
+
+        // A FOREIGN team can't answer it — and can't tell it exists.
+        var (otherTeam, _, _) = await SeedTeamChannelAsync();
+        (await AnswerViaQueueAsync(ledgerId, new[] { "a" }, null, otherTeam, ownerId)).Outcome.ShouldBe(DecisionAnswerOutcome.NotFound, "a cross-team answer is a clean not-found");
+
+        await RespondAsync(teamId, messageId, "a", ownerId);   // resolve for real so the call doesn't leak
+        await call;
+    }
+
+    private async Task<AnswerDecisionResult> AnswerViaQueueAsync(Guid decisionId, IReadOnlyList<string> selectedOptions, string? freeText, Guid teamId, Guid actorUserId)
+    {
+        using var scope = _fixture.BeginScope();
+        return await scope.Resolve<IDecisionAnswerService>().AnswerAsync(decisionId, selectedOptions, freeText, teamId, actorUserId, CancellationToken.None);
     }
 
     // ─── Build the handler with the decision surface ─────────────────────────────
