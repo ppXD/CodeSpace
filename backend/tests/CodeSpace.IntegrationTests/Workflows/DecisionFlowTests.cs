@@ -2,6 +2,7 @@ using System.Text.Json;
 using Autofac;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
+using CodeSpace.Core.Services.Decisions;
 using CodeSpace.Core.Services.Workflows.Engine;
 using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.IntegrationTests.Workflows.Infrastructure;
@@ -9,6 +10,7 @@ using CodeSpace.Messages.Authorization;
 using CodeSpace.Messages.Commands.Workflows;
 using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Decisions;
+using CodeSpace.Messages.Dtos.Decisions;
 using CodeSpace.Messages.Dtos.Workflows;
 using CodeSpace.Messages.Enums;
 using MediatR;
@@ -132,7 +134,47 @@ public class DecisionFlowTests
         outputs.GetProperty("answeredBy").GetString().ShouldBe(DecisionAnsweredByKinds.Timeout);
     }
 
+    [Fact]
+    public async Task A_queue_answer_resumes_the_node_decision_from_the_exact_point()
+    {
+        // D3b: answering a NODE-grain (flow.decision) decision through the cross-grain queue's answer service resolves
+        // the wait via the SAME ResumeWaitAsync the resume API uses → the run resumes from the exact node with the
+        // chosen option; team-scoped + resolve-once.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var workflowId = await CreateWorkflowAsync(teamId, userId, DecisionDefinition());
+        var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
+        await RunEngineAsync(runId);
+
+        var waitId = (await SingleWaitAsync(runId)).Id;
+
+        (await AnswerViaQueueAsync(waitId, new[] { "b" }, "via the queue", teamId, userId)).Outcome
+            .ShouldBe(DecisionAnswerOutcome.Answered, "the queue answer resolves the node decision");
+
+        await RunEngineAsync(runId);
+
+        using (var verify = _fixture.BeginScope())
+        {
+            var node = await verify.Resolve<CodeSpaceDbContext>().WorkflowRunNode.AsNoTracking().SingleAsync(n => n.RunId == runId && n.NodeId == "decide");
+            var outputs = JsonDocument.Parse(node.OutputsJson).RootElement;
+            outputs.GetProperty("selectedOption").GetString().ShouldBe("b", "the run resumed from the exact node with the queue answer");
+            outputs.GetProperty("answeredBy").GetString().ShouldBe(DecisionAnsweredByKinds.Human);
+        }
+
+        (await AnswerViaQueueAsync(waitId, new[] { "a" }, null, teamId, userId)).Outcome
+            .ShouldBe(DecisionAnswerOutcome.AlreadyResolved, "resolve-once: the decision is already resolved");
+
+        var (otherTeam, otherUser) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        (await AnswerViaQueueAsync(waitId, new[] { "a" }, null, otherTeam, otherUser)).Outcome
+            .ShouldBe(DecisionAnswerOutcome.NotFound, "a foreign team can't see or answer the decision");
+    }
+
     // ─── Helpers ────────────────────────────────────────────────────────────────
+
+    private async Task<AnswerDecisionResult> AnswerViaQueueAsync(Guid decisionId, IReadOnlyList<string> selectedOptions, string? freeText, Guid teamId, Guid actorUserId)
+    {
+        using var scope = _fixture.BeginScope();
+        return await scope.Resolve<IDecisionAnswerService>().AnswerAsync(decisionId, selectedOptions, freeText, teamId, actorUserId, CancellationToken.None);
+    }
 
     private async Task<WorkflowRunWait> SingleWaitAsync(Guid runId)
     {
