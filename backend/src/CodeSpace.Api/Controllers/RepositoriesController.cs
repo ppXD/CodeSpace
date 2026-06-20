@@ -29,9 +29,9 @@ public class RepositoriesController : ControllerBase
     }
 
     [HttpGet("{repositoryId:guid}")]
-    public async Task<IActionResult> Get([FromRoute] Guid repositoryId, CancellationToken cancellationToken)
+    public async Task<IActionResult> Get([FromRoute] Guid repositoryId, [FromQuery] bool refresh, CancellationToken cancellationToken)
     {
-        var result = await _mediator.Send(new GetRepositoryQuery { RepositoryId = repositoryId }, cancellationToken).ConfigureAwait(false);
+        var result = await _mediator.Send(new GetRepositoryQuery { RepositoryId = repositoryId, Refresh = refresh }, cancellationToken).ConfigureAwait(false);
         return result == null ? NotFound() : Ok(result);
     }
 

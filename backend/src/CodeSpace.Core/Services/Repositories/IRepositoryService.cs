@@ -16,6 +16,6 @@ public interface IRepositoryService
     /// </summary>
     Task<IReadOnlyList<RepositorySummary>> ListAsync(Guid? providerInstanceId, Guid? projectId, CancellationToken cancellationToken);
 
-    Task<RepositoryDetail?> GetAsync(Guid repositoryId, CancellationToken cancellationToken);
+    Task<RepositoryDetail?> GetAsync(Guid repositoryId, bool refresh, CancellationToken cancellationToken);
     Task RelinkCredentialAsync(Guid repositoryId, Guid newCredentialId, CancellationToken cancellationToken);
 }

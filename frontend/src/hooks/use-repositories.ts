@@ -59,10 +59,22 @@ export function useRepositoryByFullPath(fullPath: string | null) {
   // A future backend `GET /api/repositories/by-full-path` would make this O(1)
   // but isn't worth shipping until a large-team customer hits this path.
   const match = fullPath ? list.data?.find(r => r.fullPath === fullPath) : undefined;
-  const detail = useRepository(match?.id ?? null);
+  const id = match?.id ?? null;
+  const detail = useRepository(id);
+
+  // Stale-while-revalidate: `detail` serves the stored metadata snapshot instantly, so the page paints
+  // with no network wait. This second read asks the backend to re-sync visibility/description/default
+  // branch/… from the provider (~1-2s); once it lands we prefer it, so the header updates to the live
+  // values. `isLoading` deliberately ignores it — the initial render must never block on the refresh.
+  const refreshed = useQuery({
+    queryKey: ["repository", id, "metadata-refresh"],
+    queryFn: () => repositoriesApi.get(id!, true),
+    enabled: id != null,
+    staleTime: 30_000,
+  });
 
   return {
-    repo: detail.data ?? null,
+    repo: refreshed.data ?? detail.data ?? null,
     isLoading: list.isLoading || (match != null && detail.isLoading),
     error: list.error ?? detail.error,
     // The repository wasn't in the team's list — either it doesn't exist, doesn't belong
