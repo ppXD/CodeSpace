@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Linq;
 using System.Net.Sockets;
 using CodeSpace.Core.Services.Agents.Mcp;
+using CodeSpace.Core.Services.Agents.Sandbox;
 using CodeSpace.Core.Services.Agents.Sandbox.Isolation;
 using CodeSpace.Core.Services.Agents.Sandbox.Runners;
 using CodeSpace.Messages.Agents;
@@ -306,6 +307,19 @@ public sealed class LocalProcessDurableRunnerTests : IDisposable
         info.Environment.ShouldContainKey("CSP_ERR");
         info.Environment.ShouldContainKey("CSP_EXIT");
         info.Environment.ShouldContainKey("CSP_PID");
+    }
+
+    [Fact]
+    public void BuildDurableStartInfo_keeps_the_non_interactive_defaults_through_the_scrub()
+    {
+        // C1 is injected at the SHARED ApplyEnvironment choke point, so the durable/bwrap path must carry the
+        // non-interactive defaults too (the bwrap argv has no --clearenv → the confined child inherits this env).
+        // Guards the durable half of the "one choke point covers both paths" claim against a future reorder of the
+        // post-Clear() env assembly — mirrors the spool-env precedent above.
+        var info = LocalProcessRunner.BuildDurableStartInfo(new SandboxSpec { Command = "mycmd" }, "/tmp/spool-noninteractive");
+
+        foreach (var (key, value) in NonInteractiveEnv.Defaults)
+            info.Environment[key].ShouldBe(value, $"{key} must survive the durable assembly so the bwrap child auto-defaults a prompt");
     }
 
     [Fact]

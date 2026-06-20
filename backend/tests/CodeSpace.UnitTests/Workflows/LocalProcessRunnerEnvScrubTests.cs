@@ -140,22 +140,31 @@ public sealed class LocalProcessRunnerEnvScrubTests
     [Fact]
     public async Task A_child_that_branches_on_the_prompt_takes_the_non_interactive_path_and_never_hangs()
     {
-        // Gate #6 (the common case): a child that WOULD prompt instead takes its non-interactive branch because the env
-        // is set — so it finishes immediately rather than blocking on stdin until the wall-clock timeout. A SHORT
-        // timeout is the teeth: if the injection had failed, the `read` branch would sit and the run would TimedOut.
+        // Gate #6: a child that WOULD block on a prompt instead takes its non-interactive branch because CI=1 is
+        // injected, so it finishes immediately rather than sitting until the wall-clock timeout. The teeth are REAL: the
+        // `else` branch reads from a FIFO that NOBODY writes — opening a FIFO for read blocks until a writer appears —
+        // so if the injection were missing the child would genuinely HANG there until the short timeout fired
+        // (TimedOut), exactly the silent hang C1 exists to prevent. With C1 present it takes the echo branch and never
+        // opens the FIFO → fast Success.
         if (OperatingSystem.IsWindows()) return;
 
-        var spec = new SandboxSpec
+        var fifo = Path.Combine(Path.GetTempPath(), "cs-c1-fifo-" + Guid.NewGuid().ToString("N"));
+        using (var mkfifo = Process.Start("mkfifo", fifo)!) await mkfifo.WaitForExitAsync();
+        try
         {
-            Command = "/bin/sh",
-            Args = new[] { "-c", "if [ \"$CI\" = \"1\" ]; then echo NONINTERACTIVE; else read line; fi" },
-            TimeoutSeconds = 10,
-        };
+            var spec = new SandboxSpec
+            {
+                Command = "/bin/sh",
+                Args = new[] { "-c", $"if [ \"$CI\" = \"1\" ]; then echo NONINTERACTIVE; else read line < {fifo}; fi" },
+                TimeoutSeconds = 5,
+            };
 
-        var result = await new LocalProcessRunner().RunAsync(spec, CancellationToken.None);
+            var result = await new LocalProcessRunner().RunAsync(spec, CancellationToken.None);
 
-        result.Status.ShouldBe(SandboxStatus.Success, "the injected CI=1 makes the child take the non-interactive branch — it never blocks on read until the timeout");
-        result.Stdout.ShouldContain("NONINTERACTIVE");
+            result.Status.ShouldBe(SandboxStatus.Success, "CI=1 makes the child take the non-interactive branch — it never blocks on the no-writer FIFO until the timeout (a missing injection would TimedOut here)");
+            result.Stdout.ShouldContain("NONINTERACTIVE");
+        }
+        finally { File.Delete(fifo); }
     }
 
     private static SandboxSpec EnvSpec() => new()
