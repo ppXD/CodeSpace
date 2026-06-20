@@ -29,7 +29,13 @@ public static class ToolCallLedgerStateMachine
     /// </summary>
     public static bool IsLegalTransition(ToolCallLedgerStatus from, ToolCallLedgerStatus to) => to switch
     {
-        ToolCallLedgerStatus.Succeeded => from is ToolCallLedgerStatus.Pending or ToolCallLedgerStatus.Running,
+        // Pending → Succeeded (synchronous call) and Running → Succeeded (executed after approval) are the side-effect
+        // paths. AwaitingApproval → Succeeded is the DECISION-answer edge (Decision substrate D2): a decision.request has
+        // NO side effect to execute — the human's typed answer IS the terminal result — so it resolves straight out of
+        // AwaitingApproval, never through the Running execution claim. The edge is taken ONLY by TryAnswerDecisionAsync,
+        // which guards on tool_kind == 'decision.request', so a real side-effecting approval row can never reach Succeeded
+        // without its Running execution hop.
+        ToolCallLedgerStatus.Succeeded => from is ToolCallLedgerStatus.Pending or ToolCallLedgerStatus.Running or ToolCallLedgerStatus.AwaitingApproval,
         ToolCallLedgerStatus.Failed => from is ToolCallLedgerStatus.Pending or ToolCallLedgerStatus.AwaitingApproval or ToolCallLedgerStatus.Running,
         ToolCallLedgerStatus.Denied => from == ToolCallLedgerStatus.Pending,
         ToolCallLedgerStatus.AwaitingApproval => from == ToolCallLedgerStatus.Pending,

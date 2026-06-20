@@ -16,13 +16,15 @@ public sealed class MessageInteractionService : IMessageInteractionService, ISco
     private readonly IWorkflowResumeService _resume;
     private readonly IResolvePolicyEvaluator _resolvePolicy;
     private readonly IToolCallApprovalResolver _toolApprovals;
+    private readonly IDecisionRequestResolver _decisions;
 
-    public MessageInteractionService(CodeSpaceDbContext db, IWorkflowResumeService resume, IResolvePolicyEvaluator resolvePolicy, IToolCallApprovalResolver toolApprovals)
+    public MessageInteractionService(CodeSpaceDbContext db, IWorkflowResumeService resume, IResolvePolicyEvaluator resolvePolicy, IToolCallApprovalResolver toolApprovals, IDecisionRequestResolver decisions)
     {
         _db = db;
         _resume = resume;
         _resolvePolicy = resolvePolicy;
         _toolApprovals = toolApprovals;
+        _decisions = decisions;
     }
 
     public async Task RespondAsync(Guid teamId, Guid messageId, string responseKey, Guid actorUserId, string? comment, IReadOnlyDictionary<string, JsonElement>? values, CancellationToken cancellationToken)
@@ -205,6 +207,7 @@ public sealed class MessageInteractionService : IMessageInteractionService, ISco
         {
             WorkflowWaitTarget wait => await _resume.ResumeByActionTokenAsync(wait.Token, responseKey, actorUserId, comment, values, teamId, cancellationToken).ConfigureAwait(false),
             ToolCallApprovalTarget approval => await _toolApprovals.ResolveByTokenAsync(approval.Token, responseKey, actorUserId, teamId, cancellationToken).ConfigureAwait(false),
+            DecisionRequestTarget decision => await _decisions.ResolveByTokenAsync(decision.Token, responseKey, comment, actorUserId, teamId, cancellationToken).ConfigureAwait(false),
             _ => throw new InvalidOperationException($"Unsupported interaction target '{target.GetType().Name}'."),
         };
 }

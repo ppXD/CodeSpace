@@ -25,8 +25,11 @@ public class ToolCallLedgerStateMachineTests
     // legal — an executing (claimed) row resolves to a terminal
     [InlineData(ToolCallLedgerStatus.Running, ToolCallLedgerStatus.Succeeded, true)]
     [InlineData(ToolCallLedgerStatus.Running, ToolCallLedgerStatus.Failed, true)]
-    // illegal — the side effect runs ONLY after the Running claim; an approved row never succeeds straight from AwaitingApproval
-    [InlineData(ToolCallLedgerStatus.AwaitingApproval, ToolCallLedgerStatus.Succeeded, false)]
+    // legal — the DECISION-answer edge (Decision substrate D2): a decision.request has no side effect to run, so the
+    // typed answer resolves straight out of AwaitingApproval → Succeeded (never through the Running execution hop). Taken
+    // ONLY by TryAnswerDecisionAsync, which guards on tool_kind == 'decision.request', so a real side-effecting approval
+    // row can never reach Succeeded without its Running claim.
+    [InlineData(ToolCallLedgerStatus.AwaitingApproval, ToolCallLedgerStatus.Succeeded, true)]
     // illegal — a denial is synchronous-only; an approval can never re-pend or expire from Pending; Running is reached ONLY from AwaitingApproval
     [InlineData(ToolCallLedgerStatus.AwaitingApproval, ToolCallLedgerStatus.Denied, false)]
     [InlineData(ToolCallLedgerStatus.Pending, ToolCallLedgerStatus.Expired, false)]

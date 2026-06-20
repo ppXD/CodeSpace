@@ -4,6 +4,7 @@ using CodeSpace.Core.Services.Chat;
 using CodeSpace.Core.Services.Chat.Interactions;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Agents.Mcp;
+using CodeSpace.Messages.Decisions;
 using CodeSpace.Messages.Dtos.Chat.Interactions;
 
 namespace CodeSpace.Core.Services.Agents.Mcp;
@@ -171,6 +172,17 @@ public sealed class McpRequestHandler : IMcpRequestHandler
         var tool = _registry.Resolve(name);
 
         if (tool == null) return JsonRpcResponse.Fail(id, Error(JsonRpcError.InvalidParams, $"Unknown tool '{name}'."));
+
+        // decision.request is an ASK, not a gated side effect — intercept it BEFORE the autonomy gate (a Confined tier
+        // must never DENY a question) and drive the durable decision flow on the SAME tool-ledger spine the approval
+        // flow uses, generalized from binary approve/reject to typed options. The tool is only in the registry when
+        // governance is on (DI-gated), so a governance-OFF run never reaches here (Resolve returned null → Unknown).
+        if (string.Equals(name, DecisionRequestTool.ToolKind, StringComparison.Ordinal))
+        {
+            var decisionArgs = prms.TryGetProperty("arguments", out var da) ? da : EmptyObject;
+
+            return JsonRpcResponse.Ok(id, await RunDecisionFlowAsync(tool, decisionArgs, cancellationToken).ConfigureAwait(false));
+        }
 
         // Authorize BEFORE validating input: a tool the run's autonomy tier won't permit is refused outright (a
         // tool result with isError:true, not a protocol error), so the model never sees input feedback for — or
@@ -392,6 +404,239 @@ public sealed class McpRequestHandler : IMcpRequestHandler
             _waiters.Remove(ledgerId);
         }
     }
+
+    // ─── Decision flow (Decision substrate D2 — agent.code mid-run decision.request) ──────────────────
+    // The agent-grain analogue of the approval flow: same durable tool-ledger spine (claim → park → block → resolve),
+    // but a DECISION is an ASK with no side effect — the human's typed answer IS the terminal result, so there is no
+    // Running execution hop. The resolver records a DecisionAnswer (AwaitingApproval → Succeeded, guarded on the
+    // decision tool kind), and the handler wraps that bare answer into the MCP wire result at its own redacting choke
+    // point (the resolver, living in chat-land, never touches MCP wire).
+
+    /// <summary>
+    /// Drive an agent-grain <c>decision.request</c>: surface-check (fail-closed if there's no answerer), validate, then
+    /// claim the durable ledger row (exactly-once by the deterministic key — AC1) and either replay a settled answer, re-
+    /// block a still-parked re-call (never a second card), or freshly park + post + block. Returns the DecisionAnswer
+    /// (wrapped as the tool result) once answered, or a pending ticket if the synchronous block elapses first.
+    /// </summary>
+    private async Task<JsonElement> RunDecisionFlowAsync(IAgentTool tool, JsonElement arguments, CancellationToken cancellationToken)
+    {
+        if (!HasDecisionSurface()) return ToolResult(isError: true, "This run has no decision surface configured; a decision cannot be raised here.");
+
+        var validation = tool.ValidateInput(arguments);
+
+        if (!validation.IsValid) return ToolResult(isError: true, validation.Error ?? "Invalid decision input.");
+
+        // Tenancy: the card posts into the run's approval conversation — verify it belongs to the run's team (the
+        // conversation id is unvalidated node config; mirrors CanServeApprovalAsync). A foreign id → fail-closed.
+        if (!await _bot!.ConversationBelongsToTeamAsync(_approvalConversationId!.Value, _teamId!.Value, cancellationToken).ConfigureAwait(false))
+            return ToolResult(isError: true, "This run has no decision surface configured; a decision cannot be raised here.");
+
+        var teamId = _teamId!.Value;
+
+        var inputHash = ToolCallKey.InputHash(arguments);   // SERVER-derived — never read from the wire
+        var key = ToolCallKey.For(tool.Kind, inputHash);
+
+        var claim = await _ledger!.TryClaimAsync(_runId, teamId, tool.Kind, key, inputHash, _fenceEpoch, cancellationToken).ConfigureAwait(false);
+
+        return claim.Outcome switch
+        {
+            ToolCallClaimOutcome.Duplicate => WrapDecisionResult(claim.PriorStatus, claim.PriorResultJson, claim.PriorError),                          // already answered/expired — replay (AC1)
+            ToolCallClaimOutcome.InFlight => await ResumeDecisionOrTicketAsync(teamId, claim.LedgerId, cancellationToken).ConfigureAwait(false),        // a re-call of a still-parked decision — never a 2nd card
+            _ => await ParkDecisionAsync(arguments, key, teamId, claim.LedgerId, cancellationToken).ConfigureAwait(false),                              // fresh claim — park + post + block
+        };
+    }
+
+    /// <summary>Every collaborator the decision flow needs is present (governance + ledger + card-post + waiter + component registry + an approval conversation + a team). ANY missing piece → fail-closed (no DB read, no card, the flat refusal).</summary>
+    private bool HasDecisionSurface() =>
+        _governanceEnabled && _ledger is not null && _bot is not null && _waiters is not null && _components is not null
+        && _approvalConversationId is not null && _teamId is not null;
+
+    /// <summary>
+    /// A FRESH decision claim's park: CAS Pending → AwaitingApproval (stamping token + the bounded deadline), post the
+    /// typed-options card (stamping its message id), then BLOCK until answered. If the park CAS is lost (a concurrent
+    /// path already parked the row), DON'T post — re-bind to whatever it became (the no-second-card guard).
+    /// </summary>
+    private async Task<JsonElement> ParkDecisionAsync(JsonElement arguments, string key, Guid teamId, Guid ledgerId, CancellationToken cancellationToken)
+    {
+        var token = Guid.NewGuid().ToString("N");
+        var deadlineAt = DateTimeOffset.UtcNow.AddSeconds(DecisionTimeoutSeconds(arguments));
+
+        var parked = await _ledger!.TryBeginApprovalAsync(ledgerId, teamId, token, deadlineAt, cancellationToken).ConfigureAwait(false);
+
+        if (!parked) return await ResumeDecisionOrTicketAsync(teamId, ledgerId, cancellationToken).ConfigureAwait(false);
+
+        var request = BuildDecisionRequest(arguments, ledgerId, key, deadlineAt);
+
+        var messageId = await PostDecisionCardAsync(request, token, cancellationToken).ConfigureAwait(false);
+
+        await _ledger.SetApprovalMessageAsync(ledgerId, teamId, messageId, cancellationToken).ConfigureAwait(false);
+
+        return await BlockForDecisionAnswerAsync(teamId, ledgerId, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>Re-bind to an already-parked (or just-resolved) decision WITHOUT posting a second card: a terminal row replays its answer; a still-AwaitingApproval one blocks again on a freshly-registered waiter (the card was posted on the first park).</summary>
+    private async Task<JsonElement> ResumeDecisionOrTicketAsync(Guid teamId, Guid ledgerId, CancellationToken cancellationToken)
+    {
+        var state = await _ledger!.ReadApprovalStateAsync(ledgerId, teamId, cancellationToken).ConfigureAwait(false);
+
+        if (state is null) return ToolResult(isError: true, "This decision's record is missing.");
+
+        if (ToolCallLedgerStateMachine.IsTerminal(state.Status)) return WrapDecisionResult(state.Status, state.ResultJson, state.Error);
+
+        return await BlockForDecisionAnswerAsync(teamId, ledgerId, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// BLOCK the synchronous decision.request call until an answer lands or the bound elapses (mirrors
+    /// <see cref="BlockForDecisionAsync"/>, minus the approve→execute hop — a decision resolves straight to a terminal).
+    /// The durable row is the authority, so we ALWAYS re-read after the wake; the in-memory waiter is a latency fast-path.
+    /// On ct cancellation we propagate (the row stays AwaitingApproval for the reaper / a re-issue). On the bound elapsing
+    /// with no answer, the pending ticket lets the model re-issue the exact call to keep waiting.
+    /// </summary>
+    private async Task<JsonElement> BlockForDecisionAnswerAsync(Guid teamId, Guid ledgerId, CancellationToken cancellationToken)
+    {
+        var waiter = _waiters!.Register(ledgerId);
+
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+
+        try
+        {
+            var bound = Task.Delay(TimeSpan.FromSeconds(ApprovalBoundSeconds()), linked.Token);
+
+            await Task.WhenAny(waiter.Completion, bound).ConfigureAwait(false);
+
+            linked.Cancel();
+
+            cancellationToken.ThrowIfCancellationRequested();
+
+            var state = await _ledger!.ReadApprovalStateAsync(ledgerId, teamId, cancellationToken).ConfigureAwait(false);
+
+            if (state is null) return ToolResult(isError: true, "This decision's record is missing.");
+
+            if (ToolCallLedgerStateMachine.IsTerminal(state.Status)) return WrapDecisionResult(state.Status, state.ResultJson, state.Error);   // answered / expired by the reaper
+
+            return PendingDecisionTicket(ledgerId);   // the bound elapsed with no answer — the row stays AwaitingApproval
+        }
+        finally
+        {
+            _waiters.Remove(ledgerId);
+        }
+    }
+
+    /// <summary>Wrap a settled decision row into the MCP wire result at the redacting choke point: a Succeeded row replays its stored DecisionAnswer (as both text + structuredContent); anything else (expired / cancelled) is an isError the model can act on.</summary>
+    private JsonElement WrapDecisionResult(ToolCallLedgerStatus status, string? resultJson, string? error)
+    {
+        if (status != ToolCallLedgerStatus.Succeeded || resultJson is not { Length: > 0 } answer)
+            return ToolResult(isError: true, error ?? "This decision was not answered.");
+
+        using var doc = JsonDocument.Parse(answer);
+
+        return ToolResult(isError: false, answer, doc.RootElement.Clone());
+    }
+
+    /// <summary>The typed pending-ticket returned when the bounded block elapses with no answer — names the ledger ticket so the model can re-issue the exact call to keep waiting for a human.</summary>
+    private JsonElement PendingDecisionTicket(Guid ledgerId) =>
+        ToolResult(isError: true, $"Awaiting a human decision (ticket {ledgerId}); still pending. Re-issue this exact call to keep waiting.");
+
+    /// <summary>The agent-declared deadline (seconds) clamped to a sane bounded range — a decision can never hang forever (AC4); the durable reaper expires the row past this.</summary>
+    private static int DecisionTimeoutSeconds(JsonElement arguments)
+    {
+        const int min = 30, max = 86400, fallback = 3600;
+
+        return arguments.ValueKind == JsonValueKind.Object && arguments.TryGetProperty("timeoutSeconds", out var t)
+            && t.ValueKind == JsonValueKind.Number && t.TryGetInt32(out var seconds) && seconds > 0
+            ? Math.Clamp(seconds, min, max)
+            : fallback;
+    }
+
+    /// <summary>Project the agent's call arguments into the typed <see cref="DecisionRequest"/> envelope, stamping the SERVER-controlled fields (the ledger id IS the decision id; the run is the root trace; the backend is the tool ledger). The agent declares only the semantic fields (question / options / risk / policy), already validated.</summary>
+    private DecisionRequest BuildDecisionRequest(JsonElement args, Guid ledgerId, string key, DateTimeOffset deadlineAt)
+    {
+        var options = ReadDecisionOptions(args);
+
+        return new DecisionRequest
+        {
+            Id = ledgerId,
+            RootTraceId = _runId,
+            AgentRunId = _runId,
+            ToolCallId = ledgerId.ToString("N"),
+            Scope = DecisionScopes.Agent,
+            RequesterType = DecisionRequesterTypes.Agent,
+            // Default the type from the options' presence when the agent left it unset — option buttons vs a free-text submit.
+            DecisionType = ReadDecisionString(args, "decisionType") ?? (options.Count > 0 ? DecisionTypes.ChooseOne : DecisionTypes.FreeText),
+            Question = ReadDecisionString(args, "question") ?? "",
+            Options = options,
+            RecommendedOption = ReadDecisionString(args, "recommendedOption"),
+            BlockingReason = ReadDecisionString(args, "blockingReason"),
+            ContextSummary = ReadDecisionString(args, "contextSummary"),
+            AnswerSchema = ReadDecisionString(args, "answerSchema"),
+            RiskLevel = ReadDecisionString(args, "riskLevel") ?? DecisionRiskLevels.Medium,
+            Policy = ReadDecisionString(args, "policy") ?? DecisionPolicies.HumanRequired,
+            DefaultAction = ReadDecisionString(args, "defaultAction"),
+            TimeoutAt = deadlineAt,
+            DedupeKey = key,
+            ResumeBackend = DecisionResumeBackends.ToolLedger,
+            Status = DecisionStatuses.Pending,
+        };
+    }
+
+    private static string? ReadDecisionString(JsonElement obj, string name) =>
+        obj.ValueKind == JsonValueKind.Object && obj.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() : null;
+
+    private static IReadOnlyList<DecisionOption> ReadDecisionOptions(JsonElement args)
+    {
+        if (args.ValueKind != JsonValueKind.Object || !args.TryGetProperty("options", out var options) || options.ValueKind != JsonValueKind.Array)
+            return Array.Empty<DecisionOption>();
+
+        return options.EnumerateArray()
+            .Where(o => o.ValueKind == JsonValueKind.Object)
+            .Select(o => new DecisionOption
+            {
+                Id = ReadDecisionString(o, "id") ?? "",
+                Label = ReadDecisionString(o, "label") ?? "",
+                IsSideEffecting = o.TryGetProperty("isSideEffecting", out var s) && s.ValueKind == JsonValueKind.True,
+            })
+            .Where(o => o.Id.Length > 0)
+            .ToList();
+    }
+
+    /// <summary>Build + post the REDACTED decision card into the run's approval conversation: the body carries the question + (redacted) blocking reason + recommendation; the buttons are the typed options (or a free-text submit). The server-side <see cref="DecisionRequestTarget"/> carries the resolution token (omitted from the client view).</summary>
+    private async Task<Guid> PostDecisionCardAsync(DecisionRequest request, string token, CancellationToken cancellationToken)
+    {
+        var component = _components!.Build(DecisionButtonsConfig(request))
+            ?? throw new InvalidOperationException("The decision action-buttons component factory is not registered.");
+
+        var interaction = new MessageInteraction
+        {
+            Component = component,
+            Target = new DecisionRequestTarget { Token = token },
+            AllowedResponderUserIds = null,   // any team member may answer (team-scoped already)
+            Resolve = new ResolvePolicy(),    // first responder wins
+        };
+
+        var posted = await _bot!.PostAsBotAsync(_approvalConversationId!.Value, DecisionCardBody(request), interaction, cancellationToken).ConfigureAwait(false);
+
+        return posted.Id;
+    }
+
+    /// <summary>The typed-options button config: option id → button key for choose_one / approve_action; a single free-text submit (the reserved key + requiresComment) for confirm / free_text / an option-less ask. The recommended option gets the Primary emphasis. Option LABELS are agent-authored free text, so they go through the run redactor before reaching the human card — the same invariant <see cref="DecisionCardBody"/> upholds for the body (a button key is the option id, NOT displayed, so it stays verbatim as the resolution handle).</summary>
+    private JsonElement DecisionButtonsConfig(DecisionRequest request)
+    {
+        var buttons = request.DecisionType == DecisionTypes.FreeText || request.Options.Count == 0
+            ? new object[] { new { key = DecisionRequestResolver.FreeTextResponseKey, label = "Answer", style = "Primary", requiresComment = true } }
+            : request.Options
+                .Select(o => (object)new { key = o.Id, label = _redactor.Redact(o.Label), style = o.Id == request.RecommendedOption ? "Primary" : "Default", requiresComment = false })
+                .ToArray();
+
+        return JsonSerializer.SerializeToElement(new { kind = "action_buttons", buttons }, AgentJson.Options);
+    }
+
+    /// <summary>The redacted decision card body — the question + (optional) why + recommendation. Routed through the run's redactor so an echoed secret in the agent's text never reaches the human surface.</summary>
+    private string DecisionCardBody(DecisionRequest request) =>
+        _redactor.Redact(
+            $"Agent run {_runId} needs a decision: **{request.Question}**"
+            + (request.BlockingReason is { Length: > 0 } reason ? $"\n\n_Why:_ {reason}" : "")
+            + (request.RecommendedOption is { Length: > 0 } rec ? $"\n\n_Recommended:_ {rec}" : ""));
 
     /// <summary>
     /// Build + post the REDACTED approval card into the run's approval conversation. The body names the tool + a

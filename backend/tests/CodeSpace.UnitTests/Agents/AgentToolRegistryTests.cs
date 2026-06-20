@@ -43,7 +43,49 @@ public class AgentToolRegistryTests
             Task.FromResult(new SandboxResult { Status = SandboxStatus.Success, ExitCode = 0, Stdout = "", Stderr = "" });
     }
 
-    private static AgentToolRegistry Build(params INodeRuntime[] nodes) => new(nodes, NullLoggerFactory.Instance);
+    private static AgentToolRegistry Build(params INodeRuntime[] nodes) => new(nodes, Array.Empty<IAgentTool>(), NullLoggerFactory.Instance);
+
+    private static AgentToolRegistry BuildWith(IEnumerable<INodeRuntime> nodes, IEnumerable<IAgentTool> firstParty) => new(nodes, firstParty, NullLoggerFactory.Instance);
+
+    /// <summary>A minimal first-party (non-node) tool, the shape DecisionRequestTool registers under.</summary>
+    private sealed class FakeFirstPartyTool : IAgentTool
+    {
+        public FakeFirstPartyTool(string kind) => Kind = kind;
+        public string Kind { get; }
+        public string Description => "fake";
+        public JsonElement InputSchema { get; } = SchemaBuilder.EmptyObject();
+        public JsonElement OutputSchema { get; } = SchemaBuilder.EmptyObject();
+        public AgentToolValidation ValidateInput(JsonElement input) => AgentToolValidation.Valid;
+        public Task<AgentToolResult> CallAsync(AgentToolCall call, CancellationToken ct) => Task.FromResult(AgentToolResult.Fail("n/a"));
+    }
+
+    [Fact]
+    public void First_party_tools_merge_into_the_catalog_alongside_node_tools()
+    {
+        var registry = BuildWith(
+            new INodeRuntime[] { new FakeNode("git.read", eligible: true) },
+            new IAgentTool[] { new FakeFirstPartyTool("decision.request") });
+
+        registry.All.Select(t => t.Kind).ShouldBe(new[] { "decision.request", "git.read" }, "sorted union of node + first-party tools");
+        registry.Resolve("decision.request").ShouldNotBeNull("a first-party tool resolves by kind");
+    }
+
+    [Fact]
+    public void No_first_party_tools_is_byte_identical_to_node_only()
+    {
+        // The governance-OFF posture: an empty first-party set leaves the catalog exactly as node-only (the D2 byte-identical pin).
+        BuildWith(new INodeRuntime[] { new FakeNode("git.read", eligible: true) }, Array.Empty<IAgentTool>())
+            .All.Select(t => t.Kind).ShouldBe(new[] { "git.read" });
+    }
+
+    [Fact]
+    public void A_first_party_tool_colliding_with_a_node_kind_fails_loudly()
+    {
+        Should.Throw<InvalidOperationException>(() => BuildWith(
+                new INodeRuntime[] { new FakeNode("git.read", eligible: true) },
+                new IAgentTool[] { new FakeFirstPartyTool("git.read") }))
+            .Message.ShouldContain("git.read");
+    }
 
     [Fact]
     public void Only_eligible_nodes_are_projected_as_tools()

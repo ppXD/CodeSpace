@@ -84,6 +84,18 @@ public static class DecisionStatuses
     public const string Cancelled = "cancelled";
 }
 
+/// <summary>
+/// The reserved MCP tool name the agent-grain decision substrate (D2) intercepts. Pinned (Rule 8): the
+/// <c>McpRequestHandler</c> special-cases this name BEFORE the autonomy gate (a decision is an ask, never a gated
+/// side effect) and the ledger answer-CAS (<c>TryAnswerDecisionAsync</c>) guards on it so a decision answer can NEVER
+/// flip a real side-effecting approval row. Renaming it orphans every parked decision + breaks the guard — a
+/// compile-visible decision, pinned by a unit test.
+/// </summary>
+public static class DecisionToolKinds
+{
+    public const string DecisionRequest = "decision.request";
+}
+
 /// <summary>Who answered a resolved decision (audit + the rationale source).</summary>
 public static class DecisionAnsweredByKinds
 {
