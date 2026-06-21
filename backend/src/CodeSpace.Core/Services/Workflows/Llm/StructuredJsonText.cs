@@ -39,6 +39,16 @@ internal static class StructuredJsonText
         catch (JsonException) { return null; }
     }
 
+    /// <summary>A short, single-line preview of a model reply for a diagnostic exception (so a CI failure shows WHAT the model actually returned, not just "no structured output"). Truncated + newline-collapsed.</summary>
+    public static string Preview(string? content)
+    {
+        if (string.IsNullOrWhiteSpace(content)) return "(empty)";
+
+        var collapsed = content.Replace('\n', ' ').Replace('\r', ' ').Trim();
+
+        return collapsed.Length <= 600 ? collapsed : collapsed[..600] + "…";
+    }
+
     private static string StripFences(string content)
     {
         var text = content.Trim();

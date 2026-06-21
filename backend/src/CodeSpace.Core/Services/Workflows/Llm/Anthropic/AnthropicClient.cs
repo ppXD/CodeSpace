@@ -88,7 +88,7 @@ public sealed class AnthropicClient : ILLMClient, IStructuredLLMClient
             : StructuredJsonText.TryExtractObject(TextContent(parsed));
 
         if (json is not { } result)
-            throw new InvalidOperationException("Anthropic structured completion produced neither a tool_use block nor a JSON content object — the model did not produce structured output.");
+            throw new InvalidOperationException($"Anthropic structured completion produced neither a tool_use block nor a JSON content object — the model did not produce structured output. Content preview: {StructuredJsonText.Preview(TextContent(parsed))}");
 
         return new StructuredLLMCompletion
         {
