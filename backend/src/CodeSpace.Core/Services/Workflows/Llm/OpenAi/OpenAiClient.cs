@@ -86,7 +86,10 @@ public sealed class OpenAiClient : ILLMClient, IStructuredLLMClient
             Temperature = request.Temperature,
             Messages = BuildMessages(StructuredJsonText.WithSchemaInstruction(request.SystemPrompt, request.JsonSchema), request.UserPrompt),
             Tools = new[] { new OpenAiTool { Function = new OpenAiFunction { Name = StructuredToolName, Description = "Return the result as structured JSON.", Parameters = request.JsonSchema } } },
-            ToolChoice = new OpenAiToolChoice { Function = new OpenAiToolChoiceFunction { Name = StructuredToolName } },
+            // JSON mode: GUARANTEE the content is a JSON object even when the model does not call the function — the
+            // robust path for models/gateways without reliable forced tool-calling. tool_choice is left AUTO (omitted):
+            // forcing it conflicts with json_object on some gateways, and the model returns the JSON as content anyway.
+            ResponseFormat = new OpenAiResponseFormat(),
         };
 
         var parsed = await PostChatAsync(body, request.Credential, cancellationToken).ConfigureAwait(false);
@@ -94,8 +97,8 @@ public sealed class OpenAiClient : ILLMClient, IStructuredLLMClient
         var message = parsed.Choices?.FirstOrDefault()?.Message;
         var toolCall = message?.ToolCalls?.FirstOrDefault(t => t.Function?.Name == StructuredToolName);
 
-        // Prefer the function-call arguments; FALL BACK to a JSON object recovered from the text content (the model
-        // returned JSON as content instead of calling the function — common on models/gateways without forced tools).
+        // Prefer the function-call arguments; FALL BACK to a JSON object recovered from the text content (json mode
+        // makes the content a JSON object even when the model skips the function).
         var json = toolCall?.Function?.Arguments is { } arguments
             ? ParseToolArguments(arguments)
             : StructuredJsonText.TryExtractObject(message?.Content);
@@ -103,7 +106,7 @@ public sealed class OpenAiClient : ILLMClient, IStructuredLLMClient
         if (json is not { } result)
         {
             var refusal = string.IsNullOrWhiteSpace(message?.Refusal) ? "" : $" (refusal: {message!.Refusal})";
-            throw new InvalidOperationException($"OpenAI structured completion produced neither a function call nor a JSON content object — the model did not produce structured output{refusal}.");
+            throw new InvalidOperationException($"OpenAI structured completion produced neither a function call nor a JSON content object — the model did not produce structured output{refusal}. Content preview: {StructuredJsonText.Preview(message?.Content)}");
         }
 
         return new StructuredLLMCompletion
@@ -179,7 +182,13 @@ public sealed class OpenAiClient : ILLMClient, IStructuredLLMClient
         [JsonPropertyName("temperature")] public required double Temperature { get; init; }
         [JsonPropertyName("messages")] public required IReadOnlyList<OpenAiMessage> Messages { get; init; }
         [JsonPropertyName("tools")] [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] public IReadOnlyList<OpenAiTool>? Tools { get; init; }
-        [JsonPropertyName("tool_choice")] [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] public OpenAiToolChoice? ToolChoice { get; init; }
+        [JsonPropertyName("response_format")] [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] public OpenAiResponseFormat? ResponseFormat { get; init; }
+    }
+
+    /// <summary>OpenAI JSON mode — <c>{"type":"json_object"}</c> — guarantees the assistant content is a JSON object (the system prompt carries the schema).</summary>
+    private sealed class OpenAiResponseFormat
+    {
+        [JsonPropertyName("type")] public string Type => "json_object";
     }
 
     private sealed class OpenAiMessage

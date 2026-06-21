@@ -80,13 +80,15 @@ public class OpenAiClientStructuredTests
         result.InputTokens.ShouldBe(12);
         result.OutputTokens.ShouldBe(7);
 
-        // Request shape: a single forced function whose parameters IS the caller's schema, tool_choice pinned to it.
+        // Request shape: a function tool whose parameters IS the caller's schema (the fast path for tool-capable
+        // models) PLUS json_object response_format (the robust path — guarantees JSON content when the model skips
+        // the tool). tool_choice is left AUTO/omitted: forcing it conflicts with json_object on some gateways.
         var sent = JsonDocument.Parse(handler.RequestBody!).RootElement;
         var fn = sent.GetProperty("tools")[0].GetProperty("function");
         fn.GetProperty("name").GetString().ShouldBe("respond");
         fn.GetProperty("parameters").GetProperty("properties").GetProperty("subtasks").GetProperty("type").GetString().ShouldBe("array");
-        sent.GetProperty("tool_choice").GetProperty("type").GetString().ShouldBe("function");
-        sent.GetProperty("tool_choice").GetProperty("function").GetProperty("name").GetString().ShouldBe("respond");
+        sent.GetProperty("response_format").GetProperty("type").GetString().ShouldBe("json_object");
+        sent.TryGetProperty("tool_choice", out _).ShouldBeFalse("tool_choice is omitted — it conflicts with json_object on strict gateways");
         sent.GetProperty("messages")[1].GetProperty("content").GetString().ShouldBe("decompose this");
         sent.GetProperty("messages")[0].GetProperty("role").GetString().ShouldBe("system");
     }
