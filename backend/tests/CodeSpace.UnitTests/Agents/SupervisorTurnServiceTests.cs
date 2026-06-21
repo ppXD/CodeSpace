@@ -5,6 +5,7 @@ using CodeSpace.Core.Services.Supervisor.Deciders;
 using CodeSpace.Core.Services.Supervisor.Executors;
 using CodeSpace.Core.Services.Workflows.Nodes.Builtin;
 using CodeSpace.Messages.Agents;
+using CodeSpace.Messages.Agents.Benchmark;
 using CodeSpace.Messages.Dtos.Agents;
 using CodeSpace.UnitTests.Infrastructure;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -234,6 +235,180 @@ public class SupervisorTurnServiceTests
         single["integratedBranch"].GetString().ShouldBe("codespace/integration/x");
     }
 
+    // ── L4 P1: a terminal stop's MODEL-authored acceptance gates the verdict + branch ──
+
+    [Fact]
+    public void BuildResult_withholds_the_branch_and_reports_failure_when_the_stop_grade_FAILED()
+    {
+        // The stop's execution outcome carries a FAILED folded grade (the model's definition of done did not pass) →
+        // BuildResult withholds the run's final reviewable head + carries AcceptancePassed=false (node → AcceptanceFailed).
+        var context = StopContextWithFinalBranch();
+
+        var stopOutcome = SupervisorOutcome.AppendAcceptanceGrade("""{"stopped":true}""", passed: false, "model-check-failed");
+        var result = SupervisorTurnService.BuildResult(context, StopDecision(), SupervisorExecution.Synchronous(stopOutcome));
+
+        result.AcceptancePassed.ShouldBe(false);
+        result.IntegratedBranch.ShouldBeNull("a failed model definition-of-done withholds the reviewable head — no verified branch to ship");
+        result.RepositoryBranches.ShouldBeEmpty();
+    }
+
+    [Fact]
+    public void BuildResult_surfaces_the_branch_and_reports_pass_when_the_stop_grade_PASSED()
+    {
+        var context = StopContextWithFinalBranch();
+
+        var stopOutcome = SupervisorOutcome.AppendAcceptanceGrade("""{"stopped":true}""", passed: true, "tests-passed");
+        var result = SupervisorTurnService.BuildResult(context, StopDecision(), SupervisorExecution.Synchronous(stopOutcome));
+
+        result.AcceptancePassed.ShouldBe(true);
+        result.IntegratedBranch.ShouldBe("codespace/resolve/final", "a passed grade surfaces the verified head as before");
+    }
+
+    [Fact]
+    public void BuildResult_leaves_AcceptancePassed_null_and_surfaces_the_branch_when_no_grade_was_folded()
+    {
+        // The dominant case (no model acceptance authored): no acceptanceGrade on the stop outcome → AcceptancePassed
+        // null → the node reports Completed + the branch surfaces, byte-identical to before this slice.
+        var context = StopContextWithFinalBranch();
+
+        var result = SupervisorTurnService.BuildResult(context, StopDecision(), SupervisorExecution.Synchronous("""{"stopped":true}"""));
+
+        result.AcceptancePassed.ShouldBeNull();
+        result.IntegratedBranch.ShouldBe("codespace/resolve/final");
+    }
+
+    [Theory]
+    [InlineData(null, "Completed")]   // no model acceptance authored → byte-identical Completed
+    [InlineData(true, "Completed")]
+    [InlineData(false, "AcceptanceFailed")]
+    public void Finish_maps_the_acceptance_verdict_to_the_status_output(bool? acceptancePassed, string expectedStatus)
+    {
+        var outputs = AgentSupervisorNode.Finish(NullLogger.Instance, SupervisorTurnResult.Finished("stop", "done", integratedBranch: "b", acceptancePassed: acceptancePassed)).Outputs;
+
+        outputs["status"].GetString().ShouldBe(expectedStatus);
+    }
+
+    [Fact]
+    public async Task A_full_turn_stop_with_a_model_acceptance_that_FAILS_grades_once_reports_failure_and_withholds_the_branch()
+    {
+        var ledger = SeedRunWithCleanMerge();
+        var grader = new FakeAcceptanceGrader(new BenchmarkGrade { Passed = false, Detail = "model-check-failed" });
+        var service = ServiceWith(ledger, new StopWithAcceptanceDecider("npm", "test"), grader);
+
+        var result = await service.RunTurnAsync(_runId, _teamId, "sup", "goal", null, GoalConfigWithRepo(), CancellationToken.None);
+
+        result.IsFinished.ShouldBeTrue();
+        result.AcceptancePassed.ShouldBe(false);
+        result.IntegratedBranch.ShouldBeNull("the failed model DoD withholds the reviewable head end-to-end");
+        grader.CallCount.ShouldBe(1, "the model command is graded exactly once against the run's final branch");
+        grader.LastCall!.Value.Branch.ShouldBe("codespace/integration/final");
+        grader.LastCall.Value.Command.ShouldBe(new[] { "npm", "test" });
+        SupervisorOutcome.ReadAcceptanceGradePassed(StopRowOutcome(ledger)).ShouldBe(false, "the verdict is folded durably onto the stop row");
+    }
+
+    [Fact]
+    public async Task A_full_turn_stop_with_a_model_acceptance_that_PASSES_reports_completed_and_surfaces_the_branch()
+    {
+        var ledger = SeedRunWithCleanMerge();
+        var grader = new FakeAcceptanceGrader(new BenchmarkGrade { Passed = true, Detail = "tests-passed" });
+        var service = ServiceWith(ledger, new StopWithAcceptanceDecider("npm", "test"), grader);
+
+        var result = await service.RunTurnAsync(_runId, _teamId, "sup", "goal", null, GoalConfigWithRepo(), CancellationToken.None);
+
+        result.AcceptancePassed.ShouldBe(true);
+        result.IntegratedBranch.ShouldBe("codespace/integration/final");
+        grader.CallCount.ShouldBe(1);
+    }
+
+    [Fact]
+    public async Task A_full_turn_stop_with_NO_model_acceptance_never_grades_and_is_byte_identical()
+    {
+        var ledger = SeedRunWithCleanMerge();
+        var grader = new FakeAcceptanceGrader();
+        var service = ServiceWith(ledger, new StopWithAcceptanceDecider(/* no command */), grader);
+
+        var result = await service.RunTurnAsync(_runId, _teamId, "sup", "goal", null, GoalConfigWithRepo(), CancellationToken.None);
+
+        result.AcceptancePassed.ShouldBeNull("no model definition-of-done → no grade → the node reports Completed");
+        result.IntegratedBranch.ShouldBe("codespace/integration/final");
+        grader.CallCount.ShouldBe(0, "a stop without a model acceptance command never grades");
+        SupervisorOutcome.ReadAcceptanceGradePassed(StopRowOutcome(ledger)).ShouldBeNull("the stop outcome carries no acceptanceGrade — byte-identical to pre-slice");
+    }
+
+    [Fact]
+    public async Task A_full_turn_stop_with_a_model_acceptance_but_no_final_branch_SKIPS_the_grade()
+    {
+        // A run that produced no single-repo reviewable head (no integration seeded) → nothing to clone+grade → SKIP,
+        // never a fail-closed mislabel of a legitimately branchless / analysis-style run.
+        var ledger = new FakeSupervisorDecisionLog();
+        var grader = new FakeAcceptanceGrader(new BenchmarkGrade { Passed = false, Detail = "would-fail" });
+        var service = ServiceWith(ledger, new StopWithAcceptanceDecider("npm", "test"), grader);
+
+        var result = await service.RunTurnAsync(_runId, _teamId, "sup", "goal", null, GoalConfigWithRepo(), CancellationToken.None);
+
+        result.AcceptancePassed.ShouldBeNull();
+        grader.CallCount.ShouldBe(0, "no final branch → the grade is skipped (the run is reported Completed, not falsely AcceptanceFailed)");
+    }
+
+    [Fact]
+    public async Task A_full_turn_stop_with_a_model_acceptance_on_a_MULTI_repo_run_SKIPS_the_grade()
+    {
+        // Multi-repo objective acceptance is a separate deferral — a multi-repo run has no single branch to grade, so the
+        // model stop check is skipped (the per-repo branches still surface).
+        var ledger = SeedRunWithCleanMultiRepoMerge();
+        var grader = new FakeAcceptanceGrader(new BenchmarkGrade { Passed = false, Detail = "would-fail" });
+        var service = ServiceWith(ledger, new StopWithAcceptanceDecider("npm", "test"), grader);
+
+        var result = await service.RunTurnAsync(_runId, _teamId, "sup", "goal", null, GoalConfigWithRepo(), CancellationToken.None);
+
+        result.AcceptancePassed.ShouldBeNull();
+        grader.CallCount.ShouldBe(0, "a multi-repo run skips the single-repo stop grade (deferred)");
+        result.RepositoryBranches.Count.ShouldBe(2, "the per-repo branches still surface");
+    }
+
+    [Fact]
+    public async Task A_budget_forced_stop_is_never_graded_even_with_a_final_branch_and_repo()
+    {
+        // A FORCED stop (budget/governance) carries only {"reason":...} — no model acceptance — so it is never graded,
+        // EVEN when the run has a final reviewable branch + repo (so the skip is the forced-stop shape, not no-branch).
+        var ledger = SeedRunWithCleanMerge();   // Sequence 1: a clean merge → a final branch exists
+
+        for (var i = 0; i < SupervisorLane.DecisionBudget - 1; i++)
+            ledger.SeedTerminal(_runId, _teamId, SupervisorDecisionKinds.Plan, $$"""{"turn":{{i}}}""", "{}");   // fill the round budget
+
+        var grader = new FakeAcceptanceGrader(new BenchmarkGrade { Passed = true, Detail = "would-pass" });
+        var service = ServiceWith(ledger, new AlwaysPlanDecider(), grader);   // the decider is never asked — the budget forces the stop
+
+        var result = await service.RunTurnAsync(_runId, _teamId, "sup", "goal", null, GoalConfigWithRepo(), CancellationToken.None);
+
+        result.DecisionKind.ShouldBe(SupervisorDecisionKinds.Stop);
+        result.TerminalReason.ShouldBe(SupervisorTurnService.BudgetExhaustedReason, "the budget forced the stop");
+        grader.CallCount.ShouldBe(0, "a forced stop has no model acceptance command → it is never graded");
+        result.AcceptancePassed.ShouldBeNull("a forced stop reports Completed, never AcceptanceFailed");
+    }
+
+    [Fact]
+    public async Task An_in_flight_stop_with_a_model_acceptance_is_graded_once_on_crash_recovery()
+    {
+        // A stop that crashed AFTER claim but BEFORE RecordTerminal is re-entered as context.InFlight → ReplayInFlightTurnAsync
+        // re-executes + re-grades it (bounded, idempotent-by-design). Pins that the recovery walk DOES grade + fold the verdict
+        // (the grade is on the execute path, which the in-flight replay re-runs — not the rehydrate fold).
+        var ledger = SeedRunWithCleanMerge();   // Sequence 1: the final branch
+        var stopPayload = JsonSerializer.Serialize(new SupervisorStopPayload { Outcome = "completed", Summary = "done", Acceptance = new SupervisorAcceptanceSpec { Command = new[] { "npm", "test" } } }, AgentJson.Options);
+        ledger.SeedPending(_runId, _teamId, SupervisorDecisionKinds.Stop, stopPayload);   // Sequence 2: the crashed-mid-execution stop
+
+        var grader = new FakeAcceptanceGrader(new BenchmarkGrade { Passed = false, Detail = "model-check-failed" });
+        var service = ServiceWith(ledger, new AlwaysPlanDecider(), grader);   // the decider is NOT consulted on the in-flight replay path
+
+        var result = await service.RunTurnAsync(_runId, _teamId, "sup", "goal", null, GoalConfigWithRepo(), CancellationToken.None);
+
+        result.IsFinished.ShouldBeTrue("the frozen in-flight stop is finished on recovery");
+        result.AcceptancePassed.ShouldBe(false, "the recovered stop's model DoD is graded — it failed");
+        result.IntegratedBranch.ShouldBeNull("the failed DoD withholds the head on recovery too");
+        grader.CallCount.ShouldBe(1, "the recovery walk grades the in-flight stop's model command once");
+        SupervisorOutcome.ReadAcceptanceGradePassed(StopRowOutcome(ledger)).ShouldBe(false, "the verdict is folded onto the recovered stop row");
+    }
+
     // ── Replay: a re-run of a settled turn does NOT re-execute the side effect ───────
 
     [Fact]
@@ -299,6 +474,85 @@ public class SupervisorTurnServiceTests
 
     private SupervisorTurnService Service(FakeSupervisorDecisionLog ledger) =>
         new(ledger, new StubSupervisorDecider(), new StubSupervisorActionExecutor(), db: null!, new FakeAcceptanceGrader(), new FakeDecisionQueue(), new FakeDecisionArbiter(), new FakeDecisionAnswerService(), NullLogger<SupervisorTurnService>.Instance);
+
+    // ── L4 P1 stop-acceptance test helpers ──────────────────────────────────────────
+
+    private SupervisorTurnService ServiceWith(FakeSupervisorDecisionLog ledger, ISupervisorDecider decider, FakeAcceptanceGrader grader) =>
+        new(ledger, decider, new StubSupervisorActionExecutor(), db: null!, grader, new FakeDecisionQueue(), new FakeDecisionArbiter(), new FakeDecisionAnswerService(), NullLogger<SupervisorTurnService>.Instance);
+
+    private static SupervisorDecision StopDecision() => new() { Kind = SupervisorDecisionKinds.Stop, PayloadJson = "{}" };
+
+    private static SupervisorGoalConfig GoalConfigWithRepo() => new() { AgentProfile = new SupervisorAgentProfile { RepositoryId = Guid.NewGuid() } };
+
+    private static string VerifiedResolveOutcome()
+    {
+        var resolver = new SupervisorAgentResult { AgentRunId = Guid.NewGuid(), Status = "Succeeded", Summary = $"done {SupervisorResolverRecipe.TestsPassedMarker}", ProducedBranch = "codespace/resolve/final" };
+
+        return JsonSerializer.Serialize(new { agentRunIds = new[] { resolver.AgentRunId }, agentCount = 1, agentResults = new[] { resolver } }, AgentJson.Options);
+    }
+
+    private static SupervisorTurnContext StopContextWithFinalBranch() => new()
+    {
+        Goal = "g",
+        TurnNumber = 2,
+        PriorDecisions = new[]
+        {
+            new SupervisorPriorDecision { Id = Guid.NewGuid(), Sequence = 1, DecisionKind = SupervisorDecisionKinds.Resolve, Status = SupervisorDecisionStatus.Succeeded, PayloadJson = "{}", OutcomeJson = VerifiedResolveOutcome() },
+        },
+    };
+
+    // A clean single-repo MERGE (not a resolve) is the run's final reviewable head here: merge is NOT a StagesAgents
+    // decision, so rehydrate never reads the agent-results DB (null in this unit harness) — the full-turn tests stay DB-free.
+    private FakeSupervisorDecisionLog SeedRunWithCleanMerge()
+    {
+        var ledger = new FakeSupervisorDecisionLog();
+        var outcome = JsonSerializer.Serialize(new { integration = new { status = "Clean", integratedBranch = "codespace/integration/final" } }, AgentJson.Options);
+
+        ledger.SeedTerminal(_runId, _teamId, SupervisorDecisionKinds.Merge, "{}", outcome);
+        return ledger;
+    }
+
+    private FakeSupervisorDecisionLog SeedRunWithCleanMultiRepoMerge()
+    {
+        var ledger = new FakeSupervisorDecisionLog();
+        var outcome = JsonSerializer.Serialize(new
+        {
+            integration = new
+            {
+                status = "Clean",
+                repositories = new[]
+                {
+                    new { repositoryId = Guid.NewGuid(), alias = "web", status = "Clean", integratedBranch = "codespace/integration/run/turn1" },
+                    new { repositoryId = Guid.NewGuid(), alias = "api", status = "Clean", integratedBranch = "codespace/integration/run/turn1" },
+                },
+            },
+        }, AgentJson.Options);
+
+        ledger.SeedTerminal(_runId, _teamId, SupervisorDecisionKinds.Merge, "{}", outcome);
+        return ledger;
+    }
+
+    private static string? StopRowOutcome(FakeSupervisorDecisionLog ledger) => ledger.Rows.Last(r => r.DecisionKind == SupervisorDecisionKinds.Stop).OutcomeJson;
+
+    /// <summary>A decider that STOPS with an optional model-authored acceptance command (empty args ⇒ no acceptance) — drives the stop-grade path.</summary>
+    private sealed class StopWithAcceptanceDecider : ISupervisorDecider
+    {
+        private readonly string[] _command;
+
+        public StopWithAcceptanceDecider(params string[] command) => _command = command;
+
+        public Task<SupervisorDecision> DecideAsync(SupervisorTurnContext context, CancellationToken cancellationToken) =>
+            Task.FromResult(new SupervisorDecision
+            {
+                Kind = SupervisorDecisionKinds.Stop,
+                PayloadJson = JsonSerializer.Serialize(new SupervisorStopPayload
+                {
+                    Outcome = "completed",
+                    Summary = "done",
+                    Acceptance = _command.Length > 0 ? new SupervisorAcceptanceSpec { Command = _command } : null,
+                }, AgentJson.Options),
+            });
+    }
 
     /// <summary>A decider that emits decision A on its FIRST call and a DIFFERENT decision B on every later one — models a non-deterministic real LLM re-asked on the same turn after a crash. The crown-jewel test asserts the replay ignores it entirely (CallCount stays 0).</summary>
     private sealed class NonDeterministicDecider : ISupervisorDecider

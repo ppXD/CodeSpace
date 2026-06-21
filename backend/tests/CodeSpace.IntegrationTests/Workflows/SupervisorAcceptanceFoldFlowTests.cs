@@ -6,6 +6,7 @@ using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Decisions;
 using CodeSpace.Core.Services.Supervisor;
 using CodeSpace.Core.Services.Supervisor.Arbiter;
+using CodeSpace.Core.Services.Workflows.Nodes.Builtin;
 using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.IntegrationTests.Workflows.Infrastructure;
 using CodeSpace.Messages.Agents;
@@ -161,6 +162,50 @@ public sealed class SupervisorAcceptanceFoldFlowTests
         SupervisorOutcome.ReadResolutionVerdict(resolve.OutcomeJson).ShouldBe(SupervisorResolutionVerdict.Verified, "the marker verdict stands for a multi-repo resolve, byte-identical to pre-A3");
     }
 
+    // ─── L4 P1: a terminal STOP's MODEL-authored acceptance is graded inline + persisted on the real ledger ───
+
+    [Theory]
+    [InlineData(true, "Completed")]        // the model definition-of-done passes → the run completes, branch surfaces
+    [InlineData(false, "AcceptanceFailed")] // it fails → AcceptanceFailed, the reviewable branch is withheld
+    public async Task A_terminal_stop_grades_the_model_command_and_persists_the_verdict(bool gradePassed, string expectedStatus)
+    {
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedSupervisorRunAsync(teamId, userId);
+        var repoId = Guid.NewGuid();
+
+        // A clean single-repo merge is the run's final reviewable head — the branch the stop's model check grades against.
+        await SeedCleanMergeDecisionAsync(runId, teamId, "codespace/integration/x");
+
+        var (result, grader) = await RunStopTurnAsync(runId, teamId, GoalConfig(repoId, acceptanceChecks: null), new[] { "sh", "check.sh" }, new BenchmarkGrade { Passed = gradePassed, Detail = "model-check" });
+
+        grader.CallCount.ShouldBe(1, "the model command is graded once against the run's final branch");
+        grader.LastCall!.Value.Branch.ShouldBe("codespace/integration/x");
+        grader.LastCall.Value.Command.ShouldBe(new[] { "sh", "check.sh" }, "the model-authored command is the graded argv");
+
+        result.AcceptancePassed.ShouldBe(gradePassed);
+        result.IntegratedBranch.ShouldBe(gradePassed ? "codespace/integration/x" : null, "a failed model DoD withholds the reviewable head");
+        AgentSupervisorNode.Finish(Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance, result).Outputs["status"].GetString().ShouldBe(expectedStatus);
+
+        SupervisorOutcome.ReadAcceptanceGradePassed(await StopLedgerOutcomeAsync(runId, teamId))
+            .ShouldBe(gradePassed, "the verdict is PERSISTED onto the durable stop row");
+    }
+
+    [Fact]
+    public async Task A_terminal_stop_with_no_model_acceptance_never_grades_and_is_byte_identical()
+    {
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedSupervisorRunAsync(teamId, userId);
+
+        await SeedCleanMergeDecisionAsync(runId, teamId, "codespace/integration/x");
+
+        var (result, grader) = await RunStopTurnAsync(runId, teamId, GoalConfig(Guid.NewGuid(), acceptanceChecks: null), command: Array.Empty<string>(), new BenchmarkGrade { Passed = false, Detail = "should-not-run" });
+
+        grader.CallCount.ShouldBe(0, "a stop without a model acceptance command never grades");
+        result.AcceptancePassed.ShouldBeNull();
+        result.IntegratedBranch.ShouldBe("codespace/integration/x", "the branch surfaces as before");
+        SupervisorOutcome.ReadAcceptanceGradePassed(await StopLedgerOutcomeAsync(runId, teamId)).ShouldBeNull("the durable stop row carries no acceptanceGrade — byte-identical to pre-slice");
+    }
+
     // ─── Crown jewel: the REAL grader (DI-resolved) wired through the real fold against a real repo + branch ───
 
     [Theory]
@@ -195,6 +240,48 @@ public sealed class SupervisorAcceptanceFoldFlowTests
             SupervisorOutcome.ResolvedBranch(resolve).ShouldBeNull("a really-failing check withholds the accept boundary");
         else
             SupervisorOutcome.ResolvedBranch(resolve).ShouldBe("resolve/head", "a really-passing check accepts the resolved branch");
+    }
+
+    [Theory]
+    [InlineData(0, "Completed")]            // the model definition-of-done really passes → the run completes
+    [InlineData(1, "AcceptanceFailed")]     // it really fails → AcceptanceFailed end-to-end, the head is withheld
+    public async Task The_real_grade_drives_the_terminal_stop_status_over_a_real_repo_branch(int checkExitCode, string expectedStatus)
+    {
+        if (!await GitReadyAsync()) return;
+
+        using var remote = new AcceptanceRemote();
+        await remote.InitAsync();
+        await remote.AddBranchWithCheckAsync("integration/head", checkExitCode);
+
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedSupervisorRunAsync(teamId, userId);
+        var repoId = await SeedBoundRepositoryAsync(teamId, remote.Url);
+
+        // The run's final reviewable head is a REAL branch on the remote; the stop's model check clones + runs it for real.
+        await SeedCleanMergeDecisionAsync(runId, teamId, "integration/head");
+
+        SupervisorTurnResult result;
+        using (var scope = _fixture.BeginScope())
+        {
+            // The REAL SupervisorAcceptanceGrader at the grade seam (clones integration/head + runs check.sh); a fixed
+            // stop-authoring decider stands in for the LLM brain so no model is needed.
+            var service = new SupervisorTurnService(
+                scope.Resolve<ISupervisorDecisionLog>(),
+                new StopWithAcceptanceDecider(new[] { "sh", "check.sh" }),
+                scope.Resolve<ISupervisorActionExecutor>(),
+                scope.Resolve<CodeSpaceDbContext>(),
+                scope.Resolve<ISupervisorAcceptanceGrader>(),
+                scope.Resolve<IDecisionQueueService>(),
+                scope.Resolve<IDecisionArbiter>(),
+                scope.Resolve<IDecisionAnswerService>(),
+                scope.Resolve<ILogger<SupervisorTurnService>>());
+
+            result = await service.RunTurnAsync(runId, teamId, NodeId, Goal, conversationId: null, GoalConfig(repoId, acceptanceChecks: null), CancellationToken.None);
+        }
+
+        AgentSupervisorNode.Finish(Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance, result).Outputs["status"].GetString()
+            .ShouldBe(expectedStatus, "the REAL acceptance check's exit code drives the terminal stop status end-to-end");
+        result.IntegratedBranch.ShouldBe(checkExitCode == 0 ? "integration/head" : null, "a really-failing model DoD withholds the reviewable head");
     }
 
     // ─── Helpers ───
@@ -309,6 +396,71 @@ public sealed class SupervisorAcceptanceFoldFlowTests
             scope.Resolve<ILogger<SupervisorTurnService>>());
 
         return await service.RehydrateFromDecisionLogAsync(runId, teamId, NodeId, Goal, goalConfig, CancellationToken.None);
+    }
+
+    private async Task<(SupervisorTurnResult Result, RecordingGrader Grader)> RunStopTurnAsync(Guid runId, Guid teamId, SupervisorGoalConfig goalConfig, string[] command, BenchmarkGrade grade)
+    {
+        var grader = new RecordingGrader(grade);
+
+        using var scope = _fixture.BeginScope();
+        var service = new SupervisorTurnService(
+            scope.Resolve<ISupervisorDecisionLog>(),
+            new StopWithAcceptanceDecider(command),
+            scope.Resolve<ISupervisorActionExecutor>(),
+            scope.Resolve<CodeSpaceDbContext>(),
+            grader,
+            scope.Resolve<IDecisionQueueService>(),
+            scope.Resolve<IDecisionArbiter>(),
+            scope.Resolve<IDecisionAnswerService>(),
+            scope.Resolve<ILogger<SupervisorTurnService>>());
+
+        var result = await service.RunTurnAsync(runId, teamId, NodeId, Goal, conversationId: null, goalConfig, CancellationToken.None);
+        return (result, grader);
+    }
+
+    private async Task SeedCleanMergeDecisionAsync(Guid runId, Guid teamId, string integratedBranch)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        var now = DateTimeOffset.UtcNow;
+        db.SupervisorDecisionRecord.Add(new SupervisorDecisionRecord
+        {
+            Id = Guid.NewGuid(), TeamId = teamId, SupervisorRunId = runId, Sequence = 1,
+            DecisionKind = SupervisorDecisionKinds.Merge, IdempotencyKey = $"merge-{Guid.NewGuid():N}", InputHash = "test",
+            Status = SupervisorDecisionStatus.Succeeded, PayloadJson = "{}",
+            OutcomeJson = JsonSerializer.Serialize(new { integration = new { status = "Clean", integratedBranch } }, AgentJson.Options),
+            FenceEpoch = 1, CreatedDate = now, CreatedBy = Guid.Empty, LastModifiedDate = now, LastModifiedBy = Guid.Empty,
+        });
+        await db.SaveChangesAsync();
+    }
+
+    private async Task<string?> StopLedgerOutcomeAsync(Guid runId, Guid teamId)
+    {
+        using var scope = _fixture.BeginScope();
+        return await scope.Resolve<CodeSpaceDbContext>().SupervisorDecisionRecord.AsNoTracking()
+            .Where(d => d.SupervisorRunId == runId && d.TeamId == teamId && d.DecisionKind == SupervisorDecisionKinds.Stop)
+            .Select(d => d.OutcomeJson)
+            .SingleAsync();
+    }
+
+    /// <summary>A decider that STOPS with an optional model-authored acceptance command (empty ⇒ no acceptance) — drives the L4 P1 stop-grade path over the real ledger.</summary>
+    private sealed class StopWithAcceptanceDecider : ISupervisorDecider
+    {
+        private readonly string[] _command;
+
+        public StopWithAcceptanceDecider(string[] command) => _command = command;
+
+        public Task<SupervisorDecision> DecideAsync(SupervisorTurnContext context, CancellationToken cancellationToken) =>
+            Task.FromResult(new SupervisorDecision
+            {
+                Kind = SupervisorDecisionKinds.Stop,
+                PayloadJson = JsonSerializer.Serialize(new SupervisorStopPayload
+                {
+                    Outcome = "completed",
+                    Summary = "done",
+                    Acceptance = _command.Length > 0 ? new SupervisorAcceptanceSpec { Command = _command } : null,
+                }, AgentJson.Options),
+            });
     }
 
     private static SupervisorGoalConfig GoalConfig(Guid repoId, IReadOnlyList<string>? acceptanceChecks) => new()

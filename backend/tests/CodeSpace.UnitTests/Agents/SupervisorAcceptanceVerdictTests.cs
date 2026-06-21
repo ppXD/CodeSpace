@@ -100,6 +100,39 @@ public class SupervisorAcceptanceVerdictTests
         SupervisorLane.AcceptanceGradeTimeoutSeconds.ShouldBe(120);
     }
 
+    // ── AppendAcceptanceGrade: the GENERIC additive fold for a terminal STOP (preserves the stop shape) ──
+
+    [Fact]
+    public void Append_acceptance_grade_preserves_the_stop_outcome_shape_and_appends_the_grade()
+    {
+        // Unlike the resolve-shaped FoldAcceptanceGrade, the stop fold must NOT drop the stop's own keys. Every
+        // existing key is re-emitted verbatim in order and only the acceptanceGrade key is added (no shape corruption).
+        var stopOutcome = JsonSerializer.Serialize(new { stopped = true, outcome = "completed", summary = "done" }, AgentJson.Options);
+
+        var graded = SupervisorOutcome.AppendAcceptanceGrade(stopOutcome, passed: false, detail: "model-check-failed");
+
+        graded.ShouldBe(stopOutcome[..^1] + ""","acceptanceGrade":{"passed":false,"detail":"model-check-failed"}}""",
+            "the stop's stopped/outcome/summary survive byte-intact and only the acceptanceGrade key is appended");
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void Append_then_read_round_trips_the_passed_on_a_stop_shape(bool passed)
+    {
+        var stopOutcome = JsonSerializer.Serialize(new { stopped = true, outcome = "completed", summary = "done" }, AgentJson.Options);
+
+        SupervisorOutcome.ReadAcceptanceGradePassed(SupervisorOutcome.AppendAcceptanceGrade(stopOutcome, passed, "d")).ShouldBe(passed);
+    }
+
+    [Fact]
+    public void Append_acceptance_grade_starts_from_an_empty_object_for_a_blank_or_unparseable_outcome()
+    {
+        // Defensive (a stop outcome is always a valid object) — a null/blank/garbage input yields a bare grade object.
+        SupervisorOutcome.AppendAcceptanceGrade(null, true, "d").ShouldBe("""{"acceptanceGrade":{"passed":true,"detail":"d"}}""");
+        SupervisorOutcome.AppendAcceptanceGrade("not json", true, "d").ShouldBe("""{"acceptanceGrade":{"passed":true,"detail":"d"}}""");
+    }
+
     private static string ResolveOutcome(string status, string summary, bool? gradePassed)
     {
         var agentResults = new[] { new { agentRunId = Guid.NewGuid(), status, summary, producedBranch = "b" } };

@@ -47,6 +47,16 @@ public sealed record SupervisorTurnResult
     /// </summary>
     public IReadOnlyList<SupervisorRepositoryBranch> RepositoryBranches { get; init; } = Array.Empty<SupervisorRepositoryBranch>();
 
+    /// <summary>
+    /// The objective acceptance verdict on FINISH (L4 P1) — <c>null</c> when the terminal stop authored no
+    /// model acceptance check (the dominant case; the node reports Completed, byte-identical to before),
+    /// <c>true</c>/<c>false</c> = the server-run grade's pass/fail. <c>false</c> ⇒ the node reports
+    /// <c>AcceptanceFailed</c> and the reviewable branches are withheld (the model's definition of done did not
+    /// pass, so there is no verified head to ship). An in-memory node-local read only — a finish never parks, so
+    /// this never serializes into a wait payload.
+    /// </summary>
+    public bool? AcceptancePassed { get; init; }
+
     /// <summary>The folded context for the NEXT turn — carried as the self-advance park wait's payload. Null on finish.</summary>
     public SupervisorTurnContext? NextTurn { get; init; }
 
@@ -66,8 +76,8 @@ public sealed record SupervisorTurnResult
     /// <summary>True when this turn parked on a human answer (ask_human) — the node suspends on a single Action wait keyed to <see cref="HumanWaitToken"/>.</summary>
     public bool ParkedOnHuman => !IsFinished && HumanWaitToken != null;
 
-    public static SupervisorTurnResult Finished(string decisionKind, string? terminalReason, string? integratedBranch = null, IReadOnlyList<SupervisorRepositoryBranch>? repositoryBranches = null) =>
-        new() { IsFinished = true, DecisionKind = decisionKind, TerminalReason = terminalReason, IntegratedBranch = integratedBranch, RepositoryBranches = repositoryBranches ?? Array.Empty<SupervisorRepositoryBranch>() };
+    public static SupervisorTurnResult Finished(string decisionKind, string? terminalReason, string? integratedBranch = null, IReadOnlyList<SupervisorRepositoryBranch>? repositoryBranches = null, bool? acceptancePassed = null) =>
+        new() { IsFinished = true, DecisionKind = decisionKind, TerminalReason = terminalReason, IntegratedBranch = integratedBranch, RepositoryBranches = repositoryBranches ?? Array.Empty<SupervisorRepositoryBranch>(), AcceptancePassed = acceptancePassed };
 
     /// <summary>A SYNCHRONOUS non-terminal decision (plan / merge) — the node self-advances on a SupervisorDecision wait carrying the next-turn context.</summary>
     public static SupervisorTurnResult SelfAdvance(string decisionKind, SupervisorTurnContext nextTurn) =>

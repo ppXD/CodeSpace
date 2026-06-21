@@ -106,7 +106,7 @@ public sealed class AgentSupervisorNode : INodeRuntime
             {
               "type": "object",
               "properties": {
-                "status":           { "type": "string" },
+                "status":           { "type": "string", "description": "Terminal status: 'Completed', or 'AcceptanceFailed' when the stop's model-authored acceptance check did not pass (the reviewable branch is then withheld)." },
                 "decision":         { "type": "string" },
                 "reason":           { "type": "string" },
                 "turns":            { "type": "integer" },
@@ -215,7 +215,10 @@ public sealed class AgentSupervisorNode : INodeRuntime
 
         var outputs = new Dictionary<string, JsonElement>
         {
-            ["status"] = JsonSerializer.SerializeToElement("Completed"),
+            // L4 P1: a terminal stop whose MODEL-authored acceptance check FAILED reports AcceptanceFailed (objective
+            // definition-of-done not met) instead of the self-reported Completed; null (no check authored) / true →
+            // Completed, byte-identical to before. The failed verdict also withholds the reviewable branch upstream.
+            ["status"] = JsonSerializer.SerializeToElement(result.AcceptancePassed == false ? "AcceptanceFailed" : "Completed"),
             ["decision"] = JsonSerializer.SerializeToElement(result.DecisionKind),
             ["reason"] = JsonSerializer.SerializeToElement(result.TerminalReason ?? ""),
             ["turns"] = JsonSerializer.SerializeToElement((result.NextTurn?.TurnNumber ?? 0)),

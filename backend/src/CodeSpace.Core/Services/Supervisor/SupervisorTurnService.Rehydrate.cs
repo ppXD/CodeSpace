@@ -293,6 +293,54 @@ public sealed partial class SupervisorTurnService
         }
     }
 
+    /// <summary>
+    /// Grade a terminal STOP's MODEL-authored acceptance check (L4 P1) inline on the decided-stop path, folding the
+    /// verdict onto the stop outcome so <see cref="BuildResult"/> reads it back off <c>execution.OutcomeJson</c>. A
+    /// byte-identical no-op unless the stop carries a model <see cref="SupervisorAcceptanceSpec.Command"/>. SINGLE-repo
+    /// only: grades the run's final reviewable head — a null branch (multi-repo / analysis-only / un-integrated work)
+    /// ⇒ SKIP (the multi-repo objective grade is a separate deferral, and there is no single branch to clone), never a
+    /// fail-closed mislabel of a legitimately branchless run. The model criterion is ADDITIONAL to whatever the resolve
+    /// floor already enforced (it can only TIGHTEN acceptance, never manufacture it).
+    /// </summary>
+    private async Task<SupervisorExecution> ApplyStopAcceptanceGradeAsync(SupervisorExecution execution, SupervisorTurnContext context, SupervisorDecision decision, Guid teamId, CancellationToken cancellationToken)
+    {
+        if (decision.Kind != SupervisorDecisionKinds.Stop) return execution;
+
+        var command = NormalizeCommand(ReadStopAcceptanceCommand(decision.PayloadJson));
+
+        if (command is null) return execution;   // no model definition-of-done → byte-identical no-op (the dominant case)
+
+        var branch = SupervisorOutcome.ReadFinalIntegratedBranch(context.PriorDecisions);
+        var repositoryId = context.AgentProfile?.RepositoryId;
+
+        if (string.IsNullOrEmpty(branch) || repositoryId is null) return execution;   // nothing single-repo to grade against → skip (don't mislabel multi-repo / analysis-only)
+
+        var grade = await GradeStopAcceptanceAsync(repositoryId.Value, teamId, branch, command, cancellationToken).ConfigureAwait(false);
+
+        return execution with { OutcomeJson = SupervisorOutcome.AppendAcceptanceGrade(execution.OutcomeJson, grade.Passed, grade.Detail) };
+    }
+
+    /// <summary>Grade the stop's model command against the final branch, fail-closed: the grader is itself fail-closed; any unexpected non-cancellation escape degrades to not-accepted so the terminal record can never crash + strand the row. Only a genuine cancellation propagates.</summary>
+    private async Task<BenchmarkGrade> GradeStopAcceptanceAsync(Guid repositoryId, Guid teamId, string branch, IReadOnlyList<string> command, CancellationToken cancellationToken)
+    {
+        try
+        {
+            return await _acceptanceGrader.GradeAsync(repositoryId, teamId, branch, command, SupervisorLane.AcceptanceGradeTimeoutSeconds, cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogWarning(ex, "Stop acceptance grade failed unexpectedly; recording not-accepted");
+            return new BenchmarkGrade { Passed = false, Detail = $"grade-error: {ex.Message}" };
+        }
+    }
+
+    /// <summary>The model-authored acceptance argv off a stop decision's payload (<see cref="SupervisorStopPayload.Acceptance"/>'s command), best-effort (null when absent / malformed).</summary>
+    private static IReadOnlyList<string>? ReadStopAcceptanceCommand(string payloadJson)
+    {
+        try { return JsonSerializer.Deserialize<SupervisorStopPayload>(payloadJson, AgentJson.Options)?.Acceptance?.Command; }
+        catch (JsonException) { return null; }
+    }
+
     /// <summary>The placeholder for a staged agent-run id that no longer resolves (deleted / out-of-team) — keeps the folded set N-for-N so the decider sees an explicit "this agent is gone" rather than a silently shorter list. Not reachable today (AgentRun rows are append-only), but fail-legible if it ever is.</summary>
     private static SupervisorAgentResult UnknownAgentResult(Guid agentRunId) =>
         new() { AgentRunId = agentRunId, Status = "Unknown", Error = "agent run not found (deleted or out-of-team)" };
