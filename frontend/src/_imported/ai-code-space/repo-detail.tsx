@@ -26,6 +26,7 @@ import {
   useRepositoryTags,
 } from "@/hooks/use-repositories";
 import { PrReviewActions } from "@/components/repositories/PrReviewActions";
+import { LaunchTaskModal } from "@/components/tasks/LaunchTaskModal";
 import { formatBytes } from "@/lib/codeTree";
 
 import { DiffViewer } from "./diff-viewer";
@@ -83,6 +84,7 @@ export function RepoDetailHeader({ repoId, activeTab, onTabChange, teamSlug, chi
   const repository = useRepository(repoId);
   const instances = useProviderInstances();
   const navigate = useNavigate();
+  const [launchOpen, setLaunchOpen] = useState(false);
 
   // Breadcrumb navigation handlers — kept here so the route layer doesn't have
   // to know about the per-crumb destinations. Both target the same place the
@@ -257,8 +259,23 @@ export function RepoDetailHeader({ repoId, activeTab, onTabChange, teamSlug, chi
             <button className="btn" onClick={() => window.open(repo.webUrl, "_blank", "noopener")}>
               <Ic.ArrowOut size={13} /> Open on {instance ? PROVIDER_LABEL[instance.provider] : "provider"}
             </button>
+            <button className="btn btn-primary" onClick={() => setLaunchOpen(true)}>
+              <Ic.Zap size={13} /> Launch a task
+            </button>
           </div>
         </div>
+
+        {launchOpen && (
+          <LaunchTaskModal
+            surface="repo"
+            autofill={{ repositoryId: repo.id, repositoryLabel: repo.fullPath, baseBranch: repo.defaultBranch }}
+            onClose={() => setLaunchOpen(false)}
+            onLaunched={(runId) => {
+              setLaunchOpen(false);
+              navigate({ to: "/teams/$teamSlug/workflows/runs/$runId", params: { teamSlug, runId } });
+            }}
+          />
+        )}
 
         <div className="rd-tabs">
           {detailTabs.map(([id, label, badge]) => (

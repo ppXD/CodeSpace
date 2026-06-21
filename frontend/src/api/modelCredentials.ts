@@ -48,4 +48,35 @@ export const modelCredentialsApi = {
 
   revoke: (id: string) =>
     fetchJson<{ id: string }>(`/api/model-credentials/${id}/revoke`, { method: "POST" }),
+
+  /** The models a single credential exposes (mirror of backend CredentialedModelSummary). */
+  listModels: (credentialId: string) =>
+    fetchJson<CredentialedModelSummary[]>(`/api/model-credentials/${encodeURIComponent(credentialId)}/models`),
+
+  /** Manually add a model id to a credential's maintained list (the "type a model id" half). */
+  addModel: (credentialId: string, input: AddCredentialedModelInput) =>
+    fetchJson<{ id: string }>(`/api/model-credentials/${encodeURIComponent(credentialId)}/models`, { method: "POST", body: JSON.stringify(input) }),
+
+  /** Remove one model row from a credential by its row id. */
+  removeModel: (credentialId: string, modelRowId: string) =>
+    fetchJson<{ id: string }>(`/api/model-credentials/${encodeURIComponent(credentialId)}/models/${encodeURIComponent(modelRowId)}`, { method: "DELETE" }),
+
+  /** Reflect the credential's endpoint and refresh its model list (the "auto-suggest" half). Returns the count. */
+  refreshModels: (credentialId: string) =>
+    fetchJson<{ refreshed: number }>(`/api/model-credentials/${encodeURIComponent(credentialId)}/models/refresh`, { method: "POST" }),
 };
+
+/** Body for adding a model to a credential (mirror of backend AddCredentialedModelCommand). */
+export interface AddCredentialedModelInput {
+  modelId: string;
+  displayName?: string | null;
+}
+
+/** One model a credential can authenticate (mirror of backend CredentialedModelSummary). */
+export interface CredentialedModelSummary {
+  /** The model-row id (not the model id) — used to pin model+credential together. */
+  id: string;
+  modelId: string;
+  displayName?: string | null;
+  enabled: boolean;
+}
