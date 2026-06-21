@@ -47,7 +47,10 @@ public sealed class AgentRunCommandNode : INodeRuntime
         _artifacts = artifacts;
     }
 
-    public string TypeKey => "agent.run_command";
+    /// <summary>The node's stable type key — also the MCP tool kind the gate special-cases for command-risk escalation (Slice B3a). A const so the gate references it without drift.</summary>
+    public const string NodeTypeKey = "agent.run_command";
+
+    public string TypeKey => NodeTypeKey;
 
     public NodeManifest Manifest { get; } = new()
     {
