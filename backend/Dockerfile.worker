@@ -1,0 +1,43 @@
+# CodeSpace WORKER image — THE LOCAL SANDBOX RUNNER.
+#
+# This is the Hangfire PROCESSING pod (deploy with CODESPACE_HANGFIRE_PROCESSING_ENABLED unset / true): agent runs
+# and the per-run MCP endpoint execute HERE, and the harness CLI (claude / codex) is spawned as a CONFINED child
+# process by LocalProcessRunner. It is a SEPARATE image from the public API (backend/Dockerfile.api) precisely
+# because it carries the agent-execution + isolation dependencies the internet-facing API must NOT:
+#   • git           — the workspace layer clones bound repos with the git CLI;
+#   • bubblewrap    — per-run filesystem + namespace confinement (BubblewrapSandbox);
+#   • util-linux    — prlimit, for the RLIMIT_NPROC / RLIMIT_FSIZE resource caps (ProcessRlimits);
+#   • codespace-mcp — the tool-fabric proxy, published next to CodeSpace.Api.dll by the csproj target.
+# Deploy this as its own deployment so it scales (replica) independently of the API.
+#
+#   docker build -f backend/Dockerfile.worker -t codespace-worker .  # build context = backend/
+#
+# The agent harness CLIs (claude / codex) are NOT baked in — an operator layers them on or repoints
+# CODESPACE_CLAUDE_CODE_PATH / CODESPACE_CODEX_CLI_PATH; without them the MCP endpoint still serves, the harness
+# just won't launch (a clean failed run, surfaced like any missing binary).
+#
+# CONFINEMENT ARMING: bubblewrap is installed here so the capability is PRESENT, but the fail-closed guard
+# CODESPACE_REQUIRE_SANDBOX=1 is left to the DEPLOYMENT to arm (k8s pod / compose) on a host that grants user
+# namespaces — hardcoding it in the image would fail-close every run on an environment where in-container userns
+# is not configured. Heavier isolation (network egress allowlist, cgroup mem/cpu/pid caps, seccomp + cap-drop +
+# no-new-privs) layers on top of bubblewrap HERE in later slices — this image is where all confinement belongs.
+#
+FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
+WORKDIR /src
+COPY . .
+RUN dotnet restore CodeSpace.sln
+# Publishing the API runs PublishMcpProxy → codespace-mcp lands in /app alongside CodeSpace.Api.dll.
+RUN dotnet publish src/CodeSpace.Api/CodeSpace.Api.csproj -c Release -o /app --no-restore
+
+FROM mcr.microsoft.com/dotnet/aspnet:10.0 AS runtime
+WORKDIR /app
+# Agent-execution + isolation deps (worker-only; absent from the lean public API image):
+#   git → clone bound repos · bubblewrap → fs/namespace confinement · util-linux → prlimit resource caps.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends git bubblewrap util-linux \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=build /app ./
+# codespace-mcp ships as an executable apphost; ensure the harness can launch it inside the sandbox.
+RUN chmod +x ./codespace-mcp || true
+EXPOSE 8080
+ENTRYPOINT ["dotnet", "CodeSpace.Api.dll"]
