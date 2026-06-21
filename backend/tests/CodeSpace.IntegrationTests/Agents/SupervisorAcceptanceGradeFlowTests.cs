@@ -13,22 +13,23 @@ using Shouldly;
 namespace CodeSpace.IntegrationTests.Agents;
 
 /// <summary>
-/// 🟢 E2E (high fidelity, Rule 12): the supervisor's objective acceptance gate end-to-end through the WHOLE real
+/// 🟢 Integration (high-fidelity real-git, Rule 9): the supervisor's objective acceptance gate through the WHOLE real
 /// stack — the DI-resolved <see cref="SupervisorAcceptanceGrader"/> → real <c>RepositoryWorkspaceResolver</c> (a
 /// Postgres-seeded <see cref="Repository"/> row) → real <c>LocalGitWorkspaceProvider</c> (a real shallow clone of a
 /// real branch on a file:// bare remote) → real <see cref="Core.Services.Agents.Eval.Benchmark.Graders.TestsPassGrader"/>
 /// running a real <c>check.sh</c> through the real <c>LocalProcessRunner</c>. No agent runs and no self-report is
 /// consulted: the verdict is PURELY the exit code of the cloned branch's own check — a branch whose check exits 0
-/// is accepted, one whose check exits 1 is not, and a branch that cannot be cloned fails CLOSED. POSIX-only
-/// (Rule 12.1): the check + git run as real processes.
+/// is accepted, one whose check exits 1 is not, and a branch that cannot be cloned fails CLOSED. POSIX-only:
+/// the check + git run as real processes. Real Postgres + a hermetic local git remote (no external network) ⇒
+/// Integration tier, not E2E (see backend/tests/TESTING.md).
 /// </summary>
 [Collection(PostgresCollection.Name)]
 [Trait("Category", "Integration")]
-public sealed class SupervisorAcceptanceGradeE2ETests
+public sealed class SupervisorAcceptanceGradeFlowTests
 {
     private readonly PostgresFixture _fixture;
 
-    public SupervisorAcceptanceGradeE2ETests(PostgresFixture fixture) { _fixture = fixture; }
+    public SupervisorAcceptanceGradeFlowTests(PostgresFixture fixture) { _fixture = fixture; }
 
     [Fact]
     public async Task A_branch_whose_check_passes_is_accepted_and_a_failing_branch_is_not()

@@ -1,6 +1,6 @@
 name: Backend · Integration
 
-# The 108 Category=Integration tests against a REAL Postgres (the engine's change tracker,
+# The Category=Integration tests against a REAL Postgres (the engine's change tracker,
 # concurrency tokens, the agent-run reconciler/lease/re-attach spine, the durable spool, the
 # webhook→dispatch chain). A throw-away GUID database is created + DbUp-migrated + dropped per
 # fixture. The committed appsettings.json admin connection (localhost:5432, postgres/123456)
