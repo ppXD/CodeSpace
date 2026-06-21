@@ -1,0 +1,99 @@
+using System.Text.Json;
+using CodeSpace.Core.Services.Agents.ModelCredentials;
+using CodeSpace.Core.Services.Supervisor.Deciders;
+using CodeSpace.Core.Services.Workflows.Llm;
+using CodeSpace.Messages.Agents;
+using Shouldly;
+
+namespace CodeSpace.IntegrationTests.Workflows.Supervisor;
+
+/// <summary>
+/// Always-on (no model, no Postgres): drive the REAL <see cref="LlmSupervisorDecider"/> via a CANNED structured
+/// client so the real prompt-build → Deserialize → <see cref="SupervisorDecisionProjector"/> path runs end-to-end,
+/// then score the produced decision. Proves (a) the real decider projects each verb correctly over a golden
+/// context, and (b) the scorer's rubric has TEETH — the CORRECT canned decision passes every scenario, a WRONG one
+/// fails. The real-model REPLAY (the kill-gate that arms on a recorded cassette / a live key) reuses this exact
+/// drive-then-score path, only swapping the canned client for the recorded / real model.
+/// </summary>
+[Trait("Category", "Integration")]
+public class SupervisorDecisionEvalDeciderTests
+{
+    private const string CannedProvider = "canned";
+
+    [Fact]
+    public async Task The_real_decider_over_the_correct_canned_decision_passes_every_golden_scenario()
+    {
+        foreach (var scenario in SupervisorDecisionGoldenScenarios.All)
+        {
+            var decision = await DecideAsync(scenario, CorrectDecisionJson(scenario.Name));
+            var score = SupervisorDecisionEval.Score(scenario, decision);
+
+            score.Pass.ShouldBeTrue($"scenario '{scenario.Name}' should pass with the correct decision but: {score.Note}");
+        }
+    }
+
+    [Fact]
+    public async Task A_wrong_decision_fails_the_scorer_proving_the_rubric_has_teeth()
+    {
+        // mixed-results: retrying s1 (the SUCCEEDED subtask) instead of s2 (the FAILED one) must FAIL the positional check.
+        var mixed = Scenario("mixed-results");
+        SupervisorDecisionEval.Score(mixed, await DecideAsync(mixed, """{"kind":"retry","retry":{"subtaskId":"s1"}}"""))
+            .Pass.ShouldBeFalse("retrying the succeeded subtask must fail the rubric");
+
+        // all-succeeded: stopping without merging must FAIL (accepted = {merge}).
+        var allSucceeded = Scenario("all-succeeded");
+        SupervisorDecisionEval.Score(allSucceeded, await DecideAsync(allSucceeded, """{"kind":"stop","stop":{"outcome":"completed"}}"""))
+            .Pass.ShouldBeFalse("quitting without merging the succeeded work must fail");
+
+        // merge-conflict: stopping instead of resolving must FAIL (accepted = {resolve}).
+        var conflict = Scenario("merge-conflict");
+        SupervisorDecisionEval.Score(conflict, await DecideAsync(conflict, """{"kind":"stop","stop":{"outcome":"failed"}}"""))
+            .Pass.ShouldBeFalse("abandoning an auto-resolvable conflict must fail");
+    }
+
+    private static SupervisorGoldenScenario Scenario(string name) => SupervisorDecisionGoldenScenarios.All.Single(s => s.Name == name);
+
+    private static async Task<SupervisorDecision> DecideAsync(SupervisorGoldenScenario scenario, string cannedModelJson)
+    {
+        var registry = new LLMClientRegistry(new ILLMClient[] { new CannedStructuredClient(cannedModelJson) });
+        var decider = new LlmSupervisorDecider(registry, new StubPoolSelector(CannedProvider));
+
+        return await decider.DecideAsync(scenario.Context, CancellationToken.None);
+    }
+
+    /// <summary>The decision a competent brain SHOULD make at each golden point — fed through the real Deserialize+Project so the always-on test exercises the projection, not a hand-built SupervisorDecision.</summary>
+    private static string CorrectDecisionJson(string scenarioName) => scenarioName switch
+    {
+        "first-turn" => """{"kind":"plan","plan":{"subtasks":[{"id":"s1","title":"Subtask 1","instruction":"do s1"},{"id":"s2","title":"Subtask 2","instruction":"do s2"}]}}""",
+        "mixed-results" => """{"kind":"retry","retry":{"subtaskId":"s2"}}""",
+        "all-succeeded" => """{"kind":"merge","merge":{}}""",
+        "merge-conflict" => """{"kind":"resolve","resolve":{}}""",
+        "verified-resolution" => """{"kind":"stop","stop":{"outcome":"completed"}}""",
+        _ => throw new ArgumentException($"no canned decision for scenario '{scenarioName}'"),
+    };
+
+    /// <summary>An <see cref="IStructuredLLMClient"/> that returns a fixed model JSON regardless of the request — the model stub at the one seam the decider calls.</summary>
+    private sealed class CannedStructuredClient : ILLMClient, IStructuredLLMClient
+    {
+        private readonly JsonElement _json;
+        public CannedStructuredClient(string modelJson) => _json = JsonDocument.Parse(modelJson).RootElement.Clone();
+
+        public string Provider => CannedProvider;
+        public Task<LLMCompletion> CompleteAsync(LLMCompletionRequest request, CancellationToken cancellationToken) => throw new NotSupportedException("the eval uses the structured path only");
+        public Task<StructuredLLMCompletion> CompleteStructuredAsync(StructuredLLMCompletionRequest request, CancellationToken cancellationToken) =>
+            Task.FromResult(new StructuredLLMCompletion { Json = _json, Model = request.Model });
+    }
+
+    /// <summary>A pool selector that resolves the canned-provider credential so the decider routes at the canned client.</summary>
+    private sealed class StubPoolSelector : IModelPoolSelector
+    {
+        private readonly string _provider;
+        public StubPoolSelector(string provider) => _provider = provider;
+
+        public Task<ModelPoolPick?> ResolveByRowIdAsync(Guid teamId, Guid modelCredentialModelId, bool requireStructured, CancellationToken cancellationToken) =>
+            Task.FromResult<ModelPoolPick?>(new ModelPoolPick { ModelId = "canned-model", Credential = new ResolvedModelCredential { Provider = _provider, ApiKey = "x" } });
+
+        public Task<ModelPoolPick?> SelectAsync(Guid teamId, string provider, bool requireStructured, IReadOnlyList<string>? allowedModels, string? pinnedModel, CancellationToken cancellationToken) => throw new NotImplementedException();
+        public Task<ModelDispatchRef?> ResolveDispatchAsync(Guid teamId, string modelName, IReadOnlyList<Guid>? allowedRowIds, CancellationToken cancellationToken) => throw new NotImplementedException();
+    }
+}
