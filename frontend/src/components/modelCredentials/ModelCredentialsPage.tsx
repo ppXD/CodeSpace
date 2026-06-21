@@ -4,11 +4,26 @@ import { Ic } from "@/_imported/ai-code-space/icons";
 import type { ModelCredentialSummary } from "@/api/modelCredentials";
 import { ApiError } from "@/api/request";
 import { useConfirm } from "@/components/dialog";
-import { useModelCredentials, useRevokeModelCredential } from "@/hooks/use-model-credentials";
+import { useCredentialedModelList, useModelCredentials, useRevokeModelCredential } from "@/hooks/use-model-credentials";
 import { providerForm } from "@/lib/providerForms";
 
 import { ModelCredentialModal } from "./ModelCredentialModal";
+import { ModelCredentialModelsModal } from "./ModelCredentialModelsModal";
 import { ProviderLogo } from "./ProviderLogo";
+
+/** A credential's model count as a clickable card row that opens the models manager. */
+function CredentialModelsRow({ credentialId, onManage }: { credentialId: string; onManage: () => void }) {
+  const list = useCredentialedModelList(credentialId);
+  const n = list.data?.length ?? 0;
+  const label = list.isLoading ? "models…" : n === 0 ? "No models — add one" : `${n} ${n === 1 ? "model" : "models"}`;
+  return (
+    <button type="button" className="mc-card-row mc-card-modelsrow" onClick={onManage} title="Manage models">
+      <Ic.Box size={12} />
+      <span>{label}</span>
+      <Ic.ChevronRight size={13} />
+    </button>
+  );
+}
 
 type ModalState = { mode: "add" } | { mode: "edit"; credential: ModelCredentialSummary } | null;
 
@@ -23,6 +38,7 @@ export function ModelCredentialsPage() {
   const revoke = useRevokeModelCredential();
   const confirm = useConfirm();
   const [modal, setModal] = useState<ModalState>(null);
+  const [modelsFor, setModelsFor] = useState<ModelCredentialSummary | null>(null);
 
   const rows = creds.data ?? [];
 
@@ -85,6 +101,7 @@ export function ModelCredentialsPage() {
                   <Ic.Link size={12} />
                   <span title={c.baseUrl ?? undefined}>{c.baseUrl ?? "default endpoint"}</span>
                 </div>
+                <CredentialModelsRow credentialId={c.id} onManage={() => setModelsFor(c)} />
               </div>
 
               <div className="mc-card-foot">
@@ -98,6 +115,7 @@ export function ModelCredentialsPage() {
 
       {modal?.mode === "add" && <ModelCredentialModal onClose={() => setModal(null)} />}
       {modal?.mode === "edit" && <ModelCredentialModal editing={modal.credential} onClose={() => setModal(null)} />}
+      {modelsFor && <ModelCredentialModelsModal credential={modelsFor} onClose={() => setModelsFor(null)} />}
     </>
   );
 }

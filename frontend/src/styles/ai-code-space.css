@@ -55,7 +55,10 @@
 .acs-root .mono { font-family: inherit; }
 .acs-root button { font: inherit; color: inherit; }
 .acs-root a { color: inherit; text-decoration: none; }
-.acs-root ::selection { background: var(--accent-soft); }
+/* Text selection — warm light-orange everywhere, including portaled modals (which render outside
+   .acs-root and would otherwise fall back to the OS dark-blue highlight). Global on purpose. */
+::selection { background: var(--accent-soft); color: var(--ink); }
+::-moz-selection { background: var(--accent-soft); color: var(--ink); }
 
 /* Themed scrollbars for every scroll container in the app — thin + soft, matching the warm
    palette, so the heavy/dark OS-default scrollbar never shows (e.g. in a narrowly-dragged chat
@@ -69,6 +72,15 @@
 }
 .acs-root ::-webkit-scrollbar-thumb:hover { background: rgba(0, 0, 0, .28); }
 .acs-root ::-webkit-scrollbar-corner { background: transparent; }
+
+/* Global warm scrollbar — also covers portal'd surfaces (modals/popovers mounted on <body>,
+   outside .acs-root) so the heavy OS-default bar never shows anywhere in the app. */
+html, body, * { scrollbar-width: thin; scrollbar-color: rgba(0, 0, 0, .16) transparent; }
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: rgba(0, 0, 0, .16); border-radius: 5px; border: 2px solid transparent; background-clip: content-box; }
+::-webkit-scrollbar-thumb:hover { background: rgba(0, 0, 0, .28); }
+::-webkit-scrollbar-corner { background: transparent; }
 
 /* ---------- Global button system (Claude-style) ---------- */
 .acs-root .btn {
@@ -436,6 +448,30 @@
 .acs-root .mc-card-row code { font-family: var(--font-mono, ui-monospace, monospace); color: var(--ink-2); }
 .acs-root .mc-card-foot { display: flex; align-items: center; justify-content: flex-end; gap: 4px; margin-top: auto; padding-top: 10px; border-top: 1px solid var(--line); }
 .acs-root .mc-card-foot .btn { height: 26px; padding: 0 10px; font-size: 12px; }
+/* Clickable "N models" row on the credential card — opens the models manager. */
+.acs-root .mc-card-modelsrow { appearance: none; background: transparent; border: 0; width: calc(100% + 10px); padding: 4px 5px; margin: -1px -5px; border-radius: 7px; cursor: pointer; text-align: left; transition: background .12s, color .12s; }
+.acs-root .mc-card-modelsrow:hover { background: var(--panel-2); color: var(--ink-2); }
+.acs-root .mc-card-modelsrow > svg:last-child { margin-left: auto; color: var(--muted-2); }
+
+/* Models manager modal — portaled to <body>, so these are GLOBAL (not under .acs-root). */
+.mc-models-bar { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
+.mc-models-count { font-size: 12.5px; font-weight: 500; color: var(--muted); }
+.mc-models-refresh > svg { color: var(--accent); }
+.mc-models-empty { font-size: 12.5px; color: var(--muted); text-align: center; padding: 22px 12px; border: 1px dashed var(--line); border-radius: 10px; line-height: 1.5; }
+.mc-models-err { margin-top: 10px; font-size: 12px; color: var(--accent); }
+
+/* Multi-row model editor (shared by the Add-credential form and the manager): a row per model —
+   model-id + display name + delete — with "+ Add model" to append a blank row. */
+.mc-modelrows { display: flex; flex-direction: column; gap: 7px; }
+.mc-modelrow { display: flex; align-items: center; gap: 7px; }
+.mc-modelrow .wf-form-input { flex: 1 1 0; min-width: 0; }
+.mc-modelrow .mc-modelrow-id { flex: 1.35 1 0; }
+.mc-modelrow-del { appearance: none; background: transparent; border: 0; width: 32px; height: 32px; flex-shrink: 0; border-radius: 7px; color: var(--muted-2); cursor: pointer; display: grid; place-items: center; transition: background .12s, color .12s; }
+.mc-modelrow-del:hover { background: rgba(217,119,87,.12); color: var(--accent); }
+.mc-addmodel { appearance: none; background: transparent; border: 0; color: var(--ink-2); font: inherit; font-size: 12.5px; font-weight: 500; cursor: pointer; display: inline-flex; align-items: center; gap: 6px; padding: 5px 4px; align-self: flex-start; border-radius: 6px; transition: color .12s; }
+.mc-addmodel:hover, .mc-addmodel:hover > svg { color: var(--accent); }
+.mc-addmodel > svg { color: var(--muted); }
+
 
 /* ============================================================
  * Repo detail
@@ -3221,7 +3257,7 @@ textarea:-webkit-autofill {
   transition: filter .12s ease, transform .04s ease;
 }
 .acs-root .wf-editor-toolbar-publish:hover:not(:disabled) { filter: brightness(1.05); }
-.acs-root .wf-editor-toolbar-publish:active:not(:disabled) { transform: translateY(1px); }
+.acs-root .wf-editor-toolbar-publish:active:not(:disabled) { }
 .acs-root .wf-editor-toolbar-publish:disabled { opacity: 0.55; cursor: not-allowed; }
 /* Subtle pulse so the operator sees "you have changes" without an extra label. */
 .acs-root .wf-editor-toolbar-publish-dirty {
@@ -3243,7 +3279,7 @@ textarea:-webkit-autofill {
   cursor: pointer; transition: filter .12s ease, transform .04s ease;
 }
 .acs-root .wf-editor-toolbar-run:hover:not(:disabled) { filter: brightness(0.97); }
-.acs-root .wf-editor-toolbar-run:active:not(:disabled) { transform: translateY(1px); }
+.acs-root .wf-editor-toolbar-run:active:not(:disabled) { }
 .acs-root .wf-editor-toolbar-run:disabled { opacity: 0.6; cursor: not-allowed; }
 
 /* In-editor run viewer / history dialog — reuses the global .mdl shell but wider + taller so
@@ -4122,3 +4158,274 @@ body.chat-resizing .acs-root .app { transition: none; }
 .acs-root .sc-harness { font-weight: 500; color: var(--ink); }
 .acs-root .sc-rate { font-weight: 600; color: var(--ink); font-variant-numeric: tabular-nums; }
 .acs-root .sc-rate-n { color: var(--muted-2); font-size: 11.5px; }
+
+/* ── Launch-a-task modal — two-pane AI task composer (portal'd to body) ───────── */
+.mdl.lt2 { width: 680px; }
+.lt2 select, .lt2 input, .lt2 textarea { font: inherit; font-size: 13px; color: var(--ink); background: var(--panel); border: 1px solid var(--line); border-radius: 7px; padding: 6px 9px; width: 100%; box-sizing: border-box; outline: none; }
+.lt2 select:focus, .lt2 input:focus, .lt2 textarea:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+.lt2 select:disabled, .lt2 input:disabled { background: var(--panel-2); color: var(--muted-2); cursor: not-allowed; }
+
+.lt2-head { align-items: center; gap: 10px; }
+.lt2-rocket { color: var(--accent); display: inline-flex; }
+.lt2-ctx { flex: 1; text-align: right; font-size: 12px; color: var(--muted); }
+
+.lt2-panes { flex: 1; min-height: 0; display: grid; grid-template-columns: 1.55fr 1fr; }
+.lt2-form { overflow-y: auto; padding: 16px 18px; display: flex; flex-direction: column; gap: 17px; scrollbar-width: thin; }
+.lt2-plan { overflow-y: auto; padding: 16px; background: var(--panel-2); border-left: 1px solid var(--line); display: flex; flex-direction: column; gap: 7px; }
+
+.lt2-step-h { font-size: 12px; color: var(--ink-2); margin-bottom: 7px; display: flex; align-items: center; gap: 7px; }
+.lt2-step-n { font-size: 11px; color: var(--muted-2); }
+.lt2-task { resize: vertical; min-height: 62px; line-height: 1.5; font-size: 14px; }
+
+.lt2-repo1 { display: flex; align-items: center; gap: 8px; color: var(--muted); }
+.lt2-repo1-name { flex: 1; font-size: 13px; font-weight: 500; color: var(--ink); }
+.lt2-grow { flex: 1; }
+.lt2-branch { width: auto; min-width: 96px; }
+.lt2-add { appearance: none; background: transparent; border: 0; color: var(--accent); font: inherit; font-size: 12px; cursor: pointer; padding: 7px 0 0; display: inline-flex; align-items: center; gap: 5px; }
+.lt2-da-tag { font-size: 10px; color: #993C1D; border: 1px dashed #D85A30; border-radius: 4px; padding: 0 5px; margin-left: 6px; }
+
+.lt2-table { border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+.lt2-tr { display: grid; grid-template-columns: 26px 1.4fr 1fr 0.85fr 0.7fr 24px; gap: 5px; padding: 5px 7px; align-items: center; border-top: 1px solid var(--line); }
+.lt2-tr:first-child { border-top: 0; }
+.lt2-tr select, .lt2-tr input { font-size: 11.5px; padding: 4px 6px; }
+.lt2-th { background: var(--panel-2); font-size: 10.5px; color: var(--muted); text-transform: uppercase; letter-spacing: .03em; }
+.lt2-radio { appearance: none; border: 1px solid var(--line-2); background: var(--panel); width: 18px; height: 18px; border-radius: 50%; cursor: pointer; display: grid; place-items: center; color: var(--accent); padding: 0; }
+.lt2-radio[data-on="true"] { border-color: var(--accent); }
+.lt2-row-x { appearance: none; border: 0; background: transparent; color: var(--muted-2); cursor: pointer; padding: 0; }
+
+.lt2-seg { display: flex; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+.lt2-seg-b { flex: 1; appearance: none; background: transparent; border: 0; border-left: 1px solid var(--line); font: inherit; font-size: 12.5px; color: var(--ink-2); padding: 7px; cursor: pointer; }
+.lt2-seg-b:first-child { border-left: 0; }
+.lt2-seg-b:hover:not([data-on="true"]) { background: var(--panel-2); }
+.lt2-seg-b[data-on="true"] { background: var(--accent-soft); color: #8A4326; font-weight: 500; }
+.lt2-blurb { font-size: 11.5px; color: var(--muted); margin-top: 6px; }
+
+.lt2-sup { display: block; width: 100%; text-align: left; appearance: none; border: 1px solid #EADED4; background: transparent; border-radius: 10px; overflow: hidden; cursor: pointer; padding: 0; }
+.lt2-sup-h { display: flex; align-items: center; gap: 7px; padding: 9px 12px; background: #FCF7F2; border-bottom: 1px solid #EADED4; font-size: 12.5px; font-weight: 500; color: #7A3318; }
+.lt2-edit { font-size: 11px; color: #993C1D; display: inline-flex; align-items: center; gap: 4px; font-weight: 400; }
+.lt2-sup-b { padding: 9px 12px; display: flex; flex-direction: column; gap: 4px; font-size: 11.5px; color: var(--ink-2); }
+.lt2-k { color: var(--muted); }
+
+.lt2-mini { display: flex; gap: 14px; }
+.lt2-mini-f { flex: 1; display: flex; flex-direction: column; gap: 4px; font-size: 11.5px; color: var(--muted); }
+
+.lt2-adv { appearance: none; background: transparent; border: 0; border-top: 1px solid var(--line); padding: 14px 0 0; font: inherit; font-size: 12.5px; color: var(--ink-2); cursor: pointer; display: flex; align-items: center; gap: 6px; }
+.lt2-adv:hover { color: var(--accent); }
+.lt2-adv-sub { font-size: 11px; color: var(--muted-2); }
+.lt2-adv-body { display: flex; flex-direction: column; gap: 9px; }
+.lt2-adv-sec { font-size: 11px; font-weight: 600; color: var(--ink-2); text-transform: uppercase; letter-spacing: .04em; margin-top: 6px; display: flex; align-items: center; gap: 6px; }
+.lt2-grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 12px; }
+.lt2-f { display: flex; flex-direction: column; gap: 3px; font-size: 11.5px; color: var(--muted); }
+.lt2-dim { opacity: .9; }
+.lt2-safety { display: flex; flex-direction: column; gap: 8px; font-size: 12px; color: var(--ink-2); }
+.lt2-safety label { display: flex; align-items: center; gap: 8px; }
+.lt2-tog { width: 28px; height: 16px; background: var(--line-2); border-radius: 999px; position: relative; flex-shrink: 0; }
+.lt2-tog[data-on="true"] { background: var(--accent); }
+.lt2-tog span { position: absolute; top: 2px; width: 12px; height: 12px; background: #fff; border-radius: 50%; }
+.lt2-tog[data-on="true"] span { right: 2px; }
+.lt2-tog:not([data-on="true"]) span { left: 2px; }
+
+.lt2-plan-t { font-size: 11px; font-weight: 600; letter-spacing: .05em; text-transform: uppercase; color: var(--muted); margin-bottom: 3px; }
+.lt2-plan-row { font-size: 11.5px; color: var(--ink-2); }
+.lt2-plan-k { color: var(--muted); }
+.lt2-plan-sub { font-size: 11px; color: var(--muted-2); margin-top: 4px; }
+.lt2-plan-repo { font-size: 11.5px; color: var(--ink-2); }
+.lt2-plan-dim { font-size: 11.5px; color: var(--muted-2); }
+.lt2-w { color: #993C1D; }
+.lt2-plan-div { height: 1px; background: var(--line); margin: 5px 0; }
+.lt2-gate { font-size: 11.5px; color: var(--ink-2); display: flex; align-items: center; gap: 6px; }
+.lt2-gate svg { color: #854F0B; }
+.lt2-plan-grow { flex: 1; min-height: 8px; }
+.lt2-ready { font-size: 11.5px; color: #3B6D11; display: flex; align-items: center; gap: 6px; }
+.lt2-miss { display: flex; flex-direction: column; gap: 4px; font-size: 11.5px; color: #8A5A1A; }
+.lt2-miss div { display: flex; align-items: center; gap: 6px; }
+.lt2-miss svg { color: #C97C3F; }
+
+.lt2-foot { gap: 10px; }
+.lt2-save { font-size: 12.5px; }
+.lt2-err { font-size: 11.5px; color: var(--accent); }
+
+/* ── Launch box — minimal Claude-style composer (lt3) ───────────────────────── */
+@keyframes lt3Flow { from { transform: translateX(-120%); } to { transform: translateX(340%); } }
+.mdl.lt3 { width: 864px; overflow: visible; padding: 12px; gap: 0; border-radius: 22px; }
+.lt3 select, .lt3 input { font: inherit; font-size: 13px; color: var(--ink); background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 7px 10px; width: 100%; box-sizing: border-box; outline: none; }
+.lt3 select:focus, .lt3 input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+.lt3 select:disabled { background: var(--panel-2); color: var(--muted-2); cursor: not-allowed; }
+.lt3-pop-mask { position: fixed; inset: 0; z-index: 1; }
+
+.lt3-box { border: 1px solid var(--line); border-radius: 16px; background: var(--panel); padding: 16px 12px 12px; position: relative; z-index: 2; box-shadow: 0 1px 2px rgba(20,15,8,.03); }
+.lt3-chips { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 11px; }
+.lt3-chip { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--ink-2); border: 1px solid var(--line); border-radius: 999px; padding: 3px 11px; }
+.lt3-chip > svg { color: var(--muted); }
+.lt3-chip-b { color: var(--muted); padding-left: 7px; border-left: 1px solid var(--line); }
+.lt3-input { border: 0; background: transparent; resize: none; width: 100%; font: inherit; font-size: 16px; line-height: 1.65; color: var(--ink); padding: 2px 0; outline: none; min-height: 140px; }
+.lt3-input::placeholder { color: var(--muted-2); }
+
+.lt3-bar { display: flex; align-items: center; gap: 8px; margin-top: 12px; min-width: 0; }
+.lt3-spacer { flex: 1 1 0; min-width: 8px; }
+.lt3-anchor { position: relative; display: flex; flex-shrink: 0; min-width: 0; }
+.lt3-anchor-flex { flex-shrink: 1; }
+.lt3-anchor-flex .lt3-pill { min-width: 0; }
+.lt3-pill { display: inline-flex; align-items: center; gap: 8px; height: 40px; font: inherit; font-size: 13.5px; line-height: 1; color: var(--ink); background: var(--panel); border: 1px solid var(--line); border-radius: 11px; padding: 0 13px; cursor: pointer; white-space: nowrap; transition: background .12s, border-color .12s; }
+.lt3-pill:hover { background: var(--panel-2); border-color: var(--line-2); }
+.lt3-pill > svg { display: block; flex-shrink: 0; }
+.lt3-pill > svg:first-child { color: var(--muted); }
+.lt3-pill > svg:last-child { color: var(--muted-2); }
+.lt3-pill > span { display: block; line-height: 1.5; overflow: hidden; text-overflow: ellipsis; }
+.lt3-pill-quiet { color: var(--ink-2); }
+.lt3-eff-pill { color: #8A4326; }
+/* Advanced — the in-bar gateway to the settings tray. A pale warm tint + accent gear marks it as the
+   premium "advanced settings" control without shouting; lights to accent-soft while the tray is open. */
+.lt3-adv { gap: 7px; background: rgba(217,119,87,.05); border-color: #ECDAD0; color: var(--ink-2); flex-shrink: 0; }
+.lt3-adv > svg:first-child { color: var(--accent); }
+.lt3-adv:hover { background: rgba(217,119,87,.11); border-color: #E3C3B2; }
+.lt3-adv[data-open="true"] { background: var(--accent-soft); border-color: #E3C3B2; color: #8A4326; }
+.lt3-adv[data-open="true"] > svg:first-child { color: #8A4326; }
+.mdl .lt3-send { width: 40px; height: 40px; border-radius: 11px; border: none; background: var(--ink); color: #fff; display: grid; place-items: center; cursor: pointer; padding: 0; flex-shrink: 0; margin-left: 6px; transition: background .12s, transform .08s; }
+.mdl .lt3-send:hover:not(:disabled) { background: var(--ink-2); }
+.mdl .lt3-send:active:not(:disabled) { transform: scale(.93); }
+.mdl .lt3-send:disabled { background: var(--panel-2); color: var(--muted-2); cursor: not-allowed; }
+
+.lt3-pop { position: absolute; bottom: calc(100% + 9px); min-width: 226px; max-width: 300px; background: var(--panel); border: 1px solid var(--line); border-radius: 14px; box-shadow: 0 12px 36px rgba(20,15,8,.16), 0 2px 8px rgba(20,15,8,.06); padding: 6px; z-index: 5; }
+.lt3-pop[data-align="left"] { left: 0; }
+.lt3-pop[data-align="right"] { right: 0; }
+.lt3-pop-t { font-size: 10.5px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted-2); padding: 6px 9px 8px; display: flex; align-items: center; gap: 7px; }
+/* Contextual one-liner under a popover title — explains how the Model maps under the current effort. */
+.lt3-pop-note { padding: 0 9px 9px; margin-top: -4px; font-size: 11px; line-height: 1.45; color: var(--muted); }
+.lt3-eff-cur { color: #993C1D; font-weight: 500; text-transform: none; letter-spacing: 0; font-size: 12.5px; }
+.lt3-opt { display: flex; align-items: center; gap: 11px; width: 100%; text-align: left; appearance: none; background: transparent; border: 0; border-radius: 10px; padding: 8px 9px; cursor: pointer; color: var(--ink); }
+.lt3-opt:hover { background: var(--panel-2); }
+.lt3-opt[data-on="true"] { background: var(--accent-soft); }
+.lt3-opt > svg { color: #993C1D; flex-shrink: 0; }
+.lt3-opt-m { flex: 1; display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.lt3-opt-t { font-size: 13px; color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }
+.lt3-opt-d { font-size: 11.5px; color: var(--muted); }
+.lt3-opt[data-on="true"] .lt3-opt-t { color: #7A3318; font-weight: 500; }
+/* Hover tooltip on an effort option — themed dark bubble (matches .lt3-help), never OS chrome. */
+.lt3-opt[data-tip] { position: relative; }
+.lt3-opt[data-tip]::after { content: attr(data-tip); position: absolute; left: 6px; right: 6px; bottom: calc(100% + 5px); background: var(--ink); color: #F4F1EA; font-size: 11.5px; line-height: 1.5; padding: 8px 11px; border-radius: 9px; box-shadow: 0 10px 28px rgba(20,15,8,.24); opacity: 0; pointer-events: none; transition: opacity .12s; text-align: left; z-index: 12; }
+.lt3-opt[data-tip]:hover::after { opacity: 1; }
+
+/* Combined Model · Effort dropdown — model list + Effort right-flyout (Gemini-style) */
+.lt3-divider { height: 1px; background: var(--line); margin: 5px 8px; }
+.lt3-eff-row-anchor { position: relative; }
+.lt3-eff-row { justify-content: flex-start; }
+.lt3-eff-row-v { font-size: 12px; color: var(--muted); margin-left: auto; }
+.lt3-eff-row > svg:last-child { color: var(--muted-2); flex-shrink: 0; }
+.lt3-eff-row[data-open="true"] { background: var(--panel-2); }
+.lt3-flyout { position: absolute; left: calc(100% + 8px); bottom: -7px; min-width: 224px; background: var(--panel); border: 1px solid var(--line); border-radius: 13px; box-shadow: 0 12px 36px rgba(20,15,8,.18), 0 2px 8px rgba(20,15,8,.06); padding: 4px 4px 8px; z-index: 7; }
+
+
+/* Customize — compact settings tray (inspector style): small left tabs + one row per item */
+/* Align the Customize disclosure + Reset with the input box's content edges (left chevron under the
+   pills, Reset under the send button) so the section reads as part of the composer, not adrift. */
+/* Reset lives at the right end of the tab row inside the tray. */
+.lt3-reset { appearance: none; background: transparent; border: 0; font: inherit; font-size: 11.5px; color: var(--muted-2); cursor: pointer; padding: 4px 7px; margin-left: auto; margin-right: 3px; align-self: center; border-radius: 7px; }
+.lt3-reset:hover { color: var(--accent); background: rgba(31,30,29,.04); }
+/* Card holds NO horizontal padding — tab/row boxes go full-bleed so their dividers meet the
+   border cleanly; overflow:hidden clips full-width rows to the rounded corners. */
+.lt3-cust { margin: 10px 0 2px; background: #fbfaf7; border: 1px solid #e8e1d7; border-radius: 12px; padding: 0; overflow: hidden; }
+.lt3-ctabs { display: flex; gap: 2px; padding: 4px 5px 0; border-bottom: 1px solid #eee8df; }
+.lt3-ctab { appearance: none; background: transparent; border: 0; border-bottom: 2px solid transparent; font: inherit; font-size: 13px; font-weight: 500; color: var(--muted); padding: 9px 11px; margin-bottom: -1px; cursor: pointer; transition: color .12s, border-color .12s; }
+.lt3-ctab:hover:not([data-on="true"]) { color: var(--ink-2); }
+.lt3-ctab[data-on="true"] { color: #8A4326; border-bottom-color: #E0A07F; }
+.lt3-cbody { min-height: 220px; display: flex; flex-direction: column; }
+/* One-line description band at the top of each Advanced tab — explains what the tab governs. */
+/* The tab's intro caption — left-aligned, italic + lighter, so it reads as description, not a setting row. */
+.lt3-cnote { padding: 11px 16px; font-size: 11px; font-style: italic; line-height: 1.45; color: var(--muted-2); border-bottom: 1px solid #eee8df; }
+/* Hint at the top of the Agent-model-pool popover. */
+.lt3-poolhint { padding: 2px 4px 9px; font-size: 11px; line-height: 1.4; color: var(--muted); }
+.lt3-cdisabled { font-size: 12.5px; color: var(--muted); line-height: 1.6; padding: 24px 16px; }
+.lt3-cdisabled b { color: var(--ink-2); font-weight: 600; }
+
+/* One settings row — label left · value right · chevron; click opens a popover */
+.lt3-srow { display: flex; align-items: center; gap: 10px; width: 100%; min-height: 46px; padding: 0 16px; background: transparent; border: 0; border-bottom: 1px solid #eee8df; font: inherit; text-align: left; cursor: pointer; transition: background .1s; }
+.lt3-srow:last-child { border-bottom: 0; }
+.lt3-srow:hover, .lt3-srow[data-open="true"] { background: #f4efe8; }
+.lt3-srow-l { flex-shrink: 0; font-size: 13px; color: #7a746c; }
+.lt3-srow .lt3-combo-v { flex: 1; text-align: right; font-size: 14px; color: #24211d; }
+.lt3-srow > svg { color: var(--muted-2); flex-shrink: 0; }
+.lt3-srow .lt3-tog { margin-left: auto; }
+/* Read-only derived row (e.g. "Agent model — Auto · from pool" in Deep): no hover, muted value. */
+.lt3-srow-ro { cursor: default; }
+.lt3-srow-ro:hover { background: transparent; }
+.lt3-srow-ro .lt3-combo-v { color: #7a746c; }
+.lt3-rowpop { bottom: auto; z-index: 95; max-width: 360px; padding: 12px; }
+
+.lt3-limits { display: flex; align-items: center; gap: 7px; font-size: 12px; color: var(--muted); }
+.lt3-limits input { width: 48px !important; text-align: center; font: inherit; font-size: 13px; color: var(--ink); background: var(--panel-2); border: 1px solid var(--line); border-radius: 8px; padding: 7px 4px !important; outline: none; }
+.lt3-limits input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+.lt3-chips2 { display: flex; align-items: center; gap: 5px; flex-wrap: wrap; max-width: 300px; }
+.lt3-chip2 { display: inline-flex; align-items: center; gap: 5px; font-size: 11.5px; color: var(--ink-2); background: var(--panel-2); border: 1px solid var(--line); border-radius: 999px; padding: 3px 5px 3px 10px; }
+.lt3-chip2 > button { appearance: none; background: transparent; border: 0; color: var(--muted-2); cursor: pointer; display: grid; place-items: center; padding: 0; }
+.lt3-chip2 > button:hover { color: var(--ink-2); }
+.lt3-chip2-add { font-size: 11.5px; color: var(--accent); border: 1px dashed var(--line-2); border-radius: 999px; padding: 3px 10px; cursor: pointer; }
+.lt3-expand { display: flex; flex-direction: column; gap: 18px; padding: 14px 6px 2px; }
+.lt3-sec-t { font-size: 10.5px; font-weight: 600; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); margin-bottom: 9px; display: flex; align-items: center; gap: 7px; }
+.lt3-err { font-size: 12px; color: var(--accent); padding: 9px 6px 0; }
+.lt3-da { font-size: 10px; color: #993C1D; border: 1px dashed #D99377; border-radius: 4px; padding: 0 5px; font-weight: 400; letter-spacing: 0; text-transform: none; }
+
+.lt3-tog { width: 30px; height: 17px; background: var(--line-2); border-radius: 999px; position: relative; flex-shrink: 0; }
+.lt3-tog[data-on="true"] { background: var(--accent); }
+.lt3-tog span { position: absolute; top: 2px; width: 13px; height: 13px; background: #fff; border-radius: 50%; }
+.lt3-tog[data-on="true"] span { right: 2px; }
+.lt3-tog:not([data-on="true"]) span { left: 2px; }
+
+/* Effort menu — Auto toggle + draggable 3-level dial + hover help */
+.lt3-eff-head { display: flex; align-items: center; gap: 10px; padding: 6px 9px 8px; }
+.lt3-eff-title { font-size: 10.5px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted-2); }
+.lt3-auto { appearance: none; background: transparent; border: 0; font: inherit; font-size: 12px; color: var(--ink-2); cursor: pointer; display: inline-flex; align-items: center; gap: 7px; padding: 0; }
+.lt3-help { width: 18px; height: 18px; border-radius: 50%; border: 1px solid var(--line-2); color: var(--muted); font-size: 11px; display: grid; place-items: center; cursor: help; position: relative; }
+.lt3-help::after { content: attr(data-tip); position: absolute; bottom: calc(100% + 9px); right: -6px; width: 218px; background: var(--ink); color: #F4F1EA; font-size: 11.5px; line-height: 1.5; padding: 9px 11px; border-radius: 9px; box-shadow: 0 8px 24px rgba(20,15,8,.22); opacity: 0; pointer-events: none; transition: opacity .12s; text-align: left; z-index: 8; }
+.lt3-help:hover::after { opacity: 1; }
+.lt3-eff { padding: 0 9px 4px; }
+.lt3-eff-ends { display: flex; justify-content: space-between; font-size: 11px; color: var(--muted); margin-bottom: 4px; }
+.lt3-eff-range { -webkit-appearance: none; appearance: none; width: 100%; height: 18px; background: transparent; cursor: pointer; margin: 2px 0; }
+.lt3-eff-range::-webkit-slider-runnable-track { height: 18px; border-radius: 999px; background-image: radial-gradient(circle, rgba(255,255,255,.5) 1px, transparent 1.4px), linear-gradient(90deg, var(--muted-2), #E0A07F 58%, #D97757); background-size: 7px 7px, 100% 100%; }
+.lt3-eff-range::-moz-range-track { height: 18px; border-radius: 999px; background-image: radial-gradient(circle, rgba(255,255,255,.5) 1px, transparent 1.4px), linear-gradient(90deg, var(--muted-2), #E0A07F 58%, #D97757); background-size: 7px 7px, 100% 100%; }
+.lt3-eff-range::-webkit-slider-thumb { -webkit-appearance: none; width: 16px; height: 16px; margin-top: 1px; border-radius: 50%; background: #fff; box-shadow: 0 0 0 1px rgba(0,0,0,.12); cursor: grab; }
+.lt3-eff-range::-moz-range-thumb { width: 16px; height: 16px; border: 0; border-radius: 50%; background: #fff; box-shadow: 0 0 0 1px rgba(0,0,0,.12); cursor: grab; }
+.lt3-eff-range[data-deep="true"]::-webkit-slider-thumb { box-shadow: 0 0 9px 2px rgba(217,119,87,.85); }
+.lt3-eff-range[data-deep="true"]::-moz-range-thumb { box-shadow: 0 0 9px 2px rgba(217,119,87,.85); }
+.lt3-eff-stops { display: flex; justify-content: space-between; margin-top: 7px; font-size: 11px; color: var(--muted); padding: 0 1px; }
+.lt3-eff-stops > span[data-on="true"] { color: #993C1D; font-weight: 500; }
+
+.lt3-eff-mini { display: inline-block; width: 20px; height: 7px; border-radius: 999px; background: var(--panel-2); border: 1px solid var(--line); overflow: hidden; flex-shrink: 0; }
+.lt3-eff-mini > span { display: block; height: 100%; background: linear-gradient(90deg, var(--muted-2), #D97757); border-radius: 999px; }
+
+/* Repositories multi-select (Copilot-style) */
+/* Self-contained so it styles correctly even in the portal'd Combo popover (outside .lt3). */
+.lt3-search { margin: 2px 4px 8px; width: calc(100% - 8px); box-sizing: border-box; font: inherit; font-size: 13px; color: var(--ink); background: var(--panel-2); border: 1px solid var(--line); border-radius: 9px; padding: 8px 11px; outline: none; }
+.lt3-search:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); background: var(--panel); }
+.lt3-search::placeholder { color: var(--muted-2); }
+.lt3-rlist { max-height: 240px; overflow-y: auto; display: flex; flex-direction: column; scrollbar-width: thin; }
+.lt3-ritem { display: flex; align-items: center; gap: 6px; border-radius: 9px; padding-right: 7px; }
+.lt3-ritem:hover { background: var(--panel-2); }
+.lt3-ritem-main { display: flex; align-items: center; gap: 9px; flex: 1; min-width: 0; text-align: left; appearance: none; background: transparent; border: 0; border-radius: 9px; padding: 8px 9px; cursor: pointer; color: var(--ink); font: inherit; font-size: 13px; }
+.lt3-ritem-main > svg { color: var(--muted); flex-shrink: 0; }
+.lt3-rbranch { width: auto !important; min-width: 84px; max-width: 132px; background: var(--panel-2) !important; border-radius: 999px !important; font-size: 11px !important; padding: 4px 9px !important; color: var(--ink-2); flex-shrink: 0; }
+.lt3-rname { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* In-house dropdown (Combo) — Claude-style, replaces native <select> everywhere */
+.lt3-pop-wide { min-width: 560px; }
+.lt3-combo-btn { display: flex; align-items: center; gap: 8px; width: 100%; font: inherit; font-size: 13px; color: var(--ink); background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 8px 11px; cursor: pointer; text-align: left; transition: border-color .12s; }
+.lt3-combo-btn:hover { border-color: var(--line-2); }
+.lt3-combo-btn[data-open="true"] { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+.lt3-combo-btn > svg { color: var(--muted-2); flex-shrink: 0; }
+.lt3-branch-btn { display: inline-flex; align-items: center; justify-content: center; gap: 4px; min-width: 70px; max-width: 150px; font: inherit; font-size: 12px; color: var(--muted); background: transparent; border: 0; border-radius: 8px; padding: 6px 9px; cursor: pointer; flex-shrink: 0; transition: background .12s, color .12s; }
+.lt3-branch-btn:hover { background: rgba(31,30,29,.045); color: var(--ink-2); }
+.lt3-branch-btn[data-open="true"] { background: var(--accent-soft); color: #8A4326; }
+.lt3-branch-btn > svg { color: var(--muted-2); flex-shrink: 0; }
+.lt3-rmeta { display: flex; align-items: center; gap: 4px; flex-shrink: 0; }
+.lt3-ralias { width: 84px !important; font-size: 11.5px !important; color: var(--ink-2); background: transparent !important; border: 1px solid transparent !important; border-radius: 7px !important; padding: 5px 8px !important; }
+.lt3-ralias::placeholder { color: var(--muted-2); }
+.lt3-ralias:hover { background: rgba(31,30,29,.045) !important; }
+.lt3-ralias:focus { background: var(--panel-2) !important; border-color: var(--line) !important; box-shadow: none !important; }
+.lt3-combo-v { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lt3-combo-pop { bottom: auto; z-index: 95; max-height: 340px; display: flex; flex-direction: column; }
+.lt3-combo-list { overflow-y: auto; display: flex; flex-direction: column; }
+.lt3-check { width: 17px; height: 17px; border-radius: 5px; border: 1.5px solid var(--line-2); display: grid; place-items: center; color: #fff; flex-shrink: 0; }
+.lt3-check[data-on="true"] { background: var(--accent); border-color: var(--accent); }
+.lt3-rempty { font-size: 12px; color: var(--muted); padding: 10px 9px; }
+
+.lt3-srepo-name { flex: 1; font-size: 13px; font-weight: 500; color: var(--ink); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

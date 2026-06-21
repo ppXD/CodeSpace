@@ -7,6 +7,8 @@ import { ApiError } from "@/api/request";
 import { useAddModelCredential, useUpdateModelCredential } from "@/hooks/use-model-credentials";
 import { PROVIDER_FORMS, providerForm } from "@/lib/providerForms";
 
+import { ModelRowsEditor, type ModelRow } from "./ModelRowsEditor";
+
 interface ModelCredentialModalProps {
   /** Present = edit (provider locked, secret write-only); absent = add (provider is chosen in the form). */
   editing?: ModelCredentialSummary;
@@ -26,6 +28,7 @@ export function ModelCredentialModal({ editing, onClose }: ModelCredentialModalP
   const [displayName, setDisplayName] = useState(editing?.displayName ?? "");
   const [apiKey, setApiKey] = useState("");                      // never prefilled — the key is write-only
   const [baseUrl, setBaseUrl] = useState(editing?.baseUrl ?? "");
+  const [models, setModels] = useState<ModelRow[]>([{ modelId: "", displayName: "" }]);
   const [error, setError] = useState<string | null>(null);
 
   const add = useAddModelCredential();
@@ -65,8 +68,11 @@ export function ModelCredentialModal({ editing, onClose }: ModelCredentialModalP
         { onSuccess: onClose, onError },
       );
     } else {
+      const seedModels = models
+        .map(m => ({ modelId: m.modelId.trim(), displayName: m.displayName.trim() || null }))
+        .filter(m => m.modelId !== "");
       add.mutate(
-        { provider, displayName: displayName.trim(), apiKey: keyless ? null : trimmedKey, baseUrl: trimmedBaseUrl },
+        { provider, displayName: displayName.trim(), apiKey: keyless ? null : trimmedKey, baseUrl: trimmedBaseUrl, models: seedModels },
         { onSuccess: onClose, onError },
       );
     }
@@ -122,6 +128,14 @@ export function ModelCredentialModal({ editing, onClose }: ModelCredentialModalP
                 <input className="wf-form-input" type="text" value={baseUrl} onChange={(e) => setBaseUrl(e.target.value)} placeholder={baseUrlField.placeholder} />
                 {!baseUrlRequired && <span className="wf-form-help">Override the default endpoint — for a self-hosted or compatible gateway.</span>}
               </label>
+            )}
+
+            {!isEdit && (
+              <div className="wf-form-row">
+                <span className="wf-form-label">Models · optional</span>
+                <ModelRowsEditor rows={models} onChange={setModels} />
+                <span className="wf-form-help">Seed the model ids this credential exposes. Display name is optional, and you can refresh or edit them any time.</span>
+              </div>
             )}
 
             {error && <div className="wf-form-row"><span className="wf-form-help wf-form-help-err">{error}</span></div>}
