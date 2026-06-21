@@ -101,6 +101,24 @@ public class AnthropicClientStructuredTests
     }
 
     [Fact]
+    public async Task Structured_completion_falls_back_to_json_in_text_content_when_the_model_skips_the_tool()
+    {
+        // The real-endpoint case: the model IGNORED the forced tool and put the JSON in a text block. Recover it.
+        var inner = "Here is the result: {\"subtasks\":[\"a\",\"b\"]}";
+        var response = JsonSerializer.Serialize(new { model = "m", content = new[] { new { type = "text", text = inner } } });
+        var client = new AnthropicClient(new StubHttpClientFactory(new CapturingHandler(response)));
+        var schema = JsonDocument.Parse("""{ "type": "object" }""").RootElement;
+
+        var result = await client.CompleteStructuredAsync(new StructuredLLMCompletionRequest
+        {
+            Model = "m", SystemPrompt = "s", UserPrompt = "u", JsonSchema = schema, Credential = TestCredential,
+        }, CancellationToken.None);
+
+        result.Json.GetProperty("subtasks")[0].GetString().ShouldBe("a");
+        result.Json.GetProperty("subtasks").GetArrayLength().ShouldBe(2);
+    }
+
+    [Fact]
     public async Task The_request_credential_key_and_base_url_authenticate_the_call()
     {
         const string response = """{ "model": "m", "content": [ { "type": "tool_use", "name": "respond", "input": {} } ] }""";

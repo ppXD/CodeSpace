@@ -92,16 +92,31 @@ public class OpenAiClientStructuredTests
     }
 
     [Fact]
-    public async Task Structured_completion_throws_when_no_tool_calls_are_returned()
+    public async Task Structured_completion_throws_when_there_is_neither_a_tool_call_nor_json_content()
     {
-        // Model answered with plain text instead of calling the function — surface it, don't return garbage.
+        // Model answered with plain prose (no function call, no JSON) — surface it, don't return garbage.
         const string response = """{ "model": "m", "choices": [ { "message": { "role": "assistant", "content": "I cannot." } } ] }""";
         var client = new OpenAiClient(new StubHttpClientFactory(new CapturingHandler(response)));
         var schema = JsonDocument.Parse("""{ "type": "object" }""").RootElement;
 
         var ex = await Should.ThrowAsync<InvalidOperationException>(() => client.CompleteStructuredAsync(StructuredRequest(schema, TestCredential), CancellationToken.None));
 
-        ex.Message.ShouldContain("tool_calls");
+        ex.Message.ShouldContain("did not produce structured output");
+    }
+
+    [Fact]
+    public async Task Structured_completion_falls_back_to_json_in_the_content_when_the_model_skips_the_function()
+    {
+        // The real-endpoint case: the model IGNORED the forced function and returned the JSON as fenced content. Recover it.
+        var inner = "```json\n{\"subtasks\":[\"a\",\"b\"]}\n```";
+        var response = JsonSerializer.Serialize(new { model = "m", choices = new[] { new { message = new { content = inner } } } });
+        var client = new OpenAiClient(new StubHttpClientFactory(new CapturingHandler(response)));
+        var schema = JsonDocument.Parse("""{ "type": "object" }""").RootElement;
+
+        var result = await client.CompleteStructuredAsync(StructuredRequest(schema, TestCredential), CancellationToken.None);
+
+        result.Json.GetProperty("subtasks")[0].GetString().ShouldBe("a");
+        result.Json.GetProperty("subtasks").GetArrayLength().ShouldBe(2);
     }
 
     [Fact]

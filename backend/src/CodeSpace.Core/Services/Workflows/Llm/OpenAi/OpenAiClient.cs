@@ -76,14 +76,15 @@ public sealed class OpenAiClient : ILLMClient, IStructuredLLMClient
 
     public async Task<StructuredLLMCompletion> CompleteStructuredAsync(StructuredLLMCompletionRequest request, CancellationToken cancellationToken)
     {
-        // Force the model to call ONE function whose parameters IS the requested schema. The call's arguments are
-        // therefore schema-valid JSON (a string the gateway returns; we parse it).
+        // Force the model to call ONE function whose parameters IS the requested schema (the fast path). The schema is
+        // ALSO put in the system prompt so a model that ignores the forced function still knows the exact shape to emit
+        // as content — the generic fallback for models/gateways without reliable forced tool-calling.
         var body = new OpenAiChatRequest
         {
             Model = request.Model,
             MaxTokens = request.MaxOutputTokens,
             Temperature = request.Temperature,
-            Messages = BuildMessages(request.SystemPrompt, request.UserPrompt),
+            Messages = BuildMessages(StructuredJsonText.WithSchemaInstruction(request.SystemPrompt, request.JsonSchema), request.UserPrompt),
             Tools = new[] { new OpenAiTool { Function = new OpenAiFunction { Name = StructuredToolName, Description = "Return the result as structured JSON.", Parameters = request.JsonSchema } } },
             ToolChoice = new OpenAiToolChoice { Function = new OpenAiToolChoiceFunction { Name = StructuredToolName } },
         };
@@ -93,16 +94,21 @@ public sealed class OpenAiClient : ILLMClient, IStructuredLLMClient
         var message = parsed.Choices?.FirstOrDefault()?.Message;
         var toolCall = message?.ToolCalls?.FirstOrDefault(t => t.Function?.Name == StructuredToolName);
 
-        if (toolCall?.Function?.Arguments is not { } arguments)
+        // Prefer the function-call arguments; FALL BACK to a JSON object recovered from the text content (the model
+        // returned JSON as content instead of calling the function — common on models/gateways without forced tools).
+        var json = toolCall?.Function?.Arguments is { } arguments
+            ? ParseToolArguments(arguments)
+            : StructuredJsonText.TryExtractObject(message?.Content);
+
+        if (json is not { } result)
         {
-            // Surface a model refusal (content: null, no tool_calls) legibly rather than a bare "no output".
             var refusal = string.IsNullOrWhiteSpace(message?.Refusal) ? "" : $" (refusal: {message!.Refusal})";
-            throw new InvalidOperationException($"OpenAI structured completion returned no tool_calls — the model did not produce structured output{refusal}.");
+            throw new InvalidOperationException($"OpenAI structured completion produced neither a function call nor a JSON content object — the model did not produce structured output{refusal}.");
         }
 
         return new StructuredLLMCompletion
         {
-            Json = ParseToolArguments(arguments),
+            Json = result,
             Model = parsed.Model ?? request.Model,
             InputTokens = parsed.Usage?.PromptTokens,
             OutputTokens = parsed.Usage?.CompletionTokens,
