@@ -13,6 +13,7 @@ namespace CodeSpace.UnitTests.Workflows;
 /// real production path on a real <see cref="ProcessStartInfo"/> (and one real child process).
 /// </summary>
 [Trait("Category", "Unit")]
+[Collection("LocalProcessIdleWatchdog")]
 public sealed class LocalProcessRunnerEnvScrubTests
 {
     [Fact]
@@ -165,6 +166,123 @@ public sealed class LocalProcessRunnerEnvScrubTests
             result.Stdout.ShouldContain("NONINTERACTIVE");
         }
         finally { File.Delete(fifo); }
+    }
+
+    // ── C3: stall watchdog (no output for the idle window → terminated early as Stalled) ─────────────
+
+    [Fact]
+    public void Stdout_idle_timeout_env_var_pinned() =>
+        // A rename silently disables the watchdog for any operator who tuned it. Hard-pin (Rule 8).
+        LocalProcessRunner.StdoutIdleTimeoutEnvVar.ShouldBe("CODESPACE_AGENT_STDOUT_IDLE_TIMEOUT_SECONDS");
+
+    [Theory]
+    [InlineData("2", 2)]
+    [InlineData("90", 90)]
+    [InlineData("0", -1)]    // disabled
+    [InlineData("-5", -1)]
+    [InlineData("", -1)]
+    [InlineData("nope", -1)]
+    [InlineData(null, -1)]   // unset → disabled (default; no watchdog)
+    public void IdleTimeout_is_opt_in_and_only_a_positive_integer_enables_it(string? raw, int expectedSeconds)
+    {
+        var prior = Environment.GetEnvironmentVariable(LocalProcessRunner.StdoutIdleTimeoutEnvVar);
+        try
+        {
+            Environment.SetEnvironmentVariable(LocalProcessRunner.StdoutIdleTimeoutEnvVar, raw);
+
+            var idle = LocalProcessRunner.IdleTimeout();
+
+            if (expectedSeconds < 0) idle.ShouldBeNull("an unset / 0 / negative / non-numeric value leaves the watchdog disabled");
+            else idle.ShouldBe(TimeSpan.FromSeconds(expectedSeconds));
+        }
+        finally { Environment.SetEnvironmentVariable(LocalProcessRunner.StdoutIdleTimeoutEnvVar, prior); }
+    }
+
+    [Fact]
+    public async Task A_silent_streaming_child_is_terminated_as_stalled_well_before_its_timeout()
+    {
+        // Gate #6 (the stall case): a run producing NO output for the idle window is killed early as Stalled — it never
+        // sits to its full TimeoutSeconds. The deadline is far (30s); the 2s idle window is the teeth.
+        if (OperatingSystem.IsWindows()) return;
+
+        var prior = Environment.GetEnvironmentVariable(LocalProcessRunner.StdoutIdleTimeoutEnvVar);
+        try
+        {
+            Environment.SetEnvironmentVariable(LocalProcessRunner.StdoutIdleTimeoutEnvVar, "2");
+
+            var spec = new SandboxSpec { Command = "/bin/sh", Args = new[] { "-c", "sleep 30" }, TimeoutSeconds = 30 };
+
+            var result = await new LocalProcessRunner().RunStreamingAsync(spec, (_, _) => Task.CompletedTask, CancellationToken.None);
+
+            result.Status.ShouldBe(SandboxStatus.Stalled, "no output for the 2s idle window → stalled, not a 30s TimedOut");
+        }
+        finally { Environment.SetEnvironmentVariable(LocalProcessRunner.StdoutIdleTimeoutEnvVar, prior); }
+    }
+
+    [Fact]
+    public async Task A_streaming_child_that_keeps_emitting_within_the_window_is_not_stalled()
+    {
+        // The watchdog must NOT kill an active run: a child that emits a line inside every idle window runs to completion.
+        if (OperatingSystem.IsWindows()) return;
+
+        var prior = Environment.GetEnvironmentVariable(LocalProcessRunner.StdoutIdleTimeoutEnvVar);
+        try
+        {
+            Environment.SetEnvironmentVariable(LocalProcessRunner.StdoutIdleTimeoutEnvVar, "2");
+
+            var spec = new SandboxSpec { Command = "/bin/sh", Args = new[] { "-c", "for i in 1 2 3 4; do echo line$i; sleep 0.3; done" }, TimeoutSeconds = 30 };
+
+            var result = await new LocalProcessRunner().RunStreamingAsync(spec, (_, _) => Task.CompletedTask, CancellationToken.None);
+
+            result.Status.ShouldBe(SandboxStatus.Success, "a child emitting within the idle window is never falsely stalled");
+        }
+        finally { Environment.SetEnvironmentVariable(LocalProcessRunner.StdoutIdleTimeoutEnvVar, prior); }
+    }
+
+    [Fact]
+    public async Task A_streaming_child_emitting_newline_less_progress_is_not_stalled()
+    {
+        // Regression for the review's major finding: the watchdog's signal is BYTE progress, not completed-line
+        // delivery — so a run streaming a \r-style progress bar with NO newline for longer than the idle window is
+        // alive, not falsely killed. `printf` (no trailing newline) emits bytes every 0.3s inside the 2s window.
+        if (OperatingSystem.IsWindows()) return;
+
+        var prior = Environment.GetEnvironmentVariable(LocalProcessRunner.StdoutIdleTimeoutEnvVar);
+        try
+        {
+            Environment.SetEnvironmentVariable(LocalProcessRunner.StdoutIdleTimeoutEnvVar, "2");
+
+            var spec = new SandboxSpec { Command = "/bin/sh", Args = new[] { "-c", "for i in 1 2 3 4 5 6 7 8 9 10; do printf 'tick'; sleep 0.3; done" }, TimeoutSeconds = 30 };
+
+            var result = await new LocalProcessRunner().RunStreamingAsync(spec, (_, _) => Task.CompletedTask, CancellationToken.None);
+
+            result.Status.ShouldBe(SandboxStatus.Success, "newline-less byte output within the window resets the idle clock — not stalled");
+        }
+        finally { Environment.SetEnvironmentVariable(LocalProcessRunner.StdoutIdleTimeoutEnvVar, prior); }
+    }
+
+    [Fact]
+    public async Task The_watchdog_char_pump_delivers_whole_lines_trims_CRLF_and_flushes_a_trailing_partial()
+    {
+        // Pins the line-CONTENT of the watchdog's char-level pump (the fold's most behaviour-rich code, otherwise only
+        // asserted on terminal Status). `printf` emits: alpha\n  beta\r\n  gamma(no trailing newline). Expect the LF and
+        // CRLF to break lines (the CRLF's \r trimmed) and the unterminated "gamma" to be flushed at EOF.
+        if (OperatingSystem.IsWindows()) return;
+
+        var prior = Environment.GetEnvironmentVariable(LocalProcessRunner.StdoutIdleTimeoutEnvVar);
+        try
+        {
+            Environment.SetEnvironmentVariable(LocalProcessRunner.StdoutIdleTimeoutEnvVar, "2");
+
+            var spec = new SandboxSpec { Command = "/bin/sh", Args = new[] { "-c", @"printf 'alpha\nbeta\r\ngamma'" }, TimeoutSeconds = 30 };
+
+            var lines = new List<string>();
+            var result = await new LocalProcessRunner().RunStreamingAsync(spec, (l, _) => { lines.Add(l); return Task.CompletedTask; }, CancellationToken.None);
+
+            result.Status.ShouldBe(SandboxStatus.Success);
+            lines.ShouldBe(new[] { "alpha", "beta", "gamma" });
+        }
+        finally { Environment.SetEnvironmentVariable(LocalProcessRunner.StdoutIdleTimeoutEnvVar, prior); }
     }
 
     private static SandboxSpec EnvSpec() => new()
