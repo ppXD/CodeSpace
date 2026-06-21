@@ -233,6 +233,37 @@ public static class SupervisorOutcome
     }
 
     /// <summary>
+    /// Append an OBJECTIVE acceptance grade onto an ARBITRARY decision outcome, preserving every existing key verbatim
+    /// (L4 P1 — the terminal-STOP analogue of <see cref="FoldAcceptanceGrade"/>). Unlike the resolve fold, which re-emits
+    /// the fixed resolve shape, this is a GENERIC additive merge: it copies the outcome's own keys (a stop's
+    /// <c>stopped</c>/<c>outcome</c>/<c>summary</c>) in order and adds a single <c>acceptanceGrade</c> object — so the
+    /// stop's shape is never corrupted. Read back by the shape-agnostic <see cref="ReadAcceptanceGradePassed"/> (the same
+    /// once-guard + verdict reader the resolve path uses). A null/blank/non-object input starts from an empty object.
+    /// Pure + deterministic (keys preserved in source order, grade appended last).
+    /// </summary>
+    public static string AppendAcceptanceGrade(string? outcomeJson, bool passed, string detail)
+    {
+        var merged = new Dictionary<string, object?>();
+
+        if (!string.IsNullOrWhiteSpace(outcomeJson))
+        {
+            try
+            {
+                using var doc = JsonDocument.Parse(outcomeJson);
+
+                if (doc.RootElement.ValueKind == JsonValueKind.Object)
+                    foreach (var prop in doc.RootElement.EnumerateObject())
+                        merged[prop.Name] = prop.Value.Clone();   // Clone so the value outlives the JsonDocument's dispose
+            }
+            catch (JsonException) { merged.Clear(); }   // unparseable → start from an empty object (defensive; a stop outcome is always valid)
+        }
+
+        merged["acceptanceGrade"] = new { passed, detail };
+
+        return JsonSerializer.Serialize(merged, AgentJson.Options);
+    }
+
+    /// <summary>
     /// Read the folded objective acceptance verdict off a resolve outcome (L4 A3): <c>true</c>/<c>false</c> = the
     /// server grade's pass/fail, <c>null</c> = NO grade was folded (no operator acceptance command configured), so the
     /// caller falls back to the self-reported marker — byte-identical to pre-A3. Best-effort + pure. Doubles as the

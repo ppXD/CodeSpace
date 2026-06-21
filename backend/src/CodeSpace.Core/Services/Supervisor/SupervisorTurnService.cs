@@ -214,6 +214,13 @@ public sealed partial class SupervisorTurnService : ISupervisorTurnService, ISco
 
         var execution = await ExecuteOrTerminalizeFailureAsync(decisionId, teamId, context, decision, cancellationToken).ConfigureAwait(false);
 
+        // L4 P1: a terminal stop carrying a MODEL-authored acceptance check is graded HERE — inline on the decided-stop
+        // path, BEFORE the terminal is recorded — so the folded verdict is persisted with the outcome and read off it at
+        // BuildResult (a stop finishes the same turn; it never re-rehydrates, so the resolve's fold-at-rehydrate seam
+        // does not apply). The duplicate-claim replay (ClaimAndExecuteAsync) returns the already-graded outcome, so the
+        // grade I/O runs at most once per committed stop; a no-acceptance stop is a byte-identical no-op.
+        execution = await ApplyStopAcceptanceGradeAsync(execution, context, decision, teamId, cancellationToken).ConfigureAwait(false);
+
         await _ledger.RecordTerminalAsync(decisionId, teamId, SupervisorDecisionStatus.Succeeded, execution.OutcomeJson, error: null, cancellationToken).ConfigureAwait(false);
 
         return execution;
@@ -267,7 +274,22 @@ public sealed partial class SupervisorTurnService : ISupervisorTurnService, ISco
     /// </summary>
     internal static SupervisorTurnResult BuildResult(SupervisorTurnContext context, SupervisorDecision decision, SupervisorExecution execution)
     {
-        if (decision.IsTerminal) return SupervisorTurnResult.Finished(decision.Kind, ReadStopReason(decision), SupervisorOutcome.ReadFinalIntegratedBranch(context.PriorDecisions), SupervisorOutcome.ReadFinalRepositoryBranches(context.PriorDecisions));
+        if (decision.IsTerminal)
+        {
+            // L4 P1: the objective acceptance verdict folded onto THIS stop's outcome (null = no model check authored).
+            // A FAILED model definition-of-done WITHHOLDS the reviewable head — there is no verified branch to ship, so a
+            // downstream git.open_pr / git.open_change_set sees nothing (exactly as a non-verified resolve withholds its
+            // branch). null/true surface the branches as before (byte-identical for every run with no model acceptance).
+            var acceptancePassed = SupervisorOutcome.ReadAcceptanceGradePassed(execution.OutcomeJson);
+            var withhold = acceptancePassed == false;
+
+            return SupervisorTurnResult.Finished(
+                decision.Kind,
+                ReadStopReason(decision),
+                withhold ? null : SupervisorOutcome.ReadFinalIntegratedBranch(context.PriorDecisions),
+                withhold ? Array.Empty<SupervisorRepositoryBranch>() : SupervisorOutcome.ReadFinalRepositoryBranches(context.PriorDecisions),
+                acceptancePassed);
+        }
 
         var nextTurn = context with { TurnNumber = context.TurnNumber + 1, InFlight = null };
 
