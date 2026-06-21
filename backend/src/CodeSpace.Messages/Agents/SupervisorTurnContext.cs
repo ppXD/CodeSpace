@@ -95,6 +95,15 @@ public sealed record SupervisorTurnContext
     public Dtos.Agents.SupervisorAgentProfile? AgentProfile { get; init; }
 
     /// <summary>
+    /// The operator's OBJECTIVE acceptance floor (carried from <c>SupervisorGoalConfig.AcceptanceChecks</c>, blank
+    /// entries dropped) — the argv a terminal verdict is graded against. Enforced on the <c>resolve</c> verdict (L4
+    /// A3) AND on every terminal <c>stop</c> (L4 C1), so it gates the run's FINAL reviewable head even on a clean
+    /// (no-conflict) run that never resolved — the model can tighten acceptance with its own stop command but can
+    /// never ship past this floor. <c>null</c> (none / all-blank) ⇒ no operator grade runs (byte-identical).
+    /// </summary>
+    public IReadOnlyList<string>? AcceptanceChecks { get; init; }
+
+    /// <summary>
     /// The tool allow-list each spawned agent is restricted to (P2-3) — the supervisor config's REUSED
     /// <c>AllowedTools</c> threaded into <c>AgentTask.Tools</c>. Tri-state, matching the task envelope: <c>null</c>
     /// (the default, and pre-P2-3) = the harness default; non-empty = exactly these (UNIONed with a persona's tools

@@ -206,6 +206,88 @@ public sealed class SupervisorAcceptanceFoldFlowTests
         SupervisorOutcome.ReadAcceptanceGradePassed(await StopLedgerOutcomeAsync(runId, teamId)).ShouldBeNull("the durable stop row carries no acceptanceGrade — byte-identical to pre-slice");
     }
 
+    // ─── L4 C1: the OPERATOR acceptance floor gates EVERY terminal stop, even a clean (no-conflict) run ───
+
+    [Theory]
+    [InlineData(true, "Completed")]
+    [InlineData(false, "AcceptanceFailed")]
+    public async Task A_clean_run_with_no_model_check_is_still_gated_by_the_operator_floor(bool floorPasses, string expectedStatus)
+    {
+        // The C1 gap: a clean run (merge, no conflict → no resolve) whose stop carries NO model definition-of-done.
+        // Before C1 the operator's floor was enforced ONLY at resolve, so this run shipped ungated. Now the stop
+        // grades the operator floor against the final head — the model can no longer bypass it by authoring no check.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedSupervisorRunAsync(teamId, userId);
+        var repoId = Guid.NewGuid();
+
+        await SeedCleanMergeDecisionAsync(runId, teamId, "codespace/integration/x");
+
+        var floor = new[] { "sh", "floor.sh" };
+        var grader = new RecordingGrader(new BenchmarkGrade { Passed = floorPasses, Detail = "operator-floor" });
+        var result = await RunStopTurnWithGraderAsync(runId, teamId, GoalConfig(repoId, acceptanceChecks: floor), command: Array.Empty<string>(), grader);
+
+        grader.CallCount.ShouldBe(1, "the operator floor is graded even with no model check authored");
+        grader.LastCall!.Value.Command.ShouldBe(floor, "the OPERATOR's acceptance command is the graded argv");
+        result.AcceptancePassed.ShouldBe(floorPasses);
+        result.IntegratedBranch.ShouldBe(floorPasses ? "codespace/integration/x" : null, "a failed operator floor withholds the reviewable head");
+        AgentSupervisorNode.Finish(Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance, result).Outputs["status"].GetString().ShouldBe(expectedStatus);
+    }
+
+    [Fact]
+    public async Task The_operator_floor_is_graded_FIRST_and_short_circuits_the_model_check_on_failure()
+    {
+        // Precedence + AND: when BOTH gates are present and the operator floor FAILS, the model check is never graded
+        // (the floor is the mandatory gate; the model can only tighten on top of it).
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedSupervisorRunAsync(teamId, userId);
+
+        await SeedCleanMergeDecisionAsync(runId, teamId, "codespace/integration/x");
+
+        var floor = new[] { "sh", "floor.sh" };
+        var grader = new RecordingGrader(new BenchmarkGrade { Passed = false, Detail = "floor-failed" });
+        var result = await RunStopTurnWithGraderAsync(runId, teamId, GoalConfig(Guid.NewGuid(), acceptanceChecks: floor), command: new[] { "sh", "model.sh" }, grader);
+
+        grader.CallCount.ShouldBe(1, "the operator floor failed → the model check is short-circuited, never graded");
+        grader.LastCall!.Value.Command.ShouldBe(floor, "the operator floor is graded FIRST");
+        result.AcceptancePassed.ShouldBe(false);
+    }
+
+    [Fact]
+    public async Task A_passing_operator_floor_AND_a_failing_model_check_is_not_accepted()
+    {
+        // The AND across both gates: the operator floor passes but the model's own tightening fails → not accepted.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedSupervisorRunAsync(teamId, userId);
+
+        await SeedCleanMergeDecisionAsync(runId, teamId, "codespace/integration/x");
+
+        var floor = new[] { "sh", "floor.sh" };
+        var model = new[] { "sh", "model.sh" };
+        var grader = new QueuedGrader(new BenchmarkGrade { Passed = true, Detail = "floor-ok" }, new BenchmarkGrade { Passed = false, Detail = "model-failed" });
+        var result = await RunStopTurnWithGraderAsync(runId, teamId, GoalConfig(Guid.NewGuid(), acceptanceChecks: floor), command: model, grader);
+
+        grader.CallCount.ShouldBe(2, "the operator floor passed → the model check is graded too (the AND)");
+        grader.Commands[0].ShouldBe(floor, "operator floor first");
+        grader.Commands[1].ShouldBe(model, "then the model's tightening");
+        result.AcceptancePassed.ShouldBe(false, "both gates must pass — a failing model check is not accepted");
+    }
+
+    [Fact]
+    public async Task Both_gates_passing_accepts_and_surfaces_the_branch()
+    {
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedSupervisorRunAsync(teamId, userId);
+
+        await SeedCleanMergeDecisionAsync(runId, teamId, "codespace/integration/x");
+
+        var grader = new QueuedGrader(new BenchmarkGrade { Passed = true, Detail = "floor-ok" }, new BenchmarkGrade { Passed = true, Detail = "model-ok" });
+        var result = await RunStopTurnWithGraderAsync(runId, teamId, GoalConfig(Guid.NewGuid(), acceptanceChecks: new[] { "sh", "floor.sh" }), command: new[] { "sh", "model.sh" }, grader);
+
+        grader.CallCount.ShouldBe(2);
+        result.AcceptancePassed.ShouldBe(true);
+        result.IntegratedBranch.ShouldBe("codespace/integration/x", "both gates passed → the reviewable head surfaces");
+    }
+
     // ─── Crown jewel: the REAL grader (DI-resolved) wired through the real fold against a real repo + branch ───
 
     [Theory]
@@ -282,6 +364,48 @@ public sealed class SupervisorAcceptanceFoldFlowTests
         AgentSupervisorNode.Finish(Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance, result).Outputs["status"].GetString()
             .ShouldBe(expectedStatus, "the REAL acceptance check's exit code drives the terminal stop status end-to-end");
         result.IntegratedBranch.ShouldBe(checkExitCode == 0 ? "integration/head" : null, "a really-failing model DoD withholds the reviewable head");
+    }
+
+    [Theory]
+    [InlineData(0, "Completed")]            // the operator floor really passes on a clean run → the run completes
+    [InlineData(1, "AcceptanceFailed")]     // it really fails → AcceptanceFailed end-to-end, the head is withheld
+    public async Task The_real_operator_floor_gates_a_clean_runs_terminal_stop_over_a_real_repo_branch(int checkExitCode, string expectedStatus)
+    {
+        if (!await GitReadyAsync()) return;
+
+        using var remote = new AcceptanceRemote();
+        await remote.InitAsync();
+        await remote.AddBranchWithCheckAsync("integration/head", checkExitCode);
+
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedSupervisorRunAsync(teamId, userId);
+        var repoId = await SeedBoundRepositoryAsync(teamId, remote.Url);
+
+        // A clean (no-conflict) run with NO model definition-of-done — the C1 gap. The OPERATOR floor (acceptanceChecks)
+        // must still clone integration/head + run check.sh for real and gate the terminal.
+        await SeedCleanMergeDecisionAsync(runId, teamId, "integration/head");
+
+        SupervisorTurnResult result;
+        using (var scope = _fixture.BeginScope())
+        {
+            // The REAL grader at the seam; the stop authors NO model check (empty command) so ONLY the operator floor runs.
+            var service = new SupervisorTurnService(
+                scope.Resolve<ISupervisorDecisionLog>(),
+                new StopWithAcceptanceDecider(Array.Empty<string>()),
+                scope.Resolve<ISupervisorActionExecutor>(),
+                scope.Resolve<CodeSpaceDbContext>(),
+                scope.Resolve<ISupervisorAcceptanceGrader>(),
+                scope.Resolve<IDecisionQueueService>(),
+                scope.Resolve<IDecisionArbiter>(),
+                scope.Resolve<IDecisionAnswerService>(),
+                scope.Resolve<ILogger<SupervisorTurnService>>());
+
+            result = await service.RunTurnAsync(runId, teamId, NodeId, Goal, conversationId: null, GoalConfig(repoId, acceptanceChecks: new[] { "sh", "check.sh" }), CancellationToken.None);
+        }
+
+        AgentSupervisorNode.Finish(Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance, result).Outputs["status"].GetString()
+            .ShouldBe(expectedStatus, "the REAL operator-floor check's exit code gates the clean run's terminal stop end-to-end");
+        result.IntegratedBranch.ShouldBe(checkExitCode == 0 ? "integration/head" : null, "a really-failing operator floor withholds the reviewable head even with no model check");
     }
 
     // ─── Helpers ───
@@ -401,7 +525,13 @@ public sealed class SupervisorAcceptanceFoldFlowTests
     private async Task<(SupervisorTurnResult Result, RecordingGrader Grader)> RunStopTurnAsync(Guid runId, Guid teamId, SupervisorGoalConfig goalConfig, string[] command, BenchmarkGrade grade)
     {
         var grader = new RecordingGrader(grade);
+        var result = await RunStopTurnWithGraderAsync(runId, teamId, goalConfig, command, grader);
+        return (result, grader);
+    }
 
+    /// <summary>Run a terminal stop turn with a CUSTOM grader at the acceptance seam — lets a C1 test assert the AND across the operator floor + the model gate graded in order.</summary>
+    private async Task<SupervisorTurnResult> RunStopTurnWithGraderAsync(Guid runId, Guid teamId, SupervisorGoalConfig goalConfig, string[] command, ISupervisorAcceptanceGrader grader)
+    {
         using var scope = _fixture.BeginScope();
         var service = new SupervisorTurnService(
             scope.Resolve<ISupervisorDecisionLog>(),
@@ -414,8 +544,7 @@ public sealed class SupervisorAcceptanceFoldFlowTests
             scope.Resolve<IDecisionAnswerService>(),
             scope.Resolve<ILogger<SupervisorTurnService>>());
 
-        var result = await service.RunTurnAsync(runId, teamId, NodeId, Goal, conversationId: null, goalConfig, CancellationToken.None);
-        return (result, grader);
+        return await service.RunTurnAsync(runId, teamId, NodeId, Goal, conversationId: null, goalConfig, CancellationToken.None);
     }
 
     private async Task SeedCleanMergeDecisionAsync(Guid runId, Guid teamId, string integratedBranch)
@@ -581,6 +710,23 @@ public sealed class SupervisorAcceptanceFoldFlowTests
             LastCall = (repositoryId, teamId, branch, command, timeoutSeconds);
             if (_throw != null) throw _throw;
             return Task.FromResult(_grade);
+        }
+    }
+
+    /// <summary>Returns a SEQUENCE of grades (one per call) + records each call's command — lets a C1 test assert the AND across the two stop gates graded in order (operator floor then model).</summary>
+    private sealed class QueuedGrader : ISupervisorAcceptanceGrader
+    {
+        private readonly Queue<BenchmarkGrade> _grades;
+        public QueuedGrader(params BenchmarkGrade[] grades) => _grades = new Queue<BenchmarkGrade>(grades);
+
+        public int CallCount { get; private set; }
+        public List<IReadOnlyList<string>> Commands { get; } = new();
+
+        public Task<BenchmarkGrade> GradeAsync(Guid repositoryId, Guid teamId, string branch, IReadOnlyList<string> command, int timeoutSeconds, CancellationToken cancellationToken)
+        {
+            CallCount++;
+            Commands.Add(command);
+            return Task.FromResult(_grades.Count > 0 ? _grades.Dequeue() : new BenchmarkGrade { Passed = true, Detail = "default" });
         }
     }
 }

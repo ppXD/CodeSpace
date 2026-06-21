@@ -97,6 +97,7 @@ public sealed partial class SupervisorTurnService
             NoProgressDecisions = FoldNoProgressDecisions(priorDecisions),
             ApprovalPolicy = SupervisorGoalPlan.From(goalConfig).ApprovalPolicy,
             AgentProfile = goalConfig?.AgentProfile,
+            AcceptanceChecks = acceptanceCommand,
             SpawnedAgentTools = NormalizeTools(goalConfig?.AllowedTools),
             AllowedModelIds = NormalizeModelIds(goalConfig?.AllowedModelIds),
             SupervisorModelId = goalConfig?.SupervisorModelId,
@@ -294,44 +295,66 @@ public sealed partial class SupervisorTurnService
     }
 
     /// <summary>
-    /// Grade a terminal STOP's MODEL-authored acceptance check (L4 P1) inline on the decided-stop path, folding the
-    /// verdict onto the stop outcome so <see cref="BuildResult"/> reads it back off <c>execution.OutcomeJson</c>. A
-    /// byte-identical no-op unless the stop carries a model <see cref="SupervisorAcceptanceSpec.Command"/>. SINGLE-repo
-    /// only: grades the run's final reviewable head — a null branch (multi-repo / analysis-only / un-integrated work)
-    /// ⇒ SKIP (the multi-repo objective grade is a separate deferral, and there is no single branch to clone), never a
-    /// fail-closed mislabel of a legitimately branchless run. The model criterion is ADDITIONAL to whatever the resolve
-    /// floor already enforced (it can only TIGHTEN acceptance, never manufacture it).
+    /// Grade a terminal STOP against BOTH acceptance gates (L4 P1 + C1) inline on the decided-stop path, folding ONE
+    /// combined verdict onto the stop outcome so <see cref="BuildResult"/> reads it back off <c>execution.OutcomeJson</c>:
+    /// <list type="bullet">
+    ///   <item>the OPERATOR floor (<see cref="SupervisorTurnContext.AcceptanceChecks"/>) — MANDATORY when set, so the
+    ///         model can never ship a CLEAN (no-conflict) run past it; the resolve path only enforces the floor when a
+    ///         conflict produced a resolve, leaving a clean run's final head ungated until C1.</item>
+    ///   <item>the MODEL's own stop command (<see cref="SupervisorAcceptanceSpec.Command"/>) — an ADDITIONAL tightening
+    ///         the brain authored; it can only NARROW acceptance, never manufacture it.</item>
+    /// </list>
+    /// Both gates run against the run's FINAL reviewable head and BOTH must pass (each absent ⇒ vacuously passes).
+    /// Both absent ⇒ a byte-identical no-op (the dominant case). SINGLE-repo only: a null branch (multi-repo /
+    /// analysis-only / un-integrated work) ⇒ SKIP (the multi-repo objective grade is a separate deferral; there is no
+    /// single branch to clone), never a fail-closed mislabel of a legitimately branchless run.
     /// </summary>
     private async Task<SupervisorExecution> ApplyStopAcceptanceGradeAsync(SupervisorExecution execution, SupervisorTurnContext context, SupervisorDecision decision, Guid teamId, CancellationToken cancellationToken)
     {
         if (decision.Kind != SupervisorDecisionKinds.Stop) return execution;
 
-        var command = NormalizeCommand(ReadStopAcceptanceCommand(decision.PayloadJson));
+        // Operator floor FIRST (the mandatory gate), then the model's tightening — short-circuited in order so the
+        // verdict detail names the gate that failed.
+        var gates = new[]
+        {
+            ("operator-floor", NormalizeCommand(context.AcceptanceChecks)),
+            ("model-check", NormalizeCommand(ReadStopAcceptanceCommand(decision.PayloadJson))),
+        };
 
-        if (command is null) return execution;   // no model definition-of-done → byte-identical no-op (the dominant case)
+        if (gates.All(g => g.Item2 is null)) return execution;   // no operator floor + no model criterion → byte-identical no-op (the dominant case)
 
         var branch = SupervisorOutcome.ReadFinalIntegratedBranch(context.PriorDecisions);
         var repositoryId = context.AgentProfile?.RepositoryId;
 
         if (string.IsNullOrEmpty(branch) || repositoryId is null) return execution;   // nothing single-repo to grade against → skip (don't mislabel multi-repo / analysis-only)
 
-        var grade = await GradeStopAcceptanceAsync(repositoryId.Value, teamId, branch, command, cancellationToken).ConfigureAwait(false);
+        var grade = await GradeStopGatesAsync(repositoryId.Value, teamId, branch, gates, cancellationToken).ConfigureAwait(false);
 
         return execution with { OutcomeJson = SupervisorOutcome.AppendAcceptanceGrade(execution.OutcomeJson, grade.Passed, grade.Detail) };
     }
 
-    /// <summary>Grade the stop's model command against the final branch, fail-closed: the grader is itself fail-closed; any unexpected non-cancellation escape degrades to not-accepted so the terminal record can never crash + strand the row. Only a genuine cancellation propagates.</summary>
-    private async Task<BenchmarkGrade> GradeStopAcceptanceAsync(Guid repositoryId, Guid teamId, string branch, IReadOnlyList<string> command, CancellationToken cancellationToken)
+    /// <summary>Grade each PRESENT gate against the final branch IN ORDER, short-circuiting on the first failure (the verdict detail names the failing gate). All-pass ⇒ accepted. Fail-closed: the grader is itself fail-closed; any unexpected non-cancellation escape degrades to not-accepted so the terminal record can never crash + strand the row. Only a genuine cancellation propagates.</summary>
+    private async Task<BenchmarkGrade> GradeStopGatesAsync(Guid repositoryId, Guid teamId, string branch, IReadOnlyList<(string Label, IReadOnlyList<string>? Command)> gates, CancellationToken cancellationToken)
     {
-        try
+        foreach (var (label, command) in gates)
         {
-            return await _acceptanceGrader.GradeAsync(repositoryId, teamId, branch, command, SupervisorLane.AcceptanceGradeTimeoutSeconds, cancellationToken).ConfigureAwait(false);
+            if (command is null) continue;
+
+            BenchmarkGrade grade;
+            try
+            {
+                grade = await _acceptanceGrader.GradeAsync(repositoryId, teamId, branch, command, SupervisorLane.AcceptanceGradeTimeoutSeconds, cancellationToken).ConfigureAwait(false);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                _logger.LogWarning(ex, "Stop acceptance {Gate} grade failed unexpectedly; recording not-accepted", label);
+                return new BenchmarkGrade { Passed = false, Detail = $"{label}: grade-error: {ex.Message}" };
+            }
+
+            if (!grade.Passed) return new BenchmarkGrade { Passed = false, Detail = $"{label}: {grade.Detail}" };
         }
-        catch (Exception ex) when (ex is not OperationCanceledException)
-        {
-            _logger.LogWarning(ex, "Stop acceptance grade failed unexpectedly; recording not-accepted");
-            return new BenchmarkGrade { Passed = false, Detail = $"grade-error: {ex.Message}" };
-        }
+
+        return new BenchmarkGrade { Passed = true, Detail = "accepted" };
     }
 
     /// <summary>The model-authored acceptance argv off a stop decision's payload (<see cref="SupervisorStopPayload.Acceptance"/>'s command), best-effort (null when absent / malformed).</summary>
