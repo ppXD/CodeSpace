@@ -48,6 +48,21 @@ public class OpenAiClientStructuredTests
         public HttpClient CreateClient(string name) => new(_handler, disposeHandler: false);
     }
 
+    /// <summary>Returns a different canned response per call, capturing each request body — lets a test prove the progressive fallback fires (attempt 1 then attempt 2 hit the endpoint twice with different shapes).</summary>
+    private sealed class SequencedHandler : HttpMessageHandler
+    {
+        private readonly Queue<(HttpStatusCode Status, string Body)> _responses;
+        public readonly List<string> RequestBodies = new();
+        public SequencedHandler(params (HttpStatusCode Status, string Body)[] responses) { _responses = new Queue<(HttpStatusCode, string)>(responses); }
+
+        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            RequestBodies.Add(request.Content is null ? "" : await request.Content.ReadAsStringAsync(cancellationToken));
+            var (status, body) = _responses.Count > 0 ? _responses.Dequeue() : (HttpStatusCode.OK, "{}");
+            return new HttpResponseMessage(status) { Content = new StringContent(body, Encoding.UTF8, "application/json") };
+        }
+    }
+
     private static readonly ResolvedModelCredential TestCredential = new() { Provider = "OpenAI", ApiKey = "test-key", BaseUrl = "https://gw.example.com/v1" };
 
     private static StructuredLLMCompletionRequest StructuredRequest(JsonElement schema, ResolvedModelCredential? credential) => new()
@@ -80,15 +95,15 @@ public class OpenAiClientStructuredTests
         result.InputTokens.ShouldBe(12);
         result.OutputTokens.ShouldBe(7);
 
-        // Request shape: a function tool whose parameters IS the caller's schema (the fast path for tool-capable
-        // models) PLUS json_object response_format (the robust path — guarantees JSON content when the model skips
-        // the tool). tool_choice is left AUTO/omitted: forcing it conflicts with json_object on some gateways.
+        // Request shape of attempt 1: a single forced function whose parameters IS the caller's schema, tool_choice
+        // pinned to it. response_format is NOT sent (it 400s on gateways that do not support json_object).
         var sent = JsonDocument.Parse(handler.RequestBody!).RootElement;
         var fn = sent.GetProperty("tools")[0].GetProperty("function");
         fn.GetProperty("name").GetString().ShouldBe("respond");
         fn.GetProperty("parameters").GetProperty("properties").GetProperty("subtasks").GetProperty("type").GetString().ShouldBe("array");
-        sent.GetProperty("response_format").GetProperty("type").GetString().ShouldBe("json_object");
-        sent.TryGetProperty("tool_choice", out _).ShouldBeFalse("tool_choice is omitted — it conflicts with json_object on strict gateways");
+        sent.GetProperty("tool_choice").GetProperty("type").GetString().ShouldBe("function");
+        sent.GetProperty("tool_choice").GetProperty("function").GetProperty("name").GetString().ShouldBe("respond");
+        sent.TryGetProperty("response_format", out _).ShouldBeFalse("response_format is omitted — json_object 400s on gateways that don't support it");
         sent.GetProperty("messages")[1].GetProperty("content").GetString().ShouldBe("decompose this");
         sent.GetProperty("messages")[0].GetProperty("role").GetString().ShouldBe("system");
     }
@@ -119,6 +134,42 @@ public class OpenAiClientStructuredTests
 
         result.Json.GetProperty("subtasks")[0].GetString().ShouldBe("a");
         result.Json.GetProperty("subtasks").GetArrayLength().ShouldBe(2);
+    }
+
+    [Fact]
+    public async Task Degrades_to_a_prompt_only_request_when_the_forced_function_is_rejected_with_a_400()
+    {
+        // A LiteLLM-style gateway 400s the forced-function request (the feature is unsupported), then answers the
+        // prompt-only retry in plain content. The client must NOT surface the 400 — it must degrade and recover.
+        var handler = new SequencedHandler(
+            (HttpStatusCode.BadRequest, """{ "error": { "message": "tool_choice is not supported by this model" } }"""),
+            (HttpStatusCode.OK, """{ "model": "m", "choices": [ { "message": { "content": "{\"subtasks\":[\"a\",\"b\"]}" } } ] }"""));
+        var client = new OpenAiClient(new StubHttpClientFactory(handler));
+        var schema = JsonDocument.Parse("""{ "type": "object" }""").RootElement;
+
+        var result = await client.CompleteStructuredAsync(StructuredRequest(schema, TestCredential), CancellationToken.None);
+
+        result.Json.GetProperty("subtasks")[0].GetString().ShouldBe("a");
+        handler.RequestBodies.Count.ShouldBe(2, "attempt 1 (forced function) then attempt 2 (prompt-only) both hit the endpoint");
+        JsonDocument.Parse(handler.RequestBodies[0]).RootElement.TryGetProperty("tool_choice", out _).ShouldBeTrue("attempt 1 forces the function");
+        JsonDocument.Parse(handler.RequestBodies[1]).RootElement.TryGetProperty("tools", out _).ShouldBeFalse("attempt 2 sends NO tools — the safest request");
+    }
+
+    [Fact]
+    public async Task Degrades_to_a_prompt_only_request_when_the_forced_function_returns_no_usable_output()
+    {
+        // The model honours neither the forced function nor a JSON content object on attempt 1 (e.g. an empty/prose
+        // reply), but answers the prompt-only retry. The client recovers from attempt 2.
+        var handler = new SequencedHandler(
+            (HttpStatusCode.OK, """{ "model": "m", "choices": [ { "message": { "content": "" } } ] }"""),
+            (HttpStatusCode.OK, """{ "model": "m", "choices": [ { "message": { "content": "```json\n{\"kind\":\"plan\"}\n```" } } ] }"""));
+        var client = new OpenAiClient(new StubHttpClientFactory(handler));
+        var schema = JsonDocument.Parse("""{ "type": "object" }""").RootElement;
+
+        var result = await client.CompleteStructuredAsync(StructuredRequest(schema, TestCredential), CancellationToken.None);
+
+        result.Json.GetProperty("kind").GetString().ShouldBe("plan");
+        handler.RequestBodies.Count.ShouldBe(2, "attempt 1 produced no usable output, so the prompt-only floor ran");
     }
 
     [Fact]

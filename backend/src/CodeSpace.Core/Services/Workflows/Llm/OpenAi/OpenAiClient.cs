@@ -76,47 +76,77 @@ public sealed class OpenAiClient : ILLMClient, IStructuredLLMClient
 
     public async Task<StructuredLLMCompletion> CompleteStructuredAsync(StructuredLLMCompletionRequest request, CancellationToken cancellationToken)
     {
-        // Force the model to call ONE function whose parameters IS the requested schema (the fast path). The schema is
-        // ALSO put in the system prompt so a model that ignores the forced function still knows the exact shape to emit
-        // as content — the generic fallback for models/gateways without reliable forced tool-calling.
+        // Progressive structured output (generic across models AND gateways): try the constrained path first for the
+        // best fidelity on capable models, then degrade to a prompt-only floor for models/gateways that cannot honour
+        // it. The schema rides in the system prompt for BOTH attempts so any model knows the exact shape to emit.
+        var system = StructuredJsonText.WithSchemaInstruction(request.SystemPrompt, request.JsonSchema);
+
+        // Attempt 1 — forced function-calling. A gateway/model that rejects it (400) or returns neither a function
+        // call nor a JSON content object yields null here, degrading to the prompt-only floor below.
+        if (await TryStructuredViaFunctionAsync(request, system, cancellationToken).ConfigureAwait(false) is { } viaFunction)
+            return viaFunction;
+
+        // Attempt 2 — prompt-only floor: no tools, no response_format. This is the SAFEST request — it never 400s on a
+        // gateway that rejects forced functions or json_object, and forces nothing that could suppress the reply. The
+        // model answers in text; recover the JSON object from it.
         var body = new OpenAiChatRequest
         {
             Model = request.Model,
             MaxTokens = request.MaxOutputTokens,
             Temperature = request.Temperature,
-            Messages = BuildMessages(StructuredJsonText.WithSchemaInstruction(request.SystemPrompt, request.JsonSchema), request.UserPrompt),
-            Tools = new[] { new OpenAiTool { Function = new OpenAiFunction { Name = StructuredToolName, Description = "Return the result as structured JSON.", Parameters = request.JsonSchema } } },
-            // JSON mode: GUARANTEE the content is a JSON object even when the model does not call the function — the
-            // robust path for models/gateways without reliable forced tool-calling. tool_choice is left AUTO (omitted):
-            // forcing it conflicts with json_object on some gateways, and the model returns the JSON as content anyway.
-            ResponseFormat = new OpenAiResponseFormat(),
+            Messages = BuildMessages(system, request.UserPrompt),
         };
 
         var parsed = await PostChatAsync(body, request.Credential, cancellationToken).ConfigureAwait(false);
+        var message = parsed.Choices?.FirstOrDefault()?.Message;
+
+        if (StructuredJsonText.TryExtractObject(message?.Content) is not { } result)
+        {
+            var refusal = string.IsNullOrWhiteSpace(message?.Refusal) ? "" : $" (refusal: {message!.Refusal})";
+            throw new InvalidOperationException($"OpenAI structured completion produced no JSON via forced function-calling OR the prompt-only fallback — the model did not produce structured output{refusal}. Content preview: {StructuredJsonText.Preview(message?.Content)}");
+        }
+
+        return BuildCompletion(result, parsed, request.Model);
+    }
+
+    /// <summary>
+    /// Attempt 1: forced function-calling — a single function whose parameters IS the schema, tool_choice pinned to it.
+    /// Returns null (degrade to the prompt-only floor) when the gateway REJECTS the request (e.g. 400 on an unsupported
+    /// feature) or the model returns neither a function call nor a recoverable JSON content object.
+    /// </summary>
+    private async Task<StructuredLLMCompletion?> TryStructuredViaFunctionAsync(StructuredLLMCompletionRequest request, string system, CancellationToken cancellationToken)
+    {
+        var body = new OpenAiChatRequest
+        {
+            Model = request.Model,
+            MaxTokens = request.MaxOutputTokens,
+            Temperature = request.Temperature,
+            Messages = BuildMessages(system, request.UserPrompt),
+            Tools = new[] { new OpenAiTool { Function = new OpenAiFunction { Name = StructuredToolName, Description = "Return the result as structured JSON.", Parameters = request.JsonSchema } } },
+            ToolChoice = new OpenAiToolChoice { Function = new OpenAiToolChoiceFunction { Name = StructuredToolName } },
+        };
+
+        OpenAiChatResponse parsed;
+        try { parsed = await PostChatAsync(body, request.Credential, cancellationToken).ConfigureAwait(false); }
+        catch (InvalidOperationException) { return null; }   // gateway rejects forced functions (e.g. 400) → degrade. Any PERSISTENT error re-surfaces from the floor attempt.
 
         var message = parsed.Choices?.FirstOrDefault()?.Message;
         var toolCall = message?.ToolCalls?.FirstOrDefault(t => t.Function?.Name == StructuredToolName);
 
-        // Prefer the function-call arguments; FALL BACK to a JSON object recovered from the text content (json mode
-        // makes the content a JSON object even when the model skips the function).
         var json = toolCall?.Function?.Arguments is { } arguments
             ? ParseToolArguments(arguments)
             : StructuredJsonText.TryExtractObject(message?.Content);
 
-        if (json is not { } result)
-        {
-            var refusal = string.IsNullOrWhiteSpace(message?.Refusal) ? "" : $" (refusal: {message!.Refusal})";
-            throw new InvalidOperationException($"OpenAI structured completion produced neither a function call nor a JSON content object — the model did not produce structured output{refusal}. Content preview: {StructuredJsonText.Preview(message?.Content)}");
-        }
-
-        return new StructuredLLMCompletion
-        {
-            Json = result,
-            Model = parsed.Model ?? request.Model,
-            InputTokens = parsed.Usage?.PromptTokens,
-            OutputTokens = parsed.Usage?.CompletionTokens,
-        };
+        return json is { } result ? BuildCompletion(result, parsed, request.Model) : null;
     }
+
+    private static StructuredLLMCompletion BuildCompletion(JsonElement json, OpenAiChatResponse parsed, string fallbackModel) => new()
+    {
+        Json = json,
+        Model = parsed.Model ?? fallbackModel,
+        InputTokens = parsed.Usage?.PromptTokens,
+        OutputTokens = parsed.Usage?.CompletionTokens,
+    };
 
     /// <summary>Accept the function-call arguments whether the gateway returns them as a JSON STRING (OpenAI) or an inline OBJECT (some gateways) — a real-endpoint shape the fake-HTTP tests would otherwise let through.</summary>
     private static JsonElement ParseToolArguments(JsonElement arguments) => arguments.ValueKind switch
@@ -182,13 +212,7 @@ public sealed class OpenAiClient : ILLMClient, IStructuredLLMClient
         [JsonPropertyName("temperature")] public required double Temperature { get; init; }
         [JsonPropertyName("messages")] public required IReadOnlyList<OpenAiMessage> Messages { get; init; }
         [JsonPropertyName("tools")] [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] public IReadOnlyList<OpenAiTool>? Tools { get; init; }
-        [JsonPropertyName("response_format")] [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] public OpenAiResponseFormat? ResponseFormat { get; init; }
-    }
-
-    /// <summary>OpenAI JSON mode — <c>{"type":"json_object"}</c> — guarantees the assistant content is a JSON object (the system prompt carries the schema).</summary>
-    private sealed class OpenAiResponseFormat
-    {
-        [JsonPropertyName("type")] public string Type => "json_object";
+        [JsonPropertyName("tool_choice")] [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] public OpenAiToolChoice? ToolChoice { get; init; }
     }
 
     private sealed class OpenAiMessage

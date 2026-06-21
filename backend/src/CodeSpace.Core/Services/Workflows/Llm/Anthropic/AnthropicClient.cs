@@ -63,41 +63,76 @@ public sealed class AnthropicClient : ILLMClient, IStructuredLLMClient
 
     public async Task<StructuredLLMCompletion> CompleteStructuredAsync(StructuredLLMCompletionRequest request, CancellationToken cancellationToken)
     {
-        // Force the model to call ONE tool whose input_schema is the requested schema (the fast path). The schema is
-        // ALSO put in the system prompt so a model that ignores the forced tool still knows the exact shape to emit as
-        // text content — the generic fallback for models/gateways without reliable forced tool-use.
+        // Progressive structured output (generic across models AND gateways): try the constrained path first for the
+        // best fidelity on capable models, then degrade to a prompt-only floor for models/gateways that cannot honour
+        // it. The schema rides in the system prompt for BOTH attempts so any model knows the exact shape to emit.
+        var system = StructuredJsonText.WithSchemaInstruction(request.SystemPrompt, request.JsonSchema);
+        var messages = new[] { new AnthropicMessage { Role = "user", Content = request.UserPrompt } };
+
+        // Attempt 1 — forced tool-use. A gateway/model that rejects it (400) or returns neither a tool_use block nor a
+        // JSON content object yields null here, degrading to the prompt-only floor below.
+        if (await TryStructuredViaToolAsync(request, system, messages, cancellationToken).ConfigureAwait(false) is { } viaTool)
+            return viaTool;
+
+        // Attempt 2 — prompt-only floor: no tools. This is the SAFEST request — it never 400s on a gateway that rejects
+        // forced tool-use, and forces nothing that could suppress the reply (some gateways return an EMPTY content when
+        // a tool is forced). The model answers in text; recover the JSON object from it.
         var body = new AnthropicMessageRequest
         {
             Model = request.Model,
             MaxTokens = request.MaxOutputTokens,
             Temperature = request.Temperature,
-            System = StructuredJsonText.WithSchemaInstruction(request.SystemPrompt, request.JsonSchema),
-            Messages = new[] { new AnthropicMessage { Role = "user", Content = request.UserPrompt } },
+            System = system,
+            Messages = messages
+        };
+
+        var parsed = await PostMessagesAsync(body, request.Credential, cancellationToken).ConfigureAwait(false);
+        var text = TextContent(parsed);
+
+        if (StructuredJsonText.TryExtractObject(text) is not { } result)
+            throw new InvalidOperationException($"Anthropic structured completion produced no JSON via forced tool-use OR the prompt-only fallback — the model did not produce structured output. Content preview: {StructuredJsonText.Preview(text)}");
+
+        return BuildCompletion(result, parsed, request.Model);
+    }
+
+    /// <summary>
+    /// Attempt 1: forced tool-use — a single tool whose input_schema IS the schema, tool_choice pinned to it. Returns
+    /// null (degrade to the prompt-only floor) when the gateway REJECTS the request (e.g. 400 on an unsupported
+    /// feature) or the model returns neither a tool_use block nor a recoverable JSON content object.
+    /// </summary>
+    private async Task<StructuredLLMCompletion?> TryStructuredViaToolAsync(StructuredLLMCompletionRequest request, string system, AnthropicMessage[] messages, CancellationToken cancellationToken)
+    {
+        var body = new AnthropicMessageRequest
+        {
+            Model = request.Model,
+            MaxTokens = request.MaxOutputTokens,
+            Temperature = request.Temperature,
+            System = system,
+            Messages = messages,
             Tools = new[] { new AnthropicTool { Name = StructuredToolName, Description = "Return the result as structured JSON.", InputSchema = request.JsonSchema } },
             ToolChoice = new AnthropicToolChoice { Type = "tool", Name = StructuredToolName }
         };
 
-        var parsed = await PostMessagesAsync(body, request.Credential, cancellationToken).ConfigureAwait(false);
+        AnthropicMessageResponse parsed;
+        try { parsed = await PostMessagesAsync(body, request.Credential, cancellationToken).ConfigureAwait(false); }
+        catch (InvalidOperationException) { return null; }   // gateway rejects forced tool-use (e.g. 400) → degrade. Any PERSISTENT error re-surfaces from the floor attempt.
 
         var toolUse = parsed.Content?.FirstOrDefault(c => c.Type == "tool_use" && c.Name == StructuredToolName);
 
-        // Prefer the tool_use input; FALL BACK to a JSON object recovered from the text content (the model returned
-        // JSON as content instead of calling the tool — common on models/gateways without forced tool-use).
         var json = toolUse?.Input is { } input
             ? input.Clone()
             : StructuredJsonText.TryExtractObject(TextContent(parsed));
 
-        if (json is not { } result)
-            throw new InvalidOperationException($"Anthropic structured completion produced neither a tool_use block nor a JSON content object — the model did not produce structured output. Content preview: {StructuredJsonText.Preview(TextContent(parsed))}");
-
-        return new StructuredLLMCompletion
-        {
-            Json = result,
-            Model = parsed.Model ?? request.Model,
-            InputTokens = parsed.Usage?.InputTokens,
-            OutputTokens = parsed.Usage?.OutputTokens
-        };
+        return json is { } result ? BuildCompletion(result, parsed, request.Model) : null;
     }
+
+    private static StructuredLLMCompletion BuildCompletion(JsonElement json, AnthropicMessageResponse parsed, string fallbackModel) => new()
+    {
+        Json = json,
+        Model = parsed.Model ?? fallbackModel,
+        InputTokens = parsed.Usage?.InputTokens,
+        OutputTokens = parsed.Usage?.OutputTokens
+    };
 
     /// <summary>Join the response's text content blocks (the structured fallback reads JSON out of these when the model answered in text instead of a tool_use block).</summary>
     private static string TextContent(AnthropicMessageResponse parsed) =>
