@@ -351,19 +351,19 @@ public class SupervisorTurnServiceTests
     }
 
     [Fact]
-    public async Task A_full_turn_stop_with_a_model_acceptance_on_a_MULTI_repo_run_SKIPS_the_grade()
+    public async Task A_full_turn_stop_on_a_MULTI_repo_run_grades_every_repo_head_and_withholds_all_on_failure()
     {
-        // Multi-repo objective acceptance is a separate deferral — a multi-repo run has no single branch to grade, so the
-        // model stop check is skipped (the per-repo branches still surface).
+        // L4 C2: a multi-repo run grades EACH per-repo head (no longer skipped). The first repo's check fails → the
+        // whole all-or-nothing change is not accepted and EVERY per-repo branch is withheld.
         var ledger = SeedRunWithCleanMultiRepoMerge();
         var grader = new FakeAcceptanceGrader(new BenchmarkGrade { Passed = false, Detail = "would-fail" });
         var service = ServiceWith(ledger, new StopWithAcceptanceDecider("npm", "test"), grader);
 
         var result = await service.RunTurnAsync(_runId, _teamId, "sup", "goal", null, GoalConfigWithRepo(), CancellationToken.None);
 
-        result.AcceptancePassed.ShouldBeNull();
-        grader.CallCount.ShouldBe(0, "a multi-repo run skips the single-repo stop grade (deferred)");
-        result.RepositoryBranches.Count.ShouldBe(2, "the per-repo branches still surface");
+        result.AcceptancePassed.ShouldBe(false, "C2: the multi-repo stop grades the per-repo heads — a failing check is not accepted");
+        grader.CallCount.ShouldBe(1, "the model check is graded per repo; the first repo fails → short-circuit");
+        result.RepositoryBranches.ShouldBeEmpty("one failing repo withholds EVERY per-repo head — all-or-nothing");
     }
 
     [Fact]
