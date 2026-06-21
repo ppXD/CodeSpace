@@ -42,6 +42,21 @@ public class AnthropicClientStructuredTests
         public HttpClient CreateClient(string name) => new(_handler, disposeHandler: false);
     }
 
+    /// <summary>Returns a different canned response per call, capturing each request body — lets a test prove the progressive fallback fires (attempt 1 then attempt 2 hit the endpoint twice with different shapes).</summary>
+    private sealed class SequencedHandler : HttpMessageHandler
+    {
+        private readonly Queue<(HttpStatusCode Status, string Body)> _responses;
+        public readonly List<string> RequestBodies = new();
+        public SequencedHandler(params (HttpStatusCode Status, string Body)[] responses) { _responses = new Queue<(HttpStatusCode, string)>(responses); }
+
+        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            RequestBodies.Add(request.Content is null ? "" : await request.Content.ReadAsStringAsync(cancellationToken));
+            var (status, body) = _responses.Count > 0 ? _responses.Dequeue() : (HttpStatusCode.OK, "{}");
+            return new HttpResponseMessage(status) { Content = new StringContent(body, Encoding.UTF8, "application/json") };
+        }
+    }
+
     [Fact]
     public async Task Structured_completion_forces_a_tool_and_extracts_its_input()
     {
@@ -85,9 +100,10 @@ public class AnthropicClientStructuredTests
     }
 
     [Fact]
-    public async Task Structured_completion_throws_when_no_tool_use_block_is_returned()
+    public async Task Structured_completion_throws_when_neither_attempt_yields_json()
     {
-        // Model answered with plain text instead of calling the tool — surface it, don't return garbage.
+        // Model answered with plain prose (no tool, no JSON) on BOTH the forced-tool attempt and the prompt-only
+        // floor — surface it with a content preview, don't return garbage.
         const string response = """{ "model": "m", "content": [ { "type": "text", "text": "I cannot." } ], "usage": { "input_tokens": 1, "output_tokens": 1 } }""";
         var client = new AnthropicClient(new StubHttpClientFactory(new CapturingHandler(response)));
         var schema = JsonDocument.Parse("""{ "type": "object" }""").RootElement;
@@ -97,7 +113,50 @@ public class AnthropicClientStructuredTests
             Model = "m", SystemPrompt = "", UserPrompt = "x", JsonSchema = schema, Credential = TestCredential,
         }, CancellationToken.None));
 
-        ex.Message.ShouldContain("tool_use");
+        ex.Message.ShouldContain("did not produce structured output");
+        ex.Message.ShouldContain("I cannot.", customMessage: "the content preview names what the model actually returned");
+    }
+
+    [Fact]
+    public async Task Degrades_to_a_prompt_only_request_when_the_forced_tool_returns_empty_content()
+    {
+        // The real-gateway case the content-preview diagnosis surfaced: forcing the tool yields an EMPTY reply. The
+        // client must degrade to a prompt-only request (no tools) and recover the JSON the model then returns as text.
+        var handler = new SequencedHandler(
+            (HttpStatusCode.OK, """{ "model": "m", "content": [] }"""),
+            (HttpStatusCode.OK, """{ "model": "m", "content": [ { "type": "text", "text": "{\"kind\":\"plan\"}" } ] }"""));
+        var client = new AnthropicClient(new StubHttpClientFactory(handler));
+        var schema = JsonDocument.Parse("""{ "type": "object" }""").RootElement;
+
+        var result = await client.CompleteStructuredAsync(new StructuredLLMCompletionRequest
+        {
+            Model = "m", SystemPrompt = "s", UserPrompt = "u", JsonSchema = schema, Credential = TestCredential,
+        }, CancellationToken.None);
+
+        result.Json.GetProperty("kind").GetString().ShouldBe("plan");
+        handler.RequestBodies.Count.ShouldBe(2, "attempt 1 (forced tool) then attempt 2 (prompt-only) both hit the endpoint");
+        JsonDocument.Parse(handler.RequestBodies[0]).RootElement.TryGetProperty("tool_choice", out _).ShouldBeTrue("attempt 1 forces the tool");
+        JsonDocument.Parse(handler.RequestBodies[1]).RootElement.TryGetProperty("tools", out _).ShouldBeFalse("attempt 2 sends NO tools — the safest request");
+    }
+
+    [Fact]
+    public async Task Degrades_to_a_prompt_only_request_when_the_forced_tool_is_rejected_with_a_400()
+    {
+        // A gateway 400s the forced-tool request (the feature is unsupported), then answers the prompt-only retry in
+        // plain text. The client must NOT surface the 400 — it must degrade and recover.
+        var handler = new SequencedHandler(
+            (HttpStatusCode.BadRequest, """{ "error": { "message": "tool_choice not supported" } }"""),
+            (HttpStatusCode.OK, """{ "model": "m", "content": [ { "type": "text", "text": "{\"kind\":\"merge\"}" } ] }"""));
+        var client = new AnthropicClient(new StubHttpClientFactory(handler));
+        var schema = JsonDocument.Parse("""{ "type": "object" }""").RootElement;
+
+        var result = await client.CompleteStructuredAsync(new StructuredLLMCompletionRequest
+        {
+            Model = "m", SystemPrompt = "s", UserPrompt = "u", JsonSchema = schema, Credential = TestCredential,
+        }, CancellationToken.None);
+
+        result.Json.GetProperty("kind").GetString().ShouldBe("merge");
+        handler.RequestBodies.Count.ShouldBe(2, "attempt 1 400'd, so the prompt-only floor ran");
     }
 
     [Fact]
