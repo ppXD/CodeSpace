@@ -1,0 +1,27 @@
+# CodeSpace PUBLIC API image — the HTTP frontend ONLY.
+#
+# Deploy this with CODESPACE_HANGFIRE_PROCESSING_ENABLED=false: the pod serves the REST/SSE surface and ENQUEUES
+# work, but starts NO Hangfire processing server (HangfireRegistrar.CodeSpace.cs returns early when processing is
+# off), so it NEVER executes an agent run and NEVER hosts a per-run MCP endpoint. Agent execution lives
+# EXCLUSIVELY in the worker image (backend/Dockerfile.worker — the local sandbox runner). Deploy the two images as
+# SEPARATE deployments so each scales (replica) independently: the API on HTTP load, the worker on job throughput.
+#
+# Because this image is INTERNET-FACING it is kept minimal — NO git, NO bubblewrap/prlimit, NO harness CLIs (those
+# are agent-execution + isolation deps that belong only on the worker). Verified 2026-06: every git / workspace-clone
+# path lives under Services/Agents/* (the executor, workspace providers, integrators, acceptance grader), all of
+# which run inside Hangfire jobs on the worker — no synchronous controller/handler clones a repo. If a synchronous
+# API path ever needs git, reconsider this leanness rather than silently regressing the attack surface.
+#
+#   docker build -f backend/Dockerfile.api -t codespace-api .        # build context = backend/
+#
+FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
+WORKDIR /src
+COPY . .
+RUN dotnet restore CodeSpace.sln
+RUN dotnet publish src/CodeSpace.Api/CodeSpace.Api.csproj -c Release -o /app --no-restore
+
+FROM mcr.microsoft.com/dotnet/aspnet:10.0 AS runtime
+WORKDIR /app
+COPY --from=build /app ./
+EXPOSE 8080
+ENTRYPOINT ["dotnet", "CodeSpace.Api.dll"]
