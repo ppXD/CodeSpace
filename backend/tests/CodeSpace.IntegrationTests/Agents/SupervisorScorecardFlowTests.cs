@@ -1,5 +1,6 @@
 using Autofac;
 using CodeSpace.Core.Persistence.Db;
+using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Agents.Eval;
 using CodeSpace.Core.Services.Supervisor;
@@ -139,6 +140,30 @@ public class SupervisorScorecardFlowTests : IDisposable
         card.Rollup.OutcomeDistribution[SupervisorOutcomes.Aborted].ShouldBe(1);
     }
 
+    [Theory]
+    [InlineData(false, SupervisorOutcomes.AcceptanceFailed)]  // the model self-reported "completed" but its OWN definition-of-done FAILED → never completed
+    [InlineData(true, SupervisorOutcomes.Completed)]          // it passed → the success label stands
+    public async Task The_scorecard_reads_the_objective_acceptance_verdict_off_the_stop_row_not_the_self_report(bool gradePassed, string expectedOutcome)
+    {
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+
+        // A terminal supervisor run whose stop the model LABELLED "completed", with the server's OBJECTIVE acceptance
+        // verdict folded onto the durable stop OUTCOME (the L4 P1 grade). The scorecard must classify by the grade, not
+        // the label: gradePassed=false ⇒ acceptance-failed even though the brain claimed completion.
+        var runId = await SeedTerminalSupervisorRunWithGradedStopAsync(teamId, userId, label: "completed", acceptancePassed: gradePassed);
+
+        var card = await GetScorecardAsync(userId, teamId);
+
+        var run = card.Runs.Single(r => r.SupervisorRunId == runId);
+        run.NotScored.ShouldBeFalse("the run reached a terminal status");
+        run.StopCount.ShouldBe(1);
+        run.Outcome.ShouldBe(expectedOutcome, "the OBJECTIVE acceptance verdict on the stop's OutcomeJson drives the bucket, not the model's self-reported label");
+
+        card.Rollup.OutcomeDistribution[expectedOutcome].ShouldBe(1);
+        if (!gradePassed)
+            card.Rollup.OutcomeDistribution.GetValueOrDefault(SupervisorOutcomes.Completed, 0).ShouldBe(0, "a brain that over-claims completion must never inflate the completed bucket");
+    }
+
     [Fact]
     public async Task A_different_team_sees_none_of_another_teams_supervisor_runs()
     {
@@ -188,6 +213,41 @@ public class SupervisorScorecardFlowTests : IDisposable
     }
 
     // ─── Helpers ────────────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Seed a TERMINAL supervisor run with a single model-authored stop whose payload carries the self-reported
+    /// <paramref name="label"/> and whose durable OUTCOME carries the SERVER's objective acceptance grade (folded by
+    /// the real <see cref="SupervisorOutcome.AppendAcceptanceGrade"/>). The grade-production path is owned by
+    /// SupervisorAcceptanceFoldFlowTests; this seeds the persisted shape to prove the scorecard READS it.
+    /// </summary>
+    private async Task<Guid> SeedTerminalSupervisorRunWithGradedStopAsync(Guid teamId, Guid userId, string label, bool acceptancePassed)
+    {
+        var workflowId = await CreateWorkflowAsync(teamId, userId);
+        var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
+
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        var now = DateTimeOffset.UtcNow;
+
+        var stopOutcome = SupervisorOutcome.AppendAcceptanceGrade($"{{\"stopped\":true,\"outcome\":\"{label}\"}}", acceptancePassed, "model-check");
+
+        db.SupervisorDecisionRecord.Add(new SupervisorDecisionRecord
+        {
+            Id = Guid.NewGuid(), TeamId = teamId, SupervisorRunId = runId, Sequence = 1,
+            DecisionKind = SupervisorDecisionKinds.Stop, IdempotencyKey = $"stop-{Guid.NewGuid():N}", InputHash = "test",
+            Status = SupervisorDecisionStatus.Succeeded, PayloadJson = $"{{\"outcome\":\"{label}\",\"summary\":\"done\"}}",
+            OutcomeJson = stopOutcome,
+            FenceEpoch = 1, CreatedDate = now, CreatedBy = Guid.Empty, LastModifiedDate = now, LastModifiedBy = Guid.Empty,
+        });
+        await db.SaveChangesAsync();
+
+        // Drive the WorkflowRun to a terminal Success so the run is SCORED (the acceptance verdict, not the run status,
+        // is what distinguishes acceptance-failed from completed — the node completes either way).
+        await db.WorkflowRun.Where(r => r.Id == runId)
+            .ExecuteUpdateAsync(s => s.SetProperty(r => r.Status, WorkflowRunStatus.Success).SetProperty(r => r.CompletedAt, now));
+
+        return runId;
+    }
 
     /// <summary>Drive turn 0 (plan) → self-advance → turn 1 (spawn) which stages 2 real agent runs + parks. Returns the supervisor run id + the two spawned agent-run ids.</summary>
     private async Task<(Guid RunId, Guid Agent0, Guid Agent1)> DriveSupervisorToSpawnParkAsync(Guid teamId, Guid userId)

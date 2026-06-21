@@ -144,6 +144,9 @@ public sealed class SupervisorScorecardService : ISupervisorScorecardService, IS
         Kind = row.DecisionKind,
         StagedAgentCount = SupervisorDecisionKinds.StagesAgents(row.DecisionKind) ? SupervisorOutcome.ReadStagedAgentCount(row.OutcomeJson) : 0,
         StopReason = row.DecisionKind == SupervisorDecisionKinds.Stop ? ReadStopReason(row.PayloadJson) : null,
+        // The OBJECTIVE acceptance verdict L4 P1 folded onto the stop's OUTCOME (not its payload). null for a stop with
+        // no model definition-of-done — leaves the label-based classification byte-identical for every pre-acceptance run.
+        AcceptancePassed = row.DecisionKind == SupervisorDecisionKinds.Stop ? SupervisorOutcome.ReadAcceptanceGradePassed(row.OutcomeJson) : null,
     };
 
     /// <summary>Wall-clock seconds from the first decision to the run's stop: the last stop decision's <c>CreatedDate</c> (the terminal decision) else the run's <c>CompletedAt</c>; null when neither anchor exists.</summary>

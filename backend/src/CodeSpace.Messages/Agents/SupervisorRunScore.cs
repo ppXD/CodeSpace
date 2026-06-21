@@ -18,6 +18,9 @@ public sealed record SupervisorDecisionSummary
 
     /// <summary>The terminal stop reason / outcome label read off a <c>stop</c> decision's payload (a forced-stop <c>reason</c> or a decider <c>outcome</c>); null for a non-stop decision.</summary>
     public string? StopReason { get; init; }
+
+    /// <summary>The OBJECTIVE acceptance verdict the server graded for a model-authored <c>stop</c>'s definition-of-done (folded onto the stop's outcome by L4 P1); <c>false</c> when the model's own acceptance check FAILED, <c>true</c> when it passed, <c>null</c> when the stop authored no acceptance check (or the row is not a stop). The scorer lets this OVERRIDE the self-reported <see cref="StopReason"/> label so the eval never scores the brain's word over the server's grade.</summary>
+    public bool? AcceptancePassed { get; init; }
 }
 
 /// <summary>
@@ -60,6 +63,9 @@ public static class SupervisorOutcomes
     /// <summary>The decider stopped with a failure/abandon label, OR the run reached a terminal <c>Failure</c> with no supervisor stop decision (e.g. the supervisor node failed: lane disabled mid-run, unreadable scope) — not a clean completion, not a bound.</summary>
     public const string Aborted = "aborted";
 
+    /// <summary>The model authored a <c>stop</c> it labelled done, but its OWN model-authored acceptance check (the definition of done) FAILED the server's objective grade — the reviewable branch was withheld. Distinct from <see cref="Aborted"/> (the model didn't even claim success) and never folded into <see cref="Completed"/>: the eval reports the brain over-claiming completion as its own honest signal.</summary>
+    public const string AcceptanceFailed = "acceptance-failed";
+
     /// <summary>An operator cancelled the run mid-flight (terminal <c>Cancelled</c>) with no supervisor stop decision — honest, never folded into completed.</summary>
     public const string Cancelled = "cancelled";
 
@@ -101,7 +107,7 @@ public sealed record SupervisorRunScore
     /// <summary>Wall-clock seconds from the first decision to the terminal stop; null when the run isn't terminal yet.</summary>
     public double? TimeToStopSeconds { get; init; }
 
-    /// <summary>The outcome bucket (a <see cref="SupervisorOutcomes"/> value): completed / budget-exhausted / governance-denied / aborted / cancelled, or not-scored for an in-flight run.</summary>
+    /// <summary>The outcome bucket (a <see cref="SupervisorOutcomes"/> value): completed / budget-exhausted / governance-denied / aborted / acceptance-failed / cancelled, or not-scored for an in-flight run.</summary>
     public required string Outcome { get; init; }
 
     /// <summary>True when the run has not reached a terminal stop — reported but excluded from the roll-up averages (honest).</summary>

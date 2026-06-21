@@ -16,8 +16,8 @@ namespace CodeSpace.UnitTests.Agents;
 [Trait("Category", "Unit")]
 public class SupervisorEvalScorecardTests
 {
-    private static SupervisorDecisionSummary Decision(string kind, int staged = 0, string? stopReason = null) =>
-        new() { Kind = kind, StagedAgentCount = staged, StopReason = stopReason };
+    private static SupervisorDecisionSummary Decision(string kind, int staged = 0, string? stopReason = null, bool? acceptancePassed = null) =>
+        new() { Kind = kind, StagedAgentCount = staged, StopReason = stopReason, AcceptancePassed = acceptancePassed };
 
     // terminalStatus null = in-flight (not scored); a value = the run's REAL terminal status. Defaults to Success
     // so a terminal run with a clean stop label keeps mapping to completed exactly as before.
@@ -137,6 +137,61 @@ public class SupervisorEvalScorecardTests
             .Outcome.ShouldBe(expected);
     }
 
+    // ─── Objective acceptance verdict OVERRIDES the self-reported label (the C3 self-grade seam) ───────
+
+    [Fact]
+    public void A_model_stop_labelled_completed_whose_acceptance_check_FAILED_is_scored_acceptance_failed_not_completed()
+    {
+        // The self-grade hole: the brain authored a stop it labelled "completed", but the SERVER graded its own
+        // definition-of-done as FAILED (the reviewable branch was withheld). The eval must NOT take the brain's word.
+        SupervisorEvalScorecard.Score(Run(new[] { Decision(SupervisorDecisionKinds.Stop, stopReason: "completed", acceptancePassed: false) }))
+            .Outcome.ShouldBe(SupervisorOutcomes.AcceptanceFailed);
+    }
+
+    [Theory]
+    [InlineData(true)]   // acceptance passed → the success label stands
+    [InlineData(null)]   // no acceptance check authored → label-based classification, byte-identical to a pre-acceptance run
+    public void A_model_stop_labelled_completed_stays_completed_when_acceptance_passed_or_was_not_checked(bool? acceptancePassed)
+    {
+        SupervisorEvalScorecard.Score(Run(new[] { Decision(SupervisorDecisionKinds.Stop, stopReason: "completed", acceptancePassed: acceptancePassed) }))
+            .Outcome.ShouldBe(SupervisorOutcomes.Completed);
+    }
+
+    [Fact]
+    public void A_failed_acceptance_grade_overrides_even_a_non_success_label_with_the_specific_bucket()
+    {
+        // A stop the model labelled "failed" AND that failed acceptance is the more-specific acceptance-failed, not the
+        // generic aborted — the objective grade is the precise signal.
+        SupervisorEvalScorecard.Score(Run(new[] { Decision(SupervisorDecisionKinds.Stop, stopReason: "failed", acceptancePassed: false) }))
+            .Outcome.ShouldBe(SupervisorOutcomes.AcceptanceFailed);
+    }
+
+    [Fact]
+    public void A_forced_bound_stop_keeps_its_bucket_even_if_an_acceptance_grade_is_somehow_present()
+    {
+        // Precedence guard: a fail-closed bound / governance force-stop is classified by its reason BEFORE the
+        // acceptance check — a forced stop is the engine's verdict, never the model's definition-of-done.
+        SupervisorEvalScorecard.Score(Run(new[] { Decision(SupervisorDecisionKinds.Stop, stopReason: SupervisorStopReasons.GovernanceDenied, acceptancePassed: false) }))
+            .Outcome.ShouldBe(SupervisorOutcomes.GovernanceDenied);
+
+        SupervisorEvalScorecard.Score(Run(new[] { Decision(SupervisorDecisionKinds.Stop, stopReason: SupervisorStopReasons.BudgetExhausted, acceptancePassed: false) }))
+            .Outcome.ShouldBe(SupervisorOutcomes.BudgetExhausted);
+    }
+
+    [Fact]
+    public void Acceptance_failed_runs_tally_in_the_outcome_distribution()
+    {
+        var card = SupervisorEvalScorecard.Compute(new[]
+        {
+            Run(new[] { Decision(SupervisorDecisionKinds.Stop, stopReason: "completed", acceptancePassed: true) }),
+            Run(new[] { Decision(SupervisorDecisionKinds.Stop, stopReason: "completed", acceptancePassed: false) }),
+            Run(new[] { Decision(SupervisorDecisionKinds.Stop, stopReason: "done", acceptancePassed: false) }),
+        });
+
+        card.Rollup.OutcomeDistribution[SupervisorOutcomes.Completed].ShouldBe(1);
+        card.Rollup.OutcomeDistribution[SupervisorOutcomes.AcceptanceFailed].ShouldBe(2, "a brain that self-reports done but fails its own DoD is counted honestly");
+    }
+
     [Fact]
     public void A_terminal_run_with_no_stop_reason_is_completed_as_the_neutral_default()
     {
@@ -180,6 +235,15 @@ public class SupervisorEvalScorecardTests
         score.NotScored.ShouldBeTrue();
         score.Outcome.ShouldBe(SupervisorOutcomes.NotScored);
         score.SpawnedAgents.ShouldBe(2, "the per-kind facts are still computed — only the outcome is withheld");
+    }
+
+    [Fact]
+    public void The_terminal_gate_dominates_the_acceptance_override_for_an_in_flight_run()
+    {
+        // Pins that the in-flight gate (Outcome = NotScored when not terminal) runs BEFORE the acceptance override —
+        // an in-flight run carrying a failed acceptance grade is still not-scored, never acceptance-failed.
+        SupervisorEvalScorecard.Score(Run(new[] { Decision(SupervisorDecisionKinds.Stop, stopReason: "completed", acceptancePassed: false) }, terminalStatus: null))
+            .Outcome.ShouldBe(SupervisorOutcomes.NotScored);
     }
 
     [Fact]
@@ -282,6 +346,8 @@ public class SupervisorEvalScorecardTests
                 spawnedStatuses: new[] { AgentRunStatus.Succeeded, AgentRunStatus.Failed }, timeToStopSeconds: 7, id: Guid.Parse("11111111-1111-1111-1111-111111111111")),
             Run(new[] { Decision(SupervisorDecisionKinds.Stop, stopReason: SupervisorStopReasons.BudgetExhausted) },
                 timeToStopSeconds: 3, id: Guid.Parse("22222222-2222-2222-2222-222222222222")),
+            Run(new[] { Decision(SupervisorDecisionKinds.Stop, stopReason: "completed", acceptancePassed: false) },
+                timeToStopSeconds: 5, id: Guid.Parse("33333333-3333-3333-3333-333333333333")),   // the acceptance-failed bucket participates in the snapshot
         };
 
         System.Text.Json.JsonSerializer.Serialize(SupervisorEvalScorecard.Compute(runs))
