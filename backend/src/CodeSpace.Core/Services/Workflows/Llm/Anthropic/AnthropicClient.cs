@@ -63,14 +63,15 @@ public sealed class AnthropicClient : ILLMClient, IStructuredLLMClient
 
     public async Task<StructuredLLMCompletion> CompleteStructuredAsync(StructuredLLMCompletionRequest request, CancellationToken cancellationToken)
     {
-        // Force the model to call ONE tool whose input_schema is the requested schema. The tool's
-        // arguments (the tool_use block's `input`) are therefore schema-valid JSON.
+        // Force the model to call ONE tool whose input_schema is the requested schema (the fast path). The schema is
+        // ALSO put in the system prompt so a model that ignores the forced tool still knows the exact shape to emit as
+        // text content — the generic fallback for models/gateways without reliable forced tool-use.
         var body = new AnthropicMessageRequest
         {
             Model = request.Model,
             MaxTokens = request.MaxOutputTokens,
             Temperature = request.Temperature,
-            System = request.SystemPrompt,
+            System = StructuredJsonText.WithSchemaInstruction(request.SystemPrompt, request.JsonSchema),
             Messages = new[] { new AnthropicMessage { Role = "user", Content = request.UserPrompt } },
             Tools = new[] { new AnthropicTool { Name = StructuredToolName, Description = "Return the result as structured JSON.", InputSchema = request.JsonSchema } },
             ToolChoice = new AnthropicToolChoice { Type = "tool", Name = StructuredToolName }
@@ -80,17 +81,27 @@ public sealed class AnthropicClient : ILLMClient, IStructuredLLMClient
 
         var toolUse = parsed.Content?.FirstOrDefault(c => c.Type == "tool_use" && c.Name == StructuredToolName);
 
-        if (toolUse?.Input is not { } input)
-            throw new InvalidOperationException("Anthropic structured completion returned no tool_use block — the model did not produce structured output.");
+        // Prefer the tool_use input; FALL BACK to a JSON object recovered from the text content (the model returned
+        // JSON as content instead of calling the tool — common on models/gateways without forced tool-use).
+        var json = toolUse?.Input is { } input
+            ? input.Clone()
+            : StructuredJsonText.TryExtractObject(TextContent(parsed));
+
+        if (json is not { } result)
+            throw new InvalidOperationException("Anthropic structured completion produced neither a tool_use block nor a JSON content object — the model did not produce structured output.");
 
         return new StructuredLLMCompletion
         {
-            Json = input.Clone(),
+            Json = result,
             Model = parsed.Model ?? request.Model,
             InputTokens = parsed.Usage?.InputTokens,
             OutputTokens = parsed.Usage?.OutputTokens
         };
     }
+
+    /// <summary>Join the response's text content blocks (the structured fallback reads JSON out of these when the model answered in text instead of a tool_use block).</summary>
+    private static string TextContent(AnthropicMessageResponse parsed) =>
+        string.Join("\n", parsed.Content?.Where(c => c.Type == "text").Select(c => c.Text ?? "") ?? Array.Empty<string>());
 
     private async Task<AnthropicMessageResponse> PostMessagesAsync(AnthropicMessageRequest body, ResolvedModelCredential? credential, CancellationToken cancellationToken)
     {

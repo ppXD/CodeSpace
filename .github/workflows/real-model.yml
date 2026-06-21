@@ -54,10 +54,12 @@ jobs:
       - name: Restore
         run: dotnet restore backend/tests/CodeSpace.IntegrationTests/CodeSpace.IntegrationTests.csproj
 
-      - name: Test (Category=RealModel — drives the live endpoint, scores the golden decisions)
+      - name: Test (the supervisor decision eval — drives the live endpoint, scores the golden decisions)
+        # Scoped to the decision-eval class (no Postgres): the planner RealModel test is a separate, DB-backed
+        # concern with its own ANTHROPIC-native key, so it is not run here.
         run: >
           dotnet test backend/tests/CodeSpace.IntegrationTests/CodeSpace.IntegrationTests.csproj
           --no-restore
-          --filter "Category=RealModel"
+          --filter "FullyQualifiedName~RealModelSupervisorDecisionFlowTests"
           --logger "console;verbosity=normal"
           --logger "trx;LogFileName=real-model.trx"
