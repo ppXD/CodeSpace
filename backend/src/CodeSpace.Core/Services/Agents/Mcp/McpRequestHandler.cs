@@ -1,5 +1,6 @@
 using System.Text.Json;
 using CodeSpace.Core.Services.Agents.Tools;
+using CodeSpace.Core.Services.Workflows.Nodes.Builtin;
 using CodeSpace.Core.Services.Chat;
 using CodeSpace.Core.Services.Chat.Interactions;
 using CodeSpace.Core.Services.Decisions;
@@ -191,6 +192,15 @@ public sealed class McpRequestHandler : IMcpRequestHandler
         // surface) ALSO short-circuits to the same flat refusal — the conversation-less-run safety (fail-closed).
         var gate = AgentToolGate.Decide(_autonomy, tool.RequiresApproval, tool.AlwaysRequiresApproval);
 
+        // B3a: a DANGEROUS shell command tightens the gate — even an Unleashed run (the only tier where run_command is
+        // Allow) must get a human to approve `rm -rf /`, a pipe-to-shell, `sudo`, a force-push, etc. before it runs.
+        // Command-aware (safe commands keep auto-running); only ever escalates Allow→RequireApproval (never relaxes),
+        // and only for agent.run_command. The sandbox bounds the blast radius; this is the human checkpoint H7 wanted.
+        if (gate == AgentToolGateDecision.Allow
+            && string.Equals(name, AgentRunCommandNode.NodeTypeKey, StringComparison.Ordinal)
+            && CommandRiskClassifier.IsDangerous(ReadRunCommandLine(prms)))
+            gate = AgentToolGateDecision.RequireApproval;
+
         if (gate == AgentToolGateDecision.Deny) return JsonRpcResponse.Ok(id, ToolResult(isError: true, GateMessage(gate, name)));
 
         if (gate == AgentToolGateDecision.RequireApproval && !await CanServeApprovalAsync(tool, cancellationToken).ConfigureAwait(false))
@@ -219,6 +229,20 @@ public sealed class McpRequestHandler : IMcpRequestHandler
             return JsonRpcResponse.Ok(id, await InvokeToolAsync(tool, arguments, cancellationToken).ConfigureAwait(false));
 
         return JsonRpcResponse.Ok(id, await InvokeWithLedgerAsync(tool, arguments, cancellationToken).ConfigureAwait(false));
+    }
+
+    /// <summary>The full command line an <c>agent.run_command</c> call would run — the executable joined with its args — for the B3a risk classifier. A shell wrapper (<c>sh -c "…"</c>) carries its inner command in the args, so the joined text catches it too. Empty when absent / malformed.</summary>
+    private static string ReadRunCommandLine(JsonElement prms)
+    {
+        if (!prms.TryGetProperty("arguments", out var args) || args.ValueKind != JsonValueKind.Object) return "";
+
+        var command = args.TryGetProperty("command", out var c) && c.ValueKind == JsonValueKind.String ? c.GetString() ?? "" : "";
+
+        var parts = new List<string> { command };
+        if (args.TryGetProperty("args", out var argv) && argv.ValueKind == JsonValueKind.Array)
+            parts.AddRange(argv.EnumerateArray().Where(e => e.ValueKind == JsonValueKind.String).Select(e => e.GetString() ?? ""));
+
+        return string.Join(' ', parts);
     }
 
     /// <summary>

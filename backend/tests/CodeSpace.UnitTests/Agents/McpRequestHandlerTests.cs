@@ -2,6 +2,7 @@ using System.Text.Json;
 using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Agents.Mcp;
 using CodeSpace.Core.Services.Agents.Tools;
+using CodeSpace.Core.Services.Workflows.Nodes.Builtin;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Agents.Mcp;
 using Shouldly;
@@ -372,6 +373,86 @@ public class McpRequestHandlerTests
 
         result.GetProperty("isError").GetBoolean().ShouldBeFalse();
         tool.CallCount.ShouldBe(1, "a read-only tool runs regardless of tier");
+    }
+
+    // ── tools/call command-risk escalation (Slice B3a) ────────────────────────
+
+    [Fact]
+    public async Task ToolsCall_a_dangerous_run_command_at_Unleashed_is_escalated_to_approval_and_not_run()
+    {
+        // B3a: agent.run_command is Allow at Unleashed (side-effecting, no AlwaysRequiresApproval), so a DANGEROUS
+        // command would auto-run (H7). The command-risk classifier tightens it to RequireApproval — with no approval
+        // surface here it flat-refuses, and the command never executes.
+        var tool = new FakeTool { Kind = AgentRunCommandNode.NodeTypeKey, IsDestructiveOverride = true };
+
+        var resp = await Respond(Handler(AgentAutonomyLevel.Unleashed, tool), Call(AgentRunCommandNode.NodeTypeKey, """{"command":"rm","args":["-rf","/"]}"""));
+
+        resp.TryGetProperty("error", out _).ShouldBeFalse("an escalation is a tool result, not a JSON-RPC error");
+        resp.GetProperty("result").GetProperty("isError").GetBoolean().ShouldBeTrue("a dangerous command at Unleashed is escalated to approval");
+        resp.GetProperty("result").GetProperty("content")[0].GetProperty("text").GetString().ShouldContain("approval");
+        tool.CallCount.ShouldBe(0, "the dangerous command must never execute without a human");
+    }
+
+    [Fact]
+    public async Task ToolsCall_a_safe_run_command_at_Unleashed_still_runs_unattended()
+    {
+        // The classifier is PRECISE, not blanket: an ordinary command keeps auto-running at Unleashed.
+        var tool = new FakeTool { Kind = AgentRunCommandNode.NodeTypeKey, IsDestructiveOverride = true };
+
+        var result = (await Respond(Handler(AgentAutonomyLevel.Unleashed, tool), Call(AgentRunCommandNode.NodeTypeKey, """{"command":"npm","args":["install"]}"""))).GetProperty("result");
+
+        result.GetProperty("isError").GetBoolean().ShouldBeFalse("a safe command is not escalated");
+        tool.CallCount.ShouldBe(1, "Unleashed still runs a safe command unattended");
+    }
+
+    [Fact]
+    public async Task ToolsCall_command_risk_escalation_is_scoped_to_run_command_only()
+    {
+        // A dangerous-looking command argument on a DIFFERENT tool is NOT command-classified — the escalation is keyed
+        // on the run_command kind, so another tool's Allow at Unleashed is unchanged.
+        var tool = new FakeTool { Kind = "echo", IsDestructiveOverride = true };
+
+        var result = (await Respond(Handler(AgentAutonomyLevel.Unleashed, tool), Call("echo", """{"command":"rm","args":["-rf","/"]}"""))).GetProperty("result");
+
+        result.GetProperty("isError").GetBoolean().ShouldBeFalse("only agent.run_command is command-classified");
+        tool.CallCount.ShouldBe(1, "a non-run_command tool at Unleashed runs unescalated");
+    }
+
+    [Fact]
+    public async Task ToolsCall_a_dangerous_run_command_at_Unleashed_with_a_surface_routes_into_the_approval_flow()
+    {
+        // B3a end-to-end: at Unleashed (the only tier where run_command is Allow), a DANGEROUS command escalated to
+        // RequireApproval ROUTES INTO the durable approval flow (parks for a human) when a surface exists — it does not
+        // auto-run. Faulting TryBeginApprovalAsync (reached only on the park path) proves the routing: a retryable
+        // isError, tool never called. Closes the regression window where a run_command shortcut could auto-run it.
+        var ledger = new SpyLedger
+        {
+            ClaimResult = () => ToolCallClaim.Proceed(Guid.NewGuid()),
+            OnBeginApprovalThrow = () => new InvalidOperationException("transient fault"),
+        };
+        var bot = new StubBot { ConversationInTeam = true };
+        var tool = new FakeTool { Kind = AgentRunCommandNode.NodeTypeKey, IsDestructiveOverride = true };
+
+        var resp = await Respond(ApprovalHandlerAt(AgentAutonomyLevel.Unleashed, ledger, bot, tool), Call(AgentRunCommandNode.NodeTypeKey, """{"command":"rm","args":["-rf","/"]}"""));
+
+        resp.GetProperty("result").GetProperty("isError").GetBoolean().ShouldBeTrue();
+        resp.GetProperty("result").GetProperty("content")[0].GetProperty("text").GetString().ShouldContain("retry", customMessage: "reaching TryBeginApprovalAsync proves the dangerous command routed into the approval park path, not auto-run");
+        tool.CallCount.ShouldBe(0, "the dangerous command must park for approval, never auto-run at Unleashed");
+    }
+
+    [Fact]
+    public async Task ToolsCall_a_safe_run_command_at_Unleashed_with_a_surface_still_auto_runs()
+    {
+        // The escalation is driven by the COMMAND, not the surface: a safe command at Unleashed stays Allow and runs,
+        // even with a full approval surface present (it must not park).
+        var ledger = new SpyLedger { ClaimResult = () => ToolCallClaim.Proceed(Guid.NewGuid()) };
+        var bot = new StubBot { ConversationInTeam = true };
+        var tool = new FakeTool { Kind = AgentRunCommandNode.NodeTypeKey, IsDestructiveOverride = true, OnCall = (_, _) => Task.FromResult(AgentToolResult.Ok(Parse("{}"), 2)) };
+
+        var resp = await Respond(ApprovalHandlerAt(AgentAutonomyLevel.Unleashed, ledger, bot, tool), Call(AgentRunCommandNode.NodeTypeKey, """{"command":"npm","args":["install"]}"""));
+
+        resp.GetProperty("result").GetProperty("isError").GetBoolean().ShouldBeFalse();
+        tool.CallCount.ShouldBe(1, "a safe command is not escalated — it runs unattended even with a surface present");
     }
 
     // ── tools/call team scope stamping ────────────────────────────────────────
@@ -992,7 +1073,10 @@ public class McpRequestHandlerTests
     }
 
     private static McpRequestHandler ApprovalHandler(SpyLedger ledger, StubBot bot, params IAgentTool[] tools) =>
-        new(new FakeRegistry(tools), AgentAutonomyLevel.Standard, Guid.NewGuid(), null, Guid.NewGuid(), ledger, fenceEpoch: 1, governanceEnabled: true,
+        ApprovalHandlerAt(AgentAutonomyLevel.Standard, ledger, bot, tools);
+
+    private static McpRequestHandler ApprovalHandlerAt(AgentAutonomyLevel autonomy, SpyLedger ledger, StubBot bot, params IAgentTool[] tools) =>
+        new(new FakeRegistry(tools), autonomy, Guid.NewGuid(), null, Guid.NewGuid(), ledger, fenceEpoch: 1, governanceEnabled: true,
             approvalConversationId: Guid.NewGuid(), bot, new StubWaiters(), new StubComponents());
 
     [Theory]
