@@ -44,6 +44,31 @@ public class McpAllowedToolsTests
         McpAllowedTools.QualifiedNames(Registry, autonomy, ServerName).ShouldBe(expected);
     }
 
+    [Theory]
+    [InlineData(AgentAutonomyLevel.Confined)]
+    [InlineData(AgentAutonomyLevel.Standard)]
+    [InlineData(AgentAutonomyLevel.Trusted)]
+    [InlineData(AgentAutonomyLevel.Unleashed)]
+    public void Decision_request_is_unremovable_from_a_restricted_allow_list_at_every_tier(AgentAutonomyLevel autonomy)
+    {
+        // Slice B2 — the decide tool is an ASK, not a side effect (RequiresApproval=false), so the gate Allows it at
+        // EVERY tier (even Confined). It must therefore ALWAYS be projected into a restricted agent's allow-list,
+        // mirroring the endpoint which intercepts decision.request BEFORE the gate — otherwise a node that set a narrow
+        // task.Tools could silently strip the agent's only way to ask. If a future change GATED the decide tool it would
+        // be Denied at Confined and dropped here, so this pin makes such a change a visible, conscious decision.
+        var registry = new IAgentTool[] { new DecisionRequestTool() };
+        var decisionName = McpAllowedTools.QualifiedName(ServerName, DecisionRequestTool.ToolKind);
+
+        decisionName.ShouldBe("mcp__codespace__decision.request");
+
+        McpAllowedTools.QualifiedNames(registry, autonomy, ServerName)
+            .ShouldContain(decisionName, customMessage: "the decide tool is offered at every tier — an ask is never gated away");
+
+        var qualified = McpAllowedTools.QualifiedNames(registry, autonomy, ServerName).ToArray();
+        McpAllowedTools.Augment(new[] { "Read", "Grep" }, qualified)
+            .ShouldContain(decisionName, customMessage: "a restricted author tool list still keeps the decide tool — it survives the augmentation");
+    }
+
     [Fact]
     public void Augment_appends_the_qualified_names_to_a_restricted_author_list_deduped_author_first()
     {
