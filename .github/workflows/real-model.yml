@@ -1,0 +1,63 @@
+name: Backend · Real model
+
+# Drives the REAL supervisor decider against a real endpoint (the CODESPACE_LLM_* repository secrets) and scores
+# its decisions over the golden scenarios — the measure-the-intelligence kill-gate. Each run calls the LIVE API,
+# so it runs on main + on demand (NOT on every PR push) to control token cost. The Category=RealModel tests
+# self-skip when the secrets are absent, so a fork without them stays green at zero API cost.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'backend/**'
+      - '.github/workflows/real-model.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: real-model-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  DOTNET_NOLOGO: 'true'
+  DOTNET_CLI_TELEMETRY_OPTOUT: 'true'
+  DOTNET_SKIP_FIRST_TIME_EXPERIENCE: 'true'
+
+jobs:
+  real-model:
+    name: real model (supervisor decision eval)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      # The custom-endpoint config the RealModel tests read (a [Theory] over both Anthropic + OpenAI wires from
+      # one gateway). Absent on a fork → the tests self-skip → green at zero cost.
+      CODESPACE_LLM_BASE_URL: ${{ secrets.CODESPACE_LLM_BASE_URL }}
+      CODESPACE_LLM_API_KEY: ${{ secrets.CODESPACE_LLM_API_KEY }}
+      CODESPACE_LLM_MODEL_ID: ${{ secrets.CODESPACE_LLM_MODEL_ID }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up .NET 10
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Cache NuGet packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.nuget/packages
+          key: nuget-realmodel-${{ runner.os }}-${{ hashFiles('backend/**/*.csproj') }}
+          restore-keys: nuget-realmodel-${{ runner.os }}-
+
+      - name: Restore
+        run: dotnet restore backend/tests/CodeSpace.IntegrationTests/CodeSpace.IntegrationTests.csproj
+
+      - name: Test (Category=RealModel — drives the live endpoint, scores the golden decisions)
+        run: >
+          dotnet test backend/tests/CodeSpace.IntegrationTests/CodeSpace.IntegrationTests.csproj
+          --no-restore
+          --filter "Category=RealModel"
+          --logger "console;verbosity=normal"
+          --logger "trx;LogFileName=real-model.trx"
