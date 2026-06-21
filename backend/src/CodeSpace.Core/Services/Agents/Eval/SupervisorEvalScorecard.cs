@@ -61,16 +61,25 @@ public static class SupervisorEvalScorecard
     /// bucket HONESTLY — a Failure → aborted, a Cancelled → cancelled, only a Success → completed (the neutral
     /// "reached its end"). A non-success terminal run is never folded into completed. Reads the LAST stop's
     /// reason (the terminal one).
+    ///
+    /// <para>The OBJECTIVE acceptance verdict (L4 P1 — the server's grade of the model's own definition-of-done)
+    /// OVERRIDES the self-reported label: a stop the model labelled "completed" whose acceptance check FAILED is
+    /// scored <see cref="SupervisorOutcomes.AcceptanceFailed"/>, never <see cref="SupervisorOutcomes.Completed"/>.
+    /// The eval must never take the brain's word over the server's grade — otherwise a brain that always self-reports
+    /// success would score a perfect completion rate while shipping nothing verified.</para>
     /// </summary>
     private static string ClassifyOutcome(IReadOnlyList<SupervisorDecisionSummary> decisions, WorkflowRunStatus terminalStatus)
     {
-        var reason = decisions.LastOrDefault(d => d.Kind == SupervisorDecisionKinds.Stop)?.StopReason;
+        var stop = decisions.LastOrDefault(d => d.Kind == SupervisorDecisionKinds.Stop);
+        var reason = stop?.StopReason;
 
         if (string.IsNullOrWhiteSpace(reason)) return ClassifyByRunStatus(terminalStatus);
 
         if (reason == SupervisorStopReasons.GovernanceDenied) return SupervisorOutcomes.GovernanceDenied;
 
         if (IsBoundReason(reason)) return SupervisorOutcomes.BudgetExhausted;
+
+        if (stop!.AcceptancePassed == false) return SupervisorOutcomes.AcceptanceFailed;
 
         return IsSuccessLabel(reason) ? SupervisorOutcomes.Completed : SupervisorOutcomes.Aborted;
     }
