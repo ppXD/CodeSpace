@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Text;
 using CodeSpace.Core.DependencyInjection;
 using CodeSpace.Messages.Agents;
 
@@ -47,6 +48,20 @@ public sealed partial class LocalProcessRunner : ISandboxRunner, ISandboxStreamR
         "SSL_CERT_FILE", "SSL_CERT_DIR", "NODE_EXTRA_CA_CERTS", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE",
     };
 
+    /// <summary>Operator opt-in for the stall watchdog (Slice C3): seconds of NO streamed output before a run is judged STALLED and terminated early as <see cref="SandboxStatus.Stalled"/> — faster than waiting the full <see cref="SandboxSpec.TimeoutSeconds"/>. Unset / 0 / negative ⇒ disabled (today's behaviour, no false-positive kills). Pinned by a test (Rule 8).</summary>
+    public const string StdoutIdleTimeoutEnvVar = "CODESPACE_AGENT_STDOUT_IDLE_TIMEOUT_SECONDS";
+
+    /// <summary>The configured stall-watchdog idle window, or null when disabled (unset / ≤ 0). Read per call so a test (and an operator) can toggle it without a restart.</summary>
+    internal static TimeSpan? IdleTimeout()
+    {
+        var raw = Environment.GetEnvironmentVariable(StdoutIdleTimeoutEnvVar);
+
+        return int.TryParse(raw, out var seconds) && seconds > 0 ? TimeSpan.FromSeconds(seconds) : null;
+    }
+
+    /// <summary>Internal signal: the stall watchdog tripped (no output for the idle window). Caught by the streaming caller and mapped to <see cref="SandboxStatus.Stalled"/>.</summary>
+    private sealed class AgentStalledException : Exception { }
+
     public string Kind => LocalKind;
 
     public async Task<SandboxResult> RunAsync(SandboxSpec spec, CancellationToken cancellationToken)
@@ -89,12 +104,16 @@ public sealed partial class LocalProcessRunner : ISandboxRunner, ISandboxStreamR
 
         try
         {
-            await PumpStdoutAsync(process, onStdoutLine, linkedCts.Token).ConfigureAwait(false);
+            await PumpStdoutAsync(process, onStdoutLine, linkedCts.Token, IdleTimeout()).ConfigureAwait(false);
             await process.WaitForExitAsync(linkedCts.Token).ConfigureAwait(false);
+        }
+        catch (AgentStalledException)
+        {
+            return await TerminateStreamingAsync(process, stderrTask, cancellationToken, stalled: true).ConfigureAwait(false);
         }
         catch (OperationCanceledException)
         {
-            return await TerminateStreamingAsync(process, stderrTask, cancellationToken).ConfigureAwait(false);
+            return await TerminateStreamingAsync(process, stderrTask, cancellationToken, stalled: false).ConfigureAwait(false);
         }
 
         var status = process.ExitCode == 0 ? SandboxStatus.Success : SandboxStatus.Failed;
@@ -102,15 +121,76 @@ public sealed partial class LocalProcessRunner : ISandboxRunner, ISandboxStreamR
         return new SandboxResult { Status = status, ExitCode = process.ExitCode, Stdout = "", Stderr = await stderrTask.ConfigureAwait(false) };
     }
 
-    /// <summary>Read stdout line-by-line, awaiting the consumer per line so a slow consumer backpressures the read. Ends when stdout closes (process exit).</summary>
-    private static async Task PumpStdoutAsync(Process process, Func<string, CancellationToken, Task> onStdoutLine, CancellationToken cancellationToken)
+    /// <summary>
+    /// Read stdout line-by-line, awaiting the consumer per line so a slow consumer backpressures the read. Ends when
+    /// stdout closes (process exit). With no <paramref name="idleTimeout"/> (the default) this is a plain line pump.
+    /// When the C3 stall watchdog is on, it delegates to <see cref="PumpStdoutWithIdleWatchdogAsync"/>, which reads at
+    /// the BYTE level so any output — even a newline-less progress bar — resets the idle clock.
+    /// </summary>
+    private static async Task PumpStdoutAsync(Process process, Func<string, CancellationToken, Task> onStdoutLine, CancellationToken cancellationToken, TimeSpan? idleTimeout)
     {
+        if (idleTimeout is { } idle)
+        {
+            await PumpStdoutWithIdleWatchdogAsync(process, onStdoutLine, cancellationToken, idle).ConfigureAwait(false);
+            return;
+        }
+
         while (await process.StandardOutput.ReadLineAsync(cancellationToken).ConfigureAwait(false) is { } line)
             await onStdoutLine(line, cancellationToken).ConfigureAwait(false);
     }
 
-    /// <summary>Same terminate semantics as the batch path: kill the tree, let stderr settle, rethrow on caller-cancel, else map to TimedOut.</summary>
-    private static async Task<SandboxResult> TerminateStreamingAsync(Process process, Task<string> stderrTask, CancellationToken cancellationToken)
+    /// <summary>
+    /// The C3 stall watchdog read loop. Reads stdout at the CHAR level (not <c>ReadLineAsync</c>, which blocks until a
+    /// newline and so can't tell a stalled run from one mid-line) bounded by the idle window: any chunk of bytes resets
+    /// the window, so a run streaming a newline-less progress bar (<c>\r</c> updates) or a single slow long line is
+    /// alive — never falsely stalled. Only TRUE silence (no bytes for the whole window) throws <see cref="AgentStalledException"/>;
+    /// a genuine caller / overall-timeout cancel propagates as <see cref="OperationCanceledException"/>. Chars are
+    /// buffered and delivered to the consumer as whole <c>\n</c>-terminated lines (a trailing CR from a CRLF trimmed),
+    /// and a final partial line is flushed at EOF. Note: unlike <c>ReadLineAsync</c> (the default path) a LONE <c>\r</c>
+    /// is NOT a line break here — a <c>\r</c>-style progress bar stays one logical line, which is the intended rendering
+    /// (splitting it into N phantom lines is exactly the line-centric behaviour the watchdog moves away from).
+    /// </summary>
+    private static async Task PumpStdoutWithIdleWatchdogAsync(Process process, Func<string, CancellationToken, Task> onStdoutLine, CancellationToken cancellationToken, TimeSpan idle)
+    {
+        var reader = process.StandardOutput;
+        var buffer = new char[4096];
+        var line = new StringBuilder();
+
+        while (true)
+        {
+            int read;
+
+            using (var idleCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken))
+            {
+                idleCts.CancelAfter(idle);
+
+                try { read = await reader.ReadAsync(buffer.AsMemory(), idleCts.Token).ConfigureAwait(false); }
+                catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+                {
+                    throw new AgentStalledException();   // no bytes for the whole idle window (not a real cancel) → stalled
+                }
+            }
+
+            if (read == 0)   // stdout closed → process exiting; flush a trailing partial line
+            {
+                if (line.Length > 0) await onStdoutLine(line.ToString(), cancellationToken).ConfigureAwait(false);
+                break;
+            }
+
+            for (var i = 0; i < read; i++)
+            {
+                if (buffer[i] != '\n') { line.Append(buffer[i]); continue; }
+
+                if (line.Length > 0 && line[^1] == '\r') line.Length--;
+
+                await onStdoutLine(line.ToString(), cancellationToken).ConfigureAwait(false);
+                line.Clear();
+            }
+        }
+    }
+
+    /// <summary>Same terminate semantics as the batch path: kill the tree, let stderr settle, rethrow on caller-cancel, else map to Stalled (C3) or TimedOut.</summary>
+    private static async Task<SandboxResult> TerminateStreamingAsync(Process process, Task<string> stderrTask, CancellationToken cancellationToken, bool stalled)
     {
         KillQuietly(process);
 
@@ -118,7 +198,7 @@ public sealed partial class LocalProcessRunner : ISandboxRunner, ISandboxStreamR
 
         cancellationToken.ThrowIfCancellationRequested();
 
-        return new SandboxResult { Status = SandboxStatus.TimedOut, ExitCode = -1, Stdout = "", Stderr = stderr };
+        return new SandboxResult { Status = stalled ? SandboxStatus.Stalled : SandboxStatus.TimedOut, ExitCode = -1, Stdout = "", Stderr = stderr };
     }
 
     /// <summary>Builds the child <see cref="ProcessStartInfo"/> from a scrubbed environment. Internal + static so the scrub behaviour is unit-testable against a real <see cref="ProcessStartInfo"/>.</summary>

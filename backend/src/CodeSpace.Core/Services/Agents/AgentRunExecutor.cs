@@ -357,12 +357,23 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         // Final flush for the terminal-drain lines (no trailing checkpoint), as in the live path.
         await writer.FlushAsync(cancellationToken).ConfigureAwait(false);
 
-        var result = sandbox.Status == SandboxStatus.TimedOut
-            ? new AgentRunResult { Status = AgentRunStatus.TimedOut, ExitReason = "timed-out", Error = "The agent run exceeded its time budget and was terminated." }
-            : harness.BuildResult(events, sandbox.ExitCode);
+        var result = MapSandboxResult(sandbox, harness, events);
 
         return result with { Transcript = transcript.ToString() };
     }
+
+    /// <summary>
+    /// Map a terminal <see cref="SandboxResult"/> onto the agent-run result. A budget overrun is <see cref="AgentRunStatus.TimedOut"/>;
+    /// a C3 STALL (no output for the idle window — likely a nested interactive prompt the agent can't answer) is surfaced
+    /// for a human as <see cref="AgentRunStatus.NeedsReview"/> / <see cref="CompletionDisposition.Blocked"/>; any other
+    /// terminal is folded by the harness from its events. Shared by the live + reattach paths so they can't drift.
+    /// </summary>
+    internal static AgentRunResult MapSandboxResult(SandboxResult sandbox, IAgentHarness harness, IReadOnlyList<AgentEvent> events) => sandbox.Status switch
+    {
+        SandboxStatus.TimedOut => new AgentRunResult { Status = AgentRunStatus.TimedOut, ExitReason = "timed-out", Error = "The agent run exceeded its time budget and was terminated." },
+        SandboxStatus.Stalled => new AgentRunResult { Status = AgentRunStatus.NeedsReview, CompletionDisposition = CompletionDisposition.Blocked, ExitReason = "stalled", Error = "The agent produced no output for the configured idle window and was terminated as stalled — it is likely blocked at an interactive prompt it cannot answer unattended; a human must take over." },
+        _ => harness.BuildResult(events, sandbox.ExitCode),
+    };
 
     /// <summary>Fallback when the credential can't be re-resolved to redact a re-attached tail: complete from the exit marker WITHOUT re-tailing (so no unredacted line reaches the log) — Succeeded/Failed by the code if it's present, Failed if the process is gone, or null (leave Running for a later sweep) if it's still alive and we can't safely observe it.</summary>
     private static async Task<AgentRunResult?> CompleteFromMarkerOnlyAsync(ISandboxDurableRunner durable, SandboxHandle handle, CancellationToken cancellationToken)
@@ -930,9 +941,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         await writer.FlushAsync(cancellationToken).ConfigureAwait(false);
 
         // Events are already redacted, so a result the harness folds from them (summary / error) is redacted too.
-        var result = sandbox.Status == SandboxStatus.TimedOut
-            ? new AgentRunResult { Status = AgentRunStatus.TimedOut, ExitReason = "timed-out", Error = "The agent run exceeded its time budget and was terminated." }
-            : harness.BuildResult(events, sandbox.ExitCode);
+        var result = MapSandboxResult(sandbox, harness, events);
 
         // D3: attach the faithful raw transcript (offloaded to an artifact at completion if large — the common case).
         return result with { Transcript = transcript.ToString() };

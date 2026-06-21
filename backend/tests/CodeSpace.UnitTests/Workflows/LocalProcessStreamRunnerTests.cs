@@ -9,6 +9,7 @@ namespace CodeSpace.UnitTests.Workflows;
 /// stdout over time.
 /// </summary>
 [Trait("Category", "Unit")]
+[Collection("LocalProcessIdleWatchdog")]
 public sealed class LocalProcessStreamRunnerTests : SandboxStreamRunnerContractTests
 {
     protected override ISandboxStreamRunner StreamRunner { get; } = new LocalProcessRunner();

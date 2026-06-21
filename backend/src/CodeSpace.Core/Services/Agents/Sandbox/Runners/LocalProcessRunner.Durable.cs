@@ -143,11 +143,21 @@ public sealed partial class LocalProcessRunner
     public async Task<SandboxResult> AttachAsync(SandboxHandle handle, Func<string, CancellationToken, Task> onStdoutLine, CancellationToken cancellationToken, Func<long, CancellationToken, Task>? onCheckpoint = null)
     {
         var stdoutPath = Path.Combine(handle.SpoolDirectory, StdoutFile);
+        var stderrPath = Path.Combine(handle.SpoolDirectory, StderrFile);
         var exitPath = Path.Combine(handle.SpoolDirectory, ExitMarkerFile);
 
         // Resume from the handle's checkpoint (0 on a first attach / an older handle) so a re-attach after a
         // restart picks up where the dead observer stopped instead of re-emitting the whole spool.
         var offset = handle.StdoutOffset;
+
+        // C3 stall watchdog (opt-in): the wall-clock of the LAST observed output. No new output for the idle window
+        // ⇒ the run is stalled (e.g. blocked at a nested interactive prompt) ⇒ terminate early as Stalled. Re-attach
+        // restarts this clock (a fresh observation), which is correct — it never fires on a run that is still emitting.
+        // "Output" is BYTE growth of either spool file, NOT completed-line delivery — so a run streaming a newline-less
+        // progress bar (\r updates) or a single slow long line is alive, not falsely stalled.
+        var idleTimeout = IdleTimeout();
+        var lastAdvance = DateTimeOffset.UtcNow;
+        var lastByteLength = SafeFileLength(stdoutPath) + SafeFileLength(stderrPath);
 
         while (true)
         {
@@ -155,15 +165,25 @@ public sealed partial class LocalProcessRunner
 
             // Checkpoint AFTER the batch's lines were delivered, only when it advanced — so the persisted offset
             // never runs ahead of the events (a re-attach at worst re-emits the last batch, never loses lines).
-            if (onCheckpoint is not null && advanced != offset) await onCheckpoint(advanced, cancellationToken).ConfigureAwait(false);
+            if (advanced != offset && onCheckpoint is not null)
+                await onCheckpoint(advanced, cancellationToken).ConfigureAwait(false);
 
             offset = advanced;
+
+            // Reset the idle clock on ANY byte growth (incl. stderr-only or a not-yet-complete line), not only a
+            // delivered line — the watchdog's signal is true silence, and an actively-emitting run is never silent.
+            var byteLength = SafeFileLength(stdoutPath) + SafeFileLength(stderrPath);
+            if (byteLength > lastByteLength) lastAdvance = DateTimeOffset.UtcNow;
+            lastByteLength = byteLength;
 
             if (TryReadExitCode(exitPath, out var code))
                 return await CompleteFromSpoolAsync(handle, offset, code, onStdoutLine, cancellationToken).ConfigureAwait(false);
 
             if (DateTimeOffset.UtcNow >= handle.Deadline)
                 return await TimeoutAsync(handle, offset, onStdoutLine, cancellationToken).ConfigureAwait(false);
+
+            if (idleTimeout is { } idle && DateTimeOffset.UtcNow - lastAdvance >= idle)
+                return await StalledAsync(handle, offset, onStdoutLine, cancellationToken).ConfigureAwait(false);
 
             if (!IsProcessAlive(handle.ProcessId, handle.ProcessStartTimeUtc))
                 return await VanishedAsync(handle, offset, onStdoutLine, cancellationToken).ConfigureAwait(false);
@@ -211,6 +231,18 @@ public sealed partial class LocalProcessRunner
         var stderr = await ReadAllSafeAsync(Path.Combine(handle.SpoolDirectory, StderrFile)).ConfigureAwait(false);
 
         return new SandboxResult { Status = SandboxStatus.TimedOut, ExitCode = -1, Stdout = "", Stderr = stderr };
+    }
+
+    /// <summary>C3 stall watchdog tripped (no output for the idle window): terminate the process tree, drain what landed, return Stalled.</summary>
+    private async Task<SandboxResult> StalledAsync(SandboxHandle handle, long offset, Func<string, CancellationToken, Task> onLine, CancellationToken ct)
+    {
+        KillByIdQuietly(handle.ProcessId, handle.ProcessStartTimeUtc);
+
+        await EmitNewLinesAsync(Path.Combine(handle.SpoolDirectory, StdoutFile), offset, onLine, drainPartial: true, ct).ConfigureAwait(false);
+
+        var stderr = await ReadAllSafeAsync(Path.Combine(handle.SpoolDirectory, StderrFile)).ConfigureAwait(false);
+
+        return new SandboxResult { Status = SandboxStatus.Stalled, ExitCode = -1, Stdout = "", Stderr = stderr };
     }
 
     /// <summary>Supervisor disappeared: it writes the marker before exiting, so re-check after a beat — a true "gone with no marker" was a kill.</summary>
@@ -531,5 +563,12 @@ public sealed partial class LocalProcessRunner
     {
         try { return File.Exists(path) ? await File.ReadAllTextAsync(path).ConfigureAwait(false) : ""; }
         catch { return ""; }
+    }
+
+    /// <summary>Current byte length of a spool file, 0 when it is absent or unreadable — the watchdog's byte-progress probe.</summary>
+    private static long SafeFileLength(string path)
+    {
+        try { return File.Exists(path) ? new FileInfo(path).Length : 0; }
+        catch { return 0; }
     }
 }

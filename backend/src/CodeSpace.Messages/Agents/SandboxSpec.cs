@@ -93,4 +93,7 @@ public enum SandboxStatus
 
     /// <summary>Did not finish within <see cref="SandboxSpec.TimeoutSeconds"/> and was terminated.</summary>
     TimedOut,
+
+    /// <summary>Slice C3: produced NO output for the configured idle window and was terminated early — the run is stalled (e.g. a nested tool waiting at an interactive prompt the agent can't answer, a deadlock). Distinct from <see cref="TimedOut"/> (a run that was making progress but ran past its budget): a stall is surfaced for a human as NeedsReview(Blocked), faster than the full timeout. Only ever produced when the idle watchdog is enabled.</summary>
+    Stalled,
 }

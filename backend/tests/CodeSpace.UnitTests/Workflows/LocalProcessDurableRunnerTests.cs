@@ -19,6 +19,7 @@ namespace CodeSpace.UnitTests.Workflows;
 /// skips on Windows (Rule 12.1). Spool dirs are GUID-keyed + cleaned up (Rule 12.2/12.3).
 /// </summary>
 [Trait("Category", "Unit")]
+[Collection("LocalProcessIdleWatchdog")]
 public sealed class LocalProcessDurableRunnerTests : IDisposable
 {
     private readonly LocalProcessRunner _runner = new();
@@ -137,6 +138,71 @@ public sealed class LocalProcessDurableRunnerTests : IDisposable
 
         result.Status.ShouldBe(SandboxStatus.TimedOut, "the observer enforces the handle's wall-clock deadline");
         result.ExitCode.ShouldBe(-1);
+    }
+
+    [Fact]
+    public async Task A_silent_durable_run_is_terminated_as_stalled_well_before_its_deadline()
+    {
+        // C3 stall watchdog on the DURABLE (real-run) path: no spool output for the idle window → Stalled, killed early,
+        // not left to the far-off deadline. Idle 2s; deadline 30s.
+        if (OperatingSystem.IsWindows()) return;
+
+        var prior = Environment.GetEnvironmentVariable(LocalProcessRunner.StdoutIdleTimeoutEnvVar);
+        try
+        {
+            Environment.SetEnvironmentVariable(LocalProcessRunner.StdoutIdleTimeoutEnvVar, "2");
+
+            var handle = await LaunchAsync(ContractSpecs.Sleep(30) with { TimeoutSeconds = 30 });
+
+            var (result, _) = await AttachCollectAsync(handle);
+
+            result.Status.ShouldBe(SandboxStatus.Stalled, "no spool advance for the 2s idle window → stalled, not a 30s timeout");
+            result.ExitCode.ShouldBe(-1);
+        }
+        finally { Environment.SetEnvironmentVariable(LocalProcessRunner.StdoutIdleTimeoutEnvVar, prior); }
+    }
+
+    [Fact]
+    public async Task A_durable_run_emitting_within_the_idle_window_is_not_stalled()
+    {
+        // The watchdog must not kill an active durable run: spool advances inside every idle window → runs to completion.
+        if (OperatingSystem.IsWindows()) return;
+
+        var prior = Environment.GetEnvironmentVariable(LocalProcessRunner.StdoutIdleTimeoutEnvVar);
+        try
+        {
+            Environment.SetEnvironmentVariable(LocalProcessRunner.StdoutIdleTimeoutEnvVar, "2");
+
+            var handle = await LaunchAsync(new SandboxSpec { Command = "/bin/sh", Args = new[] { "-c", "for i in 1 2 3 4; do echo tick$i; sleep 0.3; done" }, TimeoutSeconds = 30 });
+
+            var (result, lines) = await AttachCollectAsync(handle);
+
+            result.Status.ShouldBe(SandboxStatus.Success, "spool advancing within the idle window is never falsely stalled");
+            lines.ShouldContain("tick4");
+        }
+        finally { Environment.SetEnvironmentVariable(LocalProcessRunner.StdoutIdleTimeoutEnvVar, prior); }
+    }
+
+    [Fact]
+    public async Task A_durable_run_emitting_newline_less_progress_is_not_stalled()
+    {
+        // Regression for the review's major finding on the DURABLE path: the watchdog resets on spool BYTE growth, not
+        // only on a delivered line — so a run writing a \r-style progress bar with NO newline keeps the file growing
+        // and is alive, not falsely stalled. `printf` (no newline) grows out.log every 0.3s inside the 2s window.
+        if (OperatingSystem.IsWindows()) return;
+
+        var prior = Environment.GetEnvironmentVariable(LocalProcessRunner.StdoutIdleTimeoutEnvVar);
+        try
+        {
+            Environment.SetEnvironmentVariable(LocalProcessRunner.StdoutIdleTimeoutEnvVar, "2");
+
+            var handle = await LaunchAsync(new SandboxSpec { Command = "/bin/sh", Args = new[] { "-c", "for i in 1 2 3 4 5 6 7 8 9 10; do printf 'tick'; sleep 0.3; done" }, TimeoutSeconds = 30 });
+
+            var (result, _) = await AttachCollectAsync(handle);
+
+            result.Status.ShouldBe(SandboxStatus.Success, "newline-less byte growth of the spool within the window is never falsely stalled");
+        }
+        finally { Environment.SetEnvironmentVariable(LocalProcessRunner.StdoutIdleTimeoutEnvVar, prior); }
     }
 
     [Fact]
