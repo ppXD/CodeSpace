@@ -8,9 +8,10 @@ namespace CodeSpace.Messages.Agents;
 /// instead of a self-reported "it passed" prose marker: the server executes <see cref="Command"/> against the
 /// produced workspace and a non-zero exit fails acceptance. Carried on a terminal <c>stop</c> (the run's
 /// definition of done) and on each plan phase. On a terminal stop the server runs this check against the run's final
-/// reviewable branch and a failed verdict WITHHOLDS that branch — an ADDITIONAL gate on top of the operator's own
-/// acceptance floor (<c>SupervisorGoalConfig.AcceptanceChecks</c>), which the stop path ALSO enforces against the
-/// final head (L4 C1) so the floor gates even a clean no-conflict run. Both must pass; a model criterion only ever
+/// reviewable head(s) — the single integrated branch (single-repo) or EVERY per-repo head (multi-repo, all-or-nothing,
+/// L4 C2) — and a failed verdict WITHHOLDS that head set. It is an ADDITIONAL gate on top of the operator's own
+/// acceptance floor (<c>SupervisorGoalConfig.AcceptanceChecks</c>), which the stop path ALSO enforces against the same
+/// head(s) (L4 C1) so the floor gates even a clean no-conflict run. Both must pass; a model criterion only ever
 /// TIGHTENS acceptance, never manufactures it (it cannot ship past the operator floor).
 ///
 /// <para>Optional everywhere it appears, and — because it serializes through <c>AgentJson.Options</c> (Web

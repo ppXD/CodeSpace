@@ -304,10 +304,11 @@ public sealed partial class SupervisorTurnService
     ///   <item>the MODEL's own stop command (<see cref="SupervisorAcceptanceSpec.Command"/>) — an ADDITIONAL tightening
     ///         the brain authored; it can only NARROW acceptance, never manufacture it.</item>
     /// </list>
-    /// Both gates run against the run's FINAL reviewable head and BOTH must pass (each absent ⇒ vacuously passes).
-    /// Both absent ⇒ a byte-identical no-op (the dominant case). SINGLE-repo only: a null branch (multi-repo /
-    /// analysis-only / un-integrated work) ⇒ SKIP (the multi-repo objective grade is a separate deferral; there is no
-    /// single branch to clone), never a fail-closed mislabel of a legitimately branchless run.
+    /// Both gates run against EVERY reviewable head the run is shipping and ALL must pass (each gate absent ⇒ vacuously
+    /// passes; both absent ⇒ a byte-identical no-op, the dominant case). The head set is the run's SINGLE integrated
+    /// branch (single-repo) OR every per-repo final head (multi-repo, L4 C2) — a multi-repo change is all-or-nothing, so
+    /// ANY repo failing the floor withholds the WHOLE set. An empty head set (analysis-only / un-integrated work) ⇒ SKIP,
+    /// never a fail-closed mislabel of a legitimately branchless run.
     /// </summary>
     private async Task<SupervisorExecution> ApplyStopAcceptanceGradeAsync(SupervisorExecution execution, SupervisorTurnContext context, SupervisorDecision decision, Guid teamId, CancellationToken cancellationToken)
     {
@@ -323,35 +324,71 @@ public sealed partial class SupervisorTurnService
 
         if (gates.All(g => g.Item2 is null)) return execution;   // no operator floor + no model criterion → byte-identical no-op (the dominant case)
 
-        var branch = SupervisorOutcome.ReadFinalIntegratedBranch(context.PriorDecisions);
-        var repositoryId = context.AgentProfile?.RepositoryId;
+        var targets = ResolveAcceptanceTargets(context);
 
-        if (string.IsNullOrEmpty(branch) || repositoryId is null) return execution;   // nothing single-repo to grade against → skip (don't mislabel multi-repo / analysis-only)
+        if (targets.Count == 0) return execution;   // nothing to grade against (analysis-only / un-integrated) → skip
 
-        var grade = await GradeStopGatesAsync(repositoryId.Value, teamId, branch, gates, cancellationToken).ConfigureAwait(false);
+        var grade = await GradeStopTargetsAsync(teamId, targets, gates, cancellationToken).ConfigureAwait(false);
 
         return execution with { OutcomeJson = SupervisorOutcome.AppendAcceptanceGrade(execution.OutcomeJson, grade.Passed, grade.Detail) };
     }
 
-    /// <summary>Grade each PRESENT gate against the final branch IN ORDER, short-circuiting on the first failure (the verdict detail names the failing gate). All-pass ⇒ accepted. Fail-closed: the grader is itself fail-closed; any unexpected non-cancellation escape degrades to not-accepted so the terminal record can never crash + strand the row. Only a genuine cancellation propagates.</summary>
-    private async Task<BenchmarkGrade> GradeStopGatesAsync(Guid repositoryId, Guid teamId, string branch, IReadOnlyList<(string Label, IReadOnlyList<string>? Command)> gates, CancellationToken cancellationToken)
+    /// <summary>
+    /// The reviewable head(s) a terminal stop grades against: the SINGLE integrated branch (single-repo) when present,
+    /// else EVERY per-repo final head (multi-repo, L4 C2). A multi-repo head missing its repository id can't be cloned,
+    /// so it is kept with <see cref="Guid.Empty"/> — the grader fails it CLOSED rather than silently passing an
+    /// un-gradeable repo. Empty ⇒ branchless (analysis-only / un-integrated) ⇒ the caller skips.
+    /// </summary>
+    private static IReadOnlyList<(Guid RepositoryId, string Alias, string Branch)> ResolveAcceptanceTargets(SupervisorTurnContext context)
     {
-        foreach (var (label, command) in gates)
+        var integrated = SupervisorOutcome.ReadFinalIntegratedBranch(context.PriorDecisions);
+
+        if (!string.IsNullOrEmpty(integrated) && context.AgentProfile?.RepositoryId is { } repoId)
+            return new[] { (repoId, "", integrated) };
+
+        return SupervisorOutcome.ReadFinalRepositoryBranches(context.PriorDecisions)
+            .Where(b => !string.IsNullOrEmpty(b.SourceBranch))
+            .Select(b => (b.RepositoryId ?? Guid.Empty, b.Alias, b.SourceBranch))
+            .ToList();
+    }
+
+    /// <summary>
+    /// Grade each PRESENT gate against EVERY target head IN ORDER (every repo must satisfy every gate), short-circuiting
+    /// on the first failure (the verdict detail names the failing repo + gate). All-pass ⇒ accepted. Fail-closed: an
+    /// un-gradeable repo (no id) and any unexpected non-cancellation grader escape degrade to not-accepted so the
+    /// terminal record can never crash + strand the row. Only a genuine cancellation propagates.
+    ///
+    /// <para>The grades run SEQUENTIALLY (one clone-and-run per repo×gate). The target count is the OPERATOR's
+    /// integrated-repo set — the repos bound to this run's workspace, NOT a model-controlled fan-out — so it is bounded
+    /// by operator config, not by the brain; there is deliberately no supervisor cap here (a cap would limit the
+    /// operator's own workspace, not the model). The first-failure short-circuit keeps the common rejected case cheap;
+    /// a future perf slice could grade with a bounded degree-of-parallelism if a large workspace makes wall-clock bite.</para>
+    /// </summary>
+    private async Task<BenchmarkGrade> GradeStopTargetsAsync(Guid teamId, IReadOnlyList<(Guid RepositoryId, string Alias, string Branch)> targets, IReadOnlyList<(string Label, IReadOnlyList<string>? Command)> gates, CancellationToken cancellationToken)
+    {
+        foreach (var target in targets)
         {
-            if (command is null) continue;
+            var repoTag = string.IsNullOrEmpty(target.Alias) ? "" : $"repo '{target.Alias}': ";
 
-            BenchmarkGrade grade;
-            try
-            {
-                grade = await _acceptanceGrader.GradeAsync(repositoryId, teamId, branch, command, SupervisorLane.AcceptanceGradeTimeoutSeconds, cancellationToken).ConfigureAwait(false);
-            }
-            catch (Exception ex) when (ex is not OperationCanceledException)
-            {
-                _logger.LogWarning(ex, "Stop acceptance {Gate} grade failed unexpectedly; recording not-accepted", label);
-                return new BenchmarkGrade { Passed = false, Detail = $"{label}: grade-error: {ex.Message}" };
-            }
+            if (target.RepositoryId == Guid.Empty) return new BenchmarkGrade { Passed = false, Detail = $"{repoTag}no repository id to grade against" };
 
-            if (!grade.Passed) return new BenchmarkGrade { Passed = false, Detail = $"{label}: {grade.Detail}" };
+            foreach (var (label, command) in gates)
+            {
+                if (command is null) continue;
+
+                BenchmarkGrade grade;
+                try
+                {
+                    grade = await _acceptanceGrader.GradeAsync(target.RepositoryId, teamId, target.Branch, command, SupervisorLane.AcceptanceGradeTimeoutSeconds, cancellationToken).ConfigureAwait(false);
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    _logger.LogWarning(ex, "Stop acceptance {Gate} grade for repo {Repo} failed unexpectedly; recording not-accepted", label, target.Alias);
+                    return new BenchmarkGrade { Passed = false, Detail = $"{repoTag}{label}: grade-error: {ex.Message}" };
+                }
+
+                if (!grade.Passed) return new BenchmarkGrade { Passed = false, Detail = $"{repoTag}{label}: {grade.Detail}" };
+            }
         }
 
         return new BenchmarkGrade { Passed = true, Detail = "accepted" };

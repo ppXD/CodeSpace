@@ -288,6 +288,64 @@ public sealed class SupervisorAcceptanceFoldFlowTests
         result.IntegratedBranch.ShouldBe("codespace/integration/x", "both gates passed → the reviewable head surfaces");
     }
 
+    // ─── L4 C2: a MULTI-repo stop grades EVERY per-repo head — all-or-nothing, fail-closed ───
+
+    [Fact]
+    public async Task A_multi_repo_stop_grades_every_repo_head_and_accepts_when_all_pass()
+    {
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedSupervisorRunAsync(teamId, userId);
+        var web = Guid.NewGuid();
+        var api = Guid.NewGuid();
+
+        await SeedMultiRepoMergeDecisionAsync(runId, teamId, (web, "web", "web/x"), (api, "api", "api/x"));
+
+        var grader = new QueuedGrader(new BenchmarkGrade { Passed = true, Detail = "web-ok" }, new BenchmarkGrade { Passed = true, Detail = "api-ok" });
+        var result = await RunStopTurnWithGraderAsync(runId, teamId, GoalConfig(web, acceptanceChecks: new[] { "sh", "floor.sh" }), command: Array.Empty<string>(), grader);
+
+        grader.CallCount.ShouldBe(2, "the operator floor is graded against EACH repo's head");
+        result.AcceptancePassed.ShouldBe(true);
+        result.RepositoryBranches.Count.ShouldBe(2, "all repos passed → every per-repo head surfaces");
+    }
+
+    [Fact]
+    public async Task A_multi_repo_stop_is_all_or_nothing_one_failing_repo_withholds_every_branch()
+    {
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedSupervisorRunAsync(teamId, userId);
+        var web = Guid.NewGuid();
+        var api = Guid.NewGuid();
+
+        await SeedMultiRepoMergeDecisionAsync(runId, teamId, (web, "web", "web/x"), (api, "api", "api/x"));
+
+        // web passes, api FAILS the operator floor → the WHOLE multi-repo change is not accepted (a partial ship of an
+        // interdependent change is unsafe).
+        var grader = new QueuedGrader(new BenchmarkGrade { Passed = true, Detail = "web-ok" }, new BenchmarkGrade { Passed = false, Detail = "api-tests-failed" });
+        var result = await RunStopTurnWithGraderAsync(runId, teamId, GoalConfig(web, acceptanceChecks: new[] { "sh", "floor.sh" }), command: Array.Empty<string>(), grader);
+
+        grader.CallCount.ShouldBe(2, "both repos are graded; api fails the second");
+        result.AcceptancePassed.ShouldBe(false);
+        result.RepositoryBranches.ShouldBeEmpty("one failing repo withholds EVERY per-repo head — all-or-nothing");
+    }
+
+    [Fact]
+    public async Task A_multi_repo_head_with_no_repository_id_fails_closed_never_silently_passing()
+    {
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedSupervisorRunAsync(teamId, userId);
+        var web = Guid.NewGuid();
+
+        // A per-repo head missing its repository id can't be cloned → it must fail closed, never slip past ungraded —
+        // even though the gradeable repo passes.
+        await SeedMultiRepoMergeDecisionAsync(runId, teamId, (web, "web", "web/x"), (null, "ghost", "ghost/x"));
+
+        var grader = new RecordingGrader(new BenchmarkGrade { Passed = true, Detail = "ok" });
+        var result = await RunStopTurnWithGraderAsync(runId, teamId, GoalConfig(web, acceptanceChecks: new[] { "sh", "floor.sh" }), command: Array.Empty<string>(), grader);
+
+        result.AcceptancePassed.ShouldBe(false, "an un-gradeable repo (no id) fails the whole stop closed");
+        result.RepositoryBranches.ShouldBeEmpty();
+    }
+
     // ─── Crown jewel: the REAL grader (DI-resolved) wired through the real fold against a real repo + branch ───
 
     [Theory]
@@ -406,6 +464,52 @@ public sealed class SupervisorAcceptanceFoldFlowTests
         AgentSupervisorNode.Finish(Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance, result).Outputs["status"].GetString()
             .ShouldBe(expectedStatus, "the REAL operator-floor check's exit code gates the clean run's terminal stop end-to-end");
         result.IntegratedBranch.ShouldBe(checkExitCode == 0 ? "integration/head" : null, "a really-failing operator floor withholds the reviewable head even with no model check");
+    }
+
+    [Theory]
+    [InlineData(0, "Completed")]            // both repos' checks really pass → the multi-repo run completes
+    [InlineData(1, "AcceptanceFailed")]     // the SECOND repo really fails → the WHOLE multi-repo change is withheld
+    public async Task The_real_operator_floor_gates_a_multi_repo_stop_all_or_nothing_over_real_repo_branches(int secondRepoExit, string expectedStatus)
+    {
+        if (!await GitReadyAsync()) return;
+
+        using var remoteA = new AcceptanceRemote();
+        await remoteA.InitAsync();
+        await remoteA.AddBranchWithCheckAsync("head", 0);          // repo A always passes
+
+        using var remoteB = new AcceptanceRemote();
+        await remoteB.InitAsync();
+        await remoteB.AddBranchWithCheckAsync("head", secondRepoExit);   // repo B is the swing vote
+
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedSupervisorRunAsync(teamId, userId);
+        var repoA = await SeedBoundRepositoryAsync(teamId, remoteA.Url);
+        var repoB = await SeedBoundRepositoryAsync(teamId, remoteB.Url);
+
+        await SeedMultiRepoMergeDecisionAsync(runId, teamId, (repoA, "a", "head"), (repoB, "b", "head"));
+
+        SupervisorTurnResult result;
+        using (var scope = _fixture.BeginScope())
+        {
+            // The REAL grader clones EACH repo@head + runs check.sh for real; the stop authors no model check so only
+            // the operator floor runs, against BOTH repos.
+            var service = new SupervisorTurnService(
+                scope.Resolve<ISupervisorDecisionLog>(),
+                new StopWithAcceptanceDecider(Array.Empty<string>()),
+                scope.Resolve<ISupervisorActionExecutor>(),
+                scope.Resolve<CodeSpaceDbContext>(),
+                scope.Resolve<ISupervisorAcceptanceGrader>(),
+                scope.Resolve<IDecisionQueueService>(),
+                scope.Resolve<IDecisionArbiter>(),
+                scope.Resolve<IDecisionAnswerService>(),
+                scope.Resolve<ILogger<SupervisorTurnService>>());
+
+            result = await service.RunTurnAsync(runId, teamId, NodeId, Goal, conversationId: null, GoalConfig(repoA, acceptanceChecks: new[] { "sh", "check.sh" }), CancellationToken.None);
+        }
+
+        AgentSupervisorNode.Finish(Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance, result).Outputs["status"].GetString()
+            .ShouldBe(expectedStatus, "every repo's REAL check must pass; one failing repo fails the whole multi-repo stop");
+        result.RepositoryBranches.Count.ShouldBe(secondRepoExit == 0 ? 2 : 0, "all-or-nothing — one failing repo withholds EVERY per-repo head");
     }
 
     // ─── Helpers ───
@@ -558,6 +662,30 @@ public sealed class SupervisorAcceptanceFoldFlowTests
             DecisionKind = SupervisorDecisionKinds.Merge, IdempotencyKey = $"merge-{Guid.NewGuid():N}", InputHash = "test",
             Status = SupervisorDecisionStatus.Succeeded, PayloadJson = "{}",
             OutcomeJson = JsonSerializer.Serialize(new { integration = new { status = "Clean", integratedBranch } }, AgentJson.Options),
+            FenceEpoch = 1, CreatedDate = now, CreatedBy = Guid.Empty, LastModifiedDate = now, LastModifiedBy = Guid.Empty,
+        });
+        await db.SaveChangesAsync();
+    }
+
+    /// <summary>Seed a MULTI-repo clean merge — the per-repo <c>integration.repositories[]</c> shape ReadFinalRepositoryBranches reads, with NO top-level integratedBranch (so ReadFinalIntegratedBranch is null and the stop grades the per-repo heads). A null repoId omits the id (an un-gradeable head).</summary>
+    private async Task SeedMultiRepoMergeDecisionAsync(Guid runId, Guid teamId, params (Guid? RepoId, string Alias, string Branch)[] repos)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        var now = DateTimeOffset.UtcNow;
+
+        var repositories = repos
+            .Select(r => r.RepoId is { } id
+                ? (object)new { status = "Clean", integratedBranch = r.Branch, repositoryId = id.ToString(), alias = r.Alias }
+                : new { status = "Clean", integratedBranch = r.Branch, alias = r.Alias })
+            .ToArray();
+
+        db.SupervisorDecisionRecord.Add(new SupervisorDecisionRecord
+        {
+            Id = Guid.NewGuid(), TeamId = teamId, SupervisorRunId = runId, Sequence = 1,
+            DecisionKind = SupervisorDecisionKinds.Merge, IdempotencyKey = $"merge-{Guid.NewGuid():N}", InputHash = "test",
+            Status = SupervisorDecisionStatus.Succeeded, PayloadJson = "{}",
+            OutcomeJson = JsonSerializer.Serialize(new { integration = new { status = "Clean", repositories } }, AgentJson.Options),
             FenceEpoch = 1, CreatedDate = now, CreatedBy = Guid.Empty, LastModifiedDate = now, LastModifiedBy = Guid.Empty,
         });
         await db.SaveChangesAsync();
