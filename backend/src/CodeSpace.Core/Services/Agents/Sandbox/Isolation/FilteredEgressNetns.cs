@@ -48,24 +48,35 @@ public static class FilteredEgressNetns
     {
         var plan = FilteredEgressPlan.Build(runId, allowedIps);
 
-        foreach (var argv in plan.SetupCommands)
+        try
         {
-            var (exit, output) = await RunHostAsync(argv, stdin: null, timeoutSeconds, cancellationToken).ConfigureAwait(false);
-            if (exit != 0)
+            foreach (var argv in plan.SetupCommands)
             {
-                await TeardownAsync(runId, CancellationToken.None).ConfigureAwait(false);   // fail-closed: clean up whatever the partial setup created
-                return new SetupResult { SetupOk = false, SetupError = $"{string.Join(' ', argv)} → exit {exit}: {Trim(output)}" };
+                var (exit, output) = await RunHostAsync(argv, stdin: null, timeoutSeconds, cancellationToken).ConfigureAwait(false);
+                if (exit != 0)
+                {
+                    await TeardownAsync(runId, CancellationToken.None).ConfigureAwait(false);   // fail-closed: clean up whatever the partial setup created
+                    return new SetupResult { SetupOk = false, SetupError = $"{string.Join(' ', argv)} → exit {exit}: {Trim(output)}" };
+                }
             }
-        }
 
-        var (nftExit, nftOut) = await RunHostAsync(plan.NftApplyArgv, stdin: plan.NftRuleset, timeoutSeconds, cancellationToken).ConfigureAwait(false);
-        if (nftExit != 0)
+            var (nftExit, nftOut) = await RunHostAsync(plan.NftApplyArgv, stdin: plan.NftRuleset, timeoutSeconds, cancellationToken).ConfigureAwait(false);
+            if (nftExit != 0)
+            {
+                await TeardownAsync(runId, CancellationToken.None).ConfigureAwait(false);
+                return new SetupResult { SetupOk = false, SetupError = $"nft -f - → exit {nftExit}: {Trim(nftOut)}" };
+            }
+
+            return new SetupResult { SetupOk = true, ExecPrefix = plan.ExecPrefix };
+        }
+        catch (Exception ex)
         {
+            // ANY throw mid-setup (a missing ip/nft binary → process.Start throws; a broken nft pipe → WriteAsync
+            // throws) must ALSO fail CLOSED — tear down whatever was created, never leak a half-built netns. (The
+            // explicit exit!=0 branches already returned, so this only fires for a genuine throw — no double-teardown.)
             await TeardownAsync(runId, CancellationToken.None).ConfigureAwait(false);
-            return new SetupResult { SetupOk = false, SetupError = $"nft -f - → exit {nftExit}: {Trim(nftOut)}" };
+            return new SetupResult { SetupOk = false, SetupError = $"setup threw: {ex.Message}" };
         }
-
-        return new SetupResult { SetupOk = true, ExecPrefix = plan.ExecPrefix };
     }
 
     /// <summary>
