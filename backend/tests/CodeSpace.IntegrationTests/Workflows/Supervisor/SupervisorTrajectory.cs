@@ -228,11 +228,18 @@ public static class SupervisorTrajectoryScore
         if (SupervisorOutcome.ReadFinalIntegratedBranch(t.Ledger) is null)
             return (false, $"stopped WITHOUT shipping (no clean integration or verified resolution in the ledger) — quit early or left work unintegrated. Trajectory: {trail}");
 
-        if (!t.Kinds.Contains(SupervisorDecisionKinds.Plan))
-            return (false, $"shipped without PLANNING — Trajectory: {trail}");
+        // Defense in depth on the ORDER: the brain must PLAN and DO THE WORK *before* it first attempts to ship — not
+        // merge out of nothing, not plan after a ship. (The ledger ship-check above covers trailing un-integrated work;
+        // this covers the ordering.) firstShip is guaranteed >= 0 because a non-null shippable head implies a merge/resolve.
+        var firstShip = FirstIndex(t.Kinds, k => k == SupervisorDecisionKinds.Merge || k == SupervisorDecisionKinds.Resolve);
 
-        if (!t.Kinds.Any(SupervisorDecisionKinds.StagesAgents))
-            return (false, $"shipped without DOING THE WORK (no spawn/retry/resolve) — Trajectory: {trail}");
+        var planIndex = FirstIndex(t.Kinds, k => k == SupervisorDecisionKinds.Plan);
+        if (planIndex < 0 || planIndex > firstShip)
+            return (false, $"shipped without PLANNING first — Trajectory: {trail}");
+
+        var workIndex = FirstIndex(t.Kinds, SupervisorDecisionKinds.StagesAgents);
+        if (workIndex < 0 || workIndex > firstShip)
+            return (false, $"shipped without DOING THE WORK (no spawn/retry/resolve before the merge/resolve) — Trajectory: {trail}");
 
         var planCount = t.Kinds.Count(k => k == SupervisorDecisionKinds.Plan);
         if (planCount - 1 > MaxReplans)
@@ -243,5 +250,14 @@ public static class SupervisorTrajectoryScore
             return (false, $"staged work {workUnits} times (> {MaxWorkUnits}) — churning, not converging. Trajectory: {trail}");
 
         return (true, $"drove to completion: {trail}");
+    }
+
+    /// <summary>The index of the first kind matching the predicate, or -1.</summary>
+    private static int FirstIndex(IReadOnlyList<string> kinds, Func<string, bool> match)
+    {
+        for (var i = 0; i < kinds.Count; i++)
+            if (match(kinds[i])) return i;
+
+        return -1;
     }
 }
