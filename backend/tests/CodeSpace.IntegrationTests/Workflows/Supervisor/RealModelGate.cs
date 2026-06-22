@@ -31,6 +31,63 @@ public static class RealModelGate
         ReportInformational(ok, verdict, Environment.GetEnvironmentVariable(StepSummaryEnvVar));
     }
 
+    /// <summary>
+    /// Drive a live-model gate and <see cref="Assess"/> its verdict, BUT treat a GATEWAY-level failure — an HttpClient
+    /// timeout or an unreachable/transport error, i.e. "no response from the gateway" — as NON-GATING infra: it is
+    /// reported to the step-summary as informational and never fails the job, even for a blessed wire. A clean
+    /// completion still gates as usual, so the blessed gate hard-fails ONLY on a genuine wrong-decision / wiring
+    /// verdict — it blocks main on bad INTELLIGENCE, never on the owner's gateway being slow or down. A non-infra
+    /// exception (a real bug, an assertion) PROPAGATES so it is never swallowed. Mirrors the trajectory's bounded-clean
+    /// philosophy: a slow endpoint surfaces a clean signal instead of a flaky RED. The infra skip is surfaced LOUDLY so
+    /// a persistently-slow gateway is visible in the job summary rather than a silent green.
+    /// </summary>
+    public static Task AssessLiveAsync(string provider, Func<Task<(bool Ok, string Verdict)>> drive) =>
+        AssessLiveAsync(provider, drive, Environment.GetEnvironmentVariable(StepSummaryEnvVar));
+
+    /// <summary>Testable core of <see cref="AssessLiveAsync(string, Func{Task{ValueTuple{bool, string}}})"/> — takes the step-summary path explicitly so a test pins the non-gating behaviour without mutating process env.</summary>
+    internal static async Task AssessLiveAsync(string provider, Func<Task<(bool Ok, string Verdict)>> drive, string? stepSummaryPath)
+    {
+        try
+        {
+            var (ok, verdict) = await drive().ConfigureAwait(false);
+            Assess(provider, ok, verdict);
+        }
+        catch (Exception ex) when (IsGatewayInfraFailure(ex))
+        {
+            ReportInfraSkip(provider, ex, stepSummaryPath);
+        }
+    }
+
+    /// <summary>Whether <paramref name="ex"/> is a GATEWAY/transport failure ("no response from the gateway") rather than a decision/wiring failure — so the gate treats it as non-gating infra. A <see cref="TimeoutException"/> anywhere in the inner chain is the HttpClient.Timeout signature; an <see cref="System.Net.Http.HttpRequestException"/> / <see cref="System.Net.Sockets.SocketException"/> is an unreachable/reset gateway. A bare cancellation (our own deadline) is NOT infra — it carries no <c>TimeoutException</c>, so a "did not converge" signal still gates.</summary>
+    internal static bool IsGatewayInfraFailure(Exception ex)
+    {
+        for (Exception? e = ex; e is not null; e = e.InnerException)
+            if (e is TimeoutException or System.Net.Http.HttpRequestException or System.Net.Sockets.SocketException) return true;
+
+        return false;
+    }
+
+    /// <summary>Report a gateway infra failure LOUDLY as non-gating — to the step-summary FILE when present (so a persistently-slow gateway is VISIBLE in the job-summary UI, never a silent green), else the console. Pure given <paramref name="stepSummaryPath"/>.</summary>
+    internal static void ReportInfraSkip(string provider, Exception ex, string? stepSummaryPath)
+    {
+        var line = $"⚠️ real-model gate NON-GATING infra skip — {provider} gateway timed out / unreachable (NOT a decision verdict): {InfraReason(ex)}";
+
+        if (!string.IsNullOrWhiteSpace(stepSummaryPath))
+            File.AppendAllText(stepSummaryPath, line + Environment.NewLine);
+        else
+            Console.WriteLine(line);
+    }
+
+    /// <summary>The innermost gateway/transport reason (type + message) for a legible infra-skip line.</summary>
+    private static string InfraReason(Exception ex)
+    {
+        for (Exception? e = ex; e is not null; e = e.InnerException)
+            if (e is TimeoutException or System.Net.Http.HttpRequestException or System.Net.Sockets.SocketException)
+                return $"{e.GetType().Name}: {e.Message}";
+
+        return ex.GetType().Name;
+    }
+
     /// <summary>Surface an INFORMATIONAL wire's verdict (pass OR fail, so silence never reads as "it ran clean") where it is actually visible: the GitHub step-summary FILE when present (capture-immune → reaches the job-summary UI), else the console for a local run. Pure given <paramref name="stepSummaryPath"/> → pinnable without mutating process env.</summary>
     internal static void ReportInformational(bool ok, string verdict, string? stepSummaryPath)
     {

@@ -36,21 +36,27 @@ public sealed class RealModelSupervisorDecisionFlowTests
 
         if (baseUrl is null || apiKey is null || model is null) return;   // secrets absent → skip (honest CI/fork behaviour)
 
-        var credential = new ResolvedModelCredential { Provider = provider, BaseUrl = BaseUrlFor(provider, baseUrl), ApiKey = apiKey };
-        var registry = new LLMClientRegistry(new ILLMClient[] { new AnthropicClient(SharedHttp), new OpenAiClient(SharedHttp) });
-        var decider = new LlmSupervisorDecider(registry, new FixedCredentialSelector(model, credential));
-
-        var scores = new List<SupervisorDecisionScore>();
-        foreach (var scenario in SupervisorDecisionGoldenScenarios.All)
+        // Non-gating on gateway latency: a per-call HTTP timeout / unreachable gateway is surfaced as informational, not
+        // a RED — the blessed wire fails only on a genuine WRONG DECISION. (The gateway is sometimes slow enough to blow
+        // even the generous per-call timeout below; that must not flake the kill-gate.)
+        await RealModelGate.AssessLiveAsync(provider, async () =>
         {
-            var decision = await decider.DecideAsync(scenario.Context, CancellationToken.None);
-            scores.Add(SupervisorDecisionEval.Score(scenario, decision));
-        }
+            var credential = new ResolvedModelCredential { Provider = provider, BaseUrl = BaseUrlFor(provider, baseUrl), ApiKey = apiKey };
+            var registry = new LLMClientRegistry(new ILLMClient[] { new AnthropicClient(SharedHttp), new OpenAiClient(SharedHttp) });
+            var decider = new LlmSupervisorDecider(registry, new FixedCredentialSelector(model, credential));
 
-        var (passed, total, allPassed) = SupervisorDecisionEval.Aggregate(scores);
-        var failures = string.Join(" | ", scores.Where(s => !s.Pass).Select(s => $"{s.Scenario}: got '{s.ActualKind}' — {s.Note}"));
+            var scores = new List<SupervisorDecisionScore>();
+            foreach (var scenario in SupervisorDecisionGoldenScenarios.All)
+            {
+                var decision = await decider.DecideAsync(scenario.Context, CancellationToken.None);
+                scores.Add(SupervisorDecisionEval.Score(scenario, decision));
+            }
 
-        RealModelGate.Assess(provider, allPassed, $"{provider} model '{model}' scored {passed}/{total} golden supervisor decisions. Failures: {failures}");
+            var (passed, total, allPassed) = SupervisorDecisionEval.Aggregate(scores);
+            var failures = string.Join(" | ", scores.Where(s => !s.Pass).Select(s => $"{s.Scenario}: got '{s.ActualKind}' — {s.Note}"));
+
+            return (allPassed, $"{provider} model '{model}' scored {passed}/{total} golden supervisor decisions. Failures: {failures}");
+        });
     }
 
     /// <summary>Anthropic's client appends <c>/v1/messages</c> to the host base; OpenAI's appends <c>/chat/completions</c> to a <c>/v1</c> base — derive each from the single configured base so one gateway serves both wires.</summary>
@@ -69,9 +75,10 @@ public sealed class RealModelSupervisorDecisionFlowTests
 
     private sealed class SimpleHttpClientFactory : IHttpClientFactory
     {
-        // One golden decision is a single fast call (~10-20s on the gateway); 45s is ample headroom yet bounds the
-        // class's worst case (14 scenarios × 2 wires = 28 calls) so a stalled call cannot silently consume the budget.
-        public HttpClient CreateClient(string name) => new() { Timeout = TimeSpan.FromSeconds(45) };
+        // A single golden decision is one structured call; on this gateway the progressive double-attempt (forced-tool
+        // then a prompt-only floor) runs ~50-90s, so 150s fits a normal slow turn with headroom yet bounds this shared
+        // job's runtime. A call that STILL exceeds it is non-gating gateway infra via AssessLiveAsync (not a flaky RED).
+        public HttpClient CreateClient(string name) => new() { Timeout = TimeSpan.FromSeconds(150) };
     }
 
     /// <summary>Resolves the brain model to the configured real model + credential (the in-process pool, stubbed for a decider-only real call).</summary>

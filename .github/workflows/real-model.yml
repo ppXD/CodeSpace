@@ -31,11 +31,12 @@ jobs:
     runs-on: ubuntu-latest
     # Headroom for the SEQUENTIAL worst case (xUnit runs a class's [Theory] cases serially): the trajectory class is
     # 10 cases (5 scenarios — happy/conflict/failure/persistent-conflict/multi-failure × 2 wires) each bounded by its
-    # own 6-min wall-clock deadline = up to 60 min, plus the decision class (14 golden × 2 wires = 28 calls, bounded by
-    # its 45s per-call HTTP timeout) ≈ up to 21 min, plus restore+build. Typical is FAR lower (a decision is a ~15-20s
-    # call, a converging trajectory ~3-5 min; only the under-converging OpenAI wire approaches its deadline). The high
-    # ceiling exists so a slow tail surfaces each case's CLEAN scored verdict rather than an opaque job kill.
-    timeout-minutes: 85
+    # own 6-min wall-clock deadline = up to 60 min, plus the decision class (14 golden × 2 wires = 28 calls, each bounded
+    # by its 150s per-call HTTP timeout) — on a uniformly-slow gateway this combined budget can approach ~110 min, so the
+    # ceiling carries margin. Typical is FAR lower (a decision ~15-90s, a converging trajectory ~3-5 min). A per-call
+    # timeout / unreachable gateway is treated as NON-GATING infra by RealModelGate.AssessLiveAsync (surfaced to the job
+    # summary, not a RED), so a slow tail can't flake the blessed kill-gate — only a genuine wrong decision fails it.
+    timeout-minutes: 120
     env:
       # The custom-endpoint config the RealModel tests read (a [Theory] over both Anthropic + OpenAI wires from
       # one gateway). Absent on a fork → the tests self-skip → green at zero cost.

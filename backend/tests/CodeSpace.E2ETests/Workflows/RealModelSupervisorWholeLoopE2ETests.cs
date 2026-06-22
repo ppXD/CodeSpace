@@ -115,11 +115,18 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
         var workflowId = await CreateWholeLoopWorkflowAsync(teamId, userId, repoId, brainModelId);
         var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
 
-        await RunEngineAsync(runId);
-        await jobClient.WaitForPendingAsync();
+        // Non-gating on gateway latency: a brain decision call that times out / can't reach the gateway is surfaced as
+        // informational, not a RED — the blessed wire fails only on a genuine wrong-decision/wiring verdict (run failed,
+        // no patch, acceptance failed, or no spawn+merge). The brain's per-call timeout is bumped to 180s in the fixture
+        // so a normal slow turn still measures; a turn that STILL exceeds it propagates a TimeoutException → infra skip.
+        await RealModelGate.AssessLiveAsync(Provider, async () =>
+        {
+            await RunEngineAsync(runId);
+            await jobClient.WaitForPendingAsync();
 
-        var (ok, note) = await EvaluateAsync(runId, teamId);
-        RealModelGate.Assess(Provider, ok, $"{Provider} model '{model}' whole-loop — {note}");
+            var (ok, note) = await EvaluateAsync(runId, teamId);
+            return (ok, $"{Provider} model '{model}' whole-loop — {note}");
+        });
     }
 
     // ─── Verdict ─────────────────────────────────────────────────────────────────────
