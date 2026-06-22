@@ -50,32 +50,30 @@ export function FilterSelect({ label, options, value, onChange, loading }: {
 
   return (
     <div className="filterpill-root" ref={rootRef}>
-      <button
-        type="button"
-        className="filterpill"
-        data-armed={selected ? true : undefined}
-        aria-haspopup="listbox"
-        aria-expanded={open}
-        onClick={() => setOpen((o) => !o)}
-      >
-        <span className="filterpill-label">{label}</span>
-        {selected && <span className="filterpill-value">{selected.label}</span>}
-        {selected ? (
-          <span
-            className="filterpill-x"
-            role="button"
-            aria-label={`Clear ${label}`}
-            onClick={(e) => { e.stopPropagation(); choose(null); }}
-          >
+      {/* The trigger and the clear (✕) are SEPARATE sibling buttons — never a button nested in a button (invalid
+          HTML + a keyboard-dead control). The container div carries the pill chrome (border / armed tint). */}
+      <div className="filterpill" data-armed={selected ? true : undefined}>
+        <button
+          type="button"
+          className="filterpill-main"
+          aria-haspopup="listbox"
+          aria-expanded={open}
+          onClick={() => setOpen((o) => !o)}
+        >
+          <span className="filterpill-label">{label}</span>
+          {selected && <span className="filterpill-value">{selected.label}</span>}
+          {!selected && <span className="filterpill-caret" aria-hidden="true"><Ic.ChevronDown size={11} /></span>}
+        </button>
+
+        {selected && (
+          <button type="button" className="filterpill-x" aria-label={`Clear ${label}`} onClick={() => choose(null)}>
             <Ic.X size={9} />
-          </span>
-        ) : (
-          <span className="filterpill-caret" aria-hidden="true"><Ic.ChevronDown size={11} /></span>
+          </button>
         )}
-      </button>
+      </div>
 
       {open && (
-        <div className="filterpop" role="listbox" aria-label={label}>
+        <div className="filterpop">
           {options.length > SEARCH_THRESHOLD && (
             <input
               className="filterpop-search"
@@ -87,7 +85,7 @@ export function FilterSelect({ label, options, value, onChange, loading }: {
             />
           )}
 
-          <div className="filterpop-list">
+          <div className="filterpop-list" role="listbox" aria-label={label}>
             {loading ? (
               <div className="filterpop-empty">Loading…</div>
             ) : matches.length === 0 ? (

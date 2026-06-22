@@ -62,6 +62,13 @@ function TeamRunsPage() {
   const toggleFilter = (f: CockpitFilter) => setFilter((cur) => (cur === f ? null : f));
   const openRun = (runId: string) => navigate({ to: "/teams/$teamSlug/runs/$runId", params: { teamSlug, runId } });
 
+  const errorBanner = runs.error instanceof ApiError ? (
+    <div className="cn-banner cn-banner-err">
+      <div className="cn-banner-h">Couldn't load runs</div>
+      <div className="cn-banner-p">{runs.error.message}</div>
+    </div>
+  ) : null;
+
   return (
     <section className="ct">
       <div className="ct-head" style={{ paddingBottom: 18 }}>
@@ -74,36 +81,38 @@ function TeamRunsPage() {
       <div className="ct-body">
         {runs.isLoading && <div className="ct-empty"><div className="ct-empty-h">Loading…</div></div>}
 
-        {runs.error instanceof ApiError && (
-          <div className="cn-banner cn-banner-err" style={{ margin: 16 }}>
-            <div className="cn-banner-h">Couldn't load runs</div>
-            <div className="cn-banner-p">{runs.error.message}</div>
-          </div>
-        )}
-
-        {!runs.isLoading && !runs.error && (runList.length > 0 || hasScope) && (
+        {/* Whenever there are runs OR a scope is set, render the cockpit WITH the bar — even on an errored refetch,
+            so the user can always clear/adjust the filter rather than being stranded on a bare error banner. */}
+        {!runs.isLoading && (runList.length > 0 || hasScope) && (
           <div className="cockpit">
             <RunFilterBar filter={scope} onChange={setScope} />
 
-            {runList.length === 0 ? (
-              <div className="ct-empty">
-                <div className="ct-empty-h">No runs match these filters</div>
-                <div className="ct-empty-p">Adjust or clear the filters above to see more runs.</div>
-              </div>
-            ) : (
+            {errorBanner}
+
+            {runList.length > 0 ? (
               <>
                 <CockpitCards metrics={metrics} filter={filter} onFilter={toggleFilter} />
                 <CockpitBoard runs={runList} decisions={decisionList} phasesByRun={phasesByRun} filter={filter} nowMs={nowMs} onOpen={openRun} />
               </>
-            )}
+            ) : !runs.error ? (
+              <div className="ct-empty">
+                <div className="ct-empty-h">No runs match these filters</div>
+                <div className="ct-empty-p">Adjust or clear the filters above to see more runs.</div>
+              </div>
+            ) : null}
           </div>
         )}
 
-        {!runs.isLoading && !runs.error && runList.length === 0 && !hasScope && (
-          <div className="ct-empty">
-            <div className="ct-empty-h">No runs yet</div>
-            <div className="ct-empty-p">Launch a task or run a workflow and it'll show up here.</div>
-          </div>
+        {/* Genuinely empty (no runs, no scope): the error banner if the load failed, otherwise the first-run nudge. */}
+        {!runs.isLoading && runList.length === 0 && !hasScope && (
+          runs.error instanceof ApiError ? (
+            <div style={{ margin: 16 }}>{errorBanner}</div>
+          ) : (
+            <div className="ct-empty">
+              <div className="ct-empty-h">No runs yet</div>
+              <div className="ct-empty-p">Launch a task or run a workflow and it'll show up here.</div>
+            </div>
+          )
         )}
       </div>
     </section>

@@ -44,11 +44,13 @@ describe("RunFilterBar", () => {
     expect(onChange).toHaveBeenCalledWith({ runKinds: ["task"], repositoryIds: ["r1"] });
   });
 
-  it("the inline ✕ clears just its own dimension", () => {
+  it("the inline ✕ is a real, keyboard-operable button that clears just its own dimension", () => {
     const onChange = renderBar({ repositoryIds: ["r1"], runKinds: ["task"] });
 
-    fireEvent.click(screen.getByLabelText("Clear Repository"));
+    const clear = screen.getByLabelText("Clear Repository");
+    expect(clear.tagName).toBe("BUTTON");   // not a <span role="button"> nested in the pill button (invalid + keyboard-dead)
 
+    fireEvent.click(clear);
     expect(onChange).toHaveBeenCalledWith({ repositoryIds: undefined, runKinds: ["task"] });
   });
 
