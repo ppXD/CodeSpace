@@ -285,4 +285,15 @@ describe("RunDetailView — run-view tabs", () => {
     render(<RunDetailView runId="parent-1" nested />);
     expect(screen.queryByRole("tab", { name: "Activity" })).not.toBeInTheDocument();
   });
+
+  it("drops the redundant summary line in the framed panel (tab strip is the head, aligning with the rails)", () => {
+    const { container } = render(<RunDetailView runId="parent-1" />);   // non-nested = the Run Room panel
+    expect(container.querySelector(".wf-run-summary")).toBeNull();      // metadata now lives in the page header + Run rail
+    expect(screen.getByRole("tablist")).toBeInTheDocument();
+  });
+
+  it("keeps the compact summary line when nested (the editor dialog has no header/rails)", () => {
+    const { container } = render(<RunDetailView runId="parent-1" nested />);
+    expect(container.querySelector(".wf-run-summary")).not.toBeNull();
+  });
 });
