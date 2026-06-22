@@ -1,0 +1,232 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1800" height="1320" viewBox="0 0 1800 1320">
+  <defs>
+    <style>
+      .bg { fill: #f8f6ef; }
+      .panel { fill: #fffdf8; stroke: #e5ded2; stroke-width: 2; }
+      .card { fill: #ffffff; stroke: #e4ddd1; stroke-width: 1.5; }
+      .soft { fill: #fbf3ee; stroke: #ecc8b7; stroke-width: 1.5; }
+      .decision { fill: #fff6df; stroke: #d99b35; stroke-width: 1.7; }
+      .ink { fill: #27231f; font-family: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", Arial, sans-serif; }
+      .mono { fill: #27231f; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+      .muted { fill: #8b847a; }
+      .subtle { fill: #b0a99f; }
+      .accent { fill: #c76642; }
+      .green { fill: #2f8a55; }
+      .amber { fill: #c58a1f; }
+      .red { fill: #b84747; }
+      .purple { fill: #7c63b5; }
+      .line { stroke: #e5ded2; stroke-width: 1.5; }
+      .activeLine { stroke: #c76642; stroke-width: 3; }
+      .greenLine { stroke: #2f8a55; stroke-width: 3; }
+      .dash { stroke-dasharray: 7 7; }
+      .title { font-size: 26px; font-weight: 760; }
+      .h1 { font-size: 22px; font-weight: 730; }
+      .h2 { font-size: 17px; font-weight: 720; }
+      .txt { font-size: 15px; }
+      .small { font-size: 12px; }
+      .tiny { font-size: 10px; }
+      .pillText { font-size: 12px; font-weight: 700; }
+    </style>
+  </defs>
+
+  <rect class="bg" x="0" y="0" width="1800" height="1320"/>
+  <text class="ink title" x="60" y="62">CodeSpace Run Room · one generic UI for every run</text>
+  <text class="ink muted txt" x="60" y="91">Default explains · Canvas visualizes · Changes proves · Trace audits · Decisions unblock</text>
+
+  <!-- shared layout legend -->
+  <rect class="card" x="1265" y="35" rx="10" ry="10" width="475" height="72"/>
+  <text class="ink h2" x="1288" y="64">Shared grammar</text>
+  <circle class="accent" cx="1294" cy="87" r="4"/><text class="ink muted small" x="1306" y="91">Header state sentence</text>
+  <circle class="green" cx="1460" cy="87" r="4"/><text class="ink muted small" x="1472" y="91">Outline + live work</text>
+  <circle class="amber" cx="1618" cy="87" r="4"/><text class="ink muted small" x="1630" y="91">Decision rail</text>
+
+  <!-- PANEL 1 -->
+  <g transform="translate(60,135)">
+    <rect class="panel" x="0" y="0" rx="18" ry="18" width="820" height="540"/>
+    <text class="ink h1" x="28" y="42">Fast · single agent</text>
+    <text class="ink muted txt" x="28" y="70">Running · Agent executing · no decisions</text>
+    <text class="ink muted small" x="655" y="42">4m 12s</text>
+    <rect class="soft" x="28" y="92" rx="10" ry="10" width="764" height="50"/>
+    <text class="ink txt" x="48" y="123">Single worker is editing auth/session.ts, then verifying tests.</text>
+
+    <text class="ink h2" x="34" y="178">Activity</text>
+    <text class="ink muted h2" x="126" y="178">Canvas</text>
+    <text class="ink muted h2" x="222" y="178">Changes</text>
+    <text class="ink muted h2" x="326" y="178">Trace</text>
+    <line class="activeLine" x1="34" y1="190" x2="104" y2="190"/>
+    <line class="line" x1="28" y1="202" x2="792" y2="202"/>
+
+    <rect class="card" x="28" y="222" rx="12" ry="12" width="172" height="270"/>
+    <text class="ink muted small" x="48" y="250">OUTLINE</text>
+    <circle class="green" cx="52" cy="283" r="6"/><text class="ink txt" x="70" y="288">Run agent</text>
+    <circle class="subtle" cx="52" cy="325" r="6"/><text class="ink muted txt" x="70" y="330">Verify</text>
+    <circle class="subtle" cx="52" cy="367" r="6"/><text class="ink muted txt" x="70" y="372">Done</text>
+
+    <rect class="card" x="220" y="222" rx="12" ry="12" width="360" height="270"/>
+    <text class="ink muted small" x="240" y="250">LIVE WORK</text>
+    <rect class="soft" x="240" y="268" rx="10" ry="10" width="320" height="96"/>
+    <circle class="accent" cx="260" cy="294" r="6"/><text class="ink h2" x="278" y="300">agent · running</text>
+    <text class="ink muted small" x="278" y="326">claude-code · sonnet · Wisp:write</text>
+    <text class="ink txt" x="260" y="350">Running tests after a focused patch.</text>
+    <text class="ink muted small" x="242" y="398">Recent activity</text>
+    <text class="ink txt" x="258" y="426">• edited 2 files</text>
+    <text class="ink txt" x="258" y="454">• pnpm test running</text>
+
+    <rect class="card" x="600" y="222" rx="12" ry="12" width="192" height="270"/>
+    <text class="ink muted small" x="620" y="250">RIGHT RAIL</text>
+    <text class="ink h2" x="620" y="285">Output</text>
+    <text class="ink muted small" x="620" y="312">branch · 2 files</text>
+    <text class="ink h2" x="620" y="356">Artifacts</text>
+    <text class="ink muted small" x="620" y="383">patch · transcript</text>
+    <text class="ink h2" x="620" y="427">Run info</text>
+    <text class="ink muted small" x="620" y="454">manual · snapshot v28</text>
+  </g>
+
+  <!-- PANEL 2 -->
+  <g transform="translate(920,135)">
+    <rect class="panel" x="0" y="0" rx="18" ry="18" width="820" height="540"/>
+    <text class="ink h1" x="28" y="42">Standard · planner + parallel agents</text>
+    <text class="ink muted txt" x="28" y="70">Running · Implement · 2 of 3 agents active</text>
+    <text class="ink muted small" x="655" y="42">12m 08s</text>
+    <rect class="soft" x="28" y="92" rx="10" ry="10" width="764" height="50"/>
+    <text class="ink txt" x="48" y="123">Planner split the work; backend and frontend run in parallel, docs is done.</text>
+
+    <text class="ink h2" x="34" y="178">Activity</text>
+    <text class="ink muted h2" x="126" y="178">Canvas</text>
+    <text class="ink muted h2" x="222" y="178">Changes</text>
+    <text class="ink muted h2" x="326" y="178">Trace</text>
+    <line class="activeLine" x1="34" y1="190" x2="104" y2="190"/>
+    <line class="line" x1="28" y1="202" x2="792" y2="202"/>
+
+    <rect class="card" x="28" y="222" rx="12" ry="12" width="190" height="270"/>
+    <text class="ink muted small" x="48" y="250">OUTLINE</text>
+    <text class="green txt" x="48" y="286">✓ Plan</text>
+    <text class="accent txt" x="48" y="326">● Implement</text>
+    <text class="ink muted small" x="68" y="354">backend · running</text>
+    <text class="ink muted small" x="68" y="380">frontend · running</text>
+    <text class="ink muted small" x="68" y="406">docs · done</text>
+    <text class="ink muted txt" x="48" y="448">○ Synthesize</text>
+
+    <rect class="card" x="238" y="222" rx="12" ry="12" width="352" height="270"/>
+    <text class="ink muted small" x="258" y="250">AGENTS</text>
+    <rect class="soft" x="258" y="268" rx="9" ry="9" width="312" height="58"/>
+    <circle class="accent" cx="278" cy="297" r="5"/><text class="ink txt" x="294" y="302">backend · running tests</text>
+    <text class="ink muted tiny" x="294" y="318">5 files · 44k tokens</text>
+    <rect class="soft" x="258" y="340" rx="9" ry="9" width="312" height="58"/>
+    <circle class="accent" cx="278" cy="369" r="5"/><text class="ink txt" x="294" y="374">frontend · patching UI</text>
+    <text class="ink muted tiny" x="294" y="390">2 files · 31k tokens</text>
+    <rect class="card" x="258" y="412" rx="9" ry="9" width="312" height="58"/>
+    <circle class="green" cx="278" cy="441" r="5"/><text class="ink txt" x="294" y="446">docs · done</text>
+    <text class="ink muted tiny" x="294" y="462">summary ready</text>
+
+    <rect class="card" x="610" y="222" rx="12" ry="12" width="182" height="270"/>
+    <text class="ink muted small" x="630" y="250">RIGHT RAIL</text>
+    <text class="ink h2" x="630" y="285">Changes</text>
+    <text class="ink muted small" x="630" y="312">Wisp · 7 files</text>
+    <text class="ink muted small" x="630" y="334">SDK · read only</text>
+    <text class="ink h2" x="630" y="378">Branches</text>
+    <text class="ink muted small" x="630" y="405">run/backend</text>
+    <text class="ink muted small" x="630" y="427">run/frontend</text>
+  </g>
+
+  <!-- PANEL 3 -->
+  <g transform="translate(60,720)">
+    <rect class="panel" x="0" y="0" rx="18" ry="18" width="820" height="540"/>
+    <text class="ink h1" x="28" y="42">Deep · supervisor</text>
+    <text class="ink muted txt" x="28" y="70">Running · Round 2/6 · 3 of 5 agents active · 1 decision</text>
+    <text class="ink muted small" x="655" y="42">18m 32s</text>
+    <rect class="decision" x="28" y="92" rx="10" ry="10" width="764" height="50"/>
+    <text class="ink txt" x="48" y="123">Backend tests are retrying; supervisor recommends squash merge. Decision waiting.</text>
+
+    <text class="ink h2" x="34" y="178">Activity</text>
+    <text class="ink muted h2" x="126" y="178">Canvas</text>
+    <text class="ink muted h2" x="222" y="178">Changes</text>
+    <text class="ink muted h2" x="326" y="178">Trace</text>
+    <line class="activeLine" x1="34" y1="190" x2="104" y2="190"/>
+    <line class="line" x1="28" y1="202" x2="792" y2="202"/>
+
+    <rect class="card" x="28" y="222" rx="12" ry="12" width="184" height="270"/>
+    <text class="ink muted small" x="48" y="250">OUTLINE</text>
+    <text class="green txt" x="48" y="286">✓ Plan</text>
+    <text class="accent txt" x="48" y="326">● Implement</text>
+    <text class="ink muted small" x="68" y="354">backend-fix · retry</text>
+    <text class="ink muted small" x="68" y="380">frontend-fix · wait</text>
+    <text class="ink muted small" x="68" y="406">test-fix · running</text>
+    <text class="ink muted txt" x="48" y="446">○ Review</text>
+    <text class="red txt" x="48" y="478">△ Decisions · 1</text>
+
+    <rect class="card" x="232" y="222" rx="12" ry="12" width="360" height="270"/>
+    <rect class="soft" x="252" y="242" rx="10" ry="10" width="320" height="58"/>
+    <text class="ink h2" x="270" y="266">Supervisor · round 2</text>
+    <text class="ink muted small" x="270" y="286">next checkpoint after backend tests</text>
+    <rect class="soft" x="252" y="320" rx="9" ry="9" width="320" height="48"/>
+    <circle class="accent" cx="272" cy="344" r="5"/><text class="ink txt" x="288" y="349">backend-fix · retrying tests</text>
+    <rect class="card" x="252" y="380" rx="9" ry="9" width="320" height="48"/>
+    <circle class="amber" cx="272" cy="404" r="5"/><text class="ink txt" x="288" y="409">frontend-fix · waiting</text>
+    <rect class="card" x="252" y="440" rx="9" ry="9" width="320" height="34"/>
+    <circle class="subtle" cx="272" cy="457" r="5"/><text class="ink muted txt" x="288" y="462">correctness-review · pending</text>
+
+    <rect class="decision" x="612" y="222" rx="12" ry="12" width="180" height="270"/>
+    <text class="amber h2" x="632" y="252">Decision · 1</text>
+    <text class="ink h2" x="632" y="288">Choose merge</text>
+    <text class="ink h2" x="632" y="312">strategy</text>
+    <text class="ink muted small" x="632" y="342">asked by backend-fix</text>
+    <text class="ink muted small" x="632" y="365">recommends: squash</text>
+    <rect class="soft" x="632" y="388" rx="8" ry="8" width="140" height="34"/>
+    <text class="ink pillText" x="653" y="410">Use recommendation</text>
+    <rect class="card" x="632" y="434" rx="8" ry="8" width="66" height="32"/>
+    <text class="ink pillText" x="651" y="455">Choose</text>
+    <rect class="card" x="706" y="434" rx="8" ry="8" width="66" height="32"/>
+    <text class="ink pillText" x="718" y="455">Ask sup.</text>
+  </g>
+
+  <!-- PANEL 4 -->
+  <g transform="translate(920,720)">
+    <rect class="panel" x="0" y="0" rx="18" ry="18" width="820" height="540"/>
+    <text class="ink h1" x="28" y="42">Custom workflow · triggered</text>
+    <text class="ink muted txt" x="28" y="70">Suspended · waiting at approval node</text>
+    <text class="ink muted small" x="655" y="42">2m 48s</text>
+    <rect class="decision" x="28" y="92" rx="10" ry="10" width="764" height="50"/>
+    <text class="ink txt" x="48" y="123">PR trigger reached approval before posting review comment.</text>
+
+    <text class="ink h2" x="34" y="178">Activity</text>
+    <text class="ink muted h2" x="126" y="178">Canvas</text>
+    <text class="ink muted h2" x="222" y="178">Changes</text>
+    <text class="ink muted h2" x="326" y="178">Trace</text>
+    <line class="activeLine" x1="34" y1="190" x2="104" y2="190"/>
+    <line class="line" x1="28" y1="202" x2="792" y2="202"/>
+
+    <rect class="card" x="28" y="222" rx="12" ry="12" width="180" height="270"/>
+    <text class="ink muted small" x="48" y="250">OUTLINE</text>
+    <text class="green txt" x="48" y="286">✓ PR opened</text>
+    <text class="green txt" x="48" y="326">✓ Fetch diff</text>
+    <text class="green txt" x="48" y="366">✓ Map files</text>
+    <text class="amber txt" x="48" y="406">Ⅱ Approval</text>
+    <text class="ink muted txt" x="48" y="446">○ Comment</text>
+
+    <rect class="card" x="228" y="222" rx="12" ry="12" width="382" height="270"/>
+    <text class="ink muted small" x="248" y="250">CANVAS SUMMARY</text>
+    <g transform="translate(248,283)">
+      <rect class="card" x="0" y="0" rx="8" width="72" height="44"/><text class="ink tiny" x="12" y="26">PR opened</text>
+      <line class="greenLine" x1="72" y1="22" x2="112" y2="22"/>
+      <rect class="card" x="112" y="0" rx="8" width="72" height="44"/><text class="ink tiny" x="126" y="26">Fetch diff</text>
+      <line class="greenLine" x1="184" y1="22" x2="224" y2="22"/>
+      <rect class="card" x="224" y="0" rx="8" width="72" height="44"/><text class="ink tiny" x="244" y="26">Map</text>
+      <line class="activeLine dash" x1="296" y1="22" x2="336" y2="22"/>
+      <rect class="soft" x="336" y="0" rx="8" width="72" height="44"/><text class="ink tiny" x="352" y="26">Approval</text>
+    </g>
+    <text class="ink muted small" x="248" y="378">Activity timeline</text>
+    <text class="ink txt" x="266" y="408">• received GitHub PR event</text>
+    <text class="ink txt" x="266" y="436">• reviewed 6 changed files</text>
+    <text class="amber txt" x="266" y="464">• waiting for approval</text>
+
+    <rect class="card" x="630" y="222" rx="12" ry="12" width="162" height="270"/>
+    <text class="amber h2" x="650" y="252">Needs you</text>
+    <text class="ink muted small" x="650" y="282">Approve PR review</text>
+    <rect class="soft" x="650" y="306" rx="8" ry="8" width="118" height="34"/>
+    <text class="ink pillText" x="682" y="328">Review</text>
+    <text class="ink h2" x="650" y="382">Run info</text>
+    <text class="ink muted small" x="650" y="410">provider.github</text>
+    <text class="ink muted small" x="650" y="432">workflow v41</text>
+  </g>
+</svg>
