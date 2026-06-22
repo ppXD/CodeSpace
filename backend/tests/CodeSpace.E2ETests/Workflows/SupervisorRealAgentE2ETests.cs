@@ -15,7 +15,7 @@ using MediatR;
 using Microsoft.EntityFrameworkCore;
 using Shouldly;
 
-namespace CodeSpace.IntegrationTests.Workflows;
+namespace CodeSpace.E2ETests.Workflows;
 
 /// <summary>
 /// 🟢 THE supervisor→real-agent seam, driven top-to-bottom as ONE engine run — the join a verified self-review
@@ -52,6 +52,7 @@ namespace CodeSpace.IntegrationTests.Workflows;
 /// </summary>
 [Collection(PostgresCollection.Name)]
 [Trait("Category", "E2E")]
+[Trait("Surface", "Engine")]
 public sealed class SupervisorRealAgentE2ETests : IDisposable
 {
     private readonly PostgresFixture _fixture;

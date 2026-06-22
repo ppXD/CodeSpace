@@ -18,7 +18,7 @@ using MediatR;
 using Microsoft.EntityFrameworkCore;
 using Shouldly;
 
-namespace CodeSpace.IntegrationTests.Workflows;
+namespace CodeSpace.E2ETests.Workflows;
 
 /// <summary>
 /// Closes the continuity gap the self-review found: the PLANNER'S OWN coding-path projection
@@ -57,6 +57,7 @@ namespace CodeSpace.IntegrationTests.Workflows;
 /// </summary>
 [Collection(PostgresCollection.Name)]
 [Trait("Category", "E2E")]
+[Trait("Surface", "Engine")]
 public class PlannerCodingFlowE2ETests
 {
     private readonly PostgresFixture _fixture;

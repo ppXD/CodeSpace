@@ -21,6 +21,7 @@ namespace CodeSpace.E2ETests.Webhooks;
 /// app host + real Postgres).
 /// </summary>
 [Trait("Category", "E2E")]
+[Trait("Surface", "Http")]
 public sealed class WebhookEndpointE2ETests : IClassFixture<WebhookApiFactory>
 {
     private readonly WebhookApiFactory _factory;

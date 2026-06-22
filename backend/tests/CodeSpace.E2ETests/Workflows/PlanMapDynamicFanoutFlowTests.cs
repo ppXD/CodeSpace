@@ -17,7 +17,7 @@ using CodeSpace.Messages.Tasks.Effort;
 using Microsoft.EntityFrameworkCore;
 using Shouldly;
 
-namespace CodeSpace.IntegrationTests.Workflows;
+namespace CodeSpace.E2ETests.Workflows;
 
 /// <summary>
 /// THE crown jewel for PR-B: the MODEL authors a per-agent SPEC and that decision DRIVES the platform. An explicit
@@ -52,6 +52,7 @@ namespace CodeSpace.IntegrationTests.Workflows;
 /// </summary>
 [Collection(PostgresCollection.Name)]
 [Trait("Category", "E2E")]
+[Trait("Surface", "Engine")]
 public class PlanMapDynamicFanoutFlowTests
 {
     private readonly PostgresFixture _fixture;

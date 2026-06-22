@@ -22,7 +22,7 @@ namespace CodeSpace.IntegrationTests.Workflows;
 /// <summary>
 /// THE S0a kill-gate: a plan-map-synth run whose PLANNER is a REAL model (recorded/replayed via
 /// <see cref="RecordReplayStructuredLLMClient"/> over the production <see cref="AnthropicClient"/>), driving the
-/// same router→builder→snapshot-starter→engine→fan-out spine as <see cref="PlanMapSynthFanoutFlowTests"/>. The
+/// same router→builder→snapshot-starter→engine→fan-out spine as <c>PlanMapSynthFanoutFlowTests</c>. The
 /// difference is the decision authorship that is under test: the fan-out width + subtask content come from a
 /// real-model transcript, NOT the hand-written <see cref="DeterministicPlannerLlmClient"/> fake. The AGENT
 /// bodies stay <see cref="SubtaskAwareFakeCli"/> — only the planner is real/recorded.
@@ -75,7 +75,7 @@ public sealed class RealModelPhaseAuthorshipFlowTests
         await DriveRealModelPlanMapSynthToSuccessAsync();
     }
 
-    /// <summary>The shared body — identical drive/drain to <see cref="PlanMapSynthFanoutFlowTests"/>, but the planner is the real/recorded model and the assertions pin against the MODEL-authored subtasks read back from the cassette.</summary>
+    /// <summary>The shared body — identical drive/drain to <c>PlanMapSynthFanoutFlowTests</c>, but the planner is the real/recorded model and the assertions pin against the MODEL-authored subtasks read back from the cassette.</summary>
     private async Task DriveRealModelPlanMapSynthToSuccessAsync()
     {
         using var cli = new SubtaskAwareFakeCli();

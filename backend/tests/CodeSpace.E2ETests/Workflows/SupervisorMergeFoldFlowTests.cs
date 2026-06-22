@@ -16,7 +16,7 @@ using MediatR;
 using Microsoft.EntityFrameworkCore;
 using Shouldly;
 
-namespace CodeSpace.IntegrationTests.Workflows;
+namespace CodeSpace.E2ETests.Workflows;
 
 /// <summary>
 /// 🟢 THE S1 merge-fidelity crown jewel (HIGH fidelity — same real spine as
@@ -38,6 +38,7 @@ namespace CodeSpace.IntegrationTests.Workflows;
 /// </summary>
 [Collection(PostgresCollection.Name)]
 [Trait("Category", "E2E")]
+[Trait("Surface", "Engine")]
 public sealed class SupervisorMergeFoldFlowTests : IDisposable
 {
     private readonly PostgresFixture _fixture;

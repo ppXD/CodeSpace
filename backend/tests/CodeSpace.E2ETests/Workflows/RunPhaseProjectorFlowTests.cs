@@ -24,7 +24,7 @@ using CodeSpace.Core.Services.Tasks.Phases.Sources.Supervisor;
 using Microsoft.EntityFrameworkCore;
 using Shouldly;
 
-namespace CodeSpace.IntegrationTests.Workflows;
+namespace CodeSpace.E2ETests.Workflows;
 
 /// <summary>
 /// 🟢 PR7's crown jewel — the run phase projector over REAL task runs of all three effort tiers, through the REAL
@@ -42,6 +42,7 @@ namespace CodeSpace.IntegrationTests.Workflows;
 /// </summary>
 [Collection(PostgresCollection.Name)]
 [Trait("Category", "E2E")]
+[Trait("Surface", "Engine")]
 public class RunPhaseProjectorFlowTests : IDisposable
 {
     private readonly PostgresFixture _fixture;

@@ -28,6 +28,7 @@ namespace CodeSpace.E2ETests.Tasks;
 /// script — Rule 12.1); the 404 cases need no agent and run everywhere.</para>
 /// </summary>
 [Trait("Category", "E2E")]
+[Trait("Surface", "Http")]
 public sealed class TaskRunPhasesEndpointE2ETests : IClassFixture<TaskLaunchApiFactory>
 {
     private readonly TaskLaunchApiFactory _factory;

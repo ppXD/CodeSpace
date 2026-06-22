@@ -15,7 +15,7 @@ using MediatR;
 using Microsoft.EntityFrameworkCore;
 using Shouldly;
 
-namespace CodeSpace.IntegrationTests.Workflows;
+namespace CodeSpace.E2ETests.Workflows;
 
 /// <summary>
 /// D7-5 agent-bodied map-branch rerun — the crown jewel for the "agent-branch(execute-again)" v1 goal. Re-run ONE
@@ -38,6 +38,7 @@ namespace CodeSpace.IntegrationTests.Workflows;
 /// </summary>
 [Collection(PostgresCollection.Name)]
 [Trait("Category", "E2E")]
+[Trait("Surface", "Engine")]
 public class RerunMapBranchAgentFlowTests
 {
     private readonly PostgresFixture _fixture;

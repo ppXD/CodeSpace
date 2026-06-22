@@ -16,7 +16,7 @@ using CodeSpace.Messages.Tasks.Effort;
 using Microsoft.EntityFrameworkCore;
 using Shouldly;
 
-namespace CodeSpace.IntegrationTests.Workflows;
+namespace CodeSpace.E2ETests.Workflows;
 
 /// <summary>
 /// THE crown jewel for PR5: an explicit <c>standard</c>-effort task routes through the REAL
@@ -50,6 +50,7 @@ namespace CodeSpace.IntegrationTests.Workflows;
 /// </summary>
 [Collection(PostgresCollection.Name)]
 [Trait("Category", "E2E")]
+[Trait("Surface", "Engine")]
 public class PlanMapSynthFanoutFlowTests
 {
     private readonly PostgresFixture _fixture;
