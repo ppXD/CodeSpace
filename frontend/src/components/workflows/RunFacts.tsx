@@ -1,21 +1,25 @@
+import { Ic } from "@/_imported/ai-code-space/icons";
 import type { WorkflowRunDetail } from "@/api/workflows";
 import { relativeTime } from "@/lib/codeTree";
 
 /**
- * The compact run-facts strip in the Run Room's context rail — the run's standing metadata (how it started, when,
- * how long it has run, which release). Read-only; complements the decision inbox above it so the rail reads as a
- * full context panel rather than a lone inbox. A live run shows an elapsed-since-start duration.
+ * The run-facts panel in the Run Room's context rail — the run's standing metadata (how it started, when, how long
+ * it has run, which release), in a framed rail card so it reads consistently with the outline + decision panels.
+ * Read-only; a live run shows an elapsed-since-start duration.
  */
 export function RunFacts({ run }: { run: WorkflowRunDetail }) {
   const duration = formatDuration(run.startedAt, run.completedAt);
 
   return (
-    <dl className="run-facts">
-      <Fact label="Source" value={sourceLabel(run.sourceType)} />
-      {run.startedAt && <Fact label="Started" value={relativeTime(run.startedAt)} />}
-      {duration && <Fact label="Duration" value={duration} />}
-      <Fact label="Release" value={`v${run.workflowVersion}`} />
-    </dl>
+    <div className="rail-card">
+      <div className="rail-card-head"><Ic.Box size={12} aria-hidden="true" /> Run</div>
+      <dl className="run-facts">
+        <Fact label="Source" value={sourceLabel(run.sourceType)} />
+        {run.startedAt && <Fact label="Started" value={relativeTime(run.startedAt)} />}
+        {duration && <Fact label="Duration" value={duration} />}
+        <Fact label="Release" value={`v${run.workflowVersion}`} />
+      </dl>
+    </div>
   );
 }
 

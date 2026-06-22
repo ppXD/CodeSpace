@@ -83,9 +83,12 @@ function RunDetailPage() {
 
       <div className="ct-body run-room-body">
         <aside className="run-room-rail">
-          {phases.data
-            ? <RunOutline phases={phases.data.phases} />
-            : <div className="run-outline-empty">{phases.isLoading ? "Loading outline…" : "Outline unavailable."}</div>}
+          <div className="rail-card">
+            <div className="rail-card-head"><Ic.Workflow size={12} aria-hidden="true" /> Outline</div>
+            {phases.data
+              ? <RunOutline phases={phases.data.phases} />
+              : <div className="run-outline-empty">{phases.isLoading ? "Loading outline…" : "Outline unavailable."}</div>}
+          </div>
         </aside>
         <div className="run-room-main">
           <RunDetailView
