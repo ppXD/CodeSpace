@@ -1,5 +1,4 @@
 using System.Net.Http.Headers;
-using System.Net.Http.Json;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using CodeSpace.Messages.Agents;
@@ -115,7 +114,7 @@ public sealed class AnthropicClient : ILLMClient, IStructuredLLMClient
 
         AnthropicMessageResponse parsed;
         try { parsed = await PostMessagesAsync(body, request.Credential, cancellationToken).ConfigureAwait(false); }
-        catch (InvalidOperationException) { return null; }   // gateway rejects forced tool-use (e.g. 400) → degrade. Any PERSISTENT error re-surfaces from the floor attempt.
+        catch (LlmApiException e) when (e.Category == LlmErrorCategory.BadRequest) { return null; }   // ONLY a 400-shape rejection (forced tool-use unsupported) degrades to the floor. A 401/429/5xx PROPAGATES — never swallowed into a second billable call that mis-reports the real cause.
 
         var toolUse = parsed.Content?.FirstOrDefault(c => c.Type == "tool_use" && c.Name == StructuredToolName);
 
@@ -151,19 +150,19 @@ public sealed class AnthropicClient : ILLMClient, IStructuredLLMClient
 
         var baseUrl = NullIfBlank(credential?.BaseUrl) ?? DefaultApiBaseUrl;
         var http = _httpClientFactory.CreateClient(nameof(AnthropicClient));
-        http.BaseAddress = new Uri(baseUrl);
-        http.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
-        http.DefaultRequestHeaders.Add("x-api-key", apiKey);
-        http.DefaultRequestHeaders.Add("anthropic-version", AnthropicVersion);
 
-        var response = await http.PostAsJsonAsync("/v1/messages", body, cancellationToken).ConfigureAwait(false);
-        var responseBody = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
+        // Per-call headers on the REQUEST message (never mutate the singleton-resolved client's DefaultRequestHeaders) so
+        // concurrent flow.map branches can never bleed one team's key onto another's call. Buffered StringContent (not a
+        // streaming JsonContent) so the resilience handler can re-send the body on a transient retry.
+        using var message = new HttpRequestMessage(HttpMethod.Post, new Uri(new Uri(baseUrl), "/v1/messages"))
+        {
+            Content = LlmHttpTransport.JsonBody(body),
+        };
+        message.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
+        message.Headers.Add("x-api-key", apiKey);
+        message.Headers.Add("anthropic-version", AnthropicVersion);
 
-        if (!response.IsSuccessStatusCode)
-            throw new InvalidOperationException($"Anthropic API returned {(int)response.StatusCode}: {responseBody}");
-
-        return JsonSerializer.Deserialize<AnthropicMessageResponse>(responseBody)
-            ?? throw new InvalidOperationException("Anthropic API returned empty body.");
+        return await LlmHttpTransport.SendForJsonAsync<AnthropicMessageResponse>(http, message, Provider, options: null, cancellationToken).ConfigureAwait(false);
     }
 
     private static string? NullIfBlank(string? value) => string.IsNullOrWhiteSpace(value) ? null : value;

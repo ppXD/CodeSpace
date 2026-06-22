@@ -232,14 +232,17 @@ public class OpenAiClientStructuredTests
     [Fact]
     public async Task A_non_success_status_throws_with_the_body()
     {
+        // A PERSISTENT 400 (both the forced-function attempt AND the prompt-only floor) surfaces as a TYPED BadRequest
+        // carrying the status + the provider's error body — not an untyped exception with the status buried in prose.
         var handler = new CapturingHandler("""{ "error": { "message": "bad model" } }""", HttpStatusCode.BadRequest);
         var client = new OpenAiClient(new StubHttpClientFactory(handler));
         var schema = JsonDocument.Parse("""{ "type": "object" }""").RootElement;
 
-        var ex = await Should.ThrowAsync<InvalidOperationException>(() => client.CompleteStructuredAsync(StructuredRequest(schema, TestCredential), CancellationToken.None));
+        var ex = await Should.ThrowAsync<LlmApiException>(() => client.CompleteStructuredAsync(StructuredRequest(schema, TestCredential), CancellationToken.None));
 
-        ex.Message.ShouldContain("400");
-        ex.Message.ShouldContain("bad model");
+        ex.Category.ShouldBe(LlmErrorCategory.BadRequest);
+        ex.StatusCode.ShouldBe(400);
+        ex.ProviderMessage.ShouldContain("bad model");
     }
 
     [Fact]
