@@ -49,10 +49,14 @@ public sealed class LlmCompleteNode : INodeRuntime
             {
               "type": "object",
               "properties": {
-                "provider": { "type": "string", "enum": ["Anthropic"], "default": "Anthropic" },
+                "provider": { "type": "string", "enum": ["Anthropic", "OpenAI"], "default": "Anthropic", "description": "The wire to use. 'OpenAI' covers any OpenAI-compatible gateway (LiteLLM/OpenRouter/vLLM/…) configured as a model credential." },
                 "model": { "type": "string", "description": "Optional. Pins ONE model from the team's credentialed-model pool for this provider; it must be an enabled pool model. Omit to let the pool pick (its recommended model)." },
                 "maxTokens": { "type": "integer", "minimum": 1, "maximum": 8192, "default": 2048 },
                 "temperature": { "type": "number", "minimum": 0, "maximum": 1, "default": 0.2 },
+                "topP": { "type": "number", "minimum": 0, "maximum": 1, "description": "Optional nucleus sampling. Omit to leave it at the provider default." },
+                "frequencyPenalty": { "type": "number", "minimum": -2, "maximum": 2, "description": "Optional. OpenAI-wire only (ignored on Anthropic, whose API has no equivalent)." },
+                "presencePenalty": { "type": "number", "minimum": -2, "maximum": 2, "description": "Optional. OpenAI-wire only." },
+                "stop": { "type": "array", "items": { "type": "string" }, "maxItems": 4, "description": "Optional stop sequences — generation halts when any is produced." },
                 "responseSchema": { "type": "object", "description": "Optional JSON Schema. When set, the model is constrained to return JSON matching it, surfaced on the 'json' output (downstream can index into it, e.g. {{nodes.this.outputs.json.items[0]}}). Requires a provider that supports structured output." }
               },
               "required": ["provider"]
@@ -88,6 +92,7 @@ public sealed class LlmCompleteNode : INodeRuntime
         var modelPin = ReadStringOrNull(context.Config, "model");   // optional pin; null = let the pool pick its recommended model
         var maxTokens = ReadInt(context.Config, "maxTokens", 2048);
         var temperature = ReadDouble(context.Config, "temperature", 0.2);
+        var sampling = BuildSampling(context.Config);
 
         var systemPrompt = ReadString(context.Inputs, "systemPrompt", "");
         var userPrompt = ReadString(context.Inputs, "userPrompt", "");
@@ -114,7 +119,7 @@ public sealed class LlmCompleteNode : INodeRuntime
         // 'json' output. Routes through the IStructuredLLMClient sibling capability — clean fail if the
         // resolved provider doesn't offer it.
         if (requireStructured)
-            return await RunStructuredAsync(context, client, provider, pick, systemPrompt, userPrompt, maxTokens, temperature, responseSchema, cancellationToken).ConfigureAwait(false);
+            return await RunStructuredAsync(context, client, provider, pick, systemPrompt, userPrompt, maxTokens, temperature, sampling, responseSchema, cancellationToken).ConfigureAwait(false);
 
         // Wrap the LLM call with ledger emission. The completed record's response_payload
         // carries the token counts (cheap to inline). The full text lives in workflow_artifact,
@@ -131,7 +136,8 @@ public sealed class LlmCompleteNode : INodeRuntime
                 SystemPrompt = systemPrompt,
                 UserPrompt = userPrompt,
                 MaxOutputTokens = maxTokens,
-                Temperature = temperature
+                Temperature = temperature,
+                Sampling = sampling
             }, ct),
             completionExtractor: result => new ExternalCallCompletion
             {
@@ -159,7 +165,7 @@ public sealed class LlmCompleteNode : INodeRuntime
         return NodeResult.Ok(outputs);
     }
 
-    private async Task<NodeResult> RunStructuredAsync(NodeRunContext context, ILLMClient client, string provider, ModelPoolPick pick, string systemPrompt, string userPrompt, int maxTokens, double temperature, JsonElement responseSchema, CancellationToken cancellationToken)
+    private async Task<NodeResult> RunStructuredAsync(NodeRunContext context, ILLMClient client, string provider, ModelPoolPick pick, string systemPrompt, string userPrompt, int maxTokens, double temperature, LlmSamplingOptions? sampling, JsonElement responseSchema, CancellationToken cancellationToken)
     {
         if (client is not IStructuredLLMClient structured)
             return NodeResult.Fail($"Provider '{provider}' doesn't support structured output (responseSchema). Remove the schema to use plain text, or pick a provider that does.");
@@ -176,7 +182,8 @@ public sealed class LlmCompleteNode : INodeRuntime
                 UserPrompt = userPrompt,
                 JsonSchema = responseSchema,
                 MaxOutputTokens = maxTokens,
-                Temperature = temperature
+                Temperature = temperature,
+                Sampling = sampling
             }, ct),
             completionExtractor: result => new ExternalCallCompletion
             {
@@ -276,5 +283,31 @@ public sealed class LlmCompleteNode : INodeRuntime
         if (!bag.TryGetValue(key, out var value)) return fallback;
         if (value.ValueKind != JsonValueKind.Number) return fallback;
         return value.TryGetDouble(out var d) ? d : fallback;
+    }
+
+    /// <summary>An optional number config value — null when absent / non-numeric (so a knob is sent only when the author set it).</summary>
+    private static double? ReadDoubleOrNull(IReadOnlyDictionary<string, JsonElement> bag, string key) =>
+        bag.TryGetValue(key, out var value) && value.ValueKind == JsonValueKind.Number && value.TryGetDouble(out var d) ? d : null;
+
+    /// <summary>An optional non-empty string-array config value — null when absent / not an array / empty.</summary>
+    private static IReadOnlyList<string>? ReadStringArrayOrNull(IReadOnlyDictionary<string, JsonElement> bag, string key)
+    {
+        if (!bag.TryGetValue(key, out var value) || value.ValueKind != JsonValueKind.Array) return null;
+
+        var list = value.EnumerateArray().Where(e => e.ValueKind == JsonValueKind.String).Select(e => e.GetString()!).ToList();
+        return list.Count > 0 ? list : null;
+    }
+
+    /// <summary>The optional sampling knobs — null when the author set NONE (so the request is byte-identical to the temperature-only path). Each field is independently optional. Internal so the config→options mapping is unit-pinned directly (InternalsVisibleTo).</summary>
+    internal static LlmSamplingOptions? BuildSampling(IReadOnlyDictionary<string, JsonElement> config)
+    {
+        var topP = ReadDoubleOrNull(config, "topP");
+        var frequencyPenalty = ReadDoubleOrNull(config, "frequencyPenalty");
+        var presencePenalty = ReadDoubleOrNull(config, "presencePenalty");
+        var stop = ReadStringArrayOrNull(config, "stop");
+
+        if (topP is null && frequencyPenalty is null && presencePenalty is null && stop is null) return null;
+
+        return new LlmSamplingOptions { TopP = topP, FrequencyPenalty = frequencyPenalty, PresencePenalty = presencePenalty, Stop = stop };
     }
 }
