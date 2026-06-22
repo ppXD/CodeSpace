@@ -2103,53 +2103,41 @@ textarea:-webkit-autofill {
 /* Text block grows to fill the header's left share; the action buttons sit at the right after one
  * clear gap — two parts, not a narrow block + a wide center void + buttons. */
 .acs-root .agent-ov-head-text { flex: 1; min-width: 0; }
+/* Name + the Enable/Pause pill side by side, so the workflow's live state reads right next to its title. */
+.acs-root .agent-ov-name-row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
 .acs-root .agent-ov-name { margin: 0; font-size: 22px; font-weight: 650; color: var(--ink); }
 /* Fills the header's (flex:1) text block, so a short blurb sits on one/two lines and wraps only at
  * the block's right edge — beside, not under, the action buttons. Overview-only. */
 .acs-root .agent-ov-desc { margin: 8px 0 0; font-size: 14px; line-height: 1.6; color: var(--muted); }
 .acs-root .agent-ov-desc-empty { font-style: italic; }
-.acs-root .agent-ov-actions { display: flex; gap: 10px; flex-shrink: 0; }
+.acs-root .agent-ov-actions { display: flex; align-items: center; flex-wrap: wrap; justify-content: flex-end; gap: 10px; flex-shrink: 0; }
 .acs-root .agent-ov-meta { margin: 0; display: flex; flex-wrap: wrap; gap: 12px 40px; padding: 16px 0; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
 .acs-root .agent-ov-meta-item { display: flex; align-items: center; gap: 10px; }
 .acs-root .agent-ov-meta-item dt { margin: 0; font-size: 12px; font-weight: 600; color: var(--muted); }
 .acs-root .agent-ov-meta-item dd { margin: 0; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .acs-root .agent-ov-triggers { display: inline-flex; gap: 6px; flex-wrap: wrap; }
-.acs-root .agent-ov-status { font-size: 12px; font-weight: 600; padding: 2px 9px; border-radius: 999px; background: var(--panel-2); color: var(--muted); border: 1px solid var(--line); }
-/* Enabled = success green (matches the run-status "ok" pill); Paused keeps the neutral grey above. */
-.acs-root .agent-ov-status[data-enabled="true"] { background: #E6F4EC; color: #1F6B3F; border-color: #BFE0CD; }
+/* Enable/Pause — a status pill in the header that shows BOTH the live state and the action icon; clicking
+   confirms first. Enabled = success green (matches the run-status "ok" pill); Paused = amber so an off
+   workflow stands out. Owns "is this live?", so the meta block no longer repeats a Status row. */
+.acs-root .agent-ov-power {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 6px 12px; border-radius: 999px; font: inherit; font-size: 12.5px; font-weight: 600;
+  border: 1px solid var(--line); cursor: pointer; transition: background .14s, border-color .14s, color .14s;
+}
+.acs-root .agent-ov-power > svg { display: block; }
+.acs-root .agent-ov-power[data-enabled="true"]  { background: #E6F4EC; color: #1F6B3F; border-color: #BFE0CD; }
+.acs-root .agent-ov-power[data-enabled="true"]:hover:not(:disabled)  { background: #D8EEE1; border-color: #A6D3B9; }
+.acs-root .agent-ov-power[data-enabled="false"] { background: #FFF4E6; color: #A8590E; border-color: #F0D9B8; }
+.acs-root .agent-ov-power[data-enabled="false"]:hover:not(:disabled) { background: #FCEBD6; border-color: #E8C79D; }
+.acs-root .agent-ov-power:disabled { opacity: .6; cursor: default; }
 .acs-root .agent-ov-section { display: flex; flex-direction: column; gap: 10px; }
 .acs-root .agent-ov-section-head { display: flex; align-items: center; justify-content: space-between; }
 .acs-root .agent-ov-section-title { margin: 0; font-size: 13px; font-weight: 600; color: var(--ink); }
-.acs-root .agent-ov-link { display: inline-flex; align-items: center; gap: 3px; font: inherit; font-size: 12px; color: var(--accent); background: none; border: 0; cursor: pointer; padding: 2px 4px; }
-.acs-root .agent-ov-link:hover { text-decoration: underline; }
 .acs-root .agent-ov-runs-empty { font-size: 13px; color: var(--muted); padding: 16px; border: 1px dashed var(--line); border-radius: 8px; background: var(--panel); }
-.acs-root .agent-ov-runs { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
-.acs-root .agent-ov-run { display: grid; grid-template-columns: auto 90px 1fr auto; align-items: center; gap: 12px; padding: 9px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); }
-.acs-root .agent-ov-run-id { font-family: var(--mono, ui-monospace, monospace); font-size: 12px; color: var(--ink); }
-.acs-root .agent-ov-run-src, .acs-root .agent-ov-run-time { font-size: 12px; color: var(--muted); }
-
-/* Settings panel — identity (read-only) · status switch · guardrails (forthcoming) · danger zone.
- * Each actionable setting is a bordered row: descriptive text on the left, the control on the right. */
-.acs-root .agent-set { padding: 22px 0 8px; display: flex; flex-direction: column; gap: 26px; }
-/* A settings section: an uppercase label over its control row(s) — reads as a config page, distinct
- * from the Overview dashboard (no big name/description header; the name lives in the breadcrumb). */
-.acs-root .agent-set-group { display: flex; flex-direction: column; gap: 8px; }
-.acs-root .agent-set-group-title { margin: 0; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); }
-.acs-root .agent-set-row { display: flex; align-items: center; justify-content: space-between; gap: 24px; padding: 16px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel); }
-.acs-root .agent-set-row-text { min-width: 0; }
-.acs-root .agent-set-row-title { font-size: 13.5px; font-weight: 600; color: var(--ink); }
-.acs-root .agent-set-row-desc { margin-top: 3px; font-size: 12.5px; color: var(--muted); max-width: 64ch; }
-.acs-root .agent-set-row .btn { flex-shrink: 0; }
-/* Guardrails placeholder — muted, dashed, clearly not-yet-active. */
-.acs-root .agent-set-soon { display: flex; align-items: center; gap: 12px; padding: 16px; border: 1px dashed var(--line); border-radius: 10px; background: var(--panel); }
-.acs-root .agent-set-soon-ic { display: inline-flex; flex-shrink: 0; color: var(--muted); }
-.acs-root .agent-set-soon-text { margin: 0; flex: 1; min-width: 0; font-size: 12.5px; line-height: 1.55; color: var(--muted); }
-.acs-root .agent-set-soon-tag { flex-shrink: 0; font-size: 11px; font-weight: 600; padding: 2px 9px; border-radius: 999px; background: var(--panel-2); color: var(--muted); border: 1px solid var(--line); }
-/* Danger zone — soft warning tint so deletion reads as consequential without shouting. */
-.acs-root .agent-set-danger { border-color: #E4C3B5; background: #FBF1EC; }
+/* The Runs list reuses the .agent-activity row styles (clickable, version + chevron) — see below. */
 
 /* Activity list */
-.acs-root .agent-activity { list-style: none; margin: 0; padding: 16px 0; display: flex; flex-direction: column; gap: 4px; }
+.acs-root .agent-activity { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
 .acs-root .agent-activity-row {
   display: grid; grid-template-columns: auto 90px 1fr auto auto 16px; align-items: center; gap: 12px;
   padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); cursor: pointer;
@@ -2323,6 +2311,124 @@ textarea:-webkit-autofill {
   box-shadow: 0 1px 2px rgba(31,30,29,0.04);
 }
 .acs-root .wf-rf-node[data-selected="true"] { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-soft); }
+
+/* ── Run overlay (RunCanvas): a node's status as a ring + corner badge, reusing the app status tones ── */
+.acs-root .wf-rf-node[data-run-status], .acs-root .wf-rf-loop[data-run-status] { transition: border-color .18s ease, box-shadow .18s ease, opacity .18s ease; }
+.acs-root .wf-rf-node[data-run-status="pending"], .acs-root .wf-rf-loop[data-run-status="pending"],
+.acs-root .wf-rf-node[data-run-status="skipped"], .acs-root .wf-rf-loop[data-run-status="skipped"] { opacity: .5; }
+.acs-root .wf-rf-node[data-run-status="success"]  { border-color: #BFE0CD; }
+.acs-root .wf-rf-node[data-run-status="failure"]  { border-color: #E7A6A6; box-shadow: 0 0 0 2px #FCEDED; }
+.acs-root .wf-rf-node[data-run-status="suspended"] { border-color: #D9CFEC; box-shadow: 0 0 0 2px #EEEAF6; }
+.acs-root .wf-rf-loop[data-run-status="failure"]  { box-shadow: 0 0 0 2px #FCEDED; }
+.acs-root .wf-rf-node[data-run-status="running"], .acs-root .wf-rf-loop[data-run-status="running"] { border-color: var(--accent); animation: wfRunPulse 1.5s ease-in-out infinite; }
+@keyframes wfRunPulse {
+  0%, 100% { box-shadow: 0 0 0 2px var(--accent-soft), 0 0 0 0 rgba(217,119,87,0); }
+  50%      { box-shadow: 0 0 0 2px var(--accent-soft), 0 0 14px 1px rgba(217,119,87,.30); }
+}
+.acs-root .wf-rf-status-badge { position: absolute; top: -7px; right: -7px; width: 18px; height: 18px; border-radius: 50%; display: grid; place-items: center; z-index: 5; border: 1.5px solid var(--panel); }
+.acs-root .wf-rf-status-badge > svg { display: block; }
+.acs-root .wf-rf-status-badge[data-status="success"]   { background: #1F6B3F; color: #fff; }
+.acs-root .wf-rf-status-badge[data-status="failure"]   { background: #9E3535; color: #fff; }
+.acs-root .wf-rf-status-badge[data-status="suspended"] { background: #5B4B8A; color: #fff; }
+.acs-root .wf-rf-status-badge[data-status="skipped"]   { background: var(--panel-2); color: var(--muted-2); }
+.acs-root .wf-rf-status-badge[data-status="running"]   { background: var(--accent-soft); border-color: #E3C3B2; }
+.acs-root .wf-rf-status-spin { width: 9px; height: 9px; border-radius: 50%; border: 2px solid #E9CFC0; border-top-color: var(--accent); animation: wfSpin .7s linear infinite; }
+@keyframes wfSpin { to { transform: rotate(360deg); } }
+
+/* ── Live run-level progress chip overlaid on the run canvas (top-left Panel) ───────────────────────── */
+.acs-root .wf-run-progress {
+  display: inline-flex; align-items: center; gap: 8px;
+  padding: 5px 11px; border-radius: 999px;
+  background: color-mix(in srgb, var(--panel) 88%, transparent); backdrop-filter: blur(6px);
+  border: 1px solid var(--line); box-shadow: 0 1px 3px rgba(31,30,29,0.06);
+  font-size: 11.5px; color: var(--ink-2); line-height: 1;
+}
+.acs-root .wf-run-progress-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted-2); flex: none; }
+.acs-root .wf-run-progress[data-tone="success"]  .wf-run-progress-dot { background: #1F6B3F; }
+.acs-root .wf-run-progress[data-tone="failure"]  .wf-run-progress-dot { background: #9E3535; }
+.acs-root .wf-run-progress[data-tone="running"]  .wf-run-progress-dot { background: var(--accent); }
+.acs-root .wf-run-progress-dot[data-live] { animation: wfProgressPulse 1.4s ease-in-out infinite; }
+@keyframes wfProgressPulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(217,119,87,.45); }
+  50%      { box-shadow: 0 0 0 5px rgba(217,119,87,0); }
+}
+.acs-root .wf-run-progress-stat { font-weight: 600; letter-spacing: -.01em; }
+.acs-root .wf-run-progress-stat + .wf-run-progress-stat { padding-left: 8px; border-left: 1px solid var(--line); }
+.acs-root .wf-run-progress-running { color: var(--accent); }
+.acs-root .wf-run-progress-failed { color: #9E3535; }
+
+/* ── Coze-style per-node result footer (RunCanvas): a "status · duration" bar hanging under each node,
+   expandable in place to reveal its output/error. The graph flows left→right, so the area below a node
+   is free — the bar floats there. Only present in a run view (node carries runRows). ─────────────────── */
+/* ReactFlow gives a node wrapper `pointer-events: none` when it's non-interactive (our run nodes are
+   selectable/draggable/connectable=false — see @xyflow NodeWrapper `hasPointerEvents`). This bar is a DOM
+   child of that wrapper, so without an override it inherits `none` and clicks fall through to the pane
+   (grab cursor, no toggle). Re-enable hit-testing for JUST this subtree (ReactFlow's own EdgeLabelRenderer
+   pattern: pointer-events + nopan); the rest of the card stays pass-through so the canvas still pans over it. */
+.acs-root .wf-rf-result { position: absolute; top: calc(100% + 6px); left: 0; right: 0; z-index: 6; cursor: default; pointer-events: auto; }
+.acs-root .wf-rf-result[data-open] { z-index: 24; }
+.acs-root .wf-rf-result-bar {
+  display: flex; align-items: center; gap: 6px; width: 100%;
+  padding: 4px 9px; border-radius: 8px; border: 1px solid var(--line);
+  background: var(--panel); font: inherit; font-size: 11px; color: var(--ink-2);
+  text-align: left; cursor: default; box-shadow: 0 1px 2px rgba(31,30,29,0.05);
+  transition: border-color .14s ease, background .14s ease;
+}
+.acs-root .wf-rf-result-bar[data-expandable] { cursor: pointer; }
+.acs-root .wf-rf-result-glyph { display: grid; place-items: center; width: 14px; height: 14px; }
+.acs-root .wf-rf-result-glyph > svg { display: block; }
+.acs-root .wf-rf-result-label { font-weight: 600; letter-spacing: -.01em; }
+.acs-root .wf-rf-result-dur { margin-left: auto; color: var(--muted); font-variant-numeric: tabular-nums; }
+.acs-root .wf-rf-result-caret { display: grid; place-items: center; color: var(--muted-2); transition: transform .16s ease; }
+.acs-root .wf-rf-result[data-open] .wf-rf-result-caret { transform: rotate(180deg); }
+/* status tones — same palette as the corner badge + app status pills */
+.acs-root .wf-rf-result[data-status="success"]   .wf-rf-result-bar { border-color: #BFE0CD; background: #F2F9F5; }
+.acs-root .wf-rf-result[data-status="success"]   .wf-rf-result-glyph { color: #1F6B3F; }
+.acs-root .wf-rf-result[data-status="failure"]   .wf-rf-result-bar { border-color: #E7A6A6; background: #FCF3F3; }
+.acs-root .wf-rf-result[data-status="failure"]   .wf-rf-result-glyph { color: #9E3535; }
+.acs-root .wf-rf-result[data-status="suspended"] .wf-rf-result-bar { border-color: #D9CFEC; background: #F5F1FB; }
+.acs-root .wf-rf-result[data-status="suspended"] .wf-rf-result-glyph { color: #5B4B8A; }
+.acs-root .wf-rf-result[data-status="running"]   .wf-rf-result-bar { border-color: var(--accent); background: #FFF6EF; }
+.acs-root .wf-rf-result[data-status="skipped"]   .wf-rf-result-bar { opacity: .7; }
+.acs-root .wf-rf-result[data-status="skipped"]   .wf-rf-result-glyph { color: var(--muted-2); }
+
+.acs-root .wf-rf-result-panel {
+  margin-top: 5px; max-height: 240px; overflow: auto;
+  border: 1px solid var(--line); border-radius: 9px; background: var(--panel);
+  padding: 8px; box-shadow: 0 6px 20px rgba(31,30,29,0.10);
+}
+/* An embedded agent timeline / sub-workflow link needs more room than the node-width default. */
+.acs-root .wf-rf-result-panel[data-rich] { width: 384px; max-height: 360px; }
+.acs-root .wf-rf-result-open {
+  display: inline-flex; align-items: center; gap: 6px;
+  margin-top: 2px; padding: 5px 10px; border-radius: 7px;
+  border: 1px solid var(--line); background: var(--panel-2); color: var(--ink-2);
+  font: inherit; font-size: 11px; font-weight: 600; cursor: pointer;
+  transition: border-color .12s, color .12s;
+}
+.acs-root .wf-rf-result-open:hover { border-color: var(--accent); color: var(--accent); }
+.acs-root .wf-rf-result-open > svg { color: var(--muted-2); }
+.acs-root .wf-rf-result-open:hover > svg { color: var(--accent); }
+.acs-root .wf-rf-result-block + .wf-rf-result-block { margin-top: 8px; }
+.acs-root .wf-rf-result-block-h { font-size: 9.5px; font-weight: 700; letter-spacing: .07em; text-transform: uppercase; color: var(--muted); margin-bottom: 4px; }
+.acs-root .wf-rf-result-err { margin: 0 0 8px; padding: 7px 8px; border-radius: 7px; background: #FCEDED; color: #9E3535; font-size: 11px; white-space: pre-wrap; word-break: break-word; }
+.acs-root .wf-rf-result-empty { font-size: 11px; color: var(--muted); }
+.acs-root .wf-rf-result-branch + .wf-rf-result-branch { margin-top: 8px; padding-top: 8px; border-top: 1px dashed var(--line); }
+.acs-root .wf-rf-result-branch-h { display: flex; align-items: center; gap: 6px; margin-bottom: 5px; }
+.acs-root .wf-rf-result-branch-ix { font-size: 10.5px; font-weight: 700; color: var(--accent); }
+.acs-root .wf-rf-result-branch-st { font-size: 10px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+
+/* The run-view canvas surface + its Canvas/Timeline toggle. */
+.acs-root .wf-run-canvas { height: min(58vh, 540px); min-height: 420px; border: 1px solid var(--line); border-radius: 14px; overflow: hidden; background: var(--panel); position: relative; }
+.acs-root .wf-run-canvas-loading { display: grid; place-items: center; color: var(--muted); font-size: 13px; }
+.acs-root .wf-run-canvas .react-flow__attribution { display: none; }
+.acs-root .wf-run-views { display: inline-flex; background: var(--panel-2); border: 1px solid var(--line); border-radius: 9px; padding: 2px; gap: 2px; }
+.acs-root .wf-run-views-inline { margin-bottom: 12px; }
+.acs-root .wf-run-views button { appearance: none; background: transparent; border: 0; font: inherit; font-size: 12.5px; color: var(--muted); padding: 5px 11px; border-radius: 7px; cursor: pointer; display: inline-flex; align-items: center; gap: 6px; transition: background .12s, color .12s; }
+.acs-root .wf-run-views button:hover:not([data-active="true"]) { color: var(--ink-2); }
+.acs-root .wf-run-views button[data-active="true"] { background: var(--panel); color: var(--ink); box-shadow: 0 1px 2px rgba(20,15,8,.05); }
+.acs-root .wf-run-views button > svg { color: var(--muted-2); }
+.acs-root .wf-run-views button[data-active="true"] > svg { color: var(--accent); }
 
 /* flow.loop container — a sized box whose body subgraph (child nodes) renders inside it. Only the
    frame + header are drawn here; React Flow positions the children over the interior. */

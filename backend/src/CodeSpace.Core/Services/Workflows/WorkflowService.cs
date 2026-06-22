@@ -871,10 +871,13 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
         var childRunByNode = await LoadSubworkflowChildLinksAsync(runId, cancellationToken).ConfigureAwait(false);
         var agentRunByNode = await LoadAgentRunLinksAsync(runId, cancellationToken).ConfigureAwait(false);
 
-        // nodeId → typeKey from the run's VERSION-PINNED definition (the exact JSON this run executed),
-        // so each iterated row can be stamped with its owning container's kind. Disambiguates a map
-        // branch key ("<mapId>#<i>") from a loop body key ("<loopId>#<i>"), which share a shape.
-        var typeKeyByNodeId = await LoadNodeTypeKeysAsync(run, cancellationToken).ConfigureAwait(false);
+        // The exact graph this run executed — the VERSION-PINNED snapshot (the exact JSON this run ran),
+        // NOT the workflow's current definition. Feeds the run canvas faithfully, and gives each iterated
+        // row its owning container's kind (disambiguating a map branch "<mapId>#<i>" from a loop body
+        // "<loopId>#<i>", which share a shape).
+        var definition = await LoadRunDefinitionAsync(run, cancellationToken).ConfigureAwait(false);
+        var typeKeyByNodeId = definition?.Nodes.ToDictionary(node => node.Id, node => node.TypeKey)
+            ?? new Dictionary<string, string>();
 
         return new WorkflowRunDetail
         {
@@ -888,6 +891,7 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
             StartedAt = run.StartedAt,
             CompletedAt = run.CompletedAt,
             Nodes = nodes.Select(n => MapRunNode(n, childRunByNode, agentRunByNode, typeKeyByNodeId)).ToList(),
+            Definition = definition,
             Outputs = outputs,
             PendingWait = pending == null ? null : new WorkflowRunWaitInfo
             {
@@ -1031,20 +1035,20 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
     /// pinned <c>WorkflowVersion.DefinitionJson</c>. Empty when the version row is missing or unparsable
     /// (so every row falls back to a <c>null</c> container kind — no crash, just no badge).
     /// </summary>
-    private async Task<IReadOnlyDictionary<string, string>> LoadNodeTypeKeysAsync(WorkflowRun run, CancellationToken cancellationToken)
+    /// <summary>
+    /// The EXACT definition this run executed — a snapshot run's inline JSON, or an authored run's
+    /// version-pinned <c>workflow_version</c> JSON. NOT the workflow's current definition, so the run-detail
+    /// (and the canvas it feeds) stays faithful to how the run actually ran even after later edits.
+    /// Resilient: <c>null</c> if that snapshot can't be loaded (missing version row / corrupt JSON).
+    /// </summary>
+    private async Task<WorkflowDefinition?> LoadRunDefinitionAsync(WorkflowRun run, CancellationToken cancellationToken)
     {
-        // A snapshot run's definition is inline on the run row (no workflow_version to read); an
-        // authored run reads its version-pinned JSON. Either way we map nodeId → typeKey from the
-        // EXACT JSON this run executed.
         var definitionJson = run.DefinitionSnapshotJson ?? await _db.WorkflowVersion.AsNoTracking()
             .Where(v => v.WorkflowId == run.WorkflowId && v.Version == run.WorkflowVersion)
             .Select(v => v.DefinitionJson)
             .FirstOrDefaultAsync(cancellationToken).ConfigureAwait(false);
 
-        var definition = definitionJson == null ? null : JsonSerializer.Deserialize<WorkflowDefinition>(definitionJson, WorkflowJson.Options);
-        if (definition == null) return new Dictionary<string, string>();
-
-        return definition.Nodes.ToDictionary(node => node.Id, node => node.TypeKey);
+        return definitionJson == null ? null : JsonSerializer.Deserialize<WorkflowDefinition>(definitionJson, WorkflowJson.Options);
     }
 
     /// <summary>

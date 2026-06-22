@@ -20,7 +20,7 @@ import {
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 
-import { createFileRoute, useNavigate } from "@tanstack/react-router";
+import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type DragEvent } from "react";
 
 import { Ic } from "@/_imported/ai-code-space/icons";
@@ -62,7 +62,7 @@ import { RunWorkflowModal } from "@/components/workflows/RunWorkflowModal";
 import { RunViewerDialog } from "@/components/workflows/RunViewerDialog";
 import { RunHistoryDialog } from "@/components/workflows/RunHistoryDialog";
 import { AgentDetailShell, type AgentTab } from "@/components/workflows/AgentDetailShell";
-import { ActivityTab, OverviewTab, SettingsTab } from "@/components/workflows/AgentDetailTabPanels";
+import { OverviewTab } from "@/components/workflows/AgentDetailTabPanels";
 
 // Five panels covering every scope the engine resolves:
 //   - variables  → wf.*    (Variable table, scope=Workflow, persists immediately via API)
@@ -96,15 +96,15 @@ import { useQueries } from "@tanstack/react-query";
  * in the palette automatically, and its config + inputs forms come for free from
  * its JSON schemas. No editor code change required for new node types.
  */
-type AgentDetailTab = "overview" | "activity" | "source" | "settings";
+type AgentDetailTab = "overview" | "source";
 
 export const Route = createFileRoute("/_app/teams/$teamSlug/workflows/$workflowId/")({
-  // Tab choice is URL-driven (?tab=settings) for shareable deep links; overview is the default and
+  // Tab choice is URL-driven (?tab=source) for shareable deep links; overview is the default and
   // omitted from the URL for a clean path (mirrors the Project detail page's ?tab=variables).
   validateSearch: (raw: Record<string, unknown>): { tab?: AgentDetailTab } => {
     if (typeof raw.tab === "string") {
-      const lower = raw.tab.toLowerCase();
-      if (lower === "activity" || lower === "source" || lower === "settings") return { tab: lower };
+      // "activity" + "settings" are gone (merged into Overview) — old ?tab links fall through to Overview.
+      if (raw.tab.toLowerCase() === "source") return { tab: "source" };
     }
     return {};
   },
@@ -132,9 +132,7 @@ function WorkflowEditorPage() {
   // Data-driven: a new view (Settings, …) is one array entry.
   const tabs: AgentTab[] = [
     { key: "overview", label: "Overview" },
-    { key: "activity", label: "Activity" },
     { key: "source", label: "Source", keepMounted: true, fill: true },
-    { key: "settings", label: "Settings" },
   ];
 
   return (
@@ -143,19 +141,22 @@ function WorkflowEditorPage() {
       defaultTab="overview"
       active={activeTab}
       onActiveChange={setTab}
+      hideTabs
       crumbs={
         <>
           <a onClick={() => navigate({ to: "/teams/$teamSlug/workflows", params: { teamSlug } })}>Workflows</a>
           <span className="sep">/</span>
-          <span className="cur">{name}</span>
+          {/* With the tab bar gone, the name crumb is the way back to Overview from the Source canvas — a
+              real <Link> (href + keyboard-operable), not an onClick-only anchor. Overview is the no-search default. */}
+          {activeTab === "overview"
+            ? <span className="cur">{name}</span>
+            : <Link to="/teams/$teamSlug/workflows/$workflowId" params={{ teamSlug, workflowId }}>{name}</Link>}
         </>
       }
       render={(key, api) =>
         // ReactFlowProvider must wrap any component that calls useReactFlow().
         key === "source" ? <ReactFlowProvider><EditorShell /></ReactFlowProvider>
-        : key === "overview" ? <OverviewTab workflowId={workflowId} onEditSource={() => api.goTo("source")} onViewActivity={() => api.goTo("activity")} />
-        : key === "settings" ? <SettingsTab workflowId={workflowId} onDeleted={() => navigate({ to: "/teams/$teamSlug/workflows", params: { teamSlug } })} />
-        : <ActivityTab workflowId={workflowId} />
+        : <OverviewTab workflowId={workflowId} onEditSource={() => api.goTo("source")} onDeleted={() => navigate({ to: "/teams/$teamSlug/workflows", params: { teamSlug } })} />
       }
     />
   );

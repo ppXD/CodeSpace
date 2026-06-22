@@ -43,10 +43,6 @@ function WorkflowRunDetailPage() {
             </a>
           ) : <span>Workflow</span>}
           <span className="sep">/</span>
-          {workflowId ? (
-            <a onClick={() => navigate({ to: "/teams/$teamSlug/workflows/$workflowId/runs", params: { teamSlug, workflowId } })}>Activity</a>
-          ) : <span>Activity</span>}
-          <span className="sep">/</span>
           <span className="cur">Run {runId.slice(0, 8)}</span>
         </div>
         <div className="ct-title-row">

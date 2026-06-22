@@ -1,12 +1,19 @@
-import { useCallback, useContext } from "react";
+import { useCallback, useContext, useState } from "react";
 import { Handle, NodeResizer, Position, useStore, type NodeProps, type ReactFlowState } from "@xyflow/react";
 
 import { Ic } from "@/_imported/ai-code-space/icons";
-import type { NodeKind } from "@/api/workflows";
+import { isAgentRunActive, type AgentRunStatus } from "@/api/agents";
+import type { NodeKind, NodeStatus, WorkflowRunNodeSummary } from "@/api/workflows";
+import { useAgentRun } from "@/hooks/use-agents";
 import { ERROR_HANDLE } from "@/lib/workflowErrorRoute";
 
+import { AgentRunTimeline } from "./AgentRunTimeline";
+import { AgentToolCalls } from "./AgentToolCalls";
+import { JsonView } from "./JsonView";
 import { loopMinSize } from "./loopResize";
+import { branchBadge } from "./mapBranches";
 import { NodeAddContext, type NodeAddRequest } from "./nodeAddContext";
+import { RunOpenContext } from "./runOpenContext";
 import { CATCH_HANDLE, isContainerKind } from "./workflowContainers";
 
 /**
@@ -57,6 +64,182 @@ export interface WorkflowNodeData extends Record<string, unknown> {
   inputFields?: ReadonlyArray<{ name: string; label?: string | null; required?: boolean }>;
   /** A flow.loop container the user resized by its corner — explicit pixel size, persisted to the definition. Absent = auto-size to fit the body. */
   size?: { width: number; height: number };
+  /**
+   * When this card renders inside a run view (RunCanvas), the node's status in that run — drives the
+   * status ring + corner badge. Absent in the editor, so the same component carries no overlay there.
+   */
+  runStatus?: NodeStatus;
+  /**
+   * When this card renders inside a run view: the run's row(s) for this node — one for a plain node, N
+   * for a map/loop fan-out. Drives the coze-style result footer (status · duration, click to expand the
+   * node's output / error). Absent in the editor, so no footer renders there.
+   */
+  runRows?: WorkflowRunNodeSummary[];
+}
+
+/**
+ * Corner badge marking a node's status when the card is shown inside a run view. Pending stays
+ * badge-less (the card is just dimmed); Running pulses; the rest carry a single glyph in the shared
+ * status tone (matching RunStatusBadge across the app).
+ */
+function RunStatusDot({ status }: { status: NodeStatus }) {
+  if (status === "Pending") return null;
+  const glyph =
+    status === "Success" ? <Ic.Check size={11} />
+    : status === "Failure" ? <Ic.X size={11} />
+    : status === "Suspended" ? <Ic.Pause size={11} />
+    : status === "Skipped" ? <Ic.Dot size={13} />
+    : <span className="wf-rf-status-spin" />;
+  return <span className="wf-rf-status-badge" data-status={status.toLowerCase()} aria-hidden="true">{glyph}</span>;
+}
+
+/**
+ * Coze/Dify-style run-result footer that hangs UNDER a node in a run view: a compact "status · duration"
+ * bar that expands in place to reveal the node's output (and error). The graph flows left→right, so the
+ * space below each node is free — the bar floats there without overlapping neighbours. Renders only when
+ * the node has run rows (run view); the editor card never carries it.
+ */
+function RunResultBar({ status, rows, title }: { status: NodeStatus; rows: WorkflowRunNodeSummary[]; title?: string }) {
+  const [open, setOpen] = useState(false);
+  if (status === "Pending") return null;                 // not reached yet → no footer (matches coze)
+
+  const durationMs = aggregateDurationMs(rows);
+  const expandable = rows.some(isRowExpandable);
+  // An embedded agent timeline / sub-workflow link needs more room than a node-width panel — widen it.
+  const rich = rows.some((r) => !!r.agentRunId || !!r.childRunId);
+
+  return (
+    <div className="wf-rf-result nodrag nopan" data-status={status.toLowerCase()} data-open={open || undefined}>
+      <button
+        type="button"
+        className="wf-rf-result-bar"
+        data-expandable={expandable || undefined}
+        aria-expanded={expandable ? open : undefined}
+        title={title}
+        onClick={(e) => { e.stopPropagation(); if (expandable) setOpen((v) => !v); }}
+      >
+        <span className="wf-rf-result-glyph" aria-hidden="true">{resultGlyph(status)}</span>
+        <span className="wf-rf-result-label">{resultLabel(status, rows.length)}</span>
+        {durationMs != null && <span className="wf-rf-result-dur">{formatDuration(durationMs)}</span>}
+        {expandable && <span className="wf-rf-result-caret" aria-hidden="true"><Ic.ChevronDown size={12} /></span>}
+      </button>
+      {open && expandable && (
+        <div className="wf-rf-result-panel nowheel nodrag" data-rich={rich || undefined} onClick={(e) => e.stopPropagation()}>
+          {rows.length === 1
+            ? <RunRowDetail row={rows[0]} />
+            : rows.map((r, i) => {
+                // The REAL map element index, parsed from the row's iterationKey (#i, or #i/#j nested) — NOT
+                // the array position, which is StartedAt order and wrong for out-of-order map completion. ""
+                // for a loop/try row, which stays unbadged, exactly as the timeline view does.
+                const badge = branchBadge(r);
+                return (
+                  <div key={`${r.nodeId}:${r.iterationKey}:${i}`} className="wf-rf-result-branch">
+                    <div className="wf-rf-result-branch-h">
+                      {badge && <span className="wf-rf-result-branch-ix">{badge}</span>}
+                      <span className="wf-rf-result-branch-st" data-status={r.status.toLowerCase()}>{r.status}</span>
+                    </div>
+                    <RunRowDetail row={r} />
+                  </div>
+                );
+              })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * One run row's detail inside the result panel — error first, then output, then input. For an `agent.code`
+ * step it also embeds the LIVE agent run (status + event timeline + governed tool-call audit), so you watch
+ * the agent work without leaving the canvas; for a `flow.subworkflow` step it offers to open the child run.
+ * Falls back to "no output" only when the row carries nothing at all.
+ */
+function RunRowDetail({ row }: { row: WorkflowRunNodeSummary }) {
+  const onOpenRun = useContext(RunOpenContext);
+  const hasOut = hasRunContent(row.outputs);
+  const hasIn = hasRunContent(row.inputs);
+  const bare = !row.error && !hasOut && !hasIn && !row.agentRunId && !row.childRunId;
+
+  return (
+    <>
+      {row.error && <pre className="wf-rf-result-err">{row.error}</pre>}
+      {hasOut && (
+        <div className="wf-rf-result-block">
+          <div className="wf-rf-result-block-h">Output</div>
+          <JsonView data={row.outputs} />
+        </div>
+      )}
+      {hasIn && (
+        <div className="wf-rf-result-block">
+          <div className="wf-rf-result-block-h">Input</div>
+          <JsonView data={row.inputs} />
+        </div>
+      )}
+      {row.agentRunId && (
+        <div className="wf-rf-result-block">
+          <AgentRunTimeline agentRunId={row.agentRunId} />
+          <AgentToolCalls agentRunId={row.agentRunId} />
+        </div>
+      )}
+      {row.childRunId && onOpenRun && (
+        <button type="button" className="wf-rf-result-open" onClick={() => onOpenRun(row.childRunId!)}>
+          <Ic.ArrowOut size={12} /> Open sub-workflow run
+        </button>
+      )}
+      {bare && <div className="wf-rf-result-empty">No output recorded.</div>}
+    </>
+  );
+}
+
+/** A row earns the expand caret when it carries anything inspectable — output, input, error, an agent run, or a child run. */
+function isRowExpandable(row: WorkflowRunNodeSummary): boolean {
+  return hasRunContent(row.outputs) || !!row.error || hasRunContent(row.inputs) || !!row.agentRunId || !!row.childRunId;
+}
+
+/** The status glyph in the result bar — mirrors the corner badge's tone vocabulary. */
+function resultGlyph(status: NodeStatus) {
+  if (status === "Success") return <Ic.Check size={12} />;
+  if (status === "Failure") return <Ic.X size={12} />;
+  if (status === "Suspended") return <Ic.Pause size={12} />;
+  if (status === "Skipped") return <Ic.Dot size={14} />;
+  return <span className="wf-rf-status-spin" />;            // Running
+}
+
+/** "Success" / "Failure" / … — appends "· N branches" when a map/loop node fanned out to many rows. */
+function resultLabel(status: NodeStatus, count: number): string {
+  return count > 1 ? `${status} · ${count} branches` : status;
+}
+
+/**
+ * Total wall-clock for a node's row(s): earliest start → latest completion. Returns null while any row is
+ * still running (no completion yet) so the bar shows just the live status, no misleading duration.
+ */
+function aggregateDurationMs(rows: WorkflowRunNodeSummary[]): number | null {
+  const starts: number[] = [];
+  let latestEnd = 0;
+  for (const r of rows) {
+    if (r.startedAt) starts.push(Date.parse(r.startedAt));
+    if (!r.completedAt) return null;
+    latestEnd = Math.max(latestEnd, Date.parse(r.completedAt));
+  }
+  if (starts.length === 0) return null;
+  return Math.max(0, latestEnd - Math.min(...starts));
+}
+
+/** Coze-style duration: sub-second to ms precision (0.632s / 0.000s), whole seconds (22s), then minutes (2m29s). */
+function formatDuration(ms: number): string {
+  if (ms < 1000) return `${(ms / 1000).toFixed(3)}s`;
+  if (ms < 60_000) return `${Math.round(ms / 1000)}s`;
+  const m = Math.floor(ms / 60_000);
+  const s = Math.round((ms % 60_000) / 1000);
+  return `${m}m${s}s`;
+}
+
+/** True when a value is worth showing — non-null and not an empty object. */
+function hasRunContent(value: unknown): boolean {
+  if (value === null || value === undefined) return false;
+  if (typeof value === "object" && !Array.isArray(value)) return Object.keys(value).length > 0;
+  return true;
 }
 
 /**
@@ -93,7 +276,8 @@ function ContainerNode({ id, d, selected }: { id: string; d: WorkflowNodeData; s
   const onAddFrom = useContext(NodeAddContext);
   const isTry = d.kind === "Try";
   return (
-    <div className="wf-rf-loop" data-kind={d.kind.toLowerCase()} data-selected={selected}>
+    <div className="wf-rf-loop" data-kind={d.kind.toLowerCase()} data-selected={selected} data-run-status={d.runStatus}>
+      {d.runStatus && <RunStatusDot status={d.runStatus} />}
       {/* Drag a corner/edge to resize. Min size = the body's bounding box, so the box never shrinks
           past its items; the new size is persisted to the definition via the editor's onNodesChange. */}
       <NodeResizer isVisible={selected} minWidth={minWidth} minHeight={minHeight} lineClassName="wf-rf-resize-line" handleClassName="wf-rf-resize-handle" />
@@ -110,6 +294,7 @@ function ContainerNode({ id, d, selected }: { id: string; d: WorkflowNodeData; s
         <Handle id={ERROR_HANDLE} type="source" position={Position.Bottom} className="wf-rf-handle wf-rf-handle-error" title="On error → connect to a handler node" />
       )}
       {onAddFrom && <AddNodeButton nodeId={d.nodeId} onAddFrom={onAddFrom} />}
+      {d.runStatus && d.runRows && <RunResultBar status={d.runStatus} rows={d.runRows} />}
     </div>
   );
 }
@@ -120,6 +305,14 @@ export function WorkflowNode({ id, data, selected }: NodeProps) {
   // null outside the editor (no provider) → no "+" button. A Terminal has no output, so never add from it.
   const onAddFrom = useContext(NodeAddContext);
   const showAdd = d.kind !== "Terminal";
+
+  // An agent.code node parks (Suspended) the whole time its agent works; surface the agent's LIVE status so
+  // the card reads as active, not an idle wait — matching the timeline view. Single agent row only; the hook
+  // stays unconditional (disabled, no fetch, when there's no agent row — the editor, a plain node, a fan-out).
+  const agentRow = d.runRows?.length === 1 ? d.runRows[0] : undefined;
+  const agentRun = useAgentRun(agentRow?.agentRunId ?? undefined);
+  const runStatus = effectiveRunStatus(d.runStatus, d.runRows, agentRun.data?.status);
+  const parkedTitle = runStatus !== d.runStatus ? "Parked (Suspended) while its agent runs" : undefined;
 
   // A container (loop / try / map) draws only its frame + header; its body renders inside. It's its own
   // component so the store subscription it needs (for the resize-min) doesn't run for every node.
@@ -132,7 +325,8 @@ export function WorkflowNode({ id, data, selected }: NodeProps) {
   const isLoopStart = d.typeKey === "flow.loop_start" || d.typeKey === "flow.map_start";
 
   return (
-    <div className="wf-rf-node" data-kind={d.kind.toLowerCase()} data-selected={selected}>
+    <div className="wf-rf-node" data-kind={d.kind.toLowerCase()} data-selected={selected} data-run-status={runStatus}>
+      {runStatus && <RunStatusDot status={runStatus} />}
       {d.kind !== "Trigger" && !isLoopStart && <Handle type="target" position={Position.Left} className="wf-rf-handle" />}
       <div className="wf-rf-node-bar" />
       <div className="wf-rf-node-icon">{iconFor(d)}</div>
@@ -173,8 +367,22 @@ export function WorkflowNode({ id, data, selected }: NodeProps) {
         />
       )}
       {showAdd && onAddFrom && <AddNodeButton nodeId={d.nodeId} onAddFrom={onAddFrom} />}
+      {runStatus && d.runRows && <RunResultBar status={runStatus} rows={d.runRows} title={parkedTitle} />}
     </div>
   );
+}
+
+/**
+ * The status to PAINT for a node. An agent.code node parks (Suspended) while its agent run is still
+ * working, so — for the single-agent-row case — surface the agent's live activity as "Running" instead of a
+ * misleading idle "Suspended" (mirrors the timeline view's isParkedOnLiveAgent). Everything else is the raw
+ * node status.
+ */
+function effectiveRunStatus(runStatus: NodeStatus | undefined, rows: WorkflowRunNodeSummary[] | undefined, agentStatus: AgentRunStatus | undefined): NodeStatus | undefined {
+  if (runStatus === "Suspended" && rows?.length === 1 && !!rows[0].agentRunId && isAgentRunActive(agentStatus)) {
+    return "Running";
+  }
+  return runStatus;
 }
 
 /** Manifest iconKey → icon. The author's hint wins; misses fall back to Kind, then category. */
