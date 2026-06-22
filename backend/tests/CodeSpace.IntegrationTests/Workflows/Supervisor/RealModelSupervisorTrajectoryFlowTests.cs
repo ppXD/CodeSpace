@@ -35,7 +35,13 @@ public sealed class RealModelSupervisorTrajectoryFlowTests
         var registry = new LLMClientRegistry(new ILLMClient[] { new AnthropicClient(SharedHttp), new OpenAiClient(SharedHttp) });
         var decider = new LlmSupervisorDecider(registry, new FixedCredentialSelector(model, credential));
 
-        var trajectory = await SupervisorTrajectory.RunAsync(decider, maxTurns: 10, CancellationToken.None);
+        // A wall-clock deadline bounds the WHOLE trajectory independently of the per-call HTTP timeout, so a slow or
+        // hanging endpoint surfaces the scorer's clean "did not converge" verdict instead of blowing the CI job's
+        // wall-time budget. The happy path is 4 turns, so maxTurns:8 is ample headroom for a replan or an ask; the
+        // deadline is the hard cap (~6 min/wire × 2 wires + build stays well under the job's 20-min ceiling).
+        using var deadline = new CancellationTokenSource(TimeSpan.FromMinutes(6));
+
+        var trajectory = await SupervisorTrajectory.RunAsync(decider, maxTurns: 8, deadline.Token);
 
         var (ok, note) = SupervisorTrajectoryScore.Score(trajectory);
         ok.ShouldBeTrue($"{provider} model '{model}' trajectory was NOT sound — {note}");
@@ -54,7 +60,7 @@ public sealed class RealModelSupervisorTrajectoryFlowTests
 
     private sealed class SimpleHttpClientFactory : IHttpClientFactory
     {
-        public HttpClient CreateClient(string name) => new() { Timeout = TimeSpan.FromSeconds(120) };
+        public HttpClient CreateClient(string name) => new() { Timeout = TimeSpan.FromSeconds(60) };
     }
 
     private sealed class FixedCredentialSelector : IModelPoolSelector
