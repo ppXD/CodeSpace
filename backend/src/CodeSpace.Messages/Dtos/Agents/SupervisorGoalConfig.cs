@@ -22,7 +22,7 @@ public sealed record SupervisorGoalConfig
     /// <summary>Optional allow-list of harness / agent kinds the supervisor may spawn (e.g. <c>["codex-cli"]</c>). Null / empty = no restriction (the harness default). RESERVED — stored + parsed; the spawn-time enforcement gate is a follow-up.</summary>
     public IReadOnlyList<string>? AllowedAgents { get; init; }
 
-    /// <summary>Optional allow-list of tool kinds spawned agents may use. RESERVED — stored only; threaded into the spawned <c>AgentTask.Tools</c> in a follow-up.</summary>
+    /// <summary>Optional allow-list of tool kinds spawned agents may use — threaded into each spawned <c>AgentTask.Tools</c> (via <c>SupervisorTurnContext.SpawnedAgentTools</c>). Null / empty = no restriction.</summary>
     public IReadOnlyList<string>? AllowedTools { get; init; }
 
     /// <summary>Optional cap on how many agents one spawn decision may fan out at once. Null = the schema's hard <c>maxItems</c> (20). Clamped to <c>[1, 20]</c> by the plan.</summary>
@@ -43,7 +43,7 @@ public sealed record SupervisorGoalConfig
     /// <summary>Optional cap on how many <c>resolve</c> attempts the supervisor may make against a conflicted integration (resolver loop #379). Null = the <c>SupervisorLane.DefaultMaxResolveAttempts</c> default (1). Clamped to <c>[1, MaxResolveAttemptsCeiling]</c>.</summary>
     public int? MaxResolveAttempts { get; init; }
 
-    /// <summary>Optional acceptance checks the operator wants verified before the supervisor declares success. RESERVED — stored + parsed; the enforcing acceptance gate is a follow-up.</summary>
+    /// <summary>Optional acceptance checks the operator wants verified before the supervisor declares success — the OPERATOR FLOOR (L4 P1), an argv (e.g. <c>["sh","check.sh"]</c>). ENFORCED at the terminal <c>stop</c>: the run's reviewable head is cloned and graded against this command (mandatory when set), and a non-zero exit fails the stop (status <c>AcceptanceFailed</c>) + WITHHOLDS the reviewable branch — so the supervisor can't declare success on an unverified head. Null / empty = no floor.</summary>
     public IReadOnlyList<string>? AcceptanceChecks { get; init; }
 
     /// <summary>
