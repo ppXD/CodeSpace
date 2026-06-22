@@ -44,8 +44,15 @@ public sealed class SupervisorLiveBrainE2ETests : IDisposable
     {
         _fixture = fixture;
         _laneBefore = Environment.GetEnvironmentVariable(SupervisorLane.EnabledEnvVar);
-        Environment.SetEnvironmentVariable(SupervisorLane.EnabledEnvVar, "1");
+
+        // Do the only THROWABLE mutation (the DI resolve that flips the decider) FIRST: if it throws, nothing global was
+        // changed yet, so xUnit skipping Dispose (it skips it when a ctor throws) can leak NOTHING. The env-var set is
+        // last because it cannot throw — there is no window where it is set but the flag flip then fails. The two
+        // process-globals (the decider flag + the lane env) are shared across THIS assembly's "Postgres" collection
+        // (the ~6 supervisor E2E classes — NOT the IntegrationTests assembly, which has its own fixture instance), and
+        // both are restored in Dispose, which xUnit runs after this collection-serialized class's single test.
         SetDeciderMode(useLiveModel: true);   // the engine now resolves the PRODUCTION LlmSupervisorDecider
+        Environment.SetEnvironmentVariable(SupervisorLane.EnabledEnvVar, "1");
     }
 
     public void Dispose()
