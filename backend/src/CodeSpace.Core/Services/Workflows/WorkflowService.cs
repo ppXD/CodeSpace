@@ -886,6 +886,7 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
         // "simplify" to .Overlaps() (that binds to the Span method, not Npgsql) or it stops translating.
         if (filter.RepositoryIds is { Count: > 0 } repositoryIds) query = query.Where(r => r.ScopeRepositoryIds.Any(id => repositoryIds.Contains(id)));
         if (filter.ProjectIds is { Count: > 0 } projectIds) query = query.Where(r => r.ScopeProjectIds.Any(id => projectIds.Contains(id)));
+        if (filter.ActorIds is { Count: > 0 } actorIds) query = query.Where(r => r.ActorId != null && actorIds.Contains(r.ActorId.Value));
         if (filter.Since is { } since) query = query.Where(r => r.CreatedDate >= since);
         if (filter.Until is { } until) query = query.Where(r => r.CreatedDate < until);
 

@@ -52,6 +52,9 @@ public sealed record RunListFilter
     /// <summary>Only runs whose launch SCOPE (derived from its repos at launch) touches any of these projects (array-overlap, OR-within). Null / empty = any.</summary>
     public IReadOnlyList<Guid>? ProjectIds { get; init; }
 
+    /// <summary>Only runs launched by any of these users (<c>actor_id = ANY</c>, OR-within). A webhook / system run (null actor) matches no actor filter. Null / empty = any.</summary>
+    public IReadOnlyList<Guid>? ActorIds { get; init; }
+
     /// <summary>
     /// <c>true</c> = only runs with a PENDING decision (a parked decision the run is waiting on a human/policy to
     /// answer), <c>false</c> = only runs WITHOUT one, null = either. Narrower than <c>Suspended</c>: a run parked on a

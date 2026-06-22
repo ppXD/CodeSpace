@@ -102,6 +102,11 @@ public sealed class TeamRunsIndexEndpointE2ETests : IClassFixture<TaskLaunchApiF
         var byRepo = await SendAsync(HttpMethod.Get, $"/api/workflows/runs?repositoryIds={Guid.NewGuid()}", userId, teamId);
         byRepo.StatusCode.ShouldBe(HttpStatusCode.OK, customMessage: await DescribeFailureAsync(byRepo));
         (await byRepo.Content.ReadFromJsonAsync<RunPage>())!.Items.ShouldNotContain(r => r.Id == runId, "repositoryIds binds (Guid list) and excludes a run outside that repo scope");
+
+        // ?actorIds= binds: the run was launched by `userId`, so a different actor excludes it.
+        var byActor = await SendAsync(HttpMethod.Get, $"/api/workflows/runs?actorIds={Guid.NewGuid()}", userId, teamId);
+        byActor.StatusCode.ShouldBe(HttpStatusCode.OK, customMessage: await DescribeFailureAsync(byActor));
+        (await byActor.Content.ReadFromJsonAsync<RunPage>())!.Items.ShouldNotContain(r => r.Id == runId, "actorIds binds and excludes a run launched by a different user");
     }
 
     [Fact]

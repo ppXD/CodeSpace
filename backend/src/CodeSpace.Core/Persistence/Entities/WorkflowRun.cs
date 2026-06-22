@@ -69,6 +69,13 @@ public class WorkflowRun : IEntity<Guid>, IAuditable
     public required string SourceType { get; set; }
 
     /// <summary>
+    /// Denormalised from <see cref="WorkflowRunRequest"/>.<c>ActorId</c> at row insert — the user who launched this run.
+    /// NULL for a webhook / system run with no user actor (the request's <c>ActorId</c> is itself nullable). Lets the
+    /// runs index filter by launcher without joining the request; recheck-tier filter (no dedicated index yet).
+    /// </summary>
+    public Guid? ActorId { get; set; }
+
+    /// <summary>
     /// Launch-time SCOPE: the repositories this run was launched against (multi-repo) — a point-in-time snapshot set at
     /// the snapshot/task creation site. NOT the repos the run actually touched (that is the future
     /// <c>touched_repository_ids</c> from the Changes projector). Empty for an authored workflow run (its repos live in
