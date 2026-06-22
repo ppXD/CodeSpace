@@ -2448,17 +2448,75 @@ textarea:-webkit-autofill {
 .acs-root .run-facts-key { margin: 0; font-size: 11.5px; color: var(--muted); }
 .acs-root .run-facts-val { margin: 0; font-size: 12.5px; color: var(--ink-2); font-weight: 500; }
 
-/* ── Runs index — the team's runs page, zoned Needs-attention / Live / Recent ────────────────────────── */
-.acs-root .runs-zones { display: flex; flex-direction: column; gap: 26px; padding: 16px; }
-.acs-root .runs-zone-head { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
-.acs-root .runs-zone-label { font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: .05em; color: var(--ink-2); }
-.acs-root .runs-zone-count { min-width: 18px; height: 18px; padding: 0 5px; border-radius: 9px; background: var(--panel-2); color: var(--muted); font-size: 11px; font-weight: 700; display: grid; place-items: center; }
-.acs-root .runs-zone[data-tone="attention"] .runs-zone-label { color: #A8590E; }
-.acs-root .runs-zone[data-tone="attention"] .runs-zone-count { background: #A8590E; color: #fff; }
+/* ── Runs cockpit — the run control center: status cards + the work board (attention / live / recent) ── */
+.acs-root .ct-subtitle { margin-top: 3px; font-size: 12.5px; color: var(--muted); }
+.acs-root .cockpit { display: flex; flex-direction: column; gap: 22px; padding: 16px; }
+
+/* The four status cards (each a filter toggle). */
+.acs-root .cockpit-cards { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; }
+.acs-root .cockpit-card { appearance: none; text-align: left; cursor: pointer; border: 1px solid var(--line); border-radius: 14px; background: var(--panel); padding: 14px 16px; display: flex; flex-direction: column; gap: 6px; transition: border-color .14s ease, box-shadow .14s ease; }
+.acs-root .cockpit-card:hover { border-color: var(--accent-soft); }
+.acs-root .cockpit-card[data-armed] { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+.acs-root .cockpit-card[data-zero] { opacity: .72; }
+.acs-root .cockpit-card-top { display: flex; align-items: center; gap: 8px; min-height: 18px; }
+.acs-root .cockpit-card-label { font-size: 11.5px; font-weight: 600; text-transform: uppercase; letter-spacing: .04em; color: var(--ink-2); }
+.acs-root .cockpit-card-glyph { margin-left: auto; display: inline-flex; align-items: center; color: var(--muted-2); }
+.acs-root .cockpit-card-value { font-size: 28px; font-weight: 600; line-height: 1; color: var(--ink); font-variant-numeric: tabular-nums; }
+.acs-root .cockpit-card-sub { font-size: 11.5px; color: var(--muted); }
+.acs-root .cockpit-card[data-tone="decision"]:not([data-zero]) .cockpit-card-value { color: #A8590E; }
+.acs-root .cockpit-card[data-tone="live"]:not([data-zero]) .cockpit-card-value { color: var(--accent); }
+.acs-root .cockpit-card[data-tone="failed"]:not([data-zero]) .cockpit-card-value { color: #9E3535; }
+.acs-root .cockpit-card[data-tone="failed"] .cockpit-card-glyph { color: #9E3535; }
+
+/* Restrained liveness — only the decision + live cards animate, and only while non-zero. */
+.acs-root .cockpit-pulse { width: 8px; height: 8px; border-radius: 50%; background: #A8590E; animation: cockpitPulseAmber 1.8s ease-in-out infinite; }
+.acs-root .cockpit-flow { display: inline-flex; gap: 3px; }
+.acs-root .cockpit-flow i { width: 4px; height: 4px; border-radius: 50%; background: var(--accent); animation: cockpitFlow 1.2s ease-in-out infinite; }
+.acs-root .cockpit-flow i:nth-child(2) { animation-delay: .18s; }
+.acs-root .cockpit-flow i:nth-child(3) { animation-delay: .36s; }
+.acs-root .cockpit-spark { width: 56px; height: 18px; color: var(--accent); opacity: .7; }
+@keyframes cockpitPulseAmber { 0%, 100% { box-shadow: 0 0 0 0 rgba(168,89,14,.4); } 50% { box-shadow: 0 0 0 5px rgba(168,89,14,0); } }
+@keyframes cockpitPulseAccent { 0%, 100% { box-shadow: 0 0 0 0 rgba(217,119,87,.4); } 50% { box-shadow: 0 0 0 5px rgba(217,119,87,0); } }
+@keyframes cockpitFlow { 0%, 100% { opacity: .25; } 50% { opacity: 1; } }
+@media (prefers-reduced-motion: reduce) {
+  .acs-root .cockpit-pulse, .acs-root .cockpit-flow i { animation: none; }
+}
+@media (max-width: 900px) { .acs-root .cockpit-cards { grid-template-columns: repeat(2, 1fr); } }
+
+/* The work board — zones below the cards. */
+.acs-root .cockpit-board { display: flex; flex-direction: column; gap: 22px; }
+.acs-root .cockpit-zone { display: flex; flex-direction: column; gap: 10px; }
+.acs-root .cockpit-zone-head { display: flex; align-items: center; gap: 8px; }
+.acs-root .cockpit-zone-label { font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: .05em; color: var(--ink-2); }
+.acs-root .cockpit-empty { display: flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--muted); padding: 8px 2px; }
+.acs-root .cockpit-empty > svg { color: #1F6B3F; }
+
+/* Needs-attention zone — answerable decision cards (reused) + suspended-run rows. */
+.acs-root .cockpit-attention { display: flex; flex-direction: column; gap: 12px; }
+.acs-root .cockpit-attn-row { display: flex; align-items: center; gap: 11px; padding: 11px 13px; border: 1px solid #E3B8A0; border-radius: 12px; background: var(--accent-soft); cursor: pointer; }
+.acs-root .cockpit-attn-glyph { display: grid; place-items: center; width: 22px; height: 22px; flex: none; border-radius: 6px; background: var(--panel); color: #A8590E; }
+.acs-root .cockpit-attn-body { flex: 1; min-width: 0; }
+.acs-root .cockpit-attn-title { font-size: 13.5px; font-weight: 500; color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.acs-root .cockpit-attn-sub { font-size: 10.5px; color: #A8590E; text-transform: uppercase; letter-spacing: .04em; font-weight: 600; }
+.acs-root .cockpit-attn-meta { font-size: 11.5px; color: var(--muted); margin-top: 1px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.acs-root .cockpit-attn-act { flex: none; padding: 5px 12px; font-size: 12px; }
+
+/* Live zone — each run's current-state sentence. */
+.acs-root .cockpit-live { display: flex; flex-direction: column; gap: 8px; }
+.acs-root .cockpit-live-row { display: flex; align-items: center; gap: 11px; padding: 11px 13px; border: 1px solid var(--line); border-radius: 12px; background: var(--panel); cursor: pointer; transition: border-color .12s ease; }
+.acs-root .cockpit-live-row:hover { border-color: var(--accent-soft); }
+.acs-root .cockpit-live-dot { width: 8px; height: 8px; border-radius: 50%; flex: none; background: var(--accent); animation: cockpitPulseAccent 1.8s ease-in-out infinite; }
+.acs-root .cockpit-live-body { flex: 1; min-width: 0; }
+.acs-root .cockpit-live-title { font-size: 13.5px; font-weight: 500; color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.acs-root .cockpit-live-meta { font-size: 11.5px; color: var(--ink-2); margin-top: 1px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.acs-root .cockpit-live-status { flex: none; font-size: 10px; color: var(--accent); text-transform: uppercase; letter-spacing: .04em; font-weight: 600; }
+/* The live dot is defined below the cards' reduced-motion block, so it needs its own override (equal specificity, source order wins). */
+@media (prefers-reduced-motion: reduce) { .acs-root .cockpit-live-dot { animation: none; } }
+
+/* Compact run rows — used by Recent + the failed/today filter views. */
 .acs-root .runs-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
 .acs-root .runs-row { display: flex; align-items: center; gap: 12px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 10px; cursor: pointer; background: var(--panel); transition: background .12s ease, border-color .12s ease; }
 .acs-root .runs-row:hover { background: var(--panel-2); border-color: var(--accent-soft); }
-.acs-root .runs-zone[data-tone="attention"] .runs-row { border-color: #E3B8A0; }
 .acs-root .runs-row-glyph { display: grid; place-items: center; width: 18px; height: 18px; flex: none; color: var(--muted-2); }
 .acs-root .runs-row-glyph > svg { display: block; }
 .acs-root .runs-row-glyph[data-status="success"]   { color: #1F6B3F; }
