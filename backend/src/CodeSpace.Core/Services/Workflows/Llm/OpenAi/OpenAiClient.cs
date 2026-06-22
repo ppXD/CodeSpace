@@ -128,7 +128,7 @@ public sealed class OpenAiClient : ILLMClient, IStructuredLLMClient
 
         OpenAiChatResponse parsed;
         try { parsed = await PostChatAsync(body, request.Credential, cancellationToken).ConfigureAwait(false); }
-        catch (LlmApiException e) when (e.Category == LlmErrorCategory.BadRequest) { return null; }   // ONLY a 400-shape rejection (forced functions unsupported) degrades to the floor. A 401/429/5xx PROPAGATES — never swallowed into a second billable call that mis-reports the real cause.
+        catch (LlmApiException e) when (e.StatusCode is 400 or 422) { return null; }   // ANY request-shape rejection (400/422 — forced functions unsupported) degrades to the floor, regardless of the refined category (a body keyword must never disable the fallback). A 401/403/404/429/5xx PROPAGATES — never swallowed into a second billable call that mis-reports the real cause.
 
         var message = parsed.Choices?.FirstOrDefault()?.Message;
         var toolCall = message?.ToolCalls?.FirstOrDefault(t => t.Function?.Name == StructuredToolName);

@@ -114,7 +114,7 @@ public sealed class AnthropicClient : ILLMClient, IStructuredLLMClient
 
         AnthropicMessageResponse parsed;
         try { parsed = await PostMessagesAsync(body, request.Credential, cancellationToken).ConfigureAwait(false); }
-        catch (LlmApiException e) when (e.Category == LlmErrorCategory.BadRequest) { return null; }   // ONLY a 400-shape rejection (forced tool-use unsupported) degrades to the floor. A 401/429/5xx PROPAGATES — never swallowed into a second billable call that mis-reports the real cause.
+        catch (LlmApiException e) when (e.StatusCode is 400 or 422) { return null; }   // ANY request-shape rejection (400/422 — forced tool-use unsupported) degrades to the floor, regardless of the refined category (a body keyword must never disable the fallback). A 401/403/404/429/5xx PROPAGATES — never swallowed into a second billable call that mis-reports the real cause.
 
         var toolUse = parsed.Content?.FirstOrDefault(c => c.Type == "tool_use" && c.Name == StructuredToolName);
 

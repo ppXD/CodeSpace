@@ -81,11 +81,15 @@ public sealed class LlmApiException : Exception
         _ => LlmErrorCategory.BadRequest,
     };
 
+    // The needles are SPECIFIC phrases that denote the condition — NOT broad substrings like a bare "safety" (matches
+    // "safety_settings") or "too long" (matches "tool name too long"), which would mislabel a feature-unsupported 400.
+    // The category is only a refined LABEL on a 400/422 anyway (the degrade decision is status-based), so a miss merely
+    // leaves the generic BadRequest — it can never disable the progressive fallback.
     private static bool MentionsContextLength(string? body) =>
-        ContainsAny(body, "context length", "context_length", "context window", "maximum context", "too long", "maximum_tokens", "reduce the length", "string too long");
+        ContainsAny(body, "context length", "context_length", "context window", "maximum context", "maximum_tokens", "reduce the length", "string too long", "too many tokens", "exceeds the maximum");
 
     private static bool MentionsContentFilter(string? body) =>
-        ContainsAny(body, "content filter", "content_filter", "content policy", "content_policy", "safety", "flagged");
+        ContainsAny(body, "content filter", "content_filter", "content policy", "content_policy", "content was blocked", "blocked by safety", "safety policy", "flagged");
 
     private static bool ContainsAny(string? body, params string[] needles)
     {

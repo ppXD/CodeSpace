@@ -83,6 +83,45 @@ public class LlmTransportTypedErrorTests
         handler.Count.ShouldBe(2, "a 400 degrades to the prompt-only floor");
     }
 
+    [Theory]
+    [InlineData("the 'tool name' is too long for this model")]   // 'too long' must NOT be read as a context-window overflow
+    [InlineData("forced tool-use violates the safety_settings of this gateway")]   // 'safety' must NOT be read as a content block
+    public async Task A_400_whose_body_trips_a_classification_keyword_still_degrades(string rejectionBody)
+    {
+        // The regression the review caught: the degrade must key on the STATUS (a 400/422 request-shape rejection), not
+        // the refined category — a feature-unsupported 400 whose body happens to contain 'too long' / 'safety' must still
+        // fall back to the prompt-only floor, never propagate and fail the structured run.
+        var handler = new SequencedHandler(
+            (HttpStatusCode.BadRequest, "{\"error\":{\"message\":\"" + rejectionBody + "\"}}"),
+            (HttpStatusCode.OK, """{"model":"m","content":[{"type":"text","text":"{\"kind\":\"plan\"}"}]}"""));
+        var client = new AnthropicClient(Factory(handler));
+
+        var result = await client.CompleteStructuredAsync(new StructuredLLMCompletionRequest
+        {
+            Model = "m", SystemPrompt = "s", UserPrompt = "u", JsonSchema = Schema, Credential = AnthropicCred,
+        }, CancellationToken.None);
+
+        result.Json.GetProperty("kind").GetString().ShouldBe("plan");
+        handler.Count.ShouldBe(2, "a 400 must degrade regardless of a body keyword — the fallback can't be disabled by prose");
+    }
+
+    [Fact]
+    public async Task A_404_does_NOT_degrade_and_fails_fast()
+    {
+        // A 404 (wrong model id / misconfigured base URL) is a routing error — it must propagate after ONE call, not
+        // burn a second billable prompt-only request against the same wrong endpoint.
+        var handler = new SequencedHandler((HttpStatusCode.NotFound, """{"error":"model not found"}"""));
+        var client = new AnthropicClient(Factory(handler));
+
+        var ex = await Should.ThrowAsync<LlmApiException>(() => client.CompleteStructuredAsync(new StructuredLLMCompletionRequest
+        {
+            Model = "ghost", SystemPrompt = "s", UserPrompt = "u", JsonSchema = Schema, Credential = AnthropicCred,
+        }, CancellationToken.None));
+
+        ex.StatusCode.ShouldBe(404);
+        handler.Count.ShouldBe(1, "a 404 routing error must fail fast — never degrade to a second call against the same wrong endpoint");
+    }
+
     [Fact]
     public async Task A_rate_limit_carries_the_parsed_retry_after()
     {
