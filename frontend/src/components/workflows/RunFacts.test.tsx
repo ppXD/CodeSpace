@@ -8,7 +8,7 @@ import { RunFacts } from "./RunFacts";
 function run(o: Partial<WorkflowRunDetail>): WorkflowRunDetail {
   return {
     id: "run-1", workflowId: "wf", workflowVersion: 3, sourceType: "manual", normalizedPayload: {},
-    status: "Success", error: null, startedAt: null, completedAt: null, nodes: [], ...o,
+    status: "Success", error: null, startedAt: null, completedAt: null, createdDate: "2026-06-22T00:00:00Z", nodes: [], ...o,
   };
 }
 
@@ -19,8 +19,8 @@ describe("RunFacts", () => {
     expect(screen.getByText("v7")).toBeTruthy();
   });
 
-  it("renders the elapsed duration for a completed run", () => {
-    render(<RunFacts run={run({ startedAt: "2026-06-22T00:00:00Z", completedAt: "2026-06-22T00:01:30Z" })} />);
+  it("renders the wall-clock duration (createdDate→completedAt) for a completed run", () => {
+    render(<RunFacts run={run({ createdDate: "2026-06-22T00:00:00Z", completedAt: "2026-06-22T00:01:30Z" })} />);
     expect(screen.getByText("1m 30s")).toBeTruthy();
   });
 });
