@@ -104,8 +104,49 @@ public sealed class SupervisorWholeLoopE2ETests : IDisposable
 
         await AssertRunReachedSuccessAsync(runId);
         await AssertBothAgentsProducedRealPatchesAsync(runId);
-        await AssertDecisionLedgerIsPlanSpawnMergeStopAsync(runId, teamId);
+        await AssertDecisionLedgerAsync(runId, teamId, SupervisorDecisionKinds.Plan, SupervisorDecisionKinds.Spawn, SupervisorDecisionKinds.Merge, SupervisorDecisionKinds.Stop);
         await AssertIntegratedBranchOnRemoteAsync(remote, runId);
+        await AssertAcceptancePassedOnStopAsync(runId, teamId);
+    }
+
+    [Fact]
+    public async Task Supervisor_recovers_a_failed_subtask_via_retry_to_a_passing_acceptance_gate()
+    {
+        if (OperatingSystem.IsWindows()) return;          // the fake CLI is a /bin/sh script the runner spawns
+        if (!await GitReadyAsync()) return;               // real git is required for clone/capture/integrate/grade
+
+        // The "do beta" subtask FAILS its first run (a real Failed agent, no patch); the supervisor RETRIES it with a
+        // revised instruction the fake CLI succeeds on — a real failure→recovery through the real engine, not a replay.
+        using var cli = new FailFirstThenSucceedFakeCli();
+
+        SetDecisionScript(s => s.PlanSpawnRetryMergeStop());
+
+        var jobClient = ResolveJobClient();
+        jobClient.Clear();
+        jobClient.AutoExecute = true;
+
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+
+        using var remote = new BareRemote();
+        await remote.SeedBaseAsync(new() { ["check.sh"] = "#!/bin/sh\nexit 0\n", ["base.txt"] = "base\n" });
+        var repoId = await SeedBoundRepositoryAsync(teamId, remote.Url, "main");
+
+        var workflowId = await CreateWholeLoopWorkflowAsync(teamId, userId, repoId);
+        var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
+
+        await RunEngineAsync(runId);
+        await jobClient.WaitForPendingAsync();
+
+        // A failed agent is a SIGNAL the supervisor recovers from — the run still reaches Success via the retry.
+        await AssertRunReachedSuccessAsync(runId);
+        await AssertOneAgentFailedThenTheRetrySucceededAsync(runId);
+        await AssertDecisionLedgerAsync(runId, teamId, SupervisorDecisionKinds.Plan, SupervisorDecisionKinds.Spawn, SupervisorDecisionKinds.Retry, SupervisorDecisionKinds.Merge, SupervisorDecisionKinds.Stop);
+
+        // The merge integrated the recovered (retry) patch alongside alpha's + pushed a reviewable integration branch.
+        // (Regression guard: the FAILED first attempt — which recorded a base but no patch — must NOT sink the merge.)
+        var allBranches = await remote.ListBranchesAsync();
+        allBranches.Any(b => b.Contains($"integration/{runId:N}")).ShouldBeTrue($"the merge must integrate the recovered work past the failed first attempt + push a reviewable branch; remote branches: [{string.Join(", ", allBranches)}]");
+
         await AssertAcceptancePassedOnStopAsync(runId, teamId);
     }
 
@@ -182,7 +223,7 @@ public sealed class SupervisorWholeLoopE2ETests : IDisposable
         }
     }
 
-    private async Task AssertDecisionLedgerIsPlanSpawnMergeStopAsync(Guid runId, Guid teamId)
+    private async Task AssertDecisionLedgerAsync(Guid runId, Guid teamId, params string[] expectedKinds)
     {
         using var verify = _fixture.BeginScope();
         var db = verify.Resolve<CodeSpaceDbContext>();
@@ -193,17 +234,30 @@ public sealed class SupervisorWholeLoopE2ETests : IDisposable
             .Select(d => d.DecisionKind)
             .ToListAsync();
 
-        kinds.ShouldBe(
-            new[] { SupervisorDecisionKinds.Plan, SupervisorDecisionKinds.Spawn, SupervisorDecisionKinds.Merge, SupervisorDecisionKinds.Stop },
-            customMessage: "the ledger must record plan/spawn/merge/stop in order — the merge turn only advanced because both real agents completed through the barrier, and the stop only succeeded because acceptance passed");
+        kinds.ShouldBe(expectedKinds,
+            customMessage: $"the ledger must record {string.Join("/", expectedKinds)} in order — each later turn only advanced because the prior turn's agents completed through the barrier");
     }
 
-    private async Task AssertIntegratedBranchOnRemoteAsync(BareRemote remote, Guid runId)
+    private async Task AssertOneAgentFailedThenTheRetrySucceededAsync(Guid runId)
     {
-        // The merge turn is sequence 2 → the integrator's reviewable branch is codespace/integration/<run>/turn2.
-        var branch = $"codespace/integration/{runId:N}/turn2";
+        using var verify = _fixture.BeginScope();
+        var db = verify.Resolve<CodeSpaceDbContext>();
+
+        var statuses = await db.AgentRun.AsNoTracking().Where(r => r.WorkflowRunId == runId)
+            .Select(r => r.Status).ToListAsync();
+
+        // 3 real agent runs: alpha (succeeded), beta's first attempt (FAILED, no patch), beta's retry (succeeded).
+        statuses.Count.ShouldBe(3, "spawn[both] staged 2 + the retry staged 1");
+        statuses.Count(s => s == AgentRunStatus.Failed).ShouldBe(1, "exactly the first 'do beta' attempt FAILED — a real failed agent run");
+        statuses.Count(s => s == AgentRunStatus.Succeeded).ShouldBe(2, "alpha + the beta RETRY both succeeded with real patches");
+    }
+
+    private async Task AssertIntegratedBranchOnRemoteAsync(BareRemote remote, Guid runId, int turn = 2)
+    {
+        // The merge turn's sequence is `turn` → the integrator's reviewable branch is codespace/integration/<run>/turn{N}.
+        var branch = $"codespace/integration/{runId:N}/turn{turn}";
         (await remote.RemoteHasBranchAsync(branch)).ShouldBeTrue(
-            $"the supervisor's merge really integrated both agents' real patches and pushed {branch} to the bare remote");
+            $"the supervisor's merge really integrated the agents' real patches and pushed {branch} to the bare remote");
     }
 
     private async Task AssertAcceptancePassedOnStopAsync(Guid runId, Guid teamId)
@@ -369,6 +423,12 @@ public sealed class SupervisorWholeLoopE2ETests : IDisposable
 
         public async Task<bool> RemoteHasBranchAsync(string branch) =>
             (await Git(_root, "--git-dir", _bare, "branch", "--list", branch)).Trim().Length > 0;
+
+        /// <summary>Every branch on the remote, trimmed — the caller filters (avoids git refglob ambiguity over <c>/</c>).</summary>
+        public async Task<IReadOnlyList<string>> ListBranchesAsync() =>
+            (await Git(_root, "--git-dir", _bare, "branch", "--list"))
+                .Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                .Select(b => b.TrimStart('*', ' ').Trim()).ToList();
 
         private static async Task Config(string dir)
         {

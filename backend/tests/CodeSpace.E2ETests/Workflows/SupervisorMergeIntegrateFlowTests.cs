@@ -198,6 +198,36 @@ public sealed class SupervisorMergeIntegrateFlowTests : IDisposable
     }
 
     [Fact]
+    public async Task A_failed_agent_with_a_base_but_no_work_does_not_sink_the_merge()
+    {
+        if (!await GitReadyAsync()) return;
+
+        using var remote = new BareRemote();
+        var baseSha = await remote.SeedBaseAsync(new() { ["a.txt"] = "base-a\n", ["b.txt"] = "base-b\n" });
+
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var repoId = await SeedBoundRepositoryAsync(teamId, remote.Url, "main");
+        var runId = await SeedSupervisorRunAsync(teamId, userId);
+
+        var patchA = await remote.MakePatchAsync(baseSha, d => File.WriteAllText(Path.Combine(d, "a.txt"), "agent-a\n"));
+        var patchB = await remote.MakePatchAsync(baseSha, d => File.WriteAllText(Path.Combine(d, "b.txt"), "agent-b\n"));
+
+        var idA = await SeedAgentRunAsync(runId, teamId, "do alpha", baseSha, patchA, "codespace/agent/a");
+        // The REGRESSION shape: a FAILED agent that recorded a base but captured NO work (the failure→retry case the
+        // whole-loop E2E surfaced). The base-only filter let it through → Unintegrable → conflicted the WHOLE merge.
+        var idFailed = await SeedFailedAgentRunWithBaseAsync(runId, teamId, "build broke", baseSha);
+        var idB = await SeedAgentRunAsync(runId, teamId, "do beta", baseSha, patchB, "codespace/agent/b");
+
+        var outcome = await ExecuteMergeAsync(runId, teamId, integrate: true, idA, idFailed, idB);
+
+        var integration = outcome.GetProperty("integration");
+        integration.GetProperty("status").GetString().ShouldBe("Clean",
+            "a FAILED agent that recorded a base but no patch/branch must be EXCLUDED — not fed to the integrator as an Unintegrable contribution that sinks the whole merge; the two good diffs still integrate cleanly");
+        integration.GetProperty("appliedCount").GetInt32().ShouldBe(2);
+        integration.GetProperty("excludedAgents").EnumerateArray().Select(e => e.GetString()).ShouldContain(idFailed.ToString(), customMessage: "the base-but-no-work failed agent is excluded honestly");
+    }
+
+    [Fact]
     public async Task Merge_after_a_verified_resolution_surfaces_the_resolver_branch_without_re_integrating()
     {
         if (!await GitReadyAsync()) return;
@@ -1062,6 +1092,34 @@ public sealed class SupervisorMergeIntegrateFlowTests : IDisposable
         {
             Id = id, TeamId = teamId, WorkflowRunId = runId, NodeId = NodeId, IterationKey = $"{NodeId}#turn0#{id:N}",
             Harness = "codex-cli", Status = AgentRunStatus.Failed, Error = error, TaskJson = "{}", ResultJson = null,
+            CreatedDate = now, CreatedBy = Guid.Empty, LastModifiedDate = now, LastModifiedBy = Guid.Empty,
+        });
+        await db.SaveChangesAsync();
+        return id;
+    }
+
+    /// <summary>Seed a FAILED AgentRun whose ResultJson records a BaseSha but NO patch + NO branch — the shape a real exit-1 codex run persists (its workspace was cloned before it failed). Before the eligibility fix this slipped past the base-only filter into the integrator as an Unintegrable contribution that sank the whole merge (e.g. after a failure→retry).</summary>
+    private async Task<Guid> SeedFailedAgentRunWithBaseAsync(Guid runId, Guid teamId, string error, string baseSha)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        var id = Guid.NewGuid();
+        var now = DateTimeOffset.UtcNow;
+
+        var resultJson = JsonSerializer.Serialize(new AgentRunResult
+        {
+            Status = AgentRunStatus.Failed,
+            ExitReason = "non-zero-exit",
+            Error = error,
+            Patch = "",               // the failed run captured no diff
+            BaseSha = baseSha,        // but DID record a base (the clone happened before it failed)
+            ProducedBranch = null,    // and pushed no branch
+        }, AgentJson.Options);
+
+        db.AgentRun.Add(new AgentRun
+        {
+            Id = id, TeamId = teamId, WorkflowRunId = runId, NodeId = NodeId, IterationKey = $"{NodeId}#turn0#{id:N}",
+            Harness = "codex-cli", Status = AgentRunStatus.Failed, Error = error, TaskJson = "{}", ResultJson = resultJson,
             CreatedDate = now, CreatedBy = Guid.Empty, LastModifiedDate = now, LastModifiedBy = Guid.Empty,
         });
         await db.SaveChangesAsync();
