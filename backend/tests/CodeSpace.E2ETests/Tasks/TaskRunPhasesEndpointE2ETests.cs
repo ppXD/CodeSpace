@@ -18,7 +18,7 @@ using Shouldly;
 namespace CodeSpace.E2ETests.Tasks;
 
 /// <summary>
-/// E2E coverage for <c>GET /api/tasks/{runId}/phases</c> through the REAL ASP.NET pipeline — JWT auth, the X-Team-Id
+/// E2E coverage for <c>GET /api/workflows/runs/{runId}/phases</c> through the REAL ASP.NET pipeline — JWT auth, the X-Team-Id
 /// team-scope behavior, route binding, the controller, the projector + sources, the GlobalExceptionFilter. A quick
 /// task is launched + run to terminal, then its phases are fetched over real HTTP and asserted; a foreign / absent
 /// run returns 404 (team-scoped, fail-closed).
@@ -48,7 +48,7 @@ public sealed class TaskRunPhasesEndpointE2ETests : IClassFixture<TaskLaunchApiF
 
         await _factory.JobClient.DrainAsync();
 
-        var response = await SendAsync(HttpMethod.Get, $"/api/tasks/{runId}/phases", userId, teamId);
+        var response = await SendAsync(HttpMethod.Get, $"/api/workflows/runs/{runId}/phases", userId, teamId);
 
         response.StatusCode.ShouldBe(HttpStatusCode.OK, customMessage: await DescribeFailureAsync(response));
 
@@ -70,7 +70,7 @@ public sealed class TaskRunPhasesEndpointE2ETests : IClassFixture<TaskLaunchApiF
     {
         var (userId, teamId) = await SeedTeamMembershipAsync();
 
-        var response = await SendAsync(HttpMethod.Get, $"/api/tasks/{Guid.NewGuid()}/phases", userId, teamId);
+        var response = await SendAsync(HttpMethod.Get, $"/api/workflows/runs/{Guid.NewGuid()}/phases", userId, teamId);
 
         response.StatusCode.ShouldBe(HttpStatusCode.NotFound, "an absent run is 404 — the projector returns null and the controller conflates");
     }
@@ -80,7 +80,7 @@ public sealed class TaskRunPhasesEndpointE2ETests : IClassFixture<TaskLaunchApiF
     {
         var (userId, _) = await SeedTeamMembershipAsync();
 
-        var request = new HttpRequestMessage(HttpMethod.Get, $"/api/tasks/{Guid.NewGuid()}/phases");
+        var request = new HttpRequestMessage(HttpMethod.Get, $"/api/workflows/runs/{Guid.NewGuid()}/phases");
         request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", MintToken(userId));
 
         var response = await _factory.CreateClient().SendAsync(request);
@@ -92,7 +92,7 @@ public sealed class TaskRunPhasesEndpointE2ETests : IClassFixture<TaskLaunchApiF
 
     private async Task<Guid> LaunchQuickTaskAsync(Guid userId, Guid teamId)
     {
-        var request = new HttpRequestMessage(HttpMethod.Post, "/api/tasks")
+        var request = new HttpRequestMessage(HttpMethod.Post, "/api/workflows/runs")
         {
             Content = JsonContent.Create(new
             {

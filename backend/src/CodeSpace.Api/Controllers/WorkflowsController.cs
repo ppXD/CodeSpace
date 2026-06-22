@@ -78,72 +78,8 @@ public class WorkflowsController : ControllerBase
         return Ok(result);
     }
 
-    [HttpGet("runs/{runId:guid}")]
-    public async Task<IActionResult> GetRun([FromRoute] Guid runId, CancellationToken cancellationToken)
-    {
-        var result = await _mediator.Send(new GetWorkflowRunQuery { RunId = runId }, cancellationToken).ConfigureAwait(false);
-        return result == null ? NotFound() : Ok(result);
-    }
-
-    /// <summary>
-    /// Replay an existing run. Clones the original's workflow_version, release hash,
-    /// trigger payload, and variable snapshot rows onto a fresh run id. Engine detects
-    /// the existing snapshot and walks the replay path (plain frozen, secrets
-    /// re-resolved). Returns the new run's id.
-    /// </summary>
-    [HttpPost("runs/{runId:guid}/replay")]
-    public async Task<IActionResult> Replay([FromRoute] Guid runId, CancellationToken cancellationToken)
-    {
-        var newRunId = await _mediator.Send(new ReplayRunCommand { OriginalRunId = runId }, cancellationToken).ConfigureAwait(false);
-        return Ok(new { runId = newRunId });
-    }
-
-    /// <summary>
-    /// Re-run an existing run STARTING FROM a chosen node (D7). Forks a new run that reuses the upstream cells
-    /// (pre-seeded from the original) and re-runs the chosen node + its downstream. Returns the new run's id.
-    /// </summary>
-    [HttpPost("runs/{runId:guid}/rerun-from-node")]
-    public async Task<IActionResult> RerunFromNode([FromRoute] Guid runId, [FromBody] RerunRunFromNodeCommand command, CancellationToken cancellationToken)
-    {
-        var newRunId = await _mediator.Send(command with { OriginalRunId = runId }, cancellationToken).ConfigureAwait(false);
-        return Ok(new { runId = newRunId });
-    }
-
-    /// <summary>
-    /// Re-run ONE branch of a top-level flow.map in an existing run (D7). Forks a new run that reuses the N-1
-    /// sibling branches and re-runs the chosen branch + the map's downstream synthesizer. Returns the new run's id.
-    /// </summary>
-    [HttpPost("runs/{runId:guid}/rerun-map-branch")]
-    public async Task<IActionResult> RerunMapBranch([FromRoute] Guid runId, [FromBody] RerunMapBranchCommand command, CancellationToken cancellationToken)
-    {
-        var newRunId = await _mediator.Send(command with { OriginalRunId = runId }, cancellationToken).ConfigureAwait(false);
-        return Ok(new { runId = newRunId });
-    }
-
-    /// <summary>
-    /// Resolve a pending approval on a Suspended run with a human decision (approve / reject +
-    /// optional comment) and resume it. Returns <c>{ resumed }</c> — false when the run has no
-    /// pending approval wait.
-    /// </summary>
-    [HttpPost("runs/{runId:guid}/resume")]
-    public async Task<IActionResult> Resume([FromRoute] Guid runId, [FromBody] ResumeRunCommand command, CancellationToken cancellationToken)
-    {
-        var resumed = await _mediator.Send(command with { RunId = runId }, cancellationToken).ConfigureAwait(false);
-        return Ok(new { resumed });
-    }
-
-    /// <summary>
-    /// Operator cancel: abort a non-terminal run + tear down its branch agents and staged children. Team-scoped —
-    /// a run that isn't the caller's returns 404 (fail-closed). An already-terminal run is an idempotent no-op
-    /// reported as <c>{ cancelled: false, status }</c>; a successful flip returns <c>{ cancelled: true, status:
-    /// "Cancelled", agentRunsCancelled }</c>.
-    /// </summary>
-    [HttpPost("runs/{runId:guid}/cancel")]
-    public async Task<IActionResult> Cancel([FromRoute] Guid runId, CancellationToken cancellationToken)
-    {
-        var outcome = await _mediator.Send(new CancelRunCommand { RunId = runId }, cancellationToken).ConfigureAwait(false);
-        return outcome == null ? NotFound() : Ok(outcome);
-    }
+    // The RUN resource (detail · phases · replay · rerun-from-node · rerun-map-branch · resume · cancel · launch)
+    // lives in WorkflowRunsController under the same api/workflows/runs prefix — one controller per resource.
 
     /// <summary>
     /// Plan a workflow from a free-text task. Returns <c>{ plannerEnabled, plan, definition }</c> — the planner
