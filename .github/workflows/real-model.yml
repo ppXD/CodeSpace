@@ -55,11 +55,13 @@ jobs:
         run: dotnet restore backend/tests/CodeSpace.IntegrationTests/CodeSpace.IntegrationTests.csproj
 
       - name: Test (the supervisor decision eval — drives the live endpoint, scores the golden decisions)
-        # Scoped to the decision-eval class (no Postgres): the planner RealModel test is a separate, DB-backed
-        # concern with its own ANTHROPIC-native key, so it is not run here.
+        # Scoped to the supervisor RealModel classes (no Postgres) — the single-decision kill-gate AND the multi-turn
+        # trajectory gate (RealModelSupervisorDecisionFlowTests + RealModelSupervisorTrajectoryFlowTests, both
+        # FullyQualifiedName~RealModelSupervisor). The planner RealModel test is a separate, DB-backed concern with its
+        # own ANTHROPIC-native key, so it is not run here.
         run: >
           dotnet test backend/tests/CodeSpace.IntegrationTests/CodeSpace.IntegrationTests.csproj
           --no-restore
-          --filter "FullyQualifiedName~RealModelSupervisorDecisionFlowTests"
+          --filter "FullyQualifiedName~RealModelSupervisor"
           --logger "console;verbosity=normal"
           --logger "trx;LogFileName=real-model.trx"
