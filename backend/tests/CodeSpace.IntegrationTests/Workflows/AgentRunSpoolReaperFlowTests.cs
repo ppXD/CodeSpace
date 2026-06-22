@@ -112,7 +112,29 @@ public sealed class AgentRunSpoolReaperFlowTests : IDisposable
                 .ShouldBeNull("the handle is still cleared so the run doesn't get re-processed every sweep");
     }
 
-    private async Task<Guid> SeedTerminalRunWithHandleAsync(Guid teamId, string spoolDir, DateTimeOffset completedAt)
+    [Fact]
+    public async Task Reaps_a_netns_keyed_handle_without_the_egress_teardown_blocking_the_reap()
+    {
+        // B3.2b backstop: a handle carrying an EgressNetnsKey (a run that reached terminal via a path that skipped the
+        // runner's per-terminal netns teardown) must still reap the spool + clear the handle. The netns teardown is
+        // best-effort — a key for a netns that doesn't exist here (or a host without ip/nft) is a swallowed no-op, so
+        // it must never throw and abort the reap. Guards against a regression where the teardown breaks the sweep.
+        var teamId = await SeedTeamAsync();
+        var dir = MakeSpoolDir(Path.Combine(_spoolRoot, Guid.NewGuid().ToString("N")));
+        var runId = await SeedTerminalRunWithHandleAsync(teamId, dir, completedAt: DateTimeOffset.UtcNow.AddDays(-2), egressNetnsKey: Guid.NewGuid().ToString("N"));
+
+        int reaped;
+        using (var scope = _fixture.BeginScope())
+            reaped = await scope.Resolve<IAgentRunSpoolReaper>().ReapAsync(CancellationToken.None);
+
+        reaped.ShouldBeGreaterThanOrEqualTo(1);
+        Directory.Exists(dir).ShouldBeFalse("the spool is still reclaimed even though the handle carried a netns key");
+        using (var scope = _fixture.BeginScope())
+            (await scope.Resolve<IAgentRunService>().GetAsync(runId, CancellationToken.None)).RunnerHandleJson
+                .ShouldBeNull("the handle is still cleared — the best-effort netns teardown never blocks the reap");
+    }
+
+    private async Task<Guid> SeedTerminalRunWithHandleAsync(Guid teamId, string spoolDir, DateTimeOffset completedAt, string? egressNetnsKey = null)
     {
         Guid runId;
         using (var scope = _fixture.BeginScope())
@@ -120,7 +142,7 @@ public sealed class AgentRunSpoolReaperFlowTests : IDisposable
             var svc = scope.Resolve<IAgentRunService>();
             runId = (await svc.CreateAsync(BuildTask(), teamId, null, null, iterationKey: "", cancellationToken: CancellationToken.None)).Id;
             var epoch = await svc.MarkRunningAsync(runId, CancellationToken.None);
-            await svc.SetRunnerHandleAsync(runId, HandleJson(spoolDir), CancellationToken.None);
+            await svc.SetRunnerHandleAsync(runId, HandleJson(spoolDir, egressNetnsKey), CancellationToken.None);
             await svc.CompleteAsync(runId, new AgentRunResult { Status = AgentRunStatus.Succeeded, ExitReason = "done" }, epoch, CancellationToken.None);
         }
 
@@ -132,8 +154,8 @@ public sealed class AgentRunSpoolReaperFlowTests : IDisposable
         return runId;
     }
 
-    private static string HandleJson(string spoolDir) =>
-        JsonSerializer.Serialize(new SandboxHandle { Kind = "local", ProcessId = 1, SpoolDirectory = spoolDir, Deadline = DateTimeOffset.UtcNow }, AgentJson.Options);
+    private static string HandleJson(string spoolDir, string? egressNetnsKey = null) =>
+        JsonSerializer.Serialize(new SandboxHandle { Kind = "local", ProcessId = 1, SpoolDirectory = spoolDir, Deadline = DateTimeOffset.UtcNow, EgressNetnsKey = egressNetnsKey }, AgentJson.Options);
 
     private static string MakeSpoolDir(string dir)
     {

@@ -247,7 +247,9 @@ public sealed partial class LocalProcessRunner
     /// Tear down the run's filtered-egress netns at reap (B3.2b) — a NO-OP when the run had none
     /// (<see cref="SandboxHandle.EgressNetnsKey"/> null). Best-effort + idempotent, reconstructed PURELY from the key,
     /// so it is safe to call from EVERY terminal path (and from a DIFFERENT worker after a restart re-attaches and
-    /// reaches a terminal state). A missed path doesn't permanently leak — the orphan reaper is the backstop.
+    /// reaches a terminal state). A path that misses this (e.g. a re-attach that can only complete from the exit marker
+    /// at the executor layer, never re-entering these helpers) is backstopped by <see cref="AgentRunSpoolReaper"/>,
+    /// which tears the netns down from the persisted handle before clearing it.
     /// </summary>
     private static async Task TearDownEgressNetnsAsync(SandboxHandle handle)
     {

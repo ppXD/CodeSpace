@@ -1,6 +1,7 @@
 using System.Text.Json;
 using CodeSpace.Core.DependencyInjection;
 using CodeSpace.Core.Persistence.Db;
+using CodeSpace.Core.Services.Agents.Sandbox.Isolation;
 using CodeSpace.Core.Services.Agents.Sandbox.Runners;
 using CodeSpace.Messages.Agents;
 using Microsoft.EntityFrameworkCore;
@@ -9,10 +10,14 @@ using Microsoft.Extensions.Logging;
 namespace CodeSpace.Core.Services.Agents;
 
 /// <summary>
-/// Reclaims the on-disk spool of agent runs that have FINISHED past a retention window — the disk
+/// Reclaims the host resources of agent runs that have FINISHED past a retention window — the disk
 /// counterpart to <c>IWorkspaceJanitor</c>. The durable runner writes each run's stdout/stderr/exit/pid to a
 /// spool directory so a restart can recover/re-attach it; once the run is terminal that spool is debris (its
-/// redacted output is already in the append-only event log), so this ages it out.
+/// redacted output is already in the append-only event log), so this ages it out. It is ALSO the backstop for the
+/// durable runner's filtered-egress netns (B3.2b): a run that reached terminal via a path that skipped the runner's
+/// per-terminal teardown (most notably a re-attach that could only complete from the exit marker) still carries its
+/// netns key on the handle, so the reaper tears that netns down from the handle before clearing it — the last point
+/// the key is available, the guarantee against a permanently-leaked namespace.
 ///
 /// <para><b>Terminal-gated, not age-gated:</b> a live run has no <c>CompletedAt</c>, so the reaper can NEVER
 /// touch a running run's spool however long it runs — which matters precisely because durable runs are meant
@@ -81,10 +86,21 @@ public sealed class AgentRunSpoolReaper : IAgentRunSpoolReaper, IScopedDependenc
 
     private async Task<bool> ReapOneAsync(Guid runId, string handleJson, CancellationToken cancellationToken)
     {
+        var handle = TryDeserialize(handleJson);
+
         // Delete the spool dir ONLY when it's strictly under the spool root (else a forged/corrupt handle path
         // could point anywhere). A gone / out-of-root / unparseable handle just skips the delete.
-        if (TryResolveSpoolDir(handleJson) is { } dir && IsUnderSpoolRoot(dir))
+        if (handle?.SpoolDirectory is { } dir && IsUnderSpoolRoot(dir))
             DeleteQuietly(dir);
+
+        // Backstop the durable runner's per-terminal-path filtered-egress netns teardown (B3.2b): a run that reached
+        // terminal via a path that SKIPPED it — most notably a re-attach that could only complete from the exit marker
+        // (e.g. after the run's credential rotated) — would otherwise leave its netns/veth/nft-table on the host with
+        // no other reaper, and it leaks permanently once the handle below is cleared. This is the LAST point the key is
+        // available, so tear it down here. Best-effort + idempotent: a no-op when the fast path already freed it, when
+        // the run had no netns, or on a host without ip/nft (the executor swallows each failed command).
+        if (handle?.EgressNetnsKey is { Length: > 0 } netnsKey)
+            await FilteredEgressNetns.TeardownAsync(netnsKey, cancellationToken).ConfigureAwait(false);
 
         // Clear the handle regardless (the spool is reclaimed or irrelevant, and a terminal run never re-attaches)
         // so the run drops out of the candidate set and isn't re-processed every sweep.
@@ -96,9 +112,9 @@ public sealed class AgentRunSpoolReaper : IAgentRunSpoolReaper, IScopedDependenc
         return cleared == 1;
     }
 
-    private static string? TryResolveSpoolDir(string handleJson)
+    private static SandboxHandle? TryDeserialize(string handleJson)
     {
-        try { return JsonSerializer.Deserialize<SandboxHandle>(handleJson, AgentJson.Options)?.SpoolDirectory; }
+        try { return JsonSerializer.Deserialize<SandboxHandle>(handleJson, AgentJson.Options); }
         catch (JsonException) { return null; }
     }
 
