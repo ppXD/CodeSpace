@@ -16,6 +16,9 @@ public sealed record WorkflowRunSummary
     /// <summary>Pinned version for an authored run. <c>null</c> for a snapshot run.</summary>
     public int? WorkflowVersion { get; init; }
 
+    /// <summary>The parent workflow's display name (LEFT JOIN). <c>null</c> for a snapshot / task run (no parent workflow), so the index can label a row without a second lookup.</summary>
+    public string? WorkflowName { get; init; }
+
     /// <summary>Open-string source identifier. Examples: "manual", "replay", "provider.github.pull_request".</summary>
     public required string SourceType { get; init; }
 

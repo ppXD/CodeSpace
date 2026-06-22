@@ -146,8 +146,11 @@ export interface UpdateWorkflowInput {
 
 export interface WorkflowRunSummary {
   id: string;
-  workflowId: string;
-  workflowVersion: number;
+  /** Parent workflow id for an authored run; `null` for a snapshot / task run (it has no parent workflow). */
+  workflowId: string | null;
+  workflowVersion: number | null;
+  /** Parent workflow's display name (`null` for a snapshot / task run) — lets a row show a name without a second lookup. */
+  workflowName: string | null;
   /** Sourced from upstream run_request.source_type. */
   sourceType: WorkflowRunSourceType;
   status: WorkflowRunStatus;
@@ -155,6 +158,12 @@ export interface WorkflowRunSummary {
   startedAt: string | null;
   completedAt: string | null;
   createdDate: string;
+}
+
+/** One keyset-paginated page of the runs index. `nextCursor` is null on the last page; echo it back as `?cursor=`. */
+export interface RunPage {
+  items: WorkflowRunSummary[];
+  nextCursor: string | null;
 }
 
 export interface WorkflowRunNodeSummary {
@@ -391,8 +400,9 @@ export const workflowsApi = {
   listRuns: (workflowId: string, limit = 50) =>
     fetchJson<WorkflowRunSummary[]>(`/api/workflows/${workflowId}/runs?limit=${limit}`),
 
-  /** The team's runs index — every top-level run the team owns (any source), newest first. */
-  listTeamRuns: (limit = 50) => fetchJson<WorkflowRunSummary[]>(`/api/workflows/runs?limit=${limit}`),
+  /** The team's runs index — every top-level run the team owns (any source), newest first; keyset-paginated. */
+  listTeamRuns: (limit = 50, cursor?: string) =>
+    fetchJson<RunPage>(`/api/workflows/runs?limit=${limit}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`),
 
   getRun: (runId: string) => fetchJson<WorkflowRunDetail>(`/api/workflows/runs/${runId}`),
 

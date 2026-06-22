@@ -6,7 +6,7 @@ import { bucketRuns, sourceLabel } from "./runsIndex";
 
 function run(id: string, status: WorkflowRunStatus): WorkflowRunSummary {
   return {
-    id, workflowId: "w", workflowVersion: 1, sourceType: "manual", status,
+    id, workflowId: "w", workflowVersion: 1, workflowName: null, sourceType: "manual", status,
     error: null, startedAt: null, completedAt: null, createdDate: "2026-06-22T00:00:00Z",
   };
 }

@@ -47,9 +47,9 @@ public sealed class TeamRunsIndexEndpointE2ETests : IClassFixture<TaskLaunchApiF
         var response = await SendAsync(HttpMethod.Get, "/api/workflows/runs", userId, teamId);
         response.StatusCode.ShouldBe(HttpStatusCode.OK, customMessage: await DescribeFailureAsync(response));
 
-        var body = await response.Content.ReadFromJsonAsync<List<RunRow>>();
-        body.ShouldNotBeNull();
-        body!.ShouldContain(r => r.Id == runId, "the launched top-level run appears in its team's runs index");
+        var page = await response.Content.ReadFromJsonAsync<RunPage>();
+        page.ShouldNotBeNull();
+        page!.Items.ShouldContain(r => r.Id == runId, "the launched top-level run appears in its team's runs index");
     }
 
     [Fact]
@@ -67,8 +67,38 @@ public sealed class TeamRunsIndexEndpointE2ETests : IClassFixture<TaskLaunchApiF
         var response = await SendAsync(HttpMethod.Get, "/api/workflows/runs", otherUserId, otherTeamId);
         response.StatusCode.ShouldBe(HttpStatusCode.OK, customMessage: await DescribeFailureAsync(response));
 
-        var body = await response.Content.ReadFromJsonAsync<List<RunRow>>();
-        body!.ShouldNotContain(r => r.Id == runId, "the index is team-scoped — another team never sees the run");
+        var page = await response.Content.ReadFromJsonAsync<RunPage>();
+        page!.Items.ShouldNotContain(r => r.Id == runId, "the index is team-scoped — another team never sees the run");
+    }
+
+    [Fact]
+    public async Task Index_paginates_over_http_via_the_cursor()
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        using var cli = new FakeCodexCli();
+
+        var (userId, teamId) = await SeedTeamMembershipAsync();
+
+        var runA = await LaunchQuickTaskAsync(userId, teamId);
+        var runB = await LaunchQuickTaskAsync(userId, teamId);
+
+        // First page of 1 — the wire shape must carry a NextCursor since a second run exists.
+        var first = await SendAsync(HttpMethod.Get, "/api/workflows/runs?limit=1", userId, teamId);
+        first.StatusCode.ShouldBe(HttpStatusCode.OK, customMessage: await DescribeFailureAsync(first));
+        var page1 = await first.Content.ReadFromJsonAsync<RunPage>();
+        page1!.Items.Count.ShouldBe(1, "limit=1 binds from the query string and caps the page");
+        page1.NextCursor.ShouldNotBeNull("two runs, page of 1 → there must be a next cursor");
+
+        // Second page via the cursor (URL-encoded) — the two pages must be disjoint and together cover both runs.
+        var second = await SendAsync(HttpMethod.Get, $"/api/workflows/runs?limit=1&cursor={Uri.EscapeDataString(page1.NextCursor!)}", userId, teamId);
+        second.StatusCode.ShouldBe(HttpStatusCode.OK, customMessage: await DescribeFailureAsync(second));
+        var page2 = await second.Content.ReadFromJsonAsync<RunPage>();
+        page2!.Items.Count.ShouldBe(1);
+
+        var seen = new[] { page1.Items[0].Id, page2.Items[0].Id };
+        seen.ShouldBeUnique("keyset pages must not overlap");
+        seen.ShouldBe(new[] { runA, runB }, ignoreOrder: true, "the two pages together cover both launched runs");
     }
 
     [Fact]
@@ -123,6 +153,12 @@ public sealed class TeamRunsIndexEndpointE2ETests : IClassFixture<TaskLaunchApiF
     {
         public Guid Id { get; init; }
         public Guid RunId { get; init; }   // the launch response names it RunId; the index row names it Id
+    }
+
+    private sealed record RunPage
+    {
+        public IReadOnlyList<RunRow> Items { get; init; } = [];
+        public string? NextCursor { get; init; }
     }
 
     private async Task<(Guid UserId, Guid TeamId)> SeedTeamMembershipAsync()

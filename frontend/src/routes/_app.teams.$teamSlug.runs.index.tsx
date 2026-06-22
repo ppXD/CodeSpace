@@ -8,7 +8,7 @@ import { CockpitCards, type CockpitMetrics } from "@/components/workflows/Cockpi
 import { countRuns, summarizeDecisions, summarizeToday, suspendedNeedingReview, type CockpitFilter } from "@/components/workflows/cockpit";
 import { summarizeRunState } from "@/components/workflows/runPhases";
 import { bucketRuns } from "@/components/workflows/runsIndex";
-import { useLiveRunsPhases, usePendingDecisions, useTeamRuns, useWorkflows } from "@/hooks/use-workflows";
+import { useLiveRunsPhases, usePendingDecisions, useTeamRuns } from "@/hooks/use-workflows";
 
 /**
  * The Runs cockpit — the team's run control center, not a history table. Four status cards answer "is anything on
@@ -24,7 +24,6 @@ function TeamRunsPage() {
   const navigate = useNavigate();
   const runs = useTeamRuns();
   const decisions = usePendingDecisions();
-  const workflows = useWorkflows();
   const [filter, setFilter] = useState<CockpitFilter>(null);
 
   // A slow clock so the relative ages ("oldest 14m", "waiting 2d") and today's window stay fresh without churning.
@@ -36,7 +35,6 @@ function TeamRunsPage() {
 
   const runList = runs.data ?? [];
   const decisionList = decisions.data ?? [];
-  const nameById = new Map((workflows.data ?? []).map((w) => [w.id, w.name]));
 
   // The live runs' phases, batched — powers the Live zone's state sentences + the "agents active" tally.
   const liveIds = bucketRuns(runList).live.map((r) => r.id);
@@ -88,7 +86,7 @@ function TeamRunsPage() {
         {!runs.isLoading && !runs.error && runList.length > 0 && (
           <div className="cockpit">
             <CockpitCards metrics={metrics} filter={filter} onFilter={toggleFilter} />
-            <CockpitBoard runs={runList} decisions={decisionList} phasesByRun={phasesByRun} nameById={nameById} filter={filter} nowMs={nowMs} onOpen={openRun} />
+            <CockpitBoard runs={runList} decisions={decisionList} phasesByRun={phasesByRun} filter={filter} nowMs={nowMs} onOpen={openRun} />
           </div>
         )}
       </div>

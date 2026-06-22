@@ -112,10 +112,13 @@ export function useTeamRuns(limit = 50) {
   return useQuery({
     queryKey: ["team-runs", limit],
     queryFn: () => workflowsApi.listTeamRuns(limit),
+    // The endpoint is keyset-paginated (RunPage); unwrap to the items array so consumers stay array-based.
+    // nextCursor is unused until the cockpit grows a load-more (the page already shows the newest `limit`).
+    select: (page) => page.items,
     refetchInterval: (q) => {
-      const data = q.state.data;
-      if (!data) return false;
-      return data.some((r) => isRunActive(r.status)) ? 4000 : false;
+      const items = q.state.data?.items;
+      if (!items) return false;
+      return items.some((r) => isRunActive(r.status)) ? 4000 : false;
     },
   });
 }
