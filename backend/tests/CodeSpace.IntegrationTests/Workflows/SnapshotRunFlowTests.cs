@@ -344,18 +344,21 @@ public class SnapshotRunFlowTests
         Guid runId;
         using (var scope = _fixture.BeginScope())
             runId = await scope.Resolve<IRunFromSnapshotStarter>().StartFromSnapshotAsync(
-                EchoInputDefinition(), teamId, userId, launchPayloadJson: "{}", scopeRepositoryIds: new[] { repoId }, CancellationToken.None);
+                EchoInputDefinition(), teamId, userId, launchPayloadJson: "{}", scopeRepositoryIds: new[] { repoId }, projectionKind: "supervisor", CancellationToken.None);
 
         var run = await LoadRunAsync(runId);
         run.ScopeRepositoryIds.ShouldBe(new[] { repoId }, ignoreOrder: true, customMessage: "the launch repo set is stamped onto the run");
         run.ScopeProjectIds.ShouldBe(new[] { projA, projB }, ignoreOrder: true,
             customMessage: "projects are DERIVED from the repo's project_repository links at launch — a repo in two projects yields both");
+        run.ProjectionKind.ShouldBe("supervisor", "the route's projection kind is denormalised onto the run");
+        run.RunKind.ShouldBe(RunKinds.Task, "run_kind is the GENERATED classification of source_type=snapshot → task");
 
         // Replay clones the scope arrays verbatim (point-in-time snapshot — no re-derivation), like the frozen definition.
         await RunEngineAsync(runId);
         var replay = await LoadRunAsync(await ReplayAsync(runId, teamId, userId));
         replay.ScopeRepositoryIds.ShouldBe(new[] { repoId }, ignoreOrder: true, customMessage: "replay clones the scope repos");
         replay.ScopeProjectIds.ShouldBe(new[] { projA, projB }, ignoreOrder: true, "replay clones the derived projects — no re-derivation");
+        replay.ProjectionKind.ShouldBe("supervisor", "replay clones the projection kind");
     }
 
     /// <summary>Seed a real repository linked into TWO projects (a repo may belong to several) — so the run's project derivation has a multi-project case to resolve.</summary>
@@ -489,7 +492,7 @@ public class SnapshotRunFlowTests
     {
         using var scope = _fixture.BeginScope();
         var starter = scope.Resolve<IRunFromSnapshotStarter>();
-        return await starter.StartFromSnapshotAsync(definition, teamId, userId, launchPayloadJson, scopeRepositoryIds: null, CancellationToken.None);
+        return await starter.StartFromSnapshotAsync(definition, teamId, userId, launchPayloadJson, scopeRepositoryIds: null, projectionKind: null, CancellationToken.None);
     }
 
     /// <summary>Replay a finished run via the real production seam — the same call the ReplayRunCommand handler makes.</summary>

@@ -509,7 +509,7 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
                 original.DefinitionSnapshotHash ?? string.Empty,
                 teamId, actorUserId, original.RunRequest?.NormalizedPayloadJson ?? "{}", sourceType,
                 parentRunId: original.Id, causationRequestId: original.RunRequestId,
-                original.ScopeRepositoryIds, original.ScopeProjectIds, cancellationToken).ConfigureAwait(false);
+                original.ScopeRepositoryIds, original.ScopeProjectIds, original.ProjectionKind, cancellationToken).ConfigureAwait(false);
         else
             forkRunId = await _runStarter.StartAsync(new RunSourceEnvelope
             {
@@ -887,6 +887,8 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
         if (filter.RepositoryIds is { Count: > 0 } repositoryIds) query = query.Where(r => r.ScopeRepositoryIds.Any(id => repositoryIds.Contains(id)));
         if (filter.ProjectIds is { Count: > 0 } projectIds) query = query.Where(r => r.ScopeProjectIds.Any(id => projectIds.Contains(id)));
         if (filter.ActorIds is { Count: > 0 } actorIds) query = query.Where(r => r.ActorId != null && actorIds.Contains(r.ActorId.Value));
+        if (filter.RunKinds is { Count: > 0 } runKinds) query = query.Where(r => runKinds.Contains(r.RunKind));
+        if (filter.ProjectionKinds is { Count: > 0 } projectionKinds) query = query.Where(r => r.ProjectionKind != null && projectionKinds.Contains(r.ProjectionKind));
         if (filter.Since is { } since) query = query.Where(r => r.CreatedDate >= since);
         if (filter.Until is { } until) query = query.Where(r => r.CreatedDate < until);
 

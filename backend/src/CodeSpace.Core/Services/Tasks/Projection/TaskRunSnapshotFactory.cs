@@ -30,7 +30,7 @@ public sealed class TaskRunSnapshotFactory : ITaskRunSnapshotFactory, IScopedDep
 
         var launchPayloadJson = BuildLaunchPayload(context.Seed);
 
-        var runId = await _starter.StartFromSnapshotAsync(definition, teamId, actorUserId, launchPayloadJson, ScopeRepositoryIds(context.AgentProfile), cancellationToken).ConfigureAwait(false);
+        var runId = await _starter.StartFromSnapshotAsync(definition, teamId, actorUserId, launchPayloadJson, ScopeRepositoryIds(context.AgentProfile), context.Route.ProjectionKind, cancellationToken).ConfigureAwait(false);
 
         return new TaskRunHandle { RunId = runId, ProjectionKind = context.Route.ProjectionKind };
     }

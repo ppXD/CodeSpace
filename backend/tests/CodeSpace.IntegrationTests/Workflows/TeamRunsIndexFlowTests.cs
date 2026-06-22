@@ -319,6 +319,29 @@ public class TeamRunsIndexFlowTests
     }
 
     [Fact]
+    public async Task Filters_by_run_kind_generated_from_source_and_by_projection_kind()
+    {
+        var (teamA, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var t = DateTimeOffset.UtcNow;
+
+        var task = await InsertRunAsync(teamA, null, t, workflowId: null, sourceType: WorkflowRunSourceTypes.Snapshot, projectionKind: "single-agent");        // → run_kind=task
+        var supervisor = await InsertRunAsync(teamA, null, t.AddMinutes(-1), workflowId: null, sourceType: WorkflowRunSourceTypes.Snapshot, projectionKind: "supervisor");  // task + supervisor
+        var replay = await InsertRunAsync(teamA, null, t.AddMinutes(-2), workflowId: null, sourceType: WorkflowRunSourceTypes.Replay);                          // → run_kind=replay, no projection
+
+        // run_kind is GENERATED from source_type by Postgres — no population, always consistent.
+        (await FilterAsync(teamA, new RunListFilter { RunKinds = [RunKinds.Task] }))
+            .Select(r => r.Id).ShouldBe(new[] { task, supervisor }, ignoreOrder: true, "run_kind=task = source_type snapshot (generated column)");
+        (await FilterAsync(teamA, new RunListFilter { RunKinds = [RunKinds.Replay] }))
+            .Select(r => r.Id).ShouldBe(new[] { replay }, "run_kind=replay = source_type replay/rerun");
+        (await FilterAsync(teamA, new RunListFilter { RunKinds = [RunKinds.Task, RunKinds.Replay] }))
+            .Select(r => r.Id).ShouldBe(new[] { task, supervisor, replay }, ignoreOrder: true, "run kinds are OR'd (run_kind = ANY)");
+
+        // projection_kind: only a task run carries one; a replay (null projection_kind) matches no projection filter.
+        (await FilterAsync(teamA, new RunListFilter { ProjectionKinds = ["supervisor"] }))
+            .Select(r => r.Id).ShouldBe(new[] { supervisor }, "projection_kind filter matches the coordination mode; a run without one is excluded");
+    }
+
+    [Fact]
     public async Task Filters_by_actor_excluding_actorless_webhook_runs()
     {
         var (teamA, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
@@ -456,7 +479,7 @@ public class TeamRunsIndexFlowTests
         return page.Items;
     }
 
-    private async Task<Guid> InsertRunAsync(Guid teamId, Guid? parentRunId, DateTimeOffset createdDate, Guid? workflowId, string? sourceType = null, WorkflowRunStatus status = WorkflowRunStatus.Enqueued, DateTimeOffset? startedAt = null, List<Guid>? repositoryIds = null, List<Guid>? projectIds = null, Guid? actorId = null)
+    private async Task<Guid> InsertRunAsync(Guid teamId, Guid? parentRunId, DateTimeOffset createdDate, Guid? workflowId, string? sourceType = null, WorkflowRunStatus status = WorkflowRunStatus.Enqueued, DateTimeOffset? startedAt = null, List<Guid>? repositoryIds = null, List<Guid>? projectIds = null, Guid? actorId = null, string? projectionKind = null)
     {
         using var scope = _fixture.BeginScope();
         var db = scope.Resolve<CodeSpaceDbContext>();
@@ -494,6 +517,7 @@ public class TeamRunsIndexFlowTests
             ScopeRepositoryIds = repositoryIds ?? [],
             ScopeProjectIds = projectIds ?? [],
             ActorId = actorId,
+            ProjectionKind = projectionKind,   // RunKind is GENERATED from source_type — not set here
             CreatedDate = createdDate,   // explicit → the audit interceptor leaves it (it only stamps a default value)
             CreatedBy = SystemUsers.SeederId,
             LastModifiedBy = SystemUsers.SeederId,

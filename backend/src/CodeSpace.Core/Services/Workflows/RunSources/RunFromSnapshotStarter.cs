@@ -40,7 +40,7 @@ public sealed class RunFromSnapshotStarter : IRunFromSnapshotStarter, IScopedDep
         _logger = logger;
     }
 
-    public async Task<Guid> StartFromSnapshotAsync(WorkflowDefinition definition, Guid teamId, Guid actorUserId, string? launchPayloadJson, IReadOnlyList<Guid>? scopeRepositoryIds, CancellationToken cancellationToken)
+    public async Task<Guid> StartFromSnapshotAsync(WorkflowDefinition definition, Guid teamId, Guid actorUserId, string? launchPayloadJson, IReadOnlyList<Guid>? scopeRepositoryIds, string? projectionKind, CancellationToken cancellationToken)
     {
         EnsureValidDefinition(definition);
 
@@ -50,7 +50,7 @@ public sealed class RunFromSnapshotStarter : IRunFromSnapshotStarter, IScopedDep
         var repositoryIds = scopeRepositoryIds ?? [];
         var projectIds = await DeriveScopeProjectIdsAsync(repositoryIds, teamId, cancellationToken).ConfigureAwait(false);
 
-        var runId = await StageAsync(teamId, actorUserId, definitionJson, definitionHash, payloadJson, WorkflowRunSourceTypes.Snapshot, parentRunId: null, causationRequestId: null, repositoryIds, projectIds, cancellationToken).ConfigureAwait(false);
+        var runId = await StageAsync(teamId, actorUserId, definitionJson, definitionHash, payloadJson, WorkflowRunSourceTypes.Snapshot, parentRunId: null, causationRequestId: null, repositoryIds, projectIds, projectionKind, cancellationToken).ConfigureAwait(false);
 
         await _recordLogger.RunQueuedAsync(runId, WorkflowRunSourceTypes.Snapshot, actorUserId, cancellationToken).ConfigureAwait(false);
 
@@ -77,10 +77,10 @@ public sealed class RunFromSnapshotStarter : IRunFromSnapshotStarter, IScopedDep
     /// links back to the original request). The caller clones the variable snapshot then dispatches — exactly as
     /// the authored-replay path does, so the engine's variable-presence fork takes the replay scope.
     /// </summary>
-    public async Task<Guid> StageReplayFromSnapshotAsync(string definitionJson, string definitionHash, Guid teamId, Guid actorUserId, string payloadJson, string sourceType, Guid parentRunId, Guid causationRequestId, IReadOnlyList<Guid> scopeRepositoryIds, IReadOnlyList<Guid> scopeProjectIds, CancellationToken cancellationToken)
+    public async Task<Guid> StageReplayFromSnapshotAsync(string definitionJson, string definitionHash, Guid teamId, Guid actorUserId, string payloadJson, string sourceType, Guid parentRunId, Guid causationRequestId, IReadOnlyList<Guid> scopeRepositoryIds, IReadOnlyList<Guid> scopeProjectIds, string? projectionKind, CancellationToken cancellationToken)
     {
-        // Replay CLONES the original's scope arrays verbatim (point-in-time snapshot — no re-derivation), same as the frozen definition.
-        var runId = await StageAsync(teamId, actorUserId, definitionJson, definitionHash, NormalizePayload(payloadJson), sourceType, parentRunId, causationRequestId, scopeRepositoryIds, scopeProjectIds, cancellationToken).ConfigureAwait(false);
+        // Replay CLONES the original's scope arrays + projection kind verbatim (point-in-time snapshot — no re-derivation), same as the frozen definition.
+        var runId = await StageAsync(teamId, actorUserId, definitionJson, definitionHash, NormalizePayload(payloadJson), sourceType, parentRunId, causationRequestId, scopeRepositoryIds, scopeProjectIds, projectionKind, cancellationToken).ConfigureAwait(false);
 
         await _recordLogger.RunQueuedAsync(runId, sourceType, actorUserId, cancellationToken).ConfigureAwait(false);
 
@@ -134,7 +134,7 @@ public sealed class RunFromSnapshotStarter : IRunFromSnapshotStarter, IScopedDep
     /// optional <paramref name="parentRunId"/> (set on a replay — the engine emits <c>run.replayed</c>
     /// from it). Status starts Pending — the post-commit dispatch flips it to Enqueued.
     /// </summary>
-    private async Task<Guid> StageAsync(Guid teamId, Guid actorUserId, string definitionJson, string definitionHash, string payloadJson, string sourceType, Guid? parentRunId, Guid? causationRequestId, IReadOnlyList<Guid> scopeRepositoryIds, IReadOnlyList<Guid> scopeProjectIds, CancellationToken cancellationToken)
+    private async Task<Guid> StageAsync(Guid teamId, Guid actorUserId, string definitionJson, string definitionHash, string payloadJson, string sourceType, Guid? parentRunId, Guid? causationRequestId, IReadOnlyList<Guid> scopeRepositoryIds, IReadOnlyList<Guid> scopeProjectIds, string? projectionKind, CancellationToken cancellationToken)
     {
         var requestId = Guid.NewGuid();
         var runId = Guid.NewGuid();
@@ -169,6 +169,7 @@ public sealed class RunFromSnapshotStarter : IRunFromSnapshotStarter, IScopedDep
             TeamId = teamId,
             RunRequestId = requestId,
             ActorId = actorUserId,   // snapshot / task runs are always user-launched (mirrors the request's ActorId)
+            ProjectionKind = projectionKind,
             ScopeRepositoryIds = scopeRepositoryIds.ToList(),
             ScopeProjectIds = scopeProjectIds.ToList(),
             Status = WorkflowRunStatus.Pending,
