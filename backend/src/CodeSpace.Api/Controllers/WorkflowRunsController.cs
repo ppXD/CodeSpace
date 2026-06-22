@@ -25,6 +25,14 @@ public class WorkflowRunsController : ControllerBase
 
     public WorkflowRunsController(IMediator mediator) { _mediator = mediator; }
 
+    /// <summary>The team's runs index — every top-level run the team owns (any source), newest first. Team-scoped.</summary>
+    [HttpGet]
+    public async Task<IActionResult> List([FromQuery] ListTeamRunsQuery query, CancellationToken cancellationToken)
+    {
+        var result = await _mediator.Send(query, cancellationToken).ConfigureAwait(false);
+        return Ok(result);
+    }
+
     /// <summary>Launch a run from a generic task spec (effort / autonomy / surface / repos). Returns the run id + route + projection.</summary>
     [HttpPost]
     public async Task<IActionResult> Launch([FromBody] LaunchTaskCommand command, CancellationToken cancellationToken)

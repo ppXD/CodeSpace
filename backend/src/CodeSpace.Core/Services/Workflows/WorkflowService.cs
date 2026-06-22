@@ -827,19 +827,38 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
             .Take(limit)
             .ToListAsync(cancellationToken).ConfigureAwait(false);
 
-        return rows.Select(r => new WorkflowRunSummary
-        {
-            Id = r.Id,
-            WorkflowId = r.WorkflowId,
-            WorkflowVersion = r.WorkflowVersion,
-            SourceType = r.RunRequest?.SourceType ?? string.Empty,
-            Status = r.Status,
-            Error = r.Error,
-            StartedAt = r.StartedAt,
-            CompletedAt = r.CompletedAt,
-            CreatedDate = r.CreatedDate
-        }).ToList();
+        return rows.Select(ToSummary).ToList();
     }
+
+    public async Task<IReadOnlyList<WorkflowRunSummary>> ListTeamRunsAsync(Guid teamId, int limit, CancellationToken cancellationToken)
+    {
+        // Exclude only NESTED-EXECUTION runs — a flow.subworkflow child (SourceType `workflow.child`) runs inside its
+        // parent's Run Room, not as its own index row. NOT a ParentRunId filter: a replay / rerun fork also carries
+        // ParentRunId (its lineage to the original), yet is a top-level run the user launched and expects here. Agent
+        // runs are a separate entity, never WorkflowRun rows. TeamId is on the run directly, so snapshot / task runs
+        // (null WorkflowId) are included.
+        var rows = await _db.WorkflowRun
+            .Include(r => r.RunRequest)
+            .Where(r => r.TeamId == teamId && r.RunRequest.SourceType != WorkflowRunSourceTypes.ChildWorkflow)
+            .OrderByDescending(r => r.CreatedDate)
+            .Take(limit)
+            .ToListAsync(cancellationToken).ConfigureAwait(false);
+
+        return rows.Select(ToSummary).ToList();
+    }
+
+    private static WorkflowRunSummary ToSummary(WorkflowRun r) => new()
+    {
+        Id = r.Id,
+        WorkflowId = r.WorkflowId,
+        WorkflowVersion = r.WorkflowVersion,
+        SourceType = r.RunRequest?.SourceType ?? string.Empty,
+        Status = r.Status,
+        Error = r.Error,
+        StartedAt = r.StartedAt,
+        CompletedAt = r.CompletedAt,
+        CreatedDate = r.CreatedDate
+    };
 
     public async Task<WorkflowRunDetail?> GetRunAsync(Guid runId, Guid teamId, CancellationToken cancellationToken)
     {

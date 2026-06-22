@@ -2438,6 +2438,38 @@ textarea:-webkit-autofill {
 .acs-root .run-facts-key { margin: 0; font-size: 11.5px; color: var(--muted); }
 .acs-root .run-facts-val { margin: 0; font-size: 12.5px; color: var(--ink-2); font-weight: 500; }
 
+/* ── Runs index — the team's runs page, zoned Needs-attention / Live / Recent ────────────────────────── */
+.acs-root .runs-zones { display: flex; flex-direction: column; gap: 26px; padding: 16px; }
+.acs-root .runs-zone-head { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+.acs-root .runs-zone-label { font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: .05em; color: var(--ink-2); }
+.acs-root .runs-zone-count { min-width: 18px; height: 18px; padding: 0 5px; border-radius: 9px; background: var(--panel-2); color: var(--muted); font-size: 11px; font-weight: 700; display: grid; place-items: center; }
+.acs-root .runs-zone[data-tone="attention"] .runs-zone-label { color: #A8590E; }
+.acs-root .runs-zone[data-tone="attention"] .runs-zone-count { background: #A8590E; color: #fff; }
+.acs-root .runs-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 1px; }
+.acs-root .runs-row { display: flex; align-items: center; gap: 12px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 10px; cursor: pointer; background: var(--panel); transition: background .12s ease, border-color .12s ease; }
+.acs-root .runs-row:hover { background: var(--panel-2); border-color: var(--accent-soft); }
+.acs-root .runs-zone[data-tone="attention"] .runs-row { border-color: #E3B8A0; }
+.acs-root .runs-row-glyph { display: grid; place-items: center; width: 18px; height: 18px; flex: none; color: var(--muted-2); }
+.acs-root .runs-row-glyph > svg { display: block; }
+.acs-root .runs-row-glyph[data-status="success"]   { color: #1F6B3F; }
+.acs-root .runs-row-glyph[data-status="failure"]   { color: #9E3535; }
+.acs-root .runs-row-glyph[data-status="suspended"] { color: #A8590E; }
+.acs-root .runs-row-glyph[data-status="cancelled"] { opacity: .55; }
+.acs-root .runs-row-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13.5px; font-weight: 500; color: var(--ink); }
+.acs-root .runs-row-id { font-size: 11.5px; color: var(--muted-2); font-variant-numeric: tabular-nums; font-family: ui-monospace, monospace; }
+.acs-root .runs-row-source { font-size: 11px; color: var(--muted); }
+.acs-root .runs-row-status { font-size: 10px; color: var(--muted-2); text-transform: uppercase; letter-spacing: .04em; min-width: 64px; }
+.acs-root .runs-row-when { font-size: 11.5px; color: var(--muted); white-space: nowrap; min-width: 72px; text-align: right; }
+.acs-root .runs-row-spin { width: 12px; height: 12px; border-radius: 50%; border: 2px solid #E9CFC0; border-top-color: var(--accent); animation: wfSpin .7s linear infinite; }
+.acs-root .runs-row-hollow { width: 11px; height: 11px; border-radius: 50%; border: 1.5px solid var(--line); }
+@media (prefers-reduced-motion: reduce) {
+  .acs-root .runs-row-spin { animation: none; }
+}
+.acs-root .runs-row-source, .acs-root .runs-row-status, .acs-root .runs-row-id { flex: none; }
+@media (max-width: 720px) {
+  .acs-root .runs-row-source, .acs-root .runs-row-id { display: none; }
+}
+
 /* ── Live run-level progress chip overlaid on the run canvas (top-left Panel) ───────────────────────── */
 .acs-root .wf-run-progress {
   display: inline-flex; align-items: center; gap: 8px;

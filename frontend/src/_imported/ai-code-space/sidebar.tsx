@@ -35,6 +35,7 @@ export function Sidebar() {
     || /^\/teams\/[^/]+\/(repositories|projects)/.test(pathname);
   const isAgentsActive = /^\/teams\/[^/]+\/agents/.test(pathname);
   const isWorkflowsActive = /^\/teams\/[^/]+\/workflows/.test(pathname);
+  const isRunsActive = /^\/teams\/[^/]+\/runs/.test(pathname);
   const isSettingsActive = /^\/teams\/[^/]+\/settings/.test(pathname);
 
   // ── Team switcher ────────────────────────────────────────────────────────────
@@ -322,6 +323,21 @@ export function Sidebar() {
           {active && active.workflowCount != null && (
             <span className="sb-nav-badge">{active.workflowCount}</span>
           )}
+        </div>
+        <div
+          className="sb-nav-item"
+          data-active={isRunsActive}
+          onClick={() => {
+            // The team's runs index — every run the team has launched, any source. Team-scoped; same
+            // first-paint guard as the other rows (no-op until the active team resolves).
+            if (active) {
+              navigate({ to: "/teams/$teamSlug/runs", params: { teamSlug: teamToUrlSlug(active) } });
+            }
+          }}
+          title="Runs"
+        >
+          <span className="sb-nav-ic"><Ic.Play size={15} /></span>
+          <span className="sb-nav-lbl">Runs</span>
         </div>
         <div
           className="sb-nav-item"
