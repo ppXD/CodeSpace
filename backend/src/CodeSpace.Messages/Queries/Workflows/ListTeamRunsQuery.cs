@@ -26,6 +26,12 @@ public sealed record ListTeamRunsQuery : IQuery<RunPage>, IRequireTeamMembership
     /// <summary>Only runs from any of these open <c>source_type</c> tokens; bind <c>?sourceTypes=manual&amp;sourceTypes=replay</c>. Omit for any source.</summary>
     public IReadOnlyList<string>? SourceTypes { get; init; }
 
+    /// <summary>Only runs with (<c>true</c>) / without (<c>false</c>) a pending decision; omit for either.</summary>
+    public bool? HasPendingDecision { get; init; }
+
+    /// <summary>Only runs that need attention (<c>true</c>) / don't (<c>false</c>) — the broad union; omit for either.</summary>
+    public bool? NeedsAttention { get; init; }
+
     /// <summary>Inclusive lower bound on the run's creation instant.</summary>
     public DateTimeOffset? Since { get; init; }
 
@@ -43,6 +49,8 @@ public sealed record ListTeamRunsQuery : IQuery<RunPage>, IRequireTeamMembership
         WorkflowIds = WorkflowIds,
         Statuses = Statuses,
         SourceTypes = SourceTypes,
+        HasPendingDecision = HasPendingDecision,
+        NeedsAttention = NeedsAttention,
         Since = Since,
         Until = Until,
     };

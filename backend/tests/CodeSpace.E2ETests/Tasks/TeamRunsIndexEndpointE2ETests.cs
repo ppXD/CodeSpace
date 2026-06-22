@@ -91,6 +91,12 @@ public sealed class TeamRunsIndexEndpointE2ETests : IClassFixture<TaskLaunchApiF
         filtered.StatusCode.ShouldBe(HttpStatusCode.OK, customMessage: await DescribeFailureAsync(filtered));
         var page = await filtered.Content.ReadFromJsonAsync<RunPage>();
         page!.Items.ShouldNotContain(r => r.Id == runId, "the workflowIds filter binds (repeated param = OR list) and excludes the null-workflow task run");
+
+        // A bool filter binds too: a freshly-launched task never has a pending decision, so ?hasPendingDecision=true
+        // deterministically excludes it — proving the bool flag flows controller → query → service (the EXISTS path).
+        var decided = await SendAsync(HttpMethod.Get, "/api/workflows/runs?hasPendingDecision=true", userId, teamId);
+        decided.StatusCode.ShouldBe(HttpStatusCode.OK, customMessage: await DescribeFailureAsync(decided));
+        (await decided.Content.ReadFromJsonAsync<RunPage>())!.Items.ShouldNotContain(r => r.Id == runId, "hasPendingDecision=true binds and excludes a run with no pending decision");
     }
 
     [Fact]

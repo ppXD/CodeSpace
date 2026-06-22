@@ -42,6 +42,27 @@ public sealed record RunListFilter
     /// <summary>Only runs from any of these open <c>source_type</c> tokens (<c>source_type = ANY</c>; e.g. <c>manual</c>, <c>schedule.cron</c>, <c>provider.github.pull_request</c>). Null / empty = any source.</summary>
     public IReadOnlyList<string>? SourceTypes { get; init; }
 
+    /// <summary>
+    /// <c>true</c> = only runs with a PENDING decision (a parked decision the run is waiting on a human/policy to
+    /// answer), <c>false</c> = only runs WITHOUT one, null = either. Narrower than <c>Suspended</c>: a run parked on a
+    /// Timer/Action wait is Suspended but has no pending decision, and an agent-grain decision parks the agent without
+    /// flipping the run's status. Matches either park backend (node-grain <c>workflow_run_wait</c> Decision-Pending,
+    /// or agent-grain <c>tool_call_ledger</c> decision.request-AwaitingApproval via its agent run) — an EXISTS.
+    /// </summary>
+    public bool? HasPendingDecision { get; init; }
+
+    /// <summary>
+    /// <c>true</c> = only runs a human should act on NOW (the BROAD attention union), <c>false</c> = only runs that
+    /// don't, null = either. A run needs attention when it (a) has a pending decision (<see cref="HasPendingDecision"/>),
+    /// OR (b) is Suspended on a HUMAN-ACTIONABLE wait — Approval / Action (NOT a self-advancing supervisor wait, a
+    /// timer, or a machine wait), OR (c) Failed and UNRESOLVED (no successful replay/rerun), OR (d) is Running but
+    /// genuinely STUCK (started long ago with no recent ledger progress — the reconciler's liveness signal, not the run
+    /// row's audit timestamp). Intentionally broader than the cockpit's client-side <c>suspendedNeedingReview</c>
+    /// (which is Suspended-minus-queued-decision only); a UI wiring this must reconcile card-vs-zone scope rather than
+    /// drop-in replace.
+    /// </summary>
+    public bool? NeedsAttention { get; init; }
+
     /// <summary>Inclusive lower bound on <c>created_date</c> — only runs created at or after this instant.</summary>
     public DateTimeOffset? Since { get; init; }
 

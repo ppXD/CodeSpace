@@ -4,7 +4,9 @@ using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Workflows;
 using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.IntegrationTests.Workflows.Infrastructure;
+using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Constants;
+using CodeSpace.Messages.Decisions;
 using CodeSpace.Messages.Dtos.Workflows;
 using CodeSpace.Messages.Enums;
 using Shouldly;
@@ -316,6 +318,66 @@ public class TeamRunsIndexFlowTests
         walked.ShouldBe(failures, "the filter holds across every page — keyset paging never leaks a non-matching (Success) row");
     }
 
+    [Fact]
+    public async Task HasPendingDecision_matches_node_and_agent_grain_and_is_narrower_than_suspended()
+    {
+        var (teamA, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+
+        var t = DateTimeOffset.UtcNow;
+        var nodeDecision = await InsertRunAsync(teamA, null, t, workflowId: null, status: WorkflowRunStatus.Suspended);
+        await SeedNodeDecisionWaitAsync(nodeDecision);                                                  // parked on a Decision wait
+        var agentDecision = await InsertRunAsync(teamA, null, t.AddMinutes(-1), workflowId: null, status: WorkflowRunStatus.Running);
+        await SeedAgentDecisionAsync(teamA, agentDecision);                                             // an agent.code decision.request
+        var resolvedDecision = await InsertRunAsync(teamA, null, t.AddMinutes(-2), workflowId: null, status: WorkflowRunStatus.Suspended);
+        await SeedNodeDecisionWaitAsync(resolvedDecision, resolved: true);                              // a RESOLVED decision → no longer pending
+        var suspendedNoDecision = await InsertRunAsync(teamA, null, t.AddMinutes(-3), workflowId: null, status: WorkflowRunStatus.Suspended);   // Suspended, but on no decision
+
+        (await FilterAsync(teamA, new RunListFilter { HasPendingDecision = true }))
+            .Select(r => r.Id).ShouldBe(new[] { nodeDecision, agentDecision },
+                customMessage: "matches a node-grain Decision-Pending wait OR an agent-grain decision.request — and is NARROWER than Suspended (the resolved decision + the decision-less suspended run are excluded)");
+
+        (await FilterAsync(teamA, new RunListFilter { HasPendingDecision = false }))
+            .Select(r => r.Id).ShouldBe(new[] { resolvedDecision, suspendedNoDecision },
+                customMessage: "the false form is the exact complement — runs WITHOUT a pending decision");
+    }
+
+    [Fact]
+    public async Task NeedsAttention_is_the_broad_union_actionable_suspend_unresolved_failure_or_stuck_running()
+    {
+        var (teamA, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var t = DateTimeOffset.UtcNow;
+
+        // (a) a pending decision
+        var decisionRun = await InsertRunAsync(teamA, null, t, workflowId: null, status: WorkflowRunStatus.Running);
+        await SeedAgentDecisionAsync(teamA, decisionRun);
+
+        // (b) a HUMAN-actionable suspend (Approval) → attention; a self-advancing supervisor suspend → NOT
+        var approvalSuspended = await InsertRunAsync(teamA, null, t.AddMinutes(-1), workflowId: null, status: WorkflowRunStatus.Suspended);
+        await SeedWaitAsync(approvalSuspended, WorkflowWaitKinds.Approval, WorkflowWaitStatuses.Pending);
+        var selfAdvance = await InsertRunAsync(teamA, null, t.AddMinutes(-2), workflowId: null, status: WorkflowRunStatus.Suspended);
+        await SeedWaitAsync(selfAdvance, WorkflowWaitKinds.SupervisorDecision, WorkflowWaitStatuses.Pending);   // self-advance — needs no human
+
+        // (c) an UNRESOLVED failure → attention; a failure with a successful replay child → NOT
+        var unresolvedFailure = await InsertRunAsync(teamA, null, t.AddMinutes(-3), workflowId: null, status: WorkflowRunStatus.Failure);
+        var resolvedFailure = await InsertRunAsync(teamA, null, t.AddMinutes(-4), workflowId: null, status: WorkflowRunStatus.Failure);
+        var replayChild = await InsertRunAsync(teamA, parentRunId: resolvedFailure, t.AddMinutes(-3), workflowId: null, status: WorkflowRunStatus.Success);   // successful replay → resolves the failure
+
+        // (d) a genuinely STUCK running run (old StartedAt, no ledger) → attention; a healthy long-running run (recent ledger) → NOT
+        var stuckRunning = await InsertRunAsync(teamA, null, t.AddMinutes(-5), workflowId: null, status: WorkflowRunStatus.Running, startedAt: t.AddHours(-2));
+        var healthyRunning = await InsertRunAsync(teamA, null, t.AddMinutes(-6), workflowId: null, status: WorkflowRunStatus.Running, startedAt: t.AddHours(-2));
+        await SeedRunRecordAsync(healthyRunning, t.AddMinutes(-1));   // recent ledger progress → alive, not stuck
+
+        var success = await InsertRunAsync(teamA, null, t.AddMinutes(-7), workflowId: null, status: WorkflowRunStatus.Success);
+
+        (await FilterAsync(teamA, new RunListFilter { NeedsAttention = true }))
+            .Select(r => r.Id).ShouldBe(new[] { decisionRun, approvalSuspended, unresolvedFailure, stuckRunning }, ignoreOrder: true,
+                customMessage: "the broad union: pending-decision OR human-actionable-suspend OR unresolved-failure OR stuck-running — EXCLUDING a self-advance suspend, a replayed failure, a fresh-ledger long-runner, and a success");
+
+        (await FilterAsync(teamA, new RunListFilter { NeedsAttention = false }))
+            .Select(r => r.Id).ShouldBe(new[] { selfAdvance, resolvedFailure, replayChild, healthyRunning, success }, ignoreOrder: true,
+                customMessage: "the false form is the exact complement — self-advance, resolved-failure + its replay, a live long-runner, and a success all need no human");
+    }
+
     private async Task<Guid> CreateNamedWorkflowAsync(Guid teamId, Guid userId, string name)
     {
         using var scope = _fixture.BeginScopeAs(userId, teamId, Roles.Admin);
@@ -348,7 +410,7 @@ public class TeamRunsIndexFlowTests
         return page.Items;
     }
 
-    private async Task<Guid> InsertRunAsync(Guid teamId, Guid? parentRunId, DateTimeOffset createdDate, Guid? workflowId, string? sourceType = null, WorkflowRunStatus status = WorkflowRunStatus.Enqueued)
+    private async Task<Guid> InsertRunAsync(Guid teamId, Guid? parentRunId, DateTimeOffset createdDate, Guid? workflowId, string? sourceType = null, WorkflowRunStatus status = WorkflowRunStatus.Enqueued, DateTimeOffset? startedAt = null)
     {
         using var scope = _fixture.BeginScope();
         var db = scope.Resolve<CodeSpaceDbContext>();
@@ -382,6 +444,7 @@ public class TeamRunsIndexFlowTests
             SourceType = resolvedSource,   // denorm mirrors the request — the team index now excludes children by THIS column
             ParentRunId = parentRunId,
             Status = status,
+            StartedAt = startedAt,   // set for a "stuck running" run — NeedsAttention's running-stale branch reads StartedAt (not the audit timestamp)
             CreatedDate = createdDate,   // explicit → the audit interceptor leaves it (it only stamps a default value)
             CreatedBy = SystemUsers.SeederId,
             LastModifiedBy = SystemUsers.SeederId,
@@ -389,5 +452,98 @@ public class TeamRunsIndexFlowTests
 
         await db.SaveChangesAsync().ConfigureAwait(false);
         return runId;
+    }
+
+    /// <summary>Park a node-grain Decision wait on a run (Pending unless <paramref name="resolved"/>). Mirrors the durable Decision substrate's node grain.</summary>
+    private Task SeedNodeDecisionWaitAsync(Guid runId, bool resolved = false) =>
+        SeedWaitAsync(runId, WorkflowWaitKinds.Decision, resolved ? WorkflowWaitStatuses.Resolved : WorkflowWaitStatuses.Pending);
+
+    /// <summary>Park a wait of any kind/status on a run — used to exercise the human-actionable (Approval/Action) vs self-advance (SupervisorDecision) attention scoping.</summary>
+    private async Task SeedWaitAsync(Guid runId, string waitKind, string status)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+
+        db.WorkflowRunWait.Add(new WorkflowRunWait
+        {
+            Id = Guid.NewGuid(),
+            RunId = runId,
+            NodeId = "wait",
+            IterationKey = string.Empty,
+            WaitKind = waitKind,
+            Token = Guid.NewGuid().ToString("N"),
+            WakeAt = DateTimeOffset.UtcNow.AddMinutes(5),
+            Status = status,
+            PayloadJson = "{}",
+            CreatedAt = DateTimeOffset.UtcNow,
+            ResolvedAt = status == WorkflowWaitStatuses.Resolved ? DateTimeOffset.UtcNow : null,
+        });
+
+        await db.SaveChangesAsync().ConfigureAwait(false);
+    }
+
+    /// <summary>Append a ledger record at <paramref name="occurredAt"/> — recent ledger activity is the liveness signal NeedsAttention's stuck-running branch reads (NOT the run row's audit timestamp).</summary>
+    private async Task SeedRunRecordAsync(Guid runId, DateTimeOffset occurredAt)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+
+        db.WorkflowRunRecord.Add(new WorkflowRunRecord
+        {
+            Id = Guid.NewGuid(),
+            RunId = runId,
+            Sequence = 1,
+            RecordType = WorkflowRunRecordTypes.RunQueued,
+            NodeId = "n1",
+            IterationKey = string.Empty,
+            CorrelationId = null,
+            PayloadJson = "{}",
+            OccurredAt = occurredAt,
+        });
+
+        await db.SaveChangesAsync().ConfigureAwait(false);
+    }
+
+    /// <summary>Park an agent-grain decision.request on a run: an AgentRun under the run + a tool-ledger row in the given status. Mirrors the durable Decision substrate's agent grain.</summary>
+    private async Task SeedAgentDecisionAsync(Guid teamId, Guid runId, ToolCallLedgerStatus status = ToolCallLedgerStatus.AwaitingApproval)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        var now = DateTimeOffset.UtcNow;
+        var agentRunId = Guid.NewGuid();
+
+        db.AgentRun.Add(new AgentRun
+        {
+            Id = agentRunId,
+            TeamId = teamId,
+            WorkflowRunId = runId,
+            NodeId = "agent",
+            IterationKey = "agent#turn0#0",
+            Harness = "codex-cli",
+            Status = AgentRunStatus.Running,
+            TaskJson = "{}",
+            CreatedDate = now,
+            CreatedBy = SystemUsers.SeederId,
+            LastModifiedDate = now,
+            LastModifiedBy = SystemUsers.SeederId,
+        });
+        await db.SaveChangesAsync().ConfigureAwait(false);
+
+        var ledgerId = Guid.NewGuid();
+        db.ToolCallLedger.Add(new ToolCallLedger
+        {
+            Id = ledgerId,
+            TeamId = teamId,
+            AgentRunId = agentRunId,
+            ToolKind = DecisionToolKinds.DecisionRequest,
+            IdempotencyKey = $"decision.request:{ledgerId:N}",
+            InputHash = new string('0', 64),
+            Status = status,
+            ApprovalDeadlineAt = now.AddMinutes(5),
+            DecisionEnvelopeJson = "{}",
+            CreatedBy = SystemUsers.SeederId,
+            LastModifiedBy = SystemUsers.SeederId,
+        });
+        await db.SaveChangesAsync().ConfigureAwait(false);
     }
 }

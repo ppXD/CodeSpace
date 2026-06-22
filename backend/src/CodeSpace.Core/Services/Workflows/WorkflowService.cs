@@ -11,8 +11,11 @@ using CodeSpace.Core.Services.Workflows.Engine;
 using CodeSpace.Core.Services.Workflows.Nodes;
 using CodeSpace.Core.Services.Workflows.RunSources;
 using CodeSpace.Core.Services.Workflows.Runtime;
+using CodeSpace.Core.Services.Workflows.Reconciliation;
+using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Commands.Workflows;
 using CodeSpace.Messages.Constants;
+using CodeSpace.Messages.Decisions;
 using CodeSpace.Messages.Dtos.Workflows;
 using CodeSpace.Messages.Enums;
 using Microsoft.EntityFrameworkCore;
@@ -872,7 +875,7 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
     /// ORDER BY are applied by the caller AFTER this so the index drives the scan. Index coverage per dimension is
     /// documented on <see cref="RunListFilter"/> (workflow + date-window seek; bare status / source recheck).
     /// </summary>
-    private static IQueryable<WorkflowRun> ApplyFilter(IQueryable<WorkflowRun> query, RunListFilter filter)
+    private IQueryable<WorkflowRun> ApplyFilter(IQueryable<WorkflowRun> query, RunListFilter filter)
     {
         if (filter.WorkflowIds is { Count: > 0 } workflowIds) query = query.Where(r => r.WorkflowId != null && workflowIds.Contains(r.WorkflowId.Value));
         if (filter.Statuses is { Count: > 0 } statuses) query = query.Where(r => statuses.Contains(r.Status));
@@ -880,8 +883,60 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
         if (filter.Since is { } since) query = query.Where(r => r.CreatedDate >= since);
         if (filter.Until is { } until) query = query.Where(r => r.CreatedDate < until);
 
+        if (filter.HasPendingDecision is { } wantsDecision)
+        {
+            var pending = HasPendingDecisionPredicate();
+            query = query.Where(wantsDecision ? pending : ExpressionPredicate.Not(pending));
+        }
+
+        if (filter.NeedsAttention is { } wantsAttention)
+        {
+            var attention = ExpressionPredicate.Or(HasPendingDecisionPredicate(), NeedsAttentionNonDecisionPredicate(DateTimeOffset.UtcNow));
+            query = query.Where(wantsAttention ? attention : ExpressionPredicate.Not(attention));
+        }
+
         return query;
     }
+
+    /// <summary>
+    /// The non-decision components of the broad NeedsAttention union — each a thing a HUMAN must act on:
+    /// <list type="bullet">
+    /// <item>a human-actionable suspend: Suspended on a pending Approval / Action wait. EXCLUDES self-advancing waits
+    ///   (SupervisorDecision / SupervisorAgentWaits) and machine waits (Timer / Callback / Subworkflow / AgentRun) — a
+    ///   supervisor run parked between turns is Suspended but needs no human. (Decision waits are the OTHER half of the
+    ///   union, via <see cref="HasPendingDecisionPredicate"/>.)</item>
+    /// <item>an UNRESOLVED failure: Failed with no successful replay/rerun (a fork stamps <c>parent_run_id</c> at the
+    ///   original, so a successful child means the failure was already resolved).</item>
+    /// <item>a genuinely STUCK running run: started past <c>RunningStuckAfter</c> AND no ledger progress within
+    ///   <c>LedgerLivenessWindow</c> — the reconciler's OWN liveness signal. NOT <c>LastModifiedDate</c>: the lifecycle
+    ///   transitions via <c>ExecuteUpdateAsync</c> and progress is the append-only ledger, neither of which bumps the
+    ///   run row, so its audit timestamp does not track liveness.</item>
+    /// </list>
+    /// </summary>
+    private Expression<Func<WorkflowRun, bool>> NeedsAttentionNonDecisionPredicate(DateTimeOffset now) => r =>
+        (r.Status == WorkflowRunStatus.Suspended
+            && _db.WorkflowRunWait.Any(w => w.RunId == r.Id && w.Status == WorkflowWaitStatuses.Pending
+                && (w.WaitKind == WorkflowWaitKinds.Approval || w.WaitKind == WorkflowWaitKinds.Action)))
+        || (r.Status == WorkflowRunStatus.Failure
+            && !_db.WorkflowRun.Any(child => child.ParentRunId == r.Id && child.Status == WorkflowRunStatus.Success))
+        || (r.Status == WorkflowRunStatus.Running && r.StartedAt < now - StuckRunReconcilerService.RunningStuckAfter
+            && !_db.WorkflowRunRecord.Any(rec => rec.RunId == r.Id && rec.OccurredAt >= now - StuckRunReconcilerService.LedgerLivenessWindow));
+
+    /// <summary>
+    /// EXISTS a pending decision for the run, on EITHER park backend: a node-grain <c>workflow_run_wait</c> in
+    /// Decision/Pending, or an agent-grain <c>tool_call_ledger</c> decision.request in AwaitingApproval (approved_at
+    /// null) reached via the run's agent runs. Backed by the two 0064 partial indexes.
+    /// </summary>
+    private Expression<Func<WorkflowRun, bool>> HasPendingDecisionPredicate() => r =>
+        _db.WorkflowRunWait.Any(w => w.RunId == r.Id && w.WaitKind == WorkflowWaitKinds.Decision && w.Status == WorkflowWaitStatuses.Pending)
+        || _db.AgentRun.Any(a => a.WorkflowRunId == r.Id
+            && _db.ToolCallLedger.Any(t => t.AgentRunId == a.Id && t.ToolKind == DecisionToolKinds.DecisionRequest
+                && t.Status == ToolCallLedgerStatus.AwaitingApproval && t.ApprovedAt == null));
+
+    /// <summary>The non-decision components of NeedsAttention: Suspended / Failed, or active-but-stale past <paramref name="staleBefore"/>.</summary>
+    private static Expression<Func<WorkflowRun, bool>> StaleOrUnhealthyPredicate(DateTimeOffset staleBefore) => r =>
+        r.Status == WorkflowRunStatus.Suspended || r.Status == WorkflowRunStatus.Failure
+        || ((r.Status == WorkflowRunStatus.Pending || r.Status == WorkflowRunStatus.Enqueued || r.Status == WorkflowRunStatus.Running) && r.LastModifiedDate < staleBefore);
 
     /// <summary>
     /// In-SQL projection to the history-row shape — selects only the summary columns (no over-fetch) and LEFT JOINs
