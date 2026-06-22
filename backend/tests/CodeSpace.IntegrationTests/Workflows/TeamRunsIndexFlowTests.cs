@@ -226,11 +226,14 @@ public class TeamRunsIndexFlowTests
         var t = DateTimeOffset.UtcNow;
         var replay = await InsertRunAsync(teamA, null, t, workflowId: null, sourceType: WorkflowRunSourceTypes.Replay);
         await InsertRunAsync(teamA, null, t.AddMinutes(-1), workflowId: null, sourceType: WorkflowRunSourceTypes.Snapshot);
-        await InsertRunAsync(teamA, null, t.AddMinutes(-2), workflowId: null, sourceType: WorkflowRunSourceTypes.ScheduleCron);
+        var cron = await InsertRunAsync(teamA, null, t.AddMinutes(-2), workflowId: null, sourceType: WorkflowRunSourceTypes.ScheduleCron);
 
-        var rows = await FilterAsync(teamA, new RunListFilter { SourceType = WorkflowRunSourceTypes.Replay });
+        (await FilterAsync(teamA, new RunListFilter { SourceTypes = new[] { WorkflowRunSourceTypes.Replay } }))
+            .Select(r => r.Id).ShouldBe(new[] { replay }, "a one-element source set matches that token exactly");
 
-        rows.Select(r => r.Id).ShouldBe(new[] { replay }, "source_type filter matches the open token exactly");
+        (await FilterAsync(teamA, new RunListFilter { SourceTypes = new[] { WorkflowRunSourceTypes.Replay, WorkflowRunSourceTypes.ScheduleCron } }))
+            .Select(r => r.Id).ShouldBe(new[] { replay, cron },
+                customMessage: "values within a field are OR'd (source_type = ANY) — replay + cron, snapshot excluded, newest first");
     }
 
     [Fact]
@@ -257,13 +260,18 @@ public class TeamRunsIndexFlowTests
 
         var wfA = await CreateNamedWorkflowAsync(teamId, userId, "Alpha");
         var wfB = await CreateNamedWorkflowAsync(teamId, userId, "Beta");
+        var wfC = await CreateNamedWorkflowAsync(teamId, userId, "Gamma");
         var runA = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, wfA, teamId);
-        await WorkflowsTestSeed.SeedManualRunAsync(_fixture, wfB, teamId);
-        await InsertRunAsync(teamId, null, DateTimeOffset.UtcNow.AddMinutes(-5), workflowId: null);   // a task run
+        var runB = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, wfB, teamId);
+        await WorkflowsTestSeed.SeedManualRunAsync(_fixture, wfC, teamId);                            // workflow C — excluded
+        await InsertRunAsync(teamId, null, DateTimeOffset.UtcNow.AddMinutes(-5), workflowId: null);   // a task run (null workflow)
 
-        var rows = await FilterAsync(teamId, new RunListFilter { WorkflowId = wfA });
+        (await FilterAsync(teamId, new RunListFilter { WorkflowIds = new[] { wfA } }))
+            .Select(r => r.Id).ShouldBe(new[] { runA }, "a one-element workflow set returns only that workflow's runs — not the task run");
 
-        rows.Select(r => r.Id).ShouldBe(new[] { runA }, "workflow filter returns only that workflow's runs — not workflow B's, not the task run");
+        (await FilterAsync(teamId, new RunListFilter { WorkflowIds = new[] { wfA, wfB } }))
+            .Select(r => r.Id).ShouldBe(new[] { runA, runB }, ignoreOrder: true,
+                customMessage: "workflow ids are OR'd (workflow_id = ANY) — A and B, never C, never the null-workflow task run");
     }
 
     [Fact]
@@ -276,7 +284,7 @@ public class TeamRunsIndexFlowTests
         await InsertRunAsync(teamA, null, t.AddMinutes(-1), workflowId: null, sourceType: WorkflowRunSourceTypes.Replay, status: WorkflowRunStatus.Success);   // wrong status
         await InsertRunAsync(teamA, null, t.AddMinutes(-2), workflowId: null, sourceType: WorkflowRunSourceTypes.Snapshot, status: WorkflowRunStatus.Failure);  // wrong source
 
-        var rows = await FilterAsync(teamA, new RunListFilter { SourceType = WorkflowRunSourceTypes.Replay, Statuses = new[] { WorkflowRunStatus.Failure } });
+        var rows = await FilterAsync(teamA, new RunListFilter { SourceTypes = new[] { WorkflowRunSourceTypes.Replay }, Statuses = new[] { WorkflowRunStatus.Failure } });
 
         rows.Select(r => r.Id).ShouldBe(new[] { match }, "multiple filter dimensions compose as AND — only the run matching every dimension");
     }

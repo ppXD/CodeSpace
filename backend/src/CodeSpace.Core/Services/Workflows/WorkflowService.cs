@@ -874,9 +874,9 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
     /// </summary>
     private static IQueryable<WorkflowRun> ApplyFilter(IQueryable<WorkflowRun> query, RunListFilter filter)
     {
-        if (filter.WorkflowId is { } workflowId) query = query.Where(r => r.WorkflowId == workflowId);
+        if (filter.WorkflowIds is { Count: > 0 } workflowIds) query = query.Where(r => r.WorkflowId != null && workflowIds.Contains(r.WorkflowId.Value));
         if (filter.Statuses is { Count: > 0 } statuses) query = query.Where(r => statuses.Contains(r.Status));
-        if (!string.IsNullOrEmpty(filter.SourceType)) query = query.Where(r => r.SourceType == filter.SourceType);
+        if (filter.SourceTypes is { Count: > 0 } sourceTypes) query = query.Where(r => sourceTypes.Contains(r.SourceType));
         if (filter.Since is { } since) query = query.Where(r => r.CreatedDate >= since);
         if (filter.Until is { } until) query = query.Where(r => r.CreatedDate < until);
 

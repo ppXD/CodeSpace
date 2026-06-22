@@ -85,12 +85,12 @@ public sealed class TeamRunsIndexEndpointE2ETests : IClassFixture<TaskLaunchApiF
         var all = await (await SendAsync(HttpMethod.Get, "/api/workflows/runs", userId, teamId)).Content.ReadFromJsonAsync<RunPage>();
         all!.Items.ShouldContain(r => r.Id == runId);
 
-        // ?workflowId= binds from the query string and filters: a task run has a null workflowId, so any workflowId
-        // filter excludes it — a deterministic proof the generic filter param flows controller → query → service.
-        var filtered = await SendAsync(HttpMethod.Get, $"/api/workflows/runs?workflowId={Guid.NewGuid()}", userId, teamId);
+        // ?workflowIds= (a list param) binds from the query string and filters: a task run has a null workflowId, so
+        // any workflowIds filter excludes it — a deterministic proof the generic list filter flows controller → query → service.
+        var filtered = await SendAsync(HttpMethod.Get, $"/api/workflows/runs?workflowIds={Guid.NewGuid()}&workflowIds={Guid.NewGuid()}", userId, teamId);
         filtered.StatusCode.ShouldBe(HttpStatusCode.OK, customMessage: await DescribeFailureAsync(filtered));
         var page = await filtered.Content.ReadFromJsonAsync<RunPage>();
-        page!.Items.ShouldNotContain(r => r.Id == runId, "the workflowId filter binds from the query string and excludes the null-workflow task run");
+        page!.Items.ShouldNotContain(r => r.Id == runId, "the workflowIds filter binds (repeated param = OR list) and excludes the null-workflow task run");
     }
 
     [Fact]
