@@ -64,10 +64,7 @@ function TeamRunsPage() {
       <div className="ct-head" style={{ paddingBottom: 18 }}>
         <div className="ct-crumbs"><span className="cur">Runs</span></div>
         <div className="ct-title-row">
-          <div>
-            <h1 className="ct-title">Runs</h1>
-            <div className="ct-subtitle">across tasks · workflows · PR automation · scheduled jobs</div>
-          </div>
+          <h1 className="ct-title">Runs</h1>
         </div>
       </div>
 

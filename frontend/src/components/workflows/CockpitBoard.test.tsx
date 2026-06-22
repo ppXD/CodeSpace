@@ -42,8 +42,9 @@ describe("CockpitBoard", () => {
     expect(screen.getByText("Choose merge strategy")).toBeTruthy();   // decision card
     expect(screen.getByText("Live")).toBeTruthy();
     expect(screen.getByText(/Implement · 2 of 3 agents active/)).toBeTruthy();   // live sentence from phases
-    expect(screen.getByText("Recent")).toBeTruthy();
-    expect(container.querySelectorAll(".runs-row").length).toBe(1);    // the one Success run
+    expect(screen.getByText("History")).toBeTruthy();
+    expect(container.querySelectorAll(".run-row2").length).toBe(1);    // the one Success run
+    expect(screen.getByText(/Workflow · Manual · v1 · completed/)).toBeTruthy();   // title-cased source + the result-summary meta
   });
 
   it("dedups a suspended run that already has a queued decision", () => {
@@ -62,14 +63,14 @@ describe("CockpitBoard", () => {
     fireEvent.click(screen.getByText("Review →"));
     expect(onOpen).toHaveBeenCalledWith("s1");
 
-    fireEvent.click(container.querySelector(".runs-row")!);
+    fireEvent.click(container.querySelector(".run-row2")!);
     expect(onOpen).toHaveBeenCalledWith("r1");
   });
 
   it("filter='failed' shows only failed + suspended runs", () => {
     const { container } = board({ filter: "failed", runs: [run("f", "Failure"), run("s", "Suspended"), run("ok", "Success"), run("live", "Running")] });
     expect(screen.getByText("Failed / stuck")).toBeTruthy();
-    expect(container.querySelectorAll(".runs-row").length).toBe(2);   // Failure + Suspended only
+    expect(container.querySelectorAll(".run-row2").length).toBe(2);   // Failure + Suspended only
   });
 
   it("falls back to the run status in the Live row before its phases + start load", () => {
@@ -85,7 +86,7 @@ describe("CockpitBoard", () => {
       run("t2", "Success", { createdDate: yesterday }),
     ] });
     expect(screen.getByText("Today")).toBeTruthy();
-    expect(container.querySelectorAll(".runs-row").length).toBe(1);   // only t1 (today)
+    expect(container.querySelectorAll(".run-row2").length).toBe(1);   // only t1 (today)
   });
 
   it("shows the calm empty state when nothing needs attention", () => {
