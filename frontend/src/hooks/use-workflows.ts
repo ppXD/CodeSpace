@@ -104,6 +104,22 @@ export function useWorkflowRuns(workflowId: string | null) {
   });
 }
 
+/**
+ * The team's runs index (every top-level run, any source). Polls every 4s while at least one run is still
+ * non-terminal — the same cadence as the per-workflow run list — and stops once everything has settled.
+ */
+export function useTeamRuns(limit = 50) {
+  return useQuery({
+    queryKey: ["team-runs", limit],
+    queryFn: () => workflowsApi.listTeamRuns(limit),
+    refetchInterval: (q) => {
+      const data = q.state.data;
+      if (!data) return false;
+      return data.some((r) => isRunActive(r.status)) ? 4000 : false;
+    },
+  });
+}
+
 export function useWorkflowRun(runId: string | null) {
   return useQuery({
     queryKey: ["workflow-run", runId],

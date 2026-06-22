@@ -51,6 +51,10 @@ public interface IWorkflowService
     Task<Guid> RerunMapBranchAsync(Guid originalRunId, string mapNodeId, int branchIndex, Guid teamId, Guid actorUserId, CancellationToken cancellationToken);
 
     Task<IReadOnlyList<WorkflowRunSummary>> ListRunsAsync(Guid workflowId, Guid teamId, int limit, CancellationToken cancellationToken);
+
+    /// <summary>The team's runs index — every top-level run the team owns (any source), newest first, capped at <paramref name="limit"/>.</summary>
+    Task<IReadOnlyList<WorkflowRunSummary>> ListTeamRunsAsync(Guid teamId, int limit, CancellationToken cancellationToken);
+
     Task<WorkflowRunDetail?> GetRunAsync(Guid runId, Guid teamId, CancellationToken cancellationToken);
 
     /// <summary>

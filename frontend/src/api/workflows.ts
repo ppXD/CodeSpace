@@ -389,6 +389,9 @@ export const workflowsApi = {
   listRuns: (workflowId: string, limit = 50) =>
     fetchJson<WorkflowRunSummary[]>(`/api/workflows/${workflowId}/runs?limit=${limit}`),
 
+  /** The team's runs index — every top-level run the team owns (any source), newest first. */
+  listTeamRuns: (limit = 50) => fetchJson<WorkflowRunSummary[]>(`/api/workflows/runs?limit=${limit}`),
+
   getRun: (runId: string) => fetchJson<WorkflowRunDetail>(`/api/workflows/runs/${runId}`),
 
   /** The run's outline — the merged, order-sorted phase tree projected over the durable substrate (run-neutral). */
