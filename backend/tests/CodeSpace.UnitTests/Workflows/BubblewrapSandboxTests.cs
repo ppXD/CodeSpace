@@ -68,6 +68,16 @@ public sealed class BubblewrapSandboxTests
     }
 
     [Fact]
+    public void A_requested_egress_allowlist_fails_closed_to_no_network_until_enforcement_lands()
+    {
+        // B3.1: the host-filter enforcement is a later slice, so an allowlist this runner cannot yet enforce must
+        // FAIL CLOSED (severed), never silently share the host network ("any host").
+        var withAllowlist = BubblewrapSandbox.BuildArgs(Plan() with { ShareNetwork = true, EgressAllowlist = new[] { "api.anthropic.com" } });
+
+        withAllowlist.ShouldContain("--unshare-net", customMessage: "an unenforceable allowlist denies all egress — never falls open to full host network");
+    }
+
+    [Fact]
     public void Binds_an_absolute_command_directory_that_is_outside_the_standard_roots()
     {
         var a = BubblewrapSandbox.BuildArgs(Plan() with { Command = "/usr/local/custom/claude" });

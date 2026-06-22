@@ -35,10 +35,21 @@ public sealed record SandboxSpec
     /// <summary>
     /// Whether the command may reach the network. <c>false</c> → the sandbox runner severs egress entirely (a fresh
     /// network namespace with only loopback), so a confined agent cannot reach cloud-metadata, the LAN, or exfiltrate
-    /// over the internet. <c>true</c> (default — non-breaking) → the host network is shared. Enforced only by a
-    /// sandboxing runner; a bare-process runner cannot honour it. (A model-API-only egress allowlist is a later slice.)
+    /// over the internet. <c>true</c> (default — non-breaking) → the host network is shared, UNLESS
+    /// <see cref="EgressAllowlist"/> narrows it. Enforced only by a sandboxing runner; a bare-process runner cannot
+    /// honour it.
     /// </summary>
     public bool AllowNetwork { get; init; } = true;
+
+    /// <summary>
+    /// A DENY-BY-DEFAULT egress allowlist (host names) the run may reach — the narrowing of <see cref="AllowNetwork"/>
+    /// from "any host" to ONLY these (e.g. the model API + the git host). Null / empty ⇒ no allowlist: with
+    /// <see cref="AllowNetwork"/> the egress is full (today's behaviour), without it severed. When an allowlist IS set
+    /// but the runner cannot ENFORCE it (no privileged netns/filter — the enforcement is a follow-up slice), egress is
+    /// FAIL-CLOSED severed entirely rather than left wide open, so a requested narrowing never silently degrades to
+    /// "any host". The host filtering itself (netns + nftables / proxy) is enforced by a later sandbox slice.
+    /// </summary>
+    public IReadOnlyList<string>? EgressAllowlist { get; init; }
 
     /// <summary>
     /// Max processes the command + its descendants may spawn (RLIMIT_NPROC) — a fork-bomb cap so a runaway agent
