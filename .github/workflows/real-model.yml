@@ -61,10 +61,11 @@ jobs:
         run: dotnet restore backend/tests/CodeSpace.IntegrationTests/CodeSpace.IntegrationTests.csproj
 
       - name: Test (the supervisor decision eval — drives the live endpoint, scores the golden decisions)
-        # Scoped to the supervisor RealModel classes (no Postgres) — the single-decision kill-gate AND the multi-turn
-        # trajectory gate (RealModelSupervisorDecisionFlowTests + RealModelSupervisorTrajectoryFlowTests, both
-        # FullyQualifiedName~RealModelSupervisor). The planner RealModel test is a separate, DB-backed concern with its
-        # own ANTHROPIC-native key, so it is not run here.
+        # Scoped to the supervisor RealModel classes in IntegrationTests (no Postgres) — the single-decision kill-gate
+        # AND the multi-turn trajectory gate (RealModelSupervisorDecisionFlowTests + RealModelSupervisorTrajectoryFlowTests,
+        # both FullyQualifiedName~RealModelSupervisor). The DB-backed whole-loop gate lives in the E2ETests assembly and
+        # runs in its own Postgres job below. The planner RealModel test is a separate, DB-backed concern with its own
+        # ANTHROPIC-native key, so it is not run here.
         #
         # Per-wire gate policy lives in RealModelGate: the blessed wire (Anthropic by default) GATES this job; other
         # wires (OpenAI) run + report their verdict to the log but do NOT fail the job — an operator reblesses via the
@@ -75,3 +76,66 @@ jobs:
           --filter "FullyQualifiedName~RealModelSupervisor"
           --logger "console;verbosity=normal"
           --logger "trx;LogFileName=real-model.trx"
+
+  real-model-wholeloop:
+    name: real model (live-brain whole-loop)
+    runs-on: ubuntu-latest
+    # The live brain authors up to maxRounds (10) decisions, each a live API call (~15-60s), plus real git
+    # clone/capture/integrate per spawned agent + the acceptance grade — well under this ceiling; the headroom
+    # surfaces a slow tail's scored verdict rather than an opaque kill.
+    timeout-minutes: 45
+
+    # A plain host runner (NOT a privileged bwrap container): the whole-loop test does NOT set
+    # CODESPACE_REQUIRE_SANDBOX, so the runner confines the fake-CLI agent under bubblewrap when the host supports
+    # it and runs it unconfined otherwise — confinement is proven in the dedicated sandbox lane, here the gate is
+    # the LIVE BRAIN driving the real durable loop. git is pre-installed on ubuntu-latest (the test self-skips if not).
+    services:
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: '123456'
+          POSTGRES_DB: postgres
+        # Host-port mapped (NOT a container-alias) — this job runs directly on the runner, so the E2ETests fixture
+        # reaches Postgres at localhost:5432 (its appsettings default), exactly like the e2e-http job.
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d postgres"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 20
+
+    env:
+      # The custom-endpoint config the RealModel tests read; absent on a fork → the test self-skips → green at zero cost.
+      CODESPACE_LLM_BASE_URL: ${{ secrets.CODESPACE_LLM_BASE_URL }}
+      CODESPACE_LLM_API_KEY: ${{ secrets.CODESPACE_LLM_API_KEY }}
+      CODESPACE_LLM_MODEL_ID: ${{ secrets.CODESPACE_LLM_MODEL_ID }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up .NET 10
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Cache NuGet packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.nuget/packages
+          key: nuget-realmodel-e2e-${{ runner.os }}-${{ hashFiles('backend/**/*.csproj') }}
+          restore-keys: nuget-realmodel-e2e-${{ runner.os }}-
+
+      - name: Restore
+        run: dotnet restore backend/tests/CodeSpace.E2ETests/CodeSpace.E2ETests.csproj
+
+      - name: Test (the live-brain whole-loop — a REAL model drives the real durable engine end to end)
+        # Scoped to the single whole-loop class. The blessed wire (Anthropic) GATES via RealModelGate; the test
+        # self-skips (returns green) when the CODESPACE_LLM_* secrets are absent, so a fork stays green at zero cost.
+        run: >
+          dotnet test backend/tests/CodeSpace.E2ETests/CodeSpace.E2ETests.csproj
+          --no-restore
+          --filter "FullyQualifiedName~RealModelSupervisorWholeLoop"
+          --logger "console;verbosity=normal"
+          --logger "trx;LogFileName=real-model-wholeloop.trx"

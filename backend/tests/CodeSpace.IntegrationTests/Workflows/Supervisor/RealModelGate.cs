@@ -9,7 +9,7 @@ namespace CodeSpace.IntegrationTests.Workflows.Supervisor;
 /// blocking main — an honest split, not a silenced one. Default blessed set: Anthropic only. An operator widens or
 /// changes it via the env var (comma-separated provider names) with no code change.
 /// </summary>
-internal static class RealModelGate
+public static class RealModelGate
 {
     /// <summary>Comma-separated provider names whose real-model verdict GATES CI. Absent/blank → the default blessed set. Env-overridable so an operator can bless a different/extra wire without a code change (pinned by test).</summary>
     public const string RequiredProvidersEnvVar = "CODESPACE_REALMODEL_REQUIRED_PROVIDERS";
