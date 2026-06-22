@@ -542,6 +542,19 @@ public sealed class LocalProcessDurableRunnerTests : IDisposable
     }
 
     [Fact]
+    public async Task ResolveAllowedIpsBounded_propagates_a_real_cancellation_rather_than_masking_it_as_a_timeout()
+    {
+        // The bounded resolver converts a TIMEOUT (a black-holed DNS) into a fail-closed setup abort, but a GENUINE run
+        // cancellation must propagate as OperationCanceledException (handled as transient by the executor), never be
+        // reclassified. A pre-cancelled token + a name (forces the DNS path) exercises the distinction deterministically.
+        using var cts = new CancellationTokenSource();
+        await cts.CancelAsync();
+
+        await Should.ThrowAsync<OperationCanceledException>(
+            () => LocalProcessRunner.ResolveAllowedIpsBoundedAsync(new[] { "example.com" }, cts.Token));
+    }
+
+    [Fact]
     public void AppendChildCommand_binds_a_dedicated_socket_dir_NOT_the_spool_dir_so_no_spool_artifacts_leak()
     {
         if (BubblewrapSandbox.Available is null) return;   // bwrap-only: the writable --bind only exists under confinement

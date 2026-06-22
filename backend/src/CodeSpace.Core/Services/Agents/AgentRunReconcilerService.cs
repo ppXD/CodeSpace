@@ -4,6 +4,7 @@ using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Agents.Mcp;
 using CodeSpace.Core.Services.Agents.Sandbox;
+using CodeSpace.Core.Services.Agents.Sandbox.Isolation;
 using CodeSpace.Core.Services.Jobs;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Constants;
@@ -270,8 +271,29 @@ public sealed class AgentRunReconcilerService : IAgentRunReconcilerService, ISco
         if (durable is not null && handle is not null)
             await TerminateQuietlyAsync(durable, handle, runId, cancellationToken).ConfigureAwait(false);
 
+        await TearDownEgressNetnsQuietlyAsync(runId, cancellationToken).ConfigureAwait(false);
+
         await TryAppendEventAsync(runId, AgentEventKind.Error, AbandonedError, cancellationToken).ConfigureAwait(false);
         return StaleOutcome.Abandoned;
+    }
+
+    /// <summary>
+    /// Best-effort tear down an abandoned run's filtered-egress netns (B3 stability) — keyed by the RUN ID alone, so it
+    /// closes the one window the handle-keyed backstops (terminal teardown + spool reaper) can't see: a run that crashed
+    /// between the netns SETUP and the handle PERSIST left no handle carrying the reap key, so its netns/veth/nft-table
+    /// would otherwise leak permanently. The netns key IS the run id (the durable launch sets it up under
+    /// <c>runId.ToString("N")</c>), so a reconstruct-from-runId teardown reaps it. Idempotent + a no-op when the run had
+    /// no netns; gated on <see cref="FilteredEgressNetns.IsSupported"/> so a non-Linux host never spawns a doomed exec.
+    /// </summary>
+    private async Task TearDownEgressNetnsQuietlyAsync(Guid runId, CancellationToken cancellationToken)
+    {
+        if (!FilteredEgressNetns.IsSupported) return;
+
+        try { await FilteredEgressNetns.TeardownAsync(runId.ToString("N"), cancellationToken).ConfigureAwait(false); }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "AgentRunReconciler: best-effort egress-netns teardown for abandoned run {RunId} failed", runId);
+        }
     }
 
     /// <summary>Kill the abandoned run's orphaned process tree via its durable handle, swallowing any failure (the run still reached Failed; at worst the process lingers to its deadline) so a kill error never aborts the sweep.</summary>
