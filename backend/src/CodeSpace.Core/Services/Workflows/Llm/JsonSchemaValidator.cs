@@ -87,7 +87,9 @@ internal static class JsonSchemaValidator
         "array" => instance.ValueKind == JsonValueKind.Array,
         "string" => instance.ValueKind == JsonValueKind.String,
         "boolean" => instance.ValueKind is JsonValueKind.True or JsonValueKind.False,
-        "integer" => instance.ValueKind == JsonValueKind.Number && instance.TryGetInt64(out _),
+        // JSON Schema treats a number with no fractional part as an integer — so 5.0 IS a valid integer (TryGetInt64
+        // alone would wrongly reject it). Accept any Number whose value truncates to itself.
+        "integer" => instance.ValueKind == JsonValueKind.Number && instance.TryGetDouble(out var d) && d == Math.Truncate(d),
         "number" => instance.ValueKind == JsonValueKind.Number,
         "null" => instance.ValueKind == JsonValueKind.Null,
         _ => true,   // an unknown/compound type (e.g. a "type": ["string","null"] array we don't parse) → don't reject
@@ -100,7 +102,8 @@ internal static class JsonSchemaValidator
         return a.ValueKind switch
         {
             JsonValueKind.String => a.GetString() == b.GetString(),
-            JsonValueKind.Number => a.GetRawText() == b.GetRawText(),
+            // Compare numbers by VALUE so an enum of 1 matches a model's 1.0 (GetRawText would mismatch the spelling).
+            JsonValueKind.Number => a.TryGetDouble(out var av) && b.TryGetDouble(out var bv) && av == bv,
             JsonValueKind.True or JsonValueKind.False or JsonValueKind.Null => true,
             _ => a.GetRawText() == b.GetRawText(),
         };
