@@ -18,9 +18,7 @@ using Shouldly;
 namespace CodeSpace.E2ETests.Tasks;
 
 /// <summary>
-/// E2E coverage for <c>GET /api/workflows/runs/{runId}/phases</c> (and its deprecated <c>/api/tasks/{runId}/phases</c>
-/// alias, fetched for the SAME launched run so the migration is proven non-breaking without doubling the heavy agent
-/// chain) through the REAL ASP.NET pipeline — JWT auth, the X-Team-Id
+/// E2E coverage for <c>GET /api/tasks/{runId}/phases</c> through the REAL ASP.NET pipeline — JWT auth, the X-Team-Id
 /// team-scope behavior, route binding, the controller, the projector + sources, the GlobalExceptionFilter. A quick
 /// task is launched + run to terminal, then its phases are fetched over real HTTP and asserted; a foreign / absent
 /// run returns 404 (team-scoped, fail-closed).
@@ -38,7 +36,7 @@ public sealed class TaskRunPhasesEndpointE2ETests : IClassFixture<TaskLaunchApiF
     public TaskRunPhasesEndpointE2ETests(TaskLaunchApiFactory factory) { _factory = factory; }
 
     [Fact]
-    public async Task Get_phases_returns_the_phase_tree_via_canonical_and_alias_routes()
+    public async Task Get_phases_returns_the_phase_tree_for_a_launched_run()
     {
         if (OperatingSystem.IsWindows()) return;   // the fake CLI is a /bin/sh script the runner spawns
 
@@ -50,27 +48,21 @@ public sealed class TaskRunPhasesEndpointE2ETests : IClassFixture<TaskLaunchApiF
 
         await _factory.JobClient.DrainAsync();
 
-        // One launch, both routes: the canonical run-resource route AND the deprecated /api/tasks alias must
-        // return the identical phase tree — so the heavy agent chain runs ONCE (running it per-route doubles the
-        // chain in one class and is flaky), while still proving the migration is non-breaking.
-        foreach (var route in new[] { $"/api/workflows/runs/{runId}/phases", $"/api/tasks/{runId}/phases" })
-        {
-            var response = await SendAsync(HttpMethod.Get, route, userId, teamId);
+        var response = await SendAsync(HttpMethod.Get, $"/api/tasks/{runId}/phases", userId, teamId);
 
-            response.StatusCode.ShouldBe(HttpStatusCode.OK, customMessage: $"{route} — {await DescribeFailureAsync(response)}");
+        response.StatusCode.ShouldBe(HttpStatusCode.OK, customMessage: await DescribeFailureAsync(response));
 
-            var body = await response.Content.ReadFromJsonAsync<TaskRunPhasesResponse>();
-            body.ShouldNotBeNull();
-            body!.RunId.ShouldBe(runId, $"{route}: the phases belong to the launched run");
-            body.RunStatus.ShouldBe(nameof(WorkflowRunStatus.Success), $"{route}: the launched quick task ran to Success");
-            body.Phases.ShouldNotBeEmpty($"{route}: the run produced structural node phases");
-            body.Phases.ShouldContain(p => p.Status == PhaseStatus.Succeeded, $"{route}: at least one phase reached the Succeeded render status");
+        var body = await response.Content.ReadFromJsonAsync<TaskRunPhasesResponse>();
+        body.ShouldNotBeNull();
+        body!.RunId.ShouldBe(runId);
+        body.RunStatus.ShouldBe(nameof(WorkflowRunStatus.Success), "the launched quick task ran to Success");
+        body.Phases.ShouldNotBeEmpty("the run produced structural node phases");
+        body.Phases.ShouldContain(p => p.Status == PhaseStatus.Succeeded, "at least one phase reached the Succeeded render status");
 
-            var agentPhase = body.Phases.Where(p => p.Kind == "agent").ToList()
-                .ShouldHaveSingleItem($"{route}: the quick run's agent.code node surfaces as one 'agent' phase over real HTTP");
-            // The node source stamps the ref's Status from the REAL team-scoped AgentRun row (Succeeded), not the NodeStatus.
-            agentPhase.Agents.ShouldHaveSingleItem().Status.ShouldBe(nameof(AgentRunStatus.Succeeded));
-        }
+        var agentPhase = body.Phases.Where(p => p.Kind == "agent").ToList()
+            .ShouldHaveSingleItem("the quick run's agent.code node surfaces as one 'agent' phase over real HTTP");
+        // The node source stamps the ref's Status from the REAL team-scoped AgentRun row (Succeeded), not the NodeStatus.
+        agentPhase.Agents.ShouldHaveSingleItem().Status.ShouldBe(nameof(AgentRunStatus.Succeeded));
     }
 
     [Fact]
@@ -100,7 +92,7 @@ public sealed class TaskRunPhasesEndpointE2ETests : IClassFixture<TaskLaunchApiF
 
     private async Task<Guid> LaunchQuickTaskAsync(Guid userId, Guid teamId)
     {
-        var request = new HttpRequestMessage(HttpMethod.Post, "/api/workflows/runs")
+        var request = new HttpRequestMessage(HttpMethod.Post, "/api/tasks")
         {
             Content = JsonContent.Create(new
             {

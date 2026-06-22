@@ -49,7 +49,7 @@ const PERMS = [
  * Permission tier + Repositories multi-select (per-repo branch inline) bottom-left, and a single
  * Model·Effort selector bottom-right. Every dropdown is the in-house warm-theme `Combo` (no native
  * selects). "Customize" expands in place into Supervisor (on Deep) + Advanced execution / safety. WIRED
- * fields drive a real `POST /api/workflows/runs`; extra repos, supervisor config and safety toggles are design-ahead.
+ * fields drive a real `POST /api/tasks`; extra repos, supervisor config and safety toggles are design-ahead.
  */
 export function LaunchTaskModal({ surface, autofill, onClose, onLaunched }: LaunchTaskModalProps) {
   const [taskText, setTaskText] = useState(autofill?.taskText ?? "");

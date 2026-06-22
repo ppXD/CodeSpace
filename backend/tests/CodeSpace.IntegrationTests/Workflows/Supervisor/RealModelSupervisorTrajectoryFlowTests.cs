@@ -60,7 +60,11 @@ public sealed class RealModelSupervisorTrajectoryFlowTests
 
     private sealed class SimpleHttpClientFactory : IHttpClientFactory
     {
-        public HttpClient CreateClient(string name) => new() { Timeout = TimeSpan.FromSeconds(60) };
+        // Generous PER-CALL timeout: this gateway is slow (~50-90s/turn with the progressive structured-output
+        // double-attempt), so a tight per-call cap would abort a legitimately-slow turn and — worse — surface as an
+        // OperationCanceledException that is NOT the trajectory deadline. The WHOLE-trajectory wall-clock bound is the
+        // 6-min CancellationTokenSource at the call site; this per-call cap is only a backstop against a genuine hang.
+        public HttpClient CreateClient(string name) => new() { Timeout = TimeSpan.FromSeconds(150) };
     }
 
     private sealed class FixedCredentialSelector : IModelPoolSelector
