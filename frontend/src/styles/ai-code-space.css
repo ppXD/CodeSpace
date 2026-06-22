@@ -2336,6 +2336,9 @@ textarea:-webkit-autofill {
 @keyframes wfSpin { to { transform: rotate(360deg); } }
 
 /* ── Run Room: outline rail | run view | context rail (decision inbox + facts), under the run-state sentence ── */
+/* padding-top gives the body air below the .ct-head divider (the shared .ct-body has padding-top:0 for table pages
+   whose sticky thead supplies its own offset; the run room has no such spacer, so it sets its own). */
+.acs-root .ct-body.run-room-body { padding-top: 20px; }
 .acs-root .run-room-body { display: grid; grid-template-columns: 232px minmax(0, 1fr) 280px; gap: 26px; align-items: start; }
 .acs-root .run-room-rail { position: sticky; top: 14px; align-self: start; max-height: calc(100vh - 28px); overflow-y: auto; }
 .acs-root .run-room-main { min-width: 0; }
@@ -2363,7 +2366,7 @@ textarea:-webkit-autofill {
 .acs-root .run-state-waiting { color: #A8590E; font-weight: 600; }
 
 /* The outline — the phase tree as the run's navigation skeleton. */
-.acs-root .run-outline { display: flex; flex-direction: column; gap: 1px; }
+.acs-root .run-outline { display: flex; flex-direction: column; gap: 3px; }
 .acs-root .run-outline-empty { font-size: 12.5px; color: var(--muted); padding: 14px 4px; }
 .acs-root .run-outline-phase { border-radius: 9px; padding: 1px 2px; transition: background .15s ease; }
 .acs-root .run-outline-phase[data-status="active"] { background: var(--accent-soft); }
@@ -2445,7 +2448,7 @@ textarea:-webkit-autofill {
 .acs-root .runs-zone-count { min-width: 18px; height: 18px; padding: 0 5px; border-radius: 9px; background: var(--panel-2); color: var(--muted); font-size: 11px; font-weight: 700; display: grid; place-items: center; }
 .acs-root .runs-zone[data-tone="attention"] .runs-zone-label { color: #A8590E; }
 .acs-root .runs-zone[data-tone="attention"] .runs-zone-count { background: #A8590E; color: #fff; }
-.acs-root .runs-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 1px; }
+.acs-root .runs-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
 .acs-root .runs-row { display: flex; align-items: center; gap: 12px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 10px; cursor: pointer; background: var(--panel); transition: background .12s ease, border-color .12s ease; }
 .acs-root .runs-row:hover { background: var(--panel-2); border-color: var(--accent-soft); }
 .acs-root .runs-zone[data-tone="attention"] .runs-row { border-color: #E3B8A0; }
