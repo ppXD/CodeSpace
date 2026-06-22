@@ -2728,15 +2728,15 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
     private static IReadOnlyDictionary<string, JsonElement> BuildErrorOutput(string? error, string nodeId) =>
         new Dictionary<string, JsonElement> { ["error"] = JsonSerializer.SerializeToElement(new { message = error ?? "Node failed.", node = nodeId }) };
 
+    /// <summary>A provider Retry-After is honored as the backoff but CLAMPED to this ceiling — a gateway sending a huge value (e.g. 3600s) must not wedge the run; past this the attempt still waits the cap and a later attempt / the error branch handles a persistent limit.</summary>
+    private const double RetryAfterCapSeconds = 60;
+
     /// <summary>
     /// Surface a failed attempt that WILL be retried: an append-only Warn <c>log</c> record naming
     /// the attempt, the (truncated) error, and the wait — so the run-detail timeline tells the
     /// retry story — then await the bounded backoff. Cancelling during the wait throws
     /// OperationCanceledException, which propagates to the run-level cancel handler.
     /// </summary>
-    /// <summary>A provider Retry-After is honored as the backoff but CLAMPED to this ceiling — a gateway sending a huge value (e.g. 3600s) must not wedge the run; past this the attempt still waits the cap and a later attempt / the error branch handles a persistent limit.</summary>
-    private const double RetryAfterCapSeconds = 60;
-
     private async Task LogRetryAndWaitAsync(NodeExecution exec, int attempt, RetryPlan plan, string error, DateTimeOffset attemptStartedAt, TimeSpan? retryAfter, CancellationToken cancellationToken)
     {
         // A provider Retry-After (a 429/503) overrides the plan's backoff for THIS attempt, clamped to a sane ceiling.
