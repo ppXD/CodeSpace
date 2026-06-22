@@ -103,7 +103,7 @@ public sealed class RealModelGateTests
         {
             // Anthropic is the blessed wire; a gateway timeout must NOT fail the job, AND must be surfaced loudly.
             await Should.NotThrowAsync(() => RealModelGate.AssessLiveAsync("Anthropic",
-                () => throw new TaskCanceledException("timeout", new TimeoutException()), path));
+                () => throw new TaskCanceledException("timeout", new TimeoutException()), gating: true, path));
 
             var written = File.ReadAllText(path);
             written.ShouldContain("NON-GATING infra skip");
@@ -121,13 +121,35 @@ public sealed class RealModelGateTests
         // A clean completion with ok=false on the blessed wire FAILS the job — the gate's teeth are intact. (Caught via
         // a plain try/catch because the async Should.ThrowAsync does not reliably catch Shouldly's own assertion type.)
         var gated = false;
-        try { await RealModelGate.AssessLiveAsync("Anthropic", () => Task.FromResult((false, "scored 3/5")), stepSummaryPath: null); }
+        try { await RealModelGate.AssessLiveAsync("Anthropic", () => Task.FromResult((false, "scored 3/5")), gating: true, stepSummaryPath: null); }
         catch (Shouldly.ShouldAssertException) { gated = true; }
         gated.ShouldBeTrue("a blessed wire's genuine bad verdict must fail the job");
 
         // ok=true passes cleanly.
         await Should.NotThrowAsync(() =>
-            RealModelGate.AssessLiveAsync("Anthropic", () => Task.FromResult((true, "scored 5/5")), stepSummaryPath: null));
+            RealModelGate.AssessLiveAsync("Anthropic", () => Task.FromResult((true, "scored 5/5")), gating: true, stepSummaryPath: null));
+    }
+
+    [Fact]
+    public async Task AssessLiveAsync_with_gating_false_reports_a_bad_verdict_informationally_and_never_fails_the_job()
+    {
+        var path = Path.Combine(Path.GetTempPath(), $"realmodel-info-{Guid.NewGuid():N}.md");
+        try
+        {
+            // A demoted (informational) lane on the BLESSED wire must NOT fail the job even on a bad verdict — its result
+            // is observed (a precondition the blessed decision-eval already measures), not a kill-gate. It is still REPORTED.
+            await Should.NotThrowAsync(() => RealModelGate.AssessLiveAsync("Anthropic",
+                () => Task.FromResult((false, "whole-loop: no conformant decision")), gating: false, path));
+
+            var written = File.ReadAllText(path);
+            written.ShouldContain("INFORMATIONAL");
+            written.ShouldContain("NOT gating");
+            written.ShouldContain("no conformant decision");
+        }
+        finally
+        {
+            File.Delete(path);
+        }
     }
 
     [Fact]
@@ -135,6 +157,6 @@ public sealed class RealModelGateTests
     {
         // A real bug in the drive (not a gateway failure) must PROPAGATE, never be masked as an infra skip.
         await Should.ThrowAsync<InvalidOperationException>(() =>
-            RealModelGate.AssessLiveAsync("Anthropic", () => throw new InvalidOperationException("wiring bug"), stepSummaryPath: null));
+            RealModelGate.AssessLiveAsync("Anthropic", () => throw new InvalidOperationException("wiring bug"), gating: true, stepSummaryPath: null));
     }
 }
