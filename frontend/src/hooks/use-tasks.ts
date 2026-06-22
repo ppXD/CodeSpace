@@ -3,7 +3,7 @@ import { useMutation } from "@tanstack/react-query";
 import { tasksApi, type LaunchTaskInput } from "@/api/tasks";
 
 /**
- * Launch a task via `POST /api/tasks`. Returns the started run's id so the caller can navigate
+ * Launch a task via `POST /api/workflows/runs`. Returns the started run's id so the caller can navigate
  * to its phase tree. Stateless mutation — every surface (Overview launchpad, PR/issue/repo
  * headers, a global "New task") reuses it through the one `LaunchTaskModal`.
  */
