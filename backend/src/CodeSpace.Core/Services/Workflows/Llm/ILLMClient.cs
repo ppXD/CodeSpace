@@ -33,6 +33,9 @@ public sealed record LLMCompletionRequest
     public int MaxOutputTokens { get; init; } = 2048;
     public double Temperature { get; init; } = 0.2;
 
+    /// <summary>Optional generation knobs (top_p / penalties / stop) the client maps onto its API's supported params. Null ⇒ none sent (byte-identical to the prior behaviour).</summary>
+    public LlmSamplingOptions? Sampling { get; init; }
+
     /// <summary>The resolved credential (key + base URL) this call authenticates with. Null = the client's operator-global env key. Transient + <c>[JsonIgnore]</c> so the secret never serializes. See <c>StructuredLLMCompletionRequest.Credential</c>.</summary>
     [JsonIgnore]
     public ResolvedModelCredential? Credential { get; init; }

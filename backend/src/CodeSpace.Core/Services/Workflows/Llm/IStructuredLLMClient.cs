@@ -39,6 +39,9 @@ public sealed record StructuredLLMCompletionRequest
     public int MaxOutputTokens { get; init; } = 2048;
     public double Temperature { get; init; } = 0.2;
 
+    /// <summary>Optional generation knobs (top_p / penalties / stop) the client maps onto its API's supported params. Null ⇒ none sent.</summary>
+    public LlmSamplingOptions? Sampling { get; init; }
+
     /// <summary>
     /// The resolved credential (key + base URL) this call authenticates with — the in-process plane's analogue of the
     /// agent plane's just-in-time credential injection. The caller resolves it (team credential &gt; operator-global)

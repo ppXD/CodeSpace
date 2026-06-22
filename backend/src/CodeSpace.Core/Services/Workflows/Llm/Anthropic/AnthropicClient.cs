@@ -43,6 +43,8 @@ public sealed class AnthropicClient : ILLMClient, IStructuredLLMClient
             Model = request.Model,
             MaxTokens = request.MaxOutputTokens,
             Temperature = request.Temperature,
+            TopP = request.Sampling?.TopP,
+            StopSequences = request.Sampling?.Stop,
             System = request.SystemPrompt,
             Messages = new[] { new AnthropicMessage { Role = "user", Content = request.UserPrompt } }
         };
@@ -98,6 +100,8 @@ public sealed class AnthropicClient : ILLMClient, IStructuredLLMClient
             Model = request.Model,
             MaxTokens = request.MaxOutputTokens,
             Temperature = request.Temperature,
+            TopP = request.Sampling?.TopP,
+            StopSequences = request.Sampling?.Stop,
             System = system,
             Messages = messages
         };
@@ -123,6 +127,8 @@ public sealed class AnthropicClient : ILLMClient, IStructuredLLMClient
             Model = request.Model,
             MaxTokens = request.MaxOutputTokens,
             Temperature = request.Temperature,
+            TopP = request.Sampling?.TopP,
+            StopSequences = request.Sampling?.Stop,
             System = system,
             Messages = messages,
             Tools = new[] { new AnthropicTool { Name = StructuredToolName, Description = "Return the result as structured JSON.", InputSchema = request.JsonSchema } },
@@ -191,6 +197,8 @@ public sealed class AnthropicClient : ILLMClient, IStructuredLLMClient
         [JsonPropertyName("temperature")] public required double Temperature { get; init; }
         [JsonPropertyName("system")] public required string System { get; init; }
         [JsonPropertyName("messages")] public required IReadOnlyList<AnthropicMessage> Messages { get; init; }
+        [JsonPropertyName("top_p")] [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] public double? TopP { get; init; }
+        [JsonPropertyName("stop_sequences")] [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] public IReadOnlyList<string>? StopSequences { get; init; }
         [JsonPropertyName("tools")] [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] public IReadOnlyList<AnthropicTool>? Tools { get; init; }
         [JsonPropertyName("tool_choice")] [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] public AnthropicToolChoice? ToolChoice { get; init; }
     }

@@ -58,6 +58,10 @@ public sealed class OpenAiClient : ILLMClient, IStructuredLLMClient
             Model = request.Model,
             MaxTokens = request.MaxOutputTokens,
             Temperature = request.Temperature,
+            TopP = request.Sampling?.TopP,
+            FrequencyPenalty = request.Sampling?.FrequencyPenalty,
+            PresencePenalty = request.Sampling?.PresencePenalty,
+            Stop = request.Sampling?.Stop,
             Messages = BuildMessages(request.SystemPrompt, request.UserPrompt),
         };
 
@@ -110,6 +114,10 @@ public sealed class OpenAiClient : ILLMClient, IStructuredLLMClient
             Model = request.Model,
             MaxTokens = request.MaxOutputTokens,
             Temperature = request.Temperature,
+            TopP = request.Sampling?.TopP,
+            FrequencyPenalty = request.Sampling?.FrequencyPenalty,
+            PresencePenalty = request.Sampling?.PresencePenalty,
+            Stop = request.Sampling?.Stop,
             Messages = BuildMessages(system, request.UserPrompt),
         };
 
@@ -137,6 +145,10 @@ public sealed class OpenAiClient : ILLMClient, IStructuredLLMClient
             Model = request.Model,
             MaxTokens = request.MaxOutputTokens,
             Temperature = request.Temperature,
+            TopP = request.Sampling?.TopP,
+            FrequencyPenalty = request.Sampling?.FrequencyPenalty,
+            PresencePenalty = request.Sampling?.PresencePenalty,
+            Stop = request.Sampling?.Stop,
             Messages = BuildMessages(system, request.UserPrompt),
             Tools = new[] { new OpenAiTool { Function = new OpenAiFunction { Name = StructuredToolName, Description = "Return the result as structured JSON.", Parameters = request.JsonSchema } } },
             ToolChoice = new OpenAiToolChoice { Function = new OpenAiToolChoiceFunction { Name = StructuredToolName } },
@@ -223,6 +235,10 @@ public sealed class OpenAiClient : ILLMClient, IStructuredLLMClient
         [JsonPropertyName("max_tokens")] public required int MaxTokens { get; init; }
         [JsonPropertyName("temperature")] public required double Temperature { get; init; }
         [JsonPropertyName("messages")] public required IReadOnlyList<OpenAiMessage> Messages { get; init; }
+        [JsonPropertyName("top_p")] [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] public double? TopP { get; init; }
+        [JsonPropertyName("frequency_penalty")] [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] public double? FrequencyPenalty { get; init; }
+        [JsonPropertyName("presence_penalty")] [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] public double? PresencePenalty { get; init; }
+        [JsonPropertyName("stop")] [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] public IReadOnlyList<string>? Stop { get; init; }
         [JsonPropertyName("tools")] [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] public IReadOnlyList<OpenAiTool>? Tools { get; init; }
         [JsonPropertyName("tool_choice")] [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] public OpenAiToolChoice? ToolChoice { get; init; }
     }
