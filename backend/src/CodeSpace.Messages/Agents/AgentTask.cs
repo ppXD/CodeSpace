@@ -117,12 +117,45 @@ public sealed record AgentPermissions
     public AgentNetworkAccess Network { get; init; } = AgentNetworkAccess.Off;
 
     public AgentWriteScope WriteScope { get; init; } = AgentWriteScope.Workspace;
+
+    /// <summary>
+    /// Egress posture WHEN <see cref="Network"/> is On: <see cref="AgentEgressPolicy.Full"/> (the default — reach any
+    /// host, today's behaviour) or <see cref="AgentEgressPolicy.Allowlist"/> (deny-by-default; reachable = the run's
+    /// model-API host + git host(s) + <see cref="EgressAllowHosts"/>, enforced by the sandbox's filtered netns and
+    /// FAIL-CLOSED on a runner that can't enforce it). Network Off ⇒ no egress regardless of this. <c>[JsonIgnore(WhenWritingDefault)]</c>
+    /// so a Full (default) run's permissions serialize byte-identically to a pre-field envelope.
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public AgentEgressPolicy Egress { get; init; } = AgentEgressPolicy.Full;
+
+    /// <summary>
+    /// Operator-configured EXTRA hosts reachable under <see cref="AgentEgressPolicy.Allowlist"/> egress (package
+    /// registries, internal services) — UNIONed with the auto-derived model + git hosts. Null/empty under Allowlist ⇒
+    /// only model + git are reachable. Ignored under <see cref="AgentEgressPolicy.Full"/>. <c>[JsonIgnore(WhenWritingNull)]</c>
+    /// so an unset list adds nothing to the persisted permissions.
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public IReadOnlyList<string>? EgressAllowHosts { get; init; }
 }
 
 public enum AgentNetworkAccess
 {
     Off,
     On,
+}
+
+/// <summary>
+/// The egress posture for a networked run — a governance knob that hangs off <see cref="AgentPermissions"/> per the
+/// autonomy axis. Default <see cref="Full"/> keeps every existing run byte-identical; <see cref="Allowlist"/> is the
+/// opt-in deny-by-default mode the sandbox enforces via its filtered network namespace.
+/// </summary>
+public enum AgentEgressPolicy
+{
+    /// <summary>Reach any host (today's behaviour when network is On).</summary>
+    Full,
+
+    /// <summary>Deny-by-default: reachable hosts = the run's model-API host + git host(s) + <see cref="AgentPermissions.EgressAllowHosts"/>, enforced by the sandbox's filtered netns. Fail-closed on a runner that can't enforce (severed, never widened).</summary>
+    Allowlist,
 }
 
 /// <summary>
