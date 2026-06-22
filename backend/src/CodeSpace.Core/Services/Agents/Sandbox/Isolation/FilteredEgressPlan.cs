@@ -47,26 +47,23 @@ public sealed record FilteredEgressPlan
 
     /// <summary>
     /// Build the plan for an allowlist of already-resolved destination IPs. <paramref name="runId"/> seeds the
-    /// GUID-derived unique names; <paramref name="allowedIps"/> are the only reachable destinations (plus DNS).
+    /// GUID-derived unique names; <paramref name="subnet"/> is the COLLISION-FREE /30 the caller reserved from
+    /// <see cref="EgressSubnetAllocator"/> (so two concurrent runs never share a subnet — a host-global nft-chain
+    /// hazard); <paramref name="allowedIps"/> are the only reachable destinations (plus DNS).
     /// </summary>
-    public static FilteredEgressPlan Build(string runId, IReadOnlyList<string> allowedIps)
+    public static FilteredEgressPlan Build(string runId, IReadOnlyList<string> allowedIps, EgressSubnetAllocator.Lease subnet)
     {
+        var ns = NamespaceFor(runId);
         var slug = Slug(runId);
-        var ns = $"cs-egr-{slug}";
         var vethHost = $"csh-{slug}";
         var vethNs = $"csn-{slug}";
 
-        // A run-unique /30 in 10.x — derived from a HASH of the full runId (not slug positions, which would hit a
-        // common prefix like "run-" and collide) so concurrent runs don't share a subnet on the host.
-        var hash = System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(runId ?? ""));
-        var octet2 = hash[0] % 254 + 1;
-        var octet3 = hash[1] % 254 + 1;
-        var hostIp = $"10.{octet2}.{octet3}.1";
-        var nsIp = $"10.{octet2}.{octet3}.2";
-        var subnet = $"10.{octet2}.{octet3}.0/30";
+        var hostIp = subnet.HostIp;
+        var nsIp = subnet.NsIp;
+        var subnetCidr = subnet.Cidr;
         var table = ns;   // one nft table per run, named like the ns
 
-        var nftRuleset = BuildNftRuleset(table, subnet, allowedIps);
+        var nftRuleset = BuildNftRuleset(table, subnetCidr, allowedIps);
 
         var setup = new List<IReadOnlyList<string>>
         {
@@ -82,13 +79,6 @@ public sealed record FilteredEgressPlan
             new[] { "sysctl", "-w", "net.ipv4.ip_forward=1" },
         };
 
-        var teardown = new List<IReadOnlyList<string>>
-        {
-            new[] { "ip", "netns", "del", ns },          // removes the ns + its veth end
-            new[] { "ip", "link", "del", vethHost },     // best-effort: del may already be gone with the ns
-            new[] { "nft", "delete", "table", "ip", table },
-        };
-
         return new FilteredEgressPlan
         {
             Namespace = ns,
@@ -97,11 +87,32 @@ public sealed record FilteredEgressPlan
             HostAddrCidr = $"{hostIp}/30",
             NsAddrCidr = $"{nsIp}/30",
             HostIp = hostIp,
-            NsSubnetCidr = subnet,
+            NsSubnetCidr = subnetCidr,
             SetupCommands = setup,
             NftRuleset = nftRuleset,
             ExecPrefix = new[] { "ip", "netns", "exec", ns },
-            TeardownCommands = teardown,
+            TeardownCommands = TeardownCommandsFor(runId),
+        };
+    }
+
+    /// <summary>The per-run netns / nft-table name — derived PURELY from <paramref name="runId"/>, so a reaper / teardown reconstructs it with no setup-time state.</summary>
+    public static string NamespaceFor(string runId) => $"cs-egr-{Slug(runId)}";
+
+    /// <summary>
+    /// The teardown argv sequences (delete the netns + host veth + nft table), in order — reconstructed PURELY from
+    /// <paramref name="runId"/> (every name is runId-derived) so a reap needs NO setup-time subnet/state, even from a
+    /// different worker after a crash. Run best-effort even on failure.
+    /// </summary>
+    public static IReadOnlyList<IReadOnlyList<string>> TeardownCommandsFor(string runId)
+    {
+        var ns = NamespaceFor(runId);
+        var vethHost = $"csh-{Slug(runId)}";
+
+        return new List<IReadOnlyList<string>>
+        {
+            new[] { "ip", "netns", "del", ns },          // removes the ns + its veth end
+            new[] { "ip", "link", "del", vethHost },     // best-effort: del may already be gone with the ns
+            new[] { "nft", "delete", "table", "ip", ns },
         };
     }
 
