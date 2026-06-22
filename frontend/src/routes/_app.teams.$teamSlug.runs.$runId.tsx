@@ -91,10 +91,14 @@ function RunDetailPage() {
           </div>
         </aside>
         <div className="run-room-main">
-          <RunDetailView
-            runId={runId}
-            onOpenRun={(childRunId) => navigate({ to: "/teams/$teamSlug/runs/$runId", params: { teamSlug, runId: childRunId } })}
-          />
+          {/* Framed as a panel so the center aligns with the left/right rail cards (same border + top edge),
+              and the Activity·Canvas·Changes·Trace tabs read as that panel's header. */}
+          <div className="run-panel">
+            <RunDetailView
+              runId={runId}
+              onOpenRun={(childRunId) => navigate({ to: "/teams/$teamSlug/runs/$runId", params: { teamSlug, runId: childRunId } })}
+            />
+          </div>
         </div>
         <aside className="run-room-context">
           {decisions.data && <DecisionInbox decisions={runDecisions} />}

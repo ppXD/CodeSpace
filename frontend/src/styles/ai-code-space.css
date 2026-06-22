@@ -2357,6 +2357,11 @@ textarea:-webkit-autofill {
 /* Rail panels — the outline (left) and the decision inbox + run facts (right) each read as a framed sidebar card,
    so the two rails are visually consistent and aligned (a background-tasks-style panel rather than bare text). */
 .acs-root .rail-card { border: 1px solid var(--line); border-radius: 12px; padding: 12px; }
+/* The center run-detail, framed as a panel so its top edge + border align with the left/right rail cards. */
+.acs-root .run-panel { border: 1px solid var(--line); border-radius: 14px; padding: 16px; }
+/* Honest placeholder for a tab whose backend projector hasn't shipped (Changes / Trace). */
+.acs-root .run-tab-soon { position: relative; }
+.acs-root .run-tab-soon-tag { display: inline-block; margin-bottom: 10px; padding: 2px 9px; border-radius: 99px; background: var(--panel-2); border: 1px solid var(--line); font-size: 10.5px; font-weight: 600; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); }
 .acs-root .rail-card-head { display: flex; align-items: center; gap: 7px; margin: 0 0 10px; font-size: 11.5px; font-weight: 600; text-transform: uppercase; letter-spacing: .05em; color: var(--ink-2); }
 .acs-root .rail-card-head > svg,
 .acs-root .decision-inbox-head > svg { color: var(--muted-2); }   /* the inbox keeps its own head class, but its icon joins the family */

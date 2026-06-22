@@ -30,14 +30,16 @@ const MAX_EMBED_DEPTH = 3;
  * host must live inside `.acs-root` (the route does; the editor overlay renders in-tree rather
  * than portaling to <body> for exactly this reason).
  */
-export function RunDetailView({ runId, nested = false, depth = 0, onOpenRun, defaultView = "canvas" }: { runId: string; nested?: boolean; depth?: number; onOpenRun?: (runId: string) => void; defaultView?: "canvas" | "timeline" }) {
+type RunView = "activity" | "canvas" | "changes" | "trace";
+
+export function RunDetailView({ runId, nested = false, depth = 0, onOpenRun, defaultView = "activity" }: { runId: string; nested?: boolean; depth?: number; onOpenRun?: (runId: string) => void; defaultView?: RunView }) {
   const run = useWorkflowRun(runId);
   // The canvas renders the run's OWN version-pinned definition snapshot (run.definition) — never the
   // workflow's current graph — so it stays faithful to how the run actually ran. Manifests drive the
   // node icons/kinds for definitionToRfNodes.
   const manifests = useNodeManifests();
   const manifestByType = useMemo(() => new Map((manifests.data ?? []).map((m) => [m.typeKey, m])), [manifests.data]);
-  const [view, setView] = useState<"canvas" | "timeline">(defaultView);
+  const [view, setView] = useState<RunView>(defaultView);
 
   if (run.isLoading) {
     return <div className="ct-empty"><div className="ct-empty-h">Loading run…</div></div>;
@@ -89,11 +91,17 @@ export function RunDetailView({ runId, nested = false, depth = 0, onOpenRun, def
 
       {!nested && (
         <div className="wf-run-views wf-run-views-inline" role="tablist" aria-label="Run view">
+          <button type="button" role="tab" aria-selected={view === "activity"} data-active={view === "activity"} onClick={() => setView("activity")}>
+            <Ic.Clock size={13} /> Activity
+          </button>
           <button type="button" role="tab" aria-selected={view === "canvas"} data-active={view === "canvas"} onClick={() => setView("canvas")}>
             <Ic.Workflow size={13} /> Canvas
           </button>
-          <button type="button" role="tab" aria-selected={view === "timeline"} data-active={view === "timeline"} onClick={() => setView("timeline")}>
-            <Ic.Clock size={13} /> Timeline
+          <button type="button" role="tab" aria-selected={view === "changes"} data-active={view === "changes"} onClick={() => setView("changes")}>
+            <Ic.Branch size={13} /> Changes
+          </button>
+          <button type="button" role="tab" aria-selected={view === "trace"} data-active={view === "trace"} onClick={() => setView("trace")}>
+            <Ic.Code size={13} /> Trace
           </button>
         </div>
       )}
@@ -102,6 +110,12 @@ export function RunDetailView({ runId, nested = false, depth = 0, onOpenRun, def
         r.definition
           ? <RunCanvas definition={r.definition} runNodes={r.nodes} manifestByType={manifestByType} onOpenRun={onOpenRun} />
           : <div className="wf-run-canvas wf-run-canvas-loading">This run's graph snapshot isn't available.</div>
+      ) : !nested && view === "changes" ? (
+        <RunTabComingSoon title="Changes"
+          note="The files this run created or modified — per-repo change sets, diffs, and the pull requests it opened." />
+      ) : !nested && view === "trace" ? (
+        <RunTabComingSoon title="Trace"
+          note="The full low-level event stream — every node, tool call, model turn, and decision, in order." />
       ) : (
         <>
       <section className="wf-section">
@@ -282,6 +296,21 @@ export function RunStatusBadge({ status, title }: { status: string; title?: stri
     : "running";
 
   return <span className={`wf-status-pill wf-status-${tone}`} title={title}>{status}</span>;
+}
+
+/**
+ * An honest placeholder for a run-view tab whose backing projector hasn't shipped yet (Changes, Trace). Keeps the
+ * tab visible so the run-detail structure reads as the intended whole, while being explicit that the data is coming
+ * — never a fake-empty panel that looks like the run produced nothing.
+ */
+function RunTabComingSoon({ title, note }: { title: string; note: string }) {
+  return (
+    <div className="ct-empty run-tab-soon">
+      <span className="run-tab-soon-tag">Coming soon</span>
+      <div className="ct-empty-h">{title}</div>
+      <div className="ct-empty-p">{note}</div>
+    </div>
+  );
 }
 
 /** True when a value is worth a dedicated block — non-null, and not an empty object. */
