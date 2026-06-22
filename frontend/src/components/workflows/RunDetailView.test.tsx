@@ -19,6 +19,8 @@ const { useWorkflowRunMock, useAgentRunMock } = vi.hoisted(() => ({
 vi.mock("@/hooks/use-workflows", () => ({
   useResumeRun: () => ({ mutate: vi.fn(), isPending: false, isError: false }),
   useWorkflowRun: (runId: string) => useWorkflowRunMock(runId),
+  useWorkflow: () => ({ data: undefined, isLoading: false }),
+  useNodeManifests: () => ({ data: [] }),
 }));
 
 // RunNodeRow reads the agent run's live status for its badge (and AgentRunTimeline streams it); mock the
@@ -65,7 +67,7 @@ describe("RunDetailView — sub-workflow step drill-down", () => {
     });
     const onOpenRun = vi.fn();
 
-    render(<RunDetailView runId="parent-1" onOpenRun={onOpenRun} />);
+    render(<RunDetailView defaultView="timeline" runId="parent-1" onOpenRun={onOpenRun} />);
 
     // The sub-workflow step id is a link → opens the child run full-page.
     fireEvent.click(screen.getByTitle("Open the sub-workflow run"));
@@ -84,7 +86,7 @@ describe("RunDetailView — sub-workflow step drill-down", () => {
     useWorkflowRunMock.mockImplementation((runId: string) =>
       runId === "parent-1" ? ok(detail({ nodes: [node({ nodeId: "sub", childRunId: "child-1" })] })) : missing);
 
-    render(<RunDetailView runId="parent-1" />);
+    render(<RunDetailView defaultView="timeline" runId="parent-1" />);
 
     expect(screen.queryByTitle("Open the sub-workflow run")).toBeNull();
     expect(screen.getByText("sub")).toBeTruthy(); // still shown — just not a link
@@ -93,7 +95,7 @@ describe("RunDetailView — sub-workflow step drill-down", () => {
   it("shows no child embed for a non-subworkflow node", () => {
     useWorkflowRunMock.mockImplementation(() => ok(detail({ nodes: [node({ nodeId: "start" })] })));
 
-    render(<RunDetailView runId="parent-1" onOpenRun={vi.fn()} />);
+    render(<RunDetailView defaultView="timeline" runId="parent-1" onOpenRun={vi.fn()} />);
 
     expect(screen.queryByText("Sub-workflow run")).toBeNull();
     expect(screen.queryByTitle("Open the sub-workflow run")).toBeNull();
@@ -110,7 +112,7 @@ describe("RunDetailView — sub-workflow step drill-down", () => {
       return missing;
     });
 
-    render(<RunDetailView runId="parent-1" />);
+    render(<RunDetailView defaultView="timeline" runId="parent-1" />);
 
     // The suspended panel embeds the child at the top…
     expect(screen.getByText("Running a sub-workflow")).toBeTruthy();
@@ -129,7 +131,7 @@ describe("RunDetailView — live agent-code node badge", () => {
     })));
     useAgentRunMock.mockImplementation((id?: string) => ({ data: id === "ar-1" ? { status: "Running" } : undefined }));
 
-    render(<RunDetailView runId="parent-1" />);
+    render(<RunDetailView defaultView="timeline" runId="parent-1" />);
 
     // The row's status badge reads "Running" (derived from the agent run), with the engine truth on hover.
     const badge = screen.getByTitle(parkedTitle);
@@ -142,7 +144,7 @@ describe("RunDetailView — live agent-code node badge", () => {
       nodes: [node({ nodeId: "sleep", status: "Suspended" })],  // no agentRunId
     })));
 
-    const { container } = render(<RunDetailView runId="parent-1" />);
+    const { container } = render(<RunDetailView defaultView="timeline" runId="parent-1" />);
 
     expect(screen.queryByTitle(parkedTitle)).toBeNull();
     // The node row's own pill keeps "Suspended" (scoped, so it's not the run-summary badge).
@@ -156,7 +158,7 @@ describe("RunDetailView — live agent-code node badge", () => {
     })));
     useAgentRunMock.mockImplementation((id?: string) => ({ data: id === "ar-1" ? { status: "Failed" } : undefined }));
 
-    render(<RunDetailView runId="parent-1" />);
+    render(<RunDetailView defaultView="timeline" runId="parent-1" />);
 
     // Terminal agent status → keep the node's own status (no parked-badge override).
     expect(screen.queryByTitle(parkedTitle)).toBeNull();
@@ -174,7 +176,7 @@ describe("RunDetailView — parallel-wave observability", () => {
       ],
     })));
 
-    render(<RunDetailView runId="parent-1" />);
+    render(<RunDetailView defaultView="timeline" runId="parent-1" />);
     expect(screen.getAllByText("∥ parallel").length).toBe(2);
   });
 
@@ -186,7 +188,7 @@ describe("RunDetailView — parallel-wave observability", () => {
       ],
     })));
 
-    render(<RunDetailView runId="parent-1" />);
+    render(<RunDetailView defaultView="timeline" runId="parent-1" />);
     expect(screen.queryByText("∥ parallel")).toBeNull();
   });
 });
@@ -205,7 +207,7 @@ describe("RunDetailView — map-branch observability", () => {
       ],
     })));
 
-    render(<RunDetailView runId="parent-1" />);
+    render(<RunDetailView defaultView="timeline" runId="parent-1" />);
 
     // Per-element branch badges — three distinct elements of `map`.
     expect(screen.getByText("#0")).toBeTruthy();
@@ -223,7 +225,7 @@ describe("RunDetailView — map-branch observability", () => {
       nodes: [mapNode({ nodeId: "leaf", iterationKey: "outer#1/inner#2" })],
     })));
 
-    render(<RunDetailView runId="parent-1" />);
+    render(<RunDetailView defaultView="timeline" runId="parent-1" />);
     expect(screen.getByText("#1/#2")).toBeTruthy();
   });
 
@@ -235,7 +237,7 @@ describe("RunDetailView — map-branch observability", () => {
       ],
     })));
 
-    const { container } = render(<RunDetailView runId="parent-1" />);
+    const { container } = render(<RunDetailView defaultView="timeline" runId="parent-1" />);
     expect(container.querySelector(".wf-run-node-branch")).toBeNull();
     expect(container.querySelector(".wf-map-rollups")).toBeNull();
   });
@@ -245,7 +247,7 @@ describe("RunDetailView — map-branch observability", () => {
       nodes: [node({ nodeId: "a" }), node({ nodeId: "b" })],   // empty iteration keys (default)
     })));
 
-    const { container } = render(<RunDetailView runId="parent-1" />);
+    const { container } = render(<RunDetailView defaultView="timeline" runId="parent-1" />);
     expect(container.querySelector(".wf-run-node-branch")).toBeNull();
     expect(container.querySelector(".wf-map-rollups")).toBeNull();
   });

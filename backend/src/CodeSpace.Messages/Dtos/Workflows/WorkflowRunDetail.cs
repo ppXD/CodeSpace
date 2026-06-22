@@ -30,6 +30,15 @@ public sealed record WorkflowRunDetail
     public required IReadOnlyList<WorkflowRunNodeSummary> Nodes { get; init; }
 
     /// <summary>
+    /// The EXACT graph this run executed — the version-pinned snapshot (an authored run's frozen
+    /// <c>workflow_version</c> JSON, or a snapshot run's inline definition), NOT the workflow's current
+    /// definition. So a run rendered on the canvas reflects how it ACTUALLY ran even after the workflow is
+    /// later edited — keeping replay / audit honest. <c>null</c> only when that snapshot can't be loaded
+    /// (a missing version row / corrupt JSON), in which case the UI falls back gracefully.
+    /// </summary>
+    public WorkflowDefinition? Definition { get; init; }
+
+    /// <summary>
     /// What this run produced — filled by the last successful Terminal node's resolved Inputs
     /// (which map to the workflow's declared Outputs). Empty object for failed / cancelled
     /// runs OR workflows with no declared Outputs. Mirrors <c>workflow_run.outputs_jsonb</c>.

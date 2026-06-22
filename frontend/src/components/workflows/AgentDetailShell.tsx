@@ -34,13 +34,16 @@ export interface AgentShellApi {
  * owns the `visited` set so `keepMounted` panes survive once shown — including when the controlled
  * tab changes from the URL on load.
  */
-export function AgentDetailShell({ tabs, defaultTab, crumbs, render, active: controlledActive, onActiveChange }: {
+export function AgentDetailShell({ tabs, defaultTab, crumbs, render, active: controlledActive, onActiveChange, hideTabs = false }: {
   tabs: ReadonlyArray<AgentTab>;
   defaultTab: string;
   crumbs?: ReactNode;
   render: (key: string, api: AgentShellApi) => ReactNode;
   active?: string;
   onActiveChange?: (key: string) => void;
+  /** Suppress the tab BAR while keeping the pane/mount machinery — navigation is driven by content
+   *  (e.g. an "Edit in Source" button) + the breadcrumb. Used when there's effectively one landing view. */
+  hideTabs?: boolean;
 }) {
   const [internalActive, setInternalActive] = useState(defaultTab);
   const active = controlledActive ?? internalActive;
@@ -60,9 +63,12 @@ export function AgentDetailShell({ tabs, defaultTab, crumbs, render, active: con
 
   return (
     <section className="ct agent-detail">
-      <div className="ct-head">
+      {/* The .ct-head border-bottom exists to host the tab underline. With no tabs it's just an orphan
+          line under the breadcrumb, so drop it — the content below brings its own structure (matching the
+          clean detail-page header rather than the tabbed project/repo heads where the border IS the tab track). */}
+      <div className="ct-head" style={hideTabs ? { borderBottom: "none" } : undefined}>
         {crumbs && <div className="ct-crumbs">{crumbs}</div>}
-        <AgentDetailTabs tabs={tabs} active={active} onChange={goTo} />
+        {!hideTabs && <AgentDetailTabs tabs={tabs} active={active} onChange={goTo} />}
       </div>
       {tabs.map((t) => {
         const isActive = t.key === active;

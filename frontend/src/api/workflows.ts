@@ -212,6 +212,12 @@ export interface WorkflowRunDetail {
   startedAt: string | null;
   completedAt: string | null;
   nodes: WorkflowRunNodeSummary[];
+  /**
+   * The EXACT graph this run executed — the version-pinned snapshot, NOT the workflow's current
+   * definition — so the run canvas stays faithful to how the run actually ran after later edits.
+   * `null`/absent only when the snapshot couldn't be loaded.
+   */
+  definition?: WorkflowDefinition | null;
   /** Last successful Terminal's resolved Inputs. */
   outputs?: unknown;
   /** Set when the run is Suspended — tells the UI why it's paused + what affordance to show. */

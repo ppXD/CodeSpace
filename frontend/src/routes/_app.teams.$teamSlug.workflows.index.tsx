@@ -175,7 +175,7 @@ function WorkflowsListPage() {
                         className="btn btn-ghost"
                         onClick={() =>
                           navigate({
-                            to: "/teams/$teamSlug/workflows/$workflowId/runs",
+                            to: "/teams/$teamSlug/workflows/$workflowId",
                             params: { teamSlug, workflowId: w.id },
                           })
                         }

@@ -1,15 +1,16 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 
 import { Ic } from "@/_imported/ai-code-space/icons";
 import { isAgentRunActive, type AgentRunStatus } from "@/api/agents";
 import type { WorkflowRunNodeSummary, WorkflowRunWaitInfo } from "@/api/workflows";
 import { ApiError } from "@/api/request";
 import { useAgentRun } from "@/hooks/use-agents";
-import { useResumeRun, useWorkflowRun } from "@/hooks/use-workflows";
+import { useNodeManifests, useResumeRun, useWorkflowRun } from "@/hooks/use-workflows";
 
 import { AgentRunTimeline } from "./AgentRunTimeline";
 import { AgentToolCalls } from "./AgentToolCalls";
 import { JsonView } from "./JsonView";
+import { RunCanvas } from "./RunCanvas";
 import { branchBadge, groupMapBranches, type MapRollup } from "./mapBranches";
 import { concurrentNodeKeys, runNodeKey } from "./runConcurrency";
 
@@ -29,8 +30,14 @@ const MAX_EMBED_DEPTH = 3;
  * host must live inside `.acs-root` (the route does; the editor overlay renders in-tree rather
  * than portaling to <body> for exactly this reason).
  */
-export function RunDetailView({ runId, nested = false, depth = 0, onOpenRun }: { runId: string; nested?: boolean; depth?: number; onOpenRun?: (runId: string) => void }) {
+export function RunDetailView({ runId, nested = false, depth = 0, onOpenRun, defaultView = "canvas" }: { runId: string; nested?: boolean; depth?: number; onOpenRun?: (runId: string) => void; defaultView?: "canvas" | "timeline" }) {
   const run = useWorkflowRun(runId);
+  // The canvas renders the run's OWN version-pinned definition snapshot (run.definition) — never the
+  // workflow's current graph — so it stays faithful to how the run actually ran. Manifests drive the
+  // node icons/kinds for definitionToRfNodes.
+  const manifests = useNodeManifests();
+  const manifestByType = useMemo(() => new Map((manifests.data ?? []).map((m) => [m.typeKey, m])), [manifests.data]);
+  const [view, setView] = useState<"canvas" | "timeline">(defaultView);
 
   if (run.isLoading) {
     return <div className="ct-empty"><div className="ct-empty-h">Loading run…</div></div>;
@@ -80,6 +87,23 @@ export function RunDetailView({ runId, nested = false, depth = 0, onOpenRun }: {
         <SuspendedPanel runId={runId} wait={r.pendingWait} depth={depth} onOpenRun={onOpenRun} />
       )}
 
+      {!nested && (
+        <div className="wf-run-views wf-run-views-inline" role="tablist" aria-label="Run view">
+          <button type="button" role="tab" aria-selected={view === "canvas"} data-active={view === "canvas"} onClick={() => setView("canvas")}>
+            <Ic.Workflow size={13} /> Canvas
+          </button>
+          <button type="button" role="tab" aria-selected={view === "timeline"} data-active={view === "timeline"} onClick={() => setView("timeline")}>
+            <Ic.Clock size={13} /> Timeline
+          </button>
+        </div>
+      )}
+
+      {!nested && view === "canvas" ? (
+        r.definition
+          ? <RunCanvas definition={r.definition} runNodes={r.nodes} manifestByType={manifestByType} onOpenRun={onOpenRun} />
+          : <div className="wf-run-canvas wf-run-canvas-loading">This run's graph snapshot isn't available.</div>
+      ) : (
+        <>
       <section className="wf-section">
         <h2 className="wf-section-h">Normalized payload</h2>
         <JsonView data={r.normalizedPayload} />
@@ -118,6 +142,8 @@ export function RunDetailView({ runId, nested = false, depth = 0, onOpenRun }: {
           </ol>
         )}
       </section>
+        </>
+      )}
     </div>
   );
 }

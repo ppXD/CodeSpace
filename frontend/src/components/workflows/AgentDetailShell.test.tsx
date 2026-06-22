@@ -106,4 +106,12 @@ describe("AgentDetailShell", () => {
     expect(sourcePane!.style.display).toBe("none");
     expect(screen.getByText("content:source")).toBeTruthy();
   });
+
+  it("hideTabs: suppresses the tab BAR (and its orphan head border) but still renders the active pane", () => {
+    const { container } = render(<AgentDetailShell tabs={TABS} defaultTab="overview" hideTabs render={(k) => <div>content:{k}</div>} />);
+    expect(screen.queryByRole("tab")).toBeNull();              // no tab bar
+    expect(screen.getByText("content:overview")).toBeTruthy(); // active pane still renders
+    // The .ct-head border-bottom hosts the tab underline; with no tabs it's dropped (no orphan line).
+    expect((container.querySelector(".ct-head") as HTMLElement).style.borderBottomStyle).toBe("none");
+  });
 });

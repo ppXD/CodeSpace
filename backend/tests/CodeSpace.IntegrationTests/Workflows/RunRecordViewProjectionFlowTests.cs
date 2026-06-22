@@ -223,6 +223,46 @@ public class RunRecordViewProjectionFlowTests
     }
 
     [Fact]
+    public async Task GetWorkflowRun_returns_the_runs_version_pinned_snapshot_not_the_current_definition()
+    {
+        // The credibility guarantee behind the run canvas: a run must render against the graph AS IT RAN,
+        // never the workflow's CURRENT definition. Edit the workflow after a run, and that old run's detail
+        // must STILL carry the original (v1) snapshot — otherwise replay / audit on the canvas would lie.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var workflowId = await CreateWorkflowAsync(teamId, userId, WorkflowsTestSeed.MinimalDefinition()); // v1: start → end
+        var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
+        await RunEngineAsync(runId);
+
+        // Edit the workflow to a DIFFERENT shape (adds a branch) → version 2. The run stays pinned to v1.
+        using (var scope = _fixture.BeginScopeAs(userId, teamId, Roles.Admin))
+        {
+            await scope.Resolve<IMediator>().Send(new UpdateWorkflowCommand
+            {
+                WorkflowId = workflowId,
+                Name = "edited-after-run",
+                Description = null,
+                Definition = BranchedDefinition(condition: "true"),  // start → branch → true_end / false_end
+                Activations = new List<WorkflowActivationInput>(),
+            });
+        }
+
+        WorkflowRunDetail? detail;
+        using (var scope = _fixture.BeginScopeAs(userId, teamId, Roles.Admin))
+        {
+            detail = await scope.Resolve<IMediator>().Send(new GetWorkflowRunQuery { RunId = runId });
+        }
+
+        detail.ShouldNotBeNull();
+        detail!.WorkflowVersion.ShouldBe(1, "the run stays pinned to the version it ran against");
+        detail.Definition.ShouldNotBeNull("the run carries its version-pinned definition snapshot");
+
+        // The snapshot is the ORIGINAL v1 graph (start → end), NOT the edited v2 (which added a branch).
+        var nodeIds = detail.Definition!.Nodes.Select(n => n.Id).OrderBy(x => x).ToList();
+        nodeIds.ShouldBe(new[] { "end", "start" });
+        detail.Definition.Nodes.ShouldNotContain(n => n.Id == "branch", "a node added AFTER the run must not leak into its snapshot");
+    }
+
+    [Fact]
     public async Task Map_body_rows_project_container_kind_flow_map_top_level_rows_null()
     {
         // PR-D3 blocker: a loop body key ("<loopId>#<i>") and a map branch key ("<mapId>#<i>") share a

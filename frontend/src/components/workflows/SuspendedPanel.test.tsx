@@ -18,6 +18,8 @@ vi.mock("@/hooks/use-workflows", () => ({
   useResumeRun: () => ({ mutate, isPending: false, isError: false }),
   // Used by the embedded child RunDetailView for a Subworkflow wait.
   useWorkflowRun: (runId: string) => useWorkflowRunMock(runId),
+  useWorkflow: () => ({ data: undefined, isLoading: false }),
+  useNodeManifests: () => ({ data: [] }),
 }));
 
 // The embedded child RunDetailView's node rows read each node's agent-run status for their badge; mock the
