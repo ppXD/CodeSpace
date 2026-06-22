@@ -41,16 +41,18 @@ public static class RealModelGate
     /// philosophy: a slow endpoint surfaces a clean signal instead of a flaky RED. The infra skip is surfaced LOUDLY so
     /// a persistently-slow gateway is visible in the job summary rather than a silent green.
     /// </summary>
-    public static Task AssessLiveAsync(string provider, Func<Task<(bool Ok, string Verdict)>> drive) =>
-        AssessLiveAsync(provider, drive, Environment.GetEnvironmentVariable(StepSummaryEnvVar));
+    public static Task AssessLiveAsync(string provider, Func<Task<(bool Ok, string Verdict)>> drive, bool gating = true) =>
+        AssessLiveAsync(provider, drive, gating, Environment.GetEnvironmentVariable(StepSummaryEnvVar));
 
-    /// <summary>Testable core of <see cref="AssessLiveAsync(string, Func{Task{ValueTuple{bool, string}}})"/> — takes the step-summary path explicitly so a test pins the non-gating behaviour without mutating process env.</summary>
-    internal static async Task AssessLiveAsync(string provider, Func<Task<(bool Ok, string Verdict)>> drive, string? stepSummaryPath)
+    /// <summary>Testable core of <see cref="AssessLiveAsync(string, Func{Task{ValueTuple{bool, string}}}, bool)"/> — takes the step-summary path explicitly so a test pins the behaviour without mutating process env. When <paramref name="gating"/> is false the clean verdict is REPORTED (informational), never asserted — for a lane whose live result is observed but must not block main (e.g. a precondition the blessed decision-eval already measures); an infra failure is non-gating regardless.</summary>
+    internal static async Task AssessLiveAsync(string provider, Func<Task<(bool Ok, string Verdict)>> drive, bool gating, string? stepSummaryPath)
     {
         try
         {
             var (ok, verdict) = await drive().ConfigureAwait(false);
-            Assess(provider, ok, verdict);
+
+            if (gating) Assess(provider, ok, verdict);
+            else ReportInformational(ok, verdict, stepSummaryPath);
         }
         catch (Exception ex) when (IsGatewayInfraFailure(ex))
         {
