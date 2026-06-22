@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
-import { workflowsApi, type CreateWorkflowInput, type UpdateWorkflowInput, type WorkflowRunStatus } from "@/api/workflows";
+import { workflowsApi, type AnswerDecisionInput, type CreateWorkflowInput, type UpdateWorkflowInput, type WorkflowRunStatus } from "@/api/workflows";
 
 /**
  * Hooks for the workflows engine surface. Same shape as the repository hooks —
@@ -131,6 +131,37 @@ export function useRunPhases(runId: string | null) {
       const data = q.state.data;
       if (!data) return false;
       return isRunActive(data.runStatus) ? 2000 : false;
+    },
+  });
+}
+
+/**
+ * The team's cross-grain "Needs decision" queue. The Run Room filters this to the run's tree (by `rootTraceId`)
+ * client-side — a per-run endpoint is a future backend filter. Polled every 3s while `poll` is true (the run is
+ * still live and can park a fresh decision); a terminal run has none outstanding, so the caller stops it.
+ */
+export function usePendingDecisions(poll = true) {
+  return useQuery({
+    queryKey: ["pending-decisions"],
+    queryFn: () => workflowsApi.listPendingDecisions(),
+    refetchInterval: poll ? 3000 : false,
+  });
+}
+
+/**
+ * Answer a pending decision (either grain). Resolving it resumes the parked run. Invalidates on SETTLED, not just
+ * success: an `AlreadyResolved` (another answerer / the deadline won) throws, and we still want the queue to refetch
+ * so the now-stale card drops — only a genuine `Invalid` answer is surfaced inline by the card.
+ */
+export function useAnswerDecision() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ decisionId, body }: { decisionId: string; body: AnswerDecisionInput }) =>
+      workflowsApi.answerDecision(decisionId, body),
+    onSettled: () => {
+      qc.invalidateQueries({ queryKey: ["pending-decisions"] });
+      qc.invalidateQueries({ queryKey: ["run-phases"] });
+      qc.invalidateQueries({ queryKey: ["workflow-run"] });
     },
   });
 }

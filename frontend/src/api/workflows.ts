@@ -305,6 +305,58 @@ export interface RunPhasesResponse {
   phases: RunPhase[];
 }
 
+// ─── Decisions (the cross-grain "Needs decision" queue — GET /api/workflows/decisions) ───────────
+
+/** The shape of the ask — an OPEN string (forward-compatible); the UI maps a known set to affordances and free-texts the rest. */
+export type DecisionType = "confirm" | "choose_one" | "choose_many" | "free_text" | "approve_action";
+
+/** Mirrors backend `DecisionOption` — one selectable choice; `isSideEffecting` marks an irreversible outcome. */
+export interface DecisionOption {
+  id: string;
+  label: string;
+  isSideEffecting?: boolean;
+}
+
+/**
+ * Mirrors backend `PendingDecision` — one PENDING item in the unified queue, projected over BOTH park grains
+ * (an `agent.code` mid-run `decision.request` AND a `flow.decision` node wait). `rootTraceId` is the run-tree
+ * key the Run Room filters on; `grain`/`decisionType`/`riskLevel`/`policy` are open strings.
+ */
+export interface PendingDecision {
+  id: string;
+  grain: string;
+  rootTraceId: string;
+  workflowRunId?: string | null;
+  agentRunId?: string | null;
+  nodeId?: string | null;
+  decisionType: DecisionType;
+  question: string;
+  options: DecisionOption[];
+  recommendedOption?: string | null;
+  blockingReason?: string | null;
+  contextSummary?: string | null;
+  riskLevel: string;
+  policy: string;
+  createdAt: string;
+  deadlineAt?: string | null;
+  answerMessageId?: string | null;
+}
+
+/** Body for POST /api/workflows/decisions/{id}/answer — chosen option id(s) and/or a free-text answer. */
+export interface AnswerDecisionInput {
+  selectedOptions?: string[];
+  freeText?: string | null;
+}
+
+/** Mirrors backend `DecisionAnswerOutcome`. */
+export type DecisionAnswerOutcome = "Answered" | "AlreadyResolved" | "NotFound" | "Invalid" | "RequiresHuman";
+
+/** Mirrors backend `AnswerDecisionResult`. */
+export interface AnswerDecisionResult {
+  outcome: DecisionAnswerOutcome;
+  message?: string | null;
+}
+
 // ─── API client ────────────────────────────────────────────────────────────────
 
 export const workflowsApi = {
@@ -341,6 +393,16 @@ export const workflowsApi = {
 
   /** The run's outline — the merged, order-sorted phase tree projected over the durable substrate (run-neutral). */
   getRunPhases: (runId: string) => fetchJson<RunPhasesResponse>(`/api/workflows/runs/${runId}/phases`),
+
+  /** The team's cross-grain pending decisions, soonest-deadline first. The Run Room filters by `rootTraceId`. */
+  listPendingDecisions: () => fetchJson<PendingDecision[]>("/api/workflows/decisions"),
+
+  /** Answer a pending decision (either grain) — the route id is the authority; the body is the answer. */
+  answerDecision: (decisionId: string, body: AnswerDecisionInput) =>
+    fetchJson<AnswerDecisionResult>(`/api/workflows/decisions/${decisionId}/answer`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
 
   /**
    * Replay an existing run. Backend clones release hash + trigger payload + variable
