@@ -1,5 +1,6 @@
 using System.Text.Json.Serialization;
 using CodeSpace.Api.Extensions;
+using CodeSpace.Core.Services.Workflows.Llm;
 using CodeSpace.Api.Filters;
 using CodeSpace.Core.Services.Auth;
 using CodeSpace.Core.Services.Identity;
@@ -74,6 +75,11 @@ public class Startup
         services.AddHttpClient(CodeSpace.Core.Services.Agents.ModelCredentials.Reflectors.LiteLLMOpenAIReflector.HttpClientName,
                 c => c.Timeout = TimeSpan.FromSeconds(15))
             .ConfigurePrimaryHttpMessageHandler(() => new System.Net.Http.SocketsHttpHandler { AllowAutoRedirect = false });
+        // The in-process LLM clients (Anthropic / OpenAI-wire) resolve their HttpClient by name. Without a dedicated
+        // registration they fell to the bare default above — a 100s wall that GUILLOTINES a slow reasoning / long
+        // generation, no connection-lifetime tuning, no transient resilience. Register the hardened, resilient named
+        // clients (generous tunable budget + SocketsHttpHandler + retry/Retry-After) — shared with the resilience test.
+        services.AddLlmHttpClients();
         // Background janitor that sweeps expired oauth_pending_state rows every 5 minutes.
         // ConsumeAsync drops a row on successful flow, but abandoned flows (user closed tab)
         // would accumulate without this.

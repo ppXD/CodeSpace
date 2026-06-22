@@ -128,7 +128,7 @@ public sealed class OpenAiClient : ILLMClient, IStructuredLLMClient
 
         OpenAiChatResponse parsed;
         try { parsed = await PostChatAsync(body, request.Credential, cancellationToken).ConfigureAwait(false); }
-        catch (InvalidOperationException) { return null; }   // gateway rejects forced functions (e.g. 400) → degrade. Any PERSISTENT error re-surfaces from the floor attempt.
+        catch (LlmApiException e) when (e.StatusCode is 400 or 422) { return null; }   // ANY request-shape rejection (400/422 — forced functions unsupported) degrades to the floor, regardless of the refined category (a body keyword must never disable the fallback). A 401/403/404/429/5xx PROPAGATES — never swallowed into a second billable call that mis-reports the real cause.
 
         var message = parsed.Choices?.FirstOrDefault()?.Message;
         var toolCall = message?.ToolCalls?.FirstOrDefault(t => t.Function?.Name == StructuredToolName);
@@ -181,21 +181,17 @@ public sealed class OpenAiClient : ILLMClient, IStructuredLLMClient
         var url = baseUrl.TrimEnd('/') + "/chat/completions";
 
         var http = _httpClientFactory.CreateClient(nameof(OpenAiClient));
-        http.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", apiKey);
 
-        // Post with a BARE `application/json` content type (no `; charset=utf-8`): some strict OpenAI-compatible
-        // gateways reject the charset suffix that PostAsJsonAsync adds. StringContent is UTF-8 by default.
-        using var content = new StringContent(JsonSerializer.Serialize(body));
-        content.Headers.ContentType = new MediaTypeHeaderValue("application/json");
+        // Per-call Authorization on the REQUEST message (never the singleton client's DefaultRequestHeaders) so two
+        // concurrent flow.map branches can't bleed one team's Bearer onto another's call. Buffered body so the resilience
+        // handler can re-send it on a transient retry.
+        using var message = new HttpRequestMessage(HttpMethod.Post, url)
+        {
+            Content = LlmHttpTransport.JsonBody(body),
+        };
+        message.Headers.Authorization = new AuthenticationHeaderValue("Bearer", apiKey);
 
-        var response = await http.PostAsync(url, content, cancellationToken).ConfigureAwait(false);
-        var responseBody = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
-
-        if (!response.IsSuccessStatusCode)
-            throw new InvalidOperationException($"OpenAI API returned {(int)response.StatusCode} from {url}: {responseBody}");
-
-        return JsonSerializer.Deserialize<OpenAiChatResponse>(responseBody, ResponseJsonOptions)
-            ?? throw new InvalidOperationException("OpenAI API returned empty body.");
+        return await LlmHttpTransport.SendForJsonAsync<OpenAiChatResponse>(http, message, Provider, ResponseJsonOptions, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>Case-insensitive so a non-conformant gateway that capitalises response keys (e.g. <c>Choices</c>) still deserializes.</summary>
