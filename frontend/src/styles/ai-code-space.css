@@ -2451,6 +2451,34 @@ textarea:-webkit-autofill {
 /* ── Runs cockpit — the run control center: status cards + the work board (attention / live / recent) ── */
 .acs-root .cockpit { display: flex; flex-direction: column; gap: 22px; padding: 16px; }
 
+/* Runs filter bar — the entity/scope lens above the status cards. A row of single-select pills; warm theme, restrained. */
+.acs-root .run-filterbar { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+.acs-root .run-filterbar-icon { display: inline-flex; align-items: center; color: var(--muted-2); margin-right: 2px; }
+.acs-root .filterpill-root { position: relative; }
+.acs-root .filterpill { display: inline-flex; align-items: center; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); color: var(--ink-2); transition: border-color .14s ease, background .14s ease, color .14s ease; }
+.acs-root .filterpill:hover { border-color: var(--accent-soft); color: var(--ink); }
+.acs-root .filterpill[data-armed] { border-color: var(--accent); background: var(--panel-2); color: var(--ink); }
+.acs-root .filterpill[data-armed] .filterpill-label { color: var(--muted); }
+.acs-root .filterpill-main { appearance: none; cursor: pointer; display: inline-flex; align-items: center; gap: 6px; height: 30px; padding: 0 10px; border: 0; border-radius: 8px; background: transparent; color: inherit; font-size: 12.5px; font-weight: 500; }
+.acs-root .filterpill[data-armed] .filterpill-main { padding-right: 4px; }
+.acs-root .filterpill-value { font-weight: 600; color: var(--ink); max-width: 150px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.acs-root .filterpill-caret { display: inline-flex; color: var(--muted-2); }
+.acs-root .filterpill-x { appearance: none; cursor: pointer; display: inline-flex; align-items: center; justify-content: center; width: 18px; height: 18px; margin-right: 6px; border: 0; border-radius: 4px; background: transparent; color: var(--muted); transition: background .12s ease, color .12s ease; }
+.acs-root .filterpill-x:hover { background: var(--danger); color: #fff; }
+.acs-root .filterpill-main:focus-visible, .acs-root .filterpill-x:focus-visible, .acs-root .filterpop-opt:focus-visible, .acs-root .run-filterbar-clear:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.acs-root .filterpop { position: absolute; top: calc(100% + 6px); left: 0; z-index: 30; min-width: 200px; max-width: 280px; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; box-shadow: var(--shadow-2); padding: 6px; }
+.acs-root .filterpop-search { width: 100%; height: 30px; box-sizing: border-box; padding: 0 9px; margin-bottom: 6px; border: 1px solid var(--line); border-radius: 7px; background: var(--bg); color: var(--ink); font-size: 12.5px; }
+.acs-root .filterpop-search:focus { outline: none; border-color: var(--accent); }
+.acs-root .filterpop-list { max-height: 260px; overflow-y: auto; display: flex; flex-direction: column; gap: 1px; }
+.acs-root .filterpop-opt { appearance: none; cursor: pointer; display: flex; align-items: center; gap: 8px; width: 100%; text-align: left; padding: 7px 9px; border: 0; border-radius: 7px; background: transparent; color: var(--ink-2); font-size: 12.5px; }
+.acs-root .filterpop-opt:hover { background: var(--panel-2); color: var(--ink); }
+.acs-root .filterpop-opt[data-selected] { color: var(--accent); font-weight: 600; }
+.acs-root .filterpop-opt-label { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.acs-root .filterpop-opt svg { color: var(--accent); flex-shrink: 0; }
+.acs-root .filterpop-empty { padding: 10px 9px; color: var(--muted); font-size: 12px; text-align: center; }
+.acs-root .run-filterbar-clear { appearance: none; cursor: pointer; height: 30px; padding: 0 8px; border: 0; border-radius: 8px; background: transparent; color: var(--muted); font-size: 12px; font-weight: 500; transition: color .12s ease; }
+.acs-root .run-filterbar-clear:hover { color: var(--danger); }
+
 /* The four status cards (each a filter toggle). */
 .acs-root .cockpit-cards { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; }
 .acs-root .cockpit-card { appearance: none; text-align: left; cursor: pointer; border: 1px solid var(--line); border-radius: 14px; background: var(--panel); padding: 14px 16px; display: flex; flex-direction: column; gap: 6px; transition: border-color .14s ease, box-shadow .14s ease; }

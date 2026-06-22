@@ -1,6 +1,6 @@
-import { useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
+import { keepPreviousData, useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
 
-import { workflowsApi, type AnswerDecisionInput, type CreateWorkflowInput, type UpdateWorkflowInput, type WorkflowRunStatus } from "@/api/workflows";
+import { buildRunListParams, workflowsApi, type AnswerDecisionInput, type CreateWorkflowInput, type RunListFilterInput, type UpdateWorkflowInput, type WorkflowRunStatus } from "@/api/workflows";
 
 /**
  * Hooks for the workflows engine surface. Same shape as the repository hooks —
@@ -108,10 +108,14 @@ export function useWorkflowRuns(workflowId: string | null) {
  * The team's runs index (every top-level run, any source). Polls every 4s while at least one run is still
  * non-terminal — the same cadence as the per-workflow run list — and stops once everything has settled.
  */
-export function useTeamRuns(limit = 50) {
+export function useTeamRuns(filter?: RunListFilterInput, limit = 50) {
+  // Key on the canonical serialized filter so two equivalent filters share a cache entry and a changed filter refetches.
+  const key = buildRunListParams(filter, limit);
   return useQuery({
-    queryKey: ["team-runs", limit],
-    queryFn: () => workflowsApi.listTeamRuns(limit),
+    queryKey: ["team-runs", key],
+    queryFn: () => workflowsApi.listTeamRuns(filter, limit),
+    // Keep the previous page visible while a changed filter refetches, so the bar + board don't blank between filters.
+    placeholderData: keepPreviousData,
     // The endpoint is keyset-paginated (RunPage); unwrap to the items array so consumers stay array-based.
     // nextCursor is unused until the cockpit grows a load-more (the page already shows the newest `limit`).
     select: (page) => page.items,
