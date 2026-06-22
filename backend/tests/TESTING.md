@@ -14,7 +14,7 @@ Two more categories live alongside the above (not a separate project tier):
 
 | `[Trait("Category", …)]` | What it is | Where | CI workflow |
 |---|---|---|---|
-| `Sandbox` | Real-kernel `bubblewrap`/`prlimit` isolation against a live runner | `CodeSpace.UnitTests` (degrade-skips with no bwrap; runs for real in the sandbox workflow) | `sandbox-isolation.yml` |
+| `Sandbox` | Real-kernel `bubblewrap`/`prlimit` isolation against a live runner | `CodeSpace.SandboxTests` (its own project; runs confined only in the sandbox workflow, degrade-returns elsewhere) | `sandbox-isolation.yml` |
 | `RealModel` | The supervisor decision eval driven against a **live model endpoint** (gated on secrets; main + on-demand only, to control token cost) | `CodeSpace.IntegrationTests` | `real-model.yml` |
 
 ## The Unit / Integration / E2E line

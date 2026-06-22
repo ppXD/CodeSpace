@@ -81,11 +81,11 @@ jobs:
           restore-keys: nuget-sandbox-
 
       - name: Restore
-        run: dotnet restore backend/tests/CodeSpace.UnitTests/CodeSpace.UnitTests.csproj
+        run: dotnet restore backend/tests/CodeSpace.SandboxTests/CodeSpace.SandboxTests.csproj
 
       - name: Test (real bwrap / prlimit confinement)
         run: >
-          dotnet test backend/tests/CodeSpace.UnitTests/CodeSpace.UnitTests.csproj
+          dotnet test backend/tests/CodeSpace.SandboxTests/CodeSpace.SandboxTests.csproj
           --no-restore
           --filter "Category=Sandbox"
           --logger "console;verbosity=detailed"
