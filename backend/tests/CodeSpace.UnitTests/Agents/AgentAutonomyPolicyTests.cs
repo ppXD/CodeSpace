@@ -23,6 +23,12 @@ public class AgentAutonomyPolicyTests
 
         permissions.Network.ShouldBe(network);
         permissions.WriteScope.ShouldBe(writeScope);
+
+        // The egress governance knob defaults Full at EVERY tier — opting a run into deny-by-default egress is a
+        // per-field override, never a tier default. Pinning it here keeps that a reviewed, non-breaking decision: no
+        // tier silently restricts egress (which would break dependency-fetching runs).
+        permissions.Egress.ShouldBe(AgentEgressPolicy.Full);
+        permissions.EgressAllowHosts.ShouldBeNull();
     }
 
     [Fact]
