@@ -20,12 +20,16 @@ namespace CodeSpace.IntegrationTests.Workflows.Supervisor;
 public sealed class RealModelSupervisorTrajectoryFlowTests
 {
     [Theory]
-    [InlineData("Anthropic", "happy")]      // plan → spawn → merge(clean) → stop
-    [InlineData("Anthropic", "conflict")]   // plan → spawn → merge(CONFLICT) → resolve(verified) → stop
-    [InlineData("Anthropic", "failure")]    // plan → spawn(1 FAILED) → retry → merge(clean) → stop
+    [InlineData("Anthropic", "happy")]                  // plan → spawn → merge(clean) → stop
+    [InlineData("Anthropic", "conflict")]               // plan → spawn → merge(CONFLICT) → resolve(verified) → stop
+    [InlineData("Anthropic", "failure")]                // plan → spawn(1 FAILED) → retry → merge(clean) → stop
+    [InlineData("Anthropic", "persistent-conflict")]    // the FIRST resolve is UNVERIFIED → must resolve AGAIN before shipping
+    [InlineData("Anthropic", "multi-failure")]          // BOTH subtasks fail → must retry EACH before a clean merge
     [InlineData("OpenAI", "happy")]
     [InlineData("OpenAI", "conflict")]
     [InlineData("OpenAI", "failure")]
+    [InlineData("OpenAI", "persistent-conflict")]
+    [InlineData("OpenAI", "multi-failure")]
     public async Task The_real_model_drives_a_run_to_completion_and_stops_after_shipping(string provider, string scenario)
     {
         var baseUrl = Env(RealModelSupervisorDecisionFlowTests.BaseUrlEnvVar);
@@ -38,13 +42,16 @@ public sealed class RealModelSupervisorTrajectoryFlowTests
         var registry = new LLMClientRegistry(new ILLMClient[] { new AnthropicClient(SharedHttp), new OpenAiClient(SharedHttp) });
         var decider = new LlmSupervisorDecider(registry, new FixedCredentialSelector(model, credential));
 
-        // The SUCCESS path proves convergence; the two RECOVERY paths prove the live brain handles a merge conflict
-        // (resolve+verify before shipping) and an agent failure (retry the failed subtask) — the property a happy-path
-        // run cannot exercise. The scorer reads the SAME real shippable head off the ledger across all three.
+        // The SUCCESS path proves convergence; the four RECOVERY paths prove the live brain handles a merge conflict,
+        // an agent failure, a PERSISTENT conflict (it must NOT accept the first unverified resolution and must resolve
+        // again), and a MULTI-failure (it must retry EACH failed subtask) — multi-turn properties a happy-path run
+        // cannot exercise. The scorer reads the SAME real shippable head off the ledger across all five.
         var environment = scenario switch
         {
             "conflict" => SupervisorTrajectoryEnvironments.ConflictThenResolve,
             "failure" => SupervisorTrajectoryEnvironments.FailureThenRetry,
+            "persistent-conflict" => SupervisorTrajectoryEnvironments.ConflictThenUnverifiedThenVerified,
+            "multi-failure" => SupervisorTrajectoryEnvironments.MultiFailureThenRetry,
             _ => SupervisorTrajectoryEnvironments.HappyPath,
         };
 
