@@ -1,4 +1,4 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import { workflowsApi, type AnswerDecisionInput, type CreateWorkflowInput, type UpdateWorkflowInput, type WorkflowRunStatus } from "@/api/workflows";
 
@@ -117,6 +117,21 @@ export function useTeamRuns(limit = 50) {
       if (!data) return false;
       return data.some((r) => isRunActive(r.status)) ? 4000 : false;
     },
+  });
+}
+
+/**
+ * Phases for a set of LIVE runs, batched — powers the cockpit's Live zone (each run's state sentence) and the
+ * "agents active" tally. Shares the per-run ["run-phases", id] cache key with useRunPhases (so a run also open in
+ * the Run Room dedups its fetch), polling each every 3s. Results come back aligned with `runIds`.
+ */
+export function useLiveRunsPhases(runIds: string[]) {
+  return useQueries({
+    queries: runIds.map((runId) => ({
+      queryKey: ["run-phases", runId],
+      queryFn: () => workflowsApi.getRunPhases(runId),
+      refetchInterval: 3000,
+    })),
   });
 }
 
