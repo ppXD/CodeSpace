@@ -32,6 +32,7 @@ public sealed class ScriptedSupervisorDecider : ISupervisorDecider
         {
             SupervisorScriptMode.PlanSpawnStop => PlanSpawnStop(context),
             SupervisorScriptMode.PlanSpawnMergeStop => PlanSpawnMergeStop(context),
+            SupervisorScriptMode.PlanSpawnRetryMergeStop => PlanSpawnRetryMergeStop(context),
             SupervisorScriptMode.AskHumanStop => AskHumanStop(context),
             SupervisorScriptMode.PlanThenSpawnForever => PlanThenSpawnForever(context),
             SupervisorScriptMode.PlanSpawnDispatchStop => PlanSpawnDispatchStop(context),
@@ -85,6 +86,19 @@ public sealed class ScriptedSupervisorDecider : ISupervisorDecider
         1 => Canonical(SupervisorDecisionKinds.Spawn, new SupervisorSpawnPayload { SubtaskIds = new[] { SubtaskA, SubtaskB } }),
         2 => Canonical(SupervisorDecisionKinds.Merge, new SupervisorMergePayload { SynthesisInstruction = "combine both branches" }),
         _ => Canonical(SupervisorDecisionKinds.Stop, new SupervisorStopPayload { Outcome = "completed", Summary = "merged" }),
+    };
+
+    // Failure→retry arc: turn 0 plan(2) → turn 1 spawn(both) → the "do beta" subtask FAILS in FailFirstThenSucceedFakeCli
+    // → turn 2 RETRY it with a revised instruction carrying the "retry" marker (which the fake CLI succeeds on) → turn 3
+    // merge (folds the retry's patch alongside the alpha patch) → turn 4 stop. Proves real failure-recovery through the
+    // real engine: a failed agent run is a SIGNAL the decider recovers from, not a run-killer.
+    private static SupervisorDecision PlanSpawnRetryMergeStop(SupervisorTurnContext context) => context.TurnNumber switch
+    {
+        0 => Plan(context.Goal),
+        1 => Canonical(SupervisorDecisionKinds.Spawn, new SupervisorSpawnPayload { SubtaskIds = new[] { SubtaskA, SubtaskB } }),
+        2 => Canonical(SupervisorDecisionKinds.Retry, new SupervisorRetryPayload { SubtaskId = SubtaskB, RevisedInstruction = "do beta retry" }),
+        3 => Canonical(SupervisorDecisionKinds.Merge, new SupervisorMergePayload { SynthesisInstruction = "combine both branches" }),
+        _ => Canonical(SupervisorDecisionKinds.Stop, new SupervisorStopPayload { Outcome = "completed", Summary = "recovered via retry" }),
     };
 
     /// <summary>The guid a bad dispatch targets — never bound by any test profile, so the per-agent repo clamp rejects it.</summary>
@@ -161,6 +175,8 @@ public sealed class SupervisorDecisionScript
 
     public void PlanSpawnMergeStop() => Mode = SupervisorScriptMode.PlanSpawnMergeStop;
 
+    public void PlanSpawnRetryMergeStop() => Mode = SupervisorScriptMode.PlanSpawnRetryMergeStop;
+
     public void AskHumanStop() => Mode = SupervisorScriptMode.AskHumanStop;
 
     public void PlanThenSpawnForever() => Mode = SupervisorScriptMode.PlanThenSpawnForever;
@@ -190,6 +206,7 @@ public enum SupervisorScriptMode
     PlanThenStop,
     PlanSpawnStop,
     PlanSpawnMergeStop,
+    PlanSpawnRetryMergeStop,
     PlanSpawnDispatchStop,
     PlanSpawnBadRepoStop,
     PlanSpawnBadModelStop,

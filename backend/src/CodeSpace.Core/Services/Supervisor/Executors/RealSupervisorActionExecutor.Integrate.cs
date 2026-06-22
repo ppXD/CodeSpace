@@ -210,11 +210,14 @@ public sealed partial class RealSupervisorActionExecutor
 
         if (workspace is null) return new { status = "Skipped", reason = "the repository could not be resolved to a clone target" };
 
-        // Only agents that recorded a base + a diff can be integrated by patch — a failed / abandoned / analysis-only
-        // agent (no base) is EXCLUDED so it can't sink the whole clean set (its work stays in the side-by-side fold +
-        // on its own branch). Surfaced honestly as `excludedAgents` so the outcome stays truthful about who combined.
-        var eligible = merged.Where(m => !string.IsNullOrEmpty(m.BaseSha)).ToList();
-        var excluded = merged.Where(m => string.IsNullOrEmpty(m.BaseSha)).Select(m => m.AgentRunId.ToString()).ToList();
+        // Only agents that recorded a base AND captured actual work (a patch or a produced branch) can be integrated by
+        // patch — a failed / abandoned / analysis-only agent is EXCLUDED so it can't sink the whole clean set. A FAILED
+        // agent often DID record a base (its workspace was cloned before it failed) yet has no patch/branch, so checking
+        // the base alone let it through as an UNINTEGRABLE contribution that conflicted the entire merge (e.g. after a
+        // failure→retry, the failed first attempt blocked integrating the successful retry). Require captured work too.
+        // Surfaced honestly as `excludedAgents` so the outcome stays truthful about who combined.
+        var eligible = merged.Where(IsIntegrable).ToList();
+        var excluded = merged.Where(m => !IsIntegrable(m)).Select(m => m.AgentRunId.ToString()).ToList();
 
         if (eligible.Count == 0) return new { status = "Skipped", reason = "no agent recorded a base revision (an analysis-only run has nothing to integrate)", excludedAgents = excluded };
 
@@ -233,6 +236,9 @@ public sealed partial class RealSupervisorActionExecutor
             return new { status = "Failed", reason = ex.Message, excludedAgents = excluded };
         }
     }
+
+    /// <summary>An agent is integrable only if it recorded a base AND captured actual work (a patch or a produced branch). A failed agent that cloned a base but produced nothing is NOT a contribution — its empty patch is Unintegrable and would conflict the whole merge.</summary>
+    private static bool IsIntegrable(MergedAgent m) => !string.IsNullOrEmpty(m.BaseSha) && (!string.IsNullOrEmpty(m.Patch) || !string.IsNullOrEmpty(m.ProducedBranch));
 
     private static IntegrationRequest BuildIntegrationRequest(Guid repoId, SupervisorTurnContext context, WorkspaceRequest workspace, string baseSha, IReadOnlyList<MergedAgent> eligible) => new()
     {
