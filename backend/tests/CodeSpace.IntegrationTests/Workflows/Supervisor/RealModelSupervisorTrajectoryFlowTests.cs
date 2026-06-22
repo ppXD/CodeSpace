@@ -4,7 +4,6 @@ using CodeSpace.Core.Services.Workflows.Llm;
 using CodeSpace.Core.Services.Workflows.Llm.Anthropic;
 using CodeSpace.Core.Services.Workflows.Llm.OpenAi;
 using CodeSpace.Messages.Agents;
-using Shouldly;
 
 namespace CodeSpace.IntegrationTests.Workflows.Supervisor;
 
@@ -44,7 +43,7 @@ public sealed class RealModelSupervisorTrajectoryFlowTests
         var trajectory = await SupervisorTrajectory.RunAsync(decider, maxTurns: 8, deadline.Token);
 
         var (ok, note) = SupervisorTrajectoryScore.Score(trajectory);
-        ok.ShouldBeTrue($"{provider} model '{model}' trajectory was NOT sound — {note}");
+        RealModelGate.Assess(provider, ok, $"{provider} model '{model}' trajectory — {note}");
     }
 
     private static string BaseUrlFor(string provider, string baseUrl)

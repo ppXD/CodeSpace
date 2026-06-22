@@ -59,6 +59,10 @@ jobs:
         # trajectory gate (RealModelSupervisorDecisionFlowTests + RealModelSupervisorTrajectoryFlowTests, both
         # FullyQualifiedName~RealModelSupervisor). The planner RealModel test is a separate, DB-backed concern with its
         # own ANTHROPIC-native key, so it is not run here.
+        #
+        # Per-wire gate policy lives in RealModelGate: the blessed wire (Anthropic by default) GATES this job; other
+        # wires (OpenAI) run + report their verdict to the log but do NOT fail the job — an operator reblesses via the
+        # CODESPACE_REALMODEL_REQUIRED_PROVIDERS env var (comma-separated) without a code change.
         run: >
           dotnet test backend/tests/CodeSpace.IntegrationTests/CodeSpace.IntegrationTests.csproj
           --no-restore

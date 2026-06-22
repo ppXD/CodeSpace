@@ -101,8 +101,11 @@ public static class SupervisorDecisionGoldenScenarios
     /// <summary>The operator-picked brain model row id — non-null so the real <c>LlmSupervisorDecider</c> proceeds past its fail-closed "no brain model" guard.</summary>
     public static readonly Guid BrainModelRowId = Guid.Parse("44444444-4444-4444-4444-444444444444");
 
+    /// <summary>The canonical real-model fixture goal — deliberately SPECIFIC and unambiguous (clear deliverable + acceptance) so the only correct first move is to PLAN, never to ask a clarifying question. Shared with the trajectory eval so both gates score the same well-specified task.</summary>
+    public const string FixtureGoal = "Add server-side email-format validation to the signup endpoint: reject malformed addresses with HTTP 400 and a clear error message, and cover it with unit tests.";
+
     private static SupervisorTurnContext Context(int turn, IReadOnlyList<SupervisorPriorDecision> priors) =>
-        new() { Goal = "Ship the feature end to end", TurnNumber = turn, PriorDecisions = priors, SupervisorModelId = BrainModelRowId };
+        new() { Goal = FixtureGoal, TurnNumber = turn, PriorDecisions = priors, SupervisorModelId = BrainModelRowId };
 
     private static SupervisorAgentResult Agent(Guid id, string status, string? summary = null, string? error = null, string? branch = null) =>
         new() { AgentRunId = id, Status = status, Summary = summary, Error = error, ProducedBranch = branch };
