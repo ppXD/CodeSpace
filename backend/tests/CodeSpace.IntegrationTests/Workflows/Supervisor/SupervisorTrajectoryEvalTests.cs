@@ -175,6 +175,54 @@ public sealed class SupervisorTrajectoryEvalTests
         note.ShouldContain("WITHOUT shipping");
     }
 
+    // ── Complex multi-turn recovery: persist past an unverified resolution / recover from multiple failures ───
+
+    [Fact]
+    public async Task A_brain_that_persists_past_an_unverified_resolution_and_ships_scores_ok()
+    {
+        var result = await SupervisorTrajectory.RunAsync(new ConflictPersistingDecider(), SupervisorTrajectoryEnvironments.ConflictThenUnverifiedThenVerified, maxTurns: 8, CancellationToken.None);
+
+        result.ReachedStop.ShouldBeTrue();
+        result.Kinds.ShouldBe(new[] { SupervisorDecisionKinds.Plan, SupervisorDecisionKinds.Spawn, SupervisorDecisionKinds.Merge, SupervisorDecisionKinds.Resolve, SupervisorDecisionKinds.Resolve, SupervisorDecisionKinds.Stop });
+
+        var (ok, note) = SupervisorTrajectoryScore.Score(result);
+        ok.ShouldBeTrue($"re-resolving past the unverified reconciliation to a VERIFIED one and stopping is a sound recovery ({note})");
+    }
+
+    [Fact]
+    public async Task A_brain_that_stops_on_the_first_unverified_resolution_fails()
+    {
+        var result = await SupervisorTrajectory.RunAsync(new ResolveOnceThenStopDecider(), SupervisorTrajectoryEnvironments.ConflictThenUnverifiedThenVerified, maxTurns: 8, CancellationToken.None);
+
+        result.ReachedStop.ShouldBeTrue("it stops — but on an UNVERIFIED resolution");
+        var (ok, note) = SupervisorTrajectoryScore.Score(result);
+        ok.ShouldBeFalse("accepting the first unverified resolution ships nothing — the reconciliation never passed the build/tests");
+        note.ShouldContain("WITHOUT shipping");
+    }
+
+    [Fact]
+    public async Task A_brain_that_retries_every_failure_then_ships_scores_ok()
+    {
+        var result = await SupervisorTrajectory.RunAsync(new MultiFailureRecoveringDecider(), SupervisorTrajectoryEnvironments.MultiFailureThenRetry, maxTurns: 8, CancellationToken.None);
+
+        result.ReachedStop.ShouldBeTrue();
+        result.Kinds.ShouldBe(new[] { SupervisorDecisionKinds.Plan, SupervisorDecisionKinds.Spawn, SupervisorDecisionKinds.Retry, SupervisorDecisionKinds.Retry, SupervisorDecisionKinds.Merge, SupervisorDecisionKinds.Stop });
+
+        var (ok, note) = SupervisorTrajectoryScore.Score(result);
+        ok.ShouldBeTrue($"retrying BOTH failed subtasks then merging clean is a sound multi-failure recovery ({note})");
+    }
+
+    [Fact]
+    public async Task A_brain_that_merges_before_recovering_all_failures_fails()
+    {
+        var result = await SupervisorTrajectory.RunAsync(new RetryOnceThenMergeDecider(), SupervisorTrajectoryEnvironments.MultiFailureThenRetry, maxTurns: 8, CancellationToken.None);
+
+        result.ReachedStop.ShouldBeTrue("it stops — but merged while a subtask was still unrecovered");
+        var (ok, note) = SupervisorTrajectoryScore.Score(result);
+        ok.ShouldBeFalse("merging before BOTH failures are retried integrates nothing clean — it ships no reviewable head");
+        note.ShouldContain("WITHOUT shipping");
+    }
+
     // ── Scripted deciders (decide purely from the prior-decision kinds — no model) ──────────────────────────
 
     /// <summary>A converging brain: plan if nothing planned, spawn if planned-not-spawned, merge if spawned-not-merged, else stop.</summary>
@@ -335,6 +383,81 @@ public sealed class SupervisorTrajectoryEvalTests
             var kind =
                 !kinds.Contains(SupervisorDecisionKinds.Plan) ? SupervisorDecisionKinds.Plan
                 : !kinds.Contains(SupervisorDecisionKinds.Spawn) ? SupervisorDecisionKinds.Spawn
+                : !kinds.Contains(SupervisorDecisionKinds.Merge) ? SupervisorDecisionKinds.Merge
+                : SupervisorDecisionKinds.Stop;
+
+            return Task.FromResult(new SupervisorDecision { Kind = kind, PayloadJson = "{}" });
+        }
+    }
+
+    /// <summary>A persistent brain: plan→spawn→merge, and while the merge is CONFLICTED and no VERIFIED resolve exists, keep resolving (so it re-resolves past an unverified reconciliation) — then stop on the accepted, verified resolution.</summary>
+    private sealed class ConflictPersistingDecider : ISupervisorDecider
+    {
+        public Task<SupervisorDecision> DecideAsync(SupervisorTurnContext context, CancellationToken cancellationToken)
+        {
+            var priors = context.PriorDecisions;
+            var kinds = priors.Select(d => d.DecisionKind).ToList();
+            var conflicted = priors.Any(d => d.DecisionKind == SupervisorDecisionKinds.Merge && SupervisorOutcome.ReadIntegration(d.OutcomeJson) is { IsConflicted: true });
+            var verifiedResolve = priors.Any(d => d.DecisionKind == SupervisorDecisionKinds.Resolve && SupervisorOutcome.ReadResolutionVerdict(d.OutcomeJson) == SupervisorResolutionVerdict.Verified);
+
+            var kind =
+                !kinds.Contains(SupervisorDecisionKinds.Plan) ? SupervisorDecisionKinds.Plan
+                : !kinds.Contains(SupervisorDecisionKinds.Spawn) ? SupervisorDecisionKinds.Spawn
+                : !kinds.Contains(SupervisorDecisionKinds.Merge) ? SupervisorDecisionKinds.Merge
+                : conflicted && !verifiedResolve ? SupervisorDecisionKinds.Resolve
+                : SupervisorDecisionKinds.Stop;
+
+            return Task.FromResult(new SupervisorDecision { Kind = kind, PayloadJson = "{}" });
+        }
+    }
+
+    /// <summary>A brain that ACCEPTS the first resolution: plan→spawn→merge→resolve(once)→stop. Against the unverified-then-verified environment its single resolve is unverified, so it ships nothing — the scorer must fail it.</summary>
+    private sealed class ResolveOnceThenStopDecider : ISupervisorDecider
+    {
+        public Task<SupervisorDecision> DecideAsync(SupervisorTurnContext context, CancellationToken cancellationToken)
+        {
+            var priors = context.PriorDecisions;
+            var kinds = priors.Select(d => d.DecisionKind).ToList();
+            var conflicted = priors.Any(d => d.DecisionKind == SupervisorDecisionKinds.Merge && SupervisorOutcome.ReadIntegration(d.OutcomeJson) is { IsConflicted: true });
+
+            var kind =
+                !kinds.Contains(SupervisorDecisionKinds.Plan) ? SupervisorDecisionKinds.Plan
+                : !kinds.Contains(SupervisorDecisionKinds.Spawn) ? SupervisorDecisionKinds.Spawn
+                : !kinds.Contains(SupervisorDecisionKinds.Merge) ? SupervisorDecisionKinds.Merge
+                : conflicted && !kinds.Contains(SupervisorDecisionKinds.Resolve) ? SupervisorDecisionKinds.Resolve
+                : SupervisorDecisionKinds.Stop;
+
+            return Task.FromResult(new SupervisorDecision { Kind = kind, PayloadJson = "{}" });
+        }
+    }
+
+    /// <summary>A thorough recovering brain: plan→spawn, then RETRY until two retries have happened (recovering both failed subtasks), then merge→stop.</summary>
+    private sealed class MultiFailureRecoveringDecider : ISupervisorDecider
+    {
+        public Task<SupervisorDecision> DecideAsync(SupervisorTurnContext context, CancellationToken cancellationToken)
+        {
+            var kinds = context.PriorDecisions.Select(d => d.DecisionKind).ToList();
+            var kind =
+                !kinds.Contains(SupervisorDecisionKinds.Plan) ? SupervisorDecisionKinds.Plan
+                : !kinds.Contains(SupervisorDecisionKinds.Spawn) ? SupervisorDecisionKinds.Spawn
+                : kinds.Count(k => k == SupervisorDecisionKinds.Retry) < 2 ? SupervisorDecisionKinds.Retry
+                : !kinds.Contains(SupervisorDecisionKinds.Merge) ? SupervisorDecisionKinds.Merge
+                : SupervisorDecisionKinds.Stop;
+
+            return Task.FromResult(new SupervisorDecision { Kind = kind, PayloadJson = "{}" });
+        }
+    }
+
+    /// <summary>A hasty brain that retries only ONCE then merges: plan→spawn→retry→merge→stop. Against the multi-failure environment one failure is still unrecovered at merge, so it integrates nothing clean — the scorer must fail it.</summary>
+    private sealed class RetryOnceThenMergeDecider : ISupervisorDecider
+    {
+        public Task<SupervisorDecision> DecideAsync(SupervisorTurnContext context, CancellationToken cancellationToken)
+        {
+            var kinds = context.PriorDecisions.Select(d => d.DecisionKind).ToList();
+            var kind =
+                !kinds.Contains(SupervisorDecisionKinds.Plan) ? SupervisorDecisionKinds.Plan
+                : !kinds.Contains(SupervisorDecisionKinds.Spawn) ? SupervisorDecisionKinds.Spawn
+                : kinds.Count(k => k == SupervisorDecisionKinds.Retry) < 1 ? SupervisorDecisionKinds.Retry
                 : !kinds.Contains(SupervisorDecisionKinds.Merge) ? SupervisorDecisionKinds.Merge
                 : SupervisorDecisionKinds.Stop;
 

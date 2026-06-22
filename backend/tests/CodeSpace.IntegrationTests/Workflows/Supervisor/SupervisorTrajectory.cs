@@ -82,6 +82,12 @@ public static class SupervisorTrajectoryEnvironments
     /// <summary>An agent FAILURE recovery path: the first spawn returns one Succeeded + one Failed agent; the only way to ship is to RETRY the failed subtask — so a competent brain converges plan→spawn→retry→merge→stop.</summary>
     public static ISupervisorTrajectoryEnvironment FailureThenRetry { get; } = new FailureThenRetryEnvironment();
 
+    /// <summary>A PERSISTENT-CONFLICT recovery path: the merge conflicts AND the FIRST resolve comes back UNVERIFIED (the reconciliation didn't pass) — the brain must NOT accept it; only a SECOND, verified resolve ships. A brain that stops on the first unverified resolution ships nothing — the multi-turn safety property the single-decision unverified-resolution scenario can't measure.</summary>
+    public static ISupervisorTrajectoryEnvironment ConflictThenUnverifiedThenVerified { get; } = new ConflictThenUnverifiedThenVerifiedEnvironment();
+
+    /// <summary>A MULTI-FAILURE recovery path: the first spawn returns BOTH subtasks Failed — the brain must retry EACH (two retries) before integration is clean; a merge before both are recovered is INCOMPLETE and ships nothing.</summary>
+    public static ISupervisorTrajectoryEnvironment MultiFailureThenRetry { get; } = new MultiFailureThenRetryEnvironment();
+
     private sealed class HappyPathEnvironment : ISupervisorTrajectoryEnvironment
     {
         public SupervisorPriorDecision Fold(SupervisorDecision d, long seq, IReadOnlyList<SupervisorPriorDecision> priors) => d.Kind switch
@@ -122,6 +128,38 @@ public static class SupervisorTrajectoryEnvironments
             // Integration is CLEAN only once the failure has been retried; a premature merge is INCOMPLETE (no branch),
             // so the ledger ship-check fails until the brain retries.
             var k when k == SupervisorDecisionKinds.Merge => TrajectoryOutcomes.HasRetry(priors) ? TrajectoryOutcomes.CleanMerge(d, seq) : TrajectoryOutcomes.IncompleteMerge(d, seq),
+            var k when k == SupervisorDecisionKinds.Resolve => TrajectoryOutcomes.VerifiedResolve(d, seq),
+            var k when k == SupervisorDecisionKinds.AskHuman => TrajectoryOutcomes.AnsweredAsk(d, seq),
+            _ => TrajectoryOutcomes.Handled(d, seq),
+        };
+    }
+
+    private sealed class ConflictThenUnverifiedThenVerifiedEnvironment : ISupervisorTrajectoryEnvironment
+    {
+        public SupervisorPriorDecision Fold(SupervisorDecision d, long seq, IReadOnlyList<SupervisorPriorDecision> priors) => d.Kind switch
+        {
+            var k when k == SupervisorDecisionKinds.Plan => TrajectoryOutcomes.Plan(d, seq),
+            var k when k == SupervisorDecisionKinds.Spawn || k == SupervisorDecisionKinds.Retry => TrajectoryOutcomes.AllSucceeded(d, seq),
+            var k when k == SupervisorDecisionKinds.Merge => TrajectoryOutcomes.HasVerifiedResolve(priors) ? TrajectoryOutcomes.CleanMerge(d, seq) : TrajectoryOutcomes.ConflictedMerge(d, seq),
+            // The FIRST resolve fails verification (its reconciliation didn't pass the build/tests); a competent brain must
+            // NOT accept it and must resolve AGAIN — the SECOND resolve is verified. So the only way to ship is to persist
+            // past the unverified one; a brain that stops on the first unverified resolution ships nothing.
+            var k when k == SupervisorDecisionKinds.Resolve => priors.Any(p => p.DecisionKind == SupervisorDecisionKinds.Resolve) ? TrajectoryOutcomes.VerifiedResolve(d, seq) : TrajectoryOutcomes.UnverifiedResolve(d, seq),
+            var k when k == SupervisorDecisionKinds.AskHuman => TrajectoryOutcomes.AnsweredAsk(d, seq),
+            _ => TrajectoryOutcomes.Handled(d, seq),
+        };
+    }
+
+    private sealed class MultiFailureThenRetryEnvironment : ISupervisorTrajectoryEnvironment
+    {
+        public SupervisorPriorDecision Fold(SupervisorDecision d, long seq, IReadOnlyList<SupervisorPriorDecision> priors) => d.Kind switch
+        {
+            var k when k == SupervisorDecisionKinds.Plan => TrajectoryOutcomes.Plan(d, seq),
+            // BOTH subtasks fail on the first spawn; each RETRY recovers one. Integration is CLEAN only once BOTH have been
+            // retried — so the brain must retry twice, and a premature merge (before both are recovered) is INCOMPLETE.
+            var k when k == SupervisorDecisionKinds.Spawn => TrajectoryOutcomes.BothFailed(d, seq),
+            var k when k == SupervisorDecisionKinds.Retry => TrajectoryOutcomes.AllSucceeded(d, seq),
+            var k when k == SupervisorDecisionKinds.Merge => TrajectoryOutcomes.CountRetries(priors) >= 2 ? TrajectoryOutcomes.CleanMerge(d, seq) : TrajectoryOutcomes.IncompleteMerge(d, seq),
             var k when k == SupervisorDecisionKinds.Resolve => TrajectoryOutcomes.VerifiedResolve(d, seq),
             var k when k == SupervisorDecisionKinds.AskHuman => TrajectoryOutcomes.AnsweredAsk(d, seq),
             _ => TrajectoryOutcomes.Handled(d, seq),
@@ -179,11 +217,31 @@ internal static class TrajectoryOutcomes
     /// <summary>A generic "handled" outcome for an unrecognized verb so the loop simply continues (the scorer does not penalize a detour).</summary>
     public static SupervisorPriorDecision Handled(SupervisorDecision d, long seq) => Prior(d, seq, "{}");
 
+    public static SupervisorPriorDecision BothFailed(SupervisorDecision d, long seq)
+    {
+        var ids = new[] { Guid.NewGuid(), Guid.NewGuid() };
+        var staged = JsonSerializer.Serialize(new { agentRunIds = ids, agentCount = ids.Length }, AgentJson.Options);
+        var results = ids.Select((id, i) => new SupervisorAgentResult { AgentRunId = id, Status = "Failed", Error = $"subtask {i + 1} failed: build error" }).ToArray();
+        return Prior(d, seq, SupervisorOutcome.FoldAgentResults(staged, results));
+    }
+
+    /// <summary>A resolve whose reconciliation did NOT pass (Succeeded RUN but NO <see cref="SupervisorResolverRecipe.TestsPassedMarker"/>) → <see cref="SupervisorOutcome.ReadResolutionVerdict"/> reads Unverified, so it ships nothing and the brain must resolve again.</summary>
+    public static SupervisorPriorDecision UnverifiedResolve(SupervisorDecision d, long seq)
+    {
+        var id = Guid.NewGuid();
+        var staged = JsonSerializer.Serialize(new { agentRunIds = new[] { id }, agentCount = 1 }, AgentJson.Options);
+        var resolver = new SupervisorAgentResult { AgentRunId = id, Status = "Succeeded", Summary = "attempted to reconcile the conflict, but the build still fails and the tests do not pass", ProducedBranch = "resolve/attempt" };
+        return Prior(d, seq, SupervisorOutcome.FoldAgentResults(staged, new[] { resolver }));
+    }
+
     public static bool HasVerifiedResolve(IReadOnlyList<SupervisorPriorDecision> priors) =>
         priors.Any(p => p.DecisionKind == SupervisorDecisionKinds.Resolve && SupervisorOutcome.ReadResolutionVerdict(p.OutcomeJson) == SupervisorResolutionVerdict.Verified);
 
     public static bool HasRetry(IReadOnlyList<SupervisorPriorDecision> priors) =>
         priors.Any(p => p.DecisionKind == SupervisorDecisionKinds.Retry);
+
+    public static int CountRetries(IReadOnlyList<SupervisorPriorDecision> priors) =>
+        priors.Count(p => p.DecisionKind == SupervisorDecisionKinds.Retry);
 
     private static SupervisorPriorDecision Prior(SupervisorDecision d, long seq, string outcomeJson) =>
         new() { Id = Guid.Empty, Sequence = seq, DecisionKind = d.Kind, Status = SupervisorDecisionStatus.Succeeded, PayloadJson = d.PayloadJson, OutcomeJson = outcomeJson };
