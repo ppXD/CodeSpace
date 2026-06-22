@@ -881,6 +881,9 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
         if (filter.WorkflowIds is { Count: > 0 } workflowIds) query = query.Where(r => r.WorkflowId != null && workflowIds.Contains(r.WorkflowId.Value));
         if (filter.Statuses is { Count: > 0 } statuses) query = query.Where(r => statuses.Contains(r.Status));
         if (filter.SourceTypes is { Count: > 0 } sourceTypes) query = query.Where(r => sourceTypes.Contains(r.SourceType));
+        // Npgsql translates `array.Any(x => list.Contains(x))` to the Postgres array-overlap operator
+        // `scope_repository_ids && @ids` — GIN-sargable (the 0065 GIN indexes). Verified via ToQueryString; do NOT
+        // "simplify" to .Overlaps() (that binds to the Span method, not Npgsql) or it stops translating.
         if (filter.RepositoryIds is { Count: > 0 } repositoryIds) query = query.Where(r => r.ScopeRepositoryIds.Any(id => repositoryIds.Contains(id)));
         if (filter.ProjectIds is { Count: > 0 } projectIds) query = query.Where(r => r.ScopeProjectIds.Any(id => projectIds.Contains(id)));
         if (filter.Since is { } since) query = query.Where(r => r.CreatedDate >= since);
@@ -935,11 +938,6 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
         || _db.AgentRun.Any(a => a.WorkflowRunId == r.Id
             && _db.ToolCallLedger.Any(t => t.AgentRunId == a.Id && t.ToolKind == DecisionToolKinds.DecisionRequest
                 && t.Status == ToolCallLedgerStatus.AwaitingApproval && t.ApprovedAt == null));
-
-    /// <summary>The non-decision components of NeedsAttention: Suspended / Failed, or active-but-stale past <paramref name="staleBefore"/>.</summary>
-    private static Expression<Func<WorkflowRun, bool>> StaleOrUnhealthyPredicate(DateTimeOffset staleBefore) => r =>
-        r.Status == WorkflowRunStatus.Suspended || r.Status == WorkflowRunStatus.Failure
-        || ((r.Status == WorkflowRunStatus.Pending || r.Status == WorkflowRunStatus.Enqueued || r.Status == WorkflowRunStatus.Running) && r.LastModifiedDate < staleBefore);
 
     /// <summary>
     /// In-SQL projection to the history-row shape — selects only the summary columns (no over-fetch) and LEFT JOINs
