@@ -151,6 +151,44 @@ public class NodeRetryFlowTests
         (await RetryLogsAsync(db, runId)).Count.ShouldBe(0, "no retry happened — nothing failed");
     }
 
+    [Fact]
+    public async Task A_non_retryable_typed_fault_fails_fast_without_burning_attempts()
+    {
+        // PR-2: a node throwing a TERMINAL typed fault (an LLM auth failure) under a 3-attempt policy must run EXACTLY
+        // ONCE — retrying an auth error would waste two more billable calls + backoff for a failure that can't recover.
+        var key = Guid.NewGuid().ToString("N");
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var workflowId = await CreateWorkflowAsync(teamId, userId, FlakyDefinition(key, failTimes: 99, Retry(maxAttempts: 3), throwCategory: "auth-failed"));
+        var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
+
+        await RunEngineAsync(runId);
+
+        FlakyTestNode.AttemptsFor(key).ShouldBe(1, "a non-retryable typed fault fails fast — the engine does NOT re-attempt it");
+
+        using var verify = _fixture.BeginScope();
+        var db = verify.Resolve<CodeSpaceDbContext>();
+
+        (await db.WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == runId)).Status.ShouldBe(WorkflowRunStatus.Failure);
+        (await RetryLogsAsync(db, runId)).Count.ShouldBe(0, "no retry was attempted, so no 'retrying' log");
+    }
+
+    [Fact]
+    public async Task A_retryable_typed_fault_still_retries_and_recovers()
+    {
+        // The other half: a RETRYABLE typed fault (a transient 503) under a 3-attempt policy still retries and recovers,
+        // exactly like a generic flaky failure — proving fail-fast is scoped to terminal faults only.
+        var key = Guid.NewGuid().ToString("N");
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var workflowId = await CreateWorkflowAsync(teamId, userId, FlakyDefinition(key, failTimes: 2, Retry(maxAttempts: 3), throwCategory: "transient"));
+        var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
+
+        await RunEngineAsync(runId);
+
+        FlakyTestNode.AttemptsFor(key).ShouldBe(3, "two transient throws + one success = three invocations — a retryable fault is still retried");
+        (await _fixture.BeginScope().Resolve<CodeSpaceDbContext>().WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == runId)).Status
+            .ShouldBe(WorkflowRunStatus.Success);
+    }
+
     // ─── Helpers ────────────────────────────────────────────────────────────────
 
     /// <summary>The structured per-attempt records for the flaky node, oldest-first — payload + the parent chain.</summary>
@@ -200,14 +238,14 @@ public class NodeRetryFlowTests
 
     private static RetryPolicy Retry(int maxAttempts) => new() { MaxAttempts = maxAttempts, BackoffSeconds = 0 };
 
-    private static WorkflowDefinition FlakyDefinition(string key, int failTimes, RetryPolicy? retry) => new()
+    private static WorkflowDefinition FlakyDefinition(string key, int failTimes, RetryPolicy? retry, string throwCategory = "") => new()
     {
         SchemaVersion = 1,
         Nodes = new List<NodeDefinition>
         {
             new() { Id = "start", TypeKey = "trigger.manual", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
             new() { Id = "flaky", TypeKey = FlakyTestNode.Key,
-                    Config = WorkflowsTestSeed.Json($$"""{"key":"{{key}}","failTimes":{{failTimes}}}"""),
+                    Config = WorkflowsTestSeed.Json($$"""{"key":"{{key}}","failTimes":{{failTimes}},"throwCategory":"{{throwCategory}}"}"""),
                     Inputs = WorkflowsTestSeed.EmptyJson(),
                     Retry = retry },
             new() { Id = "end", TypeKey = "builtin.terminal", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
