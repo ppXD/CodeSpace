@@ -257,6 +257,54 @@ export interface NodeManifestDto {
   presets?: NodePreset[];
 }
 
+// ─── Run phases (the run-outline projection — GET /api/workflows/runs/{id}/phases) ───────────────
+
+/** The ONLY closed axis of a phase — the render vocabulary. Everything else (kind, agent status) is an open string. */
+export type PhaseStatus = "Pending" | "Active" | "Waiting" | "Succeeded" | "Failed" | "Skipped";
+
+/** Mirrors backend `PhaseAgentRef` — one agent run a phase fanned out to. `status` is the open AgentRunStatus name. */
+export interface PhaseAgentRef {
+  agentRunId: string;
+  nodeId?: string | null;
+  iterationKey?: string | null;
+  status: string;
+  label?: string | null;
+}
+
+/** Mirrors backend `PhaseMetrics` — the small roll-up a phase row shows. */
+export interface PhaseMetrics {
+  agentCount: number;
+  succeededCount: number;
+  failedCount: number;
+  extra?: Record<string, unknown>;
+}
+
+/**
+ * Mirrors backend `RunPhase` — one row of a run's outline (a node, a map fan-out, an agent step, a supervisor
+ * decision, a model-authored phase). `kind` is an OPEN string the UI never switches on; only `status` is closed.
+ * This is the run-neutral projection: the SAME shape backs a single-agent run, a workflow, and a Deep supervisor.
+ */
+export interface RunPhase {
+  id: string;
+  label: string;
+  kind: string;
+  status: PhaseStatus;
+  order: number;
+  agents: PhaseAgentRef[];
+  metrics: PhaseMetrics;
+  summary?: string | null;
+  sourceKey: string;
+  startedAt?: string | null;
+  completedAt?: string | null;
+}
+
+/** Mirrors backend `TaskRunPhasesResponse` — the run's overall status + the merged, order-sorted phase tree. */
+export interface RunPhasesResponse {
+  runId: string;
+  runStatus: WorkflowRunStatus;
+  phases: RunPhase[];
+}
+
 // ─── API client ────────────────────────────────────────────────────────────────
 
 export const workflowsApi = {
@@ -290,6 +338,9 @@ export const workflowsApi = {
     fetchJson<WorkflowRunSummary[]>(`/api/workflows/${workflowId}/runs?limit=${limit}`),
 
   getRun: (runId: string) => fetchJson<WorkflowRunDetail>(`/api/workflows/runs/${runId}`),
+
+  /** The run's outline — the merged, order-sorted phase tree projected over the durable substrate (run-neutral). */
+  getRunPhases: (runId: string) => fetchJson<RunPhasesResponse>(`/api/workflows/runs/${runId}/phases`),
 
   /**
    * Replay an existing run. Backend clones release hash + trigger payload + variable
