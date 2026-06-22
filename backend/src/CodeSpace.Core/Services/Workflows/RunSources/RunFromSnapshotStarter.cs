@@ -168,6 +168,7 @@ public sealed class RunFromSnapshotStarter : IRunFromSnapshotStarter, IScopedDep
             ReleaseHashAtRun = definitionHash,
             TeamId = teamId,
             RunRequestId = requestId,
+            ActorId = actorUserId,   // snapshot / task runs are always user-launched (mirrors the request's ActorId)
             ScopeRepositoryIds = scopeRepositoryIds.ToList(),
             ScopeProjectIds = scopeProjectIds.ToList(),
             Status = WorkflowRunStatus.Pending,

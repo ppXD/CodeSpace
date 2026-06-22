@@ -319,6 +319,24 @@ public class TeamRunsIndexFlowTests
     }
 
     [Fact]
+    public async Task Filters_by_actor_excluding_actorless_webhook_runs()
+    {
+        var (teamA, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+
+        Guid actorX = Guid.NewGuid(), actorY = Guid.NewGuid();
+        var t = DateTimeOffset.UtcNow;
+        var byX = await InsertRunAsync(teamA, null, t, workflowId: null, actorId: actorX);
+        var byY = await InsertRunAsync(teamA, null, t.AddMinutes(-1), workflowId: null, actorId: actorY);
+        await InsertRunAsync(teamA, null, t.AddMinutes(-2), workflowId: null, sourceType: WorkflowRunSourceTypes.Manual, actorId: null);   // a webhook-style run with no user actor
+
+        (await FilterAsync(teamA, new RunListFilter { ActorIds = [actorX] }))
+            .Select(r => r.Id).ShouldBe(new[] { byX }, "actor filter returns only that user's runs");
+
+        (await FilterAsync(teamA, new RunListFilter { ActorIds = [actorX, actorY] }))
+            .Select(r => r.Id).ShouldBe(new[] { byX, byY }, ignoreOrder: true, "actor ids are OR'd (actor_id = ANY); a null-actor run matches no actor filter");
+    }
+
+    [Fact]
     public async Task Filters_by_repository_and_project_scope_with_array_overlap()
     {
         var (teamA, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
@@ -438,7 +456,7 @@ public class TeamRunsIndexFlowTests
         return page.Items;
     }
 
-    private async Task<Guid> InsertRunAsync(Guid teamId, Guid? parentRunId, DateTimeOffset createdDate, Guid? workflowId, string? sourceType = null, WorkflowRunStatus status = WorkflowRunStatus.Enqueued, DateTimeOffset? startedAt = null, List<Guid>? repositoryIds = null, List<Guid>? projectIds = null)
+    private async Task<Guid> InsertRunAsync(Guid teamId, Guid? parentRunId, DateTimeOffset createdDate, Guid? workflowId, string? sourceType = null, WorkflowRunStatus status = WorkflowRunStatus.Enqueued, DateTimeOffset? startedAt = null, List<Guid>? repositoryIds = null, List<Guid>? projectIds = null, Guid? actorId = null)
     {
         using var scope = _fixture.BeginScope();
         var db = scope.Resolve<CodeSpaceDbContext>();
@@ -475,6 +493,7 @@ public class TeamRunsIndexFlowTests
             StartedAt = startedAt,   // set for a "stuck running" run — NeedsAttention's running-stale branch reads StartedAt (not the audit timestamp)
             ScopeRepositoryIds = repositoryIds ?? [],
             ScopeProjectIds = projectIds ?? [],
+            ActorId = actorId,
             CreatedDate = createdDate,   // explicit → the audit interceptor leaves it (it only stamps a default value)
             CreatedBy = SystemUsers.SeederId,
             LastModifiedBy = SystemUsers.SeederId,

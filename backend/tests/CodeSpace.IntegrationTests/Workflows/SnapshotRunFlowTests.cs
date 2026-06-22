@@ -117,6 +117,10 @@ public class SnapshotRunFlowTests
         var request = await LoadRequestAsync(run.RunRequestId);
         run.SourceType.ShouldBe(request.SourceType,
             customMessage: "the run's denorm must mirror its request's source_type exactly");
+
+        // The actor is denormalised the same way — a task/snapshot run is user-launched, so actor_id == the launcher.
+        run.ActorId.ShouldBe(userId, "the snapshot starter denormalises the launching actor onto the run");
+        run.ActorId.ShouldBe(request.ActorId, "the run's actor denorm mirrors its request's actor_id");
     }
 
     [Fact]
