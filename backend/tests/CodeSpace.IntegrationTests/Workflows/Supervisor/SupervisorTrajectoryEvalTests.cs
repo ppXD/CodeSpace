@@ -127,6 +127,54 @@ public sealed class SupervisorTrajectoryEvalTests
             SupervisorTrajectory.RunAsync(new PerCallTimeoutDecider(), maxTurns: 6, CancellationToken.None));
     }
 
+    // ── Recovery environments: the brain must RESOLVE a conflict / RETRY a failure before it can ship ────────
+
+    [Fact]
+    public async Task A_brain_that_resolves_a_merge_conflict_then_ships_scores_ok()
+    {
+        var result = await SupervisorTrajectory.RunAsync(new ConflictResolvingDecider(), SupervisorTrajectoryEnvironments.ConflictThenResolve, maxTurns: 8, CancellationToken.None);
+
+        result.ReachedStop.ShouldBeTrue();
+        result.Kinds.ShouldBe(new[] { SupervisorDecisionKinds.Plan, SupervisorDecisionKinds.Spawn, SupervisorDecisionKinds.Merge, SupervisorDecisionKinds.Resolve, SupervisorDecisionKinds.Stop });
+
+        var (ok, note) = SupervisorTrajectoryScore.Score(result);
+        ok.ShouldBeTrue($"resolving the conflict to a VERIFIED resolution and stopping is a sound recovery ({note})");
+    }
+
+    [Fact]
+    public async Task A_brain_that_gives_up_on_a_merge_conflict_fails()
+    {
+        var result = await SupervisorTrajectory.RunAsync(new ShipNaivelyDecider(), SupervisorTrajectoryEnvironments.ConflictThenResolve, maxTurns: 8, CancellationToken.None);
+
+        result.ReachedStop.ShouldBeTrue("it stops — but on an unresolved conflict");
+        var (ok, note) = SupervisorTrajectoryScore.Score(result);
+        ok.ShouldBeFalse("stopping on a CONFLICTED merge ships nothing — the conflict was never resolved");
+        note.ShouldContain("WITHOUT shipping");
+    }
+
+    [Fact]
+    public async Task A_brain_that_retries_a_failed_agent_then_ships_scores_ok()
+    {
+        var result = await SupervisorTrajectory.RunAsync(new FailureRetryingDecider(), SupervisorTrajectoryEnvironments.FailureThenRetry, maxTurns: 8, CancellationToken.None);
+
+        result.ReachedStop.ShouldBeTrue();
+        result.Kinds.ShouldBe(new[] { SupervisorDecisionKinds.Plan, SupervisorDecisionKinds.Spawn, SupervisorDecisionKinds.Retry, SupervisorDecisionKinds.Merge, SupervisorDecisionKinds.Stop });
+
+        var (ok, note) = SupervisorTrajectoryScore.Score(result);
+        ok.ShouldBeTrue($"retrying the failed subtask then merging clean is a sound recovery ({note})");
+    }
+
+    [Fact]
+    public async Task A_brain_that_merges_over_a_failed_agent_without_retrying_fails()
+    {
+        var result = await SupervisorTrajectory.RunAsync(new ShipNaivelyDecider(), SupervisorTrajectoryEnvironments.FailureThenRetry, maxTurns: 8, CancellationToken.None);
+
+        result.ReachedStop.ShouldBeTrue("it stops — but the merge was incomplete (a subtask never succeeded)");
+        var (ok, note) = SupervisorTrajectoryScore.Score(result);
+        ok.ShouldBeFalse("merging over an un-retried failure integrates nothing clean — it ships no reviewable head");
+        note.ShouldContain("WITHOUT shipping");
+    }
+
     // ── Scripted deciders (decide purely from the prior-decision kinds — no model) ──────────────────────────
 
     /// <summary>A converging brain: plan if nothing planned, spawn if planned-not-spawned, merge if spawned-not-merged, else stop.</summary>
@@ -235,5 +283,62 @@ public sealed class SupervisorTrajectoryEvalTests
     {
         public Task<SupervisorDecision> DecideAsync(SupervisorTurnContext context, CancellationToken cancellationToken) =>
             throw new OperationCanceledException();
+    }
+
+    /// <summary>A conflict-aware brain: plan→spawn→merge, and when that merge CONFLICTS, spawn a resolver (→verified) and stop on the accepted resolution. Reads the ledger outcomes, not just kinds.</summary>
+    private sealed class ConflictResolvingDecider : ISupervisorDecider
+    {
+        public Task<SupervisorDecision> DecideAsync(SupervisorTurnContext context, CancellationToken cancellationToken)
+        {
+            var priors = context.PriorDecisions;
+            var kinds = priors.Select(d => d.DecisionKind).ToList();
+            var conflicted = priors.Any(d => d.DecisionKind == SupervisorDecisionKinds.Merge && SupervisorOutcome.ReadIntegration(d.OutcomeJson) is { IsConflicted: true });
+            var verifiedResolve = priors.Any(d => d.DecisionKind == SupervisorDecisionKinds.Resolve && SupervisorOutcome.ReadResolutionVerdict(d.OutcomeJson) == SupervisorResolutionVerdict.Verified);
+
+            var kind =
+                !kinds.Contains(SupervisorDecisionKinds.Plan) ? SupervisorDecisionKinds.Plan
+                : !kinds.Contains(SupervisorDecisionKinds.Spawn) ? SupervisorDecisionKinds.Spawn
+                : !kinds.Contains(SupervisorDecisionKinds.Merge) ? SupervisorDecisionKinds.Merge
+                : conflicted && !verifiedResolve ? SupervisorDecisionKinds.Resolve
+                : SupervisorDecisionKinds.Stop;
+
+            return Task.FromResult(new SupervisorDecision { Kind = kind, PayloadJson = "{}" });
+        }
+    }
+
+    /// <summary>A failure-aware brain: plan→spawn, and when an agent FAILED, retry the failed subtask before merging clean and stopping. Reads the ledger's agent results.</summary>
+    private sealed class FailureRetryingDecider : ISupervisorDecider
+    {
+        public Task<SupervisorDecision> DecideAsync(SupervisorTurnContext context, CancellationToken cancellationToken)
+        {
+            var priors = context.PriorDecisions;
+            var kinds = priors.Select(d => d.DecisionKind).ToList();
+            var hasFailure = priors.Any(d => SupervisorDecisionKinds.StagesAgents(d.DecisionKind) && SupervisorOutcome.ReadAgentResults(d.OutcomeJson).Any(r => string.Equals(r.Status, "Failed", StringComparison.OrdinalIgnoreCase)));
+
+            var kind =
+                !kinds.Contains(SupervisorDecisionKinds.Plan) ? SupervisorDecisionKinds.Plan
+                : !kinds.Contains(SupervisorDecisionKinds.Spawn) ? SupervisorDecisionKinds.Spawn
+                : hasFailure && !kinds.Contains(SupervisorDecisionKinds.Retry) ? SupervisorDecisionKinds.Retry
+                : !kinds.Contains(SupervisorDecisionKinds.Merge) ? SupervisorDecisionKinds.Merge
+                : SupervisorDecisionKinds.Stop;
+
+            return Task.FromResult(new SupervisorDecision { Kind = kind, PayloadJson = "{}" });
+        }
+    }
+
+    /// <summary>A naive brain that ignores recovery signals: plan→spawn→merge→stop regardless of conflict/failure. In a recovery environment its merge never integrates cleanly, so it ships nothing — the scorer must fail it.</summary>
+    private sealed class ShipNaivelyDecider : ISupervisorDecider
+    {
+        public Task<SupervisorDecision> DecideAsync(SupervisorTurnContext context, CancellationToken cancellationToken)
+        {
+            var kinds = context.PriorDecisions.Select(d => d.DecisionKind).ToList();
+            var kind =
+                !kinds.Contains(SupervisorDecisionKinds.Plan) ? SupervisorDecisionKinds.Plan
+                : !kinds.Contains(SupervisorDecisionKinds.Spawn) ? SupervisorDecisionKinds.Spawn
+                : !kinds.Contains(SupervisorDecisionKinds.Merge) ? SupervisorDecisionKinds.Merge
+                : SupervisorDecisionKinds.Stop;
+
+            return Task.FromResult(new SupervisorDecision { Kind = kind, PayloadJson = "{}" });
+        }
     }
 }

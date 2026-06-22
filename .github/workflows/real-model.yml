@@ -29,7 +29,9 @@ jobs:
   real-model:
     name: real model (supervisor decision eval)
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # Headroom for the expanded trajectory gate: 5 golden decisions × 2 wires + the multi-turn trajectory across
+    # 3 scenarios (happy / conflict / failure) × 2 wires, each trajectory bounded by its own 6-min wall-clock deadline.
+    timeout-minutes: 40
     env:
       # The custom-endpoint config the RealModel tests read (a [Theory] over both Anthropic + OpenAI wires from
       # one gateway). Absent on a fork → the tests self-skip → green at zero cost.
