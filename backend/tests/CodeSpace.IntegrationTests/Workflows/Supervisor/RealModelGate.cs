@@ -58,19 +58,48 @@ public static class RealModelGate
         }
     }
 
-    /// <summary>Whether <paramref name="ex"/> is a GATEWAY/transport failure ("no response from the gateway") rather than a decision/wiring failure — so the gate treats it as non-gating infra. A <see cref="TimeoutException"/> anywhere in the inner chain is the HttpClient.Timeout signature; an <see cref="System.Net.Http.HttpRequestException"/> / <see cref="System.Net.Sockets.SocketException"/> is an unreachable/reset gateway. A bare cancellation (our own deadline) is NOT infra — it carries no <c>TimeoutException</c>, so a "did not converge" signal still gates.</summary>
-    internal static bool IsGatewayInfraFailure(Exception ex)
+    /// <summary>SocketError codes that mean "could not establish a connection AT ALL" — a mis-pointed/typo'd endpoint, a wrong port, an unresolvable host. These are WIRING failures the kill-gate must CATCH (gate), so they are deliberately NOT treated as transient infra; an established-then-dropped/aborted connection (any other code) is.</summary>
+    private static readonly System.Net.Sockets.SocketError[] WiringSocketErrors =
     {
-        for (Exception? e = ex; e is not null; e = e.InnerException)
-            if (e is TimeoutException or System.Net.Http.HttpRequestException or System.Net.Sockets.SocketException) return true;
+        System.Net.Sockets.SocketError.HostNotFound, System.Net.Sockets.SocketError.ConnectionRefused,
+        System.Net.Sockets.SocketError.HostUnreachable, System.Net.Sockets.SocketError.NetworkUnreachable,
+        System.Net.Sockets.SocketError.TryAgain,
+    };
 
-        return false;
+    /// <summary>
+    /// Whether <paramref name="ex"/> is a TRANSIENT gateway/transport failure ("the gateway was too slow or dropped the
+    /// connection") rather than a decision OR WIRING failure — so the gate treats it as non-gating infra. Matches, anywhere
+    /// in the (Aggregate-flattened) chain: a <see cref="TimeoutException"/> (the HttpClient.Timeout signature — the gateway
+    /// is slow), an <see cref="System.IO.IOException"/> (a mid-stream transport drop, incl. .NET 8+ <c>HttpIOException</c>),
+    /// or a <see cref="System.Net.Sockets.SocketException"/> whose code is NOT a connect/DNS failure (a reset/abort).
+    /// Deliberately does NOT match a bare <see cref="System.Net.Http.HttpRequestException"/> or a connect/DNS
+    /// <c>SocketException</c> (a mis-pointed/unreachable endpoint is a WIRING bug the kill-gate must catch — masking it
+    /// would green the gate on a broken wire), and not a bare cancellation (our own deadline — a "did not converge" signal).
+    /// </summary>
+    internal static bool IsGatewayInfraFailure(Exception ex) => Unwrap(ex).Any(IsTransientTransport);
+
+    private static bool IsTransientTransport(Exception e) => e switch
+    {
+        TimeoutException => true,
+        System.IO.IOException => true,
+        System.Net.Sockets.SocketException se => !WiringSocketErrors.Contains(se.SocketErrorCode),
+        _ => false,
+    };
+
+    /// <summary>Every exception in the chain, flattening an <see cref="AggregateException"/> so a fault in a non-first slot (e.g. from a future parallel drive) is still inspected, not just <c>.InnerException</c>.</summary>
+    private static IEnumerable<Exception> Unwrap(Exception ex)
+    {
+        var roots = ex is AggregateException agg ? agg.Flatten().InnerExceptions : (IEnumerable<Exception>)new[] { ex };
+
+        foreach (var root in roots)
+            for (Exception? e = root; e is not null; e = e.InnerException)
+                yield return e;
     }
 
     /// <summary>Report a gateway infra failure LOUDLY as non-gating — to the step-summary FILE when present (so a persistently-slow gateway is VISIBLE in the job-summary UI, never a silent green), else the console. Pure given <paramref name="stepSummaryPath"/>.</summary>
     internal static void ReportInfraSkip(string provider, Exception ex, string? stepSummaryPath)
     {
-        var line = $"⚠️ real-model gate NON-GATING infra skip — {provider} gateway timed out / unreachable (NOT a decision verdict): {InfraReason(ex)}";
+        var line = $"⚠️ real-model gate NON-GATING infra skip — {provider} gateway timed out / dropped the connection (NOT a decision verdict): {InfraReason(ex)}";
 
         if (!string.IsNullOrWhiteSpace(stepSummaryPath))
             File.AppendAllText(stepSummaryPath, line + Environment.NewLine);
@@ -78,15 +107,9 @@ public static class RealModelGate
             Console.WriteLine(line);
     }
 
-    /// <summary>The innermost gateway/transport reason (type + message) for a legible infra-skip line.</summary>
-    private static string InfraReason(Exception ex)
-    {
-        for (Exception? e = ex; e is not null; e = e.InnerException)
-            if (e is TimeoutException or System.Net.Http.HttpRequestException or System.Net.Sockets.SocketException)
-                return $"{e.GetType().Name}: {e.Message}";
-
-        return ex.GetType().Name;
-    }
+    /// <summary>The innermost transient-transport reason (type + message) for a legible infra-skip line.</summary>
+    private static string InfraReason(Exception ex) =>
+        Unwrap(ex).Where(IsTransientTransport).Select(e => $"{e.GetType().Name}: {e.Message}").FirstOrDefault() ?? ex.GetType().Name;
 
     /// <summary>Surface an INFORMATIONAL wire's verdict (pass OR fail, so silence never reads as "it ran clean") where it is actually visible: the GitHub step-summary FILE when present (capture-immune → reaches the job-summary UI), else the console for a local run. Pure given <paramref name="stepSummaryPath"/> → pinnable without mutating process env.</summary>
     internal static void ReportInformational(bool ok, string verdict, string? stepSummaryPath)

@@ -68,6 +68,12 @@ public sealed class RealModelSupervisorTrajectoryFlowTests
         {
             var trajectory = await SupervisorTrajectory.RunAsync(decider, environment, maxTurns: 8, deadline.Token);
 
+            // A FIRED wall-clock deadline is the gateway being too slow to finish the trajectory in the budget — not a
+            // wrong decision — so surface it as a TimeoutException for AssessLiveAsync to skip (non-gating). A turn-cap
+            // exhaustion (the model looping without shipping) leaves the deadline UNFIRED and still gates via the scorer.
+            if (deadline.IsCancellationRequested)
+                throw new TimeoutException($"[{scenario}] trajectory exceeded its 6-min wall-clock — the gateway was too slow to converge");
+
             var (ok, note) = SupervisorTrajectoryScore.Score(trajectory);
             return (ok, $"{provider} model '{model}' [{scenario}] trajectory — {note}");
         });

@@ -212,13 +212,15 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
     private async Task<Guid> CreateWholeLoopWorkflowAsync(Guid teamId, Guid userId, Guid repoId, Guid brainModelId)
     {
         // The live brain (supervisorModelId) authors the arc; its agents clone repoId + push branches, the merge
-        // integrates them, and the operator acceptance floor (check.sh) gates the terminal stop. maxRounds caps a
-        // runaway live brain so the in-memory drain always terminates.
+        // integrates them, and the operator acceptance floor (check.sh) gates the terminal stop. The happy path converges
+        // in ~4 rounds (plan→spawn→merge→stop); maxRounds:6 gives slack yet BOUNDS the wall-clock — at up to ~2×180s per
+        // round (the progressive double-attempt on a slow gateway) 6 rounds stays well under this lane's 45-min job
+        // timeout, so a slow-but-progressing run can't blow the job (an opaque kill); a per-call timeout still self-skips.
         var supConfig = $$"""
             {
               "goal": "Add server-side email-format validation to the signup endpoint, with unit tests.",
               "supervisorModelId": "{{brainModelId}}",
-              "maxRounds": 10,
+              "maxRounds": 6,
               "agentProfile": { "repositoryId": "{{repoId}}", "pushBranch": true, "integrateBranches": true },
               "acceptanceChecks": ["sh", "check.sh"]
             }

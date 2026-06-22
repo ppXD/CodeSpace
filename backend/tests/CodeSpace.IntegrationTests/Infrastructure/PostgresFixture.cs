@@ -147,11 +147,12 @@ public sealed class PostgresFixture : IAsyncLifetime
         // GitHubOAuthClient + GitLabOAuthClient take IHttpClientFactory; register it so the
         // singletons can be constructed even when tests don't hit the live HTTP path.
         services.AddHttpClient();
-        // The real-model LIVE whole-loop drives the production LlmSupervisorDecider → AnthropicClient/OpenAiClient, which
-        // resolve their HttpClient by these NAMES. The owner's gateway is slow (~50-90s/turn via the progressive
-        // structured-output double-attempt), so the default 100s would abort a normal slow turn; 180s lets it measure.
-        // A turn that STILL exceeds 180s is treated as non-gating gateway infra by RealModelGate.AssessLiveAsync. Only the
-        // live whole-loop resolves these named clients, so this is inert for every other (faked-LLM) test.
+        // The real-model LIVE tests drive the production LlmSupervisorDecider → AnthropicClient/OpenAiClient (the whole-loop)
+        // and the planner RealModel test (RealModelPhaseAuthorshipFlowTests, RECORD mode), which resolve their HttpClient by
+        // these NAMES. The owner's gateway is slow (~50-90s/turn via the progressive structured-output double-attempt), so
+        // the default 100s would abort a normal slow turn; 180s lets it measure. A turn that STILL exceeds 180s is treated
+        // as non-gating gateway infra by RealModelGate.AssessLiveAsync. Every other (faked-LLM) test uses its own client and
+        // is unaffected; a longer timeout is inert for any client that never makes a real slow call.
         services.AddHttpClient(nameof(CodeSpace.Core.Services.Workflows.Llm.Anthropic.AnthropicClient), c => c.Timeout = TimeSpan.FromSeconds(180));
         services.AddHttpClient(nameof(CodeSpace.Core.Services.Workflows.Llm.OpenAi.OpenAiClient), c => c.Timeout = TimeSpan.FromSeconds(180));
 

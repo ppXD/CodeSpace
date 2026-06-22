@@ -72,13 +72,20 @@ public sealed class RealModelGateTests
     }
 
     [Fact]
-    public void A_gateway_timeout_or_transport_failure_is_infra_but_a_bare_cancel_or_a_logic_error_are_not()
+    public void Transient_transport_failures_are_infra_but_wiring_failures_and_logic_errors_gate()
     {
-        // HttpClient.Timeout surfaces as a TaskCanceledException wrapping a TimeoutException — the gateway, not the brain.
-        RealModelGate.IsGatewayInfraFailure(new TaskCanceledException("timeout", new TimeoutException())).ShouldBeTrue("an HttpClient.Timeout is gateway infra");
+        // TRANSIENT (slow / dropped gateway) → non-gating infra:
+        RealModelGate.IsGatewayInfraFailure(new TaskCanceledException("timeout", new TimeoutException())).ShouldBeTrue("an HttpClient.Timeout is the gateway being slow");
         RealModelGate.IsGatewayInfraFailure(new TimeoutException()).ShouldBeTrue();
-        RealModelGate.IsGatewayInfraFailure(new System.Net.Http.HttpRequestException("connection refused")).ShouldBeTrue("an unreachable gateway is infra");
-        RealModelGate.IsGatewayInfraFailure(new Exception("io", new System.Net.Sockets.SocketException())).ShouldBeTrue("a transport reset is infra");
+        RealModelGate.IsGatewayInfraFailure(new System.IO.IOException("response stream ended")).ShouldBeTrue("a mid-stream drop (incl. HttpIOException) is transient transport");
+        RealModelGate.IsGatewayInfraFailure(new System.Net.Sockets.SocketException((int)System.Net.Sockets.SocketError.ConnectionReset)).ShouldBeTrue("an established-then-reset connection is transient");
+        // Flattened through an AggregateException (a future parallel drive) — the TimeoutException in a non-first slot is still found.
+        RealModelGate.IsGatewayInfraFailure(new AggregateException(new InvalidOperationException("x"), new TimeoutException())).ShouldBeTrue("an aggregate-wrapped timeout is still infra");
+
+        // WIRING (mis-pointed/unreachable endpoint) → MUST gate (a broken wire can't green the kill-gate):
+        RealModelGate.IsGatewayInfraFailure(new System.Net.Http.HttpRequestException("name not resolved")).ShouldBeFalse("a bare HttpRequestException (DNS/connect) is a wiring failure, not transient");
+        RealModelGate.IsGatewayInfraFailure(new System.Net.Http.HttpRequestException("dns", new System.Net.Sockets.SocketException((int)System.Net.Sockets.SocketError.HostNotFound))).ShouldBeFalse("an unresolvable host is a wiring failure");
+        RealModelGate.IsGatewayInfraFailure(new System.Net.Sockets.SocketException((int)System.Net.Sockets.SocketError.ConnectionRefused)).ShouldBeFalse("a refused connection is a mis-pointed endpoint, a wiring failure");
 
         // Our OWN deadline cancellation carries no TimeoutException → NOT infra (a "did not converge" verdict must gate).
         RealModelGate.IsGatewayInfraFailure(new OperationCanceledException()).ShouldBeFalse("a bare cancel is our deadline, not the gateway");
