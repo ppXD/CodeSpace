@@ -73,12 +73,13 @@ public sealed class TaskLaunchService : ITaskLaunchService, IScopedDependency
             throw new KeyNotFoundException($"Repository {repositoryId} not found or not accessible.");
     }
 
-    /// <summary>Maps the seed + the operator's effort/recipe/autonomy onto the router input. PR4 leaves <c>CapsOverride</c> null (the caps/supervisor seam a later PR fills).</summary>
+    /// <summary>Maps the seed + the operator's effort/recipe/autonomy + safety-budget caps onto the router input. The router TIGHTENS the effort preset's caps with <c>CapsOverride</c> (null ⇒ preset-only, byte-identical).</summary>
     private static EffortRouteRequest BuildRouteRequest(TaskLaunchSeed seed, TaskLaunchRequest request) => new()
     {
         Seed = seed,
         RequestedEffort = request.RequestedEffort,
         RequestedRecipe = request.RequestedRecipe,
+        CapsOverride = request.CapsOverride,
     };
 
     /// <summary>Pure mapping: the request overrides + (seed repo ?? request repo) + the CLAMPED autonomy → the agent envelope the projection stamps. Every field optional, folding to agent.code's own defaults. Internal (not private) so the clamp choke point is unit-pinned directly (InternalsVisibleTo), not only through integration coverage.</summary>

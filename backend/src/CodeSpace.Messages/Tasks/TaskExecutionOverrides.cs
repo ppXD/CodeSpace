@@ -7,9 +7,9 @@ namespace CodeSpace.Messages.Tasks;
 /// default, etc.), so a bare task launches identically to an authored bare <c>agent.code</c> node. <see cref="Harness"/>
 /// / <see cref="RunnerKind"/> are OPEN STRINGS (the registries resolve them).
 ///
-/// <para>PR4-minimal: caps + approval-policy inputs (MaxParallelism / MaxTotalSpawns / MaxCostUsd / ApprovalPolicy)
-/// are intentionally NOT modelled here — they are supervisor / cost concerns a later PR adds via the router's
-/// <c>CapsOverride</c> seam, which PR4 leaves unused.</para>
+/// <para>Safety-budget caps (MaxParallelism / MaxTotalSpawns / MaxCostUsd / MaxRounds) are NOT here — they are a
+/// supervisor / cost concern carried by the sibling <see cref="TaskCapsOverride"/>, which rides the router's
+/// <c>CapsOverride</c> seam. ApprovalPolicy rides the autonomy tier separately.</para>
 /// </summary>
 public sealed record TaskExecutionOverrides
 {

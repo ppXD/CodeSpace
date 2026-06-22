@@ -42,6 +42,9 @@ public sealed record TaskLaunchRequest
     /// <summary>The operator's execution overrides (harness / model / persona / runner / credential). Defaults to all-absent.</summary>
     public TaskExecutionOverrides Overrides { get; init; } = new();
 
+    /// <summary>The operator's safety-budget caps projected onto the router's <c>CapsOverride</c> seam (the numeric caps only — autonomy/approval merge tighten-only). Null ⇒ the effort preset's caps stand. The router TIGHTENS the preset with a set cap; a cost cap force-stops the run via the supervisor's bounds.</summary>
+    public RouteCaps? CapsOverride { get; init; }
+
     /// <summary>The opaque per-surface payload (the folded <c>LaunchContext.Raw</c>) — ONLY the resolved seed provider reads it; the core never does. Defaults empty.</summary>
     public IReadOnlyDictionary<string, JsonElement> SurfacePayload { get; init; } = new Dictionary<string, JsonElement>();
 }
