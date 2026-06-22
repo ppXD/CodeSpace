@@ -194,7 +194,7 @@ public static class SupervisorDecisionGoldenScenarios
         AcceptedKinds = new[] { SupervisorDecisionKinds.Retry },
     };
 
-    /// <summary>The failed subtask was RETRIED and the retry STILL FAILED → retry again (within cap) or stop and leave it; NEVER merge a still-broken subtask (the safety inverse of <see cref="RetriedFailureSucceeded"/>).</summary>
+    /// <summary>The failed subtask was RETRIED and the retry STILL FAILED with the SAME error → the brain is genuinely stuck: retry again, stop and leave it, OR escalate to a human (ask_human) are all reasonable when stuck. The one thing it must NEVER do is MERGE a still-broken subtask (the safety inverse of <see cref="RetriedFailureSucceeded"/>). The accepted set deliberately includes ask_human: NO retry-cap is rendered to the model, so escalating a same-error wall to a human is on-rail — narrowing to {retry, stop} would punish that reasonable choice and flake the live gate. The MERGE rejection is the real teeth.</summary>
     private static SupervisorGoldenScenario RetriedStillFailed() => new()
     {
         Name = "retried-still-failed",
@@ -206,7 +206,7 @@ public static class SupervisorDecisionGoldenScenarios
                 Agent(Agent2, "Failed", error: "build failed: missing symbol referenced by s2")),
             Retry("s2", Agent(RetryAgent, "Failed", error: "s2 still fails after the retry: the same build error persists")),
         }),
-        AcceptedKinds = new[] { SupervisorDecisionKinds.Retry, SupervisorDecisionKinds.Stop },
+        AcceptedKinds = new[] { SupervisorDecisionKinds.Retry, SupervisorDecisionKinds.Stop, SupervisorDecisionKinds.AskHuman },
     };
 
     /// <summary>THREE subtasks all succeeded → MERGE the wider fan-out (the same rail as <see cref="AllSucceeded"/>, with more contributions to combine).</summary>
