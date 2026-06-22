@@ -76,10 +76,26 @@ public sealed class OpenAiClient : ILLMClient, IStructuredLLMClient
 
     public async Task<StructuredLLMCompletion> CompleteStructuredAsync(StructuredLLMCompletionRequest request, CancellationToken cancellationToken)
     {
-        // Progressive structured output (generic across models AND gateways): try the constrained path first for the
-        // best fidelity on capable models, then degrade to a prompt-only floor for models/gateways that cannot honour
-        // it. The schema rides in the system prompt for BOTH attempts so any model knows the exact shape to emit.
-        var system = StructuredJsonText.WithSchemaInstruction(request.SystemPrompt, request.JsonSchema);
+        // Get the JSON via the progressive path, then VALIDATE it against the requested schema — a recovered object that
+        // is missing a required field / has a wrong-typed value / an invalid enum is NOT success. On a validation miss,
+        // RE-ASK ONCE with the exact violations named, then re-validate; a second miss is a typed Malformed fault.
+        var first = await CompleteStructuredOnceAsync(request, request.SystemPrompt, cancellationToken).ConfigureAwait(false);
+        var errors = JsonSchemaValidator.Validate(first.Json, request.JsonSchema);
+        if (errors.Count == 0) return first;
+
+        var feedbackSystem = StructuredJsonText.WithValidationFeedback(request.SystemPrompt, errors, first.Json);
+        var second = await CompleteStructuredOnceAsync(request, feedbackSystem, cancellationToken).ConfigureAwait(false);
+        var errors2 = JsonSchemaValidator.Validate(second.Json, request.JsonSchema);
+        if (errors2.Count == 0) return second;
+
+        throw new LlmApiException(Provider, null, LlmErrorCategory.Malformed,
+            $"structured output failed schema validation after a re-ask: {string.Join("; ", errors2)}");
+    }
+
+    /// <summary>One progressive structured attempt (forced function-calling → prompt-only floor) against the given base system prompt — the re-ask passes a feedback-augmented base so the SAME path retries with the validation errors named.</summary>
+    private async Task<StructuredLLMCompletion> CompleteStructuredOnceAsync(StructuredLLMCompletionRequest request, string baseSystemPrompt, CancellationToken cancellationToken)
+    {
+        var system = StructuredJsonText.WithSchemaInstruction(baseSystemPrompt, request.JsonSchema);
 
         // Attempt 1 — forced function-calling. A gateway/model that rejects it (400) or returns neither a function
         // call nor a JSON content object yields null here, degrading to the prompt-only floor below.
