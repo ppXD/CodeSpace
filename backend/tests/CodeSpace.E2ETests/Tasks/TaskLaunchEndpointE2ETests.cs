@@ -20,7 +20,7 @@ using Shouldly;
 namespace CodeSpace.E2ETests.Tasks;
 
 /// <summary>
-/// E2E coverage for <c>POST /api/tasks</c> through the REAL ASP.NET pipeline — JWT auth, the X-Team-Id
+/// E2E coverage for <c>POST /api/workflows/runs</c> through the REAL ASP.NET pipeline — JWT auth, the X-Team-Id
 /// team-scope behavior (TeamMembershipAuthorizationBehavior), model binding of <c>LaunchTaskCommand</c>, the
 /// controller, the mediator, the GlobalExceptionFilter. The launch's post-commit dispatch → engine run →
 /// agent.code → real executor + LocalProcessRunner + fake CLI → resume → terminal chain is then DRAINED and the
@@ -48,7 +48,7 @@ public sealed class TaskLaunchEndpointE2ETests : IClassFixture<TaskLaunchApiFact
         var (userId, teamId) = await SeedTeamMembershipAsync();
 
         // POST through the REAL pipeline: a signed bearer token + the X-Team-Id header drive auth + team scope.
-        var request = new HttpRequestMessage(HttpMethod.Post, "/api/tasks")
+        var request = new HttpRequestMessage(HttpMethod.Post, "/api/workflows/runs")
         {
             Content = JsonContent.Create(new
             {
@@ -107,7 +107,7 @@ public sealed class TaskLaunchEndpointE2ETests : IClassFixture<TaskLaunchApiFact
 
         // A signed token but NO X-Team-Id header → the team-scope behavior throws (team comes from the header,
         // never the body) → the GlobalExceptionFilter maps it to 403. Tenancy fail-closed at the HTTP boundary.
-        var request = new HttpRequestMessage(HttpMethod.Post, "/api/tasks")
+        var request = new HttpRequestMessage(HttpMethod.Post, "/api/workflows/runs")
         {
             Content = JsonContent.Create(new { taskText = "no team header", surfaceKind = "chat" }),
         };
@@ -158,5 +158,5 @@ public sealed class TaskLaunchEndpointE2ETests : IClassFixture<TaskLaunchApiFact
     }
 
     private static async Task<string> DescribeFailureAsync(HttpResponseMessage response) =>
-        $"POST /api/tasks expected 200 but got {(int)response.StatusCode}; body: {await response.Content.ReadAsStringAsync()}";
+        $"POST /api/workflows/runs expected 200 but got {(int)response.StatusCode}; body: {await response.Content.ReadAsStringAsync()}";
 }
