@@ -29,6 +29,7 @@ namespace CodeSpace.E2ETests.Tasks;
 /// </summary>
 [Trait("Category", "E2E")]
 [Trait("Surface", "Http")]
+[Collection(FakeCliHttpE2ECollection.Name)]   // serial with the other fake-CLI Http E2E classes — they share the process-wide CodexHarness.CommandEnvVar
 public sealed class TaskRunPhasesEndpointE2ETests : IClassFixture<TaskLaunchApiFactory>
 {
     private readonly TaskLaunchApiFactory _factory;
