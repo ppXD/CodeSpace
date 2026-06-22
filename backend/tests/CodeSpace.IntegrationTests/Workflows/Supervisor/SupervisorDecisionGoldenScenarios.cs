@@ -18,14 +18,19 @@ public static class SupervisorDecisionGoldenScenarios
     private static readonly Guid Agent1 = Guid.Parse("11111111-1111-1111-1111-111111111111");
     private static readonly Guid Agent2 = Guid.Parse("22222222-2222-2222-2222-222222222222");
     private static readonly Guid Resolver = Guid.Parse("33333333-3333-3333-3333-333333333333");
+    private static readonly Guid RetryAgent = Guid.Parse("55555555-5555-5555-5555-555555555555");
 
     public static IReadOnlyList<SupervisorGoldenScenario> All { get; } = new[]
     {
         FirstTurn(),
+        PlannedNotSpawned(),
         MixedResults(),
+        RetriedFailureSucceeded(),
         AllSucceeded(),
+        CleanIntegration(),
         MergeConflict(),
         VerifiedResolution(),
+        UnverifiedResolution(),
     };
 
     /// <summary>Turn 0, no priors → the brain must PLAN first (it cannot spawn/retry/merge over non-existent subtasks).</summary>
@@ -96,6 +101,60 @@ public static class SupervisorDecisionGoldenScenarios
         AcceptedKinds = new[] { SupervisorDecisionKinds.Merge, SupervisorDecisionKinds.Stop },
     };
 
+    /// <summary>Planned, nothing spawned yet → SPAWN over the planned subtasks (the rails say plan THEN spawn; re-planning or merging/stopping with no work done quits early).</summary>
+    private static SupervisorGoldenScenario PlannedNotSpawned() => new()
+    {
+        Name = "planned-not-spawned",
+        Context = Context(turn: 1, new[] { Plan("s1", "s2") }),
+        AcceptedKinds = new[] { SupervisorDecisionKinds.Spawn },
+    };
+
+    /// <summary>One subtask FAILED, was RETRIED, and the retry SUCCEEDED → every subtask is now green → MERGE (don't retry again, don't stop before merging).</summary>
+    private static SupervisorGoldenScenario RetriedFailureSucceeded() => new()
+    {
+        Name = "retried-failure-succeeded",
+        Context = Context(turn: 3, new[]
+        {
+            Plan("s1", "s2"),
+            Spawn(new[] { "s1", "s2" },
+                Agent(Agent1, "Succeeded", summary: "implemented s1; unit tests green", branch: "agent/s1"),
+                Agent(Agent2, "Failed", error: "build failed: missing symbol referenced by s2")),
+            Retry("s2", Agent(RetryAgent, "Succeeded", summary: "fixed s2; unit tests green", branch: "agent/s2-retry")),
+        }),
+        AcceptedKinds = new[] { SupervisorDecisionKinds.Merge },
+    };
+
+    /// <summary>The merge integrated CLEANLY (a reviewable branch exists, no conflict) → STOP and ship; the goal is met and nothing remains (re-merging / re-spawning is churn).</summary>
+    private static SupervisorGoldenScenario CleanIntegration() => new()
+    {
+        Name = "clean-integration",
+        Context = Context(turn: 3, new[]
+        {
+            Plan("s1", "s2"),
+            Spawn(new[] { "s1", "s2" },
+                Agent(Agent1, "Succeeded", summary: "s1", branch: "agent/s1"),
+                Agent(Agent2, "Succeeded", summary: "s2", branch: "agent/s2")),
+            CleanMerge(),
+        }),
+        AcceptedKinds = new[] { SupervisorDecisionKinds.Stop },
+    };
+
+    /// <summary>The resolution did NOT pass the build/tests (no verified marker) → do NOT ACCEPT it: retry the resolution (within cap) or stop and leave the conflict for a human. NEVER merge an unverified reconciliation — the safety-critical inverse of <see cref="VerifiedResolution"/>.</summary>
+    private static SupervisorGoldenScenario UnverifiedResolution() => new()
+    {
+        Name = "unverified-resolution",
+        Context = Context(turn: 4, new[]
+        {
+            Plan("s1", "s2"),
+            Spawn(new[] { "s1", "s2" },
+                Agent(Agent1, "Succeeded", summary: "s1", branch: "agent/s1"),
+                Agent(Agent2, "Succeeded", summary: "s2", branch: "agent/s2")),
+            ConflictedMerge(),
+            Resolve(Agent(Resolver, "Succeeded", summary: "attempted to reconcile the conflict, but the build still fails and the tests do not pass", branch: "resolve/head")),
+        }),
+        AcceptedKinds = new[] { SupervisorDecisionKinds.Resolve, SupervisorDecisionKinds.Stop },
+    };
+
     // ── Builders (fixed strings; real folds) ─────────────────────────────────────────────────────────────────
 
     /// <summary>The operator-picked brain model row id — non-null so the real <c>LlmSupervisorDecider</c> proceeds past its fail-closed "no brain model" guard.</summary>
@@ -146,6 +205,16 @@ public static class SupervisorDecisionGoldenScenarios
 
         return PriorDecision(SupervisorDecisionKinds.Resolve, 3, "{}", SupervisorOutcome.FoldAgentResults(staged, new[] { resolver }));
     }
+
+    private static SupervisorPriorDecision Retry(string subtaskId, SupervisorAgentResult result)
+    {
+        var staged = JsonSerializer.Serialize(new { agentRunIds = new[] { result.AgentRunId }, agentCount = 1 }, AgentJson.Options);
+
+        return PriorDecision(SupervisorDecisionKinds.Retry, 2, JsonSerializer.Serialize(new { subtaskId }, AgentJson.Options), SupervisorOutcome.FoldAgentResults(staged, new[] { result }));
+    }
+
+    private static SupervisorPriorDecision CleanMerge() =>
+        PriorDecision(SupervisorDecisionKinds.Merge, 2, "{}", JsonSerializer.Serialize(new { integration = new { status = "Clean", integratedBranch = "codespace/integration/head" } }, AgentJson.Options));
 
     private static SupervisorPriorDecision PriorDecision(string kind, long sequence, string payloadJson, string outcomeJson) =>
         new() { Id = Guid.Empty, Sequence = sequence, DecisionKind = kind, Status = SupervisorDecisionStatus.Succeeded, PayloadJson = payloadJson, OutcomeJson = outcomeJson };
