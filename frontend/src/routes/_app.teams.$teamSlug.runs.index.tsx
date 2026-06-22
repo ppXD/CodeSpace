@@ -9,7 +9,7 @@ import { useTeamRuns, useWorkflows } from "@/hooks/use-workflows";
  * Needs attention (parked on a human signal), Live (in flight), Recent (settled). Each row opens the Run Room.
  * A monitoring surface: read-only, polled while anything is still running.
  */
-export const Route = createFileRoute("/_app/teams/$teamSlug/runs")({
+export const Route = createFileRoute("/_app/teams/$teamSlug/runs/")({
   component: TeamRunsPage,
 });
 
@@ -22,7 +22,7 @@ function TeamRunsPage() {
   const nameById = new Map((workflows.data ?? []).map((w) => [w.id, w.name]));
   const total = (runs.data ?? []).length;
 
-  const openRun = (runId: string) => navigate({ to: "/teams/$teamSlug/workflows/runs/$runId", params: { teamSlug, runId } });
+  const openRun = (runId: string) => navigate({ to: "/teams/$teamSlug/runs/$runId", params: { teamSlug, runId } });
 
   return (
     <section className="ct">
