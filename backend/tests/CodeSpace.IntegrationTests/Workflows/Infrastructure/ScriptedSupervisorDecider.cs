@@ -33,6 +33,7 @@ public sealed class ScriptedSupervisorDecider : ISupervisorDecider
             SupervisorScriptMode.PlanSpawnStop => PlanSpawnStop(context),
             SupervisorScriptMode.PlanSpawnMergeStop => PlanSpawnMergeStop(context),
             SupervisorScriptMode.PlanSpawnRetryMergeStop => PlanSpawnRetryMergeStop(context),
+            SupervisorScriptMode.PlanSpawnMergeResolveMergeStop => PlanSpawnMergeResolveMergeStop(context),
             SupervisorScriptMode.AskHumanStop => AskHumanStop(context),
             SupervisorScriptMode.PlanThenSpawnForever => PlanThenSpawnForever(context),
             SupervisorScriptMode.PlanSpawnDispatchStop => PlanSpawnDispatchStop(context),
@@ -99,6 +100,19 @@ public sealed class ScriptedSupervisorDecider : ISupervisorDecider
         2 => Canonical(SupervisorDecisionKinds.Retry, new SupervisorRetryPayload { SubtaskId = SubtaskB, RevisedInstruction = "do beta retry" }),
         3 => Canonical(SupervisorDecisionKinds.Merge, new SupervisorMergePayload { SynthesisInstruction = "combine both branches" }),
         _ => Canonical(SupervisorDecisionKinds.Stop, new SupervisorStopPayload { Outcome = "completed", Summary = "recovered via retry" }),
+    };
+
+    // Conflict→resolve arc: plan(2) → spawn(both, editing the SAME file with conflicting content) → merge (CONFLICTED:
+    // real git can't auto-combine the two edits) → resolve (a resolver agent reconciles + verifies) → merge (accepts the
+    // VERIFIED resolution's branch as the integrated head) → stop. Proves the full conflict-recovery loop through real git.
+    private static SupervisorDecision PlanSpawnMergeResolveMergeStop(SupervisorTurnContext context) => context.TurnNumber switch
+    {
+        0 => Plan(context.Goal),
+        1 => Canonical(SupervisorDecisionKinds.Spawn, new SupervisorSpawnPayload { SubtaskIds = new[] { SubtaskA, SubtaskB } }),
+        2 => Canonical(SupervisorDecisionKinds.Merge, new SupervisorMergePayload { SynthesisInstruction = "combine both branches" }),
+        3 => Canonical(SupervisorDecisionKinds.Resolve, new SupervisorResolvePayload()),
+        4 => Canonical(SupervisorDecisionKinds.Merge, new SupervisorMergePayload { SynthesisInstruction = "accept the reconciled result" }),
+        _ => Canonical(SupervisorDecisionKinds.Stop, new SupervisorStopPayload { Outcome = "completed", Summary = "conflict reconciled" }),
     };
 
     /// <summary>The guid a bad dispatch targets — never bound by any test profile, so the per-agent repo clamp rejects it.</summary>
@@ -177,6 +191,8 @@ public sealed class SupervisorDecisionScript
 
     public void PlanSpawnRetryMergeStop() => Mode = SupervisorScriptMode.PlanSpawnRetryMergeStop;
 
+    public void PlanSpawnMergeResolveMergeStop() => Mode = SupervisorScriptMode.PlanSpawnMergeResolveMergeStop;
+
     public void AskHumanStop() => Mode = SupervisorScriptMode.AskHumanStop;
 
     public void PlanThenSpawnForever() => Mode = SupervisorScriptMode.PlanThenSpawnForever;
@@ -207,6 +223,7 @@ public enum SupervisorScriptMode
     PlanSpawnStop,
     PlanSpawnMergeStop,
     PlanSpawnRetryMergeStop,
+    PlanSpawnMergeResolveMergeStop,
     PlanSpawnDispatchStop,
     PlanSpawnBadRepoStop,
     PlanSpawnBadModelStop,
