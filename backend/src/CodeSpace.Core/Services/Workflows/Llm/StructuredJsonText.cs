@@ -1,3 +1,4 @@
+using System.Linq;
 using System.Text.Json;
 
 namespace CodeSpace.Core.Services.Workflows.Llm;
@@ -19,24 +20,62 @@ internal static class StructuredJsonText
         return string.IsNullOrWhiteSpace(systemPrompt) ? instruction : systemPrompt + "\n\n" + instruction;
     }
 
+    /// <summary>Augment the base system prompt with the validation errors from a previous attempt so the RE-ASK names exactly what to fix — the model that returned a shape-invalid object gets a precise correction, not just a blind retry.</summary>
+    public static string WithValidationFeedback(string systemPrompt, IReadOnlyList<string> errors, JsonElement previous)
+    {
+        var feedback =
+            "Your previous response did NOT conform to the required JSON Schema. Fix exactly these problems and respond again with ONLY the corrected JSON object:\n" +
+            string.Join("\n", errors.Select(e => "- " + e)) +
+            "\n\nYour previous (invalid) response was:\n" + previous.GetRawText();
+
+        return string.IsNullOrWhiteSpace(systemPrompt) ? feedback : systemPrompt + "\n\n" + feedback;
+    }
+
     /// <summary>
     /// Recover a JSON object from a model's free-text reply — the fallback when it returned the JSON as content
     /// instead of a tool/function call. Strips a leading <c>```json</c> / trailing <c>```</c> fence, then takes the
-    /// outermost <c>{ … }</c> span and parses it. Null when the content holds no JSON object.
+    /// FIRST BALANCED <c>{ … }</c> span (brace-depth + string-aware, so a brace inside a string or trailing prose
+    /// doesn't break it) and parses it. Null when the content holds no complete JSON object (incl. a truncated one).
     /// </summary>
     public static JsonElement? TryExtractObject(string? content)
     {
         if (string.IsNullOrWhiteSpace(content)) return null;
 
-        var text = StripFences(content);
+        var span = ExtractFirstBalancedObject(StripFences(content));
+        if (span is null) return null;
 
-        var start = text.IndexOf('{');
-        var end = text.LastIndexOf('}');
-
-        if (start < 0 || end <= start) return null;
-
-        try { return JsonDocument.Parse(text.Substring(start, end - start + 1)).RootElement.Clone(); }
+        try { return JsonDocument.Parse(span).RootElement.Clone(); }
         catch (JsonException) { return null; }
+    }
+
+    /// <summary>The first complete top-level <c>{ … }</c> by brace depth — ignoring braces inside strings (with escapes) and any prose / second object after it. Null when there is no opening brace or the object is unterminated (truncated output).</summary>
+    private static string? ExtractFirstBalancedObject(string text)
+    {
+        var start = text.IndexOf('{');
+        if (start < 0) return null;
+
+        var depth = 0;
+        var inString = false;
+        var escaped = false;
+
+        for (var i = start; i < text.Length; i++)
+        {
+            var c = text[i];
+
+            if (inString)
+            {
+                if (escaped) escaped = false;
+                else if (c == '\\') escaped = true;
+                else if (c == '"') inString = false;
+                continue;
+            }
+
+            if (c == '"') inString = true;
+            else if (c == '{') depth++;
+            else if (c == '}' && --depth == 0) return text.Substring(start, i - start + 1);
+        }
+
+        return null;
     }
 
     /// <summary>A short, single-line preview of a model reply for a diagnostic exception (so a CI failure shows WHAT the model actually returned, not just "no structured output"). Truncated + newline-collapsed.</summary>
