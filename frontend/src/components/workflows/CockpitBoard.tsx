@@ -3,7 +3,7 @@ import type { PendingDecision, RunPhasesResponse, WorkflowRunStatus, WorkflowRun
 import { relativeTime } from "@/lib/codeTree";
 
 import { DecisionCard } from "./DecisionCard";
-import { compactAge, type CockpitFilter } from "./cockpit";
+import { compactAge, suspendedNeedingReview, type CockpitFilter } from "./cockpit";
 import { bucketRuns, sourceLabel } from "./runsIndex";
 import { summarizeRunState } from "./runPhases";
 
@@ -24,9 +24,8 @@ export function CockpitBoard({ runs, decisions, phasesByRun, nameById, filter, n
 }) {
   const buckets = bucketRuns(runs);
 
-  // A suspended run that already has a queued decision is covered by its Answer card — don't also list it as a row.
-  const decided = new Set(decisions.flatMap((d) => [d.workflowRunId, d.rootTraceId].filter(Boolean) as string[]));
-  const suspended = buckets.needsAttention.filter((r) => !decided.has(r.id));
+  // The exact set the Needs-attention CARD counts (decisions + these), so the headline can't disagree with the rows.
+  const suspended = suspendedNeedingReview(runs, decisions);
 
   if (filter === "failed") {
     return <Zone label="Failed / stuck"><CompactList runs={runs.filter((r) => r.status === "Failure" || r.status === "Suspended")} nameById={nameById} onOpen={onOpen} empty="Nothing failed or stuck." /></Zone>;
@@ -35,7 +34,7 @@ export function CockpitBoard({ runs, decisions, phasesByRun, nameById, filter, n
     return <Zone label="Today"><CompactList runs={runs.filter((r) => isToday(r.createdDate, nowMs))} nameById={nameById} onOpen={onOpen} empty="No runs today yet." /></Zone>;
   }
 
-  const showAttention = filter === null || filter === "decisions";
+  const showAttention = filter === null || filter === "attention";
   const showLive = filter === null || filter === "live";
   const showRecent = filter === null;
 

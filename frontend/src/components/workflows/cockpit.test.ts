@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import type { PendingDecision, WorkflowRunStatus, WorkflowRunSummary } from "@/api/workflows";
 
-import { compactAge, countRuns, summarizeDecisions, summarizeToday } from "./cockpit";
+import { compactAge, countRuns, summarizeDecisions, summarizeToday, suspendedNeedingReview } from "./cockpit";
 
 function decision(o: Partial<PendingDecision>): PendingDecision {
   return {
@@ -14,6 +14,19 @@ function decision(o: Partial<PendingDecision>): PendingDecision {
 function run(id: string, status: WorkflowRunStatus, createdDate = "2026-06-22T00:00:00Z"): WorkflowRunSummary {
   return { id, workflowId: "w", workflowVersion: 1, sourceType: "manual", status, error: null, startedAt: null, completedAt: null, createdDate };
 }
+
+describe("suspendedNeedingReview", () => {
+  it("returns suspended runs except those already covered by a queued decision", () => {
+    const runs = [run("s1", "Suspended"), run("s2", "Suspended"), run("running", "Running"), run("done", "Success")];
+    const decisions = [decision({ id: "d", workflowRunId: "s1" })];   // s1 is covered by its decision
+    expect(suspendedNeedingReview(runs, decisions).map((r) => r.id)).toEqual(["s2"]);
+  });
+
+  it("matches the decision's rootTraceId too, and is empty when none are suspended", () => {
+    expect(suspendedNeedingReview([run("s", "Suspended")], [decision({ rootTraceId: "s" })])).toEqual([]);
+    expect(suspendedNeedingReview([run("ok", "Success")], [])).toEqual([]);
+  });
+});
 
 describe("compactAge", () => {
   const now = 1_700_000_000_000;

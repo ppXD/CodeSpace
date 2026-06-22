@@ -5,7 +5,7 @@ import { ApiError } from "@/api/request";
 import type { RunPhasesResponse } from "@/api/workflows";
 import { CockpitBoard } from "@/components/workflows/CockpitBoard";
 import { CockpitCards, type CockpitMetrics } from "@/components/workflows/CockpitCards";
-import { countRuns, summarizeDecisions, summarizeToday, type CockpitFilter } from "@/components/workflows/cockpit";
+import { countRuns, summarizeDecisions, summarizeToday, suspendedNeedingReview, type CockpitFilter } from "@/components/workflows/cockpit";
 import { summarizeRunState } from "@/components/workflows/runPhases";
 import { bucketRuns } from "@/components/workflows/runsIndex";
 import { useLiveRunsPhases, usePendingDecisions, useTeamRuns, useWorkflows } from "@/hooks/use-workflows";
@@ -48,6 +48,7 @@ function TeamRunsPage() {
   const counts = countRuns(runList);
   const metrics: CockpitMetrics = {
     decisions: summarizeDecisions(decisionList, nowMs),
+    suspendedReview: suspendedNeedingReview(runList, decisionList).length,
     liveCount: counts.live,
     agentsActive,
     failed: counts.failed,
