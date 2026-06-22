@@ -64,32 +64,25 @@ export function RunDetailView({ runId, nested = false, depth = 0, onOpenRun, def
 
   return (
     <div className={nested ? "wf-detail-body wf-detail-body-nested" : "wf-detail-body"}>
-      <div className="wf-run-summary">
-        <RunStatusBadge status={r.status} />
-        <span>·</span>
-        <span className="wf-trigger-chip wf-trigger-chip-soft">{r.sourceType}</span>
-        <span>·</span>
-        <span className="wf-version">v{r.workflowVersion}</span>
-        {r.startedAt && (
-          <>
-            <span>·</span>
-            <span>{new Date(r.startedAt).toLocaleString()}</span>
-          </>
-        )}
-      </div>
-
-      {r.error && (
-        <div className="cn-banner cn-banner-err" style={{ margin: 0 }}>
-          <div className="cn-banner-h">Run failed</div>
-          <div className="cn-banner-p" style={{ fontFamily: "inherit" }}>{r.error}</div>
+      {/* Non-nested: the tab strip IS the panel head, so its top edge lines up with the left/right rail-card heads
+          (the status·source·version·date the summary line used to show is already in the page header + the Run
+          rail, so it's dropped here to fix the center-vs-rails misalignment). Nested (the editor dialog) has no
+          header/rails, so it keeps the compact summary line. */}
+      {nested ? (
+        <div className="wf-run-summary">
+          <RunStatusBadge status={r.status} />
+          <span>·</span>
+          <span className="wf-trigger-chip wf-trigger-chip-soft">{r.sourceType}</span>
+          <span>·</span>
+          <span className="wf-version">v{r.workflowVersion}</span>
+          {r.startedAt && (
+            <>
+              <span>·</span>
+              <span>{new Date(r.startedAt).toLocaleString()}</span>
+            </>
+          )}
         </div>
-      )}
-
-      {r.status === "Suspended" && r.pendingWait && (
-        <SuspendedPanel runId={runId} wait={r.pendingWait} depth={depth} onOpenRun={onOpenRun} />
-      )}
-
-      {!nested && (
+      ) : (
         <div className="wf-run-views wf-run-views-inline" role="tablist" aria-label="Run view">
           <button type="button" role="tab" aria-selected={view === "activity"} data-active={view === "activity"} onClick={() => setView("activity")}>
             <Ic.Clock size={13} /> Activity
@@ -104,6 +97,17 @@ export function RunDetailView({ runId, nested = false, depth = 0, onOpenRun, def
             <Ic.Code size={13} /> Trace
           </button>
         </div>
+      )}
+
+      {r.error && (
+        <div className="cn-banner cn-banner-err" style={{ margin: 0 }}>
+          <div className="cn-banner-h">Run failed</div>
+          <div className="cn-banner-p" style={{ fontFamily: "inherit" }}>{r.error}</div>
+        </div>
+      )}
+
+      {r.status === "Suspended" && r.pendingWait && (
+        <SuspendedPanel runId={runId} wait={r.pendingWait} depth={depth} onOpenRun={onOpenRun} />
       )}
 
       {!nested && view === "canvas" ? (
