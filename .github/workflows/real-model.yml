@@ -31,8 +31,9 @@ jobs:
     runs-on: ubuntu-latest
     # Headroom for the SEQUENTIAL worst case (xUnit runs a class's [Theory] cases serially): the trajectory class is
     # 6 cases (3 scenarios × 2 wires) each bounded by its own 6-min wall-clock deadline = up to 36 min, plus the
-    # decision class (5 golden × 2 wires, bounded by its 60s per-call HTTP timeout) ≈ up to 10 min, plus restore+build.
-    timeout-minutes: 55
+    # decision class (9 golden × 2 wires, bounded by its 60s per-call HTTP timeout) ≈ up to 18 min, plus restore+build.
+    # Typical is far lower (a decision is a ~15-20s call, a converging trajectory ~3-4 min); this covers the tail.
+    timeout-minutes: 60
     env:
       # The custom-endpoint config the RealModel tests read (a [Theory] over both Anthropic + OpenAI wires from
       # one gateway). Absent on a fork → the tests self-skip → green at zero cost.

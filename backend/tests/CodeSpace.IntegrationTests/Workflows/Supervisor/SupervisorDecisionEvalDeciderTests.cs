@@ -49,6 +49,17 @@ public class SupervisorDecisionEvalDeciderTests
         var conflict = Scenario("merge-conflict");
         SupervisorDecisionEval.Score(conflict, await DecideAsync(conflict, """{"kind":"stop","stop":{"outcome":"failed"}}"""))
             .Pass.ShouldBeFalse("abandoning an auto-resolvable conflict must fail");
+
+        // unverified-resolution (SAFETY-CRITICAL): ACCEPTING an unverified reconciliation by merging must FAIL
+        // (accepted = {resolve, stop} — retry or leave it for a human, never merge a reconciliation that didn't pass).
+        var unverified = Scenario("unverified-resolution");
+        SupervisorDecisionEval.Score(unverified, await DecideAsync(unverified, """{"kind":"merge","merge":{}}"""))
+            .Pass.ShouldBeFalse("merging an UNVERIFIED resolution must fail — the supervisor must never accept a reconciliation that did not pass the build/tests");
+
+        // clean-integration: re-spawning after a clean integration is churn — must FAIL (accepted = {stop}).
+        var clean = Scenario("clean-integration");
+        SupervisorDecisionEval.Score(clean, await DecideAsync(clean, """{"kind":"spawn","spawn":{"subtaskIds":["s1"]}}"""))
+            .Pass.ShouldBeFalse("re-spawning after the work integrated cleanly must fail — the goal is met, stop");
     }
 
     private static SupervisorGoldenScenario Scenario(string name) => SupervisorDecisionGoldenScenarios.All.Single(s => s.Name == name);
@@ -65,10 +76,14 @@ public class SupervisorDecisionEvalDeciderTests
     private static string CorrectDecisionJson(string scenarioName) => scenarioName switch
     {
         "first-turn" => """{"kind":"plan","plan":{"subtasks":[{"id":"s1","title":"Subtask 1","instruction":"do s1"},{"id":"s2","title":"Subtask 2","instruction":"do s2"}]}}""",
+        "planned-not-spawned" => """{"kind":"spawn","spawn":{"subtaskIds":["s1","s2"]}}""",
         "mixed-results" => """{"kind":"retry","retry":{"subtaskId":"s2"}}""",
+        "retried-failure-succeeded" => """{"kind":"merge","merge":{}}""",
         "all-succeeded" => """{"kind":"merge","merge":{}}""",
+        "clean-integration" => """{"kind":"stop","stop":{"outcome":"completed"}}""",
         "merge-conflict" => """{"kind":"resolve","resolve":{}}""",
         "verified-resolution" => """{"kind":"stop","stop":{"outcome":"completed"}}""",
+        "unverified-resolution" => """{"kind":"resolve","resolve":{}}""",
         _ => throw new ArgumentException($"no canned decision for scenario '{scenarioName}'"),
     };
 
