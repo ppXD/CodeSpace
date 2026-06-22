@@ -109,6 +109,46 @@ public sealed class SupervisorWholeLoopE2ETests : IDisposable
         await AssertAcceptancePassedOnStopAsync(runId, teamId);
     }
 
+    [Fact]
+    public async Task Supervisor_withholds_the_reviewable_branch_when_the_real_acceptance_floor_fails()
+    {
+        if (OperatingSystem.IsWindows()) return;          // the fake CLI is a /bin/sh script the runner spawns
+        if (!await GitReadyAsync()) return;               // real git is required for clone/capture/integrate/grade
+
+        using var cli = new FileWritingFakeCli();
+
+        SetDecisionScript(s => s.PlanSpawnMergeStop());
+
+        var jobClient = ResolveJobClient();
+        jobClient.Clear();
+        jobClient.AutoExecute = true;
+
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+
+        using var remote = new BareRemote();
+        // SAME happy-loop wiring — the ONLY change is the operator's acceptance floor REJECTS the integrated head
+        // (check.sh exits 1). The whole real arc (spawn → real patch → real merge) still runs; the difference is the
+        // objective gate must catch the broken head and WITHHOLD it.
+        await remote.SeedBaseAsync(new() { ["check.sh"] = "#!/bin/sh\nexit 1\n", ["base.txt"] = "base\n" });
+        var repoId = await SeedBoundRepositoryAsync(teamId, remote.Url, "main");
+
+        var workflowId = await CreateWholeLoopWorkflowAsync(teamId, userId, repoId);
+        var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
+
+        await RunEngineAsync(runId);
+        await jobClient.WaitForPendingAsync();
+
+        // The agents still did real work and the merge still integrated — the gate is the LAST thing, not a short-circuit.
+        await AssertRunReachedSuccessAsync(runId);
+        await AssertBothAgentsProducedRealPatchesAsync(runId);
+        await AssertIntegratedBranchOnRemoteAsync(remote, runId);
+
+        // The objective floor FAILED against the real grader → the stop's grade is false, the node reports
+        // AcceptanceFailed, and the reviewable branch is WITHHELD (a downstream git.open_pr binds "" → nothing). The
+        // safety floor provably stops a broken head from ever reaching a PR — end to end through real git.
+        await AssertAcceptanceFailedAndBranchWithheldAsync(runId, teamId);
+    }
+
     // ─── Assertions ──────────────────────────────────────────────────────────────────
 
     private async Task AssertRunReachedSuccessAsync(Guid runId)
@@ -178,6 +218,31 @@ public sealed class SupervisorWholeLoopE2ETests : IDisposable
 
         SupervisorOutcome.ReadAcceptanceGradePassed(stop.OutcomeJson).ShouldBe(true,
             "the terminal stop graded the integrated branch against the real check.sh operator floor and it PASSED");
+    }
+
+    private async Task AssertAcceptanceFailedAndBranchWithheldAsync(Guid runId, Guid teamId)
+    {
+        using var verify = _fixture.BeginScope();
+        var db = verify.Resolve<CodeSpaceDbContext>();
+
+        var stop = await db.SupervisorDecisionRecord.AsNoTracking()
+            .Where(d => d.SupervisorRunId == runId && d.TeamId == teamId && d.DecisionKind == SupervisorDecisionKinds.Stop)
+            .OrderByDescending(d => d.Sequence)
+            .FirstAsync();
+
+        SupervisorOutcome.ReadAcceptanceGradePassed(stop.OutcomeJson).ShouldBe(false,
+            "the integrated head failed the real check.sh floor → the stop's objective grade is FALSE, not a self-reported success");
+
+        // The terminal supervisor node output: status=AcceptanceFailed + the reviewable branch withheld to "".
+        var supRows = await db.WorkflowRunNode.AsNoTracking().Where(n => n.RunId == runId && n.NodeId == NodeId).ToListAsync();
+        var terminal = supRows
+            .Select(n => System.Text.Json.JsonDocument.Parse(n.OutputsJson).RootElement)
+            .First(o => o.TryGetProperty("status", out _));
+
+        terminal.GetProperty("status").GetString().ShouldBe("AcceptanceFailed",
+            "the supervisor reports the objective definition-of-done was NOT met — not a self-reported Completed");
+        terminal.GetProperty("integratedBranch").GetString().ShouldBe("",
+            "the reviewable branch is WITHHELD — a head that fails the operator floor must never be handed to a downstream PR-open");
     }
 
     // ─── Helpers ─────────────────────────────────────────────────────────────────────
