@@ -4,12 +4,18 @@ import { summarizeRunState } from "./runPhases";
 
 /**
  * The run's "control state" sentence — one glance at WHERE the run is and WHAT needs you, composed purely from
- * the run status + the phase tree (e.g. "Running · Implement · 2 of 4 agents active · 1 waiting"). The waiting
- * count is the slice-1 decision signal (phases parked on an approval / unanswered ask_human); the rich decision
- * inbox lands in a later slice. Renders nothing extra for a clean terminal run beyond its status + agent tally.
+ * the run status + the phase tree (e.g. "Running · Implement · 2 of 4 agents active · 1 decision needs you").
+ * `pendingDecisions` is the real "needs you" signal from the decision inbox — when present it supersedes the
+ * coarser phase-Waiting count; without it the header falls back to that count. Renders nothing extra for a clean
+ * terminal run beyond its status + agent tally.
  */
-export function RunStateHeader({ runStatus, phases }: { runStatus: WorkflowRunStatus; phases: readonly RunPhase[] }) {
+export function RunStateHeader({ runStatus, phases, pendingDecisions }: { runStatus: WorkflowRunStatus; phases: readonly RunPhase[]; pendingDecisions?: number }) {
   const s = summarizeRunState(runStatus, phases);
+
+  // The sharp signal (answerable decisions) wins over the proxy (phases parked) when the inbox has loaded.
+  const needsYou = pendingDecisions != null && pendingDecisions > 0
+    ? `${pendingDecisions} ${pendingDecisions === 1 ? "decision needs" : "decisions need"} you`
+    : pendingDecisions == null && s.waiting > 0 ? `${s.waiting} waiting` : null;
 
   // One clean sentence for assistive tech — the visual `·`-separated spans are aria-hidden noise on
   // their own. role="status" announces transitions politely as the 2s poll advances the run.
@@ -17,7 +23,7 @@ export function RunStateHeader({ runStatus, phases }: { runStatus: WorkflowRunSt
     s.lead,
     s.focus,
     s.totalAgents > 0 ? `${s.activeAgents} of ${s.totalAgents} agents active` : null,
-    s.waiting > 0 ? `${s.waiting} waiting` : null,
+    needsYou,
   ].filter(Boolean).join(", ");
 
   return (
@@ -32,8 +38,8 @@ export function RunStateHeader({ runStatus, phases }: { runStatus: WorkflowRunSt
         <><span className="run-state-sep" aria-hidden="true">·</span><span aria-hidden="true">{s.activeAgents} of {s.totalAgents} agents active</span></>
       )}
 
-      {s.waiting > 0 && (
-        <><span className="run-state-sep" aria-hidden="true">·</span><span className="run-state-waiting" aria-hidden="true">{s.waiting} waiting</span></>
+      {needsYou && (
+        <><span className="run-state-sep" aria-hidden="true">·</span><span className="run-state-waiting" aria-hidden="true">{needsYou}</span></>
       )}
     </div>
   );

@@ -1,10 +1,13 @@
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
 
 import { Ic } from "@/_imported/ai-code-space/icons";
+import { DecisionInbox } from "@/components/workflows/DecisionInbox";
 import { RunDetailView } from "@/components/workflows/RunDetailView";
+import { RunFacts } from "@/components/workflows/RunFacts";
 import { RunOutline } from "@/components/workflows/RunOutline";
 import { RunStateHeader } from "@/components/workflows/RunStateHeader";
-import { useReplayRun, useRunPhases, useWorkflow, useWorkflowRun } from "@/hooks/use-workflows";
+import { decisionsForRun } from "@/components/workflows/runDecisions";
+import { isRunActive, usePendingDecisions, useReplayRun, useRunPhases, useWorkflow, useWorkflowRun } from "@/hooks/use-workflows";
 
 /**
  * Standalone run-detail page (reached from the workflows list → Runs). The run content itself
@@ -23,6 +26,12 @@ function WorkflowRunDetailPage() {
   const run = useWorkflowRun(runId);
   // The run-neutral outline (the phase projection) — a separate endpoint, polled on the same cadence.
   const phases = useRunPhases(runId);
+  // The cross-grain decision queue, narrowed to this run — polled while the run can still park one. Agent-grain
+  // decisions key off the agent run id, so we pass the run's fanned-out agent ids (from the phase projection).
+  const pendingPoll = run.data ? isRunActive(run.data.status) : true;
+  const decisions = usePendingDecisions(pendingPoll);
+  const runAgentIds = new Set((phases.data?.phases ?? []).flatMap((p) => p.agents).map((a) => a.agentRunId));
+  const runDecisions = decisions.data ? decisionsForRun(decisions.data, runId, runAgentIds) : [];
   const workflowId = run.data?.workflowId ?? null;
   const workflow = useWorkflow(workflowId);
   const replay = useReplayRun();
@@ -52,7 +61,10 @@ function WorkflowRunDetailPage() {
         <div className="ct-title-row">
           <div>
             <h1 className="ct-title">Run {runId.slice(0, 8)}</h1>
-            {run.data && phases.data && <RunStateHeader runStatus={run.data.status} phases={phases.data.phases} />}
+            {run.data && phases.data && (
+              <RunStateHeader runStatus={run.data.status} phases={phases.data.phases}
+                pendingDecisions={decisions.data ? runDecisions.length : undefined} />
+            )}
           </div>
           <div className="ct-actions">
             <button
@@ -87,6 +99,10 @@ function WorkflowRunDetailPage() {
             onOpenRun={(childRunId) => navigate({ to: "/teams/$teamSlug/workflows/runs/$runId", params: { teamSlug, runId: childRunId } })}
           />
         </div>
+        <aside className="run-room-context">
+          {decisions.data && <DecisionInbox decisions={runDecisions} />}
+          {run.data && <RunFacts run={run.data} />}
+        </aside>
       </div>
     </section>
   );

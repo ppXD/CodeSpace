@@ -2335,13 +2335,20 @@ textarea:-webkit-autofill {
 .acs-root .wf-rf-status-spin { width: 9px; height: 9px; border-radius: 50%; border: 2px solid #E9CFC0; border-top-color: var(--accent); animation: wfSpin .7s linear infinite; }
 @keyframes wfSpin { to { transform: rotate(360deg); } }
 
-/* ── Run Room (slice 1): the run-state sentence + the phases-driven Run Outline rail, wrapping the run view ── */
-.acs-root .run-room-body { display: grid; grid-template-columns: 232px minmax(0, 1fr); gap: 26px; align-items: start; }
-.acs-root .run-room-rail { position: sticky; top: 14px; align-self: start; }
+/* ── Run Room: outline rail | run view | context rail (decision inbox + facts), under the run-state sentence ── */
+.acs-root .run-room-body { display: grid; grid-template-columns: 232px minmax(0, 1fr) 280px; gap: 26px; align-items: start; }
+.acs-root .run-room-rail { position: sticky; top: 14px; align-self: start; max-height: calc(100vh - 28px); overflow-y: auto; }
 .acs-root .run-room-main { min-width: 0; }
+.acs-root .run-room-context { position: sticky; top: 14px; align-self: start; max-height: calc(100vh - 28px); overflow-y: auto; display: flex; flex-direction: column; gap: 18px; }
+/* Below ~1400px the center canvas gets too narrow squeezed between both rails — drop the context rail full-width
+   under the run view (keeps a usable node canvas on standard laptops; only wide screens keep the true 3-pane). */
+@media (max-width: 1400px) {
+  .acs-root .run-room-body { grid-template-columns: 232px minmax(0, 1fr); }
+  .acs-root .run-room-context { grid-column: 1 / -1; position: static; max-height: none; overflow: visible; }
+}
 @media (max-width: 900px) {
   .acs-root .run-room-body { grid-template-columns: 1fr; }
-  .acs-root .run-room-rail { position: static; }
+  .acs-root .run-room-rail, .acs-root .run-room-context { position: static; }
 }
 
 /* The header "control state" sentence — one glance at where the run is + what needs you. */
@@ -2390,6 +2397,46 @@ textarea:-webkit-autofill {
   .acs-root .run-outline-agent-dot[data-busy] { animation: none; }
   .acs-root .run-outline-agent-dot[data-busy] { box-shadow: 0 0 0 2px var(--accent-soft); }
 }
+
+/* ── Context rail: the decision inbox ("what needs you now") + the run-facts strip ─────────────────── */
+.acs-root .decision-inbox { display: flex; flex-direction: column; gap: 10px; }
+.acs-root .decision-inbox-head { display: flex; align-items: center; gap: 7px; font-size: 11.5px; font-weight: 600; text-transform: uppercase; letter-spacing: .05em; color: var(--ink-2); }
+.acs-root .decision-inbox-count { margin-left: auto; min-width: 18px; height: 18px; padding: 0 5px; border-radius: 9px; background: #A8590E; color: #fff; font-size: 11px; font-weight: 700; display: grid; place-items: center; }
+.acs-root .decision-inbox-clear { display: flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--muted); padding: 6px 2px; }
+.acs-root .decision-inbox-clear > svg { color: #1F6B3F; }
+.acs-root .decision-inbox-list { display: flex; flex-direction: column; gap: 12px; }
+
+.acs-root .decision-card { border: 1px solid var(--line); border-radius: 12px; padding: 12px; background: var(--panel); display: flex; flex-direction: column; gap: 8px; }
+.acs-root .decision-card[data-risk="high"] { border-color: #E3B8A0; background: var(--accent-soft); }
+.acs-root .decision-card-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.acs-root .decision-card-type { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .05em; color: var(--accent); }
+.acs-root .decision-card-risk { display: inline-flex; align-items: center; gap: 3px; font-size: 10px; font-weight: 600; color: #9E3535; }
+.acs-root .decision-card-deadline { margin-left: auto; display: inline-flex; align-items: center; gap: 3px; font-size: 10.5px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.acs-root .decision-card-q { font-size: 13.5px; font-weight: 500; color: var(--ink); line-height: 1.42; }
+.acs-root .decision-card-context { font-size: 12px; color: var(--ink-2); line-height: 1.45; }
+.acs-root .decision-card-blocked { font-size: 11.5px; color: var(--muted); font-style: italic; line-height: 1.4; }
+.acs-root .decision-card-options { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 2px; }
+/* Option labels are content (a branch name, a sentence) — allow them to wrap rather than overflow the 280px rail. */
+.acs-root .decision-card-option { display: inline-flex; align-items: center; gap: 5px; padding: 5px 11px; font-size: 12px; max-width: 100%; white-space: normal; text-align: left; }
+.acs-root .decision-card-option[data-recommended] { box-shadow: 0 0 0 2px var(--accent-soft); }
+/* On a high-risk card (accent-soft field) the soft ring would vanish — use the solid accent so it stays visible. */
+.acs-root .decision-card[data-risk="high"] .decision-card-option[data-recommended] { box-shadow: 0 0 0 2px var(--accent); }
+.acs-root .decision-card-rec { font-size: 9px; text-transform: uppercase; letter-spacing: .04em; opacity: .85; }
+.acs-root .decision-card-checks { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.acs-root .decision-card-check { display: flex; align-items: center; gap: 7px; font-size: 12.5px; color: var(--ink-2); cursor: pointer; }
+.acs-root .decision-card-check > svg { color: #A8590E; }
+.acs-root .decision-card-free { display: flex; flex-direction: column; gap: 7px; }
+.acs-root .decision-card-textarea { width: 100%; resize: vertical; border: 1px solid var(--line); border-radius: 8px; padding: 7px 9px; font: inherit; font-size: 12.5px; color: var(--ink); background: var(--bg); }
+.acs-root .decision-card-textarea:focus { outline: none; border-color: var(--accent); }
+.acs-root .decision-card-actions { display: flex; justify-content: flex-end; }
+.acs-root .decision-card-submit { padding: 5px 13px; font-size: 12px; }
+.acs-root .decision-card-error { display: flex; align-items: center; gap: 5px; font-size: 11.5px; color: #9E3535; }
+
+.acs-root .run-facts { margin: 0; border: 1px solid var(--line); border-radius: 12px; padding: 2px 12px; }
+.acs-root .run-facts-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 8px 0; border-bottom: 1px solid var(--line); }
+.acs-root .run-facts-row:last-child { border-bottom: none; }
+.acs-root .run-facts-key { margin: 0; font-size: 11.5px; color: var(--muted); }
+.acs-root .run-facts-val { margin: 0; font-size: 12.5px; color: var(--ink-2); font-weight: 500; }
 
 /* ── Live run-level progress chip overlaid on the run canvas (top-left Panel) ───────────────────────── */
 .acs-root .wf-run-progress {

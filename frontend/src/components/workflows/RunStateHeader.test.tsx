@@ -38,6 +38,24 @@ describe("RunStateHeader", () => {
     expect(getByText("1 waiting")).toBeTruthy();
   });
 
+  it("prefers the real decision count over the phase-waiting proxy, pluralizing it", () => {
+    const phases = [phase({ label: "Approve push", status: "Waiting" })];
+    const { getByText, rerender } = render(<RunStateHeader runStatus="Suspended" phases={phases} pendingDecisions={2} />);
+    expect(getByText("2 decisions need you")).toBeTruthy();
+    expect(() => getByText("1 waiting")).toThrow();   // the proxy is superseded
+
+    rerender(<RunStateHeader runStatus="Suspended" phases={phases} pendingDecisions={1} />);
+    expect(getByText("1 decision needs you")).toBeTruthy();
+  });
+
+  it("drops the needs-you clause when the inbox has loaded with zero decisions", () => {
+    const { queryByText } = render(<RunStateHeader runStatus="Running" phases={[
+      phase({ label: "Approve push", status: "Waiting" }),
+    ]} pendingDecisions={0} />);
+    expect(queryByText("1 waiting")).toBeNull();          // loaded-and-empty wins over the proxy
+    expect(queryByText(/needs you/)).toBeNull();
+  });
+
   it("shows just the status for a clean terminal run with no agents", () => {
     const { container, queryByText } = render(<RunStateHeader runStatus="Success" phases={[
       phase({ label: "Done", status: "Succeeded" }),
