@@ -72,6 +72,28 @@ public sealed class TeamRunsIndexEndpointE2ETests : IClassFixture<TaskLaunchApiF
     }
 
     [Fact]
+    public async Task Index_applies_a_query_string_filter()
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        using var cli = new FakeCodexCli();
+
+        var (userId, teamId) = await SeedTeamMembershipAsync();
+        var runId = await LaunchQuickTaskAsync(userId, teamId);
+
+        // Unfiltered → the launched task run is present.
+        var all = await (await SendAsync(HttpMethod.Get, "/api/workflows/runs", userId, teamId)).Content.ReadFromJsonAsync<RunPage>();
+        all!.Items.ShouldContain(r => r.Id == runId);
+
+        // ?workflowId= binds from the query string and filters: a task run has a null workflowId, so any workflowId
+        // filter excludes it — a deterministic proof the generic filter param flows controller → query → service.
+        var filtered = await SendAsync(HttpMethod.Get, $"/api/workflows/runs?workflowId={Guid.NewGuid()}", userId, teamId);
+        filtered.StatusCode.ShouldBe(HttpStatusCode.OK, customMessage: await DescribeFailureAsync(filtered));
+        var page = await filtered.Content.ReadFromJsonAsync<RunPage>();
+        page!.Items.ShouldNotContain(r => r.Id == runId, "the workflowId filter binds from the query string and excludes the null-workflow task run");
+    }
+
+    [Fact]
     public async Task Index_paginates_over_http_via_the_cursor()
     {
         if (OperatingSystem.IsWindows()) return;

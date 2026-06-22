@@ -832,7 +832,7 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
             .ToListAsync(cancellationToken).ConfigureAwait(false);
     }
 
-    public async Task<RunPage> ListTeamRunsAsync(Guid teamId, string? cursor, int limit, CancellationToken cancellationToken)
+    public async Task<RunPage> ListTeamRunsAsync(Guid teamId, RunListFilter filter, string? cursor, int limit, CancellationToken cancellationToken)
     {
         var keyset = RunCursor.Decode(cursor);
         var take = Math.Clamp(limit, 1, MaxRunsPageSize);
@@ -843,6 +843,8 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
         // runs are a separate entity, never WorkflowRun rows. TeamId is on the run directly, so snapshot / task runs
         // (null WorkflowId) are included.
         var query = _db.WorkflowRun.Where(r => r.TeamId == teamId && r.SourceType != WorkflowRunSourceTypes.ChildWorkflow);
+
+        query = ApplyFilter(query, filter);
 
         // Keyset: "strictly after" the cursor row under (created_date DESC, id DESC) is the tuple < comparison.
         // r.Id.CompareTo translates to a Postgres uuid comparison (its native byte order) — the SAME order the index
@@ -862,6 +864,23 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
         var nextCursor = hasMore ? new RunCursor(items[^1].CreatedDate, items[^1].Id).Encode() : null;
 
         return new RunPage { Items = items, NextCursor = nextCursor };
+    }
+
+    /// <summary>
+    /// Compose the generic run filter — each dimension is an optional AND-narrowing predicate, applied at this single
+    /// site so a new filter dimension is one line here, never a new query. Order is irrelevant (all AND); the keyset +
+    /// ORDER BY are applied by the caller AFTER this so the index drives the scan. Index coverage per dimension is
+    /// documented on <see cref="RunListFilter"/> (workflow + date-window seek; bare status / source recheck).
+    /// </summary>
+    private static IQueryable<WorkflowRun> ApplyFilter(IQueryable<WorkflowRun> query, RunListFilter filter)
+    {
+        if (filter.WorkflowId is { } workflowId) query = query.Where(r => r.WorkflowId == workflowId);
+        if (filter.Statuses is { Count: > 0 } statuses) query = query.Where(r => statuses.Contains(r.Status));
+        if (!string.IsNullOrEmpty(filter.SourceType)) query = query.Where(r => r.SourceType == filter.SourceType);
+        if (filter.Since is { } since) query = query.Where(r => r.CreatedDate >= since);
+        if (filter.Until is { } until) query = query.Where(r => r.CreatedDate < until);
+
+        return query;
     }
 
     /// <summary>

@@ -18,5 +18,5 @@ public sealed class ListTeamRunsQueryHandler : IRequestHandler<ListTeamRunsQuery
     }
 
     public Task<RunPage> Handle(ListTeamRunsQuery request, CancellationToken cancellationToken) =>
-        _service.ListTeamRunsAsync(_currentTeam.Id!.Value, request.Cursor, request.Limit, cancellationToken);
+        _service.ListTeamRunsAsync(_currentTeam.Id!.Value, request.ToFilter(), request.Cursor, request.Limit, cancellationToken);
 }
