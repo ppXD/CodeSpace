@@ -504,6 +504,43 @@ public sealed class LocalProcessDurableRunnerTests : IDisposable
         File.Exists(Path.Combine(spool, "agent-home", ".mcp.json")).ShouldBeFalse("Mcp=null must write no declaration");
     }
 
+    // ─── B3.2b: the filtered-egress netns prefix wraps the whole supervisor chain ────────────────────────────────
+
+    [Fact]
+    public void BuildDurableStartInfo_runs_the_whole_chain_inside_the_egress_netns_prefix_when_one_is_set()
+    {
+        // When the durable launch sets up a filtered-egress netns it passes the `ip netns exec <ns>` prefix; the
+        // supervisor must run the WHOLE chain (prlimit → bwrap → agent) behind it, so its only egress is the netns filter.
+        var prefix = new[] { "ip", "netns", "exec", "cs-egr-deadbeef" };
+
+        var info = LocalProcessRunner.BuildDurableStartInfo(
+            new SandboxSpec { Command = "mycmd", Args = new[] { "--flag", "value" } }, "/tmp/spool-egr", prefix);
+
+        var c = info.ArgumentList.IndexOf("-c");
+        info.ArgumentList[c + 2].ShouldBe("sh");                       // $0 — the script reads the real command from "$@"
+        var afterDollarZero = info.ArgumentList.Skip(c + 3).ToList();
+
+        afterDollarZero.Take(4).ShouldBe(prefix, "the netns prefix is OUTERMOST — ahead of any prlimit/bwrap wrapper");
+        afterDollarZero.TakeLast(3).ShouldBe(new[] { "mycmd", "--flag", "value" }, "the real command still trails every wrapper");
+
+        if (BubblewrapSandbox.Available is not null)
+            info.ArgumentList.ShouldNotContain("--unshare-net", customMessage: "inside a filtered netns bwrap SHARES it (inherits the allowlist filter) — it must never --unshare-net the namespace it was placed in");
+    }
+
+    [Fact]
+    public void BuildDurableStartInfo_without_an_egress_prefix_preserves_today_network_behaviour()
+    {
+        // No prefix (null) ⇒ no `ip netns exec`, and a network-OFF run still --unshare-nets under bwrap — today's
+        // behaviour preserved byte-for-byte. The netns wiring is inert until an enforceable allowlist sets a prefix.
+        var info = LocalProcessRunner.BuildDurableStartInfo(
+            new SandboxSpec { Command = "mycmd", AllowNetwork = false }, "/tmp/spool-noegr");
+
+        info.ArgumentList.ShouldNotContain("netns", customMessage: "no enforceable allowlist ⇒ no netns prefix");
+
+        if (BubblewrapSandbox.Available is not null)
+            info.ArgumentList.ShouldContain("--unshare-net", customMessage: "network-off without a netns still severs egress via --unshare-net");
+    }
+
     [Fact]
     public void AppendChildCommand_binds_a_dedicated_socket_dir_NOT_the_spool_dir_so_no_spool_artifacts_leak()
     {

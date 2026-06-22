@@ -77,4 +77,14 @@ public sealed record SandboxHandle
     /// (Unlike the model key — which is NEVER persisted — this grants nothing beyond the run's own already-gated tools.)
     /// </summary>
     public string? McpRunToken { get; init; }
+
+    /// <summary>
+    /// The key of the filtered-egress network namespace this run was launched inside (B3.2b) — non-null ONLY when a
+    /// deny-by-default allowlist was enforceable and a netns was set up. It is the teardown handle: the netns / veth /
+    /// nft-table names are derived purely from it, so a reap (or a re-attach after a restart, on a DIFFERENT worker)
+    /// tears the namespace down with no setup-time state. Null when the run had no allowlist or the runner couldn't
+    /// enforce one (degraded to None) — and the value an older handle deserializes to, so a pre-existing run is never
+    /// mistaken for having a netns to reap.
+    /// </summary>
+    public string? EgressNetnsKey { get; init; }
 }

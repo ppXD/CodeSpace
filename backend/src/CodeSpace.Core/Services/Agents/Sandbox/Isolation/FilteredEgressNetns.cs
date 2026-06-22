@@ -82,8 +82,8 @@ public static class FilteredEgressNetns
     /// <summary>
     /// Tear down the filtered netns for <paramref name="runId"/> — best-effort, reconstructed PURELY from the runId
     /// (the netns/veth/table names are runId-derived), so it works even when called by a DIFFERENT worker after a
-    /// crash/resume, or as an orphan sweep, with no setup-time state. Idempotent: deleting an already-gone ns/table is
-    /// a no-op the best-effort wrapper swallows.
+    /// crash/resume, or by the spool reaper from a persisted handle, with no setup-time state. Idempotent: deleting an
+    /// already-gone ns/table is a no-op the best-effort wrapper swallows.
     /// </summary>
     public static async Task TeardownAsync(string runId, CancellationToken cancellationToken)
     {
