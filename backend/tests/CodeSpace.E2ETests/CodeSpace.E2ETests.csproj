@@ -35,6 +35,10 @@
     <ProjectReference Include="..\..\src\CodeSpace.Api\CodeSpace.Api.csproj" />
     <ProjectReference Include="..\..\src\CodeSpace.Core\CodeSpace.Core.csproj" />
     <ProjectReference Include="..\..\src\CodeSpace.Messages\CodeSpace.Messages.csproj" />
+    <!-- The engine-tier E2E tests reuse the shared Postgres fixture + seed/job-client test infra that lives in
+         IntegrationTests.Infrastructure. Referencing the project (rather than duplicating a TestInfra assembly)
+         keeps one home for that infra; E2E declares its own [CollectionDefinition] over the shared fixture type. -->
+    <ProjectReference Include="..\CodeSpace.IntegrationTests\CodeSpace.IntegrationTests.csproj" />
   </ItemGroup>
 
 </Project>

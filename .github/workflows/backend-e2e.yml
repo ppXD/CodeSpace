@@ -1,18 +1,19 @@
 name: Backend · E2E
 
-# Two E2E gates, both against a throw-away GUID Postgres:
+# Two E2E gates, both against a throw-away GUID Postgres. ALL E2E tests live in CodeSpace.E2ETests
+# (Category=E2E); the two gates split it by the Surface trait because they need DIFFERENT runtimes:
 #
-#   1. e2e-http — the REAL ASP.NET pipeline (routing, [AllowAnonymous], model binding, the
-#      GlobalExceptionFilter) in-memory via WebApplicationFactory: the actual HTTP status code a
-#      webhook provider receives (CodeSpace.E2ETests). Runs directly on the host runner, so it reaches
-#      Postgres at localhost:5432 (the committed appsettings.json admin connection).
+#   1. e2e-http (Surface=Http) — the REAL ASP.NET pipeline (routing, [AllowAnonymous], model binding,
+#      the GlobalExceptionFilter) in-memory via WebApplicationFactory: the actual HTTP status code a
+#      webhook provider receives. Runs directly on the host runner, so it reaches Postgres at
+#      localhost:5432 (the committed appsettings.json admin connection).
 #
-#   2. e2e-engine — THE headline intelligent flow driven top-to-bottom as one engine run:
+#   2. e2e-engine (Surface=Engine) — THE headline intelligent flow driven top-to-bottom as one engine run:
 #      trigger.manual → llm.complete(responseSchema) planner → flow.map fan-out whose body is a REAL
 #      agent.code that ACTUALLY EXECUTES (real AgentRunExecutor → real LocalProcessRunner → a fake
 #      codex CLI process under REAL bubblewrap confinement → real completion → resume) → a synthesizer
-#      that reduces the per-branch results. The Category=E2E tests live in CodeSpace.IntegrationTests
-#      (they need the full engine/sandbox DI container, not the HTTP host). bubblewrap is installed +
+#      that reduces the per-branch results. These engine-tier tests reuse the shared Postgres fixture +
+#      seed infra from CodeSpace.IntegrationTests (referenced as a project). bubblewrap is installed +
 #      CODESPACE_REQUIRE_SANDBOX=1 so the agent runs CONFINED (the production posture) and a degraded
 #      sandbox fails HARD rather than silently running unconfined. It runs in a PRIVILEGED container
 #      (mirroring sandbox-isolation.yml) so unprivileged user namespaces work despite ubuntu-latest's
@@ -82,14 +83,28 @@ jobs:
       - name: Restore
         run: dotnet restore backend/tests/CodeSpace.E2ETests/CodeSpace.E2ETests.csproj
 
-      - name: Test
+      - name: Test (Surface=Http — the REAL ASP.NET pipeline via WebApplicationFactory)
         run: >
           dotnet test backend/tests/CodeSpace.E2ETests/CodeSpace.E2ETests.csproj
           --no-restore
+          --filter "Category=E2E&Surface=Http"
           --logger "console;verbosity=normal"
           --logger "trx;LogFileName=e2e-http.trx"
           --results-directory backend/TestResults
           --blame-hang-timeout 5m
+
+      - name: Assert the HTTP E2E actually ran (no silent skip)
+        # `dotnet test --filter` EXITS 0 even when the filter matches ZERO tests, so a Surface-trait regression
+        # could green this gate while exercising nothing. Require at least one HTTP E2E to have executed.
+        run: |
+          trx=backend/TestResults/e2e-http.trx
+          test -f "$trx" || { echo "::error::trx not found at $trx — the test step produced no results"; exit 1; }
+          executed=$(grep -oE 'executed="[0-9]+"' "$trx" | head -1 | grep -oE '[0-9]+')
+          echo "executed=${executed:-0}"
+          if [ "${executed:-0}" -lt 1 ]; then
+            echo "::error::Expected Category=E2E&Surface=Http tests to run, but ${executed:-0} executed — the filter matched nothing (trait regression?)."
+            exit 1
+          fi
 
       - name: Upload test results
         if: always()
@@ -173,13 +188,13 @@ jobs:
           restore-keys: nuget-e2e-engine-
 
       - name: Restore
-        run: dotnet restore backend/tests/CodeSpace.IntegrationTests/CodeSpace.IntegrationTests.csproj
+        run: dotnet restore backend/tests/CodeSpace.E2ETests/CodeSpace.E2ETests.csproj
 
-      - name: Test (Category=E2E — the headline planner→map→real-agents→synthesizer flow)
+      - name: Test (Surface=Engine — the headline planner→map→real-agents→synthesizer flow)
         run: >
-          dotnet test backend/tests/CodeSpace.IntegrationTests/CodeSpace.IntegrationTests.csproj
+          dotnet test backend/tests/CodeSpace.E2ETests/CodeSpace.E2ETests.csproj
           --no-restore
-          --filter "Category=E2E"
+          --filter "Category=E2E&Surface=Engine"
           --logger "console;verbosity=normal"
           --logger "trx;LogFileName=e2e-engine.trx"
           --results-directory backend/TestResults
@@ -197,7 +212,7 @@ jobs:
           passed=$(grep -oE 'passed="[0-9]+"' "$trx" | head -1 | grep -oE '[0-9]+')
           echo "executed=${executed:-0} passed=${passed:-0}"
           if [ "${executed:-0}" -lt 1 ]; then
-            echo "::error::Expected the Category=E2E headline-flow test to run, but ${executed:-0} executed — the filter matched nothing (trait regression?) or it was silently skipped."
+            echo "::error::Expected the Category=E2E&Surface=Engine headline-flow tests to run, but ${executed:-0} executed — the filter matched nothing (trait regression?) or it was silently skipped."
             exit 1
           fi
 

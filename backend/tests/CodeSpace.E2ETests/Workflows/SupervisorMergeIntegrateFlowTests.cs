@@ -21,7 +21,7 @@ using MediatR;
 using Microsoft.EntityFrameworkCore;
 using Shouldly;
 
-namespace CodeSpace.IntegrationTests.Workflows;
+namespace CodeSpace.E2ETests.Workflows;
 
 /// <summary>
 /// 🟢 SOTA #3 step 7 — the supervisor INTEGRATE + SYNTHESIS lane, driven against the REAL
@@ -40,6 +40,7 @@ namespace CodeSpace.IntegrationTests.Workflows;
 /// </summary>
 [Collection(PostgresCollection.Name)]
 [Trait("Category", "E2E")]
+[Trait("Surface", "Engine")]
 public sealed class SupervisorMergeIntegrateFlowTests : IDisposable
 {
     private const string NodeId = "sup";

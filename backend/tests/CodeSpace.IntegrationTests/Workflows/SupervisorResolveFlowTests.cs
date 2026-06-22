@@ -25,7 +25,7 @@ namespace CodeSpace.IntegrationTests.Workflows;
 /// agent — the loop only ever ADDS an attempt, never strands the run.
 ///
 /// <para>Fidelity: real executor + real <c>AgentRunService</c> staging through real Postgres. The agent does not
-/// EXECUTE here (that is the proven spawn→real-agent pipeline, covered by <see cref="SupervisorRealAgentE2ETests"/>);
+/// EXECUTE here (that is the proven spawn→real-agent pipeline, covered by <c>SupervisorRealAgentE2ETests</c>);
 /// this isolates the deterministic SYNTHESIS — the new logic — at the persistence tier.</para>
 /// </summary>
 [Collection(PostgresCollection.Name)]

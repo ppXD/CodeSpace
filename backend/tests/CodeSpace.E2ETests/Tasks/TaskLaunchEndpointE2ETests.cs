@@ -31,6 +31,7 @@ namespace CodeSpace.E2ETests.Tasks;
 /// the Hangfire transport is the in-test deferred queue. POSIX-only (the fake CLI is a /bin/sh script — Rule 12.1).</para>
 /// </summary>
 [Trait("Category", "E2E")]
+[Trait("Surface", "Http")]
 public sealed class TaskLaunchEndpointE2ETests : IClassFixture<TaskLaunchApiFactory>
 {
     private readonly TaskLaunchApiFactory _factory;

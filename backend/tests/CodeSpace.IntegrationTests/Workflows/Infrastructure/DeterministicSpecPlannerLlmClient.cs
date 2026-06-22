@@ -9,7 +9,7 @@ namespace CodeSpace.IntegrationTests.Workflows.Infrastructure;
 /// string array): this client returns an OBJECT-ARRAY <c>{ "subtasks": [{ name, goal, mode }] }</c>, so each
 /// fan-out subtask carries a MODEL-CHOSEN <c>mode</c> ∈ {research, code} the dynamic body maps to permissions —
 /// the model deciding each agent's intent. A SEPARATE fake under its OWN provider tag (<see cref="ProviderTag"/>)
-/// so the existing string-planner fake (and <see cref="PlanMapSynthFanoutFlowTests"/>) stay untouched.
+/// so the existing string-planner fake (and <c>PlanMapSynthFanoutFlowTests</c>) stay untouched.
 ///
 /// <para>It implements the same <see cref="IStructuredLLMClient"/> the production <c>AnthropicClient</c> does, so
 /// the planner node routes through the real structured-output path (the cast + <c>CompleteStructuredAsync</c> +
