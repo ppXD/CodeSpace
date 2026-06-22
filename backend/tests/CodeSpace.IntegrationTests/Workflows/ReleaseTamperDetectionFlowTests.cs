@@ -290,6 +290,7 @@ public class ReleaseTamperDetectionFlowTests
             WorkflowVersion = workflowVersion,
             TeamId = teamId,
             RunRequestId = requestId,
+            SourceType = WorkflowRunSourceTypes.Manual,
             Status = WorkflowRunStatus.Enqueued,
             EnqueuedAt = now,
             CreatedBy = SystemUsers.SeederId,

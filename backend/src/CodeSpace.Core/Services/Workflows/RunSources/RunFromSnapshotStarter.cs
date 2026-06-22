@@ -140,6 +140,7 @@ public sealed class RunFromSnapshotStarter : IRunFromSnapshotStarter, IScopedDep
             Id = runId,
             WorkflowId = null,
             WorkflowVersion = null,
+            SourceType = sourceType,
             ParentRunId = parentRunId,
             DefinitionSnapshotJson = definitionJson,
             DefinitionSnapshotHash = definitionHash,

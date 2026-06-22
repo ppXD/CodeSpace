@@ -100,6 +100,26 @@ public class SnapshotRunFlowTests
     }
 
     [Fact]
+    public async Task Snapshot_run_denormalises_source_type_onto_the_run_row()
+    {
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+
+        var runId = await StartSnapshotAsync(teamId, userId, EchoInputDefinition(), launchPayloadJson: "{}");
+
+        // The team runs index filters + orders on workflow_run.source_type WITHOUT joining the request
+        // (and its partial keyset index excludes children by that column). So the real starter MUST
+        // denormalise source_type onto the run row at creation — left null it would violate NOT NULL and
+        // the substrate that makes the index JOIN-free would be a lie. A snapshot run is sourced 'snapshot'.
+        var run = await LoadRunAsync(runId);
+        run.SourceType.ShouldBe(WorkflowRunSourceTypes.Snapshot,
+            customMessage: "RunFromSnapshotStarter must write source_type onto the run, not just the request");
+
+        var request = await LoadRequestAsync(run.RunRequestId);
+        run.SourceType.ShouldBe(request.SourceType,
+            customMessage: "the run's denorm must mirror its request's source_type exactly");
+    }
+
+    [Fact]
     public async Task Snapshot_run_suspends_then_resumes_reloading_the_inline_definition_on_reentry()
     {
         var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);

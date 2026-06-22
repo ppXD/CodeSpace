@@ -58,6 +58,16 @@ public class WorkflowRun : IEntity<Guid>, IAuditable
     /// </summary>
     public Guid RunRequestId { get; set; }
 
+    /// <summary>
+    /// Denormalised from <see cref="WorkflowRunRequest"/>.<c>SourceType</c> at row insert — an open
+    /// string (<c>manual</c> / <c>replay</c> / <c>schedule.cron</c> / <c>workflow.child</c> /
+    /// <c>provider.github.pull_request</c> / …). The team runs index filters + orders on this without
+    /// joining the request, and the partial keyset index excludes child-workflow runs by it. Set at the
+    /// two run-creation sites (<c>RunStarter</c>, <c>RunFromSnapshotStarter</c>); <c>required</c> so the
+    /// compiler enforces every creation site populates it.
+    /// </summary>
+    public required string SourceType { get; set; }
+
     public WorkflowRunStatus Status { get; set; } = WorkflowRunStatus.Pending;
     public string? Error { get; set; }
 

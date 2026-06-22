@@ -209,6 +209,7 @@ public static class WorkflowsTestSeed
             // explicitly so EF Core's INSERT carries the value (rather than the Guid default
             // of all-zeros, which would FK-violate).
             RunRequestId = requestId,
+            SourceType = WorkflowRunSourceTypes.Manual,
             // Seed directly in Enqueued state to mirror what production produces at engine
             // entry. Production has WorkflowService.RunManuallyAsync calling
             // IWorkflowRunDispatcher.DispatchAsync, which performs the Pending→Enqueued CAS

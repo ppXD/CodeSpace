@@ -191,6 +191,7 @@ public class DecisionQueueFlowTests
             WorkflowVersion = 1,
             TeamId = teamId,
             RunRequestId = requestId,
+            SourceType = WorkflowRunSourceTypes.Manual,
             Status = WorkflowRunStatus.Suspended,
             CreatedBy = SystemUsers.SeederId,
             LastModifiedBy = SystemUsers.SeederId,
