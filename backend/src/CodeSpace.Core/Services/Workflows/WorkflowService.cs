@@ -822,7 +822,7 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
 
         var rows = await _db.WorkflowRun
             .Where(r => r.WorkflowId == workflowId)
-            .OrderByDescending(r => r.CreatedDate)
+            .OrderByDescending(r => r.CreatedDate).ThenByDescending(r => r.Id)
             .Take(limit)
             .ToListAsync(cancellationToken).ConfigureAwait(false);
 
@@ -836,9 +836,12 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
         // ParentRunId (its lineage to the original), yet is a top-level run the user launched and expects here. Agent
         // runs are a separate entity, never WorkflowRun rows. TeamId is on the run directly, so snapshot / task runs
         // (null WorkflowId) are included.
+        // ORDER BY (created_date DESC, id DESC) — the id tiebreaker makes the cut at Take(limit) DETERMINISTIC when
+        // rows share a created_date (child fan-out, batch replays insert in the same millisecond) and matches the
+        // (team_id, created_date DESC, id DESC) keyset index, so the page boundary is stable for keyset pagination.
         var rows = await _db.WorkflowRun
             .Where(r => r.TeamId == teamId && r.SourceType != WorkflowRunSourceTypes.ChildWorkflow)
-            .OrderByDescending(r => r.CreatedDate)
+            .OrderByDescending(r => r.CreatedDate).ThenByDescending(r => r.Id)
             .Take(limit)
             .ToListAsync(cancellationToken).ConfigureAwait(false);
 

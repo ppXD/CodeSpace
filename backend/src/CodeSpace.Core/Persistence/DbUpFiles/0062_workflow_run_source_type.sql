@@ -33,6 +33,12 @@ CREATE INDEX idx_workflow_run_team_keyset
     ON workflow_run (team_id, created_date DESC, id DESC)
     WHERE source_type <> 'workflow.child';
 
+-- Drop the superseded team index. idx_workflow_run_team_started (0017) was (team_id, started_at DESC) for an
+-- earlier team-runs query that ordered by started_at. The index now orders by created_date (started_at is
+-- re-stamped on resume) and filters source_type, so idx_workflow_run_team_keyset replaces it outright — no
+-- query orders runs by (team_id, started_at) anymore, leaving the old index as pure write-amplification.
+DROP INDEX IF EXISTS idx_workflow_run_team_started;
+
 COMMENT ON COLUMN workflow_run.source_type IS
     'Denormalised from workflow_run_request.source_type at row insert (open string: manual / '
     'replay / schedule.cron / workflow.child / provider.github.pull_request / ...). The team runs '

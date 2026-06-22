@@ -66,6 +66,30 @@ public class TeamRunsIndexFlowTests
         result.Select(r => r.Id).ShouldBe(new[] { top, mid });   // the 2 newest only
     }
 
+    [Fact]
+    public async Task Breaks_created_date_ties_by_id_descending_for_a_deterministic_boundary()
+    {
+        var (teamA, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+
+        // All three share a created_date — child fan-out / batch replays insert in the same instant. With no
+        // tiebreaker the cut at Take(limit) is nondeterministic; the query orders by id DESC (matching the keyset
+        // index) so the order — and the page boundary — is stable. Postgres uuid ordering is a byte compare of the
+        // canonical form, which equals an ordinal compare of the lowercase GUID string (NOT .NET's Guid.CompareTo).
+        var sameInstant = DateTimeOffset.UtcNow;
+        var ids = new List<Guid>();
+        for (var i = 0; i < 4; i++)
+            ids.Add(await InsertRunAsync(teamA, parentRunId: null, createdDate: sameInstant, workflowId: null));
+
+        var expectedIdDesc = ids.OrderByDescending(id => id.ToString(), StringComparer.Ordinal).ToArray();
+
+        var first = await ListAsync(teamA, 50);
+        first.Select(r => r.Id).ShouldBe(expectedIdDesc, "tied created_date rows must order by id DESC (Postgres uuid order)");
+
+        var page = await ListAsync(teamA, 2);
+        page.Select(r => r.Id).ShouldBe(expectedIdDesc.Take(2).ToArray(),
+            customMessage: "the limited page must be the deterministic id-DESC prefix, not an arbitrary 2 of the 4 ties");
+    }
+
     private async Task<IReadOnlyList<WorkflowRunSummary>> ListAsync(Guid teamId, int limit)
     {
         using var scope = _fixture.BeginScope();
