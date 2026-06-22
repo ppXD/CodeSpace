@@ -2,7 +2,9 @@ import { createFileRoute, useNavigate } from "@tanstack/react-router";
 
 import { Ic } from "@/_imported/ai-code-space/icons";
 import { RunDetailView } from "@/components/workflows/RunDetailView";
-import { useReplayRun, useWorkflow, useWorkflowRun } from "@/hooks/use-workflows";
+import { RunOutline } from "@/components/workflows/RunOutline";
+import { RunStateHeader } from "@/components/workflows/RunStateHeader";
+import { useReplayRun, useRunPhases, useWorkflow, useWorkflowRun } from "@/hooks/use-workflows";
 
 /**
  * Standalone run-detail page (reached from the workflows list → Runs). The run content itself
@@ -19,6 +21,8 @@ function WorkflowRunDetailPage() {
   // Shared with RunDetailView via the same query key (React Query dedups) — used here only to
   // resolve the breadcrumb workflow + Re-run target.
   const run = useWorkflowRun(runId);
+  // The run-neutral outline (the phase projection) — a separate endpoint, polled on the same cadence.
+  const phases = useRunPhases(runId);
   const workflowId = run.data?.workflowId ?? null;
   const workflow = useWorkflow(workflowId);
   const replay = useReplayRun();
@@ -48,6 +52,7 @@ function WorkflowRunDetailPage() {
         <div className="ct-title-row">
           <div>
             <h1 className="ct-title">Run {runId.slice(0, 8)}</h1>
+            {run.data && phases.data && <RunStateHeader runStatus={run.data.status} phases={phases.data.phases} />}
           </div>
           <div className="ct-actions">
             <button
@@ -70,11 +75,18 @@ function WorkflowRunDetailPage() {
         </div>
       </div>
 
-      <div className="ct-body">
-        <RunDetailView
-          runId={runId}
-          onOpenRun={(childRunId) => navigate({ to: "/teams/$teamSlug/workflows/runs/$runId", params: { teamSlug, runId: childRunId } })}
-        />
+      <div className="ct-body run-room-body">
+        <aside className="run-room-rail">
+          {phases.data
+            ? <RunOutline phases={phases.data.phases} />
+            : <div className="run-outline-empty">{phases.isLoading ? "Loading outline…" : "Outline unavailable."}</div>}
+        </aside>
+        <div className="run-room-main">
+          <RunDetailView
+            runId={runId}
+            onOpenRun={(childRunId) => navigate({ to: "/teams/$teamSlug/workflows/runs/$runId", params: { teamSlug, runId: childRunId } })}
+          />
+        </div>
       </div>
     </section>
   );

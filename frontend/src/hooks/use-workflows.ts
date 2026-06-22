@@ -117,6 +117,24 @@ export function useWorkflowRun(runId: string | null) {
   });
 }
 
+/**
+ * The run's outline — the merged phase tree (the run-neutral projection). Separate query from the run detail
+ * (a different endpoint with its own shape), polled on the same 2s cadence while the run is non-terminal so the
+ * outline + the canvas/timeline advance in lockstep.
+ */
+export function useRunPhases(runId: string | null) {
+  return useQuery({
+    queryKey: ["run-phases", runId],
+    queryFn: () => workflowsApi.getRunPhases(runId!),
+    enabled: runId != null,
+    refetchInterval: (q) => {
+      const data = q.state.data;
+      if (!data) return false;
+      return isRunActive(data.runStatus) ? 2000 : false;
+    },
+  });
+}
+
 export function useReplayRun() {
   const qc = useQueryClient();
   return useMutation({
