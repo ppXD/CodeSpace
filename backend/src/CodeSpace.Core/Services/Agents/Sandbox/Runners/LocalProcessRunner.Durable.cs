@@ -139,7 +139,12 @@ public sealed partial class LocalProcessRunner
 
         if (policy.Mode != SandboxEgressMode.Filtered) return (Array.Empty<string>(), null);
 
-        var setup = await FilteredEgressNetns.SetupAsync(spoolKey, policy.AllowedHosts, EgressSetupTimeoutSeconds, ct).ConfigureAwait(false);
+        // The allowlist carries host NAMES (+ IP literals); the IPv4-only netns pins IPs, so resolve at setup on the
+        // host that builds the namespace. Best-effort/fail-closed: an unresolvable host is dropped (the resulting set,
+        // even empty, only ever narrows egress — never widens it).
+        var allowedIps = await EgressHostResolver.ResolveIpv4Async(policy.AllowedHosts, ct).ConfigureAwait(false);
+
+        var setup = await FilteredEgressNetns.SetupAsync(spoolKey, allowedIps, EgressSetupTimeoutSeconds, ct).ConfigureAwait(false);
 
         if (!setup.SetupOk)
             throw new InvalidOperationException($"Filtered-egress netns setup failed (fail-closed — run aborted rather than launched unfiltered): {setup.SetupError}");
