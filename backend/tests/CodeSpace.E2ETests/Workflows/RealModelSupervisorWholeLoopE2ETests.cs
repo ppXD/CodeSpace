@@ -30,13 +30,19 @@ namespace CodeSpace.E2ETests.Workflows;
 /// <c>ModelCredential</c> row (the live decider reads its key from the DB, never in-process). The live model authors
 /// plan → spawn → (inspect/retry) → merge → stop on its own; the spawned agents are REAL OS processes that EDIT REAL
 /// FILES (<see cref="FileWritingFakeCli"/>), the executor captures REAL patches, the merge integrates them on a bare
-/// <c>file://</c> remote, and the terminal stop is graded against a real <c>check.sh</c> acceptance floor — so a green
-/// verdict means a LIVE brain really drove real agents to a verified, integrated, accepted patch.
+/// <c>file://</c> remote, and the terminal stop is graded against a real <c>check.sh</c> acceptance floor (a real clone
+/// + real script execution) — so a green verdict means a LIVE brain really drove real agents through
+/// plan → spawn → merge → accept → stop against the real durable engine, real git integration, and a real acceptance
+/// gate. The ORCHESTRATION is real and live-authored end to end; what is stubbed is the agent's CODING (the fake codex
+/// writes a mechanical patch) and therefore the seeded <c>check.sh</c> is a STRUCTURAL green-check (<c>exit 0</c>), not a
+/// goal-relevance oracle — the gate certifies the live brain drove the whole arc to a real integrated+accepted head, not
+/// that it solved the task (the live decision QUALITY is measured separately by the golden/trajectory decision evals).
 ///
-/// <para>Honestly gated: self-skips when the <c>CODESPACE_LLM_*</c> secrets are absent (CI/forks stay green at zero
-/// cost), and runs only in the dedicated Postgres+secrets real-model lane. The blessed wire (Anthropic) GATES via
-/// <see cref="RealModelGate"/>; only the CLI's intelligence (the fake codex) and the agent COUNT are bounded — the
-/// brain, the engine, the runner, the git, and the acceptance are all real.</para>
+/// <para>Honestly gated: self-skips when ALL <c>CODESPACE_LLM_*</c> secrets are absent (CI/forks stay green at zero
+/// cost) but FAILS on a partial config (a rotated/blanked single secret can't silently mask the gate), and runs only in
+/// the dedicated Postgres+secrets real-model lane. The blessed wire (Anthropic) GATES via <see cref="RealModelGate"/>;
+/// only the CLI's coding intelligence (the fake codex) and the agent COUNT are bounded — the brain's decisions, the
+/// engine, the runner, the git, and the acceptance MECHANISM are all real.</para>
 /// </summary>
 [Collection(PostgresCollection.Name)]
 [Trait("Category", "RealModel")]
@@ -81,7 +87,13 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
         var apiKey = Env(RealModelSupervisorDecisionFlowTests.ApiKeyEnvVar);
         var model = Env(RealModelSupervisorDecisionFlowTests.ModelIdEnvVar);
 
-        if (baseUrl is null || apiKey is null || model is null) return;   // secrets absent → skip (honest CI/fork behaviour)
+        // Fail-closed on a PARTIAL secret config: all three absent → honest fork/local skip; some-but-not-all present
+        // is a broken/rotated/renamed secret that would otherwise self-skip the BLESSED gate GREEN having driven no live
+        // brain at all — so throw to turn that masked-nothing into a RED main run instead of a false green.
+        var present = new[] { baseUrl, apiKey, model }.Count(v => v is not null);
+        if (present == 0) return;
+        present.ShouldBe(3, "CODESPACE_LLM_* is partially configured — set all three (base url / api key / model id) or none; a partial config would otherwise self-skip the blessed whole-loop gate GREEN proving nothing.");
+
         if (OperatingSystem.IsWindows()) return;                          // the fake CLI is a /bin/sh script
         if (!await GitReadyAsync()) return;                              // real git is required for clone/capture/integrate
 
@@ -134,9 +146,15 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
             .OrderByDescending(d => d.Sequence).FirstOrDefaultAsync();
         var acceptancePassed = stop is not null && SupervisorOutcome.ReadAcceptanceGradePassed(stop.OutcomeJson) == true;
 
+        // Structural floor: the live brain must have actually FANNED OUT (spawn) and INTEGRATED (merge), not merely
+        // reached a green acceptance. acceptancePassed already implies a merged head today (the grade only runs against a
+        // real integrated branch), so this is an EXPLICIT, legible guard that keeps the gate honest if that coupling is
+        // ever loosened — and it asserts the trajectory the note already records rather than leaving it unchecked.
+        var spawnedAndMerged = kinds.Contains(SupervisorDecisionKinds.Spawn) && kinds.Contains(SupervisorDecisionKinds.Merge);
+
         var trail = string.Join("→", kinds);
-        var ok = run.Status == WorkflowRunStatus.Success && realPatchCount >= 1 && acceptancePassed;
-        return (ok, $"status={run.Status}, realPatches={realPatchCount}, acceptancePassed={acceptancePassed}, trajectory={trail}");
+        var ok = run.Status == WorkflowRunStatus.Success && realPatchCount >= 1 && acceptancePassed && spawnedAndMerged;
+        return (ok, $"status={run.Status}, realPatches={realPatchCount}, acceptancePassed={acceptancePassed}, spawnedAndMerged={spawnedAndMerged}, trajectory={trail}");
     }
 
     // ─── Helpers ─────────────────────────────────────────────────────────────────────
