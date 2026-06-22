@@ -61,6 +61,16 @@ export function countRuns(runs: readonly WorkflowRunSummary[]): RunCounts {
   return { live, failed, suspended };
 }
 
+/**
+ * Suspended runs that need a human AND aren't already represented by a queued decision — a run whose decision is in
+ * the queue is covered by its Answer card, so it would otherwise double-list. The single source of truth shared by
+ * the Needs-attention CARD count and the Needs-attention ZONE rows, so the two never disagree.
+ */
+export function suspendedNeedingReview(runs: readonly WorkflowRunSummary[], decisions: readonly PendingDecision[]): WorkflowRunSummary[] {
+  const decided = new Set(decisions.flatMap((d) => [d.workflowRunId, d.rootTraceId].filter(Boolean) as string[]));
+  return runs.filter((r) => r.status === "Suspended" && !decided.has(r.id));
+}
+
 /** Today's runs (by createdDate, local day) → the count + a 24-bucket hourly histogram for the card's sparkline. */
 export interface TodaySummary {
   count: number;
@@ -85,4 +95,4 @@ export function summarizeToday(runs: readonly WorkflowRunSummary[], nowMs: numbe
 }
 
 /** The cockpit filter — which card is "armed", narrowing the zones below. `null` shows the full board. */
-export type CockpitFilter = "decisions" | "live" | "failed" | "today" | null;
+export type CockpitFilter = "attention" | "live" | "failed" | "today" | null;
