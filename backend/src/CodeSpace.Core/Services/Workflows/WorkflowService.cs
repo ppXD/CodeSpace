@@ -889,6 +889,9 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
         if (filter.ActorIds is { Count: > 0 } actorIds) query = query.Where(r => r.ActorId != null && actorIds.Contains(r.ActorId.Value));
         if (filter.RunKinds is { Count: > 0 } runKinds) query = query.Where(r => runKinds.Contains(r.RunKind));
         if (filter.ProjectionKinds is { Count: > 0 } projectionKinds) query = query.Where(r => r.ProjectionKind != null && projectionKinds.Contains(r.ProjectionKind));
+        // The agent set is RUNTIME-evolving (the supervisor spawns per turn), so this is an EXISTS over agent_run — NOT a run column.
+        if (filter.AgentDefinitionIds is { Count: > 0 } agentDefinitionIds)
+            query = query.Where(r => _db.AgentRun.Any(a => a.WorkflowRunId == r.Id && a.AgentDefinitionId != null && agentDefinitionIds.Contains(a.AgentDefinitionId.Value)));
         if (filter.Since is { } since) query = query.Where(r => r.CreatedDate >= since);
         if (filter.Until is { } until) query = query.Where(r => r.CreatedDate < until);
 

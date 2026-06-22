@@ -28,6 +28,13 @@ public class AgentRun : IEntity<Guid>, IAuditable
     /// <summary>The workflow run whose agent.code node spawned this. NULL for a standalone agent run. Soft link (no FK).</summary>
     public Guid? WorkflowRunId { get; set; }
 
+    /// <summary>
+    /// The persona this agent run embodies — promoted from <c>task_jsonb.agentDefinitionId</c> to a column so the runs
+    /// index can filter "runs that used agent X" (an EXISTS over agent_run). NULL when the task carries no persona (a
+    /// raw harness task). Set at creation from the task's <c>AgentDefinitionId</c>.
+    /// </summary>
+    public Guid? AgentDefinitionId { get; set; }
+
     /// <summary>The agent.code node id within that run. NULL for a standalone agent run.</summary>
     public string? NodeId { get; set; }
 

@@ -154,6 +154,7 @@ public sealed class AgentRunService : IAgentRunService, IScopedDependency
             NodeId = nodeId,
             IterationKey = iterationKey,
             Harness = task.Harness,
+            AgentDefinitionId = task.AgentDefinitionId,   // promoted from task_jsonb to a column so the runs index can filter by agent
             Status = AgentRunStatus.Queued,
             TaskJson = JsonSerializer.Serialize(task, AgentJson.Options),
         };

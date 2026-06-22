@@ -342,6 +342,31 @@ public class TeamRunsIndexFlowTests
     }
 
     [Fact]
+    public async Task Filters_by_agent_definition_via_exists_over_the_runs_runtime_agents()
+    {
+        var (teamA, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        Guid agentX = Guid.NewGuid(), agentY = Guid.NewGuid(), agentZ = Guid.NewGuid();
+        var t = DateTimeOffset.UtcNow;
+
+        var usedX = await InsertRunAsync(teamA, null, t, workflowId: null);
+        await SeedAgentRunAsync(teamA, usedX, agentX);
+        // A supervisor-style run that spawned TWO agents across turns — the EXISTS must match by EITHER, not just the first.
+        var usedYandZ = await InsertRunAsync(teamA, null, t.AddMinutes(-1), workflowId: null);
+        await SeedAgentRunAsync(teamA, usedYandZ, agentY, "agent#turn0#0");
+        await SeedAgentRunAsync(teamA, usedYandZ, agentZ, "agent#turn1#0");
+        await InsertRunAsync(teamA, null, t.AddMinutes(-2), workflowId: null);   // no agent runs → matches no agent filter
+
+        (await FilterAsync(teamA, new RunListFilter { AgentDefinitionIds = [agentX] }))
+            .Select(r => r.Id).ShouldBe(new[] { usedX }, "matches a run that spawned an agent of that persona (EXISTS over agent_run)");
+
+        (await FilterAsync(teamA, new RunListFilter { AgentDefinitionIds = [agentZ] }))
+            .Select(r => r.Id).ShouldBe(new[] { usedYandZ }, "matches by an agent spawned on a LATER turn — the set is runtime-evolving, not launch-fixed");
+
+        (await FilterAsync(teamA, new RunListFilter { AgentDefinitionIds = [agentX, agentY] }))
+            .Select(r => r.Id).ShouldBe(new[] { usedX, usedYandZ }, ignoreOrder: true, "agent ids are OR'd; a run with no agents matches none");
+    }
+
+    [Fact]
     public async Task Filters_by_actor_excluding_actorless_webhook_runs()
     {
         var (teamA, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
@@ -572,6 +597,33 @@ public class TeamRunsIndexFlowTests
             CorrelationId = null,
             PayloadJson = "{}",
             OccurredAt = occurredAt,
+        });
+
+        await db.SaveChangesAsync().ConfigureAwait(false);
+    }
+
+    /// <summary>Spawn an agent run of the given persona under a run — the runtime-evolving relation the AgentDefinitionIds filter EXISTS over. A run can have several (supervisor spawns per turn), distinguished by <paramref name="iterationKey"/>.</summary>
+    private async Task SeedAgentRunAsync(Guid teamId, Guid runId, Guid agentDefinitionId, string iterationKey = "agent#turn0#0")
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        var now = DateTimeOffset.UtcNow;
+
+        db.AgentRun.Add(new AgentRun
+        {
+            Id = Guid.NewGuid(),
+            TeamId = teamId,
+            WorkflowRunId = runId,
+            AgentDefinitionId = agentDefinitionId,
+            NodeId = "agent",
+            IterationKey = iterationKey,
+            Harness = "codex-cli",
+            Status = AgentRunStatus.Running,
+            TaskJson = "{}",
+            CreatedDate = now,
+            CreatedBy = SystemUsers.SeederId,
+            LastModifiedDate = now,
+            LastModifiedBy = SystemUsers.SeederId,
         });
 
         await db.SaveChangesAsync().ConfigureAwait(false);
