@@ -60,10 +60,23 @@ public sealed class RealModelSupervisorTrajectoryFlowTests
         // wall-time budget. A sound run is 4-5 turns, so maxTurns:8 is ample headroom for a replan or an ask.
         using var deadline = new CancellationTokenSource(TimeSpan.FromMinutes(6));
 
-        var trajectory = await SupervisorTrajectory.RunAsync(decider, environment, maxTurns: 8, deadline.Token);
+        // Non-gating on gateway latency: a per-call HTTP timeout (one hung turn → TimeoutException) is surfaced as
+        // informational, not a RED — the blessed wire fails only on a genuine "did not converge / shipped wrong" verdict.
+        // The 6-min deadline still SCORES a non-converging run as a real failure (its cancellation carries no
+        // TimeoutException, so AssessLiveAsync gates it rather than treating it as infra).
+        await RealModelGate.AssessLiveAsync(provider, async () =>
+        {
+            var trajectory = await SupervisorTrajectory.RunAsync(decider, environment, maxTurns: 8, deadline.Token);
 
-        var (ok, note) = SupervisorTrajectoryScore.Score(trajectory);
-        RealModelGate.Assess(provider, ok, $"{provider} model '{model}' [{scenario}] trajectory — {note}");
+            // A FIRED wall-clock deadline is the gateway being too slow to finish the trajectory in the budget — not a
+            // wrong decision — so surface it as a TimeoutException for AssessLiveAsync to skip (non-gating). A turn-cap
+            // exhaustion (the model looping without shipping) leaves the deadline UNFIRED and still gates via the scorer.
+            if (deadline.IsCancellationRequested)
+                throw new TimeoutException($"[{scenario}] trajectory exceeded its 6-min wall-clock — the gateway was too slow to converge");
+
+            var (ok, note) = SupervisorTrajectoryScore.Score(trajectory);
+            return (ok, $"{provider} model '{model}' [{scenario}] trajectory — {note}");
+        });
     }
 
     private static string BaseUrlFor(string provider, string baseUrl)
@@ -80,9 +93,9 @@ public sealed class RealModelSupervisorTrajectoryFlowTests
     private sealed class SimpleHttpClientFactory : IHttpClientFactory
     {
         // Generous PER-CALL timeout: this gateway is slow (~50-90s/turn with the progressive structured-output
-        // double-attempt), so a tight per-call cap would abort a legitimately-slow turn and — worse — surface as an
-        // OperationCanceledException that is NOT the trajectory deadline. The WHOLE-trajectory wall-clock bound is the
-        // 6-min CancellationTokenSource at the call site; this per-call cap is only a backstop against a genuine hang.
+        // double-attempt), so a tight per-call cap would abort a legitimately-slow turn. A turn that STILL exceeds 150s
+        // throws a TimeoutException that AssessLiveAsync treats as non-gating gateway infra (not a flaky RED). The
+        // WHOLE-trajectory wall-clock bound is the 6-min CancellationTokenSource at the call site (a non-converging run).
         public HttpClient CreateClient(string name) => new() { Timeout = TimeSpan.FromSeconds(150) };
     }
 

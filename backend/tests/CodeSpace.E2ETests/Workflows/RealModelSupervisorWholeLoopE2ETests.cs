@@ -115,11 +115,18 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
         var workflowId = await CreateWholeLoopWorkflowAsync(teamId, userId, repoId, brainModelId);
         var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
 
-        await RunEngineAsync(runId);
-        await jobClient.WaitForPendingAsync();
+        // Non-gating on gateway latency: a brain decision call that times out / can't reach the gateway is surfaced as
+        // informational, not a RED — the blessed wire fails only on a genuine wrong-decision/wiring verdict (run failed,
+        // no patch, acceptance failed, or no spawn+merge). The brain's per-call timeout is bumped to 180s in the fixture
+        // so a normal slow turn still measures; a turn that STILL exceeds it propagates a TimeoutException → infra skip.
+        await RealModelGate.AssessLiveAsync(Provider, async () =>
+        {
+            await RunEngineAsync(runId);
+            await jobClient.WaitForPendingAsync();
 
-        var (ok, note) = await EvaluateAsync(runId, teamId);
-        RealModelGate.Assess(Provider, ok, $"{Provider} model '{model}' whole-loop — {note}");
+            var (ok, note) = await EvaluateAsync(runId, teamId);
+            return (ok, $"{Provider} model '{model}' whole-loop — {note}");
+        });
     }
 
     // ─── Verdict ─────────────────────────────────────────────────────────────────────
@@ -205,13 +212,15 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
     private async Task<Guid> CreateWholeLoopWorkflowAsync(Guid teamId, Guid userId, Guid repoId, Guid brainModelId)
     {
         // The live brain (supervisorModelId) authors the arc; its agents clone repoId + push branches, the merge
-        // integrates them, and the operator acceptance floor (check.sh) gates the terminal stop. maxRounds caps a
-        // runaway live brain so the in-memory drain always terminates.
+        // integrates them, and the operator acceptance floor (check.sh) gates the terminal stop. The happy path converges
+        // in ~4 rounds (plan→spawn→merge→stop); maxRounds:6 gives slack yet BOUNDS the wall-clock — at up to ~2×180s per
+        // round (the progressive double-attempt on a slow gateway) 6 rounds stays well under this lane's 45-min job
+        // timeout, so a slow-but-progressing run can't blow the job (an opaque kill); a per-call timeout still self-skips.
         var supConfig = $$"""
             {
               "goal": "Add server-side email-format validation to the signup endpoint, with unit tests.",
               "supervisorModelId": "{{brainModelId}}",
-              "maxRounds": 10,
+              "maxRounds": 6,
               "agentProfile": { "repositoryId": "{{repoId}}", "pushBranch": true, "integrateBranches": true },
               "acceptanceChecks": ["sh", "check.sh"]
             }

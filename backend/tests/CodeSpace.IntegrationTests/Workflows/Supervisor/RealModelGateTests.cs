@@ -70,4 +70,71 @@ public sealed class RealModelGateTests
             File.Delete(path);
         }
     }
+
+    [Fact]
+    public void Transient_transport_failures_are_infra_but_wiring_failures_and_logic_errors_gate()
+    {
+        // TRANSIENT (slow / dropped gateway) → non-gating infra:
+        RealModelGate.IsGatewayInfraFailure(new TaskCanceledException("timeout", new TimeoutException())).ShouldBeTrue("an HttpClient.Timeout is the gateway being slow");
+        RealModelGate.IsGatewayInfraFailure(new TimeoutException()).ShouldBeTrue();
+        RealModelGate.IsGatewayInfraFailure(new System.IO.IOException("response stream ended")).ShouldBeTrue("a mid-stream drop (incl. HttpIOException) is transient transport");
+        RealModelGate.IsGatewayInfraFailure(new System.Net.Sockets.SocketException((int)System.Net.Sockets.SocketError.ConnectionReset)).ShouldBeTrue("an established-then-reset connection is transient");
+        // Flattened through an AggregateException (a future parallel drive) — the TimeoutException in a non-first slot is still found.
+        RealModelGate.IsGatewayInfraFailure(new AggregateException(new InvalidOperationException("x"), new TimeoutException())).ShouldBeTrue("an aggregate-wrapped timeout is still infra");
+
+        // WIRING (mis-pointed/unreachable endpoint) → MUST gate (a broken wire can't green the kill-gate):
+        RealModelGate.IsGatewayInfraFailure(new System.Net.Http.HttpRequestException("name not resolved")).ShouldBeFalse("a bare HttpRequestException (DNS/connect) is a wiring failure, not transient");
+        RealModelGate.IsGatewayInfraFailure(new System.Net.Http.HttpRequestException("dns", new System.Net.Sockets.SocketException((int)System.Net.Sockets.SocketError.HostNotFound))).ShouldBeFalse("an unresolvable host is a wiring failure");
+        RealModelGate.IsGatewayInfraFailure(new System.Net.Sockets.SocketException((int)System.Net.Sockets.SocketError.ConnectionRefused)).ShouldBeFalse("a refused connection is a mis-pointed endpoint, a wiring failure");
+
+        // Our OWN deadline cancellation carries no TimeoutException → NOT infra (a "did not converge" verdict must gate).
+        RealModelGate.IsGatewayInfraFailure(new OperationCanceledException()).ShouldBeFalse("a bare cancel is our deadline, not the gateway");
+        RealModelGate.IsGatewayInfraFailure(new TaskCanceledException()).ShouldBeFalse();
+        // A real logic bug / assertion must NEVER be misread as infra.
+        RealModelGate.IsGatewayInfraFailure(new InvalidOperationException("wiring bug")).ShouldBeFalse();
+        RealModelGate.IsGatewayInfraFailure(new Shouldly.ShouldAssertException("scored 3/5")).ShouldBeFalse();
+    }
+
+    [Fact]
+    public async Task AssessLiveAsync_treats_a_gateway_timeout_as_non_gating_even_for_the_blessed_wire()
+    {
+        var path = Path.Combine(Path.GetTempPath(), $"realmodel-infra-{Guid.NewGuid():N}.md");
+        try
+        {
+            // Anthropic is the blessed wire; a gateway timeout must NOT fail the job, AND must be surfaced loudly.
+            await Should.NotThrowAsync(() => RealModelGate.AssessLiveAsync("Anthropic",
+                () => throw new TaskCanceledException("timeout", new TimeoutException()), path));
+
+            var written = File.ReadAllText(path);
+            written.ShouldContain("NON-GATING infra skip");
+            written.ShouldContain("Anthropic");
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+
+    [Fact]
+    public async Task AssessLiveAsync_still_gates_the_blessed_wire_on_a_genuine_bad_verdict_and_passes_a_good_one()
+    {
+        // A clean completion with ok=false on the blessed wire FAILS the job — the gate's teeth are intact. (Caught via
+        // a plain try/catch because the async Should.ThrowAsync does not reliably catch Shouldly's own assertion type.)
+        var gated = false;
+        try { await RealModelGate.AssessLiveAsync("Anthropic", () => Task.FromResult((false, "scored 3/5")), stepSummaryPath: null); }
+        catch (Shouldly.ShouldAssertException) { gated = true; }
+        gated.ShouldBeTrue("a blessed wire's genuine bad verdict must fail the job");
+
+        // ok=true passes cleanly.
+        await Should.NotThrowAsync(() =>
+            RealModelGate.AssessLiveAsync("Anthropic", () => Task.FromResult((true, "scored 5/5")), stepSummaryPath: null));
+    }
+
+    [Fact]
+    public async Task AssessLiveAsync_never_swallows_a_non_infra_exception()
+    {
+        // A real bug in the drive (not a gateway failure) must PROPAGATE, never be masked as an infra skip.
+        await Should.ThrowAsync<InvalidOperationException>(() =>
+            RealModelGate.AssessLiveAsync("Anthropic", () => throw new InvalidOperationException("wiring bug"), stepSummaryPath: null));
+    }
 }
