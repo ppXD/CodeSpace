@@ -35,10 +35,11 @@ public static class EgressHostResolver
         return ips.Distinct(StringComparer.Ordinal).ToList();
     }
 
-    /// <summary>DNS A/AAAA lookup that never throws — a resolution failure (NXDOMAIN, no network, timeout) yields an empty set so one bad host can't abort the whole setup; the caller fails closed on the resulting (possibly empty) IP set.</summary>
+    /// <summary>DNS A/AAAA lookup that never throws on a resolution failure (NXDOMAIN, no network, timeout) — it yields an empty set so one bad host can't abort the whole setup, and the caller fails closed on the resulting (possibly empty) IP set. A genuine cancellation IS rethrown (not swallowed as "unresolvable") so an aborted setup tears down promptly.</summary>
     private static async Task<IPAddress[]> SafeResolveAsync(string host, CancellationToken cancellationToken)
     {
         try { return await Dns.GetHostAddressesAsync(host, cancellationToken).ConfigureAwait(false); }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
         catch { return Array.Empty<IPAddress>(); }
     }
 }

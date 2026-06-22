@@ -59,4 +59,16 @@ public class EgressHostResolverTests
     {
         (await EgressHostResolver.ResolveIpv4Async(Array.Empty<string>(), CancellationToken.None)).ShouldBeEmpty();
     }
+
+    [Fact]
+    public async Task A_genuine_cancellation_is_rethrown_not_swallowed_as_unresolvable()
+    {
+        // A cancelled token must abort the setup (the runner tears down), NOT be masked as "this host didn't resolve" —
+        // otherwise a cancelled setup would silently narrow the allow set and launch. A name (not an IP literal) forces
+        // the DNS path where the token is observed.
+        using var cts = new CancellationTokenSource();
+        await cts.CancelAsync();
+
+        await Should.ThrowAsync<OperationCanceledException>(() => EgressHostResolver.ResolveIpv4Async(new[] { "example.com" }, cts.Token));
+    }
 }
