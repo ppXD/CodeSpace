@@ -211,6 +211,8 @@ export interface WorkflowRunDetail {
   error: string | null;
   startedAt: string | null;
   completedAt: string | null;
+  /** Run-creation time (immutable). Wall-clock duration = createdDate → completedAt (startedAt is reset per resume). */
+  createdDate: string;
   nodes: WorkflowRunNodeSummary[];
   /**
    * The EXACT graph this run executed — the version-pinned snapshot, NOT the workflow's current

@@ -27,6 +27,14 @@ public sealed record WorkflowRunDetail
     public string? Error { get; init; }
     public DateTimeOffset? StartedAt { get; init; }
     public DateTimeOffset? CompletedAt { get; init; }
+
+    /// <summary>
+    /// Run-creation time (≈ run.queued), immutable. The wall-clock "how long did this run take" is CreatedDate →
+    /// CompletedAt — NOT StartedAt → CompletedAt: StartedAt is re-stamped on every suspend→resume re-dispatch (the
+    /// stuck-run reconciler relies on that per-dispatch reset), so it collapses to ~0s for any agent run that parked.
+    /// </summary>
+    public required DateTimeOffset CreatedDate { get; init; }
+
     public required IReadOnlyList<WorkflowRunNodeSummary> Nodes { get; init; }
 
     /// <summary>

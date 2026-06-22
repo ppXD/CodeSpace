@@ -45,7 +45,7 @@ function detail(over: Partial<WorkflowRunDetail>): WorkflowRunDetail {
   return {
     id: "parent-1", workflowId: "w", workflowVersion: 1, sourceType: "manual",
     normalizedPayload: {}, status: "Success", error: null, startedAt: null, completedAt: null,
-    nodes: [], outputs: {}, pendingWait: null, ...over,
+    createdDate: "2026-06-22T00:00:00Z", nodes: [], outputs: {}, pendingWait: null, ...over,
   };
 }
 

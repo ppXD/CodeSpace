@@ -41,10 +41,12 @@ export function formatDuration(startISO: string | null, endISO: string | null): 
  * isn't in the runs-list summary; surfacing it needs a small backend field, tracked separately.)
  */
 export function runOutcome(run: WorkflowRunSummary, nowMs: number): string {
-  if (run.status === "Success") { const d = formatDuration(run.startedAt, run.completedAt); return d ? `completed in ${d}` : "completed"; }
+  // Duration is createdDate→completedAt (wall-clock), NOT startedAt→completedAt — startedAt is reset on every
+  // suspend→resume re-dispatch (the reconciler needs that), so it collapses to ~0s for any run that parked.
+  if (run.status === "Success") { const d = formatDuration(run.createdDate, run.completedAt); return d ? `completed in ${d}` : "completed"; }
   if (run.status === "Failure") return run.error ? `failed · ${run.error}` : "failed";
   if (run.status === "Cancelled") return "cancelled";
-  if (run.status === "Suspended") return `waiting ${compactAge(run.startedAt ?? run.createdDate, nowMs)}`;
+  if (run.status === "Suspended") return `waiting ${compactAge(run.createdDate, nowMs)}`;
 
   return run.status.toLowerCase();
 }
