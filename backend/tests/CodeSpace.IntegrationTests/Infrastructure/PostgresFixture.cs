@@ -319,9 +319,18 @@ public sealed class PostgresFixture : IAsyncLifetime
         // LlmSupervisorDecider (last-wins), so the supervisor node's own DI scope resolves THIS — driving the
         // REAL turn service + executor with no LLM. The fixture-singleton script knob lets a test pick the arc
         // (default plan→stop keeps the E2 flow green; the E3 crown-jewel flips it to plan→spawn→stop).
+        //
+        // The SupervisorDeciderMode knob picks the decider FOR the engine: scripted by default (byte-identical to every
+        // existing test), or — when a [Trait RealModel] test flips UseLiveModel — the PRODUCTION LlmSupervisorDecider
+        // (resolved AsSelf by CodeSpaceModule), so the live brain drives the real engine. Same InstancePerLifetimeScope
+        // lifetime + last-wins position, so the supervisor node's own DI scope resolves whichever the flag selects.
         builder.RegisterType<Workflows.Infrastructure.SupervisorDecisionScript>().AsSelf().SingleInstance();
-        builder.RegisterType<Workflows.Infrastructure.ScriptedSupervisorDecider>()
-            .As<CodeSpace.Core.Services.Supervisor.ISupervisorDecider>()
+        builder.RegisterType<Workflows.Infrastructure.SupervisorDeciderMode>().AsSelf().SingleInstance();
+        builder.RegisterType<Workflows.Infrastructure.ScriptedSupervisorDecider>().AsSelf().InstancePerLifetimeScope();
+        builder.Register<CodeSpace.Core.Services.Supervisor.ISupervisorDecider>(c =>
+                c.Resolve<Workflows.Infrastructure.SupervisorDeciderMode>().UseLiveModel
+                    ? c.Resolve<CodeSpace.Core.Services.Supervisor.Deciders.LlmSupervisorDecider>()
+                    : c.Resolve<Workflows.Infrastructure.ScriptedSupervisorDecider>())
             .InstancePerLifetimeScope();
     }
 }
