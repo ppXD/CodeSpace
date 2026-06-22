@@ -17,14 +17,14 @@ namespace CodeSpace.Messages.Queries.Workflows;
 /// </summary>
 public sealed record ListTeamRunsQuery : IQuery<RunPage>, IRequireTeamMembership
 {
-    /// <summary>Only runs of this authored workflow (omit for any source).</summary>
-    public Guid? WorkflowId { get; init; }
+    /// <summary>Only runs of any of these authored workflows; bind <c>?workflowIds=&lt;id&gt;&amp;workflowIds=&lt;id&gt;</c>. Omit for any source.</summary>
+    public IReadOnlyList<Guid>? WorkflowIds { get; init; }
 
     /// <summary>Only runs in any of these lifecycle states; bind <c>?statuses=Running&amp;statuses=Suspended</c>. Omit for any state.</summary>
     public IReadOnlyList<WorkflowRunStatus>? Statuses { get; init; }
 
-    /// <summary>Only runs from this open <c>source_type</c> token.</summary>
-    public string? SourceType { get; init; }
+    /// <summary>Only runs from any of these open <c>source_type</c> tokens; bind <c>?sourceTypes=manual&amp;sourceTypes=replay</c>. Omit for any source.</summary>
+    public IReadOnlyList<string>? SourceTypes { get; init; }
 
     /// <summary>Inclusive lower bound on the run's creation instant.</summary>
     public DateTimeOffset? Since { get; init; }
@@ -40,9 +40,9 @@ public sealed record ListTeamRunsQuery : IQuery<RunPage>, IRequireTeamMembership
     /// <summary>Fold the bound filter fields into the run-neutral spec the service applies.</summary>
     public RunListFilter ToFilter() => new()
     {
-        WorkflowId = WorkflowId,
+        WorkflowIds = WorkflowIds,
         Statuses = Statuses,
-        SourceType = SourceType,
+        SourceTypes = SourceTypes,
         Since = Since,
         Until = Until,
     };
