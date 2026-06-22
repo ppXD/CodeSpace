@@ -13,6 +13,7 @@ using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Enums;
 using CodeSpace.Messages.Tasks;
 using CodeSpace.Messages.Tasks.Effort;
+using MediatR;
 using Microsoft.EntityFrameworkCore;
 using Shouldly;
 
@@ -103,6 +104,34 @@ public class TaskLaunchFlowTests
         var folded = JsonSerializer.Deserialize<Messages.Agents.AgentRunResult>(agentRun.ResultJson!, AgentJson.Options)!;
         folded.Summary.ShouldBe(SubtaskAwareFakeCli.ExpectedSummaryFor("Work on the auth refactor"),
             customMessage: "the real folded summary must be the fake-CLI transform of the launched goal — a mismatch means the goal never reached the real CLI");
+    }
+
+    [Fact]
+    public async Task Launching_with_a_cost_cap_tightens_the_route_caps_through_the_full_command_path()
+    {
+        // F1: the operator's safety-budget cap flows the WHOLE command path — LaunchTaskCommand.Caps → the handler's
+        // BuildCapsOverride → TaskLaunchRequest.CapsOverride → BuildRouteRequest → the router merge → Route.Caps.
+        // Dispatched via the mediator (NOT the service directly) so the new command→request wiring is exercised, not
+        // bypassed. The downstream (Route.Caps → supervisor config → SupervisorBounds force-stop) is tested already.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+
+        var jobClient = ResolveJobClient();
+        jobClient.Clear();
+        jobClient.AutoExecute = false;   // route assertion only — don't run the agent
+
+        using var scope = _fixture.BeginScopeAs(userId, teamId, Roles.Admin);
+        var result = await scope.Resolve<IMediator>().Send(new LaunchTaskCommand
+        {
+            TaskText = "Work on the auth refactor",
+            Effort = TaskEffortModes.Quick,
+            Autonomy = "Confined",
+            Harness = "codex-cli",
+            RunnerKind = "local",
+            Caps = new TaskCapsOverride { MaxCostUsd = 3.25m, MaxParallelism = 2 },
+        }, CancellationToken.None);
+
+        result.Route.Caps.MaxCostUsd.ShouldBe(3.25m, "the operator cost cap reached the route through the handler (was dropped — CapsOverride=null — before F1)");
+        result.Route.Caps.MaxParallelism.ShouldBe(2, "the operator parallelism cap reached the route too");
     }
 
     [Fact]

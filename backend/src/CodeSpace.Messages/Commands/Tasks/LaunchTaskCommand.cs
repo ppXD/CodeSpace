@@ -16,8 +16,9 @@ namespace CodeSpace.Messages.Commands.Tasks;
 ///
 /// <para><see cref="Effort"/> / <see cref="Autonomy"/> / <see cref="Harness"/> / <see cref="RunnerKind"/> /
 /// <see cref="SurfaceKind"/> are OPEN STRINGS (no enum) — a new tier / surface is a new const, never a core-enum edit.
-/// PR4 intentionally DEFERS the supervisor / cost inputs (ApprovalPolicy + MaxParallelism / MaxTotalSpawns /
-/// MaxCostUsd): they ride the router's <c>CapsOverride</c> seam a later PR fills, which PR4 leaves unused.</para>
+/// The operator's safety-budget caps (<see cref="Caps"/> — cost / parallelism / spawns / rounds) ride the router's
+/// <c>CapsOverride</c> seam, which TIGHTENS the effort preset's caps (a cost cap force-stops the run via the
+/// supervisor's bounds). ApprovalPolicy still rides <see cref="Autonomy"/> separately.</para>
 /// </summary>
 public sealed record LaunchTaskCommand : ICommand<LaunchTaskResult>, IRequireTeamMembership
 {
@@ -50,6 +51,9 @@ public sealed record LaunchTaskCommand : ICommand<LaunchTaskResult>, IRequireTea
 
     /// <summary>The <c>ModelCredential</c> reference the agent authenticates with. Null → the persona default → the team/operator fallback.</summary>
     public Guid? ModelCredentialId { get; init; }
+
+    /// <summary>The operator's optional safety-budget caps (cost / parallelism / spawns / rounds). Null / empty ⇒ the effort preset's caps stand (byte-identical to no override). A set cap TIGHTENS the preset.</summary>
+    public TaskCapsOverride? Caps { get; init; }
 
     /// <summary>The launch surface (an open <see cref="TaskLaunchSurfaceKinds"/> string). Defaults to <c>chat</c> — the registry resolves a seed provider by it.</summary>
     public string SurfaceKind { get; init; } = TaskLaunchSurfaceKinds.Chat;

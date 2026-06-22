@@ -40,8 +40,18 @@ public sealed class LaunchTaskCommandHandler : IRequestHandler<LaunchTaskCommand
             RequestedEffort = request.Effort,
             Autonomy = request.Autonomy,
             Overrides = BuildOverrides(request),
+            CapsOverride = BuildCapsOverride(request.Caps),
             SurfacePayload = BuildSurfacePayload(request),
         }, cancellationToken);
+
+    /// <summary>Project the operator's safety-budget caps onto the router's <c>CapsOverride</c> seam. Null / empty ⇒ null (the launch service then leaves the router override unset — byte-identical to the preset-only path). A set-but-invalid cap fails LOUD (<see cref="ArgumentException"/>) here rather than silently degrading to "no cap" downstream. Internal (not private) so the mapping + empty-collapse + reject is unit-pinned directly (InternalsVisibleTo), like <c>TaskLaunchService.BuildAgentProfile</c>.</summary>
+    internal static RouteCaps? BuildCapsOverride(TaskCapsOverride? caps)
+    {
+        if (caps is not { IsEmpty: false }) return null;
+
+        caps.Validate();
+        return caps.ToRouteCaps();
+    }
 
     private static TaskExecutionOverrides BuildOverrides(LaunchTaskCommand request) => new()
     {
