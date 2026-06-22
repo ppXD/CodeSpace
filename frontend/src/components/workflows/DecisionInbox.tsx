@@ -10,7 +10,7 @@ import { DecisionCard } from "./DecisionCard";
  */
 export function DecisionInbox({ decisions }: { decisions: readonly PendingDecision[] }) {
   return (
-    <section className="decision-inbox" aria-label="Decisions">
+    <section className="decision-inbox rail-card" aria-label="Decisions">
       <div className="decision-inbox-head">
         <Ic.Bell size={12} aria-hidden="true" />
         <span className="decision-inbox-title">Needs you</span>
