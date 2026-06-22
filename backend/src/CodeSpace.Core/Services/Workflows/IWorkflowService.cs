@@ -53,11 +53,12 @@ public interface IWorkflowService
     Task<IReadOnlyList<WorkflowRunSummary>> ListRunsAsync(Guid workflowId, Guid teamId, int limit, CancellationToken cancellationToken);
 
     /// <summary>
-    /// The team's runs index — every top-level run the team owns (any source), newest first. Keyset-paginated:
+    /// The team's runs index — every top-level run the team owns (any source), newest first, narrowed by
+    /// <paramref name="filter"/> (any subset of its dimensions; <see cref="RunListFilter.None"/> for all). Keyset-paginated:
     /// <paramref name="cursor"/> is the opaque token from the previous page (null = first page), <paramref name="limit"/>
     /// is clamped to <see cref="WorkflowService.MaxRunsPageSize"/>. Returns the page + a next cursor (null on the last page).
     /// </summary>
-    Task<RunPage> ListTeamRunsAsync(Guid teamId, string? cursor, int limit, CancellationToken cancellationToken);
+    Task<RunPage> ListTeamRunsAsync(Guid teamId, RunListFilter filter, string? cursor, int limit, CancellationToken cancellationToken);
 
     Task<WorkflowRunDetail?> GetRunAsync(Guid runId, Guid teamId, CancellationToken cancellationToken);
 

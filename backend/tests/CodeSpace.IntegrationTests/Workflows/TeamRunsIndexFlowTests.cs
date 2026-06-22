@@ -186,6 +186,128 @@ public class TeamRunsIndexFlowTests
         rows.Single(r => r.WorkflowId == null).WorkflowName.ShouldBeNull("a task / snapshot run has no parent workflow → null name");
     }
 
+    [Fact]
+    public async Task Filters_by_status()
+    {
+        var (teamA, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+
+        var t = DateTimeOffset.UtcNow;
+        var failed = await InsertRunAsync(teamA, null, t, workflowId: null, status: WorkflowRunStatus.Failure);
+        await InsertRunAsync(teamA, null, t.AddMinutes(-1), workflowId: null, status: WorkflowRunStatus.Success);
+        await InsertRunAsync(teamA, null, t.AddMinutes(-2), workflowId: null, status: WorkflowRunStatus.Running);
+
+        var rows = await FilterAsync(teamA, new RunListFilter { Statuses = new[] { WorkflowRunStatus.Failure } });
+
+        rows.Select(r => r.Id).ShouldBe(new[] { failed }, "a one-element status set returns only runs in that lifecycle state");
+    }
+
+    [Fact]
+    public async Task Filters_by_a_status_set_the_active_group_in_one_query()
+    {
+        var (teamA, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+
+        var t = DateTimeOffset.UtcNow;
+        var running = await InsertRunAsync(teamA, null, t, workflowId: null, status: WorkflowRunStatus.Running);
+        var suspended = await InsertRunAsync(teamA, null, t.AddMinutes(-1), workflowId: null, status: WorkflowRunStatus.Suspended);
+        await InsertRunAsync(teamA, null, t.AddMinutes(-2), workflowId: null, status: WorkflowRunStatus.Success);   // terminal — excluded
+        await InsertRunAsync(teamA, null, t.AddMinutes(-3), workflowId: null, status: WorkflowRunStatus.Failure);   // terminal — excluded
+
+        // The whole point of a status SET: the non-terminal "active" group is ONE query, not N — newest first.
+        var rows = await FilterAsync(teamA, new RunListFilter { Statuses = new[] { WorkflowRunStatus.Running, WorkflowRunStatus.Suspended } });
+
+        rows.Select(r => r.Id).ShouldBe(new[] { running, suspended }, "a status set returns runs in ANY of the listed states (SQL = ANY), excluding the rest");
+    }
+
+    [Fact]
+    public async Task Filters_by_source_type()
+    {
+        var (teamA, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+
+        var t = DateTimeOffset.UtcNow;
+        var replay = await InsertRunAsync(teamA, null, t, workflowId: null, sourceType: WorkflowRunSourceTypes.Replay);
+        await InsertRunAsync(teamA, null, t.AddMinutes(-1), workflowId: null, sourceType: WorkflowRunSourceTypes.Snapshot);
+        await InsertRunAsync(teamA, null, t.AddMinutes(-2), workflowId: null, sourceType: WorkflowRunSourceTypes.ScheduleCron);
+
+        var rows = await FilterAsync(teamA, new RunListFilter { SourceType = WorkflowRunSourceTypes.Replay });
+
+        rows.Select(r => r.Id).ShouldBe(new[] { replay }, "source_type filter matches the open token exactly");
+    }
+
+    [Fact]
+    public async Task Filters_by_created_date_window_inclusive_lower_exclusive_upper()
+    {
+        var (teamA, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+
+        var t = DateTimeOffset.UtcNow;
+        await InsertRunAsync(teamA, null, t, workflowId: null);                       // == Until → excluded (exclusive upper)
+        var inWindowNew = await InsertRunAsync(teamA, null, t.AddHours(-1), workflowId: null);
+        var inWindowOld = await InsertRunAsync(teamA, null, t.AddHours(-2), workflowId: null);   // == Since → included (inclusive lower)
+        await InsertRunAsync(teamA, null, t.AddHours(-3), workflowId: null);          // < Since → excluded
+
+        var rows = await FilterAsync(teamA, new RunListFilter { Since = t.AddHours(-2), Until = t });
+
+        rows.Select(r => r.Id).ShouldBe(new[] { inWindowNew, inWindowOld },
+            customMessage: "Since is an inclusive lower bound, Until an exclusive upper bound, on created_date — newest first");
+    }
+
+    [Fact]
+    public async Task Filters_by_workflow_id_excluding_task_runs_and_other_workflows()
+    {
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+
+        var wfA = await CreateNamedWorkflowAsync(teamId, userId, "Alpha");
+        var wfB = await CreateNamedWorkflowAsync(teamId, userId, "Beta");
+        var runA = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, wfA, teamId);
+        await WorkflowsTestSeed.SeedManualRunAsync(_fixture, wfB, teamId);
+        await InsertRunAsync(teamId, null, DateTimeOffset.UtcNow.AddMinutes(-5), workflowId: null);   // a task run
+
+        var rows = await FilterAsync(teamId, new RunListFilter { WorkflowId = wfA });
+
+        rows.Select(r => r.Id).ShouldBe(new[] { runA }, "workflow filter returns only that workflow's runs — not workflow B's, not the task run");
+    }
+
+    [Fact]
+    public async Task Combines_filters_as_an_intersection()
+    {
+        var (teamA, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+
+        var t = DateTimeOffset.UtcNow;
+        var match = await InsertRunAsync(teamA, null, t, workflowId: null, sourceType: WorkflowRunSourceTypes.Replay, status: WorkflowRunStatus.Failure);
+        await InsertRunAsync(teamA, null, t.AddMinutes(-1), workflowId: null, sourceType: WorkflowRunSourceTypes.Replay, status: WorkflowRunStatus.Success);   // wrong status
+        await InsertRunAsync(teamA, null, t.AddMinutes(-2), workflowId: null, sourceType: WorkflowRunSourceTypes.Snapshot, status: WorkflowRunStatus.Failure);  // wrong source
+
+        var rows = await FilterAsync(teamA, new RunListFilter { SourceType = WorkflowRunSourceTypes.Replay, Statuses = new[] { WorkflowRunStatus.Failure } });
+
+        rows.Select(r => r.Id).ShouldBe(new[] { match }, "multiple filter dimensions compose as AND — only the run matching every dimension");
+    }
+
+    [Fact]
+    public async Task A_filter_narrows_keyset_pagination_without_leaking_non_matching_rows()
+    {
+        var (teamA, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+
+        var t = DateTimeOffset.UtcNow;
+        var failures = new List<Guid>();
+        for (var i = 0; i < 3; i++)
+        {
+            failures.Add(await InsertRunAsync(teamA, null, t.AddMinutes(-i), workflowId: null, status: WorkflowRunStatus.Failure));
+            await InsertRunAsync(teamA, null, t.AddMinutes(-i), workflowId: null, status: WorkflowRunStatus.Success);   // interleaved non-matching
+        }
+
+        var filter = new RunListFilter { Statuses = new[] { WorkflowRunStatus.Failure } };
+        var walked = new List<Guid>();
+        string? cursor = null;
+        do
+        {
+            using var scope = _fixture.BeginScope();
+            var page = await scope.Resolve<IWorkflowService>().ListTeamRunsAsync(teamA, filter, cursor, limit: 2, CancellationToken.None);
+            walked.AddRange(page.Items.Select(r => r.Id));
+            cursor = page.NextCursor;
+        } while (cursor != null);
+
+        walked.ShouldBe(failures, "the filter holds across every page — keyset paging never leaks a non-matching (Success) row");
+    }
+
     private async Task<Guid> CreateNamedWorkflowAsync(Guid teamId, Guid userId, string name)
     {
         using var scope = _fixture.BeginScopeAs(userId, teamId, Roles.Admin);
@@ -208,10 +330,17 @@ public class TeamRunsIndexFlowTests
     private async Task<RunPage> PageAsync(Guid teamId, string? cursor, int limit)
     {
         using var scope = _fixture.BeginScope();
-        return await scope.Resolve<IWorkflowService>().ListTeamRunsAsync(teamId, cursor, limit, CancellationToken.None);
+        return await scope.Resolve<IWorkflowService>().ListTeamRunsAsync(teamId, RunListFilter.None, cursor, limit, CancellationToken.None);
     }
 
-    private async Task<Guid> InsertRunAsync(Guid teamId, Guid? parentRunId, DateTimeOffset createdDate, Guid? workflowId, string? sourceType = null)
+    private async Task<IReadOnlyList<WorkflowRunSummary>> FilterAsync(Guid teamId, RunListFilter filter)
+    {
+        using var scope = _fixture.BeginScope();
+        var page = await scope.Resolve<IWorkflowService>().ListTeamRunsAsync(teamId, filter, cursor: null, limit: 50, CancellationToken.None);
+        return page.Items;
+    }
+
+    private async Task<Guid> InsertRunAsync(Guid teamId, Guid? parentRunId, DateTimeOffset createdDate, Guid? workflowId, string? sourceType = null, WorkflowRunStatus status = WorkflowRunStatus.Enqueued)
     {
         using var scope = _fixture.BeginScope();
         var db = scope.Resolve<CodeSpaceDbContext>();
@@ -244,7 +373,7 @@ public class TeamRunsIndexFlowTests
             RunRequestId = requestId,
             SourceType = resolvedSource,   // denorm mirrors the request — the team index now excludes children by THIS column
             ParentRunId = parentRunId,
-            Status = WorkflowRunStatus.Enqueued,
+            Status = status,
             CreatedDate = createdDate,   // explicit → the audit interceptor leaves it (it only stamps a default value)
             CreatedBy = SystemUsers.SeederId,
             LastModifiedBy = SystemUsers.SeederId,
