@@ -60,6 +60,21 @@ public class SupervisorDecisionEvalDeciderTests
         var clean = Scenario("clean-integration");
         SupervisorDecisionEval.Score(clean, await DecideAsync(clean, """{"kind":"spawn","spawn":{"subtaskIds":["s1"]}}"""))
             .Pass.ShouldBeFalse("re-spawning after the work integrated cleanly must fail — the goal is met, stop");
+
+        // retried-still-failed (SAFETY-CRITICAL): MERGING a subtask whose retry STILL failed must FAIL — never ship broken work.
+        var stillFailed = Scenario("retried-still-failed");
+        SupervisorDecisionEval.Score(stillFailed, await DecideAsync(stillFailed, """{"kind":"merge","merge":{}}"""))
+            .Pass.ShouldBeFalse("merging a subtask that still fails after a retry must fail — the supervisor must never ship broken work");
+
+        // three-subtask-partial-failure: retrying a SUCCEEDED subtask (s1) instead of the failed one (s2) must FAIL the positional check.
+        var threePartial = Scenario("three-subtask-partial-failure");
+        SupervisorDecisionEval.Score(threePartial, await DecideAsync(threePartial, """{"kind":"retry","retry":{"subtaskId":"s1"}}"""))
+            .Pass.ShouldBeFalse("retrying a succeeded subtask in a 3-way fan-out must fail — the retry must target the FAILED subtask");
+
+        // all-failed: quitting on the first all-failure (stop) must FAIL — the supervisor must try to recover (accepted = {retry}).
+        var allFailed = Scenario("all-failed");
+        SupervisorDecisionEval.Score(allFailed, await DecideAsync(allFailed, """{"kind":"stop","stop":{"outcome":"failed"}}"""))
+            .Pass.ShouldBeFalse("giving up on the first all-failure must fail — retry to recover before quitting");
     }
 
     private static SupervisorGoldenScenario Scenario(string name) => SupervisorDecisionGoldenScenarios.All.Single(s => s.Name == name);
@@ -78,10 +93,15 @@ public class SupervisorDecisionEvalDeciderTests
         "first-turn" => """{"kind":"plan","plan":{"subtasks":[{"id":"s1","title":"Subtask 1","instruction":"do s1"},{"id":"s2","title":"Subtask 2","instruction":"do s2"}]}}""",
         "planned-not-spawned" => """{"kind":"spawn","spawn":{"subtaskIds":["s1","s2"]}}""",
         "mixed-results" => """{"kind":"retry","retry":{"subtaskId":"s2"}}""",
+        "three-subtask-partial-failure" => """{"kind":"retry","retry":{"subtaskId":"s2"}}""",
+        "all-failed" => """{"kind":"retry","retry":{"subtaskId":"s1"}}""",
         "retried-failure-succeeded" => """{"kind":"merge","merge":{}}""",
+        "retried-still-failed" => """{"kind":"stop","stop":{"outcome":"failed"}}""",
         "all-succeeded" => """{"kind":"merge","merge":{}}""",
+        "three-subtask-all-succeeded" => """{"kind":"merge","merge":{}}""",
         "clean-integration" => """{"kind":"stop","stop":{"outcome":"completed"}}""",
         "merge-conflict" => """{"kind":"resolve","resolve":{}}""",
+        "multi-file-conflict" => """{"kind":"resolve","resolve":{}}""",
         "verified-resolution" => """{"kind":"stop","stop":{"outcome":"completed"}}""",
         "unverified-resolution" => """{"kind":"resolve","resolve":{}}""",
         _ => throw new ArgumentException($"no canned decision for scenario '{scenarioName}'"),

@@ -69,9 +69,9 @@ public sealed class RealModelSupervisorDecisionFlowTests
 
     private sealed class SimpleHttpClientFactory : IHttpClientFactory
     {
-        // One golden decision is a single fast call (~10-20s on the gateway); 60s is ample headroom yet bounds the
-        // class's worst case (5 scenarios × 2 wires) so a stalled call cannot silently consume the whole CI budget.
-        public HttpClient CreateClient(string name) => new() { Timeout = TimeSpan.FromSeconds(60) };
+        // One golden decision is a single fast call (~10-20s on the gateway); 45s is ample headroom yet bounds the
+        // class's worst case (14 scenarios × 2 wires = 28 calls) so a stalled call cannot silently consume the budget.
+        public HttpClient CreateClient(string name) => new() { Timeout = TimeSpan.FromSeconds(45) };
     }
 
     /// <summary>Resolves the brain model to the configured real model + credential (the in-process pool, stubbed for a decider-only real call).</summary>

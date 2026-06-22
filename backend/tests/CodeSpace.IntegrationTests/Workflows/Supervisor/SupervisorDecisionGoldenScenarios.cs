@@ -17,20 +17,29 @@ public static class SupervisorDecisionGoldenScenarios
     // fixed anyway so the folded OutcomeJson + the cassette key never drift across runs.
     private static readonly Guid Agent1 = Guid.Parse("11111111-1111-1111-1111-111111111111");
     private static readonly Guid Agent2 = Guid.Parse("22222222-2222-2222-2222-222222222222");
+    private static readonly Guid Agent3 = Guid.Parse("66666666-6666-6666-6666-666666666666");
     private static readonly Guid Resolver = Guid.Parse("33333333-3333-3333-3333-333333333333");
     private static readonly Guid RetryAgent = Guid.Parse("55555555-5555-5555-5555-555555555555");
 
+    // Ordered by the decision PHASE the brain is in (plan → spawn → inspect/retry → merge → conflict → resolve), so the
+    // corpus reads as a comprehensive sweep of the single-decision space. Each point has ONE reasonable action (or a
+    // tightly-bounded accepted set) so the live gate measures decision quality, not punishes a reasonable variation.
     public static IReadOnlyList<SupervisorGoldenScenario> All { get; } = new[]
     {
-        FirstTurn(),
-        PlannedNotSpawned(),
-        MixedResults(),
-        RetriedFailureSucceeded(),
-        AllSucceeded(),
-        CleanIntegration(),
-        MergeConflict(),
-        VerifiedResolution(),
-        UnverifiedResolution(),
+        FirstTurn(),                      // no priors                       → plan
+        PlannedNotSpawned(),              // planned, nothing spawned        → spawn
+        MixedResults(),                   // 2 subtasks, s2 failed           → retry s2 (positional)
+        ThreeSubtaskPartialFailure(),     // 3 subtasks, s2 failed           → retry s2 (positional, richer)
+        AllFailed(),                      // both subtasks failed            → retry (recover, don't quit)
+        RetriedFailureSucceeded(),        // a retry fixed the failure       → merge
+        RetriedStillFailed(),             // the retry STILL failed          → retry-again / stop, NEVER merge
+        AllSucceeded(),                   // both succeeded                  → merge
+        ThreeSubtaskAllSucceeded(),       // three succeeded                 → merge (larger fan-out)
+        CleanIntegration(),               // a clean integrated branch       → stop
+        MergeConflict(),                  // the merge conflicted            → resolve
+        MultiFileConflict(),              // a conflict across many files    → resolve (don't give up on a hard conflict)
+        VerifiedResolution(),             // the resolution passed tests     → accept (merge/stop)
+        UnverifiedResolution(),           // the resolution did NOT pass     → resolve/stop, NEVER merge
     };
 
     /// <summary>Turn 0, no priors → the brain must PLAN first (it cannot spawn/retry/merge over non-existent subtasks).</summary>
@@ -155,6 +164,81 @@ public static class SupervisorDecisionGoldenScenarios
         AcceptedKinds = new[] { SupervisorDecisionKinds.Resolve, SupervisorDecisionKinds.Stop },
     };
 
+    /// <summary>THREE subtasks, only s2 FAILED → RETRY the failed one (positional teeth with a wider fan-out — must target s2, not blindly s1/s3).</summary>
+    private static SupervisorGoldenScenario ThreeSubtaskPartialFailure() => new()
+    {
+        Name = "three-subtask-partial-failure",
+        Context = Context(turn: 2, new[]
+        {
+            Plan("s1", "s2", "s3"),
+            Spawn(new[] { "s1", "s2", "s3" },
+                Agent(Agent1, "Succeeded", summary: "implemented s1; unit tests green", branch: "agent/s1"),
+                Agent(Agent2, "Failed", error: "build failed: missing symbol referenced by s2"),
+                Agent(Agent3, "Succeeded", summary: "implemented s3; unit tests green", branch: "agent/s3")),
+        }),
+        AcceptedKinds = new[] { SupervisorDecisionKinds.Retry },
+        PayloadCheck = RetryTargets("s2"),
+    };
+
+    /// <summary>EVERY subtask failed → RETRY to recover the work (don't merge nothing, don't quit on the first failure).</summary>
+    private static SupervisorGoldenScenario AllFailed() => new()
+    {
+        Name = "all-failed",
+        Context = Context(turn: 2, new[]
+        {
+            Plan("s1", "s2"),
+            Spawn(new[] { "s1", "s2" },
+                Agent(Agent1, "Failed", error: "s1 build failed: unresolved symbol"),
+                Agent(Agent2, "Failed", error: "s2 tests failed: assertion error")),
+        }),
+        AcceptedKinds = new[] { SupervisorDecisionKinds.Retry },
+    };
+
+    /// <summary>The failed subtask was RETRIED and the retry STILL FAILED with the SAME error → the brain is genuinely stuck: retry again, stop and leave it, OR escalate to a human (ask_human) are all reasonable when stuck. The one thing it must NEVER do is MERGE a still-broken subtask (the safety inverse of <see cref="RetriedFailureSucceeded"/>). The accepted set deliberately includes ask_human: NO retry-cap is rendered to the model, so escalating a same-error wall to a human is on-rail — narrowing to {retry, stop} would punish that reasonable choice and flake the live gate. The MERGE rejection is the real teeth.</summary>
+    private static SupervisorGoldenScenario RetriedStillFailed() => new()
+    {
+        Name = "retried-still-failed",
+        Context = Context(turn: 3, new[]
+        {
+            Plan("s1", "s2"),
+            Spawn(new[] { "s1", "s2" },
+                Agent(Agent1, "Succeeded", summary: "implemented s1; unit tests green", branch: "agent/s1"),
+                Agent(Agent2, "Failed", error: "build failed: missing symbol referenced by s2")),
+            Retry("s2", Agent(RetryAgent, "Failed", error: "s2 still fails after the retry: the same build error persists")),
+        }),
+        AcceptedKinds = new[] { SupervisorDecisionKinds.Retry, SupervisorDecisionKinds.Stop, SupervisorDecisionKinds.AskHuman },
+    };
+
+    /// <summary>THREE subtasks all succeeded → MERGE the wider fan-out (the same rail as <see cref="AllSucceeded"/>, with more contributions to combine).</summary>
+    private static SupervisorGoldenScenario ThreeSubtaskAllSucceeded() => new()
+    {
+        Name = "three-subtask-all-succeeded",
+        Context = Context(turn: 2, new[]
+        {
+            Plan("s1", "s2", "s3"),
+            Spawn(new[] { "s1", "s2", "s3" },
+                Agent(Agent1, "Succeeded", summary: "implemented s1; unit tests green", branch: "agent/s1"),
+                Agent(Agent2, "Succeeded", summary: "implemented s2; unit tests green", branch: "agent/s2"),
+                Agent(Agent3, "Succeeded", summary: "implemented s3; unit tests green", branch: "agent/s3")),
+        }),
+        AcceptedKinds = new[] { SupervisorDecisionKinds.Merge },
+    };
+
+    /// <summary>The merge conflicted across MANY files → still RESOLVE (a harder, multi-file conflict must not make the brain give up / stop instead of reconciling).</summary>
+    private static SupervisorGoldenScenario MultiFileConflict() => new()
+    {
+        Name = "multi-file-conflict",
+        Context = Context(turn: 3, new[]
+        {
+            Plan("s1", "s2"),
+            Spawn(new[] { "s1", "s2" },
+                Agent(Agent1, "Succeeded", summary: "s1", branch: "agent/s1"),
+                Agent(Agent2, "Succeeded", summary: "s2", branch: "agent/s2")),
+            ConflictedMerge("src/Auth.cs", "src/Signup.cs", "src/Validation.cs", "src/Routes.cs"),
+        }),
+        AcceptedKinds = new[] { SupervisorDecisionKinds.Resolve },
+    };
+
     // ── Builders (fixed strings; real folds) ─────────────────────────────────────────────────────────────────
 
     /// <summary>The operator-picked brain model row id — non-null so the real <c>LlmSupervisorDecider</c> proceeds past its fail-closed "no brain model" guard.</summary>
@@ -180,17 +264,19 @@ public static class SupervisorDecisionGoldenScenarios
         return PriorDecision(SupervisorDecisionKinds.Spawn, 1, JsonSerializer.Serialize(new { subtaskIds }, AgentJson.Options), SupervisorOutcome.FoldAgentResults(staged, results));
     }
 
-    private static SupervisorPriorDecision ConflictedMerge()
+    private static SupervisorPriorDecision ConflictedMerge() => ConflictedMerge("src/Feature.cs");
+
+    private static SupervisorPriorDecision ConflictedMerge(params string[] conflictedFiles)
     {
         var outcome = JsonSerializer.Serialize(new
         {
             integration = new
             {
                 status = "Conflicted",
-                reason = "two agents edited the same file",
+                reason = "the agents edited the same file(s)",
                 outcomes = new[]
                 {
-                    new { conflictedFiles = new[] { "src/Feature.cs" }, fallbackBranch = "agent/s1" },
+                    new { conflictedFiles, fallbackBranch = "agent/s1" },
                     new { conflictedFiles = Array.Empty<string>(), fallbackBranch = "agent/s2" },
                 },
             },
