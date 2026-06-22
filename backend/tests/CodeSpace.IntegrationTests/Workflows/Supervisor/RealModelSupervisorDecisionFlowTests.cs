@@ -4,7 +4,6 @@ using CodeSpace.Core.Services.Workflows.Llm;
 using CodeSpace.Core.Services.Workflows.Llm.Anthropic;
 using CodeSpace.Core.Services.Workflows.Llm.OpenAi;
 using CodeSpace.Messages.Agents;
-using Shouldly;
 
 namespace CodeSpace.IntegrationTests.Workflows.Supervisor;
 
@@ -51,7 +50,7 @@ public sealed class RealModelSupervisorDecisionFlowTests
         var (passed, total, allPassed) = SupervisorDecisionEval.Aggregate(scores);
         var failures = string.Join(" | ", scores.Where(s => !s.Pass).Select(s => $"{s.Scenario}: got '{s.ActualKind}' — {s.Note}"));
 
-        allPassed.ShouldBeTrue($"{provider} model '{model}' scored {passed}/{total} golden supervisor decisions. Failures: {failures}");
+        RealModelGate.Assess(provider, allPassed, $"{provider} model '{model}' scored {passed}/{total} golden supervisor decisions. Failures: {failures}");
     }
 
     /// <summary>Anthropic's client appends <c>/v1/messages</c> to the host base; OpenAI's appends <c>/chat/completions</c> to a <c>/v1</c> base — derive each from the single configured base so one gateway serves both wires.</summary>

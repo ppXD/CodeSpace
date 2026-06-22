@@ -33,7 +33,7 @@ public static class SupervisorTrajectory
         {
             if (cancellationToken.IsCancellationRequested) break;
 
-            var context = new SupervisorTurnContext { Goal = "Ship the feature end to end", TurnNumber = turn, PriorDecisions = priors.ToList(), SupervisorModelId = Brain };
+            var context = new SupervisorTurnContext { Goal = SupervisorDecisionGoldenScenarios.FixtureGoal, TurnNumber = turn, PriorDecisions = priors.ToList(), SupervisorModelId = Brain };
 
             SupervisorDecision decision;
             try
