@@ -909,6 +909,7 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
             Error = run.Error,
             StartedAt = run.StartedAt,
             CompletedAt = run.CompletedAt,
+            CreatedDate = run.CreatedDate,
             Nodes = nodes.Select(n => MapRunNode(n, childRunByNode, agentRunByNode, typeKeyByNodeId)).ToList(),
             Definition = definition,
             Outputs = outputs,

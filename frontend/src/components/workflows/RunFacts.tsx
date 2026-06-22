@@ -8,14 +8,15 @@ import { relativeTime } from "@/lib/codeTree";
  * Read-only; a live run shows an elapsed-since-start duration.
  */
 export function RunFacts({ run }: { run: WorkflowRunDetail }) {
-  const duration = formatDuration(run.startedAt, run.completedAt);
+  // Both from createdDate (immutable), not startedAt (reset on every resume → "Started 2m ago" / "Duration 0s" lies).
+  const duration = formatDuration(run.createdDate, run.completedAt);
 
   return (
     <div className="rail-card">
       <div className="rail-card-head"><Ic.Box size={12} aria-hidden="true" /> Run</div>
       <dl className="run-facts">
         <Fact label="Source" value={sourceLabel(run.sourceType)} />
-        {run.startedAt && <Fact label="Started" value={relativeTime(run.startedAt)} />}
+        <Fact label="Started" value={relativeTime(run.createdDate)} />
         {duration && <Fact label="Duration" value={duration} />}
         <Fact label="Release" value={`v${run.workflowVersion}`} />
       </dl>
@@ -38,11 +39,11 @@ function sourceLabel(sourceType: string): string {
   return sourceType.charAt(0).toUpperCase() + sourceType.slice(1);
 }
 
-/** Elapsed time from start to completion (or to now, for a still-running run); empty when not started. */
-function formatDuration(startedAt: string | null, completedAt: string | null): string {
-  if (!startedAt) return "";
+/** Elapsed time from the run's creation to completion (or to now, for a still-running run); empty when absent. */
+function formatDuration(createdDate: string | null, completedAt: string | null): string {
+  if (!createdDate) return "";
 
-  const start = new Date(startedAt).getTime();
+  const start = new Date(createdDate).getTime();
   const end = completedAt ? new Date(completedAt).getTime() : Date.now();
   const sec = Math.max(0, Math.round((end - start) / 1000));
 

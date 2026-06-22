@@ -29,12 +29,13 @@ describe("formatDuration", () => {
 describe("runOutcome", () => {
   const now = Date.parse("2026-06-22T01:00:00Z");
   it("summarizes the result per status", () => {
-    expect(runOutcome({ ...run("a", "Success"), startedAt: "2026-06-22T00:00:00Z", completedAt: "2026-06-22T00:07:59Z" }, now)).toBe("completed in 7m 59s");
+    // duration is createdDate→completedAt; run() defaults createdDate to 2026-06-22T00:00:00Z
+    expect(runOutcome({ ...run("a", "Success"), completedAt: "2026-06-22T00:07:59Z" }, now)).toBe("completed in 7m 59s");
     expect(runOutcome(run("b", "Success"), now)).toBe("completed");                       // no completedAt → no duration
     expect(runOutcome({ ...run("c", "Failure"), error: "test exited 1" }, now)).toBe("failed · test exited 1");
     expect(runOutcome(run("d", "Failure"), now)).toBe("failed");                           // no error message
     expect(runOutcome(run("e", "Cancelled"), now)).toBe("cancelled");
-    expect(runOutcome({ ...run("f", "Suspended"), startedAt: "2026-06-21T22:00:00Z" }, now)).toBe("waiting 3h");
+    expect(runOutcome({ ...run("f", "Suspended"), createdDate: "2026-06-21T22:00:00Z" }, now)).toBe("waiting 3h");
   });
 });
 
