@@ -98,7 +98,7 @@ export function AgentOverviewPanel({ workflow, runs = [], onRun, onEditSource, o
                 <span className="agent-activity-id">{r.id.slice(0, 8)}</span>
                 <span className="agent-activity-src">{r.sourceType}</span>
                 <span className="agent-activity-time">{r.startedAt ? new Date(r.startedAt).toLocaleString() : "—"}</span>
-                <span className="agent-activity-ver">v{r.workflowVersion}</span>
+                {r.workflowVersion != null && <span className="agent-activity-ver">v{r.workflowVersion}</span>}
                 <Ic.ChevronRight size={12} />
               </li>
             ))}

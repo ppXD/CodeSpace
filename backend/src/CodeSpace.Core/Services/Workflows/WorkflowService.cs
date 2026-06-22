@@ -827,7 +827,7 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
         return await _db.WorkflowRun
             .Where(r => r.WorkflowId == workflowId)
             .OrderByDescending(r => r.CreatedDate).ThenByDescending(r => r.Id)
-            .Take(Math.Clamp(limit, 1, MaxRunsPageSize))
+            .Take(limit)
             .Select(ToSummaryExpr)
             .ToListAsync(cancellationToken).ConfigureAwait(false);
     }

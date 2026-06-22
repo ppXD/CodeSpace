@@ -125,6 +125,36 @@ public class TeamRunsIndexFlowTests
     }
 
     [Fact]
+    public async Task Keyset_splits_a_created_date_tie_across_a_page_boundary_without_skip_or_dupe()
+    {
+        var (teamA, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+
+        // FOUR rows share ONE created_date, plus one older row. With page size 2 the first boundary lands INSIDE the
+        // tie group, so page 2 can only be selected by the cursor's (created_date == c.created_date && id < c.id)
+        // tiebreaker branch — proving the id comparison runs in Postgres uuid order (the order the index + ORDER BY
+        // use). If it translated to .NET Guid order instead, page 2 would skip/dupe a tied row and walked != canonical.
+        var sameInstant = DateTimeOffset.UtcNow;
+        for (var i = 0; i < 4; i++)
+            await InsertRunAsync(teamA, parentRunId: null, createdDate: sameInstant, workflowId: null);
+        await InsertRunAsync(teamA, parentRunId: null, createdDate: sameInstant.AddMinutes(-1), workflowId: null);
+
+        var canonical = (await ListAsync(teamA, 50)).Select(r => r.Id).ToList();
+        canonical.Count.ShouldBe(5);
+
+        var walked = new List<Guid>();
+        string? cursor = null;
+        do
+        {
+            var page = await PageAsync(teamA, cursor, 2);   // boundary falls between tied rows 2 and 3
+            walked.AddRange(page.Items.Select(r => r.Id));
+            cursor = page.NextCursor;
+        } while (cursor != null);
+
+        walked.ShouldBe(canonical, "paging through a created_date tie group must reproduce the exact id-DESC order — the in-tie page boundary is decided solely by the cursor's id tiebreaker");
+        walked.Distinct().Count().ShouldBe(5, "no row may appear on two pages across the in-tie boundary");
+    }
+
+    [Fact]
     public async Task A_full_last_page_still_reports_no_next_cursor()
     {
         var (teamA, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);

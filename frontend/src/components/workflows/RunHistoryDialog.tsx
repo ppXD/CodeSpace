@@ -49,7 +49,7 @@ export function RunHistoryDialog({ workflowId, onPick, onClose }: { workflowId: 
                   <span className="wf-run-hist-id">{r.id.slice(0, 8)}</span>
                   <span className="wf-run-hist-src">{r.sourceType}</span>
                   <span className="wf-run-hist-time">{r.startedAt ? new Date(r.startedAt).toLocaleString() : "—"}</span>
-                  <span className="wf-run-hist-ver">v{r.workflowVersion}</span>
+                  {r.workflowVersion != null && <span className="wf-run-hist-ver">v{r.workflowVersion}</span>}
                   <Ic.ChevronRight size={12} />
                 </li>
               ))}
