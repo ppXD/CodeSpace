@@ -66,7 +66,7 @@ public sealed class DurableLaunchEgressE2ETests
     }
 
     /// <summary>The netns name the durable launch derives for <paramref name="runKey"/> — reconstructed via the same pure plan builder the launch uses, so the assertion can't drift from the production name.</summary>
-    private static string NamespaceOf(string runKey) => FilteredEgressPlan.Build(runKey, Array.Empty<string>()).Namespace;
+    private static string NamespaceOf(string runKey) => FilteredEgressPlan.NamespaceFor(runKey);
 
     /// <summary>True when <paramref name="ns"/> is still a live network namespace (parsing <c>ip netns list</c>), used to assert teardown actually removed it.</summary>
     private static async Task<bool> NetnsExistsAsync(string ns)

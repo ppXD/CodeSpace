@@ -12,23 +12,47 @@ namespace CodeSpace.UnitTests.Workflows;
 [Trait("Category", "Unit")]
 public class FilteredEgressPlanTests
 {
+    // A fixed reserved /30 — the collision-FREE allocation is EgressSubnetAllocator's job (pinned separately); these
+    // tests pin the plan SHAPE given a lease.
+    private static readonly EgressSubnetAllocator.Lease Subnet = new() { Cidr = "10.5.7.16/30", HostIp = "10.5.7.17", NsIp = "10.5.7.18" };
+
     [Fact]
     public void Names_are_run_unique_and_consistent_across_the_plan()
     {
-        var a = FilteredEgressPlan.Build("run-aaaa1111", new[] { "1.1.1.1" });
-        var b = FilteredEgressPlan.Build("run-bbbb2222", new[] { "1.1.1.1" });
+        var a = FilteredEgressPlan.Build("run-aaaa1111", new[] { "1.1.1.1" }, Subnet);
+        var b = FilteredEgressPlan.Build("run-bbbb2222", new[] { "1.1.1.1" }, Subnet);
 
         a.Namespace.ShouldNotBe(b.Namespace, "distinct runs get distinct netns names — no collision on the shared kernel");
-        a.NsSubnetCidr.ShouldNotBe(b.NsSubnetCidr, "and distinct subnets");
         a.ExecPrefix.ShouldBe(new[] { "ip", "netns", "exec", a.Namespace }, "the command runs inside this run's netns");
         a.TeardownCommands.ShouldContain(c => c.SequenceEqual(new[] { "ip", "netns", "del", a.Namespace }), "teardown deletes the netns");
         a.TeardownCommands.ShouldContain(c => c.SequenceEqual(new[] { "nft", "delete", "table", "ip", a.Namespace }), "teardown deletes the nft table");
     }
 
     [Fact]
+    public void The_plan_uses_the_reserved_subnet_lease()
+    {
+        var plan = FilteredEgressPlan.Build("run-ffff6666", new[] { "1.1.1.1" }, Subnet);
+
+        plan.NsSubnetCidr.ShouldBe(Subnet.Cidr, "the plan pins the caller-reserved /30, not a self-derived one");
+        plan.HostIp.ShouldBe(Subnet.HostIp);
+        plan.SetupCommands.ShouldContain(c => c.SequenceEqual(new[] { "ip", "netns", "exec", plan.Namespace, "ip", "addr", "add", $"{Subnet.NsIp}/30", "dev", plan.VethNs }), "the netns side gets the lease's ns address");
+    }
+
+    [Fact]
+    public void Teardown_commands_are_reconstructable_from_the_run_id_alone()
+    {
+        // The reaper / crash-resume contract: teardown needs NO setup-time subnet — every name is runId-derived.
+        var fromPlan = FilteredEgressPlan.Build("run-7777", new[] { "1.1.1.1" }, Subnet).TeardownCommands;
+        var fromRunId = FilteredEgressPlan.TeardownCommandsFor("run-7777");
+
+        fromRunId.Select(c => string.Join(' ', c)).ShouldBe(fromPlan.Select(c => string.Join(' ', c)),
+            "TeardownCommandsFor(runId) reproduces the plan's teardown with no subnet/state");
+    }
+
+    [Fact]
     public void The_nft_ruleset_allows_only_the_given_ips_then_drops_the_subnet()
     {
-        var plan = FilteredEgressPlan.Build("run-cccc3333", new[] { "1.1.1.1", "140.82.112.3" });
+        var plan = FilteredEgressPlan.Build("run-cccc3333", new[] { "1.1.1.1", "140.82.112.3" }, Subnet);
         var rs = plan.NftRuleset;
 
         rs.ShouldContain("masquerade", customMessage: "the subnet is NAT'd out (interface-agnostic)");
@@ -43,7 +67,7 @@ public class FilteredEgressPlanTests
     public void With_no_allowed_ips_there_is_no_accept_set_only_dns_then_drop()
     {
         // A degenerate allowlist (no IPs) still produces a valid ruleset: DNS + a scoped drop, no daddr-accept rule.
-        var rs = FilteredEgressPlan.Build("run-dddd4444", Array.Empty<string>()).NftRuleset;
+        var rs = FilteredEgressPlan.Build("run-dddd4444", Array.Empty<string>(), Subnet).NftRuleset;
 
         rs.ShouldNotContain("ip daddr {", customMessage: "no allowed IPs → no daddr accept rule");
         rs.ShouldContain("drop");
@@ -52,7 +76,7 @@ public class FilteredEgressPlanTests
     [Fact]
     public void Setup_creates_the_netns_and_veth_and_default_route()
     {
-        var plan = FilteredEgressPlan.Build("run-eeee5555", new[] { "1.1.1.1" });
+        var plan = FilteredEgressPlan.Build("run-eeee5555", new[] { "1.1.1.1" }, Subnet);
 
         plan.SetupCommands[0].ShouldBe(new[] { "ip", "netns", "add", plan.Namespace }, "the netns is created first");
         plan.SetupCommands.ShouldContain(c => c.Count >= 2 && c[0] == "ip" && c[1] == "link" && c.Contains("veth"), "a veth pair is created");
