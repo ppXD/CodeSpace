@@ -52,10 +52,14 @@ public sealed record RunListFilter
     public bool? HasPendingDecision { get; init; }
 
     /// <summary>
-    /// <c>true</c> = only runs a human should look at NOW (the BROAD attention union — not just suspended), <c>false</c>
-    /// = only runs that don't, null = either. A run needs attention when it has a pending decision, OR is Suspended (any
-    /// wait, incl. approval), OR Failed, OR is active (Pending/Enqueued/Running) but untouched past the stale horizon
-    /// (stuck/no-progress). Distinct from <see cref="HasPendingDecision"/> (that is just the decision component).
+    /// <c>true</c> = only runs a human should act on NOW (the BROAD attention union), <c>false</c> = only runs that
+    /// don't, null = either. A run needs attention when it (a) has a pending decision (<see cref="HasPendingDecision"/>),
+    /// OR (b) is Suspended on a HUMAN-ACTIONABLE wait — Approval / Action (NOT a self-advancing supervisor wait, a
+    /// timer, or a machine wait), OR (c) Failed and UNRESOLVED (no successful replay/rerun), OR (d) is Running but
+    /// genuinely STUCK (started long ago with no recent ledger progress — the reconciler's liveness signal, not the run
+    /// row's audit timestamp). Intentionally broader than the cockpit's client-side <c>suspendedNeedingReview</c>
+    /// (which is Suspended-minus-queued-decision only); a UI wiring this must reconcile card-vs-zone scope rather than
+    /// drop-in replace.
     /// </summary>
     public bool? NeedsAttention { get; init; }
 

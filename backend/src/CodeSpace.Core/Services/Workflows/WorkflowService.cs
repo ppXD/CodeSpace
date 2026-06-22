@@ -11,6 +11,7 @@ using CodeSpace.Core.Services.Workflows.Engine;
 using CodeSpace.Core.Services.Workflows.Nodes;
 using CodeSpace.Core.Services.Workflows.RunSources;
 using CodeSpace.Core.Services.Workflows.Runtime;
+using CodeSpace.Core.Services.Workflows.Reconciliation;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Commands.Workflows;
 using CodeSpace.Messages.Constants;
@@ -890,7 +891,7 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
 
         if (filter.NeedsAttention is { } wantsAttention)
         {
-            var attention = ExpressionPredicate.Or(HasPendingDecisionPredicate(), StaleOrUnhealthyPredicate(DateTimeOffset.UtcNow - StaleActiveAfter));
+            var attention = ExpressionPredicate.Or(HasPendingDecisionPredicate(), NeedsAttentionNonDecisionPredicate(DateTimeOffset.UtcNow));
             query = query.Where(wantsAttention ? attention : ExpressionPredicate.Not(attention));
         }
 
@@ -898,11 +899,28 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
     }
 
     /// <summary>
-    /// A Pending/Enqueued/Running run untouched this long counts as stuck (no progress) → surfaced by NeedsAttention.
-    /// Mirrors <c>StuckRunReconcilerService.RunningStuckAfter</c> — the reconciler would itself flip a no-liveness
-    /// Running run to Failure by this horizon, so the window is conservative (a freshly-running run is never flagged).
+    /// The non-decision components of the broad NeedsAttention union — each a thing a HUMAN must act on:
+    /// <list type="bullet">
+    /// <item>a human-actionable suspend: Suspended on a pending Approval / Action wait. EXCLUDES self-advancing waits
+    ///   (SupervisorDecision / SupervisorAgentWaits) and machine waits (Timer / Callback / Subworkflow / AgentRun) — a
+    ///   supervisor run parked between turns is Suspended but needs no human. (Decision waits are the OTHER half of the
+    ///   union, via <see cref="HasPendingDecisionPredicate"/>.)</item>
+    /// <item>an UNRESOLVED failure: Failed with no successful replay/rerun (a fork stamps <c>parent_run_id</c> at the
+    ///   original, so a successful child means the failure was already resolved).</item>
+    /// <item>a genuinely STUCK running run: started past <c>RunningStuckAfter</c> AND no ledger progress within
+    ///   <c>LedgerLivenessWindow</c> — the reconciler's OWN liveness signal. NOT <c>LastModifiedDate</c>: the lifecycle
+    ///   transitions via <c>ExecuteUpdateAsync</c> and progress is the append-only ledger, neither of which bumps the
+    ///   run row, so its audit timestamp does not track liveness.</item>
+    /// </list>
     /// </summary>
-    private static readonly TimeSpan StaleActiveAfter = TimeSpan.FromMinutes(30);
+    private Expression<Func<WorkflowRun, bool>> NeedsAttentionNonDecisionPredicate(DateTimeOffset now) => r =>
+        (r.Status == WorkflowRunStatus.Suspended
+            && _db.WorkflowRunWait.Any(w => w.RunId == r.Id && w.Status == WorkflowWaitStatuses.Pending
+                && (w.WaitKind == WorkflowWaitKinds.Approval || w.WaitKind == WorkflowWaitKinds.Action)))
+        || (r.Status == WorkflowRunStatus.Failure
+            && !_db.WorkflowRun.Any(child => child.ParentRunId == r.Id && child.Status == WorkflowRunStatus.Success))
+        || (r.Status == WorkflowRunStatus.Running && r.StartedAt < now - StuckRunReconcilerService.RunningStuckAfter
+            && !_db.WorkflowRunRecord.Any(rec => rec.RunId == r.Id && rec.OccurredAt >= now - StuckRunReconcilerService.LedgerLivenessWindow));
 
     /// <summary>
     /// EXISTS a pending decision for the run, on EITHER park backend: a node-grain <c>workflow_run_wait</c> in
