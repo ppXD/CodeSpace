@@ -166,6 +166,67 @@ export interface RunPage {
   nextCursor: string | null;
 }
 
+/**
+ * The generic runs-index filter — the client mirror of the backend's RunListFilter. EVERY field is optional and a
+ * LIST: values within one field are OR'd, fields are AND'd. ONE shape drives every runs surface — a surface supplies
+ * only the dimensions it scopes by (a repo page sets `repositoryIds`, the cockpit's Live card sets `statuses`, the
+ * filter bar sets the entity dimensions). Empty / omitted fields are no constraint.
+ */
+export interface RunListFilterInput {
+  workflowIds?: string[];
+  statuses?: WorkflowRunStatus[];
+  sourceTypes?: string[];
+  /** Coarse origin kind — `workflow` / `task` / `event` / `replay` / `schedule` (see the run_kind GENERATED column). */
+  runKinds?: string[];
+  /** Task projection/coordination mode — `single-agent` / `supervisor`. */
+  projectionKinds?: string[];
+  repositoryIds?: string[];
+  projectIds?: string[];
+  /** Users who launched the run. */
+  actorIds?: string[];
+  /** Agent personas the run used (matches an agent spawned on ANY turn). */
+  agentDefinitionIds?: string[];
+  hasPendingDecision?: boolean;
+  needsAttention?: boolean;
+  /** Inclusive lower / exclusive upper bound on createdDate (ISO 8601). */
+  since?: string;
+  until?: string;
+}
+
+/**
+ * Serialize a runs filter (+ paging) into the query string the runs index binds. Each list field emits one repeated
+ * param per value (`repositoryIds=a&repositoryIds=b`); booleans/dates emit one param; empty / undefined fields are
+ * omitted so the URL — and the React Query cache key derived from it — stays canonical (equivalent filters serialize
+ * identically). Field order is fixed, so a given filter always produces the same string.
+ */
+export function buildRunListParams(filter: RunListFilterInput | undefined, limit: number, cursor?: string): string {
+  const p = new URLSearchParams();
+  p.set("limit", String(limit));
+  if (cursor) p.set("cursor", cursor);
+
+  if (filter) {
+    const lists: [string, readonly string[] | undefined][] = [
+      ["workflowIds", filter.workflowIds],
+      ["statuses", filter.statuses],
+      ["sourceTypes", filter.sourceTypes],
+      ["runKinds", filter.runKinds],
+      ["projectionKinds", filter.projectionKinds],
+      ["repositoryIds", filter.repositoryIds],
+      ["projectIds", filter.projectIds],
+      ["actorIds", filter.actorIds],
+      ["agentDefinitionIds", filter.agentDefinitionIds],
+    ];
+    for (const [key, values] of lists) for (const v of values ?? []) p.append(key, v);
+
+    if (filter.hasPendingDecision !== undefined) p.set("hasPendingDecision", String(filter.hasPendingDecision));
+    if (filter.needsAttention !== undefined) p.set("needsAttention", String(filter.needsAttention));
+    if (filter.since) p.set("since", filter.since);
+    if (filter.until) p.set("until", filter.until);
+  }
+
+  return p.toString();
+}
+
 export interface WorkflowRunNodeSummary {
   nodeId: string;
   iterationKey: string;
@@ -400,9 +461,9 @@ export const workflowsApi = {
   listRuns: (workflowId: string, limit = 50) =>
     fetchJson<WorkflowRunSummary[]>(`/api/workflows/${workflowId}/runs?limit=${limit}`),
 
-  /** The team's runs index — every top-level run the team owns (any source), newest first; keyset-paginated. */
-  listTeamRuns: (limit = 50, cursor?: string) =>
-    fetchJson<RunPage>(`/api/workflows/runs?limit=${limit}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`),
+  /** The team's runs index — every top-level run the team owns (any source), newest first; keyset-paginated + filterable. */
+  listTeamRuns: (filter?: RunListFilterInput, limit = 50, cursor?: string) =>
+    fetchJson<RunPage>(`/api/workflows/runs?${buildRunListParams(filter, limit, cursor)}`),
 
   getRun: (runId: string) => fetchJson<WorkflowRunDetail>(`/api/workflows/runs/${runId}`),
 

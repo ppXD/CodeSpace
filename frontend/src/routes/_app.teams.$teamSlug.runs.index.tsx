@@ -2,9 +2,10 @@ import { useEffect, useState } from "react";
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
 
 import { ApiError } from "@/api/request";
-import type { RunPhasesResponse } from "@/api/workflows";
+import type { RunListFilterInput, RunPhasesResponse } from "@/api/workflows";
 import { CockpitBoard } from "@/components/workflows/CockpitBoard";
 import { CockpitCards, type CockpitMetrics } from "@/components/workflows/CockpitCards";
+import { RunFilterBar } from "@/components/workflows/RunFilterBar";
 import { countRuns, summarizeDecisions, summarizeToday, suspendedNeedingReview, type CockpitFilter } from "@/components/workflows/cockpit";
 import { summarizeRunState } from "@/components/workflows/runPhases";
 import { bucketRuns } from "@/components/workflows/runsIndex";
@@ -22,9 +23,13 @@ export const Route = createFileRoute("/_app/teams/$teamSlug/runs/")({
 function TeamRunsPage() {
   const { teamSlug } = Route.useParams();
   const navigate = useNavigate();
-  const runs = useTeamRuns();
+  // The bar's server-side scope filter (which kind / repo / project / actor / agent); the cards below are the
+  // orthogonal client-side status/time lens over whatever this scope returns.
+  const [scope, setScope] = useState<RunListFilterInput>({});
+  const runs = useTeamRuns(scope);
   const decisions = usePendingDecisions();
   const [filter, setFilter] = useState<CockpitFilter>(null);
+  const hasScope = Object.values(scope).some((v) => (Array.isArray(v) ? v.length > 0 : v != null));
 
   // A slow clock so the relative ages ("oldest 14m", "waiting 2d") and today's window stay fresh without churning.
   const [nowMs, setNowMs] = useState(() => Date.now());
@@ -76,17 +81,28 @@ function TeamRunsPage() {
           </div>
         )}
 
-        {!runs.isLoading && !runs.error && runList.length === 0 && (
-          <div className="ct-empty">
-            <div className="ct-empty-h">No runs yet</div>
-            <div className="ct-empty-p">Launch a task or run a workflow and it'll show up here.</div>
+        {!runs.isLoading && !runs.error && (runList.length > 0 || hasScope) && (
+          <div className="cockpit">
+            <RunFilterBar filter={scope} onChange={setScope} />
+
+            {runList.length === 0 ? (
+              <div className="ct-empty">
+                <div className="ct-empty-h">No runs match these filters</div>
+                <div className="ct-empty-p">Adjust or clear the filters above to see more runs.</div>
+              </div>
+            ) : (
+              <>
+                <CockpitCards metrics={metrics} filter={filter} onFilter={toggleFilter} />
+                <CockpitBoard runs={runList} decisions={decisionList} phasesByRun={phasesByRun} filter={filter} nowMs={nowMs} onOpen={openRun} />
+              </>
+            )}
           </div>
         )}
 
-        {!runs.isLoading && !runs.error && runList.length > 0 && (
-          <div className="cockpit">
-            <CockpitCards metrics={metrics} filter={filter} onFilter={toggleFilter} />
-            <CockpitBoard runs={runList} decisions={decisionList} phasesByRun={phasesByRun} filter={filter} nowMs={nowMs} onOpen={openRun} />
+        {!runs.isLoading && !runs.error && runList.length === 0 && !hasScope && (
+          <div className="ct-empty">
+            <div className="ct-empty-h">No runs yet</div>
+            <div className="ct-empty-p">Launch a task or run a workflow and it'll show up here.</div>
           </div>
         )}
       </div>
