@@ -41,6 +41,9 @@ public sealed record ListTeamRunsQuery : IQuery<RunPage>, IRequireTeamMembership
     /// <summary>Only task runs of any of these projection modes; bind <c>?projectionKinds=supervisor</c>. Omit for any.</summary>
     public IReadOnlyList<string>? ProjectionKinds { get; init; }
 
+    /// <summary>Only runs that used any of these agent personas; bind <c>?agentDefinitionIds=&lt;id&gt;</c>. Omit for any.</summary>
+    public IReadOnlyList<Guid>? AgentDefinitionIds { get; init; }
+
     /// <summary>Only runs with (<c>true</c>) / without (<c>false</c>) a pending decision; omit for either.</summary>
     public bool? HasPendingDecision { get; init; }
 
@@ -69,6 +72,7 @@ public sealed record ListTeamRunsQuery : IQuery<RunPage>, IRequireTeamMembership
         ActorIds = ActorIds,
         RunKinds = RunKinds,
         ProjectionKinds = ProjectionKinds,
+        AgentDefinitionIds = AgentDefinitionIds,
         HasPendingDecision = HasPendingDecision,
         NeedsAttention = NeedsAttention,
         Since = Since,

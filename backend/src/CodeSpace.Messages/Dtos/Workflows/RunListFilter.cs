@@ -62,6 +62,13 @@ public sealed record RunListFilter
     public IReadOnlyList<string>? ProjectionKinds { get; init; }
 
     /// <summary>
+    /// Only runs that USED any of these agent personas (an EXISTS over the run's agent runs, OR-within). The agent set
+    /// is runtime-evolving (the supervisor spawns agents per turn), so this is NOT a launch-time run column — it matches
+    /// any agent run the run spawned. A raw-harness agent (no persona) is not matched. Null / empty = any.
+    /// </summary>
+    public IReadOnlyList<Guid>? AgentDefinitionIds { get; init; }
+
+    /// <summary>
     /// <c>true</c> = only runs with a PENDING decision (a parked decision the run is waiting on a human/policy to
     /// answer), <c>false</c> = only runs WITHOUT one, null = either. Narrower than <c>Suspended</c>: a run parked on a
     /// Timer/Action wait is Suspended but has no pending decision, and an agent-grain decision parks the agent without

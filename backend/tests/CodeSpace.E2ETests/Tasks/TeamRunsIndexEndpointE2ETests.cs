@@ -112,6 +112,11 @@ public sealed class TeamRunsIndexEndpointE2ETests : IClassFixture<TaskLaunchApiF
         var byKind = await SendAsync(HttpMethod.Get, "/api/workflows/runs?runKinds=workflow", userId, teamId);
         byKind.StatusCode.ShouldBe(HttpStatusCode.OK, customMessage: await DescribeFailureAsync(byKind));
         (await byKind.Content.ReadFromJsonAsync<RunPage>())!.Items.ShouldNotContain(r => r.Id == runId, "runKinds binds and excludes a task run from a workflow-kind filter");
+
+        // ?agentDefinitionIds= binds (the EXISTS path): the run used no agent of this random persona, so it's excluded.
+        var byAgent = await SendAsync(HttpMethod.Get, $"/api/workflows/runs?agentDefinitionIds={Guid.NewGuid()}", userId, teamId);
+        byAgent.StatusCode.ShouldBe(HttpStatusCode.OK, customMessage: await DescribeFailureAsync(byAgent));
+        (await byAgent.Content.ReadFromJsonAsync<RunPage>())!.Items.ShouldNotContain(r => r.Id == runId, "agentDefinitionIds binds and excludes a run that used no agent of that persona");
     }
 
     [Fact]

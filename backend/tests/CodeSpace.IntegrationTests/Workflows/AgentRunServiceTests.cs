@@ -1479,6 +1479,20 @@ public class AgentRunServiceTests
             .CountAsync(r => r.TeamId == teamId && (r.Status == AgentRunStatus.Queued || r.Status == AgentRunStatus.Running));
     }
 
+    [Fact]
+    public async Task CreateAsync_promotes_the_tasks_agent_definition_id_onto_the_run()
+    {
+        var teamId = await SeedTeamAsync();
+        var agentDefinitionId = Guid.NewGuid();
+
+        using var scope = _fixture.BeginScope();
+        var run = await scope.Resolve<IAgentRunService>().CreateAsync(
+            BuildTask() with { AgentDefinitionId = agentDefinitionId }, teamId, null, null, iterationKey: "", cancellationToken: CancellationToken.None);
+
+        run.AgentDefinitionId.ShouldBe(agentDefinitionId,
+            customMessage: "the persona is promoted from the task onto the agent_run column at creation — the key the runs index filters by");
+    }
+
     private static AgentTask BuildTask(string goal = "Fix the failing billing tests") =>
         new() { Goal = goal, Harness = "codex-cli", Model = "gpt-5.3-codex" };
 
