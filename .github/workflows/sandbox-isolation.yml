@@ -55,12 +55,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install bubblewrap + util-linux (prlimit)
+      - name: Install bubblewrap + util-linux (prlimit) + iproute2/nftables (egress filter) + curl
         run: |
           apt-get update
-          apt-get install -y --no-install-recommends bubblewrap util-linux ca-certificates
+          apt-get install -y --no-install-recommends bubblewrap util-linux ca-certificates iproute2 nftables curl
           echo "bwrap: $(bwrap --version)"
           echo "prlimit: $(prlimit --version)"
+          echo "ip: $(ip -Version)"
+          echo "nft: $(nft --version)"
 
       - name: Probe — unprivileged user namespaces (informational)
         # Informational only: the authoritative gate is the test step below (REQUIRE_SANDBOX=1 → hard
@@ -103,8 +105,8 @@ jobs:
           executed=$(grep -oE 'executed="[0-9]+"' "$trx" | head -1 | grep -oE '[0-9]+')
           passed=$(grep -oE 'passed="[0-9]+"' "$trx" | head -1 | grep -oE '[0-9]+')
           echo "executed=${executed:-0} passed=${passed:-0}"
-          if [ "${executed:-0}" -lt 4 ]; then
-            echo "::error::Expected >=4 sandbox isolation tests to run, but only ${executed:-0} did — the Category=Sandbox filter matched too few (trait regression?)."
+          if [ "${executed:-0}" -lt 5 ]; then
+            echo "::error::Expected >=5 sandbox isolation tests to run (4 bwrap/prlimit confinement + 1 egress-allowlist filter), but only ${executed:-0} did — the Category=Sandbox filter matched too few (trait regression?)."
             exit 1
           fi
 
