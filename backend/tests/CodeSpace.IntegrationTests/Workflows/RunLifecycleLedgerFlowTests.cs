@@ -214,6 +214,7 @@ public class RunLifecycleLedgerFlowTests
             WorkflowVersion = original.WorkflowVersion,
             TeamId = original.TeamId,
             RunRequestId = replayRequestId,
+            SourceType = WorkflowRunSourceTypes.Replay,
             ReleaseHashAtRun = original.ReleaseHashAtRun,
             ParentRunId = originalRunId,
             // See the matching comment in WorkflowRunReplayFlowTests.StageReplayAsync.

@@ -79,13 +79,14 @@ public class TeamRunsIndexFlowTests
 
         var requestId = Guid.NewGuid();
         var runId = Guid.NewGuid();
+        var resolvedSource = sourceType ?? (workflowId == null ? WorkflowRunSourceTypes.Snapshot : WorkflowRunSourceTypes.Manual);
 
         db.WorkflowRunRequest.Add(new WorkflowRunRequest
         {
             Id = requestId,
             TeamId = teamId,
             WorkflowId = workflowId,
-            SourceType = sourceType ?? (workflowId == null ? WorkflowRunSourceTypes.Snapshot : WorkflowRunSourceTypes.Manual),
+            SourceType = resolvedSource,
             ActorType = "user",
             ActorId = SystemUsers.SeederId,
             NormalizedPayloadJson = "{}",
@@ -102,6 +103,7 @@ public class TeamRunsIndexFlowTests
             WorkflowVersion = workflowId == null ? null : 1,
             TeamId = teamId,
             RunRequestId = requestId,
+            SourceType = resolvedSource,   // denorm mirrors the request — the team index now excludes children by THIS column
             ParentRunId = parentRunId,
             Status = WorkflowRunStatus.Enqueued,
             CreatedDate = createdDate,   // explicit → the audit interceptor leaves it (it only stamps a default value)

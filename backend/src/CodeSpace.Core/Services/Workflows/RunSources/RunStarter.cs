@@ -78,6 +78,7 @@ public sealed class RunStarter : IRunStarter, IScopedDependency
             WorkflowVersion = envelope.WorkflowVersion,
             TeamId = envelope.TeamId,
             RunRequestId = requestId,
+            SourceType = envelope.SourceType,
             ReleaseHashAtRun = envelope.ReleaseHashAtRun ?? string.Empty,
             ParentRunId = envelope.ParentRunId,
             Status = WorkflowRunStatus.Pending,

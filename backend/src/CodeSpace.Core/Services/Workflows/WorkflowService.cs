@@ -821,7 +821,6 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
         await EnsureWorkflowVisibleAsync(workflowId, teamId, cancellationToken).ConfigureAwait(false);
 
         var rows = await _db.WorkflowRun
-            .Include(r => r.RunRequest)
             .Where(r => r.WorkflowId == workflowId)
             .OrderByDescending(r => r.CreatedDate)
             .Take(limit)
@@ -838,8 +837,7 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
         // runs are a separate entity, never WorkflowRun rows. TeamId is on the run directly, so snapshot / task runs
         // (null WorkflowId) are included.
         var rows = await _db.WorkflowRun
-            .Include(r => r.RunRequest)
-            .Where(r => r.TeamId == teamId && r.RunRequest.SourceType != WorkflowRunSourceTypes.ChildWorkflow)
+            .Where(r => r.TeamId == teamId && r.SourceType != WorkflowRunSourceTypes.ChildWorkflow)
             .OrderByDescending(r => r.CreatedDate)
             .Take(limit)
             .ToListAsync(cancellationToken).ConfigureAwait(false);
@@ -852,7 +850,7 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
         Id = r.Id,
         WorkflowId = r.WorkflowId,
         WorkflowVersion = r.WorkflowVersion,
-        SourceType = r.RunRequest?.SourceType ?? string.Empty,
+        SourceType = r.SourceType,
         Status = r.Status,
         Error = r.Error,
         StartedAt = r.StartedAt,

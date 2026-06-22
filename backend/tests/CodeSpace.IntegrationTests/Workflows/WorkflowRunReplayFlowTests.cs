@@ -412,6 +412,7 @@ public class WorkflowRunReplayFlowTests
             WorkflowVersion = original.WorkflowVersion,
             TeamId = original.TeamId,
             RunRequestId = replayRequestId,
+            SourceType = WorkflowRunSourceTypes.Replay,
             ReleaseHashAtRun = original.ReleaseHashAtRun,
             ParentRunId = originalRunId,
             // Seed directly in Enqueued state. The replay staging in this helper skips the

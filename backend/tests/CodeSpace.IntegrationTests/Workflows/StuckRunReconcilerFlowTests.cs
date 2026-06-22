@@ -610,6 +610,7 @@ public class StuckRunReconcilerFlowTests
             WorkflowVersion = 1,
             TeamId = teamId,
             RunRequestId = requestId,
+            SourceType = WorkflowRunSourceTypes.Manual,
             Status = status,
             // Phase 3.0 hardening — Enqueued status now requires EnqueuedAt to be set
             // (the dispatcher's CAS stamps it; the reconciler's stuck-Enqueued sweep

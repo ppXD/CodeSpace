@@ -399,6 +399,7 @@ public class NoDoubleExecutionFlowTests
             WorkflowVersion = 1,
             TeamId = teamId,
             RunRequestId = requestId,
+            SourceType = WorkflowRunSourceTypes.Manual,
             Status = WorkflowRunStatus.Pending,
             CreatedBy = SystemUsers.SeederId,
             LastModifiedBy = SystemUsers.SeederId,
