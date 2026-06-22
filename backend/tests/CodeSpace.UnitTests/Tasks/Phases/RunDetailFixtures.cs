@@ -15,6 +15,7 @@ internal static class RunDetailFixtures
         SourceType = "test",
         NormalizedPayload = EmptyObject,
         Status = status,
+        CreatedDate = DateTimeOffset.UtcNow,
         Nodes = nodes,
         Outputs = EmptyObject,
     };
