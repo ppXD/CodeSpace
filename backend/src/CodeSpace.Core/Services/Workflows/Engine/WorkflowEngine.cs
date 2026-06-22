@@ -2571,7 +2571,7 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
         for (var attempt = 1; attempt <= plan.MaxAttempts; attempt++)
         {
             var attemptStartedAt = DateTimeOffset.UtcNow;
-            var (result, thrownError) = await RunNodeOnceAsync(exec, cancellationToken).ConfigureAwait(false);
+            var (result, thrown) = await RunNodeOnceAsync(exec, cancellationToken).ConfigureAwait(false);
 
             // A suspend parks the run by design — never a failure, never retried. A sub-workflow
             // suspend stages its child here; if the child can't be started, that's a clean node
@@ -2600,13 +2600,17 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
             if (result != null && result.Status != NodeStatus.Failure)
                 return await FinalizeNonFailureAsync(exec, result, cancellationToken).ConfigureAwait(false);
 
-            // Genuine failure (returned Fail or threw). Retry while attempts remain, else finalise.
-            lastError = result?.Error ?? thrownError ?? lastError;
+            // Genuine failure (returned Fail or threw). A TERMINAL fault (a typed non-retryable exception, or a node that
+            // marked its Fail non-retryable) fails fast — never burn the remaining attempts with backoff on an auth /
+            // bad-request / content-length error. A retryable fault that carries a provider Retry-After uses it as the
+            // next attempt's backoff (clamped). Everything else retries per the node plan (unchanged).
+            var (retryable, retryAfter) = ClassifyFailure(thrown);
+            lastError = result?.Error ?? thrown?.Message ?? lastError;
 
-            if (attempt == plan.MaxAttempts)
+            if (!retryable || attempt == plan.MaxAttempts)
                 return await FinalizeFailureAsync(exec, lastError, cancellationToken).ConfigureAwait(false);
 
-            await LogRetryAndWaitAsync(exec, attempt, plan, lastError, attemptStartedAt, cancellationToken).ConfigureAwait(false);
+            await LogRetryAndWaitAsync(exec, attempt, plan, lastError, attemptStartedAt, retryAfter, cancellationToken).ConfigureAwait(false);
         }
 
         // Defensive: the loop always returns on its final attempt.
@@ -2654,7 +2658,7 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
     /// a cancel stops the run, and a leak is a contract violation that must surface its detailed
     /// message (the loop would otherwise mask it as a generic node failure).
     /// </summary>
-    private async Task<(NodeResult? Result, string? Error)> RunNodeOnceAsync(NodeExecution exec, CancellationToken cancellationToken)
+    private async Task<(NodeResult? Result, Exception? Thrown)> RunNodeOnceAsync(NodeExecution exec, CancellationToken cancellationToken)
     {
         try
         {
@@ -2667,8 +2671,17 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
         catch (Exception ex)
         {
             _logger.LogError(ex, "Node {NodeId} threw unhandled exception", exec.Node.Id);
-            return (null, ex.Message);
+            return (null, ex);   // the EXCEPTION (not just its message) so the retry loop can classify a typed retryable-vs-terminal fault
         }
+    }
+
+    /// <summary>Decide whether a node failure should be RETRIED and any provider backoff. A thrown <see cref="IRetryClassifiedException"/> anywhere in the chain (e.g. an LLM auth/rate-limit fault that propagated from the llm.complete node, the supervisor decider, or a flow.map branch) is authoritative; everything else retries per the node plan (the prior status-blind default). Internal (not private) so the classification is unit-pinned directly via InternalsVisibleTo.</summary>
+    internal static (bool Retryable, TimeSpan? RetryAfter) ClassifyFailure(Exception? thrown)
+    {
+        for (var e = thrown; e is not null; e = e.InnerException)
+            if (e is IRetryClassifiedException c) return (c.IsRetryable, c.RetryAfter);
+
+        return (true, null);
     }
 
     /// <summary>
@@ -2721,21 +2734,28 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
     /// retry story — then await the bounded backoff. Cancelling during the wait throws
     /// OperationCanceledException, which propagates to the run-level cancel handler.
     /// </summary>
-    private async Task LogRetryAndWaitAsync(NodeExecution exec, int attempt, RetryPlan plan, string error, DateTimeOffset attemptStartedAt, CancellationToken cancellationToken)
+    /// <summary>A provider Retry-After is honored as the backoff but CLAMPED to this ceiling — a gateway sending a huge value (e.g. 3600s) must not wedge the run; past this the attempt still waits the cap and a later attempt / the error branch handles a persistent limit.</summary>
+    private const double RetryAfterCapSeconds = 60;
+
+    private async Task LogRetryAndWaitAsync(NodeExecution exec, int attempt, RetryPlan plan, string error, DateTimeOffset attemptStartedAt, TimeSpan? retryAfter, CancellationToken cancellationToken)
     {
+        // A provider Retry-After (a 429/503) overrides the plan's backoff for THIS attempt, clamped to a sane ceiling.
+        var delay = retryAfter is { } ra ? TimeSpan.FromSeconds(Math.Min(ra.TotalSeconds, RetryAfterCapSeconds)) : plan.Delay;
+        var delaySeconds = delay.TotalSeconds;
+
         // Durable, queryable record of THIS failed attempt — chained to the node.started row (parent_record_id),
         // carrying the attempt index, the full per-attempt error, how long it ran, and the backoff before the next
         // try. This is the structured retry history (reconstructable from the DB), keyed to the node's iteration
         // so a map-branch / loop-iteration retry is addressable. The Warn line below stays for the live timeline.
-        await _recordLogger.AttemptFailedAsync(exec.Run.Id, exec.Node.Id, exec.IterationKey, attempt, plan.MaxAttempts, error, DateTimeOffset.UtcNow - attemptStartedAt, plan.BackoffSeconds, exec.ParentRecordId, cancellationToken).ConfigureAwait(false);
+        await _recordLogger.AttemptFailedAsync(exec.Run.Id, exec.Node.Id, exec.IterationKey, attempt, plan.MaxAttempts, error, DateTimeOffset.UtcNow - attemptStartedAt, delaySeconds, exec.ParentRecordId, cancellationToken).ConfigureAwait(false);
 
-        var waitHint = plan.BackoffSeconds > 0 ? $" Retrying in {plan.BackoffSeconds:0.##}s." : " Retrying now.";
+        var waitHint = delaySeconds > 0 ? $" Retrying in {delaySeconds:0.##}s." : " Retrying now.";
         var message = $"Attempt {attempt}/{plan.MaxAttempts} failed: {Truncate(error, 200)}.{waitHint}";
 
         await _recordLogger.LogAsync(exec.Run.Id, exec.Node.Id, Lifecycle.LogLevel.Warn, message, cancellationToken).ConfigureAwait(false);
 
-        if (plan.Delay > TimeSpan.Zero)
-            await Task.Delay(plan.Delay, cancellationToken).ConfigureAwait(false);
+        if (delay > TimeSpan.Zero)
+            await Task.Delay(delay, cancellationToken).ConfigureAwait(false);
     }
 
     private static string Truncate(string value, int max) => value.Length <= max ? value : value[..max] + "…";

@@ -39,7 +39,7 @@ public enum LlmErrorCategory
 /// timeout, or an unparseable body — NEVER by pre-flight config checks (a missing key stays an
 /// <see cref="InvalidOperationException"/>), and NEVER for a 2xx-with-no-structured-output content failure.
 /// </summary>
-public sealed class LlmApiException : Exception
+public sealed class LlmApiException : Exception, IRetryClassifiedException
 {
     public LlmApiException(string provider, int? statusCode, LlmErrorCategory category, string providerMessage, TimeSpan? retryAfter = null, Exception? inner = null)
         : base(BuildMessage(provider, statusCode, category, providerMessage), inner)

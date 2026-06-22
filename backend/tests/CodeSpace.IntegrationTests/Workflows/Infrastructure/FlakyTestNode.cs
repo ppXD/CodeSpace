@@ -49,15 +49,29 @@ public sealed class FlakyTestNode : INodeRuntime
     {
         var key = ReadString(context.Config, "key");
         var failTimes = ReadInt(context.Config, "failTimes");
+        var throwCategory = ReadString(context.Config, "throwCategory");   // ""=Fail-result; "auth-failed"/"transient"=THROW a typed LlmApiException
 
         var attempt = AttemptsByKey.AddOrUpdate(key, 1, (_, n) => n + 1);
 
         if (attempt <= failTimes)
+        {
+            // A typed THROW lets a test prove the engine's retry CLASSIFICATION: a non-retryable category fails fast
+            // (one attempt), a retryable one retries. An empty throwCategory keeps the original Fail-result behaviour.
+            if (throwCategory.Length > 0) throw TypedFault(throwCategory, attempt);
+
             return Task.FromResult(NodeResult.Fail($"flaky failure on attempt {attempt}"));
+        }
 
         var outputs = new Dictionary<string, JsonElement> { ["attempts"] = JsonSerializer.SerializeToElement(attempt) };
         return Task.FromResult(NodeResult.Ok(outputs));
     }
+
+    private static CodeSpace.Core.Services.Workflows.Llm.LlmApiException TypedFault(string category, int attempt) => category switch
+    {
+        "auth-failed" => new("Anthropic", 401, CodeSpace.Core.Services.Workflows.Llm.LlmErrorCategory.AuthFailed, $"auth failed on attempt {attempt}"),
+        "transient" => new("Anthropic", 503, CodeSpace.Core.Services.Workflows.Llm.LlmErrorCategory.Transient, $"transient on attempt {attempt}"),
+        _ => new("Anthropic", 400, CodeSpace.Core.Services.Workflows.Llm.LlmErrorCategory.BadRequest, $"bad request on attempt {attempt}"),
+    };
 
     private static string ReadString(IReadOnlyDictionary<string, JsonElement> bag, string name) =>
         bag.TryGetValue(name, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() ?? "" : "";
