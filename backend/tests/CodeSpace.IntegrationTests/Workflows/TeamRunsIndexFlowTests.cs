@@ -319,6 +319,34 @@ public class TeamRunsIndexFlowTests
     }
 
     [Fact]
+    public async Task Filters_by_repository_and_project_scope_with_array_overlap()
+    {
+        var (teamA, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+
+        Guid repoA = Guid.NewGuid(), repoB = Guid.NewGuid(), repoC = Guid.NewGuid();
+        Guid projP = Guid.NewGuid(), projQ = Guid.NewGuid();
+        var t = DateTimeOffset.UtcNow;
+
+        // a MULTI-repo run touching {A,B} in project P, a single-repo {C} in project Q, and a no-scope run.
+        var multiRepo = await InsertRunAsync(teamA, null, t, workflowId: null, repositoryIds: [repoA, repoB], projectIds: [projP]);
+        var singleRepo = await InsertRunAsync(teamA, null, t.AddMinutes(-1), workflowId: null, repositoryIds: [repoC], projectIds: [projQ]);
+        await InsertRunAsync(teamA, null, t.AddMinutes(-2), workflowId: null);   // no scope → matches no repo/project filter
+
+        (await FilterAsync(teamA, new RunListFilter { RepositoryIds = [repoB] }))
+            .Select(r => r.Id).ShouldBe(new[] { multiRepo }, "a run whose multi-repo scope CONTAINS the filtered repo matches (array overlap)");
+
+        (await FilterAsync(teamA, new RunListFilter { RepositoryIds = [repoA, repoC] }))
+            .Select(r => r.Id).ShouldBe(new[] { multiRepo, singleRepo }, ignoreOrder: true,
+                customMessage: "repo ids are OR'd (array overlap &&) — a run touching ANY listed repo matches");
+
+        (await FilterAsync(teamA, new RunListFilter { ProjectIds = [projQ] }))
+            .Select(r => r.Id).ShouldBe(new[] { singleRepo }, "project scope filters the same way");
+
+        (await FilterAsync(teamA, new RunListFilter { RepositoryIds = [Guid.NewGuid()] }))
+            .ShouldBeEmpty("an unrelated repo matches nothing");
+    }
+
+    [Fact]
     public async Task HasPendingDecision_matches_node_and_agent_grain_and_is_narrower_than_suspended()
     {
         var (teamA, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
@@ -410,7 +438,7 @@ public class TeamRunsIndexFlowTests
         return page.Items;
     }
 
-    private async Task<Guid> InsertRunAsync(Guid teamId, Guid? parentRunId, DateTimeOffset createdDate, Guid? workflowId, string? sourceType = null, WorkflowRunStatus status = WorkflowRunStatus.Enqueued, DateTimeOffset? startedAt = null)
+    private async Task<Guid> InsertRunAsync(Guid teamId, Guid? parentRunId, DateTimeOffset createdDate, Guid? workflowId, string? sourceType = null, WorkflowRunStatus status = WorkflowRunStatus.Enqueued, DateTimeOffset? startedAt = null, List<Guid>? repositoryIds = null, List<Guid>? projectIds = null)
     {
         using var scope = _fixture.BeginScope();
         var db = scope.Resolve<CodeSpaceDbContext>();
@@ -445,6 +473,8 @@ public class TeamRunsIndexFlowTests
             ParentRunId = parentRunId,
             Status = status,
             StartedAt = startedAt,   // set for a "stuck running" run — NeedsAttention's running-stale branch reads StartedAt (not the audit timestamp)
+            ScopeRepositoryIds = repositoryIds ?? [],
+            ScopeProjectIds = projectIds ?? [],
             CreatedDate = createdDate,   // explicit → the audit interceptor leaves it (it only stamps a default value)
             CreatedBy = SystemUsers.SeederId,
             LastModifiedBy = SystemUsers.SeederId,

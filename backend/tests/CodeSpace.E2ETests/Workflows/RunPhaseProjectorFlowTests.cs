@@ -377,7 +377,7 @@ public class RunPhaseProjectorFlowTests : IDisposable
 
         var definition = RetargetPlannerToFake(scope.Resolve<ITaskProjectionRegistry>().Resolve(route.ProjectionKind).Build(context));
 
-        return await scope.Resolve<IRunFromSnapshotStarter>().StartFromSnapshotAsync(definition, teamId, userId, launchPayloadJson: null, CancellationToken.None);
+        return await scope.Resolve<IRunFromSnapshotStarter>().StartFromSnapshotAsync(definition, teamId, userId, launchPayloadJson: null, scopeRepositoryIds: null, CancellationToken.None);
     }
 
     private static WorkflowDefinition RetargetPlannerToFake(WorkflowDefinition definition) => definition with
@@ -410,7 +410,7 @@ public class RunPhaseProjectorFlowTests : IDisposable
             Edges = new List<EdgeDefinition> { new() { From = "start", To = "done" } },
         };
 
-        return await scope.Resolve<IRunFromSnapshotStarter>().StartFromSnapshotAsync(definition, teamId, userId, launchPayloadJson: null, CancellationToken.None);
+        return await scope.Resolve<IRunFromSnapshotStarter>().StartFromSnapshotAsync(definition, teamId, userId, launchPayloadJson: null, scopeRepositoryIds: null, CancellationToken.None);
     }
 
     private async Task RunEngineAsync(Guid runId)

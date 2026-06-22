@@ -508,7 +508,8 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
                 original.DefinitionSnapshotJson ?? throw new InvalidOperationException($"Snapshot run {original.Id} has no inline definition to fork."),
                 original.DefinitionSnapshotHash ?? string.Empty,
                 teamId, actorUserId, original.RunRequest?.NormalizedPayloadJson ?? "{}", sourceType,
-                parentRunId: original.Id, causationRequestId: original.RunRequestId, cancellationToken).ConfigureAwait(false);
+                parentRunId: original.Id, causationRequestId: original.RunRequestId,
+                original.ScopeRepositoryIds, original.ScopeProjectIds, cancellationToken).ConfigureAwait(false);
         else
             forkRunId = await _runStarter.StartAsync(new RunSourceEnvelope
             {
@@ -880,6 +881,8 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
         if (filter.WorkflowIds is { Count: > 0 } workflowIds) query = query.Where(r => r.WorkflowId != null && workflowIds.Contains(r.WorkflowId.Value));
         if (filter.Statuses is { Count: > 0 } statuses) query = query.Where(r => statuses.Contains(r.Status));
         if (filter.SourceTypes is { Count: > 0 } sourceTypes) query = query.Where(r => sourceTypes.Contains(r.SourceType));
+        if (filter.RepositoryIds is { Count: > 0 } repositoryIds) query = query.Where(r => r.ScopeRepositoryIds.Any(id => repositoryIds.Contains(id)));
+        if (filter.ProjectIds is { Count: > 0 } projectIds) query = query.Where(r => r.ScopeProjectIds.Any(id => projectIds.Contains(id)));
         if (filter.Since is { } since) query = query.Where(r => r.CreatedDate >= since);
         if (filter.Until is { } until) query = query.Where(r => r.CreatedDate < until);
 

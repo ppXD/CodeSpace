@@ -43,6 +43,16 @@ public sealed record RunListFilter
     public IReadOnlyList<string>? SourceTypes { get; init; }
 
     /// <summary>
+    /// Only runs whose launch SCOPE touches any of these repositories (array-overlap <c>&amp;&amp;</c>, OR-within). This is the
+    /// run's launch scope (which repos it was launched against — a multi-repo task touches several), a point-in-time
+    /// snapshot, NOT the repos it actually changed. Null / empty = any.
+    /// </summary>
+    public IReadOnlyList<Guid>? RepositoryIds { get; init; }
+
+    /// <summary>Only runs whose launch SCOPE (derived from its repos at launch) touches any of these projects (array-overlap, OR-within). Null / empty = any.</summary>
+    public IReadOnlyList<Guid>? ProjectIds { get; init; }
+
+    /// <summary>
     /// <c>true</c> = only runs with a PENDING decision (a parked decision the run is waiting on a human/policy to
     /// answer), <c>false</c> = only runs WITHOUT one, null = either. Narrower than <c>Suspended</c>: a run parked on a
     /// Timer/Action wait is Suspended but has no pending decision, and an agent-grain decision parks the agent without

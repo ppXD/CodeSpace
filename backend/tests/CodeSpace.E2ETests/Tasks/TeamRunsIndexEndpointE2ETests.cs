@@ -97,6 +97,11 @@ public sealed class TeamRunsIndexEndpointE2ETests : IClassFixture<TaskLaunchApiF
         var decided = await SendAsync(HttpMethod.Get, "/api/workflows/runs?hasPendingDecision=true", userId, teamId);
         decided.StatusCode.ShouldBe(HttpStatusCode.OK, customMessage: await DescribeFailureAsync(decided));
         (await decided.Content.ReadFromJsonAsync<RunPage>())!.Items.ShouldNotContain(r => r.Id == runId, "hasPendingDecision=true binds and excludes a run with no pending decision");
+
+        // A Guid-list filter binds too: a chat-launched task has no repo scope, so ?repositoryIds= excludes it deterministically.
+        var byRepo = await SendAsync(HttpMethod.Get, $"/api/workflows/runs?repositoryIds={Guid.NewGuid()}", userId, teamId);
+        byRepo.StatusCode.ShouldBe(HttpStatusCode.OK, customMessage: await DescribeFailureAsync(byRepo));
+        (await byRepo.Content.ReadFromJsonAsync<RunPage>())!.Items.ShouldNotContain(r => r.Id == runId, "repositoryIds binds (Guid list) and excludes a run outside that repo scope");
     }
 
     [Fact]

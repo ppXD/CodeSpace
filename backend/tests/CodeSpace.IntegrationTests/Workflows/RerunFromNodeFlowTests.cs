@@ -1034,7 +1034,7 @@ public class RerunFromNodeFlowTests
     private async Task<Guid> StartSnapshotAsync(Guid teamId, Guid userId, WorkflowDefinition def)
     {
         using var scope = _fixture.BeginScope();
-        return await scope.Resolve<IRunFromSnapshotStarter>().StartFromSnapshotAsync(def, teamId, userId, "{}", CancellationToken.None);
+        return await scope.Resolve<IRunFromSnapshotStarter>().StartFromSnapshotAsync(def, teamId, userId, "{}", scopeRepositoryIds: null, CancellationToken.None);
     }
 
     /// <summary>Drive the REAL service seam, then return the new run id (dispatch fires inline post-commit, leaving the fork Enqueued).</summary>
