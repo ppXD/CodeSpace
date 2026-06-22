@@ -11,7 +11,7 @@ vi.mock("@/hooks/use-workflows", () => ({ useAnswerDecision: () => ({ mutate: vi
 const NOW = new Date(2026, 5, 22, 15, 0, 0).getTime();
 
 function run(id: string, status: WorkflowRunStatus, o: Partial<WorkflowRunSummary> = {}): WorkflowRunSummary {
-  return { id, workflowId: "w", workflowVersion: 1, sourceType: "manual", status, error: null, startedAt: new Date(NOW - 18 * 60_000).toISOString(), completedAt: null, createdDate: new Date(NOW).toISOString(), ...o };
+  return { id, workflowId: "w", workflowVersion: 1, workflowName: null, sourceType: "manual", status, error: null, startedAt: new Date(NOW - 18 * 60_000).toISOString(), completedAt: null, createdDate: new Date(NOW).toISOString(), ...o };
 }
 
 function decision(o: Partial<PendingDecision>): PendingDecision {
@@ -28,7 +28,7 @@ function phasesFor(runId: string): RunPhasesResponse {
 }
 
 const board = (o: Partial<Parameters<typeof CockpitBoard>[0]>) =>
-  render(<CockpitBoard runs={[]} decisions={[]} phasesByRun={new Map()} nameById={new Map()} filter={null} nowMs={NOW} onOpen={() => {}} {...o} />);
+  render(<CockpitBoard runs={[]} decisions={[]} phasesByRun={new Map()} filter={null} nowMs={NOW} onOpen={() => {}} {...o} />);
 
 describe("CockpitBoard", () => {
   it("shows the three zones, the answerable decision, and a live state sentence", () => {
@@ -45,6 +45,17 @@ describe("CockpitBoard", () => {
     expect(screen.getByText("History")).toBeTruthy();
     expect(container.querySelectorAll(".run-row2").length).toBe(1);    // the one Success run
     expect(screen.getByText(/Workflow · Manual · v1 · completed/)).toBeTruthy();   // title-cased source + the result-summary meta
+  });
+
+  it("titles a row with the workflow name, falling back to the source label when there is none", () => {
+    const { container } = board({ runs: [
+      run("named", "Success", { workflowName: "Deploy Pipeline" }),
+      run("anon", "Success", { workflowName: null, sourceType: "webhook" }),
+    ] });
+
+    const titles = [...container.querySelectorAll(".run-row2-title")].map((n) => n.textContent);
+    expect(titles).toContain("Deploy Pipeline");   // authored run shows its workflow name (from run.workflowName)
+    expect(titles).toContain("Webhook");           // null name → title-cased source label
   });
 
   it("dedups a suspended run that already has a queued decision", () => {

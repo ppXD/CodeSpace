@@ -13,11 +13,10 @@ import { summarizeRunState } from "./runPhases";
  * Recent (compact history). Arming a card narrows to one view. Decisions answer inline; suspended runs open the Run
  * Room (the right resume affordance depends on the wait kind, so we send the operator there rather than guess).
  */
-export function CockpitBoard({ runs, decisions, phasesByRun, nameById, filter, nowMs, onOpen }: {
+export function CockpitBoard({ runs, decisions, phasesByRun, filter, nowMs, onOpen }: {
   runs: readonly WorkflowRunSummary[];
   decisions: readonly PendingDecision[];
   phasesByRun: Map<string, RunPhasesResponse>;
-  nameById: Map<string, string>;
   filter: CockpitFilter;
   nowMs: number;
   onOpen: (runId: string) => void;
@@ -28,10 +27,10 @@ export function CockpitBoard({ runs, decisions, phasesByRun, nameById, filter, n
   const suspended = suspendedNeedingReview(runs, decisions);
 
   if (filter === "failed") {
-    return <Zone label="Failed / stuck"><CompactList runs={runs.filter((r) => r.status === "Failure" || r.status === "Suspended")} nameById={nameById} nowMs={nowMs} onOpen={onOpen} empty="Nothing failed or stuck." /></Zone>;
+    return <Zone label="Failed / stuck"><CompactList runs={runs.filter((r) => r.status === "Failure" || r.status === "Suspended")} nowMs={nowMs} onOpen={onOpen} empty="Nothing failed or stuck." /></Zone>;
   }
   if (filter === "today") {
-    return <Zone label="Today"><CompactList runs={runs.filter((r) => isToday(r.createdDate, nowMs))} nameById={nameById} nowMs={nowMs} onOpen={onOpen} empty="No runs today yet." /></Zone>;
+    return <Zone label="Today"><CompactList runs={runs.filter((r) => isToday(r.createdDate, nowMs))} nowMs={nowMs} onOpen={onOpen} empty="No runs today yet." /></Zone>;
   }
 
   const showAttention = filter === null || filter === "attention";
@@ -47,7 +46,7 @@ export function CockpitBoard({ runs, decisions, phasesByRun, nameById, filter, n
             : (
               <div className="cockpit-attention">
                 {decisions.map((d) => <DecisionCard key={d.id} decision={d} />)}
-                {suspended.map((r) => <SuspendedRow key={r.id} run={r} name={r.workflowId ? nameById.get(r.workflowId) : null} nowMs={nowMs} onOpen={onOpen} />)}
+                {suspended.map((r) => <SuspendedRow key={r.id} run={r} nowMs={nowMs} onOpen={onOpen} />)}
               </div>
             )}
         </Zone>
@@ -56,13 +55,13 @@ export function CockpitBoard({ runs, decisions, phasesByRun, nameById, filter, n
       {showLive && buckets.live.length > 0 && (
         <Zone label="Live">
           <div className="cockpit-live">
-            {buckets.live.map((r) => <LiveRow key={r.id} run={r} phases={phasesByRun.get(r.id)} name={r.workflowId ? nameById.get(r.workflowId) : null} nowMs={nowMs} onOpen={onOpen} />)}
+            {buckets.live.map((r) => <LiveRow key={r.id} run={r} phases={phasesByRun.get(r.id)} nowMs={nowMs} onOpen={onOpen} />)}
           </div>
         </Zone>
       )}
 
       {showRecent && (
-        <Zone label="History"><CompactList runs={buckets.recent} nameById={nameById} nowMs={nowMs} onOpen={onOpen} empty="No runs yet." /></Zone>
+        <Zone label="History"><CompactList runs={buckets.recent} nowMs={nowMs} onOpen={onOpen} empty="No runs yet." /></Zone>
       )}
     </div>
   );
@@ -78,8 +77,8 @@ function Zone({ label, children }: { label: string; children: React.ReactNode })
 }
 
 /** A suspended run in the attention zone — its wait, how long it has been parked, and a Review action into the Run Room. */
-function SuspendedRow({ run, name, nowMs, onOpen }: { run: WorkflowRunSummary; name?: string | null; nowMs: number; onOpen: (runId: string) => void }) {
-  const title = name ?? sourceLabel(run.sourceType);
+function SuspendedRow({ run, nowMs, onOpen }: { run: WorkflowRunSummary; nowMs: number; onOpen: (runId: string) => void }) {
+  const title = run.workflowName ?? sourceLabel(run.sourceType);
 
   return (
     <div className="cockpit-attn-row" onClick={() => onOpen(run.id)}>
@@ -94,8 +93,8 @@ function SuspendedRow({ run, name, nowMs, onOpen }: { run: WorkflowRunSummary; n
 }
 
 /** A live run's current-state sentence — derived from its phase projection (focus phase + agents) when loaded. */
-function LiveRow({ run, phases, name, nowMs, onOpen }: { run: WorkflowRunSummary; phases?: RunPhasesResponse; name?: string | null; nowMs: number; onOpen: (runId: string) => void }) {
-  const title = name ?? sourceLabel(run.sourceType);
+function LiveRow({ run, phases, nowMs, onOpen }: { run: WorkflowRunSummary; phases?: RunPhasesResponse; nowMs: number; onOpen: (runId: string) => void }) {
+  const title = run.workflowName ?? sourceLabel(run.sourceType);
   const state = phases ? summarizeRunState(phases.runStatus, phases.phases) : null;
   const elapsed = run.startedAt ? compactAge(run.startedAt, nowMs) : null;
 
@@ -118,12 +117,12 @@ function LiveRow({ run, phases, name, nowMs, onOpen }: { run: WorkflowRunSummary
 }
 
 /** The run list used for History + the failed/today filter views — info-dense two-line rows. */
-function CompactList({ runs, nameById, nowMs, onOpen, empty }: { runs: WorkflowRunSummary[]; nameById: Map<string, string>; nowMs: number; onOpen: (runId: string) => void; empty: string }) {
+function CompactList({ runs, nowMs, onOpen, empty }: { runs: WorkflowRunSummary[]; nowMs: number; onOpen: (runId: string) => void; empty: string }) {
   if (runs.length === 0) return <div className="cockpit-empty">{empty}</div>;
 
   return (
     <ul className="runs-list">
-      {runs.map((r) => <RunRow key={r.id} run={r} name={r.workflowId ? nameById.get(r.workflowId) : null} nowMs={nowMs} onOpen={onOpen} />)}
+      {runs.map((r) => <RunRow key={r.id} run={r} nowMs={nowMs} onOpen={onOpen} />)}
     </ul>
   );
 }
@@ -133,8 +132,8 @@ function CompactList({ runs, nameById, nowMs, onOpen, empty }: { runs: WorkflowR
  * RESULT summary ("completed in 7m59s" / "failed · …") plus its short id — so each row reads as "what happened",
  * not a bare DB cell. The status colour is carried by the glyph, so no redundant status word.
  */
-function RunRow({ run, name, nowMs, onOpen }: { run: WorkflowRunSummary; name?: string | null; nowMs: number; onOpen: (runId: string) => void }) {
-  const title = name ?? sourceLabel(run.sourceType);
+function RunRow({ run, nowMs, onOpen }: { run: WorkflowRunSummary; nowMs: number; onOpen: (runId: string) => void }) {
+  const title = run.workflowName ?? sourceLabel(run.sourceType);
   const meta = [run.workflowId ? "Workflow" : "Task", sourceLabel(run.sourceType), run.workflowVersion != null ? `v${run.workflowVersion}` : null, runOutcome(run, nowMs)].filter(Boolean).join(" · ");
   const when = run.completedAt ?? run.startedAt ?? run.createdDate;
 

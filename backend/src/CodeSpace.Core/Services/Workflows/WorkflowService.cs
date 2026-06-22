@@ -1,3 +1,4 @@
+using System.Linq.Expressions;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using CodeSpace.Core.DependencyInjection;
@@ -816,49 +817,69 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
             .ConfigureAwait(false);
     }
 
+    /// <summary>Cap on a single page — clamps a caller-supplied limit so an unbounded page can't be requested.</summary>
+    public const int MaxRunsPageSize = 100;
+
     public async Task<IReadOnlyList<WorkflowRunSummary>> ListRunsAsync(Guid workflowId, Guid teamId, int limit, CancellationToken cancellationToken)
     {
         await EnsureWorkflowVisibleAsync(workflowId, teamId, cancellationToken).ConfigureAwait(false);
 
-        var rows = await _db.WorkflowRun
+        return await _db.WorkflowRun
             .Where(r => r.WorkflowId == workflowId)
             .OrderByDescending(r => r.CreatedDate).ThenByDescending(r => r.Id)
             .Take(limit)
+            .Select(ToSummaryExpr)
             .ToListAsync(cancellationToken).ConfigureAwait(false);
-
-        return rows.Select(ToSummary).ToList();
     }
 
-    public async Task<IReadOnlyList<WorkflowRunSummary>> ListTeamRunsAsync(Guid teamId, int limit, CancellationToken cancellationToken)
+    public async Task<RunPage> ListTeamRunsAsync(Guid teamId, string? cursor, int limit, CancellationToken cancellationToken)
     {
+        var keyset = RunCursor.Decode(cursor);
+        var take = Math.Clamp(limit, 1, MaxRunsPageSize);
+
         // Exclude only NESTED-EXECUTION runs — a flow.subworkflow child (SourceType `workflow.child`) runs inside its
         // parent's Run Room, not as its own index row. NOT a ParentRunId filter: a replay / rerun fork also carries
         // ParentRunId (its lineage to the original), yet is a top-level run the user launched and expects here. Agent
         // runs are a separate entity, never WorkflowRun rows. TeamId is on the run directly, so snapshot / task runs
         // (null WorkflowId) are included.
-        // ORDER BY (created_date DESC, id DESC) — the id tiebreaker makes the cut at Take(limit) DETERMINISTIC when
-        // rows share a created_date (child fan-out, batch replays insert in the same millisecond) and matches the
-        // (team_id, created_date DESC, id DESC) keyset index, so the page boundary is stable for keyset pagination.
-        var rows = await _db.WorkflowRun
-            .Where(r => r.TeamId == teamId && r.SourceType != WorkflowRunSourceTypes.ChildWorkflow)
+        var query = _db.WorkflowRun.Where(r => r.TeamId == teamId && r.SourceType != WorkflowRunSourceTypes.ChildWorkflow);
+
+        // Keyset: "strictly after" the cursor row under (created_date DESC, id DESC) is the tuple < comparison.
+        // r.Id.CompareTo translates to a Postgres uuid comparison (its native byte order) — the SAME order the index
+        // and ORDER BY use, so C# never needs to (and must not) compare GUIDs itself (its order differs from uuid's).
+        if (keyset is { } c)
+            query = query.Where(r => r.CreatedDate < c.CreatedDate || (r.CreatedDate == c.CreatedDate && r.Id.CompareTo(c.Id) < 0));
+
+        // Fetch one extra row to know whether a further page exists without a second COUNT query.
+        var rows = await query
             .OrderByDescending(r => r.CreatedDate).ThenByDescending(r => r.Id)
-            .Take(limit)
+            .Take(take + 1)
+            .Select(ToSummaryExpr)
             .ToListAsync(cancellationToken).ConfigureAwait(false);
 
-        return rows.Select(ToSummary).ToList();
+        var hasMore = rows.Count > take;
+        var items = hasMore ? rows.GetRange(0, take) : rows;
+        var nextCursor = hasMore ? new RunCursor(items[^1].CreatedDate, items[^1].Id).Encode() : null;
+
+        return new RunPage { Items = items, NextCursor = nextCursor };
     }
 
-    private static WorkflowRunSummary ToSummary(WorkflowRun r) => new()
+    /// <summary>
+    /// In-SQL projection to the history-row shape — selects only the summary columns (no over-fetch) and LEFT JOINs
+    /// the parent workflow for its display name (null for a snapshot / task run). Shared by both run-list queries.
+    /// </summary>
+    private static readonly Expression<Func<WorkflowRun, WorkflowRunSummary>> ToSummaryExpr = r => new WorkflowRunSummary
     {
         Id = r.Id,
         WorkflowId = r.WorkflowId,
         WorkflowVersion = r.WorkflowVersion,
+        WorkflowName = r.Workflow != null ? r.Workflow.Name : null,
         SourceType = r.SourceType,
         Status = r.Status,
         Error = r.Error,
         StartedAt = r.StartedAt,
         CompletedAt = r.CompletedAt,
-        CreatedDate = r.CreatedDate
+        CreatedDate = r.CreatedDate,
     };
 
     public async Task<WorkflowRunDetail?> GetRunAsync(Guid runId, Guid teamId, CancellationToken cancellationToken)

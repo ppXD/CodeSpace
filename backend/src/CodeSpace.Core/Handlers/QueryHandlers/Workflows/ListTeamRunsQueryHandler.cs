@@ -6,7 +6,7 @@ using MediatR;
 
 namespace CodeSpace.Core.Handlers.QueryHandlers.Workflows;
 
-public sealed class ListTeamRunsQueryHandler : IRequestHandler<ListTeamRunsQuery, IReadOnlyList<WorkflowRunSummary>>
+public sealed class ListTeamRunsQueryHandler : IRequestHandler<ListTeamRunsQuery, RunPage>
 {
     private readonly IWorkflowService _service;
     private readonly ICurrentTeam _currentTeam;
@@ -17,6 +17,6 @@ public sealed class ListTeamRunsQueryHandler : IRequestHandler<ListTeamRunsQuery
         _currentTeam = currentTeam;
     }
 
-    public Task<IReadOnlyList<WorkflowRunSummary>> Handle(ListTeamRunsQuery request, CancellationToken cancellationToken) =>
-        _service.ListTeamRunsAsync(_currentTeam.Id!.Value, request.Limit, cancellationToken);
+    public Task<RunPage> Handle(ListTeamRunsQuery request, CancellationToken cancellationToken) =>
+        _service.ListTeamRunsAsync(_currentTeam.Id!.Value, request.Cursor, request.Limit, cancellationToken);
 }
