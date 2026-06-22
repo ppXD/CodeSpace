@@ -66,10 +66,11 @@ public class EgressSubnetAllocatorTests
         try
         {
             var first = EgressSubnetAllocator.Acquire(runId);
+            var after = EgressSubnetAllocator.ActiveCount;
             var second = EgressSubnetAllocator.Acquire(runId);
 
             second.Cidr.ShouldBe(first.Cidr, "a setup retry / re-entry for the same run is stable, not a second reservation");
-            EgressSubnetAllocator.ActiveCount.ShouldBe(EgressSubnetAllocator.ActiveCount, "no double-count");
+            EgressSubnetAllocator.ActiveCount.ShouldBe(after, "re-acquiring the same run reserves no second /30");
         }
         finally { EgressSubnetAllocator.Release(runId); }
     }
