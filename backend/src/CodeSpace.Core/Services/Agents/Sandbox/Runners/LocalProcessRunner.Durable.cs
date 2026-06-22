@@ -141,8 +141,9 @@ public sealed partial class LocalProcessRunner
 
         // The allowlist carries host NAMES (+ IP literals); the IPv4-only netns pins IPs, so resolve at setup on the
         // host that builds the namespace. Best-effort/fail-closed: an unresolvable host is dropped (the resulting set,
-        // even empty, only ever narrows egress — never widens it).
-        var allowedIps = await EgressHostResolver.ResolveIpv4Async(policy.AllowedHosts, ct).ConfigureAwait(false);
+        // even empty, only ever narrows egress — never widens it). BOUNDED: a black-holed resolver can't hang the launch
+        // — the resolution shares the setup budget and a timeout aborts the launch fail-closed (not a silent stall).
+        var allowedIps = await ResolveAllowedIpsBoundedAsync(policy.AllowedHosts, ct).ConfigureAwait(false);
 
         var setup = await FilteredEgressNetns.SetupAsync(spoolKey, allowedIps, EgressSetupTimeoutSeconds, ct).ConfigureAwait(false);
 
@@ -150,6 +151,27 @@ public sealed partial class LocalProcessRunner
             throw new InvalidOperationException($"Filtered-egress netns setup failed (fail-closed — run aborted rather than launched unfiltered): {setup.SetupError}");
 
         return (setup.ExecPrefix, spoolKey);
+    }
+
+    /// <summary>
+    /// Resolve the allowlist hosts to IPs under a bounded budget (the same <see cref="EgressSetupTimeoutSeconds"/> the
+    /// ip/nft commands get) — a slow / black-holed DNS server can't hang the durable launch indefinitely. A genuine run
+    /// cancellation (<paramref name="ct"/>) propagates as-is; only the TIMEOUT is converted to a fail-closed setup abort
+    /// so the run lands a clean Failed rather than stalling on resolution.
+    /// </summary>
+    internal static async Task<IReadOnlyList<string>> ResolveAllowedIpsBoundedAsync(IReadOnlyList<string> hosts, CancellationToken ct)
+    {
+        using var dnsCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        dnsCts.CancelAfter(TimeSpan.FromSeconds(EgressSetupTimeoutSeconds));
+
+        try
+        {
+            return await EgressHostResolver.ResolveIpv4Async(hosts, dnsCts.Token).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+        {
+            throw new InvalidOperationException($"Filtered-egress host resolution exceeded {EgressSetupTimeoutSeconds}s (run aborted fail-closed rather than stalling on a black-holed resolver).");
+        }
     }
 
     /// <summary>
