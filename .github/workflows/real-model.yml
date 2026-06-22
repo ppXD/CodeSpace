@@ -29,7 +29,10 @@ jobs:
   real-model:
     name: real model (supervisor decision eval)
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # Headroom for the SEQUENTIAL worst case (xUnit runs a class's [Theory] cases serially): the trajectory class is
+    # 6 cases (3 scenarios × 2 wires) each bounded by its own 6-min wall-clock deadline = up to 36 min, plus the
+    # decision class (5 golden × 2 wires, bounded by its 60s per-call HTTP timeout) ≈ up to 10 min, plus restore+build.
+    timeout-minutes: 55
     env:
       # The custom-endpoint config the RealModel tests read (a [Theory] over both Anthropic + OpenAI wires from
       # one gateway). Absent on a fork → the tests self-skip → green at zero cost.
