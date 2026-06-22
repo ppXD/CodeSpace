@@ -190,6 +190,40 @@ public sealed class SupervisorWholeLoopE2ETests : IDisposable
         await AssertAcceptanceFailedAndBranchWithheldAsync(runId, teamId);
     }
 
+    [Fact]
+    public async Task Supervisor_gates_a_real_conflict_resolution_behind_the_irreversible_human_approval_floor()
+    {
+        if (OperatingSystem.IsWindows()) return;          // the fake CLI is a /bin/sh script the runner spawns
+        if (!await GitReadyAsync()) return;               // real git is required for clone/capture/conflict
+
+        // Both agents edit the SAME file with conflicting content → a REAL git merge conflict. The supervisor's resolve
+        // attempt then hits the un-bypassable safety floor: re-merging a conflict is an IRREVERSIBLE side effect, so it
+        // is NOT executed silently — it is gated behind a human APPROVAL card. Proves the conflict + the safety gate
+        // end-to-end through the real engine. (The full approve→reconcile→accept loop is the follow-up slice.)
+        using var cli = new ConflictThenResolveFakeCli();
+
+        SetDecisionScript(s => s.PlanSpawnMergeResolveMergeStop());
+
+        var jobClient = ResolveJobClient();
+        jobClient.Clear();
+        jobClient.AutoExecute = true;
+
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+
+        using var remote = new BareRemote();
+        await remote.SeedBaseAsync(new() { ["check.sh"] = "#!/bin/sh\nexit 0\n", [ConflictThenResolveFakeCli.SharedFile] = "base content\n" });
+        var repoId = await SeedBoundRepositoryAsync(teamId, remote.Url, "main");
+
+        var workflowId = await CreateWholeLoopWorkflowAsync(teamId, userId, repoId);
+        var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
+
+        await RunEngineAsync(runId);
+        await jobClient.WaitForPendingAsync();
+
+        await AssertFirstMergeConflictedAsync(runId, teamId);
+        await AssertResolveWasGatedToAnApprovalCardAsync(runId, teamId);
+    }
+
     // ─── Assertions ──────────────────────────────────────────────────────────────────
 
     private async Task AssertRunReachedSuccessAsync(Guid runId)
@@ -236,6 +270,40 @@ public sealed class SupervisorWholeLoopE2ETests : IDisposable
 
         kinds.ShouldBe(expectedKinds,
             customMessage: $"the ledger must record {string.Join("/", expectedKinds)} in order — each later turn only advanced because the prior turn's agents completed through the barrier");
+    }
+
+    private async Task AssertFirstMergeConflictedAsync(Guid runId, Guid teamId)
+    {
+        using var verify = _fixture.BeginScope();
+        var db = verify.Resolve<CodeSpaceDbContext>();
+
+        var firstMerge = await db.SupervisorDecisionRecord.AsNoTracking()
+            .Where(d => d.SupervisorRunId == runId && d.TeamId == teamId && d.DecisionKind == SupervisorDecisionKinds.Merge)
+            .OrderBy(d => d.Sequence).Select(d => d.OutcomeJson).FirstAsync();
+
+        System.Text.Json.JsonDocument.Parse(firstMerge).RootElement.GetProperty("integration").GetProperty("status").GetString()
+            .ShouldBe("Conflicted", "the two agents edited the SAME file → real git could not auto-combine them (a REAL conflict, not a seeded one)");
+    }
+
+    private async Task AssertResolveWasGatedToAnApprovalCardAsync(Guid runId, Guid teamId)
+    {
+        using var verify = _fixture.BeginScope();
+        var db = verify.Resolve<CodeSpaceDbContext>();
+
+        // The scripted `resolve` decision is irreversible → the governance rewrites it into an ask_human APPROVAL card
+        // (its question carries the approval marker + names the gated action) rather than executing it. So the ledger
+        // records NO resolve, and an ask_human whose question is the resolve approval prompt.
+        var kinds = await db.SupervisorDecisionRecord.AsNoTracking()
+            .Where(d => d.SupervisorRunId == runId && d.TeamId == teamId)
+            .Select(d => d.DecisionKind).ToListAsync();
+        kinds.ShouldNotContain(SupervisorDecisionKinds.Resolve, "the irreversible resolve must NOT have executed silently — it is gated behind approval");
+
+        var askQuestions = await db.SupervisorDecisionRecord.AsNoTracking()
+            .Where(d => d.SupervisorRunId == runId && d.TeamId == teamId && d.DecisionKind == SupervisorDecisionKinds.AskHuman)
+            .Select(d => d.PayloadJson).ToListAsync();
+
+        askQuestions.Any(p => p.Contains(SupervisorApprovalRequest.ApprovalMarker, StringComparison.Ordinal) && p.Contains("resolve", StringComparison.OrdinalIgnoreCase))
+            .ShouldBeTrue("the conflict's resolve attempt surfaced a human approval card for the irreversible re-merge (the un-bypassable safety floor) — it was not auto-resolved");
     }
 
     private async Task AssertOneAgentFailedThenTheRetrySucceededAsync(Guid runId)
