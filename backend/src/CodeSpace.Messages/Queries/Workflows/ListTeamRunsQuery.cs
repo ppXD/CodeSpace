@@ -26,6 +26,12 @@ public sealed record ListTeamRunsQuery : IQuery<RunPage>, IRequireTeamMembership
     /// <summary>Only runs from any of these open <c>source_type</c> tokens; bind <c>?sourceTypes=manual&amp;sourceTypes=replay</c>. Omit for any source.</summary>
     public IReadOnlyList<string>? SourceTypes { get; init; }
 
+    /// <summary>Only runs whose launch scope touches any of these repositories; bind <c>?repositoryIds=&lt;id&gt;&amp;repositoryIds=&lt;id&gt;</c>. Omit for any.</summary>
+    public IReadOnlyList<Guid>? RepositoryIds { get; init; }
+
+    /// <summary>Only runs whose launch scope touches any of these projects; bind <c>?projectIds=&lt;id&gt;</c>. Omit for any.</summary>
+    public IReadOnlyList<Guid>? ProjectIds { get; init; }
+
     /// <summary>Only runs with (<c>true</c>) / without (<c>false</c>) a pending decision; omit for either.</summary>
     public bool? HasPendingDecision { get; init; }
 
@@ -49,6 +55,8 @@ public sealed record ListTeamRunsQuery : IQuery<RunPage>, IRequireTeamMembership
         WorkflowIds = WorkflowIds,
         Statuses = Statuses,
         SourceTypes = SourceTypes,
+        RepositoryIds = RepositoryIds,
+        ProjectIds = ProjectIds,
         HasPendingDecision = HasPendingDecision,
         NeedsAttention = NeedsAttention,
         Since = Since,

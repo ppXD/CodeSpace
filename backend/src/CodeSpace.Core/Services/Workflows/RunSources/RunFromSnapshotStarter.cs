@@ -9,6 +9,7 @@ using CodeSpace.Core.Services.Workflows.Lifecycle;
 using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Dtos.Workflows;
 using CodeSpace.Messages.Enums;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
 
 namespace CodeSpace.Core.Services.Workflows.RunSources;
@@ -39,14 +40,17 @@ public sealed class RunFromSnapshotStarter : IRunFromSnapshotStarter, IScopedDep
         _logger = logger;
     }
 
-    public async Task<Guid> StartFromSnapshotAsync(WorkflowDefinition definition, Guid teamId, Guid actorUserId, string? launchPayloadJson, CancellationToken cancellationToken)
+    public async Task<Guid> StartFromSnapshotAsync(WorkflowDefinition definition, Guid teamId, Guid actorUserId, string? launchPayloadJson, IReadOnlyList<Guid>? scopeRepositoryIds, CancellationToken cancellationToken)
     {
         EnsureValidDefinition(definition);
 
         var (definitionJson, definitionHash) = Freeze(definition);
         var payloadJson = NormalizePayload(launchPayloadJson);
 
-        var runId = await StageAsync(teamId, actorUserId, definitionJson, definitionHash, payloadJson, WorkflowRunSourceTypes.Snapshot, parentRunId: null, causationRequestId: null, cancellationToken).ConfigureAwait(false);
+        var repositoryIds = scopeRepositoryIds ?? [];
+        var projectIds = await DeriveScopeProjectIdsAsync(repositoryIds, teamId, cancellationToken).ConfigureAwait(false);
+
+        var runId = await StageAsync(teamId, actorUserId, definitionJson, definitionHash, payloadJson, WorkflowRunSourceTypes.Snapshot, parentRunId: null, causationRequestId: null, repositoryIds, projectIds, cancellationToken).ConfigureAwait(false);
 
         await _recordLogger.RunQueuedAsync(runId, WorkflowRunSourceTypes.Snapshot, actorUserId, cancellationToken).ConfigureAwait(false);
 
@@ -73,9 +77,10 @@ public sealed class RunFromSnapshotStarter : IRunFromSnapshotStarter, IScopedDep
     /// links back to the original request). The caller clones the variable snapshot then dispatches — exactly as
     /// the authored-replay path does, so the engine's variable-presence fork takes the replay scope.
     /// </summary>
-    public async Task<Guid> StageReplayFromSnapshotAsync(string definitionJson, string definitionHash, Guid teamId, Guid actorUserId, string payloadJson, string sourceType, Guid parentRunId, Guid causationRequestId, CancellationToken cancellationToken)
+    public async Task<Guid> StageReplayFromSnapshotAsync(string definitionJson, string definitionHash, Guid teamId, Guid actorUserId, string payloadJson, string sourceType, Guid parentRunId, Guid causationRequestId, IReadOnlyList<Guid> scopeRepositoryIds, IReadOnlyList<Guid> scopeProjectIds, CancellationToken cancellationToken)
     {
-        var runId = await StageAsync(teamId, actorUserId, definitionJson, definitionHash, NormalizePayload(payloadJson), sourceType, parentRunId, causationRequestId, cancellationToken).ConfigureAwait(false);
+        // Replay CLONES the original's scope arrays verbatim (point-in-time snapshot — no re-derivation), same as the frozen definition.
+        var runId = await StageAsync(teamId, actorUserId, definitionJson, definitionHash, NormalizePayload(payloadJson), sourceType, parentRunId, causationRequestId, scopeRepositoryIds, scopeProjectIds, cancellationToken).ConfigureAwait(false);
 
         await _recordLogger.RunQueuedAsync(runId, sourceType, actorUserId, cancellationToken).ConfigureAwait(false);
 
@@ -106,6 +111,22 @@ public sealed class RunFromSnapshotStarter : IRunFromSnapshotStarter, IScopedDep
         string.IsNullOrWhiteSpace(launchPayloadJson) ? "{}" : launchPayloadJson;
 
     /// <summary>
+    /// Derive the run's launch-time SCOPE projects from its repositories via the team's <c>project_repository</c> links
+    /// (a repo may be in several projects; soft-deleted links excluded). A point-in-time snapshot — frozen onto the run
+    /// so a later repo re-home does not rewrite history. Empty in → empty out (no query).
+    /// </summary>
+    private async Task<List<Guid>> DeriveScopeProjectIdsAsync(IReadOnlyList<Guid> repositoryIds, Guid teamId, CancellationToken cancellationToken)
+    {
+        if (repositoryIds.Count == 0) return [];
+
+        return await _db.ProjectRepository
+            .Where(pr => pr.TeamId == teamId && pr.DeletedDate == null && repositoryIds.Contains(pr.RepositoryId))
+            .Select(pr => pr.ProjectId)
+            .Distinct()
+            .ToListAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
     /// Stage the request + snapshot-run pair in ONE transaction. The request carries source/actor
     /// metadata (WorkflowId left NULL — there is no workflow) plus the optional
     /// <paramref name="causationRequestId"/> linking a replay back to the original request; the run
@@ -113,7 +134,7 @@ public sealed class RunFromSnapshotStarter : IRunFromSnapshotStarter, IScopedDep
     /// optional <paramref name="parentRunId"/> (set on a replay — the engine emits <c>run.replayed</c>
     /// from it). Status starts Pending — the post-commit dispatch flips it to Enqueued.
     /// </summary>
-    private async Task<Guid> StageAsync(Guid teamId, Guid actorUserId, string definitionJson, string definitionHash, string payloadJson, string sourceType, Guid? parentRunId, Guid? causationRequestId, CancellationToken cancellationToken)
+    private async Task<Guid> StageAsync(Guid teamId, Guid actorUserId, string definitionJson, string definitionHash, string payloadJson, string sourceType, Guid? parentRunId, Guid? causationRequestId, IReadOnlyList<Guid> scopeRepositoryIds, IReadOnlyList<Guid> scopeProjectIds, CancellationToken cancellationToken)
     {
         var requestId = Guid.NewGuid();
         var runId = Guid.NewGuid();
@@ -147,6 +168,8 @@ public sealed class RunFromSnapshotStarter : IRunFromSnapshotStarter, IScopedDep
             ReleaseHashAtRun = definitionHash,
             TeamId = teamId,
             RunRequestId = requestId,
+            ScopeRepositoryIds = scopeRepositoryIds.ToList(),
+            ScopeProjectIds = scopeProjectIds.ToList(),
             Status = WorkflowRunStatus.Pending,
             CreatedBy = actorUserId,
             LastModifiedBy = actorUserId,

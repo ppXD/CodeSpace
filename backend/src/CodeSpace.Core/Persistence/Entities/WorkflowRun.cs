@@ -68,6 +68,18 @@ public class WorkflowRun : IEntity<Guid>, IAuditable
     /// </summary>
     public required string SourceType { get; set; }
 
+    /// <summary>
+    /// Launch-time SCOPE: the repositories this run was launched against (multi-repo) — a point-in-time snapshot set at
+    /// the snapshot/task creation site. NOT the repos the run actually touched (that is the future
+    /// <c>touched_repository_ids</c> from the Changes projector). Empty for an authored workflow run (its repos live in
+    /// the definition). <c>uuid[]</c> + GIN; the repo filter is an array-overlap probe. <see cref="ScopeProjectIds"/> is
+    /// derived from these via <c>project_repository</c> at launch.
+    /// </summary>
+    public List<Guid> ScopeRepositoryIds { get; set; } = [];
+
+    /// <summary>Launch-time SCOPE: the projects the run's <see cref="ScopeRepositoryIds"/> belonged to AT LAUNCH (a repo may be in many projects), a point-in-time snapshot. Empty for an authored run.</summary>
+    public List<Guid> ScopeProjectIds { get; set; } = [];
+
     public WorkflowRunStatus Status { get; set; } = WorkflowRunStatus.Pending;
     public string? Error { get; set; }
 
