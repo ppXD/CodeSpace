@@ -71,6 +71,14 @@ public class EgressAllowlistBuilderTests
     }
 
     [Fact]
+    public void Every_repo_host_in_a_multi_repo_workspace_is_included()
+    {
+        var hosts = EgressAllowlistBuilder.Build(null, null, new[] { "https://github.com/a/x.git", "git@gitlab.com:b/y.git", "https://github.com/a/z.git" }, null);
+
+        hosts.ShouldBe(new[] { "github.com", "gitlab.com" }, "all repos' hosts are pinned, de-duped across repos (two github repos → one entry)");
+    }
+
+    [Fact]
     public void An_unparseable_url_is_skipped_not_thrown()
     {
         var hosts = EgressAllowlistBuilder.Build(null, null, new[] { "not a url", "", "https://ok.example.com/r.git" }, null);

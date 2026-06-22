@@ -56,6 +56,22 @@ public class AgentRunExecutorEgressTests
     }
 
     [Fact]
+    public void The_fail_closed_sever_preserves_other_spec_fields()
+    {
+        // ApplyEgressPolicy runs AFTER the spec is built with its Mcp wiring + command; the sever path's `with` must
+        // carry every untouched field forward (it only flips AllowNetwork + clears the allowlist), or a restricted
+        // run with no derivable host would silently lose its tool fabric / command.
+        var spec = new SandboxSpec { Command = "agent", Args = new[] { "--x" }, AllowNetwork = true, Mcp = new McpServerWiring { RelativeFileName = ".mcp.json", Content = "{}", SocketPath = "/tmp/s" } };
+        var perms = new AgentPermissions { Network = AgentNetworkAccess.On, Egress = AgentEgressPolicy.Allowlist };
+
+        var result = AgentRunExecutor.ApplyEgressPolicy(spec, perms, modelBaseUrl: null, modelProvider: "MysteryCo", workspace: null);
+
+        result.AllowNetwork.ShouldBeFalse();
+        result.Command.ShouldBe("agent");
+        result.Mcp.ShouldBe(spec.Mcp, "the sever path must preserve the tool-fabric wiring");
+    }
+
+    [Fact]
     public void Allowlist_pins_the_git_host_from_the_workspace()
     {
         var workspace = WorkspaceProvisionRequest.FromSingle(new WorkspaceRequest { RepositoryUrl = "https://github.com/owner/repo.git" });
