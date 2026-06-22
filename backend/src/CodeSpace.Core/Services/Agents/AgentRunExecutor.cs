@@ -4,6 +4,7 @@ using CodeSpace.Core.DependencyInjection;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Services.Agents.Mcp;
 using CodeSpace.Core.Services.Agents.Sandbox;
+using CodeSpace.Core.Services.Agents.Sandbox.Isolation;
 using CodeSpace.Core.Services.Agents.Sandbox.Runners;
 using CodeSpace.Core.Services.Agents.Tools;
 using CodeSpace.Core.Services.Agents.Workspace;
@@ -167,7 +168,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
             // project it onto the harness's env vars. The secret lives only in this in-memory effectiveTask →
             // SandboxSpec.Environment; it is NEVER re-persisted (CompleteAsync writes only the result). The
             // redactor (keyed on the decrypted key) strips it from any echoed event / error before it persists.
-            var (secretEnv, secretRedactor) = await ResolveModelCredentialEnvAsync(task, run.TeamId, harness, cancellationToken).ConfigureAwait(false);
+            var (secretEnv, secretRedactor, modelBaseUrl, modelProvider) = await ResolveModelCredentialEnvAsync(task, run.TeamId, harness, cancellationToken).ConfigureAwait(false);
             redactor = secretRedactor;
 
             var effectiveTask = (workspace is null ? task : task with { WorkspaceDirectory = workspace.Directory }) with { Environment = MergeEnvironment(task.Environment, secretEnv) };
@@ -193,7 +194,9 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
             // receives the governed tools the endpoint serves (today the harness projects ONLY task.Tools, so a restricted
             // run couldn't call them). Additive + tier-filtered; a no-op when the author named no tools (the CLI default
             // already reaches a declared MCP server's tools). Drives BuildInvocation off the augmented task.
-            var spec = harness.BuildInvocation(AugmentToolsForMcp(effectiveTask, mcp, mcpWiring)) with { Mcp = mcpWiring };
+            var spec = ApplyEgressPolicy(
+                harness.BuildInvocation(AugmentToolsForMcp(effectiveTask, mcp, mcpWiring)) with { Mcp = mcpWiring },
+                effectiveTask.Permissions, modelBaseUrl, modelProvider, workspaceProvision);
 
             // The MCP token rides the durable handle whenever the ENDPOINT opened (not only when a declaration was
             // written) so a re-attach re-binds the SAME socket+token — the detached agent's declaration file still
@@ -839,7 +842,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     /// run then relies on whatever env the runner already provides. A PINNED-but-unresolvable credential throws
     /// (the executor's catch lands a clean Failed), never silently using a different key.
     /// </summary>
-    private async Task<(IReadOnlyDictionary<string, string> Env, SecretRedactor Redactor)> ResolveModelCredentialEnvAsync(AgentTask task, Guid teamId, IAgentHarness harness, CancellationToken cancellationToken)
+    private async Task<(IReadOnlyDictionary<string, string> Env, SecretRedactor Redactor, string? ModelBaseUrl, string? ModelProvider)> ResolveModelCredentialEnvAsync(AgentTask task, Guid teamId, IAgentHarness harness, CancellationToken cancellationToken)
     {
         var projector = harness as IModelCredentialProjector;
 
@@ -849,8 +852,32 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         // Redact only the actual SECRET (the api key / gateway token) — never the non-secret base URL.
         var redactor = credential?.ApiKey is { Length: > 0 } key ? new SecretRedactor(new[] { key }) : SecretRedactor.None;
 
-        return (env, redactor);
+        // The non-secret base URL + provider tag flow out so a restricted (Allowlist) run can pin its model-API host
+        // in the egress allowlist (B3.3b). Both null when no credential resolved.
+        return (env, redactor, credential?.BaseUrl, credential?.Provider);
     }
+
+    /// <summary>
+    /// When the run opted into <see cref="AgentEgressPolicy.Allowlist"/> egress (B3.3b), set the sandbox's egress
+    /// allowlist to the run's model-API host + each repo's git host + the operator's extra hosts. FAIL-CLOSED: an
+    /// Allowlist run whose host set comes out EMPTY is SEVERED (AllowNetwork=false), never left to fall through to
+    /// Full egress (<see cref="Sandbox.Isolation.SandboxEgressPolicy"/> reads an empty allowlist as "no allowlist →
+    /// Full"). Full egress (the default) returns the spec UNCHANGED — byte-identical to today.
+    /// </summary>
+    internal static SandboxSpec ApplyEgressPolicy(SandboxSpec spec, AgentPermissions permissions, string? modelBaseUrl, string? modelProvider, WorkspaceProvisionRequest? workspace)
+    {
+        if (permissions.Egress != AgentEgressPolicy.Allowlist) return spec;
+
+        var hosts = EgressAllowlistBuilder.Build(modelBaseUrl, modelProvider, CloneUrlsOf(workspace), permissions.EgressAllowHosts);
+
+        if (hosts.Count == 0) return spec with { AllowNetwork = false, EgressAllowlist = null };   // fail-closed: no derivable host ⇒ sever, NEVER Full
+
+        return spec with { EgressAllowlist = hosts };
+    }
+
+    /// <summary>The git clone URLs of every repo in the run's workspace provision (empty for a no-repo run) — the source of the allowlist's git hosts.</summary>
+    private static IReadOnlyList<string> CloneUrlsOf(WorkspaceProvisionRequest? workspace) =>
+        workspace is null ? Array.Empty<string>() : workspace.Repositories.Select(r => r.CloneRequest.RepositoryUrl).ToList();
 
     /// <summary>Layer the resolved credential's env onto the task's own non-secret env — the injected value wins for a shared key. In-memory only; the result is never re-persisted (an empty secret env returns the task env unchanged).</summary>
     internal static IReadOnlyDictionary<string, string> MergeEnvironment(IReadOnlyDictionary<string, string> taskEnv, IReadOnlyDictionary<string, string> secretEnv)
