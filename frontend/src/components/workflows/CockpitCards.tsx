@@ -1,3 +1,5 @@
+import { useEffect, useRef, useState } from "react";
+
 import { Ic } from "@/_imported/ai-code-space/icons";
 
 import type { CockpitFilter, DecisionSummary, TodaySummary } from "./cockpit";
@@ -25,6 +27,8 @@ export function CockpitCards({ metrics, filter, onFilter }: { metrics: CockpitMe
   // the headline number and the rows below can never disagree.
   const attention = decisions.count + suspendedReview;
   const stuck = failed + suspended;
+  // Failed/stuck stays calm — it only highlights briefly when the count GROWS (a new failure arrived), never a steady blink.
+  const flashFailed = useFlashOnIncrease(stuck);
 
   return (
     <div className="cockpit-cards">
@@ -38,7 +42,7 @@ export function CockpitCards({ metrics, filter, onFilter }: { metrics: CockpitMe
         {liveCount > 0 && <span className="cockpit-flow" aria-hidden="true"><i /><i /><i /></span>}
       </StatusCard>
 
-      <StatusCard tone="failed" label="Failed / stuck" value={stuck} armed={filter === "failed"} onClick={() => onFilter("failed")}
+      <StatusCard tone="failed" label="Failed / stuck" value={stuck} armed={filter === "failed"} flash={flashFailed} onClick={() => onFilter("failed")}
         sub={stuck === 0 ? "None" : joinDot([failed > 0 && `${failed} failed`, suspended > 0 && `${suspended} suspended`])}>
         {stuck > 0 && <Ic.Triangle size={12} aria-hidden="true" />}
       </StatusCard>
@@ -51,11 +55,11 @@ export function CockpitCards({ metrics, filter, onFilter }: { metrics: CockpitMe
   );
 }
 
-function StatusCard({ tone, label, value, sub, armed, onClick, children }: {
-  tone: string; label: string; value: number; sub: string; armed: boolean; onClick: () => void; children?: React.ReactNode;
+function StatusCard({ tone, label, value, sub, armed, flash, onClick, children }: {
+  tone: string; label: string; value: number; sub: string; armed: boolean; flash?: boolean; onClick: () => void; children?: React.ReactNode;
 }) {
   return (
-    <button type="button" className="cockpit-card" data-tone={tone} data-armed={armed || undefined} data-zero={value === 0 || undefined}
+    <button type="button" className="cockpit-card" data-tone={tone} data-armed={armed || undefined} data-zero={value === 0 || undefined} data-flash={flash || undefined}
       aria-pressed={armed} onClick={onClick}>
       <div className="cockpit-card-top">
         <span className="cockpit-card-label">{label}</span>
@@ -67,6 +71,24 @@ function StatusCard({ tone, label, value, sub, armed, onClick, children }: {
   );
 }
 
+/** True for ~1.2s right after `value` increases — a one-shot highlight for "a new one just arrived", never a steady blink. */
+function useFlashOnIncrease(value: number): boolean {
+  const [flash, setFlash] = useState(false);
+  const prev = useRef(value);
+
+  useEffect(() => {
+    if (value > prev.current) {
+      setFlash(true);
+      const t = setTimeout(() => setFlash(false), 1200);
+      prev.current = value;
+      return () => clearTimeout(t);
+    }
+    prev.current = value;
+  }, [value]);
+
+  return flash;
+}
+
 /** A tiny line sparkline (the day's hourly run histogram) — decorative, so it scales to fill and is aria-hidden. */
 function Sparkline({ data }: { data: number[] }) {
   const max = Math.max(1, ...data);
@@ -75,7 +97,7 @@ function Sparkline({ data }: { data: number[] }) {
 
   return (
     <svg className="cockpit-spark" viewBox="0 0 100 20" preserveAspectRatio="none" aria-hidden="true">
-      <polyline points={points} fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round" strokeLinecap="round" vectorEffect="non-scaling-stroke" />
+      <polyline className="cockpit-spark-line" pathLength={1} points={points} fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round" strokeLinecap="round" vectorEffect="non-scaling-stroke" />
     </svg>
   );
 }

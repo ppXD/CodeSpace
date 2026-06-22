@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import type { PendingDecision, WorkflowRunStatus, WorkflowRunSummary } from "@/api/workflows";
 
-import { compactAge, countRuns, summarizeDecisions, summarizeToday, suspendedNeedingReview } from "./cockpit";
+import { compactAge, countRuns, formatDuration, runOutcome, summarizeDecisions, summarizeToday, suspendedNeedingReview } from "./cockpit";
 
 function decision(o: Partial<PendingDecision>): PendingDecision {
   return {
@@ -14,6 +14,29 @@ function decision(o: Partial<PendingDecision>): PendingDecision {
 function run(id: string, status: WorkflowRunStatus, createdDate = "2026-06-22T00:00:00Z"): WorkflowRunSummary {
   return { id, workflowId: "w", workflowVersion: 1, sourceType: "manual", status, error: null, startedAt: null, completedAt: null, createdDate };
 }
+
+describe("formatDuration", () => {
+  const t0 = "2026-06-22T00:00:00Z";
+  it("reads in s / m s / h m, and is empty without both ends", () => {
+    expect(formatDuration(t0, "2026-06-22T00:00:45Z")).toBe("45s");
+    expect(formatDuration(t0, "2026-06-22T00:07:59Z")).toBe("7m 59s");
+    expect(formatDuration(t0, "2026-06-22T01:05:00Z")).toBe("1h 5m");
+    expect(formatDuration(null, t0)).toBe("");
+    expect(formatDuration(t0, null)).toBe("");
+  });
+});
+
+describe("runOutcome", () => {
+  const now = Date.parse("2026-06-22T01:00:00Z");
+  it("summarizes the result per status", () => {
+    expect(runOutcome({ ...run("a", "Success"), startedAt: "2026-06-22T00:00:00Z", completedAt: "2026-06-22T00:07:59Z" }, now)).toBe("completed in 7m 59s");
+    expect(runOutcome(run("b", "Success"), now)).toBe("completed");                       // no completedAt → no duration
+    expect(runOutcome({ ...run("c", "Failure"), error: "test exited 1" }, now)).toBe("failed · test exited 1");
+    expect(runOutcome(run("d", "Failure"), now)).toBe("failed");                           // no error message
+    expect(runOutcome(run("e", "Cancelled"), now)).toBe("cancelled");
+    expect(runOutcome({ ...run("f", "Suspended"), startedAt: "2026-06-21T22:00:00Z" }, now)).toBe("waiting 3h");
+  });
+});
 
 describe("suspendedNeedingReview", () => {
   it("returns suspended runs except those already covered by a queued decision", () => {

@@ -20,6 +20,35 @@ export function compactAge(iso: string, nowMs: number): string {
   return `${Math.floor(h / 24)}d`;
 }
 
+/** Elapsed time between two ISO timestamps as "45s" / "7m 59s" / "1h 5m"; empty when either is missing. */
+export function formatDuration(startISO: string | null, endISO: string | null): string {
+  if (!startISO || !endISO) return "";
+
+  const sec = Math.max(0, Math.round((new Date(endISO).getTime() - new Date(startISO).getTime()) / 1000));
+  if (!Number.isFinite(sec)) return "";   // an unparseable timestamp → no duration rather than "NaNm NaNs"
+  if (sec < 60) return `${sec}s`;
+
+  const m = Math.floor(sec / 60);
+  if (m < 60) return `${m}m ${sec % 60}s`;
+
+  const h = Math.floor(m / 60);
+  return `${h}h ${m % 60}m`;
+}
+
+/**
+ * A one-line "what happened" for a run — the result summary the rows were missing. Success reports how long it took,
+ * failure surfaces the error, a parked run its wait age. (The failing/parked NODE name — "failed at code node" —
+ * isn't in the runs-list summary; surfacing it needs a small backend field, tracked separately.)
+ */
+export function runOutcome(run: WorkflowRunSummary, nowMs: number): string {
+  if (run.status === "Success") { const d = formatDuration(run.startedAt, run.completedAt); return d ? `completed in ${d}` : "completed"; }
+  if (run.status === "Failure") return run.error ? `failed · ${run.error}` : "failed";
+  if (run.status === "Cancelled") return "cancelled";
+  if (run.status === "Suspended") return `waiting ${compactAge(run.startedAt ?? run.createdDate, nowMs)}`;
+
+  return run.status.toLowerCase();
+}
+
 /** The Needs-decision card: how many decisions wait on a human, the oldest one's age, and how many are high-risk. */
 export interface DecisionSummary {
   count: number;

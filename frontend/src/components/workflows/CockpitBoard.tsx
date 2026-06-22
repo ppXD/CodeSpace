@@ -3,7 +3,7 @@ import type { PendingDecision, RunPhasesResponse, WorkflowRunStatus, WorkflowRun
 import { relativeTime } from "@/lib/codeTree";
 
 import { DecisionCard } from "./DecisionCard";
-import { compactAge, suspendedNeedingReview, type CockpitFilter } from "./cockpit";
+import { compactAge, runOutcome, suspendedNeedingReview, type CockpitFilter } from "./cockpit";
 import { bucketRuns, sourceLabel } from "./runsIndex";
 import { summarizeRunState } from "./runPhases";
 
@@ -28,10 +28,10 @@ export function CockpitBoard({ runs, decisions, phasesByRun, nameById, filter, n
   const suspended = suspendedNeedingReview(runs, decisions);
 
   if (filter === "failed") {
-    return <Zone label="Failed / stuck"><CompactList runs={runs.filter((r) => r.status === "Failure" || r.status === "Suspended")} nameById={nameById} onOpen={onOpen} empty="Nothing failed or stuck." /></Zone>;
+    return <Zone label="Failed / stuck"><CompactList runs={runs.filter((r) => r.status === "Failure" || r.status === "Suspended")} nameById={nameById} nowMs={nowMs} onOpen={onOpen} empty="Nothing failed or stuck." /></Zone>;
   }
   if (filter === "today") {
-    return <Zone label="Today"><CompactList runs={runs.filter((r) => isToday(r.createdDate, nowMs))} nameById={nameById} onOpen={onOpen} empty="No runs today yet." /></Zone>;
+    return <Zone label="Today"><CompactList runs={runs.filter((r) => isToday(r.createdDate, nowMs))} nameById={nameById} nowMs={nowMs} onOpen={onOpen} empty="No runs today yet." /></Zone>;
   }
 
   const showAttention = filter === null || filter === "attention";
@@ -62,7 +62,7 @@ export function CockpitBoard({ runs, decisions, phasesByRun, nameById, filter, n
       )}
 
       {showRecent && (
-        <Zone label="Recent"><CompactList runs={buckets.recent} nameById={nameById} onOpen={onOpen} empty="No recent runs." /></Zone>
+        <Zone label="History"><CompactList runs={buckets.recent} nameById={nameById} nowMs={nowMs} onOpen={onOpen} empty="No runs yet." /></Zone>
       )}
     </div>
   );
@@ -117,29 +117,40 @@ function LiveRow({ run, phases, name, nowMs, onOpen }: { run: WorkflowRunSummary
   );
 }
 
-/** The compact run list used for Recent + the failed/today filter views. */
-function CompactList({ runs, nameById, onOpen, empty }: { runs: WorkflowRunSummary[]; nameById: Map<string, string>; onOpen: (runId: string) => void; empty: string }) {
+/** The run list used for History + the failed/today filter views — info-dense two-line rows. */
+function CompactList({ runs, nameById, nowMs, onOpen, empty }: { runs: WorkflowRunSummary[]; nameById: Map<string, string>; nowMs: number; onOpen: (runId: string) => void; empty: string }) {
   if (runs.length === 0) return <div className="cockpit-empty">{empty}</div>;
 
   return (
     <ul className="runs-list">
-      {runs.map((r) => <RunRow key={r.id} run={r} name={r.workflowId ? nameById.get(r.workflowId) : null} onOpen={onOpen} />)}
+      {runs.map((r) => <RunRow key={r.id} run={r} name={r.workflowId ? nameById.get(r.workflowId) : null} nowMs={nowMs} onOpen={onOpen} />)}
     </ul>
   );
 }
 
-function RunRow({ run, name, onOpen }: { run: WorkflowRunSummary; name?: string | null; onOpen: (runId: string) => void }) {
+/**
+ * Two-line run row: the title + when on top, and below it the run's context (kind · source · version) folded into a
+ * RESULT summary ("completed in 7m59s" / "failed · …") plus its short id — so each row reads as "what happened",
+ * not a bare DB cell. The status colour is carried by the glyph, so no redundant status word.
+ */
+function RunRow({ run, name, nowMs, onOpen }: { run: WorkflowRunSummary; name?: string | null; nowMs: number; onOpen: (runId: string) => void }) {
   const title = name ?? sourceLabel(run.sourceType);
-  const when = run.startedAt ?? run.createdDate;
+  const meta = [run.workflowId ? "Workflow" : "Task", sourceLabel(run.sourceType), run.workflowVersion != null ? `v${run.workflowVersion}` : null, runOutcome(run, nowMs)].filter(Boolean).join(" · ");
+  const when = run.completedAt ?? run.startedAt ?? run.createdDate;
 
   return (
-    <li className="runs-row" data-status={run.status.toLowerCase()} onClick={() => onOpen(run.id)}>
-      <span className="runs-row-glyph" data-status={run.status.toLowerCase()} aria-hidden="true"><RunGlyph status={run.status} /></span>
-      <span className="runs-row-title" title={title}>{title}</span>
-      <span className="runs-row-id">{run.id.slice(0, 8)}</span>
-      <span className="runs-row-source">{sourceLabel(run.sourceType)}</span>
-      <span className="runs-row-status">{run.status}</span>
-      <span className="runs-row-when">{relativeTime(when)}</span>
+    <li className="run-row2" data-status={run.status.toLowerCase()} onClick={() => onOpen(run.id)}>
+      <span className="run-row2-glyph" data-status={run.status.toLowerCase()} aria-hidden="true"><RunGlyph status={run.status} /></span>
+      <div className="run-row2-body">
+        <div className="run-row2-l1">
+          <span className="run-row2-title" title={title}>{title}</span>
+          <span className="run-row2-when">{relativeTime(when)}</span>
+        </div>
+        <div className="run-row2-l2">
+          <span className="run-row2-meta" title={meta}>{meta}</span>
+          <span className="run-row2-id">{run.id.slice(0, 8)}</span>
+        </div>
+      </div>
     </li>
   );
 }

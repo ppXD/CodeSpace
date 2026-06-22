@@ -2449,7 +2449,6 @@ textarea:-webkit-autofill {
 .acs-root .run-facts-val { margin: 0; font-size: 12.5px; color: var(--ink-2); font-weight: 500; }
 
 /* ── Runs cockpit — the run control center: status cards + the work board (attention / live / recent) ── */
-.acs-root .ct-subtitle { margin-top: 3px; font-size: 12.5px; color: var(--muted); }
 .acs-root .cockpit { display: flex; flex-direction: column; gap: 22px; padding: 16px; }
 
 /* The four status cards (each a filter toggle). */
@@ -2475,11 +2474,18 @@ textarea:-webkit-autofill {
 .acs-root .cockpit-flow i:nth-child(2) { animation-delay: .18s; }
 .acs-root .cockpit-flow i:nth-child(3) { animation-delay: .36s; }
 .acs-root .cockpit-spark { width: 56px; height: 18px; color: var(--accent); opacity: .7; }
+.acs-root .cockpit-spark-line { stroke-dasharray: 1; stroke-dashoffset: 1; animation: cockpitDraw 1.1s ease-out forwards; }
+/* Failed/stuck stays calm — a one-shot red ring only when the count grows (a new failure), never a steady blink. */
+.acs-root .cockpit-card[data-flash] { animation: cockpitFlash 1.2s ease-out; }
 @keyframes cockpitPulseAmber { 0%, 100% { box-shadow: 0 0 0 0 rgba(168,89,14,.4); } 50% { box-shadow: 0 0 0 5px rgba(168,89,14,0); } }
 @keyframes cockpitPulseAccent { 0%, 100% { box-shadow: 0 0 0 0 rgba(217,119,87,.4); } 50% { box-shadow: 0 0 0 5px rgba(217,119,87,0); } }
 @keyframes cockpitFlow { 0%, 100% { opacity: .25; } 50% { opacity: 1; } }
+@keyframes cockpitDraw { to { stroke-dashoffset: 0; } }
+@keyframes cockpitFlash { 0% { box-shadow: 0 0 0 0 rgba(158,53,53,.5); } 100% { box-shadow: 0 0 0 6px rgba(158,53,53,0); } }
 @media (prefers-reduced-motion: reduce) {
   .acs-root .cockpit-pulse, .acs-root .cockpit-flow i { animation: none; }
+  .acs-root .cockpit-card[data-flash] { animation: none; }
+  .acs-root .cockpit-spark-line { animation: none; stroke-dashoffset: 0; }
 }
 @media (max-width: 900px) { .acs-root .cockpit-cards { grid-template-columns: repeat(2, 1fr); } }
 
@@ -2513,29 +2519,26 @@ textarea:-webkit-autofill {
 /* The live dot is defined below the cards' reduced-motion block, so it needs its own override (equal specificity, source order wins). */
 @media (prefers-reduced-motion: reduce) { .acs-root .cockpit-live-dot { animation: none; } }
 
-/* Compact run rows — used by Recent + the failed/today filter views. */
+/* Two-line run rows — History + the failed/today filter views. Each row reads as "what happened", not a DB cell. */
 .acs-root .runs-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
-.acs-root .runs-row { display: flex; align-items: center; gap: 12px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 10px; cursor: pointer; background: var(--panel); transition: background .12s ease, border-color .12s ease; }
-.acs-root .runs-row:hover { background: var(--panel-2); border-color: var(--accent-soft); }
-.acs-root .runs-row-glyph { display: grid; place-items: center; width: 18px; height: 18px; flex: none; color: var(--muted-2); }
-.acs-root .runs-row-glyph > svg { display: block; }
-.acs-root .runs-row-glyph[data-status="success"]   { color: #1F6B3F; }
-.acs-root .runs-row-glyph[data-status="failure"]   { color: #9E3535; }
-.acs-root .runs-row-glyph[data-status="suspended"] { color: #A8590E; }
-.acs-root .runs-row-glyph[data-status="cancelled"] { opacity: .55; }
-.acs-root .runs-row-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13.5px; font-weight: 500; color: var(--ink); }
-.acs-root .runs-row-id { font-size: 11.5px; color: var(--muted-2); font-variant-numeric: tabular-nums; font-family: ui-monospace, monospace; }
-.acs-root .runs-row-source { font-size: 11px; color: var(--muted); }
-.acs-root .runs-row-status { font-size: 10px; color: var(--muted-2); text-transform: uppercase; letter-spacing: .04em; min-width: 64px; }
-.acs-root .runs-row-when { font-size: 11.5px; color: var(--muted); white-space: nowrap; min-width: 72px; text-align: right; }
+.acs-root .run-row2 { display: flex; align-items: flex-start; gap: 11px; padding: 10px 13px; border: 1px solid var(--line); border-radius: 11px; cursor: pointer; background: var(--panel); transition: background .12s ease, border-color .12s ease; }
+.acs-root .run-row2:hover { background: var(--panel-2); border-color: var(--accent-soft); }
+.acs-root .run-row2-glyph { display: grid; place-items: center; width: 18px; height: 18px; flex: none; margin-top: 1px; color: var(--muted-2); }
+.acs-root .run-row2-glyph > svg { display: block; }
+.acs-root .run-row2-glyph[data-status="success"]   { color: #1F6B3F; }
+.acs-root .run-row2-glyph[data-status="failure"]   { color: #9E3535; }
+.acs-root .run-row2-glyph[data-status="suspended"] { color: #A8590E; }
+.acs-root .run-row2-glyph[data-status="cancelled"] { opacity: .55; }
+.acs-root .run-row2-body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.acs-root .run-row2-l1, .acs-root .run-row2-l2 { display: flex; align-items: baseline; gap: 10px; }
+.acs-root .run-row2-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13.5px; font-weight: 500; color: var(--ink); }
+.acs-root .run-row2-when { flex: none; font-size: 11.5px; color: var(--muted); white-space: nowrap; }
+.acs-root .run-row2-meta { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11.5px; color: var(--ink-2); }
+.acs-root .run-row2-id { flex: none; font-size: 11px; color: var(--muted-2); font-variant-numeric: tabular-nums; font-family: ui-monospace, monospace; }
 .acs-root .runs-row-spin { width: 12px; height: 12px; border-radius: 50%; border: 2px solid #E9CFC0; border-top-color: var(--accent); animation: wfSpin .7s linear infinite; }
 .acs-root .runs-row-hollow { width: 11px; height: 11px; border-radius: 50%; border: 1.5px solid var(--line); }
 @media (prefers-reduced-motion: reduce) {
   .acs-root .runs-row-spin { animation: none; }
-}
-.acs-root .runs-row-source, .acs-root .runs-row-status, .acs-root .runs-row-id { flex: none; }
-@media (max-width: 720px) {
-  .acs-root .runs-row-source, .acs-root .runs-row-id { display: none; }
 }
 
 /* ── Live run-level progress chip overlaid on the run canvas (top-left Panel) ───────────────────────── */
