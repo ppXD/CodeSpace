@@ -64,6 +64,36 @@ public class SubtaskAwareFakeCliDriftTests
     }
 
     [Fact]
+    public void The_file_writing_fake_cli_lines_parse_through_the_real_harness_and_its_file_slug_is_deterministic()
+    {
+        // Rule-12.5 drift pin for FileWritingFakeCli (the driver of the whole-loop supervisor E2E). It emits the
+        // SAME three codex-shaped lines as SubtaskAwareFakeCli PLUS writes a file; pin both the event contract and
+        // the goal→filename slug the E2E's "changed files start with agent_" assertion depends on.
+        var harness = new CodexHarness();
+        const string goal = "do alpha";
+
+        var lines = new[]
+        {
+            """{"type":"agent_reasoning","message":"Editing for: do alpha"}""",
+            $$"""{"type":"agent_message","message":"{{FileWritingFakeCli.SummaryPrefix}}do alpha"}""",
+            """{"type":"task_complete","message":"completed"}""",
+        };
+
+        var parsed = lines.SelectMany(harness.ParseEvents).ToList();
+        parsed.Select(e => e.Kind).ShouldBe(new[] { AgentEventKind.Reasoning, AgentEventKind.AssistantMessage, AgentEventKind.Completed });
+
+        var result = harness.BuildResult(parsed, exitCode: 0);
+        result.Status.ShouldBe(AgentRunStatus.Succeeded);
+        result.Summary.ShouldBe(FileWritingFakeCli.ExpectedSummaryFor(goal));
+
+        FileWritingFakeCli.EmittedEventTypes.ShouldBe(new[] { "agent_reasoning", "agent_message", "task_complete" });
+        // The C# FileFor mirror must equal the script's `tr -c 'A-Za-z0-9' '_'` slug — distinct goals → distinct files
+        // (clean K-way merge); the E2E asserts the captured diff names a file with this prefix.
+        FileWritingFakeCli.FileFor("do alpha").ShouldBe("agent_do_alpha.txt");
+        FileWritingFakeCli.FileFor("do beta").ShouldBe("agent_do_beta.txt");
+    }
+
+    [Fact]
     public void The_high_volume_fake_cli_lines_still_parse_into_the_expected_per_line_shape()
     {
         // Rule-12.5 drift pin for HighVolumeSubtaskFakeCli (the driver of the two D1 map-fan-out E2E tests). It
