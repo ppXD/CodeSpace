@@ -1,9 +1,8 @@
 name: Backend · Unit
 
 # Pure, infra-free backend logic (the Category=Unit tests). No database, no network.
-# The 4 bubblewrap/prlimit isolation E2Es also live in this project; on this plain runner they
-# have no bwrap, so they DEGRADE-SKIP cleanly (proving the unconfined fallback path) — they run
-# for REAL in the dedicated sandbox-isolation workflow.
+# Real-kernel bubblewrap/prlimit confinement tests live in their own CodeSpace.SandboxTests project
+# (Category=Sandbox) and run in the dedicated sandbox-isolation workflow — never here.
 
 on:
   push:
