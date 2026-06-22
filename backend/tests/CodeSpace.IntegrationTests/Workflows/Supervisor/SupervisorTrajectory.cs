@@ -40,9 +40,9 @@ public static class SupervisorTrajectory
             {
                 decision = await decider.DecideAsync(context, cancellationToken).ConfigureAwait(false);
             }
-            catch (OperationCanceledException)
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
-                break;   // a wall-clock deadline fired mid-decision — fall through to a clean non-stop result (a scored failure, never an opaque CI timeout)
+                break;   // OUR wall-clock deadline fired mid-decision — fall through to a clean non-stop result (a scored failure, never an opaque CI timeout). A per-call HttpClient timeout (an OperationCanceledException whose token is NOT ours) is deliberately NOT caught here — it must propagate honestly rather than masquerade as a turn-cap loop.
             }
 
             kinds.Add(decision.Kind);

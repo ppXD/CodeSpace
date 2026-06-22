@@ -35,8 +35,6 @@ export interface LaunchTaskResult {
 }
 
 export const tasksApi = {
-  // Launch a run from a task spec — the run resource is rooted at api/workflows/runs (the substrate is the
-  // workflow engine). The legacy POST /api/tasks still works (deprecated alias) but the canonical route is this.
   launch: (input: LaunchTaskInput) =>
-    fetchJson<LaunchTaskResult>("/api/workflows/runs", { method: "POST", body: JSON.stringify(input) }),
+    fetchJson<LaunchTaskResult>("/api/tasks", { method: "POST", body: JSON.stringify(input) }),
 };

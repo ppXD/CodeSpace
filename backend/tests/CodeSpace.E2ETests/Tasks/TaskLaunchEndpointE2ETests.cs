@@ -20,13 +20,11 @@ using Shouldly;
 namespace CodeSpace.E2ETests.Tasks;
 
 /// <summary>
-/// E2E coverage for <c>POST /api/workflows/runs</c> through the REAL ASP.NET pipeline — JWT auth, the X-Team-Id
+/// E2E coverage for <c>POST /api/tasks</c> through the REAL ASP.NET pipeline — JWT auth, the X-Team-Id
 /// team-scope behavior (TeamMembershipAuthorizationBehavior), model binding of <c>LaunchTaskCommand</c>, the
 /// controller, the mediator, the GlobalExceptionFilter. The launch's post-commit dispatch → engine run →
 /// agent.code → real executor + LocalProcessRunner + fake CLI → resume → terminal chain is then DRAINED and the
-/// run asserted to reach Success — proving the generic launch surface works end to end behind real HTTP. The
-/// deprecated <c>/api/tasks</c> alias is proven non-breaking by the fail-closed Theory (both routes resolve to the
-/// same launch handler) without re-running the heavy agent chain a second time in one class.
+/// run asserted to reach Success — proving the generic launch surface works end to end behind real HTTP.
 ///
 /// <para>Tier: 🟢 High-fidelity — real app host + real Postgres + real engine + real executor + LocalProcessRunner
 /// spawning a real OS process; only the CLI's intelligence is faked at the binary (<see cref="FakeCodexCli"/>) and
@@ -41,7 +39,7 @@ public sealed class TaskLaunchEndpointE2ETests : IClassFixture<TaskLaunchApiFact
     public TaskLaunchEndpointE2ETests(TaskLaunchApiFactory factory) { _factory = factory; }
 
     [Fact]
-    public async Task Launch_runs_a_real_agent_to_success()
+    public async Task Post_tasks_launches_a_chat_task_that_runs_a_real_agent_to_success()
     {
         if (OperatingSystem.IsWindows()) return;   // the fake CLI is a /bin/sh script the runner spawns
 
@@ -50,9 +48,7 @@ public sealed class TaskLaunchEndpointE2ETests : IClassFixture<TaskLaunchApiFact
         var (userId, teamId) = await SeedTeamMembershipAsync();
 
         // POST through the REAL pipeline: a signed bearer token + the X-Team-Id header drive auth + team scope.
-        // The deprecated /api/tasks alias resolves to this same handler — proven without a second heavy agent
-        // chain by the both-routes fail-closed Theory below (running the full chain per-route is flaky in one class).
-        var request = new HttpRequestMessage(HttpMethod.Post, "/api/workflows/runs")
+        var request = new HttpRequestMessage(HttpMethod.Post, "/api/tasks")
         {
             Content = JsonContent.Create(new
             {
@@ -104,16 +100,14 @@ public sealed class TaskLaunchEndpointE2ETests : IClassFixture<TaskLaunchApiFact
             customMessage: "the folded summary must match the launched task text through the real CLI; a mismatch means the goal never propagated end-to-end or the fake-CLI event shape drifted");
     }
 
-    [Theory]
-    [InlineData("/api/workflows/runs")]   // canonical
-    [InlineData("/api/tasks")]            // deprecated alias — also fail-closed
-    public async Task Launch_without_a_team_header_is_rejected_fail_closed(string launchRoute)
+    [Fact]
+    public async Task Post_tasks_without_a_team_header_is_rejected_fail_closed()
     {
         var (userId, _) = await SeedTeamMembershipAsync();
 
         // A signed token but NO X-Team-Id header → the team-scope behavior throws (team comes from the header,
         // never the body) → the GlobalExceptionFilter maps it to 403. Tenancy fail-closed at the HTTP boundary.
-        var request = new HttpRequestMessage(HttpMethod.Post, launchRoute)
+        var request = new HttpRequestMessage(HttpMethod.Post, "/api/tasks")
         {
             Content = JsonContent.Create(new { taskText = "no team header", surfaceKind = "chat" }),
         };
@@ -164,5 +158,5 @@ public sealed class TaskLaunchEndpointE2ETests : IClassFixture<TaskLaunchApiFact
     }
 
     private static async Task<string> DescribeFailureAsync(HttpResponseMessage response) =>
-        $"launch POST expected 200 but got {(int)response.StatusCode}; body: {await response.Content.ReadAsStringAsync()}";
+        $"POST /api/tasks expected 200 but got {(int)response.StatusCode}; body: {await response.Content.ReadAsStringAsync()}";
 }

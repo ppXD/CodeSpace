@@ -117,6 +117,16 @@ public sealed class SupervisorTrajectoryEvalTests
         SupervisorTrajectoryScore.Score(result).Note.ShouldContain("time budget");
     }
 
+    [Fact]
+    public async Task A_per_call_HTTP_timeout_propagates_and_is_NOT_mislabeled_as_a_turn_cap()
+    {
+        // A per-call HttpClient.Timeout throws OperationCanceledException whose token is NOT the trajectory deadline
+        // (the deadline never fired). RunAsync must let it propagate — swallowing it would mislabel a slow endpoint as a
+        // looping model that "hit the turn cap" (the exact bug the real-model OpenAI wire surfaced).
+        await Should.ThrowAsync<OperationCanceledException>(() =>
+            SupervisorTrajectory.RunAsync(new PerCallTimeoutDecider(), maxTurns: 6, CancellationToken.None));
+    }
+
     // ── Scripted deciders (decide purely from the prior-decision kinds — no model) ──────────────────────────
 
     /// <summary>A converging brain: plan if nothing planned, spawn if planned-not-spawned, merge if spawned-not-merged, else stop.</summary>
@@ -218,5 +228,12 @@ public sealed class SupervisorTrajectoryEvalTests
             _deadline.Cancel();
             throw new OperationCanceledException(cancellationToken);
         }
+    }
+
+    /// <summary>Simulates an HttpClient per-call timeout: throws OperationCanceledException WITHOUT the trajectory deadline being cancelled — RunAsync must let it propagate, not swallow it as a turn-cap.</summary>
+    private sealed class PerCallTimeoutDecider : ISupervisorDecider
+    {
+        public Task<SupervisorDecision> DecideAsync(SupervisorTurnContext context, CancellationToken cancellationToken) =>
+            throw new OperationCanceledException();
     }
 }
