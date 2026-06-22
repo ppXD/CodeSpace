@@ -172,6 +172,19 @@ public sealed class SupervisorDecisionScript
     public void PlanSpawnBadModelStop() => Mode = SupervisorScriptMode.PlanSpawnBadModelStop;
 }
 
+/// <summary>
+/// The fixture-singleton knob that picks WHICH <see cref="CodeSpace.Core.Services.Supervisor.ISupervisorDecider"/> the
+/// engine resolves: the deterministic <see cref="ScriptedSupervisorDecider"/> (default) or the production
+/// <see cref="CodeSpace.Core.Services.Supervisor.Deciders.LlmSupervisorDecider"/> — so a <c>[Trait RealModel]</c> test
+/// can drive the REAL durable engine with a LIVE brain (its credential resolved from a seeded DB row) instead of a
+/// scripted one. Defaults to <see cref="UseLiveModel"/> = false, so every existing supervisor test is byte-identical;
+/// a test that flips it MUST reset it in Dispose (the fixture is shared across the whole Postgres collection).
+/// </summary>
+public sealed class SupervisorDeciderMode
+{
+    public bool UseLiveModel { get; set; }
+}
+
 public enum SupervisorScriptMode
 {
     PlanThenStop,
