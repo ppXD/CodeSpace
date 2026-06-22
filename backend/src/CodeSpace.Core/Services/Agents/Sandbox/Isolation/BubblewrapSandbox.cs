@@ -88,10 +88,13 @@ public static class BubblewrapSandbox
             "--tmpfs", "/tmp",               // private /tmp → host /tmp (other runs' spools) shadowed
         };
 
-        // Network: severed by default-deny when the run forbids it — a fresh net namespace with only loopback, so
-        // the agent cannot reach cloud-metadata (169.254.169.254), the LAN, or the internet. When allowed, the host
-        // network is shared (the agent reaches its model API). (Model-API-only egress allowlist is a later slice.)
-        if (!plan.ShareNetwork) args.Add("--unshare-net");
+        // Network: the egress policy decides the namespace. None (network forbidden) OR a requested allowlist this
+        // runner cannot yet ENFORCE (canEnforceAllowlist:false — the privileged host-filter is a later slice) both
+        // FAIL CLOSED to --unshare-net (a fresh net namespace, loopback only — no cloud-metadata / LAN / internet).
+        // Only Full shares the host network (the agent reaches its model API). Byte-identical for a run with no
+        // allowlist: ShareNetwork true → Full → shared; false → None → severed.
+        var egress = SandboxEgressPolicy.Derive(plan.ShareNetwork, plan.EgressAllowlist, canEnforceAllowlist: false);
+        if (egress.Mode != SandboxEgressMode.Full) args.Add("--unshare-net");
 
         // Read-only minimal root: the runtime + harness binary are reachable, the rest of the host FS is invisible.
         foreach (var dir in ReadOnlyRootDirs)
@@ -216,4 +219,7 @@ public sealed record BwrapPlan
 
     /// <summary>Whether to SHARE the host network. <c>false</c> → <c>--unshare-net</c> (only loopback; no egress).</summary>
     public bool ShareNetwork { get; init; } = true;
+
+    /// <summary>The deny-by-default egress allowlist (host names) — narrows <see cref="ShareNetwork"/> to ONLY these. Null / empty ⇒ no allowlist. Until the privileged host-filtering slice lands the allowlist is UNENFORCEABLE here, so a set allowlist FAILS CLOSED to no egress (see <see cref="SandboxEgressPolicy"/>).</summary>
+    public IReadOnlyList<string>? EgressAllowlist { get; init; }
 }

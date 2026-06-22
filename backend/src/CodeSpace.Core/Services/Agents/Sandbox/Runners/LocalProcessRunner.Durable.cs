@@ -377,6 +377,7 @@ public sealed partial class LocalProcessRunner
                 WritablePaths = writable,
                 ReadOnlyExtraPaths = readOnlyExtra,
                 ShareNetwork = spec.AllowNetwork,
+                EgressAllowlist = spec.EgressAllowlist,
             });
             command = bwrap;
         }
