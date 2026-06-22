@@ -52,10 +52,22 @@ public class AgentEgressPolicyTests
     }
 
     [Fact]
-    public void An_unset_egress_allow_hosts_is_omitted_from_the_persisted_json()
+    public void A_full_egress_run_serializes_byte_identically_to_a_pre_field_envelope()
     {
+        // The default (Full) egress + unset extra-hosts must add NOTHING to the persisted JSON, so an existing run's
+        // task_json is unchanged by introducing the knob — no "egress" key, no "egressAllowHosts" key.
         var task = new AgentTask { Goal = "g", Harness = "codex-cli", Permissions = new AgentPermissions { Network = AgentNetworkAccess.On } };
 
-        JsonSerializer.Serialize(task, AgentJson.Options).ShouldNotContain("egressAllowHosts", Case.Insensitive, "an unset extra-hosts list must add nothing to the envelope");
+        var json = JsonSerializer.Serialize(task, AgentJson.Options);
+
+        json.ShouldNotContain("egress", Case.Insensitive, "a Full (default) run must add neither the egress posture nor the extra-hosts list to the envelope");
+    }
+
+    [Fact]
+    public void An_allowlist_run_does_serialize_the_egress_posture()
+    {
+        var task = new AgentTask { Goal = "g", Harness = "codex-cli", Permissions = new AgentPermissions { Network = AgentNetworkAccess.On, Egress = AgentEgressPolicy.Allowlist } };
+
+        JsonSerializer.Serialize(task, AgentJson.Options).ShouldContain("Allowlist", Case.Insensitive, "a non-default posture IS persisted so the run's intent survives a re-attach");
     }
 }

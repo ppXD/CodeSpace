@@ -122,8 +122,10 @@ public sealed record AgentPermissions
     /// Egress posture WHEN <see cref="Network"/> is On: <see cref="AgentEgressPolicy.Full"/> (the default — reach any
     /// host, today's behaviour) or <see cref="AgentEgressPolicy.Allowlist"/> (deny-by-default; reachable = the run's
     /// model-API host + git host(s) + <see cref="EgressAllowHosts"/>, enforced by the sandbox's filtered netns and
-    /// FAIL-CLOSED on a runner that can't enforce it). Network Off ⇒ no egress regardless of this.
+    /// FAIL-CLOSED on a runner that can't enforce it). Network Off ⇒ no egress regardless of this. <c>[JsonIgnore(WhenWritingDefault)]</c>
+    /// so a Full (default) run's permissions serialize byte-identically to a pre-field envelope.
     /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
     public AgentEgressPolicy Egress { get; init; } = AgentEgressPolicy.Full;
 
     /// <summary>
