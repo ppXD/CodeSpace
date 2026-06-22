@@ -26,7 +26,7 @@ public interface IRunFromSnapshotStarter
     /// <c>ExecuteRunAsync</c>). Returns the new <c>workflow_run.id</c>. Throws
     /// <c>WorkflowValidationException</c> for an invalid definition (before any DB write).
     /// </summary>
-    Task<Guid> StartFromSnapshotAsync(WorkflowDefinition definition, Guid teamId, Guid actorUserId, string? launchPayloadJson, IReadOnlyList<Guid>? scopeRepositoryIds, CancellationToken cancellationToken);
+    Task<Guid> StartFromSnapshotAsync(WorkflowDefinition definition, Guid teamId, Guid actorUserId, string? launchPayloadJson, IReadOnlyList<Guid>? scopeRepositoryIds, string? projectionKind, CancellationToken cancellationToken);
 
     /// <summary>
     /// Replay a finished snapshot/dynamic run: clone its EXACT frozen definition (<paramref name="definitionJson"/>
@@ -38,5 +38,5 @@ public interface IRunFromSnapshotStarter
     /// snapshot then dispatches, exactly as the authored-replay path does, so the engine's variable-presence fork
     /// takes the replay scope. Returns the new <c>workflow_run.id</c>.
     /// </summary>
-    Task<Guid> StageReplayFromSnapshotAsync(string definitionJson, string definitionHash, Guid teamId, Guid actorUserId, string payloadJson, string sourceType, Guid parentRunId, Guid causationRequestId, IReadOnlyList<Guid> scopeRepositoryIds, IReadOnlyList<Guid> scopeProjectIds, CancellationToken cancellationToken);
+    Task<Guid> StageReplayFromSnapshotAsync(string definitionJson, string definitionHash, Guid teamId, Guid actorUserId, string payloadJson, string sourceType, Guid parentRunId, Guid causationRequestId, IReadOnlyList<Guid> scopeRepositoryIds, IReadOnlyList<Guid> scopeProjectIds, string? projectionKind, CancellationToken cancellationToken);
 }

@@ -13,6 +13,10 @@ public class WorkflowRunConfiguration : IEntityTypeConfiguration<WorkflowRun>
         builder.Property(r => r.Status).HasConversion<string>().HasMaxLength(16);
         builder.Property(r => r.OutputsJson).HasColumnName("outputs_jsonb").HasColumnType("jsonb");
 
+        // run_kind is a Postgres GENERATED column (migration 0067) — the DB computes it from source_type, so EF must
+        // never write it (INSERT/UPDATE) and must read it back after a write.
+        builder.Property(r => r.RunKind).ValueGeneratedOnAddOrUpdate();
+
         // Inline frozen definition for a SNAPSHOT run (dynamic-workflows substrate). NULL for an
         // authored run, which loads its definition from the pinned WorkflowVersion instead.
         builder.Property(r => r.DefinitionSnapshotJson).HasColumnName("definition_snapshot_jsonb").HasColumnType("jsonb");

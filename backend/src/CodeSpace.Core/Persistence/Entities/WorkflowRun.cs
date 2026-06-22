@@ -76,6 +76,20 @@ public class WorkflowRun : IEntity<Guid>, IAuditable
     public Guid? ActorId { get; set; }
 
     /// <summary>
+    /// Coarse semantic origin — a Postgres GENERATED column derived from <see cref="SourceType"/> (workflow / task /
+    /// event / replay / schedule / child / api / other; see <c>RunKinds</c>). Read-only: the DB computes it, EF never
+    /// writes it. Filter by run kind without classifying client-side.
+    /// </summary>
+    public string RunKind { get; private set; } = "";
+
+    /// <summary>
+    /// The projection / coordination MODE of a task run (single-agent / plan-map-synth / supervisor / …; an open string,
+    /// see <c>TaskProjectionKinds</c>). NULL for an authored / non-task run. Denormalised from the route's projection
+    /// kind at the snapshot creation site — it is NOT derivable from a column (it lives in the snapshot node graph).
+    /// </summary>
+    public string? ProjectionKind { get; set; }
+
+    /// <summary>
     /// Launch-time SCOPE: the repositories this run was launched against (multi-repo) — a point-in-time snapshot set at
     /// the snapshot/task creation site. NOT the repos the run actually touched (that is the future
     /// <c>touched_repository_ids</c> from the Changes projector). Empty for an authored workflow run (its repos live in

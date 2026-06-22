@@ -55,6 +55,12 @@ public sealed record RunListFilter
     /// <summary>Only runs launched by any of these users (<c>actor_id = ANY</c>, OR-within). A webhook / system run (null actor) matches no actor filter. Null / empty = any.</summary>
     public IReadOnlyList<Guid>? ActorIds { get; init; }
 
+    /// <summary>Only runs of any of these coarse origin kinds (<c>run_kind = ANY</c>, OR-within; e.g. <c>workflow</c>, <c>task</c>, <c>event</c>, <c>replay</c> — see <c>RunKinds</c>). Null / empty = any.</summary>
+    public IReadOnlyList<string>? RunKinds { get; init; }
+
+    /// <summary>Only task runs of any of these projection/coordination modes (<c>projection_kind = ANY</c>, OR-within; e.g. <c>single-agent</c>, <c>supervisor</c>). A non-task run (null projection_kind) matches none. Null / empty = any.</summary>
+    public IReadOnlyList<string>? ProjectionKinds { get; init; }
+
     /// <summary>
     /// <c>true</c> = only runs with a PENDING decision (a parked decision the run is waiting on a human/policy to
     /// answer), <c>false</c> = only runs WITHOUT one, null = either. Narrower than <c>Suspended</c>: a run parked on a

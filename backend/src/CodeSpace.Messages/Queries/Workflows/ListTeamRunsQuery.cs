@@ -35,6 +35,12 @@ public sealed record ListTeamRunsQuery : IQuery<RunPage>, IRequireTeamMembership
     /// <summary>Only runs launched by any of these users; bind <c>?actorIds=&lt;id&gt;</c>. Omit for any.</summary>
     public IReadOnlyList<Guid>? ActorIds { get; init; }
 
+    /// <summary>Only runs of any of these coarse origin kinds; bind <c>?runKinds=workflow&amp;runKinds=task</c>. Omit for any.</summary>
+    public IReadOnlyList<string>? RunKinds { get; init; }
+
+    /// <summary>Only task runs of any of these projection modes; bind <c>?projectionKinds=supervisor</c>. Omit for any.</summary>
+    public IReadOnlyList<string>? ProjectionKinds { get; init; }
+
     /// <summary>Only runs with (<c>true</c>) / without (<c>false</c>) a pending decision; omit for either.</summary>
     public bool? HasPendingDecision { get; init; }
 
@@ -61,6 +67,8 @@ public sealed record ListTeamRunsQuery : IQuery<RunPage>, IRequireTeamMembership
         RepositoryIds = RepositoryIds,
         ProjectIds = ProjectIds,
         ActorIds = ActorIds,
+        RunKinds = RunKinds,
+        ProjectionKinds = ProjectionKinds,
         HasPendingDecision = HasPendingDecision,
         NeedsAttention = NeedsAttention,
         Since = Since,

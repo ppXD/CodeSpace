@@ -107,6 +107,11 @@ public sealed class TeamRunsIndexEndpointE2ETests : IClassFixture<TaskLaunchApiF
         var byActor = await SendAsync(HttpMethod.Get, $"/api/workflows/runs?actorIds={Guid.NewGuid()}", userId, teamId);
         byActor.StatusCode.ShouldBe(HttpStatusCode.OK, customMessage: await DescribeFailureAsync(byActor));
         (await byActor.Content.ReadFromJsonAsync<RunPage>())!.Items.ShouldNotContain(r => r.Id == runId, "actorIds binds and excludes a run launched by a different user");
+
+        // ?runKinds= binds: a task launch is a snapshot run → run_kind=task, never 'workflow', so this excludes it.
+        var byKind = await SendAsync(HttpMethod.Get, "/api/workflows/runs?runKinds=workflow", userId, teamId);
+        byKind.StatusCode.ShouldBe(HttpStatusCode.OK, customMessage: await DescribeFailureAsync(byKind));
+        (await byKind.Content.ReadFromJsonAsync<RunPage>())!.Items.ShouldNotContain(r => r.Id == runId, "runKinds binds and excludes a task run from a workflow-kind filter");
     }
 
     [Fact]
