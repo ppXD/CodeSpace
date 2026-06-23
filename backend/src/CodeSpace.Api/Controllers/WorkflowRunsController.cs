@@ -65,6 +65,14 @@ public class WorkflowRunsController : ControllerBase
         return result == null ? NotFound() : Ok(result);
     }
 
+    /// <summary>The run's RAW event ledger — every workflow_run_record row in Sequence order, unfiltered (the Trace audit, the unfiltered counterpart to /timeline). Foreign / absent → 404.</summary>
+    [HttpGet("{runId:guid}/records")]
+    public async Task<IActionResult> GetRecords([FromRoute] Guid runId, CancellationToken cancellationToken)
+    {
+        var result = await _mediator.Send(new GetRunRecordsQuery { RunId = runId }, cancellationToken).ConfigureAwait(false);
+        return result == null ? NotFound() : Ok(result);
+    }
+
     /// <summary>Replay an existing run onto a fresh run id (plain values frozen from snapshot, secrets re-resolved). Returns the new run id.</summary>
     [HttpPost("{runId:guid}/replay")]
     public async Task<IActionResult> Replay([FromRoute] Guid runId, CancellationToken cancellationToken)
