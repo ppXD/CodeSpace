@@ -63,4 +63,28 @@ describe("RunStateHeader", () => {
     expect(container.querySelector('.run-state[data-status="success"] .run-state-lead')?.textContent).toBe("Success");
     expect(queryByText(/agents active/)).toBeNull();   // no agents → no agent clause
   });
+
+  it("settles the agent tally to a plain count on a terminal run (no nonsensical '0 of 1 active')", () => {
+    const { getByText, queryByText } = render(<RunStateHeader runStatus="Success" phases={[
+      phase({ label: "code", status: "Succeeded", agents: [{ agentRunId: "a1", status: "Succeeded" }] }),
+    ]} />);
+    expect(getByText("1 agent")).toBeTruthy();          // settled count, not "0 of 1 agents active"
+    expect(queryByText(/agents active/)).toBeNull();    // the live-progress phrasing is gone once terminal
+  });
+
+  it("pluralizes the settled agent count on a multi-agent terminal run", () => {
+    const { getByText } = render(<RunStateHeader runStatus="Failure" phases={[
+      phase({ label: "fan-out", status: "Failed", agents: [
+        { agentRunId: "a1", status: "Succeeded" }, { agentRunId: "a2", status: "Failed" }, { agentRunId: "a3", status: "Succeeded" },
+      ] }),
+    ]} />);
+    expect(getByText("3 agents")).toBeTruthy();
+  });
+
+  it("keeps the live 'N of M active' phrasing while the run is still active", () => {
+    const { getByText } = render(<RunStateHeader runStatus="Running" phases={[
+      phase({ label: "code", status: "Active", agents: [{ agentRunId: "a1", status: "Running" }] }),
+    ]} />);
+    expect(getByText("1 of 1 agents active")).toBeTruthy();   // active run → live tally, even at full/zero counts
+  });
 });
