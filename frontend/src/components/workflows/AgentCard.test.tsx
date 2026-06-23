@@ -40,4 +40,14 @@ describe("AgentCard rollup", () => {
     render(<AgentCard agent={agent} />);   // no events
     expect(screen.getByText("claude-code · 7m 59s")).toBeInTheDocument();
   });
+
+  it("highlights and scrolls into view when the outline selects it", () => {
+    const scrollIntoView = vi.fn();
+    Element.prototype.scrollIntoView = scrollIntoView;   // jsdom doesn't implement it
+
+    const { container } = render(<AgentCard agent={agent} selected />);
+
+    expect(container.querySelector(".run-agent-card[data-selected]")).not.toBeNull();
+    expect(scrollIntoView).toHaveBeenCalled();
+  });
 });

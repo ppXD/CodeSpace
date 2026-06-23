@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
 
 import { Ic } from "@/_imported/ai-code-space/icons";
@@ -35,6 +36,8 @@ function RunDetailPage() {
   const runDecisions = decisions.data ? decisionsForRun(decisions.data, runId, runAgentIds) : [];
   const workflowId = run.data?.workflowId ?? null;
   const replay = useReplayRun();
+  // Clicking an agent in the outline focuses its card in the center (the Live-work band scrolls it into view).
+  const [selectedAgentRunId, setSelectedAgentRunId] = useState<string | null>(null);
 
   const onReplay = async () => {
     const result = await replay.mutateAsync(runId);
@@ -86,7 +89,7 @@ function RunDetailPage() {
           <div className="rail-card">
             <div className="rail-card-head"><Ic.Workflow size={12} aria-hidden="true" /> Outline</div>
             {phases.data
-              ? <RunOutline phases={phases.data.phases} />
+              ? <RunOutline phases={phases.data.phases} selectedAgentRunId={selectedAgentRunId} onSelectAgent={setSelectedAgentRunId} />
               : <div className="run-outline-empty">{phases.isLoading ? "Loading outline…" : "Outline unavailable."}</div>}
           </div>
         </aside>
@@ -96,6 +99,7 @@ function RunDetailPage() {
           <div className="run-panel">
             <RunDetailView
               runId={runId}
+              selectedAgentRunId={selectedAgentRunId}
               onOpenRun={(childRunId) => navigate({ to: "/teams/$teamSlug/runs/$runId", params: { teamSlug, runId: childRunId } })}
             />
           </div>

@@ -1,5 +1,5 @@
-import { render } from "@testing-library/react";
-import { describe, expect, it } from "vitest";
+import { fireEvent, render } from "@testing-library/react";
+import { describe, expect, it, vi } from "vitest";
 
 import type { RunPhase } from "@/api/workflows";
 
@@ -50,5 +50,29 @@ describe("RunOutline", () => {
       phase({ id: "ask", label: "Choose merge strategy", status: "Waiting", summary: "Squash or rebase? — awaiting answer" }),
     ]} />);
     expect(getByText("Squash or rebase? — awaiting answer")).toBeTruthy();
+  });
+
+  it("makes agent rows clickable buttons when onSelectAgent is given, and marks the selected one", () => {
+    const onSelect = vi.fn();
+    const { container, getByText } = render(<RunOutline
+      phases={[phase({ status: "Active", metrics: { agentCount: 2, succeededCount: 0, failedCount: 0 }, agents: [
+        { agentRunId: "a1", label: "backend-fix", status: "Running" },
+        { agentRunId: "a2", label: "frontend-fix", status: "Queued" },
+      ] })]}
+      selectedAgentRunId="a2"
+      onSelectAgent={onSelect}
+    />);
+
+    fireEvent.click(getByText("backend-fix"));
+    expect(onSelect).toHaveBeenCalledWith("a1");
+
+    expect(container.querySelector("button.run-outline-agent")).not.toBeNull();
+    expect(container.querySelector(".run-outline-agent[data-selected]")?.textContent).toContain("frontend-fix");
+  });
+
+  it("renders agent rows as plain (non-button) when no handler is given", () => {
+    const { container } = render(<RunOutline phases={[phase({ agents: [{ agentRunId: "a1", label: "solo", status: "Running" }] })]} />);
+    expect(container.querySelector("button.run-outline-agent")).toBeNull();
+    expect(container.querySelector(".run-outline-agent")).not.toBeNull();
   });
 });
