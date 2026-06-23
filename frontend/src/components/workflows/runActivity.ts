@@ -93,6 +93,23 @@ function typeRank(it: ActivityItem): number {
   return it.kind === "event" ? 0 : 1;
 }
 
+// ── shared agent-tile presentation (used by both the collapsed tile and the expanded terminal footer) ──
+
+/** running while in flight; done on success; waiting when queued; failed on any terminal error. The render axis. */
+export type TileState = "running" | "waiting" | "done" | "failed";
+
+export function tileState(status: string): TileState {
+  if (status === "Running") return "running";
+  if (status === "Queued") return "waiting";
+  if (status === "Succeeded") return "done";
+  return "failed";   // Failed / Cancelled / TimedOut / anything else terminal
+}
+
+/** Compact token count — thousands as "15.4k", smaller counts verbatim. */
+export function formatTokens(n: number): string {
+  return n >= 1000 ? `${(n / 1000).toFixed(1)}k` : `${n}`;
+}
+
 /** Compare two ISO timestamps; a null sorts LAST so an unanchored item goes to the end rather than the top. */
 function cmpAt(a: string | null, b: string | null): number {
   if (a === b) return 0;

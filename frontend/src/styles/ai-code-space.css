@@ -2397,8 +2397,11 @@ textarea:-webkit-autofill {
 
 /* the light terminal tile — mac-terminal chrome over a warm surface (the ONLY terminal-styled element; the dark
    profile is deferred to global dark mode). A read-only live-log preview, never an interactive shell. */
-.acs-root .agent-tile { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; overflow: hidden; transition: opacity .15s ease, box-shadow .15s ease; }
+.acs-root .agent-tile { appearance: none; width: 100%; display: block; text-align: left; font: inherit; color: inherit; padding: 0; cursor: pointer; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; overflow: hidden; transition: opacity .15s ease, box-shadow .15s ease, border-color .15s ease; }
+.acs-root .agent-tile:hover { border-color: var(--line-2); }
+.acs-root .agent-tile:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 .acs-root .agent-tile[data-selected] { box-shadow: 0 0 0 2px var(--accent); }
+.acs-root .agent-tile[data-open] { box-shadow: 0 0 0 2px var(--accent); border-color: var(--accent); }
 .acs-root .agent-tile-bar { display: flex; align-items: center; gap: 6px; padding: 6px 9px; background: var(--panel-2); border-bottom: 1px solid var(--line); }
 .acs-root .agent-tile-lights { display: inline-flex; gap: 4px; flex: none; }
 .acs-root .agent-tile-lights > i { width: 8px; height: 8px; border-radius: 50%; }
@@ -2426,7 +2429,39 @@ textarea:-webkit-autofill {
 @keyframes agentTilePulse { 0%, 100% { opacity: 1; } 50% { opacity: .4; } }
 @keyframes agentTileBlink { 0%, 48% { opacity: 1; } 49%, 100% { opacity: 0; } }
 @media (prefers-reduced-motion: reduce) { .acs-root .agent-tile-live, .acs-root .agent-tile-cursor { animation: none; } }
-@media (max-width: 560px) { .acs-root .agent-wave-grid { grid-template-columns: 1fr; } }
+/* the expanded terminal window — one per wave, under the grid. Light mac chrome; read-only scrollback + a tool-calls tab. */
+.acs-root .agent-terminal { margin-top: 11px; background: var(--panel); border: 1px solid var(--line-2); border-radius: 11px; overflow: hidden; box-shadow: 0 2px 12px rgba(0,0,0,.05); }
+.acs-root .agent-terminal-bar { display: flex; align-items: center; gap: 8px; padding: 8px 12px; background: var(--panel-2); border-bottom: 1px solid var(--line); }
+.acs-root .agent-terminal-lights { display: inline-flex; gap: 5px; flex: none; }
+.acs-root .agent-terminal-lights > i { width: 10px; height: 10px; border-radius: 50%; }
+.acs-root .agent-terminal-lights > i:nth-child(1) { background: #ff5f57; }
+.acs-root .agent-terminal-lights > i:nth-child(2) { background: #febc2e; }
+.acs-root .agent-terminal-lights > i:nth-child(3) { background: #28c840; }
+.acs-root .agent-terminal-title { flex: 1; text-align: center; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.acs-root .agent-terminal-close { appearance: none; border: 0; background: transparent; cursor: pointer; display: inline-flex; color: var(--muted-2); padding: 2px; border-radius: 5px; flex: none; }
+.acs-root .agent-terminal-close:hover { background: var(--panel); color: var(--ink-2); }
+.acs-root .agent-terminal-body { max-height: 360px; overflow-y: auto; }
+.acs-root .agent-terminal-empty { padding: 16px 14px; font-family: ui-monospace, Menlo, monospace; font-size: 12px; color: var(--muted); }
+.acs-root .agent-terminal-scroll { list-style: none; margin: 0; padding: 12px 14px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; line-height: 1.65; }
+.acs-root .agent-terminal-row { color: var(--ink-2); white-space: pre-wrap; word-break: break-word; }
+.acs-root .agent-terminal-row[data-kind="command"] { color: var(--ink); }
+.acs-root .agent-terminal-row[data-kind="error"] { color: #9E3535; }
+.acs-root .agent-terminal-row[data-kind="warn"] { color: #A8590E; }
+.acs-root .agent-terminal-prompt { color: #1F6B3F; }
+.acs-root .agent-terminal-footer { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 7px 12px; background: var(--panel-2); border-top: 1px solid var(--line); font-size: 11px; color: var(--muted); }
+.acs-root .agent-terminal-stat { display: inline-flex; align-items: center; gap: 5px; }
+.acs-root .agent-terminal-statdot { width: 6px; height: 6px; border-radius: 50%; background: var(--muted-2); }
+.acs-root .agent-terminal[data-state="running"] .agent-terminal-statdot { background: var(--accent); animation: agentTilePulse 1.5s ease-in-out infinite; }
+.acs-root .agent-terminal[data-state="done"] .agent-terminal-statdot { background: #1F6B3F; }
+.acs-root .agent-terminal[data-state="waiting"] .agent-terminal-statdot { background: #A8590E; }
+.acs-root .agent-terminal[data-state="failed"] .agent-terminal-statdot { background: #9E3535; }
+.acs-root .agent-terminal-meta::before { content: "·"; margin-right: 8px; color: var(--muted-2); }
+.acs-root .agent-terminal-tabs { margin-left: auto; display: inline-flex; gap: 4px; }
+.acs-root .agent-terminal-tabs > button { appearance: none; border: 0; background: transparent; cursor: pointer; font: inherit; font-size: 11px; color: var(--muted); padding: 3px 8px; border-radius: 6px; }
+.acs-root .agent-terminal-tabs > button:hover { background: var(--panel); color: var(--ink-2); }
+.acs-root .agent-terminal-tabs > button[data-active] { background: var(--panel); color: var(--ink); font-weight: 500; }
+@media (prefers-reduced-motion: reduce) { .acs-root .agent-terminal[data-state="running"] .agent-terminal-statdot { animation: none; } }
+@media (max-width: 560px) { .acs-root .agent-wave-grid { grid-template-columns: 1fr; } .acs-root .agent-terminal-body { max-height: 260px; } }
 /* The Trace tab — the raw event ledger: a dense chronological list of every record, type rendered verbatim (monospace),
    a non-trivial payload expanding in place to raw JSON. The audit truth, so styling stays neutral (only failures tone). */
 .acs-root .run-trace { display: flex; flex-direction: column; gap: 8px; }

@@ -5,15 +5,17 @@ import type { PhaseAgentRef } from "@/api/workflows";
 import { useAgentRun, useAgentRunEvents } from "@/hooks/use-agents";
 
 import { isAgentBusy } from "./runPhases";
+import { formatTokens, tileState, type TileState } from "./runActivity";
 
 /**
  * One agent rendered as a light "terminal tile" — the live-execution unit of an agent wave. It is a READ-ONLY log
  * preview dressed in mac-terminal chrome (traffic lights + a name title), NOT an interactive shell: a running agent
  * shows its latest line + a blinking cursor, a finished one dims and keeps its output summary, a queued one is amber,
- * a failed one reads danger. Stays to TWO preview lines so a wave of many tiles reads at a glance; the full scrollback
- * + tool calls open on the (stage-2) expand. Status is the agent run's LIVE status, falling back to the phase ref's.
+ * a failed one reads danger. Stays to TWO preview lines so a wave of many tiles reads at a glance. Clicking the tile
+ * (when `onOpen` is given) opens its full terminal scrollback below the wave; `open` marks the one that's expanded.
+ * Status is the agent run's LIVE status, falling back to the phase ref's.
  */
-export function AgentTile({ agent, selected }: { agent: PhaseAgentRef; selected?: boolean }) {
+export function AgentTile({ agent, selected, open, onOpen }: { agent: PhaseAgentRef; selected?: boolean; open?: boolean; onOpen?: () => void }) {
   const tileRef = useRef<HTMLDivElement>(null);
 
   // When the outline selects this agent, bring its tile into view (within the Activity panel's own scroll).
@@ -36,7 +38,18 @@ export function AgentTile({ agent, selected }: { agent: PhaseAgentRef; selected?
   const summary = metricLine(files, tokens);
 
   return (
-    <div className="agent-tile" data-state={state} data-selected={selected || undefined} ref={tileRef}>
+    <div
+      className="agent-tile"
+      role={onOpen ? "button" : undefined}
+      tabIndex={onOpen ? 0 : undefined}
+      data-state={state}
+      data-selected={selected || undefined}
+      data-open={open || undefined}
+      aria-expanded={onOpen ? !!open : undefined}
+      onClick={onOpen}
+      onKeyDown={onOpen ? (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onOpen(); } } : undefined}
+      ref={tileRef}
+    >
       <div className="agent-tile-bar">
         <span className="agent-tile-lights" aria-hidden="true"><i></i><i></i><i></i></span>
         <span className="agent-tile-name" title={name}>{name}</span>
@@ -45,16 +58,6 @@ export function AgentTile({ agent, selected }: { agent: PhaseAgentRef; selected?
       <div className="agent-tile-body">{bodyLines(state, latest, summary)}</div>
     </div>
   );
-}
-
-/** running while in flight; done on success; waiting when queued; failed on any terminal error. The tile's render axis. */
-type TileState = "running" | "waiting" | "done" | "failed";
-
-function tileState(status: string): TileState {
-  if (status === "Running") return "running";
-  if (status === "Queued") return "waiting";
-  if (status === "Succeeded") return "done";
-  return "failed";   // Failed / Cancelled / TimedOut / anything else terminal
 }
 
 /** The two-line preview body, per state — a running agent gets its live line + cursor; the others a quiet two-liner. */
@@ -105,8 +108,4 @@ function stateFlag(state: TileState) {
 /** "2 files · 14.2k tokens" — each part dropped when zero; "" when the agent produced neither yet. */
 function metricLine(files: number, tokens: number): string {
   return [files > 0 && `${files} ${files === 1 ? "file" : "files"}`, tokens > 0 && `${formatTokens(tokens)} tokens`].filter(Boolean).join(" · ");
-}
-
-function formatTokens(n: number): string {
-  return n >= 1000 ? `${(n / 1000).toFixed(1)}k` : `${n}`;
 }

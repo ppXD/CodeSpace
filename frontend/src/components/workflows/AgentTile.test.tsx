@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { PhaseAgentRef } from "@/api/workflows";
@@ -88,5 +88,17 @@ describe("AgentTile", () => {
 
     expect(tile(container)?.dataset.selected).toBe("true");
     expect(Element.prototype.scrollIntoView).toHaveBeenCalled();
+  });
+
+  it("calls onOpen when clicked and marks data-open + aria-expanded when expanded", () => {
+    const onOpen = vi.fn();
+    const { container, rerender } = render(<AgentTile agent={tileAgent({ agentRunId: "a1", label: "x" })} onOpen={onOpen} />);
+
+    fireEvent.click(screen.getByRole("button"));
+    expect(onOpen).toHaveBeenCalledTimes(1);
+
+    rerender(<AgentTile agent={tileAgent({ agentRunId: "a1", label: "x" })} onOpen={onOpen} open />);
+    expect(tile(container)?.dataset.open).toBe("true");
+    expect(screen.getByRole("button").getAttribute("aria-expanded")).toBe("true");
   });
 });
