@@ -3,6 +3,7 @@ using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Workflows.RunSources;
 using CodeSpace.Messages.Enums;
+using Microsoft.EntityFrameworkCore;
 
 namespace CodeSpace.Core.Services.Sessions;
 
@@ -44,6 +45,28 @@ public sealed class WorkSessionService : IWorkSessionService, IScopedDependency
         _db.WorkSession.Add(session);
 
         return Task.FromResult(new SessionAssignment { SessionId = session.Id, TurnIndex = FirstTurnIndex });
+    }
+
+    public async Task<SessionAssignment> ContinueAsync(Guid sessionId, Guid teamId, CancellationToken cancellationToken)
+    {
+        // Team-scoped lookup: a foreign / missing session is the SAME not-found, so a cross-team session never leaks.
+        var session = await _db.WorkSession.AsNoTracking()
+            .SingleOrDefaultAsync(s => s.Id == sessionId && s.TeamId == teamId, cancellationToken).ConfigureAwait(false)
+            ?? throw new KeyNotFoundException($"Session {sessionId} not found or not accessible.");
+
+        if (session.Status != WorkSessionStatus.Open)
+            throw new InvalidOperationException($"Session {sessionId} is {session.Status} and cannot take a new turn.");
+
+        // Next ordinal = one past the highest EXISTING top-level turn. Only rows with a turn index count — a child /
+        // replay run inherits SessionId with a NULL index and must not bump it. NOTE: this MAX+1 is computed under
+        // READ COMMITTED, so two CONCURRENT follow-ups to the same session can land the same ordinal (advisory /
+        // display only — the runs stay distinct). Conversational follow-ups are inherently sequential, so this is
+        // theoretical; a strict per-session counter is a later refinement if it ever matters.
+        var maxTurn = await _db.WorkflowRun.AsNoTracking()
+            .Where(r => r.SessionId == sessionId && r.SessionTurnIndex != null)
+            .MaxAsync(r => (int?)r.SessionTurnIndex, cancellationToken).ConfigureAwait(false);
+
+        return new SessionAssignment { SessionId = sessionId, TurnIndex = (maxTurn ?? 0) + 1 };
     }
 
     /// <summary>

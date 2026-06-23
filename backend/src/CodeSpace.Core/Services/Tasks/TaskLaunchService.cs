@@ -51,10 +51,12 @@ public sealed class TaskLaunchService : ITaskLaunchService, IScopedDependency
 
         var context = new TaskBuildContext { Seed = seed, Route = route, AgentProfile = profile, GroundingContext = seed.GroundingContext };
 
-        // A manual launch opens a NEW task thread; the run staged below is its first turn. Staged onto the same
-        // unit of work as the run (see IWorkSessionService.OpenAsync) so the two commit atomically — a launch that
-        // fails downstream (e.g. a rejected repo earlier) leaves no orphan session.
-        var session = await _sessions.OpenAsync(request.TeamId, seed.Goal, WorkSessionKind.Task, request.ActorUserId, cancellationToken).ConfigureAwait(false);
+        // Resolve the thread this run is a turn of: CONTINUE the named session (the run becomes its next top-level
+        // turn) or OPEN a new one. Both stage onto the same unit of work as the run, so they commit atomically — a
+        // launch that fails downstream (a rejected repo, an invalid continue target) leaves no orphan session.
+        var session = request.ContinueSessionId is { } continueId
+            ? await _sessions.ContinueAsync(continueId, request.TeamId, cancellationToken).ConfigureAwait(false)
+            : await _sessions.OpenAsync(request.TeamId, seed.Goal, WorkSessionKind.Task, request.ActorUserId, cancellationToken).ConfigureAwait(false);
 
         var handle = await _factory.CreateAndRunAsync(context, request.TeamId, request.ActorUserId, session, cancellationToken).ConfigureAwait(false);
 

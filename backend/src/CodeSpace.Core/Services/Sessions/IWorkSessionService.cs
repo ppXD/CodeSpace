@@ -20,4 +20,13 @@ public interface IWorkSessionService
     /// semantic (Task for a manual launch; a PR / Issue surface passes its own).
     /// </summary>
     Task<SessionAssignment> OpenAsync(Guid teamId, string title, WorkSessionKind kind, Guid actorUserId, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Continue an EXISTING session with the NEXT top-level turn: validate it exists + belongs to
+    /// <paramref name="teamId"/> (a foreign / missing session is an indistinguishable not-found — never a leak) and
+    /// is still <c>Open</c>, then return a binding whose <c>TurnIndex</c> is one past the session's highest existing
+    /// turn. Only top-level turns count — a child / replay run inherits the session with a NULL turn index and never
+    /// bumps the ordinal (the "user-visible turns only" rule). Reads only; no row is written here.
+    /// </summary>
+    Task<SessionAssignment> ContinueAsync(Guid sessionId, Guid teamId, CancellationToken cancellationToken);
 }
