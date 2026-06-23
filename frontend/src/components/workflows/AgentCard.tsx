@@ -7,7 +7,13 @@ import { useAgentRun, useAgentRunEvents } from "@/hooks/use-agents";
 import { AgentRunTimeline } from "./AgentRunTimeline";
 import { AgentToolCalls } from "./AgentToolCalls";
 import { RunStatusBadge } from "./RunStatusBadge";
+import { formatDuration } from "./cockpit";
 import { isAgentBusy } from "./runPhases";
+
+/** Join the truthy parts of an agent card's meta line with " · " (harness · N files · M tools · duration). */
+function metaLine(parts: (string | false | null | undefined)[]): string {
+  return parts.filter(Boolean).join(" · ");
+}
 
 /**
  * One agent in the run's Live-work band — the restrained card the command-center design calls for: name + live
@@ -34,6 +40,22 @@ export function AgentCard({ agent }: { agent: PhaseAgentRef }) {
   // "…" while the first event fetch is still in flight, so a terminal agent doesn't flash "No activity" then swap.
   const activity = latest?.text ?? (active ? "Starting…" : events.data === undefined ? "…" : "No activity recorded.");
 
+  // Client-side rollups from what's already on the wire: file edits + tool uses counted off the event stream,
+  // elapsed/duration off the run row. The model / token / cost fields need a backend rollup (a later slice).
+  const evts = events.data ?? [];
+  const files = evts.filter((e) => e.kind === "FileChanged").length;
+  const tools = evts.filter((e) => e.kind === "ToolCall").length;
+  // Duration is shown once the agent settles (a ticking elapsed for a live run would need an impure clock; the
+  // status badge + the expand's "active Ns ago" heartbeat already convey liveness).
+  const duration = run.data?.completedAt && run.data.createdDate ? formatDuration(run.data.createdDate, run.data.completedAt) : "";
+
+  const meta = metaLine([
+    run.data?.harness,
+    files > 0 && `${files} ${files === 1 ? "file" : "files"}`,
+    tools > 0 && `${tools} ${tools === 1 ? "tool" : "tools"}`,
+    duration,
+  ]);
+
   return (
     <div className="run-agent-card" data-active={active || undefined} data-open={open || undefined}>
       <button type="button" className="run-agent-card-head" aria-expanded={open} onClick={() => setOpen((o) => !o)}>
@@ -43,7 +65,7 @@ export function AgentCard({ agent }: { agent: PhaseAgentRef }) {
       </button>
 
       <div className="run-agent-card-activity">{activity}</div>
-      {run.data?.harness && <div className="run-agent-card-meta">{run.data.harness}</div>}
+      {meta && <div className="run-agent-card-meta">{meta}</div>}
 
       {open && (
         <div className="run-agent-card-body">
