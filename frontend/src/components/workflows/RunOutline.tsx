@@ -1,5 +1,5 @@
 import { Ic } from "@/_imported/ai-code-space/icons";
-import type { PhaseStatus, RunPhase } from "@/api/workflows";
+import type { PhaseAgentRef, PhaseStatus, RunPhase } from "@/api/workflows";
 
 import { isAgentBusy } from "./runPhases";
 
@@ -8,21 +8,26 @@ import { isAgentBusy } from "./runPhases";
  * phase (a node, a map fan-out, an agent step, a supervisor decision, a model-authored phase), each carrying its
  * status, a small agent roll-up, and the agent runs it fanned out to (indented). It collapses naturally: a
  * single-agent run is ~3 rows, a workflow is its node tree, a Deep supervisor is its phases — same data, same
- * component. Display-only here; click-to-focus is a later slice. Polls in lockstep with the rest of the run view.
+ * component. When `onSelectAgent` is given the indented agent rows become buttons that focus the matching card in
+ * the center (the selected one is highlighted). Polls in lockstep with the rest of the run view.
  */
-export function RunOutline({ phases }: { phases: readonly RunPhase[] }) {
+export function RunOutline({ phases, selectedAgentRunId, onSelectAgent }: {
+  phases: readonly RunPhase[];
+  selectedAgentRunId?: string | null;
+  onSelectAgent?: (agentRunId: string) => void;
+}) {
   if (phases.length === 0) {
     return <div className="run-outline-empty">No phases yet — the run hasn’t reached a step.</div>;
   }
 
   return (
     <nav className="run-outline" aria-label="Run outline">
-      {phases.map((p) => <PhaseRow key={p.id} phase={p} />)}
+      {phases.map((p) => <PhaseRow key={p.id} phase={p} selectedAgentRunId={selectedAgentRunId} onSelectAgent={onSelectAgent} />)}
     </nav>
   );
 }
 
-function PhaseRow({ phase }: { phase: RunPhase }) {
+function PhaseRow({ phase, selectedAgentRunId, onSelectAgent }: { phase: RunPhase; selectedAgentRunId?: string | null; onSelectAgent?: (agentRunId: string) => void }) {
   const { agentCount, succeededCount, failedCount } = phase.metrics;
 
   return (
@@ -43,15 +48,29 @@ function PhaseRow({ phase }: { phase: RunPhase }) {
       {phase.agents.length > 0 && (
         <ul className="run-outline-agents">
           {phase.agents.map((a, i) => (
-            <li key={`${a.agentRunId}:${i}`} className="run-outline-agent">
-              <span className="run-outline-agent-dot" data-busy={isAgentBusy(a.status) || undefined} data-status={a.status.toLowerCase()} aria-hidden="true" />
-              <span className="run-outline-agent-label">{a.label ?? a.iterationKey ?? a.agentRunId.slice(0, 8)}</span>
-              <span className="run-outline-agent-status">{a.status}</span>
+            <li key={`${a.agentRunId}:${i}`}>
+              {onSelectAgent ? (
+                <button type="button" className="run-outline-agent" data-selected={a.agentRunId === selectedAgentRunId || undefined} onClick={() => onSelectAgent(a.agentRunId)}>
+                  <AgentRowInner agent={a} />
+                </button>
+              ) : (
+                <div className="run-outline-agent"><AgentRowInner agent={a} /></div>
+              )}
             </li>
           ))}
         </ul>
       )}
     </div>
+  );
+}
+
+function AgentRowInner({ agent }: { agent: PhaseAgentRef }) {
+  return (
+    <>
+      <span className="run-outline-agent-dot" data-busy={isAgentBusy(agent.status) || undefined} data-status={agent.status.toLowerCase()} aria-hidden="true" />
+      <span className="run-outline-agent-label">{agent.label ?? agent.iterationKey ?? agent.agentRunId.slice(0, 8)}</span>
+      <span className="run-outline-agent-status">{agent.status}</span>
+    </>
   );
 }
 

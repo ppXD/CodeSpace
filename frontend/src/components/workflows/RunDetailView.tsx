@@ -37,7 +37,7 @@ const MAX_EMBED_DEPTH = 3;
  */
 type RunView = "activity" | "canvas" | "changes" | "trace";
 
-export function RunDetailView({ runId, nested = false, depth = 0, onOpenRun, defaultView = "activity" }: { runId: string; nested?: boolean; depth?: number; onOpenRun?: (runId: string) => void; defaultView?: RunView }) {
+export function RunDetailView({ runId, nested = false, depth = 0, onOpenRun, defaultView = "activity", selectedAgentRunId }: { runId: string; nested?: boolean; depth?: number; onOpenRun?: (runId: string) => void; defaultView?: RunView; selectedAgentRunId?: string | null }) {
   const run = useWorkflowRun(runId);
   // The canvas renders the run's OWN version-pinned definition snapshot (run.definition) — never the
   // workflow's current graph — so it stays faithful to how the run actually ran. Manifests drive the
@@ -178,7 +178,7 @@ export function RunDetailView({ runId, nested = false, depth = 0, onOpenRun, def
       ) : (
         <>
           {/* The Live-work band — the command-center heart: a conditional lead strip + the run's agent cards. */}
-          {!nested && <RunLiveWork phases={phaseList} />}
+          {!nested && <RunLiveWork phases={phaseList} selectedAgentRunId={selectedAgentRunId} />}
 
           {nested || agents.length === 0 ? (
             // The editor dialog, or a structural workflow with no agents: the node trace IS the content.

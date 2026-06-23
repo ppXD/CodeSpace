@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { Ic } from "@/_imported/ai-code-space/icons";
 import type { PhaseAgentRef } from "@/api/workflows";
@@ -23,8 +23,15 @@ function metaLine(parts: (string | false | null | undefined)[]): string {
  * the agent row loads); "current activity" is its latest streamed event line. Per-agent actions (ask-to-adjust /
  * retry / stop) and the model/repo/files/tokens fields arrive with the later backend slices.
  */
-export function AgentCard({ agent }: { agent: PhaseAgentRef }) {
+export function AgentCard({ agent, selected }: { agent: PhaseAgentRef; selected?: boolean }) {
   const [open, setOpen] = useState(false);
+  const cardRef = useRef<HTMLDivElement>(null);
+
+  // When the outline selects this agent, bring its card into view (within the center panel's own scroll).
+  useEffect(() => {
+    if (selected) cardRef.current?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+  }, [selected]);
+
   const run = useAgentRun(agent.agentRunId);
   // Display the live agent-run status once loaded, falling back to the phase ref's status; both are open strings,
   // so isAgentBusy (string → busy?) classifies "in flight" for the accent + the event-poll gate.
@@ -57,7 +64,7 @@ export function AgentCard({ agent }: { agent: PhaseAgentRef }) {
   ]);
 
   return (
-    <div className="run-agent-card" data-active={active || undefined} data-open={open || undefined}>
+    <div className="run-agent-card" ref={cardRef} data-active={active || undefined} data-open={open || undefined} data-selected={selected || undefined}>
       <button type="button" className="run-agent-card-head" aria-expanded={open} onClick={() => setOpen((o) => !o)}>
         <span className="run-agent-card-caret" aria-hidden="true"><Ic.ChevronRight size={11} /></span>
         <span className="run-agent-card-name">{name}</span>

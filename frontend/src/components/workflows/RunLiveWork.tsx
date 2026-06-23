@@ -46,7 +46,7 @@ const STRIP_ICON = { supervisor: Ic.Sparkles, planner: Ic.Fork, nodes: Ic.Workfl
  * Returns null when nothing agent-shaped has surfaced yet (the caller then shows the node list instead). The
  * narrative timeline + per-agent rollups (files/tokens/model/round N-M) arrive with the later slices.
  */
-export function RunLiveWork({ phases }: { phases: readonly RunPhase[] }) {
+export function RunLiveWork({ phases, selectedAgentRunId }: { phases: readonly RunPhase[]; selectedAgentRunId?: string | null }) {
   const agents = dedupRunAgents(phases);
   const strip = leadStrip(phases, agents.length);
   const StripIcon = strip ? STRIP_ICON[strip.mode] : null;
@@ -65,7 +65,7 @@ export function RunLiveWork({ phases }: { phases: readonly RunPhase[] }) {
 
       {agents.length > 0 && (
         <div className="run-agent-cards">
-          {agents.map((a) => <AgentCard key={a.agentRunId} agent={a} />)}
+          {agents.map((a) => <AgentCard key={a.agentRunId} agent={a} selected={a.agentRunId === selectedAgentRunId} />)}
         </div>
       )}
     </div>
