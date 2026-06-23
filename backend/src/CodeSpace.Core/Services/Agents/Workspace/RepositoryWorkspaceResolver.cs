@@ -18,9 +18,10 @@ namespace CodeSpace.Core.Services.Agents.Workspace;
 /// the providers use (so OAuth refresh + every auth type are handled in one place). A run with no workspace
 /// (no spec and no <c>RepositoryId</c>) resolves to <c>null</c>.
 ///
-/// <para>Multi-repo PR1 scope: the data model + canonicalization land here; a workspace with MORE THAN ONE repo
-/// is not yet executable (the multi-dir handle + clone arrives a slice later) and is REFUSED with a clear error,
-/// so a single-repo run is byte-identical and a premature multi-repo authoring fails loud rather than silently
+/// <para>Multi-repo is fully resolved here: <see cref="ResolveAsync"/> loops over EVERY repo in the spec and
+/// produces one <see cref="WorkspaceRepositoryProvision"/> per repo (honouring each repo's per-repo ref). A
+/// single-repo run is just the 1-element case — byte-identical to the legacy <c>RepositoryId</c> path. Each repo
+/// is loaded TEAM-SCOPED and non-deleted; an unresolvable repo fails the whole provision loud rather than silently
 /// dropping repos.</para>
 /// </summary>
 public sealed class RepositoryWorkspaceResolver : IAgentWorkspaceResolver, IScopedDependency
@@ -86,7 +87,12 @@ public sealed class RepositoryWorkspaceResolver : IAgentWorkspaceResolver, IScop
         await _db.Repository.AsNoTracking()
             .Include(r => r.ProviderInstance)
             .Include(r => r.Credential)
-            .SingleOrDefaultAsync(r => r.Id == repositoryId && r.TeamId == teamId, cancellationToken).ConfigureAwait(false)
+            // Team-scoped AND non-deleted (matches every other repo loader + the launch-time gate): a repo
+            // soft-deleted between launch validation and clone-time must not still be cloned. This is the FAIL-CLOSED
+            // contract for EVERY resolve, including a replay/rerun that re-resolves the repo live — a run whose repo
+            // was deleted afterwards refuses to re-clone it (rather than reaching a stale remote via a still-valid
+            // credential). Deliberate: an operator who removed a repo should not have old runs silently re-clone it.
+            .SingleOrDefaultAsync(r => r.Id == repositoryId && r.TeamId == teamId && r.DeletedDate == null, cancellationToken).ConfigureAwait(false)
         ?? throw new WorkspaceException($"Repository {repositoryId} not found for this team.");
 
     /// <summary>Resolve a clone token through the provider auth layer. A repo with no bound credential clones anonymously (public repo).</summary>
