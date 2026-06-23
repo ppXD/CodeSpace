@@ -374,6 +374,61 @@ public sealed class SupervisorWholeLoopE2ETests : IDisposable
         await AssertUnverifiedResolutionWasWithheldAsync(runId, teamId, remote);
     }
 
+    [Fact]
+    public async Task Supervisor_withholds_a_multi_repo_resolution_that_lies_about_passing_at_the_stop_backstop()
+    {
+        if (OperatingSystem.IsWindows()) return;          // the fake CLI is a /bin/sh script the runner spawns
+        if (!await GitReadyAsync()) return;               // real git is required for clone/capture/per-repo conflict/grade
+
+        // THE MULTI-REPO SAFETY BACKSTOP — the multi-repo resolve verdict is currently MARKER-ONLY (the objective resolve
+        // grade is single-repo only), so a multi-repo resolver that LIES (emits RESOLUTION_VERIFIED but drops one side in
+        // the conflicted repo) is graded Verified AT THE RESOLVE STEP and its branch is surfaced as a head. The TERMINAL
+        // STOP is the independent backstop: it objectively grades EVERY per-repo head (clone + run check.sh) and, when the
+        // related repo's alpha-only head fails, withholds ALL per-repo branches from the node output — so the lie never
+        // reaches a downstream PR-open. Defence-in-depth, proven end-to-end (the resolve-grade skip is a legibility gap,
+        // not a shipping hole, BECAUSE this backstop holds).
+        using var cli = new MultiRepoLyingResolveFakeCli();
+
+        SetDecisionScript(s => s.PlanSpawnMergeResolveApprovedMergeStop());
+
+        var jobClient = ResolveJobClient();
+        jobClient.Clear();
+        jobClient.AutoExecute = true;
+
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var conversationId = await SeedConversationAsync(teamId, userId);
+
+        // The primary repo's clean disjoint integration passes its own check.sh; the related repo's check.sh requires
+        // BOTH sides survived, which the lying alpha-only reconciliation fails.
+        using var primaryRemote = new BareRemote();
+        using var relatedRemote = new BareRemote();
+        await primaryRemote.SeedBaseAsync(new() { ["check.sh"] = "#!/bin/sh\nexit 0\n" });
+        await relatedRemote.SeedBaseAsync(new()
+        {
+            ["check.sh"] = "#!/bin/sh\nif grep -q alpha shared.txt && grep -q beta shared.txt; then exit 0; else exit 1; fi\n",
+            [MultiRepoLyingResolveFakeCli.SharedFile] = "base content\n",
+        });
+        var primaryRepoId = await SeedBoundRepositoryAsync(teamId, primaryRemote.Url, "main");
+        var relatedRepoId = await SeedBoundRepositoryAsync(teamId, relatedRemote.Url, "main");
+
+        var workflowId = await CreateWholeLoopWorkflowAsync(teamId, userId, primaryRepoId, conversationId, (relatedRepoId, MultiRepoLyingResolveFakeCli.RelatedAlias));
+        var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
+
+        // Drive to the resolve-approval park.
+        await RunEngineAsync(runId);
+        await jobClient.WaitForPendingAsync();
+
+        var token = await AssertParkedOnResolveApprovalAsync(runId, teamId);
+
+        // Approve → the lying multi-repo resolver runs (marker-Verified) → its api head is surfaced → the stop grades each
+        // head → the api head fails → the whole per-repo head set is withheld.
+        await AnswerAsync(token, "approve", userId, teamId);
+        await RunEngineAsync(runId);
+        await jobClient.WaitForPendingAsync();
+
+        await AssertMultiRepoLieCaughtAtStopBackstopAsync(runId, teamId);
+    }
+
     // ─── Assertions ──────────────────────────────────────────────────────────────────
 
     private async Task AssertRunReachedSuccessAsync(Guid runId)
@@ -559,6 +614,50 @@ public sealed class SupervisorWholeLoopE2ETests : IDisposable
             branches.ShouldContain(head.SourceBranch,
                 customMessage: $"repo '{head.Alias}' head '{head.SourceBranch}' must be live on its own remote; remote: [{string.Join(", ", branches)}]");
         }
+    }
+
+    /// <summary>A multi-repo resolver lied (marker-Verified at the resolve step, since the objective resolve grade is single-repo only) but the TERMINAL STOP objectively re-graded each per-repo head, caught the dropped side, and withheld ALL per-repo branches from the node output — the lie never reaches a downstream PR-open.</summary>
+    private async Task AssertMultiRepoLieCaughtAtStopBackstopAsync(Guid runId, Guid teamId)
+    {
+        using var verify = _fixture.BeginScope();
+        var db = verify.Resolve<CodeSpaceDbContext>();
+
+        // THE GAP, DOCUMENTED: the multi-repo resolve verdict trusts the marker alone (the objective resolve grade is
+        // single-repo only), so the lying resolver passes the RESOLVE step as Verified and its api branch is surfaced.
+        var resolve = await db.SupervisorDecisionRecord.AsNoTracking()
+            .Where(d => d.SupervisorRunId == runId && d.TeamId == teamId && d.DecisionKind == SupervisorDecisionKinds.Resolve)
+            .OrderByDescending(d => d.Sequence).Select(d => d.OutcomeJson).FirstAsync();
+        SupervisorOutcome.ReadResolutionVerdict(resolve).ShouldBe(SupervisorResolutionVerdict.Verified,
+            "the multi-repo resolve verdict trusts the marker alone (no objective resolve grade yet) — so the lie passes the resolve step; the terminal stop is the backstop");
+
+        // THE BACKSTOP: the terminal stop objectively grades EVERY per-repo head (clone + check.sh). The related repo's
+        // alpha-only head fails its grep-both-sides check → acceptancePassed=false (all-or-nothing).
+        var stop = await db.SupervisorDecisionRecord.AsNoTracking()
+            .Where(d => d.SupervisorRunId == runId && d.TeamId == teamId && d.DecisionKind == SupervisorDecisionKinds.Stop)
+            .OrderByDescending(d => d.Sequence).Select(d => d.OutcomeJson).FirstAsync();
+        SupervisorOutcome.ReadAcceptanceGradePassed(stop).ShouldBe(false,
+            "the terminal stop cloned each per-repo head + ran its check.sh; the lying related-repo head dropped beta → the stop grade is FALSE");
+
+        // The heads WERE produced: the merge surfaced both per-repo heads on the ledger (primary clean + the lying
+        // resolver's api branch, marker-short-circuited). So the node-output absence below is a genuine WITHHOLD, not a
+        // never-produced absence — the substrate had real heads in hand and refused to hand them on.
+        var priorDecisions = await ReadPriorDecisionsAsync(db, runId, teamId);
+        SupervisorOutcome.ReadFinalRepositoryBranches(priorDecisions).Count.ShouldBe(2,
+            "the merge surfaced both per-repo reconciled heads on the ledger (primary + the lying api branch) — they exist to be withheld");
+
+        // THE WITHHOLD: a failed multi-repo stop grade withholds ALL per-repo branches from the node output (the SAME
+        // acceptancePassed==false condition that withholds the single-repo integratedBranch), so the node emits NO
+        // repositoryBranches — a downstream git.open_change_set bound to {{nodes.sup.outputs.repositoryBranches}} gets
+        // nothing, and the lie never ships.
+        var supRows = await db.WorkflowRunNode.AsNoTracking().Where(n => n.RunId == runId && n.NodeId == NodeId).ToListAsync();
+        var terminal = supRows
+            .Select(n => System.Text.Json.JsonDocument.Parse(n.OutputsJson).RootElement)
+            .First(o => o.TryGetProperty("status", out _));
+
+        terminal.GetProperty("status").GetString().ShouldBe("AcceptanceFailed",
+            "the supervisor reports the objective definition-of-done was NOT met for the multi-repo heads — not a self-reported Completed");
+        terminal.TryGetProperty("repositoryBranches", out _).ShouldBeFalse(
+            "the per-repo branches are WITHHELD — a head set where any repo fails the operator floor must never be handed to a downstream per-repo PR-open");
     }
 
     /// <summary>The resolver lied (claimed RESOLUTION_VERIFIED) but its branch objectively failed check.sh, so the resolution graded Unverified and the substrate WITHHELD its branch — surfacing no reviewable head a downstream PR-open could target.</summary>
