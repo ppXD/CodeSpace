@@ -77,8 +77,38 @@ public sealed class PostgresFixture : IAsyncLifetime
         _ioc = BuildIocContainer(ConnectionString);
     }
 
+    private Autofac.IContainer? _iocGovernanceOn;
+    private readonly object _governanceContainerLock = new();
+
+    /// <summary>
+    /// A scope from a SECOND container built with tool governance ON — so the DI <c>IAgentToolRegistry</c> includes the
+    /// governance-gated <c>decision.request</c> first-party tool (<c>CodeSpaceModule.RegisterFirstPartyAgentTools</c>
+    /// registers it only when governance is on AT CONTAINER-BUILD time). It shares this fixture's Postgres (same
+    /// connection string, schema already migrated), so a run seeded via <see cref="BeginScope"/> is visible here and a
+    /// decision raised through the real endpoint parks to the same ledger. Lazily built + reused. Lets the REAL per-run
+    /// MCP endpoint serve a real agent-raised decision.request WITHOUT flipping the default container's governance — the
+    /// ungoverned-catalog pin (<c>AgentToolRegistryFlowTests</c>) and every other test keep the byte-identical off default.
+    /// </summary>
+    public Autofac.ILifetimeScope BeginGovernanceOnScope()
+    {
+        if (_iocGovernanceOn is null)
+            lock (_governanceContainerLock)
+                _iocGovernanceOn ??= BuildGovernanceOnContainer();
+
+        return _iocGovernanceOn.BeginLifetimeScope();
+    }
+
+    private Autofac.IContainer BuildGovernanceOnContainer()
+    {
+        var prior = Environment.GetEnvironmentVariable(Core.Services.Agents.Mcp.McpRequestHandler.GovernanceEnabledEnvVar);
+        Environment.SetEnvironmentVariable(Core.Services.Agents.Mcp.McpRequestHandler.GovernanceEnabledEnvVar, "true");
+        try { return BuildIocContainer(ConnectionString); }
+        finally { Environment.SetEnvironmentVariable(Core.Services.Agents.Mcp.McpRequestHandler.GovernanceEnabledEnvVar, prior); }
+    }
+
     public async Task DisposeAsync()
     {
+        _iocGovernanceOn?.Dispose();
         _ioc?.Dispose();
         await DropTestDatabaseAsync().ConfigureAwait(false);
     }

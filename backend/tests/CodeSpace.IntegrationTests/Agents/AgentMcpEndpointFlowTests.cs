@@ -10,9 +10,13 @@ using CodeSpace.Core.Services.Agents.Mcp;
 using CodeSpace.Core.Services.Agents.Sandbox;
 using CodeSpace.Core.Services.Agents.Sandbox.Runners;
 using CodeSpace.Core.Services.Agents.Workspace;
+using CodeSpace.Core.Services.Decisions;
 using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.Messages.Agents;
+using CodeSpace.Messages.Decisions;
+using CodeSpace.Messages.Dtos.Decisions;
 using CodeSpace.Messages.Enums;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging.Abstractions;
 using Shouldly;
@@ -741,7 +745,154 @@ public class AgentMcpEndpointFlowTests
         return new FlagScope(scope, scope.Resolve<IAgentMcpConnectRegistry>());
     }
 
+    /// <summary>The connect-registry SINGLETON from the governance-on container — the same instance a run driven through that container (<c>useGovernanceContainer</c>) registers its endpoint into.</summary>
+    private FlagScope ConnectRegistryFromGovernanceContainer()
+    {
+        var scope = _fixture.BeginGovernanceOnScope();
+        return new FlagScope(scope, scope.Resolve<IAgentMcpConnectRegistry>());
+    }
+
     /// <summary>Start the real ExecuteAsync (flag ON) on a background task so the test can drive JSON-RPC while the harness sleeps.</summary>
+    // ── B2: a REAL agent RAISES a decision over the endpoint → parks → is answered → resumes → exits clean ──
+
+    [Fact]
+    public async Task A_real_agent_raising_a_decision_parks_blocks_is_answered_then_resumes_and_exits_clean()
+    {
+        // Real-scenario coverage B2 — the deepest whole-interaction edge: a REAL agent PROCESS raises a real
+        // decision.request through the real per-run MCP endpoint (via the real codespace-mcp proxy), the durable
+        // decision substrate PARKS + blocks it, a human answers via the queue, and the SAME agent process RESUMES past
+        // the blocked call and EXITS 0. Joins AgentMcpEndpointFlowTests' real-process MCP transport with the decision
+        // substrate McpDecisionFlowTests proves at the handler level. Five gates (owner acceptance): (1) the decision
+        // ledger row is never lost; (2) the answer is exactly-once; (3) the agent does not re-run its completed
+        // pre-decision side effect; (4) it exits 0 after resume (Succeeded, not NeedsReview); (5) the full
+        // raise→park→answer→resume lifecycle is observable.
+        if (OperatingSystem.IsWindows()) return;
+        if (!Socket.OSSupportsUnixDomainSockets) return;
+        var proxyDll = ProxyDllPathOrNull();
+        if (proxyDll is null) return;   // the build-only proxy ref should produce it; skip (not fail) for portability
+
+        var teamId = await SeedTeamAsync();
+        var ownerId = await TeamOwnerAsync(teamId);
+        var runId = await CreateRunAsync(teamId, AgentAutonomyLevel.Standard);
+
+        using var fake = new DecisionRaisingFakeCli();
+        using var connects = ConnectRegistryFromGovernanceContainer();
+        using var workerCts = new CancellationTokenSource();
+
+        // The REAL executor runs the fake agent through the GOVERNANCE-ON container (so the endpoint's DI registry holds
+        // decision.request) with runtime governance ON (so the handler runs the decision loop) while the endpoint is open.
+        var run = Task.Run(() => ExecuteAsync(runId, new ScriptedHarness(fake.Script), mcpEnabled: true, governanceEnabled: true, useGovernanceContainer: true, cancellationToken: workerCts.Token));
+
+        try
+        {
+            // The endpoint opened → hand the agent the per-run socket + token (minted only now) + the proxy dll path.
+            var connect = await WaitForConnectAsync(connects, runId, run);
+            fake.WriteCreds(connect.SocketPath, connect.Token, proxyDll);
+
+            // GATE 1 — the real agent raised the decision and it PARKED durably (regardless of any chat surface).
+            Guid ledgerId;
+            try { (ledgerId, _) = await WaitForParkedDecisionAsync(teamId, runId); }
+            catch (TimeoutException)
+            {
+                var rows = await ReadRunRowsDiagAsync(teamId, runId);
+                throw new Exception($"B2 diag — no parked decision.\nfake debug log:\n{fake.ReadDebug()}\nledger rows: {rows}");
+            }
+            var parked = await ReadDecisionRowAsync(ledgerId);
+            parked.Status.ShouldBe(ToolCallLedgerStatus.AwaitingApproval, "the agent's decision parks to the durable ledger");
+            parked.ToolKind.ShouldBe("decision.request");
+            parked.DecisionEnvelopeJson.ShouldNotBeNullOrEmpty("the parked row stashes the decision envelope durably");
+            parked.DecisionEnvelopeJson!.ShouldContain(DecisionRaisingFakeCli.Question, customMessage: "the stashed envelope is the agent's REAL question, end to end through the proxy");
+
+            // GATE 3 (pre) — the pre-decision side effect ran exactly ONCE, and the agent is BLOCKED (not resumed) yet.
+            File.ReadAllLines(fake.PreMarker).Length.ShouldBe(1, "the agent did its pre-decision work exactly once before raising");
+            File.Exists(fake.PostMarker).ShouldBeFalse("the agent is blocked on the unanswered decision — it has NOT resumed");
+
+            // Answer via the queue/REST path (a human) → resolves the durable row. Routed through the governance-on
+            // container so it signals the endpoint's waiter SINGLETON (the agent's fast-path resume).
+            (await AnswerDecisionViaQueueAsync(ledgerId, new[] { "a" }, teamId, ownerId, useGovernanceContainer: true)).Outcome.ShouldBe(DecisionAnswerOutcome.Answered);
+
+            var answered = await ReadDecisionRowAsync(ledgerId);
+            answered.Status.ShouldBe(ToolCallLedgerStatus.Succeeded, "the answer CAS flips the durable row to Succeeded");
+            JsonSerializer.Deserialize<DecisionAnswer>(answered.ResultJson!, new JsonSerializerOptions(JsonSerializerDefaults.Web))!
+                .SelectedOptions.ShouldBe(new[] { "a" }, "the recorded answer is the human's chosen option");
+
+            // GATE 2 — a SECOND answer is an idempotent no-op (exactly-once); the first answer stands byte-identical.
+            (await AnswerDecisionViaQueueAsync(ledgerId, new[] { "b" }, teamId, ownerId, useGovernanceContainer: true)).Outcome.ShouldBe(DecisionAnswerOutcome.AlreadyResolved, "exactly-once: the second answer never re-applies");
+            (await ReadDecisionRowAsync(ledgerId)).ResultJson.ShouldBe(answered.ResultJson, "the first answer stands — the row is byte-identical after the no-op");
+
+            // GATE 4 — the agent process RESUMED past the now-answered call and exited 0 → the run is Succeeded, not NeedsReview.
+            await run.WaitAsync(TimeSpan.FromSeconds(60));
+            File.ReadAllLines(fake.PostMarker).Length.ShouldBe(1, "the agent resumed after the answer and recorded its post-decision marker exactly once (APPENDED, so a double-resume would show >1)");
+            File.ReadAllLines(fake.PreMarker).Length.ShouldBe(1, "GATE 3: resuming NEVER re-ran the completed pre-decision side effect");
+
+            (await ReadAgentRunStatusAsync(runId)).ShouldBe(AgentRunStatus.Succeeded, "GATE 4: the resumed agent exited 0 → Succeeded, never NeedsReview");
+            // GATE 5: the full lifecycle is observable — the parked row carried the envelope, the answer recorded the verdict, the run completed.
+        }
+        finally
+        {
+            workerCts.Cancel();
+            try { await run; } catch { /* cancelled / already completed */ }
+        }
+    }
+
+    /// <summary>The team's owner user id — the human actor that answers the agent's decision via the queue.</summary>
+    private async Task<Guid> TeamOwnerAsync(Guid teamId)
+    {
+        using var scope = _fixture.BeginScope();
+        return await scope.Resolve<CodeSpaceDbContext>().Team.AsNoTracking().Where(t => t.Id == teamId).Select(t => t.OwnerUserId).SingleAsync();
+    }
+
+    /// <summary>Poll for the run's parked decision.request ledger row — the durable queue surface, present regardless of any chat card (Slice 0). Mirrors McpDecisionFlowTests.WaitForParkedDecisionAsync.</summary>
+    private async Task<(Guid LedgerId, Guid? ApprovalMessageId)> WaitForParkedDecisionAsync(Guid teamId, Guid runId)
+    {
+        for (var i = 0; i < 300; i++)   // ~15s budget under full-suite Postgres contention + the proxy launch
+        {
+            using (var scope = _fixture.BeginScope())
+            {
+                var row = await scope.Resolve<CodeSpaceDbContext>().ToolCallLedger.AsNoTracking()
+                    .Where(l => l.AgentRunId == runId && l.TeamId == teamId && l.ToolKind == "decision.request" && l.Status == ToolCallLedgerStatus.AwaitingApproval)
+                    .Select(l => new { l.Id, l.ApprovalMessageId })
+                    .FirstOrDefaultAsync();
+
+                if (row is not null) return (row.Id, row.ApprovalMessageId);
+            }
+
+            await Task.Delay(50);
+        }
+
+        throw new TimeoutException($"No parked decision for run {runId} within 15s — the real agent's decision.request must park to the durable ledger.");
+    }
+
+    private async Task<ToolCallLedger> ReadDecisionRowAsync(Guid ledgerId)
+    {
+        using var scope = _fixture.BeginScope();
+        return await scope.Resolve<CodeSpaceDbContext>().ToolCallLedger.AsNoTracking().SingleAsync(l => l.Id == ledgerId);
+    }
+
+    private async Task<string> ReadRunRowsDiagAsync(Guid teamId, Guid runId)
+    {
+        using var scope = _fixture.BeginScope();
+        var rows = await scope.Resolve<CodeSpaceDbContext>().ToolCallLedger.AsNoTracking()
+            .Where(l => l.AgentRunId == runId && l.TeamId == teamId)
+            .Select(l => new { l.ToolKind, l.Status, l.ResultJson }).ToListAsync();
+        return rows.Count == 0 ? "(none)" : string.Join(" | ", rows.Select(r => $"{r.ToolKind}:{r.Status}:{r.ResultJson}"));
+    }
+
+    private async Task<AnswerDecisionResult> AnswerDecisionViaQueueAsync(Guid decisionId, IReadOnlyList<string> selectedOptions, Guid teamId, Guid actorUserId, bool useGovernanceContainer = false)
+    {
+        // The answer signals the blocked endpoint via the per-container IToolApprovalWaiterRegistry SINGLETON, so it must
+        // run through the SAME container the endpoint opened in — else the agent only wakes when the 600s durable bound
+        // elapses (the DB row is the authority, but the in-memory waiter is the fast-path the test's 60s budget relies on).
+        using var scope = useGovernanceContainer ? _fixture.BeginGovernanceOnScope() : _fixture.BeginScope();
+        return await scope.Resolve<IDecisionAnswerService>().AnswerAsync(decisionId, selectedOptions, null, teamId, actorUserId, CancellationToken.None);
+    }
+
+    private async Task<AgentRunStatus> ReadAgentRunStatusAsync(Guid runId)
+    {
+        using var scope = _fixture.BeginScope();
+        return (await scope.Resolve<IAgentRunService>().GetAsync(runId, CancellationToken.None)).Status;
+    }
+
     private Task RunExecutorInBackground(Guid runId, IAgentHarness harness, bool governanceEnabled = false) => Task.Run(() => ExecuteAsync(runId, harness, mcpEnabled: true, governanceEnabled: governanceEnabled));
 
     /// <summary>
@@ -751,7 +902,7 @@ public class AgentMcpEndpointFlowTests
     /// at a real existing stand-in (the test only File.Exists-checks it; the scripted harness runs /bin/sh, not the proxy);
     /// when false we point it at a missing path to exercise the fail-closed "no declaration" branch.
     /// </summary>
-    private async Task ExecuteAsync(Guid runId, IAgentHarness harness, bool mcpEnabled, bool proxyPresent = true, bool governanceEnabled = false, CancellationToken cancellationToken = default)
+    private async Task ExecuteAsync(Guid runId, IAgentHarness harness, bool mcpEnabled, bool proxyPresent = true, bool governanceEnabled = false, bool useGovernanceContainer = false, CancellationToken cancellationToken = default)
     {
         var previousEndpoint = Environment.GetEnvironmentVariable(AgentRunExecutor.McpEndpointEnabledEnvVar);
         var previousProxy = Environment.GetEnvironmentVariable(LocalProcessRunner.McpProxyPathEnvVar);
@@ -763,7 +914,9 @@ public class AgentMcpEndpointFlowTests
 
         try
         {
-            using var scope = _fixture.BeginScope();
+            // useGovernanceContainer routes the run through the SECOND, governance-on container so the endpoint's DI
+            // IAgentToolRegistry actually contains decision.request (registry composition is fixed at container build).
+            using var scope = useGovernanceContainer ? _fixture.BeginGovernanceOnScope() : _fixture.BeginScope();
             await NewExecutor(scope, harness).ExecuteAsync(runId, cancellationToken);
         }
         finally
