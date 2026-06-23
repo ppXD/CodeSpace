@@ -8,6 +8,13 @@ export type NodeStatus = "Pending" | "Running" | "Success" | "Failure" | "Skippe
 // Suspended = paused on a node waiting for a timer / approval / callback; resumes on the signal.
 export type WorkflowRunStatus = "Pending" | "Enqueued" | "Running" | "Success" | "Failure" | "Cancelled" | "Suspended";
 
+/** The result of a hard-stop. `cancelled` is true when this call won the flip; false (with the existing terminal `status`) when the run had already finished. `agentRunsCancelled` is how many in-flight agents the kill-wave stopped. */
+export interface CancelRunOutcome {
+  cancelled: boolean;
+  status: WorkflowRunStatus;
+  agentRunsCancelled: number;
+}
+
 /**
  * Open string instead of a closed enum. Examples: "manual", "replay", "schedule.cron",
  * "provider.github.pull_request". The UI renders the value as-is (it's already a stable,
@@ -526,6 +533,14 @@ export const workflowsApi = {
       method: "POST",
       body: JSON.stringify(body),
     }),
+
+  /**
+   * Cancel (hard-stop) a still-live run — wins the non-terminal → Cancelled flip and kills the run's in-flight
+   * agents. Idempotent: an already-terminal run returns `cancelled: false` carrying its existing status.
+   */
+  cancelRun: (runId: string) => fetchJson<CancelRunOutcome>(`/api/workflows/runs/${runId}/cancel`, {
+    method: "POST",
+  }),
 
   listNodeManifests: () => fetchJson<NodeManifestDto[]>("/api/workflows/node-manifests"),
 

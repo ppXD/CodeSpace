@@ -231,6 +231,23 @@ export function useReplayRun() {
   });
 }
 
+/**
+ * Cancel (hard-stop) a still-live run — the operator action. Invalidates the run's views so the terminal
+ * Cancelled state shows at once (the 2s status poll would also catch it). The backend POST /cancel is idempotent.
+ */
+export function useCancelRun(runId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: () => workflowsApi.cancelRun(runId),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["workflow-run", runId] });
+      qc.invalidateQueries({ queryKey: ["run-phases", runId] });
+      qc.invalidateQueries({ queryKey: ["workflow-runs"] });
+      qc.invalidateQueries({ queryKey: ["team-runs"] });
+    },
+  });
+}
+
 /** Approve / reject a run parked on a flow.wait_approval, then resume it. */
 export function useResumeRun(runId: string) {
   const qc = useQueryClient();
