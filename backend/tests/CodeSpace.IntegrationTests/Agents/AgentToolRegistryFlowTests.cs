@@ -81,7 +81,10 @@ public class AgentToolRegistryFlowTests
 
         var readOnlyKinds = registry.All.Where(t => t.IsReadOnly).Select(t => t.Kind).OrderBy(k => k).ToArray();
 
-        readOnlyKinds.ShouldBe(new[] { "git.fetch_pr_checks", "git.fetch_pr_diff", "git.list_prs" }, "the read-only (ledger-short-circuit, ungoverned) tool set must stay EXACTLY this curated allowlist — a new read-only tool is a conscious edit here; an unexpected entry means a side-effecting node forgot IsSideEffecting=true");
+        // get_context is the FIRST-PARTY read-only retrieval tool (registered unconditionally — no governance dep): a
+        // pure, team-scoped, fail-closed read with no side effect, so it belongs in the ungoverned ledger-short-circuit
+        // set by design. This entry is that conscious decision.
+        readOnlyKinds.ShouldBe(new[] { "get_context", "git.fetch_pr_checks", "git.fetch_pr_diff", "git.list_prs" }, "the read-only (ledger-short-circuit, ungoverned) tool set must stay EXACTLY this curated allowlist — a new read-only tool is a conscious edit here; an unexpected entry means a side-effecting node forgot IsSideEffecting=true");
 
         registry.All.Where(t => !t.IsReadOnly).ShouldAllBe(t => t.IsDestructive && t.RequiresApproval,
             "every NON-read-only tool routes through the governed path — side-effecting, approval-gated by default");

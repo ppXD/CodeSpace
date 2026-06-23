@@ -770,7 +770,7 @@ public sealed class McpRequestHandler : IMcpRequestHandler
     {
         try
         {
-            var result = await tool.CallAsync(new AgentToolCall { Input = arguments, TeamId = _teamId }, cancellationToken).ConfigureAwait(false);
+            var result = await tool.CallAsync(new AgentToolCall { Input = arguments, TeamId = _teamId, RunId = _runId }, cancellationToken).ConfigureAwait(false);
 
             if (result.IsError)
             {
@@ -864,7 +864,7 @@ public sealed class McpRequestHandler : IMcpRequestHandler
     {
         try
         {
-            var result = await tool.CallAsync(new AgentToolCall { Input = arguments, TeamId = _teamId }, cancellationToken).ConfigureAwait(false);
+            var result = await tool.CallAsync(new AgentToolCall { Input = arguments, TeamId = _teamId, RunId = _runId }, cancellationToken).ConfigureAwait(false);
 
             if (result.IsError) return ToolResult(isError: true, result.Error ?? "Tool failed.");
 

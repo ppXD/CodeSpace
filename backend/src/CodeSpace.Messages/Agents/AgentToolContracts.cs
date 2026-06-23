@@ -17,6 +17,13 @@ public sealed record AgentToolCall
     /// within it (null → no team → fail-closed, today's behavior).
     /// </summary>
     public Guid? TeamId { get; init; }
+
+    /// <summary>
+    /// The agent run this call is serving — stamped from the per-run MCP endpoint (same provenance as
+    /// <see cref="TeamId"/>). A context-retrieval tool resolves it to its WorkflowRun → SessionId to scope what it
+    /// may read. Null → no run context (a retrieval tool then has no session to read → fail-closed / empty).
+    /// </summary>
+    public Guid? RunId { get; init; }
 }
 
 /// <summary>Result of the pure, I/O-free input-validation stage — the first gate before any permission check or side effect.</summary>
