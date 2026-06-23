@@ -39,9 +39,9 @@ public sealed class TaskRunSnapshotFactory : ITaskRunSnapshotFactory, IScopedDep
 
     /// <summary>
     /// The launch SCOPE repo set this run was launched against — the agent profile's primary repo plus its related
-    /// (multi-repo) repos, distinct. Empty when the projection has no agent profile / no repo. NOTE: today
-    /// <c>RelatedRepositories</c> has no production producer (the launch path only resolves the primary), so the scope
-    /// is the single primary repo until the multi-repo launch wiring lands — at which point this already handles it.
+    /// (multi-repo) repos, distinct. Empty when the projection has no agent profile / no repo. A multi-repo launch
+    /// (<c>TaskLaunchRequest.RelatedRepositories</c> → <c>BuildAgentProfile</c>) populates the profile's related repos,
+    /// so the scope folds them in here — the set a session-branch resolver later scans per repo.
     /// </summary>
     private static IReadOnlyList<Guid> ScopeRepositoryIds(ResolvedAgentProfile? profile)
     {

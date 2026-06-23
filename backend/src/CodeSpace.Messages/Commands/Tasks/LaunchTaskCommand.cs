@@ -36,6 +36,9 @@ public sealed record LaunchTaskCommand : ICommand<LaunchTaskResult>, IRequireTea
     /// <summary>The repository the task targets, when named. Validated TEAM-SCOPED by the service; a foreign repo is a clear not-found.</summary>
     public Guid? RepositoryId { get; init; }
 
+    /// <summary>ADDITIONAL repositories to clone alongside the primary <see cref="RepositoryId"/> for a coordinated multi-repo change (e.g. a frontend + backend). EVERY entry is validated TEAM-SCOPED by the service (fail-closed, exactly like the primary). Null / empty ⇒ a single-repo run (byte-identical). Requires a primary <see cref="RepositoryId"/>.</summary>
+    public IReadOnlyList<TaskRelatedRepository>? RelatedRepositories { get; init; }
+
     /// <summary>The base branch the work starts from, when named. Null → the repo's default.</summary>
     public string? BaseBranch { get; init; }
 

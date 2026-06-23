@@ -1,6 +1,7 @@
 using CodeSpace.Core.DependencyInjection;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Services.Agents;
+using CodeSpace.Core.Services.Agents.Workspace;
 using CodeSpace.Core.Services.Sessions;
 using CodeSpace.Core.Services.Tasks.Effort;
 using CodeSpace.Core.Services.Tasks.Launch;
@@ -47,7 +48,7 @@ public sealed class TaskLaunchService : ITaskLaunchService, IScopedDependency
     {
         var seed = await _seedProviders.Resolve(request.SurfaceKind).SeedAsync(request, cancellationToken).ConfigureAwait(false);
 
-        await EnsureRepositoryInTeamAsync(seed, request, cancellationToken).ConfigureAwait(false);
+        await EnsureRepositoriesInTeamAsync(seed, request, cancellationToken).ConfigureAwait(false);
 
         var route = await _router.RouteAsync(BuildRouteRequest(seed, request), cancellationToken).ConfigureAwait(false);
 
@@ -112,18 +113,28 @@ public sealed class TaskLaunchService : ITaskLaunchService, IScopedDependency
         return await _sessionBranches.ResolveStartRefAsync(sessionId, request.TeamId, primaryRepoId, cancellationToken).ConfigureAwait(false);
     }
 
-    /// <summary>Validates the seed's (or request's) repo belongs to <c>request.TeamId</c>; a foreign / missing repo is a clear not-found — indistinguishable, so a foreign repo never leaks. Neither names a repo ⇒ skip (analysis-only is valid).</summary>
-    private async Task EnsureRepositoryInTeamAsync(TaskLaunchSeed seed, TaskLaunchRequest request, CancellationToken cancellationToken)
+    /// <summary>
+    /// Validates EVERY repo the run touches — the primary (seed's, else request's) PLUS each related (multi-repo) repo —
+    /// belongs to <c>request.TeamId</c>. A foreign / missing repo is a clear not-found (indistinguishable, so a foreign
+    /// repo never leaks) and rejecting ANY one fails the whole launch fail-closed, BEFORE the session opens (no orphan).
+    /// No repo named ⇒ skip (analysis-only is valid). Single-repo path is byte-identical (one id in, the same message out).
+    /// </summary>
+    private async Task EnsureRepositoriesInTeamAsync(TaskLaunchSeed seed, TaskLaunchRequest request, CancellationToken cancellationToken)
     {
-        var repositoryId = seed.RepositoryId ?? request.RepositoryId;
+        var ids = new HashSet<Guid>();
 
-        if (repositoryId == null) return;
+        if ((seed.RepositoryId ?? request.RepositoryId) is { } primary) ids.Add(primary);
+        if (request.RelatedRepositories is { } related) foreach (var r in related) ids.Add(r.RepositoryId);
+
+        if (ids.Count == 0) return;
 
         var inTeam = await _db.Repository.AsNoTracking()
-            .AnyAsync(r => r.Id == repositoryId.Value && r.TeamId == request.TeamId && r.DeletedDate == null, cancellationToken).ConfigureAwait(false);
+            .Where(r => ids.Contains(r.Id) && r.TeamId == request.TeamId && r.DeletedDate == null)
+            .Select(r => r.Id)
+            .ToListAsync(cancellationToken).ConfigureAwait(false);
 
-        if (!inTeam)
-            throw new KeyNotFoundException($"Repository {repositoryId} not found or not accessible.");
+        if (inTeam.Count != ids.Count)
+            throw new KeyNotFoundException($"Repository {string.Join(", ", ids.Except(inTeam))} not found or not accessible.");
     }
 
     /// <summary>Maps the seed + the operator's effort/recipe/autonomy + safety-budget caps onto the router input. The router TIGHTENS the effort preset's caps with <c>CapsOverride</c> (null ⇒ preset-only, byte-identical).</summary>
@@ -135,18 +146,34 @@ public sealed class TaskLaunchService : ITaskLaunchService, IScopedDependency
         CapsOverride = request.CapsOverride,
     };
 
-    /// <summary>Pure mapping: the request overrides + (seed repo ?? request repo) + the CLAMPED autonomy → the agent envelope the projection stamps. Every field optional, folding to agent.code's own defaults. Internal (not private) so the clamp choke point is unit-pinned directly (InternalsVisibleTo), not only through integration coverage.</summary>
-    internal static ResolvedAgentProfile BuildAgentProfile(TaskLaunchRequest request, TaskLaunchSeed seed, RoutePlan route) => new()
+    /// <summary>Pure mapping: the request overrides + (seed repo ?? request repo) + each related repo + the CLAMPED autonomy → the agent envelope the projection stamps. Every field optional, folding to agent.code's own defaults. Related repos require a primary (fail-loud, mirroring the agent.code node — a workspace has nowhere to anchor without one). Internal (not private) so the clamp + related-repo choke point is unit-pinned directly (InternalsVisibleTo), not only through integration coverage.</summary>
+    internal static ResolvedAgentProfile BuildAgentProfile(TaskLaunchRequest request, TaskLaunchSeed seed, RoutePlan route)
     {
-        RepositoryId = seed.RepositoryId ?? request.RepositoryId,
-        Harness = request.Overrides.Harness,
-        Model = request.Overrides.Model,
-        AgentDefinitionId = request.Overrides.AgentDefinitionId,
-        ModelCredentialId = request.Overrides.ModelCredentialId,
-        ModelCredentialModelId = request.Overrides.ModelCredentialModelId,
-        RunnerKind = request.Overrides.RunnerKind,
-        AutonomyLevel = ClampAutonomy(request, route),
-    };
+        var repositoryId = seed.RepositoryId ?? request.RepositoryId;
+        var related = BuildRelatedRepositories(request.RelatedRepositories);
+
+        if (related is { Count: > 0 } && repositoryId is null)
+            throw new ArgumentException("Related repositories require a primary repository — name a primary repository, or remove the related ones.");
+
+        return new ResolvedAgentProfile
+        {
+            RepositoryId = repositoryId,
+            RelatedRepositories = related,
+            Harness = request.Overrides.Harness,
+            Model = request.Overrides.Model,
+            AgentDefinitionId = request.Overrides.AgentDefinitionId,
+            ModelCredentialId = request.Overrides.ModelCredentialId,
+            ModelCredentialModelId = request.Overrides.ModelCredentialModelId,
+            RunnerKind = request.Overrides.RunnerKind,
+            AutonomyLevel = ClampAutonomy(request, route),
+        };
+    }
+
+    /// <summary>Project the operator's typed related repos onto <see cref="WorkspaceRepositorySpec"/>s through the SHARED authoring path (Rule 7 — the same defaults the agent.code node + supervisor get). Null / empty ⇒ null, so a single-repo launch leaves <c>RelatedRepositories</c> unset (the projection omits the key — byte-identical).</summary>
+    private static IReadOnlyList<WorkspaceRepositorySpec>? BuildRelatedRepositories(IReadOnlyList<TaskRelatedRepository>? related) =>
+        related is { Count: > 0 }
+            ? related.Select(r => AgentWorkspaceAuthoring.ToRelatedSpec(r.RepositoryId, r.Alias, r.Access)).ToList()
+            : null;
 
     /// <summary>
     /// The SINGLE choke point that pins the run's autonomy: clamp the operator's requested tier down to the route's

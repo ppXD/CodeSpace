@@ -38,15 +38,45 @@ public static class AgentWorkspaceAuthoring
             if (!element.TryGetProperty("repositoryId", out var idEl) || idEl.ValueKind != JsonValueKind.String || !Guid.TryParse(idEl.GetString(), out var repoId)) continue;
 
             var alias = element.TryGetProperty("alias", out var aliasEl) && aliasEl.ValueKind == JsonValueKind.String ? (aliasEl.GetString() ?? "").Trim() : "";
-            var access = element.TryGetProperty("access", out var accessEl) && accessEl.ValueKind == JsonValueKind.String && string.Equals(accessEl.GetString(), "write", StringComparison.OrdinalIgnoreCase)
-                ? WorkspaceAccess.Write
-                : WorkspaceAccess.Read;
+            var access = ParseAccess(element.TryGetProperty("access", out var accessEl) && accessEl.ValueKind == JsonValueKind.String ? accessEl.GetString() : null);
 
             list.Add(new WorkspaceRepositorySpec { Alias = alias, RepositoryId = repoId, Access = access });
         }
 
         return list;
     }
+
+    /// <summary>
+    /// Project a TYPED authored related repo (the task-launch surface's <c>{repositoryId, alias?, access?}</c>) onto a
+    /// <see cref="WorkspaceRepositorySpec"/> with the SAME defaults as the JSON <see cref="ParseRelatedRepositories"/>
+    /// path (alias trimmed, blank-OK so <see cref="WorkspaceSpec.FromAuthoredRepos"/> assigns a unique one; access
+    /// defaults to read-only context) — so a launch-authored repo and a node-authored one resolve identically (Rule 7).
+    /// </summary>
+    public static WorkspaceRepositorySpec ToRelatedSpec(Guid repositoryId, string? alias, string? access) =>
+        new() { Alias = (alias ?? "").Trim(), RepositoryId = repositoryId, Access = ParseAccess(access) };
+
+    /// <summary>
+    /// Serialize related specs back to the authored <c>{repositoryId, alias?, access?}</c> JSON shape both the
+    /// <c>agent.code</c> node input AND the supervisor config consume — the inverse of <see cref="ParseRelatedRepositories"/>,
+    /// in ONE place (Rule 7) so a projection emits the EXACT shape these re-parse. Null / empty ⇒ null, so a caller
+    /// omits the key entirely (a single-repo projection stays byte-identical). Alias is omitted when blank (the
+    /// workspace re-derives a unique one).
+    /// </summary>
+    public static IReadOnlyList<Dictionary<string, object?>>? SerializeRelatedRepositories(IReadOnlyList<WorkspaceRepositorySpec>? related)
+    {
+        if (related is not { Count: > 0 }) return null;
+
+        return related.Select(r => new Dictionary<string, object?>
+        {
+            ["repositoryId"] = r.RepositoryId.ToString(),
+            ["alias"] = string.IsNullOrWhiteSpace(r.Alias) ? null : r.Alias,
+            ["access"] = r.Access == WorkspaceAccess.Write ? "write" : "read",
+        }).ToList();
+    }
+
+    /// <summary>The authored access string → enum: <c>"write"</c> (case-insensitive) ⇒ writable, anything else (incl. null/blank/garbage) ⇒ read-only context — the safe default. The ONE place the access wire-value is interpreted (shared by the JSON + typed authoring paths).</summary>
+    internal static WorkspaceAccess ParseAccess(string? access) =>
+        string.Equals(access, "write", StringComparison.OrdinalIgnoreCase) ? WorkspaceAccess.Write : WorkspaceAccess.Read;
 
     /// <summary>
     /// Resolve the authored <see cref="WorkspaceSpec"/> a producer attaches to its <see cref="AgentTask"/>: the

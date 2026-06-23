@@ -318,6 +318,222 @@ public class TaskLaunchFlowTests
             customMessage: "the goal the fake provider read from the surface payload must reach the real CLI — proving only the provider interpreted Raw, not the core");
     }
 
+    // ─── Multi-repo launch (the front door to the multi-repo workspace底座) ──────────────────────────────────────
+
+    [Fact]
+    public async Task Multi_repo_launch_projects_every_related_repo_into_the_frozen_agent_node_and_the_run_scope()
+    {
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var primary = await SeedRepositoryAsync(teamId);
+        var api = await SeedRepositoryAsync(teamId);
+        var web = await SeedRepositoryAsync(teamId);
+
+        // A single-agent (quick) task across THREE same-team repos. We assert the ACCEPT path + the multi-repo round
+        // trip into the frozen snapshot + the run SCOPE (what a session-branch resolver later reads) — without running
+        // (a real multi-repo clone of seed-only repos would fail; the single-agent run path is proven above).
+        var request = new TaskLaunchRequest
+        {
+            TeamId = teamId,
+            ActorUserId = userId,
+            SurfaceKind = TaskLaunchSurfaceKinds.Chat,
+            TaskText = "Coordinated change across api + web",
+            RepositoryId = primary,
+            RelatedRepositories = new[]
+            {
+                new TaskRelatedRepository { RepositoryId = api, Alias = "api", Access = "write" },
+                new TaskRelatedRepository { RepositoryId = web, Alias = "web", Access = "read" },
+            },
+            RequestedEffort = TaskEffortModes.Quick,
+        };
+
+        var result = await LaunchAsync(request);
+
+        result.ProjectionKind.ShouldBe(TaskProjectionKinds.SingleAgent);
+
+        var run = await LoadRunAsync(result.RunId);
+
+        // The primary stays on the agent node's repositoryId; the related repos land on relatedRepositories VERBATIM.
+        ReadAgentRepositoryId(run.DefinitionSnapshotJson!).ShouldBe(primary.ToString());
+
+        var related = ReadAgentRelatedRepositories(run.DefinitionSnapshotJson!);
+        related.Select(r => r.repoId).ShouldBe(new[] { api.ToString(), web.ToString() }, "both related repos round-trip into the frozen agent.code inputs, in authored order");
+        related.Single(r => r.repoId == api.ToString()).access.ShouldBe("write", "the authored write access round-trips");
+        related.Single(r => r.repoId == web.ToString()).access.ShouldBe("read", "the authored read access round-trips");
+        related.Single(r => r.repoId == api.ToString()).alias.ShouldBe("api");
+
+        // The run SCOPE is the primary PLUS every related repo (distinct) — this is the set a multi-repo session-branch
+        // resolver scans by, so opening the multi-repo front door makes a multi-repo session turn producible.
+        run.ScopeRepositoryIds.ShouldBe(new[] { primary, api, web }, ignoreOrder: true,
+            customMessage: "the launch scope folds primary + related repos — the substrate TaskRunSnapshotFactory already supports, now fed");
+    }
+
+    [Fact]
+    public async Task A_cross_team_RELATED_repo_is_rejected_fail_closed_and_no_run_is_created()
+    {
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var (otherTeamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+
+        // The PRIMARY is in-team but a RELATED repo belongs to ANOTHER team. The launch must validate EVERY repo and
+        // reject fail-closed — a foreign related repo can never be pulled into the workspace (the tenancy floor).
+        var primary = await SeedRepositoryAsync(teamId);
+        var foreignRelated = await SeedRepositoryAsync(otherTeamId);
+
+        var request = new TaskLaunchRequest
+        {
+            TeamId = teamId,
+            ActorUserId = userId,
+            SurfaceKind = TaskLaunchSurfaceKinds.Chat,
+            TaskText = "Try to pull in a foreign repo as related",
+            RepositoryId = primary,
+            RelatedRepositories = new[] { new TaskRelatedRepository { RepositoryId = foreignRelated, Alias = "api" } },
+            RequestedEffort = TaskEffortModes.Quick,
+        };
+
+        var ex = await Should.ThrowAsync<KeyNotFoundException>(() => LaunchAsync(request));
+
+        ex.Message.ShouldContain("not found or not accessible",
+            customMessage: "a cross-team RELATED repo must surface as a generic not-found — the same fail-closed posture as the primary, never a cross-team workspace");
+
+        (await CountRunsForTeamAsync(teamId)).ShouldBe(0, "a launch with ANY inaccessible repo rejects BEFORE starting a run (and before opening a session)");
+    }
+
+    [Fact]
+    public async Task Multi_repo_deep_launch_projects_every_related_repo_into_the_plan_map_body_agent()
+    {
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var primary = await SeedRepositoryAsync(teamId);
+        var api = await SeedRepositoryAsync(teamId);
+
+        // A DEEP task routes to the plan-map-synth fan-out (the supervisor lane is off by default → deep degrades to
+        // map-fanout). The related repos must reach the MAP BODY agent.code node (each fan-out branch clones them) —
+        // proving the multi-repo workspace flows through the map projection too, not only single-agent. Frozen-def
+        // assertion only (the map run path is covered by PlanMapSynthFanoutFlowTests).
+        var request = new TaskLaunchRequest
+        {
+            TeamId = teamId,
+            ActorUserId = userId,
+            SurfaceKind = TaskLaunchSurfaceKinds.Chat,
+            TaskText = "Deep coordinated change",
+            RepositoryId = primary,
+            RelatedRepositories = new[] { new TaskRelatedRepository { RepositoryId = api, Alias = "api", Access = "write" } },
+            RequestedEffort = TaskEffortModes.Deep,
+        };
+
+        var result = await LaunchAsync(request);
+
+        result.ProjectionKind.ShouldBe(TaskProjectionKinds.PlanMapSynth, "deep degrades to the map-fanout shape with the supervisor lane off (the default)");
+
+        var run = await LoadRunAsync(result.RunId);
+
+        var related = ReadAgentRelatedRepositories(run.DefinitionSnapshotJson!);
+        related.Select(r => r.repoId).ShouldBe(new[] { api.ToString() }, "the related repo reaches the map body agent.code node — a deep multi-repo launch is NOT a silent drop");
+        related.Single().access.ShouldBe("write");
+        run.ScopeRepositoryIds.ShouldBe(new[] { primary, api }, ignoreOrder: true);
+    }
+
+    [Fact]
+    public async Task A_single_repo_launch_omits_relatedRepositories_byte_identical()
+    {
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var primary = await SeedRepositoryAsync(teamId);
+
+        var request = new TaskLaunchRequest
+        {
+            TeamId = teamId,
+            ActorUserId = userId,
+            SurfaceKind = TaskLaunchSurfaceKinds.Chat,
+            TaskText = "Single repo, no related",
+            RepositoryId = primary,
+            RequestedEffort = TaskEffortModes.Quick,
+        };
+
+        var run = await LoadRunAsync((await LaunchAsync(request)).RunId);
+
+        HasRelatedRepositoriesKey(run.DefinitionSnapshotJson!).ShouldBeFalse(
+            "a single-repo launch must NOT add a relatedRepositories key — the frozen agent.code inputs are byte-identical to the pre-multi-repo launch");
+        run.ScopeRepositoryIds.ShouldBe(new[] { primary }, ignoreOrder: true, customMessage: "the scope is just the primary — byte-identical");
+    }
+
+    [Fact]
+    public async Task A_related_repo_equal_to_the_primary_is_deduped_and_the_launch_succeeds()
+    {
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var primary = await SeedRepositoryAsync(teamId);
+
+        // The operator double-picks the primary as a related repo. It is the team's OWN repo, so the launch must NOT
+        // reject (not a tenancy issue) and must NOT scope/clone it twice — the workspace resolver collapses it to one
+        // (unit-pinned on FromAuthoredRepos). Here: the end-to-end launch tolerates it + the scope is deduped.
+        var request = new TaskLaunchRequest
+        {
+            TeamId = teamId,
+            ActorUserId = userId,
+            SurfaceKind = TaskLaunchSurfaceKinds.Chat,
+            TaskText = "Primary also listed as related",
+            RepositoryId = primary,
+            RelatedRepositories = new[] { new TaskRelatedRepository { RepositoryId = primary, Alias = "dup" } },
+            RequestedEffort = TaskEffortModes.Quick,
+        };
+
+        var run = await LoadRunAsync((await LaunchAsync(request)).RunId);
+
+        run.ScopeRepositoryIds.ShouldBe(new[] { primary }, ignoreOrder: true, customMessage: "a related repo equal to the primary is deduped — the repo is scoped (and cloned) once, not twice");
+    }
+
+    [Theory]
+    [InlineData(true)]   // the soft-deleted repo is the PRIMARY
+    [InlineData(false)]  // the soft-deleted repo is a RELATED repo
+    public async Task A_soft_deleted_repo_is_rejected_fail_closed(bool deletedIsPrimary)
+    {
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var live = await SeedRepositoryAsync(teamId);
+        var deleted = await SeedRepositoryAsync(teamId);
+        await SoftDeleteRepositoryAsync(deleted);
+
+        // The fail-closed guard (DeletedDate == null) must reject a soft-deleted in-team repo as either the primary OR
+        // a related repo — a deleted repo can no more reach the workspace than a foreign one.
+        var request = new TaskLaunchRequest
+        {
+            TeamId = teamId,
+            ActorUserId = userId,
+            SurfaceKind = TaskLaunchSurfaceKinds.Chat,
+            TaskText = "Target a deleted repo",
+            RepositoryId = deletedIsPrimary ? deleted : live,
+            RelatedRepositories = deletedIsPrimary ? null : new[] { new TaskRelatedRepository { RepositoryId = deleted, Alias = "api" } },
+            RequestedEffort = TaskEffortModes.Quick,
+        };
+
+        var ex = await Should.ThrowAsync<KeyNotFoundException>(() => LaunchAsync(request));
+
+        ex.Message.ShouldContain("not found or not accessible", customMessage: "a soft-deleted repo surfaces as a generic not-found — the fail-closed DeletedDate guard");
+        (await CountRunsForTeamAsync(teamId)).ShouldBe(0, "a soft-deleted repo rejects BEFORE any run is created");
+    }
+
+    [Fact]
+    public async Task Related_repositories_without_a_primary_are_rejected_fail_loud_with_no_run()
+    {
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var related = await SeedRepositoryAsync(teamId);   // in-team so the team-scope gate passes — the related-without-primary guard is what must fire
+
+        // Related repos have nowhere to anchor without a primary. The launch must reject fail-loud (ArgumentException
+        // from BuildAgentProfile, which runs BEFORE the session opens) — proving the guard is reached in the real
+        // pipeline and leaves no orphan run/session.
+        var request = new TaskLaunchRequest
+        {
+            TeamId = teamId,
+            ActorUserId = userId,
+            SurfaceKind = TaskLaunchSurfaceKinds.Chat,
+            TaskText = "Related repos but no primary",
+            RepositoryId = null,
+            RelatedRepositories = new[] { new TaskRelatedRepository { RepositoryId = related, Alias = "api" } },
+            RequestedEffort = TaskEffortModes.Quick,
+        };
+
+        var ex = await Should.ThrowAsync<ArgumentException>(() => LaunchAsync(request));
+
+        ex.Message.ShouldContain("require a primary repository");
+        (await CountRunsForTeamAsync(teamId)).ShouldBe(0, "the related-without-primary guard fires before the session opens — no orphan run/session");
+    }
+
     /// <summary>A test-only launch surface proving zero-core-edit extensibility: derives the goal + a LinkedEntityRef ENTIRELY from the surface payload the core never reads.</summary>
     private sealed class FakeSurfaceSeedProvider : ITaskLaunchSeedProvider
     {
@@ -408,6 +624,18 @@ public class TaskLaunchFlowTests
         return repoId;
     }
 
+    /// <summary>Soft-deletes a seeded repo (sets <c>DeletedDate</c>) so the launch's fail-closed <c>DeletedDate == null</c> gate must reject it.</summary>
+    private async Task SoftDeleteRepositoryAsync(Guid repoId)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+
+        var repo = await db.Repository.SingleAsync(r => r.Id == repoId);
+        repo.DeletedDate = DateTimeOffset.UtcNow;
+
+        await db.SaveChangesAsync();
+    }
+
     /// <summary>Reads the projected agent.code node's bound <c>repositoryId</c> input out of the frozen definition snapshot.</summary>
     private static string? ReadAgentRepositoryId(string definitionSnapshotJson)
     {
@@ -415,5 +643,28 @@ public class TaskLaunchFlowTests
         var agent = root.GetProperty("nodes").EnumerateArray().Single(n => n.GetProperty("id").GetString() == "agent");
 
         return agent.GetProperty("inputs").TryGetProperty("repositoryId", out var repo) ? repo.GetString() : null;
+    }
+
+    /// <summary>Reads the projected agent.code node's <c>relatedRepositories</c> input (id + alias + access per entry) out of the frozen snapshot, in authored order. Empty when the key is absent.</summary>
+    private static IReadOnlyList<(string repoId, string? alias, string? access)> ReadAgentRelatedRepositories(string definitionSnapshotJson)
+    {
+        var root = JsonDocument.Parse(definitionSnapshotJson).RootElement;
+        var agent = root.GetProperty("nodes").EnumerateArray().Single(n => n.GetProperty("id").GetString() == "agent");
+
+        if (!agent.GetProperty("inputs").TryGetProperty("relatedRepositories", out var arr) || arr.ValueKind != JsonValueKind.Array) return [];
+
+        return arr.EnumerateArray().Select(e => (
+            e.GetProperty("repositoryId").GetString()!,
+            e.TryGetProperty("alias", out var a) && a.ValueKind == JsonValueKind.String ? a.GetString() : null,
+            e.TryGetProperty("access", out var ac) && ac.ValueKind == JsonValueKind.String ? ac.GetString() : null)).ToList();
+    }
+
+    /// <summary>True when the frozen agent.code node carries a <c>relatedRepositories</c> input key at all (the byte-identity guard for a single-repo launch).</summary>
+    private static bool HasRelatedRepositoriesKey(string definitionSnapshotJson)
+    {
+        var root = JsonDocument.Parse(definitionSnapshotJson).RootElement;
+        var agent = root.GetProperty("nodes").EnumerateArray().Single(n => n.GetProperty("id").GetString() == "agent");
+
+        return agent.GetProperty("inputs").TryGetProperty("relatedRepositories", out _);
     }
 }

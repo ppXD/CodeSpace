@@ -30,6 +30,9 @@ public sealed record TaskLaunchRequest
     /// <summary>The repository the task targets, when the operator named one. Validated TEAM-SCOPED by the launch service.</summary>
     public Guid? RepositoryId { get; init; }
 
+    /// <summary>ADDITIONAL repositories cloned alongside the primary <see cref="RepositoryId"/> for a coordinated multi-repo change. EVERY entry is validated TEAM-SCOPED (fail-closed). Null / empty ⇒ a single-repo run (byte-identical). Requires a primary <see cref="RepositoryId"/>.</summary>
+    public IReadOnlyList<TaskRelatedRepository>? RelatedRepositories { get; init; }
+
     /// <summary>The base branch the work starts from, when named. Null → the repo's default.</summary>
     public string? BaseBranch { get; init; }
 

@@ -144,6 +144,50 @@ public sealed class TaskLaunchEndpointE2ETests : IClassFixture<TaskLaunchApiFact
     }
 
     [Fact]
+    public async Task Post_tasks_with_related_repositories_binds_the_multi_repo_workspace_through_real_http()
+    {
+        var (userId, teamId) = await SeedTeamMembershipAsync();
+        var primary = await SeedRepositoryAsync(teamId, "api");
+        var web = await SeedRepositoryAsync(teamId, "web");
+
+        // POST a MULTI-REPO launch through the REAL pipeline — the new relatedRepositories array must bind through
+        // ASP.NET model binding → LaunchTaskCommand → request → profile → projection. Frozen-def assertion only (a
+        // real multi-repo clone of seed-only repos would fail; the run path is covered by the single-agent E2E above).
+        var request = new HttpRequestMessage(HttpMethod.Post, "/api/workflows/runs")
+        {
+            Content = JsonContent.Create(new
+            {
+                taskText = "Coordinated change across api + web",
+                repositoryId = primary,
+                relatedRepositories = new[] { new { repositoryId = web, alias = "web", access = "write" } },
+                effort = "quick",
+                surfaceKind = "chat",
+            }),
+        };
+        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", MintToken(userId));
+        request.Headers.Add("X-Team-Id", teamId.ToString());
+
+        var response = await _factory.CreateClient().SendAsync(request);
+
+        response.StatusCode.ShouldBe(HttpStatusCode.OK, customMessage: await DescribeFailureAsync(response));
+
+        var body = await response.Content.ReadFromJsonAsync<LaunchResponse>();
+        body.ShouldNotBeNull();
+
+        using var scope = _factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<CodeSpaceDbContext>();
+        var run = await db.WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == body!.RunId);
+
+        // The related repo bound through HTTP and round-tripped into the frozen agent.code inputs…
+        ReadAgentRelatedRepositoryIds(run.DefinitionSnapshotJson!).ShouldBe(new[] { web.ToString() },
+            customMessage: "the relatedRepositories array must bind through real ASP.NET model binding into the projected agent.code inputs");
+
+        // …and the run scope is the primary + the related repo (what a multi-repo session-branch resolver scans).
+        run.ScopeRepositoryIds.ShouldBe(new[] { primary, web }, ignoreOrder: true,
+            customMessage: "the launch scope folds the primary + related repos through the full HTTP pipeline");
+    }
+
+    [Fact]
     public async Task Post_tasks_without_a_team_header_is_rejected_fail_closed()
     {
         var (userId, _) = await SeedTeamMembershipAsync();
@@ -197,6 +241,34 @@ public sealed class TaskLaunchEndpointE2ETests : IClassFixture<TaskLaunchApiFact
         var root = JsonDocument.Parse(definitionSnapshotJson).RootElement;
         var agent = root.GetProperty("nodes").EnumerateArray().Single(n => n.GetProperty("id").GetString() == "agent");
         return agent.GetProperty("config").GetProperty("goal").GetString()!;
+    }
+
+    /// <summary>Reads the projected agent.code node's <c>relatedRepositories</c> repo ids out of the frozen snapshot. Empty when the key is absent.</summary>
+    private static IReadOnlyList<string> ReadAgentRelatedRepositoryIds(string definitionSnapshotJson)
+    {
+        var root = JsonDocument.Parse(definitionSnapshotJson).RootElement;
+        var agent = root.GetProperty("nodes").EnumerateArray().Single(n => n.GetProperty("id").GetString() == "agent");
+
+        if (!agent.GetProperty("inputs").TryGetProperty("relatedRepositories", out var arr) || arr.ValueKind != JsonValueKind.Array) return [];
+
+        return arr.EnumerateArray().Select(e => e.GetProperty("repositoryId").GetString()!).ToList();
+    }
+
+    /// <summary>Seeds a provider instance + an active repository in the team — enough to satisfy the launch's team-scope check.</summary>
+    private async Task<Guid> SeedRepositoryAsync(Guid teamId, string name)
+    {
+        using var scope = _factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<CodeSpaceDbContext>();
+
+        var suffix = Guid.NewGuid().ToString("N")[..8];
+        var instanceId = Guid.NewGuid();
+        var repoId = Guid.NewGuid();
+
+        db.ProviderInstance.Add(new ProviderInstance { Id = instanceId, TeamId = teamId, Provider = ProviderKind.GitHub, DisplayName = "GH", BaseUrl = $"https://gh-{suffix}.local", CreatedBy = SystemUsers.SeederId, LastModifiedBy = SystemUsers.SeederId });
+        db.Repository.Add(new Repository { Id = repoId, TeamId = teamId, ProviderInstanceId = instanceId, ExternalId = $"ext-{suffix}", NamespacePath = "acme", Name = name, FullPath = $"acme/{name}-{suffix}", WebUrl = $"https://gh.local/acme/{name}", CreatedBy = SystemUsers.SeederId, LastModifiedBy = SystemUsers.SeederId });
+
+        await db.SaveChangesAsync();
+        return repoId;
     }
 
     private sealed record LaunchResponse

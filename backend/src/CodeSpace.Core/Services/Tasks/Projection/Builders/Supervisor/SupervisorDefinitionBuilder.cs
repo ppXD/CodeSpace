@@ -1,5 +1,6 @@
 using System.Text.Json;
 using CodeSpace.Core.DependencyInjection;
+using CodeSpace.Core.Services.Agents.Workspace;
 using CodeSpace.Messages.Dtos.Workflows;
 using CodeSpace.Messages.Tasks;
 
@@ -98,6 +99,10 @@ public sealed class SupervisorDefinitionBuilder : IWorkflowDefinitionBuilder, IS
         var map = new Dictionary<string, object?>();
 
         AddIfPresent(map, "repositoryId", profile.RepositoryId?.ToString());
+        // Multi-repo: each spawned agent ALSO clones these (the supervisor config's relatedRepositories — the SAME
+        // {repositoryId, alias?, access?} shape the agent.code node gets, via the ONE shared serializer). Omitted
+        // when none, so a single-repo / analysis-only supervisor spawn is byte-identical.
+        AddIfPresent(map, "relatedRepositories", AgentWorkspaceAuthoring.SerializeRelatedRepositories(profile.RelatedRepositories));
         AddIfPresent(map, "harness", NullIfBlank(profile.Harness));
         AddIfPresent(map, "model", NullIfBlank(profile.Model));
         AddIfPresent(map, "agentDefinitionId", profile.AgentDefinitionId?.ToString());
