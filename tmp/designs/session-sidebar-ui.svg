@@ -1,0 +1,184 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1800" height="1120" viewBox="0 0 1800 1120">
+  <defs>
+    <style>
+      .bg { fill: #faf9f5; }
+      .panel { fill: #fffdfa; stroke: #e6ded2; stroke-width: 1.5; }
+      .soft { fill: #f7f2ec; stroke: #e6ded2; stroke-width: 1.2; }
+      .soft2 { fill: #fbf7f2; stroke: #eaded2; stroke-width: 1.1; }
+      .selected { fill: #f3dfd3; stroke: #dc8b6e; stroke-width: 1.4; }
+      .amber { fill: #fff2d6; stroke: #dfae3a; stroke-width: 1.2; }
+      .green { fill: #e9f6e8; stroke: #8abf7b; stroke-width: 1.1; }
+      .red { fill: #fae9e7; stroke: #d67870; stroke-width: 1.1; }
+      .blue { fill: #e8f1fb; stroke: #77a7dc; stroke-width: 1.1; }
+      .ink { fill: #252321; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
+      .muted { fill: #8d8780; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
+      .faint { fill: #aaa39b; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
+      .title { font-size: 31px; font-weight: 700; letter-spacing: 0; }
+      .h1 { font-size: 25px; font-weight: 700; letter-spacing: 0; }
+      .h2 { font-size: 18px; font-weight: 700; letter-spacing: 0; text-transform: uppercase; }
+      .body { font-size: 17px; letter-spacing: 0; }
+      .small { font-size: 14px; letter-spacing: 0; }
+      .tiny { font-size: 12px; letter-spacing: 0; text-transform: uppercase; font-weight: 700; }
+      .btn { fill: #ffffff; stroke: #ded6cb; stroke-width: 1.2; }
+      .accentBtn { fill: #dd7554; }
+      .accentText { fill: #9d452d; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
+      .line { stroke: #e8e0d7; stroke-width: 1.2; }
+      .dotGreen { fill: #2e8b57; }
+      .dotAmber { fill: #bb7414; }
+      .dotBlue { fill: #4e93d8; }
+      .dotRed { fill: #b54b48; }
+      .dotMuted { fill: #bab3ab; }
+      .shadow { filter: drop-shadow(0 10px 22px rgba(56, 45, 32, .08)); }
+    </style>
+  </defs>
+
+  <rect class="bg" width="1800" height="1120"/>
+
+  <rect x="34" y="34" width="1732" height="1052" rx="18" class="panel shadow"/>
+
+  <!-- Workspace nav -->
+  <rect x="58" y="58" width="196" height="1004" rx="14" class="soft"/>
+  <circle cx="92" cy="94" r="17" fill="#62a676"/>
+  <text x="84" y="100" class="ink small" fill="#ffffff" font-weight="700">D</text>
+  <text x="121" y="90" class="ink body" font-weight="700">Default</text>
+  <text x="121" y="112" class="muted small">3 members</text>
+
+  <g class="body">
+    <text x="88" y="182" class="muted">Projects</text>
+    <text x="88" y="232" class="muted">Agents</text>
+    <text x="88" y="282" class="muted">Workflows</text>
+    <rect x="74" y="308" width="154" height="38" rx="8" fill="#efe7db"/>
+    <text x="88" y="333" class="ink" font-weight="700">Threads</text>
+    <text x="88" y="382" class="muted">Runs</text>
+    <text x="88" y="432" class="muted">Settings</text>
+  </g>
+  <text x="74" y="1018" class="muted small">Runs = execution monitor</text>
+
+  <!-- Sessions sidebar -->
+  <rect x="274" y="58" width="455" height="1004" rx="14" fill="#fffefa" stroke="#e4dccf" stroke-width="1.4"/>
+  <text x="304" y="110" class="ink title">Threads</text>
+  <text x="304" y="137" class="muted small">Sessions = long-lived work threads</text>
+  <rect x="304" y="164" width="295" height="42" rx="10" class="soft2"/>
+  <text x="324" y="191" class="faint body">Search threads...</text>
+  <rect x="613" y="164" width="88" height="42" rx="10" class="accentBtn"/>
+  <text x="632" y="191" fill="#ffffff" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace" font-size="15" font-weight="700">New</text>
+
+  <text x="304" y="252" class="muted tiny">Needs you</text>
+  <rect x="304" y="272" width="397" height="95" rx="12" class="selected"/>
+  <circle cx="330" cy="304" r="7" class="dotAmber"/>
+  <text x="350" y="306" class="ink body" font-weight="700">Fix checkout bug in Wisp</text>
+  <rect x="662" y="286" width="23" height="23" rx="11.5" fill="#c47a22"/>
+  <text x="670" y="303" fill="#ffffff" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace" font-size="13" font-weight="700">1</text>
+  <text x="350" y="333" class="accentText small">Deep · 4 agents · merge strategy</text>
+  <text x="350" y="356" class="muted small">Wisp write · SDK read · 18m</text>
+
+  <text x="304" y="413" class="muted tiny">Active</text>
+  <rect x="304" y="433" width="397" height="86" rx="12" class="soft2"/>
+  <circle cx="330" cy="464" r="7" class="dotBlue"/>
+  <text x="350" y="467" class="ink body" font-weight="700">Refactor auth lifecycle</text>
+  <text x="350" y="493" class="muted small">Standard · backend-fix running</text>
+  <text x="350" y="515" class="muted small">2 of 3 agents · 9m</text>
+
+  <text x="304" y="565" class="muted tiny">Recent</text>
+  <rect x="304" y="585" width="397" height="82" rx="12" class="soft2"/>
+  <circle cx="330" cy="614" r="7" class="dotGreen"/>
+  <text x="350" y="617" class="ink body" font-weight="700">Add OAuth to SDK</text>
+  <text x="350" y="643" class="muted small">2 runs · PR #80 opened</text>
+  <text x="640" y="643" class="faint small">2h</text>
+
+  <rect x="304" y="682" width="397" height="82" rx="12" class="soft2"/>
+  <circle cx="330" cy="711" r="7" class="dotRed"/>
+  <text x="350" y="714" class="ink body" font-weight="700">Nightly dependency upgrade</text>
+  <text x="350" y="740" class="muted small">Scheduled · tests failed</text>
+  <text x="636" y="740" class="faint small">6h</text>
+
+  <rect x="304" y="779" width="397" height="82" rx="12" class="soft2"/>
+  <circle cx="330" cy="808" r="7" class="dotMuted"/>
+  <text x="350" y="811" class="ink body" font-weight="700">Review PR #142</text>
+  <text x="350" y="837" class="muted small">PR thread · completed</text>
+  <text x="624" y="837" class="faint small">1d</text>
+
+  <!-- Main conversation panel -->
+  <rect x="752" y="58" width="990" height="1004" rx="14" fill="#fffefa" stroke="#e4dccf" stroke-width="1.4"/>
+  <text x="790" y="107" class="ink title">Fix checkout bug in Wisp</text>
+  <text x="790" y="137" class="muted body">Wisp:main write · SDK:main read · Standard autonomy</text>
+  <rect x="1454" y="82" width="132" height="38" rx="10" class="btn"/>
+  <text x="1475" y="107" class="ink small" font-weight="700">Open Run Room</text>
+  <rect x="1600" y="82" width="108" height="38" rx="10" class="btn"/>
+  <text x="1621" y="107" class="ink small" font-weight="700">Follow-up</text>
+  <line x1="752" y1="158" x2="1742" y2="158" class="line"/>
+
+  <!-- User message -->
+  <rect x="1118" y="193" width="548" height="74" rx="18" fill="#f2e5dc"/>
+  <text x="1146" y="225" class="ink body">Fix the checkout bug and open a PR.</text>
+  <text x="1146" y="249" class="muted small">Use Wisp as primary; SDK is context only.</text>
+
+  <!-- Run card -->
+  <rect x="790" y="308" width="878" height="420" rx="16" class="panel"/>
+  <text x="822" y="350" class="ink h1">Run #2 · Deep supervisor</text>
+  <rect x="1532" y="325" width="96" height="32" rx="16" class="amber"/>
+  <text x="1553" y="346" class="accentText small" font-weight="700">Running</text>
+  <text x="822" y="382" class="muted body">Plan complete · Implement running · 1 decision waiting</text>
+
+  <!-- Phase chips -->
+  <rect x="822" y="413" width="88" height="34" rx="17" class="green"/>
+  <text x="846" y="436" class="ink small" font-weight="700">Plan</text>
+  <rect x="922" y="413" width="140" height="34" rx="17" class="blue"/>
+  <text x="946" y="436" class="ink small" font-weight="700">Implement</text>
+  <rect x="1074" y="413" width="108" height="34" rx="17" class="soft"/>
+  <text x="1098" y="436" class="muted small" font-weight="700">Review</text>
+  <rect x="1194" y="413" width="118" height="34" rx="17" class="amber"/>
+  <text x="1217" y="436" class="accentText small" font-weight="700">Decision 1</text>
+
+  <!-- Supervisor strip -->
+  <rect x="822" y="477" width="806" height="76" rx="12" class="soft2"/>
+  <circle cx="848" cy="506" r="7" class="dotBlue"/>
+  <text x="866" y="510" class="ink body" font-weight="700">Supervisor · round 2 of 6</text>
+  <text x="866" y="535" class="muted small">Next: finish backend fix, run tests, then start review agents</text>
+  <rect x="1465" y="493" width="132" height="34" rx="17" class="btn"/>
+  <text x="1487" y="515" class="ink small" font-weight="700">Ask supervisor</text>
+
+  <!-- Agent mini rows -->
+  <rect x="822" y="574" width="806" height="54" rx="10" class="soft2"/>
+  <rect x="822" y="574" width="4" height="54" rx="2" fill="#6aa2dc"/>
+  <text x="844" y="607" class="ink body" font-weight="700">backend-fix</text>
+  <text x="1034" y="607" class="muted body">running pnpm test after focused patch</text>
+  <text x="1510" y="607" class="accentText small">12m</text>
+
+  <rect x="822" y="638" width="806" height="54" rx="10" class="soft2"/>
+  <rect x="822" y="638" width="4" height="54" rx="2" fill="#c79a32"/>
+  <text x="844" y="671" class="ink body" font-weight="700">frontend-fix</text>
+  <text x="1034" y="671" class="muted body">waiting for backend output</text>
+  <text x="1510" y="671" class="muted small">idle</text>
+
+  <rect x="822" y="704" width="806" height="54" rx="10" class="soft2"/>
+  <text x="844" y="737" class="ink body" font-weight="700">correctness-review</text>
+  <text x="1034" y="737" class="muted body">pending until implementation passes</text>
+  <text x="1490" y="737" class="muted small">queued</text>
+
+  <!-- Decision card in conversation -->
+  <rect x="790" y="752" width="878" height="112" rx="16" class="amber"/>
+  <text x="822" y="789" class="accentText h1">Needs decision: merge strategy</text>
+  <text x="822" y="821" class="ink body">backend-fix recommends squash; default in 4m unless answered.</text>
+  <rect x="1312" y="790" width="178" height="42" rx="12" class="accentBtn"/>
+  <text x="1341" y="817" fill="#ffffff" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace" font-size="16" font-weight="700">Use recommendation</text>
+  <rect x="1504" y="790" width="94" height="42" rx="12" class="btn"/>
+  <text x="1530" y="817" class="ink small" font-weight="700">Choose</text>
+
+  <!-- Output line -->
+  <rect x="790" y="892" width="878" height="70" rx="14" class="green"/>
+  <text x="822" y="921" class="ink body" font-weight="700">Output so far</text>
+  <text x="822" y="946" class="muted body">branch run-abc/backend-fix · 8 files changed · PR draft ready</text>
+
+  <!-- Composer -->
+  <rect x="790" y="988" width="878" height="54" rx="16" fill="#ffffff" stroke="#ddd5ca" stroke-width="1.4"/>
+  <text x="817" y="1022" class="faint body">Ask a follow-up or launch another run...</text>
+  <rect x="1180" y="1000" width="92" height="30" rx="15" class="soft"/>
+  <text x="1203" y="1020" class="ink small">Standard</text>
+  <rect x="1282" y="1000" width="82" height="30" rx="15" class="soft"/>
+  <text x="1304" y="1020" class="ink small">2 repos</text>
+  <rect x="1374" y="1000" width="108" height="30" rx="15" class="soft"/>
+  <text x="1395" y="1020" class="ink small">Auto · Deep</text>
+  <circle cx="1634" cy="1015" r="20" fill="#dd7554"/>
+  <path d="M1626 1015 L1638 1005 L1638 1025 Z" fill="#ffffff"/>
+</svg>
