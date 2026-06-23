@@ -2670,7 +2670,11 @@ textarea:-webkit-autofill {
 .acs-root .wf-rf-result-glyph > svg { display: block; }
 .acs-root .wf-rf-result-label { font-weight: 600; letter-spacing: -.01em; }
 .acs-root .wf-rf-result-dur { margin-left: auto; color: var(--muted); font-variant-numeric: tabular-nums; }
-.acs-root .wf-rf-result-caret { display: grid; place-items: center; color: var(--muted-2); transition: transform .16s ease; }
+/* The caret always sits at the right edge. When a duration precedes it the duration's auto-margin already
+   pushed the pair right, so the caret hugs it (margin reset); when there is no duration (a still-running /
+   suspended node) the caret carries the auto-margin itself, matching the completed nodes' right alignment. */
+.acs-root .wf-rf-result-caret { display: grid; place-items: center; margin-left: auto; color: var(--muted-2); transition: transform .16s ease; }
+.acs-root .wf-rf-result-dur + .wf-rf-result-caret { margin-left: 0; }
 .acs-root .wf-rf-result[data-open] .wf-rf-result-caret { transform: rotate(180deg); }
 /* status tones — same palette as the corner badge + app status pills */
 .acs-root .wf-rf-result[data-status="success"]   .wf-rf-result-bar { border-color: #BFE0CD; background: #F2F9F5; }
