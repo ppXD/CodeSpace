@@ -24,12 +24,20 @@ namespace CodeSpace.Core.Persistence.Entities;
 /// </summary>
 public class WorkSession : IEntity<Guid>, IAuditable
 {
+    /// <summary>
+    /// Max length of <see cref="Title"/> — the single source of truth for the column width: the EF
+    /// <c>HasMaxLength</c> and any caller that derives a title (see <c>WorkSessionService.SanitizeTitle</c>)
+    /// reference this so a title can never overflow the column. Migration <c>0069</c>'s <c>VARCHAR(256)</c>
+    /// must match this literal (pinned by <c>WorkSessionTitleTests</c>).
+    /// </summary>
+    public const int TitleMaxLength = 256;
+
     public Guid Id { get; set; }
 
     /// <summary>Tenancy — every session is scoped to exactly one team (mirrors <c>WorkflowRun.TeamId</c>).</summary>
     public Guid TeamId { get; set; }
 
-    /// <summary>Human-facing thread title (e.g. the launching task's goal, the PR title).</summary>
+    /// <summary>Human-facing thread title (e.g. the launching task's goal, the PR title). At most <see cref="TitleMaxLength"/> chars.</summary>
     public string Title { get; set; } = default!;
 
     /// <summary>

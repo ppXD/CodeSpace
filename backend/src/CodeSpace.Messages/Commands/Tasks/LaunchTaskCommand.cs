@@ -74,6 +74,9 @@ public sealed record LaunchTaskResult
     /// <summary>The <c>workflow_run.id</c> of the started snapshot run — ALWAYS set (the launch always runs).</summary>
     public required Guid RunId { get; init; }
 
+    /// <summary>The <c>work_session.id</c> of the thread this launch opened — ALWAYS set; the run above is its first turn. A follow-up may continue the same session (a later slice).</summary>
+    public required Guid SessionId { get; init; }
+
     /// <summary>The projection kind that built the run — the open string the registry resolved a builder by.</summary>
     public required string ProjectionKind { get; init; }
 

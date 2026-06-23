@@ -146,7 +146,7 @@ public class TaskProjectionFlowTests
             Route = new RoutePlan { ProjectionKind = FakeProjectionBuilder.Kind },
         };
 
-        var handle = await scope.Resolve<ITaskRunSnapshotFactory>().CreateAndRunAsync(context, teamId, userId, CancellationToken.None);
+        var handle = await scope.Resolve<ITaskRunSnapshotFactory>().CreateAndRunAsync(context, teamId, userId, session: null, CancellationToken.None);
 
         handle.ProjectionKind.ShouldBe(FakeProjectionBuilder.Kind);
 
@@ -190,7 +190,7 @@ public class TaskProjectionFlowTests
     private async Task<TaskRunHandle> CreateAndRunAsync(TaskBuildContext context, Guid teamId, Guid userId)
     {
         using var scope = _fixture.BeginScope();
-        return await scope.Resolve<ITaskRunSnapshotFactory>().CreateAndRunAsync(context, teamId, userId, CancellationToken.None);
+        return await scope.Resolve<ITaskRunSnapshotFactory>().CreateAndRunAsync(context, teamId, userId, session: null, CancellationToken.None);
     }
 
     private async Task RunEngineAsync(Guid runId)

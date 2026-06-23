@@ -19,7 +19,7 @@ public class WorkSessionConfiguration : IEntityTypeConfiguration<WorkSession>
 
         builder.Property(s => s.Kind).HasConversion<string>().HasMaxLength(16);
         builder.Property(s => s.Status).HasConversion<string>().HasMaxLength(16);
-        builder.Property(s => s.Title).HasMaxLength(256);
+        builder.Property(s => s.Title).HasMaxLength(WorkSession.TitleMaxLength);
         builder.Property(s => s.ScopeJson).HasColumnName("scope_jsonb").HasColumnType("jsonb");
 
         builder.HasOne(s => s.Team).WithMany().HasForeignKey(s => s.TeamId);
