@@ -22,7 +22,7 @@ public sealed class TaskRunSnapshotFactory : ITaskRunSnapshotFactory, IScopedDep
         _starter = starter;
     }
 
-    public async Task<TaskRunHandle> CreateAndRunAsync(TaskBuildContext context, Guid teamId, Guid actorUserId, CancellationToken cancellationToken)
+    public async Task<TaskRunHandle> CreateAndRunAsync(TaskBuildContext context, Guid teamId, Guid actorUserId, SessionAssignment? session, CancellationToken cancellationToken)
     {
         var builder = _registry.Resolve(context.Route.ProjectionKind);
 
@@ -30,9 +30,9 @@ public sealed class TaskRunSnapshotFactory : ITaskRunSnapshotFactory, IScopedDep
 
         var launchPayloadJson = BuildLaunchPayload(context.Seed);
 
-        // session: null — the task-launch path does not yet bind a WorkSession (a later slice resolves + threads
-        // one here); a null binding leaves the run session-less, byte-identical to pre-session behaviour.
-        var runId = await _starter.StartFromSnapshotAsync(definition, teamId, actorUserId, launchPayloadJson, ScopeRepositoryIds(context.AgentProfile), context.Route.ProjectionKind, session: null, cancellationToken).ConfigureAwait(false);
+        // The pre-resolved session binding (the launch service opens it) threads straight onto the run; NULL leaves
+        // the run session-less, byte-identical to pre-session behaviour.
+        var runId = await _starter.StartFromSnapshotAsync(definition, teamId, actorUserId, launchPayloadJson, ScopeRepositoryIds(context.AgentProfile), context.Route.ProjectionKind, session, cancellationToken).ConfigureAwait(false);
 
         return new TaskRunHandle { RunId = runId, ProjectionKind = context.Route.ProjectionKind };
     }

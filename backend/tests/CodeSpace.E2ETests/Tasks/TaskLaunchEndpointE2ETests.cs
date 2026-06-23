@@ -71,6 +71,7 @@ public sealed class TaskLaunchEndpointE2ETests : IClassFixture<TaskLaunchApiFact
         var body = await response.Content.ReadFromJsonAsync<LaunchResponse>();
         body.ShouldNotBeNull();
         body!.RunId.ShouldNotBe(Guid.Empty, "the launch endpoint returns the started run id");
+        body.SessionId.ShouldNotBe(Guid.Empty, "the launch endpoint returns the opened work-session id");
         body.ProjectionKind.ShouldBe("single-agent");
         body.SurfaceKind.ShouldBe("chat");
 
@@ -89,6 +90,14 @@ public sealed class TaskLaunchEndpointE2ETests : IClassFixture<TaskLaunchApiFact
         run.WorkflowId.ShouldBeNull("a launched task run is a snapshot run — not a child of any workflow");
         run.WorkflowVersion.ShouldBeNull();
         (await db.Workflow.AsNoTracking().CountAsync(w => w.TeamId == teamId)).ShouldBe(0, "no workflow row is created for a launched snapshot run");
+
+        // The launch opened a WorkSession (Kind=Task) and bound the run to it as turn 1 — and the binding SURVIVED
+        // the whole HTTP → engine → agent → terminal walk (the executor's status/output writes never clobbered it).
+        var session = await db.WorkSession.AsNoTracking().SingleAsync(s => s.Id == body.SessionId);
+        session.TeamId.ShouldBe(teamId, "the opened session is scoped to the launching team");
+        session.Kind.ShouldBe(WorkSessionKind.Task, "a launched task opens a Task-kind thread");
+        run.SessionId.ShouldBe(body.SessionId, "the run stays bound to its session through the full engine walk");
+        run.SessionTurnIndex.ShouldBe(1, "the launch run is the session's first turn");
 
         var agentRun = await db.AgentRun.AsNoTracking().SingleAsync(r => r.WorkflowRunId == body.RunId);
         agentRun.Status.ShouldBe(AgentRunStatus.Succeeded, "the launched agent.code executed to Succeeded via the real executor + runner + fake CLI");
@@ -125,6 +134,7 @@ public sealed class TaskLaunchEndpointE2ETests : IClassFixture<TaskLaunchApiFact
     private sealed record LaunchResponse
     {
         public Guid RunId { get; init; }
+        public Guid SessionId { get; init; }
         public string ProjectionKind { get; init; } = "";
         public string SurfaceKind { get; init; } = "";
     }

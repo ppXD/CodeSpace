@@ -1,11 +1,13 @@
 using CodeSpace.Core.DependencyInjection;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Services.Agents;
+using CodeSpace.Core.Services.Sessions;
 using CodeSpace.Core.Services.Tasks.Effort;
 using CodeSpace.Core.Services.Tasks.Launch;
 using CodeSpace.Core.Services.Tasks.Projection;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Commands.Tasks;
+using CodeSpace.Messages.Enums;
 using CodeSpace.Messages.Tasks;
 using CodeSpace.Messages.Tasks.Effort;
 using Microsoft.EntityFrameworkCore;
@@ -25,13 +27,15 @@ public sealed class TaskLaunchService : ITaskLaunchService, IScopedDependency
     private readonly ITaskLaunchSeedProviderRegistry _seedProviders;
     private readonly IEffortRouter _router;
     private readonly ITaskRunSnapshotFactory _factory;
+    private readonly IWorkSessionService _sessions;
     private readonly CodeSpaceDbContext _db;
 
-    public TaskLaunchService(ITaskLaunchSeedProviderRegistry seedProviders, IEffortRouter router, ITaskRunSnapshotFactory factory, CodeSpaceDbContext db)
+    public TaskLaunchService(ITaskLaunchSeedProviderRegistry seedProviders, IEffortRouter router, ITaskRunSnapshotFactory factory, IWorkSessionService sessions, CodeSpaceDbContext db)
     {
         _seedProviders = seedProviders;
         _router = router;
         _factory = factory;
+        _sessions = sessions;
         _db = db;
     }
 
@@ -47,11 +51,17 @@ public sealed class TaskLaunchService : ITaskLaunchService, IScopedDependency
 
         var context = new TaskBuildContext { Seed = seed, Route = route, AgentProfile = profile, GroundingContext = seed.GroundingContext };
 
-        var handle = await _factory.CreateAndRunAsync(context, request.TeamId, request.ActorUserId, cancellationToken).ConfigureAwait(false);
+        // A manual launch opens a NEW task thread; the run staged below is its first turn. Staged onto the same
+        // unit of work as the run (see IWorkSessionService.OpenAsync) so the two commit atomically — a launch that
+        // fails downstream (e.g. a rejected repo earlier) leaves no orphan session.
+        var session = await _sessions.OpenAsync(request.TeamId, seed.Goal, WorkSessionKind.Task, request.ActorUserId, cancellationToken).ConfigureAwait(false);
+
+        var handle = await _factory.CreateAndRunAsync(context, request.TeamId, request.ActorUserId, session, cancellationToken).ConfigureAwait(false);
 
         return new LaunchTaskResult
         {
             RunId = handle.RunId,
+            SessionId = session.SessionId,
             ProjectionKind = handle.ProjectionKind,
             Route = route,
             SurfaceKind = seed.SurfaceKind,

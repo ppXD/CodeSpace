@@ -1,3 +1,4 @@
+using CodeSpace.Core.Services.Workflows.RunSources;
 using CodeSpace.Messages.Tasks;
 
 namespace CodeSpace.Core.Services.Tasks.Projection;
@@ -17,6 +18,9 @@ public interface ITaskRunSnapshotFactory
     /// freeze + dispatch it through <c>IRunFromSnapshotStarter.StartFromSnapshotAsync</c>, and return the
     /// <see cref="TaskRunHandle"/> (run id + projection kind). Throws when no builder is registered for the kind,
     /// or <c>WorkflowValidationException</c> if the built definition is somehow invalid (a builder contract bug).
+    /// <para><paramref name="session"/> is the pre-resolved WorkSession binding stamped onto the run; NULL = a
+    /// session-less run (byte-identical to pre-session behaviour). Positional + explicit so every launch path
+    /// consciously decides its session binding.</para>
     /// </summary>
-    Task<TaskRunHandle> CreateAndRunAsync(TaskBuildContext context, Guid teamId, Guid actorUserId, CancellationToken cancellationToken);
+    Task<TaskRunHandle> CreateAndRunAsync(TaskBuildContext context, Guid teamId, Guid actorUserId, SessionAssignment? session, CancellationToken cancellationToken);
 }
