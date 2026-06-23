@@ -281,4 +281,129 @@ public sealed class RealModelGateTests
             File.Delete(path);
         }
     }
+
+    // ── Strict whole-loop gate: real-model-DROVE-to-completion is the criterion (CapabilityMiss REDS, best-of-N flake-safe) ──
+
+    [Fact]
+    public void Strict_whole_loop_attempt_budget_constants_are_pinned()
+    {
+        // Renaming the env var breaks an operator who raised N via env; the default is the flake-vs-cost knob.
+        RealModelGate.WholeLoopAttemptsEnvVar.ShouldBe("CODESPACE_REALMODEL_WHOLE_LOOP_ATTEMPTS");
+        RealModelGate.DefaultWholeLoopAttempts.ShouldBe(2);
+    }
+
+    [Fact]
+    public async Task The_strict_gate_passes_on_any_Drove_among_the_N_attempts()
+    {
+        // best-of-N: a first-attempt capability miss followed by a Drove PASSES — one off-run never reds main.
+        var (drive, calls) = Sequence(RealModelOutcome.CapabilityMiss, RealModelOutcome.Drove);
+
+        await Should.NotThrowAsync(() => RealModelGate.AssessLiveWholeLoopAsync("Anthropic", drive, attempts: 2, stepSummaryPath: null));
+
+        calls().ShouldBe(2, "it retried after the miss and stopped on the Drove");
+    }
+
+    [Fact]
+    public async Task The_strict_gate_reds_the_blessed_wire_when_EVERY_attempt_is_a_capability_miss()
+    {
+        // The real-model-DROVE-to-completion criterion: a model that RAN but parked short in ALL N attempts REDS — it is
+        // not a "reported" footnote. (Plain try/catch — async Should.ThrowAsync does not reliably catch Shouldly's type.)
+        var (drive, calls) = Sequence(RealModelOutcome.CapabilityMiss, RealModelOutcome.CapabilityMiss);
+
+        var gated = false;
+        try { await RealModelGate.AssessLiveWholeLoopAsync("Anthropic", drive, attempts: 2, stepSummaryPath: null); }
+        catch (Shouldly.ShouldAssertException) { gated = true; }
+
+        gated.ShouldBeTrue("N capability misses on the blessed wire must red — the model did not drive to completion");
+        calls().ShouldBe(2, "it used the full best-of-N budget before gating");
+    }
+
+    [Fact]
+    public async Task The_strict_gate_reds_immediately_on_a_code_fault_and_never_retries_it()
+    {
+        // A CodeFault is a real regression, not capability variance — it reds on attempt 1 and is NEVER retried.
+        var (drive, calls) = Sequence(RealModelOutcome.CodeFault, RealModelOutcome.Drove);
+
+        var gated = false;
+        try { await RealModelGate.AssessLiveWholeLoopAsync("Anthropic", drive, attempts: 2, stepSummaryPath: null); }
+        catch (Shouldly.ShouldAssertException) { gated = true; }
+
+        gated.ShouldBeTrue("a CodeFault reds the blessed wire");
+        calls().ShouldBe(1, "a CodeFault is never retried — the Drove that would have followed is never reached");
+    }
+
+    [Fact]
+    public async Task A_gateway_infra_attempt_is_non_gating_and_does_NOT_consume_a_capability_slot()
+    {
+        // An infra (timeout) attempt is a non-gating LOUD skip that does not burn a capability slot — so infra→miss→Drove
+        // still PASSES on a 2-attempt budget (the Drove is reached only because the infra attempt did not count).
+        var (drive, calls) = Sequence(new TimeoutException("gateway slow"), RealModelOutcome.CapabilityMiss, RealModelOutcome.Drove);
+
+        await Should.NotThrowAsync(() => RealModelGate.AssessLiveWholeLoopAsync("Anthropic", drive, attempts: 2, stepSummaryPath: null));
+
+        calls().ShouldBe(3, "the infra attempt did not consume a capability slot, so the later Drove was reached");
+    }
+
+    [Fact]
+    public async Task An_all_infra_run_is_a_non_gating_skip_never_a_gate()
+    {
+        // Every attempt times out → misses never reaches N → non-gating infra skip, never a gate. A slow gateway can't red.
+        var (drive, _) = Sequence(new TimeoutException("a"), new TimeoutException("b"), new TimeoutException("c"), new TimeoutException("d"), new TimeoutException("e"));
+
+        await Should.NotThrowAsync(() => RealModelGate.AssessLiveWholeLoopAsync("Anthropic", drive, attempts: 2, stepSummaryPath: null));
+    }
+
+    [Fact]
+    public async Task The_strict_gate_never_gates_an_informational_wire()
+    {
+        // An informational wire never reds even on N capability misses — only the blessed wire gates.
+        var (drive, _) = Sequence(RealModelOutcome.CapabilityMiss, RealModelOutcome.CapabilityMiss);
+
+        await Should.NotThrowAsync(() => RealModelGate.AssessLiveWholeLoopAsync("OpenAI", drive, attempts: 2, stepSummaryPath: null));
+    }
+
+    [Fact]
+    public async Task The_strict_gate_never_swallows_a_non_infra_exception()
+    {
+        // A real bug while driving (not a gateway failure) PROPAGATES, never masked as a skip — same teeth as the overloads.
+        Func<Task<(RealModelOutcome Outcome, string Note)>> drive = () => throw new InvalidOperationException("harness bug");
+
+        await Should.ThrowAsync<InvalidOperationException>(() => RealModelGate.AssessLiveWholeLoopAsync("Anthropic", drive, attempts: 2, stepSummaryPath: null));
+    }
+
+    [Fact]
+    public void A_no_secret_skip_is_reported_as_NOT_EVALUATED_and_never_reads_as_a_pass()
+    {
+        var path = Path.Combine(Path.GetTempPath(), $"realmodel-skip-{Guid.NewGuid():N}.md");
+        try
+        {
+            RealModelGate.ReportSkipped("Anthropic", "CODESPACE_LLM_* absent (fork/local)", path);
+
+            var written = File.ReadAllText(path);
+            written.ShouldContain("NOT EVALUATED");
+            written.ShouldContain("skip");
+            written.ShouldContain("Anthropic");
+            written.Contains("✅").ShouldBeFalse("a skip must never be styled as a pass — the Drove pass icon must be absent");
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+
+    /// <summary>A driveOnce factory yielding the given steps in order (a <see cref="RealModelOutcome"/> → returned; an <see cref="Exception"/> → thrown), repeating the last step if called beyond the list. The companion func returns the invocation count — so a test pins that a CodeFault is never retried / best-of-N spent its budget.</summary>
+    private static (Func<Task<(RealModelOutcome Outcome, string Note)>> Drive, Func<int> Calls) Sequence(params object[] steps)
+    {
+        var calls = 0;
+
+        Func<Task<(RealModelOutcome Outcome, string Note)>> drive = async () =>
+        {
+            var step = steps[Math.Min(calls, steps.Length - 1)];
+            calls++;
+            await Task.Yield();
+            return step is Exception ex ? throw ex : ((RealModelOutcome)step, "note");
+        };
+
+        return (drive, () => calls);
+    }
 }

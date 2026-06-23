@@ -81,9 +81,10 @@ jobs:
   real-model-wholeloop:
     name: real model (live-brain whole-loop)
     runs-on: ubuntu-latest
-    # The live brain authors up to maxRounds (10) decisions, each a live API call (~15-60s), plus real git
-    # clone/capture/integrate per spawned agent + the acceptance grade — well under this ceiling; the headroom
-    # surfaces a slow tail's scored verdict rather than an opaque kill.
+    # The live brain authors up to maxRounds (6) decisions, each a live API call (~15-60s), plus real git
+    # clone/capture/integrate per spawned agent + the acceptance grade; the headline arc may re-run up to best-of-N
+    # (default 2) independent times when the model parks short — still well under this ceiling, with headroom for a slow
+    # tail's scored verdict rather than an opaque kill.
     timeout-minutes: 45
 
     # A plain host runner (NOT a privileged bwrap container): the whole-loop test does NOT set
@@ -132,11 +133,13 @@ jobs:
         run: dotnet restore backend/tests/CodeSpace.E2ETests/CodeSpace.E2ETests.csproj
 
       - name: Test (the live-brain whole-loop — a REAL model drives the real durable engine end to end)
-        # Scoped to the single whole-loop class. INFORMATIONAL, not a kill-gate (RealModelGate gating:false): the verdict
-        # is reported to the job summary but never REDs main — the gateway model reliably drives the SIMPLE golden schema
-        # (measured by the BLESSED decision-eval job above) yet can fail to produce the FULL supervisor decision schema in
-        # the real context ("no conformant decision"), a model CAPABILITY precondition, not a code regression. The test
-        # self-skips (green) when ALL CODESPACE_LLM_* secrets are absent (fork stays green) and FAILS on a partial config.
+        # Scoped to the single whole-loop class. GATING on the real-model-DROVE-to-completion criterion: the HEADLINE
+        # drive→accept arc HARD-fails main unless the live model drove the whole arc to the real integrated+accepted head
+        # (Drove). A CAPABILITY MISS (the model RAN but parked short) now REDs — made flake-safe by a bounded best-of-N
+        # capability-floor (a fresh run per attempt; gates only if EVERY non-infra attempt parks short). A CODE FAULT reds
+        # at once; a gateway timeout is non-gating LOUD infra. The two REACTION arcs (conflict→resolve, failure→retry)
+        # still gate only on a CODE FAULT and REPORT a capability miss. The test self-skips when ALL CODESPACE_LLM_*
+        # secrets are absent — surfaced LOUDLY as NOT EVALUATED (skip ≠ pass), fork stays green — and FAILS on a partial config.
         run: >
           dotnet test backend/tests/CodeSpace.E2ETests/CodeSpace.E2ETests.csproj
           --no-restore
