@@ -56,7 +56,17 @@ public static class AgentWorkspaceAuthoring
     /// (<see cref="WorkspaceSpec.FromAuthoredRepos"/> already returns null for an empty related list; this also
     /// guards a null primary, the analysis-only case.) <paramref name="primaryRef"/> is the primary's authored ref
     /// (null = the repo default).
+    /// <para>EXCEPTION: a single-repo run that PINS a primary ref (session branch continuity — start the next turn
+    /// from the prior turn's produced branch) needs an EXPLICIT one-repo spec so the resolver clones at that ref;
+    /// without a ref it stays null (byte-identical — the executor derives <c>FromRepository(id)</c> at the default
+    /// branch). So: related repos ⇒ the multi-repo spec; else a pinned ref ⇒ <c>FromRepository(id, ref)</c>; else null.</para>
     /// </summary>
-    public static WorkspaceSpec? ResolveAuthoredWorkspace(Guid? primaryRepositoryId, IReadOnlyList<WorkspaceRepositorySpec> relatedRepositories, string? primaryRef = null) =>
-        primaryRepositoryId is { } primaryId ? WorkspaceSpec.FromAuthoredRepos(primaryId, primaryRef, relatedRepositories) : null;
+    public static WorkspaceSpec? ResolveAuthoredWorkspace(Guid? primaryRepositoryId, IReadOnlyList<WorkspaceRepositorySpec> relatedRepositories, string? primaryRef = null)
+    {
+        if (primaryRepositoryId is not { } primaryId) return null;
+
+        if (relatedRepositories.Count > 0) return WorkspaceSpec.FromAuthoredRepos(primaryId, primaryRef, relatedRepositories);
+
+        return string.IsNullOrWhiteSpace(primaryRef) ? null : WorkspaceSpec.FromRepository(primaryId, primaryRef);
+    }
 }

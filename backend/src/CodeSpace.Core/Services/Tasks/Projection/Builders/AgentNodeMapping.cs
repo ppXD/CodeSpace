@@ -79,6 +79,10 @@ internal static class AgentNodeMapping
         AddIfPresent(inputs, "repositoryId", repositoryId?.ToString());
         AddIfPresent(inputs, "relatedRepositories", BuildRelatedRepositories(context.AgentProfile?.RelatedRepositories));
 
+        // Session branch continuity: clone the primary repo at the prior turn's produced branch. Only meaningful with
+        // a primary repo; absent ⇒ omitted ⇒ the repo's default branch (byte-identical to a fresh launch).
+        if (repositoryId is not null) AddIfPresent(inputs, "baseRef", NullIfBlank(context.PrimaryBaseRef));
+
         return JsonSerializer.SerializeToElement(inputs);
     }
 

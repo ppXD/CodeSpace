@@ -113,6 +113,30 @@ public class AgentCodeNodeTests
     }
 
     [Fact]
+    public async Task Base_ref_input_clones_the_single_repo_at_that_ref()
+    {
+        // Session branch continuity (S4b): a baseRef input pins the prior turn's produced branch — a single-repo run
+        // then gets an explicit workspace whose primary Ref is that branch, so the agent starts on earlier work
+        // (the workspace provider clones --branch <ref>; absent baseRef stays the null-workspace default-branch path).
+        var repo = Guid.NewGuid();
+        var inputs = new Dictionary<string, JsonElement>
+        {
+            ["repositoryId"] = Str(repo.ToString()),
+            ["baseRef"] = Str("run-1/x"),
+        };
+
+        var result = await new AgentCodeNode().RunAsync(BuildContext(RequiredConfig(), resume: null, inputs), CancellationToken.None);
+
+        result.Status.ShouldBe(NodeStatus.Suspended);
+        var task = JsonSerializer.Deserialize<AgentTask>(result.SuspendUntil!.Payload, AgentJson.Options)!;
+
+        task.Workspace.ShouldNotBeNull("a pinned baseRef needs an explicit workspace so the clone uses it");
+        var primary = task.Workspace!.Repositories.Single();
+        primary.RepositoryId.ShouldBe(repo);
+        primary.Ref.ShouldBe("run-1/x", "the agent clones the primary repo at the prior turn's branch");
+    }
+
+    [Fact]
     public async Task Related_repositories_without_a_primary_repository_fails_the_node()
     {
         // Fail loud rather than silently drop the authored multi-repo intent (e.g. an expression-bound primary that

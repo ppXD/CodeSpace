@@ -71,6 +71,7 @@ public sealed class AgentCodeNode : INodeRuntime
               "type": "object",
               "properties": {
                 "repositoryId": { "type": "string", "format": "uuid", "x-selector": "repository", "description": "The PRIMARY repository the agent works in — cloned into its workspace before it runs. Pick one, or switch to Expression to bind it from the trigger (e.g. {{trigger.repositoryId}}). Leave empty for an analysis-only run with no repo." },
+                "baseRef": { "type": "string", "description": "The branch/ref to clone the PRIMARY repository at. Leave empty for the repo's default branch. A session follow-up sets this to the prior turn's produced branch so the agent builds on earlier work instead of starting from the default branch." },
                 "relatedRepositories": {
                   "type": "array",
                   "description": "Multi-repo: ALSO clone these repositories into the workspace (for a coordinated change across e.g. a frontend + backend). The primary is repositoryId; leave empty for a single-repo run.",
@@ -149,7 +150,7 @@ public sealed class AgentCodeNode : INodeRuntime
         // primary (the workspace has nowhere to anchor + nothing writable to default to).
         if (related.Count > 0 && repositoryId is null) return Fail("Input 'relatedRepositories' requires a primary 'repositoryId' — pick the primary repository, or remove the related ones.");
 
-        var workspace = AgentWorkspaceAuthoring.ResolveAuthoredWorkspace(repositoryId, related);
+        var workspace = AgentWorkspaceAuthoring.ResolveAuthoredWorkspace(repositoryId, related, ReadBaseRef(context));
 
         var task = new AgentTask
         {
@@ -246,6 +247,12 @@ public sealed class AgentCodeNode : INodeRuntime
         modelCredentialModelId = id;
         return true;
     }
+
+    /// <summary>Read the optional <c>baseRef</c> input — the branch/ref to clone the primary repo at (session branch continuity). Absent / blank / non-string → null (the repo default).</summary>
+    private static string? ReadBaseRef(NodeRunContext context) =>
+        context.Inputs.TryGetValue("baseRef", out var v) && v.ValueKind == JsonValueKind.String && !string.IsNullOrWhiteSpace(v.GetString())
+            ? v.GetString()
+            : null;
 
     /// <summary>Read the optional <c>repositoryId</c> input. Absent / empty → no repo (null, an analysis-only run). Present-but-malformed → false (a clean node failure).</summary>
     private static bool TryReadRepositoryId(NodeRunContext context, out Guid? repositoryId)
