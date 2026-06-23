@@ -149,10 +149,10 @@ public static class RealModelGate
     internal static async Task AssessLiveWholeLoopAsync(string provider, Func<Task<(RealModelOutcome Outcome, string Note)>> driveOnce, int attempts, string? stepSummaryPath)
     {
         var budget = Math.Max(1, attempts);   // defend the core: a non-positive budget would otherwise gate on ZERO misses (the public entrypoint already clamps via WholeLoopAttempts, but this core is callable directly)
-        var misses = 0;
+        var missNotes = new List<string>();   // accumulate each park-short verdict so the gate message names WHY (rounds vs schema), visible in the CI console log — not just the job summary
         var maxAttempts = budget + InfraRetryBudget;
 
-        for (var i = 0; i < maxAttempts && misses < budget; i++)
+        for (var i = 0; i < maxAttempts && missNotes.Count < budget; i++)
         {
             try
             {
@@ -170,7 +170,7 @@ public static class RealModelGate
                     return;
                 }
 
-                misses++;   // CapabilityMiss → best-of-N retry on a fresh run
+                missNotes.Add(note);   // CapabilityMiss → best-of-N retry on a fresh run
             }
             catch (Exception ex) when (IsGatewayInfraFailure(ex))
             {
@@ -178,8 +178,8 @@ public static class RealModelGate
             }
         }
 
-        if (misses >= budget && IsRequired(provider))
-            false.ShouldBeTrue($"REQUIRED wire — the live model did NOT drive the arc to the accept head in {budget} attempt(s) (a CapabilityMiss, NOT a gateway-infra fault) — see the job summary. The real-model-drove-to-completion gate requires a Drove; a skip would have been reported separately and is never a pass.");
+        if (missNotes.Count >= budget && IsRequired(provider))
+            false.ShouldBeTrue($"REQUIRED wire — the live model did NOT drive the arc to the accept head in {budget} attempt(s) (a CapabilityMiss, NOT a gateway-infra fault). The real-model-drove-to-completion gate requires a Drove; a skip is reported separately and is never a pass. Per-attempt verdict: {string.Join(" || ", missNotes)}");
         // else: misses < attempts only because gateway-infra exhausted the bounded attempt budget → non-gating infra skip (already reported loudly).
     }
 

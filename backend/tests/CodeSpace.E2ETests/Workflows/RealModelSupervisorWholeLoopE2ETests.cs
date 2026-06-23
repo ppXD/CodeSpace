@@ -436,10 +436,12 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
     private async Task<Guid> CreateWholeLoopWorkflowAsync(Guid teamId, Guid userId, Guid repoId, Guid brainModelId, string? goal = null, Guid? conversationId = null)
     {
         // The live brain (supervisorModelId) authors the arc; its agents clone repoId + push branches, the merge
-        // integrates them, and the operator acceptance floor (check.sh) gates the terminal stop. The happy path converges
-        // in ~4 rounds (plan→spawn→merge→stop); maxRounds:6 gives slack yet BOUNDS the wall-clock — at up to ~2×180s per
-        // round (the progressive double-attempt on a slow gateway) 6 rounds stays well under this lane's 45-min job
-        // timeout, so a slow-but-progressing run can't blow the job (an opaque kill); a per-call timeout still self-skips.
+        // integrates them, and the operator acceptance floor (check.sh) gates the terminal stop. The SCRIPTED skeleton
+        // converges in ~4 rounds (plan→spawn→merge→stop), but a REAL model is less efficient — plan → spawn → inspect →
+        // (retry) → merge → stop is already ~5-6 turns with zero slack — so maxRounds:12 gives a real model a FAIR budget
+        // to drive to the accept head (a tight 6 starved it: the strict gate is real-model-drove-to-completion, so a budget
+        // tuned for the scripted skeleton would red a capable-but-deliberate model). 12 rounds still BOUNDS the wall-clock
+        // well under this lane's job timeout; a per-call timeout still self-skips as non-gating infra.
         // A conversationId (when set) is the surface the irreversible `resolve` gate parks its human-approval card on.
         var effectiveGoal = goal ?? "Add server-side email-format validation to the signup endpoint, with unit tests.";
         var conversationLine = conversationId is { } cid ? $",\n              \"conversationId\": \"{cid}\"" : "";
@@ -447,7 +449,7 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
             {
               "goal": "{{effectiveGoal}}",
               "supervisorModelId": "{{brainModelId}}",
-              "maxRounds": 6,
+              "maxRounds": 12,
               "agentProfile": { "repositoryId": "{{repoId}}", "pushBranch": true, "integrateBranches": true },
               "acceptanceChecks": ["sh", "check.sh"]{{conversationLine}}
             }

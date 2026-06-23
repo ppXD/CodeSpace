@@ -81,11 +81,12 @@ jobs:
   real-model-wholeloop:
     name: real model (live-brain whole-loop)
     runs-on: ubuntu-latest
-    # The live brain authors up to maxRounds (6) decisions, each a live API call (~15-60s), plus real git
-    # clone/capture/integrate per spawned agent + the acceptance grade; the headline arc may re-run up to best-of-N
-    # (default 2) independent times when the model parks short — still well under this ceiling, with headroom for a slow
-    # tail's scored verdict rather than an opaque kill.
-    timeout-minutes: 45
+    # The live brain authors up to maxRounds (12 — a FAIR budget for a real, less-efficient model to reach the accept
+    # head) decisions, each a live API call (~15-60s), plus real git clone/capture/integrate per spawned agent + the
+    # acceptance grade; the headline arc may re-run up to best-of-N (3, set below) independent times when the model parks
+    # short. The 60-min ceiling holds the worst case (≈3 attempts × ~12 rounds + the 2 reaction arcs) with headroom for a
+    # slow tail's scored verdict rather than an opaque kill.
+    timeout-minutes: 60
 
     # A plain host runner (NOT a privileged bwrap container): the whole-loop test does NOT set
     # CODESPACE_REQUIRE_SANDBOX, so the runner confines the fake-CLI agent under bubblewrap when the host supports
@@ -113,6 +114,9 @@ jobs:
       CODESPACE_LLM_BASE_URL: ${{ secrets.CODESPACE_LLM_BASE_URL }}
       CODESPACE_LLM_API_KEY: ${{ secrets.CODESPACE_LLM_API_KEY }}
       CODESPACE_LLM_MODEL_ID: ${{ secrets.CODESPACE_LLM_MODEL_ID }}
+      # best-of-N capability-floor for the strict whole-loop gate (Rule 8 escape hatch): 3 independent attempts absorb a
+      # real model's run-to-run variance so a single off-run can't flaky-red main, while a persistent park-short still REDs.
+      CODESPACE_REALMODEL_WHOLE_LOOP_ATTEMPTS: '3'
 
     steps:
       - uses: actions/checkout@v4

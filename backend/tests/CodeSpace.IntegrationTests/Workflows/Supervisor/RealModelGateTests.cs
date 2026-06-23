@@ -310,12 +310,15 @@ public sealed class RealModelGateTests
         // not a "reported" footnote. (Plain try/catch — async Should.ThrowAsync does not reliably catch Shouldly's type.)
         var (drive, calls) = Sequence(RealModelOutcome.CapabilityMiss, RealModelOutcome.CapabilityMiss);
 
-        var gated = false;
+        Shouldly.ShouldAssertException? caught = null;
         try { await RealModelGate.AssessLiveWholeLoopAsync("Anthropic", drive, attempts: 2, stepSummaryPath: null); }
-        catch (Shouldly.ShouldAssertException) { gated = true; }
+        catch (Shouldly.ShouldAssertException ex) { caught = ex; }
 
-        gated.ShouldBeTrue("N capability misses on the blessed wire must red — the model did not drive to completion");
+        caught.ShouldNotBeNull("N capability misses on the blessed wire must red — the model did not drive to completion");
         calls().ShouldBe(2, "it used the full best-of-N budget before gating");
+        // The gate names WHY each attempt parked short (the per-attempt verdict) so a CI red is diagnosable from the console log.
+        caught!.Message.ShouldContain("verdict#1");
+        caught.Message.ShouldContain("verdict#2");
     }
 
     [Fact]
@@ -401,7 +404,7 @@ public sealed class RealModelGateTests
             var step = steps[Math.Min(calls, steps.Length - 1)];
             calls++;
             await Task.Yield();
-            return step is Exception ex ? throw ex : ((RealModelOutcome)step, "note");
+            return step is Exception ex ? throw ex : ((RealModelOutcome)step, $"verdict#{calls}");
         };
 
         return (drive, () => calls);
