@@ -344,7 +344,7 @@ public class SnapshotRunFlowTests
         Guid runId;
         using (var scope = _fixture.BeginScope())
             runId = await scope.Resolve<IRunFromSnapshotStarter>().StartFromSnapshotAsync(
-                EchoInputDefinition(), teamId, userId, launchPayloadJson: "{}", scopeRepositoryIds: new[] { repoId }, projectionKind: "supervisor", CancellationToken.None);
+                EchoInputDefinition(), teamId, userId, launchPayloadJson: "{}", scopeRepositoryIds: new[] { repoId }, projectionKind: "supervisor", session: null, CancellationToken.None);
 
         var run = await LoadRunAsync(runId);
         run.ScopeRepositoryIds.ShouldBe(new[] { repoId }, ignoreOrder: true, customMessage: "the launch repo set is stamped onto the run");
@@ -492,7 +492,7 @@ public class SnapshotRunFlowTests
     {
         using var scope = _fixture.BeginScope();
         var starter = scope.Resolve<IRunFromSnapshotStarter>();
-        return await starter.StartFromSnapshotAsync(definition, teamId, userId, launchPayloadJson, scopeRepositoryIds: null, projectionKind: null, CancellationToken.None);
+        return await starter.StartFromSnapshotAsync(definition, teamId, userId, launchPayloadJson, scopeRepositoryIds: null, projectionKind: null, session: null, CancellationToken.None);
     }
 
     /// <summary>Replay a finished run via the real production seam — the same call the ReplayRunCommand handler makes.</summary>

@@ -163,7 +163,7 @@ public class BoundsHardClampFlowTests
 
         var builder = scope.Resolve<ITaskProjectionRegistry>().Resolve(route.ProjectionKind);
 
-        return await scope.Resolve<IRunFromSnapshotStarter>().StartFromSnapshotAsync(builder.Build(context), teamId, userId, launchPayloadJson: null, scopeRepositoryIds: null, projectionKind: null, CancellationToken.None);
+        return await scope.Resolve<IRunFromSnapshotStarter>().StartFromSnapshotAsync(builder.Build(context), teamId, userId, launchPayloadJson: null, scopeRepositoryIds: null, projectionKind: null, session: null, CancellationToken.None);
     }
 
     private async Task RunEngineAsync(Guid runId)

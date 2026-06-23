@@ -52,6 +52,13 @@ public sealed record RunSourceEnvelope
     public Guid? ParentRunId { get; init; }
     public string? ReleaseHashAtRun { get; init; }
 
+    /// <summary>
+    /// Pre-resolved WorkSession binding for this run — the upstream resolver decides it; the starter only
+    /// WRITES <c>SessionId</c> / <c>SessionTurnIndex</c> from it. NULL (the default at every current creation
+    /// site) = a session-less run, byte-identical to pre-session behaviour.
+    /// </summary>
+    public SessionAssignment? Session { get; init; }
+
     // ── Idempotency triple — provider-event paths only ──────────────────────────────────
     //
     // Hardening (Phase 3.0): protects against duplicate ingestion of the SAME upstream

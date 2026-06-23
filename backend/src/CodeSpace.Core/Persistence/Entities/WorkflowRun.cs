@@ -140,6 +140,23 @@ public class WorkflowRun : IEntity<Guid>, IAuditable
     /// </summary>
     public Guid? ParentRunId { get; set; }
 
+    /// <summary>
+    /// FK-free pointer (same stance as <see cref="ParentRunId"/> — a bare lineage column, no enforced FK / nav)
+    /// to the owning <c>WorkSession</c> — the long-term work-context thread this run is ONE turn of. NULL for a
+    /// session-less run, which is every run until the session layer starts binding them (so the default is
+    /// byte-identical to pre-session behaviour). Written at the two run-creation sites from a pre-resolved
+    /// <c>SessionAssignment</c>; the binding rides the run→AgentRun FK to every child unit automatically.
+    /// </summary>
+    public Guid? SessionId { get; set; }
+
+    /// <summary>
+    /// 1-based ordinal of this run within its <see cref="SessionId"/> session — but ONLY a TOP-LEVEL,
+    /// user-visible turn gets a new index. A child / sub-workflow / replay / rerun-from-node INHERITS the
+    /// <see cref="SessionId"/> yet consumes NO new turn (it hangs off the timeline via <see cref="ParentRunId"/>),
+    /// so its turn index stays NULL. NULL also whenever <see cref="SessionId"/> is NULL.
+    /// </summary>
+    public int? SessionTurnIndex { get; set; }
+
     public DateTimeOffset CreatedDate { get; set; }
     public Guid CreatedBy { get; set; }
     public DateTimeOffset LastModifiedDate { get; set; }
