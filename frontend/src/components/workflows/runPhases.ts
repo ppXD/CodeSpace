@@ -1,4 +1,9 @@
-import type { RunPhase, WorkflowRunStatus } from "@/api/workflows";
+import type { PhaseAgentRef, RunPhase, WorkflowRunStatus } from "@/api/workflows";
+
+/** The run's agents, deduped by agentRunId across all phases (a supervisor lists one agent in several phases). */
+export function dedupRunAgents(phases: readonly RunPhase[]): PhaseAgentRef[] {
+  return [...new Map(phases.flatMap((p) => p.agents).map((a) => [a.agentRunId, a])).values()];
+}
 
 /**
  * An agent ref's open status counts as "in flight" while it is still working. Whitelisting the busy
