@@ -46,6 +46,7 @@ public static class RunRecordTimelineMap
             Summary = summary,
             Severity = severity,
             OccurredAt = r.OccurredAt,
+            Order = r.Sequence,   // the ledger's monotonic order — the same-OccurredAt tie-break
             NodeId = r.NodeId,
             SourceKey = Key,
         };

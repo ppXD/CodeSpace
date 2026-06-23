@@ -75,11 +75,12 @@ public sealed class RunTimelineProjector : IRunTimelineProjector, IScopedDepende
         }
     }
 
-    /// <summary>Stable-sort the merged events by OccurredAt, tie-broken by SourceKey then Id — a deterministic chronological order independent of source-iteration order.</summary>
+    /// <summary>Stable-sort the merged events by OccurredAt, tie-broken by SourceKey then the source's numeric Order (so two events in one tick keep their true ledger order, never the lexical id order) then Id — deterministic, independent of source-iteration order.</summary>
     private static IReadOnlyList<RunTimelineEvent> Merge(List<RunTimelineEvent> events) =>
         events
             .OrderBy(e => e.OccurredAt)
             .ThenBy(e => e.SourceKey, StringComparer.Ordinal)
+            .ThenBy(e => e.Order)
             .ThenBy(e => e.Id, StringComparer.Ordinal)
             .ToList();
 }

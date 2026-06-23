@@ -25,8 +25,11 @@ public sealed record RunTimelineEvent
     /// <summary>The closed render tone — Info / Success / Warning / Error.</summary>
     public required TimelineSeverity Severity { get; init; }
 
-    /// <summary>When the event occurred — the cross-source chronological sort key.</summary>
+    /// <summary>When the event occurred — the primary chronological sort key.</summary>
     public required DateTimeOffset OccurredAt { get; init; }
+
+    /// <summary>The source's own monotonic order (e.g. the ledger Sequence) — the same-<see cref="OccurredAt"/> tie-break so two events in one tick keep their true ledger order. 0 when the source has none.</summary>
+    public long Order { get; init; }
 
     /// <summary>The node this event belongs to, when applicable (null for run-level events).</summary>
     public string? NodeId { get; init; }

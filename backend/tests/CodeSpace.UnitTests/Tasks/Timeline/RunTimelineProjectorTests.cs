@@ -47,6 +47,20 @@ public class RunTimelineProjectorTests
     }
 
     [Fact]
+    public async Task Same_timestamp_events_keep_ledger_order_not_lexical_id_order()
+    {
+        // record-2 then record-10 in one tick: lexical id order would put "record-10" FIRST. The numeric Order pins it.
+        var src = new StaticSource("run-record", Ev("record-2", T0, order: 2), Ev("record-10", T0, order: 10));
+
+        var projector = Build(runExists: true, src);
+
+        var events = await projector.ProjectAsync(RunId, TeamId, CancellationToken.None);
+
+        events.ShouldNotBeNull();
+        events!.Select(e => e.Id).ShouldBe(new[] { "record-2", "record-10" }, "the numeric Order tie-break keeps the true ledger order on a same-timestamp collision");
+    }
+
+    [Fact]
     public async Task A_throwing_source_degrades_the_others_still_contribute()
     {
         var healthy = new StaticSource("healthy", Ev("ok", T0));
@@ -93,13 +107,14 @@ public class RunTimelineProjectorTests
         return new RunTimelineProjector(workflows, sources, NullLogger<RunTimelineProjector>.Instance);
     }
 
-    private static RunTimelineEvent Ev(string id, DateTimeOffset at) => new()
+    private static RunTimelineEvent Ev(string id, DateTimeOffset at, long order = 0) => new()
     {
         Id = id,
         Kind = "test",
         Title = id,
         Severity = TimelineSeverity.Info,
         OccurredAt = at,
+        Order = order,
         SourceKey = "test",
     };
 
