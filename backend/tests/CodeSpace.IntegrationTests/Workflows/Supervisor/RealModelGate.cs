@@ -3,17 +3,19 @@ using Shouldly;
 namespace CodeSpace.IntegrationTests.Workflows.Supervisor;
 
 /// <summary>
-/// The three-way outcome of a live-model WHOLE-LOOP run, so the blessed wire can gate SAFELY — only a code regression
-/// fails the job, never the gateway model's capability. The classifying TEST maps the run's terminal state to one of
+/// The three-way outcome of a live-model WHOLE-LOOP run. The classifying TEST maps the run's terminal state to one of
 /// these (a faulted run → <see cref="CodeFault"/>; a fully-driven run → <see cref="Drove"/>; a clean-but-short run →
-/// <see cref="CapabilityMiss"/>); <see cref="RealModelGate"/> only gates on <see cref="CodeFault"/>.
+/// <see cref="CapabilityMiss"/>). TWO gate policies consume it: the legacy <see cref="RealModelGate.AssessLiveAsync(string, Func{Task{ValueTuple{RealModelOutcome, string}}})"/>
+/// reds only on <see cref="CodeFault"/> (CapabilityMiss reported) — used by the report-only reaction arcs; the STRICT
+/// <see cref="RealModelGate.AssessLiveWholeLoopAsync(string, Func{Task{ValueTuple{RealModelOutcome, string}}}, int?)"/>
+/// reds on CapabilityMiss too (real-model-drove-to-completion = the only pass), flake-safed by a best-of-N floor.
 /// </summary>
 public enum RealModelOutcome
 {
-    /// <summary>The live brain produced conformant decisions that drove the engine to the intended terminal. The gate is satisfied.</summary>
+    /// <summary>The live brain produced conformant decisions that drove the engine to the intended terminal. The gate is satisfied (the ONLY pass under the strict whole-loop gate).</summary>
     Drove,
 
-    /// <summary>The live brain did NOT drive the arc — it produced no conformant decision, or stopped/force-stopped short of the outcome. A MODEL precondition (the gateway model's capability), NOT a code bug → REPORTED, never gates the job.</summary>
+    /// <summary>The live brain did NOT drive the arc — it produced no conformant decision, or stopped/force-stopped short of the outcome. A MODEL precondition, NOT a code bug. The report-only reaction arcs REPORT it (never gate); the STRICT whole-loop gate REDS it after a best-of-N floor (real-model-drove-to-completion is the criterion — a model that ran but parked short is not a pass).</summary>
     CapabilityMiss,
 
     /// <summary>The engine/substrate FAULTED while executing the live brain's (valid) decisions — an unhandled exception left the run Failed. A real CODE regression → gates the blessed wire.</summary>
@@ -108,6 +110,92 @@ public static class RealModelGate
         {
             ReportInfraSkip(provider, ex, stepSummaryPath);
         }
+    }
+
+    /// <summary>The env var that overrides the STRICT whole-loop gate's best-of-N attempt budget (Rule 8 escape hatch — an operator can raise N if the gateway's single-arc park-short rate p is high enough that p^2 still flakes main, trading cost for stability, with no code change). Pinned by test.</summary>
+    public const string WholeLoopAttemptsEnvVar = "CODESPACE_REALMODEL_WHOLE_LOOP_ATTEMPTS";
+
+    /// <summary>The default best-of-N attempt budget for the strict whole-loop gate: the live model gets this many INDEPENDENT runs to drive the arc to the accept head before a CapabilityMiss gates (flake ~p^N). 2 balances flake-resistance against per-PR token cost.</summary>
+    public const int DefaultWholeLoopAttempts = 2;
+
+    /// <summary>Extra attempts allowed ON TOP of the capability budget so a slow/dropping gateway (non-gating infra) never EXHAUSTS the capability budget and forces a false skip — a gateway-infra attempt does not consume a capability slot, but total attempts are still bounded so an always-infra gateway can't loop forever.</summary>
+    private const int InfraRetryBudget = 2;
+
+    /// <summary>The effective best-of-N attempt budget: the env override when positive + parseable, else <see cref="DefaultWholeLoopAttempts"/> (Rule 8 — read only here).</summary>
+    public static int WholeLoopAttempts()
+    {
+        var raw = Environment.GetEnvironmentVariable(WholeLoopAttemptsEnvVar)?.Trim();
+
+        return int.TryParse(raw, out var n) && n > 0 ? n : DefaultWholeLoopAttempts;
+    }
+
+    /// <summary>
+    /// Drive the STRICT live-model WHOLE-LOOP gate — the real-model-DROVE-to-completion criterion: the blessed wire
+    /// passes ONLY when the live model drove the arc to the genuine accept head (<see cref="RealModelOutcome.Drove"/>).
+    /// A <see cref="RealModelOutcome.CapabilityMiss"/> (the model RAN but parked short of the accept head) now REDS the
+    /// blessed wire — it is NOT a "reported" footnote — made FLAKE-SAFE by a bounded best-of-N capability-floor:
+    /// <paramref name="attempts"/> INDEPENDENT re-runs (a FRESH run per call of <paramref name="driveOnce"/>), gating only
+    /// when EVERY non-infra attempt parks short (flake ~p^N). A <see cref="RealModelOutcome.CodeFault"/> reds IMMEDIATELY
+    /// and is NEVER retried (a code regression is not capability variance). A gateway-infra failure is a non-gating LOUD
+    /// skip that does NOT consume a capability slot (a slow gateway never burns the budget; total attempts stay bounded so
+    /// an always-infra gateway can't loop). Every attempt's outcome is ALWAYS reported, so a persistent miss is visible,
+    /// never a silent green. An informational wire never gates regardless. SKIP ≠ PASS: the caller's secret guard handles
+    /// the no-credentials skip (surfaced via <see cref="ReportSkipped(string, string)"/>) — this method never sees it.
+    /// </summary>
+    public static Task AssessLiveWholeLoopAsync(string provider, Func<Task<(RealModelOutcome Outcome, string Note)>> driveOnce, int? attempts = null) =>
+        AssessLiveWholeLoopAsync(provider, driveOnce, attempts ?? WholeLoopAttempts(), Environment.GetEnvironmentVariable(StepSummaryEnvVar));
+
+    /// <summary>Testable core of the strict whole-loop gate — takes the attempt budget + step-summary path explicitly so a test pins the best-of-N / infra / gate logic with NO live call and without mutating process env. Any Drove → pass; a CodeFault → gate at once (never retried); a gateway-infra failure → non-gating skip that does not consume a slot; only when all <paramref name="attempts"/> non-infra attempts park short → gate (CapabilityMiss).</summary>
+    internal static async Task AssessLiveWholeLoopAsync(string provider, Func<Task<(RealModelOutcome Outcome, string Note)>> driveOnce, int attempts, string? stepSummaryPath)
+    {
+        var budget = Math.Max(1, attempts);   // defend the core: a non-positive budget would otherwise gate on ZERO misses (the public entrypoint already clamps via WholeLoopAttempts, but this core is callable directly)
+        var misses = 0;
+        var maxAttempts = budget + InfraRetryBudget;
+
+        for (var i = 0; i < maxAttempts && misses < budget; i++)
+        {
+            try
+            {
+                var (outcome, note) = await driveOnce().ConfigureAwait(false);
+
+                ReportThreeWay(outcome, note, stepSummaryPath);
+
+                if (outcome == RealModelOutcome.Drove) return;   // any Drove among N → PASS (real model drove to completion)
+
+                if (outcome == RealModelOutcome.CodeFault)        // a code regression reds at once — never retried, not capability variance
+                {
+                    if (IsRequired(provider))
+                        false.ShouldBeTrue($"REQUIRED wire — the engine FAULTED driving the live brain's decisions (a CODE regression): {note}");
+
+                    return;
+                }
+
+                misses++;   // CapabilityMiss → best-of-N retry on a fresh run
+            }
+            catch (Exception ex) when (IsGatewayInfraFailure(ex))
+            {
+                ReportInfraSkip(provider, ex, stepSummaryPath);   // non-gating infra — does NOT consume a capability slot
+            }
+        }
+
+        if (misses >= budget && IsRequired(provider))
+            false.ShouldBeTrue($"REQUIRED wire — the live model did NOT drive the arc to the accept head in {budget} attempt(s) (a CapabilityMiss, NOT a gateway-infra fault) — see the job summary. The real-model-drove-to-completion gate requires a Drove; a skip would have been reported separately and is never a pass.");
+        // else: misses < attempts only because gateway-infra exhausted the bounded attempt budget → non-gating infra skip (already reported loudly).
+    }
+
+    /// <summary>Surface a no-credentials / unavailable-binary SKIP LOUDLY as explicitly NOT-A-PASS — so the ONLY honest green-skip (a fork/local run with no live model) is legible in the job summary and can never be mistaken for a real-model pass. Pure given <paramref name="stepSummaryPath"/>.</summary>
+    public static void ReportSkipped(string provider, string reason) =>
+        ReportSkipped(provider, reason, Environment.GetEnvironmentVariable(StepSummaryEnvVar));
+
+    /// <summary>Testable core of <see cref="ReportSkipped(string, string)"/> — explicit step-summary path. Writes a 'NOT EVALUATED … skip ≠ pass' line so an honest skip is visible, never a silent green that reads as a pass.</summary>
+    internal static void ReportSkipped(string provider, string reason, string? stepSummaryPath)
+    {
+        var line = $"⏭️ real-model whole-loop NOT EVALUATED — {provider} skipped ({reason}). A skip is NOT a pass: no live model ran, so nothing was driven to completion.";
+
+        if (!string.IsNullOrWhiteSpace(stepSummaryPath))
+            File.AppendAllText(stepSummaryPath, line + Environment.NewLine);
+        else
+            Console.WriteLine(line);
     }
 
     /// <summary>Surface a three-way whole-loop outcome (ALWAYS — a CapabilityMiss must never read as a silent green) to the step-summary FILE when present (capture-immune → the job-summary UI), else the console. Pure given <paramref name="stepSummaryPath"/>.</summary>

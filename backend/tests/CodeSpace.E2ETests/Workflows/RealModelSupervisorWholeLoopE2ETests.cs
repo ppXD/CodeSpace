@@ -39,16 +39,19 @@ namespace CodeSpace.E2ETests.Workflows;
 /// goal-relevance oracle — the gate certifies the live brain drove the whole arc to a real integrated+accepted head, not
 /// that it solved the task (the live decision QUALITY is measured separately by the golden/trajectory decision evals).
 ///
-/// <para>GATING, but only on a CODE FAULT (a three-way <see cref="RealModelOutcome"/>): the blessed wire reds main ONLY
-/// if the engine FAULTED while driving the live brain's decisions (a real substrate regression — every model-side miss
-/// now fails closed to a clean stop, so a run Failure is never a model miss). A model CAPABILITY MISS (the gateway model
-/// drove the arc short — e.g. produced no conformant decision) is REPORTED to the job summary but never blocks main, and
-/// a gateway timeout is non-gating infra. Self-skips when ALL <c>CODESPACE_LLM_*</c> secrets are absent (CI/forks stay
-/// green at zero cost) but FAILS on a partial config (a rotated/blanked single secret can't silently mask the lane).
-/// Only the CLI's coding intelligence (the fake codex) and the agent COUNT are bounded — the brain's decisions, the
-/// engine, the runner, the git, and the acceptance MECHANISM are all real; this lane proves the live join end-to-end
-/// without a model shortfall ever being able to red main. The blessed decision-QUALITY kill-gate stays the golden
-/// decision-eval.</para>
+/// <para>GATING — the HEADLINE drive→accept arc (<c>The_real_model_drives_the_whole_loop_to_an_integrated_accepted_patch</c>)
+/// hard-gates on the real-model-DROVE-to-completion criterion: the blessed wire passes ONLY when the live model drove the
+/// whole arc to the real integrated+accepted head (<see cref="RealModelOutcome.Drove"/>). A model CAPABILITY MISS (the
+/// model RAN but parked short of the accept head) now REDS the blessed wire — it is the criterion, not a footnote — made
+/// FLAKE-SAFE by a bounded best-of-N capability-floor (a fresh run per attempt; gates only if EVERY non-infra attempt
+/// parks short, ~p^N). A CODE FAULT reds at once; a gateway timeout is non-gating LOUD infra. The two REACTION arcs
+/// (observe-a-conflict→resolve, failed-subtask→retry) still gate only on a CODE FAULT and REPORT a capability miss —
+/// they assert the model REACTS correctly, a harder/more-variable signal tightened separately. Self-skips when ALL
+/// <c>CODESPACE_LLM_*</c> secrets are absent (forks stay green at zero cost, surfaced LOUDLY as NOT EVALUATED — skip ≠
+/// pass) but FAILS on a partial config (a rotated/blanked single secret can't silently mask the lane). What is stubbed is
+/// the agent's CODING (the fake codex) so the seeded <c>check.sh</c> is a STRUCTURAL exit-0, not a goal-relevance oracle
+/// — the gate certifies the live brain drove the whole arc to a real integrated+accepted head; decision QUALITY stays the
+/// golden decision-eval.</para>
 /// </summary>
 [Collection(PostgresCollection.Name)]
 [Trait("Category", "RealModel")]
@@ -97,7 +100,7 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
         // is a broken/rotated/renamed secret that would otherwise self-skip the BLESSED gate GREEN having driven no live
         // brain at all — so throw to turn that masked-nothing into a RED main run instead of a false green.
         var present = new[] { baseUrl, apiKey, model }.Count(v => v is not null);
-        if (present == 0) return;
+        if (present == 0) { RealModelGate.ReportSkipped(Provider, "CODESPACE_LLM_* absent (fork/local — no live model)"); return; }   // skip ≠ pass: surfaced loudly as NOT EVALUATED
         present.ShouldBe(3, "CODESPACE_LLM_* is partially configured — set all three (base url / api key / model id) or none; a partial config would otherwise self-skip the blessed whole-loop gate GREEN proving nothing.");
 
         if (OperatingSystem.IsWindows()) return;                          // the fake CLI is a /bin/sh script
@@ -123,16 +126,21 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
         var brainModelId = await SeedBrainModelAsync(teamId, BaseUrlFor(baseUrl), apiKey, model);
 
         var workflowId = await CreateWholeLoopWorkflowAsync(teamId, userId, repoId, brainModelId);
-        var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
 
-        // GATING — but only on a CODE FAULT (the three-way gate). The blessed wire reds ONLY if the engine FAULTED while
-        // driving the live brain's decisions (a real substrate regression — every model-side miss now fails closed to a
-        // clean stop, so a Failure is never a model miss). A CAPABILITY MISS (the gateway model drove the arc short, e.g.
-        // produced no conformant decision) is REPORTED but never blocks main, and a gateway timeout is non-gating infra. So
-        // the lane now PROVES the live join — a real-brain whole-loop regression that crashes the engine reds main —
-        // without a model shortfall ever being able to. The blessed decision-QUALITY kill-gate is still the golden eval.
-        await RealModelGate.AssessLiveAsync(Provider, async () =>
+        // STRICT real-model-DROVE-to-completion gate (the real-model whole-loop CONNECTIVITY criterion). The blessed wire
+        // passes ONLY when the live model drove the whole arc to the real integrated+accepted head (Drove). A CAPABILITY
+        // MISS — the model RAN but parked short of the accept head — now REDS, made flake-safe by a bounded best-of-N
+        // capability-floor (a FRESH run per attempt; gates only if EVERY non-infra attempt parks short, ~p^N). A CODE FAULT
+        // reds at once (never retried); a gateway timeout is non-gating LOUD infra (doesn't consume an attempt slot). A
+        // no-secret skip was already surfaced NOT-EVALUATED above (skip ≠ pass). Decision QUALITY stays the golden eval.
+        await RealModelGate.AssessLiveWholeLoopAsync(Provider, async () =>
         {
+            // Clear the shared in-memory job client per best-of-N attempt. SAFE because [Collection(PostgresCollection)]
+            // runs every test in this collection SERIALLY — no concurrent sibling has in-flight jobs to drop. (WaitForPendingAsync
+            // already drained the prior attempt to empty, so this is a no-op-on-empty between attempts.)
+            jobClient.Clear();
+            var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);   // a FRESH run per attempt — re-seed, never reuse a parked-short run
+
             await RunEngineAsync(runId);
             await jobClient.WaitForPendingAsync();
 
