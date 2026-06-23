@@ -7,14 +7,16 @@ import { useAgentRun, useAgentRunEvents } from "@/hooks/use-agents";
 
 import { AgentToolCalls } from "./AgentToolCalls";
 import { isAgentBusy } from "./runPhases";
-import { formatTokens, tileState } from "./runActivity";
+import { formatDuration, formatTokens, tileState } from "./runActivity";
 
 /**
- * The expanded agent terminal — opening a tile pops this full mac-terminal WINDOW under the wave (ONE per wave). Its
- * Output tab is the agent's whole event stream re-skinned as terminal scrollback (commands prompted, errors toned);
- * the Tool calls tab drills into the governed audit. The footer carries the live status + model + token + file
- * rollup. STILL read-only — there is no input; the window only reveals scrollback / tools, never a real shell. The
- * full raw ledger lives in the Trace tab.
+ * The expanded agent terminal — opening an agent (a fleet dot, a table row, a tile) pops this full mac-terminal WINDOW
+ * under the wave (ONE per wave). The title bar leads with the agent NAME; an identity strip carries harness · model ·
+ * tool count · run time (the Slice-A rollup the ref already holds), so everything about the agent lives in one place.
+ * The Output tab is the agent's whole event stream re-skinned as terminal scrollback (commands prompted, errors
+ * toned); the Tool calls tab drills into the governed audit; the footer carries the live status + token + file rollup.
+ * STILL read-only — there is no input; the window only reveals scrollback / tools, never a real shell. The full raw
+ * ledger lives in the Trace tab.
  */
 export function AgentTerminal({ agent, onClose }: { agent: PhaseAgentRef; onClose: () => void }) {
   const [tab, setTab] = useState<"output" | "tools">("output");
@@ -29,13 +31,27 @@ export function AgentTerminal({ agent, onClose }: { agent: PhaseAgentRef; onClos
   const files = evts.filter((e) => e.kind === "FileChanged").length;
   const tokens = (agent.inputTokens ?? 0) + (agent.outputTokens ?? 0);
 
+  // The agent's identity strip — harness (the live run row) + model + tools + time (the phase rollup). Each part drops when absent.
+  const identity = [
+    run.data?.harness,
+    agent.model,
+    agent.toolCount != null && `${agent.toolCount} ${agent.toolCount === 1 ? "tool" : "tools"}`,
+    agent.durationMs != null && formatDuration(agent.durationMs),
+  ].filter(Boolean) as string[];
+
   return (
     <div className="agent-terminal" data-state={tileState(status)}>
       <div className="agent-terminal-bar">
         <span className="agent-terminal-lights" aria-hidden="true"><i></i><i></i><i></i></span>
-        <span className="agent-terminal-title">{name} — agent.code — {tab === "output" ? "scrollback" : "tool calls"}</span>
+        <span className="agent-terminal-title" title={name}>{name}</span>
         <button type="button" className="agent-terminal-close" onClick={onClose} aria-label="Collapse terminal"><Ic.Collapse size={13} /></button>
       </div>
+
+      {identity.length > 0 && (
+        <div className="agent-terminal-meta">
+          {identity.map((part, i) => <span key={i}>{part}</span>)}
+        </div>
+      )}
 
       <div className="agent-terminal-body">
         {tab === "output" ? <Scrollback events={evts} loading={events.isLoading && evts.length === 0} /> : <AgentToolCalls agentRunId={agent.agentRunId} />}
@@ -43,9 +59,8 @@ export function AgentTerminal({ agent, onClose }: { agent: PhaseAgentRef; onClos
 
       <div className="agent-terminal-footer">
         <span className="agent-terminal-stat" data-state={tileState(status)}><span className="agent-terminal-statdot" aria-hidden="true"></span>{humanize(status)}</span>
-        {agent.model && <span className="agent-terminal-meta">{agent.model}</span>}
-        {tokens > 0 && <span className="agent-terminal-meta">{formatTokens(tokens)} tokens</span>}
-        {files > 0 && <span className="agent-terminal-meta">{files} {files === 1 ? "file" : "files"}</span>}
+        {tokens > 0 && <span className="agent-terminal-fact">{formatTokens(tokens)} tokens</span>}
+        {files > 0 && <span className="agent-terminal-fact">{files} {files === 1 ? "file" : "files"}</span>}
         <div className="agent-terminal-tabs">
           <button type="button" data-active={tab === "output" || undefined} onClick={() => setTab("output")}>Output</button>
           <button type="button" data-active={tab === "tools" || undefined} onClick={() => setTab("tools")}>Tool calls</button>

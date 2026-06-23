@@ -19,10 +19,13 @@ export interface AgentWave {
   agents: PhaseAgentRef[];
 }
 
-/** One item in the merged activity stream — a narrative event row or an agent-wave block. */
+/** One item in the composed activity stream — a narrative event row, an agent-wave block, or a folded run of detail events. */
 export type ActivityItem =
   | { kind: "event"; key: string; at: string; event: RunTimelineEvent }
-  | { kind: "wave"; key: string; at: string | null; wave: AgentWave };
+  | { kind: "wave"; key: string; at: string | null; wave: AgentWave }
+  | { kind: "fold"; key: string; at: string; events: RunTimelineEvent[] };
+
+type EventItem = Extract<ActivityItem, { kind: "event" }>;
 
 /** Authored semantic phases ("phase") own their agents over the raw decision / node / map phases that also list them. */
 function phaseRank(p: RunPhase): number {
@@ -77,6 +80,40 @@ export function mergeActivityStream(events: readonly RunTimelineEvent[], waves: 
     .map(({ it }) => it);
 }
 
+/**
+ * The Activity stream the UI renders: the merged event+wave stream (see mergeActivityStream) with each run of TWO OR
+ * MORE consecutive DETAIL events collapsed into one "fold" item — so the story shows milestones + waves and tucks the
+ * structural churn (node started/completed, file edits) behind a "N steps" disclosure at its chronological spot. A
+ * wave or a milestone event flushes the run; a LONE detail stays inline (a one-row fold isn't worth it — the renderer
+ * just dims it). An absent level reads as a milestone (forward-tolerance), never silently folded.
+ */
+export function composeActivity(events: readonly RunTimelineEvent[], waves: readonly AgentWave[]): ActivityItem[] {
+  const merged = mergeActivityStream(events, waves);
+  const out: ActivityItem[] = [];
+  let run: EventItem[] = [];
+  // The fold's key is anchored to the item BEFORE it (the last non-detail), NOT its first detail — so the key (and
+  // thus the disclosure's open state) survives a live poll that backfills an earlier-sorting detail to the run's front
+  // or re-sorts its members. A boundary precedes at most one fold, so keys stay unique.
+  let boundary = "start";
+
+  const flush = () => {
+    if (run.length >= 2) out.push({ kind: "fold", key: `fold:${boundary}`, at: run[0].at, events: run.map((i) => i.event) });
+    else out.push(...run);
+    run = [];
+  };
+
+  for (const item of merged) {
+    if (item.kind === "event" && item.event.level === "Detail") { run.push(item); continue; }
+
+    flush();
+    out.push(item);
+    boundary = item.key;
+  }
+
+  flush();
+  return out;
+}
+
 /** The earliest event time among a wave's agents — the fallback anchor when the phase carries no startedAt yet. */
 function earliestAgentEvent(wave: AgentWave, events: readonly RunTimelineEvent[]): string | null {
   const ids = new Set(wave.agents.map((a) => a.agentRunId));
@@ -123,19 +160,41 @@ export function formatDuration(ms: number | null | undefined): string {
   return `${Math.floor(m / 60)}h ${m % 60}m`;
 }
 
-/**
- * A wave's header roll-up — how many of its agents are done, the total, and the aggregate state for the headline: any
- * still running → running; else any failed → failed (attention); else any waiting → waiting; else all done. Drives the
- * progress squares + the state label without a per-agent fetch (reads the same phase refs the table does).
- */
-export function waveSummary(agents: readonly PhaseAgentRef[]): { done: number; total: number; state: TileState } {
-  const states = agents.map((a) => tileState(a.status));
+/** A wave's per-state agent counts (queued folds Queued/pending; failed folds every terminal-error state) — drives the fleet card's dots + summary line off the same phase refs, no per-agent fetch. */
+export interface WaveBreakdown {
+  total: number;
+  running: number;
+  done: number;
+  queued: number;
+  failed: number;
+}
 
-  return {
-    done: states.filter((s) => s === "done").length,
-    total: agents.length,
-    state: states.includes("running") ? "running" : states.includes("failed") ? "failed" : states.includes("waiting") ? "waiting" : "done",
-  };
+export function waveBreakdown(agents: readonly PhaseAgentRef[]): WaveBreakdown {
+  const b: WaveBreakdown = { total: agents.length, running: 0, done: 0, queued: 0, failed: 0 };
+
+  for (const a of agents) {
+    const s = tileState(a.status);
+    if (s === "running") b.running++;
+    else if (s === "done") b.done++;
+    else if (s === "waiting") b.queued++;
+    else b.failed++;
+  }
+
+  return b;
+}
+
+/** The fleet card's summary line — "8 agents · 4 done · 2 running · 1 queued · 1 failed"; a zero category drops, the total pluralizes. */
+export function formatBreakdown(b: WaveBreakdown): string {
+  const head = `${b.total} ${b.total === 1 ? "agent" : "agents"}`;
+
+  const parts = [
+    b.done > 0 && `${b.done} done`,
+    b.running > 0 && `${b.running} running`,
+    b.queued > 0 && `${b.queued} queued`,
+    b.failed > 0 && `${b.failed} failed`,
+  ].filter(Boolean);
+
+  return parts.length > 0 ? `${head} · ${parts.join(" · ")}` : head;
 }
 
 /** Compare two ISO timestamps; a null sorts LAST so an unanchored item goes to the end rather than the top. */

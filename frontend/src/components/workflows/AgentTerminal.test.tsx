@@ -63,14 +63,27 @@ describe("AgentTerminal", () => {
     expect(screen.queryByTestId("tool-calls")).toBeNull();
   });
 
-  it("carries the live status + model + token + file rollup in the footer", () => {
+  it("leads with the agent name and carries the full identity strip (harness · model · tools · time)", () => {
+    useAgentRunMock.mockReturnValue({ data: { status: "Running", harness: "claude-code" } });
     useAgentRunEventsMock.mockReturnValue({ data: [evt(1, "FileChanged", "x"), evt(2, "FileChanged", "y")], isLoading: false });
-    render(<AgentTerminal agent={termAgent({ agentRunId: "a1", model: "claude-opus", inputTokens: 12000, outputTokens: 2200 })} onClose={vi.fn()} />);
+    render(<AgentTerminal agent={termAgent({ agentRunId: "a1", label: "backend-fix", model: "claude-opus", toolCount: 16, durationMs: 137_000, inputTokens: 12000, outputTokens: 2200 })} onClose={vi.fn()} />);
 
-    expect(screen.getByText("running")).toBeInTheDocument();
-    expect(screen.getByText("claude-opus")).toBeInTheDocument();
+    expect(screen.getByText("backend-fix")).toBeInTheDocument();   // the title leads with the name
+    expect(screen.getByText("claude-code")).toBeInTheDocument();   // harness — the live run row
+    expect(screen.getByText("claude-opus")).toBeInTheDocument();   // model
+    expect(screen.getByText("16 tools")).toBeInTheDocument();      // the Slice-A rollup
+    expect(screen.getByText("2m 17s")).toBeInTheDocument();        // run time
+
+    expect(screen.getByText("running")).toBeInTheDocument();       // footer: live status
     expect(screen.getByText("14.2k tokens")).toBeInTheDocument();
     expect(screen.getByText("2 files")).toBeInTheDocument();
+  });
+
+  it("omits an identity part that is absent (no harness/model/tools/time → no strip)", () => {
+    useAgentRunMock.mockReturnValue({ data: { status: "Running" } });   // no harness
+    render(<AgentTerminal agent={termAgent({ agentRunId: "a1" })} onClose={vi.fn()} />);
+
+    expect(document.querySelector(".agent-terminal-meta")).toBeNull();
   });
 
   it("collapses via the close button", () => {

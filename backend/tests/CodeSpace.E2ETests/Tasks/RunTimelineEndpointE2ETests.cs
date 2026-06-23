@@ -52,6 +52,11 @@ public sealed class RunTimelineEndpointE2ETests : IClassFixture<TaskLaunchApiFac
         body.Events.Select(e => e.Title).ShouldBe(new[] { "Run started", "code started", "code failed", "Run failed" },
             "the lifecycle ledger projects chronologically over real HTTP; the log line is dropped");
         body.Events.ShouldContain(e => e.Severity == TimelineSeverity.Error, "the failure surfaces as an Error-severity event");
+
+        // The prominence axis round-trips over real HTTP: the structural node-started churn is Detail (the SPA folds it),
+        // the run + failure beats are Milestones (shown by default).
+        body.Events.Single(e => e.Title == "code started").Level.ShouldBe(TimelineLevel.Detail);
+        body.Events.Single(e => e.Title == "Run started").Level.ShouldBe(TimelineLevel.Milestone);
     }
 
     [Fact]

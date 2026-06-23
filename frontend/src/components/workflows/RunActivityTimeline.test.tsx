@@ -69,6 +69,26 @@ describe("RunActivityTimeline", () => {
     expect(rowLabels(container)).toEqual(["Run started", "Implement", "code edited"]);
   });
 
+  it("folds a run of detail events behind a 'N steps' disclosure, milestones shown", () => {
+    useRunTimelineMock.mockReturnValue({
+      data: { runId: "r1", runStatus: "Success", events: [
+        event({ id: "Run started", occurredAt: "2026-06-23T10:00:00Z", level: "Milestone" }),
+        event({ id: "manual started", occurredAt: "2026-06-23T10:00:01Z", level: "Detail" }),
+        event({ id: "manual completed", occurredAt: "2026-06-23T10:00:02Z", level: "Detail" }),
+        event({ id: "Run completed", occurredAt: "2026-06-23T10:00:03Z", level: "Milestone" }),
+      ] },
+      isLoading: false,
+    });
+    useRunPhasesMock.mockReturnValue({ data: { runId: "r1", runStatus: "Success", phases: [] }, isLoading: false });
+
+    render(<RunActivityTimeline runId="r1" />);
+
+    expect(screen.getByText("Run started")).toBeInTheDocument();
+    expect(screen.getByText("Run completed")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /2 steps/ })).toBeInTheDocument();   // the two details collapse
+    expect(screen.queryByText("manual started")).toBeNull();                       // hidden until expanded
+  });
+
   it("renders a pure-lifecycle run as events only (no waves)", () => {
     useRunTimelineMock.mockReturnValue({
       data: { runId: "r1", runStatus: "Success", events: [

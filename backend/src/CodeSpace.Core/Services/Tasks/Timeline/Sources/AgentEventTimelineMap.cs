@@ -39,6 +39,7 @@ public static class AgentEventTimelineMap
             Kind = $"agent.{e.Kind}",
             Title = Truncate(headline, MaxTitle),
             Severity = SeverityFor(e.Kind),
+            Level = LevelFor(e.Kind),
             OccurredAt = e.OccurredAt,
             Order = e.Sequence,
             NodeId = nodeByAgent.TryGetValue(e.AgentRunId, out var node) ? node : null,
@@ -46,6 +47,16 @@ public static class AgentEventTimelineMap
             SourceKey = Key,
         };
     }
+
+    // An agent's ERROR and its FINAL SUMMARY are story milestones (the failure + the conclusion the operator reads);
+    // its file edits / test output / warnings are DETAIL the wave + the agent's own terminal already carry, so they
+    // fold away on the run story line.
+    private static TimelineLevel LevelFor(AgentEventKind kind) => kind switch
+    {
+        AgentEventKind.Error => TimelineLevel.Milestone,
+        AgentEventKind.FinalSummary => TimelineLevel.Milestone,
+        _ => TimelineLevel.Detail,
+    };
 
     // TestOutput is deliberately Info: its pass/fail detail lives in the event Text, and reading a failure marker out
     // of the harness-specific DataJson to escalate to Warning/Error would couple this run-neutral source to one

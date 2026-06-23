@@ -10,7 +10,7 @@ import { formatTokens, tileState, type TileState } from "./runActivity";
 /**
  * One agent rendered as a light "terminal tile" — the live-execution unit of an agent wave. It is a READ-ONLY log
  * preview dressed in mac-terminal chrome (traffic lights + a name title), NOT an interactive shell: a running agent
- * shows its latest line + a blinking cursor, a finished one dims and keeps its output summary, a queued one is amber,
+ * shows its latest line + a blinking cursor, a finished one dims and keeps its output summary, a queued one reads gray,
  * a failed one reads danger. Stays to TWO preview lines so a wave of many tiles reads at a glance. Clicking the tile
  * (when `onOpen` is given) opens its full terminal scrollback below the wave; `open` marks the one that's expanded.
  * Status is the agent run's LIVE status, falling back to the phase ref's.
