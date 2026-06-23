@@ -127,27 +127,52 @@ public static class RealModelGate
             Console.WriteLine(line);
     }
 
-    /// <summary>The typed-<c>LlmApiException</c> message infixes that denote a GATEWAY/credential INFRA fault (the categories the decider lets PROPAGATE rather than fail-closing to a stop): <c>Transient</c> (a 5xx / 408 / client-side timeout / connection reset), <c>RateLimited</c> (a 429), <c>AuthFailed</c> (a 401/403 — a rotated / revoked / throttled credential). The decider already fails the model-CAPABILITY categories (Malformed / ContextLengthExceeded / ContentFiltered / BadRequest) closed to a clean stop, so they never reach a run Failure; ONLY these infra categories do.</summary>
-    private static readonly string[] InfraCategoryInfixes = { ", Transient):", ", RateLimited):", ", AuthFailed):" };
-
     /// <summary>
-    /// Whether a persisted node-failure ERROR text is a GATEWAY/credential INFRA fault that the decider let propagate
-    /// (an <c>LlmApiException</c> of category Transient / RateLimited / AuthFailed) rather than an engine or decision
-    /// fault. When such a fault happens DURING a supervisor turn the engine swallows it into a run Failure (whose
-    /// run-level error is the generic "Node failed."; the transport detail lives on the node-failed ledger record), so
-    /// the whole-loop classifier would otherwise read it as a code fault. This lets the lane route that case to the SAME
+    /// Whether a persisted node-failure is a GATEWAY/credential INFRA fault that the decider let propagate (an
+    /// <c>LlmApiException</c> of category Transient / RateLimited / AuthFailed) rather than an engine or decision fault.
+    /// When such a fault happens DURING a supervisor turn the engine swallows it into a run Failure (whose run-level
+    /// error is the generic "Node failed."; the transport detail lives on the node-failed ledger record), so the
+    /// whole-loop classifier would otherwise read it as a code fault. This lets the lane route that case to the SAME
     /// non-gating infra-skip path the decision-eval lane uses — honoring the lane-wide guarantee that a gateway outage
-    /// NEVER gates main. The match is DELIBERATELY NARROW and ANCHORED: it keys on the typed <c>LlmApiException</c>
-    /// message signature <c>"API error (…, &lt;Category&gt;): "</c> (the category enum name immediately before the
-    /// <c>): </c> separator that BuildMessage always emits), which a genuine engine fault (a null-ref, a git / DB / merge
-    /// failure) can NEVER produce — so a real regression is never mis-skipped.
+    /// NEVER gates main; the decider already fails the model-CAPABILITY categories (Malformed / ContextLengthExceeded /
+    /// ContentFiltered / BadRequest) closed to a clean stop, so they never reach a run Failure.
+    ///
+    /// <para>SECURITY: the category is read from the ENGINE-WRITTEN <c>(status, category): </c> slot at the START of
+    /// <c>LlmApiException.BuildMessage</c> (<c>"{provider} API error ({status}, {category}): {providerMessage}"</c>),
+    /// NOT from anywhere in the message. <paramref name="payloadOrError"/> is first reduced to the node-failed record's
+    /// <c>error</c> field (a JSON object) — defending against the JSON wrapper — and the category is then ANCHORED to the
+    /// leading slot via <see cref="InfraSlotRegex"/>. The trailing <c>providerMessage</c> is the only attacker/upstream-
+    /// controlled part (the raw error body for a non-2xx, an <c>HttpRequestException.Message</c> for a transport drop),
+    /// and it sits AFTER the matched slot — so a body that merely CONTAINS <c>", Transient): "</c> can never route a
+    /// non-transient fault to the non-gating skip (the prior unanchored substring check could). A genuine engine fault
+    /// (a null-ref, a git / DB / merge failure) carries no such leading slot, so a real regression is never mis-skipped.</para>
     /// </summary>
-    public static bool IsGatewayInfraError(string? error)
+    public static bool IsGatewayInfraError(string? payloadOrError)
     {
-        if (string.IsNullOrEmpty(error)) return false;
+        if (string.IsNullOrEmpty(payloadOrError)) return false;
 
-        return error.Contains("API error (", StringComparison.Ordinal)
-            && InfraCategoryInfixes.Any(infix => error.Contains(infix, StringComparison.Ordinal));
+        return InfraSlotRegex.IsMatch(ExtractErrorText(payloadOrError));
+    }
+
+    /// <summary>The infra categories the decider PROPAGATES (vs the capability ones it fail-closes), ANCHORED to the leading <c>(status, category): </c> slot of the BuildMessage prefix: <c>^…?API error (&lt;status, no ',' or ')'&gt;, &lt;Category&gt;): </c>. Anchoring at <c>^</c> + a comma/paren-free status means only the engine-written leading slot is read; the untrusted providerMessage that follows the first <c>): </c> can never satisfy it.</summary>
+    private static readonly System.Text.RegularExpressions.Regex InfraSlotRegex = new(
+        @"^[^(]*?API error \([^,)]*, (?:Transient|RateLimited|AuthFailed)\): ",
+        System.Text.RegularExpressions.RegexOptions.Compiled | System.Text.RegularExpressions.RegexOptions.CultureInvariant);
+
+    /// <summary>Reduce a node-failed PAYLOAD (<c>{"error":"…","outputs":{},…}</c>) to its <c>error</c> string so the category match sees only the message, not the JSON wrapper. A non-JSON input (or one without a string <c>error</c>) is treated as the raw error text itself.</summary>
+    private static string ExtractErrorText(string payloadOrError)
+    {
+        try
+        {
+            using var doc = System.Text.Json.JsonDocument.Parse(payloadOrError);
+            if (doc.RootElement.ValueKind == System.Text.Json.JsonValueKind.Object
+                && doc.RootElement.TryGetProperty("error", out var error)
+                && error.ValueKind == System.Text.Json.JsonValueKind.String)
+                return error.GetString() ?? "";
+        }
+        catch (System.Text.Json.JsonException) { /* not a JSON payload — treat the input as the raw error text */ }
+
+        return payloadOrError;
     }
 
     /// <summary>SocketError codes that mean "could not establish a connection AT ALL" — a mis-pointed/typo'd endpoint, a wrong port, an unresolvable host. These are WIRING failures the kill-gate must CATCH (gate), so they are deliberately NOT treated as transient infra; an established-then-dropped/aborted connection (any other code) is.</summary>

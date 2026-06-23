@@ -92,6 +92,9 @@ public sealed record SupervisorAskHumanPayload
 /// <summary>The <c>stop</c> payload: the terminal outcome label + a short summary, plus an optional model-authored acceptance check.</summary>
 public sealed record SupervisorStopPayload
 {
+    /// <summary>The fail-closed NON-CONFORMANT outcome label: the decider stamps this <see cref="Outcome"/> when the model produced no usable decision (a degraded / capability-miss reply) and it degraded to a clean stop rather than crashing. The shared signature a consumer (the decision-eval) keys on to reject a non-conformant reply that must NEVER score as a genuine 'stop' decision — pinned here so producer + consumer can't drift.</summary>
+    public const string NonConformantOutcome = "no-decision";
+
     public required string Outcome { get; init; }
 
     public string Summary { get; init; } = "";

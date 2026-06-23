@@ -213,27 +213,51 @@ public sealed class RealModelGateTests
     public void A_gateway_infra_node_failure_is_recognised_but_a_real_engine_fault_and_a_model_capability_miss_are_not()
     {
         // A mid-turn GATEWAY/credential outage that the engine swallowed into a run Failure carries the typed
-        // LlmApiException signature of an INFRA category (Transient / RateLimited / AuthFailed) on the node-failed record
-        // → recognised as NON-GATING infra (honours the lane-wide "a gateway outage never gates" guarantee). The
-        // node-failed payload is JSON; the anchored ", <Category>):" signature appears verbatim inside it.
-        RealModelGate.IsGatewayInfraError("{\"error\":\"Anthropic API error (no-status, Transient): the request timed out before the gateway responded\"}").ShouldBeTrue("a transient gateway timeout is infra");
-        RealModelGate.IsGatewayInfraError("OpenAI API error (HTTP 503, Transient): upstream unavailable").ShouldBeTrue("a 5xx is a transient gateway fault");
-        RealModelGate.IsGatewayInfraError("Anthropic API error (HTTP 429, RateLimited): slow down").ShouldBeTrue("a 429 is a rate-limited gateway fault");
-        RealModelGate.IsGatewayInfraError("Anthropic API error (HTTP 401, AuthFailed): invalid key").ShouldBeTrue("a rotated/revoked credential is a credential-infra outage, not a code regression — it must not gate main");
+        // LlmApiException signature of an INFRA category (Transient / RateLimited / AuthFailed) in the ENGINE-WRITTEN
+        // "(status, category): " slot at the START of the node-failed record's `error` field → recognised as NON-GATING
+        // infra (honours the lane-wide "a gateway outage never gates" guarantee). Both the real JSON payload form
+        // ({"error":"…"}) and a raw error string are accepted.
+        RealModelGate.IsGatewayInfraError(NodeFailedPayload("Anthropic API error (no-status, Transient): the request timed out before the gateway responded")).ShouldBeTrue("a transient gateway timeout is infra");
+        RealModelGate.IsGatewayInfraError("OpenAI API error (HTTP 503, Transient): upstream unavailable").ShouldBeTrue("a 5xx is a transient gateway fault (raw error form)");
+        RealModelGate.IsGatewayInfraError(NodeFailedPayload("Anthropic API error (HTTP 429, RateLimited): slow down")).ShouldBeTrue("a 429 is a rate-limited gateway fault");
+        RealModelGate.IsGatewayInfraError(NodeFailedPayload("Anthropic API error (HTTP 401, AuthFailed): invalid key")).ShouldBeTrue("a rotated/revoked credential is a credential-infra outage, not a code regression — it must not gate main");
 
         // A GENUINE engine/decision fault must NOT be mis-skipped — it has to gate (a real regression). None carry the
-        // typed infra-category signature.
-        RealModelGate.IsGatewayInfraError("Node 'sup' failed.").ShouldBeFalse("the generic run-level error is not an infra signal");
-        RealModelGate.IsGatewayInfraError("System.NullReferenceException: object reference not set").ShouldBeFalse("a null-ref is a real code fault");
-        RealModelGate.IsGatewayInfraError("git merge failed: conflict in shared.txt").ShouldBeFalse("a git fault gates");
+        // typed infra-category signature in the leading slot.
+        RealModelGate.IsGatewayInfraError(NodeFailedPayload("Node 'sup' failed.")).ShouldBeFalse("the generic run-level error is not an infra signal");
+        RealModelGate.IsGatewayInfraError(NodeFailedPayload("System.NullReferenceException: object reference not set")).ShouldBeFalse("a null-ref is a real code fault");
+        RealModelGate.IsGatewayInfraError(NodeFailedPayload("git merge failed: conflict in shared.txt")).ShouldBeFalse("a git fault gates");
 
         // A model-CAPABILITY miss is handled at the decider (fail-closed to a clean stop) so it never reaches a run
         // Failure — and is NOT an infra category here either (it would be a CapabilityMiss, never a gate).
-        RealModelGate.IsGatewayInfraError("Anthropic API error (HTTP 400, BadRequest): unsupported").ShouldBeFalse("a bad-request is a model-capability category, not infra");
-        RealModelGate.IsGatewayInfraError("Anthropic API error (no-status, Malformed): structured output failed schema validation after a re-ask").ShouldBeFalse("a schema-invalid reply is a capability miss the decider fail-closes, not infra");
+        RealModelGate.IsGatewayInfraError(NodeFailedPayload("Anthropic API error (HTTP 400, BadRequest): unsupported")).ShouldBeFalse("a bad-request is a model-capability category, not infra");
+        RealModelGate.IsGatewayInfraError(NodeFailedPayload("Anthropic API error (no-status, Malformed): structured output failed schema validation after a re-ask")).ShouldBeFalse("a schema-invalid reply is a capability miss the decider fail-closes, not infra");
         RealModelGate.IsGatewayInfraError(null).ShouldBeFalse();
         RealModelGate.IsGatewayInfraError("").ShouldBeFalse();
     }
+
+    [Fact]
+    public void A_non_transient_fault_whose_BODY_text_contains_a_fake_infra_slot_is_NOT_mis_skipped()
+    {
+        // THE attack the anchored slot defends: providerMessage is untrusted upstream body text (the raw error body for a
+        // non-2xx, an HttpRequestException.Message for a transport drop). A NON-transient fault whose body merely CONTAINS
+        // the literal ", Transient): " — or a whole fake "API error (x, Transient): " — must NOT route to the non-gating
+        // infra-skip (the prior unanchored substring check could). The category is read ONLY from the engine-written
+        // leading slot, where the real category (BadRequest / AuthFailed-is-infra-but-here-BadRequest) sits.
+        RealModelGate.IsGatewayInfraError(NodeFailedPayload("Anthropic API error (HTTP 400, BadRequest): the upstream body said \"retry, Transient): later\""))
+            .ShouldBeFalse("the ', Transient): ' is in the untrusted body, not the engine-written leading slot — it must still gate");
+
+        RealModelGate.IsGatewayInfraError(NodeFailedPayload("OpenAI API error (HTTP 400, BadRequest): nested API error (x, Transient): boom"))
+            .ShouldBeFalse("a whole fake 'API error (x, Transient): ' inside the body cannot fool the anchored leading-slot match");
+
+        // And the same body text as a bare non-LlmApiException engine error (no leading slot at all) still gates.
+        RealModelGate.IsGatewayInfraError(NodeFailedPayload("InvalidOperationException: a message mentioning , Transient): in passing"))
+            .ShouldBeFalse("body prose containing the token but no leading API-error slot is a real fault — it gates");
+    }
+
+    /// <summary>The shape the engine actually persists for a node failure: <c>{"error":"…","outputs":{},"duration_ms":…}</c> — so the gate is exercised against the REAL record shape (its `error` field), not a bare string.</summary>
+    private static string NodeFailedPayload(string error) =>
+        System.Text.Json.JsonSerializer.Serialize(new { error, outputs = new { }, duration_ms = 12 });
 
     [Theory]
     [InlineData(RealModelOutcome.Drove, "DROVE")]

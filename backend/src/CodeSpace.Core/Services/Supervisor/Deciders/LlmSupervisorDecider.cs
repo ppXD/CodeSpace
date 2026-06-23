@@ -211,7 +211,7 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
     private static SupervisorDecision NonConformantStop() => new()
     {
         Kind = SupervisorDecisionKinds.Stop,
-        PayloadJson = JsonSerializer.Serialize(new SupervisorStopPayload { Outcome = "no-decision", Summary = "The supervisor model returned a response that did not conform to the decision schema — stopping cleanly rather than crashing the run." }, AgentJson.Options),
+        PayloadJson = JsonSerializer.Serialize(new SupervisorStopPayload { Outcome = SupervisorStopPayload.NonConformantOutcome, Summary = "The supervisor model returned a response that did not conform to the decision schema — stopping cleanly rather than crashing the run." }, AgentJson.Options),
     };
 
     /// <summary>Fail-closed terminal stop when the operator did not pick a required supervisor brain model (<c>supervisorModelId</c>). The decision is the operator's — the supervisor never guesses its own model. Deterministic so a replay re-derives it.</summary>
