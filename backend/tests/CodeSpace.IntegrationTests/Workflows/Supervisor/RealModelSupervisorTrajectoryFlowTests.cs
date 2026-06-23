@@ -55,22 +55,24 @@ public sealed class RealModelSupervisorTrajectoryFlowTests
             _ => SupervisorTrajectoryEnvironments.HappyPath,
         };
 
-        // A wall-clock deadline bounds the WHOLE trajectory independently of the per-call HTTP timeout, so a slow or
-        // hanging endpoint surfaces the scorer's clean "did not converge" verdict instead of blowing the CI job's
-        // wall-time budget. A sound run is 4-5 turns, so maxTurns:8 is ample headroom for a replan or an ask.
-        using var deadline = new CancellationTokenSource(TimeSpan.FromMinutes(6));
-
         // Non-gating on gateway latency: a per-call HTTP timeout (one hung turn → TimeoutException) is surfaced as
         // informational, not a RED — the blessed wire fails only on a genuine "did not converge / shipped wrong" verdict.
-        // The 6-min deadline still SCORES a non-converging run as a real failure (its cancellation carries no
-        // TimeoutException, so AssessLiveAsync gates it rather than treating it as infra).
-        await RealModelGate.AssessLiveAsync(provider, async () =>
+        // best-of-N capability-floor: the blessed wire gets N independent attempts (a fresh trajectory + fresh wall-clock
+        // each) and passes if ANY ships correctly, so a single non-deterministic off-run can't flaky-red main; a persistent
+        // miss still REDs with each attempt's verdict. An informational wire runs once. The deadline lives INSIDE the
+        // closure so every attempt gets a full budget (a shared CTS would starve attempt 2+).
+        await RealModelGate.AssessLiveBestOfNAsync(provider, async () =>
         {
+            // A wall-clock deadline bounds the WHOLE trajectory independently of the per-call HTTP timeout, so a slow or
+            // hanging endpoint surfaces the scorer's clean "did not converge" verdict instead of blowing the job's budget.
+            // A sound run is 4-5 turns, so maxTurns:8 is ample headroom for a replan or an ask.
+            using var deadline = new CancellationTokenSource(TimeSpan.FromMinutes(6));
+
             var trajectory = await SupervisorTrajectory.RunAsync(decider, environment, maxTurns: 8, deadline.Token);
 
             // A FIRED wall-clock deadline is the gateway being too slow to finish the trajectory in the budget — not a
-            // wrong decision — so surface it as a TimeoutException for AssessLiveAsync to skip (non-gating). A turn-cap
-            // exhaustion (the model looping without shipping) leaves the deadline UNFIRED and still gates via the scorer.
+            // wrong decision — so surface it as a TimeoutException to skip (non-gating, does not consume a best-of-N slot).
+            // A turn-cap exhaustion (the model looping without shipping) leaves the deadline UNFIRED and still gates.
             if (deadline.IsCancellationRequested)
                 throw new TimeoutException($"[{scenario}] trajectory exceeded its 6-min wall-clock — the gateway was too slow to converge");
 

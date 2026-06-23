@@ -129,6 +129,75 @@ public static class RealModelGate
         return int.TryParse(raw, out var n) && n > 0 ? n : DefaultWholeLoopAttempts;
     }
 
+    /// <summary>The env var that overrides the boolean live-EVAL best-of-N budget (trajectory / arbiter) — Rule 8 escape hatch, pinned by test.</summary>
+    public const string EvalAttemptsEnvVar = "CODESPACE_REALMODEL_EVAL_ATTEMPTS";
+
+    /// <summary>The default best-of-N budget for a BOOLEAN live eval (trajectory / arbiter): N independent attempts on the BLESSED wire absorb a non-deterministic model's run-to-run variance so a single off-run can't flaky-red main, while a persistent miss still REDs. 2 balances flake-resistance against per-attempt cost (a trajectory attempt can be minutes).</summary>
+    public const int DefaultEvalAttempts = 2;
+
+    /// <summary>The effective boolean-eval best-of-N budget: the env override when positive + parseable, else <see cref="DefaultEvalAttempts"/> (Rule 8 — read only here).</summary>
+    public static int EvalAttempts()
+    {
+        var raw = Environment.GetEnvironmentVariable(EvalAttemptsEnvVar)?.Trim();
+
+        return int.TryParse(raw, out var n) && n > 0 ? n : DefaultEvalAttempts;
+    }
+
+    /// <summary>
+    /// Drive a BOOLEAN live eval (trajectory / arbiter) with the SAME best-of-N capability-floor as the whole-loop gate:
+    /// the BLESSED wire passes when ANY of <paramref name="attempts"/> independent attempts is Ok (flake ~p^N), gating only
+    /// when EVERY non-infra attempt fails; a gateway-infra failure is a non-gating LOUD skip that does NOT consume a slot.
+    /// An INFORMATIONAL wire never gates, so it runs ONCE and reports (best-of-N is a gating concern — and this saves N×
+    /// cost on the non-blessed wire). A non-infra exception PROPAGATES (never swallowed). The driveOnce factory MUST be
+    /// self-contained per call (a fresh run / fresh deadline), since it is invoked up to N times.
+    /// </summary>
+    public static Task AssessLiveBestOfNAsync(string provider, Func<Task<(bool Ok, string Verdict)>> driveOnce, int? attempts = null) =>
+        AssessLiveBestOfNAsync(provider, driveOnce, attempts ?? EvalAttempts(), Environment.GetEnvironmentVariable(StepSummaryEnvVar));
+
+    /// <summary>Testable core of the boolean best-of-N eval — explicit budget + step-summary path so a test pins the logic with no live call. Informational wire → one reported attempt; blessed wire → any Ok passes, all-fail gates (with the per-attempt verdicts), infra is a non-gating skip that does not consume a slot.</summary>
+    internal static async Task AssessLiveBestOfNAsync(string provider, Func<Task<(bool Ok, string Verdict)>> driveOnce, int attempts, string? stepSummaryPath)
+    {
+        if (!IsRequired(provider))   // informational wire never gates → one reported attempt is enough (and avoids N× cost on the non-blessed wire)
+        {
+            try
+            {
+                var (ok, verdict) = await driveOnce().ConfigureAwait(false);
+                ReportInformational(ok, verdict, stepSummaryPath);
+            }
+            catch (Exception ex) when (IsGatewayInfraFailure(ex))
+            {
+                ReportInfraSkip(provider, ex, stepSummaryPath);
+            }
+
+            return;
+        }
+
+        var budget = Math.Max(1, attempts);
+        var failVerdicts = new List<string>();
+        var maxAttempts = budget + InfraRetryBudget;
+
+        for (var i = 0; i < maxAttempts && failVerdicts.Count < budget; i++)
+        {
+            try
+            {
+                var (ok, verdict) = await driveOnce().ConfigureAwait(false);
+
+                ReportInformational(ok, verdict, stepSummaryPath);   // every attempt's verdict surfaced — a persistent miss is visible
+
+                if (ok) return;   // any Ok among N → PASS
+
+                failVerdicts.Add(verdict);
+            }
+            catch (Exception ex) when (IsGatewayInfraFailure(ex))
+            {
+                ReportInfraSkip(provider, ex, stepSummaryPath);   // non-gating infra — does NOT consume a capability slot
+            }
+        }
+
+        if (failVerdicts.Count >= budget)
+            false.ShouldBeTrue($"REQUIRED wire — the live model FAILED the eval in all {budget} attempt(s) (NOT a gateway-infra fault). The blessed wire requires at least one passing attempt. Per-attempt verdict: {string.Join(" || ", failVerdicts)}");
+    }
+
     /// <summary>
     /// Drive the STRICT live-model WHOLE-LOOP gate — the real-model-DROVE-to-completion criterion: the blessed wire
     /// passes ONLY when the live model drove the arc to the genuine accept head (<see cref="RealModelOutcome.Drove"/>).

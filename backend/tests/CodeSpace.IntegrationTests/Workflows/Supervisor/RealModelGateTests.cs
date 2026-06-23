@@ -409,4 +409,85 @@ public sealed class RealModelGateTests
 
         return (drive, () => calls);
     }
+
+    // ── Boolean best-of-N eval gate (trajectory / arbiter): any-Ok passes, all-fail reds, informational runs once ──
+
+    [Fact]
+    public void Eval_best_of_N_constants_are_pinned()
+    {
+        RealModelGate.EvalAttemptsEnvVar.ShouldBe("CODESPACE_REALMODEL_EVAL_ATTEMPTS");
+        RealModelGate.DefaultEvalAttempts.ShouldBe(2);
+    }
+
+    [Fact]
+    public async Task The_eval_best_of_N_passes_on_any_Ok_among_the_N_attempts()
+    {
+        // A first-attempt fail followed by an Ok PASSES — a single non-deterministic off-run never reds main.
+        var (drive, calls) = BoolSequence(false, true);
+
+        await Should.NotThrowAsync(() => RealModelGate.AssessLiveBestOfNAsync("Anthropic", drive, attempts: 2, stepSummaryPath: null));
+
+        calls().ShouldBe(2, "it retried after the fail and stopped on the Ok");
+    }
+
+    [Fact]
+    public async Task The_eval_best_of_N_reds_the_blessed_wire_when_EVERY_attempt_fails_and_names_each_verdict()
+    {
+        var (drive, calls) = BoolSequence(false, false);
+
+        Shouldly.ShouldAssertException? caught = null;
+        try { await RealModelGate.AssessLiveBestOfNAsync("Anthropic", drive, attempts: 2, stepSummaryPath: null); }
+        catch (Shouldly.ShouldAssertException ex) { caught = ex; }
+
+        caught.ShouldNotBeNull("N failing attempts on the blessed wire must red");
+        calls().ShouldBe(2, "it used the full best-of-N budget before gating");
+        caught!.Message.ShouldContain("verdict#1");
+        caught.Message.ShouldContain("verdict#2");
+    }
+
+    [Fact]
+    public async Task An_informational_wire_runs_ONCE_and_never_gates_even_on_a_fail()
+    {
+        // The non-blessed wire never gates → a single reported attempt (best-of-N is a gating-only concern; saves N× cost).
+        var (drive, calls) = BoolSequence(false, false);
+
+        await Should.NotThrowAsync(() => RealModelGate.AssessLiveBestOfNAsync("OpenAI", drive, attempts: 3, stepSummaryPath: null));
+
+        calls().ShouldBe(1, "an informational wire does NOT spend the best-of-N budget");
+    }
+
+    [Fact]
+    public async Task An_eval_infra_attempt_is_non_gating_and_does_NOT_consume_a_slot()
+    {
+        // infra→fail→Ok still PASSES on a 2-attempt budget — the infra attempt did not burn a capability slot.
+        var (drive, calls) = BoolSequence(new TimeoutException("gateway slow"), false, true);
+
+        await Should.NotThrowAsync(() => RealModelGate.AssessLiveBestOfNAsync("Anthropic", drive, attempts: 2, stepSummaryPath: null));
+
+        calls().ShouldBe(3, "the infra attempt did not consume a slot, so the later Ok was reached");
+    }
+
+    [Fact]
+    public async Task The_eval_best_of_N_never_swallows_a_non_infra_exception()
+    {
+        Func<Task<(bool Ok, string Verdict)>> drive = () => throw new InvalidOperationException("harness bug");
+
+        await Should.ThrowAsync<InvalidOperationException>(() => RealModelGate.AssessLiveBestOfNAsync("Anthropic", drive, attempts: 2, stepSummaryPath: null));
+    }
+
+    /// <summary>Boolean analogue of <see cref="Sequence"/>: yields (Ok, "verdict#N") for a <see cref="bool"/> step, throws an <see cref="Exception"/> step.</summary>
+    private static (Func<Task<(bool Ok, string Verdict)>> Drive, Func<int> Calls) BoolSequence(params object[] steps)
+    {
+        var calls = 0;
+
+        Func<Task<(bool Ok, string Verdict)>> drive = async () =>
+        {
+            var step = steps[Math.Min(calls, steps.Length - 1)];
+            calls++;
+            await Task.Yield();
+            return step is Exception ex ? throw ex : ((bool)step, $"verdict#{calls}");
+        };
+
+        return (drive, () => calls);
+    }
 }

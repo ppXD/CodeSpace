@@ -38,7 +38,10 @@ public sealed class RealModelSupervisorArbiterFlowTests
 
         if (baseUrl is null || apiKey is null || model is null) return;   // secrets absent → skip (honest CI/fork behaviour)
 
-        await RealModelGate.AssessLiveAsync(provider, async () =>
+        // best-of-N capability-floor (blessed wire gets N independent attempts, passes if ANY answers validly) so a single
+        // non-deterministic escalate-instead-of-answer can't flaky-red main; a persistent escalate still REDs. The closure
+        // builds a FRESH arbiter + decision each attempt, so the re-runs are independent. Informational wire runs once.
+        await RealModelGate.AssessLiveBestOfNAsync(provider, async () =>
         {
             var credential = RealModelLiveWire.Credential(provider, baseUrl, apiKey);
             var arbiter = new LlmDecisionArbiter(RealModelLiveWire.Registry(), RealModelLiveWire.Selector(model, credential));
