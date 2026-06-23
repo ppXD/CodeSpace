@@ -159,4 +159,102 @@ public sealed class RealModelGateTests
         await Should.ThrowAsync<InvalidOperationException>(() =>
             RealModelGate.AssessLiveAsync("Anthropic", () => throw new InvalidOperationException("wiring bug"), gating: true, stepSummaryPath: null));
     }
+
+    // ── Three-way whole-loop gate: the blessed wire reds ONLY on a code regression, never on a model-capability miss ──
+
+    [Fact]
+    public async Task The_three_way_gate_fails_the_blessed_wire_ONLY_on_a_code_fault()
+    {
+        // CodeFault on the blessed wire FAILS the job — the engine crashed driving the live brain's (valid) decisions.
+        // (Plain try/catch because async Should.ThrowAsync does not reliably catch Shouldly's own assertion type.)
+        var gated = false;
+        try { await RealModelGate.AssessLiveAsync("Anthropic", () => Task.FromResult((RealModelOutcome.CodeFault, "engine threw mid-merge")), stepSummaryPath: null); }
+        catch (Shouldly.ShouldAssertException) { gated = true; }
+        gated.ShouldBeTrue("a CodeFault on the blessed wire must fail the job — a real code regression");
+
+        // CapabilityMiss on the blessed wire is REPORTED, never gates — the gateway model couldn't drive, not a code bug.
+        await Should.NotThrowAsync(() => RealModelGate.AssessLiveAsync("Anthropic", () => Task.FromResult((RealModelOutcome.CapabilityMiss, "no conformant decision")), stepSummaryPath: null));
+
+        // Drove passes cleanly.
+        await Should.NotThrowAsync(() => RealModelGate.AssessLiveAsync("Anthropic", () => Task.FromResult((RealModelOutcome.Drove, "plan→spawn→merge→accept")), stepSummaryPath: null));
+
+        // An informational wire never gates — not even on a CodeFault.
+        await Should.NotThrowAsync(() => RealModelGate.AssessLiveAsync("OpenAI", () => Task.FromResult((RealModelOutcome.CodeFault, "engine threw")), stepSummaryPath: null));
+    }
+
+    [Fact]
+    public async Task The_three_way_gate_treats_a_gateway_timeout_as_non_gating_even_on_the_blessed_wire()
+    {
+        var path = Path.Combine(Path.GetTempPath(), $"realmodel-3way-infra-{Guid.NewGuid():N}.md");
+        try
+        {
+            await Should.NotThrowAsync(() => RealModelGate.AssessLiveAsync("Anthropic",
+                () => throw new TaskCanceledException("timeout", new TimeoutException()), path));
+
+            var written = File.ReadAllText(path);
+            written.ShouldContain("NON-GATING infra skip");
+            written.ShouldContain("Anthropic");
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+
+    [Fact]
+    public async Task The_three_way_gate_never_swallows_a_non_infra_exception()
+    {
+        // A real bug while driving (not a gateway failure) PROPAGATES, never masked as a skip — same teeth as the boolean overload.
+        await Should.ThrowAsync<InvalidOperationException>(() =>
+            RealModelGate.AssessLiveAsync("Anthropic", () => throw new InvalidOperationException("harness bug"), stepSummaryPath: null));
+    }
+
+    [Fact]
+    public void A_gateway_infra_node_failure_is_recognised_but_a_real_engine_fault_and_a_model_capability_miss_are_not()
+    {
+        // A mid-turn GATEWAY/credential outage that the engine swallowed into a run Failure carries the typed
+        // LlmApiException signature of an INFRA category (Transient / RateLimited / AuthFailed) on the node-failed record
+        // → recognised as NON-GATING infra (honours the lane-wide "a gateway outage never gates" guarantee). The
+        // node-failed payload is JSON; the anchored ", <Category>):" signature appears verbatim inside it.
+        RealModelGate.IsGatewayInfraError("{\"error\":\"Anthropic API error (no-status, Transient): the request timed out before the gateway responded\"}").ShouldBeTrue("a transient gateway timeout is infra");
+        RealModelGate.IsGatewayInfraError("OpenAI API error (HTTP 503, Transient): upstream unavailable").ShouldBeTrue("a 5xx is a transient gateway fault");
+        RealModelGate.IsGatewayInfraError("Anthropic API error (HTTP 429, RateLimited): slow down").ShouldBeTrue("a 429 is a rate-limited gateway fault");
+        RealModelGate.IsGatewayInfraError("Anthropic API error (HTTP 401, AuthFailed): invalid key").ShouldBeTrue("a rotated/revoked credential is a credential-infra outage, not a code regression — it must not gate main");
+
+        // A GENUINE engine/decision fault must NOT be mis-skipped — it has to gate (a real regression). None carry the
+        // typed infra-category signature.
+        RealModelGate.IsGatewayInfraError("Node 'sup' failed.").ShouldBeFalse("the generic run-level error is not an infra signal");
+        RealModelGate.IsGatewayInfraError("System.NullReferenceException: object reference not set").ShouldBeFalse("a null-ref is a real code fault");
+        RealModelGate.IsGatewayInfraError("git merge failed: conflict in shared.txt").ShouldBeFalse("a git fault gates");
+
+        // A model-CAPABILITY miss is handled at the decider (fail-closed to a clean stop) so it never reaches a run
+        // Failure — and is NOT an infra category here either (it would be a CapabilityMiss, never a gate).
+        RealModelGate.IsGatewayInfraError("Anthropic API error (HTTP 400, BadRequest): unsupported").ShouldBeFalse("a bad-request is a model-capability category, not infra");
+        RealModelGate.IsGatewayInfraError("Anthropic API error (no-status, Malformed): structured output failed schema validation after a re-ask").ShouldBeFalse("a schema-invalid reply is a capability miss the decider fail-closes, not infra");
+        RealModelGate.IsGatewayInfraError(null).ShouldBeFalse();
+        RealModelGate.IsGatewayInfraError("").ShouldBeFalse();
+    }
+
+    [Theory]
+    [InlineData(RealModelOutcome.Drove, "DROVE")]
+    [InlineData(RealModelOutcome.CapabilityMiss, "CAPABILITY MISS")]
+    [InlineData(RealModelOutcome.CodeFault, "CODE FAULT")]
+    public void The_three_way_outcome_is_always_appended_to_the_step_summary(RealModelOutcome outcome, string expectedLabel)
+    {
+        var path = Path.Combine(Path.GetTempPath(), $"realmodel-3way-{Guid.NewGuid():N}.md");
+        try
+        {
+            RealModelGate.ReportThreeWay(outcome, "trajectory=plan→spawn→merge", path);
+
+            var written = File.ReadAllText(path);
+            written.ShouldContain(expectedLabel);
+            written.ShouldContain("trajectory=plan→spawn→merge");
+            // A capability miss states plainly it does not gate — it must never read as a silent green.
+            if (outcome == RealModelOutcome.CapabilityMiss) written.ShouldContain("NOT gating");
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
 }
