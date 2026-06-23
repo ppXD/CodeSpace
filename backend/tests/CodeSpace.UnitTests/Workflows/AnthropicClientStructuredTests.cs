@@ -108,11 +108,14 @@ public class AnthropicClientStructuredTests
         var client = new AnthropicClient(new StubHttpClientFactory(new CapturingHandler(response)));
         var schema = JsonDocument.Parse("""{ "type": "object" }""").RootElement;
 
-        var ex = await Should.ThrowAsync<InvalidOperationException>(() => client.CompleteStructuredAsync(new StructuredLLMCompletionRequest
+        // A model that yields no structured output on BOTH attempts is a typed Malformed capability fault (so the
+        // supervisor decider can fail it closed to a clean stop rather than crash the run), not a bare InvalidOperationException.
+        var ex = await Should.ThrowAsync<LlmApiException>(() => client.CompleteStructuredAsync(new StructuredLLMCompletionRequest
         {
             Model = "m", SystemPrompt = "", UserPrompt = "x", JsonSchema = schema, Credential = TestCredential,
         }, CancellationToken.None));
 
+        ex.Category.ShouldBe(LlmErrorCategory.Malformed);
         ex.Message.ShouldContain("did not produce structured output");
         ex.Message.ShouldContain("I cannot.", customMessage: "the content preview names what the model actually returned");
     }

@@ -127,7 +127,7 @@ public sealed class OpenAiClient : ILLMClient, IStructuredLLMClient
         if (StructuredJsonText.TryExtractObject(message?.Content) is not { } result)
         {
             var refusal = string.IsNullOrWhiteSpace(message?.Refusal) ? "" : $" (refusal: {message!.Refusal})";
-            throw new InvalidOperationException($"OpenAI structured completion produced no JSON via forced function-calling OR the prompt-only fallback — the model did not produce structured output{refusal}. Content preview: {StructuredJsonText.Preview(message?.Content)}");
+            throw new LlmApiException(Provider, null, LlmErrorCategory.Malformed, $"structured completion produced no JSON via forced function-calling OR the prompt-only fallback — the model did not produce structured output{refusal}. Content preview: {StructuredJsonText.Preview(message?.Content)}");
         }
 
         return BuildCompletion(result, parsed, request.Model);

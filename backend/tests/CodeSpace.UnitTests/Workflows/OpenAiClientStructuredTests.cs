@@ -116,8 +116,11 @@ public class OpenAiClientStructuredTests
         var client = new OpenAiClient(new StubHttpClientFactory(new CapturingHandler(response)));
         var schema = JsonDocument.Parse("""{ "type": "object" }""").RootElement;
 
-        var ex = await Should.ThrowAsync<InvalidOperationException>(() => client.CompleteStructuredAsync(StructuredRequest(schema, TestCredential), CancellationToken.None));
+        // A model that yields no structured output is a typed Malformed capability fault (so the supervisor decider can
+        // fail it closed to a clean stop rather than crash the run), not a bare InvalidOperationException.
+        var ex = await Should.ThrowAsync<LlmApiException>(() => client.CompleteStructuredAsync(StructuredRequest(schema, TestCredential), CancellationToken.None));
 
+        ex.Category.ShouldBe(LlmErrorCategory.Malformed);
         ex.Message.ShouldContain("did not produce structured output");
     }
 

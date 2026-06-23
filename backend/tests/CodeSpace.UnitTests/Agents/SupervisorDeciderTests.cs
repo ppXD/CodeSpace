@@ -306,6 +306,74 @@ public class SupervisorDeciderTests
         JsonDocument.Parse(decision.PayloadJson).RootElement.GetProperty("outcome").GetString().ShouldBe("no-model");
     }
 
+    [Theory]
+    [InlineData("")]      // an object with a blank kind
+    [InlineData("   ")]   // whitespace-only kind
+    [InlineData(null)]    // an object with NO kind at all
+    public async Task A_non_conformant_model_response_fails_closed_to_a_terminal_stop(string? kind)
+    {
+        // The structured client returned a reply that does NOT conform to the decision schema (no usable kind). This is a
+        // model-side MISS — handled the SAME way as no-model and an unknown verb: a clean fail-closed stop, NEVER a crash
+        // that would fault the durable run. (Closes the one gap in the decider's "fail closed, never crash" contract; the
+        // same guard covers a reply that does not deserialize to a decision at all.)
+        var decider = Decider(new SupervisorModelDecision { Kind = kind! });
+
+        var decision = await decider.DecideAsync(Context(), CancellationToken.None);
+
+        decision.Kind.ShouldBe(SupervisorDecisionKinds.Stop);
+        decision.IsTerminal.ShouldBeTrue("a non-conformant model reply → a clean fail-closed stop, never an unhandled crash mid-run");
+        JsonDocument.Parse(decision.PayloadJson).RootElement.GetProperty("outcome").GetString().ShouldBe("no-decision");
+    }
+
+    [Fact]
+    public async Task A_malformed_shape_reply_also_fails_closed_to_a_terminal_stop()
+    {
+        // The gateway returned a structurally WRONG reply (a bare JSON string, not a decision object) — deserialization
+        // would throw. The decider must still fail closed to a clean stop, never crash the durable run on a degraded reply.
+        var raw = JsonSerializer.SerializeToElement("not a decision object");
+        var decider = new LlmSupervisorDecider(new FakeRegistry(new RawJsonStructuredClient(raw)), FakeSelector.WithModel());
+
+        var decision = await decider.DecideAsync(Context(), CancellationToken.None);
+
+        decision.Kind.ShouldBe(SupervisorDecisionKinds.Stop);
+        decision.IsTerminal.ShouldBeTrue("a malformed-shape reply → a clean fail-closed stop, never a crash");
+        JsonDocument.Parse(decision.PayloadJson).RootElement.GetProperty("outcome").GetString().ShouldBe("no-decision");
+    }
+
+    [Theory]
+    [InlineData(LlmErrorCategory.Malformed)]              // schema-invalid after a re-ask / no extractable JSON
+    [InlineData(LlmErrorCategory.ContextLengthExceeded)] // the prompt + tape overflowed the model's window
+    [InlineData(LlmErrorCategory.ContentFiltered)]       // the gateway blocked the reply on policy
+    [InlineData(LlmErrorCategory.BadRequest)]            // a 400 the gateway rejected even on the prompt-only floor
+    public async Task A_model_capability_category_transport_failure_fails_closed_to_a_terminal_stop(LlmErrorCategory category)
+    {
+        // The gateway THREW a typed LlmApiException for a MODEL-side reason (it could not produce a usable structured
+        // decision) — the decider fails closed to a clean stop, NEVER crashing the durable run. This is THE canonical
+        // capability miss ("no conformant decision"): it must end as a clean stop so the whole-loop reads it as a
+        // CapabilityMiss (non-gating), not a code fault.
+        var decider = new LlmSupervisorDecider(new FakeRegistry(new ThrowingStructuredClient(category)), FakeSelector.WithModel());
+
+        var decision = await decider.DecideAsync(Context(), CancellationToken.None);
+
+        decision.Kind.ShouldBe(SupervisorDecisionKinds.Stop);
+        decision.IsTerminal.ShouldBeTrue($"a {category} capability miss → a clean fail-closed stop, never a crash");
+        JsonDocument.Parse(decision.PayloadJson).RootElement.GetProperty("outcome").GetString().ShouldBe("no-decision");
+    }
+
+    [Theory]
+    [InlineData(LlmErrorCategory.Transient)]    // a 5xx / 408 / client-side timeout / connection reset
+    [InlineData(LlmErrorCategory.RateLimited)]  // a 429
+    [InlineData(LlmErrorCategory.AuthFailed)]   // a 401/403 — a rotated/revoked credential
+    public async Task An_infra_category_transport_failure_propagates_so_the_engine_fails_the_run(LlmErrorCategory category)
+    {
+        // A genuine gateway/credential INFRA fault is NOT swallowed into a stop — it PROPAGATES so the engine fails the
+        // run (visible + rerunnable) and the live-gate treats it as non-gating infra (consistent with the decision-eval
+        // lane), never a silent "completed" no-op that masks an outage.
+        var decider = new LlmSupervisorDecider(new FakeRegistry(new ThrowingStructuredClient(category)), FakeSelector.WithModel());
+
+        await Should.ThrowAsync<LlmApiException>(() => decider.DecideAsync(Context(), CancellationToken.None));
+    }
+
     [Fact]
     public async Task The_decider_calls_with_the_model_the_selector_picked_from_the_pool()
     {
@@ -395,6 +463,36 @@ public class SupervisorDeciderTests
             LastModel = request.Model;
             return Task.FromResult(new StructuredLLMCompletion { Json = JsonSerializer.SerializeToElement(_model, SupervisorDecisionSchema.Options), Model = request.Model });
         }
+    }
+
+    /// <summary>Returns a caller-supplied RAW <see cref="JsonElement"/> as the structured reply — used to feed a malformed/wrong-shape response (one the typed fake cannot produce) so the decider's fail-closed deserialization guard is exercised.</summary>
+    private sealed class RawJsonStructuredClient : ILLMClient, IStructuredLLMClient
+    {
+        private readonly JsonElement _raw;
+        public RawJsonStructuredClient(JsonElement raw) => _raw = raw;
+
+        public string Provider => "TestSupervisor";
+
+        public Task<LLMCompletion> CompleteAsync(LLMCompletionRequest request, CancellationToken cancellationToken) =>
+            Task.FromResult(new LLMCompletion { Text = "", Model = request.Model });
+
+        public Task<StructuredLLMCompletion> CompleteStructuredAsync(StructuredLLMCompletionRequest request, CancellationToken cancellationToken) =>
+            Task.FromResult(new StructuredLLMCompletion { Json = _raw, Model = request.Model });
+    }
+
+    /// <summary>Throws a typed <see cref="LlmApiException"/> of a given category from the structured call — pins the decider's "fail-closed on a model-capability miss, propagate real infra" split without a real gateway.</summary>
+    private sealed class ThrowingStructuredClient : ILLMClient, IStructuredLLMClient
+    {
+        private readonly LlmErrorCategory _category;
+        public ThrowingStructuredClient(LlmErrorCategory category) => _category = category;
+
+        public string Provider => "TestSupervisor";
+
+        public Task<LLMCompletion> CompleteAsync(LLMCompletionRequest request, CancellationToken cancellationToken) =>
+            Task.FromResult(new LLMCompletion { Text = "", Model = request.Model });
+
+        public Task<StructuredLLMCompletion> CompleteStructuredAsync(StructuredLLMCompletionRequest request, CancellationToken cancellationToken) =>
+            throw new LlmApiException("TestSupervisor", null, _category, "boom");
     }
 
     private sealed class FakeSelector : IModelPoolSelector

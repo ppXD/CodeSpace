@@ -51,11 +51,40 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
 
         if (structured == null) return NoModelStop();
 
-        var completion = await structured.CompleteStructuredAsync(BuildRequest(context, pick), cancellationToken).ConfigureAwait(false);
+        StructuredLLMCompletion completion;
+        try
+        {
+            completion = await structured.CompleteStructuredAsync(BuildRequest(context, pick), cancellationToken).ConfigureAwait(false);
+        }
+        catch (LlmApiException ex) when (IsModelCapabilityMiss(ex.Category))
+        {
+            // The gateway produced NO usable decision for a MODEL-side reason — a reply that failed schema validation
+            // after a re-ask / yielded no JSON (Malformed), an over-long context (ContextLengthExceeded), a
+            // content-filtered or bad-request reply. Fail closed to a clean stop, the SAME way as no-model / an unknown
+            // kind — NEVER crash the durable run on a model that simply could not produce a conformant decision. A genuine
+            // INFRA fault (a timeout / 5xx / 429 / auth) is NOT caught here: it propagates so the engine fails the run and
+            // the live-gate treats it as non-gating gateway infra (consistent with the decision-eval lane).
+            return NonConformantStop();
+        }
 
-        var model = Deserialize(completion.Json);
+        var model = TryDeserialize(completion.Json);
+
+        // A reply that did not parse to a decision (wrong shape) or carried no kind is the same model-side MISS — fail closed.
+        if (model is null || string.IsNullOrWhiteSpace(model.Kind)) return NonConformantStop();
 
         return SupervisorDecisionProjector.Project(model);
+    }
+
+    /// <summary>Whether an LLM transport failure is a MODEL-side capability miss (the model could not produce a usable structured decision) rather than a gateway/credential INFRA fault. Capability misses fail closed to a clean stop (never crash the run); infra faults (Transient / RateLimited / AuthFailed) propagate so the engine fails the run and the live-gate treats them as non-gating infra. This is the decider's "fail closed on a model miss, surface real infra" split.</summary>
+    private static bool IsModelCapabilityMiss(LlmErrorCategory category) => category is
+        LlmErrorCategory.Malformed or LlmErrorCategory.ContextLengthExceeded or
+        LlmErrorCategory.ContentFiltered or LlmErrorCategory.BadRequest;
+
+    /// <summary>Deserialize the model's structured reply to a decision, returning null on ANY non-conformant shape (a wrong top-level type, malformed JSON) so the caller fails closed — the decider never crashes the durable run on a degraded gateway reply.</summary>
+    private static SupervisorModelDecision? TryDeserialize(JsonElement json)
+    {
+        try { return json.Deserialize<SupervisorModelDecision>(SupervisorDecisionSchema.Options); }
+        catch (JsonException) { return null; }
     }
 
     private static StructuredLLMCompletionRequest BuildRequest(SupervisorTurnContext context, ModelPoolPick pick) => new()
@@ -178,15 +207,12 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
         return -1;
     }
 
-    private static SupervisorModelDecision Deserialize(JsonElement json)
+    /// <summary>Fail-closed terminal stop when the model's response did NOT conform to the decision schema (it did not parse to a decision, or carried no kind) — a model-side miss handled the SAME way as no-model and an unknown kind (the projector already maps an unknown verb to stop): a clean one-turn no-op stop, never an unhandled crash mid-run. Keeps the decider's "fail closed, never crash" contract WHOLE — a degraded/flaky gateway reply stops the run cleanly rather than faulting the durable engine. Deterministic so a replay re-derives it.</summary>
+    private static SupervisorDecision NonConformantStop() => new()
     {
-        var model = json.Deserialize<SupervisorModelDecision>(SupervisorDecisionSchema.Options);
-
-        if (model == null || string.IsNullOrWhiteSpace(model.Kind))
-            throw new InvalidOperationException("The supervisor decider returned no decision (no kind). The response did not conform to the decision schema.");
-
-        return model;
-    }
+        Kind = SupervisorDecisionKinds.Stop,
+        PayloadJson = JsonSerializer.Serialize(new SupervisorStopPayload { Outcome = "no-decision", Summary = "The supervisor model returned a response that did not conform to the decision schema — stopping cleanly rather than crashing the run." }, AgentJson.Options),
+    };
 
     /// <summary>Fail-closed terminal stop when the operator did not pick a required supervisor brain model (<c>supervisorModelId</c>). The decision is the operator's — the supervisor never guesses its own model. Deterministic so a replay re-derives it.</summary>
     private static SupervisorDecision NoBrainModelStop() => new()

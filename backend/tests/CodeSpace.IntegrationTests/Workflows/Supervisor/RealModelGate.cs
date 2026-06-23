@@ -3,6 +3,24 @@ using Shouldly;
 namespace CodeSpace.IntegrationTests.Workflows.Supervisor;
 
 /// <summary>
+/// The three-way outcome of a live-model WHOLE-LOOP run, so the blessed wire can gate SAFELY — only a code regression
+/// fails the job, never the gateway model's capability. The classifying TEST maps the run's terminal state to one of
+/// these (a faulted run → <see cref="CodeFault"/>; a fully-driven run → <see cref="Drove"/>; a clean-but-short run →
+/// <see cref="CapabilityMiss"/>); <see cref="RealModelGate"/> only gates on <see cref="CodeFault"/>.
+/// </summary>
+public enum RealModelOutcome
+{
+    /// <summary>The live brain produced conformant decisions that drove the engine to the intended terminal. The gate is satisfied.</summary>
+    Drove,
+
+    /// <summary>The live brain did NOT drive the arc — it produced no conformant decision, or stopped/force-stopped short of the outcome. A MODEL precondition (the gateway model's capability), NOT a code bug → REPORTED, never gates the job.</summary>
+    CapabilityMiss,
+
+    /// <summary>The engine/substrate FAULTED while executing the live brain's (valid) decisions — an unhandled exception left the run Failed. A real CODE regression → gates the blessed wire.</summary>
+    CodeFault,
+}
+
+/// <summary>
 /// The real-model gate's per-wire policy: which provider wires are REQUIRED (blessed — a bad verdict FAILS the job)
 /// versus INFORMATIONAL (still driven against the live model and their verdict reported, but never gating CI). This
 /// lets a stronger wire be the kill-gate while a weaker model on another protocol surfaces its verdict without
@@ -58,6 +76,78 @@ public static class RealModelGate
         {
             ReportInfraSkip(provider, ex, stepSummaryPath);
         }
+    }
+
+    /// <summary>
+    /// Drive a live-model WHOLE-LOOP gate whose verdict is THREE-WAY, so the blessed wire gates SAFELY: ONLY a
+    /// <see cref="RealModelOutcome.CodeFault"/> — the engine/substrate FAULTED while executing the live brain's valid
+    /// decisions (a real code regression) — fails the job. A <see cref="RealModelOutcome.CapabilityMiss"/> (the gateway
+    /// model produced no conformant decision / drove the arc short of the outcome) is a MODEL precondition, NOT a code
+    /// bug, so it is REPORTED loudly and never gates — main can't red because the gateway model couldn't drive.
+    /// <see cref="RealModelOutcome.Drove"/> passes. The brain BEHAVIOUR (Drove vs CapabilityMiss) is ALWAYS surfaced, so
+    /// a persistent capability miss is visible rather than a silent green. An informational wire never gates regardless
+    /// of outcome; a gateway infra failure is non-gating regardless (same as the boolean overload). This is the generic
+    /// seam that lets the real-brain WHOLE-LOOP lanes be gating without a model-capability miss ever reddening main.
+    /// </summary>
+    public static Task AssessLiveAsync(string provider, Func<Task<(RealModelOutcome Outcome, string Note)>> drive) =>
+        AssessLiveAsync(provider, drive, Environment.GetEnvironmentVariable(StepSummaryEnvVar));
+
+    /// <summary>Testable core of the three-way <see cref="AssessLiveAsync(string, Func{Task{ValueTuple{RealModelOutcome, string}}})"/> — takes the step-summary path explicitly so a test pins the behaviour without mutating process env. The outcome is ALWAYS reported; the blessed wire asserts only that it is NOT a <see cref="RealModelOutcome.CodeFault"/>; an informational wire never asserts; a gateway infra failure is a non-gating skip.</summary>
+    internal static async Task AssessLiveAsync(string provider, Func<Task<(RealModelOutcome Outcome, string Note)>> drive, string? stepSummaryPath)
+    {
+        try
+        {
+            var (outcome, note) = await drive().ConfigureAwait(false);
+
+            ReportThreeWay(outcome, note, stepSummaryPath);
+
+            if (IsRequired(provider))
+                (outcome != RealModelOutcome.CodeFault).ShouldBeTrue($"REQUIRED wire — the engine FAULTED driving the live brain (a CODE regression, NOT a model-capability miss): {note}");
+        }
+        catch (Exception ex) when (IsGatewayInfraFailure(ex))
+        {
+            ReportInfraSkip(provider, ex, stepSummaryPath);
+        }
+    }
+
+    /// <summary>Surface a three-way whole-loop outcome (ALWAYS — a CapabilityMiss must never read as a silent green) to the step-summary FILE when present (capture-immune → the job-summary UI), else the console. Pure given <paramref name="stepSummaryPath"/>.</summary>
+    internal static void ReportThreeWay(RealModelOutcome outcome, string note, string? stepSummaryPath)
+    {
+        var (icon, label) = outcome switch
+        {
+            RealModelOutcome.Drove => ("✅", "DROVE the whole loop"),
+            RealModelOutcome.CapabilityMiss => ("ℹ️", "CAPABILITY MISS — the model did not drive the arc (REPORTED, NOT gating)"),
+            _ => ("⚠️", "CODE FAULT — the engine faulted on the live brain's decisions (gates the blessed wire)"),
+        };
+        var line = $"{icon} real-model whole-loop: {label} — {note}";
+
+        if (!string.IsNullOrWhiteSpace(stepSummaryPath))
+            File.AppendAllText(stepSummaryPath, line + Environment.NewLine);
+        else
+            Console.WriteLine(line);
+    }
+
+    /// <summary>The typed-<c>LlmApiException</c> message infixes that denote a GATEWAY/credential INFRA fault (the categories the decider lets PROPAGATE rather than fail-closing to a stop): <c>Transient</c> (a 5xx / 408 / client-side timeout / connection reset), <c>RateLimited</c> (a 429), <c>AuthFailed</c> (a 401/403 — a rotated / revoked / throttled credential). The decider already fails the model-CAPABILITY categories (Malformed / ContextLengthExceeded / ContentFiltered / BadRequest) closed to a clean stop, so they never reach a run Failure; ONLY these infra categories do.</summary>
+    private static readonly string[] InfraCategoryInfixes = { ", Transient):", ", RateLimited):", ", AuthFailed):" };
+
+    /// <summary>
+    /// Whether a persisted node-failure ERROR text is a GATEWAY/credential INFRA fault that the decider let propagate
+    /// (an <c>LlmApiException</c> of category Transient / RateLimited / AuthFailed) rather than an engine or decision
+    /// fault. When such a fault happens DURING a supervisor turn the engine swallows it into a run Failure (whose
+    /// run-level error is the generic "Node failed."; the transport detail lives on the node-failed ledger record), so
+    /// the whole-loop classifier would otherwise read it as a code fault. This lets the lane route that case to the SAME
+    /// non-gating infra-skip path the decision-eval lane uses — honoring the lane-wide guarantee that a gateway outage
+    /// NEVER gates main. The match is DELIBERATELY NARROW and ANCHORED: it keys on the typed <c>LlmApiException</c>
+    /// message signature <c>"API error (…, &lt;Category&gt;): "</c> (the category enum name immediately before the
+    /// <c>): </c> separator that BuildMessage always emits), which a genuine engine fault (a null-ref, a git / DB / merge
+    /// failure) can NEVER produce — so a real regression is never mis-skipped.
+    /// </summary>
+    public static bool IsGatewayInfraError(string? error)
+    {
+        if (string.IsNullOrEmpty(error)) return false;
+
+        return error.Contains("API error (", StringComparison.Ordinal)
+            && InfraCategoryInfixes.Any(infix => error.Contains(infix, StringComparison.Ordinal));
     }
 
     /// <summary>SocketError codes that mean "could not establish a connection AT ALL" — a mis-pointed/typo'd endpoint, a wrong port, an unresolvable host. These are WIRING failures the kill-gate must CATCH (gate), so they are deliberately NOT treated as transient infra; an established-then-dropped/aborted connection (any other code) is.</summary>

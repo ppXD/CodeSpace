@@ -110,7 +110,7 @@ public sealed class AnthropicClient : ILLMClient, IStructuredLLMClient
         var text = TextContent(parsed);
 
         if (StructuredJsonText.TryExtractObject(text) is not { } result)
-            throw new InvalidOperationException($"Anthropic structured completion produced no JSON via forced tool-use OR the prompt-only fallback — the model did not produce structured output. Content preview: {StructuredJsonText.Preview(text)}");
+            throw new LlmApiException(Provider, null, LlmErrorCategory.Malformed, $"structured completion produced no JSON via forced tool-use OR the prompt-only fallback — the model did not produce structured output. Content preview: {StructuredJsonText.Preview(text)}");
 
         return BuildCompletion(result, parsed, request.Model);
     }

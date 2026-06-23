@@ -39,14 +39,16 @@ namespace CodeSpace.E2ETests.Workflows;
 /// goal-relevance oracle — the gate certifies the live brain drove the whole arc to a real integrated+accepted head, not
 /// that it solved the task (the live decision QUALITY is measured separately by the golden/trajectory decision evals).
 ///
-/// <para>INFORMATIONAL, not a kill-gate (<c>gating: false</c>): the verdict is reported to the job summary but never
-/// blocks main — the gateway model reliably drives the SIMPLE golden decision schema (measured by the BLESSED
-/// decision-eval) yet can fail to produce the FULL supervisor decision schema in this real context ("no conformant
-/// decision"), a model CAPABILITY precondition, not a code regression. Self-skips when ALL <c>CODESPACE_LLM_*</c> secrets
-/// are absent (CI/forks stay green at zero cost) but FAILS on a partial config (a rotated/blanked single secret can't
-/// silently mask the lane). Only the CLI's coding intelligence (the fake codex) and the agent COUNT are bounded — the
-/// brain's decisions, the engine, the runner, the git, and the acceptance MECHANISM are all real; this lane proves the
-/// live join end-to-end when a model CAN drive it.</para>
+/// <para>GATING, but only on a CODE FAULT (a three-way <see cref="RealModelOutcome"/>): the blessed wire reds main ONLY
+/// if the engine FAULTED while driving the live brain's decisions (a real substrate regression — every model-side miss
+/// now fails closed to a clean stop, so a run Failure is never a model miss). A model CAPABILITY MISS (the gateway model
+/// drove the arc short — e.g. produced no conformant decision) is REPORTED to the job summary but never blocks main, and
+/// a gateway timeout is non-gating infra. Self-skips when ALL <c>CODESPACE_LLM_*</c> secrets are absent (CI/forks stay
+/// green at zero cost) but FAILS on a partial config (a rotated/blanked single secret can't silently mask the lane).
+/// Only the CLI's coding intelligence (the fake codex) and the agent COUNT are bounded — the brain's decisions, the
+/// engine, the runner, the git, and the acceptance MECHANISM are all real; this lane proves the live join end-to-end
+/// without a model shortfall ever being able to red main. The blessed decision-QUALITY kill-gate stays the golden
+/// decision-eval.</para>
 /// </summary>
 [Collection(PostgresCollection.Name)]
 [Trait("Category", "RealModel")]
@@ -110,7 +112,11 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
         var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
 
         using var remote = new BareRemote();
-        await remote.SeedBaseAsync(new() { ["check.sh"] = "#!/bin/sh\nexit 0\n", ["base.txt"] = "base\n" });
+        // A NON-VACUOUS acceptance floor: the integrated head must actually CONTAIN an agent's work (an agent_*.txt that
+        // FileWritingFakeCli writes), so a green grade proves the brain's spawn really integrated — not just that an
+        // exit-0 script ran against an empty tree. If the integration carried no agent file, check.sh exits 1 → the stop's
+        // objective acceptance FAILS → acceptancePassed=false → the run does not read as Drove.
+        await remote.SeedBaseAsync(new() { ["check.sh"] = "#!/bin/sh\nif ls agent_*.txt >/dev/null 2>&1; then exit 0; else exit 1; fi\n", ["base.txt"] = "base\n" });
         var repoId = await SeedBoundRepositoryAsync(teamId, remote.Url, "main");
 
         // The supervisor's brain runs on this seeded credential (key encrypted into the DB row the live decider reads).
@@ -119,20 +125,20 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
         var workflowId = await CreateWholeLoopWorkflowAsync(teamId, userId, repoId, brainModelId);
         var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
 
-        // INFORMATIONAL (gating: false): the live whole-loop is OBSERVED + reported, but never blocks main. The gateway
-        // model reliably drives the SIMPLE golden decision schema (measured by the blessed decision-eval) yet can fail to
-        // produce the FULL supervisor decision schema in this real workflow context ("no conformant decision") — a model
-        // CAPABILITY precondition, not a code regression, so it must not RED the lane. (A gateway timeout is also non-gating
-        // infra; the brain's 180s per-call timeout in the fixture lets a normal slow turn still drive the loop.) The
-        // blessed intelligence kill-gate is the golden decision-eval; this lane proves the join when a model CAN drive it.
+        // GATING — but only on a CODE FAULT (the three-way gate). The blessed wire reds ONLY if the engine FAULTED while
+        // driving the live brain's decisions (a real substrate regression — every model-side miss now fails closed to a
+        // clean stop, so a Failure is never a model miss). A CAPABILITY MISS (the gateway model drove the arc short, e.g.
+        // produced no conformant decision) is REPORTED but never blocks main, and a gateway timeout is non-gating infra. So
+        // the lane now PROVES the live join — a real-brain whole-loop regression that crashes the engine reds main —
+        // without a model shortfall ever being able to. The blessed decision-QUALITY kill-gate is still the golden eval.
         await RealModelGate.AssessLiveAsync(Provider, async () =>
         {
             await RunEngineAsync(runId);
             await jobClient.WaitForPendingAsync();
 
-            var (ok, note) = await EvaluateAsync(runId, teamId);
-            return (ok, $"{Provider} model '{model}' whole-loop — {note}");
-        }, gating: false);
+            var (outcome, note) = await EvaluateAsync(runId, teamId);
+            return (outcome, $"{Provider} model '{model}' whole-loop — {note}");
+        });
     }
 
     [Fact]
@@ -186,9 +192,9 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
             await RunEngineAsync(runId);
             await jobClient.WaitForPendingAsync();
 
-            var (ok, note) = await EvaluateConflictResolveAsync(runId, teamId);
-            return (ok, $"{Provider} model '{model}' conflict→resolve — {note}");
-        }, gating: false);
+            var (outcome, note) = await EvaluateConflictResolveAsync(runId, teamId);
+            return (outcome, $"{Provider} model '{model}' conflict→resolve — {note}");
+        });
     }
 
     [Fact]
@@ -238,16 +244,18 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
             await RunEngineAsync(runId);
             await jobClient.WaitForPendingAsync();
 
-            var (ok, note) = await EvaluateFailureRetryAsync(runId, teamId);
-            return (ok, $"{Provider} model '{model}' failure→retry — {note}");
-        }, gating: false);
+            var (outcome, note) = await EvaluateFailureRetryAsync(runId, teamId);
+            return (outcome, $"{Provider} model '{model}' failure→retry — {note}");
+        });
     }
 
-    /// <summary>The live brain reacted to the real failure iff it FANNED OUT (spawn), at least one agent really FAILED, and the brain then chose the recovery action `retry`. Reports each signal (and whether it instead escalated via stop) so a non-retrying trajectory is legible, not a bare red.</summary>
-    private async Task<(bool Ok, string Note)> EvaluateFailureRetryAsync(Guid runId, Guid teamId)
+    /// <summary>The live brain reacted to the real failure iff it FANNED OUT (spawn), at least one agent really FAILED, and the brain then chose the recovery action `retry`. Classified three-way; reports each signal (and whether it instead escalated via stop) so a non-retrying trajectory is legible, not a bare red.</summary>
+    private async Task<(RealModelOutcome Outcome, string Note)> EvaluateFailureRetryAsync(Guid runId, Guid teamId)
     {
         using var verify = _fixture.BeginScope();
         var db = verify.Resolve<CodeSpaceDbContext>();
+
+        await ThrowIfGatewayInfraFailureAsync(db, runId);   // a mid-turn gateway outage is non-gating infra, not a code fault
 
         var kinds = await db.SupervisorDecisionRecord.AsNoTracking()
             .Where(d => d.SupervisorRunId == runId && d.TeamId == teamId)
@@ -260,15 +268,17 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
         var run = await db.WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == runId);
         var trail = string.Join("→", kinds);
 
-        var ok = spawned && someAgentFailed && retried;
-        return (ok, $"status={run.Status}, spawned={spawned}, agent-failed={someAgentFailed}, retried={retried}, trajectory={trail}");
+        var drove = spawned && someAgentFailed && retried;
+        return (Classify(run.Status, drove), $"status={run.Status}, spawned={spawned}, agent-failed={someAgentFailed}, retried={retried}, trajectory={trail}");
     }
 
-    /// <summary>The live brain reacted to the real conflict iff it FANNED OUT (spawn), the real-git merge genuinely CONFLICTED, and the brain then CHOSE resolve (executed, or gated to the resolve-approval ask_human floor). Reports each signal so a non-resolving trajectory is legible, not a bare red.</summary>
-    private async Task<(bool Ok, string Note)> EvaluateConflictResolveAsync(Guid runId, Guid teamId)
+    /// <summary>The live brain reacted to the real conflict iff it FANNED OUT (spawn), the real-git merge genuinely CONFLICTED, and the brain then CHOSE resolve (executed, or gated to the resolve-approval ask_human floor). Classified three-way; reports each signal so a non-resolving trajectory is legible, not a bare red.</summary>
+    private async Task<(RealModelOutcome Outcome, string Note)> EvaluateConflictResolveAsync(Guid runId, Guid teamId)
     {
         using var verify = _fixture.BeginScope();
         var db = verify.Resolve<CodeSpaceDbContext>();
+
+        await ThrowIfGatewayInfraFailureAsync(db, runId);   // a mid-turn gateway outage is non-gating infra, not a code fault
 
         var decisions = await db.SupervisorDecisionRecord.AsNoTracking()
             .Where(d => d.SupervisorRunId == runId && d.TeamId == teamId)
@@ -288,8 +298,8 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
         var run = await db.WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == runId);
         var trail = string.Join("→", decisions.Select(d => d.DecisionKind));
 
-        var ok = spawned && conflicted && resolveChosen;
-        return (ok, $"status={run.Status}, spawned={spawned}, merge-conflicted={conflicted}, resolve-chosen={resolveChosen}, trajectory={trail}");
+        var drove = spawned && conflicted && resolveChosen;
+        return (Classify(run.Status, drove), $"status={run.Status}, spawned={spawned}, merge-conflicted={conflicted}, resolve-chosen={resolveChosen}, trajectory={trail}");
     }
 
     /// <summary>Seed a team channel the supervisor's irreversible-resolve approval card parks on (so a live brain that chooses resolve parks cleanly rather than erroring on a missing surface).</summary>
@@ -302,11 +312,46 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
 
     // ─── Verdict ─────────────────────────────────────────────────────────────────────
 
-    /// <summary>The live brain drove the whole loop soundly iff the run reached Success, at least one real agent produced a real patch, and the terminal stop's objective acceptance PASSED (a green check.sh against the integrated head). Returns a legible note for the gate.</summary>
-    private async Task<(bool Ok, string Note)> EvaluateAsync(Guid runId, Guid teamId)
+    /// <summary>
+    /// Map a live whole-loop run to the THREE-WAY gate outcome so the blessed wire reds ONLY on a code regression. A
+    /// FAULTED run (<see cref="WorkflowRunStatus.Failure"/>) is a <see cref="RealModelOutcome.CodeFault"/> — the engine
+    /// could not execute the brain's decisions, a real substrate bug — because every MODEL-side miss now fails closed to
+    /// a clean stop (the decider never crashes the run on a non-conformant reply), so a Failure is never a model miss. A
+    /// run that drove the arc → <see cref="RealModelOutcome.Drove"/>; any other clean terminal (the brain stopped or
+    /// parked short of the arc — a capability shortfall, not a code bug) → <see cref="RealModelOutcome.CapabilityMiss"/>,
+    /// which is reported but never gates.
+    /// </summary>
+    private static RealModelOutcome Classify(WorkflowRunStatus status, bool drove) =>
+        status == WorkflowRunStatus.Failure ? RealModelOutcome.CodeFault
+        : drove ? RealModelOutcome.Drove
+        : RealModelOutcome.CapabilityMiss;
+
+    /// <summary>
+    /// A gateway/transport outage DURING a turn is swallowed by the engine into a run Failure (the run-level error is the
+    /// generic "Node failed."; the typed <c>LlmApiException</c> detail lives on the node-failed ledger record). If THAT
+    /// detail is a gateway infra failure, throw a <see cref="TimeoutException"/> so the live-gate's infra-skip catch
+    /// treats it as NON-GATING — honoring the lane-wide "a gateway timeout never gates" guarantee (consistent with the
+    /// decision-eval lane), instead of the three-way classifier reading the Failure as a code fault. A genuine engine
+    /// fault (any other node-failed error) is left untouched, so it gates as a <see cref="RealModelOutcome.CodeFault"/>.
+    /// Called by every evaluator BEFORE it classifies, so the routing is uniform across all three live lanes.
+    /// </summary>
+    private async Task ThrowIfGatewayInfraFailureAsync(CodeSpaceDbContext db, Guid runId)
+    {
+        var nodeFailure = await db.WorkflowRunRecord.AsNoTracking()
+            .Where(r => r.RunId == runId && r.RecordType == WorkflowRunRecordTypes.NodeFailed && r.NodeId == NodeId)
+            .OrderByDescending(r => r.Sequence).Select(r => r.PayloadJson).FirstOrDefaultAsync();
+
+        if (RealModelGate.IsGatewayInfraError(nodeFailure))
+            throw new TimeoutException($"the supervisor brain's gateway failed mid-run (NON-GATING infra): {nodeFailure}");
+    }
+
+    /// <summary>The live brain drove the whole loop soundly iff the run reached Success, at least one real agent produced a real patch, and the terminal stop's objective acceptance PASSED (a green check.sh against the integrated head). Classified three-way for safe gating + returns a legible note.</summary>
+    private async Task<(RealModelOutcome Outcome, string Note)> EvaluateAsync(Guid runId, Guid teamId)
     {
         using var verify = _fixture.BeginScope();
         var db = verify.Resolve<CodeSpaceDbContext>();
+
+        await ThrowIfGatewayInfraFailureAsync(db, runId);   // a mid-turn gateway outage is non-gating infra, not a code fault
 
         var run = await db.WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == runId);
 
@@ -331,8 +376,8 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
         var spawnedAndMerged = kinds.Contains(SupervisorDecisionKinds.Spawn) && kinds.Contains(SupervisorDecisionKinds.Merge);
 
         var trail = string.Join("→", kinds);
-        var ok = run.Status == WorkflowRunStatus.Success && realPatchCount >= 1 && acceptancePassed && spawnedAndMerged;
-        return (ok, $"status={run.Status}, realPatches={realPatchCount}, acceptancePassed={acceptancePassed}, spawnedAndMerged={spawnedAndMerged}, trajectory={trail}");
+        var drove = run.Status == WorkflowRunStatus.Success && realPatchCount >= 1 && acceptancePassed && spawnedAndMerged;
+        return (Classify(run.Status, drove), $"status={run.Status}, realPatches={realPatchCount}, acceptancePassed={acceptancePassed}, spawnedAndMerged={spawnedAndMerged}, trajectory={trail}");
     }
 
     // ─── Helpers ─────────────────────────────────────────────────────────────────────
