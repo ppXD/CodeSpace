@@ -4,6 +4,7 @@ using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Security.Claims;
 using System.Text;
+using System.Text.Json;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.E2ETests.Infrastructure;
@@ -72,6 +73,23 @@ public sealed class RunTimelineEndpointE2ETests : IClassFixture<TaskLaunchApiFac
     }
 
     [Fact]
+    public async Task Get_timeline_includes_the_supervisor_decision_ledger()
+    {
+        var (userId, teamId) = await SeedTeamMembershipAsync();
+        var runId = await SeedRunWithRecordsAsync(teamId);
+        await SeedSupervisorDecisionAsync(teamId, runId, SupervisorDecisionKinds.Spawn, StagedAgents(2));
+
+        var response = await SendAsync(HttpMethod.Get, $"/api/workflows/runs/{runId}/timeline", userId, teamId);
+
+        response.StatusCode.ShouldBe(HttpStatusCode.OK, customMessage: await DescribeFailureAsync(response));
+
+        var body = await response.Content.ReadFromJsonAsync<RunTimelineResponse>();
+        body.ShouldNotBeNull();
+        body!.Events.ShouldContain(e => e.SourceKey == "supervisor" && e.Title == "Supervisor spawned 2 agents" && e.Severity == TimelineSeverity.Success,
+            "the supervisor decision ledger merges into the same timeline over real HTTP, with severity round-tripped");
+    }
+
+    [Fact]
     public async Task Get_timeline_for_an_absent_run_is_404()
     {
         var (userId, teamId) = await SeedTeamMembershipAsync();
@@ -134,6 +152,26 @@ public sealed class RunTimelineEndpointE2ETests : IClassFixture<TaskLaunchApiFac
 
         await db.SaveChangesAsync();
     }
+
+    private async Task SeedSupervisorDecisionAsync(Guid teamId, Guid runId, string kind, string? outcome)
+    {
+        using var scope = _factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<CodeSpaceDbContext>();
+        var now = DateTimeOffset.UtcNow;
+
+        db.SupervisorDecisionRecord.Add(new SupervisorDecisionRecord
+        {
+            Id = Guid.NewGuid(), TeamId = teamId, SupervisorRunId = runId,
+            DecisionKind = kind, Status = SupervisorDecisionStatus.Succeeded, PayloadJson = "{}", OutcomeJson = outcome,
+            IdempotencyKey = Guid.NewGuid().ToString("N"), InputHash = "test",
+            CreatedDate = now, CreatedBy = SystemUsers.SeederId, LastModifiedDate = now, LastModifiedBy = SystemUsers.SeederId,
+        });
+
+        await db.SaveChangesAsync();
+    }
+
+    private static string StagedAgents(int count) =>
+        JsonSerializer.Serialize(new { agentRunIds = Enumerable.Range(0, count).Select(_ => Guid.NewGuid().ToString()).ToArray() });
 
     private async Task<HttpResponseMessage> SendAsync(HttpMethod method, string url, Guid userId, Guid teamId)
     {
