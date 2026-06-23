@@ -20,6 +20,7 @@ vi.mock("@/hooks/use-workflows", () => ({
   useWorkflowRun: (runId: string) => useWorkflowRunMock(runId),
   useWorkflow: () => ({ data: undefined, isLoading: false }),
   useNodeManifests: () => ({ data: [] }),
+  useRunPhases: () => ({ data: undefined }),   // the embedded child is nested → phases query is disabled anyway
 }));
 
 // The embedded child RunDetailView's node rows read each node's agent-run status for their badge; mock the

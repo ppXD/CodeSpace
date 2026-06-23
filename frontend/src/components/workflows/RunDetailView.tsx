@@ -1,18 +1,23 @@
-import { useMemo, useState } from "react";
+import { useMemo, useState, type ReactNode } from "react";
 
 import { Ic } from "@/_imported/ai-code-space/icons";
 import { isAgentRunActive, type AgentRunStatus } from "@/api/agents";
 import type { WorkflowRunNodeSummary, WorkflowRunWaitInfo } from "@/api/workflows";
 import { ApiError } from "@/api/request";
 import { useAgentRun } from "@/hooks/use-agents";
-import { useNodeManifests, useResumeRun, useWorkflowRun } from "@/hooks/use-workflows";
+import { useNodeManifests, useResumeRun, useRunPhases, useWorkflowRun } from "@/hooks/use-workflows";
 
 import { AgentRunTimeline } from "./AgentRunTimeline";
 import { AgentToolCalls } from "./AgentToolCalls";
 import { JsonView } from "./JsonView";
 import { RunCanvas } from "./RunCanvas";
+import { RunLiveWork } from "./RunLiveWork";
+import { RunStatusBadge } from "./RunStatusBadge";
+import { dedupRunAgents } from "./runPhases";
 import { branchBadge, groupMapBranches, type MapRollup } from "./mapBranches";
 import { concurrentNodeKeys, runNodeKey } from "./runConcurrency";
+
+export { RunStatusBadge };
 
 /**
  * How many sub-workflow levels we embed inline before falling back to a plain id. The engine caps
@@ -40,6 +45,9 @@ export function RunDetailView({ runId, nested = false, depth = 0, onOpenRun, def
   const manifests = useNodeManifests();
   const manifestByType = useMemo(() => new Map((manifests.data ?? []).map((m) => [m.typeKey, m])), [manifests.data]);
   const [view, setView] = useState<RunView>(defaultView);
+  // The Live-work center is driven by the phase projection (shared ['run-phases', id] cache). Only the framed
+  // route needs it — the embedded (nested) dialog keeps the plain node narrative, so it skips the fetch.
+  const phases = useRunPhases(nested ? null : runId);
 
   if (run.isLoading) {
     return <div className="ct-empty"><div className="ct-empty-h">Loading run…</div></div>;
@@ -61,6 +69,53 @@ export function RunDetailView({ runId, nested = false, depth = 0, onOpenRun, def
   // Per-map element-branch rollups parsed from the engine iteration keys. Empty for a non-map run
   // (every row has an empty iteration key) — so a non-map run renders exactly as before.
   const mapRollups = groupMapBranches(r.nodes);
+
+  // The run's agents (deduped) drive the Live-work cards and decide whether the raw node trace folds away (an
+  // agent/supervisor run, whose cards are the heart) or stays primary (a structural workflow with no agents).
+  const phaseList = phases.data?.phases ?? [];
+  const agents = dedupRunAgents(phaseList);
+
+  const payloadBlock = (
+    <>
+      <section className="wf-section">
+        <h2 className="wf-section-h">Normalized payload</h2>
+        <JsonView data={r.normalizedPayload} />
+      </section>
+      {hasContent(r.outputs) && (
+        <section className="wf-section">
+          <h2 className="wf-section-h">Outputs</h2>
+          <JsonView data={r.outputs} />
+        </section>
+      )}
+    </>
+  );
+
+  const nodeBlock = (
+    <section className="wf-section">
+      <h2 className="wf-section-h">Node execution</h2>
+      {mapRollups.length > 0 && <MapRollups rollups={mapRollups} />}
+      {r.nodes.length === 0 ? (
+        <div className="ct-empty">
+          <div className="ct-empty-h">No nodes executed yet</div>
+          <div className="ct-empty-p">The engine hasn't picked up this run from the outbox yet — refresh in a moment.</div>
+        </div>
+      ) : (
+        <ol className="wf-run-nodes">
+          {r.nodes.map((n) => (
+            <RunNodeRow
+              key={`${n.nodeId}:${n.iterationKey}`}
+              node={n}
+              branch={branchBadge(n)}
+              parallel={concurrent.has(runNodeKey(n))}
+              suppressChildEmbed={n.childRunId === r.pendingWait?.token}
+              depth={depth}
+              onOpenRun={onOpenRun}
+            />
+          ))}
+        </ol>
+      )}
+    </section>
+  );
 
   return (
     <div className={nested ? "wf-detail-body wf-detail-body-nested" : "wf-detail-body"}>
@@ -122,47 +177,42 @@ export function RunDetailView({ runId, nested = false, depth = 0, onOpenRun, def
           note="The full low-level event stream — every node, tool call, model turn, and decision, in order." />
       ) : (
         <>
-      <section className="wf-section">
-        <h2 className="wf-section-h">Normalized payload</h2>
-        <JsonView data={r.normalizedPayload} />
-      </section>
+          {/* The Live-work band — the command-center heart: a conditional lead strip + the run's agent cards. */}
+          {!nested && <RunLiveWork phases={phaseList} />}
 
-      {/* The run's declared Outputs (the Terminal's resolved inputs) — what this run produced.
-          Only shown once the run reached a successful Terminal. */}
-      {hasContent(r.outputs) && (
-        <section className="wf-section">
-          <h2 className="wf-section-h">Outputs</h2>
-          <JsonView data={r.outputs} />
-        </section>
-      )}
-
-      <section className="wf-section">
-        <h2 className="wf-section-h">Node execution</h2>
-        {mapRollups.length > 0 && <MapRollups rollups={mapRollups} />}
-        {r.nodes.length === 0 ? (
-          <div className="ct-empty">
-            <div className="ct-empty-h">No nodes executed yet</div>
-            <div className="ct-empty-p">The engine hasn't picked up this run from the outbox yet — refresh in a moment.</div>
-          </div>
-        ) : (
-          <ol className="wf-run-nodes">
-            {r.nodes.map((n) => (
-              <RunNodeRow
-                key={`${n.nodeId}:${n.iterationKey}`}
-                node={n}
-                branch={branchBadge(n)}
-                parallel={concurrent.has(runNodeKey(n))}
-                suppressChildEmbed={n.childRunId === r.pendingWait?.token}
-                depth={depth}
-                onOpenRun={onOpenRun}
-              />
-            ))}
-          </ol>
-        )}
-      </section>
+          {nested || agents.length === 0 ? (
+            // The editor dialog, or a structural workflow with no agents: the node trace IS the content.
+            <>
+              {payloadBlock}
+              {nodeBlock}
+            </>
+          ) : (
+            // An agent / supervisor run: the cards above are the heart, so the raw input/output + node trace
+            // fold away (and move fully into the Trace tab once its projector lands).
+            <>
+              <Fold title="Run input & output">{payloadBlock}</Fold>
+              <Fold title="Workflow nodes">{nodeBlock}</Fold>
+            </>
+          )}
         </>
       )}
     </div>
+  );
+}
+
+/**
+ * A collapsed disclosure for the raw detail an agent/supervisor run pushes below its Live-work cards (the run's
+ * input/output JSON, the node trace). Lazy: the body only mounts on expand, so a closed fold costs no polling
+ * from the agent timelines nested inside the node trace.
+ */
+function Fold({ title, children }: { title: string; children: ReactNode }) {
+  const [open, setOpen] = useState(false);
+
+  return (
+    <details className="run-fold" onToggle={(e) => setOpen(e.currentTarget.open)}>
+      <summary className="run-fold-summary">{title}</summary>
+      {open && <div className="run-fold-body">{children}</div>}
+    </details>
   );
 }
 
@@ -285,21 +335,6 @@ function MapRollups({ rollups }: { rollups: MapRollup[] }) {
  */
 function isParkedOnLiveAgent(n: WorkflowRunNodeSummary, agentStatus: AgentRunStatus | undefined): boolean {
   return n.status === "Suspended" && !!n.agentRunId && isAgentRunActive(agentStatus);
-}
-
-/** Status pill shared across the run-detail view + run lists. */
-export function RunStatusBadge({ status, title }: { status: string; title?: string }) {
-  // Enqueued = workflow-run "claimed by dispatcher, waiting for worker pickup"; Queued = an agent run not yet
-  // claimed by its worker — both read as a pending-queue tone.
-  const tone =
-    status === "Success" || status === "Succeeded" ? "ok"
-    : status === "Failure" || status === "Failed" || status === "TimedOut" ? "err"
-    : status === "Cancelled" || status === "Skipped" ? "muted"
-    : status === "Enqueued" || status === "Queued" ? "queued"
-    : status === "Suspended" ? "suspended"
-    : "running";
-
-  return <span className={`wf-status-pill wf-status-${tone}`} title={title}>{status}</span>;
 }
 
 /**

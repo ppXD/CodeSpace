@@ -11,9 +11,10 @@ import { RunDetailView } from "./RunDetailView";
  *   2. the child run-detail embeds inline, but only once expanded (no eager polling for N steps);
  *   3. with no navigation handler the id is plain text; a non-subworkflow node shows neither.
  */
-const { useWorkflowRunMock, useAgentRunMock } = vi.hoisted(() => ({
+const { useWorkflowRunMock, useAgentRunMock, useRunPhasesMock } = vi.hoisted(() => ({
   useWorkflowRunMock: vi.fn(),
   useAgentRunMock: vi.fn<(id?: string) => { data: { status: string } | undefined }>(() => ({ data: undefined })),
+  useRunPhasesMock: vi.fn<() => { data: { phases: unknown[] } | undefined }>(() => ({ data: undefined })),
 }));
 
 vi.mock("@/hooks/use-workflows", () => ({
@@ -21,6 +22,7 @@ vi.mock("@/hooks/use-workflows", () => ({
   useWorkflowRun: (runId: string) => useWorkflowRunMock(runId),
   useWorkflow: () => ({ data: undefined, isLoading: false }),
   useNodeManifests: () => ({ data: [] }),
+  useRunPhases: () => useRunPhasesMock(),
 }));
 
 // RunNodeRow reads the agent run's live status for its badge (and AgentRunTimeline streams it); mock the
@@ -56,7 +58,11 @@ beforeEach(() => {
   useWorkflowRunMock.mockReset();
   useAgentRunMock.mockReset();
   useAgentRunMock.mockImplementation(() => ({ data: undefined }));
+  useRunPhasesMock.mockReset();
+  useRunPhasesMock.mockReturnValue({ data: undefined });   // no phases → no Live-work, node trace stays primary
 });
+
+const phasesWithAgent = { data: { phases: [{ id: "p", label: "Implement", kind: "agent", status: "Active", order: 0, agents: [{ agentRunId: "ar1", status: "Running", label: "backend-fix" }], metrics: { agentCount: 1, succeededCount: 0, failedCount: 0 }, sourceKey: "supervisor-ledger" }] } };
 
 describe("RunDetailView — sub-workflow step drill-down", () => {
   it("links the step to its child run, and embeds the child inline only once expanded", () => {
@@ -295,5 +301,28 @@ describe("RunDetailView — run-view tabs", () => {
   it("keeps the compact summary line when nested (the editor dialog has no header/rails)", () => {
     const { container } = render(<RunDetailView runId="parent-1" nested />);
     expect(container.querySelector(".wf-run-summary")).not.toBeNull();
+  });
+});
+
+describe("RunDetailView — Live-work center", () => {
+  it("shows the agent cards and FOLDS the raw node trace when the run has agents", () => {
+    useWorkflowRunMock.mockImplementation(() => ok(detail({ nodes: [node({ nodeId: "code", agentRunId: "ar1" })] })));
+    useRunPhasesMock.mockReturnValue(phasesWithAgent);
+
+    render(<RunDetailView runId="parent-1" />);
+
+    expect(screen.getByText("backend-fix")).toBeInTheDocument();        // the Live-work agent card
+    expect(screen.getByText("Workflow nodes")).toBeInTheDocument();     // the node trace is now a fold
+    expect(screen.queryByText("Node execution")).not.toBeInTheDocument(); // …lazy, so unmounted while collapsed
+  });
+
+  it("keeps the node trace primary when the run has no agents (a structural workflow)", () => {
+    useWorkflowRunMock.mockImplementation(() => ok(detail({ nodes: [node({ nodeId: "start" })] })));
+    useRunPhasesMock.mockReturnValue({ data: { phases: [] } });
+
+    render(<RunDetailView runId="parent-1" />);
+
+    expect(screen.getByText("Node execution")).toBeInTheDocument();     // primary, not folded
+    expect(screen.queryByText("Workflow nodes")).not.toBeInTheDocument();
   });
 });
