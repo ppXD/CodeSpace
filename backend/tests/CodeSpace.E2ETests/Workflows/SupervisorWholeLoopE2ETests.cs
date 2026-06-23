@@ -270,6 +270,60 @@ public sealed class SupervisorWholeLoopE2ETests : IDisposable
         await AssertResolutionVerifiedAndAcceptedAsync(runId, teamId, remote);
     }
 
+    [Fact]
+    public async Task Supervisor_reconciles_a_multi_repo_conflict_after_human_approval_accepting_each_repos_head()
+    {
+        if (OperatingSystem.IsWindows()) return;          // the fake CLI is a /bin/sh script the runner spawns
+        if (!await GitReadyAsync()) return;               // real git is required for clone/capture/per-repo conflict/resolve
+
+        // THE MULTI-REPO CROWN JEWEL — the conflict-recovery loop across TWO repositories, each integrated/resolved/
+        // accepted on its OWN axis. The two agents touch BOTH repos: they add DISJOINT files in the PRIMARY repo (→ it
+        // integrates CLEANLY) and write conflicting content to one shared file in the RELATED repo (→ a REAL git conflict
+        // on THAT axis only). The supervisor's per-repo resolve reconciles ONLY the conflicted repo after human approval;
+        // the terminal stop grades + accepts EACH repo's reconciled head against ITS OWN remote's check.sh. Drives the
+        // SAME PlanSpawnMergeResolveApprovedMergeStop script as the single-repo loop — the engine routes multi-repo purely
+        // by the agents' data shape (per-repo RepositoryResults), so the decision sequence is identical.
+        using var cli = new MultiRepoConflictFakeCli();
+
+        SetDecisionScript(s => s.PlanSpawnMergeResolveApprovedMergeStop());
+
+        var jobClient = ResolveJobClient();
+        jobClient.Clear();
+        jobClient.AutoExecute = true;
+
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var conversationId = await SeedConversationAsync(teamId, userId);
+
+        // Two real bare remotes — the primary integrates cleanly, the related conflicts on its shared file (seeded so each
+        // agent's edit is a real diff against a common base). Each carries its own check.sh acceptance floor.
+        using var primaryRemote = new BareRemote();
+        using var relatedRemote = new BareRemote();
+        await primaryRemote.SeedBaseAsync(new() { ["check.sh"] = "#!/bin/sh\nexit 0\n" });
+        await relatedRemote.SeedBaseAsync(new() { ["check.sh"] = "#!/bin/sh\nexit 0\n", [MultiRepoConflictFakeCli.SharedFile] = "base content\n" });
+        var primaryRepoId = await SeedBoundRepositoryAsync(teamId, primaryRemote.Url, "main");
+        var relatedRepoId = await SeedBoundRepositoryAsync(teamId, relatedRemote.Url, "main");
+
+        var workflowId = await CreateWholeLoopWorkflowAsync(teamId, userId, primaryRepoId, conversationId, (relatedRepoId, MultiRepoConflictFakeCli.RelatedAlias));
+        var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
+
+        // Drive to the resolve-approval park: plan → spawn(both, per-repo conflict) → merge (related repo CONFLICTED,
+        // primary CLEAN) → resolve→ask_human (parks).
+        await RunEngineAsync(runId);
+        await jobClient.WaitForPendingAsync();
+
+        await AssertOnlyTheRelatedRepoConflictedAsync(runId, teamId, relatedRepoId);
+        var token = await AssertParkedOnResolveApprovalAsync(runId, teamId);
+
+        // The human APPROVES → the per-repo resolver reconciles ONLY the conflicted repo + RESOLUTION_VERIFIED → the next
+        // merge accepts the resolved repo's head + re-integrates the clean repo → stop grades BOTH heads.
+        await AnswerAsync(token, "approve", userId, teamId);
+        await RunEngineAsync(runId);
+        await jobClient.WaitForPendingAsync();
+
+        await AssertRunReachedSuccessAsync(runId);
+        await AssertEachRepoHeadAcceptedAndOnItsRemoteAsync(runId, teamId, new Dictionary<Guid, BareRemote> { [primaryRepoId] = primaryRemote, [relatedRepoId] = relatedRemote });
+    }
+
     // ─── Assertions ──────────────────────────────────────────────────────────────────
 
     private async Task AssertRunReachedSuccessAsync(Guid runId)
@@ -406,6 +460,57 @@ public sealed class SupervisorWholeLoopE2ETests : IDisposable
             customMessage: $"the reconciled head git.open_change_set would target must be live on the remote; remote: [{string.Join(", ", branches)}]");
     }
 
+    /// <summary>The first merge conflicted on EXACTLY the related repo (its shared file) and the primary integrated cleanly — proving the per-repo axes are isolated, off the SAME production reader (<see cref="SupervisorOutcome.ReadConflictedRepos"/>) the resolve loop routes on.</summary>
+    private async Task AssertOnlyTheRelatedRepoConflictedAsync(Guid runId, Guid teamId, Guid relatedRepoId)
+    {
+        using var verify = _fixture.BeginScope();
+        var db = verify.Resolve<CodeSpaceDbContext>();
+
+        var priorDecisions = await ReadPriorDecisionsAsync(db, runId, teamId);
+        var conflicted = SupervisorOutcome.ReadConflictedRepos(priorDecisions);
+
+        conflicted.Count.ShouldBe(1, "exactly ONE repo conflicted — the related repo (both agents wrote the same file); the primary repo's disjoint files integrated cleanly on their own axis");
+        conflicted[0].RepositoryId.ShouldBe(relatedRepoId, "the conflicted repo is the related one the two agents both edited");
+        conflicted[0].ConflictedFiles.ShouldContain(MultiRepoConflictFakeCli.SharedFile, "the real per-repo conflict was on the shared file the two agents both wrote");
+    }
+
+    /// <summary>The verified per-repo resolution accepted, the stop graded both heads, and EACH repo's final reviewable head (read with the production <see cref="SupervisorOutcome.ReadFinalRepositoryBranches"/> a downstream git.open_change_set binds) is live on ITS OWN remote.</summary>
+    private async Task AssertEachRepoHeadAcceptedAndOnItsRemoteAsync(Guid runId, Guid teamId, Dictionary<Guid, BareRemote> remotesByRepo)
+    {
+        using var verify = _fixture.BeginScope();
+        var db = verify.Resolve<CodeSpaceDbContext>();
+
+        // The approved multi-repo resolve executed + verified (the resolver reconciled the conflicted repo + RESOLUTION_VERIFIED).
+        var resolve = await db.SupervisorDecisionRecord.AsNoTracking()
+            .Where(d => d.SupervisorRunId == runId && d.TeamId == teamId && d.DecisionKind == SupervisorDecisionKinds.Resolve)
+            .OrderByDescending(d => d.Sequence).Select(d => d.OutcomeJson).FirstAsync();
+        SupervisorOutcome.ReadResolutionVerdict(resolve).ShouldBe(SupervisorResolutionVerdict.Verified,
+            "the human-approved multi-repo resolver reconciled the conflicted repo + ended with RESOLUTION_VERIFIED → the resolution is objectively VERIFIED");
+
+        // The terminal stop graded EVERY per-repo head (operator floor → model) against each repo's check.sh and all passed.
+        var stop = await db.SupervisorDecisionRecord.AsNoTracking()
+            .Where(d => d.SupervisorRunId == runId && d.TeamId == teamId && d.DecisionKind == SupervisorDecisionKinds.Stop)
+            .OrderByDescending(d => d.Sequence).Select(d => d.OutcomeJson).FirstAsync();
+        SupervisorOutcome.ReadAcceptanceGradePassed(stop).ShouldBe(true, "the stop graded all per-repo reconciled heads against their own check.sh and they PASSED");
+
+        // Each repo's final reviewable head — read with the SAME per-repo production reader git.open_change_set binds —
+        // is live on ITS OWN remote (the resolved repo surfaces the resolver's branch, the clean repo its integration branch).
+        var priorDecisions = await ReadPriorDecisionsAsync(db, runId, teamId);
+        var heads = SupervisorOutcome.ReadFinalRepositoryBranches(priorDecisions);
+
+        heads.Count.ShouldBe(remotesByRepo.Count, $"every repo in scope must surface a final reviewable head; got [{string.Join(", ", heads.Select(h => h.Alias + ":" + h.SourceBranch))}]");
+
+        foreach (var head in heads)
+        {
+            head.RepositoryId.ShouldNotBeNull("each per-repo head must name its repository (the PR-open key)");
+            remotesByRepo.ShouldContainKey(head.RepositoryId!.Value);
+
+            var branches = await remotesByRepo[head.RepositoryId.Value].ListBranchesAsync();
+            branches.ShouldContain(head.SourceBranch,
+                customMessage: $"repo '{head.Alias}' head '{head.SourceBranch}' must be live on its own remote; remote: [{string.Join(", ", branches)}]");
+        }
+    }
+
     /// <summary>Replay every decision row of the run into the <see cref="SupervisorPriorDecision"/> shape the production folders (e.g. <see cref="SupervisorOutcome.ReadFinalIntegratedBranch"/>) consume — so the test reads the run's final head EXACTLY as a downstream node would.</summary>
     private static async Task<IReadOnlyList<SupervisorPriorDecision>> ReadPriorDecisionsAsync(CodeSpaceDbContext db, Guid runId, Guid teamId) =>
         await db.SupervisorDecisionRecord.AsNoTracking()
@@ -521,16 +626,21 @@ public sealed class SupervisorWholeLoopE2ETests : IDisposable
         await scope.Resolve<IWorkflowEngine>().ExecuteRunAsync(runId, CancellationToken.None);
     }
 
-    private async Task<Guid> CreateWholeLoopWorkflowAsync(Guid teamId, Guid userId, Guid repoId, Guid? conversationId = null)
+    private async Task<Guid> CreateWholeLoopWorkflowAsync(Guid teamId, Guid userId, Guid repoId, Guid? conversationId = null, (Guid RepoId, string Alias)? relatedRepo = null)
     {
         // The supervisor's agents clone repoId, push their branches, and the merge integrates them; the operator's
         // acceptance floor (check.sh) gates the terminal stop against the integrated head. A conversationId (when set)
         // is the approval surface the irreversible `resolve` gate posts its human-approval card into + parks on.
         var conversationLine = conversationId is { } cid ? $",\n              \"conversationId\": \"{cid}\"" : "";
+
+        // A relatedRepo (when set) makes this a MULTI-repo run: the agent profile mounts a SECOND writable repo under
+        // its alias, so each agent's workspace has both repos (cwd = workspace root, each repo in <root>/<alias>/) and
+        // the supervisor integrates / resolves / accepts EACH repo on its own axis.
+        var relatedLine = relatedRepo is { } rr ? $",\n                \"relatedRepositories\": [ {{ \"repositoryId\": \"{rr.RepoId}\", \"alias\": \"{rr.Alias}\", \"access\": \"write\" }} ]" : "";
         var supConfig = $$"""
             {
               "goal": "ship the feature",
-              "agentProfile": { "repositoryId": "{{repoId}}", "pushBranch": true, "integrateBranches": true },
+              "agentProfile": { "repositoryId": "{{repoId}}", "pushBranch": true, "integrateBranches": true{{relatedLine}} },
               "acceptanceChecks": ["sh", "check.sh"]{{conversationLine}}
             }
             """;
