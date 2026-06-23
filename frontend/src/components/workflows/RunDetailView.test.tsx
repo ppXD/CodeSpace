@@ -24,6 +24,7 @@ vi.mock("@/hooks/use-workflows", () => ({
   useNodeManifests: () => ({ data: [] }),
   useRunPhases: () => useRunPhasesMock(),
   useRunTimeline: () => ({ data: undefined }),   // the narrative band stays empty in these node-trace tests
+  useRunRecords: () => ({ data: undefined, isLoading: false }),   // the Trace tab isn't the active view here
 }));
 
 // RunNodeRow reads the agent run's live status for its badge (and AgentRunTimeline streams it); mock the
@@ -277,7 +278,7 @@ describe("RunDetailView — run-view tabs", () => {
     expect(screen.queryByText("Coming soon")).not.toBeInTheDocument();
   });
 
-  it("shows an honest 'coming soon' placeholder for Changes / Trace (no fake-empty panel)", () => {
+  it("shows the Changes placeholder, and the Trace tab renders the raw event ledger", () => {
     render(<RunDetailView runId="parent-1" />);
 
     fireEvent.click(screen.getByRole("tab", { name: "Changes" }));
@@ -285,7 +286,8 @@ describe("RunDetailView — run-view tabs", () => {
     expect(screen.queryByText("Node execution")).not.toBeInTheDocument();   // narrative is hidden behind the tab
 
     fireEvent.click(screen.getByRole("tab", { name: "Trace" }));
-    expect(screen.getByText("Coming soon")).toBeInTheDocument();
+    expect(screen.queryByText("Coming soon")).not.toBeInTheDocument();      // Trace is no longer a placeholder
+    expect(screen.getByText(/no records yet/i)).toBeInTheDocument();        // the raw ledger view (empty in this mock)
   });
 
   it("hides the tab bar when embedded (nested), so the editor dialog's child runs stay plain", () => {

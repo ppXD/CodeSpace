@@ -187,6 +187,20 @@ export function useRunTimeline(runId: string | null) {
   });
 }
 
+/** The run's RAW event ledger — the Trace audit. Polls every 2s while the run is non-terminal, then stops. */
+export function useRunRecords(runId: string | null) {
+  return useQuery({
+    queryKey: ["run-records", runId],
+    queryFn: () => workflowsApi.getRunRecords(runId!),
+    enabled: runId != null,
+    refetchInterval: (q) => {
+      const data = q.state.data;
+      if (!data) return false;
+      return isRunActive(data.runStatus) ? 2000 : false;
+    },
+  });
+}
+
 /**
  * The team's cross-grain "Needs decision" queue. The Run Room filters this to the run's tree (by `rootTraceId`)
  * client-side — a per-run endpoint is a future backend filter. Polled every 3s while `poll` is true (the run is
