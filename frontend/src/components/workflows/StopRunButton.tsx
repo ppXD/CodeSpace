@@ -1,42 +1,35 @@
-import { useState } from "react";
-
 import { Ic } from "@/_imported/ai-code-space/icons";
 import type { WorkflowRunStatus } from "@/api/workflows";
+import { useConfirm } from "@/components/dialog";
 import { isRunActive, useCancelRun } from "@/hooks/use-workflows";
 
 /**
- * The run's hard-stop control — cancels a still-live run (kills its in-flight agents) over the existing
- * POST /cancel endpoint. Renders NOTHING for a terminal run. Because a stop can't be undone (you Re-run a fresh
- * copy), it's a deliberate two-step: a neutral "Stop" arms a red "Confirm stop" + "Keep running". On success the
- * run goes terminal and this control disappears on the next status poll/invalidation.
+ * The run's hard-stop control — a single "Stop" button that opens a confirm modal (the run can't be un-cancelled,
+ * and it kills any in-flight agents, so it's a deliberate confirm) and, on OK, cancels the run over the existing
+ * POST /cancel endpoint. Renders NOTHING for a terminal run; on success the run goes terminal and this control
+ * disappears on the next status poll.
  */
 export function StopRunButton({ runId, status }: { runId: string; status: WorkflowRunStatus }) {
   const cancel = useCancelRun(runId);
-  const [confirming, setConfirming] = useState(false);
+  const confirm = useConfirm();
 
   if (!isRunActive(status)) return null;   // a finished run has nothing to stop
 
-  if (!confirming) {
-    return (
-      <button
-        className="btn"
-        onClick={() => setConfirming(true)}
-        title="Cancel this run and kill any in-flight agents. This can't be undone — you can Re-run a fresh copy."
-      >
-        <Ic.CircleStop size={13} /> Stop
-      </button>
-    );
-  }
+  const onStop = async () => {
+    const ok = await confirm({
+      title: "Stop this run?",
+      message: "This cancels the run and kills any in-flight agents. It can’t be undone — you can Re-run a fresh copy.",
+      confirmLabel: "Stop run",
+      cancelLabel: "Keep running",
+      destructive: true,
+    });
+
+    if (ok) cancel.mutate();
+  };
 
   return (
-    <>
-      <button className="btn btn-danger" onClick={() => cancel.mutate()} disabled={cancel.isPending}>
-        <Ic.CircleStop size={13} /> {cancel.isPending ? "Stopping…" : "Confirm stop"}
-      </button>
-      <button className="btn" onClick={() => setConfirming(false)} disabled={cancel.isPending}>
-        Keep running
-      </button>
-      {cancel.isError && <span className="ct-action-error">Couldn’t stop — try again.</span>}
-    </>
+    <button className="btn" onClick={() => void onStop()} disabled={cancel.isPending} title="Cancel this run and kill any in-flight agents. This can't be undone.">
+      <Ic.CircleStop size={13} /> {cancel.isPending ? "Stopping…" : "Stop"}
+    </button>
   );
 }
