@@ -125,7 +125,7 @@ public sealed class WorkflowNodePhaseSource : IRunPhaseSource, IScopedDependency
 
         return BasePhase(node, order, kind: "agent", label: node.NodeId, agents) with
         {
-            Metrics = AgentMetrics(agents),
+            Metrics = PhaseAgentMetrics.From(agents),   // succeeded/failed from the agent's ground-truth status, not just a count
         };
     }
 
@@ -167,8 +167,6 @@ public sealed class WorkflowNodePhaseSource : IRunPhaseSource, IScopedDependency
         FailedCount = ReadIntOutput(node.Outputs, WorkflowOutputKeys.MapFailed),
         SucceededCount = Math.Max(0, ReadIntOutput(node.Outputs, WorkflowOutputKeys.MapCount) - ReadIntOutput(node.Outputs, WorkflowOutputKeys.MapFailed)),
     };
-
-    private static PhaseMetrics AgentMetrics(IReadOnlyList<PhaseAgentRef> agents) => new() { AgentCount = agents.Count };
 
     private static int ReadIntOutput(JsonElement outputs, string key) =>
         outputs.ValueKind == JsonValueKind.Object && outputs.TryGetProperty(key, out var v) && v.ValueKind == JsonValueKind.Number && v.TryGetInt32(out var n) ? n : 0;

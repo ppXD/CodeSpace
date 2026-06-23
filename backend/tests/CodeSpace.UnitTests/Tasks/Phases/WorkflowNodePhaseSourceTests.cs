@@ -72,6 +72,26 @@ public class WorkflowNodePhaseSourceTests
         agent.NodeId.ShouldBe("agent");
         agent.IterationKey.ShouldBeNull("a top-level agent node has no iteration key");
         agent.Status.ShouldBe(nameof(AgentRunStatus.Succeeded), "the ref is the REAL AgentRunStatus, not the NodeStatus name");
+
+        // The metrics roll up from the agent's GROUND-TRUTH status — a finished agent reads 1/1, not "0/1" (the bug
+        // where the node source only filled AgentCount and left SucceededCount at 0).
+        phase.Metrics.AgentCount.ShouldBe(1);
+        phase.Metrics.SucceededCount.ShouldBe(1);
+        phase.Metrics.FailedCount.ShouldBe(0);
+    }
+
+    [Fact]
+    public void A_failed_agent_node_rolls_up_as_failed_not_succeeded()
+    {
+        var agentRunId = Guid.NewGuid();
+        var nodes = new[] { RunDetailFixtures.TopLevelNode("agent", NodeStatus.Failure, agentRunId: agentRunId.ToString()) };
+        var statuses = new Dictionary<Guid, AgentRunStatus> { [agentRunId] = AgentRunStatus.Failed };
+
+        var phase = WorkflowNodePhaseSource.ProjectNodes(nodes, statuses).ShouldHaveSingleItem();
+
+        phase.Metrics.AgentCount.ShouldBe(1);
+        phase.Metrics.SucceededCount.ShouldBe(0);
+        phase.Metrics.FailedCount.ShouldBe(1);
     }
 
     [Fact]

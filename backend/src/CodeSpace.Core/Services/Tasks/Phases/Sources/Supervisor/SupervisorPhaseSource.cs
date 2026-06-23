@@ -97,7 +97,7 @@ public sealed class SupervisorPhaseSource : IRunPhaseSource, IScopedDependency
             Status = PhaseStatusFromAgents(agents),
             Order = PhaseOrderBase + index,
             Agents = agents,
-            Metrics = MetricsFor(agents),
+            Metrics = PhaseAgentMetrics.From(agents),
             Summary = PhaseAcceptanceSummary(phase.Acceptance),
             SourceKey = Key,
             StartedAt = plan.CreatedDate,
@@ -173,7 +173,7 @@ public sealed class SupervisorPhaseSource : IRunPhaseSource, IScopedDependency
             Status = PhaseStatusMap.FromDecision(decision.Status),
             Order = OrderBase + (int)decision.Sequence,
             Agents = agents,
-            Metrics = MetricsFor(agents),
+            Metrics = PhaseAgentMetrics.From(agents),
             Summary = SummaryFor(decision),
             SourceKey = Key,
             StartedAt = decision.CreatedDate,
@@ -193,12 +193,6 @@ public sealed class SupervisorPhaseSource : IRunPhaseSource, IScopedDependency
             ? SupervisorOutcome.ReadStagedAgentRunIds(decision.OutcomeJson)
             : Array.Empty<Guid>();
 
-    private static PhaseMetrics MetricsFor(IReadOnlyList<PhaseAgentRef> agents) => new()
-    {
-        AgentCount = agents.Count,
-        SucceededCount = agents.Count(a => a.Status == nameof(AgentRunStatus.Succeeded)),
-        FailedCount = agents.Count(a => a.Status is nameof(AgentRunStatus.Failed) or nameof(AgentRunStatus.Cancelled) or nameof(AgentRunStatus.TimedOut)),
-    };
 
     private static string LabelFor(SupervisorDecisionRecord decision, int agentCount) => decision.DecisionKind switch
     {
