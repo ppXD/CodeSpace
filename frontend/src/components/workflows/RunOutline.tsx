@@ -50,7 +50,7 @@ function PhaseRow({ phase, selectedAgentRunId, onSelectAgent }: { phase: RunPhas
           {phase.agents.map((a, i) => (
             <li key={`${a.agentRunId}:${i}`}>
               {onSelectAgent ? (
-                <button type="button" className="run-outline-agent" data-selected={a.agentRunId === selectedAgentRunId || undefined} onClick={() => onSelectAgent(a.agentRunId)}>
+                <button type="button" className="run-outline-agent" aria-pressed={a.agentRunId === selectedAgentRunId} data-selected={a.agentRunId === selectedAgentRunId || undefined} onClick={() => onSelectAgent(a.agentRunId)}>
                   <AgentRowInner agent={a} />
                 </button>
               ) : (
