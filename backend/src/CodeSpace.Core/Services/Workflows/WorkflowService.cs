@@ -502,6 +502,13 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
     /// </summary>
     private async Task<Guid> StageForkedRunAsync(WorkflowRun original, List<WorkflowRunVariable> snapshot, string sourceType, Guid teamId, Guid actorUserId, CancellationToken cancellationToken)
     {
+        // A fork RIDES the parent's session — the SAME thread, consuming NO new turn (Correction 1): inherit the
+        // parent's SessionId with a NULL TurnIndex, so a replay/rerun attaches to the timeline via ParentRunId and
+        // never bumps the turn ordinal. A session-less parent ⇒ null ⇒ a session-less fork (byte-identical).
+        var inheritedSession = original.SessionId is { } parentSessionId
+            ? new SessionAssignment { SessionId = parentSessionId, TurnIndex = null }
+            : null;
+
         Guid forkRunId;
         if (original.WorkflowId is null)
             forkRunId = await _snapshotStarter.StageReplayFromSnapshotAsync(
@@ -510,9 +517,7 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
                 teamId, actorUserId, original.RunRequest?.NormalizedPayloadJson ?? "{}", sourceType,
                 parentRunId: original.Id, causationRequestId: original.RunRequestId,
                 original.ScopeRepositoryIds, original.ScopeProjectIds, original.ProjectionKind,
-                // session: null — replay inheritance (carry the parent's SessionId with a null TurnIndex) is the
-                // resolver's job in a later slice; until then a forked run stays session-less.
-                session: null, cancellationToken).ConfigureAwait(false);
+                session: inheritedSession, cancellationToken).ConfigureAwait(false);
         else
             forkRunId = await _runStarter.StartAsync(new RunSourceEnvelope
             {
@@ -527,6 +532,7 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
                 CausationRequestId = original.RunRequestId,
                 ParentRunId = original.Id,
                 ReleaseHashAtRun = original.ReleaseHashAtRun,
+                Session = inheritedSession,
             }, cancellationToken).ConfigureAwait(false);
 
         var now = DateTimeOffset.UtcNow;
