@@ -27,6 +27,11 @@ public class WorkflowRunConfiguration : IEntityTypeConfiguration<WorkflowRun>
 
         builder.HasOne(r => r.RunRequest).WithMany().HasForeignKey(r => r.RunRequestId).IsRequired();
 
+        // The WorkSession timeline index (migration 0070) — "the runs of session X, by turn", the access path the
+        // continue + session-context-builder paths hit on every follow-up. Partial on session_id IS NOT NULL so it
+        // stays tiny while session adoption is sparse; keep in sync with the migration.
+        builder.HasIndex(r => new { r.SessionId, r.SessionTurnIndex }).HasFilter("session_id IS NOT NULL");
+
         // Npgsql xmin concurrency token. EF appends WHERE xmin = $loaded to every UPDATE; second
         // writer racing the same run gets DbUpdateConcurrencyException and the engine skips.
         // PostgreSQL stamps xmin automatically on every INSERT/UPDATE, so we map it via

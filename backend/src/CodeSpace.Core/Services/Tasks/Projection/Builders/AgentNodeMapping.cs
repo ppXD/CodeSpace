@@ -28,12 +28,15 @@ internal static class AgentNodeMapping
     /// body) and an optional <paramref name="mode"/> (the model-authored intent — a <c>{{item.mode}}</c> binding the
     /// dynamic fan-out body passes per branch; omitted when null/blank so the two existing callers emit identical
     /// JSON). Optional knobs are added only when present so a bare profile stays minimal.
+    /// <para><paramref name="grounding"/> is the session thread-context (a continuing turn's prior-work digest);
+    /// when present it is PREPENDED to the goal (the agent's prompt) so a follow-up builds on earlier turns. Null
+    /// (a fresh launch) leaves the goal byte-identical.</para>
     /// </summary>
-    public static JsonElement BuildAgentConfig(string goal, ResolvedAgentProfile? profile, string? mode = null)
+    public static JsonElement BuildAgentConfig(string goal, ResolvedAgentProfile? profile, string? mode = null, string? grounding = null)
     {
         var config = new Dictionary<string, object?>
         {
-            ["goal"] = goal,
+            ["goal"] = ComposeGoal(goal, grounding),
             ["harness"] = Harness(profile),
         };
 
@@ -48,6 +51,17 @@ internal static class AgentNodeMapping
 
         return JsonSerializer.SerializeToElement(config);
     }
+
+    /// <summary>
+    /// Prepend the session thread-context <paramref name="grounding"/> to a node's <paramref name="goal"/> (the
+    /// agent / supervisor prompt), with a clear separator + framing so a continuing turn builds on the prior work
+    /// rather than restarting. Null / blank grounding returns the goal verbatim (a fresh launch is byte-identical).
+    /// The shared composition point so single-agent, map, and supervisor projections inject context identically.
+    /// </summary>
+    public static string ComposeGoal(string goal, string? grounding) =>
+        string.IsNullOrWhiteSpace(grounding)
+            ? goal
+            : $"{grounding}\n\n---\nNow address this follow-up for the SAME thread — continue from the prior work above, do not start over:\n\n{goal}";
 
     /// <summary>
     /// The <c>agent.code</c> Inputs — the bound <c>repositoryId</c> (primary) from the profile, else the seed's repo,

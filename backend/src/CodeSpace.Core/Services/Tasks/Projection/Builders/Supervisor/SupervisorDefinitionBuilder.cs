@@ -71,7 +71,9 @@ public sealed class SupervisorDefinitionBuilder : IWorkflowDefinitionBuilder, IS
     {
         var config = new Dictionary<string, object?>
         {
-            ["goal"] = context.Seed.Goal,
+            // A continuing turn's thread-context is prepended to the supervisor's goal (its planning prompt) the SAME
+            // way the agent.code projections inject it, so the supervisor plans the follow-up against prior work.
+            ["goal"] = AgentNodeMapping.ComposeGoal(context.Seed.Goal, context.GroundingContext),
             ["approvalPolicy"] = context.Route.Caps.RequiresApproval ? "spawns" : "none",
         };
 
