@@ -28,15 +28,20 @@ public class AgentEventTimelineMapTests
     };
 
     [Fact]
-    public void The_narrative_set_is_the_story_line_kinds_and_excludes_the_chatter()
+    public void The_narrative_set_excludes_every_verbose_or_elsewhere_handled_kind()
     {
-        AgentEventTimelineMap.Narrative.ShouldBe(new[]
+        // Pin out EVERY non-narrative kind (the chatter that belongs in Trace, the lifecycle handled by the
+        // run-record source, and the approval/decision kinds handled by the decision queue) — so a future kind
+        // accidentally slipping into the story line is caught.
+        var excluded = new[]
         {
-            AgentEventKind.FileChanged, AgentEventKind.TestOutput, AgentEventKind.Error, AgentEventKind.Warning, AgentEventKind.FinalSummary,
-        }, ignoreOrder: true);
+            AgentEventKind.Queued, AgentEventKind.Started, AgentEventKind.AssistantMessage, AgentEventKind.Reasoning,
+            AgentEventKind.PlanUpdate, AgentEventKind.ToolCall, AgentEventKind.CommandExecuted,
+            AgentEventKind.ApprovalRequested, AgentEventKind.ApprovalResolved, AgentEventKind.Completed,
+        };
 
-        foreach (var chatter in new[] { AgentEventKind.AssistantMessage, AgentEventKind.Reasoning, AgentEventKind.ToolCall, AgentEventKind.CommandExecuted, AgentEventKind.Queued, AgentEventKind.Started, AgentEventKind.Completed })
-            AgentEventTimelineMap.Narrative.ShouldNotContain(chatter, $"{chatter} is Trace-level chatter, not the story line");
+        foreach (var kind in excluded)
+            AgentEventTimelineMap.Narrative.ShouldNotContain(kind, $"{kind} is not part of the run story line");
     }
 
     [Theory]
@@ -90,5 +95,18 @@ public class AgentEventTimelineMapTests
         var ev = AgentEventTimelineMap.ToEvent(Event(AgentEventKind.FileChanged, text: "  "), NodeByAgent);
 
         ev.Title.ShouldBe("FileChanged");
+    }
+
+    [Fact]
+    public void Clamps_without_splitting_a_surrogate_pair()
+    {
+        // 199 BMP chars, then an emoji (U+1F600 — a surrogate pair whose HIGH half lands at the would-be cut index
+        // 199), then filler. A naive cut at 200 keeps the lone high surrogate; the clamp must back off.
+        var text = new string('a', 199) + "\U0001F600" + new string('b', 100);
+
+        var ev = AgentEventTimelineMap.ToEvent(Event(AgentEventKind.FinalSummary, text), NodeByAgent);
+
+        ev.Title.ShouldEndWith("…");
+        char.IsHighSurrogate(ev.Title[^2]).ShouldBeFalse("the clamp backed off the surrogate pair — no lone high surrogate before the ellipsis");
     }
 }

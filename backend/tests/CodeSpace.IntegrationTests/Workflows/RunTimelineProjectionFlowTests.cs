@@ -108,6 +108,49 @@ public sealed class RunTimelineProjectionFlowTests
         events!.ShouldNotContain(e => e.SourceKey == "agent-events", "an agent stamped to another team is filtered by the team-scoped agent read");
     }
 
+    [Fact]
+    public async Task An_agentless_run_contributes_only_lifecycle_no_agent_events()
+    {
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedRunAsync(teamId);
+
+        var t = DateTimeOffset.UtcNow;
+        await SeedRecordsAsync(runId,
+            (WorkflowRunRecordTypes.RunStarted, null, "{}", t),
+            (WorkflowRunRecordTypes.RunCompleted, null, "{}", t.AddSeconds(1)));
+        // NO AgentRun rows — a plain structural workflow.
+
+        var events = await ProjectAsync(userId, teamId, runId);
+
+        events.ShouldNotBeNull();
+        events!.ShouldNotBeEmpty();
+        events.ShouldAllBe(e => e.SourceKey == "run-record", "an agentless run's timeline is pure lifecycle — the agent-events source contributes nothing");
+    }
+
+    [Fact]
+    public async Task A_multi_agent_run_stamps_each_event_with_its_own_agent_and_node()
+    {
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedRunAsync(teamId);
+        var backend = Guid.NewGuid();
+        var frontend = Guid.NewGuid();
+        await SeedAgentRunAsync(runId, teamId, backend, "backend-fix");
+        await SeedAgentRunAsync(runId, teamId, frontend, "frontend-fix");
+
+        var t = DateTimeOffset.UtcNow;
+        await SeedAgentEventsAsync(backend, (AgentEventKind.FileChanged, "edited api.cs", t));
+        await SeedAgentEventsAsync(frontend, (AgentEventKind.FileChanged, "edited app.tsx", t.AddSeconds(1)));
+
+        var events = await ProjectAsync(userId, teamId, runId);
+
+        events.ShouldNotBeNull();
+        var byTitle = events!.Where(e => e.SourceKey == "agent-events").ToDictionary(e => e.Title);
+        byTitle["edited api.cs"].AgentRunId.ShouldBe(backend.ToString());
+        byTitle["edited api.cs"].NodeId.ShouldBe("backend-fix", "each agent's event carries ITS OWN node, never another agent's");
+        byTitle["edited app.tsx"].AgentRunId.ShouldBe(frontend.ToString());
+        byTitle["edited app.tsx"].NodeId.ShouldBe("frontend-fix");
+    }
+
     private async Task<IReadOnlyList<RunTimelineEvent>?> ProjectAsync(Guid userId, Guid teamId, Guid runId)
     {
         using var scope = _fixture.BeginScopeAs(userId, teamId, Roles.Admin);

@@ -47,6 +47,9 @@ public static class AgentEventTimelineMap
         };
     }
 
+    // TestOutput is deliberately Info: its pass/fail detail lives in the event Text, and reading a failure marker out
+    // of the harness-specific DataJson to escalate to Warning/Error would couple this run-neutral source to one
+    // harness's payload shape. Per-result severity is a future refinement once a stable cross-harness marker exists.
     private static TimelineSeverity SeverityFor(AgentEventKind kind) => kind switch
     {
         AgentEventKind.Error => TimelineSeverity.Error,
@@ -54,5 +57,15 @@ public static class AgentEventTimelineMap
         _ => TimelineSeverity.Info,
     };
 
-    private static string Truncate(string text, int max) => text.Length <= max ? text : string.Concat(text.AsSpan(0, max).TrimEnd(), "…");
+    private static string Truncate(string text, int max)
+    {
+        if (text.Length <= max) return text;
+
+        // Don't cut INSIDE a surrogate pair — an astral char (emoji / CJK Ext-B that legitimately appears in a
+        // free-form summary) split mid-pair leaves a lone surrogate that renders as U+FFFD. Back off one unit,
+        // mirroring WorkSessionService.SanitizeTitle.
+        var cut = char.IsHighSurrogate(text[max - 1]) ? max - 1 : max;
+
+        return string.Concat(text.AsSpan(0, cut).TrimEnd(), "…");
+    }
 }
