@@ -31,7 +31,8 @@ export function AgentCard({ agent }: { agent: PhaseAgentRef }) {
   const latest = events.data && events.data.length > 0 ? events.data[events.data.length - 1] : undefined;
 
   const name = agent.label || agent.nodeId || `agent ${agent.agentRunId.slice(0, 8)}`;
-  const activity = latest?.text ?? (active ? "Starting…" : "No activity recorded.");
+  // "…" while the first event fetch is still in flight, so a terminal agent doesn't flash "No activity" then swap.
+  const activity = latest?.text ?? (active ? "Starting…" : events.data === undefined ? "…" : "No activity recorded.");
 
   return (
     <div className="run-agent-card" data-active={active || undefined} data-open={open || undefined}>
