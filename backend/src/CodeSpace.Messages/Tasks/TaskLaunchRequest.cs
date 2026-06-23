@@ -24,6 +24,9 @@ public sealed record TaskLaunchRequest
     /// <summary>The operator's free-text task. Required by the chat surface; other surfaces may derive the goal from <see cref="SurfacePayload"/> instead.</summary>
     public string? TaskText { get; init; }
 
+    /// <summary>When set, the launch CONTINUES this existing WorkSession (the run becomes its next top-level turn) rather than opening a new one. Validated TEAM-SCOPED + Open by the launch service. Null ⇒ open a new session.</summary>
+    public Guid? ContinueSessionId { get; init; }
+
     /// <summary>The repository the task targets, when the operator named one. Validated TEAM-SCOPED by the launch service.</summary>
     public Guid? RepositoryId { get; init; }
 

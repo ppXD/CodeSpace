@@ -35,6 +35,7 @@ public sealed class LaunchTaskCommandHandler : IRequestHandler<LaunchTaskCommand
             ActorUserId = _currentUser.Id!.Value,
             SurfaceKind = request.SurfaceKind,
             TaskText = request.TaskText,
+            ContinueSessionId = request.SessionId,
             RepositoryId = request.RepositoryId,
             BaseBranch = request.BaseBranch,
             RequestedEffort = request.Effort,

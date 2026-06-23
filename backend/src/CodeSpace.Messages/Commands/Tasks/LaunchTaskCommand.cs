@@ -25,6 +25,14 @@ public sealed record LaunchTaskCommand : ICommand<LaunchTaskResult>, IRequireTea
     /// <summary>The operator's free-text task. Required by the chat surface; another surface may derive the goal from <see cref="LaunchContext"/> instead.</summary>
     public required string TaskText { get; init; }
 
+    /// <summary>
+    /// Continue an existing WorkSession: when set, this launch becomes the NEXT top-level turn of that thread
+    /// (the run is bound to it) instead of opening a fresh one. Pass back the <c>SessionId</c> a prior launch
+    /// returned. Validated TEAM-SCOPED + must be Open; a foreign / missing / archived session is rejected. Null
+    /// (the default) opens a new session — byte-identical to the single-shot launch.
+    /// </summary>
+    public Guid? SessionId { get; init; }
+
     /// <summary>The repository the task targets, when named. Validated TEAM-SCOPED by the service; a foreign repo is a clear not-found.</summary>
     public Guid? RepositoryId { get; init; }
 

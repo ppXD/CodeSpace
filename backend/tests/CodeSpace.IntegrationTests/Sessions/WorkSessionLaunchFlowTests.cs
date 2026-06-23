@@ -23,9 +23,12 @@ namespace CodeSpace.IntegrationTests.Sessions;
 ///       the run carries SessionId = that session + SessionTurnIndex = 1; the result echoes the SessionId;
 ///   (b) the SAME holds through the mediator (the transactional command path) — session + run commit together;
 ///   (c) an over-long goal is truncated to the title column (robustness — a 500-char goal can't crash the insert);
-///   (d) two launches open two DISTINCT sessions, each at turn 1 (S2 always opens a NEW thread — continuing an
-///       existing one is a later slice);
+///   (d) two launches open two DISTINCT sessions, each at turn 1 (no continue id ⇒ a fresh thread);
 ///   (e) a rejected launch (cross-team repo) opens NO session — the reject lands before the session is staged.
+///
+/// <para>S3 adds CONTINUE: a launch carrying an existing <c>SessionId</c> becomes that thread's NEXT top-level turn
+/// (turn 2, 3, …) instead of opening a new session — only top-level turns bump the ordinal (an inherited null-turn
+/// child / replay does not); a missing / cross-team / archived target is rejected (fail-closed, no leak).</para>
 ///
 /// <para>Tier: high-fidelity Integration — real launch service (real seed registry + router + factory + the new
 /// WorkSessionService) + real run starter over real Postgres. The runs are staged, not executed (the session
@@ -175,6 +178,128 @@ public class WorkSessionLaunchFlowTests
             .ShouldBe(0, "a rejected launch must open no session — the reject precedes the session open");
     }
 
+    // ─── S3: continue an existing session ────────────────────────────────────────
+
+    [Fact]
+    public async Task Continue_binds_the_next_run_to_the_same_session_at_turn_two()
+    {
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        using var _pauseExec = PauseAutoExecute();
+
+        var first = await LaunchAsync(BasicChatRequest(teamId, userId, "Open the thread"));
+        var second = await LaunchAsync(ContinueRequest(teamId, userId, first.SessionId, "Follow up"));
+
+        second.SessionId.ShouldBe(first.SessionId, "a continue stays in the SAME session, not a new one");
+
+        using var verify = _fixture.BeginScope();
+        var db = verify.Resolve<CodeSpaceDbContext>();
+        var secondRun = await db.WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == second.RunId);
+        secondRun.SessionId.ShouldBe(first.SessionId, "the follow-up run is bound to the original session");
+        secondRun.SessionTurnIndex.ShouldBe(2, "the follow-up is the session's next top-level turn");
+
+        (await db.WorkSession.AsNoTracking().CountAsync(s => s.TeamId == teamId))
+            .ShouldBe(1, "continuing must NOT open a second session");
+    }
+
+    [Fact]
+    public async Task Continue_increments_across_multiple_turns()
+    {
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        using var _pauseExec = PauseAutoExecute();
+
+        var t1 = await LaunchAsync(BasicChatRequest(teamId, userId, "Turn one"));
+        var t2 = await LaunchAsync(ContinueRequest(teamId, userId, t1.SessionId, "Turn two"));
+        var t3 = await LaunchAsync(ContinueRequest(teamId, userId, t1.SessionId, "Turn three"));
+
+        (await TurnOf(t1.RunId)).ShouldBe(1);
+        (await TurnOf(t2.RunId)).ShouldBe(2);
+        (await TurnOf(t3.RunId)).ShouldBe(3, "each follow-up consumes the next ordinal");
+    }
+
+    [Fact]
+    public async Task A_child_run_with_a_null_turn_does_not_bump_the_next_turn()
+    {
+        // Correction 1: a child / replay inherits SessionId with a NULL turn index and must NOT count toward the
+        // next top-level turn. After turn 1 + an inherited null-turn run, the next continue is still turn 2 (not 3).
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        using var _pauseExec = PauseAutoExecute();
+
+        var first = await LaunchAsync(BasicChatRequest(teamId, userId, "Open"));
+        await SeedInheritedNullTurnRunAsync(teamId, first.SessionId);
+
+        var next = await LaunchAsync(ContinueRequest(teamId, userId, first.SessionId, "Follow up"));
+
+        (await TurnOf(next.RunId)).ShouldBe(2,
+            "an inherited null-turn run must not bump the ordinal — only top-level turns count");
+    }
+
+    [Fact]
+    public async Task Continue_a_nonexistent_session_is_rejected_and_creates_no_run()
+    {
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        using var _pauseExec = PauseAutoExecute();
+
+        await Should.ThrowAsync<KeyNotFoundException>(() =>
+            LaunchAsync(ContinueRequest(teamId, userId, Guid.NewGuid(), "Into the void")));
+
+        using var verify = _fixture.BeginScope();
+        var db = verify.Resolve<CodeSpaceDbContext>();
+        (await db.WorkflowRun.AsNoTracking().CountAsync(r => r.TeamId == teamId))
+            .ShouldBe(0, "a continue into a missing session must create no run");
+    }
+
+    [Fact]
+    public async Task Continue_a_cross_team_session_is_not_found_and_never_leaked()
+    {
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var (otherTeamId, otherUserId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        using var _pauseExec = PauseAutoExecute();
+
+        // A real session owned by ANOTHER team.
+        var foreign = await LaunchAsync(BasicChatRequest(otherTeamId, otherUserId, "Their thread"));
+
+        var ex = await Should.ThrowAsync<KeyNotFoundException>(() =>
+            LaunchAsync(ContinueRequest(teamId, userId, foreign.SessionId, "Try to reach it")));
+
+        ex.Message.ShouldContain("not found or not accessible",
+            customMessage: "a cross-team session must surface as a generic not-found — never reveal it exists in another team");
+    }
+
+    [Fact]
+    public async Task Continue_an_archived_session_is_rejected()
+    {
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        using var _pauseExec = PauseAutoExecute();
+
+        var first = await LaunchAsync(BasicChatRequest(teamId, userId, "Open then retire"));
+        await ArchiveSessionAsync(first.SessionId);
+
+        await Should.ThrowAsync<InvalidOperationException>(() =>
+            LaunchAsync(ContinueRequest(teamId, userId, first.SessionId, "Too late")));
+    }
+
+    [Fact]
+    public async Task Continue_via_mediator_binds_the_next_turn()
+    {
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        using var _pauseExec = PauseAutoExecute();
+
+        var first = await LaunchAsync(BasicChatRequest(teamId, userId, "Open via service"));
+
+        LaunchTaskResult second;
+        using (var scope = _fixture.BeginScopeAs(userId, teamId, Roles.Admin))
+            second = await scope.Resolve<IMediator>().Send(new LaunchTaskCommand
+            {
+                TaskText = "Continue via the command",
+                SessionId = first.SessionId,
+                Effort = TaskEffortModes.Quick,
+                Autonomy = "Confined",
+            }, CancellationToken.None);
+
+        second.SessionId.ShouldBe(first.SessionId, "the command's SessionId continues the named thread");
+        (await TurnOf(second.RunId)).ShouldBe(2);
+    }
+
     // ─── Helpers ────────────────────────────────────────────────────────────────
 
     private static TaskLaunchRequest BasicChatRequest(Guid teamId, Guid userId, string text) => new()
@@ -186,6 +311,58 @@ public class WorkSessionLaunchFlowTests
         RequestedEffort = TaskEffortModes.Quick,
         Autonomy = "Confined",
     };
+
+    private static TaskLaunchRequest ContinueRequest(Guid teamId, Guid userId, Guid sessionId, string text) => new()
+    {
+        TeamId = teamId,
+        ActorUserId = userId,
+        SurfaceKind = TaskLaunchSurfaceKinds.Chat,
+        TaskText = text,
+        ContinueSessionId = sessionId,
+        RequestedEffort = TaskEffortModes.Quick,
+        Autonomy = "Confined",
+    };
+
+    private async Task<int?> TurnOf(Guid runId)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        return await db.WorkflowRun.AsNoTracking().Where(r => r.Id == runId).Select(r => r.SessionTurnIndex).SingleAsync();
+    }
+
+    /// <summary>Stage a run that INHERITS a session (SessionId set) but consumes NO turn (SessionTurnIndex null) — the child / replay shape, so the next-turn computation must skip it.</summary>
+    private async Task SeedInheritedNullTurnRunAsync(Guid teamId, Guid sessionId)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+
+        var requestId = Guid.NewGuid();
+        var now = DateTimeOffset.UtcNow;
+
+        db.WorkflowRunRequest.Add(new WorkflowRunRequest
+        {
+            Id = requestId, TeamId = teamId, SourceType = WorkflowRunSourceTypes.Replay, ActorType = "user",
+            ActorId = SystemUsers.SeederId, NormalizedPayloadJson = "{}", Status = WorkflowRunRequestStatus.Consumed,
+            ReceivedAt = now, VerifiedAt = now, NormalizedAt = now,
+        });
+        db.WorkflowRun.Add(new WorkflowRun
+        {
+            Id = Guid.NewGuid(), TeamId = teamId, RunRequestId = requestId, SourceType = WorkflowRunSourceTypes.Replay,
+            Status = WorkflowRunStatus.Pending, SessionId = sessionId, SessionTurnIndex = null,
+            CreatedBy = SystemUsers.SeederId, LastModifiedBy = SystemUsers.SeederId,
+        });
+
+        await db.SaveChangesAsync();
+    }
+
+    private async Task ArchiveSessionAsync(Guid sessionId)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        var session = await db.WorkSession.SingleAsync(s => s.Id == sessionId);
+        session.Status = WorkSessionStatus.Archived;
+        await db.SaveChangesAsync();
+    }
 
     private async Task<LaunchTaskResult> LaunchAsync(TaskLaunchRequest request)
     {
