@@ -3,6 +3,7 @@ using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Supervisor;
 using CodeSpace.Messages.Agents;
+using CodeSpace.Messages.Decisions;
 using CodeSpace.Messages.Enums;
 using CodeSpace.Messages.Tasks.Phases;
 using Microsoft.EntityFrameworkCore;
@@ -42,22 +43,28 @@ public sealed class SupervisorPhaseSource : IRunPhaseSource, IScopedDependency
 
         if (decisions.Count == 0) return Array.Empty<RunPhase>();
 
-        var agentStatusById = await SpawnedAgentStatusesAsync(context.TeamId, decisions, cancellationToken).ConfigureAwait(false);
+        var ids = decisions.SelectMany(StagedAgentIds).Distinct().ToList();
 
-        return ProjectDecisions(decisions, agentStatusById);
+        var runs = await SpawnedAgentRowsAsync(context.TeamId, ids, cancellationToken).ConfigureAwait(false);
+        var toolCounts = await SpawnedAgentToolCountsAsync(context.TeamId, ids, cancellationToken).ConfigureAwait(false);
+
+        var agentStatusById = runs.ToDictionary(r => r.Id, r => r.Status);
+        var extrasByAgent = ExtrasById(runs, toolCounts, DateTimeOffset.UtcNow);
+
+        return ProjectDecisions(decisions, agentStatusById, extrasByAgent);
     }
 
     /// <summary>High base offset for the model-authored SEMANTIC PHASES (L4 arc C) — they sort AFTER both the structural node phases AND the per-decision tape, as their own top-level band on the board.</summary>
     public const int PhaseOrderBase = 2_000_000;
 
-    /// <summary>The pure projection step — decisions + the already-resolved ground-truth agent statuses → phases. Separated from the DB read so it is unit-testable without a DbContext. One phase per decision, PLUS the model-authored semantic phases (L4 arc C) when the plan grouped its subtasks; a flat plan adds none (the per-decision board verbatim).</summary>
-    public static IReadOnlyList<RunPhase> ProjectDecisions(IReadOnlyList<SupervisorDecisionRecord> decisions, IReadOnlyDictionary<Guid, AgentRunStatus> agentStatusById)
+    /// <summary>The pure projection step — decisions + the already-resolved ground-truth agent statuses (and the optional live duration/tool-count extras) → phases. Separated from the DB read so it is unit-testable without a DbContext. One phase per decision, PLUS the model-authored semantic phases (L4 arc C) when the plan grouped its subtasks; a flat plan adds none (the per-decision board verbatim). The compact (model/tokens) folds from the ledger; <paramref name="extrasByAgent"/> carries the figures that don't (duration, tool count) — omitted leaves those ref fields null.</summary>
+    public static IReadOnlyList<RunPhase> ProjectDecisions(IReadOnlyList<SupervisorDecisionRecord> decisions, IReadOnlyDictionary<Guid, AgentRunStatus> agentStatusById, IReadOnlyDictionary<Guid, AgentRunExtras>? extrasByAgent = null)
     {
-        var agentResultById = AgentResultsById(decisions);
+        var rollup = new AgentRollup(agentStatusById, AgentResultsById(decisions), extrasByAgent ?? EmptyExtras);
 
-        var phases = decisions.Select(d => ToPhase(d, agentStatusById, agentResultById)).ToList();
+        var phases = decisions.Select(d => ToPhase(d, rollup)).ToList();
 
-        phases.AddRange(AuthoredPhases(decisions, agentStatusById, agentResultById));
+        phases.AddRange(AuthoredPhases(decisions, rollup));
 
         return phases;
     }
@@ -69,7 +76,7 @@ public sealed class SupervisorPhaseSource : IRunPhaseSource, IScopedDependency
     /// its grouped subtasks (a phase's <c>subtaskIds</c> mapped through the spawn payload's <c>subtaskIds[i]</c> ↔ outcome
     /// <c>agentRunIds[i]</c> staging order), with the ground-truth status; its status folds from those children.
     /// </summary>
-    private static IReadOnlyList<RunPhase> AuthoredPhases(IReadOnlyList<SupervisorDecisionRecord> decisions, IReadOnlyDictionary<Guid, AgentRunStatus> agentStatusById, IReadOnlyDictionary<Guid, SupervisorAgentResult> agentResultById)
+    private static IReadOnlyList<RunPhase> AuthoredPhases(IReadOnlyList<SupervisorDecisionRecord> decisions, AgentRollup rollup)
     {
         // The LATEST plan — matching the executor, which resolves a spawn's subtasks from the most recent plan
         // (ResolvePlannedSubtasks). On a re-plan, the phases must track the same plan the spawns were built from.
@@ -80,15 +87,15 @@ public sealed class SupervisorPhaseSource : IRunPhaseSource, IScopedDependency
 
         var subtaskAgents = SubtaskAgentMap(decisions);
 
-        return authored.Select((phase, index) => ToAuthoredPhase(phase, index, plan!, subtaskAgents, agentStatusById, agentResultById)).ToList();
+        return authored.Select((phase, index) => ToAuthoredPhase(phase, index, plan!, subtaskAgents, rollup)).ToList();
     }
 
-    private static RunPhase ToAuthoredPhase(SupervisorPlanPhase phase, int index, SupervisorDecisionRecord plan, IReadOnlyDictionary<string, Guid> subtaskAgents, IReadOnlyDictionary<Guid, AgentRunStatus> agentStatusById, IReadOnlyDictionary<Guid, SupervisorAgentResult> agentResultById)
+    private static RunPhase ToAuthoredPhase(SupervisorPlanPhase phase, int index, SupervisorDecisionRecord plan, IReadOnlyDictionary<string, Guid> subtaskAgents, AgentRollup rollup)
     {
         var agents = phase.SubtaskIds
             .Select(subtaskAgents.GetValueOrDefault)
-            .Where(id => id != Guid.Empty && agentStatusById.ContainsKey(id))
-            .Select(id => AgentRefFrom(id, agentStatusById[id], agentResultById))
+            .Where(id => id != Guid.Empty && rollup.Knows(id))
+            .Select(rollup.RefFor)
             .ToList();
 
         return new RunPhase
@@ -149,23 +156,45 @@ public sealed class SupervisorPhaseSource : IRunPhaseSource, IScopedDependency
     private static string? PhaseAcceptanceSummary(SupervisorAcceptanceSpec? acceptance) =>
         acceptance == null ? null : acceptance.Description ?? string.Join(" ", acceptance.Command);
 
-    /// <summary>The REAL terminal status of every agent any spawn/retry decision staged, keyed by id, team-scoped — the ground-truth fold (mirrors <c>SupervisorScorecardService.SpawnedAgentStatusesByRunAsync</c>).</summary>
-    private async Task<IReadOnlyDictionary<Guid, AgentRunStatus>> SpawnedAgentStatusesAsync(Guid teamId, IReadOnlyList<SupervisorDecisionRecord> decisions, CancellationToken cancellationToken)
+    /// <summary>The REAL <c>AgentRun</c> rows for every id a spawn/retry decision staged, team-scoped — carrying the ground-truth status (mirrors <c>SupervisorScorecardService.SpawnedAgentStatusesByRunAsync</c>) PLUS the start/complete timestamps the live duration is computed from.</summary>
+    private async Task<IReadOnlyList<AgentRunRow>> SpawnedAgentRowsAsync(Guid teamId, IReadOnlyList<Guid> ids, CancellationToken cancellationToken)
     {
-        var ids = decisions.SelectMany(d => StagedAgentIds(d)).Distinct().ToList();
+        if (ids.Count == 0) return Array.Empty<AgentRunRow>();
 
-        if (ids.Count == 0) return EmptyStatuses;
-
-        return (await _db.AgentRun.AsNoTracking()
-                .Where(r => r.TeamId == teamId && ids.Contains(r.Id))
-                .Select(r => new { r.Id, r.Status })
-                .ToListAsync(cancellationToken).ConfigureAwait(false))
-            .ToDictionary(r => r.Id, r => r.Status);
+        return await _db.AgentRun.AsNoTracking()
+            .Where(r => r.TeamId == teamId && ids.Contains(r.Id))
+            .Select(r => new AgentRunRow(r.Id, r.Status, r.StartedAt, r.CompletedAt))
+            .ToListAsync(cancellationToken).ConfigureAwait(false);
     }
 
-    private static RunPhase ToPhase(SupervisorDecisionRecord decision, IReadOnlyDictionary<Guid, AgentRunStatus> agentStatusById, IReadOnlyDictionary<Guid, SupervisorAgentResult> agentResultById)
+    /// <summary>How many SIDE-EFFECTING tool calls each staged agent made — its <c>tool_call_ledger</c> rows team-scoped, EXCLUDING the <c>decision.request</c> envelopes (those are HITL asks, not work). The ledger holds only side-effecting tools (read-only reads aren't tracked), so this counts mutations attempted, any status. An agent with no rows is simply absent (→ count 0 downstream).</summary>
+    private async Task<IReadOnlyDictionary<Guid, int>> SpawnedAgentToolCountsAsync(Guid teamId, IReadOnlyList<Guid> ids, CancellationToken cancellationToken)
     {
-        var agents = ChildAgentRefs(decision, agentStatusById, agentResultById);
+        if (ids.Count == 0) return EmptyCounts;
+
+        return await _db.ToolCallLedger.AsNoTracking()
+            .Where(t => t.TeamId == teamId && ids.Contains(t.AgentRunId) && t.ToolKind != DecisionToolKinds.DecisionRequest)
+            .GroupBy(t => t.AgentRunId)
+            .Select(g => new { AgentRunId = g.Key, Count = g.Count() })
+            .ToDictionaryAsync(x => x.AgentRunId, x => x.Count, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>Builds the live per-agent extras (duration + tool count) from the agent rows — pure so the "now" clock + ToolCount default are in one testable place. Duration is final once the run is terminal, else live elapsed at <paramref name="now"/>; null before it starts. A negative span (clock skew) clamps to 0.</summary>
+    private static IReadOnlyDictionary<Guid, AgentRunExtras> ExtrasById(IReadOnlyList<AgentRunRow> runs, IReadOnlyDictionary<Guid, int> toolCounts, DateTimeOffset now) =>
+        runs.ToDictionary(r => r.Id, r => new AgentRunExtras { DurationMs = DurationMs(r.StartedAt, r.CompletedAt, now), ToolCount = toolCounts.GetValueOrDefault(r.Id) });
+
+    private static long? DurationMs(DateTimeOffset? startedAt, DateTimeOffset? completedAt, DateTimeOffset now)
+    {
+        if (startedAt is null) return null;
+
+        var ms = (long)((completedAt ?? now) - startedAt.Value).TotalMilliseconds;
+
+        return ms < 0 ? 0 : ms;
+    }
+
+    private static RunPhase ToPhase(SupervisorDecisionRecord decision, AgentRollup rollup)
+    {
+        var agents = ChildAgentRefs(decision, rollup);
 
         return new RunPhase
         {
@@ -184,26 +213,54 @@ public sealed class SupervisorPhaseSource : IRunPhaseSource, IScopedDependency
     }
 
     /// <summary>For spawn/retry: the real agent refs the outcome staged, with the GROUND-TRUTH status (an unfound id — e.g. a Pending outcome with none yet — is simply omitted). Every other verb: no children.</summary>
-    private static IReadOnlyList<PhaseAgentRef> ChildAgentRefs(SupervisorDecisionRecord decision, IReadOnlyDictionary<Guid, AgentRunStatus> agentStatusById, IReadOnlyDictionary<Guid, SupervisorAgentResult> agentResultById) =>
+    private static IReadOnlyList<PhaseAgentRef> ChildAgentRefs(SupervisorDecisionRecord decision, AgentRollup rollup) =>
         StagedAgentIds(decision)
-            .Where(agentStatusById.ContainsKey)
-            .Select(id => AgentRefFrom(id, agentStatusById[id], agentResultById))
+            .Where(rollup.Knows)
+            .Select(rollup.RefFor)
             .ToList();
 
-    /// <summary>An agent ref carrying its GROUND-TRUTH status plus the compact model/token rollup folded into the ledger (absent — a still-running agent, or an outcome folded before the rollup existed — leaves those fields null). A blank model reads as null (no chip).</summary>
-    private static PhaseAgentRef AgentRefFrom(Guid id, AgentRunStatus status, IReadOnlyDictionary<Guid, SupervisorAgentResult> agentResultById)
+    /// <summary>
+    /// The per-agent lookup bundle threaded through every phase path — the ground-truth status map, the ledger-folded
+    /// compact (model/tokens), and the live extras (duration/tool count) — with <see cref="RefFor"/> as the ONE place a
+    /// <see cref="PhaseAgentRef"/> is assembled, so every source path (per-decision + authored phases) projects identically.
+    /// </summary>
+    private sealed class AgentRollup
     {
-        var compact = agentResultById.GetValueOrDefault(id);
+        private readonly IReadOnlyDictionary<Guid, AgentRunStatus> _status;
+        private readonly IReadOnlyDictionary<Guid, SupervisorAgentResult> _compact;
+        private readonly IReadOnlyDictionary<Guid, AgentRunExtras> _extras;
 
-        return new PhaseAgentRef
+        public AgentRollup(IReadOnlyDictionary<Guid, AgentRunStatus> status, IReadOnlyDictionary<Guid, SupervisorAgentResult> compact, IReadOnlyDictionary<Guid, AgentRunExtras> extras)
         {
-            AgentRunId = id,
-            Status = status.ToString(),
-            Model = string.IsNullOrWhiteSpace(compact?.Model) ? null : compact!.Model,
-            InputTokens = compact?.InputTokens,
-            OutputTokens = compact?.OutputTokens,
-        };
+            _status = status;
+            _compact = compact;
+            _extras = extras;
+        }
+
+        /// <summary>True when the real agent row was found (status resolved) — the gate for emitting a ref.</summary>
+        public bool Knows(Guid id) => _status.ContainsKey(id);
+
+        /// <summary>An agent ref carrying its ground-truth status, the ledger compact (a blank model reads as null — no chip), and the live extras (absent → duration/tool null).</summary>
+        public PhaseAgentRef RefFor(Guid id)
+        {
+            var compact = _compact.GetValueOrDefault(id);
+            var extras = _extras.GetValueOrDefault(id);
+
+            return new PhaseAgentRef
+            {
+                AgentRunId = id,
+                Status = _status[id].ToString(),
+                Model = string.IsNullOrWhiteSpace(compact?.Model) ? null : compact!.Model,
+                InputTokens = compact?.InputTokens,
+                OutputTokens = compact?.OutputTokens,
+                DurationMs = extras?.DurationMs,
+                ToolCount = extras?.ToolCount,
+            };
+        }
     }
+
+    /// <summary>A staged agent's real <c>AgentRun</c> row, narrowed to what the rollup needs — ground-truth status + the timestamps the live duration is computed from.</summary>
+    private sealed record AgentRunRow(Guid Id, AgentRunStatus Status, DateTimeOffset? StartedAt, DateTimeOffset? CompletedAt);
 
     /// <summary>Every spawned agent's compact result (model + realized tokens), keyed by agent-run id — read straight off the staging decisions' folded <c>agentResults</c> (no DB, replay-deterministic). An id is unique to one decision; Last() is a defensive de-dup.</summary>
     private static IReadOnlyDictionary<Guid, SupervisorAgentResult> AgentResultsById(IReadOnlyList<SupervisorDecisionRecord> decisions) =>
@@ -249,5 +306,6 @@ public sealed class SupervisorPhaseSource : IRunPhaseSource, IScopedDependency
         return answer == null ? question : $"{question} — {answer}";
     }
 
-    private static readonly IReadOnlyDictionary<Guid, AgentRunStatus> EmptyStatuses = new Dictionary<Guid, AgentRunStatus>();
+    private static readonly IReadOnlyDictionary<Guid, AgentRunExtras> EmptyExtras = new Dictionary<Guid, AgentRunExtras>();
+    private static readonly IReadOnlyDictionary<Guid, int> EmptyCounts = new Dictionary<Guid, int>();
 }

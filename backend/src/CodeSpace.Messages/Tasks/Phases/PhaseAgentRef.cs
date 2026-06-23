@@ -33,4 +33,10 @@ public sealed record PhaseAgentRef
 
     /// <summary>Output (completion) tokens the agent produced, or null when unknown. See <see cref="InputTokens"/>.</summary>
     public int? OutputTokens { get; init; }
+
+    /// <summary>The agent's run DURATION in milliseconds — final (<c>CompletedAt − StartedAt</c>) once terminal, else live elapsed (<c>now − StartedAt</c>) computed at projection time; null when the run hasn't started yet or for a non-supervisor agent. A LIVE figure (recomputed every phase read), NOT a replay-deterministic one. Feeds the collapsed phase table's Time column. Open numeric — never switched on.</summary>
+    public long? DurationMs { get; init; }
+
+    /// <summary>How many SIDE-EFFECTING tool calls the agent made — its <c>tool_call_ledger</c> rows minus the <c>decision.request</c> HITL envelopes. NOTE the ledger records only side-effecting tools (read-only reads/greps are never ledgered), so this is "mutations attempted", not a total tool-use count. <c>0</c> is a real "made none" for a SUPERVISOR-spawned agent; null only for a non-supervisor agent (never projected). Feeds the collapsed phase table's Tools column.</summary>
+    public int? ToolCount { get; init; }
 }

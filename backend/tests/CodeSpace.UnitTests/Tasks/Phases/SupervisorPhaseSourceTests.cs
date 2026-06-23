@@ -262,6 +262,48 @@ public class SupervisorPhaseSourceTests
         only.OutputTokens.ShouldBeNull();
     }
 
+    [Fact]
+    public void Spawn_child_agents_carry_the_live_duration_and_tool_count_extras()
+    {
+        var a = Guid.NewGuid();
+        var b = Guid.NewGuid();
+
+        var spawn = Decision(2, SupervisorDecisionKinds.Spawn, SupervisorDecisionStatus.Succeeded, outcomeJson: SpawnOutcome(new[] { a, b }));
+
+        var statuses = new Dictionary<Guid, AgentRunStatus> { [a] = AgentRunStatus.Succeeded, [b] = AgentRunStatus.Running };
+
+        // The read half supplies the live extras (the figures that don't fold into the ledger).
+        var extras = new Dictionary<Guid, AgentRunExtras>
+        {
+            [a] = new AgentRunExtras { DurationMs = 137_000, ToolCount = 16 },
+            [b] = new AgentRunExtras { DurationMs = 42_000, ToolCount = 0 },
+        };
+
+        var agents = SupervisorPhaseSource.ProjectDecisions(new[] { spawn }, statuses, extras).Single().Agents;
+
+        var refA = agents.Single(x => x.AgentRunId == a);
+        refA.DurationMs.ShouldBe(137_000);
+        refA.ToolCount.ShouldBe(16);
+
+        var refB = agents.Single(x => x.AgentRunId == b);
+        refB.DurationMs.ShouldBe(42_000, "a still-running agent carries its live-elapsed duration");
+        refB.ToolCount.ShouldBe(0, "0 is a real 'made none' for a supervisor agent — not null");
+    }
+
+    [Fact]
+    public void Child_agents_have_a_null_duration_and_tool_count_when_no_extras_are_supplied()
+    {
+        var a = Guid.NewGuid();
+        var spawn = Decision(2, SupervisorDecisionKinds.Spawn, SupervisorDecisionStatus.Succeeded, outcomeJson: SpawnOutcome(new[] { a }));
+        var statuses = new Dictionary<Guid, AgentRunStatus> { [a] = AgentRunStatus.Succeeded };
+
+        // No extras map (the default overload) — a non-supervisor agent, or before the read half supplies them: the columns stay null.
+        var only = SupervisorPhaseSource.ProjectDecisions(new[] { spawn }, statuses).Single().Agents.Single();
+
+        only.DurationMs.ShouldBeNull();
+        only.ToolCount.ShouldBeNull();
+    }
+
     /// <summary>A spawn outcome staging the given ids, with the folded <c>agentResults</c> compacts — serialized with the persisted-contract options the source's reader expects.</summary>
     private static string SpawnOutcome(IReadOnlyCollection<Guid> stagedIds, params SupervisorAgentResult[] results) =>
         JsonSerializer.Serialize(new { agentCount = stagedIds.Count, agentRunIds = stagedIds.Select(i => i.ToString()), agentResults = results }, AgentJson.Options);
