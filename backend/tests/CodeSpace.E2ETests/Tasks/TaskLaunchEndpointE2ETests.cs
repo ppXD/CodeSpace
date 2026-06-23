@@ -111,6 +111,39 @@ public sealed class TaskLaunchEndpointE2ETests : IClassFixture<TaskLaunchApiFact
     }
 
     [Fact]
+    public async Task Post_continue_carries_the_first_turns_real_summary_into_the_next_agent_prompt()
+    {
+        if (OperatingSystem.IsWindows()) return;   // the fake CLI is a /bin/sh script the runner spawns
+
+        using var cli = new FakeCodexCli();
+
+        var (userId, teamId) = await SeedTeamMembershipAsync();
+
+        // Turn 1: launch + run a real agent to a real summary through the whole HTTP → engine → executor → fake CLI chain.
+        const string firstGoal = "Work on the auth refactor";
+        var first = await PostLaunchAsync(userId, teamId, firstGoal, continueSessionId: null);
+        await _factory.JobClient.DrainAsync();
+
+        var realSummary = FakeCodexCli.ExpectedSummaryFor(firstGoal);
+
+        // Turn 2: continue the SAME thread through HTTP — its agent prompt must carry turn 1's REAL summary forward.
+        var second = await PostLaunchAsync(userId, teamId, "Now also rotate the tokens", continueSessionId: first.SessionId);
+        second.SessionId.ShouldBe(first.SessionId, "the follow-up stays in the same thread through HTTP");
+        await _factory.JobClient.DrainAsync();
+
+        using var scope = _factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<CodeSpaceDbContext>();
+
+        var secondRun = await db.WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == second.RunId);
+        secondRun.SessionTurnIndex.ShouldBe(2, "the continue is the thread's second turn");
+
+        var secondAgentGoal = ReadAgentGoal(secondRun.DefinitionSnapshotJson!);
+        secondAgentGoal.ShouldContain(realSummary,
+            customMessage: "turn 2's agent prompt must carry turn 1's REAL produced summary forward — whole-product multi-turn context propagation through HTTP");
+        secondAgentGoal.ShouldContain("Now also rotate the tokens", customMessage: "and still address the new follow-up task");
+    }
+
+    [Fact]
     public async Task Post_tasks_without_a_team_header_is_rejected_fail_closed()
     {
         var (userId, _) = await SeedTeamMembershipAsync();
@@ -130,6 +163,41 @@ public sealed class TaskLaunchEndpointE2ETests : IClassFixture<TaskLaunchApiFact
     }
 
     // ─── Helpers ────────────────────────────────────────────────────────────────
+
+    /// <summary>POST a launch (optionally continuing a session) through the real HTTP pipeline + return the parsed result.</summary>
+    private async Task<LaunchResponse> PostLaunchAsync(Guid userId, Guid teamId, string taskText, Guid? continueSessionId)
+    {
+        var request = new HttpRequestMessage(HttpMethod.Post, "/api/workflows/runs")
+        {
+            Content = JsonContent.Create(new
+            {
+                taskText,
+                sessionId = continueSessionId,
+                effort = "quick",
+                harness = "codex-cli",
+                runnerKind = "local",
+                autonomy = "Confined",
+                surfaceKind = "chat",
+            }),
+        };
+        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", MintToken(userId));
+        request.Headers.Add("X-Team-Id", teamId.ToString());
+
+        var response = await _factory.CreateClient().SendAsync(request);
+        response.StatusCode.ShouldBe(HttpStatusCode.OK, customMessage: await DescribeFailureAsync(response));
+
+        var body = await response.Content.ReadFromJsonAsync<LaunchResponse>();
+        body.ShouldNotBeNull();
+        return body!;
+    }
+
+    /// <summary>Reads the projected agent.code node's <c>goal</c> (the agent prompt) out of the frozen definition snapshot.</summary>
+    private static string ReadAgentGoal(string definitionSnapshotJson)
+    {
+        var root = JsonDocument.Parse(definitionSnapshotJson).RootElement;
+        var agent = root.GetProperty("nodes").EnumerateArray().Single(n => n.GetProperty("id").GetString() == "agent");
+        return agent.GetProperty("config").GetProperty("goal").GetString()!;
+    }
 
     private sealed record LaunchResponse
     {

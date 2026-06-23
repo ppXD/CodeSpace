@@ -28,14 +28,16 @@ public sealed class TaskLaunchService : ITaskLaunchService, IScopedDependency
     private readonly IEffortRouter _router;
     private readonly ITaskRunSnapshotFactory _factory;
     private readonly IWorkSessionService _sessions;
+    private readonly ISessionContextBuilder _sessionContext;
     private readonly CodeSpaceDbContext _db;
 
-    public TaskLaunchService(ITaskLaunchSeedProviderRegistry seedProviders, IEffortRouter router, ITaskRunSnapshotFactory factory, IWorkSessionService sessions, CodeSpaceDbContext db)
+    public TaskLaunchService(ITaskLaunchSeedProviderRegistry seedProviders, IEffortRouter router, ITaskRunSnapshotFactory factory, IWorkSessionService sessions, ISessionContextBuilder sessionContext, CodeSpaceDbContext db)
     {
         _seedProviders = seedProviders;
         _router = router;
         _factory = factory;
         _sessions = sessions;
+        _sessionContext = sessionContext;
         _db = db;
     }
 
@@ -49,14 +51,18 @@ public sealed class TaskLaunchService : ITaskLaunchService, IScopedDependency
 
         var profile = BuildAgentProfile(request, seed, route);
 
-        var context = new TaskBuildContext { Seed = seed, Route = route, AgentProfile = profile, GroundingContext = seed.GroundingContext };
-
         // Resolve the thread this run is a turn of: CONTINUE the named session (the run becomes its next top-level
         // turn) or OPEN a new one. Both stage onto the same unit of work as the run, so they commit atomically — a
         // launch that fails downstream (a rejected repo, an invalid continue target) leaves no orphan session.
         var session = request.ContinueSessionId is { } continueId
             ? await _sessions.ContinueAsync(continueId, request.TeamId, cancellationToken).ConfigureAwait(false)
             : await _sessions.OpenAsync(request.TeamId, seed.Goal, WorkSessionKind.Task, request.ActorUserId, cancellationToken).ConfigureAwait(false);
+
+        // On a CONTINUE, prime the run with the thread's prior-turn digest — the projection folds this grounding into
+        // the agent's prompt so the follow-up builds on earlier work. A fresh launch carries only the seed's own grounding.
+        var grounding = await ResolveGroundingAsync(request, seed, cancellationToken).ConfigureAwait(false);
+
+        var context = new TaskBuildContext { Seed = seed, Route = route, AgentProfile = profile, GroundingContext = grounding };
 
         var handle = await _factory.CreateAndRunAsync(context, request.TeamId, request.ActorUserId, session, cancellationToken).ConfigureAwait(false);
 
@@ -69,6 +75,25 @@ public sealed class TaskLaunchService : ITaskLaunchService, IScopedDependency
             SurfaceKind = seed.SurfaceKind,
             LinkedEntity = seed.LinkedEntity,
         };
+    }
+
+    /// <summary>The grounding the run is primed with: on a CONTINUE, the session's prior-turn digest composed over any seed grounding; on a fresh launch, only the seed's own grounding (null for chat). The projection folds this into the agent prompt.</summary>
+    private async Task<string?> ResolveGroundingAsync(TaskLaunchRequest request, TaskLaunchSeed seed, CancellationToken cancellationToken)
+    {
+        if (request.ContinueSessionId is not { } sessionId) return seed.GroundingContext;
+
+        var priorTurns = await _sessionContext.BuildAsync(sessionId, request.TeamId, cancellationToken).ConfigureAwait(false);
+
+        return ComposeGrounding(priorTurns, seed.GroundingContext);
+    }
+
+    /// <summary>Join the prior-turn digest and the seed's own grounding (either may be absent) into one block, digest first.</summary>
+    private static string? ComposeGrounding(string? priorTurns, string? seedGrounding)
+    {
+        if (string.IsNullOrWhiteSpace(priorTurns)) return seedGrounding;
+        if (string.IsNullOrWhiteSpace(seedGrounding)) return priorTurns;
+
+        return $"{priorTurns}\n\n{seedGrounding}";
     }
 
     /// <summary>Validates the seed's (or request's) repo belongs to <c>request.TeamId</c>; a foreign / missing repo is a clear not-found — indistinguishable, so a foreign repo never leaks. Neither names a repo ⇒ skip (analysis-only is valid).</summary>
