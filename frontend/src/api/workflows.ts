@@ -396,13 +396,16 @@ export interface RunPhasesResponse {
 
 // ─── Run narrative timeline (the merged event story — GET /api/workflows/runs/{id}/timeline) ──────
 
-/** The ONLY closed axis of a timeline event — its render tone. `kind` and everything else is an open string. */
+/** The closed render-tone axis of a timeline event. `kind` and everything else is an open string. */
 export type TimelineSeverity = "Info" | "Success" | "Warning" | "Error";
+
+/** The closed narrative-prominence axis — a `Milestone` shows in the story; a `Detail` folds into a "N steps" disclosure. */
+export type TimelineLevel = "Milestone" | "Detail";
 
 /**
  * Mirrors backend `RunTimelineEvent` — one event on the run's narrative timeline (a run/node lifecycle step, an
- * agent's file edit, …). FLAT + source-agnostic: the UI never switches on `kind` (an OPEN string), only on
- * `severity`. The events arrive merged + chronologically sorted across every source; `sourceKey` is the provenance.
+ * agent's file edit, …). FLAT + source-agnostic: the UI never switches on `kind` (an OPEN string), only on the two
+ * closed axes `severity` (tone) + `level` (prominence). Events arrive merged + chronologically sorted; `sourceKey` is the provenance.
  */
 export interface RunTimelineEvent {
   id: string;
@@ -410,6 +413,8 @@ export interface RunTimelineEvent {
   title: string;
   summary?: string | null;
   severity: TimelineSeverity;
+  /** Narrative prominence; absent (forward-tolerance) reads as a milestone — never silently folded. */
+  level?: TimelineLevel | null;
   occurredAt: string;
   nodeId?: string | null;
   agentRunId?: string | null;

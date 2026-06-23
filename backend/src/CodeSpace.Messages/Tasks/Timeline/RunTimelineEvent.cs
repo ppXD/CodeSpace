@@ -25,6 +25,9 @@ public sealed record RunTimelineEvent
     /// <summary>The closed render tone — Info / Success / Warning / Error.</summary>
     public required TimelineSeverity Severity { get; init; }
 
+    /// <summary>The closed narrative prominence — a <c>Milestone</c> shows in the story by default; a <c>Detail</c> folds into a "N steps" disclosure. Defaults to <c>Milestone</c> so an un-leveled source is never silently hidden.</summary>
+    public TimelineLevel Level { get; init; } = TimelineLevel.Milestone;
+
     /// <summary>When the event occurred — the primary chronological sort key.</summary>
     public required DateTimeOffset OccurredAt { get; init; }
 

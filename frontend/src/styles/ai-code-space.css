@@ -2386,34 +2386,51 @@ textarea:-webkit-autofill {
 .acs-root .run-activity-waverow { padding: 8px 0; }
 .acs-root .run-activity-ring { width: 11px; height: 11px; border-radius: 50%; margin-top: 4px; justify-self: center; position: relative; z-index: 1; box-sizing: border-box; background: var(--bg); border: 2px solid var(--accent); }
 .acs-root .run-activity-wavewrap { min-width: 0; }
+/* a folded run of detail events — one "N steps" disclosure on the rail; a lone detail event just dims back from the milestones */
+.acs-root .run-activity-event[data-detail] { opacity: .5; }
+.acs-root .run-activity-fold { padding: 2px 0; }
+.acs-root .run-activity-fold-dot { width: 8px; height: 8px; background: transparent; border: 1.5px solid var(--line-2); box-sizing: border-box; }
+.acs-root .run-activity-foldbtn { appearance: none; border: 0; background: transparent; cursor: pointer; font: inherit; display: inline-flex; align-items: center; gap: 5px; font-size: 11.5px; color: var(--muted-2); padding: 2px 6px; margin-left: -6px; border-radius: 6px; }
+.acs-root .run-activity-foldbtn:hover { background: var(--panel-2); color: var(--ink-2); }
+.acs-root .run-activity-foldbtn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.acs-root .run-activity-foldbtn > svg { transition: transform .15s ease; }
+.acs-root .run-activity-foldbtn[aria-expanded="true"] > svg { transform: rotate(90deg); }
 
-/* the agent wave — a quiet header + an adaptive grid of terminal tiles */
-.acs-root .agent-wave { display: flex; flex-direction: column; gap: 9px; }
+/* the agent wave — the FLEET CARD: a two-row header (label + breakdown, then the status dots) that expands to the
+   metrics table / live tiles. Status palette across the whole family: pending gray · running blue · done green · failed red. */
+.acs-root .agent-wave { display: flex; flex-direction: column; gap: 8px; }
 .acs-root .agent-wave-head { display: flex; align-items: center; gap: 7px; font-size: 12px; }
 .acs-root .agent-wave-head > svg { color: var(--muted-2); flex: none; }
 .acs-root .agent-wave-title { font-weight: 600; color: var(--ink); flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.acs-root .agent-wave-count { font-size: 11px; color: var(--muted-2); flex: none; }
-.acs-root .agent-wave-state { text-transform: capitalize; }
-.acs-root .agent-wave-state[data-state="running"] { color: var(--accent); }
-.acs-root .agent-wave-state[data-state="done"] { color: #1F6B3F; }
-.acs-root .agent-wave-state[data-state="waiting"] { color: #A8590E; }
-.acs-root .agent-wave-state[data-state="failed"] { color: #9E3535; }
+.acs-root .agent-wave-summary { margin-left: auto; font-size: 11px; color: var(--muted-2); flex: none; white-space: nowrap; }
 .acs-root .agent-wave-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(185px, 1fr)); gap: 10px; }
 
-/* progress squares — done filled, pending outline; pushed (with the count + toggle) to the head's right edge */
-.acs-root .agent-wave-progress { margin-left: auto; display: inline-flex; gap: 3px; flex: none; }
-.acs-root .agent-wave-progress > i { width: 7px; height: 7px; border-radius: 2px; border: 1px solid var(--line-2); background: transparent; }
-.acs-root .agent-wave-progress > i[data-on] { background: var(--accent); border-color: var(--accent); }
-.acs-root .agent-wave-progress-text { margin-left: auto; font-size: 11px; color: var(--muted-2); flex: none; font-variant-numeric: tabular-nums; }
+/* the fleet dots — one status dot per agent, each a button into that agent's terminal; the selected / open agent rings */
+.acs-root .agent-fleet { display: flex; flex-wrap: wrap; gap: 6px; padding-left: 21px; }
+.acs-root .agent-fleet-dot { appearance: none; flex: none; width: 10px; height: 10px; padding: 0; border-radius: 50%; border: 0; background: var(--muted-2); cursor: pointer; transition: box-shadow .12s ease, transform .12s ease; }
+.acs-root .agent-fleet-dot:hover { transform: scale(1.25); }
+.acs-root .agent-fleet-dot:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.acs-root .agent-fleet-dot[data-state="running"] { background: #2F6FE0; animation: agentTilePulse 1.5s ease-in-out infinite; }
+.acs-root .agent-fleet-dot[data-state="done"] { background: #1F6B3F; }
+.acs-root .agent-fleet-dot[data-state="waiting"] { background: var(--muted-2); }
+.acs-root .agent-fleet-dot[data-state="failed"] { background: #9E3535; }
+.acs-root .agent-fleet-dot[data-selected], .acs-root .agent-fleet-dot[data-open] { box-shadow: 0 0 0 2px var(--bg), 0 0 0 3.5px var(--accent); }
 
-/* the density toggle — a chevron that points right (collapsed table) → down (expanded tiles) */
+/* the expand chevron — points right (collapsed card) → down (body shown) */
 .acs-root .agent-wave-toggle { appearance: none; flex: none; display: inline-flex; align-items: center; justify-content: center; width: 22px; height: 22px; padding: 0; background: transparent; border: 1px solid transparent; border-radius: 6px; color: var(--muted-2); cursor: pointer; transition: background .15s ease, color .15s ease; }
 .acs-root .agent-wave-toggle:hover { background: var(--panel-2); color: var(--ink-2); }
 .acs-root .agent-wave-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 .acs-root .agent-wave-toggle > svg { transform: rotate(-90deg); transition: transform .15s ease; }
 .acs-root .agent-wave-toggle[data-open] > svg { transform: rotate(0deg); }
 
-/* the collapsed compact table — the wave's DEFAULT density; warm, no terminal chrome (it is the index, not a terminal) */
+/* the expanded body — a Table/Tiles segmented toggle over the chosen detail view */
+.acs-root .agent-wave-body { display: flex; flex-direction: column; gap: 8px; }
+.acs-root .agent-wave-modes { display: inline-flex; gap: 2px; align-self: flex-start; padding: 2px; background: var(--panel-2); border: 1px solid var(--line); border-radius: 7px; }
+.acs-root .agent-wave-modes > button { appearance: none; border: 0; background: transparent; cursor: pointer; font: inherit; font-size: 11px; color: var(--muted); padding: 3px 10px; border-radius: 5px; }
+.acs-root .agent-wave-modes > button:hover { color: var(--ink-2); }
+.acs-root .agent-wave-modes > button[data-active] { background: var(--panel); color: var(--ink); font-weight: 500; box-shadow: 0 1px 2px rgba(0,0,0,.04); }
+
+/* the metrics table — one expanded density; warm, no terminal chrome (it is the index, not a terminal) */
 .acs-root .agent-wave-table { width: 100%; border-collapse: collapse; font-size: 12px; }
 .acs-root .agent-wave-table thead th { padding: 4px 9px; text-align: left; font-weight: 500; font-size: 10.5px; letter-spacing: .02em; text-transform: uppercase; color: var(--muted-2); border-bottom: 1px solid var(--line); }
 .acs-root .agent-wave-table th.agent-wave-num, .acs-root .agent-wave-table td.agent-wave-num { text-align: right; font-variant-numeric: tabular-nums; color: var(--muted); white-space: nowrap; }
@@ -2425,9 +2442,9 @@ textarea:-webkit-autofill {
 .acs-root .agent-wave-row[data-state="done"] { opacity: .6; }
 .acs-root .agent-wave-cell-name { display: flex; align-items: center; gap: 7px; min-width: 0; }
 .acs-root .agent-wave-dot { width: 7px; height: 7px; border-radius: 50%; flex: none; background: var(--muted-2); }
-.acs-root .agent-wave-dot[data-state="running"] { background: var(--accent); animation: agentTilePulse 1.5s ease-in-out infinite; }
+.acs-root .agent-wave-dot[data-state="running"] { background: #2F6FE0; animation: agentTilePulse 1.5s ease-in-out infinite; }
 .acs-root .agent-wave-dot[data-state="done"] { background: #1F6B3F; }
-.acs-root .agent-wave-dot[data-state="waiting"] { background: #A8590E; }
+.acs-root .agent-wave-dot[data-state="waiting"] { background: var(--muted-2); }
 .acs-root .agent-wave-dot[data-state="failed"] { background: #9E3535; }
 .acs-root .agent-wave-name { appearance: none; background: none; border: none; padding: 0; cursor: pointer; text-align: left; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11.5px; color: var(--ink-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
 .acs-root .agent-wave-name:hover { text-decoration: underline; }
@@ -2454,20 +2471,18 @@ textarea:-webkit-autofill {
 .acs-root .agent-tile-cmd { color: var(--ink); }
 .acs-root .agent-tile-prompt { color: #1F6B3F; }
 .acs-root .agent-tile-dim { color: var(--muted-2); }
-.acs-root .agent-tile-wait { color: #A8590E; }
+.acs-root .agent-tile-wait { color: var(--muted); }
 .acs-root .agent-tile-fail { color: #9E3535; }
 .acs-root .agent-tile[data-state="done"] { opacity: .62; }
 .acs-root .agent-tile[data-state="done"] .agent-tile-flag { color: #1F6B3F; }
-.acs-root .agent-tile[data-state="waiting"] { border-color: #E3C9A0; }
-.acs-root .agent-tile[data-state="waiting"] .agent-tile-bar { background: #FBF3E6; border-bottom-color: #E3C9A0; }
-.acs-root .agent-tile[data-state="waiting"] .agent-tile-name, .acs-root .agent-tile[data-state="waiting"] .agent-tile-flag { color: #A8590E; }
+.acs-root .agent-tile[data-state="waiting"] .agent-tile-name, .acs-root .agent-tile[data-state="waiting"] .agent-tile-flag { color: var(--muted); }
 .acs-root .agent-tile[data-state="failed"] .agent-tile-name, .acs-root .agent-tile[data-state="failed"] .agent-tile-flag { color: #9E3535; }
 /* the running live-dot + the blinking cursor — DECORATIVE indicators, never an input caret */
-.acs-root .agent-tile-live { width: 6px; height: 6px; border-radius: 50%; background: var(--accent); animation: agentTilePulse 1.5s ease-in-out infinite; }
+.acs-root .agent-tile-live { width: 6px; height: 6px; border-radius: 50%; background: #2F6FE0; animation: agentTilePulse 1.5s ease-in-out infinite; }
 .acs-root .agent-tile-cursor { display: inline-block; width: 6px; height: 11px; margin-left: 3px; vertical-align: -1px; background: var(--ink); animation: agentTileBlink 1.05s steps(1) infinite; }
 @keyframes agentTilePulse { 0%, 100% { opacity: 1; } 50% { opacity: .4; } }
 @keyframes agentTileBlink { 0%, 48% { opacity: 1; } 49%, 100% { opacity: 0; } }
-@media (prefers-reduced-motion: reduce) { .acs-root .agent-tile-live, .acs-root .agent-tile-cursor, .acs-root .agent-wave-dot { animation: none; } }
+@media (prefers-reduced-motion: reduce) { .acs-root .agent-tile-live, .acs-root .agent-tile-cursor, .acs-root .agent-wave-dot, .acs-root .agent-fleet-dot { animation: none; } }
 /* the expanded terminal window — one per wave, under the grid. Light mac chrome; read-only scrollback + a tool-calls tab. */
 .acs-root .agent-terminal { margin-top: 11px; background: var(--panel); border: 1px solid var(--line-2); border-radius: 11px; overflow: hidden; box-shadow: 0 2px 12px rgba(0,0,0,.05); }
 .acs-root .agent-terminal-bar { display: flex; align-items: center; gap: 8px; padding: 8px 12px; background: var(--panel-2); border-bottom: 1px solid var(--line); }
@@ -2476,9 +2491,12 @@ textarea:-webkit-autofill {
 .acs-root .agent-terminal-lights > i:nth-child(1) { background: #ff5f57; }
 .acs-root .agent-terminal-lights > i:nth-child(2) { background: #febc2e; }
 .acs-root .agent-terminal-lights > i:nth-child(3) { background: #28c840; }
-.acs-root .agent-terminal-title { flex: 1; text-align: center; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.acs-root .agent-terminal-title { flex: 1; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; font-weight: 500; color: var(--ink-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .acs-root .agent-terminal-close { appearance: none; border: 0; background: transparent; cursor: pointer; display: inline-flex; color: var(--muted-2); padding: 2px; border-radius: 5px; flex: none; }
 .acs-root .agent-terminal-close:hover { background: var(--panel); color: var(--ink-2); }
+/* the identity strip — harness · model · tool count · run time, the agent's whole identity in one line */
+.acs-root .agent-terminal-meta { display: flex; flex-wrap: wrap; align-items: center; padding: 6px 12px; background: var(--panel-2); border-bottom: 1px solid var(--line); font-size: 11px; color: var(--muted); }
+.acs-root .agent-terminal-meta > span:not(:first-child)::before { content: "·"; margin: 0 8px; color: var(--muted-2); }
 .acs-root .agent-terminal-body { max-height: 360px; overflow-y: auto; }
 .acs-root .agent-terminal-empty { padding: 16px 14px; font-family: ui-monospace, Menlo, monospace; font-size: 12px; color: var(--muted); }
 .acs-root .agent-terminal-scroll { list-style: none; margin: 0; padding: 12px 14px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; line-height: 1.65; }
@@ -2490,11 +2508,11 @@ textarea:-webkit-autofill {
 .acs-root .agent-terminal-footer { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 7px 12px; background: var(--panel-2); border-top: 1px solid var(--line); font-size: 11px; color: var(--muted); }
 .acs-root .agent-terminal-stat { display: inline-flex; align-items: center; gap: 5px; }
 .acs-root .agent-terminal-statdot { width: 6px; height: 6px; border-radius: 50%; background: var(--muted-2); }
-.acs-root .agent-terminal[data-state="running"] .agent-terminal-statdot { background: var(--accent); animation: agentTilePulse 1.5s ease-in-out infinite; }
+.acs-root .agent-terminal[data-state="running"] .agent-terminal-statdot { background: #2F6FE0; animation: agentTilePulse 1.5s ease-in-out infinite; }
 .acs-root .agent-terminal[data-state="done"] .agent-terminal-statdot { background: #1F6B3F; }
-.acs-root .agent-terminal[data-state="waiting"] .agent-terminal-statdot { background: #A8590E; }
+.acs-root .agent-terminal[data-state="waiting"] .agent-terminal-statdot { background: var(--muted-2); }
 .acs-root .agent-terminal[data-state="failed"] .agent-terminal-statdot { background: #9E3535; }
-.acs-root .agent-terminal-meta::before { content: "·"; margin-right: 8px; color: var(--muted-2); }
+.acs-root .agent-terminal-fact::before { content: "·"; margin-right: 8px; color: var(--muted-2); }
 .acs-root .agent-terminal-tabs { margin-left: auto; display: inline-flex; gap: 4px; }
 .acs-root .agent-terminal-tabs > button { appearance: none; border: 0; background: transparent; cursor: pointer; font: inherit; font-size: 11px; color: var(--muted); padding: 3px 8px; border-radius: 6px; }
 .acs-root .agent-terminal-tabs > button:hover { background: var(--panel); color: var(--ink-2); }

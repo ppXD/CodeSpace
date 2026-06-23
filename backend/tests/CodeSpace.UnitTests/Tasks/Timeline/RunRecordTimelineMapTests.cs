@@ -82,4 +82,21 @@ public class RunRecordTimelineMapTests
         ev.Title.ShouldBe("Run started");
         ev.NodeId.ShouldBeNull();
     }
+
+    [Theory]
+    // Run lifecycle, a node FAILURE, and a retry are milestones; the per-node started/completed/waiting/skipped churn folds.
+    [InlineData(WorkflowRunRecordTypes.RunStarted, TimelineLevel.Milestone)]
+    [InlineData(WorkflowRunRecordTypes.RunCompleted, TimelineLevel.Milestone)]
+    [InlineData(WorkflowRunRecordTypes.RunFailed, TimelineLevel.Milestone)]
+    [InlineData(WorkflowRunRecordTypes.RunReplayed, TimelineLevel.Milestone)]
+    [InlineData(WorkflowRunRecordTypes.NodeFailed, TimelineLevel.Milestone)]
+    [InlineData(WorkflowRunRecordTypes.AttemptFailed, TimelineLevel.Milestone)]
+    [InlineData(WorkflowRunRecordTypes.NodeStarted, TimelineLevel.Detail)]
+    [InlineData(WorkflowRunRecordTypes.NodeCompleted, TimelineLevel.Detail)]
+    [InlineData(WorkflowRunRecordTypes.NodeSuspended, TimelineLevel.Detail)]
+    [InlineData(WorkflowRunRecordTypes.NodeSkipped, TimelineLevel.Detail)]
+    public void Levels_milestones_above_structural_node_churn(string recordType, TimelineLevel expected)
+    {
+        RunRecordTimelineMap.ToEvent(Record(recordType, nodeId: "code")).ShouldNotBeNull().Level.ShouldBe(expected);
+    }
 }

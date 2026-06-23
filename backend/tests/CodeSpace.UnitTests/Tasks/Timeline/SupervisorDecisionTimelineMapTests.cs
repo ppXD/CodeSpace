@@ -55,6 +55,16 @@ public class SupervisorDecisionTimelineMapTests
     }
 
     [Theory]
+    [InlineData(SupervisorDecisionKinds.Plan)]
+    [InlineData(SupervisorDecisionKinds.Spawn)]
+    [InlineData(SupervisorDecisionKinds.AskHuman)]
+    [InlineData("teleport")]
+    public void Every_decision_is_a_milestone_never_folds(string kind)
+    {
+        SupervisorDecisionTimelineMap.ToEvent(Decision(kind)).Level.ShouldBe(TimelineLevel.Milestone, "a supervisor decision is always a story beat");
+    }
+
+    [Theory]
     [InlineData(0, "Supervisor spawned agents")]   // a still-pending spawn has staged none yet
     [InlineData(1, "Supervisor spawned 1 agent")]
     [InlineData(3, "Supervisor spawned 3 agents")]

@@ -59,6 +59,19 @@ public class AgentEventTimelineMapTests
         ev.SourceKey.ShouldBe(AgentEventTimelineMap.Key);
     }
 
+    [Theory]
+    // An agent's error + final summary are story milestones; its file edits / test output / warnings fold (the wave
+    // and the agent's own terminal already carry them).
+    [InlineData(AgentEventKind.Error, TimelineLevel.Milestone)]
+    [InlineData(AgentEventKind.FinalSummary, TimelineLevel.Milestone)]
+    [InlineData(AgentEventKind.FileChanged, TimelineLevel.Detail)]
+    [InlineData(AgentEventKind.TestOutput, TimelineLevel.Detail)]
+    [InlineData(AgentEventKind.Warning, TimelineLevel.Detail)]
+    public void Levels_errors_and_the_final_summary_above_routine_edits(AgentEventKind kind, TimelineLevel expected)
+    {
+        AgentEventTimelineMap.ToEvent(Event(kind), NodeByAgent).Level.ShouldBe(expected);
+    }
+
     [Fact]
     public void Stamps_the_agent_node_and_order()
     {

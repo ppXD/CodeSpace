@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import type { PhaseAgentRef, RunPhase, RunTimelineEvent } from "@/api/workflows";
 
-import { buildWaves, formatDuration, mergeActivityStream, waveSummary, type AgentWave } from "./runActivity";
+import { buildWaves, composeActivity, formatBreakdown, formatDuration, mergeActivityStream, waveBreakdown, type AgentWave } from "./runActivity";
 
 function agent(id: string): PhaseAgentRef {
   return { agentRunId: id, status: "Running" };
@@ -89,7 +89,7 @@ describe("mergeActivityStream", () => {
 
     const stream = mergeActivityStream(events, waves);
 
-    expect(stream.map((i) => (i.kind === "event" ? i.event.id : `wave:${i.wave.id}`)))
+    expect(stream.map((i) => (i.kind === "wave" ? `wave:${i.wave.id}` : i.kind === "event" ? i.event.id : "fold")))
       .toEqual(["run-started", "spawned", "wave:impl", "edited"]);
   });
 
@@ -141,17 +141,81 @@ describe("formatDuration", () => {
   });
 });
 
-describe("waveSummary", () => {
-  it("counts the done agents and totals the wave", () => {
-    const s = waveSummary([agentWith("Succeeded"), agentWith("Running"), agentWith("Succeeded")]);
-    expect(s.done).toBe(2);
-    expect(s.total).toBe(3);
+describe("waveBreakdown", () => {
+  it("counts agents per state (queued folds Queued, failed folds every terminal error)", () => {
+    const b = waveBreakdown([agentWith("Succeeded"), agentWith("Running"), agentWith("Queued"), agentWith("TimedOut"), agentWith("Cancelled")]);
+    expect(b).toEqual({ total: 5, running: 1, done: 1, queued: 1, failed: 2 });
+  });
+});
+
+describe("formatBreakdown", () => {
+  it("drops zero categories, pluralizes the total", () => {
+    expect(formatBreakdown(waveBreakdown([agentWith("Succeeded"), agentWith("Running"), agentWith("Succeeded")]))).toBe("3 agents · 2 done · 1 running");
+    expect(formatBreakdown(waveBreakdown([agentWith("Running")]))).toBe("1 agent · 1 running");
+    expect(formatBreakdown(waveBreakdown([agentWith("Succeeded"), agentWith("Queued"), agentWith("Failed")]))).toBe("3 agents · 1 done · 1 queued · 1 failed");
   });
 
-  it("aggregates the headline state: running wins, then failed, then waiting, else done", () => {
-    expect(waveSummary([agentWith("Succeeded"), agentWith("Running")]).state).toBe("running");
-    expect(waveSummary([agentWith("Succeeded"), agentWith("Failed")]).state).toBe("failed");
-    expect(waveSummary([agentWith("Succeeded"), agentWith("Queued")]).state).toBe("waiting");
-    expect(waveSummary([agentWith("Succeeded"), agentWith("Succeeded")]).state).toBe("done");
+  it("shows only the total when no agents have a counted state", () => {
+    expect(formatBreakdown({ total: 2, running: 0, done: 0, queued: 0, failed: 0 })).toBe("2 agents");
+  });
+});
+
+describe("composeActivity", () => {
+  const milestone = (id: string, at: string) => event({ id, occurredAt: at, level: "Milestone" });
+  const detail = (id: string, at: string) => event({ id, occurredAt: at, level: "Detail" });
+
+  it("folds a run of two-or-more consecutive detail events into one fold item", () => {
+    const items = composeActivity([
+      milestone("run-started", "2026-06-23T10:00:00Z"),
+      detail("node-a-started", "2026-06-23T10:00:01Z"),
+      detail("node-a-done", "2026-06-23T10:00:02Z"),
+      detail("node-b-started", "2026-06-23T10:00:03Z"),
+      milestone("run-done", "2026-06-23T10:00:09Z"),
+    ], []);
+
+    expect(items.map((i) => i.kind)).toEqual(["event", "fold", "event"]);
+    const fold = items[1];
+    expect(fold.kind === "fold" && fold.events.map((e) => e.id)).toEqual(["node-a-started", "node-a-done", "node-b-started"]);
+  });
+
+  it("leaves a LONE detail event inline (a one-row fold isn't worth it)", () => {
+    const items = composeActivity([
+      milestone("run-started", "2026-06-23T10:00:00Z"),
+      detail("lonely", "2026-06-23T10:00:01Z"),
+      milestone("run-done", "2026-06-23T10:00:02Z"),
+    ], []);
+
+    expect(items.map((i) => i.kind)).toEqual(["event", "event", "event"]);
+  });
+
+  it("a wave flushes the running fold — details before + after stay separate folds", () => {
+    const wave: AgentWave = { id: "w", label: "w", startedAt: "2026-06-23T10:00:03Z", agents: [agent("a1")] };
+    const items = composeActivity([
+      detail("d1", "2026-06-23T10:00:00Z"),
+      detail("d2", "2026-06-23T10:00:01Z"),
+      detail("d3", "2026-06-23T10:00:05Z"),
+      detail("d4", "2026-06-23T10:00:06Z"),
+    ], [wave]);
+
+    expect(items.map((i) => i.kind)).toEqual(["fold", "wave", "fold"]);
+  });
+
+  it("keeps a stable fold key (anchored to the preceding item) when a detail backfills to the run's front", () => {
+    const m = milestone("run-started", "2026-06-23T10:00:00Z");
+    const before = composeActivity([m, detail("d2", "2026-06-23T10:00:02Z"), detail("d3", "2026-06-23T10:00:03Z")], []);
+    const after = composeActivity([m, detail("d1", "2026-06-23T10:00:01Z"), detail("d2", "2026-06-23T10:00:02Z"), detail("d3", "2026-06-23T10:00:03Z")], []);
+
+    const foldKey = (items: ReturnType<typeof composeActivity>) => items.find((i) => i.kind === "fold")?.key;
+    // Same key across the poll → React preserves the expand state instead of remounting the disclosure shut mid-read.
+    expect(foldKey(after)).toBe(foldKey(before));
+  });
+
+  it("treats an absent level as a milestone (forward-tolerance) — never silently folds", () => {
+    const items = composeActivity([
+      event({ id: "a", occurredAt: "2026-06-23T10:00:00Z" }),   // no level
+      event({ id: "b", occurredAt: "2026-06-23T10:00:01Z" }),   // no level
+    ], []);
+
+    expect(items.map((i) => i.kind)).toEqual(["event", "event"]);
   });
 });

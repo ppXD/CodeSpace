@@ -27,6 +27,7 @@ public static class SupervisorDecisionTimelineMap
             Title = TitleFor(d),
             Summary = SummaryFor(d),
             Severity = SeverityFor(d.Status),
+            Level = TimelineLevel.Milestone,   // every supervisor decision is a story beat — it never folds away
             OccurredAt = d.CreatedDate,
             Order = d.Sequence,   // the ledger's per-run monotonic cursor — the same-OccurredAt tie-break
             SourceKey = Key,

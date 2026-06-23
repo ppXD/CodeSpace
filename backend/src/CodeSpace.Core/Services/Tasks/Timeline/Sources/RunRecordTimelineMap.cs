@@ -20,24 +20,26 @@ public static class RunRecordTimelineMap
     {
         var node = r.NodeId ?? "node";
 
+        // Run-level lifecycle, a node FAILURE, and a retry are story MILESTONES; the per-node started/completed/waiting/
+        // skipped churn is DETAIL the UI folds away (the wave already shows the agent's progress, Trace has the rest).
         return r.RecordType switch
         {
-            WorkflowRunRecordTypes.RunStarted    => Event(r, "Run started", TimelineSeverity.Info),
-            WorkflowRunRecordTypes.RunCompleted  => Event(r, "Run completed", TimelineSeverity.Success),
-            WorkflowRunRecordTypes.RunFailed     => Event(r, "Run failed", TimelineSeverity.Error, ReadString(r, "error")),
-            WorkflowRunRecordTypes.RunCancelled  => Event(r, "Run cancelled", TimelineSeverity.Warning),
-            WorkflowRunRecordTypes.RunReplayed   => Event(r, "Run replayed", TimelineSeverity.Info),
-            WorkflowRunRecordTypes.NodeStarted   => Event(r, $"{node} started", TimelineSeverity.Info),
-            WorkflowRunRecordTypes.NodeCompleted => Event(r, $"{node} completed", TimelineSeverity.Success),
-            WorkflowRunRecordTypes.NodeFailed    => Event(r, $"{node} failed", TimelineSeverity.Error, ReadString(r, "error")),
-            WorkflowRunRecordTypes.NodeSuspended => Event(r, $"{node} waiting", TimelineSeverity.Warning, ReadString(r, "wait_kind")),
-            WorkflowRunRecordTypes.NodeSkipped   => Event(r, $"{node} skipped", TimelineSeverity.Info, ReadString(r, "reason")),
-            WorkflowRunRecordTypes.AttemptFailed => Event(r, $"{node} retry", TimelineSeverity.Warning, RetrySummary(r)),
+            WorkflowRunRecordTypes.RunStarted    => Event(r, "Run started", TimelineSeverity.Info, TimelineLevel.Milestone),
+            WorkflowRunRecordTypes.RunCompleted  => Event(r, "Run completed", TimelineSeverity.Success, TimelineLevel.Milestone),
+            WorkflowRunRecordTypes.RunFailed     => Event(r, "Run failed", TimelineSeverity.Error, TimelineLevel.Milestone, ReadString(r, "error")),
+            WorkflowRunRecordTypes.RunCancelled  => Event(r, "Run cancelled", TimelineSeverity.Warning, TimelineLevel.Milestone),
+            WorkflowRunRecordTypes.RunReplayed   => Event(r, "Run replayed", TimelineSeverity.Info, TimelineLevel.Milestone),
+            WorkflowRunRecordTypes.NodeStarted   => Event(r, $"{node} started", TimelineSeverity.Info, TimelineLevel.Detail),
+            WorkflowRunRecordTypes.NodeCompleted => Event(r, $"{node} completed", TimelineSeverity.Success, TimelineLevel.Detail),
+            WorkflowRunRecordTypes.NodeFailed    => Event(r, $"{node} failed", TimelineSeverity.Error, TimelineLevel.Milestone, ReadString(r, "error")),
+            WorkflowRunRecordTypes.NodeSuspended => Event(r, $"{node} waiting", TimelineSeverity.Warning, TimelineLevel.Detail, ReadString(r, "wait_kind")),
+            WorkflowRunRecordTypes.NodeSkipped   => Event(r, $"{node} skipped", TimelineSeverity.Info, TimelineLevel.Detail, ReadString(r, "reason")),
+            WorkflowRunRecordTypes.AttemptFailed => Event(r, $"{node} retry", TimelineSeverity.Warning, TimelineLevel.Milestone, RetrySummary(r)),
             _ => null,
         };
     }
 
-    private static RunTimelineEvent Event(WorkflowRunRecord r, string title, TimelineSeverity severity, string? summary = null) =>
+    private static RunTimelineEvent Event(WorkflowRunRecord r, string title, TimelineSeverity severity, TimelineLevel level, string? summary = null) =>
         new()
         {
             Id = $"record-{r.Sequence}",
@@ -45,6 +47,7 @@ public static class RunRecordTimelineMap
             Title = title,
             Summary = summary,
             Severity = severity,
+            Level = level,
             OccurredAt = r.OccurredAt,
             Order = r.Sequence,   // the ledger's monotonic order — the same-OccurredAt tie-break
             NodeId = r.NodeId,
