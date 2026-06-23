@@ -8,6 +8,7 @@ using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Decisions;
 using CodeSpace.Messages.Enums;
+using Microsoft.EntityFrameworkCore;
 using Shouldly;
 
 namespace CodeSpace.IntegrationTests.Agents;
@@ -233,6 +234,98 @@ public class ToolCallLedgerServiceTests
         using var scope = _fixture.BeginScope();
         (await Svc(scope).FindBlockingDecisionIdAsync(runId, CancellationToken.None))
             .ShouldBeNull("no unanswered decision.request → nothing blocks a clean completion");
+    }
+
+    [Theory]
+    // stranded side-effecting row whose run is TERMINAL + whose worker's lease has EXPIRED (provably dead) → reaped:
+    [InlineData(ToolCallLedgerStatus.Pending, AgentRunStatus.Failed, -1, "git.open_pr", true)]
+    [InlineData(ToolCallLedgerStatus.Running, AgentRunStatus.Failed, -1, "git.open_pr", true)]       // a Running ledger row (approval path) too
+    [InlineData(ToolCallLedgerStatus.Pending, AgentRunStatus.Cancelled, -1, "git.open_pr", true)]
+    [InlineData(ToolCallLedgerStatus.Pending, AgentRunStatus.NeedsReview, -1, "git.open_pr", true)]  // every terminal status
+    [InlineData(ToolCallLedgerStatus.Pending, AgentRunStatus.TimedOut, -1, "git.open_pr", true)]
+    [InlineData(ToolCallLedgerStatus.Pending, AgentRunStatus.Succeeded, -1, "git.open_pr", true)]
+    // NOT reaped — each guard in isolation:
+    [InlineData(ToolCallLedgerStatus.Pending, AgentRunStatus.Cancelled, +10, "git.open_pr", false)]  // THE FIX: cancelled but the worker's lease is still VALID → live worker (e.g. a long run_command) → never yank
+    [InlineData(ToolCallLedgerStatus.Pending, AgentRunStatus.Running, -1, "git.open_pr", false)]      // run not terminal → not yet stranded (the reconciler hasn't ended it)
+    [InlineData(ToolCallLedgerStatus.Pending, AgentRunStatus.Failed, -1, "decision.request", false)] // a decision row → owned by ExpireStaleDecisionsAsync, not this reaper
+    public async Task ExpireStaleToolCalls_only_terminalizes_a_stranded_row_under_a_terminal_run_whose_worker_lease_expired(
+        ToolCallLedgerStatus ledgerStatus, AgentRunStatus runStatus, int leaseOffsetMinutes, string toolKind, bool expectedSwept)
+    {
+        var teamId = await SeedTeamAsync();
+        var runId = Guid.NewGuid();
+        var at = DateTimeOffset.UtcNow;
+
+        // Lease offset is relative to the sweep clock `at`: negative = expired (dead worker), positive = valid (live worker).
+        await SeedAgentRunAsync(teamId, runId, runStatus, at + TimeSpan.FromMinutes(leaseOffsetMinutes));
+        var ledgerId = await SeedToolCallAsync(teamId, runId, ledgerStatus, toolKind, $"{toolKind}:{runId:N}", at);
+
+        // Assert THIS row's outcome, not the global count — the sweep is team-agnostic, so a shared fixture may carry other
+        // tests' eligible rows; the per-row status is the precise, non-flaky proof.
+        using (var scope = _fixture.BeginScope())
+            await Svc(scope).ExpireStaleToolCallsAsync(at, CancellationToken.None);
+
+        using var verify = _fixture.BeginScope();
+        var row = await verify.Resolve<CodeSpaceDbContext>().ToolCallLedger.AsNoTracking().SingleAsync(l => l.Id == ledgerId);
+
+        if (expectedSwept)
+        {
+            row.Status.ShouldBe(ToolCallLedgerStatus.Failed, "a stranded side-effecting row under a terminal run whose worker is provably gone is terminalized so a re-call stops hitting InFlight");
+            row.Error.ShouldBe(ToolCallLedgerService.InterruptedError);
+        }
+        else
+        {
+            row.Status.ShouldBe(ledgerStatus, "the guard held — a live worker (valid lease) / a non-terminal run / the wrong reaper's row is left alone");
+        }
+    }
+
+    [Fact]
+    public async Task A_reaped_stranded_row_makes_a_re_call_replay_the_failure_never_re_execute()
+    {
+        // The exactly-once proof: after the reaper terminalizes a stranded Pending row, a re-call of the SAME (run, key)
+        // hits the unique index → Duplicate replaying the Failed terminal — it does NOT make a fresh claim, so the
+        // interrupted side effect is never re-run. The run is unblocked (a terminal error) instead of hanging InFlight.
+        var teamId = await SeedTeamAsync();
+        var runId = Guid.NewGuid();
+        var at = DateTimeOffset.UtcNow;
+        const string key = "git.open_pr:stranded";
+
+        await SeedAgentRunAsync(teamId, runId, AgentRunStatus.Failed, at - TimeSpan.FromMinutes(1));   // worker lease expired → provably gone
+        await SeedToolCallAsync(teamId, runId, ToolCallLedgerStatus.Pending, "git.open_pr", key, at);
+
+        using (var scope = _fixture.BeginScope())
+            (await Svc(scope).ExpireStaleToolCallsAsync(at, CancellationToken.None)).ShouldBeGreaterThanOrEqualTo(1, "the sweep terminalized at least this run's stranded row");
+
+        using var scope2 = _fixture.BeginScope();
+        var reclaim = await Svc(scope2).TryClaimAsync(runId, teamId, "git.open_pr", key, InputHash, 0, CancellationToken.None);
+
+        reclaim.Outcome.ShouldBe(ToolCallClaimOutcome.Duplicate, "the reaped row is terminal → a re-call dedups (replays), never re-runs the side effect");
+        reclaim.PriorStatus.ShouldBe(ToolCallLedgerStatus.Failed);
+    }
+
+    private async Task SeedAgentRunAsync(Guid teamId, Guid runId, AgentRunStatus status, DateTimeOffset leaseExpiresAt)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+
+        db.AgentRun.Add(new AgentRun { Id = runId, TeamId = teamId, Harness = "codex-cli", Status = status, LeaseExpiresAt = leaseExpiresAt, CreatedBy = SystemUsers.SeederId, LastModifiedBy = SystemUsers.SeederId });
+
+        await db.SaveChangesAsync();
+    }
+
+    private async Task<Guid> SeedToolCallAsync(Guid teamId, Guid runId, ToolCallLedgerStatus status, string toolKind, string key, DateTimeOffset at)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+
+        var id = Guid.NewGuid();
+        db.ToolCallLedger.Add(new ToolCallLedger
+        {
+            Id = id, TeamId = teamId, AgentRunId = runId, ToolKind = toolKind, IdempotencyKey = key, InputHash = InputHash, Status = status,
+            CreatedDate = at, LastModifiedDate = at, CreatedBy = SystemUsers.SeederId, LastModifiedBy = SystemUsers.SeederId,
+        });
+
+        await db.SaveChangesAsync();
+        return id;
     }
 
     private async Task SeedDecisionRowAsync(Guid teamId, Guid runId, Guid id, ToolCallLedgerStatus status, DateTimeOffset createdDate, string toolKind = DecisionToolKinds.DecisionRequest, DateTimeOffset? approvedAt = null)

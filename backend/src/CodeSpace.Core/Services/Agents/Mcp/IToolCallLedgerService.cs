@@ -4,6 +4,7 @@ using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Decisions;
+using CodeSpace.Messages.Enums;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
 
@@ -91,6 +92,23 @@ public interface IToolCallLedgerService
     /// one winner via the same CAS); team-agnostic; bounded per sweep (cap logged, never silently truncated).
     /// </summary>
     Task<IReadOnlyList<TimedOutDecision>> ExpireStaleDecisionsAsync(DateTimeOffset now, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Stranded-execution reaper (D6): terminalize a side-effecting tool-call row left non-terminal by a HARD crash —
+    /// a SIGKILL between the Pending INSERT (<see cref="TryClaimAsync"/>) and the recovery write, the one window
+    /// <c>RecordInterruptedThenRethrow</c> can't cover. Without it the deterministic key makes a re-call hit
+    /// <see cref="ToolCallClaimOutcome.InFlight"/> forever and the interrupted call can never reach a terminal. Candidate
+    /// set: <c>Status IN (Pending, Running) AND ToolKind != decision.request</c> (decisions terminate via
+    /// <see cref="ExpireStaleDecisionsAsync"/>) <c>AND the owning AgentRun is BOTH terminal AND past its worker's lease</c>
+    /// (<c>LeaseExpiresAt &lt; now</c>). The lease is the false-positive guard: the executor renews it on every heartbeat
+    /// THROUGHOUT a long tool call, so a LIVE worker (even mid-way through a multi-minute <c>run_command</c> under a
+    /// just-cancelled run) holds a valid lease and is NEVER reaped — only a PROVABLY-dead worker's stranded tool is
+    /// terminalized (the same liveness signal <c>AgentRunReconcilerService</c> uses). Each candidate gets a per-row
+    /// single-winner CAS <c>Pending/Running → Failed</c>. Exactly-once is PRESERVED: a re-call of the same key now reads
+    /// the terminal Failed and replays it (never re-executes the side effect). Team-agnostic; bounded per sweep (cap
+    /// logged, never silently truncated). Returns the count terminalized.
+    /// </summary>
+    Task<int> ExpireStaleToolCallsAsync(DateTimeOffset now, CancellationToken cancellationToken);
 
     /// <summary>Count a run's OTHER pending agent-grain decisions — the AwaitingApproval <c>decision.request</c> rows for <paramref name="agentRunId"/> whose idempotency key is NOT <paramref name="excludeIdempotencyKey"/> (Decision substrate D5c per-run cap). Excluding the key being raised keeps a re-issue of an already-pending decision exempt (it replays, AC1). NOT try/caught — a fault propagates so an over-cap check under DB stress fails closed.</summary>
     Task<int> CountPendingDecisionsAsync(Guid agentRunId, Guid teamId, string excludeIdempotencyKey, CancellationToken cancellationToken);
@@ -330,6 +348,64 @@ public sealed class ToolCallLedgerService : IToolCallLedgerService, IScopedDepen
             .ExecuteUpdateAsync(s => s
                 .SetProperty(l => l.Status, ToolCallLedgerStatus.Expired)
                 .SetProperty(l => l.Error, ApprovalExpiredError)
+                .SetProperty(l => l.LastModifiedDate, now), cancellationToken)
+            .ConfigureAwait(false);
+
+        return affected == 1;
+    }
+
+    /// <summary>The audit reason stamped on a stranded execution row the reaper fails. The replay path surfaces it to the model on a re-call (the deterministic key replays this terminal instead of hanging InFlight forever). "outcome unknown" is HONEST: the crash window spans before AND after the side effect, so the reaper can't claim it didn't run.</summary>
+    public const string InterruptedError = "tool call interrupted by a host crash before recording a result; its side effect may or may not have run (outcome unknown) — re-issue only if the operation is idempotent";
+
+    /// <summary>The terminal <see cref="AgentRunStatus"/> set, derived ONCE from the state machine so the stranded-reaper predicate can't drift from <see cref="AgentRunStateMachine.IsTerminal"/> (mirrors the StuckRunReconciler's NonTerminalDecisionStatuses discipline).</summary>
+    private static readonly AgentRunStatus[] TerminalAgentRunStatuses = Enum.GetValues<AgentRunStatus>().Where(AgentRunStateMachine.IsTerminal).ToArray();
+
+    public async Task<int> ExpireStaleToolCallsAsync(DateTimeOffset now, CancellationToken cancellationToken)
+    {
+        // Candidate set (bounded): a side-effecting execution row left non-terminal whose owning run is BOTH already
+        // terminal (the run has ended — user cancel / reconciler abandon / completion) AND past its worker's lease (the
+        // worker is PROVABLY gone). The lease is the load-bearing liveness signal: the executor's heartbeat renews
+        // LeaseExpiresAt every AgentRunLiveness.HeartbeatInterval THROUGHOUT a long tool call (the heartbeat loop runs
+        // concurrently with the whole execution), so a LIVE worker — even one mid-way through a 30-min run_command under a
+        // just-cancelled run — always holds a valid lease and is NEVER reaped; only once the worker actually dies (lease
+        // expires, the SAME signal AgentRunReconcilerService uses) is its stranded tool terminalized. ToolKind !=
+        // DecisionRequest is load-bearing — a parked decision row is Pending/AwaitingApproval too, and terminates via
+        // ExpireStaleDecisionsAsync. Take ExpiryBatchSize + 1 so a full page tells us the sweep was capped (no silent truncation).
+        var candidates = await _db.ToolCallLedger.AsNoTracking()
+            .Where(l => (l.Status == ToolCallLedgerStatus.Pending || l.Status == ToolCallLedgerStatus.Running)
+                        && l.ToolKind != DecisionToolKinds.DecisionRequest
+                        && _db.AgentRun.Any(r => r.Id == l.AgentRunId
+                                                 && TerminalAgentRunStatuses.Contains(r.Status)
+                                                 && (r.LeaseExpiresAt == null || r.LeaseExpiresAt < now)))
+            .OrderBy(l => l.CreatedDate)
+            .Take(ExpiryBatchSize + 1)
+            .Select(l => l.Id)
+            .ToListAsync(cancellationToken).ConfigureAwait(false);
+
+        var capped = candidates.Count > ExpiryBatchSize;
+
+        var failed = 0;
+        foreach (var id in candidates.Take(ExpiryBatchSize))
+            if (await TryFailStrandedOneAsync(id, now, cancellationToken).ConfigureAwait(false))
+                failed++;
+
+        if (failed > 0) _logger.LogInformation("Stranded tool-call reaper terminalized {Failed} interrupted side-effecting call(s)", failed);
+
+        if (capped) _logger.LogWarning("Stranded tool-call reaper hit the per-sweep cap of {Cap} — a backlog remains for the next tick", ExpiryBatchSize);
+
+        return failed;
+    }
+
+    // Per-row single-winner CAS Pending/Running → Failed (mirrors TryExpireOneAsync). The Status IN (Pending, Running)
+    // guard is the single-winner: a concurrent recovery write (the worker recording its own terminal, or a racing sweep)
+    // moves the row first → affected 0 → skip cleanly, so the reaper can NEVER clobber a real result with the interrupted error.
+    private async Task<bool> TryFailStrandedOneAsync(Guid ledgerId, DateTimeOffset now, CancellationToken cancellationToken)
+    {
+        var affected = await _db.ToolCallLedger
+            .Where(l => l.Id == ledgerId && (l.Status == ToolCallLedgerStatus.Pending || l.Status == ToolCallLedgerStatus.Running))
+            .ExecuteUpdateAsync(s => s
+                .SetProperty(l => l.Status, ToolCallLedgerStatus.Failed)
+                .SetProperty(l => l.Error, InterruptedError)
                 .SetProperty(l => l.LastModifiedDate, now), cancellationToken)
             .ConfigureAwait(false);
 

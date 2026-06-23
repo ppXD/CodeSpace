@@ -827,6 +827,8 @@ public class McpRequestHandlerTests
             throw new NotImplementedException();
         public Task<IReadOnlyList<CodeSpace.Messages.Decisions.TimedOutDecision>> ExpireStaleDecisionsAsync(DateTimeOffset now, CancellationToken ct) =>
             throw new NotImplementedException();
+        public Task<int> ExpireStaleToolCallsAsync(DateTimeOffset now, CancellationToken ct) =>
+            throw new NotImplementedException();
         public Task<int> CountPendingDecisionsAsync(Guid agentRunId, Guid teamId, string excludeIdempotencyKey, CancellationToken ct) =>
             throw new NotImplementedException();
         public Task<Guid?> FindBlockingDecisionIdAsync(Guid agentRunId, CancellationToken ct) =>
