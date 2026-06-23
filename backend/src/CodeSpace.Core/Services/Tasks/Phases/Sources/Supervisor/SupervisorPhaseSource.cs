@@ -53,9 +53,11 @@ public sealed class SupervisorPhaseSource : IRunPhaseSource, IScopedDependency
     /// <summary>The pure projection step — decisions + the already-resolved ground-truth agent statuses → phases. Separated from the DB read so it is unit-testable without a DbContext. One phase per decision, PLUS the model-authored semantic phases (L4 arc C) when the plan grouped its subtasks; a flat plan adds none (the per-decision board verbatim).</summary>
     public static IReadOnlyList<RunPhase> ProjectDecisions(IReadOnlyList<SupervisorDecisionRecord> decisions, IReadOnlyDictionary<Guid, AgentRunStatus> agentStatusById)
     {
-        var phases = decisions.Select(d => ToPhase(d, agentStatusById)).ToList();
+        var agentResultById = AgentResultsById(decisions);
 
-        phases.AddRange(AuthoredPhases(decisions, agentStatusById));
+        var phases = decisions.Select(d => ToPhase(d, agentStatusById, agentResultById)).ToList();
+
+        phases.AddRange(AuthoredPhases(decisions, agentStatusById, agentResultById));
 
         return phases;
     }
@@ -67,7 +69,7 @@ public sealed class SupervisorPhaseSource : IRunPhaseSource, IScopedDependency
     /// its grouped subtasks (a phase's <c>subtaskIds</c> mapped through the spawn payload's <c>subtaskIds[i]</c> ↔ outcome
     /// <c>agentRunIds[i]</c> staging order), with the ground-truth status; its status folds from those children.
     /// </summary>
-    private static IReadOnlyList<RunPhase> AuthoredPhases(IReadOnlyList<SupervisorDecisionRecord> decisions, IReadOnlyDictionary<Guid, AgentRunStatus> agentStatusById)
+    private static IReadOnlyList<RunPhase> AuthoredPhases(IReadOnlyList<SupervisorDecisionRecord> decisions, IReadOnlyDictionary<Guid, AgentRunStatus> agentStatusById, IReadOnlyDictionary<Guid, SupervisorAgentResult> agentResultById)
     {
         // The LATEST plan — matching the executor, which resolves a spawn's subtasks from the most recent plan
         // (ResolvePlannedSubtasks). On a re-plan, the phases must track the same plan the spawns were built from.
@@ -78,15 +80,15 @@ public sealed class SupervisorPhaseSource : IRunPhaseSource, IScopedDependency
 
         var subtaskAgents = SubtaskAgentMap(decisions);
 
-        return authored.Select((phase, index) => ToAuthoredPhase(phase, index, plan!, subtaskAgents, agentStatusById)).ToList();
+        return authored.Select((phase, index) => ToAuthoredPhase(phase, index, plan!, subtaskAgents, agentStatusById, agentResultById)).ToList();
     }
 
-    private static RunPhase ToAuthoredPhase(SupervisorPlanPhase phase, int index, SupervisorDecisionRecord plan, IReadOnlyDictionary<string, Guid> subtaskAgents, IReadOnlyDictionary<Guid, AgentRunStatus> agentStatusById)
+    private static RunPhase ToAuthoredPhase(SupervisorPlanPhase phase, int index, SupervisorDecisionRecord plan, IReadOnlyDictionary<string, Guid> subtaskAgents, IReadOnlyDictionary<Guid, AgentRunStatus> agentStatusById, IReadOnlyDictionary<Guid, SupervisorAgentResult> agentResultById)
     {
         var agents = phase.SubtaskIds
             .Select(subtaskAgents.GetValueOrDefault)
             .Where(id => id != Guid.Empty && agentStatusById.ContainsKey(id))
-            .Select(id => new PhaseAgentRef { AgentRunId = id, Status = agentStatusById[id].ToString() })
+            .Select(id => AgentRefFrom(id, agentStatusById[id], agentResultById))
             .ToList();
 
         return new RunPhase
@@ -161,9 +163,9 @@ public sealed class SupervisorPhaseSource : IRunPhaseSource, IScopedDependency
             .ToDictionary(r => r.Id, r => r.Status);
     }
 
-    private static RunPhase ToPhase(SupervisorDecisionRecord decision, IReadOnlyDictionary<Guid, AgentRunStatus> agentStatusById)
+    private static RunPhase ToPhase(SupervisorDecisionRecord decision, IReadOnlyDictionary<Guid, AgentRunStatus> agentStatusById, IReadOnlyDictionary<Guid, SupervisorAgentResult> agentResultById)
     {
-        var agents = ChildAgentRefs(decision, agentStatusById);
+        var agents = ChildAgentRefs(decision, agentStatusById, agentResultById);
 
         return new RunPhase
         {
@@ -182,11 +184,34 @@ public sealed class SupervisorPhaseSource : IRunPhaseSource, IScopedDependency
     }
 
     /// <summary>For spawn/retry: the real agent refs the outcome staged, with the GROUND-TRUTH status (an unfound id — e.g. a Pending outcome with none yet — is simply omitted). Every other verb: no children.</summary>
-    private static IReadOnlyList<PhaseAgentRef> ChildAgentRefs(SupervisorDecisionRecord decision, IReadOnlyDictionary<Guid, AgentRunStatus> agentStatusById) =>
+    private static IReadOnlyList<PhaseAgentRef> ChildAgentRefs(SupervisorDecisionRecord decision, IReadOnlyDictionary<Guid, AgentRunStatus> agentStatusById, IReadOnlyDictionary<Guid, SupervisorAgentResult> agentResultById) =>
         StagedAgentIds(decision)
             .Where(agentStatusById.ContainsKey)
-            .Select(id => new PhaseAgentRef { AgentRunId = id, Status = agentStatusById[id].ToString() })
+            .Select(id => AgentRefFrom(id, agentStatusById[id], agentResultById))
             .ToList();
+
+    /// <summary>An agent ref carrying its GROUND-TRUTH status plus the compact model/token rollup folded into the ledger (absent — a still-running agent, or an outcome folded before the rollup existed — leaves those fields null). A blank model reads as null (no chip).</summary>
+    private static PhaseAgentRef AgentRefFrom(Guid id, AgentRunStatus status, IReadOnlyDictionary<Guid, SupervisorAgentResult> agentResultById)
+    {
+        var compact = agentResultById.GetValueOrDefault(id);
+
+        return new PhaseAgentRef
+        {
+            AgentRunId = id,
+            Status = status.ToString(),
+            Model = string.IsNullOrWhiteSpace(compact?.Model) ? null : compact!.Model,
+            InputTokens = compact?.InputTokens,
+            OutputTokens = compact?.OutputTokens,
+        };
+    }
+
+    /// <summary>Every spawned agent's compact result (model + realized tokens), keyed by agent-run id — read straight off the staging decisions' folded <c>agentResults</c> (no DB, replay-deterministic). An id is unique to one decision; Last() is a defensive de-dup.</summary>
+    private static IReadOnlyDictionary<Guid, SupervisorAgentResult> AgentResultsById(IReadOnlyList<SupervisorDecisionRecord> decisions) =>
+        decisions
+            .Where(d => SupervisorDecisionKinds.StagesAgents(d.DecisionKind))
+            .SelectMany(d => SupervisorOutcome.ReadAgentResults(d.OutcomeJson))
+            .GroupBy(r => r.AgentRunId)
+            .ToDictionary(g => g.Key, g => g.Last());
 
     private static IReadOnlyList<Guid> StagedAgentIds(SupervisorDecisionRecord decision) =>
         SupervisorDecisionKinds.StagesAgents(decision.DecisionKind)

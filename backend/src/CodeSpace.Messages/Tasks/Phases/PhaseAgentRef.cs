@@ -24,4 +24,13 @@ public sealed record PhaseAgentRef
 
     /// <summary>An optional cheap display label (the harness kind today).</summary>
     public string? Label { get; init; }
+
+    /// <summary>The model the agent ran on (e.g. a pinned <c>claude-*</c>), or null when unpinned/unknown. Populated for SUPERVISOR-spawned agents (off the folded <c>agentResults</c> compact); null for a plain node/map agent (a later projection slice). Open string — never switched on.</summary>
+    public string? Model { get; init; }
+
+    /// <summary>Input (prompt) tokens the agent consumed, or null when unknown (a plain node/map agent, or a harness that reported none). Populated for SUPERVISOR-spawned agents off the durable ledger — no extra query.</summary>
+    public int? InputTokens { get; init; }
+
+    /// <summary>Output (completion) tokens the agent produced, or null when unknown. See <see cref="InputTokens"/>.</summary>
+    public int? OutputTokens { get; init; }
 }

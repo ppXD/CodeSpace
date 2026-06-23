@@ -1,6 +1,8 @@
+using System.Text.Json;
 using Autofac;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
+using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Tasks.Phases.Sources.Supervisor;
 using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.IntegrationTests.Workflows.Infrastructure;
@@ -77,6 +79,36 @@ public sealed class SupervisorPhaseProjectionFlowTests
 
         phases.ShouldNotContain(p => p.Kind == "phase", "a flat plan adds no semantic phases — the board is the per-decision tape verbatim");
         phases.Select(p => p.Label).ShouldBe(new[] { "Plan", "Stop" });
+    }
+
+    [Fact]
+    public async Task A_spawn_surfaces_each_agents_model_and_token_rollup_through_the_source()
+    {
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedRunAsync(teamId, userId);
+
+        var agentA = Guid.NewGuid();
+        await SeedAgentRunAsync(runId, teamId, agentA, AgentRunStatus.Succeeded);
+
+        // The spawn outcome carries the folded agentResults compact (model + realized tokens) — exactly as the rehydrate writes it.
+        var outcome = JsonSerializer.Serialize(new
+        {
+            agentCount = 1,
+            agentRunIds = new[] { agentA.ToString() },
+            agentResults = new[] { new SupervisorAgentResult { AgentRunId = agentA, Status = "Succeeded", Model = "claude-opus-4", InputTokens = 9000, OutputTokens = 2100 } },
+        }, AgentJson.Options);
+
+        await SeedDecisionAsync(runId, teamId, 1, SupervisorDecisionKinds.Spawn, """{"subtaskIds":["sa"]}""", outcome);
+
+        IReadOnlyList<RunPhase> phases;
+        using (var scope = _fixture.BeginScope())
+            phases = await scope.Resolve<SupervisorPhaseSource>().ContributeAsync(new RunPhaseContext { RunId = runId, TeamId = teamId }, CancellationToken.None);
+
+        var agent = phases.Single(p => p.Kind == SupervisorDecisionKinds.Spawn).Agents.Single();
+        agent.AgentRunId.ShouldBe(agentA);
+        agent.Model.ShouldBe("claude-opus-4", "the folded model survives the jsonb round-trip + ReadAgentResults");
+        agent.InputTokens.ShouldBe(9000);
+        agent.OutputTokens.ShouldBe(2100);
     }
 
     // ─── Seeding ───
