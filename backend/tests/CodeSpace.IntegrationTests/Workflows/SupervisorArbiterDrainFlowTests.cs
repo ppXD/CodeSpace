@@ -4,14 +4,18 @@ using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Agents.Mcp;
+using CodeSpace.Core.Services.Agents.ModelCredentials;
+using CodeSpace.Core.Services.Credentials;
 using CodeSpace.Core.Services.Decisions;
 using CodeSpace.Core.Services.Supervisor;
 using CodeSpace.Core.Services.Supervisor.Arbiter;
+using CodeSpace.Core.Services.Workflows.Llm;
 using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.IntegrationTests.Workflows.Infrastructure;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Decisions;
+using CodeSpace.Messages.Dtos.Agents;
 using CodeSpace.Messages.Dtos.Decisions;
 using CodeSpace.Messages.Enums;
 using Microsoft.EntityFrameworkCore;
@@ -101,6 +105,39 @@ public sealed class SupervisorArbiterDrainFlowTests
         answer.AnsweredBy.ShouldBe(DecisionAnsweredByKinds.Supervisor, "the supervisor arbiter, not a human, recorded it");
         answer.SelectedOptions.ShouldBe(new[] { "a" });
         answer.Rationale.ShouldBe("low-risk + recommended", "the rationale is durable on the answer (AC3 — never silent)");
+    }
+
+    [Fact]
+    public async Task The_real_arbiter_resolves_the_brain_model_and_auto_answers_a_low_risk_child_through_the_real_drain()
+    {
+        // The REAL LlmDecisionArbiter (resolve the brain-model row → frame the prompt → structured reply → project) wired
+        // through the REAL rehydrate + drain + ledger — only the brain's STRUCTURED CLIENT is faked (a schema-valid
+        // answer), so this is the always-green substrate twin of the live RealModel arbiter gate: it proves the
+        // production arbiter path end-to-end (real pool resolution + real auto-answer floor + real ledger CAS) WITHOUT a
+        // live key. Threads a real supervisorModelId via goalConfig — the trap the scripted tests sidestep with null.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedSupervisorRunAsync(teamId, userId);
+
+        var childRunId = Guid.NewGuid();
+        await SeedChildAgentRunAsync(runId, teamId, childRunId);
+        await SeedSpawnDecisionAsync(runId, teamId, sequence: 1, SupervisorDecisionStatus.Succeeded, childRunId);
+        var decisionId = await SeedChildDecisionAsync(teamId, childRunId, "pick a path", DecisionRiskLevels.Low, DecisionPolicies.SupervisorFirst);
+
+        var brainModelId = await SeedBrainModelAsync(teamId, FakeProvider, "test-model");
+
+        using var scope = _fixture.BeginScope();
+        var arbiter = new LlmDecisionArbiter(new LLMClientRegistry(new ILLMClient[] { new FakeStructuredArbiterClient(FakeProvider, "a") }), scope.Resolve<IModelPoolSelector>());
+        var service = BuildService(scope, arbiter);
+
+        var context = await service.RehydrateFromDecisionLogAsync(runId, teamId, NodeId, Goal, new SupervisorGoalConfig { SupervisorModelId = brainModelId }, CancellationToken.None);
+        await service.ArbitratePendingChildDecisionsAsync(context, CancellationToken.None);
+
+        var row = await ReadLedgerAsync(decisionId, teamId);
+        row.Status.ShouldBe(ToolCallLedgerStatus.Succeeded, "the real arbiter resolved the seeded brain model and answered the low-risk child through the real ledger CAS");
+
+        var answer = JsonSerializer.Deserialize<DecisionAnswer>(row.ResultJson!, Json)!;
+        answer.AnsweredBy.ShouldBe(DecisionAnsweredByKinds.Supervisor, "the real supervisor arbiter recorded it, not a human");
+        answer.SelectedOptions.ShouldBe(new[] { "a" });
     }
 
     [Fact]
@@ -210,6 +247,24 @@ public sealed class SupervisorArbiterDrainFlowTests
 
         public Task<ArbiterVerdict> DecideAsync(PendingDecision decision, Guid teamId, Guid? supervisorModelId, string goal, CancellationToken cancellationToken) =>
             Task.FromResult(_verdict);
+    }
+
+    private const string FakeProvider = "TestArbiter";
+
+    /// <summary>A deterministic structured client standing in for the brain — returns a schema-valid arbiter ANSWER for the given option id, so the REAL arbiter's resolve→prompt→project→answer path runs end-to-end without a live key. Its provider matches the seeded brain credential so the arbiter's provider-routing selects it.</summary>
+    private sealed class FakeStructuredArbiterClient : ILLMClient, IStructuredLLMClient
+    {
+        private readonly string _option;
+
+        public FakeStructuredArbiterClient(string provider, string option) { Provider = provider; _option = option; }
+
+        public string Provider { get; }
+
+        public Task<LLMCompletion> CompleteAsync(LLMCompletionRequest request, CancellationToken cancellationToken) =>
+            Task.FromResult(new LLMCompletion { Text = "", Model = request.Model });
+
+        public Task<StructuredLLMCompletion> CompleteStructuredAsync(StructuredLLMCompletionRequest request, CancellationToken cancellationToken) =>
+            Task.FromResult(new StructuredLLMCompletion { Json = JsonSerializer.SerializeToElement(new { kind = "answer", answer = new { selectedOptions = new[] { _option } }, rationale = "deterministic test answer" }), Model = request.Model });
     }
 
     // ─── Seeding ────────────────────────────────────────────────────────────────────
@@ -389,6 +444,28 @@ public sealed class SupervisorArbiterDrainFlowTests
 
         await db.SaveChangesAsync();
         return ledgerId;
+    }
+
+    /// <summary>Seed a KEYED, structured-capable credentialed-model row for the supervisor brain (the real arbiter resolves it via the real <c>IModelPoolSelector</c>). The key is a dummy — the deterministic structured client never calls a real gateway. Returns the row id → the supervisor's <c>supervisorModelId</c>.</summary>
+    private async Task<Guid> SeedBrainModelAsync(Guid teamId, string provider, string modelId)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        var encryptor = scope.Resolve<IPayloadEncryptor>();
+
+        var credId = Guid.NewGuid();
+        db.ModelCredential.Add(new ModelCredential
+        {
+            Id = credId, TeamId = teamId, Provider = provider, DisplayName = "arbiter brain cred",
+            EncryptedApiKey = encryptor.Encrypt("dummy-key"), BaseUrl = null, Status = CredentialStatus.Active,
+            CreatedBy = SystemUsers.SeederId, LastModifiedBy = SystemUsers.SeederId,
+        });
+
+        var rowId = Guid.NewGuid();
+        db.ModelCredentialModel.Add(new ModelCredentialModel { Id = rowId, ModelCredentialId = credId, ModelId = modelId, Source = ModelSource.Manual, SupportsStructuredOutput = true, Enabled = true });
+
+        await db.SaveChangesAsync();
+        return rowId;
     }
 
     private async Task<ToolCallLedger> ReadLedgerAsync(Guid ledgerId, Guid teamId)
