@@ -30,16 +30,18 @@ public sealed class TaskLaunchService : ITaskLaunchService, IScopedDependency
     private readonly ITaskRunSnapshotFactory _factory;
     private readonly IWorkSessionService _sessions;
     private readonly ISessionContextBuilder _sessionContext;
+    private readonly ISessionSummarizer _sessionSummarizer;
     private readonly ISessionBranchResolver _sessionBranches;
     private readonly CodeSpaceDbContext _db;
 
-    public TaskLaunchService(ITaskLaunchSeedProviderRegistry seedProviders, IEffortRouter router, ITaskRunSnapshotFactory factory, IWorkSessionService sessions, ISessionContextBuilder sessionContext, ISessionBranchResolver sessionBranches, CodeSpaceDbContext db)
+    public TaskLaunchService(ITaskLaunchSeedProviderRegistry seedProviders, IEffortRouter router, ITaskRunSnapshotFactory factory, IWorkSessionService sessions, ISessionContextBuilder sessionContext, ISessionSummarizer sessionSummarizer, ISessionBranchResolver sessionBranches, CodeSpaceDbContext db)
     {
         _seedProviders = seedProviders;
         _router = router;
         _factory = factory;
         _sessions = sessions;
         _sessionContext = sessionContext;
+        _sessionSummarizer = sessionSummarizer;
         _sessionBranches = sessionBranches;
         _db = db;
     }
@@ -88,6 +90,10 @@ public sealed class TaskLaunchService : ITaskLaunchService, IScopedDependency
     private async Task<string?> ResolveGroundingAsync(TaskLaunchRequest request, TaskLaunchSeed seed, CancellationToken cancellationToken)
     {
         if (request.ContinueSessionId is not { } sessionId) return seed.GroundingContext;
+
+        // Fold any turns that scrolled out of the recent window into the thread's rolling summary BEFORE building the
+        // digest, so a long thread's early context is preserved. Best-effort + fail-open (no model / error leaves it).
+        await _sessionSummarizer.EnsureSummaryUpToDateAsync(sessionId, request.TeamId, cancellationToken).ConfigureAwait(false);
 
         var priorTurns = await _sessionContext.BuildAsync(sessionId, request.TeamId, cancellationToken).ConfigureAwait(false);
 
