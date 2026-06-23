@@ -2,10 +2,14 @@ import { describe, expect, it } from "vitest";
 
 import type { PhaseAgentRef, RunPhase, RunTimelineEvent } from "@/api/workflows";
 
-import { buildWaves, mergeActivityStream, type AgentWave } from "./runActivity";
+import { buildWaves, formatDuration, mergeActivityStream, waveSummary, type AgentWave } from "./runActivity";
 
 function agent(id: string): PhaseAgentRef {
   return { agentRunId: id, status: "Running" };
+}
+
+function agentWith(status: string): PhaseAgentRef {
+  return { agentRunId: status, status };
 }
 
 function phase(o: Partial<RunPhase> & { id: string }): RunPhase {
@@ -120,5 +124,34 @@ describe("mergeActivityStream", () => {
     const stream = mergeActivityStream([event({ id: "first", occurredAt: t }), event({ id: "second", occurredAt: t })], []);
 
     expect(stream.map((i) => (i.kind === "event" ? i.event.id : ""))).toEqual(["first", "second"]);
+  });
+});
+
+describe("formatDuration", () => {
+  it("renders sub-minute as seconds, minutes as 'Nm Ns', hours as 'Nh Nm'", () => {
+    expect(formatDuration(45_000)).toBe("45s");
+    expect(formatDuration(137_000)).toBe("2m 17s");   // the table's running example
+    expect(formatDuration(3_780_000)).toBe("1h 3m");
+    expect(formatDuration(800)).toBe("0s");           // sub-second floors, never blank
+  });
+
+  it("renders an unknown duration as an em dash", () => {
+    expect(formatDuration(null)).toBe("—");
+    expect(formatDuration(undefined)).toBe("—");
+  });
+});
+
+describe("waveSummary", () => {
+  it("counts the done agents and totals the wave", () => {
+    const s = waveSummary([agentWith("Succeeded"), agentWith("Running"), agentWith("Succeeded")]);
+    expect(s.done).toBe(2);
+    expect(s.total).toBe(3);
+  });
+
+  it("aggregates the headline state: running wins, then failed, then waiting, else done", () => {
+    expect(waveSummary([agentWith("Succeeded"), agentWith("Running")]).state).toBe("running");
+    expect(waveSummary([agentWith("Succeeded"), agentWith("Failed")]).state).toBe("failed");
+    expect(waveSummary([agentWith("Succeeded"), agentWith("Queued")]).state).toBe("waiting");
+    expect(waveSummary([agentWith("Succeeded"), agentWith("Succeeded")]).state).toBe("done");
   });
 });

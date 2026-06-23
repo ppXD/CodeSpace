@@ -2391,9 +2391,48 @@ textarea:-webkit-autofill {
 .acs-root .agent-wave { display: flex; flex-direction: column; gap: 9px; }
 .acs-root .agent-wave-head { display: flex; align-items: center; gap: 7px; font-size: 12px; }
 .acs-root .agent-wave-head > svg { color: var(--muted-2); flex: none; }
-.acs-root .agent-wave-title { font-weight: 600; color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.acs-root .agent-wave-count { margin-left: auto; font-size: 11px; color: var(--muted-2); flex: none; }
+.acs-root .agent-wave-title { font-weight: 600; color: var(--ink); flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.acs-root .agent-wave-count { font-size: 11px; color: var(--muted-2); flex: none; }
+.acs-root .agent-wave-state { text-transform: capitalize; }
+.acs-root .agent-wave-state[data-state="running"] { color: var(--accent); }
+.acs-root .agent-wave-state[data-state="done"] { color: #1F6B3F; }
+.acs-root .agent-wave-state[data-state="waiting"] { color: #A8590E; }
+.acs-root .agent-wave-state[data-state="failed"] { color: #9E3535; }
 .acs-root .agent-wave-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(185px, 1fr)); gap: 10px; }
+
+/* progress squares — done filled, pending outline; pushed (with the count + toggle) to the head's right edge */
+.acs-root .agent-wave-progress { margin-left: auto; display: inline-flex; gap: 3px; flex: none; }
+.acs-root .agent-wave-progress > i { width: 7px; height: 7px; border-radius: 2px; border: 1px solid var(--line-2); background: transparent; }
+.acs-root .agent-wave-progress > i[data-on] { background: var(--accent); border-color: var(--accent); }
+.acs-root .agent-wave-progress-text { margin-left: auto; font-size: 11px; color: var(--muted-2); flex: none; font-variant-numeric: tabular-nums; }
+
+/* the density toggle — a chevron that points right (collapsed table) → down (expanded tiles) */
+.acs-root .agent-wave-toggle { appearance: none; flex: none; display: inline-flex; align-items: center; justify-content: center; width: 22px; height: 22px; padding: 0; background: transparent; border: 1px solid transparent; border-radius: 6px; color: var(--muted-2); cursor: pointer; transition: background .15s ease, color .15s ease; }
+.acs-root .agent-wave-toggle:hover { background: var(--panel-2); color: var(--ink-2); }
+.acs-root .agent-wave-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.acs-root .agent-wave-toggle > svg { transform: rotate(-90deg); transition: transform .15s ease; }
+.acs-root .agent-wave-toggle[data-open] > svg { transform: rotate(0deg); }
+
+/* the collapsed compact table — the wave's DEFAULT density; warm, no terminal chrome (it is the index, not a terminal) */
+.acs-root .agent-wave-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.acs-root .agent-wave-table thead th { padding: 4px 9px; text-align: left; font-weight: 500; font-size: 10.5px; letter-spacing: .02em; text-transform: uppercase; color: var(--muted-2); border-bottom: 1px solid var(--line); }
+.acs-root .agent-wave-table th.agent-wave-num, .acs-root .agent-wave-table td.agent-wave-num { text-align: right; font-variant-numeric: tabular-nums; color: var(--muted); white-space: nowrap; }
+.acs-root .agent-wave-row { transition: background .12s ease; }
+.acs-root .agent-wave-row > td { padding: 6px 9px; border-bottom: 1px solid var(--line); }
+.acs-root .agent-wave-row:last-child > td { border-bottom: none; }
+.acs-root .agent-wave-row:hover { background: var(--panel-2); }
+.acs-root .agent-wave-row[data-selected], .acs-root .agent-wave-row[data-open] { background: var(--accent-soft); }
+.acs-root .agent-wave-row[data-state="done"] { opacity: .6; }
+.acs-root .agent-wave-cell-name { display: flex; align-items: center; gap: 7px; min-width: 0; }
+.acs-root .agent-wave-dot { width: 7px; height: 7px; border-radius: 50%; flex: none; background: var(--muted-2); }
+.acs-root .agent-wave-dot[data-state="running"] { background: var(--accent); animation: agentTilePulse 1.5s ease-in-out infinite; }
+.acs-root .agent-wave-dot[data-state="done"] { background: #1F6B3F; }
+.acs-root .agent-wave-dot[data-state="waiting"] { background: #A8590E; }
+.acs-root .agent-wave-dot[data-state="failed"] { background: #9E3535; }
+.acs-root .agent-wave-name { appearance: none; background: none; border: none; padding: 0; cursor: pointer; text-align: left; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11.5px; color: var(--ink-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.acs-root .agent-wave-name:hover { text-decoration: underline; }
+.acs-root .agent-wave-name:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 3px; }
+.acs-root .agent-wave-model { flex: none; font-size: 10px; color: var(--muted-2); background: var(--panel-2); border: 1px solid var(--line); border-radius: 4px; padding: 0 5px; max-width: 130px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 /* the light terminal tile — mac-terminal chrome over a warm surface (the ONLY terminal-styled element; the dark
    profile is deferred to global dark mode). A read-only live-log preview, never an interactive shell. */
@@ -2428,7 +2467,7 @@ textarea:-webkit-autofill {
 .acs-root .agent-tile-cursor { display: inline-block; width: 6px; height: 11px; margin-left: 3px; vertical-align: -1px; background: var(--ink); animation: agentTileBlink 1.05s steps(1) infinite; }
 @keyframes agentTilePulse { 0%, 100% { opacity: 1; } 50% { opacity: .4; } }
 @keyframes agentTileBlink { 0%, 48% { opacity: 1; } 49%, 100% { opacity: 0; } }
-@media (prefers-reduced-motion: reduce) { .acs-root .agent-tile-live, .acs-root .agent-tile-cursor { animation: none; } }
+@media (prefers-reduced-motion: reduce) { .acs-root .agent-tile-live, .acs-root .agent-tile-cursor, .acs-root .agent-wave-dot { animation: none; } }
 /* the expanded terminal window — one per wave, under the grid. Light mac chrome; read-only scrollback + a tool-calls tab. */
 .acs-root .agent-terminal { margin-top: 11px; background: var(--panel); border: 1px solid var(--line-2); border-radius: 11px; overflow: hidden; box-shadow: 0 2px 12px rgba(0,0,0,.05); }
 .acs-root .agent-terminal-bar { display: flex; align-items: center; gap: 8px; padding: 8px 12px; background: var(--panel-2); border-bottom: 1px solid var(--line); }
