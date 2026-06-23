@@ -57,6 +57,14 @@ public class WorkflowRunsController : ControllerBase
         return result == null ? NotFound() : Ok(result);
     }
 
+    /// <summary>The run's narrative timeline — the merged, chronologically-sorted events across every source (run/node lifecycle, …). Foreign / absent → 404.</summary>
+    [HttpGet("{runId:guid}/timeline")]
+    public async Task<IActionResult> GetTimeline([FromRoute] Guid runId, CancellationToken cancellationToken)
+    {
+        var result = await _mediator.Send(new GetRunTimelineQuery { RunId = runId }, cancellationToken).ConfigureAwait(false);
+        return result == null ? NotFound() : Ok(result);
+    }
+
     /// <summary>Replay an existing run onto a fresh run id (plain values frozen from snapshot, secrets re-resolved). Returns the new run id.</summary>
     [HttpPost("{runId:guid}/replay")]
     public async Task<IActionResult> Replay([FromRoute] Guid runId, CancellationToken cancellationToken)
