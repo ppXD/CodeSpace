@@ -80,7 +80,7 @@ public class WorkSessionContextFlowTests
     {
         var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
         var sessionId = await SeedSessionAsync(teamId);
-        var huge = new string('Z', SessionContextBuilder.MaxResultChars + 500);
+        var huge = new string('Z', SessionTurnText.MaxResultChars + 500);
         await SeedCompletedTurnAsync(teamId, sessionId, turn: 1, goal: "big", summary: huge, branch: null);
 
         var context = await BuildContextAsync(sessionId, teamId);

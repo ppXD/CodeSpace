@@ -56,10 +56,18 @@ public class WorkSession : IEntity<Guid>, IAuditable
     public string? ScopeJson { get; set; }
 
     /// <summary>
-    /// Reserved rolling thread SUMMARY — the distilled context a follow-up turn's seed is primed with.
-    /// NULL until the context-builder slice populates it; carried here now so the column lands with the table.
+    /// Rolling thread SUMMARY — the LLM-distilled context of OLDER turns (those scrolled out of the recent window),
+    /// which a follow-up turn's prompt is primed with ahead of the verbatim recent turns. NULL until a thread grows
+    /// past the recent window (a short thread carries no summary — byte-identical to the pre-summary digest).
     /// </summary>
     public string? Summary { get; set; }
+
+    /// <summary>
+    /// Watermark for <see cref="Summary"/>: the highest <c>WorkflowRun.SessionTurnIndex</c> the summary already
+    /// covers. The summarizer folds only turns ABOVE this (newly scrolled out of the recent window) into the summary,
+    /// then advances it — so distillation is incremental, never a full re-summarize. NULL = no summary yet.
+    /// </summary>
+    public int? SummaryThroughTurnIndex { get; set; }
 
     public DateTimeOffset CreatedDate { get; set; }
     public Guid CreatedBy { get; set; }
