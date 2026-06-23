@@ -19,10 +19,11 @@ namespace CodeSpace.IntegrationTests.Filters;
 /// mirroring the provider's 401 used to drop the user's session mid "Add repository". Other
 /// provider statuses (404 / 5xx) still mirror through as "provider_error".
 ///
-/// Lives in IntegrationTests (not UnitTests) only because the filter needs the ASP.NET
-/// framework + CodeSpace.Api references; it touches no database, so no Postgres collection.
+/// Lives in IntegrationTests (not UnitTests) because the filter needs the ASP.NET framework +
+/// CodeSpace.Api references the lean UnitTests project excludes; tagged Integration per the
+/// one-tier-per-project rule (TESTING.md) even though it touches no database (no Postgres collection).
 /// </summary>
-[Trait("Category", "Unit")]
+[Trait("Category", "Integration")]
 public class GlobalExceptionFilterTests
 {
     [Theory]

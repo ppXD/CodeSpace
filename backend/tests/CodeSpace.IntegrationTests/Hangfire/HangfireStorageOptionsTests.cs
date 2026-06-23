@@ -10,10 +10,11 @@ namespace CodeSpace.IntegrationTests.Hangfire;
 /// The load-bearing assertion is <c>UseSlidingInvisibilityTimeout</c>: agent runs last up to
 /// <see cref="AgentTask.TimeoutSeconds"/> (1800s = 30min), far beyond the 5-minute InvisibilityTimeout,
 /// so WITHOUT a sliding (auto-renewing) lease Hangfire would re-surface a still-running agent job to a
-/// second worker. Lives in IntegrationTests (not UnitTests) only because <see cref="PostgreSqlStorageOptions"/>
-/// is a CodeSpace.Api-only package type; it touches no database, hence no Postgres collection.
+/// second worker. Lives in IntegrationTests (not UnitTests) because <see cref="PostgreSqlStorageOptions"/>
+/// is a CodeSpace.Api-only package type the lean UnitTests project excludes; tagged Integration per the
+/// one-tier-per-project rule (TESTING.md) even though it touches no database (no Postgres collection).
 /// </summary>
-[Trait("Category", "Unit")]
+[Trait("Category", "Integration")]
 public class HangfireStorageOptionsTests
 {
     private static readonly PostgreSqlStorageOptions Options = HangfireRegistrarBase.BuildStorageOptions();
