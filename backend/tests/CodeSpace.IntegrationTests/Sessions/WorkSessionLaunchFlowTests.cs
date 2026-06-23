@@ -43,7 +43,7 @@ public class WorkSessionLaunchFlowTests
     public async Task Launch_opens_a_task_session_and_binds_the_run_to_turn_one()
     {
         var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
-        StopAutoExecute();
+        using var _pauseExec = PauseAutoExecute();
 
         var result = await LaunchAsync(new TaskLaunchRequest
         {
@@ -79,7 +79,7 @@ public class WorkSessionLaunchFlowTests
         // staged session + run commit in ONE transaction. Proves the session is durable end-to-end through the
         // command pipeline, not only via a direct service call.
         var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
-        StopAutoExecute();
+        using var _pauseExec = PauseAutoExecute();
 
         LaunchTaskResult result;
         using (var scope = _fixture.BeginScopeAs(userId, teamId, Roles.Admin))
@@ -106,7 +106,7 @@ public class WorkSessionLaunchFlowTests
     public async Task A_long_goal_is_truncated_to_the_session_title_column()
     {
         var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
-        StopAutoExecute();
+        using var _pauseExec = PauseAutoExecute();
 
         var longGoal = new string('x', WorkSession.TitleMaxLength + 250);
 
@@ -134,7 +134,7 @@ public class WorkSessionLaunchFlowTests
         // S2 always opens a NEW thread per launch; continuing an existing session is a later slice. Two launches ⇒
         // two distinct sessions, and each run is its own session's turn 1 (never turn 2 of the first).
         var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
-        StopAutoExecute();
+        using var _pauseExec = PauseAutoExecute();
 
         var first = await LaunchAsync(BasicChatRequest(teamId, userId, "First task"));
         var second = await LaunchAsync(BasicChatRequest(teamId, userId, "Second task"));
@@ -193,13 +193,32 @@ public class WorkSessionLaunchFlowTests
         return await scope.Resolve<ITaskLaunchService>().LaunchAsync(request, CancellationToken.None);
     }
 
-    /// <summary>Keep the launch's post-commit dispatch from auto-running the engine — these tests assert the staged session/run, not the run outcome.</summary>
-    private void StopAutoExecute()
+    /// <summary>
+    /// Keep the launch's post-commit dispatch from auto-running the engine — these tests assert the STAGED
+    /// session/run (the binding is written at stage time), not the run outcome. The shared
+    /// <see cref="InMemoryBackgroundJobClient"/> is a fixture singleton the whole serial collection reuses and whose
+    /// default <c>AutoExecute=true</c> sibling tests (e.g. the webhook-registration flow) depend on, so the pause is
+    /// SCOPED: disposing it restores the default, leaving no cross-test pollution.
+    /// </summary>
+    private IDisposable PauseAutoExecute()
+    {
+        SetAutoExecute(clearFirst: true, value: false);
+        return new Restore(this);
+    }
+
+    private void SetAutoExecute(bool clearFirst, bool value)
     {
         using var scope = _fixture.BeginScope();
         var jobClient = scope.Resolve<InMemoryBackgroundJobClient>();
-        jobClient.Clear();
-        jobClient.AutoExecute = false;
+        if (clearFirst) jobClient.Clear();
+        jobClient.AutoExecute = value;
+    }
+
+    private sealed class Restore : IDisposable
+    {
+        private readonly WorkSessionLaunchFlowTests _owner;
+        public Restore(WorkSessionLaunchFlowTests owner) { _owner = owner; }
+        public void Dispose() => _owner.SetAutoExecute(clearFirst: false, value: true);   // restore the collection's default
     }
 
     /// <summary>Seeds a provider instance + an active repository in the given team — enough to satisfy (or, cross-team, fail) the launch service's team-scope check.</summary>
