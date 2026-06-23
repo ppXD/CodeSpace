@@ -4,7 +4,9 @@ using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Agents.Sandbox;
 using CodeSpace.Core.Services.Agents.Sandbox.Runners;
+using CodeSpace.Core.Services.Chat;
 using CodeSpace.Core.Services.Supervisor;
+using CodeSpace.Core.Services.Supervisor.Executors;
 using CodeSpace.Core.Services.Workflows.Engine;
 using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.IntegrationTests.Infrastructure.Jobs;
@@ -224,6 +226,50 @@ public sealed class SupervisorWholeLoopE2ETests : IDisposable
         await AssertResolveWasGatedToAnApprovalCardAsync(runId, teamId);
     }
 
+    [Fact]
+    public async Task Supervisor_reconciles_a_real_conflict_after_human_approval_to_a_passing_acceptance_gate()
+    {
+        if (OperatingSystem.IsWindows()) return;          // the fake CLI is a /bin/sh script the runner spawns
+        if (!await GitReadyAsync()) return;               // real git is required for clone/capture/conflict/resolve
+
+        // THE CROWN JEWEL — the full conflict-recovery loop through the real engine + real git, INCLUDING the human
+        // approval of the irreversible re-merge: two agents conflict on one file → merge CONFLICTS → resolve parks for
+        // human approval → [HUMAN APPROVES] → the resolver agent reconciles + verifies → the next merge accepts the
+        // verified resolution → stop accepts the reconciled head.
+        using var cli = new ConflictThenResolveFakeCli();
+
+        SetDecisionScript(s => s.PlanSpawnMergeResolveApprovedMergeStop());
+
+        var jobClient = ResolveJobClient();
+        jobClient.Clear();
+        jobClient.AutoExecute = true;
+
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var conversationId = await SeedConversationAsync(teamId, userId);   // the approval surface the resolve gate parks on
+
+        using var remote = new BareRemote();
+        await remote.SeedBaseAsync(new() { ["check.sh"] = "#!/bin/sh\nexit 0\n", [ConflictThenResolveFakeCli.SharedFile] = "base content\n" });
+        var repoId = await SeedBoundRepositoryAsync(teamId, remote.Url, "main");
+
+        var workflowId = await CreateWholeLoopWorkflowAsync(teamId, userId, repoId, conversationId);
+        var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
+
+        // Drive to the resolve-approval park: plan → spawn(conflict) → merge(CONFLICTED) → resolve→ask_human (parks).
+        await RunEngineAsync(runId);
+        await jobClient.WaitForPendingAsync();
+
+        var token = await AssertParkedOnResolveApprovalAsync(runId, teamId);
+
+        // The human APPROVES the irreversible re-merge → the supervisor re-emits resolve → it EXECUTES → the resolver
+        // agent reconciles + RESOLUTION_VERIFIED → the next merge accepts the verified head → stop accepts it.
+        await AnswerAsync(token, "approve", userId, teamId);
+        await RunEngineAsync(runId);
+        await jobClient.WaitForPendingAsync();
+
+        await AssertRunReachedSuccessAsync(runId);
+        await AssertResolutionVerifiedAndAcceptedAsync(runId, teamId, remote);
+    }
+
     // ─── Assertions ──────────────────────────────────────────────────────────────────
 
     private async Task AssertRunReachedSuccessAsync(Guid runId)
@@ -304,6 +350,94 @@ public sealed class SupervisorWholeLoopE2ETests : IDisposable
 
         askQuestions.Any(p => p.Contains(SupervisorApprovalRequest.ApprovalMarker, StringComparison.Ordinal) && p.Contains("resolve", StringComparison.OrdinalIgnoreCase))
             .ShouldBeTrue("the conflict's resolve attempt surfaced a human approval card for the irreversible re-merge (the un-bypassable safety floor) — it was not auto-resolved");
+    }
+
+    /// <summary>The run is Suspended on the resolve-approval Action wait (the irreversible-HITL floor parked it); returns the wait token the human answers.</summary>
+    private async Task<string> AssertParkedOnResolveApprovalAsync(Guid runId, Guid teamId)
+    {
+        using var verify = _fixture.BeginScope();
+        var db = verify.Resolve<CodeSpaceDbContext>();
+
+        (await db.WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == runId)).Status
+            .ShouldBe(WorkflowRunStatus.Suspended, "the irreversible resolve parks the run on a human-approval Action wait — not a self-advance");
+
+        var wait = await db.WorkflowRunWait.AsNoTracking()
+            .SingleAsync(w => w.RunId == runId && w.WaitKind == WorkflowWaitKinds.Action && w.Status == WorkflowWaitStatuses.Pending);
+        wait.IterationKey.ShouldEndWith("#ask", customMessage: "the supervisor ask_human approval parks on the per-turn ask Action wait");
+
+        var ask = await db.SupervisorDecisionRecord.AsNoTracking()
+            .Where(d => d.SupervisorRunId == runId && d.TeamId == teamId && d.DecisionKind == SupervisorDecisionKinds.AskHuman)
+            .Select(d => d.PayloadJson).SingleAsync();
+        ask.ShouldNotBeNull().Contains(SupervisorApprovalRequest.ApprovalMarker).ShouldBeTrue("the parked card is the resolve approval prompt");
+
+        return wait.Token;
+    }
+
+    private async Task AssertResolutionVerifiedAndAcceptedAsync(Guid runId, Guid teamId, BareRemote remote)
+    {
+        using var verify = _fixture.BeginScope();
+        var db = verify.Resolve<CodeSpaceDbContext>();
+
+        // The approved resolve EXECUTED (a resolve decision is now in the ledger) and its resolver agent verified.
+        var resolve = await db.SupervisorDecisionRecord.AsNoTracking()
+            .Where(d => d.SupervisorRunId == runId && d.TeamId == teamId && d.DecisionKind == SupervisorDecisionKinds.Resolve)
+            .OrderByDescending(d => d.Sequence).Select(d => d.OutcomeJson).FirstAsync();
+        SupervisorOutcome.ReadResolutionVerdict(resolve).ShouldBe(SupervisorResolutionVerdict.Verified,
+            "the human-approved resolver agent reconciled the branches + ended with RESOLUTION_VERIFIED → the resolution is objectively VERIFIED");
+
+        // The terminal stop accepted the reconciled head (the operator floor graded the resolved branch + passed).
+        var stop = await db.SupervisorDecisionRecord.AsNoTracking()
+            .Where(d => d.SupervisorRunId == runId && d.TeamId == teamId && d.DecisionKind == SupervisorDecisionKinds.Stop)
+            .OrderByDescending(d => d.Sequence).Select(d => d.OutcomeJson).FirstAsync();
+        SupervisorOutcome.ReadAcceptanceGradePassed(stop).ShouldBe(true, "the stop graded the accepted resolution's head against check.sh and it PASSED");
+
+        // The reconciled head a downstream git.open_change_set would target — read with the SAME production reader the
+        // node output uses (ReadFinalIntegratedBranch). For an accepted resolution that head IS the verified resolver's
+        // own pushed branch (a re-integration over the original conflicting branches would just re-conflict), surfaced by
+        // the accepting merge as its integration.integratedBranch. Asserting THAT exact branch is live on the remote
+        // proves the loop shipped a real, reviewable reconciled head — not merely that some agent branch survives.
+        var priorDecisions = await ReadPriorDecisionsAsync(db, runId, teamId);
+        var reconciledHead = SupervisorOutcome.ReadFinalIntegratedBranch(priorDecisions);
+        reconciledHead.ShouldNotBeNullOrWhiteSpace(
+            "the accepted resolution must surface a final reviewable head (the verified resolver's reconciled branch) for a downstream PR-open step");
+
+        var branches = await remote.ListBranchesAsync();
+        branches.ShouldContain(reconciledHead!,
+            customMessage: $"the reconciled head git.open_change_set would target must be live on the remote; remote: [{string.Join(", ", branches)}]");
+    }
+
+    /// <summary>Replay every decision row of the run into the <see cref="SupervisorPriorDecision"/> shape the production folders (e.g. <see cref="SupervisorOutcome.ReadFinalIntegratedBranch"/>) consume — so the test reads the run's final head EXACTLY as a downstream node would.</summary>
+    private static async Task<IReadOnlyList<SupervisorPriorDecision>> ReadPriorDecisionsAsync(CodeSpaceDbContext db, Guid runId, Guid teamId) =>
+        await db.SupervisorDecisionRecord.AsNoTracking()
+            .Where(d => d.SupervisorRunId == runId && d.TeamId == teamId)
+            .OrderBy(d => d.Sequence)
+            .Select(d => new SupervisorPriorDecision
+            {
+                Id = d.Id,
+                Sequence = d.Sequence,
+                DecisionKind = d.DecisionKind,
+                Status = d.Status,
+                PayloadJson = d.PayloadJson,
+                OutcomeJson = d.OutcomeJson,
+                Error = d.Error,
+            })
+            .ToListAsync();
+
+    /// <summary>Seed a team channel the supervisor's approval card posts into + parks on.</summary>
+    private async Task<Guid> SeedConversationAsync(Guid teamId, Guid userId)
+    {
+        using var scope = _fixture.BeginScope();
+        var slug = "sup-wl-" + Guid.NewGuid().ToString("N")[..8];
+        return await scope.Resolve<IConversationService>().CreateChannelAsync(teamId, slug, slug, isPrivate: false, userId, CancellationToken.None);
+    }
+
+    /// <summary>Answer the supervisor's ask_human approval card via the REAL token-correlated resume path (a human replying "approve").</summary>
+    private async Task AnswerAsync(string token, string answer, Guid actorUserId, Guid teamId)
+    {
+        using var scope = _fixture.BeginScope();
+        var result = await scope.Resolve<IWorkflowResumeService>()
+            .ResumeByActionTokenAsync(token, RealSupervisorActionExecutor.AnswerActionKey, actorUserId, answer, values: null, teamId, CancellationToken.None);
+        result.ShouldBe(ActionResumeResult.Resumed, "the human's approval resolves the supervisor's resolve-approval wait via the existing token-correlated resume path");
     }
 
     private async Task AssertOneAgentFailedThenTheRetrySucceededAsync(Guid runId)
@@ -387,15 +521,17 @@ public sealed class SupervisorWholeLoopE2ETests : IDisposable
         await scope.Resolve<IWorkflowEngine>().ExecuteRunAsync(runId, CancellationToken.None);
     }
 
-    private async Task<Guid> CreateWholeLoopWorkflowAsync(Guid teamId, Guid userId, Guid repoId)
+    private async Task<Guid> CreateWholeLoopWorkflowAsync(Guid teamId, Guid userId, Guid repoId, Guid? conversationId = null)
     {
         // The supervisor's agents clone repoId, push their branches, and the merge integrates them; the operator's
-        // acceptance floor (check.sh) gates the terminal stop against the integrated head.
+        // acceptance floor (check.sh) gates the terminal stop against the integrated head. A conversationId (when set)
+        // is the approval surface the irreversible `resolve` gate posts its human-approval card into + parks on.
+        var conversationLine = conversationId is { } cid ? $",\n              \"conversationId\": \"{cid}\"" : "";
         var supConfig = $$"""
             {
               "goal": "ship the feature",
               "agentProfile": { "repositoryId": "{{repoId}}", "pushBranch": true, "integrateBranches": true },
-              "acceptanceChecks": ["sh", "check.sh"]
+              "acceptanceChecks": ["sh", "check.sh"]{{conversationLine}}
             }
             """;
 
