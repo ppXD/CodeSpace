@@ -7,6 +7,7 @@ import { RunDetailView } from "@/components/workflows/RunDetailView";
 import { RunFacts } from "@/components/workflows/RunFacts";
 import { RunOutline } from "@/components/workflows/RunOutline";
 import { RunStateHeader } from "@/components/workflows/RunStateHeader";
+import { StopRunButton } from "@/components/workflows/StopRunButton";
 import { decisionsForRun } from "@/components/workflows/runDecisions";
 import { isRunActive, usePendingDecisions, useReplayRun, useRunPhases, useWorkflowRun } from "@/hooks/use-workflows";
 
@@ -64,6 +65,7 @@ function RunDetailPage() {
             )}
           </div>
           <div className="ct-actions">
+            {run.data && <StopRunButton runId={runId} status={run.data.status} />}
             <button
               className="btn btn-primary"
               onClick={() => void onReplay()}
