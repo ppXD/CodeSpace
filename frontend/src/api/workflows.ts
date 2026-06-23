@@ -348,6 +348,12 @@ export interface PhaseAgentRef {
   iterationKey?: string | null;
   status: string;
   label?: string | null;
+  /** The model the agent ran on, or null/absent when unpinned/unknown. Populated for supervisor-spawned agents. */
+  model?: string | null;
+  /** Input (prompt) tokens the agent consumed, or null/absent when unknown. Supervisor-spawned agents only. */
+  inputTokens?: number | null;
+  /** Output (completion) tokens the agent produced, or null/absent when unknown. */
+  outputTokens?: number | null;
 }
 
 /** Mirrors backend `PhaseMetrics` — the small roll-up a phase row shows. */
