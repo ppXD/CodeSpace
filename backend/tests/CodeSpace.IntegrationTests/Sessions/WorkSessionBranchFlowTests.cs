@@ -18,17 +18,20 @@ using Shouldly;
 namespace CodeSpace.IntegrationTests.Sessions;
 
 /// <summary>
-/// S4b — branch continuity: a CONTINUE clones the primary repo at the prior turn's PRODUCED branch, so the agent
-/// builds on earlier CODE (not just the narrative). Proven against real Postgres through the REAL
-/// <see cref="ITaskLaunchService"/> (the resolved branch lands on the new run's frozen agent-code <c>baseRef</c>
-/// input; the workspace provider's clone-at-ref is proven separately by <c>LocalGitWorkspaceProviderTests</c>):
-///   (a) a continue inherits the prior turn's branch; (b) the MOST RECENT produced branch wins, skipping a later
-///   analysis-only turn; (c) no prior branch ⇒ no baseRef ⇒ the repo's default branch (safe fallback); (d) a
-///   different repo never inherits another repo's branch; (e) a fresh launch carries no baseRef (byte-identical).
+/// Branch continuity (S4b + S4b-2): a CONTINUE clones EACH repo the run touches at the prior turn's PRODUCED branch
+/// for THAT repo, so the agent builds on earlier CODE (not just the narrative). Proven against real Postgres through
+/// the REAL <see cref="ITaskLaunchService"/> (the resolved refs land on the new run's frozen agent-code <c>baseRef</c>
+/// [primary] + <c>relatedRepositories[].ref</c> [each related]; the provider's clone-at-ref is proven separately by
+/// <c>LocalGitWorkspaceProviderTests</c>):
+///   (a) a single-repo continue inherits the prior turn's branch; (b) the MOST RECENT produced branch wins, skipping a
+///   later analysis-only turn; (c) no prior branch ⇒ no ref ⇒ the repo's default branch (safe fallback); (d) a
+///   different repo never inherits another repo's branch; (e) a fresh launch carries no ref (byte-identical);
+///   (f) a MULTI-repo continue inherits EACH repo's own prior branch from the prior turn's <c>repositoryResults</c>;
+///   (g) a multi-repo prior turn also feeds a later SINGLE-repo continue's primary (the v1 Count!=1 limitation, fixed).
 ///
 /// <para>Tier: high-fidelity Integration — real launch service + branch resolver over real Postgres; runs are
-/// staged, not executed (the binding is established at launch). v1 is single-repo (the run's <c>branch</c> output);
-/// per-repo continuity for a multi-repo run is the noted follow-on.</para>
+/// staged, not executed (the binding is established at launch). Per-repo branches read from <c>OutputsJson.repository-
+/// Results[].producedBranch</c> (multi-repo) or the flat <c>branch</c> (single-repo).</para>
 /// </summary>
 [Collection(PostgresCollection.Name)]
 [Trait("Category", "Integration")]
@@ -102,22 +105,96 @@ public class WorkSessionBranchFlowTests
     }
 
     [Fact]
-    public async Task Continue_does_not_inherit_a_branch_from_a_multi_repo_prior_turn()
+    public async Task Continue_inherits_each_repos_own_branch_from_a_multi_repo_prior_turn()
     {
-        // v1 trusts ONLY a single-repo turn's branch: a multi-repo turn's OutputsJson.branch is the PRIMARY's, so
-        // attributing it to a repo could clone the wrong branch. Such a turn is skipped → safe fallback to the default
-        // branch (per-repo continuity from RepositoryResults is the noted follow-on).
+        // S4b-2: a multi-repo turn surfaces every writable repo's branch in OutputsJson.repositoryResults; a multi-repo
+        // continue clones EACH repo (primary + related) at its OWN prior branch — no cross-repo bleed.
         var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
         using var _pauseExec = PauseAutoExecute();
         var repoA = await SeedRepositoryAsync(teamId);
         var repoB = await SeedRepositoryAsync(teamId);
         var sessionId = await SeedSessionAsync(teamId);
-        await SeedTurnAsync(teamId, sessionId, 1, new[] { repoA, repoB }, branch: "run-1/primary");
+        await SeedMultiRepoTurnAsync(teamId, sessionId, 1, new Dictionary<Guid, string> { [repoA] = "run-1/a", [repoB] = "run-1/b" });
+
+        var result = await LaunchAsync(ContinueRequest(teamId, userId, sessionId, repoA, "Continue both", related: repoB));
+
+        (await ReadAgentBaseRefAsync(result.RunId)).ShouldBe("run-1/a", "the primary clones at its own prior branch");
+        (await ReadAgentRelatedRefAsync(result.RunId, repoB)).ShouldBe("run-1/b", "the related repo clones at ITS own prior branch — per-repo continuity, no bleed");
+    }
+
+    [Fact]
+    public async Task Continue_single_repo_inherits_the_primary_branch_even_from_a_multi_repo_prior_turn()
+    {
+        // The v1 fix: a multi-repo prior turn was SKIPPED entirely (Count != 1 guard), losing even the primary's
+        // branch. Reading repositoryResults, a later SINGLE-repo continue now correctly inherits the primary's branch.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        using var _pauseExec = PauseAutoExecute();
+        var repoA = await SeedRepositoryAsync(teamId);
+        var repoB = await SeedRepositoryAsync(teamId);
+        var sessionId = await SeedSessionAsync(teamId);
+        await SeedMultiRepoTurnAsync(teamId, sessionId, 1, new Dictionary<Guid, string> { [repoA] = "run-1/a", [repoB] = "run-1/b" });
+
+        var result = await LaunchAsync(ContinueRequest(teamId, userId, sessionId, repoA, "Continue just A"));
+
+        (await ReadAgentBaseRefAsync(result.RunId)).ShouldBe("run-1/a",
+            "a multi-repo prior turn now contributes the primary's branch (was skipped under the v1 Count!=1 guard)");
+    }
+
+    [Fact]
+    public async Task Continue_accumulates_each_repos_newest_branch_across_mixed_single_and_multi_repo_turns()
+    {
+        // The heart of the generalized resolver: single-repo turns (flat branch) and multi-repo turns
+        // (repositoryResults) BOTH feed one per-repo map, newest-wins per repo. Turn 1 produced both A + B; turn 2
+        // (single-repo) re-touched only A. A continue over {A, B} must get A's NEWER branch AND B's OLDER one
+        // (backfill — B's earlier code carries forward even though turn 2 didn't touch it).
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        using var _pauseExec = PauseAutoExecute();
+        var repoA = await SeedRepositoryAsync(teamId);
+        var repoB = await SeedRepositoryAsync(teamId);
+        var sessionId = await SeedSessionAsync(teamId);
+        await SeedMultiRepoTurnAsync(teamId, sessionId, 1, new Dictionary<Guid, string> { [repoA] = "run-1/a", [repoB] = "run-1/b" });
+        await SeedCodeTurnAsync(teamId, sessionId, 2, repoA, "run-2/a");   // a later SINGLE-repo turn touched only A
+
+        var result = await LaunchAsync(ContinueRequest(teamId, userId, sessionId, repoA, "Continue both", related: repoB));
+
+        (await ReadAgentBaseRefAsync(result.RunId)).ShouldBe("run-2/a", "A's NEWER single-repo branch shadows its older multi-repo one (newest-wins)");
+        (await ReadAgentRelatedRefAsync(result.RunId, repoB)).ShouldBe("run-1/b", "B backfills from the older multi-repo turn — its code carries forward across turns");
+    }
+
+    [Fact]
+    public async Task Continue_inherits_only_the_repo_a_multi_repo_turn_actually_produced()
+    {
+        // A multi-repo turn that produced a branch for A but not B (the common 'only one repo changed' steady state):
+        // A inherits its branch, B falls back to its default — partial per-repo map, no cross-repo mis-attribution.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        using var _pauseExec = PauseAutoExecute();
+        var repoA = await SeedRepositoryAsync(teamId);
+        var repoB = await SeedRepositoryAsync(teamId);
+        var sessionId = await SeedSessionAsync(teamId);
+        await SeedMultiRepoTurnAsync(teamId, sessionId, 1, new Dictionary<Guid, string> { [repoA] = "run-1/a" });   // only A produced a branch
+
+        var result = await LaunchAsync(ContinueRequest(teamId, userId, sessionId, repoA, "Continue both", related: repoB));
+
+        (await ReadAgentBaseRefAsync(result.RunId)).ShouldBe("run-1/a", "A inherits its produced branch");
+        (await ReadAgentRelatedRefAsync(result.RunId, repoB)).ShouldBeNull("B produced no branch — it falls back to its default, never A's");
+    }
+
+    [Fact]
+    public async Task Continue_does_not_inherit_from_a_multi_repo_turn_that_produced_no_per_repo_branches()
+    {
+        // A multi-repo turn that changed nothing surfaces no repositoryResults (and its flat branch can't be attributed
+        // per repo) → no inheritance → the safe default-branch fallback.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        using var _pauseExec = PauseAutoExecute();
+        var repoA = await SeedRepositoryAsync(teamId);
+        var repoB = await SeedRepositoryAsync(teamId);
+        var sessionId = await SeedSessionAsync(teamId);
+        await SeedTurnAsync(teamId, sessionId, 1, new[] { repoA, repoB }, branch: "run-1/primary");   // flat branch only, NO repositoryResults
 
         var result = await LaunchAsync(ContinueRequest(teamId, userId, sessionId, repoA, "Continue"));
 
         (await ReadAgentBaseRefAsync(result.RunId)).ShouldBeNull(
-            "a multi-repo prior turn's primary branch must NOT be attributed to a repo — skip it, fall back to base");
+            "a multi-repo turn with only a flat branch (no per-repo results) attributes nothing — fall back to the default branch");
     }
 
     [Fact]
@@ -146,17 +223,18 @@ public class WorkSessionBranchFlowTests
         await SeedCodeTurnAsync(teamId, sessionId, 2, repoId, "run-2/x");
 
         using var scope = _fixture.BeginScope();
-        var resolved = await scope.Resolve<ISessionBranchResolver>().ResolveStartRefAsync(sessionId, teamId, repoId, CancellationToken.None);
+        var resolved = await scope.Resolve<ISessionBranchResolver>().ResolveStartRefsAsync(sessionId, teamId, new[] { repoId }, CancellationToken.None);
 
-        resolved.ShouldBe("run-2/x", "the resolver returns the newest produced branch for the repo");
+        resolved[repoId].ShouldBe("run-2/x", "the resolver returns the newest produced branch for the repo");
     }
 
     // ─── Helpers ────────────────────────────────────────────────────────────────
 
-    private static TaskLaunchRequest ContinueRequest(Guid teamId, Guid userId, Guid sessionId, Guid repoId, string text) => new()
+    private static TaskLaunchRequest ContinueRequest(Guid teamId, Guid userId, Guid sessionId, Guid repoId, string text, Guid? related = null) => new()
     {
         TeamId = teamId, ActorUserId = userId, SurfaceKind = TaskLaunchSurfaceKinds.Chat,
         TaskText = text, ContinueSessionId = sessionId, RepositoryId = repoId,
+        RelatedRepositories = related is { } r ? new[] { new TaskRelatedRepository { RepositoryId = r, Alias = "related", Access = "write" } } : null,
         RequestedEffort = TaskEffortModes.Quick, Autonomy = "Confined",
     };
 
@@ -169,14 +247,34 @@ public class WorkSessionBranchFlowTests
     /// <summary>Reads the projected agent.code node's <c>baseRef</c> input out of the frozen definition snapshot (null when absent ⇒ default branch).</summary>
     private async Task<string?> ReadAgentBaseRefAsync(Guid runId)
     {
+        var agent = await ReadAgentNodeAsync(runId);
+        return agent.GetProperty("inputs").TryGetProperty("baseRef", out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() : null;
+    }
+
+    /// <summary>Reads a RELATED repo's <c>ref</c> out of the frozen agent.code node's <c>relatedRepositories</c> input (null when the repo/ref is absent ⇒ default branch).</summary>
+    private async Task<string?> ReadAgentRelatedRefAsync(Guid runId, Guid repoId)
+    {
+        var agent = await ReadAgentNodeAsync(runId);
+
+        if (!agent.GetProperty("inputs").TryGetProperty("relatedRepositories", out var arr) || arr.ValueKind != JsonValueKind.Array) return null;
+
+        foreach (var entry in arr.EnumerateArray())
+        {
+            if (entry.TryGetProperty("repositoryId", out var idEl) && idEl.GetString() == repoId.ToString())
+                return entry.TryGetProperty("ref", out var refEl) && refEl.ValueKind == JsonValueKind.String ? refEl.GetString() : null;
+        }
+
+        return null;
+    }
+
+    private async Task<JsonElement> ReadAgentNodeAsync(Guid runId)
+    {
         using var scope = _fixture.BeginScope();
         var db = scope.Resolve<CodeSpaceDbContext>();
         var run = await db.WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == runId);
 
-        var root = JsonDocument.Parse(run.DefinitionSnapshotJson!).RootElement;
-        var agent = root.GetProperty("nodes").EnumerateArray().Single(n => n.GetProperty("id").GetString() == "agent");
-
-        return agent.GetProperty("inputs").TryGetProperty("baseRef", out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() : null;
+        var root = JsonDocument.Parse(run.DefinitionSnapshotJson!).RootElement.Clone();
+        return root.GetProperty("nodes").EnumerateArray().Single(n => n.GetProperty("id").GetString() == "agent");
     }
 
     private async Task<Guid> SeedSessionAsync(Guid teamId)
@@ -192,6 +290,37 @@ public class WorkSessionBranchFlowTests
     /// <summary>Stage a finished single-repo turn that targeted <paramref name="repoId"/> and (optionally) produced a branch — the shape a real single-agent code turn leaves (scope repo + OutputsJson.branch).</summary>
     private Task SeedCodeTurnAsync(Guid teamId, Guid sessionId, int turn, Guid repoId, string? branch) =>
         SeedTurnAsync(teamId, sessionId, turn, new[] { repoId }, branch);
+
+    /// <summary>Stage a finished MULTI-repo turn whose OutputsJson carries per-repo <c>repositoryResults</c> ({ repositoryId, producedBranch }) — the shape a real multi-repo single-agent code turn leaves (scope = the repos; the flat <c>branch</c> mirrors the primary, the first entry).</summary>
+    private async Task SeedMultiRepoTurnAsync(Guid teamId, Guid sessionId, int turn, IReadOnlyDictionary<Guid, string> repoBranches)
+    {
+        using var dbScope = _fixture.BeginScope();
+        var db = dbScope.Resolve<CodeSpaceDbContext>();
+
+        var requestId = Guid.NewGuid();
+        var now = DateTimeOffset.UtcNow;
+
+        db.WorkflowRunRequest.Add(new WorkflowRunRequest
+        {
+            Id = requestId, TeamId = teamId, SourceType = WorkflowRunSourceTypes.Snapshot, ActorType = "user",
+            ActorId = SystemUsers.SeederId, NormalizedPayloadJson = "{}", Status = WorkflowRunRequestStatus.Consumed,
+            ReceivedAt = now, VerifiedAt = now, NormalizedAt = now,
+        });
+
+        var repositoryResults = repoBranches.Select(kv => new { repositoryId = kv.Key.ToString(), producedBranch = kv.Value }).ToList();
+        var outputs = new { branch = repoBranches.Values.First(), repositoryResults };
+
+        db.WorkflowRun.Add(new WorkflowRun
+        {
+            Id = Guid.NewGuid(), TeamId = teamId, RunRequestId = requestId, SourceType = WorkflowRunSourceTypes.Snapshot,
+            Status = WorkflowRunStatus.Success, SessionId = sessionId, SessionTurnIndex = turn,
+            ScopeRepositoryIds = repoBranches.Keys.ToList(),
+            OutputsJson = JsonSerializer.Serialize(outputs),
+            CreatedBy = SystemUsers.SeederId, LastModifiedBy = SystemUsers.SeederId,
+        });
+
+        await db.SaveChangesAsync();
+    }
 
     /// <summary>Stage a finished turn over an arbitrary repo scope (single- or multi-repo) with an optional produced branch.</summary>
     private async Task SeedTurnAsync(Guid teamId, Guid sessionId, int turn, IReadOnlyList<Guid> scope, string? branch)

@@ -38,7 +38,7 @@ public sealed class SingleAgentDefinitionBuilder : IWorkflowDefinitionBuilder, I
                 Config = AgentNodeMapping.BuildAgentConfig(context.Seed.Goal, context.AgentProfile, grounding: context.GroundingContext), Inputs = AgentNodeMapping.BuildAgentInputs(context) },
 
         new() { Id = "done", TypeKey = "builtin.terminal", Label = "Done", Config = Empty(),
-                Inputs = TerminalInputs() },
+                Inputs = TerminalInputs(IsMultiRepo(context)) },
     };
 
     private static IReadOnlyList<EdgeDefinition> BuildEdges() => new List<EdgeDefinition>
@@ -47,14 +47,32 @@ public sealed class SingleAgentDefinitionBuilder : IWorkflowDefinitionBuilder, I
         new() { From = "agent", To = "done" },
     };
 
-    /// <summary>The terminal surfaces the agent's result as the run's outputs — the SAME output keys agent.code emits, wired via {{ref}}.</summary>
-    private static JsonElement TerminalInputs() => JsonSerializer.SerializeToElement(new
+    /// <summary>A run is multi-repo when the profile authored related repos — known here at projection time, so the terminal can surface the per-repo change set ONLY when it can be non-empty (a single-repo run never authors related repos).</summary>
+    private static bool IsMultiRepo(TaskBuildContext context) => context.AgentProfile?.RelatedRepositories is { Count: > 0 };
+
+    /// <summary>
+    /// The terminal surfaces the agent's result as the run's outputs — the SAME output keys agent.code emits, wired
+    /// via {{ref}}. A MULTI-repo run ALSO surfaces <c>repositoryResults</c> (each repo's produced branch) so a session
+    /// follow-up can continue each repo from its own prior branch (a session-branch resolver reads it from OutputsJson).
+    /// <para>It is bound ONLY for a multi-repo run: a single-repo run never emits <c>repositoryResults</c> from the
+    /// agent node, so binding it unconditionally would resolve to a <c>repositoryResults: null</c> key in EVERY
+    /// single-repo run's OutputsJson — not byte-identical. Gating on the authored multi-repo intent keeps a single-repo
+    /// run's output untouched.</para>
+    /// </summary>
+    private static JsonElement TerminalInputs(bool multiRepo)
     {
-        status = "{{nodes.agent.outputs.status}}",
-        summary = "{{nodes.agent.outputs.summary}}",
-        changedFiles = "{{nodes.agent.outputs.changedFiles}}",
-        branch = "{{nodes.agent.outputs.branch}}",
-    });
+        var inputs = new Dictionary<string, object?>
+        {
+            ["status"] = "{{nodes.agent.outputs.status}}",
+            ["summary"] = "{{nodes.agent.outputs.summary}}",
+            ["changedFiles"] = "{{nodes.agent.outputs.changedFiles}}",
+            ["branch"] = "{{nodes.agent.outputs.branch}}",
+        };
+
+        if (multiRepo) inputs["repositoryResults"] = "{{nodes.agent.outputs.repositoryResults}}";
+
+        return JsonSerializer.SerializeToElement(inputs);
+    }
 
     private static JsonElement Empty() => JsonDocument.Parse("{}").RootElement.Clone();
 }

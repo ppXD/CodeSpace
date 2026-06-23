@@ -65,11 +65,11 @@ public sealed class TaskLaunchService : ITaskLaunchService, IScopedDependency
         // the agent's prompt so the follow-up builds on earlier work. A fresh launch carries only the seed's own grounding.
         var grounding = await ResolveGroundingAsync(request, seed, cancellationToken).ConfigureAwait(false);
 
-        // …and clone the primary repo at the prior turn's produced branch, so the follow-up builds on earlier CODE
-        // (not just the narrative). Null on a fresh launch / no repo / no prior branch ⇒ the repo's default branch.
-        var primaryBaseRef = await ResolveBaseRefAsync(request, seed, profile, cancellationToken).ConfigureAwait(false);
+        // …and clone EACH repo (primary + related) at the prior turn's produced branch for it, so the follow-up builds
+        // on earlier CODE (not just the narrative). Empty on a fresh launch / no repo / no prior branch ⇒ default branches.
+        var baseRefs = await ResolveBaseRefsAsync(request, seed, profile, cancellationToken).ConfigureAwait(false);
 
-        var context = new TaskBuildContext { Seed = seed, Route = route, AgentProfile = profile, GroundingContext = grounding, PrimaryBaseRef = primaryBaseRef };
+        var context = new TaskBuildContext { Seed = seed, Route = route, AgentProfile = profile, GroundingContext = grounding, BaseRefs = baseRefs };
 
         var handle = await _factory.CreateAndRunAsync(context, request.TeamId, request.ActorUserId, session, cancellationToken).ConfigureAwait(false);
 
@@ -103,15 +103,22 @@ public sealed class TaskLaunchService : ITaskLaunchService, IScopedDependency
         return $"{priorTurns}\n\n{seedGrounding}";
     }
 
-    /// <summary>On a CONTINUE with a primary repo, the prior turn's produced branch for that repo (the projection clones the agent's workspace at it). Null on a fresh launch, an analysis-only run (no repo), or when no prior turn produced a branch (⇒ the repo's default branch — the safe fallback).</summary>
-    private async Task<string?> ResolveBaseRefAsync(TaskLaunchRequest request, TaskLaunchSeed seed, ResolvedAgentProfile profile, CancellationToken cancellationToken)
+    /// <summary>On a CONTINUE, the prior turn's produced branch for EACH repo the run touches (primary + related) — the projection clones each repo's workspace at its own ref. Empty on a fresh launch, an analysis-only run (no repos), or when no prior turn produced a branch for any (⇒ default branches — the safe fallback). A repo absent from the map clones at its default.</summary>
+    private async Task<IReadOnlyDictionary<Guid, string>> ResolveBaseRefsAsync(TaskLaunchRequest request, TaskLaunchSeed seed, ResolvedAgentProfile profile, CancellationToken cancellationToken)
     {
-        if (request.ContinueSessionId is not { } sessionId) return null;
+        if (request.ContinueSessionId is not { } sessionId) return EmptyBaseRefs;
 
-        if ((profile.RepositoryId ?? seed.RepositoryId) is not { } primaryRepoId) return null;
+        var scopeRepoIds = new HashSet<Guid>();
 
-        return await _sessionBranches.ResolveStartRefAsync(sessionId, request.TeamId, primaryRepoId, cancellationToken).ConfigureAwait(false);
+        if ((profile.RepositoryId ?? seed.RepositoryId) is { } primaryRepoId) scopeRepoIds.Add(primaryRepoId);
+        if (profile.RelatedRepositories is { } related) foreach (var r in related) scopeRepoIds.Add(r.RepositoryId);
+
+        if (scopeRepoIds.Count == 0) return EmptyBaseRefs;
+
+        return await _sessionBranches.ResolveStartRefsAsync(sessionId, request.TeamId, scopeRepoIds, cancellationToken).ConfigureAwait(false);
     }
+
+    private static readonly IReadOnlyDictionary<Guid, string> EmptyBaseRefs = new Dictionary<Guid, string>();
 
     /// <summary>
     /// Validates EVERY repo the run touches — the primary (seed's, else request's) PLUS each related (multi-repo) repo —

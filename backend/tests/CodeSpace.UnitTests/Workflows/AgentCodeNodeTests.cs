@@ -137,6 +137,33 @@ public class AgentCodeNodeTests
     }
 
     [Fact]
+    public async Task Related_repository_ref_input_clones_that_repo_at_its_own_branch()
+    {
+        // Session per-repo branch continuity (S4b-2): a relatedRepositories[].ref input pins the prior turn's produced
+        // branch for THAT repo — the node folds it onto the related spec's Ref so the agent clones each repo at its own
+        // branch (the consumer half of the primary baseRef round-trip above; no cross-repo bleed).
+        var web = Guid.NewGuid();
+        var api = Guid.NewGuid();
+        var inputs = new Dictionary<string, JsonElement>
+        {
+            ["repositoryId"] = Str(web.ToString()),
+            ["baseRef"] = Str("run-1/web"),
+            ["relatedRepositories"] = JsonSerializer.SerializeToElement(new[]
+            {
+                new { repositoryId = api.ToString(), alias = "api", access = "write", @ref = "run-1/api" },
+            }),
+        };
+
+        var result = await new AgentCodeNode().RunAsync(BuildContext(RequiredConfig(), resume: null, inputs), CancellationToken.None);
+
+        result.Status.ShouldBe(NodeStatus.Suspended);
+        var task = JsonSerializer.Deserialize<AgentTask>(result.SuspendUntil!.Payload, AgentJson.Options)!;
+
+        task.Workspace!.Repositories.Single(r => r.IsPrimary).Ref.ShouldBe("run-1/web", "the primary clones at its own prior branch");
+        task.Workspace.Repositories.Single(r => r.RepositoryId == api).Ref.ShouldBe("run-1/api", "the related repo clones at ITS own prior branch — per-repo continuity end-to-end through the node");
+    }
+
+    [Fact]
     public async Task Related_repositories_without_a_primary_repository_fails_the_node()
     {
         // Fail loud rather than silently drop the authored multi-repo intent (e.g. an expression-bound primary that

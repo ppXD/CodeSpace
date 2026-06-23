@@ -203,6 +203,68 @@ public class SingleAgentDefinitionBuilderTests
         inputs.GetProperty("summary").GetString().ShouldBe("{{nodes.agent.outputs.summary}}");
     }
 
+    [Fact]
+    public void Terminal_omits_repositoryResults_for_a_single_repo_run_byte_identical()
+    {
+        // A single-repo run never emits repositoryResults from the agent node, so the terminal must NOT bind it —
+        // else EVERY single-repo run's OutputsJson would gain a repositoryResults: null key (not byte-identical).
+        var inputs = TerminalInputsOf(Builder.Build(Context(Seed(), new ResolvedAgentProfile { RepositoryId = Guid.NewGuid() })));
+
+        inputs.TryGetProperty("repositoryResults", out _).ShouldBeFalse(
+            "a single-repo terminal surfaces only the scalar keys — byte-identical to the pre-S4b-2 output");
+        inputs.GetProperty("branch").GetString().ShouldBe("{{nodes.agent.outputs.branch}}", "the flat branch is still surfaced");
+    }
+
+    [Fact]
+    public void Terminal_surfaces_repositoryResults_for_a_multi_repo_run()
+    {
+        // A multi-repo run (authored related repos) surfaces the per-repo change set so a session follow-up can
+        // continue each repo from its own prior branch (the resolver reads OutputsJson.repositoryResults).
+        var def = Builder.Build(Context(Seed(), new ResolvedAgentProfile
+        {
+            RepositoryId = Guid.NewGuid(),
+            RelatedRepositories = new[] { new WorkspaceRepositorySpec { Alias = "api", RepositoryId = Guid.NewGuid(), Access = WorkspaceAccess.Write } },
+        }));
+
+        TerminalInputsOf(def).GetProperty("repositoryResults").GetString().ShouldBe("{{nodes.agent.outputs.repositoryResults}}",
+            "a multi-repo terminal surfaces the per-repo branches for downstream session continuity");
+        RealValidator().Validate(def).IsValid.ShouldBeTrue(customMessage: "the repositoryResults ref must resolve against agent.code's real OutputSchema");
+    }
+
+    [Fact]
+    public void Per_repo_base_refs_thread_onto_the_agent_inputs()
+    {
+        // Session branch continuity: the context's BaseRefs map sets the primary's baseRef + each related repo's ref.
+        var primary = Guid.NewGuid();
+        var related = Guid.NewGuid();
+
+        var context = Context(Seed(), new ResolvedAgentProfile
+        {
+            RepositoryId = primary,
+            RelatedRepositories = new[] { new WorkspaceRepositorySpec { Alias = "api", RepositoryId = related, Access = WorkspaceAccess.Write } },
+        }) with { BaseRefs = new Dictionary<Guid, string> { [primary] = "run-1/primary", [related] = "run-1/api" } };
+
+        var inputs = AgentInputsOf(Builder.Build(context));
+
+        inputs.GetProperty("baseRef").GetString().ShouldBe("run-1/primary", "the primary clones at its prior branch");
+        inputs.GetProperty("relatedRepositories")[0].GetProperty("ref").GetString().ShouldBe("run-1/api", "the related repo clones at ITS prior branch");
+    }
+
+    [Fact]
+    public void No_base_refs_omits_baseRef_and_per_repo_ref_byte_identical()
+    {
+        var primary = Guid.NewGuid();
+        var def = Builder.Build(Context(Seed(), new ResolvedAgentProfile
+        {
+            RepositoryId = primary,
+            RelatedRepositories = new[] { new WorkspaceRepositorySpec { Alias = "api", RepositoryId = Guid.NewGuid(), Access = WorkspaceAccess.Write } },
+        }));
+
+        var inputs = AgentInputsOf(def);
+        inputs.TryGetProperty("baseRef", out _).ShouldBeFalse("no base-refs ⇒ no baseRef key (default branch, byte-identical)");
+        inputs.GetProperty("relatedRepositories")[0].TryGetProperty("ref", out _).ShouldBeFalse("no base-refs ⇒ no per-repo ref key");
+    }
+
     // ─── Helpers ─────────────────────────────────────────────────────────────────
 
     private static JsonElement AgentConfigOf(WorkflowDefinition def) => def.Nodes.Single(n => n.Id == "agent").Config;

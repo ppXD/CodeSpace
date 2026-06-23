@@ -1,19 +1,21 @@
 namespace CodeSpace.Core.Services.Sessions;
 
 /// <summary>
-/// Resolves the git ref a CONTINUING run should clone the primary repo at — session branch continuity: a follow-up
-/// turn starts from the prior turn's PRODUCED branch, so the agent builds on earlier code instead of a fresh checkout
-/// from the default branch. The code-state companion to <see cref="ISessionContextBuilder"/> (which carries the
-/// textual narrative); together they make "build on prior work" literal in both the prompt and the working tree.
+/// Resolves the git ref each repo a CONTINUING run touches should clone at — session branch continuity: a follow-up
+/// turn starts each repo from the prior turn's PRODUCED branch for THAT repo, so the agent builds on earlier code
+/// instead of a fresh checkout from the default branch. The code-state companion to <see cref="ISessionContextBuilder"/>
+/// (which carries the textual narrative); together they make "build on prior work" literal in both the prompt and the
+/// working tree.
 /// </summary>
 public interface ISessionBranchResolver
 {
     /// <summary>
-    /// The ref to clone <paramref name="primaryRepositoryId"/> at: the most-recent prior top-level turn (in this
-    /// session, that targeted this repo) which produced a branch — that branch is the latest code state to continue
-    /// from (a later analysis-only turn produces none, so the code state is still the last code turn's branch).
-    /// Returns <c>null</c> when no prior turn produced a branch for this repo (⇒ the repo's default branch — the safe
-    /// fallback). Team-scoped (defence in depth).
+    /// The ref to clone each of <paramref name="repositoryIds"/> at: per repo, the most-recent prior top-level turn (in
+    /// this session) that PRODUCED a branch for it — its latest code state to continue from. A single-repo turn surfaces
+    /// its one repo's branch (<c>OutputsJson.branch</c>); a multi-repo turn surfaces every writable repo's branch
+    /// (<c>OutputsJson.repositoryResults[].producedBranch</c>, keyed by repository id). A repo with no prior produced
+    /// branch is ABSENT from the result map (⇒ the caller clones it at its default branch — the safe fallback). Newest
+    /// turn wins per repo. Team-scoped (defence in depth).
     /// </summary>
-    Task<string?> ResolveStartRefAsync(Guid sessionId, Guid teamId, Guid primaryRepositoryId, CancellationToken cancellationToken);
+    Task<IReadOnlyDictionary<Guid, string>> ResolveStartRefsAsync(Guid sessionId, Guid teamId, IReadOnlyCollection<Guid> repositoryIds, CancellationToken cancellationToken);
 }

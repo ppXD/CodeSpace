@@ -80,7 +80,8 @@ public sealed class AgentCodeNode : INodeRuntime
                     "properties": {
                       "repositoryId": { "type": "string", "format": "uuid" },
                       "alias": { "type": "string", "description": "The short name + mount folder for this repo (e.g. 'api'). Defaults to repo-2, repo-3, …" },
-                      "access": { "type": "string", "enum": ["read", "write"], "description": "read = context-only (default); write = the agent may edit + branch it." }
+                      "access": { "type": "string", "enum": ["read", "write"], "description": "read = context-only (default); write = the agent may edit + branch it." },
+                      "ref": { "type": "string", "description": "The branch/ref to clone THIS repo at. Leave empty for its default branch. A session follow-up sets this to the prior turn's produced branch for this repo so the agent builds on earlier work per repo." }
                     },
                     "required": ["repositoryId"]
                   }

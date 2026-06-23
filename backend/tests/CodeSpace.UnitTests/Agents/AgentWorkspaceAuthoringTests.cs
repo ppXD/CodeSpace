@@ -57,6 +57,19 @@ public class AgentWorkspaceAuthoringTests
     public void Trims_whitespace_around_the_alias() =>
         AgentWorkspaceAuthoring.ParseRelatedRepositories(Json($$"""[{"repositoryId":"{{RepoA}}","alias":"  api  "}]"""))[0].Alias.ShouldBe("api");
 
+    [Fact]
+    public void Parses_a_per_repo_ref_onto_the_spec_for_branch_continuity() =>
+        AgentWorkspaceAuthoring.ParseRelatedRepositories(Json($$"""[{"repositoryId":"{{RepoA}}","alias":"api","ref":"run-1/api"}]"""))[0].Ref
+            .ShouldBe("run-1/api", "the authored per-repo ref flows onto WorkspaceRepositorySpec.Ref — each related repo clones at its prior branch");
+
+    [Theory]
+    [InlineData("""[{"repositoryId":"11111111-1111-1111-1111-111111111111"}]""")]              // no ref key
+    [InlineData("""[{"repositoryId":"11111111-1111-1111-1111-111111111111","ref":""}]""")]     // blank ref
+    [InlineData("""[{"repositoryId":"11111111-1111-1111-1111-111111111111","ref":"   "}]""")]  // whitespace ref
+    [InlineData("""[{"repositoryId":"11111111-1111-1111-1111-111111111111","ref":42}]""")]     // non-string ref
+    public void Defaults_a_missing_or_blank_ref_to_null_so_the_repo_clones_its_default_branch(string json) =>
+        AgentWorkspaceAuthoring.ParseRelatedRepositories(Json(json))[0].Ref.ShouldBeNull();
+
     [Theory]
     [InlineData("""[{"alias":"api"}]""")]                                  // no repositoryId
     [InlineData("""[{"repositoryId":"not-a-guid"}]""")]                    // unparseable id
@@ -188,8 +201,25 @@ public class AgentWorkspaceAuthoringTests
         json[0]["repositoryId"].ShouldBe(RepoA);
         json[0]["alias"].ShouldBe("api");
         json[0]["access"].ShouldBe("write");
+        json[0].ContainsKey("ref").ShouldBeFalse("no base-refs map ⇒ no ref key (byte-identical to a non-continuity launch)");
         json[1]["alias"].ShouldBeNull("a blank alias is omitted so the workspace re-derives a unique one");
         json[1]["access"].ShouldBe("read");
+    }
+
+    [Fact]
+    public void SerializeRelatedRepositories_emits_a_per_repo_ref_from_the_base_refs_map()
+    {
+        // Session branch continuity: the baseRefs map supplies each repo's prior produced branch as its clone ref.
+        var baseRefs = new Dictionary<Guid, string> { [Guid.Parse(RepoA)] = "run-1/api" };   // RepoB has none
+
+        var json = AgentWorkspaceAuthoring.SerializeRelatedRepositories(new[]
+        {
+            new WorkspaceRepositorySpec { RepositoryId = Guid.Parse(RepoA), Alias = "api", Access = WorkspaceAccess.Write },
+            new WorkspaceRepositorySpec { RepositoryId = Guid.Parse(RepoB), Alias = "web", Access = WorkspaceAccess.Write },
+        }, baseRefs)!;
+
+        json[0]["ref"].ShouldBe("run-1/api", "the repo with a prior branch carries its ref");
+        json[1].ContainsKey("ref").ShouldBeFalse("a repo ABSENT from the map carries NO ref ⇒ it clones at its default branch");
     }
 
     [Fact]

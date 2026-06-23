@@ -39,8 +39,9 @@ public static class AgentWorkspaceAuthoring
 
             var alias = element.TryGetProperty("alias", out var aliasEl) && aliasEl.ValueKind == JsonValueKind.String ? (aliasEl.GetString() ?? "").Trim() : "";
             var access = ParseAccess(element.TryGetProperty("access", out var accessEl) && accessEl.ValueKind == JsonValueKind.String ? accessEl.GetString() : null);
+            var @ref = element.TryGetProperty("ref", out var refEl) && refEl.ValueKind == JsonValueKind.String && !string.IsNullOrWhiteSpace(refEl.GetString()) ? refEl.GetString() : null;
 
-            list.Add(new WorkspaceRepositorySpec { Alias = alias, RepositoryId = repoId, Access = access });
+            list.Add(new WorkspaceRepositorySpec { Alias = alias, RepositoryId = repoId, Access = access, Ref = @ref });
         }
 
         return list;
@@ -56,21 +57,32 @@ public static class AgentWorkspaceAuthoring
         new() { Alias = (alias ?? "").Trim(), RepositoryId = repositoryId, Access = ParseAccess(access) };
 
     /// <summary>
-    /// Serialize related specs back to the authored <c>{repositoryId, alias?, access?}</c> JSON shape both the
+    /// Serialize related specs back to the authored <c>{repositoryId, alias?, access?, ref?}</c> JSON shape both the
     /// <c>agent.code</c> node input AND the supervisor config consume — the inverse of <see cref="ParseRelatedRepositories"/>,
     /// in ONE place (Rule 7) so a projection emits the EXACT shape these re-parse. Null / empty ⇒ null, so a caller
     /// omits the key entirely (a single-repo projection stays byte-identical). Alias is omitted when blank (the
     /// workspace re-derives a unique one).
+    /// <para><paramref name="baseRefs"/> (session branch continuity) supplies a per-repo clone ref: when a repo has an
+    /// entry, its <c>ref</c> is emitted so the agent clones it at the prior turn's produced branch. Null map / a repo
+    /// absent from it ⇒ NO <c>ref</c> key for that entry (byte-identical — the repo clones at its default branch). The
+    /// agent.code path passes the map; the supervisor passes null (it has no per-repo continuity — out of scope).</para>
     /// </summary>
-    public static IReadOnlyList<Dictionary<string, object?>>? SerializeRelatedRepositories(IReadOnlyList<WorkspaceRepositorySpec>? related)
+    public static IReadOnlyList<Dictionary<string, object?>>? SerializeRelatedRepositories(IReadOnlyList<WorkspaceRepositorySpec>? related, IReadOnlyDictionary<Guid, string>? baseRefs = null)
     {
         if (related is not { Count: > 0 }) return null;
 
-        return related.Select(r => new Dictionary<string, object?>
+        return related.Select(r =>
         {
-            ["repositoryId"] = r.RepositoryId.ToString(),
-            ["alias"] = string.IsNullOrWhiteSpace(r.Alias) ? null : r.Alias,
-            ["access"] = r.Access == WorkspaceAccess.Write ? "write" : "read",
+            var entry = new Dictionary<string, object?>
+            {
+                ["repositoryId"] = r.RepositoryId.ToString(),
+                ["alias"] = string.IsNullOrWhiteSpace(r.Alias) ? null : r.Alias,
+                ["access"] = r.Access == WorkspaceAccess.Write ? "write" : "read",
+            };
+
+            if (baseRefs is not null && baseRefs.TryGetValue(r.RepositoryId, out var br) && !string.IsNullOrWhiteSpace(br)) entry["ref"] = br;
+
+            return entry;
         }).ToList();
     }
 
