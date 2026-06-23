@@ -1,4 +1,5 @@
 using Shouldly;
+using CodeSpace.Core.Services.Workflows.Llm;
 
 namespace CodeSpace.IntegrationTests.Workflows.Supervisor;
 
@@ -280,6 +281,37 @@ public sealed class RealModelGateTests
         {
             File.Delete(path);
         }
+    }
+
+    // ── Typed LlmApiException on the EXCEPTION path (trajectory / arbiter catch the throw directly) ──
+
+    [Theory]
+    [InlineData(LlmErrorCategory.Transient, true)]
+    [InlineData(LlmErrorCategory.RateLimited, true)]
+    [InlineData(LlmErrorCategory.AuthFailed, true)]
+    [InlineData(LlmErrorCategory.Malformed, false)]
+    [InlineData(LlmErrorCategory.BadRequest, false)]
+    [InlineData(LlmErrorCategory.ContextLengthExceeded, false)]
+    [InlineData(LlmErrorCategory.ContentFiltered, false)]
+    public void A_typed_LlmApiException_is_infra_for_the_propagated_gateway_categories_only(LlmErrorCategory category, bool isInfra)
+    {
+        // The decider PROPAGATES the infra categories (Transient/RateLimited/AuthFailed) as a typed throw rather than
+        // fail-closing them, so the EXCEPTION path (trajectory/arbiter best-of-N) must treat those exactly as the
+        // string-based IsGatewayInfraError treats the persisted node-failed record: non-gating infra. The model-CAPABILITY
+        // categories (Malformed/BadRequest/ContextLengthExceeded/ContentFiltered) are a real miss and must GATE, not skip.
+        var ex = new LlmApiException("Anthropic", null, category, "boom");
+
+        RealModelGate.IsGatewayInfraFailure(ex).ShouldBe(isInfra);
+    }
+
+    [Fact]
+    public void A_typed_transient_LlmApiException_nested_in_an_aggregate_is_still_infra()
+    {
+        // The await chain can surface it nested; Unwrap flattens — so the real trajectory throw ("the request timed out
+        // before the gateway responded") is recognised as non-gating infra even when wrapped, not mis-gated as a miss.
+        var inner = new LlmApiException("Anthropic", null, LlmErrorCategory.Transient, "the request timed out before the gateway responded");
+
+        RealModelGate.IsGatewayInfraFailure(new AggregateException(inner)).ShouldBeTrue();
     }
 
     // ── Strict whole-loop gate: real-model-DROVE-to-completion is the criterion (CapabilityMiss REDS, best-of-N flake-safe) ──

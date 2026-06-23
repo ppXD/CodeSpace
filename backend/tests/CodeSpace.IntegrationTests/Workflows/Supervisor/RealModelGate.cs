@@ -1,4 +1,5 @@
 using Shouldly;
+using CodeSpace.Core.Services.Workflows.Llm;
 
 namespace CodeSpace.IntegrationTests.Workflows.Supervisor;
 
@@ -357,6 +358,12 @@ public static class RealModelGate
         TimeoutException => true,
         System.IO.IOException => true,
         System.Net.Sockets.SocketException se => !WiringSocketErrors.Contains(se.SocketErrorCode),
+        // The decider classifies a gateway fault into a TYPED LlmApiException and PROPAGATES the infra categories
+        // (Transient / RateLimited / AuthFailed) rather than fail-closing them — so the EXCEPTION path (trajectory /
+        // arbiter, which catch the throw directly) must treat those exactly as the string-based IsGatewayInfraError
+        // already treats the persisted node-failed record: non-gating infra. The model-CAPABILITY categories
+        // (Malformed / ContextLengthExceeded / ContentFiltered / BadRequest) are NOT here — they are a real miss and gate.
+        LlmApiException { Category: LlmErrorCategory.Transient or LlmErrorCategory.RateLimited or LlmErrorCategory.AuthFailed } => true,
         _ => false,
     };
 
