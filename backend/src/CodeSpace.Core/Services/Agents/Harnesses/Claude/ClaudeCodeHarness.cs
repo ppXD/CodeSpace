@@ -49,6 +49,14 @@ public sealed class ClaudeCodeHarness : IAgentHarness, IModelCredentialProjector
     /// </summary>
     public const string ConfigDirEnvVar = "CLAUDE_CONFIG_DIR";
 
+    /// <summary>
+    /// Claude Code's "disable non-essential network traffic" switch — set to <c>1</c> for an Allowlist (deny-by-default)
+    /// egress run so the CLI does NOT reach telemetry / feature-gating hosts (e.g. <c>statsig.anthropic.com</c>) that the
+    /// egress allowlist (model + git only) does not pin. Without it, a deny-by-default run can stall on an unreachable
+    /// telemetry endpoint (the C3 watchdog would eventually flag it NeedsReview — never the intent). Pinned by a test (Rule 8).
+    /// </summary>
+    public const string DisableNonEssentialTrafficEnvVar = "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC";
+
     private const string AnthropicProvider = "Anthropic";
 
     private const string DefaultVersion = "2.1.0";
@@ -96,7 +104,7 @@ public sealed class ClaudeCodeHarness : IAgentHarness, IModelCredentialProjector
             Command = ResolveCommand(),
             Args = args,
             WorkingDirectory = task.WorkspaceDirectory,
-            Environment = task.Environment,
+            Environment = BuildEnvironment(task),
             TimeoutSeconds = task.TimeoutSeconds,
             // Isolate Claude Code's config dir per run so it ignores the operator's personal ~/.claude.
             ConfigHomeEnvVars = new[] { ConfigDirEnvVar },
@@ -199,6 +207,24 @@ public sealed class ClaudeCodeHarness : IAgentHarness, IModelCredentialProjector
     /// <summary>ReadOnly → plan (analysis, no edits); Workspace → bypassPermissions (autonomous within the OS sandbox, the Codex workspace-write analogue). The Autonomy dial refines this mapping later.</summary>
     private static string PermissionMode(AgentPermissions permissions) =>
         permissions.WriteScope == AgentWriteScope.ReadOnly ? "plan" : "bypassPermissions";
+
+    /// <summary>
+    /// The child env: the task's env, plus — ONLY for an Allowlist (deny-by-default) egress run — the
+    /// <see cref="DisableNonEssentialTrafficEnvVar"/> so the Claude CLI doesn't stall reaching telemetry hosts the egress
+    /// allowlist doesn't pin (B3.3c). An explicit <see cref="AgentTask.Environment"/> entry WINS (operator intent — it is
+    /// layered last), matching the runner's NonInteractiveEnv "operator value wins" convention. A Full-egress run returns
+    /// the task env unchanged → byte-identical to before.
+    /// </summary>
+    private static IReadOnlyDictionary<string, string> BuildEnvironment(AgentTask task)
+    {
+        if (task.Permissions.Egress != AgentEgressPolicy.Allowlist) return task.Environment;
+
+        var env = new Dictionary<string, string>(StringComparer.Ordinal) { [DisableNonEssentialTrafficEnvVar] = "1" };
+
+        foreach (var (key, value) in task.Environment) env[key] = value;
+
+        return env;
+    }
 
     /// <summary>
     /// Map EVERY content block of an assistant/user turn to its own event, in stream order — text → AssistantMessage,
