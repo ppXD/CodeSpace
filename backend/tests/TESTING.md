@@ -15,7 +15,7 @@ Two more categories live alongside the above (not a separate project tier):
 | `[Trait("Category", …)]` | What it is | Where | CI workflow |
 |---|---|---|---|
 | `Sandbox` | Real-kernel `bubblewrap`/`prlimit` isolation against a live runner | `CodeSpace.SandboxTests` (its own project; runs confined only in the sandbox workflow, degrade-returns elsewhere) | `sandbox-isolation.yml` |
-| `RealModel` | The supervisor decision eval driven against a **live model endpoint** (gated on secrets; main + on-demand only, to control token cost) | `CodeSpace.IntegrationTests` | `real-model.yml` |
+| `RealModel` | Supervisor brain/agent behaviour driven against a **live model endpoint** (gated on secrets; main + on-demand only, to control token cost). The **component** evals (decision · trajectory · arbiter — they drive the decider/arbiter directly, no DB) live in `CodeSpace.IntegrationTests`; the **whole-loop** eval (the full durable engine + Postgres + git, `Surface=Engine`) lives in `CodeSpace.E2ETests`. Both carry `[Trait("Category", "RealModel")]`, so the **trait — not the project — routes them** to `real-model.yml` (and `Category!=RealModel` excludes them from the normal Integration/E2E gates). | `IntegrationTests` (component evals) + `E2ETests` (whole-loop) | `real-model.yml` |
 
 ## The Unit / Integration / E2E line
 

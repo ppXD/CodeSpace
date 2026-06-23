@@ -10,10 +10,11 @@ namespace CodeSpace.IntegrationTests.Hangfire;
 /// (enqueue) are always registered regardless, so a processing-OFF public pod can still enqueue. The pure
 /// overload is the testable contract; the one-line <c>if</c> around <c>AddHangfireServer</c> /
 /// <c>ScanHangfireRecurringJobs</c> is then self-evident, so this avoids standing up the web host.
-/// Lives in IntegrationTests (not UnitTests) only because <see cref="CodeSpaceHangfireRegistrar"/> is a
-/// CodeSpace.Api-only type; it touches no database, hence no Postgres collection.
+/// Lives in IntegrationTests (not UnitTests) because <see cref="CodeSpaceHangfireRegistrar"/> is a
+/// CodeSpace.Api-only type the lean UnitTests project excludes; tagged Integration per the
+/// one-tier-per-project rule (TESTING.md) even though it touches no database (no Postgres collection).
 /// </summary>
-[Trait("Category", "Unit")]
+[Trait("Category", "Integration")]
 public class HangfireProcessingGateTests
 {
     [Fact]
