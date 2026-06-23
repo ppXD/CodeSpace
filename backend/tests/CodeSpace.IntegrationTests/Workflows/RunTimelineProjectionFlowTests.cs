@@ -1,6 +1,8 @@
+using System.Text.Json;
 using Autofac;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
+using CodeSpace.Core.Services.Supervisor;
 using CodeSpace.Core.Services.Tasks.Timeline;
 using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.IntegrationTests.Workflows.Infrastructure;
@@ -13,10 +15,11 @@ using Shouldly;
 namespace CodeSpace.IntegrationTests.Workflows;
 
 /// <summary>
-/// 🟢 Integration (real Postgres + the REAL <see cref="RunRecordTimelineSource"/> resolved from DI): the narrative
-/// timeline end-to-end at the projector seam — a run's append-only <c>workflow_run_record</c> ledger surfaces through
-/// the run-timeline projector as the NARRATIVE-worthy lifecycle events, chronologically merged, with Trace-level
-/// noise (log lines) dropped. A foreign / absent run resolves to null (team-scoped, fail-closed).
+/// 🟢 Integration (real Postgres + the REAL timeline sources — run-record, agent-events, supervisor-ledger — resolved
+/// from DI): the narrative timeline end-to-end at the projector seam. A run's append-only <c>workflow_run_record</c>
+/// ledger, its agents' harness events, and its supervisor decision ledger all surface through the run-timeline
+/// projector as NARRATIVE-worthy events, chronologically merged, with Trace-level noise (log lines / chatter) dropped.
+/// Every read is team-scoped (a foreign row never leaks); a foreign / absent run resolves to null (fail-closed).
 /// </summary>
 [Collection(PostgresCollection.Name)]
 [Trait("Category", "Integration")]
@@ -151,10 +154,101 @@ public sealed class RunTimelineProjectionFlowTests
         byTitle["edited app.tsx"].NodeId.ShouldBe("frontend-fix");
     }
 
+    [Fact]
+    public async Task Projects_the_supervisor_ledger_as_decision_events_merged_chronologically()
+    {
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedRunAsync(teamId);
+
+        var t = DateTimeOffset.UtcNow;
+        await SeedSupervisorDecisionsAsync(runId, teamId,
+            (SupervisorDecisionKinds.Plan, SupervisorDecisionStatus.Succeeded, null, null, t),
+            (SupervisorDecisionKinds.Spawn, SupervisorDecisionStatus.Succeeded, StagedAgents(2), null, t.AddSeconds(1)),
+            (SupervisorDecisionKinds.AskHuman, SupervisorDecisionStatus.Succeeded, SupervisorOutcome.FoldAnswer("Proceed?", "tok", "yes"), null, t.AddSeconds(2)),
+            (SupervisorDecisionKinds.Stop, SupervisorDecisionStatus.Succeeded, null, null, t.AddSeconds(3)));
+
+        var events = await ProjectAsync(userId, teamId, runId);
+
+        events.ShouldNotBeNull();
+        var supervisor = events!.Where(e => e.SourceKey == "supervisor").ToList();
+        supervisor.Select(e => e.Title).ShouldBe(new[] { "Supervisor planned the work", "Supervisor spawned 2 agents", "Supervisor asked you", "Supervisor stopped" },
+            "the decision ledger projects chronologically as the dynamic-supervisor story line");
+        supervisor.Single(e => e.Title == "Supervisor asked you").Summary.ShouldBe("Proceed? — yes", "ask_human surfaces the question + the folded answer");
+    }
+
+    [Fact]
+    public async Task Merges_supervisor_decisions_between_the_lifecycle_records_by_time()
+    {
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedRunAsync(teamId);
+
+        // Distinct timestamps across BOTH sources, so OccurredAt alone fixes the order — this locks the projector's
+        // cross-source merge: a supervisor decision must slot BETWEEN the lifecycle records, not after its own block.
+        var t = DateTimeOffset.UtcNow;
+        await SeedRecordsAsync(runId,
+            (WorkflowRunRecordTypes.RunStarted, null, "{}", t),
+            (WorkflowRunRecordTypes.NodeStarted, "code", "{}", t.AddSeconds(2)),
+            (WorkflowRunRecordTypes.RunCompleted, null, "{}", t.AddSeconds(4)));
+        await SeedSupervisorDecisionsAsync(runId, teamId,
+            (SupervisorDecisionKinds.Plan, SupervisorDecisionStatus.Succeeded, null, null, t.AddSeconds(1)),
+            (SupervisorDecisionKinds.Stop, SupervisorDecisionStatus.Succeeded, null, null, t.AddSeconds(3)));
+
+        var events = await ProjectAsync(userId, teamId, runId);
+
+        events.ShouldNotBeNull();
+        events!.Select(e => e.Title).ShouldBe(new[]
+        {
+            "Run started",                  // t
+            "Supervisor planned the work",  // t+1 — interleaved between the lifecycle records by OccurredAt
+            "code started",                 // t+2
+            "Supervisor stopped",           // t+3
+            "Run completed",                // t+4
+        }, "the projector merges the supervisor decisions and the lifecycle records into one chronological story");
+    }
+
+    [Fact]
+    public async Task Excludes_a_supervisor_decision_stamped_to_another_team()
+    {
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var (otherTeamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedRunAsync(teamId);
+
+        // A decision row pointing at this run id but stamped to ANOTHER team — the team-scoped ledger read must keep it off.
+        await SeedSupervisorDecisionsAsync(runId, otherTeamId, (SupervisorDecisionKinds.Plan, SupervisorDecisionStatus.Succeeded, null, null, DateTimeOffset.UtcNow));
+
+        var events = await ProjectAsync(userId, teamId, runId);
+
+        events.ShouldNotBeNull();
+        events!.ShouldNotContain(e => e.SourceKey == "supervisor", "a decision stamped to another team is filtered by the team-scoped ledger read");
+    }
+
+    private static string StagedAgents(int count) =>
+        JsonSerializer.Serialize(new { agentRunIds = Enumerable.Range(0, count).Select(_ => Guid.NewGuid().ToString()).ToArray() });
+
     private async Task<IReadOnlyList<RunTimelineEvent>?> ProjectAsync(Guid userId, Guid teamId, Guid runId)
     {
         using var scope = _fixture.BeginScopeAs(userId, teamId, Roles.Admin);
         return await scope.Resolve<IRunTimelineProjector>().ProjectAsync(runId, teamId, CancellationToken.None);
+    }
+
+    private async Task SeedSupervisorDecisionsAsync(Guid runId, Guid teamId, params (string Kind, SupervisorDecisionStatus Status, string? Outcome, string? Error, DateTimeOffset At)[] decisions)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+
+        foreach (var (kind, status, outcome, error, at) in decisions)
+        {
+            // Sequence is a DB-assigned BIGSERIAL — left unset so insert order (= chronological here) drives it.
+            db.SupervisorDecisionRecord.Add(new SupervisorDecisionRecord
+            {
+                Id = Guid.NewGuid(), TeamId = teamId, SupervisorRunId = runId,
+                DecisionKind = kind, Status = status, PayloadJson = "{}", OutcomeJson = outcome, Error = error,
+                IdempotencyKey = Guid.NewGuid().ToString("N"), InputHash = "test",
+                CreatedDate = at, CreatedBy = SystemUsers.SeederId, LastModifiedDate = at, LastModifiedBy = SystemUsers.SeederId,
+            });
+        }
+
+        await db.SaveChangesAsync();
     }
 
     private async Task SeedAgentRunAsync(Guid runId, Guid teamId, Guid agentRunId, string nodeId)
