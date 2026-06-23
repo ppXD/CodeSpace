@@ -324,6 +324,56 @@ public sealed class SupervisorWholeLoopE2ETests : IDisposable
         await AssertEachRepoHeadAcceptedAndOnItsRemoteAsync(runId, teamId, new Dictionary<Guid, BareRemote> { [primaryRepoId] = primaryRemote, [relatedRepoId] = relatedRemote });
     }
 
+    [Fact]
+    public async Task Supervisor_withholds_an_unverified_resolution_that_objectively_fails_its_tests()
+    {
+        if (OperatingSystem.IsWindows()) return;          // the fake CLI is a /bin/sh script the runner spawns
+        if (!await GitReadyAsync()) return;               // real git is required for clone/capture/conflict/grade
+
+        // THE SAFETY FLOOR — a resolver that CLAIMS success but objectively FAILS its tests must NEVER ship. Two agents
+        // conflict on one file → merge CONFLICTS → resolve parks → [HUMAN APPROVES] → the resolver reconciles BUT drops
+        // one agent's work (writes alpha-only) while STILL emitting RESOLUTION_VERIFIED (the lie). The supervisor's
+        // objective resolve grade clones the resolver's branch + runs check.sh (which requires BOTH sides) → it FAILS →
+        // the resolution is graded Unverified, and the substrate surfaces NO reviewable head: the lying branch is
+        // withheld, not accepted. The objective grade can only TIGHTEN the self-report marker, never trust it.
+        using var cli = new ConflictThenLyingResolveFakeCli();
+
+        SetDecisionScript(s => s.PlanSpawnMergeResolveApprovedMergeStop());   // SAME script — the CLI controls verification, not the decider
+
+        var jobClient = ResolveJobClient();
+        jobClient.Clear();
+        jobClient.AutoExecute = true;
+
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var conversationId = await SeedConversationAsync(teamId, userId);
+
+        // check.sh requires BOTH sides to survive — the resolver recipe's "do not discard either agent's intent" guardrail
+        // made objective. The lying resolver's alpha-only reconciliation fails it.
+        using var remote = new BareRemote();
+        await remote.SeedBaseAsync(new()
+        {
+            ["check.sh"] = "#!/bin/sh\nif grep -q alpha shared.txt && grep -q beta shared.txt; then exit 0; else exit 1; fi\n",
+            [ConflictThenLyingResolveFakeCli.SharedFile] = "base content\n",
+        });
+        var repoId = await SeedBoundRepositoryAsync(teamId, remote.Url, "main");
+
+        var workflowId = await CreateWholeLoopWorkflowAsync(teamId, userId, repoId, conversationId);
+        var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
+
+        // Drive to the resolve-approval park.
+        await RunEngineAsync(runId);
+        await jobClient.WaitForPendingAsync();
+
+        var token = await AssertParkedOnResolveApprovalAsync(runId, teamId);
+
+        // Approve → the lying resolver runs → its branch fails check.sh → the resolution is graded Unverified → withheld.
+        await AnswerAsync(token, "approve", userId, teamId);
+        await RunEngineAsync(runId);
+        await jobClient.WaitForPendingAsync();
+
+        await AssertUnverifiedResolutionWasWithheldAsync(runId, teamId, remote);
+    }
+
     // ─── Assertions ──────────────────────────────────────────────────────────────────
 
     private async Task AssertRunReachedSuccessAsync(Guid runId)
@@ -509,6 +559,48 @@ public sealed class SupervisorWholeLoopE2ETests : IDisposable
             branches.ShouldContain(head.SourceBranch,
                 customMessage: $"repo '{head.Alias}' head '{head.SourceBranch}' must be live on its own remote; remote: [{string.Join(", ", branches)}]");
         }
+    }
+
+    /// <summary>The resolver lied (claimed RESOLUTION_VERIFIED) but its branch objectively failed check.sh, so the resolution graded Unverified and the substrate WITHHELD its branch — surfacing no reviewable head a downstream PR-open could target.</summary>
+    private async Task AssertUnverifiedResolutionWasWithheldAsync(Guid runId, Guid teamId, BareRemote remote)
+    {
+        using var verify = _fixture.BeginScope();
+        var db = verify.Resolve<CodeSpaceDbContext>();
+
+        // The resolver agent really ran + pushed a branch + CLAIMED success (RESOLUTION_VERIFIED) — but the OBJECTIVE
+        // grade (clone the branch + run check.sh, which requires both sides) caught that it dropped one, so the verdict
+        // is Unverified (the self-report marker can only be tightened by the server grade, never trusted alone).
+        var resolve = await db.SupervisorDecisionRecord.AsNoTracking()
+            .Where(d => d.SupervisorRunId == runId && d.TeamId == teamId && d.DecisionKind == SupervisorDecisionKinds.Resolve)
+            .OrderByDescending(d => d.Sequence).Select(d => d.OutcomeJson).FirstAsync();
+
+        SupervisorOutcome.ReadResolutionVerdict(resolve).ShouldBe(SupervisorResolutionVerdict.Unverified,
+            "the resolver emitted RESOLUTION_VERIFIED but its alpha-only branch FAILED check.sh → the objective grade overrides the self-report → Unverified");
+
+        // It is specifically the OBJECTIVE grade that caught the lie — not an absent marker: the resolve's folded
+        // acceptance grade RAN (cloned the resolver branch + ran check.sh) and is FALSE. The CLI provably emits
+        // RESOLUTION_VERIFIED (so the self-report marker is true), so a false grade is the only thing forcing Unverified.
+        SupervisorOutcome.ReadAcceptanceGradePassed(resolve).ShouldBe(false,
+            "the objective resolve grade cloned the resolver's branch + ran check.sh against it and it FAILED (alpha-only dropped beta) — the grade is what overrode the true self-report marker");
+
+        // The lying resolver DID produce + push a real branch — so this proves the substrate ACTIVELY WITHHELD a real
+        // branch, not merely that nothing was produced.
+        var resolverBranch = SupervisorOutcome.ReadAgentResults(resolve).Select(r => r.ProducedBranch).FirstOrDefault(b => !string.IsNullOrEmpty(b));
+        resolverBranch.ShouldNotBeNullOrWhiteSpace("the resolver agent pushed its (unverified) reconciliation branch");
+        (await remote.ListBranchesAsync()).ShouldContain(resolverBranch!, customMessage: "the resolver's branch really exists on the remote — it is withheld, not absent");
+
+        // THE SAFETY PROPERTY: the production reader a downstream git.open_change_set uses surfaces NO head — the
+        // unverified reconciliation is never offered as a reviewable/acceptable branch, so no PR could open from it.
+        var priorDecisions = await ReadPriorDecisionsAsync(db, runId, teamId);
+        SupervisorOutcome.ReadFinalIntegratedBranch(priorDecisions).ShouldBeNull(
+            "the unverified resolution must NOT be surfaced as the final reviewable head — the safety floor withholds it from any PR-open");
+
+        // The terminal stop accepted nothing (no clean head to grade → no passing acceptance was ever recorded).
+        var stop = await db.SupervisorDecisionRecord.AsNoTracking()
+            .Where(d => d.SupervisorRunId == runId && d.TeamId == teamId && d.DecisionKind == SupervisorDecisionKinds.Stop)
+            .OrderByDescending(d => d.Sequence).Select(d => d.OutcomeJson).FirstAsync();
+        SupervisorOutcome.ReadAcceptanceGradePassed(stop).ShouldNotBe(true,
+            "with no clean head the stop graded + accepted nothing — it never reports a passing acceptance of the withheld work");
     }
 
     /// <summary>Replay every decision row of the run into the <see cref="SupervisorPriorDecision"/> shape the production folders (e.g. <see cref="SupervisorOutcome.ReadFinalIntegratedBranch"/>) consume — so the test reads the run's final head EXACTLY as a downstream node would.</summary>
