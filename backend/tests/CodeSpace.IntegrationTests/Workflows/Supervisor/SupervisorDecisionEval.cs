@@ -1,3 +1,5 @@
+using System.Text.Json;
+using CodeSpace.Core.Services.Agents;
 using CodeSpace.Messages.Agents;
 
 namespace CodeSpace.IntegrationTests.Workflows.Supervisor;
@@ -43,6 +45,13 @@ public static class SupervisorDecisionEval
 {
     public static SupervisorDecisionScore Score(SupervisorGoldenScenario scenario, SupervisorDecision decision)
     {
+        // A FAIL-CLOSED non-conformant stop (the decider degraded a garbage / capability-miss reply to a clean
+        // 'no-decision' stop rather than crashing) is NOT a genuine decision — the model did not DECIDE to stop, it
+        // failed to produce a usable decision. It must NEVER pass, even when the scenario ACCEPTS stop; otherwise a
+        // garbage reply would falsely green a should-stop golden scenario. Keys on the structured outcome signature.
+        if (IsNonConformantStop(decision))
+            return Fail(scenario, decision.Kind, "the model produced no conformant decision (fail-closed 'no-decision' stop) — a non-conformant reply never passes, even a should-stop scenario");
+
         if (!scenario.AcceptedKinds.Contains(decision.Kind))
             return Fail(scenario, decision.Kind, $"kind '{decision.Kind}' is not in the accepted set {{{string.Join(", ", scenario.AcceptedKinds)}}}");
 
@@ -57,6 +66,22 @@ public static class SupervisorDecisionEval
 
     private static SupervisorDecisionScore Fail(SupervisorGoldenScenario scenario, string actualKind, string note) =>
         new() { Scenario = scenario.Name, ActualKind = actualKind, AcceptedKinds = scenario.AcceptedKinds, Pass = false, Note = note };
+
+    /// <summary>Whether a decision is the decider's FAIL-CLOSED non-conformant stop — a <see cref="SupervisorDecisionKinds.Stop"/> whose payload <c>outcome</c> is <see cref="SupervisorStopPayload.NonConformantOutcome"/>. Deserialized with the SAME options the decider serialized it with, so the key/case can't drift; a non-stop or unparseable payload is not it.</summary>
+    private static bool IsNonConformantStop(SupervisorDecision decision)
+    {
+        if (decision.Kind != SupervisorDecisionKinds.Stop) return false;
+
+        try
+        {
+            var stop = JsonSerializer.Deserialize<SupervisorStopPayload>(decision.PayloadJson, AgentJson.Options);
+            return stop?.Outcome == SupervisorStopPayload.NonConformantOutcome;
+        }
+        catch (JsonException)
+        {
+            return false;
+        }
+    }
 
     /// <summary>Aggregate a run's per-scenario scores; <see cref="AllPassed"/> is the kill-gate the replay test asserts.</summary>
     public static (int Passed, int Total, bool AllPassed) Aggregate(IReadOnlyList<SupervisorDecisionScore> scores)

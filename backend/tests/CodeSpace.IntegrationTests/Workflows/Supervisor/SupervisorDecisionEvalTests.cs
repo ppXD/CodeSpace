@@ -55,6 +55,33 @@ public class SupervisorDecisionEvalTests
     }
 
     [Fact]
+    public void A_fail_closed_no_decision_stop_never_passes_even_a_should_stop_scenario()
+    {
+        // The model produced GARBAGE → the decider degraded to a fail-closed 'no-decision' stop (it did not crash). Even
+        // when the scenario ACCEPTS stop, this must FAIL — the model did not DECIDE to stop, it failed to produce a usable
+        // decision. Closes the false-green where a non-conformant reply could pass a should-stop golden scenario.
+        var nonConformant = new SupervisorDecision
+        {
+            Kind = SupervisorDecisionKinds.Stop,
+            PayloadJson = JsonSerializer.Serialize(new SupervisorStopPayload { Outcome = SupervisorStopPayload.NonConformantOutcome, Summary = "no usable decision" }, CodeSpace.Core.Services.Agents.AgentJson.Options),
+        };
+
+        var score = SupervisorDecisionEval.Score(Scenario(new[] { SupervisorDecisionKinds.Stop }), nonConformant);
+
+        score.Pass.ShouldBeFalse("a fail-closed 'no-decision' stop is a non-conformant reply, not a genuine stop decision — it must fail even a should-stop scenario");
+        score.Note.ShouldContain("no conformant decision");
+
+        // A GENUINE stop (a real terminal outcome) still PASSES a should-stop scenario — the fix rejects only the fail-closed signature.
+        var genuineStop = new SupervisorDecision
+        {
+            Kind = SupervisorDecisionKinds.Stop,
+            PayloadJson = JsonSerializer.Serialize(new SupervisorStopPayload { Outcome = "done", Summary = "goal met" }, CodeSpace.Core.Services.Agents.AgentJson.Options),
+        };
+
+        SupervisorDecisionEval.Score(Scenario(new[] { SupervisorDecisionKinds.Stop }), genuineStop).Pass.ShouldBeTrue("a genuine 'done' stop is a real decision and passes a should-stop scenario");
+    }
+
+    [Fact]
     public void Aggregate_is_the_kill_gate_only_all_passed_arms_it()
     {
         var mixed = new[]
