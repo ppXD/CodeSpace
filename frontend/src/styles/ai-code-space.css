@@ -2370,11 +2370,12 @@ textarea:-webkit-autofill {
 /* ── Activity tab: the merged live-execution timeline (event rows + inline agent-wave terminal tiles) ───────── */
 .acs-root .run-activity-empty { font-size: 12.5px; color: var(--muted); padding: 18px 4px; }
 .acs-root .run-activity-list { list-style: none; margin: 0; padding: 0; position: relative; display: flex; flex-direction: column; }
-/* the rail threads the event dots + wave rings; wave blocks sit in the body column to its right */
-.acs-root .run-activity-list::before { content: ""; position: absolute; left: 77px; top: 9px; bottom: 9px; width: 1.5px; background: var(--line); }
+/* the rail threads the event dots + wave rings (centred on them via translateX(-50%)); wave blocks sit in the body
+   column to its right. The dots/rings paint ABOVE the rail (z-index) so the line connects them rather than cutting through. */
+.acs-root .run-activity-list::before { content: ""; position: absolute; left: 77px; transform: translateX(-50%); top: 9px; bottom: 9px; width: 1.5px; background: var(--line); }
 .acs-root .run-activity-row { display: grid; grid-template-columns: 62px 12px 1fr; column-gap: 9px; align-items: start; padding: 4px 0; }
 .acs-root .run-activity-time { font-size: 11px; color: var(--muted-2); font-variant-numeric: tabular-nums; line-height: 1.5; padding-top: 1px; text-align: right; white-space: nowrap; }
-.acs-root .run-activity-dot { width: 7px; height: 7px; border-radius: 50%; margin-top: 5px; justify-self: center; background: var(--muted-2); outline: 3px solid var(--bg); }
+.acs-root .run-activity-dot { width: 7px; height: 7px; border-radius: 50%; margin-top: 5px; justify-self: center; position: relative; z-index: 1; background: var(--muted-2); }
 .acs-root .run-activity-event[data-severity="success"] .run-activity-dot { background: #1F6B3F; }
 .acs-root .run-activity-event[data-severity="warning"] .run-activity-dot { background: #A8590E; }
 .acs-root .run-activity-event[data-severity="error"]   .run-activity-dot { background: #9E3535; }
@@ -2383,7 +2384,7 @@ textarea:-webkit-autofill {
 .acs-root .run-activity-summary { font-size: 11.5px; color: var(--muted); line-height: 1.4; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
 /* wave row: a hollow ring marks the spawn on the rail; the wave block aligns with the event body column */
 .acs-root .run-activity-waverow { padding: 8px 0; }
-.acs-root .run-activity-ring { width: 11px; height: 11px; border-radius: 50%; margin-top: 4px; justify-self: center; box-sizing: border-box; background: var(--bg); border: 2px solid var(--accent); outline: 3px solid var(--bg); }
+.acs-root .run-activity-ring { width: 11px; height: 11px; border-radius: 50%; margin-top: 4px; justify-self: center; position: relative; z-index: 1; box-sizing: border-box; background: var(--bg); border: 2px solid var(--accent); }
 .acs-root .run-activity-wavewrap { min-width: 0; }
 
 /* the agent wave — a quiet header + an adaptive grid of terminal tiles */
