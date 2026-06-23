@@ -206,14 +206,24 @@ public class CodeSpaceModule : Autofac.Module
 
     /// <summary>
     /// Registers the FIRST-PARTY agent tools that are not workflow nodes (Rule 18.3 — an MCP-native capability, not a
-    /// graph step). Today: <see cref="Services.Agents.Tools.DecisionRequestTool"/> (Decision substrate D2), gated on
-    /// tool governance — the decision flow needs the ledger + approval surface, which only exist when governance is on.
-    /// Gating at REGISTRATION (not just at the handler) keeps a governance-OFF process byte-identical to pre-D2: the
-    /// tool is absent from the DI <c>IEnumerable&lt;IAgentTool&gt;</c>, so the catalog and <c>tools/list</c> never mention
-    /// it. Read through the single <see cref="Services.Agents.Mcp.McpRequestHandler.IsGovernanceEnabled"/> gate (Rule 8).
+    /// graph step).
+    /// <list type="bullet">
+    ///   <item><see cref="Services.Agents.Tools.GetContextTool"/> — a READ-ONLY context-retrieval tool. Registered
+    ///   UNCONDITIONALLY: it touches neither the ledger nor the approval surface, so it has no governance dependency and
+    ///   is useful in any run whose MCP endpoint is open (the endpoint gate is separate from governance). A run with no
+    ///   session simply gets a clean "nothing to retrieve".</item>
+    ///   <item><see cref="Services.Agents.Tools.DecisionRequestTool"/> (Decision substrate D2) — gated on tool
+    ///   governance: the decision flow needs the ledger + approval surface, which only exist when governance is on.
+    ///   Gating at REGISTRATION (not just at the handler) keeps a governance-OFF process byte-identical to pre-D2 — the
+    ///   tool is absent from the DI <c>IEnumerable&lt;IAgentTool&gt;</c>, so the catalog and <c>tools/list</c> never
+    ///   mention it. Read through the single <see cref="Services.Agents.Mcp.McpRequestHandler.IsGovernanceEnabled"/>
+    ///   gate (Rule 8).</item>
+    /// </list>
     /// </summary>
     private void RegisterFirstPartyAgentTools(ContainerBuilder builder)
     {
+        builder.RegisterType<Services.Agents.Tools.GetContextTool>().As<Services.Agents.Tools.IAgentTool>().SingleInstance();
+
         if (!Services.Agents.Mcp.McpRequestHandler.IsGovernanceEnabled()) return;
 
         builder.RegisterType<Services.Agents.Tools.DecisionRequestTool>().As<Services.Agents.Tools.IAgentTool>().SingleInstance();

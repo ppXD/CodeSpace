@@ -470,6 +470,34 @@ public class McpRequestHandlerTests
     }
 
     [Fact]
+    public async Task ToolsCall_stamps_the_handlers_run_id_onto_the_tool_call()
+    {
+        // The run id travels handler → AgentToolCall.RunId so a context-retrieval tool can resolve its run → session.
+        // Same provenance + path as TeamId; pinned so a future refactor can't silently stop threading it.
+        var runId = Guid.NewGuid();
+        Guid? seen = null;
+        var tool = new FakeTool { Kind = "echo", OnCall = (c, _) => { seen = c.RunId; return Task.FromResult(AgentToolResult.Ok(Parse("{}"), 2)); } };
+
+        var handler = new McpRequestHandler(new FakeRegistry(tool), AgentAutonomyLevel.Unleashed, Guid.NewGuid(), null, runId);
+        await Respond(handler, Call("echo", "{}"));
+
+        seen.ShouldBe(runId, "the run id must travel handler → AgentToolCall so a retrieval tool can scope to the run's session");
+    }
+
+    [Fact]
+    public async Task ToolsCall_with_no_run_on_the_handler_stamps_the_empty_run_id()
+    {
+        // The runId ctor arg defaults to default(Guid) when a handler is built without one; the tool treats Guid.Empty
+        // as "no run" (a clean miss). Pin that the stamp faithfully carries the empty id rather than fabricating one.
+        Guid? seen = Guid.NewGuid();   // sentinel: must be overwritten
+        var tool = new FakeTool { Kind = "echo", OnCall = (c, _) => { seen = c.RunId; return Task.FromResult(AgentToolResult.Ok(Parse("{}"), 2)); } };
+
+        await Respond(Handler(tool), Call("echo", "{}"));   // 5th ctor arg (runId) omitted via the defaulted param
+
+        seen.ShouldBe(Guid.Empty, "no run on the handler → the default run id is stamped, which the retrieval tool reads as 'no run'");
+    }
+
+    [Fact]
     public async Task ToolsCall_with_no_team_on_the_handler_stamps_null_preserving_the_fail_closed_default()
     {
         Guid? seen = Guid.NewGuid();   // sentinel: must be overwritten to null by the call
