@@ -429,6 +429,40 @@ public sealed class SupervisorWholeLoopE2ETests : IDisposable
         await AssertMultiRepoLieCaughtAtStopBackstopAsync(runId, teamId);
     }
 
+    [Fact]
+    public async Task LiveBrainConflictFakeCli_produces_a_real_merge_conflict_under_the_scripted_decider()
+    {
+        if (OperatingSystem.IsWindows()) return;
+        if (!await GitReadyAsync()) return;
+
+        // Deterministic TEETH for the real-model A1 lane (RealModelSupervisorWholeLoopE2ETests): pin that
+        // LiveBrainConflictFakeCli — which keys the two conflicting sides on each agent's OWN (brain-authored) goal text
+        // rather than the scripted "alpha"/"beta", so it works with a free-form live brain — STILL produces a REAL git
+        // conflict here under the scripted decider. Without this pin, the live gate's "no conflict observed" could be a
+        // silent CLI bug rather than the brain's choice. The live lane then measures whether the BRAIN chooses to resolve.
+        using var cli = new LiveBrainConflictFakeCli();
+
+        SetDecisionScript(s => s.PlanSpawnMergeStop());
+
+        var jobClient = ResolveJobClient();
+        jobClient.Clear();
+        jobClient.AutoExecute = true;
+
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+
+        using var remote = new BareRemote();
+        await remote.SeedBaseAsync(new() { ["check.sh"] = "#!/bin/sh\nexit 0\n", [LiveBrainConflictFakeCli.SharedFile] = "base\n" });
+        var repoId = await SeedBoundRepositoryAsync(teamId, remote.Url, "main");
+
+        var workflowId = await CreateWholeLoopWorkflowAsync(teamId, userId, repoId);
+        var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
+
+        await RunEngineAsync(runId);
+        await jobClient.WaitForPendingAsync();
+
+        await AssertFirstMergeConflictedAsync(runId, teamId);
+    }
+
     // ─── Assertions ──────────────────────────────────────────────────────────────────
 
     private async Task AssertRunReachedSuccessAsync(Guid runId)
