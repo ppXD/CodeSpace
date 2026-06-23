@@ -25,8 +25,11 @@ public interface IRunFromSnapshotStarter
     /// then dispatch through the EXISTING <c>IWorkflowRunDispatcher</c> (Pending → Enqueued → Hangfire
     /// <c>ExecuteRunAsync</c>). Returns the new <c>workflow_run.id</c>. Throws
     /// <c>WorkflowValidationException</c> for an invalid definition (before any DB write).
+    /// <para><paramref name="session"/> is the PRE-RESOLVED WorkSession binding stamped onto the run
+    /// (<c>SessionId</c> / <c>SessionTurnIndex</c>); NULL = a session-less run (byte-identical to pre-session
+    /// behaviour). Positional + explicit so every creation site consciously decides its session binding.</para>
     /// </summary>
-    Task<Guid> StartFromSnapshotAsync(WorkflowDefinition definition, Guid teamId, Guid actorUserId, string? launchPayloadJson, IReadOnlyList<Guid>? scopeRepositoryIds, string? projectionKind, CancellationToken cancellationToken);
+    Task<Guid> StartFromSnapshotAsync(WorkflowDefinition definition, Guid teamId, Guid actorUserId, string? launchPayloadJson, IReadOnlyList<Guid>? scopeRepositoryIds, string? projectionKind, SessionAssignment? session, CancellationToken cancellationToken);
 
     /// <summary>
     /// Replay a finished snapshot/dynamic run: clone its EXACT frozen definition (<paramref name="definitionJson"/>
@@ -37,6 +40,9 @@ public interface IRunFromSnapshotStarter
     /// this does NOT dispatch — the caller (<c>WorkflowService.ReplayRunAsync</c>) clones the original's variable
     /// snapshot then dispatches, exactly as the authored-replay path does, so the engine's variable-presence fork
     /// takes the replay scope. Returns the new <c>workflow_run.id</c>.
+    /// <para><paramref name="session"/> is the PRE-RESOLVED WorkSession binding for the fork. A replay
+    /// INHERITS its parent's session yet consumes NO new turn, so the resolver passes the parent's
+    /// <c>SessionId</c> with a NULL <c>TurnIndex</c>; NULL assignment = a session-less fork.</para>
     /// </summary>
-    Task<Guid> StageReplayFromSnapshotAsync(string definitionJson, string definitionHash, Guid teamId, Guid actorUserId, string payloadJson, string sourceType, Guid parentRunId, Guid causationRequestId, IReadOnlyList<Guid> scopeRepositoryIds, IReadOnlyList<Guid> scopeProjectIds, string? projectionKind, CancellationToken cancellationToken);
+    Task<Guid> StageReplayFromSnapshotAsync(string definitionJson, string definitionHash, Guid teamId, Guid actorUserId, string payloadJson, string sourceType, Guid parentRunId, Guid causationRequestId, IReadOnlyList<Guid> scopeRepositoryIds, IReadOnlyList<Guid> scopeProjectIds, string? projectionKind, SessionAssignment? session, CancellationToken cancellationToken);
 }

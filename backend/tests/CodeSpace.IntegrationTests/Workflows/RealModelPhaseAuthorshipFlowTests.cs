@@ -178,7 +178,7 @@ public sealed class RealModelPhaseAuthorshipFlowTests
 
         var definition = RetargetPlannerToRealModel(builder.Build(context));
 
-        return await scope.Resolve<IRunFromSnapshotStarter>().StartFromSnapshotAsync(definition, teamId, userId, launchPayloadJson: null, scopeRepositoryIds: null, projectionKind: null, CancellationToken.None);
+        return await scope.Resolve<IRunFromSnapshotStarter>().StartFromSnapshotAsync(definition, teamId, userId, launchPayloadJson: null, scopeRepositoryIds: null, projectionKind: null, session: null, CancellationToken.None);
     }
 
     /// <summary>Test-only adaptation: rewrite the PLANNER node's <c>llm.complete</c> provider to the RecordReplay decorator's tag (the real/recorded model — the ONLY real model under test), and the SYNTH node's to the deterministic plain-text synth fake. The synth MUST NOT hit the RecordReplay decorator — it has no cassette for the synth request and would throw; only the planner's decision authorship is under test here. Retarget is BY NODE ID (the graph now has two llm.complete nodes). The agent.code body + the graph SHAPE are left exactly as the production builder emitted them.</summary>

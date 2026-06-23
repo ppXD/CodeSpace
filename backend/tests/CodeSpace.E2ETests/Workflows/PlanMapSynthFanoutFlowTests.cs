@@ -205,7 +205,7 @@ public class PlanMapSynthFanoutFlowTests
 
         var definition = RetargetLlmNodesToFakes(builder.Build(context));
 
-        return await scope.Resolve<IRunFromSnapshotStarter>().StartFromSnapshotAsync(definition, teamId, userId, launchPayloadJson: null, scopeRepositoryIds: null, projectionKind: null, CancellationToken.None);
+        return await scope.Resolve<IRunFromSnapshotStarter>().StartFromSnapshotAsync(definition, teamId, userId, launchPayloadJson: null, scopeRepositoryIds: null, projectionKind: null, session: null, CancellationToken.None);
     }
 
     /// <summary>Test-only adaptation: rewrite the BOTH <c>llm.complete</c> providers — the PLANNER node to the structured planner fake, the SYNTH node to the plain-text synth fake — so the engine resolves the deterministic fakes (no API key). Retarget is BY NODE ID (the graph now has two llm.complete nodes); the agent.code body + the graph SHAPE are left exactly as the production builder emitted them.</summary>

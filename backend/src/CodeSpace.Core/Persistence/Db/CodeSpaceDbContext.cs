@@ -58,6 +58,7 @@ public class CodeSpaceDbContext : DbContext, IUnitOfWork
     public DbSet<ModelCredentialModel> ModelCredentialModel => Set<ModelCredentialModel>();
     public DbSet<ToolCallLedger> ToolCallLedger => Set<ToolCallLedger>();
     public DbSet<SupervisorDecisionRecord> SupervisorDecisionRecord => Set<SupervisorDecisionRecord>();
+    public DbSet<WorkSession> WorkSession => Set<WorkSession>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {

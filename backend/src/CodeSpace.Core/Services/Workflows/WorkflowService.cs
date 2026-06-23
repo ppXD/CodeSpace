@@ -509,7 +509,10 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
                 original.DefinitionSnapshotHash ?? string.Empty,
                 teamId, actorUserId, original.RunRequest?.NormalizedPayloadJson ?? "{}", sourceType,
                 parentRunId: original.Id, causationRequestId: original.RunRequestId,
-                original.ScopeRepositoryIds, original.ScopeProjectIds, original.ProjectionKind, cancellationToken).ConfigureAwait(false);
+                original.ScopeRepositoryIds, original.ScopeProjectIds, original.ProjectionKind,
+                // session: null — replay inheritance (carry the parent's SessionId with a null TurnIndex) is the
+                // resolver's job in a later slice; until then a forked run stays session-less.
+                session: null, cancellationToken).ConfigureAwait(false);
         else
             forkRunId = await _runStarter.StartAsync(new RunSourceEnvelope
             {
