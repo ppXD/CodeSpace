@@ -1,0 +1,102 @@
+import type { PhaseAgentRef, RunPhase, RunTimelineEvent } from "@/api/workflows";
+
+/**
+ * The activity stream's pure model — the merge that turns the run's two read planes (the narrative timeline events +
+ * the phase tree's agent groupings) into ONE chronological list the Activity tab scrolls. Source-agnostic and
+ * generic: it never switches on a phase `kind` or an event `kind` beyond ranking authored phases over raw ones, so a
+ * single-agent run, a map fan-out, and a supervisor wave all flow through the same path. No React, no hooks — unit-testable.
+ */
+
+/** An agent wave — a phase's claimed agents, rendered as the terminal-tile grid at the phase's position in the stream. */
+export interface AgentWave {
+  /** The owning phase id (the React key). */
+  id: string;
+  /** The phase label ("Implement", "Spawn 3 agents", "code"). */
+  label: string;
+  /** When the phase began — the wave's chronological anchor (null until it has started). */
+  startedAt: string | null;
+  /** The agents this wave OWNS (deduped so an agent never appears in two waves). */
+  agents: PhaseAgentRef[];
+}
+
+/** One item in the merged activity stream — a narrative event row or an agent-wave block. */
+export type ActivityItem =
+  | { kind: "event"; key: string; at: string; event: RunTimelineEvent }
+  | { kind: "wave"; key: string; at: string | null; wave: AgentWave };
+
+/** Authored semantic phases ("phase") own their agents over the raw decision / node / map phases that also list them. */
+function phaseRank(p: RunPhase): number {
+  return p.kind === "phase" ? 1 : 0;
+}
+
+/**
+ * Group the phase tree into agent WAVES, assigning each agent run to exactly ONE phase so it never renders twice. A
+ * supervisor run lists the same agent under its spawn decision AND its authored semantic phase — the authored phase
+ * wins (higher rank, then earliest `order`), and the decision phase keeps only agents no authored phase claimed. A
+ * node / map run has one phase per agent, so each becomes its own wave. A phase left with no claimed agents (e.g. a
+ * plan / stop decision, or a spawn whose agents the authored phase took) contributes no wave. Waves keep phase order.
+ */
+export function buildWaves(phases: readonly RunPhase[]): AgentWave[] {
+  const bestByAgent = new Map<string, RunPhase>();
+
+  for (const p of phases) {
+    for (const a of p.agents) {
+      const cur = bestByAgent.get(a.agentRunId);
+      const better = !cur || phaseRank(p) > phaseRank(cur) || (phaseRank(p) === phaseRank(cur) && p.order < cur.order);
+      if (better) bestByAgent.set(a.agentRunId, p);
+    }
+  }
+
+  return phases
+    .map((p): AgentWave => ({
+      id: p.id,
+      label: p.label,
+      startedAt: p.startedAt ?? null,
+      // The agents this phase claimed, also collapsed by id so a (defensively) duplicated ref in one phase's list
+      // can't render the same tile twice / collide on the React key.
+      agents: [...new Map(p.agents.filter((a) => bestByAgent.get(a.agentRunId) === p).map((a) => [a.agentRunId, a])).values()],
+    }))
+    .filter((w) => w.agents.length > 0);
+}
+
+/**
+ * Merge the narrative events + the agent waves into ONE chronological stream. Events sort by their `occurredAt`; a
+ * wave sorts by its phase `startedAt`, falling back to the earliest event among its own agents, then to the end (so
+ * an unanchored wave never silently vanishes). On an equal timestamp an event sorts BEFORE a wave, so a wave lands
+ * just after the "spawned" event that announced it. The final index tie-break keeps the sort stable + deterministic.
+ */
+export function mergeActivityStream(events: readonly RunTimelineEvent[], waves: readonly AgentWave[]): ActivityItem[] {
+  const items: ActivityItem[] = [
+    ...events.map((e): ActivityItem => ({ kind: "event", key: `e:${e.id}`, at: e.occurredAt, event: e })),
+    ...waves.map((w): ActivityItem => ({ kind: "wave", key: `w:${w.id}`, at: w.startedAt ?? earliestAgentEvent(w, events), wave: w })),
+  ];
+
+  return items
+    .map((it, i) => ({ it, i }))
+    .sort((a, b) => cmpAt(a.it.at, b.it.at) || typeRank(a.it) - typeRank(b.it) || a.i - b.i)
+    .map(({ it }) => it);
+}
+
+/** The earliest event time among a wave's agents — the fallback anchor when the phase carries no startedAt yet. */
+function earliestAgentEvent(wave: AgentWave, events: readonly RunTimelineEvent[]): string | null {
+  const ids = new Set(wave.agents.map((a) => a.agentRunId));
+  let earliest: string | null = null;
+
+  for (const e of events) {
+    if (e.agentRunId && ids.has(e.agentRunId) && (earliest === null || e.occurredAt < earliest)) earliest = e.occurredAt;
+  }
+
+  return earliest;
+}
+
+function typeRank(it: ActivityItem): number {
+  return it.kind === "event" ? 0 : 1;
+}
+
+/** Compare two ISO timestamps; a null sorts LAST so an unanchored item goes to the end rather than the top. */
+function cmpAt(a: string | null, b: string | null): number {
+  if (a === b) return 0;
+  if (a === null) return 1;
+  if (b === null) return -1;
+  return a < b ? -1 : 1;
+}

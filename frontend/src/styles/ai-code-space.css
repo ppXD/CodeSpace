@@ -2367,42 +2367,65 @@ textarea:-webkit-autofill {
 /* Honest placeholder for a tab whose backend projector hasn't shipped (Changes / Trace). */
 .acs-root .run-tab-soon-tag { display: inline-block; margin-bottom: 10px; padding: 2px 9px; border-radius: 99px; background: var(--panel-2); border: 1px solid var(--line); font-size: 10.5px; font-weight: 600; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); }
 
-/* Live-work band — the command-center Activity heart: a conditional lead strip + the run's agent cards. */
-.acs-root .run-livework { display: flex; flex-direction: column; gap: 10px; }
-.acs-root .run-leadstrip { display: flex; align-items: center; gap: 8px; padding: 8px 11px; border-radius: 9px; background: var(--panel-2); border: 1px solid var(--line); font-size: 12.5px; }
-.acs-root .run-leadstrip > svg { color: var(--accent); flex-shrink: 0; }
-.acs-root .run-leadstrip-title { font-weight: 600; color: var(--ink); flex-shrink: 0; }
-.acs-root .run-leadstrip-detail { color: var(--muted); min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.acs-root .run-agent-cards { display: flex; flex-direction: column; gap: 8px; }
-.acs-root .run-agent-card { border: 1px solid var(--line); border-radius: 10px; padding: 9px 11px; background: var(--panel); }
-.acs-root .run-agent-card[data-active] { border-left: 2px solid var(--accent); }
-.acs-root .run-agent-card[data-selected] { box-shadow: 0 0 0 2px var(--accent); }
-.acs-root .run-agent-card-head { appearance: none; cursor: pointer; display: flex; align-items: center; gap: 7px; width: 100%; padding: 0; border: 0; background: transparent; text-align: left; }
-.acs-root .run-agent-card-caret { display: inline-flex; color: var(--muted-2); transition: transform .14s ease; }
-.acs-root .run-agent-card[data-open] .run-agent-card-caret { transform: rotate(90deg); }
-.acs-root .run-agent-card-name { font-weight: 600; color: var(--ink); font-size: 13px; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.acs-root .run-agent-card-head:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
-.acs-root .run-agent-card-activity { color: var(--muted); font-size: 12px; margin-top: 4px; display: -webkit-box; -webkit-line-clamp: 2; line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
-.acs-root .run-agent-card-meta { color: var(--muted-2); font-size: 11px; margin-top: 2px; }
-.acs-root .run-agent-card-body { margin-top: 8px; border-top: 1px solid var(--line); padding-top: 8px; display: flex; flex-direction: column; gap: 8px; }
-.acs-root .run-agent-card-body > .ar-timeline, .acs-root .run-agent-card-body > .tc-panel { margin-top: 0; }
-/* The narrative timeline — the run's "what happened, in order" story line, below the live-work cards in Activity. */
-.acs-root .run-timeline { display: flex; flex-direction: column; gap: 8px; }
-.acs-root .run-timeline-head { display: flex; align-items: center; gap: 7px; font-size: 11.5px; font-weight: 600; text-transform: uppercase; letter-spacing: .05em; color: var(--ink-2); }
-.acs-root .run-timeline-head > svg { color: var(--muted-2); }
-.acs-root .run-timeline-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; }
-.acs-root .run-timeline-event { position: relative; display: grid; grid-template-columns: 62px 12px 1fr; column-gap: 9px; align-items: start; padding: 4px 0; }
-.acs-root .run-timeline-time { font-size: 11px; color: var(--muted-2); font-variant-numeric: tabular-nums; line-height: 1.5; padding-top: 1px; }
-.acs-root .run-timeline-dot { width: 7px; height: 7px; border-radius: 50%; margin-top: 5px; justify-self: center; background: var(--muted-2); }
-/* The rail threads each dot to the next; the last event has nothing below it, so it draws no line. */
-.acs-root .run-timeline-event::before { content: ""; position: absolute; left: 77px; top: 13px; height: 100%; width: 1px; background: var(--line); }
-.acs-root .run-timeline-event:last-child::before { display: none; }
-.acs-root .run-timeline-event[data-severity="success"] .run-timeline-dot { background: #1F6B3F; }
-.acs-root .run-timeline-event[data-severity="warning"] .run-timeline-dot { background: #A8590E; }
-.acs-root .run-timeline-event[data-severity="error"]   .run-timeline-dot { background: #9E3535; }
-.acs-root .run-timeline-body { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
-.acs-root .run-timeline-title { font-size: 12.5px; color: var(--ink-2); line-height: 1.45; }
-.acs-root .run-timeline-summary { font-size: 11.5px; color: var(--muted); line-height: 1.4; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+/* ── Activity tab: the merged live-execution timeline (event rows + inline agent-wave terminal tiles) ───────── */
+.acs-root .run-activity-empty { font-size: 12.5px; color: var(--muted); padding: 18px 4px; }
+.acs-root .run-activity-list { list-style: none; margin: 0; padding: 0; position: relative; display: flex; flex-direction: column; }
+/* the rail threads the event dots + wave rings; wave blocks sit in the body column to its right */
+.acs-root .run-activity-list::before { content: ""; position: absolute; left: 77px; top: 9px; bottom: 9px; width: 1.5px; background: var(--line); }
+.acs-root .run-activity-row { display: grid; grid-template-columns: 62px 12px 1fr; column-gap: 9px; align-items: start; padding: 4px 0; }
+.acs-root .run-activity-time { font-size: 11px; color: var(--muted-2); font-variant-numeric: tabular-nums; line-height: 1.5; padding-top: 1px; text-align: right; white-space: nowrap; }
+.acs-root .run-activity-dot { width: 7px; height: 7px; border-radius: 50%; margin-top: 5px; justify-self: center; background: var(--muted-2); outline: 3px solid var(--bg); }
+.acs-root .run-activity-event[data-severity="success"] .run-activity-dot { background: #1F6B3F; }
+.acs-root .run-activity-event[data-severity="warning"] .run-activity-dot { background: #A8590E; }
+.acs-root .run-activity-event[data-severity="error"]   .run-activity-dot { background: #9E3535; }
+.acs-root .run-activity-body { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.acs-root .run-activity-title { font-size: 12.5px; color: var(--ink-2); line-height: 1.45; }
+.acs-root .run-activity-summary { font-size: 11.5px; color: var(--muted); line-height: 1.4; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+/* wave row: a hollow ring marks the spawn on the rail; the wave block aligns with the event body column */
+.acs-root .run-activity-waverow { padding: 8px 0; }
+.acs-root .run-activity-ring { width: 11px; height: 11px; border-radius: 50%; margin-top: 4px; justify-self: center; box-sizing: border-box; background: var(--bg); border: 2px solid var(--accent); outline: 3px solid var(--bg); }
+.acs-root .run-activity-wavewrap { min-width: 0; }
+
+/* the agent wave — a quiet header + an adaptive grid of terminal tiles */
+.acs-root .agent-wave { display: flex; flex-direction: column; gap: 9px; }
+.acs-root .agent-wave-head { display: flex; align-items: center; gap: 7px; font-size: 12px; }
+.acs-root .agent-wave-head > svg { color: var(--muted-2); flex: none; }
+.acs-root .agent-wave-title { font-weight: 600; color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.acs-root .agent-wave-count { margin-left: auto; font-size: 11px; color: var(--muted-2); flex: none; }
+.acs-root .agent-wave-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(185px, 1fr)); gap: 10px; }
+
+/* the light terminal tile — mac-terminal chrome over a warm surface (the ONLY terminal-styled element; the dark
+   profile is deferred to global dark mode). A read-only live-log preview, never an interactive shell. */
+.acs-root .agent-tile { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; overflow: hidden; transition: opacity .15s ease, box-shadow .15s ease; }
+.acs-root .agent-tile[data-selected] { box-shadow: 0 0 0 2px var(--accent); }
+.acs-root .agent-tile-bar { display: flex; align-items: center; gap: 6px; padding: 6px 9px; background: var(--panel-2); border-bottom: 1px solid var(--line); }
+.acs-root .agent-tile-lights { display: inline-flex; gap: 4px; flex: none; }
+.acs-root .agent-tile-lights > i { width: 8px; height: 8px; border-radius: 50%; }
+.acs-root .agent-tile-lights > i:nth-child(1) { background: #ff5f57; }
+.acs-root .agent-tile-lights > i:nth-child(2) { background: #febc2e; }
+.acs-root .agent-tile-lights > i:nth-child(3) { background: #28c840; }
+.acs-root .agent-tile-name { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; color: var(--ink-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.acs-root .agent-tile-flag { margin-left: auto; display: inline-flex; flex: none; color: var(--muted-2); }
+.acs-root .agent-tile-body { padding: 8px 10px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 10.5px; line-height: 1.6; min-height: 46px; }
+.acs-root .agent-tile-line { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.acs-root .agent-tile-cmd { color: var(--ink); }
+.acs-root .agent-tile-prompt { color: #1F6B3F; }
+.acs-root .agent-tile-dim { color: var(--muted-2); }
+.acs-root .agent-tile-wait { color: #A8590E; }
+.acs-root .agent-tile-fail { color: #9E3535; }
+.acs-root .agent-tile[data-state="done"] { opacity: .62; }
+.acs-root .agent-tile[data-state="done"] .agent-tile-flag { color: #1F6B3F; }
+.acs-root .agent-tile[data-state="waiting"] { border-color: #E3C9A0; }
+.acs-root .agent-tile[data-state="waiting"] .agent-tile-bar { background: #FBF3E6; border-bottom-color: #E3C9A0; }
+.acs-root .agent-tile[data-state="waiting"] .agent-tile-name, .acs-root .agent-tile[data-state="waiting"] .agent-tile-flag { color: #A8590E; }
+.acs-root .agent-tile[data-state="failed"] .agent-tile-name, .acs-root .agent-tile[data-state="failed"] .agent-tile-flag { color: #9E3535; }
+/* the running live-dot + the blinking cursor — DECORATIVE indicators, never an input caret */
+.acs-root .agent-tile-live { width: 6px; height: 6px; border-radius: 50%; background: var(--accent); animation: agentTilePulse 1.5s ease-in-out infinite; }
+.acs-root .agent-tile-cursor { display: inline-block; width: 6px; height: 11px; margin-left: 3px; vertical-align: -1px; background: var(--ink); animation: agentTileBlink 1.05s steps(1) infinite; }
+@keyframes agentTilePulse { 0%, 100% { opacity: 1; } 50% { opacity: .4; } }
+@keyframes agentTileBlink { 0%, 48% { opacity: 1; } 49%, 100% { opacity: 0; } }
+@media (prefers-reduced-motion: reduce) { .acs-root .agent-tile-live, .acs-root .agent-tile-cursor { animation: none; } }
+@media (max-width: 560px) { .acs-root .agent-wave-grid { grid-template-columns: 1fr; } }
 /* The Trace tab — the raw event ledger: a dense chronological list of every record, type rendered verbatim (monospace),
    a non-trivial payload expanding in place to raw JSON. The audit truth, so styling stays neutral (only failures tone). */
 .acs-root .run-trace { display: flex; flex-direction: column; gap: 8px; }

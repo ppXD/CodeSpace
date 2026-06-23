@@ -10,10 +10,9 @@ import { useNodeManifests, useResumeRun, useRunPhases, useWorkflowRun } from "@/
 import { AgentRunTimeline } from "./AgentRunTimeline";
 import { AgentToolCalls } from "./AgentToolCalls";
 import { JsonView } from "./JsonView";
+import { RunActivityTimeline } from "./RunActivityTimeline";
 import { RunCanvas } from "./RunCanvas";
-import { RunLiveWork } from "./RunLiveWork";
 import { RunStatusBadge } from "./RunStatusBadge";
-import { RunTimeline } from "./RunTimeline";
 import { RunTrace } from "./RunTrace";
 import { dedupRunAgents } from "./runPhases";
 import { branchBadge, groupMapBranches, type MapRollup } from "./mapBranches";
@@ -72,8 +71,8 @@ export function RunDetailView({ runId, nested = false, depth = 0, onOpenRun, def
   // (every row has an empty iteration key) — so a non-map run renders exactly as before.
   const mapRollups = groupMapBranches(r.nodes);
 
-  // The run's agents (deduped) drive the Live-work cards and decide whether the raw node trace folds away (an
-  // agent/supervisor run, whose cards are the heart) or stays primary (a structural workflow with no agents).
+  // Whether the run has any agents decides the layout below: an agent / supervisor run folds the raw node trace away
+  // (the Activity timeline is the heart), a structural workflow with no agents keeps the node trace primary.
   const phaseList = phases.data?.phases ?? [];
   const agents = dedupRunAgents(phaseList);
 
@@ -178,11 +177,9 @@ export function RunDetailView({ runId, nested = false, depth = 0, onOpenRun, def
         <RunTrace runId={runId} />
       ) : (
         <>
-          {/* The Live-work band — the command-center heart: a conditional lead strip + the run's agent cards. */}
-          {!nested && <RunLiveWork phases={phaseList} selectedAgentRunId={selectedAgentRunId} />}
-
-          {/* The narrative timeline — the merged "what happened, in order" story below the live-work band. */}
-          {!nested && <RunTimeline runId={runId} />}
+          {/* The live execution timeline — ONE chronological stream (lifecycle + supervisor + agent-wave terminal
+              tiles), the run's story. The lightweight run-state summary sits in the page header above the tabs. */}
+          {!nested && <RunActivityTimeline runId={runId} selectedAgentRunId={selectedAgentRunId} />}
 
           {nested || agents.length === 0 ? (
             // The editor dialog, or a structural workflow with no agents: the node trace IS the content.
@@ -191,8 +188,8 @@ export function RunDetailView({ runId, nested = false, depth = 0, onOpenRun, def
               {nodeBlock}
             </>
           ) : (
-            // An agent / supervisor run: the cards above are the heart, so the raw input/output + node trace
-            // fold away (and move fully into the Trace tab once its projector lands).
+            // An agent / supervisor run: the Activity timeline above is the heart, so the raw input/output + node
+            // trace fold away (the full raw stream lives in the Trace tab).
             <>
               <Fold title="Run input & output">{payloadBlock}</Fold>
               <Fold title="Workflow nodes">{nodeBlock}</Fold>
