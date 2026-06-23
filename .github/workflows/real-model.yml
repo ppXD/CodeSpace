@@ -31,11 +31,13 @@ jobs:
     runs-on: ubuntu-latest
     # Headroom for the SEQUENTIAL worst case (xUnit runs a class's [Theory] cases serially): the trajectory class is
     # 10 cases (5 scenarios — happy/conflict/failure/persistent-conflict/multi-failure × 2 wires) each bounded by its
-    # own 6-min wall-clock deadline = up to 60 min, plus the decision class (14 golden × 2 wires = 28 calls, each bounded
-    # by its 150s per-call HTTP timeout) — on a uniformly-slow gateway this combined budget can approach ~110 min, so the
-    # ceiling carries margin. Typical is FAR lower (a decision ~15-90s, a converging trajectory ~3-5 min). A per-call
-    # timeout / unreachable gateway is treated as NON-GATING infra by RealModelGate.AssessLiveAsync (surfaced to the job
-    # summary, not a RED), so a slow tail can't flake the blessed kill-gate — only a genuine wrong decision fails it.
+    # own 6-min wall-clock deadline, plus the decision class (14 golden × 2 wires = 28 calls, each bounded by its 150s
+    # per-call HTTP timeout) + the arbiter. The trajectory/arbiter BLESSED (Anthropic) cases now carry a best-of-N=2
+    # capability-floor, so a case that FAILS re-runs up to N times (only a *failing* case re-runs — a healthy model passes
+    # attempt 1 at single-attempt cost, OpenAI runs once), worst case ~doubling the blessed trajectory budget. Typical is
+    # FAR lower (a decision ~15-90s, a converging trajectory ~3-5 min). A per-call timeout / unreachable gateway is
+    # NON-GATING infra (surfaced to the job summary, not a RED) and does not consume a best-of-N slot, so a slow tail
+    # can't flake the blessed kill-gate — only a model that fails ALL N attempts (a genuine miss) reds it.
     timeout-minutes: 120
     env:
       # The custom-endpoint config the RealModel tests read (a [Theory] over both Anthropic + OpenAI wires from
