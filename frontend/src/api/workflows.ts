@@ -413,6 +413,29 @@ export interface RunTimelineResponse {
   events: RunTimelineEvent[];
 }
 
+/**
+ * Mirrors backend `RunRecordView` — one raw row of the run's append-only event ledger (the Trace audit). `recordType`
+ * is an OPEN string (e.g. "run.started", "node.completed", "log") — render unknown types as-is. `payloadJson` is the
+ * raw, secret-redacted, jsonb-normalized payload — JSON.parse it for display.
+ */
+export interface RunRecordView {
+  sequence: number;
+  recordType: string;
+  nodeId?: string | null;
+  iterationKey: string;
+  occurredAt: string;
+  payloadJson: string;
+  correlationId?: string | null;
+  parentRecordId?: string | null;
+}
+
+/** Mirrors backend `RunRecordsResponse` — the run's status + every raw ledger record, in Sequence order (the Trace tab). */
+export interface RunRecordsResponse {
+  runId: string;
+  runStatus: WorkflowRunStatus;
+  records: RunRecordView[];
+}
+
 // ─── Decisions (the cross-grain "Needs decision" queue — GET /api/workflows/decisions) ───────────
 
 /** The shape of the ask — an OPEN string (forward-compatible); the UI maps a known set to affordances and free-texts the rest. */
@@ -507,6 +530,9 @@ export const workflowsApi = {
   getRunPhases: (runId: string) => fetchJson<RunPhasesResponse>(`/api/workflows/runs/${runId}/phases`),
 
   getRunTimeline: (runId: string) => fetchJson<RunTimelineResponse>(`/api/workflows/runs/${runId}/timeline`),
+
+  /** The run's RAW event ledger — every record unfiltered, in Sequence order (the Trace audit). */
+  getRunRecords: (runId: string) => fetchJson<RunRecordsResponse>(`/api/workflows/runs/${runId}/records`),
 
   /** The team's cross-grain pending decisions, soonest-deadline first. The Run Room filters by `rootTraceId`. */
   listPendingDecisions: () => fetchJson<PendingDecision[]>("/api/workflows/decisions"),

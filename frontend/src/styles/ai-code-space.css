@@ -2404,6 +2404,26 @@ textarea:-webkit-autofill {
 .acs-root .run-timeline-body { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 .acs-root .run-timeline-title { font-size: 12.5px; color: var(--ink-2); line-height: 1.45; }
 .acs-root .run-timeline-summary { font-size: 11.5px; color: var(--muted); line-height: 1.4; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+/* The Trace tab — the raw event ledger: a dense chronological list of every record, type rendered verbatim (monospace),
+   a non-trivial payload expanding in place to raw JSON. The audit truth, so styling stays neutral (only failures tone). */
+.acs-root .run-trace { display: flex; flex-direction: column; gap: 8px; }
+.acs-root .run-trace-head { display: flex; align-items: center; gap: 7px; font-size: 11.5px; font-weight: 600; text-transform: uppercase; letter-spacing: .05em; color: var(--ink-2); }
+.acs-root .run-trace-head > svg { color: var(--muted-2); }
+.acs-root .run-trace-empty { font-size: 12.5px; color: var(--muted); padding: 16px 4px; }
+.acs-root .run-trace-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; }
+.acs-root .run-trace-row { border-bottom: 1px solid var(--line); }
+.acs-root .run-trace-row:last-child { border-bottom: none; }
+.acs-root .run-trace-bar { appearance: none; width: 100%; display: flex; align-items: center; gap: 10px; padding: 6px 4px; border: 0; background: transparent; text-align: left; font: inherit; color: var(--ink-2); border-radius: 6px; }
+.acs-root .run-trace-bar[data-expandable] { cursor: pointer; }
+.acs-root .run-trace-bar[data-expandable]:hover { background: var(--panel-2); }
+.acs-root .run-trace-bar:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.acs-root .run-trace-time { flex: none; width: 76px; font-size: 11px; color: var(--muted-2); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.acs-root .run-trace-type { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; color: var(--ink); }
+.acs-root .run-trace-row[data-tone="error"] .run-trace-type { color: #9E3535; }
+.acs-root .run-trace-node { font-size: 11px; color: var(--muted); background: var(--panel-2); border-radius: 5px; padding: 1px 6px; white-space: nowrap; }
+.acs-root .run-trace-caret { margin-left: auto; display: inline-flex; color: var(--muted-2); transition: transform .14s ease; }
+.acs-root .run-trace-row[data-open] .run-trace-caret { transform: rotate(180deg); }
+.acs-root .run-trace-payload { padding: 2px 4px 10px 18px; overflow-x: auto; }
 /* Folded raw detail below the cards (run input/output, the node trace) — pushed down, lazy-mounted. */
 .acs-root .run-fold { border: 1px solid var(--line); border-radius: 10px; }
 .acs-root .run-fold > .run-fold-summary { cursor: pointer; list-style: none; padding: 9px 12px; font-size: 12px; font-weight: 500; color: var(--ink-2); display: flex; align-items: center; gap: 6px; }
