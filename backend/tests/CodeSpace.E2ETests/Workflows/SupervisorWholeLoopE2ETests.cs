@@ -463,6 +463,44 @@ public sealed class SupervisorWholeLoopE2ETests : IDisposable
         await AssertFirstMergeConflictedAsync(runId, teamId);
     }
 
+    [Fact]
+    public async Task LiveBrainFailingFakeCli_fails_every_agent_under_the_scripted_decider()
+    {
+        if (OperatingSystem.IsWindows()) return;
+        if (!await GitReadyAsync()) return;
+
+        // Deterministic TEETH for the real-model A2 lane: pin that LiveBrainFailingFakeCli — which fails EVERY agent
+        // unconditionally (so a free-form live brain reliably sees a failure to react to) — really produces Failed agent
+        // runs here. Without this pin, the live gate's "agent-failed" signal could be a silent CLI bug. The live lane then
+        // measures whether the BRAIN retries / escalates rather than merging over the failure.
+        using var cli = new LiveBrainFailingFakeCli();
+
+        SetDecisionScript(s => s.PlanSpawnStop());
+
+        var jobClient = ResolveJobClient();
+        jobClient.Clear();
+        jobClient.AutoExecute = true;
+
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+
+        using var remote = new BareRemote();
+        await remote.SeedBaseAsync(new() { ["check.sh"] = "#!/bin/sh\nexit 0\n", ["base.txt"] = "base\n" });
+        var repoId = await SeedBoundRepositoryAsync(teamId, remote.Url, "main");
+
+        var workflowId = await CreateWholeLoopWorkflowAsync(teamId, userId, repoId);
+        var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
+
+        await RunEngineAsync(runId);
+        await jobClient.WaitForPendingAsync();
+
+        using var verify = _fixture.BeginScope();
+        var db = verify.Resolve<CodeSpaceDbContext>();
+        var statuses = await db.AgentRun.AsNoTracking().Where(r => r.WorkflowRunId == runId).Select(r => r.Status).ToListAsync();
+
+        statuses.Count.ShouldBe(2, "the scripted spawn staged two real agent runs");
+        statuses.ShouldAllBe(s => s == AgentRunStatus.Failed, "LiveBrainFailingFakeCli exits non-zero for every agent → every spawned run is a real Failed run");
+    }
+
     // ─── Assertions ──────────────────────────────────────────────────────────────────
 
     private async Task AssertRunReachedSuccessAsync(Guid runId)

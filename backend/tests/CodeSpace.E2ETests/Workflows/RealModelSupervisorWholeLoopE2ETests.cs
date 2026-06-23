@@ -191,6 +191,79 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
         }, gating: false);
     }
 
+    [Fact]
+    public async Task The_real_model_reacts_to_a_failed_subtask_by_retrying()
+    {
+        // Real-scenario coverage A2 — a LIVE brain reacting to a real agent FAILURE through the real engine. Every
+        // failure→retry arc that runs through the real engine today uses the SCRIPTED decider. Here every spawned agent
+        // FAILS (LiveBrainFailingFakeCli: exit 1, no patch) — the only way to deterministically present a real failure to
+        // a live model, since a retry's revised instruction is brain-authored (no CLI-visible attempt marker to key a
+        // "fail-first" CLI on). The brain must OBSERVE the failed subtask in its SupervisorOutcome context and author
+        // `retry` (the recovery action), NEVER merging over the failure. INFORMATIONAL (gating:false): a live model may
+        // escalate via stop/ask_human instead of retry — both safe; the note records what it did, and this lane never
+        // reds main.
+        var baseUrl = Env(RealModelSupervisorDecisionFlowTests.BaseUrlEnvVar);
+        var apiKey = Env(RealModelSupervisorDecisionFlowTests.ApiKeyEnvVar);
+        var model = Env(RealModelSupervisorDecisionFlowTests.ModelIdEnvVar);
+
+        var present = new[] { baseUrl, apiKey, model }.Count(v => v is not null);
+        if (present == 0) return;
+        present.ShouldBe(3, "CODESPACE_LLM_* is partially configured — set all three or none; a partial config would self-skip this lane green proving nothing.");
+
+        if (OperatingSystem.IsWindows()) return;
+        if (!await GitReadyAsync()) return;
+
+        using var cli = new LiveBrainFailingFakeCli();
+
+        var jobClient = ResolveJobClient();
+        jobClient.Clear();
+        jobClient.AutoExecute = true;
+
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+
+        using var remote = new BareRemote();
+        await remote.SeedBaseAsync(new() { ["check.sh"] = "#!/bin/sh\nexit 0\n", ["base.txt"] = "base\n" });
+        var repoId = await SeedBoundRepositoryAsync(teamId, remote.Url, "main");
+
+        var brainModelId = await SeedBrainModelAsync(teamId, BaseUrlFor(baseUrl), apiKey, model);
+
+        const string goal = "Add server-side email-format validation to the signup endpoint, with unit tests. "
+                          + "If a subtask's agent reports it could not complete the work, retry that subtask before finishing.";
+
+        var workflowId = await CreateWholeLoopWorkflowAsync(teamId, userId, repoId, brainModelId, goal);
+        var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
+
+        await RealModelGate.AssessLiveAsync(Provider, async () =>
+        {
+            await RunEngineAsync(runId);
+            await jobClient.WaitForPendingAsync();
+
+            var (ok, note) = await EvaluateFailureRetryAsync(runId, teamId);
+            return (ok, $"{Provider} model '{model}' failure→retry — {note}");
+        }, gating: false);
+    }
+
+    /// <summary>The live brain reacted to the real failure iff it FANNED OUT (spawn), at least one agent really FAILED, and the brain then chose the recovery action `retry`. Reports each signal (and whether it instead escalated via stop) so a non-retrying trajectory is legible, not a bare red.</summary>
+    private async Task<(bool Ok, string Note)> EvaluateFailureRetryAsync(Guid runId, Guid teamId)
+    {
+        using var verify = _fixture.BeginScope();
+        var db = verify.Resolve<CodeSpaceDbContext>();
+
+        var kinds = await db.SupervisorDecisionRecord.AsNoTracking()
+            .Where(d => d.SupervisorRunId == runId && d.TeamId == teamId)
+            .OrderBy(d => d.Sequence).Select(d => d.DecisionKind).ToListAsync();
+
+        var spawned = kinds.Contains(SupervisorDecisionKinds.Spawn);
+        var someAgentFailed = await db.AgentRun.AsNoTracking().AnyAsync(r => r.WorkflowRunId == runId && r.Status == AgentRunStatus.Failed);
+        var retried = kinds.Contains(SupervisorDecisionKinds.Retry);
+
+        var run = await db.WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == runId);
+        var trail = string.Join("→", kinds);
+
+        var ok = spawned && someAgentFailed && retried;
+        return (ok, $"status={run.Status}, spawned={spawned}, agent-failed={someAgentFailed}, retried={retried}, trajectory={trail}");
+    }
+
     /// <summary>The live brain reacted to the real conflict iff it FANNED OUT (spawn), the real-git merge genuinely CONFLICTED, and the brain then CHOSE resolve (executed, or gated to the resolve-approval ask_human floor). Reports each signal so a non-resolving trajectory is legible, not a bare red.</summary>
     private async Task<(bool Ok, string Note)> EvaluateConflictResolveAsync(Guid runId, Guid teamId)
     {
