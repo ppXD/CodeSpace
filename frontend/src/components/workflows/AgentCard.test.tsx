@@ -41,6 +41,22 @@ describe("AgentCard rollup", () => {
     expect(screen.getByText("claude-code · 7m 59s")).toBeInTheDocument();
   });
 
+  it("shows the model and total token spend when the supervisor rollup is present", () => {
+    const rich: PhaseAgentRef = { agentRunId: "ar1", status: "Succeeded", label: "reviewer", model: "claude-opus-4", inputTokens: 12000, outputTokens: 3400 };
+
+    render(<AgentCard agent={rich} />);   // no events → harness · model · tokens · duration
+
+    expect(screen.getByText("claude-code · claude-opus-4 · 15.4k tokens · 7m 59s")).toBeInTheDocument();
+  });
+
+  it("omits the model when blank and tokens when zero (a node/map agent has no rollup)", () => {
+    const bare: PhaseAgentRef = { agentRunId: "ar1", status: "Succeeded", label: "x", model: null, inputTokens: 0, outputTokens: 0 };
+
+    render(<AgentCard agent={bare} />);
+
+    expect(screen.getByText("claude-code · 7m 59s")).toBeInTheDocument();
+  });
+
   it("highlights and scrolls into view when the outline selects it", () => {
     const scrollIntoView = vi.fn();
     Element.prototype.scrollIntoView = scrollIntoView;   // jsdom doesn't implement it

@@ -10,9 +10,14 @@ import { RunStatusBadge } from "./RunStatusBadge";
 import { formatDuration } from "./cockpit";
 import { isAgentBusy } from "./runPhases";
 
-/** Join the truthy parts of an agent card's meta line with " · " (harness · N files · M tools · duration). */
+/** Join the truthy parts of an agent card's meta line with " · " (harness · model · N files · M tools · tokens · duration). */
 function metaLine(parts: (string | false | null | undefined)[]): string {
   return parts.filter(Boolean).join(" · ");
+}
+
+/** Compact token count for the card meta — thousands as "15.4k", smaller counts verbatim. */
+function formatTokens(n: number): string {
+  return n >= 1000 ? `${(n / 1000).toFixed(1)}k` : `${n}`;
 }
 
 /**
@@ -20,8 +25,9 @@ function metaLine(parts: (string | false | null | undefined)[]): string {
  * status, the current-activity line, and the harness, then EXPAND for the full event stream + governed tool
  * audit (reusing AgentRunTimeline + AgentToolCalls verbatim). The collapsed card stays glanceable so an N-agent
  * run reads at a glance. `status` is the agent run's LIVE status (falling back to the phase ref's status before
- * the agent row loads); "current activity" is its latest streamed event line. Per-agent actions (ask-to-adjust /
- * retry / stop) and the model/repo/files/tokens fields arrive with the later backend slices.
+ * the agent row loads); "current activity" is its latest streamed event line. The meta line shows the model + token
+ * spend (from the supervisor rollup on the phase ref; null for a node/map agent). Per-agent actions (ask-to-adjust /
+ * retry / stop) and the per-agent repo arrive with later slices.
  */
 export function AgentCard({ agent, selected }: { agent: PhaseAgentRef; selected?: boolean }) {
   const [open, setOpen] = useState(false);
@@ -48,7 +54,7 @@ export function AgentCard({ agent, selected }: { agent: PhaseAgentRef; selected?
   const activity = latest?.text ?? (active ? "Starting…" : events.data === undefined ? "…" : "No activity recorded.");
 
   // Client-side rollups from what's already on the wire: file edits + tool uses counted off the event stream,
-  // elapsed/duration off the run row. The model / token / cost fields need a backend rollup (a later slice).
+  // elapsed/duration off the run row.
   const evts = events.data ?? [];
   const files = evts.filter((e) => e.kind === "FileChanged").length;
   const tools = evts.filter((e) => e.kind === "ToolCall").length;
@@ -56,10 +62,15 @@ export function AgentCard({ agent, selected }: { agent: PhaseAgentRef; selected?
   // status badge + the expand's "active Ns ago" heartbeat already convey liveness).
   const duration = run.data?.completedAt && run.data.createdDate ? formatDuration(run.data.createdDate, run.data.completedAt) : "";
 
+  // Model + realized token spend come from the phase ref (the backend supervisor rollup); null for a node/map agent.
+  const totalTokens = (agent.inputTokens ?? 0) + (agent.outputTokens ?? 0);
+
   const meta = metaLine([
     run.data?.harness,
+    agent.model,
     files > 0 && `${files} ${files === 1 ? "file" : "files"}`,
     tools > 0 && `${tools} ${tools === 1 ? "tool" : "tools"}`,
+    totalTokens > 0 && `${formatTokens(totalTokens)} tokens`,
     duration,
   ]);
 
