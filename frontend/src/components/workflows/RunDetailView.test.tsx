@@ -23,6 +23,7 @@ vi.mock("@/hooks/use-workflows", () => ({
   useWorkflow: () => ({ data: undefined, isLoading: false }),
   useNodeManifests: () => ({ data: [] }),
   useRunPhases: () => useRunPhasesMock(),
+  useRunTimeline: () => ({ data: undefined }),   // the narrative band stays empty in these node-trace tests
 }));
 
 // RunNodeRow reads the agent run's live status for its badge (and AgentRunTimeline streams it); mock the

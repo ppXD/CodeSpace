@@ -173,6 +173,20 @@ export function useRunPhases(runId: string | null) {
   });
 }
 
+/** The run's narrative timeline (the merged event story). Polls every 2s while the run is non-terminal, then stops. */
+export function useRunTimeline(runId: string | null) {
+  return useQuery({
+    queryKey: ["run-timeline", runId],
+    queryFn: () => workflowsApi.getRunTimeline(runId!),
+    enabled: runId != null,
+    refetchInterval: (q) => {
+      const data = q.state.data;
+      if (!data) return false;
+      return isRunActive(data.runStatus) ? 2000 : false;
+    },
+  });
+}
+
 /**
  * The team's cross-grain "Needs decision" queue. The Run Room filters this to the run's tree (by `rootTraceId`)
  * client-side — a per-run endpoint is a future backend filter. Polled every 3s while `poll` is true (the run is
