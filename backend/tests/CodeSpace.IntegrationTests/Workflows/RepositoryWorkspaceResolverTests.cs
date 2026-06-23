@@ -7,6 +7,7 @@ using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Credentials;
 using CodeSpace.Messages.Enums;
+using Microsoft.EntityFrameworkCore;
 using Shouldly;
 
 namespace CodeSpace.IntegrationTests.Workflows;
@@ -16,7 +17,7 @@ namespace CodeSpace.IntegrationTests.Workflows;
 /// bound repository + credential resolve into the <see cref="WorkspaceRequest"/> the clone consumes — the
 /// HTTPS URL, the default branch, a token resolved through the same auth strategies the providers use, and
 /// the provider-appropriate basic-auth username. Pins: GitHub vs GitLab username; an anonymous (no-
-/// credential) repo; no-RepositoryId → no workspace; an unknown / cross-team repo is refused.
+/// credential) repo; no-RepositoryId → no workspace; an unknown / cross-team / SOFT-DELETED repo is refused.
 /// </summary>
 [Collection(PostgresCollection.Name)]
 [Trait("Category", "Integration")]
@@ -90,6 +91,47 @@ public class RepositoryWorkspaceResolverTests
         var repoId = await SeedRepoAsync(otherTeam, ProviderKind.GitHub, "https://github.com/org/r.git", "main", token: "t");
 
         await Should.ThrowAsync<WorkspaceException>(async () => await ResolveAsync(TaskFor(repoId), teamId));
+    }
+
+    [Fact]
+    public async Task A_soft_deleted_repository_is_refused()
+    {
+        // A repo soft-deleted AFTER its id was baked into the run (e.g. between launch validation and clone-time)
+        // must not still be cloned — the clone gate filters DeletedDate just like the launch gate + every other loader.
+        var teamId = await SeedTeamAsync();
+        var repoId = await SeedRepoAsync(teamId, ProviderKind.GitHub, "https://github.com/org/repo.git", "main", token: "ghp_abc");
+        await SoftDeleteRepoAsync(repoId);
+
+        await Should.ThrowAsync<WorkspaceException>(async () => await ResolveAsync(TaskFor(repoId), teamId),
+            customMessage: "a soft-deleted repo must be refused at the clone gate — same as an unknown repo");
+    }
+
+    [Fact]
+    public async Task A_multi_repo_workspace_with_a_soft_deleted_member_is_refused()
+    {
+        // One member of a multi-repo workspace is soft-deleted → the whole provision fails loud (the per-repo loop
+        // throws on the unresolvable repo) rather than silently dropping it from the cloned workspace.
+        var teamId = await SeedTeamAsync();
+        var webId = await SeedRepoAsync(teamId, ProviderKind.GitHub, "https://github.com/org/web.git", "main", token: "ghp_web");
+        var apiId = await SeedRepoAsync(teamId, ProviderKind.GitLab, "https://gitlab.com/org/api.git", "develop", token: "glpat_api");
+        await SoftDeleteRepoAsync(apiId);
+
+        var task = new AgentTask
+        {
+            Goal = "g", Harness = "h", Model = "m",
+            Workspace = new WorkspaceSpec
+            {
+                PrimaryAlias = "web",
+                Repositories = new[]
+                {
+                    new WorkspaceRepositorySpec { Alias = "web", RepositoryId = webId, Access = WorkspaceAccess.Write, IsPrimary = true },
+                    new WorkspaceRepositorySpec { Alias = "api", RepositoryId = apiId, Access = WorkspaceAccess.Read },
+                },
+            },
+        };
+
+        await Should.ThrowAsync<WorkspaceException>(async () => await ResolveProvisionAsync(task, teamId),
+            customMessage: "a soft-deleted member fails the whole multi-repo provision — never silently dropped");
     }
 
     [Fact]
@@ -230,5 +272,17 @@ public class RepositoryWorkspaceResolverTests
 
         await db.SaveChangesAsync();
         return repoId;
+    }
+
+    /// <summary>Soft-delete a seeded repo (set <c>DeletedDate</c>) so the clone gate's <c>DeletedDate == null</c> filter must refuse it.</summary>
+    private async Task SoftDeleteRepoAsync(Guid repoId)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+
+        var repo = await db.Repository.SingleAsync(r => r.Id == repoId);
+        repo.DeletedDate = DateTimeOffset.UtcNow;
+
+        await db.SaveChangesAsync();
     }
 }
