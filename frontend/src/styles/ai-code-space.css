@@ -2338,29 +2338,32 @@ textarea:-webkit-autofill {
 /* ── Run Room: outline rail | run view | context rail (decision inbox + facts), under the run-state sentence ── */
 /* padding-top gives the body air below the .ct-head divider (the shared .ct-body has padding-top:0 for table pages
    whose sticky thead supplies its own offset; the run room has no such spacer, so it sets its own). */
-.acs-root .ct-body.run-room-body { padding-top: 20px; }
-.acs-root .run-room-body { display: grid; grid-template-columns: 232px minmax(0, 1fr) 280px; gap: 26px; align-items: start; }
-.acs-root .run-room-rail { position: sticky; top: 14px; align-self: start; max-height: calc(100vh - 28px); overflow-y: auto; }
-.acs-root .run-room-main { min-width: 0; }
-.acs-root .run-room-context { position: sticky; top: 14px; align-self: start; max-height: calc(100vh - 28px); overflow-y: auto; display: flex; flex-direction: column; gap: 18px; }
-/* Below ~1400px the center canvas gets too narrow squeezed between both rails — drop the context rail full-width
-   under the run view (keeps a usable node canvas on standard laptops; only wide screens keep the true 3-pane). */
+/* App-shell: the three columns fill the body height as EQUAL-HEIGHT panels, each scrolling INTERNALLY, so their
+   frames always match top AND bottom no matter how long the run's content is. The body itself doesn't scroll. */
+.acs-root .ct-body.run-room-body { padding-top: 20px; overflow: hidden; min-height: 0; }
+.acs-root .run-room-body { display: grid; grid-template-columns: 232px minmax(0, 1fr) 280px; grid-template-rows: minmax(0, 1fr); gap: 26px; align-items: stretch; }
+.acs-root .run-room-rail { min-height: 0; }
+.acs-root .run-room-main { min-width: 0; min-height: 0; }
+.acs-root .run-room-context { min-height: 0; display: flex; flex-direction: column; border: 1px solid var(--line); border-radius: 12px; overflow-y: auto; }
+/* Each column's frame fills its column and scrolls inside it. */
+.acs-root .run-room-rail > .rail-card { height: 100%; box-sizing: border-box; overflow-y: auto; }
+.acs-root .run-panel { border: 1px solid var(--line); border-radius: 12px; padding: 12px; height: 100%; box-sizing: border-box; overflow-y: auto; }
+/* The right column is ONE framed panel; the decision queue + run facts become borderless, divider-separated sections. */
+.acs-root .run-room-context > .rail-card { border: 0; border-radius: 0; }
+.acs-root .run-room-context > * + * { border-top: 1px solid var(--line); }
+/* Below ~1400px the context rail drops full-width below the run view; the page scrolls normally (no inner panels). */
 @media (max-width: 1400px) {
-  .acs-root .run-room-body { grid-template-columns: 232px minmax(0, 1fr); }
-  .acs-root .run-room-context { grid-column: 1 / -1; position: static; max-height: none; overflow: visible; }
+  .acs-root .ct-body.run-room-body { overflow: auto; }
+  .acs-root .run-room-body { grid-template-columns: 232px minmax(0, 1fr); grid-template-rows: none; align-items: start; }
+  .acs-root .run-room-rail > .rail-card, .acs-root .run-panel { height: auto; overflow-y: visible; }
+  .acs-root .run-room-context { grid-column: 1 / -1; }
 }
 @media (max-width: 900px) {
   .acs-root .run-room-body { grid-template-columns: 1fr; }
-  .acs-root .run-room-rail, .acs-root .run-room-context { position: static; }
 }
 
-/* Rail panels — the outline (left) and the decision inbox + run facts (right) each read as a framed sidebar card,
-   so the two rails are visually consistent and aligned (a background-tasks-style panel rather than bare text). */
+/* Rail panels — the outline (left) and the decision inbox + run facts (right) read as framed sidebar cards. */
 .acs-root .rail-card { border: 1px solid var(--line); border-radius: 12px; padding: 12px; }
-/* The center run-detail, framed as a panel so its top edge + border align with the left/right rail cards —
-   same corner radius AND inset as .rail-card so the three columns read as one consistent frame and the center's
-   first band (the tab strip) sits at the same top as the rail-card heads. */
-.acs-root .run-panel { border: 1px solid var(--line); border-radius: 12px; padding: 12px; }
 /* Honest placeholder for a tab whose backend projector hasn't shipped (Changes / Trace). */
 .acs-root .run-tab-soon-tag { display: inline-block; margin-bottom: 10px; padding: 2px 9px; border-radius: 99px; background: var(--panel-2); border: 1px solid var(--line); font-size: 10.5px; font-weight: 600; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); }
 
