@@ -70,6 +70,20 @@ describe("RunOutline", () => {
     expect(container.querySelector(".run-outline-agent[data-selected]")?.textContent).toContain("frontend-fix");
   });
 
+  it("toggles the selection off when the already-selected agent is clicked again", () => {
+    const onSelect = vi.fn();
+    const { getByText } = render(<RunOutline
+      phases={[phase({ status: "Active", metrics: { agentCount: 1, succeededCount: 0, failedCount: 0 }, agents: [
+        { agentRunId: "a1", label: "backend-fix", status: "Running" },
+      ] })]}
+      selectedAgentRunId="a1"
+      onSelectAgent={onSelect}
+    />);
+
+    fireEvent.click(getByText("backend-fix"));   // clicking the SELECTED row deselects it
+    expect(onSelect).toHaveBeenCalledWith(null);
+  });
+
   it("renders agent rows as plain (non-button) when no handler is given", () => {
     const { container } = render(<RunOutline phases={[phase({ agents: [{ agentRunId: "a1", label: "solo", status: "Running" }] })]} />);
     expect(container.querySelector("button.run-outline-agent")).toBeNull();

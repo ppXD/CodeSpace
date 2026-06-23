@@ -14,7 +14,7 @@ import { isAgentBusy } from "./runPhases";
 export function RunOutline({ phases, selectedAgentRunId, onSelectAgent }: {
   phases: readonly RunPhase[];
   selectedAgentRunId?: string | null;
-  onSelectAgent?: (agentRunId: string) => void;
+  onSelectAgent?: (agentRunId: string | null) => void;
 }) {
   if (phases.length === 0) {
     return <div className="run-outline-empty">No phases yet — the run hasn’t reached a step.</div>;
@@ -27,7 +27,7 @@ export function RunOutline({ phases, selectedAgentRunId, onSelectAgent }: {
   );
 }
 
-function PhaseRow({ phase, selectedAgentRunId, onSelectAgent }: { phase: RunPhase; selectedAgentRunId?: string | null; onSelectAgent?: (agentRunId: string) => void }) {
+function PhaseRow({ phase, selectedAgentRunId, onSelectAgent }: { phase: RunPhase; selectedAgentRunId?: string | null; onSelectAgent?: (agentRunId: string | null) => void }) {
   const { agentCount, succeededCount, failedCount } = phase.metrics;
 
   return (
@@ -50,7 +50,7 @@ function PhaseRow({ phase, selectedAgentRunId, onSelectAgent }: { phase: RunPhas
           {phase.agents.map((a, i) => (
             <li key={`${a.agentRunId}:${i}`}>
               {onSelectAgent ? (
-                <button type="button" className="run-outline-agent" aria-pressed={a.agentRunId === selectedAgentRunId} data-selected={a.agentRunId === selectedAgentRunId || undefined} onClick={() => onSelectAgent(a.agentRunId)}>
+                <button type="button" className="run-outline-agent" aria-pressed={a.agentRunId === selectedAgentRunId} data-selected={a.agentRunId === selectedAgentRunId || undefined} onClick={() => onSelectAgent(a.agentRunId === selectedAgentRunId ? null : a.agentRunId)}>
                   <AgentRowInner agent={a} />
                 </button>
               ) : (

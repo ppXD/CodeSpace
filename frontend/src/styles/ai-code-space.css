@@ -352,7 +352,6 @@ html, body, * { scrollbar-width: thin; scrollbar-color: rgba(0, 0, 0, .16) trans
  * below) instead of being capped — short descriptions read on one line. */
 .acs-root .ct-sub { font-size: 13px; color: var(--muted); margin-top: 4px; }
 .acs-root .ct-actions { display: flex; align-items: center; gap: 8px; }
-.acs-root .ct-action-error { align-self: center; font-size: 12px; color: var(--danger); }
 .acs-root .ct-tabs { display: flex; gap: 2px; margin-top: 6px; }
 .acs-root .ct-tab { padding: 8px 12px 10px; font-size: 13px; font-weight: 500; color: var(--muted); border-bottom: 2px solid transparent; cursor: pointer; margin-bottom: -1px; }
 .acs-root .ct-tab:hover { color: var(--ink-2); }

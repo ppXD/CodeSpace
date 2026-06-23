@@ -2,10 +2,12 @@ import { useMemo } from "react";
 import { Background, BackgroundVariant, Controls, Panel, ReactFlow, ReactFlowProvider, type Edge, type Node } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 
-import type { NodeManifestDto, NodeStatus, WorkflowDefinition, WorkflowRunNodeSummary } from "@/api/workflows";
+import type { NodeManifestDto, NodeStatus, WorkflowDefinition, WorkflowRunNodeSummary, WorkflowRunStatus } from "@/api/workflows";
+import { isRunActive } from "@/hooks/use-workflows";
 import { ERROR_HANDLE } from "@/lib/workflowErrorRoute";
 
 import { definitionToRfNodes } from "./definitionToRfNodes";
+import { runEdgeFlow } from "./runCanvasFlow";
 import { RunOpenContext } from "./runOpenContext";
 import { summarizeRunProgress } from "./runProgress";
 import { CATCH_HANDLE } from "./workflowContainers";
@@ -17,6 +19,8 @@ interface RunCanvasProps {
   definition: WorkflowDefinition;
   /** The run's per-node rows — a node id may repeat (one row per map branch / loop pass). */
   runNodes: WorkflowRunNodeSummary[];
+  /** The run's overall status — once terminal, a node still reading Running/Suspended is stale, so edges stop flowing. */
+  runStatus: WorkflowRunStatus;
   manifestByType: Map<string, NodeManifestDto>;
   /** Open another run full-view (a sub-workflow node's child run). Provided to nodes via RunOpenContext. */
   onOpenRun?: (runId: string) => void;
@@ -30,19 +34,22 @@ interface RunCanvasProps {
  * The run→node mapping is intentionally a thin, separate layer (aggregateStatus / statusByNodeId) so it
  * can be lifted later for the generic task-run view, where any run resolves to the same node-status shape.
  */
-export function RunCanvas({ definition, runNodes, manifestByType, onOpenRun }: RunCanvasProps) {
+export function RunCanvas({ definition, runNodes, runStatus, manifestByType, onOpenRun }: RunCanvasProps) {
   return (
     <ReactFlowProvider>
       <RunOpenContext.Provider value={onOpenRun ?? null}>
-        <RunCanvasInner definition={definition} runNodes={runNodes} manifestByType={manifestByType} />
+        <RunCanvasInner definition={definition} runNodes={runNodes} runStatus={runStatus} manifestByType={manifestByType} />
       </RunOpenContext.Provider>
     </ReactFlowProvider>
   );
 }
 
-function RunCanvasInner({ definition, runNodes, manifestByType }: RunCanvasProps) {
+function RunCanvasInner({ definition, runNodes, runStatus, manifestByType }: RunCanvasProps) {
   const statuses = useMemo(() => statusByNodeId(runNodes), [runNodes]);
   const rowsByNodeId = useMemo(() => rowsByNode(runNodes), [runNodes]);
+  // Once the run is terminal (Success/Failure/Cancelled), a node still reading Running/Suspended is stale — the
+  // cancel/finish stopped it. The edges + progress chip read this so a cancelled run doesn't keep "flowing".
+  const runActive = isRunActive(runStatus);
 
   const nodes = useMemo<Node<WorkflowNodeData>[]>(
     () => definitionToRfNodes(definition, manifestByType).map((n) => ({
@@ -55,7 +62,7 @@ function RunCanvasInner({ definition, runNodes, manifestByType }: RunCanvasProps
     [definition, manifestByType, statuses, rowsByNodeId],
   );
 
-  const edges = useMemo<Edge[]>(() => definitionToRunEdges(definition, statuses), [definition, statuses]);
+  const edges = useMemo<Edge[]>(() => definitionToRunEdges(definition, statuses, runActive), [definition, statuses, runActive]);
 
   return (
     <div className="wf-run-canvas">
@@ -74,7 +81,7 @@ function RunCanvasInner({ definition, runNodes, manifestByType }: RunCanvasProps
       >
         <Background variant={BackgroundVariant.Dots} gap={20} size={1} color="#E6E1D5" />
         <Controls showInteractive={false} position="bottom-right" />
-        <Panel position="top-left"><RunProgress statuses={statuses} /></Panel>
+        <Panel position="top-left"><RunProgress statuses={statuses} runActive={runActive} /></Panel>
       </ReactFlow>
     </div>
   );
@@ -86,29 +93,30 @@ function RunCanvasInner({ definition, runNodes, manifestByType }: RunCanvasProps
  * node-status map that paints the cards, so it flips on every 2s poll alongside the badges. A pulsing dot
  * signals the run is still moving. Hidden until the run has touched a node.
  */
-function RunProgress({ statuses }: { statuses: Map<string, NodeStatus> }) {
+function RunProgress({ statuses, runActive }: { statuses: Map<string, NodeStatus>; runActive: boolean }) {
   const c = summarizeRunProgress(statuses);
   if (!c) return null;                                        // nothing executed yet
 
-  const live = c.running > 0;
+  // "running" is only meaningful while the run is live; on a terminal run a node still reading Running is stale.
+  const live = runActive && c.running > 0;
   const tone = c.failure > 0 ? "failure" : live ? "running" : "success";
 
   return (
     <div className="wf-run-progress" data-tone={tone}>
       <span className="wf-run-progress-dot" data-live={live || undefined} />
       <span className="wf-run-progress-stat">{c.success} done</span>
-      {c.running > 0 && <span className="wf-run-progress-stat wf-run-progress-running">{c.running} running</span>}
+      {live && <span className="wf-run-progress-stat wf-run-progress-running">{c.running} running</span>}
       {c.failure > 0 && <span className="wf-run-progress-stat wf-run-progress-failed">{c.failure} failed</span>}
     </div>
   );
 }
 
 /** The editor's edge mapping + an n8n-style run overlay: the path the run actually took lights up. */
-function definitionToRunEdges(def: WorkflowDefinition, statuses: Map<string, NodeStatus>): Edge[] {
+function definitionToRunEdges(def: WorkflowDefinition, statuses: Map<string, NodeStatus>, runActive: boolean): Edge[] {
   return def.edges.map((e, idx) => {
     const isError = e.sourceHandle === ERROR_HANDLE;
     const isCatch = e.sourceHandle === CATCH_HANDLE;
-    const flow = runEdgeFlow(statuses.get(e.from), statuses.get(e.to));
+    const flow = runEdgeFlow(statuses.get(e.from), statuses.get(e.to), runActive);
     return {
       id: `e${idx}-${e.from}-${e.to}`,
       source: e.from,
@@ -121,19 +129,6 @@ function definitionToRunEdges(def: WorkflowDefinition, statuses: Map<string, Nod
       ...(isError ? { className: "wf-rf-edge-error" } : isCatch ? { className: "wf-rf-edge-catch" } : {}),
     };
   });
-}
-
-/**
- * n8n-style data-flow styling derived from an edge's endpoints: the connection the run actually took lights
- * up — terracotta + animated dashes for data flowing INTO the live node, sage for a completed hop, danger
- * into a failed node — while a branch the run skipped stays the default faint line.
- */
-function runEdgeFlow(src?: NodeStatus, tgt?: NodeStatus): { stroke?: string; animated?: boolean } {
-  if (src !== "Success") return {};                                            // nothing flowed out of the source yet
-  if (tgt === "Running" || tgt === "Suspended") return { stroke: "#D97757", animated: true };  // data flowing into the active node
-  if (tgt === "Failure") return { stroke: "#C0623D" };                         // the hop into a failed node
-  if (tgt === "Success") return { stroke: "#5FA882" };                         // a completed hop on the taken path
-  return {};                                                                    // target pending/skipped → branch not taken
 }
 
 /** Group a run's rows by node id — one entry for a plain node, N for a map/loop fan-out. */
