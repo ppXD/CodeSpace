@@ -381,6 +381,57 @@ public class ClaudeCodeHarnessTests
         Harness.BuildInvocation(Task() with { Permissions = new AgentPermissions { Network = network } }).AllowNetwork.ShouldBe(expected);
 
     [Fact]
+    public void Disables_non_essential_traffic_for_an_allowlist_egress_run()
+    {
+        // B3.3c: a deny-by-default (Allowlist) egress run pins only model + git hosts, so the harness asks the Claude CLI
+        // to disable non-essential traffic — otherwise it would stall reaching telemetry hosts (statsig) the allowlist drops.
+        var env = Harness.BuildInvocation(Task() with { Permissions = new AgentPermissions { Egress = AgentEgressPolicy.Allowlist } }).Environment;
+
+        env[ClaudeCodeHarness.DisableNonEssentialTrafficEnvVar].ShouldBe("1");
+    }
+
+    [Fact]
+    public void Leaves_non_essential_traffic_untouched_for_a_full_egress_run() =>
+        // Full egress (the default) reaches every host — nothing to disable, and the env stays byte-identical to before.
+        Harness.BuildInvocation(Task()).Environment.ContainsKey(ClaudeCodeHarness.DisableNonEssentialTrafficEnvVar).ShouldBeFalse();
+
+    [Fact]
+    public void An_explicit_task_env_value_for_the_disable_flag_wins_over_the_harness_default()
+    {
+        // Operator intent wins (the runner's NonInteractiveEnv convention): an explicit task env entry is layered last,
+        // so the harness default never clobbers it.
+        var task = Task() with
+        {
+            Permissions = new AgentPermissions { Egress = AgentEgressPolicy.Allowlist },
+            Environment = new Dictionary<string, string> { [ClaudeCodeHarness.DisableNonEssentialTrafficEnvVar] = "0" },
+        };
+
+        Harness.BuildInvocation(task).Environment[ClaudeCodeHarness.DisableNonEssentialTrafficEnvVar].ShouldBe("0");
+    }
+
+    [Fact]
+    public void Adds_the_disable_flag_alongside_unrelated_task_env_entries_under_allowlist()
+    {
+        // The overlay ADDS the flag — it must not drop the operator's other env entries (the foreach preserves foreign keys).
+        var task = Task() with
+        {
+            Permissions = new AgentPermissions { Egress = AgentEgressPolicy.Allowlist },
+            Environment = new Dictionary<string, string> { ["ANTHROPIC_BASE_URL"] = "https://gw.example" },
+        };
+
+        var env = Harness.BuildInvocation(task).Environment;
+
+        env["ANTHROPIC_BASE_URL"].ShouldBe("https://gw.example", "the operator's other env entries survive the overlay");
+        env[ClaudeCodeHarness.DisableNonEssentialTrafficEnvVar].ShouldBe("1", "the disable flag is added alongside them");
+    }
+
+    [Fact]
+    public void DisableNonEssentialTrafficEnvVar_constant_name_is_pinned() =>
+        // The Claude CLI reads this exact name to suppress telemetry/gating traffic; renaming it would silently re-stall
+        // deny-by-default egress runs on an unreachable telemetry host.
+        ClaudeCodeHarness.DisableNonEssentialTrafficEnvVar.ShouldBe("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC");
+
+    [Fact]
     public void Command_uses_the_default_then_the_env_override()
     {
         var original = System.Environment.GetEnvironmentVariable(ClaudeCodeHarness.CommandEnvVar);
