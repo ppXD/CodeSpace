@@ -7,6 +7,7 @@ using System.Text;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.E2ETests.Infrastructure;
+using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Enums;
 using CodeSpace.Messages.Tasks.Timeline;
@@ -50,6 +51,24 @@ public sealed class RunTimelineEndpointE2ETests : IClassFixture<TaskLaunchApiFac
         body.Events.Select(e => e.Title).ShouldBe(new[] { "Run started", "code started", "code failed", "Run failed" },
             "the lifecycle ledger projects chronologically over real HTTP; the log line is dropped");
         body.Events.ShouldContain(e => e.Severity == TimelineSeverity.Error, "the failure surfaces as an Error-severity event");
+    }
+
+    [Fact]
+    public async Task Get_timeline_merges_agent_events_with_the_lifecycle()
+    {
+        var (userId, teamId) = await SeedTeamMembershipAsync();
+        var runId = await SeedRunWithRecordsAsync(teamId);
+        await SeedAgentEventAsync(teamId, runId, "code", AgentEventKind.FileChanged, "edited auth/session.ts");
+
+        var response = await SendAsync(HttpMethod.Get, $"/api/workflows/runs/{runId}/timeline", userId, teamId);
+
+        response.StatusCode.ShouldBe(HttpStatusCode.OK, customMessage: await DescribeFailureAsync(response));
+
+        var body = await response.Content.ReadFromJsonAsync<RunTimelineResponse>();
+        body.ShouldNotBeNull();
+        body!.Events.ShouldContain(e => e.SourceKey == "run-record" && e.Title == "Run started", "the lifecycle source still contributes");
+        body.Events.ShouldContain(e => e.SourceKey == "agent-events" && e.Title == "edited auth/session.ts" && e.AgentRunId != null,
+            "the agent's file edit is merged into the same timeline over real HTTP, tagged with its agent");
     }
 
     [Fact]
@@ -97,6 +116,24 @@ public sealed class RunTimelineEndpointE2ETests : IClassFixture<TaskLaunchApiFac
 
     private static void AddRecord(CodeSpaceDbContext db, Guid runId, string type, string? nodeId, string payload, DateTimeOffset at) =>
         db.WorkflowRunRecord.Add(new WorkflowRunRecord { Id = Guid.NewGuid(), RunId = runId, RecordType = type, NodeId = nodeId, OccurredAt = at, PayloadJson = payload });
+
+    private async Task SeedAgentEventAsync(Guid teamId, Guid runId, string nodeId, AgentEventKind kind, string text)
+    {
+        using var scope = _factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<CodeSpaceDbContext>();
+        var agentId = Guid.NewGuid();
+        var now = DateTimeOffset.UtcNow;
+
+        db.AgentRun.Add(new AgentRun
+        {
+            Id = agentId, TeamId = teamId, WorkflowRunId = runId, NodeId = nodeId, IterationKey = nodeId,
+            Harness = "codex-cli", Status = AgentRunStatus.Succeeded, TaskJson = "{}",
+            CreatedDate = now, CreatedBy = Guid.Empty, LastModifiedDate = now, LastModifiedBy = Guid.Empty,
+        });
+        db.AgentRunEvent.Add(new AgentRunEvent { Id = Guid.NewGuid(), AgentRunId = agentId, Kind = kind, Text = text, OccurredAt = now });
+
+        await db.SaveChangesAsync();
+    }
 
     private async Task<HttpResponseMessage> SendAsync(HttpMethod method, string url, Guid userId, Guid teamId)
     {
