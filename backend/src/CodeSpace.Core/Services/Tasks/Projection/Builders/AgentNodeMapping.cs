@@ -73,18 +73,25 @@ internal static class AgentNodeMapping
     public static JsonElement BuildAgentInputs(TaskBuildContext context)
     {
         var repositoryId = context.AgentProfile?.RepositoryId ?? context.Seed.RepositoryId;
+        var baseRefs = context.BaseRefs;
 
         var inputs = new Dictionary<string, object?>();
 
         AddIfPresent(inputs, "repositoryId", repositoryId?.ToString());
-        AddIfPresent(inputs, "relatedRepositories", AgentWorkspaceAuthoring.SerializeRelatedRepositories(context.AgentProfile?.RelatedRepositories));
+        // Session branch continuity: each related repo also clones at its own prior produced branch — the baseRefs map
+        // threads a per-entry ref onto the relatedRepositories shape (omitted per entry when none, byte-identical).
+        AddIfPresent(inputs, "relatedRepositories", AgentWorkspaceAuthoring.SerializeRelatedRepositories(context.AgentProfile?.RelatedRepositories, baseRefs));
 
-        // Session branch continuity: clone the primary repo at the prior turn's produced branch. Only meaningful with
-        // a primary repo; absent ⇒ omitted ⇒ the repo's default branch (byte-identical to a fresh launch).
-        if (repositoryId is not null) AddIfPresent(inputs, "baseRef", NullIfBlank(context.PrimaryBaseRef));
+        // …and clone the PRIMARY repo at its prior produced branch. Only meaningful with a primary repo; absent ⇒
+        // omitted ⇒ the repo's default branch (byte-identical to a fresh launch).
+        if (repositoryId is { } primaryId) AddIfPresent(inputs, "baseRef", BaseRefFor(baseRefs, primaryId));
 
         return JsonSerializer.SerializeToElement(inputs);
     }
+
+    /// <summary>The clone ref for a repo from the session base-refs map (null = absent ⇒ the repo's default branch).</summary>
+    private static string? BaseRefFor(IReadOnlyDictionary<Guid, string>? baseRefs, Guid repositoryId) =>
+        baseRefs is not null && baseRefs.TryGetValue(repositoryId, out var br) ? NullIfBlank(br) : null;
 
     /// <summary>The profile's harness, else the codex-cli default (matches AgentCodeNode's catalog default; mirrors RealSupervisorActionExecutor.HarnessOf).</summary>
     private static string Harness(ResolvedAgentProfile? profile) =>
