@@ -13,6 +13,7 @@ import { JsonView } from "./JsonView";
 import { RunCanvas } from "./RunCanvas";
 import { RunLiveWork } from "./RunLiveWork";
 import { RunStatusBadge } from "./RunStatusBadge";
+import { RunTimeline } from "./RunTimeline";
 import { dedupRunAgents } from "./runPhases";
 import { branchBadge, groupMapBranches, type MapRollup } from "./mapBranches";
 import { concurrentNodeKeys, runNodeKey } from "./runConcurrency";
@@ -179,6 +180,9 @@ export function RunDetailView({ runId, nested = false, depth = 0, onOpenRun, def
         <>
           {/* The Live-work band — the command-center heart: a conditional lead strip + the run's agent cards. */}
           {!nested && <RunLiveWork phases={phaseList} selectedAgentRunId={selectedAgentRunId} />}
+
+          {/* The narrative timeline — the merged "what happened, in order" story below the live-work band. */}
+          {!nested && <RunTimeline runId={runId} />}
 
           {nested || agents.length === 0 ? (
             // The editor dialog, or a structural workflow with no agents: the node trace IS the content.

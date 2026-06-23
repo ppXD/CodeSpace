@@ -2386,6 +2386,23 @@ textarea:-webkit-autofill {
 .acs-root .run-agent-card-meta { color: var(--muted-2); font-size: 11px; margin-top: 2px; }
 .acs-root .run-agent-card-body { margin-top: 8px; border-top: 1px solid var(--line); padding-top: 8px; display: flex; flex-direction: column; gap: 8px; }
 .acs-root .run-agent-card-body > .ar-timeline, .acs-root .run-agent-card-body > .tc-panel { margin-top: 0; }
+/* The narrative timeline — the run's "what happened, in order" story line, below the live-work cards in Activity. */
+.acs-root .run-timeline { display: flex; flex-direction: column; gap: 8px; }
+.acs-root .run-timeline-head { display: flex; align-items: center; gap: 7px; font-size: 11.5px; font-weight: 600; text-transform: uppercase; letter-spacing: .05em; color: var(--ink-2); }
+.acs-root .run-timeline-head > svg { color: var(--muted-2); }
+.acs-root .run-timeline-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; }
+.acs-root .run-timeline-event { position: relative; display: grid; grid-template-columns: 62px 12px 1fr; column-gap: 9px; align-items: start; padding: 4px 0; }
+.acs-root .run-timeline-time { font-size: 11px; color: var(--muted-2); font-variant-numeric: tabular-nums; line-height: 1.5; padding-top: 1px; }
+.acs-root .run-timeline-dot { width: 7px; height: 7px; border-radius: 50%; margin-top: 5px; justify-self: center; background: var(--muted-2); }
+/* The rail threads each dot to the next; the last event has nothing below it, so it draws no line. */
+.acs-root .run-timeline-event::before { content: ""; position: absolute; left: 77px; top: 13px; height: 100%; width: 1px; background: var(--line); }
+.acs-root .run-timeline-event:last-child::before { display: none; }
+.acs-root .run-timeline-event[data-severity="success"] .run-timeline-dot { background: #1F6B3F; }
+.acs-root .run-timeline-event[data-severity="warning"] .run-timeline-dot { background: #A8590E; }
+.acs-root .run-timeline-event[data-severity="error"]   .run-timeline-dot { background: #9E3535; }
+.acs-root .run-timeline-body { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.acs-root .run-timeline-title { font-size: 12.5px; color: var(--ink-2); line-height: 1.45; }
+.acs-root .run-timeline-summary { font-size: 11.5px; color: var(--muted); line-height: 1.4; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
 /* Folded raw detail below the cards (run input/output, the node trace) — pushed down, lazy-mounted. */
 .acs-root .run-fold { border: 1px solid var(--line); border-radius: 10px; }
 .acs-root .run-fold > .run-fold-summary { cursor: pointer; list-style: none; padding: 9px 12px; font-size: 12px; font-weight: 500; color: var(--ink-2); display: flex; align-items: center; gap: 6px; }

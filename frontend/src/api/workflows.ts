@@ -377,6 +377,35 @@ export interface RunPhasesResponse {
   phases: RunPhase[];
 }
 
+// ─── Run narrative timeline (the merged event story — GET /api/workflows/runs/{id}/timeline) ──────
+
+/** The ONLY closed axis of a timeline event — its render tone. `kind` and everything else is an open string. */
+export type TimelineSeverity = "Info" | "Success" | "Warning" | "Error";
+
+/**
+ * Mirrors backend `RunTimelineEvent` — one event on the run's narrative timeline (a run/node lifecycle step, an
+ * agent's file edit, …). FLAT + source-agnostic: the UI never switches on `kind` (an OPEN string), only on
+ * `severity`. The events arrive merged + chronologically sorted across every source; `sourceKey` is the provenance.
+ */
+export interface RunTimelineEvent {
+  id: string;
+  kind: string;
+  title: string;
+  summary?: string | null;
+  severity: TimelineSeverity;
+  occurredAt: string;
+  nodeId?: string | null;
+  agentRunId?: string | null;
+  sourceKey: string;
+}
+
+/** Mirrors backend `RunTimelineResponse` — the run's status + the merged, chronologically-sorted narrative events. */
+export interface RunTimelineResponse {
+  runId: string;
+  runStatus: WorkflowRunStatus;
+  events: RunTimelineEvent[];
+}
+
 // ─── Decisions (the cross-grain "Needs decision" queue — GET /api/workflows/decisions) ───────────
 
 /** The shape of the ask — an OPEN string (forward-compatible); the UI maps a known set to affordances and free-texts the rest. */
@@ -469,6 +498,8 @@ export const workflowsApi = {
 
   /** The run's outline — the merged, order-sorted phase tree projected over the durable substrate (run-neutral). */
   getRunPhases: (runId: string) => fetchJson<RunPhasesResponse>(`/api/workflows/runs/${runId}/phases`),
+
+  getRunTimeline: (runId: string) => fetchJson<RunTimelineResponse>(`/api/workflows/runs/${runId}/timeline`),
 
   /** The team's cross-grain pending decisions, soonest-deadline first. The Run Room filters by `rootTraceId`. */
   listPendingDecisions: () => fetchJson<PendingDecision[]>("/api/workflows/decisions"),
