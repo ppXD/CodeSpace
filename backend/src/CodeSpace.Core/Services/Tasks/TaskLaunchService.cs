@@ -29,15 +29,17 @@ public sealed class TaskLaunchService : ITaskLaunchService, IScopedDependency
     private readonly ITaskRunSnapshotFactory _factory;
     private readonly IWorkSessionService _sessions;
     private readonly ISessionContextBuilder _sessionContext;
+    private readonly ISessionBranchResolver _sessionBranches;
     private readonly CodeSpaceDbContext _db;
 
-    public TaskLaunchService(ITaskLaunchSeedProviderRegistry seedProviders, IEffortRouter router, ITaskRunSnapshotFactory factory, IWorkSessionService sessions, ISessionContextBuilder sessionContext, CodeSpaceDbContext db)
+    public TaskLaunchService(ITaskLaunchSeedProviderRegistry seedProviders, IEffortRouter router, ITaskRunSnapshotFactory factory, IWorkSessionService sessions, ISessionContextBuilder sessionContext, ISessionBranchResolver sessionBranches, CodeSpaceDbContext db)
     {
         _seedProviders = seedProviders;
         _router = router;
         _factory = factory;
         _sessions = sessions;
         _sessionContext = sessionContext;
+        _sessionBranches = sessionBranches;
         _db = db;
     }
 
@@ -62,7 +64,11 @@ public sealed class TaskLaunchService : ITaskLaunchService, IScopedDependency
         // the agent's prompt so the follow-up builds on earlier work. A fresh launch carries only the seed's own grounding.
         var grounding = await ResolveGroundingAsync(request, seed, cancellationToken).ConfigureAwait(false);
 
-        var context = new TaskBuildContext { Seed = seed, Route = route, AgentProfile = profile, GroundingContext = grounding };
+        // …and clone the primary repo at the prior turn's produced branch, so the follow-up builds on earlier CODE
+        // (not just the narrative). Null on a fresh launch / no repo / no prior branch ⇒ the repo's default branch.
+        var primaryBaseRef = await ResolveBaseRefAsync(request, seed, profile, cancellationToken).ConfigureAwait(false);
+
+        var context = new TaskBuildContext { Seed = seed, Route = route, AgentProfile = profile, GroundingContext = grounding, PrimaryBaseRef = primaryBaseRef };
 
         var handle = await _factory.CreateAndRunAsync(context, request.TeamId, request.ActorUserId, session, cancellationToken).ConfigureAwait(false);
 
@@ -94,6 +100,16 @@ public sealed class TaskLaunchService : ITaskLaunchService, IScopedDependency
         if (string.IsNullOrWhiteSpace(seedGrounding)) return priorTurns;
 
         return $"{priorTurns}\n\n{seedGrounding}";
+    }
+
+    /// <summary>On a CONTINUE with a primary repo, the prior turn's produced branch for that repo (the projection clones the agent's workspace at it). Null on a fresh launch, an analysis-only run (no repo), or when no prior turn produced a branch (⇒ the repo's default branch — the safe fallback).</summary>
+    private async Task<string?> ResolveBaseRefAsync(TaskLaunchRequest request, TaskLaunchSeed seed, ResolvedAgentProfile profile, CancellationToken cancellationToken)
+    {
+        if (request.ContinueSessionId is not { } sessionId) return null;
+
+        if ((profile.RepositoryId ?? seed.RepositoryId) is not { } primaryRepoId) return null;
+
+        return await _sessionBranches.ResolveStartRefAsync(sessionId, request.TeamId, primaryRepoId, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>Validates the seed's (or request's) repo belongs to <c>request.TeamId</c>; a foreign / missing repo is a clear not-found — indistinguishable, so a foreign repo never leaks. Neither names a repo ⇒ skip (analysis-only is valid).</summary>

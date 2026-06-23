@@ -27,4 +27,7 @@ public sealed record TaskBuildContext
 
     /// <summary>The grounding context the projection may fold into the agent prompt. Null = none (a builder may fall back to <see cref="TaskLaunchSeed.GroundingContext"/>).</summary>
     public string? GroundingContext { get; init; }
+
+    /// <summary>The branch/ref to clone the PRIMARY repo at — session branch continuity: a follow-up turn starts from the prior turn's produced branch. Null = the repo's default branch (a fresh launch, byte-identical).</summary>
+    public string? PrimaryBaseRef { get; init; }
 }

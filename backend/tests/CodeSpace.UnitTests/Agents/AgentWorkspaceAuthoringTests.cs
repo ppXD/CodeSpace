@@ -117,4 +117,20 @@ public class AgentWorkspaceAuthoringTests
         var primary = workspace!.Repositories.Single(r => r.IsPrimary);
         primary.Ref.ShouldBe("release/2.0", "the authored primary ref flows onto the primary repo spec");
     }
+
+    [Fact]
+    public void ResolveAuthoredWorkspace_single_repo_with_a_pinned_ref_builds_a_one_repo_spec_at_that_ref()
+    {
+        // Session branch continuity (S4b): a single-repo CONTINUE pins the prior turn's produced branch. A bare
+        // single-repo with NO ref stays null (derives the default branch downstream — byte-identical); a pinned ref
+        // needs an EXPLICIT one-repo spec so the resolver clones at it.
+        var workspace = AgentWorkspaceAuthoring.ResolveAuthoredWorkspace(Guid.Parse(RepoA), Array.Empty<WorkspaceRepositorySpec>(), primaryRef: "run-1/x");
+
+        workspace.ShouldNotBeNull("a pinned primary ref needs an explicit spec even with no related repos");
+        workspace!.Repositories.Count.ShouldBe(1);
+        var primary = workspace.Repositories.Single();
+        primary.RepositoryId.ShouldBe(Guid.Parse(RepoA));
+        primary.IsPrimary.ShouldBeTrue();
+        primary.Ref.ShouldBe("run-1/x", "the pinned ref is the clone ref — the agent starts from the prior turn's branch");
+    }
 }
