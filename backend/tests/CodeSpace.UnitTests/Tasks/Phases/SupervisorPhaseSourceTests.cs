@@ -1,4 +1,6 @@
+using System.Text.Json;
 using CodeSpace.Core.Persistence.Entities;
+using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Supervisor;
 using CodeSpace.Core.Services.Tasks.Phases.Sources.Supervisor;
 using CodeSpace.Messages.Agents;
@@ -216,6 +218,53 @@ public class SupervisorPhaseSourceTests
         implement.Agents.Single().AgentRunId.ShouldBe(retryAgent, "the retried subtask shows its FRESH agent (latest attempt wins), not the original failed one");
         implement.Status.ShouldBe(PhaseStatus.Succeeded, "the subtask ultimately succeeded → the phase succeeded (ground-truth, not the stale failure)");
     }
+
+    [Fact]
+    public void Spawn_child_agents_carry_the_folded_model_and_token_rollup()
+    {
+        var a = Guid.NewGuid();
+        var b = Guid.NewGuid();
+
+        var spawn = Decision(2, SupervisorDecisionKinds.Spawn, SupervisorDecisionStatus.Succeeded,
+            outcomeJson: SpawnOutcome(new[] { a, b },
+                new SupervisorAgentResult { AgentRunId = a, Status = "Succeeded", Model = "claude-opus-4", InputTokens = 12000, OutputTokens = 3400 },
+                new SupervisorAgentResult { AgentRunId = b, Status = "Succeeded", Model = "  ", InputTokens = 500, OutputTokens = 100 }));
+
+        var statuses = new Dictionary<Guid, AgentRunStatus> { [a] = AgentRunStatus.Succeeded, [b] = AgentRunStatus.Succeeded };
+
+        var agents = SupervisorPhaseSource.ProjectDecisions(new[] { spawn }, statuses).Single().Agents;
+
+        var refA = agents.Single(x => x.AgentRunId == a);
+        refA.Model.ShouldBe("claude-opus-4");
+        refA.InputTokens.ShouldBe(12000);
+        refA.OutputTokens.ShouldBe(3400);
+
+        var refB = agents.Single(x => x.AgentRunId == b);
+        refB.Model.ShouldBeNull("a blank model reads as null — no chip");
+        refB.InputTokens.ShouldBe(500, "tokens still surface even when the model is unknown");
+    }
+
+    [Fact]
+    public void A_staged_agent_with_no_folded_result_has_a_null_rollup()
+    {
+        var a = Guid.NewGuid();
+
+        // Staged (in agentRunIds) but absent from agentResults — e.g. a still-running spawn fold. The rollup stays null.
+        var spawn = Decision(2, SupervisorDecisionKinds.Spawn, SupervisorDecisionStatus.Running, outcomeJson: SpawnOutcome(new[] { a }));
+
+        var statuses = new Dictionary<Guid, AgentRunStatus> { [a] = AgentRunStatus.Running };
+
+        var only = SupervisorPhaseSource.ProjectDecisions(new[] { spawn }, statuses).Single().Agents.Single();
+
+        only.Status.ShouldBe(nameof(AgentRunStatus.Running));
+        only.Model.ShouldBeNull();
+        only.InputTokens.ShouldBeNull();
+        only.OutputTokens.ShouldBeNull();
+    }
+
+    /// <summary>A spawn outcome staging the given ids, with the folded <c>agentResults</c> compacts — serialized with the persisted-contract options the source's reader expects.</summary>
+    private static string SpawnOutcome(IReadOnlyCollection<Guid> stagedIds, params SupervisorAgentResult[] results) =>
+        JsonSerializer.Serialize(new { agentCount = stagedIds.Count, agentRunIds = stagedIds.Select(i => i.ToString()), agentResults = results }, AgentJson.Options);
 
     private static SupervisorDecisionRecord Decision(long sequence, string kind, SupervisorDecisionStatus status, string? outcomeJson = null, string payloadJson = "{}") => new()
     {
