@@ -1,4 +1,5 @@
 using CodeSpace.Core.Services.Tasks;
+using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Tasks;
 using Shouldly;
 
@@ -77,5 +78,92 @@ public class TaskLaunchServiceClampTests
         var profile = TaskLaunchService.BuildAgentProfile(Request(null), Seed, Route(ceiling: "", recommended: ""));
 
         profile.AutonomyLevel.ShouldBe("Standard");
+    }
+
+    // ── Multi-repo launch: the related-repos → profile projection (the OTHER pure choke point on BuildAgentProfile) ──
+
+    private static readonly Guid PrimaryRepo = Guid.NewGuid();
+    private static readonly Guid RelatedRepo = Guid.NewGuid();
+
+    private static TaskLaunchRequest MultiRepoRequest(Guid? primary, params TaskRelatedRepository[] related) => new()
+    {
+        TeamId = Guid.NewGuid(),
+        ActorUserId = Guid.NewGuid(),
+        SurfaceKind = "chat",
+        RepositoryId = primary,
+        RelatedRepositories = related.Length > 0 ? related : null,
+    };
+
+    [Fact]
+    public void BuildAgentProfile_with_no_related_repos_leaves_RelatedRepositories_null_byte_identical()
+    {
+        var profile = TaskLaunchService.BuildAgentProfile(MultiRepoRequest(PrimaryRepo), Seed, Route("Standard"));
+
+        profile.RelatedRepositories.ShouldBeNull("no related repos ⇒ unset ⇒ the projection omits the key ⇒ a single-repo run is byte-identical");
+    }
+
+    [Fact]
+    public void BuildAgentProfile_projects_each_related_repo_onto_the_profile_through_the_shared_authoring()
+    {
+        var profile = TaskLaunchService.BuildAgentProfile(
+            MultiRepoRequest(PrimaryRepo,
+                new TaskRelatedRepository { RepositoryId = RelatedRepo, Alias = "  api  ", Access = "write" }),
+            Seed, Route("Standard"));
+
+        profile.RelatedRepositories.ShouldNotBeNull();
+        var related = profile.RelatedRepositories!.ShouldHaveSingleItem();
+        related.RepositoryId.ShouldBe(RelatedRepo);
+        related.Alias.ShouldBe("api", "the alias is trimmed by the shared authoring path");
+        related.Access.ShouldBe(WorkspaceAccess.Write, "an authored 'write' access flows onto the spec");
+    }
+
+    [Theory]
+    [InlineData("write", WorkspaceAccess.Write)]
+    [InlineData("WRITE", WorkspaceAccess.Write)]   // case-insensitive (shared with the JSON parse)
+    [InlineData("read", WorkspaceAccess.Read)]
+    [InlineData(null, WorkspaceAccess.Read)]       // absent ⇒ read-only context (the safe default)
+    [InlineData("garbage", WorkspaceAccess.Read)]
+    public void BuildAgentProfile_defaults_related_access_to_read_unless_write(string? access, WorkspaceAccess expected)
+    {
+        var profile = TaskLaunchService.BuildAgentProfile(
+            MultiRepoRequest(PrimaryRepo, new TaskRelatedRepository { RepositoryId = RelatedRepo, Access = access }),
+            Seed, Route("Standard"));
+
+        profile.RelatedRepositories!.Single().Access.ShouldBe(expected);
+    }
+
+    [Fact]
+    public void BuildAgentProfile_keeps_related_repos_in_authored_order()
+    {
+        var a = Guid.NewGuid();
+        var b = Guid.NewGuid();
+
+        var profile = TaskLaunchService.BuildAgentProfile(
+            MultiRepoRequest(PrimaryRepo,
+                new TaskRelatedRepository { RepositoryId = a, Alias = "api" },
+                new TaskRelatedRepository { RepositoryId = b, Alias = "web" }),
+            Seed, Route("Standard"));
+
+        profile.RelatedRepositories!.Select(r => r.RepositoryId).ShouldBe(new[] { a, b });
+    }
+
+    [Fact]
+    public void BuildAgentProfile_with_related_but_no_primary_repo_throws_fail_loud()
+    {
+        // A related repo has nowhere to anchor without a primary — fail LOUD at launch (mirroring the agent.code node),
+        // not silently drop the authored multi-repo intent into a no-repo run.
+        var ex = Should.Throw<ArgumentException>(() =>
+            TaskLaunchService.BuildAgentProfile(
+                MultiRepoRequest(primary: null, new TaskRelatedRepository { RepositoryId = RelatedRepo }),
+                Seed, Route("Standard")));
+
+        ex.Message.ShouldContain("require a primary repository");
+    }
+
+    [Fact]
+    public void BuildAgentProfile_with_a_primary_but_no_related_does_not_throw()
+    {
+        // Guard fires ONLY on related-without-primary; a single-repo (or analysis-only) launch is unaffected.
+        Should.NotThrow(() => TaskLaunchService.BuildAgentProfile(MultiRepoRequest(PrimaryRepo), Seed, Route("Standard")));
     }
 }

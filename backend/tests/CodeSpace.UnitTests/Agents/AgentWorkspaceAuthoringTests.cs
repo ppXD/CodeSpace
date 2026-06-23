@@ -110,12 +110,104 @@ public class AgentWorkspaceAuthoringTests
     }
 
     [Fact]
+    public void ResolveAuthoredWorkspace_drops_a_related_repo_that_duplicates_the_primary_no_double_clone()
+    {
+        // An operator double-pick (the primary listed AGAIN as a related repo) must NOT clone the repo twice into two
+        // mount folders with conflicting access — the writable primary wins, the duplicate related is collapsed.
+        var workspace = AgentWorkspaceAuthoring.ResolveAuthoredWorkspace(Guid.Parse(RepoA), new[] { Related(RepoA, "dup"), Related(RepoB, "web") });
+
+        workspace.ShouldNotBeNull();
+        workspace!.Repositories.Count.ShouldBe(2, "the related repo equal to the primary is dropped — a repo is cloned once");
+        workspace.Repositories.Count(r => r.RepositoryId == Guid.Parse(RepoA)).ShouldBe(1, "the primary appears once (the dup related is collapsed onto it)");
+        var dropped = workspace.Repositories.Single(r => r.RepositoryId == Guid.Parse(RepoA));
+        dropped.IsPrimary.ShouldBeTrue("the writable primary survives, not the read-only duplicate");
+        dropped.Access.ShouldBe(WorkspaceAccess.Write);
+    }
+
+    [Fact]
+    public void ResolveAuthoredWorkspace_drops_a_duplicate_related_repo_keeping_the_first()
+    {
+        var workspace = AgentWorkspaceAuthoring.ResolveAuthoredWorkspace(Guid.Parse(RepoA), new[] { Related(RepoB, "web"), Related(RepoB, "web-again") });
+
+        workspace!.Repositories.Count(r => r.RepositoryId == Guid.Parse(RepoB)).ShouldBe(1, "a duplicate related id is dropped — the first authored occurrence wins");
+        workspace.Repositories.Single(r => r.RepositoryId == Guid.Parse(RepoB)).Alias.ShouldBe("web", "the first occurrence's alias is kept");
+    }
+
+    [Fact]
     public void ResolveAuthoredWorkspace_threads_the_primary_ref()
     {
         var workspace = AgentWorkspaceAuthoring.ResolveAuthoredWorkspace(Guid.Parse(RepoA), new[] { Related(RepoB, "web") }, primaryRef: "release/2.0");
 
         var primary = workspace!.Repositories.Single(r => r.IsPrimary);
         primary.Ref.ShouldBe("release/2.0", "the authored primary ref flows onto the primary repo spec");
+    }
+
+    // ── ToRelatedSpec + SerializeRelatedRepositories (the typed task-launch authoring path + its inverse) ──────────
+
+    [Fact]
+    public void ToRelatedSpec_trims_the_alias_and_defaults_access_to_read()
+    {
+        var spec = AgentWorkspaceAuthoring.ToRelatedSpec(Guid.Parse(RepoA), "  api  ", access: null);
+
+        spec.RepositoryId.ShouldBe(Guid.Parse(RepoA));
+        spec.Alias.ShouldBe("api", "the typed path trims the alias exactly like the JSON parse");
+        spec.Access.ShouldBe(WorkspaceAccess.Read, "absent access ⇒ read-only context — the safe default");
+    }
+
+    [Theory]
+    [InlineData("write", WorkspaceAccess.Write)]
+    [InlineData("WRITE", WorkspaceAccess.Write)]   // case-insensitive
+    [InlineData("read", WorkspaceAccess.Read)]
+    [InlineData(null, WorkspaceAccess.Read)]
+    [InlineData("garbage", WorkspaceAccess.Read)]
+    public void ToRelatedSpec_maps_access_the_same_way_as_the_json_parse(string? access, WorkspaceAccess expected) =>
+        AgentWorkspaceAuthoring.ToRelatedSpec(Guid.Parse(RepoA), null, access).Access.ShouldBe(expected);
+
+    [Fact]
+    public void ToRelatedSpec_keeps_a_blank_alias_blank_so_the_workspace_assigns_a_unique_one() =>
+        AgentWorkspaceAuthoring.ToRelatedSpec(Guid.Parse(RepoA), "   ", null).Alias.ShouldBe("");
+
+    [Fact]
+    public void SerializeRelatedRepositories_is_null_for_null_or_empty()
+    {
+        AgentWorkspaceAuthoring.SerializeRelatedRepositories(null).ShouldBeNull();
+        AgentWorkspaceAuthoring.SerializeRelatedRepositories(Array.Empty<WorkspaceRepositorySpec>()).ShouldBeNull("empty ⇒ null so the caller omits the key — byte-identical to a single-repo projection");
+    }
+
+    [Fact]
+    public void SerializeRelatedRepositories_emits_the_authored_shape_omitting_a_blank_alias()
+    {
+        var json = AgentWorkspaceAuthoring.SerializeRelatedRepositories(new[]
+        {
+            new WorkspaceRepositorySpec { RepositoryId = Guid.Parse(RepoA), Alias = "api", Access = WorkspaceAccess.Write },
+            new WorkspaceRepositorySpec { RepositoryId = Guid.Parse(RepoB), Alias = "", Access = WorkspaceAccess.Read },
+        });
+
+        json.ShouldNotBeNull();
+        json!.Count.ShouldBe(2);
+        json[0]["repositoryId"].ShouldBe(RepoA);
+        json[0]["alias"].ShouldBe("api");
+        json[0]["access"].ShouldBe("write");
+        json[1]["alias"].ShouldBeNull("a blank alias is omitted so the workspace re-derives a unique one");
+        json[1]["access"].ShouldBe("read");
+    }
+
+    [Fact]
+    public void SerializeRelatedRepositories_round_trips_through_ParseRelatedRepositories()
+    {
+        // The serializer is the inverse of the parse — a projection emits the EXACT shape the agent.code node + the
+        // supervisor re-parse, so a launch-authored multi-repo workspace resolves identically end-to-end.
+        var original = new[]
+        {
+            new WorkspaceRepositorySpec { RepositoryId = Guid.Parse(RepoA), Alias = "api", Access = WorkspaceAccess.Write },
+            new WorkspaceRepositorySpec { RepositoryId = Guid.Parse(RepoB), Alias = "web", Access = WorkspaceAccess.Read },
+        };
+
+        var json = AgentWorkspaceAuthoring.SerializeRelatedRepositories(original)!;
+        var reparsed = AgentWorkspaceAuthoring.ParseRelatedRepositories(Json(JsonSerializer.Serialize(json)));
+
+        reparsed.Select(r => (r.RepositoryId, r.Alias, r.Access))
+            .ShouldBe(original.Select(r => (r.RepositoryId, r.Alias, r.Access)));
     }
 
     [Fact]

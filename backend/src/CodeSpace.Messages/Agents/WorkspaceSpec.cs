@@ -53,6 +53,11 @@ public sealed record WorkspaceSpec
     /// <para>The primary keeps the exact <see cref="FromRepository"/> defaults (alias "repo", writable, primary) so a
     /// one-related-repo workspace's primary repo runs identically. Each related repo gets a unique alias (its authored
     /// alias, else <c>repo-2</c>, <c>repo-3</c>, …) defaulting to read-only context unless authored writable.</para>
+    ///
+    /// <para>A repo is cloned ONCE: a related repo whose <see cref="WorkspaceRepositorySpec.RepositoryId"/> duplicates
+    /// the primary (an operator double-pick) or an earlier related entry is DROPPED — the primary (writable) and the
+    /// first authored occurrence win. Without this, the same repo would clone into two mount folders with conflicting
+    /// access. Symmetric to the alias de-dup: a collision is collapsed, never a double-clone.</para>
     /// </summary>
     public static WorkspaceSpec? FromAuthoredRepos(Guid primaryRepositoryId, string? primaryRef, IReadOnlyList<WorkspaceRepositorySpec> relatedRepositories)
     {
@@ -61,10 +66,15 @@ public sealed record WorkspaceSpec
         var primary = new WorkspaceRepositorySpec { Alias = DefaultAlias, RepositoryId = primaryRepositoryId, Ref = primaryRef, Path = DefaultAlias, Access = WorkspaceAccess.Write, IsPrimary = true };
 
         var taken = new HashSet<string>(StringComparer.Ordinal) { DefaultAlias };
+        var takenRepoIds = new HashSet<Guid> { primaryRepositoryId };
         var repos = new List<WorkspaceRepositorySpec> { primary };
 
         foreach (var related in relatedRepositories)
         {
+            // De-dup by repo id: the primary + the first authored occurrence win; a self/duplicate related repo is
+            // dropped so a repo is never cloned twice into conflicting mounts.
+            if (!takenRepoIds.Add(related.RepositoryId)) continue;
+
             var alias = NormalizeAlias(related.Alias, taken);
             taken.Add(alias);
 

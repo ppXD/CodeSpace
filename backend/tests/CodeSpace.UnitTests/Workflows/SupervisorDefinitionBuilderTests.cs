@@ -2,6 +2,7 @@ using CodeSpace.Core.Services.Tasks.Projection.Builders.Supervisor;
 using CodeSpace.Core.Services.Workflows.Engine;
 using CodeSpace.Core.Services.Workflows.Nodes;
 using CodeSpace.Core.Services.Workflows.Nodes.Builtin;
+using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Tasks;
 using Shouldly;
 
@@ -118,6 +119,44 @@ public class SupervisorDefinitionBuilderTests
         agentProfile.GetProperty("runnerKind").GetString().ShouldBe("local");
         agentProfile.GetProperty("enableMcp").GetBoolean().ShouldBeTrue();
         agentProfile.GetProperty("autonomyLevel").GetString().ShouldBe("Trusted");
+    }
+
+    [Fact]
+    public void Supervisor_config_stamps_each_related_repo_so_a_deep_multi_repo_launch_is_not_a_silent_drop()
+    {
+        // The deep (supervisor) path's analogue of the agent.code node's relatedRepositories — each spawned agent
+        // clones these alongside the primary. Emitted in the SAME {repositoryId, alias?, access?} shape (via the ONE
+        // shared serializer) the supervisor's SupervisorAgentProfile re-parses.
+        var api = Guid.NewGuid();
+        var web = Guid.NewGuid();
+        var profile = new ResolvedAgentProfile
+        {
+            RepositoryId = Guid.NewGuid(),
+            RelatedRepositories = new[]
+            {
+                new WorkspaceRepositorySpec { RepositoryId = api, Alias = "api", Access = WorkspaceAccess.Write },
+                new WorkspaceRepositorySpec { RepositoryId = web, Alias = "web", Access = WorkspaceAccess.Read },
+            },
+        };
+
+        var agentProfile = Builder.Build(Context(profile)).Nodes.Single(n => n.Id == "sup").Config.GetProperty("agentProfile");
+
+        var related = agentProfile.GetProperty("relatedRepositories").EnumerateArray().ToList();
+        related.Select(e => e.GetProperty("repositoryId").GetString()).ShouldBe(new[] { api.ToString(), web.ToString() }, "both related repos reach the supervisor config in authored order");
+        related[0].GetProperty("access").GetString().ShouldBe("write");
+        related[1].GetProperty("access").GetString().ShouldBe("read");
+        related[0].GetProperty("alias").GetString().ShouldBe("api");
+    }
+
+    [Fact]
+    public void A_profile_with_no_related_repos_omits_relatedRepositories_byte_identical()
+    {
+        var profile = new ResolvedAgentProfile { RepositoryId = Guid.NewGuid(), Harness = "codex-cli" };
+
+        var agentProfile = Builder.Build(Context(profile)).Nodes.Single(n => n.Id == "sup").Config.GetProperty("agentProfile");
+
+        agentProfile.TryGetProperty("relatedRepositories", out _).ShouldBeFalse(
+            "no related repos ⇒ no key — a single-repo supervisor spawn is byte-identical to the pre-multi-repo-launch shape");
     }
 
     [Fact]
