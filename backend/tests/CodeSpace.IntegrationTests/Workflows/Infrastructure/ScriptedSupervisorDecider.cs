@@ -34,6 +34,7 @@ public sealed class ScriptedSupervisorDecider : ISupervisorDecider
             SupervisorScriptMode.PlanSpawnMergeStop => PlanSpawnMergeStop(context),
             SupervisorScriptMode.PlanSpawnRetryMergeStop => PlanSpawnRetryMergeStop(context),
             SupervisorScriptMode.PlanSpawnMergeResolveMergeStop => PlanSpawnMergeResolveMergeStop(context),
+            SupervisorScriptMode.PlanSpawnMergeResolveApprovedMergeStop => PlanSpawnMergeResolveApprovedMergeStop(context),
             SupervisorScriptMode.AskHumanStop => AskHumanStop(context),
             SupervisorScriptMode.PlanThenSpawnForever => PlanThenSpawnForever(context),
             SupervisorScriptMode.PlanSpawnDispatchStop => PlanSpawnDispatchStop(context),
@@ -115,6 +116,22 @@ public sealed class ScriptedSupervisorDecider : ISupervisorDecider
         _ => Canonical(SupervisorDecisionKinds.Stop, new SupervisorStopPayload { Outcome = "completed", Summary = "conflict reconciled" }),
     };
 
+    // Conflict→resolve FULL loop (slice C-full): plan(2) → spawn(both, conflicting) → merge (CONFLICTED) → resolve
+    // (turn 3, irreversible → gated into an ask_human APPROVAL card that parks the run) → [human approves] → resolve
+    // RE-EMITTED (turn 4 — WasJustApproved now fires, so the turn service EXECUTES it: a resolver agent reconciles +
+    // verifies) → merge (turn 5 — accepts the VERIFIED resolution's branch as the integrated head) → stop. Proves the
+    // whole conflict-recovery loop INCLUDING the human approval of the irreversible re-merge.
+    private static SupervisorDecision PlanSpawnMergeResolveApprovedMergeStop(SupervisorTurnContext context) => context.TurnNumber switch
+    {
+        0 => Plan(context.Goal),
+        1 => Canonical(SupervisorDecisionKinds.Spawn, new SupervisorSpawnPayload { SubtaskIds = new[] { SubtaskA, SubtaskB } }),
+        2 => Canonical(SupervisorDecisionKinds.Merge, new SupervisorMergePayload { SynthesisInstruction = "combine both branches" }),
+        3 => Canonical(SupervisorDecisionKinds.Resolve, new SupervisorResolvePayload()),   // → ask_human approval (parks)
+        4 => Canonical(SupervisorDecisionKinds.Resolve, new SupervisorResolvePayload()),   // re-emit; WasJustApproved → executes the resolver
+        5 => Canonical(SupervisorDecisionKinds.Merge, new SupervisorMergePayload { SynthesisInstruction = "accept the reconciled result" }),
+        _ => Canonical(SupervisorDecisionKinds.Stop, new SupervisorStopPayload { Outcome = "completed", Summary = "conflict reconciled + accepted" }),
+    };
+
     /// <summary>The guid a bad dispatch targets — never bound by any test profile, so the per-agent repo clamp rejects it.</summary>
     public static readonly Guid UnboundRepo = Guid.Parse("dead0000-0000-0000-0000-00000000beef");
 
@@ -193,6 +210,8 @@ public sealed class SupervisorDecisionScript
 
     public void PlanSpawnMergeResolveMergeStop() => Mode = SupervisorScriptMode.PlanSpawnMergeResolveMergeStop;
 
+    public void PlanSpawnMergeResolveApprovedMergeStop() => Mode = SupervisorScriptMode.PlanSpawnMergeResolveApprovedMergeStop;
+
     public void AskHumanStop() => Mode = SupervisorScriptMode.AskHumanStop;
 
     public void PlanThenSpawnForever() => Mode = SupervisorScriptMode.PlanThenSpawnForever;
@@ -224,6 +243,7 @@ public enum SupervisorScriptMode
     PlanSpawnMergeStop,
     PlanSpawnRetryMergeStop,
     PlanSpawnMergeResolveMergeStop,
+    PlanSpawnMergeResolveApprovedMergeStop,
     PlanSpawnDispatchStop,
     PlanSpawnBadRepoStop,
     PlanSpawnBadModelStop,
