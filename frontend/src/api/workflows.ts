@@ -354,6 +354,10 @@ export interface PhaseAgentRef {
   inputTokens?: number | null;
   /** Output (completion) tokens the agent produced, or null/absent when unknown. */
   outputTokens?: number | null;
+  /** Run duration in ms — final once terminal, else live elapsed at the last poll; null/absent for a non-supervisor agent or before it starts. The Time column. */
+  durationMs?: number | null;
+  /** Side-effecting tool calls the agent made (ledger rows minus decision.request); `0` is a real "made none" for a supervisor agent, null/absent for a non-supervisor one. The Tools column. */
+  toolCount?: number | null;
 }
 
 /** Mirrors backend `PhaseMetrics` — the small roll-up a phase row shows. */

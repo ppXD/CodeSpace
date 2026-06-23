@@ -110,6 +110,34 @@ export function formatTokens(n: number): string {
   return n >= 1000 ? `${(n / 1000).toFixed(1)}k` : `${n}`;
 }
 
+/** Human run duration — "45s", "2m 17s", "1h 3m"; null/undefined → "—" (unknown / not started). Sub-second floors to "0s". */
+export function formatDuration(ms: number | null | undefined): string {
+  if (ms == null) return "—";
+
+  const s = Math.floor(ms / 1000);
+  if (s < 60) return `${s}s`;
+
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m ${s % 60}s`;
+
+  return `${Math.floor(m / 60)}h ${m % 60}m`;
+}
+
+/**
+ * A wave's header roll-up — how many of its agents are done, the total, and the aggregate state for the headline: any
+ * still running → running; else any failed → failed (attention); else any waiting → waiting; else all done. Drives the
+ * progress squares + the state label without a per-agent fetch (reads the same phase refs the table does).
+ */
+export function waveSummary(agents: readonly PhaseAgentRef[]): { done: number; total: number; state: TileState } {
+  const states = agents.map((a) => tileState(a.status));
+
+  return {
+    done: states.filter((s) => s === "done").length,
+    total: agents.length,
+    state: states.includes("running") ? "running" : states.includes("failed") ? "failed" : states.includes("waiting") ? "waiting" : "done",
+  };
+}
+
 /** Compare two ISO timestamps; a null sorts LAST so an unanchored item goes to the end rather than the top. */
 function cmpAt(a: string | null, b: string | null): number {
   if (a === b) return 0;
