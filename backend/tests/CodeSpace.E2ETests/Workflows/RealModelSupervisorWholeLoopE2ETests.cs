@@ -4,6 +4,7 @@ using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Agents.Sandbox;
 using CodeSpace.Core.Services.Agents.Sandbox.Runners;
+using CodeSpace.Core.Services.Chat;
 using CodeSpace.Core.Services.Supervisor;
 using CodeSpace.Core.Services.Workflows.Engine;
 using CodeSpace.IntegrationTests.Infrastructure;
@@ -134,6 +135,98 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
         }, gating: false);
     }
 
+    [Fact]
+    public async Task The_real_model_observes_a_real_conflict_and_chooses_to_resolve()
+    {
+        // Real-scenario coverage A1 — the headline gap the deterministic whole-loop can't reach: a LIVE brain reacting to
+        // REAL adverse git state. Every conflict→resolve arc that runs through the real engine today uses the SCRIPTED
+        // decider; the only live-brain whole-loop is happy-path. Here the live model is handed a task whose two parallel
+        // subtasks edit the SAME file, so their real diffs CONFLICT, and the brain must OBSERVE the conflicted integration
+        // in its own SupervisorOutcome context and CHOOSE `resolve` (which the irreversible-HITL floor then gates to an
+        // approval card — proving the brain reached the recovery decision; the approval→reconcile→accept tail is proven
+        // deterministically by SupervisorWholeLoopE2ETests). INFORMATIONAL (gating:false): a live model may decompose the
+        // task without a real conflict, or choose stop/retry — the note records exactly what it did, and this lane never
+        // reds main (the blessed intelligence kill-gate is the golden decision-eval).
+        var baseUrl = Env(RealModelSupervisorDecisionFlowTests.BaseUrlEnvVar);
+        var apiKey = Env(RealModelSupervisorDecisionFlowTests.ApiKeyEnvVar);
+        var model = Env(RealModelSupervisorDecisionFlowTests.ModelIdEnvVar);
+
+        var present = new[] { baseUrl, apiKey, model }.Count(v => v is not null);
+        if (present == 0) return;
+        present.ShouldBe(3, "CODESPACE_LLM_* is partially configured — set all three or none; a partial config would self-skip this lane green proving nothing.");
+
+        if (OperatingSystem.IsWindows()) return;
+        if (!await GitReadyAsync()) return;
+
+        using var cli = new LiveBrainConflictFakeCli();
+
+        var jobClient = ResolveJobClient();
+        jobClient.Clear();
+        jobClient.AutoExecute = true;
+
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var conversationId = await SeedConversationAsync(teamId, userId);   // the surface the irreversible resolve parks its approval on
+
+        // shared.txt is seeded so each agent's edit is a real diff against a common base → a real git conflict when two run.
+        using var remote = new BareRemote();
+        await remote.SeedBaseAsync(new() { ["check.sh"] = "#!/bin/sh\nexit 0\n", [LiveBrainConflictFakeCli.SharedFile] = "base\n" });
+        var repoId = await SeedBoundRepositoryAsync(teamId, remote.Url, "main");
+
+        var brainModelId = await SeedBrainModelAsync(teamId, BaseUrlFor(baseUrl), apiKey, model);
+
+        const string goal = "The file shared.txt needs two improvements developed IN PARALLEL by two separate agents, each editing shared.txt: "
+                          + "(1) add input validation, and (2) add error logging. Spawn one agent per improvement, integrate their branches, "
+                          + "and if the integration conflicts, resolve it into one reconciled version before finishing.";
+
+        var workflowId = await CreateWholeLoopWorkflowAsync(teamId, userId, repoId, brainModelId, goal, conversationId);
+        var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
+
+        await RealModelGate.AssessLiveAsync(Provider, async () =>
+        {
+            await RunEngineAsync(runId);
+            await jobClient.WaitForPendingAsync();
+
+            var (ok, note) = await EvaluateConflictResolveAsync(runId, teamId);
+            return (ok, $"{Provider} model '{model}' conflict→resolve — {note}");
+        }, gating: false);
+    }
+
+    /// <summary>The live brain reacted to the real conflict iff it FANNED OUT (spawn), the real-git merge genuinely CONFLICTED, and the brain then CHOSE resolve (executed, or gated to the resolve-approval ask_human floor). Reports each signal so a non-resolving trajectory is legible, not a bare red.</summary>
+    private async Task<(bool Ok, string Note)> EvaluateConflictResolveAsync(Guid runId, Guid teamId)
+    {
+        using var verify = _fixture.BeginScope();
+        var db = verify.Resolve<CodeSpaceDbContext>();
+
+        var decisions = await db.SupervisorDecisionRecord.AsNoTracking()
+            .Where(d => d.SupervisorRunId == runId && d.TeamId == teamId)
+            .OrderBy(d => d.Sequence)
+            .Select(d => new { d.DecisionKind, d.PayloadJson, d.OutcomeJson })
+            .ToListAsync();
+
+        var spawned = decisions.Any(d => d.DecisionKind == SupervisorDecisionKinds.Spawn);
+        var conflicted = decisions.Any(d => d.DecisionKind == SupervisorDecisionKinds.Merge && SupervisorOutcome.ReadIntegration(d.OutcomeJson) is { IsConflicted: true });
+        // The brain chose resolve: either it executed (a Resolve row) or — the common path — the irreversible-HITL floor
+        // rewrote it into an ask_human approval card carrying the resolve-approval marker.
+        var resolveChosen = decisions.Any(d => d.DecisionKind == SupervisorDecisionKinds.Resolve)
+            || decisions.Any(d => d.DecisionKind == SupervisorDecisionKinds.AskHuman
+                                  && d.PayloadJson.Contains(SupervisorApprovalRequest.ApprovalMarker, StringComparison.Ordinal)
+                                  && d.PayloadJson.Contains("resolve", StringComparison.OrdinalIgnoreCase));
+
+        var run = await db.WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == runId);
+        var trail = string.Join("→", decisions.Select(d => d.DecisionKind));
+
+        var ok = spawned && conflicted && resolveChosen;
+        return (ok, $"status={run.Status}, spawned={spawned}, merge-conflicted={conflicted}, resolve-chosen={resolveChosen}, trajectory={trail}");
+    }
+
+    /// <summary>Seed a team channel the supervisor's irreversible-resolve approval card parks on (so a live brain that chooses resolve parks cleanly rather than erroring on a missing surface).</summary>
+    private async Task<Guid> SeedConversationAsync(Guid teamId, Guid userId)
+    {
+        using var scope = _fixture.BeginScope();
+        var slug = "sup-lb-" + Guid.NewGuid().ToString("N")[..8];
+        return await scope.Resolve<IConversationService>().CreateChannelAsync(teamId, slug, slug, isPrivate: false, userId, CancellationToken.None);
+    }
+
     // ─── Verdict ─────────────────────────────────────────────────────────────────────
 
     /// <summary>The live brain drove the whole loop soundly iff the run reached Success, at least one real agent produced a real patch, and the terminal stop's objective acceptance PASSED (a green check.sh against the integrated head). Returns a legible note for the gate.</summary>
@@ -214,20 +307,23 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
         return rowId;
     }
 
-    private async Task<Guid> CreateWholeLoopWorkflowAsync(Guid teamId, Guid userId, Guid repoId, Guid brainModelId)
+    private async Task<Guid> CreateWholeLoopWorkflowAsync(Guid teamId, Guid userId, Guid repoId, Guid brainModelId, string? goal = null, Guid? conversationId = null)
     {
         // The live brain (supervisorModelId) authors the arc; its agents clone repoId + push branches, the merge
         // integrates them, and the operator acceptance floor (check.sh) gates the terminal stop. The happy path converges
         // in ~4 rounds (plan→spawn→merge→stop); maxRounds:6 gives slack yet BOUNDS the wall-clock — at up to ~2×180s per
         // round (the progressive double-attempt on a slow gateway) 6 rounds stays well under this lane's 45-min job
         // timeout, so a slow-but-progressing run can't blow the job (an opaque kill); a per-call timeout still self-skips.
+        // A conversationId (when set) is the surface the irreversible `resolve` gate parks its human-approval card on.
+        var effectiveGoal = goal ?? "Add server-side email-format validation to the signup endpoint, with unit tests.";
+        var conversationLine = conversationId is { } cid ? $",\n              \"conversationId\": \"{cid}\"" : "";
         var supConfig = $$"""
             {
-              "goal": "Add server-side email-format validation to the signup endpoint, with unit tests.",
+              "goal": "{{effectiveGoal}}",
               "supervisorModelId": "{{brainModelId}}",
               "maxRounds": 6,
               "agentProfile": { "repositoryId": "{{repoId}}", "pushBranch": true, "integrateBranches": true },
-              "acceptanceChecks": ["sh", "check.sh"]
+              "acceptanceChecks": ["sh", "check.sh"]{{conversationLine}}
             }
             """;
 
