@@ -356,8 +356,12 @@ export interface PhaseAgentRef {
   outputTokens?: number | null;
   /** Run duration in ms — final once terminal, else live elapsed at the last poll; null/absent for a non-supervisor agent or before it starts. The Time column. */
   durationMs?: number | null;
-  /** Side-effecting tool calls the agent made (ledger rows minus decision.request); `0` is a real "made none" for a supervisor agent, null/absent for a non-supervisor one. The Tools column. */
+  /** Side-effecting tool calls the agent made (ledger rows minus decision.request); `0` is a real "made none", null/absent when the agent row is missing. The Tools column. */
   toolCount?: number | null;
+  /** Realized spend in USD — model price × tokens, computed server-side. null when the model is unpriced (fail-open) or before tokens land. */
+  costUsd?: number | null;
+  /** Git-truth count of files the agent changed (off the result's changedFiles, not a live event tally). null before the result lands; `0` is a real "touched none". */
+  filesChanged?: number | null;
 }
 
 /** Mirrors backend `PhaseMetrics` — the small roll-up a phase row shows. */

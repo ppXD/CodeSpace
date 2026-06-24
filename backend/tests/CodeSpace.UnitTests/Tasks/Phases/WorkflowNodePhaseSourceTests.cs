@@ -132,7 +132,7 @@ public class WorkflowNodePhaseSourceTests
         var statuses = new Dictionary<Guid, AgentRunStatus> { [agentRunId] = AgentRunStatus.Succeeded };
         var metrics = new Dictionary<Guid, AgentRunMetrics>
         {
-            [agentRunId] = new() { Status = AgentRunStatus.Succeeded, DurationMs = 12_000, InputTokens = 200, OutputTokens = 80, ToolCount = 3, Model = "claude-opus-4" },
+            [agentRunId] = new() { Status = AgentRunStatus.Succeeded, DurationMs = 12_000, InputTokens = 200, OutputTokens = 80, ToolCount = 3, Model = "claude-opus-4", CostUsd = 0.05m, FilesChanged = 4 },
         };
 
         var agent = WorkflowNodePhaseSource.ProjectNodes(nodes, statuses, metrics).ShouldHaveSingleItem().Agents.ShouldHaveSingleItem();
@@ -142,6 +142,8 @@ public class WorkflowNodePhaseSourceTests
         agent.OutputTokens.ShouldBe(80);
         agent.ToolCount.ShouldBe(3);
         agent.Model.ShouldBe("claude-opus-4");
+        agent.CostUsd.ShouldBe(0.05m);
+        agent.FilesChanged.ShouldBe(4);
     }
 
     [Fact]

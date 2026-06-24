@@ -2,6 +2,7 @@ using System.Text.Json;
 using CodeSpace.Core.DependencyInjection;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Services.Agents;
+using CodeSpace.Core.Services.Agents.Cost;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Decisions;
 using CodeSpace.Messages.Enums;
@@ -15,10 +16,10 @@ namespace CodeSpace.Core.Services.Tasks.Phases;
 /// TWO batch queries — the <c>AgentRun</c> rows + a grouped <c>tool_call_ledger</c> count. The ONE place that turns the
 /// durable agent record into <see cref="AgentRunMetrics"/>, so a plain <c>agent.code</c> / map agent surfaces the SAME
 /// rollup <c>SupervisorPhaseSource</c> folds from its decision ledger. Duration is LIVE (recomputed at <c>now</c>);
-/// tokens/model deserialize DEFENSIVELY from a NARROW projection of <c>ResultJson</c>/<c>TaskJson</c> — just the
-/// token-usage + model leaves, never the whole result/task graph (so the heavy ChangedFiles/Summary/patch fields aren't
-/// materialized on this poll-path) — and a malformed/partial blob reads as unknown, never throws, so one bad row can't
-/// blank the whole projection. READ-ONLY.
+/// tokens/model/cost/files deserialize DEFENSIVELY from a NARROW projection of <c>ResultJson</c>/<c>TaskJson</c> — the
+/// token-usage + changed-file list (for its COUNT) + model leaves, never the whole result/task graph (so the heavy
+/// patch / transcript / summary / per-repo bodies aren't materialized on this poll-path) — and a malformed/partial blob
+/// reads as unknown, never throws, so one bad row can't blank the whole projection. READ-ONLY.
 /// </summary>
 public sealed class AgentMetricsReader : IScopedDependency
 {
@@ -57,11 +58,14 @@ public sealed class AgentMetricsReader : IScopedDependency
             .ToDictionaryAsync(x => x.AgentRunId, x => x.Count, cancellationToken).ConfigureAwait(false);
     }
 
-    /// <summary>Turn one agent's persisted state into the metrics bundle — pure, so the live clock + the defensive parses live in one unit-testable place. Tokens null until the result lands; model null when the task left it blank.</summary>
+    /// <summary>Turn one agent's persisted state into the metrics bundle — pure, so the live clock + the defensive parses + the cost pricing live in one unit-testable place. Tokens/files null until the result lands; model null when the task left it blank; cost null when the model is unpriced (fail-open).</summary>
     public static AgentRunMetrics Build(Guid id, AgentRunStatus status, DateTimeOffset? startedAt, DateTimeOffset? completedAt, string? resultJson, string? taskJson, int toolCount, DateTimeOffset now)
     {
-        var tokens = TryDeserialize<TokenSlice>(resultJson)?.TokenUsage;
-        var model = TryDeserialize<ModelSlice>(taskJson)?.Model;
+        var result = TryDeserialize<ResultSlice>(resultJson);
+        var rawModel = TryDeserialize<ModelSlice>(taskJson)?.Model;
+        var model = string.IsNullOrWhiteSpace(rawModel) ? null : rawModel;
+
+        var tokens = result?.TokenUsage;
 
         return new AgentRunMetrics
         {
@@ -70,7 +74,9 @@ public sealed class AgentMetricsReader : IScopedDependency
             InputTokens = tokens?.InputTokens,
             OutputTokens = tokens?.OutputTokens,
             ToolCount = toolCount,
-            Model = string.IsNullOrWhiteSpace(model) ? null : model,
+            Model = model,
+            CostUsd = tokens is null ? null : AgentCostPricing.CostUsd(model, tokens.InputTokens, tokens.OutputTokens),
+            FilesChanged = result?.ChangedFiles?.Count,
         };
     }
 
@@ -93,8 +99,8 @@ public sealed class AgentMetricsReader : IScopedDependency
         catch (JsonException) { return null; }
     }
 
-    /// <summary>The token-usage leaf of <c>AgentRunResult</c> — a narrow projection so the result blob's heavy fields (patch / changed files / summary / transcript) are never materialized on this poll-path.</summary>
-    private sealed record TokenSlice(AgentTokenUsage? TokenUsage);
+    /// <summary>The leaves of <c>AgentRunResult</c> the metric needs — token usage + the changed-file list (for its COUNT) — a narrow projection so the result blob's heavy fields (patch / summary / transcript) are never materialized on this poll-path.</summary>
+    private sealed record ResultSlice(AgentTokenUsage? TokenUsage, IReadOnlyList<string>? ChangedFiles);
 
     /// <summary>The model leaf of <c>AgentTask</c> — a narrow projection so the task envelope's heavy fields (workspace / permissions / prompt) are never materialized here.</summary>
     private sealed record ModelSlice(string? Model);

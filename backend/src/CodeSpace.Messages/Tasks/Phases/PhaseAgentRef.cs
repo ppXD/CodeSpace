@@ -37,6 +37,12 @@ public sealed record PhaseAgentRef
     /// <summary>The agent's run DURATION in milliseconds — final (<c>CompletedAt − StartedAt</c>) once terminal, else live elapsed (<c>now − StartedAt</c>) computed at projection time; null when the run hasn't started yet or for a non-supervisor agent. A LIVE figure (recomputed every phase read), NOT a replay-deterministic one. Feeds the collapsed phase table's Time column. Open numeric — never switched on.</summary>
     public long? DurationMs { get; init; }
 
-    /// <summary>How many SIDE-EFFECTING tool calls the agent made — its <c>tool_call_ledger</c> rows minus the <c>decision.request</c> HITL envelopes. NOTE the ledger records only side-effecting tools (read-only reads/greps are never ledgered), so this is "mutations attempted", not a total tool-use count. <c>0</c> is a real "made none" for a SUPERVISOR-spawned agent; null only for a non-supervisor agent (never projected). Feeds the collapsed phase table's Tools column.</summary>
+    /// <summary>How many SIDE-EFFECTING tool calls the agent made — its <c>tool_call_ledger</c> rows minus the <c>decision.request</c> HITL envelopes. NOTE the ledger records only side-effecting tools (read-only reads/greps are never ledgered), so this is "mutations attempted", not a total tool-use count. <c>0</c> is a real "made none"; null only when the agent row is absent. Feeds the collapsed phase table's Tools column.</summary>
     public int? ToolCount { get; init; }
+
+    /// <summary>The agent's REALIZED spend in USD — <c>model price × tokens</c>, computed once server-side so every surface shows the same figure. Null when the model is unpriced (fail-open — e.g. a Codex/OpenAI model absent from the price table) or before tokens land. Open numeric — display as money, never switched on.</summary>
+    public decimal? CostUsd { get; init; }
+
+    /// <summary>How many files the agent changed — the GIT-TRUTH count off the result's <c>changedFiles</c> (not a live FileChanged-event tally, which can double-count). Null before the result lands / when the agent row is absent; <c>0</c> is a real "touched none". Feeds the terminal's files fact.</summary>
+    public int? FilesChanged { get; init; }
 }

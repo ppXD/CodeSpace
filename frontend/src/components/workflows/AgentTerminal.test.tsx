@@ -63,10 +63,11 @@ describe("AgentTerminal", () => {
     expect(screen.queryByTestId("tool-calls")).toBeNull();
   });
 
-  it("leads with the agent name and carries the full identity strip (harness · model · tools · time)", () => {
+  it("leads with the agent name and carries the full identity strip (harness · model · tools · time) + the cost/files facts", () => {
     useAgentRunMock.mockReturnValue({ data: { status: "Running", harness: "claude-code" } });
-    useAgentRunEventsMock.mockReturnValue({ data: [evt(1, "FileChanged", "x"), evt(2, "FileChanged", "y")], isLoading: false });
-    render(<AgentTerminal agent={termAgent({ agentRunId: "a1", label: "backend-fix", model: "claude-opus", toolCount: 16, durationMs: 137_000, inputTokens: 12000, outputTokens: 2200 })} onClose={vi.fn()} />);
+    // Five FileChanged events, but the footer count comes from the REF's git-truth filesChanged (3), not the event tally.
+    useAgentRunEventsMock.mockReturnValue({ data: [evt(1, "FileChanged", "x"), evt(2, "FileChanged", "x"), evt(3, "FileChanged", "y"), evt(4, "FileChanged", "y"), evt(5, "FileChanged", "z")], isLoading: false });
+    render(<AgentTerminal agent={termAgent({ agentRunId: "a1", label: "backend-fix", model: "claude-opus", toolCount: 16, durationMs: 137_000, inputTokens: 12000, outputTokens: 2200, costUsd: 0.0045, filesChanged: 3 })} onClose={vi.fn()} />);
 
     expect(screen.getByText("backend-fix")).toBeInTheDocument();   // the title leads with the name
     expect(screen.getByText("claude-code")).toBeInTheDocument();   // harness — the live run row
@@ -76,7 +77,8 @@ describe("AgentTerminal", () => {
 
     expect(screen.getByText("running")).toBeInTheDocument();       // footer: live status
     expect(screen.getByText("14.2k tokens")).toBeInTheDocument();
-    expect(screen.getByText("2 files")).toBeInTheDocument();
+    expect(screen.getByText("$0.0045")).toBeInTheDocument();       // cost, computed server-side
+    expect(screen.getByText("3 files")).toBeInTheDocument();       // the git-truth ref count (3), NOT the 5 FileChanged events
   });
 
   it("omits an identity part that is absent (no harness/model/tools/time → no strip)", () => {

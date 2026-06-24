@@ -245,6 +245,22 @@ public class SupervisorPhaseSourceTests
     }
 
     [Fact]
+    public void Spawn_child_agents_carry_the_priced_cost_and_changed_file_count()
+    {
+        var a = Guid.NewGuid();
+
+        // A PRICED model in the compact (claude-opus-4-8 = $5/$25 per M) + changed files: 1M in + 1M out → $30; two files → 2.
+        var spawn = Decision(2, SupervisorDecisionKinds.Spawn, SupervisorDecisionStatus.Succeeded,
+            outcomeJson: SpawnOutcome(new[] { a },
+                new SupervisorAgentResult { AgentRunId = a, Status = "Succeeded", Model = "claude-opus-4-8", InputTokens = 1_000_000, OutputTokens = 1_000_000, ChangedFiles = new[] { "src/x.cs", "src/y.cs" } }));
+
+        var refA = SupervisorPhaseSource.ProjectDecisions(new[] { spawn }, new Dictionary<Guid, AgentRunStatus> { [a] = AgentRunStatus.Succeeded }).Single().Agents.Single();
+
+        refA.CostUsd.ShouldBe(30m, "the supervisor source prices the compact's model × tokens — the SAME pricing the node source uses");
+        refA.FilesChanged.ShouldBe(2, "the git-truth changed-file count off the folded compact");
+    }
+
+    [Fact]
     public void A_staged_agent_with_no_folded_result_has_a_null_rollup()
     {
         var a = Guid.NewGuid();
@@ -260,6 +276,8 @@ public class SupervisorPhaseSourceTests
         only.Model.ShouldBeNull();
         only.InputTokens.ShouldBeNull();
         only.OutputTokens.ShouldBeNull();
+        only.CostUsd.ShouldBeNull("no compact → no priced cost");
+        only.FilesChanged.ShouldBeNull("no compact → unknown file count");
     }
 
     [Fact]

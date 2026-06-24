@@ -7,7 +7,7 @@ import { useAgentRun, useAgentRunEvents } from "@/hooks/use-agents";
 
 import { AgentToolCalls } from "./AgentToolCalls";
 import { isAgentBusy } from "./runPhases";
-import { formatDuration, formatTokens, tileState } from "./runActivity";
+import { formatDuration, formatTokens, formatUsd, tileState } from "./runActivity";
 
 /**
  * The expanded agent terminal — opening an agent (a fleet dot, a table row, a tile) pops this full mac-terminal WINDOW
@@ -28,8 +28,9 @@ export function AgentTerminal({ agent, onClose }: { agent: PhaseAgentRef; onClos
 
   const name = agent.label || agent.nodeId || `agent ${agent.agentRunId.slice(0, 8)}`;
   const evts = events.data ?? [];
-  const files = evts.filter((e) => e.kind === "FileChanged").length;
+  const files = agent.filesChanged ?? 0;   // git-truth count off the ref (not a live FileChanged-event tally, which can double-count)
   const tokens = (agent.inputTokens ?? 0) + (agent.outputTokens ?? 0);
+  const cost = agent.costUsd ?? 0;
 
   // The agent's identity strip — harness (the live run row) + model + tools + time (the phase rollup). Each part drops when absent.
   const identity = [
@@ -60,6 +61,7 @@ export function AgentTerminal({ agent, onClose }: { agent: PhaseAgentRef; onClos
       <div className="agent-terminal-footer">
         <span className="agent-terminal-stat" data-state={tileState(status)}><span className="agent-terminal-statdot" aria-hidden="true"></span>{humanize(status)}</span>
         {tokens > 0 && <span className="agent-terminal-fact">{formatTokens(tokens)} tokens</span>}
+        {cost > 0 && <span className="agent-terminal-fact">{formatUsd(cost)}</span>}
         {files > 0 && <span className="agent-terminal-fact">{files} {files === 1 ? "file" : "files"}</span>}
         <div className="agent-terminal-tabs">
           <button type="button" data-active={tab === "output" || undefined} onClick={() => setTab("output")}>Output</button>

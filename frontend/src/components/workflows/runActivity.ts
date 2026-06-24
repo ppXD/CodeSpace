@@ -153,6 +153,12 @@ export function formatTokens(n: number): string {
   return n >= 1000 ? `${(n / 1000).toFixed(1)}k` : `${n}`;
 }
 
+/** Cost in USD — "$0.0045" for sub-dollar (4dp, trailing zeros trimmed), "$12.30" for a dollar or more. */
+export function formatUsd(usd: number): string {
+  if (usd >= 1) return `$${usd.toFixed(2)}`;
+  return `$${usd.toFixed(4).replace(/0+$/, "").replace(/\.$/, "")}`;
+}
+
 /** Human run duration — "45s", "2m 17s", "1h 3m"; null/undefined → "—" (unknown / not started). Sub-second floors to "0s". */
 export function formatDuration(ms: number | null | undefined): string {
   if (ms == null) return "—";
