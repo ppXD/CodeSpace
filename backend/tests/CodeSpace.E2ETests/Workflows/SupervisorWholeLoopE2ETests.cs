@@ -193,6 +193,78 @@ public sealed class SupervisorWholeLoopE2ETests : IDisposable
     }
 
     [Fact]
+    public async Task Supervisor_accepts_an_agent_solution_that_actually_solves_the_task_via_a_goal_relevance_oracle()
+    {
+        if (OperatingSystem.IsWindows()) return;          // the fake CLI is a /bin/sh script the runner spawns
+        if (!await GitReadyAsync()) return;               // real git is required for clone/capture/integrate/grade
+
+        // GOAL-RELEVANCE (解對任務, not just "drove the arc"): the agent edits solution.sh to the CORRECT A+B impl, and the
+        // seeded check.sh is an OUTPUT-equality oracle (sh solution.sh 7 5 == 12), NOT a structural exit-0. A green grade
+        // therefore means the agent's edit actually SOLVED the task — the deepest acceptance signal.
+        using var cli = new SolutionWritingFakeCli(SolutionWritingFakeCli.CorrectSolution);
+
+        SetDecisionScript(s => s.PlanSpawnSingleMergeStop());   // ONE agent edits solution.sh → clean single-branch merge
+
+        var jobClient = ResolveJobClient();
+        jobClient.Clear();
+        jobClient.AutoExecute = true;
+
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+
+        using var remote = new BareRemote();
+        // Seed a WRONG solution.sh stub (echo 0) the agent must FIX + the goal-relevance oracle.
+        await remote.SeedBaseAsync(new() { ["check.sh"] = SolutionWritingFakeCli.GoalRelevanceCheckSh, ["solution.sh"] = SolutionWritingFakeCli.SeededStub });
+        var repoId = await SeedBoundRepositoryAsync(teamId, remote.Url, "main");
+
+        var workflowId = await CreateWholeLoopWorkflowAsync(teamId, userId, repoId);
+        var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
+
+        await RunEngineAsync(runId);
+        await jobClient.WaitForPendingAsync();
+
+        await AssertRunReachedSuccessAsync(runId);
+        await AssertAgentEditedSolutionAsync(runId, "$1 + $2");   // the agent wrote the CORRECT (adding) solution
+        await AssertDecisionLedgerAsync(runId, teamId, SupervisorDecisionKinds.Plan, SupervisorDecisionKinds.Spawn, SupervisorDecisionKinds.Merge, SupervisorDecisionKinds.Stop);
+        await AssertIntegratedBranchOnRemoteAsync(remote, runId);
+        await AssertAcceptancePassedOnStopAsync(runId, teamId);   // the oracle RAN the agent's solution → 12 → PASS
+    }
+
+    [Fact]
+    public async Task Supervisor_withholds_an_agent_solution_that_integrates_but_computes_the_WRONG_answer()
+    {
+        if (OperatingSystem.IsWindows()) return;
+        if (!await GitReadyAsync()) return;
+
+        // The TEETH that distinguishes "解對任務" from "drove the arc": the agent DOES edit solution.sh + the merge DOES
+        // integrate it (a real patch, a real head) — but to a plausible-but-WRONG impl (subtracts: 7 5 → 2 ≠ 12). A
+        // STRUCTURAL check ("a file integrated") would green this; the goal-relevance oracle catches it and WITHHOLDS the head.
+        using var cli = new SolutionWritingFakeCli(SolutionWritingFakeCli.WrongSolution);
+
+        SetDecisionScript(s => s.PlanSpawnSingleMergeStop());
+
+        var jobClient = ResolveJobClient();
+        jobClient.Clear();
+        jobClient.AutoExecute = true;
+
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+
+        using var remote = new BareRemote();
+        await remote.SeedBaseAsync(new() { ["check.sh"] = SolutionWritingFakeCli.GoalRelevanceCheckSh, ["solution.sh"] = SolutionWritingFakeCli.SeededStub });
+        var repoId = await SeedBoundRepositoryAsync(teamId, remote.Url, "main");
+
+        var workflowId = await CreateWholeLoopWorkflowAsync(teamId, userId, repoId);
+        var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
+
+        await RunEngineAsync(runId);
+        await jobClient.WaitForPendingAsync();
+
+        await AssertRunReachedSuccessAsync(runId);
+        await AssertAgentEditedSolutionAsync(runId, "$1 - $2");       // the agent REALLY wrote the WRONG (subtracting) solution — not a no-op
+        await AssertIntegratedBranchOnRemoteAsync(remote, runId);     // the merge REALLY integrated it
+        await AssertAcceptanceFailedAndBranchWithheldAsync(runId, teamId);   // the oracle caught the wrong ANSWER → withheld
+    }
+
+    [Fact]
     public async Task Supervisor_gates_a_real_conflict_resolution_behind_the_irreversible_human_approval_floor()
     {
         if (OperatingSystem.IsWindows()) return;          // the fake CLI is a /bin/sh script the runner spawns
@@ -532,6 +604,23 @@ public sealed class SupervisorWholeLoopE2ETests : IDisposable
             result.ProducedBranch.ShouldNotBeNullOrWhiteSpace("the real agent's change was published as its own branch");
             result.ChangedFiles.ShouldContain(f => f.StartsWith(FileWritingFakeCli.FilePrefix), "the captured diff names the agent's written file");
         }
+    }
+
+    private async Task AssertAgentEditedSolutionAsync(Guid runId, string expectedBodyMarker)
+    {
+        using var verify = _fixture.BeginScope();
+        var db = verify.Resolve<CodeSpaceDbContext>();
+
+        var results = await db.AgentRun.AsNoTracking().Where(r => r.WorkflowRunId == runId)
+            .Select(r => r.ResultJson).ToListAsync();
+
+        results.Count.ShouldBe(1, "spawn[SubtaskA] staged exactly ONE real agent run");
+
+        var result = System.Text.Json.JsonSerializer.Deserialize<AgentRunResult>(results.Single()!, AgentJson.Options)!;
+        result.Status.ShouldBe(AgentRunStatus.Succeeded);
+        result.Patch.ShouldNotBeNullOrWhiteSpace("the executor's real git-diff captured the agent's solution.sh edit — a real unified diff");
+        result.ChangedFiles.ShouldContain(SolutionWritingFakeCli.SolutionFile, "the captured diff edited the SEEDED source (solution.sh), proving a real agent attempted/solved the TASK — not a marker file (so the wrong-answer teeth isn't a no-op)");
+        result.Patch!.ShouldContain(expectedBodyMarker, customMessage: $"the captured diff wrote the EXPECTED solution body ('{expectedBodyMarker}') — pinning WHICH solution the agent produced, not just that it edited the file");
     }
 
     private async Task AssertDecisionLedgerAsync(Guid runId, Guid teamId, params string[] expectedKinds)
