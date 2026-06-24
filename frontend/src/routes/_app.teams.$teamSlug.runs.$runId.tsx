@@ -37,8 +37,12 @@ function RunDetailPage() {
   const runDecisions = decisions.data ? decisionsForRun(decisions.data, runId, runAgentIds) : [];
   const workflowId = run.data?.workflowId ?? null;
   const replay = useReplayRun();
-  // Clicking an agent in the outline focuses its card in the center (the Live-work band scrolls it into view).
+  // The outline drives the center: a selected PHASE filters the Activity tiles to it; a selected AGENT opens its terminal.
   const [selectedAgentRunId, setSelectedAgentRunId] = useState<string | null>(null);
+  const [selectedPhaseId, setSelectedPhaseId] = useState<string | null>(null);
+  // Selecting a phase is a fresh focus — clear any open agent so its terminal can't linger after the tiles filter away
+  // from it. (Selecting an AGENT sets its phase then itself, in that order, so the agent still wins.)
+  const selectPhase = (phaseId: string | null) => { setSelectedPhaseId(phaseId); setSelectedAgentRunId(null); };
 
   const onReplay = async () => {
     const result = await replay.mutateAsync(runId);
@@ -91,7 +95,7 @@ function RunDetailPage() {
           <div className="rail-card">
             <div className="rail-card-head"><Ic.Workflow size={12} aria-hidden="true" /> Outline</div>
             {phases.data
-              ? <RunOutline phases={phases.data.phases} selectedAgentRunId={selectedAgentRunId} onSelectAgent={setSelectedAgentRunId} />
+              ? <RunOutline phases={phases.data.phases} selectedPhaseId={selectedPhaseId} onSelectPhase={selectPhase} selectedAgentRunId={selectedAgentRunId} onSelectAgent={setSelectedAgentRunId} />
               : <div className="run-outline-empty">{phases.isLoading ? "Loading outline…" : "Outline unavailable."}</div>}
           </div>
         </aside>
@@ -101,7 +105,9 @@ function RunDetailPage() {
           <div className="run-panel">
             <RunDetailView
               runId={runId}
+              selectedPhaseId={selectedPhaseId}
               selectedAgentRunId={selectedAgentRunId}
+              onSelectAgent={setSelectedAgentRunId}
               onOpenRun={(childRunId) => navigate({ to: "/teams/$teamSlug/runs/$runId", params: { teamSlug, runId: childRunId } })}
             />
           </div>

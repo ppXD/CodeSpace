@@ -2367,89 +2367,11 @@ textarea:-webkit-autofill {
 /* Honest placeholder for a tab whose backend projector hasn't shipped (Changes / Trace). */
 .acs-root .run-tab-soon-tag { display: inline-block; margin-bottom: 10px; padding: 2px 9px; border-radius: 99px; background: var(--panel-2); border: 1px solid var(--line); font-size: 10.5px; font-weight: 600; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); }
 
-/* ── Activity tab: the merged live-execution timeline (event rows + inline agent-wave terminal tiles) ───────── */
+/* ── Activity tab: the flat grid of live terminal tiles for the selected phase (the open agent's terminal pops below) ── */
 .acs-root .run-activity-empty { font-size: 12.5px; color: var(--muted); padding: 18px 4px; }
-.acs-root .run-activity-list { list-style: none; margin: 0; padding: 0; position: relative; display: flex; flex-direction: column; }
-/* the rail threads the event dots + wave rings (centred on them via translateX(-50%)); wave blocks sit in the body
-   column to its right. The dots/rings paint ABOVE the rail (z-index) so the line connects them rather than cutting through. */
-.acs-root .run-activity-list::before { content: ""; position: absolute; left: 77px; transform: translateX(-50%); top: 9px; bottom: 9px; width: 1.5px; background: var(--line); }
-.acs-root .run-activity-row { display: grid; grid-template-columns: 62px 12px 1fr; column-gap: 9px; align-items: start; padding: 4px 0; }
-.acs-root .run-activity-time { font-size: 11px; color: var(--muted-2); font-variant-numeric: tabular-nums; line-height: 1.5; padding-top: 1px; text-align: right; white-space: nowrap; }
-.acs-root .run-activity-dot { width: 7px; height: 7px; border-radius: 50%; margin-top: 5px; justify-self: center; position: relative; z-index: 1; background: var(--muted-2); }
-.acs-root .run-activity-event[data-severity="success"] .run-activity-dot { background: #1F6B3F; }
-.acs-root .run-activity-event[data-severity="warning"] .run-activity-dot { background: #A8590E; }
-.acs-root .run-activity-event[data-severity="error"]   .run-activity-dot { background: #9E3535; }
-.acs-root .run-activity-body { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
-.acs-root .run-activity-title { font-size: 12.5px; color: var(--ink-2); line-height: 1.45; }
-.acs-root .run-activity-summary { font-size: 11.5px; color: var(--muted); line-height: 1.4; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
-/* wave row: a hollow ring marks the spawn on the rail; the wave block aligns with the event body column */
-.acs-root .run-activity-waverow { padding: 8px 0; }
-.acs-root .run-activity-ring { width: 11px; height: 11px; border-radius: 50%; margin-top: 4px; justify-self: center; position: relative; z-index: 1; box-sizing: border-box; background: var(--bg); border: 2px solid var(--accent); }
-.acs-root .run-activity-wavewrap { min-width: 0; }
-/* a folded run of detail events — one "N steps" disclosure on the rail; a lone detail event just dims back from the milestones */
-.acs-root .run-activity-event[data-detail] { opacity: .5; }
-.acs-root .run-activity-fold { padding: 2px 0; }
-.acs-root .run-activity-fold-dot { width: 8px; height: 8px; background: transparent; border: 1.5px solid var(--line-2); box-sizing: border-box; }
-.acs-root .run-activity-foldbtn { appearance: none; border: 0; background: transparent; cursor: pointer; font: inherit; display: inline-flex; align-items: center; gap: 5px; font-size: 11.5px; color: var(--muted-2); padding: 2px 6px; margin-left: -6px; border-radius: 6px; }
-.acs-root .run-activity-foldbtn:hover { background: var(--panel-2); color: var(--ink-2); }
-.acs-root .run-activity-foldbtn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
-.acs-root .run-activity-foldbtn > svg { transition: transform .15s ease; }
-.acs-root .run-activity-foldbtn[aria-expanded="true"] > svg { transform: rotate(90deg); }
-
-/* the agent wave — the FLEET CARD: a two-row header (label + breakdown, then the status dots) that expands to the
-   metrics table / live tiles. Status palette across the whole family: pending gray · running blue · done green · failed red. */
-.acs-root .agent-wave { display: flex; flex-direction: column; gap: 8px; }
-.acs-root .agent-wave-head { display: flex; align-items: center; gap: 7px; font-size: 12px; }
-.acs-root .agent-wave-head > svg { color: var(--muted-2); flex: none; }
-.acs-root .agent-wave-title { font-weight: 600; color: var(--ink); flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.acs-root .agent-wave-summary { margin-left: auto; font-size: 11px; color: var(--muted-2); flex: none; white-space: nowrap; }
-.acs-root .agent-wave-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(185px, 1fr)); gap: 10px; }
-
-/* the fleet dots — one status dot per agent, each a button into that agent's terminal; the selected / open agent rings */
-.acs-root .agent-fleet { display: flex; flex-wrap: wrap; gap: 6px; padding-left: 21px; }
-.acs-root .agent-fleet-dot { appearance: none; flex: none; width: 10px; height: 10px; padding: 0; border-radius: 50%; border: 0; background: var(--muted-2); cursor: pointer; transition: box-shadow .12s ease, transform .12s ease; }
-.acs-root .agent-fleet-dot:hover { transform: scale(1.25); }
-.acs-root .agent-fleet-dot:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-.acs-root .agent-fleet-dot[data-state="running"] { background: #2F6FE0; animation: agentTilePulse 1.5s ease-in-out infinite; }
-.acs-root .agent-fleet-dot[data-state="done"] { background: #1F6B3F; }
-.acs-root .agent-fleet-dot[data-state="waiting"] { background: var(--muted-2); }
-.acs-root .agent-fleet-dot[data-state="failed"] { background: #9E3535; }
-.acs-root .agent-fleet-dot[data-selected], .acs-root .agent-fleet-dot[data-open] { box-shadow: 0 0 0 2px var(--bg), 0 0 0 3.5px var(--accent); }
-
-/* the expand chevron — points right (collapsed card) → down (body shown) */
-.acs-root .agent-wave-toggle { appearance: none; flex: none; display: inline-flex; align-items: center; justify-content: center; width: 22px; height: 22px; padding: 0; background: transparent; border: 1px solid transparent; border-radius: 6px; color: var(--muted-2); cursor: pointer; transition: background .15s ease, color .15s ease; }
-.acs-root .agent-wave-toggle:hover { background: var(--panel-2); color: var(--ink-2); }
-.acs-root .agent-wave-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
-.acs-root .agent-wave-toggle > svg { transform: rotate(-90deg); transition: transform .15s ease; }
-.acs-root .agent-wave-toggle[data-open] > svg { transform: rotate(0deg); }
-
-/* the expanded body — a Table/Tiles segmented toggle over the chosen detail view */
-.acs-root .agent-wave-body { display: flex; flex-direction: column; gap: 8px; }
-.acs-root .agent-wave-modes { display: inline-flex; gap: 2px; align-self: flex-start; padding: 2px; background: var(--panel-2); border: 1px solid var(--line); border-radius: 7px; }
-.acs-root .agent-wave-modes > button { appearance: none; border: 0; background: transparent; cursor: pointer; font: inherit; font-size: 11px; color: var(--muted); padding: 3px 10px; border-radius: 5px; }
-.acs-root .agent-wave-modes > button:hover { color: var(--ink-2); }
-.acs-root .agent-wave-modes > button[data-active] { background: var(--panel); color: var(--ink); font-weight: 500; box-shadow: 0 1px 2px rgba(0,0,0,.04); }
-
-/* the metrics table — one expanded density; warm, no terminal chrome (it is the index, not a terminal) */
-.acs-root .agent-wave-table { width: 100%; border-collapse: collapse; font-size: 12px; }
-.acs-root .agent-wave-table thead th { padding: 4px 9px; text-align: left; font-weight: 500; font-size: 10.5px; letter-spacing: .02em; text-transform: uppercase; color: var(--muted-2); border-bottom: 1px solid var(--line); }
-.acs-root .agent-wave-table th.agent-wave-num, .acs-root .agent-wave-table td.agent-wave-num { text-align: right; font-variant-numeric: tabular-nums; color: var(--muted); white-space: nowrap; }
-.acs-root .agent-wave-row { transition: background .12s ease; }
-.acs-root .agent-wave-row > td { padding: 6px 9px; border-bottom: 1px solid var(--line); }
-.acs-root .agent-wave-row:last-child > td { border-bottom: none; }
-.acs-root .agent-wave-row:hover { background: var(--panel-2); }
-.acs-root .agent-wave-row[data-selected], .acs-root .agent-wave-row[data-open] { background: var(--accent-soft); }
-.acs-root .agent-wave-row[data-state="done"] { opacity: .6; }
-.acs-root .agent-wave-cell-name { display: flex; align-items: center; gap: 7px; min-width: 0; }
-.acs-root .agent-wave-dot { width: 7px; height: 7px; border-radius: 50%; flex: none; background: var(--muted-2); }
-.acs-root .agent-wave-dot[data-state="running"] { background: #2F6FE0; animation: agentTilePulse 1.5s ease-in-out infinite; }
-.acs-root .agent-wave-dot[data-state="done"] { background: #1F6B3F; }
-.acs-root .agent-wave-dot[data-state="waiting"] { background: var(--muted-2); }
-.acs-root .agent-wave-dot[data-state="failed"] { background: #9E3535; }
-.acs-root .agent-wave-name { appearance: none; background: none; border: none; padding: 0; cursor: pointer; text-align: left; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11.5px; color: var(--ink-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
-.acs-root .agent-wave-name:hover { text-decoration: underline; }
-.acs-root .agent-wave-name:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 3px; }
-.acs-root .agent-wave-model { flex: none; font-size: 10px; color: var(--muted-2); background: var(--panel-2); border: 1px solid var(--line); border-radius: 4px; padding: 0 5px; max-width: 130px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.acs-root .run-tiles { display: flex; flex-direction: column; }
+.acs-root .run-tiles-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(205px, 1fr)); gap: 11px; align-items: start; }
+@media (max-width: 560px) { .acs-root .run-tiles-grid { grid-template-columns: 1fr; } }
 
 /* the light terminal tile — mac-terminal chrome over a warm surface (the ONLY terminal-styled element; the dark
    profile is deferred to global dark mode). A read-only live-log preview, never an interactive shell. */
@@ -2565,10 +2487,25 @@ textarea:-webkit-autofill {
 .acs-root .run-outline { display: flex; flex-direction: column; gap: 3px; }
 .acs-root .run-outline-empty { font-size: 12.5px; color: var(--muted); padding: 14px 4px; }
 .acs-root .run-outline-phase { border-radius: 9px; padding: 1px 2px; transition: background .15s ease; }
-.acs-root .run-outline-phase[data-status="active"] { background: var(--accent-soft); }
-.acs-root .run-outline-row { display: flex; align-items: center; gap: 9px; padding: 6px; font-size: 13px; color: var(--ink-2); }
+.acs-root .run-outline-phase[data-status="active"], .acs-root .run-outline-phase[data-selected] { background: var(--accent-soft); }
+.acs-root .run-outline-row { display: flex; align-items: center; gap: 7px; padding: 6px; font-size: 13px; color: var(--ink-2); }
 .acs-root .run-outline-phase[data-status="active"] .run-outline-row,
-.acs-root .run-outline-phase[data-status="active"] .run-outline-label { color: var(--ink); font-weight: 500; }
+.acs-root .run-outline-phase[data-status="active"] .run-outline-label,
+.acs-root .run-outline-phase[data-selected] .run-outline-label { color: var(--ink); font-weight: 500; }
+/* the chevron collapsing a phase's agent list (rotates ▸ → ▾), with a spacer keeping agentless rows aligned */
+.acs-root .run-outline-caret { appearance: none; flex: none; display: inline-flex; align-items: center; justify-content: center; width: 16px; height: 16px; padding: 0; background: transparent; border: 0; border-radius: 4px; color: var(--muted-2); cursor: pointer; }
+.acs-root .run-outline-caret:hover { background: var(--panel-2); color: var(--ink-2); }
+.acs-root .run-outline-caret:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.acs-root .run-outline-caret > svg { transition: transform .15s ease; }
+.acs-root .run-outline-caret[data-open] > svg { transform: rotate(90deg); }
+.acs-root .run-outline-caret-spacer { width: 16px; flex: none; }
+/* the phase label as a select button — drives the Activity tiles */
+.acs-root button.run-outline-label { appearance: none; background: transparent; border: 0; padding: 0; font: inherit; text-align: left; cursor: pointer; color: inherit; }
+.acs-root button.run-outline-label:hover { text-decoration: underline; }
+.acs-root button.run-outline-label:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 3px; }
+/* the nested "Phases" block — a supervisor's semantic phases under the node that spawned them */
+.acs-root .run-outline-phases { margin: 1px 0 3px 13px; padding-left: 10px; border-left: 1.5px solid var(--line); display: flex; flex-direction: column; gap: 3px; }
+.acs-root .run-outline-phases-label { font-size: 10px; letter-spacing: .04em; text-transform: uppercase; color: var(--muted-2); padding: 3px 6px 1px; }
 .acs-root .run-outline-glyph { display: grid; place-items: center; width: 16px; height: 16px; flex: none; color: var(--muted-2); }
 .acs-root .run-outline-glyph > svg { display: block; }
 .acs-root .run-outline-glyph[data-status="succeeded"] { color: #1F6B3F; }
@@ -2578,8 +2515,8 @@ textarea:-webkit-autofill {
 .acs-root .run-outline-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .acs-root .run-outline-metric { font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
 .acs-root .run-outline-metric-fail { color: #9E3535; }
-.acs-root .run-outline-summary { font-size: 11.5px; color: var(--muted); padding: 0 6px 6px 33px; line-height: 1.45; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
-.acs-root .run-outline-agents { list-style: none; margin: 0 0 5px; padding: 0 0 0 33px; display: flex; flex-direction: column; gap: 4px; }
+.acs-root .run-outline-summary { font-size: 11.5px; color: var(--muted); padding: 0 6px 6px 40px; line-height: 1.45; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+.acs-root .run-outline-agents { list-style: none; margin: 0 0 5px; padding: 0 0 0 40px; display: flex; flex-direction: column; gap: 4px; }
 .acs-root .run-outline-agent { display: flex; align-items: center; gap: 7px; font-size: 12px; width: 100%; padding: 3px 5px; margin: 0 -5px; appearance: none; background: transparent; border: 0; border-radius: 5px; text-align: left; font-family: inherit; color: inherit; }
 .acs-root button.run-outline-agent { cursor: pointer; transition: background .12s ease; }
 .acs-root button.run-outline-agent:not([data-selected]):hover { background: var(--panel-2); }
@@ -2588,10 +2525,10 @@ textarea:-webkit-autofill {
 .acs-root .run-outline-agent-dot { width: 6px; height: 6px; border-radius: 50%; flex: none; background: var(--muted-2); }
 .acs-root .run-outline-agent-dot[data-status="succeeded"] { background: #1F6B3F; }
 .acs-root .run-outline-agent-dot[data-status="failed"]    { background: #9E3535; }
-.acs-root .run-outline-agent-dot[data-busy] { background: var(--accent); animation: runOutlinePulse 1.4s ease-in-out infinite; }
+.acs-root .run-outline-agent-dot[data-busy] { background: #2F6FE0; animation: runOutlinePulse 1.4s ease-in-out infinite; }
 .acs-root .run-outline-agent-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink-2); }
 .acs-root .run-outline-agent-status { font-size: 10px; color: var(--muted-2); text-transform: uppercase; letter-spacing: .04em; }
-.acs-root .run-outline-spin { width: 11px; height: 11px; border-radius: 50%; border: 2px solid #E9CFC0; border-top-color: var(--accent); animation: wfSpin .7s linear infinite; }
+.acs-root .run-outline-spin { width: 11px; height: 11px; border-radius: 50%; border: 2px solid #CFE0F7; border-top-color: #2F6FE0; animation: wfSpin .7s linear infinite; }
 .acs-root .run-outline-hollow { width: 10px; height: 10px; border-radius: 50%; border: 1.5px solid var(--line); }
 @keyframes runOutlinePulse { 0%, 100% { box-shadow: 0 0 0 0 rgba(217,119,87,.4); } 50% { box-shadow: 0 0 0 4px rgba(217,119,87,0); } }
 /* Honour reduced-motion: drop the rail's pulse + spinner, keep "busy" legible with a static ring. */
