@@ -84,9 +84,9 @@ function PhaseRow({ phase, agents, onSelectPhase, selectedAgentRunId, onSelectAg
 }
 
 /**
- * An agent-bearing phase as a CLAUDE-style framed box — the WHOLE box toggles its agent table (name top-left, chevron
+ * An agent-bearing phase as a CLAUDE-style framed box — the header toggles its agent list (name top-left, chevron
  * top-right, a square status dot per agent below). Toggling also focuses the phase so the Activity timeline scrolls to
- * it. The expanded table is Agent · Time only (no dot / status word — the rich rollup lives in the agent's terminal).
+ * it. Each agent is one full-width Agent·Time row (the WHOLE row is the click target; the rich rollup lives in the terminal).
  */
 function PhaseBox({ phase, agents, onSelectPhase, selectedAgentRunId, onSelectAgent }: {
   phase: RunPhase;
@@ -115,22 +115,19 @@ function PhaseBox({ phase, agents, onSelectPhase, selectedAgentRunId, onSelectAg
         </button>
 
         {open && (
-          <table className="run-outline-agtable">
-            <thead><tr><th scope="col">Agent</th><th scope="col" className="run-outline-agtable-time">Time</th></tr></thead>
-            <tbody>
-              {agents.map((a) => {
-                const name = a.label ?? a.iterationKey ?? a.agentRunId.slice(0, 8);
-                return (
-                  <tr key={a.agentRunId} data-selected={a.agentRunId === selectedAgentRunId || undefined}>
-                    <td>{onSelectAgent
-                      ? <button type="button" className="run-outline-agname" aria-pressed={a.agentRunId === selectedAgentRunId} title={name} onClick={() => focusAgent(a.agentRunId)}>{name}</button>
-                      : <span className="run-outline-agname" title={name}>{name}</span>}</td>
-                    <td className="run-outline-agtable-time">{formatDuration(a.durationMs)}</td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
+          <div className="run-outline-aglist">
+            <div className="run-outline-aghead"><span>Agent</span><span>Time</span></div>
+            {agents.map((a) => {
+              const name = a.label ?? a.iterationKey ?? a.agentRunId.slice(0, 8);
+              const selected = a.agentRunId === selectedAgentRunId;
+              const body = (<><span className="run-outline-agname">{name}</span><span className="run-outline-agtime">{formatDuration(a.durationMs)}</span></>);
+
+              // The WHOLE row is one click target (no inner button, no hover underline); a plain div when not selectable.
+              return onSelectAgent
+                ? <button key={a.agentRunId} type="button" className="run-outline-agrow" data-selected={selected || undefined} aria-pressed={selected} title={name} onClick={() => focusAgent(a.agentRunId)}>{body}</button>
+                : <div key={a.agentRunId} className="run-outline-agrow" data-selected={selected || undefined} title={name}>{body}</div>;
+            })}
+          </div>
         )}
       </div>
     </div>

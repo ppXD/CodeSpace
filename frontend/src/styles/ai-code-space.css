@@ -2397,14 +2397,14 @@ textarea:-webkit-autofill {
 /* a phase on the timeline as a Claude-style CONVERSATION BOX — a collapsed summary (name · N agents · time · dots) that
    drills into the terminal tiles, then one full terminal */
 .acs-root .run-tl-phase { display: flex; flex-direction: column; gap: 8px; }
-.acs-root .run-tl-box { display: flex; align-items: center; gap: 9px; width: 100%; text-align: left; appearance: none; font: inherit; cursor: pointer; border: 1px solid var(--line); border-radius: 10px; background: var(--panel-2); padding: 9px 12px; transition: border-color .12s ease, background .12s ease; }
+.acs-root .run-tl-box { display: flex; flex-direction: column; gap: 8px; width: 100%; text-align: left; appearance: none; font: inherit; cursor: pointer; border: 1px solid var(--line); border-radius: 10px; background: var(--panel-2); padding: 10px 12px; transition: border-color .12s ease, background .12s ease; }
 .acs-root .run-tl-box:hover { border-color: var(--line-2); background: var(--panel); }
 .acs-root .run-tl-box:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
-.acs-root .run-tl-box-name { font-weight: 600; font-size: 12.5px; color: var(--ink); flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.acs-root .run-tl-box-meta { font-size: 11.5px; color: var(--muted-2); white-space: nowrap; flex: none; }
-.acs-root .run-tl-box .run-tl-dots { margin-left: auto; }
-.acs-root .run-tl-box-caret { flex: none; color: var(--muted-2); transition: transform .15s ease; }
+.acs-root .run-tl-box-head { display: flex; align-items: center; gap: 8px; }
+.acs-root .run-tl-box-name { font-weight: 600; font-size: 13px; color: var(--ink); flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.acs-root .run-tl-box-caret { margin-left: auto; flex: none; color: var(--muted-2); transition: transform .15s ease; }
 .acs-root .run-tl-box[data-open] .run-tl-box-caret { transform: rotate(90deg); }
+.acs-root .run-tl-box-meta { font-size: 11.5px; color: var(--muted-2); }
 .acs-root .run-tl-dots { display: inline-flex; flex-wrap: wrap; gap: 4px; }
 /* the UNIVERSAL status palette: done gray (fixed) · running blue (pulse) · queued amber · failed red — dots always show */
 .acs-root .run-tl-dots > i { width: 8px; height: 8px; border-radius: 50%; flex: none; background: var(--muted-2); }
@@ -2528,10 +2528,12 @@ textarea:-webkit-autofill {
 
 /* The outline — the phase tree as the run's navigation skeleton. */
 .acs-root .run-outline { display: flex; flex-direction: column; gap: 3px; position: relative; padding-left: 15px; }
-/* the tree line — a vertical guide threading every outline item, with a short horizontal tick to each (structure at a glance) */
-.acs-root .run-outline::before { content: ""; position: absolute; left: 4px; top: 12px; bottom: 13px; width: 1.5px; background: var(--line); }
+/* the tree line — a fine 1px vertical guide threading every outline item, with a short horizontal tick to each. It
+   STARTS at the first item's tick (top:13px) and STOPS at the last item's tick (bottom:17px ≈ the agentless end row), so
+   it never overshoots the head/tail. */
+.acs-root .run-outline::before { content: ""; position: absolute; left: 4px; top: 13px; bottom: 17px; width: 1px; background: var(--line); }
 .acs-root .run-outline > .run-outline-phase, .acs-root .run-outline > .run-outline-phases { position: relative; }
-.acs-root .run-outline > .run-outline-phase::before, .acs-root .run-outline > .run-outline-phases::before { content: ""; position: absolute; height: 1.5px; background: var(--line); }
+.acs-root .run-outline > .run-outline-phase::before, .acs-root .run-outline > .run-outline-phases::before { content: ""; position: absolute; height: 1px; background: var(--line); }
 .acs-root .run-outline > .run-outline-phase::before { top: 13px; left: -11px; width: 9px; }      /* aligns to the row glyph */
 .acs-root .run-outline > .run-outline-phases::before { top: 8px; left: -12px; width: 11px; }      /* aligns to the "Phases" label; reaches the spine across the block's border */
 .acs-root .run-outline-empty { font-size: 12.5px; color: var(--muted); padding: 14px 4px; }
@@ -2541,7 +2543,7 @@ textarea:-webkit-autofill {
 .acs-root .run-outline-phase[data-status="active"] .run-outline-row,
 .acs-root .run-outline-phase[data-status="active"] .run-outline-label { color: var(--ink); font-weight: 500; }
 /* the nested "Phases" block — a supervisor's semantic phases under the node that spawned them */
-.acs-root .run-outline-phases { margin: 2px 0 3px; padding-left: 8px; border-left: 1.5px solid var(--line); display: flex; flex-direction: column; gap: 4px; }
+.acs-root .run-outline-phases { margin: 2px 0 3px; padding-left: 8px; border-left: 1px solid var(--line); display: flex; flex-direction: column; gap: 4px; }
 .acs-root .run-outline-phases-label { font-size: 10px; letter-spacing: .04em; text-transform: uppercase; color: var(--muted-2); padding: 3px 6px 1px; }
 .acs-root .run-outline-glyph { display: grid; place-items: center; width: 16px; height: 16px; flex: none; color: var(--muted-2); }
 .acs-root .run-outline-glyph > svg { display: block; }
@@ -2567,18 +2569,17 @@ textarea:-webkit-autofill {
 .acs-root .run-outline-box-caret { margin-left: auto; flex: none; color: var(--muted-2); transition: transform .15s ease; }
 .acs-root .run-outline-box-head[data-open] .run-outline-box-caret { transform: rotate(90deg); }
 
-/* the Agent · Time table inside the card (no dot / status word — the rich rollup lives in the terminal) */
-.acs-root .run-outline-agtable { width: 100%; border-collapse: collapse; font-size: 11.5px; margin: 0; border-top: 0.5px solid var(--line); }
-.acs-root .run-outline-agtable th:first-child, .acs-root .run-outline-agtable td:first-child { width: 100%; }   /* Agent greedy → Time aligns at the right edge */
-.acs-root .run-outline-agtable thead th { text-align: left; font-weight: 500; font-size: 9.5px; letter-spacing: .03em; text-transform: uppercase; color: var(--muted-2); padding: 6px 11px 3px; }
-.acs-root .run-outline-agtable td { padding: 4px 11px; }
-.acs-root .run-outline-agtable-time { text-align: right; font-variant-numeric: tabular-nums; color: var(--muted-2); white-space: nowrap; }
-.acs-root .run-outline-agtable tbody tr { transition: background .1s ease; }
-.acs-root .run-outline-agtable tbody tr:hover { background: var(--panel); }
-.acs-root .run-outline-agtable tbody tr[data-selected] { background: var(--accent-soft); }
-.acs-root .run-outline-agname { appearance: none; background: none; border: 0; padding: 0; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; color: var(--ink-2); cursor: pointer; text-align: left; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.acs-root .run-outline-agname:hover { text-decoration: underline; }
-.acs-root .run-outline-agname:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; border-radius: 3px; }
+/* the Agent · Time list inside the card — each agent is ONE full-width row (the whole row is the click target, no inner
+   button, no hover underline; only the row highlights). The rich rollup lives in the terminal. */
+.acs-root .run-outline-aglist { display: flex; flex-direction: column; border-top: 1px solid var(--line); }
+.acs-root .run-outline-aghead { display: flex; justify-content: space-between; padding: 6px 11px 3px; font-size: 9.5px; font-weight: 500; letter-spacing: .03em; text-transform: uppercase; color: var(--muted-2); }
+.acs-root .run-outline-agrow { display: flex; align-items: center; justify-content: space-between; gap: 8px; width: 100%; padding: 5px 11px; appearance: none; background: transparent; border: 0; font: inherit; text-align: left; color: inherit; transition: background .1s ease; }
+.acs-root button.run-outline-agrow { cursor: pointer; }
+.acs-root button.run-outline-agrow:hover { background: var(--panel); }
+.acs-root .run-outline-agrow[data-selected] { background: var(--accent-soft); }
+.acs-root button.run-outline-agrow:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.acs-root .run-outline-agname { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; color: var(--ink-2); }
+.acs-root .run-outline-agtime { flex: none; font-variant-numeric: tabular-nums; color: var(--muted-2); font-size: 11.5px; white-space: nowrap; }
 .acs-root .run-outline-spin { width: 11px; height: 11px; border-radius: 50%; border: 2px solid #CFE0F7; border-top-color: #2F6FE0; animation: wfSpin .7s linear infinite; }
 .acs-root .run-outline-hollow { width: 10px; height: 10px; border-radius: 50%; border: 1.5px solid var(--line); }
 @keyframes runOutlinePulse { 0%, 100% { box-shadow: 0 0 0 0 rgba(217,119,87,.4); } 50% { box-shadow: 0 0 0 4px rgba(217,119,87,0); } }
