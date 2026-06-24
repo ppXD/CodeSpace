@@ -850,7 +850,11 @@ public class AgentMcpEndpointFlowTests
             using (var scope = _fixture.BeginScope())
             {
                 var row = await scope.Resolve<CodeSpaceDbContext>().ToolCallLedger.AsNoTracking()
-                    .Where(l => l.AgentRunId == runId && l.TeamId == teamId && l.ToolKind == "decision.request" && l.Status == ToolCallLedgerStatus.AwaitingApproval)
+                    // Require the stashed envelope, NOT just AwaitingApproval: ParkDecisionAsync flips the status and then
+                    // SetDecisionEnvelopeAsync stashes the envelope in a SEPARATE write, so under full-suite Postgres
+                    // contention a status-only poll can catch the row in the window before the envelope lands (a real race
+                    // → DecisionEnvelopeJson null). Waiting for the envelope makes the parked state the test reads atomic.
+                    .Where(l => l.AgentRunId == runId && l.TeamId == teamId && l.ToolKind == "decision.request" && l.Status == ToolCallLedgerStatus.AwaitingApproval && l.DecisionEnvelopeJson != null)
                     .Select(l => new { l.Id, l.ApprovalMessageId })
                     .FirstOrDefaultAsync();
 
