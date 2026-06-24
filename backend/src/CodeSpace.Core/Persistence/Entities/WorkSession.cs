@@ -69,6 +69,15 @@ public class WorkSession : IEntity<Guid>, IAuditable
     /// </summary>
     public int? SummaryThroughTurnIndex { get; set; }
 
+    /// <summary>
+    /// The highest top-level turn ordinal assigned in this thread — the atomic, race-free turn counter that replaces
+    /// the old MAX(SessionTurnIndex)+1 read. Starts at 1 (the opening run's turn, <c>WorkSessionService.FirstTurnIndex</c>).
+    /// A CONTINUE atomically increments it (<c>UPDATE … SET last_turn_index = last_turn_index + 1 … RETURNING</c>), so
+    /// two concurrent follow-ups to the same session SERIALISE on this row and get DISTINCT ordinals — never a duplicate
+    /// turn. A child / replay / sub-workflow run inherits the SessionId with a NULL turn index and never touches this.
+    /// </summary>
+    public int LastTurnIndex { get; set; } = 1;
+
     public DateTimeOffset CreatedDate { get; set; }
     public Guid CreatedBy { get; set; }
     public DateTimeOffset LastModifiedDate { get; set; }

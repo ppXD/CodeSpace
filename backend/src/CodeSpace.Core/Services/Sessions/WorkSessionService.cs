@@ -49,24 +49,31 @@ public sealed class WorkSessionService : IWorkSessionService, IScopedDependency
 
     public async Task<SessionAssignment> ContinueAsync(Guid sessionId, Guid teamId, CancellationToken cancellationToken)
     {
-        // Team-scoped lookup: a foreign / missing session is the SAME not-found, so a cross-team session never leaks.
-        var session = await _db.WorkSession.AsNoTracking()
-            .SingleOrDefaultAsync(s => s.Id == sessionId && s.TeamId == teamId, cancellationToken).ConfigureAwait(false)
-            ?? throw new KeyNotFoundException($"Session {sessionId} not found or not accessible.");
+        // Atomically CLAIM the next turn ordinal: the UPDATE … RETURNING row-locks the session, so two CONCURRENT
+        // continues to the same session SERIALISE here and get DISTINCT ordinals — no MAX+1 read-committed race, no
+        // duplicate top-level turn by construction. Team- + Open-scoped, so a foreign / archived session claims nothing
+        // (0 rows). A child / replay inherits the SessionId with a NULL turn index and never reaches here, so it can't
+        // bump the counter. The claim runs in the launch's transaction, so a failed launch rolls the increment back.
+        var claimed = await _db.Database
+            .SqlQueryRaw<int>(
+                "UPDATE work_session SET last_turn_index = last_turn_index + 1 WHERE id = {0} AND team_id = {1} AND status = 'Open' RETURNING last_turn_index AS \"Value\"",
+                sessionId, teamId)
+            .ToListAsync(cancellationToken).ConfigureAwait(false);
 
-        if (session.Status != WorkSessionStatus.Open)
-            throw new InvalidOperationException($"Session {sessionId} is {session.Status} and cannot take a new turn.");
+        if (claimed.Count == 1) return new SessionAssignment { SessionId = sessionId, TurnIndex = claimed[0] };
 
-        // Next ordinal = one past the highest EXISTING top-level turn. Only rows with a turn index count — a child /
-        // replay run inherits SessionId with a NULL index and must not bump it. NOTE: this MAX+1 is computed under
-        // READ COMMITTED, so two CONCURRENT follow-ups to the same session can land the same ordinal (advisory /
-        // display only — the runs stay distinct). Conversational follow-ups are inherently sequential, so this is
-        // theoretical; a strict per-session counter is a later refinement if it ever matters.
-        var maxTurn = await _db.WorkflowRun.AsNoTracking()
-            .Where(r => r.SessionId == sessionId && r.SessionTurnIndex != null)
-            .MaxAsync(r => (int?)r.SessionTurnIndex, cancellationToken).ConfigureAwait(false);
+        // 0 rows — the claim matched no OPEN, team-owned session. A best-effort lookup distinguishes a foreign / missing
+        // session (KeyNotFound, no existence leak — a cross-team session reads the SAME not-found) from an archived one
+        // (InvalidOperation); the failed claim above is the authority, this only shapes the error.
+        var status = await _db.WorkSession.AsNoTracking()
+            .Where(s => s.Id == sessionId && s.TeamId == teamId)
+            .Select(s => (WorkSessionStatus?)s.Status)
+            .FirstOrDefaultAsync(cancellationToken).ConfigureAwait(false);
 
-        return new SessionAssignment { SessionId = sessionId, TurnIndex = (maxTurn ?? 0) + 1 };
+        if (status is { } st)
+            throw new InvalidOperationException($"Session {sessionId} is {st} and cannot take a new turn.");
+
+        throw new KeyNotFoundException($"Session {sessionId} not found or not accessible.");
     }
 
     /// <summary>
