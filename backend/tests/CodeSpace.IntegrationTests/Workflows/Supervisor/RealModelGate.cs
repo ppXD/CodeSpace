@@ -1,7 +1,21 @@
 using Shouldly;
 using CodeSpace.Core.Services.Workflows.Llm;
+using CodeSpace.Messages.Enums;
 
 namespace CodeSpace.IntegrationTests.Workflows.Supervisor;
+
+/// <summary>
+/// Raised by a whole-loop EVALUATOR when the brain's spawned agents could not EXECUTE on the runner at all (the
+/// deterministic fake agent is an <c>exit 0</c> script, so an all-failed fan-out is an OS/sandbox/process/capture
+/// infra fault — NOT a model decision). The gate treats it EXACTLY like a gateway timeout: a non-gating LOUD skip that
+/// does not consume a best-of-N capability slot (<see cref="RealModelGate.IsGatewayInfraFailure"/> recognises it), so a
+/// runner-side execution break can never red main as a false CapabilityMiss. Distinct from a gateway timeout only in
+/// the surfaced reason; the routing is identical.
+/// </summary>
+public sealed class AgentExecutionInfraException : Exception
+{
+    public AgentExecutionInfraException(string message) : base(message) { }
+}
 
 /// <summary>
 /// The three-way outcome of a live-model WHOLE-LOOP run. The classifying TEST maps the run's terminal state to one of
@@ -286,6 +300,32 @@ public static class RealModelGate
     }
 
     /// <summary>
+    /// Classify the spawned agents' EXECUTION health for a whole-loop verdict, separating a MODEL miss from an
+    /// OS/sandbox/process/capture INFRA fault. The whole-loop fake agent is a DETERMINISTIC <c>exit 0</c> script that
+    /// cannot CHOOSE to fail, so a fan-out where the brain spawned ≥1 agent yet NONE succeeded is an execution-infra
+    /// fault on the runner (the model drove its decisions; its agents broke underneath it) → the caller raises
+    /// <see cref="AgentExecutionInfraException"/> to route it to the non-gating infra skip, NEVER a CapabilityMiss red.
+    /// When at least one agent succeeded the execution path WORKS, so any shortfall is the model's and gates as usual.
+    /// When the brain spawned ZERO agents (parked at plan, never fanned out) it is a genuine model miss — NOT infra —
+    /// so the gate still reds it. Returns the legible summary appended to the verdict note in every case.
+    ///
+    /// <para>The boundary is "NONE succeeded" (not "all <c>Failed</c>") DELIBERATELY: on the strict lane's deterministic
+    /// exit-0 fake, ANY non-succeeded terminal (Failed / TimedOut / Stalled→NeedsReview / Cancelled) is a runner-side
+    /// execution break the model cannot author, so treating every all-non-succeeded fan-out as infra is the safe,
+    /// no-false-red choice — do NOT narrow this to <c>failed == count</c> (a sandbox hang ending all-TimedOut would then
+    /// red as a phantom miss). The blast radius is the deterministic-fake gating lane; the real-agent lanes are report-only.</para>
+    /// </summary>
+    public static (bool ExecutionInfraFault, string Summary) ClassifyAgentExecution(IReadOnlyList<AgentRunStatus> statuses)
+    {
+        if (statuses.Count == 0) return (false, "agents=0 (never fanned out)");   // a plan-only park is a genuine miss, NOT infra — it gates
+
+        var succeeded = statuses.Count(s => s == AgentRunStatus.Succeeded);
+        var failed = statuses.Count(s => s == AgentRunStatus.Failed);
+
+        return (succeeded == 0, $"agents={statuses.Count} ({succeeded} succeeded, {failed} failed)");
+    }
+
+    /// <summary>
     /// Whether a persisted node-failure is a GATEWAY/credential INFRA fault that the decider let propagate (an
     /// <c>LlmApiException</c> of category Transient / RateLimited / AuthFailed) rather than an engine or decision fault.
     /// When such a fault happens DURING a supervisor turn the engine swallows it into a run Failure (whose run-level
@@ -357,6 +397,11 @@ public static class RealModelGate
     {
         TimeoutException => true,
         System.IO.IOException => true,
+        // An EVALUATOR-raised execution-infra fault (the brain's spawned agents could not run on the runner — a
+        // deterministic exit-0 fake can't CHOOSE to fail) routes through the SAME non-gating infra-skip path as a
+        // gateway timeout: the model drove its DECISIONS fine; its agents broke underneath it, so this is infra, never
+        // a CapabilityMiss. Does not consume a best-of-N capability slot.
+        AgentExecutionInfraException => true,
         System.Net.Sockets.SocketException se => !WiringSocketErrors.Contains(se.SocketErrorCode),
         // The decider classifies a gateway fault into a TYPED LlmApiException and PROPAGATES the infra categories
         // (Transient / RateLimited / AuthFailed) rather than fail-closing them — so the EXCEPTION path (trajectory /
@@ -377,10 +422,10 @@ public static class RealModelGate
                 yield return e;
     }
 
-    /// <summary>Report a gateway infra failure LOUDLY as non-gating — to the step-summary FILE when present (so a persistently-slow gateway is VISIBLE in the job-summary UI, never a silent green), else the console. Pure given <paramref name="stepSummaryPath"/>.</summary>
+    /// <summary>Report an infra failure LOUDLY as non-gating — to the step-summary FILE when present (so a persistently-slow gateway OR a runner-side agent-execution break is VISIBLE in the job-summary UI, never a silent green), else the console. The reason names whether it was the gateway transport or the agents that broke (NOT a decision verdict either way). Pure given <paramref name="stepSummaryPath"/>.</summary>
     internal static void ReportInfraSkip(string provider, Exception ex, string? stepSummaryPath)
     {
-        var line = $"⚠️ real-model gate NON-GATING infra skip — {provider} gateway timed out / dropped the connection (NOT a decision verdict): {InfraReason(ex)}";
+        var line = $"⚠️ real-model gate NON-GATING infra skip — {provider} (infra fault, NOT a decision verdict): {InfraReason(ex)}";
 
         if (!string.IsNullOrWhiteSpace(stepSummaryPath))
             File.AppendAllText(stepSummaryPath, line + Environment.NewLine);

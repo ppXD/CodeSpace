@@ -428,10 +428,28 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
             .Where(d => d.SupervisorRunId == runId && d.TeamId == teamId)
             .OrderBy(d => d.Sequence).Select(d => d.DecisionKind).ToListAsync();
 
-        var patches = await db.AgentRun.AsNoTracking().Where(r => r.WorkflowRunId == runId && r.Status == AgentRunStatus.Succeeded)
-            .Select(r => r.ResultJson).ToListAsync();
-        var realPatchCount = patches.Count(j => j is not null
-            && System.Text.Json.JsonSerializer.Deserialize<AgentRunResult>(j!, AgentJson.Options)?.Patch is { Length: > 0 });
+        // EVERY spawned agent (ANY status), so an all-failed fan-out reads as an OS/sandbox/process/capture INFRA fault
+        // — the whole-loop fake agent is a deterministic exit-0 script, so it cannot CHOOSE to fail — routed to the
+        // non-gating infra skip (like a gateway timeout), NOT mislabelled a model CapabilityMiss. This evaluator OWNS
+        // that routing; the report-only reaction arcs use their own evaluators (the failure→retry arc EXPECTS an
+        // all-failed fan-out and must not be re-routed here).
+        var agentRuns = await db.AgentRun.AsNoTracking().Where(r => r.WorkflowRunId == runId)
+            .Select(r => new { r.Status, r.Error, r.ResultJson }).ToListAsync();
+
+        var (executionInfraFault, agentSummary) = RealModelGate.ClassifyAgentExecution(agentRuns.Select(r => r.Status).ToList());
+        if (executionInfraFault)
+        {
+            // Surface the FIRST agent's failure detail (the run-level Error, else the ResultJson's exitReason/error) so
+            // the next run pinpoints WHY the agents could not execute — the actual RunHarnessAsync/sandbox cause — rather
+            // than leaving an opaque "agents failed". This is the instrumentation that turns a blind infra-skip legible.
+            var firstDetail = agentRuns.Select(r => AgentFailureDetail(r.Error, r.ResultJson)).FirstOrDefault(d => !string.IsNullOrWhiteSpace(d));
+            throw new AgentExecutionInfraException(
+                $"the brain's spawned agents could not EXECUTE on this runner — {agentSummary}; first agent failure: {Truncate(firstDetail) ?? "(none captured)"}. "
+              + "The whole-loop fake agent is a deterministic exit-0 script, so an all-failed fan-out is an OS/sandbox/process/capture infra fault, not a model miss.");
+        }
+
+        var realPatchCount = agentRuns.Count(r => r.Status == AgentRunStatus.Succeeded && r.ResultJson is not null
+            && System.Text.Json.JsonSerializer.Deserialize<AgentRunResult>(r.ResultJson!, AgentJson.Options)?.Patch is { Length: > 0 });
 
         var stop = await db.SupervisorDecisionRecord.AsNoTracking()
             .Where(d => d.SupervisorRunId == runId && d.TeamId == teamId && d.DecisionKind == SupervisorDecisionKinds.Stop)
@@ -446,13 +464,31 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
 
         var trail = string.Join("→", kinds);
         var drove = run.Status == WorkflowRunStatus.Success && realPatchCount >= 1 && acceptancePassed && spawnedAndMerged;
-        return (Classify(run.Status, drove), $"status={run.Status}, realPatches={realPatchCount}, acceptancePassed={acceptancePassed}, spawnedAndMerged={spawnedAndMerged}, trajectory={trail}");
+        return (Classify(run.Status, drove), $"status={run.Status}, realPatches={realPatchCount}, {agentSummary}, acceptancePassed={acceptancePassed}, spawnedAndMerged={spawnedAndMerged}, trajectory={trail}");
     }
 
     // ─── Helpers ─────────────────────────────────────────────────────────────────────
 
     /// <summary>Anthropic's client appends <c>/v1/messages</c> to the host base — pass the gateway host as-is.</summary>
     private static string BaseUrlFor(string baseUrl) => baseUrl.TrimEnd('/');
+
+    /// <summary>Clip a captured agent error to a bounded, single-line snippet for the infra-skip note (the full error is on the AgentRun row; the note only needs enough to root-cause the runner-side break).</summary>
+    private static string? Truncate(string? s, int max = 300) =>
+        s is null ? null : (s.Length <= max ? s : s[..max] + "…").ReplaceLineEndings(" ");
+
+    /// <summary>The best diagnostic for a failed agent run: the run-level <c>Error</c> when present, else the ResultJson's <c>exitReason</c>/<c>error</c> (so a harness/sandbox non-zero exit whose detail lives only on the result is still legible).</summary>
+    private static string? AgentFailureDetail(string? error, string? resultJson)
+    {
+        if (!string.IsNullOrWhiteSpace(error)) return error;
+        if (resultJson is null) return null;
+
+        try
+        {
+            var r = System.Text.Json.JsonSerializer.Deserialize<AgentRunResult>(resultJson, AgentJson.Options);
+            return r is null ? null : $"exitReason={r.ExitReason}; error={r.Error ?? "(null)"}";
+        }
+        catch { return null; }
+    }
 
     private void SetDeciderMode(bool useLiveModel)
     {

@@ -1,5 +1,6 @@
 using Shouldly;
 using CodeSpace.Core.Services.Workflows.Llm;
+using CodeSpace.Messages.Enums;
 
 namespace CodeSpace.IntegrationTests.Workflows.Supervisor;
 
@@ -314,6 +315,63 @@ public sealed class RealModelGateTests
         RealModelGate.IsGatewayInfraFailure(new AggregateException(inner)).ShouldBeTrue();
     }
 
+    // ── Agent-execution infra fault: an all-failed fan-out of the deterministic exit-0 fake is INFRA, not a model miss ──
+
+    [Fact]
+    public void An_agent_execution_infra_fault_is_recognised_as_non_gating_infra_but_a_real_drive_bug_still_gates()
+    {
+        // The deterministic exit-0 fake agent cannot CHOOSE to fail, so an all-failed fan-out is an OS/sandbox/capture
+        // fault — routed to the SAME non-gating skip as a gateway timeout (and flattened through an aggregate, as the
+        // await chain may wrap it). A genuine logic bug is NEVER misread as this infra.
+        RealModelGate.IsGatewayInfraFailure(new AgentExecutionInfraException("agents could not execute")).ShouldBeTrue();
+        RealModelGate.IsGatewayInfraFailure(new AggregateException(new AgentExecutionInfraException("agents broke"))).ShouldBeTrue("the await chain can wrap it");
+        RealModelGate.IsGatewayInfraFailure(new InvalidOperationException("a real engine bug")).ShouldBeFalse("a logic bug must gate, never read as execution infra");
+    }
+
+    [Theory]
+    // statuses encoded as a CSV of Succeeded(s)/Failed(f)/Queued(q) — the verdict's execution-health signal
+    [InlineData("", false, "agents=0")]                       // never fanned out → a plan-only park is a GENUINE miss (gates), NOT infra
+    [InlineData("f", true, "agents=1 (0 succeeded, 1 failed)")]   // single agent failed to execute → infra
+    [InlineData("f,f,f", true, "agents=3 (0 succeeded, 3 failed)")]   // every agent failed → infra (the observed runner break)
+    [InlineData("s", false, "agents=1 (1 succeeded, 0 failed)")]      // an agent succeeded → execution works; any shortfall is the MODEL's → gates
+    [InlineData("s,f", false, "agents=2 (1 succeeded, 1 failed)")]    // partial success → NOT infra (the path works), a shortfall gates
+    [InlineData("f,q", true, "agents=2 (0 succeeded, 1 failed)")]     // none succeeded (a stuck/queued + a failed) → still an execution-infra fault
+    public void ClassifyAgentExecution_separates_an_execution_infra_fault_from_a_model_miss(string csv, bool expectInfra, string expectSummary)
+    {
+        var statuses = csv.Length == 0
+            ? new List<AgentRunStatus>()
+            : csv.Split(',').Select(c => c switch { "s" => AgentRunStatus.Succeeded, "f" => AgentRunStatus.Failed, _ => AgentRunStatus.Queued }).ToList();
+
+        var (infra, summary) = RealModelGate.ClassifyAgentExecution(statuses);
+
+        infra.ShouldBe(expectInfra);
+        summary.ShouldContain(expectSummary);
+    }
+
+    [Fact]
+    public async Task AssessLiveAsync_treats_an_agent_execution_fault_as_non_gating_even_for_the_blessed_wire()
+    {
+        // The report-only reaction-arc path (three-way AssessLiveAsync) must NOT red the blessed wire when the agents
+        // could not execute — it is infra, surfaced loudly, never a code-fault gate.
+        var path = Path.Combine(Path.GetTempPath(), $"realmodel-execinfra-{Guid.NewGuid():N}.md");
+        try
+        {
+            Func<Task<(RealModelOutcome Outcome, string Note)>> drive =
+                () => throw new AgentExecutionInfraException("the spawned agents could not execute — agents=2 (0 succeeded, 2 failed)");
+
+            await Should.NotThrowAsync(() => RealModelGate.AssessLiveAsync("Anthropic", drive, path));
+
+            var written = File.ReadAllText(path);
+            written.ShouldContain("NON-GATING infra skip");
+            written.ShouldContain("Anthropic");
+            written.ShouldContain("could not execute");   // the reason names the agent break, honestly (not "gateway timed out")
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+
     // ── Strict whole-loop gate: real-model-DROVE-to-completion is the criterion (CapabilityMiss REDS, best-of-N flake-safe) ──
 
     [Fact]
@@ -384,6 +442,30 @@ public sealed class RealModelGateTests
     {
         // Every attempt times out → misses never reaches N → non-gating infra skip, never a gate. A slow gateway can't red.
         var (drive, _) = Sequence(new TimeoutException("a"), new TimeoutException("b"), new TimeoutException("c"), new TimeoutException("d"), new TimeoutException("e"));
+
+        await Should.NotThrowAsync(() => RealModelGate.AssessLiveWholeLoopAsync("Anthropic", drive, attempts: 2, stepSummaryPath: null));
+    }
+
+    [Fact]
+    public async Task An_agent_execution_infra_attempt_does_NOT_consume_a_capability_slot()
+    {
+        // The runner-side break we observed: the spawned agents could not execute. That attempt is non-gating infra
+        // (NOT a CapabilityMiss), so execution-infra→miss→Drove still PASSES on a 2-attempt budget — the broken-agent
+        // attempt did not burn a capability slot, exactly like a gateway timeout.
+        var (drive, calls) = Sequence(new AgentExecutionInfraException("agents=2 (0 succeeded, 2 failed)"), RealModelOutcome.CapabilityMiss, RealModelOutcome.Drove);
+
+        await Should.NotThrowAsync(() => RealModelGate.AssessLiveWholeLoopAsync("Anthropic", drive, attempts: 2, stepSummaryPath: null));
+
+        calls().ShouldBe(3, "the execution-infra attempt did not consume a capability slot, so the later Drove was reached");
+    }
+
+    [Fact]
+    public async Task An_all_execution_infra_run_is_a_non_gating_skip_never_a_gate()
+    {
+        // Every attempt is a runner-side agent-execution break → misses never reach N → non-gating infra skip, never a
+        // gate. This is the fix for the observed false-red: a runner that cannot execute the fake agent can no longer
+        // red main as a phantom CapabilityMiss.
+        var (drive, _) = Sequence(new AgentExecutionInfraException("a"), new AgentExecutionInfraException("b"), new AgentExecutionInfraException("c"), new AgentExecutionInfraException("d"), new AgentExecutionInfraException("e"));
 
         await Should.NotThrowAsync(() => RealModelGate.AssessLiveWholeLoopAsync("Anthropic", drive, attempts: 2, stepSummaryPath: null));
     }
