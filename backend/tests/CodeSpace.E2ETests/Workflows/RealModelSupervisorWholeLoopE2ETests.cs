@@ -650,7 +650,105 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
         return (rowId, credId);   // RowId = the brain's supervisorModelId; CredId = the credential the AGENT profile authenticates with
     }
 
-    private async Task<Guid> CreateWholeLoopWorkflowAsync(Guid teamId, Guid userId, Guid repoId, Guid brainModelId, string? goal = null, Guid? conversationId = null, Guid? agentCredId = null, string? agentModel = null)
+    [Fact]
+    public async Task The_real_model_drives_a_multi_repo_task_to_a_per_repo_integrated_head_on_each_repo()
+    {
+        // MULTI-REPO ORCHESTRATION — the live brain drives a task spanning TWO bound repos to a per-repo integrated head
+        // on EACH. The multi-repo division of labour is OPERATOR-bound on the profile (relatedRepositories), so every
+        // spawned agent's workspace mounts both repos; the model just drives its normal plan→spawn→merge→stop and the
+        // engine fans out + integrates EACH repo on its own axis. (The model never SEES repo ids, so it can't author
+        // per-agent repo dispatch — the faithful proof is OUTCOME-based: the run's final reviewable heads span BOTH repos,
+        // each live on its own remote.) REPORT-ONLY: a model may park short on the more complex multi-repo goal, so a
+        // single-repo / short result is a ⚠️, never a red — the deterministic multi-repo loop is already gated elsewhere.
+        var baseUrl = Env(RealModelSupervisorDecisionFlowTests.BaseUrlEnvVar);
+        var apiKey = Env(RealModelSupervisorDecisionFlowTests.ApiKeyEnvVar);
+        var model = Env(RealModelSupervisorDecisionFlowTests.ModelIdEnvVar);
+
+        var present = new[] { baseUrl, apiKey, model }.Count(v => v is not null);
+        if (present == 0) { RealModelGate.ReportSkipped(Provider, "CODESPACE_LLM_* absent (fork/local — no live model)"); return; }   // skip ≠ pass
+        present.ShouldBe(3, "CODESPACE_LLM_* is partially configured — set all three or none; a partial config would self-skip the arm proving nothing.");
+
+        if (OperatingSystem.IsWindows()) return;
+        if (!await GitReadyAsync()) return;
+
+        using var cli = new MultiRepoFeatureFakeCli();   // each agent writes a disjoint file into BOTH repo subdirs → both integrate cleanly
+
+        var jobClient = ResolveJobClient();
+        jobClient.Clear();
+        jobClient.AutoExecute = true;
+
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+
+        // Two real bare remotes, each with its OWN non-vacuous acceptance floor (requires an agent_*.txt in the
+        // integrated head), so a green per-repo grade proves an agent's work really landed in THAT repo.
+        const string agentCheck = "#!/bin/sh\nif ls agent_*.txt >/dev/null 2>&1; then exit 0; else exit 1; fi\n";
+        using var primaryRemote = new BareRemote();
+        using var relatedRemote = new BareRemote();
+        await primaryRemote.SeedBaseAsync(new() { ["check.sh"] = agentCheck, ["base.txt"] = "base\n" });
+        await relatedRemote.SeedBaseAsync(new() { ["check.sh"] = agentCheck, ["base.txt"] = "base\n" });
+        var primaryRepoId = await SeedBoundRepositoryAsync(teamId, primaryRemote.Url, "main");
+        var relatedRepoId = await SeedBoundRepositoryAsync(teamId, relatedRemote.Url, "main");
+
+        var (brainModelId, _) = await SeedBrainModelAsync(teamId, BaseUrlFor(baseUrl), apiKey, model);
+
+        const string multiRepoGoal =
+            "Ship a small feature that spans TWO repositories — a primary service and a related 'api' library: make the "
+          + "corresponding change in EACH repo. Plan the subtasks, spawn agents to implement them, then merge.";
+
+        var workflowId = await CreateWholeLoopWorkflowAsync(teamId, userId, primaryRepoId, brainModelId,
+            goal: multiRepoGoal, relatedRepo: (relatedRepoId, MultiRepoFeatureFakeCli.RelatedAlias));
+
+        await RealModelGate.AssessLiveAsync(Provider, async () =>
+        {
+            var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
+
+            await RunEngineAsync(runId);
+            await jobClient.WaitForPendingAsync();
+
+            using var verify = _fixture.BeginScope();
+            var db = verify.Resolve<CodeSpaceDbContext>();
+
+            // The production per-repo reader a downstream git.open_change_set binds: the final reviewable head for EACH repo.
+            var priorDecisions = await ReadPriorDecisionsAsync(db, runId, teamId);
+            var heads = SupervisorOutcome.ReadFinalRepositoryBranches(priorDecisions);
+
+            var repoIds = heads.Where(h => h.RepositoryId is not null).Select(h => h.RepositoryId!.Value).Distinct().ToHashSet();
+            var spansBoth = repoIds.Contains(primaryRepoId) && repoIds.Contains(relatedRepoId);
+
+            // Strongest signal: each per-repo head is live on ITS OWN remote (the merge integrated + pushed it per repo).
+            var remotesByRepo = new Dictionary<Guid, BareRemote> { [primaryRepoId] = primaryRemote, [relatedRepoId] = relatedRemote };
+            var onRemotes = true;
+            var missing = "";
+            foreach (var h in heads.Where(h => h.RepositoryId is not null && remotesByRepo.ContainsKey(h.RepositoryId!.Value)))
+            {
+                var branches = await remotesByRepo[h.RepositoryId!.Value].ListBranchesAsync();
+                if (!branches.Contains(h.SourceBranch)) { onRemotes = false; missing += $" [{h.Alias}:{h.SourceBranch} not on its remote]"; }
+            }
+
+            var drove = spansBoth && onRemotes;
+            return (drove,
+                $"{Provider} '{model}' multi-repo: final heads={heads.Count}, repos-spanned={repoIds.Count}, spansBoth={spansBoth}, onRemotes={onRemotes}{missing}. "
+              + (drove ? "DROVE — the live model drove a two-repo task to a per-repo integrated head live on EACH repo's remote." : "did NOT reach a per-repo head on both repos (reported, not gating)."));
+        }, gating: false);
+    }
+
+    private static async Task<IReadOnlyList<SupervisorPriorDecision>> ReadPriorDecisionsAsync(CodeSpaceDbContext db, Guid runId, Guid teamId) =>
+        await db.SupervisorDecisionRecord.AsNoTracking()
+            .Where(d => d.SupervisorRunId == runId && d.TeamId == teamId)
+            .OrderBy(d => d.Sequence)
+            .Select(d => new SupervisorPriorDecision
+            {
+                Id = d.Id,
+                Sequence = d.Sequence,
+                DecisionKind = d.DecisionKind,
+                Status = d.Status,
+                PayloadJson = d.PayloadJson,
+                OutcomeJson = d.OutcomeJson,
+                Error = d.Error,
+            })
+            .ToListAsync();
+
+    private async Task<Guid> CreateWholeLoopWorkflowAsync(Guid teamId, Guid userId, Guid repoId, Guid brainModelId, string? goal = null, Guid? conversationId = null, Guid? agentCredId = null, string? agentModel = null, (Guid RepoId, string Alias)? relatedRepo = null)
     {
         // When an agent credential is supplied, the spawned agents run a REAL coding-CLI harness (claude-code) against the
         // gateway (its credential decrypted just-in-time + projected onto ANTHROPIC_BASE_URL/AUTH_TOKEN by the harness), at
@@ -668,12 +766,16 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
         // A conversationId (when set) is the surface the irreversible `resolve` gate parks its human-approval card on.
         var effectiveGoal = goal ?? "Add server-side email-format validation to the signup endpoint, with unit tests.";
         var conversationLine = conversationId is { } cid ? $",\n              \"conversationId\": \"{cid}\"" : "";
+        // A relatedRepo (when set) makes this a MULTI-repo run: the profile mounts a SECOND writable repo under its alias,
+        // so every spawned agent's workspace has both repos (cwd = workspace root, each repo at <root>/<alias>/) and the
+        // supervisor integrates + accepts EACH repo on its own axis. Mirrors the deterministic whole-loop's relatedLine.
+        var relatedLine = relatedRepo is { } rr ? $",\n                \"relatedRepositories\": [ {{ \"repositoryId\": \"{rr.RepoId}\", \"alias\": \"{rr.Alias}\", \"access\": \"write\" }} ]" : "";
         var supConfig = $$"""
             {
               "goal": "{{effectiveGoal}}",
               "supervisorModelId": "{{brainModelId}}",
               "maxRounds": 12,
-              "agentProfile": { "repositoryId": "{{repoId}}", "pushBranch": true, "integrateBranches": true{{realAgentFields}} },
+              "agentProfile": { "repositoryId": "{{repoId}}", "pushBranch": true, "integrateBranches": true{{realAgentFields}}{{relatedLine}} },
               "acceptanceChecks": ["sh", "check.sh"]{{conversationLine}}
             }
             """;
@@ -771,6 +873,12 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
             await Git(seed, "commit", "-m", "seed");
             await Git(seed, "push", "origin", "main");
         }
+
+        /// <summary>Every branch on the bare remote, trimmed — the caller filters (avoids git refglob ambiguity over <c>/</c>). Used to assert a per-repo head is live on ITS OWN remote.</summary>
+        public async Task<IReadOnlyList<string>> ListBranchesAsync() =>
+            (await Git(_root, "--git-dir", _bare, "branch", "--list"))
+                .Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                .Select(b => b.TrimStart('*', ' ').Trim()).ToList();
 
         private static async Task<string> Git(string workdir, params string[] args)
         {
