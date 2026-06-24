@@ -1,6 +1,7 @@
 using Autofac;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
+using CodeSpace.Core.Services.Sessions;
 using CodeSpace.Core.Services.Tasks;
 using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.IntegrationTests.Infrastructure.Jobs;
@@ -214,6 +215,61 @@ public class WorkSessionLaunchFlowTests
         (await TurnOf(t1.RunId)).ShouldBe(1);
         (await TurnOf(t2.RunId)).ShouldBe(2);
         (await TurnOf(t3.RunId)).ShouldBe(3, "each follow-up consumes the next ordinal");
+    }
+
+    [Fact]
+    public async Task Concurrent_continues_to_the_same_session_get_distinct_turn_ordinals()
+    {
+        // Single-statement atomicity: the old MAX(turn)+1 read could hand two simultaneous continues the SAME ordinal.
+        // The atomic counter (UPDATE … RETURNING row-locks the session) serialises them, so N concurrent continues get
+        // the N DISTINCT ordinals 2..N+1 — never a duplicate. Postgres row-lock serialisation on `x = x + 1` is
+        // identical in autocommit and in an explicit transaction, so resolving ContinueAsync in bare scopes proves the
+        // distinctness without a launch transaction; the SEPARATE enlistment/rollback contract (a failed launch leaves
+        // the counter unadvanced) is pinned by A_rolled_back_launch_does_not_advance_the_turn_counter below.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var first = await LaunchAsync(BasicChatRequest(teamId, userId, "Open the thread"));
+        var sessionId = first.SessionId;
+
+        const int n = 8;
+        var turns = await Task.WhenAll(Enumerable.Range(0, n).Select(async _ =>
+        {
+            using var scope = _fixture.BeginScope();
+            var assignment = await scope.Resolve<IWorkSessionService>().ContinueAsync(sessionId, teamId, CancellationToken.None);
+            return assignment.TurnIndex!.Value;
+        }));
+
+        turns.Distinct().Count().ShouldBe(n, "each concurrent continue must claim a DISTINCT ordinal — no MAX+1 duplicate");
+        turns.OrderBy(t => t).ShouldBe(Enumerable.Range(2, n), "the claimed ordinals are the contiguous block 2..N+1 (turn 1 was the opening run)");
+    }
+
+    [Fact]
+    public async Task A_rolled_back_launch_does_not_advance_the_turn_counter()
+    {
+        // The production atomicity contract: ContinueAsync's `UPDATE … RETURNING` enlists in the launch's AMBIENT
+        // transaction (it runs on the same request-scoped DbContext connection), so a launch that FAILS after claiming
+        // an ordinal must roll the increment back — the next successful continue REUSES that ordinal, never skips it.
+        // Autocommit scopes can't prove this (the increment commits instantly); only an explicit transaction that rolls
+        // back can. Without enlistment a claimed-then-failed launch would burn ordinal 2 and the retry would jump to 3.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        using var _pauseExec = PauseAutoExecute();
+
+        var first = await LaunchAsync(BasicChatRequest(teamId, userId, "Open the thread"));
+        var sessionId = first.SessionId;
+
+        using (var scope = _fixture.BeginScope())
+        {
+            var db = scope.Resolve<CodeSpaceDbContext>();
+            await using var tx = await db.Database.BeginTransactionAsync();
+
+            var claimed = await scope.Resolve<IWorkSessionService>().ContinueAsync(sessionId, teamId, CancellationToken.None);
+            claimed.TurnIndex!.Value.ShouldBe(2, "the claim inside the transaction sees the next ordinal");
+
+            await tx.RollbackAsync();   // the launch fails before commit — the increment must unwind with the transaction
+        }
+
+        var retry = await LaunchAsync(ContinueRequest(teamId, userId, sessionId, "Retry after the failure"));
+
+        (await TurnOf(retry.RunId)).ShouldBe(2, "the rolled-back claim must NOT have advanced the counter — ordinal 2 is reused, not skipped to 3");
     }
 
     [Fact]
