@@ -3,7 +3,7 @@ import { useState } from "react";
 import { Ic } from "@/_imported/ai-code-space/icons";
 import type { PhaseAgentRef, PhaseStatus, RunPhase } from "@/api/workflows";
 
-import { buildWaves, waveBreakdown } from "./runActivity";
+import { buildWaves, tileState, waveBreakdown } from "./runActivity";
 
 const NODE_SOURCE = "node-summary";
 
@@ -96,6 +96,12 @@ function PhaseRow({ phase, agents, selectedPhaseId, onSelectPhase, selectedAgent
           <button type="button" className="run-outline-caret" data-open={open || undefined} aria-expanded={open} aria-label="Toggle agents" onClick={() => setOpen((v) => !v)}><Ic.ChevronRight size={12} /></button>
         )}
       </div>
+
+      {hasAgents && (
+        <div className="run-outline-dots" aria-hidden="true">
+          {agents.map((a) => <i key={a.agentRunId} data-state={tileState(a.status)} />)}
+        </div>
+      )}
 
       {phase.summary && <div className="run-outline-summary" title={phase.summary}>{phase.summary}</div>}
 

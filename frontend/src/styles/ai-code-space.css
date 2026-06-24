@@ -2552,6 +2552,12 @@ textarea:-webkit-autofill {
 .acs-root .run-outline-metric { font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; flex: none; }
 .acs-root .run-outline-metric-fail { color: #9E3535; }
 .acs-root .run-outline-summary { font-size: 11.5px; color: var(--muted); padding: 0 6px 6px 25px; line-height: 1.45; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+/* the always-on per-agent dots under a phase (the Claude read) — universal palette: done gray (fixed) · running blue (pulse) · queued amber · failed red */
+.acs-root .run-outline-dots { display: flex; flex-wrap: wrap; gap: 4px; padding: 1px 6px 5px 25px; }
+.acs-root .run-outline-dots > i { width: 7px; height: 7px; border-radius: 50%; background: var(--muted-2); }
+.acs-root .run-outline-dots > i[data-state="running"] { background: #2F6FE0; animation: runOutlinePulse 1.4s ease-in-out infinite; }
+.acs-root .run-outline-dots > i[data-state="waiting"] { background: #A8590E; }
+.acs-root .run-outline-dots > i[data-state="failed"] { background: #9E3535; }
 .acs-root .run-outline-agents { list-style: none; margin: 0 0 5px; padding: 0 0 0 25px; display: flex; flex-direction: column; gap: 4px; }
 .acs-root .run-outline-agent { display: flex; align-items: center; gap: 7px; font-size: 12px; width: 100%; padding: 3px 5px; margin: 0 -5px; appearance: none; background: transparent; border: 0; border-radius: 5px; text-align: left; font-family: inherit; color: inherit; }
 .acs-root button.run-outline-agent { cursor: pointer; transition: background .12s ease; }
@@ -2571,6 +2577,7 @@ textarea:-webkit-autofill {
 /* Honour reduced-motion: drop the rail's pulse + spinner, keep "busy" legible with a static ring. */
 @media (prefers-reduced-motion: reduce) {
   .acs-root .run-outline-spin,
+  .acs-root .run-outline-dots > i[data-state="running"],
   .acs-root .run-outline-agent-dot[data-busy] { animation: none; }
   .acs-root .run-outline-agent-dot[data-busy] { box-shadow: 0 0 0 2px var(--accent-soft); }
 }
