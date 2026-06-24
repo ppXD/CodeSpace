@@ -88,8 +88,12 @@ public sealed class McpRequestHandler : IMcpRequestHandler
     private readonly IChatBotService? _bot;
     private readonly IToolApprovalWaiterRegistry? _waiters;
     private readonly IInteractionComponentRegistry? _components;
+    // Which slice of the catalog this connection serves. The endpoint opens for every run; ReadOnly (the default for a
+    // run that did NOT opt into the side-effecting fabric) serves only read-only tools — they are the only ones listed,
+    // allow-listed, and callable. Full (the existing opt-in) serves the whole registry, byte-identical to before.
+    private readonly McpCatalogMode _catalogMode;
 
-    public McpRequestHandler(IAgentToolRegistry registry, AgentAutonomyLevel autonomy, Guid? teamId = null, SecretRedactor? redactor = null, Guid runId = default, IToolCallLedgerService? ledger = null, long fenceEpoch = 0, bool governanceEnabled = false, Guid? approvalConversationId = null, IChatBotService? bot = null, IToolApprovalWaiterRegistry? waiters = null, IInteractionComponentRegistry? components = null)
+    public McpRequestHandler(IAgentToolRegistry registry, AgentAutonomyLevel autonomy, Guid? teamId = null, SecretRedactor? redactor = null, Guid runId = default, IToolCallLedgerService? ledger = null, long fenceEpoch = 0, bool governanceEnabled = false, Guid? approvalConversationId = null, IChatBotService? bot = null, IToolApprovalWaiterRegistry? waiters = null, IInteractionComponentRegistry? components = null, McpCatalogMode catalogMode = McpCatalogMode.Full)
     {
         _registry = registry;
         _autonomy = autonomy;
@@ -103,7 +107,11 @@ public sealed class McpRequestHandler : IMcpRequestHandler
         _bot = bot;
         _waiters = waiters;
         _components = components;
+        _catalogMode = catalogMode;
     }
+
+    /// <summary>True when this run's catalog mode serves <paramref name="tool"/>: Full serves the whole registry; ReadOnly serves only read-only tools. The ONE predicate every catalog surface (tools/list, tools/call resolve, the allow-list) consults so they agree by construction.</summary>
+    private bool Serves(IAgentTool tool) => _catalogMode == McpCatalogMode.Full || tool.IsReadOnly;
 
     /// <summary>The effective bounded-block window (seconds): the env override when positive + parseable, else <see cref="DefaultApprovalBoundSeconds"/> (Rule 8 — read only here).</summary>
     public static int ApprovalBoundSeconds()
@@ -174,6 +182,10 @@ public sealed class McpRequestHandler : IMcpRequestHandler
         var tool = _registry.Resolve(name);
 
         if (tool == null) return JsonRpcResponse.Fail(id, Error(JsonRpcError.InvalidParams, $"Unknown tool '{name}'."));
+
+        // A side-effecting tool is not part of a ReadOnly run's catalog (it is absent from tools/list too) — refuse it
+        // at call time so a stale/guessed name can't reach the gate or a side effect. Fail-closed, before the gate.
+        if (!Serves(tool)) return JsonRpcResponse.Ok(id, ToolResult(isError: true, $"Tool '{name}' is not available: this run serves only read-only tools. The side-effecting tool fabric is opt-in."));
 
         // decision.request is an ASK, not a gated side effect — intercept it BEFORE the autonomy gate (a Confined tier
         // must never DENY a question) and drive the durable decision flow on the SAME tool-ledger spine the approval
@@ -904,7 +916,8 @@ public sealed class McpRequestHandler : IMcpRequestHandler
 
     private JsonElement ToolsListResult()
     {
-        var tools = _registry.All.Select(ToolDescriptor).ToArray();
+        // Advertise only the tools this run's catalog mode serves — a ReadOnly run never even sees a side-effecting name.
+        var tools = _registry.All.Where(Serves).Select(ToolDescriptor).ToArray();
 
         return JsonSerializer.SerializeToElement(new { tools }, AgentJson.Options);
     }

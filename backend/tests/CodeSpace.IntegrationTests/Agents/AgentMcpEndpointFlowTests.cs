@@ -425,7 +425,7 @@ public class AgentMcpEndpointFlowTests
     }
 
     [Fact]
-    public async Task Flag_off_mints_no_endpoint()
+    public async Task A_full_fabric_off_run_tears_down_its_read_only_endpoint_after_completion()
     {
         if (OperatingSystem.IsWindows()) return;
 
@@ -434,14 +434,50 @@ public class AgentMcpEndpointFlowTests
 
         using var connects = ConnectRegistryFromFixture();
 
-        // Flag OFF (default): ExecuteAsync runs the harness with NO endpoint — the seam never has an entry for the run.
+        // Full fabric OFF (the default): the endpoint opens in READ-ONLY mode for the harness span (proven serving in
+        // A_full_fabric_off_run_opens_a_read_only_endpoint...), then disposes on exit like any endpoint — so AFTER a
+        // quick run the seam no longer resolves the run and the socket is unlinked.
         await ExecuteAsync(runId, new ScriptedHarness("printf 'done\\n'"), mcpEnabled: false);
 
-        connects.TryConnect(runId, out _).ShouldBeFalse(customMessage: "flag-OFF ExecuteAsync must mint no endpoint (byte-identical to today)");
-        File.Exists(LocalProcessRunner.McpSocketPathFor(runId.ToString("N"))).ShouldBeFalse(customMessage: "flag-OFF must never bind a socket under the run's spool dir");
+        connects.TryConnect(runId, out _).ShouldBeFalse(customMessage: "the read-only endpoint is torn down on the harness's exit — the seam must not resolve a completed run");
+        File.Exists(LocalProcessRunner.McpSocketPathFor(runId.ToString("N"))).ShouldBeFalse(customMessage: "dispose must unlink the per-run socket file");
 
         using var scope = _fixture.BeginScope();
         (await scope.Resolve<IAgentRunService>().GetAsync(runId, CancellationToken.None)).Status.ShouldBe(AgentRunStatus.Succeeded);
+    }
+
+    [Fact]
+    public async Task A_full_fabric_off_run_opens_a_read_only_endpoint_serving_get_context_not_the_side_effecting_tools()
+    {
+        if (OperatingSystem.IsWindows()) return;
+        if (!Socket.OSSupportsUnixDomainSockets) return;
+
+        var teamId = await SeedTeamAsync();
+        // Unleashed so a side-effecting tool WOULD be gate-Allowed in full mode — proving the read-only MODE (not the
+        // autonomy gate) is what withholds it.
+        var runId = await CreateRunAsync(teamId, AgentAutonomyLevel.Unleashed);
+
+        using var connects = ConnectRegistryFromFixture();
+        // mcpEnabled:false → the full side-effecting fabric is OFF → the endpoint opens in read-only mode. A sleeping
+        // harness keeps it open while we drive JSON-RPC over the real per-run socket.
+        var run = Task.Run(() => ExecuteAsync(runId, new ScriptedHarness("sleep 6"), mcpEnabled: false));
+
+        var connect = await WaitForConnectAsync(connects, runId, run);
+        await using var client = await McpClient.ConnectAsync(connect);
+
+        // tools/list serves the read-only tools (get_context + the git reads) but NOT the side-effecting fabric.
+        var list = await client.ExchangeAsync(1, "tools/list");
+        var tools = ToolNames(list);
+        tools.ShouldContain("get_context", customMessage: "the safe read tool is served by default with the full fabric off");
+        tools.ShouldContain("git.list_prs", customMessage: "the git read tools are read-only → served by default too");
+        tools.ShouldNotContain("agent.run_command", customMessage: "a side-effecting tool is NOT advertised in read-only mode");
+
+        // A side-effecting call is refused by the MODE even though Unleashed would allow it in full mode.
+        var call = await client.CallToolAsync(2, "agent.run_command", new { command = "true" });
+        call.GetProperty("isError").GetBoolean().ShouldBeTrue(customMessage: "run_command is refused in read-only mode regardless of tier");
+        Text(call).ShouldContain("read-only", customMessage: "the refusal explains the run serves only read-only tools");
+
+        await run;
     }
 
     [Fact]
@@ -642,6 +678,35 @@ public class AgentMcpEndpointFlowTests
         tools.ShouldContain("mcp__codespace__agent.run_command", customMessage: "a RESTRICTED run must still receive the governed codespace tools the open endpoint serves");
         tools.ShouldContain("mcp__codespace__git.list_prs", customMessage: "the read git tool is projected too");
         tools.ShouldAllBe(t => !t.StartsWith("mcp__") || t.StartsWith("mcp__codespace__"), customMessage: "only the codespace server's tools are added");
+
+        using var scope = _fixture.BeginScope();
+        (await scope.Resolve<IAgentRunService>().GetAsync(runId, CancellationToken.None)).Status.ShouldBe(AgentRunStatus.Succeeded);
+    }
+
+    [Fact]
+    public async Task A_restricted_run_with_the_full_fabric_OFF_gets_only_the_read_only_codespace_tools_in_the_allow_list()
+    {
+        if (OperatingSystem.IsWindows()) return;
+        if (!Socket.OSSupportsUnixDomainSockets) return;
+
+        var teamId = await SeedTeamAsync();
+        // Unleashed so a side-effecting tool WOULD be tier-permitted — proving the read-only MODE (not the tier) is what
+        // keeps it out of the allow-list.
+        var runId = await CreateRunAsync(teamId, AgentAutonomyLevel.Unleashed, tools: new[] { "Read", "Grep" });
+
+        var harness = new AllowedToolsCapturingHarness("printf 'done\\n'");
+
+        // Full fabric OFF (the default) + a declaring harness + the proxy present → the read-only endpoint opens and its
+        // allow-list augmentation merges ONLY the read-only codespace tools.
+        await ExecuteAsync(runId, harness, mcpEnabled: false);
+
+        var tools = harness.CapturedTools.ShouldNotBeNull(customMessage: "the executor must have invoked BuildInvocation with a Tools list");
+
+        tools.ShouldContain("Read");
+        tools.ShouldContain("Grep");
+        tools.ShouldContain("mcp__codespace__get_context", customMessage: "the read-only endpoint merges the safe read tool into a restricted allow-list");
+        tools.ShouldContain("mcp__codespace__git.list_prs", customMessage: "the read git tools are read-only → merged too");
+        tools.ShouldNotContain("mcp__codespace__agent.run_command", customMessage: "a side-effecting tool is NOT in the read-only allow-list, even at Unleashed");
 
         using var scope = _fixture.BeginScope();
         (await scope.Resolve<IAgentRunService>().GetAsync(runId, CancellationToken.None)).Status.ShouldBe(AgentRunStatus.Succeeded);
@@ -912,7 +977,9 @@ public class AgentMcpEndpointFlowTests
         var previousProxy = Environment.GetEnvironmentVariable(LocalProcessRunner.McpProxyPathEnvVar);
         var previousGovernance = Environment.GetEnvironmentVariable(McpRequestHandler.GovernanceEnabledEnvVar);
         Environment.SetEnvironmentVariable(AgentRunExecutor.McpEndpointEnabledEnvVar, mcpEnabled ? "true" : null);
-        Environment.SetEnvironmentVariable(LocalProcessRunner.McpProxyPathEnvVar, mcpEnabled ? (proxyPresent ? StandInProxyPath() : "/nonexistent/codespace-mcp") : null);
+        // The endpoint now opens for EVERY run (read-only by default, full on mcpEnabled), so the proxy is wanted
+        // regardless of the full-fabric flag — drive its presence by proxyPresent alone, not by mcpEnabled.
+        Environment.SetEnvironmentVariable(LocalProcessRunner.McpProxyPathEnvVar, proxyPresent ? StandInProxyPath() : "/nonexistent/codespace-mcp");
         // The endpoint reads IsGovernanceEnabled() once at open, so the loop only runs E2E when this is set ON too.
         Environment.SetEnvironmentVariable(McpRequestHandler.GovernanceEnabledEnvVar, governanceEnabled ? "true" : null);
 
