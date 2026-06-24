@@ -151,6 +151,80 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
     }
 
     [Fact]
+    public async Task The_real_model_authors_heterogeneous_per_agent_dispatch_when_the_goal_invites_distinct_roles()
+    {
+        // L4 ARC B — the model-authored DIVISION OF LABOUR proof: given a goal that invites two DISTINCT roles, does a live
+        // model AUTHOR a heterogeneous agents[] dispatch (each subtask its own role) rather than fan out homogeneous agents?
+        // The schema + executor + clamps for agents[] are already gated deterministically (SupervisorSpawnFlowTests); this
+        // OBSERVES whether the REAL brain uses the option now that the prompt surfaces it. REPORT-ONLY (gating:false): a model
+        // may legitimately decline to differentiate, so a homogeneous spawn is a reported ⚠️, never a red — exactly the
+        // first-rollout tier the real-coding arm uses. Dispatch authorship is read from the STAGED agents' goals, so it does
+        // NOT depend on the run reaching a terminal Success (an unrelated merge/accept failure can't false-red this arm).
+        var baseUrl = Env(RealModelSupervisorDecisionFlowTests.BaseUrlEnvVar);
+        var apiKey = Env(RealModelSupervisorDecisionFlowTests.ApiKeyEnvVar);
+        var model = Env(RealModelSupervisorDecisionFlowTests.ModelIdEnvVar);
+
+        var present = new[] { baseUrl, apiKey, model }.Count(v => v is not null);
+        if (present == 0) { RealModelGate.ReportSkipped(Provider, "CODESPACE_LLM_* absent (fork/local — no live model)"); return; }   // skip ≠ pass
+        present.ShouldBe(3, "CODESPACE_LLM_* is partially configured — set all three or none; a partial config would self-skip the arm proving nothing.");
+
+        if (OperatingSystem.IsWindows()) return;
+        if (!await GitReadyAsync()) return;
+
+        using var cli = new FileWritingFakeCli();
+
+        var jobClient = ResolveJobClient();
+        jobClient.Clear();
+        jobClient.AutoExecute = true;
+
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+
+        using var remote = new BareRemote();
+        await remote.SeedBaseAsync(new() { ["check.sh"] = "#!/bin/sh\nif ls agent_*.txt >/dev/null 2>&1; then exit 0; else exit 1; fi\n", ["base.txt"] = "base\n" });
+        var repoId = await SeedBoundRepositoryAsync(teamId, remote.Url, "main");
+
+        var (brainModelId, _) = await SeedBrainModelAsync(teamId, BaseUrlFor(baseUrl), apiKey, model);
+
+        // A goal that explicitly invites a per-agent agents[] dispatch with two DISTINCT roles (the model is free to decline).
+        const string dispatchGoal =
+            "Harden the signup endpoint, splitting the work across TWO agents with DISTINCT roles working in parallel: a "
+          + "'backend implementer' that adds the server-side validation, and a separate 'test author' that writes the unit "
+          + "tests. When you spawn, author a per-agent agents[] dispatch that gives each agent its own role.";
+
+        var workflowId = await CreateWholeLoopWorkflowAsync(teamId, userId, repoId, brainModelId, goal: dispatchGoal);
+
+        // REPORT-ONLY: ✅ = the live model authored heterogeneous per-agent dispatch (≥2 agents with distinct, role-prefixed
+        // goals — the executor renders an authored role as "As the <role>, …"); ⚠️ = it fanned out homogeneous agents
+        // (reported, never gating). A gateway outage is a non-gating infra skip.
+        await RealModelGate.AssessLiveAsync(Provider, async () =>
+        {
+            var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
+
+            await RunEngineAsync(runId);
+            await jobClient.WaitForPendingAsync();
+
+            using var verify = _fixture.BeginScope();
+            var db = verify.Resolve<CodeSpaceDbContext>();
+
+            var taskJsons = await db.AgentRun.AsNoTracking().Where(r => r.WorkflowRunId == runId)
+                .Select(r => r.TaskJson).ToListAsync();
+            var goals = taskJsons
+                .Select(j => System.Text.Json.JsonSerializer.Deserialize<Messages.Agents.AgentTask>(j, AgentJson.Options)?.Goal ?? "")
+                .ToList();
+
+            // An authored per-agent role is rendered "As the <role>, <instruction>" (RealSupervisorActionExecutor.WithRole);
+            // distinct such goals across ≥2 agents = the model authored a heterogeneous dispatch, not a homogeneous fan-out.
+            var roleAuthoredGoals = goals.Where(g => g.Contains("As the ", StringComparison.Ordinal)).Distinct().ToList();
+            var authored = goals.Count >= 2 && roleAuthoredGoals.Count >= 2;
+
+            var sample = string.Join(" | ", roleAuthoredGoals.Take(3).Select(g => g.Length <= 80 ? g : g[..80] + "…"));
+            return (authored,
+                $"{Provider} '{model}' dispatch: agents={goals.Count}, distinct role-authored goals={roleAuthoredGoals.Count} [{sample}]. "
+              + (authored ? "DROVE — the live model authored a heterogeneous per-agent division of labour." : "did NOT differentiate — homogeneous fan-out (reported, not gating)."));
+        }, gating: false);
+    }
+
+    [Fact]
     public async Task The_real_model_observes_a_real_conflict_and_chooses_to_resolve()
     {
         // Real-scenario coverage A1 — the headline gap the deterministic whole-loop can't reach: a LIVE brain reacting to

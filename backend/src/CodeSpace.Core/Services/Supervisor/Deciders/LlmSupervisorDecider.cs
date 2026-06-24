@@ -244,6 +244,11 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
         "recorded status, error and summary in the most recent spawn OR retry outcome, retry any subtask that FAILED or " +
         "did not satisfy the goal (optionally with a revised instruction), and merge only once the results you need have " +
         "succeeded. Stop when the goal is met or a bound forces it. " +
+        "When you spawn, you MAY optionally author a per-agent 'agents[]' override (one entry per subtask id) to give " +
+        "each agent a DISTINCT role, goal, repo subset, harness, model, or a LOWER autonomy — use it when the subtasks " +
+        "need different specialisations (e.g. a backend implementer and a separate reviewer); omit 'agents[]' to fan out " +
+        "homogeneous agents (the default). The server CLAMPS every per-agent field to the operator's grant: a repo subset " +
+        "must lie within the run's bound repos and autonomy is never raised above the run's ceiling. " +
         "Before planning, check whether the goal has ALREADY been delivered: if the context shows THIS EXACT ask was " +
         "already completed and verified by prior work (the SAME change shipped/merged with passing tests — not merely " +
         "related work), do NOT re-plan or redo it — 'stop' to recognise completion, or 'ask_human' to clarify what new " +

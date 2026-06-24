@@ -135,6 +135,21 @@ public class SupervisorDeciderTests
     }
 
     [Fact]
+    public void The_system_prompt_surfaces_the_optional_per_agent_dispatch_override_and_its_clamp()
+    {
+        // L4 model-authored dispatch: the model can only AUTHOR heterogeneous agents[] (distinct role/repo/autonomy per
+        // subtask) if the prompt tells it the option exists — the schema + executor already accept it, but the brain was
+        // never told. Pinned so the guidance can't be dropped silently (the real-model dispatch arm depends on it), and so
+        // the OPTIONAL framing + the server clamp are both stated (omitting either would either suppress dispatch or
+        // invite an escalation the model expects to stick).
+        var system = LlmSupervisorDecider.SystemPromptForTest;
+
+        system.ShouldContain("agents[]", Case.Insensitive, "the per-agent dispatch override is named so the model knows it can author heterogeneous agents");
+        system.ShouldContain("omit", Case.Insensitive, "...and it is explicitly OPTIONAL — omit it for the homogeneous default, so plain-spawn stays the model's natural choice");
+        system.ShouldContain("clamp", Case.Insensitive, "...and the server clamp is stated so the model doesn't expect to escalate repos/autonomy past the operator's grant");
+    }
+
+    [Fact]
     public void The_system_prompt_guides_recognising_an_already_completed_ask_without_re_planning_redundant_work()
     {
         // Redundant-complete handoff: a session-continue whose follow-up re-requests work the prior context already
