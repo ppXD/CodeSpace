@@ -90,10 +90,13 @@ jobs:
     # slow tail's scored verdict rather than an opaque kill.
     timeout-minutes: 60
 
-    # A plain host runner (NOT a privileged bwrap container): the whole-loop test does NOT set
-    # CODESPACE_REQUIRE_SANDBOX, so the runner confines the fake-CLI agent under bubblewrap when the host supports
-    # it and runs it unconfined otherwise — confinement is proven in the dedicated sandbox lane, here the gate is
-    # the LIVE BRAIN driving the real durable loop. git is pre-installed on ubuntu-latest (the test self-skips if not).
+    # A plain host runner (NOT a privileged bwrap container). This lane's gate is the LIVE BRAIN driving the real
+    # durable loop — NOT sandbox confinement (which is proven, fail-closed, in the dedicated sandbox lane). The spawned
+    # agent here is a TRUSTED test fake (FileWritingFakeCli), so it needs no confinement; and bwrap on a plain runner is
+    # FLAKY (its trivial probe can pass while the real agent's bind-mounted git/file IO fails under the same userns on
+    # some runner instances — observed red-ing the brain gate on an execution fault, never a brain miss). So we force the
+    # already-supported UNCONFINED path deterministically (CODESPACE_BWRAP_PATH below → probe unavailable → unconfined;
+    # REQUIRE_SANDBOX is unset, so no fail-closed throw). git is pre-installed on ubuntu-latest (the test self-skips if not).
     services:
       postgres:
         image: postgres:18-alpine
@@ -119,6 +122,11 @@ jobs:
       # best-of-N capability-floor for the strict whole-loop gate (Rule 8 escape hatch): 3 independent attempts absorb a
       # real model's run-to-run variance so a single off-run can't flaky-red main, while a persistent park-short still REDs.
       CODESPACE_REALMODEL_WHOLE_LOOP_ATTEMPTS: '3'
+      # Force the fake agent UNCONFINED on this brain-gate lane: a non-existent bwrap binary makes BubblewrapSandbox's
+      # probe degrade to "unavailable" → the agent runs unconfined (deterministic), bypassing plain-host bwrap flakiness.
+      # Safe: REQUIRE_SANDBOX is unset (no fail-closed throw), the agent is a trusted test fake, and confinement is gated
+      # for real in the sandbox lane. A best-of-N attempt's agent failure here was an EXECUTION fault, not a brain miss.
+      CODESPACE_BWRAP_PATH: /nonexistent/bwrap-disabled-on-the-brain-gate-lane
 
     steps:
       - uses: actions/checkout@v4
