@@ -63,12 +63,16 @@ jobs:
       - name: Restore
         run: dotnet restore backend/tests/CodeSpace.IntegrationTests/CodeSpace.IntegrationTests.csproj
 
-      - name: Test (the supervisor decision eval — drives the live endpoint, scores the golden decisions)
-        # Scoped to the supervisor RealModel classes in IntegrationTests (no Postgres) — the single-decision kill-gate
-        # AND the multi-turn trajectory gate (RealModelSupervisorDecisionFlowTests + RealModelSupervisorTrajectoryFlowTests,
-        # both FullyQualifiedName~RealModelSupervisor). The DB-backed whole-loop gate lives in the E2ETests assembly and
-        # runs in its own Postgres job below. The planner RealModel test is a separate, DB-backed concern with its own
-        # ANTHROPIC-native key, so it is not run here.
+      - name: Test (the supervisor + session decision evals — drives the live endpoint, scores the golden decisions)
+        # The component RealModel evals in IntegrationTests (no Postgres — each builds its LLM client in-memory):
+        #   ~RealModelSupervisor → the single-decision kill-gate + the multi-turn trajectory gate + the arbiter
+        #     (RealModelSupervisorDecisionFlowTests / RealModelSupervisorTrajectoryFlowTests / RealModelSupervisorArbiterFlowTests).
+        #   ~RealModelSession → the session-handoff evals (RealModelSessionContinueFlowTests / RealModelSessionSummaryFlowTests).
+        #     These carry Category=RealModel but their class token is "RealModelSession", NOT "RealModelSupervisor", so the
+        #     old single-clause filter silently de-selected them — they ran on NO lane. The OR-clause re-includes them; both
+        #     are DB-free component evals, so the no-Postgres job is the correct home.
+        # The DB-backed whole-loop gates live in the E2ETests assembly and run in their own Postgres job below. The planner
+        # RealModel test is a separate, DB-backed concern with its own ANTHROPIC-native key, so it is not run here.
         #
         # Per-wire gate policy lives in RealModelGate: the blessed wire (Anthropic by default) GATES this job; other
         # wires (OpenAI) run + report their verdict to the log but do NOT fail the job — an operator reblesses via the
@@ -76,9 +80,24 @@ jobs:
         run: >
           dotnet test backend/tests/CodeSpace.IntegrationTests/CodeSpace.IntegrationTests.csproj
           --no-restore
-          --filter "FullyQualifiedName~RealModelSupervisor"
+          --filter "FullyQualifiedName~RealModelSupervisor|FullyQualifiedName~RealModelSession"
           --logger "console;verbosity=normal"
           --logger "trx;LogFileName=real-model.trx"
+          --results-directory backend/TestResults
+
+      - name: Assert the decision evals actually ran (no silent skip)
+        # `dotnet test --filter` EXITS 0 even when the filter matches ZERO tests, so an FQN/trait regression could green
+        # this gate while exercising nothing — exactly how the session evals went unnoticed on no lane. Require >=1 selected.
+        # (A secrets-absent run still SELECTS + reports these classes, so the count is >=1 whether or not the gateway is set.)
+        run: |
+          trx=backend/TestResults/real-model.trx
+          test -f "$trx" || { echo "::error::trx not found at $trx — the test step produced no results"; exit 1; }
+          executed=$(grep -oE 'executed="[0-9]+"' "$trx" | head -1 | grep -oE '[0-9]+')
+          echo "executed=${executed:-0}"
+          if [ "${executed:-0}" -lt 1 ]; then
+            echo "::error::Expected RealModel decision evals to run, but ${executed:-0} executed — the filter matched nothing (FQN/trait regression?)."
+            exit 1
+          fi
 
   real-model-wholeloop:
     name: real model (live-brain whole-loop)
@@ -168,16 +187,36 @@ jobs:
         run: dotnet restore backend/tests/CodeSpace.E2ETests/CodeSpace.E2ETests.csproj
 
       - name: Test (the live-brain whole-loop — a REAL model drives the real durable engine end to end)
-        # Scoped to the single whole-loop class. GATING on the real-model-DROVE-to-completion criterion: the HEADLINE
-        # drive→accept arc HARD-fails main unless the live model drove the whole arc to the real integrated+accepted head
-        # (Drove). A CAPABILITY MISS (the model RAN but parked short) now REDs — made flake-safe by a bounded best-of-N
-        # capability-floor (a fresh run per attempt; gates only if EVERY non-infra attempt parks short). A CODE FAULT reds
-        # at once; a gateway timeout is non-gating LOUD infra. The two REACTION arcs (conflict→resolve, failure→retry)
-        # still gate only on a CODE FAULT and REPORT a capability miss. The test self-skips when ALL CODESPACE_LLM_*
-        # secrets are absent — surfaced LOUDLY as NOT EVALUATED (skip ≠ pass), fork stays green — and FAILS on a partial config.
+        # Scoped to the DB-backed whole-loop RealModel classes in E2ETests:
+        #   ~RealModelSupervisorWholeLoop → the supervisor drive→accept kill-gate (+ its two reaction arcs).
+        #   ~RealModelSession → the session whole-loop gates (RealModelSessionWholeLoopE2ETests + the session convergence
+        #     whole-loop). Same de-selection bug as the component job: their class token is "RealModelSession", so the old
+        #     single-clause filter ran them on NO lane. Both are [Surface=Engine] DB+git whole-loop tests, so this Postgres
+        #     job (which also installs the real coding CLI) is the correct home.
+        # GATING on the real-model-DROVE-to-completion criterion: the HEADLINE drive→accept arc HARD-fails main unless the
+        # live model drove the whole arc to the real integrated+accepted head (Drove). A CAPABILITY MISS (the model RAN but
+        # parked short) now REDs — made flake-safe by a bounded best-of-N capability-floor (a fresh run per attempt; gates
+        # only if EVERY non-infra attempt parks short). A CODE FAULT reds at once; a gateway timeout is non-gating LOUD infra.
+        # The reaction arcs (conflict→resolve, failure→retry) still gate only on a CODE FAULT and REPORT a capability miss.
+        # Each test self-skips when ALL CODESPACE_LLM_* secrets are absent — surfaced LOUDLY as NOT EVALUATED (skip ≠ pass),
+        # fork stays green — and FAILS on a partial config.
         run: >
           dotnet test backend/tests/CodeSpace.E2ETests/CodeSpace.E2ETests.csproj
           --no-restore
-          --filter "FullyQualifiedName~RealModelSupervisorWholeLoop"
+          --filter "FullyQualifiedName~RealModelSupervisorWholeLoop|FullyQualifiedName~RealModelSession"
           --logger "console;verbosity=normal"
           --logger "trx;LogFileName=real-model-wholeloop.trx"
+          --results-directory backend/TestResults
+
+      - name: Assert the whole-loop gates actually ran (no silent skip)
+        # Same fail-closed guard as the component job: `dotnet test --filter` exits 0 on zero matches, so an FQN/trait
+        # drift that de-selects the supervisor OR session whole-loop must RED this lane, not pass green at zero cost.
+        run: |
+          trx=backend/TestResults/real-model-wholeloop.trx
+          test -f "$trx" || { echo "::error::trx not found at $trx — the test step produced no results"; exit 1; }
+          executed=$(grep -oE 'executed="[0-9]+"' "$trx" | head -1 | grep -oE '[0-9]+')
+          echo "executed=${executed:-0}"
+          if [ "${executed:-0}" -lt 1 ]; then
+            echo "::error::Expected RealModel whole-loop gates to run, but ${executed:-0} executed — the filter matched nothing (FQN/trait regression?)."
+            exit 1
+          fi
