@@ -6,6 +6,7 @@ using CodeSpace.Core.Services.Agents.Sandbox;
 using CodeSpace.Core.Services.Agents.Sandbox.Runners;
 using CodeSpace.Core.Services.Chat;
 using CodeSpace.Core.Services.Supervisor;
+using CodeSpace.Core.Services.Tasks.Phases;
 using CodeSpace.Core.Services.Workflows.Engine;
 using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.IntegrationTests.Infrastructure.Jobs;
@@ -308,6 +309,37 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
             var (outcome, note) = await EvaluateAsync(runId, teamId, deterministicFakeAgents: false);   // REAL claude — 0 patches is a genuine capability outcome, never a capture-infra skip
             return (outcome, $"{Provider} model '{model}' CODING-agent goal-relevance (Drove = SOLVED the task) — {note}");
         });
+
+        // The REAL-MODEL metric proof (post-#671 review residual): when the live claude agent actually SUCCEEDS it
+        // consumed real tokens, and they MUST reach the projected per-agent metric the run-detail reads. The
+        // deterministic RealHarnessExecutionTests pin the PARSER on real-shaped bytes; THIS pins the LIVE wire shape
+        // end-to-end (a real claude-code v2.1.x stream → AgentTokenUsageReader → result_jsonb → AgentMetricsReader).
+        await AssertRealAgentTokensReachTheMetricAsync(runId, teamId);
+    }
+
+    /// <summary>
+    /// Asserts a SUCCEEDED live coding-agent's real token usage reaches the projected metric. A real claude run always
+    /// consumes input tokens, so a Succeeded run whose projected metric carries none means the live usage shape drifted
+    /// from <c>AgentTokenUsageReader</c> or the projection dropped it — both worth red-ing. No-op when no agent succeeded
+    /// this attempt (a capability miss / infra fault → the goal-relevance report owns that), so it never flakes the lane.
+    /// </summary>
+    private async Task AssertRealAgentTokensReachTheMetricAsync(Guid runId, Guid teamId)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+
+        var succeeded = await db.AgentRun.AsNoTracking()
+            .Where(r => r.WorkflowRunId == runId && r.Status == AgentRunStatus.Succeeded && r.ResultJson != null)
+            .Select(r => r.Id)
+            .ToListAsync();
+
+        if (succeeded.Count == 0) return;   // no clean real run this attempt — the AssessLiveAsync capability report owns it
+
+        var metrics = await scope.Resolve<AgentMetricsReader>().ReadAsync(teamId, succeeded, DateTimeOffset.UtcNow, CancellationToken.None);
+
+        var withTokens = metrics.Values.Where(m => m.InputTokens is > 0 && m.OutputTokens is > 0).ToList();
+        withTokens.ShouldNotBeEmpty($"{Provider}: a real claude coding-agent SUCCEEDED but no projected metric carried real input+output tokens — the live usage shape may have drifted from AgentTokenUsageReader, or the projection dropped it");
+        withTokens[0].DurationMs.ShouldNotBeNull("a completed real agent carries a live duration on its metric");
     }
 
     /// <summary>Whether the real <c>claude</c> coding-agent CLI is on PATH — the live-coding arm self-skips (NOT a pass) when it is absent (fork/local, or a runner without the install step).</summary>
