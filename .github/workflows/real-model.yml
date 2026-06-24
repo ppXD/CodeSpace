@@ -233,3 +233,105 @@ jobs:
             echo "::error::Expected RealModel whole-loop gates to run, but ${executed:-0} executed — the filter matched nothing (FQN/trait regression?)."
             exit 1
           fi
+
+  real-model-benchmark:
+    name: real model (benchmark corpus solve-rate)
+    runs-on: ubuntu-latest
+    # A SEPARATE job from the whole-loop gate (NOT a shared FQN filter): a real claude coding agent attempts the WHOLE
+    # seed corpus — every (task × mode) is its own live agent.code run — so this lane's wall-clock is isolated from the
+    # whole-loop's own near-60-min best-of-N budget; one slow benchmark run can never time-out the brain gate, and the
+    # solve-rate gets its own job summary. The seed corpus is a handful of trivial offline fixtures, so the real agent
+    # solves each fast (~30-90s); the ceiling holds the worst case with headroom.
+    timeout-minutes: 60
+
+    # Same UNCONFINED rationale as the whole-loop lane: this gate's signal is the live SOLVE-RATE, not sandbox
+    # confinement (proven, fail-closed, in the dedicated sandbox lane). The benchmark agent edits TRUSTED offline
+    # fixtures, so it needs no confinement; and bwrap on a plain runner is flaky. So force the unconfined path
+    # deterministically + disable the prlimit caps (the RLIMIT_NPROC per-UID trap that signal-kills forks on a shared
+    # host) — exactly as the whole-loop lane documents.
+    services:
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: '123456'
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d postgres"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 20
+
+    env:
+      # The custom-endpoint config the RealModel tests read; absent on a fork → the test self-skips → green at zero cost.
+      CODESPACE_LLM_BASE_URL: ${{ secrets.CODESPACE_LLM_BASE_URL }}
+      CODESPACE_LLM_API_KEY: ${{ secrets.CODESPACE_LLM_API_KEY }}
+      CODESPACE_LLM_MODEL_ID: ${{ secrets.CODESPACE_LLM_MODEL_ID }}
+      # Force the real agent UNCONFINED (a non-existent bwrap binary → BubblewrapSandbox probe degrades to "unavailable"),
+      # and disable the prlimit caps (caps=0 → ProcessRlimits.Wrap returns the command unchanged → no RLIMIT_NPROC kill on
+      # a shared host). Safe: REQUIRE_SANDBOX is unset, the benchmark edits trusted offline fixtures, and real confinement
+      # stays gated, fail-closed, in the dedicated sandbox-isolation lane.
+      CODESPACE_BWRAP_PATH: /nonexistent/bwrap-disabled-on-the-benchmark-lane
+      CODESPACE_AGENT_MAX_PROCESSES: '0'
+      CODESPACE_AGENT_MAX_FILE_MB: '0'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up .NET 10
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Set up Node (for the real coding-agent CLI)
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install the real coding-agent CLI (Claude Code)
+        # The benchmark drives the real `claude` CLI per corpus pair (the ClaudeCodeHarness resolves it on PATH + projects
+        # the seeded gateway credential). Best-effort install (continue-on-error): a pinned-version miss shows red on the
+        # step but the JOB stays green and the benchmark self-skips LOUDLY ("claude not installed → skip ≠ pass") rather
+        # than red-ing the lane. Pinned to the v2.1.x line the harness surface is verified against.
+        continue-on-error: true
+        run: |
+          npm install -g '@anthropic-ai/claude-code@~2.1.0'
+          claude --version
+
+      - name: Cache NuGet packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.nuget/packages
+          key: nuget-realmodel-e2e-${{ runner.os }}-${{ hashFiles('backend/**/*.csproj') }}
+          restore-keys: nuget-realmodel-e2e-${{ runner.os }}-
+
+      - name: Restore
+        run: dotnet restore backend/tests/CodeSpace.E2ETests/CodeSpace.E2ETests.csproj
+
+      - name: Test (the live solve-rate — a real claude agent attempts the whole seed corpus)
+        # REPORT-ONLY: a brand-new live coding-over-corpus path REPORTS the solve-rate to the job summary (Drove = solved
+        # ≥1 task; CapabilityMiss = ran but solved none) and only a CODE FAULT reds; a gateway outage (every pair fails to
+        # execute) is non-gating LOUD infra. Self-skips when ALL CODESPACE_LLM_* are absent (fork stays green) and FAILS on
+        # a partial config. Flip to a gating solve-rate FLOOR once a first live run confirms the wiring AND a solve.
+        run: >
+          dotnet test backend/tests/CodeSpace.E2ETests/CodeSpace.E2ETests.csproj
+          --no-restore
+          --filter "FullyQualifiedName~RealModelBenchmark"
+          --logger "console;verbosity=normal"
+          --logger "trx;LogFileName=real-model-benchmark.trx"
+          --results-directory backend/TestResults
+
+      - name: Assert the benchmark gate actually ran (no silent skip)
+        # `dotnet test --filter` exits 0 on zero matches, so an FQN/trait drift that de-selects the benchmark must RED this
+        # lane, not pass green at zero cost. (A secrets-absent run still SELECTS + reports the class, so the count is >=1.)
+        run: |
+          trx=backend/TestResults/real-model-benchmark.trx
+          test -f "$trx" || { echo "::error::trx not found at $trx — the test step produced no results"; exit 1; }
+          executed=$(grep -oE 'executed="[0-9]+"' "$trx" | head -1 | grep -oE '[0-9]+')
+          echo "executed=${executed:-0}"
+          if [ "${executed:-0}" -lt 1 ]; then
+            echo "::error::Expected the RealModel benchmark gate to run, but ${executed:-0} executed — the filter matched nothing (FQN/trait regression?)."
+            exit 1
+          fi

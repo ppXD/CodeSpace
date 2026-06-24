@@ -47,7 +47,7 @@ public sealed class CorpusBenchmarkFlowTests
 
         CorpusBenchmarkRun run;
         using (var scope = _fixture.BeginScope())
-            run = await scope.Resolve<ICorpusBenchmarkRunner>().RunAsync(corpus, teamId, CancellationToken.None);
+            run = await scope.Resolve<ICorpusBenchmarkRunner>().RunAsync(corpus, teamId, selection: null, CancellationToken.None);
 
         // EVERY (task × mode) pair ran end to end — staged, executed, graded — with NO infra error.
         run.Errored.ShouldBeEmpty("the offline seed corpus stages + runs cleanly — no infra faults");

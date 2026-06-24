@@ -144,7 +144,7 @@ public sealed class BenchmarkRunnerFlowTests
     private async Task<BenchmarkResult> RunAsync(BenchmarkTask task, BenchmarkMode mode, string workspaceDir, Guid teamId)
     {
         using var scope = _fixture.BeginScope();
-        return await scope.Resolve<IBenchmarkRunner>().RunAsync(task, mode, workspaceDir, teamId, CancellationToken.None);
+        return await scope.Resolve<IBenchmarkRunner>().RunAsync(task, mode, workspaceDir, teamId, selection: null, CancellationToken.None);
     }
 
     private async Task AssertRealRunRecordedAsync(BenchmarkResult result, Guid teamId)

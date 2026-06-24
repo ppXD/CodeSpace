@@ -1,4 +1,5 @@
 using CodeSpace.Core.Services.Agents.Eval.Benchmark;
+using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Agents.Benchmark;
 using CodeSpace.Messages.Enums;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -28,7 +29,7 @@ public class CorpusBenchmarkRunnerTests
 
         var corpus = new[] { MakeTask("task-a", TwoModes), MakeTask("task-b", TwoModes) };
 
-        var run = await sut.RunAsync(corpus, Guid.NewGuid(), CancellationToken.None);
+        var run = await sut.RunAsync(corpus, Guid.NewGuid(), selection: null, CancellationToken.None);
 
         run.Results.Count.ShouldBe(4, "every (task × mode) pair ran — 2 tasks × 2 modes");
         run.Errored.ShouldBeEmpty();
@@ -51,7 +52,7 @@ public class CorpusBenchmarkRunnerTests
         var runner = new StubRunner(passWhen: (_, _) => true);
         var sut = new CorpusBenchmarkRunner(runner, stager, NullLogger<CorpusBenchmarkRunner>.Instance);
 
-        await sut.RunAsync(new[] { MakeTask("task-a", TwoModes) }, Guid.NewGuid(), CancellationToken.None);
+        await sut.RunAsync(new[] { MakeTask("task-a", TwoModes) }, Guid.NewGuid(), selection: null, CancellationToken.None);
 
         stager.Staged.Count.ShouldBe(2, "one fresh fixture staged per (task × mode) pair");
         stager.Staged.Select(s => s.Directory).Distinct().Count().ShouldBe(2, "each pair gets its OWN isolated workspace — never shared");
@@ -68,7 +69,7 @@ public class CorpusBenchmarkRunnerTests
         var runner = new StubRunner(passWhen: (_, _) => true, throwWhen: (taskId, _) => taskId == "task-b");
         var sut = new CorpusBenchmarkRunner(runner, new NoopStager(), NullLogger<CorpusBenchmarkRunner>.Instance);
 
-        var run = await sut.RunAsync(new[] { MakeTask("task-a", TwoModes), MakeTask("task-b", TwoModes) }, Guid.NewGuid(), CancellationToken.None);
+        var run = await sut.RunAsync(new[] { MakeTask("task-a", TwoModes), MakeTask("task-b", TwoModes) }, Guid.NewGuid(), selection: null, CancellationToken.None);
 
         run.Results.Count.ShouldBe(2, "only task-a's two pairs ran cleanly");
         run.Results.ShouldAllBe(r => r.TaskId == "task-a");
@@ -85,7 +86,7 @@ public class CorpusBenchmarkRunnerTests
         var runner = new StubRunner(passWhen: (_, _) => true);
         var sut = new CorpusBenchmarkRunner(runner, new ThrowingStager(), NullLogger<CorpusBenchmarkRunner>.Instance);
 
-        var run = await sut.RunAsync(new[] { MakeTask("task-a", TwoModes) }, Guid.NewGuid(), CancellationToken.None);
+        var run = await sut.RunAsync(new[] { MakeTask("task-a", TwoModes) }, Guid.NewGuid(), selection: null, CancellationToken.None);
 
         run.Results.ShouldBeEmpty("nothing could run — staging failed for every pair");
         run.Errored.Count.ShouldBe(2);
@@ -99,7 +100,36 @@ public class CorpusBenchmarkRunnerTests
         var sut = new CorpusBenchmarkRunner(runner, new NoopStager(), NullLogger<CorpusBenchmarkRunner>.Instance);
 
         await Should.ThrowAsync<OperationCanceledException>(
-            () => sut.RunAsync(new[] { MakeTask("task-a", TwoModes) }, Guid.NewGuid(), CancellationToken.None));
+            () => sut.RunAsync(new[] { MakeTask("task-a", TwoModes) }, Guid.NewGuid(), selection: null, CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task The_agent_selection_is_threaded_verbatim_to_the_instrument_for_every_pair()
+    {
+        // The corpus runner chooses the LOOP; the SELECTION (which agent attempts it — real harness/model/credential)
+        // belongs to the run and must reach EVERY (task × mode) the instrument runs, unchanged — else a real-model gate
+        // would silently run the fake CLI on some pairs.
+        var runner = new StubRunner(passWhen: (_, _) => true);
+        var sut = new CorpusBenchmarkRunner(runner, new NoopStager(), NullLogger<CorpusBenchmarkRunner>.Instance);
+
+        var credId = Guid.NewGuid();
+        var selection = new BenchmarkAgentSelection { Harness = "claude-code", Model = "gw-model", ModelCredentialId = credId, Autonomy = AgentAutonomyLevel.Trusted };
+
+        await sut.RunAsync(new[] { MakeTask("task-a", TwoModes), MakeTask("task-b", TwoModes) }, Guid.NewGuid(), selection, CancellationToken.None);
+
+        runner.Calls.Count.ShouldBe(4, "the loop still ran every pair");
+        runner.Calls.ShouldAllBe(c => ReferenceEquals(c.Selection, selection), "every pair got the SAME selection the caller passed — never null, never a copy");
+    }
+
+    [Fact]
+    public async Task A_null_selection_reaches_the_instrument_as_null_the_deterministic_default()
+    {
+        var runner = new StubRunner(passWhen: (_, _) => true);
+        var sut = new CorpusBenchmarkRunner(runner, new NoopStager(), NullLogger<CorpusBenchmarkRunner>.Instance);
+
+        await sut.RunAsync(new[] { MakeTask("task-a", TwoModes) }, Guid.NewGuid(), selection: null, CancellationToken.None);
+
+        runner.Calls.ShouldAllBe(c => c.Selection == null, "no selection ⇒ the instrument runs the env's fake CLI with no credential (the CI plumbing default)");
     }
 
     // ─── stubs ───
@@ -123,19 +153,19 @@ public class CorpusBenchmarkRunnerTests
         private readonly Func<string, BenchmarkMode, bool> _passWhen;
         private readonly Func<string, BenchmarkMode, bool>? _throwWhen;
         private readonly bool _cancel;
-        public List<(string TaskId, BenchmarkMode Mode, string Workspace)> Calls { get; } = new();
+        public List<(string TaskId, BenchmarkMode Mode, string Workspace, BenchmarkAgentSelection? Selection)> Calls { get; } = new();
 
         public StubRunner(Func<string, BenchmarkMode, bool> passWhen, Func<string, BenchmarkMode, bool>? throwWhen = null, bool cancel = false)
         {
             _passWhen = passWhen; _throwWhen = throwWhen; _cancel = cancel;
         }
 
-        public Task<BenchmarkResult> RunAsync(BenchmarkTask task, BenchmarkMode mode, string workspaceDirectory, Guid teamId, CancellationToken cancellationToken)
+        public Task<BenchmarkResult> RunAsync(BenchmarkTask task, BenchmarkMode mode, string workspaceDirectory, Guid teamId, BenchmarkAgentSelection? selection, CancellationToken cancellationToken)
         {
             if (_cancel) throw new OperationCanceledException();
             if (_throwWhen?.Invoke(task.Id, mode) == true) throw new InvalidOperationException($"runner blew up on {task.Id}/{mode}");
 
-            Calls.Add((task.Id, mode, workspaceDirectory));
+            Calls.Add((task.Id, mode, workspaceDirectory, selection));
 
             var passed = _passWhen(task.Id, mode);
             return Task.FromResult(new BenchmarkResult
