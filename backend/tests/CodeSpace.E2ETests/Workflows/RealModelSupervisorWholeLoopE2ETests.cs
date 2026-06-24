@@ -206,21 +206,24 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
             using var verify = _fixture.BeginScope();
             var db = verify.Resolve<CodeSpaceDbContext>();
 
-            var taskJsons = await db.AgentRun.AsNoTracking().Where(r => r.WorkflowRunId == runId)
-                .Select(r => r.TaskJson).ToListAsync();
-            var goals = taskJsons
-                .Select(j => System.Text.Json.JsonSerializer.Deserialize<Messages.Agents.AgentTask>(j, AgentJson.Options)?.Goal ?? "")
+            // Read the AUTHORITATIVE signal — the model's own spawn DECISION payload, not the rendered agent goal: did it
+            // author a per-agent agents[] dispatch with ≥2 DISTINCT roles? Keying on SupervisorSpawnPayload.Agents proves
+            // the MODEL authored heterogeneous dispatch (a rendered-goal substring could coincide on a plain fan-out).
+            var spawnPayloads = await db.SupervisorDecisionRecord.AsNoTracking()
+                .Where(d => d.SupervisorRunId == runId && d.TeamId == teamId && d.DecisionKind == SupervisorDecisionKinds.Spawn)
+                .OrderBy(d => d.Sequence).Select(d => d.PayloadJson).ToListAsync();
+
+            var authoredAgents = spawnPayloads
+                .SelectMany(p => System.Text.Json.JsonSerializer.Deserialize<Messages.Agents.SupervisorSpawnPayload>(p, AgentJson.Options)?.Agents
+                                 ?? Enumerable.Empty<Messages.Agents.SupervisorAgentDispatch>())
                 .ToList();
+            var distinctRoles = authoredAgents.Where(a => !string.IsNullOrWhiteSpace(a.Role)).Select(a => a.Role!.Trim()).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+            var authored = authoredAgents.Count >= 2 && distinctRoles.Count >= 2;
 
-            // An authored per-agent role is rendered "As the <role>, <instruction>" (RealSupervisorActionExecutor.WithRole);
-            // distinct such goals across ≥2 agents = the model authored a heterogeneous dispatch, not a homogeneous fan-out.
-            var roleAuthoredGoals = goals.Where(g => g.Contains("As the ", StringComparison.Ordinal)).Distinct().ToList();
-            var authored = goals.Count >= 2 && roleAuthoredGoals.Count >= 2;
-
-            var sample = string.Join(" | ", roleAuthoredGoals.Take(3).Select(g => g.Length <= 80 ? g : g[..80] + "…"));
+            var sample = string.Join(" / ", distinctRoles.Take(3));
             return (authored,
-                $"{Provider} '{model}' dispatch: agents={goals.Count}, distinct role-authored goals={roleAuthoredGoals.Count} [{sample}]. "
-              + (authored ? "DROVE — the live model authored a heterogeneous per-agent division of labour." : "did NOT differentiate — homogeneous fan-out (reported, not gating)."));
+                $"{Provider} '{model}' spawn dispatch: authored agents[]={authoredAgents.Count}, distinct roles={distinctRoles.Count} [{sample}]. "
+              + (authored ? "DROVE — the live model authored a heterogeneous per-agent division of labour (agents[] in the spawn decision)." : "did NOT author heterogeneous dispatch — homogeneous fan-out (reported, not gating)."));
         }, gating: false);
     }
 
