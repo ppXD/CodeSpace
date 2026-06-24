@@ -123,7 +123,7 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
         var repoId = await SeedBoundRepositoryAsync(teamId, remote.Url, "main");
 
         // The supervisor's brain runs on this seeded credential (key encrypted into the DB row the live decider reads).
-        var brainModelId = await SeedBrainModelAsync(teamId, BaseUrlFor(baseUrl), apiKey, model);
+        var (brainModelId, _) = await SeedBrainModelAsync(teamId, BaseUrlFor(baseUrl), apiKey, model);
 
         var workflowId = await CreateWholeLoopWorkflowAsync(teamId, userId, repoId, brainModelId);
 
@@ -186,7 +186,7 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
         await remote.SeedBaseAsync(new() { ["check.sh"] = "#!/bin/sh\nexit 0\n", [LiveBrainConflictFakeCli.SharedFile] = "base\n" });
         var repoId = await SeedBoundRepositoryAsync(teamId, remote.Url, "main");
 
-        var brainModelId = await SeedBrainModelAsync(teamId, BaseUrlFor(baseUrl), apiKey, model);
+        var (brainModelId, _) = await SeedBrainModelAsync(teamId, BaseUrlFor(baseUrl), apiKey, model);
 
         const string goal = "The file shared.txt needs two improvements developed IN PARALLEL by two separate agents, each editing shared.txt: "
                           + "(1) add input validation, and (2) add error logging. Spawn one agent per improvement, integrate their branches, "
@@ -239,7 +239,7 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
         await remote.SeedBaseAsync(new() { ["check.sh"] = "#!/bin/sh\nexit 0\n", ["base.txt"] = "base\n" });
         var repoId = await SeedBoundRepositoryAsync(teamId, remote.Url, "main");
 
-        var brainModelId = await SeedBrainModelAsync(teamId, BaseUrlFor(baseUrl), apiKey, model);
+        var (brainModelId, _) = await SeedBrainModelAsync(teamId, BaseUrlFor(baseUrl), apiKey, model);
 
         const string goal = "Add server-side email-format validation to the signup endpoint, with unit tests. "
                           + "If a subtask's agent reports it could not complete the work, retry that subtask before finishing.";
@@ -255,6 +255,67 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
             var (outcome, note) = await EvaluateFailureRetryAsync(runId, teamId);
             return (outcome, $"{Provider} model '{model}' failure→retry — {note}");
         });
+    }
+
+    [Fact]
+    public async Task The_real_coding_agent_solves_a_goal_relevance_task_authored_by_the_live_model()
+    {
+        // ITEM #2 LIVE ARM — the deepest 解對任務 proof: a REAL coding-CLI (claude-code) driven by a live model EDITS a
+        // real source (solution.sh) and the GOAL-RELEVANCE oracle grades whether it actually SOLVED the task (output
+        // equality: sh solution.sh 7 5 == 12), not just that a file integrated. The brain is also live (this lane's
+        // default), so the whole arc — brain drives → real agent solves → real merge → goal-relevance accept — is real.
+        //
+        // REPORT-ONLY for now (legacy AssessLiveAsync three-way): a brand-new live integration (real claude CLI → gateway →
+        // real edit) is REPORTED to the job summary (Drove = the real model SOLVED the task; CapabilityMiss = it didn't) and
+        // only a CODE FAULT reds. Flip to AssessLiveWholeLoopAsync (strict gate + best-of-N) once the first live run
+        // confirms the wiring AND a solve — gating main on an unproven live coding path would violate 穩.
+        var baseUrl = Env(RealModelSupervisorDecisionFlowTests.BaseUrlEnvVar);
+        var apiKey = Env(RealModelSupervisorDecisionFlowTests.ApiKeyEnvVar);
+        var model = Env(RealModelSupervisorDecisionFlowTests.ModelIdEnvVar);
+
+        var present = new[] { baseUrl, apiKey, model }.Count(v => v is not null);
+        if (present == 0) { RealModelGate.ReportSkipped(Provider, "CODESPACE_LLM_* absent (fork/local — no live model)"); return; }
+        present.ShouldBe(3, "CODESPACE_LLM_* is partially configured — set all three or none; a partial config would self-skip this lane green proving nothing.");
+
+        if (OperatingSystem.IsWindows()) return;
+        if (!await GitReadyAsync()) return;
+        if (!await ClaudeReadyAsync()) { RealModelGate.ReportSkipped(Provider, "the `claude` coding-agent CLI is not installed — the real-coding arm needs a harness binary (skip ≠ pass)"); return; }   // honest-skip, NOT a pass
+
+        var jobClient = ResolveJobClient();
+        jobClient.Clear();
+        jobClient.AutoExecute = true;
+
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+
+        using var remote = new BareRemote();
+        // The GOAL-RELEVANCE oracle: the agent must edit solution.sh so `sh solution.sh 7 5` prints 12 — graded by check.sh.
+        await remote.SeedBaseAsync(new() { ["check.sh"] = SolutionWritingFakeCli.GoalRelevanceCheckSh, ["solution.sh"] = SolutionWritingFakeCli.SeededStub });
+        var repoId = await SeedBoundRepositoryAsync(teamId, remote.Url, "main");
+
+        var (brainModelId, agentCredId) = await SeedBrainModelAsync(teamId, BaseUrlFor(baseUrl), apiKey, model);
+
+        // The spawned agent runs the REAL claude-code CLI (agentCredId → its gateway credential) at Trusted autonomy.
+        var workflowId = await CreateWholeLoopWorkflowAsync(teamId, userId, repoId, brainModelId,
+            goal: "Edit the file solution.sh so that running `sh solution.sh A B` prints the SUM of the two integer arguments A and B. Keep it a POSIX /bin/sh script. Do not change anything else.",
+            agentCredId: agentCredId, agentModel: model);
+        var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
+
+        await RealModelGate.AssessLiveAsync(Provider, async () =>
+        {
+            await RunEngineAsync(runId);
+            await jobClient.WaitForPendingAsync();
+
+            var (outcome, note) = await EvaluateAsync(runId, teamId);
+            return (outcome, $"{Provider} model '{model}' CODING-agent goal-relevance (Drove = SOLVED the task) — {note}");
+        });
+    }
+
+    /// <summary>Whether the real <c>claude</c> coding-agent CLI is on PATH — the live-coding arm self-skips (NOT a pass) when it is absent (fork/local, or a runner without the install step).</summary>
+    private static async Task<bool> ClaudeReadyAsync()
+    {
+        if (OperatingSystem.IsWindows()) return false;
+        try { return (await new LocalProcessRunner().RunAsync(new SandboxSpec { Command = "claude", Args = new[] { "--version" }, TimeoutSeconds = 15 }, CancellationToken.None)).Status == SandboxStatus.Success; }
+        catch { return false; }
     }
 
     /// <summary>The live brain reacted to the real failure iff it FANNED OUT (spawn), at least one agent really FAILED, and the brain then chose the recovery action `retry`. Classified three-way; reports each signal (and whether it instead escalated via stop) so a non-retrying trajectory is legible, not a bare red.</summary>
@@ -412,7 +473,7 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
     }
 
     /// <summary>Seed a KEYED, structured-capable credentialed-model row for the supervisor brain (the live decider reads its key + base url from this row). Returns the row id → the supervisor's <c>supervisorModelId</c>.</summary>
-    private async Task<Guid> SeedBrainModelAsync(Guid teamId, string baseUrl, string apiKey, string modelId)
+    private async Task<(Guid RowId, Guid CredId)> SeedBrainModelAsync(Guid teamId, string baseUrl, string apiKey, string modelId)
     {
         using var scope = _fixture.BeginScope();
         var db = scope.Resolve<CodeSpaceDbContext>();
@@ -430,11 +491,17 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
         db.ModelCredentialModel.Add(new ModelCredentialModel { Id = rowId, ModelCredentialId = credId, ModelId = modelId, Source = ModelSource.Manual, SupportsStructuredOutput = true, Enabled = true });
 
         await db.SaveChangesAsync();
-        return rowId;
+        return (rowId, credId);   // RowId = the brain's supervisorModelId; CredId = the credential the AGENT profile authenticates with
     }
 
-    private async Task<Guid> CreateWholeLoopWorkflowAsync(Guid teamId, Guid userId, Guid repoId, Guid brainModelId, string? goal = null, Guid? conversationId = null)
+    private async Task<Guid> CreateWholeLoopWorkflowAsync(Guid teamId, Guid userId, Guid repoId, Guid brainModelId, string? goal = null, Guid? conversationId = null, Guid? agentCredId = null, string? agentModel = null)
     {
+        // When an agent credential is supplied, the spawned agents run a REAL coding-CLI harness (claude-code) against the
+        // gateway (its credential decrypted just-in-time + projected onto ANTHROPIC_BASE_URL/AUTH_TOKEN by the harness), at
+        // Trusted autonomy so they get network egress to reach the gateway. Absent → the byte-identical fake-agent profile.
+        var realAgentFields = agentCredId is { } ac
+            ? $$""", "harness": "claude-code", "modelCredentialId": "{{ac}}", "model": "{{agentModel}}", "autonomyLevel": "Trusted" """
+            : "";
         // The live brain (supervisorModelId) authors the arc; its agents clone repoId + push branches, the merge
         // integrates them, and the operator acceptance floor (check.sh) gates the terminal stop. The SCRIPTED skeleton
         // converges in ~4 rounds (plan→spawn→merge→stop), but a REAL model is less efficient — plan → spawn → inspect →
@@ -450,7 +517,7 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
               "goal": "{{effectiveGoal}}",
               "supervisorModelId": "{{brainModelId}}",
               "maxRounds": 12,
-              "agentProfile": { "repositoryId": "{{repoId}}", "pushBranch": true, "integrateBranches": true },
+              "agentProfile": { "repositoryId": "{{repoId}}", "pushBranch": true, "integrateBranches": true{{realAgentFields}} },
               "acceptanceChecks": ["sh", "check.sh"]{{conversationLine}}
             }
             """;

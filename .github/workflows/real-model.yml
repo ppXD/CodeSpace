@@ -136,6 +136,27 @@ jobs:
         with:
           dotnet-version: '10.0.x'
 
+      - name: Set up Node (for the real coding-agent CLI)
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install the real coding-agent CLI (Claude Code)
+        # Installs the REAL Claude Code CLI so the live CODING-AGENT arm (the_real_coding_agent_solves_a_goal_relevance_task)
+        # can drive a live model to author a real solution.sh + have the goal-relevance oracle grade whether it SOLVED the
+        # task. ClaudeCodeHarness resolves `claude` on PATH + projects the seeded gateway credential onto its env
+        # (ANTHROPIC_BASE_URL / ANTHROPIC_AUTH_TOKEN), so no extra wiring is needed. The CLI surface is verified against
+        # v2.1.x — pin to that line so a future CLI flag change can't silently break the harness.
+        #
+        # continue-on-error: this is the FIRST rollout of the live-coding arm — if the pinned version is wrong / unpublished,
+        # a hard `npm install` failure would RED the whole job every push. Best-effort install instead: the step shows red
+        # (visible, so the version can be corrected) but the JOB stays green; the coding test then self-skips LOUDLY
+        # ("claude not installed → skip ≠ pass"). Make this fatal once the version is confirmed and the arm flips to gating.
+        continue-on-error: true
+        run: |
+          npm install -g '@anthropic-ai/claude-code@~2.1.0'
+          claude --version
+
       - name: Cache NuGet packages
         uses: actions/cache@v4
         with:
