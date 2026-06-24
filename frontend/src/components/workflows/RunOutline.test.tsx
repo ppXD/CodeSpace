@@ -34,6 +34,14 @@ describe("RunOutline", () => {
     expect(container.querySelector(".run-outline-agent-dot[data-busy]")).not.toBeNull();
   });
 
+  it("renders an always-on per-agent dot row under an agent-bearing phase, status-colored", () => {
+    const { container } = render(<RunOutline phases={[
+      phase({ id: "code", label: "Implement", status: "Active", agents: [agent("a1", "Running", "x"), agent("a2", "Succeeded", "y"), agent("a3", "Queued", "z")] }),
+    ]} onSelectPhase={vi.fn()} />);
+
+    expect([...container.querySelectorAll(".run-outline-dots > i")].map((d) => d.getAttribute("data-state"))).toEqual(["running", "done", "waiting"]);
+  });
+
   it("maps each terminal status to its glyph tone", () => {
     const { container } = render(<RunOutline phases={[
       phase({ id: "ok", label: "Plan", status: "Succeeded" }),
