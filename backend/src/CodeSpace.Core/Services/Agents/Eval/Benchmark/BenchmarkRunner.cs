@@ -41,12 +41,12 @@ public sealed class BenchmarkRunner : IBenchmarkRunner, IScopedDependency
         _graders = graders;
     }
 
-    public async Task<BenchmarkResult> RunAsync(BenchmarkTask task, BenchmarkMode mode, string workspaceDirectory, Guid teamId, CancellationToken cancellationToken)
+    public async Task<BenchmarkResult> RunAsync(BenchmarkTask task, BenchmarkMode mode, string workspaceDirectory, Guid teamId, BenchmarkAgentSelection? selection, CancellationToken cancellationToken)
     {
         if (mode == BenchmarkMode.WorkflowMap)
             throw new NotSupportedException("BenchmarkMode.WorkflowMap is reserved and not yet wired: it runs through the composed planner→flow.map→synthesizer ENGINE path (a workflow, not a single agent run), which this single-run runner does not orchestrate. Run the two harness-CLI modes here; the seed corpus ships only those.");
 
-        var agentTask = BuildAgentTask(task, mode, workspaceDirectory);
+        var agentTask = BuildAgentTask(task, mode, workspaceDirectory, selection);
 
         // The SAME gate the executor will consult to decide whether to open the run's MCP endpoint — recorded on the
         // result so the cli vs cli-mcp rows can never be mislabeled relative to what the run actually did.
@@ -65,20 +65,37 @@ public sealed class BenchmarkRunner : IBenchmarkRunner, IScopedDependency
 
     /// <summary>
     /// Build the agent-task envelope for this (task, mode): the pre-staged workspace is pinned directly (no RepositoryId →
-    /// the executor uses WorkspaceDirectory as the sandbox cwd), autonomy stays Standard so the agent may write inside its
-    /// workspace, and the per-run MCP opt-in is set IFF the mode is <see cref="BenchmarkMode.HarnessCliWithMcp"/> — the one
-    /// knob that genuinely differentiates the two harness-CLI modes within a single process.
+    /// the executor uses WorkspaceDirectory as the sandbox cwd), and the per-run MCP opt-in is set IFF the mode is
+    /// <see cref="BenchmarkMode.HarnessCliWithMcp"/> — the one knob that genuinely differentiates the two harness-CLI
+    /// modes within a single process. The optional <paramref name="selection"/> chooses WHICH agent attempts it: a null
+    /// selection (the deterministic CI default) keeps the task's own harness, no model, no credential, and Standard
+    /// autonomy — exactly the pre-selection behaviour; a real selection overrides the harness/model/credential and
+    /// raises autonomy so a LIVE agent authenticates to the gateway and may edit the workspace to solve the task.
+    /// <see cref="AgentTask.Permissions"/> is DERIVED from the resolved autonomy via <see cref="AgentAutonomyPolicy.Derive"/>
+    /// — the same way every other live-agent path (<c>AgentCodeNode</c>, supervisor spawn) does — because the executor +
+    /// harness read <c>Permissions.Network</c> verbatim, NOT the autonomy tier: without this, a Trusted selection would
+    /// leave Network=Off and a confined live agent could never reach the gateway. The null path stays byte-identical —
+    /// <c>Derive(Standard)</c> equals the default <c>AgentPermissions</c> (Network=Off, WriteScope=Workspace). Internal
+    /// (not private) so the override + fallback + permission derivation is unit-pinned directly (InternalsVisibleTo).
     /// </summary>
-    private static AgentTask BuildAgentTask(BenchmarkTask task, BenchmarkMode mode, string workspaceDirectory) => new()
+    internal static AgentTask BuildAgentTask(BenchmarkTask task, BenchmarkMode mode, string workspaceDirectory, BenchmarkAgentSelection? selection)
     {
-        Goal = task.Goal,
-        Harness = task.Harness,
-        RunnerKind = DefaultRunnerKind,
-        WorkspaceDirectory = workspaceDirectory,
-        Autonomy = AgentAutonomyLevel.Standard,
-        TimeoutSeconds = task.TimeoutSeconds,
-        EnableMcpEndpoint = mode == BenchmarkMode.HarnessCliWithMcp ? true : null,
-    };
+        var autonomy = selection?.Autonomy ?? AgentAutonomyLevel.Standard;
+
+        return new AgentTask
+        {
+            Goal = task.Goal,
+            Harness = selection?.Harness ?? task.Harness,
+            RunnerKind = DefaultRunnerKind,
+            WorkspaceDirectory = workspaceDirectory,
+            Model = selection?.Model,
+            ModelCredentialId = selection?.ModelCredentialId,
+            Autonomy = autonomy,
+            Permissions = AgentAutonomyPolicy.Derive(autonomy),
+            TimeoutSeconds = task.TimeoutSeconds,
+            EnableMcpEndpoint = mode == BenchmarkMode.HarnessCliWithMcp ? true : null,
+        };
+    }
 
     /// <summary>Grade the finished run with the task's oracle, against the post-run workspace, on the same runner kind the agent ran on. The grader is independent of the agent (it re-runs the repo's tests).</summary>
     private async Task<BenchmarkGrade> GradeAsync(BenchmarkTask task, string workspaceDirectory, CancellationToken cancellationToken)

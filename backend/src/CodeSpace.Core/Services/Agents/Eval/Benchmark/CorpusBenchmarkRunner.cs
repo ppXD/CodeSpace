@@ -30,14 +30,14 @@ public sealed class CorpusBenchmarkRunner : ICorpusBenchmarkRunner, IScopedDepen
         _logger = logger;
     }
 
-    public async Task<CorpusBenchmarkRun> RunAsync(IReadOnlyList<BenchmarkTask> corpus, Guid teamId, CancellationToken cancellationToken)
+    public async Task<CorpusBenchmarkRun> RunAsync(IReadOnlyList<BenchmarkTask> corpus, Guid teamId, BenchmarkAgentSelection? selection, CancellationToken cancellationToken)
     {
         var results = new List<BenchmarkResult>();
         var errored = new List<CorpusBenchmarkError>();
 
         foreach (var task in corpus)
             foreach (var mode in task.Modes)
-                await RunPairAsync(task, mode, teamId, results, errored, cancellationToken).ConfigureAwait(false);
+                await RunPairAsync(task, mode, teamId, selection, results, errored, cancellationToken).ConfigureAwait(false);
 
         return new CorpusBenchmarkRun
         {
@@ -48,7 +48,7 @@ public sealed class CorpusBenchmarkRunner : ICorpusBenchmarkRunner, IScopedDepen
     }
 
     /// <summary>Stage → run → grade ONE (task,mode) pair in an isolated workspace; a non-cancellation throw is recorded as an infra error (the pair is excluded from the score), never aborting the corpus. The workspace is always reclaimed.</summary>
-    private async Task RunPairAsync(BenchmarkTask task, BenchmarkMode mode, Guid teamId, List<BenchmarkResult> results, List<CorpusBenchmarkError> errored, CancellationToken cancellationToken)
+    private async Task RunPairAsync(BenchmarkTask task, BenchmarkMode mode, Guid teamId, BenchmarkAgentSelection? selection, List<BenchmarkResult> results, List<CorpusBenchmarkError> errored, CancellationToken cancellationToken)
     {
         var workspace = Path.Combine(Path.GetTempPath(), "cs-corpus-bench-" + Guid.NewGuid().ToString("N"));
 
@@ -57,7 +57,7 @@ public sealed class CorpusBenchmarkRunner : ICorpusBenchmarkRunner, IScopedDepen
             Directory.CreateDirectory(workspace);
             _stager.Stage(task.FixtureRef, workspace);
 
-            results.Add(await _runner.RunAsync(task, mode, workspace, teamId, cancellationToken).ConfigureAwait(false));
+            results.Add(await _runner.RunAsync(task, mode, workspace, teamId, selection, cancellationToken).ConfigureAwait(false));
         }
         catch (OperationCanceledException)
         {
