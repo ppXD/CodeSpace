@@ -134,6 +134,28 @@ public class AgentCodeNodeTests
         var primary = task.Workspace!.Repositories.Single();
         primary.RepositoryId.ShouldBe(repo);
         primary.Ref.ShouldBe("run-1/x", "the agent clones the primary repo at the prior turn's branch");
+        primary.RefSoftFallback.ShouldBeFalse("a baseRef with NO baseRefFromSession marker is HARD — an author-pinned ref fails loud if gone, never silently rewritten");
+    }
+
+    [Fact]
+    public async Task A_session_base_ref_marks_the_primary_soft_so_a_pruned_branch_falls_back()
+    {
+        // Correction-4: when the launch projection set baseRef from the SESSION base-refs map, it also sets
+        // baseRefFromSession:true → the primary's ref is SOFT, so a pruned prior branch falls back to the default.
+        var repo = Guid.NewGuid();
+        var inputs = new Dictionary<string, JsonElement>
+        {
+            ["repositoryId"] = Str(repo.ToString()),
+            ["baseRef"] = Str("run-1/x"),
+            ["baseRefFromSession"] = JsonSerializer.SerializeToElement(true),
+        };
+
+        var result = await new AgentCodeNode().RunAsync(BuildContext(RequiredConfig(), resume: null, inputs), CancellationToken.None);
+
+        var task = JsonSerializer.Deserialize<AgentTask>(result.SuspendUntil!.Payload, AgentJson.Options)!;
+        var primary = task.Workspace!.Repositories.Single();
+        primary.Ref.ShouldBe("run-1/x");
+        primary.RefSoftFallback.ShouldBeTrue("a session-inherited baseRef is SOFT — the clone falls back to the default branch if the prior branch was pruned");
     }
 
     [Fact]

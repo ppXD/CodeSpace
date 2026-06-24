@@ -51,7 +51,7 @@ public sealed class RepositoryWorkspaceResolver : IAgentWorkspaceResolver, IScop
 
         foreach (var repo in spec.Repositories)
         {
-            var clone = await ResolveByRepositoryIdAsync(repo.RepositoryId, teamId, cancellationToken, repo.Ref).ConfigureAwait(false)
+            var clone = await ResolveByRepositoryIdAsync(repo.RepositoryId, teamId, cancellationToken, repo.Ref, repo.RefSoftFallback).ConfigureAwait(false)
                 ?? throw new WorkspaceException($"Repository {repo.RepositoryId} could not be resolved.");
 
             provisions.Add(new WorkspaceRepositoryProvision { Alias = repo.Alias, CloneRequest = clone, Path = repo.Path, Access = repo.Access, IsPrimary = repo.IsPrimary });
@@ -64,7 +64,7 @@ public sealed class RepositoryWorkspaceResolver : IAgentWorkspaceResolver, IScop
     internal static WorkspaceSpec? CanonicalWorkspace(AgentTask task) =>
         task.Workspace ?? (task.RepositoryId is { } id ? WorkspaceSpec.FromRepository(id) : null);
 
-    public async Task<WorkspaceRequest?> ResolveByRepositoryIdAsync(Guid repositoryId, Guid teamId, CancellationToken cancellationToken, string? @ref = null)
+    public async Task<WorkspaceRequest?> ResolveByRepositoryIdAsync(Guid repositoryId, Guid teamId, CancellationToken cancellationToken, string? @ref = null, bool softFallback = false)
     {
         var repo = await LoadRepositoryAsync(repositoryId, teamId, cancellationToken).ConfigureAwait(false);
 
@@ -73,11 +73,19 @@ public sealed class RepositoryWorkspaceResolver : IAgentWorkspaceResolver, IScop
 
         var token = await ResolveTokenAsync(repo, cancellationToken).ConfigureAwait(false);
 
+        var requestedRef = string.IsNullOrWhiteSpace(@ref) ? null : @ref;
+
         return new WorkspaceRequest
         {
             RepositoryUrl = repo.CloneUrlHttps,
-            // The spec's per-repo ref when authored, else the repository's default branch (the legacy behaviour).
-            Ref = string.IsNullOrWhiteSpace(@ref) ? repo.DefaultBranch : @ref,
+            // The spec's per-repo ref when requested, else the repository's default branch (the legacy behaviour).
+            Ref = requestedRef ?? repo.DefaultBranch,
+            // Carry the default branch as the soft fallback ONLY for an EXPLICITLY-SOFT session-inherited ref
+            // (softFallback) — a prior produced branch is transient (a merged PR auto-deletes it), so the provider
+            // degrades to the default instead of failing the continuing run. Every other caller (an authored ref, the
+            // acceptance grader's produced-branch ref, the integrate path) passes softFallback=false ⇒ DefaultRef null
+            // ⇒ a HARD ref, used verbatim, fail loud if gone (never silently rewritten) ⇒ byte-identical to before.
+            DefaultRef = softFallback && requestedRef is not null && !string.Equals(requestedRef, repo.DefaultBranch, StringComparison.Ordinal) ? repo.DefaultBranch : null,
             Token = token,
             TokenUsername = token is null ? null : TokenUsernameFor(repo.ProviderInstance.Provider),
         };

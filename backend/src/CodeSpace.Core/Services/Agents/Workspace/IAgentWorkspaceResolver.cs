@@ -23,6 +23,9 @@ public interface IAgentWorkspaceResolver
     /// only a <c>RepositoryId</c> (not a whole <see cref="AgentTask"/>) uses to obtain the clone URL + push token.
     /// <paramref name="ref"/> overrides the checked-out ref (null → the repository's default branch). Throws
     /// <see cref="WorkspaceException"/> when the repository can't be resolved (missing, no clone URL).
+    /// <paramref name="softFallback"/> = true (the session-continuity callers only) marks <paramref name="ref"/> as a
+    /// transient prior produced branch, so the resolved request carries the default branch as a clone fallback if that
+    /// branch was pruned; false (every other caller — authored refs, the acceptance grader, integrate) keeps it HARD.
     /// </summary>
-    Task<WorkspaceRequest?> ResolveByRepositoryIdAsync(Guid repositoryId, Guid teamId, CancellationToken cancellationToken, string? @ref = null);
+    Task<WorkspaceRequest?> ResolveByRepositoryIdAsync(Guid repositoryId, Guid teamId, CancellationToken cancellationToken, string? @ref = null, bool softFallback = false);
 }

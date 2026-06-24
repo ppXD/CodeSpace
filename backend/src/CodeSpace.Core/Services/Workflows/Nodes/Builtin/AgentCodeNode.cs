@@ -151,7 +151,7 @@ public sealed class AgentCodeNode : INodeRuntime
         // primary (the workspace has nowhere to anchor + nothing writable to default to).
         if (related.Count > 0 && repositoryId is null) return Fail("Input 'relatedRepositories' requires a primary 'repositoryId' — pick the primary repository, or remove the related ones.");
 
-        var workspace = AgentWorkspaceAuthoring.ResolveAuthoredWorkspace(repositoryId, related, ReadBaseRef(context));
+        var workspace = AgentWorkspaceAuthoring.ResolveAuthoredWorkspace(repositoryId, related, ReadBaseRef(context), ReadBaseRefFromSession(context));
 
         var task = new AgentTask
         {
@@ -254,6 +254,10 @@ public sealed class AgentCodeNode : INodeRuntime
         context.Inputs.TryGetValue("baseRef", out var v) && v.ValueKind == JsonValueKind.String && !string.IsNullOrWhiteSpace(v.GetString())
             ? v.GetString()
             : null;
+
+    /// <summary>Read the optional <c>baseRefFromSession</c> input — true ONLY when the launch projection set <c>baseRef</c> from a SESSION-inherited prior branch (a transient branch a merged PR can delete). Marks the primary ref SOFT so the clone falls back to the default branch if it was pruned. An author-pinned baseRef never carries this ⇒ stays HARD (fail loud if gone). Absent / non-true → false.</summary>
+    private static bool ReadBaseRefFromSession(NodeRunContext context) =>
+        context.Inputs.TryGetValue("baseRefFromSession", out var v) && v.ValueKind == JsonValueKind.True;
 
     /// <summary>Read the optional <c>repositoryId</c> input. Absent / empty → no repo (null, an analysis-only run). Present-but-malformed → false (a clean node failure).</summary>
     private static bool TryReadRepositoryId(NodeRunContext context, out Guid? repositoryId)
