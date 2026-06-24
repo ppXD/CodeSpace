@@ -1,4 +1,4 @@
-import type { PhaseAgentRef, RunPhase } from "@/api/workflows";
+import type { PhaseAgentRef, RunPhase, RunTimelineEvent } from "@/api/workflows";
 
 /**
  * The run's pure phase/agent model — groups the phase tree into agent WAVES (each phase's claimed agents) and the
@@ -52,6 +52,88 @@ export function buildWaves(phases: readonly RunPhase[]): AgentWave[] {
       agents: [...new Map(p.agents.filter((a) => bestByAgent.get(a.agentRunId) === p).map((a) => [a.agentRunId, a])).values()],
     }))
     .filter((w) => w.agents.length > 0);
+}
+
+/** One item on the composed Activity timeline — a narrative event row, an agent-wave (a phase's agents), or a folded run of detail events. */
+export type ActivityItem =
+  | { kind: "event"; key: string; at: string; event: RunTimelineEvent }
+  | { kind: "wave"; key: string; at: string | null; wave: AgentWave }
+  | { kind: "fold"; key: string; at: string; events: RunTimelineEvent[] };
+
+type EventItem = Extract<ActivityItem, { kind: "event" }>;
+
+/**
+ * Merge the narrative events + the agent waves into ONE chronological stream. Events sort by `occurredAt`; a wave sorts
+ * by its phase `startedAt`, falling back to the earliest event among its own agents, then to the end (so an unanchored
+ * wave never silently vanishes). On an equal timestamp an event sorts BEFORE a wave, so a wave lands just after the
+ * "spawned" event that announced it. The final index tie-break keeps the sort stable + deterministic.
+ */
+export function mergeActivityStream(events: readonly RunTimelineEvent[], waves: readonly AgentWave[]): ActivityItem[] {
+  const items: ActivityItem[] = [
+    ...events.map((e): ActivityItem => ({ kind: "event", key: `e:${e.id}`, at: e.occurredAt, event: e })),
+    ...waves.map((w): ActivityItem => ({ kind: "wave", key: `w:${w.id}`, at: w.startedAt ?? earliestAgentEvent(w, events), wave: w })),
+  ];
+
+  return items
+    .map((it, i) => ({ it, i }))
+    .sort((a, b) => cmpAt(a.it.at, b.it.at) || typeRank(a.it) - typeRank(b.it) || a.i - b.i)
+    .map(({ it }) => it);
+}
+
+/**
+ * The Activity timeline the UI renders: the merged event+wave stream with each run of TWO OR MORE consecutive DETAIL
+ * events collapsed into one "fold" item — so the story reads as milestones + phase waves and tucks the structural churn
+ * (node started/completed, file edits) behind a "N steps" disclosure at its chronological spot. A wave or a milestone
+ * event flushes the run; a LONE detail stays inline (the renderer dims it). An absent level reads as a milestone
+ * (forward-tolerant), never silently folded. The fold key anchors to the item BEFORE it, so a live-poll backfill of an
+ * earlier-sorting detail can't reset the disclosure's open state.
+ */
+export function composeActivity(events: readonly RunTimelineEvent[], waves: readonly AgentWave[]): ActivityItem[] {
+  const merged = mergeActivityStream(events, waves);
+  const out: ActivityItem[] = [];
+  let run: EventItem[] = [];
+  let boundary = "start";
+
+  const flush = () => {
+    if (run.length >= 2) out.push({ kind: "fold", key: `fold:${boundary}`, at: run[0].at, events: run.map((i) => i.event) });
+    else out.push(...run);
+    run = [];
+  };
+
+  for (const item of merged) {
+    if (item.kind === "event" && item.event.level === "Detail") { run.push(item); continue; }
+
+    flush();
+    out.push(item);
+    boundary = item.key;
+  }
+
+  flush();
+  return out;
+}
+
+/** The earliest event time among a wave's agents — the fallback anchor when the phase carries no startedAt yet. */
+function earliestAgentEvent(wave: AgentWave, events: readonly RunTimelineEvent[]): string | null {
+  const ids = new Set(wave.agents.map((a) => a.agentRunId));
+  let earliest: string | null = null;
+
+  for (const e of events) {
+    if (e.agentRunId && ids.has(e.agentRunId) && (earliest === null || e.occurredAt < earliest)) earliest = e.occurredAt;
+  }
+
+  return earliest;
+}
+
+function typeRank(it: ActivityItem): number {
+  return it.kind === "event" ? 0 : 1;
+}
+
+/** Compare two ISO timestamps; a null sorts LAST so an unanchored item goes to the end rather than the top. */
+function cmpAt(a: string | null, b: string | null): number {
+  if (a === b) return 0;
+  if (a === null) return 1;
+  if (b === null) return -1;
+  return a < b ? -1 : 1;
 }
 
 // ── shared agent-status presentation (the tile + the outline roll-up read these) ──
