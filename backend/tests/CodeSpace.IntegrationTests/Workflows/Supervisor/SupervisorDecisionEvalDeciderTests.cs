@@ -75,6 +75,21 @@ public class SupervisorDecisionEvalDeciderTests
         var allFailed = Scenario("all-failed");
         SupervisorDecisionEval.Score(allFailed, await DecideAsync(allFailed, """{"kind":"stop","stop":{"outcome":"failed"}}"""))
             .Pass.ShouldBeFalse("giving up on the first all-failure must fail — retry to recover before quitting");
+
+        // four-subtask-two-failed (SAFETY at high fan-out): MERGING a 4-way fan-out with 2 still-failed subtasks must FAIL.
+        var fourTwoFailed = Scenario("four-subtask-two-failed");
+        SupervisorDecisionEval.Score(fourTwoFailed, await DecideAsync(fourTwoFailed, """{"kind":"merge","merge":{}}"""))
+            .Pass.ShouldBeFalse("merging a 4-way fan-out with 2 failed subtasks must fail — never ship half-broken work");
+
+        // five-subtask-middle-failed: retrying a SUCCEEDED subtask (s1) instead of the failed middle one (s3) must FAIL (positional at high fan-out).
+        var fiveMiddle = Scenario("five-subtask-middle-failed");
+        SupervisorDecisionEval.Score(fiveMiddle, await DecideAsync(fiveMiddle, """{"kind":"retry","retry":{"subtaskId":"s1"}}"""))
+            .Pass.ShouldBeFalse("retrying a succeeded subtask in a 5-way fan-out must fail — the retry must target the FAILED s3");
+
+        // four-subtask-all-succeeded: stopping without merging the largest clean fan-out must FAIL (accepted = {merge}).
+        var fourAllOk = Scenario("four-subtask-all-succeeded");
+        SupervisorDecisionEval.Score(fourAllOk, await DecideAsync(fourAllOk, """{"kind":"stop","stop":{"outcome":"completed"}}"""))
+            .Pass.ShouldBeFalse("quitting without merging four succeeded subtasks must fail — integrate the work");
     }
 
     private static SupervisorGoldenScenario Scenario(string name) => SupervisorDecisionGoldenScenarios.All.Single(s => s.Name == name);
@@ -104,6 +119,10 @@ public class SupervisorDecisionEvalDeciderTests
         "multi-file-conflict" => """{"kind":"resolve","resolve":{}}""",
         "verified-resolution" => """{"kind":"stop","stop":{"outcome":"completed"}}""",
         "unverified-resolution" => """{"kind":"resolve","resolve":{}}""",
+        "four-subtask-two-failed" => """{"kind":"retry","retry":{"subtaskId":"s2"}}""",
+        "five-subtask-middle-failed" => """{"kind":"retry","retry":{"subtaskId":"s3"}}""",
+        "four-subtask-all-succeeded" => """{"kind":"merge","merge":{}}""",
+        "subset-conflict-across-three" => """{"kind":"resolve","resolve":{}}""",
         _ => throw new ArgumentException($"no canned decision for scenario '{scenarioName}'"),
     };
 
