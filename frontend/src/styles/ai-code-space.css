@@ -2535,7 +2535,6 @@ textarea:-webkit-autofill {
 .acs-root .run-outline-caret:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 .acs-root .run-outline-caret > svg { transition: transform .15s ease; }
 .acs-root .run-outline-caret[data-open] > svg { transform: rotate(90deg); }
-.acs-root .run-outline-caret-spacer { width: 16px; flex: none; }
 /* the phase label as a select button — drives the Activity tiles */
 .acs-root button.run-outline-label { appearance: none; background: transparent; border: 0; padding: 0; font: inherit; text-align: left; cursor: pointer; color: inherit; }
 .acs-root button.run-outline-label:hover { text-decoration: underline; }
@@ -2549,11 +2548,11 @@ textarea:-webkit-autofill {
 .acs-root .run-outline-glyph[data-status="failed"]    { color: #9E3535; }
 .acs-root .run-outline-glyph[data-status="waiting"]   { color: #A8590E; }
 .acs-root .run-outline-glyph[data-status="skipped"]   { opacity: .55; }
-.acs-root .run-outline-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.acs-root .run-outline-metric { font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.acs-root .run-outline-label { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.acs-root .run-outline-metric { font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; flex: none; }
 .acs-root .run-outline-metric-fail { color: #9E3535; }
-.acs-root .run-outline-summary { font-size: 11.5px; color: var(--muted); padding: 0 6px 6px 40px; line-height: 1.45; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
-.acs-root .run-outline-agents { list-style: none; margin: 0 0 5px; padding: 0 0 0 40px; display: flex; flex-direction: column; gap: 4px; }
+.acs-root .run-outline-summary { font-size: 11.5px; color: var(--muted); padding: 0 6px 6px 25px; line-height: 1.45; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+.acs-root .run-outline-agents { list-style: none; margin: 0 0 5px; padding: 0 0 0 25px; display: flex; flex-direction: column; gap: 4px; }
 .acs-root .run-outline-agent { display: flex; align-items: center; gap: 7px; font-size: 12px; width: 100%; padding: 3px 5px; margin: 0 -5px; appearance: none; background: transparent; border: 0; border-radius: 5px; text-align: left; font-family: inherit; color: inherit; }
 .acs-root button.run-outline-agent { cursor: pointer; transition: background .12s ease; }
 .acs-root button.run-outline-agent:not([data-selected]):hover { background: var(--panel-2); }
@@ -2564,8 +2563,8 @@ textarea:-webkit-autofill {
 .acs-root .run-outline-agent-dot[data-status="queued"]    { background: #A8590E; }
 .acs-root .run-outline-agent-dot[data-status="failed"]    { background: #9E3535; }
 .acs-root .run-outline-agent-dot[data-busy] { background: #2F6FE0; animation: runOutlinePulse 1.4s ease-in-out infinite; }
-.acs-root .run-outline-agent-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink-2); }
-.acs-root .run-outline-agent-status { font-size: 10px; color: var(--muted-2); text-transform: uppercase; letter-spacing: .04em; }
+.acs-root .run-outline-agent-label { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink-2); }
+.acs-root .run-outline-agent-status { font-size: 10px; color: var(--muted-2); text-transform: uppercase; letter-spacing: .04em; flex: none; }
 .acs-root .run-outline-spin { width: 11px; height: 11px; border-radius: 50%; border: 2px solid #CFE0F7; border-top-color: #2F6FE0; animation: wfSpin .7s linear infinite; }
 .acs-root .run-outline-hollow { width: 10px; height: 10px; border-radius: 50%; border: 1.5px solid var(--line); }
 @keyframes runOutlinePulse { 0%, 100% { box-shadow: 0 0 0 0 rgba(217,119,87,.4); } 50% { box-shadow: 0 0 0 4px rgba(217,119,87,0); } }

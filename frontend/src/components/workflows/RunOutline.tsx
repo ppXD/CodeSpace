@@ -82,10 +82,6 @@ function PhaseRow({ phase, agents, selectedPhaseId, onSelectPhase, selectedAgent
   return (
     <div className="run-outline-phase" data-status={phase.status.toLowerCase()} data-selected={selected || undefined}>
       <div className="run-outline-row">
-        {hasAgents
-          ? <button type="button" className="run-outline-caret" data-open={open || undefined} aria-expanded={open} aria-label="Toggle agents" onClick={() => setOpen((v) => !v)}><Ic.ChevronRight size={12} /></button>
-          : <span className="run-outline-caret-spacer" aria-hidden="true" />}
-
         <span className="run-outline-glyph" data-status={phase.status.toLowerCase()} aria-hidden="true"><PhaseGlyph status={phase.status} /></span>
 
         {hasAgents && onSelectPhase
@@ -94,6 +90,10 @@ function PhaseRow({ phase, agents, selectedPhaseId, onSelectPhase, selectedAgent
 
         {hasAgents && (
           <span className="run-outline-metric">{b.done}/{b.total}{b.failed > 0 && <span className="run-outline-metric-fail"> · {b.failed}✕</span>}</span>
+        )}
+
+        {hasAgents && (
+          <button type="button" className="run-outline-caret" data-open={open || undefined} aria-expanded={open} aria-label="Toggle agents" onClick={() => setOpen((v) => !v)}><Ic.ChevronRight size={12} /></button>
         )}
       </div>
 
