@@ -203,6 +203,9 @@ jobs:
         #     whole-loop). Same de-selection bug as the component job: their class token is "RealModelSession", so the old
         #     single-clause filter ran them on NO lane. Both are [Surface=Engine] DB+git whole-loop tests, so this Postgres
         #     job (which also installs the real coding CLI) is the correct home.
+        #   ~RealModelPlanner → the live-model PLANNER gate (RealModelPlannerWholeLoopE2ETests): a real model authors the
+        #     plan-map-synth decomposition (pool-driven against the gateway) and the real engine fans out over it. Closes
+        #     the orphaned planner-authorship gap (the native-key RealModelPhaseAuthorshipFlowTests ran on no lane).
         # GATING on the real-model-DROVE-to-completion criterion: the HEADLINE drive→accept arc HARD-fails main unless the
         # live model drove the whole arc to the real integrated+accepted head (Drove). A CAPABILITY MISS (the model RAN but
         # parked short) now REDs — made flake-safe by a bounded best-of-N capability-floor (a fresh run per attempt; gates
@@ -213,7 +216,7 @@ jobs:
         run: >
           dotnet test backend/tests/CodeSpace.E2ETests/CodeSpace.E2ETests.csproj
           --no-restore
-          --filter "FullyQualifiedName~RealModelSupervisorWholeLoop|FullyQualifiedName~RealModelSession"
+          --filter "FullyQualifiedName~RealModelSupervisorWholeLoop|FullyQualifiedName~RealModelSession|FullyQualifiedName~RealModelPlanner"
           --logger "console;verbosity=normal"
           --logger "trx;LogFileName=real-model-wholeloop.trx"
           --results-directory backend/TestResults
