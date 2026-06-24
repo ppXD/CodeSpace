@@ -212,6 +212,36 @@ public class TaskLaunchFlowTests
     }
 
     [Fact]
+    public async Task A_repo_surface_launch_resolves_the_repo_provider_and_round_trips_the_repository()
+    {
+        // The frontend Launch composer sends surfaceKind='repo' with a selected repository — this proves the real
+        // seed-provider registry RESOLVES the repo provider (the "No ITaskLaunchSeedProvider for surface 'repo'"
+        // runtime error is gone) and the repo task seeds → routes → projects exactly like the chat-with-repo path.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var repoId = await SeedRepositoryAsync(teamId);
+
+        var request = new TaskLaunchRequest
+        {
+            TeamId = teamId,
+            ActorUserId = userId,
+            SurfaceKind = TaskLaunchSurfaceKinds.Repo,
+            TaskText = "Add structured logging across the service",
+            RepositoryId = repoId,
+            RequestedEffort = TaskEffortModes.Quick,
+        };
+
+        var result = await LaunchAsync(request);
+
+        result.RunId.ShouldNotBe(Guid.Empty);
+        result.SurfaceKind.ShouldBe(TaskLaunchSurfaceKinds.Repo, "the repo surface flows through unflattened");
+
+        var run = await LoadRunAsync(result.RunId);
+        run.DefinitionSnapshotJson.ShouldNotBeNull("the launched definition is frozen inline on the run");
+
+        ReadAgentRepositoryId(run.DefinitionSnapshotJson!).ShouldBe(repoId.ToString(), "the repo task scopes the projected agent.code to the selected repository");
+    }
+
+    [Fact]
     public async Task A_cross_team_repo_is_rejected_fail_closed_and_never_leaked()
     {
         var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
