@@ -108,8 +108,16 @@ public sealed class RealModelSessionConvergenceWholeLoopE2ETests : IDisposable
         var credId = await SeedAgentModelAsync(teamId, BaseUrlFor(baseUrl!), apiKey!, model!);
 
         // REPORT-ONLY: ✅ = the live model converged (built B on turn 1's real branch, both features pass); ⚠️ = it did
-        // not (reported, never gating); a gateway-transport outage is a non-gating infra skip. No assertion inside drive,
-        // so only a genuine WIRING exception propagates (which is what we WANT surfaced while bringing the arm up).
+        // not (reported to the job summary, never gating); a gateway-transport outage is a non-gating infra skip. The
+        // engine swallows an agent/clone/gateway fault into a run Failure, so the drive READS it and returns a ⚠️ verdict
+        // (no-branch / grade-false) rather than throwing — a wiring break shows as a legible ⚠️, never a red.
+        //
+        // EGRESS NOTE: the launched agent's autonomy is effort-clamped to Standard (Network=Off by policy — every effort
+        // route ceilings at Standard), so it reaches the gateway ONLY because the real-model whole-loop lane runs
+        // UNCONFINED (CODESPACE_BWRAP_PATH=/nonexistent) and the bare process inherits host network — the SAME lane the
+        // sibling real-coding arm (RealModelSupervisorWholeLoopE2ETests) relies on. A confined host would sever egress and
+        // this arm would report a permanent no-branch ⚠️ (legible via the verdict below, never a silent green). Granting a
+        // SESSION coding agent first-class networked autonomy is a separate platform decision, tracked as a follow-up.
         await RealModelGate.AssessLiveAsync(Provider, async () =>
         {
             // ── TURN 1: the live agent fixes add.sh; the executor pushes a real produced branch. ──
@@ -119,7 +127,7 @@ public sealed class RealModelSessionConvergenceWholeLoopE2ETests : IDisposable
             var turn1Branch = ReadProducedBranch(firstRun);
 
             if (turn1Branch is null)
-                return (false, $"turn 1 produced no branch — the live agent did not author+push a fix (status={firstRun.Status}). add.sh fix not carried.");
+                return (false, $"turn 1 produced no branch — the live agent did not author+push a fix (status={firstRun.Status}; check gateway egress + the claude CLI on the lane). add.sh fix not carried.");
 
             // ── TURN 2: a CONTINUE — must clone turn 1's branch and add the mul.sh fix without breaking add.sh. ──
             var second = await LaunchAsync(LaunchRequest(teamId, userId, repoId, credId, model!, Turn2Goal, continueSessionId: first.SessionId));
