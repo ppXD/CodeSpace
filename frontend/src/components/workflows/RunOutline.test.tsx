@@ -14,6 +14,7 @@ function phase(o: Partial<RunPhase>): RunPhase {
 }
 const agent = (id: string, status: string, label: string, nodeId?: string, durationMs?: number): PhaseAgentRef => ({ agentRunId: id, status, label, nodeId, durationMs });
 const box = (c: HTMLElement) => c.querySelector<HTMLElement>(".run-outline-box");
+const boxHead = (c: HTMLElement) => c.querySelector<HTMLElement>(".run-outline-box-head");   // the toggle lives on the header button, not the gray card div
 const dots = (c: HTMLElement) => Array.from(c.querySelectorAll<HTMLElement>(".run-outline-dots > i")).map((d) => d.dataset.state);
 
 describe("RunOutline", () => {
@@ -45,18 +46,16 @@ describe("RunOutline", () => {
     expect(container.querySelector('.run-outline-glyph[data-status="waiting"]')).not.toBeNull();
   });
 
-  it("clicking the box selects the phase and toggles its table; a done phase starts collapsed", () => {
+  it("clicking the box header selects the phase and toggles its table; a done phase starts collapsed", () => {
     const onSelectPhase = vi.fn();
-    const make = (selectedPhaseId?: string) => <RunOutline phases={[phase({ id: "code", label: "Implement", status: "Succeeded", agents: [agent("a1", "Succeeded", "scout")] })]} selectedPhaseId={selectedPhaseId} onSelectPhase={onSelectPhase} />;
-    const { container, getByText, rerender } = render(make());
+    const { container, getByText } = render(<RunOutline phases={[phase({ id: "code", label: "Implement", status: "Succeeded", agents: [agent("a1", "Succeeded", "scout")] })]} onSelectPhase={onSelectPhase} />);
 
     expect(container.querySelector(".run-outline-agtable")).toBeNull();   // a done phase starts collapsed
-    fireEvent.click(box(container)!);
+    fireEvent.click(boxHead(container)!);
     expect(onSelectPhase).toHaveBeenCalledWith("code");
-    expect(getByText("scout")).toBeTruthy();   // the box click expanded the table
-
-    rerender(make("code"));
-    expect(container.querySelector(".run-outline-phase[data-selected]")).not.toBeNull();
+    expect(getByText("scout")).toBeTruthy();   // the box-header click expanded the table — the table lives INSIDE the gray card
+    expect(box(container)!.querySelector(".run-outline-agtable")).not.toBeNull();
+    expect(container.querySelector(".run-outline-phase[data-selected]")).toBeNull();   // the gray card never gains a persistent selected highlight — same whether clicked or not
   });
 
   it("clicking an agent name focuses its phase AND the agent", () => {
