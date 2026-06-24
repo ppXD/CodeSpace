@@ -10,7 +10,7 @@ import { useNodeManifests, useResumeRun, useRunPhases, useWorkflowRun } from "@/
 import { AgentRunTimeline } from "./AgentRunTimeline";
 import { AgentToolCalls } from "./AgentToolCalls";
 import { JsonView } from "./JsonView";
-import { RunActivityTimeline } from "./RunActivityTimeline";
+import { RunActivityTiles } from "./RunActivityTiles";
 import { RunCanvas } from "./RunCanvas";
 import { RunStatusBadge } from "./RunStatusBadge";
 import { RunTrace } from "./RunTrace";
@@ -38,7 +38,7 @@ const MAX_EMBED_DEPTH = 3;
  */
 type RunView = "activity" | "canvas" | "changes" | "trace";
 
-export function RunDetailView({ runId, nested = false, depth = 0, onOpenRun, defaultView = "activity", selectedAgentRunId }: { runId: string; nested?: boolean; depth?: number; onOpenRun?: (runId: string) => void; defaultView?: RunView; selectedAgentRunId?: string | null }) {
+export function RunDetailView({ runId, nested = false, depth = 0, onOpenRun, defaultView = "activity", selectedPhaseId, selectedAgentRunId, onSelectAgent }: { runId: string; nested?: boolean; depth?: number; onOpenRun?: (runId: string) => void; defaultView?: RunView; selectedPhaseId?: string | null; selectedAgentRunId?: string | null; onSelectAgent?: (agentRunId: string | null) => void }) {
   const run = useWorkflowRun(runId);
   // The canvas renders the run's OWN version-pinned definition snapshot (run.definition) — never the
   // workflow's current graph — so it stays faithful to how the run actually ran. Manifests drive the
@@ -177,9 +177,9 @@ export function RunDetailView({ runId, nested = false, depth = 0, onOpenRun, def
         <RunTrace runId={runId} />
       ) : (
         <>
-          {/* The live execution timeline — ONE chronological stream (lifecycle + supervisor + agent-wave terminal
-              tiles), the run's story. The lightweight run-state summary sits in the page header above the tabs. */}
-          {!nested && <RunActivityTimeline runId={runId} selectedAgentRunId={selectedAgentRunId} />}
+          {/* Activity — the run's agents as a flat grid of live terminal tiles, driven by the outline (a selected phase
+              filters them; a selected agent opens its terminal). The run's narrative + raw audit live in the Trace tab. */}
+          {!nested && <RunActivityTiles runId={runId} selectedPhaseId={selectedPhaseId} selectedAgentRunId={selectedAgentRunId} onSelectAgent={onSelectAgent} />}
 
           {nested || agents.length === 0 ? (
             // The editor dialog, or a structural workflow with no agents: the node trace IS the content.
