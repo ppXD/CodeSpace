@@ -79,6 +79,22 @@ jobs:
           --results-directory backend/TestResults
           --blame-hang-timeout 5m
 
+      - name: Assert the integration suite actually ran (no silent skip)
+        # `dotnet test --filter` EXITS 0 even when the filter matches ZERO tests, so a Category-trait regression (or a
+        # filter typo) could green this lane while exercising nothing. This is the ONE main lane that lacked the
+        # executed>=1 guard the e2e / sandbox / real-model lanes already carry — closing it upholds the no-silent-skip
+        # invariant uniformly and is the backstop that keeps a dormant fixture (e.g. the planner replay cassette) or a
+        # trait drift from passing GREEN at zero executions.
+        run: |
+          trx=backend/TestResults/integration.trx
+          test -f "$trx" || { echo "::error::trx not found at $trx — the test step produced no results"; exit 1; }
+          executed=$(grep -oE 'executed="[0-9]+"' "$trx" | head -1 | grep -oE '[0-9]+')
+          echo "executed=${executed:-0}"
+          if [ "${executed:-0}" -lt 1 ]; then
+            echo "::error::Expected the integration suite to run, but ${executed:-0} executed — the filter matched nothing (Category-trait regression?)."
+            exit 1
+          fi
+
       - name: Upload test results
         if: always()
         uses: actions/upload-artifact@v4
