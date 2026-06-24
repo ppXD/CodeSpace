@@ -6,6 +6,7 @@ using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Agents.Sandbox;
 using CodeSpace.Core.Services.Agents.Sandbox.Runners;
 using CodeSpace.Core.Services.Agents.Workspace;
+using CodeSpace.Core.Services.Tasks.Phases;
 using CodeSpace.Core.Services.Workflows.Artifacts;
 using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.IntegrationTests.Workflows.Infrastructure;
@@ -678,6 +679,31 @@ public class AgentRunExecutorTests
         result.TokenUsage.ShouldNotBeNull("the usage reported in the stream is persisted to result_jsonb for cost accounting");
         result.TokenUsage!.InputTokens.ShouldBe(1450);
         result.TokenUsage.OutputTokens.ShouldBe(260);
+    }
+
+    [Fact]
+    public async Task Projects_the_captured_token_usage_onto_the_agent_metric_end_to_end()
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        // The capture→persist→PROJECT chain joined deterministically — the gap the sibling token-persist test leaves
+        // open. A harness emits a KNOWN token_count, the REAL executor persists it to result_jsonb, and the SAME
+        // AgentMetricsReader the run-detail outline/terminal consume projects that figure onto the per-agent metric.
+        // Proves the tokens don't just persist but actually REACH the projected ref end-to-end, without a real model.
+        var teamId = await SeedTeamAsync();
+        var runId = await CreateScriptedRunAsync(teamId);
+
+        const string script = """printf 'working on it\n{"type":"token_count","info":{"total_token_usage":{"input_tokens":1450,"output_tokens":260}}}\n'""";
+        await ExecuteAsync(runId, new UsageReportingHarness(script));
+
+        using var scope = _fixture.BeginScope();
+        var metrics = await scope.Resolve<AgentMetricsReader>().ReadAsync(teamId, new[] { runId }, DateTimeOffset.UtcNow, CancellationToken.None);
+
+        var m = metrics[runId];
+        m.Status.ShouldBe(AgentRunStatus.Succeeded);
+        m.InputTokens.ShouldBe(1450, "the harness-emitted token_count is captured, persisted, AND projected onto the metric the UI reads");
+        m.OutputTokens.ShouldBe(260);
+        m.DurationMs.ShouldNotBeNull("a completed run carries a real duration off its persisted timestamps");
     }
 
     [Fact]

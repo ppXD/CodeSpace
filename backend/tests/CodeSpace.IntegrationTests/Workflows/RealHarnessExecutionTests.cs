@@ -4,6 +4,7 @@ using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Agents.Harnesses.Claude;
 using CodeSpace.Core.Services.Agents.Harnesses.Codex;
+using CodeSpace.Core.Services.Tasks.Phases;
 using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Enums;
@@ -57,6 +58,62 @@ public class RealHarnessExecutionTests
         {"type":"assistant","message":{"content":[{"type":"tool_use","name":"Edit","input":{"file_path":"src/billing/Invoice.cs"}}]}}
         {"type":"result","subtype":"success","result":"Fixed the billing tests.","is_error":false}
         """;
+
+    // The codex happy stream PLUS the cumulative usage event real codex emits (`token_count.info.total_token_usage`) —
+    // the run total the production CodexHarness.BuildResult folds into result_jsonb.
+    private const string CodexUsageFixture =
+        """
+        {"type":"agent_reasoning","message":"Analyzing the failing billing tests"}
+        {"type":"agent_message","message":"Fixed the billing calculation."}
+        {"type":"token_count","info":{"total_token_usage":{"input_tokens":1450,"output_tokens":260}}}
+        {"type":"task_complete","message":"completed"}
+        """;
+
+    // The claude happy stream whose final `result` line carries the run `usage` (the shape `--output-format stream-json` emits).
+    private const string ClaudeUsageFixture =
+        """
+        {"type":"system","subtype":"init","cwd":"/tmp/ws"}
+        {"type":"assistant","message":{"content":[{"type":"text","text":"Looking into the billing tests."}]}}
+        {"type":"result","subtype":"success","result":"Fixed the billing tests.","is_error":false,"usage":{"input_tokens":1450,"output_tokens":260}}
+        """;
+
+    [Theory]
+    [InlineData("codex-cli")]
+    [InlineData("claude-code")]
+    public async Task Real_harness_extracts_token_usage_and_projects_it_onto_the_metric(string harnessKind)
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        // The high-fidelity value-correctness proof for BOTH harnesses: the REAL CodexHarness / ClaudeCodeHarness parse
+        // a real-shaped USAGE line off the pipe (codex `token_count.info.total_token_usage`; claude `result.usage`), the
+        // real executor persists it, and AgentMetricsReader — the SAME reader the run-detail outline/terminal consume —
+        // projects that figure onto the per-agent metric. Pins the Claude/Codex token PARITY end-to-end (the unit tests
+        // pin it only at the parser), deterministically, no real model needed.
+        var (commandEnvVar, fixture) = UsageCase(harnessKind);
+        using var cli = new FakeCli(commandEnvVar, fixture);
+
+        var teamId = await SeedTeamAsync();
+        var runId = await CreateRunAsync(teamId, harnessKind, cli.Env());
+
+        await ExecuteRealAsync(runId);
+
+        using var scope = _fixture.BeginScope();
+        var metrics = await scope.Resolve<AgentMetricsReader>().ReadAsync(teamId, new[] { runId }, DateTimeOffset.UtcNow, CancellationToken.None);
+
+        var m = metrics[runId];
+        m.Status.ShouldBe(AgentRunStatus.Succeeded);
+        m.InputTokens.ShouldBe(1450, $"{harnessKind}: the real harness parsed the usage line off the pipe and it reached the projected metric");
+        m.OutputTokens.ShouldBe(260, $"{harnessKind}: output tokens project identically across harnesses");
+        m.DurationMs.ShouldNotBeNull("a completed real-harness run carries a live duration off its persisted timestamps");
+    }
+
+    private (string CommandEnvVar, string Fixture) UsageCase(string harnessKind) =>
+        harnessKind switch
+        {
+            "codex-cli" => (CodexHarness.CommandEnvVar, CodexUsageFixture),
+            "claude-code" => (ClaudeCodeHarness.CommandEnvVar, ClaudeUsageFixture),
+            _ => throw new ArgumentOutOfRangeException(nameof(harnessKind), harnessKind, null),
+        };
 
     [Theory]
     [InlineData("codex-cli")]
