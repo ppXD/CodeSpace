@@ -2524,7 +2524,7 @@ textarea:-webkit-autofill {
 .acs-root .run-outline { display: flex; flex-direction: column; gap: 3px; }
 .acs-root .run-outline-empty { font-size: 12.5px; color: var(--muted); padding: 14px 4px; }
 .acs-root .run-outline-phase { border-radius: 9px; padding: 1px 2px; transition: background .15s ease; }
-.acs-root .run-outline-phase[data-status="active"], .acs-root .run-outline-phase[data-selected] { background: var(--accent-soft); }
+.acs-root .run-outline-phase[data-status="active"] { background: var(--accent-soft); }
 .acs-root .run-outline-row { display: flex; align-items: center; gap: 7px; padding: 5px 2px; font-size: 13px; color: var(--ink-2); }
 .acs-root .run-outline-phase[data-status="active"] .run-outline-row,
 .acs-root .run-outline-phase[data-status="active"] .run-outline-label,
@@ -2572,6 +2572,7 @@ textarea:-webkit-autofill {
 
 /* the Agent · Time table revealed under the box (no dot / status word — the rich rollup lives in the terminal) */
 .acs-root .run-outline-agtable { width: 100%; border-collapse: collapse; font-size: 11.5px; margin: 3px 0 7px; }
+.acs-root .run-outline-agtable th:first-child, .acs-root .run-outline-agtable td:first-child { width: 100%; }   /* Agent greedy → Time aligns at the right edge */
 .acs-root .run-outline-agtable thead th { text-align: left; font-weight: 500; font-size: 9.5px; letter-spacing: .03em; text-transform: uppercase; color: var(--muted-2); padding: 2px 4px; }
 .acs-root .run-outline-agtable td { padding: 3px 4px; }
 .acs-root .run-outline-agtable-time { text-align: right; font-variant-numeric: tabular-nums; color: var(--muted-2); white-space: nowrap; }
