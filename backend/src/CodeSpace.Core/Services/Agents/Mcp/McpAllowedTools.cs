@@ -45,7 +45,7 @@ public static class McpAllowedTools
     }
 
     /// <summary>The fully-qualified <c>mcp__&lt;serverName&gt;__&lt;Kind&gt;</c> names for every tool the tier can call (Allow or RequireApproval — a Deny is omitted), in registry order. Pure + internal so it's unit-pinned independently of the merge.</summary>
-    internal static IEnumerable<string> QualifiedNames(IReadOnlyList<IAgentTool> tools, AgentAutonomyLevel autonomy, string serverName) =>
+    internal static IEnumerable<string> QualifiedNames(IEnumerable<IAgentTool> tools, AgentAutonomyLevel autonomy, string serverName) =>
         tools.Where(t => AgentToolGate.Decide(autonomy, t.RequiresApproval, t.AlwaysRequiresApproval) != AgentToolGateDecision.Deny)
              .Select(t => QualifiedName(serverName, t.Kind));
 

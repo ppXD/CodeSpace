@@ -43,6 +43,7 @@ public sealed class AgentMcpEndpoint : IAsyncDisposable
     private readonly long _fenceEpoch;
     private readonly bool _governanceEnabled;
     private readonly Guid? _approvalConversationId;
+    private readonly McpCatalogMode _catalogMode;
     private readonly CancellationTokenSource _cts;
     private readonly Socket _listener;
     private readonly Task _acceptLoop;
@@ -50,7 +51,7 @@ public sealed class AgentMcpEndpoint : IAsyncDisposable
 
     private bool _disposed;
 
-    public AgentMcpEndpoint(Guid runId, IAgentToolRegistry registry, AgentAutonomyLevel autonomy, Guid teamId, SecretRedactor redactor, string socketPath, string token, IAgentMcpConnectRegistry connects, IServiceScope scope, CancellationToken ct, ILogger logger, long fenceEpoch = 0, bool governanceEnabled = false, Guid? approvalConversationId = null)
+    public AgentMcpEndpoint(Guid runId, IAgentToolRegistry registry, AgentAutonomyLevel autonomy, Guid teamId, SecretRedactor redactor, string socketPath, string token, IAgentMcpConnectRegistry connects, IServiceScope scope, CancellationToken ct, ILogger logger, long fenceEpoch = 0, bool governanceEnabled = false, Guid? approvalConversationId = null, McpCatalogMode catalogMode = McpCatalogMode.Full)
     {
         _runId = runId;
         _registry = registry;
@@ -64,6 +65,7 @@ public sealed class AgentMcpEndpoint : IAsyncDisposable
         _fenceEpoch = fenceEpoch;
         _governanceEnabled = governanceEnabled;
         _approvalConversationId = approvalConversationId;
+        _catalogMode = catalogMode;
         _cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
         _listener = new Socket(AddressFamily.Unix, SocketType.Stream, ProtocolType.Unspecified);
 
@@ -106,10 +108,11 @@ public sealed class AgentMcpEndpoint : IAsyncDisposable
     /// with a restricted author tool list still reaches the governed codespace tools the open endpoint serves. Computed
     /// from the SAME registry + autonomy this endpoint serves with (and the SAME server name the handler advertises), so
     /// the allow-list and the endpoint gate agree by construction. A tool the tier is Denied is omitted (never offered a
-    /// name it would be refused).
+    /// name it would be refused). In ReadOnly catalog mode only read-only tools are projected — the SAME slice the
+    /// handler lists + serves, so the allow-list never names a tool this run's mode would refuse.
     /// </summary>
     public IReadOnlyList<string> AllowedToolNames() =>
-        McpAllowedTools.QualifiedNames(_registry.All, _autonomy, McpRequestHandler.ServerName).ToArray();
+        McpAllowedTools.QualifiedNames(_registry.All.Where(t => _catalogMode == McpCatalogMode.Full || t.IsReadOnly), _autonomy, McpRequestHandler.ServerName).ToArray();
 
     public async ValueTask DisposeAsync()
     {
@@ -177,7 +180,7 @@ public sealed class AgentMcpEndpoint : IAsyncDisposable
         var waiters = connectionScope?.ServiceProvider.GetRequiredService<IToolApprovalWaiterRegistry>();
         var components = connectionScope?.ServiceProvider.GetRequiredService<IInteractionComponentRegistry>();
 
-        var handler = new McpRequestHandler(_registry, _autonomy, _teamId, _redactor, _runId, ledger, _fenceEpoch, _governanceEnabled, _approvalConversationId, bot, waiters, components);
+        var handler = new McpRequestHandler(_registry, _autonomy, _teamId, _redactor, _runId, ledger, _fenceEpoch, _governanceEnabled, _approvalConversationId, bot, waiters, components, _catalogMode);
         var loop = new McpFramingLoop(handler);
 
         try { await loop.RunAsync(reader, writer, ct).ConfigureAwait(false); }

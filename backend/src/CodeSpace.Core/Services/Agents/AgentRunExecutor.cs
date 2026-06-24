@@ -175,13 +175,14 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
 
             // Mint the per-run socket + token ONCE so the endpoint listener and the harness's declaration agree by
             // construction (and so the token can be stamped on the durable handle for a re-attach to re-bind the same
-            // one). Both null on the flag-OFF path → no endpoint, no wiring → byte-identical to today.
+            // one).
             var (socketPath, token) = MintMcpConnect(agentRunId);
 
-            // Open the per-run MCP endpoint (flag-OFF → null → no-op). It lives ONLY for the harness span: the harness
-            // runs synchronously here (RunHarnessAsync → AttachAsync blocks until exit), and `await using` inside the
-            // try tears it down on EVERY exit (success / cancel / generic catch) — NOT gated on leaveWorkspaceForReattach.
-            await using var mcp = OpenMcpEndpointIfEnabled(effectiveTask, agentRunId, effectiveTask.Autonomy, run.TeamId, redactor, socketPath, token, claimedEpoch, effectiveTask.ApprovalConversationId, cancellationToken);
+            // Open the per-run MCP endpoint — it opens for EVERY run now, serving the read-only tools by default and the
+            // full fabric only on opt-in (ResolveMcpCatalogMode). It lives ONLY for the harness span: the harness runs
+            // synchronously here (RunHarnessAsync → AttachAsync blocks until exit), and `await using` inside the try
+            // tears it down on EVERY exit (success / cancel / generic catch) — NOT gated on leaveWorkspaceForReattach.
+            await using var mcp = OpenMcpEndpoint(effectiveTask, agentRunId, effectiveTask.Autonomy, run.TeamId, redactor, socketPath, token, claimedEpoch, effectiveTask.ApprovalConversationId, cancellationToken);
 
             // Wire the live CLI to the fabric ONLY when the endpoint actually opened AND the harness declares an
             // MCP-server shape — a non-null endpoint already encodes "the flag is on AND the bind succeeded", so no
@@ -696,28 +697,37 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     internal static bool ShouldOpenMcpEndpoint(AgentTask task) => IsMcpEndpointEnabled() || task.EnableMcpEndpoint == true;
 
     /// <summary>
+    /// Which slice of the tool catalog this run's endpoint serves. The endpoint now opens for EVERY run; this is the
+    /// ONLY thing the opt-in changes. <see cref="ShouldOpenMcpEndpoint"/> ON (the ambient flag OR the per-run opt-in)
+    /// selects <see cref="McpCatalogMode.Full"/> — the whole registry incl. the side-effecting fabric, byte-identical to
+    /// before. OFF (the default) selects <see cref="McpCatalogMode.ReadOnly"/> — only read-only tools (e.g.
+    /// <c>get_context</c> + the git reads) are served, so a default run still reaches the safe read tools without
+    /// exposing any side effect. Pure + internal so it's unit-pinned.
+    /// </summary>
+    internal static McpCatalogMode ResolveMcpCatalogMode(AgentTask task) => ShouldOpenMcpEndpoint(task) ? McpCatalogMode.Full : McpCatalogMode.ReadOnly;
+
+    /// <summary>
     /// A BOOT diagnostic the worker host calls once at startup so a mis-configured tool fabric is VISIBLE at deploy time,
-    /// not silently discovered as a tool-less run hours later: when the endpoint is enabled deployment-wide
-    /// (<see cref="IsMcpEndpointEnabled"/>) but the <c>codespace-mcp</c> proxy binary can't be resolved at
-    /// <see cref="LocalProcessRunner.McpProxyBinaryPath"/>, log a clear Warning naming the resolved path + the override
-    /// env var; otherwise (endpoint enabled AND the binary present) log a confirming Information line. A no-op when the
-    /// endpoint is OFF (nothing to warn about). Pure logging — never throws, never fails boot (the fabric is optional
-    /// infra). The per-run <see cref="BuildMcpWiring"/> ALSO fail-closes + logs per run; this is the proactive deploy-time
-    /// half of the same fail-closed signal. Internal + static so it's unit-pinnable without a host.
+    /// not silently discovered as a tool-less run hours later. The MCP endpoint now opens for EVERY run (serving the
+    /// read-only tools by default, the full fabric on opt-in), so the <c>codespace-mcp</c> proxy is needed by every run:
+    /// when it can't be resolved at <see cref="LocalProcessRunner.McpProxyBinaryPath"/>, log a clear Warning naming the
+    /// resolved path + the override env var (every run will degrade to TOOL-LESS); otherwise log a confirming
+    /// Information line that also notes whether the full side-effecting fabric is enabled deployment-wide
+    /// (<see cref="IsMcpEndpointEnabled"/>). Pure logging — never throws, never fails boot (the fabric is optional infra).
+    /// The per-run <see cref="BuildMcpWiring"/> ALSO fail-closes + logs per run; this is the proactive deploy-time half of
+    /// the same fail-closed signal. Internal + static so it's unit-pinnable without a host.
     /// </summary>
     public static void LogMcpProxyReadiness(ILogger logger)
     {
-        if (!IsMcpEndpointEnabled()) return;
-
         var proxyPath = LocalProcessRunner.McpProxyBinaryPath();
 
         if (File.Exists(proxyPath))
         {
-            logger.LogInformation("MCP tool fabric enabled ({EnvVar}=on); codespace-mcp proxy resolved at '{ProxyPath}'", McpEndpointEnabledEnvVar, proxyPath);
+            logger.LogInformation("MCP tool fabric ready; codespace-mcp proxy resolved at '{ProxyPath}'. Read-only tools (get_context + git reads) serve by default; the full side-effecting fabric is {FabricState}.", proxyPath, IsMcpEndpointEnabled() ? "ENABLED deployment-wide" : "opt-in per run");
             return;
         }
 
-        logger.LogWarning("MCP tool fabric is enabled ({EnvVar}=on) but the codespace-mcp proxy binary was NOT found at '{ProxyPath}'. Agent runs will fail closed to a TOOL-LESS run (no MCP wiring written). Publish the proxy alongside the worker or set {OverrideEnvVar} to its absolute path.", McpEndpointEnabledEnvVar, proxyPath, LocalProcessRunner.McpProxyPathEnvVar);
+        logger.LogWarning("The codespace-mcp proxy binary was NOT found at '{ProxyPath}'. Agent runs will fail closed to a TOOL-LESS run (no MCP wiring written) — including the read-only tools served by default. Publish the proxy alongside the worker or set {OverrideEnvVar} to its absolute path.", proxyPath, LocalProcessRunner.McpProxyPathEnvVar);
     }
 
     /// <summary>
@@ -730,19 +740,18 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         (LocalProcessRunner.McpSocketPathFor(runId.ToString("N")), McpRunToken.Mint());
 
     /// <summary>
-    /// Open the run's per-run UDS MCP endpoint on the given socket + token when the run's MCP gate is ON
-    /// (<see cref="ShouldOpenMcpEndpoint"/> — the ambient env flag OR the task's per-run opt-in) — null otherwise, so the
-    /// gate-OFF path is byte-identical. Mints a DEDICATED DI scope (its own DbContext) because the framing loop
-    /// runs CONCURRENTLY with the harness + the event-append path, so it must not share the heartbeat / streaming scope.
-    /// The scope is held for the endpoint's life and disposed in the endpoint's <see cref="AgentMcpEndpoint.DisposeAsync"/>.
-    /// The connect registry is a DI singleton, so resolving it from this scope hands a consumer the same map. Fail-soft
-    /// (A10): a host that can't bind a UDS — though the gate is on — disposes the scope, logs a Warning, and returns
-    /// null; the endpoint is optional infra, not the run, so the run still proceeds without it.
+    /// Open the run's per-run UDS MCP endpoint on the given socket + token. The endpoint opens for EVERY run; what it
+    /// SERVES is the <see cref="ResolveMcpCatalogMode"/> mode — ReadOnly by default (only read-only tools, e.g.
+    /// <c>get_context</c> + git reads), Full when the run opted into the side-effecting fabric. Mints a DEDICATED DI
+    /// scope (its own DbContext) because the framing loop runs CONCURRENTLY with the harness + the event-append path, so
+    /// it must not share the heartbeat / streaming scope. The scope is held for the endpoint's life and disposed in the
+    /// endpoint's <see cref="AgentMcpEndpoint.DisposeAsync"/>. The connect registry is a DI singleton, so resolving it
+    /// from this scope hands a consumer the same map. Fail-soft (A10): a host that can't bind a UDS disposes the scope,
+    /// logs a Warning, and returns null; the endpoint is optional infra, not the run, so the run still proceeds without
+    /// it (and a proxy-less deployment still degrades to a tool-less run via the wiring's own fail-close).
     /// </summary>
-    private AgentMcpEndpoint? OpenMcpEndpointIfEnabled(AgentTask task, Guid runId, AgentAutonomyLevel autonomy, Guid teamId, SecretRedactor redactor, string socketPath, string token, long fenceEpoch, Guid? approvalConversationId, CancellationToken ct)
+    private AgentMcpEndpoint? OpenMcpEndpoint(AgentTask task, Guid runId, AgentAutonomyLevel autonomy, Guid teamId, SecretRedactor redactor, string socketPath, string token, long fenceEpoch, Guid? approvalConversationId, CancellationToken ct)
     {
-        if (!ShouldOpenMcpEndpoint(task)) return null;
-
         var scope = _scopeFactory.CreateScope();
         var registry = scope.ServiceProvider.GetRequiredService<IAgentToolRegistry>();
         var connects = scope.ServiceProvider.GetRequiredService<IAgentMcpConnectRegistry>();
@@ -751,9 +760,13 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         // into each connection's handler so a side-effecting tool call is ledger-tracked. Flag-OFF → no ledger rows.
         var governanceEnabled = McpRequestHandler.IsGovernanceEnabled();
 
+        // The catalog mode is the ONLY thing the opt-in changes now: the endpoint ALWAYS opens, serving the read-only
+        // tools by default and the whole fabric only when the run opted in.
+        var catalogMode = ResolveMcpCatalogMode(task);
+
         try
         {
-            return new AgentMcpEndpoint(runId, registry, autonomy, teamId, redactor, socketPath, token, connects, scope, ct, _logger, fenceEpoch, governanceEnabled, approvalConversationId);
+            return new AgentMcpEndpoint(runId, registry, autonomy, teamId, redactor, socketPath, token, connects, scope, ct, _logger, fenceEpoch, governanceEnabled, approvalConversationId, catalogMode);
         }
         // An over-length socket path throws ArgumentOutOfRangeException (UDS endpoint ctor); CreateDirectory can throw
         // IOException / UnauthorizedAccessException. The endpoint is optional infra, not the run, so any of these is a
@@ -772,10 +785,10 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     /// The in-process listener died with the original worker, but the setsid-detached agent keeps running with its 0600
     /// declaration file pointing at THIS socket+token — a fresh token would lock it out. The socket path is reconstructed
     /// from the run id (the single-source-of-truth <see cref="LocalProcessRunner.McpSocketPathFor"/>, the SAME the
-    /// launch bound). Null — no re-open — when the run had no fabric (handle carries no token) or the run's MCP gate is
-    /// off (<see cref="ShouldOpenMcpEndpoint"/> — ambient flag OR per-run opt-in, the SAME gate the launch used, so a
-    /// run opened via the per-run opt-in re-opens here too); the wiring flag is NOT re-checked here (the agent's
-    /// declaration already exists, so the endpoint must serve it regardless). Fail-soft via <see cref="OpenMcpEndpointIfEnabled"/>.
+    /// launch bound). Null — no re-open — only when the run had no fabric (the handle carries no token, e.g. a pre-fabric
+    /// run); the wiring flag is NOT re-checked here (the agent's declaration already exists, so the endpoint must serve
+    /// it regardless). The catalog mode is re-resolved from the SAME task, so the re-opened endpoint serves the SAME
+    /// slice the launch did. Fail-soft via <see cref="OpenMcpEndpoint"/>.
     /// </summary>
     private AgentMcpEndpoint? ReopenMcpEndpointForReattach(AgentTask task, Guid runId, AgentAutonomyLevel autonomy, Guid teamId, SecretRedactor redactor, SandboxHandle handle, long fenceEpoch, Guid? approvalConversationId, CancellationToken ct)
     {
@@ -787,13 +800,14 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         // credential — kept INDEPENDENT of the fold's own resolution (a second decrypt is harmless + idempotent) so the
         // delicate fingerprint-gated marker-only re-tail in ReattachAndFoldAsync is left untouched. The caller degrades
         // it to SecretRedactor.None on a resolution failure, so a deleted/rotated credential never blocks the reattach.
-        return OpenMcpEndpointIfEnabled(task, runId, autonomy, teamId, redactor, socketPath, token, fenceEpoch, approvalConversationId, ct);
+        return OpenMcpEndpoint(task, runId, autonomy, teamId, redactor, socketPath, token, fenceEpoch, approvalConversationId, ct);
     }
 
     /// <summary>
     /// Build the MCP wiring the runner uses to point the live CLI at the fabric — or null (no wiring) unless BOTH hold:
-    /// the endpoint ACTUALLY opened (a non-null endpoint already encodes "the flag is on AND the bind succeeded" — no
-    /// second flag), and the chosen harness declares an MCP-server shape (<see cref="IMcpHarnessDeclaration"/>).
+    /// the endpoint ACTUALLY opened (a non-null endpoint encodes "the bind succeeded"; the endpoint opens for every run
+    /// now, serving the read-only tools by default), and the chosen harness declares an MCP-server shape
+    /// (<see cref="IMcpHarnessDeclaration"/>).
     ///
     /// <para>Fail-CLOSED (A10): the proxy binary the declaration points at must EXIST host-side; if it doesn't (a
     /// mis-configured deployment, a missing publish artifact), write NO declaration + log a Warning — handing the agent

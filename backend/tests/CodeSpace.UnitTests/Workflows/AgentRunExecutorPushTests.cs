@@ -18,6 +18,7 @@ namespace CodeSpace.UnitTests.Workflows;
 /// append). With the flag OFF every run is byte-identical (no push, no handle interaction).
 /// </summary>
 [Trait("Category", "Unit")]
+[Collection("McpEndpointEnvMutation")]   // serialize with McpCatalogModeTests — both mutate CODESPACE_AGENT_MCP_ENDPOINT_ENABLED
 public sealed class AgentRunExecutorPushTests
 {
     private const long ClaimedEpoch = 7;
@@ -204,15 +205,38 @@ public sealed class AgentRunExecutorPushTests
     }
 
     [Fact]
-    public void LogMcpProxyReadiness_is_silent_when_the_endpoint_is_off()
+    public void LogMcpProxyReadiness_warns_when_the_proxy_is_missing_even_with_the_full_fabric_off()
     {
+        // The endpoint now opens for EVERY run (read-only tools by default), so a missing proxy makes EVERY run tool-less
+        // — including the read-only get_context. The boot diagnostic must warn even when the full-fabric flag is off.
         WithMcpEnv(endpoint: null, proxyPath: "/nonexistent/codespace-mcp", () =>
         {
             var logger = new CapturingLogger();
 
             AgentRunExecutor.LogMcpProxyReadiness(logger);
 
-            logger.Entries.ShouldBeEmpty(customMessage: "endpoint OFF → no proxy to warn about → no log (byte-identical to today)");
+            var warning = logger.Entries.ShouldHaveSingleItem();
+            warning.Level.ShouldBe(LogLevel.Warning, customMessage: "the read-only endpoint opens by default, so a missing proxy is a fail-closed Warning even with the full fabric off");
+            warning.Message.ShouldContain("TOOL-LESS");
+        });
+    }
+
+    [Fact]
+    public void LogMcpProxyReadiness_confirms_at_information_with_the_proxy_present_and_the_full_fabric_off()
+    {
+        // The full-fabric flag off is the DEFAULT: read-only tools serve, the side-effecting fabric is opt-in. A present
+        // proxy is a confirming Information line (not silent) since the read-only endpoint will open.
+        var presentBinary = OperatingSystem.IsWindows() ? Environment.ProcessPath! : "/bin/sh";
+
+        WithMcpEnv(endpoint: null, proxyPath: presentBinary, () =>
+        {
+            var logger = new CapturingLogger();
+
+            AgentRunExecutor.LogMcpProxyReadiness(logger);
+
+            var info = logger.Entries.ShouldHaveSingleItem();
+            info.Level.ShouldBe(LogLevel.Information);
+            info.Message.ShouldContain("opt-in", customMessage: "the line notes the full side-effecting fabric is opt-in per run when the ambient flag is off");
         });
     }
 
