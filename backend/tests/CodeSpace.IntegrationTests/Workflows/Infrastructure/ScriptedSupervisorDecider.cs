@@ -32,6 +32,7 @@ public sealed class ScriptedSupervisorDecider : ISupervisorDecider
         {
             SupervisorScriptMode.PlanSpawnStop => PlanSpawnStop(context),
             SupervisorScriptMode.PlanSpawnMergeStop => PlanSpawnMergeStop(context),
+            SupervisorScriptMode.PlanSpawnSingleMergeStop => PlanSpawnSingleMergeStop(context),
             SupervisorScriptMode.PlanSpawnRetryMergeStop => PlanSpawnRetryMergeStop(context),
             SupervisorScriptMode.PlanSpawnMergeResolveMergeStop => PlanSpawnMergeResolveMergeStop(context),
             SupervisorScriptMode.PlanSpawnMergeResolveApprovedMergeStop => PlanSpawnMergeResolveApprovedMergeStop(context),
@@ -88,6 +89,18 @@ public sealed class ScriptedSupervisorDecider : ISupervisorDecider
         1 => Canonical(SupervisorDecisionKinds.Spawn, new SupervisorSpawnPayload { SubtaskIds = new[] { SubtaskA, SubtaskB } }),
         2 => Canonical(SupervisorDecisionKinds.Merge, new SupervisorMergePayload { SynthesisInstruction = "combine both branches" }),
         _ => Canonical(SupervisorDecisionKinds.Stop, new SupervisorStopPayload { Outcome = "completed", Summary = "merged" }),
+    };
+
+    // Single-agent merge arc: turn 0 plan(2) → turn 1 spawn ONLY SubtaskA → turn 2 merge (one branch, no conflict) →
+    // turn 3 stop. Used by the goal-relevance oracle test: ONE agent edits solution.sh, so the integrated head is that
+    // agent's edit alone and the check.sh oracle grades exactly its correctness (two agents both editing solution.sh
+    // would conflict and obscure the signal).
+    private static SupervisorDecision PlanSpawnSingleMergeStop(SupervisorTurnContext context) => context.TurnNumber switch
+    {
+        0 => Plan(context.Goal),
+        1 => Canonical(SupervisorDecisionKinds.Spawn, new SupervisorSpawnPayload { SubtaskIds = new[] { SubtaskA } }),
+        2 => Canonical(SupervisorDecisionKinds.Merge, new SupervisorMergePayload { SynthesisInstruction = "integrate the solution" }),
+        _ => Canonical(SupervisorDecisionKinds.Stop, new SupervisorStopPayload { Outcome = "completed", Summary = "solution integrated" }),
     };
 
     // Failure→retry arc: turn 0 plan(2) → turn 1 spawn(both) → the "do beta" subtask FAILS in FailFirstThenSucceedFakeCli
@@ -206,6 +219,8 @@ public sealed class SupervisorDecisionScript
 
     public void PlanSpawnMergeStop() => Mode = SupervisorScriptMode.PlanSpawnMergeStop;
 
+    public void PlanSpawnSingleMergeStop() => Mode = SupervisorScriptMode.PlanSpawnSingleMergeStop;
+
     public void PlanSpawnRetryMergeStop() => Mode = SupervisorScriptMode.PlanSpawnRetryMergeStop;
 
     public void PlanSpawnMergeResolveMergeStop() => Mode = SupervisorScriptMode.PlanSpawnMergeResolveMergeStop;
@@ -241,6 +256,7 @@ public enum SupervisorScriptMode
     PlanThenStop,
     PlanSpawnStop,
     PlanSpawnMergeStop,
+    PlanSpawnSingleMergeStop,
     PlanSpawnRetryMergeStop,
     PlanSpawnMergeResolveMergeStop,
     PlanSpawnMergeResolveApprovedMergeStop,
