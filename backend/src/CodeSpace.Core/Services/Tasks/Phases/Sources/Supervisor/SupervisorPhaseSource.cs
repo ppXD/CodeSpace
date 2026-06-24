@@ -46,7 +46,7 @@ public sealed class SupervisorPhaseSource : IRunPhaseSource, IScopedDependency
         var ids = decisions.SelectMany(StagedAgentIds).Distinct().ToList();
 
         var runs = await SpawnedAgentRowsAsync(context.TeamId, ids, cancellationToken).ConfigureAwait(false);
-        var toolCounts = await SpawnedAgentToolCountsAsync(context.TeamId, ids, cancellationToken).ConfigureAwait(false);
+        var toolCounts = await AgentMetricsReader.ToolCountsByAgentAsync(_db, context.TeamId, ids, cancellationToken).ConfigureAwait(false);
 
         var agentStatusById = runs.ToDictionary(r => r.Id, r => r.Status);
         var extrasByAgent = ExtrasById(runs, toolCounts, DateTimeOffset.UtcNow);
@@ -167,30 +167,9 @@ public sealed class SupervisorPhaseSource : IRunPhaseSource, IScopedDependency
             .ToListAsync(cancellationToken).ConfigureAwait(false);
     }
 
-    /// <summary>How many SIDE-EFFECTING tool calls each staged agent made — its <c>tool_call_ledger</c> rows team-scoped, EXCLUDING the <c>decision.request</c> envelopes (those are HITL asks, not work). The ledger holds only side-effecting tools (read-only reads aren't tracked), so this counts mutations attempted, any status. An agent with no rows is simply absent (→ count 0 downstream).</summary>
-    private async Task<IReadOnlyDictionary<Guid, int>> SpawnedAgentToolCountsAsync(Guid teamId, IReadOnlyList<Guid> ids, CancellationToken cancellationToken)
-    {
-        if (ids.Count == 0) return EmptyCounts;
-
-        return await _db.ToolCallLedger.AsNoTracking()
-            .Where(t => t.TeamId == teamId && ids.Contains(t.AgentRunId) && t.ToolKind != DecisionToolKinds.DecisionRequest)
-            .GroupBy(t => t.AgentRunId)
-            .Select(g => new { AgentRunId = g.Key, Count = g.Count() })
-            .ToDictionaryAsync(x => x.AgentRunId, x => x.Count, cancellationToken).ConfigureAwait(false);
-    }
-
-    /// <summary>Builds the live per-agent extras (duration + tool count) from the agent rows — pure so the "now" clock + ToolCount default are in one testable place. Duration is final once the run is terminal, else live elapsed at <paramref name="now"/>; null before it starts. A negative span (clock skew) clamps to 0.</summary>
+    /// <summary>Builds the live per-agent extras (duration + tool count) from the agent rows — the duration + tool-count primitives are shared with the node source via <see cref="AgentMetricsReader"/> so the two can't diverge. Duration is final once terminal, else live elapsed at <paramref name="now"/>; null before it starts; tool count defaults to 0.</summary>
     private static IReadOnlyDictionary<Guid, AgentRunExtras> ExtrasById(IReadOnlyList<AgentRunRow> runs, IReadOnlyDictionary<Guid, int> toolCounts, DateTimeOffset now) =>
-        runs.ToDictionary(r => r.Id, r => new AgentRunExtras { DurationMs = DurationMs(r.StartedAt, r.CompletedAt, now), ToolCount = toolCounts.GetValueOrDefault(r.Id) });
-
-    private static long? DurationMs(DateTimeOffset? startedAt, DateTimeOffset? completedAt, DateTimeOffset now)
-    {
-        if (startedAt is null) return null;
-
-        var ms = (long)((completedAt ?? now) - startedAt.Value).TotalMilliseconds;
-
-        return ms < 0 ? 0 : ms;
-    }
+        runs.ToDictionary(r => r.Id, r => new AgentRunExtras { DurationMs = AgentMetricsReader.ComputeDuration(r.StartedAt, r.CompletedAt, now), ToolCount = toolCounts.GetValueOrDefault(r.Id) });
 
     private static RunPhase ToPhase(SupervisorDecisionRecord decision, AgentRollup rollup)
     {
@@ -307,5 +286,4 @@ public sealed class SupervisorPhaseSource : IRunPhaseSource, IScopedDependency
     }
 
     private static readonly IReadOnlyDictionary<Guid, AgentRunExtras> EmptyExtras = new Dictionary<Guid, AgentRunExtras>();
-    private static readonly IReadOnlyDictionary<Guid, int> EmptyCounts = new Dictionary<Guid, int>();
 }

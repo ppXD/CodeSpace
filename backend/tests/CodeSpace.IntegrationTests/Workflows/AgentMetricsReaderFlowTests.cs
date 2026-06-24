@@ -9,6 +9,7 @@ using CodeSpace.IntegrationTests.Workflows.Infrastructure;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Decisions;
 using CodeSpace.Messages.Enums;
+using CodeSpace.Messages.Tasks.Phases;
 using Shouldly;
 
 namespace CodeSpace.IntegrationTests.Workflows;
