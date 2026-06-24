@@ -159,7 +159,7 @@ public sealed class ClaudeCodeHarness : IAgentHarness, IModelCredentialProjector
         // message, instead of the run failing with an opaque "claude exited with code 1".
         var error = events.LastOrDefault(e => e.Kind == AgentEventKind.Error)?.Text
                     ?? (string.IsNullOrWhiteSpace(summary) ? null : summary)
-                    ?? $"claude exited with code {exitCode}";
+                    ?? $"claude exited with code {Sandbox.SandboxExitCode.Describe(exitCode)}";
 
         return new AgentRunResult { Status = AgentRunStatus.Failed, ExitReason = "non-zero-exit", Summary = summary, ChangedFiles = changedFiles, Error = error, TokenUsage = usage };
     }

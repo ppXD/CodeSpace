@@ -146,6 +146,16 @@ jobs:
       # Safe: REQUIRE_SANDBOX is unset (no fail-closed throw), the agent is a trusted test fake, and confinement is gated
       # for real in the sandbox lane. A best-of-N attempt's agent failure here was an EXECUTION fault, not a brain miss.
       CODESPACE_BWRAP_PATH: /nonexistent/bwrap-disabled-on-the-brain-gate-lane
+      # ALSO disable the prlimit resource caps (caps=0 → ProcessRlimits.Wrap returns the command UNCHANGED → no prlimit
+      # wrapper). Disabling bwrap left prlimit ARMED, and RLIMIT_NPROC is a PER-UID cap: on a plain unprivileged shared
+      # ubuntu-latest host it counts the runner's WHOLE process table, so a heavier runner-image baseline can push the
+      # wrapped fake's fork()s over the cap → the kernel SIGNAL-KILLS it → the durable spool's $? marker records
+      # 128+signal → AgentRun Status=Failed → realPatches=0 (the false-red observed from ~02:00 UTC 2026-06-24). The
+      # green prlimit lanes run as ROOT in --privileged containers, where NPROC headroom is unlimited + the process
+      # table is near-empty, so the cap never bites. The agent here is a trusted fake that needs no fork-bomb/file-size
+      # cap; real resource confinement stays gated, fail-closed, in the dedicated sandbox-isolation lane.
+      CODESPACE_AGENT_MAX_PROCESSES: '0'
+      CODESPACE_AGENT_MAX_FILE_MB: '0'
 
     steps:
       - uses: actions/checkout@v4

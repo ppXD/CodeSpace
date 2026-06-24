@@ -144,7 +144,7 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
             await RunEngineAsync(runId);
             await jobClient.WaitForPendingAsync();
 
-            var (outcome, note) = await EvaluateAsync(runId, teamId);
+            var (outcome, note) = await EvaluateAsync(runId, teamId, deterministicFakeAgents: true);   // headline arc = FileWritingFakeCli (always patches on success)
             return (outcome, $"{Provider} model '{model}' whole-loop — {note}");
         });
     }
@@ -305,7 +305,7 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
             await RunEngineAsync(runId);
             await jobClient.WaitForPendingAsync();
 
-            var (outcome, note) = await EvaluateAsync(runId, teamId);
+            var (outcome, note) = await EvaluateAsync(runId, teamId, deterministicFakeAgents: false);   // REAL claude — 0 patches is a genuine capability outcome, never a capture-infra skip
             return (outcome, $"{Provider} model '{model}' CODING-agent goal-relevance (Drove = SOLVED the task) — {note}");
         });
     }
@@ -414,8 +414,8 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
             throw new TimeoutException($"the supervisor brain's gateway failed mid-run (NON-GATING infra): {nodeFailure}");
     }
 
-    /// <summary>The live brain drove the whole loop soundly iff the run reached Success, at least one real agent produced a real patch, and the terminal stop's objective acceptance PASSED (a green check.sh against the integrated head). Classified three-way for safe gating + returns a legible note.</summary>
-    private async Task<(RealModelOutcome Outcome, string Note)> EvaluateAsync(Guid runId, Guid teamId)
+    /// <summary>The live brain drove the whole loop soundly iff the run reached Success, at least one real agent produced a real patch, and the terminal stop's objective acceptance PASSED (a green check.sh against the integrated head). Classified three-way for safe gating + returns a legible note. <paramref name="deterministicFakeAgents"/> (true for the headline FileWritingFakeCli arc) routes a spawned+merged-but-zero-captured-patches run to the non-gating capture-infra skip — a deterministic fake ALWAYS patches on success, so 0 patches is a workspace-capture fault, not a model miss; the real coding-agent arm passes false (its 0 patches IS a capability outcome).</summary>
+    private async Task<(RealModelOutcome Outcome, string Note)> EvaluateAsync(Guid runId, Guid teamId, bool deterministicFakeAgents)
     {
         using var verify = _fixture.BeginScope();
         var db = verify.Resolve<CodeSpaceDbContext>();
@@ -461,6 +461,17 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
         // real integrated branch), so this is an EXPLICIT, legible guard that keeps the gate honest if that coupling is
         // ever loosened — and it asserts the trajectory the note already records rather than leaving it unchecked.
         var spawnedAndMerged = kinds.Contains(SupervisorDecisionKinds.Spawn) && kinds.Contains(SupervisorDecisionKinds.Merge);
+
+        // CAPTURE-infra fault (the symptom-B counterpart of the all-failed case above): the brain spawned+merged and
+        // agents SUCCEEDED, yet ZERO real patches were captured. The headline fake ALWAYS writes a file on success, so
+        // the model cannot have caused this — the file write or the git-diff capture broke under runner load (a
+        // fork-starved capture on a flaky shared host). Route to the non-gating infra skip, not a phantom CapabilityMiss.
+        // Only for the deterministic-fake arc; the real coding agent's 0 patches is a genuine capability outcome.
+        var succeededAgents = agentRuns.Count(r => r.Status == AgentRunStatus.Succeeded);
+        if (RealModelGate.IsCaptureInfraFault(deterministicFakeAgents, spawnedAndMerged, succeededAgents, realPatchCount))
+            throw new AgentExecutionInfraException(
+                $"the brain spawned+merged and {succeededAgents} agent(s) SUCCEEDED, but ZERO real patches were captured ({agentSummary}). "
+              + "The headline fake agent ALWAYS writes a file on success, so a succeeded fan-out with no captured patch is a workspace-capture/execution infra fault on this runner (a fork-starved file write or git-diff capture), NOT a model miss.");
 
         var trail = string.Join("→", kinds);
         var drove = run.Status == WorkflowRunStatus.Success && realPatchCount >= 1 && acceptancePassed && spawnedAndMerged;

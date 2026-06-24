@@ -326,6 +326,19 @@ public static class RealModelGate
     }
 
     /// <summary>
+    /// Whether a whole-loop run that SPAWNED + MERGED with succeeded agents yet captured ZERO real patches is a
+    /// workspace-CAPTURE / execution infra fault rather than a model miss. ONLY meaningful when the spawned agents are
+    /// DETERMINISTIC fakes that ALWAYS write a file on success (the headline arc's <c>FileWritingFakeCli</c>): the model
+    /// cannot make such an agent produce nothing, so a succeeded fan-out with NO captured patch means the file write or
+    /// the git-diff capture broke under runner load (fork-starvation on a flaky shared host) — non-gating infra, the
+    /// counterpart of <see cref="ClassifyAgentExecution"/>'s all-failed case for the "agents succeeded but their work
+    /// was not captured" symptom. NOT applied to a REAL coding agent (claude), where producing no patch is a legitimate
+    /// capability outcome that MUST gate — so the caller passes <paramref name="deterministicFakeAgents"/>=false there.
+    /// </summary>
+    public static bool IsCaptureInfraFault(bool deterministicFakeAgents, bool spawnedAndMerged, int succeededAgents, int realPatchCount) =>
+        deterministicFakeAgents && spawnedAndMerged && succeededAgents > 0 && realPatchCount == 0;
+
+    /// <summary>
     /// Whether a persisted node-failure is a GATEWAY/credential INFRA fault that the decider let propagate (an
     /// <c>LlmApiException</c> of category Transient / RateLimited / AuthFailed) rather than an engine or decision fault.
     /// When such a fault happens DURING a supervisor turn the engine swallows it into a run Failure (whose run-level
