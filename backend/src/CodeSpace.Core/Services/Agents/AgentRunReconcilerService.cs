@@ -314,7 +314,7 @@ public sealed class AgentRunReconcilerService : IAgentRunReconcilerService, ISco
     /// </summary>
     private async Task<StaleOutcome> RecoverFromSpoolAsync(Guid runId, int exitCode, CancellationToken cancellationToken)
     {
-        var result = new AgentRunResult { Status = exitCode == 0 ? AgentRunStatus.Succeeded : AgentRunStatus.Failed, ExitReason = "recovered-from-spool", Error = exitCode == 0 ? null : $"{RecoveredError} The agent exited with code {exitCode}." };
+        var result = new AgentRunResult { Status = exitCode == 0 ? AgentRunStatus.Succeeded : AgentRunStatus.Failed, ExitReason = "recovered-from-spool", Error = exitCode == 0 ? null : $"{RecoveredError} The agent exited with code {Sandbox.SandboxExitCode.Describe(exitCode)}." };
 
         // Completion contract (Slice A1): even on this crash-recovery path, a clean exit can't be called Succeeded while a
         // decision the run raised is still unanswered — re-grade to NeedsReview(NeedsDecision) so the invariant holds here

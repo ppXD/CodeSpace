@@ -362,6 +362,25 @@ public sealed class LocalProcessDurableRunnerTests : IDisposable
     }
 
     [Fact]
+    public void BuildDurableStartInfo_with_resource_caps_disabled_carries_no_prlimit_wrapper()
+    {
+        // The fix for the live-brain whole-loop false-red: a TRUSTED-fake lane sets MaxProcesses=0 + MaxFileSizeMb=0
+        // (via CODESPACE_AGENT_MAX_PROCESSES / _MAX_FILE_MB) so ProcessRlimits.Wrap returns the command UNCHANGED — NO
+        // prlimit wrapper. RLIMIT_NPROC is per-UID; on a plain unprivileged shared host it counts the runner's whole
+        // process table, so under the supervisor's CONCURRENT multi-agent fan-out a 4096 cap starves the agents' fork()s
+        // → signal-kills (Status=Failed) and fork-starved git captures (Succeeded with realPatches=0). Disabling the
+        // caps removes that wrapper entirely; this pins that wiring so a future default can't silently re-arm it.
+        var info = LocalProcessRunner.BuildDurableStartInfo(
+            new SandboxSpec { Command = "mycmd", Args = new[] { "--flag", "value" }, MaxProcesses = 0, MaxFileSizeMb = 0 }, "/tmp/spool-caps");
+
+        info.ArgumentList.Any(a => a.Contains("prlimit")).ShouldBeFalse(
+            "with both resource caps disabled the durable command must carry NO prlimit wrapper (else a per-UID rlimit can signal-kill or fork-starve a trusted fake on a shared host)");
+
+        // The real command still trails (bwrap may still wrap it when confinement is available; only prlimit is gone).
+        info.ArgumentList.TakeLast(3).ShouldBe(new[] { "mycmd", "--flag", "value" });
+    }
+
+    [Fact]
     public void BuildDurableStartInfo_keeps_the_spool_env_vars_through_a_scrub()
     {
         // The spool paths are added AFTER ApplyEnvironment, so a scrub's Clear() can't drop them — otherwise a

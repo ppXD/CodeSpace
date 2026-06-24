@@ -348,6 +348,20 @@ public sealed class RealModelGateTests
         summary.ShouldContain(expectSummary);
     }
 
+    [Theory]
+    // deterministicFakeAgents, spawnedAndMerged, succeededAgents, realPatchCount → isCaptureInfra
+    [InlineData(true, true, 6, 0, true)]    // headline fake: spawned+merged, 6 succeeded, 0 patches → the file write / capture broke → infra
+    [InlineData(true, true, 1, 0, true)]    // a single succeeded fake with no captured patch is still a capture fault
+    [InlineData(true, true, 3, 1, false)]   // a patch WAS captured → the path works; any shortfall is the model's → gates
+    [InlineData(true, false, 6, 0, false)]  // never merged (parked before integrating) → a genuine model miss, NOT capture infra
+    [InlineData(true, true, 0, 0, false)]   // zero succeeded → the all-FAILED case (ClassifyAgentExecution owns it), not this one
+    [InlineData(false, true, 6, 0, false)]  // REAL coding agent: 0 patches is a legit "didn't edit" capability outcome → must gate, never skip
+    public void IsCaptureInfraFault_skips_only_a_deterministic_fake_that_merged_with_succeeded_agents_but_no_patch(
+        bool deterministicFakes, bool spawnedAndMerged, int succeeded, int patches, bool expected)
+    {
+        RealModelGate.IsCaptureInfraFault(deterministicFakes, spawnedAndMerged, succeeded, patches).ShouldBe(expected);
+    }
+
     [Fact]
     public async Task AssessLiveAsync_treats_an_agent_execution_fault_as_non_gating_even_for_the_blessed_wire()
     {

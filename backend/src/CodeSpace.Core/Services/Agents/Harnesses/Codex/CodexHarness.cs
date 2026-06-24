@@ -130,7 +130,7 @@ public sealed class CodexHarness : IAgentHarness, IModelCredentialProjector, IMc
         // AgentRun.error and the node failure instead of an opaque "codex exited with code 1".
         var error = events.LastOrDefault(e => e.Kind == AgentEventKind.Error)?.Text
                     ?? (string.IsNullOrWhiteSpace(summary) ? null : summary)
-                    ?? $"codex exited with code {exitCode}";
+                    ?? $"codex exited with code {Sandbox.SandboxExitCode.Describe(exitCode)}";
 
         return new AgentRunResult { Status = AgentRunStatus.Failed, ExitReason = "non-zero-exit", Summary = summary, ChangedFiles = changedFiles, Error = error, TokenUsage = usage };
     }
