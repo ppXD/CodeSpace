@@ -2397,7 +2397,7 @@ textarea:-webkit-autofill {
 /* a phase on the timeline as a Claude-style CONVERSATION BOX — a collapsed summary (name · N agents · time · dots) that
    drills into the terminal tiles, then one full terminal */
 .acs-root .run-tl-phase { display: flex; flex-direction: column; gap: 8px; }
-.acs-root .run-tl-box { display: flex; flex-direction: column; gap: 8px; width: 100%; text-align: left; appearance: none; font: inherit; cursor: pointer; border: 1px solid var(--line); border-radius: 10px; background: var(--panel-2); padding: 10px 12px; transition: border-color .12s ease, background .12s ease; }
+.acs-root .run-tl-box { display: flex; flex-direction: column; gap: 7px; width: 320px; max-width: 100%; align-self: flex-start; text-align: left; appearance: none; font: inherit; cursor: pointer; border: 1px solid var(--line); border-radius: 10px; background: var(--panel-2); padding: 9px 13px; transition: border-color .12s ease, background .12s ease; }
 .acs-root .run-tl-box:hover { border-color: var(--line-2); background: var(--panel); }
 .acs-root .run-tl-box:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 .acs-root .run-tl-box-head { display: flex; align-items: center; gap: 8px; }
@@ -2527,15 +2527,17 @@ textarea:-webkit-autofill {
 .acs-root .run-state-waiting { color: #A8590E; font-weight: 600; }
 
 /* The outline — the phase tree as the run's navigation skeleton. */
-.acs-root .run-outline { display: flex; flex-direction: column; gap: 3px; position: relative; padding-left: 15px; }
-/* the tree line — a fine 1px vertical guide threading every outline item, with a short horizontal tick to each. It
-   STARTS at the first item's tick (top:13px) and STOPS at the last item's tick (bottom:17px ≈ the agentless end row), so
-   it never overshoots the head/tail. */
-.acs-root .run-outline::before { content: ""; position: absolute; left: 4px; top: 13px; bottom: 17px; width: 1px; background: var(--line); }
+.acs-root .run-outline { display: flex; flex-direction: column; gap: 3px; position: relative; padding-left: 16px; }
+/* the tree connector: ONE continuous 1px spine from the first item's anchor to the last item's, so the line can NEVER
+   break, plus a straight 1px tick to each item — and a small ROUNDED arc overlaid at the head and tail so the bends
+   curve smoothly without the spine overshooting either end. */
+.acs-root .run-outline::before { content: ""; position: absolute; left: 4px; top: 20px; bottom: 24px; width: 1px; background: var(--line); }   /* 20 = head anchor 13 + arc radius 7; 24 = tail anchor-from-bottom 17 + 7 — the spine meets the arcs where they leave, never overshooting them */
 .acs-root .run-outline > .run-outline-phase, .acs-root .run-outline > .run-outline-phases { position: relative; }
-.acs-root .run-outline > .run-outline-phase::before, .acs-root .run-outline > .run-outline-phases::before { content: ""; position: absolute; height: 1px; background: var(--line); }
-.acs-root .run-outline > .run-outline-phase::before { top: 13px; left: -11px; width: 9px; }      /* aligns to the row glyph */
-.acs-root .run-outline > .run-outline-phases::before { top: 8px; left: -12px; width: 11px; }      /* aligns to the "Phases" label; reaches the spine across the block's border */
+.acs-root .run-outline > .run-outline-phase::before, .acs-root .run-outline > .run-outline-phases::before { content: ""; position: absolute; left: -12px; top: 13px; width: 10px; height: 1px; background: var(--line); }
+.acs-root .run-outline > .run-outline-phases::before { top: 8px; }   /* the "Phases" block anchors its tick on its label */
+/* head + tail: overlay a small arc (its left edge sits ON the spine) that curves it into the first / last tick */
+.acs-root .run-outline > :first-child::before { top: 13px; height: 8px; background: none; border-top: 1px solid var(--line); border-left: 1px solid var(--line); border-top-left-radius: 7px; }
+.acs-root .run-outline > :last-child::before { top: 5px; height: 8px; background: none; border-bottom: 1px solid var(--line); border-left: 1px solid var(--line); border-bottom-left-radius: 7px; }
 .acs-root .run-outline-empty { font-size: 12.5px; color: var(--muted); padding: 14px 4px; }
 .acs-root .run-outline-phase { border-radius: 9px; padding: 1px 2px; transition: background .15s ease; }
 .acs-root .run-outline-phase[data-status="active"] { background: var(--accent-soft); }
