@@ -50,9 +50,9 @@ public sealed class LlmDecisionArbiter : IDecisionArbiter, IScopedDependency
         // propagates (the run is being torn down — there is no human to escalate to).
         try
         {
-            var pick = await _modelSelector.ResolveByRowIdAsync(teamId, brainModelId, requireStructured: true, cancellationToken).ConfigureAwait(false);
+            var pick = await _modelSelector.ResolveByRowIdAsync(teamId, brainModelId, cancellationToken).ConfigureAwait(false);
 
-            if (pick == null) return ArbiterVerdict.Escalate("No structured-capable brain model is available in the team's pool — escalated to a human.");
+            if (pick == null) return ArbiterVerdict.Escalate("No brain model is available in the team's pool — escalated to a human.");
 
             var structured = _clientRegistry.All.OfType<IStructuredLLMClient>().FirstOrDefault(c => string.Equals(c.Provider, pick.Credential.Provider, StringComparison.OrdinalIgnoreCase));
 

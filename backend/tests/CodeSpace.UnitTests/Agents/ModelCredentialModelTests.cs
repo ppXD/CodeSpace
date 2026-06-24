@@ -14,14 +14,12 @@ namespace CodeSpace.UnitTests.Agents;
 public class ModelCredentialModelTests
 {
     [Fact]
-    public void A_new_model_defaults_to_enabled_manual_and_no_capabilities()
+    public void A_new_model_defaults_to_enabled_and_manual()
     {
         var model = new ModelCredentialModel { ModelId = "claude-sonnet-4-5" };
 
         model.Enabled.ShouldBeTrue("a freshly added model is usable by default");
         model.Source.ShouldBe(ModelSource.Manual, "the default authoring mode is operator-typed");
-
-        model.SupportsStructuredOutput.ShouldBeFalse("the capability defaults to a safe declares-nothing floor");
 
         model.DisplayName.ShouldBeNull("null DisplayName falls back to the wire ModelId");
     }

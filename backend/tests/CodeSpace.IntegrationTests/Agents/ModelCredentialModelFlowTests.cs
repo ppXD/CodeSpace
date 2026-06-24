@@ -13,7 +13,7 @@ namespace CodeSpace.IntegrationTests.Agents;
 
 /// <summary>
 /// The persistence contract for <see cref="ModelCredentialModel"/> against real Postgres: rows round-trip under
-/// their credential with the capability boundary intact; the (credential, model id) unique index is enforced and
+/// their credential; the (credential, model id) unique index is enforced and
 /// is PER-credential not global; deleting the credential CASCADES its models; the DB defaults match the safe
 /// floor; and — the non-negotiable acceptance gate of slice 1 — a populated model list does NOT perturb
 /// just-in-time credential resolution (the new table is additive metadata the resolver never reads).
@@ -27,12 +27,12 @@ public class ModelCredentialModelFlowTests
     public ModelCredentialModelFlowTests(PostgresFixture fixture) { _fixture = fixture; }
 
     [Fact]
-    public async Task Models_persist_and_round_trip_under_their_credential_with_capabilities()
+    public async Task Models_persist_and_round_trip_under_their_credential()
     {
         var teamId = await SeedTeamAsync();
         var credId = await SeedCredentialAsync(teamId, "Anthropic", key: "sk-x");
 
-        await AddModelAsync(credId, "claude-opus-4-8", displayName: "Opus 4.8", source: ModelSource.Reflected, structured: true);
+        await AddModelAsync(credId, "claude-opus-4-8", displayName: "Opus 4.8", source: ModelSource.Reflected);
         await AddModelAsync(credId, "claude-haiku-4-5");   // defaults
 
         using var scope = _fixture.BeginScope();
@@ -44,12 +44,10 @@ public class ModelCredentialModelFlowTests
         var opus = credential.Models.Single(m => m.ModelId == "claude-opus-4-8");
         opus.DisplayName.ShouldBe("Opus 4.8");
         opus.Source.ShouldBe(ModelSource.Reflected);
-        opus.SupportsStructuredOutput.ShouldBeTrue();
         opus.Enabled.ShouldBeTrue();
 
         var haiku = credential.Models.Single(m => m.ModelId == "claude-haiku-4-5");
         haiku.Source.ShouldBe(ModelSource.Manual, "an added model defaults to operator-typed");
-        haiku.SupportsStructuredOutput.ShouldBeFalse("the capability defaults to the declares-nothing floor");
         haiku.Enabled.ShouldBeTrue("a freshly added model is usable by default");
     }
 
@@ -126,7 +124,6 @@ public class ModelCredentialModelFlowTests
             var row = await db.ModelCredentialModel.AsNoTracking().SingleAsync(m => m.ModelCredentialId == credId);
             row.Enabled.ShouldBeTrue("DB default: enabled = TRUE");
             row.Source.ShouldBe(ModelSource.Manual, "DB default: source = 'Manual' (string, not an int)");
-            row.SupportsStructuredOutput.ShouldBeFalse("DB default: capability floor = FALSE");
             row.DisplayName.ShouldBeNull("nullable, no default → NULL");
         }
     }
@@ -141,7 +138,7 @@ public class ModelCredentialModelFlowTests
 
         if (withModels)
         {
-            await AddModelAsync(credId, "claude-opus-4-8", structured: true);
+            await AddModelAsync(credId, "claude-opus-4-8");
             await AddModelAsync(credId, "claude-haiku-4-5");
         }
 
@@ -159,7 +156,7 @@ public class ModelCredentialModelFlowTests
 
     // ─── Seeding helpers (mirror ModelCredentialResolverFlowTests) ───
 
-    private async Task AddModelAsync(Guid credId, string modelId, string? displayName = null, ModelSource source = ModelSource.Manual, bool structured = false)
+    private async Task AddModelAsync(Guid credId, string modelId, string? displayName = null, ModelSource source = ModelSource.Manual)
     {
         using var scope = _fixture.BeginScope();
         var db = scope.Resolve<CodeSpaceDbContext>();
@@ -170,7 +167,6 @@ public class ModelCredentialModelFlowTests
             ModelId = modelId,
             DisplayName = displayName,
             Source = source,
-            SupportsStructuredOutput = structured,
         });
         await db.SaveChangesAsync();
     }

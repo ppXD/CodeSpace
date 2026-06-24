@@ -6,31 +6,31 @@ namespace CodeSpace.Core.Services.Agents.ModelCredentials;
 /// Picks an in-process LLM call's model + its backing credential ENTIRELY from the team's credentialed-model POOL (the
 /// <c>ModelCredentialModel</c> rows S1–S3 build) — the one mechanism every in-process caller shares: the supervisor
 /// decider, the workflow planner, the <c>llm.complete</c> node, the supervisor synthesis. A qualifying row is an
-/// ENABLED model under an ACTIVE credential of the requested provider, optionally narrowed to structured-output-capable
-/// (the decider/planner need it; a free-text reduce does not), bounded by the operator's allowed-models pool
+/// ENABLED model under an ACTIVE credential of the requested provider, bounded by the operator's allowed-models pool
 /// (null/empty = all the team's models), pinned to one model when the caller has one, preferring a supervisor-
-/// recommended model. The chosen row's backing credential is decrypted just-in-time. <c>null</c> = nothing qualifies →
-/// the caller fails closed. There is NO env "system credential" fallback and NO default model anywhere on this path.
+/// recommended model. The pool is provider+credential GENERIC — it never gates on a model "capability" flag: structured
+/// output is the client's job (<c>IStructuredLLMClient</c> degrades a model that doesn't honour forced tool-use to its
+/// prompt-only JSON floor), so any credentialed model is selectable and a genuinely-incapable one fails at call time,
+/// never as a pre-filter. The chosen row's backing credential is decrypted just-in-time. <c>null</c> = nothing
+/// qualifies → the caller fails closed. NO env "system credential" fallback and NO default model anywhere on this path.
 /// </summary>
 public interface IModelPoolSelector
 {
     /// <summary>
-    /// Select a model + credential for <paramref name="provider"/> (the client the caller will invoke), narrowed to
-    /// structured-capable when <paramref name="requireStructured"/>, bounded by <paramref name="allowedModels"/>
-    /// (null/empty = all), pinned to <paramref name="pinnedModel"/> if set, preferring a recommended one. Null when
-    /// nothing qualifies. Provider + model-id matching is case-insensitive (parity with the agent-side resolver + the
-    /// spawn clamp).
+    /// Select a model + credential for <paramref name="provider"/> (the client the caller will invoke), bounded by
+    /// <paramref name="allowedModels"/> (null/empty = all), pinned to <paramref name="pinnedModel"/> if set, preferring
+    /// a recommended one. Null when nothing qualifies. Provider + model-id matching is case-insensitive (parity with the
+    /// agent-side resolver + the spawn clamp).
     /// </summary>
-    Task<ModelPoolPick?> SelectAsync(Guid teamId, string provider, bool requireStructured, IReadOnlyList<string>? allowedModels, string? pinnedModel, CancellationToken cancellationToken);
+    Task<ModelPoolPick?> SelectAsync(Guid teamId, string provider, IReadOnlyList<string>? allowedModels, string? pinnedModel, CancellationToken cancellationToken);
 
     /// <summary>
     /// Resolve ONE credentialed-model row the operator picked by id (the supervisor's brain model) → its model id + the
-    /// decrypted backing credential. Team-scoped, must be ENABLED under an ACTIVE credential, and (when
-    /// <paramref name="requireStructured"/>) structured-output-capable. <c>null</c> when the row is missing / disabled /
-    /// revoked / not the team's / not structured → the caller fails closed. Unambiguous by construction: a row id names
-    /// exactly one (model, credential) pair, so the same model id under two credentials is never a guess.
+    /// decrypted backing credential. Team-scoped, must be ENABLED under an ACTIVE credential. <c>null</c> when the row is
+    /// missing / disabled / revoked / not the team's → the caller fails closed. Unambiguous by construction: a row id
+    /// names exactly one (model, credential) pair, so the same model id under two credentials is never a guess.
     /// </summary>
-    Task<ModelPoolPick?> ResolveByRowIdAsync(Guid teamId, Guid modelCredentialModelId, bool requireStructured, CancellationToken cancellationToken);
+    Task<ModelPoolPick?> ResolveByRowIdAsync(Guid teamId, Guid modelCredentialModelId, CancellationToken cancellationToken);
 
     /// <summary>
     /// Resolve a supervisor-dispatched agent's effective model NAME (the L4 model authors a name, not a row id) to a

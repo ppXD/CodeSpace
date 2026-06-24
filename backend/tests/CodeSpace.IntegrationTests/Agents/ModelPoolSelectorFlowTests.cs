@@ -13,10 +13,10 @@ namespace CodeSpace.IntegrationTests.Agents;
 /// The shared POOL-DRIVEN model selection (<see cref="IModelPoolSelector"/>) every in-process LLM caller uses — the
 /// supervisor decider, the workflow planner, the <c>llm.complete</c> node, the supervisor synthesis — against real
 /// Postgres: the model + key come entirely from the team's credentialed-model pool. A qualifying row is an enabled
-/// model under an active credential of the right provider, narrowed to structured-capable only when the caller asks
-/// (the decider/planner do; a free-text reduce does not), bounded by the allowed pool (empty = all), the pin if set,
-/// preferring a supervisor-recommended one — and the backing credential is decrypted. Nothing qualifies → null
-/// (the caller fails closed). No env "system" key, no default model.
+/// model under an active credential of the right provider — the pool is capability-GENERIC (no structured-output gate;
+/// the structured CLIENT degrades a model that can't do forced tool-use to a prompt-only JSON floor) — bounded by the
+/// allowed pool (empty = all), the pin if set, preferring a supervisor-recommended one — and the backing credential is
+/// decrypted. Nothing qualifies → null (the caller fails closed). No env "system" key, no default model.
 /// </summary>
 [Collection(PostgresCollection.Name)]
 [Trait("Category", "Integration")]
@@ -27,11 +27,11 @@ public class ModelPoolSelectorFlowTests
     public ModelPoolSelectorFlowTests(PostgresFixture fixture) { _fixture = fixture; }
 
     [Fact]
-    public async Task It_picks_a_structured_capable_model_and_decrypts_its_credential()
+    public async Task It_picks_a_pool_model_and_decrypts_its_credential()
     {
         var teamId = await SeedTeamAsync();
         var credId = await SeedCredentialAsync(teamId, "Anthropic", key: "sk-team");
-        await AddModelAsync(credId, "claude-opus-4-8", structured: true);
+        await AddModelAsync(credId, "claude-opus-4-8");
 
         var pick = await SelectAsync(teamId, "Anthropic");
 
@@ -46,23 +46,24 @@ public class ModelPoolSelectorFlowTests
     {
         var teamId = await SeedTeamAsync();
         var credId = await SeedCredentialAsync(teamId, "Anthropic", key: "sk");
-        await AddModelAsync(credId, "claude-sonnet-4-6", structured: true);
-        await AddModelAsync(credId, "claude-opus-4-8", structured: true);
+        await AddModelAsync(credId, "claude-sonnet-4-6");
+        await AddModelAsync(credId, "claude-opus-4-8");
 
         // No pin, no recommendation flag — the total order (model id, then row id) decides; 'opus' sorts before 'sonnet'.
         (await SelectAsync(teamId, "Anthropic"))!.ModelId.ShouldBe("claude-opus-4-8");
     }
 
     [Fact]
-    public async Task A_free_text_caller_may_pick_a_non_structured_model()
+    public async Task Any_enabled_credentialed_model_is_selectable_the_pool_is_capability_generic()
     {
         var teamId = await SeedTeamAsync();
         var credId = await SeedCredentialAsync(teamId, "Anthropic", key: "sk");
-        await AddModelAsync(credId, "claude-haiku-4-5", structured: false);   // not structured-capable
+        await AddModelAsync(credId, "metis-coder-max");   // a custom gateway model with no "capability" flag
 
-        // requireStructured:false (a free-text reduce, e.g. synthesis) accepts it; requireStructured:true excludes it.
-        (await SelectAsync(teamId, "Anthropic", requireStructured: false))!.ModelId.ShouldBe("claude-haiku-4-5");
-        (await SelectAsync(teamId, "Anthropic", requireStructured: true)).ShouldBeNull();
+        // The pool no longer gates on a structured-output flag: the structured CLIENT degrades a model that doesn't
+        // natively support forced tool-use to a prompt-only JSON floor, so ANY enabled credentialed model is selectable
+        // (Dify's model-node model). A custom gateway model needs no per-model capability declaration to plan/decide.
+        (await SelectAsync(teamId, "Anthropic"))!.ModelId.ShouldBe("metis-coder-max");
     }
 
     [Fact]
@@ -70,8 +71,8 @@ public class ModelPoolSelectorFlowTests
     {
         var teamId = await SeedTeamAsync();
         var credId = await SeedCredentialAsync(teamId, "Anthropic", key: "sk");
-        await AddModelAsync(credId, "claude-opus-4-8", structured: true);
-        await AddModelAsync(credId, "claude-sonnet-4-6", structured: true);
+        await AddModelAsync(credId, "claude-opus-4-8");
+        await AddModelAsync(credId, "claude-sonnet-4-6");
 
         // Empty pool → all qualify (the recommended-tie-break / id order decides).
         (await SelectAsync(teamId, "Anthropic", allowed: null)).ShouldNotBeNull();
@@ -88,8 +89,8 @@ public class ModelPoolSelectorFlowTests
     {
         var teamId = await SeedTeamAsync();
         var credId = await SeedCredentialAsync(teamId, "Anthropic", key: "sk");
-        await AddModelAsync(credId, "claude-opus-4-8", structured: true);
-        await AddModelAsync(credId, "claude-sonnet-4-6", structured: true);
+        await AddModelAsync(credId, "claude-opus-4-8");
+        await AddModelAsync(credId, "claude-sonnet-4-6");
 
         // The pin overrides the default id-order pick (opus would sort first).
         (await SelectAsync(teamId, "Anthropic", pinned: "claude-sonnet-4-6"))!.ModelId.ShouldBe("claude-sonnet-4-6");
@@ -99,15 +100,14 @@ public class ModelPoolSelectorFlowTests
     }
 
     [Theory]
-    [InlineData(false, true, true, "Anthropic")]    // not structured → excluded
-    [InlineData(true, false, true, "Anthropic")]    // disabled → excluded
-    [InlineData(true, true, false, "Anthropic")]    // revoked credential → excluded
-    [InlineData(true, true, true, "OpenAI")]        // wrong provider for the Anthropic client → excluded
-    public async Task Only_an_enabled_structured_model_under_an_active_credential_of_the_provider_qualifies(bool structured, bool enabled, bool active, string provider)
+    [InlineData(false, true, "Anthropic")]    // disabled → excluded
+    [InlineData(true, false, "Anthropic")]    // revoked credential → excluded
+    [InlineData(true, true, "OpenAI")]        // wrong provider for the Anthropic client → excluded
+    public async Task Only_an_enabled_model_under_an_active_credential_of_the_provider_qualifies(bool enabled, bool active, string provider)
     {
         var teamId = await SeedTeamAsync();
         var credId = await SeedCredentialAsync(teamId, provider, key: "sk", active: active);
-        await AddModelAsync(credId, "the-model", structured: structured, enabled: enabled);
+        await AddModelAsync(credId, "the-model", enabled: enabled);
 
         (await SelectAsync(teamId, "Anthropic")).ShouldBeNull();
     }
@@ -126,7 +126,7 @@ public class ModelPoolSelectorFlowTests
     {
         var teamId = await SeedTeamAsync();
         var credId = await SeedCredentialAsync(teamId, "anthropic", key: "sk");   // lower-case provider
-        await AddModelAsync(credId, "claude-opus-4-8", structured: true);
+        await AddModelAsync(credId, "claude-opus-4-8");
 
         // The structured client's provider tag is "Anthropic" (upper) — the credential is "anthropic" (lower): a match.
         (await SelectAsync(teamId, "Anthropic"))!.ModelId.ShouldBe("claude-opus-4-8");
@@ -142,8 +142,8 @@ public class ModelPoolSelectorFlowTests
         var teamId = await SeedTeamAsync();
         var credA = await SeedCredentialAsync(teamId, "Anthropic", key: "sk-a");
         var credB = await SeedCredentialAsync(teamId, "Anthropic", key: "sk-b");
-        await AddModelAsync(credA, "claude-opus-4-8", structured: true);
-        await AddModelAsync(credB, "claude-opus-4-8", structured: true);
+        await AddModelAsync(credA, "claude-opus-4-8");
+        await AddModelAsync(credB, "claude-opus-4-8");
 
         // The total tie-break (model id, then row id) makes the pick STABLE across calls — never an arbitrary key.
         (await SelectAsync(teamId, "Anthropic"))!.Credential.ApiKey
@@ -155,7 +155,7 @@ public class ModelPoolSelectorFlowTests
     {
         var teamId = await SeedTeamAsync();
         var credId = await SeedCredentialAsync(teamId, "Anthropic", key: null, baseUrl: "https://gw/v1");
-        await AddModelAsync(credId, "claude-opus-4-8", structured: true);
+        await AddModelAsync(credId, "claude-opus-4-8");
 
         var pick = await SelectAsync(teamId, "Anthropic");
         pick.ShouldNotBeNull();
@@ -165,20 +165,20 @@ public class ModelPoolSelectorFlowTests
 
     // ─── Helpers ───
 
-    private async Task<ModelPoolPick?> SelectAsync(Guid teamId, string provider, bool requireStructured = true, IReadOnlyList<string>? allowed = null, string? pinned = null)
+    private async Task<ModelPoolPick?> SelectAsync(Guid teamId, string provider, IReadOnlyList<string>? allowed = null, string? pinned = null)
     {
         using var scope = _fixture.BeginScope();
-        return await scope.Resolve<IModelPoolSelector>().SelectAsync(teamId, provider, requireStructured, allowed, pinned, CancellationToken.None);
+        return await scope.Resolve<IModelPoolSelector>().SelectAsync(teamId, provider, allowed, pinned, CancellationToken.None);
     }
 
-    private async Task AddModelAsync(Guid credId, string modelId, bool structured = false, bool enabled = true)
+    private async Task AddModelAsync(Guid credId, string modelId, bool enabled = true)
     {
         using var scope = _fixture.BeginScope();
         var db = scope.Resolve<CodeSpaceDbContext>();
         db.ModelCredentialModel.Add(new ModelCredentialModel
         {
             Id = Guid.NewGuid(), ModelCredentialId = credId, ModelId = modelId, Source = ModelSource.Manual,
-            SupportsStructuredOutput = structured, Enabled = enabled,
+            Enabled = enabled,
         });
         await db.SaveChangesAsync();
     }

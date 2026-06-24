@@ -82,7 +82,7 @@ public sealed class SessionSummarizer : ISessionSummarizer, IScopedDependency
 
             if (client is null) return null;
 
-            var pick = await _modelSelector.SelectAsync(teamId, client.Provider, requireStructured: false, allowedModels: null, pinnedModel: null, cancellationToken).ConfigureAwait(false);
+            var pick = await _modelSelector.SelectAsync(teamId, client.Provider, allowedModels: null, pinnedModel: null, cancellationToken).ConfigureAwait(false);
 
             if (pick is null) return null;   // no credentialed model in the team's pool — fail open
 

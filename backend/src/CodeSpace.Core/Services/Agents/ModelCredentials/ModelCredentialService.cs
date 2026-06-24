@@ -196,7 +196,6 @@ public sealed class ModelCredentialService : IModelCredentialService, IScopedDep
                 if (row.Source == ModelSource.Manual) continue;   // never clobber an operator's manual row
 
                 row.DisplayName = rm.DisplayName;
-                row.SupportsStructuredOutput = rm.SupportsStructuredOutput;
                 row.Enabled = true;   // a re-appeared model is re-enabled
             }
             else
@@ -208,7 +207,6 @@ public sealed class ModelCredentialService : IModelCredentialService, IScopedDep
                     ModelId = rm.ModelId,
                     DisplayName = rm.DisplayName,
                     Source = ModelSource.Reflected,
-                    SupportsStructuredOutput = rm.SupportsStructuredOutput,
                 });
             }
         }

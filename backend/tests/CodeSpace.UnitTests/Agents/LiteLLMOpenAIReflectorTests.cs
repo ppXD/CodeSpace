@@ -9,8 +9,9 @@ namespace CodeSpace.UnitTests.Agents;
 /// <summary>
 /// Pins the OpenAI-compatible / LiteLLM reflector WIRE SHAPE without a live gateway: a captured
 /// <see cref="HttpMessageHandler"/> asserts the request GETs <c>{baseUrl}/v1/models</c> with a bearer token, and the
-/// response's <c>data[].id</c> ids become <see cref="ReflectedModel"/>s enriched from the in-code catalog. CanReflect
-/// gates purely on a configured base URL — a direct vendor key (no base URL) is manual-only.
+/// response's <c>data[].id</c> ids become <see cref="ReflectedModel"/>s verbatim (the pool is capability-generic — a
+/// reflected model is just its id, no per-model flag). CanReflect gates purely on a configured base URL — a direct
+/// vendor key (no base URL) is manual-only.
 /// </summary>
 [Trait("Category", "Unit")]
 public class LiteLLMOpenAIReflectorTests
@@ -29,7 +30,7 @@ public class LiteLLMOpenAIReflectorTests
     }
 
     [Fact]
-    public async Task Reflects_v1_models_and_enriches_known_ids_from_the_catalog()
+    public async Task Reflects_v1_model_ids_verbatim()
     {
         const string response = """
             { "object": "list", "data": [ { "id": "gpt-5.4" }, { "id": "gpt-5.4-codex" }, { "id": "my-co/custom-model" } ] }
@@ -38,12 +39,9 @@ public class LiteLLMOpenAIReflectorTests
 
         var models = await reflector.ListModelsAsync(Credential("https://gateway.local"), CancellationToken.None);
 
+        // Every advertised id passes through unchanged — including a custom-gateway id the in-code world never heard of.
+        // The pool is capability-generic, so there is nothing to enrich: the reflector's job is just to discover ids.
         models.Select(m => m.ModelId).ShouldBe(new[] { "gpt-5.4", "gpt-5.4-codex", "my-co/custom-model" });
-
-        // A known STRUCTURED id is enriched to true; a known non-structured (codex) and an unknown id both take the false floor.
-        models.Single(m => m.ModelId == "gpt-5.4").SupportsStructuredOutput.ShouldBeTrue("a known structured id is enriched from BuiltinModelCatalog");
-        models.Single(m => m.ModelId == "gpt-5.4-codex").SupportsStructuredOutput.ShouldBeFalse("codex is tool-use only, not structured");
-        models.Single(m => m.ModelId == "my-co/custom-model").SupportsStructuredOutput.ShouldBeFalse("an unknown id gets the false floor");
     }
 
     [Fact]

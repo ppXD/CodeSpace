@@ -71,7 +71,7 @@ public static class WorkflowsTestSeed
     /// in these flow tests — one deterministic fake client per tag, registered in <c>PostgresFixture</c>. After the
     /// S6b switch the in-process plane is PURE pool-driven (no env key, no default model): a caller resolves its
     /// model + credential ENTIRELY from the team's credentialed-model pool, so a team running any of these fakes must
-    /// carry a credentialed, enabled, structured-capable model for that provider. Sourced from each fake's own
+    /// carry a credentialed, enabled model for that provider. Sourced from each fake's own
     /// <c>ProviderTag</c> constant so a tag rename is a compile error here, never a silent pool miss.
     /// </summary>
     private static readonly IReadOnlyList<string> InProcessFakeProviderTags = new[]
@@ -85,7 +85,7 @@ public static class WorkflowsTestSeed
     };
 
     /// <summary>
-    /// Seed the team's in-process model pool: one KEYLESS credential + one enabled, structured-capable model per fake
+    /// Seed the team's in-process model pool: one KEYLESS credential + one enabled model per fake
     /// provider tag. The fakes ignore the credential (they're deterministic, never reach a real API), so a keyless row
     /// is correct for CI — the pool only has to make the pool-driven selector RESOLVE (provider + structured + enabled),
     /// not authenticate. The llm.complete nodes in these tests pin no <c>model</c>, so a single recommended model per
@@ -115,7 +115,6 @@ public static class WorkflowsTestSeed
                 ModelCredentialId = credId,
                 ModelId = PoolModelIdFor(provider),
                 Source = ModelSource.Manual,
-                SupportsStructuredOutput = true,
                 Enabled = true,
             });
         }

@@ -628,7 +628,7 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
         await scope.Resolve<IWorkflowEngine>().ExecuteRunAsync(runId, CancellationToken.None);
     }
 
-    /// <summary>Seed a KEYED, structured-capable credentialed-model row for the supervisor brain (the live decider reads its key + base url from this row). Returns the row id → the supervisor's <c>supervisorModelId</c>.</summary>
+    /// <summary>Seed a KEYED credentialed-model row for the supervisor brain (the live decider reads its key + base url from this row). Returns the row id → the supervisor's <c>supervisorModelId</c>.</summary>
     private async Task<(Guid RowId, Guid CredId)> SeedBrainModelAsync(Guid teamId, string baseUrl, string apiKey, string modelId)
     {
         using var scope = _fixture.BeginScope();
@@ -644,7 +644,7 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
         });
 
         var rowId = Guid.NewGuid();
-        db.ModelCredentialModel.Add(new ModelCredentialModel { Id = rowId, ModelCredentialId = credId, ModelId = modelId, Source = ModelSource.Manual, SupportsStructuredOutput = true, Enabled = true });
+        db.ModelCredentialModel.Add(new ModelCredentialModel { Id = rowId, ModelCredentialId = credId, ModelId = modelId, Source = ModelSource.Manual, Enabled = true });
 
         await db.SaveChangesAsync();
         return (rowId, credId);   // RowId = the brain's supervisorModelId; CredId = the credential the AGENT profile authenticates with

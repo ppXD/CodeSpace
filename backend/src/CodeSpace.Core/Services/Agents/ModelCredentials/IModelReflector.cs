@@ -14,6 +14,6 @@ public interface IModelReflector
     /// <summary>Whether this reflector can discover models for the credential (e.g. its base URL is a reachable OpenAI-compatible gateway). False → the credential is manual-only and the refresh no-ops.</summary>
     bool CanReflect(ResolvedModelCredential credential);
 
-    /// <summary>List the models the credential's endpoint advertises, each enriched with capabilities from <see cref="BuiltinModelCatalog"/>. Only called when <see cref="CanReflect"/> is true.</summary>
+    /// <summary>List the models the credential's endpoint advertises (just their ids — the pool is capability-generic). Only called when <see cref="CanReflect"/> is true.</summary>
     Task<IReadOnlyList<ReflectedModel>> ListModelsAsync(ResolvedModelCredential credential, CancellationToken cancellationToken);
 }

@@ -101,24 +101,25 @@ public sealed class LlmCompleteNode : INodeRuntime
 
         var client = _clientRegistry.Resolve(provider);
 
-        var requireStructured = TryReadObject(context.Config, "responseSchema", out var responseSchema);
+        var useStructured = TryReadObject(context.Config, "responseSchema", out var responseSchema);
 
         // Pure pool-driven (S6b): the model + credential come ENTIRELY from the team's credentialed-model pool for this
         // provider — no env key, no default model. The config 'model' is a PIN (must be an enabled pool model), else the
-        // pool's recommended one. A structured node narrows to a structured-capable pool model. Fail closed when nothing
+        // pool's recommended one. The pool is GENERIC — it never gates on a capability flag; a schema-bearing node just
+        // routes through the structured client (which degrades a non-structured model). Fail closed when nothing
         // qualifies — never silently substitute or reach an ambient env key.
         if (!NodeScopeReader.TryReadTeamId(context, out var teamId))
             return NodeResult.Fail("The run carries no team context — llm.complete resolves its model + credential from the team's pool.");
 
-        var pick = await ResolvePoolPickAsync(teamId, provider, requireStructured, modelPin, cancellationToken).ConfigureAwait(false);
+        var pick = await ResolvePoolPickAsync(teamId, provider, modelPin, cancellationToken).ConfigureAwait(false);
 
         if (pick is null)
-            return NodeResult.Fail(NoPoolModelMessage(provider, modelPin, requireStructured));
+            return NodeResult.Fail(NoPoolModelMessage(provider, modelPin));
 
         // Structured mode: a responseSchema constrains the model to schema-valid JSON, surfaced on the
         // 'json' output. Routes through the IStructuredLLMClient sibling capability — clean fail if the
         // resolved provider doesn't offer it.
-        if (requireStructured)
+        if (useStructured)
             return await RunStructuredAsync(context, client, provider, pick, systemPrompt, userPrompt, maxTokens, temperature, sampling, responseSchema, cancellationToken).ConfigureAwait(false);
 
         // Wrap the LLM call with ledger emission. The completed record's response_payload
@@ -240,20 +241,19 @@ public sealed class LlmCompleteNode : INodeRuntime
         });
 
     /// <summary>Resolve the pool pick in a FRESH DI scope (the node is a singleton — it must not capture the scoped selector's DbContext, which concurrent map branches would share + collide on). The pick is a detached POCO, safe to use after the scope disposes.</summary>
-    private async Task<ModelPoolPick?> ResolvePoolPickAsync(Guid teamId, string provider, bool requireStructured, string? modelPin, CancellationToken cancellationToken)
+    private async Task<ModelPoolPick?> ResolvePoolPickAsync(Guid teamId, string provider, string? modelPin, CancellationToken cancellationToken)
     {
         using var scope = _scopeFactory.CreateScope();
         var selector = scope.ServiceProvider.GetRequiredService<IModelPoolSelector>();
 
-        return await selector.SelectAsync(teamId, provider, requireStructured, allowedModels: null, pinnedModel: modelPin, cancellationToken).ConfigureAwait(false);
+        return await selector.SelectAsync(teamId, provider, allowedModels: null, pinnedModel: modelPin, cancellationToken).ConfigureAwait(false);
     }
 
-    /// <summary>The fail-closed message when nothing in the team's pool qualifies — names the provider, the pin (if any), and the structured requirement so the operator knows exactly what to add to the pool.</summary>
-    private static string NoPoolModelMessage(string provider, string? modelPin, bool requireStructured)
+    /// <summary>The fail-closed message when nothing in the team's pool qualifies — names the provider + the pin (if any) so the operator knows exactly what to add to the pool.</summary>
+    private static string NoPoolModelMessage(string provider, string? modelPin)
     {
         var pinPart = modelPin is null ? "" : $" matching '{modelPin}'";
-        var structuredPart = requireStructured ? " with structured output" : "";
-        return $"No model is available in the team's pool for provider '{provider}'{pinPart}{structuredPart}. Add a credentialed, enabled model to run this node.";
+        return $"No model is available in the team's pool for provider '{provider}'{pinPart}. Add a credentialed, enabled model to run this node.";
     }
 
     private static string ReadString(IReadOnlyDictionary<string, JsonElement> bag, string key, string fallback)
