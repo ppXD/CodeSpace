@@ -1,11 +1,15 @@
 import { describe, expect, it } from "vitest";
 
-import type { PhaseAgentRef, RunPhase } from "@/api/workflows";
+import type { PhaseAgentRef, RunPhase, RunTimelineEvent } from "@/api/workflows";
 
-import { buildWaves, formatDuration, waveBreakdown } from "./runActivity";
+import { buildWaves, composeActivity, formatDuration, mergeActivityStream, waveBreakdown, type AgentWave } from "./runActivity";
 
 function agent(id: string): PhaseAgentRef {
   return { agentRunId: id, status: "Running" };
+}
+
+function event(o: Partial<RunTimelineEvent> & { id: string; occurredAt: string }): RunTimelineEvent {
+  return { kind: "x", title: o.id, severity: "Info", sourceKey: "run-record", ...o };
 }
 
 function agentWith(status: string): PhaseAgentRef {
@@ -87,5 +91,63 @@ describe("waveBreakdown", () => {
   it("counts agents per state (queued folds Queued, failed folds every terminal error)", () => {
     const b = waveBreakdown([agentWith("Succeeded"), agentWith("Running"), agentWith("Queued"), agentWith("TimedOut"), agentWith("Cancelled")]);
     expect(b).toEqual({ total: 5, running: 1, done: 1, queued: 1, failed: 2 });
+  });
+});
+
+describe("mergeActivityStream", () => {
+  const wave = (id: string, startedAt: string | null, agents: string[] = ["a1"]): AgentWave => ({ id, label: id, startedAt, agents: agents.map(agent) });
+
+  it("interleaves a wave between events by its startedAt, an event sorting before a wave on a tie", () => {
+    const stream = mergeActivityStream([
+      event({ id: "run-started", occurredAt: "2026-06-23T10:00:00Z" }),
+      event({ id: "spawned", occurredAt: "2026-06-23T10:00:02Z" }),
+      event({ id: "edited", occurredAt: "2026-06-23T10:00:09Z", agentRunId: "a1" }),
+    ], [wave("impl", "2026-06-23T10:00:02Z")]);
+
+    expect(stream.map((i) => (i.kind === "wave" ? `wave:${i.wave.id}` : i.kind === "event" ? i.event.id : "fold"))).toEqual(["run-started", "spawned", "wave:impl", "edited"]);
+  });
+
+  it("anchors a wave with no startedAt to its earliest agent event, else sends it to the end", () => {
+    const anchored = mergeActivityStream([
+      event({ id: "run-started", occurredAt: "2026-06-23T10:00:00Z" }),
+      event({ id: "a1-edit", occurredAt: "2026-06-23T10:00:05Z", agentRunId: "a1" }),
+      event({ id: "later", occurredAt: "2026-06-23T10:00:20Z" }),
+    ], [wave("w", null, ["a1"])]);
+    expect(anchored.map((i) => (i.kind === "event" ? i.event.id : "wave"))).toEqual(["run-started", "a1-edit", "wave", "later"]);
+
+    const unanchored = mergeActivityStream([event({ id: "only", occurredAt: "2026-06-23T10:00:00Z" })], [wave("w", null, ["ghost"])]);
+    expect(unanchored[unanchored.length - 1]).toMatchObject({ kind: "wave" });
+  });
+});
+
+describe("composeActivity", () => {
+  const milestone = (id: string, at: string) => event({ id, occurredAt: at, level: "Milestone" });
+  const detail = (id: string, at: string) => event({ id, occurredAt: at, level: "Detail" });
+
+  it("folds a run of two-or-more consecutive detail events; a lone detail stays inline", () => {
+    const items = composeActivity([
+      milestone("run-started", "2026-06-23T10:00:00Z"),
+      detail("d1", "2026-06-23T10:00:01Z"),
+      detail("d2", "2026-06-23T10:00:02Z"),
+      milestone("mid", "2026-06-23T10:00:03Z"),
+      detail("lone", "2026-06-23T10:00:04Z"),
+      milestone("run-done", "2026-06-23T10:00:05Z"),
+    ], []);
+
+    expect(items.map((i) => i.kind)).toEqual(["event", "fold", "event", "event", "event"]);
+  });
+
+  it("keeps a stable fold key (anchored to the preceding item) when a detail backfills to the run's front", () => {
+    const m = milestone("run-started", "2026-06-23T10:00:00Z");
+    const before = composeActivity([m, detail("d2", "2026-06-23T10:00:02Z"), detail("d3", "2026-06-23T10:00:03Z")], []);
+    const after = composeActivity([m, detail("d1", "2026-06-23T10:00:01Z"), detail("d2", "2026-06-23T10:00:02Z"), detail("d3", "2026-06-23T10:00:03Z")], []);
+
+    const foldKey = (items: ReturnType<typeof composeActivity>) => items.find((i) => i.kind === "fold")?.key;
+    expect(foldKey(after)).toBe(foldKey(before));
+  });
+
+  it("treats an absent level as a milestone (forward-tolerance) — never silently folds", () => {
+    const items = composeActivity([event({ id: "a", occurredAt: "2026-06-23T10:00:00Z" }), event({ id: "b", occurredAt: "2026-06-23T10:00:01Z" })], []);
+    expect(items.map((i) => i.kind)).toEqual(["event", "event"]);
   });
 });

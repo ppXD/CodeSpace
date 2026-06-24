@@ -18,7 +18,7 @@ import { formatDuration, formatTokens, tileState } from "./runActivity";
  * STILL read-only — there is no input; the window only reveals scrollback / tools, never a real shell. The full raw
  * ledger lives in the Trace tab.
  */
-export function AgentTerminal({ agent, onClose }: { agent: PhaseAgentRef; onClose: () => void }) {
+export function AgentTerminal({ agent, onClose }: { agent: PhaseAgentRef; onClose?: () => void }) {
   const [tab, setTab] = useState<"output" | "tools">("output");
 
   const run = useAgentRun(agent.agentRunId);
@@ -44,7 +44,7 @@ export function AgentTerminal({ agent, onClose }: { agent: PhaseAgentRef; onClos
       <div className="agent-terminal-bar">
         <span className="agent-terminal-lights" aria-hidden="true"><i></i><i></i><i></i></span>
         <span className="agent-terminal-title" title={name}>{name}</span>
-        <button type="button" className="agent-terminal-close" onClick={onClose} aria-label="Collapse terminal"><Ic.Collapse size={13} /></button>
+        {onClose && <button type="button" className="agent-terminal-close" onClick={onClose} aria-label="Collapse terminal"><Ic.Collapse size={13} /></button>}
       </div>
 
       {identity.length > 0 && (

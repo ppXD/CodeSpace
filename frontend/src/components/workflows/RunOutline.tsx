@@ -4,7 +4,6 @@ import { Ic } from "@/_imported/ai-code-space/icons";
 import type { PhaseAgentRef, PhaseStatus, RunPhase } from "@/api/workflows";
 
 import { buildWaves, waveBreakdown } from "./runActivity";
-import { isAgentBusy } from "./runPhases";
 
 const NODE_SOURCE = "node-summary";
 
@@ -118,7 +117,8 @@ function PhaseRow({ phase, agents, selectedPhaseId, onSelectPhase, selectedAgent
 function AgentRowInner({ agent }: { agent: PhaseAgentRef }) {
   return (
     <>
-      <span className="run-outline-agent-dot" data-busy={isAgentBusy(agent.status) || undefined} data-status={agent.status.toLowerCase()} aria-hidden="true" />
+      {/* data-busy drives the blue PULSE — Running only; a Queued agent must read amber (data-status), not the busy blue. */}
+      <span className="run-outline-agent-dot" data-busy={agent.status === "Running" || undefined} data-status={agent.status.toLowerCase()} aria-hidden="true" />
       <span className="run-outline-agent-label">{agent.label ?? agent.iterationKey ?? agent.agentRunId.slice(0, 8)}</span>
       <span className="run-outline-agent-status">{agent.status.toLowerCase()}</span>
     </>

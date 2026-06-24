@@ -120,6 +120,14 @@ describe("RunOutline", () => {
     expect(container.querySelector(".run-outline-label")?.textContent).toBe("code");
   });
 
+  it("renders a queued agent's dot as amber (data-status), never the busy-blue pulse", () => {
+    const { container } = render(<RunOutline phases={[phase({ id: "code", label: "code", status: "Active", agents: [agent("a1", "Queued", "deploy")] })]} onSelectAgent={vi.fn()} />);
+
+    const dot = container.querySelector(".run-outline-agent-dot");
+    expect(dot?.getAttribute("data-status")).toBe("queued");
+    expect(dot?.hasAttribute("data-busy")).toBe(false);   // a queued agent isn't "busy" → it reads amber, not the running blue
+  });
+
   it("renders agent rows as plain (non-button) when no handler is given", () => {
     const { container } = render(<RunOutline phases={[phase({ status: "Active", agents: [agent("a1", "Running", "solo")] })]} />);
     expect(container.querySelector("button.run-outline-agent")).toBeNull();

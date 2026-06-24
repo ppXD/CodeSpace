@@ -314,7 +314,7 @@ describe("RunDetailView — Live-work center", () => {
 
     render(<RunDetailView runId="parent-1" />);
 
-    expect(screen.getByRole("button", { name: /backend-fix/ })).toBeInTheDocument();   // the agent's fleet dot
+    expect(screen.getByText("backend-fix")).toBeInTheDocument();        // the single agent's inline terminal (its title)
     expect(screen.getByText("Workflow nodes")).toBeInTheDocument();     // the node trace is now a fold
     expect(screen.queryByText("Node execution")).not.toBeInTheDocument(); // …lazy, so unmounted while collapsed
   });

@@ -10,7 +10,7 @@ import { useNodeManifests, useResumeRun, useRunPhases, useWorkflowRun } from "@/
 import { AgentRunTimeline } from "./AgentRunTimeline";
 import { AgentToolCalls } from "./AgentToolCalls";
 import { JsonView } from "./JsonView";
-import { RunActivityTiles } from "./RunActivityTiles";
+import { RunActivityTimeline } from "./RunActivityTimeline";
 import { RunCanvas } from "./RunCanvas";
 import { RunStatusBadge } from "./RunStatusBadge";
 import { RunTrace } from "./RunTrace";
@@ -177,9 +177,9 @@ export function RunDetailView({ runId, nested = false, depth = 0, onOpenRun, def
         <RunTrace runId={runId} />
       ) : (
         <>
-          {/* Activity — the run's agents as a flat grid of live terminal tiles, driven by the outline (a selected phase
-              filters them; a selected agent opens its terminal). The run's narrative + raw audit live in the Trace tab. */}
-          {!nested && <RunActivityTiles runId={runId} selectedPhaseId={selectedPhaseId} selectedAgentRunId={selectedAgentRunId} onSelectAgent={onSelectAgent} />}
+          {/* Activity — the run's execution story as one chronological timeline: milestone events, each phase's agents
+              as an inline terminal / tile wave, decisions at their point. The outline scrolls it; Trace has the raw audit. */}
+          {!nested && <RunActivityTimeline runId={runId} selectedPhaseId={selectedPhaseId} selectedAgentRunId={selectedAgentRunId} onSelectAgent={onSelectAgent} />}
 
           {nested || agents.length === 0 ? (
             // The editor dialog, or a structural workflow with no agents: the node trace IS the content.
