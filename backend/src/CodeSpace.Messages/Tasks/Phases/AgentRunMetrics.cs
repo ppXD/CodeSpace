@@ -8,7 +8,9 @@ namespace CodeSpace.Messages.Tasks.Phases;
 /// <see cref="Status"/> is the ground-truth <see cref="AgentRunStatus"/>; <see cref="DurationMs"/> is LIVE (recomputed
 /// each read); tokens come from the completed <c>ResultJson</c> (null until done, or when the harness reported none);
 /// <see cref="Model"/> from the task envelope (null when unpinned). <see cref="ToolCount"/> is a real 0+ count of the
-/// agent's side-effecting tool calls. The non-status figures map 1:1 onto <see cref="PhaseAgentRef"/>'s metric fields.
+/// agent's side-effecting tool calls. <see cref="CostUsd"/> is the realized spend (model × tokens, fail-open null when
+/// the model is unpriced); <see cref="FilesChanged"/> is the git-truth changed-file count off the result. The
+/// non-status figures map 1:1 onto <see cref="PhaseAgentRef"/>'s metric fields.
 /// </summary>
 public sealed record AgentRunMetrics
 {
@@ -23,4 +25,8 @@ public sealed record AgentRunMetrics
     public int ToolCount { get; init; }
 
     public string? Model { get; init; }
+
+    public decimal? CostUsd { get; init; }
+
+    public int? FilesChanged { get; init; }
 }

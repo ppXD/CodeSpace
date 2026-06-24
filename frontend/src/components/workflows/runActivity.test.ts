@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import type { PhaseAgentRef, RunPhase, RunTimelineEvent } from "@/api/workflows";
 
-import { buildWaves, composeActivity, formatDuration, mergeActivityStream, waveBreakdown, type AgentWave } from "./runActivity";
+import { buildWaves, composeActivity, formatDuration, formatUsd, mergeActivityStream, waveBreakdown, type AgentWave } from "./runActivity";
 
 function agent(id: string): PhaseAgentRef {
   return { agentRunId: id, status: "Running" };
@@ -84,6 +84,16 @@ describe("formatDuration", () => {
   it("renders an unknown duration as an em dash", () => {
     expect(formatDuration(null)).toBe("—");
     expect(formatDuration(undefined)).toBe("—");
+  });
+});
+
+describe("formatUsd", () => {
+  it("renders a dollar or more with 2dp, sub-dollar with up to 4dp (trailing zeros trimmed)", () => {
+    expect(formatUsd(30)).toBe("$30.00");
+    expect(formatUsd(12.3)).toBe("$12.30");
+    expect(formatUsd(0.0045)).toBe("$0.0045");
+    expect(formatUsd(0.055)).toBe("$0.055");   // 0.0550 → trailing zero trimmed
+    expect(formatUsd(0.05)).toBe("$0.05");
   });
 });
 

@@ -92,6 +92,31 @@ public sealed class AgentMetricsReaderFlowTests
         m.OutputTokens.ShouldBeNull();
         m.Model.ShouldBe("claude-opus-4", "the model is known from the task envelope even before the result lands");
         m.ToolCount.ShouldBe(0, "no side-effecting tool calls yet");
+        m.CostUsd.ShouldBeNull("no tokens yet → no cost");
+        m.FilesChanged.ShouldBeNull("no result blob yet → unknown file count");
+    }
+
+    [Fact]
+    public async Task Reads_cost_from_the_priced_model_and_the_changed_file_count()
+    {
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+
+        var t0 = DateTimeOffset.UtcNow;
+        var resultJson = JsonSerializer.Serialize(new AgentRunResult
+        {
+            Status = AgentRunStatus.Succeeded, ExitReason = "completed",
+            TokenUsage = new AgentTokenUsage { InputTokens = 1_000_000, OutputTokens = 1_000_000 },
+            ChangedFiles = new[] { "src/a.cs", "src/b.cs", "README.md" },
+        }, AgentJson.Options);
+
+        var agentId = await SeedAgentRunAsync(teamId, AgentRunStatus.Succeeded, t0.AddSeconds(-10), t0, Task("claude-opus-4-8"), resultJson);
+
+        using var scope = _fixture.BeginScope();
+        var metrics = await scope.Resolve<AgentMetricsReader>().ReadAsync(teamId, new[] { agentId }, DateTimeOffset.UtcNow, CancellationToken.None);
+
+        var m = metrics[agentId];
+        m.CostUsd.ShouldBe(30m, "claude-opus-4-8 is priced $5/$25 per M → 1M in + 1M out = $30, computed once in the reader");
+        m.FilesChanged.ShouldBe(3, "the git-truth changed-file count off the persisted result");
     }
 
     private static string Result(int input, int output) =>

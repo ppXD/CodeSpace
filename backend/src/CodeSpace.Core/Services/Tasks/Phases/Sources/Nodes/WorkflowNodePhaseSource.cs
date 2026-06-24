@@ -157,6 +157,8 @@ public sealed class WorkflowNodePhaseSource : IRunPhaseSource, IScopedDependency
             OutputTokens = metrics?.OutputTokens,
             DurationMs = metrics?.DurationMs,
             ToolCount = metrics?.ToolCount,
+            CostUsd = metrics?.CostUsd,
+            FilesChanged = metrics?.FilesChanged,
         };
     }
 

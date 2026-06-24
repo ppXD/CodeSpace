@@ -1,6 +1,7 @@
 using CodeSpace.Core.DependencyInjection;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
+using CodeSpace.Core.Services.Agents.Cost;
 using CodeSpace.Core.Services.Supervisor;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Decisions;
@@ -219,21 +220,24 @@ public sealed class SupervisorPhaseSource : IRunPhaseSource, IScopedDependency
         /// <summary>True when the real agent row was found (status resolved) — the gate for emitting a ref.</summary>
         public bool Knows(Guid id) => _status.ContainsKey(id);
 
-        /// <summary>An agent ref carrying its ground-truth status, the ledger compact (a blank model reads as null — no chip), and the live extras (absent → duration/tool null).</summary>
+        /// <summary>An agent ref carrying its ground-truth status, the ledger compact (a blank model reads as null — no chip; cost = model×tokens, fail-open null when unpriced; files = the compact's git-truth changed-file count), and the live extras (absent → duration/tool null).</summary>
         public PhaseAgentRef RefFor(Guid id)
         {
             var compact = _compact.GetValueOrDefault(id);
             var extras = _extras.GetValueOrDefault(id);
+            var model = string.IsNullOrWhiteSpace(compact?.Model) ? null : compact!.Model;
 
             return new PhaseAgentRef
             {
                 AgentRunId = id,
                 Status = _status[id].ToString(),
-                Model = string.IsNullOrWhiteSpace(compact?.Model) ? null : compact!.Model,
+                Model = model,
                 InputTokens = compact?.InputTokens,
                 OutputTokens = compact?.OutputTokens,
                 DurationMs = extras?.DurationMs,
                 ToolCount = extras?.ToolCount,
+                CostUsd = compact is null ? null : AgentCostPricing.CostUsd(model, compact.InputTokens, compact.OutputTokens),
+                FilesChanged = compact?.ChangedFiles.Count,
             };
         }
     }

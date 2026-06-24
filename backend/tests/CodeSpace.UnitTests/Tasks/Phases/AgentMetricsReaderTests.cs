@@ -76,5 +76,35 @@ public class AgentMetricsReaderTests
         m.Model.ShouldBeNull();
         m.ToolCount.ShouldBe(1);         // the non-JSON figures still project
         m.DurationMs.ShouldBe(2_000);
+        m.CostUsd.ShouldBeNull();        // no model/tokens → no cost
+        m.FilesChanged.ShouldBeNull();   // no result → unknown file count
+    }
+
+    [Fact]
+    public void Prices_a_priced_model_and_counts_changed_files()
+    {
+        // claude-opus-4-8 is priced $5/$25 per M tokens (input/output). 1M in + 1M out → $5 + $25 = $30. Three files → 3.
+        var resultJson = JsonSerializer.Serialize(new AgentRunResult
+        {
+            Status = AgentRunStatus.Succeeded, ExitReason = "completed",
+            TokenUsage = new AgentTokenUsage { InputTokens = 1_000_000, OutputTokens = 1_000_000 },
+            ChangedFiles = new[] { "src/A.cs", "src/B.cs", "README.md" },
+        }, AgentJson.Options);
+
+        var m = AgentMetricsReader.Build(Guid.NewGuid(), AgentRunStatus.Succeeded, Now.AddSeconds(-5), Now, resultJson, Task("claude-opus-4-8"), toolCount: 0, Now);
+
+        m.CostUsd.ShouldBe(30m, "1M in × $5/M + 1M out × $25/M = $30 — computed once, server-side");
+        m.FilesChanged.ShouldBe(3);
+    }
+
+    [Fact]
+    public void Cost_is_null_for_an_unpriced_model_but_tokens_and_a_zero_file_count_still_project()
+    {
+        // An OpenAI/Codex model is intentionally absent from the price table → fail-open NULL cost (never a misleading 0).
+        var m = AgentMetricsReader.Build(Guid.NewGuid(), AgentRunStatus.Succeeded, Now.AddSeconds(-5), Now, Result(500, 200), Task("gpt-5-codex"), toolCount: 0, Now);
+
+        m.InputTokens.ShouldBe(500);
+        m.CostUsd.ShouldBeNull("an unpriced model fails open to null cost, never 0");
+        m.FilesChanged.ShouldBe(0, "a completed result with an empty changedFiles is a real 'touched none' (0), not unknown (null)");
     }
 }
