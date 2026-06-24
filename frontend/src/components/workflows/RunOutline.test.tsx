@@ -23,7 +23,7 @@ describe("RunOutline", () => {
     expect(container.querySelector(".run-outline-empty")).not.toBeNull();
   });
 
-  it("renders an agent-bearing phase as a framed box with square per-agent dots + an Agent·Time table on expand", () => {
+  it("renders an agent-bearing phase as a framed box with square per-agent dots + an Agent·Time list on expand", () => {
     const { container, getByText } = render(<RunOutline phases={[
       phase({ id: "code", label: "Implement", status: "Active", agents: [agent("a1", "Running", "backend-fix", undefined, 137_000), agent("a2", "Succeeded", "frontend-fix")] }),
     ]} onSelectPhase={vi.fn()} />);
@@ -31,7 +31,7 @@ describe("RunOutline", () => {
     expect(box(container)).not.toBeNull();
     expect(dots(container)).toEqual(["running", "done"]);
     expect(getByText("Implement")).toBeTruthy();
-    expect(getByText("backend-fix")).toBeTruthy();   // the Active phase auto-expands its table
+    expect(getByText("backend-fix")).toBeTruthy();   // the Active phase auto-expands its list
     expect(getByText("2m 17s")).toBeTruthy();        // the Time column
   });
 
@@ -46,15 +46,15 @@ describe("RunOutline", () => {
     expect(container.querySelector('.run-outline-glyph[data-status="waiting"]')).not.toBeNull();
   });
 
-  it("clicking the box header selects the phase and toggles its table; a done phase starts collapsed", () => {
+  it("clicking the box header selects the phase and toggles its list; a done phase starts collapsed", () => {
     const onSelectPhase = vi.fn();
     const { container, getByText } = render(<RunOutline phases={[phase({ id: "code", label: "Implement", status: "Succeeded", agents: [agent("a1", "Succeeded", "scout")] })]} onSelectPhase={onSelectPhase} />);
 
-    expect(container.querySelector(".run-outline-agtable")).toBeNull();   // a done phase starts collapsed
+    expect(container.querySelector(".run-outline-aglist")).toBeNull();   // a done phase starts collapsed
     fireEvent.click(boxHead(container)!);
     expect(onSelectPhase).toHaveBeenCalledWith("code");
-    expect(getByText("scout")).toBeTruthy();   // the box-header click expanded the table — the table lives INSIDE the gray card
-    expect(box(container)!.querySelector(".run-outline-agtable")).not.toBeNull();
+    expect(getByText("scout")).toBeTruthy();   // the box-header click expanded the list — the list lives INSIDE the gray card
+    expect(box(container)!.querySelector(".run-outline-aglist")).not.toBeNull();
     expect(container.querySelector(".run-outline-phase[data-selected]")).toBeNull();   // the gray card never gains a persistent selected highlight — same whether clicked or not
   });
 
@@ -68,10 +68,10 @@ describe("RunOutline", () => {
       onSelectAgent={onSelectAgent}
     />);
 
-    fireEvent.click(getByText("backend-fix"));
+    fireEvent.click(getByText("backend-fix"));   // clicking anywhere in the row (the name span bubbles to the row button) focuses it
     expect(onSelectPhase).toHaveBeenCalledWith("code");
     expect(onSelectAgent).toHaveBeenCalledWith("a1");
-    expect(container.querySelector(".run-outline-agtable tr[data-selected]")?.textContent).toContain("frontend-fix");
+    expect(container.querySelector(".run-outline-agrow[data-selected]")?.textContent).toContain("frontend-fix");
   });
 
   it("renders a queued agent's box dot as amber (data-state waiting), with no data-busy", () => {
@@ -99,9 +99,9 @@ describe("RunOutline", () => {
     expect(container.querySelector(".run-outline-label")?.textContent).toBe("code");
   });
 
-  it("renders agent names as plain (non-button) when no select handler is given", () => {
+  it("renders an agent row as plain (non-button) when no select handler is given", () => {
     const { container } = render(<RunOutline phases={[phase({ id: "code", status: "Active", agents: [agent("a1", "Running", "solo")] })]} />);
-    expect(container.querySelector("button.run-outline-agname")).toBeNull();
+    expect(container.querySelector("button.run-outline-agrow")).toBeNull();   // the whole row is a div, not a clickable button
     expect(container.querySelector(".run-outline-agname")?.textContent).toBe("solo");
   });
 });

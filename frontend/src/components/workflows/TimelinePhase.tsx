@@ -45,12 +45,14 @@ export function TimelinePhase({ wave, selectedPhaseId, selectedAgentRunId, onSel
   return (
     <div className="run-tl-phase" ref={ref}>
       <button type="button" className="run-tl-box" data-open={open || undefined} aria-expanded={open} onClick={() => setUserToggle(!open)}>
-        <span className="run-tl-box-name" title={wave.label}>{wave.label}</span>
+        <span className="run-tl-box-head">
+          <span className="run-tl-box-name" title={wave.label}>{wave.label}</span>
+          <Ic.ChevronRight className="run-tl-box-caret" size={14} aria-hidden="true" />
+        </span>
         <span className="run-tl-box-meta">{boxMeta(wave, breakdown)}</span>
         <span className="run-tl-dots" aria-hidden="true">
           {wave.agents.map((a) => <i key={a.agentRunId} data-state={tileState(a.status)} />)}
         </span>
-        <Ic.ChevronRight className="run-tl-box-caret" size={14} aria-hidden="true" />
       </button>
 
       {open && (single
