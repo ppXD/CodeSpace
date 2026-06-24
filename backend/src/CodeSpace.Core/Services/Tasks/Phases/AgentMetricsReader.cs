@@ -5,6 +5,7 @@ using CodeSpace.Core.Services.Agents;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Decisions;
 using CodeSpace.Messages.Enums;
+using CodeSpace.Messages.Tasks.Phases;
 using Microsoft.EntityFrameworkCore;
 
 namespace CodeSpace.Core.Services.Tasks.Phases;
@@ -39,18 +40,22 @@ public sealed class AgentMetricsReader : IScopedDependency
             .Select(r => new Row(r.Id, r.Status, r.StartedAt, r.CompletedAt, r.ResultJson, r.TaskJson))
             .ToListAsync(cancellationToken).ConfigureAwait(false);
 
-        var toolCounts = await ToolCountsAsync(teamId, ids, cancellationToken).ConfigureAwait(false);
+        var toolCounts = await ToolCountsByAgentAsync(_db, teamId, ids, cancellationToken).ConfigureAwait(false);
 
         return rows.ToDictionary(r => r.Id, r => Build(r.Id, r.Status, r.StartedAt, r.CompletedAt, r.ResultJson, r.TaskJson, toolCounts.GetValueOrDefault(r.Id), now));
     }
 
-    /// <summary>How many SIDE-EFFECTING tool calls each agent made — its <c>tool_call_ledger</c> rows team-scoped, EXCLUDING the <c>decision.request</c> HITL envelopes (mirrors <c>SupervisorPhaseSource</c>). An agent with no rows is absent → 0 downstream.</summary>
-    private async Task<IReadOnlyDictionary<Guid, int>> ToolCountsAsync(Guid teamId, IReadOnlyList<Guid> ids, CancellationToken cancellationToken) =>
-        await _db.ToolCallLedger.AsNoTracking()
-            .Where(t => t.TeamId == teamId && ids.Contains(t.AgentRunId) && t.ToolKind != DecisionToolKinds.DecisionRequest)
+    /// <summary>How many SIDE-EFFECTING tool calls each agent made — its <c>tool_call_ledger</c> rows team-scoped, EXCLUDING the <c>decision.request</c> HITL envelopes. An agent with no rows is absent → 0 downstream. The ONE place both phase sources (node + supervisor) count tool calls, so the figure can't diverge.</summary>
+    public static async Task<IReadOnlyDictionary<Guid, int>> ToolCountsByAgentAsync(CodeSpaceDbContext db, Guid teamId, IReadOnlyList<Guid> agentRunIds, CancellationToken cancellationToken)
+    {
+        if (agentRunIds.Count == 0) return EmptyCounts;
+
+        return await db.ToolCallLedger.AsNoTracking()
+            .Where(t => t.TeamId == teamId && agentRunIds.Contains(t.AgentRunId) && t.ToolKind != DecisionToolKinds.DecisionRequest)
             .GroupBy(t => t.AgentRunId)
             .Select(g => new { AgentRunId = g.Key, Count = g.Count() })
             .ToDictionaryAsync(x => x.AgentRunId, x => x.Count, cancellationToken).ConfigureAwait(false);
+    }
 
     /// <summary>Turn one agent's persisted state into the metrics bundle — pure, so the live clock + the defensive parses live in one unit-testable place. Tokens null until the result lands; model null when the task left it blank.</summary>
     public static AgentRunMetrics Build(Guid id, AgentRunStatus status, DateTimeOffset? startedAt, DateTimeOffset? completedAt, string? resultJson, string? taskJson, int toolCount, DateTimeOffset now)
@@ -61,7 +66,7 @@ public sealed class AgentMetricsReader : IScopedDependency
         return new AgentRunMetrics
         {
             Status = status,
-            DurationMs = DurationMs(startedAt, completedAt, now),
+            DurationMs = ComputeDuration(startedAt, completedAt, now),
             InputTokens = tokens?.InputTokens,
             OutputTokens = tokens?.OutputTokens,
             ToolCount = toolCount,
@@ -69,8 +74,8 @@ public sealed class AgentMetricsReader : IScopedDependency
         };
     }
 
-    /// <summary>Live duration: final once terminal (<c>CompletedAt − StartedAt</c>), else elapsed (<c>now − StartedAt</c>); null before it starts; a negative span (clock skew) clamps to 0. Mirrors <c>SupervisorPhaseSource.DurationMs</c>.</summary>
-    private static long? DurationMs(DateTimeOffset? startedAt, DateTimeOffset? completedAt, DateTimeOffset now)
+    /// <summary>Live duration: final once terminal (<c>CompletedAt − StartedAt</c>), else elapsed (<c>now − StartedAt</c>); null before it starts; a negative span (clock skew) clamps to 0. The ONE place both phase sources compute an agent's run duration.</summary>
+    public static long? ComputeDuration(DateTimeOffset? startedAt, DateTimeOffset? completedAt, DateTimeOffset now)
     {
         if (startedAt is null) return null;
 
@@ -97,4 +102,5 @@ public sealed class AgentMetricsReader : IScopedDependency
     private sealed record Row(Guid Id, AgentRunStatus Status, DateTimeOffset? StartedAt, DateTimeOffset? CompletedAt, string? ResultJson, string? TaskJson);
 
     private static readonly IReadOnlyDictionary<Guid, AgentRunMetrics> Empty = new Dictionary<Guid, AgentRunMetrics>();
+    private static readonly IReadOnlyDictionary<Guid, int> EmptyCounts = new Dictionary<Guid, int>();
 }
