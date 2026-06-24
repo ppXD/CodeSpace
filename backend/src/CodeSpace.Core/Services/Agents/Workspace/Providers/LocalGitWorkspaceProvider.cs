@@ -460,10 +460,10 @@ public sealed class LocalGitWorkspaceProvider : IWorkspaceProvider, IWorkspaceJa
             return branchName;
         }
 
-        /// <summary>Commit everything staged under a fixed CodeSpace identity; returns false (no commit) when there was nothing to commit. The identity is set inline via <c>-c</c> so the clone's git config is never mutated.</summary>
+        /// <summary>Commit everything staged under a fixed CodeSpace identity; returns false (no commit) when there was nothing to commit. The identity AND <c>commit.gpgsign=false</c> are set inline via <c>-c</c> so the clone's git config is never mutated — and the automated capture commit can never inherit a host/global <c>commit.gpgsign=true</c> that would make it block on a signing key the unattended agent does not have (which would fail the branch push → the produced branch is silently lost). An internal automation commit under a synthetic identity has no meaningful signature, so signing is always disabled here.</summary>
         private async Task<bool> CommitOrDetectEmptyAsync(MaterializedRepo repo, string branchName, CancellationToken cancellationToken)
         {
-            var result = await RunGitAsync(repo, new[] { "-c", "user.name=CodeSpace", "-c", "user.email=agent@codespace.local", "commit", "-m", $"Agent run {branchName}" }, cancellationToken, PushTimeoutSeconds).ConfigureAwait(false);
+            var result = await RunGitAsync(repo, new[] { "-c", "commit.gpgsign=false", "-c", "user.name=CodeSpace", "-c", "user.email=agent@codespace.local", "commit", "-m", $"Agent run {branchName}" }, cancellationToken, PushTimeoutSeconds).ConfigureAwait(false);
 
             if (result.Status == SandboxStatus.Success) return true;
 

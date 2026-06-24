@@ -257,7 +257,13 @@ public sealed class LocalGitBranchIntegrator : IBranchIntegrator, IScopedDepende
 
     private async Task CommitAsync(string directory, int count, CancellationToken cancellationToken)
     {
-        var args = new[] { "-C", directory, "-c", "user.name=CodeSpace", "-c", "user.email=agent@codespace.local", "commit", "-m", $"Integrate {count} agent contribution(s)" };
+        // commit.gpgsign=false is set inline so the automated integration commit never inherits a host/global
+        // commit.gpgsign=true that would make it block on a signing key the unattended agent does not have — unlike the
+        // capture commit (whose failure is swallowed), THIS failure propagates to an integration "Failed" status, so a
+        // signing-on host would degrade the integration → no integrated head → a false acceptance miss. An internal
+        // automation commit under a synthetic identity has no meaningful signature; identity is inline too so the
+        // staging clone's git config is never mutated.
+        var args = new[] { "-C", directory, "-c", "commit.gpgsign=false", "-c", "user.name=CodeSpace", "-c", "user.email=agent@codespace.local", "commit", "-m", $"Integrate {count} agent contribution(s)" };
 
         var result = await RunGitAsync(args, directory, cancellationToken).ConfigureAwait(false);
 
