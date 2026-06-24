@@ -18,6 +18,8 @@ public static class SupervisorDecisionGoldenScenarios
     private static readonly Guid Agent1 = Guid.Parse("11111111-1111-1111-1111-111111111111");
     private static readonly Guid Agent2 = Guid.Parse("22222222-2222-2222-2222-222222222222");
     private static readonly Guid Agent3 = Guid.Parse("66666666-6666-6666-6666-666666666666");
+    private static readonly Guid Agent4 = Guid.Parse("77777777-7777-7777-7777-777777777777");
+    private static readonly Guid Agent5 = Guid.Parse("88888888-8888-8888-8888-888888888888");
     private static readonly Guid Resolver = Guid.Parse("33333333-3333-3333-3333-333333333333");
     private static readonly Guid RetryAgent = Guid.Parse("55555555-5555-5555-5555-555555555555");
 
@@ -40,6 +42,11 @@ public static class SupervisorDecisionGoldenScenarios
         MultiFileConflict(),              // a conflict across many files    → resolve (don't give up on a hard conflict)
         VerifiedResolution(),             // the resolution passed tests     → accept (merge/stop)
         UnverifiedResolution(),           // the resolution did NOT pass     → resolve/stop, NEVER merge
+        // Higher-fan-out sweep — the judgment the ≤3-subtask cases above can't exercise: does it hold at 4-5 subtasks?
+        FourSubtaskTwoFailed(),           // 4 subtasks, s2+s4 failed        → retry OR spawn (recover both; don't merge incomplete)
+        FiveSubtaskMiddleFailed(),        // 5 subtasks, s3 failed           → retry s3 (positional at high fan-out)
+        FourSubtaskAllSucceeded(),        // 4 succeeded                     → merge (largest clean fan-out)
+        SubsetConflictAcrossThree(),      // 3 agents, a real conflict       → resolve
     };
 
     /// <summary>Turn 0, no priors → the brain must PLAN first (it cannot spawn/retry/merge over non-existent subtasks).</summary>
@@ -235,6 +242,74 @@ public static class SupervisorDecisionGoldenScenarios
                 Agent(Agent1, "Succeeded", summary: "s1", branch: "agent/s1"),
                 Agent(Agent2, "Succeeded", summary: "s2", branch: "agent/s2")),
             ConflictedMerge("src/Auth.cs", "src/Signup.cs", "src/Validation.cs", "src/Routes.cs"),
+        }),
+        AcceptedKinds = new[] { SupervisorDecisionKinds.Resolve },
+    };
+
+    // ── Higher-fan-out sweep (4-5 subtasks) — the judgment the ≤3-subtask cases can't exercise ───────────────────
+
+    /// <summary>4 subtasks, s2 + s4 FAILED → RECOVER the two failures: RETRY (re-run one) or SPAWN (re-fan-out over [s2,s4]) — both are on-rail re-run verbs. A merge would ship a 4-way fan-out that is half-broken; at higher fan-out the brain must still not merge incomplete work.</summary>
+    private static SupervisorGoldenScenario FourSubtaskTwoFailed() => new()
+    {
+        Name = "four-subtask-two-failed",
+        Context = Context(turn: 2, new[]
+        {
+            Plan("s1", "s2", "s3", "s4"),
+            Spawn(new[] { "s1", "s2", "s3", "s4" },
+                Agent(Agent1, "Succeeded", summary: "implemented s1; unit tests green"),
+                Agent(Agent2, "Failed", error: "build failed: missing symbol referenced by s2"),
+                Agent(Agent3, "Succeeded", summary: "implemented s3; unit tests green"),
+                Agent(Agent4, "Failed", error: "test failure: s4 assertion did not hold")),
+        }),
+        AcceptedKinds = new[] { SupervisorDecisionKinds.Retry, SupervisorDecisionKinds.Spawn },
+    };
+
+    /// <summary>5 subtasks, only the MIDDLE one (s3) failed → RETRY s3 (positional teeth at the highest fan-out — retrying s1/s5 instead of the actually-failed s3 is wrong).</summary>
+    private static SupervisorGoldenScenario FiveSubtaskMiddleFailed() => new()
+    {
+        Name = "five-subtask-middle-failed",
+        Context = Context(turn: 2, new[]
+        {
+            Plan("s1", "s2", "s3", "s4", "s5"),
+            Spawn(new[] { "s1", "s2", "s3", "s4", "s5" },
+                Agent(Agent1, "Succeeded", summary: "implemented s1; unit tests green"),
+                Agent(Agent2, "Succeeded", summary: "implemented s2; unit tests green"),
+                Agent(Agent3, "Failed", error: "build failed: missing symbol referenced by s3"),
+                Agent(Agent4, "Succeeded", summary: "implemented s4; unit tests green"),
+                Agent(Agent5, "Succeeded", summary: "implemented s5; unit tests green")),
+        }),
+        AcceptedKinds = new[] { SupervisorDecisionKinds.Retry },
+        PayloadCheck = RetryTargets("s3"),
+    };
+
+    /// <summary>4 subtasks ALL succeeded → MERGE (the largest clean fan-out; the brain must integrate the work, not stop short of shipping or churn re-spawning).</summary>
+    private static SupervisorGoldenScenario FourSubtaskAllSucceeded() => new()
+    {
+        Name = "four-subtask-all-succeeded",
+        Context = Context(turn: 2, new[]
+        {
+            Plan("s1", "s2", "s3", "s4"),
+            Spawn(new[] { "s1", "s2", "s3", "s4" },
+                Agent(Agent1, "Succeeded", summary: "s1", branch: "agent/s1"),
+                Agent(Agent2, "Succeeded", summary: "s2", branch: "agent/s2"),
+                Agent(Agent3, "Succeeded", summary: "s3", branch: "agent/s3"),
+                Agent(Agent4, "Succeeded", summary: "s4", branch: "agent/s4")),
+        }),
+        AcceptedKinds = new[] { SupervisorDecisionKinds.Merge },
+    };
+
+    /// <summary>3 agents all succeeded but the merge CONFLICTED → RESOLVE (a 3-way fan-out conflict must still be reconciled, not abandoned).</summary>
+    private static SupervisorGoldenScenario SubsetConflictAcrossThree() => new()
+    {
+        Name = "subset-conflict-across-three",
+        Context = Context(turn: 3, new[]
+        {
+            Plan("s1", "s2", "s3"),
+            Spawn(new[] { "s1", "s2", "s3" },
+                Agent(Agent1, "Succeeded", summary: "s1", branch: "agent/s1"),
+                Agent(Agent2, "Succeeded", summary: "s2", branch: "agent/s2"),
+                Agent(Agent3, "Succeeded", summary: "s3", branch: "agent/s3")),
+            ConflictedMerge("src/Shared.cs"),
         }),
         AcceptedKinds = new[] { SupervisorDecisionKinds.Resolve },
     };
