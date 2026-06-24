@@ -14,6 +14,15 @@ public sealed record WorkspaceRequest
     /// <summary>Branch / tag / sha to check out. Null → the remote's default branch.</summary>
     public string? Ref { get; init; }
 
+    /// <summary>
+    /// The branch to fall back to when <see cref="Ref"/> is a SOFT, non-default ref that no longer exists on the remote
+    /// — set only for a SESSION-inherited prior branch (which is transient: a merged PR auto-deletes it). When set and
+    /// <see cref="Ref"/> is gone, the provider clones <see cref="DefaultRef"/> instead of failing the run. Null (the
+    /// default) → <see cref="Ref"/> is HARD: used verbatim, the clone fails loud if it is gone (an authored ref's
+    /// explicit intent is never silently rewritten). Byte-identical to before whenever null.
+    /// </summary>
+    public string? DefaultRef { get; init; }
+
     /// <summary>Access token for HTTPS auth. Null → an anonymous clone (public or local repo).</summary>
     public string? Token { get; init; }
 

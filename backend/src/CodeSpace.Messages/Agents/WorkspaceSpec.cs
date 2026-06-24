@@ -1,3 +1,5 @@
+using System.Text.Json.Serialization;
+
 namespace CodeSpace.Messages.Agents;
 
 /// <summary>
@@ -33,11 +35,11 @@ public sealed record WorkspaceSpec
     /// at the default alias. The back-compat bridge so every single-repo run resolves through the SAME canonical
     /// <see cref="WorkspaceSpec"/> as a multi-repo one, with byte-identical execution.
     /// </summary>
-    public static WorkspaceSpec FromRepository(Guid repositoryId, string? @ref = null) => new()
+    public static WorkspaceSpec FromRepository(Guid repositoryId, string? @ref = null, bool refSoftFallback = false) => new()
     {
         Repositories = new[]
         {
-            new WorkspaceRepositorySpec { Alias = DefaultAlias, RepositoryId = repositoryId, Ref = @ref, Path = DefaultAlias, Access = WorkspaceAccess.Write, IsPrimary = true },
+            new WorkspaceRepositorySpec { Alias = DefaultAlias, RepositoryId = repositoryId, Ref = @ref, RefSoftFallback = refSoftFallback, Path = DefaultAlias, Access = WorkspaceAccess.Write, IsPrimary = true },
         },
         PrimaryAlias = DefaultAlias,
         CwdMode = WorkspaceCwdMode.Auto,
@@ -59,11 +61,11 @@ public sealed record WorkspaceSpec
     /// first authored occurrence win. Without this, the same repo would clone into two mount folders with conflicting
     /// access. Symmetric to the alias de-dup: a collision is collapsed, never a double-clone.</para>
     /// </summary>
-    public static WorkspaceSpec? FromAuthoredRepos(Guid primaryRepositoryId, string? primaryRef, IReadOnlyList<WorkspaceRepositorySpec> relatedRepositories)
+    public static WorkspaceSpec? FromAuthoredRepos(Guid primaryRepositoryId, string? primaryRef, IReadOnlyList<WorkspaceRepositorySpec> relatedRepositories, bool primaryRefSoftFallback = false)
     {
         if (relatedRepositories.Count == 0) return null;
 
-        var primary = new WorkspaceRepositorySpec { Alias = DefaultAlias, RepositoryId = primaryRepositoryId, Ref = primaryRef, Path = DefaultAlias, Access = WorkspaceAccess.Write, IsPrimary = true };
+        var primary = new WorkspaceRepositorySpec { Alias = DefaultAlias, RepositoryId = primaryRepositoryId, Ref = primaryRef, RefSoftFallback = primaryRefSoftFallback, Path = DefaultAlias, Access = WorkspaceAccess.Write, IsPrimary = true };
 
         var taken = new HashSet<string>(StringComparer.Ordinal) { DefaultAlias };
         var takenRepoIds = new HashSet<Guid> { primaryRepositoryId };
@@ -126,6 +128,18 @@ public sealed record WorkspaceRepositorySpec
 
     /// <summary>The branch/ref to check out. Null → the repository's default branch.</summary>
     public string? Ref { get; init; }
+
+    /// <summary>
+    /// True when <see cref="Ref"/> is a SOFT, session-inherited prior branch — set ONLY by the session-continuity
+    /// projection (never by an authored spec). When true and the prior branch was pruned on the remote, the resolver
+    /// carries the default branch as the clone fallback (the run survives a merged-PR-deleted branch). False (the
+    /// default) → <see cref="Ref"/> is HARD: an authored ref / a grader's produced-branch ref is used verbatim and the
+    /// clone fails loud if it is gone — never silently rewritten. Byte-identical to before whenever false.
+    /// <para>Omitted from the serialized spec when false (<see cref="JsonIgnoreCondition.WhenWritingDefault"/>) so a
+    /// non-session spec's persisted <c>task_json</c> is byte-identical to before this field existed.</para>
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public bool RefSoftFallback { get; init; }
 
     /// <summary>The subdirectory under the workspace root this repo clones into in a MULTI-repo workspace (defaults to <see cref="Alias"/> when null). Ignored for a single-repo workspace (which clones flat at the repo root).</summary>
     public string? Path { get; init; }

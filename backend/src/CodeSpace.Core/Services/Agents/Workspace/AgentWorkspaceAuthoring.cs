@@ -40,8 +40,11 @@ public static class AgentWorkspaceAuthoring
             var alias = element.TryGetProperty("alias", out var aliasEl) && aliasEl.ValueKind == JsonValueKind.String ? (aliasEl.GetString() ?? "").Trim() : "";
             var access = ParseAccess(element.TryGetProperty("access", out var accessEl) && accessEl.ValueKind == JsonValueKind.String ? accessEl.GetString() : null);
             var @ref = element.TryGetProperty("ref", out var refEl) && refEl.ValueKind == JsonValueKind.String && !string.IsNullOrWhiteSpace(refEl.GetString()) ? refEl.GetString() : null;
+            // A session-inherited related ref carries refSoftFallback:true (set by SerializeRelatedRepositories); an
+            // authored related repo never does ⇒ stays HARD (fail loud if its ref is gone).
+            var refSoftFallback = element.TryGetProperty("refSoftFallback", out var softEl) && softEl.ValueKind == JsonValueKind.True;
 
-            list.Add(new WorkspaceRepositorySpec { Alias = alias, RepositoryId = repoId, Access = access, Ref = @ref });
+            list.Add(new WorkspaceRepositorySpec { Alias = alias, RepositoryId = repoId, Access = access, Ref = @ref, RefSoftFallback = refSoftFallback });
         }
 
         return list;
@@ -80,7 +83,13 @@ public static class AgentWorkspaceAuthoring
                 ["access"] = r.Access == WorkspaceAccess.Write ? "write" : "read",
             };
 
-            if (baseRefs is not null && baseRefs.TryGetValue(r.RepositoryId, out var br) && !string.IsNullOrWhiteSpace(br)) entry["ref"] = br;
+            if (baseRefs is not null && baseRefs.TryGetValue(r.RepositoryId, out var br) && !string.IsNullOrWhiteSpace(br))
+            {
+                entry["ref"] = br;
+                // The related ref came from the SESSION base-refs map (a transient prior produced branch) → mark it
+                // SOFT so the clone falls back to the default branch if it was pruned (parity with the primary baseRef).
+                entry["refSoftFallback"] = true;
+            }
 
             return entry;
         }).ToList();
@@ -103,12 +112,12 @@ public static class AgentWorkspaceAuthoring
     /// without a ref it stays null (byte-identical — the executor derives <c>FromRepository(id)</c> at the default
     /// branch). So: related repos ⇒ the multi-repo spec; else a pinned ref ⇒ <c>FromRepository(id, ref)</c>; else null.</para>
     /// </summary>
-    public static WorkspaceSpec? ResolveAuthoredWorkspace(Guid? primaryRepositoryId, IReadOnlyList<WorkspaceRepositorySpec> relatedRepositories, string? primaryRef = null)
+    public static WorkspaceSpec? ResolveAuthoredWorkspace(Guid? primaryRepositoryId, IReadOnlyList<WorkspaceRepositorySpec> relatedRepositories, string? primaryRef = null, bool primaryRefSoftFallback = false)
     {
         if (primaryRepositoryId is not { } primaryId) return null;
 
-        if (relatedRepositories.Count > 0) return WorkspaceSpec.FromAuthoredRepos(primaryId, primaryRef, relatedRepositories);
+        if (relatedRepositories.Count > 0) return WorkspaceSpec.FromAuthoredRepos(primaryId, primaryRef, relatedRepositories, primaryRefSoftFallback);
 
-        return string.IsNullOrWhiteSpace(primaryRef) ? null : WorkspaceSpec.FromRepository(primaryId, primaryRef);
+        return string.IsNullOrWhiteSpace(primaryRef) ? null : WorkspaceSpec.FromRepository(primaryId, primaryRef, primaryRefSoftFallback);
     }
 }

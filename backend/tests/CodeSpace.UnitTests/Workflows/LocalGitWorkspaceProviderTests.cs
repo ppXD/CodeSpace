@@ -103,6 +103,60 @@ public sealed class LocalGitWorkspaceProviderTests
     }
 
     [Fact]
+    public async Task A_present_soft_ref_is_checked_out_unchanged()
+    {
+        // A SOFT ref (DefaultRef set — a session-inherited prior branch) that STILL EXISTS is checked out exactly as
+        // before: the existence pre-flight passes, so there is no fallback. Proves the happy path is byte-identical.
+        if (!await GitAvailableAsync()) return;
+
+        using var origin = new TempDir();
+        await SeedOriginAsync(origin.Path, "README.md", "main-content");
+        await RunGitAsync(origin.Path, "checkout", "-b", "feature");
+        await WriteAndCommitAsync(origin.Path, "feature.txt", "feature-content");
+
+        await using var handle = await NewProvider().PrepareAsync(
+            WorkspaceProvisionRequest.FromSingle(new WorkspaceRequest { RepositoryUrl = AsFileUrl(origin.Path), Ref = "feature", DefaultRef = "main" }), CancellationToken.None);
+
+        File.Exists(Path.Combine(handle.Directory, "feature.txt")).ShouldBeTrue("the present soft ref is checked out — no fallback when it still exists");
+    }
+
+    [Fact]
+    public async Task A_pruned_soft_ref_falls_back_to_the_default_branch()
+    {
+        // Correction-4: a session continue whose prior branch was DELETED (a merged PR auto-deletes it) must NOT fail —
+        // it falls back to the default branch carried in DefaultRef. The continuing run still gets a workspace.
+        if (!await GitAvailableAsync()) return;
+
+        using var origin = new TempDir();
+        await SeedOriginAsync(origin.Path, "README.md", "main-content");
+        await RunGitAsync(origin.Path, "checkout", "-b", "feature");
+        await WriteAndCommitAsync(origin.Path, "feature.txt", "feature-content");
+        await RunGitAsync(origin.Path, "checkout", "main");
+        await RunGitAsync(origin.Path, "branch", "-D", "feature");   // the prior branch is now pruned on the remote
+
+        await using var handle = await NewProvider().PrepareAsync(
+            WorkspaceProvisionRequest.FromSingle(new WorkspaceRequest { RepositoryUrl = AsFileUrl(origin.Path), Ref = "feature", DefaultRef = "main" }), CancellationToken.None);
+
+        File.Exists(Path.Combine(handle.Directory, "README.md")).ShouldBeTrue("the run fell back to the default branch and still got a workspace");
+        File.Exists(Path.Combine(handle.Directory, "feature.txt")).ShouldBeFalse("the default branch never carried the pruned branch's file — proof it cloned main, not feature");
+    }
+
+    [Fact]
+    public async Task A_pruned_hard_ref_still_fails_loud()
+    {
+        // A HARD ref (DefaultRef null — no session fallback) that is gone must STILL fail the clone, byte-identical to
+        // before: an explicit ref's intent is never silently rewritten to the default branch.
+        if (!await GitAvailableAsync()) return;
+
+        using var origin = new TempDir();
+        await SeedOriginAsync(origin.Path, "README.md", "main-content");
+
+        await Should.ThrowAsync<WorkspaceException>(async () =>
+            await NewProvider().PrepareAsync(
+                WorkspaceProvisionRequest.FromSingle(new WorkspaceRequest { RepositoryUrl = AsFileUrl(origin.Path), Ref = "ghost-branch" }), CancellationToken.None));
+    }
+
+    [Fact]
     public async Task Does_not_persist_credentials_in_git_config()
     {
         // Token auth against a local origin that ignores it — the point is the post-clone remote rewrite:

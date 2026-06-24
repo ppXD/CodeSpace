@@ -62,6 +62,57 @@ public class AgentWorkspaceAuthoringTests
         AgentWorkspaceAuthoring.ParseRelatedRepositories(Json($$"""[{"repositoryId":"{{RepoA}}","alias":"api","ref":"run-1/api"}]"""))[0].Ref
             .ShouldBe("run-1/api", "the authored per-repo ref flows onto WorkspaceRepositorySpec.Ref — each related repo clones at its prior branch");
 
+    [Fact]
+    public void Parses_refSoftFallback_onto_the_spec_for_a_session_related_ref()
+    {
+        // A SESSION-inherited related ref carries refSoftFallback:true (set by SerializeRelatedRepositories) → SOFT;
+        // an authored related ref (no marker) stays HARD.
+        AgentWorkspaceAuthoring.ParseRelatedRepositories(Json($$"""[{"repositoryId":"{{RepoA}}","ref":"run-1/api","refSoftFallback":true}]"""))[0].RefSoftFallback
+            .ShouldBeTrue("a session related ref is soft");
+        AgentWorkspaceAuthoring.ParseRelatedRepositories(Json($$"""[{"repositoryId":"{{RepoA}}","ref":"release/1.2"}]"""))[0].RefSoftFallback
+            .ShouldBeFalse("an authored related ref with no marker is hard");
+    }
+
+    [Fact]
+    public void Related_session_refs_round_trip_soft_through_serialize_then_parse()
+    {
+        // The session base-refs map drives BOTH the ref AND its soft marker through the relatedRepositories node-input
+        // JSON. A repo present in the map → soft; a repo absent from it → no ref, hard.
+        var inMap = Guid.Parse(RepoA);
+        var notInMap = Guid.Parse(RepoB);
+        var related = new[]
+        {
+            new WorkspaceRepositorySpec { Alias = "api", RepositoryId = inMap, Access = WorkspaceAccess.Write },
+            new WorkspaceRepositorySpec { Alias = "web", RepositoryId = notInMap, Access = WorkspaceAccess.Read },
+        };
+
+        var serialized = AgentWorkspaceAuthoring.SerializeRelatedRepositories(related, new Dictionary<Guid, string> { [inMap] = "run-1/api" });
+        var reparsed = AgentWorkspaceAuthoring.ParseRelatedRepositories(Json(JsonSerializer.Serialize(serialized)));
+
+        var apiSpec = reparsed.Single(r => r.RepositoryId == inMap);
+        apiSpec.Ref.ShouldBe("run-1/api");
+        apiSpec.RefSoftFallback.ShouldBeTrue("a related repo with a session base-ref is SOFT end to end (Correction-4 parity with the primary)");
+
+        var webSpec = reparsed.Single(r => r.RepositoryId == notInMap);
+        webSpec.Ref.ShouldBeNull();
+        webSpec.RefSoftFallback.ShouldBeFalse("a related repo absent from the session map carries no ref ⇒ HARD, clones its default branch");
+    }
+
+    [Fact]
+    public void ResolveAuthoredWorkspace_marks_the_primary_soft_when_requested()
+    {
+        // primaryRefSoftFallback flows onto the PRIMARY's RefSoftFallback on BOTH branches — single-repo (FromRepository)
+        // and multi-repo (FromAuthoredRepos) — so a session continue's primary is soft however many repos it has.
+        var single = AgentWorkspaceAuthoring.ResolveAuthoredWorkspace(Guid.Parse(RepoA), Array.Empty<WorkspaceRepositorySpec>(), "run-1/x", primaryRefSoftFallback: true);
+        single!.Primary!.RefSoftFallback.ShouldBeTrue("single-repo primary is soft when requested");
+
+        var multi = AgentWorkspaceAuthoring.ResolveAuthoredWorkspace(Guid.Parse(RepoA), new[] { Related(RepoB, "web") }, "run-1/x", primaryRefSoftFallback: true);
+        multi!.Primary!.RefSoftFallback.ShouldBeTrue("multi-repo primary is soft when requested");
+
+        var hard = AgentWorkspaceAuthoring.ResolveAuthoredWorkspace(Guid.Parse(RepoA), Array.Empty<WorkspaceRepositorySpec>(), "release/1.2");
+        hard!.Primary!.RefSoftFallback.ShouldBeFalse("an authored primary ref (soft not requested) stays HARD");
+    }
+
     [Theory]
     [InlineData("""[{"repositoryId":"11111111-1111-1111-1111-111111111111"}]""")]              // no ref key
     [InlineData("""[{"repositoryId":"11111111-1111-1111-1111-111111111111","ref":""}]""")]     // blank ref

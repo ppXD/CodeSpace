@@ -177,9 +177,11 @@ public class SupervisorAcceptanceGraderTests
 
         public Task<WorkspaceProvisionRequest?> ResolveAsync(AgentTask task, Guid teamId, CancellationToken cancellationToken) => throw new NotSupportedException();
 
-        public Task<WorkspaceRequest?> ResolveByRepositoryIdAsync(Guid repositoryId, Guid teamId, CancellationToken cancellationToken, string? @ref = null)
+        public bool SoftFallback { get; private set; }
+
+        public Task<WorkspaceRequest?> ResolveByRepositoryIdAsync(Guid repositoryId, Guid teamId, CancellationToken cancellationToken, string? @ref = null, bool softFallback = false)
         {
-            RepositoryId = repositoryId; TeamId = teamId; Ref = @ref;
+            RepositoryId = repositoryId; TeamId = teamId; Ref = @ref; SoftFallback = softFallback;
             if (_throwOnResolve != null) throw _throwOnResolve;
             return Task.FromResult(_clone);
         }

@@ -84,7 +84,16 @@ internal static class AgentNodeMapping
 
         // …and clone the PRIMARY repo at its prior produced branch. Only meaningful with a primary repo; absent ⇒
         // omitted ⇒ the repo's default branch (byte-identical to a fresh launch).
-        if (repositoryId is { } primaryId) AddIfPresent(inputs, "baseRef", BaseRefFor(baseRefs, primaryId));
+        if (repositoryId is { } primaryId)
+        {
+            var primaryBaseRef = BaseRefFor(baseRefs, primaryId);
+            AddIfPresent(inputs, "baseRef", primaryBaseRef);
+
+            // The primary baseRef came from the SESSION base-refs map (a transient prior produced branch), so mark it
+            // SOFT — the clone falls back to the default branch if it was pruned (a merged PR deletes it). Set only
+            // alongside an actual baseRef; an author-pinned baseRef never carries this ⇒ stays a HARD ref (fail loud).
+            if (primaryBaseRef is not null) inputs["baseRefFromSession"] = true;
+        }
 
         return JsonSerializer.SerializeToElement(inputs);
     }

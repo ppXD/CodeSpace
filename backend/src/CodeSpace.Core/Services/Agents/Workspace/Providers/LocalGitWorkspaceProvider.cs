@@ -255,10 +255,12 @@ public sealed class LocalGitWorkspaceProvider : IWorkspaceProvider, IWorkspaceJa
     {
         var url = BuildAuthenticatedUrl(request.RepositoryUrl, request.TokenUsername, request.Token);
 
+        var checkoutRef = await ResolveCheckoutRefAsync(request, url, cancellationToken).ConfigureAwait(false);
+
         var args = new List<string> { "clone" };
 
         if (request.Depth > 0) { args.Add("--depth"); args.Add(request.Depth.ToString()); }
-        if (!string.IsNullOrWhiteSpace(request.Ref)) { args.Add("--branch"); args.Add(request.Ref); }
+        if (!string.IsNullOrWhiteSpace(checkoutRef)) { args.Add("--branch"); args.Add(checkoutRef); }
 
         args.Add(url);
         args.Add(directory);
@@ -267,6 +269,39 @@ public sealed class LocalGitWorkspaceProvider : IWorkspaceProvider, IWorkspaceJa
 
         if (result.Status != SandboxStatus.Success)
             throw new WorkspaceException($"git clone failed (exit {result.ExitCode}): {Redact(Summarize(result.Stderr), request.Token)}");
+    }
+
+    /// <summary>
+    /// The ref to actually check out. A SOFT ref (a session-inherited prior branch — <see cref="WorkspaceRequest.DefaultRef"/>
+    /// carries the fallback) is pre-flighted against the remote: if it was pruned (a merged PR auto-deletes it) we clone
+    /// the default branch instead of failing the continuing run, surfaced as a Warning. A HARD ref (DefaultRef null — the
+    /// default branch itself, or any ref with no fallback) is returned verbatim, so an explicit ref is never silently
+    /// rewritten and the clone fails loud if it is gone. Byte-identical to before for every hard ref (no pre-flight runs).
+    /// </summary>
+    private async Task<string?> ResolveCheckoutRefAsync(WorkspaceRequest request, string url, CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(request.Ref) || string.IsNullOrWhiteSpace(request.DefaultRef) || string.Equals(request.Ref, request.DefaultRef, StringComparison.Ordinal))
+            return request.Ref;
+
+        if (await RefExistsOnRemoteAsync(url, request.Ref!, cancellationToken).ConfigureAwait(false))
+            return request.Ref;
+
+        _logger.LogWarning("Session continuity: the prior branch '{PriorRef}' no longer exists on the remote for {RepositoryUrl}; starting the continuing run from the default branch '{DefaultRef}' instead", request.Ref, request.RepositoryUrl, request.DefaultRef);
+
+        return request.DefaultRef;
+    }
+
+    /// <summary>
+    /// True when <paramref name="ref"/> resolves to a ref (branch or tag) on the remote. Only a clean PROBE that
+    /// definitively finds NO matching ref (ls-remote succeeds with empty output) returns false → the soft fallback
+    /// fires; a transient git / network failure of the probe is treated as PRESENT (return true) so a flaky probe never
+    /// silently downgrades a continuing run to the default branch — the clone itself then surfaces any real failure.
+    /// </summary>
+    private async Task<bool> RefExistsOnRemoteAsync(string url, string @ref, CancellationToken cancellationToken)
+    {
+        var result = await RunGitAsync(new[] { "ls-remote", url, @ref }, cancellationToken).ConfigureAwait(false);
+
+        return result.Status != SandboxStatus.Success || !string.IsNullOrWhiteSpace(result.Stdout);
     }
 
     /// <summary>

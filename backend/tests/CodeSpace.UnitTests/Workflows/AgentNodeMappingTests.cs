@@ -71,6 +71,7 @@ public class AgentNodeMappingTests
 
         inputs.GetProperty("baseRef").GetString().ShouldBe("run-1/primary", "the primary's ref comes from the map keyed by its repo id");
         inputs.GetProperty("relatedRepositories")[0].GetProperty("ref").GetString().ShouldBe("run-1/api", "each related repo's ref comes from the map keyed by ITS repo id — no bleed");
+        inputs.GetProperty("baseRefFromSession").GetBoolean().ShouldBeTrue("a baseRef from the SESSION map is marked SOFT so a pruned prior branch falls back to the default (Correction-4)");
     }
 
     [Fact]
@@ -102,5 +103,6 @@ public class AgentNodeMappingTests
 
         inputs.TryGetProperty("baseRef", out _).ShouldBeFalse("no map ⇒ no baseRef (default branch, byte-identical to a fresh launch)");
         inputs.GetProperty("relatedRepositories")[0].TryGetProperty("ref", out _).ShouldBeFalse("no map ⇒ no per-repo ref");
+        inputs.TryGetProperty("baseRefFromSession", out _).ShouldBeFalse("no baseRef ⇒ no soft marker (an author-set baseRef stays HARD) — byte-identical");
     }
 }

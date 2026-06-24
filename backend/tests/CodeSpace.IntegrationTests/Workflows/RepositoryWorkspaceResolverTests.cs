@@ -147,20 +147,66 @@ public class RepositoryWorkspaceResolverTests
         request.ShouldNotBeNull();
         request!.RepositoryUrl.ShouldBe("https://github.com/org/repo.git");
         request.Ref.ShouldBe("main", "a null per-repo ref falls back to the repo's default branch — byte-identical to the RepositoryId path");
+        request.DefaultRef.ShouldBeNull("a null per-repo ref is the default branch → no soft fallback → byte-identical");
         request.Token.ShouldBe("ghp_abc");
         request.TokenUsername.ShouldBe("x-access-token");
     }
 
     [Fact]
-    public async Task An_authored_per_repo_ref_overrides_the_default_branch()
+    public async Task An_authored_per_repo_ref_overrides_the_default_branch_and_stays_hard()
     {
         var teamId = await SeedTeamAsync();
         var repoId = await SeedRepoAsync(teamId, ProviderKind.GitHub, "https://github.com/org/repo.git", "main", token: "ghp_abc");
 
-        // The one NEW production branch in ResolveByRepositoryIdAsync: the spec's per-repo ref wins over the default branch.
+        // An AUTHORED per-repo ref (refSoftFallback NOT set) wins over the default branch AND is HARD — no soft fallback.
         var request = await ResolveAsync(new AgentTask { Goal = "g", Harness = "h", Model = "m", Workspace = WorkspaceSpec.FromRepository(repoId, "release/1.2") }, teamId);
 
         request!.Ref.ShouldBe("release/1.2", "the authored per-repo ref overrides the repository's default branch");
+        request.DefaultRef.ShouldBeNull("an authored ref is HARD (softFallback false) — never silently rewritten; the clone fails loud if it is gone");
+    }
+
+    [Fact]
+    public async Task A_session_soft_per_repo_ref_carries_the_default_branch_as_a_fallback()
+    {
+        var teamId = await SeedTeamAsync();
+        var repoId = await SeedRepoAsync(teamId, ProviderKind.GitHub, "https://github.com/org/repo.git", "main", token: "ghp_abc");
+
+        // A SESSION-inherited prior branch (refSoftFallback: true) is SOFT — the default branch rides along as the clone
+        // fallback so a continue survives a pruned prior branch (Correction-4).
+        var request = await ResolveAsync(new AgentTask { Goal = "g", Harness = "h", Model = "m", Workspace = WorkspaceSpec.FromRepository(repoId, "run-1/api", refSoftFallback: true) }, teamId);
+
+        request!.Ref.ShouldBe("run-1/api");
+        request.DefaultRef.ShouldBe("main", customMessage: "a session-soft non-default ref carries the default branch as the fallback (Correction-4)");
+    }
+
+    [Fact]
+    public async Task A_requested_ref_equal_to_the_default_branch_carries_no_fallback()
+    {
+        var teamId = await SeedTeamAsync();
+        var repoId = await SeedRepoAsync(teamId, ProviderKind.GitHub, "https://github.com/org/repo.git", "main", token: "ghp_abc");
+
+        // A requested ref that IS the default branch needs no soft fallback (the default always exists) → DefaultRef null
+        // → a hard ref → byte-identical to before (no existence pre-flight at clone time). Even marked soft, it stays null.
+        var request = await ResolveAsync(new AgentTask { Goal = "g", Harness = "h", Model = "m", Workspace = WorkspaceSpec.FromRepository(repoId, "main", refSoftFallback: true) }, teamId);
+
+        request!.Ref.ShouldBe("main");
+        request.DefaultRef.ShouldBeNull("a ref equal to the default branch needs no fallback");
+    }
+
+    [Fact]
+    public async Task A_direct_non_default_ref_call_stays_hard_the_acceptance_grader_path()
+    {
+        var teamId = await SeedTeamAsync();
+        var repoId = await SeedRepoAsync(teamId, ProviderKind.GitHub, "https://github.com/org/repo.git", "main", token: "ghp_abc");
+
+        // The acceptance grader (+ the integrate path) call ResolveByRepositoryIdAsync DIRECTLY with the agent's PRODUCED
+        // branch and NO softFallback. That ref MUST stay hard (DefaultRef null), so grading clones EXACTLY the produced
+        // branch and fails loud if it is gone — never silently grading the default branch (the review's blocker guard).
+        using var scope = _fixture.BeginScope();
+        var request = await scope.Resolve<IAgentWorkspaceResolver>().ResolveByRepositoryIdAsync(repoId, teamId, CancellationToken.None, "codespace/integration/abc123");
+
+        request!.Ref.ShouldBe("codespace/integration/abc123");
+        request.DefaultRef.ShouldBeNull("a direct non-default-ref call (the acceptance grader) is HARD — no fallback, fail loud if the produced branch is gone");
     }
 
     [Fact]
