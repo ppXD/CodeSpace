@@ -5,7 +5,6 @@ import type { PhaseAgentRef, RunPhase } from "@/api/workflows";
 
 import { RunOutline } from "./RunOutline";
 
-// A node-spine phase (the structural manual/code/end) — the default, since the outline renders the node spine.
 function phase(o: Partial<RunPhase>): RunPhase {
   return {
     id: "p", label: "P", kind: "node", status: "Pending", order: 0,
@@ -13,7 +12,9 @@ function phase(o: Partial<RunPhase>): RunPhase {
     ...o,
   };
 }
-const agent = (id: string, status: string, label: string, nodeId?: string): PhaseAgentRef => ({ agentRunId: id, status, label, nodeId });
+const agent = (id: string, status: string, label: string, nodeId?: string, durationMs?: number): PhaseAgentRef => ({ agentRunId: id, status, label, nodeId, durationMs });
+const box = (c: HTMLElement) => c.querySelector<HTMLElement>(".run-outline-box");
+const dots = (c: HTMLElement) => Array.from(c.querySelectorAll<HTMLElement>(".run-outline-dots > i")).map((d) => d.dataset.state);
 
 describe("RunOutline", () => {
   it("shows an empty hint when there are no phases", () => {
@@ -21,28 +22,19 @@ describe("RunOutline", () => {
     expect(container.querySelector(".run-outline-empty")).not.toBeNull();
   });
 
-  it("renders the active phase highlighted with a spinner, its done/total roll-up, and its agent children", () => {
+  it("renders an agent-bearing phase as a framed box with square per-agent dots + an Agent·Time table on expand", () => {
     const { container, getByText } = render(<RunOutline phases={[
-      phase({ id: "code", label: "Implement", status: "Active", agents: [agent("a1", "Running", "backend-fix"), agent("a2", "Succeeded", "frontend-fix")] }),
-    ]} />);
-
-    expect(getByText("Implement")).toBeTruthy();
-    expect(container.querySelector('.run-outline-phase[data-status="active"]')).not.toBeNull();
-    expect(container.querySelector('.run-outline-glyph[data-status="active"] .run-outline-spin')).not.toBeNull();
-    expect(getByText("1/2")).toBeTruthy();   // done / total, off the displayed agents
-    expect(getByText("backend-fix")).toBeTruthy();   // the active phase auto-expands its agents
-    expect(container.querySelector(".run-outline-agent-dot[data-busy]")).not.toBeNull();
-  });
-
-  it("renders an always-on per-agent dot row under an agent-bearing phase, status-colored", () => {
-    const { container } = render(<RunOutline phases={[
-      phase({ id: "code", label: "Implement", status: "Active", agents: [agent("a1", "Running", "x"), agent("a2", "Succeeded", "y"), agent("a3", "Queued", "z")] }),
+      phase({ id: "code", label: "Implement", status: "Active", agents: [agent("a1", "Running", "backend-fix", undefined, 137_000), agent("a2", "Succeeded", "frontend-fix")] }),
     ]} onSelectPhase={vi.fn()} />);
 
-    expect([...container.querySelectorAll(".run-outline-dots > i")].map((d) => d.getAttribute("data-state"))).toEqual(["running", "done", "waiting"]);
+    expect(box(container)).not.toBeNull();
+    expect(dots(container)).toEqual(["running", "done"]);
+    expect(getByText("Implement")).toBeTruthy();
+    expect(getByText("backend-fix")).toBeTruthy();   // the Active phase auto-expands its table
+    expect(getByText("2m 17s")).toBeTruthy();        // the Time column
   });
 
-  it("maps each terminal status to its glyph tone", () => {
+  it("maps each terminal status to its glyph tone on the agentless node rows", () => {
     const { container } = render(<RunOutline phases={[
       phase({ id: "ok", label: "Plan", status: "Succeeded" }),
       phase({ id: "bad", label: "Verify", status: "Failed" }),
@@ -53,35 +45,21 @@ describe("RunOutline", () => {
     expect(container.querySelector('.run-outline-glyph[data-status="waiting"]')).not.toBeNull();
   });
 
-  it("surfaces a phase summary line when present", () => {
-    const { getByText } = render(<RunOutline phases={[phase({ id: "ask", label: "Choose strategy", status: "Waiting", summary: "Squash or rebase? — awaiting answer" })]} />);
-    expect(getByText("Squash or rebase? — awaiting answer")).toBeTruthy();
-  });
-
-  it("selects a phase when its label is clicked, marking it, and toggles off on a re-click", () => {
+  it("clicking the box selects the phase and toggles its table; a done phase starts collapsed", () => {
     const onSelectPhase = vi.fn();
-    const { getByText, container, rerender } = render(<RunOutline phases={[phase({ id: "code", label: "Implement", status: "Active", agents: [agent("a1", "Running", "x")] })]} onSelectPhase={onSelectPhase} />);
+    const make = (selectedPhaseId?: string) => <RunOutline phases={[phase({ id: "code", label: "Implement", status: "Succeeded", agents: [agent("a1", "Succeeded", "scout")] })]} selectedPhaseId={selectedPhaseId} onSelectPhase={onSelectPhase} />;
+    const { container, getByText, rerender } = render(make());
 
-    fireEvent.click(getByText("Implement"));
+    expect(container.querySelector(".run-outline-agtable")).toBeNull();   // a done phase starts collapsed
+    fireEvent.click(box(container)!);
     expect(onSelectPhase).toHaveBeenCalledWith("code");
+    expect(getByText("scout")).toBeTruthy();   // the box click expanded the table
 
-    rerender(<RunOutline phases={[phase({ id: "code", label: "Implement", status: "Active", agents: [agent("a1", "Running", "x")] })]} selectedPhaseId="code" onSelectPhase={onSelectPhase} />);
-    expect(container.querySelector('.run-outline-phase[data-selected]')).not.toBeNull();
-    fireEvent.click(getByText("Implement"));
-    expect(onSelectPhase).toHaveBeenLastCalledWith(null);
+    rerender(make("code"));
+    expect(container.querySelector(".run-outline-phase[data-selected]")).not.toBeNull();
   });
 
-  it("collapses a non-active phase's agents until the caret expands them", () => {
-    const { container, getByText, getByLabelText } = render(<RunOutline phases={[
-      phase({ id: "ground", label: "Ground", status: "Succeeded", agents: [agent("a1", "Succeeded", "scout")] }),
-    ]} onSelectPhase={vi.fn()} />);
-
-    expect(container.querySelector(".run-outline-agent")).toBeNull();   // a done phase starts collapsed
-    fireEvent.click(getByLabelText("Toggle agents"));
-    expect(getByText("scout")).toBeTruthy();
-  });
-
-  it("selects an agent's phase AND the agent when an agent row is clicked", () => {
+  it("clicking an agent name focuses its phase AND the agent", () => {
     const onSelectPhase = vi.fn();
     const onSelectAgent = vi.fn();
     const { getByText, container } = render(<RunOutline
@@ -92,23 +70,17 @@ describe("RunOutline", () => {
     />);
 
     fireEvent.click(getByText("backend-fix"));
-    expect(onSelectPhase).toHaveBeenCalledWith("code");   // focusing an agent focuses its phase too
+    expect(onSelectPhase).toHaveBeenCalledWith("code");
     expect(onSelectAgent).toHaveBeenCalledWith("a1");
-    expect(container.querySelector(".run-outline-agent[data-selected]")?.textContent).toContain("frontend-fix");
+    expect(container.querySelector(".run-outline-agtable tr[data-selected]")?.textContent).toContain("frontend-fix");
   });
 
-  it("nests a supervisor's semantic phases under a 'Phases' block beneath their node", () => {
-    const { container, getByText } = render(<RunOutline phases={[
-      phase({ id: "manual", label: "manual", status: "Succeeded" }),
-      phase({ id: "code", label: "code", status: "Active" }),   // the supervisor node — no inline agents
-      phase({ id: "end", label: "end", status: "Pending" }),
-      phase({ id: "phase-impl", label: "Implement", kind: "phase", status: "Active", sourceKey: "supervisor-ledger", agents: [agent("a1", "Running", "backend", "code")] }),
-    ]} onSelectPhase={vi.fn()} />);
+  it("renders a queued agent's box dot as amber (data-state waiting), with no data-busy", () => {
+    const { container } = render(<RunOutline phases={[phase({ id: "code", label: "code", status: "Active", agents: [agent("a1", "Queued", "deploy")] })]} onSelectPhase={vi.fn()} />);
 
-    const block = container.querySelector(".run-outline-phases");
-    expect(block).not.toBeNull();
-    expect(getByText("Phases")).toBeTruthy();
-    expect(block?.textContent).toContain("Implement");   // the semantic phase lives in the block, not the spine
+    const dot = container.querySelector<HTMLElement>(".run-outline-dots > i");
+    expect(dot?.dataset.state).toBe("waiting");
+    expect(dot?.hasAttribute("data-busy")).toBe(false);
   });
 
   it("shows spawn-decision agents in the Phases block when no semantic phases were authored (flat plan)", () => {
@@ -119,26 +91,18 @@ describe("RunOutline", () => {
 
     const block = container.querySelector(".run-outline-phases");
     expect(block?.textContent).toContain("Spawn 2 agents");
-    expect(getByText("worker-1")).toBeTruthy();   // the decision's agents are NOT dropped from the outline
+    expect(getByText("worker-1")).toBeTruthy();
   });
 
-  it("does not make an agentless phase selectable (its label stays a plain span)", () => {
+  it("renders an agentless node as a plain row, not a selectable box", () => {
     const { container } = render(<RunOutline phases={[phase({ id: "code", label: "code", status: "Active" })]} onSelectPhase={vi.fn()} />);
-    expect(container.querySelector("button.run-outline-label")).toBeNull();   // no agents → nothing to filter to
+    expect(container.querySelector(".run-outline-box")).toBeNull();
     expect(container.querySelector(".run-outline-label")?.textContent).toBe("code");
   });
 
-  it("renders a queued agent's dot as amber (data-status), never the busy-blue pulse", () => {
-    const { container } = render(<RunOutline phases={[phase({ id: "code", label: "code", status: "Active", agents: [agent("a1", "Queued", "deploy")] })]} onSelectAgent={vi.fn()} />);
-
-    const dot = container.querySelector(".run-outline-agent-dot");
-    expect(dot?.getAttribute("data-status")).toBe("queued");
-    expect(dot?.hasAttribute("data-busy")).toBe(false);   // a queued agent isn't "busy" → it reads amber, not the running blue
-  });
-
-  it("renders agent rows as plain (non-button) when no handler is given", () => {
-    const { container } = render(<RunOutline phases={[phase({ status: "Active", agents: [agent("a1", "Running", "solo")] })]} />);
-    expect(container.querySelector("button.run-outline-agent")).toBeNull();
-    expect(container.querySelector(".run-outline-agent")).not.toBeNull();
+  it("renders agent names as plain (non-button) when no select handler is given", () => {
+    const { container } = render(<RunOutline phases={[phase({ id: "code", status: "Active", agents: [agent("a1", "Running", "solo")] })]} />);
+    expect(container.querySelector("button.run-outline-agname")).toBeNull();
+    expect(container.querySelector(".run-outline-agname")?.textContent).toBe("solo");
   });
 });
