@@ -61,10 +61,9 @@ export function RunOutline({ phases, selectedPhaseId, onSelectPhase, selectedAge
   );
 }
 
-function PhaseRow({ phase, agents, selectedPhaseId, onSelectPhase, selectedAgentRunId, onSelectAgent }: {
+function PhaseRow({ phase, agents, onSelectPhase, selectedAgentRunId, onSelectAgent }: {
   phase: RunPhase;
   agents: PhaseAgentRef[];
-  selectedPhaseId?: string | null;
   onSelectPhase?: (phaseId: string | null) => void;
   selectedAgentRunId?: string | null;
   onSelectAgent?: (agentRunId: string | null) => void;
@@ -81,7 +80,7 @@ function PhaseRow({ phase, agents, selectedPhaseId, onSelectPhase, selectedAgent
     );
   }
 
-  return <PhaseBox phase={phase} agents={agents} selectedPhaseId={selectedPhaseId} onSelectPhase={onSelectPhase} selectedAgentRunId={selectedAgentRunId} onSelectAgent={onSelectAgent} />;
+  return <PhaseBox phase={phase} agents={agents} onSelectPhase={onSelectPhase} selectedAgentRunId={selectedAgentRunId} onSelectAgent={onSelectAgent} />;
 }
 
 /**
@@ -89,50 +88,51 @@ function PhaseRow({ phase, agents, selectedPhaseId, onSelectPhase, selectedAgent
  * top-right, a square status dot per agent below). Toggling also focuses the phase so the Activity timeline scrolls to
  * it. The expanded table is Agent · Time only (no dot / status word — the rich rollup lives in the agent's terminal).
  */
-function PhaseBox({ phase, agents, selectedPhaseId, onSelectPhase, selectedAgentRunId, onSelectAgent }: {
+function PhaseBox({ phase, agents, onSelectPhase, selectedAgentRunId, onSelectAgent }: {
   phase: RunPhase;
   agents: PhaseAgentRef[];
-  selectedPhaseId?: string | null;
   onSelectPhase?: (phaseId: string | null) => void;
   selectedAgentRunId?: string | null;
   onSelectAgent?: (agentRunId: string | null) => void;
 }) {
   const [open, setOpen] = useState(() => phase.status === "Active");
-  const selected = phase.id === selectedPhaseId;
 
   const toggle = () => { setOpen((v) => !v); onSelectPhase?.(phase.id); };
   const focusAgent = (id: string) => { onSelectPhase?.(phase.id); onSelectAgent?.(id === selectedAgentRunId ? null : id); };
 
   return (
-    <div className="run-outline-phase" data-selected={selected || undefined}>
-      <button type="button" className="run-outline-box" data-open={open || undefined} aria-expanded={open} onClick={toggle}>
-        <span className="run-outline-box-head">
-          <span className="run-outline-box-name" title={phase.label}>{phase.label}</span>
-          <Ic.ChevronRight className="run-outline-box-caret" size={13} aria-hidden="true" />
-        </span>
-        <span className="run-outline-dots" aria-hidden="true">
-          {agents.map((a) => <i key={a.agentRunId} data-state={tileState(a.status)} />)}
-        </span>
-      </button>
+    <div className="run-outline-phase">
+      {/* one gray card — the SAME gray clicked or not; the header toggles, the agent table lives INSIDE it, only a row highlights */}
+      <div className="run-outline-box">
+        <button type="button" className="run-outline-box-head" data-open={open || undefined} aria-expanded={open} onClick={toggle}>
+          <span className="run-outline-box-headrow">
+            <span className="run-outline-box-name" title={phase.label}>{phase.label}</span>
+            <Ic.ChevronRight className="run-outline-box-caret" size={13} aria-hidden="true" />
+          </span>
+          <span className="run-outline-dots" aria-hidden="true">
+            {agents.map((a) => <i key={a.agentRunId} data-state={tileState(a.status)} />)}
+          </span>
+        </button>
 
-      {open && (
-        <table className="run-outline-agtable">
-          <thead><tr><th scope="col">Agent</th><th scope="col" className="run-outline-agtable-time">Time</th></tr></thead>
-          <tbody>
-            {agents.map((a) => {
-              const name = a.label ?? a.iterationKey ?? a.agentRunId.slice(0, 8);
-              return (
-                <tr key={a.agentRunId} data-selected={a.agentRunId === selectedAgentRunId || undefined}>
-                  <td>{onSelectAgent
-                    ? <button type="button" className="run-outline-agname" aria-pressed={a.agentRunId === selectedAgentRunId} title={name} onClick={() => focusAgent(a.agentRunId)}>{name}</button>
-                    : <span className="run-outline-agname" title={name}>{name}</span>}</td>
-                  <td className="run-outline-agtable-time">{formatDuration(a.durationMs)}</td>
-                </tr>
-              );
-            })}
-          </tbody>
-        </table>
-      )}
+        {open && (
+          <table className="run-outline-agtable">
+            <thead><tr><th scope="col">Agent</th><th scope="col" className="run-outline-agtable-time">Time</th></tr></thead>
+            <tbody>
+              {agents.map((a) => {
+                const name = a.label ?? a.iterationKey ?? a.agentRunId.slice(0, 8);
+                return (
+                  <tr key={a.agentRunId} data-selected={a.agentRunId === selectedAgentRunId || undefined}>
+                    <td>{onSelectAgent
+                      ? <button type="button" className="run-outline-agname" aria-pressed={a.agentRunId === selectedAgentRunId} title={name} onClick={() => focusAgent(a.agentRunId)}>{name}</button>
+                      : <span className="run-outline-agname" title={name}>{name}</span>}</td>
+                    <td className="run-outline-agtable-time">{formatDuration(a.durationMs)}</td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        )}
+      </div>
     </div>
   );
 }
