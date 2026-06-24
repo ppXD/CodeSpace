@@ -1,12 +1,10 @@
 using System.Text.Json;
 using CodeSpace.Core.DependencyInjection;
-using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Services.Workflows;
 using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Dtos.Workflows;
 using CodeSpace.Messages.Enums;
 using CodeSpace.Messages.Tasks.Phases;
-using Microsoft.EntityFrameworkCore;
 
 namespace CodeSpace.Core.Services.Tasks.Phases.Sources.Nodes;
 
@@ -32,12 +30,12 @@ public sealed class WorkflowNodePhaseSource : IRunPhaseSource, IScopedDependency
     private const string MapContainerKind = "flow.map";
 
     private readonly IWorkflowService _workflows;
-    private readonly CodeSpaceDbContext _db;
+    private readonly AgentMetricsReader _metrics;
 
-    public WorkflowNodePhaseSource(IWorkflowService workflows, CodeSpaceDbContext db)
+    public WorkflowNodePhaseSource(IWorkflowService workflows, AgentMetricsReader metrics)
     {
         _workflows = workflows;
-        _db = db;
+        _metrics = metrics;
     }
 
     public string SourceKey => Key;
@@ -48,35 +46,31 @@ public sealed class WorkflowNodePhaseSource : IRunPhaseSource, IScopedDependency
 
         if (run == null) return Array.Empty<RunPhase>();
 
-        var agentStatusById = await AgentStatusesAsync(context.TeamId, run.Nodes, cancellationToken).ConfigureAwait(false);
+        // ONE team-scoped read of the real AgentRun rows + tool ledger gives BOTH the ground-truth status AND the
+        // per-agent metrics (duration / tokens / tool count / model), so a plain agent.code / map agent now carries the
+        // SAME rollup the supervisor source folds from its ledger — not just status.
+        var metricsById = await _metrics.ReadAsync(context.TeamId, AgentRunIdsOf(run.Nodes), DateTimeOffset.UtcNow, cancellationToken).ConfigureAwait(false);
 
-        return ProjectNodes(run.Nodes, agentStatusById);
+        var agentStatusById = metricsById.ToDictionary(kv => kv.Key, kv => kv.Value.Status);
+
+        return ProjectNodes(run.Nodes, agentStatusById, metricsById);
     }
 
-    /// <summary>The REAL status of every node-referenced agent run, keyed by id, team-scoped — the ground-truth fold (mirrors <c>SupervisorScorecardService.SpawnedAgentStatusesByRunAsync</c>'s id-set query). ONE batch query, never per-ref.</summary>
-    private async Task<IReadOnlyDictionary<Guid, AgentRunStatus>> AgentStatusesAsync(Guid teamId, IReadOnlyList<WorkflowRunNodeSummary> nodes, CancellationToken cancellationToken)
-    {
-        var ids = nodes
+    /// <summary>The distinct agent-run ids referenced by the node rows (a node carrying a parseable <c>AgentRunId</c>) — the id set the metrics read folds over.</summary>
+    private static IReadOnlyList<Guid> AgentRunIdsOf(IReadOnlyList<WorkflowRunNodeSummary> nodes) =>
+        nodes
             .Where(n => !string.IsNullOrEmpty(n.AgentRunId) && Guid.TryParse(n.AgentRunId, out _))
             .Select(n => Guid.Parse(n.AgentRunId!))
             .Distinct()
             .ToList();
 
-        if (ids.Count == 0) return EmptyStatuses;
-
-        return (await _db.AgentRun.AsNoTracking()
-                .Where(r => r.TeamId == teamId && ids.Contains(r.Id))
-                .Select(r => new { r.Id, r.Status })
-                .ToListAsync(cancellationToken).ConfigureAwait(false))
-            .ToDictionary(r => r.Id, r => r.Status);
-    }
-
-    /// <summary>The pure projection step — node summaries + the already-resolved ground-truth agent statuses → phases. Separated from the DB read so it is unit-testable without a DbContext.</summary>
-    public static IReadOnlyList<RunPhase> ProjectNodes(IReadOnlyList<WorkflowRunNodeSummary> nodes, IReadOnlyDictionary<Guid, AgentRunStatus> agentStatusById)
+    /// <summary>The pure projection step — node summaries + the already-resolved ground-truth agent statuses (and the optional per-agent metrics) → phases. Separated from the DB read so it is unit-testable without a DbContext. <paramref name="metricsById"/> omitted leaves the refs' duration/tokens/tool/model fields null (today's behavior).</summary>
+    public static IReadOnlyList<RunPhase> ProjectNodes(IReadOnlyList<WorkflowRunNodeSummary> nodes, IReadOnlyDictionary<Guid, AgentRunStatus> agentStatusById, IReadOnlyDictionary<Guid, AgentRunMetrics>? metricsById = null)
     {
         var topLevel = OrderTopLevel(nodes);
+        var metrics = metricsById ?? EmptyMetrics;
 
-        return topLevel.Select((node, index) => ToPhase(node, index, nodes, agentStatusById)).ToList();
+        return topLevel.Select((node, index) => ToPhase(node, index, nodes, agentStatusById, metrics)).ToList();
     }
 
     private static IReadOnlyList<WorkflowRunNodeSummary> OrderTopLevel(IReadOnlyList<WorkflowRunNodeSummary> nodes) =>
@@ -85,13 +79,13 @@ public sealed class WorkflowNodePhaseSource : IRunPhaseSource, IScopedDependency
             .OrderBy(n => n.StartedAt ?? DateTimeOffset.MaxValue)
             .ToList();
 
-    private static RunPhase ToPhase(WorkflowRunNodeSummary node, int order, IReadOnlyList<WorkflowRunNodeSummary> allRows, IReadOnlyDictionary<Guid, AgentRunStatus> agentStatusById)
+    private static RunPhase ToPhase(WorkflowRunNodeSummary node, int order, IReadOnlyList<WorkflowRunNodeSummary> allRows, IReadOnlyDictionary<Guid, AgentRunStatus> agentStatusById, IReadOnlyDictionary<Guid, AgentRunMetrics> metricsById)
     {
         var branches = MapBranchesOf(node.NodeId, allRows);
 
-        if (branches.Count > 0) return MapPhase(node, order, branches, agentStatusById);
+        if (branches.Count > 0) return MapPhase(node, order, branches, agentStatusById, metricsById);
 
-        if (!string.IsNullOrEmpty(node.AgentRunId)) return AgentPhase(node, order, agentStatusById);
+        if (!string.IsNullOrEmpty(node.AgentRunId)) return AgentPhase(node, order, agentStatusById, metricsById);
 
         return PlainPhase(node, order);
     }
@@ -112,16 +106,16 @@ public sealed class WorkflowNodePhaseSource : IRunPhaseSource, IScopedDependency
         iterationKey.StartsWith(prefix, StringComparison.Ordinal) &&
         iterationKey.AsSpan(prefix.Length).IndexOf('/') < 0;
 
-    private static RunPhase MapPhase(WorkflowRunNodeSummary node, int order, IReadOnlyList<WorkflowRunNodeSummary> branches, IReadOnlyDictionary<Guid, AgentRunStatus> agentStatusById)
+    private static RunPhase MapPhase(WorkflowRunNodeSummary node, int order, IReadOnlyList<WorkflowRunNodeSummary> branches, IReadOnlyDictionary<Guid, AgentRunStatus> agentStatusById, IReadOnlyDictionary<Guid, AgentRunMetrics> metricsById)
     {
-        var agents = branches.Where(b => !string.IsNullOrEmpty(b.AgentRunId)).Select(b => ToAgentRef(b, agentStatusById)).ToList();
+        var agents = branches.Where(b => !string.IsNullOrEmpty(b.AgentRunId)).Select(b => ToAgentRef(b, agentStatusById, metricsById)).ToList();
 
         return BasePhase(node, order, kind: "map", label: "Fan out", agents) with { Metrics = MapMetrics(node, agents) };
     }
 
-    private static RunPhase AgentPhase(WorkflowRunNodeSummary node, int order, IReadOnlyDictionary<Guid, AgentRunStatus> agentStatusById)
+    private static RunPhase AgentPhase(WorkflowRunNodeSummary node, int order, IReadOnlyDictionary<Guid, AgentRunStatus> agentStatusById, IReadOnlyDictionary<Guid, AgentRunMetrics> metricsById)
     {
-        var agents = new[] { ToAgentRef(node, agentStatusById) };
+        var agents = new[] { ToAgentRef(node, agentStatusById, metricsById) };
 
         return BasePhase(node, order, kind: "agent", label: node.NodeId, agents) with
         {
@@ -146,10 +140,11 @@ public sealed class WorkflowNodePhaseSource : IRunPhaseSource, IScopedDependency
         CompletedAt = node.CompletedAt,
     };
 
-    /// <summary>The agent ref for a node row, carrying the GROUND-TRUTH AgentRunStatus name read team-scoped — falling back to the owning node's status name only when the agent row is missing (team-foreign or not yet created).</summary>
-    private static PhaseAgentRef ToAgentRef(WorkflowRunNodeSummary node, IReadOnlyDictionary<Guid, AgentRunStatus> agentStatusById)
+    /// <summary>The agent ref for a node row, carrying the GROUND-TRUTH AgentRunStatus name + the per-agent metrics (duration / tokens / tool count / model) read team-scoped — falling back to the owning node's status name, and leaving the metric fields null, only when the agent row is missing (team-foreign or not yet created).</summary>
+    private static PhaseAgentRef ToAgentRef(WorkflowRunNodeSummary node, IReadOnlyDictionary<Guid, AgentRunStatus> agentStatusById, IReadOnlyDictionary<Guid, AgentRunMetrics> metricsById)
     {
         var agentRunId = Guid.Parse(node.AgentRunId!);
+        var metrics = metricsById.GetValueOrDefault(agentRunId);
 
         return new()
         {
@@ -157,6 +152,11 @@ public sealed class WorkflowNodePhaseSource : IRunPhaseSource, IScopedDependency
             NodeId = node.NodeId,
             IterationKey = string.IsNullOrEmpty(node.IterationKey) ? null : node.IterationKey,
             Status = agentStatusById.TryGetValue(agentRunId, out var status) ? status.ToString() : node.Status.ToString(),
+            Model = metrics?.Model,
+            InputTokens = metrics?.InputTokens,
+            OutputTokens = metrics?.OutputTokens,
+            DurationMs = metrics?.DurationMs,
+            ToolCount = metrics?.ToolCount,
         };
     }
 
@@ -171,5 +171,5 @@ public sealed class WorkflowNodePhaseSource : IRunPhaseSource, IScopedDependency
     private static int ReadIntOutput(JsonElement outputs, string key) =>
         outputs.ValueKind == JsonValueKind.Object && outputs.TryGetProperty(key, out var v) && v.ValueKind == JsonValueKind.Number && v.TryGetInt32(out var n) ? n : 0;
 
-    private static readonly IReadOnlyDictionary<Guid, AgentRunStatus> EmptyStatuses = new Dictionary<Guid, AgentRunStatus>();
+    private static readonly IReadOnlyDictionary<Guid, AgentRunMetrics> EmptyMetrics = new Dictionary<Guid, AgentRunMetrics>();
 }

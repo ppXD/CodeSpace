@@ -1,3 +1,4 @@
+using CodeSpace.Core.Services.Tasks.Phases;
 using CodeSpace.Core.Services.Tasks.Phases.Sources.Nodes;
 using CodeSpace.Messages.Enums;
 using CodeSpace.Messages.Tasks.Phases;
@@ -102,10 +103,15 @@ public class WorkflowNodePhaseSourceTests
         var nodes = new[] { RunDetailFixtures.TopLevelNode("agent", NodeStatus.Running, agentRunId: agentRunId.ToString()) };
 
         // The agent row isn't in the team-scoped status map (team-foreign or not yet created) — the documented
-        // fallback stamps the owning node's status name so the ref is never blank.
-        var phase = WorkflowNodePhaseSource.ProjectNodes(nodes, EmptyStatuses).ShouldHaveSingleItem();
+        // fallback stamps the owning node's status name so the ref is never blank, and leaves EVERY metric field null
+        // (a missing row contributes no metrics, matching the supervisor-source contract).
+        var agent = WorkflowNodePhaseSource.ProjectNodes(nodes, EmptyStatuses).ShouldHaveSingleItem().Agents.ShouldHaveSingleItem();
 
-        phase.Agents.ShouldHaveSingleItem().Status.ShouldBe(nameof(NodeStatus.Running), "absent agent row → fall back to the node status name");
+        agent.Status.ShouldBe(nameof(NodeStatus.Running), "absent agent row → fall back to the node status name");
+        agent.DurationMs.ShouldBeNull();
+        agent.InputTokens.ShouldBeNull();
+        agent.ToolCount.ShouldBeNull("a missing agent row leaves ToolCount null, not 0");
+        agent.Model.ShouldBeNull();
     }
 
     [Fact]
@@ -117,6 +123,43 @@ public class WorkflowNodePhaseSourceTests
 
         phase.Kind.ShouldBe("node");
         phase.Agents.ShouldBeEmpty();
+    }
+
+    [Fact]
+    public void Threads_the_per_agent_metrics_onto_the_agent_ref_when_supplied()
+    {
+        var agentRunId = Guid.NewGuid();
+        var nodes = new[] { RunDetailFixtures.TopLevelNode("code", NodeStatus.Success, agentRunId: agentRunId.ToString()) };
+        var statuses = new Dictionary<Guid, AgentRunStatus> { [agentRunId] = AgentRunStatus.Succeeded };
+        var metrics = new Dictionary<Guid, AgentRunMetrics>
+        {
+            [agentRunId] = new() { Status = AgentRunStatus.Succeeded, DurationMs = 12_000, InputTokens = 200, OutputTokens = 80, ToolCount = 3, Model = "claude-opus-4" },
+        };
+
+        var agent = WorkflowNodePhaseSource.ProjectNodes(nodes, statuses, metrics).ShouldHaveSingleItem().Agents.ShouldHaveSingleItem();
+
+        agent.DurationMs.ShouldBe(12_000);
+        agent.InputTokens.ShouldBe(200);
+        agent.OutputTokens.ShouldBe(80);
+        agent.ToolCount.ShouldBe(3);
+        agent.Model.ShouldBe("claude-opus-4");
+    }
+
+    [Fact]
+    public void Leaves_the_metric_fields_null_when_no_metrics_are_supplied()
+    {
+        var agentRunId = Guid.NewGuid();
+        var nodes = new[] { RunDetailFixtures.TopLevelNode("code", NodeStatus.Running, agentRunId: agentRunId.ToString()) };
+        var statuses = new Dictionary<Guid, AgentRunStatus> { [agentRunId] = AgentRunStatus.Running };
+
+        // The metricsById overload is OPTIONAL — omitting it keeps today's behavior (status only, metric fields null).
+        var agent = WorkflowNodePhaseSource.ProjectNodes(nodes, statuses).ShouldHaveSingleItem().Agents.ShouldHaveSingleItem();
+
+        agent.Status.ShouldBe(nameof(AgentRunStatus.Running));
+        agent.DurationMs.ShouldBeNull();
+        agent.InputTokens.ShouldBeNull();
+        agent.ToolCount.ShouldBeNull();
+        agent.Model.ShouldBeNull();
     }
 
     [Fact]
