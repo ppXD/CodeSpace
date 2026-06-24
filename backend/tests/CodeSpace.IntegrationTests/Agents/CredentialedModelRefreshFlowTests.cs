@@ -19,7 +19,7 @@ namespace CodeSpace.IntegrationTests.Agents;
 /// <summary>
 /// The reflection UPSERT against real Postgres, driven through MediatR with a FAKE reflector (so the team-membership
 /// behaviour + handler + <c>ModelCredentialService</c> all run, without a live gateway). Pins the reconciliation
-/// contract: a reflected model is added with its capabilities; a MANUAL row is never clobbered; a vanished reflected
+/// contract: a reflected model is added by id; a MANUAL row is never clobbered; a vanished reflected
 /// row is disabled (not deleted) and re-enabled when it reappears; a non-reflectable credential is a no-op; and the
 /// refresh is idempotent.
 /// </summary>
@@ -32,13 +32,13 @@ public class CredentialedModelRefreshFlowTests
     public CredentialedModelRefreshFlowTests(PostgresFixture fixture) { _fixture = fixture; }
 
     [Fact]
-    public async Task Refresh_adds_reflected_models_with_their_capabilities()
+    public async Task Refresh_adds_reflected_models_by_id()
     {
         var (userId, teamId) = await SeedTeamAsync();
         var credId = await AddCredentialAsync(userId, teamId);
 
         var count = await RefreshAsync(userId, teamId, credId, Reflectable(
-            Model("claude-opus-4-8", structured: true),
+            Model("claude-opus-4-8"),
             Model("custom/x")));
 
         count.ShouldBe(2);
@@ -48,7 +48,6 @@ public class CredentialedModelRefreshFlowTests
 
         var opus = rows.Single(r => r.ModelId == "claude-opus-4-8");
         opus.Source.ShouldBe(ModelSource.Reflected);
-        opus.SupportsStructuredOutput.ShouldBeTrue();
         opus.Enabled.ShouldBeTrue();
     }
 
@@ -59,12 +58,11 @@ public class CredentialedModelRefreshFlowTests
         var credId = await AddCredentialAsync(userId, teamId);
         await SendAsync(userId, teamId, new AddCredentialedModelCommand { ModelCredentialId = credId, ModelId = "gpt-5.4" });
 
-        // The gateway reflects the SAME id WITH a capability — the operator's manual row must stay sovereign.
-        await RefreshAsync(userId, teamId, credId, Reflectable(Model("gpt-5.4", structured: true)));
+        // The gateway reflects the SAME id — the operator's manual row must stay sovereign.
+        await RefreshAsync(userId, teamId, credId, Reflectable(Model("gpt-5.4")));
 
         var row = (await RowsAsync(credId)).ShouldHaveSingleItem();
         row.Source.ShouldBe(ModelSource.Manual, "a reflected id matching a manual row leaves the manual row untouched");
-        row.SupportsStructuredOutput.ShouldBeFalse("the manual row's capabilities are not overwritten by reflection");
     }
 
     [Fact]
@@ -130,11 +128,7 @@ public class CredentialedModelRefreshFlowTests
 
     // ─── Helpers ───
 
-    private static ReflectedModel Model(string id, bool structured = false) => new()
-    {
-        ModelId = id,
-        SupportsStructuredOutput = structured,
-    };
+    private static ReflectedModel Model(string id) => new() { ModelId = id };
 
     private static FakeReflector Reflectable(params ReflectedModel[] models) => new(canReflect: true, models);
 

@@ -149,7 +149,7 @@ public sealed partial class RealSupervisorActionExecutor
         // Pure pool-driven (S6b): the model + credential come from the team's pool for the chosen client's provider —
         // the profile's model is a PIN (it must be a qualifying pool model), else the pool's recommended one. A text
         // reduce doesn't need structured output. No pool model → degrade to a note (never an env key, never a default).
-        var pick = await _modelSelector.SelectAsync(teamId, client.Provider, requireStructured: false, allowedModels: null, pinnedModel: profile?.Model, cancellationToken).ConfigureAwait(false);
+        var pick = await _modelSelector.SelectAsync(teamId, client.Provider, allowedModels: null, pinnedModel: profile?.Model, cancellationToken).ConfigureAwait(false);
 
         if (pick is null) return new { note = $"no pool model available for synthesis on provider '{client.Provider}'" };
 

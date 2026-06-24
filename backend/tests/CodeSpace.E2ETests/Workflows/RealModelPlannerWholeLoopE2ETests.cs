@@ -76,7 +76,7 @@ public sealed class RealModelPlannerWholeLoopE2ETests
         var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
 
         // The planner's llm.complete resolves its model from the team POOL (S6b); seed the gateway as the team's ONLY
-        // Anthropic structured-capable pool model so the planner authors against CODESPACE_LLM_* with no native key.
+        // Anthropic pool model so the planner authors against CODESPACE_LLM_* with no native key.
         await SeedGatewayPoolModelAsync(teamId, BaseUrlFor(baseUrl!), apiKey!, model!);
 
         // Deterministic routing (NOT model-dependent) — assert the headline plan-map-synth recipe before the live call.
@@ -150,7 +150,7 @@ public sealed class RealModelPlannerWholeLoopE2ETests
         return node with { Config = JsonSerializer.SerializeToElement(config) };
     }
 
-    /// <summary>Seed the gateway as the team's ONLY Anthropic structured-capable pool model (the planner llm.complete resolves it via the pool). Mirrors the supervisor real-model tests' SeedBrainModelAsync.</summary>
+    /// <summary>Seed the gateway as the team's ONLY Anthropic pool model (the planner llm.complete resolves it via the pool). Mirrors the supervisor real-model tests' SeedBrainModelAsync.</summary>
     private async Task SeedGatewayPoolModelAsync(Guid teamId, string baseUrl, string apiKey, string modelId)
     {
         using var scope = _fixture.BeginScope();
@@ -164,7 +164,7 @@ public sealed class RealModelPlannerWholeLoopE2ETests
             EncryptedApiKey = encryptor.Encrypt(apiKey), BaseUrl = baseUrl, Status = CredentialStatus.Active,
             CreatedBy = SystemUsers.SeederId, LastModifiedBy = SystemUsers.SeederId,
         });
-        db.ModelCredentialModel.Add(new ModelCredentialModel { Id = Guid.NewGuid(), ModelCredentialId = credId, ModelId = modelId, Source = ModelSource.Manual, SupportsStructuredOutput = true, Enabled = true });
+        db.ModelCredentialModel.Add(new ModelCredentialModel { Id = Guid.NewGuid(), ModelCredentialId = credId, ModelId = modelId, Source = ModelSource.Manual, Enabled = true });
 
         await db.SaveChangesAsync();
     }

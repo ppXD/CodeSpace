@@ -23,15 +23,16 @@ public sealed class ModelPoolSelector : IModelPoolSelector, IScopedDependency
         _encryptor = encryptor;
     }
 
-    public async Task<ModelPoolPick?> SelectAsync(Guid teamId, string provider, bool requireStructured, IReadOnlyList<string>? allowedModels, string? pinnedModel, CancellationToken cancellationToken)
+    public async Task<ModelPoolPick?> SelectAsync(Guid teamId, string provider, IReadOnlyList<string>? allowedModels, string? pinnedModel, CancellationToken cancellationToken)
     {
         // The pool is the team's ENABLED credentialed models under an ACTIVE credential FOR THE PROVIDER the client
-        // serves (so the key authenticates that API), narrowed to structured-capable when the caller needs structured
-        // output. Provider + model-id matching is CASE-INSENSITIVE (parity with the agent-side resolver + the clamp).
+        // serves (so the key authenticates that API). GENERIC — no capability gate: structured output is the client's
+        // job (it degrades to a prompt-only JSON floor). Provider + model-id matching is CASE-INSENSITIVE (parity with
+        // the agent-side resolver + the clamp).
         var providerLower = provider.ToLower();
 
         var query = _db.ModelCredentialModel.AsNoTracking()
-            .Where(m => m.Enabled && (!requireStructured || m.SupportsStructuredOutput)
+            .Where(m => m.Enabled
                 && m.Credential.TeamId == teamId && m.Credential.DeletedDate == null && m.Credential.Status == CredentialStatus.Active
                 && m.Credential.Provider.ToLower() == providerLower);
 
@@ -59,13 +60,13 @@ public sealed class ModelPoolSelector : IModelPoolSelector, IScopedDependency
         return ToPick(row.ModelId, row.Provider, row.EncryptedApiKey, row.BaseUrl);
     }
 
-    public async Task<ModelPoolPick?> ResolveByRowIdAsync(Guid teamId, Guid modelCredentialModelId, bool requireStructured, CancellationToken cancellationToken)
+    public async Task<ModelPoolPick?> ResolveByRowIdAsync(Guid teamId, Guid modelCredentialModelId, CancellationToken cancellationToken)
     {
-        // The operator picked ONE exact row (the brain model) — resolve it under the same team / enabled / active /
-        // structured guards as the pool query, so a missing / disabled / revoked / non-structured / cross-team row
-        // fails closed rather than running an unbacked or wrong-capability model.
+        // The operator picked ONE exact row (the brain model) — resolve it under the same team / enabled / active guards
+        // as the pool query, so a missing / disabled / revoked / cross-team row fails closed rather than running an
+        // unbacked model. No capability gate: the structured client degrades a non-structured model at call time.
         var row = await _db.ModelCredentialModel.AsNoTracking()
-            .Where(m => m.Id == modelCredentialModelId && m.Enabled && (!requireStructured || m.SupportsStructuredOutput)
+            .Where(m => m.Id == modelCredentialModelId && m.Enabled
                 && m.Credential.TeamId == teamId && m.Credential.DeletedDate == null && m.Credential.Status == CredentialStatus.Active)
             .Select(m => new { m.ModelId, m.Credential.Provider, m.Credential.EncryptedApiKey, m.Credential.BaseUrl })
             .FirstOrDefaultAsync(cancellationToken).ConfigureAwait(false);

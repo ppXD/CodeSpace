@@ -2,8 +2,8 @@ namespace CodeSpace.Messages.Dtos.ModelCredentials;
 
 /// <summary>
 /// One model on a credential's maintained list, as shown in the picker — the secret-free pick-from-list surface.
-/// The capability flags + provenance are intentionally NOT here: the picker needs only id / label / availability,
-/// while the capabilities live on the entity for the scheduler to read, not the chooser.
+/// Provenance (manual vs reflected) is intentionally NOT here: the picker needs only id / label / availability,
+/// not where the row came from.
 /// </summary>
 public sealed record CredentialedModelSummary
 {

@@ -403,10 +403,10 @@ public class WorkSessionSummaryFlowTests
     /// <summary>A model-pool selector whose SelectAsync THROWS — simulating a credential-decrypt fault during model resolution (the path that must also fail open, not break the launch).</summary>
     private sealed class ThrowingSelector : IModelPoolSelector
     {
-        public Task<ModelPoolPick?> SelectAsync(Guid teamId, string provider, bool requireStructured, IReadOnlyList<string>? allowedModels, string? pinnedModel, CancellationToken cancellationToken) =>
+        public Task<ModelPoolPick?> SelectAsync(Guid teamId, string provider, IReadOnlyList<string>? allowedModels, string? pinnedModel, CancellationToken cancellationToken) =>
             throw new InvalidOperationException("simulated credential decrypt fault");
 
-        public Task<ModelPoolPick?> ResolveByRowIdAsync(Guid teamId, Guid modelCredentialModelId, bool requireStructured, CancellationToken cancellationToken) => throw new NotImplementedException();
+        public Task<ModelPoolPick?> ResolveByRowIdAsync(Guid teamId, Guid modelCredentialModelId, CancellationToken cancellationToken) => throw new NotImplementedException();
         public Task<ModelDispatchRef?> ResolveDispatchAsync(Guid teamId, string modelName, IReadOnlyList<Guid>? allowedRowIds, CancellationToken cancellationToken) => throw new NotImplementedException();
     }
 }

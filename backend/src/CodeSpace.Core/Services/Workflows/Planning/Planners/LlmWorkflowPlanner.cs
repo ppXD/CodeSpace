@@ -32,10 +32,10 @@ public sealed class LlmWorkflowPlanner : IWorkflowPlanner, IScopedDependency
     {
         var structured = ResolveStructuredClient();
 
-        var pick = await _modelSelector.SelectAsync(request.TeamId, structured.Provider, requireStructured: true, allowedModels: null, pinnedModel: null, cancellationToken).ConfigureAwait(false);
+        var pick = await _modelSelector.SelectAsync(request.TeamId, structured.Provider, allowedModels: null, pinnedModel: null, cancellationToken).ConfigureAwait(false);
 
         if (pick == null)
-            throw new InvalidOperationException($"No structured-capable model is available in the team's pool for provider '{structured.Provider}'. Add a credentialed model (with structured output) to plan tasks.");
+            throw new InvalidOperationException($"No model is available in the team's pool for provider '{structured.Provider}'. Add a credentialed, enabled model to plan tasks.");
 
         var completion = await structured.CompleteStructuredAsync(BuildRequest(request, pick), cancellationToken).ConfigureAwait(false);
 

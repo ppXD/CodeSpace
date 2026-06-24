@@ -446,7 +446,7 @@ public sealed class SupervisorArbiterDrainFlowTests
         return ledgerId;
     }
 
-    /// <summary>Seed a KEYED, structured-capable credentialed-model row for the supervisor brain (the real arbiter resolves it via the real <c>IModelPoolSelector</c>). The key is a dummy — the deterministic structured client never calls a real gateway. Returns the row id → the supervisor's <c>supervisorModelId</c>.</summary>
+    /// <summary>Seed a KEYED credentialed-model row for the supervisor brain (the real arbiter resolves it via the real <c>IModelPoolSelector</c>). The key is a dummy — the deterministic structured client never calls a real gateway. Returns the row id → the supervisor's <c>supervisorModelId</c>.</summary>
     private async Task<Guid> SeedBrainModelAsync(Guid teamId, string provider, string modelId)
     {
         using var scope = _fixture.BeginScope();
@@ -462,7 +462,7 @@ public sealed class SupervisorArbiterDrainFlowTests
         });
 
         var rowId = Guid.NewGuid();
-        db.ModelCredentialModel.Add(new ModelCredentialModel { Id = rowId, ModelCredentialId = credId, ModelId = modelId, Source = ModelSource.Manual, SupportsStructuredOutput = true, Enabled = true });
+        db.ModelCredentialModel.Add(new ModelCredentialModel { Id = rowId, ModelCredentialId = credId, ModelId = modelId, Source = ModelSource.Manual, Enabled = true });
 
         await db.SaveChangesAsync();
         return rowId;

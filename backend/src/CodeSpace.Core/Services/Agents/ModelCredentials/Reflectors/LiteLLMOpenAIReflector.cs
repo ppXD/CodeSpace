@@ -9,10 +9,10 @@ namespace CodeSpace.Core.Services.Agents.ModelCredentials.Reflectors;
 /// <summary>
 /// Reflects an OpenAI-compatible / LiteLLM gateway's <c>GET {baseUrl}/v1/models</c> into the credential's model list.
 /// The ONLY case with a real HTTP plane the backend can hit: a gateway/proxy URL stored as <c>BaseUrl</c>. A direct
-/// vendor key with no base URL (and every CLI-harness model) is NOT reflectable — those are <c>BuiltinModelCatalog</c>
-/// + manual only. Stateless transport (mirrors <c>AnthropicClient</c>'s <c>IHttpClientFactory</c> use); each
-/// discovered id is enriched with capabilities from the in-code catalog. A curated per-vendor reflector would be a
-/// sibling here (Rule 18.3) ONLY if a vendor needs flags this generic + catalog path can't derive.
+/// vendor key with no base URL (and every CLI-harness model) is NOT reflectable — those are manual only. Stateless
+/// transport (mirrors <c>AnthropicClient</c>'s <c>IHttpClientFactory</c> use); it discovers the advertised model ids
+/// (the pool is capability-generic — no flag to enrich). A curated per-vendor reflector would be a sibling here
+/// (Rule 18.3) ONLY if a vendor ever needs metadata this generic path can't derive.
 /// </summary>
 public sealed class LiteLLMOpenAIReflector : IModelReflector, ISingletonDependency
 {
@@ -50,7 +50,7 @@ public sealed class LiteLLMOpenAIReflector : IModelReflector, ISingletonDependen
             .Where(id => !string.IsNullOrWhiteSpace(id))
             .Select(id => id!.Trim())
             .Distinct(StringComparer.Ordinal)
-            .Select(id => new ReflectedModel { ModelId = id, SupportsStructuredOutput = BuiltinModelCatalog.SupportsStructuredOutput(id) })
+            .Select(id => new ReflectedModel { ModelId = id })
             .ToList();
     }
 

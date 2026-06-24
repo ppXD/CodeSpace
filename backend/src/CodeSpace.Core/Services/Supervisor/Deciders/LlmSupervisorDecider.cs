@@ -39,9 +39,9 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
         // and never a guessed default). Absent → fail closed.
         if (context.SupervisorModelId is not { } brainModelId) return NoBrainModelStop();
 
-        // Resolve that exact row → its model id + decrypted credential (team-owned, enabled, structured-capable). A
-        // missing / disabled / revoked / non-structured row → fail closed: no env "system" key, no substitute model.
-        var pick = await _modelSelector.ResolveByRowIdAsync(context.TeamId, brainModelId, requireStructured: true, cancellationToken).ConfigureAwait(false);
+        // Resolve that exact row → its model id + decrypted credential (team-owned, enabled). A missing / disabled /
+        // revoked row → fail closed: no env "system" key, no substitute model.
+        var pick = await _modelSelector.ResolveByRowIdAsync(context.TeamId, brainModelId, cancellationToken).ConfigureAwait(false);
 
         if (pick == null) return NoPoolModelStop();
 
@@ -218,7 +218,7 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
     private static SupervisorDecision NoBrainModelStop() => new()
     {
         Kind = SupervisorDecisionKinds.Stop,
-        PayloadJson = JsonSerializer.Serialize(new SupervisorStopPayload { Outcome = "no-model", Summary = "No supervisor brain model is selected — set 'supervisorModelId' to a credentialed, structured-capable model." }, AgentJson.Options),
+        PayloadJson = JsonSerializer.Serialize(new SupervisorStopPayload { Outcome = "no-model", Summary = "No supervisor brain model is selected — set 'supervisorModelId' to a credentialed, enabled model." }, AgentJson.Options),
     };
 
     /// <summary>Fail-closed terminal stop when no structured-LLM provider is registered — the lane is on but no model is configured. Deterministic so a replay re-derives it.</summary>
@@ -228,11 +228,11 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
         PayloadJson = JsonSerializer.Serialize(new SupervisorStopPayload { Outcome = "no-model", Summary = "No structured-output LLM provider is configured for the supervisor lane." }, AgentJson.Options),
     };
 
-    /// <summary>Fail-closed terminal stop when the team's credentialed-model POOL has no structured-capable model the brain can run (none configured, or none within the allowed pool / pin) — it stops cleanly rather than guessing a model or key. The pool analogue of <see cref="NoModelStop"/>.</summary>
+    /// <summary>Fail-closed terminal stop when the team's credentialed-model POOL has no model the brain can run (none configured, or none within the allowed pool / pin) — it stops cleanly rather than guessing a model or key. The pool analogue of <see cref="NoModelStop"/>.</summary>
     private static SupervisorDecision NoPoolModelStop() => new()
     {
         Kind = SupervisorDecisionKinds.Stop,
-        PayloadJson = JsonSerializer.Serialize(new SupervisorStopPayload { Outcome = "no-model", Summary = "No structured-output model is available in the team's credentialed model pool — add a model credential with a structured-capable model, or widen the allowed model pool." }, AgentJson.Options),
+        PayloadJson = JsonSerializer.Serialize(new SupervisorStopPayload { Outcome = "no-model", Summary = "No model is available in the team's credentialed model pool — add a credentialed, enabled model for the supervisor's provider, or widen the allowed model pool." }, AgentJson.Options),
     };
 
     private const string SystemPrompt =
