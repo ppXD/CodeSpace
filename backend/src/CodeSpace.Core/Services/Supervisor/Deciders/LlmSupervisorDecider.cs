@@ -112,7 +112,7 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
 
         if (context.PriorDecisions.Count == 0)
         {
-            builder.AppendLine("No prior decisions yet — this is the first turn. Start by planning (decompose the goal into subtasks).");
+            builder.AppendLine("No prior decisions yet — this is the first turn. Start by planning (decompose the goal into subtasks) — UNLESS the goal context shows THIS EXACT ask was already completed and verified by prior work (the same change shipped/merged with passing tests); then do NOT re-plan it: 'stop' to recognise completion, or 'ask_human' to clarify the new ask.");
         }
         else
         {
@@ -244,6 +244,11 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
         "recorded status, error and summary in the most recent spawn OR retry outcome, retry any subtask that FAILED or " +
         "did not satisfy the goal (optionally with a revised instruction), and merge only once the results you need have " +
         "succeeded. Stop when the goal is met or a bound forces it. " +
+        "Before planning, check whether the goal has ALREADY been delivered: if the context shows THIS EXACT ask was " +
+        "already completed and verified by prior work (the SAME change shipped/merged with passing tests — not merely " +
+        "related work), do NOT re-plan or redo it — 'stop' to recognise completion, or 'ask_human' to clarify what new " +
+        "work is wanted. A follow-up that asks for NEW or ADDITIONAL work — even building on prior turns, or touching the " +
+        "same file/endpoint/area as prior work — is NOT redundant; plan it. " +
         "If a merge reports INTEGRATION CONFLICTED, the agents' work could not be auto-combined; you may spawn ONE agent " +
         "to reconcile the preserved branches, build, and run the tests (then merge again), or stop to leave the conflict " +
         "for a human — never accept an unverified resolution. " +

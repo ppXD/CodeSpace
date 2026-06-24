@@ -134,6 +134,26 @@ public class SupervisorDeciderTests
         system.ShouldNotContain("then merge, then stop", Case.Insensitive, "the unconditional merge-then-stop rail is GONE — it would override the conditional retry guidance");
     }
 
+    [Fact]
+    public void The_system_prompt_guides_recognising_an_already_completed_ask_without_re_planning_redundant_work()
+    {
+        // Redundant-complete handoff: a session-continue whose follow-up re-requests work the prior context already
+        // shipped+verified. The model must override the plan-first rail and recognise completion (stop / ask_human),
+        // NOT re-plan to redo merged work — while a NEW/additional ask still plans. Pinned so the guidance can't be
+        // dropped silently (the live golden eval continue-redundant-complete depends on it).
+        var system = LlmSupervisorDecider.SystemPromptForTest;
+
+        system.ShouldContain("already", Case.Insensitive, "the rail names the already-delivered case");
+        system.ShouldContain("do NOT re-plan", Case.Insensitive, "...and instructs NOT to redo it");
+        system.ShouldContain("recognise completion", Case.Insensitive, "...stop on a satisfied goal");
+        system.ShouldContain("NEW or ADDITIONAL work", Case.Insensitive, "...but a genuinely new ask is NOT redundant and must still be planned (guards the incremental/mixed/after-failure scenarios)");
+
+        // The first-turn user-prompt line carries the same exception, so a fresh continue with no prior decisions still sees it.
+        var firstTurn = LlmSupervisorDecider.BuildUserPromptForTest(Context(turnNumber: 1));
+        firstTurn.ShouldContain("Start by planning", Case.Insensitive, "the default rail is still plan-first");
+        firstTurn.ShouldContain("already completed and verified", Case.Insensitive, "...with the redundant-complete exception");
+    }
+
     // ── Resolver loop #379 S1: the decider PERCEIVES an integration conflict ─────────
 
     /// <summary>
