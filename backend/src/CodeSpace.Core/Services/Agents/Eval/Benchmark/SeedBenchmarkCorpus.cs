@@ -3,15 +3,18 @@ using CodeSpace.Messages.Agents.Benchmark;
 namespace CodeSpace.Core.Services.Agents.Eval.Benchmark;
 
 /// <summary>
-/// The small, fixed SEED corpus the instrument ships with — 4 tasks, every one gradable by the tests-pass
-/// oracle. Deliberately TINY (Rule 2 / the slice-1 scope guard): this is enough to prove the instrument
-/// end-to-end — task → mode → grade → scorecard row — NOT a 20-task real-model suite (an explicit follow-on).
+/// The small, fixed SEED corpus the instrument ships with — 9 tasks across two difficulty tiers, every one gradable
+/// by the tests-pass oracle. An EASY tier (4 one-edit tasks — the slice-1 plumbing floor) plus a HARDER tier (5 tasks
+/// needing real reasoning + a known-correct multi-case answer: implement-from-spec, multi-bug boundary fix, a stack
+/// algorithm, Euclid's gcd, edge-case bounding). The harder tier exists so a LIVE model's solve-rate DIFFERENTIATES —
+/// a one-edit-only corpus a capable model trivially clears at ~100% measures nothing.
 ///
 /// <para>Each task's <see cref="BenchmarkTask.FixtureRef"/> names a fixture that <see cref="SeedBenchmarkFixtures.Stage"/>
 /// materialises as a self-contained, OFFLINE local repo: a directory with a check script that exits non-zero until the
-/// agent makes the documented one-line edit, plus the editable solution file, re-run by the
-/// <see cref="BenchmarkTask.TestCommand"/>. The fixtures need no network, no model key, no package manager — so CI runs
-/// them through the fake CLI to prove the PLUMBING, and a real-model run on demand produces the real comparison numbers.</para>
+/// agent fixes the editable solution file, re-run by the <see cref="BenchmarkTask.TestCommand"/>. Every harder task's
+/// <see cref="BenchmarkTask.Goal"/> is behaviour-only (it never names the fix) so the model must read + understand +
+/// write the logic itself. The fixtures need no network, no model key, no package manager — so CI runs them through the
+/// fake CLI to prove the PLUMBING, and a real-model run on demand produces the real comparison numbers.</para>
 /// </summary>
 public static class SeedBenchmarkCorpus
 {
@@ -56,6 +59,40 @@ public static class SeedBenchmarkCorpus
             description: "A check feeds an empty input that currently crashes; add the guard so it returns the expected value.",
             fixtureRef: "missing-guard",
             goal: "The check script crashes on empty input. Add a guard so it returns the expected value for the empty case and passes."),
+
+        // ── Harder tier: real reasoning + a multi-case check, so a live model's solve-rate DIFFERENTIATES rather than
+        //    trivially hitting 100% on the one-edit easy tier above. Same offline tests-pass shape; the goal stays
+        //    behaviour-only (never names the fix) so the model must read + understand + write the logic itself.
+
+        Task(
+            id: "implement-fizzbuzz",
+            description: "A function must echo Fizz/Buzz/FizzBuzz by divisibility but only echoes its input; implement the full rule.",
+            fixtureRef: "fizzbuzz",
+            goal: "The check script exercises a function over several inputs and currently fails. Run it, read what it expects, and implement the function so every case passes."),
+
+        Task(
+            id: "fix-grade-boundaries",
+            description: "A score-to-letter function is wrong exactly at the grade boundaries; fix the comparisons so the boundary scores grade correctly.",
+            fixtureRef: "grade-boundaries",
+            goal: "The check script fails because a function returns the wrong result at certain boundary inputs. Run it, find why the boundaries are wrong, and fix the code so every case passes."),
+
+        Task(
+            id: "implement-balanced-parens",
+            description: "A bracket-matching function always reports success; implement the real in-order balance check so unbalanced inputs are rejected.",
+            fixtureRef: "balanced-parens",
+            goal: "The check script feeds several inputs to a function and currently fails. Run it, work out the rule it expects, and implement the function so every case passes."),
+
+        Task(
+            id: "implement-gcd-euclid",
+            description: "A greatest-common-divisor function returns a placeholder; implement the algorithm so it computes the real value.",
+            fixtureRef: "gcd-euclid",
+            goal: "The check script expects a function to compute a value over several inputs but it returns a placeholder. Implement it so every case passes."),
+
+        Task(
+            id: "implement-clamp-range",
+            description: "A range-bounding function returns its input unbounded; implement bounding (including a negative range) so every case passes.",
+            fixtureRef: "clamp-range",
+            goal: "The check script feeds a function values below, above, and inside a range and currently fails. Run it, infer the expected behaviour, and implement the function so every case passes."),
     };
 
     private static BenchmarkTask Task(string id, string description, string fixtureRef, string goal) => new()

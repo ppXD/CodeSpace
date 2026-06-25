@@ -7,17 +7,17 @@ namespace CodeSpace.UnitTests.Agents.Benchmark;
 
 /// <summary>
 /// Pins the seed corpus shape + the mode-label map + the grader registry — the static, deterministic surface of
-/// the instrument. The corpus is a SMALL seed (slice-1 scope), every task tests-pass-gradable; the mode labels
-/// are the wire-visible scorecard row keys (Rule 8); the registry resolves the one built grader + refuses an
-/// unbuilt follow-on kind loudly.
+/// the instrument. The corpus is a CURATED two-tier seed (an easy one-edit tier + a harder reasoning tier so a live
+/// model's solve-rate differentiates), every task tests-pass-gradable; the mode labels are the wire-visible scorecard
+/// row keys (Rule 8); the registry resolves the one built grader + refuses an unbuilt follow-on kind loudly.
 /// </summary>
 [Trait("Category", "Unit")]
 public class BenchmarkCorpusTests
 {
     [Fact]
-    public void Seed_corpus_is_a_small_3_to_5_task_set_all_tests_pass_gradable()
+    public void Seed_corpus_is_a_curated_two_tier_set_all_tests_pass_gradable()
     {
-        SeedBenchmarkCorpus.Tasks.Count.ShouldBeInRange(3, 5, "slice-1 ships a SMALL seed corpus, not a 20-task suite");
+        SeedBenchmarkCorpus.Tasks.Count.ShouldBeInRange(8, 20, "a curated two-tier seed corpus (easy + harder), not a one-edit-only set nor a sprawling auto-generated suite");
 
         SeedBenchmarkCorpus.Tasks.ShouldAllBe(t => t.Grading == BenchmarkGradingKind.TestsPass, "every seed task is graded by the objective tests-pass oracle");
         SeedBenchmarkCorpus.Tasks.ShouldAllBe(t => t.TestCommand.Count > 0, "every tests-pass task carries a test command for the grader to re-run");
