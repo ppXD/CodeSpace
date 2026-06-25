@@ -2635,7 +2635,7 @@ textarea:-webkit-autofill {
 .acs-root .cockpit { display: flex; flex-direction: column; gap: 22px; padding: 16px; }
 
 /* Runs filter bar — the entity/scope lens above the status cards. A row of multi-select count-pills; warm theme, restrained. */
-.acs-root .run-filterbar { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+.acs-root .run-filterbar { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; padding: 9px 11px; background: var(--panel); border: 1px solid var(--line); border-radius: 12px; }
 .acs-root .run-filterbar-icon { display: inline-flex; align-items: center; color: var(--muted-2); margin-right: 2px; }
 .acs-root .filterpill-root { position: relative; }
 .acs-root .filterpill { display: inline-flex; align-items: center; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); color: var(--ink-2); transition: border-color .14s ease, background .14s ease, color .14s ease; }
