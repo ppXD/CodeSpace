@@ -45,6 +45,34 @@ public class AgentCodeNodeTests
         task.AgentDefinitionId.ShouldBeNull("an inline run carries no persona — the pure-inline path the resolver returns unchanged (zero regression)");
     }
 
+    [Theory]
+    [InlineData(900, 900)]   // a positive value is the wall-clock cap, in seconds
+    [InlineData(0, null)]    // explicit 0 ⇒ NO wall-clock (infinite — the operator's "no timeout" choice)
+    [InlineData(-1, null)]   // explicit negative ⇒ infinite too
+    public async Task TimeoutSeconds_maps_positive_to_a_cap_and_non_positive_to_infinite(int configured, int? expected)
+    {
+        var config = new Dictionary<string, JsonElement>(RequiredConfig()) { ["timeoutSeconds"] = Num(configured) };
+
+        var result = await new AgentCodeNode().RunAsync(BuildContext(config, resume: null), CancellationToken.None);
+        var task = JsonSerializer.Deserialize<AgentTask>(result.SuspendUntil!.Payload, AgentJson.Options);
+
+        task!.TimeoutSeconds.ShouldBe(expected);
+    }
+
+    [Fact]
+    public async Task TimeoutSeconds_absent_falls_back_to_the_bounded_1h_default_never_infinite()
+    {
+        // An UNSET config must never be unbounded — only an EXPLICIT non-positive value is infinite. So a launch that
+        // doesn't touch the timeout (or a programmatic/supervisor agent) stays bounded at the 1h default.
+        var config = new Dictionary<string, JsonElement>(RequiredConfig());
+        config.Remove("timeoutSeconds");
+
+        var result = await new AgentCodeNode().RunAsync(BuildContext(config, resume: null), CancellationToken.None);
+        var task = JsonSerializer.Deserialize<AgentTask>(result.SuspendUntil!.Payload, AgentJson.Options);
+
+        task!.TimeoutSeconds.ShouldBe(3600);
+    }
+
     [Fact]
     public async Task Repository_input_is_carried_onto_the_task()
     {

@@ -8,7 +8,7 @@ namespace CodeSpace.IntegrationTests.Hangfire;
 /// <summary>
 /// Pins the Hangfire Postgres storage contract (<see cref="HangfireRegistrarBase.BuildStorageOptions"/>).
 /// The load-bearing assertion is <c>UseSlidingInvisibilityTimeout</c>: agent runs last up to
-/// <see cref="AgentTask.TimeoutSeconds"/> (1800s = 30min), far beyond the 5-minute InvisibilityTimeout,
+/// <see cref="AgentTask.TimeoutSeconds"/> (default 3600s = 1h, or unbounded when null), far beyond the 5-minute InvisibilityTimeout,
 /// so WITHOUT a sliding (auto-renewing) lease Hangfire would re-surface a still-running agent job to a
 /// second worker. Lives in IntegrationTests (not UnitTests) because <see cref="PostgreSqlStorageOptions"/>
 /// is a CodeSpace.Api-only package type the lean UnitTests project excludes; tagged Integration per the
@@ -32,7 +32,7 @@ public class HangfireStorageOptionsTests
     {
         // The exact reason sliding is mandatory: the fixed lease window is far below an agent run's
         // wall-clock cap, so a non-sliding timeout would re-surface a live long run to another worker.
-        var maxAgentRun = TimeSpan.FromSeconds(new AgentTask { Goal = "x", Harness = "x", Model = "x" }.TimeoutSeconds);
+        var maxAgentRun = TimeSpan.FromSeconds(new AgentTask { Goal = "x", Harness = "x", Model = "x" }.TimeoutSeconds ?? 3600);
 
         Options.InvisibilityTimeout.ShouldBeLessThan(maxAgentRun);
         Options.UseSlidingInvisibilityTimeout.ShouldBeTrue();

@@ -19,8 +19,8 @@ public sealed record SandboxSpec
     /// <summary>Extra environment variables layered onto the runner's own environment. Secrets belong here, never in <see cref="Args"/>.</summary>
     public IReadOnlyDictionary<string, string> Environment { get; init; } = new Dictionary<string, string>();
 
-    /// <summary>Wall-clock cap. On expiry the runner terminates the command (and its children) and returns <see cref="SandboxStatus.TimedOut"/>.</summary>
-    public int TimeoutSeconds { get; init; } = 600;
+    /// <summary>Wall-clock cap. On expiry the runner terminates the command (and its children) and returns <see cref="SandboxStatus.TimedOut"/>. <c>null</c> (or ≤0) ⇒ NO wall-clock — the run is bounded only by caller cancellation, the stall watchdog, and (for an agent run) the cost cap.</summary>
+    public int? TimeoutSeconds { get; init; } = 600;
 
     /// <summary>
     /// Names of environment variables that must point the command at a PER-RUN ISOLATED config home rather
