@@ -1,0 +1,16 @@
+# Build context hygiene for Dockerfile.api / Dockerfile.worker (context = backend/).
+# Keep host build output, IDE state, and VCS metadata OUT of the image build context — they bloat the
+# context transfer, can leak local state, and (critically) a stale host bin/obj of a different SDK/RID
+# would confuse `dotnet restore`/`publish` inside the linux build container.
+**/bin
+**/obj
+**/.vs
+**/.idea
+**/*.user
+**/.DS_Store
+**/TestResults
+**/*.log
+.git
+.gitignore
+.dockerignore
+Dockerfile.*
