@@ -11,8 +11,8 @@ namespace CodeSpace.Core.Services.Tasks.Launch.Providers.Chat;
 /// <para>Chat has NO source entity to derive a goal from, so it REQUIRES a non-blank
 /// <see cref="TaskLaunchRequest.TaskText"/> — a blank goal throws a clear validation error rather than launching an
 /// empty agent. It reads NOTHING from the surface payload (a chat launch carries no opaque context); the richer
-/// pr / issue / project / repo providers (a later PR) are the ones that read <c>SurfacePayload</c> + attach a
-/// <c>LinkedEntityRef</c>.</para>
+/// pr / issue / project providers (a later PR) are the ones that read <c>SurfacePayload</c> + attach a
+/// <c>LinkedEntityRef</c>. (<c>RepoSeedProvider</c> already exists — repo anchors to a repository + base branch.)</para>
 /// </summary>
 public sealed class ChatSeedProvider : ITaskLaunchSeedProvider, ISingletonDependency
 {

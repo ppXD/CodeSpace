@@ -1,9 +1,11 @@
 import { fetchJson } from "./request";
 
-/** The surfaces the generic launch modal can be opened from — mirror of the backend
- *  `TaskLaunchSurfaceKinds` consts. Only `chat` has a live seed provider today; the rest
- *  pin context but route through the same free-text path. */
-export type TaskSurfaceKind = "chat" | "pr" | "issue" | "project" | "repo";
+/** The surfaces the generic launch modal can be opened from — the SEEDABLE subset of the backend
+ *  `TaskLaunchSurfaceKinds` consts. `chat` and `repo` have live seed providers; the backend's
+ *  reserved `pr` / `issue` / `project` are deliberately EXCLUDED here because they have no provider
+ *  yet — launching one would throw in `TaskLaunchSeedProviderRegistry.Resolve` (a 500), so the type
+ *  forbids opening the modal with one. Add a surface back when its provider lands. */
+export type TaskSurfaceKind = "chat" | "repo";
 
 /**
  * The WIRED subset of `LaunchTaskCommand` the modal sends today. Optional fields are omitted
