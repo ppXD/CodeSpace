@@ -66,6 +66,17 @@ public sealed record LaunchTaskCommand : ICommand<LaunchTaskResult>, IRequireTea
     /// <summary>The operator's optional safety-budget caps (cost / parallelism / spawns / rounds). Null / empty ⇒ the effort preset's caps stand (byte-identical to no override). A set cap TIGHTENS the preset.</summary>
     public TaskCapsOverride? Caps { get; init; }
 
+    /// <summary>
+    /// The operator's ALLOWED MODEL POOL for the agents a Deep (supervisor) run dispatches — a multi-select of
+    /// credentialed-model ROW ids (<c>ModelCredentialModel</c> ids, NOT model names). EVERY id is validated TEAM-SCOPED
+    /// by the service (fail-closed, exactly like the repos): a foreign / disabled / deleted-credential row rejects the
+    /// whole launch. Baked into the projected <c>agent.supervisor</c> node's <c>allowedModelIds</c>, where every
+    /// dispatched agent's model must resolve to a row in the pool (out of pool ⇒ fails closed at dispatch). Null /
+    /// empty ⇒ the pool is ALL the team's credentialed models (byte-identical to no pool). Inert on a non-supervisor
+    /// projection (single-agent / map ignore it).
+    /// </summary>
+    public IReadOnlyList<Guid>? AllowedModelIds { get; init; }
+
     /// <summary>The launch surface (an open <see cref="TaskLaunchSurfaceKinds"/> string). Defaults to <c>chat</c> — the registry resolves a seed provider by it.</summary>
     public string SurfaceKind { get; init; } = TaskLaunchSurfaceKinds.Chat;
 

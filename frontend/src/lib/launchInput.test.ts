@@ -23,6 +23,7 @@ const form = (over: Partial<LaunchFormState> = {}): LaunchFormState => ({
   maxRounds: "6",
   maxAgents: "20",
   budget: "none",
+  agentModels: [],
   ...over,
 });
 
@@ -139,5 +140,32 @@ describe("buildLaunchInput — caps (Limits + Budget)", () => {
   it("keeps only the valid limit fields", () => {
     const input = buildLaunchInput(form({ effort: "deep", maxParallel: "2", maxRounds: "-1", maxAgents: "", budget: "none" }));
     expect(input.caps).toEqual({ maxParallelism: 2 });
+  });
+});
+
+describe("buildLaunchInput — agent model pool (allowedModelIds)", () => {
+  it("omits allowedModelIds when the pool is empty", () => {
+    expect(buildLaunchInput(form({ effort: "deep", agentModels: [] }))).not.toHaveProperty("allowedModelIds");
+  });
+
+  it("sends the pool row ids on a deep run", () => {
+    const input = buildLaunchInput(form({ effort: "deep", agentModels: ["row-a", "row-b"] }));
+    expect(input.allowedModelIds).toEqual(["row-a", "row-b"]);
+  });
+
+  it("sends the pool on auto", () => {
+    expect(buildLaunchInput(form({ effort: "auto", agentModels: ["row-a"] })).allowedModelIds).toEqual(["row-a"]);
+  });
+
+  it("omits the pool on quick and standard (supervisor-only, Coordination tab hidden)", () => {
+    expect(buildLaunchInput(form({ effort: "quick", agentModels: ["row-a"] }))).not.toHaveProperty("allowedModelIds");
+    expect(buildLaunchInput(form({ effort: "standard", agentModels: ["row-a"] }))).not.toHaveProperty("allowedModelIds");
+  });
+
+  it("copies the pool array (no shared reference to the form state)", () => {
+    const agentModels = ["row-a"];
+    const input = buildLaunchInput(form({ effort: "deep", agentModels }));
+    expect(input.allowedModelIds).not.toBe(agentModels);
+    expect(input.allowedModelIds).toEqual(["row-a"]);
   });
 });

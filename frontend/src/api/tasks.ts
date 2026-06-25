@@ -47,6 +47,10 @@ export interface LaunchTaskInput {
   modelCredentialId?: string | null;
   relatedRepositories?: LaunchRelatedRepository[];
   caps?: LaunchCaps;
+  /** The allowed model pool for a Deep run's dispatched agents — credentialed-model ROW ids (not names). Binds
+   *  into `LaunchTaskCommand.AllowedModelIds`; the backend validates each row is team-owned. Empty/absent = all
+   *  the team's models. Sent only on deep/auto (the supervisor pool is inert on a single-agent run). */
+  allowedModelIds?: string[];
 }
 
 /** Mirror of the backend `LaunchTaskResult` — only the fields the UI consumes. `runId` is the

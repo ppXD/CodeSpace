@@ -58,6 +58,8 @@ public sealed class TaskLaunchService : ITaskLaunchService, IScopedDependency
 
         await EnsureRepositoriesInTeamAsync(seed, request, cancellationToken).ConfigureAwait(false);
 
+        await EnsureModelsInTeamAsync(request, cancellationToken).ConfigureAwait(false);
+
         var route = await _router.RouteAsync(BuildRouteRequest(seed, request), cancellationToken).ConfigureAwait(false);
 
         var profile = BuildAgentProfile(request, seed, route);
@@ -81,7 +83,7 @@ public sealed class TaskLaunchService : ITaskLaunchService, IScopedDependency
         // (null) for every non-supervisor projection — single-agent / map launches are byte-identical.
         var brainModelId = await ResolveSupervisorBrainModelAsync(route, request.TeamId, cancellationToken).ConfigureAwait(false);
 
-        var context = new TaskBuildContext { Seed = seed, Route = route, AgentProfile = profile, GroundingContext = grounding, BaseRefs = baseRefs, SupervisorBrainModelId = brainModelId };
+        var context = new TaskBuildContext { Seed = seed, Route = route, AgentProfile = profile, GroundingContext = grounding, BaseRefs = baseRefs, SupervisorBrainModelId = brainModelId, AllowedModelIds = request.AllowedModelIds };
 
         var handle = await _factory.CreateAndRunAsync(context, request.TeamId, request.ActorUserId, session, cancellationToken).ConfigureAwait(false);
 
@@ -177,6 +179,30 @@ public sealed class TaskLaunchService : ITaskLaunchService, IScopedDependency
 
         if (inTeam.Count != ids.Count)
             throw new KeyNotFoundException($"Repository {string.Join(", ", ids.Except(inTeam))} not found or not accessible.");
+    }
+
+    /// <summary>
+    /// Validates EVERY operator-supplied allowed-model-pool row (<c>ModelCredentialModel</c> id) is a team-owned,
+    /// enabled row under an active, non-deleted credential — the model analogue of <see cref="EnsureRepositoriesInTeamAsync"/>.
+    /// A foreign / disabled / dead-credential row is an indistinguishable not-found (so a foreign row never leaks its
+    /// existence), and ANY bad row fails the whole launch fail-closed BEFORE the session opens (no orphan). An empty
+    /// pool ⇒ skip (all the team's models — byte-identical to no override). The dispatch-time pool guard still fails
+    /// closed too; this just turns a silent "agent can't run" into a clear launch-time rejection.
+    /// </summary>
+    private async Task EnsureModelsInTeamAsync(TaskLaunchRequest request, CancellationToken cancellationToken)
+    {
+        if (request.AllowedModelIds is not { Count: > 0 } pool) return;
+
+        var ids = pool.ToHashSet();
+
+        var inTeam = await _db.ModelCredentialModel.AsNoTracking()
+            .Where(m => ids.Contains(m.Id) && m.Enabled
+                && m.Credential.TeamId == request.TeamId && m.Credential.DeletedDate == null && m.Credential.Status == CredentialStatus.Active)
+            .Select(m => m.Id)
+            .ToListAsync(cancellationToken).ConfigureAwait(false);
+
+        if (inTeam.Count != ids.Count)
+            throw new KeyNotFoundException($"Model {string.Join(", ", ids.Except(inTeam))} not found or not accessible.");
     }
 
     /// <summary>Maps the seed + the operator's effort/recipe/autonomy + safety-budget caps onto the router input. The router TIGHTENS the effort preset's caps with <c>CapsOverride</c> (null ⇒ preset-only, byte-identical).</summary>
