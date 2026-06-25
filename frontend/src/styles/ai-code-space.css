@@ -2839,6 +2839,38 @@ textarea:-webkit-autofill {
 .acs-root .wf-rf-result-branch-ix { font-size: 10.5px; font-weight: 700; color: var(--accent); }
 .acs-root .wf-rf-result-branch-st { font-size: 10px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
 
+/* flow.map fan-out — the activity-terminal result under a map/agent node: a summary line + a per-branch status
+   dot strip + one focused branch terminal. Floats below the node like .wf-rf-result; widens when a branch is open. */
+.acs-root .wf-rf-fanout {
+  position: absolute; top: calc(100% + 6px); left: 0; min-width: 100%; max-width: 384px; z-index: 7;
+  border: 1px solid var(--line); border-radius: 9px; background: var(--panel);
+  box-shadow: 0 1px 2px rgba(31,30,29,0.05); padding: 7px 8px;
+}
+.acs-root .wf-rf-fanout:has(.wf-rf-fanout-term) { width: 384px; z-index: 24; box-shadow: 0 6px 20px rgba(31,30,29,0.10); }
+.acs-root .wf-rf-fanout-sum { display: flex; align-items: center; flex-wrap: wrap; gap: 3px 9px; font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.acs-root .wf-rf-fanout-total { font-weight: 600; color: var(--ink-2); }
+.acs-root .wf-rf-fanout-sum [data-state="done"]    { color: #1F6B3F; }
+.acs-root .wf-rf-fanout-sum [data-state="running"] { color: var(--accent); }
+.acs-root .wf-rf-fanout-sum [data-state="failed"]  { color: #9E3535; }
+.acs-root .wf-rf-fanout-sum [data-state="queued"]  { color: var(--muted-2); }
+
+.acs-root .wf-rf-fanout-strip { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 7px; }
+.acs-root .wf-rf-fanout-dot { width: 13px; height: 13px; border-radius: 3px; border: 0; padding: 0; cursor: pointer; transition: transform .1s ease; }
+.acs-root .wf-rf-fanout-dot:hover { transform: scale(1.16); }
+.acs-root .wf-rf-fanout-dot[data-sel], .acs-root .wf-rf-fanout-dot:focus-visible { outline: none; box-shadow: 0 0 0 1.5px var(--panel), 0 0 0 3px var(--accent); }
+.acs-root .wf-rf-fanout-dot[data-state="done"]    { background: #1F6B3F; }
+.acs-root .wf-rf-fanout-dot[data-state="running"] { background: var(--accent); animation: wf-rf-fanout-pulse 1.4s ease-in-out infinite; }
+.acs-root .wf-rf-fanout-dot[data-state="failed"]  { background: #9E3535; }
+.acs-root .wf-rf-fanout-dot[data-state="queued"]  { background: var(--line); }
+@keyframes wf-rf-fanout-pulse { 0%, 100% { opacity: 1; } 50% { opacity: .4; } }
+
+.acs-root .wf-rf-fanout-term { margin-top: 8px; border-top: 1px solid var(--line); padding-top: 8px; max-height: 320px; overflow: auto; }
+.acs-root .wf-rf-fanout-term-h { display: flex; align-items: center; gap: 6px; margin-bottom: 6px; }
+.acs-root .wf-rf-fanout-term-ix { font-size: 10.5px; font-weight: 700; color: var(--accent); }
+.acs-root .wf-rf-fanout-term-st { font-size: 10px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+.acs-root .wf-rf-fanout-term-st[data-status="failure"] { color: #9E3535; }
+.acs-root .wf-rf-fanout-term-st[data-status="success"] { color: #1F6B3F; }
+
 /* The run-view canvas surface + its Canvas/Timeline toggle. */
 .acs-root .wf-run-canvas { height: min(58vh, 540px); min-height: 420px; border: 1px solid var(--line); border-radius: 14px; overflow: hidden; background: var(--panel); position: relative; }
 .acs-root .wf-run-canvas-loading { display: grid; place-items: center; color: var(--muted); font-size: 13px; }

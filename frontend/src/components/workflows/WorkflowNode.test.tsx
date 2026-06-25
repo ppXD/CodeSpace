@@ -117,7 +117,9 @@ describe("WorkflowNode coze-style result footer", () => {
     expect(run.container.querySelector(".wf-rf-result-dur")).toBeNull();
   });
 
-  it("rolls a map/loop fan-out into one bar labelled with its branch count", () => {
+  it("rolls a loop / non-map fan-out into one bar labelled with its branch count", () => {
+    // No containerKind → not a flow.map (a loop / try body shares the `<id>#<i>` key shape), so this keeps the
+    // coze-style bar; a real flow.map fan-out renders the MapFanout panel instead (see the S3 describe below).
     const run = renderNode({
       runStatus: "Success",
       runRows: [
@@ -160,9 +162,10 @@ describe("WorkflowNode result footer — agent.code + sub-workflow embeds (S3)",
     expect(onOpenRun).toHaveBeenCalledWith("child-run-9");
   });
 
-  it("labels map fan-out branches by their real element index (iterationKey), not array order", () => {
-    // The backend returns run rows in StartedAt order; here element 2 started before element 0 (parallel
-    // map). The branch labels must reflect the iterationKey, not the array position.
+  it("renders a map fan-out as the activity-terminal panel, branches ordered by element index", () => {
+    // The backend returns run rows in StartedAt order; here element 2 started before element 0 (parallel map).
+    // A flow.map fan-out renders the MapFanout panel (not the plain result-bar list), ordering its branch dots
+    // by the iterationKey element index, NOT the array position.
     const run = renderNode({
       runStatus: "Success",
       runRows: [
@@ -170,9 +173,15 @@ describe("WorkflowNode result footer — agent.code + sub-workflow embeds (S3)",
         row({ containerKind: "flow.map", iterationKey: "items#0", outputs: { v: "a" }, startedAt: "2026-06-22T00:00:01.000Z", completedAt: "2026-06-22T00:00:01.500Z" }),
       ],
     });
-    fireEvent.click(run.container.querySelector(".wf-rf-result-bar")!);
-    const indices = Array.from(run.container.querySelectorAll(".wf-rf-result-branch-ix")).map((e) => e.textContent);
-    expect(indices).toEqual(["#2", "#0"]);   // not the array-position ["#0", "#1"]
+
+    expect(run.container.querySelector(".wf-rf-fanout")).not.toBeNull();   // the fan-out panel, not the plain bar
+    expect(run.container.querySelector(".wf-rf-result-bar")).toBeNull();
+
+    const titles = Array.from(run.container.querySelectorAll(".wf-rf-fanout-dot")).map((e) => e.getAttribute("title"));
+    expect(titles).toEqual(["#0 · Success", "#2 · Success"]);   // sorted by element index, not array order
+
+    fireEvent.click(run.container.querySelectorAll<HTMLElement>(".wf-rf-fanout-dot")[1]!);   // focus #2
+    expect(run.container.querySelector(".wf-rf-fanout-term-ix")?.textContent).toBe("#2");
   });
 
   it("surfaces a parked agent.code node's live status as Running (not the idle Suspended)", () => {

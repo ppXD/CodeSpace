@@ -11,7 +11,8 @@ import { AgentRunTimeline } from "./AgentRunTimeline";
 import { AgentToolCalls } from "./AgentToolCalls";
 import { JsonView } from "./JsonView";
 import { loopMinSize } from "./loopResize";
-import { branchBadge } from "./mapBranches";
+import { branchBadge, fanBranches } from "./mapBranches";
+import { MapFanout } from "./MapFanout";
 import { NodeAddContext, type NodeAddRequest } from "./nodeAddContext";
 import { RunOpenContext } from "./runOpenContext";
 import { CATCH_HANDLE, isContainerKind } from "./workflowContainers";
@@ -191,6 +192,18 @@ function RunRowDetail({ row }: { row: WorkflowRunNodeSummary }) {
   );
 }
 
+/**
+ * The run-result footer under a node. A flow.map fan-out with ≥2 branches renders the activity-terminal
+ * {@link MapFanout} — a summary line + a per-branch status dot strip + one focused branch terminal — so a K-branch
+ * map reads as one card, not K stacked rows. Everything else (a plain node, a SINGLE-branch map, a loop / try
+ * fan-out) keeps the coze-style {@link RunResultBar}, whose single-row path embeds the agent run richly. Both hang
+ * in the free space below the node.
+ */
+function NodeRunFooter({ status, rows, title }: { status: NodeStatus; rows: WorkflowRunNodeSummary[]; title?: string }) {
+  if (fanBranches(rows).length >= 2) return <MapFanout rows={rows} renderBranch={(row) => <RunRowDetail row={row} />} />;
+  return <RunResultBar status={status} rows={rows} title={title} />;
+}
+
 /** A row earns the expand caret when it carries anything inspectable — output, input, error, an agent run, or a child run. */
 function isRowExpandable(row: WorkflowRunNodeSummary): boolean {
   return hasRunContent(row.outputs) || !!row.error || hasRunContent(row.inputs) || !!row.agentRunId || !!row.childRunId;
@@ -294,7 +307,7 @@ function ContainerNode({ id, d, selected }: { id: string; d: WorkflowNodeData; s
         <Handle id={ERROR_HANDLE} type="source" position={Position.Bottom} className="wf-rf-handle wf-rf-handle-error" title="On error → connect to a handler node" />
       )}
       {onAddFrom && <AddNodeButton nodeId={d.nodeId} onAddFrom={onAddFrom} />}
-      {d.runStatus && d.runRows && <RunResultBar status={d.runStatus} rows={d.runRows} />}
+      {d.runStatus && d.runRows && <NodeRunFooter status={d.runStatus} rows={d.runRows} />}
     </div>
   );
 }
@@ -367,7 +380,7 @@ export function WorkflowNode({ id, data, selected }: NodeProps) {
         />
       )}
       {showAdd && onAddFrom && <AddNodeButton nodeId={d.nodeId} onAddFrom={onAddFrom} />}
-      {runStatus && d.runRows && <RunResultBar status={runStatus} rows={d.runRows} title={parkedTitle} />}
+      {runStatus && d.runRows && <NodeRunFooter status={runStatus} rows={d.runRows} title={parkedTitle} />}
     </div>
   );
 }
