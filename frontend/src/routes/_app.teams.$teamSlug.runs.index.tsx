@@ -8,13 +8,13 @@ import { CockpitCards, type CockpitMetrics } from "@/components/workflows/Cockpi
 import { RunFilterBar } from "@/components/workflows/RunFilterBar";
 import { summarizeDecisions, summarizeToday, type CockpitFilter } from "@/components/workflows/cockpit";
 import { summarizeRunState } from "@/components/workflows/runPhases";
-import { bucketRuns } from "@/components/workflows/runsIndex";
 import { useLiveRunsPhases, usePendingDecisions, useTeamRuns, useTeamRunSummary, useTeamRunsHistory } from "@/hooks/use-workflows";
 
-/** History = terminal runs only; the live + suspended runs live in the pinned zones above, so History never duplicates them. */
+/** History = terminal runs only; the live + attention runs live in the pinned zones above, so History never duplicates them. */
 const TERMINAL_STATUSES: WorkflowRunStatus[] = ["Success", "Failure", "Cancelled"];
 const HISTORY_PAGE_SIZE = 20;
-/** Suspended-needing-review (the Needs-attention zone) is normally a handful; fetch up to this for the zone + its "View all". */
+/** The Live + Needs-attention zones are normally a handful; fetch up to this for the zone preview + its "View all". */
+const LIVE_LIMIT = 50;
 const ATTENTION_LIMIT = 50;
 
 /**
@@ -48,21 +48,24 @@ function TeamRunsPage() {
   const todayStartIso = new Date(day.getFullYear(), day.getMonth(), day.getDate()).toISOString();
 
   // ── Data: the cards read TRUE scoped counts; each zone fetches its OWN set so the number and the list always agree. ──
-  const runs = useTeamRuns(scope);   // newest-50 — powers the Live zone + the failed/today armed views + the today sparkline
+  const runs = useTeamRuns(scope);   // newest-50 — powers the failed/today armed views + the today sparkline
   const summary = useTeamRunSummary(scope, todayStartIso);
   const decisions = usePendingDecisions();
-  // The Needs-attention zone fetches its OWN runs (suspended, no pending decision) so the card can't say "1" while the
-  // zone shows nothing for a run outside the newest-50 — the number, the preview, and "View all" are one set.
-  const attentionRuns = useTeamRuns({ ...scope, statuses: ["Suspended"], hasPendingDecision: false }, ATTENTION_LIMIT);
+  // LIVE = actively progressing, no human needed: running/queued PLUS auto-resuming suspends — a fan-out parked on its
+  // agent runs is WORKING, not waiting on you. A suspend that needs a person (Approval/Action) is excluded (it's attention).
+  const liveRuns = useTeamRuns({ ...scope, statuses: ["Pending", "Enqueued", "Running", "Suspended"], needsAttention: false }, LIVE_LIMIT);
+  // NEEDS-ATTENTION = human-ACTIONABLE suspends only (no pending decision), its OWN set so the count == the listed rows.
+  const attentionRuns = useTeamRuns({ ...scope, statuses: ["Suspended"], needsAttention: true, hasPendingDecision: false }, ATTENTION_LIMIT);
   // History is its own numbered page of TERMINAL runs, only fetched on the default board (an armed card hides it).
   const history = useTeamRunsHistory({ ...scope, statuses: TERMINAL_STATUSES }, historyPage, HISTORY_PAGE_SIZE, filter === null);
 
   const runList = runs.data ?? [];
   const decisionList = decisions.data ?? [];
+  const liveList = liveRuns.data ?? [];
   const attentionList = attentionRuns.data ?? [];
 
   // The live runs' phases, batched — powers the Live zone's state sentences + the "agents active" tally.
-  const liveIds = bucketRuns(runList).live.map((r) => r.id);
+  const liveIds = liveList.map((r) => r.id);
   const livePhases = useLiveRunsPhases(liveIds);
 
   // ── Render-time derivations (no hooks below this line). ──
@@ -122,6 +125,7 @@ function TeamRunsPage() {
                 <CockpitBoard
                   runs={runList}
                   decisions={decisionList}
+                  live={liveList}
                   attention={{ runs: attentionList, total: s?.suspendedNeedingReview ?? 0 }}
                   phasesByRun={phasesByRun}
                   filter={filter}

@@ -35,12 +35,12 @@ const ATTENTION_EMPTY: RunAttentionView = { runs: [], total: 0 };
 const attn = (items: WorkflowRunSummary[], total?: number): RunAttentionView => ({ runs: items, total: total ?? items.length });
 
 const board = (o: Partial<Parameters<typeof CockpitBoard>[0]>) =>
-  render(<CockpitBoard runs={[]} decisions={[]} attention={ATTENTION_EMPTY} phasesByRun={new Map()} filter={null} history={HISTORY_EMPTY} nowMs={NOW} onOpen={() => {}} onFilter={() => {}} {...o} />);
+  render(<CockpitBoard runs={[]} decisions={[]} live={[]} attention={ATTENTION_EMPTY} phasesByRun={new Map()} filter={null} history={HISTORY_EMPTY} nowMs={NOW} onOpen={() => {}} onFilter={() => {}} {...o} />);
 
 describe("CockpitBoard", () => {
   it("shows the three zones, the answerable decision, and a live state sentence", () => {
     const { container } = board({
-      runs: [run("live1", "Running")],
+      live: [run("live1", "Running")],
       decisions: [decision({ id: "dec1", question: "Choose merge strategy" })],
       phasesByRun: new Map([["live1", phasesFor("live1")]]),
       history: hist([run("done1", "Success")]),
@@ -114,9 +114,18 @@ describe("CockpitBoard", () => {
   });
 
   it("falls back to the run status in the Live row before its phases + start load", () => {
-    const { container } = board({ runs: [run("live1", "Running", { startedAt: null })], phasesByRun: new Map() });   // no phases, no start
+    const { container } = board({ live: [run("live1", "Running", { startedAt: null })], phasesByRun: new Map() });   // no phases, no start
     const meta = container.querySelector(".cockpit-live-meta");
     expect(meta?.textContent).toBe("Running");   // degrades to status, no crash
+  });
+
+  it("renders the Live zone from its own `live` set (including auto-resuming suspends), not from `runs`", () => {
+    const { container } = board({
+      runs: [run("ignored", "Failure", { workflowName: "Not in live" })],   // the `runs` prop no longer feeds the default board's Live zone
+      live: [run("working", "Running", { workflowName: "Fan out" }), run("parked", "Suspended", { workflowName: "Snapshot" })],
+    });
+    const titles = [...container.querySelectorAll(".cockpit-live-title")].map((n) => n.textContent);
+    expect(titles).toEqual(["Fan out", "Snapshot"]);   // both from `live`; a Suspended run here is auto-resuming → still Live, not attention
   });
 
   it("filter='today' shows only runs created today", () => {
