@@ -59,6 +59,10 @@ public sealed partial class LocalProcessRunner : ISandboxRunner, ISandboxStreamR
         return int.TryParse(raw, out var seconds) && seconds > 0 ? TimeSpan.FromSeconds(seconds) : null;
     }
 
+    /// <summary>The wall-clock cancellation source for a spec's <see cref="SandboxSpec.TimeoutSeconds"/>: a positive value arms the timeout; <c>null</c> or ≤0 means NO wall-clock — an unarmed source that never auto-cancels, so the run is bounded only by caller cancellation + the stall watchdog (the operator's "no timeout" choice).</summary>
+    private static CancellationTokenSource WallClockCts(int? timeoutSeconds) =>
+        timeoutSeconds is { } seconds && seconds > 0 ? new CancellationTokenSource(TimeSpan.FromSeconds(seconds)) : new CancellationTokenSource();
+
     /// <summary>Internal signal: the stall watchdog tripped (no output for the idle window). Caught by the streaming caller and mapped to <see cref="SandboxStatus.Stalled"/>.</summary>
     private sealed class AgentStalledException : Exception { }
 
@@ -73,7 +77,7 @@ public sealed partial class LocalProcessRunner : ISandboxRunner, ISandboxStreamR
         var stdoutTask = process.StandardOutput.ReadToEndAsync();
         var stderrTask = process.StandardError.ReadToEndAsync();
 
-        using var timeoutCts = new CancellationTokenSource(TimeSpan.FromSeconds(spec.TimeoutSeconds));
+        using var timeoutCts = WallClockCts(spec.TimeoutSeconds);
         using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, timeoutCts.Token);
 
         try
@@ -99,7 +103,7 @@ public sealed partial class LocalProcessRunner : ISandboxRunner, ISandboxStreamR
         // stderr captured in full (diagnostic context for the result); stdout is pumped line-by-line to the consumer.
         var stderrTask = process.StandardError.ReadToEndAsync();
 
-        using var timeoutCts = new CancellationTokenSource(TimeSpan.FromSeconds(spec.TimeoutSeconds));
+        using var timeoutCts = WallClockCts(spec.TimeoutSeconds);
         using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, timeoutCts.Token);
 
         try

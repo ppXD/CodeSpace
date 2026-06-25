@@ -165,7 +165,10 @@ public sealed class AgentCodeNode : INodeRuntime
             RepositoryId = repositoryId,
             Workspace = workspace,
             RunnerKind = ReadOptionalString(context.Config, "runnerKind"),
-            TimeoutSeconds = ReadInt(context.Config, "timeoutSeconds") ?? 1800,
+            // A positive timeoutSeconds caps the run; an explicit ≤0 means NO wall-clock (unbounded — bounded only by
+            // the stall watchdog + cost cap, the operator's "no timeout" choice); ABSENT → the bounded 1h default. Only
+            // an explicit non-positive value is infinite, so an unset config is never accidentally unbounded.
+            TimeoutSeconds = ReadInt(context.Config, "timeoutSeconds") is { } t ? (t > 0 ? t : (int?)null) : 3600,
             Autonomy = autonomy,
             Permissions = ResolvePermissions(context.Config, autonomy, mode),
             ApprovalConversationId = ReadOptionalGuid(context.Config, "approvalConversationId"),

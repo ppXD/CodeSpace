@@ -32,7 +32,7 @@ public class HangfireStorageOptionsTests
     {
         // The exact reason sliding is mandatory: the fixed lease window is far below an agent run's
         // wall-clock cap, so a non-sliding timeout would re-surface a live long run to another worker.
-        var maxAgentRun = TimeSpan.FromSeconds(new AgentTask { Goal = "x", Harness = "x", Model = "x" }.TimeoutSeconds);
+        var maxAgentRun = TimeSpan.FromSeconds(new AgentTask { Goal = "x", Harness = "x", Model = "x" }.TimeoutSeconds ?? 3600);
 
         Options.InvisibilityTimeout.ShouldBeLessThan(maxAgentRun);
         Options.UseSlidingInvisibilityTimeout.ShouldBeTrue();

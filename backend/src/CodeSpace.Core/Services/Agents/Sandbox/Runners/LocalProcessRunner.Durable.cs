@@ -118,7 +118,7 @@ public sealed partial class LocalProcessRunner
                     ProcessId = supervisorPid,
                     ProcessStartTimeUtc = TryReadStartTimeUtc(supervisorPid),
                     SpoolDirectory = spoolDir,
-                    Deadline = DateTimeOffset.UtcNow.AddSeconds(spec.TimeoutSeconds),
+                    Deadline = spec.TimeoutSeconds is { } secs && secs > 0 ? DateTimeOffset.UtcNow.AddSeconds(secs) : DateTimeOffset.MaxValue,
                     EgressNetnsKey = egress.Key,
                     CgroupRunKey = cgroup.Key,
                 };

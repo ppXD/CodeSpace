@@ -81,8 +81,8 @@ public sealed record AgentTask
     /// <summary>Extra environment for the agent process (short-lived credentials are injected here by AgentRunService, then wiped).</summary>
     public IReadOnlyDictionary<string, string> Environment { get; init; } = new Dictionary<string, string>();
 
-    /// <summary>Wall-clock cap for the whole agent run.</summary>
-    public int TimeoutSeconds { get; init; } = 1800;
+    /// <summary>Wall-clock cap for the whole agent run, in seconds. Default 3600 (1h). <c>null</c> ⇒ NO wall-clock (unbounded) — the run is then bounded only by the stall watchdog (no-progress) + the cost cap; use for a genuinely long task. Never defaulted to null: an absent value falls back to the bounded default, so only an EXPLICIT null (the operator's "no timeout" choice) is unbounded.</summary>
+    public int? TimeoutSeconds { get; init; } = 3600;
 
     /// <summary>The conversation a run posts its tool-approval cards into — null = no approval surface (which fails closed in a later slice). Stored only; nothing reads it yet.</summary>
     public Guid? ApprovalConversationId { get; init; }
