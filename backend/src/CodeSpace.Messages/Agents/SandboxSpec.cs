@@ -60,9 +60,25 @@ public sealed record SandboxSpec
     /// <summary>
     /// Max size of any single file the command may write, in MiB (RLIMIT_FSIZE) — bounds a runaway file / log / the
     /// run's own stdout spool from filling the disk. <c>0</c> = unlimited. Enforced by a sandboxing runner. (A total
-    /// disk quota + memory-RSS cap need cgroup delegation — a later slice.)
+    /// disk quota needs cgroup io delegation — a later slice; the memory + cpu caps below land via cgroup.)
     /// </summary>
     public int MaxFileSizeMb { get; init; } = 2048;
+
+    /// <summary>
+    /// Max resident memory the command + every descendant may use, in MiB — a cgroup-v2 <c>memory.max</c> cap so a
+    /// runaway agent (or its subtree) cannot OOM the worker. This is the capability prlimit cannot give: <c>RLIMIT_AS</c>
+    /// is per-process address space, not a whole-subtree RSS ceiling. <c>0</c> = unlimited (the byte-identical default).
+    /// Enforced only by a runner with cgroup-v2 delegation (the durable local runner on Linux); ignored otherwise. The
+    /// PURE limit plan is <c>CgroupResourcePlan</c>; the privileged executor + lifecycle wiring land in a later slice.
+    /// </summary>
+    public int MaxMemoryMb { get; init; }
+
+    /// <summary>
+    /// Max CPU the command + every descendant may use, as a percent of ONE core — a cgroup-v2 <c>cpu.max</c> quota
+    /// (e.g. <c>50</c> ⇒ "50000 100000", 50% of a core; <c>200</c> allows two cores). <c>0</c> = unlimited (the default).
+    /// Enforced only by a runner with cgroup-v2 delegation; ignored otherwise.
+    /// </summary>
+    public int MaxCpuPercent { get; init; }
 
     /// <summary>
     /// MCP tool-fabric wiring for this run: the declaration the runner writes into the per-run config-home (0600 — it
