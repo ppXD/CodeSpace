@@ -97,7 +97,7 @@ public class SupervisorDecisionEvalDeciderTests
     private static async Task<SupervisorDecision> DecideAsync(SupervisorGoldenScenario scenario, string cannedModelJson)
     {
         var registry = new LLMClientRegistry(new ILLMClient[] { new CannedStructuredClient(cannedModelJson) });
-        var decider = new LlmSupervisorDecider(registry, new StubPoolSelector(CannedProvider));
+        var decider = new LlmSupervisorDecider(registry, new StubPoolSelector(CannedProvider), new CodeSpace.Core.Services.Agents.AgentHarnessRegistry(System.Array.Empty<CodeSpace.Core.Services.Agents.IAgentHarness>()));
 
         return await decider.DecideAsync(scenario.Context, CancellationToken.None);
     }
@@ -149,5 +149,6 @@ public class SupervisorDecisionEvalDeciderTests
 
         public Task<ModelPoolPick?> SelectAsync(Guid teamId, string provider, IReadOnlyList<string>? allowedModels, string? pinnedModel, CancellationToken cancellationToken) => throw new NotImplementedException();
         public Task<ModelDispatchRef?> ResolveDispatchAsync(Guid teamId, string modelName, IReadOnlyList<Guid>? allowedRowIds, CancellationToken cancellationToken) => throw new NotImplementedException();
+        public Task<IReadOnlyList<CodeSpace.Core.Services.Agents.ModelCredentials.PoolModelInfo>> ListPoolAsync(Guid teamId, IReadOnlyList<Guid>? allowedRowIds, CancellationToken cancellationToken) => Task.FromResult<IReadOnlyList<CodeSpace.Core.Services.Agents.ModelCredentials.PoolModelInfo>>(System.Array.Empty<CodeSpace.Core.Services.Agents.ModelCredentials.PoolModelInfo>());
     }
 }

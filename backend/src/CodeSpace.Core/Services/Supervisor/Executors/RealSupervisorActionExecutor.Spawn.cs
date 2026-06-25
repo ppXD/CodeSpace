@@ -243,7 +243,12 @@ public sealed partial class RealSupervisorActionExecutor
         var dispatch = await _modelSelector.ResolveDispatchAsync(context.TeamId, effectiveModel, context.AllowedModelIds, cancellationToken).ConfigureAwait(false)
             ?? throw new SupervisorModelAccessException($"agent.supervisor spawn requests model '{effectiveModel}', which is not a credentialed model in this run's allowed model pool.");
 
-        return resolved with { Model = dispatch.ModelId, ModelCredentialId = dispatch.ModelCredentialId };
+        // Authoring-time compatibility clamp (P1): the resolved model runs on a credential of THIS provider, so pin a
+        // harness that can drive it — the authored/default harness if it already can, else a registered one that does.
+        // The model authored the MODEL; the server makes the harness match it (the run-time reconciler is the backstop).
+        var harness = HarnessModelReconciler.Reconcile(resolved.Harness, dispatch.Provider, _harnesses.All).HarnessKind;
+
+        return resolved with { Model = dispatch.ModelId, ModelCredentialId = dispatch.ModelCredentialId, Harness = harness };
     }
 
     /// <summary>

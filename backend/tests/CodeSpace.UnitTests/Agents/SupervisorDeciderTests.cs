@@ -323,7 +323,7 @@ public class SupervisorDeciderTests
     [Fact]
     public async Task A_deployment_with_no_structured_provider_fails_closed_to_a_terminal_stop()
     {
-        var decider = new LlmSupervisorDecider(new FakeRegistry(structured: null), FakeSelector.WithModel());
+        var decider = new LlmSupervisorDecider(new FakeRegistry(structured: null), FakeSelector.WithModel(), new FakeHarnesses());
 
         var decision = await decider.DecideAsync(Context(), CancellationToken.None);
 
@@ -335,7 +335,7 @@ public class SupervisorDeciderTests
     public async Task A_run_with_no_selected_brain_model_fails_closed_to_a_terminal_stop()
     {
         // supervisorModelId is REQUIRED — the operator must pick the brain model; the supervisor never guesses its own.
-        var decider = new LlmSupervisorDecider(new FakeRegistry(new FakeStructuredClient(new SupervisorModelDecision { Kind = SupervisorDecisionKinds.Plan })), FakeSelector.WithModel());
+        var decider = new LlmSupervisorDecider(new FakeRegistry(new FakeStructuredClient(new SupervisorModelDecision { Kind = SupervisorDecisionKinds.Plan })), FakeSelector.WithModel(), new FakeHarnesses());
 
         var decision = await decider.DecideAsync(Context() with { SupervisorModelId = null }, CancellationToken.None);
 
@@ -349,7 +349,7 @@ public class SupervisorDeciderTests
     {
         // The structured provider IS registered, but the team's credentialed-model pool yields nothing (none
         // configured, or none within the allowed pool) → the brain stops cleanly rather than guess a model or key.
-        var decider = new LlmSupervisorDecider(new FakeRegistry(new FakeStructuredClient(new SupervisorModelDecision { Kind = SupervisorDecisionKinds.Plan })), FakeSelector.Empty());
+        var decider = new LlmSupervisorDecider(new FakeRegistry(new FakeStructuredClient(new SupervisorModelDecision { Kind = SupervisorDecisionKinds.Plan })), FakeSelector.Empty(), new FakeHarnesses());
 
         var decision = await decider.DecideAsync(Context(), CancellationToken.None);
 
@@ -383,7 +383,7 @@ public class SupervisorDeciderTests
         // The gateway returned a structurally WRONG reply (a bare JSON string, not a decision object) — deserialization
         // would throw. The decider must still fail closed to a clean stop, never crash the durable run on a degraded reply.
         var raw = JsonSerializer.SerializeToElement("not a decision object");
-        var decider = new LlmSupervisorDecider(new FakeRegistry(new RawJsonStructuredClient(raw)), FakeSelector.WithModel());
+        var decider = new LlmSupervisorDecider(new FakeRegistry(new RawJsonStructuredClient(raw)), FakeSelector.WithModel(), new FakeHarnesses());
 
         var decision = await decider.DecideAsync(Context(), CancellationToken.None);
 
@@ -403,7 +403,7 @@ public class SupervisorDeciderTests
         // decision) — the decider fails closed to a clean stop, NEVER crashing the durable run. This is THE canonical
         // capability miss ("no conformant decision"): it must end as a clean stop so the whole-loop reads it as a
         // CapabilityMiss (non-gating), not a code fault.
-        var decider = new LlmSupervisorDecider(new FakeRegistry(new ThrowingStructuredClient(category)), FakeSelector.WithModel());
+        var decider = new LlmSupervisorDecider(new FakeRegistry(new ThrowingStructuredClient(category)), FakeSelector.WithModel(), new FakeHarnesses());
 
         var decision = await decider.DecideAsync(Context(), CancellationToken.None);
 
@@ -421,7 +421,7 @@ public class SupervisorDeciderTests
         // A genuine gateway/credential INFRA fault is NOT swallowed into a stop — it PROPAGATES so the engine fails the
         // run (visible + rerunnable) and the live-gate treats it as non-gating infra (consistent with the decision-eval
         // lane), never a silent "completed" no-op that masks an outage.
-        var decider = new LlmSupervisorDecider(new FakeRegistry(new ThrowingStructuredClient(category)), FakeSelector.WithModel());
+        var decider = new LlmSupervisorDecider(new FakeRegistry(new ThrowingStructuredClient(category)), FakeSelector.WithModel(), new FakeHarnesses());
 
         await Should.ThrowAsync<LlmApiException>(() => decider.DecideAsync(Context(), CancellationToken.None));
     }
@@ -430,7 +430,7 @@ public class SupervisorDeciderTests
     public async Task The_decider_calls_with_the_model_the_selector_picked_from_the_pool()
     {
         var fake = new FakeStructuredClient(new SupervisorModelDecision { Kind = SupervisorDecisionKinds.Plan });
-        var decider = new LlmSupervisorDecider(new FakeRegistry(fake), FakeSelector.WithModel("claude-opus-4-8"));
+        var decider = new LlmSupervisorDecider(new FakeRegistry(fake), FakeSelector.WithModel("claude-opus-4-8"), new FakeHarnesses());
 
         await decider.DecideAsync(Context(), CancellationToken.None);
 
@@ -484,7 +484,7 @@ public class SupervisorDeciderTests
         SupervisorDecisionProjector.Project(fill(new SupervisorModelDecision { Kind = kind }));
 
     private static LlmSupervisorDecider Decider(SupervisorModelDecision model) =>
-        new(new FakeRegistry(new FakeStructuredClient(model)), FakeSelector.WithModel());
+        new(new FakeRegistry(new FakeStructuredClient(model)), FakeSelector.WithModel(), new FakeHarnesses());
 
     // ── Fakes at the honest IStructuredLLMClient seam ────────────────────────────────
 
@@ -562,5 +562,12 @@ public class SupervisorDeciderTests
         public Task<ModelPoolPick?> ResolveByRowIdAsync(Guid teamId, Guid modelCredentialModelId, CancellationToken cancellationToken) => Task.FromResult(_pick);
 
         public Task<ModelDispatchRef?> ResolveDispatchAsync(Guid teamId, string modelName, IReadOnlyList<Guid>? allowedRowIds, CancellationToken cancellationToken) => Task.FromResult<ModelDispatchRef?>(null);
+        public Task<IReadOnlyList<PoolModelInfo>> ListPoolAsync(Guid teamId, IReadOnlyList<Guid>? allowedRowIds, CancellationToken cancellationToken) => Task.FromResult<IReadOnlyList<PoolModelInfo>>(Array.Empty<PoolModelInfo>());
+    }
+
+    private sealed class FakeHarnesses : CodeSpace.Core.Services.Agents.IAgentHarnessRegistry
+    {
+        public IReadOnlyList<CodeSpace.Core.Services.Agents.IAgentHarness> All { get; } = Array.Empty<CodeSpace.Core.Services.Agents.IAgentHarness>();
+        public CodeSpace.Core.Services.Agents.IAgentHarness Resolve(string kind) => throw new NotSupportedException();
     }
 }

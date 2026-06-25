@@ -26,11 +26,13 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
 {
     private readonly ILLMClientRegistry _clientRegistry;
     private readonly IModelPoolSelector _modelSelector;
+    private readonly IAgentHarnessRegistry _harnesses;
 
-    public LlmSupervisorDecider(ILLMClientRegistry clientRegistry, IModelPoolSelector modelSelector)
+    public LlmSupervisorDecider(ILLMClientRegistry clientRegistry, IModelPoolSelector modelSelector, IAgentHarnessRegistry harnesses)
     {
         _clientRegistry = clientRegistry;
         _modelSelector = modelSelector;
+        _harnesses = harnesses;
     }
 
     public async Task<SupervisorDecision> DecideAsync(SupervisorTurnContext context, CancellationToken cancellationToken)
@@ -51,10 +53,15 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
 
         if (structured == null) return NoModelStop();
 
+        // P1 — render the capability catalog (available harnesses + their drivable providers, and this run's
+        // credentialed model pool + each model's provider) so the brain authors a provider-compatible (harness, model)
+        // per agent ON PURPOSE rather than blind. The server still clamps an incompatible pair, so this guides not gates.
+        var catalog = await BuildCapabilityCatalogAsync(context, cancellationToken).ConfigureAwait(false);
+
         StructuredLLMCompletion completion;
         try
         {
-            completion = await structured.CompleteStructuredAsync(BuildRequest(context, pick), cancellationToken).ConfigureAwait(false);
+            completion = await structured.CompleteStructuredAsync(BuildRequest(context, pick, catalog), cancellationToken).ConfigureAwait(false);
         }
         catch (LlmApiException ex) when (IsModelCapabilityMiss(ex.Category))
         {
@@ -87,12 +94,53 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
         catch (JsonException) { return null; }
     }
 
-    private static StructuredLLMCompletionRequest BuildRequest(SupervisorTurnContext context, ModelPoolPick pick) => new()
+    private async Task<string> BuildCapabilityCatalogAsync(SupervisorTurnContext context, CancellationToken cancellationToken)
+    {
+        var pool = await _modelSelector.ListPoolAsync(context.TeamId, context.AllowedModelIds, cancellationToken).ConfigureAwait(false);
+
+        return RenderCatalog(_harnesses.All, pool);
+    }
+
+    /// <summary>
+    /// Render the capability catalog the brain authors against (P1): every registered harness + the model providers it
+    /// can drive, and the run's credentialed pool models + each model's provider — so the model picks a provider-compatible
+    /// (harness, model) pair on purpose. Internal + static so the rendering is unit-pinned without an LLM/DB.
+    /// </summary>
+    internal static string RenderCatalog(IReadOnlyList<IAgentHarness> harnesses, IReadOnlyList<PoolModelInfo> pool)
+    {
+        var builder = new StringBuilder();
+
+        builder.AppendLine("Capability catalog — when you author a per-agent harness + model, the harness MUST be able to drive the model's provider:");
+
+        builder.AppendLine("Harnesses (and the model providers each can drive):");
+        foreach (var harness in harnesses)
+        {
+            var providers = harness is IModelCredentialProjector projector && projector.SupportedProviders.Count > 0
+                ? string.Join(", ", projector.SupportedProviders)
+                : "(needs no model key)";
+            builder.AppendLine($"  - {harness.Kind} — drives: {providers}");
+        }
+
+        if (pool.Count > 0)
+        {
+            builder.AppendLine("Models in this run's credentialed pool (model — provider):");
+            foreach (var model in pool) builder.AppendLine($"  - {model.ModelId} — {model.Provider}");
+            builder.AppendLine("Per agent, pick a model from THIS pool and a harness whose providers include that model's provider. The server corrects an incompatible pair, but a compatible choice is preferred.");
+        }
+        else
+        {
+            builder.AppendLine("No credentialed models are listed for this run — omit per-agent model/harness and let the run defaults apply.");
+        }
+
+        return builder.ToString();
+    }
+
+    private static StructuredLLMCompletionRequest BuildRequest(SupervisorTurnContext context, ModelPoolPick pick, string catalog) => new()
     {
         // The model id AND the credential both come from the one chosen pool row — nothing guessed, nothing hidden.
         Model = pick.ModelId,
         SystemPrompt = SystemPrompt,
-        UserPrompt = BuildUserPrompt(context),
+        UserPrompt = BuildUserPrompt(context, catalog),
         JsonSchema = SupervisorDecisionSchema.ResponseSchema,
         MaxOutputTokens = 4096,
         Temperature = 0.2,
@@ -100,15 +148,21 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
     };
 
     /// <summary>Internal test accessor (InternalsVisibleTo) — pins the context→prompt framing directly, without a real LLM round-trip.</summary>
-    internal static string BuildUserPromptForTest(SupervisorTurnContext context) => BuildUserPrompt(context);
+    internal static string BuildUserPromptForTest(SupervisorTurnContext context, string catalog = "") => BuildUserPrompt(context, catalog);
 
-    private static string BuildUserPrompt(SupervisorTurnContext context)
+    private static string BuildUserPrompt(SupervisorTurnContext context, string catalog)
     {
         var builder = new StringBuilder();
 
         builder.AppendLine($"Goal: {context.Goal}");
         builder.AppendLine($"Turn: {context.TurnNumber}");
         builder.AppendLine();
+
+        if (!string.IsNullOrWhiteSpace(catalog))
+        {
+            builder.AppendLine(catalog.TrimEnd());
+            builder.AppendLine();
+        }
 
         if (context.PriorDecisions.Count == 0)
         {

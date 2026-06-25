@@ -92,10 +92,25 @@ public sealed class ModelPoolSelector : IModelPoolSelector, IScopedDependency
         // Tie-break by row id for a deterministic pick when two credentials of the team back the same model id.
         var row = await query
             .OrderBy(m => m.Id)
-            .Select(m => new { m.ModelId, m.ModelCredentialId })
+            .Select(m => new { m.ModelId, m.ModelCredentialId, m.Credential.Provider })
             .FirstOrDefaultAsync(cancellationToken).ConfigureAwait(false);
 
-        return row == null ? null : new ModelDispatchRef { ModelId = row.ModelId, ModelCredentialId = row.ModelCredentialId };
+        return row == null ? null : new ModelDispatchRef { ModelId = row.ModelId, ModelCredentialId = row.ModelCredentialId, Provider = row.Provider };
+    }
+
+    public async Task<IReadOnlyList<PoolModelInfo>> ListPoolAsync(Guid teamId, IReadOnlyList<Guid>? allowedRowIds, CancellationToken cancellationToken)
+    {
+        var query = _db.ModelCredentialModel.AsNoTracking()
+            .Where(m => m.Enabled && m.Credential.TeamId == teamId && m.Credential.DeletedDate == null && m.Credential.Status == CredentialStatus.Active);
+
+        if (allowedRowIds is { Count: > 0 }) query = query.Where(m => allowedRowIds.Contains(m.Id));
+
+        return await query
+            .Select(m => new PoolModelInfo(m.ModelId, m.Credential.Provider))
+            .Distinct()
+            .OrderBy(m => m.ModelId)
+            .ToListAsync(cancellationToken)
+            .ConfigureAwait(false);
     }
 
     private ModelPoolPick ToPick(string modelId, string provider, string? encryptedApiKey, string? baseUrl) => new()

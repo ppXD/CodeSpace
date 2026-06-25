@@ -40,7 +40,7 @@ public sealed class RealModelSupervisorTrajectoryFlowTests
 
         var credential = new ResolvedModelCredential { Provider = provider, BaseUrl = BaseUrlFor(provider, baseUrl), ApiKey = apiKey };
         var registry = new LLMClientRegistry(new ILLMClient[] { new AnthropicClient(SharedHttp), new OpenAiClient(SharedHttp) });
-        var decider = new LlmSupervisorDecider(registry, new FixedCredentialSelector(model, credential));
+        var decider = new LlmSupervisorDecider(registry, new FixedCredentialSelector(model, credential), new CodeSpace.Core.Services.Agents.AgentHarnessRegistry(System.Array.Empty<CodeSpace.Core.Services.Agents.IAgentHarness>()));
 
         // The SUCCESS path proves convergence; the four RECOVERY paths prove the live brain handles a merge conflict,
         // an agent failure, a PERSISTENT conflict (it must NOT accept the first unverified resolution and must resolve
@@ -112,5 +112,6 @@ public sealed class RealModelSupervisorTrajectoryFlowTests
 
         public Task<ModelPoolPick?> SelectAsync(Guid teamId, string provider, IReadOnlyList<string>? allowedModels, string? pinnedModel, CancellationToken cancellationToken) => throw new NotImplementedException();
         public Task<ModelDispatchRef?> ResolveDispatchAsync(Guid teamId, string modelName, IReadOnlyList<Guid>? allowedRowIds, CancellationToken cancellationToken) => throw new NotImplementedException();
+        public Task<IReadOnlyList<CodeSpace.Core.Services.Agents.ModelCredentials.PoolModelInfo>> ListPoolAsync(Guid teamId, IReadOnlyList<Guid>? allowedRowIds, CancellationToken cancellationToken) => Task.FromResult<IReadOnlyList<CodeSpace.Core.Services.Agents.ModelCredentials.PoolModelInfo>>(System.Array.Empty<CodeSpace.Core.Services.Agents.ModelCredentials.PoolModelInfo>());
     }
 }
