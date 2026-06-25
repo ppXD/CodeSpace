@@ -144,6 +144,20 @@ public static class RealModelGate
         return int.TryParse(raw, out var n) && n > 0 ? n : DefaultWholeLoopAttempts;
     }
 
+    /// <summary>The env var that overrides the per-attempt DEADLINE for the strict whole-loop gate (Rule 8 escape hatch). Each best-of-N attempt is bounded by this wall-clock; an attempt that exceeds it is a "did not converge" MISS (a hung agent / gateway call that never returned), NOT a gateway-infra skip and NOT a silent ride to the CI job's wall-clock cap. Pinned by test.</summary>
+    public const string WholeLoopAttemptDeadlineEnvVar = "CODESPACE_REALMODEL_WHOLE_LOOP_ATTEMPT_DEADLINE_SECONDS";
+
+    /// <summary>The default per-attempt deadline (seconds) for the strict whole-loop gate. A healthy attempt (real brain turns + fast deterministic fake agents) converges in ~2-7 min, so 600s gives headroom; a hang is bounded to this instead of riding to the CI job's 60-min cap. With the default 2-miss budget a persistent hang REDs in ~2×deadline, well under the job cap.</summary>
+    public const int DefaultWholeLoopAttemptDeadlineSeconds = 600;
+
+    /// <summary>The effective per-attempt deadline: the env override when positive + parseable, else <see cref="DefaultWholeLoopAttemptDeadlineSeconds"/> (Rule 8 — read only here).</summary>
+    public static TimeSpan WholeLoopAttemptDeadline()
+    {
+        var raw = Environment.GetEnvironmentVariable(WholeLoopAttemptDeadlineEnvVar)?.Trim();
+
+        return int.TryParse(raw, out var n) && n > 0 ? TimeSpan.FromSeconds(n) : TimeSpan.FromSeconds(DefaultWholeLoopAttemptDeadlineSeconds);
+    }
+
     /// <summary>The env var that overrides the boolean live-EVAL best-of-N budget (trajectory / arbiter) — Rule 8 escape hatch, pinned by test.</summary>
     public const string EvalAttemptsEnvVar = "CODESPACE_REALMODEL_EVAL_ATTEMPTS";
 
@@ -230,17 +244,20 @@ public static class RealModelGate
         AssessLiveWholeLoopAsync(provider, driveOnce, attempts ?? WholeLoopAttempts(), Environment.GetEnvironmentVariable(StepSummaryEnvVar));
 
     /// <summary>Testable core of the strict whole-loop gate — takes the attempt budget + step-summary path explicitly so a test pins the best-of-N / infra / gate logic with NO live call and without mutating process env. Any Drove → pass; a CodeFault → gate at once (never retried); a gateway-infra failure → non-gating skip that does not consume a slot; only when all <paramref name="attempts"/> non-infra attempts park short → gate (CapabilityMiss).</summary>
-    internal static async Task AssessLiveWholeLoopAsync(string provider, Func<Task<(RealModelOutcome Outcome, string Note)>> driveOnce, int attempts, string? stepSummaryPath)
+    internal static async Task AssessLiveWholeLoopAsync(string provider, Func<Task<(RealModelOutcome Outcome, string Note)>> driveOnce, int attempts, string? stepSummaryPath, TimeSpan? attemptDeadline = null)
     {
         var budget = Math.Max(1, attempts);   // defend the core: a non-positive budget would otherwise gate on ZERO misses (the public entrypoint already clamps via WholeLoopAttempts, but this core is callable directly)
         var missNotes = new List<string>();   // accumulate each park-short verdict so the gate message names WHY (rounds vs schema), visible in the CI console log — not just the job summary
         var maxAttempts = budget + InfraRetryBudget;
+        var deadline = attemptDeadline ?? WholeLoopAttemptDeadline();   // bound each attempt so a hung agent/gateway call REDs fast, never rides to the CI job's wall-clock cap
 
         for (var i = 0; i < maxAttempts && missNotes.Count < budget; i++)
         {
+            using var attemptCts = new CancellationTokenSource(deadline);
+
             try
             {
-                var (outcome, note) = await driveOnce().ConfigureAwait(false);
+                var (outcome, note) = await driveOnce().WaitAsync(attemptCts.Token).ConfigureAwait(false);
 
                 ReportThreeWay(outcome, note, stepSummaryPath);
 
@@ -255,6 +272,16 @@ public static class RealModelGate
                 }
 
                 missNotes.Add(note);   // CapabilityMiss → best-of-N retry on a fresh run
+            }
+            catch (OperationCanceledException) when (attemptCts.IsCancellationRequested)
+            {
+                // OUR per-attempt DEADLINE fired — the attempt did not converge in time (a hung agent / gateway call
+                // that never returned). Treat it as a non-converging MISS, NOT a gateway-infra skip: a bounded hang is a
+                // real "did not drive to completion" signal, so it accrues toward the budget and a PERSISTENT hang REDs
+                // fast (~budget×deadline), well under the CI job cap — instead of one stuck test silently killing the job.
+                var note = $"did not converge within {deadline.TotalMinutes:0}m — likely a hung agent or gateway call (per-attempt deadline)";
+                ReportThreeWay(RealModelOutcome.CapabilityMiss, note, stepSummaryPath);
+                missNotes.Add(note);
             }
             catch (Exception ex) when (IsGatewayInfraFailure(ex))
             {

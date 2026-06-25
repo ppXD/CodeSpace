@@ -474,6 +474,37 @@ public sealed class RealModelGateTests
     }
 
     [Fact]
+    public async Task A_whole_loop_attempt_that_exceeds_the_deadline_is_a_did_not_converge_miss_not_a_job_hang()
+    {
+        // The hang we observed in CI: an attempt blocked in a stuck agent / gateway call that never returned, riding to
+        // the job's 60-min wall-clock cap (one stuck test silently killing the whole job). The per-attempt deadline must
+        // ABORT it as a non-converging MISS — so a persistent hang REDs the blessed wire FAST + bounded, never the cap.
+        Func<Task<(RealModelOutcome Outcome, string Note)>> hangs = async () =>
+        {
+            await Task.Delay(TimeSpan.FromSeconds(30));   // a stuck drive that never returns on its own
+            return (RealModelOutcome.Drove, "would have driven had it not been aborted");
+        };
+
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        Shouldly.ShouldAssertException? caught = null;
+        try { await RealModelGate.AssessLiveWholeLoopAsync("Anthropic", hangs, attempts: 2, stepSummaryPath: null, attemptDeadline: TimeSpan.FromMilliseconds(50)); }
+        catch (Shouldly.ShouldAssertException ex) { caught = ex; }
+        sw.Stop();
+
+        caught.ShouldNotBeNull("two deadline-exceeded attempts are non-converging misses → the blessed wire REDs (not a silent infra skip, not a hang)");
+        caught!.Message.ShouldContain("did not converge", Case.Insensitive);
+        sw.Elapsed.ShouldBeLessThan(TimeSpan.FromSeconds(10), "the deadline aborted each hung attempt — the gate did NOT wait 30s for driveOnce, proving the job-cap hang is bounded away");
+    }
+
+    [Fact]
+    public void The_whole_loop_attempt_deadline_env_var_and_default_are_pinned()
+    {
+        // Rule 8: renaming this env var or changing the default silently changes the CI hang-bounding behaviour — pin both.
+        RealModelGate.WholeLoopAttemptDeadlineEnvVar.ShouldBe("CODESPACE_REALMODEL_WHOLE_LOOP_ATTEMPT_DEADLINE_SECONDS");
+        RealModelGate.DefaultWholeLoopAttemptDeadlineSeconds.ShouldBe(600);
+    }
+
+    [Fact]
     public async Task An_all_execution_infra_run_is_a_non_gating_skip_never_a_gate()
     {
         // Every attempt is a runner-side agent-execution break → misses never reach N → non-gating infra skip, never a
