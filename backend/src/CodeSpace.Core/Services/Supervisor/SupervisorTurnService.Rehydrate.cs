@@ -140,12 +140,14 @@ public sealed partial class SupervisorTurnService
             .Sum(d => SupervisorOutcome.SpendUsd(SupervisorOutcome.ReadAgentResults(d.OutcomeJson)));
 
     /// <summary>
-    /// Count the MOST RECENT consecutive decisions that produced no new SETTLED agent result (the E5 best-effort
-    /// no-progress counter, folded from the durable ledger). A decision "made progress" if it staged agents whose
-    /// results a later turn can fold (spawn/retry with agents) OR it is a merge that read prior results; a run of
-    /// decisions that spawned nothing + merged nothing (e.g. the decider looping on plan / a degraded ask_human)
-    /// accumulates. A spawn/retry resets the counter (it advanced the work). DEMOTED to best-effort per the design
-    /// — a long-running spawn whose agents haven't settled is a PARK (not a fresh decided turn), so it never trips.
+    /// Count the MOST RECENT consecutive decisions that produced no new SETTLED EVIDENCE of progress (the no-progress
+    /// stall counter, folded from the durable ledger). EVIDENCE-based (W3), not staged-count: a spawn/retry advances the
+    /// work only if its folded agents carry real evidence (a Succeeded agent or a concrete artifact — see
+    /// <see cref="SupervisorOutcome.HasSettledEvidence"/>); a merge advances it (it consumed prior results). A run of
+    /// decisions that produced nothing — a wave of all-FAILED/empty agents, the decider looping on plan, or a degraded
+    /// ask_human — accumulates and eventually trips the stall bound. A LEDGER FACT (reads the same folded OutcomeJson the
+    /// decider sees), so it survives replay + re-entry deterministically. A long-running spawn whose agents haven't
+    /// settled is a PARK (not yet a terminal decision in <paramref name="priorDecisions"/>), so it never trips early.
     /// </summary>
     private static int FoldNoProgressDecisions(IReadOnlyList<SupervisorPriorDecision> priorDecisions)
     {
@@ -157,10 +159,11 @@ public sealed partial class SupervisorTurnService
         return streak;
     }
 
-    /// <summary>A decision advanced the work if it staged agents (spawn/retry/resolve — the work fans out) or merged prior results (it consumed them). Plan / ask_human / a zero-agent spawn make no fresh progress toward a settled result.</summary>
+    /// <summary>A staging decision (spawn/retry/resolve) advanced the work only if its folded agents produced SETTLED EVIDENCE — a Succeeded agent or a real artifact (see <see cref="SupervisorOutcome.HasSettledEvidence"/>); a merge advanced it (it consumed prior results). A wave of all-failed/empty agents, a plan, or an ask_human makes no fresh progress.</summary>
     private static bool MadeProgress(SupervisorPriorDecision decision) =>
-        SupervisorDecisionKinds.StagesAgents(decision.DecisionKind) ? SupervisorOutcome.ReadStagedAgentCount(decision.OutcomeJson) > 0
-        : decision.DecisionKind == SupervisorDecisionKinds.Merge;
+        SupervisorDecisionKinds.StagesAgents(decision.DecisionKind)
+            ? SupervisorOutcome.HasSettledEvidence(SupervisorOutcome.ReadAgentResults(decision.OutcomeJson))
+            : decision.DecisionKind == SupervisorDecisionKinds.Merge;
 
     /// <summary>
     /// Fold the human's answer into an ask_human decision's replayed outcome (E4): look up the recorded
