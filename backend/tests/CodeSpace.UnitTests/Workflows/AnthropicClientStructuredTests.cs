@@ -165,6 +165,72 @@ public class AnthropicClientStructuredTests
     }
 
     [Fact]
+    public async Task Usage_totals_the_billed_forced_attempt_plus_the_floor_when_it_degrades()
+    {
+        // The forced-tool attempt is a 200 with usage (BILLED) but yields no tool_use → degrades to the floor, also
+        // billed. The returned usage must TOTAL both POSTs, not just the floor — else a degraded structured call
+        // under-reports what the provider actually charged.
+        var handler = new SequencedHandler(
+            (HttpStatusCode.OK, """{ "model": "m", "content": [], "usage": { "input_tokens": 12, "output_tokens": 7 }, "stop_reason": "tool_use" }"""),
+            (HttpStatusCode.OK, """{ "model": "m", "content": [ { "type": "text", "text": "{\"kind\":\"plan\"}" } ], "usage": { "input_tokens": 8, "output_tokens": 5 }, "stop_reason": "end_turn" }"""));
+        var client = new AnthropicClient(new StubHttpClientFactory(handler));
+        var schema = JsonDocument.Parse("""{ "type": "object" }""").RootElement;
+
+        var result = await client.CompleteStructuredAsync(new StructuredLLMCompletionRequest
+        {
+            Model = "m", SystemPrompt = "s", UserPrompt = "u", JsonSchema = schema, Credential = TestCredential,
+        }, CancellationToken.None);
+
+        result.Json.GetProperty("kind").GetString().ShouldBe("plan");
+        result.Usage.InputTokens.ShouldBe(20, "the billed forced attempt (12) + the floor (8) — never just the floor");
+        result.Usage.OutputTokens.ShouldBe(12, "7 + 5");
+        result.Usage.FinishReason.ShouldBe("end_turn", "the LATER (accepted floor) sub-call's reason, not the degraded forced attempt's");
+    }
+
+    [Fact]
+    public async Task A_400_rejected_forced_attempt_is_not_billed_so_only_the_floor_counts()
+    {
+        // The forced attempt 400s (rejected pre-generation → NOT billed). Only the floor's usage counts — the reject
+        // must not be summed in (it never cost a token).
+        var handler = new SequencedHandler(
+            (HttpStatusCode.BadRequest, """{ "error": { "message": "tool_choice not supported" } }"""),
+            (HttpStatusCode.OK, """{ "model": "m", "content": [ { "type": "text", "text": "{\"kind\":\"merge\"}" } ], "usage": { "input_tokens": 9, "output_tokens": 4 }, "stop_reason": "end_turn" }"""));
+        var client = new AnthropicClient(new StubHttpClientFactory(handler));
+        var schema = JsonDocument.Parse("""{ "type": "object" }""").RootElement;
+
+        var result = await client.CompleteStructuredAsync(new StructuredLLMCompletionRequest
+        {
+            Model = "m", SystemPrompt = "s", UserPrompt = "u", JsonSchema = schema, Credential = TestCredential,
+        }, CancellationToken.None);
+
+        result.Json.GetProperty("kind").GetString().ShouldBe("merge");
+        result.Usage.InputTokens.ShouldBe(9, "the 400 was rejected pre-generation (not billed) — only the floor's 9 counts");
+        result.Usage.OutputTokens.ShouldBe(4);
+    }
+
+    [Fact]
+    public async Task Usage_accumulates_across_a_schema_invalid_attempt_and_the_re_ask()
+    {
+        // Attempt 1's forced tool returns {} — valid JSON but schema-INVALID (missing the required "kind"); billed
+        // (10/6). The client re-asks, billed again (11/7). The returned usage must TOTAL both — a re-asked structured
+        // call bills twice, and reporting only the second under-counts the spend.
+        var schema = JsonDocument.Parse("""{ "type": "object", "required": ["kind"], "properties": { "kind": { "type": "string" } } }""").RootElement;
+        var handler = new SequencedHandler(
+            (HttpStatusCode.OK, """{ "model": "m", "content": [ { "type": "tool_use", "name": "respond", "input": {} } ], "usage": { "input_tokens": 10, "output_tokens": 6 }, "stop_reason": "tool_use" }"""),
+            (HttpStatusCode.OK, """{ "model": "m", "content": [ { "type": "tool_use", "name": "respond", "input": { "kind": "plan" } } ], "usage": { "input_tokens": 11, "output_tokens": 7 }, "stop_reason": "tool_use" }"""));
+        var client = new AnthropicClient(new StubHttpClientFactory(handler));
+
+        var result = await client.CompleteStructuredAsync(new StructuredLLMCompletionRequest
+        {
+            Model = "m", SystemPrompt = "s", UserPrompt = "u", JsonSchema = schema, Credential = TestCredential,
+        }, CancellationToken.None);
+
+        result.Json.GetProperty("kind").GetString().ShouldBe("plan");
+        result.Usage.InputTokens.ShouldBe(21, "attempt 1 (10) + the re-ask (11) — a re-asked structured call bills twice");
+        result.Usage.OutputTokens.ShouldBe(13, "6 + 7");
+    }
+
+    [Fact]
     public async Task Structured_completion_falls_back_to_json_in_text_content_when_the_model_skips_the_tool()
     {
         // The real-endpoint case: the model IGNORED the forced tool and put the JSON in a text block. Recover it.

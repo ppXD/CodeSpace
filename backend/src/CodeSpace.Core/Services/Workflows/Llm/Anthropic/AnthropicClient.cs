@@ -74,7 +74,7 @@ public sealed class AnthropicClient : ILLMClient, IStructuredLLMClient
         var feedbackSystem = StructuredJsonText.WithValidationFeedback(request.SystemPrompt, errors, first.Json);
         var second = await CompleteStructuredOnceAsync(request, feedbackSystem, cancellationToken).ConfigureAwait(false);
         var errors2 = JsonSchemaValidator.Validate(second.Json, request.JsonSchema);
-        if (errors2.Count == 0) return second;
+        if (errors2.Count == 0) return second with { Usage = first.Usage.Add(second.Usage) };   // total billed = the first (invalid) attempt + the re-ask
 
         throw new LlmApiException(Provider, null, LlmErrorCategory.Malformed,
             $"structured output failed schema validation after a re-ask: {string.Join("; ", errors2)}");
@@ -86,14 +86,16 @@ public sealed class AnthropicClient : ILLMClient, IStructuredLLMClient
         var system = StructuredJsonText.WithSchemaInstruction(baseSystemPrompt, request.JsonSchema);
         var messages = new[] { new AnthropicMessage { Role = "user", Content = request.UserPrompt } };
 
-        // Attempt 1 — forced tool-use. A gateway/model that rejects it (400) or returns neither a tool_use block nor a
-        // JSON content object yields null here, degrading to the prompt-only floor below.
-        if (await TryStructuredViaToolAsync(request, system, messages, cancellationToken).ConfigureAwait(false) is { } viaTool)
-            return viaTool;
+        // Attempt 1 — forced tool-use. A 400/422 reject (toolParsed null, nothing billed) or a 200 that yields no usable
+        // JSON degrades to the prompt-only floor below; a 200 WITH a result returns here carrying its own usage.
+        var (toolJson, toolParsed) = await TryStructuredViaToolAsync(request, system, messages, cancellationToken).ConfigureAwait(false);
+        if (toolJson is { } viaTool)
+            return BuildCompletion(viaTool, toolParsed!, request.Model);
 
-        // Attempt 2 — prompt-only floor: no tools. This is the SAFEST request — it never 400s on a gateway that rejects
-        // forced tool-use, and forces nothing that could suppress the reply (some gateways return an EMPTY content when
-        // a tool is forced). The model answers in text; recover the JSON object from it.
+        // Attempt 2 — prompt-only floor: no tools. The SAFEST request — never 400s on a gateway that rejects forced
+        // tool-use, and forces nothing that could suppress the reply (some gateways return EMPTY content when a tool is
+        // forced). The model answers in text; recover the JSON object from it. The returned usage TOTALS the (billed but
+        // degraded) forced attempt + this floor, so the caller sees what the provider actually billed.
         var body = new AnthropicMessageRequest
         {
             Model = request.Model,
@@ -111,15 +113,17 @@ public sealed class AnthropicClient : ILLMClient, IStructuredLLMClient
         if (StructuredJsonText.TryExtractObject(text) is not { } result)
             throw new LlmApiException(Provider, null, LlmErrorCategory.Malformed, $"structured completion produced no JSON via forced tool-use OR the prompt-only fallback — the model did not produce structured output. Content preview: {StructuredJsonText.Preview(text)}");
 
-        return BuildCompletion(result, parsed, request.Model);
+        var totalUsage = (toolParsed is null ? LlmUsage.None : UsageFrom(toolParsed)).Add(UsageFrom(parsed));
+        return BuildCompletion(result, parsed, request.Model) with { Usage = totalUsage };
     }
 
     /// <summary>
     /// Attempt 1: forced tool-use — a single tool whose input_schema IS the schema, tool_choice pinned to it. Returns
-    /// null (degrade to the prompt-only floor) when the gateway REJECTS the request (e.g. 400 on an unsupported
-    /// feature) or the model returns neither a tool_use block nor a recoverable JSON content object.
+    /// the recovered JSON (or null to degrade to the prompt-only floor) PLUS the parsed response — so the caller can
+    /// accumulate the BILLED usage even when the JSON is null (a 200 that produced no usable tool call still cost
+    /// tokens). On a 400/422 reject the request was never generated, so both are null (nothing to bill).
     /// </summary>
-    private async Task<StructuredLLMCompletion?> TryStructuredViaToolAsync(StructuredLLMCompletionRequest request, string system, AnthropicMessage[] messages, CancellationToken cancellationToken)
+    private async Task<(JsonElement? Json, AnthropicMessageResponse? Parsed)> TryStructuredViaToolAsync(StructuredLLMCompletionRequest request, string system, AnthropicMessage[] messages, CancellationToken cancellationToken)
     {
         var body = new AnthropicMessageRequest
         {
@@ -136,7 +140,7 @@ public sealed class AnthropicClient : ILLMClient, IStructuredLLMClient
 
         AnthropicMessageResponse parsed;
         try { parsed = await PostMessagesAsync(body, request.Credential, cancellationToken).ConfigureAwait(false); }
-        catch (LlmApiException e) when (e.StatusCode is 400 or 422) { return null; }   // ANY request-shape rejection (400/422 — forced tool-use unsupported) degrades to the floor, regardless of the refined category (a body keyword must never disable the fallback). A 401/403/404/429/5xx PROPAGATES — never swallowed into a second billable call that mis-reports the real cause.
+        catch (LlmApiException e) when (e.StatusCode is 400 or 422) { return (null, null); }   // ANY request-shape rejection (400/422 — forced tool-use unsupported) degrades to the floor, regardless of the refined category (a body keyword must never disable the fallback). A 401/403/404/429/5xx PROPAGATES — never swallowed into a second billable call that mis-reports the real cause.
 
         var toolUse = parsed.Content?.FirstOrDefault(c => c.Type == "tool_use" && c.Name == StructuredToolName);
 
@@ -144,7 +148,7 @@ public sealed class AnthropicClient : ILLMClient, IStructuredLLMClient
             ? input.Clone()
             : StructuredJsonText.TryExtractObject(TextContent(parsed));
 
-        return json is { } result ? BuildCompletion(result, parsed, request.Model) : null;
+        return (json, parsed);
     }
 
     private static StructuredLLMCompletion BuildCompletion(JsonElement json, AnthropicMessageResponse parsed, string fallbackModel) => new()

@@ -21,4 +21,22 @@ public sealed record LlmUsage
 
     /// <summary>The empty usage — the default on every completion so <c>Usage</c> is never null (a provider response with no usage block yields this).</summary>
     public static readonly LlmUsage None = new();
+
+    /// <summary>
+    /// Sum this usage with a LATER one — used to total the SEVERAL billed sub-calls one structured completion makes
+    /// (a forced tool/function attempt that degrades to a prompt-only floor, each re-asked once on a schema miss) so
+    /// the returned usage reflects what the provider actually BILLED, not just the final POST. Token counts add (two
+    /// nulls stay null; a null on one side is treated as 0 so a reported count is never lost). The finish reason is the
+    /// LATER one UNCONDITIONALLY — the final/accepted sub-call's, even when that's null: the degraded/rejected earlier
+    /// attempts' reasons (a "tool_use" that produced no usable JSON, a schema-invalid round) are NOT the answer's and
+    /// must never surface in place of the accepted call's. Null honestly means "the accepted call reported no reason".
+    /// </summary>
+    public LlmUsage Add(LlmUsage later) => new()
+    {
+        InputTokens = AddTokens(InputTokens, later.InputTokens),
+        OutputTokens = AddTokens(OutputTokens, later.OutputTokens),
+        FinishReason = later.FinishReason
+    };
+
+    private static int? AddTokens(int? a, int? b) => a is null && b is null ? null : (a ?? 0) + (b ?? 0);
 }

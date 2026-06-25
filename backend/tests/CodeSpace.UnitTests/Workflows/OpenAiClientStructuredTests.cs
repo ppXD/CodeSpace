@@ -177,6 +177,45 @@ public class OpenAiClientStructuredTests
     }
 
     [Fact]
+    public async Task Usage_totals_the_billed_forced_attempt_plus_the_floor_when_it_degrades()
+    {
+        // The forced-function attempt is a 200 with usage (BILLED) but yields no usable output → degrades to the floor,
+        // also billed. The returned usage must TOTAL both POSTs, not just the floor.
+        var handler = new SequencedHandler(
+            (HttpStatusCode.OK, """{ "model": "m", "choices": [ { "message": { "content": "" }, "finish_reason": "tool_calls" } ], "usage": { "prompt_tokens": 12, "completion_tokens": 7 } }"""),
+            (HttpStatusCode.OK, """{ "model": "m", "choices": [ { "message": { "content": "{\"kind\":\"plan\"}" }, "finish_reason": "stop" } ], "usage": { "prompt_tokens": 8, "completion_tokens": 5 } }"""));
+        var client = new OpenAiClient(new StubHttpClientFactory(handler));
+        var schema = JsonDocument.Parse("""{ "type": "object" }""").RootElement;
+
+        var result = await client.CompleteStructuredAsync(StructuredRequest(schema, TestCredential), CancellationToken.None);
+
+        result.Json.GetProperty("kind").GetString().ShouldBe("plan");
+        result.Usage.InputTokens.ShouldBe(20, "the billed forced attempt (12) + the floor (8) — never just the floor");
+        result.Usage.OutputTokens.ShouldBe(12, "7 + 5");
+        result.Usage.FinishReason.ShouldBe("stop", "the accepted floor's reason, not the degraded forced attempt's 'tool_calls'");
+    }
+
+    [Fact]
+    public async Task Usage_accumulates_across_a_schema_invalid_attempt_and_the_re_ask()
+    {
+        // Attempt 1's forced function returns {} — a valid JSON object but schema-INVALID (missing the required "kind").
+        // That's billed (10/6); the client re-asks, also billed (11/7). The returned usage must TOTAL both — a re-asked
+        // structured call bills twice, and reporting only the second under-counts the spend.
+        var schema = JsonDocument.Parse("""{ "type": "object", "required": ["kind"], "properties": { "kind": { "type": "string" } } }""").RootElement;
+        var handler = new SequencedHandler(
+            (HttpStatusCode.OK, """{ "model": "m", "choices": [ { "message": { "tool_calls": [ { "function": { "name": "respond", "arguments": "{}" } } ] }, "finish_reason": "tool_calls" } ], "usage": { "prompt_tokens": 10, "completion_tokens": 6 } }"""),
+            (HttpStatusCode.OK, """{ "model": "m", "choices": [ { "message": { "tool_calls": [ { "function": { "name": "respond", "arguments": "{\"kind\":\"plan\"}" } } ] }, "finish_reason": "tool_calls" } ], "usage": { "prompt_tokens": 11, "completion_tokens": 7 } }"""));
+        var client = new OpenAiClient(new StubHttpClientFactory(handler));
+
+        var result = await client.CompleteStructuredAsync(StructuredRequest(schema, TestCredential), CancellationToken.None);
+
+        result.Json.GetProperty("kind").GetString().ShouldBe("plan");
+        handler.RequestBodies.Count.ShouldBe(2, "a schema-invalid attempt 1 forces one re-ask");
+        result.Usage.InputTokens.ShouldBe(21, "attempt 1 (10) + the re-ask (11) — a re-asked structured call bills twice");
+        result.Usage.OutputTokens.ShouldBe(13, "6 + 7");
+    }
+
+    [Fact]
     public async Task The_credential_bearer_key_and_base_url_authenticate_the_call_and_append_chat_completions()
     {
         const string response = """{ "model": "m", "choices": [ { "message": { "tool_calls": [ { "function": { "name": "respond", "arguments": "{}" } } ] } } ] }""";

@@ -89,7 +89,7 @@ public sealed class OpenAiClient : ILLMClient, IStructuredLLMClient
         var feedbackSystem = StructuredJsonText.WithValidationFeedback(request.SystemPrompt, errors, first.Json);
         var second = await CompleteStructuredOnceAsync(request, feedbackSystem, cancellationToken).ConfigureAwait(false);
         var errors2 = JsonSchemaValidator.Validate(second.Json, request.JsonSchema);
-        if (errors2.Count == 0) return second;
+        if (errors2.Count == 0) return second with { Usage = first.Usage.Add(second.Usage) };   // total billed = the first (invalid) attempt + the re-ask
 
         throw new LlmApiException(Provider, null, LlmErrorCategory.Malformed,
             $"structured output failed schema validation after a re-ask: {string.Join("; ", errors2)}");
@@ -100,14 +100,15 @@ public sealed class OpenAiClient : ILLMClient, IStructuredLLMClient
     {
         var system = StructuredJsonText.WithSchemaInstruction(baseSystemPrompt, request.JsonSchema);
 
-        // Attempt 1 — forced function-calling. A gateway/model that rejects it (400) or returns neither a function
-        // call nor a JSON content object yields null here, degrading to the prompt-only floor below.
-        if (await TryStructuredViaFunctionAsync(request, system, cancellationToken).ConfigureAwait(false) is { } viaFunction)
-            return viaFunction;
+        // Attempt 1 — forced function-calling. A 400/422 reject (funcParsed null, nothing billed) or a 200 that yields no
+        // usable JSON degrades to the prompt-only floor below; a 200 WITH a result returns here carrying its own usage.
+        var (funcJson, funcParsed) = await TryStructuredViaFunctionAsync(request, system, cancellationToken).ConfigureAwait(false);
+        if (funcJson is { } viaFunction)
+            return BuildCompletion(viaFunction, funcParsed!, request.Model);
 
-        // Attempt 2 — prompt-only floor: no tools, no response_format. This is the SAFEST request — it never 400s on a
-        // gateway that rejects forced functions or json_object, and forces nothing that could suppress the reply. The
-        // model answers in text; recover the JSON object from it.
+        // Attempt 2 — prompt-only floor: no tools, no response_format. The SAFEST request — never 400s on a gateway that
+        // rejects forced functions or json_object. The model answers in text; recover the JSON from it. The returned
+        // usage TOTALS the (billed but degraded) forced attempt + this floor, so the caller sees what was actually billed.
         var body = new OpenAiChatRequest
         {
             Model = request.Model,
@@ -129,15 +130,17 @@ public sealed class OpenAiClient : ILLMClient, IStructuredLLMClient
             throw new LlmApiException(Provider, null, LlmErrorCategory.Malformed, $"structured completion produced no JSON via forced function-calling OR the prompt-only fallback — the model did not produce structured output{refusal}. Content preview: {StructuredJsonText.Preview(message?.Content)}");
         }
 
-        return BuildCompletion(result, parsed, request.Model);
+        var totalUsage = (funcParsed is null ? LlmUsage.None : UsageFrom(funcParsed)).Add(UsageFrom(parsed));
+        return BuildCompletion(result, parsed, request.Model) with { Usage = totalUsage };
     }
 
     /// <summary>
     /// Attempt 1: forced function-calling — a single function whose parameters IS the schema, tool_choice pinned to it.
-    /// Returns null (degrade to the prompt-only floor) when the gateway REJECTS the request (e.g. 400 on an unsupported
-    /// feature) or the model returns neither a function call nor a recoverable JSON content object.
+    /// Returns the recovered JSON (or null to degrade to the prompt-only floor) PLUS the parsed response — so the caller
+    /// can accumulate the BILLED usage even when the JSON is null (a 200 that produced no usable function call still
+    /// cost tokens). On a 400/422 reject the request was never generated, so both are null (nothing to bill).
     /// </summary>
-    private async Task<StructuredLLMCompletion?> TryStructuredViaFunctionAsync(StructuredLLMCompletionRequest request, string system, CancellationToken cancellationToken)
+    private async Task<(JsonElement? Json, OpenAiChatResponse? Parsed)> TryStructuredViaFunctionAsync(StructuredLLMCompletionRequest request, string system, CancellationToken cancellationToken)
     {
         var body = new OpenAiChatRequest
         {
@@ -155,7 +158,7 @@ public sealed class OpenAiClient : ILLMClient, IStructuredLLMClient
 
         OpenAiChatResponse parsed;
         try { parsed = await PostChatAsync(body, request.Credential, cancellationToken).ConfigureAwait(false); }
-        catch (LlmApiException e) when (e.StatusCode is 400 or 422) { return null; }   // ANY request-shape rejection (400/422 — forced functions unsupported) degrades to the floor, regardless of the refined category (a body keyword must never disable the fallback). A 401/403/404/429/5xx PROPAGATES — never swallowed into a second billable call that mis-reports the real cause.
+        catch (LlmApiException e) when (e.StatusCode is 400 or 422) { return (null, null); }   // ANY request-shape rejection (400/422 — forced functions unsupported) degrades to the floor, regardless of the refined category (a body keyword must never disable the fallback). A 401/403/404/429/5xx PROPAGATES — never swallowed into a second billable call that mis-reports the real cause.
 
         var message = parsed.Choices?.FirstOrDefault()?.Message;
         var toolCall = message?.ToolCalls?.FirstOrDefault(t => t.Function?.Name == StructuredToolName);
@@ -164,7 +167,7 @@ public sealed class OpenAiClient : ILLMClient, IStructuredLLMClient
             ? ParseToolArguments(arguments)
             : StructuredJsonText.TryExtractObject(message?.Content);
 
-        return json is { } result ? BuildCompletion(result, parsed, request.Model) : null;
+        return (json, parsed);
     }
 
     private static StructuredLLMCompletion BuildCompletion(JsonElement json, OpenAiChatResponse parsed, string fallbackModel) => new()
