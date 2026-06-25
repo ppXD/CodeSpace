@@ -175,12 +175,14 @@ public sealed class AnthropicClient : ILLMClient, IStructuredLLMClient
         // team's credentialed-model pool and passes it here. There is NO ambient env-key backstop: a caller without a
         // credential fails closed rather than silently borrowing an operator-global key. (The env var const survives
         // for the AGENT plane's operator-global fallback + the cassette record-mode gate, which read it independently.)
-        var apiKey = NullIfBlank(credential?.ApiKey);
+        if (credential is null)
+            throw new InvalidOperationException("Anthropic model credential not configured. The in-process plane must pass a model credential resolved from the team's pool.");
 
-        if (string.IsNullOrWhiteSpace(apiKey))
-            throw new InvalidOperationException("Anthropic API key not configured. The in-process plane must pass a model credential resolved from the team's pool.");
+        // The KEY is OPTIONAL: a keyless Anthropic-compatible gateway sends NO x-api-key header — the same way the agent
+        // CLI harness omits the key env var. The endpoint decides; the public API without a key returns a clean 401.
+        var apiKey = NullIfBlank(credential.ApiKey);
 
-        var baseUrl = NullIfBlank(credential?.BaseUrl) ?? DefaultApiBaseUrl;
+        var baseUrl = NullIfBlank(credential.BaseUrl) ?? DefaultApiBaseUrl;
         var http = _httpClientFactory.CreateClient(nameof(AnthropicClient));
 
         // Per-call headers on the REQUEST message (never mutate the singleton-resolved client's DefaultRequestHeaders) so
@@ -191,7 +193,7 @@ public sealed class AnthropicClient : ILLMClient, IStructuredLLMClient
             Content = LlmHttpTransport.JsonBody(body),
         };
         message.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
-        message.Headers.Add("x-api-key", apiKey);
+        if (apiKey is not null) message.Headers.Add("x-api-key", apiKey);
         message.Headers.Add("anthropic-version", AnthropicVersion);
 
         return await LlmHttpTransport.SendForJsonAsync<AnthropicMessageResponse>(http, message, Provider, options: null, cancellationToken).ConfigureAwait(false);
