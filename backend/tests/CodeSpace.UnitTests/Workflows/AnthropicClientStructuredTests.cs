@@ -283,8 +283,28 @@ public class AnthropicClientStructuredTests
         {
             var ex = await Should.ThrowAsync<InvalidOperationException>(() => client.CompleteStructuredAsync(
                 new StructuredLLMCompletionRequest { Model = "m", SystemPrompt = "s", UserPrompt = "u", JsonSchema = schema }, CancellationToken.None));
-            ex.Message.ShouldContain("API key not configured");
+            ex.Message.ShouldContain("credential not configured", Case.Insensitive, "a NULL credential fails closed (the KEY is optional, but the credential is required — no env-key borrow)");
         });
+    }
+
+    [Fact]
+    public async Task A_keyless_credential_sends_no_x_api_key_header_so_a_local_gateway_runs()
+    {
+        // A keyless Anthropic-compatible gateway: a credential with a base URL but no key sends NO x-api-key header.
+        const string response = """
+            { "model": "m", "content": [ { "type": "tool_use", "id": "t1", "name": "respond", "input": { "ok": true } } ], "stop_reason": "tool_use" }
+            """;
+        var handler = new CapturingHandler(response);
+        var client = new AnthropicClient(new StubHttpClientFactory(handler));
+        var schema = JsonDocument.Parse("""{ "type": "object" }""").RootElement;
+        var keyless = new ResolvedModelCredential { Provider = "Anthropic", ApiKey = null, BaseUrl = "https://local-gw.local" };
+
+        var result = await client.CompleteStructuredAsync(
+            new StructuredLLMCompletionRequest { Model = "m", SystemPrompt = "s", UserPrompt = "u", JsonSchema = schema, Credential = keyless }, CancellationToken.None);
+
+        result.Json.GetProperty("ok").GetBoolean().ShouldBeTrue("a keyless gateway runs the in-process structured call");
+        handler.ApiKeyHeader.ShouldBeNull("no key → NO x-api-key header (the endpoint decides)");
+        handler.RequestUri.ShouldBe("https://local-gw.local/v1/messages");
 
         handler.ApiKeyHeader.ShouldBeNull("the call must fail closed before any request is sent — never reaching the env key");
     }

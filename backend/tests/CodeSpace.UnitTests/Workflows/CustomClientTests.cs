@@ -107,4 +107,30 @@ public class CustomClientTests
         ex.Category.ShouldBe(LlmErrorCategory.AuthFailed, "the typed category is preserved so the decider's capability-miss filter is unaffected");
         ex.StatusCode.ShouldBe(401);
     }
+
+    [Fact]
+    public async Task A_keyless_Custom_gateway_runs_with_no_authorization_header()
+    {
+        // The headline keyless case: a Custom credential with a base URL but NO key (a local / no-auth gateway) drives the
+        // in-process plane with no Authorization header — Custom endpoints run to the supervisor even keyless.
+        const string response = """
+            { "model": "m", "choices": [ { "message": { "role": "assistant", "content": null,
+              "tool_calls": [ { "id": "c", "type": "function", "function": { "name": "respond", "arguments": "{\"ok\":true}" } } ] }, "finish_reason": "tool_calls" } ] }
+            """;
+        var handler = new CapturingHandler(response);
+        var client = new CustomClient(new StubHttpClientFactory(handler));
+
+        var keyless = new ResolvedModelCredential { Provider = "Custom", ApiKey = null, BaseUrl = "https://local-gw.local/v1" };
+        var request = new StructuredLLMCompletionRequest
+        {
+            Model = "m", SystemPrompt = "s", UserPrompt = "u", Credential = keyless,
+            JsonSchema = JsonDocument.Parse("""{ "type": "object" }""").RootElement,
+        };
+
+        var result = await client.CompleteStructuredAsync(request, CancellationToken.None);
+
+        result.Json.GetProperty("ok").GetBoolean().ShouldBeTrue("a keyless Custom gateway runs the in-process structured call");
+        handler.AuthorizationHeader.ShouldBeNull("no key → NO Authorization header to the keyless gateway");
+        handler.RequestUri.ShouldBe("https://local-gw.local/v1/chat/completions");
+    }
 }

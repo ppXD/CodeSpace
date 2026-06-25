@@ -255,8 +255,30 @@ public class OpenAiClientStructuredTests
 
         var ex = await Should.ThrowAsync<InvalidOperationException>(() => client.CompleteStructuredAsync(StructuredRequest(schema, credential: null), CancellationToken.None));
 
-        ex.Message.ShouldContain("API key not configured");
+        ex.Message.ShouldContain("credential not configured", Case.Insensitive, "a NULL credential is a caller bug — fail closed (the KEY is optional, but the credential is required)");
         handler.Sent.ShouldBeFalse("the call must fail closed before any request is sent");
+    }
+
+    [Fact]
+    public async Task A_keyless_credential_sends_no_authorization_header_so_a_local_gateway_runs()
+    {
+        // A keyless local / no-auth gateway (vLLM, a self-hosted relay): the credential has a base URL but no key, so the
+        // call goes through with NO Authorization header — the in-process plane runs on it, not just the agent harness.
+        const string response = """
+            { "model": "m", "choices": [ { "message": { "role": "assistant", "content": null,
+              "tool_calls": [ { "id": "c", "type": "function", "function": { "name": "respond", "arguments": "{\"ok\":true}" } } ] }, "finish_reason": "tool_calls" } ] }
+            """;
+        var handler = new CapturingHandler(response);
+        var client = new OpenAiClient(new StubHttpClientFactory(handler));
+        var schema = JsonDocument.Parse("""{ "type": "object" }""").RootElement;
+        var keyless = new ResolvedModelCredential { Provider = "OpenAI", ApiKey = null, BaseUrl = "https://local-gw.local/v1" };
+
+        var result = await client.CompleteStructuredAsync(StructuredRequest(schema, keyless), CancellationToken.None);
+
+        result.Json.GetProperty("ok").GetBoolean().ShouldBeTrue("a keyless gateway runs the in-process structured call");
+        handler.Sent.ShouldBeTrue("a keyless credential is a keyless ENDPOINT — the call goes through, never fail-closed");
+        handler.AuthorizationHeader.ShouldBeNull("no key → NO Authorization header (the endpoint decides; a public API would 401)");
+        handler.RequestUri.ShouldBe("https://local-gw.local/v1/chat/completions");
     }
 
     [Fact]

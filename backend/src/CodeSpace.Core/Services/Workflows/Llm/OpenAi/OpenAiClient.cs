@@ -208,12 +208,15 @@ public sealed class OpenAiClient : ILLMClient, IStructuredLLMClient
     {
         // Pure pool-driven (mirrors AnthropicClient post-S6b): the credential is the ONLY key source — no ambient
         // env-key backstop. A caller without a credential fails closed rather than silently borrowing a global key.
-        var apiKey = NullIfBlank(credential?.ApiKey);
+        if (credential is null)
+            throw new InvalidOperationException("OpenAI model credential not configured. The in-process plane must pass a model credential resolved from the team's pool.");
 
-        if (string.IsNullOrWhiteSpace(apiKey))
-            throw new InvalidOperationException("OpenAI API key not configured. The in-process plane must pass a model credential resolved from the team's pool.");
+        // The KEY is OPTIONAL: a keyless local / no-auth gateway (vLLM, a self-hosted relay) sends NO Authorization header
+        // — the same way the agent CLI harness omits the key env var. The endpoint decides; a public API without a key
+        // returns a clean 401. So a keyless Custom endpoint runs the in-process plane, not just the agent harness.
+        var apiKey = NullIfBlank(credential.ApiKey);
 
-        var baseUrl = NullIfBlank(credential?.BaseUrl) ?? DefaultApiBaseUrl;
+        var baseUrl = NullIfBlank(credential.BaseUrl) ?? DefaultApiBaseUrl;
         var url = baseUrl.TrimEnd('/') + "/chat/completions";
 
         var http = _httpClientFactory.CreateClient(nameof(OpenAiClient));
@@ -225,7 +228,7 @@ public sealed class OpenAiClient : ILLMClient, IStructuredLLMClient
         {
             Content = LlmHttpTransport.JsonBody(body),
         };
-        message.Headers.Authorization = new AuthenticationHeaderValue("Bearer", apiKey);
+        if (apiKey is not null) message.Headers.Authorization = new AuthenticationHeaderValue("Bearer", apiKey);
 
         return await LlmHttpTransport.SendForJsonAsync<OpenAiChatResponse>(http, message, Provider, ResponseJsonOptions, cancellationToken).ConfigureAwait(false);
     }
