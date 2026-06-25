@@ -42,12 +42,14 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
     private readonly IPostCommitActions _postCommit;
     private readonly IAgentRunService _agentRunService;
     private readonly Rerun.IRerunCellSeeder _cellSeeder;
+    private readonly Engine.IRunCancellationRegistry _cancellationRegistry;
+    private readonly Artifacts.IArtifactStore _artifactStore;
     private readonly ILogger<WorkflowService> _logger;
 
     /// <summary>Reason stamped on a branch agent run aborted by the kill-wave when an operator cancels its parent workflow run.</summary>
     private const string OperatorCancelledAgentReason = "Cancelled because its parent workflow run was cancelled by an operator.";
 
-    public WorkflowService(CodeSpaceDbContext db, DefinitionValidator validator, INodeRegistry nodeRegistry, Lifecycle.IRunRecordLogger recordLogger, IRunStarter runStarter, RunSources.IRunFromSnapshotStarter snapshotStarter, IWorkflowRunDispatcher runDispatcher, Engine.IWorkflowResumeService resumeService, IPostCommitActions postCommit, IAgentRunService agentRunService, Rerun.IRerunCellSeeder cellSeeder, ILogger<WorkflowService> logger)
+    public WorkflowService(CodeSpaceDbContext db, DefinitionValidator validator, INodeRegistry nodeRegistry, Lifecycle.IRunRecordLogger recordLogger, IRunStarter runStarter, RunSources.IRunFromSnapshotStarter snapshotStarter, IWorkflowRunDispatcher runDispatcher, Engine.IWorkflowResumeService resumeService, IPostCommitActions postCommit, IAgentRunService agentRunService, Rerun.IRerunCellSeeder cellSeeder, Engine.IRunCancellationRegistry cancellationRegistry, Artifacts.IArtifactStore artifactStore, ILogger<WorkflowService> logger)
     {
         _db = db;
         _validator = validator;
@@ -60,6 +62,8 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
         _postCommit = postCommit;
         _agentRunService = agentRunService;
         _cellSeeder = cellSeeder;
+        _cancellationRegistry = cancellationRegistry;
+        _artifactStore = artifactStore;
         _logger = logger;
     }
 
@@ -698,6 +702,12 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
 
         if (flipped == 0) return await ReReadTerminalOutcomeAsync(runId, teamId, cancellationToken).ConfigureAwait(false);
 
+        // Trip the in-process walk's token so an actively-running engine walk on THIS host stops cooperatively
+        // at its next safe checkpoint instead of running every remaining node under CancellationToken.None. A
+        // no-op when no walk is running here (a parked run, or one walking on another replica — that one is
+        // caught by the engine's wave-boundary status re-read). Fired AFTER the flip so the walk observes Cancelled.
+        _cancellationRegistry.Cancel(runId);
+
         var agentRunsCancelled = await TearDownCancelledRunAsync(runId, cancellationToken).ConfigureAwait(false);
 
         await _recordLogger.RunCancelledAsync(runId, TimeSpan.Zero, cancellationToken).ConfigureAwait(false);
@@ -1002,6 +1012,10 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
         var childRunByNode = await LoadSubworkflowChildLinksAsync(runId, cancellationToken).ConfigureAwait(false);
         var agentRunByNode = await LoadAgentRunLinksAsync(runId, cancellationToken).ConfigureAwait(false);
 
+        // Re-inflate any offloaded-value refs in each node's outputs so the run-detail surfaces the REAL values,
+        // not the bare {"$artifact_ref":…} pointers the engine writes to the ledger for oversize outputs.
+        var resolvedOutputsByNode = await ResolveNodeOutputsForDisplayAsync(nodes, run.TeamId, cancellationToken).ConfigureAwait(false);
+
         // The exact graph this run executed — the VERSION-PINNED snapshot (the exact JSON this run ran),
         // NOT the workflow's current definition. Feeds the run canvas faithfully, and gives each iterated
         // row its owning container's kind (disambiguating a map branch "<mapId>#<i>" from a loop body
@@ -1022,7 +1036,7 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
             StartedAt = run.StartedAt,
             CompletedAt = run.CompletedAt,
             CreatedDate = run.CreatedDate,
-            Nodes = nodes.Select(n => MapRunNode(n, childRunByNode, agentRunByNode, typeKeyByNodeId)).ToList(),
+            Nodes = nodes.Select(n => MapRunNode(n, childRunByNode, agentRunByNode, typeKeyByNodeId, resolvedOutputsByNode)).ToList(),
             Definition = definition,
             Outputs = outputs,
             PendingWait = pending == null ? null : new WorkflowRunWaitInfo
@@ -1146,20 +1160,50 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
         WorkflowRunNode n,
         IReadOnlyDictionary<(string NodeId, string IterationKey), string> childRunByNode,
         IReadOnlyDictionary<(string NodeId, string IterationKey), string> agentRunByNode,
-        IReadOnlyDictionary<string, string> typeKeyByNodeId) => new()
+        IReadOnlyDictionary<string, string> typeKeyByNodeId,
+        IReadOnlyDictionary<(string NodeId, string IterationKey), JsonElement> resolvedOutputsByNode) => new()
     {
         NodeId = n.NodeId,
         IterationKey = n.IterationKey,
         ContainerKind = ResolveContainerKind(n.IterationKey, typeKeyByNodeId),
         Status = n.Status,
         Inputs = SafeParseJson(n.InputsJson),
-        Outputs = SafeParseJson(n.OutputsJson),
+        Outputs = resolvedOutputsByNode.TryGetValue((n.NodeId, n.IterationKey), out var resolved) ? resolved : SafeParseJson(n.OutputsJson),
         Error = n.Error,
         StartedAt = n.StartedAt,
         CompletedAt = n.CompletedAt,
         ChildRunId = childRunByNode.GetValueOrDefault((n.NodeId, n.IterationKey)),
         AgentRunId = agentRunByNode.GetValueOrDefault((n.NodeId, n.IterationKey))
     };
+
+    /// <summary>Re-inflate offloaded-value refs in each node's outputs for the run-detail display. Cheap when no refs are present (ResolveAsync only fetches a value that IS a ref); keyed by (nodeId, iterationKey) to match the per-cell rows.</summary>
+    private async Task<Dictionary<(string NodeId, string IterationKey), JsonElement>> ResolveNodeOutputsForDisplayAsync(IReadOnlyList<WorkflowRunNode> nodes, Guid teamId, CancellationToken cancellationToken)
+    {
+        var result = new Dictionary<(string, string), JsonElement>();
+
+        foreach (var n in nodes)
+        {
+            var resolved = await Artifacts.NodeOutputArtifacts.ResolveAsync(_artifactStore, teamId, ParseOutputsObject(n.OutputsJson), cancellationToken).ConfigureAwait(false);
+            result[(n.NodeId, n.IterationKey)] = JsonSerializer.SerializeToElement(resolved);
+        }
+
+        return result;
+    }
+
+    /// <summary>Parse a node's <c>outputs_jsonb</c> into a property dictionary for ref resolution; empty for null / non-object.</summary>
+    private static Dictionary<string, JsonElement> ParseOutputsObject(string? json)
+    {
+        var dict = new Dictionary<string, JsonElement>();
+
+        if (string.IsNullOrWhiteSpace(json)) return dict;
+
+        var root = JsonDocument.Parse(json).RootElement;
+        if (root.ValueKind != JsonValueKind.Object) return dict;
+
+        foreach (var prop in root.EnumerateObject()) dict[prop.Name] = prop.Value.Clone();
+
+        return dict;
+    }
 
     /// <summary>
     /// nodeId → typeKey for the run's VERSION-PINNED definition (the exact JSON it executed, not the

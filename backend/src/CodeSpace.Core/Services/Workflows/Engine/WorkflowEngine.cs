@@ -56,6 +56,7 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
     private readonly IWorkflowResumeService _resumeService;
     private readonly IAgentRunService _agentRunService;
     private readonly IAgentDefinitionResolver _agentDefinitionResolver;
+    private readonly IRunCancellationRegistry _cancellationRegistry;
     // The run's lifetime scope — BeginLifetimeScope() per parallel node gives each its own DbContext +
     // record logger so concurrent nodes never share an EF change-tracker (see RunNodeInChildScopeAsync).
     private readonly ILifetimeScope _lifetimeScope;
@@ -71,7 +72,7 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
     internal const int DefaultMaxParallelism = 8;
     internal const int MaxParallelismCeiling = 64;
 
-    public WorkflowEngine(CodeSpaceDbContext db, INodeRegistry nodeRegistry, IVariableService variableService, IRunRecordLogger recordLogger, IPayloadRedactor redactor, IArtifactStore artifactStore, ILogger<WorkflowEngine> logger, ILoggerFactory loggerFactory, ICodeSpaceBackgroundJobClient backgroundJobClient, ISubworkflowService subworkflowService, IWorkflowResumeService resumeService, IAgentRunService agentRunService, IAgentDefinitionResolver agentDefinitionResolver, ILifetimeScope lifetimeScope)
+    public WorkflowEngine(CodeSpaceDbContext db, INodeRegistry nodeRegistry, IVariableService variableService, IRunRecordLogger recordLogger, IPayloadRedactor redactor, IArtifactStore artifactStore, ILogger<WorkflowEngine> logger, ILoggerFactory loggerFactory, ICodeSpaceBackgroundJobClient backgroundJobClient, ISubworkflowService subworkflowService, IWorkflowResumeService resumeService, IAgentRunService agentRunService, IAgentDefinitionResolver agentDefinitionResolver, IRunCancellationRegistry cancellationRegistry, ILifetimeScope lifetimeScope)
     {
         _db = db;
         _nodeRegistry = nodeRegistry;
@@ -86,6 +87,7 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
         _resumeService = resumeService;
         _agentRunService = agentRunService;
         _agentDefinitionResolver = agentDefinitionResolver;
+        _cancellationRegistry = cancellationRegistry;
         _lifetimeScope = lifetimeScope;
         _maxParallelism = ParseMaxParallelism(Environment.GetEnvironmentVariable(MaxParallelismEnvVar));
     }
@@ -146,14 +148,21 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
         // in Running forever — the reconciler's "abandoned Running" sweep would eventually
         // catch it, but operators see the failure immediately this way + the timeline gets
         // the run.failed ledger record with the specific exception message.
+        // Register a per-run cancellation source for the lifetime of THIS walk and thread its token through —
+        // so an operator cancel on this host (WorkflowService.CancelRunAsync → registry.Cancel) trips it and the
+        // walk stops cooperatively instead of running every remaining node under CancellationToken.None. Linked
+        // to the supplied token so a host/shutdown cancel still propagates. Disposed (unregistered) on exit.
+        using var cancellation = _cancellationRegistry.Register(runId, cancellationToken);
+
         try
         {
-            await RunAfterClaimAsync(runId, startedAt, cancellationToken).ConfigureAwait(false);
+            await RunAfterClaimAsync(runId, startedAt, cancellation.Token).ConfigureAwait(false);
         }
         catch (OperationCanceledException)
         {
-            // Cancel handling already happens INSIDE RunAfterClaimAsync (it writes the
-            // Cancelled status + ledger). Re-throw so Hangfire records the job as cancelled.
+            // Cancel handling already happens INSIDE RunAfterClaimAsync (it lands the run Cancelled via a
+            // Running-guarded CAS + ledger, or no-ops when the operator's flip already owns it). Re-throw so
+            // Hangfire records the job as cancelled.
             throw;
         }
         catch (Exception ex)
@@ -235,12 +244,63 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
         }
         catch (OperationCanceledException)
         {
-            // Operator-initiated cancel — distinct from a node Failure. CompleteRun uses CT.None
-            // since the supplied token is already triggered; we still want the DB write to land.
-            await CompleteRunAsync(run, WorkflowRunStatus.Cancelled, error: null, cancellationToken: CancellationToken.None).ConfigureAwait(false);
-            await _recordLogger.RunCancelledAsync(run.Id, DateTimeOffset.UtcNow - engineStartedAt, CancellationToken.None).ConfigureAwait(false);
+            // Operator-initiated cancel (the registry token tripped, or the wave-boundary re-read saw a
+            // cross-host cancel). The row is typically ALREADY Cancelled by WorkflowService.CancelRunAsync's
+            // status flip (which also bumped xmin) — so a tracked CompleteRunAsync would throw a concurrency
+            // exception. Land the terminal via a Running-guarded CAS instead: it no-ops when the operator's
+            // flip already owns the row (no duplicate status write, no duplicate ledger), and lands Cancelled +
+            // the ledger once for any other-sourced cancel that left the row Running.
+            await EnsureRunCancelledAsync(run.Id, engineStartedAt).ConfigureAwait(false);
+
+            // If this cancelled run is a sub-workflow CHILD, wake the parent parked on it — exactly as the normal
+            // CompleteRunAsync path does. Without this a child cancelled mid-walk would leave its parent Suspended
+            // forever: no reconciler resumes a parent on a Pending Subworkflow wait (the stranded-Suspended sweep
+            // skips any run holding a pending wait). Resolves only this child's own wait, with status=Cancelled, so
+            // the parent's subworkflow node fails / routes its error edge. No-op when the run has no parent wait.
+            await ResumeParentIfSubworkflowChildAsync(run, WorkflowRunStatus.Cancelled, error: null, CancellationToken.None).ConfigureAwait(false);
             throw;
         }
+    }
+
+    /// <summary>
+    /// Land a cancelled walk's run terminal via a <c>WHERE Status = Running</c> CAS — the conflict-free completion
+    /// for the cooperative-cancel path. 0 rows = the operator's own flip already owns the terminal (then it also
+    /// emitted the run.cancelled ledger + tore down children), so this is a clean no-op. 1 row = a cancel from
+    /// another source left the row Running; we land it Cancelled and emit the ledger once. Uses CancellationToken.None
+    /// so the write lands even though the walk's token is tripped.
+    /// </summary>
+    private async Task EnsureRunCancelledAsync(Guid runId, DateTimeOffset engineStartedAt)
+    {
+        var flipped = await _db.WorkflowRun
+            .Where(r => r.Id == runId && r.Status == WorkflowRunStatus.Running)
+            .ExecuteUpdateAsync(s => s
+                .SetProperty(r => r.Status, WorkflowRunStatus.Cancelled)
+                .SetProperty(r => r.CompletedAt, (DateTimeOffset?)DateTimeOffset.UtcNow), CancellationToken.None)
+            .ConfigureAwait(false);
+
+        if (flipped > 0)
+            await _recordLogger.RunCancelledAsync(runId, DateTimeOffset.UtcNow - engineStartedAt, CancellationToken.None).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// The cross-host cancel backstop, checked at each TOP-LEVEL wave boundary: re-read the run's persisted status
+    /// and throw <see cref="OperationCanceledException"/> if it is Cancelled. The in-process
+    /// <see cref="IRunCancellationRegistry"/> trips a SAME-host walk's token instantly AT EVERY LEVEL (top-level,
+    /// map-branch, and loop-body sub-walks all check that token), so a single-replica cancel is fully cooperative
+    /// everywhere. This DB re-read additionally catches a cancel that landed on ANOTHER replica (whose token this
+    /// host doesn't hold); a cancel of a long inner map/loop body on another replica is honoured when control
+    /// returns to this top-level boundary, not mid-body. One indexed PK lookup per top-level wave — negligible.
+    /// </summary>
+    private async Task ThrowIfRunCancelledAsync(Guid runId, CancellationToken cancellationToken)
+    {
+        var status = await _db.WorkflowRun.AsNoTracking()
+            .Where(r => r.Id == runId)
+            .Select(r => (WorkflowRunStatus?)r.Status)
+            .SingleOrDefaultAsync(cancellationToken)
+            .ConfigureAwait(false);
+
+        if (status == WorkflowRunStatus.Cancelled)
+            throw new OperationCanceledException($"Run {runId} was cancelled by an operator.");
     }
 
     /// <summary>
@@ -774,6 +834,27 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
         return dict;
     }
 
+    /// <summary>
+    /// Parse a persisted node's <c>outputs_jsonb</c> from the ledger AND re-inflate any offloaded-value refs
+    /// (<see cref="NodeOutputArtifacts"/>) back to their full content. The single resolving reader every
+    /// scope-from-ledger rebuild (crash-resume, map / loop replay) routes through, so a node's large output that
+    /// was offloaded on write resolves to its real value when a downstream node reads <c>{{nodes.X.outputs.*}}</c>
+    /// after a replay — never the bare ref.
+    /// </summary>
+    private async Task<Dictionary<string, JsonElement>> LoadNodeOutputsAsync(string? outputsJson, Guid teamId, CancellationToken cancellationToken)
+    {
+        var resolved = await NodeOutputArtifacts.ResolveAsync(_artifactStore, teamId, ParsePayloadObject(outputsJson), cancellationToken).ConfigureAwait(false);
+
+        // A ref that survives resolution (its artifact is missing / cross-team) is a corruption signal, not a
+        // benign no-op: ResolveAsync fails SAFE by keeping the ref rather than dropping the value, but feeding a
+        // bare ref object into replay scope silently diverges from the first-pass value. Surface it loudly.
+        foreach (var (key, value) in resolved)
+            if (NodeOutputArtifacts.IsRef(value))
+                _logger.LogWarning("Replay: node output '{Key}' is an artifact ref that did not resolve (missing or cross-team) — the bare ref is fed downstream; replay determinism for this value is broken", key);
+
+        return resolved;
+    }
+
     private async Task StartRunAsync(WorkflowRun run, CancellationToken cancellationToken)
     {
         // The atomic Enqueued→Running CAS at the entry of ExecuteRunAsync already flipped
@@ -1004,6 +1085,7 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
         while (state.Ready.Count > 0)
         {
             cancellationToken.ThrowIfCancellationRequested();
+            await ThrowIfRunCancelledAsync(run.Id, cancellationToken).ConfigureAwait(false);
 
             var wave = DrainReadyWave(state);
 
@@ -1262,7 +1344,7 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
 
             var outputs = BuildLoopOutputs(loopVars, iterations, failures, reason);
             scope.Nodes[loopNode.Id] = outputs;
-            await _recordLogger.NodeCompletedAsync(run.Id, loopNode.Id, nodeIterationKey, outputs, null, DateTimeOffset.UtcNow - startedAt, cancellationToken).ConfigureAwait(false);
+            await CompleteNodeWithOffloadAsync(run.Id, run.TeamId, loopNode.Id, nodeIterationKey, outputs, null, DateTimeOffset.UtcNow - startedAt, cancellationToken).ConfigureAwait(false);
             return NodeStatus.Success;
         }
         catch (NodeFailureException ex)
@@ -1383,7 +1465,7 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
 
             var outputs = BuildMapOutputs(plan.ResultKey, results, failed);
             scope.Nodes[mapNode.Id] = outputs;
-            await _recordLogger.NodeCompletedAsync(run.Id, mapNode.Id, nodeIterationKey, outputs, null, DateTimeOffset.UtcNow - startedAt, cancellationToken).ConfigureAwait(false);
+            await CompleteNodeWithOffloadAsync(run.Id, run.TeamId, mapNode.Id, nodeIterationKey, outputs, null, DateTimeOffset.UtcNow - startedAt, cancellationToken).ConfigureAwait(false);
             return NodeStatus.Success;
         }
         catch (NodeFailureException ex)
@@ -1740,10 +1822,20 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
             var branchKey = CombineIterationKey(nodeIterationKey, $"{mapNode.Id}#{i}");
 
             if (TrySettleBranch(rowsByKey, branchKey, body, terminal, errorHandling, i, out var outcome))
-                settled[i] = outcome;
+                settled[i] = await ResolveBranchOutcomeAsync(outcome, run.TeamId, cancellationToken).ConfigureAwait(false);
         }
 
         return new MapReplayState(settled);
+    }
+
+    /// <summary>Re-inflate any offloaded-value refs in a settled branch's replayed terminal outputs — the branch's own terminal output was offloaded on write, so the replayed result must resolve before it feeds the map's aggregated results. A failed / non-object outcome carries nothing to resolve.</summary>
+    private async Task<MapBranchOutcome> ResolveBranchOutcomeAsync(MapBranchOutcome outcome, Guid teamId, CancellationToken cancellationToken)
+    {
+        if (outcome.Failed || outcome.Result.ValueKind != JsonValueKind.Object) return outcome;
+
+        var resolved = await NodeOutputArtifacts.ResolveAsync(_artifactStore, teamId, ParsePayloadObject(outcome.Result.GetRawText()), cancellationToken).ConfigureAwait(false);
+
+        return outcome with { Result = JsonSerializer.SerializeToElement(resolved) };
     }
 
     /// <summary>
@@ -1823,7 +1915,7 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
 
             if (row.Status != NodeStatus.Success) continue;
 
-            var outputs = ParsePayloadObject(row.OutputsJson);
+            var outputs = await LoadNodeOutputsAsync(row.OutputsJson, run.TeamId, cancellationToken).ConfigureAwait(false);
             if (outputs.Count > 0) branchScope.Nodes[row.NodeId] = outputs;
 
             var hints = ParseRoutingHints(row.RoutingHintsJson);
@@ -2043,7 +2135,8 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
             // the live pass produced, then re-apply the var updates.
             var passNodes = new Dictionary<string, IReadOnlyDictionary<string, JsonElement>>();
             foreach (var (k, v) in outerScope.Nodes) passNodes[k] = v;
-            foreach (var r in passRows.Where(r => r.Status == NodeStatus.Success)) passNodes[r.NodeId] = ParsePayloadObject(r.OutputsJson);
+            foreach (var r in passRows.Where(r => r.Status == NodeStatus.Success))
+                passNodes[r.NodeId] = await LoadNodeOutputsAsync(r.OutputsJson, run.TeamId, cancellationToken).ConfigureAwait(false);
 
             loopVars = ApplyLoopVarUpdates(config.LoopVariables, loopVars, BuildLoopScope(outerScope, passNodes, loopVars, j));
         }
@@ -2076,7 +2169,7 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
 
             if (row.Status != NodeStatus.Success) continue;
 
-            var outputs = ParsePayloadObject(row.OutputsJson);
+            var outputs = await LoadNodeOutputsAsync(row.OutputsJson, run.TeamId, cancellationToken).ConfigureAwait(false);
             if (outputs.Count > 0) iterScope.Nodes[row.NodeId] = outputs;
 
             var hints = ParseRoutingHints(row.RoutingHintsJson);
@@ -2228,7 +2321,7 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
 
             if (node.Status != NodeStatus.Success) continue;
 
-            var outputs = ParsePayloadObject(node.OutputsJson);
+            var outputs = await LoadNodeOutputsAsync(node.OutputsJson, run.TeamId, cancellationToken).ConfigureAwait(false);
             if (outputs.Count > 0) scope.Nodes[node.NodeId] = outputs;
 
             var hints = ParseRoutingHints(node.RoutingHintsJson);
@@ -2375,24 +2468,31 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
         // reuse the wake_at column so the row + run-detail surface "auto-wakes at X" uniformly.
         var wakeAt = waitKind == WorkflowWaitKinds.Timer ? ReadWakeAt(token) : token.DeadlineAt;
 
+        // The staging chain below (stage child run → node.suspended → wait row) must be ATOMIC against an
+        // operator cancel: with the P3 cooperative-cancel token now threaded through the walk, a cancel tripping
+        // BETWEEN the child-run commit and the wait commit would leave a Queued child with no wait (the same
+        // split the P1 reconciler sweep collects, but better never created). Run it under CancellationToken.None
+        // so a cancel is honoured at the next wave boundary, never mid-suspend.
+        var stagingCt = CancellationToken.None;
+
         // Sub-workflow: stage the child run NOW (parent_run_id = this run); its id is the wait's
         // correlation token. The child is dispatched only AFTER the parent commits Suspended (see
         // RunAfterClaimAsync) so a fast child can't finish before the parent is parked. A staging
         // failure throws SubworkflowStartException, which ExecuteNodeAsync turns into a node failure.
         var correlationToken = waitKind switch
         {
-            WorkflowWaitKinds.Subworkflow => (await StageSubworkflowChildAsync(run, token, cancellationToken).ConfigureAwait(false)).ToString(),
-            WorkflowWaitKinds.AgentRun => (await StageAgentRunAsync(run, node, token, iterationKey, cancellationToken).ConfigureAwait(false)).ToString(),
+            WorkflowWaitKinds.Subworkflow => (await StageSubworkflowChildAsync(run, token, stagingCt).ConfigureAwait(false)).ToString(),
+            WorkflowWaitKinds.AgentRun => (await StageAgentRunAsync(run, node, token, iterationKey, stagingCt).ConfigureAwait(false)).ToString(),
             _ => token.CorrelationToken ?? Guid.NewGuid().ToString("N"),
         };
 
-        await _recordLogger.NodeSuspendedAsync(run.Id, node.Id, iterationKey, waitKind, wakeAt, cancellationToken).ConfigureAwait(false);
+        await _recordLogger.NodeSuspendedAsync(run.Id, node.Id, iterationKey, waitKind, wakeAt, stagingCt).ConfigureAwait(false);
 
         // One outstanding wait per (run, node, iteration). Drop any prior (resolved) wait for
         // this node+iteration so a re-suspend can't trip the unique index.
         var existing = await _db.WorkflowRunWait
             .Where(w => w.RunId == run.Id && w.NodeId == node.Id && w.IterationKey == iterationKey)
-            .ToListAsync(cancellationToken).ConfigureAwait(false);
+            .ToListAsync(stagingCt).ConfigureAwait(false);
         if (existing.Count > 0) _db.WorkflowRunWait.RemoveRange(existing);
 
         var waitId = Guid.NewGuid();
@@ -2412,7 +2512,7 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
             PayloadJson = token.Payload.ValueKind == JsonValueKind.Undefined ? null : token.Payload.GetRawText(),
             CreatedAt = DateTimeOffset.UtcNow,
         });
-        await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+        await _db.SaveChangesAsync(stagingCt).ConfigureAwait(false);
 
         // Timer waits self-wake: schedule the resume at wake_at. Approval / Callback waits are
         // woken by an external signal, so nothing is scheduled there. A BOUNDED wait (DeadlineAt +
@@ -2696,7 +2796,7 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
     private async Task<NodeRunOutcome> FinalizeNonFailureAsync(NodeExecution exec, NodeResult result, CancellationToken cancellationToken)
     {
         var duration = DateTimeOffset.UtcNow - exec.StartedAt;
-        await PersistNodeResultAsync(exec.Run.Id, exec.Node.Id, result, duration, cancellationToken, exec.IterationKey).ConfigureAwait(false);
+        await PersistNodeResultAsync(exec, result, duration, cancellationToken).ConfigureAwait(false);
 
         var scopeOutputs = result.Status == NodeStatus.Success && result.Outputs.Count > 0 ? result.Outputs : null;
         var terminalOutputs = result.Status == NodeStatus.Success && exec.Runtime.Manifest.Kind == NodeKind.Terminal && exec.ResolvedInputs.Count > 0
@@ -2813,13 +2913,48 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
     /// Write the <c>node.completed</c> / <c>node.failed</c> ledger record for a node whose
     /// <c>RunAsync</c> returned (i.e. did not throw). The branching is by <see cref="NodeStatus"/>;
     /// thrown exceptions go through <see cref="ExecuteNodeAsync"/>'s catch handlers instead.
+    ///
+    /// <para>Before the LEDGER write, an oversize output VALUE (a large HTTP body / LLM completion) is offloaded
+    /// to the content-addressed artifact store and replaced by a compact ref (<see cref="NodeOutputArtifacts"/>),
+    /// so the append-only run-record ledger never accumulates unbounded blobs. The in-process scope keeps the
+    /// FULL values (merged separately via <see cref="MergeNodeOutcome"/>), so this offload is invisible to a
+    /// single-pass walk — refs are re-inflated only when scope is rebuilt from the ledger on replay.</para>
     /// </summary>
-    private async Task PersistNodeResultAsync(Guid runId, string nodeId, NodeResult result, TimeSpan duration, CancellationToken cancellationToken, string iterationKey = NoIteration)
+    private async Task PersistNodeResultAsync(NodeExecution exec, NodeResult result, TimeSpan duration, CancellationToken cancellationToken)
     {
         if (result.Status == NodeStatus.Success)
-            await _recordLogger.NodeCompletedAsync(runId, nodeId, iterationKey, result.Outputs, result.RoutingHints, duration, cancellationToken).ConfigureAwait(false);
+            await CompleteNodeWithOffloadAsync(exec.Run.Id, exec.Run.TeamId, exec.Node.Id, exec.IterationKey, result.Outputs, result.RoutingHints, duration, cancellationToken).ConfigureAwait(false);
         else
-            await _recordLogger.NodeFailedAsync(runId, nodeId, iterationKey, result.Error ?? "Node returned non-success without error message.", duration, cancellationToken).ConfigureAwait(false);
+            await _recordLogger.NodeFailedAsync(exec.Run.Id, exec.Node.Id, exec.IterationKey, result.Error ?? "Node returned non-success without error message.", duration, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Write a successful node's <c>node.completed</c> ledger record with its oversize output VALUES offloaded to
+    /// the artifact store (<see cref="NodeOutputArtifacts"/>) so the append-only ledger never accumulates unbounded
+    /// blobs. Shared by the leaf path and the map / loop container aggregates (each keeps the FULL values in scope
+    /// separately, so this offload is invisible to a single-pass walk).
+    ///
+    /// <para>FAIL-OPEN on a store error (the side-effect-vs-settlement boundary): the node's <c>RunAsync</c> already
+    /// fired its side effect by the time we get here, so if the offload itself throws (artifact DB / blob-backend IO)
+    /// we must STILL settle the node — fall back to writing the full inline outputs (one oversize row beats a
+    /// re-dispatch re-firing a non-idempotent side effect). A tripped cancel token is the exception: it re-throws so
+    /// the run lands Cancelled (a terminal run never re-walks, so the node can't re-fire).</para>
+    /// </summary>
+    private async Task CompleteNodeWithOffloadAsync(Guid runId, Guid teamId, string nodeId, string iterationKey, IReadOnlyDictionary<string, JsonElement> outputs, IReadOnlyList<string>? routingHints, TimeSpan duration, CancellationToken cancellationToken)
+    {
+        IReadOnlyDictionary<string, JsonElement> ledgerOutputs;
+
+        try
+        {
+            ledgerOutputs = await NodeOutputArtifacts.OffloadLargeAsync(_artifactStore, teamId, outputs, ArtifactStoreConfig.InlineThresholdBytes, cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogWarning(ex, "Run {RunId} node {NodeId}: output offload failed; writing node.completed with full inline outputs so the node is recorded settled and never re-fires its side effect", runId, nodeId);
+            ledgerOutputs = outputs;
+        }
+
+        await _recordLogger.NodeCompletedAsync(runId, nodeId, iterationKey, ledgerOutputs, routingHints, duration, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>

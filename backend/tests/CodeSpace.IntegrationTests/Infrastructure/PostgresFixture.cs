@@ -285,6 +285,14 @@ public sealed class PostgresFixture : IAsyncLifetime
             .As<CodeSpace.Core.Services.Workflows.Nodes.INodeRuntime>()
             .SingleInstance();
 
+        // Test-only node that BLOCKS a wave until the test releases it — the hermetic window for the
+        // cooperative-cancel tests (issue an operator cancel while a walk is parked inside this node, then prove
+        // the engine stops firing the remaining nodes). Same registration rationale: engine/validator see it,
+        // palette doesn't.
+        builder.RegisterType<Workflows.Infrastructure.CancelGateNode>()
+            .As<CodeSpace.Core.Services.Workflows.Nodes.INodeRuntime>()
+            .SingleInstance();
+
         // Deterministic structured-output LLM client for the headline-flow E2E's planner half. Registered as
         // BOTH ILLMClient + IStructuredLLMClient under its OWN provider tag (DeterministicPlannerLlmClient.
         // ProviderTag), so the LLMClientRegistry holds it ALONGSIDE the real Anthropic client (no duplicate-
