@@ -33,6 +33,14 @@ public class WorkflowRunsController : ControllerBase
         return Ok(result);
     }
 
+    /// <summary>The runs cockpit's true scoped counts (the status cards) — live / failed / suspended / today over the bar's scope. Team-scoped.</summary>
+    [HttpGet("summary")]
+    public async Task<IActionResult> Summary([FromQuery] GetTeamRunSummaryQuery query, CancellationToken cancellationToken)
+    {
+        var result = await _mediator.Send(query, cancellationToken).ConfigureAwait(false);
+        return Ok(result);
+    }
+
     /// <summary>Launch a run from a generic task spec (effort / autonomy / surface / repos). Returns the run id + route + projection.</summary>
     [HttpPost]
     public async Task<IActionResult> Launch([FromBody] LaunchTaskCommand command, CancellationToken cancellationToken)

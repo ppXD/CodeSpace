@@ -40,6 +40,7 @@ internal sealed class StubWorkflowService : IWorkflowService
     public Task<IReadOnlyList<WorkflowRunSummary>> ListRunsAsync(Guid workflowId, Guid teamId, int limit, CancellationToken cancellationToken) => throw new NotImplementedException();
     public Task<RunPage> ListTeamRunsAsync(Guid teamId, RunListFilter filter, string? cursor, int limit, CancellationToken cancellationToken) => throw new NotImplementedException();
     public Task<RunPage> ListTeamRunsPageAsync(Guid teamId, RunListFilter filter, int page, int pageSize, CancellationToken cancellationToken) => throw new NotImplementedException();
+    public Task<RunSummary> SummarizeTeamRunsAsync(Guid teamId, RunListFilter filter, DateTimeOffset todayStart, CancellationToken cancellationToken) => throw new NotImplementedException();
     public Task<bool> ApproveRunAsync(Guid runId, Guid teamId, Guid actorUserId, bool approved, string? comment, CancellationToken cancellationToken) => throw new NotImplementedException();
     public Task<CancelRunOutcome?> CancelRunAsync(Guid runId, Guid teamId, CancellationToken cancellationToken) => throw new NotImplementedException();
     public IReadOnlyList<NodeManifestDto> ListNodeManifests() => throw new NotImplementedException();

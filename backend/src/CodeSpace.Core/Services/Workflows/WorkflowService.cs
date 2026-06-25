@@ -910,6 +910,35 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
         return new RunPage { Items = items, TotalCount = total };
     }
 
+    public async Task<RunSummary> SummarizeTeamRunsAsync(Guid teamId, RunListFilter filter, DateTimeOffset todayStart, CancellationToken cancellationToken)
+    {
+        var query = TeamRunsQuery(teamId, filter);
+
+        // One pass for the per-status + today tallies (Postgres count(*) FILTER), then a second for the EXISTS-gated
+        // review count (Suspended runs no pending decision already covers — the run half of the attention card).
+        var tally = await query.GroupBy(_ => 1).Select(g => new
+        {
+            Live = g.Count(r => r.Status == WorkflowRunStatus.Pending || r.Status == WorkflowRunStatus.Enqueued || r.Status == WorkflowRunStatus.Running),
+            Failed = g.Count(r => r.Status == WorkflowRunStatus.Failure),
+            Suspended = g.Count(r => r.Status == WorkflowRunStatus.Suspended),
+            Today = g.Count(r => r.CreatedDate >= todayStart),
+        }).FirstOrDefaultAsync(cancellationToken).ConfigureAwait(false);
+
+        var needingReview = await query
+            .Where(r => r.Status == WorkflowRunStatus.Suspended)
+            .Where(ExpressionPredicate.Not(HasPendingDecisionPredicate()))
+            .CountAsync(cancellationToken).ConfigureAwait(false);
+
+        return new RunSummary
+        {
+            Live = tally?.Live ?? 0,
+            Failed = tally?.Failed ?? 0,
+            Suspended = tally?.Suspended ?? 0,
+            SuspendedNeedingReview = needingReview,
+            Today = tally?.Today ?? 0,
+        };
+    }
+
     /// <summary>
     /// Compose the generic run filter — each dimension is an optional AND-narrowing predicate, applied at this single
     /// site so a new filter dimension is one line here, never a new query. Order is irrelevant (all AND); the keyset +
