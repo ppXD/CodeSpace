@@ -1,4 +1,5 @@
 using System.Text.Json;
+using CodeSpace.Core.Services.Agents.Cost;
 using CodeSpace.Core.Services.Agents.ModelCredentials;
 using CodeSpace.Core.Services.Workflows.Llm;
 using CodeSpace.Core.Services.Workflows.Runtime;
@@ -80,7 +81,9 @@ public sealed class LlmCompleteNode : INodeRuntime
                 "json": { "type": ["object","null"] },
                 "model": { "type": "string" },
                 "inputTokens": { "type": ["integer","null"] },
-                "outputTokens": { "type": ["integer","null"] }
+                "outputTokens": { "type": ["integer","null"] },
+                "finishReason": { "type": ["string","null"], "description": "The provider's stop reason (Anthropic stop_reason / OpenAI finish_reason), e.g. 'stop' / 'length' / 'tool_calls'. Null if not reported." },
+                "costUsd": { "type": ["number","null"], "description": "Estimated USD cost of this call from (model, input, output) tokens. Null when the model is unpriced or the provider reported no usage." }
               }
             }
             """)
@@ -140,28 +143,12 @@ public sealed class LlmCompleteNode : INodeRuntime
                 Temperature = temperature,
                 Sampling = sampling
             }, ct),
-            completionExtractor: result => new ExternalCallCompletion
-            {
-                ResponsePayload = JsonSerializer.SerializeToElement(new
-                {
-                    model = result.Model,
-                    input_tokens = result.InputTokens,
-                    output_tokens = result.OutputTokens,
-                    text_length = result.Text?.Length ?? 0,
-                })
-            },
+            completionExtractor: result => LedgerCompletion(result.Model, result.Usage, result.Text?.Length ?? 0),
             cancellationToken: cancellationToken).ConfigureAwait(false);
 
-        context.Logger.LogInformation("LLM completion {Model} in={InTok} out={OutTok}", completion.Model, completion.InputTokens, completion.OutputTokens);
+        context.Logger.LogInformation("LLM completion {Model} in={InTok} out={OutTok} finish={Finish}", completion.Model, completion.Usage.InputTokens, completion.Usage.OutputTokens, completion.Usage.FinishReason);
 
-        var outputs = new Dictionary<string, JsonElement>
-        {
-            ["text"] = JsonSerializer.SerializeToElement(completion.Text),
-            ["json"] = JsonSerializer.SerializeToElement((object?)null),
-            ["model"] = JsonSerializer.SerializeToElement(completion.Model),
-            ["inputTokens"] = JsonSerializer.SerializeToElement(completion.InputTokens),
-            ["outputTokens"] = JsonSerializer.SerializeToElement(completion.OutputTokens)
-        };
+        var outputs = BuildOutputs(JsonSerializer.SerializeToElement(completion.Text), JsonSerializer.SerializeToElement((object?)null), completion.Model, completion.Usage);
 
         return NodeResult.Ok(outputs);
     }
@@ -186,32 +173,47 @@ public sealed class LlmCompleteNode : INodeRuntime
                 Temperature = temperature,
                 Sampling = sampling
             }, ct),
-            completionExtractor: result => new ExternalCallCompletion
-            {
-                ResponsePayload = JsonSerializer.SerializeToElement(new
-                {
-                    model = result.Model,
-                    input_tokens = result.InputTokens,
-                    output_tokens = result.OutputTokens,
-                })
-            },
+            completionExtractor: result => LedgerCompletion(result.Model, result.Usage),
             cancellationToken: cancellationToken).ConfigureAwait(false);
 
-        context.Logger.LogInformation("LLM structured completion {Model} in={InTok} out={OutTok}", completion.Model, completion.InputTokens, completion.OutputTokens);
+        context.Logger.LogInformation("LLM structured completion {Model} in={InTok} out={OutTok} finish={Finish}", completion.Model, completion.Usage.InputTokens, completion.Usage.OutputTokens, completion.Usage.FinishReason);
 
         // Emit the parsed object on 'json' (downstream can index into it); keep 'text' populated with the
         // serialized form so a node wired to either output still works.
-        var outputs = new Dictionary<string, JsonElement>
-        {
-            ["text"] = JsonSerializer.SerializeToElement(completion.Json.GetRawText()),
-            ["json"] = completion.Json,
-            ["model"] = JsonSerializer.SerializeToElement(completion.Model),
-            ["inputTokens"] = JsonSerializer.SerializeToElement(completion.InputTokens),
-            ["outputTokens"] = JsonSerializer.SerializeToElement(completion.OutputTokens)
-        };
+        var outputs = BuildOutputs(JsonSerializer.SerializeToElement(completion.Json.GetRawText()), completion.Json, completion.Model, completion.Usage);
 
         return NodeResult.Ok(outputs);
     }
+
+    /// <summary>The node's output map for both paths — text/json differ, the model + usage envelope (tokens, finish reason, derived USD cost) are shared. Keeping it one place means the two completion shapes can't drift in what they surface.</summary>
+    private static Dictionary<string, JsonElement> BuildOutputs(JsonElement text, JsonElement json, string model, LlmUsage usage) => new()
+    {
+        ["text"] = text,
+        ["json"] = json,
+        ["model"] = JsonSerializer.SerializeToElement(model),
+        ["inputTokens"] = JsonSerializer.SerializeToElement(usage.InputTokens),
+        ["outputTokens"] = JsonSerializer.SerializeToElement(usage.OutputTokens),
+        ["finishReason"] = JsonSerializer.SerializeToElement(usage.FinishReason),
+        ["costUsd"] = JsonSerializer.SerializeToElement(CostUsdOf(model, usage))
+    };
+
+    /// <summary>The redacted ledger record for one LLM call — model + the usage envelope (tokens, finish reason, derived cost); the full text lives in a workflow_artifact, so only its length rides here. Shared by the plain + structured paths so the audit payload can't drift.</summary>
+    private static ExternalCallCompletion LedgerCompletion(string model, LlmUsage usage, int? textLength = null) => new()
+    {
+        ResponsePayload = JsonSerializer.SerializeToElement(new
+        {
+            model,
+            input_tokens = usage.InputTokens,
+            output_tokens = usage.OutputTokens,
+            finish_reason = usage.FinishReason,
+            cost_usd = CostUsdOf(model, usage),
+            text_length = textLength
+        })
+    };
+
+    /// <summary>Derive the USD cost of one call from (model, in, out) via the shared pricing table. Null when the provider reported no token counts (can't price) or the model is unpriced — fail-open, never throws (matches <c>AgentCostPricing</c>).</summary>
+    private static decimal? CostUsdOf(string model, LlmUsage usage) =>
+        usage.InputTokens is { } input && usage.OutputTokens is { } output ? AgentCostPricing.CostUsd(model, input, output) : null;
 
     /// <summary>Reads a non-empty JSON object from the bag (an empty <c>{}</c> counts as absent → text path).</summary>
     private static bool TryReadObject(IReadOnlyDictionary<string, JsonElement> bag, string key, out JsonElement value)

@@ -26,12 +26,12 @@ public sealed class DeterministicPlannerLlmClient : ILLMClient, IStructuredLLMCl
     public string Provider => ProviderTag;
 
     public Task<LLMCompletion> CompleteAsync(LLMCompletionRequest request, CancellationToken cancellationToken) =>
-        Task.FromResult(new LLMCompletion { Text = string.Join(", ", Subtasks), Model = request.Model, InputTokens = 7, OutputTokens = 9 });
+        Task.FromResult(new LLMCompletion { Text = string.Join(", ", Subtasks), Model = request.Model, Usage = new() { InputTokens = 7, OutputTokens = 9 } });
 
     public Task<StructuredLLMCompletion> CompleteStructuredAsync(StructuredLLMCompletionRequest request, CancellationToken cancellationToken)
     {
         var json = JsonSerializer.SerializeToElement(new { subtasks = Subtasks });
 
-        return Task.FromResult(new StructuredLLMCompletion { Json = json, Model = request.Model, InputTokens = 11, OutputTokens = 13 });
+        return Task.FromResult(new StructuredLLMCompletion { Json = json, Model = request.Model, Usage = new() { InputTokens = 11, OutputTokens = 13 } });
     }
 }

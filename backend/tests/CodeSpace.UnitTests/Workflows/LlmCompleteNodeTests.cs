@@ -26,11 +26,11 @@ public class LlmCompleteNodeTests
     {
         public string Provider => "Anthropic";
         public StructuredLLMCompletionRequest? StructuredRequest;
-        public LLMCompletion TextResult = new() { Text = "plain answer", Model = "claude-sonnet-4-5", InputTokens = 10, OutputTokens = 5 };
+        public LLMCompletion TextResult = new() { Text = "plain answer", Model = "claude-opus-4-8", Usage = new() { InputTokens = 10, OutputTokens = 5, FinishReason = "end_turn" } };
         public StructuredLLMCompletion StructuredResult = new()
         {
             Json = JsonDocument.Parse("""{ "subtasks": ["a", "b"] }""").RootElement.Clone(),
-            Model = "claude-sonnet-4-5", InputTokens = 11, OutputTokens = 6
+            Model = "claude-opus-4-8", Usage = new() { InputTokens = 11, OutputTokens = 6, FinishReason = "tool_use" }
         };
 
         public Task<LLMCompletion> CompleteAsync(LLMCompletionRequest request, CancellationToken ct) => Task.FromResult(TextResult);
@@ -47,7 +47,7 @@ public class LlmCompleteNodeTests
     {
         public string Provider => "Anthropic";
         public Task<LLMCompletion> CompleteAsync(LLMCompletionRequest request, CancellationToken ct) =>
-            Task.FromResult(new LLMCompletion { Text = "text", Model = "m", InputTokens = 1, OutputTokens = 1 });
+            Task.FromResult(new LLMCompletion { Text = "text", Model = "m", Usage = new() { InputTokens = 1, OutputTokens = 1 } });
     }
 
     private sealed class StubRegistry : ILLMClientRegistry
@@ -94,6 +94,38 @@ public class LlmCompleteNodeTests
         result.Status.ShouldBe(NodeStatus.Success);
         result.Outputs["text"].GetString().ShouldBe("plain answer");
         result.Outputs["json"].ValueKind.ShouldBe(JsonValueKind.Null, "no schema → text mode, json output is null");
+    }
+
+    [Fact]
+    public async Task Surfaces_finish_reason_and_derived_usd_cost_on_the_outputs()
+    {
+        var node = Node(new StructuredStubClient(), StubPoolSelector.WithModel());
+
+        var result = await node.RunAsync(Context(config: new(), userPrompt: "hi"), CancellationToken.None);
+
+        result.Status.ShouldBe(NodeStatus.Success);
+        result.Outputs["inputTokens"].GetInt32().ShouldBe(10);
+        result.Outputs["outputTokens"].GetInt32().ShouldBe(5);
+        result.Outputs["finishReason"].GetString().ShouldBe("end_turn", "the provider stop reason is surfaced from the usage envelope");
+
+        // claude-opus-4-8 = $5/M input, $25/M output → 10*5/1e6 + 5*25/1e6 = 0.000175 (derived, not provider-reported).
+        result.Outputs["costUsd"].GetDecimal().ShouldBe(0.000175m, "cost is derived from (model, in, out) via the shared pricing table");
+    }
+
+    [Fact]
+    public async Task Cost_is_null_for_an_unpriced_model_but_finish_reason_still_surfaces()
+    {
+        var stub = new StructuredStubClient
+        {
+            TextResult = new() { Text = "x", Model = "metis-coder-max", Usage = new() { InputTokens = 10, OutputTokens = 5, FinishReason = "stop" } }
+        };
+        var node = Node(stub, StubPoolSelector.WithModel());
+
+        var result = await node.RunAsync(Context(config: new(), userPrompt: "hi"), CancellationToken.None);
+
+        result.Status.ShouldBe(NodeStatus.Success);
+        result.Outputs["costUsd"].ValueKind.ShouldBe(JsonValueKind.Null, "an unpriced (custom-gateway) model yields a null cost — fail-open, never a throw or a bogus zero");
+        result.Outputs["finishReason"].GetString().ShouldBe("stop", "finish reason surfaces even when the model is unpriced");
     }
 
     [Fact]

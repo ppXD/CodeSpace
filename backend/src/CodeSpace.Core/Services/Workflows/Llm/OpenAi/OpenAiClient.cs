@@ -73,8 +73,7 @@ public sealed class OpenAiClient : ILLMClient, IStructuredLLMClient
         {
             Text = message?.Content ?? "",
             Model = parsed.Model ?? request.Model,
-            InputTokens = parsed.Usage?.PromptTokens,
-            OutputTokens = parsed.Usage?.CompletionTokens,
+            Usage = UsageFrom(parsed)
         };
     }
 
@@ -172,8 +171,14 @@ public sealed class OpenAiClient : ILLMClient, IStructuredLLMClient
     {
         Json = json,
         Model = parsed.Model ?? fallbackModel,
+        Usage = UsageFrom(parsed)
+    };
+
+    private static LlmUsage UsageFrom(OpenAiChatResponse parsed) => new()
+    {
         InputTokens = parsed.Usage?.PromptTokens,
         OutputTokens = parsed.Usage?.CompletionTokens,
+        FinishReason = parsed.Choices?.FirstOrDefault()?.FinishReason
     };
 
     /// <summary>Accept the function-call arguments whether the gateway returns them as a JSON STRING (OpenAI) or an inline OBJECT (some gateways) — a real-endpoint shape the fake-HTTP tests would otherwise let through.</summary>
@@ -284,6 +289,7 @@ public sealed class OpenAiClient : ILLMClient, IStructuredLLMClient
     private sealed class OpenAiChoice
     {
         [JsonPropertyName("message")] public OpenAiResponseMessage? Message { get; init; }
+        [JsonPropertyName("finish_reason")] public string? FinishReason { get; init; }
     }
 
     private sealed class OpenAiResponseMessage

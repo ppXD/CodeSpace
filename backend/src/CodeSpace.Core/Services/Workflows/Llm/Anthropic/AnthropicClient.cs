@@ -57,8 +57,7 @@ public sealed class AnthropicClient : ILLMClient, IStructuredLLMClient
         {
             Text = text,
             Model = parsed.Model ?? request.Model,
-            InputTokens = parsed.Usage?.InputTokens,
-            OutputTokens = parsed.Usage?.OutputTokens
+            Usage = UsageFrom(parsed)
         };
     }
 
@@ -152,8 +151,14 @@ public sealed class AnthropicClient : ILLMClient, IStructuredLLMClient
     {
         Json = json,
         Model = parsed.Model ?? fallbackModel,
+        Usage = UsageFrom(parsed)
+    };
+
+    private static LlmUsage UsageFrom(AnthropicMessageResponse parsed) => new()
+    {
         InputTokens = parsed.Usage?.InputTokens,
-        OutputTokens = parsed.Usage?.OutputTokens
+        OutputTokens = parsed.Usage?.OutputTokens,
+        FinishReason = parsed.StopReason
     };
 
     /// <summary>Join the response's text content blocks (the structured fallback reads JSON out of these when the model answered in text instead of a tool_use block).</summary>
@@ -227,6 +232,7 @@ public sealed class AnthropicClient : ILLMClient, IStructuredLLMClient
         [JsonPropertyName("model")] public string? Model { get; init; }
         [JsonPropertyName("content")] public IReadOnlyList<AnthropicContentBlock>? Content { get; init; }
         [JsonPropertyName("usage")] public AnthropicUsage? Usage { get; init; }
+        [JsonPropertyName("stop_reason")] public string? StopReason { get; init; }
     }
 
     private sealed class AnthropicContentBlock

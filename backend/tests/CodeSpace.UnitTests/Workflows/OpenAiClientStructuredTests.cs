@@ -78,7 +78,7 @@ public class OpenAiClientStructuredTests
             {
               "model": "gpt-4o",
               "choices": [ { "message": { "role": "assistant", "content": null,
-                "tool_calls": [ { "id": "call_1", "type": "function", "function": { "name": "respond", "arguments": "{\"subtasks\":[\"x\",\"y\"]}" } } ] } } ],
+                "tool_calls": [ { "id": "call_1", "type": "function", "function": { "name": "respond", "arguments": "{\"subtasks\":[\"x\",\"y\"]}" } } ] }, "finish_reason": "tool_calls" } ],
               "usage": { "prompt_tokens": 12, "completion_tokens": 7 }
             }
             """;
@@ -92,8 +92,9 @@ public class OpenAiClientStructuredTests
         result.Json.GetProperty("subtasks")[0].GetString().ShouldBe("x");
         result.Json.GetProperty("subtasks").GetArrayLength().ShouldBe(2);
         result.Model.ShouldBe("gpt-4o");
-        result.InputTokens.ShouldBe(12);
-        result.OutputTokens.ShouldBe(7);
+        result.Usage.InputTokens.ShouldBe(12);
+        result.Usage.OutputTokens.ShouldBe(7);
+        result.Usage.FinishReason.ShouldBe("tool_calls", "the OpenAI finish_reason is surfaced on the usage envelope");
 
         // Request shape of attempt 1: a single forced function whose parameters IS the caller's schema, tool_choice
         // pinned to it. response_format is NOT sent (it 400s on gateways that do not support json_object).
@@ -222,14 +223,15 @@ public class OpenAiClientStructuredTests
     [Fact]
     public async Task Free_text_completion_returns_the_message_content()
     {
-        const string response = """{ "model": "gpt-4o", "choices": [ { "message": { "role": "assistant", "content": "hello there" } } ], "usage": { "prompt_tokens": 3, "completion_tokens": 2 } }""";
+        const string response = """{ "model": "gpt-4o", "choices": [ { "message": { "role": "assistant", "content": "hello there" }, "finish_reason": "stop" } ], "usage": { "prompt_tokens": 3, "completion_tokens": 2 } }""";
         var client = new OpenAiClient(new StubHttpClientFactory(new CapturingHandler(response)));
 
         var result = await client.CompleteAsync(new LLMCompletionRequest { Model = "gpt-4o", SystemPrompt = "s", UserPrompt = "u", Credential = TestCredential }, CancellationToken.None);
 
         result.Text.ShouldBe("hello there");
-        result.InputTokens.ShouldBe(3);
-        result.OutputTokens.ShouldBe(2);
+        result.Usage.InputTokens.ShouldBe(3);
+        result.Usage.OutputTokens.ShouldBe(2);
+        result.Usage.FinishReason.ShouldBe("stop", "the OpenAI finish_reason is surfaced on the usage envelope");
     }
 
     [Fact]

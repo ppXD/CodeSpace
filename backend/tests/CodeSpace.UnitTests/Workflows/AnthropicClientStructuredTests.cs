@@ -66,7 +66,8 @@ public class AnthropicClientStructuredTests
               "content": [
                 { "type": "tool_use", "id": "toolu_1", "name": "respond", "input": { "subtasks": ["x", "y"] } }
               ],
-              "usage": { "input_tokens": 12, "output_tokens": 7 }
+              "usage": { "input_tokens": 12, "output_tokens": 7 },
+              "stop_reason": "tool_use"
             }
             """;
         var handler = new CapturingHandler(response);
@@ -80,7 +81,7 @@ public class AnthropicClientStructuredTests
             Credential = TestCredential,
         }, CancellationToken.None);
 
-        var (json, model, inTok, outTok) = (result.Json, result.Model, result.InputTokens, result.OutputTokens);
+        var (json, model, inTok, outTok) = (result.Json, result.Model, result.Usage.InputTokens, result.Usage.OutputTokens);
 
         // Response extraction: tool_use.input became the JSON.
         json.GetProperty("subtasks")[0].GetString().ShouldBe("x");
@@ -88,6 +89,7 @@ public class AnthropicClientStructuredTests
         model.ShouldBe("claude-sonnet-4-5");
         inTok.ShouldBe(12);
         outTok.ShouldBe(7);
+        result.Usage.FinishReason.ShouldBe("tool_use", "the Anthropic stop_reason is surfaced on the usage envelope");
 
         // Request shape: a single forced tool whose input_schema IS the caller's schema.
         var sent = JsonDocument.Parse(handler.RequestBody!).RootElement;

@@ -39,12 +39,12 @@ public sealed class DeterministicSpecPlannerLlmClient : ILLMClient, IStructuredL
     public string Provider => ProviderTag;
 
     public Task<LLMCompletion> CompleteAsync(LLMCompletionRequest request, CancellationToken cancellationToken) =>
-        Task.FromResult(new LLMCompletion { Text = string.Join(", ", Specs.Select(s => s.Goal)), Model = request.Model, InputTokens = 7, OutputTokens = 9 });
+        Task.FromResult(new LLMCompletion { Text = string.Join(", ", Specs.Select(s => s.Goal)), Model = request.Model, Usage = new() { InputTokens = 7, OutputTokens = 9 } });
 
     public Task<StructuredLLMCompletion> CompleteStructuredAsync(StructuredLLMCompletionRequest request, CancellationToken cancellationToken)
     {
         var json = JsonSerializer.SerializeToElement(new { subtasks = Specs.Select(s => new { name = s.Name, goal = s.Goal, mode = s.Mode }) });
 
-        return Task.FromResult(new StructuredLLMCompletion { Json = json, Model = request.Model, InputTokens = 11, OutputTokens = 13 });
+        return Task.FromResult(new StructuredLLMCompletion { Json = json, Model = request.Model, Usage = new() { InputTokens = 11, OutputTokens = 13 } });
     }
 }
