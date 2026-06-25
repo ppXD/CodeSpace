@@ -173,6 +173,7 @@ export function LaunchTaskModal({ surface, autofill, onClose, onLaunched }: Laun
     const input = buildLaunchInput({
       taskText, surface, workspace, effort, autonomy, model, modelCredentialId, harness, agentDefinitionId, runnerKind,
       maxParallel: cfg.maxParallel, maxRounds: cfg.maxRounds, maxAgents: cfg.maxAgents, budget: cfg.budget,
+      agentModels: cfg.agentModels,
     });
     launch.mutate(input, { onSuccess: res => onLaunched?.(res.runId) });
   };
@@ -197,16 +198,18 @@ export function LaunchTaskModal({ surface, autofill, onClose, onLaunched }: Laun
   // The Agent-setup "Agent model" and the primary chip then offer only those models (plus Auto). In Deep
   // the primary model is the supervisor brain (unconstrained) and agents draw from the pool, so it's Auto.
   const allModels = credModels.data ?? [];
-  const poolModels = cfg.agentModels.length ? allModels.filter(o => cfg.agentModels.includes(o.modelId)) : allModels;
+  const poolModels = cfg.agentModels.length ? allModels.filter(o => cfg.agentModels.includes(o.rowId)) : allModels;
   const agentModelOpts: Option[] = [{ value: "", label: "Auto" }, ...poolModels.map(o => ({ value: o.modelId, label: o.modelId, desc: `${o.provider} · ${o.credentialName}` }))];
   const menuModels = effort === "deep" ? allModels : poolModels;
   const poolLabel = cfg.agentModels.length ? `${cfg.agentModels.length} model${cfg.agentModels.length > 1 ? "s" : ""}` : "All eligible models";
-  // Toggle a model in the pool. Outside Deep the primary model IS the agent model, so if narrowing the
-  // pool strands it, fall back to Auto. (In Deep the model is the unconstrained supervisor brain.)
-  const togglePoolModel = (id: string) => {
-    const next = cfg.agentModels.includes(id) ? cfg.agentModels.filter(m => m !== id) : [...cfg.agentModels, id];
+  // Toggle a model ROW in the pool (keyed by the row id so two credentials exposing the same model name stay
+  // distinct). Outside Deep the picked model IS the agent model, so if narrowing the pool strands its row, fall
+  // back to Auto. (In Deep the model is the unconstrained supervisor brain.)
+  const togglePoolModel = (rowId: string) => {
+    const next = cfg.agentModels.includes(rowId) ? cfg.agentModels.filter(m => m !== rowId) : [...cfg.agentModels, rowId];
     setC({ agentModels: next });
-    if (effort !== "deep" && model && next.length && !next.includes(model)) { setModel(""); setModelCredentialId(""); }
+    const selectedRowId = allModels.find(o => o.modelId === model && o.credentialId === modelCredentialId)?.rowId;
+    if (effort !== "deep" && selectedRowId && next.length && !next.includes(selectedRowId)) { setModel(""); setModelCredentialId(""); }
   };
   const branchOpts: Option[] = [
     { value: "auto", label: "Create branch when changes exist" },
@@ -358,9 +361,9 @@ export function LaunchTaskModal({ surface, autofill, onClose, onLaunched }: Laun
                   <div className="lt3-poolhint">Agents draw only from these models. Leave empty to allow all eligible models.</div>
                   <div className="lt3-rlist">
                     {allModels.map(o => {
-                      const on = cfg.agentModels.includes(o.modelId);
+                      const on = cfg.agentModels.includes(o.rowId);
                       return (
-                        <button key={`${o.credentialId}/${o.modelId}`} type="button" className="lt3-opt" data-on={on} onClick={() => togglePoolModel(o.modelId)}>
+                        <button key={o.rowId} type="button" className="lt3-opt" data-on={on} onClick={() => togglePoolModel(o.rowId)}>
                           <span className="lt3-check" data-on={on}>{on && <Ic.Check size={11} />}</span>
                           <span className="lt3-opt-m"><span className="lt3-opt-t">{o.modelId}</span><span className="lt3-opt-d">{o.provider} · {o.credentialName}</span></span>
                         </button>

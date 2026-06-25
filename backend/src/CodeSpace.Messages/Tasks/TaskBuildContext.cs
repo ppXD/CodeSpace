@@ -33,4 +33,7 @@ public sealed record TaskBuildContext
 
     /// <summary>The supervisor's OWN brain-model credentialed-row id (a <c>ModelCredentialModel</c> id), resolved at launch when the Deep lane projects an <c>agent.supervisor</c> node and the operator pinned none — the <c>SupervisorDefinitionBuilder</c> bakes it into the node's <c>supervisorModelId</c> so the decider has a brain instead of stopping turn-1. Resolved ONCE here (replay-stable: every turn + replay reads the same baked id). Null for a non-supervisor projection or an empty pool (the builder then emits no brain — the honest fail-closed floor).</summary>
     public Guid? SupervisorBrainModelId { get; init; }
+
+    /// <summary>The operator's allowed model pool (credentialed-model ROW ids) for the agents a Deep run dispatches, validated TEAM-SCOPED at launch — the <c>SupervisorDefinitionBuilder</c> bakes it into the node's <c>allowedModelIds</c>, where a dispatched model out of the pool fails closed. Null / empty ⇒ the pool is all the team's models (the builder omits the key — byte-identical). Inert on a non-supervisor projection (its builder never reads this).</summary>
+    public IReadOnlyList<Guid>? AllowedModelIds { get; init; }
 }

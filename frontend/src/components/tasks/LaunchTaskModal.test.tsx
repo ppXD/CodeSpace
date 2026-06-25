@@ -13,7 +13,7 @@ vi.mock("@/hooks/use-agents", () => ({
   useAgentDefinitions: () => ({ data: [{ id: "a1", name: "Reviewer" }] }),
 }));
 vi.mock("@/hooks/use-model-credentials", () => ({
-  useCredentialedModels: () => ({ data: [{ modelId: "gpt-5-codex", credentialId: "c1", credentialName: "Team OpenAI", provider: "openai" }] }),
+  useCredentialedModels: () => ({ data: [{ rowId: "m1", modelId: "gpt-5-codex", credentialId: "c1", credentialName: "Team OpenAI", provider: "openai" }] }),
 }));
 vi.mock("@/hooks/use-tasks", () => ({
   useLaunchTask: () => ({

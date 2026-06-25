@@ -30,6 +30,8 @@ export interface LaunchFormState {
   maxAgents: string;
   /** Coordination "Budget" — `"none"` or a dollar amount string (`"5"`/`"10"`/`"25"`). */
   budget: string;
+  /** Coordination "Agent model pool" — credentialed-model ROW ids the dispatched agents may use. Empty = all. */
+  agentModels: string[];
 }
 
 const primaryOf = (workspace: LaunchWorkspaceRepo[]) => workspace.find(r => r.isPrimary) ?? workspace[0];
@@ -74,6 +76,10 @@ export function buildLaunchInput(state: LaunchFormState): LaunchTaskInput {
 
   const caps = tierExposesCaps(state.effort) ? buildCaps(state) : undefined;
   if (caps) input.caps = caps;
+
+  // The agent model pool is a supervisor-lane bound (inert on a single-agent run), and the Coordination tab that
+  // sets it is only shown on deep/auto — so gate it the same way as caps. Empty ⇒ omit (all the team's models).
+  if (tierExposesCaps(state.effort) && state.agentModels.length) input.allowedModelIds = [...state.agentModels];
 
   return input;
 }

@@ -43,6 +43,7 @@ public sealed class LaunchTaskCommandHandler : IRequestHandler<LaunchTaskCommand
             Autonomy = request.Autonomy,
             Overrides = BuildOverrides(request),
             CapsOverride = BuildCapsOverride(request.Caps),
+            AllowedModelIds = request.AllowedModelIds,
             SurfacePayload = BuildSurfacePayload(request),
         }, cancellationToken);
 

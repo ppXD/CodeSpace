@@ -29,12 +29,13 @@ public class SupervisorDefinitionBuilderTests
         new TerminalNode(),
     }));
 
-    private static TaskBuildContext Context(ResolvedAgentProfile? profile = null, RouteCaps? caps = null, Guid? brainModelId = null) => new()
+    private static TaskBuildContext Context(ResolvedAgentProfile? profile = null, RouteCaps? caps = null, Guid? brainModelId = null, IReadOnlyList<Guid>? allowedModelIds = null) => new()
     {
         Seed = new TaskLaunchSeed { Goal = "Ship the whole feature", SurfaceKind = "chat", TeamId = Guid.NewGuid() },
         Route = new RoutePlan { ProjectionKind = TaskProjectionKinds.Supervisor, Caps = caps ?? new RouteCaps() },
         AgentProfile = profile,
         SupervisorBrainModelId = brainModelId,
+        AllowedModelIds = allowedModelIds,
     };
 
     [Fact]
@@ -92,6 +93,28 @@ public class SupervisorDefinitionBuilderTests
         sup.Config.GetProperty("maxRounds").GetInt32().ShouldBe(6);
         sup.Config.GetProperty("maxTotalSpawns").GetInt32().ShouldBe(20);
         sup.Config.GetProperty("maxCostUsd").GetDecimal().ShouldBe(12.50m, "the route's cost cap folds onto the supervisor bound as a JSON number (SOTA #4)");
+    }
+
+    [Fact]
+    public void Supervisor_config_bakes_the_allowed_model_pool_as_a_uuid_string_array()
+    {
+        var rowA = Guid.NewGuid();
+        var rowB = Guid.NewGuid();
+
+        var sup = Builder.Build(Context(allowedModelIds: new[] { rowA, rowB })).Nodes.Single(n => n.Id == "sup");
+
+        sup.Config.GetProperty("allowedModelIds").EnumerateArray().Select(e => e.GetString()).ShouldBe(
+            new[] { rowA.ToString(), rowB.ToString() }, "the operator's model pool rows bake onto the supervisor's allowedModelIds in order");
+    }
+
+    [Fact]
+    public void Supervisor_config_omits_the_allowed_model_pool_when_empty_or_unset()
+    {
+        Builder.Build(Context(allowedModelIds: null)).Nodes.Single(n => n.Id == "sup")
+            .Config.TryGetProperty("allowedModelIds", out _).ShouldBeFalse("a null pool omits the key — the supervisor draws from all the team's models (byte-identical)");
+
+        Builder.Build(Context(allowedModelIds: Array.Empty<Guid>())).Nodes.Single(n => n.Id == "sup")
+            .Config.TryGetProperty("allowedModelIds", out _).ShouldBeFalse("an EMPTY pool also omits the key — empty means 'all models', not 'no models'");
     }
 
     [Theory]

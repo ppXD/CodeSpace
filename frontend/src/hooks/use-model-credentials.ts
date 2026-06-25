@@ -15,6 +15,9 @@ export function useModelCredentials(provider?: string) {
 
 /** One pickable model, resolved from the team's model credentials (not a hardcoded harness list). */
 export interface CredentialedModelOption {
+  /** The credentialed-model ROW id (a ModelCredentialModel id) — the unambiguous (credential, model) handle the
+   *  backend's model pool keys on (two credentials exposing the same model name are distinct rows). */
+  rowId: string;
   modelId: string;
   credentialId: string;
   credentialName: string;
@@ -32,7 +35,7 @@ export function useCredentialedModels() {
       const creds = await modelCredentialsApi.list();
       const lists = await Promise.all(creds.map(c =>
         modelCredentialsApi.listModels(c.id)
-          .then(models => models.filter(m => m.enabled).map(m => ({ modelId: m.modelId, credentialId: c.id, credentialName: c.displayName, provider: c.provider })))
+          .then(models => models.filter(m => m.enabled).map(m => ({ rowId: m.id, modelId: m.modelId, credentialId: c.id, credentialName: c.displayName, provider: c.provider })))
           .catch(() => [] as CredentialedModelOption[]),
       ));
       return lists.flat();

@@ -91,6 +91,10 @@ public sealed class SupervisorDefinitionBuilder : IWorkflowDefinitionBuilder, IS
         // structured-capable brain, so the build stays pure + a bare supervisor still validates (it just fails closed
         // at decide time — the honest floor).
         AddIfPresent(config, "supervisorModelId", context.SupervisorBrainModelId?.ToString());
+        // The operator's allowed model pool (credentialed-model row ids) for the agents this supervisor dispatches —
+        // baked as a string-uuid array onto the node's allowedModelIds, where a dispatched model out of the pool fails
+        // closed. Omitted (null) when empty, so a bare supervisor draws from all the team's models — byte-identical.
+        AddIfPresent(config, "allowedModelIds", context.AllowedModelIds is { Count: > 0 } pool ? pool.Select(id => id.ToString()).ToList() : null);
         AddIfPresent(config, "agentProfile", BuildAgentProfile(context.AgentProfile));
 
         return JsonSerializer.SerializeToElement(config);

@@ -286,6 +286,69 @@ public class TaskLaunchFlowTests
     }
 
     [Fact]
+    public async Task A_deep_launch_bakes_the_operator_allowed_model_pool_into_the_supervisor_snapshot()
+    {
+        // The operator's agent model pool (AllowedModelIds — credentialed-model row ids) must bind through the full
+        // command path → team-scope validation → TaskBuildContext → the supervisor node's allowedModelIds, so a
+        // dispatched agent out of the pool fails closed at run time. Frozen-def assertion (don't walk the run).
+        var flagBefore = Environment.GetEnvironmentVariable(SupervisorLane.EnabledEnvVar);
+        Environment.SetEnvironmentVariable(SupervisorLane.EnabledEnvVar, "1");
+
+        var jobClient = ResolveJobClient();
+        jobClient.Clear();
+        jobClient.AutoExecute = false;
+
+        try
+        {
+            var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+
+            var poolRow = await FirstTeamPoolRowAsync(teamId);
+
+            var result = await LaunchAsync(new TaskLaunchRequest
+            {
+                TeamId = teamId, ActorUserId = userId, SurfaceKind = TaskLaunchSurfaceKinds.Chat,
+                TaskText = "Ship the whole feature", RequestedEffort = TaskEffortModes.Deep,
+                AllowedModelIds = new[] { poolRow },
+            });
+
+            result.Route.ProjectionKind.ShouldBe(TaskProjectionKinds.Supervisor, "deep routes the supervisor lane (flag on)");
+
+            var run = await LoadRunAsync(result.RunId);
+            run.DefinitionSnapshotJson.ShouldNotBeNull();
+
+            ReadSupervisorAllowedModelIds(run.DefinitionSnapshotJson!).ShouldBe(new[] { poolRow.ToString() },
+                customMessage: "the operator's pool row binds through the command path into the supervisor's allowedModelIds");
+        }
+        finally
+        {
+            jobClient.AutoExecute = true;
+            Environment.SetEnvironmentVariable(SupervisorLane.EnabledEnvVar, flagBefore);
+        }
+    }
+
+    [Fact]
+    public async Task A_foreign_allowed_model_row_is_rejected_fail_closed_and_never_leaked()
+    {
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+
+        // A model-pool row id that is NOT a team-owned credentialed-model row (here a random id). The launch must
+        // reject it with a generic not-found — indistinguishable from a foreign team's row, so existence never leaks —
+        // BEFORE any run is created. The dispatch-time pool guard fails closed too; this is the clean launch-time floor.
+        var request = new TaskLaunchRequest
+        {
+            TeamId = teamId, ActorUserId = userId, SurfaceKind = TaskLaunchSurfaceKinds.Chat,
+            TaskText = "Pin a foreign model", RequestedEffort = TaskEffortModes.Deep,
+            AllowedModelIds = new[] { Guid.NewGuid() },
+        };
+
+        var ex = await Should.ThrowAsync<KeyNotFoundException>(() => LaunchAsync(request));
+
+        ex.Message.ShouldContain("not found or not accessible", customMessage: "a foreign model row surfaces as a generic not-found");
+
+        (await CountRunsForTeamAsync(teamId)).ShouldBe(0, "the launch must reject BEFORE starting any run");
+    }
+
+    [Fact]
     public async Task A_cross_team_repo_is_rejected_fail_closed_and_never_leaked()
     {
         var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
@@ -734,6 +797,27 @@ public class TaskLaunchFlowTests
         using var scope = _fixture.BeginScope();
         return await scope.Resolve<CodeSpaceDbContext>().ModelCredentialModel.AsNoTracking()
             .AnyAsync(m => m.Id == rowId && m.Enabled && m.Credential.TeamId == teamId && m.Credential.Status == CredentialStatus.Active && m.Credential.DeletedDate == null);
+    }
+
+    /// <summary>One real enabled credentialed-model row the team owns — a valid AllowedModelIds entry the launch must accept.</summary>
+    private async Task<Guid> FirstTeamPoolRowAsync(Guid teamId)
+    {
+        using var scope = _fixture.BeginScope();
+        return await scope.Resolve<CodeSpaceDbContext>().ModelCredentialModel.AsNoTracking()
+            .Where(m => m.Enabled && m.Credential.TeamId == teamId && m.Credential.Status == CredentialStatus.Active && m.Credential.DeletedDate == null)
+            .Select(m => m.Id)
+            .FirstAsync();
+    }
+
+    /// <summary>Reads the supervisor node's <c>allowedModelIds</c> array out of the frozen snapshot, in authored order. Empty when the key is absent.</summary>
+    private static IReadOnlyList<string> ReadSupervisorAllowedModelIds(string definitionSnapshotJson)
+    {
+        var root = JsonDocument.Parse(definitionSnapshotJson).RootElement;
+        var sup = root.GetProperty("nodes").EnumerateArray().Single(n => n.GetProperty("id").GetString() == "sup");
+
+        if (!sup.GetProperty("config").TryGetProperty("allowedModelIds", out var arr) || arr.ValueKind != JsonValueKind.Array) return [];
+
+        return arr.EnumerateArray().Select(e => e.GetString()!).ToList();
     }
 
     /// <summary>Reads the projected agent.code node's <c>relatedRepositories</c> input (id + alias + access per entry) out of the frozen snapshot, in authored order. Empty when the key is absent.</summary>
