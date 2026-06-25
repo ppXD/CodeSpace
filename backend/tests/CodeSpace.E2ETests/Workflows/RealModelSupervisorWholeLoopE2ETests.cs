@@ -236,15 +236,17 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
         // subtasks edit the SAME file, so their real diffs CONFLICT, and the brain must OBSERVE the conflicted integration
         // in its own SupervisorOutcome context and CHOOSE `resolve` (which the irreversible-HITL floor then gates to an
         // approval card — proving the brain reached the recovery decision; the approval→reconcile→accept tail is proven
-        // deterministically by SupervisorWholeLoopE2ETests). INFORMATIONAL (gating:false): a live model may decompose the
-        // task without a real conflict, or choose stop/retry — the note records exactly what it did, and this lane never
-        // reds main (the blessed intelligence kill-gate is the golden decision-eval).
+        // deterministically by SupervisorWholeLoopE2ETests). GATING best-of-N: the live model must drive spawn→real-git-
+        // conflict→a SAFE reaction (resolve, or the prompt-sanctioned stop/escalate), or the blessed wire REDs after a
+        // bounded capability-floor (a FRESH run per attempt; reds only if EVERY non-infra attempt parks short, ~p^N). A
+        // CodeFault reds at once; a gateway outage is non-gating LOUD infra; a no-secret config skips NOT-EVALUATED
+        // (skip ≠ pass). The note records the trajectory (incl. whether it chose resolve) so a miss is legible.
         var baseUrl = Env(RealModelSupervisorDecisionFlowTests.BaseUrlEnvVar);
         var apiKey = Env(RealModelSupervisorDecisionFlowTests.ApiKeyEnvVar);
         var model = Env(RealModelSupervisorDecisionFlowTests.ModelIdEnvVar);
 
         var present = new[] { baseUrl, apiKey, model }.Count(v => v is not null);
-        if (present == 0) return;
+        if (present == 0) { RealModelGate.ReportSkipped(Provider, "CODESPACE_LLM_* absent (fork/local — no live model)"); return; }   // skip ≠ pass — a gating arm must surface NOT-EVALUATED, never self-skip green
         present.ShouldBe(3, "CODESPACE_LLM_* is partially configured — set all three or none; a partial config would self-skip this lane green proving nothing.");
 
         if (OperatingSystem.IsWindows()) return;
@@ -271,10 +273,16 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
                           + "and if the integration conflicts, resolve it into one reconciled version before finishing.";
 
         var workflowId = await CreateWholeLoopWorkflowAsync(teamId, userId, repoId, brainModelId, goal, conversationId);
-        var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
 
-        await RealModelGate.AssessLiveAsync(Provider, async () =>
+        // GATING best-of-N (N is the job's CODESPACE_REALMODEL_WHOLE_LOOP_ATTEMPTS, uniform with the headline/solve arms):
+        // each attempt is a FRESH run (re-seeded inside) so the gate reds only if EVERY non-infra attempt fails to drive
+        // spawn→real-git-conflict→a safe reaction. The criterion accepts ANY prompt-sanctioned handling (resolve, stop-for-
+        // human, or escalate — see EvaluateConflictResolveAsync), so it reds on genuine mishandling, never a sanctioned verb.
+        await RealModelGate.AssessLiveWholeLoopAsync(Provider, async () =>
         {
+            jobClient.Clear();
+            var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);   // a FRESH run per best-of-N attempt
+
             await RunEngineAsync(runId);
             await jobClient.WaitForPendingAsync();
 
@@ -291,15 +299,18 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
         // FAILS (LiveBrainFailingFakeCli: exit 1, no patch) — the only way to deterministically present a real failure to
         // a live model, since a retry's revised instruction is brain-authored (no CLI-visible attempt marker to key a
         // "fail-first" CLI on). The brain must OBSERVE the failed subtask in its SupervisorOutcome context and author
-        // `retry` (the recovery action), NEVER merging over the failure. INFORMATIONAL (gating:false): a live model may
-        // escalate via stop/ask_human instead of retry — both safe; the note records what it did, and this lane never
-        // reds main.
+        // an ACTIVE recovery, NEVER merging over the failure. GATING best-of-N: the goal + the decider's standing rail both
+        // instruct a retry-on-failure, so the live model must take an active recovery (`retry`, or an `ask_human` escalate),
+        // or the blessed wire REDs after a bounded capability-floor (a FRESH run per attempt). A CodeFault reds at once; a
+        // gateway outage is non-gating LOUD infra; a no-secret config skips NOT-EVALUATED. The perpetual-failure scenario
+        // force-STOPs cleanly at the decision budget ("budget exhausted"), never a run Failure, so a model that recovered
+        // reads Drove from the ledger and is never mis-gated as a CodeFault.
         var baseUrl = Env(RealModelSupervisorDecisionFlowTests.BaseUrlEnvVar);
         var apiKey = Env(RealModelSupervisorDecisionFlowTests.ApiKeyEnvVar);
         var model = Env(RealModelSupervisorDecisionFlowTests.ModelIdEnvVar);
 
         var present = new[] { baseUrl, apiKey, model }.Count(v => v is not null);
-        if (present == 0) return;
+        if (present == 0) { RealModelGate.ReportSkipped(Provider, "CODESPACE_LLM_* absent (fork/local — no live model)"); return; }   // skip ≠ pass — a gating arm must surface NOT-EVALUATED, never self-skip green
         present.ShouldBe(3, "CODESPACE_LLM_* is partially configured — set all three or none; a partial config would self-skip this lane green proving nothing.");
 
         if (OperatingSystem.IsWindows()) return;
@@ -323,10 +334,15 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
                           + "If a subtask's agent reports it could not complete the work, retry that subtask before finishing.";
 
         var workflowId = await CreateWholeLoopWorkflowAsync(teamId, userId, repoId, brainModelId, goal);
-        var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
 
-        await RealModelGate.AssessLiveAsync(Provider, async () =>
+        // GATING best-of-N (N from the job env, uniform with the other strict arms): a FRESH run per attempt; reds only if
+        // EVERY non-infra attempt fails to take an ACTIVE recovery (retry — the instructed action — or escalate) on the
+        // real failure. A perpetual-failure run force-stops cleanly at the decision budget, never a run Failure.
+        await RealModelGate.AssessLiveWholeLoopAsync(Provider, async () =>
         {
+            jobClient.Clear();
+            var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);   // a FRESH run per best-of-N attempt
+
             await RunEngineAsync(runId);
             await jobClient.WaitForPendingAsync();
 
@@ -432,7 +448,7 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
         catch { return false; }
     }
 
-    /// <summary>The live brain reacted to the real failure iff it FANNED OUT (spawn), at least one agent really FAILED, and the brain then chose the recovery action `retry`. Classified three-way; reports each signal (and whether it instead escalated via stop) so a non-retrying trajectory is legible, not a bare red.</summary>
+    /// <summary>The live brain handled the real failure APPROPRIATELY iff it FANNED OUT (spawn), at least one agent really FAILED, and the brain then took an ACTIVE recovery — `retry` (the action the goal + the decider's standing rail both instruct) or an `ask_human` escalation — never silently giving up or merging over the failure. (A bare stop without retrying or escalating ignored the explicit retry instruction → a miss.) Classified three-way; the note reports each signal so a non-recovering trajectory is legible, not a bare red.</summary>
     private async Task<(RealModelOutcome Outcome, string Note)> EvaluateFailureRetryAsync(Guid runId, Guid teamId)
     {
         using var verify = _fixture.BeginScope();
@@ -447,15 +463,17 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
         var spawned = kinds.Contains(SupervisorDecisionKinds.Spawn);
         var someAgentFailed = await db.AgentRun.AsNoTracking().AnyAsync(r => r.WorkflowRunId == runId && r.Status == AgentRunStatus.Failed);
         var retried = kinds.Contains(SupervisorDecisionKinds.Retry);
+        var escalated = kinds.Contains(SupervisorDecisionKinds.AskHuman);   // escalate-to-human is a co-equal active recovery (not a passive give-up)
+        var recovered = retried || escalated;
 
         var run = await db.WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == runId);
         var trail = string.Join("→", kinds);
 
-        var drove = spawned && someAgentFailed && retried;
-        return (Classify(run.Status, drove), $"status={run.Status}, spawned={spawned}, agent-failed={someAgentFailed}, retried={retried}, trajectory={trail}");
+        var drove = spawned && someAgentFailed && recovered;
+        return (Classify(run.Status, drove), $"status={run.Status}, spawned={spawned}, agent-failed={someAgentFailed}, retried={retried}, escalated={escalated}, trajectory={trail}");
     }
 
-    /// <summary>The live brain reacted to the real conflict iff it FANNED OUT (spawn), the real-git merge genuinely CONFLICTED, and the brain then CHOSE resolve (executed, or gated to the resolve-approval ask_human floor). Classified three-way; reports each signal so a non-resolving trajectory is legible, not a bare red.</summary>
+    /// <summary>The live brain handled the real conflict APPROPRIATELY iff it FANNED OUT (spawn), the real-git merge genuinely CONFLICTED, and the brain then took ANY prompt-sanctioned reaction — `resolve` (executed, or gated to the resolve-approval ask_human floor), a terminal `stop` to leave it for a human, or an `ask_human` escalation. Gating on `resolve` ALONE would RED main when the model picks the stop the decider prompt offers co-equally (the resolve MECHANISM is already gated deterministically by SupervisorWholeLoopE2ETests); the sound live-model claim is "engages a real conflict without merging over it". Classified three-way; the note reports which reaction it took so a stop-vs-resolve trajectory is legible.</summary>
     private async Task<(RealModelOutcome Outcome, string Note)> EvaluateConflictResolveAsync(Guid runId, Guid teamId)
     {
         using var verify = _fixture.BeginScope();
@@ -472,17 +490,26 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
         var spawned = decisions.Any(d => d.DecisionKind == SupervisorDecisionKinds.Spawn);
         var conflicted = decisions.Any(d => d.DecisionKind == SupervisorDecisionKinds.Merge && SupervisorOutcome.ReadIntegration(d.OutcomeJson) is { IsConflicted: true });
         // The brain chose resolve: either it executed (a Resolve row) or — the common path — the irreversible-HITL floor
-        // rewrote it into an ask_human approval card carrying the resolve-approval marker.
+        // rewrote it into an ask_human approval card carrying the resolve-approval marker. (Reported in the note even
+        // though the gate does not require it specifically — see handledConflict.)
         var resolveChosen = decisions.Any(d => d.DecisionKind == SupervisorDecisionKinds.Resolve)
             || decisions.Any(d => d.DecisionKind == SupervisorDecisionKinds.AskHuman
                                   && d.PayloadJson.Contains(SupervisorApprovalRequest.ApprovalMarker, StringComparison.Ordinal)
                                   && d.PayloadJson.Contains("resolve", StringComparison.OrdinalIgnoreCase));
 
+        // The decider's conflict prompt offers `resolve` AND a co-equal "stop to leave the conflict for a human" (and an
+        // ask_human escalation). So the brain handled the conflict appropriately iff it took ANY of those safe reactions —
+        // the ONLY miss is failing to produce a real conflict, or silently merging over one. Gating on resolve alone
+        // would red main on the sanctioned stop, so accept resolve | stop | ask_human.
+        var handledConflict = resolveChosen
+            || decisions.Any(d => d.DecisionKind == SupervisorDecisionKinds.Stop)
+            || decisions.Any(d => d.DecisionKind == SupervisorDecisionKinds.AskHuman);
+
         var run = await db.WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == runId);
         var trail = string.Join("→", decisions.Select(d => d.DecisionKind));
 
-        var drove = spawned && conflicted && resolveChosen;
-        return (Classify(run.Status, drove), $"status={run.Status}, spawned={spawned}, merge-conflicted={conflicted}, resolve-chosen={resolveChosen}, trajectory={trail}");
+        var drove = spawned && conflicted && handledConflict;
+        return (Classify(run.Status, drove), $"status={run.Status}, spawned={spawned}, merge-conflicted={conflicted}, resolve-chosen={resolveChosen}, handled={handledConflict}, trajectory={trail}");
     }
 
     /// <summary>Seed a team channel the supervisor's irreversible-resolve approval card parks on (so a live brain that chooses resolve parks cleanly rather than erroring on a missing surface).</summary>
