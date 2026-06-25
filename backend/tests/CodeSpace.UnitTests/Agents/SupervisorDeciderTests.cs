@@ -480,6 +480,24 @@ public class SupervisorDeciderTests
         SupervisorDecisionProjector.Project(model).PayloadJson.ShouldBe(SupervisorDecisionProjector.Project(model).PayloadJson, "same model decision → byte-identical canonical payload (the idempotency-key stability the ledger relies on)");
     }
 
+    [Fact]
+    public async Task DecideAsync_renders_the_capability_catalog_into_the_structured_request_user_prompt()
+    {
+        // End-to-end through DecideAsync (not just the static helper): a populated pool + a registered harness must
+        // flow through BuildCapabilityCatalogAsync → the LLM request's user prompt, so the live brain is informed.
+        var client = new FakeStructuredClient(new SupervisorModelDecision { Kind = SupervisorDecisionKinds.Plan });
+        var decider = new LlmSupervisorDecider(
+            new FakeRegistry(client),
+            FakeSelector.WithModelAndPool("claude-sonnet-4-5", new PoolModelInfo("metis-coder-max", "Anthropic")),
+            new FakeHarnesses(new CatalogHarness("claude-code", "Anthropic", "Custom")));
+
+        await decider.DecideAsync(Context(), CancellationToken.None);
+
+        client.LastUserPrompt.ShouldNotBeNull();
+        client.LastUserPrompt!.ShouldContain("metis-coder-max — Anthropic", Case.Sensitive, "the run's pool reaches the live decide prompt");
+        client.LastUserPrompt.ShouldContain("claude-code — drives: Anthropic, Custom", Case.Sensitive, "the harness↔provider map reaches the live decide prompt");
+    }
+
     private static SupervisorDecision Project(string kind, Func<SupervisorModelDecision, SupervisorModelDecision> fill) =>
         SupervisorDecisionProjector.Project(fill(new SupervisorModelDecision { Kind = kind }));
 
@@ -502,6 +520,7 @@ public class SupervisorDeciderTests
     {
         private readonly SupervisorModelDecision _model;
         public string? LastModel;
+        public string? LastUserPrompt;
 
         public FakeStructuredClient(SupervisorModelDecision model) => _model = model;
 
@@ -513,6 +532,7 @@ public class SupervisorDeciderTests
         public Task<StructuredLLMCompletion> CompleteStructuredAsync(StructuredLLMCompletionRequest request, CancellationToken cancellationToken)
         {
             LastModel = request.Model;
+            LastUserPrompt = request.UserPrompt;
             return Task.FromResult(new StructuredLLMCompletion { Json = JsonSerializer.SerializeToElement(_model, SupervisorDecisionSchema.Options), Model = request.Model });
         }
     }
@@ -550,10 +570,14 @@ public class SupervisorDeciderTests
     private sealed class FakeSelector : IModelPoolSelector
     {
         private readonly ModelPoolPick? _pick;
-        private FakeSelector(ModelPoolPick? pick) => _pick = pick;
+        private readonly IReadOnlyList<PoolModelInfo> _pool;
+        private FakeSelector(ModelPoolPick? pick, IReadOnlyList<PoolModelInfo>? pool = null) { _pick = pick; _pool = pool ?? Array.Empty<PoolModelInfo>(); }
 
         public static FakeSelector WithModel(string modelId = "claude-sonnet-4-5") =>
             new(new ModelPoolPick { ModelId = modelId, Credential = new ResolvedModelCredential { Provider = "TestSupervisor", ApiKey = "sk-test" } });
+
+        public static FakeSelector WithModelAndPool(string modelId, params PoolModelInfo[] pool) =>
+            new(new ModelPoolPick { ModelId = modelId, Credential = new ResolvedModelCredential { Provider = "TestSupervisor", ApiKey = "sk-test" } }, pool);
 
         public static FakeSelector Empty() => new(null);
 
@@ -562,12 +586,26 @@ public class SupervisorDeciderTests
         public Task<ModelPoolPick?> ResolveByRowIdAsync(Guid teamId, Guid modelCredentialModelId, CancellationToken cancellationToken) => Task.FromResult(_pick);
 
         public Task<ModelDispatchRef?> ResolveDispatchAsync(Guid teamId, string modelName, IReadOnlyList<Guid>? allowedRowIds, CancellationToken cancellationToken) => Task.FromResult<ModelDispatchRef?>(null);
-        public Task<IReadOnlyList<PoolModelInfo>> ListPoolAsync(Guid teamId, IReadOnlyList<Guid>? allowedRowIds, CancellationToken cancellationToken) => Task.FromResult<IReadOnlyList<PoolModelInfo>>(Array.Empty<PoolModelInfo>());
+        public Task<IReadOnlyList<PoolModelInfo>> ListPoolAsync(Guid teamId, IReadOnlyList<Guid>? allowedRowIds, CancellationToken cancellationToken) => Task.FromResult(_pool);
     }
 
     private sealed class FakeHarnesses : CodeSpace.Core.Services.Agents.IAgentHarnessRegistry
     {
-        public IReadOnlyList<CodeSpace.Core.Services.Agents.IAgentHarness> All { get; } = Array.Empty<CodeSpace.Core.Services.Agents.IAgentHarness>();
+        public FakeHarnesses(params CodeSpace.Core.Services.Agents.IAgentHarness[] harnesses) => All = harnesses;
+        public IReadOnlyList<CodeSpace.Core.Services.Agents.IAgentHarness> All { get; }
         public CodeSpace.Core.Services.Agents.IAgentHarness Resolve(string kind) => throw new NotSupportedException();
+    }
+
+    private sealed class CatalogHarness : CodeSpace.Core.Services.Agents.IAgentHarness, CodeSpace.Core.Services.Agents.IModelCredentialProjector
+    {
+        public CatalogHarness(string kind, params string[] providers) { Kind = kind; SupportedProviders = providers; }
+        public string Kind { get; }
+        public string Version => "test";
+        public IReadOnlyList<string> Models => Array.Empty<string>();
+        public IReadOnlyList<string> SupportedProviders { get; }
+        public SandboxSpec BuildInvocation(AgentTask task) => throw new NotSupportedException();
+        public IReadOnlyList<AgentEvent> ParseEvents(string rawLine) => throw new NotSupportedException();
+        public AgentRunResult BuildResult(IReadOnlyList<AgentEvent> events, int exitCode) => throw new NotSupportedException();
+        public IReadOnlyDictionary<string, string> ProjectToEnv(ResolvedModelCredential credential) => throw new NotSupportedException();
     }
 }

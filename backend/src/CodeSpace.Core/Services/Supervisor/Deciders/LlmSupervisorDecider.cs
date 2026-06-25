@@ -105,6 +105,12 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
     /// Render the capability catalog the brain authors against (P1): every registered harness + the model providers it
     /// can drive, and the run's credentialed pool models + each model's provider — so the model picks a provider-compatible
     /// (harness, model) pair on purpose. Internal + static so the rendering is unit-pinned without an LLM/DB.
+    ///
+    /// <para>KNOWN LIMITATION (reviewed): a model NAME is unique only PER credential, so the same name can list under two
+    /// different-provider rows (both shipped harnesses support "Custom"). The brain authors a name only (no provider
+    /// disambiguator yet — a P2 schema add), and <c>ResolveDispatchAsync</c> tie-breaks by row id, so the dispatched
+    /// provider may differ from the catalog line the brain reasoned about. Non-fatal: the authoring-time clamp +
+    /// run-time reconciler bind a compatible harness regardless. Surfacing the provider per name is the P2 follow-up.</para>
     /// </summary>
     internal static string RenderCatalog(IReadOnlyList<IAgentHarness> harnesses, IReadOnlyList<PoolModelInfo> pool)
     {

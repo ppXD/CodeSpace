@@ -108,7 +108,7 @@ public sealed class ModelPoolSelector : IModelPoolSelector, IScopedDependency
         return await query
             .Select(m => new PoolModelInfo(m.ModelId, m.Credential.Provider))
             .Distinct()
-            .OrderBy(m => m.ModelId)
+            .OrderBy(m => m.ModelId).ThenBy(m => m.Provider)   // total order — a model name can exist under two providers (both harnesses list Custom); keep the catalog render stable across runs
             .ToListAsync(cancellationToken)
             .ConfigureAwait(false);
     }
