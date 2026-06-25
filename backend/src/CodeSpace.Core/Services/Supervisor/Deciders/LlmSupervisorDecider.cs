@@ -249,6 +249,11 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
         "need different specialisations (e.g. a backend implementer and a separate reviewer); omit 'agents[]' to fan out " +
         "homogeneous agents (the default). The server CLAMPS every per-agent field to the operator's grant: a repo subset " +
         "must lie within the run's bound repos and autonomy is never raised above the run's ceiling. " +
+        "When you 'stop', you MAY optionally author an objective 'acceptance' definition-of-done — an argv 'command' the " +
+        "server RUNS against the integrated result to verify the goal is met (it is AND-ed with the operator's own " +
+        "acceptance floor, never replaces it) — but author it ONLY when the goal itself names a concrete runnable check " +
+        "(e.g. it explicitly says to verify with a specific test/command); otherwise OMIT 'acceptance' and rely on the " +
+        "operator's floor. Never author a command you are not confident the integrated result passes. " +
         "Before planning, check whether the goal has ALREADY been delivered: if the context shows THIS EXACT ask was " +
         "already completed and verified by prior work (the SAME change shipped/merged with passing tests — not merely " +
         "related work), do NOT re-plan or redo it — 'stop' to recognise completion, or 'ask_human' to clarify what new " +

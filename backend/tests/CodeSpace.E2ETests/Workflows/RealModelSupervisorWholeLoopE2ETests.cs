@@ -732,6 +732,79 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
         }, gating: false);
     }
 
+    [Fact]
+    public async Task The_real_model_authors_an_objective_stop_acceptance_definition_of_done_when_the_goal_names_a_check()
+    {
+        // L4 model-authored DEFINITION OF DONE — does a live model author its OWN objective stop 'acceptance' command (a
+        // server-run check verifying the goal, AND-ed with the operator floor) when the goal names a concrete check? The
+        // schema + terminal-stop grader already accept it (gated deterministically); this OBSERVES whether the real brain
+        // uses the option now the prompt surfaces it. The goal NAMES the exact check (`sh check.sh` — the operator floor),
+        // so a model that authors it produces a PASSING acceptance (no self-inflicted regression). REPORT-ONLY: a model may
+        // decline to author a DoD, so an omitted acceptance is a ⚠️, never a red. Read from the STOP decision payload.
+        var baseUrl = Env(RealModelSupervisorDecisionFlowTests.BaseUrlEnvVar);
+        var apiKey = Env(RealModelSupervisorDecisionFlowTests.ApiKeyEnvVar);
+        var model = Env(RealModelSupervisorDecisionFlowTests.ModelIdEnvVar);
+
+        var present = new[] { baseUrl, apiKey, model }.Count(v => v is not null);
+        if (present == 0) { RealModelGate.ReportSkipped(Provider, "CODESPACE_LLM_* absent (fork/local — no live model)"); return; }   // skip ≠ pass
+        present.ShouldBe(3, "CODESPACE_LLM_* is partially configured — set all three or none; a partial config would self-skip the arm proving nothing.");
+
+        if (OperatingSystem.IsWindows()) return;
+        if (!await GitReadyAsync()) return;
+
+        using var cli = new FileWritingFakeCli();
+
+        var jobClient = ResolveJobClient();
+        jobClient.Clear();
+        jobClient.AutoExecute = true;
+
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+
+        using var remote = new BareRemote();
+        await remote.SeedBaseAsync(new() { ["check.sh"] = "#!/bin/sh\nif ls agent_*.txt >/dev/null 2>&1; then exit 0; else exit 1; fi\n", ["base.txt"] = "base\n" });
+        var repoId = await SeedBoundRepositoryAsync(teamId, remote.Url, "main");
+
+        var (brainModelId, _) = await SeedBrainModelAsync(teamId, BaseUrlFor(baseUrl), apiKey, model);
+
+        const string dodGoal =
+            "Add a small change to the service. When you STOP, author an objective acceptance definition-of-done that "
+          + "verifies the result by running this exact check: sh check.sh.";
+
+        var workflowId = await CreateWholeLoopWorkflowAsync(teamId, userId, repoId, brainModelId, goal: dodGoal);
+
+        await RealModelGate.AssessLiveAsync(Provider, async () =>
+        {
+            var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
+
+            await RunEngineAsync(runId);
+            await jobClient.WaitForPendingAsync();
+
+            using var verify = _fixture.BeginScope();
+            var db = verify.Resolve<CodeSpaceDbContext>();
+
+            // The AUTHORITATIVE signal — the model's own stop DECISION: (a) did it AUTHOR a non-empty acceptance command
+            // (payload), AND (b) did the server GRADE that DoD (AND-ed with the operator floor) as PASSED (outcome)? Asserting
+            // both proves the live model authored an objective DoD that actually HELD on the real integrated result — not
+            // merely that it emitted a command.
+            var stops = await db.SupervisorDecisionRecord.AsNoTracking()
+                .Where(d => d.SupervisorRunId == runId && d.TeamId == teamId && d.DecisionKind == SupervisorDecisionKinds.Stop)
+                .OrderByDescending(d => d.Sequence).Select(d => new { d.PayloadJson, d.OutcomeJson }).ToListAsync();
+
+            var authoredStop = stops.FirstOrDefault(s =>
+                System.Text.Json.JsonSerializer.Deserialize<SupervisorStopPayload>(s.PayloadJson, AgentJson.Options)?.Acceptance is { Command.Count: > 0 });
+            var command = authoredStop is null ? null
+                : System.Text.Json.JsonSerializer.Deserialize<SupervisorStopPayload>(authoredStop.PayloadJson, AgentJson.Options)!.Acceptance!.Command;
+            var gradePassed = authoredStop is not null && SupervisorOutcome.ReadAcceptanceGradePassed(authoredStop.OutcomeJson) == true;
+            var authored = command is not null;
+            var drove = authored && gradePassed;
+
+            return (drove,
+                $"{Provider} '{model}' stop DoD: stops={stops.Count}, acceptance-authored={authored}, command=[{(command is null ? "" : string.Join(" ", command))}], graded-passed={gradePassed}. "
+              + (drove ? "DROVE — the live model authored its own objective definition-of-done AND the server graded it PASSED on the real result."
+                       : authored ? "authored a DoD but it did not grade PASSED (reported, not gating)." : "did NOT author a stop acceptance (reported, not gating)."));
+        }, gating: false);
+    }
+
     private static async Task<IReadOnlyList<SupervisorPriorDecision>> ReadPriorDecisionsAsync(CodeSpaceDbContext db, Guid runId, Guid teamId) =>
         await db.SupervisorDecisionRecord.AsNoTracking()
             .Where(d => d.SupervisorRunId == runId && d.TeamId == teamId)
