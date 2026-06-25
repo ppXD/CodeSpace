@@ -1,7 +1,8 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 
-import type { LaunchTaskInput, TaskSurfaceKind } from "@/api/tasks";
+import type { TaskSurfaceKind } from "@/api/tasks";
+import { buildLaunchInput } from "@/lib/launchInput";
 import { Ic } from "@/_imported/ai-code-space/icons";
 import { useAgentDefinitions, useHarnesses } from "@/hooks/use-agents";
 import { useCredentialedModels } from "@/hooks/use-model-credentials";
@@ -169,19 +170,10 @@ export function LaunchTaskModal({ surface, autofill, onClose, onLaunched }: Laun
 
   const submit = () => {
     if (!canLaunch) return;
-    const input: LaunchTaskInput = {
-      taskText: taskText.trim(),
-      surfaceKind: surface,
-      repositoryId: primary?.repositoryId || null,
-      baseBranch: primary?.branch || null,
-      effort,
-      autonomy,
-      model: model || null,
-      harness: harness || null,
-      agentDefinitionId: agentDefinitionId || null,
-      runnerKind: runnerKind || null,
-      modelCredentialId: modelCredentialId || null,
-    };
+    const input = buildLaunchInput({
+      taskText, surface, workspace, effort, autonomy, model, modelCredentialId, harness, agentDefinitionId, runnerKind,
+      maxParallel: cfg.maxParallel, maxRounds: cfg.maxRounds, maxAgents: cfg.maxAgents, budget: cfg.budget,
+    });
     launch.mutate(input, { onSuccess: res => onLaunched?.(res.runId) });
   };
 

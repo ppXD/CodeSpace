@@ -1,0 +1,114 @@
+import type { LaunchTaskInput, TaskSurfaceKind } from "@/api/tasks";
+
+/** One repo in the launch workspace. `isPrimary` marks the repo whose id+branch become the run's
+ *  primary `repositoryId` / `baseBranch`; every other repo becomes a related-repository entry. */
+export interface LaunchWorkspaceRepo {
+  repositoryId: string;
+  branch: string;
+  access: "write" | "read";
+  alias: string;
+  isPrimary: boolean;
+}
+
+/** The slice of Launch-modal state that maps to backend params. Pure data — the modal owns the React
+ *  state; this is the snapshot handed to {@link buildLaunchInput} so the mapping is unit-testable in
+ *  isolation (no DOM). Caps fields are strings because they come from text inputs / a select. */
+export interface LaunchFormState {
+  taskText: string;
+  surface: TaskSurfaceKind;
+  workspace: LaunchWorkspaceRepo[];
+  effort: string;
+  autonomy: string;
+  model: string;
+  modelCredentialId: string;
+  harness: string;
+  agentDefinitionId: string;
+  runnerKind: string;
+  /** Coordination "Limits" — supervisor fan-out bounds. Only meaningful on deep/auto (see effort gate). */
+  maxParallel: string;
+  maxRounds: string;
+  maxAgents: string;
+  /** Coordination "Budget" — `"none"` or a dollar amount string (`"5"`/`"10"`/`"25"`). */
+  budget: string;
+}
+
+const primaryOf = (workspace: LaunchWorkspaceRepo[]) => workspace.find(r => r.isPrimary) ?? workspace[0];
+
+/** Parse a positive-int cap from a text field. Blank / non-numeric / `< 1` ⇒ undefined (omit the cap, so
+ *  the backend keeps the effort preset's default — the launch stays byte-identical to an unset field). */
+const posIntCap = (raw: string): number | undefined => {
+  const n = Number.parseInt(raw, 10);
+  return Number.isFinite(n) && n >= 1 ? n : undefined;
+};
+
+/** True when the launch tier exposes the Coordination caps (Limits / Budget). Those bound a fan-out /
+ *  supervisor loop, so they only apply — and are only VISIBLE in the modal — on deep/auto. Sending them
+ *  on quick/standard would impose a cap the operator never saw (the Coordination tab is hidden there). */
+const tierExposesCaps = (effort: string) => effort === "deep" || effort === "auto";
+
+/**
+ * Map the Launch-modal form state to the wire `LaunchTaskInput`. The single source of truth for what the
+ * modal sends — extracted as a pure function so every field, the multi-repo split, and the caps gating are
+ * exhaustively unit-tested. Optional fields are OMITTED (undefined) when the operator leaves a default, so
+ * an unconfigured launch is byte-identical to the minimal command the backend's projection fills in.
+ */
+export function buildLaunchInput(state: LaunchFormState): LaunchTaskInput {
+  const primary = primaryOf(state.workspace);
+
+  const input: LaunchTaskInput = {
+    taskText: state.taskText.trim(),
+    surfaceKind: state.surface,
+    repositoryId: primary?.repositoryId || null,
+    baseBranch: primary?.branch || null,
+    effort: state.effort,
+    autonomy: state.autonomy,
+    model: state.model || null,
+    harness: state.harness || null,
+    agentDefinitionId: state.agentDefinitionId || null,
+    runnerKind: state.runnerKind || null,
+    modelCredentialId: state.modelCredentialId || null,
+  };
+
+  const relatedRepositories = buildRelatedRepositories(state.workspace, primary);
+  if (relatedRepositories) input.relatedRepositories = relatedRepositories;
+
+  const caps = tierExposesCaps(state.effort) ? buildCaps(state) : undefined;
+  if (caps) input.caps = caps;
+
+  return input;
+}
+
+/** Every workspace repo EXCEPT the primary becomes a related-repository. Blank alias ⇒ omitted (the
+ *  backend derives one). Empty ⇒ undefined so the key is omitted (single-repo launch is unchanged). */
+function buildRelatedRepositories(workspace: LaunchWorkspaceRepo[], primary: LaunchWorkspaceRepo | undefined) {
+  const related = workspace
+    .filter(r => r !== primary && r.repositoryId)
+    .map(r => {
+      const alias = r.alias.trim();
+      return { repositoryId: r.repositoryId, access: r.access, ...(alias ? { alias } : {}) };
+    });
+
+  return related.length ? related : undefined;
+}
+
+/** The Coordination "Limits" + "Budget" as the backend `caps` (TaskCapsOverride). Each cap is included
+ *  only when set to a real value; budget `"none"` ⇒ no cost cap. All-unset ⇒ undefined (omit the key). */
+function buildCaps(state: LaunchFormState) {
+  const caps: NonNullable<LaunchTaskInput["caps"]> = {};
+
+  const maxParallelism = posIntCap(state.maxParallel);
+  if (maxParallelism !== undefined) caps.maxParallelism = maxParallelism;
+
+  const maxRounds = posIntCap(state.maxRounds);
+  if (maxRounds !== undefined) caps.maxRounds = maxRounds;
+
+  const maxTotalSpawns = posIntCap(state.maxAgents);
+  if (maxTotalSpawns !== undefined) caps.maxTotalSpawns = maxTotalSpawns;
+
+  if (state.budget !== "none") {
+    const cost = Number(state.budget);
+    if (Number.isFinite(cost) && cost > 0) caps.maxCostUsd = cost;
+  }
+
+  return Object.keys(caps).length ? caps : undefined;
+}
