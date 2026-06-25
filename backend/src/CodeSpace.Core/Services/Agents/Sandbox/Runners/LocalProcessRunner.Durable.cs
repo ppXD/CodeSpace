@@ -90,38 +90,56 @@ public sealed partial class LocalProcessRunner
         var spoolDir = SpoolDirectoryFor(spoolKey);
         Directory.CreateDirectory(spoolDir);
 
-        // B3.2b: when a deny-by-default egress allowlist is requested AND this runner can enforce it (ip+nft+privilege),
-        // set up a filtered network namespace FIRST and run the whole supervisor chain inside it. Fail-closed: a setup
-        // failure throws, so the run lands a clean Failed rather than launching with unfiltered (or no) egress.
-        var egress = await SetupEgressNetnsAsync(spec, spoolKey, cancellationToken).ConfigureAwait(false);
+        // B4: when a memory/cpu cap is requested AND the operator delegated a cgroup root (on a cgroup-v2 host), create
+        // the per-run cgroup leaf FIRST so the supervisor chain self-adds into it OUTERMOST and the whole subtree is
+        // resource-capped on the host. Fail-closed: a setup failure throws, so the run lands Failed rather than uncapped.
+        var cgroup = await SetupCgroupAsync(spec, spoolKey, cancellationToken).ConfigureAwait(false);
 
         try
         {
-            using var process = new Process { StartInfo = BuildDurableStartInfo(spec, spoolDir, egress.ExecPrefix) };
-            process.Start();
+            // B3.2b: when a deny-by-default egress allowlist is requested AND this runner can enforce it (ip+nft+privilege),
+            // set up a filtered network namespace and run the whole supervisor chain inside it. Fail-closed: a setup
+            // failure throws, so the run lands a clean Failed rather than launching with unfiltered (or no) egress.
+            var egress = await SetupEgressNetnsAsync(spec, spoolKey, cancellationToken).ConfigureAwait(false);
 
-            // The launched process may be `setsid` (Linux); its own id isn't a reliable handle for the supervisor
-            // (setsid execs the shell in place or forks it). Read the pid the supervisor self-reported, then capture
-            // that process's start time as a PID-reuse guard for later probes.
-            var supervisorPid = await ResolveSupervisorPidAsync(spoolDir, process, cancellationToken).ConfigureAwait(false);
-
-            return new SandboxHandle
+            try
             {
-                Kind = LocalKind,
-                ProcessId = supervisorPid,
-                ProcessStartTimeUtc = TryReadStartTimeUtc(supervisorPid),
-                SpoolDirectory = spoolDir,
-                Deadline = DateTimeOffset.UtcNow.AddSeconds(spec.TimeoutSeconds),
-                EgressNetnsKey = egress.Key,
-            };
+                using var process = new Process { StartInfo = BuildDurableStartInfo(spec, spoolDir, egress.ExecPrefix, cgroup.ExecPrefix) };
+                process.Start();
+
+                // The launched process may be `setsid` (Linux); its own id isn't a reliable handle for the supervisor
+                // (setsid execs the shell in place or forks it). Read the pid the supervisor self-reported, then capture
+                // that process's start time as a PID-reuse guard for later probes.
+                var supervisorPid = await ResolveSupervisorPidAsync(spoolDir, process, cancellationToken).ConfigureAwait(false);
+
+                return new SandboxHandle
+                {
+                    Kind = LocalKind,
+                    ProcessId = supervisorPid,
+                    ProcessStartTimeUtc = TryReadStartTimeUtc(supervisorPid),
+                    SpoolDirectory = spoolDir,
+                    Deadline = DateTimeOffset.UtcNow.AddSeconds(spec.TimeoutSeconds),
+                    EgressNetnsKey = egress.Key,
+                    CgroupRunKey = cgroup.Key,
+                };
+            }
+            catch
+            {
+                // The netns was set up but the launch itself failed (e.g. the supervisor never reported its pid) — tear
+                // the namespace down here so a failed launch never leaks one (the handle that would carry the reap key is
+                // never returned).
+                if (egress.Key is { Length: > 0 } orphanKey)
+                    await FilteredEgressNetns.TeardownAsync(orphanKey, CancellationToken.None).ConfigureAwait(false);
+
+                throw;
+            }
         }
         catch
         {
-            // The netns was set up but the launch itself failed (e.g. the supervisor never reported its pid) — tear
-            // the namespace down here so a failed launch never leaks one (the handle that would carry the reap key is
-            // never returned).
-            if (egress.Key is { Length: > 0 } orphanKey)
-                await FilteredEgressNetns.TeardownAsync(orphanKey, CancellationToken.None).ConfigureAwait(false);
+            // The cgroup was created but the launch (or the egress setup) failed — reap it here so a failed launch never
+            // leaks the cgroup (the handle that would carry the reap key is never returned).
+            if (cgroup.Key is { Length: > 0 } orphanCgroup && CgroupResourceLimit.CgroupRoot is { } root)
+                await CgroupResourceLimit.TeardownAsync(root, orphanCgroup, CancellationToken.None).ConfigureAwait(false);
 
             throw;
         }
@@ -149,6 +167,31 @@ public sealed partial class LocalProcessRunner
 
         if (!setup.SetupOk)
             throw new InvalidOperationException($"Filtered-egress netns setup failed (fail-closed — run aborted rather than launched unfiltered): {setup.SetupError}");
+
+        return (setup.ExecPrefix, spoolKey);
+    }
+
+    /// <summary>
+    /// Create this run's cgroup-v2 resource-cap leaf (B4) when a memory/cpu cap is requested AND the operator delegated
+    /// a root (<see cref="CgroupResourceLimit.CgroupRoot"/>) on a cgroup-v2 host — returning the self-add prefix the
+    /// supervisor chain runs OUTERMOST behind (so the whole chain is capped) plus the teardown key. No cap / no
+    /// delegated root / no cgroup-v2 ⇒ empty prefix + null key (byte-identical to a run without a cap). Only the memory
+    /// + cpu ceilings prlimit can't give are applied here; the process cap stays on prlimit's RLIMIT_NPROC, so pids is
+    /// never double-capped. Fail-closed: a setup failure throws (the run lands Failed rather than launching uncapped),
+    /// with the partial cgroup already reaped.
+    /// </summary>
+    private static async Task<(IReadOnlyList<string> ExecPrefix, string? Key)> SetupCgroupAsync(SandboxSpec spec, string spoolKey, CancellationToken ct)
+    {
+        if (CgroupResourceLimit.CgroupRoot is not { } root || !CgroupResourceLimit.IsSupported) return (Array.Empty<string>(), null);
+
+        var plan = CgroupResourcePlan.Build(root, spoolKey, spec.MaxMemoryMb, spec.MaxCpuPercent, maxPids: 0);
+
+        if (plan is null) return (Array.Empty<string>(), null);
+
+        var setup = await CgroupResourceLimit.SetupAsync(plan, ct).ConfigureAwait(false);
+
+        if (!setup.SetupOk)
+            throw new InvalidOperationException($"cgroup resource-cap setup failed (fail-closed — run aborted rather than launched uncapped): {setup.SetupError}");
 
         return (setup.ExecPrefix, spoolKey);
     }
@@ -267,7 +310,7 @@ public sealed partial class LocalProcessRunner
         // timeout path uses, so a recycled pid is never killed and an already-exited run is a quiet no-op.
         KillByIdQuietly(handle.ProcessId, handle.ProcessStartTimeUtc);
 
-        await TearDownEgressNetnsAsync(handle).ConfigureAwait(false);
+        await TearDownIsolationAsync(handle).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -278,10 +321,32 @@ public sealed partial class LocalProcessRunner
     /// at the executor layer, never re-entering these helpers) is backstopped by <see cref="AgentRunSpoolReaper"/>,
     /// which tears the netns down from the persisted handle before clearing it.
     /// </summary>
+    /// <summary>Tear down BOTH per-run isolation resources at a terminal path — the filtered-egress netns (B3.2b) and the cgroup-v2 resource cap (B4). Called from every terminal teardown site so neither is ever missed; each inner call is a no-op when the run had none.</summary>
+    private static async Task TearDownIsolationAsync(SandboxHandle handle)
+    {
+        await TearDownEgressNetnsAsync(handle).ConfigureAwait(false);
+        await TearDownCgroupAsync(handle).ConfigureAwait(false);
+    }
+
     private static async Task TearDownEgressNetnsAsync(SandboxHandle handle)
     {
         if (handle.EgressNetnsKey is { Length: > 0 } key)
             await FilteredEgressNetns.TeardownAsync(key, CancellationToken.None).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Tear down the run's cgroup-v2 resource-cap leaf at reap (B4) — a NO-OP when the run had none
+    /// (<see cref="SandboxHandle.CgroupRunKey"/> null) or the operator root is no longer configured. Best-effort +
+    /// idempotent, the leaf path reconstructed PURELY from the key + the configured root, so it is safe from EVERY
+    /// terminal path (and a DIFFERENT worker after a restart). Backstopped by <see cref="AgentRunSpoolReaper"/> +
+    /// <see cref="AgentRunReconcilerService"/>, which reap it from the persisted handle / the runId. NOTE: the operator
+    /// root must stay STABLE across a run's lifetime — unsetting <c>CODESPACE_AGENT_CGROUP_ROOT</c> mid-run makes every
+    /// teardown no-op and leaks the leaf (an out-of-scope deployment misconfiguration; a leaked empty cgroup is cheap).
+    /// </summary>
+    private static async Task TearDownCgroupAsync(SandboxHandle handle)
+    {
+        if (handle.CgroupRunKey is { Length: > 0 } key && CgroupResourceLimit.CgroupRoot is { } root)
+            await CgroupResourceLimit.TeardownAsync(root, key, CancellationToken.None).ConfigureAwait(false);
     }
 
     public Task<SandboxProbe> ProbeAsync(SandboxHandle handle, CancellationToken cancellationToken)
@@ -298,7 +363,7 @@ public sealed partial class LocalProcessRunner
     /// <summary>Final drain (incl. a trailing partial line) + buffered stderr, mapped to Success/Failed by the exit code.</summary>
     private async Task<SandboxResult> CompleteFromSpoolAsync(SandboxHandle handle, long offset, int exitCode, Func<string, CancellationToken, Task> onLine, CancellationToken ct)
     {
-        await TearDownEgressNetnsAsync(handle).ConfigureAwait(false);
+        await TearDownIsolationAsync(handle).ConfigureAwait(false);
 
         await EmitNewLinesAsync(Path.Combine(handle.SpoolDirectory, StdoutFile), offset, onLine, drainPartial: true, ct).ConfigureAwait(false);
 
@@ -312,7 +377,7 @@ public sealed partial class LocalProcessRunner
     {
         KillByIdQuietly(handle.ProcessId, handle.ProcessStartTimeUtc);
 
-        await TearDownEgressNetnsAsync(handle).ConfigureAwait(false);
+        await TearDownIsolationAsync(handle).ConfigureAwait(false);
 
         await EmitNewLinesAsync(Path.Combine(handle.SpoolDirectory, StdoutFile), offset, onLine, drainPartial: true, ct).ConfigureAwait(false);
 
@@ -326,7 +391,7 @@ public sealed partial class LocalProcessRunner
     {
         KillByIdQuietly(handle.ProcessId, handle.ProcessStartTimeUtc);
 
-        await TearDownEgressNetnsAsync(handle).ConfigureAwait(false);
+        await TearDownIsolationAsync(handle).ConfigureAwait(false);
 
         await EmitNewLinesAsync(Path.Combine(handle.SpoolDirectory, StdoutFile), offset, onLine, drainPartial: true, ct).ConfigureAwait(false);
 
@@ -345,7 +410,7 @@ public sealed partial class LocalProcessRunner
         if (TryReadExitCode(Path.Combine(handle.SpoolDirectory, ExitMarkerFile), out var code))
             return await CompleteFromSpoolAsync(handle, offset, code, onLine, ct).ConfigureAwait(false);
 
-        await TearDownEgressNetnsAsync(handle).ConfigureAwait(false);
+        await TearDownIsolationAsync(handle).ConfigureAwait(false);
 
         await EmitNewLinesAsync(Path.Combine(handle.SpoolDirectory, StdoutFile), offset, onLine, drainPartial: true, ct).ConfigureAwait(false);
 
@@ -364,7 +429,7 @@ public sealed partial class LocalProcessRunner
         return newOffset;
     }
 
-    internal static ProcessStartInfo BuildDurableStartInfo(SandboxSpec spec, string spoolDir, IReadOnlyList<string>? egressExecPrefix = null)
+    internal static ProcessStartInfo BuildDurableStartInfo(SandboxSpec spec, string spoolDir, IReadOnlyList<string>? egressExecPrefix = null, IReadOnlyList<string>? cgroupExecPrefix = null)
     {
         var info = new ProcessStartInfo
         {
@@ -409,7 +474,7 @@ public sealed partial class LocalProcessRunner
         // The actual command "$@": CONFINED under bwrap when this host supports it (fresh namespaces + read-only
         // minimal root + only the workspace/config-home writable), else the bare command (unconfined fallback). A
         // filtered-egress netns prefix (B3.2b), when present, wraps the whole chain outermost.
-        AppendChildCommand(info.ArgumentList, spec, configHome, egressExecPrefix ?? Array.Empty<string>());
+        AppendChildCommand(info.ArgumentList, spec, configHome, egressExecPrefix ?? Array.Empty<string>(), cgroupExecPrefix ?? Array.Empty<string>());
 
         ApplyEnvironment(info, spec);
 
@@ -433,7 +498,7 @@ public sealed partial class LocalProcessRunner
     /// <see cref="BubblewrapSandbox.Available"/>, else the bare command — the unconfined fallback on macOS dev, a
     /// host without <c>bwrap</c>, or one that denies unprivileged user namespaces.
     /// </summary>
-    private static void AppendChildCommand(System.Collections.ObjectModel.Collection<string> argv, SandboxSpec spec, string? configHome, IReadOnlyList<string> egressExecPrefix)
+    private static void AppendChildCommand(System.Collections.ObjectModel.Collection<string> argv, SandboxSpec spec, string? configHome, IReadOnlyList<string> egressExecPrefix, IReadOnlyList<string> cgroupExecPrefix)
     {
         // Fail-closed: a deployment that mandates isolation (CODESPACE_REQUIRE_SANDBOX) must never run unconfined.
         BubblewrapSandbox.EnsureSatisfiable(BubblewrapSandbox.Available, BubblewrapSandbox.IsRequired);
@@ -490,8 +555,13 @@ public sealed partial class LocalProcessRunner
         if (ProcessRlimits.Available is { } prlimit)
             (command, args) = ProcessRlimits.Wrap(prlimit, command, args, ProcessRlimits.EffectiveMaxProcesses(spec.MaxProcesses), ProcessRlimits.EffectiveMaxFileSizeMb(spec.MaxFileSizeMb));
 
-        // 3. Filtered-egress netns (ip netns exec <ns>), OUTERMOST — enters the per-run filtered network namespace
-        //    before prlimit/bwrap/agent, so the entire chain's only egress is the nftables allowlist. Empty (no prefix)
+        // 4. cgroup self-add (sh -c 'echo $$ > procs && exec "$@"'), OUTERMOST — places the WHOLE chain into the per-run
+        //    resource-capped cgroup on the HOST before entering the netns; cgroup membership is inherited across the
+        //    netns/prlimit/bwrap unshares, so the agent + every descendant are capped. Empty ⇒ byte-identical.
+        foreach (var p in cgroupExecPrefix) argv.Add(p);
+
+        // 3. Filtered-egress netns (ip netns exec <ns>) — enters the per-run filtered network namespace before
+        //    prlimit/bwrap/agent, so the entire chain's only egress is the nftables allowlist. Empty (no prefix)
         //    ⇒ byte-identical to a run without an enforceable allowlist.
         foreach (var p in egressExecPrefix) argv.Add(p);
 

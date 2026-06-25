@@ -23,6 +23,19 @@ public static class CgroupResourceLimit
     /// <summary>True on Linux with a cgroup-v2 unified mount (<c>/sys/fs/cgroup/cgroup.controllers</c> present). The actual write/delegation privilege is exercised at setup, which fails CLOSED.</summary>
     public static bool IsSupported => _supported.Value;
 
+    /// <summary>Operator escape-hatch (Rule 8): the DELEGATED cgroup-v2 root the durable launch creates per-run leaves under. UNSET ⇒ no resource cap is applied (byte-identical to a run without one) — the operator opts in by delegating a subtree + setting this. Pinned by a test.</summary>
+    public const string CgroupRootEnvVar = "CODESPACE_AGENT_CGROUP_ROOT";
+
+    /// <summary>The configured delegated cgroup root (<see cref="CgroupRootEnvVar"/>), or null when the operator has not delegated a subtree — in which case the durable launch applies no cgroup cap.</summary>
+    public static string? CgroupRoot
+    {
+        get
+        {
+            var v = Environment.GetEnvironmentVariable(CgroupRootEnvVar);
+            return string.IsNullOrWhiteSpace(v) ? null : v.Trim();
+        }
+    }
+
     /// <summary>The outcome of SETTING UP the cgroup (without running anything in it) — for the durable launch, which runs its detached process behind <see cref="ExecPrefix"/> and tears down separately at reap. On failure the partial cgroup is already cleaned up (fail-closed).</summary>
     public sealed record SetupResult
     {

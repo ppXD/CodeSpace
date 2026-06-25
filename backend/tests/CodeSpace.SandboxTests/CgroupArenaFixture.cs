@@ -1,12 +1,13 @@
 namespace CodeSpace.SandboxTests;
 
 /// <summary>
-/// A xUnit class fixture that bootstraps the cgroup-v2 arena EXACTLY ONCE for the whole
-/// <see cref="CgroupResourceE2ETests"/> class — so the controller-enablement + the (process-moving) leaf-ify run a
-/// single time on the clean current cgroup, and every test reuses the captured <see cref="CgroupTestArena.Root"/>.
-/// Doing it per-test mutated shared cgroupfs state (the leaf-ify moves the test runner's OWN process into a sibling
-/// leaf, so a SECOND test's <c>/proc/self/cgroup</c> resolves to that leaf → a cascade of EBUSY / missing-controllers).
-/// One-time bootstrap is also the correct Rule-12 isolation: the tests don't re-touch the shared hierarchy.
+/// A xUnit COLLECTION fixture that bootstraps the cgroup-v2 arena EXACTLY ONCE for the whole <c>Cgroup</c> collection
+/// (every cgroup E2E class — <see cref="CgroupResourceE2ETests"/> + the durable-launch wiring) — so the
+/// controller-enablement + the (process-moving) leaf-ify run a single time on the clean current cgroup, and every test
+/// reuses the captured <see cref="CgroupTestArena.Root"/>. Doing it per-test (or per-class) mutated shared cgroupfs
+/// state: the leaf-ify moves the test runner's OWN process into a sibling leaf, so a SECOND bootstrap's
+/// <c>/proc/self/cgroup</c> resolves to that leaf → a cascade of EBUSY / missing-controllers. The shared-once fixture +
+/// the serialised collection close that — both within a class and across the cgroup classes (Rule-12 isolation).
 /// </summary>
 public sealed class CgroupArenaFixture : IDisposable
 {

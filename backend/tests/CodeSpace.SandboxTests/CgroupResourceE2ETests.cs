@@ -16,7 +16,8 @@ namespace CodeSpace.SandboxTests;
 /// <para>Class-level <c>[Trait("Category", "Sandbox")]</c> — the same privileged gate as the bwrap + egress tests.</para>
 /// </summary>
 [Trait("Category", "Sandbox")]
-public sealed class CgroupResourceE2ETests : IClassFixture<CgroupArenaFixture>
+[Collection("Cgroup")]
+public sealed class CgroupResourceE2ETests
 {
     private const string AllocMarker = "cs-alloc-ok";
 
