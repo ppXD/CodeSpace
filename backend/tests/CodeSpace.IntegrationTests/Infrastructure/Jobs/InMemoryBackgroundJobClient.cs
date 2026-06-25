@@ -121,7 +121,7 @@ public sealed class InMemoryBackgroundJobClient : ICodeSpaceBackgroundJobClient
 
     public string Enqueue<T>(Expression<Func<T, Task>> methodCall, string queue = HangfireConstants.DefaultQueue)
     {
-        var jobId = Record(typeof(T), methodCall.Body);
+        var jobId = Record(typeof(T), methodCall.Body, queue);
         if (AutoExecute) QueueFuncTTask(methodCall.Compile());
         return jobId;
     }
@@ -185,7 +185,7 @@ public sealed class InMemoryBackgroundJobClient : ICodeSpaceBackgroundJobClient
         lock (_lock) _pending.Enqueue(deferred);
     }
 
-    private string Record(Type serviceType, Expression body)
+    private string Record(Type serviceType, Expression body, string queue = HangfireConstants.DefaultQueue)
     {
         if (ThrowOnEnqueue is { } ex)
         {
@@ -205,6 +205,7 @@ public sealed class InMemoryBackgroundJobClient : ICodeSpaceBackgroundJobClient
                 MethodName = methodName,
                 RunId = runId,
                 EnqueuedAt = DateTimeOffset.UtcNow,
+                Queue = queue,
             });
         }
 
@@ -247,4 +248,6 @@ public sealed record EnqueuedCall
     public required string MethodName { get; init; }
     public required Guid? RunId { get; init; }
     public required DateTimeOffset EnqueuedAt { get; init; }
+    /// <summary>The Hangfire queue the job was routed to — DefaultQueue unless an overload passed one (e.g. agent.code executor jobs → AgentQueue).</summary>
+    public required string Queue { get; init; }
 }

@@ -1,5 +1,6 @@
 using System.Text.Json;
 using Autofac;
+using CodeSpace.Core.Constants;
 using CodeSpace.Core.DependencyInjection;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
@@ -973,7 +974,7 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
 
         foreach (var token in tokens)
             if (Guid.TryParse(token, out var agentRunId))
-                _backgroundJobClient.Enqueue<IAgentRunExecutor>(e => e.ExecuteAsync(agentRunId, CancellationToken.None));
+                _backgroundJobClient.Enqueue<IAgentRunExecutor>(e => e.ExecuteAsync(agentRunId, CancellationToken.None), HangfireConstants.AgentQueue);
     }
 
     /// <summary>

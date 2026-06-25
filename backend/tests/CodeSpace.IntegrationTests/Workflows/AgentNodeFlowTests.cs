@@ -1,5 +1,6 @@
 using System.Text.Json;
 using Autofac;
+using CodeSpace.Core.Constants;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Agents;
@@ -93,6 +94,36 @@ public class AgentNodeFlowTests
             var outputs = JsonDocument.Parse(run.OutputsJson).RootElement;
             outputs.GetProperty("summary").GetString().ShouldBe("Fixed the failing billing tests.");
             outputs.GetProperty("branch").GetString().ShouldBe("agent/fix-billing");
+        }
+        finally
+        {
+            jobClient.AutoExecute = true;
+        }
+    }
+
+    [Fact]
+    public async Task The_long_agent_run_executor_is_enqueued_on_the_dedicated_agent_queue()
+    {
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var workflowId = await CreateWorkflowAsync(teamId, userId, AgentNodeDefinition(withErrorBranch: false));
+        var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
+
+        var jobClient = ResolveJobClient();
+        jobClient.Clear();
+        jobClient.AutoExecute = false;   // record the executor dispatch; don't run the (binary-less) harness
+
+        try
+        {
+            // The agent.code node parks and enqueues its LONG-running executor job. It MUST land on the dedicated
+            // agent queue, not the control-plane "default" queue — that isolation is the whole point of the split:
+            // enough concurrent agent runs would otherwise occupy every worker and starve the reconcilers / expiry.
+            await RunEngineAsync(runId);
+
+            var agentEnqueue = jobClient.Calls.Single(c =>
+                c.ServiceType == typeof(IAgentRunExecutor) && c.MethodName == nameof(IAgentRunExecutor.ExecuteAsync));
+
+            agentEnqueue.Queue.ShouldBe(HangfireConstants.AgentQueue,
+                "the long agent.code executor job rides the dedicated agents queue so it can't starve the control plane");
         }
         finally
         {

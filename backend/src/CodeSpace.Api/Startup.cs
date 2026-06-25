@@ -1,5 +1,6 @@
 using System.Text.Json.Serialization;
 using CodeSpace.Api.Extensions;
+using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Services.Workflows.Llm;
 using CodeSpace.Api.Filters;
 using CodeSpace.Core.Services.Auth;
@@ -7,6 +8,7 @@ using CodeSpace.Core.Services.Credentials;
 using CodeSpace.Core.Services.Identity;
 using CodeSpace.Core.Services.OAuth;
 using CodeSpace.Core.Settings;
+using Microsoft.AspNetCore.Diagnostics.HealthChecks;
 using Microsoft.Extensions.Hosting;
 using Serilog;
 
@@ -43,6 +45,12 @@ public class Startup
         // API/worker pod shares ONE key-ring and decrypts the same credentials (without this, the default per-pod
         // ephemeral key-ring breaks credential decryption across replicas / restarts). See CodeSpaceDataProtection.
         services.AddCodeSpaceDataProtection();
+
+        // k8s probe surface. /health/live (liveness) carries NO checks — it's 200 whenever the process is up and
+        // the pipeline responds, so a transient DB blip doesn't trigger a pod RESTART. /health/ready (readiness)
+        // runs the "ready"-tagged checks — here a DbContext ping — so a pod is pulled from the Service's endpoints
+        // (stops receiving traffic) while its DB is unreachable, without being killed. Mapped anonymous below.
+        services.AddHealthChecks().AddDbContextCheck<CodeSpaceDbContext>("db", tags: new[] { "ready" });
 
         // CORS — needed when the SPA calls the backend directly (VITE_API_URL=http://localhost:5099)
         // instead of going through Vite's /api proxy. The Vite-proxy path is same-origin so CORS
@@ -135,6 +143,11 @@ public class Startup
 
         app.UseEndpoints(endpoints =>
         {
+            // k8s liveness/readiness probes — AllowAnonymous because the global FallbackPolicy requires auth and a
+            // probe is unauthenticated. Live = process up (no checks); Ready = the "ready"-tagged checks (DB ping).
+            endpoints.MapHealthChecks("/health/live", new HealthCheckOptions { Predicate = _ => false }).AllowAnonymous();
+            endpoints.MapHealthChecks("/health/ready", new HealthCheckOptions { Predicate = check => check.Tags.Contains("ready") }).AllowAnonymous();
+
             endpoints.MapControllers();
             if (env.IsDevelopment()) endpoints.MapOpenApi();
         });

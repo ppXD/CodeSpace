@@ -58,13 +58,38 @@ public class CodeSpaceHangfireRegistrar : HangfireRegistrarBase
 
         if (!IsProcessingEnabled()) return;
 
+        // TWO dedicated worker pools so a saturated agent pool can never starve the control plane. A long
+        // agent.code run holds a worker for minutes (a codex/claude child runs); isolating the IAgentRunExecutor
+        // jobs onto their OWN server — not just queue order, which only biases a FREE worker — guarantees the
+        // control-plane jobs (wait/resume, recurring reconcilers/expiry, webhooks) keep their own capacity.
+        //
+        // KNOWN RESIDUAL (tracked separately): the agent.code node PARKS and dispatches its executor here, so its
+        // engine walk is short — but a SYNCHRONOUS long node (agent.run_command, the git open-PR/review nodes, the
+        // supervisor acceptance grader) runs inline ON the engine job, which is on the control pool. So this split
+        // isolates the agent.code EXECUTOR, not every long job; a command-heavy engine walk can still occupy a
+        // control worker for its timeout. Fully closing it needs those nodes dispatched off the control pool too.
+        // Both pools run only on a processing (worker) pod.
+
+        // Control-plane pool — short, low-volume jobs. A small fixed pool is plenty and is never blocked by agents.
+        services.AddHangfireServer(opt =>
+        {
+            opt.WorkerCount = ControlWorkerCount;
+            opt.ServerName = $"codespace-control-{Environment.MachineName}";
+            opt.Queues = new[] { HangfireConstants.DefaultQueue };
+        });
+
+        // Agent pool — the long IAgentRunExecutor jobs. (WorkerCount preserves the prior agent concurrency; tune
+        // it down for a child-process-heavy pod in a follow-up rather than changing throughput here.)
         services.AddHangfireServer(opt =>
         {
             opt.WorkerCount = Environment.ProcessorCount * 2;
-            opt.ServerName = $"codespace-{Environment.MachineName}";
-            opt.Queues = new[] { HangfireConstants.DefaultQueue };
+            opt.ServerName = $"codespace-agents-{Environment.MachineName}";
+            opt.Queues = new[] { HangfireConstants.AgentQueue };
         });
     }
+
+    /// <summary>Dedicated control-plane workers — a deliberate small FLOOR (control jobs are short + low-volume + self-drain at the 2s poll interval, so they need little). Raise it if control-plane latency is ever observed under a recovery burst (many simultaneous resumes / reconciler re-dispatches / decision-expiry).</summary>
+    private const int ControlWorkerCount = 4;
 
     public override void ApplyHangfire(IApplicationBuilder app, IConfiguration configuration)
     {
