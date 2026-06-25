@@ -89,11 +89,6 @@ function TeamRunsPage() {
   };
   const openRun = (runId: string) => navigate({ to: "/teams/$teamSlug/runs/$runId", params: { teamSlug, runId } });
 
-  // Hold the board until the summary's FIRST load too, so the cards never flash a false all-zero "All clear" / "Idle"
-  // before the true counts arrive (a changed scope keeps the prior numbers via keepPreviousData, so this only gates
-  // the very first paint; a summary error degrades to zeros rather than hanging).
-  const cockpitLoading = runs.isLoading || (summary.isLoading && !summary.data);
-
   const errorBanner = runs.error instanceof ApiError ? (
     <div className="cn-banner cn-banner-err">
       <div className="cn-banner-h">Couldn't load runs</div>
@@ -111,11 +106,11 @@ function TeamRunsPage() {
       </div>
 
       <div className="ct-body">
-        {cockpitLoading && <div className="ct-empty"><div className="ct-empty-h">Loading…</div></div>}
+        {runs.isLoading && <div className="ct-empty"><div className="ct-empty-h">Loading…</div></div>}
 
         {/* Whenever there are runs OR a scope is set, render the cockpit WITH the bar — even on an errored refetch,
             so the user can always clear/adjust the filter rather than being stranded on a bare error banner. */}
-        {!cockpitLoading && (runList.length > 0 || hasScope) && (
+        {!runs.isLoading && (runList.length > 0 || hasScope) && (
           <div className="cockpit">
             <RunFilterBar filter={scope} onChange={changeScope} />
 
@@ -146,7 +141,7 @@ function TeamRunsPage() {
         )}
 
         {/* Genuinely empty (no runs, no scope): the error banner if the load failed, otherwise the first-run nudge. */}
-        {!cockpitLoading && runList.length === 0 && !hasScope && (
+        {!runs.isLoading && runList.length === 0 && !hasScope && (
           runs.error instanceof ApiError ? (
             <div style={{ margin: 16 }}>{errorBanner}</div>
           ) : (
