@@ -30,4 +30,7 @@ public sealed record TaskExecutionOverrides
 
     /// <summary>A picked credentialed model (a <c>ModelCredentialModel</c> row) — sets BOTH the model and its backing credential from one choice, taking precedence over <see cref="Model"/> / <see cref="ModelCredentialId"/>. Null → those loose fields.</summary>
     public Guid? ModelCredentialModelId { get; init; }
+
+    /// <summary>The agent run's wall-clock cap, in seconds. Null → the projection's bounded default (1h). 0 → NO wall-clock (unbounded — bounded only by the stall watchdog + cost cap). A positive value caps the run.</summary>
+    public int? TimeoutSeconds { get; init; }
 }

@@ -34,6 +34,8 @@ export interface LaunchFormState {
   agentModels: string[];
   /** Coordination "Autonomy ceiling" — a tier name, or `""` (Inherit the preset). Tighten-only on the backend. */
   autonomyCeiling: string;
+  /** "Time limit" — the per-agent wall-clock as a seconds string: `"3600"` (1h, the default), `"0"` (No limit / unbounded), etc. Applies to ALL tiers (a per-agent execution setting, unlike the deep/auto-gated Coordination caps). */
+  timeLimit: string;
 }
 
 const primaryOf = (workspace: LaunchWorkspaceRepo[]) => workspace.find(r => r.isPrimary) ?? workspace[0];
@@ -75,6 +77,12 @@ export function buildLaunchInput(state: LaunchFormState): LaunchTaskInput {
 
   const relatedRepositories = buildRelatedRepositories(state.workspace, primary);
   if (relatedRepositories) input.relatedRepositories = relatedRepositories;
+
+  // The per-agent wall-clock — sent on ALL tiers (a per-agent setting, unlike the deep/auto-gated caps). The default
+  // "3600" (1h) is OMITTED so an untouched launch stays byte-identical to the backend default; "0" = No limit
+  // (unbounded — the backend maps 0 → no wall-clock) is sent explicitly, as is any other non-default value.
+  const timeLimit = Number.parseInt(state.timeLimit, 10);
+  if (Number.isFinite(timeLimit) && timeLimit >= 0 && timeLimit !== 3600) input.timeoutSeconds = timeLimit;
 
   const caps = tierExposesCaps(state.effort) ? buildCaps(state) : undefined;
   if (caps) input.caps = caps;

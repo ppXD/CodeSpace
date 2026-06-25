@@ -25,7 +25,27 @@ const form = (over: Partial<LaunchFormState> = {}): LaunchFormState => ({
   budget: "none",
   agentModels: [],
   autonomyCeiling: "",
+  timeLimit: "3600",
   ...over,
+});
+
+describe("buildLaunchInput — time limit (per-agent wall-clock)", () => {
+  it("omits timeoutSeconds at the 1h default (byte-identical to the backend default)", () => {
+    expect(buildLaunchInput(form())).not.toHaveProperty("timeoutSeconds");
+  });
+
+  it("sends 0 for No limit (unbounded)", () => {
+    expect(buildLaunchInput(form({ timeLimit: "0" })).timeoutSeconds).toBe(0);
+  });
+
+  it("sends a non-default cap", () => {
+    expect(buildLaunchInput(form({ timeLimit: "7200" })).timeoutSeconds).toBe(7200);
+  });
+
+  it("applies on ALL tiers — a per-agent setting, unlike the deep/auto-gated caps", () => {
+    expect(buildLaunchInput(form({ effort: "quick", timeLimit: "1800" })).timeoutSeconds).toBe(1800);
+    expect(buildLaunchInput(form({ effort: "standard", timeLimit: "0" })).timeoutSeconds).toBe(0);
+  });
 });
 
 describe("buildLaunchInput — base fields", () => {

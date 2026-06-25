@@ -63,6 +63,9 @@ public sealed record LaunchTaskCommand : ICommand<LaunchTaskResult>, IRequireTea
     /// <summary>The <c>ModelCredential</c> reference the agent authenticates with. Null → the persona default → the team/operator fallback.</summary>
     public Guid? ModelCredentialId { get; init; }
 
+    /// <summary>The agent run's wall-clock cap, in seconds. Null → the projection's bounded default (1h). 0 → NO wall-clock (unbounded — bounded only by the stall watchdog + cost cap). A positive value caps the run.</summary>
+    public int? TimeoutSeconds { get; init; }
+
     /// <summary>The operator's optional safety-budget caps (cost / parallelism / spawns / rounds). Null / empty ⇒ the effort preset's caps stand (byte-identical to no override). A set cap TIGHTENS the preset.</summary>
     public TaskCapsOverride? Caps { get; init; }
 

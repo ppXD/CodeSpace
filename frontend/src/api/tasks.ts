@@ -45,6 +45,8 @@ export interface LaunchTaskInput {
   agentDefinitionId?: string | null;
   runnerKind?: string | null;
   modelCredentialId?: string | null;
+  /** The agent run's wall-clock cap, in seconds. Omitted ⇒ the backend's bounded 1h default. 0 ⇒ NO wall-clock (unbounded — bounded only by the stall watchdog + cost cap). */
+  timeoutSeconds?: number | null;
   relatedRepositories?: LaunchRelatedRepository[];
   caps?: LaunchCaps;
   /** The allowed model pool for a Deep run's dispatched agents — credentialed-model ROW ids (not names). Binds

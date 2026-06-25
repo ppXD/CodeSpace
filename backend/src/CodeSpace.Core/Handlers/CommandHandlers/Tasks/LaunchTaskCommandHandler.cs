@@ -68,6 +68,7 @@ public sealed class LaunchTaskCommandHandler : IRequestHandler<LaunchTaskCommand
         AgentDefinitionId = request.AgentDefinitionId,
         RunnerKind = request.RunnerKind,
         ModelCredentialId = request.ModelCredentialId,
+        TimeoutSeconds = request.TimeoutSeconds,
     };
 
     /// <summary>Carries the opaque <c>LaunchContext.Raw</c> through under its surface-kind key for the resolved seed provider to read — the handler never interprets it. Absent context ⇒ an empty payload.</summary>

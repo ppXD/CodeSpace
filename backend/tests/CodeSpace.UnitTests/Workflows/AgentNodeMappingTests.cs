@@ -46,6 +46,26 @@ public class AgentNodeMappingTests
         config.GetProperty("mode").GetString().ShouldBe(mode, "a present mode is emitted as the agent.code config key the node reads");
     }
 
+    // ── timeoutSeconds: the operator's per-agent wall-clock mapped onto the agent.code config key the node reads. ──
+
+    [Fact]
+    public void BuildAgentConfig_omits_timeoutSeconds_when_the_profile_sets_none()
+    {
+        var config = AgentNodeMapping.BuildAgentConfig("g", new ResolvedAgentProfile { Harness = "codex-cli" });
+
+        config.TryGetProperty("timeoutSeconds", out _).ShouldBeFalse("an absent timeout omits the key — the node applies its bounded 1h default (byte-identical)");
+    }
+
+    [Theory]
+    [InlineData(7200)]   // a positive value caps the run
+    [InlineData(0)]      // an explicit 0 is emitted verbatim — AgentCodeNode maps it to NO wall-clock (the operator's "No limit")
+    public void BuildAgentConfig_emits_the_profile_timeoutSeconds_verbatim(int timeout)
+    {
+        var config = AgentNodeMapping.BuildAgentConfig("g", new ResolvedAgentProfile { Harness = "codex-cli", TimeoutSeconds = timeout });
+
+        config.GetProperty("timeoutSeconds").GetInt32().ShouldBe(timeout, "the per-agent wall-clock is emitted verbatim (incl. 0 = infinite) onto the agent.code config key the node reads");
+    }
+
     // ── BuildAgentInputs: the Rule-16 single home that threads BaseRefs onto baseRef + relatedRepositories[].ref,
     //    shared by single-agent AND plan-map-synth — pinned directly here (both consumers go through this method). ──
 
