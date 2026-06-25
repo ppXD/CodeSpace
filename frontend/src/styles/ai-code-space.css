@@ -2634,33 +2634,36 @@ textarea:-webkit-autofill {
 /* ── Runs cockpit — the run control center: status cards + the work board (attention / live / recent) ── */
 .acs-root .cockpit { display: flex; flex-direction: column; gap: 22px; padding: 16px; }
 
-/* Runs filter bar — the entity/scope lens above the status cards. A row of single-select pills; warm theme, restrained. */
+/* Runs filter bar — the entity/scope lens above the status cards. A row of multi-select count-pills; warm theme, restrained. */
 .acs-root .run-filterbar { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
 .acs-root .run-filterbar-icon { display: inline-flex; align-items: center; color: var(--muted-2); margin-right: 2px; }
 .acs-root .filterpill-root { position: relative; }
 .acs-root .filterpill { display: inline-flex; align-items: center; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); color: var(--ink-2); transition: border-color .14s ease, background .14s ease, color .14s ease; }
-.acs-root .filterpill:hover { border-color: var(--accent-soft); color: var(--ink); }
-.acs-root .filterpill[data-armed] { border-color: var(--accent); background: var(--panel-2); color: var(--ink); }
-.acs-root .filterpill[data-armed] .filterpill-label { color: var(--muted); }
-.acs-root .filterpill-main { appearance: none; cursor: pointer; display: inline-flex; align-items: center; gap: 6px; height: 30px; padding: 0 10px; border: 0; border-radius: 8px; background: transparent; color: inherit; font-size: 12.5px; font-weight: 500; }
-.acs-root .filterpill[data-armed] .filterpill-main { padding-right: 4px; }
-.acs-root .filterpill-value { font-weight: 600; color: var(--ink); max-width: 150px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.acs-root .filterpill:hover { border-color: var(--accent-soft); color: var(--ink); background: var(--panel-2); }
+.acs-root .filterpill[data-armed] { border-color: var(--accent-soft); background: #FDF6F2; color: var(--ink); }
+.acs-root .filterpill[data-armed] .filterpill-label { color: var(--ink-2); }
+.acs-root .filterpill-main { appearance: none; cursor: pointer; display: inline-flex; align-items: center; gap: 7px; height: 30px; padding: 0 10px; border: 0; border-radius: 8px; background: transparent; color: inherit; font-size: 12.5px; font-weight: 500; }
 .acs-root .filterpill-caret { display: inline-flex; color: var(--muted-2); }
-.acs-root .filterpill-x { appearance: none; cursor: pointer; display: inline-flex; align-items: center; justify-content: center; width: 18px; height: 18px; margin-right: 6px; border: 0; border-radius: 4px; background: transparent; color: var(--muted); transition: background .12s ease, color .12s ease; }
-.acs-root .filterpill-x:hover { background: var(--danger); color: #fff; }
-.acs-root .filterpill-main:focus-visible, .acs-root .filterpill-x:focus-visible, .acs-root .filterpop-opt:focus-visible, .acs-root .run-filterbar-clear:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
-.acs-root .filterpop { position: absolute; top: calc(100% + 6px); left: 0; z-index: 30; min-width: 200px; max-width: 280px; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; box-shadow: var(--shadow-2); padding: 6px; }
-.acs-root .filterpop-search { width: 100%; height: 30px; box-sizing: border-box; padding: 0 9px; margin-bottom: 6px; border: 1px solid var(--line); border-radius: 7px; background: var(--bg); color: var(--ink); font-size: 12.5px; }
+.acs-root .filterpill-count { display: inline-grid; place-items: center; min-width: 17px; height: 17px; padding: 0 5px; border-radius: 5px; background: #9E4A2C; color: #fff; font-size: 10.5px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.acs-root .filterpill-main:focus-visible, .acs-root .filterpop-opt:focus-visible, .acs-root .filterpop-head-clear:focus-visible, .acs-root .run-filterbar-clear:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.acs-root .filterpop { position: absolute; top: calc(100% + 6px); left: 0; z-index: 30; width: 248px; max-width: 280px; background: var(--panel); border: 1px solid var(--line-2); border-radius: 11px; box-shadow: var(--shadow-2); overflow: hidden; }
+.acs-root .filterpop-head { display: flex; align-items: baseline; gap: 8px; padding: 10px 12px 9px; border-bottom: 1px solid var(--line); }
+.acs-root .filterpop-head-label { font-size: 12px; font-weight: 600; color: var(--ink); }
+.acs-root .filterpop-head-count { font-size: 10.5px; color: var(--muted); }
+.acs-root .filterpop-head-clear { appearance: none; cursor: pointer; margin-left: auto; border: 0; background: transparent; color: #9E4A2C; font-size: 10.5px; padding: 0; }
+.acs-root .filterpop-head-clear:hover { text-decoration: underline; }
+.acs-root .filterpop-search { width: calc(100% - 22px); height: 30px; box-sizing: border-box; padding: 0 9px; margin: 9px 11px 3px; border: 1px solid var(--line); border-radius: 7px; background: var(--bg); color: var(--ink); font-size: 12px; }
 .acs-root .filterpop-search:focus { outline: none; border-color: var(--accent); }
-.acs-root .filterpop-list { max-height: 260px; overflow-y: auto; display: flex; flex-direction: column; gap: 1px; }
-.acs-root .filterpop-opt { appearance: none; cursor: pointer; display: flex; align-items: center; gap: 8px; width: 100%; text-align: left; padding: 7px 9px; border: 0; border-radius: 7px; background: transparent; color: var(--ink-2); font-size: 12.5px; }
+.acs-root .filterpop-list { max-height: 248px; overflow-y: auto; display: flex; flex-direction: column; padding: 4px 5px 6px; }
+.acs-root .filterpop-opt { appearance: none; cursor: pointer; display: flex; align-items: center; gap: 9px; width: 100%; text-align: left; padding: 7px 8px; border: 0; border-radius: 7px; background: transparent; color: var(--ink-2); font-size: 12.5px; }
 .acs-root .filterpop-opt:hover { background: var(--panel-2); color: var(--ink); }
-.acs-root .filterpop-opt[data-selected] { color: var(--accent); font-weight: 600; }
+.acs-root .filterpop-opt[data-selected] { color: var(--ink); }
+.acs-root .filterpop-box { display: grid; place-items: center; width: 15px; height: 15px; flex: none; border: 1.5px solid var(--line-2); border-radius: 4px; color: #fff; transition: background .1s ease, border-color .1s ease; }
+.acs-root .filterpop-opt[data-selected] .filterpop-box { background: var(--accent); border-color: var(--accent); }
 .acs-root .filterpop-opt-label { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.acs-root .filterpop-opt svg { color: var(--accent); flex-shrink: 0; }
-.acs-root .filterpop-empty { padding: 10px 9px; color: var(--muted); font-size: 12px; text-align: center; }
-.acs-root .run-filterbar-clear { appearance: none; cursor: pointer; height: 30px; padding: 0 8px; border: 0; border-radius: 8px; background: transparent; color: var(--muted); font-size: 12px; font-weight: 500; transition: color .12s ease; }
-.acs-root .run-filterbar-clear:hover { color: var(--danger); }
+.acs-root .filterpop-empty { padding: 12px 9px; color: var(--muted); font-size: 12px; text-align: center; }
+.acs-root .run-filterbar-clear { appearance: none; cursor: pointer; height: 30px; padding: 0 10px; border: 0; border-radius: 8px; background: transparent; color: var(--muted); font-size: 12px; font-weight: 500; display: inline-flex; align-items: center; gap: 5px; transition: color .12s ease, background .12s ease; }
+.acs-root .run-filterbar-clear:hover { color: #9E4A2C; background: var(--panel-2); }
 
 /* The four status cards (each a filter toggle). */
 .acs-root .cockpit-cards { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; }

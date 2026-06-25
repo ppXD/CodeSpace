@@ -11,17 +11,17 @@ export interface FilterOption {
 const SEARCH_THRESHOLD = 6;
 
 /**
- * A generic single-select filter pill — the building block of the runs filter bar. Closed, it's a compact pill showing
- * the dimension name (e.g. "Repository"), or, when armed, the chosen option with an inline clear (✕). Open, it's a
- * searchable option list. Single-select by design: the backend takes a list per dimension, but the v1 bar keeps each
- * to one value (so picking one closes the popover); multi-select is a later, additive change. `null` value = no
- * constraint on this dimension. The control is self-contained — it closes on outside-click / Escape, no portal.
+ * A generic MULTI-select filter pill — the building block of the runs filter bar. Closed, it's a compact pill showing
+ * the dimension name (e.g. "Repository") and, when armed, a coral COUNT of how many values are picked (so the bar stays
+ * lean however many you choose). Open, it's a searchable CHECKBOX list: ticking a row toggles that value and KEEPS the
+ * popover open, so you build a set in one pass; the header carries the count + a per-facet Clear. Values within a
+ * dimension are OR'd on the wire. `[]` = no constraint. Self-contained — closes on outside-click / Escape, no portal.
  */
-export function FilterSelect({ label, options, value, onChange, loading }: {
+export function FilterSelect({ label, options, values, onChange, loading }: {
   label: string;
   options: FilterOption[];
-  value: string | null;
-  onChange: (next: string | null) => void;
+  values: string[];
+  onChange: (next: string[]) => void;
   loading?: boolean;
 }) {
   const [open, setOpen] = useState(false);
@@ -39,20 +39,18 @@ export function FilterSelect({ label, options, value, onChange, loading }: {
     return () => { document.removeEventListener("mousedown", onDown); document.removeEventListener("keydown", onKey); };
   }, [open]);
 
-  const selected = useMemo(() => options.find((o) => o.value === value) ?? null, [options, value]);
+  const chosen = useMemo(() => new Set(values), [values]);
 
   const matches = useMemo(() => {
     const q = query.trim().toLowerCase();
     return q === "" ? options : options.filter((o) => o.label.toLowerCase().includes(q));
   }, [options, query]);
 
-  const choose = (next: string | null) => { onChange(next); setOpen(false); setQuery(""); };
+  const toggle = (v: string) => onChange(chosen.has(v) ? values.filter((x) => x !== v) : [...values, v]);
 
   return (
     <div className="filterpill-root" ref={rootRef}>
-      {/* The trigger and the clear (✕) are SEPARATE sibling buttons — never a button nested in a button (invalid
-          HTML + a keyboard-dead control). The container div carries the pill chrome (border / armed tint). */}
-      <div className="filterpill" data-armed={selected ? true : undefined}>
+      <div className="filterpill" data-armed={values.length > 0 ? true : undefined}>
         <button
           type="button"
           className="filterpill-main"
@@ -61,19 +59,20 @@ export function FilterSelect({ label, options, value, onChange, loading }: {
           onClick={() => setOpen((o) => !o)}
         >
           <span className="filterpill-label">{label}</span>
-          {selected && <span className="filterpill-value">{selected.label}</span>}
-          {!selected && <span className="filterpill-caret" aria-hidden="true"><Ic.ChevronDown size={11} /></span>}
+          {values.length > 0
+            ? <span className="filterpill-count">{values.length}</span>
+            : <span className="filterpill-caret" aria-hidden="true"><Ic.ChevronDown size={11} /></span>}
         </button>
-
-        {selected && (
-          <button type="button" className="filterpill-x" aria-label={`Clear ${label}`} onClick={() => choose(null)}>
-            <Ic.X size={9} />
-          </button>
-        )}
       </div>
 
       {open && (
         <div className="filterpop">
+          <div className="filterpop-head">
+            <span className="filterpop-head-label">{label}</span>
+            {values.length > 0 && <span className="filterpop-head-count">{values.length} selected</span>}
+            {values.length > 0 && <button type="button" className="filterpop-head-clear" onClick={() => onChange([])}>Clear</button>}
+          </div>
+
           {options.length > SEARCH_THRESHOLD && (
             <input
               className="filterpop-search"
@@ -85,26 +84,29 @@ export function FilterSelect({ label, options, value, onChange, loading }: {
             />
           )}
 
-          <div className="filterpop-list" role="listbox" aria-label={label}>
+          <div className="filterpop-list" role="listbox" aria-label={label} aria-multiselectable="true">
             {loading ? (
               <div className="filterpop-empty">Loading…</div>
             ) : matches.length === 0 ? (
               <div className="filterpop-empty">{query ? "No match." : "Nothing to show."}</div>
             ) : (
-              matches.map((o) => (
-                <button
-                  key={o.value}
-                  type="button"
-                  role="option"
-                  aria-selected={o.value === value}
-                  className="filterpop-opt"
-                  data-selected={o.value === value || undefined}
-                  onClick={() => choose(o.value)}
-                >
-                  <span className="filterpop-opt-label">{o.label}</span>
-                  {o.value === value && <Ic.Check size={12} aria-hidden="true" />}
-                </button>
-              ))
+              matches.map((o) => {
+                const on = chosen.has(o.value);
+                return (
+                  <button
+                    key={o.value}
+                    type="button"
+                    role="option"
+                    aria-selected={on}
+                    className="filterpop-opt"
+                    data-selected={on || undefined}
+                    onClick={() => toggle(o.value)}
+                  >
+                    <span className="filterpop-box" aria-hidden="true">{on && <Ic.Check size={11} />}</span>
+                    <span className="filterpop-opt-label">{o.label}</span>
+                  </button>
+                );
+              })
             )}
           </div>
         </div>
