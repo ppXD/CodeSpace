@@ -2,6 +2,7 @@ using Autofac;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Agents;
+using CodeSpace.Core.Services.Agents.ModelCredentials;
 using CodeSpace.Core.Services.Agents.Sandbox;
 using CodeSpace.Core.Services.Agents.Workspace;
 using CodeSpace.Core.Services.Credentials;
@@ -49,7 +50,7 @@ public class AgentRunReconcileRepairFlowTests
             var registry = new AgentHarnessRegistry(new IAgentHarness[] { harnessA, harnessB });
             var db = scope.Resolve<CodeSpaceDbContext>();
             var executor = new AgentRunExecutor(
-                scope.Resolve<IAgentRunService>(), registry, new HarnessModelReconciler(registry, db),
+                scope.Resolve<IAgentRunService>(), registry, new HarnessModelReconciler(registry, scope.Resolve<IModelPoolSelector>(), db),
                 scope.Resolve<ISandboxRunnerRegistry>(), scope.Resolve<IAgentWorkspaceResolver>(),
                 scope.Resolve<IModelCredentialResolver>(), scope.Resolve<IWorkspaceProviderRegistry>(),
                 scope.Resolve<IAgentRunCompletionNotifier>(), scope.Resolve<IServiceScopeFactory>(), db,

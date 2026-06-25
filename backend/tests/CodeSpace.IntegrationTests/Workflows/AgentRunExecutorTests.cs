@@ -3,6 +3,7 @@ using Autofac;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Agents;
+using CodeSpace.Core.Services.Agents.ModelCredentials;
 using CodeSpace.Core.Services.Agents.Sandbox;
 using CodeSpace.Core.Services.Agents.Sandbox.Runners;
 using CodeSpace.Core.Services.Agents.Workspace;
@@ -969,7 +970,7 @@ public class AgentRunExecutorTests
         var executor = new AgentRunExecutor(
             scope.Resolve<IAgentRunService>(),
             new AgentHarnessRegistry(new[] { harness }),
-            new HarnessModelReconciler(new AgentHarnessRegistry(new[] { harness }), scope.Resolve<CodeSpaceDbContext>()),
+            new HarnessModelReconciler(new AgentHarnessRegistry(new[] { harness }), scope.Resolve<IModelPoolSelector>(), scope.Resolve<CodeSpaceDbContext>()),
             scope.Resolve<ISandboxRunnerRegistry>(),
             new FixedWorkspaceResolver(),
             scope.Resolve<IModelCredentialResolver>(),
@@ -1099,7 +1100,7 @@ public class AgentRunExecutorTests
         var executor = new AgentRunExecutor(
             scope.Resolve<IAgentRunService>(),
             new AgentHarnessRegistry(new[] { harness }),
-            new HarnessModelReconciler(new AgentHarnessRegistry(new[] { harness }), scope.Resolve<CodeSpaceDbContext>()),
+            new HarnessModelReconciler(new AgentHarnessRegistry(new[] { harness }), scope.Resolve<IModelPoolSelector>(), scope.Resolve<CodeSpaceDbContext>()),
             scope.Resolve<ISandboxRunnerRegistry>(),
             scope.Resolve<IAgentWorkspaceResolver>(),
             scope.Resolve<IModelCredentialResolver>(),
@@ -1126,7 +1127,7 @@ public class AgentRunExecutorTests
         var executor = new AgentRunExecutor(
             instrumented,
             new AgentHarnessRegistry(new[] { harness }),
-            new HarnessModelReconciler(new AgentHarnessRegistry(new[] { harness }), scope.Resolve<CodeSpaceDbContext>()),
+            new HarnessModelReconciler(new AgentHarnessRegistry(new[] { harness }), scope.Resolve<IModelPoolSelector>(), scope.Resolve<CodeSpaceDbContext>()),
             scope.Resolve<ISandboxRunnerRegistry>(),
             scope.Resolve<IAgentWorkspaceResolver>(),
             scope.Resolve<IModelCredentialResolver>(),

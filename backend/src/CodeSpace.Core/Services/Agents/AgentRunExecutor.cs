@@ -157,9 +157,10 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
             var task = JsonSerializer.Deserialize<AgentTask>(run.TaskJson, AgentJson.Options)
                        ?? throw new InvalidOperationException($"AgentRun {agentRunId} has an empty task envelope.");
 
-            // Reconcile the authored harness with the pinned model credential's provider — if the pairing is
-            // impossible (e.g. an Anthropic-provider pool model under a codex-cli default), repair to a harness that
-            // CAN drive it so the agent still runs, instead of failing every agent at credential resolution.
+            // Reconcile the authored harness with the model's provider (from the pinned credential, or — for the
+            // planner's loose model name — the pool row backing it) — if the pairing is impossible (e.g. an
+            // Anthropic-provider model under a codex-cli default), repair to a harness that CAN drive it so the agent
+            // still runs, instead of failing every agent at credential resolution.
             var reconciliation = await _harnessReconciler.ReconcileAsync(task, run.TeamId, cancellationToken).ConfigureAwait(false);
             var harness = _harnesses.Resolve(reconciliation.HarnessKind);
 

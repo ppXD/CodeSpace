@@ -1,5 +1,6 @@
 using CodeSpace.Core.DependencyInjection;
 using CodeSpace.Core.Persistence.Db;
+using CodeSpace.Core.Services.Agents.ModelCredentials;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Enums;
 using Microsoft.EntityFrameworkCore;
@@ -15,24 +16,24 @@ namespace CodeSpace.Core.Services.Agents;
 /// that CAN, so the agent still runs. It NEVER fails on a mismatch; it falls back. The brain stays free to author
 /// any (harness, model); this layer makes a wrong pairing harmless instead of fatal.
 ///
-/// <para>Only a PINNED credential can mismatch the harness: the no-pin path resolves a team-default credential FROM
-/// the harness's own providers, so it is compatible by construction. So the reconciler only acts when
-/// <see cref="AgentTask.ModelCredentialId"/> is set. It reads only the credential's PROVIDER (no decrypt). When no
-/// registered harness can drive the provider at all (a genuinely-unrunnable model — nothing to fall back to), it
-/// leaves the authored harness so the credential resolver surfaces its precise, already-tested error — the honest
-/// floor, not a silent wrong run.</para>
+/// <para>It needs the model's PROVIDER, and finds it from whichever the task carries: a PINNED credential
+/// (<see cref="AgentTask.ModelCredentialId"/> — the supervisor / hand-authored pin path) reads that credential's
+/// provider; else a loose MODEL NAME (<see cref="AgentTask.Model"/> with no pin — the planner path) resolves the
+/// provider of the pool row that backs that name. Either way it reads only the PROVIDER (no decrypt). When the task
+/// carries neither, or the named model isn't in the pool, or no registered harness can drive the provider at all (a
+/// genuinely-unrunnable model — nothing to fall back to), it leaves the authored harness so the downstream credential
+/// resolver surfaces its precise, already-tested error — the honest floor, not a silent wrong run.</para>
 ///
-/// <para>SCOPE: this reconciles the harness↔credential-PROVIDER axis only. The model NAME (<see cref="AgentTask.Model"/>)
-/// ↔ credential consistency is the dispatch layer's job — the supervisor's <c>ApplyDispatchModelAsync</c> resolves the
-/// model name AND its credential from the SAME credentialed pool row, so they are consistent by construction and a
-/// harness repair makes the whole (harness, model, credential) triple runnable. A hand-authored task that pins a
-/// credential whose provider doesn't match its <see cref="AgentTask.Model"/> name is an upstream authoring error this
-/// layer deliberately does NOT mask (blanking the model here would drop a VALID operator model choice in the common
-/// consistent case); P1's catalog-informed authoring is what keeps the two in step.</para>
+/// <para>SCOPE: this reconciles the harness↔model-PROVIDER axis. It does NOT touch the model NAME — the planner's loose
+/// name stays verbatim (the no-pin resolver picks a credential from the now-compatible harness's providers), and the
+/// supervisor's <c>ApplyDispatchModelAsync</c> already resolves the model name AND its credential from the SAME pool
+/// row, so a pin repair makes the whole (harness, model, credential) triple runnable. Blanking the model here would
+/// drop a VALID operator choice in the common consistent case, so this layer never does; it only swaps the harness for
+/// one that can drive the model's provider.</para>
 /// </summary>
 public interface IHarnessModelReconciler
 {
-    /// <summary>Resolve the harness KIND to ACTUALLY run for <paramref name="task"/>: the authored one when it can drive the pinned credential's provider, else a registered harness that can (the always-runnable fallback). The caller resolves the kind to an adapter, so the registry stays the single owner of kind→adapter.</summary>
+    /// <summary>Resolve the harness KIND to ACTUALLY run for <paramref name="task"/>: the authored one when it can drive the model's provider (from the pinned credential or, failing a pin, the named model's pool row), else a registered harness that can (the always-runnable fallback). The caller resolves the kind to an adapter, so the registry stays the single owner of kind→adapter.</summary>
     Task<HarnessReconciliation> ReconcileAsync(AgentTask task, Guid teamId, CancellationToken cancellationToken);
 }
 
@@ -42,32 +43,47 @@ public sealed record HarnessReconciliation(string HarnessKind, bool Repaired, st
 public sealed class HarnessModelReconciler : IHarnessModelReconciler, IScopedDependency
 {
     private readonly IAgentHarnessRegistry _harnesses;
+    private readonly IModelPoolSelector _modelSelector;
     private readonly CodeSpaceDbContext _db;
 
-    public HarnessModelReconciler(IAgentHarnessRegistry harnesses, CodeSpaceDbContext db)
+    public HarnessModelReconciler(IAgentHarnessRegistry harnesses, IModelPoolSelector modelSelector, CodeSpaceDbContext db)
     {
         _harnesses = harnesses;
+        _modelSelector = modelSelector;
         _db = db;
     }
 
     public async Task<HarnessReconciliation> ReconcileAsync(AgentTask task, Guid teamId, CancellationToken cancellationToken)
     {
-        // Only a PINNED credential can mismatch the harness. No pin → return the authored kind verbatim (the caller's
-        // registry resolves it; a genuinely-unregistered kind surfaces there, unchanged).
-        if (task.ModelCredentialId is not { } id) return new HarnessReconciliation(task.Harness, false, null);
+        var provider = await ResolveModelProviderAsync(task, teamId, cancellationToken).ConfigureAwait(false);
 
-        // Provider only — no decrypt; mirrors the credential resolver's active-row predicate so we reconcile against
-        // the SAME credential it will resolve. A missing / foreign / inactive id leaves the authored harness so the
-        // resolver throws its precise not-active-for-this-team error rather than us masking it.
-        var provider = await _db.ModelCredential.AsNoTracking()
-            .Where(c => c.Id == id && c.TeamId == teamId && c.DeletedDate == null && c.Status == CredentialStatus.Active)
-            .Select(c => c.Provider)
-            .SingleOrDefaultAsync(cancellationToken)
-            .ConfigureAwait(false);
-
+        // No provider to reconcile against (no pin AND no pooled model name) → return the authored kind verbatim (the
+        // caller's registry resolves it; a genuinely-unregistered kind surfaces there, unchanged).
         if (provider is null) return new HarnessReconciliation(task.Harness, false, null);
 
         return Reconcile(task.Harness, provider, _harnesses.All);
+    }
+
+    /// <summary>
+    /// The model's PROVIDER, from whichever the task carries. A PINNED credential is authoritative — read its provider
+    /// (no decrypt), mirroring the credential resolver's active-row predicate so we reconcile against the SAME row it
+    /// will resolve. Failing a pin, a loose model NAME (the planner path) resolves the provider of the pool row backing
+    /// it. Null = nothing to reconcile against (the resolver then picks a harness-provider default — the honest floor).
+    /// </summary>
+    private async Task<string?> ResolveModelProviderAsync(AgentTask task, Guid teamId, CancellationToken cancellationToken)
+    {
+        if (task.ModelCredentialId is { } id)
+            return await _db.ModelCredential.AsNoTracking()
+                .Where(c => c.Id == id && c.TeamId == teamId && c.DeletedDate == null && c.Status == CredentialStatus.Active)
+                .Select(c => c.Provider)
+                .SingleOrDefaultAsync(cancellationToken)
+                .ConfigureAwait(false);
+
+        if (string.IsNullOrWhiteSpace(task.Model)) return null;
+
+        var dispatch = await _modelSelector.ResolveDispatchAsync(teamId, task.Model, allowedRowIds: null, cancellationToken).ConfigureAwait(false);
+
+        return dispatch?.Provider;
     }
 
     /// <summary>

@@ -59,7 +59,7 @@ public sealed partial class WorkflowPlanProjector
 
         return new WorkflowDefinition
         {
-            Inputs = new[] { SubtasksInput(plan) },
+            Inputs = new[] { SubtasksInput(plan, HarnessKinds()) },
             Nodes = BuildCoordinatedNodes(plan, bodyTypeKey, options),
             Edges = BuildCoordinatedEdges(),
         };
@@ -85,7 +85,10 @@ public sealed partial class WorkflowPlanProjector
         new() { Id = "map", TypeKey = "flow.map", Label = "Run each subtask", ParentId = "loop",
                 Config = MapConfig(options), Inputs = Json("""{ "items": "{{loop.subtasks}}" }""") },
         new() { Id = "map_start", TypeKey = "flow.map_start", ParentId = "map", Config = Empty(), Inputs = Empty() },
-        BodyNode(bodyTypeKey),
+        // Coordinated runs the platform-default harness (perItemAllocation: false): rework rounds re-seed from the
+        // coordinator's reworkSubtasks, which carry no per-item harness, so {{item.harness}} would resolve empty and
+        // trip the agent.code guard. Per-subtask Auto-allocation is the one-shot path's job.
+        BodyNode(bodyTypeKey, perItemAllocation: false),
 
         // The coordinator judges the round + decides. Structured output (CoordinatorSchema) lands on `json`;
         // the loop reads json.decision (termination) + json.reworkSubtasks (next round) off it at pass-end.

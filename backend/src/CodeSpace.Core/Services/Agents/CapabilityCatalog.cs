@@ -20,7 +20,7 @@ public static class CapabilityCatalog
         builder.AppendLine("Capability catalog — when you author a per-agent harness + model, the harness MUST be able to drive the model's provider:");
 
         builder.AppendLine("Harnesses (and the model providers each can drive):");
-        foreach (var harness in harnesses)
+        foreach (var harness in harnesses.OrderBy(h => h.Kind, StringComparer.Ordinal))
         {
             var providers = harness is IModelCredentialProjector projector && projector.SupportedProviders.Count > 0
                 ? string.Join(", ", projector.SupportedProviders)
