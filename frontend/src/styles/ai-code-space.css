@@ -2845,6 +2845,9 @@ textarea:-webkit-autofill {
   position: absolute; top: calc(100% + 6px); left: 0; min-width: 100%; max-width: 384px; z-index: 7;
   border: 1px solid var(--line); border-radius: 9px; background: var(--panel);
   box-shadow: 0 1px 2px rgba(31,30,29,0.05); padding: 7px 8px;
+  /* React Flow sets a non-interactive node to pointer-events:none; re-enable the panel (like .wf-rf-result) so the
+     branch dots receive clicks even though the run canvas disables node select/drag/connect. */
+  pointer-events: auto;
 }
 .acs-root .wf-rf-fanout:has(.wf-rf-fanout-term) { width: 384px; z-index: 24; box-shadow: 0 6px 20px rgba(31,30,29,0.10); }
 .acs-root .wf-rf-fanout-sum { display: flex; align-items: center; flex-wrap: wrap; gap: 3px 9px; font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; }
