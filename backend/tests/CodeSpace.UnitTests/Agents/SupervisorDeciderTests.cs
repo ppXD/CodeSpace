@@ -150,6 +150,23 @@ public class SupervisorDeciderTests
     }
 
     [Fact]
+    public void The_system_prompt_surfaces_the_optional_stop_acceptance_definition_of_done_tightly_scoped()
+    {
+        // L4 model-authored DoD: the model can only author an objective stop 'acceptance' command (its own
+        // definition-of-done, graded by the server AND-ed with the operator floor) if the prompt tells it the option
+        // exists — the schema + the terminal-stop grader already accept it, but the brain was never told. Pinned so the
+        // guidance can't be dropped silently (the real-model DoD arm depends on it), AND so the TIGHT scoping survives:
+        // 'acceptance' is OPTIONAL and authored ONLY when the goal names a concrete runnable check — without that scoping,
+        // a model could author a FAILING command on a generic goal and red the gated headline whole-loop (acceptance feeds
+        // the Drove verdict, unlike the dispatch override).
+        var system = LlmSupervisorDecider.SystemPromptForTest;
+
+        system.ShouldContain("acceptance", Case.Insensitive, "the optional model-authored definition-of-done is named so the model knows it can author a stop acceptance command");
+        system.ShouldContain("definition-of-done", Case.Insensitive, "...framed as the goal's objective definition of done");
+        system.ShouldContain("ONLY when the goal", Case.Insensitive, "...TIGHTLY scoped — authored only when the goal names a concrete runnable check, so a generic goal omits it and the gated headline arc can't regress on a model-authored failing command");
+    }
+
+    [Fact]
     public void The_system_prompt_guides_recognising_an_already_completed_ask_without_re_planning_redundant_work()
     {
         // Redundant-complete handoff: a session-continue whose follow-up re-requests work the prior context already
