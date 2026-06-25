@@ -48,9 +48,17 @@ FROM mcr.microsoft.com/dotnet/aspnet:10.0 AS runtime
 WORKDIR /app
 
 # Agent-execution + isolation deps (worker-only; absent from the lean public API image):
-#   git → clone bound repos · bubblewrap → fs/namespace confinement · util-linux → prlimit resource caps.
+#   git          → clone bound repos (over HTTPS with an x-access-token; no SSH/openssh needed)
+#   git-lfs      → an LFS-backed repo would otherwise clone as POINTER files, leaving the agent on stub content;
+#                  `git lfs install --system` registers the smudge filter so every clone fetches the real blobs
+#   ca-certificates → managed CA bundle for the outbound TLS the worker makes (git remotes, model gateways, the
+#                  CLIs' provider APIs); also lets an operator drop in a private CA via update-ca-certificates
+#   bubblewrap   → per-run filesystem + namespace confinement (BubblewrapSandbox)
+#   util-linux   → prlimit, for the RLIMIT_NPROC / RLIMIT_FSIZE resource caps (ProcessRlimits)
+# (Deliberately NOT installed: openssh-client — clone is HTTPS not SSH; GPG — commits pass -c commit.gpgsign=false.)
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends git bubblewrap util-linux \
+    && apt-get install -y --no-install-recommends git git-lfs ca-certificates bubblewrap util-linux \
+    && git lfs install --system \
     && rm -rf /var/lib/apt/lists/*
 
 # The Node runtime + the globally-installed harness CLI packages from the agent-cli stage. node_modules carries
