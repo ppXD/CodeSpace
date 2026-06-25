@@ -182,6 +182,14 @@ public sealed class GlobalExceptionFilter : IExceptionFilter
                 context.Result = BuildProblemResult(StatusCodes.Status422UnprocessableEntity, "rerun_upstream_not_reusable", context.Exception.Message);
                 break;
 
+            case ArgumentException argument:
+                // A caller-supplied value failed validation (e.g. an out-of-range launch cap, or related repos
+                // passed without a primary). A bad REQUEST, not a server fault — surface 400 with the real reason
+                // instead of letting it fall to the masked 500 default arm. Covers ArgumentNull/OutOfRange too.
+                _logger.LogWarning(context.Exception, "Invalid argument at {Path}", path);
+                context.Result = BuildProblemResult(StatusCodes.Status400BadRequest, "invalid_request", argument.Message);
+                break;
+
             case InvalidOperationException invalid:
                 _logger.LogWarning(context.Exception, "Invalid operation at {Path}", path);
                 context.Result = BuildProblemResult(StatusCodes.Status400BadRequest, "invalid_request", invalid.Message);
