@@ -2348,6 +2348,22 @@ textarea:-webkit-autofill {
 /* Each column's frame fills its column and scrolls inside it. */
 .acs-root .run-room-rail > .rail-card { height: 100%; box-sizing: border-box; overflow-y: auto; }
 .acs-root .run-panel { border: 1px solid var(--line); border-radius: 12px; padding: 12px; height: 100%; box-sizing: border-box; overflow-y: auto; }
+
+/* Entering a run: each section EASES in as its own query resolves, so the staggered loads read as one smooth reveal
+   instead of a flicker of pop-ins. The loading placeholders fade in with a DELAY, so a fast load never shows them at
+   all (empty → content) — only a genuinely slow fetch surfaces "Loading…". Re-mount-driven, so polls don't re-animate. */
+@keyframes runFadeIn { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: translateY(0); } }
+.acs-root .wf-detail-body,
+.acs-root .run-state,
+.acs-root .run-outline,
+.acs-root .run-room-body .rail-card { animation: runFadeIn .24s ease both; }
+.acs-root .run-panel > .ct-empty,
+.acs-root .run-outline-empty { animation: runFadeIn .2s ease .3s both; }
+@media (prefers-reduced-motion: reduce) {
+  .acs-root .wf-detail-body, .acs-root .run-state, .acs-root .run-outline, .acs-root .run-room-body .rail-card,
+  .acs-root .run-panel > .ct-empty, .acs-root .run-outline-empty { animation: none; }
+}
+
 /* The right column is ONE framed panel; the decision queue + run facts become borderless, divider-separated sections. */
 .acs-root .run-room-context > .rail-card { border: 0; border-radius: 0; }
 .acs-root .run-room-context > * + * { border-top: 1px solid var(--line); }
