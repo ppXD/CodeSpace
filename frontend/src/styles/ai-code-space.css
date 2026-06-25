@@ -2769,6 +2769,14 @@ textarea:-webkit-autofill {
   .acs-root .runs-row-spin { animation: none; }
 }
 
+/* Numbered pager under the History list — ◀ 1 2 … N ▶; the current page is coral-accented. */
+.acs-root .runs-pager { display: flex; align-items: center; justify-content: center; gap: 4px; padding: 12px 0 2px; }
+.acs-root .runs-pager-arrow, .acs-root .runs-pager-num { display: grid; place-items: center; min-width: 28px; height: 28px; padding: 0 7px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); color: var(--ink-2); font-size: 12px; font-variant-numeric: tabular-nums; cursor: pointer; transition: background .12s ease, border-color .12s ease; }
+.acs-root .runs-pager-arrow:hover:not(:disabled), .acs-root .runs-pager-num:hover { background: var(--panel-2); border-color: var(--accent-soft); }
+.acs-root .runs-pager-arrow:disabled { opacity: .4; cursor: default; }
+.acs-root .runs-pager-num[data-current] { background: var(--accent-soft); border-color: var(--accent); color: #9E4A2C; font-weight: 500; }
+.acs-root .runs-pager-gap { min-width: 20px; text-align: center; color: var(--muted-2); font-size: 12px; user-select: none; }
+
 /* ── Live run-level progress chip overlaid on the run canvas (top-left Panel) ───────────────────────── */
 .acs-root .wf-run-progress {
   display: inline-flex; align-items: center; gap: 8px;

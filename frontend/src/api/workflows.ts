@@ -167,10 +167,15 @@ export interface WorkflowRunSummary {
   createdDate: string;
 }
 
-/** One keyset-paginated page of the runs index. `nextCursor` is null on the last page; echo it back as `?cursor=`. */
+/**
+ * One page of the runs index, in either mode. Keyset (the live feed): `nextCursor` is null on the last page; echo it
+ * back as `?cursor=`. Offset (numbered pages, e.g. History): `totalCount` is the total rows matching the filter, so
+ * the client can render "page X of Y" and jump to any page. Exactly one of the two is non-null per response.
+ */
 export interface RunPage {
   items: WorkflowRunSummary[];
   nextCursor: string | null;
+  totalCount: number | null;
 }
 
 /**
@@ -206,10 +211,11 @@ export interface RunListFilterInput {
  * omitted so the URL — and the React Query cache key derived from it — stays canonical (equivalent filters serialize
  * identically). Field order is fixed, so a given filter always produces the same string.
  */
-export function buildRunListParams(filter: RunListFilterInput | undefined, limit: number, cursor?: string): string {
+export function buildRunListParams(filter: RunListFilterInput | undefined, limit: number, cursor?: string, page?: number): string {
   const p = new URLSearchParams();
   p.set("limit", String(limit));
   if (cursor) p.set("cursor", cursor);
+  if (page !== undefined) p.set("page", String(page));   // offset (numbered) mode; the server ignores `cursor` when set
 
   if (filter) {
     const lists: [string, readonly string[] | undefined][] = [
@@ -542,6 +548,10 @@ export const workflowsApi = {
   /** The team's runs index — every top-level run the team owns (any source), newest first; keyset-paginated + filterable. */
   listTeamRuns: (filter?: RunListFilterInput, limit = 50, cursor?: string) =>
     fetchJson<RunPage>(`/api/workflows/runs?${buildRunListParams(filter, limit, cursor)}`),
+
+  /** The same index, OFFSET-paginated for numbered pages (1-based `page`): the response carries `totalCount` for "page X of Y". */
+  listTeamRunsPage: (filter: RunListFilterInput | undefined, page: number, pageSize: number) =>
+    fetchJson<RunPage>(`/api/workflows/runs?${buildRunListParams(filter, pageSize, undefined, page)}`),
 
   getRun: (runId: string) => fetchJson<WorkflowRunDetail>(`/api/workflows/runs/${runId}`),
 

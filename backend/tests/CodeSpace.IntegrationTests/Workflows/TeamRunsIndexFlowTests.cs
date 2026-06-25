@@ -14,12 +14,15 @@ using Shouldly;
 namespace CodeSpace.IntegrationTests.Workflows;
 
 /// <summary>
-/// Pins <see cref="IWorkflowService.ListTeamRunsAsync"/> — the team runs index backing the Runs page:
+/// Pins the team runs index backing the Runs page — both <see cref="IWorkflowService.ListTeamRunsAsync"/> (keyset, the
+/// live cockpit feed) and <see cref="IWorkflowService.ListTeamRunsPageAsync"/> (offset + total count, the numbered
+/// History pager):
 ///   1. Team-scoped: only the asking team's runs (never another team's).
 ///   2. Nested-execution excluded: a flow.subworkflow child (SourceType `workflow.child`) is filtered out.
 ///   3. Forks included: a replay / rerun run carries a ParentRunId (lineage) but IS a top-level run — it stays.
 ///   4. Source-agnostic: a task / snapshot run (null WorkflowId) is included — TeamId is on the run directly.
-///   5. Newest-first, capped at the requested limit.
+///   5. Newest-first, capped at the requested limit; the same filter dimensions narrow both pagination paths.
+///   6. Offset pages carry the filtered TotalCount (a past-the-end page is empty but still reports it).
 /// Real DB (the query is the whole behaviour), so this is the integration tier.
 /// </summary>
 [Collection(PostgresCollection.Name)]
@@ -472,6 +475,66 @@ public class TeamRunsIndexFlowTests
                 customMessage: "the false form is the exact complement — self-advance, resolved-failure + its replay, a live long-runner, and a success all need no human");
     }
 
+    [Fact]
+    public async Task Offset_page_returns_the_requested_slice_newest_first_with_the_total_count()
+    {
+        var (teamA, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+
+        var t = DateTimeOffset.UtcNow;
+        var byNewest = new List<Guid>();   // byNewest[0] = newest (i=0), byNewest[4] = oldest
+        for (var i = 0; i < 5; i++)
+            byNewest.Add(await InsertRunAsync(teamA, null, t.AddMinutes(-i), workflowId: null));
+
+        var page1 = await OffsetPageAsync(teamA, RunListFilter.None, page: 1, pageSize: 2);
+        page1.Items.Select(r => r.Id).ShouldBe(byNewest.Take(2), "page 1 is the 2 newest, newest first");
+        page1.TotalCount.ShouldBe(5, "the total counts every matching row, not just the page's slice");
+        page1.NextCursor.ShouldBeNull("an offset page carries a total, not a keyset cursor");
+
+        var page2 = await OffsetPageAsync(teamA, RunListFilter.None, page: 2, pageSize: 2);
+        page2.Items.Select(r => r.Id).ShouldBe(byNewest.Skip(2).Take(2), "page 2 is the next slice — no overlap with page 1");
+
+        var page3 = await OffsetPageAsync(teamA, RunListFilter.None, page: 3, pageSize: 2);
+        page3.Items.Select(r => r.Id).ShouldBe(byNewest.Skip(4), "the last page is the single remaining row");
+        page3.TotalCount.ShouldBe(5);
+    }
+
+    [Fact]
+    public async Task Offset_page_past_the_end_is_empty_but_still_reports_the_true_total()
+    {
+        var (teamA, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+
+        var t = DateTimeOffset.UtcNow;
+        for (var i = 0; i < 3; i++)
+            await InsertRunAsync(teamA, null, t.AddMinutes(-i), workflowId: null);
+
+        var beyond = await OffsetPageAsync(teamA, RunListFilter.None, page: 9, pageSize: 10);
+
+        beyond.Items.ShouldBeEmpty("a page past the last row has no items");
+        beyond.TotalCount.ShouldBe(3, "but the total still reflects every matching row, so the pager knows the real page count");
+    }
+
+    [Fact]
+    public async Task Offset_page_counts_and_slices_only_filter_matching_rows_the_terminal_history_case()
+    {
+        var (teamA, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+
+        var t = DateTimeOffset.UtcNow;
+        // The History list's real query: terminal runs only, offset-paginated. Interleave live runs that must NOT
+        // count toward the total or appear on a page — they live in the pinned Live zone, not the paged History list.
+        var terminal = new List<Guid>();
+        for (var i = 0; i < 3; i++)
+        {
+            terminal.Add(await InsertRunAsync(teamA, null, t.AddMinutes(-2 * i), workflowId: null, status: WorkflowRunStatus.Success));
+            await InsertRunAsync(teamA, null, t.AddMinutes(-2 * i - 1), workflowId: null, status: WorkflowRunStatus.Running);   // live — excluded
+        }
+
+        var filter = new RunListFilter { Statuses = new[] { WorkflowRunStatus.Success, WorkflowRunStatus.Failure, WorkflowRunStatus.Cancelled } };
+        var page1 = await OffsetPageAsync(teamA, filter, page: 1, pageSize: 2);
+
+        page1.TotalCount.ShouldBe(3, "the count honors the filter — only the 3 terminal runs, never the interleaved live ones");
+        page1.Items.Select(r => r.Id).ShouldBe(terminal.Take(2), "the page is the filtered slice, newest first");
+    }
+
     private async Task<Guid> CreateNamedWorkflowAsync(Guid teamId, Guid userId, string name)
     {
         using var scope = _fixture.BeginScopeAs(userId, teamId, Roles.Admin);
@@ -495,6 +558,12 @@ public class TeamRunsIndexFlowTests
     {
         using var scope = _fixture.BeginScope();
         return await scope.Resolve<IWorkflowService>().ListTeamRunsAsync(teamId, RunListFilter.None, cursor, limit, CancellationToken.None);
+    }
+
+    private async Task<RunPage> OffsetPageAsync(Guid teamId, RunListFilter filter, int page, int pageSize)
+    {
+        using var scope = _fixture.BeginScope();
+        return await scope.Resolve<IWorkflowService>().ListTeamRunsPageAsync(teamId, filter, page, pageSize, CancellationToken.None);
     }
 
     private async Task<IReadOnlyList<WorkflowRunSummary>> FilterAsync(Guid teamId, RunListFilter filter)

@@ -2,14 +2,18 @@ import { useEffect, useState } from "react";
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
 
 import { ApiError } from "@/api/request";
-import type { RunListFilterInput, RunPhasesResponse } from "@/api/workflows";
+import type { RunListFilterInput, RunPhasesResponse, WorkflowRunStatus } from "@/api/workflows";
 import { CockpitBoard } from "@/components/workflows/CockpitBoard";
 import { CockpitCards, type CockpitMetrics } from "@/components/workflows/CockpitCards";
 import { RunFilterBar } from "@/components/workflows/RunFilterBar";
 import { countRuns, summarizeDecisions, summarizeToday, suspendedNeedingReview, type CockpitFilter } from "@/components/workflows/cockpit";
 import { summarizeRunState } from "@/components/workflows/runPhases";
 import { bucketRuns } from "@/components/workflows/runsIndex";
-import { useLiveRunsPhases, usePendingDecisions, useTeamRuns } from "@/hooks/use-workflows";
+import { useLiveRunsPhases, usePendingDecisions, useTeamRuns, useTeamRunsHistory } from "@/hooks/use-workflows";
+
+/** History = terminal runs only; the live + suspended runs live in the pinned zones above, so History never duplicates them. */
+const TERMINAL_STATUSES: WorkflowRunStatus[] = ["Success", "Failure", "Cancelled"];
+const HISTORY_PAGE_SIZE = 20;
 
 /**
  * The Runs cockpit — the team's run control center, not a history table. Four status cards answer "is anything on
@@ -30,6 +34,17 @@ function TeamRunsPage() {
   const decisions = usePendingDecisions();
   const [filter, setFilter] = useState<CockpitFilter>(null);
   const hasScope = Object.values(scope).some((v) => (Array.isArray(v) ? v.length > 0 : v != null));
+
+  // The History zone is its own numbered page of TERMINAL runs, narrowed by the same scope. Only fetched on the default
+  // board — an armed card filter hides History. A scope change snaps back to page 1 (handled in the filter's onChange).
+  const [historyPage, setHistoryPage] = useState(1);
+  const history = useTeamRunsHistory({ ...scope, statuses: TERMINAL_STATUSES }, historyPage, HISTORY_PAGE_SIZE, filter === null);
+  const changeScope = (next: RunListFilterInput) => { setScope(next); setHistoryPage(1); };
+
+  // If the result set shrank under us (e.g. runs aged out) the page can land past the end — with no rows AND no pager
+  // to escape. Snap it back to the last real page once the count is known (render-time guard; React re-renders).
+  const historyPages = Math.max(1, Math.ceil((history.data?.totalCount ?? 0) / HISTORY_PAGE_SIZE));
+  if (history.data && historyPage > historyPages) setHistoryPage(historyPages);
 
   // A slow clock so the relative ages ("oldest 14m", "waiting 2d") and today's window stay fresh without churning.
   const [nowMs, setNowMs] = useState(() => Date.now());
@@ -85,14 +100,22 @@ function TeamRunsPage() {
             so the user can always clear/adjust the filter rather than being stranded on a bare error banner. */}
         {!runs.isLoading && (runList.length > 0 || hasScope) && (
           <div className="cockpit">
-            <RunFilterBar filter={scope} onChange={setScope} />
+            <RunFilterBar filter={scope} onChange={changeScope} />
 
             {errorBanner}
 
             {runList.length > 0 ? (
               <>
                 <CockpitCards metrics={metrics} filter={filter} onFilter={toggleFilter} />
-                <CockpitBoard runs={runList} decisions={decisionList} phasesByRun={phasesByRun} filter={filter} nowMs={nowMs} onOpen={openRun} />
+                <CockpitBoard
+                  runs={runList}
+                  decisions={decisionList}
+                  phasesByRun={phasesByRun}
+                  filter={filter}
+                  history={{ items: history.data?.items ?? [], total: history.data?.totalCount ?? 0, page: historyPage, pageSize: HISTORY_PAGE_SIZE, isLoading: history.isLoading, onPage: setHistoryPage }}
+                  nowMs={nowMs}
+                  onOpen={openRun}
+                />
               </>
             ) : !runs.error ? (
               <div className="ct-empty">
