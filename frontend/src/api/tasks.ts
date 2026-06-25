@@ -51,6 +51,10 @@ export interface LaunchTaskInput {
    *  into `LaunchTaskCommand.AllowedModelIds`; the backend validates each row is team-owned. Empty/absent = all
    *  the team's models. Sent only on deep/auto (the supervisor pool is inert on a single-agent run). */
   allowedModelIds?: string[];
+  /** A tighten-only autonomy ceiling (a tier name) the run's agents may not exceed — binds into
+   *  `LaunchTaskCommand.AutonomyCeiling`, merged onto the effort preset's ceiling (can only lower it). Absent /
+   *  "" = inherit the preset. Sent only on deep/auto (the Coordination tab that sets it). */
+  autonomyCeiling?: string;
 }
 
 /** Mirror of the backend `LaunchTaskResult` — only the fields the UI consumes. `runId` is the

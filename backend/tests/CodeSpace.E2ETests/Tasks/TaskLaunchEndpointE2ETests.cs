@@ -243,6 +243,44 @@ public sealed class TaskLaunchEndpointE2ETests : IClassFixture<TaskLaunchApiFact
     }
 
     [Fact]
+    public async Task Post_tasks_with_an_autonomy_ceiling_clamps_the_projected_agent_autonomy_through_real_http()
+    {
+        var (userId, teamId) = await SeedTeamMembershipAsync();
+
+        // A quick launch's preset ceiling is "Standard", so requesting "Trusted" normally clamps to Standard. The
+        // operator's autonomyCeiling="Confined" (BELOW Standard) must bind through HTTP → LaunchTaskCommand.AutonomyCeiling
+        // → BuildCapsOverride → the router's tighten-only merge → ClampAutonomy, dropping the projected agent to Confined.
+        // Confined is below the preset ceiling, so it can ONLY come from the operator override (an unambiguous proof).
+        var request = new HttpRequestMessage(HttpMethod.Post, "/api/workflows/runs")
+        {
+            Content = JsonContent.Create(new
+            {
+                taskText = "Constrained change",
+                effort = "quick",
+                autonomy = "Trusted",
+                autonomyCeiling = "Confined",
+                surfaceKind = "chat",
+            }),
+        };
+        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", MintToken(userId));
+        request.Headers.Add("X-Team-Id", teamId.ToString());
+
+        var response = await _factory.CreateClient().SendAsync(request);
+
+        response.StatusCode.ShouldBe(HttpStatusCode.OK, customMessage: await DescribeFailureAsync(response));
+
+        var body = await response.Content.ReadFromJsonAsync<LaunchResponse>();
+        body.ShouldNotBeNull();
+
+        using var scope = _factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<CodeSpaceDbContext>();
+        var run = await db.WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == body!.RunId);
+
+        ReadAgentAutonomyLevel(run.DefinitionSnapshotJson!).ShouldBe("Confined",
+            customMessage: "the operator's autonomy ceiling must bind through real HTTP and clamp the projected agent below the preset's Standard ceiling");
+    }
+
+    [Fact]
     public async Task Post_tasks_without_a_team_header_is_rejected_fail_closed()
     {
         var (userId, _) = await SeedTeamMembershipAsync();
@@ -296,6 +334,14 @@ public sealed class TaskLaunchEndpointE2ETests : IClassFixture<TaskLaunchApiFact
         var root = JsonDocument.Parse(definitionSnapshotJson).RootElement;
         var agent = root.GetProperty("nodes").EnumerateArray().Single(n => n.GetProperty("id").GetString() == "agent");
         return agent.GetProperty("config").GetProperty("goal").GetString()!;
+    }
+
+    /// <summary>Reads the projected agent.code node's (clamped) <c>autonomyLevel</c> config out of the frozen snapshot.</summary>
+    private static string ReadAgentAutonomyLevel(string definitionSnapshotJson)
+    {
+        var root = JsonDocument.Parse(definitionSnapshotJson).RootElement;
+        var agent = root.GetProperty("nodes").EnumerateArray().Single(n => n.GetProperty("id").GetString() == "agent");
+        return agent.GetProperty("config").GetProperty("autonomyLevel").GetString()!;
     }
 
     /// <summary>Reads the projected agent.supervisor node's <c>config</c> object out of the frozen definition snapshot.</summary>

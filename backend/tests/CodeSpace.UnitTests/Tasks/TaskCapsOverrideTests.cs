@@ -92,4 +92,38 @@ public class TaskCapsOverrideTests
     {
         Should.Throw<ArgumentException>(() => LaunchTaskCommandHandler.BuildCapsOverride(new TaskCapsOverride { MaxCostUsd = -1m }));
     }
+
+    [Fact]
+    public void BuildCapsOverride_folds_the_autonomy_ceiling_onto_the_router_seam_even_with_no_numeric_caps()
+    {
+        // The ceiling rides the SAME RouteCaps seam (a tighten-only field). With no numeric caps it still produces a
+        // RouteCaps carrying ONLY the ceiling — so the router merge can tighten the preset's autonomy ceiling.
+        var caps = LaunchTaskCommandHandler.BuildCapsOverride(null, "Standard");
+
+        caps.ShouldNotBeNull();
+        caps!.AutonomyCeiling.ShouldBe("Standard", "the operator's ceiling reaches the router override");
+        caps.MaxParallelism.ShouldBeNull("no numeric cap was set — only the ceiling");
+    }
+
+    [Fact]
+    public void BuildCapsOverride_carries_both_the_numeric_caps_and_the_ceiling()
+    {
+        var caps = LaunchTaskCommandHandler.BuildCapsOverride(new TaskCapsOverride { MaxParallelism = 3 }, "Confined");
+
+        caps.ShouldNotBeNull();
+        caps!.MaxParallelism.ShouldBe(3);
+        caps.AutonomyCeiling.ShouldBe("Confined");
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("   ")]
+    public void BuildCapsOverride_treats_a_blank_ceiling_as_no_ceiling_byte_identical(string? blankCeiling)
+    {
+        // A blank ceiling with no caps ⇒ null (the byte-identical no-op); a blank ceiling never sets the seam.
+        LaunchTaskCommandHandler.BuildCapsOverride(null, blankCeiling).ShouldBeNull();
+        LaunchTaskCommandHandler.BuildCapsOverride(new TaskCapsOverride { MaxParallelism = 2 }, blankCeiling)!
+            .AutonomyCeiling.ShouldBe("", "a blank ceiling leaves the seam's ceiling at its default — the preset stands");
+    }
 }
