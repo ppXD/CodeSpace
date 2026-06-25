@@ -41,7 +41,28 @@ public interface IModelPoolSelector
     /// the spawn fails closed. So a dispatched agent can only run a model the team credentialed, on that model's own key.
     /// </summary>
     Task<ModelDispatchRef?> ResolveDispatchAsync(Guid teamId, string modelName, IReadOnlyList<Guid>? allowedRowIds, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// List the team's credentialed pool models (model id + provider) the brain MAY dispatch — bounded to
+    /// <paramref name="allowedRowIds"/> (null/empty = ALL the team's enabled rows under active credentials). For
+    /// rendering the capability catalog into the supervisor/planner prompt so the model authors a provider-compatible
+    /// (harness, model) pair on purpose, not blind. De-duplicated by (model id, provider).
+    /// </summary>
+    Task<IReadOnlyList<PoolModelInfo>> ListPoolAsync(Guid teamId, IReadOnlyList<Guid>? allowedRowIds, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Auto-pick ONE enabled credentialed-model ROW id to run the supervisor's BRAIN on, when the operator pinned none
+    /// (the Deep/Auto lane). Bounded to <paramref name="eligibleProviders"/> — the providers a structured-LLM client
+    /// actually serves — so a self-resolved brain never trades <c>NoBrainModelStop</c> for <c>NoModelStop</c>. Returns
+    /// the row id (the decider resolves the brain BY row id) of the FIRST match in a deterministic total order (model id,
+    /// then row id), so a replay re-derives the SAME brain. Null when no enabled row under an active credential has an
+    /// eligible provider (the honest fail-closed floor — nothing to run the brain on).
+    /// </summary>
+    Task<Guid?> SelectBrainRowIdAsync(Guid teamId, IReadOnlyCollection<string> eligibleProviders, CancellationToken cancellationToken);
 }
+
+/// <summary>One pooled model the brain may dispatch — its canonical id and the provider tag whose harness can drive it. Catalog-only (no credential, no secret).</summary>
+public sealed record PoolModelInfo(string ModelId, string Provider);
 
 /// <summary>The agent-dispatch resolution: the canonical model id + the BACKING credential's id. Distinct from <see cref="ModelPoolPick"/> (the in-process plane, which carries the decrypted key) — the agent plane wants the credential REFERENCE (a Guid it resolves to env at execution), never the secret in-process.</summary>
 public sealed record ModelDispatchRef
@@ -49,6 +70,9 @@ public sealed record ModelDispatchRef
     public required string ModelId { get; init; }
 
     public required Guid ModelCredentialId { get; init; }
+
+    /// <summary>The resolved credential's provider tag — lets the spawn path author a harness that can actually drive this model (the authoring-time compatibility clamp), instead of leaving a mismatch for the run-time reconciler.</summary>
+    public required string Provider { get; init; }
 }
 
 /// <summary>The resolved pick: a model id from the pool + the decrypted credential of the row that backs it. Transient — carries a secret, never persisted.</summary>

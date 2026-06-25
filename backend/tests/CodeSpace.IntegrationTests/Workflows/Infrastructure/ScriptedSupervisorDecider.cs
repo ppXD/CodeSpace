@@ -41,6 +41,8 @@ public sealed class ScriptedSupervisorDecider : ISupervisorDecider
             SupervisorScriptMode.PlanSpawnDispatchStop => PlanSpawnDispatchStop(context),
             SupervisorScriptMode.PlanSpawnBadRepoStop => PlanSpawnBadRepoStop(context),
             SupervisorScriptMode.PlanSpawnBadModelStop => PlanSpawnBadModelStop(context),
+            SupervisorScriptMode.PlanSpawnPersonaStop => PlanSpawnPersonaStop(context),
+            SupervisorScriptMode.PlanSpawnBadPersonaStop => PlanSpawnBadPersonaStop(context),
             _ => PlanThenStop(context),
         };
 
@@ -191,6 +193,35 @@ public sealed class ScriptedSupervisorDecider : ISupervisorDecider
             },
         });
 
+    /// <summary>The slug a persona dispatch targets — the test seeds a persona with THIS slug, so the per-agent persona resolves to it.</summary>
+    public const string DispatchPersonaSlug = "dispatch-persona";
+
+    /// <summary>A persona slug NO test seeds → the per-agent persona resolution fails closed (a clean terminal).</summary>
+    public const string MissingPersonaSlug = "ghost-persona";
+
+    // P3: turn 0 plan(2) → turn 1 spawn ONE agent whose dispatch authors a per-agent PERSONA slug → turn 2 stop. Proves
+    // the model-authored persona resolves to the team AgentDefinitionId and merges (overriding the run-level profile persona).
+    private static SupervisorDecision PlanSpawnPersonaStop(SupervisorTurnContext context) => context.TurnNumber switch
+    {
+        0 => Plan(context.Goal),
+        1 => Canonical(SupervisorDecisionKinds.Spawn, new SupervisorSpawnPayload
+        {
+            SubtaskIds = new[] { SubtaskA },
+            Agents = new[] { new SupervisorAgentDispatch { SubtaskId = SubtaskA, AgentDefinition = DispatchPersonaSlug } },
+        }),
+        _ => Canonical(SupervisorDecisionKinds.Stop, new SupervisorStopPayload { Outcome = "completed", Summary = "persona dispatched" }),
+    };
+
+    // P3: a spawn whose dispatch authors a persona slug NO active team persona has → the per-agent persona clamp throws,
+    // and the turn service must terminalize the spawn as a CLEAN failure (no stranded-Running decision, no agent staged).
+    private static SupervisorDecision PlanSpawnBadPersonaStop(SupervisorTurnContext context) => context.TurnNumber == 0
+        ? Plan(context.Goal)
+        : Canonical(SupervisorDecisionKinds.Spawn, new SupervisorSpawnPayload
+        {
+            SubtaskIds = new[] { SubtaskA },
+            Agents = new[] { new SupervisorAgentDispatch { SubtaskId = SubtaskA, AgentDefinition = MissingPersonaSlug } },
+        });
+
     private static SupervisorDecision Plan(string goal) => Canonical(SupervisorDecisionKinds.Plan, new SupervisorPlanPayload
     {
         Goal = goal,
@@ -236,6 +267,10 @@ public sealed class SupervisorDecisionScript
     public void PlanSpawnBadRepoStop() => Mode = SupervisorScriptMode.PlanSpawnBadRepoStop;
 
     public void PlanSpawnBadModelStop() => Mode = SupervisorScriptMode.PlanSpawnBadModelStop;
+
+    public void PlanSpawnPersonaStop() => Mode = SupervisorScriptMode.PlanSpawnPersonaStop;
+
+    public void PlanSpawnBadPersonaStop() => Mode = SupervisorScriptMode.PlanSpawnBadPersonaStop;
 }
 
 /// <summary>
@@ -263,6 +298,8 @@ public enum SupervisorScriptMode
     PlanSpawnDispatchStop,
     PlanSpawnBadRepoStop,
     PlanSpawnBadModelStop,
+    PlanSpawnPersonaStop,
+    PlanSpawnBadPersonaStop,
     AskHumanStop,
     PlanThenSpawnForever,
 }

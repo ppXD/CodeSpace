@@ -1,6 +1,7 @@
 using System.Text;
 using System.Text.Json;
 using CodeSpace.Core.DependencyInjection;
+using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Agents.ModelCredentials;
 using CodeSpace.Core.Services.Workflows.Llm;
 using CodeSpace.Messages.Dtos.Workflows.Planning;
@@ -21,11 +22,13 @@ public sealed class LlmWorkflowPlanner : IWorkflowPlanner, IScopedDependency
 {
     private readonly ILLMClientRegistry _clientRegistry;
     private readonly IModelPoolSelector _modelSelector;
+    private readonly IAgentHarnessRegistry _harnesses;
 
-    public LlmWorkflowPlanner(ILLMClientRegistry clientRegistry, IModelPoolSelector modelSelector)
+    public LlmWorkflowPlanner(ILLMClientRegistry clientRegistry, IModelPoolSelector modelSelector, IAgentHarnessRegistry harnesses)
     {
         _clientRegistry = clientRegistry;
         _modelSelector = modelSelector;
+        _harnesses = harnesses;
     }
 
     public async Task<PlannedWorkflow> PlanAsync(WorkflowPlanRequest request, CancellationToken cancellationToken)
@@ -37,7 +40,13 @@ public sealed class LlmWorkflowPlanner : IWorkflowPlanner, IScopedDependency
         if (pick == null)
             throw new InvalidOperationException($"No model is available in the team's pool for provider '{structured.Provider}'. Add a credentialed, enabled model to plan tasks.");
 
-        var completion = await structured.CompleteStructuredAsync(BuildRequest(request, pick), cancellationToken).ConfigureAwait(false);
+        // P2 — render the capability catalog (harnesses + drivable providers, the team's whole credentialed pool) so the
+        // planner allocates a provider-compatible harness + model PER subtask informed, not blind. The run-time
+        // reconciler is the backstop.
+        var pool = await _modelSelector.ListPoolAsync(request.TeamId, allowedRowIds: null, cancellationToken).ConfigureAwait(false);
+        var catalog = CapabilityCatalog.Render(_harnesses.All, pool);
+
+        var completion = await structured.CompleteStructuredAsync(BuildRequest(request, pick, catalog), cancellationToken).ConfigureAwait(false);
 
         return Deserialize(completion.Json);
     }
@@ -53,21 +62,21 @@ public sealed class LlmWorkflowPlanner : IWorkflowPlanner, IScopedDependency
         return structured;
     }
 
-    private static StructuredLLMCompletionRequest BuildRequest(WorkflowPlanRequest request, ModelPoolPick pick) => new()
+    private static StructuredLLMCompletionRequest BuildRequest(WorkflowPlanRequest request, ModelPoolPick pick, string catalog) => new()
     {
         Model = pick.ModelId,
         Credential = pick.Credential,
         SystemPrompt = SystemPrompt,
-        UserPrompt = BuildUserPrompt(request),
+        UserPrompt = BuildUserPrompt(request, catalog),
         JsonSchema = PlannerSchema.ResponseSchema,
         MaxOutputTokens = 4096,
         Temperature = 0.2,
     };
 
     /// <summary>Internal test accessor (InternalsVisibleTo) — pins the prompt framing + over-claim guard directly, without a real LLM round-trip.</summary>
-    internal static string BuildUserPromptForTest(WorkflowPlanRequest request) => BuildUserPrompt(request);
+    internal static string BuildUserPromptForTest(WorkflowPlanRequest request, string catalog = "") => BuildUserPrompt(request, catalog);
 
-    private static string BuildUserPrompt(WorkflowPlanRequest request)
+    private static string BuildUserPrompt(WorkflowPlanRequest request, string catalog)
     {
         var builder = new StringBuilder();
 
@@ -79,6 +88,12 @@ public sealed class LlmWorkflowPlanner : IWorkflowPlanner, IScopedDependency
             builder.AppendLine();
             builder.AppendLine("Repository top-level layout (use it to ground the plan). This is a top-level listing only — it is NOT a full code analysis, so do not assume anything below the named entries:");
             builder.AppendLine(request.GroundingContext);
+        }
+
+        if (!string.IsNullOrWhiteSpace(catalog))
+        {
+            builder.AppendLine();
+            builder.AppendLine(catalog.TrimEnd());
         }
 
         return builder.ToString();
@@ -100,5 +115,8 @@ public sealed class LlmWorkflowPlanner : IWorkflowPlanner, IScopedDependency
         "Give each subtask a stable id, a short title, and a concrete instruction. " +
         "State the success criteria a reviewer would check and the main risks. " +
         "Set recommendedWorkflowKind to 'coding' when the subtasks are code changes a coding agent should make, " +
-        "otherwise 'analysis'. Return ONLY the schema-constrained JSON.";
+        "otherwise 'analysis'. " +
+        "When a capability catalog is provided, you MAY give each subtask its best-fit harness + model from it — pick a " +
+        "model from the listed pool and a harness whose providers can drive that model's provider; omit them to use the " +
+        "run defaults. Return ONLY the schema-constrained JSON.";
 }

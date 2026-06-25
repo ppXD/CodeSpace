@@ -35,7 +35,9 @@ public static class PlannerSchema
                   "id": { "type": "string", "description": "Stable, plan-local id for the subtask." },
                   "title": { "type": "string", "description": "Short human title." },
                   "instruction": { "type": "string", "description": "The concrete instruction the branch executes." },
-                  "rationale": { "type": "string", "description": "Optional one-line 'why this subtask'." }
+                  "rationale": { "type": "string", "description": "Optional one-line 'why this subtask'." },
+                  "harness": { "type": "string", "description": "Optional — the best harness for THIS subtask, chosen from the capability catalog (one whose providers can drive your chosen model). Omit to use the run default." },
+                  "model": { "type": "string", "description": "Optional — the best model for THIS subtask, chosen from the run's credentialed pool in the capability catalog (match its provider to the chosen harness). Omit for the harness default." }
                 },
                 "required": ["id", "title", "instruction"]
               }

@@ -132,7 +132,7 @@ public sealed class RealModelSessionWholeLoopE2ETests
         {
             var credential = new ResolvedModelCredential { Provider = Provider, BaseUrl = baseUrl!.TrimEnd('/'), ApiKey = apiKey! };
             var registry = new LLMClientRegistry(new ILLMClient[] { new Core.Services.Workflows.Llm.Anthropic.AnthropicClient(SharedHttp), new Core.Services.Workflows.Llm.OpenAi.OpenAiClient(SharedHttp) });
-            var decider = new LlmSupervisorDecider(registry, new FixedCredentialSelector(model!, credential));
+            var decider = new LlmSupervisorDecider(registry, new FixedCredentialSelector(model!, credential), new CodeSpace.Core.Services.Agents.AgentHarnessRegistry(System.Array.Empty<CodeSpace.Core.Services.Agents.IAgentHarness>()), new EmptyPersonaLibrary());
 
             var decision = await decider.DecideAsync(scenario.Context, CancellationToken.None);
             var score = SupervisorDecisionEval.Score(scenario, decision);
@@ -222,5 +222,20 @@ public sealed class RealModelSessionWholeLoopE2ETests
 
         public Task<ModelPoolPick?> SelectAsync(Guid teamId, string provider, IReadOnlyList<string>? allowedModels, string? pinnedModel, CancellationToken cancellationToken) => throw new NotImplementedException();
         public Task<ModelDispatchRef?> ResolveDispatchAsync(Guid teamId, string modelName, IReadOnlyList<Guid>? allowedRowIds, CancellationToken cancellationToken) => throw new NotImplementedException();
+        public Task<IReadOnlyList<CodeSpace.Core.Services.Agents.ModelCredentials.PoolModelInfo>> ListPoolAsync(Guid teamId, IReadOnlyList<Guid>? allowedRowIds, CancellationToken cancellationToken) => Task.FromResult<IReadOnlyList<CodeSpace.Core.Services.Agents.ModelCredentials.PoolModelInfo>>(System.Array.Empty<CodeSpace.Core.Services.Agents.ModelCredentials.PoolModelInfo>());
+        public Task<Guid?> SelectBrainRowIdAsync(Guid teamId, IReadOnlyCollection<string> eligibleProviders, CancellationToken cancellationToken) => Task.FromResult<Guid?>(null);
+    }
+
+    /// <summary>An empty persona library — the decider lists it to render the persona pool; this real-model session gate doesn't exercise per-agent personas.</summary>
+    private sealed class EmptyPersonaLibrary : CodeSpace.Core.Services.Agents.IAgentDefinitionService
+    {
+        public Task<IReadOnlyList<CodeSpace.Messages.Dtos.Agents.AgentDefinitionSummary>> ListAsync(Guid teamId, CancellationToken cancellationToken) =>
+            Task.FromResult<IReadOnlyList<CodeSpace.Messages.Dtos.Agents.AgentDefinitionSummary>>(System.Array.Empty<CodeSpace.Messages.Dtos.Agents.AgentDefinitionSummary>());
+
+        public Task<CodeSpace.Messages.Dtos.Agents.AgentDefinitionSummary?> GetAsync(Guid teamId, Guid agentDefinitionId, CancellationToken cancellationToken) => throw new NotImplementedException();
+        public Task<Guid> CreateAsync(Guid teamId, CodeSpace.Messages.Agents.AgentDefinitionInput input, Guid actorUserId, CancellationToken cancellationToken) => throw new NotImplementedException();
+        public Task UpdateAsync(Guid teamId, Guid agentDefinitionId, CodeSpace.Messages.Agents.AgentDefinitionInput input, Guid actorUserId, CancellationToken cancellationToken) => throw new NotImplementedException();
+        public Task<Guid> ImportAsync(Guid teamId, CodeSpace.Messages.Agents.ImportedAgentDefinitionInput input, Guid actorUserId, CancellationToken cancellationToken) => throw new NotImplementedException();
+        public Task DeleteAsync(Guid teamId, Guid agentDefinitionId, Guid actorUserId, CancellationToken cancellationToken) => throw new NotImplementedException();
     }
 }

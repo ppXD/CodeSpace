@@ -48,4 +48,15 @@ public sealed record SupervisorAgentDispatch
     /// <summary>An autonomy REQUEST (a named tier) — clamped to the run profile's autonomy CEILING (never raised past it) before the server derives the permissions. Null → the profile's autonomy.</summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? AutonomyLevel { get; init; }
+
+    /// <summary>
+    /// The Agent persona this agent embodies — the @-mention SLUG of one of the team's personas (rendered in the
+    /// capability catalog), e.g. <c>"security-reviewer"</c>. The server resolves it to that team's
+    /// <c>AgentDefinitionId</c> (the persona's system prompt / model / tools then merge into the run, exactly as the
+    /// run-level profile persona does). FAIL-CLOSED on an unknown / foreign / deleted slug (a clean terminal, like an
+    /// out-of-pool model) — the brain only picks from the team's own personas the catalog lists. Null → the run-level
+    /// profile persona (byte-identical to a homogeneous spawn).
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? AgentDefinition { get; init; }
 }

@@ -31,6 +31,9 @@ internal static class RealModelLiveWire
     /// <summary>A model-pool selector stubbed to the configured live model + credential (the in-process pool, for a decider/arbiter-only real call — no DB).</summary>
     public static IModelPoolSelector Selector(string model, ResolvedModelCredential credential) => new FixedCredentialSelector(model, credential);
 
+    /// <summary>An empty persona library (the decider lists it to render the persona pool into the catalog) — the real-model decision gates don't exercise per-agent personas, so an empty list keeps the catalog persona section absent.</summary>
+    public static CodeSpace.Core.Services.Agents.IAgentDefinitionService Personas() => new EmptyPersonaLibrary();
+
     /// <summary>Anthropic's client appends <c>/v1/messages</c> to the host base; OpenAI's appends <c>/chat/completions</c> to a <c>/v1</c> base — derive each from the single configured base so one gateway serves both wires.</summary>
     private static string BaseUrlFor(string provider, string baseUrl)
     {
@@ -59,7 +62,25 @@ internal static class RealModelLiveWire
         public Task<ModelPoolPick?> ResolveByRowIdAsync(Guid teamId, Guid modelCredentialModelId, CancellationToken cancellationToken) =>
             Task.FromResult<ModelPoolPick?>(new ModelPoolPick { ModelId = _model, Credential = _credential });
 
-        public Task<ModelPoolPick?> SelectAsync(Guid teamId, string provider, IReadOnlyList<string>? allowedModels, string? pinnedModel, CancellationToken cancellationToken) => throw new NotImplementedException();
+        // The effort classifier resolves its model via SelectAsync (by provider) — return the same configured live pick
+        // so the shared selector serves both the decider (ResolveByRowIdAsync) and the classifier (SelectAsync).
+        public Task<ModelPoolPick?> SelectAsync(Guid teamId, string provider, IReadOnlyList<string>? allowedModels, string? pinnedModel, CancellationToken cancellationToken) =>
+            Task.FromResult<ModelPoolPick?>(new ModelPoolPick { ModelId = _model, Credential = _credential });
         public Task<ModelDispatchRef?> ResolveDispatchAsync(Guid teamId, string modelName, IReadOnlyList<Guid>? allowedRowIds, CancellationToken cancellationToken) => throw new NotImplementedException();
+        public Task<IReadOnlyList<CodeSpace.Core.Services.Agents.ModelCredentials.PoolModelInfo>> ListPoolAsync(Guid teamId, IReadOnlyList<Guid>? allowedRowIds, CancellationToken cancellationToken) => Task.FromResult<IReadOnlyList<CodeSpace.Core.Services.Agents.ModelCredentials.PoolModelInfo>>(System.Array.Empty<CodeSpace.Core.Services.Agents.ModelCredentials.PoolModelInfo>());
+        public Task<Guid?> SelectBrainRowIdAsync(Guid teamId, IReadOnlyCollection<string> eligibleProviders, CancellationToken cancellationToken) => Task.FromResult<Guid?>(null);
+    }
+
+    /// <summary>An empty persona library — <c>ListAsync</c> returns no personas; the CRUD methods are never called by the decider.</summary>
+    private sealed class EmptyPersonaLibrary : CodeSpace.Core.Services.Agents.IAgentDefinitionService
+    {
+        public Task<IReadOnlyList<CodeSpace.Messages.Dtos.Agents.AgentDefinitionSummary>> ListAsync(Guid teamId, CancellationToken cancellationToken) =>
+            Task.FromResult<IReadOnlyList<CodeSpace.Messages.Dtos.Agents.AgentDefinitionSummary>>(System.Array.Empty<CodeSpace.Messages.Dtos.Agents.AgentDefinitionSummary>());
+
+        public Task<CodeSpace.Messages.Dtos.Agents.AgentDefinitionSummary?> GetAsync(Guid teamId, Guid agentDefinitionId, CancellationToken cancellationToken) => throw new NotImplementedException();
+        public Task<Guid> CreateAsync(Guid teamId, CodeSpace.Messages.Agents.AgentDefinitionInput input, Guid actorUserId, CancellationToken cancellationToken) => throw new NotImplementedException();
+        public Task UpdateAsync(Guid teamId, Guid agentDefinitionId, CodeSpace.Messages.Agents.AgentDefinitionInput input, Guid actorUserId, CancellationToken cancellationToken) => throw new NotImplementedException();
+        public Task<Guid> ImportAsync(Guid teamId, CodeSpace.Messages.Agents.ImportedAgentDefinitionInput input, Guid actorUserId, CancellationToken cancellationToken) => throw new NotImplementedException();
+        public Task DeleteAsync(Guid teamId, Guid agentDefinitionId, Guid actorUserId, CancellationToken cancellationToken) => throw new NotImplementedException();
     }
 }

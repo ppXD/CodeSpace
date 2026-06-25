@@ -30,4 +30,7 @@ public sealed record TaskBuildContext
 
     /// <summary>Per-repo (repositoryId → branch/ref) clone overrides — session branch continuity: a follow-up turn starts each repo from the prior turn's produced branch for THAT repo (primary + each related). A repo ABSENT from the map clones at its default branch. Null / empty = a fresh launch (byte-identical — every repo default).</summary>
     public IReadOnlyDictionary<Guid, string>? BaseRefs { get; init; }
+
+    /// <summary>The supervisor's OWN brain-model credentialed-row id (a <c>ModelCredentialModel</c> id), resolved at launch when the Deep lane projects an <c>agent.supervisor</c> node and the operator pinned none — the <c>SupervisorDefinitionBuilder</c> bakes it into the node's <c>supervisorModelId</c> so the decider has a brain instead of stopping turn-1. Resolved ONCE here (replay-stable: every turn + replay reads the same baked id). Null for a non-supervisor projection or an empty pool (the builder then emits no brain — the honest fail-closed floor).</summary>
+    public Guid? SupervisorBrainModelId { get; init; }
 }

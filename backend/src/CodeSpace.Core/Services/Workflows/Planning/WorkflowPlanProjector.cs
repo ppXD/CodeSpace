@@ -1,5 +1,6 @@
 using System.Text.Json;
 using CodeSpace.Core.DependencyInjection;
+using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Agents.Harnesses.Codex;
 using CodeSpace.Messages.Dtos.Workflows;
 using CodeSpace.Messages.Dtos.Workflows.Planning;
@@ -31,13 +32,20 @@ public sealed partial class WorkflowPlanProjector : IWorkflowPlanProjector, ISco
 {
     private const string CodingKind = "coding";
 
+    private readonly IAgentHarnessRegistry _harnesses;
+
+    public WorkflowPlanProjector(IAgentHarnessRegistry harnesses) => _harnesses = harnesses;
+
+    /// <summary>The registered harness kinds — the closed set the planner's authored per-subtask harness is clamped to (a hallucinated or empty kind falls to the codex-cli default), so every baked <c>{{item.harness}}</c> resolves to a kind the registry can resolve.</summary>
+    private IReadOnlyCollection<string> HarnessKinds() => _harnesses.All.Select(h => h.Kind).ToList();
+
     public WorkflowDefinition Project(PlannedWorkflow plan)
     {
         var bodyTypeKey = ResolveBodyTypeKey(plan);
 
         return new WorkflowDefinition
         {
-            Inputs = new[] { SubtasksInput(plan) },
+            Inputs = new[] { SubtasksInput(plan, HarnessKinds()) },
             Nodes = BuildNodes(plan, bodyTypeKey),
             Edges = BuildEdges(),
         };
@@ -48,13 +56,13 @@ public sealed partial class WorkflowPlanProjector : IWorkflowPlanProjector, ISco
         string.Equals(plan.RecommendedWorkflowKind, CodingKind, StringComparison.OrdinalIgnoreCase) ? "agent.code" : "llm.complete";
 
     /// <summary>The declared <c>subtasks</c> Input whose DEFAULT bakes the plan's subtasks as a resolvable array — the source the map's <c>{{input.subtasks}}</c> binding fans out over.</summary>
-    private static WorkflowVariable SubtasksInput(PlannedWorkflow plan) => new()
+    private static WorkflowVariable SubtasksInput(PlannedWorkflow plan, IReadOnlyCollection<string> harnessKinds) => new()
     {
         Name = "subtasks",
         Label = "Subtasks",
         Description = "The planned subtasks the workflow fans out over. Edit before running to change the plan.",
         Schema = Json("""{ "type": "array", "items": { "type": "object" } }"""),
-        Default = SerializeSubtasks(plan.Subtasks),
+        Default = SerializeSubtasks(plan.Subtasks, harnessKinds),
         Required = false,
     };
 
@@ -71,7 +79,7 @@ public sealed partial class WorkflowPlanProjector : IWorkflowPlanProjector, ISco
         new() { Id = "map", TypeKey = "flow.map", Label = "Run each subtask", Config = Empty(),
                 Inputs = Json("""{ "items": "{{input.subtasks}}" }""") },
         new() { Id = "map_start", TypeKey = "flow.map_start", ParentId = "map", Config = Empty(), Inputs = Empty() },
-        BodyNode(bodyTypeKey),
+        BodyNode(bodyTypeKey, perItemAllocation: true),
 
         new() { Id = "synth", TypeKey = "llm.complete", Label = "Synthesize results",
                 Config = Json("""{ "provider": "Anthropic" }"""),
@@ -82,14 +90,25 @@ public sealed partial class WorkflowPlanProjector : IWorkflowPlanProjector, ISco
     };
 
     /// <summary>The per-branch body node — the only place the recommended-kind switch decides a node type (coding → agent.code, else → llm.complete). Each reads its element as {{item.title}}/{{item.instruction}}.</summary>
-    private static NodeDefinition BodyNode(string bodyTypeKey) => bodyTypeKey == "agent.code"
+    private static NodeDefinition BodyNode(string bodyTypeKey, bool perItemAllocation) => bodyTypeKey == "agent.code"
         ? new() { Id = "body", TypeKey = "agent.code", ParentId = "map", Label = "Agent",
-                  // harness from CodexHarness.HarnessKind (the const that owns the wire string) so a rename can't silently drift (Rule 8); an anon object keeps the {{item.*}} refs literal without brace-escaping.
-                  Config = JsonSerializer.SerializeToElement(new { goal = "{{item.title}}: {{item.instruction}}", harness = CodexHarness.HarnessKind, autonomyLevel = "Confined", readOnly = true }),
-                  Inputs = Empty() }
+                  Config = AgentBodyConfig(perItemAllocation), Inputs = Empty() }
         : new() { Id = "body", TypeKey = "llm.complete", ParentId = "map", Label = "Work the subtask",
                   Config = Json("""{ "provider": "Anthropic" }"""),
                   Inputs = Json("""{ "userPrompt": "{{item.title}}: {{item.instruction}}" }""") };
+
+    /// <summary>
+    /// The agent.code body config. <b>One-shot</b> (<paramref name="perItemAllocation"/> = true) allocates PER SUBTASK:
+    /// <c>{{item.harness}}</c> ALWAYS resolves to a registered kind (SerializeSubtasks clamps it) and <c>{{item.model}}</c>
+    /// is the planner's loose name (the run-time reconciler aligns the harness to that model's provider — the 兜底).
+    /// <b>Coordinated</b> (false) runs the platform-default harness on a stable literal: its rework rounds re-seed from
+    /// the coordinator's <c>reworkSubtasks</c>, which carry NO harness/model, so <c>{{item.harness}}</c> would resolve
+    /// empty and trip the agent.code 'harness is required' guard — a literal keeps every round runnable. Per-subtask
+    /// Auto-allocation stays the one-shot path's job (the common case).
+    /// </summary>
+    private static JsonElement AgentBodyConfig(bool perItemAllocation) => perItemAllocation
+        ? JsonSerializer.SerializeToElement(new { goal = "{{item.title}}: {{item.instruction}}", harness = "{{item.harness}}", model = "{{item.model}}", autonomyLevel = "Confined", readOnly = true })
+        : JsonSerializer.SerializeToElement(new { goal = "{{item.title}}: {{item.instruction}}", harness = CodexHarness.HarnessKind, autonomyLevel = "Confined", readOnly = true });
 
     private static IReadOnlyList<EdgeDefinition> BuildEdges() => new List<EdgeDefinition>
     {
@@ -113,8 +132,28 @@ public sealed partial class WorkflowPlanProjector : IWorkflowPlanProjector, ISco
     /// <c>{{item.instruction}}</c> — the VariableResolver's element-property lookup is CASE-SENSITIVE, so the
     /// baked keys must match the lowercase refs exactly (and the planner's own schema property names).
     /// </summary>
-    private static JsonElement SerializeSubtasks(IReadOnlyList<PlannedSubtask> subtasks) =>
-        JsonSerializer.SerializeToElement(subtasks, CamelCase);
+    private static JsonElement SerializeSubtasks(IReadOnlyList<PlannedSubtask> subtasks, IReadOnlyCollection<string> harnessKinds) =>
+        JsonSerializer.SerializeToElement(subtasks.Select(s => new
+        {
+            s.Id,
+            s.Title,
+            s.Instruction,
+            s.Rationale,
+            // P2 — fill the harness so the body's {{item.harness}} ALWAYS resolves to a REGISTERED kind: the planner's
+            // per-subtask choice wins WHEN it names a real harness, else the codex-cli default (a hallucinated or empty
+            // kind can't reach the registry and throw). Model stays the planner's loose choice as an empty string when
+            // unset, so {{item.model}} resolves to "" → the agent.code node falls to the harness default.
+            harness = NormalizeHarness(s.Harness, harnessKinds),
+            model = s.Model?.Trim() ?? "",
+        }), CamelCase);
+
+    /// <summary>Clamp the planner's authored harness to a REGISTERED kind (case-insensitive, canonical casing) — an empty or hallucinated kind falls to the codex-cli default. This is the throw-safety floor: a kind the registry can't resolve never reaches run time.</summary>
+    private static string NormalizeHarness(string? authored, IReadOnlyCollection<string> harnessKinds)
+    {
+        if (string.IsNullOrWhiteSpace(authored)) return CodexHarness.HarnessKind;
+
+        return harnessKinds.FirstOrDefault(k => string.Equals(k, authored.Trim(), StringComparison.OrdinalIgnoreCase)) ?? CodexHarness.HarnessKind;
+    }
 
     private static readonly JsonSerializerOptions CamelCase = new()
     {

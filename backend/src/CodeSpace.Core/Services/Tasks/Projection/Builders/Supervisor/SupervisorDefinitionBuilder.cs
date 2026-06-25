@@ -86,6 +86,11 @@ public sealed class SupervisorDefinitionBuilder : IWorkflowDefinitionBuilder, IS
         // here, and SupervisorBounds force-stops the run when realized spend exceeds it. Omitted (null) when neither
         // the launch caps nor a bounds preset set it.
         AddIfPresent(config, "maxCostUsd", context.Route.Caps.MaxCostUsd);
+        // The supervisor's OWN brain model (the decider runs on it), self-resolved at launch when the operator pinned
+        // none — without it the decider stops turn-1 (NoBrainModelStop). Omitted (null) when the pool can't supply a
+        // structured-capable brain, so the build stays pure + a bare supervisor still validates (it just fails closed
+        // at decide time — the honest floor).
+        AddIfPresent(config, "supervisorModelId", context.SupervisorBrainModelId?.ToString());
         AddIfPresent(config, "agentProfile", BuildAgentProfile(context.AgentProfile));
 
         return JsonSerializer.SerializeToElement(config);

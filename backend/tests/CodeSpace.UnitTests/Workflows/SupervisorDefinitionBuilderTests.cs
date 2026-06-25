@@ -29,11 +29,12 @@ public class SupervisorDefinitionBuilderTests
         new TerminalNode(),
     }));
 
-    private static TaskBuildContext Context(ResolvedAgentProfile? profile = null, RouteCaps? caps = null) => new()
+    private static TaskBuildContext Context(ResolvedAgentProfile? profile = null, RouteCaps? caps = null, Guid? brainModelId = null) => new()
     {
         Seed = new TaskLaunchSeed { Goal = "Ship the whole feature", SurfaceKind = "chat", TeamId = Guid.NewGuid() },
         Route = new RoutePlan { ProjectionKind = TaskProjectionKinds.Supervisor, Caps = caps ?? new RouteCaps() },
         AgentProfile = profile,
+        SupervisorBrainModelId = brainModelId,
     };
 
     [Fact]
@@ -169,9 +170,23 @@ public class SupervisorDefinitionBuilderTests
         sup.Config.TryGetProperty("maxRounds", out _).ShouldBeFalse();
         sup.Config.TryGetProperty("maxTotalSpawns", out _).ShouldBeFalse();
         sup.Config.TryGetProperty("maxCostUsd", out _).ShouldBeFalse("an unset cost cap omits the key — the run has no cost budget (SOTA #4 default)");
+        sup.Config.TryGetProperty("supervisorModelId", out _).ShouldBeFalse("no resolved brain ⇒ no key — a hand-authored node keeps its own supervisorModelId, and an empty pool fails closed at decide time (the honest floor)");
 
         // approvalPolicy is always present — it defaults to 'none' (the autonomous, pre-approval posture).
         sup.Config.GetProperty("approvalPolicy").GetString().ShouldBe("none");
+    }
+
+    [Fact]
+    public void Supervisor_config_bakes_the_self_resolved_brain_model_when_present()
+    {
+        // The Auto/Deep lane resolves a brain model at launch (the operator pins none) and threads it on the context;
+        // the builder bakes it into supervisorModelId so the decider has a brain instead of stopping turn-1.
+        var brain = Guid.NewGuid();
+
+        var sup = Builder.Build(Context(brainModelId: brain)).Nodes.Single(n => n.Id == "sup");
+
+        sup.Config.GetProperty("supervisorModelId").GetString().ShouldBe(brain.ToString(),
+            "the launch-resolved brain row id is baked into the node config — the decider runs on it (no NoBrainModelStop turn-1)");
     }
 
     [Fact]

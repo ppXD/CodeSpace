@@ -1,6 +1,9 @@
 using System.Text.Json;
 using CodeSpace.Core.Persistence.Entities;
+using CodeSpace.Core.Services.Agents;
+using CodeSpace.Core.Services.Agents.ModelCredentials;
 using CodeSpace.Core.Services.Workflows.Engine;
+using CodeSpace.Messages.Agents;
 using CodeSpace.Core.Services.Workflows.Llm;
 using CodeSpace.Core.Services.Workflows.Nodes;
 using CodeSpace.Core.Services.Workflows.Nodes.Builtin;
@@ -97,7 +100,7 @@ public class WorkflowPlannerTests
         try
         {
             var planner = new RecordingPlanner();
-            var service = new WorkflowPlanningService(planner, new WorkflowPlanProjector(), BuildValidator(), new RecordingGrounding());
+            var service = new WorkflowPlanningService(planner, Projector(), BuildValidator(), new RecordingGrounding());
 
             var result = await service.PlanFromTaskAsync(SampleRequest(), CancellationToken.None);
 
@@ -119,7 +122,7 @@ public class WorkflowPlannerTests
         try
         {
             var planner = new RecordingPlanner(SamplePlan("analysis"));
-            var service = new WorkflowPlanningService(planner, new WorkflowPlanProjector(), BuildValidator(), new RecordingGrounding());
+            var service = new WorkflowPlanningService(planner, Projector(), BuildValidator(), new RecordingGrounding());
 
             var result = await service.PlanFromTaskAsync(SampleRequest(), CancellationToken.None);
 
@@ -141,7 +144,7 @@ public class WorkflowPlannerTests
     [InlineData("coding")]     // agent.code body — a CanSuspend node + a structurally different graph; the flagship path must also validate
     public void Projection_of_a_representative_plan_passes_DefinitionValidator(string recommendedKind)
     {
-        var definition = new WorkflowPlanProjector().Project(SamplePlan(recommendedKind));
+        var definition = Projector().Project(SamplePlan(recommendedKind));
 
         var result = BuildValidator().Validate(definition);
 
@@ -153,7 +156,7 @@ public class WorkflowPlannerTests
     {
         var plan = SamplePlan("analysis");
 
-        var definition = new WorkflowPlanProjector().Project(plan);
+        var definition = Projector().Project(plan);
 
         // The map binds its items to the declared `subtasks` input...
         var map = definition.Nodes.Single(n => n.Id == "map");
@@ -168,6 +171,56 @@ public class WorkflowPlannerTests
         baked[0].GetProperty("instruction").GetString().ShouldBe(plan.Subtasks[0].Instruction);
     }
 
+    [Fact]
+    public void Projection_carries_per_subtask_harness_and_model_filling_the_default_for_unallocated()
+    {
+        var plan = new PlannedWorkflow
+        {
+            Goal = "g",
+            RecommendedWorkflowKind = "coding",
+            Subtasks = new[]
+            {
+                new PlannedSubtask { Id = "s1", Title = "t1", Instruction = "i1", Harness = "claude-code", Model = "metis-coder-max" },
+                new PlannedSubtask { Id = "s2", Title = "t2", Instruction = "i2" },   // no allocation → default harness, empty model
+            },
+        };
+
+        var definition = Projector().Project(plan);
+
+        var baked = definition.Inputs.Single(i => i.Name == "subtasks").Default!.Value;
+        baked[0].GetProperty("harness").GetString().ShouldBe("claude-code", "the planner's per-subtask harness is carried onto its map item");
+        baked[0].GetProperty("model").GetString().ShouldBe("metis-coder-max");
+        baked[1].GetProperty("harness").GetString().ShouldBe("codex-cli", "an unallocated subtask is filled with the default so {{item.harness}} always resolves");
+        baked[1].GetProperty("model").GetString().ShouldBe("");
+
+        // The single agent body runs each branch with ITS element's allocation.
+        var body = definition.Nodes.Single(n => n.Id == "body");
+        body.Config.GetProperty("harness").GetString().ShouldBe("{{item.harness}}");
+        body.Config.GetProperty("model").GetString().ShouldBe("{{item.model}}");
+    }
+
+    [Fact]
+    public void Projection_clamps_a_hallucinated_or_empty_harness_to_the_registered_default()
+    {
+        var plan = new PlannedWorkflow
+        {
+            Goal = "g",
+            RecommendedWorkflowKind = "coding",
+            Subtasks = new[]
+            {
+                new PlannedSubtask { Id = "s1", Title = "t1", Instruction = "i1", Harness = "gpt-5-cli" },   // not a registered kind
+                new PlannedSubtask { Id = "s2", Title = "t2", Instruction = "i2", Harness = "  " },          // blank
+                new PlannedSubtask { Id = "s3", Title = "t3", Instruction = "i3", Harness = "CLAUDE-CODE" }, // registered, wrong case
+            },
+        };
+
+        var baked = Projector().Project(plan).Inputs.Single(i => i.Name == "subtasks").Default!.Value;
+
+        baked[0].GetProperty("harness").GetString().ShouldBe("codex-cli", "a hallucinated kind the registry can't resolve falls to the default — never reaches run time to throw");
+        baked[1].GetProperty("harness").GetString().ShouldBe("codex-cli", "a blank kind falls to the default");
+        baked[2].GetProperty("harness").GetString().ShouldBe("claude-code", "a registered kind is canonicalised to its registered casing");
+    }
+
     // ── Recommended-kind switch: coding → agent.code body, else → llm.complete ─
 
     [Theory]
@@ -176,7 +229,7 @@ public class WorkflowPlannerTests
     [InlineData("anything-else", "llm.complete")]
     public void Body_node_type_follows_recommended_workflow_kind(string kind, string expectedBodyTypeKey)
     {
-        var definition = new WorkflowPlanProjector().Project(SamplePlan(kind));
+        var definition = Projector().Project(SamplePlan(kind));
 
         var body = definition.Nodes.Single(n => n.Id == "body");
         body.TypeKey.ShouldBe(expectedBodyTypeKey);
@@ -237,7 +290,7 @@ public class WorkflowPlannerTests
     [InlineData("coding")]     // map body = agent.code (a CanSuspend node inside a map inside a loop)
     public void Coordinated_projection_passes_DefinitionValidator(string recommendedKind)
     {
-        var definition = new WorkflowPlanProjector().ProjectCoordinated(SamplePlan(recommendedKind), new CoordinationOptions());
+        var definition = Projector().ProjectCoordinated(SamplePlan(recommendedKind), new CoordinationOptions());
 
         var result = BuildValidator().Validate(definition);
 
@@ -245,9 +298,22 @@ public class WorkflowPlannerTests
     }
 
     [Fact]
+    public void Coordinated_coding_body_uses_a_stable_literal_harness_not_a_per_item_ref()
+    {
+        // The coordinator's reworkSubtasks (rounds 2+) carry NO per-item harness, so a {{item.harness}} body would
+        // resolve empty and trip the agent.code 'harness is required' guard. The coordinated body must bake a literal
+        // registered kind so EVERY round stays runnable. (Per-subtask Auto-allocation is the one-shot path's job.)
+        var body = Projector().ProjectCoordinated(SamplePlan("coding"), new CoordinationOptions()).Nodes.Single(n => n.Id == "body");
+
+        body.TypeKey.ShouldBe("agent.code");
+        body.Config.GetProperty("harness").GetString().ShouldBe("codex-cli", "coordinated bakes a literal harness so rework rounds (no per-item harness) still run");
+        body.Config.TryGetProperty("model", out _).ShouldBeFalse("no per-item model ref on the coordinated body — there's no allocator across rework rounds");
+    }
+
+    [Fact]
     public void Coordinated_loop_wires_the_two_loop_variables_termination_and_round_cap()
     {
-        var definition = new WorkflowPlanProjector().ProjectCoordinated(SamplePlan("analysis"), new CoordinationOptions { MaxRounds = 7 });
+        var definition = Projector().ProjectCoordinated(SamplePlan("analysis"), new CoordinationOptions { MaxRounds = 7 });
 
         var loop = definition.Nodes.Single(n => n.Id == "loop");
         loop.TypeKey.ShouldBe("flow.loop");
@@ -279,7 +345,7 @@ public class WorkflowPlannerTests
     [Fact]
     public void Coordinated_map_binds_items_to_the_loop_subtasks_and_coordinator_carries_the_schema()
     {
-        var definition = new WorkflowPlanProjector().ProjectCoordinated(SamplePlan("analysis"), new CoordinationOptions());
+        var definition = Projector().ProjectCoordinated(SamplePlan("analysis"), new CoordinationOptions());
 
         // The map fans over the CURRENT ROUND's subtasks (the loop var), not the static input.
         var map = definition.Nodes.Single(n => n.Id == "map");
@@ -302,7 +368,7 @@ public class WorkflowPlannerTests
     public void Coordinated_false_path_yields_the_one_shot_shape_no_loop()
     {
         // The default (one-shot) projection has NO flow.loop — coordinated mode is the only thing that adds one.
-        var oneShot = new WorkflowPlanProjector().Project(SamplePlan("analysis"));
+        var oneShot = Projector().Project(SamplePlan("analysis"));
 
         oneShot.Nodes.ShouldNotContain(n => n.TypeKey == "flow.loop");
         oneShot.Nodes.ShouldContain(n => n.Id == "map" && n.ParentId == null, "the one-shot map is top-level, not inside a loop");
@@ -311,7 +377,7 @@ public class WorkflowPlannerTests
     [Fact]
     public void Coordinated_map_parallelism_cap_folds_into_the_map_config()
     {
-        var definition = new WorkflowPlanProjector().ProjectCoordinated(SamplePlan("analysis"), new CoordinationOptions { MaxParallelism = 3 });
+        var definition = Projector().ProjectCoordinated(SamplePlan("analysis"), new CoordinationOptions { MaxParallelism = 3 });
 
         var map = definition.Nodes.Single(n => n.Id == "map");
         map.Config.GetProperty("maxParallelism").GetInt32().ShouldBe(3);
@@ -329,7 +395,7 @@ public class WorkflowPlannerTests
             var teamId = Guid.NewGuid();
             var planner = new RecordingPlanner(SamplePlan("analysis"));
             var grounding = new RecordingGrounding("Repository top-level layout for acme/api. Top-level entries:\n- src (directory)");
-            var service = new WorkflowPlanningService(planner, new WorkflowPlanProjector(), BuildValidator(), grounding);
+            var service = new WorkflowPlanningService(planner, Projector(), BuildValidator(), grounding);
 
             await service.PlanFromTaskAsync(new WorkflowPlanRequest { TaskText = "do it", TeamId = teamId, RepositoryId = repositoryId }, CancellationToken.None);
 
@@ -452,7 +518,41 @@ public class WorkflowPlannerTests
         prompt.ShouldNotContain("top-level layout", Case.Insensitive);
     }
 
+    [Fact]
+    public void Planner_user_prompt_carries_the_capability_catalog_when_provided()
+    {
+        var catalog = CapabilityCatalog.Render(
+            new IAgentHarness[] { new CatalogHarnessStub("claude-code", "Anthropic", "Custom") },
+            new[] { new PoolModelInfo("metis-coder-max", "Anthropic") });
+
+        var prompt = LlmWorkflowPlanner.BuildUserPromptForTest(new WorkflowPlanRequest { TaskText = "Build it", TeamId = Guid.NewGuid() }, catalog);
+
+        prompt.ShouldContain("Build it");
+        prompt.ShouldContain("claude-code — drives: Anthropic, Custom", Case.Sensitive, "the planner sees the harness↔provider map");
+        prompt.ShouldContain("metis-coder-max — Anthropic", Case.Sensitive, "the planner sees the team's pool");
+    }
+
+    private sealed class CatalogHarnessStub : IAgentHarness, IModelCredentialProjector
+    {
+        public CatalogHarnessStub(string kind, params string[] providers) { Kind = kind; SupportedProviders = providers; }
+        public string Kind { get; }
+        public string Version => "test";
+        public IReadOnlyList<string> Models => Array.Empty<string>();
+        public IReadOnlyList<string> SupportedProviders { get; }
+        public SandboxSpec BuildInvocation(AgentTask task) => throw new NotSupportedException();
+        public IReadOnlyList<AgentEvent> ParseEvents(string rawLine) => throw new NotSupportedException();
+        public AgentRunResult BuildResult(IReadOnlyList<AgentEvent> events, int exitCode) => throw new NotSupportedException();
+        public IReadOnlyDictionary<string, string> ProjectToEnv(ResolvedModelCredential credential) => throw new NotSupportedException();
+    }
+
     // ── Helpers ────────────────────────────────────────────────────────────────
+
+    /// <summary>A projector over a two-harness registry (codex-cli + claude-code) — the closed set the projector clamps the planner's authored per-subtask harness to.</summary>
+    private static WorkflowPlanProjector Projector() => new(new AgentHarnessRegistry(new IAgentHarness[]
+    {
+        new CatalogHarnessStub("codex-cli", "OpenAI", "OpenRouter", "Ollama", "Custom"),
+        new CatalogHarnessStub("claude-code", "Anthropic", "Custom"),
+    }));
 
     private static WorkflowPlanRequest SampleRequest() =>
         new() { TaskText = "Improve the onboarding flow", TeamId = Guid.NewGuid() };

@@ -163,7 +163,64 @@ public class ModelPoolSelectorFlowTests
         pick.Credential.BaseUrl.ShouldBe("https://gw/v1");
     }
 
+    // ─── SelectBrainRowIdAsync (P3b): the Auto/Deep supervisor brain auto-pick ───
+
+    [Fact]
+    public async Task SelectBrainRowId_picks_an_eligible_provider_row_deterministically_and_returns_its_row_id()
+    {
+        var teamId = await SeedTeamAsync();
+        var anthropicCred = await SeedCredentialAsync(teamId, "Anthropic", key: "sk-a");
+        var sonnetRow = await AddModelReturningIdAsync(anthropicCred, "claude-sonnet-4-6");
+        var opusRow = await AddModelReturningIdAsync(anthropicCred, "claude-opus-4-8");
+
+        // Deterministic total order (model id, then row id): 'claude-opus-4-8' sorts before 'claude-sonnet-4-6'.
+        var picked = await SelectBrainRowIdAsync(teamId, "Anthropic", "OpenAI");
+
+        picked.ShouldBe(opusRow, "the brain auto-pick is the first row in the deterministic order whose provider has a structured client — replay-stable");
+        opusRow.ShouldNotBe(sonnetRow);
+    }
+
+    [Fact]
+    public async Task SelectBrainRowId_skips_a_row_whose_provider_has_no_structured_client()
+    {
+        var teamId = await SeedTeamAsync();
+        var ollamaCred = await SeedCredentialAsync(teamId, "Ollama", key: "sk-o");
+        await AddModelAsync(ollamaCred, "llama3");   // alphabetically first, but Ollama is NOT eligible
+        var anthropicCred = await SeedCredentialAsync(teamId, "Anthropic", key: "sk-a");
+        var opusRow = await AddModelReturningIdAsync(anthropicCred, "zzz-opus");   // sorts LAST, but its provider is eligible
+
+        // Only Anthropic is an eligible (structured-capable) provider → the Ollama row is skipped even though it sorts first.
+        (await SelectBrainRowIdAsync(teamId, "Anthropic")).ShouldBe(opusRow, "a row whose provider has no structured client is never auto-picked as the brain");
+    }
+
+    [Fact]
+    public async Task SelectBrainRowId_returns_null_when_no_enabled_row_has_an_eligible_provider()
+    {
+        var teamId = await SeedTeamAsync();
+        var ollamaCred = await SeedCredentialAsync(teamId, "Ollama", key: "sk-o");
+        await AddModelAsync(ollamaCred, "llama3");
+
+        (await SelectBrainRowIdAsync(teamId, "Anthropic", "OpenAI")).ShouldBeNull("no eligible-provider row → null → the builder emits no brain → fail-closed at decide time (the honest floor)");
+        (await SelectBrainRowIdAsync(teamId)).ShouldBeNull("an empty eligible-provider set → null");
+    }
+
     // ─── Helpers ───
+
+    private async Task<Guid?> SelectBrainRowIdAsync(Guid teamId, params string[] eligibleProviders)
+    {
+        using var scope = _fixture.BeginScope();
+        return await scope.Resolve<IModelPoolSelector>().SelectBrainRowIdAsync(teamId, eligibleProviders, CancellationToken.None);
+    }
+
+    private async Task<Guid> AddModelReturningIdAsync(Guid credId, string modelId)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        var id = Guid.NewGuid();
+        db.ModelCredentialModel.Add(new ModelCredentialModel { Id = id, ModelCredentialId = credId, ModelId = modelId, Source = ModelSource.Manual, Enabled = true });
+        await db.SaveChangesAsync();
+        return id;
+    }
 
     private async Task<ModelPoolPick?> SelectAsync(Guid teamId, string provider, IReadOnlyList<string>? allowed = null, string? pinned = null)
     {

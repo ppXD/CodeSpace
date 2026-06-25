@@ -47,7 +47,12 @@ public sealed class EffortRouter : IEffortRouter, IScopedDependency
 
         var (preset, caps) = ResolveCaps(request, effortMode, effectiveRecipe);
 
-        var needsConfirmCard = wasAutoClassified && decision.Confidence < EffortPolicy.ConfirmConfidenceFloor;
+        // A risky / irreversible task ALWAYS surfaces the confirm card regardless of the model's self-confidence — the
+        // classifier emits the risk signal, but the ROUTER (not the model's confidence) decides the human gate, so an
+        // over-confident model can't suppress the operator's escalation affordance on destructive work. This restores the
+        // pre-LLM always-confirm floor for risk while keeping the confident-routing win for ordinary tasks (model emits
+        // data, policy decides — the same tighten-only convention as the autonomy ceiling).
+        var needsConfirmCard = wasAutoClassified && (decision.Confidence < EffortPolicy.ConfirmConfidenceFloor || decision.Signals.RiskySideEffects);
 
         var confirm = needsConfirmCard ? BuildConfirmCard(decision) : null;
 
@@ -77,13 +82,13 @@ public sealed class EffortRouter : IEffortRouter, IScopedDependency
         return (fallback, fallbackProjection, reason);
     }
 
-    /// <summary>An explicit non-auto operator effort is a DECISION (no classifier runs, confidence 1.0); a null / "auto" effort asks the default classifier.</summary>
+    /// <summary>An explicit non-auto operator effort is a DECISION (no classifier runs, confidence 1.0); a null / "auto" effort asks the registry's preferred AUTO classifier (the structured-LLM one when a model is available, else the always-confirm heuristic baseline — the registry decides, the router stays kind-agnostic).</summary>
     private async Task<(EffortDecision Decision, bool WasAutoClassified)> ResolveDecisionAsync(EffortRouteRequest request, CancellationToken ct)
     {
         if (IsExplicitOperatorEffort(request.RequestedEffort))
             return (OperatorDecision(request), WasAutoClassified: false);
 
-        return (await _classifiers.Default.ClassifyAsync(request, ct).ConfigureAwait(false), WasAutoClassified: true);
+        return (await _classifiers.Auto.ClassifyAsync(request, ct).ConfigureAwait(false), WasAutoClassified: true);
     }
 
     /// <summary>An effort is an explicit operator decision when it is non-blank and not the "auto" sentinel.</summary>

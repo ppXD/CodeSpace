@@ -107,7 +107,8 @@ public static class SupervisorDecisionSchema
                       "targetRepos": { "type": "array", "items": { "type": "object", "additionalProperties": false, "properties": { "repositoryId": { "type": "string" }, "alias": { "type": "string" }, "access": { "type": "string", "enum": ["read", "write"] } }, "required": ["repositoryId"] }, "description": "Optional related-repo subset for this agent — clamped to a subset of the operator's bound repos with no access upgrade." },
                       "harness": { "type": "string", "description": "Optional harness request (granted only if the operator allow-list permits)." },
                       "model": { "type": "string", "description": "Optional model request." },
-                      "autonomyLevel": { "type": "string", "enum": ["confined", "standard", "trusted", "unleashed"], "description": "Optional autonomy request (one of the four tiers) — clamped to the run profile's ceiling, never raised past it." }
+                      "autonomyLevel": { "type": "string", "enum": ["confined", "standard", "trusted", "unleashed"], "description": "Optional autonomy request (one of the four tiers) — clamped to the run profile's ceiling, never raised past it." },
+                      "agentDefinition": { "type": "string", "description": "Optional Agent persona for this agent — the SLUG of one of the team's personas listed in the capability catalog (e.g. 'security-reviewer'). Gives this agent that persona's specialist prompt/model/tools. Must be a slug the catalog lists (fail-closed otherwise). Omit to use the run-level profile persona." }
                     },
                     "required": ["subtaskId"]
                   },

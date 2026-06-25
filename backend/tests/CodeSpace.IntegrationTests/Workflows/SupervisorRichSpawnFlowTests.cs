@@ -158,6 +158,91 @@ public class SupervisorRichSpawnFlowTests : IDisposable
         spawn.Error.ShouldNotBeNull();
     }
 
+    [Fact]
+    public async Task A_spawn_authoring_a_per_agent_persona_slug_resolves_and_overrides_the_profile_persona()
+    {
+        // P3 — the model authors a DISTINCT persona for this agent via the dispatch's AgentDefinition slug. The server
+        // resolves it to the team AgentDefinitionId and merges it (system prompt prepended), OVERRIDING the run-level
+        // profile persona — so the brain can give each agent a specialist persona, not just the homogeneous default.
+        using (var s = _fixture.BeginScope()) s.Resolve<SupervisorDecisionScript>().PlanSpawnPersonaStop();
+
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+
+        var profilePersonaId = await SeedPersonaAsync(teamId, "Profile persona prompt.", model: null, toolsJson: null);
+        var dispatchPersonaId = await SeedPersonaAsync(teamId, "You are a security reviewer.", model: null, toolsJson: null, slug: ScriptedSupervisorDecider.DispatchPersonaSlug);
+
+        var workflowId = await CreateConfigWorkflowAsync(teamId, userId, $$"""{ "goal": "ship it", "agentProfile": { "agentDefinitionId": "{{profilePersonaId}}" } }""");
+        var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
+
+        var jobClient = ResolveJobClient();
+        jobClient.Clear();
+        jobClient.AutoExecute = false;
+
+        try
+        {
+            await RunEngineAsync(runId);
+            await ResolveSelfAdvanceAsync(runId);
+            await RunEngineAsync(runId);
+
+            using var verify = _fixture.BeginScope();
+            var db = verify.Resolve<CodeSpaceDbContext>();
+
+            var spawned = await db.AgentRun.AsNoTracking().Where(r => r.WorkflowRunId == runId).ToListAsync();
+            spawned.Count.ShouldBe(1, "the persona spawn staged exactly one agent");
+
+            var task = JsonSerializer.Deserialize<AgentTask>(spawned[0].TaskJson, AgentJson.Options)!;
+            task.AgentDefinitionId.ShouldBe(dispatchPersonaId, "the model-authored per-agent persona OVERRODE the run-level profile persona");
+            task.Goal.ShouldBe("You are a security reviewer.\n\ndo alpha", "the DISPATCH persona's system prompt is prepended (the merge ran on the dispatched persona, not the profile one)");
+        }
+        finally
+        {
+            jobClient.AutoExecute = true;
+        }
+    }
+
+    [Fact]
+    public async Task A_spawn_authoring_an_unknown_persona_slug_fails_closed_without_stranding_the_decision()
+    {
+        // P3 — the brain only authors slugs the catalog lists; a slug NO active team persona has must fail closed (a
+        // clean terminal, like an out-of-pool model), NOT silently fall back to the profile persona.
+        using (var s = _fixture.BeginScope()) s.Resolve<SupervisorDecisionScript>().PlanSpawnBadPersonaStop();
+
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+
+        var workflowId = await CreateConfigWorkflowAsync(teamId, userId, """{ "goal": "ship it" }""");
+        var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
+
+        var jobClient = ResolveJobClient();
+        jobClient.Clear();
+
+        await RunEngineAsync(runId);
+        await ResolveSelfAdvanceAsync(runId);
+        try { await RunEngineAsync(runId); } catch { /* the clamp failure surfaces through the node; asserted below */ }
+
+        using var verify = _fixture.BeginScope();
+        var db = verify.Resolve<CodeSpaceDbContext>();
+
+        var spawn = await db.SupervisorDecisionRecord.AsNoTracking().SingleAsync(d => d.SupervisorRunId == runId && d.DecisionKind == SupervisorDecisionKinds.Spawn);
+        spawn.Status.ShouldBe(SupervisorDecisionStatus.Failed, "an unknown per-agent persona slug terminalized the spawn — a clean Failed, not a stranded Running");
+        spawn.Error.ShouldNotBeNull();
+        spawn.Error!.ShouldContain(ScriptedSupervisorDecider.MissingPersonaSlug, Case.Insensitive);
+
+        (await db.AgentRun.AsNoTracking().CountAsync(r => r.WorkflowRunId == runId)).ShouldBe(0, "no agent staged — the persona clamp rejected the unknown slug");
+    }
+
+    private async Task<Guid> CreateConfigWorkflowAsync(Guid teamId, Guid userId, string config)
+    {
+        using var scope = _fixture.BeginScopeAs(userId, teamId, Roles.Admin);
+        return await scope.Resolve<IMediator>().Send(new CreateWorkflowCommand
+        {
+            Name = "sup-p3-" + Guid.NewGuid().ToString("N")[..6],
+            Description = null,
+            Definition = SupervisorDefinitionWithConfig(config),
+            Activations = new List<WorkflowActivationInput>(),
+            Enabled = true,
+        });
+    }
+
     /// <summary>Assert one spawned task is a REAL team agent: every profile field + the persona-merged model / tools / credential — what an agent.code node with the same config would produce.</summary>
     private static void AssertRichTeamAgent(AgentTask task, Guid repoId, Guid personaId, Guid conversationId, Guid expectedCredentialId)
     {
@@ -200,7 +285,7 @@ public class SupervisorRichSpawnFlowTests : IDisposable
         return repoId;
     }
 
-    private async Task<Guid> SeedPersonaAsync(Guid teamId, string systemPrompt, string? model, string? toolsJson)
+    private async Task<Guid> SeedPersonaAsync(Guid teamId, string systemPrompt, string? model, string? toolsJson, string? slug = null)
     {
         using var scope = _fixture.BeginScope();
         var db = scope.Resolve<CodeSpaceDbContext>();
@@ -210,7 +295,7 @@ public class SupervisorRichSpawnFlowTests : IDisposable
         {
             Id = Guid.NewGuid(),
             TeamId = teamId,
-            Slug = "persona-" + Guid.NewGuid().ToString("N")[..8],
+            Slug = slug ?? "persona-" + Guid.NewGuid().ToString("N")[..8],
             Name = "Billing persona",
             SystemPrompt = systemPrompt,
             Model = model,

@@ -92,10 +92,51 @@ public sealed class ModelPoolSelector : IModelPoolSelector, IScopedDependency
         // Tie-break by row id for a deterministic pick when two credentials of the team back the same model id.
         var row = await query
             .OrderBy(m => m.Id)
-            .Select(m => new { m.ModelId, m.ModelCredentialId })
+            .Select(m => new { m.ModelId, m.ModelCredentialId, m.Credential.Provider })
             .FirstOrDefaultAsync(cancellationToken).ConfigureAwait(false);
 
-        return row == null ? null : new ModelDispatchRef { ModelId = row.ModelId, ModelCredentialId = row.ModelCredentialId };
+        return row == null ? null : new ModelDispatchRef { ModelId = row.ModelId, ModelCredentialId = row.ModelCredentialId, Provider = row.Provider };
+    }
+
+    public async Task<IReadOnlyList<PoolModelInfo>> ListPoolAsync(Guid teamId, IReadOnlyList<Guid>? allowedRowIds, CancellationToken cancellationToken)
+    {
+        var query = _db.ModelCredentialModel.AsNoTracking()
+            .Where(m => m.Enabled && m.Credential.TeamId == teamId && m.Credential.DeletedDate == null && m.Credential.Status == CredentialStatus.Active);
+
+        if (allowedRowIds is { Count: > 0 }) query = query.Where(m => allowedRowIds.Contains(m.Id));
+
+        // Project the two columns on the DB side; dedupe + total-order + map in memory (a team's pool is small, and EF
+        // can't translate Distinct→OrderBy over a constructed record). A model name can exist under two providers (both
+        // harnesses list Custom), so the (id, provider) pair is the dedup key + the stable render order.
+        var rows = await query
+            .Select(m => new { m.ModelId, m.Credential.Provider })
+            .ToListAsync(cancellationToken)
+            .ConfigureAwait(false);
+
+        return rows
+            .Distinct()
+            .OrderBy(r => r.ModelId, StringComparer.Ordinal).ThenBy(r => r.Provider, StringComparer.Ordinal)
+            .Select(r => new PoolModelInfo(r.ModelId, r.Provider))
+            .ToList();
+    }
+
+    public async Task<Guid?> SelectBrainRowIdAsync(Guid teamId, IReadOnlyCollection<string> eligibleProviders, CancellationToken cancellationToken)
+    {
+        if (eligibleProviders.Count == 0) return null;
+
+        // Lower-case the eligible providers for a case-insensitive provider match (parity with the rest of the selector),
+        // matched in-memory: the small set isn't worth an EF Contains over a constructed list, and a structured-provider
+        // set is a handful of names. The DB query is the same active-credential / enabled predicate as the pool.
+        var eligible = eligibleProviders.Select(p => p.ToLower()).ToHashSet();
+
+        var rows = await _db.ModelCredentialModel.AsNoTracking()
+            .Where(m => m.Enabled && m.Credential.TeamId == teamId && m.Credential.DeletedDate == null && m.Credential.Status == CredentialStatus.Active)
+            .OrderBy(m => m.ModelId).ThenBy(m => m.Id)
+            .Select(m => new { m.Id, Provider = m.Credential.Provider })
+            .ToListAsync(cancellationToken).ConfigureAwait(false);
+
+        // First row (in the deterministic order) whose provider a structured client serves → a replay re-derives the SAME brain.
+        return rows.FirstOrDefault(r => eligible.Contains(r.Provider.ToLower()))?.Id;
     }
 
     private ModelPoolPick ToPick(string modelId, string provider, string? encryptedApiKey, string? baseUrl) => new()
