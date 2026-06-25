@@ -52,7 +52,7 @@ public class SupervisorAgentDispatchTests
         var json = JsonSerializer.Serialize(new SupervisorAgentDispatch { SubtaskId = "s1" }, AgentJson.Options);
 
         json.ShouldBe("""{"subtaskId":"s1"}""");
-        foreach (var field in new[] { "role", "goalOverride", "repositoryId", "targetRepos", "harness", "model", "autonomyLevel" })
+        foreach (var field in new[] { "role", "goalOverride", "repositoryId", "targetRepos", "harness", "model", "autonomyLevel", "agentDefinition" })
             json.ShouldNotContain(field, Case.Insensitive, $"a null {field} must be omitted, not emitted as null (byte-identity)");
     }
 
@@ -70,6 +70,7 @@ public class SupervisorAgentDispatchTests
             Harness = "codex-cli",
             Model = "claude-opus-4-8",
             AutonomyLevel = "trusted",
+            AgentDefinition = "security-reviewer",
         };
 
         var back = JsonSerializer.Deserialize<SupervisorAgentDispatch>(JsonSerializer.Serialize(original, AgentJson.Options), AgentJson.Options)!;
@@ -81,6 +82,7 @@ public class SupervisorAgentDispatchTests
         back.Harness.ShouldBe("codex-cli");
         back.Model.ShouldBe("claude-opus-4-8");
         back.AutonomyLevel.ShouldBe("trusted");
+        back.AgentDefinition.ShouldBe("security-reviewer", "the per-agent persona slug round-trips for the server to resolve + clamp");
         back.TargetRepos!.Value.EnumerateArray().Single().GetProperty("alias").GetString().ShouldBe("api", "the raw repo subset round-trips for the shared parser to clamp later");
     }
 

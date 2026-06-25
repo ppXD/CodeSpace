@@ -28,8 +28,10 @@ public sealed partial class RealSupervisorActionExecutor
 
         // Fan out over the subtask ids; for each, apply the model-authored per-agent dispatch override (L4 arc B) when
         // the spawn carries one keyed by that subtask id, else build a homogeneous profile clone (byte-identical to before).
+        // The dispatch spec rides ALONGSIDE the task so the async stage can resolve its per-agent persona slug (P3) on a
+        // FRESH stage only — a crash-recovery orphan reclaim reuses the already-resolved task and never re-resolves.
         var tasks = spawn.SubtaskIds
-            .Select(id => { var spec = DispatchFor(spawn, id); return BuildAgentTask(subtasks, id, spec?.GoalOverride, context, spec); })
+            .Select(id => { var spec = DispatchFor(spawn, id); return (BuildAgentTask(subtasks, id, spec?.GoalOverride, context, spec), spec); })
             .ToList();
 
         return await StageAgentsAndParkAsync(tasks, context, cancellationToken).ConfigureAwait(false);
@@ -46,8 +48,8 @@ public sealed partial class RealSupervisorActionExecutor
         var subtasks = ResolvePlannedSubtasks(context);
 
         var tasks = retry == null || string.IsNullOrWhiteSpace(retry.SubtaskId)
-            ? new List<AgentTask>()
-            : new List<AgentTask> { BuildAgentTask(subtasks, retry.SubtaskId, retry.RevisedInstruction, context) };
+            ? new List<(AgentTask, SupervisorAgentDispatch?)>()
+            : new List<(AgentTask, SupervisorAgentDispatch?)> { (BuildAgentTask(subtasks, retry.SubtaskId, retry.RevisedInstruction, context), null) };
 
         return await StageAgentsAndParkAsync(tasks, context, cancellationToken).ConfigureAwait(false);
     }
@@ -75,7 +77,7 @@ public sealed partial class RealSupervisorActionExecutor
     /// otherwise), so neither an existing turn-wait nor a <c>Queued</c> agent here can be a healthy other-turn
     /// in-flight item — both are necessarily THIS decision's crash residue.</para>
     /// </summary>
-    private async Task<SupervisorExecution> StageAgentsAndParkAsync(IReadOnlyList<AgentTask> tasks, SupervisorTurnContext context, CancellationToken cancellationToken)
+    private async Task<SupervisorExecution> StageAgentsAndParkAsync(IReadOnlyList<(AgentTask Task, SupervisorAgentDispatch? Spec)> tasks, SupervisorTurnContext context, CancellationToken cancellationToken)
     {
         if (tasks.Count == 0)
             return SupervisorExecution.Synchronous(JsonSerializer.Serialize(new { agentRunIds = Array.Empty<Guid>(), agentCount = 0, note = "no subtasks to spawn" }, AgentJson.Options));
@@ -100,7 +102,7 @@ public sealed partial class RealSupervisorActionExecutor
             // guard governs it.
             var agentRunId = k < orphans.Count
                 ? orphans[k]
-                : await CreateResolvedAgentRunAsync(tasks[k], context, cancellationToken).ConfigureAwait(false);
+                : await CreateResolvedAgentRunAsync(tasks[k].Task, tasks[k].Spec, context, cancellationToken).ConfigureAwait(false);
 
             StageAgentWait(context, k, agentRunId);
             agentRunIds.Add(agentRunId);
@@ -202,8 +204,14 @@ public sealed partial class RealSupervisorActionExecutor
     /// the turn service records a terminal failure (no stranded-Running decision) and the node fails cleanly
     /// (composing with node retry + the <c>error</c> branch) — not a misleading engine-bootstrap failure.</para>
     /// </summary>
-    private async Task<Guid> CreateResolvedAgentRunAsync(AgentTask task, SupervisorTurnContext context, CancellationToken cancellationToken)
+    private async Task<Guid> CreateResolvedAgentRunAsync(AgentTask task, SupervisorAgentDispatch? spec, SupervisorTurnContext context, CancellationToken cancellationToken)
     {
+        // P3 — resolve the model-authored per-agent persona SLUG to a team AgentDefinitionId and stamp it BEFORE the
+        // persona MERGE below, so a per-agent persona actually embodies (its system prompt / model / tools fold in via
+        // ResolveAsync). A FRESH-stage-only pre-transform (this method runs only for non-orphan slots), so a crash
+        // reclaim that reuses the already-resolved TaskJson never re-resolves a renamed/deleted persona.
+        task = await ApplyDispatchPersonaAsync(task, spec, context, cancellationToken).ConfigureAwait(false);
+
         AgentTask resolved;
 
         try
@@ -236,6 +244,25 @@ public sealed partial class RealSupervisorActionExecutor
     /// the team's credentialed models). A null effective model is the harness default (no name → no gate). Out of pool →
     /// <see cref="SupervisorModelAccessException"/> (fail-closed, terminalized by the turn service's catch).
     /// </summary>
+    /// <summary>
+    /// Resolve a model-authored per-agent persona SLUG (L4 — the third Auto axis) to a team-scoped
+    /// <c>AgentDefinitionId</c> and stamp it, OVERRIDING the run-level profile persona <see cref="BuildTaskWithGoal"/>
+    /// seeded — so each agent can embody a DISTINCT persona the brain picked from the catalog (its system prompt /
+    /// model / tools then merge in the <c>ResolveAsync</c> step that follows). FAIL-CLOSED on an unknown / foreign /
+    /// deleted slug (a clean terminal, mirroring <see cref="ApplyDispatchModelAsync"/>'s out-of-pool throw) — the brain
+    /// only authors slugs the catalog lists. No slug → unchanged (the profile persona stands; byte-identical to a
+    /// homogeneous spawn).
+    /// </summary>
+    private async Task<AgentTask> ApplyDispatchPersonaAsync(AgentTask task, SupervisorAgentDispatch? spec, SupervisorTurnContext context, CancellationToken cancellationToken)
+    {
+        if (NullIfBlank(spec?.AgentDefinition) is not { } slug) return task;
+
+        var personaId = await _agentDefinitionResolver.ResolveSlugAsync(slug, context.TeamId, cancellationToken).ConfigureAwait(false)
+            ?? throw new AgentDefinitionResolutionException($"agent.supervisor spawn requests persona '{slug}', which is not an active persona in this team's library.");
+
+        return task with { AgentDefinitionId = personaId };
+    }
+
     private async Task<AgentTask> ApplyDispatchModelAsync(AgentTask resolved, SupervisorTurnContext context, CancellationToken cancellationToken)
     {
         if (NullIfBlank(resolved.Model) is not { } effectiveModel) return resolved;

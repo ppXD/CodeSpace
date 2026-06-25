@@ -40,7 +40,7 @@ public sealed class RealModelSupervisorTrajectoryFlowTests
 
         var credential = new ResolvedModelCredential { Provider = provider, BaseUrl = BaseUrlFor(provider, baseUrl), ApiKey = apiKey };
         var registry = new LLMClientRegistry(new ILLMClient[] { new AnthropicClient(SharedHttp), new OpenAiClient(SharedHttp) });
-        var decider = new LlmSupervisorDecider(registry, new FixedCredentialSelector(model, credential), new CodeSpace.Core.Services.Agents.AgentHarnessRegistry(System.Array.Empty<CodeSpace.Core.Services.Agents.IAgentHarness>()));
+        var decider = new LlmSupervisorDecider(registry, new FixedCredentialSelector(model, credential), new CodeSpace.Core.Services.Agents.AgentHarnessRegistry(System.Array.Empty<CodeSpace.Core.Services.Agents.IAgentHarness>()), RealModelLiveWire.Personas());
 
         // The SUCCESS path proves convergence; the four RECOVERY paths prove the live brain handles a merge conflict,
         // an agent failure, a PERSISTENT conflict (it must NOT accept the first unverified resolution and must resolve

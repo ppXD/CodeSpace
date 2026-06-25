@@ -18,4 +18,7 @@ public interface IAgentDefinitionResolver
 {
     /// <summary>Merge the task's persona (if any) into it. Throws <see cref="AgentDefinitionResolutionException"/> when a referenced persona can't be resolved for the team or the merge yields nothing to run.</summary>
     Task<AgentTask> ResolveAsync(AgentTask task, Guid teamId, CancellationToken cancellationToken);
+
+    /// <summary>Resolve a persona @-mention SLUG to its team-scoped <c>AgentDefinitionId</c> (the handle is normalized the SAME way authoring derives it, so a name or a slug both resolve). Returns null when no active persona in the team has that slug — the caller decides whether that is fail-closed or a fallback. Team-scoped + <c>DeletedDate == null</c>, so a foreign / soft-deleted slug never resolves.</summary>
+    Task<Guid?> ResolveSlugAsync(string slug, Guid teamId, CancellationToken cancellationToken);
 }

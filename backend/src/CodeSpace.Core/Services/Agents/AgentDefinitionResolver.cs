@@ -77,6 +77,22 @@ public sealed class AgentDefinitionResolver : IAgentDefinitionResolver, IScopedD
         return task with { Model = row.ModelId, ModelCredentialId = row.ModelCredentialId };
     }
 
+    public async Task<Guid?> ResolveSlugAsync(string slug, Guid teamId, CancellationToken cancellationToken)
+    {
+        // Normalize the handle the SAME way authoring derives a slug from a name, so a brain that authored a display
+        // name ("Security Reviewer") or the exact handle ("security-reviewer") both resolve. A handle that yields no
+        // slug → no match (null). Team-scoped + non-deleted, mirroring LoadPersonaAsync so a foreign / soft-deleted
+        // slug never resolves.
+        var normalized = AgentDefinitionService.DeriveSlug(slug);
+
+        if (normalized.Length == 0) return null;
+
+        return await _db.AgentDefinition.AsNoTracking()
+            .Where(a => a.TeamId == teamId && a.Slug == normalized && a.DeletedDate == null)
+            .Select(a => (Guid?)a.Id)
+            .SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
+    }
+
     private async Task<AgentDefinition> LoadPersonaAsync(Guid id, Guid teamId, CancellationToken cancellationToken) =>
         await _db.AgentDefinition.AsNoTracking()
             .SingleOrDefaultAsync(a => a.Id == id && a.TeamId == teamId && a.DeletedDate == null, cancellationToken).ConfigureAwait(false)

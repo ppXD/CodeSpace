@@ -196,7 +196,52 @@ public class AgentDefinitionResolverFlowTests
         return await scope.Resolve<IAgentDefinitionResolver>().ResolveAsync(task, teamId, CancellationToken.None);
     }
 
-    private async Task<Guid> SeedPersonaAsync(Guid teamId, string systemPrompt, string? model, string? toolsJson = null, Guid? modelCredentialId = null)
+    // ── ResolveSlugAsync (P3): the brain-authored slug → team AgentDefinitionId lookup ─────────────────
+
+    [Fact]
+    public async Task ResolveSlugAsync_resolves_a_known_slug_and_normalizes_a_display_name_to_it()
+    {
+        var teamId = await SeedTeamAsync();
+        var id = await SeedPersonaAsync(teamId, "Reviewer.", model: null, slug: "security-reviewer");
+
+        (await ResolveSlugAsync("security-reviewer", teamId)).ShouldBe(id, "an exact slug resolves to its persona id");
+        (await ResolveSlugAsync("Security Reviewer", teamId)).ShouldBe(id, "a display name is normalized via DeriveSlug to the same handle and resolves");
+    }
+
+    [Fact]
+    public async Task ResolveSlugAsync_returns_null_for_an_unknown_slug()
+    {
+        var teamId = await SeedTeamAsync();
+
+        (await ResolveSlugAsync("nope-not-here", teamId)).ShouldBeNull("an unknown slug returns null — the caller decides fail-closed");
+    }
+
+    [Fact]
+    public async Task ResolveSlugAsync_is_team_scoped_and_soft_delete_aware()
+    {
+        var teamA = await SeedTeamAsync();
+        var teamB = await SeedTeamAsync();
+        var idInA = await SeedPersonaAsync(teamA, "Team A.", model: null, slug: "shared-slug");
+
+        (await ResolveSlugAsync("shared-slug", teamB)).ShouldBeNull("a slug only resolves within its own team — never a cross-team read");
+
+        using (var scope = _fixture.BeginScope())
+        {
+            var db = scope.Resolve<CodeSpaceDbContext>();
+            (await db.AgentDefinition.SingleAsync(a => a.Id == idInA)).DeletedDate = DateTimeOffset.UtcNow;
+            await db.SaveChangesAsync();
+        }
+
+        (await ResolveSlugAsync("shared-slug", teamA)).ShouldBeNull("a soft-deleted persona's slug no longer resolves");
+    }
+
+    private async Task<Guid?> ResolveSlugAsync(string slug, Guid teamId)
+    {
+        using var scope = _fixture.BeginScope();
+        return await scope.Resolve<IAgentDefinitionResolver>().ResolveSlugAsync(slug, teamId, CancellationToken.None);
+    }
+
+    private async Task<Guid> SeedPersonaAsync(Guid teamId, string systemPrompt, string? model, string? toolsJson = null, Guid? modelCredentialId = null, string? slug = null)
     {
         using var scope = _fixture.BeginScope();
         var db = scope.Resolve<CodeSpaceDbContext>();
@@ -206,7 +251,7 @@ public class AgentDefinitionResolverFlowTests
         {
             Id = Guid.NewGuid(),
             TeamId = teamId,
-            Slug = "persona-" + Guid.NewGuid().ToString("N")[..8],
+            Slug = slug ?? "persona-" + Guid.NewGuid().ToString("N")[..8],
             Name = "Persona",
             SystemPrompt = systemPrompt,
             Model = model,

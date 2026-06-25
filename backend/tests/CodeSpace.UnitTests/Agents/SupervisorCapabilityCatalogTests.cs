@@ -75,6 +75,33 @@ public class SupervisorCapabilityCatalogTests
             "no catalog → the prior framing is byte-identical (existing decider tests stay green)");
     }
 
+    [Fact]
+    public void Catalog_lists_each_team_persona_by_slug_name_and_description_sorted_by_slug()
+    {
+        var personas = new[]
+        {
+            new PersonaCatalogInfo("security-reviewer", "Security Reviewer", "Audits for vulnerabilities"),
+            new PersonaCatalogInfo("backend-impl", "Backend Implementer", null),
+        };
+
+        var catalog = CapabilityCatalog.Render(Harnesses, Array.Empty<PoolModelInfo>(), personas);
+
+        catalog.ShouldContain("backend-impl — Backend Implementer", Case.Sensitive, "a persona with no description renders slug — name");
+        catalog.ShouldContain("security-reviewer — Security Reviewer — Audits for vulnerabilities", Case.Sensitive, "a persona with a description renders slug — name — description");
+        catalog.IndexOf("backend-impl", StringComparison.Ordinal).ShouldBeLessThan(catalog.IndexOf("security-reviewer", StringComparison.Ordinal), "personas render in a stable slug order");
+        catalog.ShouldContain("Author a per-agent persona by its SLUG", Case.Insensitive, "the catalog tells the brain how to use a persona");
+    }
+
+    [Fact]
+    public void No_personas_omit_the_persona_section_byte_for_byte_the_planner_path()
+    {
+        var withNull = CapabilityCatalog.Render(Harnesses, Array.Empty<PoolModelInfo>());
+        var withEmpty = CapabilityCatalog.Render(Harnesses, Array.Empty<PoolModelInfo>(), Array.Empty<PersonaCatalogInfo>());
+
+        withNull.ShouldBe(withEmpty, "an absent/empty persona list renders identically — the planner's two-arg call is byte-identical");
+        withNull.ShouldNotContain("persona", Case.Insensitive, "no persona section is emitted when the team has no personas");
+    }
+
     private sealed class FakeHarness : IAgentHarness, IModelCredentialProjector
     {
         public FakeHarness(string kind, params string[] providers) { Kind = kind; SupportedProviders = providers; }

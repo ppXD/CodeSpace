@@ -27,12 +27,14 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
     private readonly ILLMClientRegistry _clientRegistry;
     private readonly IModelPoolSelector _modelSelector;
     private readonly IAgentHarnessRegistry _harnesses;
+    private readonly IAgentDefinitionService _agentDefinitions;
 
-    public LlmSupervisorDecider(ILLMClientRegistry clientRegistry, IModelPoolSelector modelSelector, IAgentHarnessRegistry harnesses)
+    public LlmSupervisorDecider(ILLMClientRegistry clientRegistry, IModelPoolSelector modelSelector, IAgentHarnessRegistry harnesses, IAgentDefinitionService agentDefinitions)
     {
         _clientRegistry = clientRegistry;
         _modelSelector = modelSelector;
         _harnesses = harnesses;
+        _agentDefinitions = agentDefinitions;
     }
 
     public async Task<SupervisorDecision> DecideAsync(SupervisorTurnContext context, CancellationToken cancellationToken)
@@ -98,7 +100,12 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
     {
         var pool = await _modelSelector.ListPoolAsync(context.TeamId, context.AllowedModelIds, cancellationToken).ConfigureAwait(false);
 
-        return RenderCatalog(_harnesses.All, pool);
+        // P3 — the team's persona library, so the brain authors a per-agent persona by slug. Mapped to the minimal
+        // render noun (slug/name/description); empty when the team has no personas (the section is then omitted).
+        var personas = (await _agentDefinitions.ListAsync(context.TeamId, cancellationToken).ConfigureAwait(false))
+            .Select(p => new PersonaCatalogInfo(p.Slug, p.Name, p.Description)).ToList();
+
+        return RenderCatalog(_harnesses.All, pool, personas);
     }
 
     /// <summary>
@@ -112,8 +119,8 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
     /// provider may differ from the catalog line the brain reasoned about. Non-fatal: the authoring-time clamp +
     /// run-time reconciler bind a compatible harness regardless. Surfacing the provider per name is the P2 follow-up.</para>
     /// </summary>
-    internal static string RenderCatalog(IReadOnlyList<IAgentHarness> harnesses, IReadOnlyList<PoolModelInfo> pool) =>
-        CapabilityCatalog.Render(harnesses, pool);
+    internal static string RenderCatalog(IReadOnlyList<IAgentHarness> harnesses, IReadOnlyList<PoolModelInfo> pool, IReadOnlyList<PersonaCatalogInfo>? personas = null) =>
+        CapabilityCatalog.Render(harnesses, pool, personas);
 
     private static StructuredLLMCompletionRequest BuildRequest(SupervisorTurnContext context, ModelPoolPick pick, string catalog) => new()
     {
@@ -279,10 +286,11 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
         "did not satisfy the goal (optionally with a revised instruction), and merge only once the results you need have " +
         "succeeded. Stop when the goal is met or a bound forces it. " +
         "When you spawn, you MAY optionally author a per-agent 'agents[]' override (one entry per subtask id) to give " +
-        "each agent a DISTINCT role, goal, repo subset, harness, model, or a LOWER autonomy — use it when the subtasks " +
-        "need different specialisations (e.g. a backend implementer and a separate reviewer); omit 'agents[]' to fan out " +
-        "homogeneous agents (the default). The server CLAMPS every per-agent field to the operator's grant: a repo subset " +
-        "must lie within the run's bound repos and autonomy is never raised above the run's ceiling. " +
+        "each agent a DISTINCT role, goal, repo subset, harness, model, persona, or a LOWER autonomy — use it when the " +
+        "subtasks need different specialisations (e.g. a backend implementer and a separate reviewer); omit 'agents[]' to " +
+        "fan out homogeneous agents (the default). To give an agent a specialist persona, set 'agentDefinition' to a " +
+        "persona SLUG from the capability catalog. The server CLAMPS every per-agent field to the operator's grant: a " +
+        "repo subset must lie within the run's bound repos and autonomy is never raised above the run's ceiling. " +
         "When you 'stop', you MAY optionally author an objective 'acceptance' definition-of-done — an argv 'command' the " +
         "server RUNS against the integrated result to verify the goal is met (it is AND-ed with the operator's own " +
         "acceptance floor, never replaces it) — but author it ONLY when the goal itself names a concrete runnable check " +

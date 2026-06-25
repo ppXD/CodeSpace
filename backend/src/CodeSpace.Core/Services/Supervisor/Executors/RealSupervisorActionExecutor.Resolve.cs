@@ -50,7 +50,7 @@ public sealed partial class RealSupervisorActionExecutor
 
         _logger.LogInformation("Supervisor staging a resolver agent at turn {Turn} to reconcile {Count} branch(es)", context.TurnNumber, branches.Count);
 
-        return await StageAgentsAndParkAsync(new[] { task }, context, cancellationToken).ConfigureAwait(false);
+        return await StageAgentsAndParkAsync(new (AgentTask, SupervisorAgentDispatch?)[] { (task, null) }, context, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -81,7 +81,7 @@ public sealed partial class RealSupervisorActionExecutor
 
         _logger.LogInformation("Supervisor staging a multi-repo resolver agent at turn {Turn} to reconcile {Count} repositor(ies)", context.TurnNumber, sections.Count);
 
-        return await StageAgentsAndParkAsync(new[] { task }, context, cancellationToken).ConfigureAwait(false);
+        return await StageAgentsAndParkAsync(new (AgentTask, SupervisorAgentDispatch?)[] { (task, null) }, context, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>The non-null skip reason when a multi-repo resolution has nothing to do, else null. Distinct, legible fail-safes. The related-repos arm is defence-in-depth: a multi-repo conflict implies the run's profile HAD related repos (the spawn was multi-repo), but a misconfigured / replayed profile with none would project only a single-repo workspace whose per-repo subdirs the recipe references don't exist — so degrade to a no-op rather than stage a resolver into a workspace its instruction can't navigate.</summary>
