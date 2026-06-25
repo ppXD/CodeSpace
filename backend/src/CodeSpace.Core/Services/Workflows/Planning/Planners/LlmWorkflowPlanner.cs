@@ -33,12 +33,13 @@ public sealed class LlmWorkflowPlanner : IWorkflowPlanner, IScopedDependency
 
     public async Task<PlannedWorkflow> PlanAsync(WorkflowPlanRequest request, CancellationToken cancellationToken)
     {
-        var structured = ResolveStructuredClient();
+        // Resolve a structured client + a team pool model that MATCH — iterate the registered structured providers so a
+        // team whose pool is ALL one provider (e.g. all Custom-gateway models) plans on THAT provider's client, not a
+        // provider-blind first pick that would find no model.
+        if (await InProcessStructuredModel.ResolveAsync(_clientRegistry, _modelSelector, request.TeamId, cancellationToken).ConfigureAwait(false) is not { } resolved)
+            throw new InvalidOperationException("No structured-output LLM provider has a credentialed, enabled model in the team's pool. Add a model whose provider a registered structured client serves (Anthropic / OpenAI / a Custom OpenAI-compatible gateway).");
 
-        var pick = await _modelSelector.SelectAsync(request.TeamId, structured.Provider, allowedModels: null, pinnedModel: null, cancellationToken).ConfigureAwait(false);
-
-        if (pick == null)
-            throw new InvalidOperationException($"No model is available in the team's pool for provider '{structured.Provider}'. Add a credentialed, enabled model to plan tasks.");
+        var (structured, pick) = resolved;
 
         // P2 — render the capability catalog (harnesses + drivable providers, the team's whole credentialed pool) so the
         // planner allocates a provider-compatible harness + model PER subtask informed, not blind. The run-time
@@ -49,17 +50,6 @@ public sealed class LlmWorkflowPlanner : IWorkflowPlanner, IScopedDependency
         var completion = await structured.CompleteStructuredAsync(BuildRequest(request, pick, catalog), cancellationToken).ConfigureAwait(false);
 
         return Deserialize(completion.Json);
-    }
-
-    /// <summary>The first registered client that ALSO offers structured output (ISP feature-detect via cast). A deployment with only a plain-text provider gets a clean failure, not a malformed plan.</summary>
-    private IStructuredLLMClient ResolveStructuredClient()
-    {
-        var structured = _clientRegistry.All.OfType<IStructuredLLMClient>().FirstOrDefault();
-
-        if (structured == null)
-            throw new InvalidOperationException("No structured-output-capable LLM provider is registered. The task planner needs a provider that supports schema-constrained JSON.");
-
-        return structured;
     }
 
     private static StructuredLLMCompletionRequest BuildRequest(WorkflowPlanRequest request, ModelPoolPick pick, string catalog) => new()

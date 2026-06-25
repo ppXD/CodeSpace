@@ -194,6 +194,19 @@ public class ModelPoolSelectorFlowTests
     }
 
     [Fact]
+    public async Task SelectBrainRowId_picks_a_Custom_provider_row_when_Custom_is_eligible()
+    {
+        // Custom endpoints to the supervisor: once "Custom" is a registered structured provider, a Custom-tagged pool
+        // model is an eligible supervisor BRAIN — so a team whose pool is all-Custom still bakes a brain (no NoBrainModelStop).
+        var teamId = await SeedTeamAsync();
+        var credId = await SeedCredentialAsync(teamId, "Custom", key: "gw-key");
+        var row = await AddModelReturningIdAsync(credId, "metis-coder-max");
+
+        (await SelectBrainRowIdAsync(teamId, "Custom")).ShouldBe(row, "a Custom-tagged credentialed model is an eligible brain row");
+        (await SelectBrainRowIdAsync(teamId, "OpenAI", "Anthropic")).ShouldBeNull("but only when 'Custom' is in the eligible set — it is not OpenAI/Anthropic");
+    }
+
+    [Fact]
     public async Task SelectBrainRowId_returns_null_when_no_enabled_row_has_an_eligible_provider()
     {
         var teamId = await SeedTeamAsync();

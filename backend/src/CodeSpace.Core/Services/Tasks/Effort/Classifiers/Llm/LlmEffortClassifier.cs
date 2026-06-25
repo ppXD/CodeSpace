@@ -67,18 +67,15 @@ public sealed class LlmEffortClassifier : IEffortClassifier, IScopedDependency
         };
     }
 
-    /// <summary>The model's classification, or null when no structured provider / pool model is available, or the model path missed for ANY reason (a keyless credential the client rejects, a transport / gateway fault, a malformed reply) — the caller then falls to the heuristic baseline. Mirrors the planner's resolve (first structured client → a pool model for ITS provider).</summary>
+    /// <summary>The model's classification, or null when no structured provider has a team pool model, or the model path missed for ANY reason (a keyless credential the client rejects, a transport / gateway fault, a malformed reply) — the caller then falls to the heuristic baseline. Resolves a structured client + model that MATCH (so an all-Custom pool classifies on the Custom client), the same as the planner.</summary>
     private async Task<LlmEffortClassification?> TryClassifyWithModelAsync(EffortRouteRequest request, CancellationToken ct)
     {
-        var structured = _clients.All.OfType<IStructuredLLMClient>().FirstOrDefault();
-
-        if (structured is null) return null;
-
         try
         {
-            var pick = await _models.SelectAsync(request.Seed.TeamId, structured.Provider, allowedModels: null, pinnedModel: null, ct).ConfigureAwait(false);
+            if (await InProcessStructuredModel.ResolveAsync(_clients, _models, request.Seed.TeamId, ct).ConfigureAwait(false) is not { } resolved)
+                return null;
 
-            if (pick is null) return null;
+            var (structured, pick) = resolved;
 
             var completion = await structured.CompleteStructuredAsync(BuildRequest(request, pick), ct).ConfigureAwait(false);
 

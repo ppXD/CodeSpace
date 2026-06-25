@@ -2,6 +2,7 @@ using System.Net.Http;
 using CodeSpace.Core.Services.Agents.ModelCredentials;
 using CodeSpace.Core.Services.Workflows.Llm;
 using CodeSpace.Core.Services.Workflows.Llm.Anthropic;
+using CodeSpace.Core.Services.Workflows.Llm.Custom;
 using CodeSpace.Core.Services.Workflows.Llm.OpenAi;
 using CodeSpace.Messages.Agents;
 
@@ -21,8 +22,8 @@ internal static class RealModelLiveWire
     /// <summary>The env var's value, or null when absent/blank — the honest self-skip signal (secrets unset ⇒ the gate skips green).</summary>
     public static string? Env(string name) => string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable(name)) ? null : Environment.GetEnvironmentVariable(name);
 
-    /// <summary>The real Anthropic + OpenAI structured clients over the shared HttpClient — the registry the live decider/arbiter resolves its provider-routed client from.</summary>
-    public static ILLMClientRegistry Registry() => new LLMClientRegistry(new ILLMClient[] { new AnthropicClient(SharedHttp), new OpenAiClient(SharedHttp) });
+    /// <summary>The real Anthropic + OpenAI + Custom structured clients over the shared HttpClient — the registry the live decider/arbiter resolves its provider-routed client from. Custom is the OpenAI-compatible wire re-tagged, so a Custom-tagged credential routes to it.</summary>
+    public static ILLMClientRegistry Registry() => new LLMClientRegistry(new ILLMClient[] { new AnthropicClient(SharedHttp), new OpenAiClient(SharedHttp), new CustomClient(SharedHttp) });
 
     /// <summary>The live credential for one wire: the provider + the per-provider base URL (derived from the single configured host) + the configured key.</summary>
     public static ResolvedModelCredential Credential(string provider, string baseUrl, string apiKey) =>
@@ -34,12 +35,12 @@ internal static class RealModelLiveWire
     /// <summary>An empty persona library (the decider lists it to render the persona pool into the catalog) — the real-model decision gates don't exercise per-agent personas, so an empty list keeps the catalog persona section absent.</summary>
     public static CodeSpace.Core.Services.Agents.IAgentDefinitionService Personas() => new EmptyPersonaLibrary();
 
-    /// <summary>Anthropic's client appends <c>/v1/messages</c> to the host base; OpenAI's appends <c>/chat/completions</c> to a <c>/v1</c> base — derive each from the single configured base so one gateway serves both wires.</summary>
+    /// <summary>Anthropic's client appends <c>/v1/messages</c> to the host base; OpenAI's (and Custom's — the same wire) appends <c>/chat/completions</c> to a <c>/v1</c> base — derive each from the single configured base so one gateway serves all wires.</summary>
     private static string BaseUrlFor(string provider, string baseUrl)
     {
         var b = baseUrl.TrimEnd('/');
 
-        if (!string.Equals(provider, "OpenAI", StringComparison.OrdinalIgnoreCase)) return b;
+        if (!string.Equals(provider, "OpenAI", StringComparison.OrdinalIgnoreCase) && !string.Equals(provider, "Custom", StringComparison.OrdinalIgnoreCase)) return b;
 
         return b.EndsWith("/v1", StringComparison.OrdinalIgnoreCase) ? b : b + "/v1";
     }
