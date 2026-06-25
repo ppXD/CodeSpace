@@ -173,7 +173,7 @@ export function LaunchTaskModal({ surface, autofill, onClose, onLaunched }: Laun
     const input = buildLaunchInput({
       taskText, surface, workspace, effort, autonomy, model, modelCredentialId, harness, agentDefinitionId, runnerKind,
       maxParallel: cfg.maxParallel, maxRounds: cfg.maxRounds, maxAgents: cfg.maxAgents, budget: cfg.budget,
-      agentModels: cfg.agentModels,
+      agentModels: cfg.agentModels, autonomyCeiling: cfg.autonomyCeiling,
     });
     launch.mutate(input, { onSuccess: res => onLaunched?.(res.runId) });
   };

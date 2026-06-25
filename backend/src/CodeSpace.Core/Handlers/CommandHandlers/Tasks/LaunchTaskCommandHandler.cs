@@ -42,18 +42,23 @@ public sealed class LaunchTaskCommandHandler : IRequestHandler<LaunchTaskCommand
             RequestedEffort = request.Effort,
             Autonomy = request.Autonomy,
             Overrides = BuildOverrides(request),
-            CapsOverride = BuildCapsOverride(request.Caps),
+            CapsOverride = BuildCapsOverride(request.Caps, request.AutonomyCeiling),
             AllowedModelIds = request.AllowedModelIds,
             SurfacePayload = BuildSurfacePayload(request),
         }, cancellationToken);
 
-    /// <summary>Project the operator's safety-budget caps onto the router's <c>CapsOverride</c> seam. Null / empty ⇒ null (the launch service then leaves the router override unset — byte-identical to the preset-only path). A set-but-invalid cap fails LOUD (<see cref="ArgumentException"/>) here rather than silently degrading to "no cap" downstream. Internal (not private) so the mapping + empty-collapse + reject is unit-pinned directly (InternalsVisibleTo), like <c>TaskLaunchService.BuildAgentProfile</c>.</summary>
-    internal static RouteCaps? BuildCapsOverride(TaskCapsOverride? caps)
+    /// <summary>Project the operator's safety-budget caps + autonomy ceiling onto the router's <c>CapsOverride</c> seam. Both null / empty ⇒ null (the launch service then leaves the router override unset — byte-identical to the preset-only path). A set-but-invalid numeric cap fails LOUD (<see cref="ArgumentException"/>) here rather than silently degrading to "no cap" downstream. The autonomy ceiling rides the SAME seam (it is a <c>RouteCaps</c> field): the router merges it TIGHTEN-ONLY onto the preset's ceiling and <c>ClampAutonomy</c> then clamps the run's autonomy to it. Internal (not private) so the mapping + empty-collapse + reject is unit-pinned directly (InternalsVisibleTo), like <c>TaskLaunchService.BuildAgentProfile</c>.</summary>
+    internal static RouteCaps? BuildCapsOverride(TaskCapsOverride? caps, string? autonomyCeiling = null)
     {
-        if (caps is not { IsEmpty: false }) return null;
+        var ceiling = string.IsNullOrWhiteSpace(autonomyCeiling) ? null : autonomyCeiling.Trim();
 
-        caps.Validate();
-        return caps.ToRouteCaps();
+        if (caps is not { IsEmpty: false } && ceiling is null) return null;
+
+        caps?.Validate();
+
+        var routeCaps = caps is { IsEmpty: false } ? caps.ToRouteCaps() : new RouteCaps();
+
+        return ceiling is null ? routeCaps : routeCaps with { AutonomyCeiling = ceiling };
     }
 
     private static TaskExecutionOverrides BuildOverrides(LaunchTaskCommand request) => new()

@@ -77,6 +77,15 @@ public sealed record LaunchTaskCommand : ICommand<LaunchTaskResult>, IRequireTea
     /// </summary>
     public IReadOnlyList<Guid>? AllowedModelIds { get; init; }
 
+    /// <summary>
+    /// An operator-chosen autonomy CEILING (an open tier-name string, e.g. <c>"Standard"</c>) for the agents the run
+    /// runs / dispatches — a TIGHTEN-ONLY bound the router merges onto the effort preset's ceiling (it can only LOWER
+    /// it, never raise it), which then CLAMPS the run's autonomy via <c>ClampAutonomy</c>. Null / blank ⇒ inherit the
+    /// preset's ceiling (byte-identical). An unrecognised tier safely degrades to "inherit the preset" (never removes
+    /// the ceiling). Distinct from <see cref="Autonomy"/> (the run's REQUESTED tier — this caps what that may reach).
+    /// </summary>
+    public string? AutonomyCeiling { get; init; }
+
     /// <summary>The launch surface (an open <see cref="TaskLaunchSurfaceKinds"/> string). Defaults to <c>chat</c> — the registry resolves a seed provider by it.</summary>
     public string SurfaceKind { get; init; } = TaskLaunchSurfaceKinds.Chat;
 

@@ -24,6 +24,7 @@ const form = (over: Partial<LaunchFormState> = {}): LaunchFormState => ({
   maxAgents: "20",
   budget: "none",
   agentModels: [],
+  autonomyCeiling: "",
   ...over,
 });
 
@@ -167,5 +168,24 @@ describe("buildLaunchInput — agent model pool (allowedModelIds)", () => {
     const input = buildLaunchInput(form({ effort: "deep", agentModels }));
     expect(input.allowedModelIds).not.toBe(agentModels);
     expect(input.allowedModelIds).toEqual(["row-a"]);
+  });
+});
+
+describe("buildLaunchInput — autonomy ceiling", () => {
+  it("omits the ceiling when '' (Inherit the preset)", () => {
+    expect(buildLaunchInput(form({ effort: "deep", autonomyCeiling: "" }))).not.toHaveProperty("autonomyCeiling");
+  });
+
+  it("sends the ceiling on a deep run", () => {
+    expect(buildLaunchInput(form({ effort: "deep", autonomyCeiling: "Standard" })).autonomyCeiling).toBe("Standard");
+  });
+
+  it("sends the ceiling on auto", () => {
+    expect(buildLaunchInput(form({ effort: "auto", autonomyCeiling: "Confined" })).autonomyCeiling).toBe("Confined");
+  });
+
+  it("omits the ceiling on quick and standard (Coordination tab hidden)", () => {
+    expect(buildLaunchInput(form({ effort: "quick", autonomyCeiling: "Confined" }))).not.toHaveProperty("autonomyCeiling");
+    expect(buildLaunchInput(form({ effort: "standard", autonomyCeiling: "Confined" }))).not.toHaveProperty("autonomyCeiling");
   });
 });

@@ -32,6 +32,8 @@ export interface LaunchFormState {
   budget: string;
   /** Coordination "Agent model pool" — credentialed-model ROW ids the dispatched agents may use. Empty = all. */
   agentModels: string[];
+  /** Coordination "Autonomy ceiling" — a tier name, or `""` (Inherit the preset). Tighten-only on the backend. */
+  autonomyCeiling: string;
 }
 
 const primaryOf = (workspace: LaunchWorkspaceRepo[]) => workspace.find(r => r.isPrimary) ?? workspace[0];
@@ -80,6 +82,9 @@ export function buildLaunchInput(state: LaunchFormState): LaunchTaskInput {
   // The agent model pool is a supervisor-lane bound (inert on a single-agent run), and the Coordination tab that
   // sets it is only shown on deep/auto — so gate it the same way as caps. Empty ⇒ omit (all the team's models).
   if (tierExposesCaps(state.effort) && state.agentModels.length) input.allowedModelIds = [...state.agentModels];
+
+  // The autonomy ceiling is a Coordination knob (deep/auto only); "" means Inherit the preset ⇒ omit the key.
+  if (tierExposesCaps(state.effort) && state.autonomyCeiling) input.autonomyCeiling = state.autonomyCeiling;
 
   return input;
 }
