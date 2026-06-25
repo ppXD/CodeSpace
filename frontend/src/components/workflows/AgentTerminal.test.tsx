@@ -51,6 +51,29 @@ describe("AgentTerminal", () => {
     expect(screen.getByText(/connecting to the sandbox/i)).toBeInTheDocument();
   });
 
+  it("surfaces the run's failure reason when an agent failed BEFORE emitting any event (not 'No output yet.')", () => {
+    // The reported gap: a dispatch / harness failure leaves the event stream empty, so the terminal read "No output yet."
+    // even though the run carries WHY it failed on its `error` field. Surface that as an error line instead.
+    useAgentRunMock.mockReturnValue({ data: { status: "Failed", error: "codex-cli cannot drive the Anthropic credential 'metis-coder'" } });
+    useAgentRunEventsMock.mockReturnValue({ data: [], isLoading: false });
+
+    const { container } = render(<AgentTerminal agent={termAgent({ agentRunId: "a1", status: "Failed" })} onClose={vi.fn()} />);
+
+    expect(screen.queryByText(/no output yet/i)).toBeNull();
+    const row = container.querySelector<HTMLElement>(".agent-terminal-row");
+    expect(row?.dataset.kind).toBe("error");
+    expect(row).toHaveTextContent(/cannot drive the Anthropic credential/);
+  });
+
+  it("still reads 'No output yet.' for a non-failed run with an empty stream (no error to surface)", () => {
+    useAgentRunMock.mockReturnValue({ data: { status: "Succeeded", error: null } });
+    useAgentRunEventsMock.mockReturnValue({ data: [], isLoading: false });
+
+    render(<AgentTerminal agent={termAgent({ agentRunId: "a1", status: "Succeeded" })} onClose={vi.fn()} />);
+
+    expect(screen.getByText(/no output yet/i)).toBeInTheDocument();
+  });
+
   it("switches to the tool-calls drill-in and back", () => {
     useAgentRunEventsMock.mockReturnValue({ data: [evt(1, "FileChanged", "x")], isLoading: false });
     render(<AgentTerminal agent={termAgent({ agentRunId: "a1" })} onClose={vi.fn()} />);

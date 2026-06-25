@@ -67,6 +67,31 @@ describe("AgentTile", () => {
     expect(tile(container)?.dataset.state).toBe("failed");
   });
 
+  it("shows the run's failure reason on a failed tile that emitted no event (instead of bare 'stopped')", () => {
+    useAgentRunMock.mockReturnValue({ data: { status: "Failed", error: "no drivable credential for codex-cli" } });
+    useAgentRunEventsMock.mockReturnValue({ data: [] });
+
+    const { container } = render(<AgentTile agent={tileAgent({ agentRunId: "a1", label: "x" })} />);
+
+    expect(tile(container)?.dataset.state).toBe("failed");
+    expect(screen.getByText("no drivable credential for codex-cli")).toBeInTheDocument();
+    expect(screen.queryByText("stopped")).toBeNull();
+  });
+
+  it("falls back to 'stopped' on a failed tile with neither a latest event nor a (non-empty) error", () => {
+    useAgentRunEventsMock.mockReturnValue({ data: [] });
+
+    // null error → "stopped"
+    useAgentRunMock.mockReturnValue({ data: { status: "Failed", error: null } });
+    const { rerender } = render(<AgentTile agent={tileAgent({ agentRunId: "a1", label: "x" })} />);
+    expect(screen.getByText("stopped")).toBeInTheDocument();
+
+    // an EMPTY-STRING error must also fall through to "stopped" (|| not ??), never render a blank line
+    useAgentRunMock.mockReturnValue({ data: { status: "Failed", error: "" } });
+    rerender(<AgentTile agent={tileAgent({ agentRunId: "a1", label: "x" })} />);
+    expect(screen.getByText("stopped")).toBeInTheDocument();
+  });
+
   it("falls back from the phase ref status when the agent row hasn't loaded", () => {
     useAgentRunMock.mockReturnValue({ data: undefined });
 

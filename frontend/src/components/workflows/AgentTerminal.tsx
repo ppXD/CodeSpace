@@ -55,7 +55,7 @@ export function AgentTerminal({ agent, onClose }: { agent: PhaseAgentRef; onClos
       )}
 
       <div className="agent-terminal-body">
-        {tab === "output" ? <Scrollback events={evts} loading={events.isLoading && evts.length === 0} /> : <AgentToolCalls agentRunId={agent.agentRunId} />}
+        {tab === "output" ? <Scrollback events={evts} loading={events.isLoading && evts.length === 0} error={tileState(status) === "failed" ? run.data?.error ?? null : null} /> : <AgentToolCalls agentRunId={agent.agentRunId} />}
       </div>
 
       <div className="agent-terminal-footer">
@@ -72,8 +72,11 @@ export function AgentTerminal({ agent, onClose }: { agent: PhaseAgentRef; onClos
   );
 }
 
-function Scrollback({ events, loading }: { events: AgentRunEventDto[]; loading: boolean }) {
+function Scrollback({ events, loading, error }: { events: AgentRunEventDto[]; loading: boolean; error: string | null }) {
   if (events.length === 0) {
+    // A run that failed BEFORE emitting any event (a dispatch / harness error) carries its reason on the run's `error`,
+    // not in the empty stream — surface it as an error line so a failed terminal always says WHY, never "No output yet.".
+    if (error) return <ol className="agent-terminal-scroll"><li className="agent-terminal-row" data-kind="error">{error}</li></ol>;
     return <div className="agent-terminal-empty">{loading ? "Connecting to the sandbox…" : "No output yet."}</div>;
   }
 

@@ -36,6 +36,7 @@ export function AgentTile({ agent, selected, open, onOpen }: { agent: PhaseAgent
   const files = evts.filter((e) => e.kind === "FileChanged").length;
   const tokens = (agent.inputTokens ?? 0) + (agent.outputTokens ?? 0);
   const summary = metricLine(files, tokens);
+  const failReason = run.data?.error || undefined;   // a fail-before-events run has no `latest`; its reason lives on the run (|| so an empty error falls through to "stopped")
 
   return (
     <div
@@ -55,13 +56,13 @@ export function AgentTile({ agent, selected, open, onOpen }: { agent: PhaseAgent
         <span className="agent-tile-name" title={name}>{name}</span>
         <span className="agent-tile-flag" aria-hidden="true">{stateFlag(state)}</span>
       </div>
-      <div className="agent-tile-body">{bodyLines(state, latest, summary)}</div>
+      <div className="agent-tile-body">{bodyLines(state, latest, summary, failReason)}</div>
     </div>
   );
 }
 
 /** The two-line preview body, per state — a running agent gets its live line + cursor; the others a quiet two-liner. */
-function bodyLines(state: TileState, latest: string | undefined, summary: string) {
+function bodyLines(state: TileState, latest: string | undefined, summary: string, failReason: string | undefined) {
   if (state === "running") {
     return (
       <>
@@ -83,7 +84,7 @@ function bodyLines(state: TileState, latest: string | undefined, summary: string
   if (state === "failed") {
     return (
       <>
-        <div className="agent-tile-line agent-tile-cmd">{latest ?? "stopped"}</div>
+        <div className="agent-tile-line agent-tile-cmd">{latest ?? failReason ?? "stopped"}</div>
         <div className="agent-tile-line agent-tile-fail">failed</div>
       </>
     );
