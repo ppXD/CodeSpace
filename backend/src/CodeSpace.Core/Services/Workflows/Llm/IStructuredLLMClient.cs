@@ -58,6 +58,7 @@ public sealed record StructuredLLMCompletion
     /// <summary>The schema-valid object the model produced.</summary>
     public required JsonElement Json { get; init; }
     public required string Model { get; init; }
-    public int? InputTokens { get; init; }
-    public int? OutputTokens { get; init; }
+
+    /// <summary>Provider-reported token counts + stop reason. Never null — <see cref="LlmUsage.None"/> when the provider returned no usage.</summary>
+    public LlmUsage Usage { get; init; } = LlmUsage.None;
 }

@@ -43,7 +43,7 @@ public sealed class DeterministicTaskPlannerLlmClient : ILLMClient, IStructuredL
 
     /// <summary>Plain-text path — used by the projected body (analysis) + synthesizer llm.complete nodes. Echoes the prompt deterministically.</summary>
     public Task<LLMCompletion> CompleteAsync(LLMCompletionRequest request, CancellationToken cancellationToken) =>
-        Task.FromResult(new LLMCompletion { Text = $"done: {request.UserPrompt}", Model = request.Model, InputTokens = 5, OutputTokens = 7 });
+        Task.FromResult(new LLMCompletion { Text = $"done: {request.UserPrompt}", Model = request.Model, Usage = new() { InputTokens = 5, OutputTokens = 7 } });
 
     public Task<StructuredLLMCompletion> CompleteStructuredAsync(StructuredLLMCompletionRequest request, CancellationToken cancellationToken)
     {
@@ -61,6 +61,6 @@ public sealed class DeterministicTaskPlannerLlmClient : ILLMClient, IStructuredL
             recommendedWorkflowKind = _recommendedWorkflowKind,
         });
 
-        return Task.FromResult(new StructuredLLMCompletion { Json = json, Model = request.Model, InputTokens = 11, OutputTokens = 23 });
+        return Task.FromResult(new StructuredLLMCompletion { Json = json, Model = request.Model, Usage = new() { InputTokens = 11, OutputTokens = 23 } });
     }
 }

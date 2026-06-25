@@ -29,5 +29,5 @@ public sealed class DeterministicSynthLlmClient : ILLMClient
     public static string ExpectedReduceFor(string userPrompt) => $"{Prefix}{userPrompt.Length}]: {userPrompt}";
 
     public Task<LLMCompletion> CompleteAsync(LLMCompletionRequest request, CancellationToken cancellationToken) =>
-        Task.FromResult(new LLMCompletion { Text = ExpectedReduceFor(request.UserPrompt), Model = request.Model, InputTokens = 17, OutputTokens = 19 });
+        Task.FromResult(new LLMCompletion { Text = ExpectedReduceFor(request.UserPrompt), Model = request.Model, Usage = new() { InputTokens = 17, OutputTokens = 19, FinishReason = "stop" } });
 }

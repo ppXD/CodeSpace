@@ -130,7 +130,7 @@ public static class WorkflowsTestSeed
         provider == RecordReplayStructuredLLMClient.ProviderTag ? PlanMapSynthPlannerRequest.DefaultModel : $"{provider}-model";
 
     /// <summary>Seed a team credential + one enabled credentialed-model row (keyless — a fake CLI never authenticates). Returns the credential id (a supervisor-dispatched agent resolving this model runs on it) + the row id (an allowed-pool entry).</summary>
-    public static async Task<(Guid CredentialId, Guid RowId)> SeedCredentialedModelAsync(PostgresFixture fixture, Guid teamId, string modelId)
+    public static async Task<(Guid CredentialId, Guid RowId)> SeedCredentialedModelAsync(PostgresFixture fixture, Guid teamId, string modelId, string provider = "Anthropic")
     {
         using var scope = fixture.BeginScope();
         var db = scope.Resolve<CodeSpaceDbContext>();
@@ -138,7 +138,7 @@ public static class WorkflowsTestSeed
         var credId = Guid.NewGuid();
         db.ModelCredential.Add(new ModelCredential
         {
-            Id = credId, TeamId = teamId, Provider = "Anthropic", DisplayName = "test cred",
+            Id = credId, TeamId = teamId, Provider = provider, DisplayName = "test cred",
             Status = CredentialStatus.Active, CreatedBy = SystemUsers.SeederId, LastModifiedBy = SystemUsers.SeederId,
         });
 

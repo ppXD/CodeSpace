@@ -45,6 +45,7 @@ public sealed record LLMCompletion
 {
     public required string Text { get; init; }
     public required string Model { get; init; }
-    public int? InputTokens { get; init; }
-    public int? OutputTokens { get; init; }
+
+    /// <summary>Provider-reported token counts + stop reason. Never null — <see cref="LlmUsage.None"/> when the provider returned no usage.</summary>
+    public LlmUsage Usage { get; init; } = LlmUsage.None;
 }
