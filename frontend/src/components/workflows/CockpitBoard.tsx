@@ -5,7 +5,7 @@ import { relativeTime } from "@/lib/codeTree";
 import { DecisionCard } from "./DecisionCard";
 import { Pager } from "./Pager";
 import { compactAge, runDuration, runStatusTone, runStatusWord, runType, type CockpitFilter } from "./cockpit";
-import { bucketRuns, sourceLabel } from "./runsIndex";
+import { sourceLabel } from "./runsIndex";
 import { summarizeRunState } from "./runPhases";
 
 /** How many suspended runs the default-board Needs-attention zone previews before it collapses to "View all N". */
@@ -37,9 +37,10 @@ export interface RunAttentionView {
  * Recent (compact history). Arming a card narrows to one view. Decisions answer inline; suspended runs open the Run
  * Room (the right resume affordance depends on the wait kind, so we send the operator there rather than guess).
  */
-export function CockpitBoard({ runs, decisions, attention, phasesByRun, filter, history, nowMs, onOpen, onFilter }: {
+export function CockpitBoard({ runs, decisions, live, attention, phasesByRun, filter, history, nowMs, onOpen, onFilter }: {
   runs: readonly WorkflowRunSummary[];
   decisions: readonly PendingDecision[];
+  live: readonly WorkflowRunSummary[];
   attention: RunAttentionView;
   phasesByRun: Map<string, RunPhasesResponse>;
   filter: CockpitFilter;
@@ -48,8 +49,6 @@ export function CockpitBoard({ runs, decisions, attention, phasesByRun, filter, 
   onOpen: (runId: string) => void;
   onFilter: (filter: CockpitFilter) => void;
 }) {
-  const buckets = bucketRuns(runs);
-
   if (filter === "failed") {
     return <Zone label="Failed / stuck"><CompactList runs={runs.filter((r) => r.status === "Failure" || r.status === "Suspended")} nowMs={nowMs} onOpen={onOpen} empty="Nothing failed or stuck." /></Zone>;
   }
@@ -90,10 +89,10 @@ export function CockpitBoard({ runs, decisions, attention, phasesByRun, filter, 
         </Zone>
       )}
 
-      {showLive && buckets.live.length > 0 && (
+      {showLive && live.length > 0 && (
         <Zone label="Live">
           <div className="cockpit-live">
-            {buckets.live.map((r) => <LiveRow key={r.id} run={r} phases={phasesByRun.get(r.id)} nowMs={nowMs} onOpen={onOpen} />)}
+            {live.map((r) => <LiveRow key={r.id} run={r} phases={phasesByRun.get(r.id)} nowMs={nowMs} onOpen={onOpen} />)}
           </div>
         </Zone>
       )}

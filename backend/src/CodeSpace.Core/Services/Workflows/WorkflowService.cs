@@ -914,24 +914,34 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
     {
         var query = TeamRunsQuery(teamId, filter);
 
-        // One pass for the per-status + today tallies (Postgres count(*) FILTER), then a second for the EXISTS-gated
-        // review count (Suspended runs no pending decision already covers — the run half of the attention card).
+        // A run parked on agent / machine waits is auto-resuming WORK, not a thing a human must act on. So LIVE is
+        // "actively progressing, no human needed" (running/queued + auto-resuming suspends), and NEEDS-REVIEW is the
+        // human-actionable (Approval/Action) suspends only — both ride the shared attention predicate.
+        var attention = ExpressionPredicate.Or(HasPendingDecisionPredicate(), NeedsAttentionNonDecisionPredicate(DateTimeOffset.UtcNow));
+
         var tally = await query.GroupBy(_ => 1).Select(g => new
         {
-            Live = g.Count(r => r.Status == WorkflowRunStatus.Pending || r.Status == WorkflowRunStatus.Enqueued || r.Status == WorkflowRunStatus.Running),
             Failed = g.Count(r => r.Status == WorkflowRunStatus.Failure),
             Suspended = g.Count(r => r.Status == WorkflowRunStatus.Suspended),
             Today = g.Count(r => r.CreatedDate >= todayStart),
         }).FirstOrDefaultAsync(cancellationToken).ConfigureAwait(false);
 
+        var live = await query
+            .Where(r => r.Status == WorkflowRunStatus.Pending || r.Status == WorkflowRunStatus.Enqueued || r.Status == WorkflowRunStatus.Running || r.Status == WorkflowRunStatus.Suspended)
+            .Where(ExpressionPredicate.Not(attention))
+            .CountAsync(cancellationToken).ConfigureAwait(false);
+
+        // This card == the attention ZONE list (statuses:[Suspended], needsAttention:true, hasPendingDecision:false),
+        // because `Suspended ∧ attention ∧ ¬decision` reduces to `actionable ∧ ¬decision` ONLY while the other attention
+        // disjuncts (Failure / Running-stuck) stay status-disjoint from Suspended. Keep them so, or the card/zone diverge.
         var needingReview = await query
-            .Where(r => r.Status == WorkflowRunStatus.Suspended)
+            .Where(ActionableSuspendPredicate())
             .Where(ExpressionPredicate.Not(HasPendingDecisionPredicate()))
             .CountAsync(cancellationToken).ConfigureAwait(false);
 
         return new RunSummary
         {
-            Live = tally?.Live ?? 0,
+            Live = live,
             Failed = tally?.Failed ?? 0,
             Suspended = tally?.Suspended ?? 0,
             SuspendedNeedingReview = needingReview,
@@ -994,14 +1004,23 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
     ///   run row, so its audit timestamp does not track liveness.</item>
     /// </list>
     /// </summary>
-    private Expression<Func<WorkflowRun, bool>> NeedsAttentionNonDecisionPredicate(DateTimeOffset now) => r =>
-        (r.Status == WorkflowRunStatus.Suspended
-            && _db.WorkflowRunWait.Any(w => w.RunId == r.Id && w.Status == WorkflowWaitStatuses.Pending
-                && (w.WaitKind == WorkflowWaitKinds.Approval || w.WaitKind == WorkflowWaitKinds.Action)))
-        || (r.Status == WorkflowRunStatus.Failure
-            && !_db.WorkflowRun.Any(child => child.ParentRunId == r.Id && child.Status == WorkflowRunStatus.Success))
-        || (r.Status == WorkflowRunStatus.Running && r.StartedAt < now - StuckRunReconcilerService.RunningStuckAfter
-            && !_db.WorkflowRunRecord.Any(rec => rec.RunId == r.Id && rec.OccurredAt >= now - StuckRunReconcilerService.LedgerLivenessWindow));
+    private Expression<Func<WorkflowRun, bool>> NeedsAttentionNonDecisionPredicate(DateTimeOffset now) =>
+        ExpressionPredicate.Or(ActionableSuspendPredicate(), r =>
+            (r.Status == WorkflowRunStatus.Failure
+                && !_db.WorkflowRun.Any(child => child.ParentRunId == r.Id && child.Status == WorkflowRunStatus.Success))
+            || (r.Status == WorkflowRunStatus.Running && r.StartedAt < now - StuckRunReconcilerService.RunningStuckAfter
+                && !_db.WorkflowRunRecord.Any(rec => rec.RunId == r.Id && rec.OccurredAt >= now - StuckRunReconcilerService.LedgerLivenessWindow)));
+
+    /// <summary>
+    /// A HUMAN-actionable suspend: Suspended on a pending Approval / Action wait. EXCLUDES self-advancing waits
+    /// (SupervisorDecision / SupervisorAgentWaits) and machine waits (Timer / Callback / Subworkflow / AgentRun) — a run
+    /// parked on those auto-resumes (e.g. a fan-out waiting on its agent runs is WORKING), so it needs no human and
+    /// belongs in the Live set, not Needs-attention. The single source for "a suspend a person must act on".
+    /// </summary>
+    private Expression<Func<WorkflowRun, bool>> ActionableSuspendPredicate() => r =>
+        r.Status == WorkflowRunStatus.Suspended
+        && _db.WorkflowRunWait.Any(w => w.RunId == r.Id && w.Status == WorkflowWaitStatuses.Pending
+            && (w.WaitKind == WorkflowWaitKinds.Approval || w.WaitKind == WorkflowWaitKinds.Action));
 
     /// <summary>
     /// EXISTS a pending decision for the run, on EITHER park backend: a node-grain <c>workflow_run_wait</c> in

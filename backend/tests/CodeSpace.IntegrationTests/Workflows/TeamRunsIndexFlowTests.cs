@@ -541,19 +541,21 @@ public class TeamRunsIndexFlowTests
         var (teamA, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
         var t = DateTimeOffset.UtcNow;
 
-        // Live = Pending/Enqueued/Running (3); plus 2 failed, 1 suspended, 4 success — all created today.
+        // Live folds Pending/Enqueued/Running (3) PLUS a suspend parked on its agent runs (auto-resuming WORK) → 4;
+        // plus 2 failed, 1 suspended (the same one), 4 success — all created today.
         await InsertRunAsync(teamA, null, t, workflowId: null, status: WorkflowRunStatus.Running);
         await InsertRunAsync(teamA, null, t.AddMinutes(-1), workflowId: null, status: WorkflowRunStatus.Pending);
         await InsertRunAsync(teamA, null, t.AddMinutes(-2), workflowId: null, status: WorkflowRunStatus.Enqueued);
         for (var i = 0; i < 2; i++) await InsertRunAsync(teamA, null, t.AddMinutes(-3 - i), workflowId: null, status: WorkflowRunStatus.Failure);
-        await InsertRunAsync(teamA, null, t.AddMinutes(-6), workflowId: null, status: WorkflowRunStatus.Suspended);
+        var working = await InsertRunAsync(teamA, null, t.AddMinutes(-6), workflowId: null, status: WorkflowRunStatus.Suspended);
+        await SeedWaitAsync(working, WorkflowWaitKinds.AgentRun, WorkflowWaitStatuses.Pending);   // a machine wait → auto-resuming → live work
         for (var i = 0; i < 4; i++) await InsertRunAsync(teamA, null, t.AddMinutes(-7 - i), workflowId: null, status: WorkflowRunStatus.Success);
 
         var s = await SummaryAsync(teamA, RunListFilter.None, t.AddDays(-1));
 
-        s.Live.ShouldBe(3, "the live group folds Pending + Enqueued + Running");
+        s.Live.ShouldBe(4, "live folds Pending + Enqueued + Running + the auto-resuming (agent-wait) suspend");
         s.Failed.ShouldBe(2);
-        s.Suspended.ShouldBe(1);
+        s.Suspended.ShouldBe(1, "the raw Suspended status count is still 1 — even though that run reads as live work");
         s.Today.ShouldBe(10, "every seeded run was created after the day-start");
     }
 
@@ -582,12 +584,33 @@ public class TeamRunsIndexFlowTests
 
         var withDecision = await InsertRunAsync(teamA, null, t, workflowId: null, status: WorkflowRunStatus.Suspended);
         await SeedNodeDecisionWaitAsync(withDecision);                                                                // a pending decision covers it
-        await InsertRunAsync(teamA, null, t.AddMinutes(-1), workflowId: null, status: WorkflowRunStatus.Suspended);   // no decision → needs review
+        var needsHuman = await InsertRunAsync(teamA, null, t.AddMinutes(-1), workflowId: null, status: WorkflowRunStatus.Suspended);
+        await SeedWaitAsync(needsHuman, WorkflowWaitKinds.Approval, WorkflowWaitStatuses.Pending);                    // a human Approval wait → needs review
 
         var s = await SummaryAsync(teamA, RunListFilter.None, t.AddDays(-1));
 
         s.Suspended.ShouldBe(2, "both runs are Suspended");
-        s.SuspendedNeedingReview.ShouldBe(1, "but only the one without a pending decision still needs a human");
+        s.SuspendedNeedingReview.ShouldBe(1, "only the human-actionable Approval suspend needs review — the decision-covered one is excluded");
+    }
+
+    [Fact]
+    public async Task Summary_counts_a_suspended_run_on_an_agent_wait_as_live_work_not_attention()
+    {
+        var (teamA, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var t = DateTimeOffset.UtcNow;
+
+        // A fan-out parked on its AGENT runs — a machine wait that auto-resumes when the agents finish: live WORK, not a
+        // thing a human must act on. Plus a run parked on a human APPROVAL — that one genuinely needs a person.
+        var working = await InsertRunAsync(teamA, null, t, workflowId: null, status: WorkflowRunStatus.Suspended);
+        await SeedWaitAsync(working, WorkflowWaitKinds.AgentRun, WorkflowWaitStatuses.Pending);
+        var approval = await InsertRunAsync(teamA, null, t.AddMinutes(-1), workflowId: null, status: WorkflowRunStatus.Suspended);
+        await SeedWaitAsync(approval, WorkflowWaitKinds.Approval, WorkflowWaitStatuses.Pending);
+
+        var s = await SummaryAsync(teamA, RunListFilter.None, t.AddDays(-1));
+
+        s.Live.ShouldBe(1, "the agent-wait suspend is auto-resuming work → counted live, never attention");
+        s.SuspendedNeedingReview.ShouldBe(1, "only the human-actionable Approval suspend needs a review");
+        s.Suspended.ShouldBe(2, "the raw Suspended count is unchanged — both are Suspended");
     }
 
     [Fact]
