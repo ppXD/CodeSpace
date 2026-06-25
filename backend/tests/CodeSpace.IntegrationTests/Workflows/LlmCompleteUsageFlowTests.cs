@@ -38,7 +38,7 @@ public class LlmCompleteUsageFlowTests
         // A priced pool model UNDER THE SYNTH FAKE'S PROVIDER so the node resolves it and the cost is computable.
         await WorkflowsTestSeed.SeedCredentialedModelAsync(_fixture, teamId, PricedModel, provider: DeterministicSynthLlmClient.ProviderTag);
 
-        var workflowId = await CreateLlmWorkflowAsync(teamId, userId);
+        var workflowId = await CreateLlmWorkflowAsync(teamId, userId, PricedModel);
         var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
 
         await RunEngineAsync(runId);
@@ -72,7 +72,7 @@ public class LlmCompleteUsageFlowTests
         // can't silently strip it undetected.
         await WorkflowsTestSeed.SeedCredentialedModelAsync(_fixture, teamId, "metis-coder-max", provider: DeterministicSynthLlmClient.ProviderTag);
 
-        var workflowId = await CreateLlmWorkflowAsync(teamId, userId);
+        var workflowId = await CreateLlmWorkflowAsync(teamId, userId, "metis-coder-max");
         var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
 
         await RunEngineAsync(runId);
@@ -92,11 +92,15 @@ public class LlmCompleteUsageFlowTests
         cost.ValueKind.ShouldBe(JsonValueKind.Null, "an unpriced model yields a present-but-null cost on the ledger — never a dropped key or a bogus zero");
     }
 
-    private async Task<Guid> CreateLlmWorkflowAsync(Guid teamId, Guid userId)
+    private async Task<Guid> CreateLlmWorkflowAsync(Guid teamId, Guid userId, string pinnedModel)
     {
         using var scope = _fixture.BeginScopeAs(userId, teamId, Roles.Admin);
         var mediator = scope.Resolve<MediatR.IMediator>();
 
+        // PIN the model explicitly: SeedTeamAsync also seeds a "<tag>-model" per fake provider, so the team's pool
+        // holds two models under this tag. An UNPINNED pick orders by model id — a Postgres-collation-dependent
+        // tie-break (case-sensitive C-locale in CI vs case-insensitive locally would pick differently). Pinning makes
+        // the selection deterministic + independent of what else the seed put in the pool.
         var def = new WorkflowDefinition
         {
             SchemaVersion = 1,
@@ -104,7 +108,7 @@ public class LlmCompleteUsageFlowTests
             {
                 new() { Id = "start", TypeKey = "trigger.pr.opened", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
                 new() { Id = "gen", TypeKey = "llm.complete",
-                        Config = WorkflowsTestSeed.Json($$"""{"provider":"{{DeterministicSynthLlmClient.ProviderTag}}"}"""),
+                        Config = WorkflowsTestSeed.Json($$"""{"provider":"{{DeterministicSynthLlmClient.ProviderTag}}","model":"{{pinnedModel}}"}"""),
                         Inputs = WorkflowsTestSeed.Json("""{"userPrompt":"reduce these results"}""") },
                 new() { Id = "end", TypeKey = "builtin.terminal", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
             },
