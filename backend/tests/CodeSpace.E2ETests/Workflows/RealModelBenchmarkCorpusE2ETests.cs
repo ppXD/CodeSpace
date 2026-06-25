@@ -26,12 +26,13 @@ namespace CodeSpace.E2ETests.Workflows;
 /// is the corpus's grades, NOT the agent's self-reports — the same honesty the deterministic 0.0 baseline
 /// (<c>CorpusBenchmarkFlowTests</c>) makes executable, now with a real brain producing the real number.
 ///
-/// <para>REPORT-ONLY for now (legacy three-way <see cref="RealModelGate.AssessLiveAsync(string, System.Func{System.Threading.Tasks.Task{System.ValueTuple{RealModelOutcome, string}}})"/>):
-/// a brand-new live coding-over-corpus path REPORTS the solve-rate to the job summary — <see cref="RealModelOutcome.Drove"/>
-/// = the real model solved ≥1 task, <see cref="RealModelOutcome.CapabilityMiss"/> = it ran but solved none — and only a
-/// CODE FAULT reds. A gateway outage (every pair fails to execute) is non-gating LOUD infra
-/// (<see cref="AgentExecutionInfraException"/>), never a false CapabilityMiss. Flip to a gating solve-rate FLOOR once a
-/// first live run confirms the wiring AND a solve — gating main on an unproven live coding path would violate 穩.</para>
+/// <para>GATING solve-rate FLOOR (the SWE-bench-class number): the blessed wire passes only when the real coding agent
+/// objectively SOLVES at least <see cref="MinSolveRate"/> of the cleanly-run corpus pairs — <see cref="RealModelOutcome.Drove"/>
+/// = rate ≥ floor, <see cref="RealModelOutcome.CapabilityMiss"/> = it ran but fell SHORT of the floor → REDs the wire. A
+/// gateway outage (every pair fails to execute) is non-gating LOUD infra (<see cref="AgentExecutionInfraException"/>),
+/// never a false CapabilityMiss. attempts:1 — the rate is already an average over the 18 task×mode pairs (stable; a
+/// per-corpus best-of-N would not fit the 60-min job budget) and the floor sits well below a capable model's expected
+/// rate, so a single run clears it with margin. The robust upgrade of the single-task gating solve in the whole-loop arc.</para>
 ///
 /// <para>Self-skips (skip ≠ pass, surfaced LOUDLY) when the <c>CODESPACE_LLM_*</c> secrets are absent or the
 /// <c>claude</c> CLI is not installed; FAILS on a partial secret config. POSIX-only (the seed fixtures + checks are
@@ -43,6 +44,13 @@ namespace CodeSpace.E2ETests.Workflows;
 public sealed class RealModelBenchmarkCorpusE2ETests
 {
     private const string Provider = "Anthropic";   // the blessed wire (RealModelGate gates it)
+
+    /// <summary>The GATING solve-rate FLOOR over the cleanly-run corpus pairs: a real coding agent must objectively SOLVE
+    /// at least this fraction or the blessed wire REDs. Set CONSERVATIVELY below a capable model's expected rate (the
+    /// 9-task corpus's easy tier alone is ~44% of the 18 task×mode pairs, and the model reliably clears the harder tier
+    /// too), so a single corpus run clears it with margin — yet it is a genuine non-trivial solve-rate claim, not "solved
+    /// ≥1". Raise it as the model's reliability is confirmed across runs; lower only if a dispatch shows it borderline.</summary>
+    private const double MinSolveRate = 0.5;
 
     private readonly PostgresFixture _fixture;
 
@@ -66,7 +74,7 @@ public sealed class RealModelBenchmarkCorpusE2ETests
         var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
         var credId = await SeedAgentCredentialAsync(teamId, baseUrl!.TrimEnd('/'), apiKey!);
 
-        await RealModelGate.AssessLiveAsync(Provider, async () =>
+        await RealModelGate.AssessLiveWholeLoopAsync(Provider, async () =>
         {
             // The whole seed corpus runs under the REAL claude-code CLI authenticated by the seeded gateway credential,
             // at Trusted autonomy (it must reach the gateway + edit the workspace to solve). null harness/model on the
@@ -79,7 +87,10 @@ public sealed class RealModelBenchmarkCorpusE2ETests
 
             var ran = run.Results.Count;
             var executed = run.Results.Count(r => r.RunStatus == AgentRunStatus.Succeeded);
-            var solved = run.Results.Count(r => r.Grade.Passed);
+            // solved is scoped to the SAME cleanly-run population as the denominator: a pair the grader passes but whose
+            // run did not reach Succeeded (CLI exited non-zero yet left correct code) must not inflate the rate past the
+            // executed set — numerator ⊆ denominator keeps rate ∈ [0,1] and honest.
+            var solved = run.Results.Count(r => r.RunStatus == AgentRunStatus.Succeeded && r.Grade.Passed);
 
             // No pair ran, OR every pair that ran FAILED execution (the claude CLI could not reach the gateway / could
             // not run) → infra, never a capability verdict. Mirrors the whole-loop's all-agents-failed classification:
@@ -87,11 +98,11 @@ public sealed class RealModelBenchmarkCorpusE2ETests
             if (executed == 0)
                 throw new AgentExecutionInfraException($"no benchmark pair executed cleanly — ran={ran}, executed=0, errored={run.Errored.Count} (gateway/execution infra, not a capability miss)");
 
-            // executed ≥ 1 → a genuine capability verdict: of the pairs the agent actually RAN, did it SOLVE any?
-            var outcome = solved > 0 ? RealModelOutcome.Drove : RealModelOutcome.CapabilityMiss;
-            var rate = (double)solved / executed;   // over the pairs that ran CLEANLY — a mid-corpus flake (a Failed-exec pair) is infra, never deflates the capability rate
-            return (outcome, $"{Provider} model '{model}' seed-corpus solve-rate {solved}/{executed} cleanly-run ({rate:P0}) over {SeedBenchmarkCorpus.Tasks.Count} tasks × their modes — graded={ran}, errored={run.Errored.Count}");
-        });
+            // executed ≥ 1 → a genuine capability verdict: of the pairs the agent RAN cleanly, did it SOLVE at least the floor?
+            var rate = (double)solved / executed;   // over the pairs that ran CLEANLY — a mid-corpus exec flake is infra, never deflates the capability rate
+            var outcome = rate >= MinSolveRate ? RealModelOutcome.Drove : RealModelOutcome.CapabilityMiss;   // GATING FLOOR — short of the floor REDs the blessed wire (CapabilityMiss)
+            return (outcome, $"{Provider} model '{model}' seed-corpus solve-rate {solved}/{executed} cleanly-run ({rate:P0}) vs floor {MinSolveRate:P0} → {outcome} over {SeedBenchmarkCorpus.Tasks.Count} tasks × their modes — graded={ran}, errored={run.Errored.Count}");
+        }, attempts: 1);
     }
 
     /// <summary>Seed an encrypted gateway <see cref="ModelCredential"/> the agent.code executor resolves via <c>ModelCredentialId</c> and the <c>ClaudeCodeHarness</c> projects onto its env (ANTHROPIC_BASE_URL / ANTHROPIC_API_KEY for Provider="Anthropic"). The same shape the whole-loop coding arm seeds — the live key is read from the DB, never in-process.</summary>
