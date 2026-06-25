@@ -48,4 +48,10 @@ public sealed record PlannedSubtask
 
     /// <summary>Optional one-line "why this subtask" — helps the reviewer; not required for execution.</summary>
     public string? Rationale { get; init; }
+
+    /// <summary>P2 allocation — the harness the planner picked for THIS subtask from the capability catalog (e.g. "claude-code"). Carried into the branch body as <c>{{item.harness}}</c>. Null → the projector fills the default so every branch has a valid harness.</summary>
+    public string? Harness { get; init; }
+
+    /// <summary>P2 allocation — the model the planner picked for THIS subtask from the run's pool. Carried into the branch body as <c>{{item.model}}</c>. Null → the harness default. The catalog steers the planner to a model whose provider the chosen harness can drive.</summary>
+    public string? Model { get; init; }
 }

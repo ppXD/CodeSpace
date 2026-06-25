@@ -84,8 +84,10 @@ public sealed partial class WorkflowPlanProjector : IWorkflowPlanProjector, ISco
     /// <summary>The per-branch body node — the only place the recommended-kind switch decides a node type (coding → agent.code, else → llm.complete). Each reads its element as {{item.title}}/{{item.instruction}}.</summary>
     private static NodeDefinition BodyNode(string bodyTypeKey) => bodyTypeKey == "agent.code"
         ? new() { Id = "body", TypeKey = "agent.code", ParentId = "map", Label = "Agent",
-                  // harness from CodexHarness.HarnessKind (the const that owns the wire string) so a rename can't silently drift (Rule 8); an anon object keeps the {{item.*}} refs literal without brace-escaping.
-                  Config = JsonSerializer.SerializeToElement(new { goal = "{{item.title}}: {{item.instruction}}", harness = CodexHarness.HarnessKind, autonomyLevel = "Confined", readOnly = true }),
+                  // P2 — per-subtask allocation: each branch runs the harness + model the planner picked for ITS element
+                  // ({{item.harness}} is always filled by SerializeSubtasks; {{item.model}} is "" → the harness default).
+                  // The run-time reconciler is the compatibility backstop. An anon object keeps the {{item.*}} refs literal.
+                  Config = JsonSerializer.SerializeToElement(new { goal = "{{item.title}}: {{item.instruction}}", harness = "{{item.harness}}", model = "{{item.model}}", autonomyLevel = "Confined", readOnly = true }),
                   Inputs = Empty() }
         : new() { Id = "body", TypeKey = "llm.complete", ParentId = "map", Label = "Work the subtask",
                   Config = Json("""{ "provider": "Anthropic" }"""),
@@ -114,7 +116,18 @@ public sealed partial class WorkflowPlanProjector : IWorkflowPlanProjector, ISco
     /// baked keys must match the lowercase refs exactly (and the planner's own schema property names).
     /// </summary>
     private static JsonElement SerializeSubtasks(IReadOnlyList<PlannedSubtask> subtasks) =>
-        JsonSerializer.SerializeToElement(subtasks, CamelCase);
+        JsonSerializer.SerializeToElement(subtasks.Select(s => new
+        {
+            s.Id,
+            s.Title,
+            s.Instruction,
+            s.Rationale,
+            // P2 — fill the harness so the body's {{item.harness}} ALWAYS resolves to a valid kind: the planner's
+            // per-subtask choice wins, else the codex-cli default. Model stays the planner's choice as an empty
+            // string when unset, so {{item.model}} resolves to "" → the agent.code node falls to the harness default.
+            harness = string.IsNullOrWhiteSpace(s.Harness) ? CodexHarness.HarnessKind : s.Harness.Trim(),
+            model = s.Model?.Trim() ?? "",
+        }), CamelCase);
 
     private static readonly JsonSerializerOptions CamelCase = new()
     {

@@ -1,6 +1,9 @@
 using System.Text.Json;
 using CodeSpace.Core.Persistence.Entities;
+using CodeSpace.Core.Services.Agents;
+using CodeSpace.Core.Services.Agents.ModelCredentials;
 using CodeSpace.Core.Services.Workflows.Engine;
+using CodeSpace.Messages.Agents;
 using CodeSpace.Core.Services.Workflows.Llm;
 using CodeSpace.Core.Services.Workflows.Nodes;
 using CodeSpace.Core.Services.Workflows.Nodes.Builtin;
@@ -166,6 +169,34 @@ public class WorkflowPlannerTests
         baked.GetArrayLength().ShouldBe(plan.Subtasks.Count);
         baked[0].GetProperty("title").GetString().ShouldBe(plan.Subtasks[0].Title);
         baked[0].GetProperty("instruction").GetString().ShouldBe(plan.Subtasks[0].Instruction);
+    }
+
+    [Fact]
+    public void Projection_carries_per_subtask_harness_and_model_filling_the_default_for_unallocated()
+    {
+        var plan = new PlannedWorkflow
+        {
+            Goal = "g",
+            RecommendedWorkflowKind = "coding",
+            Subtasks = new[]
+            {
+                new PlannedSubtask { Id = "s1", Title = "t1", Instruction = "i1", Harness = "claude-code", Model = "metis-coder-max" },
+                new PlannedSubtask { Id = "s2", Title = "t2", Instruction = "i2" },   // no allocation → default harness, empty model
+            },
+        };
+
+        var definition = new WorkflowPlanProjector().Project(plan);
+
+        var baked = definition.Inputs.Single(i => i.Name == "subtasks").Default!.Value;
+        baked[0].GetProperty("harness").GetString().ShouldBe("claude-code", "the planner's per-subtask harness is carried onto its map item");
+        baked[0].GetProperty("model").GetString().ShouldBe("metis-coder-max");
+        baked[1].GetProperty("harness").GetString().ShouldBe("codex-cli", "an unallocated subtask is filled with the default so {{item.harness}} always resolves");
+        baked[1].GetProperty("model").GetString().ShouldBe("");
+
+        // The single agent body runs each branch with ITS element's allocation.
+        var body = definition.Nodes.Single(n => n.Id == "body");
+        body.Config.GetProperty("harness").GetString().ShouldBe("{{item.harness}}");
+        body.Config.GetProperty("model").GetString().ShouldBe("{{item.model}}");
     }
 
     // ── Recommended-kind switch: coding → agent.code body, else → llm.complete ─
@@ -450,6 +481,33 @@ public class WorkflowPlannerTests
 
         prompt.ShouldContain("Just the task");
         prompt.ShouldNotContain("top-level layout", Case.Insensitive);
+    }
+
+    [Fact]
+    public void Planner_user_prompt_carries_the_capability_catalog_when_provided()
+    {
+        var catalog = CapabilityCatalog.Render(
+            new IAgentHarness[] { new CatalogHarnessStub("claude-code", "Anthropic", "Custom") },
+            new[] { new PoolModelInfo("metis-coder-max", "Anthropic") });
+
+        var prompt = LlmWorkflowPlanner.BuildUserPromptForTest(new WorkflowPlanRequest { TaskText = "Build it", TeamId = Guid.NewGuid() }, catalog);
+
+        prompt.ShouldContain("Build it");
+        prompt.ShouldContain("claude-code — drives: Anthropic, Custom", Case.Sensitive, "the planner sees the harness↔provider map");
+        prompt.ShouldContain("metis-coder-max — Anthropic", Case.Sensitive, "the planner sees the team's pool");
+    }
+
+    private sealed class CatalogHarnessStub : IAgentHarness, IModelCredentialProjector
+    {
+        public CatalogHarnessStub(string kind, params string[] providers) { Kind = kind; SupportedProviders = providers; }
+        public string Kind { get; }
+        public string Version => "test";
+        public IReadOnlyList<string> Models => Array.Empty<string>();
+        public IReadOnlyList<string> SupportedProviders { get; }
+        public SandboxSpec BuildInvocation(AgentTask task) => throw new NotSupportedException();
+        public IReadOnlyList<AgentEvent> ParseEvents(string rawLine) => throw new NotSupportedException();
+        public AgentRunResult BuildResult(IReadOnlyList<AgentEvent> events, int exitCode) => throw new NotSupportedException();
+        public IReadOnlyDictionary<string, string> ProjectToEnv(ResolvedModelCredential credential) => throw new NotSupportedException();
     }
 
     // ── Helpers ────────────────────────────────────────────────────────────────

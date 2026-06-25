@@ -105,12 +105,19 @@ public sealed class ModelPoolSelector : IModelPoolSelector, IScopedDependency
 
         if (allowedRowIds is { Count: > 0 }) query = query.Where(m => allowedRowIds.Contains(m.Id));
 
-        return await query
-            .Select(m => new PoolModelInfo(m.ModelId, m.Credential.Provider))
-            .Distinct()
-            .OrderBy(m => m.ModelId).ThenBy(m => m.Provider)   // total order — a model name can exist under two providers (both harnesses list Custom); keep the catalog render stable across runs
+        // Project the two columns on the DB side; dedupe + total-order + map in memory (a team's pool is small, and EF
+        // can't translate Distinct→OrderBy over a constructed record). A model name can exist under two providers (both
+        // harnesses list Custom), so the (id, provider) pair is the dedup key + the stable render order.
+        var rows = await query
+            .Select(m => new { m.ModelId, m.Credential.Provider })
             .ToListAsync(cancellationToken)
             .ConfigureAwait(false);
+
+        return rows
+            .Distinct()
+            .OrderBy(r => r.ModelId, StringComparer.Ordinal).ThenBy(r => r.Provider, StringComparer.Ordinal)
+            .Select(r => new PoolModelInfo(r.ModelId, r.Provider))
+            .ToList();
     }
 
     private ModelPoolPick ToPick(string modelId, string provider, string? encryptedApiKey, string? baseUrl) => new()
