@@ -35,20 +35,44 @@ export function formatDuration(startISO: string | null, endISO: string | null): 
   return `${h}h ${m % 60}m`;
 }
 
-/**
- * A one-line "what happened" for a run — the result summary the rows were missing. Success reports how long it took,
- * failure surfaces the error, a parked run its wait age. (The failing/parked NODE name — "failed at code node" —
- * isn't in the runs-list summary; surfacing it needs a small backend field, tracked separately.)
- */
-export function runOutcome(run: WorkflowRunSummary, nowMs: number): string {
-  // Duration is createdDate→completedAt (wall-clock), NOT startedAt→completedAt — startedAt is reset on every
-  // suspend→resume re-dispatch (the reconciler needs that), so it collapses to ~0s for any run that parked.
-  if (run.status === "Success") { const d = formatDuration(run.createdDate, run.completedAt); return d ? `completed in ${d}` : "completed"; }
-  if (run.status === "Failure") return run.error ? `failed · ${run.error}` : "failed";
-  if (run.status === "Cancelled") return "cancelled";
-  if (run.status === "Suspended") return `waiting ${compactAge(run.createdDate, nowMs)}`;
+/** Workflow vs Task — an authored run has a parent workflow; a snapshot / task run does not. */
+export function runType(run: WorkflowRunSummary): "Workflow" | "Task" {
+  return run.workflowId ? "Workflow" : "Task";
+}
 
-  return run.status.toLowerCase();
+/** The status tone shared by the row's tinted status tile + its status word. */
+export type RunStatusTone = "ok" | "err" | "running" | "suspended" | "cancelled" | "queued";
+
+export function runStatusTone(status: WorkflowRunStatus): RunStatusTone {
+  if (status === "Success") return "ok";
+  if (status === "Failure") return "err";
+  if (status === "Running") return "running";
+  if (status === "Suspended") return "suspended";
+  if (status === "Cancelled") return "cancelled";
+
+  return "queued";   // Pending / Enqueued
+}
+
+/** The status as a friendly word — "Failed" over the enum's "Failure", "Queued" over "Enqueued". */
+export function runStatusWord(status: WorkflowRunStatus): string {
+  if (status === "Failure") return "Failed";
+  if (status === "Enqueued") return "Queued";
+
+  return status;   // Success / Running / Suspended / Cancelled / Pending
+}
+
+/**
+ * The run's wall-clock time for the row's clock chip. A terminal run shows its total duration (createdDate→completedAt,
+ * NOT startedAt→completedAt — startedAt is reset on every suspend→resume re-dispatch, so it collapses to ~0s for any
+ * run that parked); a live run shows elapsed-so-far; a parked run its wait age. Empty when there's nothing meaningful
+ * yet — a freshly queued run, or a terminal run still missing its completedAt.
+ */
+export function runDuration(run: WorkflowRunSummary, nowMs: number): string {
+  if (run.status === "Suspended") return `waiting ${compactAge(run.createdDate, nowMs)}`;
+  if (run.status === "Running") return compactAge(run.startedAt ?? run.createdDate, nowMs);
+  if (run.status === "Pending" || run.status === "Enqueued") return "";
+
+  return formatDuration(run.createdDate, run.completedAt);   // Success / Failure / Cancelled
 }
 
 /** The Needs-decision card: how many decisions wait on a human, the oldest one's age, and how many are high-risk. */

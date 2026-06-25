@@ -3,7 +3,7 @@ import type { PendingDecision, RunPhasesResponse, WorkflowRunStatus, WorkflowRun
 import { relativeTime } from "@/lib/codeTree";
 
 import { DecisionCard } from "./DecisionCard";
-import { compactAge, runOutcome, suspendedNeedingReview, type CockpitFilter } from "./cockpit";
+import { compactAge, runDuration, runStatusTone, runStatusWord, runType, suspendedNeedingReview, type CockpitFilter } from "./cockpit";
 import { bucketRuns, sourceLabel } from "./runsIndex";
 import { summarizeRunState } from "./runPhases";
 
@@ -128,27 +128,42 @@ function CompactList({ runs, nowMs, onOpen, empty }: { runs: WorkflowRunSummary[
 }
 
 /**
- * Two-line run row: the title + when on top, and below it the run's context (kind · source · version) folded into a
- * RESULT summary ("completed in 7m59s" / "failed · …") plus its short id — so each row reads as "what happened",
- * not a bare DB cell. The status colour is carried by the glyph, so no redundant status word.
+ * A run row, reading top-down: the run NAME with its Workflow/Task type + version as labels beside it (and when it
+ * ran on the right); then the status word in its tone + the run's wall-clock duration; and, only for a failed run,
+ * a third line that boxes the error in a red label sized to the message. The status tone is carried by a tinted tile
+ * on the left and the status word, so the state reads at a glance without a separate badge column.
  */
 function RunRow({ run, nowMs, onOpen }: { run: WorkflowRunSummary; nowMs: number; onOpen: (runId: string) => void }) {
   const title = run.workflowName ?? sourceLabel(run.sourceType);
-  const meta = [run.workflowId ? "Workflow" : "Task", sourceLabel(run.sourceType), run.workflowVersion != null ? `v${run.workflowVersion}` : null, runOutcome(run, nowMs)].filter(Boolean).join(" · ");
+  const type = runType(run);
+  const tone = runStatusTone(run.status);
+  const version = run.workflowVersion != null ? `v${run.workflowVersion}` : null;
+  const duration = runDuration(run, nowMs);
   const when = run.completedAt ?? run.startedAt ?? run.createdDate;
+  const error = run.status === "Failure" ? run.error : null;
 
   return (
-    <li className="run-row2" data-status={run.status.toLowerCase()} onClick={() => onOpen(run.id)}>
-      <span className="run-row2-glyph" data-status={run.status.toLowerCase()} aria-hidden="true"><RunGlyph status={run.status} /></span>
+    <li className="run-row2" onClick={() => onOpen(run.id)}>
+      <span className="run-row2-tile" data-tone={tone} aria-hidden="true"><RunGlyph status={run.status} /></span>
       <div className="run-row2-body">
         <div className="run-row2-l1">
           <span className="run-row2-title" title={title}>{title}</span>
+          <span className="run-row2-type" data-type={type.toLowerCase()}>{type}</span>
+          {version && <span className="run-row2-ver">{version}</span>}
+          <span className="run-row2-gap" />
           <span className="run-row2-when">{relativeTime(when)}</span>
         </div>
         <div className="run-row2-l2">
-          <span className="run-row2-meta" title={meta}>{meta}</span>
+          <span className="run-row2-sw" data-tone={tone}>{runStatusWord(run.status)}</span>
+          {duration && <span className="run-row2-dur"><Ic.Clock size={11} />{duration}</span>}
+          <span className="run-row2-gap" />
           <span className="run-row2-id">{run.id.slice(0, 8)}</span>
         </div>
+        {error && (
+          <div className="run-row2-l3">
+            <span className="run-row2-err" title={error}><Ic.Triangle size={12} /><span>{error}</span></span>
+          </div>
+        )}
       </div>
     </li>
   );
