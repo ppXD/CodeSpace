@@ -3,6 +3,7 @@ using CodeSpace.Core.Services.Tasks.Bounds.Presets.Quick;
 using CodeSpace.Core.Services.Tasks.Bounds.Presets.Standard;
 using CodeSpace.Core.Services.Tasks.Effort;
 using CodeSpace.Core.Services.Tasks.Effort.Classifiers.Heuristic;
+using CodeSpace.Core.Services.Tasks.Effort.Classifiers.Llm;
 using CodeSpace.Core.Services.Tasks.Recipes;
 using CodeSpace.Core.Services.Tasks.Recipes.SingleAgent;
 using CodeSpace.Messages.Tasks;
@@ -32,6 +33,23 @@ public class EffortRegistriesTests
         registry.Resolve(HeuristicEffortClassifier.ClassifierKind).ShouldBeSameAs(heuristic);
         registry.Default.ShouldBeSameAs(heuristic);
         registry.All.Select(c => c.Kind).ShouldContain(HeuristicEffortClassifier.ClassifierKind);
+    }
+
+    [Fact]
+    public void Classifier_registry_Auto_prefers_structured_llm_when_registered_else_the_heuristic_default()
+    {
+        var heuristic = new HeuristicEffortClassifier();
+
+        // Heuristic only → Auto IS the heuristic (the always-confirm baseline).
+        new EffortClassifierRegistry(new IEffortClassifier[] { heuristic }).Auto.ShouldBeSameAs(heuristic);
+
+        // structured_llm registered → Auto prefers it (a real model decision supersedes the baseline), but Default
+        // stays the guaranteed heuristic floor (the LLM classifier's own run-time fallback).
+        var llm = new FakeClassifier(LlmEffortClassifier.ClassifierKind);
+        var registry = new EffortClassifierRegistry(new IEffortClassifier[] { heuristic, llm });
+
+        registry.Auto.ShouldBeSameAs(llm, "the structured-LLM classifier supersedes the heuristic on the auto path");
+        registry.Default.ShouldBeSameAs(heuristic, "Default stays the guaranteed heuristic baseline");
     }
 
     [Fact]

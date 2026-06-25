@@ -19,6 +19,9 @@ public interface IEffortClassifierRegistry
     /// <summary>Try-resolve variant — false (and a null out) when no classifier is registered for <paramref name="kind"/>.</summary>
     bool TryResolve(string kind, out IEffortClassifier classifier);
 
-    /// <summary>The deterministic classifier the router uses on the auto path when no specific kind is requested (the heuristic baseline this PR).</summary>
+    /// <summary>The deterministic baseline classifier (the always-confirm heuristic) — the GUARANTEED floor: the registry requires it, and the structured-LLM classifier degrades to it when no model is available.</summary>
     IEffortClassifier Default { get; }
+
+    /// <summary>The PREFERRED auto-path classifier the router asks for — the structured-LLM one when registered (a real model decision that can clear the confirm floor), else <see cref="Default"/>. So a deployment with a model supersedes the always-confirm baseline with ZERO router edit.</summary>
+    IEffortClassifier Auto { get; }
 }
