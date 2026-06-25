@@ -182,6 +182,36 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
     /// agents stand out as the retry signal. The most-recent spawn/retry is tagged so the model targets the freshest
     /// results. Every other decision keeps the compact payload+outcome line.
     /// </summary>
+    /// <summary>
+    /// Render an agent's GIT GROUND-TRUTH artifacts (the captured changed files + the pushed branch) under its result
+    /// line, so the brain verifies completion + detects cross-agent file OVERLAP against the real diff — not the
+    /// self-reported summary. Bounded to a capped file sample to stay token-cheap. Reads only the TOP-LEVEL fields
+    /// (the single-repo diff, or a multi-repo run's PRIMARY) — the per-repo RepositoryResults are deliberately NOT
+    /// rendered (kept single-repo-identical, no multi-repo bloat). No artifacts (a no-op / pure-analysis agent) → nothing.
+    /// </summary>
+    private static void AppendAgentArtifacts(StringBuilder builder, SupervisorAgentResult result)
+    {
+        const int maxFiles = 12;
+
+        var hasFiles = result.ChangedFiles.Count > 0;
+        var hasBranch = !string.IsNullOrEmpty(result.ProducedBranch);
+
+        if (!hasFiles && !hasBranch) return;
+
+        var parts = new List<string>();
+
+        if (hasFiles)
+        {
+            var shown = string.Join(", ", result.ChangedFiles.Take(maxFiles));
+            var more = result.ChangedFiles.Count > maxFiles ? $" (+{result.ChangedFiles.Count - maxFiles} more)" : "";
+            parts.Add($"{result.ChangedFiles.Count} changed file(s): {shown}{more}");
+        }
+
+        if (hasBranch) parts.Add($"branch {result.ProducedBranch}");
+
+        builder.AppendLine($"      produced — {string.Join("; ", parts)}");
+    }
+
     private static void AppendPriorDecision(StringBuilder builder, SupervisorPriorDecision prior, bool isLatestSpawn)
     {
         var agentResults = SupervisorDecisionKinds.StagesAgents(prior.DecisionKind)
@@ -196,6 +226,7 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
                 var r = agentResults[k];
                 var detail = !string.IsNullOrWhiteSpace(r.Error) ? $"error: {r.Error}" : !string.IsNullOrWhiteSpace(r.Summary) ? r.Summary : "(no summary)";
                 builder.AppendLine($"    agent {k}: {r.Status} — {detail}");
+                AppendAgentArtifacts(builder, r);
             }
 
             if (prior.DecisionKind == SupervisorDecisionKinds.Resolve) AppendResolutionVerdict(builder, prior);
