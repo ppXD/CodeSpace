@@ -211,7 +211,9 @@ jobs:
         # live model drove the whole arc to the real integrated+accepted head (Drove). A CAPABILITY MISS (the model RAN but
         # parked short) now REDs — made flake-safe by a bounded best-of-N capability-floor (a fresh run per attempt; gates
         # only if EVERY non-infra attempt parks short). A CODE FAULT reds at once; a gateway timeout is non-gating LOUD infra.
-        # The reaction arcs (conflict→resolve, failure→retry) still gate only on a CODE FAULT and REPORT a capability miss.
+        # The reaction arcs (conflict→resolve, failure→retry) NOW also GATE: the live model must drive a SAFE recovery on
+        # the real adverse state (spawn→conflict→resolve|stop|escalate, or spawn→fail→retry|escalate) or RED after the same
+        # best-of-N (CODESPACE_REALMODEL_WHOLE_LOOP_ATTEMPTS, uniform). Same CodeFault-reds-at-once / gateway-is-infra contract.
         # Each test self-skips when ALL CODESPACE_LLM_* secrets are absent — surfaced LOUDLY as NOT EVALUATED (skip ≠ pass),
         # fork stays green — and FAILS on a partial config.
         run: >
