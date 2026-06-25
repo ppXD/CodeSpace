@@ -14,13 +14,14 @@ namespace CodeSpace.UnitTests.Tasks.Timeline;
 [Trait("Category", "Unit")]
 public class RunRecordTimelineMapTests
 {
-    private static WorkflowRunRecord Record(string recordType, string? nodeId = null, string payloadJson = "{}", long sequence = 1) => new()
+    private static WorkflowRunRecord Record(string recordType, string? nodeId = null, string payloadJson = "{}", long sequence = 1, string iterationKey = "") => new()
     {
         Id = Guid.NewGuid(),
         RunId = Guid.NewGuid(),
         Sequence = sequence,
         RecordType = recordType,
         NodeId = nodeId,
+        IterationKey = iterationKey,
         OccurredAt = DateTimeOffset.UtcNow,
         PayloadJson = payloadJson,
     };
@@ -98,5 +99,22 @@ public class RunRecordTimelineMapTests
     public void Levels_milestones_above_structural_node_churn(string recordType, TimelineLevel expected)
     {
         RunRecordTimelineMap.ToEvent(Record(recordType, nodeId: "code")).ShouldNotBeNull().Level.ShouldBe(expected);
+    }
+
+    [Fact]
+    public void A_fanned_out_branch_failure_folds_to_detail_while_the_container_and_top_level_failures_stay_milestones()
+    {
+        // A 12-branch map that fails every branch must NOT flood the narrative with 12 "agent failed" milestones — a
+        // branch failure (non-empty iteration key) is folded DETAIL; its own agent terminal carries the error.
+        RunRecordTimelineMap.ToEvent(Record(WorkflowRunRecordTypes.NodeFailed, nodeId: "agent", iterationKey: "map#3", payloadJson: """{"error":"boom"}"""))
+            .ShouldNotBeNull().Level.ShouldBe(TimelineLevel.Detail);
+
+        // A nested map-in-map branch (composed key) folds too.
+        RunRecordTimelineMap.ToEvent(Record(WorkflowRunRecordTypes.NodeFailed, nodeId: "agent", iterationKey: "outer#0/inner#2"))
+            .ShouldNotBeNull().Level.ShouldBe(TimelineLevel.Detail);
+
+        // The map CONTAINER's own failure (empty key) and a plain top-level node failure stay the story's milestones.
+        RunRecordTimelineMap.ToEvent(Record(WorkflowRunRecordTypes.NodeFailed, nodeId: "map"))
+            .ShouldNotBeNull().Level.ShouldBe(TimelineLevel.Milestone);
     }
 }
