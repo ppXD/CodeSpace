@@ -88,6 +88,28 @@ public class GlobalExceptionFilterTests
         body.GetProperty("providerInstanceId").GetGuid().ShouldBe(instanceId);
     }
 
+    [Fact]
+    public void Argument_exception_maps_to_400_invalid_request_not_a_masked_500()
+    {
+        // A caller-supplied value that fails validation (an out-of-range launch cap, related repos passed without
+        // a primary) throws ArgumentException — it must surface as 400 with the real reason, NOT the masked 500
+        // default arm. Regression guard for the launch-path "invalid input → useless 500" bug.
+        var result = Run(new ArgumentException("MaxParallelism must be >= 1.", "maxParallelism"));
+        var body = Body(result);
+
+        result.StatusCode.ShouldBe(StatusCodes.Status400BadRequest);
+        body.GetProperty("code").GetString().ShouldBe("invalid_request");
+        body.GetProperty("message").GetString()!.ShouldContain("MaxParallelism must be >= 1.");
+    }
+
+    [Fact]
+    public void Argument_subtypes_also_map_to_400()
+    {
+        // ArgumentNullException / ArgumentOutOfRangeException derive from ArgumentException — the single arm covers them.
+        Run(new ArgumentNullException("repositoryId")).StatusCode.ShouldBe(StatusCodes.Status400BadRequest);
+        Run(new ArgumentOutOfRangeException("maxRounds", "must be >= 1")).StatusCode.ShouldBe(StatusCodes.Status400BadRequest);
+    }
+
     private static ObjectResult Run(Exception exception)
     {
         var filter = new GlobalExceptionFilter(NullLogger<GlobalExceptionFilter>.Instance);
