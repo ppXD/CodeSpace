@@ -2,12 +2,13 @@ using CodeSpace.Messages.Constants;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Persistence.EntityConfigurations;
 using CodeSpace.Core.Services.Identity;
+using Microsoft.AspNetCore.DataProtection.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 
 namespace CodeSpace.Core.Persistence.Db;
 
-public class CodeSpaceDbContext : DbContext, IUnitOfWork
+public class CodeSpaceDbContext : DbContext, IUnitOfWork, IDataProtectionKeyContext
 {
     private readonly ICurrentUser? _currentUser;
     private readonly IBotVisibility _botVisibility;
@@ -60,9 +61,23 @@ public class CodeSpaceDbContext : DbContext, IUnitOfWork
     public DbSet<SupervisorDecisionRecord> SupervisorDecisionRecord => Set<SupervisorDecisionRecord>();
     public DbSet<WorkSession> WorkSession => Set<WorkSession>();
 
+    /// <summary>The shared ASP.NET Data Protection key-ring (<see cref="IDataProtectionKeyContext"/>) — persisted in Postgres so every API/worker pod decrypts the same credentials. Mapped to <c>data_protection_keys</c> below; the table is created by DbUp 0074.</summary>
+    public DbSet<DataProtectionKey> DataProtectionKeys => Set<DataProtectionKey>();
+
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
         modelBuilder.ApplyConfigurationsFromAssembly(typeof(UserConfiguration).Assembly);
+
+        // Explicit mapping (not left to the snake_case convention) so the framework key-store entity lines up
+        // EXACTLY with the hand-written DbUp 0074 table — a deterministic contract, not a convention coincidence.
+        modelBuilder.Entity<DataProtectionKey>(b =>
+        {
+            b.ToTable("data_protection_keys");
+            b.HasKey(k => k.Id);
+            b.Property(k => k.Id).HasColumnName("id");
+            b.Property(k => k.FriendlyName).HasColumnName("friendly_name");
+            b.Property(k => k.Xml).HasColumnName("xml");
+        });
 
         // Global default: bot (non-human) users are invisible to EVERY User query. A request opts
         // back in by referencing the scoped IBotVisibility (flipped by BotVisibilityBehavior for
