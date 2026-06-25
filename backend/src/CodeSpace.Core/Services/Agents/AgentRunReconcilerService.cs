@@ -328,6 +328,7 @@ public sealed class AgentRunReconcilerService : IAgentRunReconcilerService, ISco
             await TerminateQuietlyAsync(durable, handle, runId, cancellationToken).ConfigureAwait(false);
 
         await TearDownEgressNetnsQuietlyAsync(runId, cancellationToken).ConfigureAwait(false);
+        await TearDownCgroupQuietlyAsync(runId, cancellationToken).ConfigureAwait(false);
 
         await TryAppendEventAsync(runId, AgentEventKind.Error, AbandonedError, cancellationToken).ConfigureAwait(false);
         return StaleOutcome.Abandoned;
@@ -349,6 +350,24 @@ public sealed class AgentRunReconcilerService : IAgentRunReconcilerService, ISco
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "AgentRunReconciler: best-effort egress-netns teardown for abandoned run {RunId} failed", runId);
+        }
+    }
+
+    /// <summary>
+    /// Best-effort tear down an abandoned run's cgroup-v2 resource-cap leaf (B4) — the cgroup parallel of the egress
+    /// backstop: a run that crashed between the cgroup SETUP and the handle PERSIST left no handle carrying the reap
+    /// key, so its leaf would leak. The leaf name IS runId-derived (the durable launch creates it under
+    /// <c>runId.ToString("N")</c>), so a reconstruct-from-runId teardown reaps it. Idempotent + a no-op when the run had
+    /// no cap or no root is configured; gated on cgroup-v2 support.
+    /// </summary>
+    private async Task TearDownCgroupQuietlyAsync(Guid runId, CancellationToken cancellationToken)
+    {
+        if (!CgroupResourceLimit.IsSupported || CgroupResourceLimit.CgroupRoot is not { } root) return;
+
+        try { await CgroupResourceLimit.TeardownAsync(root, runId.ToString("N"), cancellationToken).ConfigureAwait(false); }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "AgentRunReconciler: best-effort cgroup teardown for abandoned run {RunId} failed", runId);
         }
     }
 

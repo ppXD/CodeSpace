@@ -102,6 +102,12 @@ public sealed class AgentRunSpoolReaper : IAgentRunSpoolReaper, IScopedDependenc
         if (handle?.EgressNetnsKey is { Length: > 0 } netnsKey)
             await FilteredEgressNetns.TeardownAsync(netnsKey, cancellationToken).ConfigureAwait(false);
 
+        // Same backstop for the run's cgroup-v2 resource-cap leaf (B4) — reconstructed from the persisted key + the
+        // operator's configured root. Best-effort + idempotent: a no-op when the fast path already reaped it, the run
+        // had no cap, or no root is configured.
+        if (handle?.CgroupRunKey is { Length: > 0 } cgroupKey && CgroupResourceLimit.CgroupRoot is { } cgroupRoot)
+            await CgroupResourceLimit.TeardownAsync(cgroupRoot, cgroupKey, cancellationToken).ConfigureAwait(false);
+
         // Clear the handle regardless (the spool is reclaimed or irrelevant, and a terminal run never re-attaches)
         // so the run drops out of the candidate set and isn't re-processed every sweep.
         var cleared = await _db.AgentRun
