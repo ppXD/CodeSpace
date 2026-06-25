@@ -167,6 +167,21 @@ public class SupervisorDeciderTests
     }
 
     [Fact]
+    public void The_system_prompt_surfaces_the_optional_plan_phases()
+    {
+        // L4 ARC C model-authored SEMANTIC PHASES: the model can only group subtasks into named 'phases' on a plan if the
+        // prompt tells it the option exists — the schema + executor fold + projection already accept them, but the brain
+        // was never told (the same root cause #682 fixed for agents[] and #692 for acceptance). Pinned so the guidance
+        // can't be dropped silently (the real-model phase-authorship arm depends on it), AND so the OPTIONAL framing
+        // survives — phases are projection-only (they never feed the gated Drove verdict), but 'omit for a flat plan'
+        // keeps a simple goal's plan byte-identical.
+        var system = LlmSupervisorDecider.SystemPromptForTest;
+
+        system.ShouldContain("phases", Case.Insensitive, "the optional model-authored semantic phases are named so the model knows it can group subtasks into named stages");
+        system.ShouldContain("omit 'phases'", Case.Insensitive, "...and it is explicitly OPTIONAL — omit it for the flat subtask plan, so a simple goal stays byte-identical");
+    }
+
+    [Fact]
     public void The_system_prompt_guides_recognising_an_already_completed_ask_without_re_planning_redundant_work()
     {
         // Redundant-complete handoff: a session-continue whose follow-up re-requests work the prior context already
