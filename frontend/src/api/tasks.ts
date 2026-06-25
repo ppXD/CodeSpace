@@ -7,12 +7,31 @@ import { fetchJson } from "./request";
  *  forbids opening the modal with one. Add a surface back when its provider lands. */
 export type TaskSurfaceKind = "chat" | "repo";
 
+/** One non-primary repo in a multi-repo launch — mirrors the backend `TaskRelatedRepository` noun.
+ *  `access` is `"write"`/`"read"`; a blank `alias` is omitted (the backend derives one). */
+export interface LaunchRelatedRepository {
+  repositoryId: string;
+  alias?: string;
+  access?: string;
+}
+
+/** The operator's optional safety-budget caps — mirrors the backend `TaskCapsOverride` noun. Every cap
+ *  is optional: a set value replaces the effort preset's, an omitted one keeps the preset default. Bounds
+ *  a fan-out / supervisor loop, so it is inert on a single-agent (quick) run. */
+export interface LaunchCaps {
+  maxCostUsd?: number;
+  maxParallelism?: number;
+  maxRounds?: number;
+  maxTotalSpawns?: number;
+}
+
 /**
- * The WIRED subset of `LaunchTaskCommand` the modal sends today. Optional fields are omitted
- * (sent null) when the operator leaves them on their default so the backend's projection picks
- * the smart default — sending a blank string would override it. Multi-repo, the supervisor
- * model/pool/bounds, and the per-run profile toggles are design-ahead and intentionally absent
- * from this shape until their backend seams land.
+ * The WIRED subset of `LaunchTaskCommand` the modal sends. Optional fields are omitted (sent null/absent)
+ * when the operator leaves them on their default so the backend's projection picks the smart default —
+ * sending a blank string would override it. `relatedRepositories` (multi-repo workspace) and `caps`
+ * (Coordination Limits / Budget) bind straight into the existing `LaunchTaskCommand.RelatedRepositories`
+ * / `Caps` seams. The supervisor model/pool/acceptance and the per-run profile toggles are still
+ * design-ahead and intentionally absent from this shape until their backend seams land.
  */
 export interface LaunchTaskInput {
   taskText: string;
@@ -26,6 +45,8 @@ export interface LaunchTaskInput {
   agentDefinitionId?: string | null;
   runnerKind?: string | null;
   modelCredentialId?: string | null;
+  relatedRepositories?: LaunchRelatedRepository[];
+  caps?: LaunchCaps;
 }
 
 /** Mirror of the backend `LaunchTaskResult` — only the fields the UI consumes. `runId` is the
