@@ -3,6 +3,7 @@ using Autofac;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Agents;
+using CodeSpace.Core.Services.Supervisor;
 using CodeSpace.Core.Services.Tasks;
 using CodeSpace.Core.Services.Tasks.Launch;
 using CodeSpace.IntegrationTests.Infrastructure;
@@ -239,6 +240,49 @@ public class TaskLaunchFlowTests
         run.DefinitionSnapshotJson.ShouldNotBeNull("the launched definition is frozen inline on the run");
 
         ReadAgentRepositoryId(run.DefinitionSnapshotJson!).ShouldBe(repoId.ToString(), "the repo task scopes the projected agent.code to the selected repository");
+    }
+
+    [Fact]
+    public async Task A_deep_launch_self_resolves_a_brain_model_and_bakes_it_into_the_supervisor_snapshot()
+    {
+        // P3b — the dead Auto→Deep path: SupervisorDefinitionBuilder never emitted supervisorModelId, so every Deep
+        // launch hit NoBrainModelStop turn-1. The launch now self-resolves a structured-capable pool model as the brain
+        // and bakes it into the snapshot, so the decider has a brain. (The empty-pool fail-closed floor is unit-pinned
+        // by SelectBrainRowIdAsync's null path + the builder's omit-when-null test; SeedTeamAsync always seeds a pool.)
+        var flagBefore = Environment.GetEnvironmentVariable(SupervisorLane.EnabledEnvVar);
+        Environment.SetEnvironmentVariable(SupervisorLane.EnabledEnvVar, "1");
+
+        var jobClient = ResolveJobClient();
+        jobClient.Clear();
+        jobClient.AutoExecute = false;   // inspect the frozen snapshot; don't walk the supervisor run
+
+        try
+        {
+            var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+
+            var result = await LaunchAsync(new TaskLaunchRequest
+            {
+                TeamId = teamId, ActorUserId = userId, SurfaceKind = TaskLaunchSurfaceKinds.Chat,
+                TaskText = "Ship the whole feature end to end", RequestedEffort = TaskEffortModes.Deep,
+            });
+
+            result.Route.ProjectionKind.ShouldBe(TaskProjectionKinds.Supervisor, "deep routes the supervisor lane (flag on)");
+
+            var run = await LoadRunAsync(result.RunId);
+            run.DefinitionSnapshotJson.ShouldNotBeNull("the launched supervisor definition is frozen inline on the run");
+
+            var bakedBrain = ReadSupervisorBrainModelId(run.DefinitionSnapshotJson!);
+            bakedBrain.ShouldNotBeNull("the Auto/Deep launch self-resolved a brain + baked it into the supervisor node config — no NoBrainModelStop turn-1");
+
+            // The baked id is a REAL enabled credentialed-model row the TEAM owns — not a guess, not a foreign row.
+            (await IsTeamPoolRowAsync(Guid.Parse(bakedBrain!), teamId)).ShouldBeTrue(
+                "the baked brain is a team-owned, enabled credentialed-model row the decider can resolve by id");
+        }
+        finally
+        {
+            jobClient.AutoExecute = true;
+            Environment.SetEnvironmentVariable(SupervisorLane.EnabledEnvVar, flagBefore);
+        }
     }
 
     [Fact]
@@ -673,6 +717,23 @@ public class TaskLaunchFlowTests
         var agent = root.GetProperty("nodes").EnumerateArray().Single(n => n.GetProperty("id").GetString() == "agent");
 
         return agent.GetProperty("inputs").TryGetProperty("repositoryId", out var repo) ? repo.GetString() : null;
+    }
+
+    /// <summary>Reads the projected <c>agent.supervisor</c> node's <c>supervisorModelId</c> (the self-resolved brain) out of the frozen supervisor snapshot. Null when the key is absent (no brain baked).</summary>
+    private static string? ReadSupervisorBrainModelId(string definitionSnapshotJson)
+    {
+        var root = JsonDocument.Parse(definitionSnapshotJson).RootElement;
+        var sup = root.GetProperty("nodes").EnumerateArray().Single(n => n.GetProperty("id").GetString() == "sup");
+
+        return sup.GetProperty("config").TryGetProperty("supervisorModelId", out var brain) ? brain.GetString() : null;
+    }
+
+    /// <summary>Whether the row id is an enabled credentialed-model row under an active credential the team owns — proves the baked brain is a real, team-scoped, decider-resolvable row.</summary>
+    private async Task<bool> IsTeamPoolRowAsync(Guid rowId, Guid teamId)
+    {
+        using var scope = _fixture.BeginScope();
+        return await scope.Resolve<CodeSpaceDbContext>().ModelCredentialModel.AsNoTracking()
+            .AnyAsync(m => m.Id == rowId && m.Enabled && m.Credential.TeamId == teamId && m.Credential.Status == CredentialStatus.Active && m.Credential.DeletedDate == null);
     }
 
     /// <summary>Reads the projected agent.code node's <c>relatedRepositories</c> input (id + alias + access per entry) out of the frozen snapshot, in authored order. Empty when the key is absent.</summary>

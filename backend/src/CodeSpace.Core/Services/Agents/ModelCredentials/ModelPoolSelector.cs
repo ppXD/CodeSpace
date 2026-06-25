@@ -120,6 +120,25 @@ public sealed class ModelPoolSelector : IModelPoolSelector, IScopedDependency
             .ToList();
     }
 
+    public async Task<Guid?> SelectBrainRowIdAsync(Guid teamId, IReadOnlyCollection<string> eligibleProviders, CancellationToken cancellationToken)
+    {
+        if (eligibleProviders.Count == 0) return null;
+
+        // Lower-case the eligible providers for a case-insensitive provider match (parity with the rest of the selector),
+        // matched in-memory: the small set isn't worth an EF Contains over a constructed list, and a structured-provider
+        // set is a handful of names. The DB query is the same active-credential / enabled predicate as the pool.
+        var eligible = eligibleProviders.Select(p => p.ToLower()).ToHashSet();
+
+        var rows = await _db.ModelCredentialModel.AsNoTracking()
+            .Where(m => m.Enabled && m.Credential.TeamId == teamId && m.Credential.DeletedDate == null && m.Credential.Status == CredentialStatus.Active)
+            .OrderBy(m => m.ModelId).ThenBy(m => m.Id)
+            .Select(m => new { m.Id, Provider = m.Credential.Provider })
+            .ToListAsync(cancellationToken).ConfigureAwait(false);
+
+        // First row (in the deterministic order) whose provider a structured client serves → a replay re-derives the SAME brain.
+        return rows.FirstOrDefault(r => eligible.Contains(r.Provider.ToLower()))?.Id;
+    }
+
     private ModelPoolPick ToPick(string modelId, string provider, string? encryptedApiKey, string? baseUrl) => new()
     {
         ModelId = modelId,

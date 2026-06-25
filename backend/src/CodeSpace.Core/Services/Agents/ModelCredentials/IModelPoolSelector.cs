@@ -49,6 +49,16 @@ public interface IModelPoolSelector
     /// (harness, model) pair on purpose, not blind. De-duplicated by (model id, provider).
     /// </summary>
     Task<IReadOnlyList<PoolModelInfo>> ListPoolAsync(Guid teamId, IReadOnlyList<Guid>? allowedRowIds, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Auto-pick ONE enabled credentialed-model ROW id to run the supervisor's BRAIN on, when the operator pinned none
+    /// (the Deep/Auto lane). Bounded to <paramref name="eligibleProviders"/> — the providers a structured-LLM client
+    /// actually serves — so a self-resolved brain never trades <c>NoBrainModelStop</c> for <c>NoModelStop</c>. Returns
+    /// the row id (the decider resolves the brain BY row id) of the FIRST match in a deterministic total order (model id,
+    /// then row id), so a replay re-derives the SAME brain. Null when no enabled row under an active credential has an
+    /// eligible provider (the honest fail-closed floor — nothing to run the brain on).
+    /// </summary>
+    Task<Guid?> SelectBrainRowIdAsync(Guid teamId, IReadOnlyCollection<string> eligibleProviders, CancellationToken cancellationToken);
 }
 
 /// <summary>One pooled model the brain may dispatch — its canonical id and the provider tag whose harness can drive it. Catalog-only (no credential, no secret).</summary>
