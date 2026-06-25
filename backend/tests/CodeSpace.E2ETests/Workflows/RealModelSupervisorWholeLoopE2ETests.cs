@@ -343,10 +343,14 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
         // equality: sh solution.sh 7 5 == 12), not just that a file integrated. The brain is also live (this lane's
         // default), so the whole arc — brain drives → real agent solves → real merge → goal-relevance accept — is real.
         //
-        // REPORT-ONLY for now (legacy AssessLiveAsync three-way): a brand-new live integration (real claude CLI → gateway →
-        // real edit) is REPORTED to the job summary (Drove = the real model SOLVED the task; CapabilityMiss = it didn't) and
-        // only a CODE FAULT reds. Flip to AssessLiveWholeLoopAsync (strict gate + best-of-N) once the first live run
-        // confirms the wiring AND a solve — gating main on an unproven live coding path would violate 穩.
+        // GATING (the whole-system SOTA acceptance-gate pillar — "model-authored intelligence SOLVED a task", not merely
+        // DROVE the arc): the strict real-model-DROVE-to-completion gate. A CapabilityMiss — the live model RAN but did NOT
+        // SOLVE the goal-relevance task (sh solution.sh 7 5 != 12) — now REDS the blessed wire, made flake-safe by a bounded
+        // best-of-N capability floor (a FRESH run per attempt; gates only if EVERY non-infra attempt fails to solve). A CODE
+        // FAULT reds at once; a gateway timeout is non-gating LOUD infra. This is the ONE arm where BOTH the brain AND the
+        // coder are real-and-gating in the same run: the headline arc proves the brain drove a real durable+git arc but
+        // STUBS the coding (structural exit-0); HERE the spawned agent is a real claude CLI editing real source and the
+        // output-equality oracle grades a genuine SOLVE. Flipped from report-only after live runs confirmed wiring + solve.
         var baseUrl = Env(RealModelSupervisorDecisionFlowTests.BaseUrlEnvVar);
         var apiKey = Env(RealModelSupervisorDecisionFlowTests.ApiKeyEnvVar);
         var model = Env(RealModelSupervisorDecisionFlowTests.ModelIdEnvVar);
@@ -376,22 +380,23 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
         var workflowId = await CreateWholeLoopWorkflowAsync(teamId, userId, repoId, brainModelId,
             goal: "Edit the file solution.sh so that running `sh solution.sh A B` prints the SUM of the two integer arguments A and B. Keep it a POSIX /bin/sh script. Do not change anything else.",
             agentCredId: agentCredId, agentModel: model);
-        var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
-
-        await RealModelGate.AssessLiveAsync(Provider, async () =>
+        await RealModelGate.AssessLiveWholeLoopAsync(Provider, async () =>
         {
+            jobClient.Clear();   // SAFE under [Collection(PostgresCollection)] (serial); a no-op-on-empty between attempts
+            var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);   // a FRESH run per best-of-N attempt — never reuse a parked-short run
+
             await RunEngineAsync(runId);
             await jobClient.WaitForPendingAsync();
 
-            var (outcome, note) = await EvaluateAsync(runId, teamId, deterministicFakeAgents: false);   // REAL claude — 0 patches is a genuine capability outcome, never a capture-infra skip
+            var (outcome, note) = await EvaluateAsync(runId, teamId, deterministicFakeAgents: false);   // REAL claude — 0 patches IS a capability outcome, never a capture-infra skip
+
+            // The REAL-MODEL metric proof (post-#671): a SOLVE consumed real tokens that MUST reach the projected per-agent
+            // metric (a real claude-code v2.1.x stream → AgentTokenUsageReader → result_jsonb → AgentMetricsReader). Only on a
+            // Drove attempt — a CapabilityMiss has no clean run to pin and is reported/retried by the best-of-N floor.
+            if (outcome == RealModelOutcome.Drove) await AssertRealAgentTokensReachTheMetricAsync(runId, teamId);
+
             return (outcome, $"{Provider} model '{model}' CODING-agent goal-relevance (Drove = SOLVED the task) — {note}");
         });
-
-        // The REAL-MODEL metric proof (post-#671 review residual): when the live claude agent actually SUCCEEDS it
-        // consumed real tokens, and they MUST reach the projected per-agent metric the run-detail reads. The
-        // deterministic RealHarnessExecutionTests pin the PARSER on real-shaped bytes; THIS pins the LIVE wire shape
-        // end-to-end (a real claude-code v2.1.x stream → AgentTokenUsageReader → result_jsonb → AgentMetricsReader).
-        await AssertRealAgentTokensReachTheMetricAsync(runId, teamId);
     }
 
     /// <summary>
