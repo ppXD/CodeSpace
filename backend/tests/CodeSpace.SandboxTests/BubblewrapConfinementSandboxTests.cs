@@ -96,6 +96,39 @@ public sealed class BubblewrapConfinementSandboxTests : IDisposable
             customMessage: "with AllowNetwork=false the sandbox severs egress (loopback only) — no route to the internet / cloud-metadata");
     }
 
+    [Fact]
+    public async Task Bubblewrap_drops_every_capability()
+    {
+        if (BubblewrapSandbox.Available is null)
+        {
+            BubblewrapSandbox.IsRequired.ShouldBeFalse("CODESPACE_REQUIRE_SANDBOX is set but this host cannot sandbox (bwrap/userns) — the E2E cannot prove the capability drop here");
+            return;
+        }
+
+        // Read the kernel's own view: the capability masks from /proc/self/status — shell-agnostic, proving
+        // --cap-drop ALL actually took effect. This has TEETH: an unconfined (or merely userns-confined) process
+        // shows a non-zero CapBnd, so the all-zero assertion fails the moment the drop is removed. The cgroup-NS
+        // re-rooting is proven with teeth in DurableLaunchCgroupE2ETests, where a memory cap places the agent in a
+        // real non-root leaf (here the launcher sits at the container cgroup root, so 0::/ would pass vacuously).
+        var spec = new SandboxSpec
+        {
+            Command = "/bin/sh",
+            Args = new[] { "-c", "grep '^Cap' /proc/self/status" },
+            WorkingDirectory = TempDir(),
+            TimeoutSeconds = 30,
+        };
+
+        var handle = await LaunchAsync(spec);
+        var (result, lines) = await AttachCollectAsync(handle);
+
+        result.Status.ShouldBe(SandboxStatus.Success, "the confined capability probe runs to a clean exit");
+
+        var capLines = lines.Where(l => l.StartsWith("Cap")).ToList();
+        capLines.ShouldNotBeEmpty("/proc/self/status reports the capability masks");
+        foreach (var cap in capLines)
+            cap.ShouldEndWith("0000000000000000", customMessage: $"--cap-drop ALL empties every capability mask, even userns-local ones — got '{cap}'");
+    }
+
     // ─── Resource caps (prlimit wrapper — Linux only, gated on ProcessRlimits.Available) ─────────
     // 🟢 High fidelity (Rule 12): real durable launch (supervisor + prlimit + bwrap + agent), caps read straight
     // from the kernel (/proc/self/limits) so dash's missing `ulimit -u` can never silently no-op them. Skips on

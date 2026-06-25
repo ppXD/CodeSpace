@@ -110,8 +110,8 @@ jobs:
           executed=$(grep -oE 'executed="[0-9]+"' "$trx" | head -1 | grep -oE '[0-9]+')
           passed=$(grep -oE 'passed="[0-9]+"' "$trx" | head -1 | grep -oE '[0-9]+')
           echo "executed=${executed:-0} passed=${passed:-0}"
-          if [ "${executed:-0}" -lt 10 ]; then
-            echo "::error::Expected >=10 sandbox isolation tests to run (bwrap/prlimit confinement + egress-allowlist filter + cgroup resource cap + durable-launch cgroup wiring), but only ${executed:-0} did — the Category=Sandbox filter matched too few (trait regression?)."
+          if [ "${executed:-0}" -lt 12 ]; then
+            echo "::error::Expected >=12 sandbox isolation tests to run (bwrap/prlimit confinement + cap-drop + cgroup-namespace re-root + egress-allowlist filter + cgroup resource cap + durable-launch cgroup wiring), but only ${executed:-0} did — the Category=Sandbox filter matched too few (trait regression?)."
             exit 1
           fi
 
