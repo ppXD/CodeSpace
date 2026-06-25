@@ -70,6 +70,29 @@ public sealed class SeedBenchmarkFixturesTests : IDisposable
         (await RunCheckAsync(dir)).Status.ShouldBe(SandboxStatus.Success, "the documented one-line edit makes the SAME check exit 0 → solved");
     }
 
+    [Theory]
+    [InlineData("fizzbuzz")]
+    [InlineData("grade-boundaries")]
+    [InlineData("balanced-parens")]
+    [InlineData("gcd-euclid")]
+    [InlineData("clamp-range")]
+    public async Task A_known_correct_solution_makes_each_harder_fixtures_check_pass(string fixtureRef)
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        // The well-formedness guarantee the start-state-fails test alone can't give: each harder fixture is SOLVABLE —
+        // its check.sh is a CORRECT oracle (not a buggy one that never passes → an unsolvable task a live model would
+        // always score 0 on, a false signal). Stand in for the agent with a known-correct solution; the SAME check.sh
+        // must flip Failed → Success. (start-state-fails for all 9 tasks is covered by the loop test above.)
+        var dir = StageFixture(fixtureRef);
+
+        (await RunCheckAsync(dir)).Status.ShouldBe(SandboxStatus.Failed, $"'{fixtureRef}' must fail before the fix");
+
+        File.WriteAllText(Path.Combine(dir, SeedBenchmarkFixtures.SolutionFileName), KnownCorrectSolution(fixtureRef));
+
+        (await RunCheckAsync(dir)).Status.ShouldBe(SandboxStatus.Success, $"'{fixtureRef}' is solvable — a correct solution makes its multi-case check exit 0");
+    }
+
     [Fact]
     public void An_unknown_fixture_ref_throws_rather_than_staging_an_empty_dir()
     {
@@ -77,6 +100,32 @@ public sealed class SeedBenchmarkFixturesTests : IDisposable
     }
 
     // ─── Helpers ───
+
+    /// <summary>A reference solution for each harder fixture — proves the check.sh is a CORRECT, SOLVABLE oracle. These stand in for the agent; the real model authors its own (this only certifies the task is answerable, not the only answer).</summary>
+    private static string KnownCorrectSolution(string fixtureRef) => fixtureRef switch
+    {
+        "fizzbuzz" => """
+            #!/bin/sh
+            fizzbuzz() { n=$1; if [ $((n%15)) -eq 0 ]; then echo FizzBuzz; elif [ $((n%3)) -eq 0 ]; then echo Fizz; elif [ $((n%5)) -eq 0 ]; then echo Buzz; else echo "$n"; fi; }
+            """,
+        "grade-boundaries" => """
+            #!/bin/sh
+            letter_grade() { s=$1; if [ "$s" -ge 90 ]; then echo A; elif [ "$s" -ge 80 ]; then echo B; elif [ "$s" -ge 70 ]; then echo C; elif [ "$s" -ge 60 ]; then echo D; else echo F; fi; }
+            """,
+        "balanced-parens" => """
+            #!/bin/sh
+            is_balanced() { s=$1; d=0; while [ -n "$s" ]; do c=${s%"${s#?}"}; s=${s#?}; case $c in "(") d=$((d+1));; ")") d=$((d-1));; esac; if [ "$d" -lt 0 ]; then echo no; return; fi; done; if [ "$d" -eq 0 ]; then echo yes; else echo no; fi; }
+            """,
+        "gcd-euclid" => """
+            #!/bin/sh
+            gcd() { a=$1; b=$2; while [ "$b" -ne 0 ]; do t=$b; b=$((a%b)); a=$t; done; echo "$a"; }
+            """,
+        "clamp-range" => """
+            #!/bin/sh
+            clamp() { x=$1; lo=$2; hi=$3; if [ "$x" -lt "$lo" ]; then echo "$lo"; elif [ "$x" -gt "$hi" ]; then echo "$hi"; else echo "$x"; fi; }
+            """,
+        _ => throw new ArgumentException($"no known solution wired for '{fixtureRef}'", nameof(fixtureRef)),
+    };
 
     private string StageFixture(string fixtureRef)
     {
