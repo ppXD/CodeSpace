@@ -177,11 +177,10 @@ jobs:
         # (ANTHROPIC_BASE_URL / ANTHROPIC_AUTH_TOKEN), so no extra wiring is needed. The CLI surface is verified against
         # v2.1.x — pin to that line so a future CLI flag change can't silently break the harness.
         #
-        # continue-on-error: this is the FIRST rollout of the live-coding arm — if the pinned version is wrong / unpublished,
-        # a hard `npm install` failure would RED the whole job every push. Best-effort install instead: the step shows red
-        # (visible, so the version can be corrected) but the JOB stays green; the coding test then self-skips LOUDLY
-        # ("claude not installed → skip ≠ pass"). Make this fatal once the version is confirmed and the arm flips to gating.
-        continue-on-error: true
+        # FATAL install (was continue-on-error during the report-only rollout): the_real_coding_agent_solves arm is now a
+        # GATING best-of-N solve-rate gate, so a missing `claude` binary must RED the lane, never let the gating arm self-skip
+        # green ("skip ≠ pass" would silently pass the acceptance-gate pillar). The v2.1.x pin is confirmed-installable by the
+        # prior report-only runs; a future pinned-version miss is a real lane break to fix, not a silent skip.
         run: |
           npm install -g '@anthropic-ai/claude-code@~2.1.0'
           claude --version
