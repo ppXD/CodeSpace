@@ -54,7 +54,7 @@ public class SupervisorBuildAgentTaskTests
         // unusable because the default Environment is a distinct Dictionary instance, so we pin them explicitly.
         task.Permissions.ShouldBe(AgentAutonomyPolicy.Derive(AgentAutonomyLevel.Standard), "Standard autonomy derives the no-network/workspace-write posture (value-equal to pre-P2-3's untouched default)");
         task.Environment.ShouldBeEmpty("untouched → the record default empty environment");
-        task.TimeoutSeconds.ShouldBe(1800, "untouched → the record default timeout");
+        task.TimeoutSeconds.ShouldBe(3600, "untouched → the record default timeout (1h)");
         task.Workspace.ShouldBeNull("no profile → no related repos → null Workspace → byte-identical single-repo execution (S7)");
     }
 
