@@ -2871,6 +2871,17 @@ textarea:-webkit-autofill {
 .acs-root .wf-rf-fanout-term-st[data-status="failure"] { color: #9E3535; }
 .acs-root .wf-rf-fanout-term-st[data-status="success"] { color: #1F6B3F; }
 
+/* A flow.map COLLAPSED to a single fan-out card node (run view): a ~340px auto-HEIGHT card (overrides the
+   row-flex .wf-rf-node) whose body is the inline MapFanout (summary + dot strip + terminal). */
+.acs-root .wf-rf-fanout-node { flex-direction: column; align-items: stretch; gap: 0; min-width: 0; max-width: none; width: 340px; }
+.acs-root .wf-rf-fanout-node:has(.wf-rf-fanout-term) { width: 384px; }   /* widen for an open branch terminal (rich agent/output content) */
+.acs-root .wf-rf-fanout-node-head { display: flex; align-items: center; gap: 8px; }
+.acs-root .wf-rf-fanout-node-title { font-weight: 600; font-size: 13px; color: var(--ink); }
+.acs-root .wf-rf-fanout-node-head .wf-rf-node-ref { margin-left: auto; }
+/* The fan-out panel INLINE in a FanoutNode card — static flow, no floating frame (the card frames it). */
+.acs-root .wf-rf-fanout-inline { position: static; border: 0; box-shadow: none; padding: 8px 0 0; margin: 0; min-width: 0; max-width: none; width: auto; }
+.acs-root .wf-rf-fanout-inline:has(.wf-rf-fanout-term) { width: auto; box-shadow: none; }
+
 /* The run-view canvas surface + its Canvas/Timeline toggle. */
 .acs-root .wf-run-canvas { height: min(58vh, 540px); min-height: 420px; border: 1px solid var(--line); border-radius: 14px; overflow: hidden; background: var(--panel); position: relative; }
 .acs-root .wf-run-canvas-loading { display: grid; place-items: center; color: var(--muted); font-size: 13px; }

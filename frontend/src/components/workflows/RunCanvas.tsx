@@ -8,6 +8,7 @@ import { ERROR_HANDLE } from "@/lib/workflowErrorRoute";
 
 import { definitionToRfNodes } from "./definitionToRfNodes";
 import { runEdgeFlow } from "./runCanvasFlow";
+import { collapsedMapNode, runFanoutCollapse } from "./runFanoutCollapse";
 import { RunOpenContext } from "./runOpenContext";
 import { summarizeRunProgress } from "./runProgress";
 import { CATCH_HANDLE } from "./workflowContainers";
@@ -47,22 +48,39 @@ export function RunCanvas({ definition, runNodes, runStatus, manifestByType, onO
 function RunCanvasInner({ definition, runNodes, runStatus, manifestByType }: RunCanvasProps) {
   const statuses = useMemo(() => statusByNodeId(runNodes), [runNodes]);
   const rowsByNodeId = useMemo(() => rowsByNode(runNodes), [runNodes]);
+  // A fanned-out map collapses to ONE auto-sized fan-out card: its worker body's branch rows ride on the map
+  // node, and the marker + worker body nodes (and their intra-edges) are hidden.
+  const collapse = useMemo(() => runFanoutCollapse(definition, manifestByType, rowsByNodeId), [definition, manifestByType, rowsByNodeId]);
   // Once the run is terminal (Success/Failure/Cancelled), a node still reading Running/Suspended is stale — the
   // cancel/finish stopped it. The edges + progress chip read this so a cancelled run doesn't keep "flowing".
   const runActive = isRunActive(runStatus);
 
   const nodes = useMemo<Node<WorkflowNodeData>[]>(
-    () => definitionToRfNodes(definition, manifestByType).map((n) => ({
-      ...n,
-      data: { ...(n.data as WorkflowNodeData), runStatus: statuses.get(n.id), runRows: rowsByNodeId.get(n.id) },
-      draggable: false,
-      selectable: false,
-      connectable: false,
-    })),
-    [definition, manifestByType, statuses, rowsByNodeId],
+    () => definitionToRfNodes(definition, manifestByType).map((n) => {
+      const fanout = collapse.fanoutRowsByMapId.get(n.id);
+      const data = { ...(n.data as WorkflowNodeData), runStatus: statuses.get(n.id), runRows: rowsByNodeId.get(n.id), fanout };
+
+      // A collapsed map → an auto-sized fan-out card: keep its structure (incl. parentId for a nested map), drop
+      // only the container sizing. See collapsedMapNode.
+      if (fanout) return collapsedMapNode(n, data);
+
+      return {
+        ...n,
+        data,
+        draggable: false,
+        selectable: false,
+        connectable: false,
+        ...(collapse.hiddenNodeIds.has(n.id) ? { hidden: true } : {}),
+      };
+    }),
+    [definition, manifestByType, statuses, rowsByNodeId, collapse],
   );
 
-  const edges = useMemo<Edge[]>(() => definitionToRunEdges(definition, statuses, runActive), [definition, statuses, runActive]);
+  // Drop the intra-body edges of a collapsed map (both endpoints are now hidden) so no dangling connector remains.
+  const edges = useMemo<Edge[]>(
+    () => definitionToRunEdges(definition, statuses, runActive).filter((e) => !collapse.hiddenNodeIds.has(e.source) && !collapse.hiddenNodeIds.has(e.target)),
+    [definition, statuses, runActive, collapse],
+  );
 
   return (
     <div className="wf-run-canvas">
