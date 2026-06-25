@@ -30,6 +30,7 @@ public sealed class BubblewrapSandboxTests
         a.ShouldContain("--unshare-pid");
         a.ShouldContain("--unshare-ipc");
         a.ShouldContain("--unshare-uts");
+        a.ShouldContain("--unshare-cgroup-try");
         a.ShouldContain("--die-with-parent");
         Adjacent(a, "--proc", "/proc").ShouldBeTrue();
         Adjacent(a, "--dev", "/dev").ShouldBeTrue();
@@ -59,6 +60,18 @@ public sealed class BubblewrapSandboxTests
     public void Defaults_HOME_to_tmp_when_no_config_home_is_supplied() =>
         Triple(BubblewrapSandbox.BuildArgs(Plan(home: null)), "--setenv", "HOME", "/tmp")
             .ShouldBeTrue("with no config-home, HOME points at the writable tmpfs so ~-relative reads still miss operator dotfiles");
+
+    [Fact]
+    public void Drops_all_capabilities_and_isolates_the_cgroup_namespace()
+    {
+        // Defense-in-depth on top of the namespaces: --cap-drop ALL empties the capability set so even within its
+        // user namespace the agent cannot mount / load modules / wield any cap; --unshare-cgroup-try hides the real
+        // cgroup leaf path (best-effort — a pre-cgroupns kernel keeps full filesystem/pid confinement, just no cgroupns).
+        var a = BubblewrapSandbox.BuildArgs(Plan());
+
+        Adjacent(a, "--cap-drop", "ALL").ShouldBeTrue("every Linux capability is dropped, even userns-local ones");
+        a.ShouldContain("--unshare-cgroup-try", customMessage: "the agent sees 0::/ rather than its real cgroup leaf path");
+    }
 
     [Fact]
     public void Severs_the_network_only_when_sharing_is_disabled()

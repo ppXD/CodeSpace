@@ -57,6 +57,53 @@ public sealed class DurableLaunchCgroupE2ETests
     }
 
     [Fact]
+    public async Task The_cgroup_namespace_re_roots_the_agent_view_inside_a_real_leaf()
+    {
+        var arena = ArenaOrSkip();
+        if (arena is null) return;
+
+        // --unshare-cgroup-try only has TEETH when the launcher sits in a NON-root cgroup. Without bwrap the flag is
+        // never applied, so this can't prove re-rooting — require the sandbox (fail-closed on the required lane).
+        if (BubblewrapSandbox.Available is null)
+        {
+            BubblewrapSandbox.IsRequired.ShouldBeFalse("CODESPACE_REQUIRE_SANDBOX is set but no bwrap — cannot prove cgroup-namespace re-rooting without the --unshare-cgroup-try flag bwrap applies");
+            return;
+        }
+
+        var before = Environment.GetEnvironmentVariable(CgroupResourceLimit.CgroupRootEnvVar);
+        Environment.SetEnvironmentVariable(CgroupResourceLimit.CgroupRootEnvVar, arena.Root);
+        try
+        {
+            // A memory cap places the whole supervisor chain (and so the bwrap'd agent) inside a real cgroup leaf
+            // <arena>/cs-<key>. WITHOUT --unshare-cgroup-try the confined agent would read that real leaf path from
+            // /proc/self/cgroup; WITH it bwrap re-roots the cgroup namespace at the leaf so the agent reads 0::/ and
+            // cannot learn its own cgroup path. So this 0::/ assertion has TEETH — deleting the flag makes it fail.
+            var runner = new LocalProcessRunner();
+            var key = Guid.NewGuid().ToString("N");
+
+            var spec = new SandboxSpec
+            {
+                Command = "/bin/sh",
+                Args = new[] { "-c", "printf 'CGV='; grep '^0::' /proc/self/cgroup" },
+                MaxMemoryMb = 128,    // a cap ⇒ a real non-root leaf, so the view would leak the leaf path WITHOUT cgroupns
+                TimeoutSeconds = 30,
+            };
+
+            var handle = await runner.LaunchAsync(spec, key, CancellationToken.None);
+            var lines = new List<string>();
+            var result = await runner.AttachAsync(handle, (l, _) => { lines.Add(l.Trim()); return Task.CompletedTask; }, CancellationToken.None);
+
+            handle.CgroupRunKey.ShouldBe(key, "the memory cap must place the run in a cgroup leaf — otherwise the cgroupns assertion has no teeth");
+            result.Status.ShouldBe(SandboxStatus.Success, $"the cgroup-view probe runs to a clean exit. Stderr: {result.Stderr}");
+            lines.ShouldContain("CGV=0::/", customMessage: "inside a real non-root cgroup leaf, --unshare-cgroup-try re-roots the agent's cgroup namespace so /proc/self/cgroup reads 0::/ — without the flag it would read the leaf path <arena>/cs-<key> and this fails");
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable(CgroupResourceLimit.CgroupRootEnvVar, before);
+        }
+    }
+
+    [Fact]
     public async Task An_uncapped_run_sets_up_no_cgroup_even_with_a_root_configured()
     {
         var arena = ArenaOrSkip();

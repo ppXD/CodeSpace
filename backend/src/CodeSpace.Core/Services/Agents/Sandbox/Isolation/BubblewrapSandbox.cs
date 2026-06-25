@@ -6,15 +6,16 @@ namespace CodeSpace.Core.Services.Agents.Sandbox.Isolation;
 /// OS-level filesystem + process-namespace confinement for a sandboxed agent child, via Linux
 /// <c>bubblewrap</c> (<c>bwrap</c>) using the COMMAND-REWRITE strategy: the original command is rewritten as
 /// <c>bwrap &lt;confinement args&gt; -- &lt;command&gt; &lt;args&gt;</c> (see <see cref="BuildArgs"/>). The agent then runs in a
-/// fresh mount / pid / ipc / uts / user namespace over a READ-ONLY minimal root (the standard system dirs in
-/// <see cref="ReadOnlyRootDirs"/>), with a fresh <c>/proc</c> + <c>/dev</c> + a tmpfs <c>/tmp</c>, and the ONLY
-/// writable host paths being THIS run's workspace + config-home. So a prompt-injected or malicious agent cannot
-/// read the operator's <c>~/.ssh</c> / <c>~/.aws</c> / <c>~/.config/gh</c>, cannot see other runs' clones or
-/// spools, and cannot write outside its workspace — closing the audit's critical filesystem gaps.
+/// fresh mount / pid / ipc / uts / user / cgroup namespace over a READ-ONLY minimal root (the standard system dirs
+/// in <see cref="ReadOnlyRootDirs"/>), with EVERY Linux capability dropped (<c>--cap-drop ALL</c>), a fresh
+/// <c>/proc</c> + <c>/dev</c> + a tmpfs <c>/tmp</c>, and the ONLY writable host paths being THIS run's workspace +
+/// config-home. So a prompt-injected or malicious agent cannot read the operator's <c>~/.ssh</c> / <c>~/.aws</c> /
+/// <c>~/.config/gh</c>, cannot see other runs' clones or spools, cannot write outside its workspace, and cannot
+/// wield any capability — closing the audit's critical filesystem gaps.
 ///
-/// <para><b>Scope of this slice:</b> filesystem + pid/ipc/uts/user namespaces only. NETWORK stays shared (the
-/// agent needs the model API) — deny-by-default + an egress allowlist is the next slice. CPU/memory/PID cgroup
-/// caps are a later slice.</para>
+/// <para><b>Confinement surface:</b> mount + pid + ipc + uts + user + cgroup namespaces, all capabilities dropped,
+/// and (via the runner's durable launch) a deny-by-default egress allowlist + cgroup CPU/memory caps. Seccomp
+/// syscall filtering is the remaining hardening.</para>
 ///
 /// <para><b>Availability is probed, never assumed</b> (<see cref="Available"/>): Linux + a <c>bwrap</c> binary +
 /// a WORKING unprivileged user namespace (a real confined <c>true</c> must exit 0). When unavailable — macOS dev,
@@ -82,6 +83,8 @@ public static class BubblewrapSandbox
             // Tie the sandbox lifetime to the launcher, and isolate every namespace we can unprivileged.
             "--die-with-parent",
             "--unshare-user", "--unshare-pid", "--unshare-ipc", "--unshare-uts",
+            "--unshare-cgroup-try",          // private cgroup namespace → agent sees 0::/, not its real cgroup leaf path (best-effort: -try keeps full confinement on a pre-cgroupns kernel)
+            "--cap-drop", "ALL",             // drop EVERY Linux capability, even userns-local ones → mount / module-load / cap-requiring ops all denied inside the namespace
             "--new-session",                 // own session → blocks TIOCSTI tty-injection back to the parent
             "--proc", "/proc",               // fresh procfs → can't scrape other host processes / their environ
             "--dev", "/dev",                 // minimal devtmpfs (null/zero/random/…)
@@ -176,8 +179,12 @@ public static class BubblewrapSandbox
 
         try
         {
+            // Exercise the flags the real run depends on (--cap-drop, --unshare-cgroup-try), not just userns: a bwrap
+            // too old to know them must report UNAVAILABLE (→ unconfined fallback / fail-closed) rather than pass here
+            // and then die on every real launch with "unknown option". --unshare-cgroup-try is best-effort, so a host
+            // without cgroup namespaces still probes clean.
             var psi = new ProcessStartInfo { FileName = path, UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true };
-            foreach (var arg in new[] { "--unshare-user", "--unshare-pid", "--ro-bind", "/", "/", "--", "true" })
+            foreach (var arg in new[] { "--unshare-user", "--unshare-pid", "--unshare-cgroup-try", "--cap-drop", "ALL", "--ro-bind", "/", "/", "--", "true" })
                 psi.ArgumentList.Add(arg);
 
             using var proc = Process.Start(psi);
