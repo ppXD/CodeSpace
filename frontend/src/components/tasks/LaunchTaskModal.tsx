@@ -79,13 +79,13 @@ export function LaunchTaskModal({ surface, autofill, onClose, onLaunched }: Laun
     integrateBranches: false, autonomyCeiling: "",
     acceptance: ["tests pass", "PR opened"] as string[],
     askWhenUncertain: true, requireApproval: true, stopBeforeMerge: true,
-    decisionSurface: "run-activity", timeout: "safe-default", notifyChat: "off",
+    decisionSurface: "run-activity", timeout: "safe-default", timeLimit: "3600", notifyChat: "off",
   });
   const setC = (p: Partial<typeof cfg>) => setCfg(c => ({ ...c, ...p }));
   const resetTab = () => {
     if (customizeTab === "execution") { setAgentDefinitionId(""); setHarness(""); setModel(""); setModelCredentialId(""); setRunnerKind(""); setC({ branchMode: "auto", tools: "default", enableMcp: true, cwdMode: "auto" }); }
     else if (customizeTab === "supervisor") setC({ agentModels: [], agentPool: [], maxParallel: "5", maxRounds: "6", maxAgents: "20", budget: "none", integrateBranches: false, autonomyCeiling: "", acceptance: ["tests pass", "PR opened"] });
-    else setC({ askWhenUncertain: true, requireApproval: true, stopBeforeMerge: true, decisionSurface: "run-activity", timeout: "safe-default", notifyChat: "off" });
+    else setC({ askWhenUncertain: true, requireApproval: true, stopBeforeMerge: true, decisionSurface: "run-activity", timeout: "safe-default", timeLimit: "3600", notifyChat: "off" });
   };
 
   const repos = useRepositories();
@@ -173,7 +173,7 @@ export function LaunchTaskModal({ surface, autofill, onClose, onLaunched }: Laun
     const input = buildLaunchInput({
       taskText, surface, workspace, effort, autonomy, model, modelCredentialId, harness, agentDefinitionId, runnerKind,
       maxParallel: cfg.maxParallel, maxRounds: cfg.maxRounds, maxAgents: cfg.maxAgents, budget: cfg.budget,
-      agentModels: cfg.agentModels, autonomyCeiling: cfg.autonomyCeiling,
+      agentModels: cfg.agentModels, autonomyCeiling: cfg.autonomyCeiling, timeLimit: cfg.timeLimit,
     });
     launch.mutate(input, { onSuccess: res => onLaunched?.(res.runId) });
   };
@@ -417,6 +417,7 @@ export function LaunchTaskModal({ surface, autofill, onClose, onLaunched }: Laun
                 <Combo label="Decision surface" value={cfg.decisionSurface} options={[{ value: "run-activity", label: "Run activity" }]} onChange={v => setC({ decisionSurface: v })} />
                 <Combo label="Notify in chat" value={cfg.notifyChat} options={[{ value: "off", label: "Off" }, { value: "channel", label: "Current channel" }]} onChange={v => setC({ notifyChat: v })} />
                 <Combo label="Timeout" value={cfg.timeout} options={[{ value: "safe-default", label: "Safe default" }, { value: "pause", label: "Pause and wait" }, { value: "reject", label: "Safe reject" }]} onChange={v => setC({ timeout: v })} />
+                <Combo label="Time limit" value={cfg.timeLimit} options={[{ value: "1800", label: "30 minutes" }, { value: "3600", label: "1 hour" }, { value: "7200", label: "2 hours" }, { value: "0", label: "No limit" }]} onChange={v => setC({ timeLimit: v })} />
               </>}
             </div>
           </div>
