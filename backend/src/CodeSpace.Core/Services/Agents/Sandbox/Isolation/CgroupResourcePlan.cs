@@ -77,7 +77,10 @@ public sealed record CgroupResourcePlan
         {
             controllers.Add("memory");
             limits.Add(new CgroupLimit { FileName = "memory.max", Value = ((long)maxMemoryMb * 1024 * 1024).ToString(System.Globalization.CultureInfo.InvariantCulture) });
-            limits.Add(new CgroupLimit { FileName = "memory.swap.max", Value = "0" });   // no swap escape — make memory.max a hard RAM ceiling
+            // No swap escape — make memory.max a hard RAM ceiling. OPTIONAL: memory.swap.max only exists when the kernel
+            // has swap accounting; absent it, the write would ENOENT — but with no swap to escape to, memory.max alone
+            // is already a hard cap, so the executor skips it best-effort rather than failing setup closed.
+            limits.Add(new CgroupLimit { FileName = "memory.swap.max", Value = "0", Optional = true });
         }
 
         if (maxCpuPercent > 0)
@@ -129,4 +132,7 @@ public sealed record CgroupLimit
     public required string FileName { get; init; }
 
     public required string Value { get; init; }
+
+    /// <summary>When true, the executor writes this best-effort — a missing controller file (e.g. <c>memory.swap.max</c> on a kernel without swap accounting) is skipped, not a fail-closed setup error. A required limit's absent file IS an error (a controller wasn't enabled).</summary>
+    public bool Optional { get; init; }
 }

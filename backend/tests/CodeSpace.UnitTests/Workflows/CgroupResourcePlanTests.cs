@@ -31,6 +31,11 @@ public class CgroupResourcePlanTests
             ("memory.swap.max", "0"),
         });
         plan.RequiredControllers.ShouldBe(new[] { "memory" });
+
+        // memory.max is REQUIRED (its absence is a setup error); memory.swap.max is OPTIONAL (skipped best-effort on a
+        // kernel without swap accounting, so setup doesn't fail closed — memory.max still caps).
+        plan.Limits.Single(l => l.FileName == "memory.max").Optional.ShouldBeFalse();
+        plan.Limits.Single(l => l.FileName == "memory.swap.max").Optional.ShouldBeTrue();
     }
 
     [Theory]
