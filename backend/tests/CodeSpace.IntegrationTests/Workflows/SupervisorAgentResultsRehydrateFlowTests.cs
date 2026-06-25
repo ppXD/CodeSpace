@@ -196,6 +196,48 @@ public sealed class SupervisorAgentResultsRehydrateFlowTests
         SupervisorOutcome.ReadStagedAgentCount(spawn.OutcomeJson).ShouldBe(2, "agentCount stays intact");
     }
 
+    // ── Evidence-based no-progress (W3) — the streak over a REAL durable tape ─────────
+
+    [Fact]
+    public async Task Rehydrate_counts_an_all_failed_spawn_wave_as_no_progress()
+    {
+        // THE BUG FIX, end-to-end over real Postgres: a spawn whose agents ALL failed (no diff, no branch) produced
+        // NO settled evidence, so the no-progress streak must INCREMENT. The prior staged-COUNT heuristic counted it
+        // as progress (streak 0), letting a loop spawning never-succeeding agents never trip the stall bound.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedSupervisorRunAsync(teamId, userId);
+
+        var failedA = Guid.NewGuid();
+        var failedB = Guid.NewGuid();
+        await SeedAgentRunAsync(runId, teamId, failedA, AgentRunStatus.Failed, rowError: "build failed: CS1002", resultJson: null);
+        await SeedAgentRunAsync(runId, teamId, failedB, AgentRunStatus.TimedOut, rowError: "idle timeout", resultJson: null);
+
+        await SeedSpawnDecisionAsync(runId, teamId, sequence: 1, SupervisorDecisionStatus.Succeeded, SpawnOutcome(failedA, failedB));
+
+        var context = await RehydrateAsync(runId, teamId);
+
+        context.NoProgressDecisions.ShouldBe(1, "an all-failed, no-artifact spawn wave is NOT progress — the streak increments");
+    }
+
+    [Fact]
+    public async Task Rehydrate_resets_no_progress_on_a_spawn_that_produced_evidence()
+    {
+        // The non-breaking other half: a spawn whose agent produced a real artifact (a git diff + branch) resets the
+        // streak to 0 — exactly as before. A genuinely-progressing run is NEVER falsely stalled by the stricter rule.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedSupervisorRunAsync(teamId, userId);
+
+        var ok = Guid.NewGuid();
+        await SeedAgentRunAsync(runId, teamId, ok, AgentRunStatus.Succeeded, rowError: null,
+            resultJson: ResultJson(summary: "added the endpoint", changedFiles: new[] { "Api/Foo.cs" }, producedBranch: "codespace/agent/ok"));
+
+        await SeedSpawnDecisionAsync(runId, teamId, sequence: 1, SupervisorDecisionStatus.Succeeded, SpawnOutcome(ok));
+
+        var context = await RehydrateAsync(runId, teamId);
+
+        context.NoProgressDecisions.ShouldBe(0, "a spawn that produced a real artifact reset the streak — no false stall");
+    }
+
     // ─── Seeding + helpers ─────────────────────────────────────────────────────────────
 
     private async Task<Guid> SeedSupervisorRunAsync(Guid teamId, Guid userId)

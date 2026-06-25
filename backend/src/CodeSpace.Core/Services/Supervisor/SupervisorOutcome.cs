@@ -2,6 +2,7 @@ using System.Text.Json;
 using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Agents.Cost;
 using CodeSpace.Messages.Agents;
+using CodeSpace.Messages.Enums;
 
 namespace CodeSpace.Core.Services.Supervisor;
 
@@ -174,6 +175,24 @@ public static class SupervisorOutcome
     /// </summary>
     public static decimal SpendUsd(IReadOnlyList<SupervisorAgentResult> agentResults) =>
         agentResults.Sum(r => AgentCostPricing.CostUsd(r.Model, r.InputTokens, r.OutputTokens) ?? 0m);
+
+    /// <summary>
+    /// True when a staging decision's folded agent results carry REAL settled EVIDENCE of forward progress — at
+    /// least one agent that SUCCEEDED, or that produced a concrete artifact (a non-empty git diff, a pushed branch,
+    /// or a per-repo result). This is the deterministic signal the no-progress streak resets on: a wave of agents
+    /// that ALL failed with no diff/branch produced nothing, so it must NOT count as progress — the prior staged-COUNT
+    /// heuristic did, letting a loop that keeps spawning never-succeeding agents never trip the stall bound. Generic:
+    /// reads ONLY the git-ground-truth fold (ChangedFiles/ProducedBranch) + the terminal status, no task knowledge.
+    /// Empty/absent results (not-yet-folded / malformed) read as NO evidence — fail-toward-stall, the safe direction.
+    /// </summary>
+    public static bool HasSettledEvidence(IReadOnlyList<SupervisorAgentResult> agentResults) =>
+        agentResults.Any(ResultHasEvidence);
+
+    private static bool ResultHasEvidence(SupervisorAgentResult result) =>
+        string.Equals(result.Status, nameof(AgentRunStatus.Succeeded), StringComparison.Ordinal)
+        || result.ChangedFiles.Count > 0
+        || !string.IsNullOrEmpty(result.ProducedBranch)
+        || result.RepositoryResults.Any(repo => !string.IsNullOrEmpty(repo.ProducedBranch) || repo.ChangedFiles.Count > 0);
 
     /// <summary>
     /// Project the per-repo results into the COMPACT (decider-visible, durable-ledger) shape: the bounded per-repo

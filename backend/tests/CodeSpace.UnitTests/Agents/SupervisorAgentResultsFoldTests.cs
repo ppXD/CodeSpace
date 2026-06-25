@@ -244,4 +244,81 @@ public class SupervisorAgentResultsFoldTests
         SupervisorOutcome.ReadAgentResults("{not json").ShouldBeEmpty();
         SupervisorOutcome.ReadAgentResults("""{"agentResults":"oops"}""").ShouldBeEmpty("a non-array agentResults degrades to empty");
     }
+
+    // ── HasSettledEvidence: the evidence-based no-progress signal (W3) ────────────────
+    // The crown jewel of this slice — a staging decision counts as PROGRESS only if its agents produced real
+    // settled evidence, NOT merely because K agents were staged. This is what stops a loop spawning never-succeeding
+    // agents from resetting the stall streak forever. The rehydrate WIRING (the streak over a real durable tape) is
+    // proven over Postgres in SupervisorAgentResultsRehydrateFlowTests; this pins the pure predicate in isolation.
+
+    private static SupervisorAgentResult Result(string status, string[]? changedFiles = null, string? producedBranch = null, RepositoryRunResult[]? repositoryResults = null) =>
+        new()
+        {
+            AgentRunId = Guid.NewGuid(),
+            Status = status,
+            ChangedFiles = changedFiles ?? Array.Empty<string>(),
+            ProducedBranch = producedBranch,
+            RepositoryResults = repositoryResults ?? Array.Empty<RepositoryRunResult>(),
+        };
+
+    [Fact]
+    public void HasSettledEvidence_is_false_for_no_results()
+    {
+        // No folded results (a zero-agent spawn, or not-yet-folded) → no evidence → fail-toward-stall.
+        SupervisorOutcome.HasSettledEvidence(Array.Empty<SupervisorAgentResult>()).ShouldBeFalse();
+    }
+
+    [Fact]
+    public void HasSettledEvidence_is_false_for_an_all_failed_empty_wave()
+    {
+        // THE BUG FIX: a wave of agents that ALL failed with no diff/branch produced nothing — it must NOT count as
+        // progress (the prior staged-COUNT heuristic counted it, so a garbage-spawning loop never tripped the bound).
+        var failedWave = new[]
+        {
+            Result("Failed"),
+            Result("Failed"),
+            Result("TimedOut"),
+        };
+
+        SupervisorOutcome.HasSettledEvidence(failedWave).ShouldBeFalse("an all-failed, no-artifact wave is NOT progress");
+    }
+
+    [Fact]
+    public void HasSettledEvidence_is_true_for_a_succeeded_agent()
+    {
+        // A Succeeded agent advanced the work even with no diff (covers analysis / read-only tasks) — generic, not coding-only.
+        SupervisorOutcome.HasSettledEvidence(new[] { Result("Succeeded") }).ShouldBeTrue();
+    }
+
+    [Theory]
+    [InlineData("Failed")]     // a non-Succeeded status that still produced a real artifact = progress
+    [InlineData("NeedsReview")]
+    public void HasSettledEvidence_is_true_for_a_real_artifact_regardless_of_status(string status)
+    {
+        // Evidence is the ARTIFACT (git ground truth), not the self-reported status: a non-empty diff, a pushed
+        // branch, or a per-repo result each count even when the run did not cleanly Succeed.
+        SupervisorOutcome.HasSettledEvidence(new[] { Result(status, changedFiles: new[] { "src/Foo.cs" }) }).ShouldBeTrue("a non-empty diff is a real artifact");
+        SupervisorOutcome.HasSettledEvidence(new[] { Result(status, producedBranch: "codespace/agent/x") }).ShouldBeTrue("a pushed branch is a real artifact");
+        SupervisorOutcome.HasSettledEvidence(new[]
+        {
+            Result(status, repositoryResults: new[]
+            {
+                new RepositoryRunResult { Alias = "api", RepositoryId = Guid.NewGuid(), ChangedFiles = new[] { "Api/Foo.cs" }, BaseBranch = "main", Access = WorkspaceAccess.Write },
+            }),
+        }).ShouldBeTrue("a per-repo result with changed files is a real artifact");
+    }
+
+    [Fact]
+    public void HasSettledEvidence_is_true_when_any_agent_in_a_mixed_wave_produced_evidence()
+    {
+        // One real result in the wave is enough — the run advanced, so the streak resets.
+        var mixed = new[]
+        {
+            Result("Failed"),
+            Result("Succeeded"),
+            Result("Failed"),
+        };
+
+        SupervisorOutcome.HasSettledEvidence(mixed).ShouldBeTrue("any one settled-evidence agent is progress");
+    }
 }
