@@ -228,6 +228,83 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
     }
 
     [Fact]
+    public async Task The_real_model_authors_semantic_phases_when_the_goal_has_distinct_stages()
+    {
+        // L4 ARC C — the model-authored SEMANTIC-PHASE proof, completing the L4 authorship trilogy (per-agent dispatch
+        // #682, stop-DoD #692, and now phases): given a goal with DISTINCT stages, does a live model GROUP its subtasks
+        // into named plan.phases rather than emit a flat list? The schema + executor fold + projection for phases are
+        // already gated deterministically (SupervisorPhaseSourceTests / SupervisorPlanFoldFlowTests); this OBSERVES whether
+        // the REAL brain uses the option now that the prompt surfaces it. REPORT-ONLY (gating:false): a flat plan is a
+        // valid model choice (and byte-identical), so a no-phases plan is a reported ⚠️, never a red — exactly the tier
+        // the dispatch / DoD authorship arms use. Phase authorship is read from the AUTHORITATIVE plan DECISION payload,
+        // so it does NOT depend on the run reaching a terminal Success.
+        var baseUrl = Env(RealModelSupervisorDecisionFlowTests.BaseUrlEnvVar);
+        var apiKey = Env(RealModelSupervisorDecisionFlowTests.ApiKeyEnvVar);
+        var model = Env(RealModelSupervisorDecisionFlowTests.ModelIdEnvVar);
+
+        var present = new[] { baseUrl, apiKey, model }.Count(v => v is not null);
+        if (present == 0) { RealModelGate.ReportSkipped(Provider, "CODESPACE_LLM_* absent (fork/local — no live model)"); return; }   // skip ≠ pass
+        present.ShouldBe(3, "CODESPACE_LLM_* is partially configured — set all three or none; a partial config would self-skip the arm proving nothing.");
+
+        if (OperatingSystem.IsWindows()) return;
+        if (!await GitReadyAsync()) return;
+
+        using var cli = new FileWritingFakeCli();
+
+        var jobClient = ResolveJobClient();
+        jobClient.Clear();
+        jobClient.AutoExecute = true;
+
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+
+        using var remote = new BareRemote();
+        await remote.SeedBaseAsync(new() { ["check.sh"] = "#!/bin/sh\nif ls agent_*.txt >/dev/null 2>&1; then exit 0; else exit 1; fi\n", ["base.txt"] = "base\n" });
+        var repoId = await SeedBoundRepositoryAsync(teamId, remote.Url, "main");
+
+        var (brainModelId, _) = await SeedBrainModelAsync(teamId, BaseUrlFor(baseUrl), apiKey, model);
+
+        // A goal with explicitly DISTINCT stages, inviting a phased plan (the model is free to emit a flat plan instead).
+        const string phasedGoal =
+            "Add rate limiting to the API in THREE distinct stages: first INVESTIGATE the current request-handling path "
+          + "and choose an approach, then IMPLEMENT the limiter, then REVIEW it with tests. When you plan, group the "
+          + "subtasks into named phases for these stages.";
+
+        var workflowId = await CreateWholeLoopWorkflowAsync(teamId, userId, repoId, brainModelId, goal: phasedGoal);
+
+        // REPORT-ONLY: ✅ = the live model authored ≥2 named plan.phases with distinct titles; ⚠️ = a flat plan
+        // (reported, never gating — a flat plan is valid and byte-identical). A gateway outage is a non-gating infra skip.
+        await RealModelGate.AssessLiveAsync(Provider, async () =>
+        {
+            var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
+
+            await RunEngineAsync(runId);
+            await jobClient.WaitForPendingAsync();
+
+            using var verify = _fixture.BeginScope();
+            var db = verify.Resolve<CodeSpaceDbContext>();
+
+            // Read the AUTHORITATIVE signal — the model's own plan DECISION payload: did it group subtasks into named
+            // phases? Keying on SupervisorPlanPayload.Phases proves the MODEL authored the phases (the projected phase
+            // view folds the plan OUTCOME; the raw decision payload is the model's own bytes).
+            var planPayloads = await db.SupervisorDecisionRecord.AsNoTracking()
+                .Where(d => d.SupervisorRunId == runId && d.TeamId == teamId && d.DecisionKind == SupervisorDecisionKinds.Plan)
+                .OrderBy(d => d.Sequence).Select(d => d.PayloadJson).ToListAsync();
+
+            var authoredPhases = planPayloads
+                .SelectMany(p => System.Text.Json.JsonSerializer.Deserialize<Messages.Agents.SupervisorPlanPayload>(p, AgentJson.Options)?.Phases
+                                 ?? Enumerable.Empty<Messages.Agents.SupervisorPlanPhase>())
+                .ToList();
+            var distinctTitles = authoredPhases.Where(p => !string.IsNullOrWhiteSpace(p.Title)).Select(p => p.Title.Trim()).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+            var authored = authoredPhases.Count >= 2 && distinctTitles.Count >= 2;
+
+            var sample = string.Join(" / ", distinctTitles.Take(3));
+            return (authored,
+                $"{Provider} '{model}' plan phases: authored={authoredPhases.Count}, distinct titles={distinctTitles.Count} [{sample}]. "
+              + (authored ? "DROVE — the live model grouped its subtasks into named semantic phases (plan.phases in the plan decision)." : "did NOT author phases — flat subtask plan (reported, not gating)."));
+        }, gating: false);
+    }
+
+    [Fact]
     public async Task The_real_model_observes_a_real_conflict_and_chooses_to_resolve()
     {
         // Real-scenario coverage A1 — the headline gap the deterministic whole-loop can't reach: a LIVE brain reacting to
