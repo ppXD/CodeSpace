@@ -26,13 +26,37 @@ describe("RunFilterBar", () => {
     }
   });
 
-  it("picking an option sets that dimension to a one-element list (single-select → list on the wire)", () => {
+  it("picking an option arms that dimension as a one-element list", () => {
     const onChange = renderBar();
 
     fireEvent.click(screen.getByText("Repository"));        // open the popover
-    fireEvent.click(screen.getByText("acme/api"));          // choose a repo
+    fireEvent.click(screen.getByText("acme/api"));          // tick a repo
 
     expect(onChange).toHaveBeenCalledWith({ repositoryIds: ["r1"] });
+  });
+
+  it("multi-select: a second pick ADDS to the facet's list (OR within a facet)", () => {
+    const onChange = renderBar({ repositoryIds: ["r1"] });   // acme/api already chosen
+
+    fireEvent.click(screen.getByText("Repository"));
+    fireEvent.click(screen.getByText("acme/web"));           // add the second repo
+
+    expect(onChange).toHaveBeenCalledWith({ repositoryIds: ["r1", "r2"] });
+  });
+
+  it("toggling an already-chosen value removes just it from the facet", () => {
+    const onChange = renderBar({ repositoryIds: ["r1", "r2"] });
+
+    fireEvent.click(screen.getByText("Repository"));
+    fireEvent.click(screen.getByText("acme/api"));           // r1 was on → toggle off
+
+    expect(onChange).toHaveBeenCalledWith({ repositoryIds: ["r2"] });
+  });
+
+  it("the armed pill shows a count of how many values are picked", () => {
+    renderBar({ repositoryIds: ["r1", "r2"] });
+    const pill = screen.getByText("Repository").closest(".filterpill")!;
+    expect(pill.querySelector(".filterpill-count")?.textContent).toBe("2");
   });
 
   it("AND-composes with an already-armed dimension rather than replacing it", () => {
@@ -44,17 +68,16 @@ describe("RunFilterBar", () => {
     expect(onChange).toHaveBeenCalledWith({ runKinds: ["task"], repositoryIds: ["r1"] });
   });
 
-  it("the inline ✕ is a real, keyboard-operable button that clears just its own dimension", () => {
-    const onChange = renderBar({ repositoryIds: ["r1"], runKinds: ["task"] });
+  it("the popover's per-facet Clear drops just that dimension to undefined", () => {
+    const onChange = renderBar({ repositoryIds: ["r1", "r2"], runKinds: ["task"] });
 
-    const clear = screen.getByLabelText("Clear Repository");
-    expect(clear.tagName).toBe("BUTTON");   // not a <span role="button"> nested in the pill button (invalid + keyboard-dead)
+    fireEvent.click(screen.getByText("Repository"));         // open the popover
+    fireEvent.click(screen.getByText("Clear"));              // the header Clear (exact — the bar's reads "Clear (2)")
 
-    fireEvent.click(clear);
     expect(onChange).toHaveBeenCalledWith({ repositoryIds: undefined, runKinds: ["task"] });
   });
 
-  it("Clear resets every scope dimension at once", () => {
+  it("the bar Clear resets every scope dimension at once", () => {
     const onChange = renderBar({ repositoryIds: ["r1"], runKinds: ["task"] });
 
     fireEvent.click(screen.getByText(/^Clear/));
