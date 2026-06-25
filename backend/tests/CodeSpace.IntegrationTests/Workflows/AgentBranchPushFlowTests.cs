@@ -239,6 +239,7 @@ public sealed class AgentBranchPushFlowTests
         var executor = new AgentRunExecutor(
             scope.Resolve<IAgentRunService>(),
             new AgentHarnessRegistry(new[] { harness }),
+            new HarnessModelReconciler(new AgentHarnessRegistry(new[] { harness }), scope.Resolve<CodeSpaceDbContext>()),
             scope.Resolve<ISandboxRunnerRegistry>(),
             scope.Resolve<IAgentWorkspaceResolver>(),
             scope.Resolve<IModelCredentialResolver>(),

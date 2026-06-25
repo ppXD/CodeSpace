@@ -85,6 +85,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
 
     private readonly IAgentRunService _runs;
     private readonly IAgentHarnessRegistry _harnesses;
+    private readonly IHarnessModelReconciler _harnessReconciler;
     private readonly ISandboxRunnerRegistry _runners;
     private readonly IAgentWorkspaceResolver _workspaceResolver;
     private readonly IModelCredentialResolver _modelCredentials;
@@ -96,10 +97,11 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     private readonly CodeSpaceDbContext _db;
     private readonly ILogger<AgentRunExecutor> _logger;
 
-    public AgentRunExecutor(IAgentRunService runs, IAgentHarnessRegistry harnesses, ISandboxRunnerRegistry runners, IAgentWorkspaceResolver workspaceResolver, IModelCredentialResolver modelCredentials, IWorkspaceProviderRegistry workspaces, IAgentRunCompletionNotifier notifier, IServiceScopeFactory scopeFactory, CodeSpaceDbContext db, ILogger<AgentRunExecutor> logger)
+    public AgentRunExecutor(IAgentRunService runs, IAgentHarnessRegistry harnesses, IHarnessModelReconciler harnessReconciler, ISandboxRunnerRegistry runners, IAgentWorkspaceResolver workspaceResolver, IModelCredentialResolver modelCredentials, IWorkspaceProviderRegistry workspaces, IAgentRunCompletionNotifier notifier, IServiceScopeFactory scopeFactory, CodeSpaceDbContext db, ILogger<AgentRunExecutor> logger)
     {
         _runs = runs;
         _harnesses = harnesses;
+        _harnessReconciler = harnessReconciler;
         _runners = runners;
         _workspaceResolver = workspaceResolver;
         _modelCredentials = modelCredentials;
@@ -155,7 +157,23 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
             var task = JsonSerializer.Deserialize<AgentTask>(run.TaskJson, AgentJson.Options)
                        ?? throw new InvalidOperationException($"AgentRun {agentRunId} has an empty task envelope.");
 
-            var harness = _harnesses.Resolve(task.Harness);
+            // Reconcile the authored harness with the pinned model credential's provider — if the pairing is
+            // impossible (e.g. an Anthropic-provider pool model under a codex-cli default), repair to a harness that
+            // CAN drive it so the agent still runs, instead of failing every agent at credential resolution.
+            var reconciliation = await _harnessReconciler.ReconcileAsync(task, run.TeamId, cancellationToken).ConfigureAwait(false);
+            var harness = _harnesses.Resolve(reconciliation.HarnessKind);
+
+            if (reconciliation.Repaired)
+            {
+                _logger.LogWarning("AgentRun {RunId}: {Note}", agentRunId, reconciliation.Note);
+                await _runs.AppendEventAsync(agentRunId, new AgentEvent { Kind = AgentEventKind.Warning, Text = reconciliation.Note! }, cancellationToken).ConfigureAwait(false);
+
+                // Correct the stored harness so observability (the runs index, the eval scorecard's group-by) reflects
+                // the harness that ACTUALLY ran, not the impossible authored one.
+                await _db.AgentRun.Where(r => r.Id == agentRunId)
+                    .ExecuteUpdateAsync(s => s.SetProperty(r => r.Harness, reconciliation.HarnessKind), cancellationToken).ConfigureAwait(false);
+            }
+
             var runnerKind = string.IsNullOrWhiteSpace(task.RunnerKind) ? DefaultRunnerKind : task.RunnerKind;
             var runner = _runners.Resolve(runnerKind);
 
@@ -246,7 +264,9 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         var task = JsonSerializer.Deserialize<AgentTask>(run.TaskJson, AgentJson.Options)
                    ?? throw new InvalidOperationException($"AgentRun {agentRunId} has an empty task envelope.");
 
-        var harness = _harnesses.Resolve(task.Harness);
+        // Re-attach must redact + fold against the SAME harness the original run reconciled to (so the right model
+        // env is redacted); reconcile silently here — the repair event was already emitted on the first attach.
+        var harness = _harnesses.Resolve((await _harnessReconciler.ReconcileAsync(task, run.TeamId, cancellationToken).ConfigureAwait(false)).HarnessKind);
 
         if (_runners.All.FirstOrDefault(r => r.Kind == handle.Kind) is not ISandboxDurableRunner durable) return;
 

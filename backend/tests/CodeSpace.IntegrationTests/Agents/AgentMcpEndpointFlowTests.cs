@@ -1021,6 +1021,7 @@ public class AgentMcpEndpointFlowTests
     private static AgentRunExecutor NewExecutor(ILifetimeScope scope, IAgentHarness harness) => new(
         scope.Resolve<IAgentRunService>(),
         new AgentHarnessRegistry(new[] { harness }),
+        new HarnessModelReconciler(new AgentHarnessRegistry(new[] { harness }), scope.Resolve<CodeSpaceDbContext>()),
         scope.Resolve<ISandboxRunnerRegistry>(),
         scope.Resolve<IAgentWorkspaceResolver>(),
         scope.Resolve<IModelCredentialResolver>(),
