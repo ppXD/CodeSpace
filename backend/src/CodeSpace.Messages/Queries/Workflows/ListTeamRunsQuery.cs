@@ -59,6 +59,10 @@ public sealed record ListTeamRunsQuery : IQuery<RunPage>, IRequireTeamMembership
     /// <summary>Opaque keyset cursor from the previous page's <c>NextCursor</c>; null/absent = first page.</summary>
     public string? Cursor { get; init; }
 
+    /// <summary>1-based page number for OFFSET (numbered) pagination. When set, the response is an offset page carrying
+    /// <c>TotalCount</c>, with <see cref="Limit"/> as the page size and <see cref="Cursor"/> ignored. Omit for keyset paging.</summary>
+    public int? Page { get; init; }
+
     public int Limit { get; init; } = 50;
 
     /// <summary>Fold the bound filter fields into the run-neutral spec the service applies.</summary>

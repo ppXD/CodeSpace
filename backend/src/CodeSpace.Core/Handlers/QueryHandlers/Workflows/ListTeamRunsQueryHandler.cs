@@ -17,6 +17,14 @@ public sealed class ListTeamRunsQueryHandler : IRequestHandler<ListTeamRunsQuery
         _currentTeam = currentTeam;
     }
 
-    public Task<RunPage> Handle(ListTeamRunsQuery request, CancellationToken cancellationToken) =>
-        _service.ListTeamRunsAsync(_currentTeam.Id!.Value, request.ToFilter(), request.Cursor, request.Limit, cancellationToken);
+    public Task<RunPage> Handle(ListTeamRunsQuery request, CancellationToken cancellationToken)
+    {
+        var teamId = _currentTeam.Id!.Value;
+        var filter = request.ToFilter();
+
+        // A page number switches to OFFSET (numbered) pagination — the History list; otherwise keyset (the live feed).
+        return request.Page is { } page
+            ? _service.ListTeamRunsPageAsync(teamId, filter, page, request.Limit, cancellationToken)
+            : _service.ListTeamRunsAsync(teamId, filter, request.Cursor, request.Limit, cancellationToken);
+    }
 }

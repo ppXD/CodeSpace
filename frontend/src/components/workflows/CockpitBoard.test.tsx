@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import type { PendingDecision, RunPhase, RunPhasesResponse, WorkflowRunStatus, WorkflowRunSummary } from "@/api/workflows";
 
-import { CockpitBoard } from "./CockpitBoard";
+import { CockpitBoard, type RunHistoryView } from "./CockpitBoard";
 
 // DecisionCard children answer through this hook — stub it so the board renders without a QueryClient.
 vi.mock("@/hooks/use-workflows", () => ({ useAnswerDecision: () => ({ mutate: vi.fn(), isPending: false }) }));
@@ -27,15 +27,21 @@ function phasesFor(runId: string): RunPhasesResponse {
   return { runId, runStatus: "Running", phases: [phase] };
 }
 
+// The History zone reads its OWN paginated view (terminal runs), separate from `runs` (which feeds the live + attention
+// zones). Tests that check History rows pass `hist([...])`; everything else gets the empty default.
+const HISTORY_EMPTY: RunHistoryView = { items: [], total: 0, page: 1, pageSize: 20, isLoading: false, onPage: () => {} };
+const hist = (items: WorkflowRunSummary[], extra: Partial<RunHistoryView> = {}): RunHistoryView => ({ ...HISTORY_EMPTY, items, total: items.length, ...extra });
+
 const board = (o: Partial<Parameters<typeof CockpitBoard>[0]>) =>
-  render(<CockpitBoard runs={[]} decisions={[]} phasesByRun={new Map()} filter={null} nowMs={NOW} onOpen={() => {}} {...o} />);
+  render(<CockpitBoard runs={[]} decisions={[]} phasesByRun={new Map()} filter={null} history={HISTORY_EMPTY} nowMs={NOW} onOpen={() => {}} {...o} />);
 
 describe("CockpitBoard", () => {
   it("shows the three zones, the answerable decision, and a live state sentence", () => {
     const { container } = board({
-      runs: [run("live1", "Running"), run("done1", "Success")],
+      runs: [run("live1", "Running")],
       decisions: [decision({ id: "dec1", question: "Choose merge strategy" })],
       phasesByRun: new Map([["live1", phasesFor("live1")]]),
+      history: hist([run("done1", "Success")]),
     });
 
     expect(screen.getByText("Needs attention")).toBeTruthy();
@@ -43,7 +49,7 @@ describe("CockpitBoard", () => {
     expect(screen.getByText("Live")).toBeTruthy();
     expect(screen.getByText(/Implement · 2 of 3 agents active/)).toBeTruthy();   // live sentence from phases
     expect(screen.getByText("History")).toBeTruthy();
-    expect(container.querySelectorAll(".run-row2").length).toBe(1);    // the one Success run
+    expect(container.querySelectorAll(".run-row2").length).toBe(1);    // the one Success run, from the History page
     const recent = container.querySelector(".run-row2")!;
     expect(recent.querySelector(".run-row2-type")?.textContent).toBe("Workflow");   // type label beside the name
     expect(recent.querySelector(".run-row2-ver")?.textContent).toBe("v1");          // version label
@@ -51,10 +57,10 @@ describe("CockpitBoard", () => {
   });
 
   it("titles a row with the workflow name, falling back to the source label when there is none", () => {
-    const { container } = board({ runs: [
+    const { container } = board({ history: hist([
       run("named", "Success", { workflowName: "Deploy Pipeline" }),
       run("anon", "Success", { workflowName: null, sourceType: "webhook" }),
-    ] });
+    ]) });
 
     const titles = [...container.querySelectorAll(".run-row2-title")].map((n) => n.textContent);
     expect(titles).toContain("Deploy Pipeline");   // authored run shows its workflow name (from run.workflowName)
@@ -72,7 +78,7 @@ describe("CockpitBoard", () => {
 
   it("opens a run from a Review action and from a recent row", () => {
     const onOpen = vi.fn();
-    const { container } = board({ runs: [run("s1", "Suspended"), run("r1", "Success")], onOpen });
+    const { container } = board({ runs: [run("s1", "Suspended")], history: hist([run("r1", "Success")]), onOpen });
 
     fireEvent.click(screen.getByText("Review →"));
     expect(onOpen).toHaveBeenCalledWith("s1");
@@ -109,10 +115,10 @@ describe("CockpitBoard", () => {
   });
 
   it("labels the Workflow/Task type + version beside the name, and shows the status word + run duration", () => {
-    const { container } = board({ runs: [
+    const { container } = board({ history: hist([
       run("wf", "Success", { workflowVersion: 3, createdDate: new Date(NOW - 7 * 60_000 - 59_000).toISOString(), completedAt: new Date(NOW).toISOString() }),
       run("task", "Success", { workflowId: null, workflowVersion: null }),
-    ] });
+    ]) });
 
     const rows = [...container.querySelectorAll(".run-row2")];
     const wf = rows.find((r) => r.querySelector(".run-row2-type")?.textContent === "Workflow")!;
@@ -126,9 +132,9 @@ describe("CockpitBoard", () => {
   });
 
   it("boxes a failed run's error on a third line, with the duration still shown", () => {
-    const { container } = board({ runs: [
+    const { container } = board({ history: hist([
       run("f", "Failure", { error: "check.sh exit 1 — 2 tests failing", createdDate: new Date(NOW - 4 * 60_000 - 11_000).toISOString(), completedAt: new Date(NOW).toISOString() }),
-    ] });
+    ]) });
 
     const row = container.querySelector(".run-row2")!;
     expect(row.querySelector(".run-row2-sw")?.textContent).toBe("Failed");
@@ -137,7 +143,25 @@ describe("CockpitBoard", () => {
   });
 
   it("shows no error line for a failed run without a message, nor for a success", () => {
-    const { container } = board({ runs: [run("f", "Failure", { error: null }), run("ok", "Success")] });
+    const { container } = board({ history: hist([run("f", "Failure", { error: null }), run("ok", "Success")]) });
     expect(container.querySelectorAll(".run-row2-err").length).toBe(0);   // no error string → no third line
+  });
+
+  it("shows the History pager across multiple pages and reports the clicked page", () => {
+    const onPage = vi.fn();
+    board({ history: hist([run("h1", "Success"), run("h2", "Success")], { total: 45, page: 1, pageSize: 20, onPage }) });
+
+    fireEvent.click(screen.getByRole("button", { name: "2" }));   // 45 rows / 20 per page = 3 pages → numbered buttons
+    expect(onPage).toHaveBeenCalledWith(2);
+  });
+
+  it("hides the History pager when everything fits on one page", () => {
+    const { container } = board({ history: hist([run("h1", "Success")], { total: 1 }) });
+    expect(container.querySelector(".runs-pager")).toBeNull();
+  });
+
+  it("shows a loading state for the History zone while its first page loads", () => {
+    board({ history: hist([], { isLoading: true }) });
+    expect(screen.getByText("Loading…")).toBeTruthy();   // not "No past runs yet." — we don't yet know it's empty
   });
 });

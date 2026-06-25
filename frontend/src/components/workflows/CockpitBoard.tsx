@@ -3,9 +3,20 @@ import type { PendingDecision, RunPhasesResponse, WorkflowRunStatus, WorkflowRun
 import { relativeTime } from "@/lib/codeTree";
 
 import { DecisionCard } from "./DecisionCard";
+import { Pager } from "./Pager";
 import { compactAge, runDuration, runStatusTone, runStatusWord, runType, suspendedNeedingReview, type CockpitFilter } from "./cockpit";
 import { bucketRuns, sourceLabel } from "./runsIndex";
 import { summarizeRunState } from "./runPhases";
+
+/** The cockpit's paginated History view — one numbered page of the team's terminal runs, with the total for the pager. */
+export interface RunHistoryView {
+  items: WorkflowRunSummary[];
+  total: number;
+  page: number;
+  pageSize: number;
+  isLoading: boolean;
+  onPage: (page: number) => void;
+}
 
 /**
  * The cockpit's work board — the zones below the status cards. Default (no filter armed): Needs attention (the action
@@ -13,11 +24,12 @@ import { summarizeRunState } from "./runPhases";
  * Recent (compact history). Arming a card narrows to one view. Decisions answer inline; suspended runs open the Run
  * Room (the right resume affordance depends on the wait kind, so we send the operator there rather than guess).
  */
-export function CockpitBoard({ runs, decisions, phasesByRun, filter, nowMs, onOpen }: {
+export function CockpitBoard({ runs, decisions, phasesByRun, filter, history, nowMs, onOpen }: {
   runs: readonly WorkflowRunSummary[];
   decisions: readonly PendingDecision[];
   phasesByRun: Map<string, RunPhasesResponse>;
   filter: CockpitFilter;
+  history: RunHistoryView;
   nowMs: number;
   onOpen: (runId: string) => void;
 }) {
@@ -61,7 +73,16 @@ export function CockpitBoard({ runs, decisions, phasesByRun, filter, nowMs, onOp
       )}
 
       {showRecent && (
-        <Zone label="History"><CompactList runs={buckets.recent} nowMs={nowMs} onOpen={onOpen} empty="No runs yet." /></Zone>
+        <Zone label="History">
+          {history.isLoading && history.items.length === 0
+            ? <div className="cockpit-empty">Loading…</div>
+            : (
+              <>
+                <CompactList runs={history.items} nowMs={nowMs} onOpen={onOpen} empty="No past runs yet." />
+                <Pager page={history.page} pageSize={history.pageSize} total={history.total} onPage={history.onPage} />
+              </>
+            )}
+        </Zone>
       )}
     </div>
   );

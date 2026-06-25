@@ -60,6 +60,14 @@ public interface IWorkflowService
     /// </summary>
     Task<RunPage> ListTeamRunsAsync(Guid teamId, RunListFilter filter, string? cursor, int limit, CancellationToken cancellationToken);
 
+    /// <summary>
+    /// The same team runs index as <see cref="ListTeamRunsAsync"/>, but OFFSET-paginated for numbered pages: returns
+    /// page <paramref name="page"/> (1-based) of <paramref name="pageSize"/> rows plus the total count matching the
+    /// filter, so the caller can render "page X of Y" and jump to any page. <paramref name="pageSize"/> is clamped to
+    /// <see cref="WorkflowService.MaxRunsPageSize"/>; a page past the end returns an empty list with the true total.
+    /// </summary>
+    Task<RunPage> ListTeamRunsPageAsync(Guid teamId, RunListFilter filter, int page, int pageSize, CancellationToken cancellationToken);
+
     Task<WorkflowRunDetail?> GetRunAsync(Guid runId, Guid teamId, CancellationToken cancellationToken);
 
     /// <summary>

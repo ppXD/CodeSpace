@@ -128,6 +128,22 @@ export function useTeamRuns(filter?: RunListFilterInput, limit = 50) {
 }
 
 /**
+ * One numbered (offset) page of the team's run HISTORY — the cockpit's paginated past-runs list. Returns the whole
+ * RunPage (items + totalCount) so the pager can render "page X of Y" and jump to any page. Deliberately NOT
+ * `keepPreviousData`: a page / scope hop must NOT keep the prior rows on screen (they'd read as the new page / scope
+ * with no dimming) — a brief honest "Loading…" is correct. `enabled` gates the fetch: the History zone only shows on
+ * the default board, so an armed card filter passes false and this stays idle.
+ */
+export function useTeamRunsHistory(filter: RunListFilterInput | undefined, page: number, pageSize: number, enabled: boolean) {
+  const key = buildRunListParams(filter, pageSize, undefined, page);
+  return useQuery({
+    queryKey: ["team-runs-history", key],
+    queryFn: () => workflowsApi.listTeamRunsPage(filter, page, pageSize),
+    enabled,
+  });
+}
+
+/**
  * Phases for a set of LIVE runs, batched — powers the cockpit's Live zone (each run's state sentence) and the
  * "agents active" tally. Shares the per-run ["run-phases", id] cache key with useRunPhases (so a run also open in
  * the Run Room dedups its fetch), polling each every 3s. Results come back aligned with `runIds`.

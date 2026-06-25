@@ -855,19 +855,22 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
             .ToListAsync(cancellationToken).ConfigureAwait(false);
     }
 
+    /// <summary>
+    /// The base team-runs query both pagination paths share. Excludes only NESTED-EXECUTION runs — a flow.subworkflow
+    /// child (SourceType `workflow.child`) runs inside its parent's Run Room, not as its own index row. NOT a
+    /// ParentRunId filter: a replay / rerun fork also carries ParentRunId (its lineage to the original), yet is a
+    /// top-level run the user launched and expects here. Agent runs are a separate entity, never WorkflowRun rows.
+    /// TeamId is on the run directly, so snapshot / task runs (null WorkflowId) are included.
+    /// </summary>
+    private IQueryable<WorkflowRun> TeamRunsQuery(Guid teamId, RunListFilter filter) =>
+        ApplyFilter(_db.WorkflowRun.Where(r => r.TeamId == teamId && r.SourceType != WorkflowRunSourceTypes.ChildWorkflow), filter);
+
     public async Task<RunPage> ListTeamRunsAsync(Guid teamId, RunListFilter filter, string? cursor, int limit, CancellationToken cancellationToken)
     {
         var keyset = RunCursor.Decode(cursor);
         var take = Math.Clamp(limit, 1, MaxRunsPageSize);
 
-        // Exclude only NESTED-EXECUTION runs — a flow.subworkflow child (SourceType `workflow.child`) runs inside its
-        // parent's Run Room, not as its own index row. NOT a ParentRunId filter: a replay / rerun fork also carries
-        // ParentRunId (its lineage to the original), yet is a top-level run the user launched and expects here. Agent
-        // runs are a separate entity, never WorkflowRun rows. TeamId is on the run directly, so snapshot / task runs
-        // (null WorkflowId) are included.
-        var query = _db.WorkflowRun.Where(r => r.TeamId == teamId && r.SourceType != WorkflowRunSourceTypes.ChildWorkflow);
-
-        query = ApplyFilter(query, filter);
+        var query = TeamRunsQuery(teamId, filter);
 
         // Keyset: "strictly after" the cursor row under (created_date DESC, id DESC) is the tuple < comparison.
         // r.Id.CompareTo translates to a Postgres uuid comparison (its native byte order) — the SAME order the index
@@ -887,6 +890,24 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
         var nextCursor = hasMore ? new RunCursor(items[^1].CreatedDate, items[^1].Id).Encode() : null;
 
         return new RunPage { Items = items, NextCursor = nextCursor };
+    }
+
+    public async Task<RunPage> ListTeamRunsPageAsync(Guid teamId, RunListFilter filter, int page, int pageSize, CancellationToken cancellationToken)
+    {
+        var take = Math.Clamp(pageSize, 1, MaxRunsPageSize);
+        var skip = Math.Max(0, page - 1) * take;   // 1-based; a page <= 0 clamps to the first page, past-the-end yields an empty list
+
+        var query = TeamRunsQuery(teamId, filter);
+
+        var total = await query.CountAsync(cancellationToken).ConfigureAwait(false);
+
+        var items = await query
+            .OrderByDescending(r => r.CreatedDate).ThenByDescending(r => r.Id)
+            .Skip(skip).Take(take)
+            .Select(ToSummaryExpr)
+            .ToListAsync(cancellationToken).ConfigureAwait(false);
+
+        return new RunPage { Items = items, TotalCount = total };
     }
 
     /// <summary>
