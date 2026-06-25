@@ -22,7 +22,7 @@ function tileStateOf(status: NodeStatus): "running" | "done" | "failed" | "queue
  * unit-testable without the agent-run data hooks the detail panel uses. Returns null for a non-map row set (the caller
  * then renders its plain list), so a loop / try / flat fan-out is untouched.
  */
-export function MapFanout({ rows, renderBranch }: { rows: WorkflowRunNodeSummary[]; renderBranch: (row: WorkflowRunNodeSummary) => ReactNode }) {
+export function MapFanout({ rows, renderBranch, inline }: { rows: WorkflowRunNodeSummary[]; renderBranch: (row: WorkflowRunNodeSummary) => ReactNode; inline?: boolean }) {
   const branches = fanBranches(rows);
   // Keyed by the STABLE map element index, NOT the array slot: a 2s live poll can surface a slower lower-index
   // branch that re-sorts the array, so a slot index would silently swap the open terminal to a different branch.
@@ -33,8 +33,10 @@ export function MapFanout({ rows, renderBranch }: { rows: WorkflowRunNodeSummary
   const bd = fanBreakdown(branches);
   const cur = sel != null ? branches.find((b) => b.index === sel) ?? null : null;
 
+  // `inline` = rendered INSIDE a collapsed fan-out card node (static flow, the card frames it); the default floats
+  // the panel below a node (absolute) like the coze result bar.
   return (
-    <div className="wf-rf-fanout nodrag nopan" onClick={(e) => e.stopPropagation()}>
+    <div className={`wf-rf-fanout nodrag nopan${inline ? " wf-rf-fanout-inline" : ""}`} onClick={(e) => e.stopPropagation()}>
       <div className="wf-rf-fanout-sum">
         <span className="wf-rf-fanout-total">{bd.total} {bd.total === 1 ? "branch" : "branches"}</span>
         {bd.done > 0 && <span data-state="done">{bd.done} done</span>}
