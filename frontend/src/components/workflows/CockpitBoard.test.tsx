@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import type { PendingDecision, RunPhase, RunPhasesResponse, WorkflowRunStatus, WorkflowRunSummary } from "@/api/workflows";
 
-import { CockpitBoard, type RunHistoryView } from "./CockpitBoard";
+import { CockpitBoard, type RunAttentionView, type RunHistoryView } from "./CockpitBoard";
 
 // DecisionCard children answer through this hook — stub it so the board renders without a QueryClient.
 vi.mock("@/hooks/use-workflows", () => ({ useAnswerDecision: () => ({ mutate: vi.fn(), isPending: false }) }));
@@ -27,13 +27,15 @@ function phasesFor(runId: string): RunPhasesResponse {
   return { runId, runStatus: "Running", phases: [phase] };
 }
 
-// The History zone reads its OWN paginated view (terminal runs), separate from `runs` (which feeds the live + attention
-// zones). Tests that check History rows pass `hist([...])`; everything else gets the empty default.
+// History reads its OWN paginated view; the Needs-attention zone reads its OWN fetched set (suspended-needing-review)
+// with the true total. Tests pass `hist([...])` / `attn([...])` for the zone they exercise; everything else is empty.
 const HISTORY_EMPTY: RunHistoryView = { items: [], total: 0, page: 1, pageSize: 20, isLoading: false, onPage: () => {} };
 const hist = (items: WorkflowRunSummary[], extra: Partial<RunHistoryView> = {}): RunHistoryView => ({ ...HISTORY_EMPTY, items, total: items.length, ...extra });
+const ATTENTION_EMPTY: RunAttentionView = { runs: [], total: 0 };
+const attn = (items: WorkflowRunSummary[], total?: number): RunAttentionView => ({ runs: items, total: total ?? items.length });
 
 const board = (o: Partial<Parameters<typeof CockpitBoard>[0]>) =>
-  render(<CockpitBoard runs={[]} decisions={[]} phasesByRun={new Map()} filter={null} history={HISTORY_EMPTY} nowMs={NOW} onOpen={() => {}} {...o} />);
+  render(<CockpitBoard runs={[]} decisions={[]} attention={ATTENTION_EMPTY} phasesByRun={new Map()} filter={null} history={HISTORY_EMPTY} nowMs={NOW} onOpen={() => {}} onFilter={() => {}} {...o} />);
 
 describe("CockpitBoard", () => {
   it("shows the three zones, the answerable decision, and a live state sentence", () => {
@@ -67,18 +69,36 @@ describe("CockpitBoard", () => {
     expect(titles).toContain("Webhook");           // null name → title-cased source label
   });
 
-  it("dedups a suspended run that already has a queued decision", () => {
+  it("renders the Needs-attention zone from its own fetched suspended set (decisions + suspended rows)", () => {
     const { container } = board({
-      runs: [run("susp-with", "Suspended"), run("susp-without", "Suspended")],
-      decisions: [decision({ id: "dx", workflowRunId: "susp-with" })],
+      decisions: [decision({ id: "dx" })],
+      attention: attn([run("s1", "Suspended"), run("s2", "Suspended")]),
     });
-    // susp-with is covered by its decision → no SuspendedRow; susp-without shows one.
-    expect(container.querySelectorAll(".cockpit-attn-row").length).toBe(1);
+    expect(container.querySelectorAll(".cockpit-attn-row").length).toBe(2);   // both suspended runs the zone was given
+  });
+
+  it("previews the first few suspended runs and offers 'View all N' (the true total) when there are more", () => {
+    const onFilter = vi.fn();
+    const many = Array.from({ length: 5 }, (_, i) => run(`s${i}`, "Suspended"));
+    const { container } = board({ attention: attn(many, 12), decisions: [decision({ id: "d1" }), decision({ id: "d2" })], onFilter });
+
+    expect(container.querySelectorAll(".cockpit-attn-row").length).toBe(5);   // preview cap
+    const viewAll = screen.getByText(/View all 14/);   // 12 suspended + 2 decisions = the card's true total
+    fireEvent.click(viewAll);
+    expect(onFilter).toHaveBeenCalledWith("attention");
+  });
+
+  it("notes the cap in the armed attention view when more suspended runs exist than were fetched (never over-promises)", () => {
+    const fetched = Array.from({ length: 50 }, (_, i) => run(`s${i}`, "Suspended"));
+    const { container } = board({ filter: "attention", attention: attn(fetched, 60) });   // 60 true, only 50 fetched
+
+    expect(container.querySelectorAll(".cockpit-attn-row").length).toBe(50);   // the fetched set
+    expect(screen.getByText(/Showing the first 50 of 60/)).toBeInTheDocument();   // honest about the rest
   });
 
   it("opens a run from a Review action and from a recent row", () => {
     const onOpen = vi.fn();
-    const { container } = board({ runs: [run("s1", "Suspended")], history: hist([run("r1", "Success")]), onOpen });
+    const { container } = board({ attention: attn([run("s1", "Suspended")]), history: hist([run("r1", "Success")]), onOpen });
 
     fireEvent.click(screen.getByText("Review →"));
     expect(onOpen).toHaveBeenCalledWith("s1");

@@ -2713,6 +2713,11 @@ textarea:-webkit-autofill {
 
 /* Needs-attention zone — answerable decision cards (reused) + suspended-run rows. */
 .acs-root .cockpit-attention { display: flex; flex-direction: column; gap: 12px; }
+.acs-root .cockpit-viewall { appearance: none; cursor: pointer; align-self: flex-start; display: inline-flex; align-items: center; gap: 4px; padding: 5px 4px; border: 0; background: transparent; color: var(--muted); font-size: 12px; font-weight: 500; transition: color .12s ease; }
+.acs-root .cockpit-viewall:hover { color: #9E4A2C; }
+.acs-root .cockpit-viewall > svg { transition: transform .12s ease; }
+.acs-root .cockpit-viewall:hover > svg { transform: translateX(2px); }
+.acs-root .cockpit-zone-note { font-size: 11.5px; color: var(--muted); padding: 4px 2px 0; }
 .acs-root .cockpit-attn-row { display: flex; align-items: center; gap: 11px; padding: 11px 13px; border: 1px solid #E3B8A0; border-radius: 12px; background: var(--accent-soft); cursor: pointer; }
 .acs-root .cockpit-attn-glyph { display: grid; place-items: center; width: 22px; height: 22px; flex: none; border-radius: 6px; background: var(--panel); color: #A8590E; }
 .acs-root .cockpit-attn-body { flex: 1; min-width: 0; }

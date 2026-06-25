@@ -4,9 +4,12 @@ import { relativeTime } from "@/lib/codeTree";
 
 import { DecisionCard } from "./DecisionCard";
 import { Pager } from "./Pager";
-import { compactAge, runDuration, runStatusTone, runStatusWord, runType, suspendedNeedingReview, type CockpitFilter } from "./cockpit";
+import { compactAge, runDuration, runStatusTone, runStatusWord, runType, type CockpitFilter } from "./cockpit";
 import { bucketRuns, sourceLabel } from "./runsIndex";
 import { summarizeRunState } from "./runPhases";
+
+/** How many suspended runs the default-board Needs-attention zone previews before it collapses to "View all N". */
+const ATTENTION_PREVIEW = 5;
 
 /** The cockpit's paginated History view — one numbered page of the team's terminal runs, with the total for the pager. */
 export interface RunHistoryView {
@@ -19,24 +22,33 @@ export interface RunHistoryView {
 }
 
 /**
+ * The Needs-attention view — the suspended runs that need a human (its OWN fetched set, not a slice of the newest-50),
+ * plus the TRUE total for the card + the "View all N" affordance. The number, the preview, and the click-through are
+ * three projections of this one set, so they can never disagree.
+ */
+export interface RunAttentionView {
+  runs: WorkflowRunSummary[];
+  total: number;
+}
+
+/**
  * The cockpit's work board — the zones below the status cards. Default (no filter armed): Needs attention (the action
  * zone — answerable decisions + suspended runs that need a look), then Live (each run's current state sentence), then
  * Recent (compact history). Arming a card narrows to one view. Decisions answer inline; suspended runs open the Run
  * Room (the right resume affordance depends on the wait kind, so we send the operator there rather than guess).
  */
-export function CockpitBoard({ runs, decisions, phasesByRun, filter, history, nowMs, onOpen }: {
+export function CockpitBoard({ runs, decisions, attention, phasesByRun, filter, history, nowMs, onOpen, onFilter }: {
   runs: readonly WorkflowRunSummary[];
   decisions: readonly PendingDecision[];
+  attention: RunAttentionView;
   phasesByRun: Map<string, RunPhasesResponse>;
   filter: CockpitFilter;
   history: RunHistoryView;
   nowMs: number;
   onOpen: (runId: string) => void;
+  onFilter: (filter: CockpitFilter) => void;
 }) {
   const buckets = bucketRuns(runs);
-
-  // The exact set the Needs-attention CARD counts (decisions + these), so the headline can't disagree with the rows.
-  const suspended = suspendedNeedingReview(runs, decisions);
 
   if (filter === "failed") {
     return <Zone label="Failed / stuck"><CompactList runs={runs.filter((r) => r.status === "Failure" || r.status === "Suspended")} nowMs={nowMs} onOpen={onOpen} empty="Nothing failed or stuck." /></Zone>;
@@ -49,16 +61,30 @@ export function CockpitBoard({ runs, decisions, phasesByRun, filter, history, no
   const showLive = filter === null || filter === "live";
   const showRecent = filter === null;
 
+  // The attention zone previews the top N suspended runs on the default board, the whole (fetched) set when armed; the
+  // count + the rows are the same set, so "View all" appears exactly when the true total exceeds what's shown.
+  const attnShown = filter === "attention" ? attention.runs : attention.runs.slice(0, ATTENTION_PREVIEW);
+  const attnMore = filter === null && attention.total > ATTENTION_PREVIEW;
+
   return (
     <div className="cockpit-board">
       {showAttention && (
         <Zone label="Needs attention">
-          {decisions.length === 0 && suspended.length === 0
+          {decisions.length === 0 && attention.runs.length === 0
             ? <div className="cockpit-empty"><Ic.Check size={13} /> Nothing needs you right now.</div>
             : (
               <div className="cockpit-attention">
                 {decisions.map((d) => <DecisionCard key={d.id} decision={d} />)}
-                {suspended.map((r) => <SuspendedRow key={r.id} run={r} nowMs={nowMs} onOpen={onOpen} />)}
+                {attnShown.map((r) => <SuspendedRow key={r.id} run={r} nowMs={nowMs} onOpen={onOpen} />)}
+                {attnMore && (
+                  <button type="button" className="cockpit-viewall" onClick={() => onFilter("attention")}>
+                    View all {decisions.length + attention.total} <Ic.ChevronRight size={13} />
+                  </button>
+                )}
+                {/* The fetched set is capped (a pathological 50+ suspended-needing-review); never over-promise the count. */}
+                {filter === "attention" && attention.total > attention.runs.length && (
+                  <div className="cockpit-zone-note">Showing the first {attention.runs.length} of {attention.total} — narrow the scope to see the rest.</div>
+                )}
               </div>
             )}
         </Zone>

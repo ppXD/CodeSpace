@@ -6,14 +6,16 @@ import type { RunListFilterInput, RunPhasesResponse, WorkflowRunStatus } from "@
 import { CockpitBoard } from "@/components/workflows/CockpitBoard";
 import { CockpitCards, type CockpitMetrics } from "@/components/workflows/CockpitCards";
 import { RunFilterBar } from "@/components/workflows/RunFilterBar";
-import { countRuns, summarizeDecisions, summarizeToday, suspendedNeedingReview, type CockpitFilter } from "@/components/workflows/cockpit";
+import { summarizeDecisions, summarizeToday, type CockpitFilter } from "@/components/workflows/cockpit";
 import { summarizeRunState } from "@/components/workflows/runPhases";
 import { bucketRuns } from "@/components/workflows/runsIndex";
-import { useLiveRunsPhases, usePendingDecisions, useTeamRuns, useTeamRunsHistory } from "@/hooks/use-workflows";
+import { useLiveRunsPhases, usePendingDecisions, useTeamRuns, useTeamRunSummary, useTeamRunsHistory } from "@/hooks/use-workflows";
 
 /** History = terminal runs only; the live + suspended runs live in the pinned zones above, so History never duplicates them. */
 const TERMINAL_STATUSES: WorkflowRunStatus[] = ["Success", "Failure", "Cancelled"];
 const HISTORY_PAGE_SIZE = 20;
+/** Suspended-needing-review (the Needs-attention zone) is normally a handful; fetch up to this for the zone + its "View all". */
+const ATTENTION_LIMIT = 50;
 
 /**
  * The Runs cockpit — the team's run control center, not a history table. Four status cards answer "is anything on
@@ -30,21 +32,8 @@ function TeamRunsPage() {
   // The bar's server-side scope filter (which kind / repo / project / actor / agent); the cards below are the
   // orthogonal client-side status/time lens over whatever this scope returns.
   const [scope, setScope] = useState<RunListFilterInput>({});
-  const runs = useTeamRuns(scope);
-  const decisions = usePendingDecisions();
   const [filter, setFilter] = useState<CockpitFilter>(null);
-  const hasScope = Object.values(scope).some((v) => (Array.isArray(v) ? v.length > 0 : v != null));
-
-  // The History zone is its own numbered page of TERMINAL runs, narrowed by the same scope. Only fetched on the default
-  // board — an armed card filter hides History. A scope change snaps back to page 1 (handled in the filter's onChange).
   const [historyPage, setHistoryPage] = useState(1);
-  const history = useTeamRunsHistory({ ...scope, statuses: TERMINAL_STATUSES }, historyPage, HISTORY_PAGE_SIZE, filter === null);
-  const changeScope = (next: RunListFilterInput) => { setScope(next); setHistoryPage(1); };
-
-  // If the result set shrank under us (e.g. runs aged out) the page can land past the end — with no rows AND no pager
-  // to escape. Snap it back to the last real page once the count is known (render-time guard; React re-renders).
-  const historyPages = Math.max(1, Math.ceil((history.data?.totalCount ?? 0) / HISTORY_PAGE_SIZE));
-  if (history.data && historyPage > historyPages) setHistoryPage(historyPages);
 
   // A slow clock so the relative ages ("oldest 14m", "waiting 2d") and today's window stay fresh without churning.
   const [nowMs, setNowMs] = useState(() => Date.now());
@@ -53,28 +42,51 @@ function TeamRunsPage() {
     return () => clearInterval(t);
   }, []);
 
+  const hasScope = Object.values(scope).some((v) => (Array.isArray(v) ? v.length > 0 : v != null));
+  // The caller's local start-of-day — stable within a day, so the summary's cache key is stable.
+  const day = new Date(nowMs);
+  const todayStartIso = new Date(day.getFullYear(), day.getMonth(), day.getDate()).toISOString();
+
+  // ── Data: the cards read TRUE scoped counts; each zone fetches its OWN set so the number and the list always agree. ──
+  const runs = useTeamRuns(scope);   // newest-50 — powers the Live zone + the failed/today armed views + the today sparkline
+  const summary = useTeamRunSummary(scope, todayStartIso);
+  const decisions = usePendingDecisions();
+  // The Needs-attention zone fetches its OWN runs (suspended, no pending decision) so the card can't say "1" while the
+  // zone shows nothing for a run outside the newest-50 — the number, the preview, and "View all" are one set.
+  const attentionRuns = useTeamRuns({ ...scope, statuses: ["Suspended"], hasPendingDecision: false }, ATTENTION_LIMIT);
+  // History is its own numbered page of TERMINAL runs, only fetched on the default board (an armed card hides it).
+  const history = useTeamRunsHistory({ ...scope, statuses: TERMINAL_STATUSES }, historyPage, HISTORY_PAGE_SIZE, filter === null);
+
   const runList = runs.data ?? [];
   const decisionList = decisions.data ?? [];
+  const attentionList = attentionRuns.data ?? [];
 
   // The live runs' phases, batched — powers the Live zone's state sentences + the "agents active" tally.
   const liveIds = bucketRuns(runList).live.map((r) => r.id);
   const livePhases = useLiveRunsPhases(liveIds);
+
+  // ── Render-time derivations (no hooks below this line). ──
+  const changeScope = (next: RunListFilterInput) => { setScope(next); setHistoryPage(1); };
+  const toggleFilter = (f: CockpitFilter) => setFilter((cur) => (cur === f ? null : f));
+
+  // A shrunk History result set can strand the page past the end (no rows, no pager) — snap it back once known.
+  const historyPages = Math.max(1, Math.ceil((history.data?.totalCount ?? 0) / HISTORY_PAGE_SIZE));
+  if (history.data && historyPage > historyPages) setHistoryPage(historyPages);
+
   const phasesByRun = new Map<string, RunPhasesResponse>();
   liveIds.forEach((id, i) => { const d = livePhases[i]?.data; if (d) phasesByRun.set(id, d); });
   const agentsActive = [...phasesByRun.values()].reduce((n, p) => n + summarizeRunState(p.runStatus, p.phases).activeAgents, 0);
 
-  const counts = countRuns(runList);
+  const s = summary.data;
   const metrics: CockpitMetrics = {
     decisions: summarizeDecisions(decisionList, nowMs),
-    suspendedReview: suspendedNeedingReview(runList, decisionList).length,
-    liveCount: counts.live,
+    suspendedReview: s?.suspendedNeedingReview ?? 0,
+    liveCount: s?.live ?? 0,
     agentsActive,
-    failed: counts.failed,
-    suspended: counts.suspended,
-    today: summarizeToday(runList, nowMs),
+    failed: s?.failed ?? 0,
+    suspended: s?.suspended ?? 0,
+    today: { count: s?.today ?? 0, hourly: summarizeToday(runList, nowMs).hourly },
   };
-
-  const toggleFilter = (f: CockpitFilter) => setFilter((cur) => (cur === f ? null : f));
   const openRun = (runId: string) => navigate({ to: "/teams/$teamSlug/runs/$runId", params: { teamSlug, runId } });
 
   const errorBanner = runs.error instanceof ApiError ? (
@@ -110,11 +122,13 @@ function TeamRunsPage() {
                 <CockpitBoard
                   runs={runList}
                   decisions={decisionList}
+                  attention={{ runs: attentionList, total: s?.suspendedNeedingReview ?? 0 }}
                   phasesByRun={phasesByRun}
                   filter={filter}
                   history={{ items: history.data?.items ?? [], total: history.data?.totalCount ?? 0, page: historyPage, pageSize: HISTORY_PAGE_SIZE, isLoading: history.isLoading, onPage: setHistoryPage }}
                   nowMs={nowMs}
                   onOpen={openRun}
+                  onFilter={toggleFilter}
                 />
               </>
             ) : !runs.error ? (
