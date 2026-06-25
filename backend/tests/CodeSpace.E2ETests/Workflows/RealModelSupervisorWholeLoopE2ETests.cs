@@ -782,19 +782,26 @@ public sealed class RealModelSupervisorWholeLoopE2ETests : IDisposable
             using var verify = _fixture.BeginScope();
             var db = verify.Resolve<CodeSpaceDbContext>();
 
-            // The AUTHORITATIVE signal — the model's own stop DECISION payload: did it author a non-empty acceptance command?
-            var stopPayloads = await db.SupervisorDecisionRecord.AsNoTracking()
+            // The AUTHORITATIVE signal — the model's own stop DECISION: (a) did it AUTHOR a non-empty acceptance command
+            // (payload), AND (b) did the server GRADE that DoD (AND-ed with the operator floor) as PASSED (outcome)? Asserting
+            // both proves the live model authored an objective DoD that actually HELD on the real integrated result — not
+            // merely that it emitted a command.
+            var stops = await db.SupervisorDecisionRecord.AsNoTracking()
                 .Where(d => d.SupervisorRunId == runId && d.TeamId == teamId && d.DecisionKind == SupervisorDecisionKinds.Stop)
-                .OrderByDescending(d => d.Sequence).Select(d => d.PayloadJson).ToListAsync();
+                .OrderByDescending(d => d.Sequence).Select(d => new { d.PayloadJson, d.OutcomeJson }).ToListAsync();
 
-            var acceptance = stopPayloads
-                .Select(p => System.Text.Json.JsonSerializer.Deserialize<SupervisorStopPayload>(p, AgentJson.Options)?.Acceptance)
-                .FirstOrDefault(a => a is not null && a.Command.Count > 0);
-            var authored = acceptance is not null;
+            var authoredStop = stops.FirstOrDefault(s =>
+                System.Text.Json.JsonSerializer.Deserialize<SupervisorStopPayload>(s.PayloadJson, AgentJson.Options)?.Acceptance is { Command.Count: > 0 });
+            var command = authoredStop is null ? null
+                : System.Text.Json.JsonSerializer.Deserialize<SupervisorStopPayload>(authoredStop.PayloadJson, AgentJson.Options)!.Acceptance!.Command;
+            var gradePassed = authoredStop is not null && SupervisorOutcome.ReadAcceptanceGradePassed(authoredStop.OutcomeJson) == true;
+            var authored = command is not null;
+            var drove = authored && gradePassed;
 
-            return (authored,
-                $"{Provider} '{model}' stop DoD: stops={stopPayloads.Count}, acceptance-authored={authored}, command=[{(acceptance is null ? "" : string.Join(" ", acceptance.Command))}]. "
-              + (authored ? "DROVE — the live model authored its own objective definition-of-done on the stop." : "did NOT author a stop acceptance (reported, not gating)."));
+            return (drove,
+                $"{Provider} '{model}' stop DoD: stops={stops.Count}, acceptance-authored={authored}, command=[{(command is null ? "" : string.Join(" ", command))}], graded-passed={gradePassed}. "
+              + (drove ? "DROVE — the live model authored its own objective definition-of-done AND the server graded it PASSED on the real result."
+                       : authored ? "authored a DoD but it did not grade PASSED (reported, not gating)." : "did NOT author a stop acceptance (reported, not gating)."));
         }, gating: false);
     }
 
