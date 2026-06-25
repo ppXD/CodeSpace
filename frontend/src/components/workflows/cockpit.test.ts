@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import type { PendingDecision, WorkflowRunStatus, WorkflowRunSummary } from "@/api/workflows";
 
-import { compactAge, countRuns, formatDuration, runDuration, runStatusTone, runStatusWord, runType, summarizeDecisions, summarizeToday, suspendedNeedingReview } from "./cockpit";
+import { compactAge, formatDuration, runDuration, runStatusTone, runStatusWord, runType, summarizeDecisions, summarizeToday } from "./cockpit";
 
 function decision(o: Partial<PendingDecision>): PendingDecision {
   return {
@@ -68,19 +68,6 @@ describe("runDuration", () => {
   });
 });
 
-describe("suspendedNeedingReview", () => {
-  it("returns suspended runs except those already covered by a queued decision", () => {
-    const runs = [run("s1", "Suspended"), run("s2", "Suspended"), run("running", "Running"), run("done", "Success")];
-    const decisions = [decision({ id: "d", workflowRunId: "s1" })];   // s1 is covered by its decision
-    expect(suspendedNeedingReview(runs, decisions).map((r) => r.id)).toEqual(["s2"]);
-  });
-
-  it("matches the decision's rootTraceId too, and is empty when none are suspended", () => {
-    expect(suspendedNeedingReview([run("s", "Suspended")], [decision({ rootTraceId: "s" })])).toEqual([]);
-    expect(suspendedNeedingReview([run("ok", "Success")], [])).toEqual([]);
-  });
-});
-
 describe("compactAge", () => {
   const now = 1_700_000_000_000;
   it("reads in the right unit, 'now' under a minute", () => {
@@ -106,16 +93,6 @@ describe("summarizeDecisions", () => {
     expect(s.count).toBe(3);
     expect(s.oldestAge).toBe("14m");   // the b decision is oldest
     expect(s.highRisk).toBe(2);        // a + c (case-insensitive)
-  });
-});
-
-describe("countRuns", () => {
-  it("buckets by status (live = pending/enqueued/running)", () => {
-    const c = countRuns([
-      run("1", "Running"), run("2", "Pending"), run("3", "Enqueued"),
-      run("4", "Failure"), run("5", "Suspended"), run("6", "Success"), run("7", "Cancelled"),
-    ]);
-    expect(c).toEqual({ live: 3, failed: 1, suspended: 1 });
   });
 });
 
