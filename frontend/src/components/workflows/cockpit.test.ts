@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import type { PendingDecision, WorkflowRunStatus, WorkflowRunSummary } from "@/api/workflows";
 
-import { compactAge, countRuns, formatDuration, runOutcome, summarizeDecisions, summarizeToday, suspendedNeedingReview } from "./cockpit";
+import { compactAge, countRuns, formatDuration, runDuration, runStatusTone, runStatusWord, runType, summarizeDecisions, summarizeToday, suspendedNeedingReview } from "./cockpit";
 
 function decision(o: Partial<PendingDecision>): PendingDecision {
   return {
@@ -26,16 +26,45 @@ describe("formatDuration", () => {
   });
 });
 
-describe("runOutcome", () => {
-  const now = Date.parse("2026-06-22T01:00:00Z");
-  it("summarizes the result per status", () => {
-    // duration is createdDate→completedAt; run() defaults createdDate to 2026-06-22T00:00:00Z
-    expect(runOutcome({ ...run("a", "Success"), completedAt: "2026-06-22T00:07:59Z" }, now)).toBe("completed in 7m 59s");
-    expect(runOutcome(run("b", "Success"), now)).toBe("completed");                       // no completedAt → no duration
-    expect(runOutcome({ ...run("c", "Failure"), error: "test exited 1" }, now)).toBe("failed · test exited 1");
-    expect(runOutcome(run("d", "Failure"), now)).toBe("failed");                           // no error message
-    expect(runOutcome(run("e", "Cancelled"), now)).toBe("cancelled");
-    expect(runOutcome({ ...run("f", "Suspended"), createdDate: "2026-06-21T22:00:00Z" }, now)).toBe("waiting 3h");
+describe("runType", () => {
+  it("is Workflow with a parent workflow, Task without one", () => {
+    expect(runType(run("a", "Success"))).toBe("Workflow");                        // run() sets workflowId: "w"
+    expect(runType({ ...run("b", "Success"), workflowId: null })).toBe("Task");
+  });
+});
+
+describe("runStatusTone", () => {
+  it("maps each run status to its tone", () => {
+    expect(runStatusTone("Success")).toBe("ok");
+    expect(runStatusTone("Failure")).toBe("err");
+    expect(runStatusTone("Running")).toBe("running");
+    expect(runStatusTone("Suspended")).toBe("suspended");
+    expect(runStatusTone("Cancelled")).toBe("cancelled");
+    expect(runStatusTone("Pending")).toBe("queued");
+    expect(runStatusTone("Enqueued")).toBe("queued");
+  });
+});
+
+describe("runStatusWord", () => {
+  it("softens Failure→Failed and Enqueued→Queued, passes the rest through", () => {
+    expect(runStatusWord("Failure")).toBe("Failed");
+    expect(runStatusWord("Enqueued")).toBe("Queued");
+    expect(runStatusWord("Success")).toBe("Success");
+    expect(runStatusWord("Running")).toBe("Running");
+    expect(runStatusWord("Cancelled")).toBe("Cancelled");
+  });
+});
+
+describe("runDuration", () => {
+  const now = Date.parse("2026-06-22T01:00:00Z");   // 1h after run()'s default createdDate
+  it("shows total duration for a terminal run, elapsed for live, wait age for parked, empty when not meaningful", () => {
+    expect(runDuration({ ...run("a", "Success"), completedAt: "2026-06-22T00:07:59Z" }, now)).toBe("7m 59s");
+    expect(runDuration({ ...run("b", "Failure"), completedAt: "2026-06-22T00:04:11Z" }, now)).toBe("4m 11s");
+    expect(runDuration({ ...run("g", "Cancelled"), completedAt: "2026-06-22T00:02:00Z" }, now)).toBe("2m 0s");
+    expect(runDuration(run("c", "Success"), now)).toBe("");                                              // terminal, no completedAt
+    expect(runDuration({ ...run("d", "Running"), startedAt: "2026-06-22T00:58:00Z" }, now)).toBe("2m");  // elapsed from startedAt
+    expect(runDuration({ ...run("e", "Suspended"), createdDate: "2026-06-21T22:00:00Z" }, now)).toBe("waiting 3h");
+    expect(runDuration(run("f", "Pending"), now)).toBe("");
   });
 });
 

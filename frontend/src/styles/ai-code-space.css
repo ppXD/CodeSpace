@@ -2730,22 +2730,39 @@ textarea:-webkit-autofill {
 /* The live dot is defined below the cards' reduced-motion block, so it needs its own override (equal specificity, source order wins). */
 @media (prefers-reduced-motion: reduce) { .acs-root .cockpit-live-dot { animation: none; } }
 
-/* Two-line run rows — History + the failed/today filter views. Each row reads as "what happened", not a DB cell. */
+/* Run rows — History + the failed/today filter views. A tinted status tile + a status word carry the state; the
+   Workflow/Task type and version sit as labels beside the name; a failed run boxes its error on a third line. */
 .acs-root .runs-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
 .acs-root .run-row2 { display: flex; align-items: flex-start; gap: 11px; padding: 10px 13px; border: 1px solid var(--line); border-radius: 11px; cursor: pointer; background: var(--panel); transition: background .12s ease, border-color .12s ease; }
 .acs-root .run-row2:hover { background: var(--panel-2); border-color: var(--accent-soft); }
-.acs-root .run-row2-glyph { display: grid; place-items: center; width: 18px; height: 18px; flex: none; margin-top: 1px; color: var(--muted-2); }
-.acs-root .run-row2-glyph > svg { display: block; }
-.acs-root .run-row2-glyph[data-status="success"]   { color: #1F6B3F; }
-.acs-root .run-row2-glyph[data-status="failure"]   { color: #9E3535; }
-.acs-root .run-row2-glyph[data-status="suspended"] { color: #A8590E; }
-.acs-root .run-row2-glyph[data-status="cancelled"] { opacity: .55; }
-.acs-root .run-row2-body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
-.acs-root .run-row2-l1, .acs-root .run-row2-l2 { display: flex; align-items: baseline; gap: 10px; }
-.acs-root .run-row2-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13.5px; font-weight: 500; color: var(--ink); }
+.acs-root .run-row2-tile { display: grid; place-items: center; width: 30px; height: 30px; flex: none; margin-top: 1px; border-radius: 8px; border: 1px solid var(--line); background: var(--panel-2); color: var(--muted-2); }
+.acs-root .run-row2-tile > svg { display: block; }
+.acs-root .run-row2-tile[data-tone="ok"]        { color: #1F6B3F; background: #E6F4EC; border-color: #BFE0CD; }
+.acs-root .run-row2-tile[data-tone="err"]       { color: #9E3535; background: #FCEDED; border-color: #F0C6C6; }
+.acs-root .run-row2-tile[data-tone="running"]   { color: #A8590E; background: #FFF4E6; border-color: #F0D9B5; }
+.acs-root .run-row2-tile[data-tone="suspended"] { color: #5B4B8A; background: #EEEAF6; border-color: #D9CFEC; }
+.acs-root .run-row2-tile[data-tone="queued"]    { color: #2A5485; background: #E8F0FA; border-color: #C2D4EC; }
+.acs-root .run-row2-tile[data-tone="cancelled"] { color: var(--muted-2); background: var(--panel-2); border-color: var(--line); }
+.acs-root .run-row2-body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+.acs-root .run-row2-l1, .acs-root .run-row2-l2, .acs-root .run-row2-l3 { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.acs-root .run-row2-gap { flex: 1; }
+.acs-root .run-row2-title { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13.5px; font-weight: 500; color: var(--ink); }
+.acs-root .run-row2-type { flex: none; font-size: 10.5px; font-weight: 500; padding: 2px 8px; border-radius: 5px; white-space: nowrap; color: var(--ink-2); background: var(--soft); }
+.acs-root .run-row2-type[data-type="workflow"] { color: #9E4A2C; background: var(--accent-soft); }
+.acs-root .run-row2-ver { flex: none; font-size: 10.5px; color: var(--muted); border: 1px solid var(--line-2); border-radius: 5px; padding: 1px 6px; font-variant-numeric: tabular-nums; }
 .acs-root .run-row2-when { flex: none; font-size: 11.5px; color: var(--muted); white-space: nowrap; }
-.acs-root .run-row2-meta { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11.5px; color: var(--ink-2); }
+.acs-root .run-row2-sw { flex: none; font-size: 12px; font-weight: 500; color: var(--muted); }
+.acs-root .run-row2-sw[data-tone="ok"]        { color: #1F6B3F; }
+.acs-root .run-row2-sw[data-tone="err"]       { color: #9E3535; }
+.acs-root .run-row2-sw[data-tone="running"]   { color: #A8590E; }
+.acs-root .run-row2-sw[data-tone="suspended"] { color: #5B4B8A; }
+.acs-root .run-row2-sw[data-tone="queued"]    { color: #2A5485; }
+.acs-root .run-row2-dur { flex: none; display: inline-flex; align-items: center; gap: 4px; font-size: 11.5px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.acs-root .run-row2-dur > svg { display: block; }
 .acs-root .run-row2-id { flex: none; font-size: 11px; color: var(--muted-2); font-variant-numeric: tabular-nums; font-family: ui-monospace, monospace; }
+.acs-root .run-row2-err { display: inline-flex; align-items: center; gap: 5px; max-width: 100%; min-width: 0; font-size: 11.5px; color: #9E3535; background: #FCEDED; border: 1px solid #F0C6C6; border-radius: 5px; padding: 2px 8px 2px 7px; }
+.acs-root .run-row2-err > svg { flex: none; }
+.acs-root .run-row2-err > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .acs-root .runs-row-spin { width: 12px; height: 12px; border-radius: 50%; border: 2px solid #E9CFC0; border-top-color: var(--accent); animation: wfSpin .7s linear infinite; }
 .acs-root .runs-row-hollow { width: 11px; height: 11px; border-radius: 50%; border: 1.5px solid var(--line); }
 @media (prefers-reduced-motion: reduce) {
