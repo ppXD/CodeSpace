@@ -20,8 +20,10 @@ public static class RunRecordTimelineMap
     {
         var node = r.NodeId ?? "node";
 
-        // Run-level lifecycle, a node FAILURE, and a retry are story MILESTONES; the per-node started/completed/waiting/
-        // skipped churn is DETAIL the UI folds away (the wave already shows the agent's progress, Trace has the rest).
+        // Run-level lifecycle, a TOP-LEVEL node FAILURE, and a retry are story MILESTONES; the per-node started/
+        // completed/waiting/skipped churn — and a fanned-out BRANCH / loop-iteration / try-body failure — is DETAIL the
+        // UI folds away (the wave already shows the agent's progress, the branch's own terminal carries its error, Trace
+        // has the rest). See NodeFailureLevel.
         return r.RecordType switch
         {
             WorkflowRunRecordTypes.RunStarted    => Event(r, "Run started", TimelineSeverity.Info, TimelineLevel.Milestone),
@@ -31,13 +33,24 @@ public static class RunRecordTimelineMap
             WorkflowRunRecordTypes.RunReplayed   => Event(r, "Run replayed", TimelineSeverity.Info, TimelineLevel.Milestone),
             WorkflowRunRecordTypes.NodeStarted   => Event(r, $"{node} started", TimelineSeverity.Info, TimelineLevel.Detail),
             WorkflowRunRecordTypes.NodeCompleted => Event(r, $"{node} completed", TimelineSeverity.Success, TimelineLevel.Detail),
-            WorkflowRunRecordTypes.NodeFailed    => Event(r, $"{node} failed", TimelineSeverity.Error, TimelineLevel.Milestone, ReadString(r, "error")),
+            WorkflowRunRecordTypes.NodeFailed    => Event(r, $"{node} failed", TimelineSeverity.Error, NodeFailureLevel(r), ReadString(r, "error")),
             WorkflowRunRecordTypes.NodeSuspended => Event(r, $"{node} waiting", TimelineSeverity.Warning, TimelineLevel.Detail, ReadString(r, "wait_kind")),
             WorkflowRunRecordTypes.NodeSkipped   => Event(r, $"{node} skipped", TimelineSeverity.Info, TimelineLevel.Detail, ReadString(r, "reason")),
             WorkflowRunRecordTypes.AttemptFailed => Event(r, $"{node} retry", TimelineSeverity.Warning, TimelineLevel.Milestone, RetrySummary(r)),
             _ => null,
         };
     }
+
+    /// <summary>
+    /// A node FAILURE is a story MILESTONE — EXCEPT a fanned-out branch / loop-iteration / try-body failure, which is
+    /// per-iteration DETAIL the UI folds. A non-empty <see cref="WorkflowRunRecord.IterationKey"/> marks such a nested
+    /// row (<c>map#i</c> / <c>loop#i</c> / nested <c>a#i/b#j</c>); a 12-branch map that fails every branch would
+    /// otherwise flood the narrative with 12 identical "agent failed" milestones below the fan-out card. The
+    /// CONTAINER's own failure (the map / loop / try node, empty key) and every top-level node failure stay milestones,
+    /// so the story still names WHAT failed; each branch's own error lives on its agent terminal + the Trace tab.
+    /// </summary>
+    private static TimelineLevel NodeFailureLevel(WorkflowRunRecord r) =>
+        string.IsNullOrEmpty(r.IterationKey) ? TimelineLevel.Milestone : TimelineLevel.Detail;
 
     private static RunTimelineEvent Event(WorkflowRunRecord r, string title, TimelineSeverity severity, TimelineLevel level, string? summary = null) =>
         new()

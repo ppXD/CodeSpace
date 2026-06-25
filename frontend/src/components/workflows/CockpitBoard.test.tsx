@@ -44,7 +44,10 @@ describe("CockpitBoard", () => {
     expect(screen.getByText(/Implement · 2 of 3 agents active/)).toBeTruthy();   // live sentence from phases
     expect(screen.getByText("History")).toBeTruthy();
     expect(container.querySelectorAll(".run-row2").length).toBe(1);    // the one Success run
-    expect(screen.getByText(/Workflow · Manual · v1 · completed/)).toBeTruthy();   // title-cased source + the result-summary meta
+    const recent = container.querySelector(".run-row2")!;
+    expect(recent.querySelector(".run-row2-type")?.textContent).toBe("Workflow");   // type label beside the name
+    expect(recent.querySelector(".run-row2-ver")?.textContent).toBe("v1");          // version label
+    expect(recent.querySelector(".run-row2-sw")?.textContent).toBe("Success");      // status word in its tone
   });
 
   it("titles a row with the workflow name, falling back to the source label when there is none", () => {
@@ -103,5 +106,38 @@ describe("CockpitBoard", () => {
   it("shows the calm empty state when nothing needs attention", () => {
     board({ runs: [run("ok", "Success")], decisions: [] });
     expect(screen.getByText(/Nothing needs you/)).toBeTruthy();
+  });
+
+  it("labels the Workflow/Task type + version beside the name, and shows the status word + run duration", () => {
+    const { container } = board({ runs: [
+      run("wf", "Success", { workflowVersion: 3, createdDate: new Date(NOW - 7 * 60_000 - 59_000).toISOString(), completedAt: new Date(NOW).toISOString() }),
+      run("task", "Success", { workflowId: null, workflowVersion: null }),
+    ] });
+
+    const rows = [...container.querySelectorAll(".run-row2")];
+    const wf = rows.find((r) => r.querySelector(".run-row2-type")?.textContent === "Workflow")!;
+    expect(wf.querySelector(".run-row2-type")?.getAttribute("data-type")).toBe("workflow");   // coral type chip
+    expect(wf.querySelector(".run-row2-ver")?.textContent).toBe("v3");                         // version is its own label
+    expect(wf.querySelector(".run-row2-dur")?.textContent).toContain("7m 59s");                // duration shown on success
+
+    const task = rows.find((r) => r.querySelector(".run-row2-type")?.textContent === "Task")!;
+    expect(task.querySelector(".run-row2-type")?.getAttribute("data-type")).toBe("task");
+    expect(task.querySelector(".run-row2-ver")).toBeNull();                                     // a task run has no version label
+  });
+
+  it("boxes a failed run's error on a third line, with the duration still shown", () => {
+    const { container } = board({ runs: [
+      run("f", "Failure", { error: "check.sh exit 1 — 2 tests failing", createdDate: new Date(NOW - 4 * 60_000 - 11_000).toISOString(), completedAt: new Date(NOW).toISOString() }),
+    ] });
+
+    const row = container.querySelector(".run-row2")!;
+    expect(row.querySelector(".run-row2-sw")?.textContent).toBe("Failed");
+    expect(row.querySelector(".run-row2-dur")?.textContent).toContain("4m 11s");           // failure shows its run time too
+    expect(row.querySelector(".run-row2-err")?.textContent).toContain("check.sh exit 1 — 2 tests failing");
+  });
+
+  it("shows no error line for a failed run without a message, nor for a success", () => {
+    const { container } = board({ runs: [run("f", "Failure", { error: null }), run("ok", "Success")] });
+    expect(container.querySelectorAll(".run-row2-err").length).toBe(0);   // no error string → no third line
   });
 });

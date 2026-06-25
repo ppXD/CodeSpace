@@ -154,3 +154,56 @@ export function branchGroupKey(iterationKey: string): string {
   const hash = iterationKey.lastIndexOf("#");
   return hash < 0 ? "" : iterationKey.slice(0, hash);
 }
+
+/** One fanned-out branch for the canvas fan-out panel: its element index, badge (`#i` / `#i/#j`), and the row to inspect. */
+export interface FanBranch {
+  index: number;
+  badge: string;
+  row: WorkflowRunNodeSummary;
+}
+
+/**
+ * The flow.map element-branches a fanned-out body node ran — one entry per element index, ascending. Only
+ * flow.map branch rows participate (gated on `containerKind`, since a loop body row shares the `<id>#<i>` shape),
+ * so a non-map (loop / try / flat) row set yields `[]` and the caller renders the plain list unchanged. When a
+ * branch index recurs (a body with several nodes per element), the FIRST row seen represents it.
+ */
+export function fanBranches(rows: readonly WorkflowRunNodeSummary[]): FanBranch[] {
+  const byIndex = new Map<number, FanBranch>();
+
+  for (const row of rows) {
+    if (!isMapBranchNode(row)) continue;
+
+    const segments = parseIterationKey(row.iterationKey);
+    if (segments.length === 0) continue;
+
+    const index = segments[segments.length - 1].index;
+    if (byIndex.has(index)) continue;
+
+    byIndex.set(index, { index, badge: segments.map((s) => `#${s.index}`).join("/"), row });
+  }
+
+  return Array.from(byIndex.values()).sort((a, b) => a.index - b.index);
+}
+
+/** A fan-out's per-state branch counts for the summary line (running folds Suspended; done folds Skipped). */
+export interface FanBreakdown {
+  total: number;
+  done: number;
+  running: number;
+  failed: number;
+  queued: number;
+}
+
+export function fanBreakdown(branches: readonly FanBranch[]): FanBreakdown {
+  const b: FanBreakdown = { total: branches.length, done: 0, running: 0, failed: 0, queued: 0 };
+
+  for (const { row } of branches) {
+    if (row.status === "Failure") b.failed++;
+    else if (row.status === "Running" || row.status === "Suspended") b.running++;
+    else if (row.status === "Pending") b.queued++;
+    else b.done++;   // Success / Skipped — settled without failing
+  }
+
+  return b;
+}

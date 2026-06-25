@@ -87,4 +87,14 @@ public sealed record SandboxHandle
     /// mistaken for having a netns to reap.
     /// </summary>
     public string? EgressNetnsKey { get; init; }
+
+    /// <summary>
+    /// The key of the cgroup-v2 resource-cap leaf this run was launched inside (B4) — non-null ONLY when a memory/cpu
+    /// cap was requested AND the runner could enforce it (an operator-delegated cgroup root + cgroup-v2 support). It is
+    /// the teardown handle: the leaf path is derived purely from it + the operator's configured root, so a reap (or a
+    /// re-attach after a restart, on a DIFFERENT worker) tears the cgroup down with no setup-time state. Null when the
+    /// run had no cap or the runner couldn't enforce one — and the value an older handle deserializes to, so a
+    /// pre-existing run is never mistaken for having a cgroup to reap.
+    /// </summary>
+    public string? CgroupRunKey { get; init; }
 }

@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { WorkflowRunNodeSummary } from "@/api/workflows";
-import { branchBadge, branchGroupKey, groupMapBranches, parseIterationKey } from "./mapBranches";
+import { branchBadge, branchGroupKey, fanBranches, fanBreakdown, groupMapBranches, parseIterationKey } from "./mapBranches";
 
 /**
  * The map-branch parsing/grouping backbone — pins the engine iteration-key format
@@ -161,5 +161,46 @@ describe("groupMapBranches", () => {
     const rollups = groupMapBranches(nodes);
     expect(rollups).toHaveLength(1);
     expect(rollups[0]).toMatchObject({ mapId: "map", total: 2, done: 2, failed: 0 });
+  });
+});
+
+describe("fanBranches / isMapFanout / fanBreakdown", () => {
+  it("returns one branch per element, ascending by index, with its badge + row", () => {
+    const rows = [
+      mapNode({ nodeId: "agent", iterationKey: "map#2", status: "Running" }),
+      mapNode({ nodeId: "agent", iterationKey: "map#0", status: "Success" }),
+      mapNode({ nodeId: "agent", iterationKey: "map#1", status: "Failure" }),
+    ];
+    const branches = fanBranches(rows);
+    expect(branches.map((b) => b.index)).toEqual([0, 1, 2]);          // sorted by element index, NOT input order
+    expect(branches.map((b) => b.badge)).toEqual(["#0", "#1", "#2"]);
+    expect(branches[0].row.status).toBe("Success");                  // the #0 row, not the array's first
+  });
+
+  it("ignores loop / try / flat rows (gated on containerKind)", () => {
+    expect(fanBranches([node({ nodeId: "body", iterationKey: "loop#0" })])).toEqual([]);   // containerKind null → not a map
+    expect(fanBranches([mapNode({ nodeId: "agent", iterationKey: "map#0" })])).toHaveLength(1);   // a real flow.map branch counts
+  });
+
+  it("the FIRST row wins when a branch index recurs (a multi-node body)", () => {
+    const rows = [
+      mapNode({ nodeId: "ms", iterationKey: "map#0", status: "Success" }),
+      mapNode({ nodeId: "agent", iterationKey: "map#0", status: "Failure" }),
+    ];
+    const branches = fanBranches(rows);
+    expect(branches).toHaveLength(1);
+    expect(branches[0].row.nodeId).toBe("ms");
+  });
+
+  it("buckets running (incl Suspended), done (incl Skipped), failed, queued", () => {
+    const rows = [
+      mapNode({ nodeId: "a", iterationKey: "map#0", status: "Success" }),
+      mapNode({ nodeId: "a", iterationKey: "map#1", status: "Running" }),
+      mapNode({ nodeId: "a", iterationKey: "map#2", status: "Suspended" }),
+      mapNode({ nodeId: "a", iterationKey: "map#3", status: "Failure" }),
+      mapNode({ nodeId: "a", iterationKey: "map#4", status: "Pending" }),
+      mapNode({ nodeId: "a", iterationKey: "map#5", status: "Skipped" }),
+    ];
+    expect(fanBreakdown(fanBranches(rows))).toEqual({ total: 6, done: 2, running: 2, failed: 1, queued: 1 });
   });
 });

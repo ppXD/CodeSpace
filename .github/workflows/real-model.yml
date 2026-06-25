@@ -177,13 +177,14 @@ jobs:
         # (ANTHROPIC_BASE_URL / ANTHROPIC_AUTH_TOKEN), so no extra wiring is needed. The CLI surface is verified against
         # v2.1.x — pin to that line so a future CLI flag change can't silently break the harness.
         #
-        # continue-on-error: this is the FIRST rollout of the live-coding arm — if the pinned version is wrong / unpublished,
-        # a hard `npm install` failure would RED the whole job every push. Best-effort install instead: the step shows red
-        # (visible, so the version can be corrected) but the JOB stays green; the coding test then self-skips LOUDLY
-        # ("claude not installed → skip ≠ pass"). Make this fatal once the version is confirmed and the arm flips to gating.
-        continue-on-error: true
+        # FATAL install (was continue-on-error during the report-only rollout): the_real_coding_agent_solves arm is now a
+        # GATING best-of-N solve-rate gate, so a missing `claude` binary must RED the lane, never let the gating arm self-skip
+        # green ("skip ≠ pass" would silently pass the acceptance-gate pillar). The v2.1.x pin is confirmed-installable by the
+        # prior report-only runs; a future pinned-version miss is a real lane break to fix, not a silent skip.
         run: |
-          npm install -g '@anthropic-ai/claude-code@~2.1.0'
+          # One retry to absorb a transient npm-registry blip (ECONNRESET / 5xx) without false-red-ing the gating lane;
+          # a genuinely missing/yanked binary still fails after the retry → reds (the install is fatal, not flaky).
+          npm install -g '@anthropic-ai/claude-code@~2.1.0' || { sleep 5; npm install -g '@anthropic-ai/claude-code@~2.1.0'; }
           claude --version
 
       - name: Cache NuGet packages
@@ -210,7 +211,9 @@ jobs:
         # live model drove the whole arc to the real integrated+accepted head (Drove). A CAPABILITY MISS (the model RAN but
         # parked short) now REDs — made flake-safe by a bounded best-of-N capability-floor (a fresh run per attempt; gates
         # only if EVERY non-infra attempt parks short). A CODE FAULT reds at once; a gateway timeout is non-gating LOUD infra.
-        # The reaction arcs (conflict→resolve, failure→retry) still gate only on a CODE FAULT and REPORT a capability miss.
+        # The reaction arcs (conflict→resolve, failure→retry) NOW also GATE: the live model must drive a SAFE recovery on
+        # the real adverse state (spawn→conflict→resolve|stop|escalate, or spawn→fail→retry|escalate) or RED after the same
+        # best-of-N (CODESPACE_REALMODEL_WHOLE_LOOP_ATTEMPTS, uniform). Same CodeFault-reds-at-once / gateway-is-infra contract.
         # Each test self-skips when ALL CODESPACE_LLM_* secrets are absent — surfaced LOUDLY as NOT EVALUATED (skip ≠ pass),
         # fork stays green — and FAILS on a partial config.
         run: >
@@ -240,8 +243,9 @@ jobs:
     # A SEPARATE job from the whole-loop gate (NOT a shared FQN filter): a real claude coding agent attempts the WHOLE
     # seed corpus — every (task × mode) is its own live agent.code run — so this lane's wall-clock is isolated from the
     # whole-loop's own near-60-min best-of-N budget; one slow benchmark run can never time-out the brain gate, and the
-    # solve-rate gets its own job summary. The seed corpus is a handful of trivial offline fixtures, so the real agent
-    # solves each fast (~30-90s); the ceiling holds the worst case with headroom.
+    # solve-rate gets its own job summary. The seed corpus is 9 non-trivial offline tasks (an easy one-edit tier + a
+    # harder fizzbuzz/gcd/balanced-parens/clamp-range/grade-boundaries tier) × 2 modes = 18 live agent runs, each fast
+    # (~30-90s); the ceiling holds one full corpus run (attempts:1) with headroom.
     timeout-minutes: 60
 
     # Same UNCONFINED rationale as the whole-loop lane: this gate's signal is the live SOLVE-RATE, not sandbox
@@ -292,12 +296,14 @@ jobs:
 
       - name: Install the real coding-agent CLI (Claude Code)
         # The benchmark drives the real `claude` CLI per corpus pair (the ClaudeCodeHarness resolves it on PATH + projects
-        # the seeded gateway credential). Best-effort install (continue-on-error): a pinned-version miss shows red on the
-        # step but the JOB stays green and the benchmark self-skips LOUDLY ("claude not installed → skip ≠ pass") rather
-        # than red-ing the lane. Pinned to the v2.1.x line the harness surface is verified against.
-        continue-on-error: true
+        # the seeded gateway credential). FATAL install (was continue-on-error during the report-only rollout): the
+        # benchmark is now a GATING solve-rate floor, so a missing binary must RED the lane, never let the gating arm
+        # self-skip green ("skip ≠ pass"). Pinned to the v2.1.x line the harness surface is verified against; confirmed
+        # installable by the prior report-only runs.
         run: |
-          npm install -g '@anthropic-ai/claude-code@~2.1.0'
+          # One retry to absorb a transient npm-registry blip (ECONNRESET / 5xx) without false-red-ing the gating lane;
+          # a genuinely missing/yanked binary still fails after the retry → reds (the install is fatal, not flaky).
+          npm install -g '@anthropic-ai/claude-code@~2.1.0' || { sleep 5; npm install -g '@anthropic-ai/claude-code@~2.1.0'; }
           claude --version
 
       - name: Cache NuGet packages
@@ -311,10 +317,11 @@ jobs:
         run: dotnet restore backend/tests/CodeSpace.E2ETests/CodeSpace.E2ETests.csproj
 
       - name: Test (the live solve-rate — a real claude agent attempts the whole seed corpus)
-        # REPORT-ONLY: a brand-new live coding-over-corpus path REPORTS the solve-rate to the job summary (Drove = solved
-        # ≥1 task; CapabilityMiss = ran but solved none) and only a CODE FAULT reds; a gateway outage (every pair fails to
-        # execute) is non-gating LOUD infra. Self-skips when ALL CODESPACE_LLM_* are absent (fork stays green) and FAILS on
-        # a partial config. Flip to a gating solve-rate FLOOR once a first live run confirms the wiring AND a solve.
+        # GATING solve-rate FLOOR: the real claude agent must objectively SOLVE at least MinSolveRate (0.5) of the
+        # cleanly-run corpus pairs or the blessed wire REDs (CapabilityMiss = ran but fell short of the floor; Drove =
+        # cleared it). A gateway outage (every pair fails to execute) is non-gating LOUD infra, never a false miss.
+        # attempts:1 — the rate is already an 18-pair average; per-corpus best-of-N won't fit 60 min. Self-skips when ALL
+        # CODESPACE_LLM_* are absent (fork stays green) and FAILS on a partial config.
         run: >
           dotnet test backend/tests/CodeSpace.E2ETests/CodeSpace.E2ETests.csproj
           --no-restore

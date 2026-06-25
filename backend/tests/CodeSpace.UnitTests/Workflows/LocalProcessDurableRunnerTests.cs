@@ -381,6 +381,43 @@ public sealed class LocalProcessDurableRunnerTests : IDisposable
     }
 
     [Fact]
+    public void BuildDurableStartInfo_runs_the_chain_inside_the_cgroup_self_add_OUTERMOST_before_egress()
+    {
+        // B4 wiring: the cgroup self-add prefix must wrap the WHOLE chain — outermost, BEFORE the egress netns prefix —
+        // so the cgroup.procs write happens on the host before entering the netns and the entire subtree is capped.
+        var info = LocalProcessRunner.BuildDurableStartInfo(
+            new SandboxSpec { Command = "mycmd", Args = new[] { "value" } }, "/tmp/spool-cg",
+            egressExecPrefix: new[] { "EGRESS", "y" },
+            cgroupExecPrefix: new[] { "CGSELF", "x" });
+
+        var c = info.ArgumentList.IndexOf("-c");
+        var afterDollarZero = info.ArgumentList.Skip(c + 3).ToList();   // after `-c <script> sh`
+
+        afterDollarZero.Take(4).ShouldBe(new[] { "CGSELF", "x", "EGRESS", "y" }, "cgroup self-add is OUTERMOST, then the egress netns prefix");
+        afterDollarZero.TakeLast(2).ShouldBe(new[] { "mycmd", "value" }, "the real command still trails the wrappers");
+    }
+
+    [Fact]
+    public void BuildDurableStartInfo_with_no_cgroup_prefix_is_byte_identical_to_before_the_knob()
+    {
+        // Non-breaking: an absent/empty cgroup prefix (the default — no cap requested / no delegated root) produces the
+        // EXACT same argv as a call that never passed the parameter.
+        var spec = new SandboxSpec { Command = "mycmd", Args = new[] { "value" } };
+
+        var before = LocalProcessRunner.BuildDurableStartInfo(spec, "/tmp/spool-bi");
+        var withEmptyCgroup = LocalProcessRunner.BuildDurableStartInfo(spec, "/tmp/spool-bi", null, Array.Empty<string>());
+
+        withEmptyCgroup.ArgumentList.ShouldBe(before.ArgumentList);
+    }
+
+    [Fact]
+    public void CgroupRoot_env_var_constant_is_pinned()
+    {
+        // Rule 8: renaming this breaks an operator who pinned a delegated cgroup root via env. Hard-pin the literal.
+        CodeSpace.Core.Services.Agents.Sandbox.Isolation.CgroupResourceLimit.CgroupRootEnvVar.ShouldBe("CODESPACE_AGENT_CGROUP_ROOT");
+    }
+
+    [Fact]
     public void BuildDurableStartInfo_keeps_the_spool_env_vars_through_a_scrub()
     {
         // The spool paths are added AFTER ApplyEnvironment, so a scrub's Clear() can't drop them — otherwise a
