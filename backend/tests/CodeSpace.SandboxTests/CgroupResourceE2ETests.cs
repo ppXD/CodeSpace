@@ -16,14 +16,18 @@ namespace CodeSpace.SandboxTests;
 /// <para>Class-level <c>[Trait("Category", "Sandbox")]</c> — the same privileged gate as the bwrap + egress tests.</para>
 /// </summary>
 [Trait("Category", "Sandbox")]
-public sealed class CgroupResourceE2ETests
+public sealed class CgroupResourceE2ETests : IClassFixture<CgroupArenaFixture>
 {
     private const string AllocMarker = "cs-alloc-ok";
+
+    private readonly CgroupArenaFixture _fixture;
+
+    public CgroupResourceE2ETests(CgroupArenaFixture fixture) => _fixture = fixture;
 
     [Fact]
     public async Task A_process_under_the_memory_cap_runs_clean_while_one_over_it_is_OOM_killed()
     {
-        using var arena = ArenaOrSkip();
+        var arena = ArenaOrSkip();
         if (arena is null) return;
         if (!arena.HasPython) { Skip("python3 (the deterministic memory hog) is not installed"); return; }
 
@@ -58,7 +62,7 @@ public sealed class CgroupResourceE2ETests
     [Fact]
     public async Task A_fork_heavy_command_hits_the_pids_cap()
     {
-        using var arena = ArenaOrSkip();
+        var arena = ArenaOrSkip();
         if (arena is null) return;
 
         var runId = Guid.NewGuid().ToString("N");
@@ -86,7 +90,7 @@ public sealed class CgroupResourceE2ETests
     [Fact]
     public async Task A_cpu_cap_enables_the_cpu_controller_and_writes_cpu_max_on_the_real_cgroup()
     {
-        using var arena = ArenaOrSkip();
+        var arena = ArenaOrSkip();
         if (arena is null) return;
 
         // Exercises the +cpu controller-enablement + the cpu.max quota write end to end on the real kernel (a timing
@@ -110,7 +114,7 @@ public sealed class CgroupResourceE2ETests
     [Fact]
     public async Task The_setup_teardown_split_reaps_the_cgroup_and_is_reconstructable_from_runId()
     {
-        using var arena = ArenaOrSkip();
+        var arena = ArenaOrSkip();
         if (arena is null) return;
 
         // The contract the durable launch (slice 3) relies on: SetupAsync builds the capped cgroup + returns the
@@ -134,16 +138,15 @@ public sealed class CgroupResourceE2ETests
     /// <summary>A python one-liner allocating <paramref name="mib"/> MiB of touched (real RSS) memory then printing the marker — absent iff the process was killed mid-allocation.</summary>
     private static string AllocPython(int mib) => $"b = bytearray({mib} * 1024 * 1024); print('{AllocMarker}')";
 
-    /// <summary>Bootstrap an arena, or — when <c>CODESPACE_REQUIRE_CGROUP=1</c> (the privileged lane) — FAIL hard if the container can't delegate cgroups (skip ≠ pass). Returns null + loud-skips only off the required lane (macOS dev).</summary>
-    private static CgroupTestArena? ArenaOrSkip()
+    /// <summary>The fixture-bootstrapped arena (created ONCE for the class), or — when <c>CODESPACE_REQUIRE_CGROUP=1</c> (the privileged lane) — FAIL hard if the container can't delegate cgroups (skip ≠ pass). Returns null + loud-skips only off the required lane (macOS dev).</summary>
+    private CgroupTestArena? ArenaOrSkip()
     {
-        var arena = CgroupTestArena.TryCreate(out var why);
-        if (arena is not null) return arena;
+        if (_fixture.Arena is not null) return _fixture.Arena;
 
         if (Environment.GetEnvironmentVariable("CODESPACE_REQUIRE_CGROUP") == "1")
-            false.ShouldBeTrue($"CODESPACE_REQUIRE_CGROUP=1 but cgroup delegation is unavailable: {why}. The privileged sandbox lane must enforce REAL cgroup caps (fail-closed, like REQUIRE_SANDBOX) — skip is not a pass.");
+            false.ShouldBeTrue($"CODESPACE_REQUIRE_CGROUP=1 but cgroup delegation is unavailable: {_fixture.Why}. The privileged sandbox lane must enforce REAL cgroup caps (fail-closed, like REQUIRE_SANDBOX) — skip is not a pass.");
 
-        Skip($"cgroup delegation unavailable: {why}");
+        Skip($"cgroup delegation unavailable: {_fixture.Why}");
         return null;
     }
 
