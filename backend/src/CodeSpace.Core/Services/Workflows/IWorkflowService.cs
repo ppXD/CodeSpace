@@ -68,6 +68,14 @@ public interface IWorkflowService
     /// </summary>
     Task<RunPage> ListTeamRunsPageAsync(Guid teamId, RunListFilter filter, int page, int pageSize, CancellationToken cancellationToken);
 
+    /// <summary>
+    /// True scoped counts for the runs cockpit cards — live / failed / suspended / suspended-needing-review / today —
+    /// each a COUNT over the team's runs narrowed by <paramref name="filter"/> (the bar's scope), NOT a sample of a
+    /// loaded page, so "no filter" is the genuine superset. <paramref name="todayStart"/> is the caller's local
+    /// start-of-day for the today count. Mirrors the same base query + dimensions as the runs index.
+    /// </summary>
+    Task<RunSummary> SummarizeTeamRunsAsync(Guid teamId, RunListFilter filter, DateTimeOffset todayStart, CancellationToken cancellationToken);
+
     Task<WorkflowRunDetail?> GetRunAsync(Guid runId, Guid teamId, CancellationToken cancellationToken);
 
     /// <summary>

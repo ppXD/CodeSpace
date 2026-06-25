@@ -108,22 +108,36 @@ export function useWorkflowRuns(workflowId: string | null) {
  * The team's runs index (every top-level run, any source). Polls every 4s while at least one run is still
  * non-terminal — the same cadence as the per-workflow run list — and stops once everything has settled.
  */
-export function useTeamRuns(filter?: RunListFilterInput, limit = 50) {
+export function useTeamRuns(filter?: RunListFilterInput, limit = 50, enabled = true) {
   // Key on the canonical serialized filter so two equivalent filters share a cache entry and a changed filter refetches.
   const key = buildRunListParams(filter, limit);
   return useQuery({
     queryKey: ["team-runs", key],
     queryFn: () => workflowsApi.listTeamRuns(filter, limit),
+    enabled,
     // Keep the previous page visible while a changed filter refetches, so the bar + board don't blank between filters.
     placeholderData: keepPreviousData,
     // The endpoint is keyset-paginated (RunPage); unwrap to the items array so consumers stay array-based.
-    // nextCursor is unused until the cockpit grows a load-more (the page already shows the newest `limit`).
     select: (page) => page.items,
     refetchInterval: (q) => {
       const items = q.state.data?.items;
       if (!items) return false;
       return items.some((r) => isRunActive(r.status)) ? 4000 : false;
     },
+  });
+}
+
+/**
+ * The cockpit's TRUE scoped counts for the status cards — counted over the whole scoped set, not a loaded page, so
+ * nothing-selected is the genuine superset. `todayStartIso` is the caller's local start-of-day (stable within a day,
+ * so the cache key is stable). Polls on the cockpit cadence while anything is live, then settles.
+ */
+export function useTeamRunSummary(filter: RunListFilterInput | undefined, todayStartIso: string) {
+  return useQuery({
+    queryKey: ["team-run-summary", buildRunListParams(filter, 1), todayStartIso],
+    queryFn: () => workflowsApi.summarizeTeamRuns(filter, todayStartIso),
+    placeholderData: keepPreviousData,
+    refetchInterval: (q) => ((q.state.data?.live ?? 0) > 0 ? 4000 : false),
   });
 }
 

@@ -179,6 +179,20 @@ export interface RunPage {
 }
 
 /**
+ * The runs cockpit's TRUE scoped counts (the status cards) — each a count over the team's runs narrowed by the bar's
+ * scope, not a tally of a loaded page. `suspendedNeedingReview` is the run half of the Needs-attention card (suspended
+ * runs no pending decision already covers); the other half is the decision queue. `today` counts runs since the
+ * caller's local start-of-day. So nothing-selected is the genuine superset and any filter only narrows.
+ */
+export interface RunSummary {
+  live: number;
+  failed: number;
+  suspended: number;
+  suspendedNeedingReview: number;
+  today: number;
+}
+
+/**
  * The generic runs-index filter — the client mirror of the backend's RunListFilter. EVERY field is optional and a
  * LIST: values within one field are OR'd, fields are AND'd. ONE shape drives every runs surface — a surface supplies
  * only the dimensions it scopes by (a repo page sets `repositoryIds`, the cockpit's Live card sets `statuses`, the
@@ -552,6 +566,10 @@ export const workflowsApi = {
   /** The same index, OFFSET-paginated for numbered pages (1-based `page`): the response carries `totalCount` for "page X of Y". */
   listTeamRunsPage: (filter: RunListFilterInput | undefined, page: number, pageSize: number) =>
     fetchJson<RunPage>(`/api/workflows/runs?${buildRunListParams(filter, pageSize, undefined, page)}`),
+
+  /** The cockpit's true scoped counts for the status cards. `todayStartIso` is the caller's local start-of-day for the today count. */
+  summarizeTeamRuns: (filter: RunListFilterInput | undefined, todayStartIso: string) =>
+    fetchJson<RunSummary>(`/api/workflows/runs/summary?${buildRunListParams(filter, 1)}&today=${encodeURIComponent(todayStartIso)}`),
 
   getRun: (runId: string) => fetchJson<WorkflowRunDetail>(`/api/workflows/runs/${runId}`),
 

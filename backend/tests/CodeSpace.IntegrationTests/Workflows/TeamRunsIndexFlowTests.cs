@@ -535,6 +535,83 @@ public class TeamRunsIndexFlowTests
         page1.Items.Select(r => r.Id).ShouldBe(terminal.Take(2), "the page is the filtered slice, newest first");
     }
 
+    [Fact]
+    public async Task Summary_counts_each_status_group_over_the_true_set_not_a_page()
+    {
+        var (teamA, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var t = DateTimeOffset.UtcNow;
+
+        // Live = Pending/Enqueued/Running (3); plus 2 failed, 1 suspended, 4 success — all created today.
+        await InsertRunAsync(teamA, null, t, workflowId: null, status: WorkflowRunStatus.Running);
+        await InsertRunAsync(teamA, null, t.AddMinutes(-1), workflowId: null, status: WorkflowRunStatus.Pending);
+        await InsertRunAsync(teamA, null, t.AddMinutes(-2), workflowId: null, status: WorkflowRunStatus.Enqueued);
+        for (var i = 0; i < 2; i++) await InsertRunAsync(teamA, null, t.AddMinutes(-3 - i), workflowId: null, status: WorkflowRunStatus.Failure);
+        await InsertRunAsync(teamA, null, t.AddMinutes(-6), workflowId: null, status: WorkflowRunStatus.Suspended);
+        for (var i = 0; i < 4; i++) await InsertRunAsync(teamA, null, t.AddMinutes(-7 - i), workflowId: null, status: WorkflowRunStatus.Success);
+
+        var s = await SummaryAsync(teamA, RunListFilter.None, t.AddDays(-1));
+
+        s.Live.ShouldBe(3, "the live group folds Pending + Enqueued + Running");
+        s.Failed.ShouldBe(2);
+        s.Suspended.ShouldBe(1);
+        s.Today.ShouldBe(10, "every seeded run was created after the day-start");
+    }
+
+    [Fact]
+    public async Task Summary_is_scoped_by_the_filter_so_a_narrower_scope_never_exceeds_the_unscoped_total()
+    {
+        var (teamA, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var actorX = Guid.NewGuid();
+        var t = DateTimeOffset.UtcNow;
+
+        await InsertRunAsync(teamA, null, t, workflowId: null, status: WorkflowRunStatus.Failure, actorId: actorX);
+        await InsertRunAsync(teamA, null, t.AddMinutes(-1), workflowId: null, status: WorkflowRunStatus.Failure, actorId: Guid.NewGuid());   // another actor
+
+        var all = await SummaryAsync(teamA, RunListFilter.None, t.AddDays(-1));
+        var scoped = await SummaryAsync(teamA, new RunListFilter { ActorIds = new[] { actorX } }, t.AddDays(-1));
+
+        all.Failed.ShouldBe(2, "the unscoped total counts both actors' failures");
+        scoped.Failed.ShouldBe(1, "the actor scope narrows to that actor's one failure — a filter can only narrow, never widen");
+    }
+
+    [Fact]
+    public async Task Summary_suspended_needing_review_excludes_a_suspended_run_a_pending_decision_already_covers()
+    {
+        var (teamA, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var t = DateTimeOffset.UtcNow;
+
+        var withDecision = await InsertRunAsync(teamA, null, t, workflowId: null, status: WorkflowRunStatus.Suspended);
+        await SeedNodeDecisionWaitAsync(withDecision);                                                                // a pending decision covers it
+        await InsertRunAsync(teamA, null, t.AddMinutes(-1), workflowId: null, status: WorkflowRunStatus.Suspended);   // no decision → needs review
+
+        var s = await SummaryAsync(teamA, RunListFilter.None, t.AddDays(-1));
+
+        s.Suspended.ShouldBe(2, "both runs are Suspended");
+        s.SuspendedNeedingReview.ShouldBe(1, "but only the one without a pending decision still needs a human");
+    }
+
+    [Fact]
+    public async Task Summary_today_counts_only_runs_at_or_after_the_callers_local_day_start()
+    {
+        var (teamA, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var t = DateTimeOffset.UtcNow;
+        var dayStart = t.AddHours(-3);
+
+        await InsertRunAsync(teamA, null, t, workflowId: null);                         // after day-start → today
+        await InsertRunAsync(teamA, null, dayStart, workflowId: null);                  // == day-start → today (inclusive)
+        await InsertRunAsync(teamA, null, dayStart.AddMinutes(-1), workflowId: null);   // before → not today
+
+        var s = await SummaryAsync(teamA, RunListFilter.None, dayStart);
+
+        s.Today.ShouldBe(2, "createdDate >= the day-start is inclusive; the earlier run is excluded");
+    }
+
+    private async Task<RunSummary> SummaryAsync(Guid teamId, RunListFilter filter, DateTimeOffset todayStart)
+    {
+        using var scope = _fixture.BeginScope();
+        return await scope.Resolve<IWorkflowService>().SummarizeTeamRunsAsync(teamId, filter, todayStart, CancellationToken.None);
+    }
+
     private async Task<Guid> CreateNamedWorkflowAsync(Guid teamId, Guid userId, string name)
     {
         using var scope = _fixture.BeginScopeAs(userId, teamId, Roles.Admin);
