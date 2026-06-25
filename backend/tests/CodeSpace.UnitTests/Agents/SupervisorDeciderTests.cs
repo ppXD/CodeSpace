@@ -88,6 +88,38 @@ public class SupervisorDeciderTests
     }
 
     [Fact]
+    public void The_user_prompt_surfaces_each_agents_git_ground_truth_changed_files_and_branch()
+    {
+        // The brain must verify completion + detect cross-agent file OVERLAP against the GIT GROUND TRUTH it holds,
+        // not just the self-reported summary. A spawn's folded agentResults render each agent's changed files + branch.
+        // Built via the REAL fold helper (valid Guids) so the labeled path — not the raw-jsonb fallback — is exercised.
+        var agentId = Guid.NewGuid();
+        var outcome = SupervisorOutcome.FoldAgentResults(
+            $$"""{"agentRunIds":["{{agentId}}"],"agentCount":1}""",
+            new[]
+            {
+                new SupervisorAgentResult
+                {
+                    AgentRunId = agentId, Status = "Succeeded", Summary = "did it",
+                    ChangedFiles = new[] { "src/Api/Foo.cs", "src/Api/Bar.cs" }, ProducedBranch = "codespace/agent/foo",
+                },
+            });
+
+        var spawn = new SupervisorPriorDecision
+        {
+            Id = Guid.NewGuid(), Sequence = 2, DecisionKind = SupervisorDecisionKinds.Spawn, Status = SupervisorDecisionStatus.Succeeded,
+            PayloadJson = """{"subtaskIds":["s1"]}""", OutcomeJson = outcome,
+        };
+
+        var prompt = LlmSupervisorDecider.BuildUserPromptForTest(Context(turnNumber: 2, spawn));
+
+        prompt.ShouldContain("src/Api/Foo.cs", Case.Insensitive, "the decider sees the real changed files — for completion + cross-agent overlap detection");
+        prompt.ShouldContain("src/Api/Bar.cs", Case.Insensitive);
+        prompt.ShouldContain("2 changed file(s)", Case.Insensitive, "the labeled artifacts path renders the file count — proves it's not the raw-jsonb fallback");
+        prompt.ShouldContain("codespace/agent/foo", Case.Insensitive, "the decider sees the produced branch");
+    }
+
+    [Fact]
     public void The_user_prompt_is_UNCHANGED_by_per_repo_RepositoryResults()
     {
         // Resolver loop #379 S7-B — surfacing per-repo RepositoryResults into the compact must NOT change what the
