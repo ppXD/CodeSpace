@@ -536,7 +536,7 @@ public class TaskLaunchFlowTests
         // A STANDARD task routes to the plan-map-synth fan-out (the multi-agent map shape). The related repos must reach
         // the MAP BODY agent.code node (each fan-out branch clones them) — proving the multi-repo workspace flows through
         // the map projection too, not only single-agent. Frozen-def assertion only (the map run path is covered by
-        // PlanMapSynthFanoutFlowTests; the deep→supervisor multi-repo projection by SupervisorProjectionFlowTests).
+        // PlanMapSynthFanoutFlowTests; the deep→supervisor multi-repo projection by SupervisorDefinitionBuilderTests).
         var request = new TaskLaunchRequest
         {
             TeamId = teamId,
