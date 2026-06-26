@@ -40,18 +40,14 @@ namespace CodeSpace.IntegrationTests.Workflows;
 public class SupervisorBoundsFlowTests : IDisposable
 {
     private readonly PostgresFixture _fixture;
-    private readonly string? _flagBefore;
 
     public SupervisorBoundsFlowTests(PostgresFixture fixture)
     {
         _fixture = fixture;
-        _flagBefore = Environment.GetEnvironmentVariable(SupervisorLane.EnabledEnvVar);
-        Environment.SetEnvironmentVariable(SupervisorLane.EnabledEnvVar, "1");
     }
 
     public void Dispose()
     {
-        Environment.SetEnvironmentVariable(SupervisorLane.EnabledEnvVar, _flagBefore);
         using var scope = _fixture.BeginScope();
         scope.Resolve<SupervisorDecisionScript>().PlanThenStop();   // restore the default for sibling tests
     }

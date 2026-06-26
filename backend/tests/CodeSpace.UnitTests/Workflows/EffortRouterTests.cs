@@ -20,11 +20,9 @@ namespace CodeSpace.UnitTests.Workflows;
 /// map-fanout / supervisor recipes, the three bounds presets) — the FLAT pipeline that turns a request into a
 /// RoutePlan. Covers the non-auto operator path (no classifier, no confirm card, the requested tier + its caps),
 /// the auto path (the heuristic always-confirms, with confirm options DERIVED from the bounds registry), the
-/// RequestedProjection escape hatch, and the CapsOverride merge. The supervisor-lane DEGRADE pins (lane on →
-/// supervisor, lane off → map-fanout + DegradedReason) live in <see cref="EffortRouterDegradeTests"/>; the
-/// GENERICITY contract test lives in <see cref="EffortRouterGenericityTests"/>. The supervisor-lane capability
-/// is reported AVAILABLE here (a fixed probe) so an explicit <c>deep</c> reaches the supervisor recipe
-/// deterministically, independent of the ambient env flag.
+/// RequestedProjection escape hatch, and the CapsOverride merge. The supervisor lane is always on (its feature gate
+/// graduated), so an explicit <c>deep</c> reaches the supervisor recipe with no capability probe + no degrade; the
+/// generic capability-degrade mechanism is pinned in <see cref="EffortRouterDegradeTests"/>.
 /// </summary>
 [Trait("Category", "Unit")]
 public class EffortRouterTests
@@ -33,7 +31,7 @@ public class EffortRouterTests
         new EffortClassifierRegistry(new IEffortClassifier[] { new HeuristicEffortClassifier() }),
         new TaskRecipeRegistry(new ITaskRecipe[] { new SingleAgentRecipe(), new MapFanoutRecipe(), new SupervisorRecipe() }),
         new BoundsPresetRegistry(new IBoundsPreset[] { new QuickBoundsPreset(), new StandardBoundsPreset(), new DeepBoundsPreset() }),
-        new CapabilityProbeRegistry(new ICapabilityProbe[] { new FixedProbe(TaskCapabilities.SupervisorLane, available: true) }));
+        new CapabilityProbeRegistry(Array.Empty<ICapabilityProbe>()));
 
     private static EffortRouteRequest Request(string goal, string? requestedEffort = null, string? requestedRecipe = null, string? requestedProjection = null, RouteCaps? capsOverride = null) => new()
     {
@@ -184,14 +182,5 @@ public class EffortRouterTests
         plan.NeedsConfirmCard.ShouldBeTrue("the auto path always confirms — it never silently escalates to map-fanout");
         plan.RecipeKind.ShouldBe(TaskRecipeKinds.SingleAgent, "the heuristic suggests the conservative single-agent recipe");
         plan.ProjectionKind.ShouldBe(TaskProjectionKinds.SingleAgent);
-    }
-
-    /// <summary>A test probe reporting a fixed availability for one capability — lets the router pin reach the supervisor recipe deterministically, independent of the ambient env flag.</summary>
-    private sealed class FixedProbe : ICapabilityProbe
-    {
-        private readonly bool _available;
-        public FixedProbe(string capability, bool available) { Capability = capability; _available = available; }
-        public string Capability { get; }
-        public bool IsAvailable() => _available;
     }
 }

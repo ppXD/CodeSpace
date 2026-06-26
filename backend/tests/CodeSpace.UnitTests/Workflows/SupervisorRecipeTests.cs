@@ -29,8 +29,8 @@ public class SupervisorRecipeTests
         Recipe.BoundsPreset.ShouldBe(TaskEffortModes.Deep);
         Recipe.RecommendedAutonomy.ShouldBe("Standard");
         Recipe.RequiresPlanReview.ShouldBeFalse();
-        Recipe.RequiresCapability.ShouldBe(TaskCapabilities.SupervisorLane, "the supervisor projection needs the lane at execution");
-        Recipe.DegradesToRecipe.ShouldBe(TaskRecipeKinds.MapFanout, "when the lane is off, deep degrades to the multi-agent map-fanout shape");
+        Recipe.RequiresCapability.ShouldBeNull("the supervisor lane is always on (its feature gate graduated), so the recipe declares no capability");
+        Recipe.DegradesToRecipe.ShouldBeNull("the supervisor recipe never degrades — it always projects the durable supervisor lane");
         Recipe.RecommendedPhaseLabels.ShouldBe(new[] { "Plan", "Delegate", "Synthesize" });
         Recipe.GoalFrame.ShouldBe("A supervisor plans, delegates to sub-agents in bounded rounds, and synthesizes — within the durable supervisor lane.");
     }

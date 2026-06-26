@@ -56,21 +56,17 @@ public sealed class SupervisorWholeLoopE2ETests : IDisposable
     private const string NodeId = "sup";
 
     private readonly PostgresFixture _fixture;
-    private readonly string? _laneBefore;
     private readonly string? _integrateBefore;
 
     public SupervisorWholeLoopE2ETests(PostgresFixture fixture)
     {
         _fixture = fixture;
-        _laneBefore = Environment.GetEnvironmentVariable(SupervisorLane.EnabledEnvVar);
         _integrateBefore = Environment.GetEnvironmentVariable(AgentRunExecutor.IntegrateBranchEnabledEnvVar);
-        Environment.SetEnvironmentVariable(SupervisorLane.EnabledEnvVar, "1");
         Environment.SetEnvironmentVariable(AgentRunExecutor.IntegrateBranchEnabledEnvVar, "1");
     }
 
     public void Dispose()
     {
-        Environment.SetEnvironmentVariable(SupervisorLane.EnabledEnvVar, _laneBefore);
         Environment.SetEnvironmentVariable(AgentRunExecutor.IntegrateBranchEnabledEnvVar, _integrateBefore);
 
         using var scope = _fixture.BeginScope();

@@ -4,9 +4,9 @@ using Shouldly;
 namespace CodeSpace.UnitTests.Agents;
 
 /// <summary>
-/// 🟢 Unit: the server-derived idempotency key + the lane flag const. The key is <c>decisionKind:SHA-256(payload)</c>
-/// (+ an optional caller turn discriminator) — SERVER-derived + deterministic, NEVER from a model-supplied key. Pins the
-/// determinism, the per-input divergence, the turn-discriminator effect, and the flag literal (Rule 8).
+/// 🟢 Unit: the server-derived idempotency key. The key is <c>decisionKind:SHA-256(payload)</c> (+ an optional caller
+/// turn discriminator) — SERVER-derived + deterministic, NEVER from a model-supplied key. Pins the determinism, the
+/// per-input divergence, and the turn-discriminator effect.
 /// </summary>
 [Trait("Category", "Unit")]
 public class SupervisorDecisionLogKeyTests
@@ -71,25 +71,4 @@ public class SupervisorDecisionLogKeyTests
 
         key.ShouldBe($"plan:{hash}", "the audit input_hash column is exactly the hash the (no-turn) key binds");
     }
-
-    [Fact]
-    public void EnabledEnvVar_constant_name_is_pinned()
-    {
-        // Renaming this breaks every operator who flipped the supervisor lane on via env. Hard-pin the literal (Rule 8).
-        SupervisorLane.EnabledEnvVar.ShouldBe("CODESPACE_SUPERVISOR_LANE_ENABLED");
-    }
-
-    [Theory]
-    [InlineData("1", true)]
-    [InlineData("true", true)]
-    [InlineData("TRUE", true)]
-    [InlineData(" true ", true)]   // trimmed
-    [InlineData("0", false)]
-    [InlineData("false", false)]
-    [InlineData("False", false)]   // only the explicit on-values flip it on
-    [InlineData("yes", false)]
-    [InlineData("", false)]
-    [InlineData(null, false)]
-    public void IsEnabled_is_fail_closed_default_off(string? raw, bool expected) =>
-        SupervisorLane.IsEnabled(raw).ShouldBe(expected);
 }

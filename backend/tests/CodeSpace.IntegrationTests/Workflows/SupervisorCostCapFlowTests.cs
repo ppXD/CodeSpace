@@ -37,18 +37,14 @@ namespace CodeSpace.IntegrationTests.Workflows;
 public class SupervisorCostCapFlowTests : IDisposable
 {
     private readonly PostgresFixture _fixture;
-    private readonly string? _flagBefore;
 
     public SupervisorCostCapFlowTests(PostgresFixture fixture)
     {
         _fixture = fixture;
-        _flagBefore = Environment.GetEnvironmentVariable(SupervisorLane.EnabledEnvVar);
-        Environment.SetEnvironmentVariable(SupervisorLane.EnabledEnvVar, "1");
     }
 
     public void Dispose()
     {
-        Environment.SetEnvironmentVariable(SupervisorLane.EnabledEnvVar, _flagBefore);
         using var scope = _fixture.BeginScope();
         scope.Resolve<SupervisorDecisionScript>().PlanThenStop();
         scope.Resolve<InMemoryBackgroundJobClient>().AutoExecute = true;

@@ -10,7 +10,7 @@ namespace CodeSpace.Core.Services.Tasks.Recipes.MapFanout;
 /// <see cref="TaskProjectionKinds.PlanMapSynth"/> projection. It is the default SHAPE for the <c>standard</c>
 /// effort tier (<see cref="ServesEfforts"/>), so an explicit <c>standard</c> request (with no pinned recipe)
 /// routes a real multi-agent run — while <c>quick</c> stays single-agent and <c>deep</c> now routes the
-/// supervisor recipe (which DEGRADES back to this map-fanout shape when the supervisor lane is off).
+/// supervisor recipe (which always projects its own durable supervisor lane).
 ///
 /// <para>Self-registers via <see cref="ISingletonDependency"/>; a new recipe is a sibling folder, never an edit
 /// here. This recipe needs no execution-time capability, so <see cref="RequiresCapability"/> /

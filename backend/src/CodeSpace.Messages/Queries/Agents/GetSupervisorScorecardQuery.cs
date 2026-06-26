@@ -12,8 +12,7 @@ namespace CodeSpace.Messages.Queries.Agents;
 /// never the wire (<see cref="IRequireTeamMembership"/>), so a caller can only ever score its own supervisor runs.
 ///
 /// <para><see cref="Since"/> windows the runs to a trend horizon (on each run's first decision). When no supervisor
-/// runs exist (e.g. the lane was never enabled), the scorecard comes back empty — a flag-OFF deployment sees nothing
-/// new.</para>
+/// runs exist yet (e.g. a fresh team that hasn't launched a supervisor task), the scorecard comes back empty.</para>
 /// </summary>
 public sealed record GetSupervisorScorecardQuery : IQuery<SupervisorScorecard>, IRequireTeamMembership
 {

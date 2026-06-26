@@ -28,10 +28,6 @@ namespace CodeSpace.Core.Services.Workflows.Nodes.Builtin;
 /// system scope, then delegates the whole turn to the scoped <see cref="ISupervisorTurnService"/>, resolved
 /// through an <see cref="IServiceScopeFactory"/> because the node itself is a DI singleton.</para>
 ///
-/// <para>Flag-gated (<see cref="SupervisorLane.IsEnabled"/>): when the lane is OFF the node fails closed
-/// rather than touching the ledger, so a deployment that never authors an agent.supervisor node is
-/// byte-identical to today and an accidental one degrades to a clean node failure.</para>
-///
 /// Config: goal? (the run-level objective the supervisor pursues — the real LlmSupervisorDecider folds it into its prompt; the test stub follows a fixed script regardless)
 /// Outputs: status · decision (the terminal decision kind) · reason (terminal reason) · turns (decided count) ·
 /// integratedBranch (resolver loop #379, S5 — the run's final reviewable branch: the latest clean merge's, or a
@@ -119,10 +115,6 @@ public sealed class AgentSupervisorNode : INodeRuntime
 
     public async Task<NodeResult> RunAsync(NodeRunContext context, CancellationToken cancellationToken)
     {
-        // Fail closed when the lane is off — never touch the ledger. A flag-OFF deployment that never
-        // authors this node is byte-identical; an accidental one degrades to a clean node failure.
-        if (!SupervisorLane.IsEnabled()) return NodeResult.Fail("The supervisor lane is disabled (set CODESPACE_SUPERVISOR_LANE_ENABLED to enable it).");
-
         if (!TryReadRunIdentity(context, out var supervisorRunId, out var teamId))
             return NodeResult.Fail("agent.supervisor could not read the run id / team id from the system scope.");
 

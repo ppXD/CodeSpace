@@ -22,29 +22,21 @@ namespace CodeSpace.IntegrationTests.Workflows;
 /// 🟢 THE PR6 CROWN JEWEL (high fidelity — REAL effort router over the real registries + REAL
 /// <see cref="ITaskRunSnapshotFactory"/> + REAL engine + REAL <c>SupervisorTurnService</c> over real Postgres;
 /// the scripted decider stands in for the LLM, no real CLI). The DEEP effort tier flows end-to-end through the
-/// supervisor lane:
-/// <list type="bullet">
-///   <item>With the lane ON: route explicit <c>deep</c> through the REAL router → it resolves the supervisor
-///         recipe (no degrade) → build the <see cref="TaskBuildContext"/> → the factory projects the
-///         <c>trigger.manual → agent.supervisor → builtin.terminal</c> snapshot run → the engine drives the
-///         supervisor turn loop (turn 0 plan → self-advance → turn 1 stop) to terminal SUCCESS. The decision
-///         ledger has [Plan, Stop] and NO <c>workflow</c> / <c>workflow_version</c> row (a snapshot run).</item>
-///   <item>With the lane OFF: route explicit <c>deep</c> → the router DEGRADES to map-fanout + sets a non-null
-///         DegradedReason (no supervisor run is started) — the honest fallback.</item>
-/// </list>
+/// supervisor lane (always on): route explicit <c>deep</c> through the REAL router → it resolves the supervisor
+/// recipe (no degrade) → build the <see cref="TaskBuildContext"/> → the factory projects the
+/// <c>trigger.manual → agent.supervisor → builtin.terminal</c> snapshot run → the engine drives the
+/// supervisor turn loop (turn 0 plan → self-advance → turn 1 stop) to terminal SUCCESS. The decision
+/// ledger has [Plan, Stop] and NO <c>workflow</c> / <c>workflow_version</c> row (a snapshot run).
 /// </summary>
 [Collection(PostgresCollection.Name)]
 [Trait("Category", "Integration")]
 public class SupervisorProjectionFlowTests : IDisposable
 {
     private readonly PostgresFixture _fixture;
-    private readonly string? _flagBefore;
 
     public SupervisorProjectionFlowTests(PostgresFixture fixture)
     {
         _fixture = fixture;
-        _flagBefore = Environment.GetEnvironmentVariable(SupervisorLane.EnabledEnvVar);
-        Environment.SetEnvironmentVariable(SupervisorLane.EnabledEnvVar, "1");
 
         using var scope = _fixture.BeginScope();
         scope.Resolve<SupervisorDecisionScript>().PlanThenStop();   // the SIMPLEST arc: turn0 plan → turn1 stop, no spawn, no CLI
@@ -52,7 +44,6 @@ public class SupervisorProjectionFlowTests : IDisposable
 
     public void Dispose()
     {
-        Environment.SetEnvironmentVariable(SupervisorLane.EnabledEnvVar, _flagBefore);
         using var scope = _fixture.BeginScope();
         scope.Resolve<SupervisorDecisionScript>().PlanThenStop();   // restore the default for sibling tests
     }
@@ -69,7 +60,7 @@ public class SupervisorProjectionFlowTests : IDisposable
         var workflowCountBefore = await CountWorkflowsAsync(teamId);
         var versionCountBefore = await CountWorkflowVersionsAsync();
 
-        // ── L2: the REAL router turns an explicit deep request into a RoutePlan. Lane ON → supervisor, no degrade. ──
+        // ── L2: the REAL router turns an explicit deep request into a RoutePlan → supervisor, no degrade. ──
         var request = new EffortRouteRequest
         {
             Seed = new TaskLaunchSeed { Goal = "ship the whole feature", SurfaceKind = "test", TeamId = teamId },
@@ -78,7 +69,7 @@ public class SupervisorProjectionFlowTests : IDisposable
 
         var plan = await RouteAsync(request);
 
-        plan.RecipeKind.ShouldBe(TaskRecipeKinds.Supervisor, "deep routes the supervisor recipe with the lane on");
+        plan.RecipeKind.ShouldBe(TaskRecipeKinds.Supervisor, "deep routes the supervisor recipe");
         plan.ProjectionKind.ShouldBe(TaskProjectionKinds.Supervisor);
         plan.DegradedReason.ShouldBeNull("no degrade — the lane is available");
 
@@ -105,7 +96,7 @@ public class SupervisorProjectionFlowTests : IDisposable
 
         var run = await db.WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == handle.RunId);
         run.Status.ShouldBe(WorkflowRunStatus.Success,
-            customMessage: "the routed deep task must walk start → agent.supervisor → terminal to Success through the real router → projection → engine → supervisor turn loop; if Suspended the turn loop did not finish, if Failure the lane was off");
+            customMessage: "the routed deep task must walk start → agent.supervisor → terminal to Success through the real router → projection → engine → supervisor turn loop; if Suspended the turn loop did not finish");
 
         (await LedgerKinds(handle.RunId, teamId)).ShouldBe(
             new[] { SupervisorDecisionKinds.Plan, SupervisorDecisionKinds.Stop },
@@ -116,37 +107,6 @@ public class SupervisorProjectionFlowTests : IDisposable
         run.WorkflowVersion.ShouldBeNull("a routed supervisor task run has no pinned version");
         (await CountWorkflowsAsync(teamId)).ShouldBe(workflowCountBefore, "no workflow row is created for the routed supervisor snapshot run");
         (await CountWorkflowVersionsAsync()).ShouldBe(versionCountBefore, "no workflow_version row is created for the routed supervisor snapshot run");
-    }
-
-    [Fact]
-    public async Task With_the_lane_OFF_deep_degrades_to_map_fanout_and_starts_no_supervisor_run()
-    {
-        // Flip the lane OFF for THIS test: the REAL router's degrade step must fall back to map-fanout + set a
-        // non-null DegradedReason — the honest fallback, with NO supervisor run started.
-        var flagBeforeThisTest = Environment.GetEnvironmentVariable(SupervisorLane.EnabledEnvVar);
-        Environment.SetEnvironmentVariable(SupervisorLane.EnabledEnvVar, "0");
-
-        try
-        {
-            var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
-
-            var request = new EffortRouteRequest
-            {
-                Seed = new TaskLaunchSeed { Goal = "ship the whole feature", SurfaceKind = "test", TeamId = teamId },
-                RequestedEffort = TaskEffortModes.Deep,
-            };
-
-            var plan = await RouteAsync(request);
-
-            plan.RecipeKind.ShouldBe(TaskRecipeKinds.MapFanout, "lane OFF → deep degrades to the map-fanout shape");
-            plan.ProjectionKind.ShouldBe(TaskProjectionKinds.PlanMapSynth, "the projection recomputed from the map-fanout default");
-            plan.DegradedReason.ShouldNotBeNullOrEmpty("the degrade is NEVER silent — DegradedReason names the unavailable capability");
-            plan.DegradedReason!.ShouldContain(TaskCapabilities.SupervisorLane);
-        }
-        finally
-        {
-            Environment.SetEnvironmentVariable(SupervisorLane.EnabledEnvVar, flagBeforeThisTest);
-        }
     }
 
     // ─── Helpers ────────────────────────────────────────────────────────────────

@@ -310,13 +310,10 @@ public sealed class StuckRunReconcilerService : IStuckRunReconcilerService, ISco
     /// the Suspended commit and the enqueue, or a dropped Hangfire job), only this sweep re-fires the
     /// self-advance — calling <see cref="IWorkflowResumeService.ResumeWaitAsync"/> exactly as the engine
     /// does, which resolves the wait + flips Suspended → Pending + re-dispatches. The resume's own
-    /// wait-status CAS makes a re-fire racing a still-live original a no-op (idempotent). Runs ONLY when the
-    /// supervisor lane is enabled, so a flag-OFF deployment is byte-identical (no extra query, no behaviour).
+    /// wait-status CAS makes a re-fire racing a still-live original a no-op (idempotent).
     /// </summary>
     private async Task<int> RecoverSupervisorAdvancesAsync(CancellationToken cancellationToken)
     {
-        if (!SupervisorLane.IsEnabled()) return 0;
-
         var threshold = DateTimeOffset.UtcNow - SupervisorAdvanceLostAfter;
 
         var stale = await _db.WorkflowRunWait.AsNoTracking()
@@ -364,12 +361,10 @@ public sealed class StuckRunReconcilerService : IStuckRunReconcilerService, ISco
     /// query EXCLUDES any run that already has <see cref="MaxSupervisorRunRecoveries"/> durable
     /// <c>supervisor.run_recovered</c> records — that run is left Running for <see cref="MarkAbandonedRunningAsync"/>
     /// to fail cleanly. So a transient crash recovers; a deterministic crash recovers K times then TERMINATES.</para>
-    /// <para>Runs ONLY when the supervisor lane is enabled, so a flag-OFF deployment is byte-identical (no extra query).</para>
+    /// <para>The reaper always runs; a run with no non-terminal <c>SupervisorDecisionRecord</c> simply matches nothing here (the candidate query returns 0 for it) and falls through to <see cref="MarkAbandonedRunningAsync"/> unchanged.</para>
     /// </summary>
     private async Task<int> RecoverAbandonedSupervisorRunsAsync(CancellationToken cancellationToken)
     {
-        if (!SupervisorLane.IsEnabled()) return 0;
-
         var candidates = await FindRecoverableSupervisorRunsAsync(cancellationToken).ConfigureAwait(false);
 
         var recovered = 0;

@@ -24,16 +24,16 @@ namespace CodeSpace.Core.Services.Tasks.Projection.Builders.Supervisor;
 ///       every spawned agent inherits.</item>
 ///     <item><c>maxParallelism</c> / <c>maxRounds</c> / <c>maxTotalSpawns</c> = the route's
 ///       <see cref="RouteCaps"/> (the RouteCaps→SupervisorGoalConfig fold) — the operator's safety bounds. The
-///       node clamps each to the <c>SupervisorLane</c> ceiling at EXECUTION (this build never clamps).</item>
+///       node clamps each to its bounds ceiling at EXECUTION (this build never clamps).</item>
 ///     <item><c>approvalPolicy</c> = <c>"spawns"</c> when <c>Caps.RequiresApproval</c>, else <c>"none"</c>.</item>
 ///   </list>
 /// </para>
 ///
-/// <para><b>Build stays PURE.</b> No lane check (the node fails closed if the lane is off; the router degrades
-/// <c>deep</c> away from this projection when the supervisor-lane capability is unavailable — see
-/// <c>SupervisorRecipe</c>), no clamp (the turn service clamps at execution), no DB / no LLM. The graph is a
-/// fixed three-node skeleton, so the output ALWAYS passes <c>DefinitionValidator</c>. Self-registers via
-/// <see cref="ISingletonDependency"/>; a new projection is a sibling builder folder, never an edit here.</para>
+/// <para><b>Build stays PURE.</b> The supervisor recipe always projects the durable lane (no capability gate —
+/// the <c>deep</c> route always reaches this projection; see <c>SupervisorRecipe</c>), no clamp (the turn
+/// service clamps at execution), no DB / no LLM. The graph is a fixed three-node skeleton, so the output ALWAYS
+/// passes <c>DefinitionValidator</c>. Self-registers via <see cref="ISingletonDependency"/>; a new projection is
+/// a sibling builder folder, never an edit here.</para>
 ///
 /// <para><b>Deferred (not built this PR):</b> the <c>conversationId</c> + mid-loop ask_human / approval HITL
 /// surface — the deep bounds preset sets <c>Caps.RequiresApproval</c> false, so deep runs autonomously

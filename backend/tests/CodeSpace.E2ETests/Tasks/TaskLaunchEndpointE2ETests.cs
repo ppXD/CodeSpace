@@ -194,52 +194,41 @@ public sealed class TaskLaunchEndpointE2ETests : IClassFixture<TaskLaunchApiFact
         var (userId, teamId) = await SeedTeamMembershipAsync();
         var repo = await SeedRepositoryAsync(teamId, "api");
 
-        // Enable the supervisor lane for this POST so `deep` projects the supervisor (not the degraded map-fanout
-        // fallback) — restored immediately after. Safe in this serial fake-CLI Http collection (no parallel reader).
-        var laneBefore = Environment.GetEnvironmentVariable(SupervisorLane.EnabledEnvVar);
-        Environment.SetEnvironmentVariable(SupervisorLane.EnabledEnvVar, "1");
-        try
+        // POST a DEEP launch carrying the operator's `caps` object — the Coordination Limits + Budget. It must
+        // bind through ASP.NET model binding → LaunchTaskCommand.Caps → BuildCapsOverride → the router's CapsOverride
+        // → Route.Caps → the projected agent.supervisor node config. A set numeric cap REPLACES the preset's, so the
+        // POSTed values must appear verbatim on the frozen "sup" node (frozen-def assertion only — no agent runs).
+        var request = new HttpRequestMessage(HttpMethod.Post, "/api/workflows/runs")
         {
-            // POST a DEEP launch carrying the operator's `caps` object — the Coordination Limits + Budget. It must
-            // bind through ASP.NET model binding → LaunchTaskCommand.Caps → BuildCapsOverride → the router's CapsOverride
-            // → Route.Caps → the projected agent.supervisor node config. A set numeric cap REPLACES the preset's, so the
-            // POSTed values must appear verbatim on the frozen "sup" node (frozen-def assertion only — no agent runs).
-            var request = new HttpRequestMessage(HttpMethod.Post, "/api/workflows/runs")
+            Content = JsonContent.Create(new
             {
-                Content = JsonContent.Create(new
-                {
-                    taskText = "Coordinate a multi-step change",
-                    repositoryId = repo,
-                    effort = "deep",
-                    surfaceKind = "chat",
-                    caps = new { maxParallelism = 3, maxRounds = 4, maxTotalSpawns = 5, maxCostUsd = 12 },
-                }),
-            };
-            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", MintToken(userId));
-            request.Headers.Add("X-Team-Id", teamId.ToString());
+                taskText = "Coordinate a multi-step change",
+                repositoryId = repo,
+                effort = "deep",
+                surfaceKind = "chat",
+                caps = new { maxParallelism = 3, maxRounds = 4, maxTotalSpawns = 5, maxCostUsd = 12 },
+            }),
+        };
+        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", MintToken(userId));
+        request.Headers.Add("X-Team-Id", teamId.ToString());
 
-            var response = await _factory.CreateClient().SendAsync(request);
+        var response = await _factory.CreateClient().SendAsync(request);
 
-            response.StatusCode.ShouldBe(HttpStatusCode.OK, customMessage: await DescribeFailureAsync(response));
+        response.StatusCode.ShouldBe(HttpStatusCode.OK, customMessage: await DescribeFailureAsync(response));
 
-            var body = await response.Content.ReadFromJsonAsync<LaunchResponse>();
-            body.ShouldNotBeNull();
-            body!.ProjectionKind.ShouldBe("supervisor", "with the lane enabled, a deep launch projects the supervisor");
+        var body = await response.Content.ReadFromJsonAsync<LaunchResponse>();
+        body.ShouldNotBeNull();
+        body!.ProjectionKind.ShouldBe("supervisor", "a deep launch projects the supervisor");
 
-            using var scope = _factory.Services.CreateScope();
-            var db = scope.ServiceProvider.GetRequiredService<CodeSpaceDbContext>();
-            var run = await db.WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == body.RunId);
+        using var scope = _factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<CodeSpaceDbContext>();
+        var run = await db.WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == body.RunId);
 
-            var sup = ReadSupervisorConfig(run.DefinitionSnapshotJson!);
-            sup.GetProperty("maxParallelism").GetInt32().ShouldBe(3, "the launch caps must bind through real HTTP into the supervisor bounds");
-            sup.GetProperty("maxRounds").GetInt32().ShouldBe(4);
-            sup.GetProperty("maxTotalSpawns").GetInt32().ShouldBe(5);
-            sup.GetProperty("maxCostUsd").GetDecimal().ShouldBe(12m, "the operator's budget must reach the supervisor's force-stop bound");
-        }
-        finally
-        {
-            Environment.SetEnvironmentVariable(SupervisorLane.EnabledEnvVar, laneBefore);
-        }
+        var sup = ReadSupervisorConfig(run.DefinitionSnapshotJson!);
+        sup.GetProperty("maxParallelism").GetInt32().ShouldBe(3, "the launch caps must bind through real HTTP into the supervisor bounds");
+        sup.GetProperty("maxRounds").GetInt32().ShouldBe(4);
+        sup.GetProperty("maxTotalSpawns").GetInt32().ShouldBe(5);
+        sup.GetProperty("maxCostUsd").GetDecimal().ShouldBe(12m, "the operator's budget must reach the supervisor's force-stop bound");
     }
 
     [Fact]

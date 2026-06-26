@@ -16,66 +16,20 @@ using Shouldly;
 namespace CodeSpace.UnitTests.Workflows;
 
 /// <summary>
-/// Pins the PR6 lane-availability DEGRADE on the FLAT router pipeline. With the production recipe set
-/// (single-agent / map-fanout / supervisor) and a FAKE capability-probe registry reporting the supervisor-lane
-/// capability available or unavailable, an explicit <c>deep</c> request either reaches the supervisor recipe
-/// (lane on → null DegradedReason) or degrades to map-fanout (lane off → a NON-NULL DegradedReason — never
-/// silent). The GENERICITY contract test proves the degrade is DATA-DRIVEN, not supervisor-hardcoded: a fake
-/// recipe declaring a fake capability + a fake fallback degrades through the UNCHANGED router with zero
-/// production-core knowledge of either string.
+/// Pins the GENERIC capability-availability DEGRADE on the FLAT router pipeline — DATA-DRIVEN, not hardcoded to any one
+/// recipe: a FAKE recipe declaring a FAKE capability (reported unavailable) + a FAKE fallback degrades through the
+/// UNCHANGED router with zero production-core knowledge of either string, and the DegradedReason is never silent. (The
+/// supervisor lane — the only former real capability — graduated its feature gate and is always on, so its recipe no
+/// longer degrades; the generic mechanism remains for a future capability that needs it.)
 /// </summary>
 [Trait("Category", "Unit")]
 public class EffortRouterDegradeTests
 {
-    private static EffortRouter Router(bool laneAvailable, params ITaskRecipe[] extraRecipes)
-    {
-        var recipes = new ITaskRecipe[] { new SingleAgentRecipe(), new MapFanoutRecipe(), new SupervisorRecipe() }.Concat(extraRecipes).ToArray();
-
-        return new EffortRouter(
-            new EffortClassifierRegistry(new IEffortClassifier[] { new HeuristicEffortClassifier() }),
-            new TaskRecipeRegistry(recipes),
-            new BoundsPresetRegistry(new IBoundsPreset[] { new QuickBoundsPreset(), new StandardBoundsPreset(), new DeepBoundsPreset() }),
-            new CapabilityProbeRegistry(new ICapabilityProbe[] { new FakeProbe(TaskCapabilities.SupervisorLane, laneAvailable) }));
-    }
-
     private static EffortRouteRequest Request(string requestedEffort) => new()
     {
         Seed = new TaskLaunchSeed { Goal = "ship the whole feature", SurfaceKind = "test", TeamId = Guid.NewGuid() },
         RequestedEffort = requestedEffort,
     };
-
-    [Fact]
-    public async Task Deep_with_the_lane_available_routes_the_supervisor_recipe_with_no_degrade()
-    {
-        var plan = await Router(laneAvailable: true).RouteAsync(Request(TaskEffortModes.Deep), CancellationToken.None);
-
-        plan.RecipeKind.ShouldBe(TaskRecipeKinds.Supervisor);
-        plan.ProjectionKind.ShouldBe(TaskProjectionKinds.Supervisor);
-        plan.DegradedReason.ShouldBeNull("the lane is available, so the supervisor recipe routes unchanged");
-    }
-
-    [Fact]
-    public async Task Deep_with_the_lane_unavailable_degrades_to_map_fanout_with_a_non_null_reason()
-    {
-        var plan = await Router(laneAvailable: false).RouteAsync(Request(TaskEffortModes.Deep), CancellationToken.None);
-
-        plan.RecipeKind.ShouldBe(TaskRecipeKinds.MapFanout, "deep degrades to the map-fanout shape when the supervisor lane is off");
-        plan.ProjectionKind.ShouldBe(TaskProjectionKinds.PlanMapSynth, "the projection recomputes from the fallback recipe's default");
-        plan.DegradedReason.ShouldNotBeNullOrEmpty("a degrade is NEVER silent — DegradedReason is always set when it fires");
-        plan.DegradedReason!.ShouldContain(TaskRecipeKinds.Supervisor);
-        plan.DegradedReason.ShouldContain(TaskCapabilities.SupervisorLane);
-        plan.DegradedReason.ShouldContain(TaskRecipeKinds.MapFanout);
-    }
-
-    [Fact]
-    public async Task A_non_degrading_tier_keeps_a_null_reason()
-    {
-        // standard → map-fanout has no required capability, so it never degrades regardless of the lane state.
-        var plan = await Router(laneAvailable: false).RouteAsync(Request(TaskEffortModes.Standard), CancellationToken.None);
-
-        plan.RecipeKind.ShouldBe(TaskRecipeKinds.MapFanout);
-        plan.DegradedReason.ShouldBeNull("a recipe with no required capability never degrades");
-    }
 
     [Fact]
     public async Task The_degrade_is_data_driven_a_fake_recipe_and_fake_capability_degrade_with_zero_router_edit()

@@ -56,21 +56,16 @@ namespace CodeSpace.E2ETests.Workflows;
 public sealed class SupervisorRealAgentE2ETests : IDisposable
 {
     private readonly PostgresFixture _fixture;
-    private readonly string? _flagBefore;
 
     public SupervisorRealAgentE2ETests(PostgresFixture fixture)
     {
         _fixture = fixture;
-        _flagBefore = Environment.GetEnvironmentVariable(SupervisorLane.EnabledEnvVar);
-        Environment.SetEnvironmentVariable(SupervisorLane.EnabledEnvVar, "1");
     }
 
     public void Dispose()
     {
-        // Restore the lane flag + reset the fixture-singleton decision script to the default for sibling tests,
+        // Reset the fixture-singleton decision script to the default for sibling tests,
         // even on the failure path (mirrors SupervisorSpawnFlowTests so no global state leaks).
-        Environment.SetEnvironmentVariable(SupervisorLane.EnabledEnvVar, _flagBefore);
-
         using var scope = _fixture.BeginScope();
         scope.Resolve<SupervisorDecisionScript>().PlanThenStop();
         scope.Resolve<InMemoryBackgroundJobClient>().AutoExecute = true;   // restore the shared fixture default (mirrors SupervisorScorecardFlowTests)
