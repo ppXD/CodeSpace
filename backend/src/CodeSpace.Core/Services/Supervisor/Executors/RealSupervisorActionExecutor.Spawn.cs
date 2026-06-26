@@ -26,8 +26,10 @@ public sealed partial class RealSupervisorActionExecutor
         var spawn = Deserialize<SupervisorSpawnPayload>(decision.PayloadJson) ?? new SupervisorSpawnPayload();
         var subtasks = ResolvePlannedSubtasks(context);
 
-        // Fan out over the subtask ids; for each, apply the model-authored per-agent dispatch override (L4 arc B) when
-        // the spawn carries one keyed by that subtask id, else build a homogeneous profile clone (byte-identical to before).
+        // Fan out over the subtask ids (already clamped to the dependency-ready frontier when the decision was formed —
+        // see SupervisorTurnService.ClampSpawnToDependencyFrontier — so the persisted payload's subtaskIds match the
+        // staged agents one-for-one). For each, apply the model-authored per-agent dispatch override (L4 arc B) when the
+        // spawn carries one keyed by that subtask id, else build a homogeneous profile clone (byte-identical to before).
         // The dispatch spec rides ALONGSIDE the task so the async stage can resolve its per-agent persona slug (P3) on a
         // FRESH stage only — a crash-recovery orphan reclaim reuses the already-resolved task and never re-resolves.
         var tasks = spawn.SubtaskIds

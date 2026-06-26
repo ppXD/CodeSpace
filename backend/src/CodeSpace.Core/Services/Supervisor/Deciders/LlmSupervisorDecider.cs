@@ -164,12 +164,34 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
             builder.AppendLine("Prior decisions (in order, with their recorded outcomes):");
             for (var i = 0; i < context.PriorDecisions.Count; i++)
                 AppendPriorDecision(builder, context.PriorDecisions[i], isLatestSpawn: i == latestSpawnIndex);
+
+            AppendDependencyFrontier(builder, context);
         }
 
         builder.AppendLine();
         builder.AppendLine("Choose the single next action. After planning, spawn agents over the planned subtask ids; once their results are recorded, INSPECT each agent's status and error in the most recent spawn OR retry outcome above, RETRY any subtask that failed or did not satisfy the goal (optionally with a revised instruction), then merge the successful results, then stop. Return ONLY the schema-constrained JSON.");
 
         return builder.ToString();
+    }
+
+    /// <summary>
+    /// Render the plan's dependency FRONTIER (loopability — the server enforces <c>DependsOn</c> ordering at spawn): the
+    /// subtasks READY to spawn now (every dependency accepted) and those still BLOCKED on a dependency, so the model
+    /// spawns in DAG order rather than racing. Nothing for a flat plan (no <c>DependsOn</c>) — byte-identical to before.
+    /// </summary>
+    private static void AppendDependencyFrontier(StringBuilder builder, SupervisorTurnContext context)
+    {
+        var (ready, blocked) = SupervisorDependencyGate.Frontier(context);
+
+        if (ready.Count == 0 && blocked.Count == 0) return;
+
+        builder.AppendLine();
+        builder.AppendLine("Dependency frontier (the server spawns subtasks in DependsOn order — a blocked subtask is DEFERRED until its dependencies are accepted, so spawn only ready ones):");
+
+        if (ready.Count > 0) builder.AppendLine($"    ready to spawn now: {string.Join(", ", ready)}");
+
+        foreach (var b in blocked)
+            builder.AppendLine($"    blocked: {b.Id} (waiting on {string.Join(", ", b.WaitingOn)})");
     }
 
     /// <summary>Internal test accessor (InternalsVisibleTo) — pins the system-prompt guidance as a tested contract (the inspect-and-retry framing; no unconditional merge-then-stop rail).</summary>
