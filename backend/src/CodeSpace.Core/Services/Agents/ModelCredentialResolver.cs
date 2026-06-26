@@ -72,8 +72,8 @@ public sealed class ModelCredentialResolver : IModelCredentialResolver, IScopedD
     }
 
     /// <summary>
-    /// No-pin "auto" resolve. Picks a (model, credential) pair from the FULL team pool — the first enabled model (by id,
-    /// then row id for a deterministic tie-break) across ALL the team's Active credentials whose provider the harness can
+    /// No-pin "auto" resolve. Picks a (model, credential) pair from the FULL team pool — the operator-marked default model
+    /// if one is set, else the first enabled model (by id, then row id for a deterministic tie-break) across ALL the team's Active credentials whose provider the harness can
     /// drive — so an "auto" run sees EVERY applicable model (null pool ⇒ all apply, the same contract <c>IModelPoolSelector</c>
     /// honours), never just one credential's rows. The model id and the decrypted key come from the SAME row, so they are
     /// always consistent. When the team has eligible credentials but NO registered models (an official vendor that hosts
@@ -96,9 +96,11 @@ public sealed class ModelCredentialResolver : IModelCredentialResolver, IScopedD
 
         var eligibleIds = eligible.Select(c => c.Id).ToHashSet();
 
+        // Operator-marked default first, else model id, then row id (a stable total order). If TWO eligible credentials
+        // each mark a default, the (model-id, row-id) tie-break decides — deterministic, not credential-recency-weighted.
         var pick = await _db.ModelCredentialModel.AsNoTracking()
             .Where(m => m.Enabled && eligibleIds.Contains(m.ModelCredentialId))
-            .OrderBy(m => m.ModelId).ThenBy(m => m.Id)
+            .OrderByDescending(m => m.IsDefault).ThenBy(m => m.ModelId).ThenBy(m => m.Id)
             .Select(m => new { m.ModelId, m.ModelCredentialId })
             .FirstOrDefaultAsync(cancellationToken).ConfigureAwait(false);
 
@@ -117,7 +119,7 @@ public sealed class ModelCredentialResolver : IModelCredentialResolver, IScopedD
     private async Task<string?> PickDefaultModelAsync(Guid credentialId, CancellationToken cancellationToken) =>
         await _db.ModelCredentialModel.AsNoTracking()
             .Where(m => m.ModelCredentialId == credentialId && m.Enabled)
-            .OrderBy(m => m.ModelId)
+            .OrderByDescending(m => m.IsDefault).ThenBy(m => m.ModelId)
             .Select(m => m.ModelId)
             .FirstOrDefaultAsync(cancellationToken).ConfigureAwait(false);
 

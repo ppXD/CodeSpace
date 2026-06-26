@@ -469,6 +469,9 @@ html, body, * { scrollbar-width: thin; scrollbar-color: rgba(0, 0, 0, .16) trans
 .mc-modelrow .mc-modelrow-id { flex: 1.35 1 0; }
 .mc-modelrow-del { appearance: none; background: transparent; border: 0; width: 32px; height: 32px; flex-shrink: 0; border-radius: 7px; color: var(--muted-2); cursor: pointer; display: grid; place-items: center; transition: background .12s, color .12s; }
 .mc-modelrow-del:hover { background: rgba(217,119,87,.12); color: var(--accent); }
+.mc-modelrow-star { appearance: none; background: transparent; border: 0; width: 32px; height: 32px; flex-shrink: 0; border-radius: 7px; color: var(--muted-2); cursor: pointer; display: grid; place-items: center; transition: background .12s, color .12s; }
+.mc-modelrow-star:hover { background: rgba(217,119,87,.12); color: var(--accent); }
+.mc-modelrow-star.is-default { color: var(--accent); }
 .mc-addmodel { appearance: none; background: transparent; border: 0; color: var(--ink-2); font: inherit; font-size: 12.5px; font-weight: 500; cursor: pointer; display: inline-flex; align-items: center; gap: 6px; padding: 5px 4px; align-self: flex-start; border-radius: 6px; transition: color .12s; }
 .mc-addmodel:hover, .mc-addmodel:hover > svg { color: var(--accent); }
 .mc-addmodel > svg { color: var(--muted); }

@@ -32,5 +32,8 @@ public class ModelCredentialModel : IEntity<Guid>
     /// <summary>Operator soft-hide without deleting — a disabled row is not part of the usable pool. Defaults true (a freshly added model is usable).</summary>
     public bool Enabled { get; set; } = true;
 
+    /// <summary>The operator's preferred model for an "auto" run (no pinned model) — the resolver orders default-marked rows first in the pool pick. At most one per credential (the service clears the others when one is set). Defaults false.</summary>
+    public bool IsDefault { get; set; }
+
     public ModelCredential Credential { get; set; } = default!;
 }

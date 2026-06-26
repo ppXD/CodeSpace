@@ -152,6 +152,36 @@ public sealed class ModelCredentialService : IModelCredentialService, IScopedDep
         return row.Id;
     }
 
+    /// <summary>
+    /// Mark ONE model as the credential's default for an "auto" run (no pinned model) — the resolver orders default-marked
+    /// rows first in the pool pick, so an operator can make "auto" use a model they know works. At most one default per
+    /// credential: setting one CLEARS any other default on the same credential, in a single transaction. The row must be
+    /// ENABLED (a hidden model can't be the default) and on a team-scoped Active credential. Passing the same row twice is
+    /// idempotent. There is no separate "clear" verb — re-marking moves the star; deleting/disabling the row drops it.
+    /// </summary>
+    public async Task<Guid> SetDefaultModelAsync(Guid credentialId, Guid modelRowId, CancellationToken cancellationToken)
+    {
+        await LoadActiveAsync(credentialId, cancellationToken).ConfigureAwait(false);   // team-scope guard
+
+        // Serialize concurrent set-default writers on the SAME credential (a double-click / two operators): without it,
+        // two transactions can each read the pre-commit snapshot and leave TWO defaults (a lost update — the rows carry
+        // no concurrency token). A txn-scoped advisory lock, the same primitive RefreshModelsAsync uses; per-credential.
+        await _db.Database.ExecuteSqlInterpolatedAsync($"SELECT pg_advisory_xact_lock({AdvisoryLockKey(credentialId)})", cancellationToken).ConfigureAwait(false);
+
+        var rows = await _db.ModelCredentialModel.Where(m => m.ModelCredentialId == credentialId).ToListAsync(cancellationToken).ConfigureAwait(false);
+
+        var target = rows.FirstOrDefault(m => m.Id == modelRowId)
+            ?? throw new KeyNotFoundException($"Model {modelRowId} not found on credential {credentialId}.");
+
+        if (!target.Enabled) throw new InvalidOperationException($"Model '{target.ModelId}' is disabled and cannot be the default.");
+
+        foreach (var m in rows) m.IsDefault = m.Id == modelRowId;   // exactly one default per credential
+
+        await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+
+        return target.Id;
+    }
+
     public async Task<int> RefreshModelsAsync(Guid credentialId, CancellationToken cancellationToken)
     {
         var credential = await LoadActiveAsync(credentialId, cancellationToken).ConfigureAwait(false);   // team-scope guard
@@ -230,6 +260,7 @@ public sealed class ModelCredentialService : IModelCredentialService, IScopedDep
         ModelId = m.ModelId,
         DisplayName = m.DisplayName,
         Enabled = m.Enabled,
+        IsDefault = m.IsDefault,
     };
 
     private ModelCredentialSummary ToSummary(ModelCredential c)

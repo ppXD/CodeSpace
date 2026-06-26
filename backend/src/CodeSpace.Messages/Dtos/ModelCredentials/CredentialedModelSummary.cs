@@ -18,4 +18,7 @@ public sealed record CredentialedModelSummary
 
     /// <summary>Whether the model is part of the usable pool (a disabled row is hidden from selection but kept).</summary>
     public required bool Enabled { get; init; }
+
+    /// <summary>The operator-marked default for an "auto" run — at most one per credential. The UI shows it as the starred model.</summary>
+    public bool IsDefault { get; init; }
 }
