@@ -36,6 +36,24 @@ public sealed record SupervisorPlannedSubtask
     public required string Title { get; init; }
 
     public required string Instruction { get; init; }
+
+    /// <summary>
+    /// Optional plan-local subtask ids this subtask DEPENDS ON — the build-graph edges (loopability slice 1). The model
+    /// authors them so the server can later validate the fan-out as a DAG (slice 2) and order it. Null-omitted
+    /// (<c>[JsonIgnore(WhenWritingNull)]</c>) so a subtask with no dependencies serializes byte-identical to before — the
+    /// idempotency-key bytes are unchanged. PURE DATA here: recorded + projected; the validator + ordering consumer are follow-ups.
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public IReadOnlyList<string>? DependsOn { get; init; }
+
+    /// <summary>
+    /// Optional model-authored OBJECTIVE per-subtask acceptance — this unit's "definition of done", reusing the same
+    /// noun as a stop / phase (<see cref="SupervisorAcceptanceSpec"/>). Null-omitted (<c>[JsonIgnore(WhenWritingNull)]</c>)
+    /// so a subtask without a contract serializes byte-identical to before. PURE DATA here: recorded + projected; the
+    /// per-unit acceptance GATE (grade each settled unit against this at the spawn fold) is a follow-up (slice 3).
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public SupervisorAcceptanceSpec? Acceptance { get; init; }
 }
 
 /// <summary>The <c>spawn</c> payload: prior-plan subtask ids to fan out as parallel agent runs (K = the list length), plus an optional per-agent dispatch override per subtask (L4 arc B).</summary>

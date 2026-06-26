@@ -46,7 +46,18 @@ public static class SupervisorDecisionSchema
                     "properties": {
                       "id": { "type": "string", "description": "Stable, plan-local id for the subtask (referenced later by spawn/retry)." },
                       "title": { "type": "string", "description": "Short human title." },
-                      "instruction": { "type": "string", "description": "The concrete instruction a spawned agent executes." }
+                      "instruction": { "type": "string", "description": "The concrete instruction a spawned agent executes." },
+                      "dependsOn": { "type": "array", "items": { "type": "string" }, "description": "Optional plan-local subtask ids this subtask depends on — the build-graph edges the server validates as a DAG (absent → an independent unit)." },
+                      "acceptance": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "properties": {
+                          "command": { "type": "array", "minItems": 1, "items": { "type": "string" }, "description": "An argv the server runs to OBJECTIVELY verify this subtask is done." },
+                          "description": { "type": "string", "description": "Optional human-readable description of the subtask's acceptance check." }
+                        },
+                        "required": ["command"],
+                        "description": "Optional per-subtask acceptance — the unit's definition of done (recorded + projected; the per-unit gate is a follow-up)."
+                      }
                     },
                     "required": ["id", "title", "instruction"]
                   }
