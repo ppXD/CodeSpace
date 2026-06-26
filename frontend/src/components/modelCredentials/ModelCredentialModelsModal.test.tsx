@@ -19,7 +19,7 @@ vi.mock("@/hooks/use-model-credentials", () => ({
 
 const cred: ModelCredentialSummary = {
   id: "mc1", teamId: "t1", provider: "Anthropic", displayName: "Team Anthropic",
-  keyHint: "····a1b2", baseUrl: null, status: "Active", createdDate: "2026-06-11T00:00:00Z",
+  keyHint: "····a1b2", keyUnreadable: false, baseUrl: null, status: "Active", createdDate: "2026-06-11T00:00:00Z",
 };
 
 function renderModal() {

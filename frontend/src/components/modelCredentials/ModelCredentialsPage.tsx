@@ -95,7 +95,11 @@ export function ModelCredentialsPage() {
               <div className="mc-card-rows">
                 <div className="mc-card-row">
                   <Ic.Key size={12} />
-                  {c.keyHint ? <code>{c.keyHint}</code> : <span>no key</span>}
+                  {c.keyHint
+                    ? <code>{c.keyHint}</code>
+                    : c.keyUnreadable
+                      ? <span className="mc-key-dead" title="The stored key can no longer be decrypted — edit this credential to re-enter it.">key unreadable — re-enter</span>
+                      : <span>no key</span>}
                 </div>
                 <div className="mc-card-row">
                   <Ic.Link size={12} />

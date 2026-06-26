@@ -5,8 +5,8 @@ import type { CredentialStatus } from "./types";
 
 /**
  * Mirrors backend `ModelCredentialSummary` — a team's model credential as shown in settings. NEVER carries
- * the secret: `keyHint` is the masked tail (e.g. `····a1b2`), null for a keyless provider. `baseUrl` is
- * non-secret config and is shown verbatim.
+ * the secret: `keyHint` is the masked tail (e.g. `····a1b2`), null for a keyless provider OR a dead key.
+ * `keyUnreadable` disambiguates the two. `baseUrl` is non-secret config and is shown verbatim.
  */
 export interface ModelCredentialSummary {
   id: string;
@@ -14,6 +14,8 @@ export interface ModelCredentialSummary {
   provider: string;
   displayName: string;
   keyHint: string | null;
+  /** A stored key that can no longer be decrypted (key-ring rotated/lost/migrated) — needs re-entry. */
+  keyUnreadable: boolean;
   baseUrl: string | null;
   status: CredentialStatus;
   createdDate: string;

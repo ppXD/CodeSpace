@@ -1,3 +1,4 @@
+using System.Security.Cryptography;
 using CodeSpace.Core.DependencyInjection;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
@@ -231,21 +232,46 @@ public sealed class ModelCredentialService : IModelCredentialService, IScopedDep
         Enabled = m.Enabled,
     };
 
-    private ModelCredentialSummary ToSummary(ModelCredential c) => new()
+    private ModelCredentialSummary ToSummary(ModelCredential c)
     {
-        Id = c.Id,
-        TeamId = c.TeamId,
-        Provider = c.Provider,
-        DisplayName = c.DisplayName,
-        KeyHint = MaskKey(string.IsNullOrEmpty(c.EncryptedApiKey) ? null : _encryptor.Decrypt(c.EncryptedApiKey)),
-        BaseUrl = c.BaseUrl,
-        Status = c.Status,
-        CreatedDate = c.CreatedDate,
-    };
+        var keyHint = SafeKeyHint(_encryptor, c.EncryptedApiKey);
+
+        return new ModelCredentialSummary
+        {
+            Id = c.Id,
+            TeamId = c.TeamId,
+            Provider = c.Provider,
+            DisplayName = c.DisplayName,
+            KeyHint = keyHint,
+            // A stored key that masked to null can only be one that FAILED to decrypt — a real key never masks to
+            // null (a non-blank secret is never stored). Surface it so the UI prompts re-entry instead of showing a
+            // dead key as the benign "no key".
+            KeyUnreadable = !string.IsNullOrEmpty(c.EncryptedApiKey) && keyHint is null,
+            BaseUrl = c.BaseUrl,
+            Status = c.Status,
+            CreatedDate = c.CreatedDate,
+        };
+    }
 
     private string? EncryptOrNull(string? apiKey) => string.IsNullOrWhiteSpace(apiKey) ? null : _encryptor.Encrypt(apiKey);
 
     private static string? NullIfBlank(string? value) => string.IsNullOrWhiteSpace(value) ? null : value;
+
+    /// <summary>
+    /// The masked tail for the list view — best-effort. A secret encrypted under a since-rotated or lost Data
+    /// Protection key (after a key-ring migration, say) can no longer be decrypted; the list must still render, so an
+    /// unreadable key yields a null hint rather than throwing — the operator needs the list precisely to re-enter the
+    /// dead keys. Like <c>CredentialService.TryReadOAuthPayload</c>'s decrypt-or-null handling, but narrowed to the two
+    /// "the stored value is unreadable" exceptions so a genuine bug still surfaces. Point-of-use paths
+    /// (<c>ModelCredentialResolver</c> / <c>ModelPoolSelector</c>) still throw when the credential is actually used.
+    /// </summary>
+    internal static string? SafeKeyHint(IPayloadEncryptor encryptor, string? encryptedApiKey)
+    {
+        if (string.IsNullOrEmpty(encryptedApiKey)) return null;
+
+        try { return MaskKey(encryptor.Decrypt(encryptedApiKey)); }
+        catch (Exception ex) when (ex is CryptographicException or FormatException) { return null; }
+    }
 
     /// <summary>Mask a plaintext key to its last 4 chars (e.g. <c>····a1b2</c>); null for a keyless credential. The only place a key tail is ever surfaced — never the full key.</summary>
     internal static string? MaskKey(string? plaintext)

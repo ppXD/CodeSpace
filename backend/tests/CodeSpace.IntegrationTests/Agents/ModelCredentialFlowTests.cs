@@ -51,6 +51,7 @@ public class ModelCredentialFlowTests
         summary.BaseUrl.ShouldBe("https://api.anthropic.com");
         summary.KeyHint.ShouldBe("····9f3a");
         summary.KeyHint!.ShouldNotContain("supersecret");
+        summary.KeyUnreadable.ShouldBeFalse("a decryptable key is not flagged unreadable");
     }
 
     [Fact]
@@ -62,7 +63,33 @@ public class ModelCredentialFlowTests
 
         var summary = (await SendAsync(userId, teamId, new ListModelCredentialsQuery())).ShouldHaveSingleItem();
         summary.KeyHint.ShouldBeNull();
+        summary.KeyUnreadable.ShouldBeFalse("a genuinely keyless provider is not flagged unreadable");
         summary.BaseUrl.ShouldBe("http://localhost:11434");
+    }
+
+    [Fact]
+    public async Task A_credential_whose_key_cannot_be_decrypted_still_lists_with_a_null_hint()
+    {
+        var (userId, teamId) = await SeedTeamAsync();
+        var id = await SendAsync(userId, teamId, new AddModelCredentialCommand { Provider = "Anthropic", DisplayName = "Stale key", ApiKey = "sk-rotated-away", BaseUrl = "https://api.anthropic.com" });
+
+        // Simulate a Data Protection key-ring change (rotation / loss / the #725 Postgres key-ring migration): the
+        // stored ciphertext can no longer be decrypted. The list MUST still render — one unreadable secret cannot 500
+        // the whole credentials page, because the operator needs that very list to re-enter the dead keys.
+        using (var scope = _fixture.BeginScope())
+        {
+            var db = scope.Resolve<CodeSpaceDbContext>();
+            var row = await db.ModelCredential.SingleAsync(c => c.Id == id);
+            row.EncryptedApiKey = "not-a-readable-protected-payload";
+            await db.SaveChangesAsync();
+        }
+
+        var summary = (await SendAsync(userId, teamId, new ListModelCredentialsQuery())).ShouldHaveSingleItem();
+        summary.DisplayName.ShouldBe("Stale key");
+        summary.BaseUrl.ShouldBe("https://api.anthropic.com");
+        summary.Status.ShouldBe(CredentialStatus.Active);
+        summary.KeyHint.ShouldBeNull("an undecryptable key yields no hint rather than throwing the whole list");
+        summary.KeyUnreadable.ShouldBeTrue("a stored-but-undecryptable key is flagged for re-entry, not shown as keyless");
     }
 
     [Fact]
