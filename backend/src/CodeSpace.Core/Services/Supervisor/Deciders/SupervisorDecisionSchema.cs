@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Text.Json.Serialization;
 
 namespace CodeSpace.Core.Services.Supervisor.Deciders;
 
@@ -52,11 +53,12 @@ public static class SupervisorDecisionSchema
                         "type": "object",
                         "additionalProperties": false,
                         "properties": {
-                          "command": { "type": "array", "minItems": 1, "items": { "type": "string" }, "description": "An argv the server runs to OBJECTIVELY verify this subtask is done." },
+                          "command": { "type": "array", "minItems": 1, "items": { "type": "string" }, "description": "For kind=TestsPass (default): an argv the server runs to OBJECTIVELY verify this subtask is done. For kind=ArtifactPresent: the list of repo-relative deliverable file paths that must exist." },
+                          "kind": { "type": "string", "enum": ["TestsPass", "ArtifactPresent"], "description": "Which objective oracle verifies this — TestsPass (run the command argv, exit 0) for code, or ArtifactPresent (the command lists deliverable files that must exist) for research/analysis output. Omit for TestsPass." },
                           "description": { "type": "string", "description": "Optional human-readable description of the subtask's acceptance check." }
                         },
                         "required": ["command"],
-                        "description": "Optional per-subtask acceptance — the unit's definition of done (recorded + projected; the per-unit gate is a follow-up)."
+                        "description": "Optional per-subtask acceptance — the unit's objective definition of done, graded on the unit's own branch."
                       }
                     },
                     "required": ["id", "title", "instruction"]
@@ -171,8 +173,9 @@ public static class SupervisorDecisionSchema
                       "type": "array",
                       "minItems": 1,
                       "items": { "type": "string" },
-                      "description": "An argv the server runs against the produced workspace to OBJECTIVELY verify the result (non-zero exit = not accepted). Authoring a runnable command makes 'done' a server-verified fact, not a self-report."
+                      "description": "For kind=TestsPass (default): an argv the server runs against the produced workspace (non-zero exit = not accepted). For kind=ArtifactPresent: the repo-relative deliverable file paths that must exist. Authoring it makes 'done' a server-verified fact, not a self-report."
                     },
+                    "kind": { "type": "string", "enum": ["TestsPass", "ArtifactPresent"], "description": "Which objective oracle verifies the result — TestsPass (run the command argv) for code, or ArtifactPresent (the command lists deliverable files that must exist) for research/analysis output. Omit for TestsPass. This tightening gate is AND-ed under the operator's own acceptance floor, which is always graded as TestsPass." },
                     "description": { "type": "string", "description": "Optional human-readable description of what the acceptance check proves." }
                   },
                   "required": ["command"],
@@ -187,9 +190,10 @@ public static class SupervisorDecisionSchema
         }
         """).RootElement.Clone();
 
-    /// <summary>Deserialization options for mapping a schema-valid object back into <c>SupervisorModelDecision</c>. Case-insensitive so the model's lower-camel keys bind to the record's Pascal properties.</summary>
+    /// <summary>Deserialization options for mapping a schema-valid object back into <c>SupervisorModelDecision</c>. Case-insensitive so the model's lower-camel keys bind to the record's Pascal properties; the string-enum converter binds the acceptance <c>kind</c> ("TestsPass"/"ArtifactPresent") to <c>BenchmarkGradingKind</c>.</summary>
     public static readonly JsonSerializerOptions Options = new()
     {
         PropertyNameCaseInsensitive = true,
+        Converters = { new JsonStringEnumConverter() },
     };
 }

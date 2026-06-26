@@ -2,6 +2,7 @@ using System.Text.Json;
 using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Supervisor.Deciders;
 using CodeSpace.Messages.Agents;
+using CodeSpace.Messages.Agents.Benchmark;
 using Shouldly;
 
 namespace CodeSpace.UnitTests.Agents;
@@ -73,6 +74,41 @@ public class SupervisorAcceptanceSpecTests
         json.ShouldBe("""{"command":["pytest"],"description":"all unit tests pass"}""");
     }
 
+    // ── The Kind oracle selector: null-omitted (byte-identity), present as its enum name ──
+
+    [Fact]
+    public void Acceptance_spec_omits_a_null_kind_byte_identical_to_the_tests_pass_default()
+    {
+        var json = JsonSerializer.Serialize(new SupervisorAcceptanceSpec { Command = new[] { "make", "check" } }, AgentJson.Options);
+
+        json.ShouldBe("""{"command":["make","check"]}""");
+        json.ShouldNotContain("kind", Case.Insensitive,
+            "an absent kind must be omitted — a default-TestsPass stop serializes to the exact pre-change bytes the idempotency key depends on");
+    }
+
+    [Fact]
+    public void Acceptance_spec_emits_a_present_kind_as_its_enum_name()
+    {
+        var json = JsonSerializer.Serialize(
+            new SupervisorAcceptanceSpec { Command = new[] { "report.md" }, Kind = BenchmarkGradingKind.ArtifactPresent }, AgentJson.Options);
+
+        json.ShouldBe("""{"command":["report.md"],"kind":"ArtifactPresent"}""",
+            "a non-default oracle is authored as its enum NAME (the string the schema enum and the grader registry agree on)");
+    }
+
+    [Fact]
+    public void Acceptance_spec_round_trips_a_kind_through_the_canonical_options()
+    {
+        var original = new SupervisorAcceptanceSpec { Command = new[] { "docs/findings.md" }, Kind = BenchmarkGradingKind.ArtifactPresent, Description = "deliverable exists" };
+
+        var back = JsonSerializer.Deserialize<SupervisorAcceptanceSpec>(
+            JsonSerializer.Serialize(original, AgentJson.Options), AgentJson.Options)!;
+
+        back.Command.ShouldBe(new[] { "docs/findings.md" });
+        back.Kind.ShouldBe(BenchmarkGradingKind.ArtifactPresent);
+        back.Description.ShouldBe("deliverable exists");
+    }
+
     [Fact]
     public void Acceptance_spec_round_trips_through_the_canonical_options()
     {
@@ -128,6 +164,30 @@ public class SupervisorAcceptanceSpecTests
         model.Stop!.Acceptance.ShouldBeNull("a stop the model authors without acceptance carries no spec");
     }
 
+    [Fact]
+    public void A_model_emitted_stop_with_an_artifact_present_kind_binds_the_oracle()
+    {
+        // A research/analysis stop: the deliverable is a FILE, so the model authors the ArtifactPresent oracle and lists paths.
+        const string modelJson = """
+            { "kind": "stop", "stop": { "outcome": "completed", "summary": "report written", "acceptance": { "command": ["docs/report.md"], "kind": "ArtifactPresent" } } }
+            """;
+
+        var model = JsonSerializer.Deserialize<SupervisorModelDecision>(modelJson, SupervisorDecisionSchema.Options)!;
+
+        model.Stop!.Acceptance!.Kind.ShouldBe(BenchmarkGradingKind.ArtifactPresent, "the model's chosen oracle binds via the schema options' string-enum converter");
+        model.Stop.Acceptance.Command.ShouldBe(new[] { "docs/report.md" }, "for ArtifactPresent the command slot carries the deliverable paths");
+    }
+
+    [Fact]
+    public void A_model_emitted_acceptance_without_a_kind_binds_null_defaulting_to_tests_pass()
+    {
+        var model = JsonSerializer.Deserialize<SupervisorModelDecision>(
+            """{ "kind": "stop", "stop": { "outcome": "completed", "summary": "shipped", "acceptance": { "command": ["dotnet", "test"] } } }""",
+            SupervisorDecisionSchema.Options)!;
+
+        model.Stop!.Acceptance!.Kind.ShouldBeNull("an omitted kind binds null — the grader defaults it to TestsPass, the byte-identical legacy path");
+    }
+
     // ── Schema contract: acceptance is an optional, closed object ─────────────────────
 
     [Fact]
@@ -151,5 +211,18 @@ public class SupervisorAcceptanceSpecTests
         acceptance.GetProperty("required").EnumerateArray().Select(e => e.GetString()).ShouldContain("command");
         acceptance.GetProperty("properties").GetProperty("command").GetProperty("minItems").GetInt32()
             .ShouldBe(1, "an acceptance command must be a non-empty argv");
+    }
+
+    [Fact]
+    public void The_acceptance_kind_is_an_optional_enum_of_the_two_oracles()
+    {
+        var acceptance = SupervisorDecisionSchema.ResponseSchema
+            .GetProperty("properties").GetProperty("stop").GetProperty("properties").GetProperty("acceptance");
+
+        acceptance.GetProperty("required").EnumerateArray().Select(e => e.GetString())
+            .ShouldNotContain("kind", "kind stays OPTIONAL — omitting it defaults to TestsPass (the byte-identical legacy path)");
+
+        acceptance.GetProperty("properties").GetProperty("kind").GetProperty("enum").EnumerateArray().Select(e => e.GetString())
+            .ShouldBe(new[] { "TestsPass", "ArtifactPresent" }, "the model picks one of exactly the two oracles the grader registry resolves");
     }
 }

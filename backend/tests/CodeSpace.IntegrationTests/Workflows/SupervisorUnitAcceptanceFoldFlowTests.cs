@@ -60,6 +60,7 @@ public sealed class SupervisorUnitAcceptanceFoldFlowTests
         grader.LastCall!.Value.RepositoryId.ShouldBe(repoId);
         grader.LastCall.Value.Branch.ShouldBe("codespace/agent/s1", "the unit is graded against the branch IT produced");
         grader.LastCall.Value.Command.ShouldBe(Check, "the subtask's authored acceptance command is the graded argv");
+        grader.LastCall.Value.Kind.ShouldBe(BenchmarkGradingKind.TestsPass, "a subtask with no authored oracle kind defaults to TestsPass");
 
         var spawn = ctx.PriorDecisions.Single(d => d.DecisionKind == SupervisorDecisionKinds.Spawn);
         SupervisorOutcome.ReadAgentResults(spawn.OutcomeJson).Single().AcceptancePassed.ShouldBe(expectedVerdict, "the per-unit verdict folds onto the agent result");
@@ -68,6 +69,28 @@ public sealed class SupervisorUnitAcceptanceFoldFlowTests
 
         SupervisorOutcome.ReadAgentResults(await LedgerSpawnOutcomeAsync(runId, teamId)).Single().AcceptancePassed
             .ShouldBe(expectedVerdict, "the verdict is PERSISTED on the durable spawn row (replay reads it, never re-grades)");
+    }
+
+    [Fact]
+    public async Task A_subtask_authored_artifact_present_kind_is_forwarded_to_the_per_unit_grade()
+    {
+        // T1.1: a NON-coding subtask authors Kind=ArtifactPresent (its deliverable is a FILE, not a passing test) — the
+        // per-unit fold must thread THAT oracle to the grade, not the default TestsPass. The stop-path kind-forwarding is
+        // pinned in SupervisorAcceptanceFoldFlowTests; this pins the per-unit (per-subtask) path, so regressing the fold to
+        // a hardcoded TestsPass is caught.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedSupervisorRunAsync(teamId, userId);
+        var repoId = Guid.NewGuid();
+
+        await SeedPlanAsync(runId, teamId, sequence: 1, ArtifactPlanPayload("s1", new[] { "docs/report.md" }));
+        await SeedSpawnAsync(runId, teamId, sequence: 2, """{"subtaskIds":["s1"]}""", SpawnOutcome(Unit(Guid.NewGuid(), "codespace/agent/s1")));
+
+        var grader = new RecordingGrader(new BenchmarkGrade { Passed = true, Detail = "artifacts-present" });
+        await RehydrateAsync(runId, teamId, GoalConfig(repoId), grader);
+
+        grader.CallCount.ShouldBe(1, "the unit's deliverable check runs once against its own branch");
+        grader.LastCall!.Value.Command.ShouldBe(new[] { "docs/report.md" }, "the subtask's declared deliverable paths are the graded command");
+        grader.LastCall.Value.Kind.ShouldBe(BenchmarkGradingKind.ArtifactPresent, "the per-unit fold forwards the subtask's authored oracle kind — not the default TestsPass");
     }
 
     [Fact]
@@ -224,6 +247,10 @@ public sealed class SupervisorUnitAcceptanceFoldFlowTests
         return JsonSerializer.Serialize(new { goal = Goal, subtasks = ordered }, AgentJson.Options);
     }
 
+    /// <summary>A plan whose single subtask authors a NON-coding acceptance — Kind=ArtifactPresent + the declared deliverable paths in the command slot.</summary>
+    private static string ArtifactPlanPayload(string id, string[] paths) =>
+        JsonSerializer.Serialize(new { goal = Goal, subtasks = new[] { new { id, title = id, instruction = "do " + id, acceptance = new { command = paths, kind = "ArtifactPresent" } } } }, AgentJson.Options);
+
     private static SupervisorAgentResult Unit(Guid agentRunId, string? producedBranch) =>
         new() { AgentRunId = agentRunId, Status = "Succeeded", Summary = "did it", ProducedBranch = producedBranch };
 
@@ -326,12 +353,12 @@ public sealed class SupervisorUnitAcceptanceFoldFlowTests
         public RecordingGrader(Exception toThrow) { _throw = toThrow; _grade = new BenchmarkGrade { Passed = false, Detail = "unused" }; }
 
         public int CallCount { get; private set; }
-        public (Guid RepositoryId, Guid TeamId, string Branch, IReadOnlyList<string> Command, int TimeoutSeconds)? LastCall { get; private set; }
+        public (Guid RepositoryId, Guid TeamId, string Branch, IReadOnlyList<string> Command, int TimeoutSeconds, BenchmarkGradingKind Kind)? LastCall { get; private set; }
 
-        public Task<BenchmarkGrade> GradeAsync(Guid repositoryId, Guid teamId, string branch, IReadOnlyList<string> command, int timeoutSeconds, CancellationToken cancellationToken)
+        public Task<BenchmarkGrade> GradeAsync(Guid repositoryId, Guid teamId, string branch, IReadOnlyList<string> command, int timeoutSeconds, CancellationToken cancellationToken, BenchmarkGradingKind kind = BenchmarkGradingKind.TestsPass)
         {
             CallCount++;
-            LastCall = (repositoryId, teamId, branch, command, timeoutSeconds);
+            LastCall = (repositoryId, teamId, branch, command, timeoutSeconds, kind);
             if (_throw != null) throw _throw;
             return Task.FromResult(_grade);
         }

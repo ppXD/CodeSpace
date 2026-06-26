@@ -335,7 +335,8 @@ public sealed partial class SupervisorTurnService
         for (var i = 0; i < results.Count; i++)
         {
             var subtaskId = i < unitSubtaskIds.Count ? unitSubtaskIds[i] : null;
-            var command = subtaskId is not null && acceptanceBySubtask.TryGetValue(subtaskId, out var spec) ? NormalizeCommand(spec.Command) : null;
+            var spec = subtaskId is not null && acceptanceBySubtask.TryGetValue(subtaskId, out var found) ? found : null;
+            var command = spec is not null ? NormalizeCommand(spec.Command) : null;
 
             // Ungraded — keep the result byte-identical — when: the unit has no contract; its command is all-blank; or
             // its agent ran MULTI-repo (RepositoryResults present → the per-agent multi-repo grade is deferred, exactly
@@ -349,7 +350,8 @@ public sealed partial class SupervisorTurnService
             var repositoryId = (subtaskId is not null && repoOverrides.TryGetValue(subtaskId, out var overrideRepo) ? overrideRepo : (Guid?)null)
                                ?? goalConfig?.AgentProfile?.RepositoryId;
 
-            var grade = await GradeUnitAcceptanceAsync(results[i], repositoryId, command, teamId, decision.Id, cancellationToken).ConfigureAwait(false);
+            // The subtask authored its OWN oracle kind (TestsPass argv / ArtifactPresent paths) — null defaults to TestsPass.
+            var grade = await GradeUnitAcceptanceAsync(results[i], repositoryId, command, spec!.Kind ?? BenchmarkGradingKind.TestsPass, teamId, decision.Id, cancellationToken).ConfigureAwait(false);
 
             graded.Add(results[i] with { AcceptancePassed = grade.Passed, AcceptanceDetail = grade.Detail });
             anyGraded = true;
@@ -361,14 +363,14 @@ public sealed partial class SupervisorTurnService
     }
 
     /// <summary>Grade ONE unit's produced branch against its subtask acceptance command, fail-closed: no branch/repo → not-accepted; the grader is itself fail-closed; any unexpected non-cancellation escape degrades to not-accepted so the terminal fold can never crash + strand the row. Only a genuine cancellation propagates.</summary>
-    private async Task<BenchmarkGrade> GradeUnitAcceptanceAsync(SupervisorAgentResult result, Guid? repositoryId, IReadOnlyList<string> command, Guid teamId, Guid decisionId, CancellationToken cancellationToken)
+    private async Task<BenchmarkGrade> GradeUnitAcceptanceAsync(SupervisorAgentResult result, Guid? repositoryId, IReadOnlyList<string> command, BenchmarkGradingKind kind, Guid teamId, Guid decisionId, CancellationToken cancellationToken)
     {
         if (string.IsNullOrEmpty(result.ProducedBranch) || repositoryId is null)
             return new BenchmarkGrade { Passed = false, Detail = "no-branch-or-repo" };
 
         try
         {
-            return await _acceptanceGrader.GradeAsync(repositoryId.Value, teamId, result.ProducedBranch, command, SupervisorLane.AcceptanceGradeTimeoutSeconds, cancellationToken).ConfigureAwait(false);
+            return await _acceptanceGrader.GradeAsync(repositoryId.Value, teamId, result.ProducedBranch, command, SupervisorLane.AcceptanceGradeTimeoutSeconds, cancellationToken, kind).ConfigureAwait(false);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -449,11 +451,14 @@ public sealed partial class SupervisorTurnService
         if (decision.Kind != SupervisorDecisionKinds.Stop) return execution;
 
         // Operator floor FIRST (the mandatory gate), then the model's tightening — short-circuited in order so the
-        // verdict detail names the gate that failed.
+        // verdict detail names the gate that failed. The floor is ALWAYS the TestsPass oracle (operator-controlled — the
+        // model never authors the floor's kind); only the model-check gate honors the model-authored acceptance Kind.
+        var modelAcceptance = ReadStopAcceptance(decision.PayloadJson);
+
         var gates = new[]
         {
-            ("operator-floor", NormalizeCommand(context.AcceptanceChecks)),
-            ("model-check", NormalizeCommand(ReadStopAcceptanceCommand(decision.PayloadJson))),
+            ("operator-floor", NormalizeCommand(context.AcceptanceChecks), BenchmarkGradingKind.TestsPass),
+            ("model-check", NormalizeCommand(modelAcceptance?.Command), modelAcceptance?.Kind ?? BenchmarkGradingKind.TestsPass),
         };
 
         if (gates.All(g => g.Item2 is null)) return execution;   // no operator floor + no model criterion → byte-identical no-op (the dominant case)
@@ -498,7 +503,7 @@ public sealed partial class SupervisorTurnService
     /// operator's own workspace, not the model). The first-failure short-circuit keeps the common rejected case cheap;
     /// a future perf slice could grade with a bounded degree-of-parallelism if a large workspace makes wall-clock bite.</para>
     /// </summary>
-    private async Task<BenchmarkGrade> GradeStopTargetsAsync(Guid teamId, IReadOnlyList<(Guid RepositoryId, string Alias, string Branch)> targets, IReadOnlyList<(string Label, IReadOnlyList<string>? Command)> gates, CancellationToken cancellationToken)
+    private async Task<BenchmarkGrade> GradeStopTargetsAsync(Guid teamId, IReadOnlyList<(Guid RepositoryId, string Alias, string Branch)> targets, IReadOnlyList<(string Label, IReadOnlyList<string>? Command, BenchmarkGradingKind Kind)> gates, CancellationToken cancellationToken)
     {
         foreach (var target in targets)
         {
@@ -506,14 +511,14 @@ public sealed partial class SupervisorTurnService
 
             if (target.RepositoryId == Guid.Empty) return new BenchmarkGrade { Passed = false, Detail = $"{repoTag}no repository id to grade against" };
 
-            foreach (var (label, command) in gates)
+            foreach (var (label, command, kind) in gates)
             {
                 if (command is null) continue;
 
                 BenchmarkGrade grade;
                 try
                 {
-                    grade = await _acceptanceGrader.GradeAsync(target.RepositoryId, teamId, target.Branch, command, SupervisorLane.AcceptanceGradeTimeoutSeconds, cancellationToken).ConfigureAwait(false);
+                    grade = await _acceptanceGrader.GradeAsync(target.RepositoryId, teamId, target.Branch, command, SupervisorLane.AcceptanceGradeTimeoutSeconds, cancellationToken, kind).ConfigureAwait(false);
                 }
                 catch (Exception ex) when (ex is not OperationCanceledException)
                 {
@@ -528,10 +533,10 @@ public sealed partial class SupervisorTurnService
         return new BenchmarkGrade { Passed = true, Detail = "accepted" };
     }
 
-    /// <summary>The model-authored acceptance argv off a stop decision's payload (<see cref="SupervisorStopPayload.Acceptance"/>'s command), best-effort (null when absent / malformed).</summary>
-    private static IReadOnlyList<string>? ReadStopAcceptanceCommand(string payloadJson)
+    /// <summary>The model-authored acceptance spec off a stop decision's payload (<see cref="SupervisorStopPayload.Acceptance"/> — its command + oracle Kind), best-effort (null when absent / malformed).</summary>
+    private static SupervisorAcceptanceSpec? ReadStopAcceptance(string payloadJson)
     {
-        try { return JsonSerializer.Deserialize<SupervisorStopPayload>(payloadJson, AgentJson.Options)?.Acceptance?.Command; }
+        try { return JsonSerializer.Deserialize<SupervisorStopPayload>(payloadJson, AgentJson.Options)?.Acceptance; }
         catch (JsonException) { return null; }
     }
 

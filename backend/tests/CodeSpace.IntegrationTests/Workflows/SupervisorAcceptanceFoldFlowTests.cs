@@ -273,6 +273,47 @@ public sealed class SupervisorAcceptanceFoldFlowTests
     }
 
     [Fact]
+    public async Task The_model_authored_oracle_kind_gates_only_the_model_check_the_floor_stays_tests_pass()
+    {
+        // T1.1: the model authors a NON-coding deliverable check (ArtifactPresent) on ITS gate. The trust guard is that
+        // the operator floor is ALWAYS graded TestsPass server-side (the model never authors the floor's oracle); only
+        // the model's own tightening gate honors SupervisorAcceptanceSpec.Kind.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedSupervisorRunAsync(teamId, userId);
+
+        await SeedCleanMergeDecisionAsync(runId, teamId, "codespace/integration/x");
+
+        var floor = new[] { "sh", "floor.sh" };
+        var modelPaths = new[] { "docs/report.md" };
+        var grader = new QueuedGrader(new BenchmarkGrade { Passed = true, Detail = "floor-ok" }, new BenchmarkGrade { Passed = true, Detail = "artifacts-present" });
+        var result = await RunStopTurnWithGraderAsync(runId, teamId, GoalConfig(Guid.NewGuid(), acceptanceChecks: floor), command: modelPaths, grader, modelKind: BenchmarkGradingKind.ArtifactPresent);
+
+        grader.CallCount.ShouldBe(2, "both gates graded — operator floor then the model's tightening");
+        grader.Kinds[0].ShouldBe(BenchmarkGradingKind.TestsPass, "the operator floor is ALWAYS graded TestsPass — the model never authors the floor's oracle");
+        grader.Kinds[1].ShouldBe(BenchmarkGradingKind.ArtifactPresent, "the model-check gate honors the model-authored oracle kind");
+        result.AcceptancePassed.ShouldBe(true, "floor (TestsPass) AND model (ArtifactPresent) both pass → accepted");
+        result.IntegratedBranch.ShouldBe("codespace/integration/x", "an accepted run surfaces its reviewable head");
+    }
+
+    [Fact]
+    public async Task A_model_artifact_check_that_fails_withholds_the_head()
+    {
+        // The same non-coding stop, but the declared deliverable is missing → the model's ArtifactPresent gate fails →
+        // not accepted → the reviewable head is withheld (the deterministic non-coding analogue of a failing test gate).
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedSupervisorRunAsync(teamId, userId);
+
+        await SeedCleanMergeDecisionAsync(runId, teamId, "codespace/integration/x");
+
+        var grader = new QueuedGrader(new BenchmarkGrade { Passed = true, Detail = "floor-ok" }, new BenchmarkGrade { Passed = false, Detail = "artifact-missing: docs/report.md" });
+        var result = await RunStopTurnWithGraderAsync(runId, teamId, GoalConfig(Guid.NewGuid(), acceptanceChecks: new[] { "sh", "floor.sh" }), command: new[] { "docs/report.md" }, grader, modelKind: BenchmarkGradingKind.ArtifactPresent);
+
+        grader.Kinds[1].ShouldBe(BenchmarkGradingKind.ArtifactPresent, "the missing-artifact verdict came from the ArtifactPresent oracle");
+        result.AcceptancePassed.ShouldBe(false, "a missing deliverable is not accepted");
+        result.IntegratedBranch.ShouldBeNull("a failed model artifact check withholds the reviewable head");
+    }
+
+    [Fact]
     public async Task Both_gates_passing_accepts_and_surfaces_the_branch()
     {
         var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
@@ -633,13 +674,13 @@ public sealed class SupervisorAcceptanceFoldFlowTests
         return (result, grader);
     }
 
-    /// <summary>Run a terminal stop turn with a CUSTOM grader at the acceptance seam — lets a C1 test assert the AND across the operator floor + the model gate graded in order.</summary>
-    private async Task<SupervisorTurnResult> RunStopTurnWithGraderAsync(Guid runId, Guid teamId, SupervisorGoalConfig goalConfig, string[] command, ISupervisorAcceptanceGrader grader)
+    /// <summary>Run a terminal stop turn with a CUSTOM grader at the acceptance seam — lets a C1 test assert the AND across the operator floor + the model gate graded in order. An optional <paramref name="modelKind"/> is the oracle the model authors on ITS gate (the operator floor is always graded TestsPass server-side).</summary>
+    private async Task<SupervisorTurnResult> RunStopTurnWithGraderAsync(Guid runId, Guid teamId, SupervisorGoalConfig goalConfig, string[] command, ISupervisorAcceptanceGrader grader, BenchmarkGradingKind? modelKind = null)
     {
         using var scope = _fixture.BeginScope();
         var service = new SupervisorTurnService(
             scope.Resolve<ISupervisorDecisionLog>(),
-            new StopWithAcceptanceDecider(command),
+            new StopWithAcceptanceDecider(command, modelKind),
             scope.Resolve<ISupervisorActionExecutor>(),
             scope.Resolve<CodeSpaceDbContext>(),
             grader,
@@ -700,12 +741,13 @@ public sealed class SupervisorAcceptanceFoldFlowTests
             .SingleAsync();
     }
 
-    /// <summary>A decider that STOPS with an optional model-authored acceptance command (empty ⇒ no acceptance) — drives the L4 P1 stop-grade path over the real ledger.</summary>
+    /// <summary>A decider that STOPS with an optional model-authored acceptance command (empty ⇒ no acceptance) and an optional oracle <c>kind</c> — drives the L4 P1 stop-grade path over the real ledger.</summary>
     private sealed class StopWithAcceptanceDecider : ISupervisorDecider
     {
         private readonly string[] _command;
+        private readonly BenchmarkGradingKind? _kind;
 
-        public StopWithAcceptanceDecider(string[] command) => _command = command;
+        public StopWithAcceptanceDecider(string[] command, BenchmarkGradingKind? kind = null) { _command = command; _kind = kind; }
 
         public Task<SupervisorDecision> DecideAsync(SupervisorTurnContext context, CancellationToken cancellationToken) =>
             Task.FromResult(new SupervisorDecision
@@ -715,7 +757,7 @@ public sealed class SupervisorAcceptanceFoldFlowTests
                 {
                     Outcome = "completed",
                     Summary = "done",
-                    Acceptance = _command.Length > 0 ? new SupervisorAcceptanceSpec { Command = _command } : null,
+                    Acceptance = _command.Length > 0 ? new SupervisorAcceptanceSpec { Command = _command, Kind = _kind } : null,
                 }, AgentJson.Options),
             });
     }
@@ -830,12 +872,12 @@ public sealed class SupervisorAcceptanceFoldFlowTests
         public RecordingGrader(Exception toThrow) { _throw = toThrow; _grade = new BenchmarkGrade { Passed = false, Detail = "unused" }; }
 
         public int CallCount { get; private set; }
-        public (Guid RepositoryId, Guid TeamId, string Branch, IReadOnlyList<string> Command, int TimeoutSeconds)? LastCall { get; private set; }
+        public (Guid RepositoryId, Guid TeamId, string Branch, IReadOnlyList<string> Command, int TimeoutSeconds, BenchmarkGradingKind Kind)? LastCall { get; private set; }
 
-        public Task<BenchmarkGrade> GradeAsync(Guid repositoryId, Guid teamId, string branch, IReadOnlyList<string> command, int timeoutSeconds, CancellationToken cancellationToken)
+        public Task<BenchmarkGrade> GradeAsync(Guid repositoryId, Guid teamId, string branch, IReadOnlyList<string> command, int timeoutSeconds, CancellationToken cancellationToken, BenchmarkGradingKind kind = BenchmarkGradingKind.TestsPass)
         {
             CallCount++;
-            LastCall = (repositoryId, teamId, branch, command, timeoutSeconds);
+            LastCall = (repositoryId, teamId, branch, command, timeoutSeconds, kind);
             if (_throw != null) throw _throw;
             return Task.FromResult(_grade);
         }
@@ -849,11 +891,13 @@ public sealed class SupervisorAcceptanceFoldFlowTests
 
         public int CallCount { get; private set; }
         public List<IReadOnlyList<string>> Commands { get; } = new();
+        public List<BenchmarkGradingKind> Kinds { get; } = new();
 
-        public Task<BenchmarkGrade> GradeAsync(Guid repositoryId, Guid teamId, string branch, IReadOnlyList<string> command, int timeoutSeconds, CancellationToken cancellationToken)
+        public Task<BenchmarkGrade> GradeAsync(Guid repositoryId, Guid teamId, string branch, IReadOnlyList<string> command, int timeoutSeconds, CancellationToken cancellationToken, BenchmarkGradingKind kind = BenchmarkGradingKind.TestsPass)
         {
             CallCount++;
             Commands.Add(command);
+            Kinds.Add(kind);
             return Task.FromResult(_grades.Count > 0 ? _grades.Dequeue() : new BenchmarkGrade { Passed = true, Detail = "default" });
         }
     }

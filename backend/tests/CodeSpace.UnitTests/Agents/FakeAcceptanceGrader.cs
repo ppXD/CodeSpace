@@ -17,12 +17,12 @@ internal sealed class FakeAcceptanceGrader : ISupervisorAcceptanceGrader
     public FakeAcceptanceGrader(Exception toThrow) { _throw = toThrow; _grade = new BenchmarkGrade { Passed = false, Detail = "unused" }; }
 
     public int CallCount { get; private set; }
-    public (Guid RepositoryId, Guid TeamId, string Branch, IReadOnlyList<string> Command, int TimeoutSeconds)? LastCall { get; private set; }
+    public (Guid RepositoryId, Guid TeamId, string Branch, IReadOnlyList<string> Command, int TimeoutSeconds, BenchmarkGradingKind Kind)? LastCall { get; private set; }
 
-    public Task<BenchmarkGrade> GradeAsync(Guid repositoryId, Guid teamId, string branch, IReadOnlyList<string> command, int timeoutSeconds, CancellationToken cancellationToken)
+    public Task<BenchmarkGrade> GradeAsync(Guid repositoryId, Guid teamId, string branch, IReadOnlyList<string> command, int timeoutSeconds, CancellationToken cancellationToken, BenchmarkGradingKind kind = BenchmarkGradingKind.TestsPass)
     {
         CallCount++;
-        LastCall = (repositoryId, teamId, branch, command, timeoutSeconds);
+        LastCall = (repositoryId, teamId, branch, command, timeoutSeconds, kind);
         if (_throw != null) throw _throw;
         return Task.FromResult(_grade);
     }

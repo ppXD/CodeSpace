@@ -2,6 +2,7 @@ using System.Text.Json;
 using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Supervisor;
 using CodeSpace.Messages.Agents;
+using CodeSpace.Messages.Agents.Benchmark;
 
 namespace CodeSpace.IntegrationTests.Workflows.Infrastructure;
 
@@ -32,6 +33,7 @@ public sealed class ScriptedSupervisorDecider : ISupervisorDecider
         {
             SupervisorScriptMode.PlanSpawnStop => PlanSpawnStop(context),
             SupervisorScriptMode.PlanSpawnMergeStop => PlanSpawnMergeStop(context),
+            SupervisorScriptMode.PlanSpawnMergeArtifactStop => PlanSpawnMergeArtifactStop(context, _script.ArtifactPaths),
             SupervisorScriptMode.PlanSpawnSingleMergeStop => PlanSpawnSingleMergeStop(context),
             SupervisorScriptMode.PlanSpawnRetryMergeStop => PlanSpawnRetryMergeStop(context),
             SupervisorScriptMode.PlanSpawnMergeResolveMergeStop => PlanSpawnMergeResolveMergeStop(context),
@@ -91,6 +93,24 @@ public sealed class ScriptedSupervisorDecider : ISupervisorDecider
         1 => Canonical(SupervisorDecisionKinds.Spawn, new SupervisorSpawnPayload { SubtaskIds = new[] { SubtaskA, SubtaskB } }),
         2 => Canonical(SupervisorDecisionKinds.Merge, new SupervisorMergePayload { SynthesisInstruction = "combine both branches" }),
         _ => Canonical(SupervisorDecisionKinds.Stop, new SupervisorStopPayload { Outcome = "completed", Summary = "merged" }),
+    };
+
+    // T1.1 non-coding arc: same plan→spawn(both)→merge as PlanSpawnMergeStop, but the terminal STOP authors a model
+    // ArtifactPresent definition-of-done — the declared deliverable PATHS (read from the script knob) must EXIST on the
+    // integrated head. Drives the real ArtifactPresentGrader against a real clone (the "deliverable exists" oracle for
+    // research/analysis output), AND-ed under the operator floor. Declaring a produced file accepts; declaring a
+    // never-produced file withholds the head even when the structural floor passes.
+    private static SupervisorDecision PlanSpawnMergeArtifactStop(SupervisorTurnContext context, IReadOnlyList<string> artifactPaths) => context.TurnNumber switch
+    {
+        0 => Plan(context.Goal),
+        1 => Canonical(SupervisorDecisionKinds.Spawn, new SupervisorSpawnPayload { SubtaskIds = new[] { SubtaskA, SubtaskB } }),
+        2 => Canonical(SupervisorDecisionKinds.Merge, new SupervisorMergePayload { SynthesisInstruction = "combine both branches" }),
+        _ => Canonical(SupervisorDecisionKinds.Stop, new SupervisorStopPayload
+        {
+            Outcome = "completed",
+            Summary = "deliverables produced",
+            Acceptance = new SupervisorAcceptanceSpec { Command = artifactPaths, Kind = BenchmarkGradingKind.ArtifactPresent },
+        }),
     };
 
     // Single-agent merge arc: turn 0 plan(2) → turn 1 spawn ONLY SubtaskA → turn 2 merge (one branch, no conflict) →
@@ -244,11 +264,20 @@ public sealed class SupervisorDecisionScript
 {
     public SupervisorScriptMode Mode { get; set; } = SupervisorScriptMode.PlanThenStop;
 
+    /// <summary>The repo-relative deliverable paths the <see cref="SupervisorScriptMode.PlanSpawnMergeArtifactStop"/> stop authors on its model ArtifactPresent gate.</summary>
+    public IReadOnlyList<string> ArtifactPaths { get; set; } = Array.Empty<string>();
+
     public void PlanThenStop() => Mode = SupervisorScriptMode.PlanThenStop;
 
     public void PlanSpawnStop() => Mode = SupervisorScriptMode.PlanSpawnStop;
 
     public void PlanSpawnMergeStop() => Mode = SupervisorScriptMode.PlanSpawnMergeStop;
+
+    public void PlanSpawnMergeArtifactStop(IReadOnlyList<string> artifactPaths)
+    {
+        ArtifactPaths = artifactPaths;
+        Mode = SupervisorScriptMode.PlanSpawnMergeArtifactStop;
+    }
 
     public void PlanSpawnSingleMergeStop() => Mode = SupervisorScriptMode.PlanSpawnSingleMergeStop;
 
@@ -291,6 +320,7 @@ public enum SupervisorScriptMode
     PlanThenStop,
     PlanSpawnStop,
     PlanSpawnMergeStop,
+    PlanSpawnMergeArtifactStop,
     PlanSpawnSingleMergeStop,
     PlanSpawnRetryMergeStop,
     PlanSpawnMergeResolveMergeStop,
