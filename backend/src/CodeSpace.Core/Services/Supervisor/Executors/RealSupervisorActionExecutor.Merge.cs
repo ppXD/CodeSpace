@@ -76,7 +76,7 @@ public sealed partial class RealSupervisorActionExecutor
 
         var rejected = staging
             .SelectMany(d => SupervisorOutcome.ReadAgentResults(d.OutcomeJson))
-            .Where(r => r.AcceptancePassed == false)
+            .Where(IsAcceptanceRejected)
             .Select(r => r.AgentRunId)
             .ToHashSet();
 
@@ -85,6 +85,16 @@ public sealed partial class RealSupervisorActionExecutor
             .Where(id => !rejected.Contains(id))
             .ToList();
     }
+
+    /// <summary>
+    /// The SINGLE definition of "this unit's work is WITHHELD from the reviewable head" (loopability slice 4): its
+    /// per-unit acceptance grade objectively REJECTED it (<see cref="SupervisorAgentResult.AcceptancePassed"/> == false).
+    /// Shared by BOTH doors to the head — the merge (<see cref="ResolveAgentRunIdsToMerge"/>) AND the resolver's
+    /// branch collection (<c>RealSupervisorActionExecutor.Resolve.cs</c>) — so the two can never drift on which units a
+    /// rejection withholds. An ungraded unit (<c>null</c> — no per-unit contract, or a deferred multi-repo unit) is NOT
+    /// withheld (byte-identical to pre-slice).
+    /// </summary>
+    internal static bool IsAcceptanceRejected(SupervisorAgentResult result) => result.AcceptancePassed == false;
 
     /// <summary>Load each agent run's FULL terminal result by id, TEAM-SCOPED (defense-in-depth — the ids are this run's own recorded spawns, but a cross-team id never resolves) into the typed <see cref="MergedAgent"/> the merged-array projection AND the integrate step both consume (one read). A missing / non-terminal run contributes its status, not a crash. Preserves spawn order.</summary>
     private async Task<IReadOnlyList<MergedAgent>> ReadMergedAgentsAsync(IReadOnlyList<Guid> agentRunIds, Guid teamId, CancellationToken cancellationToken)

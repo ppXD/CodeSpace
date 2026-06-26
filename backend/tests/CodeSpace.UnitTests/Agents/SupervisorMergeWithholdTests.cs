@@ -3,6 +3,7 @@ using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Supervisor;
 using CodeSpace.Core.Services.Supervisor.Executors;
 using CodeSpace.Messages.Agents;
+using CodeSpace.Messages.Enums;
 using Shouldly;
 
 namespace CodeSpace.UnitTests.Agents;
@@ -79,5 +80,46 @@ public class SupervisorMergeWithholdTests
     public void A_context_with_no_staging_decisions_resolves_to_empty()
     {
         RealSupervisorActionExecutor.ResolveAgentRunIdsToMerge(Context()).ShouldBeEmpty();
+    }
+
+    // ── The OTHER door to the reviewable head: the resolver's branch set must withhold the same rejected units, else a
+    //    conflict→resolve reconciles a rejected branch back into the head (the review finding this slice folds). ──
+
+    private static SupervisorAgentResult UnitWithBranch(string branch, bool? acceptancePassed) =>
+        new() { AgentRunId = Guid.NewGuid(), Status = "Succeeded", ProducedBranch = branch, AcceptancePassed = acceptancePassed };
+
+    [Fact]
+    public void The_resolver_branch_set_withholds_a_rejected_units_branch()
+    {
+        var context = Context(Staging(SupervisorDecisionKinds.Spawn,
+            UnitWithBranch("b-passed", true), UnitWithBranch("b-rejected", false), UnitWithBranch("b-ungraded", null)));
+
+        RealSupervisorActionExecutor.CollectAgentBranches(context)
+            .ShouldBe(new[] { "b-passed", "b-ungraded" }, "the resolver reconciles only the non-rejected branches — the same withhold as the merge, closing the second door to the head");
+    }
+
+    [Fact]
+    public void The_resolver_branch_set_is_byte_identical_for_an_all_ungraded_wave()
+    {
+        var context = Context(Staging(SupervisorDecisionKinds.Spawn, UnitWithBranch("b-a", null), UnitWithBranch("b-b", null)));
+
+        RealSupervisorActionExecutor.CollectAgentBranches(context).ShouldBe(new[] { "b-a", "b-b" }, "no verdicts → every branch is reconciled, exactly as before the slice");
+    }
+
+    [Fact]
+    public void The_resolver_per_repo_branch_set_withholds_a_rejected_unit()
+    {
+        var repo = Guid.NewGuid();
+
+        SupervisorAgentResult MultiRepoUnit(string branch, bool? passed) => new()
+        {
+            AgentRunId = Guid.NewGuid(), Status = "Succeeded", AcceptancePassed = passed,
+            RepositoryResults = new[] { new RepositoryRunResult { Alias = "r", RepositoryId = repo, ProducedBranch = branch, BaseBranch = "main", Access = WorkspaceAccess.Write } },
+        };
+
+        var context = Context(Staging(SupervisorDecisionKinds.Spawn, MultiRepoUnit("r-passed", true), MultiRepoUnit("r-rejected", false)));
+
+        RealSupervisorActionExecutor.CollectAgentBranchesForRepo(context, repo)
+            .ShouldBe(new[] { "r-passed" }, "the per-repo resolver set withholds a rejected unit too (defensive — multi-repo per-unit grades are deferred, so today rejected multi-repo units don't arise, but the guard holds)");
     }
 }
