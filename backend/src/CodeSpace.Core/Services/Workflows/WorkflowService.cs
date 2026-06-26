@@ -379,6 +379,12 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
         if (rerunRunId == Guid.Empty)
             return await ResolveDedupedForkAsync(operationId!.Value, teamId, cancellationToken).ConfigureAwait(false);
 
+        // Acquire the active-rerun lease (one row per branch) AFTER the OperationId dedup short-circuit — so a
+        // same-token retry returns the prior fork above and never trips the lease — and BEFORE seeding. A concurrent
+        // DISTINCT-operation rerun whose branch set overlaps an in-flight one loses the lease insert on 23505 →
+        // RerunAlreadyInProgressException, whose throw rolls back THIS fork with the command transaction.
+        await AcquireRerunLeaseAsync(originalRunId, mapNodeId, branchIndices, rerunRunId, teamId, cancellationToken).ConfigureAwait(false);
+
         await _cellSeeder.SeedKeptCellsAsync(originalRunId, rerunRunId, keptToSeed, writeEmptySnapshotSentinel: snapshot.Count == 0, cancellationToken).ConfigureAwait(false);
         await _cellSeeder.SeedSiblingBranchCellsAsync(originalRunId, rerunRunId, mapNodeId, branchIndices, branchCount, cancellationToken).ConfigureAwait(false);
 
@@ -612,6 +618,40 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
         _logger.LogInformation("Workflow map-branch rerun deduplicated by operation id — returning the prior fork. OperationId={OperationId} ForkRunId={Fork} TeamId={Team}", operationId, priorForkId, teamId);
 
         return priorForkId;
+    }
+
+    /// <summary>
+    /// Claim the active-rerun lease for every re-run branch (one in_progress row, keyed to the fork). The flush is
+    /// forced HERE — not deferred to the command's outer SaveChanges — so the partial-unique 23505 (a concurrent
+    /// rerun already holds an OVERLAPPING branch) is catchable and translatable to the typed
+    /// <see cref="RerunAlreadyInProgressException"/>; throwing rolls the just-staged fork back with the command
+    /// transaction. The EF per-SaveChanges savepoint inside that transaction keeps the 23505 from poisoning it.
+    /// </summary>
+    private async Task AcquireRerunLeaseAsync(Guid originalRunId, string mapNodeId, IReadOnlySet<int> branchIndices, Guid forkRunId, Guid teamId, CancellationToken cancellationToken)
+    {
+        var now = DateTimeOffset.UtcNow;
+
+        foreach (var branchIndex in branchIndices)
+            _db.WorkflowRerunLease.Add(new WorkflowRerunLease
+            {
+                Id = Guid.NewGuid(),
+                OriginalRunId = originalRunId,
+                MapNodeId = mapNodeId,
+                BranchIndex = branchIndex,
+                ForkRunId = forkRunId,
+                TeamId = teamId,
+                Status = RerunLeaseStatuses.InProgress,
+                CreatedAt = now,
+            });
+
+        try
+        {
+            await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+        }
+        catch (DbUpdateException ex) when (ex.InnerException is Npgsql.PostgresException { SqlState: "23505" })
+        {
+            throw new RerunAlreadyInProgressException(originalRunId, mapNodeId, branchIndices.OrderBy(i => i).ToList());
+        }
     }
 
     /// <summary>

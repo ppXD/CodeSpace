@@ -4,6 +4,7 @@ using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Services.Workflows;
 using CodeSpace.Core.Services.Workflows.Engine;
 using CodeSpace.Core.Services.Workflows.Nodes;
+using CodeSpace.Core.Services.Workflows.Reconciliation;
 using CodeSpace.Core.Services.Workflows.Rerun;
 using CodeSpace.Core.Services.Workflows.RunSources;
 using CodeSpace.IntegrationTests.Infrastructure;
@@ -534,10 +535,11 @@ public class RerunMapBranchFlowTests
     }
 
     [Fact]
-    public async Task Rerun_without_an_operation_id_forks_independently_on_every_call()
+    public async Task Rerun_without_an_operation_id_forks_independently_once_the_prior_fork_completes()
     {
-        // Opt-in: a client that sends NO token gets no idempotency — every call forks. (Non-regression: the existing
-        // single-branch endpoint, which never sent a token, is byte-identical.)
+        // Opt-in: a client that sends NO token gets no idempotency — a fresh rerun of the same branch forks again
+        // ONCE the prior one finished (its lease released inline on completion). Two token-less reruns of the same
+        // branch are NOT coalesced (no dedup); they're merely serialized by the active-rerun lease.
         var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
         var key = "mapidem-null-" + Guid.NewGuid().ToString("N");
 
@@ -546,10 +548,12 @@ public class RerunMapBranchFlowTests
         var beforeReruns = await RunCountAsync(teamId);
 
         var fork1 = await RerunMapBranchesAsync(originalRunId, "map", new HashSet<int> { 0 }, teamId, userId, operationId: null);
+        await RunEngineAsync(fork1);   // fork1 completes → its branch-0 lease is released inline
+
         var fork2 = await RerunMapBranchesAsync(originalRunId, "map", new HashSet<int> { 0 }, teamId, userId, operationId: null);
 
-        fork2.ShouldNotBe(fork1, "no token → no dedup → each call forks");
-        (await RunCountAsync(teamId)).ShouldBe(beforeReruns + 2, "both token-less submits forked");
+        fork2.ShouldNotBe(fork1, "no token → no dedup → a fresh rerun of the same branch forks again");
+        (await RunCountAsync(teamId)).ShouldBe(beforeReruns + 2, "both token-less submits forked (the lease released between them)");
     }
 
     [Fact]
@@ -625,6 +629,156 @@ public class RerunMapBranchFlowTests
         for (var i = 1; i < 4; i++) FlakyTestNode.AttemptsFor($"{key}-e{i}").ShouldBe(1, $"sibling {i} was reused — not re-run");
     }
 
+    // ─────────────────────────────────────────────────────────────────────────────
+    //  Active-rerun lease — a DISTINCT-operation concurrent rerun of the SAME branch
+    //  is refused (409) while the first is in flight; it frees the instant that fork
+    //  ends, and the reconciler's terminal-join sweep is the complete backstop.
+    // ─────────────────────────────────────────────────────────────────────────────
+
+    [Fact]
+    public async Task Rerun_a_branch_already_being_reran_is_refused_then_allowed_once_the_first_fork_completes()
+    {
+        // The core lease guarantee + the inline release. A distinct-token rerun of a branch whose prior rerun is
+        // still in flight is refused with RerunAlreadyInProgressException (→ 409) and its fork rolls back (no orphan).
+        // Once the first fork reaches terminal, its lease frees inline → the same branch can be reran again.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var key = "maplease-serial-" + Guid.NewGuid().ToString("N");
+
+        var workflowId = await CreateWorkflowAsync(teamId, userId, CountingMapDef(key));
+        var originalRunId = await RunFreshAsync(workflowId, teamId, FourElements);
+
+        var fork1 = await RerunMapBranchViaCommandAsync(originalRunId, "map", 0, teamId, userId, Guid.NewGuid());   // lease held (fork1 not executed)
+        (await ActiveLeaseCountAsync(originalRunId)).ShouldBe(1, "the first rerun holds an in-progress lease on branch 0");
+
+        var afterFirst = await RunCountAsync(teamId);
+        await Should.ThrowAsync<RerunAlreadyInProgressException>(() =>
+            RerunMapBranchViaCommandAsync(originalRunId, "map", 0, teamId, userId, Guid.NewGuid()));   // distinct token, same branch → 409
+        (await RunCountAsync(teamId)).ShouldBe(afterFirst, "the refused rerun's fork rolled back with its transaction — no orphan");
+
+        await RunEngineAsync(fork1);   // fork1 completes → its lease releases inline
+        (await ActiveLeaseCountAsync(originalRunId)).ShouldBe(0, "the lease freed the instant the fork reached terminal");
+
+        var fork3 = await RerunMapBranchViaCommandAsync(originalRunId, "map", 0, teamId, userId, Guid.NewGuid());   // now allowed
+        fork3.ShouldNotBe(fork1, "once the lease released, the same branch reruns again as a fresh fork");
+    }
+
+    [Fact]
+    public async Task Concurrent_distinct_token_reruns_of_the_same_branch_admit_exactly_one()
+    {
+        // The race: two CONCURRENT distinct-token reruns of the SAME branch. The partial-unique lease serializes
+        // them — one acquires + forks, the other loses the lease insert (23505 → RerunAlreadyInProgressException) and
+        // rolls back. Exactly one fork; exactly one rejection. (OperationId can't help — the tokens differ.)
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var key = "maplease-race-" + Guid.NewGuid().ToString("N");
+
+        var workflowId = await CreateWorkflowAsync(teamId, userId, CountingMapDef(key));
+        var originalRunId = await RunFreshAsync(workflowId, teamId, FourElements);
+        var before = await RunCountAsync(teamId);
+
+        async Task<Exception?> TryRerun(Guid op)
+        {
+            try { await RerunMapBranchViaCommandAsync(originalRunId, "map", 0, teamId, userId, op); return null; }
+            catch (Exception ex) { return ex; }
+        }
+
+        var errors = (await Task.WhenAll(TryRerun(Guid.NewGuid()), TryRerun(Guid.NewGuid()))).Where(e => e != null).ToList();
+
+        errors.Count.ShouldBe(1, "exactly one of the two concurrent reruns was refused");
+        errors[0].ShouldBeOfType<RerunAlreadyInProgressException>();
+        (await RunCountAsync(teamId)).ShouldBe(before + 1, "exactly one fork survived; the loser rolled back");
+        (await ActiveLeaseCountAsync(originalRunId)).ShouldBe(1, "the single winner holds the only in-progress lease");
+    }
+
+    [Fact]
+    public async Task Reruns_of_disjoint_branches_do_not_conflict()
+    {
+        // Disjoint branch sets never collide: two in-flight reruns of DIFFERENT branches both hold their own leases.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var key = "maplease-disjoint-" + Guid.NewGuid().ToString("N");
+
+        var workflowId = await CreateWorkflowAsync(teamId, userId, CountingMapDef(key));
+        var originalRunId = await RunFreshAsync(workflowId, teamId, FourElements);
+        var before = await RunCountAsync(teamId);
+
+        var fork1 = await RerunMapBranchesAsync(originalRunId, "map", new HashSet<int> { 0 }, teamId, userId, Guid.NewGuid());
+        var fork2 = await RerunMapBranchesAsync(originalRunId, "map", new HashSet<int> { 1 }, teamId, userId, Guid.NewGuid());   // disjoint → no conflict
+
+        fork2.ShouldNotBe(fork1, "disjoint-branch reruns fork independently");
+        (await RunCountAsync(teamId)).ShouldBe(before + 2, "both disjoint reruns forked");
+        (await ActiveLeaseCountAsync(originalRunId)).ShouldBe(2, "each holds its own branch lease");
+    }
+
+    [Fact]
+    public async Task Same_token_retry_of_an_in_flight_rerun_dedups_and_does_not_trip_the_lease()
+    {
+        // The ordering hazard, resolved: a SAME-token retry must dedup to the prior fork (OperationId) and must NOT
+        // be misread as a lease conflict, even though the prior fork's lease is still held. The dedup short-circuit
+        // runs BEFORE the lease is taken.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var key = "maplease-sametoken-" + Guid.NewGuid().ToString("N");
+
+        var workflowId = await CreateWorkflowAsync(teamId, userId, CountingMapDef(key));
+        var originalRunId = await RunFreshAsync(workflowId, teamId, FourElements);
+
+        var opId = Guid.NewGuid();
+        var fork1 = await RerunMapBranchesAsync(originalRunId, "map", new HashSet<int> { 0 }, teamId, userId, opId);   // lease held, fork1 not executed
+        var before = await RunCountAsync(teamId);
+
+        var fork2 = await RerunMapBranchesAsync(originalRunId, "map", new HashSet<int> { 0 }, teamId, userId, opId);   // SAME token → dedup, NOT a 409
+
+        fork2.ShouldBe(fork1, "a same-token retry dedups to the prior fork — it must NOT hit the held lease as a false conflict");
+        (await RunCountAsync(teamId)).ShouldBe(before, "no second fork; the retry returned the prior one");
+        (await ActiveLeaseCountAsync(originalRunId)).ShouldBe(1, "still exactly one lease — the retry took none");
+    }
+
+    [Fact]
+    public async Task A_rerun_set_that_overlaps_an_in_flight_lease_on_any_branch_is_refused_atomically()
+    {
+        // SET granularity: the per-branch lease catches an overlap on ANY branch of the set, and the conflicting
+        // insert is ATOMIC — a {1,2} rerun that collides with an in-flight {0,1} on branch 1 is refused WHOLE (it
+        // leaks no partial branch-2 lease). (Driven through the service for a multi-branch set; the single-branch
+        // mediator tests already prove the fork rolls back on the throw.)
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var key = "maplease-setoverlap-" + Guid.NewGuid().ToString("N");
+
+        var workflowId = await CreateWorkflowAsync(teamId, userId, CountingMapDef(key));
+        var originalRunId = await RunFreshAsync(workflowId, teamId, FourElements);
+
+        await RerunMapBranchesAsync(originalRunId, "map", new HashSet<int> { 0, 1 }, teamId, userId, Guid.NewGuid());   // holds leases on 0 and 1
+        (await ActiveLeaseCountAsync(originalRunId)).ShouldBe(2, "the first rerun holds leases on branches 0 and 1");
+
+        await Should.ThrowAsync<RerunAlreadyInProgressException>(() =>
+            RerunMapBranchesAsync(originalRunId, "map", new HashSet<int> { 1, 2 }, teamId, userId, Guid.NewGuid()));   // overlaps on branch 1
+
+        (await ActiveLeaseCountAsync(originalRunId)).ShouldBe(2, "the refused set leaked no partial lease — its branch-2 row never committed");
+    }
+
+    [Fact]
+    public async Task Reconciler_releases_the_lease_of_a_fork_cancelled_outside_the_completion_path()
+    {
+        // The reaper backstop. An operator cancel flips the fork to Cancelled via a CAS that BYPASSES the engine's
+        // inline release, so the lease lingers in_progress. The reconciler's terminal-join sweep frees it (the fork
+        // is terminal), after which the branch can be reran again.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var key = "maplease-reaper-" + Guid.NewGuid().ToString("N");
+
+        var workflowId = await CreateWorkflowAsync(teamId, userId, CountingMapDef(key));
+        var originalRunId = await RunFreshAsync(workflowId, teamId, FourElements);
+
+        var fork1 = await RerunMapBranchesAsync(originalRunId, "map", new HashSet<int> { 0 }, teamId, userId, Guid.NewGuid());
+        await CancelRunAsync(fork1, teamId);   // Cancelled via CAS — the inline release does NOT run
+        await AssertRunStatusAsync(fork1, WorkflowRunStatus.Cancelled);
+        (await ActiveLeaseCountAsync(originalRunId)).ShouldBe(1, "the cancel bypassed the inline release — the lease lingers");
+
+        var summary = await ReconcileAsync();
+
+        summary.ReleasedRerunLeases.ShouldBeGreaterThanOrEqualTo(1, "the reconciler's terminal-join freed the cancelled fork's lease");
+        (await ActiveLeaseCountAsync(originalRunId)).ShouldBe(0, "no in-progress lease remains for this run");
+
+        var fork2 = await RerunMapBranchesAsync(originalRunId, "map", new HashSet<int> { 0 }, teamId, userId, Guid.NewGuid());
+        fork2.ShouldNotBe(fork1, "the branch reruns again once the reconciler released the orphaned lease");
+    }
+
     [Fact]
     public async Task Rerun_side_effecting_map_branch_parks_on_approval_then_approve_fires_target_once_and_siblings_never_refire()
     {
@@ -650,10 +804,18 @@ public class RerunMapBranchFlowTests
         (await PendingApprovalWaitCountAsync(rerunId)).ShouldBe(1, "exactly one rerun-gate Approval wait is parked (for the single re-run branch)");
         MutatingProbeNode.ExecutionsFor($"{probeKey}-e2").ShouldBe(1, "the gate must NOT let the side effect fire before approval");
 
+        // A legitimately SUSPENDED rerun KEEPS its lease — the rerun is genuinely still in flight (parked on the
+        // human gate), so a concurrent re-rerun of the same branch must stay BLOCKED. This is the exact double-fire
+        // the lease prevents: without it, a second rerun would fire the side effect again while the first is parked.
+        (await ActiveLeaseCountAsync(originalRunId)).ShouldBe(1, "the parked fork still holds its branch-2 lease");
+        await Should.ThrowAsync<RerunAlreadyInProgressException>(() =>
+            RerunMapBranchViaCommandAsync(originalRunId, "map", 2, teamId, userId, Guid.NewGuid()));
+
         (await ApproveRerunGateAsync(rerunId, teamId, userId, approved: true)).ShouldBeTrue();
         await RunEngineAsync(rerunId);
 
         await AssertRunStatusAsync(rerunId, WorkflowRunStatus.Success);
+        (await ActiveLeaseCountAsync(originalRunId)).ShouldBe(0, "the lease frees once the parked fork resumes + completes");
         MutatingProbeNode.ExecutionsFor($"{probeKey}-e2").ShouldBe(2, "the approved target fired EXACTLY once more");
         MutatingProbeNode.ExecutionsFor($"{probeKey}-e0").ShouldBe(1, "sibling 0 was replayed — its side effect must NOT re-fire");
         MutatingProbeNode.ExecutionsFor($"{probeKey}-e1").ShouldBe(1, "sibling 1 replayed, no re-fire");
@@ -1357,6 +1519,25 @@ public class RerunMapBranchFlowTests
     {
         using var scope = _fixture.BeginScope();
         return await scope.Resolve<CodeSpaceDbContext>().WorkflowRun.AsNoTracking().CountAsync(r => r.TeamId == teamId);
+    }
+
+    private async Task<int> ActiveLeaseCountAsync(Guid originalRunId)
+    {
+        using var scope = _fixture.BeginScope();
+        return await scope.Resolve<CodeSpaceDbContext>().WorkflowRerunLease.AsNoTracking()
+            .CountAsync(l => l.OriginalRunId == originalRunId && l.Status == RerunLeaseStatuses.InProgress);
+    }
+
+    private async Task CancelRunAsync(Guid runId, Guid teamId)
+    {
+        using var scope = _fixture.BeginScope();
+        await scope.Resolve<IWorkflowService>().CancelRunAsync(runId, teamId, CancellationToken.None);
+    }
+
+    private async Task<StuckRunReconcileSummary> ReconcileAsync()
+    {
+        using var scope = _fixture.BeginScope();
+        return await scope.Resolve<IStuckRunReconcilerService>().ReconcileAsync(CancellationToken.None);
     }
 
     /// <summary>Resolve a pending rerun-gate Approval wait through the REAL ResumeRunCommand chain (→ ApproveRunAsync), as an operator would.</summary>

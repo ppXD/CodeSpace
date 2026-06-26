@@ -151,6 +151,14 @@ public sealed class GlobalExceptionFilter : IExceptionFilter
                 };
                 break;
 
+            case RerunAlreadyInProgressException inProgress:
+                // 409 — a rerun of an OVERLAPPING branch is already in flight (its WorkflowRerunLease is held).
+                // Surface the message (it names the run/map/branches) so the operator knows to wait. Sits before the
+                // generic 23505 arm so the typed conflict wins over the anonymous "duplicate_resource".
+                _logger.LogInformation("Rerun already in progress at {Path}: {Message}", path, inProgress.Message);
+                context.Result = BuildProblemResult(StatusCodes.Status409Conflict, "rerun_already_in_progress", inProgress.Message);
+                break;
+
             case DbUpdateException dbEx when ExtractPostgresSqlState(dbEx) == "23505":
                 // Postgres unique-constraint violation. Handlers SHOULD pre-check and throw
                 // a friendlier InvalidOperationException; this is the safety net for race

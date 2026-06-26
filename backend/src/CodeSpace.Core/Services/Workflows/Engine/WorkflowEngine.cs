@@ -880,8 +880,32 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
         if (status is WorkflowRunStatus.Failure or WorkflowRunStatus.Cancelled)
             await CancelPendingWaitsAndChildrenAsync(run, cancellationToken).ConfigureAwait(false);
 
+        // A Rerun fork reaching terminal frees the active-rerun leases it holds IMMEDIATELY (so the operator can
+        // re-rerun the same branch without waiting a reconciler tick); the reconciler's terminal-join sweep is the
+        // complete backstop for the cancel paths that skip this method and for a best-effort flip that failed.
+        if (run.SourceType == WorkflowRunSourceTypes.Rerun)
+            await ReleaseRerunLeasesAsync(run.Id, cancellationToken).ConfigureAwait(false);
+
         // If this run is a sub-workflow child, wake the parent that's parked on it.
         await ResumeParentIfSubworkflowChildAsync(run, status, error, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>Best-effort: free the active-rerun leases this fork holds (status-guarded CAS by fork id). NEVER
+    /// throws out of completion — the reconciler's terminal-join sweep re-releases anything this misses.</summary>
+    private async Task ReleaseRerunLeasesAsync(Guid forkRunId, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await _db.WorkflowRerunLease
+                .Where(l => l.ForkRunId == forkRunId && l.Status == RerunLeaseStatuses.InProgress)
+                .ExecuteUpdateAsync(s => s
+                    .SetProperty(l => l.Status, RerunLeaseStatuses.Released)
+                    .SetProperty(l => l.ReleasedAt, DateTimeOffset.UtcNow), cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Best-effort rerun-lease release failed for fork {ForkRunId}; the reconciler will free it", forkRunId);
+        }
     }
 
     /// <summary>
