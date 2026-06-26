@@ -454,6 +454,32 @@ public class RerunMapBranchFlowTests
     }
 
     [Fact]
+    public async Task Rerun_a_branch_of_a_terminate_map_whose_siblings_recovered_via_an_in_body_error_edge_reuses_them_and_stays_successful()
+    {
+        // The boundary the terminate arm must NOT cross: a body node that FAILS but is HANDLED by its own in-body
+        // error edge is NOT a terminate point — the branch recovers and the terminate-mode map SUCCEEDS. Rerunning
+        // one branch must reuse the error-edge-recovered siblings (their flaky never re-fires) and stay Success —
+        // proving the !HasErrorEdgeInDefinition guard keeps a handled failure out of the terminate settlement.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var key = "mapterm-edge-" + Guid.NewGuid().ToString("N");
+
+        var workflowId = await CreateWorkflowAsync(teamId, userId, EdgeHandledTerminateMapDef(key));
+        var originalRunId = await RunFreshAsync(workflowId, teamId, FourElements);
+        await AssertRunStatusAsync(originalRunId, WorkflowRunStatus.Success,
+            "every branch's flaky failed but its error edge recovered to a succeeding node → no terminate, the map succeeds");
+        for (var i = 0; i < 4; i++) FlakyTestNode.AttemptsFor($"{key}-e{i}").ShouldBe(1, $"branch {i} ran once + recovered via its error edge");
+
+        var rerunId = await RerunMapBranchesAsync(originalRunId, "map", new HashSet<int> { 0 }, teamId, userId);
+        await RunEngineAsync(rerunId);
+
+        await AssertRunStatusAsync(rerunId, WorkflowRunStatus.Success, "branch 0 re-ran and recovered again; the recovered siblings reused → the map stays Success");
+        FlakyTestNode.AttemptsFor($"{key}-e0").ShouldBe(2, "branch 0 re-ran once and recovered again");
+        for (var i = 1; i < 4; i++) FlakyTestNode.AttemptsFor($"{key}-e{i}").ShouldBe(1, $"recovered sibling {i} was REUSED — its handled failure must NOT re-fire");
+        (await NodeStartedCountAsync(rerunId, "synth")).ShouldBe(1, "the synthesizer ran once the map succeeded");
+        (await LoadMapResultsAsync(rerunId, "map")).GetArrayLength().ShouldBe(4);
+    }
+
+    [Fact]
     public async Task Rerun_side_effecting_map_branch_parks_on_approval_then_approve_fires_target_once_and_siblings_never_refire()
     {
         // CROWN JEWEL (D7-5 side-effecting body). Map over 4 elements; each branch body is a PURELY side-effecting
@@ -872,6 +898,36 @@ public class RerunMapBranchFlowTests
             new() { From = "synth", To = "end" },
             new() { From = "ms", To = "flaky" },
             new() { From = "flaky", To = "echo" },
+        },
+    };
+
+    // terminate-mode map whose body node FAILS but is HANDLED by its OWN in-body error edge: flaky[failTimes=99]
+    // always fails → routes down its error handle to a recover node that succeeds → the branch SUCCEEDS, so a
+    // handled failure is NOT a terminate point and the map SUCCEEDS (never Failure). Exercises in-body error routing
+    // inside a map branch + the rerun reuse of an error-edge-recovered sibling — the inverse of the terminate arm's
+    // !HasErrorEdgeInDefinition guard (the same predicate the continue arm uses to skip handled failures).
+    private static WorkflowDefinition EdgeHandledTerminateMapDef(string counterPrefix) => new()
+    {
+        SchemaVersion = 1,
+        Nodes = new List<NodeDefinition>
+        {
+            new() { Id = "start", TypeKey = "trigger.manual", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
+            new() { Id = "map", TypeKey = "flow.map", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.Json("""{ "items": "{{trigger.things}}" }""") },
+            new() { Id = "ms", TypeKey = "flow.map_start", ParentId = "map", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
+            new() { Id = "flaky", TypeKey = FlakyTestNode.Key, ParentId = "map",
+                    Config = WorkflowsTestSeed.Json($$"""{ "key": "{{counterPrefix}}-{{"{{"}}item{{"}}"}}", "failTimes": 99 }"""), Inputs = WorkflowsTestSeed.EmptyJson() },
+            new() { Id = "recover", TypeKey = JsonEmitNode.Key, ParentId = "map", Config = WorkflowsTestSeed.EmptyJson(),
+                    Inputs = WorkflowsTestSeed.Json("""{ "item": "{{item}}", "recovered": true }""") },
+            new() { Id = "synth", TypeKey = JsonEmitNode.Key, Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.Json("""{ "agg": "{{nodes.map.outputs.results}}" }""") },
+            new() { Id = "end", TypeKey = "builtin.terminal", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
+        },
+        Edges = new List<EdgeDefinition>
+        {
+            new() { From = "start", To = "map" },
+            new() { From = "map", To = "synth" },
+            new() { From = "synth", To = "end" },
+            new() { From = "ms", To = "flaky" },
+            new() { From = "flaky", To = "recover", SourceHandle = WorkflowHandles.Error },
         },
     };
 
