@@ -54,6 +54,20 @@ public class SupervisorAcceptanceGraderTests
         oracle.Context.Task.Grading.ShouldBe(BenchmarkGradingKind.TestsPass);
     }
 
+    [Theory]
+    [InlineData(BenchmarkGradingKind.TestsPass)]
+    [InlineData(BenchmarkGradingKind.ArtifactPresent)]
+    public async Task Resolves_the_oracle_named_by_the_requested_kind(BenchmarkGradingKind kind)
+    {
+        var oracle = new FakeGrader(Pass);
+        var grader = Build(new FakeResolver(new WorkspaceRequest { RepositoryUrl = "file:///r" }), oracle);
+
+        await grader.GradeAsync(Guid.NewGuid(), Guid.NewGuid(), "b", Command, 30, CancellationToken.None, kind);
+
+        oracle.ResolvedKind.ShouldBe(kind, "the adapter resolves the registry oracle by the requested kind — TestsPass by default, ArtifactPresent when the model authored it");
+        oracle.Context!.Task.TestCommand.ShouldBe(Command, "the authored paths/argv flow to whichever oracle was resolved");
+    }
+
     [Fact]
     public async Task Returns_the_oracles_verdict_verbatim()
     {

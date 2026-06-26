@@ -189,6 +189,80 @@ public sealed class SupervisorWholeLoopE2ETests : IDisposable
     }
 
     [Fact]
+    public async Task Supervisor_accepts_a_non_coding_run_whose_declared_deliverables_exist_via_the_artifact_oracle()
+    {
+        if (OperatingSystem.IsWindows()) return;          // the fake CLI is a /bin/sh script the runner spawns
+        if (!await GitReadyAsync()) return;               // real git is required for clone/capture/integrate/grade
+
+        using var cli = new FileWritingFakeCli();         // alpha + beta each write a deterministic file into their clone
+
+        // The model authors a NON-coding definition-of-done (T1.1): the produced workspace must CONTAIN the declared
+        // deliverable files. Both agents' files land on the integrated head, so the REAL ArtifactPresentGrader (clone +
+        // filesystem existence check, never a self-report) passes — the deterministic "deliverable exists" oracle for
+        // research / analysis output, AND-ed under the operator's own check.sh floor.
+        SetDecisionScript(s => s.PlanSpawnMergeArtifactStop(new[] { FileWritingFakeCli.FileFor("do alpha"), FileWritingFakeCli.FileFor("do beta") }));
+
+        var jobClient = ResolveJobClient();
+        jobClient.Clear();
+        jobClient.AutoExecute = true;
+
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+
+        using var remote = new BareRemote();
+        await remote.SeedBaseAsync(new() { ["check.sh"] = "#!/bin/sh\nexit 0\n", ["base.txt"] = "base\n" });
+        var repoId = await SeedBoundRepositoryAsync(teamId, remote.Url, "main");
+
+        var workflowId = await CreateWholeLoopWorkflowAsync(teamId, userId, repoId);
+        var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
+
+        await RunEngineAsync(runId);
+        await jobClient.WaitForPendingAsync();
+
+        await AssertRunReachedSuccessAsync(runId);
+        await AssertBothAgentsProducedRealPatchesAsync(runId);
+        await AssertIntegratedBranchOnRemoteAsync(remote, runId);
+        await AssertAcceptancePassedOnStopAsync(runId, teamId);   // the ArtifactPresent oracle cloned the head + found BOTH declared files → PASS
+    }
+
+    [Fact]
+    public async Task Supervisor_withholds_a_non_coding_run_whose_declared_deliverable_is_missing()
+    {
+        if (OperatingSystem.IsWindows()) return;          // the fake CLI is a /bin/sh script the runner spawns
+        if (!await GitReadyAsync()) return;               // real git is required for clone/capture/integrate/grade
+
+        using var cli = new FileWritingFakeCli();
+
+        // THE TEETH for the artifact oracle: the SAME real arc (spawn → real files → real merge) and a PASSING structural
+        // floor (check.sh exits 0), but the model's ArtifactPresent gate declares a deliverable the agents NEVER produced
+        // (docs/SUMMARY.md). A structural exit-0 check would green this run; the deliverable-exists oracle clones the head,
+        // finds the file missing, and WITHHOLDS — proving the new oracle catches an absent deliverable independent of tests.
+        SetDecisionScript(s => s.PlanSpawnMergeArtifactStop(new[] { FileWritingFakeCli.FileFor("do alpha"), "docs/SUMMARY.md" }));
+
+        var jobClient = ResolveJobClient();
+        jobClient.Clear();
+        jobClient.AutoExecute = true;
+
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+
+        using var remote = new BareRemote();
+        await remote.SeedBaseAsync(new() { ["check.sh"] = "#!/bin/sh\nexit 0\n", ["base.txt"] = "base\n" });
+        var repoId = await SeedBoundRepositoryAsync(teamId, remote.Url, "main");
+
+        var workflowId = await CreateWholeLoopWorkflowAsync(teamId, userId, repoId);
+        var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
+
+        await RunEngineAsync(runId);
+        await jobClient.WaitForPendingAsync();
+
+        // The agents still did real work and the merge still integrated; the passing structural floor did NOT save it —
+        // the missing-deliverable verdict from the ArtifactPresent oracle is what withholds the reviewable head.
+        await AssertRunReachedSuccessAsync(runId);
+        await AssertBothAgentsProducedRealPatchesAsync(runId);
+        await AssertIntegratedBranchOnRemoteAsync(remote, runId);
+        await AssertAcceptanceFailedAndBranchWithheldAsync(runId, teamId);
+    }
+
+    [Fact]
     public async Task Supervisor_accepts_an_agent_solution_that_actually_solves_the_task_via_a_goal_relevance_oracle()
     {
         if (OperatingSystem.IsWindows()) return;          // the fake CLI is a /bin/sh script the runner spawns

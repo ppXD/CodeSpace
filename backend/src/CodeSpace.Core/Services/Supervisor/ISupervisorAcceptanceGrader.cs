@@ -17,10 +17,12 @@ namespace CodeSpace.Core.Services.Supervisor;
 public interface ISupervisorAcceptanceGrader
 {
     /// <summary>
-    /// Clone <paramref name="repositoryId"/> at <paramref name="branch"/> (team-scoped), run <paramref name="command"/>
-    /// in it (argv, no shell, cwd = the clone root, capped at <paramref name="timeoutSeconds"/>), and return the
-    /// pass/fail grade — then remove the clone. A repo/branch that can't be cloned, or a check that can't be run,
-    /// yields a failed grade with a legible detail (fail-closed); only a genuine cancellation propagates.
+    /// Clone <paramref name="repositoryId"/> at <paramref name="branch"/> (team-scoped) and grade it with the oracle
+    /// named by <paramref name="kind"/> against <paramref name="command"/> — for <c>TestsPass</c> (the default) run the
+    /// argv (no shell, cwd = the clone root, capped at <paramref name="timeoutSeconds"/>); for <c>ArtifactPresent</c>
+    /// check the declared deliverable paths exist — then remove the clone. A repo/branch that can't be cloned, or a check
+    /// that can't be run, yields a failed grade with a legible detail (fail-closed); only a genuine cancellation propagates.
+    /// The default keeps every existing caller (the operator floor + resolve path) on the <c>TestsPass</c> oracle.
     /// </summary>
-    Task<BenchmarkGrade> GradeAsync(Guid repositoryId, Guid teamId, string branch, IReadOnlyList<string> command, int timeoutSeconds, CancellationToken cancellationToken);
+    Task<BenchmarkGrade> GradeAsync(Guid repositoryId, Guid teamId, string branch, IReadOnlyList<string> command, int timeoutSeconds, CancellationToken cancellationToken, BenchmarkGradingKind kind = BenchmarkGradingKind.TestsPass);
 }

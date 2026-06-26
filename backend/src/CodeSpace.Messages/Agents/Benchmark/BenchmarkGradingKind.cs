@@ -21,4 +21,13 @@ public enum BenchmarkGradingKind
 
     /// <summary>FOLLOW-ON (not built): the produced unified diff is matched against a known-good golden patch. Brittle to formatting; deferred.</summary>
     DiffMatch,
+
+    /// <summary>
+    /// The declared DELIVERABLE artifact(s) exist in the produced workspace — a deterministic, agent-INDEPENDENT
+    /// "definition of done" for NON-coding work (research / analysis / audit) whose output is a file, not a passing
+    /// test. The grading command is read as a list of repo-relative paths that MUST be present on the produced branch;
+    /// all present = solved. Like <see cref="TestsPass"/> the verdict is the code's filesystem check on an independent
+    /// clone, never the model's opinion of itself.
+    /// </summary>
+    ArtifactPresent,
 }

@@ -1,4 +1,5 @@
 using System.Text.Json.Serialization;
+using CodeSpace.Messages.Agents.Benchmark;
 
 namespace CodeSpace.Messages.Agents;
 
@@ -21,8 +22,23 @@ namespace CodeSpace.Messages.Agents;
 /// </summary>
 public sealed record SupervisorAcceptanceSpec
 {
-    /// <summary>The runnable acceptance check — an argv the server executes against the produced workspace (a non-zero exit fails acceptance). Authoring a runnable command is what makes the verdict OBJECTIVE rather than a model self-report.</summary>
+    /// <summary>
+    /// The acceptance check payload. Its meaning is the <see cref="Kind"/>'s: for <c>TestsPass</c> (the default) it is an
+    /// ARGV the server runs against the produced workspace (non-zero exit fails); for <c>ArtifactPresent</c> it is the
+    /// list of repo-relative PATHS that must exist on the produced branch. Either way, authoring it is what makes the
+    /// verdict OBJECTIVE — a server-run check on an agent-independent clone, never a model self-report.
+    /// </summary>
     public required IReadOnlyList<string> Command { get; init; }
+
+    /// <summary>
+    /// Which OBJECTIVE oracle verifies this acceptance — <c>TestsPass</c> (run the argv, exit 0) for coding, or
+    /// <c>ArtifactPresent</c> (the declared deliverable files exist) for non-coding work. Null-omitted
+    /// (<c>[JsonIgnore(WhenWritingNull)]</c>) so an ABSENT kind serializes byte-identical and defaults to
+    /// <c>TestsPass</c> — the model only authors a non-default kind for its OWN tightening gate / per-subtask check; the
+    /// operator acceptance floor is always graded as <c>TestsPass</c> server-side (the model never authors the floor's kind).
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public BenchmarkGradingKind? Kind { get; init; }
 
     /// <summary>Optional human-readable description of what the check proves — surfaced in the phase projection for legibility; never executed.</summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]

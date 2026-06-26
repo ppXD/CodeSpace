@@ -35,7 +35,7 @@ public sealed class SupervisorAcceptanceGrader : ISupervisorAcceptanceGrader, IS
         _logger = logger;
     }
 
-    public async Task<BenchmarkGrade> GradeAsync(Guid repositoryId, Guid teamId, string branch, IReadOnlyList<string> command, int timeoutSeconds, CancellationToken cancellationToken)
+    public async Task<BenchmarkGrade> GradeAsync(Guid repositoryId, Guid teamId, string branch, IReadOnlyList<string> command, int timeoutSeconds, CancellationToken cancellationToken, BenchmarkGradingKind kind = BenchmarkGradingKind.TestsPass)
     {
         try
         {
@@ -44,7 +44,7 @@ public sealed class SupervisorAcceptanceGrader : ISupervisorAcceptanceGrader, IS
 
             await using var workspace = await _providers.Resolve(DefaultRunnerKind).PrepareAsync(WorkspaceProvisionRequest.FromSingle(clone), cancellationToken).ConfigureAwait(false);
 
-            return await GradeWorkspaceAsync(workspace.Directory, command, timeoutSeconds, cancellationToken).ConfigureAwait(false);
+            return await GradeWorkspaceAsync(workspace.Directory, command, timeoutSeconds, kind, cancellationToken).ConfigureAwait(false);
         }
         catch (WorkspaceException ex)
         {
@@ -62,11 +62,11 @@ public sealed class SupervisorAcceptanceGrader : ISupervisorAcceptanceGrader, IS
         }
     }
 
-    private async Task<BenchmarkGrade> GradeWorkspaceAsync(string directory, IReadOnlyList<string> command, int timeoutSeconds, CancellationToken cancellationToken)
+    private async Task<BenchmarkGrade> GradeWorkspaceAsync(string directory, IReadOnlyList<string> command, int timeoutSeconds, BenchmarkGradingKind kind, CancellationToken cancellationToken)
     {
         var context = BenchmarkGradingContext.ForCommand(command, timeoutSeconds, directory, _runners.Resolve(DefaultRunnerKind));
 
-        return await _graders.Resolve(BenchmarkGradingKind.TestsPass).GradeAsync(context, cancellationToken).ConfigureAwait(false);
+        return await _graders.Resolve(kind).GradeAsync(context, cancellationToken).ConfigureAwait(false);
     }
 
     private static BenchmarkGrade Failed(string detail) => new() { Passed = false, Detail = detail };
