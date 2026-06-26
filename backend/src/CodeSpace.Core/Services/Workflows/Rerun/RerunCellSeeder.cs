@@ -37,11 +37,12 @@ public interface IRerunCellSeeder
     /// fanned out over <paramref name="branchCount"/> elements, re-emits every NON-target branch's cells faithfully
     /// (each row's real NodeId + status + outputs, under the branch key <c>"&lt;mapId&gt;#&lt;j&gt;"</c>) so the engine's
     /// <c>RehydrateMapResults</c>/<c>TrySettleBranch</c> REPLAYS those siblings (no side-effect re-fire) on the fork.
-    /// The TARGET branch (<paramref name="targetIndex"/>) is OMITTED — with no rows under its key, the map re-runs it
-    /// fresh. The map's OWN top-level cell is NOT seeded here (the planner keeps it in the re-run set), so the map
+    /// The TARGET branches (<paramref name="rerunIndices"/>) are OMITTED — with no rows under their keys, the map re-runs
+    /// them fresh. The map's OWN top-level cell is NOT seeded here (the planner keeps it in the re-run set), so the map
     /// re-enters and re-aggregates. Branch cells are terminal-record-only (no node.started) — the reuse discriminator.
+    /// The single-branch rerun is the <c>|rerunIndices| == 1</c> case of this same set primitive.
     /// </summary>
-    Task SeedSiblingBranchCellsAsync(Guid originalRunId, Guid newRunId, string mapNodeId, int targetIndex, int branchCount, CancellationToken cancellationToken);
+    Task SeedSiblingBranchCellsAsync(Guid originalRunId, Guid newRunId, string mapNodeId, IReadOnlySet<int> rerunIndices, int branchCount, CancellationToken cancellationToken);
 }
 
 public sealed class RerunCellSeeder : IRerunCellSeeder, IScopedDependency
@@ -84,7 +85,7 @@ public sealed class RerunCellSeeder : IRerunCellSeeder, IScopedDependency
             });
     }
 
-    public async Task SeedSiblingBranchCellsAsync(Guid originalRunId, Guid newRunId, string mapNodeId, int targetIndex, int branchCount, CancellationToken cancellationToken)
+    public async Task SeedSiblingBranchCellsAsync(Guid originalRunId, Guid newRunId, string mapNodeId, IReadOnlySet<int> rerunIndices, int branchCount, CancellationToken cancellationToken)
     {
         // A top-level map's branch key is exactly "<mapId>#<i>" (CombineIterationKey("", seg) == seg). Load the
         // original's branch-scoped rows, group by EXACT key, and re-emit each NON-target branch faithfully.
@@ -97,7 +98,7 @@ public sealed class RerunCellSeeder : IRerunCellSeeder, IScopedDependency
 
         for (var j = 0; j < branchCount; j++)
         {
-            if (j == targetIndex) continue;   // OMIT the target branch → no rows under its key → the map re-runs it fresh
+            if (rerunIndices.Contains(j)) continue;   // OMIT the re-run branches → no rows under their keys → the map re-runs them fresh
 
             var branchKey = $"{mapNodeId}#{j}";
             if (!byKey.TryGetValue(branchKey, out var branchRows)) continue;   // sibling never produced direct cells — nothing to replay

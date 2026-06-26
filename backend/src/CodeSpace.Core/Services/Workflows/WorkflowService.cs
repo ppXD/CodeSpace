@@ -330,7 +330,17 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
         return rerunRunId;
     }
 
-    public async Task<Guid> RerunMapBranchAsync(Guid originalRunId, string mapNodeId, int branchIndex, Guid teamId, Guid actorUserId, CancellationToken cancellationToken)
+    /// <summary>Re-run a SINGLE map branch — the <c>|branchIndices| == 1</c> degenerate case of <see cref="RerunMapBranchesAsync"/>.</summary>
+    public Task<Guid> RerunMapBranchAsync(Guid originalRunId, string mapNodeId, int branchIndex, Guid teamId, Guid actorUserId, CancellationToken cancellationToken) =>
+        RerunMapBranchesAsync(originalRunId, mapNodeId, new HashSet<int> { branchIndex }, teamId, actorUserId, cancellationToken);
+
+    /// <summary>
+    /// Re-run a SET of a top-level map's branches in ONE forked run: the chosen branches re-run fresh while every OTHER
+    /// (reusable) sibling is REPLAYED from the original's ledger, then the map re-enters and re-aggregates over the mix.
+    /// This is the single generic primitive both "rerun this branch" (a singleton) and "rerun these branches" compose
+    /// from — never a second rerun path; one fork per call (never N forks looped over the set).
+    /// </summary>
+    public async Task<Guid> RerunMapBranchesAsync(Guid originalRunId, string mapNodeId, IReadOnlySet<int> branchIndices, Guid teamId, Guid actorUserId, CancellationToken cancellationToken)
     {
         var original = await LoadRunForForkAsync(originalRunId, teamId, cancellationToken).ConfigureAwait(false);
         var definition = await LoadOriginalDefinitionAsync(original, cancellationToken).ConfigureAwait(false);
@@ -338,10 +348,10 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
         // Fail-closed, ALL before any write. (1) the target must be a TOP-LEVEL flow.map; (2) its body must be
         // re-runnable per the D7-5 allowlist (pure + purely-side-effecting [D7-3-gated] + agent.code [re-stage];
         // refuse other-suspendable / both-flagged / nested-container); (3) the original map must have SUCCEEDED (a
-        // Success map ⇒ every branch settled cleanly — this subsumes "suspended sibling" and "terminate-mode-failed
-        // map", both non-Success → refuse); (4) the branch index must be within the original fan-out. The plan re-runs
-        // FROM the map (so the map re-enters + its downstream synthesizer re-runs); the gate exempts ONLY this map from
-        // the container refusal.
+        // Success map ⇒ every sibling settled cleanly, so reusing the non-chosen siblings is sound — this subsumes
+        // "suspended sibling" and "terminate-mode-failed map", both non-Success → refuse); (4) every requested branch
+        // index must be within the original fan-out. The plan re-runs FROM the map (so it re-enters + its downstream
+        // synthesizer re-runs); the gate exempts ONLY this map from the container refusal.
         EnsureTargetIsTopLevelMap(definition, mapNodeId);
         EnsureMapItemsReplayDeterministic(definition, mapNodeId);
         EnsureBranchBodyIsRerunnable(definition, mapNodeId);
@@ -351,25 +361,25 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
 
         await EnsureOriginalMapSucceededAsync(originalRunId, mapNodeId, cancellationToken).ConfigureAwait(false);
         var branchCount = await ResolveOriginalBranchCountAsync(originalRunId, mapNodeId, cancellationToken).ConfigureAwait(false);
-        EnsureBranchIndexInRange(branchIndex, branchCount, mapNodeId);
+        EnsureBranchIndicesInRange(branchIndices, branchCount, mapNodeId);
 
         // The map is the re-run root, so it + its downstream are RE-RUN; everything upstream is KEPT (incl. the
         // node binding the map's items — guaranteeing the fork re-resolves the SAME element array, so the seeded
-        // sibling indices align). Seed the kept upstream (D7-2) + the N-1 NON-target sibling branch cells.
+        // sibling indices align). Seed the kept upstream (D7-2) + every NON-chosen sibling branch cell.
         var keptToSeed = await ResolveReusableKeptCellsAsync(originalRunId, definition, plan, cancellationToken).ConfigureAwait(false);
         var snapshot = await LoadVariableSnapshotAsync(originalRunId, cancellationToken).ConfigureAwait(false);
 
         var rerunRunId = await StageForkedRunAsync(original, snapshot, WorkflowRunSourceTypes.Rerun, teamId, actorUserId, cancellationToken).ConfigureAwait(false);
 
         await _cellSeeder.SeedKeptCellsAsync(originalRunId, rerunRunId, keptToSeed, writeEmptySnapshotSentinel: snapshot.Count == 0, cancellationToken).ConfigureAwait(false);
-        await _cellSeeder.SeedSiblingBranchCellsAsync(originalRunId, rerunRunId, mapNodeId, branchIndex, branchCount, cancellationToken).ConfigureAwait(false);
+        await _cellSeeder.SeedSiblingBranchCellsAsync(originalRunId, rerunRunId, mapNodeId, branchIndices, branchCount, cancellationToken).ConfigureAwait(false);
 
         await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
         await DispatchAfterCommitAsync(rerunRunId, cancellationToken).ConfigureAwait(false);
 
         _logger.LogInformation(
-            "Workflow map-branch rerun queued. OriginalRunId={Original} RerunRunId={Rerun} Map={Map} Branch={Branch}/{BranchCount} Reused={ReusedCount} Snapshot={IsSnapshot} TeamId={Team}",
-            originalRunId, rerunRunId, mapNodeId, branchIndex, branchCount, keptToSeed.Count, original.WorkflowId is null, teamId);
+            "Workflow map-branch rerun queued. OriginalRunId={Original} RerunRunId={Rerun} Map={Map} Branches={Branches}/{BranchCount} Reused={ReusedCount} Snapshot={IsSnapshot} TeamId={Team}",
+            originalRunId, rerunRunId, mapNodeId, string.Join(",", branchIndices.OrderBy(i => i)), branchCount, keptToSeed.Count, original.WorkflowId is null, teamId);
 
         return rerunRunId;
     }
@@ -476,11 +486,15 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
         return directIndices.Count;
     }
 
-    private static void EnsureBranchIndexInRange(int branchIndex, int branchCount, string mapNodeId)
+    private static void EnsureBranchIndicesInRange(IReadOnlySet<int> branchIndices, int branchCount, string mapNodeId)
     {
-        if (branchIndex < 0 || branchIndex >= branchCount)
-            throw new RerunTargetNotFoundException(
-                $"Branch index {branchIndex} is out of range for map '{mapNodeId}' (the original fanned out over {branchCount} branch(es), valid indices 0..{branchCount - 1}).");
+        if (branchIndices.Count == 0)
+            throw new RerunTargetNotFoundException($"No branch was specified to re-run for map '{mapNodeId}'.");
+
+        foreach (var branchIndex in branchIndices)
+            if (branchIndex < 0 || branchIndex >= branchCount)
+                throw new RerunTargetNotFoundException(
+                    $"Branch index {branchIndex} is out of range for map '{mapNodeId}' (the original fanned out over {branchCount} branch(es), valid indices 0..{branchCount - 1}).");
     }
 
     // ── Fork helpers — shared by replay + rerun (both fork a NEW run from the original; never mutate it) ──
