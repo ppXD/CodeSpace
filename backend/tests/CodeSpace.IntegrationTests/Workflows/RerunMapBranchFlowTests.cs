@@ -5,6 +5,7 @@ using CodeSpace.Core.Services.Workflows;
 using CodeSpace.Core.Services.Workflows.Engine;
 using CodeSpace.Core.Services.Workflows.Nodes;
 using CodeSpace.Core.Services.Workflows.Rerun;
+using CodeSpace.Core.Services.Workflows.RunSources;
 using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.IntegrationTests.Workflows.Infrastructure;
 using CodeSpace.Messages.Authorization;
@@ -594,6 +595,34 @@ public class RerunMapBranchFlowTests
 
         forks[0].ShouldBe(forks[1], "both concurrent submits of the same operation id resolve to ONE fork");
         (await RunCountAsync(teamId)).ShouldBe(beforeReruns + 1, "exactly one fork was created despite two concurrent submits");
+    }
+
+    [Fact]
+    public async Task Rerun_a_snapshot_run_map_branch_with_the_same_operation_id_twice_returns_one_fork()
+    {
+        // The OTHER fork path: a snapshot-origin run (WorkflowId null) forks through RunFromSnapshotStarter, whose
+        // 23505 → detach → Guid.Empty short-circuit was hand-written this slice (the authored RunStarter mirror). A
+        // double-submit must dedup there too — exactly one fork, the chosen branch re-runs once, siblings reused.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var key = "mapidem-snap-" + Guid.NewGuid().ToString("N");
+
+        var originalRunId = await RunSnapshotFreshAsync(CountingMapDef(key), teamId, userId, FourElements);
+        await AssertRunStatusAsync(originalRunId, WorkflowRunStatus.Success, "the snapshot map ran fresh");
+        for (var i = 0; i < 4; i++) FlakyTestNode.AttemptsFor($"{key}-e{i}").ShouldBe(1);
+
+        var opId = Guid.NewGuid();
+        var beforeReruns = await RunCountAsync(teamId);
+
+        var fork1 = await RerunMapBranchesAsync(originalRunId, "map", new HashSet<int> { 0 }, teamId, userId, opId);
+        var fork2 = await RerunMapBranchesAsync(originalRunId, "map", new HashSet<int> { 0 }, teamId, userId, opId);
+
+        fork2.ShouldBe(fork1, "the snapshot-fork dedup returns the SAME fork");
+        (await RunCountAsync(teamId)).ShouldBe(beforeReruns + 1, "the duplicate snapshot-fork submit created no second fork");
+
+        await RunEngineAsync(fork1);
+        await AssertRunStatusAsync(fork1, WorkflowRunStatus.Success);
+        FlakyTestNode.AttemptsFor($"{key}-e0").ShouldBe(2, "the chosen branch re-ran EXACTLY once despite the double-submit");
+        for (var i = 1; i < 4; i++) FlakyTestNode.AttemptsFor($"{key}-e{i}").ShouldBe(1, $"sibling {i} was reused — not re-run");
     }
 
     [Fact]
@@ -1241,6 +1270,18 @@ public class RerunMapBranchFlowTests
     private async Task<Guid> RunFreshAsync(Guid workflowId, Guid teamId, string payloadJson)
     {
         var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId, payloadJson: payloadJson);
+        await RunEngineAsync(runId);
+        return runId;
+    }
+
+    // Stage + walk a SNAPSHOT-origin run (WorkflowId null, inline frozen definition) via the real snapshot starter —
+    // so a rerun of it forks through RunFromSnapshotStarter (not the authored RunStarter), exercising that path.
+    private async Task<Guid> RunSnapshotFreshAsync(WorkflowDefinition def, Guid teamId, Guid userId, string payloadJson)
+    {
+        Guid runId;
+        using (var scope = _fixture.BeginScope())
+            runId = await scope.Resolve<IRunFromSnapshotStarter>().StartFromSnapshotAsync(def, teamId, userId, payloadJson, scopeRepositoryIds: null, projectionKind: null, session: null, CancellationToken.None);
+
         await RunEngineAsync(runId);
         return runId;
     }
