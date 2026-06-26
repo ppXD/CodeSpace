@@ -171,6 +171,43 @@ public class SupervisorDeciderTests
     }
 
     [Fact]
+    public void The_user_prompt_renders_the_dependency_frontier_when_the_plan_declares_depends_on()
+    {
+        // a (done) → b ready → c blocked on b. The frontier guides the model to spawn in DependsOn order.
+        var plan = new SupervisorPriorDecision
+        {
+            Id = Guid.NewGuid(), Sequence = 1, DecisionKind = SupervisorDecisionKinds.Plan, Status = SupervisorDecisionStatus.Succeeded, OutcomeJson = "{}",
+            PayloadJson = """{"goal":"g","subtasks":[{"id":"a","title":"a","instruction":"do"},{"id":"b","title":"b","instruction":"do","dependsOn":["a"]},{"id":"c","title":"c","instruction":"do","dependsOn":["b"]}]}""",
+        };
+        var agentId = Guid.NewGuid();
+        var spawn = new SupervisorPriorDecision
+        {
+            Id = Guid.NewGuid(), Sequence = 2, DecisionKind = SupervisorDecisionKinds.Spawn, Status = SupervisorDecisionStatus.Succeeded,
+            PayloadJson = """{"subtaskIds":["a"]}""",
+            OutcomeJson = SupervisorOutcome.FoldAgentResults($$"""{"agentRunIds":["{{agentId}}"],"agentCount":1}""", new[] { new SupervisorAgentResult { AgentRunId = agentId, Status = "Succeeded" } }),
+        };
+
+        var prompt = LlmSupervisorDecider.BuildUserPromptForTest(Context(turnNumber: 2, plan, spawn));
+
+        prompt.ShouldContain("Dependency frontier", Case.Insensitive, "the model sees the server-enforced ordering");
+        prompt.ShouldContain("ready to spawn now: b", Case.Insensitive, "a is done → b's dependency is satisfied");
+        prompt.ShouldContain("blocked: c (waiting on b)", Case.Insensitive, "c waits on the not-done b");
+    }
+
+    [Fact]
+    public void The_user_prompt_renders_no_dependency_frontier_for_a_flat_plan()
+    {
+        var plan = new SupervisorPriorDecision
+        {
+            Id = Guid.NewGuid(), Sequence = 1, DecisionKind = SupervisorDecisionKinds.Plan, Status = SupervisorDecisionStatus.Succeeded, OutcomeJson = "{}",
+            PayloadJson = """{"goal":"g","subtasks":[{"id":"a","title":"a","instruction":"do"},{"id":"b","title":"b","instruction":"do"}]}""",
+        };
+
+        LlmSupervisorDecider.BuildUserPromptForTest(Context(turnNumber: 1, plan))
+            .ShouldNotContain("Dependency frontier", Case.Insensitive, "a flat plan (no DependsOn) renders no frontier — byte-identical to before");
+    }
+
+    [Fact]
     public void The_user_prompt_is_UNCHANGED_by_per_repo_RepositoryResults()
     {
         // Resolver loop #379 S7-B — surfacing per-repo RepositoryResults into the compact must NOT change what the

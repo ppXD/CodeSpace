@@ -26,11 +26,21 @@ public sealed partial class RealSupervisorActionExecutor
         var spawn = Deserialize<SupervisorSpawnPayload>(decision.PayloadJson) ?? new SupervisorSpawnPayload();
         var subtasks = ResolvePlannedSubtasks(context);
 
-        // Fan out over the subtask ids; for each, apply the model-authored per-agent dispatch override (L4 arc B) when
-        // the spawn carries one keyed by that subtask id, else build a homogeneous profile clone (byte-identical to before).
-        // The dispatch spec rides ALONGSIDE the task so the async stage can resolve its per-agent persona slug (P3) on a
-        // FRESH stage only — a crash-recovery orphan reclaim reuses the already-resolved task and never re-resolves.
-        var tasks = spawn.SubtaskIds
+        // Dependency rail: the server clamps the requested fan-out to its READY frontier — a subtask runs only once every
+        // DependsOn it declared is a non-rejected success, so a unit builds on an accepted predecessor instead of racing
+        // it. Deterministic over the tape (replay-safe). A flat plan (no DependsOn) admits every requested id verbatim
+        // (Ready == requested), so the build below is byte-identical to before. A deferred subtask is re-proposed by the
+        // model on a later turn once its dependency settles (the decider sees the frontier).
+        var (ready, deferred) = SupervisorDependencyGate.Partition(context, spawn.SubtaskIds);
+
+        if (deferred.Count > 0)
+            _logger.LogInformation("Supervisor deferred {Deferred} subtask(s) with unmet dependencies, spawning {Ready} ready subtask(s) this turn on node {NodeId}", deferred.Count, ready.Count, context.NodeId);
+
+        // Fan out over the ready subtask ids; for each, apply the model-authored per-agent dispatch override (L4 arc B)
+        // when the spawn carries one keyed by that subtask id, else build a homogeneous profile clone. The dispatch spec
+        // rides ALONGSIDE the task so the async stage can resolve its per-agent persona slug (P3) on a FRESH stage only —
+        // a crash-recovery orphan reclaim reuses the already-resolved task and never re-resolves.
+        var tasks = ready
             .Select(id => { var spec = DispatchFor(spawn, id); return (BuildAgentTask(subtasks, id, spec?.GoalOverride, context, spec), spec); })
             .ToList();
 
