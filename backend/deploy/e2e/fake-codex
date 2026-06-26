@@ -1,0 +1,13 @@
+#!/bin/sh
+# Fake codex CLI for the deploy compose E2E — the worker's CodexHarness is pointed here via
+# CODESPACE_CODEX_CLI_PATH, so NO model credential or network is needed to prove the agent-run path through the
+# real worker image. It is the static twin of tests/.../FakeCodexCli.cs: take the LAST positional arg as the goal
+# (codex puts the prompt last), JSON-escape it, and print a three-line `codex exec --json`-shaped stream whose
+# final agent_message is "DONE: <goal>" so the real executor's ParseEvent/BuildResult fold a Succeeded run.
+goal=""
+for goal in "$@"; do :; done
+esc=$(printf '%s' "$goal" | sed 's/\\/\\\\/g; s/"/\\"/g')
+printf '{"type":"agent_reasoning","message":"Planning work for: %s"}\n' "$esc"
+printf '{"type":"agent_message","message":"DONE: %s"}\n' "$esc"
+printf '{"type":"task_complete","message":"completed"}\n'
+exit 0

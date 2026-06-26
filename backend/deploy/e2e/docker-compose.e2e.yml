@@ -1,0 +1,61 @@
+# Deploy E2E stack — the REAL production topology, built from the REAL images. Postgres + the lean API
+# (processing OFF, enqueues only) + the worker (processing ON, executes agents). run.sh drives a launch over HTTP
+# and asserts the WORKER runs the agent through its image to a terminal state. Build context is backend/ (../..).
+name: codespace-deploy-e2e
+
+services:
+  postgres:
+    image: postgres:18-alpine
+    environment:
+      POSTGRES_USER: codespace
+      POSTGRES_PASSWORD: codespace
+      POSTGRES_DB: codespace
+      POSTGRES_HOST_AUTH_METHOD: scram-sha-256
+      PGDATA: /var/lib/postgresql/data/pgdata
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U codespace -d codespace"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+
+  # PUBLIC API — serves HTTP + enqueues, processes NO jobs. Built from the lean Dockerfile.api.
+  api:
+    build:
+      context: ../..
+      dockerfile: Dockerfile.api
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      ASPNETCORE_ENVIRONMENT: Production
+      ASPNETCORE_URLS: http://+:8080
+      CodeSpaceStore__ConnectionString: "Host=postgres;Port=5432;Database=codespace;Username=codespace;Password=codespace"
+      Authentication__Jwt__SymmetricKey: "${E2E_JWT_KEY}"
+      CODESPACE_VARIABLE_MASTER_KEY: "${E2E_VARIABLE_MASTER_KEY}"
+      CODESPACE_HANGFIRE_PROCESSING_ENABLED: "false"
+    ports:
+      - "18080:8080"
+
+  # WORKER — the local sandbox runner. Built from Dockerfile.worker. The harness CLI is pointed at the mounted
+  # fake-codex so the agent run completes with NO model credential / network. REQUIRE_SANDBOX is left unset, so on a
+  # host without unprivileged userns the run is unconfined (confinement is proven by the privileged sandbox lane).
+  worker:
+    build:
+      context: ../..
+      dockerfile: Dockerfile.worker
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      ASPNETCORE_ENVIRONMENT: Production
+      ASPNETCORE_URLS: http://+:8080
+      CodeSpaceStore__ConnectionString: "Host=postgres;Port=5432;Database=codespace;Username=codespace;Password=codespace"
+      Authentication__Jwt__SymmetricKey: "${E2E_JWT_KEY}"
+      CODESPACE_VARIABLE_MASTER_KEY: "${E2E_VARIABLE_MASTER_KEY}"
+      CODESPACE_HANGFIRE_PROCESSING_ENABLED: "true"
+      CODESPACE_AGENT_MCP_ENDPOINT_ENABLED: "true"
+      CODESPACE_CODEX_CLI_PATH: "/opt/fake-codex"
+    volumes:
+      - ./fake-codex:/opt/fake-codex:ro
+    ports:
+      - "18081:8080"
