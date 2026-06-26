@@ -71,6 +71,9 @@ public sealed class ClaudeCodeHarness : IAgentHarness, IModelCredentialProjector
     /// <summary>Every env var Claude Code resolves a NON-primary model from — pinned to the run's model on a gateway so it never reaches for a default Anthropic model the gateway doesn't host (see <see cref="AddGatewayModelTiers"/>).</summary>
     private static readonly string[] BackgroundModelEnvVars = { SmallFastModelEnvVar, DefaultHaikuModelEnvVar, DefaultSonnetModelEnvVar, DefaultOpusModelEnvVar, SubagentModelEnvVar };
 
+    /// <summary>Claude Code settings key that suppresses the WebFetch hostname PREFLIGHT to <c>api.anthropic.com</c> — the one inference-adjacent call NOT covered by <see cref="DisableNonEssentialTrafficEnvVar"/>. Delivered via <c>--settings</c> on a sealed-egress run. Pinned by a test (Rule 8).</summary>
+    public const string SkipWebFetchPreflightSetting = "skipWebFetchPreflight";
+
     private const string AnthropicProvider = "Anthropic";
 
     private const string DefaultVersion = "2.1.0";
@@ -92,6 +95,8 @@ public sealed class ClaudeCodeHarness : IAgentHarness, IModelCredentialProjector
         // the model not to wait on stdin, to raise a genuine blocker via the decision tool, and not to end by asking.
         args.Add("--append-system-prompt");
         args.Add(AgentOperatingContract.SystemDirective);
+
+        AppendSealedEgressSettings(args, task);
 
         // Omit --model when blank so the CLI picks its own default (the Model=empty rule).
         if (!string.IsNullOrWhiteSpace(task.Model))
@@ -196,9 +201,23 @@ public sealed class ClaudeCodeHarness : IAgentHarness, IModelCredentialProjector
         var isGateway = !string.Equals(credential.Provider, AnthropicProvider, StringComparison.OrdinalIgnoreCase);
 
         if (!string.IsNullOrEmpty(credential.ApiKey)) env[isGateway ? AuthTokenEnvVar : ApiKeyEnvVar] = credential.ApiKey;
-        if (!string.IsNullOrEmpty(credential.BaseUrl)) env[BaseUrlEnvVar] = credential.BaseUrl;
+        if (!string.IsNullOrWhiteSpace(credential.BaseUrl)) env[BaseUrlEnvVar] = StripVersionSuffix(credential.BaseUrl);
 
         return env;
+    }
+
+    /// <summary>
+    /// Claude Code's SDK appends <c>/v1/messages</c> to <see cref="BaseUrlEnvVar"/>, so the base must be the ROOT — a
+    /// trailing <c>/v1</c> would produce <c>host/v1/v1/messages</c> → 404. Strip ONE trailing <c>/v1</c> (and any trailing
+    /// slash) so an operator who entered the OpenAI-style <c>host/v1</c> form (or shares one base URL with the Codex
+    /// harness, which REQUIRES <c>/v1</c> — see <c>CodexHarness.EnsureOpenAiVersionPath</c>) still connects. Idempotent:
+    /// a root URL is returned unchanged.
+    /// </summary>
+    internal static string StripVersionSuffix(string baseUrl)
+    {
+        var trimmed = baseUrl.TrimEnd('/');
+
+        return trimmed.EndsWith("/v1", StringComparison.Ordinal) ? trimmed[..^3] : trimmed;
     }
 
     private void EnsureSupported(string provider)
@@ -260,6 +279,22 @@ public sealed class ClaudeCodeHarness : IAgentHarness, IModelCredentialProjector
         if (!task.Environment.TryGetValue(AuthTokenEnvVar, out var token) || string.IsNullOrWhiteSpace(token)) return;
 
         foreach (var key in BackgroundModelEnvVars) env[key] = task.Model;
+    }
+
+    /// <summary>
+    /// On a deny-by-default (Allowlist) egress run, deliver <c>--settings {"<see cref="SkipWebFetchPreflightSetting"/>":true}</c>
+    /// so a WebFetch tool call doesn't preflight the hostname against <c>api.anthropic.com</c> — a host the egress allowlist
+    /// (model + git only) doesn't pin, which would stall the run (it's NOT covered by <see cref="DisableNonEssentialTrafficEnvVar"/>,
+    /// the only other escape our env closes). Safe to add unconditionally: the runner writes NO <c>settings.json</c> into the
+    /// per-run config dir (only <c>.mcp.json</c>, loaded independently), so <c>--settings</c> cannot clobber any run settings.
+    /// A Full-egress run is unchanged.
+    /// </summary>
+    private static void AppendSealedEgressSettings(List<string> args, AgentTask task)
+    {
+        if (task.Permissions.Egress != AgentEgressPolicy.Allowlist) return;
+
+        args.Add("--settings");
+        args.Add($"{{\"{SkipWebFetchPreflightSetting}\":true}}");
     }
 
     /// <summary>

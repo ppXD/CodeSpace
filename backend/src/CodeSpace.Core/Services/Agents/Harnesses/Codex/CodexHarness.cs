@@ -82,6 +82,7 @@ public sealed class CodexHarness : IAgentHarness, IModelCredentialProjector, IMc
         // Point Codex at a custom gateway (when one was projected) BEFORE the prompt positional — Codex parses `-c`
         // overrides as flags, so they must precede the goal.
         AppendModelProviderConfig(args, task);
+        AppendTelemetryConfig(args, task);
 
         // B1 asymmetry: Codex exec has NO native system-prompt flag (Claude uses --append-system-prompt). Prepending the
         // operating contract to the prompt positional conflates it with the goal (and pollutes goal-reading consumers),
@@ -198,9 +199,39 @@ public sealed class CodexHarness : IAgentHarness, IModelCredentialProjector, IMc
 
         Override($"model_provider={ModelProviderId}");
         Override($"model_providers.{ModelProviderId}.name={ModelProviderId}");
-        Override($"model_providers.{ModelProviderId}.base_url={baseUrl}");
+        Override($"model_providers.{ModelProviderId}.base_url={EnsureOpenAiVersionPath(baseUrl)}");
         Override($"model_providers.{ModelProviderId}.wire_api={ModelProviderWireApi}");
         Override($"model_providers.{ModelProviderId}.env_key={ApiKeyEnvVar}");
+    }
+
+    /// <summary>
+    /// Codex appends <c>/responses</c> to the provider <c>base_url</c>, so the base MUST carry the OpenAI version
+    /// segment — a root URL would hit <c>host/responses</c> → 404. Ensure a trailing <c>/v1</c> IDEMPOTENTLY: append it
+    /// only when the path doesn't already end in <c>/v1</c>, so an operator URL that already ends in <c>/v1</c> (or
+    /// OpenRouter's <c>/api/v1</c>) is left as-is — never doubled to <c>/v1/v1</c>. A trailing slash is trimmed first.
+    /// This encodes the standard OpenAI <c>/v1</c> convention; a gateway that serves Responses under a different path
+    /// must store that full path. Claude's mirror (<c>ClaudeCodeHarness</c>) STRIPS a trailing <c>/v1</c>, so ONE
+    /// operator base URL serves both harnesses.
+    /// </summary>
+    internal static string EnsureOpenAiVersionPath(string baseUrl)
+    {
+        var trimmed = baseUrl.TrimEnd('/');
+
+        return trimmed.EndsWith("/v1", StringComparison.Ordinal) ? trimmed : trimmed + "/v1";
+    }
+
+    /// <summary>
+    /// On a deny-by-default (Allowlist) egress run, silence Codex's one non-auth-gated telemetry default — the Statsig
+    /// OTEL metrics exporter (→ <c>ab.chatgpt.com</c>) — plus analytics, so a sealed run makes ZERO call off its pinned
+    /// allowlist (model + git). Analytics is already inert for an api-key provider, but pinning both is explicit. A
+    /// Full-egress run is unchanged — byte-identical to before.
+    /// </summary>
+    private static void AppendTelemetryConfig(List<string> args, AgentTask task)
+    {
+        if (task.Permissions.Egress != AgentEgressPolicy.Allowlist) return;
+
+        args.Add("-c"); args.Add("otel.metrics_exporter=none");
+        args.Add("-c"); args.Add("analytics.enabled=false");
     }
 
     /// <summary>Codex hosts an MCP server from an <c>[mcp_servers.&lt;name&gt;]</c> table in its config home's <c>config.toml</c>. The harness owns the format — it renders the TOML content with the run-scoped socket + token baked in; the runner just writes the bytes.</summary>

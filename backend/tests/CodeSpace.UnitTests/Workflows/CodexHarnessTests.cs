@@ -140,6 +140,54 @@ public class CodexHarnessTests
     }
 
     [Theory]
+    [InlineData("http://gw:40000", "http://gw:40000/v1")]            // root → append /v1 (Codex appends /responses)
+    [InlineData("http://gw:40000/", "http://gw:40000/v1")]           // trailing slash trimmed first
+    [InlineData("http://gw:40000/v1", "http://gw:40000/v1")]         // already /v1 → unchanged (no /v1/v1)
+    [InlineData("http://gw:40000/v1/", "http://gw:40000/v1")]        // /v1 + slash → unchanged
+    [InlineData("https://openrouter.ai/api/v1", "https://openrouter.ai/api/v1")] // /api/v1 ends in /v1 → unchanged
+    public void EnsureOpenAiVersionPath_is_idempotent(string input, string expected) =>
+        CodexHarness.EnsureOpenAiVersionPath(input).ShouldBe(expected);
+
+    [Fact]
+    public void A_root_gateway_base_url_is_normalized_to_v1_in_the_override()
+    {
+        // The operator's root base URL must reach Codex as host/v1 so it hits /v1/responses, not /responses → 404.
+        var task = Task() with { Environment = new Dictionary<string, string> { [CodexHarness.BaseUrlEnvVar] = "http://gw:40000" } };
+
+        Harness.BuildInvocation(task).Args.ShouldContain("model_providers.codespace.base_url=http://gw:40000/v1");
+    }
+
+    [Fact]
+    public void Seals_telemetry_on_an_allowlist_egress_run()
+    {
+        // A deny-by-default run pins model+git only; silence Codex's Statsig OTEL exporter + analytics so nothing leaks off-allowlist.
+        var args = Harness.BuildInvocation(Task() with { Permissions = new AgentPermissions { Egress = AgentEgressPolicy.Allowlist } }).Args;
+
+        args.ShouldContain("otel.metrics_exporter=none");
+        args.ShouldContain("analytics.enabled=false");
+    }
+
+    [Fact]
+    public void Leaves_telemetry_untouched_on_a_full_egress_run() =>
+        Harness.BuildInvocation(Task()).Args.ShouldNotContain("otel.metrics_exporter=none");
+
+    [Fact]
+    public void Gateway_override_and_telemetry_seal_coexist_on_an_allowlist_run()
+    {
+        // A sealed gateway run gets BOTH the model-provider routing AND the telemetry seal — neither drops the other.
+        var task = Task() with
+        {
+            Permissions = new AgentPermissions { Egress = AgentEgressPolicy.Allowlist },
+            Environment = new Dictionary<string, string> { [CodexHarness.BaseUrlEnvVar] = "http://gw:40000" },
+        };
+
+        var args = Harness.BuildInvocation(task).Args;
+
+        args.ShouldContain("model_providers.codespace.base_url=http://gw:40000/v1");
+        args.ShouldContain("otel.metrics_exporter=none");
+    }
+
+    [Theory]
     [InlineData("{\"type\":\"agent_message\",\"message\":\"hi\"}", AgentEventKind.AssistantMessage)]
     [InlineData("{\"type\":\"agent_reasoning\"}", AgentEventKind.Reasoning)]
     [InlineData("{\"type\":\"plan_update\"}", AgentEventKind.PlanUpdate)]
