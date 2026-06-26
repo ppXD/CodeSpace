@@ -57,6 +57,20 @@ public sealed class ClaudeCodeHarness : IAgentHarness, IModelCredentialProjector
     /// </summary>
     public const string DisableNonEssentialTrafficEnvVar = "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC";
 
+    /// <summary>Claude Code's "small/fast" background model — used for title/summary generation, <c>/compact</c>, lightweight steps. Defaults to a haiku model NAME. Pinned by a test (Rule 8).</summary>
+    public const string SmallFastModelEnvVar = "ANTHROPIC_SMALL_FAST_MODEL";
+
+    /// <summary>The model the <c>haiku</c> / <c>sonnet</c> / <c>opus</c> tier aliases resolve to. Pinned by a test (Rule 8).</summary>
+    public const string DefaultHaikuModelEnvVar = "ANTHROPIC_DEFAULT_HAIKU_MODEL";
+    public const string DefaultSonnetModelEnvVar = "ANTHROPIC_DEFAULT_SONNET_MODEL";
+    public const string DefaultOpusModelEnvVar = "ANTHROPIC_DEFAULT_OPUS_MODEL";
+
+    /// <summary>The model Claude Code spawns subagents on. Pinned by a test (Rule 8).</summary>
+    public const string SubagentModelEnvVar = "CLAUDE_CODE_SUBAGENT_MODEL";
+
+    /// <summary>Every env var Claude Code resolves a NON-primary model from — pinned to the run's model on a gateway so it never reaches for a default Anthropic model the gateway doesn't host (see <see cref="AddGatewayModelTiers"/>).</summary>
+    private static readonly string[] BackgroundModelEnvVars = { SmallFastModelEnvVar, DefaultHaikuModelEnvVar, DefaultSonnetModelEnvVar, DefaultOpusModelEnvVar, SubagentModelEnvVar };
+
     private const string AnthropicProvider = "Anthropic";
 
     private const string DefaultVersion = "2.1.0";
@@ -209,21 +223,43 @@ public sealed class ClaudeCodeHarness : IAgentHarness, IModelCredentialProjector
         permissions.WriteScope == AgentWriteScope.ReadOnly ? "plan" : "bypassPermissions";
 
     /// <summary>
-    /// The child env: the task's env, plus — ONLY for an Allowlist (deny-by-default) egress run — the
-    /// <see cref="DisableNonEssentialTrafficEnvVar"/> so the Claude CLI doesn't stall reaching telemetry hosts the egress
-    /// allowlist doesn't pin (B3.3c). An explicit <see cref="AgentTask.Environment"/> entry WINS (operator intent — it is
-    /// layered last), matching the runner's NonInteractiveEnv "operator value wins" convention. A Full-egress run returns
-    /// the task env unchanged → byte-identical to before.
+    /// The child env: the task's env, plus harness-injected entries — the <see cref="DisableNonEssentialTrafficEnvVar"/>
+    /// for an Allowlist (deny-by-default) egress run (so the CLI doesn't stall reaching telemetry hosts the allowlist
+    /// doesn't pin, B3.3c), and the gateway model-tier pins (<see cref="AddGatewayModelTiers"/>). An explicit
+    /// <see cref="AgentTask.Environment"/> entry WINS (operator intent — layered last), matching the runner's
+    /// NonInteractiveEnv "operator value wins" convention. When nothing is injected the task env is returned unchanged → byte-identical.
     /// </summary>
     private static IReadOnlyDictionary<string, string> BuildEnvironment(AgentTask task)
     {
-        if (task.Permissions.Egress != AgentEgressPolicy.Allowlist) return task.Environment;
+        var injected = new Dictionary<string, string>(StringComparer.Ordinal);
 
-        var env = new Dictionary<string, string>(StringComparer.Ordinal) { [DisableNonEssentialTrafficEnvVar] = "1" };
+        if (task.Permissions.Egress == AgentEgressPolicy.Allowlist) injected[DisableNonEssentialTrafficEnvVar] = "1";
 
-        foreach (var (key, value) in task.Environment) env[key] = value;
+        AddGatewayModelTiers(injected, task);
 
-        return env;
+        if (injected.Count == 0) return task.Environment;
+
+        foreach (var (key, value) in task.Environment) injected[key] = value;
+
+        return injected;
+    }
+
+    /// <summary>
+    /// On a NON-Anthropic gateway (the "Custom" provider — signalled by the projected <see cref="AuthTokenEnvVar"/>, which
+    /// <see cref="ProjectToEnv"/> sets ONLY for a gateway), Claude Code still resolves its small/fast background model and
+    /// its haiku/sonnet/opus tier aliases + subagents to DEFAULT Anthropic model NAMES — which a gateway that hosts only
+    /// its own model family doesn't serve, so a run fails the moment Claude reaches for haiku (title/summary, <c>/compact</c>,
+    /// a lightweight subagent). Pin EVERY non-primary tier to the run's own model so no unsupported name escapes. Only when
+    /// a gateway auth-token was projected AND a model is set. Direct Anthropic — and an Anthropic-provider PROXY (api-key +
+    /// base URL, which fronts real haiku) — are untouched, since neither carries the auth-token. The operator still wins
+    /// (these are layered before the task env in <see cref="BuildEnvironment"/>).
+    /// </summary>
+    private static void AddGatewayModelTiers(Dictionary<string, string> env, AgentTask task)
+    {
+        if (string.IsNullOrWhiteSpace(task.Model)) return;
+        if (!task.Environment.TryGetValue(AuthTokenEnvVar, out var token) || string.IsNullOrWhiteSpace(token)) return;
+
+        foreach (var key in BackgroundModelEnvVars) env[key] = task.Model;
     }
 
     /// <summary>

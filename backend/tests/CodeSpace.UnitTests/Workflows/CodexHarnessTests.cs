@@ -102,6 +102,43 @@ public class CodexHarnessTests
         spec.Args.ShouldNotContain("workspace-write");
     }
 
+    [Fact]
+    public void A_gateway_base_url_is_injected_as_a_model_provider_via_config_overrides_before_the_prompt()
+    {
+        // Codex 0.142.x ignores OPENAI_BASE_URL as an env var (it routes via a config model-provider), so the projected
+        // base URL must be re-injected as `-c model_provider` overrides — over the `responses` wire, key from OPENAI_API_KEY.
+        var task = Task() with { Environment = new Dictionary<string, string> { [CodexHarness.BaseUrlEnvVar] = "http://gw.local:40000/v1" } };
+
+        var spec = Harness.BuildInvocation(task);
+
+        spec.Args.ShouldContain("-c");
+        spec.Args.ShouldContain("model_provider=codespace");
+        spec.Args.ShouldContain("model_providers.codespace.base_url=http://gw.local:40000/v1");
+        spec.Args.ShouldContain("model_providers.codespace.wire_api=responses");
+        spec.Args.ShouldContain("model_providers.codespace.env_key=OPENAI_API_KEY");
+
+        // The overrides are flags: they must land AFTER --sandbox and BEFORE the goal positional (which stays last).
+        var args = new List<string>(spec.Args);
+        args.IndexOf("--sandbox").ShouldBeLessThan(args.IndexOf("model_provider=codespace"));
+        args.IndexOf("model_provider=codespace").ShouldBeLessThan(args.Count - 1);
+        spec.Args[^1].ShouldBe("Fix the failing billing tests");
+    }
+
+    [Fact]
+    public void No_provider_override_without_a_gateway_base_url_codex_keeps_its_default_openai_provider()
+    {
+        // Plain OpenAI (no base-URL override) must NOT inject a model-provider — Codex's built-in provider hits api.openai.com.
+        Harness.BuildInvocation(Task()).Args.ShouldNotContain("model_provider=codespace");
+    }
+
+    [Fact]
+    public void Model_provider_config_constants_are_pinned()
+    {
+        // Rule 8: these are the wire the agent authenticates over. wire_api MUST be `responses` (0.142.x dropped `chat`).
+        CodexHarness.ModelProviderWireApi.ShouldBe("responses");
+        CodexHarness.ModelProviderId.ShouldBe("codespace");
+    }
+
     [Theory]
     [InlineData("{\"type\":\"agent_message\",\"message\":\"hi\"}", AgentEventKind.AssistantMessage)]
     [InlineData("{\"type\":\"agent_reasoning\"}", AgentEventKind.Reasoning)]

@@ -425,6 +425,89 @@ public class ClaudeCodeHarnessTests
         env[ClaudeCodeHarness.DisableNonEssentialTrafficEnvVar].ShouldBe("1", "the disable flag is added alongside them");
     }
 
+    // A Custom gateway is signalled by the projected ANTHROPIC_AUTH_TOKEN (ProjectToEnv sets it ONLY for non-Anthropic).
+    private static AgentTask Gateway(string? model, params (string, string)[] extraEnv)
+    {
+        var env = new Dictionary<string, string> { [ClaudeCodeHarness.AuthTokenEnvVar] = "tok", ["ANTHROPIC_BASE_URL"] = "https://gw.example/v1" };
+        foreach (var (k, v) in extraEnv) env[k] = v;
+        return Task(model: model) with { Environment = env };
+    }
+
+    [Fact]
+    public void Pins_every_background_model_tier_to_the_run_model_on_a_gateway()
+    {
+        // On a custom gateway Claude Code would otherwise resolve haiku/sonnet/opus/small-fast/subagent to DEFAULT
+        // Anthropic model names the gateway doesn't host — pin them ALL to the run's model so none escapes.
+        var env = Harness.BuildInvocation(Gateway("metis-coder-max")).Environment;
+
+        env[ClaudeCodeHarness.SmallFastModelEnvVar].ShouldBe("metis-coder-max");
+        env[ClaudeCodeHarness.DefaultHaikuModelEnvVar].ShouldBe("metis-coder-max");
+        env[ClaudeCodeHarness.DefaultSonnetModelEnvVar].ShouldBe("metis-coder-max");
+        env[ClaudeCodeHarness.DefaultOpusModelEnvVar].ShouldBe("metis-coder-max");
+        env[ClaudeCodeHarness.SubagentModelEnvVar].ShouldBe("metis-coder-max");
+    }
+
+    [Fact]
+    public void Leaves_background_tiers_untouched_on_direct_anthropic_no_base_url()
+    {
+        // Direct Anthropic (no base URL, no auth-token) serves real haiku — don't override; the tiers stay Claude's defaults.
+        var env = Harness.BuildInvocation(Task(model: "claude-opus-4-8")).Environment;
+
+        env.ContainsKey(ClaudeCodeHarness.SmallFastModelEnvVar).ShouldBeFalse();
+        env.ContainsKey(ClaudeCodeHarness.DefaultHaikuModelEnvVar).ShouldBeFalse();
+    }
+
+    [Fact]
+    public void Leaves_background_tiers_untouched_for_an_anthropic_proxy_with_a_base_url()
+    {
+        // An Anthropic-provider PROXY authenticates with the api-key (not the gateway auth-token) + a base URL — it fronts
+        // REAL haiku, so the tiers must NOT be pinned. The auth-token (absent here) is the discriminator, not the base URL.
+        var task = Task(model: "claude-opus-4-8") with
+        {
+            Environment = new Dictionary<string, string> { [ClaudeCodeHarness.ApiKeyEnvVar] = "sk-ant", ["ANTHROPIC_BASE_URL"] = "https://proxy.internal" },
+        };
+
+        Harness.BuildInvocation(task).Environment.ContainsKey(ClaudeCodeHarness.SmallFastModelEnvVar).ShouldBeFalse();
+    }
+
+    [Fact]
+    public void A_blank_model_pins_no_tiers_even_on_a_gateway()
+    {
+        // No run model → nothing to pin to (Claude picks its own default); the gateway pinning must not write a blank.
+        Harness.BuildInvocation(Gateway(model: null)).Environment.ContainsKey(ClaudeCodeHarness.SmallFastModelEnvVar).ShouldBeFalse();
+    }
+
+    [Fact]
+    public void An_operator_small_fast_model_wins_over_the_gateway_pin()
+    {
+        // Operator intent wins (layered last): an explicit small-fast model is kept, not clobbered by the run-model pin.
+        var task = Gateway("metis-coder-max", (ClaudeCodeHarness.SmallFastModelEnvVar, "metis-coder-auto"));
+
+        Harness.BuildInvocation(task).Environment[ClaudeCodeHarness.SmallFastModelEnvVar].ShouldBe("metis-coder-auto");
+    }
+
+    [Fact]
+    public void Gateway_tier_pins_and_the_allowlist_disable_flag_coexist()
+    {
+        // The two harness-injected concerns land in the same overlay dict — a deny-by-default gateway run gets BOTH.
+        var task = Gateway("metis-coder-max") with { Permissions = new AgentPermissions { Egress = AgentEgressPolicy.Allowlist } };
+        var env = Harness.BuildInvocation(task).Environment;
+
+        env[ClaudeCodeHarness.SmallFastModelEnvVar].ShouldBe("metis-coder-max");
+        env[ClaudeCodeHarness.DisableNonEssentialTrafficEnvVar].ShouldBe("1");
+    }
+
+    [Fact]
+    public void Background_model_env_var_names_are_pinned()
+    {
+        // Rule 8: these are the contract Claude Code resolves its non-primary models from — a rename silently re-breaks haiku.
+        ClaudeCodeHarness.SmallFastModelEnvVar.ShouldBe("ANTHROPIC_SMALL_FAST_MODEL");
+        ClaudeCodeHarness.DefaultHaikuModelEnvVar.ShouldBe("ANTHROPIC_DEFAULT_HAIKU_MODEL");
+        ClaudeCodeHarness.DefaultSonnetModelEnvVar.ShouldBe("ANTHROPIC_DEFAULT_SONNET_MODEL");
+        ClaudeCodeHarness.DefaultOpusModelEnvVar.ShouldBe("ANTHROPIC_DEFAULT_OPUS_MODEL");
+        ClaudeCodeHarness.SubagentModelEnvVar.ShouldBe("CLAUDE_CODE_SUBAGENT_MODEL");
+    }
+
     [Fact]
     public void DisableNonEssentialTrafficEnvVar_constant_name_is_pinned() =>
         // The Claude CLI reads this exact name to suppress telemetry/gating traffic; renaming it would silently re-stall
