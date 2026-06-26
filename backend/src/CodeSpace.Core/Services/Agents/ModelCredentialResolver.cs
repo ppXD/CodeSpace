@@ -68,12 +68,20 @@ public sealed class ModelCredentialResolver : IModelCredentialResolver, IScopedD
         if (projector is not null && !projector.SupportedProviders.Contains(credential.Provider, StringComparer.OrdinalIgnoreCase))
             throw new ModelCredentialResolutionException($"Model credential {id} is for a provider this harness cannot drive.");
 
-        return Decrypt(credential);
+        return Decrypt(credential) with { DefaultModel = await PickDefaultModelAsync(credential.Id, cancellationToken).ConfigureAwait(false) };
     }
 
     /// <summary>
-    /// The team's most-recent Active credential whose provider the harness can drive; null when the team has
-    /// none. Candidates are filtered in memory (a team has few) so provider matching is case-insensitive.
+    /// No-pin "auto" resolve. Picks a (model, credential) pair from the FULL team pool — the first enabled model (by id,
+    /// then row id for a deterministic tie-break) across ALL the team's Active credentials whose provider the harness can
+    /// drive — so an "auto" run sees EVERY applicable model (null pool ⇒ all apply, the same contract <c>IModelPoolSelector</c>
+    /// honours), never just one credential's rows. The model id and the decrypted key come from the SAME row, so they are
+    /// always consistent. When the team has eligible credentials but NO registered models (an official vendor that hosts
+    /// everything), fall back to the most-recent one with no default model — the CLI's own default stands, correct there.
+    /// Null when the team has no usable credential at all (→ the operator-global key). Provider matching is case-insensitive
+    /// in memory (a team has few credentials). It is NOT routed through <c>IModelPoolSelector.SelectAsync</c> because that
+    /// is single-provider, whereas an agent harness drives SEVERAL providers and the pool here spans them — the null=all
+    /// semantic, not the method, is the shared contract.
     /// </summary>
     private async Task<ResolvedModelCredential?> ResolveTeamDefaultAsync(Guid teamId, IReadOnlyList<string> supportedProviders, CancellationToken cancellationToken)
     {
@@ -82,10 +90,36 @@ public sealed class ModelCredentialResolver : IModelCredentialResolver, IScopedD
             .OrderByDescending(c => c.CreatedDate)
             .ToListAsync(cancellationToken).ConfigureAwait(false);
 
-        var match = candidates.FirstOrDefault(c => supportedProviders.Contains(c.Provider, StringComparer.OrdinalIgnoreCase));
+        var eligible = candidates.Where(c => supportedProviders.Contains(c.Provider, StringComparer.OrdinalIgnoreCase)).ToList();
 
-        return match is null ? null : Decrypt(match);
+        if (eligible.Count == 0) return null;
+
+        var eligibleIds = eligible.Select(c => c.Id).ToHashSet();
+
+        var pick = await _db.ModelCredentialModel.AsNoTracking()
+            .Where(m => m.Enabled && eligibleIds.Contains(m.ModelCredentialId))
+            .OrderBy(m => m.ModelId).ThenBy(m => m.Id)
+            .Select(m => new { m.ModelId, m.ModelCredentialId })
+            .FirstOrDefaultAsync(cancellationToken).ConfigureAwait(false);
+
+        // A model in the pool → pair it with ITS OWN credential (key + model from one row). No models → the most-recent
+        // eligible credential, no default model (an official vendor hosts the CLI default).
+        return pick is not null
+            ? Decrypt(eligible.First(c => c.Id == pick.ModelCredentialId)) with { DefaultModel = pick.ModelId }
+            : Decrypt(eligible[0]);
     }
+
+    /// <summary>
+    /// A PINNED credential's default model: its first ENABLED model (by id). Credential-scoped on purpose — the operator
+    /// pinned THIS credential, so an "auto" model must come from ITS rows, never the wider pool. Null when the pinned
+    /// credential has no registered models (→ the CLI default). The no-pin path uses the full-pool pick above instead.
+    /// </summary>
+    private async Task<string?> PickDefaultModelAsync(Guid credentialId, CancellationToken cancellationToken) =>
+        await _db.ModelCredentialModel.AsNoTracking()
+            .Where(m => m.ModelCredentialId == credentialId && m.Enabled)
+            .OrderBy(m => m.ModelId)
+            .Select(m => m.ModelId)
+            .FirstOrDefaultAsync(cancellationToken).ConfigureAwait(false);
 
     /// <summary>
     /// Last resort: the operator-global single-tenant key from the worker env, for the first supported provider

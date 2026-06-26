@@ -187,10 +187,14 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
             // project it onto the harness's env vars. The secret lives only in this in-memory effectiveTask →
             // SandboxSpec.Environment; it is NEVER re-persisted (CompleteAsync writes only the result). The
             // redactor (keyed on the decrypted key) strips it from any echoed event / error before it persists.
-            var (secretEnv, secretRedactor, modelBaseUrl, modelProvider) = await ResolveModelCredentialEnvAsync(task, run.TeamId, harness, cancellationToken).ConfigureAwait(false);
+            var (secretEnv, secretRedactor, modelBaseUrl, modelProvider, defaultModel) = await ResolveModelCredentialEnvAsync(task, run.TeamId, harness, cancellationToken).ConfigureAwait(false);
             redactor = secretRedactor;
 
-            var effectiveTask = (workspace is null ? task : task with { WorkspaceDirectory = workspace.Directory }) with { Environment = MergeEnvironment(task.Environment, secretEnv) };
+            // An "auto" run (no pinned model) falls back to the resolved credential's own default model, so a custom
+            // gateway runs on ITS family instead of the CLI's built-in default (e.g. codex gpt-5.5) it can't serve.
+            var effectiveModel = string.IsNullOrWhiteSpace(task.Model) ? defaultModel : task.Model;
+
+            var effectiveTask = (workspace is null ? task : task with { WorkspaceDirectory = workspace.Directory }) with { Environment = MergeEnvironment(task.Environment, secretEnv), Model = effectiveModel };
 
             // Mint the per-run socket + token ONCE so the endpoint listener and the harness's declaration agree by
             // construction (and so the token can be stamped on the durable handle for a re-attach to re-bind the same
@@ -877,7 +881,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     /// run then relies on whatever env the runner already provides. A PINNED-but-unresolvable credential throws
     /// (the executor's catch lands a clean Failed), never silently using a different key.
     /// </summary>
-    private async Task<(IReadOnlyDictionary<string, string> Env, SecretRedactor Redactor, string? ModelBaseUrl, string? ModelProvider)> ResolveModelCredentialEnvAsync(AgentTask task, Guid teamId, IAgentHarness harness, CancellationToken cancellationToken)
+    private async Task<(IReadOnlyDictionary<string, string> Env, SecretRedactor Redactor, string? ModelBaseUrl, string? ModelProvider, string? DefaultModel)> ResolveModelCredentialEnvAsync(AgentTask task, Guid teamId, IAgentHarness harness, CancellationToken cancellationToken)
     {
         var projector = harness as IModelCredentialProjector;
 
@@ -888,8 +892,9 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         var redactor = credential?.ApiKey is { Length: > 0 } key ? new SecretRedactor(new[] { key }) : SecretRedactor.None;
 
         // The non-secret base URL + provider tag flow out so a restricted (Allowlist) run can pin its model-API host
-        // in the egress allowlist (B3.3b). Both null when no credential resolved.
-        return (env, redactor, credential?.BaseUrl, credential?.Provider);
+        // in the egress allowlist (B3.3b). DefaultModel flows out so a model-less ("auto") run falls back to one of the
+        // credential's own models instead of the CLI default. All null when no credential resolved.
+        return (env, redactor, credential?.BaseUrl, credential?.Provider, credential?.DefaultModel);
     }
 
     /// <summary>

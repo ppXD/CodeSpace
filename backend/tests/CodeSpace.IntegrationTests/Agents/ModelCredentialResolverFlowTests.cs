@@ -174,6 +174,94 @@ public class ModelCredentialResolverFlowTests
         (await ResolveAsync(NoPin(), teamId, projector: null)).ShouldBeNull();
     }
 
+    [Fact]
+    public async Task An_unpinned_run_defaults_to_the_pools_first_enabled_model()
+    {
+        var teamId = await SeedTeamAsync();
+        var id = await SeedCredentialAsync(teamId, "OpenAI", key: "sk-team-openai");
+        await SeedModelAsync(id, "metis-coder-max", enabled: true);
+        await SeedModelAsync(id, "metis-coder", enabled: true);
+
+        var resolved = await ResolveAsync(NoPin(), teamId, Projector("OpenAI"));
+
+        // The first ENABLED model by id across the pool — an "auto" run (no pinned model) runs on one of the team's OWN
+        // models, so a custom gateway never falls back to the CLI default (codex gpt-5.5) it can't serve.
+        resolved!.DefaultModel.ShouldBe("metis-coder");
+    }
+
+    [Fact]
+    public async Task An_unpinned_run_picks_the_first_model_across_the_FULL_pool_with_the_matching_key()
+    {
+        var teamId = await SeedTeamAsync();
+        // Credential B is created LATER (the old recency-first pick would choose it) and holds an alphabetically-LATE
+        // model; credential A (earlier) holds an alphabetically-EARLY one. The full-pool pick must land on A's model,
+        // AND the resolved key must come from A — the model + key are ONE row, never a recency-credential mismatch.
+        var a = await SeedCredentialAsync(teamId, "OpenAI", key: "sk-a");
+        await SeedModelAsync(a, "aaa-early", enabled: true);
+        var b = await SeedCredentialAsync(teamId, "Custom", key: "sk-b");
+        await SeedModelAsync(b, "zzz-late", enabled: true);
+
+        var resolved = await ResolveAsync(NoPin(), teamId, Projector("OpenAI", "Custom"));
+
+        resolved!.DefaultModel.ShouldBe("aaa-early", "model-first across the WHOLE pool — not the most-recent credential's first row");
+        resolved.ApiKey.ShouldBe("sk-a", "the key comes from the SAME credential as the picked model");
+    }
+
+    [Fact]
+    public async Task The_pool_default_excludes_models_under_a_revoked_credential()
+    {
+        var teamId = await SeedTeamAsync();
+        var revoked = await SeedCredentialAsync(teamId, "OpenAI", key: "sk-revoked", status: CredentialStatus.Revoked);
+        await SeedModelAsync(revoked, "aaa-from-revoked", enabled: true);   // alphabetically FIRST, but under a revoked credential
+        var active = await SeedCredentialAsync(teamId, "OpenAI", key: "sk-active");
+        await SeedModelAsync(active, "bbb-from-active", enabled: true);
+
+        var resolved = await ResolveAsync(NoPin(), teamId, Projector("OpenAI"));
+
+        resolved!.DefaultModel.ShouldBe("bbb-from-active", "a model under a revoked credential is not in the pool, even alphabetically first");
+        resolved.ApiKey.ShouldBe("sk-active");
+    }
+
+    [Fact]
+    public async Task The_default_model_skips_disabled_models()
+    {
+        var teamId = await SeedTeamAsync();
+        var id = await SeedCredentialAsync(teamId, "OpenAI", key: "sk");
+        await SeedModelAsync(id, "aaa-disabled", enabled: false);
+        await SeedModelAsync(id, "zzz-enabled", enabled: true);
+
+        (await ResolveAsync(NoPin(), teamId, Projector("OpenAI")))!.DefaultModel.ShouldBe("zzz-enabled");
+    }
+
+    [Fact]
+    public async Task A_credential_with_no_models_has_a_null_default_model()
+    {
+        var teamId = await SeedTeamAsync();
+        await SeedCredentialAsync(teamId, "OpenAI", key: "sk");
+
+        // No registered models → null, so the CLI default stands — correct for an official vendor that hosts everything.
+        (await ResolveAsync(NoPin(), teamId, Projector("OpenAI")))!.DefaultModel.ShouldBeNull();
+    }
+
+    [Fact]
+    public async Task A_pinned_credential_also_carries_its_default_model()
+    {
+        var teamId = await SeedTeamAsync();
+        var id = await SeedCredentialAsync(teamId, "OpenAI", key: "sk");
+        await SeedModelAsync(id, "metis-coder-max", enabled: true);
+
+        (await ResolveAsync(TaskWith(id), teamId, Projector("OpenAI")))!.DefaultModel.ShouldBe("metis-coder-max");
+    }
+
+    private async Task SeedModelAsync(Guid credentialId, string modelId, bool enabled)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+
+        db.ModelCredentialModel.Add(new ModelCredentialModel { Id = Guid.NewGuid(), ModelCredentialId = credentialId, ModelId = modelId, Enabled = enabled, Source = ModelSource.Manual });
+        await db.SaveChangesAsync();
+    }
+
     private static AgentTask TaskWith(Guid modelCredentialId) => new() { Goal = "g", Harness = "h", ModelCredentialId = modelCredentialId };
     private static AgentTask NoPin() => new() { Goal = "g", Harness = "h" };
 
