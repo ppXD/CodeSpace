@@ -12,16 +12,35 @@
 # which run inside Hangfire jobs on the worker — no synchronous controller/handler clones a repo. If a synchronous
 # API path ever needs git, reconsider this leanness rather than silently regressing the attack surface.
 #
-#   docker build -f backend/Dockerfile.api -t codespace-api .        # build context = backend/
+#   docker build -f backend/Dockerfile.api -t codespace-api backend/        # build context = backend/
 #
+# global.json FLOORS the SDK feature band (a floor, not a full pin, against the floating sdk:10.0 tag). Multi-arch
+# DIGEST pinning of the base images — the real reproducibility lever — is a deferred follow-up: it needs the
+# manifest-LIST digest + a Renovate bump job (a per-platform digest breaks multi-arch + forces emulation).
 FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
 WORKDIR /src
 COPY . .
+# global.json (copied above) FLOORS the SDK feature band (latestFeature ≥ 10.0.300). PublishMcpProxy → codespace-mcp lands in /app too.
+# (A csproj-only restore-cache split was attempted but reverted — the API's build-only ProjectReference to
+# CodeSpace.Mcp breaks a manifest-only restore; not worth the build-speed micro-optimization.)
 RUN dotnet restore CodeSpace.sln
 RUN dotnet publish src/CodeSpace.Api/CodeSpace.Api.csproj -c Release -o /app --no-restore
 
 FROM mcr.microsoft.com/dotnet/aspnet:10.0 AS runtime
 WORKDIR /app
 COPY --from=build /app ./
+
+# The shared publish output includes codespace-mcp (the agent tool-fabric proxy + its sidecars). The API runs with
+# processing OFF — it NEVER opens an MCP endpoint or launches the proxy — so it is dead agent-execution machinery
+# here. Strip it (+ its .dll/.deps.json/.runtimeconfig.json) so this internet-facing image carries ZERO of it. The
+# proxy still ships in the WORKER image (which executes agents); the publish-output smoke checks the build artifact,
+# not this image, so removing it here is safe.
+RUN rm -f codespace-mcp*
+
+# Run as the base image's prebuilt non-root user (app, uid 1654) — a pure win for the internet-facing API (it
+# executes no agent / spawns no child process, so nothing here needs root). $APP_UID is numeric so a k8s
+# runAsNonRoot check is satisfied; pair with a dropped-capabilities, no-new-privileges securityContext.
+USER $APP_UID
+
 EXPOSE 8080
 ENTRYPOINT ["dotnet", "CodeSpace.Api.dll"]

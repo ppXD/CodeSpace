@@ -7,37 +7,83 @@
 #   • git           — the workspace layer clones bound repos with the git CLI;
 #   • bubblewrap    — per-run filesystem + namespace confinement (BubblewrapSandbox);
 #   • util-linux    — prlimit, for the RLIMIT_NPROC / RLIMIT_FSIZE resource caps (ProcessRlimits);
-#   • codespace-mcp — the tool-fabric proxy, published next to CodeSpace.Api.dll by the csproj target.
+#   • codespace-mcp — the tool-fabric proxy, published next to CodeSpace.Api.dll by the csproj target;
+#   • node + codex + claude — the agent harness CLIs (Node programs) + their runtime, baked in (see below).
 # Deploy this as its own deployment so it scales (replica) independently of the API.
 #
-#   docker build -f backend/Dockerfile.worker -t codespace-worker .  # build context = backend/
+#   docker build -f backend/Dockerfile.worker -t codespace-worker backend/   # build context = backend/
+#   # build amd64 for a linux/amd64 cluster from another arch: --platform=linux/amd64
 #
-# The agent harness CLIs (claude / codex) are NOT baked in — an operator layers them on or repoints
-# CODESPACE_CLAUDE_CODE_PATH / CODESPACE_CODEX_CLI_PATH; without them the MCP endpoint still serves, the harness
-# just won't launch (a clean failed run, surfaced like any missing binary).
+# HARNESS CLIs ARE BAKED IN: codex (@openai/codex) and claude (@anthropic-ai/claude-code) are Node.js programs, and
+# the dotnet/aspnet base ships NO Node runtime — so a bare worker image fails every agent run with exit 127
+# (command not found). This image installs Node + both CLIs (version-pinned; override via the build args below).
+# CodexHarness / ClaudeCodeHarness default to `codex` / `claude` on PATH, so no env wiring is needed; an operator
+# can still repoint CODESPACE_CODEX_CLI_PATH / CODESPACE_CLAUDE_CODE_PATH at a different binary.
 #
 # CONFINEMENT ARMING: bubblewrap is installed here so the capability is PRESENT, but the fail-closed guard
 # CODESPACE_REQUIRE_SANDBOX=1 is left to the DEPLOYMENT to arm (k8s pod / compose) on a host that grants user
 # namespaces — hardcoding it in the image would fail-close every run on an environment where in-container userns
-# is not configured. Heavier isolation (network egress allowlist, cgroup mem/cpu/pid caps, seccomp + cap-drop +
-# no-new-privs) layers on top of bubblewrap HERE in later slices — this image is where all confinement belongs.
+# is not configured. The non-root user below runs bubblewrap via UNPRIVILEGED user namespaces — validate that the
+# target host/pod permits unprivileged userns for this uid (else arm REQUIRE_SANDBOX only where it does).
 #
+# global.json FLOORS the SDK feature band (a floor, not a full pin, against the floating sdk:10.0 tag). Multi-arch
+# base-image digest pinning is a deferred follow-up — it needs the manifest-LIST digest + a Renovate bump (a
+# per-platform digest forces emulation).
+
+# ── 1. Build the .NET app (global.json pins the SDK feature band) ──
 FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
 WORKDIR /src
 COPY . .
 RUN dotnet restore CodeSpace.sln
-# Publishing the API runs PublishMcpProxy → codespace-mcp lands in /app alongside CodeSpace.Api.dll.
 RUN dotnet publish src/CodeSpace.Api/CodeSpace.Api.csproj -c Release -o /app --no-restore
 
+# ── 2. The Node-based harness CLIs, version-pinned (override at build time with --build-arg) ──
+FROM node:20-bookworm-slim AS agent-cli
+ARG CODEX_CLI_VERSION=0.142.2
+ARG CLAUDE_CODE_VERSION=2.1.191
+RUN npm install -g "@openai/codex@${CODEX_CLI_VERSION}" "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}"
+
+# ── 3. Runtime: agent-execution + isolation deps + the Node runtime & CLIs + the published app ──
 FROM mcr.microsoft.com/dotnet/aspnet:10.0 AS runtime
 WORKDIR /app
+
 # Agent-execution + isolation deps (worker-only; absent from the lean public API image):
-#   git → clone bound repos · bubblewrap → fs/namespace confinement · util-linux → prlimit resource caps.
+#   git          → clone bound repos (over HTTPS with an x-access-token; no SSH/openssh needed)
+#   git-lfs      → an LFS-backed repo would otherwise clone as POINTER files, leaving the agent on stub content;
+#                  `git lfs install --system` registers the smudge filter so every clone fetches the real blobs
+#   ca-certificates → managed CA bundle for the outbound TLS the worker makes (git remotes, model gateways, the
+#                  CLIs' provider APIs); also lets an operator drop in a private CA via update-ca-certificates
+#   bubblewrap   → per-run filesystem + namespace confinement (BubblewrapSandbox)
+#   util-linux   → prlimit, for the RLIMIT_NPROC / RLIMIT_FSIZE resource caps (ProcessRlimits)
+# (Deliberately NOT installed: openssh-client — clone is HTTPS not SSH; GPG — commits pass -c commit.gpgsign=false.)
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends git bubblewrap util-linux \
+    && apt-get install -y --no-install-recommends git git-lfs ca-certificates bubblewrap util-linux \
+    && git lfs install --system \
     && rm -rf /var/lib/apt/lists/*
+
+# The Node runtime + the globally-installed harness CLI packages from the agent-cli stage. node_modules carries
+# each CLI's nested platform binary (e.g. @openai/codex/node_modules/@openai/codex-linux-*); `node` (on PATH at
+# /usr/local/bin) runs the launchers. The /usr/local/bin/{codex,claude} entries are RECREATED as symlinks here
+# rather than COPY'd — Docker COPY dereferences a symlink source, which would pull each launcher OUT of its package
+# dir and break its sibling-package (platform-binary) resolution. The relative targets point back into node_modules.
+COPY --from=agent-cli /usr/local/bin/node /usr/local/bin/node
+COPY --from=agent-cli /usr/local/lib/node_modules /usr/local/lib/node_modules
+RUN ln -s ../lib/node_modules/@openai/codex/bin/codex.js /usr/local/bin/codex \
+ && ln -s ../lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe /usr/local/bin/claude \
+ && codex --version && claude --version
+# ^ the smoke run is load-bearing: it fails the BUILD loud if a pinned-version bump moves a launcher's bin entry
+#   (dangling symlink) or drops the nested platform binary — otherwise the worker would build green and 127 at runtime.
+
 COPY --from=build /app ./
-# codespace-mcp ships as an executable apphost; ensure the harness can launch it inside the sandbox.
-RUN chmod +x ./codespace-mcp || true
+# codespace-mcp ships as an executable apphost; fail the BUILD loud if it's missing (a regressed PublishMcpProxy
+# target would otherwise yield a worker whose MCP endpoint silently fails closed to tool-less runs at runtime).
+RUN chmod +x ./codespace-mcp
+
+# Run agent harness children as the base image's prebuilt non-root user (app, uid 1654, home /home/app) —
+# defense-in-depth: the worker is the one image that runs agent-driven commands. The CLIs + codespace-mcp are
+# world-executable; the harness pins per-run CODEX_HOME / CLAUDE_CONFIG_DIR, and /tmp (per-run clones + the MCP
+# socket) is world-writable. $APP_UID is numeric so a k8s runAsNonRoot check is satisfied.
+USER $APP_UID
+
 EXPOSE 8080
 ENTRYPOINT ["dotnet", "CodeSpace.Api.dll"]
