@@ -26,7 +26,7 @@ vi.mock("@/components/dialog", () => ({ useConfirm: () => mocks.confirmFn }));
 
 const cred: ModelCredentialSummary = {
   id: "mc1", teamId: "t1", provider: "Anthropic", displayName: "Team Anthropic",
-  keyHint: "····a1b2", baseUrl: null, status: "Active", createdDate: "2026-06-11T00:00:00Z",
+  keyHint: "····a1b2", keyUnreadable: false, baseUrl: null, status: "Active", createdDate: "2026-06-11T00:00:00Z",
 };
 
 describe("ModelCredentialsPage", () => {
@@ -45,6 +45,17 @@ describe("ModelCredentialsPage", () => {
     expect(screen.getByText("Team Anthropic")).toBeInTheDocument();
     expect(screen.getByText("····a1b2")).toBeInTheDocument();   // masked tail, not a full key
     expect(screen.getByText("Active")).toBeInTheDocument();
+  });
+
+  it("flags a credential whose key can no longer be decrypted, distinct from a keyless one", () => {
+    mocks.rows = [
+      { ...cred, id: "dead", displayName: "Dead key", keyHint: null, keyUnreadable: true },
+      { ...cred, id: "ollama", displayName: "Local Ollama", keyHint: null, keyUnreadable: false },
+    ];
+    render(<ModelCredentialsPage />);
+
+    expect(screen.getByText("key unreadable — re-enter")).toBeInTheDocument();   // dead key → prompt re-entry
+    expect(screen.getByText("no key")).toBeInTheDocument();                       // genuinely keyless → benign
   });
 
   it("shows an empty state when the team has no credentials", () => {

@@ -446,6 +446,7 @@ html, body, * { scrollbar-width: thin; scrollbar-color: rgba(0, 0, 0, .16) trans
 .acs-root .mc-card-row > svg { flex-shrink: 0; }
 .acs-root .mc-card-row > span, .acs-root .mc-card-row > code { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .acs-root .mc-card-row code { font-family: var(--font-mono, ui-monospace, monospace); color: var(--ink-2); }
+.acs-root .mc-card-row .mc-key-dead { color: var(--warn); font-weight: 500; }
 .acs-root .mc-card-foot { display: flex; align-items: center; justify-content: flex-end; gap: 4px; margin-top: auto; padding-top: 10px; border-top: 1px solid var(--line); }
 .acs-root .mc-card-foot .btn { height: 26px; padding: 0 10px; font-size: 12px; }
 /* Clickable "N models" row on the credential card — opens the models manager. */
