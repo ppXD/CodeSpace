@@ -50,6 +50,13 @@ public interface IWorkflowService
     /// </summary>
     Task<Guid> RerunMapBranchAsync(Guid originalRunId, string mapNodeId, int branchIndex, Guid teamId, Guid actorUserId, CancellationToken cancellationToken);
 
+    /// <summary>
+    /// Re-run a SET of a top-level map's branches in ONE forked run (the generic primitive the single-branch rerun is the
+    /// <c>|branchIndices| == 1</c> case of): the chosen branches re-run fresh, every other reusable sibling is replayed,
+    /// the map re-aggregates. Same fail-closed gates as <see cref="RerunMapBranchAsync"/>, plus an empty set is rejected.
+    /// </summary>
+    Task<Guid> RerunMapBranchesAsync(Guid originalRunId, string mapNodeId, IReadOnlySet<int> branchIndices, Guid teamId, Guid actorUserId, CancellationToken cancellationToken);
+
     Task<IReadOnlyList<WorkflowRunSummary>> ListRunsAsync(Guid workflowId, Guid teamId, int limit, CancellationToken cancellationToken);
 
     /// <summary>

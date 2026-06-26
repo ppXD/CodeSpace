@@ -102,6 +102,98 @@ public class RerunMapBranchFlowTests
         agg[2].GetProperty("attempts").GetInt32().ShouldBe(2, "the synthesizer observed the re-run branch's new value");
     }
 
+    // ─────────────────────────────────────────────────────────────────────────────
+    //  Set primitive — RerunMapBranchesAsync (single-branch is the |set|==1 case)
+    // ─────────────────────────────────────────────────────────────────────────────
+
+    [Fact]
+    public async Task Rerun_a_set_of_map_branches_reuses_the_rest_reruns_each_chosen_branch_and_re_synthesizes()
+    {
+        // The set primitive in ONE fork: rerun branches {1,3} of a 4-element succeeded map. Siblings 0/2 are REPLAYED
+        // (counters unchanged, zero node.started); branches 1 AND 3 each re-run exactly once; the map re-aggregates in
+        // element order; the downstream synthesizer re-runs once over the new aggregate.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var key = "mapbranch-set-" + Guid.NewGuid().ToString("N");
+
+        var workflowId = await CreateWorkflowAsync(teamId, userId, CountingMapDef(key));
+        var originalRunId = await RunFreshAsync(workflowId, teamId, FourElements);
+        await AssertRunStatusAsync(originalRunId, WorkflowRunStatus.Success);
+
+        var rerunId = await RerunMapBranchesAsync(originalRunId, "map", new HashSet<int> { 1, 3 }, teamId, userId);
+        await RunEngineAsync(rerunId);
+
+        await AssertRunStatusAsync(rerunId, WorkflowRunStatus.Success);
+        FlakyTestNode.AttemptsFor($"{key}-e0").ShouldBe(1, "sibling 0 was REPLAYED — its counter must not bump");
+        FlakyTestNode.AttemptsFor($"{key}-e1").ShouldBe(2, "chosen branch 1 re-ran exactly once");
+        FlakyTestNode.AttemptsFor($"{key}-e2").ShouldBe(1, "sibling 2 was replayed");
+        FlakyTestNode.AttemptsFor($"{key}-e3").ShouldBe(2, "chosen branch 3 re-ran exactly once");
+
+        (await BranchStartedCountAsync(rerunId, "echo", "map#0")).ShouldBe(0);
+        (await BranchStartedCountAsync(rerunId, "echo", "map#1")).ShouldBe(1, "chosen branch 1 re-ran");
+        (await BranchStartedCountAsync(rerunId, "echo", "map#2")).ShouldBe(0);
+        (await BranchStartedCountAsync(rerunId, "echo", "map#3")).ShouldBe(1, "chosen branch 3 re-ran");
+
+        var results = await LoadMapResultsAsync(rerunId, "map");
+        results.GetArrayLength().ShouldBe(4);
+        for (var i = 0; i < 4; i++)
+            results[i].GetProperty("item").GetString().ShouldBe($"e{i}", $"results[{i}] holds element e{i} in order");
+        results[0].GetProperty("attempts").GetInt32().ShouldBe(1);
+        results[1].GetProperty("attempts").GetInt32().ShouldBe(2, "the re-run branch 1's fresh result slots back at index 1");
+        results[2].GetProperty("attempts").GetInt32().ShouldBe(1);
+        results[3].GetProperty("attempts").GetInt32().ShouldBe(2, "the re-run branch 3's fresh result slots back at index 3");
+
+        (await NodeStartedCountAsync(rerunId, "synth")).ShouldBe(1, "the synthesizer re-ran once over the re-aggregated results");
+    }
+
+    [Fact]
+    public async Task Rerun_the_full_branch_set_reruns_every_branch()
+    {
+        // The whole set {0,1,2,3} → every branch re-runs (nothing reused); the map re-aggregates over all-fresh results.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var key = "mapbranch-full-" + Guid.NewGuid().ToString("N");
+
+        var workflowId = await CreateWorkflowAsync(teamId, userId, CountingMapDef(key));
+        var originalRunId = await RunFreshAsync(workflowId, teamId, FourElements);
+
+        var rerunId = await RerunMapBranchesAsync(originalRunId, "map", new HashSet<int> { 0, 1, 2, 3 }, teamId, userId);
+        await RunEngineAsync(rerunId);
+
+        await AssertRunStatusAsync(rerunId, WorkflowRunStatus.Success);
+        for (var i = 0; i < 4; i++)
+        {
+            FlakyTestNode.AttemptsFor($"{key}-e{i}").ShouldBe(2, $"branch {i} re-ran (the whole set was chosen)");
+            (await BranchStartedCountAsync(rerunId, "echo", $"map#{i}")).ShouldBe(1, $"branch {i} re-ran on the fork");
+        }
+    }
+
+    [Fact]
+    public async Task Rerun_an_empty_branch_set_is_refused_and_writes_nothing()
+    {
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var key = "mapbranch-empty-" + Guid.NewGuid().ToString("N");
+        var workflowId = await CreateWorkflowAsync(teamId, userId, CountingMapDef(key));
+        var originalRunId = await RunFreshAsync(workflowId, teamId, FourElements);
+
+        var before = await RunCountAsync(teamId);
+        await Should.ThrowAsync<RerunTargetNotFoundException>(async () =>
+            await RerunMapBranchesAsync(originalRunId, "map", new HashSet<int>(), teamId, userId));
+        (await RunCountAsync(teamId)).ShouldBe(before, "an empty branch set must write no fork");
+    }
+
+    [Fact]
+    public async Task Rerun_a_set_with_an_out_of_range_index_is_refused_and_writes_nothing()
+    {
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var key = "mapbranch-setrange-" + Guid.NewGuid().ToString("N");
+        var workflowId = await CreateWorkflowAsync(teamId, userId, CountingMapDef(key));
+        var originalRunId = await RunFreshAsync(workflowId, teamId, FourElements);
+
+        var before = await RunCountAsync(teamId);
+        await Should.ThrowAsync<RerunTargetNotFoundException>(async () =>
+            await RerunMapBranchesAsync(originalRunId, "map", new HashSet<int> { 1, 99 }, teamId, userId));   // valid indices 0..3
+        (await RunCountAsync(teamId)).ShouldBe(before, "any out-of-range index in the set rejects the whole rerun — write nothing");
+    }
+
     [Fact]
     public async Task Rerun_map_branch_re_walk_before_completion_does_not_re_execute_siblings()
     {
@@ -775,6 +867,12 @@ public class RerunMapBranchFlowTests
     {
         using var scope = _fixture.BeginScope();
         return await scope.Resolve<IWorkflowService>().RerunMapBranchAsync(originalRunId, mapNodeId, branchIndex, teamId, userId, CancellationToken.None);
+    }
+
+    private async Task<Guid> RerunMapBranchesAsync(Guid originalRunId, string mapNodeId, IReadOnlySet<int> branchIndices, Guid teamId, Guid userId)
+    {
+        using var scope = _fixture.BeginScope();
+        return await scope.Resolve<IWorkflowService>().RerunMapBranchesAsync(originalRunId, mapNodeId, branchIndices, teamId, userId, CancellationToken.None);
     }
 
     private async Task RunEngineAsync(Guid runId)
