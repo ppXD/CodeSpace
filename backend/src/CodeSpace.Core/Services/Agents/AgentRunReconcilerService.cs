@@ -1,4 +1,5 @@
 using System.Text.Json;
+using CodeSpace.Core.Constants;
 using CodeSpace.Core.DependencyInjection;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
@@ -297,7 +298,7 @@ public sealed class AgentRunReconcilerService : IAgentRunReconcilerService, ISco
             return StaleOutcome.LeftAlone;   // lost the reclaim CAS — another replica won, or it just landed terminal
 
         await TryAppendEventAsync(runId, AgentEventKind.Warning, ReattachNote, cancellationToken).ConfigureAwait(false);
-        _jobs.Enqueue<IAgentRunExecutor>(e => e.ReattachAsync(runId, CancellationToken.None));
+        _jobs.Enqueue<IAgentRunExecutor>(e => e.ReattachAsync(runId, CancellationToken.None), HangfireConstants.AgentQueue);
 
         _logger.LogInformation("AgentRunReconciler: re-attaching agent run {RunId} (its durable process is alive but its worker vanished)", runId);
         return StaleOutcome.Reattached;
@@ -559,7 +560,7 @@ public sealed class AgentRunReconcilerService : IAgentRunReconcilerService, ISco
     {
         try
         {
-            _jobs.Enqueue<IAgentRunExecutor>(e => e.ExecuteAsync(runId, CancellationToken.None));
+            _jobs.Enqueue<IAgentRunExecutor>(e => e.ExecuteAsync(runId, CancellationToken.None), HangfireConstants.AgentQueue);
 
             _logger.LogInformation("AgentRunReconciler: re-dispatched stuck queued agent run {RunId} (created {CreatedDate:o})", runId, createdDate);
             return 1;
