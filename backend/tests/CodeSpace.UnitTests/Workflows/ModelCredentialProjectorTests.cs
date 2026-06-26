@@ -149,7 +149,7 @@ public sealed class CustomGatewayDualFormatTests
         var env = new CodexHarness().ProjectToEnv(Custom);
 
         env[CodexHarness.ApiKeyEnvVar].ShouldBe("sk-gateway-virtual-key");   // OPENAI_API_KEY (Bearer)
-        env[CodexHarness.BaseUrlEnvVar].ShouldBe("https://my-gateway/v1");   // OPENAI_BASE_URL
+        env[CodexHarness.BaseUrlEnvVar].ShouldBe("https://my-gateway/v1");   // OPENAI_BASE_URL — carrier; BuildInvocation keeps /v1 (idempotent)
     }
 
     [Fact]
@@ -158,7 +158,9 @@ public sealed class CustomGatewayDualFormatTests
         var env = new ClaudeCodeHarness().ProjectToEnv(Custom);
 
         env[ClaudeCodeHarness.AuthTokenEnvVar].ShouldBe("sk-gateway-virtual-key");   // ANTHROPIC_AUTH_TOKEN (Bearer), not x-api-key
-        env[ClaudeCodeHarness.BaseUrlEnvVar].ShouldBe("https://my-gateway/v1");      // ANTHROPIC_BASE_URL
+        // The SAME stored /v1 base URL is normalized to the ROOT for Claude (its SDK appends /v1/messages), so the one
+        // Custom credential connects under BOTH harnesses — Codex keeps /v1, Claude strips it. This is the dual-format fix.
+        env[ClaudeCodeHarness.BaseUrlEnvVar].ShouldBe("https://my-gateway");
         env.ShouldNotContainKey(ClaudeCodeHarness.ApiKeyEnvVar);
     }
 }

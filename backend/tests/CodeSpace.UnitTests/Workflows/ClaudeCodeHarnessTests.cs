@@ -508,6 +508,40 @@ public class ClaudeCodeHarnessTests
         ClaudeCodeHarness.SubagentModelEnvVar.ShouldBe("CLAUDE_CODE_SUBAGENT_MODEL");
     }
 
+    [Theory]
+    [InlineData("http://gw:40000", "http://gw:40000")]        // root → unchanged (SDK appends /v1/messages)
+    [InlineData("http://gw:40000/", "http://gw:40000")]       // trailing slash trimmed
+    [InlineData("http://gw:40000/v1", "http://gw:40000")]     // /v1 stripped (else /v1/v1/messages → 404)
+    [InlineData("http://gw:40000/v1/", "http://gw:40000")]    // /v1 + slash stripped
+    // A path-prefixed gateway: strip the trailing /v1 too → SDK re-adds /v1/messages giving host/api/v1/messages. The
+    // SAME stored host/api/v1 stays host/api/v1 under Codex (it appends /responses) — different bases per wire, both right.
+    [InlineData("https://gw/api/v1", "https://gw/api")]
+    public void StripVersionSuffix_removes_a_trailing_v1(string input, string expected) =>
+        ClaudeCodeHarness.StripVersionSuffix(input).ShouldBe(expected);
+
+    [Fact]
+    public void ProjectToEnv_strips_a_trailing_v1_from_the_base_url()
+    {
+        // An operator who entered the OpenAI-style host/v1 (or shares one URL with the Codex harness) must still connect.
+        var env = Harness.ProjectToEnv(new ResolvedModelCredential { Provider = "Custom", ApiKey = "tok", BaseUrl = "http://gw:40000/v1" });
+
+        env[ClaudeCodeHarness.BaseUrlEnvVar].ShouldBe("http://gw:40000");
+    }
+
+    [Fact]
+    public void Delivers_skip_webfetch_preflight_on_an_allowlist_egress_run()
+    {
+        // The one inference-adjacent escape our env doesn't close — WebFetch preflights api.anthropic.com (off-allowlist).
+        var args = Harness.BuildInvocation(Task() with { Permissions = new AgentPermissions { Egress = AgentEgressPolicy.Allowlist } }).Args;
+
+        args.ShouldContain("--settings");
+        args.ShouldContain("{\"skipWebFetchPreflight\":true}");
+    }
+
+    [Fact]
+    public void No_webfetch_settings_on_a_full_egress_run() =>
+        Harness.BuildInvocation(Task()).Args.ShouldNotContain("--settings");
+
     [Fact]
     public void DisableNonEssentialTrafficEnvVar_constant_name_is_pinned() =>
         // The Claude CLI reads this exact name to suppress telemetry/gating traffic; renaming it would silently re-stall
