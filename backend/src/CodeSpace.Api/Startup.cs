@@ -3,6 +3,7 @@ using CodeSpace.Api.Extensions;
 using CodeSpace.Core.Services.Workflows.Llm;
 using CodeSpace.Api.Filters;
 using CodeSpace.Core.Services.Auth;
+using CodeSpace.Core.Services.Credentials;
 using CodeSpace.Core.Services.Identity;
 using CodeSpace.Core.Services.OAuth;
 using CodeSpace.Core.Settings;
@@ -37,6 +38,11 @@ public class Startup
                 // error on the way in.
                 opts.JsonSerializerOptions.Converters.Add(new JsonStringEnumConverter());
             });
+
+        // Persist the Data Protection key-ring in the shared Postgres under a stable application name, so every
+        // API/worker pod shares ONE key-ring and decrypts the same credentials (without this, the default per-pod
+        // ephemeral key-ring breaks credential decryption across replicas / restarts). See CodeSpaceDataProtection.
+        services.AddCodeSpaceDataProtection();
 
         // CORS — needed when the SPA calls the backend directly (VITE_API_URL=http://localhost:5099)
         // instead of going through Vite's /api proxy. The Vite-proxy path is same-origin so CORS
