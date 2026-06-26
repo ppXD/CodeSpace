@@ -38,9 +38,14 @@ RUN dotnet restore CodeSpace.sln
 RUN dotnet publish src/CodeSpace.Api/CodeSpace.Api.csproj -c Release -o /app --no-restore
 
 # ── 2. The Node-based harness CLIs, version-pinned (override at build time with --build-arg) ──
+# These two ARG defaults are the SINGLE SOURCE OF TRUTH for the pinned CLI versions. A test
+# (HarnessVersionPinTests) asserts CodexHarness.DefaultVersion / ClaudeCodeHarness.DefaultVersion match these exact
+# strings, so the harness-reported version can NEVER silently drift from what the worker actually installs — bump
+# here and the test fails until the C# constants follow. `deploy/sync-local-harnesses.sh` installs these same pins
+# locally, so a dev box matches the worker. Keep all three (this file · the harness consts · a local install) in lockstep.
 FROM node:20-bookworm-slim AS agent-cli
 ARG CODEX_CLI_VERSION=0.142.2
-ARG CLAUDE_CODE_VERSION=2.1.191
+ARG CLAUDE_CODE_VERSION=2.1.193
 RUN npm install -g "@openai/codex@${CODEX_CLI_VERSION}" "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}"
 
 # ── 3. Runtime: agent-execution + isolation deps + the Node runtime & CLIs + the published app ──

@@ -304,7 +304,7 @@ public class CodexHarnessTests
         try
         {
             System.Environment.SetEnvironmentVariable(CodexHarness.VersionEnvVar, null);
-            new CodexHarness().Version.ShouldBe("0.2.0");
+            new CodexHarness().Version.ShouldBe(CodexHarness.DefaultVersion);   // tracks the Dockerfile pin (HarnessVersionPinTests)
 
             System.Environment.SetEnvironmentVariable(CodexHarness.VersionEnvVar, "9.9.9");
             new CodexHarness().Version.ShouldBe("9.9.9");

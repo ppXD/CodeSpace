@@ -76,7 +76,8 @@ public sealed class ClaudeCodeHarness : IAgentHarness, IModelCredentialProjector
 
     private const string AnthropicProvider = "Anthropic";
 
-    private const string DefaultVersion = "2.1.0";
+    /// <summary>The pinned Claude Code CLI version — MUST match <c>CLAUDE_CODE_VERSION</c> in <c>backend/Dockerfile.worker</c> (the single source of truth); a pin test fails if they drift.</summary>
+    internal const string DefaultVersion = "2.1.193";
 
     private const string DefaultCommand = "claude";
 
