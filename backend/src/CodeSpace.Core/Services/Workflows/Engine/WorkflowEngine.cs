@@ -1952,7 +1952,7 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
         {
             var branchKey = CombineIterationKey(nodeIterationKey, $"{mapNode.Id}#{i}");
 
-            if (TrySettleBranch(rowsByKey, branchKey, body, terminal, errorHandling, i, out var outcome))
+            if (TrySettleBranch(rowsByKey, branchKey, body, terminal, mapNode.Id, errorHandling, i, out var outcome))
                 settled[i] = await ResolveBranchOutcomeAsync(outcome, run.TeamId, cancellationToken).ConfigureAwait(false);
         }
 
@@ -1976,7 +1976,7 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
     /// OWN-key rows (a nested descendant has a longer key), exactly as the live walk reduces a branch from
     /// its own-key terminal.
     /// </summary>
-    private static bool TrySettleBranch(IReadOnlyDictionary<string, IReadOnlyList<Core.Persistence.Entities.WorkflowRunNode>> rowsByKey, string branchKey, WorkflowDefinition body, NodeDefinition terminal, MapErrorHandling errorHandling, int index, out MapBranchOutcome outcome)
+    private static bool TrySettleBranch(IReadOnlyDictionary<string, IReadOnlyList<Core.Persistence.Entities.WorkflowRunNode>> rowsByKey, string branchKey, WorkflowDefinition body, NodeDefinition terminal, string mapNodeId, MapErrorHandling errorHandling, int index, out MapBranchOutcome outcome)
     {
         outcome = default;
 
@@ -2006,6 +2006,21 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
             if (abandonRow != null)
             {
                 outcome = new MapBranchOutcome(index, BuildMapFailureMarker($"Node '{abandonRow.NodeId}' failed.", abandonRow.NodeId), Failed: true);
+                return true;
+            }
+        }
+
+        // Terminate mode: a body node FAILED with no in-body error edge IS the terminate point. Replay it as a
+        // TERMINATE failure WITHOUT re-running — so a seeded failed sibling NOT chosen for rerun keeps blocking the
+        // map (the operator re-runs only the chosen branches; the rest still terminate it). TerminateFailure MUST be
+        // set, mirroring TerminateOutcome: FanOutBranchesAsync sources the terminate signal ONLY from
+        // outcome.TerminateFailure, so a Failed-only replay would silently degrade terminate → continue.
+        if (errorHandling == MapErrorHandling.Terminate)
+        {
+            var terminateRow = ownRows.FirstOrDefault(r => r.Status == NodeStatus.Failure && !HasErrorEdgeInDefinition(body, r.NodeId));
+            if (terminateRow != null)
+            {
+                outcome = new MapBranchOutcome(index, EmptyJsonObject(), Failed: true, TerminateFailure: $"Node '{terminateRow.NodeId}' in map '{mapNodeId}' failed.");
                 return true;
             }
         }

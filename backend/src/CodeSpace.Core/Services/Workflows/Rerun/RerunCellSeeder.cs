@@ -126,9 +126,10 @@ public sealed class RerunCellSeeder : IRerunCellSeeder, IScopedDependency
                 break;
 
             case NodeStatus.Failure:
-                // A re-emitted Failure cell is either a top-level kept failure (error-edge-handled) OR a map
-                // sibling's continue-mode abandon row (a failed body node with no error edge) — both round-trip
-                // faithfully: RehydrateFromLedger / TrySettleBranch re-settle it from the node.failed record.
+                // A re-emitted Failure cell is one of: a top-level kept failure (error-edge-handled); a map sibling's
+                // continue-mode abandon row; or a map sibling's TERMINATE-mode failed row (both: a failed body node
+                // with no error edge) — all round-trip faithfully: RehydrateFromLedger / TrySettleBranch re-settle
+                // each from the node.failed record (the terminate arm replays it as a preserved failure, no re-run).
                 await _recordLogger.NodeFailedAsync(newRunId, cell.NodeId, iterationKey, cell.Error ?? "(failed)", TimeSpan.Zero, cancellationToken).ConfigureAwait(false);
                 break;
 

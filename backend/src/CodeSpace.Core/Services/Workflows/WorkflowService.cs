@@ -347,11 +347,12 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
 
         // Fail-closed, ALL before any write. (1) the target must be a TOP-LEVEL flow.map; (2) its body must be
         // re-runnable per the D7-5 allowlist (pure + purely-side-effecting [D7-3-gated] + agent.code [re-stage];
-        // refuse other-suspendable / both-flagged / nested-container); (3) the original map must have SUCCEEDED (a
-        // Success map ⇒ every sibling settled cleanly, so reusing the non-chosen siblings is sound — this subsumes
-        // "suspended sibling" and "terminate-mode-failed map", both non-Success → refuse); (4) every requested branch
-        // index must be within the original fan-out. The plan re-runs FROM the map (so it re-enters + its downstream
-        // synthesizer re-runs); the gate exempts ONLY this map from the container refusal.
+        // refuse other-suspendable / both-flagged / nested-container); (3) the original map must have reached a TERMINAL
+        // AGGREGATE — Success OR a terminate-mode Failure (a Failure map provably has no parked sibling, so the clean
+        // siblings replay and the failed siblings re-settle-as-failed via the TrySettleBranch Terminate arm; null /
+        // Suspended / Running → refuse); (4) every requested branch index must be within the original fan-out. The plan
+        // re-runs FROM the map (so it re-enters + its downstream synthesizer re-runs); the gate exempts ONLY this map
+        // from the container refusal.
         EnsureTargetIsTopLevelMap(definition, mapNodeId);
         EnsureMapItemsReplayDeterministic(definition, mapNodeId);
         EnsureBranchBodyIsRerunnable(definition, mapNodeId);
@@ -359,7 +360,7 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
         var plan = Rerun.RerunFromNodePlanner.Plan(definition, mapNodeId);
         EnsureNoUnsupportedNodeInClosure(definition, plan, exemptMapId: mapNodeId);
 
-        await EnsureOriginalMapSucceededAsync(originalRunId, mapNodeId, cancellationToken).ConfigureAwait(false);
+        await EnsureOriginalMapRerunnableAsync(originalRunId, mapNodeId, cancellationToken).ConfigureAwait(false);
         var branchCount = await ResolveOriginalBranchCountAsync(originalRunId, mapNodeId, cancellationToken).ConfigureAwait(false);
         EnsureBranchIndicesInRange(branchIndices, branchCount, mapNodeId);
 
@@ -448,20 +449,24 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
         if (blocked.Count > 0) throw new RerunBlockedByUnsupportedNodeException(blocked);
     }
 
-    /// <summary>Gate: the original map must have COMPLETED Successfully. A Success map guarantees every branch settled
-    /// cleanly (the engine re-suspends the map while any branch is parked, and terminate-mode failures fail the map),
-    /// so this single check subsumes "a sibling is still suspended/running" and "terminate-mode map failed" — both
-    /// leave the map non-Success → no clean aggregate to reuse → 422.</summary>
-    private async Task EnsureOriginalMapSucceededAsync(Guid originalRunId, string mapNodeId, CancellationToken cancellationToken)
+    /// <summary>Gate: the original map must have reached a TERMINAL AGGREGATE — Success (every branch settled clean) OR
+    /// Failure (a terminate-mode branch failure). A Failure map is reusable because the engine re-suspends while any
+    /// branch is parked and only fails once suspended==0 (so a Failure map provably has NO parked/running sibling): the
+    /// clean siblings replay and the failed siblings are re-settled-as-failed by the <c>TrySettleBranch</c> Terminate arm
+    /// (this gate is sound ONLY co-shipped with that arm). A null (never ran) / Suspended / Running / Pending map has no
+    /// clean aggregate to reuse → 422. A binding / ceiling / nesting failure throws BEFORE fan-out, leaving zero
+    /// <c>"&lt;mapId&gt;#&lt;i&gt;"</c> rows → <see cref="ResolveOriginalBranchCountAsync"/> returns 0 →
+    /// <see cref="EnsureBranchIndicesInRange"/> fail-closed-rejects every index, so a map-own failure can't reach a rerun.</summary>
+    private async Task EnsureOriginalMapRerunnableAsync(Guid originalRunId, string mapNodeId, CancellationToken cancellationToken)
     {
         var status = await _db.WorkflowRunNode.AsNoTracking()
             .Where(n => n.RunId == originalRunId && n.NodeId == mapNodeId && n.IterationKey == WorkflowIterationKeys.TopLevel)
             .Select(n => (NodeStatus?)n.Status)
             .SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
 
-        if (status != NodeStatus.Success)
+        if (status is not (NodeStatus.Success or NodeStatus.Failure))
             throw new RerunUpstreamNotReusableException(
-                $"Cannot re-run a branch of map '{mapNodeId}': it did not complete successfully in run {originalRunId} (status {status?.ToString() ?? "never ran"}). Replay the whole run instead.");
+                $"Cannot re-run a branch of map '{mapNodeId}': it did not reach a terminal aggregate in run {originalRunId} (status {status?.ToString() ?? "never ran"}). Replay the whole run instead.");
     }
 
     /// <summary>The number of branches the original map fanned out over = the count of DISTINCT direct branch keys
