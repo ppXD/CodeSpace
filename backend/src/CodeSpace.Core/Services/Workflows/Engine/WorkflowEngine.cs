@@ -1,3 +1,5 @@
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using Autofac;
 using CodeSpace.Core.Constants;
@@ -1439,7 +1441,7 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
         try
         {
             var plan = MapPlan.From(ParseMapConfig(mapNode.Config));
-            var elements = ResolveMapElements(mapNode, scope);
+            var elements = await ResolveMapElementsWithSnapshotAsync(run, mapNode, scope, nodeIterationKey, cancellationToken).ConfigureAwait(false);
 
             if (elements.Count > MapPlan.MaxBranchesCeiling)
                 throw new NodeFailureException($"Map '{mapNode.Id}' fans out over {elements.Count} elements, exceeding the {MapPlan.MaxBranchesCeiling}-branch ceiling.");
@@ -1747,6 +1749,119 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
 
         return items.EnumerateArray().Select(e => e.Clone()).ToList();
     }
+
+    private static class MapInputSensitivity
+    {
+        public const string Plain = "Plain";
+        public const string SecretDerived = "SecretDerived";
+    }
+
+    /// <summary>
+    /// Resolve the map's element array THROUGH the durable per-map input snapshot
+    /// (<see cref="Core.Persistence.Entities.WorkflowRunMapInput"/>): on the FIRST fan-out resolve <c>items</c>
+    /// live, classify sensitivity, and persist the frozen array (committed on the parent DbContext BEFORE any
+    /// branch child-scope opens — record writes commit per row, so the row is durable before
+    /// <see cref="FanOutBranchesAsync"/> dispatches); on every later re-entry (same-run resume) load the SNAPSHOT
+    /// instead of re-resolving, so a changed upstream binding can never shift the branch space out from under the
+    /// index-keyed replay + reduce. A SecretDerived collection stores no frozen array and re-resolves live,
+    /// mirroring <see cref="WorkflowRunVariable"/>'s secret rule (no plaintext at rest, no resume-behaviour change).
+    /// Created at first fan-out, NEVER at fork time.
+    /// </summary>
+    private async Task<IReadOnlyList<JsonElement>> ResolveMapElementsWithSnapshotAsync(WorkflowRun run, NodeDefinition mapNode, NodeRunScope scope, string nodeIterationKey, CancellationToken cancellationToken)
+    {
+        var existing = await _db.WorkflowRunMapInput.AsNoTracking()
+            .SingleOrDefaultAsync(s => s.RunId == run.Id && s.MapNodeId == mapNode.Id && s.IterationKey == nodeIterationKey, cancellationToken).ConfigureAwait(false);
+
+        if (existing != null)
+            return await LoadSnapshotElementsAsync(existing, mapNode, scope, run.TeamId, cancellationToken).ConfigureAwait(false);
+
+        var elements = ResolveMapElements(mapNode, scope);
+
+        if (await TryInsertMapInputSnapshotAsync(run, mapNode, nodeIterationKey, elements, scope, cancellationToken).ConfigureAwait(false))
+            return elements;
+
+        // Lost the get-or-create race (a concurrent re-walk / crash-replay won the INSERT) — the winner's row is canonical.
+        var winner = await _db.WorkflowRunMapInput.AsNoTracking()
+            .SingleAsync(s => s.RunId == run.Id && s.MapNodeId == mapNode.Id && s.IterationKey == nodeIterationKey, cancellationToken).ConfigureAwait(false);
+
+        return await LoadSnapshotElementsAsync(winner, mapNode, scope, run.TeamId, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>Read a persisted map-input snapshot back to the element array: a SecretDerived snapshot re-resolves live (no frozen array was stored); a Plain snapshot deserializes its frozen array, re-inflating any offloaded artifact ref. A NULL array column is the empty collection (a deliberately empty map), distinct from the live resolve-to-null short-circuit it overrides.</summary>
+    private async Task<IReadOnlyList<JsonElement>> LoadSnapshotElementsAsync(Core.Persistence.Entities.WorkflowRunMapInput snapshot, NodeDefinition mapNode, NodeRunScope scope, Guid teamId, CancellationToken cancellationToken)
+    {
+        if (snapshot.Sensitivity == MapInputSensitivity.SecretDerived)
+            return ResolveMapElements(mapNode, scope);
+
+        if (snapshot.ElementsJson == null)
+            return Array.Empty<JsonElement>();
+
+        using var doc = JsonDocument.Parse(snapshot.ElementsJson);
+        var stored = doc.RootElement.Clone();
+
+        var resolved = await NodeOutputArtifacts.ResolveAsync(_artifactStore, teamId, new Dictionary<string, JsonElement> { ["elements"] = stored }, cancellationToken).ConfigureAwait(false);
+
+        return resolved.TryGetValue("elements", out var arr) && arr.ValueKind == JsonValueKind.Array
+            ? arr.EnumerateArray().Select(e => e.Clone()).ToList()
+            : Array.Empty<JsonElement>();
+    }
+
+    /// <summary>Classify + persist the map's frozen input array, committed before any branch dispatches so a child scope never runs against an un-snapshotted map. Returns false (without throwing) when a concurrent writer already created the row (23505) — the caller re-reads the winner.</summary>
+    private async Task<bool> TryInsertMapInputSnapshotAsync(WorkflowRun run, NodeDefinition mapNode, string nodeIterationKey, IReadOnlyList<JsonElement> elements, NodeRunScope scope, CancellationToken cancellationToken)
+    {
+        var sensitivity = ClassifyMapItemsSensitivity(mapNode, scope);
+
+        string? elementsJson = null;
+        if (sensitivity == MapInputSensitivity.Plain)
+        {
+            var array = JsonSerializer.SerializeToElement(elements);
+            var offloaded = await NodeOutputArtifacts.OffloadLargeAsync(_artifactStore, run.TeamId, new Dictionary<string, JsonElement> { ["elements"] = array }, ArtifactStoreConfig.InlineThresholdBytes, cancellationToken).ConfigureAwait(false);
+            elementsJson = JsonSerializer.Serialize(offloaded["elements"]);
+        }
+
+        var row = new Core.Persistence.Entities.WorkflowRunMapInput
+        {
+            Id = Guid.NewGuid(),
+            RunId = run.Id,
+            MapNodeId = mapNode.Id,
+            IterationKey = nodeIterationKey,
+            DefinitionHash = run.ReleaseHashAtRun,
+            ElementCount = elements.Count,
+            ElementsJson = elementsJson,
+            ContentHash = ComputeMapElementsHash(elements),
+            Sensitivity = sensitivity,
+            CapturedAt = DateTimeOffset.UtcNow,
+        };
+
+        _db.WorkflowRunMapInput.Add(row);
+        try
+        {
+            await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+            return true;
+        }
+        catch (DbUpdateException ex) when (IsUniqueViolation(ex))
+        {
+            _db.Entry(row).State = EntityState.Detached;
+            return false;
+        }
+    }
+
+    /// <summary>A map is SecretDerived when its <c>items</c> binding references any secret path (the same path set the terminal-output leak guard intersects against); otherwise Plain. Over-classifying is safe — a SecretDerived map merely re-resolves live (never freezes a plaintext secret).</summary>
+    private static string ClassifyMapItemsSensitivity(NodeDefinition mapNode, NodeRunScope scope)
+    {
+        if (scope.SecretPaths.Count == 0) return MapInputSensitivity.Plain;
+
+        foreach (var path in VariableResolver.ExtractReferencedPaths(mapNode.Inputs))
+            if (scope.SecretPaths.Contains(path)) return MapInputSensitivity.SecretDerived;
+
+        return MapInputSensitivity.Plain;
+    }
+
+    private static string ComputeMapElementsHash(IReadOnlyList<JsonElement> elements) =>
+        Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(JsonSerializer.Serialize(elements))));
+
+    private static bool IsUniqueViolation(DbUpdateException ex) =>
+        ex.InnerException is Npgsql.PostgresException { SqlState: "23505" };
 
     /// <summary>
     /// The single body node that is the per-element result source: the lone TERMINAL of the body subgraph
