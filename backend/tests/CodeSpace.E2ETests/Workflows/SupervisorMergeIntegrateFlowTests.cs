@@ -48,7 +48,6 @@ public sealed class SupervisorMergeIntegrateFlowTests : IDisposable
 
     private readonly PostgresFixture _fixture;
     private readonly string? _flagBefore;
-    private readonly string? _laneBefore;
 
     public SupervisorMergeIntegrateFlowTests(PostgresFixture fixture)
     {
@@ -56,16 +55,14 @@ public sealed class SupervisorMergeIntegrateFlowTests : IDisposable
         // Drive the gate purely by the per-run profile opt-in: ensure the ambient flag is OFF so the gate-OFF test is deterministic.
         _flagBefore = Environment.GetEnvironmentVariable(AgentRunExecutor.IntegrateBranchEnabledEnvVar);
         Environment.SetEnvironmentVariable(AgentRunExecutor.IntegrateBranchEnabledEnvVar, null);
-        _laneBefore = Environment.GetEnvironmentVariable(SupervisorLane.EnabledEnvVar);
     }
 
     // Restore ALL shared/process-global state in Dispose (xUnit runs it even on a test-body throw), so the composition
-    // test's lane-flag + decision-script + integrate-flag + AutoExecute mutations can never leak to the 95-class shared
+    // test's decision-script + integrate-flag + AutoExecute mutations can never leak to the 95-class shared
     // Postgres collection — the convention SupervisorSpawnFlowTests / SupervisorMergeFoldFlowTests follow.
     public void Dispose()
     {
         Environment.SetEnvironmentVariable(AgentRunExecutor.IntegrateBranchEnabledEnvVar, _flagBefore);
-        Environment.SetEnvironmentVariable(SupervisorLane.EnabledEnvVar, _laneBefore);
 
         using var scope = _fixture.BeginScope();
         scope.Resolve<SupervisorDecisionScript>().PlanThenStop();
@@ -818,9 +815,8 @@ public sealed class SupervisorMergeIntegrateFlowTests : IDisposable
         // has none, so each repo reports a Failed disposition — what matters is BOTH repos' heads reached the node.)
         if (!await GitReadyAsync()) return;
 
-        // Enable the lane + integrate gate + the merge script for this run. ALL of these (+ AutoExecute) are restored
+        // Enable the integrate gate + the merge script for this run. ALL of these (+ AutoExecute) are restored
         // by Dispose (which xUnit runs even on a throw), so nothing leaks to the shared collection — no per-test finally.
-        Environment.SetEnvironmentVariable(SupervisorLane.EnabledEnvVar, "1");
         Environment.SetEnvironmentVariable(AgentRunExecutor.IntegrateBranchEnabledEnvVar, "1");
         using (var s = _fixture.BeginScope()) s.Resolve<SupervisorDecisionScript>().PlanSpawnMergeStop();
 

@@ -54,7 +54,7 @@ public sealed class SupervisorScorecardService : ISupervisorScorecardService, IS
     /// The team's recent supervisor run ids (most-recent first by FIRST-decision time), capped at
     /// <see cref="RecentRunCap"/> and windowed by <paramref name="since"/> on the run's first decision. A
     /// supervisor run is any run with at least one team-scoped decision row — derived purely from the ledger, so a
-    /// flag-OFF deployment (no decisions ever written) yields none and the scorecard is empty.
+    /// team that has never run the always-on supervisor lane (no decisions ever written) yields none and the scorecard is empty.
     /// </summary>
     private async Task<IReadOnlyList<Guid>> RecentSupervisorRunIdsAsync(Guid teamId, DateTimeOffset? since, CancellationToken cancellationToken)
     {

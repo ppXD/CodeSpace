@@ -38,27 +38,21 @@ public sealed class SupervisorLiveBrainE2ETests : IDisposable
     private const string NodeId = "sup";
 
     private readonly PostgresFixture _fixture;
-    private readonly string? _laneBefore;
 
     public SupervisorLiveBrainE2ETests(PostgresFixture fixture)
     {
         _fixture = fixture;
-        _laneBefore = Environment.GetEnvironmentVariable(SupervisorLane.EnabledEnvVar);
 
-        // Do the only THROWABLE mutation (the DI resolve that flips the decider) FIRST: if it throws, nothing global was
-        // changed yet, so xUnit skipping Dispose (it skips it when a ctor throws) can leak NOTHING. The env-var set is
-        // last because it cannot throw — there is no window where it is set but the flag flip then fails. The two
-        // process-globals (the decider flag + the lane env) are shared across THIS assembly's "Postgres" collection
-        // (the ~6 supervisor E2E classes — NOT the IntegrationTests assembly, which has its own fixture instance), and
-        // both are restored in Dispose, which xUnit runs after this collection-serialized class's single test.
+        // The DI resolve that flips the decider is the only global mutation: if it throws, nothing global was changed
+        // yet, so xUnit skipping Dispose (it skips it when a ctor throws) can leak NOTHING. The decider flag is a
+        // process-global shared across THIS assembly's "Postgres" collection (the ~6 supervisor E2E classes — NOT the
+        // IntegrationTests assembly, which has its own fixture instance), and is restored in Dispose, which xUnit runs
+        // after this collection-serialized class's single test.
         SetDeciderMode(useLiveModel: true);   // the engine now resolves the PRODUCTION LlmSupervisorDecider
-        Environment.SetEnvironmentVariable(SupervisorLane.EnabledEnvVar, "1");
     }
 
     public void Dispose()
     {
-        Environment.SetEnvironmentVariable(SupervisorLane.EnabledEnvVar, _laneBefore);
-
         using var scope = _fixture.BeginScope();
         scope.Resolve<SupervisorDeciderMode>().UseLiveModel = false;   // CRITICAL: restore the shared-fixture default for sibling tests
         scope.Resolve<SupervisorDecisionScript>().PlanThenStop();

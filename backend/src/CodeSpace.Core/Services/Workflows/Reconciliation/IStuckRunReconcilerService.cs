@@ -29,15 +29,15 @@ namespace CodeSpace.Core.Services.Workflows.Reconciliation;
 ///       parked run always has a Pending wait, so it is excluded; we CAS Suspended→Pending then
 ///       re-dispatch (the resolved waits rehydrate as the suspended nodes' payloads on the re-walk).</item>
 ///   <item><b>Supervisor self-advance lost</b> (status=Suspended > 2 min ago with a pending
-///       <c>SupervisorDecision</c> wait — PR-E E2, flag-gated) — a supervisor turn parks on a wait that
+///       <c>SupervisorDecision</c> wait — PR-E E2) — a supervisor turn parks on a wait that
 ///       self-advances (no external work item), but the post-Suspended-commit <c>ResumeWaitAsync</c>
 ///       enqueue was lost (a crash between commit and enqueue, or a dropped Hangfire job). Unlike every
 ///       other wait this run will NEVER be woken externally, and the Stranded sweep excludes it (it HAS a
 ///       pending wait), so the reconciler re-fires the self-advance. The resume's own wait-status CAS makes
-///       a re-fire racing a still-live original idempotent. Sweep runs ONLY when the supervisor lane is
-///       enabled, so a flag-OFF deployment is byte-identical (no extra query).</item>
+///       a re-fire racing a still-live original idempotent. The sweep always runs; runs with no pending
+///       supervisor wait simply don't match it.</item>
 ///   <item><b>Abandoned-Running supervisor run</b> (status=Running, no ledger activity in 5 min, started
-///       > 30 min ago, AND a non-terminal <c>SupervisorDecisionRecord</c> — PR-E P1-2, flag-gated) — a worker
+///       > 30 min ago, AND a non-terminal <c>SupervisorDecisionRecord</c> — PR-E P1-2) — a worker
 ///       died mid-supervisor-decision, leaving the run Running with a Pending/Running decision row the
 ///       frozen-replay path (PR-1) can finish deterministically. This sweep runs BEFORE the abandoned-Running
 ///       failure sweep so it RE-DISPATCHES the run (CAS Running→Pending) instead of failing it; the engine
@@ -45,7 +45,7 @@ namespace CodeSpace.Core.Services.Workflows.Reconciliation;
 ///       crashing run is recovered at most <see cref="StuckRunReconcilerService.MaxSupervisorRunRecoveries"/>
 ///       times (counted from durable <c>supervisor.run_recovered</c> ledger records), after which it falls
 ///       through to the abandoned-Running failure sweep and terminates cleanly — never an infinite loop.
-///       Flag-OFF byte-identical (no extra query when the lane is off).</item>
+///       The sweep always runs; runs with no non-terminal supervisor decision simply don't match it.</item>
 /// </list>
 ///
 /// <para>Idempotent + safe to call concurrently from multiple replicas because every state
@@ -64,10 +64,10 @@ public sealed record StuckRunReconcileSummary
     public int MarkedAbandonedFromRunning { get; init; }
     public int RedispatchedFromStrandedSuspended { get; init; }
 
-    /// <summary>Supervisor self-advances re-fired because the post-commit ResumeWaitAsync enqueue was lost (PR-E E2). 0 when the supervisor lane is off.</summary>
+    /// <summary>Supervisor self-advances re-fired because the post-commit ResumeWaitAsync enqueue was lost (PR-E E2). 0 when no run has a stranded supervisor self-advance wait.</summary>
     public int RecoveredSupervisorAdvance { get; init; }
 
-    /// <summary>Abandoned-Running supervisor runs with a recoverable in-flight decision that were re-dispatched instead of failed (PR-E P1-2). 0 when the supervisor lane is off.</summary>
+    /// <summary>Abandoned-Running supervisor runs with a recoverable in-flight decision that were re-dispatched instead of failed (PR-E P1-2). 0 when no run has a recoverable in-flight supervisor decision.</summary>
     public int RecoveredAbandonedSupervisorRun { get; init; }
 
     public int Total => RedispatchedFromPending + RevertedFromEnqueued + MarkedAbandonedFromRunning + RedispatchedFromStrandedSuspended + RecoveredSupervisorAdvance + RecoveredAbandonedSupervisorRun;

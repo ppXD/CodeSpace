@@ -249,9 +249,6 @@ public class TaskLaunchFlowTests
         // launch hit NoBrainModelStop turn-1. The launch now self-resolves a structured-capable pool model as the brain
         // and bakes it into the snapshot, so the decider has a brain. (The empty-pool fail-closed floor is unit-pinned
         // by SelectBrainRowIdAsync's null path + the builder's omit-when-null test; SeedTeamAsync always seeds a pool.)
-        var flagBefore = Environment.GetEnvironmentVariable(SupervisorLane.EnabledEnvVar);
-        Environment.SetEnvironmentVariable(SupervisorLane.EnabledEnvVar, "1");
-
         var jobClient = ResolveJobClient();
         jobClient.Clear();
         jobClient.AutoExecute = false;   // inspect the frozen snapshot; don't walk the supervisor run
@@ -266,7 +263,7 @@ public class TaskLaunchFlowTests
                 TaskText = "Ship the whole feature end to end", RequestedEffort = TaskEffortModes.Deep,
             });
 
-            result.Route.ProjectionKind.ShouldBe(TaskProjectionKinds.Supervisor, "deep routes the supervisor lane (flag on)");
+            result.Route.ProjectionKind.ShouldBe(TaskProjectionKinds.Supervisor, "deep routes the supervisor lane");
 
             var run = await LoadRunAsync(result.RunId);
             run.DefinitionSnapshotJson.ShouldNotBeNull("the launched supervisor definition is frozen inline on the run");
@@ -281,7 +278,6 @@ public class TaskLaunchFlowTests
         finally
         {
             jobClient.AutoExecute = true;
-            Environment.SetEnvironmentVariable(SupervisorLane.EnabledEnvVar, flagBefore);
         }
     }
 
@@ -291,9 +287,6 @@ public class TaskLaunchFlowTests
         // The operator's agent model pool (AllowedModelIds — credentialed-model row ids) must bind through the full
         // command path → team-scope validation → TaskBuildContext → the supervisor node's allowedModelIds, so a
         // dispatched agent out of the pool fails closed at run time. Frozen-def assertion (don't walk the run).
-        var flagBefore = Environment.GetEnvironmentVariable(SupervisorLane.EnabledEnvVar);
-        Environment.SetEnvironmentVariable(SupervisorLane.EnabledEnvVar, "1");
-
         var jobClient = ResolveJobClient();
         jobClient.Clear();
         jobClient.AutoExecute = false;
@@ -311,7 +304,7 @@ public class TaskLaunchFlowTests
                 AllowedModelIds = new[] { poolRow },
             });
 
-            result.Route.ProjectionKind.ShouldBe(TaskProjectionKinds.Supervisor, "deep routes the supervisor lane (flag on)");
+            result.Route.ProjectionKind.ShouldBe(TaskProjectionKinds.Supervisor, "deep routes the supervisor lane");
 
             var run = await LoadRunAsync(result.RunId);
             run.DefinitionSnapshotJson.ShouldNotBeNull();
@@ -322,7 +315,6 @@ public class TaskLaunchFlowTests
         finally
         {
             jobClient.AutoExecute = true;
-            Environment.SetEnvironmentVariable(SupervisorLane.EnabledEnvVar, flagBefore);
         }
     }
 
@@ -535,30 +527,30 @@ public class TaskLaunchFlowTests
     }
 
     [Fact]
-    public async Task Multi_repo_deep_launch_projects_every_related_repo_into_the_plan_map_body_agent()
+    public async Task Multi_repo_standard_launch_projects_every_related_repo_into_the_plan_map_body_agent()
     {
         var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
         var primary = await SeedRepositoryAsync(teamId);
         var api = await SeedRepositoryAsync(teamId);
 
-        // A DEEP task routes to the plan-map-synth fan-out (the supervisor lane is off by default → deep degrades to
-        // map-fanout). The related repos must reach the MAP BODY agent.code node (each fan-out branch clones them) —
-        // proving the multi-repo workspace flows through the map projection too, not only single-agent. Frozen-def
-        // assertion only (the map run path is covered by PlanMapSynthFanoutFlowTests).
+        // A STANDARD task routes to the plan-map-synth fan-out (the multi-agent map shape). The related repos must reach
+        // the MAP BODY agent.code node (each fan-out branch clones them) — proving the multi-repo workspace flows through
+        // the map projection too, not only single-agent. Frozen-def assertion only (the map run path is covered by
+        // PlanMapSynthFanoutFlowTests; the deep→supervisor multi-repo projection by SupervisorDefinitionBuilderTests).
         var request = new TaskLaunchRequest
         {
             TeamId = teamId,
             ActorUserId = userId,
             SurfaceKind = TaskLaunchSurfaceKinds.Chat,
-            TaskText = "Deep coordinated change",
+            TaskText = "Standard coordinated change",
             RepositoryId = primary,
             RelatedRepositories = new[] { new TaskRelatedRepository { RepositoryId = api, Alias = "api", Access = "write" } },
-            RequestedEffort = TaskEffortModes.Deep,
+            RequestedEffort = TaskEffortModes.Standard,
         };
 
         var result = await LaunchAsync(request);
 
-        result.ProjectionKind.ShouldBe(TaskProjectionKinds.PlanMapSynth, "deep degrades to the map-fanout shape with the supervisor lane off (the default)");
+        result.ProjectionKind.ShouldBe(TaskProjectionKinds.PlanMapSynth, "standard routes to the map-fanout (plan-map-synth) shape");
 
         var run = await LoadRunAsync(result.RunId);
 

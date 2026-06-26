@@ -5,7 +5,8 @@ namespace CodeSpace.Core.Services.Workflows.Plugins.Builtin;
 /// <summary>
 /// The agent-execution nodes — <c>agent.code</c> (runs a coding agent — Codex, Claude Code, … — as a step),
 /// <c>agent.run_command</c> (runs one shell command in a sandbox, optionally inside a cloned repo), and
-/// <c>agent.supervisor</c> (PR-E: the bounded durable turn-loop brain, flag-gated, default-OFF). They sit on
+/// <c>agent.supervisor</c> (PR-E: the bounded durable turn-loop brain, always on — the supervisor recipe always
+/// projects the durable lane). They sit on
 /// the agent execution layer (<c>IAgentHarness</c> / <c>ISandboxRunner</c> + the workspace providers).
 /// Removing this plugin disables the agent steps cleanly; the engine still runs git / llm / http / logic
 /// flows. Auto-discovered by the DI module's <c>IPluginModule</c> scan — adding it needs no engine edits.

@@ -38,13 +38,10 @@ namespace CodeSpace.IntegrationTests.Agents;
 public class SupervisorScorecardFlowTests : IDisposable
 {
     private readonly PostgresFixture _fixture;
-    private readonly string? _flagBefore;
 
     public SupervisorScorecardFlowTests(PostgresFixture fixture)
     {
         _fixture = fixture;
-        _flagBefore = Environment.GetEnvironmentVariable(SupervisorLane.EnabledEnvVar);
-        Environment.SetEnvironmentVariable(SupervisorLane.EnabledEnvVar, "1");
 
         using var scope = _fixture.BeginScope();
         scope.Resolve<SupervisorDecisionScript>().PlanSpawnStop();   // plan → spawn → stop
@@ -52,7 +49,6 @@ public class SupervisorScorecardFlowTests : IDisposable
 
     public void Dispose()
     {
-        Environment.SetEnvironmentVariable(SupervisorLane.EnabledEnvVar, _flagBefore);
         using var scope = _fixture.BeginScope();
         scope.Resolve<SupervisorDecisionScript>().PlanThenStop();
         scope.Resolve<InMemoryBackgroundJobClient>().AutoExecute = true;   // restore the shared fixture default for sibling tests
@@ -110,21 +106,18 @@ public class SupervisorScorecardFlowTests : IDisposable
         // ── Turn 1: the supervisor plans (one Succeeded ledger row) + parks on the self-advance wait. ──
         await RunEngineAsync(runId);
 
-        // ── DISABLE the lane mid-run, then resume: the resumed re-entry hits AgentSupervisorNode's fail-closed
-        //    guard (NodeResult.Fail), which drives the WorkflowRun to Failure. The ledger now has a plan row but
-        //    NO supervisor stop decision — the exact reachable scenario the scorecard must NOT call completed. ──
-        Environment.SetEnvironmentVariable(SupervisorLane.EnabledEnvVar, "0");
-        await ResolveSelfAdvanceAsync(runId);
-        await RunEngineAsync(runId);
+        // ── The ledger now has a plan row but NO supervisor stop decision. Force the run terminal-Failure (an
+        //    abandoned / crashed run) — the exact reachable scenario the scorecard must NOT call completed. ──
+        using (var fail = _fixture.BeginScope())
+            await fail.Resolve<CodeSpaceDbContext>().WorkflowRun
+                .Where(r => r.Id == runId)
+                .ExecuteUpdateAsync(s => s.SetProperty(r => r.Status, WorkflowRunStatus.Failure));
 
         using (var verify = _fixture.BeginScope())
         {
             (await verify.Resolve<CodeSpaceDbContext>().WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == runId)).Status
-                .ShouldBe(WorkflowRunStatus.Failure, "the resumed turn hit the disabled-lane fail-closed guard → the run failed");
+                .ShouldBe(WorkflowRunStatus.Failure, "the run died with a plan row but no stop decision — terminal Failure");
         }
-
-        // Re-enable the lane so the scorecard read itself runs under the same flag-on regime as the rest.
-        Environment.SetEnvironmentVariable(SupervisorLane.EnabledEnvVar, "1");
 
         var card = await GetScorecardAsync(userId, teamId);
 

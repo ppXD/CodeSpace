@@ -28,7 +28,7 @@ namespace CodeSpace.IntegrationTests.Workflows;
 /// like <see cref="MapAgentResumeFlowTests"/> — no real CLI). The supervisor lane DRIVES real agents
 /// end-to-end:
 /// <list type="bullet">
-///   <item>a flag-on <c>agent.supervisor</c> run: turn 0 = plan(2 subtasks) → SELF-ADVANCES; turn 1 =
+///   <item>an <c>agent.supervisor</c> run: turn 0 = plan(2 subtasks) → SELF-ADVANCES; turn 1 =
 ///         spawn[both] → stages 2 REAL agent runs + parks 2 <c>AgentRun</c> waits keyed <c>#turn1#0/#turn1#1</c>;
 ///         the WAIT-FOR-ALL barrier holds the supervisor Suspended until BOTH agents complete, then resumes →
 ///         turn 2 = stop → run Success. The ledger has plan/spawn/stop in order; the 2 spawned AgentRun rows
@@ -43,13 +43,10 @@ namespace CodeSpace.IntegrationTests.Workflows;
 public class SupervisorSpawnFlowTests : IDisposable
 {
     private readonly PostgresFixture _fixture;
-    private readonly string? _flagBefore;
 
     public SupervisorSpawnFlowTests(PostgresFixture fixture)
     {
         _fixture = fixture;
-        _flagBefore = Environment.GetEnvironmentVariable(SupervisorLane.EnabledEnvVar);
-        Environment.SetEnvironmentVariable(SupervisorLane.EnabledEnvVar, "1");
 
         using var scope = _fixture.BeginScope();
         scope.Resolve<SupervisorDecisionScript>().PlanSpawnStop();   // the E3 arc: plan → spawn → stop
@@ -57,7 +54,6 @@ public class SupervisorSpawnFlowTests : IDisposable
 
     public void Dispose()
     {
-        Environment.SetEnvironmentVariable(SupervisorLane.EnabledEnvVar, _flagBefore);
         using var scope = _fixture.BeginScope();
         scope.Resolve<SupervisorDecisionScript>().PlanThenStop();   // restore the default for sibling tests
     }
@@ -674,48 +670,6 @@ public class SupervisorSpawnFlowTests : IDisposable
         }
         finally
         {
-            jobClient.AutoExecute = true;
-        }
-    }
-
-    [Fact]
-    public async Task With_the_supervisor_lane_OFF_an_abandoned_running_supervisor_run_is_failed_exactly_as_today()
-    {
-        // FLAG-OFF byte-identical: with the lane disabled the new recovery sweep returns 0 immediately (no extra
-        // query, no behaviour), so a stale-Running supervisor run is FAILED by the abandoned-Running sweep exactly
-        // as it would be today — the recovery is gated entirely behind the lane flag.
-        var flagBeforeThisTest = Environment.GetEnvironmentVariable(SupervisorLane.EnabledEnvVar);
-
-        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
-        var workflowId = await CreateWorkflowAsync(teamId, userId);
-        var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId);
-
-        var jobClient = ResolveJobClient();
-        jobClient.Clear();
-        jobClient.AutoExecute = false;
-
-        try
-        {
-            // Build the recoverable residue WHILE the lane is on (the fault needs the lane), then stamp the signature.
-            await RunEngineAsync(runId);
-            await ResolveSelfAdvanceAsync(runId);
-            await Should.ThrowAsync<InvalidOperationException>(() => RunTurnWithSpawnFaultAsync(runId, teamId, throwOnCall: 2));
-            await StampWorkerDeathSignatureAsync(runId);
-
-            // Now flip the lane OFF for the reconcile: the recovery sweep must be a no-op.
-            Environment.SetEnvironmentVariable(SupervisorLane.EnabledEnvVar, "0");
-
-            var summary = await ReconcileAsync();
-
-            summary.RecoveredAbandonedSupervisorRun.ShouldBe(0, "lane OFF → the supervisor-run recovery sweep is a no-op (byte-identical to today)");
-            summary.MarkedAbandonedFromRunning.ShouldBe(1, "with the recovery sweep disabled, the stale-Running run is failed by the abandoned sweep exactly as today");
-
-            (await ReadStatusAsync(runId)).ShouldBe(WorkflowRunStatus.Failure, "lane OFF → the run is FAILED, not recovered");
-            (await CountRecoveryMarkersAsync(runId)).ShouldBe(0, "no recovery marker written when the lane is off");
-        }
-        finally
-        {
-            Environment.SetEnvironmentVariable(SupervisorLane.EnabledEnvVar, flagBeforeThisTest);
             jobClient.AutoExecute = true;
         }
     }

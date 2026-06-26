@@ -28,7 +28,7 @@ namespace CodeSpace.IntegrationTests.Workflows;
 /// answer resume over real Postgres; the scripted decider stands in for the LLM). ask_human is wired as the
 /// THIRD park path — a mid-loop HUMAN checkpoint:
 /// <list type="bullet">
-///   <item>a flag-on <c>agent.supervisor</c> run with a conversation: turn 0 = ask_human("which approach?")
+///   <item>an <c>agent.supervisor</c> run with a conversation: turn 0 = ask_human("which approach?")
 ///         posts a question CARD into the run's OWN team conversation + parks on a SINGLE <c>Action</c> wait
 ///         keyed <c>sup#turn0#ask</c> (the run is Suspended); a human's answer via the real resume path resolves
 ///         the wait → the supervisor re-enters → turn 1 sees the answer FOLDED into its context → (scripted)
@@ -47,13 +47,10 @@ namespace CodeSpace.IntegrationTests.Workflows;
 public class SupervisorAskHumanFlowTests : IDisposable
 {
     private readonly PostgresFixture _fixture;
-    private readonly string? _flagBefore;
 
     public SupervisorAskHumanFlowTests(PostgresFixture fixture)
     {
         _fixture = fixture;
-        _flagBefore = Environment.GetEnvironmentVariable(SupervisorLane.EnabledEnvVar);
-        Environment.SetEnvironmentVariable(SupervisorLane.EnabledEnvVar, "1");
 
         using var scope = _fixture.BeginScope();
         scope.Resolve<SupervisorDecisionScript>().AskHumanStop();
@@ -61,7 +58,6 @@ public class SupervisorAskHumanFlowTests : IDisposable
 
     public void Dispose()
     {
-        Environment.SetEnvironmentVariable(SupervisorLane.EnabledEnvVar, _flagBefore);
         using var scope = _fixture.BeginScope();
         scope.Resolve<SupervisorDecisionScript>().PlanThenStop();   // restore the default for sibling tests
     }

@@ -19,9 +19,9 @@ namespace CodeSpace.IntegrationTests.Workflows;
 
 /// <summary>
 /// 🟢 Integration (high fidelity — REAL engine + REAL <see cref="SupervisorDecisionLog"/> over real Postgres,
-/// the supervisor lane flag flipped ON). The PR-E E2 SMALLEST VERTICAL of the bounded durable turn loop:
+/// the supervisor lane unconditionally on). The PR-E E2 SMALLEST VERTICAL of the bounded durable turn loop:
 /// <list type="bullet">
-///   <item>a flag-on <c>agent.supervisor</c> run executes turn 1 (plan → a Succeeded ledger row), PARKS on a
+///   <item>an <c>agent.supervisor</c> run executes turn 1 (plan → a Succeeded ledger row), PARKS on a
 ///         per-turn <c>SupervisorDecision</c> wait, the self-advance resumes it, turn 2 (stop) → the run
 ///         reaches Success; the ledger has EXACTLY 2 rows in Sequence order;</item>
 ///   <item>RESTART-REPLAY: drive turn 1, park, then SIMULATE A RESTART by re-dispatching the Suspended run
@@ -34,24 +34,19 @@ namespace CodeSpace.IntegrationTests.Workflows;
 /// </summary>
 [Collection(PostgresCollection.Name)]
 [Trait("Category", "Integration")]
-public class SupervisorTurnFlowTests : IDisposable
+public class SupervisorTurnFlowTests
 {
     private readonly PostgresFixture _fixture;
-    private readonly string? _flagBefore;
 
     public SupervisorTurnFlowTests(PostgresFixture fixture)
     {
         _fixture = fixture;
-        _flagBefore = Environment.GetEnvironmentVariable(SupervisorLane.EnabledEnvVar);
-        Environment.SetEnvironmentVariable(SupervisorLane.EnabledEnvVar, "1");
 
         // The scripted decider drives the REAL turn service with no LLM. This E2 flow pins the plan→stop arc;
         // reset the shared fixture-singleton script (the E3 crown-jewel flips it to plan→spawn→stop).
         using var scope = _fixture.BeginScope();
         scope.Resolve<CodeSpace.IntegrationTests.Workflows.Infrastructure.SupervisorDecisionScript>().PlanThenStop();
     }
-
-    public void Dispose() => Environment.SetEnvironmentVariable(SupervisorLane.EnabledEnvVar, _flagBefore);
 
     [Fact]
     public async Task Supervisor_runs_plan_then_self_advances_to_stop_and_completes()

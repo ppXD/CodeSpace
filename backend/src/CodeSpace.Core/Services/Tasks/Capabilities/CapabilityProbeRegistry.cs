@@ -11,9 +11,9 @@ namespace CodeSpace.Core.Services.Tasks.Capabilities;
 /// <para><b>Fail-OPEN by design.</b> <see cref="IsAvailable"/> returns true for an UNPROBED capability rather
 /// than false. The router degrade this gate drives is a UX nicety — it picks a softer recipe when a lane is off
 /// so the operator gets an honest fallback instead of an execution-time failure. The REAL enforcer is the
-/// projection's own execution-time gate (the <c>agent.supervisor</c> node fails closed when its lane flag is
-/// off). So an unknown capability defaulting to "available" can never bypass safety — at worst the projected run
-/// hits the node's own fail-closed gate. (Fail-CLOSED is the deferred policy, documented in PR6.)</para>
+/// projection's own execution-time gate (a gated node fails closed when its own flag is off). So an unknown
+/// capability defaulting to "available" can never bypass safety — at worst the projected run hits the node's own
+/// fail-closed gate. (Fail-CLOSED is the deferred policy, documented in PR6.)</para>
 /// </summary>
 public sealed class CapabilityProbeRegistry : ICapabilityProbeRegistry, ISingletonDependency
 {

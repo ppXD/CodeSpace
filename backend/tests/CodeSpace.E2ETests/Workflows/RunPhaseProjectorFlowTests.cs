@@ -34,7 +34,7 @@ namespace CodeSpace.E2ETests.Workflows;
 /// <list type="bullet">
 ///   <item>QUICK single-agent → the agent.code node surfaces as a phase carrying ONE real PhaseAgentRef (Succeeded);</item>
 ///   <item>STANDARD plan-map-synth → a 'Fan out' map phase whose Agents are the >1 real branch agent refs;</item>
-///   <item>DEEP supervisor (lane on, PlanThenStop) → the agent.supervisor node phase AND the supervisor-ledger Plan + Stop
+///   <item>DEEP supervisor (PlanThenStop) → the agent.supervisor node phase AND the supervisor-ledger Plan + Stop
 ///         decision phases with the right statuses.</item>
 /// </list>
 /// Plus the team-scope 404-conflate (a foreign team's run → null) and the ZERO-CORE-EDIT genericity contract: a
@@ -46,18 +46,14 @@ namespace CodeSpace.E2ETests.Workflows;
 public class RunPhaseProjectorFlowTests : IDisposable
 {
     private readonly PostgresFixture _fixture;
-    private readonly string? _laneFlagBefore;
 
     public RunPhaseProjectorFlowTests(PostgresFixture fixture)
     {
         _fixture = fixture;
-        _laneFlagBefore = Environment.GetEnvironmentVariable(SupervisorLane.EnabledEnvVar);
     }
 
     public void Dispose()
     {
-        Environment.SetEnvironmentVariable(SupervisorLane.EnabledEnvVar, _laneFlagBefore);
-
         using var scope = _fixture.BeginScope();
 
         // The supervisor decision script is a shared singleton — restore the default so the deep test's
@@ -167,8 +163,6 @@ public class RunPhaseProjectorFlowTests : IDisposable
     [Fact]
     public async Task Deep_run_phases_include_the_supervisor_node_and_the_ledger_decision_phases()
     {
-        Environment.SetEnvironmentVariable(SupervisorLane.EnabledEnvVar, "1");
-
         using (var setup = _fixture.BeginScope()) setup.Resolve<SupervisorDecisionScript>().PlanThenStop();
 
         var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
@@ -183,7 +177,7 @@ public class RunPhaseProjectorFlowTests : IDisposable
             RequestedEffort = TaskEffortModes.Deep,
         });
 
-        route.ProjectionKind.ShouldBe(TaskProjectionKinds.Supervisor, "deep routes the supervisor with the lane on");
+        route.ProjectionKind.ShouldBe(TaskProjectionKinds.Supervisor, "deep routes the supervisor");
 
         var context = new TaskBuildContext
         {
@@ -227,7 +221,6 @@ public class RunPhaseProjectorFlowTests : IDisposable
         // AgentRun rows are staged + parked on agent waits; we simulate their completion to resume the supervisor to
         // stop, then ProjectAsync and assert the supervisor-ledger spawn phase's child PhaseAgentRefs equal the REAL
         // AgentRun ids, each carrying the REAL AgentRunStatus read TEAM-SCOPED from the DB (never the decider's word).
-        Environment.SetEnvironmentVariable(SupervisorLane.EnabledEnvVar, "1");
 
         // Switch the shared scripted decider to the spawn arc; Dispose restores PlanThenStop for sibling tests.
         using (var setup = _fixture.BeginScope()) setup.Resolve<SupervisorDecisionScript>().PlanSpawnStop();
@@ -244,7 +237,7 @@ public class RunPhaseProjectorFlowTests : IDisposable
             RequestedEffort = TaskEffortModes.Deep,
         });
 
-        route.ProjectionKind.ShouldBe(TaskProjectionKinds.Supervisor, "deep routes the supervisor with the lane on");
+        route.ProjectionKind.ShouldBe(TaskProjectionKinds.Supervisor, "deep routes the supervisor");
 
         var context = new TaskBuildContext
         {

@@ -12,11 +12,10 @@ namespace CodeSpace.Core.Services.Tasks.Recipes.Supervisor;
 /// <c>deep</c> request (with no pinned recipe) reaches the supervisor; the no-overlap registry assert is why
 /// map-fanout no longer claims <c>deep</c>.
 ///
-/// <para><b>Honest degrade.</b> The supervisor projection's <c>agent.supervisor</c> node fails closed when the
-/// lane flag is off, so this recipe DECLARES <see cref="RequiresCapability"/> = the supervisor-lane capability +
-/// <see cref="DegradesToRecipe"/> = map-fanout: when the lane is unavailable the router degrades <c>deep</c>
-/// back to the multi-agent map-fanout shape (with a non-null DegradedReason) rather than projecting a run that
-/// would only fail its own gate. Self-registers via <see cref="ISingletonDependency"/>; a new recipe is a
+/// <para><b>Always on.</b> The supervisor lane graduated its feature gate and is now unconditionally available, so
+/// the supervisor projection's <c>agent.supervisor</c> node always runs and this recipe always projects the durable
+/// supervisor lane. It declares no <see cref="RequiresCapability"/> and never degrades — <c>deep</c> always reaches
+/// the supervisor shape. Self-registers via <see cref="ISingletonDependency"/>; a new recipe is a
 /// sibling folder, never an edit elsewhere.</para>
 /// </summary>
 public sealed class SupervisorRecipe : ITaskRecipe, ISingletonDependency
@@ -37,7 +36,9 @@ public sealed class SupervisorRecipe : ITaskRecipe, ISingletonDependency
 
     public IReadOnlyList<string> RecommendedPhaseLabels => new[] { "Plan", "Delegate", "Synthesize" };
 
-    public string? RequiresCapability => TaskCapabilities.SupervisorLane;
+    // The supervisor lane is always on (it graduated its feature gate), so this recipe never degrades — it always
+    // projects the durable supervisor lane.
+    public string? RequiresCapability => null;
 
-    public string? DegradesToRecipe => TaskRecipeKinds.MapFanout;
+    public string? DegradesToRecipe => null;
 }

@@ -11,10 +11,10 @@ namespace CodeSpace.UnitTests.Agents;
 
 /// <summary>
 /// 🟢 Unit: the supervisor-decision reaper dispatch chain stays thin (Rule 14 + Rule 16). The recurring job sends
-/// exactly the <see cref="ExpireStaleSupervisorDecisionsCommand"/> on a minutely cadence (no logic of its own), is
-/// conditionally registered behind the lane flag (so flag-OFF is byte-identical — never scheduled), and the command
-/// handler derives the cutoff + forwards to <see cref="ISupervisorDecisionLog.ExpireStalePendingAsync"/> and returns its
-/// count (no logic of its own). Hand-rolled recording doubles (no mocking lib, matching the codebase convention).
+/// exactly the <see cref="ExpireStaleSupervisorDecisionsCommand"/> on a minutely cadence (no logic of its own — the lane
+/// is always on, so the reaper is unconditionally registered), and the command handler derives the cutoff + forwards to
+/// <see cref="ISupervisorDecisionLog.ExpireStalePendingAsync"/> and returns its count (no logic of its own). Hand-rolled
+/// recording doubles (no mocking lib, matching the codebase convention).
 /// </summary>
 [Trait("Category", "Unit")]
 public class ExpireStaleSupervisorDecisionsDispatchTests
@@ -31,30 +31,6 @@ public class ExpireStaleSupervisorDecisionsDispatchTests
         await job.Execute();
 
         mediator.Sent.ShouldHaveSingleItem().ShouldBeOfType<ExpireStaleSupervisorDecisionsCommand>("the job is a thin dispatcher — it only sends the command");
-    }
-
-    [Theory]
-    [InlineData("1", true)]
-    [InlineData("true", true)]
-    [InlineData(null, false)]
-    [InlineData("0", false)]
-    public void The_job_registers_only_when_the_lane_flag_is_on(string? raw, bool expectedRegister)
-    {
-        // ShouldRegister gates the scheduler scan: flag-OFF → the reaper is never scheduled (byte-identical). Mutate the
-        // env around the read so the conditional-registration contract is pinned end-to-end.
-        var original = Environment.GetEnvironmentVariable(SupervisorLane.EnabledEnvVar);
-        try
-        {
-            Environment.SetEnvironmentVariable(SupervisorLane.EnabledEnvVar, raw);
-
-            var job = new ExpireStaleSupervisorDecisionsRecurringJob(new RecordingMediator());
-
-            job.ShouldRegister.ShouldBe(expectedRegister, "the reaper is scheduled only when the supervisor lane is enabled");
-        }
-        finally
-        {
-            Environment.SetEnvironmentVariable(SupervisorLane.EnabledEnvVar, original);
-        }
     }
 
     [Fact]

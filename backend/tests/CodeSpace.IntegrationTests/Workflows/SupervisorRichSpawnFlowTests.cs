@@ -25,7 +25,7 @@ namespace CodeSpace.IntegrationTests.Workflows;
 /// <see cref="Core.Services.Supervisor.Executors.RealSupervisorActionExecutor"/> + REAL
 /// <see cref="Core.Services.Agents.AgentRunService"/> + REAL <see cref="Core.Services.Agents.AgentDefinitionResolver"/>
 /// over real Postgres; the scripted decider stands in for the LLM, agent completion is not reached — we inspect
-/// the staged <c>AgentRun.TaskJson</c>). A flag-on supervisor whose node config carries a FULL agent profile
+/// the staged <c>AgentRun.TaskJson</c>). A supervisor whose node config carries a FULL agent profile
 /// (repo + harness + model + persona + credential + runner + MCP + tools + conversation) spawns agents whose
 /// PERSISTED <see cref="AgentTask"/> inherits every profile field AND has the PERSONA-MERGE applied — the same
 /// resolver <c>WorkflowEngine.StageAgentRunAsync</c> runs for an <c>agent.code</c> node — proving the spawn
@@ -37,7 +37,6 @@ namespace CodeSpace.IntegrationTests.Workflows;
 public class SupervisorRichSpawnFlowTests : IDisposable
 {
     private readonly PostgresFixture _fixture;
-    private readonly string? _flagBefore;
 
     private const string PersonaPrompt = "You are a careful billing engineer.";
     private const string PersonaModel = "claude-opus";
@@ -48,8 +47,6 @@ public class SupervisorRichSpawnFlowTests : IDisposable
     public SupervisorRichSpawnFlowTests(PostgresFixture fixture)
     {
         _fixture = fixture;
-        _flagBefore = Environment.GetEnvironmentVariable(SupervisorLane.EnabledEnvVar);
-        Environment.SetEnvironmentVariable(SupervisorLane.EnabledEnvVar, "1");
 
         using var scope = _fixture.BeginScope();
         scope.Resolve<SupervisorDecisionScript>().PlanSpawnStop();   // plan(2) → spawn(both) → stop
@@ -57,7 +54,6 @@ public class SupervisorRichSpawnFlowTests : IDisposable
 
     public void Dispose()
     {
-        Environment.SetEnvironmentVariable(SupervisorLane.EnabledEnvVar, _flagBefore);
         using var scope = _fixture.BeginScope();
         scope.Resolve<SupervisorDecisionScript>().PlanThenStop();   // restore the default for sibling tests
     }
