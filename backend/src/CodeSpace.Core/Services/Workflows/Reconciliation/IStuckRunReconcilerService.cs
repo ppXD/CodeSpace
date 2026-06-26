@@ -70,5 +70,8 @@ public sealed record StuckRunReconcileSummary
     /// <summary>Abandoned-Running supervisor runs with a recoverable in-flight decision that were re-dispatched instead of failed (PR-E P1-2). 0 when the supervisor lane is off.</summary>
     public int RecoveredAbandonedSupervisorRun { get; init; }
 
-    public int Total => RedispatchedFromPending + RevertedFromEnqueued + MarkedAbandonedFromRunning + RedispatchedFromStrandedSuspended + RecoveredSupervisorAdvance + RecoveredAbandonedSupervisorRun;
+    /// <summary>Active-rerun leases freed because their fork reached a terminal state (the backstop for the inline release the engine does on completion).</summary>
+    public int ReleasedRerunLeases { get; init; }
+
+    public int Total => RedispatchedFromPending + RevertedFromEnqueued + MarkedAbandonedFromRunning + RedispatchedFromStrandedSuspended + RecoveredSupervisorAdvance + RecoveredAbandonedSupervisorRun + ReleasedRerunLeases;
 }

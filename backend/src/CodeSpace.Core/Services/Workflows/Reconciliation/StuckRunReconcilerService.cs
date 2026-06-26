@@ -99,6 +99,12 @@ public sealed class StuckRunReconcilerService : IStuckRunReconcilerService, ISco
 
         var abandoned = await MarkAbandonedRunningAsync(cancellationToken).ConfigureAwait(false);
         var unstranded = await RedispatchStrandedSuspendedAsync(cancellationToken).ConfigureAwait(false);
+
+        // AFTER MarkAbandonedRunningAsync: a crashed rerun fork is flipped Running→Failure above, so this same pass
+        // then frees its lease (the terminal-join catches it). Keeps the active-rerun lease's release complete even
+        // when the engine's inline release was skipped (cancel paths) or failed.
+        var releasedLeases = await ReleaseTerminatedRerunLeasesAsync(cancellationToken).ConfigureAwait(false);
+
         var supervisorAdvances = await RecoverSupervisorAdvancesAsync(cancellationToken).ConfigureAwait(false);
 
         var summary = new StuckRunReconcileSummary
@@ -109,12 +115,13 @@ public sealed class StuckRunReconcilerService : IStuckRunReconcilerService, ISco
             RedispatchedFromStrandedSuspended = unstranded,
             RecoveredSupervisorAdvance = supervisorAdvances,
             RecoveredAbandonedSupervisorRun = recoveredSupervisorRuns,
+            ReleasedRerunLeases = releasedLeases,
         };
 
         if (summary.Total > 0)
             _logger.LogInformation(
-                "StuckRunReconciler: redispatched={Redispatched}, reverted={Reverted}, abandoned={Abandoned}, unstranded={Unstranded}, supervisorAdvances={SupervisorAdvances}, supervisorRunsRecovered={SupervisorRunsRecovered}",
-                summary.RedispatchedFromPending, summary.RevertedFromEnqueued, summary.MarkedAbandonedFromRunning, summary.RedispatchedFromStrandedSuspended, summary.RecoveredSupervisorAdvance, summary.RecoveredAbandonedSupervisorRun);
+                "StuckRunReconciler: redispatched={Redispatched}, reverted={Reverted}, abandoned={Abandoned}, unstranded={Unstranded}, supervisorAdvances={SupervisorAdvances}, supervisorRunsRecovered={SupervisorRunsRecovered}, rerunLeasesReleased={RerunLeasesReleased}",
+                summary.RedispatchedFromPending, summary.RevertedFromEnqueued, summary.MarkedAbandonedFromRunning, summary.RedispatchedFromStrandedSuspended, summary.RecoveredSupervisorAdvance, summary.RecoveredAbandonedSupervisorRun, summary.ReleasedRerunLeases);
 
         return summary;
     }
@@ -300,6 +307,24 @@ public sealed class StuckRunReconcilerService : IStuckRunReconcilerService, ISco
         }
 
         return redispatched;
+    }
+
+    /// <summary>
+    /// Free active-rerun leases whose fork reached a TERMINAL state — the complete backstop for the engine's inline
+    /// release (which the cancel paths skip, and which is best-effort). A crashed fork is first flipped to Failure by
+    /// <see cref="MarkAbandonedRunningAsync"/> earlier this pass, so its lease is caught here too; a hard-deleted fork
+    /// frees its lease via the FK cascade. A legitimately Suspended fork (parked on a branch approval) KEEPS its lease.
+    /// Set-based: one status-guarded UPDATE, returning the rows freed.
+    /// </summary>
+    private async Task<int> ReleaseTerminatedRerunLeasesAsync(CancellationToken cancellationToken)
+    {
+        return await _db.WorkflowRerunLease
+            .Where(l => l.Status == RerunLeaseStatuses.InProgress
+                        && _db.WorkflowRun.Any(r => r.Id == l.ForkRunId
+                            && (r.Status == WorkflowRunStatus.Success || r.Status == WorkflowRunStatus.Failure || r.Status == WorkflowRunStatus.Cancelled)))
+            .ExecuteUpdateAsync(s => s
+                .SetProperty(l => l.Status, RerunLeaseStatuses.Released)
+                .SetProperty(l => l.ReleasedAt, DateTimeOffset.UtcNow), cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>
