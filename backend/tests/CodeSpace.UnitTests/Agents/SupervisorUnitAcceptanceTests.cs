@@ -102,4 +102,36 @@ public class SupervisorUnitAcceptanceTests
         back.AcceptancePassed.ShouldBe(false);
         back.AcceptanceDetail.ShouldBe("tests-failed-exit-1");
     }
+
+    // ── The positional invariant the per-unit join depends on: crash-recovery re-park must re-derive agentRunIds in
+    //    NUMERIC spawn-index order. The wait key's #{k} is non-zero-padded, so a lexicographic sort scrambles K≥11. ──
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(7)]
+    [InlineData(15)]
+    public void SpawnIndexOf_parses_the_trailing_index_off_the_wait_key(int k)
+    {
+        SupervisorOutcome.SpawnIndexOf(SupervisorOutcome.AgentWaitKey("sup", turnNumber: 1, spawnIndex: k)).ShouldBe(k);
+    }
+
+    [Fact]
+    public void SpawnIndexOf_sorts_a_malformed_key_last_rather_than_throwing()
+    {
+        SupervisorOutcome.SpawnIndexOf("sup#turn1#notanumber").ShouldBe(int.MaxValue);
+        SupervisorOutcome.SpawnIndexOf("nohash").ShouldBe(int.MaxValue);
+    }
+
+    [Fact]
+    public void Ordering_re_park_keys_by_spawn_index_preserves_numeric_order_for_K_over_ten()
+    {
+        // The 12 per-turn wait keys a K=12 spawn staged, in numeric order. A lexicographic sort would yield
+        // #0,#1,#10,#11,#2,… — scrambling agentRunIds out of subtaskIds[i] order and corrupting the per-unit grade.
+        var numeric = Enumerable.Range(0, 12).Select(k => SupervisorOutcome.AgentWaitKey("sup", 1, k)).ToList();
+        var scrambled = numeric.OrderBy(key => key, StringComparer.Ordinal).ToList();
+
+        scrambled.ShouldNotBe(numeric, "precondition: a lexicographic order genuinely differs at K≥11 (the test has teeth)");
+        scrambled.OrderBy(SupervisorOutcome.SpawnIndexOf).ToList()
+            .ShouldBe(numeric, "ordering the re-derived waits by parsed spawn index restores the authored subtaskIds[i] order");
+    }
 }

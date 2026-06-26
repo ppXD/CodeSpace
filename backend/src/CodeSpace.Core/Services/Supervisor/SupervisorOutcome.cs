@@ -21,6 +21,20 @@ public static class SupervisorOutcome
     /// <summary>The wait IterationKey for the k-th agent a spawn/retry staged at turn N: <c>&lt;nodeId&gt;#turn{N}#{k}</c> (must-fix #1's full form, mirroring flow.map's <c>&lt;mapId&gt;#&lt;i&gt;</c>). Distinct per (turn, spawn-index) so K waits never collide.</summary>
     public static string AgentWaitKey(string nodeId, int turnNumber, int spawnIndex) => $"{nodeId}#turn{turnNumber}#{spawnIndex}";
 
+    /// <summary>
+    /// The NUMERIC spawn index parsed back off an <see cref="AgentWaitKey"/> (the trailing <c>#{k}</c>) — the ordering
+    /// key for crash-recovery re-park. The index is NOT zero-padded, so a LEXICOGRAPHIC sort on the raw key scrambles
+    /// it for K≥11 (<c>#0,#1,#10,#11,…,#2</c>), which would reorder a re-derived <c>agentRunIds</c> out of the authored
+    /// <c>subtaskIds[i]</c> order every spawn-fan-out + the per-unit acceptance join depend on. Re-derivation must order
+    /// by THIS instead. A malformed tail sorts LAST (<see cref="int.MaxValue"/>) — fail-legible, never a throw.
+    /// </summary>
+    public static int SpawnIndexOf(string iterationKey)
+    {
+        var hash = iterationKey.LastIndexOf('#');
+
+        return hash >= 0 && hash + 1 < iterationKey.Length && int.TryParse(iterationKey[(hash + 1)..], out var k) ? k : int.MaxValue;
+    }
+
     /// <summary>The SupervisorDecision self-advance wait IterationKey a synchronous (plan/merge) turn parks on: <c>&lt;nodeId&gt;#turn{N}</c> (must-fix #1; the per-turn root the spawn key's <c>#{k}</c> + ask key's <c>#ask</c> hang off). Distinct per turn so each turn's self-advance row never collides.</summary>
     public static string SelfAdvanceWaitKey(string nodeId, int turnNumber) => $"{nodeId}#turn{turnNumber}";
 
