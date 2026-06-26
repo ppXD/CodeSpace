@@ -49,7 +49,8 @@ public sealed class CodexHarness : IAgentHarness, IModelCredentialProjector, IMc
     /// </summary>
     public const string ConfigHomeEnvVar = "CODEX_HOME";
 
-    private const string DefaultVersion = "0.2.0";
+    /// <summary>The pinned Codex CLI version — MUST match <c>CODEX_CLI_VERSION</c> in <c>backend/Dockerfile.worker</c> (the single source of truth); a pin test fails if they drift.</summary>
+    internal const string DefaultVersion = "0.142.2";
 
     private const string DefaultCommand = "codex";
 
