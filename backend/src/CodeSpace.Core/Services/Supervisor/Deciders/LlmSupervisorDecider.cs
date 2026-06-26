@@ -227,6 +227,7 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
                 var detail = !string.IsNullOrWhiteSpace(r.Error) ? $"error: {r.Error}" : !string.IsNullOrWhiteSpace(r.Summary) ? r.Summary : "(no summary)";
                 builder.AppendLine($"    agent {k}: {r.Status} — {detail}");
                 AppendAgentArtifacts(builder, r);
+                AppendUnitAcceptanceVerdict(builder, r);
             }
 
             if (prior.DecisionKind == SupervisorDecisionKinds.Resolve) AppendResolutionVerdict(builder, prior);
@@ -257,6 +258,16 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
             SupervisorResolutionVerdict.Unverified => "    resolution NOT verified — the reconciliation did not pass the build/tests; do NOT accept it. Retry the resolution or stop and leave the conflict for a human.",
             _ => "    resolution verdict unknown — the resolver has not produced a verified result.",
         });
+    }
+
+    /// <summary>Render a unit's per-unit OBJECTIVE acceptance verdict (loopability slice 3) under its result line so the brain ACTS on it: a PASSED unit's work is server-verified; a FAILED unit's branch is NOT mergeable and is the precise subtask to RETRY (objective truth overrides the agent's self-report). Absent (the subtask authored no acceptance, or a multi-repo unit was deferred) → nothing, byte-identical to before.</summary>
+    private static void AppendUnitAcceptanceVerdict(StringBuilder builder, SupervisorAgentResult result)
+    {
+        if (result.AcceptancePassed is not { } passed) return;
+
+        builder.AppendLine(passed
+            ? "      acceptance PASSED — this unit's definition-of-done check ran green against its branch; the work is objectively verified."
+            : $"      acceptance FAILED — this unit's own check did NOT pass ({result.AcceptanceDetail}); its branch is NOT mergeable. RETRY this exact subtask (do not merge it).");
     }
 
     /// <summary>Render a conflicted merge integration legibly: what conflicted, where the agents' work is preserved, and the two moves available (spawn a resolver to reconcile + verify, or stop and leave it for a human).</summary>

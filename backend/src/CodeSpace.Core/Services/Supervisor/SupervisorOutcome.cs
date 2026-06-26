@@ -21,6 +21,20 @@ public static class SupervisorOutcome
     /// <summary>The wait IterationKey for the k-th agent a spawn/retry staged at turn N: <c>&lt;nodeId&gt;#turn{N}#{k}</c> (must-fix #1's full form, mirroring flow.map's <c>&lt;mapId&gt;#&lt;i&gt;</c>). Distinct per (turn, spawn-index) so K waits never collide.</summary>
     public static string AgentWaitKey(string nodeId, int turnNumber, int spawnIndex) => $"{nodeId}#turn{turnNumber}#{spawnIndex}";
 
+    /// <summary>
+    /// The NUMERIC spawn index parsed back off an <see cref="AgentWaitKey"/> (the trailing <c>#{k}</c>) — the ordering
+    /// key for crash-recovery re-park. The index is NOT zero-padded, so a LEXICOGRAPHIC sort on the raw key scrambles
+    /// it for K≥11 (<c>#0,#1,#10,#11,…,#2</c>), which would reorder a re-derived <c>agentRunIds</c> out of the authored
+    /// <c>subtaskIds[i]</c> order every spawn-fan-out + the per-unit acceptance join depend on. Re-derivation must order
+    /// by THIS instead. A malformed tail sorts LAST (<see cref="int.MaxValue"/>) — fail-legible, never a throw.
+    /// </summary>
+    public static int SpawnIndexOf(string iterationKey)
+    {
+        var hash = iterationKey.LastIndexOf('#');
+
+        return hash >= 0 && hash + 1 < iterationKey.Length && int.TryParse(iterationKey[(hash + 1)..], out var k) ? k : int.MaxValue;
+    }
+
     /// <summary>The SupervisorDecision self-advance wait IterationKey a synchronous (plan/merge) turn parks on: <c>&lt;nodeId&gt;#turn{N}</c> (must-fix #1; the per-turn root the spawn key's <c>#{k}</c> + ask key's <c>#ask</c> hang off). Distinct per turn so each turn's self-advance row never collides.</summary>
     public static string SelfAdvanceWaitKey(string nodeId, int turnNumber) => $"{nodeId}#turn{turnNumber}";
 
@@ -189,10 +203,16 @@ public static class SupervisorOutcome
         agentResults.Any(ResultHasEvidence);
 
     private static bool ResultHasEvidence(SupervisorAgentResult result) =>
-        string.Equals(result.Status, nameof(AgentRunStatus.Succeeded), StringComparison.Ordinal)
-        || result.ChangedFiles.Count > 0
-        || !string.IsNullOrEmpty(result.ProducedBranch)
-        || result.RepositoryResults.Any(repo => !string.IsNullOrEmpty(repo.ProducedBranch) || repo.ChangedFiles.Count > 0);
+        // Loopability slice 3: an OBJECTIVELY-REJECTED unit is NOT settled evidence — even if it pushed a branch or
+        // self-reported Succeeded. Without this, a unit that pushes a branch but FAILS its per-unit acceptance resets
+        // the no-progress streak (ProducedBranch counts below), so an acceptance-failing retry loop never trips the
+        // stall bound (only the total-spawn cap), burning the budget on never-passing work. An ungraded unit
+        // (AcceptancePassed null — no per-unit contract, the pre-slice case) is byte-identically unaffected.
+        result.AcceptancePassed != false
+        && (string.Equals(result.Status, nameof(AgentRunStatus.Succeeded), StringComparison.Ordinal)
+            || result.ChangedFiles.Count > 0
+            || !string.IsNullOrEmpty(result.ProducedBranch)
+            || result.RepositoryResults.Any(repo => !string.IsNullOrEmpty(repo.ProducedBranch) || repo.ChangedFiles.Count > 0));
 
     /// <summary>
     /// Project the per-repo results into the COMPACT (decider-visible, durable-ledger) shape: the bounded per-repo
@@ -690,6 +710,22 @@ public static class SupervisorOutcome
         catch (JsonException)
         {
             return Array.Empty<SupervisorPlanPhase>();
+        }
+    }
+
+    /// <summary>Read the model-authored planned SUBTASKS off a <c>plan</c> decision's PAYLOAD (loopability slice 1) — each carrying its optional <c>dependsOn</c> + <c>acceptance</c> contract. Empty when absent/malformed. The per-unit acceptance fold reads each spawned unit's subtask <c>Acceptance</c> through here (joined positionally to the agent that ran it). Pure + best-effort.</summary>
+    public static IReadOnlyList<SupervisorPlannedSubtask> ReadPlanSubtasks(string? planPayloadJson)
+    {
+        if (string.IsNullOrWhiteSpace(planPayloadJson)) return Array.Empty<SupervisorPlannedSubtask>();
+
+        try
+        {
+            return JsonSerializer.Deserialize<SupervisorPlanPayload>(planPayloadJson, AgentJson.Options)?.Subtasks
+                   ?? Array.Empty<SupervisorPlannedSubtask>();
+        }
+        catch (JsonException)
+        {
+            return Array.Empty<SupervisorPlannedSubtask>();
         }
     }
 

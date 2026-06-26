@@ -1,3 +1,5 @@
+using System.Text.Json.Serialization;
+
 namespace CodeSpace.Messages.Agents;
 
 /// <summary>
@@ -53,4 +55,20 @@ public sealed record SupervisorAgentResult
 
     /// <summary>The model the agent ran on (from its <c>AgentTask</c>), used to PRICE <see cref="InputTokens"/>/<see cref="OutputTokens"/>. Null/blank/unknown → unpriceable → the run contributes 0 to summed cost (fail-open).</summary>
     public string? Model { get; init; }
+
+    /// <summary>
+    /// The per-UNIT OBJECTIVE acceptance verdict (loopability slice 3): <c>true</c> = this unit's own planned-subtask
+    /// acceptance command ran GREEN against the branch this agent produced; <c>false</c> = it FAILED (the unit's branch
+    /// is NOT mergeable — the precise retry target, AND it is discounted from the no-progress evidence so a
+    /// branch-pushed-but-rejected wave can't fake progress); <c>null</c> = the subtask authored no acceptance (or the
+    /// grade was deferred — a multi-repo agent), so the prior self-report behaviour stands. Null-omitted
+    /// (<c>[JsonIgnore(WhenWritingNull)]</c>) so an UNGRADED unit serializes byte-identical to before (the durable
+    /// agentResults bytes are unchanged), and — folded post-terminal — it never enters the idempotency key.
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public bool? AcceptancePassed { get; init; }
+
+    /// <summary>The per-unit acceptance verdict detail (the grader's reason — e.g. "tests-passed", "tests-failed-exit-1", "no-branch-or-repo", "grade-error: …"). Null-omitted; only present alongside a non-null <see cref="AcceptancePassed"/>.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? AcceptanceDetail { get; init; }
 }

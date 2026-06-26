@@ -123,14 +123,22 @@ public sealed partial class RealSupervisorActionExecutor
     {
         var keyPrefix = $"{context.NodeId}#turn{context.TurnNumber}#";
 
-        var tokens = await _db.WorkflowRunWait.AsNoTracking()
+        var waits = await _db.WorkflowRunWait.AsNoTracking()
             .Where(w => w.RunId == context.SupervisorRunId && w.NodeId == context.NodeId
                         && w.WaitKind == WorkflowWaitKinds.AgentRun && w.IterationKey.StartsWith(keyPrefix))
-            .OrderBy(w => w.IterationKey)
-            .Select(w => w.Token)
+            .Select(w => new { w.IterationKey, w.Token })
             .ToListAsync(cancellationToken).ConfigureAwait(false);
 
-        return tokens.Select(t => Guid.TryParse(t, out var id) ? id : (Guid?)null).Where(id => id.HasValue).Select(id => id!.Value).ToList();
+        // Order by the PARSED NUMERIC spawn index, NOT the lexicographic IterationKey: the key's trailing #{k} is raw
+        // (non-zero-padded), so a text sort yields #0,#1,#10,…,#2 for K≥11 — scrambling agentRunIds out of the authored
+        // subtaskIds[i] order the fan-out + the per-unit acceptance join rely on. SQL can't parse the index, so order
+        // in memory (K ≤ 20).
+        return waits
+            .OrderBy(w => SupervisorOutcome.SpawnIndexOf(w.IterationKey))
+            .Select(w => Guid.TryParse(w.Token, out var id) ? id : (Guid?)null)
+            .Where(id => id.HasValue)
+            .Select(id => id!.Value)
+            .ToList();
     }
 
     /// <summary>Re-park on the K waits a prior crashed pass already staged this turn — re-derive the outcome from their tokens WITHOUT staging or creating anything (no double-spawn). The node re-suspends on the existing waits.</summary>
