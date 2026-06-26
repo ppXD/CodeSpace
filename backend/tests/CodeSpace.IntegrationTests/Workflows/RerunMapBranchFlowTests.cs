@@ -331,22 +331,126 @@ public class RerunMapBranchFlowTests
             await RerunMapBranchAsync(originalRunId, "synth", 0, teamId, userId));   // synth is a regular node, not a map
     }
 
+    // ─────────────────────────────────────────────────────────────────────────────
+    //  Terminate-mode rerun — the relaxed gate admits a terminate-failed map; the
+    //  TrySettleBranch Terminate arm replays an unchosen failed sibling as failed.
+    // ─────────────────────────────────────────────────────────────────────────────
+
     [Fact]
-    public async Task Rerun_map_branch_when_the_original_map_did_not_succeed_is_refused()
+    public async Task Rerun_all_failed_branches_of_a_terminate_map_that_now_pass_makes_the_map_succeed()
     {
-        // Terminate-mode map with an always-failing branch → the map FAILS. With no clean aggregate, a branch
-        // rerun is refused (this single "map must be Success" gate also subsumes a still-suspended sibling).
+        // The screenshot's case: a terminate-mode fan-out where EVERY branch failed (the map node is Failure). The
+        // relaxed gate admits it. Rerun ALL branches with a node that fails ONCE (failTimes=1) → each re-runs at
+        // attempt 2 and now succeeds → the map re-aggregates to Success and the downstream synthesizer runs.
         var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
-        var key = "mapbranch-failed-" + Guid.NewGuid().ToString("N");
-        var workflowId = await CreateWorkflowAsync(teamId, userId, TerminateModeFailingMapDef(key));
-        var originalRunId = await RunFreshAsync(workflowId, teamId, """{ "things": ["only"] }""");
+        var key = "mapterm-all-" + Guid.NewGuid().ToString("N");
+
+        var workflowId = await CreateWorkflowAsync(teamId, userId, TerminateFailingMapDef(key, failTimes: 1));
+        var originalRunId = await RunFreshAsync(workflowId, teamId, FourElements);
+        await AssertRunStatusAsync(originalRunId, WorkflowRunStatus.Failure, "every branch fails its first attempt → terminate");
+        for (var i = 0; i < 4; i++) FlakyTestNode.AttemptsFor($"{key}-e{i}").ShouldBe(1);
+
+        var rerunId = await RerunMapBranchesAsync(originalRunId, "map", new HashSet<int> { 0, 1, 2, 3 }, teamId, userId);
+        await RunEngineAsync(rerunId);
+
+        await AssertRunStatusAsync(rerunId, WorkflowRunStatus.Success, "all branches re-ran and passed on attempt 2 → the map succeeds");
+        for (var i = 0; i < 4; i++) FlakyTestNode.AttemptsFor($"{key}-e{i}").ShouldBe(2, $"branch {i} re-ran exactly once");
+        (await NodeStartedCountAsync(rerunId, "synth")).ShouldBe(1, "the synthesizer ran once the map succeeded");
+        (await LoadMapResultsAsync(rerunId, "map")).GetArrayLength().ShouldBe(4);
+    }
+
+    [Fact]
+    public async Task Rerun_one_of_several_failed_terminate_branches_leaves_the_others_failed_and_the_map_blocked()
+    {
+        // The DIAGNOSTIC case + the degrade guard. A terminate map where every branch always fails (failTimes=99).
+        // Rerun ONLY branch 0: it re-runs (and fails again), while the UNCHOSEN failed siblings 1/2/3 are REPLAYED as
+        // terminate-failures (their node never re-fires) — so the map RE-AGGREGATES TO FAILURE (not silently Success,
+        // the TerminateFailure-not-just-Failed pin) and the downstream synthesizer stays BLOCKED.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var key = "mapterm-diag-" + Guid.NewGuid().ToString("N");
+
+        var workflowId = await CreateWorkflowAsync(teamId, userId, TerminateFailingMapDef(key, failTimes: 99));
+        var originalRunId = await RunFreshAsync(workflowId, teamId, FourElements);
         await AssertRunStatusAsync(originalRunId, WorkflowRunStatus.Failure);
 
-        var before = await RunCountAsync(teamId);
-        await Should.ThrowAsync<RerunUpstreamNotReusableException>(async () =>
-            await RerunMapBranchAsync(originalRunId, "map", 0, teamId, userId));
+        var rerunId = await RerunMapBranchesAsync(originalRunId, "map", new HashSet<int> { 0 }, teamId, userId);
+        await RunEngineAsync(rerunId);
 
-        (await RunCountAsync(teamId)).ShouldBe(before, "a rerun of a non-succeeded map must write nothing");
+        await AssertRunStatusAsync(rerunId, WorkflowRunStatus.Failure,
+            "branch 0 re-ran but still failed AND siblings 1/2/3 replay terminate-failed → the map stays Failure (no degrade to Success)");
+        FlakyTestNode.AttemptsFor($"{key}-e0").ShouldBe(2, "chosen branch 0 re-ran (and failed again)");
+        FlakyTestNode.AttemptsFor($"{key}-e1").ShouldBe(1, "unchosen failed sibling 1 was REPLAYED — its failing node must NOT re-fire");
+        FlakyTestNode.AttemptsFor($"{key}-e2").ShouldBe(1);
+        FlakyTestNode.AttemptsFor($"{key}-e3").ShouldBe(1);
+        (await NodeStartedCountAsync(rerunId, "synth")).ShouldBe(0, "the map stayed Failure → the downstream synthesizer is blocked");
+    }
+
+    [Fact]
+    public async Task Rerun_the_failed_branch_of_a_partially_failed_terminate_map_reuses_the_succeeded_siblings_and_succeeds()
+    {
+        // The most realistic operator case: a terminate map where branch 0 FAILED but 1/2/3 SUCCEEDED → map Failure.
+        // Rerun {0} (it now passes on attempt 2): the succeeded siblings 1/2/3 are REUSED (not re-run, via the
+        // unchanged Success replay arm), branch 0 re-runs and passes → the map re-aggregates to Success.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var key = "mapterm-partial-" + Guid.NewGuid().ToString("N");
+
+        var workflowId = await CreateWorkflowAsync(teamId, userId, ElementControlledTerminateMapDef(key));
+        // e0 fails once (ft:1) then passes; e1/e2/e3 always pass (ft:0).
+        var originalRunId = await RunFreshAsync(workflowId, teamId, """{ "things": [ {"v":"e0","ft":1}, {"v":"e1","ft":0}, {"v":"e2","ft":0}, {"v":"e3","ft":0} ] }""");
+        await AssertRunStatusAsync(originalRunId, WorkflowRunStatus.Failure, "branch 0 fails its first attempt → terminate, even though 1/2/3 succeeded");
+        FlakyTestNode.AttemptsFor($"{key}-e0").ShouldBe(1);
+        for (var i = 1; i < 4; i++) FlakyTestNode.AttemptsFor($"{key}-e{i}").ShouldBe(1, $"sibling {i} ran + succeeded on the original");
+
+        var rerunId = await RerunMapBranchesAsync(originalRunId, "map", new HashSet<int> { 0 }, teamId, userId);
+        await RunEngineAsync(rerunId);
+
+        await AssertRunStatusAsync(rerunId, WorkflowRunStatus.Success, "branch 0 re-ran and passed; the succeeded siblings reused → the map succeeds");
+        FlakyTestNode.AttemptsFor($"{key}-e0").ShouldBe(2, "branch 0 re-ran once and passed");
+        for (var i = 1; i < 4; i++) FlakyTestNode.AttemptsFor($"{key}-e{i}").ShouldBe(1, $"succeeded sibling {i} was REUSED — not re-run");
+        (await NodeStartedCountAsync(rerunId, "synth")).ShouldBe(1, "the synthesizer ran once the map succeeded");
+        (await LoadMapResultsAsync(rerunId, "map")).GetArrayLength().ShouldBe(4);
+    }
+
+    [Fact]
+    public async Task Rerun_a_terminate_map_re_walk_before_completion_does_not_re_fire_chosen_branch_or_replayed_siblings()
+    {
+        // Durability for the terminate path: a spurious re-dispatch of the (still-Failure) terminate-rerun fork must
+        // re-fire NEITHER the chosen re-run branch NOR the replayed terminate-failed siblings.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var key = "mapterm-rewalk-" + Guid.NewGuid().ToString("N");
+
+        var workflowId = await CreateWorkflowAsync(teamId, userId, TerminateFailingMapDef(key, failTimes: 99));
+        var originalRunId = await RunFreshAsync(workflowId, teamId, FourElements);
+
+        var rerunId = await RerunMapBranchesAsync(originalRunId, "map", new HashSet<int> { 0 }, teamId, userId);
+        await RunEngineAsync(rerunId);
+        await AssertRunStatusAsync(rerunId, WorkflowRunStatus.Failure);
+
+        await ForceEnqueuedAsync(rerunId);
+        await RunEngineAsync(rerunId);
+
+        FlakyTestNode.AttemptsFor($"{key}-e0").ShouldBe(2, "the chosen branch re-ran exactly once total — the re-walk did not bump it again");
+        FlakyTestNode.AttemptsFor($"{key}-e1").ShouldBe(1, "replayed terminate-failed sibling 1 stayed put");
+        FlakyTestNode.AttemptsFor($"{key}-e2").ShouldBe(1);
+        FlakyTestNode.AttemptsFor($"{key}-e3").ShouldBe(1);
+    }
+
+    [Fact]
+    public async Task Rerun_a_branch_of_a_map_that_failed_before_fan_out_is_refused()
+    {
+        // A map-OWN failure (items resolved to a non-array → the map fails BEFORE any branch dispatched) leaves zero
+        // branch rows, so it is refused (by the branch-count guard, not the relaxed status gate) — the relaxed gate
+        // admits Failure, but only a genuine branch-terminate Failure has branches to re-run.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var key = "mapterm-binding-" + Guid.NewGuid().ToString("N");
+        var workflowId = await CreateWorkflowAsync(teamId, userId, NonArrayItemsMapDef());
+        var originalRunId = await RunFreshAsync(workflowId, teamId, """{ "scalar": "not-an-array" }""");
+        await AssertRunStatusAsync(originalRunId, WorkflowRunStatus.Failure, "a non-array items binding fails the map before fan-out");
+
+        var before = await RunCountAsync(teamId);
+        await Should.ThrowAsync<RerunTargetNotFoundException>(async () =>
+            await RerunMapBranchAsync(originalRunId, "map", 0, teamId, userId));
+        (await RunCountAsync(teamId)).ShouldBe(before, "a map that failed before fan-out has no branch to re-run — write nothing");
     }
 
     [Fact]
@@ -716,8 +820,10 @@ public class RerunMapBranchFlowTests
         },
     };
 
-    // terminate-mode map; body: ms → flaky[always fails] → the map FAILS (no clean aggregate).
-    private static WorkflowDefinition TerminateModeFailingMapDef(string counterPrefix) => new()
+    // terminate-mode map (default), per-element flaky[failTimes] → echo terminal → synth. failTimes>0 ⇒ the original
+    // run terminate-FAILS (every branch fails its first attempts); a rerun re-runs the chosen branches at a higher
+    // attempt — failTimes=1 ⇒ it passes (counter→2), failTimes=99 ⇒ it keeps failing. Mirrors CountingMapDef.
+    private static WorkflowDefinition TerminateFailingMapDef(string counterPrefix, int failTimes) => new()
     {
         SchemaVersion = 1,
         Nodes = new List<NodeDefinition>
@@ -726,7 +832,60 @@ public class RerunMapBranchFlowTests
             new() { Id = "map", TypeKey = "flow.map", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.Json("""{ "items": "{{trigger.things}}" }""") },
             new() { Id = "ms", TypeKey = "flow.map_start", ParentId = "map", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
             new() { Id = "flaky", TypeKey = FlakyTestNode.Key, ParentId = "map",
-                    Config = WorkflowsTestSeed.Json($$"""{ "key": "{{counterPrefix}}", "failTimes": 99 }"""), Inputs = WorkflowsTestSeed.EmptyJson() },
+                    Config = WorkflowsTestSeed.Json($$"""{ "key": "{{counterPrefix}}-{{"{{"}}item{{"}}"}}", "failTimes": {{failTimes}} }"""), Inputs = WorkflowsTestSeed.EmptyJson() },
+            new() { Id = "echo", TypeKey = JsonEmitNode.Key, ParentId = "map", Config = WorkflowsTestSeed.EmptyJson(),
+                    Inputs = WorkflowsTestSeed.Json("""{ "item": "{{item}}", "attempts": "{{nodes.flaky.outputs.attempts}}" }""") },
+            new() { Id = "synth", TypeKey = JsonEmitNode.Key, Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.Json("""{ "agg": "{{nodes.map.outputs.results}}" }""") },
+            new() { Id = "end", TypeKey = "builtin.terminal", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
+        },
+        Edges = new List<EdgeDefinition>
+        {
+            new() { From = "start", To = "map" },
+            new() { From = "map", To = "synth" },
+            new() { From = "synth", To = "end" },
+            new() { From = "ms", To = "flaky" },
+            new() { From = "flaky", To = "echo" },
+        },
+    };
+
+    // terminate-mode map whose per-element failure is CONTROLLED by each element ({v, ft}): flaky key={prefix}-{{item.v}},
+    // failTimes={{item.ft}} — so one element can fail (ft:1) while siblings pass (ft:0), giving a partially-failed map.
+    private static WorkflowDefinition ElementControlledTerminateMapDef(string counterPrefix) => new()
+    {
+        SchemaVersion = 1,
+        Nodes = new List<NodeDefinition>
+        {
+            new() { Id = "start", TypeKey = "trigger.manual", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
+            new() { Id = "map", TypeKey = "flow.map", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.Json("""{ "items": "{{trigger.things}}" }""") },
+            new() { Id = "ms", TypeKey = "flow.map_start", ParentId = "map", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
+            new() { Id = "flaky", TypeKey = FlakyTestNode.Key, ParentId = "map",
+                    Config = WorkflowsTestSeed.Json($$"""{ "key": "{{counterPrefix}}-{{"{{"}}item.v{{"}}"}}", "failTimes": "{{"{{"}}item.ft{{"}}"}}" }"""), Inputs = WorkflowsTestSeed.EmptyJson() },
+            new() { Id = "echo", TypeKey = JsonEmitNode.Key, ParentId = "map", Config = WorkflowsTestSeed.EmptyJson(),
+                    Inputs = WorkflowsTestSeed.Json("""{ "item": "{{item.v}}", "attempts": "{{nodes.flaky.outputs.attempts}}" }""") },
+            new() { Id = "synth", TypeKey = JsonEmitNode.Key, Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.Json("""{ "agg": "{{nodes.map.outputs.results}}" }""") },
+            new() { Id = "end", TypeKey = "builtin.terminal", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
+        },
+        Edges = new List<EdgeDefinition>
+        {
+            new() { From = "start", To = "map" },
+            new() { From = "map", To = "synth" },
+            new() { From = "synth", To = "end" },
+            new() { From = "ms", To = "flaky" },
+            new() { From = "flaky", To = "echo" },
+        },
+    };
+
+    // items binds to a SCALAR trigger field → resolves to a non-array → the map fails BEFORE fan-out (zero branch rows).
+    private static WorkflowDefinition NonArrayItemsMapDef() => new()
+    {
+        SchemaVersion = 1,
+        Nodes = new List<NodeDefinition>
+        {
+            new() { Id = "start", TypeKey = "trigger.manual", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
+            new() { Id = "map", TypeKey = "flow.map", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.Json("""{ "items": "{{trigger.scalar}}" }""") },
+            new() { Id = "ms", TypeKey = "flow.map_start", ParentId = "map", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
+            new() { Id = "flaky", TypeKey = FlakyTestNode.Key, ParentId = "map",
+                    Config = WorkflowsTestSeed.Json("""{ "key": "x", "failTimes": 0 }"""), Inputs = WorkflowsTestSeed.EmptyJson() },
             new() { Id = "end", TypeKey = "builtin.terminal", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
         },
         Edges = new List<EdgeDefinition>
