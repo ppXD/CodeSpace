@@ -25,4 +25,11 @@ public sealed record RerunMapBranchCommand : ICommand<Guid>, IRequireTeamMembers
 
     /// <summary>The 0-based element index of the branch to re-run; siblings are reused.</summary>
     public int BranchIndex { get; init; }
+
+    /// <summary>
+    /// Optional client-minted idempotency token. The UI mints ONE GUID per Rerun click and resends it verbatim on a
+    /// retry, so a double-submit (or a retried HTTP call) returns the SAME fork instead of forking twice; a genuine
+    /// re-rerun mints a new token. Null (a client that doesn't send one) opts out — each call forks independently.
+    /// </summary>
+    public Guid? OperationId { get; init; }
 }

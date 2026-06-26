@@ -217,7 +217,7 @@ public class RerunMapBranchAgentFlowTests
     private async Task<Guid> RerunMapBranchAsync(Guid originalRunId, string mapNodeId, int branchIndex, Guid teamId, Guid userId)
     {
         using var scope = _fixture.BeginScope();
-        return await scope.Resolve<IWorkflowService>().RerunMapBranchAsync(originalRunId, mapNodeId, branchIndex, teamId, userId, CancellationToken.None);
+        return await scope.Resolve<IWorkflowService>().RerunMapBranchAsync(originalRunId, mapNodeId, branchIndex, teamId, userId, operationId: null, CancellationToken.None);
     }
 
     private async Task RunEngineAsync(Guid runId)

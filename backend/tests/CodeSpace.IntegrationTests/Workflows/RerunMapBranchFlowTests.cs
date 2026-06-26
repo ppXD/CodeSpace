@@ -479,6 +479,123 @@ public class RerunMapBranchFlowTests
         (await LoadMapResultsAsync(rerunId, "map")).GetArrayLength().ShouldBe(4);
     }
 
+    // ─────────────────────────────────────────────────────────────────────────────
+    //  OperationId idempotency — a double-submit / HTTP retry of the SAME rerun click
+    //  (same client-minted token) returns the SAME fork; it never forks twice.
+    // ─────────────────────────────────────────────────────────────────────────────
+
+    [Fact]
+    public async Task Rerun_with_the_same_operation_id_twice_returns_the_same_fork_and_never_forks_again()
+    {
+        // The double-submit / HTTP-retry case: the client mints ONE token and (re)sends it. The first call forks; the
+        // second resolves to the SAME fork WITHOUT a second run and WITHOUT re-seeding — and the fork is the real one
+        // (executing it re-runs ONLY the chosen branch, exactly once, reusing the rest).
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var key = "mapidem-same-" + Guid.NewGuid().ToString("N");
+
+        var workflowId = await CreateWorkflowAsync(teamId, userId, CountingMapDef(key));
+        var originalRunId = await RunFreshAsync(workflowId, teamId, FourElements);
+        for (var i = 0; i < 4; i++) FlakyTestNode.AttemptsFor($"{key}-e{i}").ShouldBe(1);
+
+        var opId = Guid.NewGuid();
+        var beforeReruns = await RunCountAsync(teamId);
+
+        var fork1 = await RerunMapBranchesAsync(originalRunId, "map", new HashSet<int> { 0 }, teamId, userId, opId);
+        var fork2 = await RerunMapBranchesAsync(originalRunId, "map", new HashSet<int> { 0 }, teamId, userId, opId);
+
+        fork2.ShouldBe(fork1, "the second submit of the same operation id returns the SAME fork");
+        (await RunCountAsync(teamId)).ShouldBe(beforeReruns + 1, "the duplicate submit created NO second fork");
+
+        await RunEngineAsync(fork1);
+        await AssertRunStatusAsync(fork1, WorkflowRunStatus.Success);
+        FlakyTestNode.AttemptsFor($"{key}-e0").ShouldBe(2, "the chosen branch re-ran EXACTLY once despite the double-submit");
+        for (var i = 1; i < 4; i++) FlakyTestNode.AttemptsFor($"{key}-e{i}").ShouldBe(1, $"sibling {i} was reused — not re-run");
+        (await LoadMapResultsAsync(fork1, "map")).GetArrayLength().ShouldBe(4);
+    }
+
+    [Fact]
+    public async Task Rerun_with_distinct_operation_ids_forks_each_time()
+    {
+        // Two genuine clicks mint two tokens → two independent forks (idempotency is per-token, never coalescing
+        // distinct operations).
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var key = "mapidem-distinct-" + Guid.NewGuid().ToString("N");
+
+        var workflowId = await CreateWorkflowAsync(teamId, userId, CountingMapDef(key));
+        var originalRunId = await RunFreshAsync(workflowId, teamId, FourElements);
+        var beforeReruns = await RunCountAsync(teamId);
+
+        var fork1 = await RerunMapBranchesAsync(originalRunId, "map", new HashSet<int> { 0 }, teamId, userId, Guid.NewGuid());
+        var fork2 = await RerunMapBranchesAsync(originalRunId, "map", new HashSet<int> { 1 }, teamId, userId, Guid.NewGuid());
+
+        fork2.ShouldNotBe(fork1, "distinct operation ids fork independently");
+        (await RunCountAsync(teamId)).ShouldBe(beforeReruns + 2, "each distinct-token submit created its own fork");
+    }
+
+    [Fact]
+    public async Task Rerun_without_an_operation_id_forks_independently_on_every_call()
+    {
+        // Opt-in: a client that sends NO token gets no idempotency — every call forks. (Non-regression: the existing
+        // single-branch endpoint, which never sent a token, is byte-identical.)
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var key = "mapidem-null-" + Guid.NewGuid().ToString("N");
+
+        var workflowId = await CreateWorkflowAsync(teamId, userId, CountingMapDef(key));
+        var originalRunId = await RunFreshAsync(workflowId, teamId, FourElements);
+        var beforeReruns = await RunCountAsync(teamId);
+
+        var fork1 = await RerunMapBranchesAsync(originalRunId, "map", new HashSet<int> { 0 }, teamId, userId, operationId: null);
+        var fork2 = await RerunMapBranchesAsync(originalRunId, "map", new HashSet<int> { 0 }, teamId, userId, operationId: null);
+
+        fork2.ShouldNotBe(fork1, "no token → no dedup → each call forks");
+        (await RunCountAsync(teamId)).ShouldBe(beforeReruns + 2, "both token-less submits forked");
+    }
+
+    [Fact]
+    public async Task Rerun_command_dispatched_twice_with_the_same_operation_id_returns_one_fork()
+    {
+        // The FAITHFUL production path: dispatch the command through the mediator so the TransactionalBehavior wraps
+        // it in one DB transaction. The duplicate's 23505 must roll back to EF's per-SaveChanges savepoint and leave
+        // the transaction usable for the dedup LOOKUP — proving the savepoint reasoning, not just the autocommit case.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var key = "mapidem-cmd-" + Guid.NewGuid().ToString("N");
+
+        var workflowId = await CreateWorkflowAsync(teamId, userId, CountingMapDef(key));
+        var originalRunId = await RunFreshAsync(workflowId, teamId, FourElements);
+
+        var opId = Guid.NewGuid();
+        var beforeReruns = await RunCountAsync(teamId);
+
+        var fork1 = await RerunMapBranchViaCommandAsync(originalRunId, "map", 0, teamId, userId, opId);
+        var fork2 = await RerunMapBranchViaCommandAsync(originalRunId, "map", 0, teamId, userId, opId);
+
+        fork2.ShouldBe(fork1, "the duplicate command (same token) returns the prior fork through the full mediator pipeline");
+        (await RunCountAsync(teamId)).ShouldBe(beforeReruns + 1, "no second fork via the transactional command path");
+    }
+
+    [Fact]
+    public async Task Concurrent_rerun_submits_with_the_same_operation_id_create_exactly_one_fork()
+    {
+        // The race: two CONCURRENT submits (separate scopes / connections / transactions) carrying the same token.
+        // The partial unique index serializes them — one inserts + commits, the other blocks then raises 23505 and
+        // resolves the winner's fork. Exactly one fork; both callers get the same id. No lease needed for THIS guard.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var key = "mapidem-race-" + Guid.NewGuid().ToString("N");
+
+        var workflowId = await CreateWorkflowAsync(teamId, userId, CountingMapDef(key));
+        var originalRunId = await RunFreshAsync(workflowId, teamId, FourElements);
+
+        var opId = Guid.NewGuid();
+        var beforeReruns = await RunCountAsync(teamId);
+
+        var submitA = RerunMapBranchViaCommandAsync(originalRunId, "map", 0, teamId, userId, opId);
+        var submitB = RerunMapBranchViaCommandAsync(originalRunId, "map", 0, teamId, userId, opId);
+        var forks = await Task.WhenAll(submitA, submitB);
+
+        forks[0].ShouldBe(forks[1], "both concurrent submits of the same operation id resolve to ONE fork");
+        (await RunCountAsync(teamId)).ShouldBe(beforeReruns + 1, "exactly one fork was created despite two concurrent submits");
+    }
+
     [Fact]
     public async Task Rerun_side_effecting_map_branch_parks_on_approval_then_approve_fires_target_once_and_siblings_never_refire()
     {
@@ -1128,16 +1245,24 @@ public class RerunMapBranchFlowTests
         return runId;
     }
 
-    private async Task<Guid> RerunMapBranchAsync(Guid originalRunId, string mapNodeId, int branchIndex, Guid teamId, Guid userId)
+    private async Task<Guid> RerunMapBranchAsync(Guid originalRunId, string mapNodeId, int branchIndex, Guid teamId, Guid userId, Guid? operationId = null)
     {
         using var scope = _fixture.BeginScope();
-        return await scope.Resolve<IWorkflowService>().RerunMapBranchAsync(originalRunId, mapNodeId, branchIndex, teamId, userId, CancellationToken.None);
+        return await scope.Resolve<IWorkflowService>().RerunMapBranchAsync(originalRunId, mapNodeId, branchIndex, teamId, userId, operationId, CancellationToken.None);
     }
 
-    private async Task<Guid> RerunMapBranchesAsync(Guid originalRunId, string mapNodeId, IReadOnlySet<int> branchIndices, Guid teamId, Guid userId)
+    private async Task<Guid> RerunMapBranchesAsync(Guid originalRunId, string mapNodeId, IReadOnlySet<int> branchIndices, Guid teamId, Guid userId, Guid? operationId = null)
     {
         using var scope = _fixture.BeginScope();
-        return await scope.Resolve<IWorkflowService>().RerunMapBranchesAsync(originalRunId, mapNodeId, branchIndices, teamId, userId, CancellationToken.None);
+        return await scope.Resolve<IWorkflowService>().RerunMapBranchesAsync(originalRunId, mapNodeId, branchIndices, teamId, userId, operationId, CancellationToken.None);
+    }
+
+    // Drives the rerun through the REAL mediator pipeline (TransactionalBehavior + the team/user context), so the
+    // idempotency dedup runs under the same one-transaction-per-command boundary production uses.
+    private async Task<Guid> RerunMapBranchViaCommandAsync(Guid originalRunId, string mapNodeId, int branchIndex, Guid teamId, Guid userId, Guid? operationId)
+    {
+        using var scope = _fixture.BeginScopeAs(userId, teamId, Roles.Admin);
+        return await scope.Resolve<IMediator>().Send(new RerunMapBranchCommand { OriginalRunId = originalRunId, MapNodeId = mapNodeId, BranchIndex = branchIndex, OperationId = operationId });
     }
 
     private async Task RunEngineAsync(Guid runId)

@@ -47,15 +47,18 @@ public interface IWorkflowService
     /// re-runs over the new aggregate). Returns the new run's id. Refuses (before any write): a cross-team /
     /// unknown / non-top-level / non-map target, a branch index out of range, an original map that didn't
     /// complete successfully, or a branch body containing a side-effecting / suspendable / nested-container node.
+    /// <paramref name="operationId"/> is an optional client-minted idempotency token (reused on a double-submit /
+    /// HTTP retry → the SAME prior fork is returned, never a second one; a new token per genuine re-rerun).
     /// </summary>
-    Task<Guid> RerunMapBranchAsync(Guid originalRunId, string mapNodeId, int branchIndex, Guid teamId, Guid actorUserId, CancellationToken cancellationToken);
+    Task<Guid> RerunMapBranchAsync(Guid originalRunId, string mapNodeId, int branchIndex, Guid teamId, Guid actorUserId, Guid? operationId, CancellationToken cancellationToken);
 
     /// <summary>
     /// Re-run a SET of a top-level map's branches in ONE forked run (the generic primitive the single-branch rerun is the
     /// <c>|branchIndices| == 1</c> case of): the chosen branches re-run fresh, every other reusable sibling is replayed,
     /// the map re-aggregates. Same fail-closed gates as <see cref="RerunMapBranchAsync"/>, plus an empty set is rejected.
+    /// <paramref name="operationId"/> is the optional client-minted idempotency token (see <see cref="RerunMapBranchAsync"/>).
     /// </summary>
-    Task<Guid> RerunMapBranchesAsync(Guid originalRunId, string mapNodeId, IReadOnlySet<int> branchIndices, Guid teamId, Guid actorUserId, CancellationToken cancellationToken);
+    Task<Guid> RerunMapBranchesAsync(Guid originalRunId, string mapNodeId, IReadOnlySet<int> branchIndices, Guid teamId, Guid actorUserId, Guid? operationId, CancellationToken cancellationToken);
 
     Task<IReadOnlyList<WorkflowRunSummary>> ListRunsAsync(Guid workflowId, Guid teamId, int limit, CancellationToken cancellationToken);
 

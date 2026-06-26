@@ -283,7 +283,7 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
         var original = await LoadRunForForkAsync(originalRunId, teamId, cancellationToken).ConfigureAwait(false);
         var snapshot = await LoadVariableSnapshotAsync(originalRunId, cancellationToken).ConfigureAwait(false);
 
-        var replayRunId = await StageForkedRunAsync(original, snapshot, WorkflowRunSourceTypes.Replay, teamId, actorUserId, cancellationToken).ConfigureAwait(false);
+        var replayRunId = await StageForkedRunAsync(original, snapshot, WorkflowRunSourceTypes.Replay, teamId, actorUserId, operationId: null, cancellationToken).ConfigureAwait(false);
 
         await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
         await DispatchAfterCommitAsync(replayRunId, cancellationToken).ConfigureAwait(false);
@@ -313,7 +313,7 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
 
         var snapshot = await LoadVariableSnapshotAsync(originalRunId, cancellationToken).ConfigureAwait(false);
 
-        var rerunRunId = await StageForkedRunAsync(original, snapshot, WorkflowRunSourceTypes.Rerun, teamId, actorUserId, cancellationToken).ConfigureAwait(false);
+        var rerunRunId = await StageForkedRunAsync(original, snapshot, WorkflowRunSourceTypes.Rerun, teamId, actorUserId, operationId: null, cancellationToken).ConfigureAwait(false);
 
         // Pre-seed the kept (reused) upstream cells onto the fork; the engine's RehydrateFromLedger then settles
         // them and the frontier resumes at fromNode. The sentinel (empty original snapshot) forces the replay
@@ -331,8 +331,8 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
     }
 
     /// <summary>Re-run a SINGLE map branch — the <c>|branchIndices| == 1</c> degenerate case of <see cref="RerunMapBranchesAsync"/>.</summary>
-    public Task<Guid> RerunMapBranchAsync(Guid originalRunId, string mapNodeId, int branchIndex, Guid teamId, Guid actorUserId, CancellationToken cancellationToken) =>
-        RerunMapBranchesAsync(originalRunId, mapNodeId, new HashSet<int> { branchIndex }, teamId, actorUserId, cancellationToken);
+    public Task<Guid> RerunMapBranchAsync(Guid originalRunId, string mapNodeId, int branchIndex, Guid teamId, Guid actorUserId, Guid? operationId, CancellationToken cancellationToken) =>
+        RerunMapBranchesAsync(originalRunId, mapNodeId, new HashSet<int> { branchIndex }, teamId, actorUserId, operationId, cancellationToken);
 
     /// <summary>
     /// Re-run a SET of a top-level map's branches in ONE forked run: the chosen branches re-run fresh while every OTHER
@@ -340,7 +340,7 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
     /// This is the single generic primitive both "rerun this branch" (a singleton) and "rerun these branches" compose
     /// from — never a second rerun path; one fork per call (never N forks looped over the set).
     /// </summary>
-    public async Task<Guid> RerunMapBranchesAsync(Guid originalRunId, string mapNodeId, IReadOnlySet<int> branchIndices, Guid teamId, Guid actorUserId, CancellationToken cancellationToken)
+    public async Task<Guid> RerunMapBranchesAsync(Guid originalRunId, string mapNodeId, IReadOnlySet<int> branchIndices, Guid teamId, Guid actorUserId, Guid? operationId, CancellationToken cancellationToken)
     {
         var original = await LoadRunForForkAsync(originalRunId, teamId, cancellationToken).ConfigureAwait(false);
         var definition = await LoadOriginalDefinitionAsync(original, cancellationToken).ConfigureAwait(false);
@@ -370,7 +370,14 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
         var keptToSeed = await ResolveReusableKeptCellsAsync(originalRunId, definition, plan, cancellationToken).ConfigureAwait(false);
         var snapshot = await LoadVariableSnapshotAsync(originalRunId, cancellationToken).ConfigureAwait(false);
 
-        var rerunRunId = await StageForkedRunAsync(original, snapshot, WorkflowRunSourceTypes.Rerun, teamId, actorUserId, cancellationToken).ConfigureAwait(false);
+        var rerunRunId = await StageForkedRunAsync(original, snapshot, WorkflowRunSourceTypes.Rerun, teamId, actorUserId, operationId, cancellationToken).ConfigureAwait(false);
+
+        // Idempotency dedup hit: a fork carrying this operationId already committed (a double-submit / HTTP retry).
+        // The staging returned Guid.Empty WITHOUT touching the ledger — return the PRIOR fork's id, never a second
+        // fork and never re-seeded/re-dispatched side effects. Reachable only when operationId is set (else no key →
+        // no unique constraint → never Guid.Empty), so the !.Value is safe.
+        if (rerunRunId == Guid.Empty)
+            return await ResolveDedupedForkAsync(operationId!.Value, teamId, cancellationToken).ConfigureAwait(false);
 
         await _cellSeeder.SeedKeptCellsAsync(originalRunId, rerunRunId, keptToSeed, writeEmptySnapshotSentinel: snapshot.Count == 0, cancellationToken).ConfigureAwait(false);
         await _cellSeeder.SeedSiblingBranchCellsAsync(originalRunId, rerunRunId, mapNodeId, branchIndices, branchCount, cancellationToken).ConfigureAwait(false);
@@ -523,7 +530,7 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
     /// passes because the hash travels with it). The cloned snapshot makes the engine take the REPLAY scope path
     /// (frozen plains + re-resolved secrets). Lineage (ParentRunId + causation) is stamped for both.
     /// </summary>
-    private async Task<Guid> StageForkedRunAsync(WorkflowRun original, List<WorkflowRunVariable> snapshot, string sourceType, Guid teamId, Guid actorUserId, CancellationToken cancellationToken)
+    private async Task<Guid> StageForkedRunAsync(WorkflowRun original, List<WorkflowRunVariable> snapshot, string sourceType, Guid teamId, Guid actorUserId, Guid? operationId, CancellationToken cancellationToken)
     {
         // A fork RIDES the parent's session — the SAME thread, consuming NO new turn (Correction 1): inherit the
         // parent's SessionId with a NULL TurnIndex, so a replay/rerun attaches to the timeline via ParentRunId and
@@ -531,6 +538,11 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
         var inheritedSession = original.SessionId is { } parentSessionId
             ? new SessionAssignment { SessionId = parentSessionId, TurnIndex = null }
             : null;
+
+        // The client-minted idempotency token, ONLY when supplied — Replay / RerunFromNode pass operationId=null so
+        // their request rows carry a NULL key (the partial unique index ignores nulls), staying byte-identical. A
+        // duplicate submit reuses the same key → the starter raises 23505 → returns Guid.Empty (the dedup signal).
+        var idempotencyKey = operationId?.ToString();
 
         Guid forkRunId;
         if (original.WorkflowId is null)
@@ -540,7 +552,7 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
                 teamId, actorUserId, original.RunRequest?.NormalizedPayloadJson ?? "{}", sourceType,
                 parentRunId: original.Id, causationRequestId: original.RunRequestId,
                 original.ScopeRepositoryIds, original.ScopeProjectIds, original.ProjectionKind,
-                session: inheritedSession, cancellationToken).ConfigureAwait(false);
+                session: inheritedSession, idempotencyKey: idempotencyKey, cancellationToken).ConfigureAwait(false);
         else
             forkRunId = await _runStarter.StartAsync(new RunSourceEnvelope
             {
@@ -556,7 +568,12 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
                 ParentRunId = original.Id,
                 ReleaseHashAtRun = original.ReleaseHashAtRun,
                 Session = inheritedSession,
+                IdempotencyKey = idempotencyKey,
             }, cancellationToken).ConfigureAwait(false);
+
+        // Dedup hit: the starter found a committed request with this key and rolled its own insert back to Guid.Empty.
+        // Surface it verbatim WITHOUT staging the variable snapshot — the caller returns the prior fork id untouched.
+        if (forkRunId == Guid.Empty) return Guid.Empty;
 
         var now = DateTimeOffset.UtcNow;
         foreach (var s in snapshot)
@@ -572,6 +589,29 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
             });
 
         return forkRunId;
+    }
+
+    /// <summary>
+    /// Resolve the fork a prior submit of this <paramref name="operationId"/> already created — the idempotent
+    /// answer to a double-submit / HTTP retry. The starter's 23505 proves a committed request carries this key, so
+    /// the join is guaranteed to find exactly one run (team-scoped, defence-in-depth). A miss is a contract breach
+    /// (the key vanished between the conflict and this read) — fail loud rather than return Guid.Empty as a "new" run.
+    /// </summary>
+    private async Task<Guid> ResolveDedupedForkAsync(Guid operationId, Guid teamId, CancellationToken cancellationToken)
+    {
+        var key = operationId.ToString();
+
+        var priorForkId = await _db.WorkflowRun.AsNoTracking()
+            .Where(r => r.TeamId == teamId && r.RunRequest.IdempotencyKey == key)
+            .Select(r => r.Id)
+            .SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
+
+        if (priorForkId == Guid.Empty)
+            throw new InvalidOperationException($"Rerun dedup hit for operation {operationId} but its prior fork was not found.");
+
+        _logger.LogInformation("Workflow map-branch rerun deduplicated by operation id — returning the prior fork. OperationId={OperationId} ForkRunId={Fork} TeamId={Team}", operationId, priorForkId, teamId);
+
+        return priorForkId;
     }
 
     /// <summary>
