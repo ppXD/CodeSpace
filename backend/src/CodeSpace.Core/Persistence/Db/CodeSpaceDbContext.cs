@@ -45,6 +45,7 @@ public class CodeSpaceDbContext : DbContext, IUnitOfWork, IDataProtectionKeyCont
     public DbSet<WorkflowArtifact> WorkflowArtifact => Set<WorkflowArtifact>();
     public DbSet<WorkflowRunNode> WorkflowRunNode => Set<WorkflowRunNode>();
     public DbSet<WorkflowRunVariable> WorkflowRunVariable => Set<WorkflowRunVariable>();
+    public DbSet<WorkflowRunMapInput> WorkflowRunMapInput => Set<WorkflowRunMapInput>();
     public DbSet<WorkflowRunWait> WorkflowRunWait => Set<WorkflowRunWait>();
     public DbSet<Variable> Variable => Set<Variable>();
     public DbSet<Conversation> Conversation => Set<Conversation>();
