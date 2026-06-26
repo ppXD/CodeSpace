@@ -281,29 +281,72 @@ public class MapInputSnapshotFlowTests
     }
 
     [Fact]
-    public async Task A_large_collection_is_offloaded_in_the_snapshot_rather_than_stored_inline()
+    public async Task A_large_collection_offloads_on_write_and_re_inflates_on_resume_to_drive_the_branch_space()
     {
-        // A large frozen array is offloaded to the artifact store on write (a compact ref, not the full inline array),
-        // reusing the proven NodeOutputArtifacts machinery — so a big fan-out doesn't bloat the snapshot row. Re-inflation
-        // on read is that same machinery's ResolveAsync (already exercised by the inline read in the pre-seed test).
+        // A large frozen array is offloaded to the artifact store on write (a compact ref, not the full inline array);
+        // a real suspend→resume then RE-INFLATES it on read and drives the resumed branch space — the full round-trip.
+        var key = "sp-" + Guid.NewGuid().ToString("N");
+        SuspendProbeNode.Reset(key);
+
         var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
-        var workflowId = await CreateWorkflowAsync(teamId, userId, SyncMapDefinition("{{trigger.things}}"));
-        var big = Enumerable.Range(0, 64).Select(i => $"elem-{i}-{new string('x', 512)}").ToArray();
-        var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId, payloadJson: JsonSerializer.Serialize(new { things = big }));
+        var elems = Enumerable.Range(0, 16).Select(i => $"big-{i}-{new string('x', 600)}").ToList();
+        var workflowId = await CreateWorkflowAsync(teamId, userId, TriggerSuspendingMapDefinition(key));
+        var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId, payloadJson: JsonSerializer.Serialize(new { things = elems }));
 
         await RunEngineAsync(runId);
+        await AssertSuspendedAsync(runId, "16 branches parked over a large array");
 
-        using var scope = _fixture.BeginScope();
-        var db = scope.Resolve<CodeSpaceDbContext>();
-        (await db.WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == runId)).Status.ShouldBe(WorkflowRunStatus.Success);
+        var snap = await SingleSnapshotAsync(runId);
+        snap.ElementCount.ShouldBe(16);
+        snap.ElementsJson!.Length.ShouldBeLessThan(elems.Sum(s => s.Length), "the large array is offloaded to a compact artifact ref, not stored inline");
 
-        var snap = await db.WorkflowRunMapInput.AsNoTracking().SingleAsync(s => s.RunId == runId);
-        snap.ElementCount.ShouldBe(64);
-        snap.ElementsJson.ShouldNotBeNull();
-        snap.ElementsJson!.Length.ShouldBeLessThan(big.Sum(s => s.Length), "the large array is offloaded to a compact artifact ref, not stored inline");
+        for (var i = 0; i < elems.Count; i++) (await ResolveBranchAsync(runId, key, $"b-{i}", "ok")).ShouldBeTrue();
+        await RunEngineAsync(runId);
 
-        // The map still fanned over all 64 elements (the live array drove the first walk).
-        JsonDocument.Parse((await MapNodeAsync(db, runId)).OutputsJson).RootElement.GetProperty("count").GetInt32().ShouldBe(64);
+        using var done = _fixture.BeginScope();
+        var fdb = done.Resolve<CodeSpaceDbContext>();
+        (await fdb.WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == runId)).Status.ShouldBe(WorkflowRunStatus.Success);
+
+        // count==16 on resume proves the offloaded snapshot re-inflated to the full array — a failed re-inflate would
+        // fan over 0 elements and orphan the 16 parked branches.
+        JsonDocument.Parse((await MapNodeAsync(fdb, runId)).OutputsJson).RootElement.GetProperty("count").GetInt32()
+            .ShouldBe(16, "the offloaded snapshot re-inflated to all 16 elements on resume");
+    }
+
+    [Fact]
+    public async Task A_secret_derived_map_resumes_when_its_count_is_stable_then_the_count_guard_holds()
+    {
+        // The SecretDerived read path re-resolves live (no frozen array), but the frozen ElementCount guards the branch
+        // space: a secret-bound map that suspends and resumes with a STABLE size re-resolves the current secret values
+        // and proceeds (live count == frozen count). The guard fails closed only if the size drifts.
+        var key = "sp-" + Guid.NewGuid().ToString("N");
+        SuspendProbeNode.Reset(key);
+
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        using (var setup = _fixture.BeginScopeAs(userId, teamId, Roles.Admin))
+            await setup.Resolve<IVariableService>().SetAsync(VariableScope.Team, teamId, teamId, "API_KEY", VariableValueType.Secret,
+                JsonSerializer.Deserialize<JsonElement>("\"SECRET-SENTINEL\""), null, userId, CancellationToken.None);
+
+        var workflowId = await CreateWorkflowAsync(teamId, userId, SecretSuspendingMapDefinition(key));
+        var runId = await WorkflowsTestSeed.SeedManualRunAsync(_fixture, workflowId, teamId, payloadJson: "{}");
+
+        await RunEngineAsync(runId);
+        await AssertSuspendedAsync(runId, "two secret-derived branches parked");
+
+        var snap = await SingleSnapshotAsync(runId);
+        snap.Sensitivity.ShouldBe("SecretDerived");
+        snap.ElementsJson.ShouldBeNull();
+        snap.ElementCount.ShouldBe(2);
+
+        (await ResolveBranchAsync(runId, key, "branch-0", "RES-0")).ShouldBeTrue();
+        (await ResolveBranchAsync(runId, key, "branch-1", "RES-1")).ShouldBeTrue();
+        await RunEngineAsync(runId);
+
+        using var done = _fixture.BeginScope();
+        var fdb = done.Resolve<CodeSpaceDbContext>();
+        (await fdb.WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == runId)).Status
+            .ShouldBe(WorkflowRunStatus.Success, "the count guard passed (live re-resolve count == frozen ElementCount) and the map resumed");
+        JsonDocument.Parse((await MapNodeAsync(fdb, runId)).OutputsJson).RootElement.GetProperty("count").GetInt32().ShouldBe(2);
     }
 
     // ── Definitions ──
@@ -416,6 +459,54 @@ public class MapInputSnapshotFlowTests
         },
     };
 
+    // A trigger-bound map whose body SUSPENDS (items={{trigger.things}}). Used for the offload round-trip: the array
+    // comes from the trigger (never an intermediate node output, which would itself offload), so only the SNAPSHOT offloads.
+    private static WorkflowDefinition TriggerSuspendingMapDefinition(string key) => new()
+    {
+        SchemaVersion = 1,
+        Nodes = new List<NodeDefinition>
+        {
+            new() { Id = "start", TypeKey = "trigger.manual", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
+            new() { Id = "map", TypeKey = "flow.map", Config = WorkflowsTestSeed.EmptyJson(),
+                    Inputs = WorkflowsTestSeed.Json("""{ "items": "{{trigger.things}}" }""") },
+            new() { Id = "ms", TypeKey = "flow.map_start", ParentId = "map", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
+            new() { Id = "leaf", TypeKey = SuspendProbeNode.Key, ParentId = "map", Config = WorkflowsTestSeed.EmptyJson(),
+                    Inputs = WorkflowsTestSeed.Json("""{ "key": "__KEY__", "item": "b-{{index}}" }""".Replace("__KEY__", key)) },
+            new() { Id = "end", TypeKey = "builtin.terminal", Config = WorkflowsTestSeed.EmptyJson(),
+                    Inputs = WorkflowsTestSeed.Json("""{ "count": "{{nodes.map.outputs.count}}" }""") },
+        },
+        Edges = new List<EdgeDefinition>
+        {
+            new() { From = "start", To = "map" },
+            new() { From = "map", To = "end" },
+            new() { From = "ms", To = "leaf" },
+        },
+    };
+
+    // A secret-derived map (items references a secret path) whose body SUSPENDS — for the count-guard test. The leaf
+    // parks under "branch-<index>" (never the element value), so the secret never lands in the wait token.
+    private static WorkflowDefinition SecretSuspendingMapDefinition(string key) => new()
+    {
+        SchemaVersion = 1,
+        Nodes = new List<NodeDefinition>
+        {
+            new() { Id = "start", TypeKey = "trigger.manual", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
+            new() { Id = "map", TypeKey = "flow.map", Config = WorkflowsTestSeed.EmptyJson(),
+                    Inputs = WorkflowsTestSeed.Json("""{ "items": [ "{{team.API_KEY}}", "plain" ] }""") },
+            new() { Id = "ms", TypeKey = "flow.map_start", ParentId = "map", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() },
+            new() { Id = "leaf", TypeKey = SuspendProbeNode.Key, ParentId = "map", Config = WorkflowsTestSeed.EmptyJson(),
+                    Inputs = WorkflowsTestSeed.Json("""{ "key": "__KEY__", "item": "branch-{{index}}" }""".Replace("__KEY__", key)) },
+            new() { Id = "end", TypeKey = "builtin.terminal", Config = WorkflowsTestSeed.EmptyJson(),
+                    Inputs = WorkflowsTestSeed.Json("""{ "count": "{{nodes.map.outputs.count}}" }""") },
+        },
+        Edges = new List<EdgeDefinition>
+        {
+            new() { From = "start", To = "map" },
+            new() { From = "map", To = "end" },
+            new() { From = "ms", To = "leaf" },
+        },
+    };
+
     // ── Helpers ──
 
     private async Task RunEngineAsync(Guid runId)
@@ -426,6 +517,12 @@ public class MapInputSnapshotFlowTests
 
     private static async Task<Core.Persistence.Entities.WorkflowRunNode> MapNodeAsync(CodeSpaceDbContext db, Guid runId, string mapNodeId = "map") =>
         await db.WorkflowRunNode.AsNoTracking().SingleAsync(n => n.RunId == runId && n.NodeId == mapNodeId && n.IterationKey == "");
+
+    private async Task<WorkflowRunMapInput> SingleSnapshotAsync(Guid runId)
+    {
+        using var scope = _fixture.BeginScope();
+        return await scope.Resolve<CodeSpaceDbContext>().WorkflowRunMapInput.AsNoTracking().SingleAsync(s => s.RunId == runId && s.MapNodeId == "map");
+    }
 
     private async Task<Guid> CreateWorkflowAsync(Guid teamId, Guid userId, WorkflowDefinition definition)
     {

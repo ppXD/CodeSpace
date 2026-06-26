@@ -39,7 +39,9 @@ public class WorkflowRunMapInput
     /// <summary>The map's OWN enclosing-container iteration key (empty string at top level), NOT the per-branch <c>"&lt;mapId&gt;#&lt;i&gt;"</c> key.</summary>
     public string IterationKey { get; set; } = default!;
 
-    /// <summary>The run's release hash at execution (<see cref="WorkflowRun.ReleaseHashAtRun"/>) — guards against reading a snapshot against a drifted definition.</summary>
+    /// <summary>The run's release hash at execution (<see cref="WorkflowRun.ReleaseHashAtRun"/>). Written now; CONSUMED by the
+    /// fork/rerun slices as a drift guard (never read a snapshot against a drifted definition). Same-run resume never drifts,
+    /// so this slice stores it for the future reader rather than reading it — forensic until then.</summary>
     public string DefinitionHash { get; set; } = default!;
 
     /// <summary>The true resolved element count — distinguishes a real empty array from a transient resolve-to-null on resume.</summary>
@@ -48,7 +50,8 @@ public class WorkflowRunMapInput
     /// <summary>Frozen JSON of the resolved element array (an offload-ref envelope when large); NULL when <c>Sensitivity = "SecretDerived"</c> (re-resolved live).</summary>
     public string? ElementsJson { get; set; }
 
-    /// <summary>SHA-256 (uppercase hex) over the canonical resolved array — branch-index integrity for the fork / rerun reuse path.</summary>
+    /// <summary>SHA-256 (uppercase hex) over the LOGICAL (pre-offload) resolved array. Written now; CONSUMED by the fork / rerun
+    /// slices for sibling-reuse integrity (compared against the re-inflated array, not the raw ElementsJson). Forensic until then.</summary>
     public string ContentHash { get; set; } = default!;
 
     /// <summary>"Plain" | "SecretDerived" — whether the <c>items</c> binding references a secret path.</summary>

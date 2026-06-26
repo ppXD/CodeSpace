@@ -1787,12 +1787,24 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
         return await LoadSnapshotElementsAsync(winner, mapNode, scope, run.TeamId, cancellationToken).ConfigureAwait(false);
     }
 
-    /// <summary>Read a persisted map-input snapshot back to the element array: a SecretDerived snapshot re-resolves live (no frozen array was stored); a Plain snapshot deserializes its frozen array, re-inflating any offloaded artifact ref. A NULL array column is the empty collection (a deliberately empty map), distinct from the live resolve-to-null short-circuit it overrides.</summary>
+    /// <summary>Read a persisted map-input snapshot back to the element array: a SecretDerived snapshot re-resolves live (no frozen array was stored); a Plain snapshot deserializes its frozen array, re-inflating any offloaded artifact ref. The frozen <c>ElementCount</c> guards the branch space on BOTH paths against a resolve-to-null collapse on resume.</summary>
     private async Task<IReadOnlyList<JsonElement>> LoadSnapshotElementsAsync(Core.Persistence.Entities.WorkflowRunMapInput snapshot, NodeDefinition mapNode, NodeRunScope scope, Guid teamId, CancellationToken cancellationToken)
     {
+        // SecretDerived stored no frozen array (no plaintext at rest) — re-resolve live. The frozen ElementCount still
+        // guards the branch space: if the live re-resolve changed size (e.g. the secret-bound upstream vanished to null
+        // on resume), fail closed rather than silently zeroing an already-fanned-out map + discarding settled branches.
         if (snapshot.Sensitivity == MapInputSensitivity.SecretDerived)
-            return ResolveMapElements(mapNode, scope);
+        {
+            var live = ResolveMapElements(mapNode, scope);
 
+            if (live.Count != snapshot.ElementCount)
+                throw new NodeFailureException($"Map '{mapNode.Id}' secret-derived collection resolved to {live.Count} elements on re-entry but its snapshot froze {snapshot.ElementCount}; the branch space changed, so the map cannot safely resume.");
+
+            return live;
+        }
+
+        // Defensive only: a Plain map always stores "[]" for an empty collection (SecretDerived returned above), so a
+        // NULL column here means a corrupt row, not a normal empty map.
         if (snapshot.ElementsJson == null)
             return Array.Empty<JsonElement>();
 
@@ -1857,6 +1869,9 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
         return MapInputSensitivity.Plain;
     }
 
+    /// <summary>SHA-256 over the LOGICAL (pre-offload) resolved array, so the hash is offload-invariant. Written now; the
+    /// fork/rerun slices consume it for sibling-reuse integrity and must compare it against the RE-INFLATED array from
+    /// <see cref="LoadSnapshotElementsAsync"/>, never against the raw (possibly offloaded) ElementsJson column.</summary>
     private static string ComputeMapElementsHash(IReadOnlyList<JsonElement> elements) =>
         Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(JsonSerializer.Serialize(elements))));
 
