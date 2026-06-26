@@ -59,12 +59,32 @@ public sealed partial class RealSupervisorActionExecutor
         error = a.Error,
     };
 
-    /// <summary>Collect the agent-run ids recorded by EVERY prior spawn/retry decision (in order) — the merge folds all prior Attempt results.</summary>
-    private static IReadOnlyList<Guid> ResolveAgentRunIdsToMerge(SupervisorTurnContext context) =>
-        context.PriorDecisions
+    /// <summary>
+    /// Collect the agent-run ids recorded by EVERY prior spawn/retry decision (in order) — the merge folds all prior
+    /// Attempt results — MINUS any unit a per-unit acceptance grade objectively REJECTED (loopability slice 4,
+    /// "局部綠≠整合綠"): a unit that failed its OWN definition-of-done must NOT be integrated into the reviewable head,
+    /// even if the model merges. The verdict (<see cref="SupervisorAgentResult.AcceptancePassed"/>) rides each spawn
+    /// outcome's <c>agentResults</c> by agent-run id; a unit re-RUN after a rejection has a fresh id, so its retry
+    /// (passing or ungraded) integrates while the rejected original is withheld. A unit with NO verdict (ungraded — no
+    /// per-unit contract, the pre-slice case) integrates exactly as before (byte-identical).
+    /// </summary>
+    internal static IReadOnlyList<Guid> ResolveAgentRunIdsToMerge(SupervisorTurnContext context)
+    {
+        var staging = context.PriorDecisions
             .Where(d => d.DecisionKind is SupervisorDecisionKinds.Spawn or SupervisorDecisionKinds.Retry)
-            .SelectMany(d => SupervisorOutcome.ReadStagedAgentRunIds(d.OutcomeJson))
             .ToList();
+
+        var rejected = staging
+            .SelectMany(d => SupervisorOutcome.ReadAgentResults(d.OutcomeJson))
+            .Where(r => r.AcceptancePassed == false)
+            .Select(r => r.AgentRunId)
+            .ToHashSet();
+
+        return staging
+            .SelectMany(d => SupervisorOutcome.ReadStagedAgentRunIds(d.OutcomeJson))
+            .Where(id => !rejected.Contains(id))
+            .ToList();
+    }
 
     /// <summary>Load each agent run's FULL terminal result by id, TEAM-SCOPED (defense-in-depth — the ids are this run's own recorded spawns, but a cross-team id never resolves) into the typed <see cref="MergedAgent"/> the merged-array projection AND the integrate step both consume (one read). A missing / non-terminal run contributes its status, not a crash. Preserves spawn order.</summary>
     private async Task<IReadOnlyList<MergedAgent>> ReadMergedAgentsAsync(IReadOnlyList<Guid> agentRunIds, Guid teamId, CancellationToken cancellationToken)
