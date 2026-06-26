@@ -195,6 +195,56 @@ public class RerunMapBranchFlowTests
     }
 
     [Fact]
+    public async Task Rerun_a_set_in_continue_mode_replays_the_unchosen_failed_siblings_without_re_firing_them()
+    {
+        // Continue-mode map where every branch abandons → Success with failed=4. Rerun the SET {0,2}: the UNCHOSEN
+        // abandoned siblings 1/3 are REPLAYED (their failing node never re-fires — the #302 guard at set cardinality),
+        // branches 0 AND 2 re-run (and abandon again), and the failed count is reconstructed over the mix.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var key = "mapbranch-set-continue-" + Guid.NewGuid().ToString("N");
+
+        var workflowId = await CreateWorkflowAsync(teamId, userId, ContinueModeFailingMapDef(key));
+        var originalRunId = await RunFreshAsync(workflowId, teamId, FourElements);
+        await AssertRunStatusAsync(originalRunId, WorkflowRunStatus.Success);
+
+        var rerunId = await RerunMapBranchesAsync(originalRunId, "map", new HashSet<int> { 0, 2 }, teamId, userId);
+        await RunEngineAsync(rerunId);
+
+        await AssertRunStatusAsync(rerunId, WorkflowRunStatus.Success);
+        FlakyTestNode.AttemptsFor($"{key}-e0").ShouldBe(2, "chosen branch 0 re-ran (and abandoned again)");
+        FlakyTestNode.AttemptsFor($"{key}-e1").ShouldBe(1, "replayed abandoned sibling 1 MUST NOT re-fire its failing node");
+        FlakyTestNode.AttemptsFor($"{key}-e2").ShouldBe(2, "chosen branch 2 re-ran");
+        FlakyTestNode.AttemptsFor($"{key}-e3").ShouldBe(1, "replayed abandoned sibling 3 MUST NOT re-fire");
+
+        JsonDocument.Parse((await LoadCellAsync(rerunId, "map")).OutputsJson).RootElement.GetProperty("failed").GetInt32()
+            .ShouldBe(4, "the reconstructed aggregate preserves the continue-mode failed count across the set rerun");
+    }
+
+    [Fact]
+    public async Task Rerun_a_set_re_walk_before_completion_does_not_re_execute_siblings_or_re_fire_chosen_branches()
+    {
+        // Durability for a SET: a spurious re-dispatch of the terminal fork must re-execute NEITHER a replayed sibling
+        // NOR either chosen branch — exactly-once-per-branch holds across the seeded-replay path for a multi-hole set.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var key = "mapbranch-set-rewalk-" + Guid.NewGuid().ToString("N");
+
+        var workflowId = await CreateWorkflowAsync(teamId, userId, CountingMapDef(key));
+        var originalRunId = await RunFreshAsync(workflowId, teamId, FourElements);
+
+        var rerunId = await RerunMapBranchesAsync(originalRunId, "map", new HashSet<int> { 1, 3 }, teamId, userId);
+        await RunEngineAsync(rerunId);
+        await AssertRunStatusAsync(rerunId, WorkflowRunStatus.Success);
+
+        await ForceEnqueuedAsync(rerunId);
+        await RunEngineAsync(rerunId);
+
+        FlakyTestNode.AttemptsFor($"{key}-e0").ShouldBe(1, "replayed sibling 0 not re-run by the re-walk");
+        FlakyTestNode.AttemptsFor($"{key}-e1").ShouldBe(2, "chosen branch 1 re-ran exactly once total — the re-walk did not bump it again");
+        FlakyTestNode.AttemptsFor($"{key}-e2").ShouldBe(1);
+        FlakyTestNode.AttemptsFor($"{key}-e3").ShouldBe(2, "chosen branch 3 re-ran exactly once total");
+    }
+
+    [Fact]
     public async Task Rerun_map_branch_re_walk_before_completion_does_not_re_execute_siblings()
     {
         // Durability: a spurious re-dispatch of the fork (reconciler / duplicate worker) must not re-execute the
