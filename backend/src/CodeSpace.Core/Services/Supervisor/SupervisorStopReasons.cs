@@ -35,4 +35,7 @@ public static class SupervisorStopReasons
 
     /// <summary>The resolver loop (#379) exhausted its <c>MaxResolveAttempts</c> budget — a further <c>resolve</c> is refused so a conflict that won't reconcile falls back fail-safe to the humans (the K agent branches remain), never an unbounded resolve loop.</summary>
     public const string ResolveAttemptsExceeded = "resolve attempts exhausted";
+
+    /// <summary>A model-authored <c>plan</c> is structurally INVALID — its <c>DependsOn</c> graph has a dangling reference (a dependency on a subtask the plan never declares) or a cycle, so the dependency gate could never satisfy it. The Tier-0 validator force-STOPs at plan time rather than letting the run spin on deferred spawns until the no-progress bound — fail-fast + legible, never a silent stall.</summary>
+    public const string PlanInvalid = "plan structurally invalid";
 }
