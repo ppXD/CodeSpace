@@ -732,6 +732,28 @@ public class RerunMapBranchFlowTests
     }
 
     [Fact]
+    public async Task A_rerun_set_that_overlaps_an_in_flight_lease_on_any_branch_is_refused_atomically()
+    {
+        // SET granularity: the per-branch lease catches an overlap on ANY branch of the set, and the conflicting
+        // insert is ATOMIC — a {1,2} rerun that collides with an in-flight {0,1} on branch 1 is refused WHOLE (it
+        // leaks no partial branch-2 lease). (Driven through the service for a multi-branch set; the single-branch
+        // mediator tests already prove the fork rolls back on the throw.)
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var key = "maplease-setoverlap-" + Guid.NewGuid().ToString("N");
+
+        var workflowId = await CreateWorkflowAsync(teamId, userId, CountingMapDef(key));
+        var originalRunId = await RunFreshAsync(workflowId, teamId, FourElements);
+
+        await RerunMapBranchesAsync(originalRunId, "map", new HashSet<int> { 0, 1 }, teamId, userId, Guid.NewGuid());   // holds leases on 0 and 1
+        (await ActiveLeaseCountAsync(originalRunId)).ShouldBe(2, "the first rerun holds leases on branches 0 and 1");
+
+        await Should.ThrowAsync<RerunAlreadyInProgressException>(() =>
+            RerunMapBranchesAsync(originalRunId, "map", new HashSet<int> { 1, 2 }, teamId, userId, Guid.NewGuid()));   // overlaps on branch 1
+
+        (await ActiveLeaseCountAsync(originalRunId)).ShouldBe(2, "the refused set leaked no partial lease — its branch-2 row never committed");
+    }
+
+    [Fact]
     public async Task Reconciler_releases_the_lease_of_a_fork_cancelled_outside_the_completion_path()
     {
         // The reaper backstop. An operator cancel flips the fork to Cancelled via a CAS that BYPASSES the engine's
@@ -782,10 +804,18 @@ public class RerunMapBranchFlowTests
         (await PendingApprovalWaitCountAsync(rerunId)).ShouldBe(1, "exactly one rerun-gate Approval wait is parked (for the single re-run branch)");
         MutatingProbeNode.ExecutionsFor($"{probeKey}-e2").ShouldBe(1, "the gate must NOT let the side effect fire before approval");
 
+        // A legitimately SUSPENDED rerun KEEPS its lease — the rerun is genuinely still in flight (parked on the
+        // human gate), so a concurrent re-rerun of the same branch must stay BLOCKED. This is the exact double-fire
+        // the lease prevents: without it, a second rerun would fire the side effect again while the first is parked.
+        (await ActiveLeaseCountAsync(originalRunId)).ShouldBe(1, "the parked fork still holds its branch-2 lease");
+        await Should.ThrowAsync<RerunAlreadyInProgressException>(() =>
+            RerunMapBranchViaCommandAsync(originalRunId, "map", 2, teamId, userId, Guid.NewGuid()));
+
         (await ApproveRerunGateAsync(rerunId, teamId, userId, approved: true)).ShouldBeTrue();
         await RunEngineAsync(rerunId);
 
         await AssertRunStatusAsync(rerunId, WorkflowRunStatus.Success);
+        (await ActiveLeaseCountAsync(originalRunId)).ShouldBe(0, "the lease frees once the parked fork resumes + completes");
         MutatingProbeNode.ExecutionsFor($"{probeKey}-e2").ShouldBe(2, "the approved target fired EXACTLY once more");
         MutatingProbeNode.ExecutionsFor($"{probeKey}-e0").ShouldBe(1, "sibling 0 was replayed — its side effect must NOT re-fire");
         MutatingProbeNode.ExecutionsFor($"{probeKey}-e1").ShouldBe(1, "sibling 1 replayed, no re-fire");

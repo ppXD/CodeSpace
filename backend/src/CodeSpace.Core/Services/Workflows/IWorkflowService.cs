@@ -57,6 +57,10 @@ public interface IWorkflowService
     /// <c>|branchIndices| == 1</c> case of): the chosen branches re-run fresh, every other reusable sibling is replayed,
     /// the map re-aggregates. Same fail-closed gates as <see cref="RerunMapBranchAsync"/>, plus an empty set is rejected.
     /// <paramref name="operationId"/> is the optional client-minted idempotency token (see <see cref="RerunMapBranchAsync"/>).
+    /// <para>MUST run inside an ambient transaction (the mediator's <c>TransactionalBehavior</c> provides one for the
+    /// command path). It stages the fork BEFORE acquiring the per-branch rerun lease, so a lease conflict throws after
+    /// the fork rows are flushed — only the surrounding transaction's rollback undoes them. A caller that bypasses the
+    /// command pipeline would leave a committed orphan fork on a concurrent-rerun conflict.</para>
     /// </summary>
     Task<Guid> RerunMapBranchesAsync(Guid originalRunId, string mapNodeId, IReadOnlySet<int> branchIndices, Guid teamId, Guid actorUserId, Guid? operationId, CancellationToken cancellationToken);
 
