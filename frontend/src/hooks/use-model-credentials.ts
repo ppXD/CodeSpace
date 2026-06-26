@@ -86,6 +86,17 @@ export function useRefreshCredentialedModels(credentialId: string) {
   });
 }
 
+export function useSetDefaultCredentialedModel(credentialId: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (modelRowId: string) => modelCredentialsApi.setDefaultModel(credentialId, modelRowId),
+    // Invalidate ONLY the flattened launch-picker pool — NOT the per-credential list. Refetching the latter would
+    // rebuild the open editor's rows from the server, wiping any unsaved model-id/display-name edits; the modal flips
+    // the star OPTIMISTICALLY instead, and the per-credential list re-syncs on the next modal open.
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["credentialed-models"] }),
+  });
+}
+
 /** A row in the model editor — `id` present means it already exists on the credential. */
 export interface EditableModelRow { id?: string; modelId: string; displayName: string; }
 

@@ -6,15 +6,17 @@ import type { ModelCredentialSummary } from "@/api/modelCredentials";
 import { ModelCredentialModelsModal } from "./ModelCredentialModelsModal";
 
 const mocks = vi.hoisted(() => ({
-  models: [] as { id: string; modelId: string; displayName?: string | null; enabled: boolean }[],
+  models: [] as { id: string; modelId: string; displayName?: string | null; enabled: boolean; isDefault?: boolean }[],
   saveMutate: vi.fn(),
   refreshMutate: vi.fn(),
+  setDefaultMutate: vi.fn(),
 }));
 
 vi.mock("@/hooks/use-model-credentials", () => ({
   useCredentialedModelList: () => ({ data: mocks.models, isLoading: false, error: null }),
   useRefreshCredentialedModels: () => ({ mutate: mocks.refreshMutate, isPending: false }),
   useSaveCredentialedModels: () => ({ mutate: mocks.saveMutate, isPending: false }),
+  useSetDefaultCredentialedModel: () => ({ mutate: mocks.setDefaultMutate, isPending: false }),
 }));
 
 const cred: ModelCredentialSummary = {
@@ -33,6 +35,20 @@ describe("ModelCredentialModelsModal", () => {
     mocks.models = [{ id: "m1", modelId: "claude-sonnet-4-5", enabled: true }];
     mocks.saveMutate.mockReset();
     mocks.refreshMutate.mockReset();
+    mocks.setDefaultMutate.mockReset();
+  });
+
+  it("marks a model as the default when its star is clicked", () => {
+    mocks.models = [
+      { id: "m1", modelId: "metis-coder", enabled: true, isDefault: false },
+      { id: "m2", modelId: "metis-coder-max", enabled: true, isDefault: true },
+    ];
+    renderModal();
+
+    const stars = screen.getAllByTitle(/default model for auto runs/i);
+    expect(stars).toHaveLength(2);                                          // one per existing row
+    fireEvent.click(stars[0]);                                             // star the non-default row (metis-coder)
+    expect(mocks.setDefaultMutate).toHaveBeenCalledWith("m1", expect.anything());
   });
 
   it("loads the credential's models into editable rows", () => {

@@ -21,6 +21,7 @@ vi.mock("@/hooks/use-model-credentials", () => ({
   useCredentialedModelList: () => ({ data: mocks.models, isLoading: false, error: null }),
   useRefreshCredentialedModels: () => ({ mutate: vi.fn(), isPending: false }),
   useSaveCredentialedModels: () => ({ mutate: vi.fn(), isPending: false }),
+  useSetDefaultCredentialedModel: () => ({ mutate: vi.fn(), isPending: false }),
 }));
 vi.mock("@/components/dialog", () => ({ useConfirm: () => mocks.confirmFn }));
 

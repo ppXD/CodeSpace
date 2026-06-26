@@ -4,7 +4,7 @@ import { createPortal } from "react-dom";
 import { Ic } from "@/_imported/ai-code-space/icons";
 import type { ModelCredentialSummary } from "@/api/modelCredentials";
 import { ApiError } from "@/api/request";
-import { useCredentialedModelList, useRefreshCredentialedModels, useSaveCredentialedModels } from "@/hooks/use-model-credentials";
+import { useCredentialedModelList, useRefreshCredentialedModels, useSaveCredentialedModels, useSetDefaultCredentialedModel } from "@/hooks/use-model-credentials";
 import { providerForm } from "@/lib/providerForms";
 
 import { ModelRowsEditor, type ModelRow } from "./ModelRowsEditor";
@@ -23,6 +23,7 @@ export function ModelCredentialModelsModal({ credential, onClose }: ModelCredent
   const list = useCredentialedModelList(credential.id);
   const refresh = useRefreshCredentialedModels(credential.id);
   const save = useSaveCredentialedModels(credential.id);
+  const setDefault = useSetDefaultCredentialedModel(credential.id);
 
   const [rows, setRows] = useState<ModelRow[] | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -32,7 +33,7 @@ export function ModelCredentialModelsModal({ credential, onClose }: ModelCredent
   const [syncedData, setSyncedData] = useState<unknown>(undefined);
   if (list.data !== syncedData) {
     setSyncedData(list.data);
-    setRows(list.data ? list.data.map(m => ({ id: m.id, modelId: m.modelId, displayName: m.displayName ?? "" })) : null);
+    setRows(list.data ? list.data.map(m => ({ id: m.id, modelId: m.modelId, displayName: m.displayName ?? "", isDefault: m.isDefault })) : null);
   }
 
   useEffect(() => {
@@ -47,6 +48,11 @@ export function ModelCredentialModelsModal({ credential, onClose }: ModelCredent
 
   const doRefresh = () => { setError(null); refresh.mutate(undefined, { onError }); };
   const doSave = () => { setError(null); save.mutate({ original: list.data ?? [], rows: rows ?? [] }, { onSuccess: onClose, onError }); };
+  const doSetDefault = (rowId: string) => {
+    setError(null);
+    setRows(rs => rs?.map(r => ({ ...r, isDefault: r.id === rowId })) ?? rs);   // optimistic: flip the star without a refetch that would wipe unsaved edits
+    setDefault.mutate(rowId, { onError });
+  };
 
   return createPortal(
     <>
@@ -70,7 +76,7 @@ export function ModelCredentialModelsModal({ credential, onClose }: ModelCredent
 
           {list.isLoading && rows === null && <div className="mc-models-empty">Loading…</div>}
           {list.error instanceof ApiError && <div className="mc-models-empty">Couldn't load models — {list.error.message}</div>}
-          {rows !== null && <ModelRowsEditor rows={rows} onChange={setRows} />}
+          {rows !== null && <ModelRowsEditor rows={rows} onChange={setRows} onSetDefault={doSetDefault} />}
 
           {error && <div className="mc-models-err">{error}</div>}
         </div>

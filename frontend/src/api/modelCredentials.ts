@@ -66,6 +66,10 @@ export const modelCredentialsApi = {
   /** Reflect the credential's endpoint and refresh its model list (the "auto-suggest" half). Returns the count. */
   refreshModels: (credentialId: string) =>
     fetchJson<{ refreshed: number }>(`/api/model-credentials/${encodeURIComponent(credentialId)}/models/refresh`, { method: "POST" }),
+
+  /** Mark one model as the credential's default for an "auto" run (clears any other default on the same credential). */
+  setDefaultModel: (credentialId: string, modelRowId: string) =>
+    fetchJson<{ id: string }>(`/api/model-credentials/${encodeURIComponent(credentialId)}/models/${encodeURIComponent(modelRowId)}/default`, { method: "POST" }),
 };
 
 /** Body for adding a model to a credential (mirror of backend AddCredentialedModelCommand). */
@@ -81,4 +85,6 @@ export interface CredentialedModelSummary {
   modelId: string;
   displayName?: string | null;
   enabled: boolean;
+  /** The operator-marked default for an "auto" run — at most one per credential, shown as a star. */
+  isDefault: boolean;
 }

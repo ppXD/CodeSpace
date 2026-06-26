@@ -74,4 +74,11 @@ public class ModelCredentialsController : ControllerBase
         var refreshed = await _mediator.Send(new RefreshCredentialedModelsCommand { ModelCredentialId = credentialId }, cancellationToken).ConfigureAwait(false);
         return Ok(new { refreshed });
     }
+
+    [HttpPost("{credentialId:guid}/models/{modelRowId:guid}/default")]
+    public async Task<IActionResult> SetDefaultModel([FromRoute] Guid credentialId, [FromRoute] Guid modelRowId, CancellationToken cancellationToken)
+    {
+        var id = await _mediator.Send(new SetDefaultCredentialedModelCommand { ModelCredentialId = credentialId, ModelRowId = modelRowId }, cancellationToken).ConfigureAwait(false);
+        return Ok(new { id });
+    }
 }

@@ -253,12 +253,37 @@ public class ModelCredentialResolverFlowTests
         (await ResolveAsync(TaskWith(id), teamId, Projector("OpenAI")))!.DefaultModel.ShouldBe("metis-coder-max");
     }
 
-    private async Task SeedModelAsync(Guid credentialId, string modelId, bool enabled)
+    [Fact]
+    public async Task An_unpinned_run_prefers_the_operator_marked_default_over_the_alphabetical_first()
+    {
+        var teamId = await SeedTeamAsync();
+        var id = await SeedCredentialAsync(teamId, "OpenAI", key: "sk");
+        await SeedModelAsync(id, "aaa-first-alpha", enabled: true);
+        await SeedModelAsync(id, "zzz-marked-default", enabled: true, isDefault: true);   // alphabetically LAST, but the marked default
+
+        // The operator-marked default wins the pool pick — that's how "auto" uses the model the operator knows works
+        // (e.g. a gateway's metis-coder-max), not the misconfigured alphabetical-first.
+        (await ResolveAsync(NoPin(), teamId, Projector("OpenAI")))!.DefaultModel.ShouldBe("zzz-marked-default");
+    }
+
+    [Fact]
+    public async Task A_pinned_credential_prefers_its_marked_default_model()
+    {
+        var teamId = await SeedTeamAsync();
+        var id = await SeedCredentialAsync(teamId, "OpenAI", key: "sk");
+        await SeedModelAsync(id, "aaa-first-alpha", enabled: true);
+        await SeedModelAsync(id, "zzz-marked-default", enabled: true, isDefault: true);
+
+        // The pinned path (operator pinned THIS credential) also prefers the credential's marked default over alpha-first.
+        (await ResolveAsync(TaskWith(id), teamId, Projector("OpenAI")))!.DefaultModel.ShouldBe("zzz-marked-default");
+    }
+
+    private async Task SeedModelAsync(Guid credentialId, string modelId, bool enabled, bool isDefault = false)
     {
         using var scope = _fixture.BeginScope();
         var db = scope.Resolve<CodeSpaceDbContext>();
 
-        db.ModelCredentialModel.Add(new ModelCredentialModel { Id = Guid.NewGuid(), ModelCredentialId = credentialId, ModelId = modelId, Enabled = enabled, Source = ModelSource.Manual });
+        db.ModelCredentialModel.Add(new ModelCredentialModel { Id = Guid.NewGuid(), ModelCredentialId = credentialId, ModelId = modelId, Enabled = enabled, IsDefault = isDefault, Source = ModelSource.Manual });
         await db.SaveChangesAsync();
     }
 

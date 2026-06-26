@@ -129,6 +129,45 @@ public class ModelCredentialFlowTests
     }
 
     [Fact]
+    public async Task Setting_a_default_model_marks_one_and_clears_the_previous()
+    {
+        var (userId, teamId) = await SeedTeamAsync();
+        var credId = await SendAsync(userId, teamId, new AddModelCredentialCommand { Provider = "OpenAI", DisplayName = "GW", ApiKey = "sk", BaseUrl = "https://gw/v1" });
+        var m1 = await SendAsync(userId, teamId, new AddCredentialedModelCommand { ModelCredentialId = credId, ModelId = "model-a" });
+        var m2 = await SendAsync(userId, teamId, new AddCredentialedModelCommand { ModelCredentialId = credId, ModelId = "model-b" });
+
+        await SendAsync(userId, teamId, new SetDefaultCredentialedModelCommand { ModelCredentialId = credId, ModelRowId = m1 });
+        var afterFirst = await SendAsync(userId, teamId, new ListCredentialedModelsQuery { ModelCredentialId = credId });
+        afterFirst.Single(m => m.Id == m1).IsDefault.ShouldBeTrue();
+        afterFirst.Single(m => m.Id == m2).IsDefault.ShouldBeFalse();
+
+        // Re-marking moves the star — at most ONE default per credential, the previous is cleared.
+        await SendAsync(userId, teamId, new SetDefaultCredentialedModelCommand { ModelCredentialId = credId, ModelRowId = m2 });
+        var afterMove = await SendAsync(userId, teamId, new ListCredentialedModelsQuery { ModelCredentialId = credId });
+        afterMove.Single(m => m.Id == m1).IsDefault.ShouldBeFalse("the previous default is cleared");
+        afterMove.Single(m => m.Id == m2).IsDefault.ShouldBeTrue();
+    }
+
+    [Fact]
+    public async Task Setting_a_disabled_model_as_default_is_rejected()
+    {
+        var (userId, teamId) = await SeedTeamAsync();
+        var credId = await SendAsync(userId, teamId, new AddModelCredentialCommand { Provider = "OpenAI", DisplayName = "GW", ApiKey = "sk" });
+        var rowId = await SendAsync(userId, teamId, new AddCredentialedModelCommand { ModelCredentialId = credId, ModelId = "model-x" });
+
+        using (var scope = _fixture.BeginScope())
+        {
+            var db = scope.Resolve<CodeSpaceDbContext>();
+            var row = await db.ModelCredentialModel.SingleAsync(m => m.Id == rowId);
+            row.Enabled = false;
+            await db.SaveChangesAsync();
+        }
+
+        // A hidden (disabled) model can't be the auto-default — it's not in the usable pool, so the run could never use it.
+        await Should.ThrowAsync<InvalidOperationException>(() => SendAsync(userId, teamId, new SetDefaultCredentialedModelCommand { ModelCredentialId = credId, ModelRowId = rowId }));
+    }
+
+    [Fact]
     public async Task A_foreign_teams_credential_is_invisible_and_not_mutable()
     {
         var (userA, teamA) = await SeedTeamAsync();

@@ -30,6 +30,9 @@ public interface IModelCredentialService
     /// <summary>Remove a model row from a credential's list. Throws when the credential isn't the current team's or the row isn't under it. Returns the removed row id.</summary>
     Task<Guid> RemoveModelAsync(Guid credentialId, Guid modelRowId, CancellationToken cancellationToken);
 
+    /// <summary>Mark ONE enabled model as the credential's default for an "auto" run (clears any other default on the same credential). Throws when the credential isn't the current team's, the row isn't under it, or the row is disabled. Returns the marked row id.</summary>
+    Task<Guid> SetDefaultModelAsync(Guid credentialId, Guid modelRowId, CancellationToken cancellationToken);
+
     /// <summary>Reflect the credential's provider endpoint (when reflectable) and UPSERT the discovered models onto its list — reflected rows refreshed + re-enabled, manual rows untouched, vanished reflected rows disabled. A non-reflectable (manual-only) credential is a no-op returning 0. Throws when the id isn't an active credential of the current team. Returns the count reflected.</summary>
     Task<int> RefreshModelsAsync(Guid credentialId, CancellationToken cancellationToken);
 }
