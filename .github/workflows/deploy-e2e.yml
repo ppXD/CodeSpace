@@ -1,0 +1,60 @@
+name: Deploy · Compose E2E
+
+# Proves the DEPLOYABLE ARTIFACTS, not just their logic: builds the REAL api + worker images and boots the real
+# production topology (Postgres + lean API with processing OFF + worker with processing ON), then drives a launch
+# over HTTP and asserts the WORKER runs an agent through its own image to a terminal Success — with the harness
+# pointed at a fake codex, so NO model credential or network is needed. Also asserts both pods' anonymous health
+# probes and that the API image carries zero agent-execution machinery. This is the one lane that exercises the
+# images + the API↔worker split end to end; everything else tests the logic in-process on the runner.
+#
+# Confinement is intentionally NOT exercised here (the container won't grant unprivileged userns; CODESPACE_REQUIRE_SANDBOX
+# is left unset → the run is unconfined) — real bubblewrap confinement is the Sandbox · Isolation lane's job.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'backend/Dockerfile.api'
+      - 'backend/Dockerfile.worker'
+      - 'backend/global.json'
+      - 'backend/.dockerignore'
+      - 'backend/deploy/**'
+      - 'backend/src/CodeSpace.Api/Program.cs'
+      - 'backend/src/CodeSpace.Api/Startup.cs'
+      - 'backend/src/CodeSpace.Api/Extensions/Hangfire/**'
+      - '.github/workflows/deploy-e2e.yml'
+  pull_request:
+    paths:
+      - 'backend/Dockerfile.api'
+      - 'backend/Dockerfile.worker'
+      - 'backend/global.json'
+      - 'backend/.dockerignore'
+      - 'backend/deploy/**'
+      - 'backend/src/CodeSpace.Api/Program.cs'
+      - 'backend/src/CodeSpace.Api/Startup.cs'
+      - 'backend/src/CodeSpace.Api/Extensions/Hangfire/**'
+      - '.github/workflows/deploy-e2e.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-e2e-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  compose-e2e:
+    name: build images → launch → worker runs an agent → Success
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      # node mints the test JWT (mint-jwt.js); docker + docker compose v2 ship on ubuntu-latest.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Compose E2E (real images, fake CLI, no creds)
+        run: backend/deploy/e2e/run.sh
