@@ -19,5 +19,5 @@ public sealed class RerunMapBranchCommandHandler : IRequestHandler<RerunMapBranc
     }
 
     public async Task<Guid> Handle(RerunMapBranchCommand request, CancellationToken cancellationToken) =>
-        await _service.RerunMapBranchAsync(request.OriginalRunId, request.MapNodeId, request.BranchIndex, _currentTeam.Id!.Value, _currentUser.Id!.Value, cancellationToken).ConfigureAwait(false);
+        await _service.RerunMapBranchAsync(request.OriginalRunId, request.MapNodeId, request.BranchIndex, _currentTeam.Id!.Value, _currentUser.Id!.Value, request.OperationId, cancellationToken).ConfigureAwait(false);
 }

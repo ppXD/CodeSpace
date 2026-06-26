@@ -43,6 +43,9 @@ public interface IRunFromSnapshotStarter
     /// <para><paramref name="session"/> is the PRE-RESOLVED WorkSession binding for the fork. A replay
     /// INHERITS its parent's session yet consumes NO new turn, so the resolver passes the parent's
     /// <c>SessionId</c> with a NULL <c>TurnIndex</c>; NULL assignment = a session-less fork.</para>
+    /// <para><paramref name="idempotencyKey"/> is the optional client-minted rerun token: when set, a duplicate
+    /// submit reuses the key → the request insert raises 23505 → this returns <c>Guid.Empty</c> (the dedup signal);
+    /// null (replay / first submit) carries a NULL key the partial unique index ignores.</para>
     /// </summary>
-    Task<Guid> StageReplayFromSnapshotAsync(string definitionJson, string definitionHash, Guid teamId, Guid actorUserId, string payloadJson, string sourceType, Guid parentRunId, Guid causationRequestId, IReadOnlyList<Guid> scopeRepositoryIds, IReadOnlyList<Guid> scopeProjectIds, string? projectionKind, SessionAssignment? session, CancellationToken cancellationToken);
+    Task<Guid> StageReplayFromSnapshotAsync(string definitionJson, string definitionHash, Guid teamId, Guid actorUserId, string payloadJson, string sourceType, Guid parentRunId, Guid causationRequestId, IReadOnlyList<Guid> scopeRepositoryIds, IReadOnlyList<Guid> scopeProjectIds, string? projectionKind, SessionAssignment? session, string? idempotencyKey, CancellationToken cancellationToken);
 }
