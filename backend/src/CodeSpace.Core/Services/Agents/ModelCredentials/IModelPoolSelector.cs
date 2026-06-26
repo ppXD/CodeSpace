@@ -7,8 +7,8 @@ namespace CodeSpace.Core.Services.Agents.ModelCredentials;
 /// <c>ModelCredentialModel</c> rows S1–S3 build) — the one mechanism every in-process caller shares: the supervisor
 /// decider, the workflow planner, the <c>llm.complete</c> node, the supervisor synthesis. A qualifying row is an
 /// ENABLED model under an ACTIVE credential of the requested provider, bounded by the operator's allowed-models pool
-/// (null/empty = all the team's models), pinned to one model when the caller has one, preferring a supervisor-
-/// recommended model. The pool is provider+credential GENERIC — it never gates on a model "capability" flag: structured
+/// (null/empty = all the team's models), pinned to one model when the caller has one, else the first by a deterministic
+/// total order (model id, then row id). The pool is provider+credential GENERIC — it never gates on a model "capability" flag: structured
 /// output is the client's job (<c>IStructuredLLMClient</c> degrades a model that doesn't honour forced tool-use to its
 /// prompt-only JSON floor), so any credentialed model is selectable and a genuinely-incapable one fails at call time,
 /// never as a pre-filter. The chosen row's backing credential is decrypted just-in-time. <c>null</c> = nothing
@@ -18,9 +18,9 @@ public interface IModelPoolSelector
 {
     /// <summary>
     /// Select a model + credential for <paramref name="provider"/> (the client the caller will invoke), bounded by
-    /// <paramref name="allowedModels"/> (null/empty = all), pinned to <paramref name="pinnedModel"/> if set, preferring
-    /// a recommended one. Null when nothing qualifies. Provider + model-id matching is case-insensitive (parity with the
-    /// agent-side resolver + the spawn clamp).
+    /// <paramref name="allowedModels"/> (null/empty = all), pinned to <paramref name="pinnedModel"/> if set, else the
+    /// first by a deterministic order (model id, then row id). Null when nothing qualifies. Provider + model-id matching
+    /// is case-insensitive (parity with the agent-side resolver + the spawn clamp).
     /// </summary>
     Task<ModelPoolPick?> SelectAsync(Guid teamId, string provider, IReadOnlyList<string>? allowedModels, string? pinnedModel, CancellationToken cancellationToken);
 

@@ -131,7 +131,7 @@ public class ModelCredentialModelFlowTests
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
-    public async Task A_populated_model_list_does_not_change_credential_resolution(bool withModels)
+    public async Task A_populated_model_list_sets_the_auto_default_model_but_never_the_credential(bool withModels)
     {
         var teamId = await SeedTeamAsync();
         var credId = await SeedCredentialAsync(teamId, "Anthropic", key: "sk-pinned", baseUrl: "https://gw/v1");
@@ -142,16 +142,20 @@ public class ModelCredentialModelFlowTests
             await AddModelAsync(credId, "claude-haiku-4-5");
         }
 
-        var expected = new ResolvedModelCredential { Provider = "Anthropic", ApiKey = "sk-pinned", BaseUrl = "https://gw/v1" };
+        // The catalog NEVER changes WHICH credential resolves or its decrypted key/base URL — but it DOES drive the
+        // auto-default MODEL an unpinned run falls back to (so an "auto" run uses a team model, not the CLI default).
+        // First enabled by model id: claude-haiku-4-5 < claude-opus-4-8. Both DB resolver paths covered.
+        var expectedDefaultModel = withModels ? "claude-haiku-4-5" : null;
 
-        // Both DB-touching resolver paths must return the identical decrypted credential whether or not the new
-        // catalog table is populated — slice 1 is additive metadata, not a gate on existing runs. The PINNED
-        // path and the unpinned TEAM-DEFAULT path are both covered; the operator-global path reads no DB row, so
-        // the new table cannot affect it.
-        (await ResolveAsync(new AgentTask { Goal = "g", Harness = "h", ModelCredentialId = credId }, teamId, "Anthropic"))
-            .ShouldBe(expected, "pinned path is unperturbed by the model catalog");
-        (await ResolveAsync(new AgentTask { Goal = "g", Harness = "h" }, teamId, "Anthropic"))
-            .ShouldBe(expected, "team-default path is unperturbed by the model catalog");
+        foreach (var task in new[] { new AgentTask { Goal = "g", Harness = "h", ModelCredentialId = credId }, new AgentTask { Goal = "g", Harness = "h" } })
+        {
+            var resolved = await ResolveAsync(task, teamId, "Anthropic");
+
+            resolved!.Provider.ShouldBe("Anthropic");
+            resolved.ApiKey.ShouldBe("sk-pinned");
+            resolved.BaseUrl.ShouldBe("https://gw/v1");
+            resolved.DefaultModel.ShouldBe(expectedDefaultModel, "the catalog drives only the auto-default model, never the credential");
+        }
     }
 
     // ─── Seeding helpers (mirror ModelCredentialResolverFlowTests) ───
